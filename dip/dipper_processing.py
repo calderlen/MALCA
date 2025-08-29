@@ -1,16 +1,3 @@
-#!/usr/bin/env python
-#
-# This is a package that consists of all the code I have written for my 
-# research summer 2024 - summer 2025. This project involved looking for 
-# "dippers" in archival ASAS-SN data. This only consists of the code I 
-# wrote for the ASAS-SN data and spectra from APOGEE and LAMOST. I have 
-# excluded the WISE data.
-#
-# This is the first iteration of this compilation.
-# Last Edited: 06/05/2025
-# Author: Brayden JoHantgen
-
-# Importing the necessary modules
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle 
 from matplotlib.patches import ConnectionPatch
@@ -30,15 +17,13 @@ from astropy.coordinates import SkyCoord
 from astropy.time import Time
 from astropy import constants as const
 from astropy.timeseries import LombScargle as ls
-# End of Importing
 
-#
+
 colors = ["#6b8bcd", "#b3b540", "#8f62ca", "#5eb550", "#c75d9c", "#4bb092", "#c5562f", "#6c7f39", 
               "#ce5761", "#c68c45", '#b5b246', '#d77fcc', '#7362cf', '#ce443f', '#3fc1bf', '#cda735',
               '#a1b055']
-#
 
-# This function makes plots nicer (was written by Dom)
+
 def plotparams(ax, labelsize=15):
     '''
     Basic plot params
@@ -59,9 +44,7 @@ def plotparams(ax, labelsize=15):
     for axis in ['top', 'bottom', 'left', 'right']:
         ax.spines[axis].set_linewidth(1.5)
     return ax
-# End of plotparams function
 
-# This function reads dat file ASAS-SN light curves
 def read_lightcurve_dat(asas_sn_id, guide = 'known_dipper_lightcurves/'):
     """
     Input: 
@@ -95,9 +78,8 @@ def read_lightcurve_dat(asas_sn_id, guide = 'known_dipper_lightcurves/'):
     dfg['JD'].astype(float)
 
     return dfv, dfg
-# End of the read_lightcurve_dat function
 
-# This function reads csv file ASAS-SN light curves
+
 def read_lightcurve_csv(asas_sn_id, guide = 'known_dipper_lightcurves/'):
     """
     Input: 
@@ -146,30 +128,24 @@ def find_peak(df, prominence=0.17, distance=25, height=0.3, width=2):
 	Description:
 	'''
 	df['Mag'] = [float(i) for i in df['Mag']]
-
 	df['JD'] = [float(i) for i in df['JD']]
-
 	mag = df['Mag']
-
 	jd = df['JD']
 
 	meanmag = sum(mag) / len(mag)
-
 	df_mag_avg = [i - meanmag for i in mag]
-
-	peaks = scipy.signal.find_peaks(df_mag_avg, prominence=prominence, distance=distance, height=height, width=width) 
-
-	peak = peaks[0]
-
+	
+    peaks = scipy.signal.find_peaks(df_mag_avg, prominence=prominence, distance=distance, height=height, width=width) 
+	
+    peak = peaks[0]
 	prop = peaks[1]
-
-	length = len(peak)
-
-	peak = [int(i) for i in peak]
-
+	
+    length = len(peak)
+	
+    peak = [int(i) for i in peak]
 	peak = pd.Series(peak)
-
-	return peak, meanmag, length	
+	
+    return peak, meanmag, length	
 # End of the find_peak
 
 # This function creates a custom id using the position of the star
