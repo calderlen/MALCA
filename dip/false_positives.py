@@ -40,6 +40,7 @@ from astropy import units as u
 
 from dipper_processing import find_peak, custom_id, year_to_jd, jd_to_year, plot_zoom, plot_multiband
 
+from astroquery import Gaia
 
 def read_lightcurve(asassn_id, path):
     # code adapted from Brayden JoHantgen's code
@@ -82,6 +83,22 @@ def read_lightcurve(asassn_id, path):
 
     return df_v, df_g
 
+
+def custom_id(ra_val,dec_val):
+    """
+    CHANGES: ENCODE GMAG INTO THIS ID!!!
+    """
+    c = SkyCoord(ra=ra_val*u.degree, dec=dec_val*u.degree, frame='icrs')
+    ra_num = c.ra.hms
+    dec_num = c.dec.dms
+
+    if int(dec_num[0]) < 0:
+        cust_id = 'J'+str(int(c.ra.hms[0])).rjust(2,'0')+str(int(c.ra.hms[1])).rjust(2,'0')+str(int(round(c.ra.hms[2]))).rjust(2,'0')+'$-$'+str(int(c.dec.dms[0])*(-1)).rjust(2,'0')+str(int(c.dec.dms[1])*(-1)).rjust(2,'0')+str(int(round(c.dec.dms[2])*(-1))).rjust(2,'0')
+    else:
+        cust_id = 'J'+str(int(c.ra.hms[0])).rjust(2,'0')+str(int(c.ra.hms[1])).rjust(2,'0')+str(int(round(c.ra.hms[2]))).rjust(2,'0')+'$+$'+str(int(c.dec.dms[0])).rjust(2,'0')+str(int(c.dec.dms[1])).rjust(2,'0')+str(int(round(c.dec.dms[2]))).rjust(2,'0')
+
+    return cust_id
+
 def naive_dip_detection(df, prominence=0.17, distance=25, height=0.3, width=2):
     # code adapted from Brayden JoHantgen's code
 
@@ -106,8 +123,60 @@ def naive_dip_detection(df, prominence=0.17, distance=25, height=0.3, width=2):
 
     return peak, mag_mean, length
 
+def neighbor(ra_deg, dec_deg, radius_arcsec, target_gmag)
+    
+    """
+    Computes angular separation and delta_gmag between target and nearest neighbors within raidus_arcsec with a cone search in Gaia DR3. If available, the neighbor positions are propagated from epoch_jyear to new_epoch_mjd before calculating separation and delta_gmag. Returns df sorted by s_arcsec.
 
-def filter_BNS(df, ra, dec, delta_arcsec, want=('gaia')):
+    CHANGES TO MAKE: INSTEAD OF TAKING RA, DEC, RAD, TARGET GMAG -- TAKE ID THEN COMPUTE RA_DEG, DEC_DEG, TARGET_GMAG
+    """
+
+    radius_deg = radius_arcsec/3600.0
+
+    # do cone search using TAP AQDL
+
+    aqdl = f"""
+        SELECT source_id, ra, dec, phot_g_mean_mag" # not getting color or V mag currently
+        FROM gaiadr3.gaia_source
+        WHERE 1 = CONTAINS(
+            POINT('ICRS', ra, dec),
+            CIRCLE('ICRS', {ra_deg}, {dec_deg}, {radius_deg})
+        )
+        """
+    job = Gaia.launch_job_async(adql)
+    tbl = job.get_results()
+    df = tbl.to_pandas()
+
+    if "pmra" in df and "pmdec" in df:
+        sc0 = SkyCoord(ra=df["ra"].values*u.deg,
+                        dec=df["dec"].values*u.deg,
+                        pm_ra_cosdec=df["pmra"].values*u.mas/u.yr,
+                        pm_dec=df["pmdec"].values*u.mas/u.yr,
+                        obstime=Time(epoch_jyear, format='jyear')
+                        )
+        if new_epoch_mjd is not None:
+            t_new = Time(new_epoch_mjd, format='mjd')
+        else: 
+            t_new = Time(epoch_jyear, format='jyear') # make no changes
+
+        sc1 = sc0.apply_space_motion(new_obstime=t_new)
+        
+    df["ra_epoch"] = sc1.ra.deg
+    df["dec_epoch"] = sc1.dec.deg
+
+    # compute s (arcsec)
+    c_target = SkyCoord(ra_deg*u.deg, dec_dec*u_deg, fname='icrs')
+    c_neighbor = SkyCoord(df["ra_epoch"].values*u.deg, df["dec_epoch"].values*u.deg, fname='icrs')
+    df['s_arcsec'] = c_target.separation(c_neighbor).arcsec
+    df['delta_gmag'] = df["phot_g_mean_mag"] - target_gmag
+
+    # sort by separation
+    df = df.sort_values("s_arcsec").reset_index(drop=True)
+
+    return df
+
+    
+def filter_BNS(df, ra, dec, delta_arcsec):
     # Implement filtering logic for bright nearby star contamination
     '''
     THIS IS ONE OF THE MAIN SOURCES OF FALSE POSITIVES AND SHOULD BE FOCUSED ON. The light curve will have a dip that is not real, but caused by a nearby bright star. This can be identified by looking for correlated dips in nearby stars, or by checking for known bright stars in the vicinity of the target star. One way to do this is to cross-match the target star with a catalog of bright stars and check for proximity. If a bright star is found within a certain radius, the dip can be flagged as a potential false positive.
@@ -126,14 +195,22 @@ def filter_BNS(df, ra, dec, delta_arcsec, want=('gaia')):
     - compute for each neighbor
         - separation in arcseconds; keep neighbors with separation < 30 "
         - delta m = m_neighbor - m_target; keep neighbors with delta m <= 3-4 mag
-        - propagate Gaia positions with proper motion correction to the epoch of each observation
+        - propagate Gaia positions with proper motion correction to the epoch of each observation, the epoch should probably be the mid-point of the observation
+        - if separation and delta mag conditions are met, flag as false positive
+    - returns
+        - boolean flag
+
+    TWO STAGE FILTER
+        1. fast proximity screen
+            conditions for flag: (1) s <= 8" OR (2) s <= 15" and delta m <= 3 OR (3) s <= 30" and delta m<=2 
+        2. confirm contamination with correlated dip/rise of neighbor light curves
     '''
 
-    if 'gaia' in want:
-        from astroquery import Gaia
-        # not done
-        sources.append()
+    
+
+
     c = SkyCoord(ra=ra * u.degree, dec = dec*u.degree)
+
 
     for j in sources:
         source_j = SkyCoord(j['ra']*u.deg, j['dec']*u.deg)
