@@ -38,8 +38,6 @@ from astropy import units as u
 
 #import matplotlib.pyplot as pl
 
-from dipper_processing import find_peak, custom_id, year_to_jd, jd_to_year, plot_zoom, plot_multiband
-
 from astroquery import Gaia
 
 def read_lightcurve(asassn_id, path):
@@ -84,20 +82,58 @@ def read_lightcurve(asassn_id, path):
     return df_v, df_g
 
 
-def custom_id(ra_val,dec_val):
+def find_peak(df, prominence=0.17, distance=25, height=0.3, width=2):
+
+    '''
+    Fits to peak of individual LC df
+    '''
+
+	df['Mag'] = [float(i) for i in df['Mag']]
+	df['JD'] = [float(i) for i in df['JD']]
+	mag = df['Mag']
+	jd = df['JD']
+
+	mag_mean = sum(mag) / len(mag)
+	df_mag_avg = [i - mag_mean for i in mag]
+	
+    peaks = scipy.signal.find_peaks(df_mag_avg, prominence=prominence, distance=distance, height=height, width=width) 
+	
+    peak = peaks[0]
+	prop = peaks[1]
+	
+    length = len(peak)
+	
+    peak = [int(i) for i in peak]
+	peak = pd.Series(peak)
+	
+    return peak, mag_mean, length
+
+def make_id(ra_val,dec_val):
     """
     CHANGES: ENCODE GMAG INTO THIS ID!!!
     """
+
     c = SkyCoord(ra=ra_val*u.degree, dec=dec_val*u.degree, frame='icrs')
     ra_num = c.ra.hms
     dec_num = c.dec.dms
 
-    if int(dec_num[0]) < 0:
-        cust_id = 'J'+str(int(c.ra.hms[0])).rjust(2,'0')+str(int(c.ra.hms[1])).rjust(2,'0')+str(int(round(c.ra.hms[2]))).rjust(2,'0')+'$-$'+str(int(c.dec.dms[0])*(-1)).rjust(2,'0')+str(int(c.dec.dms[1])*(-1)).rjust(2,'0')+str(int(round(c.dec.dms[2])*(-1))).rjust(2,'0')
-    else:
-        cust_id = 'J'+str(int(c.ra.hms[0])).rjust(2,'0')+str(int(c.ra.hms[1])).rjust(2,'0')+str(int(round(c.ra.hms[2]))).rjust(2,'0')+'$+$'+str(int(c.dec.dms[0])).rjust(2,'0')+str(int(c.dec.dms[1])).rjust(2,'0')+str(int(round(c.dec.dms[2]))).rjust(2,'0')
+    sign = '+' if c.dec.dms[0] >= 0 else '-'
+    deg = abs(int(c.dec.dms[0]))
+    arcmin = abs(int(c.dec.dms[1]))
+    arcsec = abs(int(round(c.dec.dms[2])))
 
-    return cust_id
+    cust_id = (
+        'J'
+        + str(int(c.ra.hms[0])).rjust(2, '0')
+        + str(int(c.ra.hms[1])).rjust(2, '0')
+        + str(int(round(c.ra.hms[2]))).rjust(2, '0')
+        + sign
+        + str(deg).rjust(2, '0')
+        + str(arcmin).rjust(2, '0')
+        + str(arcsec).rjust(2, '0')
+    )
+
+    return id
 
 def naive_dip_detection(df, prominence=0.17, distance=25, height=0.3, width=2):
     # code adapted from Brayden JoHantgen's code
@@ -175,7 +211,12 @@ def neighbor(ra_deg, dec_deg, radius_arcsec, target_gmag)
 
     return df
 
-    
+    # add filter for meseed up input lightcurve, flag light curves with 0 or 200 magnitude
+
+def filter_badlightcurves():
+    # chris mentioned that due to messed up calibrations, some light curves come out to 0 or 200 mag. We should filter these out as well
+    return
+
 def filter_BNS(df, ra, dec, delta_arcsec):
     # Implement filtering logic for bright nearby star contamination
     '''
@@ -275,3 +316,5 @@ def detect_dippers(light_curve):
 
 
     pass
+
+
