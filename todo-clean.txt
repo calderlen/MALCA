@@ -1,0 +1,20 @@
+todo
+
+- LCs with bright nearby stars should be removed from the calibrated light curve folders
+
+- Dippers
+    - get coordinates of
+        - continuous variables
+            - which of these to cut out?
+            - which fo these to leave in?
+        - mixed variables that are not dippers
+            - which of these to cut out?
+            - which of these to leave in?
+        - non-continuous variables
+            - which of these to cut out?
+            - which of these to leave in?
+    - match their (proper-motion propagated) coordiantes to light curved index BEFORE they are analyzed, and cut them out from the indices
+        - how should you match?
+            - gaia id? or will this miss some
+            - RA, DEC + optional ID match?
+    - from the updated light curve indices, search light curves at lower magnitudes using the same(?) search criteria as Brayden
