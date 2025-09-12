@@ -18,7 +18,6 @@ from astropy.time import Time
 from astropy import constants as const
 from astropy.timeseries import LombScargle as ls
 
-
 colors = ["#6b8bcd", "#b3b540", "#8f62ca", "#5eb550", "#c75d9c", "#4bb092", "#c5562f", "#6c7f39", 
               "#ce5761", "#c68c45", '#b5b246', '#d77fcc', '#7362cf', '#ce443f', '#3fc1bf', '#cda735',
               '#a1b055']
