@@ -305,12 +305,6 @@ df_pairs = pd.DataFrame({
     "sep_arcsec": sep2d.to(u.arcsec).value
 })
 
-df_pairs = pd.DataFrame({
-    "targ_idx": idx_targ,
-    "vsx_idx":  idx_vsx,
-    "sep_arcsec": sep2d.to(u.arcsec).value
-}).sort_values(['targ_idx','sep_arcsec']).drop_duplicates('targ_idx', keep='first')
-
 # merge metadata
 out = (df_pairs
        .merge(df_all_clean, left_on="targ_idx", right_index=True, how="left")
