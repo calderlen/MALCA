@@ -207,11 +207,11 @@ EXCLUDE = set([
     "UG","UGER","UGSS","UGSU","UGWZ","UGZ","UGZ/IW",
 
     # Rotational variables (spotted stars, ellipsoidal, binaries, pulsars)
-    "ACV", "ACV:""BY","CTTS/ROT","ELL","FKCOM","HB","LERI",
+    "ACV", "ACV:","BY","CTTS/ROT","ELL","FKCOM","HB","LERI",
     "PSR","R","ROT","RS","SXARI","TTS/ROT","WTTS/ROT",
     "NSIN ELL","ROT (TTS subtype)",
     "r", # Assuming "r"=="R" for now
-    "r'" # Assuming "r'"=="R" for now
+    "r'", # Assuming "r'"=="R" for now
 
     # Pulsating variables (radial/non-radial, classical pulsators, WDs, hot stars)
     "ACEP","ACEP:","ACEP(B)","ACEPS", "ACEPS:","ACYG","BCEP","BCEPS",
