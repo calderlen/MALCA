@@ -11,7 +11,7 @@ df_all_clean = pd.read_csv("/data/poohbah/1/assassin/lenhart/code/calder/calder/
 df_vsx_filt_clean = pd.read_csv("/data/poohbah/1/assassin/lenhart/code/calder/calder/output/vsx_cleaned_20250919_154524.csv", low_memory=False)
 
 # coerce numerics
-for c in ["ra_deg","dec_deg","pm_ra","pm_dec","plx"]:
+for c in ["ra_deg","dec_deg","pm_ra","pm_dec"]:
     df_all_clean[c] = pd.to_numeric(df_all_clean[c], errors="coerce")
 for c in ["ra","dec"]:
     df_vsx_filt_clean[c] = pd.to_numeric(df_vsx_filt_clean[c], errors="coerce")
@@ -23,12 +23,6 @@ if not pm_ok.all():
     sample = df_all_clean.loc[~pm_ok, ["asas_sn_id","gaia_id","pm_ra","pm_dec"]].head(10)
     raise ValueError(f"{bad} row(s) missing/invalid proper motion.\nSample:\n{sample}")
 
-plx_ok = np.isfinite(df_all_clean["plx"].to_numpy()) & (df_all_clean["plx"].to_numpy() > 0)
-if not plx_ok.all():
-    bad = (~plx_ok).sum()
-    sample = df_all_clean.loc[~plx_ok, ["asas_sn_id","gaia_id","plx"]].head(10)
-    raise ValueError(f"{bad} row(s) missing/invalid parallax.\nSample:\n{sample}")
-
 # epochs
 t_gaia  = Time(2016.0, format="jyear")   # Gaia DR3 ref epoch
 t_j2000 = Time(2000.0, format="jyear")   # VSX (J2000)
@@ -37,17 +31,14 @@ ra_deg_arr  = df_all_clean['ra_deg'].to_numpy(dtype=float)
 dec_deg_arr = df_all_clean['dec_deg'].to_numpy(dtype=float)
 pm_ra_arr   = df_all_clean['pm_ra'].to_numpy(dtype=float)
 pm_dec_arr  = df_all_clean['pm_dec'].to_numpy(dtype=float)
-plx_arr     = df_all_clean['plx'].to_numpy(dtype=float)
 
 c_asassn = SkyCoord(
                     ra=ra_deg_arr * u.deg,
                     dec=dec_deg_arr * u.deg,
                     pm_ra_cosdec=pm_ra_arr * u.mas/u.yr,
                     pm_dec=pm_dec_arr * u.mas/u.yr,
-                    distance=Distance(parallax=plx_arr * u.mas),
                     obstime=Time(2016.0, format="jyear"),
 ).apply_space_motion(new_obstime=Time(2000.0, format="jyear"))
-
 
 vsx_ra_arr  = df_vsx_filt_clean["ra"].to_numpy(dtype=float)
 vsx_dec_arr = df_vsx_filt_clean["dec"].to_numpy(dtype=float)
