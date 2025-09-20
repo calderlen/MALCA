@@ -374,8 +374,8 @@ print(f"Shape of df_vsx_filt_clean after dropna: {df_vsx_filt_clean.shape}") # D
 # outputting cleaned concatenated asas-sn lightcurve index csv, and cleaned vsx csv
 stamp = datetime.now().strftime("%Y%m%d_%H%M")
 
-out_csv = p.cwd() / f"output/asassn_index_masked_concat_cleaned_{stamp}.csv"
+out_csv = p.cwd() / f"/data/poohbah/1/assassin/lenhart/code/calder/calder/output/asassn_index_masked_concat_cleaned_{stamp}.csv"
 df_all_clean.to_csv(out_csv, index=False)
 
-out_csv = p.cwd() / f"output/vsx_cleaned_{stamp}.csv"
+out_csv = p.cwd() / f"/data/poohbah/1/assassin/lenhart/code/calder/calder/output/vsx_cleaned_{stamp}.csv"
 df_vsx_filt_clean.to_csv(out_csv, index=False)
