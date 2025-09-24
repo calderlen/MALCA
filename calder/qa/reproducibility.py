@@ -39,7 +39,7 @@ c_vsx_cm   = SkyCoord(vsx_cm["ra_deg"].to_numpy()*u.deg,   vsx_cm["dec_deg"].to_
 c_asassn   = SkyCoord(asassn_df["ra_deg"].to_numpy()*u.deg,asassn_df["dec_deg"].to_numpy()*u.deg,frame="icrs")
 c_vsx2     = SkyCoord(vsx2["ra"].to_numpy()*u.deg,         vsx2["dec"].to_numpy()*u.deg,         frame="icrs")
 
-# 1) bj_objects.csv → asassn_x_vsx_matches_20250920_1415.csv (VSX)
+# 1) bj_objects.csv -> asassn_x_vsx_matches_20250920_1415.csv (VSX)
 idx_vsx, sep2d_vsx, _ = c_existing.match_to_catalog_sky(c_vsx_cm)
 mask_vsx = sep2d_vsx < (TOL_ARCSEC*u.arcsec)
 existing["matched_vsx"] = mask_vsx
@@ -61,7 +61,7 @@ matched_vsx = matched_vsx.merge(
 front_vsx = [c for c in ["category","name","ra_deg","dec_deg","method","matched_vsx","match_sep_arcsec_vsx"] if c in matched_vsx.columns]
 matched_vsx = matched_vsx[front_vsx + [c for c in matched_vsx.columns if c not in front_vsx + ["vsx_cm_index"]]]
 
-# 2) bj_objects.csv → asassn_index_masked_concat_cleaned_20250920_1351.csv (ASASSN)
+# 2) bj_objects.csv -> asassn_index_masked_concat_cleaned_20250920_1351.csv (ASASSN)
 idx_asn, sep2d_asn, _ = c_existing.match_to_catalog_sky(c_asassn)
 mask_asn = sep2d_asn < (TOL_ARCSEC*u.arcsec)
 existing["matched_asassn"] = mask_asn
@@ -83,7 +83,7 @@ matched_asassn = matched_asassn.merge(
 front_asn = [c for c in ["category","name","ra_deg","dec_deg","method","matched_asassn","match_sep_arcsec_asassn"] if c in matched_asassn.columns]
 matched_asassn = matched_asassn[front_asn + [c for c in matched_asassn.columns if c not in front_asn + ["asassn_index"]]]
 
-# 3) bj_objects.csv → vsx_cleaned_20250920_1351.csv (VSX-cleaned)
+# 3) bj_objects.csv -> vsx_cleaned_20250920_1351.csv (VSX-cleaned)
 idx_vsx2, sep2d_vsx2, _ = c_existing.match_to_catalog_sky(c_vsx2)
 mask_vsx2 = sep2d_vsx2 < (TOL_ARCSEC*u.arcsec)
 existing["matched_vsxclean"] = mask_vsx2
@@ -135,7 +135,7 @@ print("Wrote:",
       OUT_MATCH_ASASSN, "(ASASSN matches),",
       OUT_MATCH_VSXCLEAN, "(VSX-cleaned matches)")
 
-# 4) bj_objects.csv → vsx_raw_{stamp}.csv (VSX-raw)
+# 4) bj_objects.csv -> vsx_raw_{stamp}.csv (VSX-raw)
 VSX_RAW_PATH = "/data/poohbah/1/assassin/lenhart/code/calder/calder/output/vsx_raw_20250921_0408.csv"
 
 vsx_raw = pd.read_csv(VSX_RAW_PATH)
