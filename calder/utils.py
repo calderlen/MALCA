@@ -34,44 +34,83 @@ def jd_to_year(jd):
     days_in_year = 365.25
     return year_epoch + (jd - jd_epoch) / days_in_year
 
-def read_lightcurve(asassn_id, path):
-    # different processing for .dat and .csv files
+def read_lc_dat(asassn_id, path):
 
     if os.path.exists(f"{path}/{asassn_id}.dat"):
+        file = os.path.join(path, f"{asassn_id}.dat")
+        # column names
+        columns = ["JD", 
+                   "mag", 
+                   "error", 
+                   "good_bad", 
+                   "camera#", 
+                   "v_g_band", 
+                   "saturated", 
+                   "cam_field"]
 
-        fname = os.path.join(path, f"{asassn_id}.dat")
+        # read fwf
+        df = pd.read_fwf(
+            file,
+            header=None,
+            names=columns
+        )
+    
+        # split the "cam_field" column into two
+        df[["camera_name", "field"]] = df["cam_field"].str.split("/", expand=True)
 
-        df_v = pd.DataFrame()
+        # drop the old combined column
+        df = df.drop(columns=["cam_field"])
+
+        # enforce dtypes
+        df = df.astype({
+            "JD": "float64",
+            "mag": "float64",
+            "error": "float64",
+            "good_bad": "int64",
+            "camera#": "int64",
+            "v_g_band": "int64",
+            "saturated": "int64",
+            "camera_name": "string",
+            "field": "string"
+        })
+
+        df_g = df.loc[df["v_g_band"] == 0].reset_index(drop=True)    
+        df_v = df.loc[df["v_g_band"] == 1].reset_index(drop=True)
+
+        if df_v.empty:
+            print(f"[warn] {asassn_id}: no V band rows")
+        if df_g.empty:
+            print(f"[warn] {asassn_id}: no g band rows")
+        
+    else:
+        print(f"[error] {asassn_id}: file not found in {path}")
         df_g = pd.DataFrame()
+        df_v = pd.DataFrame()
+                 
+    return df_g, df_v
 
-        fdata = pd.read_fwf(fname, header=None)
-        fdata.columns = ["JD", "Mag", "Mag_err", "Quality", "Cam_number", "Phot_filter", "Camera"]
+def naive_peak_search(df, prominence=0.17, distance=25, height=0.3, width=2):
 
-        df_v = fdata.loc[fdata["Phot_filter"] == 1].reset_index(drop=True)
-        df_g = fdata.loc[fdata["Phot_filter"] == 0].reset_index(drop=True)      
+    mag = df["mag"]
+    jd = df['JD']
 
-        df_v['Mag'].astype(float)
-        df_v['JD'].astype(float)
+    meanmag = sum(mag) / len(mag)
+    df_mag_avg = [i - meanmag for i in mag]
 
-        df_g['Mag'].astype(float)
-        df_g['JD'].astype(float)
+    peaks = scipy.signal.find_peaks(df_mag_avg,
+                                    prominence=prominence,
+                                    distance=distance, 
+                                    height=height, 
+                                    width=width) 
+    
+    peak = peaks[0]
+    prop = peaks[1]
 
-    elif os.path.exists(f"{path}/{asassn_id}.csv"):
+    length = len(peak)
+    peak = [int(i) for i in peak]
+    peak = pd.Series(peak)
 
-        fname = os.path.join(path, f"{asassn_id}.csv")
-
-        df = pd.read_csv(fname)
-
-        df['Mag'] = pd.to_numeric(df['Mag'], errors='coerce')
-        df = df.dropna()
-
-        df['Mag'].astype(float)
-        df['JD'] = df.HJD.astype(float)
-
-        df_g = df.loc[df["Filter"] == 'g'].reset_index(drop=True)
-        df_v = df.loc[df["Filter"] == 'V'].reset_index(drop=True)
-
-    return df_v, df_g
+    return peak, meanmag, length
 
 def custom_id(ra_val,dec_val):
     c = SkyCoord(ra=ra_val*u.degree, dec=dec_val*u.degree, frame='icrs')
@@ -83,19 +122,20 @@ def custom_id(ra_val,dec_val):
     else:
         cust_id = 'J'+str(int(c.ra.hms[0])).rjust(2,'0')+str(int(c.ra.hms[1])).rjust(2,'0')+str(int(round(c.ra.hms[2]))).rjust(2,'0')+'$+$'+str(int(c.dec.dms[0])).rjust(2,'0')+str(int(c.dec.dms[1])).rjust(2,'0')+str(int(round(c.dec.dms[2]))).rjust(2,'0')
 
-    return cust_ids
+    return cust_id
+
 
 def plot_multiband(dfv, dfg, ra, dec, peak_option=False):
     cust_id = custom_id(ra,dec)
-    peak, meanmag, length = find_peak(dfg)
+    peak, meanmag, length = naive_peak_search(dfg)
 
     fig, ax = pl.subplots(1, 1, figsize=(8, 4))
 
-    gcams = dfg["Camera"]
+    gcams = dfg["camera#"]
     gcamtype = np.unique(gcams)
     gcamnum = len(gcamtype)
 
-    vcams = dfv["Camera"]
+    vcams = dfv["camera#"]
     vcamtype = np.unique(vcams)
     vcamnum = len(vcamtype)
 
@@ -112,15 +152,15 @@ def plot_multiband(dfv, dfg, ra, dec, peak_option=False):
     if peak_option == False:
 
         for i in range(0,gcamnum):
-            gcam = dfg.loc[dfg["Camera"] == gcamtype[i]].reset_index(drop=True)
+            gcam = dfg.loc[dfg["camera#"] == gcamtype[i]].reset_index(drop=True)
             gcamjd = gcam["JD"].astype(float) - (2.458 * 10 ** 6)
-            gcammag = gcam["Mag"].astype(float)
+            gcammag = gcam["mag"].astype(float)
             ax.scatter(gcamjd, gcammag, color=colors[i], alpha=0.6, marker='.')
 
         for i in range(0,vcamnum):
-            vcam = dfv.loc[dfv["Camera"] == vcamtype[i]].reset_index(drop=True)
+            vcam = dfv.loc[dfv["camera#"] == vcamtype[i]].reset_index(drop=True)
             vcamjd = vcam["JD"].astype(float) - (2.458 * 10 ** 6)
-            vcammag = vcam["Mag"].astype(float)
+            vcammag = vcam["mag"].astype(float)
             ax.scatter(vcamjd, vcammag, color=colors[i], alpha=0.6, marker='.')
 
         ax.set_xlim((min(dfv.JD)-(2.458 * 10 ** 6)-500),(max(dfg.JD)-(2.458 * 10 ** 6)+150))
@@ -145,19 +185,19 @@ def plot_multiband(dfv, dfg, ra, dec, peak_option=False):
         print('The number of detected peaks:', length)
 
         for i in range(0,camnum):
-            gcam = dfg.loc[dfg["Camera"] == gcamtype[i]].reset_index(drop=True)
+            gcam = dfg.loc[dfg["camera#"] == gcamtype[i]].reset_index(drop=True)
             gcamjd = gcam["JD"].astype(float) - (2.458 * 10 ** 6)
-            gcammag = gcam["Mag"].astype(float)
+            gcammag = gcam["mag"].astype(float)
             ax.scatter(gcamjd, gcammag, color=colors[i], alpha=0.6, marker='.')
 
         for i in range(0,vcamnum):
-            vcam = dfv.loc[dfv["Camera"] == vcamtype[i]].reset_index(drop=True)
+            vcam = dfv.loc[dfv["camera#"] == vcamtype[i]].reset_index(drop=True)
             vcamjd = vcam["JD"].astype(float) - (2.458 * 10 ** 6)
-            vcammag = vcam["Mag"].astype(float)
+            vcammag = vcam["mag"].astype(float)
             ax.scatter(vcamjd, vcammag, color=colors[i], alpha=0.6, marker='.')
 
         for i in range(len(peak)-1):
-            ax.vlines((dfg.JD[peak[i]] - (2.458 * 10**6)), (min(dfg['Mag'])-0.1), (max(dfg['Mag'])+0.1), "k", alpha=0.4)
+            ax.vlines((dfg.JD[peak[i]] - (2.458 * 10**6)), (min(dfg["mag"])-0.1), (max(dfg["mag"])+0.1), "k", alpha=0.4)
 
         ax.set_xlim((min(dfv.JD)-(2.458 * 10 ** 6)-300),(max(df.JD)-(2.458 * 10 ** 6)+150))
         ax.set_ylim(Min_mag,Max_mag)
@@ -178,24 +218,24 @@ def plot_multiband(dfv, dfg, ra, dec, peak_option=False):
 
 def plot_light_curve(df, ra, dec, peak_option=False):
     cust_id = custom_id(ra,dec)
-    peak, meanmag, length = find_peak(df)
+    peak, meanmag, length = naive_peak_search(df)
 
     fig, ax = pl.subplots(1, 1, figsize=(8, 4))
 
-    cams = df["Camera"]
+    cams = df["camera#"]
     camtype = np.unique(cams)
     camnum = len(camtype)
 
     if peak_option == False:
 
         for i in range(0,camnum):
-            cam = df.loc[df["Camera"] == camtype[i]].reset_index(drop=True)
+            cam = df.loc[df["camera#"] == camtype[i]].reset_index(drop=True)
             camjd = cam["JD"].astype(float) - (2.458 * 10 ** 6)
-            cammag = cam["Mag"].astype(float)
+            cammag = cam["mag"].astype(float)
             ax.scatter(camjd, cammag, color=colors[i], alpha=0.6, marker='.')
 
         ax.set_xlim((min(df.JD)-(2.458 * 10 ** 6)-300),(max(df.JD)-(2.458 * 10 ** 6)+150))
-        ax.set_ylim((min(df['Mag'])-0.1),(max(df['Mag'])+0.1))
+        ax.set_ylim((min(df["mag"])-0.1),(max(df["mag"])+0.1))
         ax.set_xlabel('Julian Date $- 2458000$ [d]', fontsize=15)
         ax.set_ylabel('g [mag]', fontsize=15)
         ax.set_title(cust_id, y=1.03, fontsize=20)
@@ -216,16 +256,16 @@ def plot_light_curve(df, ra, dec, peak_option=False):
         print('The number of detected peaks:', length)
 
         for i in range(0,camnum):
-            cam = df.loc[df["Camera"] == camtype[i]].reset_index(drop=True)
+            cam = df.loc[df["camera#"] == camtype[i]].reset_index(drop=True)
             camjd = cam["JD"].astype(float) - (2.458 * 10 ** 6)
-            cammag = cam["Mag"].astype(float)
+            cammag = cam["mag"].astype(float)
             ax.scatter(camjd, cammag, color=colors[i], alpha=0.6, marker='.')
 
         for i in range(len(peak)-1):
-            ax.vlines((df.JD[peak[i]] - (2.458 * 10**6)), (min(df['Mag'])-0.1), (max(df['Mag'])+0.1), "k", alpha=0.4)
+            ax.vlines((df.JD[peak[i]] - (2.458 * 10**6)), (min(df["mag"])-0.1), (max(df["mag"])+0.1), "k", alpha=0.4)
 
         ax.set_xlim((min(df.JD)-(2.458 * 10 ** 6)-300),(max(df.JD)-(2.458 * 10 ** 6)+150))
-        ax.set_ylim((min(df['Mag'])-0.1),(max(df['Mag'])+0.1))
+        ax.set_ylim((min(df["mag"])-0.1),(max(df["mag"])+0.1))
         ax.set_xlabel('Julian Date $- 2458000$ [d]', fontsize=15)
         ax.set_ylabel('g [mag]', fontsize=15)
         ax.set_title(cust_id, y=1.03, fontsize=20)
@@ -256,25 +296,25 @@ def plotparams(ax, labelsize=15):
 def plot_zoom(df, ra, dec, zoom_range=[-300,3000], peak_option=False):
 
     cust_id = custom_id(ra,dec)
-    peak, meanmag, length = find_peak(df)
+    peak, meanmag, length = naive_peak_search(df)
 
     fig, ax = pl.subplots(1, 1, figsize=(10, 4))
     ax = plotparams(ax)
 
-    cams = df["Camera"]
+    cams = df["camera#"]
     camtype = np.unique(cams)
     camnum = len(camtype)
 
     if peak_option == False:
 
         for i in range(0,camnum):
-            cam = df.loc[df["Camera"] == camtype[i]].reset_index(drop=True)
+            cam = df.loc[df["camera#"] == camtype[i]].reset_index(drop=True)
             camjd = cam["JD"].astype(float) - (2.458 * 10 ** 6)
-            cammag = cam["Mag"].astype(float)
+            cammag = cam["mag"].astype(float)
             ax.scatter(camjd, cammag, color=colors[i], alpha=0.6, marker='.')
 
         ax.set_xlim(zoom_range[0],zoom_range[1])
-        ax.set_ylim((min(df['Mag'])-0.1),(max(df['Mag'])+0.1))
+        ax.set_ylim((min(df["mag"])-0.1),(max(df["mag"])+0.1))
         ax.set_xlabel('Julian Date $- 2458000$ [d]', fontsize=15)
         ax.set_ylabel('g [mag]', fontsize=15)
         ax.set_title(cust_id, y=1.03, fontsize=20)
@@ -284,40 +324,19 @@ def plot_zoom(df, ra, dec, zoom_range=[-300,3000], peak_option=False):
     if peak_option == True:
 
         for i in range(0,camnum):
-            cam = df.loc[df["Camera"] == camtype[i]].reset_index(drop=True)
+            cam = df.loc[df["camera#"] == camtype[i]].reset_index(drop=True)
             camjd = cam["JD"].astype(float) - (2.458 * 10 ** 6)
-            cammag = cam["Mag"].astype(float)
+            cammag = cam["mag"].astype(float)
             ax.scatter(camjd, cammag, color=colors[i], alpha=0.6, marker='.')
 
         for i in range(len(peak)-1):
-            ax.vlines((df.JD[peak[i]] - (2.458 * 10**6)), (min(df['Mag'])-0.1), (max(df['Mag'])+0.1), "k", alpha=0.4)
+            ax.vlines((df.JD[peak[i]] - (2.458 * 10**6)), (min(df["mag"])-0.1), (max(df["mag"])+0.1), "k", alpha=0.4)
 
         ax.set_xlim(zoom_range[0],zoom_range[1])
-        ax.set_ylim((min(df['Mag'])-0.1),(max(df['Mag'])+0.1))
+        ax.set_ylim((min(df["mag"])-0.1),(max(df["mag"])+0.1))
         ax.set_xlabel('Julian Date $- 2458000$ [d]', fontsize=15)
         ax.set_ylabel('g [mag]', fontsize=15)
         ax.set_title(cust_id, y=1.03, fontsize=20)
         ax.invert_yaxis()
         ax.minorticks_on()
 
-def peak_search():
-'''
-UNFINISHED
-'''
-	df['Mag'] = [float(i) for i in df['Mag']]
-	df['JD'] = [float(i) for i in df['JD']]
-	mag = df['Mag']
-	jd = df['JD']
-
-	meanmag = sum(mag) / len(mag)
-	df_mag_avg = [i - meanmag for i in mag]
-
-	peaks = scipy.signal.find_peaks(df_mag_avg, prominence=prominence, distance=distance, height=height, width=width) 
-	peak = peaks[0]
-	prop = peaks[1]
-
-	length = len(peak)
-	peak = [int(i) for i in peak]
-	peak = pd.Series(peak)
-
-	return peak, meanmag, length
