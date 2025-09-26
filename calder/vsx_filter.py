@@ -208,16 +208,15 @@ EXCLUDE = set([
     "",
     "Minor planet",
     "R/PN",
+    "UXOR",             # UX Ori-type (disk occultations in YSOs)
+    "APER",             # aperiodic variables
+    "CST", #            # "Non-variable stars (constant), formerly suspected to be variable and hastily designated. Further observations have not confirmed their variability."
+    "DIP", "DIP:",      # VSX “dippers”
 ])
 
 
 KEEP = set([
-    # Explicit
-    "DIP", "DIP:",      # VSX “dippers”
-    "UXOR",             # UX Ori-type (disk occultations in YSOs)
-    "APER",             # aperiodic variables
-    "CST", #            # "Non-variable stars (constant), formerly suspected to be variable and hastily designated. Further observations have not confirmed their variability."
-    "VAR","MISC","*",   # useful to not discard a priori
+    "VAR","MISC","*",
 ])
 
 # Normalize policy sets to uppercase to match tokenization

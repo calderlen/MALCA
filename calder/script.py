@@ -75,12 +75,12 @@ from lc_stats import compute_stats, print_summary
 #df, summary = compute_stats("352188462946",f"{dir_14_5_15}/lc50_cal") # NO DAT AT END
 #print_summary(summary, max_rows=100)
 
-from process_lc import dip_finder, dip_finder_by_bin, dip_finder_streaming
+from lc_process import dip_finder, dip_finder_by_bin, dip_finder_streaming
 
 #df_peaks = dip_finder_by_bin()
 #df_peaks = dip_finder_by_bin()
-dip_finder_streaming()
+#dip_finder_streaming()
 
 
 # save df_peaks to csv
-df_peaks.to_csv("/data/poohbah/1/assassin/lenhart/code/calder/calder/output/dip_finder_peaks.csv", index=False)
+#df_peaks.to_csv("/data/poohbah/1/assassin/lenhart/code/calder/calder/output/dip_finder_peaks.csv", index=False)
