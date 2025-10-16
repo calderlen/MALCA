@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 from utils import read_lc_dat
 
-# ---------- helpers ----------
+# helpers
 def weighted_mean(x, w):
     w = np.asarray(w, float)
     x = np.asarray(x, float)
