@@ -100,5 +100,3 @@ def filter_df(
     _require_bool("v_is_dip_dominated", require_v_dip_dominated)
 
     return df.loc[mask].reset_index(drop=True)
-
-def filter_df(df):

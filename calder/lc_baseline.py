@@ -1,6 +1,5 @@
 import numpy as np
 import pandas as pd
-from utils import read_lc_dat
 
 # need to get the vsx catalog
 # get the asassn id of each surviving lc after crossmatchign with vsx
@@ -12,9 +11,9 @@ from utils import read_lc_dat
 
 
 def rolling_time_median(jd, mag, days=30., min_points=10):
-    '''
+    """
     rolling median in time (currently 2 months), with at least min_points in the window to compute median
-    '''
+    """
     
     t = np.asarray(jd)
     mag = np.asarray(mag)
@@ -41,25 +40,27 @@ def rolling_time_median(jd, mag, days=30., min_points=10):
 
 
 def per_camera_baseline(df, days=30., min_points=10, t_col="JD", mag_col="mag", err_col="error", cam_col="camera#"):
-    
-    # work on a copy; initialize outputs
-    out = df.copy()
-    for col in ("baseline", "resid", "z"):
-        if col not in out.columns:
-            out[col] = np.nan
+    """
+    returns a df that mirrors input df but with three extra float columns: (1) baseline, a rolling 30-day median mag computed within each camera group; (2) resid, residual mag-baseline per-camera; (3) sigma_resid, residual divided by (MAD+mag_error) in quadrature, yielding a per-point significance
+    """
+    # work on a copy; initialize df_outputs
+    df_out = df.copy()
+    for col in ("baseline", "resid", "sigma_resid"):
+        if col not in df_out.columns:
+            df_out[col] = np.nan
 
     # group by camera and fill columns
-    for _, sub in out.groupby(cam_col, group_keys=False):
+    for _, sub in df_out.groupby(cam_col, group_keys=False):
         idx = sub.index
 
-        t = out.loc[idx, t_col].to_numpy(dtype=float)
-        m = out.loc[idx, mag_col].to_numpy(dtype=float)
-        e = out.loc[idx, err_col].to_numpy(dtype=float)
+        t = df_out.loc[idx, t_col].to_numpy(dtype=float)
+        m = df_out.loc[idx, mag_col].to_numpy(dtype=float)
+        e = df_out.loc[idx, err_col].to_numpy(dtype=float)
 
         base = rolling_time_median(t, m, days=days, min_points=min_points)
         resid = m - base
 
-        # robust scale using MAD and include typical photometric error
+        # robust scatter
         med_resid = np.nanmedian(resid)
         mad = 1.4826 * np.nanmedian(np.abs(resid - med_resid))
         e_med = np.nanmedian(e)
@@ -67,10 +68,10 @@ def per_camera_baseline(df, days=30., min_points=10, t_col="JD", mag_col="mag", 
         robust_std = np.sqrt(mad**2 + e_med**2)
         robust_std = max(float(robust_std), 1e-6)  # avoid 0/NaN
 
-        z = resid / robust_std
+        sigma_resid = resid / robust_std
 
-        out.loc[idx, "baseline"] = base
-        out.loc[idx, "resid"] = resid
-        out.loc[idx, "z"] = z
+        df_out.loc[idx, "baseline"] = base
+        df_out.loc[idx, "resid"] = resid
+        df_out.loc[idx, "sigma_resid"] = sigma_resid
 
-    return out
+    return df_out

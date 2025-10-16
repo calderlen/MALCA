@@ -73,7 +73,7 @@ def read_lightcurve_csv(asas_sn_id, guide = 'known_dipper_lightcurves/'):
 
 # This function finds the peaks 
 def find_peak(df, prominence=0.17, distance=25, height=0.3, width=2):
-	'''
+	"""
 	Inputs:
 		df: dataframe of the data, requires columns of 'Mag' and 'JD'
 		prominence: same parameter of scipy.signal.find_peaks()
@@ -87,7 +87,7 @@ def find_peak(df, prominence=0.17, distance=25, height=0.3, width=2):
 		length: the number of peaks found
 
 	Description:
-	'''
+	"""
 	df['Mag'] = [float(i) for i in df['Mag']]
 	df['JD'] = [float(i) for i in df['JD']]
 	mag = df['Mag']

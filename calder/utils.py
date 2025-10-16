@@ -123,11 +123,10 @@ def match_index_to_lc(
                     "found":        found,
                 }
 
-
-
-
 def naive_peak_search(df, prominence=0.17, distance=25, height=0.3, width=2):
     
+    # adapted from Brayden's code
+
     mag = np.asarray(df["mag"], float)
     jd = np.asarray(df["JD"], float)
 
