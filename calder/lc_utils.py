@@ -159,7 +159,7 @@ def plotparams(ax, labelsize=15):
 
 
 
-def divide_cameras()
+def divide_cameras():
     """
     ADAPTED FROM BRAYDEN JOHANTGEN'S CODE: https://github.com/johantgen13/Dippers_Project.git
     """
