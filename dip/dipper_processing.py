@@ -1,5 +1,9 @@
 
+import os
 
+import numpy as np
+import pandas as pd
+import scipy.signal
 
 
 # all of this code is adapted from Brayden JoHantgen's code
@@ -72,41 +76,85 @@ def read_lightcurve_csv(asas_sn_id, guide = 'known_dipper_lightcurves/'):
     return dfv, dfg
 
 # This function finds the peaks 
-def find_peak(df, prominence=0.17, distance=25, height=0.3, width=2):
-	"""
-	Inputs:
-		df: dataframe of the data, requires columns of 'Mag' and 'JD'
-		prominence: same parameter of scipy.signal.find_peaks()
-		distance: same parameter of scipy.signal.find_peaks()
-		height: same parameter of scipy.signal.find_peaks()
-		width: same parameter of scipy.signal.find_peaks()
+def find_peak(
+    df,
+    prominence=0.17,
+    distance=25,
+    height=0.3,
+    width=2,
+    apply_box_filter=True,
+    max_dips=10,
+    max_std=0.15,
+    max_peaks_per_time=0.015,
+):
+    """Locate peaks in a light curve and optionally apply the historical "box" filter.
 
-	Outputs:
-		peak: a series of the peaks found
-		meanmag: the average magnitude of the light curve
-		length: the number of peaks found
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Must contain columns ``Mag`` and ``JD``.
+    prominence, distance, height, width : float
+        Forwarded to :func:`scipy.signal.find_peaks`.
+    apply_box_filter : bool, optional
+        If True (default), enforce the legacy box criteria used in the original
+        pipeline (number of dips, peaks per unit time, and scatter limits).
+    max_dips : int, optional
+        Maximum allowed number of dips to pass the filter.
+    max_std : float, optional
+        Maximum allowed standard deviation of the magnitudes.
+    max_peaks_per_time : float, optional
+        Maximum allowed peak density (peaks per unit JD span).
 
-	Description:
-	"""
-	df['Mag'] = [float(i) for i in df['Mag']]
-	df['JD'] = [float(i) for i in df['JD']]
-	mag = df['Mag']
-	jd = df['JD']
+    Returns
+    -------
+    pandas.Series, float, int
+        The peak indices, the mean magnitude, and the number of detected peaks.
+        If the box filter rejects the light curve, an empty Series and zero count
+        are returned (mean magnitude is still reported).
+    """
 
-	meanmag = sum(mag) / len(mag)
-	df_mag_avg = [i - meanmag for i in mag]
-	
-    peaks = scipy.signal.find_peaks(df_mag_avg, prominence=prominence, distance=distance, height=height, width=width) 
-	
-    peak = peaks[0]
-	prop = peaks[1]
-	
-    length = len(peak)
-	
-    peak = [int(i) for i in peak]
-	peak = pd.Series(peak)
-	
-    return peak, meanmag, length	
+    if df.empty:
+        return pd.Series(dtype=int), np.nan, 0
+
+    work = df.copy()
+    work["Mag"] = pd.to_numeric(work["Mag"], errors="coerce")
+    work["JD"] = pd.to_numeric(work["JD"], errors="coerce")
+    work = work.dropna(subset=["Mag", "JD"]).reset_index(drop=True)
+    if work.empty:
+        return pd.Series(dtype=int), np.nan, 0
+
+    mag = work["Mag"].to_numpy(dtype=float)
+    jd = work["JD"].to_numpy(dtype=float)
+
+    meanmag = float(np.nanmean(mag))
+    df_mag_avg = mag - meanmag
+
+    peaks, _ = scipy.signal.find_peaks(
+        df_mag_avg,
+        prominence=prominence,
+        distance=distance,
+        height=height,
+        width=width,
+    )
+
+    peaks = peaks.astype(int)
+    length = int(peaks.size)
+
+    if apply_box_filter:
+        jd_span = float(jd[-1] - jd[0]) if jd.size > 1 else 0.0
+        peaks_per_time = (length / jd_span) if jd_span > 0 else np.inf
+        std_mag = float(np.nanstd(mag))
+
+        if (
+            length == 0
+            or length >= max_dips
+            or peaks_per_time > max_peaks_per_time
+            or std_mag > max_std
+        ):
+            return pd.Series(dtype=int), meanmag, 0
+
+    peak_series = pd.Series(peaks, name="peaks")
+    return peak_series, meanmag, length
 # End of the find_peak
 
 # This function creates a custom id using the position of the star

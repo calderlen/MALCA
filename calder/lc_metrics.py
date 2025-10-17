@@ -102,7 +102,7 @@ def run_metrics(df, dip_threshold=0.3, window=30, min_points=10):
 
 def run_metrics_pcb(df, **pcb_kwargs):
     """
-    same metrics as run_metrics, but the baseline comes from per_camera_baseline
+    same metrics as run_metrics, but the dips and jumps are calculated with respect to the per_camera_baseline
     """
     df_sorted = df.sort_values("JD").reset_index(drop=True)
     df_pcb = per_camera_baseline(df_sorted, **pcb_kwargs).sort_values("JD").reset_index(drop=True)
@@ -110,8 +110,8 @@ def run_metrics_pcb(df, **pcb_kwargs):
     if "baseline" not in df_pcb.columns:
         raise ValueError("per_camera_baseline must supply a 'baseline' column")
 
-    dip_mask = df_pcb["mag"] < (df_pcb["baseline"] + 0.3)
-    jump_mask = df_pcb["mag"] > (df_pcb["baseline"] - 0.3)
+    dip_mask = df_pcb["mag"] >= (df_pcb["baseline"] + 0.3)
+    jump_mask = df_pcb["mag"] <= (df_pcb["baseline"] - 0.3)
 
     dip_runs = find_runs(dip_mask.to_numpy())
     jump_runs = find_runs(jump_mask.to_numpy())
@@ -158,10 +158,8 @@ def run_metrics_pcb(df, **pcb_kwargs):
         "dip_fraction": n_dip_points / len(df_pcb) if len(df_pcb) > 0 else np.nan,
         "jump_fraction": n_jump_points / len(df_pcb) if len(df_pcb) > 0 else np.nan,
     }
-    
 
-
-def is_dip_dominated(metrics_dict, min_dip_fraction=0.67):
+def is_dip_dominated(metrics_dict, min_dip_fraction=0.66):
     """
     returns True if the the dip fraction from the metrics dict is above a certain value, currently 2/3
     """
@@ -173,4 +171,3 @@ def is_dip_dominated(metrics_dict, min_dip_fraction=0.67):
 
 def multi_camera_confirmation():
     pass
-

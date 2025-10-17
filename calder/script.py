@@ -8,7 +8,7 @@ except ImportError:
     from calder.df_process_naive import read_df_csv_naive
 
 
-REQUIRE_BOTH = False
+BAND = "g"
 
 # Resolve to the peak_results directory next to this script, robust to CWD
 ROOT = Path(__file__).resolve().parent / "peak_results"
@@ -29,10 +29,10 @@ def main():
 
         df_sel = read_df_csv_naive(
             src,
-            require_both=REQUIRE_BOTH,
             out_csv_path=None,  # -> <stem>_selected_dippers.csv in same dir
             write_csv=True,
             index=False,
+            band=BAND,
         )
         dest = src.parent / f"{src.stem}_selected_dippers.csv"
         print(f"[ok] {name}: selected {len(df_sel)} rows -> {dest}")

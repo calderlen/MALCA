@@ -123,9 +123,18 @@ def match_index_to_lc(
                     "found":        found,
                 }
 
-def naive_peak_search(df, prominence=0.17, distance=25, height=0.3, width=2):
-    
-    # adapted from Brayden's code
+def naive_peak_search(
+    df,
+    prominence=0.17,
+    distance=25,
+    height=0.3,
+    width=2,
+    apply_box_filter=True,
+    max_dips=10,
+    max_std=0.15,
+    max_peaks_per_time=0.015,
+):
+    """adopted from Brayden's code; boolean flag for box filtering"""
 
     mag = np.asarray(df["mag"], float)
     jd = np.asarray(df["JD"], float)
@@ -133,7 +142,7 @@ def naive_peak_search(df, prominence=0.17, distance=25, height=0.3, width=2):
     meanmag = mag.mean()
     df_mag_avg = mag - meanmag
 
-    peak, prop = scipy.signal.find_peaks(
+    peak, _ = scipy.signal.find_peaks(
         df_mag_avg,
         prominence=prominence,
         distance=distance,
@@ -141,7 +150,22 @@ def naive_peak_search(df, prominence=0.17, distance=25, height=0.3, width=2):
         width=width,
     )
 
-    return pd.Series(peak, name="peaks"), meanmag, len(peak)
+    n_peaks = len(peak)
+
+    if apply_box_filter:
+        jd_span = float(jd[-1] - jd[0]) if jd.size > 1 else 0.0
+        peaks_per_time = (n_peaks / jd_span) if jd_span > 0 else np.inf
+        std_mag = float(np.nanstd(mag))
+
+        if (
+            n_peaks == 0
+            or n_peaks >= max_dips
+            or peaks_per_time > max_peaks_per_time
+            or std_mag > max_std
+        ):
+            return pd.Series(dtype=int, name="peaks"), meanmag, 0
+
+    return pd.Series(peak, name="peaks"), meanmag, n_peaks
 
 def custom_id(ra_val,dec_val):
     c = SkyCoord(ra=ra_val*u.degree, dec=dec_val*u.degree, frame='icrs')
@@ -370,4 +394,3 @@ def plot_zoom(df, ra, dec, zoom_range=[-300,3000], peak_option=False):
         ax.set_title(cust_id, y=1.03, fontsize=20)
         ax.invert_yaxis()
         ax.minorticks_on()
-
