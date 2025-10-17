@@ -10,38 +10,29 @@ import pandas as pd
 #df_v, df_g = read_lightcurve(asassn_id, path)
 
 
-def rolling_time_median(jd, mag, days=30., min_points=10):
+def rolling_time_median(jd, mag, days=300., min_points=10, min_days=30.):
     """
-    rolling median in time (currently 2 months), with at least min_points in the window to compute median
+    rolling median in time (currently 300d), with at least min_points in the window to compute median
     """
     
-    t = np.asarray(jd)
-    mag = np.asarray(mag)
+    jd = np.asarray(jd, float)
+    mag = np.asarray(mag, float)
 
-    mag_med = np.full_like(mag, np.nan, dtype=float)
-
-    for i, ti in enumerate(t):
-        mask = (t >= ti - days/2) & (t <= ti + days/2)
-        if np.sum(mask) >= min_points:
-            mag_med[i] = np.median(mag[mask])
-
-    # fill nearest
-    if np.any(np.isnan(mag_med)):
-        mask = ~np.isnan(mag_med)
-        full_med = np.interp(t, t[mask], mag_med[mask])
-        mag_med = np.where(np.isnan(mag_med), full_med, mag_med)
-
-    # if any NaNs in full_med
-    
-    # if there are not enough points in the window, fill with global median
-    global_med = np.nanmedian(mag[mask])
-
-    return np.where(np.isnan(mag_med), global_med, mag_med)
+    out = np.full_like(mag, np.nan, dtype=float)
+    for i, t0 in enumerate(jd):
+        window = days
+        while window >= min_days:
+            mask = (jd >= t0 - window/2) & (jd <= t0 + window/2)
+            if mask.sum() >= min_points:
+                out[i] = np.nanmedian(mag[mask])
+                break
+            window /= 2  # halve the window and try again
+    return out
 
 
-def per_camera_baseline(df, days=30., min_points=10, t_col="JD", mag_col="mag", err_col="error", cam_col="camera#"):
+def per_camera_baseline(df, days=300., min_points=10, t_col="JD", mag_col="mag", err_col="error", cam_col="camera#"):
     """
-    returns a df that mirrors input df but with three extra float columns: (1) baseline, a rolling 30-day median mag computed within each camera group; (2) resid, residual mag-baseline per-camera; (3) sigma_resid, residual divided by (MAD+mag_error) in quadrature, yielding a per-point significance
+    returns a df that mirrors input df but with three extra float columns: (1) baseline, a rolling 300-day median mag computed within each camera group; (2) resid, residual mag-baseline per-camera; (3) sigma_resid, residual divided by (MAD+mag_error) in quadrature, yielding a per-point significance
     """
     # work on a copy; initialize df_outputs
     df_out = df.copy()

@@ -12,7 +12,7 @@ import sys, io, argparse, math
 from collections import OrderedDict
 import numpy as np
 import pandas as pd
-from utils import read_lc_dat
+from calder.lc_utils import read_lc_dat
 
 # helpers
 def weighted_mean(x, w):
