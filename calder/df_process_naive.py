@@ -4,7 +4,7 @@ import numpy as np
 
 from astropy.timeseries import LombScargle
 
-from lc_utils import read_lc_dat, read_raw_summary
+from lc_utils import read_lc_dat, read_lc_raw
 
 
 # filtering steps to add
@@ -102,7 +102,7 @@ def filter_multi_camera(df, min_cameras=2):
         if pd.isna(raw_path):
             counts.append(np.nan)
             continue
-        raw_df = read_raw_summary(row["asas_sn_id"], str(Path(raw_path).parent))
+        raw_df = read_lc_raw(row["asas_sn_id"], str(Path(raw_path).parent))
         counts.append(len(raw_df["camera#"].unique()) if not raw_df.empty else np.nan)
 
     df = df.copy()
@@ -171,7 +171,7 @@ def filter_sigma_resid(df, min_sigma=3.0, bands=("g", "v")):
         raw_path = row.get("raw_path")
         if pd.isna(raw_path):
             continue
-        raw_df = read_raw_summary(row["asas_sn_id"], str(Path(raw_path).parent))
+        raw_df = read_lc_raw(row["asas_sn_id"], str(Path(raw_path).parent))
         if raw_df.empty:
             continue
         scatter_vals = (raw_df["sig1_high"] - raw_df["sig1_low"]).to_numpy(dtype=float)

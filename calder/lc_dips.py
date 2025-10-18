@@ -6,7 +6,7 @@ from datetime import datetime
 from concurrent.futures import ProcessPoolExecutor
 
 from lc_baseline import per_camera_baseline
-from lc_utils import read_lc_dat, read_raw_summary, match_index_to_lc
+from lc_utils import read_lc_dat, read_lc_raw, match_index_to_lc
 from df_utils import naive_peak_search
 from lc_metrics import run_metrics_pcb, is_dip_dominated
 
@@ -83,7 +83,7 @@ def _process_record_naive(record: dict, pcb_kwargs: dict):
     """
     asn = record["asas_sn_id"]
     dfg, dfv = read_lc_dat(asn, record["lc_dir"])
-    raw_df = read_raw_summary(asn, record["lc_dir"])
+    raw_df = read_lc_raw(asn, record["lc_dir"])
 
     jd_first = np.nan
     jd_last = np.nan
