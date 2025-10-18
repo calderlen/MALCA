@@ -1,3 +1,8 @@
+import numpy as np
+import pandas as pd
+
+# these are all of the non-derived columns we have to work with -- consider joining them together here as necessary
+
 
 asassn_columns=["JD",
                 "mag",
@@ -63,3 +68,42 @@ asassn_index_columns = ['asassn_id',
                         'pstarrs_z_mag_chi',
                         'pstarrs_z_mag_contrib',
                         'nstat']
+
+
+# stats you have to work with, this is everything you've derived from the above data and the file structure
+
+
+# in lc_dips._process_record_naive
+    #   mag_bin
+    #   asas_sn_id
+    #   index_num
+    #   index_csv
+    #   lc_dir
+    #   dat_path
+    #   raw_path
+    #   g_n_peaks
+    #   g_mean_mag
+    #   g_peaks_idx
+    #   g_peaks_jd
+    #   v_n_peaks
+    #   v_mean_mag
+    #   v_peaks_idx
+    #   v_peaks_jd
+    #   jd_first
+    #   jd_last
+    #   n_rows_g
+    #   n_rows_v
+    
+# in lc_dips.naive_dip_finder
+    #    n_dip_runs,
+    #    n_jump_runs,
+    #    n_dip_points,
+    #    n_jump_points,
+    #    most_recent_dip,
+    #    most_recent_jump,
+    #    max_depth,
+    #    max_height,
+    #    max_dip_duration,
+    #    max_jump_duration,
+    #    dip_fraction
+    #    jump_fraction

@@ -1,7 +1,5 @@
 #!/usr/bin/env python
 
-#This is Potato, my collection of functions I use to find Dippers
-
 #Importing the necessary modules
 import matplotlib.pyplot as plt
 import numpy as np

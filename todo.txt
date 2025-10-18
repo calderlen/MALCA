@@ -1,17 +1,12 @@
 todo
 
 - get SSH for home desktop added to the server/copy private key from work desktop to home desktop so that you can work from home on the research
-- pick a server to run code on
 - obtain "recently calibrated" light curves for 15-15.5, 15.5-16 mag. dom's newly calibrated light curves only go down to 15 mag
-- read up the other types of extrinsic and intrinsic variables and assess if you need to consider them in the "big dippers"
-
-- questions for Chris
 
 - Future improvements identified; these approaches shoudl allow searches with lower thresholds on delta g across a wider range of apparent magnitudes -- BJ's paper
     - Automate the idenitification of stars so that fewer sources require manual inspection
-    - Filter out  known variables with well-defined types, e.g., EBs
-    - Improve methods to filter typical stellar variability; present dispersion limit can eliminate longer, deeper events ebcause they are large enough to affect the dispersion while also not eliminating high amplitude variable stars that trigger our simple approach to flagging canddidates
-    - in addition to downward dips, look for upward dips about the median of the light curve -- variable stars would show both brightening and dimming features, while desired targets would primarily feature dimming events
+    - Filter out known variables with well-defined types, e.g., EBs
+    - Improve methods to filter typical stellar variability; present dispersion limit can eliminate longer, deeper events ebcause they are large enough to affect the dispersion while also not eliminating high amplitude variable stars that trigger our simple approach to flagging candidates
     - better automate the identification of bad data points and remove them before beginning the search
 
 - timescale
@@ -44,8 +39,6 @@ todo
             - bright nearby star
                 -The points scatter inconsistently, with some segments shifted up or down.
                 - Different camera colors don’t agree.
-                - Looks messy and irregular rather than a coherent astrophysical signal.
-                - Caused by contamination from a nearby bright star (bleed trails/halos).
             - bad point cluster
                 - Almost perfectly flat baseline, except for a few vertical groups of outliers.
                 - Variability comes from just a handful of bad data points.
@@ -123,7 +116,6 @@ todo
             - gaia id? or will this miss some
             - RA, DEC + optional ID match?
     - from the updated light curve indices, search light curves at lower magnitudes using the same(?) search criteria as Brayden
-
 
 # LTVs
     - add additional index csv filter for the LTVs that gets rid of good=0

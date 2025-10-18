@@ -83,6 +83,37 @@ def read_lc_dat(asassn_id, path):
                  
     return df_g, df_v
 
+def read_lc_raw(asassn_id, path):
+    """
+    read <asassn_id>.raw containing per-camera summary statistics
+    """
+    raw_path = os.path.join(path, f"{asassn_id}.raw")
+    if not os.path.exists(raw_path):
+        return pd.DataFrame()
+    columns = [
+        "camera#",
+        "median",
+        "sig1_low",
+        "sig1_high",
+        "p90_low",
+        "p90_high",
+    ]
+    df = pd.read_csv(
+        raw_path,
+        delim_whitespace=True,
+        header=None,
+        names=columns,
+        dtype={
+            "camera#": "int64",
+            "median": "float64",
+            "sig1_low": "float64",
+            "sig1_high": "float64",
+            "p90_low": "float64",
+            "p90_high": "float64",
+        },
+    )
+    return df
+
 
 def match_index_to_lc(
     index_path: str = "/data/poohbah/1/assassin/lenhart/code/calder/lcsv2_masked/",

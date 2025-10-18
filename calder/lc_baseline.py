@@ -1,5 +1,7 @@
 import numpy as np
 import pandas as pd
+from celerite2 import terms, GaussianProcess
+from scipy.optimize import minimize
 
 # need to get the vsx catalog
 # get the asassn id of each surviving lc after crossmatchign with vsx
@@ -87,3 +89,44 @@ def per_camera_baseline(
         df_out.loc[idx, "sigma_resid"] = sigma_resid
 
     return df_out
+
+
+#def fit_gp_baseline(
+#    jd,
+#    mag,
+#    error,
+#    *,
+#    kernel="matern32
+#    sho_period = None,      # period of SHO
+#    sho_Q = 1.0,            # quality factor of SHO
+#    mean_mag = None,
+#    mask = None,            # this would be a boolean mask that filters out known dips
+#    jitter_init = 1.0,    
+#):
+    
+
+
+#def fit_gp_baseline(
+#        jd,
+#        mag,
+#        error, 
+#):
+#
+#    jd, mag, error = data
+
+#    # quasi-periodic term
+#    term1 = terms.SHOTerm(sigma, rho, tau)
+    
+#    # jitter term
+#    term2 = 
+
+#
+#
+#
+#    # maximize the likelihood function for the parameters of the kernel: mean, jitter, 
+#    
+#
+#    gp = celerite2.GaussianProcess(kernel, mean=)
+#    gp.compute(jd, yerr=error)
+#
+#    pass
