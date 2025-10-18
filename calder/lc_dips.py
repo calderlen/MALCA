@@ -3,6 +3,7 @@ import pandas as pd
 from tqdm import tqdm
 import os
 from datetime import datetime
+from concurrent.futures import ProcessPoolExecutor
 
 from lc_utils import read_lc_dat, match_index_to_lc
 from df_utils import naive_peak_search
@@ -142,6 +143,70 @@ def empty_metrics(prefix):
 
 # naive dip finder that works one bin at a time
 
+def _process_record(record: dict, pcb_kwargs: dict):
+    """
+    Worker function to process a single ASAS-SN target. Returns a dict row.
+    """
+    asn = record["asas_sn_id"]
+    dfg, dfv = read_lc_dat(asn, record["lc_dir"])
+
+    # basic cleaning to drop non-finite/invalid points and sort by time
+    if not dfg.empty:
+        dfg = clean_lc(dfg)
+    if not dfv.empty:
+        dfv = clean_lc(dfv)
+
+    jd_first = np.nan
+    jd_last = np.nan
+
+    if not dfg.empty:
+        peaks_g, mean_g, n_g = naive_peak_search(dfg, **pcb_kwargs)
+        jd_first = float(dfg["JD"].iloc[0])
+        jd_last = float(dfg["JD"].iloc[-1])
+        g_stats = run_metrics_pcb(dfg, **pcb_kwargs)
+        g_metrics = {f"g_{k}": v for k, v in g_stats.items()}
+        g_metrics["g_is_dip_dominated"] = bool(is_dip_dominated(g_stats))
+    else:
+        peaks_g, mean_g, n_g = (pd.Series(dtype=int), np.nan, 0)
+        g_metrics = empty_metrics("g")
+
+    if not dfv.empty:
+        peaks_v, mean_v, n_v = naive_peak_search(dfv, **pcb_kwargs)
+        if np.isnan(jd_first):
+            jd_first = float(dfv["JD"].iloc[0])
+        if np.isnan(jd_last):
+            jd_last = float(dfv["JD"].iloc[-1])
+        v_stats = run_metrics_pcb(dfv, **pcb_kwargs)
+        v_metrics = {f"v_{k}": v for k, v in v_stats.items()}
+        v_metrics["v_is_dip_dominated"] = bool(is_dip_dominated(v_stats))
+    else:
+        peaks_v, mean_v, n_v = (pd.Series(dtype=int), np.nan, 0)
+        v_metrics = empty_metrics("v")
+
+    row = {
+        "mag_bin": record["mag_bin"],
+        "asas_sn_id": asn,
+        "index_num": record["index_num"],
+        "index_csv": record["index_csv"],
+        "lc_dir": record["lc_dir"],
+        "dat_path": record["dat_path"],
+        "g_n_peaks": n_g,
+        "g_mean_mag": mean_g,
+        "g_peaks_idx": peaks_g.tolist(),
+        "g_peaks_jd": dfg["JD"].values[peaks_g].tolist() if not dfg.empty else [],
+        "v_n_peaks": n_v,
+        "v_mean_mag": mean_v,
+        "v_peaks_idx": peaks_v.tolist(),
+        "v_peaks_jd": dfv["JD"].values[peaks_v].tolist() if not dfv.empty else [],
+        "jd_first": jd_first,
+        "jd_last": jd_last,
+        "n_rows_g": int(len(dfg)) if not dfg.empty else 0,
+        "n_rows_v": int(len(dfv)) if not dfv.empty else 0,
+    }
+    row.update(g_metrics)
+    row.update(v_metrics)
+    return row
+
 def naive_dip_finder(
     # dip finder still uses naive peak search and is thus still naive
     index_path="/data/poohbah/1/assassin/lenhart/code/calder/lcsv2_masked/",
@@ -150,10 +215,23 @@ def naive_dip_finder(
     id_column="asas_sn_id",
     out_dir="./peak_results",
     out_format="csv",
+    n_workers=None,
+    chunk_size=100000,
+    max_inflight=None,
     **pcb_kwargs,
 ):
     os.makedirs(out_dir, exist_ok=True)
     timestamp = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S%z")
+
+    # determine worker defaults
+    if n_workers is None:
+        try:
+            cpu = os.cpu_count() or 1
+        except Exception:
+            cpu = 1
+        n_workers = max(1, min(48, cpu - 2))
+    if max_inflight is None:
+        max_inflight = max(4, n_workers * 4)
 
     for b in tqdm(mag_bins, desc="Bins", unit="bin"):
         suffix = f"_{timestamp}" if timestamp else ""
@@ -161,88 +239,70 @@ def naive_dip_finder(
         if os.path.exists(out_path):
             continue
 
-        dfm = pd.DataFrame(
-            list(
-                match_index_to_lc(
-                    index_path=index_path,
-                    lc_path=lc_path,
-                    mag_bins=[b],
-                    id_column=id_column,
-                )
-            )
-        )
-        work = dfm[dfm["found"]].copy()
-        rows = []
-
-        for _, r in tqdm(work.iterrows(), total=len(work), desc=f"{b} peak search", leave=False):
-            asn = r["asas_sn_id"]
-            dfg, dfv = read_lc_dat(asn, r["lc_dir"])
-
-            # basic cleaning to drop non-finite/invalid points and sort by time
-            if not dfg.empty:
-                dfg = clean_lc(dfg)
-            if not dfv.empty:
-                dfv = clean_lc(dfv)
-
-            jd_first = np.nan
-            jd_last = np.nan
-
-            if not dfg.empty:
-                peaks_g, mean_g, n_g = naive_peak_search(dfg, **pcb_kwargs)
-                jd_first = float(dfg["JD"].iloc[0])
-                jd_last = float(dfg["JD"].iloc[-1])
-                g_stats = run_metrics_pcb(dfg, **pcb_kwargs)
-                g_metrics = {f"g_{k}": v for k, v in g_stats.items()}
-                g_metrics["g_is_dip_dominated"] = bool(is_dip_dominated(g_stats))
-            else:
-                peaks_g, mean_g, n_g = (pd.Series(dtype=int), np.nan, 0)
-                g_metrics = empty_metrics("g")
-
-            if not dfv.empty:
-                peaks_v, mean_v, n_v = naive_peak_search(dfv, **pcb_kwargs)
-                if np.isnan(jd_first):
-                    jd_first = float(dfv["JD"].iloc[0])
-                if np.isnan(jd_last):
-                    jd_last = float(dfv["JD"].iloc[-1])
-                v_stats = run_metrics_pcb(dfv, **pcb_kwargs)
-                v_metrics = {f"v_{k}": v for k, v in v_stats.items()}
-                v_metrics["v_is_dip_dominated"] = bool(is_dip_dominated(v_stats))
-            else:
-                peaks_v, mean_v, n_v = (pd.Series(dtype=int), np.nan, 0)
-                v_metrics = empty_metrics("v")
-
-            row = {
-                "mag_bin": b,
-                "asas_sn_id": asn,
-                "index_num": r["index_num"],
-                "index_csv": r["index_csv"],
-                "lc_dir": r["lc_dir"],
-                "dat_path": r["dat_path"],
-                "g_n_peaks": n_g,
-                "g_mean_mag": mean_g,
-                "g_peaks_idx": peaks_g.tolist(),
-                "g_peaks_jd": dfg["JD"].values[peaks_g].tolist() if not dfg.empty else [],
-                "v_n_peaks": n_v,
-                "v_mean_mag": mean_v,
-                "v_peaks_idx": peaks_v.tolist(),
-                "v_peaks_jd": dfv["JD"].values[peaks_v].tolist() if not dfv.empty else [],
-                "jd_first": jd_first,
-                "jd_last": jd_last,
-                "n_rows_g": int(len(dfg)) if not dfg.empty else 0,
-                "n_rows_v": int(len(dfv)) if not dfv.empty else 0,
-            }
-            row.update(g_metrics)
-            row.update(v_metrics)
-            rows.append(row)
-
-        df_out = pd.DataFrame(rows)
-        if out_format == "parquet":
-            df_out.to_parquet(out_path, index=False)
+        rows_buffer = []
+        if out_format == "csv":
+            header_written = False
         else:
-            df_out.to_csv(out_path, index=False)  
+            header_written = None  # unused for parquet
 
+        with ProcessPoolExecutor(max_workers=n_workers) as ex:
+            pending = set()
+            pbar = tqdm(desc=f"{b} peak search", unit="obj", leave=False)
+            scheduled = 0
 
+            def flush_if_needed():
+                if out_format == "csv" and len(rows_buffer) >= chunk_size:
+                    mode = "a" if os.path.exists(out_path) else "w"
+                    header = not os.path.exists(out_path)
+                    pd.DataFrame(rows_buffer).to_csv(out_path, index=False, mode=mode, header=header)
+                    rows_buffer.clear()
 
+            def drain_some(all_pending):
+                done_now = 0
+                for fut in list(all_pending):
+                    if fut.done():
+                        row = fut.result()
+                        rows_buffer.append(row)
+                        all_pending.remove(fut)
+                        done_now += 1
+                        flush_if_needed()
+                return done_now
+
+            for rec in match_index_to_lc(
+                index_path=index_path,
+                lc_path=lc_path,
+                mag_bins=[b],
+                id_column=id_column,
+            ):
+                if not rec.get("found", False):
+                    continue
+                pending.add(ex.submit(_process_record, rec, pcb_kwargs))
+                scheduled += 1
+                # grow total dynamically for ETA
+                pbar.total = scheduled
+                pbar.refresh()
+                if len(pending) >= max_inflight:
+                    done = drain_some(pending)
+                    pbar.update(done)
+
+            # Drain remaining
+            while pending:
+                done = drain_some(pending)
+                pbar.update(done)
+
+            pbar.close()
+
+        # Final flush
+        if rows_buffer:
+            if out_format == "parquet":
+                pd.DataFrame(rows_buffer).to_parquet(out_path, index=False)
+            else:
+                mode = "a" if os.path.exists(out_path) else "w"
+                header = not os.path.exists(out_path)
+                pd.DataFrame(rows_buffer).to_csv(out_path, index=False, mode=mode, header=header)
+                rows_buffer.clear()
+
+    return None
 
 
 
