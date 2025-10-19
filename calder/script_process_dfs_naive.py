@@ -152,7 +152,7 @@ def main() -> int:
                    help="Disable VSX variability class enrichment.")
     p.add_argument("--no-dip-dom", dest="apply_dip_dom", action="store_false", default=False,
                    help="Disable the dip-dominated fraction filter.")
-    p.add_argument("--no-multi-camera", dest="apply_multi_camera", action="store_false", default=False,
+    p.add_argument("--no-multi-camera", dest="apply_multi_camera", action="store_false", default=True,
                    help="Disable the multi-camera filter.")
     p.add_argument("--no-periodic", dest="apply_periodic", action="store_false", default=False,
                    help="Disable the periodicity filter.")
