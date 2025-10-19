@@ -1,31 +1,19 @@
+from __future__ import annotations
+
 import glob
 import re
-from pathlib import Path as p
+from datetime import datetime
+from pathlib import Path
+
 import pandas as pd
 from tqdm.auto import tqdm
-from datetime import datetime
 
-# file paths
-lc_dir = '/data/poohbah/1/assassin/rowan.90/lcsv2'
-lc_dir_masked = "/data/poohbah/1/assassin/lenhart/code/calder/lcsv2_masked"
-vsx_file = '/data/poohbah/1/assassin/lenhart/code/calder/vsxcat.090525'
+MAG_BINS = ("12_12.5", "12.5_13", "13_13.5", "13.5_14", "14_14.5", "14.5_15")
 
-MAG_BINS = ['12_12.5','12.5_13','13_13.5','13.5_14','14_14.5','14.5_15']
-
-# LCs live here (for lc*_cal/*.dat)
-lc_bins = [f"{lc_dir}/{b}" for b in MAG_BINS]
-
-# masked index CSVs live here (for index*_masked.csv)
-masked_bins = [f"{lc_dir_masked}/{b}" for b in MAG_BINS]
-
-lc_12_12_5 = lc_dir_masked + '/12_12.5'
-lc_12_5_13 = lc_dir_masked + '/12.5_13'
-lc_13_13_5 = lc_dir_masked + '/13_13.5'
-lc_13_5_14 = lc_dir_masked + '/13.5_14'
-lc_14_14_5 = lc_dir_masked + '/14_14.5'
-lc_14_5_15 = lc_dir_masked + '/14.5_15'
-
-dirs = [lc_12_12_5, lc_12_5_13, lc_13_13_5, lc_13_5_14, lc_14_14_5, lc_14_5_15]
+DEFAULT_LC_DIR = Path("/data/poohbah/1/assassin/rowan.90/lcsv2")
+DEFAULT_LC_DIR_MASKED = Path("/data/poohbah/1/assassin/lenhart/code/calder/lcsv2_masked")
+DEFAULT_VSX_FILE = Path("/data/poohbah/1/assassin/lenhart/code/calder/vsxcat.090525")
+DEFAULT_OUTPUT_DIR = Path("/data/poohbah/1/assassin/lenhart/code/calder/calder/output")
 
 
 colspecs = [
@@ -225,7 +213,7 @@ KEEP = set(s.upper() for s in KEEP)
 
 _SPLIT_RE = re.compile(r"[+|/,]")  # split on + or | or , or /
 
-def _normalize_token(tok: str) -> str:
+def normalize_token(tok: str) -> str:
     t = tok.strip().upper()
     if not t:
         return ""
@@ -246,7 +234,7 @@ def tokenize_classes(s):
     raw = [r for r in _SPLIT_RE.split(s) if r]
     out = []
     for r in raw:
-        t = _normalize_token(r)
+        t = normalize_token(r)
         if t:
             out.append(t)
     return out
@@ -262,64 +250,84 @@ def filter_vsx_classes(var_string):
     return bool(parts & EXCLUDE)
 
 
-cont_var_mask = df_vsx["class"].progress_apply(filter_vsx_classes)
-df_vsx_filt = df_vsx[~cont_var_mask].copy()
+def load_vsx_catalog(path: Path | str = DEFAULT_VSX_FILE) -> pd.DataFrame:
+    """Load the raw VSX catalog and coerce numeric columns."""
+    df = pd.read_fwf(path, colspecs=colspecs, names=vsx_columns, dtype=str)
+    for col in ["ra", "dec", "mag_max", "mag_min", "epoch", "period"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    for col in ["id_vsx", "var_flag", "l_max", "u_max", "f_min", "l_min", "u_min", "u_epoch", "l_period", "u_period"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
+    return df
 
-### BEGIN DEBUG OUTPUTS ###
-print("Total rows:", len(df_vsx))
-print("Excluded rows:", cont_var_mask.sum())
-print("Kept rows:", (~cont_var_mask).sum())
 
-print(df_vsx[["id_vsx","name","var_flag","ra","dec","class"]].head(5))
-print("Class NaN rate:", df_vsx["class"].isna().mean())
+def filter_vsx(df_vsx: pd.DataFrame) -> pd.DataFrame:
+    """Return a VSX subset excluding unwanted variability classes."""
+    mask = df_vsx["class"].progress_apply(filter_vsx_classes)
+    df = df_vsx[~mask].copy()
+    return df.dropna(subset=["ra", "dec"]).reset_index(drop=True)
 
-# See top classes surviving/excluded
-kept   = df_vsx[~cont_var_mask]
-excl   = df_vsx[ cont_var_mask]
-print("Kept count:", len(kept), "Excluded count:", len(excl))
-print("Top kept classes:", kept["class"].value_counts().head(50))
-print("Top excluded classes:", excl["class"].value_counts().head(5))
 
-print(f"Shape of df_vsx_filt after filtering: {df_vsx_filt.shape}") # DEBUG
-### END DEBUG OUTPUTS ###
+def load_masked_indexes(masked_root: Path | str = DEFAULT_LC_DIR_MASKED) -> pd.DataFrame:
+    """Concatenate all masked index CSVs into a single dataframe."""
+    masked_root = Path(masked_root)
+    masked_files = [
+        f
+        for mag_bin in MAG_BINS
+        for f in glob.glob(str(masked_root / mag_bin / "index*_masked.csv"))
+    ]
+    dfs = [
+        pd.read_csv(fpath, dtype={"asassn_id": "string"})
+        for fpath in tqdm(masked_files, desc="Reading masked CSVs")
+    ]
+    df = pd.concat(dfs, ignore_index=True)
+    df["ra_deg"] = pd.to_numeric(df["ra_deg"], errors="coerce")
+    df["dec_deg"] = pd.to_numeric(df["dec_deg"], errors="coerce")
+    return df.dropna(subset=["ra_deg", "dec_deg"]).reset_index(drop=True)
 
-# iterate over all dats in all lc_cal subdirs in all magnitude dirs, collect IDs of light curve
-present_ids = set()
-all_files = [f for d in lc_bins for f in glob.glob(f"{d}/lc*_cal/*.dat")]
-for f in tqdm(all_files, desc="Collecting IDs", unit="file", unit_scale=True, dynamic_ncols=True):
-    present_ids.add(p(f).stem)
 
-# this probably ins't necessary to repeat since we did it once. remove after confirming
-#for d in tqdm(dirs, desc="Creating masked index files"):
-#    mask_index_dir(d)
+def collect_present_ids(lc_root: Path | str = DEFAULT_LC_DIR) -> set[str]:
+    """Return the set of ASAS-SN IDs with .dat files present."""
+    lc_root = Path(lc_root)
+    present_ids = {
+        Path(f).stem
+        for mag_bin in MAG_BINS
+        for f in glob.glob(str(lc_root / mag_bin / "lc*_cal/*.dat"))
+    }
+    return present_ids
 
-# gather masked CSVs and read them
-masked_files = []
-for d in masked_bins:
-    masked_files.extend(glob.glob(f"{d}/index*_masked.csv"))
 
-dfs = []
-for fpath in tqdm(masked_files, desc="Reading masked CSVs"):
-    dfs.append(pd.read_csv(fpath, dtype={"asassn_id": "string"}))
+def write_clean_outputs(
+    df_asassn: pd.DataFrame,
+    df_vsx: pd.DataFrame,
+    output_dir: Path | str = DEFAULT_OUTPUT_DIR,
+    stamp: str | None = None,
+) -> tuple[Path, Path]:
+    """Write cleaned ASAS-SN index and VSX CSVs, returning their paths."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    stamp = stamp or datetime.now().strftime("%Y%m%d_%H%M")
+    asas_out = output_dir / f"asassn_index_masked_concat_cleaned_{stamp}.csv"
+    vsx_out = output_dir / f"vsx_cleaned_{stamp}.csv"
+    df_asassn.to_csv(asas_out, index=False)
+    df_vsx.to_csv(vsx_out, index=False)
+    return asas_out, vsx_out
 
-df_all = pd.concat(dfs, ignore_index=True)
 
-print(f"Shape of df_all after concat: {df_all.shape}")                       # DEBUG
+def main(
+    vsx_file: Path | str = DEFAULT_VSX_FILE,
+    lc_dir: Path | str = DEFAULT_LC_DIR,
+    masked_dir: Path | str = DEFAULT_LC_DIR_MASKED,
+    output_dir: Path | str = DEFAULT_OUTPUT_DIR,
+) -> tuple[Path, Path]:
+    """Run VSX filtering and ASAS-SN index cleaning and write cleaned CSVs."""
+    df_vsx_raw = load_vsx_catalog(vsx_file)
+    df_vsx_clean = filter_vsx(df_vsx_raw)
+    df_asassn_clean = load_masked_indexes(masked_dir)
+    _ = collect_present_ids(lc_dir)  # presently unused but retained for parity
+    return write_clean_outputs(df_asassn_clean, df_vsx_clean, output_dir=output_dir)
 
-# coerce ASAS-SN coords and drop NaNs BEFORE SkyCoord so indices match search results
-df_all["ra_deg"]  = pd.to_numeric(df_all["ra_deg"], errors="coerce")
-df_all["dec_deg"] = pd.to_numeric(df_all["dec_deg"], errors="coerce")
-df_all_clean = df_all.dropna(subset=["ra_deg","dec_deg"]).reset_index(drop=True)
-df_vsx_filt_clean = df_vsx_filt.dropna(subset=["ra","dec"]).reset_index(drop=True)
 
-print(f"Shape of df_all_clean after dropna: {df_all_clean.shape}")           # DEBUG
-print(f"Shape of df_vsx_filt_clean after dropna: {df_vsx_filt_clean.shape}") # DEBUG
-
-# outputting cleaned concatenated asas-sn lightcurve index csv, and cleaned vsx csv
-stamp = datetime.now().strftime("%Y%m%d_%H%M")
-
-out_csv = p.cwd() / f"/data/poohbah/1/assassin/lenhart/code/calder/calder/output/asassn_index_masked_concat_cleaned_{stamp}.csv"
-df_all_clean.to_csv(out_csv, index=False)
-
-out_csv = p.cwd() / f"/data/poohbah/1/assassin/lenhart/code/calder/calder/output/vsx_cleaned_{stamp}.csv"
-df_vsx_filt_clean.to_csv(out_csv, index=False)
+if __name__ == "__main__":
+    asas_path, vsx_path = main()
+    print(f"Wrote ASAS-SN cleaned index to {asas_path}")
+    print(f"Wrote VSX cleaned catalog to {vsx_path}")

@@ -77,7 +77,7 @@ def empty_metrics(prefix):
         return out
 
 # naive dip finder that works one bin at a time
-def _process_record_naive(record: dict, pcb_kwargs: dict):
+def process_record_naive(record: dict, pcb_kwargs: dict):
     """
     Worker function to process a single ASAS-SN target. Returns a dict row.
     """
@@ -186,7 +186,7 @@ def naive_dip_finder(
     out_dir="./peak_results",
     out_format="csv",
     n_workers=None,
-    chunk_size=100000,
+    chunk_size=250000,
     max_inflight=None,
     **pcb_kwargs,
 ):
@@ -246,7 +246,7 @@ def naive_dip_finder(
             ):
                 if not rec.get("found", False):
                     continue
-                pending.add(ex.submit(_process_record_naive, rec, pcb_kwargs))
+                pending.add(ex.submit(process_record_naive, rec, pcb_kwargs))
                 scheduled += 1
                 # grow total dynamically for ETA
                 pbar.total = scheduled
@@ -273,216 +273,3 @@ def naive_dip_finder(
                 rows_buffer.clear()
 
     return None
-
-def plot_multiband(dfv, dfg, ra, dec, peak_option=False):
-    """
-    ADOPTED FROM BRAYDEN JOHANTGEN'S CODE: https://github.com/johantgen13/Dippers_Project.git
-    """
-    cust_id = custom_id(ra,dec)
-    peak, meanmag, length = naive_peak_search(dfg)
-
-    fig, ax = pl.subplots(1, 1, figsize=(8, 4))
-
-    gcams = dfg["camera#"]
-    gcamtype = np.unique(gcams)
-    gcamnum = len(gcamtype)
-
-    vcams = dfv["camera#"]
-    vcamtype = np.unique(vcams)
-    vcamnum = len(vcamtype)
-
-    if max(dfg.Mag) < max(dfv.Mag):
-        Max_mag = max(dfg.Mag)+0.2
-    else:
-        Max_mag = max(dfv.Mag)+0.2
-
-    if min(dfg.Mag) < min(dfv.Mag):
-        Min_mag = min(dfg.Mag)-0.4
-    else:
-        Min_mag = min(dfv.Mag)-0.4
-
-    if peak_option == False:
-
-        for i in range(0,gcamnum):
-            gcam = dfg.loc[dfg["camera#"] == gcamtype[i]].reset_index(drop=True)
-            gcamjd = gcam["JD"].astype(float) - (2.458 * 10 ** 6)
-            gcammag = gcam["mag"].astype(float)
-            ax.scatter(gcamjd, gcammag, color=colors[i], alpha=0.6, marker='.')
-
-        for i in range(0,vcamnum):
-            vcam = dfv.loc[dfv["camera#"] == vcamtype[i]].reset_index(drop=True)
-            vcamjd = vcam["JD"].astype(float) - (2.458 * 10 ** 6)
-            vcammag = vcam["mag"].astype(float)
-            ax.scatter(vcamjd, vcammag, color=colors[i], alpha=0.6, marker='.')
-
-        ax.set_xlim((min(dfv.JD)-(2.458 * 10 ** 6)-500),(max(dfg.JD)-(2.458 * 10 ** 6)+150))
-        ax.set_ylim(Min_mag,Max_mag)
-        ax.set_xlabel('Julian Date $- 2458000$ [d]', fontsize=15)
-        ax.set_ylabel('V & g [mag]', fontsize=15)
-        ax.set_title(cust_id, y=1.03, fontsize=20)
-        ax.invert_yaxis()
-        ax.minorticks_on()
-        ax.tick_params(axis='x', direction='in', top=False, labelbottom=True, bottom=True, pad=-15, labelsize=12)
-        ax.tick_params(axis='y', direction='in', right=False, pad=-35, labelsize=12)
-        ax.tick_params('both', length=6, width=1.5, which='major')
-        ax.tick_params('both', direction='in', length=4, width=1, which='minor')
-        ax.yaxis.set_minor_locator(tick.MultipleLocator(0.1))
-        secax = ax.secondary_xaxis('top', functions=(jd_to_year,year_to_jd))
-        secax.xaxis.set_tick_params(direction='in', labelsize=12, pad=-18, length=6, width=1.5) 
-        for axis in ['top', 'bottom', 'left', 'right']:
-            ax.spines[axis].set_linewidth(1.5)
-
-    if peak_option == True:
-        print('The mean g magnitude:', meanmag)
-        print('The number of detected peaks:', length)
-
-        for i in range(0,camnum):
-            gcam = dfg.loc[dfg["camera#"] == gcamtype[i]].reset_index(drop=True)
-            gcamjd = gcam["JD"].astype(float) - (2.458 * 10 ** 6)
-            gcammag = gcam["mag"].astype(float)
-            ax.scatter(gcamjd, gcammag, color=colors[i], alpha=0.6, marker='.')
-
-        for i in range(0,vcamnum):
-            vcam = dfv.loc[dfv["camera#"] == vcamtype[i]].reset_index(drop=True)
-            vcamjd = vcam["JD"].astype(float) - (2.458 * 10 ** 6)
-            vcammag = vcam["mag"].astype(float)
-            ax.scatter(vcamjd, vcammag, color=colors[i], alpha=0.6, marker='.')
-
-        for i in range(len(peak)-1):
-            ax.vlines((dfg.JD[peak[i]] - (2.458 * 10**6)), (min(dfg["mag"])-0.1), (max(dfg["mag"])+0.1), "k", alpha=0.4)
-
-        ax.set_xlim((min(dfv.JD)-(2.458 * 10 ** 6)-300),(max(df.JD)-(2.458 * 10 ** 6)+150))
-        ax.set_ylim(Min_mag,Max_mag)
-        ax.set_xlabel('Julian Date $- 2458000$ [d]', fontsize=15)
-        ax.set_ylabel('g [mag]', fontsize=15)
-        ax.set_title(cust_id, y=1.03, fontsize=20)
-        ax.invert_yaxis()
-        ax.minorticks_on()
-        ax.tick_params(axis='x', direction='in', top=False, labelbottom=True, bottom=True, pad=-15, labelsize=12)
-        ax.tick_params(axis='y', direction='in', right=False, pad=-35, labelsize=12)
-        ax.tick_params('both', length=6, width=1.5, which='major')
-        ax.tick_params('both', direction='in', length=4, width=1, which='minor')
-        ax.yaxis.set_minor_locator(tick.MultipleLocator(0.1))
-        secax = ax.secondary_xaxis('top', functions=(jd_to_year,year_to_jd))
-        secax.xaxis.set_tick_params(direction='in', labelsize=12, pad=-18, length=6, width=1.5) 
-        for axis in ['top', 'bottom', 'left', 'right']:
-            ax.spines[axis].set_linewidth(1.5)
-  
-
-def plot_light_curve(df, ra, dec, peak_option=False):
-    """
-    ADOPTED FROM BRAYDEN JOHANTGEN'S CODE: https://github.com/johantgen13/Dippers_Project.git
-    """
-    cust_id = custom_id(ra,dec)
-    peak, meanmag, length = naive_peak_search(df)
-
-    fig, ax = pl.subplots(1, 1, figsize=(8, 4))
-
-    cams = df["camera#"]
-    camtype = np.unique(cams)
-    camnum = len(camtype)
-
-    if peak_option == False:
-
-        for i in range(0,camnum):
-            cam = df.loc[df["camera#"] == camtype[i]].reset_index(drop=True)
-            camjd = cam["JD"].astype(float) - (2.458 * 10 ** 6)
-            cammag = cam["mag"].astype(float)
-            ax.scatter(camjd, cammag, color=colors[i], alpha=0.6, marker='.')
-
-        ax.set_xlim((min(df.JD)-(2.458 * 10 ** 6)-300),(max(df.JD)-(2.458 * 10 ** 6)+150))
-        ax.set_ylim((min(df["mag"])-0.1),(max(df["mag"])+0.1))
-        ax.set_xlabel('Julian Date $- 2458000$ [d]', fontsize=15)
-        ax.set_ylabel('g [mag]', fontsize=15)
-        ax.set_title(cust_id, y=1.03, fontsize=20)
-        ax.invert_yaxis()
-        ax.minorticks_on()
-        ax.tick_params(axis='x', direction='in', top=False, labelbottom=True, bottom=True, pad=-15, labelsize=12)
-        ax.tick_params(axis='y', direction='in', right=False, pad=-35, labelsize=12)
-        ax.tick_params('both', length=6, width=1.5, which='major')
-        ax.tick_params('both', direction='in', length=4, width=1, which='minor')
-        ax.yaxis.set_minor_locator(tick.MultipleLocator(0.1))
-        secax = ax.secondary_xaxis('top', functions=(jd_to_year,year_to_jd))
-        secax.xaxis.set_tick_params(direction='in', labelsize=12, pad=-18, length=6, width=1.5) 
-        for axis in ['top', 'bottom', 'left', 'right']:
-            ax.spines[axis].set_linewidth(1.5)
-
-    if peak_option == True:
-        print('The mean magnitude:', meanmag)
-        print('The number of detected peaks:', length)
-
-        for i in range(0,camnum):
-            cam = df.loc[df["camera#"] == camtype[i]].reset_index(drop=True)
-            camjd = cam["JD"].astype(float) - (2.458 * 10 ** 6)
-            cammag = cam["mag"].astype(float)
-            ax.scatter(camjd, cammag, color=colors[i], alpha=0.6, marker='.')
-
-        for i in range(len(peak)-1):
-            ax.vlines((df.JD[peak[i]] - (2.458 * 10**6)), (min(df["mag"])-0.1), (max(df["mag"])+0.1), "k", alpha=0.4)
-
-        ax.set_xlim((min(df.JD)-(2.458 * 10 ** 6)-300),(max(df.JD)-(2.458 * 10 ** 6)+150))
-        ax.set_ylim((min(df["mag"])-0.1),(max(df["mag"])+0.1))
-        ax.set_xlabel('Julian Date $- 2458000$ [d]', fontsize=15)
-        ax.set_ylabel('g [mag]', fontsize=15)
-        ax.set_title(cust_id, y=1.03, fontsize=20)
-        ax.invert_yaxis()
-        ax.minorticks_on()
-        ax.tick_params(axis='x', direction='in', top=False, labelbottom=True, bottom=True, pad=-15, labelsize=12)
-        ax.tick_params(axis='y', direction='in', right=False, pad=-35, labelsize=12)
-        ax.tick_params('both', length=6, width=1.5, which='major')
-        ax.tick_params('both', direction='in', length=4, width=1, which='minor')
-        ax.yaxis.set_minor_locator(tick.MultipleLocator(0.1))
-        secax = ax.secondary_xaxis('top', functions=(jd_to_year,year_to_jd))
-        secax.xaxis.set_tick_params(direction='in', labelsize=12, pad=-18, length=6, width=1.5) 
-        for axis in ['top', 'bottom', 'left', 'right']:
-            ax.spines[axis].set_linewidth(1.5)
-
-
-def plot_zoom(df, ra, dec, zoom_range=[-300,3000], peak_option=False):
-    """
-    ADOPTED FROM BRAYDEN JOHANTGEN'S CODE: https://github.com/johantgen13/Dippers_Project.git
-    """
-    cust_id = custom_id(ra,dec)
-    peak, meanmag, length = naive_peak_search(df)
-
-    fig, ax = pl.subplots(1, 1, figsize=(10, 4))
-    ax = plotparams(ax)
-
-    cams = df["camera#"]
-    camtype = np.unique(cams)
-    camnum = len(camtype)
-
-    if peak_option == False:
-
-        for i in range(0,camnum):
-            cam = df.loc[df["camera#"] == camtype[i]].reset_index(drop=True)
-            camjd = cam["JD"].astype(float) - (2.458 * 10 ** 6)
-            cammag = cam["mag"].astype(float)
-            ax.scatter(camjd, cammag, color=colors[i], alpha=0.6, marker='.')
-
-        ax.set_xlim(zoom_range[0],zoom_range[1])
-        ax.set_ylim((min(df["mag"])-0.1),(max(df["mag"])+0.1))
-        ax.set_xlabel('Julian Date $- 2458000$ [d]', fontsize=15)
-        ax.set_ylabel('g [mag]', fontsize=15)
-        ax.set_title(cust_id, y=1.03, fontsize=20)
-        ax.invert_yaxis()
-        ax.minorticks_on()
-
-    if peak_option == True:
-
-        for i in range(0,camnum):
-            cam = df.loc[df["camera#"] == camtype[i]].reset_index(drop=True)
-            camjd = cam["JD"].astype(float) - (2.458 * 10 ** 6)
-            cammag = cam["mag"].astype(float)
-            ax.scatter(camjd, cammag, color=colors[i], alpha=0.6, marker='.')
-
-        for i in range(len(peak)-1):
-            ax.vlines((df.JD[peak[i]] - (2.458 * 10**6)), (min(df["mag"])-0.1), (max(df["mag"])+0.1), "k", alpha=0.4)
-
-        ax.set_xlim(zoom_range[0],zoom_range[1])
-        ax.set_ylim((min(df["mag"])-0.1),(max(df["mag"])+0.1))
-        ax.set_xlabel('Julian Date $- 2458000$ [d]', fontsize=15)
-        ax.set_ylabel('g [mag]', fontsize=15)
-        ax.set_title(cust_id, y=1.03, fontsize=20)
-        ax.invert_yaxis()
-        ax.minorticks_on()

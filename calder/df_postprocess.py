@@ -73,7 +73,7 @@ asassn_index_columns = ['asassn_id',
 # stats you have to work with, this is everything you've derived from the above data and the file structure
 
 
-# in lc_dips._process_record_naive
+# in lc_dips.process_record_naive
     #   mag_bin
     #   asas_sn_id
     #   index_num

@@ -14,8 +14,7 @@ from scipy.optimize import minimize
 
 def rolling_time_median(jd, mag, days=300.0, min_points=10, min_days=30.0):
     """
-    Rolling median in time (default 300 d). Requires at least `min_points`
-    finite magnitudes within the window; halves the window down to `min_days`.
+    Rolling median in time (default 300 d). Requires at least min_points finite magnitudes within the window; halves the window down to min_days
     """
 
     jd = np.asarray(jd, float)
