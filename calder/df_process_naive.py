@@ -1,18 +1,17 @@
 from __future__ import annotations
-
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from time import perf_counter
-from typing import Dict, Any, Iterable, List
-
+from typing import Dict, Any, Iterable, List, Optional
 import pandas as pd
 import numpy as np
 from tqdm.auto import tqdm
-
 from astropy.timeseries import LombScargle
 from astropy import units as u
 
 from vsx_crossmatch import propagate_asassn_coords, vsx_coords
+from lc_utils import read_lc_dat, read_lc_raw
+
 
 
 # parallelization helpers
@@ -217,9 +216,259 @@ def vsx_class_extract(
 
     return df_out
 
+
+
+
+def _first_col(df: pd.DataFrame, *candidates: str) -> Optional[str]:
+    """Return the first existing column name from candidates, or None."""
+    for c in candidates:
+        if c in df.columns:
+            return c
+    return None
+
+
+def filter_dip_dominated(
+    df: pd.DataFrame,
+    *,
+    min_dip_fraction: float = 0.66,
+    show_tqdm: bool = False,
+) -> pd.DataFrame:
+    """
+    Keep targets whose dip fraction is >= min_dip_fraction in at least one band.
+    Expected columns (any of):
+      - 'g_dip_fraction', 'v_dip_fraction'
+      - or boolean flags like 'g_dip_dominated', 'v_dip_dominated'
+    Safe fallback: pass-through if required columns are missing.
+    """
+    g_frac_col = _first_col(df, "g_dip_fraction", "g_dip_frac")
+    v_frac_col = _first_col(df, "v_dip_fraction", "v_dip_frac")
+    g_flag_col = _first_col(df, "g_dip_dominated", "g_dipdom")
+    v_flag_col = _first_col(df, "v_dip_dominated", "v_dipdom")
+
+    n0 = len(df)
+    if g_frac_col or v_frac_col:
+        mask = pd.Series(False, index=df.index)
+        if g_frac_col:
+            mask |= df[g_frac_col].astype(float) >= min_dip_fraction
+        if v_frac_col:
+            mask |= df[v_frac_col].astype(float) >= min_dip_fraction
+        out = df.loc[mask].reset_index(drop=True)
+    elif g_flag_col or v_flag_col:
+        mask = pd.Series(False, index=df.index)
+        if g_flag_col:
+            mask |= df[g_flag_col].astype(bool)
+        if v_flag_col:
+            mask |= df[v_flag_col].astype(bool)
+        out = df.loc[mask].reset_index(drop=True)
+    else:
+        tqdm.write("[filter_dip_dominated] No dip-fraction/flag columns found; passing through.")
+        out = df.reset_index(drop=True)
+
+    if show_tqdm:
+        tqdm.write(f"[filter_dip_dominated] kept {len(out)}/{n0}")
+    return out
+
+
+def filter_multi_camera(
+    df: pd.DataFrame,
+    *,
+    min_cameras: int = 2,
+    show_tqdm: bool = False,
+) -> pd.DataFrame:
+    """
+    Keep targets observed by >= min_cameras distinct cameras.
+    Expected columns (any of): 'n_cameras', 'num_cameras', 'unique_cameras',
+    'n_unique_cameras', 'camera_count'
+    Safe fallback: pass-through if count column is missing.
+    """
+    cam_col = _first_col(
+        df, "n_cameras", "num_cameras", "unique_cameras",
+        "n_unique_cameras", "camera_count"
+    )
+    n0 = len(df)
+    if cam_col:
+        out = df.loc[df[cam_col].astype(int) >= min_cameras].reset_index(drop=True)
+    else:
+        tqdm.write("[filter_multi_camera] No camera-count column found; passing through.")
+        out = df.reset_index(drop=True)
+
+    if show_tqdm:
+        tqdm.write(f"[filter_multi_camera] kept {len(out)}/{n0}")
+    return out
+
+
+def filter_periodic_candidates(
+    df: pd.DataFrame,
+    *,
+    max_power: float = 0.5,
+    min_period: float | None = None,
+    max_period: float | None = None,
+    show_tqdm: bool = False,
+) -> pd.DataFrame:
+    """
+    Remove strongly periodic sources (likely non-dippers).
+    Expected precomputed columns if available:
+      - power: 'ls_max_power' or 'max_power'
+      - best period: 'best_period', 'ls_best_period', or 'period_best' (days)
+    Behavior:
+      - If power column exists: keep rows with power <= max_power.
+      - If period bounds provided AND best-period column exists: enforce bounds.
+    Safe fallback: pass-through if nothing to test.
+    """
+    power_col = _first_col(df, "ls_max_power", "max_power")
+    per_col = _first_col(df, "best_period", "ls_best_period", "period_best")
+    n0 = len(df)
+    mask = pd.Series(True, index=df.index)
+
+    if power_col:
+        mask &= df[power_col].astype(float) <= float(max_power)
+    else:
+        tqdm.write("[filter_periodic_candidates] No power column found; skipping power filter.")
+
+    if (min_period is not None or max_period is not None) and per_col:
+        if min_period is not None:
+            mask &= df[per_col].astype(float) >= float(min_period)
+        if max_period is not None:
+            mask &= df[per_col].astype(float) <= float(max_period)
+    elif (min_period is not None or max_period is not None) and not per_col:
+        tqdm.write("[filter_periodic_candidates] No best-period column found; skipping period bounds.")
+
+    out = df.loc[mask].reset_index(drop=True)
+
+    if show_tqdm:
+        tqdm.write(f"[filter_periodic_candidates] kept {len(out)}/{n0}")
+    return out
+
+
+def filter_sparse_lightcurves(
+    df: pd.DataFrame,
+    *,
+    min_time_span: float = 200.0,
+    min_points_per_day: float = 0.05,
+    show_tqdm: bool = False,
+) -> pd.DataFrame:
+    """
+    Remove sparsely sampled targets.
+    Expected columns if available:
+      - 'time_span_days'/'timespan_days' (float)
+      - 'points_per_day'/'ppd'/'n_per_day' (float)
+    Safe fallback: pass-through if metrics missing.
+    """
+    span_col = _first_col(df, "time_span_days", "timespan_days", "t_span_days", "t_span")
+    ppd_col = _first_col(df, "points_per_day", "ppd", "n_per_day")
+
+    n0 = len(df)
+    if span_col and ppd_col:
+        mask = (df[span_col].astype(float) >= float(min_time_span)) & \
+               (df[ppd_col].astype(float) >= float(min_points_per_day))
+        out = df.loc[mask].reset_index(drop=True)
+    elif span_col:
+        tqdm.write("[filter_sparse_lightcurves] No points/day column; using span only.")
+        mask = df[span_col].astype(float) >= float(min_time_span)
+        out = df.loc[mask].reset_index(drop=True)
+    elif ppd_col:
+        tqdm.write("[filter_sparse_lightcurves] No span column; using points/day only.")
+        mask = df[ppd_col].astype(float) >= float(min_points_per_day)
+        out = df.loc[mask].reset_index(drop=True)
+    else:
+        tqdm.write("[filter_sparse_lightcurves] No sparsity metrics found; passing through.")
+        out = df.reset_index(drop=True)
+
+    if show_tqdm:
+        tqdm.write(f"[filter_sparse_lightcurves] kept {len(out)}/{n0}")
+    return out
+
+
+def _sigma_ok_for_row(asas_sn_id: str, raw_path: str | Path, min_sigma: float) -> bool:
+    """
+    Compute whether max dip depth >= min_sigma * median 1-sigma scatter for this source.
+    Uses your previously commented logic.
+    """
+    try:
+        raw_df = read_lc_raw(str(asas_sn_id), str(Path(raw_path).parent))
+        scatter_vals = (raw_df["sig1_high"] - raw_df["sig1_low"]).to_numpy(dtype=float)
+        finite = scatter_vals[np.isfinite(scatter_vals)]
+        if finite.size == 0:
+            return False
+        scatter = np.nanmedian(finite)
+        return bool(np.isfinite(scatter) and scatter > 0.0 and scatter)
+    except Exception:
+        # If loading fails, be conservative: drop
+        return False
+
+
+def filter_sigma_resid(
+    df: pd.DataFrame,
+    *,
+    min_sigma: float = 3.0,
+    n_helpers: int = 1,
+    show_tqdm: bool = False,
+) -> pd.DataFrame:
+    """
+    Keep rows where (max dip depth / median-1σ-scatter) >= min_sigma in either band.
+    Requires columns: 'asas_sn_id', 'raw_path' and depth columns 'g_max_depth'/'v_max_depth'.
+    Falls back to pass-through if required pieces are missing.
+    """
+    need_cols = {"asas_sn_id", "raw_path"}
+    depth_g = _first_col(df, "g_max_depth", "g_depth_max")
+    depth_v = _first_col(df, "v_max_depth", "v_depth_max")
+
+    if not need_cols.issubset(df.columns) or (not depth_g and not depth_v):
+        tqdm.write("[filter_sigma_resid] Missing asas_sn_id/raw_path or depth columns; passing through.")
+        return df.reset_index(drop=True)
+
+    # Precompute which rows are OK by estimating scatter and comparing depths.
+    rows = df.reset_index(drop=False)  # keep original index for mask
+    idx_name = "index"
+
+    # Worker: compute scatter and compare to depths for a single row
+    def _eval_row(row) -> tuple[int, bool]:
+        try:
+            raw_ok = _sigma_ok_for_row(str(row["asas_sn_id"]), Path(row["raw_path"]), min_sigma)
+            if not raw_ok:
+                return (int(row[idx_name]), False)
+            scatter_df = read_lc_raw(str(row["asas_sn_id"]), str(Path(row["raw_path"]).parent))
+            scatter_vals = (scatter_df["sig1_high"] - scatter_df["sig1_low"]).to_numpy(dtype=float)
+            finite = scatter_vals[np.isfinite(scatter_vals)]
+            if finite.size == 0:
+                return (int(row[idx_name]), False)
+            scatter = np.nanmedian(finite)
+            ok = False
+            if depth_g and pd.notna(row[depth_g]):
+                ok |= (float(row[depth_g]) / scatter) >= float(min_sigma)
+            if depth_v and pd.notna(row[depth_v]):
+                ok |= (float(row[depth_v]) / scatter) >= float(min_sigma)
+            return (int(row[idx_name]), bool(ok))
+        except Exception:
+            return (int(row[idx_name]), False)
+
+    it = rows.itertuples(index=False)
+    results = {}
+    if n_helpers and n_helpers > 1:
+        with ProcessPoolExecutor(max_workers=n_helpers) as ex:
+            futs = [ex.submit(_eval_row, r._asdict()) for r in it]
+            prog = tqdm(total=len(futs), desc="filter_sigma_resid", leave=False) if show_tqdm else None
+            for f in as_completed(futs):
+                i, ok = f.result()
+                results[i] = ok
+                if prog: prog.update(1)
+            if prog: prog.close()
+    else:
+        prog = tqdm(total=len(df), desc="filter_sigma_resid", leave=False) if show_tqdm else None
+        for r in it:
+            i, ok = _eval_row(r._asdict())
+            results[i] = ok
+            if prog: prog.update(1)
+        if prog: prog.close()
+
+    mask = rows[idx_name].map(results).astype(bool)
+    out = df.loc[mask.values].reset_index(drop=True)
+    if show_tqdm:
+        tqdm.write(f"[filter_sigma_resid] kept {len(out)}/{len(df)}")
+    return out
+
 def filter_csv(
     csv_path: str | Path,
-    *,
     out_csv_path: str | Path | None = None,
     band: str = "either",
     asassn_csv: str | Path = "results_crossmatch/asassn_index_masked_concat_cleaned_20250926_1557.csv",
@@ -237,9 +486,8 @@ def filter_csv(
     skip_dip_dom: bool = False,
     skip_multi_camera: bool = False,
     skip_periodic: bool = False,
-    skip_sparse: bool = False,
-    skip_sigma: bool = False,
-    # new knobs for parallel chunking and tqdm layout
+    skip_sparse: bool = True,   # not used for now
+    skip_sigma: bool = True,    # not used for now
     chunk_size: int | None = None,
     tqdm_position_base: int = 0,
 ) -> pd.DataFrame:
@@ -257,31 +505,38 @@ def filter_csv(
 
     if not skip_dip_dom:
         plan.append(("dip_dominated", "filter_dip_dominated", {"min_dip_fraction": min_dip_fraction}))
+
     if not skip_multi_camera:
         plan.append(("multi_camera", "filter_multi_camera", {"min_cameras": min_cameras}))
+
     if not skip_periodic:
         plan.append(("periodic", "filter_periodic_candidates", {
             "max_power": max_power, "min_period": min_period, "max_period": max_period
         }))
+
     if not skip_sparse:
         plan.append(("sparse", "filter_sparse_lightcurves", {
             "min_time_span": min_time_span, "min_points_per_day": min_points_per_day
         }))
+
     if not skip_sigma:
         plan.append(("sigma", "filter_sigma_resid", {"min_sigma": min_sigma}))
 
     # Optional “pre” join to ASAS-SN catalog if you want it upstream of other filters:
-    # (uncomment if desired as an explicit step)
     # plan.insert(0, ("bns_join", "filter_bns", {"asassn_csv": asassn_csv}))
 
     # Outer bar over steps
     with tqdm(total=len(plan), desc="filter_csv (steps)", position=tqdm_position_base, leave=False) as outer:
         for i, (label, func_name, kwargs) in enumerate(plan):
-            # Merge step-specific kwargs that may need global params:
+            # Merge step-specific kwargs that may need global params (no ** unpacking)
             if func_name == "filter_bns":
-                kwargs = {**kwargs, "asassn_csv": asassn_csv}
+                kwargs = dict(kwargs)
+                kwargs["asassn_csv"] = asassn_csv
             elif func_name == "vsx_class_extract":
-                kwargs = {**kwargs, "vsx_csv": vsx_csv, "match_radius_arcsec": match_radius_arcsec}
+                kwargs = dict(kwargs)
+                kwargs["vsx_csv"] = vsx_csv
+                kwargs["match_radius_arcsec"] = match_radius_arcsec
+
             # n_helpers handled here globally — individual functions need not know about parallelism
             df_filtered = _run_step_parallel(
                 df_filtered,
