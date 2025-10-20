@@ -80,20 +80,16 @@ def process_record_naive(
     record: dict,
     baseline_kwargs: dict,
     *,
+    baseline_func=per_camera_median_baseline,
     metrics_baseline_func=None,
     metrics_dip_threshold=0.3,
 ):
     """
-    Worker function to process a single ASAS-SN target. Returns a dict row.
+    worker function that processes a single lc
     """
     baseline_kwargs = dict(baseline_kwargs)
 
-    metrics_kwargs = {"dip_threshold": metrics_dip_threshold}
-    if metrics_baseline_func is not None:
-        metrics_kwargs["baseline_func"] = metrics_baseline_func
-    for key in ("window", "min_points"):
-        if key in baseline_kwargs:
-            metrics_kwargs[key] = baseline_kwargs[key]
+    metrics_baseline = metrics_baseline_func or baseline_func
 
     asn = record["asas_sn_id"]
     dfg, dfv = read_lc_dat(asn, record["lc_dir"])
@@ -105,14 +101,19 @@ def process_record_naive(
     if not dfg.empty:
         dfg = clean_lc(dfg)
         dfg_baseline = (
-            per_camera_median_baseline(dfg, **baseline_kwargs)
+            baseline_func(dfg, **baseline_kwargs)
             .sort_values("JD")
             .reset_index(drop=True)
         )
         peaks_g, mean_g, n_g = naive_peak_search(dfg_baseline)
         jd_first = float(dfg_baseline["JD"].iloc[0])
         jd_last = float(dfg_baseline["JD"].iloc[-1])
-        g_stats = run_metrics(dfg, **metrics_kwargs)
+        g_stats = run_metrics(
+            dfg,
+            baseline_func=metrics_baseline,
+            dip_threshold=metrics_dip_threshold,
+            **baseline_kwargs,
+        )
         g_metrics = {f"g_{k}": v for k, v in g_stats.items()}
         g_metrics["g_is_dip_dominated"] = bool(is_dip_dominated(g_stats))
         peak_idx_g = peaks_g.to_numpy(dtype=int) if n_g > 0 else np.array([], dtype=int)
@@ -128,7 +129,7 @@ def process_record_naive(
     if not dfv.empty:
         dfv = clean_lc(dfv)
         dfv_baseline = (
-            per_camera_median_baseline(dfv, **baseline_kwargs)
+            baseline_func(dfv, **baseline_kwargs)
             .sort_values("JD")
             .reset_index(drop=True)
         )
@@ -137,7 +138,12 @@ def process_record_naive(
             jd_first = float(dfv_baseline["JD"].iloc[0])
         if np.isnan(jd_last):
             jd_last = float(dfv_baseline["JD"].iloc[-1])
-        v_stats = run_metrics(dfv, **metrics_kwargs)
+        v_stats = run_metrics(
+            dfv,
+            baseline_func=metrics_baseline,
+            dip_threshold=metrics_dip_threshold,
+            **baseline_kwargs,
+        )
         v_metrics = {f"v_{k}": v for k, v in v_stats.items()}
         v_metrics["v_is_dip_dominated"] = bool(is_dip_dominated(v_stats))
         peak_idx_v = peaks_v.to_numpy(dtype=int) if n_v > 0 else np.array([], dtype=int)
@@ -203,6 +209,7 @@ def naive_dip_finder(
     n_workers=None,
     chunk_size=250000,
     max_inflight=None,
+    baseline_func=per_camera_median_baseline,
     metrics_baseline_func=None,
     metrics_dip_threshold=0.3,
     **baseline_kwargs,
@@ -268,6 +275,7 @@ def naive_dip_finder(
                         process_record_naive,
                         rec,
                         baseline_kwargs,
+                        baseline_func=baseline_func,
                         metrics_baseline_func=metrics_baseline_func,
                         metrics_dip_threshold=metrics_dip_threshold,
                     )

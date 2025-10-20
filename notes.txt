@@ -5,6 +5,13 @@ sahadeva:   249.89 GiB of RAM and 80 processors
 titipu:     250.03 GiB of RAM and 80 processors
 
 
+12_12.5 takes ~
+12.5_13 takes ~
+13_13.5 takes ~ 2.75 hrs to run
+13.5_14 takes ~ 7.5 hrs to run ?
+14_14.5 takes ~ 6.5 hrs to run
+14.5_15 takes ~
+
 PIPELINE REPRODUCES BRAYDEN'S CANDIDATES?
 
 Source           Source ID        Category                    Detected?   Detection Details         RA [deg]    DEC [deg]     Search Method   # of Dips   Max Duration [days]   Start of Most Recent Dip   Max Depth [mag]   Mean g [mag]   Mean Abs G [mag]   GBP−GRP [mag]    RVamp [km/s]     RUWE      Distance [pc]
