@@ -5,10 +5,10 @@ import os
 from datetime import datetime
 from concurrent.futures import ProcessPoolExecutor
 
-from lc_baseline import per_camera_baseline
+from lc_baseline import per_camera_median_baseline, per_camera_mean_baseline, global_mean_baseline
 from lc_utils import read_lc_dat, read_lc_raw, match_index_to_lc
 from df_utils import naive_peak_search
-from lc_metrics import run_metrics_pcb, is_dip_dominated
+from lc_metrics import run_metrics, is_dip_dominated
 
 lc_dir_masked = "/data/poohbah/1/assassin/lenhart/code/calder/lcsv2_masked"
 
@@ -76,11 +76,25 @@ def empty_metrics(prefix):
         out[f"{prefix}_is_dip_dominated"] = False
         return out
 
-# naive dip finder that works one bin at a time
-def process_record_naive(record: dict, pcb_kwargs: dict):
+def process_record_naive(
+    record: dict,
+    baseline_kwargs: dict,
+    *,
+    metrics_baseline_func=None,
+    metrics_dip_threshold=0.3,
+):
     """
     Worker function to process a single ASAS-SN target. Returns a dict row.
     """
+    baseline_kwargs = dict(baseline_kwargs)
+
+    metrics_kwargs = {"dip_threshold": metrics_dip_threshold}
+    if metrics_baseline_func is not None:
+        metrics_kwargs["baseline_func"] = metrics_baseline_func
+    for key in ("window", "min_points"):
+        if key in baseline_kwargs:
+            metrics_kwargs[key] = baseline_kwargs[key]
+
     asn = record["asas_sn_id"]
     dfg, dfv = read_lc_dat(asn, record["lc_dir"])
     raw_df = read_lc_raw(asn, record["lc_dir"])
@@ -90,20 +104,20 @@ def process_record_naive(record: dict, pcb_kwargs: dict):
 
     if not dfg.empty:
         dfg = clean_lc(dfg)
-        dfg_pcb = (
-            per_camera_baseline(dfg, **pcb_kwargs)
+        dfg_baseline = (
+            per_camera_median_baseline(dfg, **baseline_kwargs)
             .sort_values("JD")
             .reset_index(drop=True)
         )
-        peaks_g, mean_g, n_g = naive_peak_search(dfg_pcb)
-        jd_first = float(dfg_pcb["JD"].iloc[0])
-        jd_last = float(dfg_pcb["JD"].iloc[-1])
-        g_stats = run_metrics_pcb(dfg, **pcb_kwargs)
+        peaks_g, mean_g, n_g = naive_peak_search(dfg_baseline)
+        jd_first = float(dfg_baseline["JD"].iloc[0])
+        jd_last = float(dfg_baseline["JD"].iloc[-1])
+        g_stats = run_metrics(dfg, **metrics_kwargs)
         g_metrics = {f"g_{k}": v for k, v in g_stats.items()}
         g_metrics["g_is_dip_dominated"] = bool(is_dip_dominated(g_stats))
         peak_idx_g = peaks_g.to_numpy(dtype=int) if n_g > 0 else np.array([], dtype=int)
         g_peaks_idx = peak_idx_g.tolist()
-        g_peaks_jd = dfg_pcb["JD"].values[peak_idx_g].tolist() if peak_idx_g.size else []
+        g_peaks_jd = dfg_baseline["JD"].values[peak_idx_g].tolist() if peak_idx_g.size else []
     else:
         dfg = pd.DataFrame()
         peaks_g, mean_g, n_g = (pd.Series(dtype=int), np.nan, 0)
@@ -113,22 +127,22 @@ def process_record_naive(record: dict, pcb_kwargs: dict):
 
     if not dfv.empty:
         dfv = clean_lc(dfv)
-        dfv_pcb = (
-            per_camera_baseline(dfv, **pcb_kwargs)
+        dfv_baseline = (
+            per_camera_median_baseline(dfv, **baseline_kwargs)
             .sort_values("JD")
             .reset_index(drop=True)
         )
-        peaks_v, mean_v, n_v = naive_peak_search(dfv_pcb)
+        peaks_v, mean_v, n_v = naive_peak_search(dfv_baseline)
         if np.isnan(jd_first):
-            jd_first = float(dfv_pcb["JD"].iloc[0])
+            jd_first = float(dfv_baseline["JD"].iloc[0])
         if np.isnan(jd_last):
-            jd_last = float(dfv_pcb["JD"].iloc[-1])
-        v_stats = run_metrics_pcb(dfv, **pcb_kwargs)
+            jd_last = float(dfv_baseline["JD"].iloc[-1])
+        v_stats = run_metrics(dfv, **metrics_kwargs)
         v_metrics = {f"v_{k}": v for k, v in v_stats.items()}
         v_metrics["v_is_dip_dominated"] = bool(is_dip_dominated(v_stats))
         peak_idx_v = peaks_v.to_numpy(dtype=int) if n_v > 0 else np.array([], dtype=int)
         v_peaks_idx = peak_idx_v.tolist()
-        v_peaks_jd = dfv_pcb["JD"].values[peak_idx_v].tolist() if peak_idx_v.size else []
+        v_peaks_jd = dfv_baseline["JD"].values[peak_idx_v].tolist() if peak_idx_v.size else []
     else:
         dfv = pd.DataFrame()
         peaks_v, mean_v, n_v = (pd.Series(dtype=int), np.nan, 0)
@@ -177,8 +191,9 @@ def process_record_naive(record: dict, pcb_kwargs: dict):
 
     return row
 
+
+# naive dip finder that works one bin at a time
 def naive_dip_finder(
-    # dip finder still uses naive peak search and is thus still naive
     index_path="/data/poohbah/1/assassin/lenhart/code/calder/lcsv2_masked/",
     lc_path="/data/poohbah/1/assassin/rowan.90/lcsv2",
     mag_bins=('12_12.5','12.5_13','13_13.5','13.5_14','14_14.5','14.5_15'),
@@ -188,7 +203,9 @@ def naive_dip_finder(
     n_workers=None,
     chunk_size=250000,
     max_inflight=None,
-    **pcb_kwargs,
+    metrics_baseline_func=None,
+    metrics_dip_threshold=0.3,
+    **baseline_kwargs,
 ):
     os.makedirs(out_dir, exist_ok=True)
     timestamp = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S%z")
@@ -246,7 +263,15 @@ def naive_dip_finder(
             ):
                 if not rec.get("found", False):
                     continue
-                pending.add(ex.submit(process_record_naive, rec, pcb_kwargs))
+                pending.add(
+                    ex.submit(
+                        process_record_naive,
+                        rec,
+                        baseline_kwargs,
+                        metrics_baseline_func=metrics_baseline_func,
+                        metrics_dip_threshold=metrics_dip_threshold,
+                    )
+                )
                 scheduled += 1
                 # grow total dynamically for ETA
                 pbar.total = scheduled

@@ -3,8 +3,10 @@ from pathlib import Path
 
 from lc_dips import naive_dip_finder, MAG_BINS
 
+
 def main(mag_bins, **kwargs):
     naive_dip_finder(mag_bins=mag_bins, **kwargs)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run naive_dip_finder across bins.")
@@ -17,14 +19,47 @@ if __name__ == "__main__":
     )
     parser.add_argument("--out-dir", default="./peak_results")
     parser.add_argument("--format", choices=("parquet", "csv"), default="parquet")
-    parser.add_argument("--n-workers", type=int, default=None, help="Parallel workers (processes). Default: min(32, CPU-2)")
-    parser.add_argument("--chunk-size", type=int, default=250000, help="Rows per CSV flush")
+    parser.add_argument(
+        "--n-workers",
+        type=int,
+        default=None,
+        help="Parallel workers (processes). Default: min(32, CPU-2)",
+    )
+    parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=250000,
+        help="Rows per CSV flush",
+    )
+    parser.add_argument(
+        "--metrics-baseline",
+        dest="metrics_baseline",
+        default=None,
+        help="Baseline function import path (e.g. 'calder.lc_baseline:global_mean_baseline'); omit for default.",
+    )
+    parser.add_argument(
+        "--metrics-dip-threshold",
+        dest="metrics_dip_threshold",
+        type=float,
+        default=0.3,
+        help="Dip threshold used by run_metrics / run_metrics_pcb.",
+    )
+
     args = parser.parse_args()
     bins = args.mag_bins or MAG_BINS
+
+    metrics_baseline_func = None
+    if args.metrics_baseline:
+        module_path, func_name = args.metrics_baseline.split(":")
+        module = __import__(module_path, fromlist=[func_name])
+        metrics_baseline_func = getattr(module, func_name)
+
     main(
         bins,
         out_dir=args.out_dir,
         out_format=args.format,
         n_workers=args.n_workers,
         chunk_size=args.chunk_size,
+        metrics_baseline_func=metrics_baseline_func,
+        metrics_dip_threshold=args.metrics_dip_threshold,
     )

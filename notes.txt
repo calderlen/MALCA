@@ -40,6 +40,7 @@ J223332+565552   60130040391      Single Eclipse Binaries     YES         mag_bi
 J183210-173432   317827964025     Single Eclipse Binaries     NO          —                          278.04249   -17.57545     Pipeline        1           41.0                  02/09/2018                 0.31              12.72          -1.78             2.27              0.95                   1942+123−85
 
 
+8
 
 
 Brayden's candidates matching to the raw vsx catalog, so the the other 14 are not in the vsx catalog

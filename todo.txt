@@ -1,7 +1,7 @@
 todo
 
 - rename peak_results -> results_peaks
-- rename peak_results_pcb -> results_peaks_pcb
+- rename peak_results_baseline -> results_peaks_baseline
 
 
 - get SSH for home desktop added to the server/copy private key from work desktop to home desktop so that you can work from home on the research

@@ -1,17 +1,9 @@
 import numpy as np
 import pandas as pd
 #from celerite2 import terms, GaussianProcess
-from scipy.optimize import minimize
+#from scipy.optimize import minimize
 
-# need to get the vsx catalog
-# get the asassn id of each surviving lc after crossmatchign with vsx
-# load the asassn_id's into a a list
-# then for all the asassn_id's, append the v and g mag lightcurves to them
-# probably need to rewrite read_lightcurve to account for this
-
-#df_v, df_g = read_lightcurve(asassn_id, path)
-
-
+# --- helpers ---
 def rolling_time_median(jd, mag, days=300.0, min_points=10, min_days=30.0):
     """
     Rolling median in time (default 300 d). Requires at least min_points finite magnitudes within the window; halves the window down to min_days
@@ -33,8 +25,109 @@ def rolling_time_median(jd, mag, days=300.0, min_points=10, min_days=30.0):
             window /= 2.0  # halve the window and try again
     return out
 
+# --- baseline functions ---
+def global_mean_baseline(
+    df,
+    t_col="JD",         # this input is unnecessary, but just copying schema of per_camera_median_baseline for now
+    mag_col="mag",
+    err_col="error",
+):
+    df_out = df.copy()
+    for col in ("baseline", "resid", "sigma_resid"):
+        if col not in df_out.columns:
+            df_out[col] = np.nan
 
-def per_camera_baseline(
+    m = df_out.loc[:, mag_col].to_numpy(dtype=float)
+    e = df_out.loc[:, err_col].to_numpy(dtype=float)
+
+    baseline = np.full_like(m, np.nan, dtype=float)
+    resid = np.full_like(m, np.nan, dtype=float)
+
+    good = np.isfinite(m)
+    if good.any():
+        mean_mag = float(np.mean(m[good]))
+        baseline[:] = mean_mag
+        resid = m - mean_mag
+
+    resid_good = np.isfinite(resid)
+    if resid_good.any():
+        resid_vals = resid[resid_good]
+        med_resid = float(np.median(resid_vals))
+        mad = float(1.4826 * np.median(np.abs(resid_vals - med_resid)))
+    else:
+        med_resid = np.nan
+        mad = np.nan
+
+    e_good = np.isfinite(e)
+    e_med = float(np.median(e[e_good])) if e_good.any() else np.nan
+
+    mad_num = mad if np.isfinite(mad) else 0.0
+    e_med_num = e_med if np.isfinite(e_med) else 0.0
+    robust_std = float(np.sqrt(mad_num**2 + e_med_num**2))
+    robust_std = max(robust_std, 1e-6)
+
+    sigma_resid = resid / robust_std
+
+    df_out.loc[:, "baseline"] = baseline
+    df_out.loc[:, "resid"] = resid
+    df_out.loc[:, "sigma_resid"] = sigma_resid
+
+    return df_out
+
+
+def per_camera_mean_baseline(
+    df,
+    t_col="JD",         # this input is unnecessary, but just copying schema of per_camera_median_baseline for now
+    mag_col="mag",
+    err_col="error",
+    cam_col="camera#",
+):
+    df_out = df.copy()
+    for col in ("baseline", "resid", "sigma_resid"):
+        if col not in df_out.columns:
+            df_out[col] = np.nan
+
+    for _, sub in df_out.groupby(cam_col, group_keys=False):
+        idx = sub.index
+
+        m = df_out.loc[idx, mag_col].to_numpy(dtype=float)
+        e = df_out.loc[idx, err_col].to_numpy(dtype=float)
+
+        baseline = np.full_like(m, np.nan, dtype=float)
+        resid = np.full_like(m, np.nan, dtype=float)
+
+        good = np.isfinite(m)
+        if good.any():
+            cam_mean = float(np.mean(m[good]))
+            baseline[:] = cam_mean
+            resid = m - cam_mean
+
+        resid_good = np.isfinite(resid)
+        if resid_good.any():
+            resid_vals = resid[resid_good]
+            med_resid = float(np.median(resid_vals))
+            mad = float(1.4826 * np.median(np.abs(resid_vals - med_resid)))
+        else:
+            med_resid = np.nan
+            mad = np.nan
+
+        e_good = np.isfinite(e)
+        e_med = float(np.median(e[e_good])) if e_good.any() else np.nan
+
+        mad_num = mad if np.isfinite(mad) else 0.0
+        e_med_num = e_med if np.isfinite(e_med) else 0.0
+        robust_std = float(np.sqrt(mad_num**2 + e_med_num**2))
+        robust_std = max(robust_std, 1e-6)
+
+        sigma_resid = resid / robust_std
+
+        df_out.loc[idx, "baseline"] = baseline
+        df_out.loc[idx, "resid"] = resid
+        df_out.loc[idx, "sigma_resid"] = sigma_resid
+
+    return df_out
+
+def per_camera_median_baseline(
     df,
     days=300.0,
     min_points=10,
@@ -88,6 +181,12 @@ def per_camera_baseline(
         df_out.loc[idx, "sigma_resid"] = sigma_resid
 
     return df_out
+
+
+
+
+
+
 
 
 #def fit_gp_baseline(
