@@ -64,6 +64,12 @@ def _run_step_sequential(
     )
     return df_out
 
+def _first_col(df: pd.DataFrame, *candidates: str) -> Optional[str]:
+    """Return the first existing column name from candidates, or None."""
+    for c in candidates:
+        if c in df.columns:
+            return c
+    return None
 
 # filtration functions
 
@@ -200,17 +206,6 @@ def vsx_class_extract(
         pbar.update(1)
 
     return df_out
-
-
-
-
-def _first_col(df: pd.DataFrame, *candidates: str) -> Optional[str]:
-    """Return the first existing column name from candidates, or None."""
-    for c in candidates:
-        if c in df.columns:
-            return c
-    return None
-
 
 def filter_dip_dominated(
     df: pd.DataFrame,
@@ -516,7 +511,7 @@ def filter_csv(
       - outer tqdm over enabled steps
       - inner tqdm per step
     """
-    # Step 0: seed set (parallelizable)
+
     df_filtered = candidates_with_peaks_naive(
         csv_path,
         write_csv=False,
