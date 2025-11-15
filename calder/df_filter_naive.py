@@ -71,6 +71,32 @@ def _first_col(df: pd.DataFrame, *candidates: str) -> Optional[str]:
             return c
     return None
 
+
+def _log_rejections(
+    df_before: pd.DataFrame,
+    df_after: pd.DataFrame,
+    filter_name: str,
+    log_csv: str | Path | None,
+) -> None:
+    """Append IDs filtered out by a step to a CSV log if requested."""
+    if log_csv is None or "asas_sn_id" not in df_before.columns:
+        return
+
+    before_ids = set(df_before["asas_sn_id"].astype(str))
+    after_ids = set(df_after["asas_sn_id"].astype(str)) if "asas_sn_id" in df_after.columns else set()
+    rejected = sorted(before_ids - after_ids)
+    if not rejected:
+        return
+
+    log_path = Path(log_csv)
+    if not log_path.is_absolute():
+        parts = log_path.parts
+        if not parts or parts[0] != "logs":
+            log_path = Path("logs") / log_path
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    df_log = pd.DataFrame({"asas_sn_id": rejected, "filter": filter_name})
+    df_log.to_csv(log_path, mode="a", header=not log_path.exists(), index=False)
+
 # filtration functions
 
 def candidates_with_peaks_naive(
@@ -153,6 +179,7 @@ def candidates_with_peaks_naive(
 def filter_bns(
     df: pd.DataFrame,
     asassn_csv: str | Path = "results_crossmatch/asassn_index_masked_concat_cleaned_20250926_1557.csv",
+    rejected_log_csv: str | Path | None = None,
 ):
     """
     keep only rows with matching ASAS-SN index files, implicitly filtering out bright nearby stars
@@ -167,12 +194,15 @@ def filter_bns(
         ]
         cols_available = ["asas_sn_id"] + [c for c in cols_to_attach if c in catalog.columns]
 
+        df_ids = df.assign(asas_sn_id=df["asas_sn_id"].astype(str))
         df_out = (
-            df.assign(asas_sn_id=df["asas_sn_id"].astype(str))
+            df_ids
             .merge(catalog[cols_available], on="asas_sn_id", how="inner")
         )
         df_out = df_out.dropna(subset=[c for c in ["pm_ra", "pm_dec"] if c in df_out.columns]).reset_index(drop=True)
         pbar.update(1)
+
+    _log_rejections(df_ids, df_out, "filter_bns", rejected_log_csv)
 
     return df_out
 
@@ -210,6 +240,7 @@ def filter_dip_dominated(
     *,
     min_dip_fraction: float = 0.66,
     show_tqdm: bool = False,
+    rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
     """
     Keep targets whose dip fraction is >= min_dip_fraction in at least one band.
@@ -251,6 +282,7 @@ def filter_dip_dominated(
 
     if show_tqdm:
         tqdm.write(f"[filter_dip_dominated] kept {len(out)}/{n0}")
+    _log_rejections(df, out, "filter_dip_dominated", rejected_log_csv)
     if pbar:
         pbar.update(1)
         pbar.close()
@@ -262,6 +294,7 @@ def filter_multi_camera(
     *,
     min_cameras: int = 2,
     show_tqdm: bool = False,
+    rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
     """
     Keep targets observed by >= min_cameras distinct cameras.
@@ -287,6 +320,7 @@ def filter_multi_camera(
 
     if show_tqdm:
         tqdm.write(f"[filter_multi_camera] kept {len(out)}/{n0}")
+    _log_rejections(df, out, "filter_multi_camera", rejected_log_csv)
     if pbar:
         pbar.update(1)
         pbar.close()
@@ -300,6 +334,7 @@ def filter_periodic_candidates(
     min_period: float | None = None,
     max_period: float | None = None,
     show_tqdm: bool = False,
+    rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
     """
     Remove strongly periodic sources (likely non-dippers).
@@ -345,6 +380,7 @@ def filter_periodic_candidates(
 
     if show_tqdm:
         tqdm.write(f"[filter_periodic_candidates] kept {len(out)}/{n0}")
+    _log_rejections(df, out, "filter_periodic_candidates", rejected_log_csv)
     if pbar:
         pbar.update(1)
         pbar.close()
@@ -357,6 +393,7 @@ def filter_sparse_lightcurves(
     min_time_span: float = 200.0,
     min_points_per_day: float = 0.05,
     show_tqdm: bool = False,
+    rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
     """
     Remove sparsely sampled targets.
@@ -394,6 +431,7 @@ def filter_sparse_lightcurves(
 
     if show_tqdm:
         tqdm.write(f"[filter_sparse_lightcurves] kept {len(out)}/{n0}")
+    _log_rejections(df, out, "filter_sparse_lightcurves", rejected_log_csv)
     if pbar:
         pbar.update(1)
         pbar.close()
@@ -431,6 +469,7 @@ def box_filter(
         "v_std_mag",
     ),
     show_tqdm: bool = False,
+    rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
     """
     Apply a simple rectangular (\"box\") filter on dip counts, peak rate, and magnitude scatter.
@@ -472,6 +511,7 @@ def box_filter(
             f"[box_filter] kept {len(out)}/{len(df)} "
             f"(dips in [{min_dips}, {max_dips}], peaks/time <= {max_peaks_per_time}, std <= {max_std_mag})"
         )
+    _log_rejections(df, out, "box_filter", rejected_log_csv)
     return out
 
 
@@ -498,6 +538,7 @@ def filter_sigma_resid(
     *,
     min_sigma: float = 3.0,
     show_tqdm: bool = False,
+    rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
     """
     Keep rows where (max dip depth / median-1σ-scatter) >= min_sigma in either band.
@@ -552,6 +593,7 @@ def filter_sigma_resid(
     out = df.loc[mask.values].reset_index(drop=True)
     if show_tqdm:
         tqdm.write(f"[filter_sigma_resid] kept {len(out)}/{len(df)}")
+    _log_rejections(df, out, "filter_sigma_resid", rejected_log_csv)
     return out
 
 def filter_csv(
@@ -583,6 +625,7 @@ def filter_csv(
     apply_sigma: bool = True,
     seed_workers: int = 1,
     tqdm_position_base: int = 0,
+    rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
     """
     Orchestrates the optional filtering/enrichment steps with:
@@ -605,12 +648,14 @@ def filter_csv(
         plan.append(("dip_dominated", "filter_dip_dominated", {
             "min_dip_fraction": min_dip_fraction,
             "show_tqdm": True,
+            "rejected_log_csv": rejected_log_csv,
         }))
 
     if apply_multi_camera:
         plan.append(("multi_camera", "filter_multi_camera", {
             "min_cameras": min_cameras,
             "show_tqdm": True,
+            "rejected_log_csv": rejected_log_csv,
         }))
 
     if apply_box:
@@ -620,6 +665,7 @@ def filter_csv(
             "max_peaks_per_time": box_max_peaks_per_time,
             "max_std_mag": box_max_std_mag,
             "show_tqdm": True,
+            "rejected_log_csv": rejected_log_csv,
         }))
 
     if apply_sparse:
@@ -627,15 +673,20 @@ def filter_csv(
             "min_time_span": min_time_span,
             "min_points_per_day": min_points_per_day,
             "show_tqdm": True,
+            "rejected_log_csv": rejected_log_csv,
         }))
 
     if apply_bns:
-        plan.append(("bns_join", "filter_bns", {"asassn_csv": asassn_csv}))
+        plan.append(("bns_join", "filter_bns", {
+            "asassn_csv": asassn_csv,
+            "rejected_log_csv": rejected_log_csv,
+        }))
 
     if apply_sigma:
         plan.append(("sigma", "filter_sigma_resid", {
             "min_sigma": min_sigma,
             "show_tqdm": True,
+            "rejected_log_csv": rejected_log_csv,
         }))
 
     if apply_vsx_class:
@@ -649,6 +700,7 @@ def filter_csv(
             "min_period": min_period,
             "max_period": max_period,
             "show_tqdm": True,
+            "rejected_log_csv": rejected_log_csv,
         }))
 
     total_steps = len(plan)
