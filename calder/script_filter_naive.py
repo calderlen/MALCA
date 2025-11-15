@@ -6,7 +6,7 @@ import re
 import fnmatch
 import pandas as pd
 
-from df_process_naive import filter_csv
+from df_filter_naive import filter_csv
 
 
 BIN_RE = re.compile(
