@@ -9,7 +9,7 @@ import pandas as pd
 from lc_dips import naive_dip_finder
 
 
-BRAYDEN_CANDIDATES: list[dict[str, object]] = [
+brayden_candidates: list[dict[str, object]] = [
     {"source": "J042214+152530", "source_id": "377957522430", "category": "Dippers", "mag_bin": "13_13.5", "search_method": "Pipeline", "expected_detected": True},
     {"source": "J202402+383938", "source_id": "42950993887", "category": "Dippers", "mag_bin": "13_13.5", "search_method": "Pipeline", "expected_detected": True},
     {"source": "J174328+343315", "source_id": "223339338105", "category": "Dippers", "mag_bin": "13_13.5", "search_method": "Pipeline", "expected_detected": True},
@@ -56,7 +56,7 @@ def _load_manifest_df(manifest_path: Path | str) -> pd.DataFrame:
 
 
 def _dataframe_from_candidates(data: Sequence[Mapping[str, object]] | None = None) -> pd.DataFrame:
-    df = pd.DataFrame(data or BRAYDEN_CANDIDATES).copy()
+    df = pd.DataFrame(data or brayden_candidates).copy()
     df.rename(columns={"Source": "source", "Source ID": "source_id"}, inplace=True)
     df["source_id"] = df["source_id"].astype(str)
     return df
@@ -111,25 +111,22 @@ def build_reproduction_report(
 
     manifest_df = _load_manifest_df(manifest_path) if manifest_path is not None else None
 
-    if candidates is not None:
-        df_targets = _dataframe_from_candidates(candidates)
-    elif manifest_df is not None:
-        df_targets = manifest_df.copy()
-    else:
-        df_targets = _dataframe_from_candidates(None)
+    baseline_candidates = candidates or brayden_candidates
+    df_targets = _dataframe_from_candidates(baseline_candidates)
 
     manifest_subset = None
     if manifest_df is not None:
         manifest_subset = manifest_df[manifest_df["source_id"].isin(df_targets["source_id"])].copy()
-        if "mag_bin" in manifest_subset.columns:
-            df_targets = df_targets.drop(columns=["mag_bin"], errors="ignore").merge(
-                manifest_subset[["source_id", "mag_bin", "lc_dir", "index_num", "index_csv", "dat_path", "dat_exists"]],
-                on="source_id",
-                how="left",
-            )
-
-    if "mag_bin" not in df_targets.columns:
-        df_targets["mag_bin"] = manifest_subset["mag_bin"]
+        if not manifest_subset.empty:
+            cols = [
+                col
+                for col in ["source_id", "mag_bin", "lc_dir", "index_num", "index_csv", "dat_path", "dat_exists"]
+                if col in manifest_subset.columns
+            ]
+            df_targets = df_targets.merge(manifest_subset[cols], on="source_id", how="left")
+            if "mag_bin_x" in df_targets.columns and "mag_bin_y" in df_targets.columns:
+                df_targets["mag_bin"] = df_targets["mag_bin_y"].fillna(df_targets["mag_bin_x"])
+                df_targets = df_targets.drop(columns=["mag_bin_x", "mag_bin_y"])
 
     target_map = _target_map(df_targets)
     records_map = _records_from_manifest(manifest_subset) if manifest_subset is not None else None
@@ -206,10 +203,9 @@ def build_reproduction_report(
 
 
 __all__ = [
-    "BRAYDEN_CANDIDATES",
+    "brayden_candidates",
     "build_reproduction_report",
 ]
-
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
