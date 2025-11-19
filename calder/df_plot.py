@@ -355,7 +355,8 @@ def _plot_lc_with_residuals_df(
     if data.empty:
         raise ValueError("No finite JD/mag values available for plotting.")
 
-    bands = [band for band in (0, 1) if (data["v_g_band"] == band).any()]
+    preferred_order = [1, 0]
+    bands = [band for band in preferred_order if (data["v_g_band"] == band).any()]
     if not bands:
         bands = sorted(data["v_g_band"].dropna().unique())
     if not bands:
@@ -438,6 +439,13 @@ def _plot_lc_with_residuals_df(
         raw_ax.set_ylabel(f"{band_labels.get(band, f'band {band}')} mag")
         resid_ax.set_ylabel("Residual mag")
         resid_ax.set_xlabel("JD (raw)")
+        if col_idx == 0:
+            raw_ax.xaxis.set_label_position("top")
+            raw_ax.set_xlabel("JD (raw)")
+        resid_ax.axhline(0.3, color="black", linestyle="-", linewidth=0.8)
+        resid_ax.axhline(-0.3, color="black", linestyle="-", linewidth=0.8)
+        resid_ax.axhspan(0.3, resid_ax.get_ylim()[1], color="lightgrey", alpha=0.3)
+        resid_ax.axhspan(resid_ax.get_ylim()[0], -0.3, color="lightgrey", alpha=0.3)
         if legend_handles:
             raw_ax.legend(
                 handles=list(legend_handles.values()),
