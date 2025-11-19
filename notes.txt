@@ -48,6 +48,92 @@ J183210-173432   317827964025     Single Eclipse Binaries     NO          —   
 
 
 
+
+
+
+(ASAS-SN) [assassin@ast-sahadeva calder]$ python reproduce_candidates.py --n-workers 20 --manifest lc_manifest.csv --baseline-func lc_baseline:global_mean_baseline
+Bins: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 6/6 [00:09<00:00,  1.56s/bin]
+        source    source_id mag_bin  detected                     detection_details  g_n_peaks  v_n_peaks  matches_expected                                                                        
+J042214+152530 377957522430 13_13.5      True mag_bin=13_13.5; g_peaks=6; v_peaks=2          6          2              True
+J202402+383938  42950993887 13_13.5     False                                     —          0          0             False
+J174328+343315 223339338105 13_13.5      True mag_bin=13_13.5; g_peaks=1; v_peaks=0          1          0              True
+J080327-261620 601296043597 13_13.5      True mag_bin=13_13.5; g_peaks=3; v_peaks=0          3          0             False
+J184916-473251 472447294641 13_13.5      True mag_bin=13_13.5; g_peaks=1; v_peaks=0          1          0              True
+J183153-284827 455267102087 13.5_14     False                                     —          0          0              True
+J070519+061219 266288137752 13_13.5     False                                     —          0          0              True
+J081523-385923 532576686103 13.5_14     False                                     —          0          0              True
+J085816-430955 352187470767 12_12.5     False                                     —          0          0              True
+J114712-621037 609886184506 12.5_13     False                                     —          0          0              True
+J005437+644347  68720274411 13_13.5      True mag_bin=13_13.5; g_peaks=3; v_peaks=0          3          0              True
+J062510-075341 377958261591 13.5_14      True mag_bin=13.5_14; g_peaks=1; v_peaks=0          1          0              True
+J124745-622756 515397118400 13.5_14      True mag_bin=13.5_14; g_peaks=2; v_peaks=0          2          0              True
+J175912-120956 326417831663 13_13.5      True mag_bin=13_13.5; g_peaks=2; v_peaks=1          2          1              True
+J181752-580749 644245387906 12_12.5      True mag_bin=12_12.5; g_peaks=1; v_peaks=0          1          0              True
+J160757-574540 661425129485 13.5_14      True mag_bin=13.5_14; g_peaks=2; v_peaks=0          2          0             False
+J073924-272916 438086977939 13.5_14     False                                     —          0          0             False
+J074007-161608 360777377116 13_13.5      True mag_bin=13_13.5; g_peaks=2; v_peaks=0          2          0              True
+J094848-545959 635655234580 13_13.5      True mag_bin=13_13.5; g_peaks=1; v_peaks=0          1          0              True
+J162209-444247 412317159120 13.5_14      True mag_bin=13.5_14; g_peaks=1; v_peaks=0          1          0              True
+J183606-314826 438086901547 13.5_14      True mag_bin=13.5_14; g_peaks=1; v_peaks=0          1          0              True
+J205245-713514 463856535113 13_13.5      True mag_bin=13_13.5; g_peaks=1; v_peaks=0          1          0              True
+J212132+480140 120259184943 13_13.5      True mag_bin=13_13.5; g_peaks=1; v_peaks=0          1          0              True
+J225702+562312  25770019815 13.5_14      True mag_bin=13.5_14; g_peaks=1; v_peaks=0          1          0              True
+J190316-195739 515396514761 13.5_14      True mag_bin=13.5_14; g_peaks=1; v_peaks=0          1          0              True
+J175602+013135 231929175915 14_14.5     False                                     —          0          0             False
+J073234-200049 335007754417 14.5_15      True mag_bin=14.5_15; g_peaks=4; v_peaks=0          4          0              True
+J223332+565552  60130040391 12.5_13      True mag_bin=12.5_13; g_peaks=2; v_peaks=0          2          0              True
+J183210-173432 317827964025 13_13.5      True mag_bin=13_13.5; g_peaks=1; v_peaks=0          1          0             False
+
+(ASAS-SN) [assassin@ast-sahadeva calder]$ python reproduce_candidates.py --n-workers 20 --manifest lc_manifest.csv --baseline-func lc_baseline:per_camera_mean_baseline
+Bins: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 6/6 [00:13<00:00,  2.18s/bin]
+        source    source_id mag_bin  detected                     detection_details  g_n_peaks  v_n_peaks  matches_expected                                                                        
+J042214+152530 377957522430 13_13.5      True mag_bin=13_13.5; g_peaks=5; v_peaks=2          5          2              True
+J202402+383938  42950993887 13_13.5     False                                     —          0          0             False
+J174328+343315 223339338105 13_13.5      True mag_bin=13_13.5; g_peaks=1; v_peaks=0          1          0              True
+J080327-261620 601296043597 13_13.5      True mag_bin=13_13.5; g_peaks=4; v_peaks=0          4          0             False
+J184916-473251 472447294641 13_13.5      True mag_bin=13_13.5; g_peaks=1; v_peaks=0          1          0              True
+J183153-284827 455267102087 13.5_14     False                                     —          0          0              True
+J070519+061219 266288137752 13_13.5     False                                     —          0          0              True
+J081523-385923 532576686103 13.5_14     False                                     —          0          0              True
+J085816-430955 352187470767 12_12.5     False                                     —          0          0              True
+J114712-621037 609886184506 12.5_13     False                                     —          0          0              True
+J005437+644347  68720274411 13_13.5      True mag_bin=13_13.5; g_peaks=3; v_peaks=0          3          0              True
+J062510-075341 377958261591 13.5_14      True mag_bin=13.5_14; g_peaks=1; v_peaks=0          1          0              True
+J124745-622756 515397118400 13.5_14      True mag_bin=13.5_14; g_peaks=2; v_peaks=0          2          0              True
+J175912-120956 326417831663 13_13.5      True mag_bin=13_13.5; g_peaks=2; v_peaks=1          2          1              True
+J181752-580749 644245387906 12_12.5      True mag_bin=12_12.5; g_peaks=1; v_peaks=0          1          0              True
+J160757-574540 661425129485 13.5_14      True mag_bin=13.5_14; g_peaks=2; v_peaks=0          2          0             False
+J073924-272916 438086977939 13.5_14     False                                     —          0          0             False
+J074007-161608 360777377116 13_13.5      True mag_bin=13_13.5; g_peaks=2; v_peaks=0          2          0              True
+J094848-545959 635655234580 13_13.5      True mag_bin=13_13.5; g_peaks=1; v_peaks=0          1          0              True
+J162209-444247 412317159120 13.5_14      True mag_bin=13.5_14; g_peaks=1; v_peaks=0          1          0              True
+J183606-314826 438086901547 13.5_14      True mag_bin=13.5_14; g_peaks=1; v_peaks=0          1          0              True
+J205245-713514 463856535113 13_13.5      True mag_bin=13_13.5; g_peaks=1; v_peaks=0          1          0              True
+J212132+480140 120259184943 13_13.5      True mag_bin=13_13.5; g_peaks=1; v_peaks=0          1          0              True
+J225702+562312  25770019815 13.5_14      True mag_bin=13.5_14; g_peaks=1; v_peaks=0          1          0              True
+J190316-195739 515396514761 13.5_14      True mag_bin=13.5_14; g_peaks=1; v_peaks=0          1          0              True
+J175602+013135 231929175915 14_14.5     False                                     —          0          0             False
+J073234-200049 335007754417 14.5_15      True mag_bin=14.5_15; g_peaks=4; v_peaks=0          4          0              True
+J223332+565552  60130040391 12.5_13      True mag_bin=12.5_13; g_peaks=2; v_peaks=0          2          0              True
+J183210-173432 317827964025 13_13.5     False                                     —          0          0              True
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 Brayden's candidates matching to the raw vsx catalog, so the the other 14 are not in the vsx catalog
 
 category                    name                class

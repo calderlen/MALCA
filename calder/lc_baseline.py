@@ -311,20 +311,17 @@ def per_camera_trend_baseline(
         # late-window guard: within last N days, allow right-censored dips (don’t inflate sigma by requiring return)
         tmax = np.nanmax(t)
         near_end = (tmax - t) <= float(last_window_guard)
+        
+        # --- FIX START ---
         # If sigma_loc missing near the end, fall back to global robust + e_med
         if np.isnan(sigma_loc[near_end]).any():
             r_good = np.isfinite(resid)
-        if r_good.any():
-            med_r = np.nanmedian(resid[r_good])
-            mad_r = 1.4826 * np.nanmedian(np.abs(resid[r_good] - med_r))
-            robust = float(np.sqrt(max(mad_r, 0.0)**2 + max(e_med, 0.0)**2))
-            sigma_loc[near_end & ~np.isfinite(sigma_loc)] = max(robust, 1e-6)
+            # Indent this so it only runs if we actually entered the block above
+            if r_good.any():
+                med_r = np.nanmedian(resid[r_good])
+                mad_r = 1.4826 * np.nanmedian(np.abs(resid[r_good] - med_r))
+                robust = float(np.sqrt(max(mad_r, 0.0)**2 + max(e_med, 0.0)**2))
+                sigma_loc[near_end & ~np.isfinite(sigma_loc)] = max(robust, 1e-6)
+        # --- FIX END ---
 
-        sigma_loc = np.where(np.isfinite(sigma_loc), sigma_loc, 1e-6)
-        sigma_resid = resid / sigma_loc
-
-        df_out.loc[idx, "baseline"] = baseline
-        df_out.loc[idx, "resid"] = resid
-        df_out.loc[idx, "sigma_resid"] = sigma_resid
-
-    return df_out
+        sigma_loc = np.where
