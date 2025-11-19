@@ -185,8 +185,7 @@ def plot_one_lc(
     source_name=None,
     figsize=(10, 6),
     show=False,
-    # Removed jd_offset kwarg from signature to prevent confusion
-    **kwargs 
+    **kwargs
 ):
     dat_path = Path(dat_path)
     metadata = None
@@ -208,47 +207,56 @@ def plot_one_lc(
         print(f"Warning: No valid rows found in {dat_path}")
         return None
 
-    # --- PLOTTING (No Offsets) ---
-    fig, ax = pl.subplots(figsize=figsize, constrained_layout=True)
-    ax.invert_yaxis()
+    bands_present = [band for band in (0, 1) if (df["v_g_band"] == band).any()]
+    if not bands_present:
+        print(f"Warning: No g or V band data in {dat_path}")
+        return None
+
+    ax_count = len(bands_present)
+    fig, axes = pl.subplots(ax_count, 1, figsize=figsize, constrained_layout=True, sharex=True)
+    if ax_count == 1:
+        axes = [axes]
 
     camera_ids = sorted(df["camera#"].unique())
     cmap = pl.get_cmap("tab20", max(len(camera_ids), 1))
     camera_colors = {cam: cmap(i % cmap.N) for i, cam in enumerate(camera_ids)}
-    band_markers = {0: "o", 1: "s"} # 0=g, 1=V
-    camera_handles = {}
+    band_labels = {0: "g band", 1: "V band"}
+    band_markers = {0: "o", 1: "s"}
 
-    for cam in camera_ids:
-        cam_subset = df[df["camera#"] == cam]
-        for band in (0, 1):
-            subset = cam_subset[cam_subset["v_g_band"] == band]
-            if subset.empty: continue
-            
+    for ax, band in zip(axes, bands_present):
+        ax.invert_yaxis()
+        band_df = df[df["v_g_band"] == band]
+        legend_handles = {}
+
+        for cam in camera_ids:
+            subset = band_df[band_df["camera#"] == cam]
+            if subset.empty:
+                continue
             color = camera_colors[cam]
             marker = band_markers.get(band, "o")
-            
-            # Plotting Raw JD directly
             ax.errorbar(
-                subset["JD"], 
+                subset["JD"],
                 subset["mag"],
                 yerr=subset["error"],
-                fmt=marker, ms=4, color=color, alpha=0.8,
-                ecolor=color, elinewidth=0.8, capsize=2,
-                markeredgecolor="black", markeredgewidth=0.5,
+                fmt=marker,
+                ms=4,
+                color=color,
+                alpha=0.8,
+                ecolor=color,
+                elinewidth=0.8,
+                capsize=2,
+                markeredgecolor="black",
+                markeredgewidth=0.5,
             )
-            
-            if cam not in camera_handles:
-                camera_handles[cam] = Line2D([], [], color=color, marker='o', linestyle="", label=f"Camera {cam}")
+            if cam not in legend_handles:
+                legend_handles[cam] = Line2D([], [], color=color, marker='o', linestyle="", markeredgecolor="black", markeredgewidth=0.5, label=f"Camera {cam}")
 
-    ax.set_xlabel("JD (Raw)")
-    ax.set_ylabel("Magnitude")
-    ax.grid(True, which="both", linestyle="--", alpha=0.3)
-    
-    # Remove forced x-limits; let matplotlib autoscaling handle the raw data
-    # ax.set_xlim(...) 
+        ax.set_ylabel(f"{band_labels.get(band, f'band {band}')} mag")
+        ax.grid(True, which="both", linestyle="--", alpha=0.3)
+        if legend_handles:
+            ax.legend(handles=list(legend_handles.values()), title="Cameras", loc="best", fontsize="small")
 
-    if camera_handles:
-        ax.legend(handles=list(camera_handles.values()), title="Cameras", loc="best", fontsize="small")
+    axes[-1].set_xlabel("JD (raw)")
 
     asassn_id = dat_path.stem
     category = metadata.get("category") if metadata else None
@@ -265,7 +273,7 @@ def plot_one_lc(
     parts.append(jd_label)
     
     fig_title = title or f"{' – '.join(parts)} light curve"
-    ax.set_title(fig_title)
+    axes[0].set_title(fig_title)
 
     if out_path is None:
         ext = f".{out_format.lstrip('.')}" if out_format else ".pdf"
