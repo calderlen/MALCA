@@ -29,6 +29,7 @@ asassn_raw_columns = [
                '90percenthigh']
 
 PLOT_OUTPUT_DIR = Path("/data/poohbah/1/assassin/lenhart/asassn-variability/calder/lc_plots")
+DETECTION_RESULTS_FILE = Path("calder/detection_results.csv")
 
 asassn_index_columns = ['asassn_id',
                         'ra_deg',
@@ -139,7 +140,38 @@ def read_asassn_dat(dat_path):
     return df
 
 
-def plot_dat_lightcurve(
+def load_detection_results(csv_path=DETECTION_RESULTS_FILE):
+    """
+    Load detection_results.csv into a DataFrame.
+    """
+    csv_path = Path(csv_path)
+    if not csv_path.exists():
+        raise FileNotFoundError(f"detection_results file not found: {csv_path}")
+    return pd.read_csv(csv_path)
+
+
+def lookup_source_metadata(asassn_id=None, *, source_name=None, csv_path=DETECTION_RESULTS_FILE):
+    """
+    Fetch DAT_Path, Source, and Source_ID for a given ASAS-SN ID or J-name.
+    """
+    df = load_detection_results(csv_path)
+    mask = pd.Series(True, index=df.index)
+    if asassn_id is not None:
+        mask &= df["Source_ID"].astype(str).str.strip() == str(asassn_id).strip()
+    if source_name is not None:
+        mask &= df["Source"].astype(str).str.strip().str.lower() == str(source_name).strip().lower()
+    matches = df.loc[mask]
+    if matches.empty:
+        return None
+    row = matches.iloc[0]
+    return {
+        "dat_path": row.get("DAT_Path"),
+        "source": row.get("Source"),
+        "source_id": str(row.get("Source_ID")),
+    }
+
+
+def plot_one_lc(
     dat_path,
     *,
     out_path=None,
@@ -174,6 +206,12 @@ def plot_dat_lightcurve(
             If True, display the plot interactively; always saved to disk.
     """
     dat_path = Path(dat_path)
+    metadata = None
+    try:
+        metadata = lookup_source_metadata(asassn_id=dat_path.stem)
+    except FileNotFoundError:
+        metadata = None
+
     df = read_asassn_dat(dat_path)
 
     # Basic cleaning similar to lc_utils.clean_lc
@@ -243,6 +281,8 @@ def plot_dat_lightcurve(
         )
 
     asassn_id = dat_path.stem
+    if source_name is None and metadata:
+        source_name = metadata.get("source")
     label = f"{source_name} ({asassn_id})" if source_name else asassn_id
     fig_title = title or f"{label} light curve"
     ax.set_title(fig_title)
@@ -263,3 +303,67 @@ def plot_dat_lightcurve(
         pl.close(fig)
 
     return str(out_path)
+
+
+def plot_many_lc(
+    dat_paths,
+    *,
+    out_dir=None,
+    out_format="pdf",
+    source_names=None,
+    jd_offset=0.0,
+    figsize=(10, 6),
+    show=False,
+):
+    """
+    Convenience wrapper that plots multiple .dat light curves in sequence.
+
+    Args:
+        dat_paths (Sequence[str | Path]): Iterable of .dat file paths.
+        out_dir (str | Path | None): If provided, override the output directory
+            for all plots. Filenames still follow <basename>.<format>.
+        out_format (str): Desired file extension when out_dir is used.
+        source_names (Mapping[str, str] | Sequence[str] | None): Optional mapping
+            from ASAS-SN ID (file stem) to human-readable source name, or a list
+            matching dat_paths.
+        jd_offset (float): Pass-through to plot_one_lc.
+        figsize (tuple): Pass-through to plot_one_lc.
+        show (bool): Pass-through to plot_one_lc.
+
+    Returns:
+        list[str]: Paths of the generated plots.
+    """
+    outputs = []
+    dat_paths = list(dat_paths)
+    if source_names is None:
+        lookup = {}
+    elif isinstance(source_names, dict):
+        lookup = source_names
+    else:
+        lookup = {Path(p).stem: name for p, name in zip(dat_paths, source_names)}
+
+    if out_dir is not None:
+        out_dir = Path(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+    for dat_path in dat_paths:
+        dat_path = Path(dat_path)
+        stem = dat_path.stem
+        name = lookup.get(stem)
+        if out_dir is not None:
+            out_path = out_dir / f"{stem}.{out_format.lstrip('.')}"
+        else:
+            out_path = None
+
+        saved = plot_one_lc(
+            dat_path,
+            out_path=out_path,
+            out_format=out_format,
+            source_name=name,
+            jd_offset=jd_offset,
+            figsize=figsize,
+            show=show,
+        )
+        outputs.append(saved)
+
+    return outputs
