@@ -210,4 +210,18 @@ def plot_dat_lightcurve(
     fig_title = title or f"{dat_path.stem} light curve"
     ax.set_title(fig_title)
 
-    return out_path
+    if out_path is None:
+        out_dir = Path("lc_plots")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f"{dat_path.stem}.png"
+    else:
+        out_path = Path(out_path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fig.savefig(out_path, dpi=200)
+    if show:
+        pl.show()
+    else:
+        pl.close(fig)
+
+    return str(out_path)
