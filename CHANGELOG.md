@@ -2,8 +2,7 @@
 
 
 ## 19-11-2025
-- Wrapped `lc_baseline.rolling_time_median` and `lc_baseline.rolling_time_mad` with `@njit(fastmath=True)` and switched from Boolean masks to binary search w/ `np.searchsorted`, reducing complexity from O(N^2) to O(N log N)
-
+-  switched from Boolean masks to binary search w/ `np.searchsorted` in `lc_baseline.rolling_time_median` and `lc_baseline.rolling_time_mad`
 
 ## 17-11-2025
 - Added a CLI entry point directly to `df_filter_naive`, eliminating the need for the separate `script_filter_naive`.

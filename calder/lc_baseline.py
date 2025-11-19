@@ -1,112 +1,63 @@
 import numpy as np
 import pandas as pd
-from numba import njit
 #from celerite2 import terms, GaussianProcess
 #from scipy.optimize import minimize
 
 # rolling helpers
-@njit(fastmath=True)
-
-def rolling_time_median(jd, mag, days=300.0, min_points=10, min_days=30.0, past_only=True):
+def rolling_time_median (jd, mag, days=300.0, min_points=10, min_days=30.0, past_only=False):
     """
     Rolling median in time. If past_only=True, uses [t0 - days, t0] (one-sided) to avoid future-leakage into ongoing dips, i.e., causality is enforced. Halves 'days' down to min_days until >= min_points exist.
     """
-    n = len(jd)
-    out = np.full(n, np.nan)
-    
-    # making arrays contiguous for maximum speed
-    jd = np.ascontiguousarray(jd)
-    mag = np.ascontiguousarray(mag)
+    jd = np.asarray(jd, float)
+    mag = np.asarray(mag, float)
 
-    for i in range(n):
-        t0 = jd[i]
+    out = np.full_like(mag, np.nan, dtype=float)
+    for i, t0 in enumerate(jd):
         window = float(days)
-        
         while window >= float(min_days):
+        
             if past_only:
-                lo_val, hi_val = t0 - window, t0
+                lo, hi = t0 - window, t0
             else:
-                half = window / 2.0
-                lo_val, hi_val = t0 - half, t0 + half
-
-            # since jd is sorted, we find the index boundaries
-            idx_start = np.searchsorted(jd, lo_val, side='left')
-            idx_end = np.searchsorted(jd, hi_val, side='right')
-            
-            # Slice the arrays
-            vals = mag[idx_start:idx_end]
-            
-            # Count finite values manually or via isnan to avoid allocation
-            # Numba handles np.isnan very fast
-            finite_vals = vals[np.isfinite(vals)]
-            
-            if len(finite_vals) >= int(min_points):
-                out[i] = np.median(finite_vals)
+                lo, hi = t0 - window/2.0, t0 + window/2.0
+    
+            mask = (jd >= lo) & (jd <= hi)
+            vals = mag[mask]
+            good = np.isfinite(vals)
+    
+            if int(good.sum()) >= int(min_points):
+                out[i] = np.nanmedian(vals[good])
                 break
-            
-            window /= 2.0
-            
+        
+        window /= 2.0
     return out
 
-@njit(fastmath=True)
 def rolling_time_mad(jd, resid, days=200.0, min_points=10, min_days=20.0, past_only=True, add_err=None):
     """
-    Numba-optimized rolling MAD.
+    Rolling robust scatter: 1.4826 * median(|resid - median(resid)|) in a time window. If past_only=True, uses [t0 - days, t0] (one-sided) to avoid future-leakage into ongoing dips, i.e., causality is enforced. Optionally add a typical photometric error in quadrature (array-like or scalar).
     """
-    n = len(jd)
-    out = np.full(n, np.nan)
-    
-    jd = np.ascontiguousarray(jd)
-    resid = np.ascontiguousarray(resid)
-    
-    # Handle scalar vs array add_err before the loop
-    has_err_array = False
-    if add_err is not None:
-        add_err_arr = np.atleast_1d(add_err)
-        if len(add_err_arr) == n:
-            has_err_array = True
-        elif len(add_err_arr) == 1:
-            err_scalar = float(add_err_arr[0])
-        else:
-            # Fallback/Safe default
-            err_scalar = 0.0
-
-    for i in range(n):
-        t0 = jd[i]
+    jd = np.asarray(jd, float)
+    r = np.asarray(resid, float)
+    out = np.full_like(r, np.nan, dtype=float)
+    for i, t0 in enumerate(jd):
         window = float(days)
-        
         while window >= float(min_days):
             if past_only:
-                lo_val, hi_val = t0 - window, t0
+                lo, hi = t0 - window, t0
             else:
-                half = window / 2.0
-                lo_val, hi_val = t0 - half, t0 + half
-            
-            idx_start = np.searchsorted(jd, lo_val, side='left')
-            idx_end = np.searchsorted(jd, hi_val, side='right')
-            
-            vals = resid[idx_start:idx_end]
-            vals = vals[np.isfinite(vals)]
-            
-            if len(vals) >= int(min_points):
+                lo, hi = t0 - window/2.0, t0 + window/2.0
+            mask = (jd >= lo) & (jd <= hi) & np.isfinite(r)
+            vals = r[mask]
+            if int(vals.size) >= int(min_points):
                 med = np.median(vals)
-                # Manual MAD calculation to keep it inside Numba
-                # 1.4826 * median(|x - median|)
-                abs_diff = np.abs(vals - med)
-                mad = 1.4826 * np.median(abs_diff)
-                
+                mad = 1.4826 * np.median(np.abs(vals - med))
                 if add_err is not None:
-                    if has_err_array:
-                        err_here = add_err_arr[i]
-                    else:
-                        err_here = err_scalar
-                    mad = np.sqrt(mad**2 + err_here**2)
-                
+                # allow scalar or per-point error
+                    err_here = add_err[i] if np.ndim(add_err) else float(add_err)
+                    mad = float(np.sqrt(mad**2 + err_here**2))
                 out[i] = max(mad, 1e-6)
                 break
-            
             window /= 2.0
-            
     return out
 
 # baseline builders

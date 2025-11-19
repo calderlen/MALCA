@@ -2,3 +2,4 @@ todo
 
 - obtain "recently calibrated" light curves for 15-15.5, 15.5-16 mag. dom's newly calibrated light curves only go down to 15 mag
 - if you continue to fail to recover Brayden's candidates, ensure that they aren't affected by bright nearby stars and thus filtered out 
+- see if (1) you can get numba in the default ASAS-SN conda env (2) get permissions to your lenhart.106 user everywhere you need them
