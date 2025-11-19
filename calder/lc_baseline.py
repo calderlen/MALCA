@@ -375,3 +375,119 @@ def per_camera_trend_baseline(
         df_out.loc[idx, "sigma_resid"] = sigma_resid
 
     return df_out
+def global_rolling_median_baseline(
+    df,
+    days=300.0,
+    min_points=10,
+    t_col="JD",
+    mag_col="mag",
+    err_col="error",
+):
+    """
+    A global rolling-median baseline (not per camera). Applies rolling_time_median
+    to the entire dataset once, returning baseline/resid/sigma_resid columns.
+    """
+    df_out = df.copy()
+    for col in ("baseline", "resid", "sigma_resid"):
+        if col not in df_out.columns:
+            df_out[col] = np.nan
+
+    t = df_out.loc[:, t_col].to_numpy(dtype=float)
+    m = df_out.loc[:, mag_col].to_numpy(dtype=float)
+    e = df_out.loc[:, err_col].to_numpy(dtype=float)
+
+    base = rolling_time_median(t, m, days=days, min_points=min_points)
+    resid = m - base
+
+    resid_good = np.isfinite(resid)
+    if resid_good.any():
+        resid_vals = resid[resid_good]
+        med_resid = float(np.median(resid_vals))
+        mad = float(1.4826 * np.median(np.abs(resid_vals - med_resid)))
+    else:
+        med_resid = np.nan
+        mad = np.nan
+
+    e_good = np.isfinite(e)
+    e_med = float(np.median(e[e_good])) if e_good.any() else np.nan
+
+    mad_num = mad if np.isfinite(mad) else 0.0
+    e_med_num = e_med if np.isfinite(e_med) else 0.0
+    robust_std = float(np.sqrt(mad_num**2 + e_med_num**2))
+    robust_std = max(robust_std, 1e-6)
+
+    sigma_resid = resid / robust_std
+
+    df_out.loc[:, "baseline"] = base
+    df_out.loc[:, "resid"] = resid
+    df_out.loc[:, "sigma_resid"] = sigma_resid
+
+    return df_out
+
+
+def global_rolling_mean_baseline(
+    df,
+    days=300.0,
+    min_points=10,
+    t_col="JD",
+    mag_col="mag",
+    err_col="error",
+):
+    """
+    Similar to global_rolling_median_baseline but uses a rolling mean instead of median.
+    """
+    df_out = df.copy()
+    for col in ("baseline", "resid", "sigma_resid"):
+        if col not in df_out.columns:
+            df_out[col] = np.nan
+
+    t = df_out.loc[:, t_col].to_numpy(dtype=float)
+    m = df_out.loc[:, mag_col].to_numpy(dtype=float)
+    e = df_out.loc[:, err_col].to_numpy(dtype=float)
+
+    baseline = np.full_like(m, np.nan, dtype=float)
+    order = np.argsort(t)
+    t_sorted = t[order]
+    m_sorted = m[order]
+
+    for idx_sorted, i in enumerate(order):
+        t0 = t_sorted[idx_sorted]
+        window = float(days)
+        while window >= min_points:
+            lo = t0 - window if True else t0 - window / 2.0
+            hi = t0
+            start = np.searchsorted(t_sorted, lo, side="left")
+            end = np.searchsorted(t_sorted, hi, side="right")
+            vals = m_sorted[start:end]
+            finite = vals[np.isfinite(vals)]
+            if finite.size >= min_points:
+                baseline[i] = float(np.mean(finite))
+                break
+            window /= 2.0
+
+    resid = m - baseline
+
+    resid_good = np.isfinite(resid)
+    if resid_good.any():
+        resid_vals = resid[resid_good]
+        med_resid = float(np.median(resid_vals))
+        mad = float(1.4826 * np.median(np.abs(resid_vals - med_resid)))
+    else:
+        med_resid = np.nan
+        mad = np.nan
+
+    e_good = np.isfinite(e)
+    e_med = float(np.median(e[e_good])) if e_good.any() else np.nan
+
+    mad_num = mad if np.isfinite(mad) else 0.0
+    e_med_num = e_med if np.isfinite(e_med) else 0.0
+    robust_std = float(np.sqrt(mad_num**2 + e_med_num**2))
+    robust_std = max(robust_std, 1e-6)
+
+    sigma_resid = resid / robust_std
+
+    df_out.loc[:, "baseline"] = baseline
+    df_out.loc[:, "resid"] = resid
+    df_out.loc[:, "sigma_resid"] = sigma_resid
+
+    return df_out
