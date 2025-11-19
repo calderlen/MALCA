@@ -1,5 +1,6 @@
 import matplotlib.pyplot as pl
 import matplotlib.ticker as tick
+from matplotlib.lines import Line2D
 import pandas as pd
 import numpy as np
 import scipy.signal
@@ -142,7 +143,9 @@ def plot_dat_lightcurve(
     dat_path,
     *,
     out_path=None,
+    out_format="pdf",
     title=None,
+    source_name=None,
     jd_offset=0.0,
     figsize=(10, 6),
     show=False,
@@ -155,10 +158,14 @@ def plot_dat_lightcurve(
         dat_path (str | Path):
             Path to the .dat file.
         out_path (str | Path | None):
-            Destination PNG path. When None, the figure is saved to
-            /data/poohbah/1/assassin/lenhart/asassn-variability/calder/lc_plots/<basename>.png.
+            Destination path. When None, the figure is saved to
+            /data/poohbah/1/assassin/lenhart/asassn-variability/calder/lc_plots/<basename>.<format>.
+        out_format (str):
+            File format/extension to use when out_path is not provided. Defaults to 'pdf'.
         title (str | None):
             Figure title; defaults to "<basename> light curve".
+        source_name (str | None):
+            Optional J-name or alias to append next to the ASAS-SN ID in the title.
         jd_offset (float):
             Subtracted from the JD axis to improve readability.
         figsize (tuple):
@@ -183,41 +190,73 @@ def plot_dat_lightcurve(
     fig, ax = pl.subplots(figsize=figsize, constrained_layout=True)
     ax.invert_yaxis()  # magnitudes: brighter lower
 
-    colors = {0: "#1f77b4", 1: "#d62728"}  # g-band, V-band
-    labels = {0: "g band", 1: "V band"}
+    camera_ids = sorted(df["camera#"].unique())
+    cmap = pl.get_cmap("tab20", max(len(camera_ids), 1))
+    camera_colors = {cam: cmap(i % cmap.N) for i, cam in enumerate(camera_ids)}
+    band_markers = {0: "o", 1: "s"}
+    camera_handles = {}
 
-    for band in (0, 1):
-        subset = df[df["v_g_band"] == band]
-        if subset.empty:
-            continue
-        ax.errorbar(
-            subset["JD_plot"],
-            subset["mag"],
-            yerr=subset["error"],
-            fmt="o",
-            ms=3,
-            color=colors[band],
-            alpha=0.7,
-            ecolor=colors[band],
-            elinewidth=0.8,
-            capsize=2,
-            label=f"{labels[band]} (N={len(subset)})",
-        )
+    for cam in camera_ids:
+        cam_subset = df[df["camera#"] == cam]
+        for band in (0, 1):
+            subset = cam_subset[cam_subset["v_g_band"] == band]
+            if subset.empty:
+                continue
+            color = camera_colors[cam]
+            marker = band_markers.get(band, "o")
+            ax.errorbar(
+                subset["JD_plot"],
+                subset["mag"],
+                yerr=subset["error"],
+                fmt=marker,
+                ms=4,
+                color=color,
+                alpha=0.8,
+                ecolor=color,
+                elinewidth=0.8,
+                capsize=2,
+                markeredgecolor="black",
+                markeredgewidth=0.5,
+            )
+            if cam not in camera_handles:
+                camera_handles[cam] = Line2D(
+                    [],
+                    [],
+                    color=color,
+                    marker="o",
+                    linestyle="",
+                    markeredgecolor="black",
+                    markeredgewidth=0.5,
+                    label=f"Camera {cam}",
+                )
 
     ax.set_xlabel(f"JD - {jd_offset:g}" if jd_offset else "JD")
     ax.set_ylabel("Magnitude")
     ax.grid(True, which="both", linestyle="--", alpha=0.3)
-    ax.legend()
+    if camera_handles:
+        ax.legend(
+            handles=list(camera_handles.values()),
+            title="Cameras",
+            loc="best",
+            fontsize="small",
+            title_fontsize="small",
+        )
 
-    fig_title = title or f"{dat_path.stem} light curve"
+    asassn_id = dat_path.stem
+    label = f"{source_name} ({asassn_id})" if source_name else asassn_id
+    fig_title = title or f"{label} light curve"
     ax.set_title(fig_title)
 
     if out_path is None:
-        out_path = PLOT_OUTPUT_DIR / f"{dat_path.stem}.png"
+        ext = f".{out_format.lstrip('.')}" if out_format else ".pdf"
+        out_path = PLOT_OUTPUT_DIR / f"{dat_path.stem}{ext}"
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    fig.savefig(out_path, dpi=200)
+    if out_path.suffix.lower() == ".png":
+        fig.savefig(out_path, dpi=400)
+    else:
+        fig.savefig(out_path)
     if show:
         pl.show()
     else:
