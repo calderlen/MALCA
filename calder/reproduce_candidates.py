@@ -105,10 +105,6 @@ def build_reproduction_report(
     manifest_path: Path | str | None = None,
     **baseline_kwargs,
 ) -> pd.DataFrame:
-    """
-    runs a targeted naive_dip_finder search for the supplied candidates and report detection status
-    """
-
     manifest_df = _load_manifest_df(manifest_path) if manifest_path is not None else None
 
     baseline_candidates = candidates or brayden_candidates
@@ -226,11 +222,23 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Path to lc_manifest CSV/Parquet for targeted reproduction",
     )
+    parser.add_argument(
+        "--baseline-func",
+        default=None,
+        help="Baseline function import path (e.g. module:func)",
+    )
     return parser
 
 
 def main(argv: Iterable[str] | None = None) -> None:
     args = _build_parser().parse_args(argv)
+    
+    kwargs = {}
+    if args.baseline_func:
+        mod_name, func_name = args.baseline_func.split(":")
+        mod = __import__(mod_name, fromlist=[func_name])
+        kwargs["baseline_func"] = getattr(mod, func_name)
+
     report = build_reproduction_report(
         out_dir=args.out_dir,
         out_format=args.out_format,
@@ -238,6 +246,7 @@ def main(argv: Iterable[str] | None = None) -> None:
         chunk_size=args.chunk_size,
         metrics_dip_threshold=args.metrics_dip_threshold,
         manifest_path=args.manifest,
+        **kwargs,
     )
 
     columns = [

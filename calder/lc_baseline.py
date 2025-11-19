@@ -7,15 +7,11 @@ import pandas as pd
 
 def rolling_time_median(jd, mag, days=300.0, min_points=10, min_days=30.0, past_only=True):
     """
-    Rolling median in time using pure NumPy optimization (searchsorted).
+    Rolling median in time using pure numpy optimization (searchsorted).
     If past_only=True, uses [t0 - days, t0] (one-sided) to avoid future-leakage into ongoing dips.
     Halves 'days' down to min_days until >= min_points exist.
     """
-    # Ensure arrays are sorted by time for searchsorted to work correctly
-    # (The calling functions usually do this, but we ensure it here for safety if needed, 
-    # though strict sorting is done in the calling function usually).
-    # For maximum speed, we assume jd is already sorted as per your pipeline logic.
-    
+
     n = len(jd)
     out = np.full(n, np.nan, dtype=float)
     
