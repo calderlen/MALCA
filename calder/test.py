@@ -6,7 +6,7 @@ from typing import Iterable
 
 import pandas as pd
 
-from reproduce_candidates import BRAYDEN_CANDIDATES
+from reproduce_candidates import brayden_candidates
 
 MANIFEST_PATH = Path("lc_manifest.csv")
 
@@ -21,10 +21,10 @@ PRIMARY_TARGET_IDS = [
 
 
 def all_candidate_ids() -> list[str]:
-    """Return every source_id from BRAYDEN_CANDIDATES as strings."""
+    """Return every source_id from brayden_candidates as strings."""
     ids: list[str] = []
     seen = set()
-    for entry in BRAYDEN_CANDIDATES:
+    for entry in brayden_candidates:
         source = str(entry.get("source_id", "")).strip()
         if not source or source in seen:
             continue
@@ -91,7 +91,7 @@ def main() -> None:
     remaining_matches = locate_targets(df, remaining_ids, id_col=id_col)
 
     print_matches("Primary 5 (pre-listed)", primary_matches, id_col=id_col)
-    print_matches("Remaining BRAYDEN_CANDIDATES", remaining_matches, id_col=id_col)
+    print_matches("Remaining brayden_candidates", remaining_matches, id_col=id_col)
 
 
 if __name__ == "__main__":
