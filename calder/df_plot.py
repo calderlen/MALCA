@@ -30,6 +30,37 @@ asassn_raw_columns = [
 
 PLOT_OUTPUT_DIR = Path("/data/poohbah/1/assassin/lenhart/asassn-variability/calder/lc_plots")
 DETECTION_RESULTS_FILE = Path("calder/detection_results.csv")
+DEFAULT_DAT_PATHS = [
+    "/data/poohbah/1/assassin/rowan.90/lcsv2/13_13.5/lc18_cal/377957522430.dat",
+    "/data/poohbah/1/assassin/rowan.90/lcsv2/13_13.5/lc22_cal/42950993887.dat",
+    "/data/poohbah/1/assassin/rowan.90/lcsv2/13_13.5/lc21_cal/223339338105.dat",
+    "/data/poohbah/1/assassin/rowan.90/lcsv2/13_13.5/lc13_cal/601296043597.dat",
+    "/data/poohbah/1/assassin/rowan.90/lcsv2/13_13.5/lc13_cal/472447294641.dat",
+    "/data/poohbah/1/assassin/rowan.90/lcsv2/13.5_14/lc6_cal/455267102087.dat",
+    "/data/poohbah/1/assassin/rowan.90/lcsv2/13_13.5/lc4_cal/266288137752.dat",
+    "/data/poohbah/1/assassin/rowan.90/lcsv2/13.5_14/lc17_cal/532576686103.dat",
+    "/data/poohbah/1/assassin/rowan.90/lcsv2/12_12.5/lc8_cal/352187470767.dat",
+    "/data/poohbah/1/assassin/rowan.90/lcsv2/12.5_13/lc19_cal/609886184506.dat",
+    "/data/poohbah/1/assassin/rowan.90/lcsv2/13_13.5/lc22_cal/68720274411.dat",
+    "/data/poohbah/1/assassin/rowan.90/lcsv2/13.5_14/lc9_cal/377958261591.dat",
+    "/data/poohbah/1/assassin/rowan.90/lcsv2/13.5_14/lc14_cal/515397118400.dat",
+    "/data/poohbah/1/assassin/rowan.90/lcsv2/13_13.5/lc29_cal/326417831663.dat",
+    "/data/poohbah/1/assassin/rowan.90/lcsv2/12_12.5/lc11_cal/644245387906.dat",
+    "/data/poohbah/1/assassin/rowan.90/lcsv2/13.5_14/lc28_cal/661425129485.dat",
+    "/data/poohbah/1/assassin/rowan.90/lcsv2/13.5_14/lc18_cal/438086977939.dat",
+    "/data/poohbah/1/assassin/rowan.90/lcsv2/13_13.5/lc5_cal/360777377116.dat",
+    "/data/poohbah/1/assassin/rowan.90/lcsv2/13_13.5/lc10_cal/635655234580.dat",
+    "/data/poohbah/1/assassin/rowan.90/lcsv2/13.5_14/lc35_cal/412317159120.dat",
+    "/data/poohbah/1/assassin/rowan.90/lcsv2/13.5_14/lc36_cal/438086901547.dat",
+    "/data/poohbah/1/assassin/rowan.90/lcsv2/13_13.5/lc23_cal/463856535113.dat",
+    "/data/poohbah/1/assassin/rowan.90/lcsv2/13_13.5/lc2_cal/120259184943.dat",
+    "/data/poohbah/1/assassin/rowan.90/lcsv2/13.5_14/lc20_cal/25770019815.dat",
+    "/data/poohbah/1/assassin/rowan.90/lcsv2/13.5_14/lc2_cal/515396514761.dat",
+    "/data/poohbah/1/assassin/rowan.90/lcsv2/14_14.5/lc51_cal/231929175915.dat",
+    "/data/poohbah/1/assassin/rowan.90/lcsv2/14.5_15/lc2_cal/335007754417.dat",
+    "/data/poohbah/1/assassin/rowan.90/lcsv2/12.5_13/lc10_cal/60130040391.dat",
+    "/data/poohbah/1/assassin/rowan.90/lcsv2/13_13.5/lc6_cal/317827964025.dat",
+]
 
 asassn_index_columns = ['asassn_id',
                         'ra_deg',
@@ -168,6 +199,7 @@ def lookup_source_metadata(asassn_id=None, *, source_name=None, csv_path=DETECTI
         "dat_path": row.get("DAT_Path"),
         "source": row.get("Source"),
         "source_id": str(row.get("Source_ID")),
+        "category": row.get("Category"),
     }
 
 
@@ -281,10 +313,12 @@ def plot_one_lc(
         )
 
     asassn_id = dat_path.stem
+    category = metadata.get("category") if metadata else None
     if source_name is None and metadata:
         source_name = metadata.get("source")
     label = f"{source_name} ({asassn_id})" if source_name else asassn_id
-    fig_title = title or f"{label} light curve"
+    auto_title = f"{label} – {category}" if category else f"{label}"
+    fig_title = title or f"{auto_title} light curve"
     ax.set_title(fig_title)
 
     if out_path is None:
