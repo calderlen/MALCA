@@ -43,14 +43,14 @@ brayden_candidates: list[dict[str, object]] = [
 ]
 
 skypatrol_lightcurve_files = [
-    "calder/skypatrol2/231929175915-light-curves.csv",
-    "calder/skypatrol2/266288137752-light-curves.csv",
-    "calder/skypatrol2/352187470767-light-curves.csv",
-    "calder/skypatrol2/438086977939-light-curves.csv",
-    "calder/skypatrol2/455267102087-light-curves.csv",
-    "calder/skypatrol2/463856535113-light-curves.csv",
-    "calder/skypatrol2/532576686103-light-curves.csv",
-    "calder/skypatrol2/609886184506-light-curves.csv",
+    "calder/data/skypatrol2/231929175915-light-curves.csv",
+    "calder/data/skypatrol2/266288137752-light-curves.csv",
+    "calder/data/skypatrol2/352187470767-light-curves.csv",
+    "calder/data/skypatrol2/438086977939-light-curves.csv",
+    "calder/data/skypatrol2/455267102087-light-curves.csv",
+    "calder/data/skypatrol2/463856535113-light-curves.csv",
+    "calder/data/skypatrol2/532576686103-light-curves.csv",
+    "calder/data/skypatrol2/609886184506-light-curves.csv",
 ]
 
 
