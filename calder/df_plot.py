@@ -16,7 +16,6 @@ from lc_baseline import (
     per_camera_trend_baseline,
 )
 
-# --- CONFIG ---
 
 asassn_columns=["JD",
                 "mag",
@@ -35,7 +34,7 @@ asassn_raw_columns = [
                '90percentlow',
                '90percenthigh']
 
-PLOT_OUTPUT_DIR = Path("/data/poohbah/1/assassin/lenhart/asassn-variability/calder/lc_plots")
+PLOT_OUTPUT_DIR = Path("/lc_plots")
 DETECTION_RESULTS_FILE = Path("calder/detection_results.csv")
 JD_OFFSET = 2458000.0
 DEFAULT_DAT_PATHS = [
@@ -100,6 +99,8 @@ SKYPATROL_CSV_PATHS = [
     "calder/lc_data_skypatrol/661425129485-light-curves.csv",
     "calder/lc_data_skypatrol/68720274411-light-curves.csv",
 ]
+
+DEFAULT_LC_PATHS = DEFAULT_DAT_PATHS + SKYPATROL_CSV_PATHS
 
 asassn_index_columns = ['asassn_id',
                         'ra_deg',
@@ -286,7 +287,6 @@ def _lookup_metadata_for_path(path: Path):
             metadata = None
     return metadata
 
-# --- STANDARD PLOTTING FUNCTIONS ---
 
 def plot_one_lc(
     dat_path,
@@ -304,7 +304,6 @@ def plot_one_lc(
 
     df = _load_lightcurve_df(dat_path)
 
-    # Cleaning
     mask = df["JD"].notna() & df["mag"].notna()
     mask &= df["error"].between(0, 1, inclusive="neither")
     mask &= df["saturated"] == 0
@@ -406,7 +405,7 @@ def plot_one_lc(
     return str(out_path)
 
 def plot_many_lc(
-    dat_paths,
+    dat_paths=None,
     *,
     out_dir=None,
     out_format="pdf",
@@ -415,6 +414,8 @@ def plot_many_lc(
     show=False,
 ):
     outputs = []
+    if dat_paths is None:
+        dat_paths = DEFAULT_LC_PATHS
     dat_paths = list(dat_paths)
     
     if source_names is None: lookup = {}
@@ -444,7 +445,6 @@ def plot_many_lc(
 
     return outputs
 
-# --- RESIDUAL PLOTTING FUNCTIONS (UPDATED) ---
 
 def _plot_lc_with_residuals_df(
     df,
@@ -502,23 +502,17 @@ def _plot_lc_with_residuals_df(
         raw_ax = axes[0, col_idx]
         resid_ax = axes[1, col_idx]
 
-        # --- TOP PLOT (RAW MAG) ---
         raw_ax.invert_yaxis()
         raw_ax.grid(True, which="both", linestyle="--", alpha=0.3)
-        # Force JD labels on top axis
         raw_ax.tick_params(top=True, labeltop=True, bottom=False, labelbottom=False)
         raw_ax.set_xlabel(f"JD - {int(JD_OFFSET)} [d]")
         raw_ax.xaxis.set_label_position("top")
 
-        # --- BOTTOM PLOT (RESIDUALS) ---
         resid_ax.grid(True, which="both", linestyle="--", alpha=0.3)
         resid_ax.axhline(0.0, color="black", linestyle="--", alpha=0.4, zorder=1)
         
-        # Invert Y so positive residuals (dips) look like dips
         resid_ax.invert_yaxis()
 
-        # Draw grey exclusion zones with zorder=0 so they are BEHIND points
-        # We fill from 0.3 to infinity (or large number) and -0.3 to -infinity
         resid_ax.axhline(0.3, color="black", linestyle="-", linewidth=0.8, zorder=1)
         resid_ax.axhline(-0.3, color="black", linestyle="-", linewidth=0.8, zorder=1)
         
@@ -543,7 +537,6 @@ def _plot_lc_with_residuals_df(
             color = camera_colors[cam]
             marker = band_markers.get(band, "o")
             
-            # Top Panel
             raw_ax.errorbar(
                 cam_subset["JD_plot"],
                 cam_subset["mag"],
@@ -559,7 +552,6 @@ def _plot_lc_with_residuals_df(
                 markeredgewidth=0.5,
             )
             
-            # Bottom Panel - zorder=3 puts points ON TOP of grey regions
             resid_ax.scatter(
                 cam_subset["JD_plot"],
                 cam_subset["resid"],
@@ -585,12 +577,9 @@ def _plot_lc_with_residuals_df(
         resid_ax.set_ylabel(f"Residual {band_name}")
         resid_ax.set_xlabel("JD")
 
-        # Auto-scale residuals but respect inversion (max is bottom, min is top)
         resid_min = band_df["resid"].min()
         resid_max = band_df["resid"].max()
-        # Add 10% padding
         pad = (resid_max - resid_min) * 0.1 if resid_max != resid_min else 0.1
-        # If the data is entirely within the grey zone, ensure we still see the grey zone limits
         plot_min = min(resid_min - pad, -0.35) 
         plot_max = max(resid_max + pad, 0.35)
         resid_ax.set_ylim(plot_max, plot_min)
@@ -603,7 +592,6 @@ def _plot_lc_with_residuals_df(
                 fontsize="small",
             )
 
-    # Title Generation
     source_id = metadata.get("source_id") if metadata else None
     category = metadata.get("category") if metadata else None
     src_name = source_name or (metadata.get("source") if metadata else None)
@@ -670,7 +658,6 @@ def plot_lc_with_residuals(
         baseline_tag = getattr(baseline_func, "__name__", "baseline")
     results: list[str] = []
 
-    # Case 1: DF provided
     if df is not None:
         dest = out_path
         if timestamp_output and dest is not None:
@@ -688,9 +675,8 @@ def plot_lc_with_residuals(
             metadata=metadata,
         )
 
-    # Case 2: File paths provided
     if dat_paths is None:
-        dat_paths = DEFAULT_DAT_PATHS
+        dat_paths = DEFAULT_LC_PATHS
     dat_paths = list(dat_paths)
 
     multi = len(dat_paths) > 1
@@ -710,7 +696,6 @@ def plot_lc_with_residuals(
             print(f"[warn] Failed to read {path}: {exc}")
             continue
 
-        # Compute Baseline
         if baseline_func is not None:
             try:
                 df_base = baseline_func(df_raw, **baseline_kwargs)
@@ -724,12 +709,10 @@ def plot_lc_with_residuals(
             print(f"[warn] No 'resid' column for {path}; skipping.")
             continue
 
-        # Get Metadata
         meta = metadata
         if meta is None:
             meta = _lookup_metadata_for_path(path)
 
-        # determine output filename
         if multi:
             ext = f".{out_format.lstrip('.')}" if out_format else ".pdf"
             base_name = f"{path.stem}_{baseline_tag}" if baseline_tag else f"{path.stem}"

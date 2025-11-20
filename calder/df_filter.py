@@ -19,16 +19,12 @@ from lc_utils import read_lc_dat, read_lc_raw
 
 
 def _call_filter_by_name(func_name: str, df_in: pd.DataFrame, kwargs: Dict[str, Any]) -> pd.DataFrame:
-    """
-    Resolve a top-level function by name and apply it to the DataFrame.
-    """
     fn = globals().get(func_name)
     if fn is None:
         raise RuntimeError(f"Filter function '{func_name}' not found in module globals().")
     return fn(df_in, **kwargs)
 
 def _filter_candidates_chunk(df_chunk: pd.DataFrame, band_key: str) -> pd.DataFrame:
-    """Filter a chunk of the peaks DataFrame based on band requirements."""
     if df_chunk.empty:
         return df_chunk.iloc[0:0].copy()
 
@@ -51,9 +47,6 @@ def _run_step_sequential(
     step_desc: str,
     position: int = 0,
 ) -> pd.DataFrame:
-    """
-    Run a single filtration step sequentially with a compact tqdm indicator.
-    """
     func_kwargs = func_kwargs or {}
     start = perf_counter()
     n_in = len(df_in)
@@ -69,7 +62,6 @@ def _run_step_sequential(
     return df_out
 
 def _first_col(df: pd.DataFrame, *candidates: str) -> Optional[str]:
-    """Return the first existing column name from candidates, or None."""
     for c in candidates:
         if c in df.columns:
             return c
@@ -82,7 +74,6 @@ def _log_rejections(
     filter_name: str,
     log_csv: str | Path | None,
 ) -> None:
-    """Append IDs filtered out by a step to a CSV log if requested."""
     if log_csv is None or "asas_sn_id" not in df_before.columns:
         return
 
@@ -101,7 +92,6 @@ def _log_rejections(
     df_log = pd.DataFrame({"asas_sn_id": rejected, "filter": filter_name})
     df_log.to_csv(log_path, mode="a", header=not log_path.exists(), index=False)
 
-# filtration functions
 
 def candidates_with_peaks_naive(
     csv_path,
@@ -112,10 +102,6 @@ def candidates_with_peaks_naive(
     *,
     n_workers: int = 1,
 ) -> pd.DataFrame:
-    """
-    Read peaks_[mag_bin].csv and return only rows where either band has a non-zero number of peaks.
-    Parallel chunk filtering is available via n_workers > 1.
-    """
     file = Path(csv_path)
     if not file.exists():
         suffix = file.suffix or ".csv"
@@ -185,9 +171,6 @@ def filter_bns(
     asassn_csv: str | Path = "results_crossmatch/asassn_index_masked_concat_cleaned_20250926_1557.csv",
     rejected_log_csv: str | Path | None = None,
 ):
-    """
-    keep only rows with matching ASAS-SN index files, implicitly filtering out bright nearby stars
-    """
     with tqdm(total=2, desc="filter_bns", leave=False) as pbar:
         catalog = pd.read_csv(asassn_csv)
         catalog["asas_sn_id"] = catalog["asas_sn_id"].astype(str)
@@ -216,9 +199,6 @@ def vsx_class_extract(
     vsx_csv: str | Path = "results_crossmatch/vsx_cleaned_20250926_1557.csv",
     match_radius_arcsec: float = 3.0,
 ):
-    """
-    append vsx classes for matches within the given radius
-    """
     with tqdm(total=3, desc="vsx_class_extract", leave=False) as pbar:
         vsx = pd.read_csv(vsx_csv)
         vsx = vsx.dropna(subset=["ra", "dec"]).reset_index(drop=True)
@@ -246,13 +226,6 @@ def filter_dip_dominated(
     show_tqdm: bool = False,
     rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
-    """
-    Keep targets whose dip fraction is >= min_dip_fraction in at least one band.
-    Expected columns (any of):
-      - 'g_dip_fraction', 'v_dip_fraction'
-      - or boolean flags like 'g_dip_dominated', 'v_dip_dominated'
-    Safe fallback: pass-through if required columns are missing.
-    """
     g_frac_col = _first_col(df, "g_dip_fraction", "g_dip_frac")
     v_frac_col = _first_col(df, "v_dip_fraction", "v_dip_frac")
     g_flag_col = _first_col(df, "g_dip_dominated", "g_dipdom")
@@ -300,12 +273,6 @@ def filter_multi_camera(
     show_tqdm: bool = False,
     rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
-    """
-    Keep targets observed by >= min_cameras distinct cameras.
-    Expected columns (any of): 'n_cameras', 'num_cameras', 'unique_cameras',
-    'n_unique_cameras', 'camera_count'
-    Safe fallback: pass-through if count column is missing.
-    """
     cam_col = _first_col(
         df, "n_cameras", "num_cameras", "unique_cameras",
         "n_unique_cameras", "camera_count"
@@ -340,16 +307,6 @@ def filter_periodic_candidates(
     show_tqdm: bool = False,
     rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
-    """
-    Remove strongly periodic sources (likely non-dippers).
-    Expected precomputed columns if available:
-      - power: 'ls_max_power' or 'max_power'
-      - best period: 'best_period', 'ls_best_period', or 'period_best' (days)
-    Behavior:
-      - If power column exists: keep rows with power <= max_power.
-      - If period bounds provided AND best-period column exists: enforce bounds.
-    Safe fallback: pass-through if nothing to test.
-    """
     power_col = _first_col(df, "ls_max_power", "max_power")
     per_col = _first_col(df, "best_period", "ls_best_period", "period_best")
     n0 = len(df)
@@ -399,13 +356,6 @@ def filter_sparse_lightcurves(
     show_tqdm: bool = False,
     rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
-    """
-    Remove sparsely sampled targets.
-    Expected columns if available:
-      - 'time_span_days'/'timespan_days' (float)
-      - 'points_per_day'/'ppd'/'n_per_day' (float)
-    Safe fallback: pass-through if metrics missing.
-    """
     span_col = _first_col(df, "time_span_days", "timespan_days", "t_span_days", "t_span")
     ppd_col = _first_col(df, "points_per_day", "ppd", "n_per_day")
 
@@ -475,10 +425,6 @@ def box_filter(
     show_tqdm: bool = False,
     rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
-    """
-    Apply a simple rectangular (\"box\") filter on dip counts, peak rate, and magnitude scatter.
-    Falls back to pass-through if required columns are missing.
-    """
     dip_col = _first_col(df, *dip_cols)
     peaks_col = _first_col(df, *peaks_cols)
     std_col = _first_col(df, *std_cols)
@@ -520,10 +466,6 @@ def box_filter(
 
 
 def _sigma_ok_for_row(asas_sn_id: str, raw_path: str | Path, min_sigma: float) -> bool:
-    """
-    Compute whether max dip depth >= min_sigma * median 1-sigma scatter for this source.
-    Uses your previously commented logic.
-    """
     try:
         raw_df = read_lc_raw(str(asas_sn_id), str(Path(raw_path).parent))
         scatter_vals = (raw_df["sig1_high"] - raw_df["sig1_low"]).to_numpy(dtype=float)
@@ -533,7 +475,6 @@ def _sigma_ok_for_row(asas_sn_id: str, raw_path: str | Path, min_sigma: float) -
         scatter = np.nanmedian(finite)
         return bool(np.isfinite(scatter) and scatter > 0.0 and scatter)
     except Exception:
-        # If loading fails, be conservative: drop
         return False
 
 
@@ -544,11 +485,6 @@ def filter_sigma_resid(
     show_tqdm: bool = False,
     rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
-    """
-    Keep rows where (max dip depth / median-1σ-scatter) >= min_sigma in either band.
-    Requires columns: 'asas_sn_id', 'raw_path' and depth columns 'g_max_depth'/'v_max_depth'.
-    Falls back to pass-through if required pieces are missing.
-    """
     need_cols = {"asas_sn_id", "raw_path"}
     depth_g = _first_col(df, "g_max_depth", "g_depth_max")
     depth_v = _first_col(df, "v_max_depth", "v_depth_max")
@@ -557,11 +493,9 @@ def filter_sigma_resid(
         tqdm.write("[filter_sigma_resid] Missing asas_sn_id/raw_path or depth columns; passing through.")
         return df.reset_index(drop=True)
 
-    # Precompute which rows are OK by estimating scatter and comparing depths.
     rows = df.reset_index(drop=False)  # keep original index for mask
     idx_name = "index"
 
-    # Worker: compute scatter and compare to depths for a single row
     def _eval_row(row) -> tuple[int, bool]:
         try:
             raw_ok = _sigma_ok_for_row(str(row["asas_sn_id"]), Path(row["raw_path"]), min_sigma)
@@ -631,11 +565,6 @@ def filter_csv(
     tqdm_position_base: int = 0,
     rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
-    """
-    Orchestrates the optional filtering/enrichment steps with:
-      - outer tqdm over enabled steps
-      - inner tqdm per step
-    """
 
     df_filtered = candidates_with_peaks_naive(
         csv_path,
@@ -644,7 +573,6 @@ def filter_csv(
         n_workers=seed_workers,
     )
 
-    # filtration order
 
     plan: list[tuple[str, str, dict]] = []
 
@@ -709,7 +637,6 @@ def filter_csv(
 
     total_steps = len(plan)
     if total_steps:
-        # Outer bar over enabled steps
         with tqdm(total=total_steps, desc="filter_csv (steps)", position=tqdm_position_base, leave=False) as outer:
             for i, (label, func_name, kwargs) in enumerate(plan):
                 df_filtered = _run_step_sequential(
@@ -731,9 +658,6 @@ def filter_csv(
     return df_filtered
 
 
-# ---------------------------
-# CLI helpers and entry point
-# ---------------------------
 
 BIN_RE = re.compile(
     r"^peaks_(?P<low>\d+(?:_\d)?)_(?P<high>\d+(?:_\d)?)_(?P<ts>\d{8}_\d{6}[+-]\d{4})\.csv$"
@@ -741,7 +665,6 @@ BIN_RE = re.compile(
 
 
 def parse_bin_key(p: Path) -> tuple[str, str, str] | None:
-    """Return (low, high, ts) from filename like peaks_12_5_13_20251018_155817-0400.csv."""
     m = BIN_RE.match(p.name)
     if not m:
         return None
@@ -749,7 +672,6 @@ def parse_bin_key(p: Path) -> tuple[str, str, str] | None:
 
 
 def latest_per_bin(files: list[Path]) -> list[Path]:
-    """Keep the newest timestamped file per (low, high) bin."""
     best: dict[tuple[str, str], tuple[str, Path]] = {}
     for f in files:
         parsed = parse_bin_key(f)
@@ -770,7 +692,6 @@ def gather_files(
     excludes: list[str] | None,
     keep_latest: bool,
 ) -> list[Path]:
-    """Collect candidate peaks CSVs within a directory using optional include/exclude rules."""
     candidates: set[Path] = set()
     if files:
         for pat in files:
@@ -805,7 +726,6 @@ def _run_one_file(
     out_dir: Path | None = None,
     out_path_override: Path | None = None,
 ) -> pd.DataFrame:
-    """Run filter_csv for a single input CSV and write a timestamped output CSV."""
     if out_path_override is not None:
         out_csv_path = out_path_override
     else:
@@ -887,7 +807,6 @@ def main(argv: Iterable[str] | None = None) -> int:
     if output_dir and output_dir.exists() and not output_dir.is_dir():
         parser.error("--output-dir must be a directory.")
 
-    # Directory mode
     if in_path.is_dir():
         files = gather_files(
             directory=in_path,
@@ -918,7 +837,6 @@ def main(argv: Iterable[str] | None = None) -> int:
             print(f"[COMBINED] {combined_csv} ({len(combined)} rows)")
         return 0
 
-    # Single file (or pattern resolved by filter_csv)
     if in_path.is_file() or not in_path.exists():
         df = _run_one_file(
             in_path,
