@@ -309,20 +309,10 @@ def plot_one_lc(
     mask &= df["saturated"] == 0
     mask &= df["good_bad"] == 1
     df = df.loc[mask].copy()
-    if df.empty:
-        print(f"Warning: No valid rows found in {dat_path}")
-        return None
 
     df["JD_plot"] = df["JD"] - JD_OFFSET
-    
-    if df.empty:
-        print(f"Warning: No valid rows found in {dat_path}")
-        return None
 
     bands_present = [band for band in (0, 1) if (df["v_g_band"] == band).any()]
-    if not bands_present:
-        print(f"Warning: No g or V band data in {dat_path}")
-        return None
 
     ax_count = len(bands_present)
     fig, axes = pl.subplots(ax_count, 1, figsize=figsize, constrained_layout=True, sharex=True)
@@ -457,23 +447,14 @@ def _plot_lc_with_residuals_df(
     show=False,
     metadata=None,
 ):
-    required_cols = {"JD", "mag", "error", "v_g_band", "camera#", "resid"}
-    missing = required_cols - set(df.columns)
-    if missing:
-        raise ValueError(f"plot_lc_with_residuals requires columns: {missing}")
-
     data = df.copy()
     data = data[np.isfinite(data["JD"]) & np.isfinite(data["mag"])]
-    if data.empty:
-        raise ValueError("No finite JD/mag values available for plotting.")
     data["JD_plot"] = data["JD"] - JD_OFFSET
 
     preferred_order = [1, 0]
     bands = [band for band in preferred_order if (data["v_g_band"] == band).any()]
     if not bands:
         bands = sorted(data["v_g_band"].dropna().unique())
-    if not bands:
-        raise ValueError("No band information available (v_g_band missing).")
 
     n_cols = len(bands)
     fig, axes = pl.subplots(
@@ -634,8 +615,8 @@ def _plot_lc_with_residuals_df(
 def plot_lc_with_residuals(
     df=None,
     *,
-    dat_paths=None,
-    baseline_func=None,
+    dat_paths=tuple(SKYPATROL_CSV_PATHS),
+    baseline_func=per_camera_trend_baseline,
     baseline_kwargs=None,
     out_path=None,
     out_format="pdf",
@@ -647,15 +628,8 @@ def plot_lc_with_residuals(
     baseline_tag=None,
     timestamp_output=False,
 ):
-    """
-    Wrapper to handle either a DataFrame or a list of file paths.
-    """
-    if baseline_func is None:
-        baseline_func = per_camera_trend_baseline
-        
     baseline_kwargs = baseline_kwargs or {}
-    if baseline_tag is None and baseline_func is not None:
-        baseline_tag = getattr(baseline_func, "__name__", "baseline")
+    baseline_tag = baseline_tag or getattr(baseline_func, "__name__", "baseline")
     results: list[str] = []
 
     if df is not None:
@@ -675,8 +649,6 @@ def plot_lc_with_residuals(
             metadata=metadata,
         )
 
-    if dat_paths is None:
-        dat_paths = DEFAULT_LC_PATHS
     dat_paths = list(dat_paths)
 
     multi = len(dat_paths) > 1
@@ -690,28 +662,14 @@ def plot_lc_with_residuals(
 
     for path in dat_paths:
         path = Path(path)
-        try:
-            df_raw = _load_lightcurve_df(path)
-        except Exception as exc:
-            print(f"[warn] Failed to read {path}: {exc}")
-            continue
+        df_raw = _load_lightcurve_df(path)
 
         if baseline_func is not None:
-            try:
-                df_base = baseline_func(df_raw, **baseline_kwargs)
-            except Exception as exc:
-                print(f"[warn] baseline_func failed for {path}: {exc}")
-                continue
+            df_base = baseline_func(df_raw, **baseline_kwargs)
         else:
             df_base = df_raw
 
-        if "resid" not in df_base.columns:
-            print(f"[warn] No 'resid' column for {path}; skipping.")
-            continue
-
-        meta = metadata
-        if meta is None:
-            meta = _lookup_metadata_for_path(path)
+        meta = metadata or _lookup_metadata_for_path(path)
 
         if multi:
             ext = f".{out_format.lstrip('.')}" if out_format else ".pdf"

@@ -161,7 +161,6 @@ def rolling_time_mad(jd, resid, days=200.0, min_points=10, min_days=20.0, past_o
     resid = np.asarray(resid, dtype=float)
     
     # Handle add_err (scalar or array)
-    # We prep this outside the loop to avoid overhead
     if add_err is not None:
         if np.ndim(add_err) > 0:
             err_is_array = True

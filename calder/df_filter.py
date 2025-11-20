@@ -19,9 +19,7 @@ from lc_utils import read_lc_dat, read_lc_raw
 
 
 def _call_filter_by_name(func_name: str, df_in: pd.DataFrame, kwargs: Dict[str, Any]) -> pd.DataFrame:
-    fn = globals().get(func_name)
-    if fn is None:
-        raise RuntimeError(f"Filter function '{func_name}' not found in module globals().")
+    fn = globals()[func_name]
     return fn(df_in, **kwargs)
 
 def _filter_candidates_chunk(df_chunk: pd.DataFrame, band_key: str) -> pd.DataFrame:
@@ -74,7 +72,7 @@ def _log_rejections(
     filter_name: str,
     log_csv: str | Path | None,
 ) -> None:
-    if log_csv is None or "asas_sn_id" not in df_before.columns:
+    if log_csv is None:
         return
 
     before_ids = set(df_before["asas_sn_id"].astype(str))
@@ -84,10 +82,6 @@ def _log_rejections(
         return
 
     log_path = Path(log_csv)
-    if not log_path.is_absolute():
-        parts = log_path.parts
-        if not parts or parts[0] != "logs":
-            log_path = Path("logs") / log_path
     log_path.parent.mkdir(parents=True, exist_ok=True)
     df_log = pd.DataFrame({"asas_sn_id": rejected, "filter": filter_name})
     df_log.to_csv(log_path, mode="a", header=not log_path.exists(), index=False)
@@ -103,14 +97,6 @@ def candidates_with_peaks_naive(
     n_workers: int = 1,
 ) -> pd.DataFrame:
     file = Path(csv_path)
-    if not file.exists():
-        suffix = file.suffix or ".csv"
-        stem = file.stem
-        pattern = f"{stem}_*{suffix}"
-        candidates = sorted(file.parent.glob(pattern))
-        if not candidates:
-            raise FileNotFoundError(f"No file found matching {file} or {pattern}")
-        file = max(candidates, key=lambda p: p.stat().st_mtime)
 
     df = pd.read_csv(file).copy()
     df["g_n_peaks"] = pd.to_numeric(df["g_n_peaks"], errors="coerce").fillna(0)
@@ -233,29 +219,20 @@ def filter_dip_dominated(
 
     n0 = len(df)
     pbar = tqdm(total=2, desc="filter_dip_dominated", leave=False) if show_tqdm else None
-    if g_frac_col or v_frac_col:
-        mask = pd.Series(False, index=df.index)
-        if g_frac_col:
-            mask |= df[g_frac_col].astype(float) >= min_dip_fraction
-        if v_frac_col:
-            mask |= df[v_frac_col].astype(float) >= min_dip_fraction
-        out = df.loc[mask].reset_index(drop=True)
-        if pbar:
-            pbar.update(1)
-    elif g_flag_col or v_flag_col:
-        mask = pd.Series(False, index=df.index)
-        if g_flag_col:
-            mask |= df[g_flag_col].astype(bool)
-        if v_flag_col:
-            mask |= df[v_flag_col].astype(bool)
-        out = df.loc[mask].reset_index(drop=True)
-        if pbar:
-            pbar.update(1)
-    else:
-        tqdm.write("[filter_dip_dominated] No dip-fraction/flag columns found; passing through.")
-        out = df.reset_index(drop=True)
-        if pbar:
-            pbar.update(1)
+    mask = pd.Series(False, index=df.index)
+    if g_frac_col:
+        mask |= df[g_frac_col].astype(float) >= min_dip_fraction
+    if v_frac_col:
+        mask |= df[v_frac_col].astype(float) >= min_dip_fraction
+    if g_flag_col:
+        mask |= df[g_flag_col].astype(bool)
+    if v_flag_col:
+        mask |= df[v_flag_col].astype(bool)
+    if not mask.any():
+        raise KeyError("No dip-fraction or dip-dominated columns available for filtering.")
+    out = df.loc[mask].reset_index(drop=True)
+    if pbar:
+        pbar.update(1)
 
     if show_tqdm:
         tqdm.write(f"[filter_dip_dominated] kept {len(out)}/{n0}")
