@@ -299,12 +299,18 @@ def _plot_lc_with_residuals_df(
     data = df.copy()
     data = data[np.isfinite(data["JD"]) & np.isfinite(data["mag"])]
     
-    # FIX: Check if JD is already offset before subtracting
+    # --- AUTO-DETECT JD FORMAT ---
     median_jd = data["JD"].median()
+    
     if median_jd > 2000000:
-        data["JD_plot"] = data["JD"] - JD_OFFSET
+        # Case 1: Full Julian Date (e.g., 2,458,000)
+        # We want 0 at 2458000, so we subtract 2,458,000.
+        data["JD_plot"] = data["JD"] - JD_OFFSET 
     else:
-        data["JD_plot"] = data["JD"]
+        # Case 2: Reduced Julian Date (e.g., 8,000)
+        # These are likely (JD - 2,450,000). 
+        # To align 8000 (which represents 2458000) to 0, we subtract 8000.
+        data["JD_plot"] = data["JD"] - 8000.0
 
     preferred_order = [1, 0]
     bands = [band for band in preferred_order if (data["v_g_band"] == band).any()]
@@ -336,6 +342,8 @@ def _plot_lc_with_residuals_df(
         raw_ax.invert_yaxis()
         raw_ax.grid(True, which="both", linestyle="--", alpha=0.3)
         raw_ax.tick_params(top=True, labeltop=True, bottom=False, labelbottom=False)
+        
+        # Consistent X-axis label for both file types
         raw_ax.set_xlabel(f"JD - {int(JD_OFFSET)} [d]")
         raw_ax.xaxis.set_label_position("top")
         
@@ -375,6 +383,7 @@ def _plot_lc_with_residuals_df(
         resid_ax.set_ylabel(f"Residual {band_name}")
         resid_ax.set_xlabel("JD")
         
+        # Dynamic Y-limits for residuals
         resid_min, resid_max = band_df["resid"].min(), band_df["resid"].max()
         pad = (resid_max - resid_min) * 0.1 if resid_max != resid_min else 0.1
         resid_ax.set_ylim(max(resid_max + pad, 0.35), min(resid_min - pad, -0.35))
@@ -382,7 +391,7 @@ def _plot_lc_with_residuals_df(
         if legend_handles:
             raw_ax.legend(handles=list(legend_handles.values()), title="Cameras", loc="best", fontsize="small")
             
-    # Title Logic
+    # Title Logic (using metadata from the previous fix)
     src_name = source_name or (metadata.get("source") if metadata else None)
     source_id = metadata.get("source_id") if metadata else None
     category = metadata.get("category") if metadata else None
@@ -396,6 +405,7 @@ def _plot_lc_with_residuals_df(
     else:
         label = "Source"
 
+    # Label using the original JD range for clarity
     jd_start = float(data["JD"].min())
     jd_end = float(data["JD"].max())
     jd_label = f"JD {jd_start:.0f}-{jd_end:.0f}"
@@ -422,7 +432,6 @@ def _plot_lc_with_residuals_df(
     if show: pl.show()
     else: pl.close(fig)
     return str(out_path)
-
 
 def plot_one_lc(
     dat_path,
@@ -571,182 +580,6 @@ def plot_many_lc(
 
     return outputs
 
-
-def _plot_lc_with_residuals_df(
-    df,
-    *,
-    out_path,
-    out_format="pdf",
-    title=None,
-    source_name=None,
-    figsize=(12, 8),
-    show=False,
-    metadata=None,
-):
-    data = df.copy()
-    data = data[np.isfinite(data["JD"]) & np.isfinite(data["mag"])]
-    data["JD_plot"] = data["JD"] - JD_OFFSET
-
-    preferred_order = [1, 0]
-    bands = [band for band in preferred_order if (data["v_g_band"] == band).any()]
-    if not bands:
-        bands = sorted(data["v_g_band"].dropna().unique())
-
-    n_cols = len(bands)
-    fig, axes = pl.subplots(
-        2,
-        n_cols,
-        figsize=figsize,
-        constrained_layout=True,
-        sharex="col",
-    )
-    
-    if n_cols == 1:
-        axes = np.array(axes).reshape(2, 1)
-
-    camera_ids = sorted(data["camera#"].dropna().unique())
-    cmap = pl.get_cmap("tab20", max(len(camera_ids), 1))
-    camera_colors = {cam: cmap(i % cmap.N) for i, cam in enumerate(camera_ids)}
-    band_labels = {0: "g band", 1: "V band"}
-    band_markers = {0: "o", 1: "s"}
-
-    for col_idx, band in enumerate(bands):
-        band_mask = data["v_g_band"] == band
-        band_df = data[band_mask]
-        if band_df.empty:
-            continue
-
-        raw_ax = axes[0, col_idx]
-        resid_ax = axes[1, col_idx]
-
-        raw_ax.invert_yaxis()
-        raw_ax.grid(True, which="both", linestyle="--", alpha=0.3)
-        raw_ax.tick_params(top=True, labeltop=True, bottom=False, labelbottom=False)
-        raw_ax.set_xlabel(f"JD - {int(JD_OFFSET)} [d]")
-        raw_ax.xaxis.set_label_position("top")
-
-        resid_ax.grid(True, which="both", linestyle="--", alpha=0.3)
-        resid_ax.axhline(0.0, color="black", linestyle="--", alpha=0.4, zorder=1)
-        
-        resid_ax.invert_yaxis()
-
-        resid_ax.axhline(0.3, color="black", linestyle="-", linewidth=0.8, zorder=1)
-        resid_ax.axhline(-0.3, color="black", linestyle="-", linewidth=0.8, zorder=1)
-        
-        resid_ax.fill_between(
-            [band_df["JD_plot"].min(), band_df["JD_plot"].max()],
-            0.3, 100, # Fill "down" (visually) for dips > 0.3
-            color="lightgrey", alpha=0.5, zorder=0
-        )
-        resid_ax.fill_between(
-            [band_df["JD_plot"].min(), band_df["JD_plot"].max()],
-            -0.3, -100, # Fill "up" (visually) for negative deviations < -0.3
-            color="lightgrey", alpha=0.45, zorder=0
-        )
-
-        legend_handles = {}
-        
-        for cam in camera_ids:
-            cam_subset = band_df[band_df["camera#"] == cam]
-            if cam_subset.empty:
-                continue
-            
-            color = camera_colors[cam]
-            marker = band_markers.get(band, "o")
-            
-            raw_ax.errorbar(
-                cam_subset["JD_plot"],
-                cam_subset["mag"],
-                yerr=cam_subset["error"],
-                fmt=marker,
-                ms=4,
-                color=color,
-                alpha=0.8,
-                ecolor=color,
-                elinewidth=0.8,
-                capsize=2,
-                markeredgecolor="black",
-                markeredgewidth=0.5,
-            )
-            
-            resid_ax.scatter(
-                cam_subset["JD_plot"],
-                cam_subset["resid"],
-                s=10,
-                color=color,
-                alpha=0.8,
-                edgecolor="black",
-                linewidth=0.3,
-                marker=marker,
-                zorder=3 
-            )
-            
-            if cam not in legend_handles:
-                legend_handles[cam] = Line2D(
-                    [], [],
-                    color=color, marker="o", linestyle="",
-                    markeredgecolor="black", markeredgewidth=0.5,
-                    label=f"Camera {cam}",
-                )
-
-        band_name = band_labels.get(band, f'band {band}')
-        raw_ax.set_ylabel(f"{band_name} mag")
-        resid_ax.set_ylabel(f"Residual {band_name}")
-        resid_ax.set_xlabel("JD")
-
-        resid_min = band_df["resid"].min()
-        resid_max = band_df["resid"].max()
-        pad = (resid_max - resid_min) * 0.1 if resid_max != resid_min else 0.1
-        plot_min = min(resid_min - pad, -0.35) 
-        plot_max = max(resid_max + pad, 0.35)
-        resid_ax.set_ylim(plot_max, plot_min)
-
-        if legend_handles:
-            raw_ax.legend(
-                handles=list(legend_handles.values()),
-                title="Cameras",
-                loc="best",
-                fontsize="small",
-            )
-
-    source_id = metadata.get("source_id") if metadata else None
-    category = metadata.get("category") if metadata else None
-    src_name = source_name or (metadata.get("source") if metadata else None)
-    
-    if src_name and source_id:
-        label = f"{src_name} ({source_id})"
-    else:
-        label = src_name or source_id or ""
-        
-    jd_start = float(data["JD"].min())
-    jd_end = float(data["JD"].max())
-    jd_label = f"JD {jd_start:.0f}-{jd_end:.0f}"
-    
-    title_parts = []
-    if label: title_parts.append(label)
-    if category: title_parts.append(category)
-    title_parts.append(jd_label)
-    
-    fig.suptitle(title or " – ".join(title_parts), fontsize="large")
-
-    if out_path is None:
-        base = source_id or src_name or "lc"
-        ext = f".{out_format.lstrip('.')}" if out_format else ".pdf"
-        out_path = PLOT_OUTPUT_DIR / f"{base}_residuals{ext}"
-    out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    if out_path.suffix.lower() == ".png":
-        fig.savefig(out_path, dpi=400)
-    else:
-        fig.savefig(out_path)
-
-    if show:
-        pl.show()
-    else:
-        pl.close(fig)
-
-    return str(out_path)
 
 def plot_lc_with_residuals(
     df=None,
