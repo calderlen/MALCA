@@ -234,58 +234,194 @@ def load_detection_results(csv_path=DETECTION_RESULTS_FILE):
     csv_path = Path(csv_path)
     if not csv_path.exists():
         raise FileNotFoundError(f"detection_results file not found: {csv_path}")
-    df = pd.read_csv(
-        csv_path,
-        dtype={"Source_ID": "string", "Source": "string", "DAT_Path": "string", "Category": "string"},
-        keep_default_na=False,
-    )
-    df["DAT_Path"] = df["DAT_Path"].astype(str).str.strip()
-    df["Source_ID"] = df["DAT_Path"].apply(lambda p: Path(p).stem if p else "")
-    df["Source"] = df["Source"].astype(str).str.strip()
-    df["Category"] = df["Category"].astype(str).str.strip()
+    
+    # Read as string to preserve IDs, clean whitespace
+    df = pd.read_csv(csv_path, dtype=str, keep_default_na=False)
+    df = df.apply(lambda x: x.str.strip() if x.dtype == "object" else x)
+    
+    # Derive clean ID from the DAT_Path filename to ignore scientific notation in Source_ID
+    df["Match_ID"] = df["DAT_Path"].apply(lambda p: Path(p).stem if p else "")
     return df
 
 def lookup_source_metadata(asassn_id=None, *, source_name=None, dat_path=None, csv_path=DETECTION_RESULTS_FILE):
     df = load_detection_results(csv_path)
-    mask = pd.Series(True, index=df.index)
-    if asassn_id is not None:
-        mask &= df["Source_ID"].astype(str).str.strip() == str(asassn_id).strip()
-    if source_name is not None:
-        mask &= df["Source"].astype(str).str.strip().str.lower() == str(source_name).strip().lower()
-    if dat_path is not None:
-        mask &= df["DAT_Path"].astype(str).str.strip() == str(dat_path).strip()
-    matches = df.loc[mask]
+    matches = pd.DataFrame()
+
+    if asassn_id:
+        matches = df[df["Match_ID"] == str(asassn_id).strip()]
+    if matches.empty and dat_path:
+        matches = df[df["DAT_Path"] == str(dat_path).strip()]
+    if matches.empty and source_name:
+        matches = df[df["Source"].str.lower() == str(source_name).strip().lower()]
+
     if matches.empty:
         return None
+
     row = matches.iloc[0]
     return {
         "dat_path": row.get("DAT_Path"),
         "source": row.get("Source"),
-        "source_id": str(row.get("Source_ID")),
+        "source_id": row.get("Match_ID"),
         "category": row.get("Category"),
+        "vsx_class": row.get("VSX_Class"),
     }
 
 def _lookup_metadata_for_path(path: Path):
-    """
-    Try to resolve metadata for a given light curve path, falling back to ID stems.
-    """
-    metadata = None
+    path = Path(path)
     stem = path.stem
-    try:
-        metadata = lookup_source_metadata(asassn_id=stem, dat_path=str(path))
-    except FileNotFoundError:
-        metadata = None
+    
+    # Try exact match
+    meta = lookup_source_metadata(asassn_id=stem, dat_path=str(path))
+    if meta: return meta
 
-    if metadata:
-        return metadata
+    # Try stripping suffixes common in SkyPatrol/output files
+    if "-light-curves" in stem:
+        meta = lookup_source_metadata(asassn_id=stem.replace("-light-curves", ""))
+        if meta: return meta
+        
+    if "-" in stem:
+        meta = lookup_source_metadata(asassn_id=stem.split("-")[0])
+        if meta: return meta
 
-    base_id = stem.split("-", 1)[0]
-    if base_id and base_id != stem:
-        try:
-            metadata = lookup_source_metadata(asassn_id=base_id)
-        except FileNotFoundError:
-            metadata = None
-    return metadata
+    return None
+
+def _plot_lc_with_residuals_df(
+    df,
+    *,
+    out_path,
+    out_format="pdf",
+    title=None,
+    source_name=None,
+    figsize=(12, 8),
+    show=False,
+    metadata=None,
+):
+    data = df.copy()
+    data = data[np.isfinite(data["JD"]) & np.isfinite(data["mag"])]
+    
+    # FIX: Check if JD is already offset before subtracting
+    median_jd = data["JD"].median()
+    if median_jd > 2000000:
+        data["JD_plot"] = data["JD"] - JD_OFFSET
+    else:
+        data["JD_plot"] = data["JD"]
+
+    preferred_order = [1, 0]
+    bands = [band for band in preferred_order if (data["v_g_band"] == band).any()]
+    if not bands:
+        bands = sorted(data["v_g_band"].dropna().unique())
+    n_cols = len(bands)
+    
+    fig, axes = pl.subplots(
+        2, n_cols, figsize=figsize, constrained_layout=True, sharex="col"
+    )
+    
+    if n_cols == 1:
+        axes = np.array(axes).reshape(2, 1)
+        
+    camera_ids = sorted(data["camera#"].dropna().unique())
+    cmap = pl.get_cmap("tab20", max(len(camera_ids), 1))
+    camera_colors = {cam: cmap(i % cmap.N) for i, cam in enumerate(camera_ids)}
+    band_labels = {0: "g band", 1: "V band"}
+    band_markers = {0: "o", 1: "s"}
+
+    for col_idx, band in enumerate(bands):
+        band_mask = data["v_g_band"] == band
+        band_df = data[band_mask]
+        if band_df.empty: continue
+            
+        raw_ax = axes[0, col_idx]
+        resid_ax = axes[1, col_idx]
+        
+        raw_ax.invert_yaxis()
+        raw_ax.grid(True, which="both", linestyle="--", alpha=0.3)
+        raw_ax.tick_params(top=True, labeltop=True, bottom=False, labelbottom=False)
+        raw_ax.set_xlabel(f"JD - {int(JD_OFFSET)} [d]")
+        raw_ax.xaxis.set_label_position("top")
+        
+        resid_ax.grid(True, which="both", linestyle="--", alpha=0.3)
+        resid_ax.axhline(0.0, color="black", linestyle="--", alpha=0.4, zorder=1)
+        resid_ax.invert_yaxis()
+        resid_ax.axhline(0.3, color="black", linestyle="-", linewidth=0.8, zorder=1)
+        resid_ax.axhline(-0.3, color="black", linestyle="-", linewidth=0.8, zorder=1)
+        
+        resid_ax.fill_between([band_df["JD_plot"].min(), band_df["JD_plot"].max()], 0.3, 100, color="lightgrey", alpha=0.5, zorder=0)
+        resid_ax.fill_between([band_df["JD_plot"].min(), band_df["JD_plot"].max()], -0.3, -100, color="lightgrey", alpha=0.45, zorder=0)
+        
+        legend_handles = {}
+        for cam in camera_ids:
+            cam_subset = band_df[band_df["camera#"] == cam]
+            if cam_subset.empty: continue
+            
+            color = camera_colors[cam]
+            marker = band_markers.get(band, "o")
+            
+            raw_ax.errorbar(
+                cam_subset["JD_plot"], cam_subset["mag"], yerr=cam_subset["error"],
+                fmt=marker, ms=4, color=color, alpha=0.8, ecolor=color,
+                elinewidth=0.8, capsize=2, markeredgecolor="black", markeredgewidth=0.5,
+            )
+            
+            resid_ax.scatter(
+                cam_subset["JD_plot"], cam_subset["resid"], s=10, color=color,
+                alpha=0.8, edgecolor="black", linewidth=0.3, marker=marker, zorder=3
+            )
+            
+            if cam not in legend_handles:
+                legend_handles[cam] = Line2D([], [], color=color, marker="o", linestyle="", markeredgecolor="black", markeredgewidth=0.5, label=f"Camera {cam}")
+        
+        band_name = band_labels.get(band, f'band {band}')
+        raw_ax.set_ylabel(f"{band_name} mag")
+        resid_ax.set_ylabel(f"Residual {band_name}")
+        resid_ax.set_xlabel("JD")
+        
+        resid_min, resid_max = band_df["resid"].min(), band_df["resid"].max()
+        pad = (resid_max - resid_min) * 0.1 if resid_max != resid_min else 0.1
+        resid_ax.set_ylim(max(resid_max + pad, 0.35), min(resid_min - pad, -0.35))
+        
+        if legend_handles:
+            raw_ax.legend(handles=list(legend_handles.values()), title="Cameras", loc="best", fontsize="small")
+            
+    # Title Logic
+    src_name = source_name or (metadata.get("source") if metadata else None)
+    source_id = metadata.get("source_id") if metadata else None
+    category = metadata.get("category") if metadata else None
+    
+    if src_name and source_id:
+        label = f"{src_name} ({source_id})"
+    elif source_id:
+        label = str(source_id)
+    elif src_name:
+        label = str(src_name)
+    else:
+        label = "Source"
+
+    jd_start = float(data["JD"].min())
+    jd_end = float(data["JD"].max())
+    jd_label = f"JD {jd_start:.0f}-{jd_end:.0f}"
+    
+    title_parts = [label]
+    if category: title_parts.append(category)
+    title_parts.append(jd_label)
+    
+    fig.suptitle(title or " – ".join(title_parts), fontsize="large")
+    
+    if out_path is None:
+        base = source_id or src_name or "lc"
+        ext = f".{out_format.lstrip('.')}" if out_format else ".pdf"
+        out_path = PLOT_OUTPUT_DIR / f"{base}_residuals{ext}"
+        
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    if out_path.suffix.lower() == ".png":
+        fig.savefig(out_path, dpi=400)
+    else:
+        fig.savefig(out_path)
+        
+    if show: pl.show()
+    else: pl.close(fig)
+    return str(out_path)
 
 
 def plot_one_lc(
