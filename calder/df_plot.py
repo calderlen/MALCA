@@ -269,21 +269,20 @@ def lookup_source_metadata(asassn_id=None, *, source_name=None, dat_path=None, c
 def _lookup_metadata_for_path(path: Path):
     path = Path(path)
     stem = path.stem
+    source_type = "SkyPatrol" if path.suffix.lower() == ".csv" else "Internal"
     
-    # Try exact match
     meta = lookup_source_metadata(asassn_id=stem, dat_path=str(path))
-    if meta: return meta
-
-    # Try stripping suffixes common in SkyPatrol/output files
-    if "-light-curves" in stem:
+    if not meta and "-light-curves" in stem:
         meta = lookup_source_metadata(asassn_id=stem.replace("-light-curves", ""))
-        if meta: return meta
-        
-    if "-" in stem:
+    if not meta and "-" in stem:
         meta = lookup_source_metadata(asassn_id=stem.split("-")[0])
-        if meta: return meta
 
-    return None
+    if not meta:
+        return {"data_source": source_type}
+
+    meta = dict(meta)
+    meta["data_source"] = source_type
+    return meta
 
 def _plot_lc_with_residuals_df(
     df,
@@ -395,6 +394,7 @@ def _plot_lc_with_residuals_df(
     src_name = source_name or (metadata.get("source") if metadata else None)
     source_id = metadata.get("source_id") if metadata else None
     category = metadata.get("category") if metadata else None
+    source_type = metadata.get("data_source") if metadata else None
     
     if src_name and source_id:
         label = f"{src_name} ({source_id})"
@@ -412,6 +412,7 @@ def _plot_lc_with_residuals_df(
     
     title_parts = [label]
     if category: title_parts.append(category)
+    if source_type: title_parts.append(f"{source_type} LC")
     title_parts.append(jd_label)
     
     fig.suptitle(title or " – ".join(title_parts), fontsize="large")
@@ -507,6 +508,7 @@ def plot_one_lc(
 
     asassn_id = dat_path.stem
     category = metadata.get("category") if metadata else None
+    source_type = metadata.get("data_source") if metadata else None
     jd_start = float(df["JD_plot"].min())
     jd_end = float(df["JD_plot"].max())
     jd_label = f"JD - {int(JD_OFFSET)} [{jd_start:.0f}:{jd_end:.0f}]"
@@ -517,6 +519,7 @@ def plot_one_lc(
     label = f"{source_name} ({asassn_id})" if source_name else asassn_id
     parts = [label]
     if category: parts.append(category)
+    if source_type: parts.append(f"{source_type} LC")
     parts.append(jd_label)
     
     fig_title = title or f"{' – '.join(parts)} light curve"
@@ -638,7 +641,12 @@ def plot_lc_with_residuals(
         else:
             df_base = df_raw
 
-        meta = metadata or _lookup_metadata_for_path(path)
+        source_type = "SkyPatrol" if path.suffix.lower() == ".csv" else "Internal"
+        if metadata is not None:
+            meta = dict(metadata)
+        else:
+            meta = _lookup_metadata_for_path(path) or {}
+        meta.setdefault("data_source", source_type)
 
         if multi:
             ext = f".{out_format.lstrip('.')}" if out_format else ".pdf"
