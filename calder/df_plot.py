@@ -389,6 +389,8 @@ def _plot_lc_with_residuals_df(
     src_name = source_name or (metadata.get("source") if metadata else None)
     source_id = metadata.get("source_id") if metadata else None
     category = metadata.get("category") if metadata else None
+    # FIX: Retrieve the data source type (Internal vs SkyPatrol)
+    source_type = metadata.get("data_source") if metadata else None
     
     if src_name and source_id:
         label = f"{src_name} ({source_id})"
@@ -405,6 +407,8 @@ def _plot_lc_with_residuals_df(
     
     title_parts = [label]
     if category: title_parts.append(category)
+    # FIX: Append the source type to the title
+    if source_type: title_parts.append(f"{source_type} LC") 
     title_parts.append(jd_label)
     
     fig.suptitle(title or " – ".join(title_parts), fontsize="large")
