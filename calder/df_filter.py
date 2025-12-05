@@ -538,7 +538,7 @@ def filter_csv(
     peak_mode: str = "naive",
     asassn_csv: str | Path = "results_crossmatch/asassn_index_masked_concat_cleaned_20250926_1557.csv",
     vsx_csv: str | Path = "results_crossmatch/vsx_cleaned_20250926_1557.csv",
-    min_dip_fraction: float = 0.66,
+    min_dip_fraction: float = 0.0,
     min_cameras: int = 2,
     max_power: float = 0.5,
     min_period: float | None = None,

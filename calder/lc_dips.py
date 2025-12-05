@@ -348,6 +348,33 @@ def _compute_biweight_delta(df, *, mag_col="mag", t_col="JD", err_col="error", b
     return delta, jd, R
 
 
+def _compute_biweight_delta_peaks(df, *, mag_col="mag", t_col="JD", err_col="error", biweight_c=6.0, eps=1e-6):
+    """
+    Peak-oriented version of biweight delta where brightenings are positive.
+
+    Uses (R - mag) so that microlensing-like peaks (smaller magnitudes) produce
+    positive delta values suitable for peak finding.
+    """
+    mag = np.asarray(df[mag_col], float) if mag_col in df.columns else np.array([], float)
+    jd = np.asarray(df[t_col], float) if t_col in df.columns else np.array([], float)
+    if err_col in df.columns:
+        err = np.asarray(df[err_col], float)
+    else:
+        err = np.full_like(mag, np.nan, dtype=float)
+
+    finite_m = np.isfinite(mag)
+    R = float(biweight_location(mag[finite_m], c=biweight_c)) if finite_m.any() else np.nan
+    S = float(biweight_scale(mag[finite_m], c=biweight_c)) if finite_m.any() else 0.0
+    if not np.isfinite(S) or S < 0:
+        S = 0.0
+
+    err2 = np.where(np.isfinite(err), err**2, 0.0)
+    denom = np.sqrt(err2 + S**2)
+    denom = np.where(denom > 0, denom, eps)
+    delta = (R - mag) / denom
+    return delta, jd, R
+
+
 def process_record_biweight(
     record: dict,
     baseline_kwargs: dict,
