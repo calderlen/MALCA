@@ -8,7 +8,7 @@ from typing import Iterable, Sequence
 import pandas as pd
 from tqdm import tqdm
 
-from lc_dips import MAG_BINS, lc_dir_masked
+from lc_excursions import MAG_BINS, lc_dir_masked
 
 IDX_PATTERN = re.compile(r"index(\d+)_masked\.csv$", re.IGNORECASE)
 

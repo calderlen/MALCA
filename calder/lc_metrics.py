@@ -108,7 +108,7 @@ def is_dip_dominated(metrics_dict, min_dip_fraction=0.66):
     """
     returns True if the the dip fraction from the metrics dict is above a certain value, currently 2/3
     """
-    if ~np.isnan(metrics_dict["dip_fraction"]) and metrics_dict["dip_fraction"] >= min_dip_fraction:
+    if not np.isnan(metrics_dict["dip_fraction"]) and metrics_dict["dip_fraction"] >= min_dip_fraction:
             return True
     else :
         return False

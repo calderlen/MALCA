@@ -14,19 +14,21 @@ def year_to_jd(year):
     """
     ADOPTED FROM BRAYDEN JOHANTGEN'S CODE: https://github.com/johantgen13/Dippers_Project.git
     """
-    jd_epoch = 2449718.5 - (2.458 * 10 **6)
+    jd_epoch = 2449718.5  # JD at 1995-01-01 00:00:00 TT
     year_epoch = 1995
     days_in_year = 365.25
-    return (year-year_epoch)*days_in_year + jd_epoch-2450000
+    # Return JD relative to JD-2450000 to match ASAS-SN convention
+    return (year - year_epoch) * days_in_year + (jd_epoch - 2450000.0)
 
 def jd_to_year(jd):
     """
     ADOPTED FROM BRAYDEN JOHANTGEN'S CODE: https://github.com/johantgen13/Dippers_Project.git
     """
-    jd_epoch = 2449718.5 - (2.458 * 10 **6)
+    jd_epoch = 2449718.5  # JD at 1995-01-01 00:00:00 TT
     year_epoch = 1995
     days_in_year = 365.25
-    return year_epoch + (jd - jd_epoch) / days_in_year
+    # Input jd is expected to be JD-2450000; convert back to JD
+    return year_epoch + ((jd + 2450000.0) - jd_epoch) / days_in_year
 
 def read_lc_dat(asassn_id, path):
 
@@ -118,7 +120,7 @@ def read_lc_raw(asassn_id, path):
 def match_index_to_lc(
     index_path: str = "/data/poohbah/1/assassin/lenhart/code/calder/lcsv2_masked/",
     lc_path:    str = "/data/poohbah/1/assassin/rowan.90/lcsv2",
-    mag_bins:   list = ['12_12.5','12.5_13','13_13.5','13.5_14','14.5_15'],
+    mag_bins:   list = ['12_12.5','12.5_13','13_13.5','13.5_14','14_14.5','14.5_15'],
     id_column:  str = "asas_sn_id",
 ):
     """

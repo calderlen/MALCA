@@ -1,20 +1,22 @@
 import numpy as np
 import pandas as pd
 import scipy
-from astropy.stats.biweight import biweight_location, biweight_scale
+from astropy.stats import biweight_location, biweight_scale
 
 def year_to_jd(year):
-    jd_epoch = 2449718.5 - (2.458 * 10 **6)
+    jd_epoch = 2449718.5  # JD at 1995-01-01 00:00:00 TT
     year_epoch = 1995
     days_in_year = 365.25
-    return (year-year_epoch)*days_in_year + jd_epoch-2450000
+    # Return JD relative to JD-2450000 to match ASAS-SN convention
+    return (year - year_epoch) * days_in_year + (jd_epoch - 2450000.0)
 
 
 def jd_to_year(jd):
-    jd_epoch = 2449718.5 - (2.458 * 10 **6)
+    jd_epoch = 2449718.5  # JD at 1995-01-01 00:00:00 TT
     year_epoch = 1995
     days_in_year = 365.25
-    return year_epoch + (jd - jd_epoch) / days_in_year
+    # Input jd is expected to be JD-2450000; convert back to JD
+    return year_epoch + ((jd + 2450000.0) - jd_epoch) / days_in_year
 
 
 def peak_search_residual_baseline(

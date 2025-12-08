@@ -32,7 +32,7 @@ asassn_raw_columns = [
                '90percentlow',
                '90percenthigh']
 
-PLOT_OUTPUT_DIR = Path("/lc_plots")
+PLOT_OUTPUT_DIR = Path("lc_plots")
 DETECTION_RESULTS_FILE = Path("detection_results.csv")
 JD_OFFSET = 2458000.0
 DEFAULT_DAT_PATHS = [

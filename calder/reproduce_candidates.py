@@ -7,7 +7,7 @@ from typing import Iterable, Mapping, Sequence
 import numpy as np
 import pandas as pd
 
-from lc_dips import naive_dip_finder
+from lc_excursions_naive import naive_dip_finder
 
 
 brayden_candidates: list[dict[str, object]] = [
