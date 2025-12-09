@@ -89,17 +89,7 @@ def peak_search_biweight_delta(
     eps=1e-6,
 ):
     """
-    Tzanidakis et al. (2025)-style biweight magnitude deviation.
-
-    Computes:
-        delta_i = (m_i - R) / sqrt(err_i^2 + S^2)
-
-    where:
-        R = biweight location of the light curve
-        S = biweight scale of the light curve (optional)
-
-    Returns:
-        (peaks_series, R, n_peaks)
+    Tzanidakis et al. (2025) biweight magnitude deviation
     """
 
     mag = np.asarray(df[mag_col], float) if mag_col in df.columns else np.array([], float)
@@ -112,7 +102,7 @@ def peak_search_biweight_delta(
 
     finite_m = np.isfinite(mag)
 
-    # Biweight location (robust center)
+    # biweight location
     if finite_m.any():
         R = float(biweight_location(mag[finite_m], c=biweight_c))
         S = float(biweight_scale(mag[finite_m], c=biweight_c))
@@ -123,7 +113,6 @@ def peak_search_biweight_delta(
     if not np.isfinite(S) or S < 0:
         S = 0.0
 
-    # Build denominator sqrt(err^2 + S^2)
     err2 = np.where(np.isfinite(err), err**2, 0.0)
     denom = np.sqrt(err2 + S**2)
     denom = np.where(denom > 0, denom, eps)

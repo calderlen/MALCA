@@ -200,7 +200,7 @@ def score_dips_gaussian(delta, jd, err, peak_idx, sigma_threshold):
                     t_win,
                     d_win,
                     p0=[amp0, mu0, sig0],
-                    maxfev=2000,
+                    maxfev=min(2000, len(t_win) * 50),  # Scale maxfev with data size
                 )
                 amp, mu, sig = popt
                 model = gaussian(t_win, amp, mu, sig)
@@ -289,13 +289,19 @@ def score_peaks_paczynski(delta, jd, err, peak_idx, sigma_threshold):
         delta_peak = float(delta[p]) if 0 <= p < len(delta) else 0.0
 
         # find window where delta returns to <= 0.5 sigma_threshold on both sides
+        # Limit window size to prevent excessive iterations
+        max_window_size = 500
         left = p
-        while left > 0 and delta[left] > 0.5 * sigma_threshold:
+        left_steps = 0
+        while left > 0 and delta[left] > 0.5 * sigma_threshold and left_steps < max_window_size:
             left -= 1
+            left_steps += 1
         right = p
         nmax = len(delta) - 1
-        while right < nmax and delta[right] > 0.5 * sigma_threshold:
+        right_steps = 0
+        while right < nmax and delta[right] > 0.5 * sigma_threshold and right_steps < max_window_size:
             right += 1
+            right_steps += 1
 
         window = slice(left, right + 1)
         t_win = jd[window]
@@ -322,7 +328,7 @@ def score_peaks_paczynski(delta, jd, err, peak_idx, sigma_threshold):
                         [0.0, t_win.min() - half_width, 1e-3],
                         [np.inf, t_win.max() + half_width, np.inf],
                     ),
-                    maxfev=4000,
+                    maxfev=min(4000, len(t_win) * 100),  # Scale maxfev with data size
                 )
                 amp, t0_fit, tE = popt
                 tE = abs(tE)
@@ -708,8 +714,11 @@ def excursion_finder(
         def drain_some(all_pending):
             done_now = 0
             done = []
-            for fut in as_completed(all_pending, timeout=0.1):
-                done.append(fut)
+            try:
+                for fut in as_completed(all_pending, timeout=0.1):
+                    done.append(fut)
+            except TimeoutError:
+                pass
             for fut in done:
                 row = fut.result()
                 rows_buffer.append(row)
