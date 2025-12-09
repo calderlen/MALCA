@@ -2,165 +2,22 @@
 
 Pipeline to search for peaks and dips in ASAS-SN light curves
 
-## Modules
-- `calder/lc_excursions.py`
-  - `clean_lc`
-    - removes saturated light curves
-    - mask any NaN's in JD and mag (may be unnecessary?)
-    - sort light curves by JD (may be unnecessary?)
-  - `empty_metrics`
-    - creates empty dict for dip metrics for a single band
-  - `mag_to_delta_space`
-    - transforms the light curve to delta space with the biweight magntiude deviation, as done in https://arxiv.org/pdf/2508.03964
-  - `gaussian`
-  - `score_dips_gaussian`
-      - fits Gaussians to peaks of light curve in delta space, then scores the light curve using $ S = \frac{1}{\ln (N+1)^N} \sum_{n=i}^{N} \left( \frac{\delta_i}{2} \times \Phi_i \times N_{\mathrm{det},i} \times \frac{1}{\chi_i^2} \right) $. This metric is adopted from https://iopscience.iop.org/article/10.3847/1538-4357/adf5bb
-  - `paczynski`
-    - see https://en.wikipedia.org/wiki/Gravitational_microlensing
-  - `score_peaks_paczynski`
-    - fits Paczynski curve to brightenings of the light curve in delta space
-    - scores the light curve using the same metric as above.
-  - `lc_band_proc`
-    - since the ASAS-SN light curves are in two bands, V and G which have offsets, we analyze them separately. this function looks at only one of the two bands of the light curve at a time, converts the mag to delta, and finds dips/peaks a minimum distance of 50 data points apart (~1 data point per day), scores the light curve band and computes other metrics
-  - `prefix_metrics`
-  - `lc_proc`
-    - intakes a single light curve's g and v bands
-    - finds the first and last jd
-    - outputs a dict summarizing information about the light curve
-  - `excursion_finder`
-    - orchestrates parallel processing of light curves (record prep, worker submission, peak/dip analysis via `lc_proc`, and buffered writing of results) test
-- `calder/lc_excursions_naive.py`
-  - `clean_lc`
-  - `empty_metrics`
-  - `lc_proc_naive`
-    - optionally computes baseline of a single light curve
-    - finds peaks in baseline residuals for a single light curve
-    - computes dip metrics for a single light curve
-  - `naive_dip_finder`
-- `calder/lc_baseline.py`
-  - `global_mean_baseline`
-  - `global_median_baseline`
-  - `rolling_time_median`
-  - `rolling_time_mad`
-  - `global_rolling_median_baseline`
-  - `global_rolling_mean_baseline`
-  - `per_camera_mean_baseline`
-  - `per_camera_median_baseline`
-  - `per_camera_trend_baseline`
-  - `per_camera_gp_baseline`
-- `calder/lc_metrics.py`
-  - `find_runs`
-  - `run_metrics`
-  - `is_dip_dominated`
-  - `multi_camera_confirmation`
-- `calder/lc_utils.py`
-  - `year_to_jd`
-  - `jd_to_year`
-  - `read_lc_dat`
-  - `read_lc_raw`
-  - `match_index_to_lc`
-  - `custom_id`
-  - `plotparams`
-  - `divide_cameras`
-- `calder/df_filter.py`
-  - `_call_filter_by_name`
-  - `_filter_candidates_chunk`
-  - `_run_step_sequential`
-  - `_first_col`
-  - `_log_rejections`
-  - `candidates_with_peaks_naive`
-  - `candidates_with_peaks_biweight`
-  - `filter_bns`
-  - `vsx_class_extract`
-  - `filter_dip_dominated`
-  - `filter_multi_camera`
-  - `filter_periodic_candidates`
-  - `filter_sparse_lightcurves`
-  - `box_filter`
-  - `_sigma_ok_for_row`
-  - `filter_sigma_resid`
-  - `filter_csv`
-  - `parse_bin_key`
-  - `latest_per_bin`
-  - `gather_files`
-  - `_run_one_file`
-  - `_build_cli_parser`
-  - `main`
-- `calder/df_utils.py`
-  - `year_to_jd`
-  - `jd_to_year`
-  - `peak_search_residual_baseline`
-  - `peak_search_biweight_delta`
-- `calder/df_plot.py`
-  - `read_asassn_dat`
-  - `read_skypatrol_csv`
-  - `_load_lightcurve_df`
-  - `load_detection_results`
-  - `lookup_source_metadata`
-  - `_lookup_metadata_for_path`
-  - `_plot_lc_with_residuals_df`
-  - `plot_lc_with_residuals`
-  - `plot_one_lc`
-  - `plot_many_lc`
-- `calder/lc_manifest.py`
-  - `_iter_source_records`
-  - `build_manifest_dataframe`
-  - `parse_args`
-  - `main`
-- `calder/reproduce_candidates.py`
-  - `_load_manifest_df`
-  - `_dataframe_from_candidates`
-  - `_target_map`
-  - `_records_from_manifest`
-  - `_coerce_candidate_records`
-  - `_resolve_candidates`
-  - `build_reproduction_report`
-  - `_build_parser`
-  - `main`
-- `calder/stats.py`
-  - `weighted_mean`
-  - `robust_sigma`
-  - `pct`
-  - `reduced_chisq`
-  - `von_neumann_ratio`
-  - `lag1_autocorr`
-  - `linear_trend`
-  - `compute_stats`
-  - `print_summary`
-  - `load_dat`
-  - `main`
-- `calder/vsx_crossmatch.py`
-  - `load_asassn_catalog`
-  - `load_vsx_catalog`
-  - `propagate_asassn_coords`
-  - `vsx_coords`
-  - `crossmatch_asassn_vsx`
-  - `write_crossmatch`
-  - `main`
-- `calder/vsx_filter.py`
-  - `normalize_token`
-  - `tokenize_classes`
-  - `filter_vsx_classes`
-  - `load_vsx_catalog`
-  - `filter_vsx`
-  - `load_masked_indexes`
-  - `collect_present_ids`
-  - `write_clean_outputs`
-  - `main`
-- `calder/vsx_reproducibility.py`
-  - `validate_columns`
-  - `coords`
-  - `match_catalog`
-  - `run_matches`
-  - `main`
-- `calder/lc_peaks.py`
-- `calder/test.py`
-  - `all_candidate_ids`
-  - `pick_id_column`
-  - `locate_targets`
-  - `print_matches`
-  - `main`
+## How to use
+- `calder/lc_manifest.py`  
+  Build a csv/parquet file mapping ASAS-SN IDs to LC paths:  
+  `python calder/lc_manifest.py --index-root <path_to_index_root> --lc-root <path_to_lc_root> --out ./lc_manifest.csv [--mag-bin 12_12.5 ...]`
 
+- `calder/lc_excursions.py`  
+  Run dip/peak search, (writes CSV/Parquet):  
+  `python calder/lc_excursions.py --mode dips|peaks --out-dir ./results_dips --format csv --n-workers 10 --chunk-size 250000 [--mag-bin 12_12.5 ...]`
+
+- `calder/reproduce_candidates.py`  
+  Search for peaks/dips from a list of candidates (default: brayden list):  
+  `python calder/reproduce_candidates.py --method biweight|naive --manifest ./lc_manifest.csv --out-dir ./results_repro --out-format csv [--candidates <file_or_builtin>] [--n-workers 8]`
+
+- `calder/df_filter.py`  
+  Filter the list of peaks/dips
+  `python calder/df_filter.py <peaks_csv_or_dir> [--biweight] [--band g|v|both|either] [--latest-per-bin] [--output <csv>] [--output-dir <dir>]`
 
 ## Dependencies
 - numpy

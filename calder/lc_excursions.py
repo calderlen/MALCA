@@ -751,6 +751,7 @@ def excursion_finder(
 
 __all__ = ["MAG_BINS", "lc_proc", "excursion_finder"]
 
+# expose to CLI
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run dip or microlensing finder across bins.")
     parser.add_argument("--mode", choices=("dips", "peaks"), default="dips", help="Select dips (biweight delta + Gaussian fits) or peaks (microlensing Paczynski fits).")

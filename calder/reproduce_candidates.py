@@ -312,6 +312,8 @@ __all__ = [
     "build_reproduction_report",
 ]
 
+# expose to CLI
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run the targeted reproduction search and summarize results."
