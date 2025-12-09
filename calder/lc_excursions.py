@@ -713,12 +713,7 @@ def excursion_finder(
 
         def drain_some(all_pending):
             done_now = 0
-            done = []
-            try:
-                for fut in as_completed(all_pending, timeout=0.1):
-                    done.append(fut)
-            except TimeoutError:
-                pass
+            done = [fut for fut in all_pending if fut.done()]
             for fut in done:
                 row = fut.result()
                 rows_buffer.append(row)
