@@ -1,6 +1,11 @@
+import os
+import argparse
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import numpy as np
 import pandas as pd
 from scipy.special import logsumexp
+from tqdm import tqdm
 
 from lc_utils import read_lc_dat, read_lc_raw, match_index_to_lc
 
@@ -191,7 +196,6 @@ def bayesian_excursion_significance(
     log_Pf_weighted = log_1mp[None, :, None] + log_Pf_grid[:, None, :]
 
     # log_mix shape: (p_grid_len, mag_grid_len, mag_num)
-    
     log_mix = np.logaddexp(log_Pb_weighted, log_Pf_weighted)
     loglik = np.sum(log_mix, axis=2)  # (mag_grid_len, p_grid_len)
 
@@ -207,12 +211,12 @@ def bayesian_excursion_significance(
 
     # Per-point excursion probability via marginalization over p, mag_grid
     event_prob = np.zeros(mag_num, dtype=float)
-    log_mix_den = logsumexp(loglik)  # shared denominator (evidence)
+    log_mix_denom = logsumexp(loglik)  # shared denominator (evidence)
 
     for j in range(mag_num):
-        loglik_noj = loglik - log_mix[:, :, j]
-        bright_num = loglik_noj + log_p[None, :] + log_Pb_grid[:, None, j]
-        faint_num = loglik_noj + log_1mp[None, :] + log_Pf_grid[:, None, j]
+        loglik_excluding_j = loglik - log_mix[:, :, j] # leave one out
+        bright_num = loglik_excluding_j + log_p[None, :] + log_Pb_grid[:, None, j]
+        faint_num = loglik_excluding_j + log_1mp[None, :] + log_Pf_grid[:, None, j]
 
         log_bright = logsumexp(bright_num)
         log_faint = logsumexp(faint_num)
@@ -220,7 +224,10 @@ def bayesian_excursion_significance(
 
         bright_prob = np.exp(log_bright - log_norm)
         faint_prob = np.exp(log_faint - log_norm)
-        event_prob[j] = faint_prob if excursion_component == "faint" else bright_prob
+        if excursion_component == "faint":
+            event_prob[j] = faint_prob
+        elif excursion_component == "bright":
+            event_prob[j] = bright_prob
 
     event_indices = np.nonzero(event_prob >= significance_threshold)[0]
     significant = event_prob.size > 0 and float(np.nanmax(event_prob)) >= significance_threshold
@@ -256,7 +263,7 @@ def run_bayesian_significance(
     p_points=80,
     mag_grid_dip=None,
     mag_grid_jump=None,
-    significance_threshold=0.99,
+    significance_threshold=0.9545, #2-sigma
 ):
     """
     Convenience wrapper to evaluate both dips and jumps with the same inputs
@@ -289,3 +296,96 @@ def run_bayesian_significance(
         significance_threshold=significance_threshold,
     )
     return {"dip": dip, "jump": jump}
+
+
+# ----------------------------
+# CLI / multiprocessing runner
+# ----------------------------
+
+# Keep BLAS/OMP single-threaded per worker to avoid oversubscription
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+
+
+def _process_one(path, *, significance_threshold=0.9545, p_points=80):
+    df = read_lc_dat(path)
+    res = run_bayesian_significance(
+        df,
+        significance_threshold=significance_threshold,
+        p_points=p_points,
+    )
+    dip = res["dip"]
+    jump = res["jump"]
+    return {
+        "path": path,
+        "dip_significant": bool(dip["significant"]),
+        "jump_significant": bool(jump["significant"]),
+        "dip_bayes_factor": float(dip["bayes_factor"]),
+        "jump_bayes_factor": float(jump["bayes_factor"]),
+        "dip_best_p": float(dip["best_p"]),
+        "jump_best_p": float(jump["best_p"]),
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Run Bayesian excursion significance on light curves in parallel."
+    )
+    parser.add_argument("inputs", nargs="+", help="Paths to light-curve files")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=max(1, mp.cpu_count() - 2),
+        help="Number of worker processes (default: cpu_count-2)",
+    )
+    parser.add_argument(
+        "--significance-threshold",
+        type=float,
+        default=0.9545,
+        help="Per-point significance threshold (default: 0.9545 ~ 2-sigma)",
+    )
+    parser.add_argument(
+        "--p-points",
+        type=int,
+        default=80,
+        help="Number of points in the logit-spaced p grid (default: 80)",
+    )
+    parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="Optional CSV path to write results; if omitted, print to stdout.",
+    )
+    args = parser.parse_args()
+
+    results = []
+    with ProcessPoolExecutor(max_workers=args.workers) as ex:
+        futs = {
+            ex.submit(
+                _process_one,
+                path,
+                significance_threshold=args.significance_threshold,
+                p_points=args.p_points,
+            ): path
+            for path in args.inputs
+        }
+        for fut in tqdm(as_completed(futs), total=len(futs), desc="LCs", unit="lc"):
+            results.append(fut.result())
+
+    if args.output:
+        df_out = pd.DataFrame(results)
+        df_out.to_csv(args.output, index=False)
+        print(f"Wrote {len(results)} rows to {args.output}")
+    else:
+        for row in results:
+            print(
+                f"{row['path']}\t"
+                f"dip_sig={row['dip_significant']}\tjump_sig={row['jump_significant']}\t"
+                f"dip_bf={row['dip_bayes_factor']:.3f}\tjump_bf={row['jump_bayes_factor']:.3f}"
+            )
+
+
+if __name__ == "__main__":
+    main()
