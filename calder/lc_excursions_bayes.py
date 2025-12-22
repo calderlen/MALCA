@@ -7,7 +7,7 @@ import pandas as pd
 from scipy.special import logsumexp
 from tqdm import tqdm
 
-from lc_utils import read_lc_dat, read_lc_raw, match_index_to_lc
+from lc_utils import read_lc_dat2, read_lc_raw, match_index_to_lc
 
 lc_dir_masked = "/data/poohbah/1/assassin/lenhart/code/calder/lcsv2_masked"
 MAG_BINS = ['12_12.5','12.5_13','13_13.5','13.5_14','14_14.5','14.5_15']
@@ -310,7 +310,7 @@ os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 
 
 def _process_one(path, *, significance_threshold=0.9545, p_points=80):
-    df = read_lc_dat(path)
+    df = read_lc_dat2(path)
     res = run_bayesian_significance(
         df,
         significance_threshold=significance_threshold,
@@ -337,8 +337,8 @@ def main():
     parser.add_argument(
         "--workers",
         type=int,
-        default=max(1, mp.cpu_count() - 2),
-        help="Number of worker processes (default: cpu_count-2)",
+        default=max(1, mp.cpu_count() - 20),
+        help="Number of worker processes (default: cpu_count-20)",
     )
     parser.add_argument(
         "--significance-threshold",
@@ -361,6 +361,7 @@ def main():
     args = parser.parse_args()
 
     results = []
+    errors = []
     with ProcessPoolExecutor(max_workers=args.workers) as ex:
         futs = {
             ex.submit(
@@ -372,7 +373,12 @@ def main():
             for path in args.inputs
         }
         for fut in tqdm(as_completed(futs), total=len(futs), desc="LCs", unit="lc"):
-            results.append(fut.result())
+            path = futs[fut]
+            try:
+                results.append(fut.result())
+            except Exception as e:
+                errors.append({"path": path, "error": repr(e)})
+                print(f"ERROR processing {path}: {e}", flush=True)
 
     if args.output:
         df_out = pd.DataFrame(results)
@@ -386,6 +392,8 @@ def main():
                 f"dip_bf={row['dip_bayes_factor']:.3f}\tjump_bf={row['jump_bayes_factor']:.3f}"
             )
 
+    if errors:
+        print(f"Completed with {len(errors)} failures.", flush=True)
 
 if __name__ == "__main__":
     main()

@@ -9,7 +9,7 @@ from datetime import datetime
 from concurrent.futures import ProcessPoolExecutor
 
 from lc_baseline import per_camera_trend_baseline, per_camera_median_baseline
-from lc_utils import read_lc_dat, read_lc_raw, match_index_to_lc
+from lc_utils import read_lc_dat2, read_lc_raw, match_index_to_lc
 from df_utils import peak_search_residual_baseline
 from scipy.optimize import curve_fit
 from scipy.signal import find_peaks
@@ -98,7 +98,7 @@ def lc_proc_naive(
     metrics_baseline = metrics_baseline_func or baseline_func
 
     asn = record["asas_sn_id"]
-    dfg, dfv = read_lc_dat(asn, record["lc_dir"])
+    dfg, dfv = read_lc_dat2(asn, record["lc_dir"])
     raw_df = read_lc_raw(asn, record["lc_dir"])
 
     jd_first = np.nan

@@ -9,7 +9,7 @@ import warnings
 from datetime import datetime
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-from lc_utils import read_lc_dat, read_lc_raw, match_index_to_lc
+from lc_utils import read_lc_dat2, read_lc_raw, match_index_to_lc
 from scipy.optimize import curve_fit
 from scipy.signal import find_peaks
 from astropy.stats import biweight_location, biweight_scale
@@ -526,7 +526,7 @@ def lc_proc(
     metrics_dip_threshold = sigma_threshold
 
     asn = record["asas_sn_id"]
-    dfg, dfv = read_lc_dat(asn, record["lc_dir"])
+    dfg, dfv = read_lc_dat2(asn, record["lc_dir"])
     raw_df = read_lc_raw(asn, record["lc_dir"])
 
     jd_first = np.nan

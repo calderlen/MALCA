@@ -30,10 +30,10 @@ def jd_to_year(jd):
     # Input jd is expected to be JD-2450000; convert back to JD
     return year_epoch + ((jd + 2450000.0) - jd_epoch) / days_in_year
 
-def read_lc_dat(asassn_id, path):
+def read_lc_dat2(asassn_id, path):
 
-    if os.path.exists(f"{path}/{asassn_id}.dat"):
-        file = os.path.join(path, f"{asassn_id}.dat")
+    if os.path.exists(f"{path}/{asassn_id}.dat2"):
+        file = os.path.join(path, f"{asassn_id}.dat2")
         # column names
         columns = ["JD", 
                    "mag", 

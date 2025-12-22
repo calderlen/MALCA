@@ -13,7 +13,7 @@ from collections import OrderedDict
 import numpy as np
 import pandas as pd
 
-from lc_utils import read_lc_dat
+from lc_utils import read_lc_dat2
 
 # helpers
 def weighted_mean(x, w):
@@ -84,7 +84,7 @@ def linear_trend(x, y):
 
 def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=True):
     
-    df_g, df_v = read_lc_dat(asassn_id, path)
+    df_g, df_v = read_lc_dat2(asassn_id, path)
 
     if use_g:
         if df_g.empty and not df_v.empty:
