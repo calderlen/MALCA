@@ -8,9 +8,16 @@ import os
 from datetime import datetime
 from concurrent.futures import ProcessPoolExecutor
 
-from lc_baseline import per_camera_trend_baseline, per_camera_median_baseline
-from lc_utils import read_lc_dat2, read_lc_raw, match_index_to_lc
-from df_utils import peak_search_residual_baseline
+try:
+    from lc_baseline import per_camera_trend_baseline, per_camera_median_baseline
+    from lc_utils import read_lc_dat2, read_lc_raw, match_index_to_lc
+    from df_utils import peak_search_residual_baseline
+    from lc_metrics import run_metrics, is_dip_dominated
+except ImportError:
+    from calder.lc_baseline import per_camera_trend_baseline, per_camera_median_baseline
+    from calder.lc_utils import read_lc_dat2, read_lc_raw, match_index_to_lc
+    from calder.df_utils import peak_search_residual_baseline
+    from calder.lc_metrics import run_metrics, is_dip_dominated
 from scipy.optimize import curve_fit
 from scipy.signal import find_peaks
 from astropy.stats import biweight_location, biweight_scale

@@ -2,7 +2,6 @@ import os
 import argparse
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from calder.lc_baseline import per_camera_gp_baseline_masked
 import numpy as np
 import pandas as pd
 from scipy.special import logsumexp

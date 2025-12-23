@@ -32,8 +32,9 @@ def jd_to_year(jd):
 
 def read_lc_dat2(asassn_id, path):
 
-    if os.path.exists(f"{path}/{asassn_id}.dat2"):
-        file = os.path.join(path, f"{asassn_id}.dat2")
+    dat2_path = os.path.join(path, f"{asassn_id}.dat2")
+    if os.path.exists(dat2_path):
+        file = dat2_path
         # column names
         columns = ["JD", 
                    "mag", 
@@ -73,17 +74,47 @@ def read_lc_dat2(asassn_id, path):
         df_g = df.loc[df["v_g_band"] == 0].reset_index(drop=True)    
         df_v = df.loc[df["v_g_band"] == 1].reset_index(drop=True)
 
-        #if df_v.empty:
-        #    print(f"[warn] {asassn_id}: no V band rows")
-        #if df_g.empty:
-        #    print(f"[warn] {asassn_id}: no g band rows")
-        
-    else:
-        print(f"[error] {asassn_id}: file not found in {path}")
-        df_g = pd.DataFrame()
-        df_v = pd.DataFrame()
-                 
-    return df_g, df_v
+        return df_g, df_v
+
+    # Fallback: SkyPatrol CSV (e.g., <id>-light-curves.csv)
+    csv_candidates = [
+        os.path.join(path, f"{asassn_id}-light-curves.csv"),
+        os.path.join(path, f"{asassn_id}.csv"),
+    ]
+    csv_path = next((p for p in csv_candidates if os.path.exists(p)), None)
+    if csv_path:
+        df = pd.read_csv(csv_path)
+        # Normalize column names we care about
+        rename_map = {
+            "Mag": "mag",
+            "Mag Error": "error",
+            "JD": "JD",
+            "Filter": "filter",
+        }
+        df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
+        # Provide minimal columns expected downstream
+        df["saturated"] = df.get("saturated", 0)
+
+        def _band_flag(val: str) -> int:
+            v = str(val).upper()
+            if v.startswith("V"):
+                return 1  # V band
+            return 0    # treat everything else as g-equivalent
+
+        df["v_g_band"] = df["filter"].map(_band_flag) if "filter" in df.columns else 0
+
+        # Ensure types
+        for col in ["JD", "mag", "error"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        df_g = df.loc[df["v_g_band"] == 0].reset_index(drop=True)    
+        df_v = df.loc[df["v_g_band"] == 1].reset_index(drop=True)
+        return df_g, df_v
+
+    # No data found
+    print(f"[error] {asassn_id}: file not found in {path}")
+    return pd.DataFrame(), pd.DataFrame()
 
 def read_lc_raw(asassn_id, path):
     """

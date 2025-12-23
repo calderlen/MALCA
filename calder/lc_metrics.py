@@ -1,6 +1,19 @@
 import numpy as np
 
-from lc_baseline import per_camera_trend_baseline, per_camera_median_baseline, per_camera_mean_baseline, global_mean_baseline
+try:
+    from lc_baseline import (
+        per_camera_trend_baseline,
+        per_camera_median_baseline,
+        per_camera_mean_baseline,
+        global_mean_baseline,
+    )
+except ImportError:
+    from calder.lc_baseline import (
+        per_camera_trend_baseline,
+        per_camera_median_baseline,
+        per_camera_mean_baseline,
+        global_mean_baseline,
+    )
 
 
 def find_runs(mask, max_gap=1, min_length=1):

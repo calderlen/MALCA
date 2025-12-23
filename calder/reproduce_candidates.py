@@ -14,7 +14,6 @@ from lc_utils import read_lc_dat2
 
 
 
-
 brayden_candidates: list[dict[str, object]] = [
     {"source": "J042214+152530", "source_id": "377957522430", "category": "Dippers", "mag_bin": "13_13.5", "search_method": "Pipeline", "expected_detected": True},
     {"source": "J202402+383938", "source_id": "42950993887", "category": "Dippers", "mag_bin": "13_13.5", "search_method": "Pipeline", "expected_detected": True},

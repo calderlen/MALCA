@@ -9,12 +9,17 @@ import warnings
 from datetime import datetime
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-from lc_utils import read_lc_dat2, read_lc_raw, match_index_to_lc
+try:
+    from lc_utils import read_lc_dat2, read_lc_raw, match_index_to_lc
+    from lc_metrics import run_metrics, is_dip_dominated
+    from lc_baseline import per_camera_median_baseline
+except ImportError:
+    from calder.lc_utils import read_lc_dat2, read_lc_raw, match_index_to_lc
+    from calder.lc_metrics import run_metrics, is_dip_dominated
+    from calder.lc_baseline import per_camera_median_baseline
 from scipy.optimize import curve_fit
 from scipy.signal import find_peaks
 from astropy.stats import biweight_location, biweight_scale
-from lc_metrics import run_metrics, is_dip_dominated
-from lc_baseline import per_camera_median_baseline
 
 warnings.filterwarnings("ignore", message=".*Covariance of the parameters could not be estimated.*")
 warnings.filterwarnings("ignore", category=RuntimeWarning, module="scipy.optimize")
