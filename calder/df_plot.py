@@ -368,8 +368,19 @@ def _plot_lc_with_residuals_df(
             )
             # Draw baseline line if available and finite
             if "baseline" in cam_subset.columns:
+                # IMPORTANT: many surveys have repeated/near-repeated timestamps.
+                # If we plot a line through duplicate x-values, matplotlib draws
+                # dense vertical "combs" that look like oscillations. To make the
+                # baseline visually interpretable, sort by time and aggregate
+                # duplicate timestamps before plotting.
                 base_vals = cam_subset[["JD_plot", "baseline"]].dropna()
                 if not base_vals.empty:
+                    base_vals = base_vals.sort_values("JD_plot")
+                    if base_vals["JD_plot"].duplicated().any():
+                        base_vals = (
+                            base_vals.groupby("JD_plot", as_index=False)["baseline"]
+                            .median()
+                        )
                     raw_ax.plot(
                         base_vals["JD_plot"],
                         base_vals["baseline"],
