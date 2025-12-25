@@ -502,9 +502,11 @@ def per_camera_trend_baseline(
 def per_camera_gp_baseline(
     df,
     *,
-    sigma=0.05,
-    rho=200.0,
+    sigma=None,
+    rho=None,
     q=0.7,
+    S0=None,
+    w0=None,
     jitter=0.006,
     t_col="JD",
     mag_col="mag",
@@ -513,6 +515,10 @@ def per_camera_gp_baseline(
 ):
     """
     per-camera GP baseline (fixed SHO kernel)
+    
+    Supports two parameterizations:
+    - sigma, rho, Q (default)
+    - S0, w0, Q (alternative)
     """
     df_out = df.copy()
     for col in ("baseline", "resid", "sigma_resid"):
@@ -544,8 +550,16 @@ def per_camera_gp_baseline(
             yerr_fit = np.where(np.isfinite(yerr_fit), yerr_fit, np.nanmedian(yerr_fit))
             yerr_fit = np.nan_to_num(yerr_fit, nan=jitter, posinf=jitter, neginf=jitter)
 
-        # Build kernel
-        k = terms.SHOTerm(sigma=sigma, rho=rho, Q=q)
+        # Build kernel - use S0, w0 if provided, otherwise use sigma, rho
+        if S0 is not None and w0 is not None:
+            k = terms.SHOTerm(S0=S0, w0=w0, Q=q)
+        else:
+            # Default to sigma, rho if not provided
+            if sigma is None:
+                sigma = 0.05
+            if rho is None:
+                rho = 200.0
+            k = terms.SHOTerm(sigma=sigma, rho=rho, Q=q)
 
         try:
             gp = GaussianProcess(k)
@@ -579,15 +593,21 @@ def per_camera_gp_baseline(
 def per_camera_gp_baseline_masked(
     df,
     *,
-    dip_sigma_thresh=-2.5,
-    pad_days=50.0,
+    dip_sigma_thresh=-1.0,
+    pad_days=100.0,
 
-    a1=0.02**2,
-    rho1=1000.0,
-    a2=0.01**2,
-    rho2=3000.0,
+    # SHO kernel parameters (default, preferred)
+    S0=0.0005,
+    w0=0.0031415926535897933,
+    Q=0.7,
 
-    jitter=0.1,
+    # RealTerm (OU mixture) parameters (optional, for backward compatibility)
+    a1=None,
+    rho1=None,
+    a2=None,
+    rho2=None,
+
+    jitter=0.006,
     use_yerr=True,
 
     t_col="JD",
@@ -597,6 +617,18 @@ def per_camera_gp_baseline_masked(
 
     min_gp_points=10,
 ):
+    """
+    per-camera GP baseline with masking (dips excluded from fit)
+    
+    Masks out significant dips (thresholded by local MAD) before fitting the GP
+    baseline to ensure the baseline follows the quiescent state rather than the dips.
+    
+    Supports two kernel parameterizations:
+    - SHO kernel (default): S0, w0, Q
+    - RealTerm (OU mixture): a1, rho1, a2, rho2 (for backward compatibility)
+    
+    If RealTerm parameters are explicitly provided, they take precedence.
+    """
     df_out = df.copy()
     for col in ("baseline", "resid", "sigma_resid"):
         if col not in df_out.columns:
@@ -665,10 +697,16 @@ def per_camera_gp_baseline_masked(
         y_mean = float(np.mean(y_fit))
         y_fit0 = y_fit - y_mean
 
-        k = (
-            terms.RealTerm(a=float(a1), c=1.0 / float(rho1)) +
-            terms.RealTerm(a=float(a2), c=1.0 / float(rho2))
-        )
+        # Build kernel: prefer SHO if S0/w0 provided, otherwise use RealTerm
+        if a1 is not None and rho1 is not None and a2 is not None and rho2 is not None:
+            # Use RealTerm (OU mixture) if explicitly provided
+            k = (
+                terms.RealTerm(a=float(a1), c=1.0 / float(rho1)) +
+                terms.RealTerm(a=float(a2), c=1.0 / float(rho2))
+            )
+        else:
+            # Default: use SHO kernel with S0, w0, Q
+            k = terms.SHOTerm(S0=float(S0), w0=float(w0), Q=float(Q))
 
         try:
             gp = GaussianProcess(k)

@@ -170,11 +170,14 @@ def read_asassn_dat(dat_path):
 def read_skypatrol_csv(csv_path):
     """
     Read a SkyPatrol CSV, remapping columns to the ASAS-SN schema.
+    
+    SkyPatrol CSVs have comment lines starting with # and blank lines before header.
     """
     csv_path = Path(csv_path)
     df = pd.read_csv(
         csv_path,
         comment="#",
+        skip_blank_lines=True,
         dtype={
             "JD": float,
             "Flux": float,

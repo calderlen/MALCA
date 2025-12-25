@@ -6,6 +6,7 @@ from typing import Iterable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
+from scipy import stats
 
 from lc_excursions_naive import dip_finder_naive
 from lc_excursions import excursion_finder
@@ -214,7 +215,7 @@ def build_reproduction_report(
     chunk_size: int = 250000,
     metrics_baseline_func=None,
     metrics_dip_threshold: float = 0.3,
-    bayes_significance_threshold: float = 0.9973,
+    bayes_significance_threshold: float = 99.99997,
     bayes_p_points: int = 80,
     skypatrol_dir: Path | str | None = None,
     extra_columns: Iterable[str] | None = None,
@@ -489,7 +490,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--n-workers", type=int, default=10, help="ProcessPool worker count for dip_finder_naive")
     parser.add_argument("--chunk-size", type=int, default=250000, help="Rows per chunk flush for CSV output")
     parser.add_argument("--metrics-dip-threshold", type=float, default=0.3, help="Dip threshold for run_metrics")
-    parser.add_argument("--bayes-significance-threshold", type=float, default=0.9973, help="Per-point significance threshold for Bayesian dip finder")
+    parser.add_argument("--bayes-significance-threshold", type=float, default=None, help="Per-point significance threshold (percentage, e.g., 99.99997 for 5-sigma). Overridden by --bayes-sigma if provided.")
+    parser.add_argument("--bayes-sigma", type=float, default=None, help="Significance threshold in sigma units (e.g., 5.0 for 5-sigma). Converts to percentage automatically.")
     parser.add_argument("--bayes-p-points", type=int, default=80, help="Number of logit-spaced probability grid points for Bayesian dip finder")
     parser.add_argument("--skypatrol-dir", default=None, help="Directory with SkyPatrol CSV files (<source_id>-light-curves.csv)")
     parser.add_argument("--manifest", default=None, help="Path to lc_manifest CSV/Parquet for targeted reproduction")
@@ -519,6 +521,23 @@ def main(argv: Iterable[str] | None = None) -> None:
 
     candidate_data = _resolve_candidates(args.candidates)
 
+    # Convert sigma to significance threshold if provided
+    bayes_significance_threshold = args.bayes_significance_threshold
+    if args.bayes_sigma is not None:
+        # Convert sigma to percentage threshold for one-tailed test (dip detection)
+        # P(Z < -sigma) = norm.cdf(-sigma), so P(Z >= -sigma) = 1 - norm.cdf(-sigma) = norm.cdf(sigma)
+        # For 5-sigma: norm.cdf(5) ≈ 0.999999713, so threshold ≈ 99.9999713%
+        prob = stats.norm.cdf(args.bayes_sigma)
+        bayes_significance_threshold = prob * 100.0
+        if args.verbose:
+            print(f"[DEBUG] Converting {args.bayes_sigma}-sigma to significance threshold: {bayes_significance_threshold:.8f}%")
+    elif bayes_significance_threshold is None:
+        # Default to 5-sigma if neither is specified
+        prob = stats.norm.cdf(5.0)
+        bayes_significance_threshold = prob * 100.0
+        if args.verbose:
+            print(f"[DEBUG] Using default 5-sigma significance threshold: {bayes_significance_threshold:.8f}%")
+
     report = build_reproduction_report(
         candidates=candidate_data,
         out_dir=args.out_dir,
@@ -526,7 +545,7 @@ def main(argv: Iterable[str] | None = None) -> None:
         n_workers=args.n_workers,
         chunk_size=args.chunk_size,
         metrics_dip_threshold=args.metrics_dip_threshold,
-        bayes_significance_threshold=args.bayes_significance_threshold,
+        bayes_significance_threshold=bayes_significance_threshold,
         bayes_p_points=args.bayes_p_points,
         skypatrol_dir=args.skypatrol_dir,
         manifest_path=args.manifest,

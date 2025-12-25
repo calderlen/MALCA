@@ -91,11 +91,30 @@ def read_lc_dat2(asassn_id, path):
             "Mag Error": "error",
             "JD": "JD",
             "Filter": "filter",
-            "Camera": "camera_name",
+            "Camera": "camera",
         }
         df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
+        
+        # Create expected columns to match read_skypatrol_csv format
+        if "camera" in df.columns:
+            df["camera"] = df["camera"].astype(str).str.strip()
+            df["camera#"] = df["camera"]
+            df["cam_field"] = df["camera#"]
+        else:
+            df["camera"] = ""
+            df["camera#"] = ""
+            df["cam_field"] = ""
+        
         # Provide minimal columns expected downstream
         df["saturated"] = df.get("saturated", 0)
+        
+        # Handle quality flag if present
+        if "Quality" in df.columns:
+            df["quality_flag"] = df["Quality"].astype(str).str.strip().str.upper()
+            df["good_bad"] = (df["quality_flag"] == "G").astype(int)
+        else:
+            df["quality_flag"] = "G"
+            df["good_bad"] = 1
 
         def _band_flag(val: str) -> int:
             v = str(val).upper()

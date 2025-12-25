@@ -126,7 +126,7 @@ def bayesian_excursion_significance(
     p_max=None,
     p_points=80,
     mag_grid=None,
-    significance_threshold=0.9973, #3-sigma
+    significance_threshold=99.99997, #5-sigma
 ):
     """
     kind: "dip" or "jump"
@@ -230,8 +230,11 @@ def bayesian_excursion_significance(
         elif excursion_component == "bright":
             event_prob[j] = bright_prob
 
-    event_indices = np.nonzero(event_prob >= significance_threshold)[0]
-    significant = event_prob.size > 0 and float(np.nanmax(event_prob)) >= significance_threshold
+    # Convert significance_threshold from percentage to probability if needed
+    # (threshold is typically 99.99997 for 5-sigma, meaning 0.9999997 probability)
+    threshold_prob = significance_threshold / 100.0 if significance_threshold > 1.0 else significance_threshold
+    event_indices = np.nonzero(event_prob >= threshold_prob)[0]
+    significant = event_prob.size > 0 and float(np.nanmax(event_prob)) >= threshold_prob
 
     return {
         "kind": kind,
@@ -264,7 +267,7 @@ def run_bayesian_significance(
     p_points=80,
     mag_grid_dip=None,
     mag_grid_jump=None,
-    significance_threshold=0.9973, #3-sigma
+    significance_threshold=99.99997, #5-sigma
 ):
     """
     Convenience wrapper to evaluate both dips and jumps with the same inputs
@@ -310,7 +313,7 @@ os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 
 
-def _process_one(path, *, significance_threshold=0.9973, p_points=80):
+def _process_one(path, *, significance_threshold=99.99997, p_points=80):
     df = read_lc_dat2(path)
     res = run_bayesian_significance(
         df,
@@ -344,8 +347,8 @@ def main():
     parser.add_argument(
         "--significance-threshold",
         type=float,
-        default=0.9973,
-        help="Per-point significance threshold (default: 0.9973 ~ 3-sigma)",
+        default=99.99997,
+        help="Per-point significance threshold (default: 99.99997 ~ 5-sigma)",
     )
     parser.add_argument(
         "--p-points",
