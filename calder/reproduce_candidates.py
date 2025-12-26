@@ -295,19 +295,51 @@ def _plot_light_curve_with_dips(
                     linewidth=2.0, alpha=0.9, linestyle="--", label="baseline"
                 )
 
-        dip_indices = res.get("dip", {}).get("event_indices", np.array([], dtype=int))
-        if isinstance(dip_indices, (list, tuple)):
-            dip_indices = np.asarray(dip_indices, dtype=int)
-        if isinstance(dip_indices, np.ndarray) and dip_indices.size:
-            valid = dip_indices[(dip_indices >= 0) & (dip_indices < len(df_plot))]
-            if valid.size:
-                dip_jds = df_plot.iloc[valid]["JD"].to_numpy()
-                for jd in dip_jds:
-                    ax.axvline(jd, alpha=0.3, linestyle="--", linewidth=1)
+        # -------------------------------------------------------------
+        # MODIFIED LOGIC: Plot lines ONLY for BIC-confirmed events
+        # -------------------------------------------------------------
+        
+        # 1. Attempt to plot based on run_summaries (BIC aware)
+        run_summaries = res.get("dip", {}).get("run_summaries", [])
+        confirmed_count = 0
+        
+        if run_summaries:
+            for summary in run_summaries:
+                # Filter: skip if morphology is 'noise' or 'none'
+                morph = summary.get("morphology", "none")
+                if morph not in ("noise", "none"):
+                    confirmed_count += 1
+                    
+                    # Try to get t0 from params, otherwise use range center
+                    t0 = summary.get("params", {}).get("t0")
+                    if t0 is None:
+                        start_jd = summary.get("start_jd")
+                        end_jd = summary.get("end_jd")
+                        if start_jd is not None and end_jd is not None:
+                            t0 = (start_jd + end_jd) / 2.0
+                    
+                    if t0 is not None and np.isfinite(t0):
+                        # Plot distinct solid red line for confirmed event
+                        ax.axvline(t0, color='red', alpha=0.6, linestyle="-", linewidth=1.5)
 
-        n_dips = int(res.get("dip", {}).get("n_dips", 0))
+        else:
+            # 2. Fallback for legacy results (no summaries): Plot all triggered indices
+            dip_indices = res.get("dip", {}).get("event_indices", np.array([], dtype=int))
+            if isinstance(dip_indices, (list, tuple)):
+                dip_indices = np.asarray(dip_indices, dtype=int)
+            
+            if isinstance(dip_indices, np.ndarray) and dip_indices.size > 0:
+                valid = dip_indices[(dip_indices >= 0) & (dip_indices < len(df_plot))]
+                if valid.size:
+                    dip_jds = df_plot.iloc[valid]["JD"].to_numpy()
+                    for jd in dip_jds:
+                        ax.axvline(jd, alpha=0.3, linestyle="--", linewidth=1)
+                    confirmed_count = len(dip_jds) # approximations
+
+        n_triggers = int(res.get("dip", {}).get("n_dips", 0))
+        
         ax.set_ylabel(f"Magnitude ({band_label})", fontsize=12)
-        ax.set_title(f"{source_id} - {band_label}-band (n_dips={n_dips})", fontsize=12)
+        ax.set_title(f"{source_id} - {band_label}-band (triggers={n_triggers}, confirmed={confirmed_count})", fontsize=12)
         ax.invert_yaxis()
         ax.grid(True, alpha=0.3)
         ax.legend(fontsize=8, loc="best", ncol=2)

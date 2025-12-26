@@ -1,4 +1,3 @@
-
 # Thread caps (set before numpy/scipy import when possible)
 import os as _os
 _os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -13,6 +12,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import numpy as np
 import pandas as pd
 from scipy.special import logsumexp
+from scipy.optimize import curve_fit
 from tqdm import tqdm
 
 try:
@@ -108,6 +108,139 @@ def robust_median_dt_days(jd: np.ndarray) -> float:
     return float(np.nanmedian(dt))
 
 
+# ----------------------------
+# Morphology Utilities (Hybrid)
+# ----------------------------
+
+def model_gaussian(t, amp, t0, sigma, baseline):
+    return baseline + amp * np.exp(-0.5 * ((t - t0) / sigma) ** 2)
+
+def model_paczynski(t, amp, t0, tE, baseline):
+    # tE must be positive
+    tE = np.maximum(np.abs(tE), 1e-5) 
+    # Paczynski strictly brightens relative to baseline
+    # Note: amp logic handled in caller (jump vs dip)
+    return baseline + amp / np.sqrt(1.0 + ((t - t0) / tE) ** 2)
+
+def calc_bic(resid, err, n_params):
+    """
+    Bayesian Information Criterion: chi2 + k * ln(n)
+    Lower is better.
+    """
+    # Clip error to avoid division by zero
+    err = np.clip(err, 1e-9, np.inf)
+    # Robust chi2 to ignore extreme outliers during shape fitting
+    chi2 = np.nansum((resid / err) ** 2)
+    n_points = len(resid)
+    if n_points == 0:
+        return np.inf
+    return chi2 + n_params * np.log(n_points)
+
+def classify_run_morphology(jd, mag, err, run_idx, kind="dip"):
+    """
+    Fits Gaussian vs Paczynski vs Flat (Noise) to a specific run.
+    Returns dictionary with best model name and parameters.
+    """
+    # 1. Extract and Pad Data (add context around the run)
+    pad = 5 # points on either side
+    start_i = int(max(0, run_idx[0] - pad))
+    end_i = int(min(len(jd), run_idx[-1] + pad + 1))
+    
+    t_seg = jd[start_i:end_i]
+    y_seg = mag[start_i:end_i]
+    e_seg = err[start_i:end_i]
+    
+    if len(t_seg) < 4:
+        return {
+            "morphology": "none", "bic": np.nan, "delta_bic_null": 0.0, "params": {}
+        }
+
+    # 2. Initial Guesses
+    baseline_guess = np.nanmedian(y_seg)
+    # Find peak relative to baseline
+    abs_diff = np.abs(y_seg - baseline_guess)
+    peak_local_idx = np.argmax(abs_diff)
+    
+    t0_guess = t_seg[peak_local_idx]
+    amp_guess = y_seg[peak_local_idx] - baseline_guess
+    sigma_guess = max((t_seg[-1] - t_seg[0]) / 4.0, 0.01)
+    
+    # 3. Fit Baseline (Null Hypothesis)
+    # k=1 (baseline level)
+    resid_null = y_seg - baseline_guess
+    bic_null = calc_bic(resid_null, e_seg, 1)
+    
+    best_bic = bic_null
+    best_model = "noise"
+    best_params = {}
+
+    # 4. Fit Gaussian (The "Dip" or "Flare" hypothesis)
+    try:
+        popt_g, _ = curve_fit(
+            model_gaussian, t_seg, y_seg, 
+            p0=[amp_guess, t0_guess, sigma_guess, baseline_guess],
+            sigma=e_seg, maxfev=2000
+        )
+        resid_g = y_seg - model_gaussian(t_seg, *popt_g)
+        bic_g = calc_bic(resid_g, e_seg, 4) # k=4 params
+        
+        # Enforce polarity
+        # If kind="dip", we expect positive amplitude in magnitude space (fainter)
+        # If kind="jump", we expect negative amplitude in magnitude space (brighter)
+        is_valid = (popt_g[0] > 0) if kind == "dip" else (popt_g[0] < 0)
+        
+        # Require strong evidence (delta BIC > 10) to prefer over noise
+        if is_valid and bic_g < (best_bic - 10):
+            best_bic = bic_g
+            best_model = "gaussian"
+            best_params = {
+                "amp": popt_g[0], "t0": popt_g[1], 
+                "sigma": popt_g[2], "baseline": popt_g[3]
+            }
+    except Exception:
+        pass
+
+    # 5. Fit Paczynski (The "Microlensing" hypothesis)
+    # Usually only relevant for jumps (brightening), but code supports checking both
+    if kind == "jump":
+        try:
+            # Paczynski strictly brightens (negative amp in mag)
+            # Ensure initial guess is negative
+            amp_p_guess = -abs(amp_guess) 
+            
+            popt_p, _ = curve_fit(
+                model_paczynski, t_seg, y_seg,
+                p0=[amp_p_guess, t0_guess, sigma_guess, baseline_guess],
+                sigma=e_seg, maxfev=2000
+            )
+            resid_p = y_seg - model_paczynski(t_seg, *popt_p)
+            bic_p = calc_bic(resid_p, e_seg, 4)
+
+            # Valid if amp is negative (brightening)
+            is_valid_p = (popt_p[0] < 0)
+
+            if is_valid_p and bic_p < (best_bic - 10): 
+                best_bic = bic_p
+                best_model = "paczynski"
+                best_params = {
+                    "amp": popt_p[0], "t0": popt_p[1], 
+                    "tE": popt_p[2], "baseline": popt_p[3]
+                }
+        except Exception:
+            pass
+
+    return {
+        "morphology": best_model,
+        "bic": float(best_bic),
+        "delta_bic_null": float(bic_null - best_bic), # Positive means better than noise
+        "params": best_params
+    }
+
+
+# ----------------------------
+# Clustering Utilities
+# ----------------------------
+
 def cluster_triggered_indices(
     trig_idx: np.ndarray,
     jd: np.ndarray,
@@ -117,10 +250,6 @@ def cluster_triggered_indices(
 ):
     """
     Build runs from triggered indices in time order.
-
-    - allow_gap_points: allow up to this many missing indices inside a run
-      (e.g. 1 means idx steps of 2 are allowed).
-    - max_gap_days: break runs if JD gap exceeds this. If None, cadence-adaptive.
     """
     jd = np.asarray(jd, float)
     trig_idx = np.asarray(trig_idx, dtype=int)
@@ -380,7 +509,7 @@ def bayesian_excursion_significance(
     # Likelihood pieces
     if kind == "dip":
         # baseline fixed at baseline_mags; excursion is fainter grid
-        log_Pb_vec = log_gaussian(mags, baseline_mags, errs)               # (N,)
+        log_Pb_vec = log_gaussian(mags, baseline_mags, errs)                # (N,)
         log_Pb_grid = np.broadcast_to(log_Pb_vec, (M, N))                 # (M,N)
         log_Pf_grid = log_gaussian(mags[None, :], mag_grid[:, None], errs)  # (M,N)
         excursion_component = "faint"
@@ -395,7 +524,7 @@ def bayesian_excursion_significance(
         # excursion is brighter grid; baseline fixed at baseline_mags
         log_Pb_grid = log_gaussian(mags[None, :], mag_grid[:, None], errs)  # (M,N)
         log_Pf_vec = log_gaussian(mags, baseline_mags, errs)                # (N,)
-        log_Pf_grid = np.broadcast_to(log_Pf_vec, (M, N))                   # (M,N)
+        log_Pf_grid = np.broadcast_to(log_Pf_vec, (M, N))                    # (M,N)
         excursion_component = "bright"
         loglik_baseline_only = float(np.sum(log_Pf_vec))
 
@@ -417,7 +546,7 @@ def bayesian_excursion_significance(
     log_Pf_weighted = log_1mp[None, :, None] + log_Pf_grid[:, None, :]
 
     log_mix = np.logaddexp(log_Pb_weighted, log_Pf_weighted)  # (M,P,N)
-    loglik = np.sum(log_mix, axis=2)                           # (M,P)
+    loglik = np.sum(log_mix, axis=2)                            # (M,P)
 
     # posterior mode on the grid (uniform priors)
     log_post_norm = loglik - logsumexp(loglik)
@@ -489,11 +618,12 @@ def bayesian_excursion_significance(
         raise ValueError("trigger_mode must be 'logbf' or 'posterior_prob'")
 
     # build/gate runs
+    kept_runs = []
+    run_summaries = []
+
     if raw_idx.size == 0:
         event_indices = np.array([], dtype=int)
         significant = False
-        kept_runs = []
-        run_summaries = []
         run_stats = summarize_kept_runs([], jd, score_vec)
     else:
         runs = cluster_triggered_indices(
@@ -503,7 +633,7 @@ def bayesian_excursion_significance(
             max_gap_days=run_max_gap_days,
         )
 
-        kept_runs, run_summaries = gate_runs(
+        kept_runs, initial_summaries = gate_runs(
             runs,
             jd,
             score_vec,
@@ -512,6 +642,20 @@ def bayesian_excursion_significance(
             per_point_threshold=trigger_threshold_used,
             sum_threshold=run_sum_threshold_eff,
         )
+
+        # --- MORPHOLOGY CLASSIFICATION BLOCK ---
+        final_summaries = []
+        for i, r in enumerate(kept_runs):
+            # Get the basic summary from gate_runs
+            summary = initial_summaries[i]
+            # Run morphology classification on this specific run
+            morph_res = classify_run_morphology(jd, mags, errs, r, kind=kind)
+            # Merge results into summary
+            summary.update(morph_res)
+            final_summaries.append(summary)
+        
+        run_summaries = final_summaries
+        # ---------------------------------------
 
         if kept_runs:
             event_indices = np.unique(np.concatenate(kept_runs)).astype(int)
@@ -543,7 +687,7 @@ def bayesian_excursion_significance(
 
         # run outputs
         run_sum_threshold=float(run_sum_threshold_eff),
-        run_summaries=run_summaries,   # list[dict] (might be large; mainly for debugging)
+        run_summaries=run_summaries,   # list[dict] (includes morphology now)
         **run_stats,
 
         # global model comparison
@@ -701,11 +845,47 @@ def _process_one(
     dip = res["dip"]
     jump = res["jump"]
 
+    # Helper to extract best morphology info
+    def get_best_morph_info(run_list):
+        if not run_list:
+            return "none", 0.0, 0.0, 0.0
+        # sort by run_sum descending (strongest detection first)
+        best = sorted(run_list, key=lambda x: x['run_sum'], reverse=True)[0]
+        
+        morph = best.get('morphology', 'none')
+        delta_bic = best.get('delta_bic_null', 0.0)
+        
+        # safely get params
+        params = best.get('params', {})
+        # approximate "best_param" based on morphology
+        if morph == 'gaussian':
+            # return sigma
+            main_param = params.get('sigma', np.nan)
+        elif morph == 'paczynski':
+            # return tE
+            main_param = params.get('tE', np.nan)
+        else:
+            main_param = np.nan
+            
+        return morph, float(delta_bic), float(main_param)
+
+    dip_morph, dip_dbic, dip_param = get_best_morph_info(dip["run_summaries"])
+    jump_morph, jump_dbic, jump_param = get_best_morph_info(jump["run_summaries"])
+
     return dict(
         path=str(path),
 
         dip_significant=bool(dip["significant"]),
         jump_significant=bool(jump["significant"]),
+
+        # Morphology Results
+        dip_best_morph=str(dip_morph),
+        dip_best_delta_bic=float(dip_dbic),
+        dip_best_width_param=float(dip_param),
+        
+        jump_best_morph=str(jump_morph),
+        jump_best_delta_bic=float(jump_dbic),
+        jump_best_width_param=float(jump_param),
 
         # counts (post run-gating)
         dip_count=int(len(dip["event_indices"])),
@@ -888,9 +1068,8 @@ def main():
             print(
                 f"{row['path']}\t"
                 f"mode={row['trigger_mode']}\t"
-                f"dip_sig={row['dip_significant']} dip_runs={row['dip_run_count']} dip_n={row['dip_count']} dip_maxlogBF={row['dip_max_log_bf_local']:.2f}\t"
-                f"jump_sig={row['jump_significant']} jump_runs={row['jump_run_count']} jump_n={row['jump_count']} jump_maxlogBF={row['jump_max_log_bf_local']:.2f}\t"
-                f"sigma_eff={row['used_sigma_eff']}"
+                f"dip_sig={row['dip_significant']} ({row['dip_best_morph']}) dip_dBIC={row['dip_best_delta_bic']:.1f}\t"
+                f"jump_sig={row['jump_significant']} ({row['jump_best_morph']}) jump_dBIC={row['jump_best_delta_bic']:.1f}"
             )
 
     if errors:
