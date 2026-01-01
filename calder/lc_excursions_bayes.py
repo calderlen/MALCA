@@ -16,6 +16,12 @@ import pandas as pd
 from scipy.special import logsumexp
 from scipy.optimize import curve_fit
 from tqdm import tqdm
+import warnings
+
+# Suppress expected warnings
+warnings.filterwarnings("ignore", message=".*Covariance of the parameters could not be estimated.*")
+warnings.filterwarnings("ignore", message=".*overflow encountered in.*")
+warnings.filterwarnings("ignore", message=".*invalid value encountered in.*", category=RuntimeWarning)
 
 try:
     from lc_utils import read_lc_dat2
@@ -78,7 +84,15 @@ def logit_spaced_grid(p_min=1e-4, p_max=1.0 - 1e-4, n=80):
 
 
 def default_mag_grid(baseline_mag: float, mags: np.ndarray, kind: str, n=60):
+    # Check for valid mags
+    mags_finite = mags[np.isfinite(mags)]
+    if len(mags_finite) == 0:
+        raise ValueError("No finite magnitude values for grid construction")
     lo, hi = np.nanpercentile(mags, [5, 95])
+    if not (np.isfinite(lo) and np.isfinite(hi)):
+        # Fallback to median ± 0.5 mag
+        med = np.nanmedian(mags)
+        lo, hi = med - 0.5, med + 0.5
     spread = max(hi - lo, 0.05)
 
     if kind == "dip":
@@ -444,11 +458,37 @@ def bayesian_excursion_significance(
     jd = np.asarray(df["JD"], float)
     mags = np.asarray(df[mag_col], float)
 
+    # Diagnostic: Check mags after reading
+    mags_finite = np.isfinite(mags).sum()
+    mags_total = len(mags)
+    if mags_finite == 0:
+        raise ValueError(
+            f"All magnitudes are NaN/inf after reading: "
+            f"total={mags_total}, finite={mags_finite}, "
+            f"NaN={np.isnan(mags).sum()}, inf={np.isinf(mags).sum()}"
+        )
+
     # raw errors as fallback
     if err_col in df.columns:
         errs = np.asarray(df[err_col], float)
     else:
         errs = np.full_like(mags, 0.05)
+    
+    # Diagnostic: Check errors
+    errs_finite = np.isfinite(errs).sum()
+    errs_positive = (errs > 0).sum() if errs_finite > 0 else 0
+    if errs_finite == 0:
+        raise ValueError(
+            f"All errors are NaN/inf: "
+            f"total={len(errs)}, finite={errs_finite}, "
+            f"NaN={np.isnan(errs).sum()}, inf={np.isinf(errs).sum()}"
+        )
+    if errs_positive == 0:
+        raise ValueError(
+            f"All errors are non-positive: "
+            f"total={len(errs)}, finite={errs_finite}, positive={errs_positive}, "
+            f"min={np.nanmin(errs) if errs_finite > 0 else 'N/A'}"
+        )
 
     if baseline_kwargs is None:
         baseline_kwargs = dict(DEFAULT_BASELINE_KWARGS)
@@ -460,6 +500,9 @@ def bayesian_excursion_significance(
         df_base = baseline_func(df, **baseline_kwargs)
 
     if df_base is None:
+        # Check if mags has any finite values
+        if not np.isfinite(mags).any():
+            raise ValueError("All magnitude values are NaN/inf")
         baseline_mags = np.full_like(mags, np.nanmedian(mags))
     else:
         if "baseline" in df_base.columns:
@@ -468,11 +511,53 @@ def bayesian_excursion_significance(
             baseline_mags = np.asarray(df_base[mag_col], float)
 
         if use_sigma_eff and ("sigma_eff" in df_base.columns):
-            errs = np.asarray(df_base["sigma_eff"], float)
+            errs_new = np.asarray(df_base["sigma_eff"], float)
+            # Diagnostic: Check sigma_eff from baseline
+            errs_new_finite = np.isfinite(errs_new).sum()
+            errs_new_positive = (errs_new > 0).sum() if errs_new_finite > 0 else 0
+            if errs_new_finite == 0:
+                raise ValueError(
+                    f"Baseline returned all NaN/inf sigma_eff: "
+                    f"total={len(errs_new)}, finite={errs_new_finite}, "
+                    f"NaN={np.isnan(errs_new).sum()}, inf={np.isinf(errs_new).sum()}"
+                )
+            if errs_new_positive == 0:
+                raise ValueError(
+                    f"Baseline returned all non-positive sigma_eff: "
+                    f"total={len(errs_new)}, finite={errs_new_finite}, positive={errs_new_positive}, "
+                    f"min={np.nanmin(errs_new) if errs_new_finite > 0 else 'N/A'}"
+                )
+            errs = errs_new
             used_sigma_eff = True
         elif require_sigma_eff:
             raise RuntimeError("require_sigma_eff=True but baseline did not return 'sigma_eff'")
 
+    # Diagnostic: Check baseline values
+    baseline_finite = np.isfinite(baseline_mags).sum()
+    if baseline_finite == 0:
+        raise ValueError(
+            f"Baseline function returned all NaN/inf values: "
+            f"total={len(baseline_mags)}, finite={baseline_finite}, "
+            f"NaN={np.isnan(baseline_mags).sum()}, inf={np.isinf(baseline_mags).sum()}, "
+            f"baseline_func={baseline_func.__name__ if baseline_func else 'None'}"
+        )
+    
+    # Final check on errors after potential update
+    errs_finite_final = np.isfinite(errs).sum()
+    errs_positive_final = (errs > 0).sum() if errs_finite_final > 0 else 0
+    if errs_finite_final == 0:
+        raise ValueError(
+            f"All errors are NaN/inf after baseline: "
+            f"total={len(errs)}, finite={errs_finite_final}, "
+            f"NaN={np.isnan(errs).sum()}, inf={np.isinf(errs).sum()}"
+        )
+    if errs_positive_final == 0:
+        raise ValueError(
+            f"All errors are non-positive after baseline: "
+            f"total={len(errs)}, finite={errs_finite_final}, positive={errs_positive_final}, "
+            f"min={np.nanmin(errs) if errs_finite_final > 0 else 'N/A'}"
+        )
+    
     baseline_mag = float(np.nanmedian(baseline_mags))
 
     # choose p-grid bounds if not specified
@@ -516,6 +601,13 @@ def bayesian_excursion_significance(
         log_Pf_vec = log_gaussian(mags, baseline_mags, errs)                # (N,)
         log_Pf_grid = np.broadcast_to(log_Pf_vec, (M, N))                    # (M,N)
         excursion_component = "bright"
+        
+        # Check for all-NaN likelihoods
+        if not np.isfinite(log_Pf_vec).any():
+            raise ValueError("All baseline likelihood values are NaN/inf")
+        if not np.isfinite(log_Pb_grid).any():
+            raise ValueError("All excursion likelihood values are NaN/inf")
+        
         loglik_baseline_only = float(np.sum(log_Pf_vec))
 
         log_px_baseline = log_Pf_vec
@@ -535,11 +627,20 @@ def bayesian_excursion_significance(
     log_Pb_weighted = log_p[None, :, None] + log_Pb_grid[:, None, :]
     log_Pf_weighted = log_1mp[None, :, None] + log_Pf_grid[:, None, :]
 
+    # Handle NaN/Inf values before logaddexp
+    log_Pb_weighted = np.where(np.isfinite(log_Pb_weighted), log_Pb_weighted, -np.inf)
+    log_Pf_weighted = np.where(np.isfinite(log_Pf_weighted), log_Pf_weighted, -np.inf)
+
     log_mix = np.logaddexp(log_Pb_weighted, log_Pf_weighted)  # (M,P,N)
     loglik = np.sum(log_mix, axis=2)                            # (M,P)
 
     # posterior mode on the grid (uniform priors)
     log_post_norm = loglik - logsumexp(loglik)
+    
+    # Check if log_post_norm has any finite values
+    if not np.isfinite(log_post_norm).any():
+        raise ValueError("All log_posterior values are NaN/inf - cannot find best parameters")
+    
     best_m_idx, best_p_idx = np.unravel_index(np.nanargmax(log_post_norm), log_post_norm.shape)
     best_mag_event = float(mag_grid[int(best_m_idx)])
     best_p = float(p_grid[int(best_p_idx)])
@@ -860,6 +961,26 @@ def _process_one(
 
     if df.empty:
         raise ValueError(f"Empty dataframe read from {path}")
+    
+    # Check for sufficient valid data
+    required_cols = ["JD", "mag", "error"]
+    for col in required_cols:
+        if col not in df.columns:
+            raise ValueError(f"Missing required column '{col}' in {path}")
+    
+    # Filter out invalid data
+    valid_mask = (
+        np.isfinite(df["JD"]) & 
+        np.isfinite(df["mag"]) & 
+        np.isfinite(df["error"]) &
+        (df["error"] > 0) &
+        (df["error"] < 10)  # Reasonable error upper bound
+    )
+    
+    df = df[valid_mask].copy()
+    
+    if len(df) < 10:  # Need at least 10 points for meaningful analysis
+        raise ValueError(f"Insufficient valid data points ({len(df)} < 10) in {path}")
     
     res = run_bayesian_significance(
         df,
