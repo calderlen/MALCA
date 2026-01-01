@@ -30,4 +30,5 @@ Pipeline to search for peaks and dips in ASAS-SN light curves
 - scipy
 - astropy
 - tqdm
+- celerite
 - pyarrow (optional; required for Parquet outputs)
