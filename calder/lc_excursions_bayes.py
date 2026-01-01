@@ -23,9 +23,7 @@ except ImportError:
     from calder.lc_baseline import per_camera_gp_baseline
 
 
-# ----------------------------
-# Defaults / constants
-# ----------------------------
+# constants
 
 DEFAULT_BASELINE_KWARGS = dict(
     S0=0.0005,
@@ -37,9 +35,7 @@ DEFAULT_BASELINE_KWARGS = dict(
 )
 
 
-# ----------------------------
-# Small utilities
-# ----------------------------
+# utils
 
 def clean_lc(df: pd.DataFrame) -> pd.DataFrame:
     mask = np.ones(len(df), dtype=bool)
@@ -108,14 +104,12 @@ def robust_median_dt_days(jd: np.ndarray) -> float:
     return float(np.nanmedian(dt))
 
 
-# ----------------------------
-# Morphology Utilities (Hybrid)
-# ----------------------------
+# morphology utils
 
-def model_gaussian(t, amp, t0, sigma, baseline):
+def gaussian(t, amp, t0, sigma, baseline):
     return baseline + amp * np.exp(-0.5 * ((t - t0) / sigma) ** 2)
 
-def model_paczynski(t, amp, t0, tE, baseline):
+def paczynski(t, amp, t0, tE, baseline):
     # tE must be positive
     tE = np.maximum(np.abs(tE), 1e-5) 
     # Paczynski strictly brightens relative to baseline
@@ -124,8 +118,7 @@ def model_paczynski(t, amp, t0, tE, baseline):
 
 def calc_bic(resid, err, n_params):
     """
-    Bayesian Information Criterion: chi2 + k * ln(n)
-    Lower is better.
+    bic = chi2 + k * ln(n)
     """
     # Clip error to avoid division by zero
     err = np.clip(err, 1e-9, np.inf)
@@ -138,8 +131,7 @@ def calc_bic(resid, err, n_params):
 
 def classify_run_morphology(jd, mag, err, run_idx, kind="dip"):
     """
-    Fits Gaussian vs Paczynski vs Flat (Noise) to a specific run.
-    Returns dictionary with best model name and parameters.
+    fits Guassian vs Paczynski vs Flat (Noise) to a specific run, returns dictionary with best model name and parameters
     """
     # 1. Extract and Pad Data (add context around the run)
     pad = 5 # points on either side
@@ -174,14 +166,14 @@ def classify_run_morphology(jd, mag, err, run_idx, kind="dip"):
     best_model = "noise"
     best_params = {}
 
-    # 4. Fit Gaussian (The "Dip" or "Flare" hypothesis)
+    # 4. Fit Gaussian 
     try:
         popt_g, _ = curve_fit(
-            model_gaussian, t_seg, y_seg, 
+            gaussian, t_seg, y_seg, 
             p0=[amp_guess, t0_guess, sigma_guess, baseline_guess],
             sigma=e_seg, maxfev=2000
         )
-        resid_g = y_seg - model_gaussian(t_seg, *popt_g)
+        resid_g = y_seg - gaussian(t_seg, *popt_g)
         bic_g = calc_bic(resid_g, e_seg, 4) # k=4 params
         
         # Enforce polarity
@@ -200,7 +192,7 @@ def classify_run_morphology(jd, mag, err, run_idx, kind="dip"):
     except Exception:
         pass
 
-    # 5. Fit Paczynski (The "Microlensing" hypothesis)
+    # 5. Fit Paczynski
     # Usually only relevant for jumps (brightening), but code supports checking both
     if kind == "jump":
         try:
@@ -209,11 +201,11 @@ def classify_run_morphology(jd, mag, err, run_idx, kind="dip"):
             amp_p_guess = -abs(amp_guess) 
             
             popt_p, _ = curve_fit(
-                model_paczynski, t_seg, y_seg,
+                paczynski, t_seg, y_seg,
                 p0=[amp_p_guess, t0_guess, sigma_guess, baseline_guess],
                 sigma=e_seg, maxfev=2000
             )
-            resid_p = y_seg - model_paczynski(t_seg, *popt_p)
+            resid_p = y_seg - paczynski(t_seg, *popt_p)
             bic_p = calc_bic(resid_p, e_seg, 4)
 
             # Valid if amp is negative (brightening)
@@ -237,9 +229,7 @@ def classify_run_morphology(jd, mag, err, run_idx, kind="dip"):
     }
 
 
-# ----------------------------
-# Clustering Utilities
-# ----------------------------
+# clustering utils
 
 def cluster_triggered_indices(
     trig_idx: np.ndarray,
@@ -401,10 +391,7 @@ def summarize_kept_runs(kept_runs, jd: np.ndarray, score_vec: np.ndarray):
         max_run_max=float(max_max) if np.isfinite(max_max) else np.nan,
     )
 
-
-# ----------------------------
-# Core Bayesian scoring
-# ----------------------------
+# bayesian scoring
 
 def bayesian_excursion_significance(
     df: pd.DataFrame,
@@ -1016,8 +1003,8 @@ def main():
     parser.add_argument(
         "--output",
         type=str,
-        default=None,
-        help="Optional CSV path; if omitted, print to stdout.",
+        default="lc_excursions_bayes_results.csv",
+        help="CSV path for results (default: ./lc_excursions_bayes_results.csv).",
     )
 
     args = parser.parse_args()
