@@ -559,6 +559,28 @@ def bayesian_excursion_significance(
             f"min={np.nanmin(errs) if errs_finite_final > 0 else 'N/A'}"
         )
     
+    # Drop any rows with non-finite mags / errors / baseline (otherwise a single NaN drives loglik to -inf)
+    total_points = len(mags)
+    valid_mask = (
+        np.isfinite(mags)
+        & np.isfinite(errs)
+        & (errs > 0)
+        & np.isfinite(baseline_mags)
+    )
+    n_valid = int(valid_mask.sum())
+    if n_valid == 0:
+        raise ValueError(
+            "No valid points after baseline/error filtering: "
+            f"total={total_points}, finite_mags={np.isfinite(mags).sum()}, "
+            f"finite_errs={np.isfinite(errs).sum()}, positive_errs={(errs > 0).sum()}, "
+            f"finite_baseline={np.isfinite(baseline_mags).sum()}"
+        )
+    if n_valid < total_points:
+        mags = mags[valid_mask]
+        errs = errs[valid_mask]
+        baseline_mags = baseline_mags[valid_mask]
+        jd = jd[valid_mask]
+
     baseline_mag = float(np.nanmedian(baseline_mags))
 
     # choose p-grid bounds if not specified
@@ -589,12 +611,6 @@ def bayesian_excursion_significance(
         log_Pb_grid = np.broadcast_to(log_Pb_vec, (M, N))                 # (M,N)
         log_Pf_grid = log_gaussian(mags[None, :], mag_grid[:, None], errs)  # (M,N)
         excursion_component = "faint"
-        loglik_baseline_only = float(np.sum(log_Pb_vec))
-
-        # local per-point logBF: ln p(x|event) - ln p(x|baseline), event mag uniform prior
-        log_px_baseline = log_Pb_vec
-        log_px_event = logsumexp(log_Pf_grid, axis=0) - np.log(M)
-        log_bf_local = log_px_event - log_px_baseline
 
     elif kind == "jump":
         # excursion is brighter grid; baseline fixed at baseline_mags
@@ -608,15 +624,44 @@ def bayesian_excursion_significance(
             raise ValueError("All baseline likelihood values are NaN/inf")
         if not np.isfinite(log_Pb_grid).any():
             raise ValueError("All excursion likelihood values are NaN/inf")
-        
-        loglik_baseline_only = float(np.sum(log_Pf_vec))
-
-        log_px_baseline = log_Pf_vec
-        log_px_event = logsumexp(log_Pb_grid, axis=0) - np.log(M)
-        log_bf_local = log_px_event - log_px_baseline
 
     else:
         raise ValueError("kind must be 'dip' or 'jump'")
+
+    # Drop points where both baseline and excursion likelihoods are invalid (-inf/NaN across all grid points)
+    valid_points = (np.isfinite(log_Pb_grid).any(axis=0)) | (np.isfinite(log_Pf_grid).any(axis=0))
+    n_valid_points = int(valid_points.sum())
+    total_points = log_Pb_grid.shape[1]
+    if n_valid_points == 0:
+        raise ValueError(
+            "No valid likelihood contributions after baseline: "
+            f"total={total_points}, baseline_finite={np.isfinite(log_Pb_grid).sum()}, "
+            f"excursion_finite={np.isfinite(log_Pf_grid).sum()}"
+        )
+    if n_valid_points < total_points:
+        mags = mags[valid_points]
+        errs = errs[valid_points]
+        baseline_mags = baseline_mags[valid_points]
+        jd = jd[valid_points]
+        log_Pb_grid = log_Pb_grid[:, valid_points]
+        log_Pf_grid = log_Pf_grid[:, valid_points]
+        if kind == "dip":
+            log_Pb_vec = log_Pb_vec[valid_points]
+        else:
+            log_Pf_vec = log_Pf_vec[valid_points]
+        N = n_valid_points
+
+    # local per-point logBF: ln p(x|event) - ln p(x|baseline), event mag uniform prior
+    if kind == "dip":
+        loglik_baseline_only = float(np.sum(log_Pb_vec))
+        log_px_baseline = log_Pb_vec
+        log_px_event = logsumexp(log_Pf_grid, axis=0) - np.log(M)
+    else:  # jump
+        loglik_baseline_only = float(np.sum(log_Pf_vec))
+        log_px_baseline = log_Pf_vec
+        log_px_event = logsumexp(log_Pb_grid, axis=0) - np.log(M)
+
+    log_bf_local = log_px_event - log_px_baseline
 
     max_log_bf_local = float(np.nanmax(log_bf_local)) if np.isfinite(log_bf_local).any() else np.nan
 
@@ -1262,8 +1307,6 @@ def main():
     compute_event_prob = (not args.no_event_prob)
 
     # Collect input files from mag_bins if specified
-    import glob
-    import re
     expanded_inputs = []
     
     # If mag_bins specified, find all .dat2 files in lcX_cal directories
@@ -1345,33 +1388,17 @@ def main():
         output_path = Path(args.output)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         
-        try:
-            # Use the same simple approach as lc_excursions.py - let pandas handle file I/O
-            mode = 'a' if os.path.exists(args.output) else 'w'
-            header = not os.path.exists(args.output) if mode == 'a' else write_header
-            
-            df_chunk.to_csv(args.output, index=False, mode=mode, header=header)
-            
-            total_written += len(chunk_results)
-            write_header = False
-            if is_final:
-                print(f"Wrote {total_written} total rows to {args.output}", flush=True)
-            else:
-                print(f"Wrote chunk: {len(chunk_results)} rows (total: {total_written})", flush=True)
-        except (PermissionError, OSError) as e:
-            # Retry once after a short delay
-            import time
-            time.sleep(0.1)
-            try:
-                mode = 'a' if os.path.exists(args.output) else 'w'
-                header = not os.path.exists(args.output) if mode == 'a' else write_header
-                df_chunk.to_csv(args.output, index=False, mode=mode, header=header)
-                total_written += len(chunk_results)
-                write_header = False
-                print(f"Wrote chunk (retry): {len(chunk_results)} rows (total: {total_written})", flush=True)
-            except Exception as e2:
-                print(f"ERROR: Failed to write chunk after retry: {e2}", flush=True)
-                raise
+        file_exists = output_path.exists()
+        mode = "a" if file_exists else "w"
+        header = write_header and not file_exists
+        df_chunk.to_csv(args.output, index=False, mode=mode, header=header)
+
+        total_written += len(chunk_results)
+        write_header = False
+        if is_final:
+            print(f"Wrote {total_written} total rows to {args.output}", flush=True)
+        else:
+            print(f"Wrote chunk: {len(chunk_results)} rows (total: {total_written})", flush=True)
 
     with ProcessPoolExecutor(max_workers=args.workers) as ex:
         futs = {

@@ -586,6 +586,28 @@ def per_camera_gp_baseline(
 
         finite = np.isfinite(t) & np.isfinite(y)
         if finite.sum() < 5:
+            # Too few points for GP: fallback to a per-camera median baseline and jitter floor
+            if np.isfinite(y).any():
+                baseline_val = float(np.nanmedian(y[np.isfinite(y)]))
+                baseline = np.full_like(y, baseline_val, dtype=float)
+                resid = y - baseline
+
+                if np.isfinite(yerr).any():
+                    med_yerr_all = float(np.nanmedian(yerr[np.isfinite(yerr)]))
+                else:
+                    med_yerr_all = float(jitter)
+                yerr_full = np.where(np.isfinite(yerr), yerr, med_yerr_all)
+                yerr_full = np.nan_to_num(yerr_full, nan=float(jitter), posinf=float(jitter), neginf=float(jitter))
+                yerr_full = np.maximum(yerr_full, 0.0)
+
+                sigma_eff = np.sqrt(yerr_full**2 + float(jitter)**2)
+                sigma_resid = resid / sigma_eff
+
+                df_out.loc[idx, "baseline"] = baseline
+                df_out.loc[idx, "resid"] = resid
+                df_out.loc[idx, "sigma_resid"] = sigma_resid
+                if add_sigma_eff_col:
+                    df_out.loc[idx, "sigma_eff"] = sigma_eff
             continue
 
         finite_idx = np.flatnonzero(finite)
