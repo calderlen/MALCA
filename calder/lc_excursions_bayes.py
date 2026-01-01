@@ -10,6 +10,7 @@ import glob
 import os
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -1339,20 +1340,38 @@ def main():
             return
         nonlocal write_header, total_written
         df_chunk = pd.DataFrame(chunk_results)
-        # Append mode if not first write, write mode if first write
-        mode = 'a' if not write_header else 'w'
-        df_chunk.to_csv(
-            args.output,
-            mode=mode,
-            index=False,
-            header=write_header
-        )
-        total_written += len(chunk_results)
-        write_header = False
-        if is_final:
-            print(f"Wrote {total_written} total rows to {args.output}", flush=True)
-        else:
-            print(f"Wrote chunk: {len(chunk_results)} rows (total: {total_written})", flush=True)
+        
+        # Ensure output directory exists
+        output_path = Path(args.output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        try:
+            # Use the same simple approach as lc_excursions.py - let pandas handle file I/O
+            mode = 'a' if os.path.exists(args.output) else 'w'
+            header = not os.path.exists(args.output) if mode == 'a' else write_header
+            
+            df_chunk.to_csv(args.output, index=False, mode=mode, header=header)
+            
+            total_written += len(chunk_results)
+            write_header = False
+            if is_final:
+                print(f"Wrote {total_written} total rows to {args.output}", flush=True)
+            else:
+                print(f"Wrote chunk: {len(chunk_results)} rows (total: {total_written})", flush=True)
+        except (PermissionError, OSError) as e:
+            # Retry once after a short delay
+            import time
+            time.sleep(0.1)
+            try:
+                mode = 'a' if os.path.exists(args.output) else 'w'
+                header = not os.path.exists(args.output) if mode == 'a' else write_header
+                df_chunk.to_csv(args.output, index=False, mode=mode, header=header)
+                total_written += len(chunk_results)
+                write_header = False
+                print(f"Wrote chunk (retry): {len(chunk_results)} rows (total: {total_written})", flush=True)
+            except Exception as e2:
+                print(f"ERROR: Failed to write chunk after retry: {e2}", flush=True)
+                raise
 
     with ProcessPoolExecutor(max_workers=args.workers) as ex:
         futs = {
