@@ -505,11 +505,16 @@ def bayesian_excursion_significance(
         if not np.isfinite(mags).any():
             raise ValueError("All magnitude values are NaN/inf")
         baseline_mags = np.full_like(mags, np.nanmedian(mags))
+        baseline_sources = np.full(len(mags), "global_median", dtype=object)
     else:
         if "baseline" in df_base.columns:
             baseline_mags = np.asarray(df_base["baseline"], float)
         else:
             baseline_mags = np.asarray(df_base[mag_col], float)
+        if "baseline_source" in df_base.columns:
+            baseline_sources = np.asarray(df_base["baseline_source"], dtype=object)
+        else:
+            baseline_sources = np.full(len(df_base), "unknown", dtype=object)
 
         if use_sigma_eff and ("sigma_eff" in df_base.columns):
             errs_new = np.asarray(df_base["sigma_eff"], float)
@@ -579,6 +584,7 @@ def bayesian_excursion_significance(
         mags = mags[valid_mask]
         errs = errs[valid_mask]
         baseline_mags = baseline_mags[valid_mask]
+        baseline_sources = baseline_sources[valid_mask]
         jd = jd[valid_mask]
 
     baseline_mag = float(np.nanmedian(baseline_mags))
@@ -642,6 +648,7 @@ def bayesian_excursion_significance(
         mags = mags[valid_points]
         errs = errs[valid_points]
         baseline_mags = baseline_mags[valid_points]
+        baseline_sources = baseline_sources[valid_points]
         jd = jd[valid_points]
         log_Pb_grid = log_Pb_grid[:, valid_points]
         log_Pf_grid = log_Pf_grid[:, valid_points]
@@ -880,6 +887,7 @@ def bayesian_excursion_significance(
         bayes_factor=float(bayes_factor),
         log_evidence_mixture=float(log_evidence_mixture),
         log_evidence_baseline=float(loglik_baseline_only),
+        baseline_source=",".join(sorted({str(x) for x in baseline_sources if isinstance(x, (str, bytes)) and len(str(x)) > 0})) or "unknown",
 
         # grids (debug)
         p_grid=p_grid,
@@ -1172,6 +1180,7 @@ def _process_one(
         jump_best_p=float(jump["best_p"]),
 
         used_sigma_eff=bool(dip.get("used_sigma_eff", False) and jump.get("used_sigma_eff", False)),
+        baseline_source=str(dip.get("baseline_source", jump.get("baseline_source", "unknown"))),
         trigger_mode=str(trigger_mode),
         dip_trigger_threshold=float(dip.get("trigger_threshold", np.nan)),
         jump_trigger_threshold=float(jump.get("trigger_threshold", np.nan)),

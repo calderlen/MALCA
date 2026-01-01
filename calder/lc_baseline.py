@@ -537,10 +537,10 @@ def per_camera_gp_baseline(
         baseline, resid, sigma_resid  (and optionally sigma_eff)
     """
     df_out = df.copy()
-    out_cols = ("baseline", "resid", "sigma_resid") + (("sigma_eff",) if add_sigma_eff_col else ())
+    out_cols = ("baseline", "resid", "sigma_resid", "baseline_source") + (("sigma_eff",) if add_sigma_eff_col else ())
     for col in out_cols:
         if col not in df_out.columns:
-            df_out[col] = np.nan
+            df_out[col] = np.nan if col != "baseline_source" else "unknown"
 
     def _robust_sigma_floor(resid, yerr_here, var_here):
         """Estimate sigma_floor from quiescent residuals via iterative MAD clipping."""
@@ -580,35 +580,36 @@ def per_camera_gp_baseline(
         y = df_out.loc[idx, mag_col].to_numpy(dtype=float)
 
         if err_col in df_out.columns:
-            yerr = df_out.loc[idx, err_col].to_numpy(dtype=float)
-        else:
-            yerr = np.full_like(y, np.nan, dtype=float)
+        yerr = df_out.loc[idx, err_col].to_numpy(dtype=float)
+    else:
+        yerr = np.full_like(y, np.nan, dtype=float)
 
-        finite = np.isfinite(t) & np.isfinite(y)
-        if finite.sum() < 5:
-            # Too few points for GP: fallback to a per-camera median baseline and jitter floor
-            if np.isfinite(y).any():
-                baseline_val = float(np.nanmedian(y[np.isfinite(y)]))
-                baseline = np.full_like(y, baseline_val, dtype=float)
-                resid = y - baseline
+    finite = np.isfinite(t) & np.isfinite(y)
+    if finite.sum() < 5:
+        # Too few points for GP: fallback to a per-camera median baseline and jitter floor
+        if np.isfinite(y).any():
+            baseline_val = float(np.nanmedian(y[np.isfinite(y)]))
+            baseline = np.full_like(y, baseline_val, dtype=float)
+            resid = y - baseline
 
-                if np.isfinite(yerr).any():
-                    med_yerr_all = float(np.nanmedian(yerr[np.isfinite(yerr)]))
-                else:
-                    med_yerr_all = float(jitter)
-                yerr_full = np.where(np.isfinite(yerr), yerr, med_yerr_all)
-                yerr_full = np.nan_to_num(yerr_full, nan=float(jitter), posinf=float(jitter), neginf=float(jitter))
-                yerr_full = np.maximum(yerr_full, 0.0)
+            if np.isfinite(yerr).any():
+                med_yerr_all = float(np.nanmedian(yerr[np.isfinite(yerr)]))
+            else:
+                med_yerr_all = float(jitter)
+            yerr_full = np.where(np.isfinite(yerr), yerr, med_yerr_all)
+            yerr_full = np.nan_to_num(yerr_full, nan=float(jitter), posinf=float(jitter), neginf=float(jitter))
+            yerr_full = np.maximum(yerr_full, 0.0)
 
-                sigma_eff = np.sqrt(yerr_full**2 + float(jitter)**2)
-                sigma_resid = resid / sigma_eff
+            sigma_eff = np.sqrt(yerr_full**2 + float(jitter)**2)
+            sigma_resid = resid / sigma_eff
 
-                df_out.loc[idx, "baseline"] = baseline
-                df_out.loc[idx, "resid"] = resid
-                df_out.loc[idx, "sigma_resid"] = sigma_resid
-                if add_sigma_eff_col:
-                    df_out.loc[idx, "sigma_eff"] = sigma_eff
-            continue
+            df_out.loc[idx, "baseline"] = baseline
+            df_out.loc[idx, "resid"] = resid
+            df_out.loc[idx, "sigma_resid"] = sigma_resid
+            if add_sigma_eff_col:
+                df_out.loc[idx, "sigma_eff"] = sigma_eff
+            df_out.loc[idx, "baseline_source"] = "median_fallback"
+        continue
 
         finite_idx = np.flatnonzero(finite)
         t_fit = t[finite_idx]
@@ -639,6 +640,7 @@ def per_camera_gp_baseline(
         # defaults in case GP fails
         baseline = np.full_like(y, np.nan, dtype=float)
         var = np.zeros_like(y, dtype=float)
+        baseline_flag = "median_fallback"
 
         try:
             gp = GaussianProcess(k)
@@ -647,12 +649,14 @@ def per_camera_gp_baseline(
             baseline = np.asarray(mu, dtype=float) + y_mean
             var = np.asarray(var_pred, dtype=float)
             var = np.where(np.isfinite(var) & (var >= 0.0), var, 0.0)
+            baseline_flag = "gp_sho"
         except Exception as exc:  # pragma: no cover - defensive
             warnings.warn(f"GP fit failed for camera group; falling back to median baseline. Error: {exc}")
             # fallback baseline: per-camera median on finite points
             y_med = float(np.nanmedian(y[finite]))
             baseline = np.full_like(y, y_med, dtype=float)
             var = np.zeros_like(y, dtype=float)
+            baseline_flag = "median_fallback"
 
         resid = y - baseline
 
@@ -682,6 +686,7 @@ def per_camera_gp_baseline(
         df_out.loc[idx, "sigma_resid"] = sigma_resid
         if add_sigma_eff_col:
             df_out.loc[idx, "sigma_eff"] = sigma_eff
+        df_out.loc[idx, "baseline_source"] = baseline_flag
 
     return df_out
 
