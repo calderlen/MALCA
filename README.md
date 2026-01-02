@@ -2,7 +2,7 @@
 
 Pipeline to search for peaks and dips in ASAS-SN light curves
 
-## How to use
+## how to use
 - `scripts/lc_manifest.py`  
   Build a csv/parquet file mapping ASAS-SN IDs to LC paths:  
   `python scripts/lc_manifest.py --index-root <path_to_index_root> --lc-root <path_to_lc_root> --out ./lc_manifest.csv [--mag-bin 12_12.5 ...]`
@@ -24,7 +24,7 @@ Pipeline to search for peaks and dips in ASAS-SN light curves
   Summarize false-positive reduction (pre vs post filter retention):  
   `python scripts/fp_analysis.py --pre <pre_csv_or_dir> --post <post_csv_or_dir> [--id-col asas_sn_id]`
 
-## Dependencies
+## dependencies
 - numpy
 - pandas
 - scipy
@@ -33,7 +33,7 @@ Pipeline to search for peaks and dips in ASAS-SN light curves
 - celerite2
 - pyarrow (optional; required for Parquet outputs)
 
-## Project layout
+## layout
 ```
 .
 ├── docs
