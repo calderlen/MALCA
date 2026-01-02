@@ -1,4 +1,6 @@
 
+## MALCA (Multi-timescale ASAS-SN Light Curve Analysis)
+
 ## Modules
 - `src/old/lc_events.py`
   - `clean_lc`

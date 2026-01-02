@@ -1,4 +1,4 @@
-# ASAS-SN Variability Tools
+# MALCA: Multi-timescale ASAS-SN Light Curve Analysis
 
 Pipeline to search for peaks and dips in ASAS-SN light curves
 

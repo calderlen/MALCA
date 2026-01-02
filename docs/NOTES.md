@@ -14,14 +14,14 @@ titipu:     250.03 GiB of RAM and 80 processors
 
 
 
-ASAS-SN/VSX+BJ: matched 10 / 31 within 2.0"
+MALCA (ASAS-SN)/VSX+BJ: matched 10 / 31 within 2.0"
                            sum  count
 category                             
 Dippers                      6     11
 Multiple Eclipse Binaries    2      7
 Single Eclipse Binaries      2     13
 
-ASASSN+BJ: matched 31 / 31 within 2.0"
+MALCA (ASAS-SN)+BJ: matched 31 / 31 within 2.0"
                            sum  count
 category                             
 Dippers                     11     11
