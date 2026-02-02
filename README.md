@@ -118,7 +118,7 @@ graph TB
     end
 
     subgraph "Core Libraries"
-        UTILS[utils.py<br/>LC I/O, cleaning]
+        UTILS[utils.py<br/>LC I/O, cleaning, bad camera filtering]
         BASE[baseline.py<br/>GP/trend fitting]
         STATS_LIB[stats.py<br/>Statistics]
         SCORE_LIB[score.py<br/>Event scoring]

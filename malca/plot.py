@@ -16,7 +16,7 @@ from typing import Sequence
 
 from malca.events import run_bayesian_significance
 from malca.utils import gaussian, paczynski_kernel
-from malca.utils import clean_lc, read_lc_dat2
+from malca.utils import clean_lc, read_lc_dat2, filter_bad_cameras
 from malca.baseline import (
     per_camera_gp_baseline,
     global_mean_baseline,
@@ -137,9 +137,18 @@ def read_skypatrol_csv(csv_path):
     return df
 
 
-def load_lightcurve_df(path):
+def load_lightcurve_df(path, *, filter_bad_cameras_enabled: bool = False, bad_camera_scatter_ratio: float = 2.5):
     """
     Dispatch loader based on file extension (.csv -> SkyPatrol, else ASAS-SN .dat).
+    
+    Parameters
+    ----------
+    path : Path-like
+        Path to light curve file
+    filter_bad_cameras_enabled : bool
+        If True, filter out cameras with anomalously high scatter
+    bad_camera_scatter_ratio : float
+        Scatter ratio threshold for bad camera filtering
     """
     path = Path(path)
     suffix = path.suffix.lower()
@@ -147,12 +156,19 @@ def load_lightcurve_df(path):
         dfg, dfv = read_lc_dat2(path.stem, str(path.parent))
         if dfg.empty and dfv.empty:
             return pd.DataFrame()
-        return pd.concat([dfg, dfv], ignore_index=True)
-    if suffix == ".csv":
-        return read_skypatrol_csv(path)
-    if suffix == ".dat":
-        return read_asassn_dat(path)
-    return read_asassn_dat(path)
+        df = pd.concat([dfg, dfv], ignore_index=True)
+    elif suffix == ".csv":
+        df = read_skypatrol_csv(path)
+    elif suffix == ".dat":
+        df = read_asassn_dat(path)
+    else:
+        df = read_asassn_dat(path)
+    
+    # Optionally filter bad cameras
+    if filter_bad_cameras_enabled and not df.empty and "camera#" in df.columns:
+        df, _ = filter_bad_cameras(df, scatter_ratio_threshold=bad_camera_scatter_ratio)
+    
+    return df
 
 
 def load_events_paths(
@@ -338,10 +354,16 @@ def plot_bayes_results(
     legend_outside: bool = True,
     robust_threshold: bool = True,
     show_timestamp: bool = True,
+    filter_bad_cameras: bool = True,
+    bad_camera_scatter_ratio: float = 2.5,
 ):
     """Plot a light curve with Bayesian detection results and run fits."""
                       
-    df = load_lightcurve_df(csv_path)
+    df = load_lightcurve_df(
+        csv_path,
+        filter_bad_cameras_enabled=filter_bad_cameras,
+        bad_camera_scatter_ratio=bad_camera_scatter_ratio,
+    )
     df = clean_lc(
         df,
         max_error_absolute=clean_max_error_absolute,

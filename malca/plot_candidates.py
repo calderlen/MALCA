@@ -62,7 +62,8 @@ def _plot_single_candidate(args: tuple) -> tuple[str, bool, str]:
         lc_path_str, out_path_str, baseline, baseline_kwargs,
         skip_events, plot_fits, logbf_threshold_dip, logbf_threshold_jump,
         jd_offset, clean_max_error_absolute, clean_max_error_sigma,
-        detection_results_csv, annotations, metadata, run_params
+        detection_results_csv, annotations, metadata, run_params,
+        filter_bad_cameras, bad_camera_scatter_ratio
     ) = args
 
     lc_path = Path(lc_path_str)
@@ -90,6 +91,8 @@ def _plot_single_candidate(args: tuple) -> tuple[str, bool, str]:
             annotations=annotations,
             metadata=metadata,
             run_params=run_params,
+            filter_bad_cameras=filter_bad_cameras,
+            bad_camera_scatter_ratio=bad_camera_scatter_ratio,
         )
         return (lc_path_str, True, "")
     except Exception as e:
@@ -116,6 +119,8 @@ def plot_passing_candidates(
     clean_max_error_sigma: float = 5.0,
     detection_results_csv: Path | None = None,
     run_params: dict | None = None,
+    filter_bad_cameras: bool = True,
+    bad_camera_scatter_ratio: float = 2.5,
 ) -> int:
     """
     Plot all candidates that passed post-filters.
@@ -236,7 +241,8 @@ def plot_passing_candidates(
             skip_events, plot_fits, logbf_threshold_dip, logbf_threshold_jump,
             jd_offset, clean_max_error_absolute, clean_max_error_sigma,
             str(detection_results_csv) if detection_results_csv else None,
-            annotations, metadata, run_params
+            annotations, metadata, run_params,
+            filter_bad_cameras, bad_camera_scatter_ratio
         ))
 
     n_plotted = 0
@@ -395,6 +401,20 @@ Example usage:
         action="store_true",
         help="Print detailed progress",
     )
+    # Bad camera filtering
+    parser.add_argument(
+        "--no-filter-bad-cameras",
+        dest="filter_bad_cameras",
+        action="store_false",
+        help="Disable auto-filtering of bad cameras (enabled by default)",
+    )
+    parser.add_argument(
+        "--bad-camera-scatter-ratio",
+        type=float,
+        default=2.5,
+        help="Scatter ratio threshold for bad camera filtering (default: 2.5)",
+    )
+    parser.set_defaults(filter_bad_cameras=True)
 
     args = parser.parse_args()
 
@@ -473,6 +493,8 @@ Example usage:
         clean_max_error_sigma=args.clean_max_error_sigma,
         detection_results_csv=args.detection_results,
         run_params=run_params,
+        filter_bad_cameras=args.filter_bad_cameras,
+        bad_camera_scatter_ratio=args.bad_camera_scatter_ratio,
     )
 
     print(f"\nPlots saved to {out_dir}")

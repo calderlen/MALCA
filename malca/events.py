@@ -30,7 +30,7 @@ warnings.filterwarnings("ignore", message=".*Covariance of the parameters could 
 warnings.filterwarnings("ignore", message=".*overflow encountered in.*")
 warnings.filterwarnings("ignore", message=".*invalid value encountered in.*", category=RuntimeWarning)
 
-from malca.utils import read_lc_dat2, read_lc_csv, clean_lc, gaussian, paczynski_kernel, fred, skew_gaussian
+from malca.utils import read_lc_dat2, read_lc_csv, clean_lc, gaussian, paczynski_kernel, fred, skew_gaussian, filter_bad_cameras
 from malca.baseline import (
     per_camera_gp_baseline,
     per_camera_gp_baseline_masked,
@@ -1149,6 +1149,8 @@ def process_one(
 
     compute_event_prob: bool,
     excluded_cameras: str | None = None,
+    auto_filter_bad_cameras: bool = False,
+    bad_camera_scatter_ratio: float = 2.5,
 ):
     """
     
@@ -1217,6 +1219,18 @@ def process_one(
     n_points = len(df)
     if n_points < 10:
         raise ValueError(f"Insufficient valid data points ({n_points} < 10) in {path}")
+    
+    # Auto-filter bad cameras if enabled
+    bad_cameras_filtered = set()
+    if auto_filter_bad_cameras and "camera#" in df.columns:
+        df, bad_cameras_filtered = filter_bad_cameras(
+            df,
+            lc_path=path,
+            scatter_ratio_threshold=bad_camera_scatter_ratio,
+        )
+        n_points = len(df)
+        if n_points < 10:
+            raise ValueError(f"Insufficient valid data points after bad camera filtering ({n_points} < 10) in {path}")
     
     baseline_func_map = {
         "gp": per_camera_gp_baseline,
@@ -1391,6 +1405,7 @@ def process_one(
         trigger_mode=str(trigger_mode),
         dip_trigger_threshold=float(dip.get("trigger_threshold", np.nan)),
         jump_trigger_threshold=float(jump.get("trigger_threshold", np.nan)),
+        bad_cameras_filtered=",".join(str(c) for c in sorted(bad_cameras_filtered)) if bad_cameras_filtered else "",
     )
 
 
@@ -1430,6 +1445,9 @@ def main():
     parser.add_argument("--mag-max-jump", type=float, default=None, help="Max magnitude for jump grid (overrides auto)")
     parser.add_argument("--no-sigma-eff", action="store_true", help="Do not replace errors with sigma_eff from baseline")
     parser.add_argument("--allow-missing-sigma-eff", action="store_true", help="Do not error if baseline omits sigma_eff (sets require_sigma_eff=False)")
+    # Bad camera filtering
+    parser.add_argument("--no-filter-bad-cameras", dest="filter_bad_cameras", action="store_false", help="Disable auto-filtering of cameras with anomalously high scatter (enabled by default)")
+    parser.add_argument("--bad-camera-scatter-ratio", type=float, default=2.5, help="Scatter ratio threshold for bad camera filtering (default: 2.5)")
     parser.add_argument("--min-mag-offset", type=float, default=0.1, help="Apply signal amplitude filter: require |event_mag - baseline_mag| > threshold (e.g., 0.05)")
     parser.add_argument("--output", type=str, default=None, help="Output path for results (suffix adjusted per format).")
     parser.add_argument("--metadata-csv", type=str, default=None, help="Optional CSV with 'path' and extra metadata columns to attach to results.")
@@ -1438,6 +1456,7 @@ def main():
     parser.add_argument("-o", "--overwrite", action="store_true", help="Overwrite checkpoint log and existing output if present (start fresh).")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output (default: quiet).")
     parser.add_argument("--quiet", action="store_true", help=argparse.SUPPRESS)
+    parser.set_defaults(filter_bad_cameras=True)
 
     args = parser.parse_args()
     if args.trigger_mode == "posterior_prob" and args.no_event_prob:
@@ -1814,6 +1833,8 @@ def main():
                 use_sigma_eff=use_sigma_eff, require_sigma_eff=require_sigma_eff,
                 compute_event_prob=compute_event_prob,
                 excluded_cameras=path_excluded,
+                auto_filter_bad_cameras=args.filter_bad_cameras,
+                bad_camera_scatter_ratio=args.bad_camera_scatter_ratio,
             )
             futs[fut] = path
 

@@ -518,6 +518,7 @@ def identify_bad_cameras(
 def filter_bad_cameras(
     df_lc: pd.DataFrame,
     raw2_df: pd.DataFrame | None = None,
+    lc_path: str | None = None,
     **kwargs
 ) -> tuple[pd.DataFrame, set[int]]:
     """
@@ -530,7 +531,10 @@ def filter_bad_cameras(
     df_lc : pd.DataFrame
         Light curve data
     raw2_df : pd.DataFrame | None
-        Optional raw2 data
+        Optional raw2 data (if provided, takes precedence over lc_path)
+    lc_path : str | None
+        Path to the light curve file (e.g., .dat2). If provided and raw2_df is
+        None, will attempt to load the corresponding .raw2 file automatically.
     **kwargs
         Additional arguments passed to identify_bad_cameras
 
@@ -541,6 +545,15 @@ def filter_bad_cameras(
     bad_cameras : set[int]
         Set of camera IDs that were removed
     """
+    # Auto-load raw2 if lc_path provided and raw2_df not explicitly given
+    if raw2_df is None and lc_path is not None:
+        from pathlib import Path
+        lc_path_obj = Path(lc_path)
+        if lc_path_obj.suffix.lower() == ".dat2":
+            raw2_path = lc_path_obj.with_suffix(".raw2")
+            if raw2_path.exists():
+                raw2_df = read_lc_raw2(lc_path_obj.stem, str(lc_path_obj.parent))
+    
     bad_cameras = identify_bad_cameras(df_lc, raw2_df, **kwargs)
     if bad_cameras:
         cam_col = kwargs.get("cam_col", "camera#")
