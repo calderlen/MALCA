@@ -951,6 +951,11 @@ def plot_bayes_results(
                 display_key = key.replace("logbf_threshold_", "logBF_thr_")
                 info_lines.append(f"{display_key}: {run_params[key]}")
 
+    # Filtered cameras
+    if filtered_cameras:
+        cams_str = ",".join(str(c) for c in sorted(filtered_cameras))
+        info_lines.append(f"Cameras filtered: {cams_str}")
+
     # Timestamp
     if show_timestamp:
         timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M")
