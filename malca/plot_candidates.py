@@ -62,7 +62,7 @@ def _plot_single_candidate(args: tuple) -> tuple[str, bool, str]:
         lc_path_str, out_path_str, baseline, baseline_kwargs,
         skip_events, plot_fits, logbf_threshold_dip, logbf_threshold_jump,
         jd_offset, clean_max_error_absolute, clean_max_error_sigma,
-        detection_results_csv, annotations
+        detection_results_csv, annotations, metadata, run_params
     ) = args
 
     lc_path = Path(lc_path_str)
@@ -88,6 +88,8 @@ def _plot_single_candidate(args: tuple) -> tuple[str, bool, str]:
             clean_max_error_sigma=clean_max_error_sigma,
             detection_results_csv=detection_results_csv,
             annotations=annotations,
+            metadata=metadata,
+            run_params=run_params,
         )
         return (lc_path_str, True, "")
     except Exception as e:
@@ -113,6 +115,7 @@ def plot_passing_candidates(
     clean_max_error_absolute: float = 1.0,
     clean_max_error_sigma: float = 5.0,
     detection_results_csv: Path | None = None,
+    run_params: dict | None = None,
 ) -> int:
     """
     Plot all candidates that passed post-filters.
@@ -189,12 +192,29 @@ def plot_passing_candidates(
         if "catalog_match" in row.index:
             annotations["periodic"] = "Yes" if row["catalog_match"] else "No"
 
+        # Add dipper/jumper scores to annotations
+        if "dipper_score" in row.index and pd.notna(row["dipper_score"]):
+            annotations["dipper_score"] = f"{row['dipper_score']:.2f}"
+        if "jumper_score" in row.index and pd.notna(row["jumper_score"]):
+            annotations["jumper_score"] = f"{row['jumper_score']:.2f}"
+
+        # Build metadata from row
+        metadata = {}
+        if "vsx_class" in row.index and pd.notna(row["vsx_class"]) and row["vsx_class"]:
+            metadata["vsx_class"] = str(row["vsx_class"])
+        if "asas_sn_id" in row.index and pd.notna(row["asas_sn_id"]):
+            metadata["asas_sn_id"] = str(row["asas_sn_id"])
+        if "external_id" in row.index and pd.notna(row["external_id"]):
+            metadata["external_id"] = str(row["external_id"])
+        if "trigger_type" in row.index and pd.notna(row["trigger_type"]):
+            metadata["trigger_type"] = str(row["trigger_type"])
+
         work_items.append((
             str(lc_path), str(out_path), baseline, baseline_kwargs,
             skip_events, plot_fits, logbf_threshold_dip, logbf_threshold_jump,
             jd_offset, clean_max_error_absolute, clean_max_error_sigma,
             str(detection_results_csv) if detection_results_csv else None,
-            annotations
+            annotations, metadata, run_params
         ))
 
     n_plotted = 0
@@ -398,6 +418,19 @@ Example usage:
     if gp_params and args.baseline.startswith("per_camera_gp"):
         baseline_kwargs.update(gp_params)
 
+    # Load run_params.json if available from detect_run
+    run_params = None
+    if args.detect_run:
+        import json
+        run_params_path = args.detect_run.expanduser() / "run_params.json"
+        if run_params_path.exists():
+            try:
+                with open(run_params_path) as f:
+                    run_params = json.load(f)
+                print(f"Loaded run params from: {run_params_path}")
+            except Exception as e:
+                print(f"Warning: Could not load run_params.json: {e}")
+
     # Plot
     n_plotted = plot_passing_candidates(
         input_path,
@@ -417,6 +450,7 @@ Example usage:
         clean_max_error_absolute=args.clean_max_error_absolute,
         clean_max_error_sigma=args.clean_max_error_sigma,
         detection_results_csv=args.detection_results,
+        run_params=run_params,
     )
 
     print(f"\nPlots saved to {out_dir}")

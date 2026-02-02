@@ -11,6 +11,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 import time
+from datetime import datetime
 from typing import Sequence
 
 from malca.events import run_bayesian_significance
@@ -330,6 +331,13 @@ def plot_bayes_results(
     clean_max_error_absolute=1.0,
     clean_max_error_sigma=5.0,
     annotations: dict[str, str] | None = None,
+    # New parameters
+    metadata: dict | None = None,
+    run_params: dict | None = None,
+    unified_layout: bool = True,
+    legend_outside: bool = True,
+    robust_threshold: bool = True,
+    show_timestamp: bool = True,
 ):
     """Plot a light curve with Bayesian detection results and run fits."""
                       
@@ -408,15 +416,11 @@ def plot_bayes_results(
     else:
         df["JD_plot"] = df["JD"] - 8000.0
     
-                      
-    bands = [0, 1]        
-    band_labels = {0: "g band", 1: "V band"}
+    bands = [0, 1]
+    band_labels = {0: "g", 1: "V"}
     band_markers = {0: "o", 1: "s"}
-    
-                                                                           
-    fig, axes = plt.subplots(2, 2, figsize=figsize, constrained_layout=True, sharex="col")
-    
-                       
+
+    # Set up camera labels
     if "camera_name" in df.columns:
         df["camera_label"] = df["camera_name"].astype(str)
     elif "camera#" in df.columns:
@@ -429,48 +433,100 @@ def plot_bayes_results(
     camera_ids = sorted(df["camera_label"].dropna().unique())
     cmap = plt.get_cmap("tab20", max(len(camera_ids), 1))
     camera_colors = {cam: cmap(i % cmap.N) for i, cam in enumerate(camera_ids)}
-    
-                       
-    for band_idx, band in enumerate([1, 0]):                             
+
+    # Compute baselines and residuals for each band
+    band_dfs = {}
+    all_resids = []
+    for band in bands:
         band_df = df[df["v_g_band"] == band].copy()
         if band_df.empty:
             continue
-        
-                                    
         if baseline_func:
             band_df_baseline = baseline_func(band_df, **baseline_kwargs)
             if "baseline" in band_df_baseline.columns:
                 band_df["baseline"] = band_df_baseline["baseline"]
                 band_df["resid"] = band_df["mag"] - band_df["baseline"]
-        
-                                         
-        ax_main = axes[0, band_idx]
-        ax_main.invert_yaxis()
-        
-                                    
+                all_resids.extend(band_df["resid"].dropna().tolist())
+        band_dfs[band] = band_df
+
+    # Compute robust 3-sigma threshold from all residuals
+    if robust_threshold and len(all_resids) > 10:
+        all_resids_arr = np.array(all_resids)
+        all_resids_finite = all_resids_arr[np.isfinite(all_resids_arr)]
+        if len(all_resids_finite) > 10:
+            mad = 1.4826 * np.median(np.abs(all_resids_finite - np.median(all_resids_finite)))
+            sigma_3 = 3 * mad
+        else:
+            sigma_3 = 0.3
+    else:
+        sigma_3 = 0.3
+
+    # Create unified 2x1 layout (both bands on same axes)
+    if unified_layout:
+        fig, axes = plt.subplots(2, 1, figsize=figsize, constrained_layout=True, sharex=True)
+        ax_main = axes[0]
+        ax_resid = axes[1]
+    else:
+        fig, axes = plt.subplots(2, 2, figsize=figsize, constrained_layout=True, sharex="col")
+
+    # Track legend handles for unified legend
+    legend_handles = []
+    legend_labels_seen = set()
+
+    # Track if we have significant dips/jumps for legend
+    has_dip = False
+    has_jump = False
+
+    # Plot each band
+    for band in bands:
+        if band not in band_dfs:
+            continue
+        band_df = band_dfs[band]
+        band_label = band_labels[band]
+        marker = band_markers[band]
+
+        if not unified_layout:
+            band_idx = 0 if band == 1 else 1  # V first, then g
+            ax_main = axes[0, band_idx]
+            ax_resid = axes[1, band_idx]
+            ax_main.invert_yaxis()
+
+        # Plot data points by camera
         for cam in camera_ids:
             subset = band_df[band_df["camera_label"] == cam]
             if subset.empty:
                 continue
             color = camera_colors[cam]
-            marker = band_markers.get(band, "o")
+
+            # Label includes band for unified layout
+            if unified_layout:
+                label = f"{cam} ({band_label})"
+            else:
+                label = f"{cam}"
+
+            # Avoid duplicate legend entries
+            if label in legend_labels_seen:
+                label = None
+            else:
+                legend_labels_seen.add(label)
+
             ax_main.errorbar(
                 subset["JD_plot"],
                 subset["mag"],
                 yerr=subset["error"],
                 fmt=marker,
-                ms=3,
+                ms=5,
                 color=color,
                 alpha=0.7,
                 ecolor=color,
                 elinewidth=0.8,
                 capsize=1.5,
                 markeredgecolor="black",
-                markeredgewidth=0.3,
-                label=f"{cam}",
+                markeredgewidth=0.8,
+                label=label,
             )
-        
-                       
+
+        # Plot baseline
         if "baseline" in band_df.columns:
             baseline_finite = band_df[np.isfinite(band_df["baseline"])]
             if not baseline_finite.empty:
@@ -501,29 +557,28 @@ def plot_bayes_results(
                         label="Baseline",
                         zorder=5,
                     )
-        
-                                                                  
+
+        # Plot event markers
         band_res = band_results[band]
         dip = band_res["dip"]
         jump = band_res["jump"]
-        
-                       
+
+        # Plot dips
         if (not skip_events) and dip["significant"] and dip.get("run_summaries"):
+            has_dip = True
             for run_summary in dip["run_summaries"]:
                 jd_start = run_summary["start_jd"]
                 jd_end = run_summary["end_jd"]
-                
-                                    
+
                 jd_plot_start = jd_start - (jd_offset if median_jd > 2000000 else 8000.0)
                 jd_plot_end = jd_end - (jd_offset if median_jd > 2000000 else 8000.0)
                 ax_main.axvline(jd_plot_start, color="red", linestyle="--", alpha=0.7, linewidth=1.5)
                 if jd_plot_end != jd_plot_start:
                     ax_main.axvline(jd_plot_end, color="red", linestyle="--", alpha=0.7, linewidth=1.5)
-                
-                                                                 
+
                 morph = run_summary.get("morphology", "none")
                 params = run_summary.get("params", {})
-                
+
                 if morph == "gaussian" and params:
                     t0 = params.get("t0", (jd_start + jd_end) / 2)
                     if t0 is not None and np.isfinite(t0):
@@ -532,9 +587,9 @@ def plot_bayes_results(
                     if plot_fits:
                         sigma = params.get("sigma", (jd_end - jd_start) / 4)
                         amp = params.get("amp", 0.1)
-                        baseline = params.get("baseline", band_df["mag"].median())
+                        baseline_val = params.get("baseline", band_df["mag"].median())
                         t_fit = np.linspace(jd_start - 3 * sigma, jd_end + 3 * sigma, 100)
-                        mag_fit = gaussian(t_fit, amp, t0, sigma, baseline)
+                        mag_fit = gaussian(t_fit, amp, t0, sigma, baseline_val)
                         t_fit_plot = t_fit - (jd_offset if median_jd > 2000000 else 8000.0)
                         ax_main.plot(
                             t_fit_plot,
@@ -543,9 +598,8 @@ def plot_bayes_results(
                             linestyle="-",
                             linewidth=2,
                             alpha=0.8,
-                            label="Gaussian fit" if run_summary == dip["run_summaries"][0] else "",
                         )
-                
+
                 elif morph == "paczynski" and params:
                     t0 = params.get("t0", (jd_start + jd_end) / 2)
                     if t0 is not None and np.isfinite(t0):
@@ -554,9 +608,9 @@ def plot_bayes_results(
                     if plot_fits:
                         tE = params.get("tE", (jd_end - jd_start) / 2)
                         amp = params.get("amp", -0.1)
-                        baseline = params.get("baseline", band_df["mag"].median())
+                        baseline_val = params.get("baseline", band_df["mag"].median())
                         t_fit = np.linspace(jd_start - 3 * tE, jd_end + 3 * tE, 100)
-                        mag_fit = paczynski_kernel(t_fit, amp, t0, tE, baseline)
+                        mag_fit = paczynski_kernel(t_fit, amp, t0, tE, baseline_val)
                         t_fit_plot = t_fit - (jd_offset if median_jd > 2000000 else 8000.0)
                         ax_main.plot(
                             t_fit_plot,
@@ -565,24 +619,24 @@ def plot_bayes_results(
                             linestyle="-",
                             linewidth=2,
                             alpha=0.8,
-                            label="Paczynski fit" if run_summary == dip["run_summaries"][0] else "",
                         )
-        
-                                        
+
+        # Plot jumps
         if (not skip_events) and jump["significant"] and jump.get("run_summaries"):
+            has_jump = True
             for run_summary in jump["run_summaries"]:
                 jd_start = run_summary["start_jd"]
                 jd_end = run_summary["end_jd"]
-                
+
                 jd_plot_start = jd_start - (jd_offset if median_jd > 2000000 else 8000.0)
                 jd_plot_end = jd_end - (jd_offset if median_jd > 2000000 else 8000.0)
                 ax_main.axvline(jd_plot_start, color="green", linestyle="--", alpha=0.7, linewidth=1.5)
                 if jd_plot_end != jd_plot_start:
                     ax_main.axvline(jd_plot_end, color="green", linestyle="--", alpha=0.7, linewidth=1.5)
-                
+
                 morph = run_summary.get("morphology", "none")
                 params = run_summary.get("params", {})
-                
+
                 if morph == "gaussian" and params:
                     t0 = params.get("t0", (jd_start + jd_end) / 2)
                     if t0 is not None and np.isfinite(t0):
@@ -591,9 +645,9 @@ def plot_bayes_results(
                     if plot_fits:
                         sigma = params.get("sigma", (jd_end - jd_start) / 4)
                         amp = params.get("amp", -0.1)
-                        baseline = params.get("baseline", band_df["mag"].median())
+                        baseline_val = params.get("baseline", band_df["mag"].median())
                         t_fit = np.linspace(jd_start - 3 * sigma, jd_end + 3 * sigma, 100)
-                        mag_fit = gaussian(t_fit, amp, t0, sigma, baseline)
+                        mag_fit = gaussian(t_fit, amp, t0, sigma, baseline_val)
                         t_fit_plot = t_fit - (jd_offset if median_jd > 2000000 else 8000.0)
                         ax_main.plot(
                             t_fit_plot,
@@ -602,9 +656,8 @@ def plot_bayes_results(
                             linestyle="-",
                             linewidth=2,
                             alpha=0.8,
-                            label="Jump (Gaussian)" if run_summary == jump["run_summaries"][0] else "",
                         )
-                
+
                 elif morph == "paczynski" and params:
                     t0 = params.get("t0", (jd_start + jd_end) / 2)
                     if t0 is not None and np.isfinite(t0):
@@ -613,9 +666,9 @@ def plot_bayes_results(
                     if plot_fits:
                         tE = params.get("tE", (jd_end - jd_start) / 2)
                         amp = params.get("amp", -0.1)
-                        baseline = params.get("baseline", band_df["mag"].median())
+                        baseline_val = params.get("baseline", band_df["mag"].median())
                         t_fit = np.linspace(jd_start - 3 * tE, jd_end + 3 * tE, 100)
-                        mag_fit = paczynski_kernel(t_fit, amp, t0, tE, baseline)
+                        mag_fit = paczynski_kernel(t_fit, amp, t0, tE, baseline_val)
                         t_fit_plot = t_fit - (jd_offset if median_jd > 2000000 else 8000.0)
                         ax_main.plot(
                             t_fit_plot,
@@ -624,9 +677,8 @@ def plot_bayes_results(
                             linestyle="-",
                             linewidth=2,
                             alpha=0.8,
-                            label="Jump (Paczynski)" if run_summary == jump["run_summaries"][0] else "",
                         )
-                
+
                 elif morph == "fred" and params:
                     t0 = params.get("t0", (jd_start + jd_end) / 2)
                     if t0 is not None and np.isfinite(t0):
@@ -635,17 +687,12 @@ def plot_bayes_results(
                     if plot_fits:
                         tau = params.get("tau", 0.05)
                         amp = params.get("amp", -0.1)
-                        baseline = params.get("baseline", band_df["mag"].median())
-                        # Plot range: start to +10*tau to catch decay
+                        baseline_val = params.get("baseline", band_df["mag"].median())
                         t_fit = np.linspace(jd_start - 3 * tau, jd_end + 3 * tau, 100)
-                        # Need fred function imported or defined here. 
-                        # Ideally imported: `from malca.events import fred`
-                        # But failing that, we can use the analytic form:
-                        # baseline + amp * np.where(t_fit >= t0, np.exp(-(t_fit - t0)/tau), 0.0)
                         dt = t_fit - t0
                         decay = np.where(dt >= 0, np.exp(-dt / tau), 0.0)
-                        mag_fit = baseline + amp * decay
-                        
+                        mag_fit = baseline_val + amp * decay
+
                         t_fit_plot = t_fit - (jd_offset if median_jd > 2000000 else 8000.0)
                         ax_main.plot(
                             t_fit_plot,
@@ -654,70 +701,111 @@ def plot_bayes_results(
                             linestyle="-",
                             linewidth=2,
                             alpha=0.8,
-                            label="Jump (FRED)" if run_summary == jump["run_summaries"][0] else "",
                         )
-        
-        # X-axis labels on TOP for upper panels (like old plot)
-        ax_main.tick_params(top=True, labeltop=True, bottom=False, labelbottom=False)
-        ax_main.set_xlabel(f"JD - {int(jd_offset)} [d]", fontsize=10)
-        ax_main.xaxis.set_label_position("top")
-        
-        ax_main.set_ylabel(f"{band_labels[band]} [mag]", fontsize=12)
-        ax_main.grid(True, alpha=0.3)
-        if band_idx == 0:
-            ax_main.legend(loc="best", fontsize=8, ncol=2)
-        
-                                     
-        ax_resid = axes[1, band_idx]
+
+        # Plot residuals
         if "resid" in band_df.columns:
             for cam in camera_ids:
                 subset = band_df[band_df["camera_label"] == cam]
                 if subset.empty:
                     continue
                 color = camera_colors[cam]
-                marker = band_markers.get(band, "o")
                 ax_resid.scatter(
                     subset["JD_plot"],
                     subset["resid"],
-                    s=10,
+                    s=15,
                     color=color,
                     alpha=0.7,
                     edgecolor="black",
-                    linewidth=0.3,
+                    linewidth=0.5,
                     marker=marker,
                 )
-            
-            # Add shaded regions for ±0.3 mag threshold (like old plot)
-            jd_min = band_df["JD_plot"].min()
-            jd_max = band_df["JD_plot"].max()
-            ax_resid.fill_between([jd_min, jd_max], 0.3, 100, color="lightgrey", alpha=0.5, zorder=0)
-            ax_resid.fill_between([jd_min, jd_max], -0.3, -100, color="lightgrey", alpha=0.45, zorder=0)
-            
-            ax_resid.axhline(0.0, color="black", linestyle="--", alpha=0.4, zorder=1)
-            ax_resid.axhline(0.3, color="black", linestyle="-", linewidth=0.8, zorder=1)
-            ax_resid.axhline(-0.3, color="black", linestyle="-", linewidth=0.8, zorder=1)
-            
-            ax_resid.set_ylabel(f"{band_labels[band]} residual [mag]", fontsize=12)
-            ax_resid.grid(True, alpha=0.3)
-            ax_resid.invert_yaxis()
-            
-            # Set y-limits to show threshold regions properly
-            resid_min, resid_max = band_df["resid"].min(), band_df["resid"].max()
+
+        # For non-unified layout, configure axes per-band
+        if not unified_layout:
+            ax_main.tick_params(top=True, labeltop=True, bottom=False, labelbottom=False)
+            ax_main.set_xlabel(f"JD - {int(jd_offset)}", fontsize=10)
+            ax_main.xaxis.set_label_position("top")
+            ax_main.set_ylabel(f"{band_labels[band]} band [mag]", fontsize=12)
+            ax_main.grid(True, alpha=0.3)
+            ax_main.legend(loc="best", fontsize=8, ncol=2)
+
+            if "resid" in band_df.columns:
+                jd_min = band_df["JD_plot"].min()
+                jd_max = band_df["JD_plot"].max()
+                ax_resid.fill_between([jd_min, jd_max], sigma_3, 100, color="lightgrey", alpha=0.5, zorder=0)
+                ax_resid.fill_between([jd_min, jd_max], -sigma_3, -100, color="lightgrey", alpha=0.45, zorder=0)
+                ax_resid.axhline(0.0, color="black", linestyle="--", alpha=0.4, zorder=1)
+                ax_resid.axhline(sigma_3, color="black", linestyle="-", linewidth=0.8, zorder=1)
+                ax_resid.axhline(-sigma_3, color="black", linestyle="-", linewidth=0.8, zorder=1)
+                ax_resid.set_ylabel(f"{band_labels[band]} residual [mag]", fontsize=12)
+                ax_resid.grid(True, alpha=0.3)
+                ax_resid.invert_yaxis()
+                resid_min, resid_max = band_df["resid"].min(), band_df["resid"].max()
+                pad = (resid_max - resid_min) * 0.1 if resid_max != resid_min else 0.1
+                ax_resid.set_ylim(max(resid_max + pad, sigma_3 + 0.05), min(resid_min - pad, -sigma_3 - 0.05))
+            ax_resid.set_xlabel(f"JD - {int(jd_offset)}", fontsize=10)
+
+    # Configure unified axes (after plotting all bands)
+    if unified_layout:
+        ax_main.invert_yaxis()
+        ax_main.tick_params(top=True, labeltop=True, bottom=False, labelbottom=False)
+        ax_main.set_xlabel(f"JD - {int(jd_offset)}", fontsize=10)
+        ax_main.xaxis.set_label_position("top")
+        ax_main.set_ylabel("Magnitude [mag]", fontsize=12)
+        ax_main.grid(True, alpha=0.3)
+
+        # Build legend with Line2D handles for events
+        handles, labels = ax_main.get_legend_handles_labels()
+        legend_handles = list(zip(handles, labels))
+
+        # Add event color legend entries
+        if has_dip:
+            legend_handles.append((Line2D([0], [0], color="red", linestyle="--", linewidth=1.5), "Dip"))
+        if has_jump:
+            legend_handles.append((Line2D([0], [0], color="green", linestyle="--", linewidth=1.5), "Jump"))
+
+        if legend_handles:
+            final_handles = [h for h, _ in legend_handles]
+            final_labels = [l for _, l in legend_handles]
+            if legend_outside:
+                ax_main.legend(final_handles, final_labels, loc="upper left", bbox_to_anchor=(1.02, 1), fontsize=8, ncol=1)
+            else:
+                ax_main.legend(final_handles, final_labels, loc="best", fontsize=8, ncol=2)
+
+        # Residual panel for unified layout
+        jd_min = df["JD_plot"].min()
+        jd_max = df["JD_plot"].max()
+        ax_resid.fill_between([jd_min, jd_max], sigma_3, 100, color="lightgrey", alpha=0.5, zorder=0)
+        ax_resid.fill_between([jd_min, jd_max], -sigma_3, -100, color="lightgrey", alpha=0.45, zorder=0)
+        ax_resid.axhline(0.0, color="black", linestyle="--", alpha=0.4, zorder=1)
+        ax_resid.axhline(sigma_3, color="black", linestyle="-", linewidth=0.8, zorder=1)
+        ax_resid.axhline(-sigma_3, color="black", linestyle="-", linewidth=0.8, zorder=1)
+        ax_resid.set_ylabel("Residual [mag]", fontsize=12)
+        ax_resid.grid(True, alpha=0.3)
+        ax_resid.invert_yaxis()
+
+        if all_resids:
+            resid_min, resid_max = min(all_resids), max(all_resids)
             pad = (resid_max - resid_min) * 0.1 if resid_max != resid_min else 0.1
-            ax_resid.set_ylim(max(resid_max + pad, 0.35), min(resid_min - pad, -0.35))
-        
-        # X-axis labels at BOTTOM for residual panels, simpler label
-        ax_resid.set_xlabel("JD", fontsize=10)
+            ax_resid.set_ylim(max(resid_max + pad, sigma_3 + 0.05), min(resid_min - pad, -sigma_3 - 0.05))
+
+        ax_resid.set_xlabel(f"JD - {int(jd_offset)}", fontsize=10)
     
 
 
+    # Merge metadata from lookup with passed-in metadata (passed-in takes precedence)
     meta = lookup_metadata_for_path(csv_path, detection_results_csv=detection_results_csv) or {}
-    
-    # Build title in old format: "Source (ID) – Category – Source Type LC – JD range"
+    if metadata:
+        meta.update(metadata)
+
+    # Build title: "Source (ID) – VSX Class – Category – JD range"
     source_name = meta.get("source")
+    vsx_class = meta.get("vsx_class")
     category = meta.get("category")
-    source_type = meta.get("data_source")
-    
+    external_id = meta.get("external_id")
+    trigger_type = meta.get("trigger_type")
+
     # Start with source name (ID) format
     if source_name and asas_sn_id:
         label = f"{source_name} ({asas_sn_id})"
@@ -727,17 +815,17 @@ def plot_bayes_results(
         label = str(source_name)
     else:
         label = "Source"
-    
+
     # Calculate JD range from the data
-    jd_start = float(df["JD"].min())
-    jd_end = float(df["JD"].max())
-    jd_label = f"JD {jd_start:.0f}-{jd_end:.0f}"
-    
+    jd_start_val = float(df["JD"].min())
+    jd_end_val = float(df["JD"].max())
+    jd_label = f"JD {jd_start_val:.0f}-{jd_end_val:.0f}"
+
     title_parts = [label]
+    if vsx_class:
+        title_parts.append(f"VSX: {vsx_class}")
     if category:
         title_parts.append(str(category))
-    if source_type:
-        title_parts.append(f"{source_type} LC")
     title_parts.append(jd_label)
 
     if not skip_events:
@@ -745,23 +833,74 @@ def plot_bayes_results(
         g_jump = band_results[0]["jump"]
         v_dip = band_results[1]["dip"]
         v_jump = band_results[1]["jump"]
-        
+
         if g_dip["significant"] or v_dip["significant"]:
             total_dips = g_dip.get("n_runs", 0) + v_dip.get("n_runs", 0)
             title_parts.append(f"Dips: {total_dips} runs (g:{g_dip.get('n_runs', 0)}, V:{v_dip.get('n_runs', 0)})")
         if g_jump["significant"] or v_jump["significant"]:
             total_jumps = g_jump.get("n_runs", 0) + v_jump.get("n_runs", 0)
             title_parts.append(f"Jumps: {total_jumps} runs (g:{g_jump.get('n_runs', 0)}, V:{v_jump.get('n_runs', 0)})")
+
     fig.suptitle(" – ".join(title_parts), fontsize=14)
 
+    # Build subtitle with external IDs and trigger type
+    subtitle_parts = []
+    if external_id:
+        subtitle_parts.append(f"ID: {external_id}")
+    if meta.get("asas_sn_id"):
+        subtitle_parts.append(f"ASAS-SN: {meta['asas_sn_id']}")
+    if trigger_type:
+        subtitle_parts.append(f"Trigger: {trigger_type}")
+
+    # Add dipper/jumper scores from annotations if present
     if annotations:
-        ann_parts = [f"{k}: {v}" for k, v in annotations.items() if v is not None]
-        ann_text = "  |  ".join(ann_parts)
+        if annotations.get("dipper_score") is not None:
+            subtitle_parts.append(f"Dipper: {annotations['dipper_score']}")
+        if annotations.get("jumper_score") is not None:
+            subtitle_parts.append(f"Jumper: {annotations['jumper_score']}")
+
+    if subtitle_parts:
         fig.text(
-            0.5, 0.01, ann_text,
-            ha="center", va="bottom", fontsize=8,
-            fontfamily="monospace", color="0.3",
-            bbox=dict(boxstyle="round,pad=0.3", fc="0.95", ec="0.8", alpha=0.9),
+            0.5, 0.965, "  |  ".join(subtitle_parts),
+            ha="center", va="top", fontsize=10,
+            color="0.4",
+        )
+
+    # Build annotations text (filter results, RUWE, etc.)
+    if annotations:
+        # Exclude scores already in subtitle
+        ann_filtered = {k: v for k, v in annotations.items()
+                       if v is not None and k not in ("dipper_score", "jumper_score")}
+        if ann_filtered:
+            ann_parts = [f"{k}: {v}" for k, v in ann_filtered.items()]
+            ann_text = "  |  ".join(ann_parts)
+            fig.text(
+                0.5, 0.01, ann_text,
+                ha="center", va="bottom", fontsize=8,
+                fontfamily="monospace", color="0.3",
+                bbox=dict(boxstyle="round,pad=0.3", fc="0.95", ec="0.8", alpha=0.9),
+            )
+
+    # Display run_params at bottom-left
+    if run_params:
+        params_parts = []
+        for key in ["baseline", "logbf_threshold_dip", "logbf_threshold_jump", "min_run_length"]:
+            if key in run_params:
+                params_parts.append(f"{key}={run_params[key]}")
+        if params_parts:
+            fig.text(
+                0.01, 0.01, "  ".join(params_parts),
+                ha="left", va="bottom", fontsize=7,
+                fontfamily="monospace", color="0.5",
+            )
+
+    # Display timestamp at bottom-right
+    if show_timestamp:
+        timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        fig.text(
+            0.99, 0.01, timestamp_str,
+            ha="right", va="bottom", fontsize=7,
+            fontfamily="monospace", color="0.5",
         )
 
     if out_path:

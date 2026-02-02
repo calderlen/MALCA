@@ -505,6 +505,8 @@ def per_camera_gp_baseline(
     floor_iters=3,
     min_floor_points=30,
     add_sigma_eff_col=True,
+    auto_scale_gp=True,
+    auto_scale_fraction=0.5,
 ):
     """
     per-camera GP baseline (fixed SHO kernel)
@@ -512,6 +514,12 @@ def per_camera_gp_baseline(
     Supports two parameterizations:
     - S0, w0, Q (default) - smooth baseline, ~2000 day timescale
     - sigma, rho, Q (alternative) - if explicitly provided
+
+    If auto_scale_gp=True (default), the GP timescale is automatically scaled
+    based on the time span of the light curve data:
+    - w0 is set to 2π / (auto_scale_fraction * time_span)
+    - This prevents the GP from being too flat for shorter LCs
+    - Only applies when using the S0/w0 parameterization (not sigma/rho)
 
     Implements (physics convention):
         sigma_eff,j^2 = sigma_j^2 + sigma_floor^2 + sigma_model,j^2
@@ -612,7 +620,19 @@ def per_camera_gp_baseline(
             k = terms.SHOTerm(sigma=float(sigma), rho=float(rho), Q=float(q))
         else:
             # Default to S0/w0 parameterization (smoother baseline)
-            k = terms.SHOTerm(S0=float(S0), w0=float(w0), Q=float(q))
+            # Auto-scale w0 based on time span if enabled
+            w0_use = float(w0)
+            if auto_scale_gp:
+                time_span = float(t_fit.max() - t_fit.min())
+                if time_span > 0:
+                    # Set characteristic timescale to fraction of the LC span
+                    # w0 = 2π / timescale, so shorter span → larger w0 → faster variation
+                    target_timescale = max(time_span * float(auto_scale_fraction), 50.0)  # min 50 days
+                    w0_scaled = 2.0 * np.pi / target_timescale
+                    # Only use scaled w0 if it's larger (shorter timescale) than default
+                    # This prevents over-smoothing short LCs but keeps long LCs smooth
+                    w0_use = max(w0_scaled, float(w0))
+            k = terms.SHOTerm(S0=float(S0), w0=w0_use, Q=float(q))
 
         baseline = np.full_like(y, np.nan, dtype=float)
         var = np.zeros_like(y, dtype=float)
@@ -693,6 +713,8 @@ def per_camera_gp_baseline_masked(
     floor_clip=3.0,
     floor_iters=3,
     min_floor_points=30,
+    auto_scale_gp=True,
+    auto_scale_fraction=0.5,
     **kwargs
 ):
     """
@@ -706,6 +728,9 @@ def per_camera_gp_baseline_masked(
     - RealTerm (OU mixture): a1, rho1, a2, rho2 (for backward compatibility)
 
     If RealTerm parameters are explicitly provided, they take precedence.
+
+    If auto_scale_gp=True (default), the GP timescale is automatically scaled
+    based on the time span of the light curve data when using the SHO kernel.
 
     If add_sigma_eff_col is True, computes sigma_eff = sqrt(yerr^2 + sigma_floor^2 + var)
     for improved uncertainty estimation in event detection.
@@ -827,7 +852,17 @@ def per_camera_gp_baseline_masked(
                 terms.RealTerm(a=float(a2), c=1.0 / float(rho2))
             )
         else:
-            k = terms.SHOTerm(S0=float(S0), w0=float(w0), Q=float(q))
+            # Auto-scale w0 based on time span if enabled
+            w0_use = float(w0)
+            if auto_scale_gp:
+                time_span = float(t_fit.max() - t_fit.min())
+                if time_span > 0:
+                    # Set characteristic timescale to fraction of the LC span
+                    target_timescale = max(time_span * float(auto_scale_fraction), 50.0)
+                    w0_scaled = 2.0 * np.pi / target_timescale
+                    # Only use scaled w0 if it's larger (shorter timescale) than default
+                    w0_use = max(w0_scaled, float(w0))
+            k = terms.SHOTerm(S0=float(S0), w0=w0_use, Q=float(q))
 
         try:
             gp = GaussianProcess(k)
