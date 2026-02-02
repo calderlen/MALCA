@@ -309,7 +309,7 @@ def read_lc_raw(asassn_id, path):
     ]
     df = pd.read_csv(
         raw_path,
-        delim_whitespace=True,
+        sep=r"\s+",
         header=None,
         names=columns,
         dtype={
@@ -356,7 +356,7 @@ def read_lc_raw2(asassn_id, path):
     ]
     df = pd.read_csv(
         raw2_path,
-        delim_whitespace=True,
+        sep=r"\s+",
         header=None,
         names=columns,
         dtype={
