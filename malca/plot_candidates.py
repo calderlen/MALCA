@@ -184,9 +184,9 @@ def plot_passing_candidates(
         # Build annotations from filter results
         annotations = {}
         if "dip_bayes_factor" in row.index:
-            annotations["dip_BF"] = f"{row['dip_bayes_factor']:.1f}" if pd.notna(row["dip_bayes_factor"]) else "N/A"
+            annotations["dip_logBF"] = f"{row['dip_bayes_factor']:.1f}" if pd.notna(row["dip_bayes_factor"]) else "N/A"
         if "jump_bayes_factor" in row.index:
-            annotations["jump_BF"] = f"{row['jump_bayes_factor']:.1f}" if pd.notna(row["jump_bayes_factor"]) else "N/A"
+            annotations["jump_logBF"] = f"{row['jump_bayes_factor']:.1f}" if pd.notna(row["jump_bayes_factor"]) else "N/A"
         if "ruwe" in row.index and pd.notna(row["ruwe"]):
             annotations["RUWE"] = f"{row['ruwe']:.2f}"
         if "catalog_match" in row.index:

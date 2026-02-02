@@ -318,7 +318,7 @@ def plot_bayes_results(
     results_csv: Path | None = None,
     *,
     out_path: Path | None = None,
-    figsize=(16, 10),
+    figsize=(14, 8),
     show=False,
     baseline_func=None,
     baseline_kwargs=None,
@@ -455,11 +455,11 @@ def plot_bayes_results(
         all_resids_finite = all_resids_arr[np.isfinite(all_resids_arr)]
         if len(all_resids_finite) > 10:
             mad = 1.4826 * np.median(np.abs(all_resids_finite - np.median(all_resids_finite)))
-            sigma_3 = 3 * mad
+            sigma_5 = 5 * mad
         else:
-            sigma_3 = 0.3
+            sigma_5 = 0.5  # fallback ~5-sigma for typical scatter
     else:
-        sigma_3 = 0.3
+        sigma_5 = 0.5
 
     # Create unified 2x1 layout (both bands on same axes)
     if unified_layout:
@@ -733,17 +733,17 @@ def plot_bayes_results(
             if "resid" in band_df.columns:
                 jd_min = band_df["JD_plot"].min()
                 jd_max = band_df["JD_plot"].max()
-                ax_resid.fill_between([jd_min, jd_max], sigma_3, 100, color="lightgrey", alpha=0.5, zorder=0)
-                ax_resid.fill_between([jd_min, jd_max], -sigma_3, -100, color="lightgrey", alpha=0.45, zorder=0)
+                ax_resid.fill_between([jd_min, jd_max], sigma_5, 100, color="lightgrey", alpha=0.5, zorder=0)
+                ax_resid.fill_between([jd_min, jd_max], -sigma_5, -100, color="lightgrey", alpha=0.45, zorder=0)
                 ax_resid.axhline(0.0, color="black", linestyle="--", alpha=0.4, zorder=1)
-                ax_resid.axhline(sigma_3, color="black", linestyle="-", linewidth=0.8, zorder=1)
-                ax_resid.axhline(-sigma_3, color="black", linestyle="-", linewidth=0.8, zorder=1)
+                ax_resid.axhline(sigma_5, color="black", linestyle="-", linewidth=0.8, zorder=1)
+                ax_resid.axhline(-sigma_5, color="black", linestyle="-", linewidth=0.8, zorder=1)
                 ax_resid.set_ylabel(f"{band_labels[band]} residual [mag]", fontsize=12)
                 ax_resid.grid(True, alpha=0.3)
                 ax_resid.invert_yaxis()
                 resid_min, resid_max = band_df["resid"].min(), band_df["resid"].max()
                 pad = (resid_max - resid_min) * 0.1 if resid_max != resid_min else 0.1
-                ax_resid.set_ylim(max(resid_max + pad, sigma_3 + 0.05), min(resid_min - pad, -sigma_3 - 0.05))
+                ax_resid.set_ylim(max(resid_max + pad, sigma_5 + 0.05), min(resid_min - pad, -sigma_5 - 0.05))
             ax_resid.set_xlabel(f"JD - {int(jd_offset)}", fontsize=10)
 
     # Configure unified axes (after plotting all bands)
@@ -776,11 +776,11 @@ def plot_bayes_results(
         # Residual panel for unified layout
         jd_min = df["JD_plot"].min()
         jd_max = df["JD_plot"].max()
-        ax_resid.fill_between([jd_min, jd_max], sigma_3, 100, color="lightgrey", alpha=0.5, zorder=0)
-        ax_resid.fill_between([jd_min, jd_max], -sigma_3, -100, color="lightgrey", alpha=0.45, zorder=0)
+        ax_resid.fill_between([jd_min, jd_max], sigma_5, 100, color="lightgrey", alpha=0.5, zorder=0)
+        ax_resid.fill_between([jd_min, jd_max], -sigma_5, -100, color="lightgrey", alpha=0.45, zorder=0)
         ax_resid.axhline(0.0, color="black", linestyle="--", alpha=0.4, zorder=1)
-        ax_resid.axhline(sigma_3, color="black", linestyle="-", linewidth=0.8, zorder=1)
-        ax_resid.axhline(-sigma_3, color="black", linestyle="-", linewidth=0.8, zorder=1)
+        ax_resid.axhline(sigma_5, color="black", linestyle="-", linewidth=0.8, zorder=1)
+        ax_resid.axhline(-sigma_5, color="black", linestyle="-", linewidth=0.8, zorder=1)
         ax_resid.set_ylabel("Residual [mag]", fontsize=12)
         ax_resid.grid(True, alpha=0.3)
         ax_resid.invert_yaxis()
@@ -788,7 +788,7 @@ def plot_bayes_results(
         if all_resids:
             resid_min, resid_max = min(all_resids), max(all_resids)
             pad = (resid_max - resid_min) * 0.1 if resid_max != resid_min else 0.1
-            ax_resid.set_ylim(max(resid_max + pad, sigma_3 + 0.05), min(resid_min - pad, -sigma_3 - 0.05))
+            ax_resid.set_ylim(max(resid_max + pad, sigma_5 + 0.05), min(resid_min - pad, -sigma_5 - 0.05))
 
         ax_resid.set_xlabel(f"JD - {int(jd_offset)}", fontsize=10)
     
@@ -843,64 +843,53 @@ def plot_bayes_results(
 
     fig.suptitle(" – ".join(title_parts), fontsize=14)
 
-    # Build subtitle with external IDs and trigger type
-    subtitle_parts = []
-    if external_id:
-        subtitle_parts.append(f"ID: {external_id}")
-    if meta.get("asas_sn_id"):
-        subtitle_parts.append(f"ASAS-SN: {meta['asas_sn_id']}")
-    if trigger_type:
-        subtitle_parts.append(f"Trigger: {trigger_type}")
+    # Build info panel content (displayed on right side, below legend)
+    info_lines = []
 
-    # Add dipper/jumper scores from annotations if present
+    # External IDs
+    if external_id:
+        info_lines.append(f"ID: {external_id}")
+    if meta.get("asas_sn_id"):
+        info_lines.append(f"ASAS-SN: {meta['asas_sn_id']}")
+    if trigger_type:
+        info_lines.append(f"Trigger: {trigger_type}")
+
+    # Scores and filter results from annotations
     if annotations:
         if annotations.get("dipper_score") is not None:
-            subtitle_parts.append(f"Dipper: {annotations['dipper_score']}")
+            info_lines.append(f"Dipper score: {annotations['dipper_score']}")
         if annotations.get("jumper_score") is not None:
-            subtitle_parts.append(f"Jumper: {annotations['jumper_score']}")
+            info_lines.append(f"Jumper score: {annotations['jumper_score']}")
+        # Bayes factors (already log scale)
+        if annotations.get("dip_logBF") is not None:
+            info_lines.append(f"Dip logBF: {annotations['dip_logBF']}")
+        if annotations.get("jump_logBF") is not None:
+            info_lines.append(f"Jump logBF: {annotations['jump_logBF']}")
+        # Other annotations (RUWE, periodic, etc.)
+        for key, val in annotations.items():
+            if val is not None and key not in ("dipper_score", "jumper_score", "dip_logBF", "jump_logBF"):
+                info_lines.append(f"{key}: {val}")
 
-    if subtitle_parts:
-        fig.text(
-            0.5, 0.965, "  |  ".join(subtitle_parts),
-            ha="center", va="top", fontsize=10,
-            color="0.4",
-        )
-
-    # Build annotations text (filter results, RUWE, etc.)
-    if annotations:
-        # Exclude scores already in subtitle
-        ann_filtered = {k: v for k, v in annotations.items()
-                       if v is not None and k not in ("dipper_score", "jumper_score")}
-        if ann_filtered:
-            ann_parts = [f"{k}: {v}" for k, v in ann_filtered.items()]
-            ann_text = "  |  ".join(ann_parts)
-            fig.text(
-                0.5, 0.01, ann_text,
-                ha="center", va="bottom", fontsize=8,
-                fontfamily="monospace", color="0.3",
-                bbox=dict(boxstyle="round,pad=0.3", fc="0.95", ec="0.8", alpha=0.9),
-            )
-
-    # Display run_params at bottom-left
+    # Run params
     if run_params:
-        params_parts = []
         for key in ["baseline", "logbf_threshold_dip", "logbf_threshold_jump", "min_run_length"]:
             if key in run_params:
-                params_parts.append(f"{key}={run_params[key]}")
-        if params_parts:
-            fig.text(
-                0.01, 0.01, "  ".join(params_parts),
-                ha="left", va="bottom", fontsize=7,
-                fontfamily="monospace", color="0.5",
-            )
+                info_lines.append(f"{key}: {run_params[key]}")
 
-    # Display timestamp at bottom-right
+    # Timestamp
     if show_timestamp:
-        timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+        info_lines.append(f"Generated: {timestamp_str}")
+
+    # Display info panel on right side, below legend
+    if info_lines and unified_layout:
+        info_text = "\n".join(info_lines)
         fig.text(
-            0.99, 0.01, timestamp_str,
-            ha="right", va="bottom", fontsize=7,
-            fontfamily="monospace", color="0.5",
+            1.02, 0.42, info_text,
+            transform=ax_main.transAxes,
+            ha="left", va="top", fontsize=9,
+            fontfamily="monospace", color="black",
+            bbox=dict(boxstyle="round,pad=0.4", fc="0.95", ec="0.7", alpha=0.95),
         )
 
     if out_path:
