@@ -493,8 +493,8 @@ def per_camera_gp_baseline(
     sigma=None,
     rho=None,
     q=0.7,
-    S0=None,
-    w0=None,
+    S0=0.0005,
+    w0=0.0031415926535897933,
     jitter=0.006,
     t_col="JD",
     mag_col="mag",
@@ -510,8 +510,8 @@ def per_camera_gp_baseline(
     per-camera GP baseline (fixed SHO kernel)
 
     Supports two parameterizations:
-    - sigma, rho, Q (default)
-    - S0, w0, Q (alternative)
+    - S0, w0, Q (default) - smooth baseline, ~2000 day timescale
+    - sigma, rho, Q (alternative) - if explicitly provided
 
     Implements (physics convention):
         sigma_eff,j^2 = sigma_j^2 + sigma_floor^2 + sigma_model,j^2
@@ -607,14 +607,12 @@ def per_camera_gp_baseline(
             yerr_fit = np.where(np.isfinite(yerr_fit), yerr_fit, med_yerr)
             yerr_fit = np.nan_to_num(yerr_fit, nan=float(jitter), posinf=float(jitter), neginf=float(jitter))
 
-        if S0 is not None and w0 is not None:
-            k = terms.SHOTerm(S0=float(S0), w0=float(w0), Q=float(q))
-        else:
-            if sigma is None:
-                sigma = 0.05
-            if rho is None:
-                rho = 200.0
+        if sigma is not None and rho is not None:
+            # Use sigma/rho parameterization if explicitly provided
             k = terms.SHOTerm(sigma=float(sigma), rho=float(rho), Q=float(q))
+        else:
+            # Default to S0/w0 parameterization (smoother baseline)
+            k = terms.SHOTerm(S0=float(S0), w0=float(w0), Q=float(q))
 
         baseline = np.full_like(y, np.nan, dtype=float)
         var = np.zeros_like(y, dtype=float)
