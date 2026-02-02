@@ -520,7 +520,7 @@ def identify_offset_cameras(
     *,
     window_days: float = 100.0,
     min_overlap_points: int = 10,
-    offset_sigma_threshold: float = 10.0,
+    offset_sigma_threshold: float = 15.0,
     min_cameras_for_comparison: int = 2,
     cam_col: str = "camera#",
     t_col: str = "JD",
@@ -638,7 +638,7 @@ def filter_bad_cameras(
     *,
     filter_scatter: bool = True,
     filter_offset: bool = True,
-    offset_sigma_threshold: float = 10.0,
+    offset_sigma_threshold: float = 15.0,
     remove_full_camera: bool = True,
     **kwargs
 ) -> tuple[pd.DataFrame, set[int]]:
