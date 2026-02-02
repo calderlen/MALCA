@@ -324,6 +324,232 @@ def read_lc_raw(asassn_id, path):
     return df
 
 
+def read_lc_raw2(asassn_id, path):
+    """
+    Read per-camera statistics from .raw2 file.
+
+    The .raw2 file contains per-camera scatter statistics from the original raw data:
+    cam# median 1siglow 1sighigh 90percentlow 90percenthigh
+
+    Parameters
+    ----------
+    asassn_id : str
+        ASAS-SN source ID
+    path : str
+        Path to directory containing the .raw2 file
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with columns: camera#, median, sig1_low, sig1_high, p90_low, p90_high
+    """
+    raw2_path = os.path.join(path, f"{asassn_id}.raw2")
+    if not os.path.exists(raw2_path):
+        return pd.DataFrame()
+    columns = [
+        "camera#",
+        "median",
+        "sig1_low",
+        "sig1_high",
+        "p90_low",
+        "p90_high",
+    ]
+    df = pd.read_csv(
+        raw2_path,
+        delim_whitespace=True,
+        header=None,
+        names=columns,
+        dtype={
+            "camera#": "int64",
+            "median": "float64",
+            "sig1_low": "float64",
+            "sig1_high": "float64",
+            "p90_low": "float64",
+            "p90_high": "float64",
+        },
+    )
+    # Compute expected scatter (1-sigma half-width)
+    df["expected_scatter"] = (df["sig1_high"] - df["sig1_low"]) / 2.0
+    return df
+
+
+def identify_bad_cameras(
+    df_lc: pd.DataFrame,
+    raw2_df: pd.DataFrame | None = None,
+    *,
+    window_days: float = 100.0,
+    min_overlap_points: int = 10,
+    scatter_ratio_threshold: float = 2.5,
+    min_cameras_for_comparison: int = 2,
+    cam_col: str = "camera#",
+    t_col: str = "JD",
+    mag_col: str = "mag",
+) -> set[int]:
+    """
+    Identify cameras with anomalously high scatter compared to other cameras
+    in overlapping time windows.
+
+    This avoids filtering out cameras that are the only ones observing during
+    a real event - only cameras with high scatter RELATIVE to other cameras
+    in the same time window are flagged.
+
+    Algorithm:
+    1. For each camera, find all time windows where it overlaps with other cameras
+    2. In each overlap window, compute MAD scatter for this camera and others
+    3. If this camera's scatter is consistently >threshold times the median of others,
+       flag it as bad
+
+    Parameters
+    ----------
+    df_lc : pd.DataFrame
+        Light curve data with JD, mag, camera# columns
+    raw2_df : pd.DataFrame | None
+        Optional raw2 data with expected scatter per camera
+    window_days : float
+        Size of sliding window for overlap comparison (days)
+    min_overlap_points : int
+        Minimum points required in overlap window for comparison
+    scatter_ratio_threshold : float
+        Threshold for scatter ratio (camera scatter / median other scatter)
+    min_cameras_for_comparison : int
+        Minimum number of other cameras needed for valid comparison
+    cam_col, t_col, mag_col : str
+        Column names
+
+    Returns
+    -------
+    set[int]
+        Camera IDs identified as having anomalously high scatter
+    """
+    if df_lc.empty:
+        return set()
+
+    cameras = df_lc[cam_col].dropna().unique()
+    if len(cameras) < 2:
+        return set()
+
+    # Build per-camera data
+    cam_data = {}
+    for cam in cameras:
+        cam_df = df_lc[df_lc[cam_col] == cam]
+        t = cam_df[t_col].values
+        m = cam_df[mag_col].values
+        finite = np.isfinite(t) & np.isfinite(m)
+        cam_data[cam] = {
+            "t": t[finite],
+            "m": m[finite],
+            "t_min": t[finite].min() if finite.any() else np.inf,
+            "t_max": t[finite].max() if finite.any() else -np.inf,
+        }
+
+    # Track scatter ratios for each camera
+    cam_scatter_ratios = {cam: [] for cam in cameras}
+
+    # Sliding window comparison
+    t_all = df_lc[t_col].dropna().values
+    t_start = t_all.min()
+    t_end = t_all.max()
+    step = window_days / 2  # 50% overlap
+
+    t_window = t_start
+    while t_window < t_end:
+        t_lo = t_window
+        t_hi = t_window + window_days
+
+        # Find cameras with data in this window
+        cams_in_window = []
+        for cam, data in cam_data.items():
+            t_cam = data["t"]
+            in_window = (t_cam >= t_lo) & (t_cam <= t_hi)
+            n_in_window = in_window.sum()
+            if n_in_window >= min_overlap_points:
+                # Compute scatter (MAD) in this window
+                m_window = data["m"][in_window]
+                med = np.median(m_window)
+                scatter = 1.4826 * np.median(np.abs(m_window - med))
+                cams_in_window.append((cam, scatter, n_in_window))
+
+        # Compare each camera to others in this window
+        if len(cams_in_window) >= min_cameras_for_comparison + 1:
+            scatters = np.array([s for _, s, _ in cams_in_window])
+            for i, (cam, scatter, _) in enumerate(cams_in_window):
+                # Compute median scatter of OTHER cameras
+                other_scatters = np.concatenate([scatters[:i], scatters[i+1:]])
+                if len(other_scatters) >= min_cameras_for_comparison:
+                    median_other = np.median(other_scatters)
+                    if median_other > 0:
+                        ratio = scatter / median_other
+                        cam_scatter_ratios[cam].append(ratio)
+
+        t_window += step
+
+    # Identify bad cameras: those with consistently high scatter ratios
+    bad_cameras = set()
+    for cam, ratios in cam_scatter_ratios.items():
+        if len(ratios) >= 3:  # Need at least 3 comparisons
+            # Use median ratio to be robust to outliers
+            median_ratio = np.median(ratios)
+            if median_ratio > scatter_ratio_threshold:
+                bad_cameras.add(int(cam))
+
+    # Optional: also check against raw2 expected scatter
+    if raw2_df is not None and not raw2_df.empty:
+        for cam in cameras:
+            if cam in bad_cameras:
+                continue
+            cam_df = df_lc[df_lc[cam_col] == cam]
+            m = cam_df[mag_col].dropna().values
+            if len(m) < 10:
+                continue
+            actual_scatter = 1.4826 * np.median(np.abs(m - np.median(m)))
+
+            # Get expected scatter from raw2
+            raw2_row = raw2_df[raw2_df["camera#"] == cam]
+            if raw2_row.empty:
+                continue
+            expected = raw2_row["expected_scatter"].values[0]
+            if expected > 0 and actual_scatter > 3 * expected:
+                # Actual scatter is way higher than expected from raw data
+                bad_cameras.add(int(cam))
+
+    return bad_cameras
+
+
+def filter_bad_cameras(
+    df_lc: pd.DataFrame,
+    raw2_df: pd.DataFrame | None = None,
+    **kwargs
+) -> tuple[pd.DataFrame, set[int]]:
+    """
+    Filter out cameras with anomalously high scatter.
+
+    Wrapper around identify_bad_cameras that returns the filtered DataFrame.
+
+    Parameters
+    ----------
+    df_lc : pd.DataFrame
+        Light curve data
+    raw2_df : pd.DataFrame | None
+        Optional raw2 data
+    **kwargs
+        Additional arguments passed to identify_bad_cameras
+
+    Returns
+    -------
+    df_filtered : pd.DataFrame
+        DataFrame with bad cameras removed
+    bad_cameras : set[int]
+        Set of camera IDs that were removed
+    """
+    bad_cameras = identify_bad_cameras(df_lc, raw2_df, **kwargs)
+    if bad_cameras:
+        cam_col = kwargs.get("cam_col", "camera#")
+        df_filtered = df_lc[~df_lc[cam_col].isin(bad_cameras)].reset_index(drop=True)
+    else:
+        df_filtered = df_lc
+    return df_filtered, bad_cameras
+
+
 def match_index_to_lc(
     index_path: str = "/data/poohbah/1/assassin/lenhart/code/calder/lcsv2_masked/",
     lc_path:    str = "/data/poohbah/1/assassin/rowan.90/lcsv2",

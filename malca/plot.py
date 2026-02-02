@@ -843,19 +843,34 @@ def plot_bayes_results(
 
     fig.suptitle(" – ".join(title_parts), fontsize=14)
 
-    # Build info panel content (displayed on right side, below legend)
+    # Build info panel content (displayed at bottom-right, expands upward)
     info_lines = []
+
+    # Source classification
+    if vsx_class:
+        info_lines.append(f"VSX class: {vsx_class}")
 
     # External IDs
     if external_id:
-        info_lines.append(f"ID: {external_id}")
+        info_lines.append(f"External ID: {external_id}")
     if meta.get("asas_sn_id"):
-        info_lines.append(f"ASAS-SN: {meta['asas_sn_id']}")
+        info_lines.append(f"ASAS-SN ID: {meta['asas_sn_id']}")
+
+    # Coordinates and Gaia
+    if annotations:
+        if annotations.get("RA") is not None and annotations.get("Dec") is not None:
+            info_lines.append(f"RA/Dec: {annotations['RA']}, {annotations['Dec']}")
+        if annotations.get("Gaia_ID") is not None:
+            info_lines.append(f"Gaia ID: {annotations['Gaia_ID']}")
+        if annotations.get("RUWE") is not None:
+            info_lines.append(f"Gaia RUWE: {annotations['RUWE']}")
+
     if trigger_type:
         info_lines.append(f"Trigger: {trigger_type}")
 
     # Scores and filter results from annotations
     if annotations:
+        # Dipper/jumper scores
         if annotations.get("dipper_score") is not None:
             info_lines.append(f"Dipper score: {annotations['dipper_score']}")
         if annotations.get("jumper_score") is not None:
@@ -865,29 +880,41 @@ def plot_bayes_results(
             info_lines.append(f"Dip logBF: {annotations['dip_logBF']}")
         if annotations.get("jump_logBF") is not None:
             info_lines.append(f"Jump logBF: {annotations['jump_logBF']}")
-        # Other annotations (RUWE, periodic, etc.)
-        for key, val in annotations.items():
-            if val is not None and key not in ("dipper_score", "jumper_score", "dip_logBF", "jump_logBF"):
-                info_lines.append(f"{key}: {val}")
+        # Morphology
+        if annotations.get("dip_morph") is not None:
+            info_lines.append(f"Dip morph: {annotations['dip_morph']}")
+        if annotations.get("jump_morph") is not None:
+            info_lines.append(f"Jump morph: {annotations['jump_morph']}")
+        # Run counts
+        if annotations.get("dip_runs") is not None:
+            info_lines.append(f"Dip runs: {annotations['dip_runs']}")
+        if annotations.get("jump_runs") is not None:
+            info_lines.append(f"Jump runs: {annotations['jump_runs']}")
+        # Periodic match
+        if annotations.get("periodic") is not None:
+            info_lines.append(f"Periodic match: {annotations['periodic']}")
 
-    # Run params
+    # Run params (compact format)
     if run_params:
-        for key in ["baseline", "logbf_threshold_dip", "logbf_threshold_jump", "min_run_length"]:
+        params_to_show = ["baseline", "logbf_threshold_dip", "logbf_threshold_jump"]
+        for key in params_to_show:
             if key in run_params:
-                info_lines.append(f"{key}: {run_params[key]}")
+                # Shorten key names for display
+                display_key = key.replace("logbf_threshold_", "logBF_thr_")
+                info_lines.append(f"{display_key}: {run_params[key]}")
 
     # Timestamp
     if show_timestamp:
         timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M")
         info_lines.append(f"Generated: {timestamp_str}")
 
-    # Display info panel on right side, below legend
+    # Display info panel at bottom-right, expanding upward
     if info_lines and unified_layout:
         info_text = "\n".join(info_lines)
         fig.text(
-            1.02, 0.42, info_text,
-            transform=ax_main.transAxes,
-            ha="left", va="top", fontsize=9,
+            1.02, 0.02, info_text,
+            transform=ax_resid.transAxes,
+            ha="left", va="bottom", fontsize=9,
             fontfamily="monospace", color="black",
             bbox=dict(boxstyle="round,pad=0.4", fc="0.95", ec="0.7", alpha=0.95),
         )

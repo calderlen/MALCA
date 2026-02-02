@@ -198,6 +198,28 @@ def plot_passing_candidates(
         if "jumper_score" in row.index and pd.notna(row["jumper_score"]):
             annotations["jumper_score"] = f"{row['jumper_score']:.2f}"
 
+        # Morphology info
+        if "dip_best_morph" in row.index and pd.notna(row["dip_best_morph"]):
+            annotations["dip_morph"] = str(row["dip_best_morph"])
+        if "jump_best_morph" in row.index and pd.notna(row["jump_best_morph"]):
+            annotations["jump_morph"] = str(row["jump_best_morph"])
+
+        # Run info
+        if "dip_run_count" in row.index and pd.notna(row["dip_run_count"]):
+            annotations["dip_runs"] = str(int(row["dip_run_count"]))
+        if "jump_run_count" in row.index and pd.notna(row["jump_run_count"]):
+            annotations["jump_runs"] = str(int(row["jump_run_count"]))
+
+        # Coordinates
+        if "ra_deg" in row.index and pd.notna(row["ra_deg"]):
+            annotations["RA"] = f"{row['ra_deg']:.5f}"
+        if "dec_deg" in row.index and pd.notna(row["dec_deg"]):
+            annotations["Dec"] = f"{row['dec_deg']:.5f}"
+
+        # Gaia ID
+        if "gaia_id" in row.index and pd.notna(row["gaia_id"]):
+            annotations["Gaia_ID"] = str(int(row["gaia_id"]))
+
         # Build metadata from row
         metadata = {}
         if "vsx_class" in row.index and pd.notna(row["vsx_class"]) and row["vsx_class"]:
