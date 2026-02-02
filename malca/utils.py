@@ -515,16 +515,139 @@ def identify_bad_cameras(
     return bad_cameras
 
 
+def identify_offset_cameras(
+    df_lc: pd.DataFrame,
+    *,
+    window_days: float = 100.0,
+    min_overlap_points: int = 10,
+    offset_sigma_threshold: float = 5.0,
+    min_cameras_for_comparison: int = 2,
+    cam_col: str = "camera#",
+    t_col: str = "JD",
+    mag_col: str = "mag",
+    remove_full_camera: bool = True,
+) -> tuple[set[int], set[tuple[int, float, float]]]:
+    """
+    Identify cameras with systematic median offsets from other cameras.
+
+    Compares each camera's median magnitude within rolling windows to the
+    consensus median of all other cameras. If a camera's median is >N sigma
+    discrepant from the consensus, it is flagged.
+
+    Parameters
+    ----------
+    df_lc : pd.DataFrame
+        Light curve data with JD, mag, camera# columns
+    window_days : float
+        Size of sliding window for overlap comparison (days)
+    min_overlap_points : int
+        Minimum points required in overlap window for comparison
+    offset_sigma_threshold : float
+        Flag camera if its median is this many sigma from consensus
+    min_cameras_for_comparison : int
+        Minimum number of other cameras needed for valid comparison
+    cam_col, t_col, mag_col : str
+        Column names
+    remove_full_camera : bool
+        If True, return camera IDs to remove entirely. If False, also return
+        specific (camera, window_start, window_end) tuples for targeted removal.
+
+    Returns
+    -------
+    bad_cameras : set[int]
+        Camera IDs flagged for removal (entire camera)
+    bad_windows : set[tuple[int, float, float]]
+        (camera_id, window_start_jd, window_end_jd) tuples for targeted removal
+        Only populated if remove_full_camera=False
+    """
+    if df_lc.empty or cam_col not in df_lc.columns:
+        return set(), set()
+
+    cameras = df_lc[cam_col].dropna().unique()
+    if len(cameras) < min_cameras_for_comparison + 1:
+        return set(), set()
+
+    jd_min = df_lc[t_col].min()
+    jd_max = df_lc[t_col].max()
+
+    # Track offset violations per camera
+    cam_offset_violations: dict[int, list[tuple[float, float]]] = {int(c): [] for c in cameras}
+
+    # Slide window across time range
+    window_start = jd_min
+    window_step = window_days / 2  # 50% overlap
+
+    while window_start < jd_max:
+        window_end = window_start + window_days
+        window_mask = (df_lc[t_col] >= window_start) & (df_lc[t_col] < window_end)
+        window_df = df_lc[window_mask]
+
+        if window_df.empty:
+            window_start += window_step
+            continue
+
+        # Compute median per camera in this window
+        cam_medians = {}
+        for cam in cameras:
+            cam_df = window_df[window_df[cam_col] == cam]
+            if len(cam_df) >= min_overlap_points:
+                cam_medians[int(cam)] = np.median(cam_df[mag_col].dropna().values)
+
+        if len(cam_medians) < min_cameras_for_comparison + 1:
+            window_start += window_step
+            continue
+
+        # For each camera, compare to consensus of others
+        for cam, median_val in cam_medians.items():
+            other_medians = [v for k, v in cam_medians.items() if k != cam]
+            if len(other_medians) < min_cameras_for_comparison:
+                continue
+
+            consensus_median = np.median(other_medians)
+            consensus_mad = 1.4826 * np.median(np.abs(np.array(other_medians) - consensus_median))
+
+            if consensus_mad < 0.001:  # Avoid division by tiny numbers
+                consensus_mad = 0.01
+
+            offset_sigma = abs(median_val - consensus_median) / consensus_mad
+
+            if offset_sigma > offset_sigma_threshold:
+                cam_offset_violations[cam].append((window_start, window_end))
+
+        window_start += window_step
+
+    # Determine which cameras to flag
+    bad_cameras: set[int] = set()
+    bad_windows: set[tuple[int, float, float]] = set()
+
+    for cam, violations in cam_offset_violations.items():
+        if len(violations) >= 2:  # Need at least 2 violations to be confident
+            if remove_full_camera:
+                bad_cameras.add(cam)
+            else:
+                for start, end in violations:
+                    bad_windows.add((cam, start, end))
+
+    return bad_cameras, bad_windows
+
+
 def filter_bad_cameras(
     df_lc: pd.DataFrame,
     raw2_df: pd.DataFrame | None = None,
     lc_path: str | None = None,
+    *,
+    filter_scatter: bool = True,
+    filter_offset: bool = True,
+    offset_sigma_threshold: float = 5.0,
+    remove_full_camera: bool = True,
     **kwargs
 ) -> tuple[pd.DataFrame, set[int]]:
     """
-    Filter out cameras with anomalously high scatter.
+    Filter out cameras with anomalously high scatter or systematic offsets.
 
-    Wrapper around identify_bad_cameras that returns the filtered DataFrame.
+    Combines two filters:
+    1. Scatter filter (identify_bad_cameras): flags cameras with high MAD scatter
+    2. Offset filter (identify_offset_cameras): flags cameras with systematic median offsets
 
     Parameters
     ----------
@@ -535,15 +658,24 @@ def filter_bad_cameras(
     lc_path : str | None
         Path to the light curve file (e.g., .dat2). If provided and raw2_df is
         None, will attempt to load the corresponding .raw2 file automatically.
+    filter_scatter : bool
+        Apply scatter-based filtering (default: True)
+    filter_offset : bool
+        Apply median-offset filtering (default: True)
+    offset_sigma_threshold : float
+        Sigma threshold for offset filtering (default: 5.0)
+    remove_full_camera : bool
+        If True, remove entire camera when flagged. If False, for offset filter
+        only remove the specific offending time windows (default: True)
     **kwargs
-        Additional arguments passed to identify_bad_cameras
+        Additional arguments passed to identify_bad_cameras (e.g., scatter_ratio_threshold)
 
     Returns
     -------
     df_filtered : pd.DataFrame
-        DataFrame with bad cameras removed
+        DataFrame with bad cameras/points removed
     bad_cameras : set[int]
-        Set of camera IDs that were removed
+        Set of camera IDs that were fully removed
     """
     # Auto-load raw2 if lc_path provided and raw2_df not explicitly given
     if raw2_df is None and lc_path is not None:
@@ -554,12 +686,44 @@ def filter_bad_cameras(
             if raw2_path.exists():
                 raw2_df = read_lc_raw2(lc_path_obj.stem, str(lc_path_obj.parent))
     
-    bad_cameras = identify_bad_cameras(df_lc, raw2_df, **kwargs)
-    if bad_cameras:
-        cam_col = kwargs.get("cam_col", "camera#")
-        df_filtered = df_lc[~df_lc[cam_col].isin(bad_cameras)].reset_index(drop=True)
-    else:
-        df_filtered = df_lc
+    cam_col = kwargs.get("cam_col", "camera#")
+    t_col = kwargs.get("t_col", "JD")
+    bad_cameras: set[int] = set()
+    df_filtered = df_lc
+    
+    # 1. Scatter filter
+    if filter_scatter:
+        scatter_bad = identify_bad_cameras(df_lc, raw2_df, **kwargs)
+        bad_cameras.update(scatter_bad)
+    
+    # 2. Offset filter
+    if filter_offset:
+        offset_bad, offset_windows = identify_offset_cameras(
+            df_lc if df_filtered is df_lc else df_filtered,
+            offset_sigma_threshold=offset_sigma_threshold,
+            remove_full_camera=remove_full_camera,
+            cam_col=cam_col,
+            t_col=t_col,
+        )
+        bad_cameras.update(offset_bad)
+        
+        # If targeted removal mode, remove just the offending windows
+        if not remove_full_camera and offset_windows:
+            mask = pd.Series(True, index=df_filtered.index)
+            for cam, start, end in offset_windows:
+                # Mark points in this camera within this window for removal
+                window_mask = (
+                    (df_filtered[cam_col] == cam) &
+                    (df_filtered[t_col] >= start) &
+                    (df_filtered[t_col] < end)
+                )
+                mask &= ~window_mask
+            df_filtered = df_filtered[mask].reset_index(drop=True)
+    
+    # Remove full cameras
+    if bad_cameras and cam_col in df_filtered.columns:
+        df_filtered = df_filtered[~df_filtered[cam_col].isin(bad_cameras)].reset_index(drop=True)
+    
     return df_filtered, bad_cameras
 
 

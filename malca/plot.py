@@ -137,7 +137,13 @@ def read_skypatrol_csv(csv_path):
     return df
 
 
-def load_lightcurve_df(path, *, filter_bad_cameras_enabled: bool = False, bad_camera_scatter_ratio: float = 2.5):
+def load_lightcurve_df(
+    path,
+    *,
+    filter_bad_cameras_enabled: bool = False,
+    bad_camera_scatter_ratio: float = 2.5,
+    return_filtered_info: bool = False,
+):
     """
     Dispatch loader based on file extension (.csv -> SkyPatrol, else ASAS-SN .dat).
     
@@ -149,13 +155,22 @@ def load_lightcurve_df(path, *, filter_bad_cameras_enabled: bool = False, bad_ca
         If True, filter out cameras with anomalously high scatter
     bad_camera_scatter_ratio : float
         Scatter ratio threshold for bad camera filtering
+    return_filtered_info : bool
+        If True, return (df, filtered_cameras) tuple instead of just df
+
+    Returns
+    -------
+    df : pd.DataFrame
+        Light curve data (or empty DataFrame if loading fails)
+    filtered_cameras : set[int]
+        Only returned if return_filtered_info=True. Set of camera IDs removed.
     """
     path = Path(path)
     suffix = path.suffix.lower()
     if suffix == ".dat2":
         dfg, dfv = read_lc_dat2(path.stem, str(path.parent))
         if dfg.empty and dfv.empty:
-            return pd.DataFrame()
+            return (pd.DataFrame(), set()) if return_filtered_info else pd.DataFrame()
         df = pd.concat([dfg, dfv], ignore_index=True)
     elif suffix == ".csv":
         df = read_skypatrol_csv(path)
@@ -165,9 +180,12 @@ def load_lightcurve_df(path, *, filter_bad_cameras_enabled: bool = False, bad_ca
         df = read_asassn_dat(path)
     
     # Optionally filter bad cameras
+    filtered_cameras: set[int] = set()
     if filter_bad_cameras_enabled and not df.empty and "camera#" in df.columns:
-        df, _ = filter_bad_cameras(df, scatter_ratio_threshold=bad_camera_scatter_ratio)
+        df, filtered_cameras = filter_bad_cameras(df, lc_path=str(path), scatter_ratio_threshold=bad_camera_scatter_ratio)
     
+    if return_filtered_info:
+        return df, filtered_cameras
     return df
 
 
@@ -356,13 +374,21 @@ def plot_bayes_results(
     show_timestamp: bool = True,
     filter_bad_cameras: bool = True,
     bad_camera_scatter_ratio: float = 2.5,
-):
-    """Plot a light curve with Bayesian detection results and run fits."""
+    return_filtered_cameras: bool = False,
+) -> set[int] | None:
+    """Plot a light curve with Bayesian detection results and run fits.
+    
+    Returns
+    -------
+    filtered_cameras : set[int] | None
+        Set of camera IDs that were filtered out (only if return_filtered_cameras=True).
+    """
                       
-    df = load_lightcurve_df(
+    df, filtered_cameras = load_lightcurve_df(
         csv_path,
         filter_bad_cameras_enabled=filter_bad_cameras,
         bad_camera_scatter_ratio=bad_camera_scatter_ratio,
+        return_filtered_info=True,
     )
     df = clean_lc(
         df,
@@ -952,6 +978,8 @@ def plot_bayes_results(
     else:
         plt.close()
     
+    if return_filtered_cameras:
+        return filtered_cameras
     return fig
 
 

@@ -74,7 +74,7 @@ def _plot_single_candidate(args: tuple) -> tuple[str, bool, str]:
 
     try:
         baseline_func = BASELINE_FUNCTIONS.get(baseline, BASELINE_FUNCTIONS["per_camera_gp"])
-        plot_bayes_results(
+        filtered_cams = plot_bayes_results(
             lc_path,
             out_path=out_path,
             show=False,
@@ -93,10 +93,13 @@ def _plot_single_candidate(args: tuple) -> tuple[str, bool, str]:
             run_params=run_params,
             filter_bad_cameras=filter_bad_cameras,
             bad_camera_scatter_ratio=bad_camera_scatter_ratio,
+            return_filtered_cameras=True,
         )
-        return (lc_path_str, True, "")
+        # Format filtered cameras as comma-separated string
+        filtered_str = ",".join(str(c) for c in sorted(filtered_cams)) if filtered_cams else ""
+        return (lc_path_str, True, "", filtered_str)
     except Exception as e:
-        return (lc_path_str, False, str(e))
+        return (lc_path_str, False, str(e), "")
 
 
 def plot_passing_candidates(
@@ -247,6 +250,7 @@ def plot_passing_candidates(
 
     n_plotted = 0
     n_failed = 0
+    all_filtered_cameras: dict[str, str] = {}  # path -> filtered cameras string
 
     if workers > 1:
         from multiprocessing import Pool, cpu_count
@@ -260,22 +264,34 @@ def plot_passing_candidates(
                 desc="Plotting candidates"
             ))
 
-        for lc_path, success, error in results:
+        for lc_path, success, error, filtered_str in results:
             if success:
                 n_plotted += 1
+                if filtered_str:
+                    all_filtered_cameras[lc_path] = filtered_str
             else:
                 n_failed += 1
                 if verbose:
                     print(f"Failed to plot {lc_path}: {error}")
     else:
         for item in tqdm(work_items, desc="Plotting candidates"):
-            lc_path, success, error = _plot_single_candidate(item)
+            lc_path, success, error, filtered_str = _plot_single_candidate(item)
             if success:
                 n_plotted += 1
+                if filtered_str:
+                    all_filtered_cameras[lc_path] = filtered_str
             else:
                 n_failed += 1
                 if verbose:
                     print(f"Failed to plot {lc_path}: {error}")
+
+    # Report filtered cameras
+    if all_filtered_cameras:
+        print(f"\nFiltered cameras summary ({len(all_filtered_cameras)} light curves had bad cameras removed):")
+        for lc_path, cams in sorted(all_filtered_cameras.items())[:20]:
+            print(f"  {Path(lc_path).name}: cameras {cams}")
+        if len(all_filtered_cameras) > 20:
+            print(f"  ... and {len(all_filtered_cameras) - 20} more")
 
     print(f"\nGenerated {n_plotted} plots, {n_failed} failed")
     return n_plotted
