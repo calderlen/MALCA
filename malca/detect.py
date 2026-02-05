@@ -153,19 +153,22 @@ def main():
     parser.add_argument("--output-format", type=str, default="csv", choices=["csv", "parquet", "parquet_chunk"], help="Output format")
     parser.add_argument("--chunk-size", type=int, default=10000, help="Write results in chunks of this many rows")
 
-    # Step 5: Post-filter args
-    parser.add_argument("--run-post-filter", action="store_true", help="Run post_filter after events.py completes")
+    # Step 5: Post-filter args (enabled by default)
+    parser.add_argument("--run-post-filter", dest="run_post_filter", action="store_true", help="Run post_filter after events.py completes (default: enabled)")
+    parser.add_argument("--no-run-post-filter", dest="run_post_filter", action="store_false", help="Skip post-filter step")
     parser.add_argument("--min-bayes-factor", type=float, default=10.0, help="Min Bayes factor for post-filter (default: 10.0)")
     parser.add_argument("--post-filter-min-run-cameras", type=int, default=2, help="Min cameras for run robustness filter (default: 2)")
     parser.add_argument("--post-filter-min-run-points", type=int, default=2, help="Min points per run for robustness filter (default: 2)")
 
-    # Step 6: Postprocess args
-    parser.add_argument("--run-postprocess", action="store_true", help="Run postprocess (generate plots) after post_filter")
+    # Step 6: Postprocess args (enabled by default)
+    parser.add_argument("--run-postprocess", dest="run_postprocess", action="store_true", help="Run postprocess (generate plots) after post_filter (default: enabled)")
+    parser.add_argument("--no-run-postprocess", dest="run_postprocess", action="store_false", help="Skip postprocess step")
     parser.add_argument("--max-plots", type=int, default=None, help="Limit number of plots generated (default: no limit)")
     parser.add_argument("--plot-format", type=str, default="png", choices=["png", "pdf"], help="Output format for plots (default: png)")
 
-    # Step 7: Characterization args
-    parser.add_argument("--run-characterize", action="store_true", help="Run Gaia DR3 characterization after post_filter")
+    # Step 7: Characterization args (enabled by default)
+    parser.add_argument("--run-characterize", dest="run_characterize", action="store_true", help="Run Gaia DR3 characterization after post_filter (default: enabled)")
+    parser.add_argument("--no-run-characterize", dest="run_characterize", action="store_false", help="Skip characterization step")
     parser.add_argument("--gaia-cache", type=Path, default=None, help="Path to Gaia query cache file (parquet). Default: <out_dir>/gaia_cache/gaia_cache.parquet")
     parser.add_argument(
         "--index-file",
@@ -173,17 +176,29 @@ def main():
         default=Path("output/asassn_index_masked_concat_cleaned_20250919_154524_brotli.parquet"),
         help="Path to ASAS-SN index file with gaia_id, ra_deg, dec_deg columns",
     )
-    parser.add_argument("--run-dust", action="store_true", help="Run 3D dust extinction correction (requires dustmaps3d)")
+    parser.add_argument("--run-dust", dest="run_dust", action="store_true", help="Run 3D dust extinction correction (default: enabled)")
+    parser.add_argument("--no-run-dust", dest="run_dust", action="store_false", help="Skip dust extinction step")
 
-    # Step 8: Classify args
-    parser.add_argument("--run-classify", action="store_true", help="Run classification (EB/CV/starspot rejection, YSO) after post_filter")
+    # Step 8: Classify args (enabled by default)
+    parser.add_argument("--run-classify", dest="run_classify", action="store_true", help="Run classification (EB/CV/starspot rejection, YSO) (default: enabled)")
+    parser.add_argument("--no-run-classify", dest="run_classify", action="store_false", help="Skip classification step")
 
-    # Step 9: Enrich args
-    parser.add_argument("--run-enrich", action="store_true", help="Enrich passing candidates with comprehensive light curve stats")
+    # Step 9: Enrich args (enabled by default)
+    parser.add_argument("--run-enrich", dest="run_enrich", action="store_true", help="Enrich passing candidates with comprehensive light curve stats (default: enabled)")
+    parser.add_argument("--no-run-enrich", dest="run_enrich", action="store_false", help="Skip enrichment step")
     parser.add_argument("--enrich-compute-ls", action="store_true", help="Include Lomb-Scargle periodogram in enrichment (expensive)")
 
     parser.add_argument("-o", "--overwrite", action="store_true", help="Overwrite checkpoint log and existing output if present (start fresh).")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output")
+
+    parser.set_defaults(
+        run_post_filter=True,
+        run_postprocess=True,
+        run_characterize=True,
+        run_dust=True,
+        run_classify=True,
+        run_enrich=True,
+    )
 
     args = parser.parse_args()
 
@@ -341,6 +356,28 @@ def main():
             "workers": args.workers,
             "batch_size": args.batch_size,
             "output_format": args.output_format,
+            # Pre-filter (camera median)
+            "skip_camera_median": args.skip_camera_median,
+            "camera_median_tolerance": args.camera_median_tolerance,
+            # Step 5: Post-filter
+            "run_post_filter": args.run_post_filter,
+            "min_bayes_factor": args.min_bayes_factor,
+            "post_filter_min_run_cameras": args.post_filter_min_run_cameras,
+            "post_filter_min_run_points": args.post_filter_min_run_points,
+            # Step 6: Postprocess
+            "run_postprocess": args.run_postprocess,
+            "max_plots": args.max_plots,
+            "plot_format": args.plot_format,
+            # Step 7: Characterization
+            "run_characterize": args.run_characterize,
+            "run_dust": args.run_dust,
+            "gaia_cache": str(args.gaia_cache),
+            "index_file": str(args.index_file),
+            # Step 8: Classify
+            "run_classify": args.run_classify,
+            # Step 9: Enrich
+            "run_enrich": args.run_enrich,
+            "enrich_compute_ls": args.enrich_compute_ls,
             # File paths
             "index_root": str(args.index_root),
             "lc_root": str(args.lc_root),
@@ -650,18 +687,6 @@ def main():
                 if args.verbose:
                     print(f"Warning: could not parse detection results: {e}")
 
-        # VSX statistics if available
-        if vsx_tags_file and vsx_tags_file.exists():
-            try:
-                df_vsx = pd.read_csv(vsx_tags_file)
-                summary["vsx_stats"] = {
-                    "sources_with_vsx_match": len(df_vsx),
-                    "vsx_classes": df_vsx["class"].value_counts().to_dict() if "class" in df_vsx.columns else None,
-                }
-            except Exception as e:
-                if args.verbose:
-                    print(f"Warning: could not parse VSX tags: {e}")
-
         # Write summary (will be updated again if post-filter/postprocess run)
         with open(run_summary_file, "w") as f:
             json.dump(summary, f, indent=2, default=str)
@@ -903,13 +928,10 @@ def main():
                 
                 if classify_output.exists():
                     df_to_enrich = pd.read_csv(classify_output)
-                    source_file = classify_output
                 elif characterize_output.exists():
                     df_to_enrich = pd.read_csv(characterize_output)
-                    source_file = characterize_output
                 elif post_filter_output.exists():
                     df_to_enrich = pd.read_csv(post_filter_output)
-                    source_file = post_filter_output
                 else:
                     print(f"Warning: No post-filter or classified output found")
                     df_to_enrich = None

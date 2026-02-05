@@ -42,6 +42,7 @@ from malca.baseline import (
     global_median_baseline,
     per_camera_median_baseline,
     per_camera_gp_baseline,
+    per_camera_gp_baseline_masked,
 )
 from malca.validate_metadata import EventKind
 from malca.score import compute_event_score
@@ -574,7 +575,6 @@ def score_events_bayesian(
 
     run_min_points: int = 2,
     max_gap_points: int = 1,
-    run_allow_gap_points: int | None = None,
     run_max_gap_days: float | None = None,
     run_min_duration_days: float | None = None,
 
@@ -607,7 +607,7 @@ def score_events_bayesian(
         )
 
     errs = np.asarray(df[err_col], float)
-    
+
     errs_finite = np.isfinite(errs).sum()
     errs_positive = (errs > 0).sum() if errs_finite > 0 else 0
     if errs_finite == 0:
@@ -625,9 +625,6 @@ def score_events_bayesian(
 
     if baseline_kwargs is None:
         baseline_kwargs = dict(DEFAULT_BASELINE_KWARGS)
-
-    if run_allow_gap_points is not None:
-        max_gap_points = int(run_allow_gap_points)
 
     if df_base is None and baseline_func is not None:
         df_base = baseline_func(df, **baseline_kwargs)
@@ -985,7 +982,6 @@ def score_lightcurve(
 
     run_min_points: int = 2,
     max_gap_points: int = 1,
-    run_allow_gap_points: int | None = None,
     run_max_gap_days: float | None = None,
     run_min_duration_days: float | None = None,
 
@@ -1005,9 +1001,6 @@ def score_lightcurve(
         baseline_kwargs = dict(DEFAULT_BASELINE_KWARGS)
 
     df_base = baseline_func(df, **baseline_kwargs) if baseline_func is not None else None
-
-    if run_allow_gap_points is not None:
-        max_gap_points = int(run_allow_gap_points)
 
     kind_configs = {
         "dip": dict(
@@ -1104,6 +1097,7 @@ def process_lightcurve(
 
     baseline_func_map = {
         "gp": per_camera_gp_baseline,
+        "gp_masked": per_camera_gp_baseline_masked,
         "global_median": global_median_baseline,
         "per_camera_median": per_camera_median_baseline,
     }
@@ -1204,6 +1198,20 @@ def process_lightcurve(
         dipper_n_dips = int(len(events))
         dipper_n_valid_dips = int(sum(1 for e in events if e.valid))
 
+    jumper_score = 0.0
+    jumper_n_jumps = 0
+    jumper_n_valid_jumps = 0
+    if bool(jump["significant"]):
+        df_base = res.get("df_base")
+        if df_base is not None and "baseline" in df_base.columns:
+            baseline_mags = df_base["baseline"].to_numpy()
+        else:
+            baseline_mags = None
+        score, events = compute_event_score(df, event_type='jump', baseline_mags=baseline_mags)
+        jumper_score = float(score)
+        jumper_n_jumps = int(len(events))
+        jumper_n_valid_jumps = int(sum(1 for e in events if e.valid))
+
     return dict(
         path=str(path),
 
@@ -1266,6 +1274,10 @@ def process_lightcurve(
         dipper_n_dips=int(dipper_n_dips),
         dipper_n_valid_dips=int(dipper_n_valid_dips),
 
+        jumper_score=float(jumper_score),
+        jumper_n_jumps=int(jumper_n_jumps),
+        jumper_n_valid_jumps=int(jumper_n_valid_jumps),
+
         baseline_source=str(dip.get("baseline_source", jump.get("baseline_source", "unknown"))),
         trigger_mode=str(trigger_mode),
         dip_trigger_threshold=float(dip.get("trigger_threshold", np.nan)),
@@ -1299,7 +1311,7 @@ def main():
         "--baseline-func",
         type=str,
         default="gp",
-        choices=["gp", "global_median", "per_camera_median"],
+        choices=["gp", "gp_masked", "global_median", "per_camera_median"],
         help="Baseline function to use",
     )
     # Baseline kwargs (GP kernel parameters)

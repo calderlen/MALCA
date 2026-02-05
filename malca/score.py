@@ -1,5 +1,5 @@
 """
-Event scoring metric for ASAS-SN light curves (dips and microlensing).
+Event scoring metric for ASAS-SN light curves (dips, jumps, and microlensing).
 
 Implements a heuristic event score:
 
@@ -7,6 +7,7 @@ Implements a heuristic event score:
 
 where each event i is measured from the light curve. Supports:
     - Dips (symmetric Gaussian-like decreases in brightness)
+    - Jumps (symmetric Gaussian-like increases in brightness)
     - Microlensing (symmetric Paczyński curve brightening events)
 
 The reported score is log10(S).
@@ -37,7 +38,7 @@ class EventStats:
     n_det: int  # Number of detections in event
     chi2: float  # Chi-squared of fit
     valid: bool  # Passes quality cuts
-    event_type: str  # 'dip' or 'microlensing'
+    event_type: str  # 'dip', 'jump', or 'microlensing'
 
 
 def paczynski(t: np.ndarray, A0: float, t0: float, tE: float, baseline: float) -> np.ndarray:
@@ -275,7 +276,7 @@ def _fit_paczynski(
 def compute_event_score(
     df_lc: pd.DataFrame,
     *,
-    event_type: Literal['dip', 'microlensing'] = 'dip',
+    event_type: Literal['dip', 'jump', 'microlensing'] = 'dip',
     sigma_threshold: float = 1.0,
     edge_sigma: float = 0.5,
     min_fwhm_days: float = 1.5,
@@ -289,9 +290,10 @@ def compute_event_score(
     ----------
     df_lc : DataFrame
         Light curve with columns 'JD', 'mag', 'error'
-    event_type : {'dip', 'microlensing'}
+    event_type : {'dip', 'jump', 'microlensing'}
         Type of event to search for:
-        - 'dip': Symmetric magnitude increases (dippers)
+        - 'dip': Symmetric magnitude increases (dippers, Gaussian fit)
+        - 'jump': Symmetric magnitude decreases (brightening, Gaussian fit)
         - 'microlensing': Symmetric magnitude decreases (Paczyński curves)
     sigma_threshold : float
         Detection threshold in units of robust sigma
@@ -357,8 +359,8 @@ def compute_event_score(
         magnitude_dips = True
         event_mask = mag_work >= (baseline + sigma_threshold * sigma)
         edge_level = baseline + edge_sigma * sigma
-    elif event_type == 'microlensing':
-        # Microlensing: magnitude decreases (brighter)
+    elif event_type in ('jump', 'microlensing'):
+        # Jumps / microlensing: magnitude decreases (brighter)
         magnitude_dips = False
         event_mask = mag_work <= (baseline - sigma_threshold * sigma)
         edge_level = baseline - edge_sigma * sigma
@@ -403,8 +405,8 @@ def compute_event_score(
             fwhm = float(jd[right] - jd[left]) if right > left else 0.0
 
         # Fit model and refine FWHM
-        if event_type == 'dip':
-            # Fit Gaussian
+        if event_type in ('dip', 'jump'):
+            # Fit Gaussian (positive amp for dips, negative for jumps)
             amp = float(delta if magnitude_dips else -delta)
             fwhm_fit, chi2 = _fit_gaussian(
                 jd[window], mag_work[window], err[window],

@@ -14,7 +14,7 @@ import time
 from datetime import datetime
 from typing import Sequence
 
-from malca.events import run_bayesian_significance
+from malca.events import score_lightcurve
 from malca.utils import gaussian, paczynski_kernel, read_skypatrol_csv as _read_skypatrol_csv
 from malca.utils import clean_lc, read_lc_dat2, filter_bad_cameras
 from malca.baseline import (
@@ -357,7 +357,7 @@ def plot_bayes_results(
         if baseline_func is per_camera_gp_baseline:
             baseline_kwargs.setdefault("add_sigma_eff_col", True)
         
-        res_g = run_bayesian_significance(
+        res_g = score_lightcurve(
             df_g,
             baseline_func=baseline_func,
             baseline_kwargs=baseline_kwargs,
@@ -366,7 +366,7 @@ def plot_bayes_results(
             compute_event_prob=True,
         ) if not df_g.empty else {"dip": {"significant": False, "run_summaries": [], "n_runs": 0}, "jump": {"significant": False, "run_summaries": [], "n_runs": 0}}
         
-        res_v = run_bayesian_significance(
+        res_v = score_lightcurve(
             df_v,
             baseline_func=baseline_func,
             baseline_kwargs=baseline_kwargs,
