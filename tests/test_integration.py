@@ -6,11 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from malca.baseline import (
-    per_camera_gp_baseline,
-    per_camera_gp_baseline_masked,
-    per_camera_trend_baseline,
-)
+from malca.baseline import global_median_baseline, per_camera_median_baseline, per_camera_gp_baseline
 from malca.events import run_bayesian_significance
 
 
@@ -76,7 +72,7 @@ class TestFullPipeline:
 
     @pytest.mark.parametrize("baseline_func", [
         per_camera_gp_baseline,
-        per_camera_gp_baseline_masked,
+        per_camera_median_baseline,
     ])
     def test_quiescent_no_false_positives_gp(self, baseline_func):
         """Quiescent light curve should not produce false positives with GP baselines."""
@@ -94,25 +90,10 @@ class TestFullPipeline:
         assert not result["dip"]["significant"], "False positive dip detection"
         assert not result["jump"]["significant"], "False positive jump detection"
 
-    def test_quiescent_no_false_positives_trend(self):
-        """Quiescent light curve with trend baseline - may have more false positives."""
-        df = make_synthetic_lc(n_points=300, scatter=0.01, seed=1001)  # Lower scatter
-        
-        result = run_bayesian_significance(
-            df,
-            baseline_func=per_camera_trend_baseline,
-            logbf_threshold_dip=8.0,  # Higher threshold for trend baseline
-            logbf_threshold_jump=8.0,
-            trigger_mode="logbf",
-        )
-        
-        # Check it ran without error - trend baseline may have more false positives
-        assert "dip" in result
-        assert "jump" in result
-
     @pytest.mark.parametrize("baseline_func", [
         per_camera_gp_baseline,
-        per_camera_gp_baseline_masked,
+        per_camera_median_baseline,
+        global_median_baseline,
     ])
     def test_strong_dip_detected(self, baseline_func):
         """Strong injected dip should be detected by all GP baselines."""
@@ -132,25 +113,6 @@ class TestFullPipeline:
         is_significant = result["dip"]["significant"]
         assert has_triggers or is_significant, \
             f"Failed to detect strong dip with {baseline_func.__name__}"
-
-    def test_gp_vs_masked_gp_similar_on_clean(self):
-        """GP and masked GP should give similar results on clean data."""
-        df = make_synthetic_lc(n_points=250, scatter=0.012, seed=3000)
-        
-        result_gp = run_bayesian_significance(
-            df,
-            baseline_func=per_camera_gp_baseline,
-            logbf_threshold_dip=5.0,
-        )
-        
-        result_masked = run_bayesian_significance(
-            df,
-            baseline_func=per_camera_gp_baseline_masked,
-            logbf_threshold_dip=5.0,
-        )
-        
-        # Both should agree on significance
-        assert result_gp["dip"]["significant"] == result_masked["dip"]["significant"]
 
     def test_detection_reproducibility(self):
         """Same input should always produce same output."""

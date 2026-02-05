@@ -70,20 +70,8 @@ def log_gaussian(x, mu, sigma):
     z = (x - mu) / sigma
     return -0.5 * z**2 - np.log(sigma) - 0.5 * np.log(2.0 * np.pi)
 
-def robust_median_dt_days(jd: np.ndarray) -> float:
-    """
-    Compute robust median time difference from a time series.
-
-    Parameters
-    ----------
-    jd : array
-        Time values (Julian dates)
-
-    Returns
-    -------
-    median_dt : float
-        Median time difference in days
-    """
+def median_dt(jd: np.ndarray) -> float:
+    """Median of positive successive time gaps (days)."""
     jd = np.asarray(jd, float)
     jd = jd[np.isfinite(jd)]
     if jd.size < 2:

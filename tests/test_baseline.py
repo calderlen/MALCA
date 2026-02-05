@@ -6,11 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from malca.baseline import (
-    per_camera_gp_baseline,
-    per_camera_gp_baseline_masked,
-    per_camera_trend_baseline,
-)
+from malca.baseline import global_median_baseline, per_camera_median_baseline, per_camera_gp_baseline
 
 
 def make_synthetic_lc(
@@ -71,28 +67,14 @@ class TestSigmaFloorConsistency:
         assert result["sigma_eff"].notna().all()
         assert (result["sigma_eff"] > 0).all()
 
-    def test_gp_masked_baseline_has_sigma_eff(self):
-        """Verify per_camera_gp_baseline_masked produces sigma_eff column."""
-        df = make_synthetic_lc()
-        result = per_camera_gp_baseline_masked(df, add_sigma_eff_col=True)
-        
-        assert "sigma_eff" in result.columns
-        assert result["sigma_eff"].notna().all()
-        assert (result["sigma_eff"] > 0).all()
-
-    def test_sigma_eff_similar_on_quiescent_lc(self):
-        """Both baselines should give similar sigma_eff on clean data."""
+    def test_median_baselines_have_sigma_eff(self):
         df = make_synthetic_lc(seed=123)
-        
-        result_gp = per_camera_gp_baseline(df, add_sigma_eff_col=True)
-        result_masked = per_camera_gp_baseline_masked(df, add_sigma_eff_col=True)
-        
-        # Median sigma_eff should be within 50% of each other
-        median_gp = result_gp["sigma_eff"].median()
-        median_masked = result_masked["sigma_eff"].median()
-        
-        ratio = median_masked / median_gp
-        assert 0.5 < ratio < 2.0, f"sigma_eff ratio {ratio:.2f} too different"
+        res_global = global_median_baseline(df)
+        res_cam = per_camera_median_baseline(df)
+        assert "sigma_eff" in res_global.columns
+        assert "sigma_eff" in res_cam.columns
+        assert (res_global["sigma_eff"] > 0).all()
+        assert (res_cam["sigma_eff"] > 0).all()
 
     def test_sigma_eff_includes_sigma_floor(self):
         """sigma_eff should be larger than just yerr due to sigma_floor."""
@@ -131,30 +113,6 @@ class TestRobustSigmaFloor:
         assert 0.7 < ratio < 1.5, f"sigma_eff changed too much with dip: {ratio:.2f}"
 
 
-class TestMaskedGPBehavior:
-    """Test that masked GP properly excludes dips from fit."""
-
-    def test_masked_baseline_stable_with_dip(self):
-        """Masked GP baseline should follow quiescent level, not dip."""
-        df = make_synthetic_lc(seed=789)
-        t0 = df["JD"].median()
-        df_dip = inject_dip(df, t0=t0, amplitude=1.0, sigma=5.0)
-        
-        result = per_camera_gp_baseline_masked(
-            df_dip, 
-            dip_sigma_thresh=-2.0,  # Aggressive masking
-            add_sigma_eff_col=True
-        )
-        
-        # Baseline at dip center should be close to quiescent level
-        dip_mask = np.abs(df_dip["JD"] - t0) < 10
-        baseline_at_dip = result.loc[dip_mask, "baseline"].mean()
-        quiescent_mag = df["mag"].median()  # Original clean data
-        
-        # Baseline should be within 0.1 mag of quiescent level
-        assert abs(baseline_at_dip - quiescent_mag) < 0.1
-
-
 class TestBaselineFallbacks:
     """Test fallback behavior when GP fit fails."""
 
@@ -174,39 +132,6 @@ class TestBaselineFallbacks:
         
         assert "sigma_eff" in result.columns
         assert result["sigma_eff"].notna().all()
-
-
-class TestTrendBaseline:
-    """Test per_camera_trend_baseline."""
-
-    def test_trend_baseline_basic(self):
-        """Trend baseline should produce expected columns."""
-        df = make_synthetic_lc()
-        result = per_camera_trend_baseline(df)
-        
-        assert "baseline" in result.columns
-        assert "resid" in result.columns
-        assert "sigma_resid" in result.columns
-
-    def test_trend_baseline_sigma_eff_col(self):
-        """Trend baseline should produce sigma_eff when requested."""
-        df = make_synthetic_lc()
-        result = per_camera_trend_baseline(df, add_sigma_eff_col=True)
-        
-        assert "sigma_eff" in result.columns
-        assert result["sigma_eff"].notna().all()
-
-    def test_trend_baseline_accepts_kwargs(self):
-        """Trend baseline should accept extra kwargs for API compatibility."""
-        df = make_synthetic_lc()
-        # Should not raise even with GP-specific kwargs
-        result = per_camera_trend_baseline(
-            df, 
-            add_sigma_eff_col=True,
-            S0=0.001,  # GP param, should be ignored
-            w0=0.01,   # GP param, should be ignored
-        )
-        assert "baseline" in result.columns
 
 
 class TestEdgeCases:

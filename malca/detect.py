@@ -35,6 +35,7 @@ from malca.postprocess import run_postprocess
 from malca.classify import compute_all_classifications
 from malca.stats import compute_stats
 from malca.characterize import query_gaia_by_ids, get_dust_extinction
+from malca.utils import log as _log
 
 
 def safe_write_parquet(df: pd.DataFrame, path: Path) -> None:
@@ -51,38 +52,25 @@ def safe_write_parquet(df: pd.DataFrame, path: Path) -> None:
         raise
 
 
-def parse_output_format(events_args: list[str]) -> str:
-    """Find --output-format value in events args if provided."""
-    for i, arg in enumerate(events_args):
-        if arg == "--output-format" and i + 1 < len(events_args):
-            return str(events_args[i + 1]).lower()
-    return "csv"
-
-
 def default_run_dir(base_root: Path) -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return base_root / "runs" / timestamp
 
 
-def clear_existing_output(path: Path | None, fmt: str, quiet: bool = False) -> None:
+def clear_existing_output(path: Path | None, fmt: str) -> None:
     if path is None or (not path.exists()):
         return
-    try:
-        if fmt == "parquet_chunk" and path.is_dir():
-            removed_any = False
-            for child in path.glob("chunk_*.parquet*"):
-                child.unlink()
-                removed_any = True
-            if removed_any:
-                if not quiet:
-                    print(f"Overwriting existing output chunks in {path}")
-        else:
-            path.unlink()
-            if not quiet:
-                print(f"Overwriting existing output file: {path}")
-    except Exception as e:
-        if not quiet:
-            print(f"Warning: could not remove existing output {path}: {e}")
+    if fmt == "parquet_chunk" and path.is_dir():
+        removed_any = False
+        for child in path.glob("chunk_*.parquet*"):
+            child.unlink()
+            removed_any = True
+        if removed_any:
+            print(f"Overwriting existing output chunks in {path}")
+        return
+
+    path.unlink()
+    print(f"Overwriting existing output file: {path}")
 
 
 def main():
@@ -130,10 +118,10 @@ def main():
     parser.add_argument("--logbf-threshold-dip", type=float, default=5.0, help="Per-point dip trigger threshold")
     parser.add_argument("--logbf-threshold-jump", type=float, default=5.0, help="Per-point jump trigger threshold")
     parser.add_argument("--significance-threshold", type=float, default=99.99997, help="Posterior probability threshold (if trigger-mode=posterior_prob)")
-    parser.add_argument("--p-points", type=int, default=12, help="Number of points in the logit-spaced p grid")
+    parser.add_argument("--p-points", type=int, default=12, help="Number of points in the p grid")
     parser.add_argument("--mag-points", type=int, default=12, help="Number of points in the magnitude grid")
     parser.add_argument("--run-min-points", type=int, default=2, help="Min triggered points in a run")
-    parser.add_argument("--run-allow-gap-points", type=int, default=5, help="Allow up to this many missing indices inside a run")
+    parser.add_argument("--run-max-gap-points", type=int, default=5, help="Allow up to this many missing indices inside a run")
     parser.add_argument("--run-max-gap-days", type=float, default=None, help="Break runs if JD gap exceeds this")
     parser.add_argument("--run-min-duration-days", type=float, default=0.0, help="Require run duration >= this (default: 0.0 = disabled)")
     parser.add_argument("--no-event-prob", action="store_true", help="Skip LOO event responsibilities")
@@ -141,7 +129,13 @@ def main():
     parser.add_argument("--p-max-dip", type=float, default=None, help="Maximum dip fraction for p-grid")
     parser.add_argument("--p-min-jump", type=float, default=None, help="Minimum jump fraction for p-grid")
     parser.add_argument("--p-max-jump", type=float, default=None, help="Maximum jump fraction for p-grid")
-    parser.add_argument("--baseline-func", type=str, default="gp", choices=["gp", "gp_masked", "trend"], help="Baseline function")
+    parser.add_argument(
+        "--baseline-func",
+        type=str,
+        default="gp",
+        choices=["gp", "gp_masked", "global_median", "per_camera_median"],
+        help="Baseline function",
+    )
     # Baseline kwargs (GP kernel parameters)
     parser.add_argument("--baseline-s0", type=float, default=0.0005, help="GP kernel S0 parameter (default: 0.0005)")
     parser.add_argument("--baseline-w0", type=float, default=0.0031415926535897933, help="GP kernel w0 parameter (default: pi/1000)")
@@ -153,8 +147,6 @@ def main():
     parser.add_argument("--mag-max-dip", type=float, default=None, help="Max magnitude for dip grid (overrides auto)")
     parser.add_argument("--mag-min-jump", type=float, default=None, help="Min magnitude for jump grid (overrides auto)")
     parser.add_argument("--mag-max-jump", type=float, default=None, help="Max magnitude for jump grid (overrides auto)")
-    parser.add_argument("--no-sigma-eff", action="store_true", help="Do not replace errors with sigma_eff")
-    parser.add_argument("--allow-missing-sigma-eff", action="store_true", help="Do not error if baseline omits sigma_eff")
     parser.add_argument("--min-mag-offset", type=float, default=0.1, help="Require |event_mag - baseline_mag| > threshold")
     parser.add_argument("--output", type=str, default=None, help="Output path for results (default: <out_dir>/lc_events_results.csv)")
     parser.add_argument("--out-dir", type=str, default=None, help="Directory for all outputs (default: output/runs/<timestamp>)")
@@ -174,7 +166,7 @@ def main():
 
     # Step 7: Characterization args
     parser.add_argument("--run-characterize", action="store_true", help="Run Gaia DR3 characterization after post_filter")
-    parser.add_argument("--gaia-cache", type=Path, default=None, help="Path to Gaia query cache file (parquet)")
+    parser.add_argument("--gaia-cache", type=Path, default=None, help="Path to Gaia query cache file (parquet). Default: <out_dir>/gaia_cache/gaia_cache.parquet")
     parser.add_argument(
         "--index-file",
         type=Path,
@@ -191,7 +183,7 @@ def main():
     parser.add_argument("--enrich-compute-ls", action="store_true", help="Include Lomb-Scargle periodogram in enrichment (expensive)")
 
     parser.add_argument("-o", "--overwrite", action="store_true", help="Overwrite checkpoint log and existing output if present (start fresh).")
-    parser.add_argument("-v", "--verbose", action="store_true",help="Enable verbose output (default: quiet).")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output")
 
     args = parser.parse_args()
 
@@ -207,7 +199,7 @@ def main():
     events_args.extend(["--p-points", str(args.p_points)])
     events_args.extend(["--mag-points", str(args.mag_points)])
     events_args.extend(["--run-min-points", str(args.run_min_points)])
-    events_args.extend(["--run-allow-gap-points", str(args.run_allow_gap_points)])
+    events_args.extend(["--run-max-gap-points", str(args.run_max_gap_points)])
     if args.run_max_gap_days is not None:
         events_args.extend(["--run-max-gap-days", str(args.run_max_gap_days)])
     if args.run_min_duration_days is not None:
@@ -239,23 +231,20 @@ def main():
         events_args.extend(["--mag-min-jump", str(args.mag_min_jump)])
     if args.mag_max_jump is not None:
         events_args.extend(["--mag-max-jump", str(args.mag_max_jump)])
-    if args.no_sigma_eff:
-        events_args.append("--no-sigma-eff")
-    if args.allow_missing_sigma_eff:
-        events_args.append("--allow-missing-sigma-eff")
     events_args.extend(["--min-mag-offset", str(args.min_mag_offset)])
     events_args.extend(["--output-format", args.output_format])
     events_args.extend(["--chunk-size", str(args.chunk_size)])
 
+    quiet = not bool(args.verbose)
+
     def log(message: str) -> None:
-        if args.verbose:
-            print(message)
+        _log(message, quiet=quiet)
 
     # Determine file names
     mag_bin_tag = args.mag_bin[0] if len(args.mag_bin) == 1 else "multi"
 
     # IMPORTANT: never write to filesystem root (/output). Default to a writable directory.
-    events_format = parse_output_format(events_args)
+    events_format = str(args.output_format).lower()
     base_output_root = Path("/home/lenhart.106/code/malca/output")
     if args.out_dir is not None:
         out_dir = Path(args.out_dir).expanduser()
@@ -268,6 +257,11 @@ def main():
     else:
         out_dir = default_run_dir(base_output_root)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.gaia_cache is None:
+        gaia_cache_dir = out_dir / "gaia_cache"
+        gaia_cache_dir.mkdir(parents=True, exist_ok=True)
+        args.gaia_cache = gaia_cache_dir / "gaia_cache.parquet"
 
     manifests_dir = out_dir / "manifests"
     prefilter_dir = out_dir / "prefilter"
@@ -338,12 +332,10 @@ def main():
             "baseline_sigma_floor": args.baseline_sigma_floor,
             # Run parameters
             "run_min_points": args.run_min_points,
-            "run_allow_gap_points": args.run_allow_gap_points,
+            "run_max_gap_points": args.run_max_gap_points,
             "run_max_gap_days": args.run_max_gap_days,
             "run_min_duration_days": args.run_min_duration_days,
             "no_event_prob": args.no_event_prob,
-            "no_sigma_eff": args.no_sigma_eff,
-            "allow_missing_sigma_eff": args.allow_missing_sigma_eff,
             "min_mag_offset": args.min_mag_offset,
             # System parameters
             "workers": args.workers,
@@ -534,7 +526,7 @@ def main():
             log(f"Warning: could not overwrite checkpoint log {checkpoint_log}: {e}")
 
     if args.overwrite:
-        clear_existing_output(base_output, events_format, quiet=not args.verbose)
+        clear_existing_output(base_output, events_format)
 
     if checkpoint_log.exists() and not args.overwrite:
         try:
@@ -790,9 +782,7 @@ def main():
                     if "path" in df_char.columns and "asas_sn_id" not in df_char.columns:
                         def _extract_id(path_str: str) -> str:
                             name = Path(path_str).name
-                            if name.endswith("-light-curves.csv"):
-                                return name.split("-")[0]
-                            return Path(name).stem
+                            return Path(name).stem.split("-")[0]
 
                         df_char["asas_sn_id"] = df_char["path"].astype(str).map(_extract_id)
 

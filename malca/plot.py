@@ -15,18 +15,12 @@ from datetime import datetime
 from typing import Sequence
 
 from malca.events import run_bayesian_significance
-from malca.utils import gaussian, paczynski_kernel
+from malca.utils import gaussian, paczynski_kernel, read_skypatrol_csv as _read_skypatrol_csv
 from malca.utils import clean_lc, read_lc_dat2, filter_bad_cameras
 from malca.baseline import (
-    per_camera_gp_baseline,
-    global_mean_baseline,
     global_median_baseline,
-    global_rolling_median_baseline,
-    global_rolling_mean_baseline,
-    per_camera_mean_baseline,
     per_camera_median_baseline,
-    per_camera_trend_baseline,
-    per_camera_gp_baseline_masked,
+    per_camera_gp_baseline,
 )
 
 
@@ -78,63 +72,6 @@ def read_asassn_dat(dat_path):
     return df
 
 
-def read_skypatrol_csv(csv_path):
-    """
-    Read a SkyPatrol CSV, remapping columns to the ASAS-SN schema.
-    """
-    import pandas as pd
-
-    csv_path = Path(csv_path)
-    df = pd.read_csv(
-        csv_path,
-        comment="#",
-        skip_blank_lines=True,
-        dtype={
-            "JD": float,
-            "Flux": float,
-            "Flux Error": float,
-            "Mag": float,
-            "Mag Error": float,
-            "Limit": float,
-            "FWHM": float,
-            "Filter": "string",
-            "Quality": "string",
-            "Camera": "string",
-        },
-    )
-    rename_map = {
-        "Flux": "flux",
-        "Flux Error": "flux_error",
-        "Mag": "mag",
-        "Mag Error": "error",
-        "Limit": "limit",
-        "FWHM": "fwhm",
-        "Filter": "filter_band",
-        "Quality": "quality_flag",
-        "Camera": "camera",
-    }
-    df = df.rename(columns=rename_map)
-    df["JD"] = pd.to_numeric(df["JD"], errors="coerce")
-    df["mag"] = pd.to_numeric(df["mag"], errors="coerce")
-    df["error"] = pd.to_numeric(df["error"], errors="coerce")
-    df["flux"] = pd.to_numeric(df.get("flux"), errors="coerce")
-    df["flux_error"] = pd.to_numeric(df.get("flux_error"), errors="coerce")
-    df["camera"] = df["camera"].astype(str).str.strip()
-    df["camera#"] = df["camera"]
-    df["cam_field"] = df["camera#"]
-    df["quality_flag"] = df["quality_flag"].astype(str).str.strip().str.upper()
-    df["good_bad"] = (df["quality_flag"] == "G").astype(int)
-    df["saturated"] = 0
-
-    filt = df["filter_band"].astype(str).str.strip().str.lower()
-    band_map = {"v": 1, "g": 0}
-    df["v_g_band"] = filt.map(band_map)
-    df = df[df["v_g_band"].notna()].copy()
-    df["v_g_band"] = df["v_g_band"].astype(int)
-
-    df = df[pd.notna(df["JD"]) & pd.notna(df["mag"])]
-    df = df.sort_values("JD").reset_index(drop=True)
-    return df
 
 
 def load_lightcurve_df(
@@ -173,7 +110,7 @@ def load_lightcurve_df(
             return (pd.DataFrame(), set()) if return_filtered_info else pd.DataFrame()
         df = pd.concat([dfg, dfv], ignore_index=True)
     elif suffix == ".csv":
-        df = read_skypatrol_csv(path)
+        df = _read_skypatrol_csv(path)
     elif suffix == ".dat":
         df = read_asassn_dat(path)
     else:
@@ -282,9 +219,6 @@ def lookup_metadata_for_path(path: Path, detection_results_csv=None):
 
     meta = lookup_source_metadata(asassn_id=stem, dat_path=str(path), csv_path=detection_results_csv)
 
-    if not meta and "-light-curves" in stem:
-        meta = lookup_source_metadata(asassn_id=stem.replace("-light-curves", ""), csv_path=detection_results_csv)
-
     if not meta and "-" in stem:
         meta = lookup_source_metadata(asassn_id=stem.split("-")[0], csv_path=detection_results_csv)
 
@@ -294,7 +228,7 @@ def lookup_metadata_for_path(path: Path, detection_results_csv=None):
             from tests.reproduce import brayden_candidates
             
             # Extract source_id from filename
-            source_id = stem.replace("-light-curves", "").split("-")[0]
+            source_id = stem.split("-")[0]
             
             # Look up in brayden_candidates
             for candidate in brayden_candidates:
@@ -319,31 +253,19 @@ def lookup_metadata_for_path(path: Path, detection_results_csv=None):
 
 
 BASELINE_FUNCTIONS = {
-    "global_mean": global_mean_baseline,
     "global_median": global_median_baseline,
-    "global_rolling_median": global_rolling_median_baseline,
-    "global_rolling_mean": global_rolling_mean_baseline,
-    "per_camera_mean": per_camera_mean_baseline,
     "per_camera_median": per_camera_median_baseline,
-    "per_camera_trend": per_camera_trend_baseline,
     "per_camera_gp": per_camera_gp_baseline,
-    "per_camera_gp_masked": per_camera_gp_baseline_masked,
 }
 
 PER_CAMERA_BASELINES = {
-    per_camera_mean_baseline,
     per_camera_median_baseline,
-    per_camera_trend_baseline,
     per_camera_gp_baseline,
-    per_camera_gp_baseline_masked,
 }
 
 PER_CAMERA_BASELINE_NAMES = {
-    "per_camera_mean",
     "per_camera_median",
-    "per_camera_trend",
     "per_camera_gp",
-    "per_camera_gp_masked",
 }
 
 
@@ -432,7 +354,7 @@ def plot_bayes_results(
         band_results = {0: {"dip": empty_res, "jump": empty_res}, 1: {"dip": empty_res, "jump": empty_res}}
     else:
         # For GP baselines, ensure add_sigma_eff_col is enabled for sigma_eff computation
-        if baseline_func in (per_camera_gp_baseline, per_camera_gp_baseline_masked):
+        if baseline_func is per_camera_gp_baseline:
             baseline_kwargs.setdefault("add_sigma_eff_col", True)
         
         res_g = run_bayesian_significance(
@@ -1149,7 +1071,7 @@ def main():
     }
     gp_kwargs = {k: v for k, v in gp_kwargs.items() if v is not None}
     if gp_kwargs:
-        if baseline_func in (per_camera_gp_baseline, per_camera_gp_baseline_masked):
+        if baseline_func is per_camera_gp_baseline:
             baseline_kwargs.update(gp_kwargs)
         else:
             print("Warning: GP parameters were provided but baseline is not a GP baseline; ignoring.", flush=True)
@@ -1173,11 +1095,9 @@ def main():
     if args.results_csv and args.results_csv.exists():
         results_df = pd.read_csv(args.results_csv)
 
-        results_ids = set()
-        for path in results_df["path"]:
-            if "-light-curves.csv" in str(path):
-                id_str = str(path).split("/")[-1].replace("-light-curves.csv", "")
-                results_ids.add(id_str)
+        results_ids: set[str] = set()
+        for p in results_df["path"].dropna().astype(str):
+            results_ids.add(Path(p).stem.split("-")[0])
 
         csv_paths = [p for p in csv_paths if p.stem.split("-")[0] in results_ids]
         print(f"Filtered to {len(csv_paths)} light curves from results CSV")

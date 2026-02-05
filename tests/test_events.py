@@ -72,7 +72,7 @@ class TestBuildRuns:
         jd = np.arange(100.0)
         trig_idx = np.array([10, 11, 12, 13, 14])
         
-        runs = build_runs(trig_idx, jd, allow_gap_points=0)
+        runs = build_runs(trig_idx, jd, max_gap_points=0)
         
         assert len(runs) == 1
         assert list(runs[0]) == [10, 11, 12, 13, 14]
@@ -82,7 +82,7 @@ class TestBuildRuns:
         jd = np.arange(100.0)
         trig_idx = np.array([10, 11, 12, 50, 51, 52])  # Gap between 12 and 50
         
-        runs = build_runs(trig_idx, jd, allow_gap_points=0, max_gap_days=5.0)
+        runs = build_runs(trig_idx, jd, max_gap_points=0, max_gap_days=5.0)
         
         assert len(runs) == 2
         assert list(runs[0]) == [10, 11, 12]
@@ -93,11 +93,11 @@ class TestBuildRuns:
         jd = np.arange(100.0)
         trig_idx = np.array([10, 11, 13, 14])  # Missing index 12
         
-        # allow_gap_points=1 means max_index_step = 2
+        # max_gap_points=1 means max_index_step = 2
         # But we also need max_gap_days large enough (dt between 11 and 13 is 2 days)
-        runs = build_runs(trig_idx, jd, allow_gap_points=1, max_gap_days=5.0)
+        runs = build_runs(trig_idx, jd, max_gap_points=1, max_gap_days=5.0)
         
-        # With allow_gap_points=1 and sufficient max_gap_days, gap of 2 indices should merge
+        # With max_gap_points=1 and sufficient max_gap_days, gap of 2 indices should merge
         assert len(runs) == 1
 
     def test_max_gap_days_auto_calculation(self):
@@ -121,11 +121,11 @@ class TestBuildRuns:
         trig_idx = np.array([10, 11, 12, 22, 23, 24])
         
         # With max_gap_days=5, the 10-day gap should break runs
-        runs_short = build_runs(trig_idx, jd, max_gap_days=5.0, allow_gap_points=0)
+        runs_short = build_runs(trig_idx, jd, max_gap_days=5.0, max_gap_points=0)
         
-        # With max_gap_days=15, should be 1 run (but still need allow_gap_points
+        # With max_gap_days=15, should be 1 run (but still need max_gap_points
         # to allow skipping indices 13-21)
-        runs_long = build_runs(trig_idx, jd, max_gap_days=15.0, allow_gap_points=10)
+        runs_long = build_runs(trig_idx, jd, max_gap_days=15.0, max_gap_points=10)
         
         assert len(runs_short) == 2
         assert len(runs_long) == 1
@@ -207,17 +207,10 @@ class TestRunBayesianSignificance:
         assert "significant" in result["jump"]
 
     def test_uses_sigma_eff(self):
-        """Should use sigma_eff from baseline when available."""
+        """Baselines should provide sigma_eff by default."""
         df = make_synthetic_lc(seed=500)
-        
-        # Run with use_sigma_eff=True (default)
-        result = run_bayesian_significance(
-            df,
-            use_sigma_eff=True,
-            require_sigma_eff=True,
-        )
-        
-        # Should complete without error
+
+        result = run_bayesian_significance(df)
         assert "dip" in result
 
     def test_quiescent_lc_no_detection(self):

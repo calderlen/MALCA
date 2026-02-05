@@ -16,7 +16,7 @@ graph TB
 
       subgraph "Core Libraries"
           UTILS[utils.py<br/>LC I/O, cleaning]
-          BASE[baseline.py<br/>GP/trend fitting]
+          BASE[baseline.py<br/>GP/median baselines]
           STATS_LIB[stats.py<br/>LC statistics]
           SCORE_LIB[score.py<br/>Event score utils]
       end
@@ -162,7 +162,7 @@ graph TB
 
 ### Core Libraries (Shared Utilities)
 - **`utils.py`**: Light curve I/O, cleaning, coordinate transforms
-- **`baseline.py`**: Baseline fitting (GP, rolling median/mean, per-camera)
+- **`baseline.py`**: Baseline fitting (per-camera GP, masked per-camera GP, global median, per-camera rolling median)
 - **`stats.py`**: Comprehensive LC statistics (cadence, photometry, quality)
 
 ### Data Management

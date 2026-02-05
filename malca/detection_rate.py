@@ -24,9 +24,9 @@ from tqdm.auto import tqdm
 from malca.utils import read_lc_dat2
 from malca.events import run_bayesian_significance
 from malca.baseline import (
+    global_median_baseline,
+    per_camera_median_baseline,
     per_camera_gp_baseline,
-    per_camera_gp_baseline_masked,
-    per_camera_trend_baseline,
 )
 
 
@@ -79,14 +79,18 @@ def _build_detection_kwargs(args: argparse.Namespace) -> dict:
     baseline_kwargs = {
         "S0": args.baseline_s0,
         "w0": args.baseline_w0,
-        "Q": args.baseline_q,
+        "q": args.baseline_q,
         "jitter": args.baseline_jitter,
+        "add_sigma_eff_col": True,
     }
     if args.baseline_sigma_floor is not None:
         baseline_kwargs["sigma_floor"] = args.baseline_sigma_floor
 
-    use_sigma_eff = not args.no_sigma_eff
-    baseline_tag = args.baseline_func
+    baseline_map = {
+        "gp": per_camera_gp_baseline,
+        "global_median": global_median_baseline,
+        "per_camera_median": per_camera_median_baseline,
+    }
 
     # Build mag grids from min/max/points if bounds are provided
     mag_grid_dip = None
@@ -110,14 +114,12 @@ def _build_detection_kwargs(args: argparse.Namespace) -> dict:
         mag_grid_dip=mag_grid_dip,
         mag_grid_jump=mag_grid_jump,
         run_min_points=args.run_min_points,
-        run_allow_gap_points=args.run_allow_gap_points,
+        max_gap_points=args.run_max_gap_points,
         run_max_gap_days=args.run_max_gap_days,
         run_min_duration_days=args.run_min_duration_days,
         compute_event_prob=(not args.no_event_prob),
-        use_sigma_eff=use_sigma_eff,
-        allow_missing_sigma_eff=args.allow_missing_sigma_eff,
         min_mag_offset=args.min_mag_offset,
-        baseline_tag=baseline_tag,
+        baseline_func=baseline_map.get(args.baseline_func, per_camera_gp_baseline),
         baseline_kwargs=baseline_kwargs,
     )
 
@@ -429,10 +431,15 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
     parser.add_argument("--mag-min-jump", type=float, default=None)
     parser.add_argument("--mag-max-jump", type=float, default=None)
     parser.add_argument("--run-min-points", type=int, default=2)
-    parser.add_argument("--run-allow-gap-points", type=int, default=1)
+    parser.add_argument("--run-max-gap-points", type=int, default=1)
     parser.add_argument("--run-max-gap-days", type=float, default=None)
     parser.add_argument("--run-min-duration-days", type=float, default=0.0)
-    parser.add_argument("--baseline-func", type=str, default="gp", choices=["gp", "gp_masked", "trend"])
+    parser.add_argument(
+        "--baseline-func",
+        type=str,
+        default="gp",
+        choices=["gp", "global_median", "per_camera_median"],
+    )
     parser.add_argument("--baseline-s0", type=float, default=0.0005)
     parser.add_argument("--baseline-w0", type=float, default=0.0031415926535897933)
     parser.add_argument("--baseline-q", type=float, default=0.7)
@@ -442,8 +449,6 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
                         help="Disable event probability computation (faster but incompatible with trigger_mode='posterior_prob')")
     parser.add_argument("--compute-event-prob", dest="no_event_prob", action="store_false",
                         help="Enable event probability computation (default, required for trigger_mode='posterior_prob')")
-    parser.add_argument("--no-sigma-eff", action="store_true")
-    parser.add_argument("--allow-missing-sigma-eff", action="store_true")
     parser.add_argument("--min-mag-offset", type=float, default=0.2)
 
     args = parser.parse_args()

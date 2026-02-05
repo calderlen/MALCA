@@ -27,9 +27,9 @@ import matplotlib.pyplot as plt
 from malca.utils import read_lc_dat2
 from malca.events import run_bayesian_significance
 from malca.baseline import (
+    global_median_baseline,
+    per_camera_median_baseline,
     per_camera_gp_baseline,
-    per_camera_gp_baseline_masked,
-    per_camera_trend_baseline,
 )
 from malca.old.df_utils import peak_search_biweight_delta, peak_search_residual_baseline
 
@@ -203,11 +203,9 @@ def select_control_sample(
 def _build_detection_kwargs(args: argparse.Namespace) -> dict:
     baseline_map = {
         "gp": per_camera_gp_baseline,
-        "gp_masked": per_camera_gp_baseline_masked,
-        "trend": per_camera_trend_baseline,
+        "global_median": global_median_baseline,
+        "per_camera_median": per_camera_median_baseline,
     }
-    use_sigma_eff = not args.no_sigma_eff
-    require_sigma_eff = use_sigma_eff and (not args.allow_missing_sigma_eff)
 
     # Build baseline_kwargs from CLI args
     baseline_kwargs = dict(
@@ -241,12 +239,10 @@ def _build_detection_kwargs(args: argparse.Namespace) -> dict:
         mag_grid_dip=mag_grid_dip,
         mag_grid_jump=mag_grid_jump,
         run_min_points=args.run_min_points,
-        run_allow_gap_points=args.run_allow_gap_points,
+        max_gap_points=args.run_max_gap_points,
         run_max_gap_days=args.run_max_gap_days,
         run_min_duration_days=args.run_min_duration_days,
         compute_event_prob=(not args.no_event_prob),
-        use_sigma_eff=use_sigma_eff,
-        require_sigma_eff=require_sigma_eff,
         baseline_func=baseline_map.get(args.baseline_func, per_camera_gp_baseline),
         baseline_kwargs=baseline_kwargs,
     )
@@ -1736,11 +1732,16 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
     parser.add_argument("--p-min-jump", type=float, default=None)
     parser.add_argument("--p-max-jump", type=float, default=None)
     parser.add_argument("--run-min-points", type=int, default=2)
-    parser.add_argument("--run-allow-gap-points", type=int, default=1)
+    parser.add_argument("--run-max-gap-points", type=int, default=1)
     parser.add_argument("--run-max-gap-days", type=float, default=None)
     parser.add_argument("--run-min-duration-days", type=float, default=0.0)
-    parser.add_argument("--baseline-func", type=str, default="gp", choices=["gp", "gp_masked", "trend"],
-                        help="Baseline function")
+    parser.add_argument(
+        "--baseline-func",
+        type=str,
+        default="gp",
+        choices=["gp", "global_median", "per_camera_median"],
+        help="Baseline function",
+    )
     # Baseline kwargs (GP kernel parameters)
     parser.add_argument("--baseline-s0", type=float, default=0.0005, help="GP kernel S0 parameter (default: 0.0005)")
     parser.add_argument("--baseline-w0", type=float, default=0.0031415926535897933, help="GP kernel w0 parameter (default: pi/1000)")
@@ -1756,10 +1757,6 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
                         help="Disable event probability computation (faster but incompatible with trigger_mode='posterior_prob')")
     parser.add_argument("--compute-event-prob", dest="no_event_prob", action="store_false",
                         help="Enable event probability computation (default, required for trigger_mode='posterior_prob')")
-    parser.add_argument("--no-sigma-eff", action="store_true",
-                        help="Do not replace errors with sigma_eff from baseline.")
-    parser.add_argument("--allow-missing-sigma-eff", action="store_true",
-                        help="Do not error if baseline omits sigma_eff (sets require_sigma_eff=False).")
     parser.add_argument("--min-mag-offset", type=float, default=0.2,
                         help="Min magnitude offset for signal amplitude filter (0 to disable, default: 0.2)")
     parser.add_argument("--measure-pre-injection", action="store_true", default=True,

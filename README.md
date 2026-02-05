@@ -15,7 +15,7 @@ _This README is a WIP._
 
 #### Dependencies
 - Core pipeline: numpy, pandas, scipy, numba, astropy, celerite2, matplotlib, tqdm
-- Optional outputs: pyarrow (parquet)
+- Required: pyarrow (imported by core pipeline; needed even if you only write CSV)
 - Optional visualization: plotly (3D injection plots)
 - Multi-wavelength characterization: astroquery (Gaia queries), dustmaps3d (3D dust extinction), pyvo (StarHorse TAP queries), banyan-sigma (young associations), requests (unWISE queries)
 - Notebooks/EDA: jupyterlab, ipykernel, seaborn, scikit-learn, joblib
@@ -29,10 +29,10 @@ python -m malca manifest --index-root /path/to/lcsv2 --lc-root /path/to/lcsv2 \
 # Run event detection pipeline
 python -m malca detect --mag-bin 13_13.5 --workers 10 \
     --lc-root /path/to/lcsv2 --index-root /path/to/lcsv2 \
-    -- --output output/results.csv --workers 10 --min-mag-offset 0.1
+    --output output/results.csv --min-mag-offset 0.1
 
 # Validate results against known candidates (no raw data needed)
-python -m malca validation --results output/results.csv
+python -m malca validate --results output/results.csv
 
 # Plot light curves
 python -m malca plot --input /path/to/lc123.dat2 --out-dir output/plots
@@ -53,12 +53,12 @@ python -m malca detect --help
 # Detect on a single mag bin with logBF triggering (faster)
 python -m malca detect --mag-bin 13_13.5 --workers 8 \
     --lc-root /path/to/lcsv2 --index-root /path/to/lcsv2 \
-    -- --output output/events_logbf.csv --trigger-mode logbf --baseline-func trend --min-mag-offset 0.1
+    --output output/events_logbf.csv --trigger-mode logbf --baseline-func gp_masked --min-mag-offset 0.1
 
 # Detect on multiple mag bins (writes one output per bin)
 python -m malca detect --mag-bin 12_12.5 12.5_13 13_13.5 \
     --lc-root /path/to/lcsv2 --index-root /path/to/lcsv2 \
-    -- --output output/lc_events_results.csv --trigger-mode logbf
+    --output output/lc_events_results.csv --trigger-mode logbf
 
 # Reproduce on built-in candidates using local SkyPatrol CSVs
 python -m malca validate --candidates brayden_candidates --skypatrol-dir input/skypatrol2 \
@@ -119,7 +119,7 @@ graph TB
 
     subgraph "Core Libraries"
         UTILS[utils.py<br/>LC I/O, cleaning, bad camera filtering]
-        BASE[baseline.py<br/>GP/trend fitting]
+        BASE[baseline.py<br/>GP/median baselines]
         STATS_LIB[stats.py<br/>Statistics]
         SCORE_LIB[score.py<br/>Event scoring]
     end
@@ -431,7 +431,7 @@ output/
   ```
   **Note:** Event scores are computed automatically during detection and included in the results CSV (dipper_score, dipper_n_dips, dipper_n_valid_dips columns).
 - Batch plot Bayesian results (SkyPatrol CSVs, filtered by events output):
-  `python -m malca.plot_results_bayes /path/to/*-light-curves.csv --results-csv /home/lenhart.106/code/malca/output/lc_events_results_13_13.5.csv --out-dir /home/lenhart.106/code/malca/output/plots`
+  `python -m malca.old.plot_results_bayes /path/to/*.csv --results-csv /home/lenhart.106/code/malca/output/lc_events_results_13_13.5.csv --out-dir /home/lenhart.106/code/malca/output/plots`
 - Injection-recovery testing (validate pipeline completeness/contamination):
   ```bash
   # Full run: uses default manifest (output/lc_manifest_all.parquet)

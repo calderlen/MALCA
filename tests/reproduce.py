@@ -18,15 +18,15 @@ import matplotlib.pyplot as pl
 from malca.events import run_bayesian_significance
 from malca.utils import read_lc_dat2
 from malca.baseline import (
+    global_median_baseline,
+    per_camera_median_baseline,
     per_camera_gp_baseline,
-    per_camera_gp_baseline_masked,
-    per_camera_trend_baseline,
 )
 from malca.pre_filter import apply_pre_filters
 from malca.filter import filter_signal_amplitude
 from malca.post_filter import apply_post_filters
 from malca.postprocess import run_postprocess
-from malca.stats import robust_median_dt_days, compute_stats
+from malca.stats import median_dt, compute_stats
 from malca.score import compute_event_score
 from malca.classify import compute_all_classifications
 from malca.characterize import query_gaia_by_ids, get_dust_extinction
@@ -226,7 +226,7 @@ def records_from_skypatrol_dir(df_targets: pd.DataFrame, skypatrol_dir: Path) ->
     for _, row in df_targets.iterrows():
         source_id = str(row.get("source_id"))
         mag_bin = str(row.get("mag_bin"))
-        csv_path = base / f"{source_id}-light-curves.csv"
+        csv_path = base / f"{source_id}.csv"
         if not csv_path.exists():
             continue
         rec = {
@@ -644,19 +644,16 @@ def build_reproduction_report(
     mag_min_jump: float | None = None,
     mag_max_jump: float | None = None,
     # Baseline function
-    baseline_func: str = "gp",            # "gp", "gp_masked", "trend"
+    baseline_func: str = "gp",            # "gp", "global_median", "per_camera_median"
     # Baseline kwargs (GP kernel parameters)
     baseline_s0: float = 0.0005,
     baseline_w0: float = 0.0031415926535897933,
     baseline_q: float = 0.7,
     baseline_jitter: float = 0.006,
     baseline_sigma_floor: float | None = None,
-    # Sigma_eff control
-    use_sigma_eff: bool = True,
-    require_sigma_eff: bool = True,
     # Run confirmation filters
     run_min_points: int = 2,
-    run_allow_gap_points: int = 1,
+    max_gap_points: int = 1,
     run_max_gap_days: float | None = None,
     run_min_duration_days: float | None = None,
     skypatrol_dir: Path | str | None = None,
@@ -796,8 +793,8 @@ def build_reproduction_report(
 
     baseline_func_map = {
         "gp": per_camera_gp_baseline,
-        "gp_masked": per_camera_gp_baseline_masked,
-        "trend": per_camera_trend_baseline,
+        "global_median": global_median_baseline,
+        "per_camera_median": per_camera_median_baseline,
     }
     selected_baseline_func = baseline_func_map.get(baseline_func, per_camera_gp_baseline)
     baseline_kwargs_dict = dict(
@@ -995,12 +992,9 @@ def build_reproduction_report(
                             logbf_threshold_jump=logbf_threshold_jump,
                             # Run confirmation filters
                             run_min_points=run_min_points,
-                            run_allow_gap_points=run_allow_gap_points,
+                            max_gap_points=max_gap_points,
                             run_max_gap_days=run_max_gap_days,
                             run_min_duration_days=run_min_duration_days,
-                            # Sigma_eff control
-                            use_sigma_eff=use_sigma_eff,
-                            require_sigma_eff=require_sigma_eff,
                         )
                         result = apply_triggering(result, band_name)
                         return result
@@ -1101,11 +1095,11 @@ def build_reproduction_report(
 
                 g_jd_first = float(dfg_clean["JD"].min()) if not dfg_clean.empty else np.nan
                 g_jd_last = float(dfg_clean["JD"].max()) if not dfg_clean.empty else np.nan
-                g_cadence_median_days = float(robust_median_dt_days(dfg_clean["JD"].to_numpy())) if not dfg_clean.empty else np.nan
+                g_cadence_median_days = float(median_dt(dfg_clean["JD"].to_numpy())) if not dfg_clean.empty else np.nan
 
                 v_jd_first = float(dfv_clean["JD"].min()) if not dfv_clean.empty else np.nan
                 v_jd_last = float(dfv_clean["JD"].max()) if not dfv_clean.empty else np.nan
-                v_cadence_median_days = float(robust_median_dt_days(dfv_clean["JD"].to_numpy())) if not dfv_clean.empty else np.nan
+                v_cadence_median_days = float(median_dt(dfv_clean["JD"].to_numpy())) if not dfv_clean.empty else np.nan
 
                 # Camera statistics (from events.py)
                 def get_camera_stats(df_band: pd.DataFrame) -> dict:
@@ -1550,8 +1544,8 @@ def build_reproduction_report(
             try:
                 baseline_map = {
                     "gp": "per_camera_gp",
-                    "gp_masked": "per_camera_gp_masked",
-                    "trend": "per_camera_trend",
+                    "global_median": "global_median",
+                    "per_camera_median": "per_camera_median",
                 }
                 baseline_name = baseline_map.get(str(baseline_func), "per_camera_gp")
                 postprocess_dir = Path(out_dir) / "postprocess"
@@ -1594,9 +1588,9 @@ def build_reproduction_report(
                         continue
 
                     lc_path = Path(str(path_val))
-                    if lc_path.name.endswith("-light-curves.csv"):
+                    if lc_path.suffix.lower() == ".csv":
                         if verbose:
-                            print(f"[ENRICH] Skipping SkyPatrol file: {lc_path}")
+                            print(f"[ENRICH] Skipping CSV light curve: {lc_path}")
                         enriched_rows.append(row.to_dict())
                         continue
 
@@ -2186,9 +2180,9 @@ Examples:
     parser.add_argument(
         "--baseline-func",
         type=str,
-        choices=["gp", "gp_masked", "trend"],
+        choices=["gp", "global_median", "per_camera_median"],
         default="gp",
-        help="Baseline function to use: gp (default), gp_masked, or trend.",
+        help="Baseline function to use: gp (default), global_median, or per_camera_median.",
     )
     # Baseline kwargs (GP kernel parameters)
     parser.add_argument("--baseline-s0", type=float, default=0.0005, help="GP kernel S0 parameter (default: 0.0005)")
@@ -2202,18 +2196,6 @@ Examples:
     parser.add_argument("--mag-min-jump", type=float, default=None, help="Min magnitude for jump grid (overrides auto)")
     parser.add_argument("--mag-max-jump", type=float, default=None, help="Max magnitude for jump grid (overrides auto)")
 
-    # Sigma_eff control
-    parser.add_argument(
-        "--no-sigma-eff",
-        action="store_true",
-        help="Do not replace errors with sigma_eff from baseline.",
-    )
-    parser.add_argument(
-        "--allow-missing-sigma-eff",
-        action="store_true",
-        help="Do not error if baseline omits sigma_eff (sets require_sigma_eff=False).",
-    )
-
     # Run confirmation filters
     parser.add_argument(
         "--run-min-points",
@@ -2222,7 +2204,7 @@ Examples:
         help="Minimum triggered points required to confirm a run (default: 2).",
     )
     parser.add_argument(
-        "--run-allow-gap-points",
+        "--run-max-gap-points",
         type=int,
         default=1,
         help="Allow this many non-triggered points between triggered points in a run (default: 1).",
@@ -2380,7 +2362,7 @@ Examples:
     parser.add_argument(
         "--skypatrol-dir",
         default="input/skypatrol2",
-        help="Directory with SkyPatrol CSV files (<source_id>-light-curves.csv)",
+        help="Directory with SkyPatrol CSV files (<source_id>.csv)",
     )
     parser.add_argument(
         "--manifest",
@@ -2514,10 +2496,6 @@ def _main_impl(args: argparse.Namespace, plot_out_dir: Path | None = None) -> pd
     if args.verbose:
         print(f"[DEBUG] Accepted morphologies: {accepted_morphologies}")
 
-    # Compute sigma_eff flags
-    use_sigma_eff = not args.no_sigma_eff
-    require_sigma_eff = use_sigma_eff and (not args.allow_missing_sigma_eff)
-
     report = build_reproduction_report(
         candidates=candidate_data,
         out_dir=out_dir,
@@ -2550,12 +2528,9 @@ def _main_impl(args: argparse.Namespace, plot_out_dir: Path | None = None) -> pd
         baseline_q=args.baseline_q,
         baseline_jitter=args.baseline_jitter,
         baseline_sigma_floor=args.baseline_sigma_floor,
-        # Sigma_eff control
-        use_sigma_eff=use_sigma_eff,
-        require_sigma_eff=require_sigma_eff,
         # Run confirmation filters
         run_min_points=args.run_min_points,
-        run_allow_gap_points=args.run_allow_gap_points,
+        max_gap_points=args.run_max_gap_points,
         run_max_gap_days=args.run_max_gap_days,
         run_min_duration_days=args.run_min_duration_days,
         skypatrol_dir=args.skypatrol_dir,
@@ -2598,7 +2573,7 @@ def _main_impl(args: argparse.Namespace, plot_out_dir: Path | None = None) -> pd
     print("=" * 60)
     print(f"Plot format:          {args.plot_format}")
     print(f"Baseline function:    {args.baseline_func}")
-    print(f"Sigma_eff:            use={use_sigma_eff}, require={require_sigma_eff}")
+    print("Sigma_eff:            enabled (mandatory)")
     print(f"Mag grid points:      {args.mag_points}")
     if args.p_min_dip is not None or args.p_max_dip is not None:
         print(f"P-grid (dip):         min={args.p_min_dip}, max={args.p_max_dip}")
@@ -2610,7 +2585,7 @@ def _main_impl(args: argparse.Namespace, plot_out_dir: Path | None = None) -> pd
         print(f"  - Multi-camera:       min_cameras={args.min_cameras}")
         print(f"  - VSX filter:         {'APPLIED' if not args.skip_vsx else 'SKIPPED'}")
     print(f"Signal amplitude:     {'APPLIED (min_mag_offset=' + str(args.min_mag_offset) + ')' if args.min_mag_offset > 0 else 'DISABLED'}")
-    print(f"Run confirmation:     min_points={args.run_min_points}, allow_gap={args.run_allow_gap_points}")
+    print(f"Run confirmation:     min_points={args.run_min_points}, max_gap_points={args.run_max_gap_points}")
     if args.run_max_gap_days is not None:
         print(f"                      max_gap_days={args.run_max_gap_days}")
     if args.run_min_duration_days is not None:

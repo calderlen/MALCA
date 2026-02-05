@@ -1,6 +1,7 @@
 import os
 import re
 from glob import glob
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -12,6 +13,12 @@ from tqdm import tqdm
 colors = ["#6b8bcd", "#b3b540", "#8f62ca", "#5eb550", "#c75d9c", "#4bb092", "#c5562f", "#6c7f39",
               "#ce5761", "#c68c45", '#b5b246', '#d77fcc', '#7362cf', '#ce443f', '#3fc1bf', '#cda735',
               '#a1b055']
+
+
+def log(message: str, quiet: bool = False) -> None:
+    """Print *message* to stdout unless *quiet* is True."""
+    if not quiet:
+        print(message, flush=True)
 
 
 def gaussian(t, amp, t0, sigma, baseline):
@@ -293,6 +300,73 @@ def read_lc_csv(asassn_id, path):
     df_v = df[df["phot_filter"] == "V"].copy().reset_index(drop=True)
 
     return df_g, df_v
+
+
+def read_skypatrol_csv(csv_path: str | Path) -> pd.DataFrame:
+    """Read a SkyPatrol CSV and remap columns to the ASAS-SN-like schema."""
+    csv_path = Path(csv_path)
+    df = pd.read_csv(
+        csv_path,
+        comment="#",
+        skip_blank_lines=True,
+        dtype={
+            "JD": float,
+            "Flux": float,
+            "Flux Error": float,
+            "Mag": float,
+            "Mag Error": float,
+            "Limit": float,
+            "FWHM": float,
+            "Filter": "string",
+            "Quality": "string",
+            "Camera": "string",
+        },
+    )
+
+    rename_map = {
+        "Flux": "flux",
+        "Flux Error": "flux_error",
+        "Mag": "mag",
+        "Mag Error": "error",
+        "Limit": "limit",
+        "FWHM": "fwhm",
+        "Filter": "filter_band",
+        "Quality": "quality_flag",
+        "Camera": "camera",
+    }
+    df = df.rename(columns=rename_map)
+
+    df["JD"] = pd.to_numeric(df["JD"], errors="coerce")
+    df["mag"] = pd.to_numeric(df["mag"], errors="coerce")
+    df["error"] = pd.to_numeric(df["error"], errors="coerce")
+
+    if "flux" in df.columns:
+        df["flux"] = pd.to_numeric(df["flux"], errors="coerce")
+    else:
+        df["flux"] = np.nan
+
+    if "flux_error" in df.columns:
+        df["flux_error"] = pd.to_numeric(df["flux_error"], errors="coerce")
+    else:
+        df["flux_error"] = np.nan
+
+    df["camera"] = df["camera"].astype(str).str.strip()
+    df["camera#"] = df["camera"]
+    df["cam_field"] = df["camera#"]
+
+    df["quality_flag"] = df["quality_flag"].astype(str).str.strip().str.upper()
+    df["good_bad"] = (df["quality_flag"] == "G").astype(int)
+    df["saturated"] = 0
+
+    filt = df["filter_band"].astype(str).str.strip().str.lower()
+    band_map = {"v": 1, "g": 0}
+    df["v_g_band"] = filt.map(band_map)
+    df = df[df["v_g_band"].notna()].copy()
+    df["v_g_band"] = df["v_g_band"].astype(int)
+
+    df = df[pd.notna(df["JD"]) & pd.notna(df["mag"])].copy()
+    df = df.sort_values("JD").reset_index(drop=True)
+    return df
 
 
 def read_lc_raw(asassn_id, path):
