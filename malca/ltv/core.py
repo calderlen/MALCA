@@ -645,7 +645,7 @@ class ParquetChunkWriter:
         df_chunk = pd.DataFrame(chunk_results)
         table = pa.Table.from_pandas(df_chunk, preserve_index=False)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        pq.write_table(table, self.path, compression="brotli", append=self.append)
+        pq.write_table(table, self.path, compression="zstd", append=self.append)
         self.append = True
 
     def close(self):
@@ -673,7 +673,7 @@ class ParquetDatasetWriter:
         table = pa.Table.from_pandas(df_chunk, preserve_index=False)
         tmp_path = self.path / f"chunk_{self.counter:06d}.parquet.tmp"
         final_path = self.path / f"chunk_{self.counter:06d}.parquet"
-        pq.write_table(table, tmp_path, compression="brotli")
+        pq.write_table(table, tmp_path, compression="zstd")
         os.replace(tmp_path, final_path)
         self.counter += 1
 

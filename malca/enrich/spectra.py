@@ -31,8 +31,8 @@ def run_spectra_availability(
     df_use = _ensure_candidate_id(df)
     if not {"candidate_id", "ra_deg", "dec_deg"}.issubset(df_use.columns):
         empty = pd.DataFrame()
-        empty.to_parquet(out_dir / "spectra_long.parquet", index=False)
-        empty.to_parquet(out_dir / "spectra_summary.parquet", index=False)
+        empty.to_parquet(out_dir / "spectra_long.parquet", index=False, compression="zstd")
+        empty.to_parquet(out_dir / "spectra_summary.parquet", index=False, compression="zstd")
         return empty, empty
 
     coords = df_use[["candidate_id", "ra_deg", "dec_deg"]].dropna(subset=["ra_deg", "dec_deg"]).copy()
@@ -69,7 +69,7 @@ def run_spectra_availability(
 
     if cache_file and not spectra_long.empty:
         Path(cache_file).parent.mkdir(parents=True, exist_ok=True)
-        spectra_long.to_parquet(cache_file, index=False)
+        spectra_long.to_parquet(cache_file, index=False, compression="snappy")
 
     summary = coords[["candidate_id"]].copy()
     if spectra_long.empty:
@@ -84,8 +84,8 @@ def run_spectra_availability(
         summary["has_spectrum"] = summary["spectrum_sources"].str.len() > 0
         summary["spectrum_links"] = ""
 
-    spectra_long.to_parquet(out_dir / "spectra_long.parquet", index=False)
-    summary.to_parquet(out_dir / "spectra_summary.parquet", index=False)
+    spectra_long.to_parquet(out_dir / "spectra_long.parquet", index=False, compression="zstd")
+    summary.to_parquet(out_dir / "spectra_summary.parquet", index=False, compression="zstd")
     return spectra_long, summary
 
 

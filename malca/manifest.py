@@ -10,6 +10,8 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import pandas as pd
 from tqdm import tqdm
 
+from malca.config.config_parquet import PARQUET_OUTPUT_COMPRESSION
+
 MAG_BINS = ['12_12.5', '12.5_13', '13_13.5', '13.5_14', '14_14.5', '14.5_15']
 
 IDX_PATTERN = re.compile(r"index(\d+)\.csv$", re.IGNORECASE)
@@ -219,7 +221,7 @@ def main() -> None:
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    df.to_parquet(out_path, index=False, compression="brotli")
+    df.to_parquet(out_path, index=False, compression=PARQUET_OUTPUT_COMPRESSION)
 
     print(f"Wrote {len(df):,} entries to {out_path}")
 

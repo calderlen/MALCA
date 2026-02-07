@@ -31,6 +31,7 @@ import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 
+from malca.config.config_parquet import PARQUET_CACHE_COMPRESSION, PARQUET_OUTPUT_COMPRESSION
 from malca.utils import (
     read_lc_dat2,
     get_id_col,
@@ -178,7 +179,7 @@ def _compute_stats_parallel(
         df_checkpoint = df_with_stats.loc[mask, checkpoint_cols].drop_duplicates(subset=[id_col])
 
         checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-        df_checkpoint.to_parquet(checkpoint_path, index=False)
+        df_checkpoint.to_parquet(checkpoint_path, index=False, compression=PARQUET_CACHE_COMPRESSION)
 
     processed_since_save = 0
 
@@ -822,7 +823,7 @@ def main() -> None:
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if output_path.suffix.lower() in (".parquet", ".pq"):
-        out.to_parquet(output_path, index=False)
+        out.to_parquet(output_path, index=False, compression=PARQUET_OUTPUT_COMPRESSION)
     else:
         out.to_csv(output_path, index=False)
 

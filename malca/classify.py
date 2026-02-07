@@ -626,7 +626,7 @@ def main():
     args.output.parent.mkdir(parents=True, exist_ok=True)
     
     if str(args.output).endswith('.parquet'):
-        df.to_parquet(args.output, index=False)
+        df.to_parquet(args.output, index=False, compression="zstd")
     else:
         df.to_csv(args.output, index=False)
     

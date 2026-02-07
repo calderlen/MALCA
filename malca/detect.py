@@ -39,6 +39,7 @@ from malca.stats import compute_stats
 from malca.characterize import characterize_candidates_df
 from malca.enrich.neighbor import run_neighbor_enrichment
 from malca.enrich.spectra import run_spectra_availability
+from malca.config.config_parquet import PARQUET_OUTPUT_COMPRESSION
 from malca.utils import log as _log
 
 
@@ -49,11 +50,27 @@ def safe_write_parquet(df: pd.DataFrame, path: Path) -> None:
     with tempfile.NamedTemporaryFile(dir=path.parent, suffix=".tmp", delete=False) as tmp:
         tmp_path = Path(tmp.name)
     try:
-        df.to_parquet(tmp_path, index=False)
+        df.to_parquet(tmp_path, index=False, compression=PARQUET_OUTPUT_COMPRESSION)
         tmp_path.replace(path)
     except Exception:
         tmp_path.unlink(missing_ok=True)
         raise
+
+
+def load_table(path: Path) -> pd.DataFrame:
+    path = Path(path)
+    if path.suffix.lower() in {".parquet", ".pq"}:
+        return pd.read_parquet(path)
+    return pd.read_csv(path)
+
+
+def save_table(df: pd.DataFrame, path: Path) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.suffix.lower() in {".parquet", ".pq"}:
+        safe_write_parquet(df, path)
+    else:
+        df.to_csv(path, index=False)
 
 
 def default_run_dir(base_root: Path) -> Path:
@@ -99,12 +116,12 @@ def export_bundle_zip(bundle_zip: Path, out_dir: Path) -> list[str]:
         "run_params.json",
         "run_summary.json",
         "run.log",
-        "results/lc_events_filtered.csv",
-        "results/lc_events_enriched.csv",
-        "results/lc_events_characterized.csv",
-        "results/lc_events_classified.csv",
-        "results/lc_events_neighbors.csv",
-        "results/lc_events_spectra.csv",
+        "results/lc_events_filtered.parquet",
+        "results/lc_events_enriched.parquet",
+        "results/lc_events_characterized.parquet",
+        "results/lc_events_classified.parquet",
+        "results/lc_events_neighbors.parquet",
+        "results/lc_events_spectra.parquet",
     ]
     include_globs = [
         "results/lc_events_results.*",
@@ -206,9 +223,9 @@ def main():
     parser.add_argument("--mag-min-jump", type=float, default=None, help="Min magnitude for jump grid (overrides auto)")
     parser.add_argument("--mag-max-jump", type=float, default=None, help="Max magnitude for jump grid (overrides auto)")
     parser.add_argument("--min-mag-offset", type=float, default=0.1, help="Require |event_mag - baseline_mag| > threshold")
-    parser.add_argument("--output", type=str, default=None, help="Output path for results (default: <out_dir>/lc_events_results.csv)")
+    parser.add_argument("--output", type=str, default=None, help="Output path for results (default: <out_dir>/lc_events_results.parquet)")
     parser.add_argument("--out-dir", type=str, default=None, help="Directory for all outputs (default: output/runs/<timestamp>)")
-    parser.add_argument("--output-format", type=str, default="csv", choices=["csv", "parquet", "parquet_chunk"], help="Output format")
+    parser.add_argument("--output-format", type=str, default="parquet", choices=["csv", "parquet", "parquet_chunk"], help="Output format")
     parser.add_argument("--chunk-size", type=int, default=10000, help="Write results in chunks of this many rows")
     parser.add_argument(
         "--stage",
@@ -388,16 +405,16 @@ def main():
         d.mkdir(parents=True, exist_ok=True)
 
     if stage == "home":
-        required_filtered = results_dir / "lc_events_filtered.csv"
+        required_filtered = results_dir / "lc_events_filtered.parquet"
         if not required_filtered.exists():
             source_hint = f" from bundle {args.import_bundle}" if args.import_bundle else ""
             raise FileNotFoundError(
                 f"Home stage requires {required_filtered}{source_hint}. "
-                "Run cluster/full stage first and transfer results/lc_events_filtered.csv."
+                "Run cluster/full stage first and transfer results/lc_events_filtered.parquet."
             )
 
     if args.output is None:
-        events_output = results_dir / "lc_events_results.csv"
+        events_output = results_dir / "lc_events_results.parquet"
     else:
         events_output = Path(args.output).expanduser()
         if args.out_dir is not None and not events_output.is_absolute():
@@ -729,7 +746,7 @@ def main():
                     print(f"Warning: could not update run log with paths_file: {e}")
 
     # Resume logic: skip paths already recorded in events checkpoint log if present
-    base_output = events_output or (results_dir / "lc_events_results.csv")
+    base_output = events_output or (results_dir / "lc_events_results.parquet")
     suffix_map = {"csv": ".csv", "parquet": ".parquet", "parquet_chunk": None}
     ext = suffix_map.get(events_format)
     if ext and base_output.suffix.lower() != ext:
@@ -885,15 +902,15 @@ def main():
         log("\n=== Step 5: Applying post-filters ===")
         try:
             # Load events results
-            if events_format == "csv":
-                df_events = pd.read_csv(results_files[0])
-            else:
+            if events_format == "parquet_chunk":
                 df_events = pd.concat([pd.read_parquet(f) for f in results_files], ignore_index=True)
+            else:
+                df_events = load_table(results_files[0])
 
             # Apply post-filters
             df_post_filtered = apply_post_filters(
                 df_events,
-                apply_posterior_strength=True,
+                apply_evidence_strength=True,
                 min_bayes_factor=args.min_bayes_factor,
                 apply_run_robustness=True,
                 min_run_cameras=args.post_filter_min_run_cameras,
@@ -903,8 +920,8 @@ def main():
             )
 
             # Save filtered results
-            post_filter_output = results_dir / "lc_events_filtered.csv"
-            df_post_filtered.to_csv(post_filter_output, index=False)
+            post_filter_output = results_dir / "lc_events_filtered.parquet"
+            save_table(df_post_filtered, post_filter_output)
             log(f"Post-filtered results saved to {post_filter_output}")
 
             # Update summary with post-filter stats
@@ -937,10 +954,10 @@ def main():
             log("\n=== Step 9: Enriching with light curve stats ===")
             try:
                 # Enrichment now runs directly from post-filter output
-                post_filter_output = results_dir / "lc_events_filtered.csv"
+                post_filter_output = results_dir / "lc_events_filtered.parquet"
 
                 if post_filter_output.exists():
-                    df_to_enrich = pd.read_csv(post_filter_output)
+                    df_to_enrich = load_table(post_filter_output)
                 else:
                     print(f"Warning: No post-filter output found at {post_filter_output}")
                     df_to_enrich = None
@@ -991,8 +1008,8 @@ def main():
                         df_enriched = pd.DataFrame(enriched_rows)
 
                         # Save enriched results
-                        enrich_output = results_dir / "lc_events_enriched.csv"
-                        df_enriched.to_csv(enrich_output, index=False)
+                        enrich_output = results_dir / "lc_events_enriched.parquet"
+                        save_table(df_enriched, enrich_output)
                         log(f"Enriched results saved to {enrich_output}")
 
                         # Update summary
@@ -1022,7 +1039,7 @@ def main():
         else:
             log("\n=== Step 6: Generating candidate plots ===")
             try:
-                post_filter_output = results_dir / "lc_events_filtered.csv"
+                post_filter_output = results_dir / "lc_events_filtered.parquet"
                 if post_filter_output.exists():
                     postprocess_dir = out_dir / "plots"
                     postprocess_dir.mkdir(parents=True, exist_ok=True)
@@ -1055,7 +1072,7 @@ def main():
                     import traceback
                     traceback.print_exc()
 
-    post_filter_output = results_dir / "lc_events_filtered.csv"
+    post_filter_output = results_dir / "lc_events_filtered.parquet"
     has_post_filter_output = post_filter_output.exists()
 
     if run_downstream and (args.run_characterize or args.run_dust) and (not has_post_filter_output):
@@ -1065,7 +1082,7 @@ def main():
     if run_downstream and (args.run_characterize or args.run_dust) and has_post_filter_output:
         log("\n=== Step 7: Characterizing candidates ===")
         try:
-            df_char = pd.read_csv(post_filter_output)
+            df_char = load_table(post_filter_output)
 
             if "failed_any" in df_char.columns:
                 df_char = df_char[~df_char["failed_any"]].copy()
@@ -1093,8 +1110,8 @@ def main():
                 run_unwise=args.run_characterize and args.characterize_unwise,
             )
 
-            characterize_output = results_dir / "lc_events_characterized.csv"
-            df_char.to_csv(characterize_output, index=False)
+            characterize_output = results_dir / "lc_events_characterized.parquet"
+            save_table(df_char, characterize_output)
             log(f"Characterization results saved to {characterize_output}")
 
         except Exception as e:
@@ -1110,13 +1127,13 @@ def main():
         else:
             log("\n=== Step 8: Running classification ===")
             try:
-                characterize_output = results_dir / "lc_events_characterized.csv"
-                post_filter_output = results_dir / "lc_events_filtered.csv"
+                characterize_output = results_dir / "lc_events_characterized.parquet"
+                post_filter_output = results_dir / "lc_events_filtered.parquet"
 
                 if characterize_output.exists():
-                    df_post_filtered = pd.read_csv(characterize_output)
+                    df_post_filtered = load_table(characterize_output)
                 elif post_filter_output.exists():
-                    df_post_filtered = pd.read_csv(post_filter_output)
+                    df_post_filtered = load_table(post_filter_output)
                 else:
                     df_post_filtered = None
                     print(f"Warning: post-filter output not found at {post_filter_output}")
@@ -1129,8 +1146,8 @@ def main():
                         df_classified = compute_all_classifications(df_passed)
                         
                         # Save classified results
-                        classify_output = results_dir / "lc_events_classified.csv"
-                        df_classified.to_csv(classify_output, index=False)
+                        classify_output = results_dir / "lc_events_classified.parquet"
+                        save_table(df_classified, classify_output)
                         log(f"Classification results saved to {classify_output}")
                         
                         # Update summary with classification stats
@@ -1161,19 +1178,19 @@ def main():
         else:
             log("\n=== Step 10: Bulk neighbor enrichment ===")
             try:
-                enrich_output = results_dir / "lc_events_enriched.csv"
-                classify_output = results_dir / "lc_events_classified.csv"
-                characterize_output = results_dir / "lc_events_characterized.csv"
-                post_filter_output = results_dir / "lc_events_filtered.csv"
+                enrich_output = results_dir / "lc_events_enriched.parquet"
+                classify_output = results_dir / "lc_events_classified.parquet"
+                characterize_output = results_dir / "lc_events_characterized.parquet"
+                post_filter_output = results_dir / "lc_events_filtered.parquet"
 
                 if classify_output.exists():
-                    df_neighbors_in = pd.read_csv(classify_output)
+                    df_neighbors_in = load_table(classify_output)
                 elif characterize_output.exists():
-                    df_neighbors_in = pd.read_csv(characterize_output)
+                    df_neighbors_in = load_table(characterize_output)
                 elif enrich_output.exists():
-                    df_neighbors_in = pd.read_csv(enrich_output)
+                    df_neighbors_in = load_table(enrich_output)
                 elif post_filter_output.exists():
-                    df_neighbors_in = pd.read_csv(post_filter_output)
+                    df_neighbors_in = load_table(post_filter_output)
                 else:
                     df_neighbors_in = None
 
@@ -1200,7 +1217,7 @@ def main():
                         right = df_neighbor_summary.copy()
                         right["candidate_id"] = right["candidate_id"].astype(str)
                         merged = left.merge(right, left_on=key_col, right_on="candidate_id", how="left")
-                        merged.to_csv(results_dir / "lc_events_neighbors.csv", index=False)
+                        save_table(merged, results_dir / "lc_events_neighbors.parquet")
 
                     summary["neighbor_enrichment_stats"] = {
                         "rows_input": int(len(df_neighbors_in)),
@@ -1225,22 +1242,22 @@ def main():
         else:
             log("\n=== Step 11: Spectra availability enrichment ===")
             try:
-                neighbor_output = results_dir / "lc_events_neighbors.csv"
-                enrich_output = results_dir / "lc_events_enriched.csv"
-                classify_output = results_dir / "lc_events_classified.csv"
-                characterize_output = results_dir / "lc_events_characterized.csv"
-                post_filter_output = results_dir / "lc_events_filtered.csv"
+                neighbor_output = results_dir / "lc_events_neighbors.parquet"
+                enrich_output = results_dir / "lc_events_enriched.parquet"
+                classify_output = results_dir / "lc_events_classified.parquet"
+                characterize_output = results_dir / "lc_events_characterized.parquet"
+                post_filter_output = results_dir / "lc_events_filtered.parquet"
 
                 if neighbor_output.exists():
-                    df_spectra_in = pd.read_csv(neighbor_output)
+                    df_spectra_in = load_table(neighbor_output)
                 elif enrich_output.exists():
-                    df_spectra_in = pd.read_csv(enrich_output)
+                    df_spectra_in = load_table(enrich_output)
                 elif classify_output.exists():
-                    df_spectra_in = pd.read_csv(classify_output)
+                    df_spectra_in = load_table(classify_output)
                 elif characterize_output.exists():
-                    df_spectra_in = pd.read_csv(characterize_output)
+                    df_spectra_in = load_table(characterize_output)
                 elif post_filter_output.exists():
-                    df_spectra_in = pd.read_csv(post_filter_output)
+                    df_spectra_in = load_table(post_filter_output)
                 else:
                     df_spectra_in = None
 
@@ -1267,7 +1284,7 @@ def main():
                         right = spectra_summary.copy()
                         right["candidate_id"] = right["candidate_id"].astype(str)
                         merged = left.merge(right, left_on=key_col, right_on="candidate_id", how="left")
-                        merged.to_csv(results_dir / "lc_events_spectra.csv", index=False)
+                        save_table(merged, results_dir / "lc_events_spectra.parquet")
 
                     summary["spectra_enrichment_stats"] = {
                         "rows_input": int(len(df_spectra_in)),

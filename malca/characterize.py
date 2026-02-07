@@ -118,7 +118,7 @@ def query_gaia_by_ids(source_ids: list[str | int], chunk_size: int = 1000, cache
     full_df = pd.concat([cached_df, new_results], ignore_index=True) if not new_results.empty else cached_df
     
     if cache_file and not new_results.empty:
-        full_df.to_parquet(cache_file, index=False)
+        full_df.to_parquet(cache_file, index=False, compression="snappy")
         
     return full_df
 
@@ -1223,7 +1223,7 @@ def main():
     output_path.parent.mkdir(parents=True, exist_ok=True)
     
     if str(output_path).endswith(".parquet"):
-        df_char.to_parquet(output_path, index=False)
+        df_char.to_parquet(output_path, index=False, compression="zstd")
     else:
         df_char.to_csv(output_path, index=False)
         

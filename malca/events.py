@@ -47,6 +47,7 @@ from malca.baseline import (
 )
 from malca.score import compute_event_score
 from malca.stats import log_gaussian, median_dt, bic
+from malca.config.config_parquet import PARQUET_OUTPUT_COMPRESSION
 
 from numba import njit, prange
 
@@ -1336,7 +1337,7 @@ def main():
     parser.add_argument("--min-mag-offset", type=float, default=0.1, help="Apply signal amplitude filter: require |event_mag - baseline_mag| > threshold (e.g., 0.05)")
     parser.add_argument("--output", type=str, default=None, help="Output path for results (suffix adjusted per format).")
     parser.add_argument("--metadata-csv", type=str, default=None, help="Optional CSV with 'path' and extra metadata columns to attach to results.")
-    parser.add_argument("--output-format", type=str, default="csv", choices=["csv", "parquet", "parquet_chunk"], help="Output format for results.")
+    parser.add_argument("--output-format", type=str, default="parquet", choices=["csv", "parquet", "parquet_chunk"], help="Output format for results.")
     parser.add_argument("--chunk-size", type=int, default=10000, help="Write results in chunks of this many rows.")
     parser.add_argument("-o", "--overwrite", action="store_true", help="Overwrite checkpoint log and existing output if present (start fresh).")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output (default: quiet).")
@@ -1361,7 +1362,7 @@ def main():
     if not args.output:
         out_dir = default_output_dir()
         out_dir.mkdir(parents=True, exist_ok=True)
-        args.output = str(out_dir / "lc_events_results.csv")
+        args.output = str(out_dir / "lc_events_results.parquet")
 
     metadata_by_path = None
     if args.metadata_csv:
@@ -1553,7 +1554,7 @@ def main():
             df_chunk = pd.DataFrame(chunk_results)
             table = pa.Table.from_pandas(df_chunk, preserve_index=False)
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            pq.write_table(table, self.path, compression="brotli", append=self.append)
+            pq.write_table(table, self.path, compression=PARQUET_OUTPUT_COMPRESSION, append=self.append)
             self.append = True
 
         def close(self):
@@ -1580,7 +1581,7 @@ def main():
             table = pa.Table.from_pandas(df_chunk, preserve_index=False)
             tmp_path = self.path / f"chunk_{self.counter:06d}.parquet.tmp"
             final_path = self.path / f"chunk_{self.counter:06d}.parquet"
-            pq.write_table(table, tmp_path, compression="brotli")
+            pq.write_table(table, tmp_path, compression=PARQUET_OUTPUT_COMPRESSION)
             os.replace(tmp_path, final_path)
             self.counter += 1
 

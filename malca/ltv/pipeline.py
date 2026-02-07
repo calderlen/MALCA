@@ -472,7 +472,7 @@ def run_pipeline_cli(args):
     # Save output
     output_path = Path(args.output)
     if output_path.suffix == ".parquet":
-        df.to_parquet(output_path, index=False)
+        df.to_parquet(output_path, index=False, compression="zstd")
     else:
         df.to_csv(output_path, index=False)
     

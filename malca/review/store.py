@@ -530,6 +530,6 @@ def export_reviews(conn: sqlite3.Connection, out_path: Path, only_reviewed: bool
         df = df.drop(columns=["payload_json"])
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if out_path.suffix.lower() in {".parquet", ".pq"}:
-        df.to_parquet(out_path, index=False)
+        df.to_parquet(out_path, index=False, compression="zstd")
     else:
         df.to_csv(out_path, index=False)

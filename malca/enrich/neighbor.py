@@ -94,8 +94,8 @@ def run_neighbor_enrichment(
     coords_cols = ["candidate_id", "ra_deg", "dec_deg"]
     if not all(c in df_use.columns for c in coords_cols):
         empty = pd.DataFrame()
-        empty.to_parquet(out_dir / "neighbors_long.parquet", index=False)
-        empty.to_parquet(out_dir / "neighbors_summary.parquet", index=False)
+        empty.to_parquet(out_dir / "neighbors_long.parquet", index=False, compression="zstd")
+        empty.to_parquet(out_dir / "neighbors_summary.parquet", index=False, compression="zstd")
         return empty, empty
 
     coords = df_use[coords_cols].dropna(subset=["ra_deg", "dec_deg"]).copy()
@@ -135,7 +135,7 @@ def run_neighbor_enrichment(
 
     if cache_file and not neighbors_long.empty:
         Path(cache_file).parent.mkdir(parents=True, exist_ok=True)
-        neighbors_long.to_parquet(cache_file, index=False)
+        neighbors_long.to_parquet(cache_file, index=False, compression="snappy")
 
     summary = coords[["candidate_id"]].copy()
     if neighbors_long.empty:
@@ -168,8 +168,8 @@ def run_neighbor_enrichment(
         else:
             summary["bright_close_neighbor"] = False
 
-    neighbors_long.to_parquet(out_dir / "neighbors_long.parquet", index=False)
-    summary.to_parquet(out_dir / "neighbors_summary.parquet", index=False)
+    neighbors_long.to_parquet(out_dir / "neighbors_long.parquet", index=False, compression="zstd")
+    summary.to_parquet(out_dir / "neighbors_summary.parquet", index=False, compression="zstd")
     return neighbors_long, summary
 
 

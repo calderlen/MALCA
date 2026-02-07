@@ -122,7 +122,7 @@ def main() -> None:
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if output_path.suffix.lower() in (".parquet", ".pq"):
-        out.to_parquet(output_path, index=False)
+        out.to_parquet(output_path, index=False, compression="zstd")
     else:
         out.to_csv(output_path, index=False)
 

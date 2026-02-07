@@ -314,7 +314,7 @@ def dip_finder_naive(
                      
         if rows_buffer:
             if out_format == "parquet":
-                pd.DataFrame(rows_buffer).to_parquet(out_path, index=False)
+                pd.DataFrame(rows_buffer).to_parquet(out_path, index=False, compression="zstd")
             else:
                 mode = "a" if os.path.exists(out_path) else "w"
                 header = not os.path.exists(out_path)

@@ -60,19 +60,19 @@ malca manifest --index-root /path/to/lcsv2 --lc-root /path/to/lcsv2 \
 # Run event detection pipeline
 malca pipeline --mag-bin 13_13.5 --workers 10 \
     --lc-root /path/to/lcsv2 --index-root /path/to/lcsv2 \
-    --output output/results.csv --min-mag-offset 0.1
+    --output output/results.parquet --min-mag-offset 0.1
 
 # Validate results against known candidates (no raw data needed)
-malca validate --results output/results.csv
+malca validate --results output/results.parquet
 
 # Plot light curves
 malca plot --input /path/to/lc123.dat2 --out-dir output/plots
 
 # Apply quality filters
-malca filter --input output/results.csv --output output/filtered.csv
+malca filter --input output/results.parquet --output output/filtered.parquet
 
 # Multi-wavelength characterization (post-detection)
-malca characterize --input output/filtered.csv --output output/characterized.csv --dust --starhorse input/starhorse/starhorse.parquet
+malca characterize --input output/filtered.parquet --output output/characterized.parquet --dust --starhorse input/starhorse/starhorse.parquet
 
 # Get help for any command
 malca --help
@@ -234,7 +234,7 @@ The full detection workflow has three steps: build a manifest, run detection wit
        --batch-size 2000 \
        --lc-root /path/to/lcsv2 \
        --index-root /path/to/lcsv2 \
-       --output output/lc_events_results_13_13.5.csv \
+       --output output/lc_events_results_13_13.5.parquet \
        --trigger-mode posterior_prob --baseline-func gp --min-mag-offset 0.1
    ```
    - The pipeline command builds/loads the manifest, runs pre-filters, then calls `events.py` in batches.
@@ -244,11 +244,11 @@ The full detection workflow has three steps: build a manifest, run detection wit
 
 3) Post-filter events:
    ```bash
-   malca post_filter --input output/lc_events_results_13_13.5.csv \
-       --output output/lc_events_results_13_13.5_filtered.csv
+   malca post_filter --input output/lc_events_results_13_13.5.parquet \
+       --output output/lc_events_results_13_13.5_filtered.parquet
 
    # With custom thresholds
-   malca post_filter --input results.csv --output filtered.csv \
+   malca post_filter --input results.parquet --output filtered.parquet \
        --min-bayes-factor 20 --min-event-prob 0.7 --apply-morphology
    ```
    - **Implemented filters**: posterior strength, event probability, run robustness, morphology, periodicity
@@ -258,13 +258,13 @@ The full detection workflow has three steps: build a manifest, run detection wit
 # logBF triggering (faster)
 malca pipeline --mag-bin 13_13.5 --workers 8 \
     --lc-root /path/to/lcsv2 --index-root /path/to/lcsv2 \
-    --output output/events_logbf.csv --trigger-mode logbf \
+    --output output/events_logbf.parquet --trigger-mode logbf \
     --baseline-func gp_masked --min-mag-offset 0.1
 
 # Multiple mag bins (writes one output per bin)
 malca pipeline --mag-bin 12_12.5 12.5_13 13_13.5 \
     --lc-root /path/to/lcsv2 --index-root /path/to/lcsv2 \
-    --output output/lc_events_results.csv --trigger-mode logbf
+    --output output/lc_events_results.parquet --trigger-mode logbf
 ```
 
 ### Individual Commands
@@ -305,7 +305,7 @@ malca post_filter --input output/results.parquet --output output/results_filtere
 #### malca filter
 
 ```bash
-malca filter --input output/results.csv --output output/filtered.csv
+malca filter --input output/results.parquet --output output/filtered.parquet
 ```
 
 #### malca plot
@@ -318,10 +318,10 @@ malca plot --input /path/to/lc123.dat2 --out-dir output/plots --format png
 malca plot --input input/skypatrol2/*.csv --out-dir output/plots --skip-events
 
 # All files from events.py results
-malca plot --events output/lc_events_results_13_13.5_filtered.csv --out-dir output/plots
+malca plot --events output/lc_events_results_13_13.5_filtered.parquet --out-dir output/plots
 ```
 
-**Note:** Event scores are computed automatically during detection and included in the results CSV (dipper_score, dipper_n_dips, dipper_n_valid_dips columns).
+**Note:** Event scores are computed automatically during detection and included in the results table (dipper_score, dipper_n_dips, dipper_n_valid_dips columns).
 
 Legacy batch plotting: `malca old.plot_results_bayes /path/to/*.csv --results-csv output/lc_events_results_13_13.5.csv --out-dir output/plots`
 
@@ -382,7 +382,7 @@ malca validate --method bf
 malca validate --method loo --mag-bin 13_13.5
 
 # Direct file specification
-malca validate --results output/results.csv
+malca validate --results output/results.parquet
 
 # Validate latest detect run output (output/runs/<timestamp>/results)
 malca validate --latest-run
@@ -398,7 +398,7 @@ malca validate --candidates brayden_candidates --skypatrol-dir input/skypatrol2 
     --method bf --workers 4
 
 # Validate using a direct results file path
-malca validate --results output/events_logbf.csv
+malca validate --results output/events_logbf.parquet
 ```
 
 #### malca characterize
@@ -407,8 +407,8 @@ After detecting dipper candidates, characterize them using multi-wavelength data
 
 ```bash
 malca characterize \
-  --input output/filtered.csv \
-  --output output/characterized.csv \
+  --input output/filtered.parquet \
+  --output output/characterized.parquet \
   --dust \
   --starhorse input/starhorse/starhorse2021.parquet
 ```
@@ -455,7 +455,7 @@ malca characterize \
 #### malca classify
 
 ```bash
-malca classify --input output/characterized.csv --output output/classified.csv
+malca classify --input output/characterized.parquet --output output/classified.parquet
 ```
 
 #### malca stats
@@ -467,7 +467,7 @@ malca stats /path/to/lc123.dat2
 #### malca attrition
 
 ```bash
-malca attrition --pre output/pre.csv --post output/post.csv
+malca attrition --pre output/pre.parquet --post output/post.parquet
 ```
 
 ### Candidate Review
@@ -511,9 +511,9 @@ output/runs/20250121_143052/          # Timestamp-based run directory
 │   └── filtered_paths_{mag_bin}.txt
 │
 ├── results/                          # Detection results
-│   ├── lc_events_results.csv         # Raw detection output (includes dipper_score)
+│   ├── lc_events_results.parquet     # Raw detection output (includes dipper_score)
 │   ├── lc_events_results_PROCESSED.txt  # Checkpoint log
-│   ├── lc_events_results_filtered.csv   # After post_filter.py
+│   ├── lc_events_results_filtered.parquet   # After post_filter.py
 │   └── rejected_post_filter.csv      # Post-filter rejections
 │
 └── plots/                            # Visualizations (plot.py)
@@ -534,7 +534,7 @@ output/runs/20250121_143052/          # Timestamp-based run directory
 - `filter_log.json`: Filter toggles, thresholds, input/output counts, rejection breakdown
 - `plot_log.json`: Plotting parameters, GP settings, number of plots generated
 
-**Note:** Event scores (dipper_score, dipper_n_dips, dipper_n_valid_dips) are automatically computed during detection for significant events and included in the results CSV.
+**Note:** Event scores (dipper_score, dipper_n_dips, dipper_n_valid_dips) are automatically computed during detection for significant events and included in the results table.
 
 ### Standalone Module Outputs
 
@@ -543,7 +543,7 @@ output/runs/20250121_143052/          # Timestamp-based run directory
 ```
 output/injection/                     # Default output directory
 ├── results/
-│   ├── injection_results.csv         # Trial-by-trial injection results
+│   ├── injection_results.parquet     # Trial-by-trial injection results
 │   └── injection_results_PROCESSED.txt  # Checkpoint for resume
 │
 ├── cubes/
@@ -566,7 +566,7 @@ output/detection_rate/                # Default base directory
 ├── 20250121_143052/                  # Timestamped run directory
 │   ├── run_params.json                # Full parameter dump
 │   ├── results/
-│   │   ├── detection_rate_results.csv
+│   │   ├── detection_rate_results.parquet
 │   │   ├── detection_rate_results_PROCESSED.txt  # Checkpoint
 │   │   └── detection_summary.json     # Detection rate summary
 │   └── plots/
@@ -584,7 +584,7 @@ output/detection_rate/                # Default base directory
 
 ```
 output/
-├── characterized.csv                 # Single output file with added columns:
+├── characterized.parquet             # Single output file with added columns:
                                       #   - Gaia astrometry & photometry
                                       #   - 3D dust extinction (A_v_3d, ebv_3d)
                                       #   - YSO classification (yso_class)
@@ -599,7 +599,7 @@ output/
 
 ```
 output/
-└── classified.csv                    # Single output file with added columns:
+└── classified.parquet                # Single output file with added columns:
                                       #   - P_eb, P_cv, P_starspot, P_disk
                                       #   - yso_class
                                       #   - a_circ_au, transit_prob

@@ -19,6 +19,8 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 from tqdm.auto import tqdm
 
 from malca.utils import read_lc_dat2
@@ -269,7 +271,7 @@ def run_detection_rate(
     manifest: pd.DataFrame,
     total_trials: int,
     detection_kwargs: dict,
-    output_csv: Path,
+    output_path: Path,
     checkpoint_path: Path | None = None,
     checkpoint_interval: int = 1000,
     workers: int = 10,
@@ -278,6 +280,34 @@ def run_detection_rate(
 ) -> pd.DataFrame:
     """Run detection rate trials in parallel with checkpointing."""
     import multiprocessing as mp
+
+    class _Writer:
+        def __init__(self, path: Path):
+            self.path = Path(path)
+            self.is_parquet = self.path.suffix.lower() in {".parquet", ".pq"}
+            self.columns = None
+            self.pq_writer = None
+
+        def write_chunk(self, rows: list[dict]) -> None:
+            if not rows:
+                return
+            df_chunk = pd.DataFrame(rows)
+            if self.columns is None:
+                self.columns = list(df_chunk.columns)
+            df_chunk = df_chunk.reindex(columns=self.columns)
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            if self.is_parquet:
+                table = pa.Table.from_pandas(df_chunk, preserve_index=False)
+                if self.pq_writer is None:
+                    self.pq_writer = pq.ParquetWriter(self.path, table.schema, compression="zstd")
+                self.pq_writer.write_table(table)
+            else:
+                header = not self.path.exists() or self.path.stat().st_size == 0
+                df_chunk.to_csv(self.path, mode="a", header=header, index=False)
+
+        def close(self) -> None:
+            if self.pq_writer is not None:
+                self.pq_writer.close()
 
     id_col = get_id_column(manifest)
     control_ids = manifest[id_col].values
@@ -293,6 +323,7 @@ def run_detection_rate(
                 print(f"Resuming from trial {start_index}")
 
     results = []
+    writer = _Writer(output_path)
 
     with mp.Pool(
         processes=workers,
@@ -309,12 +340,8 @@ def run_detection_rate(
                 completed = [r.get() for r in results]
                 results = []
 
-                # Append to CSV
                 df_batch = pd.DataFrame(completed)
-                if output_csv.exists():
-                    df_batch.to_csv(output_csv, mode="a", header=False, index=False)
-                else:
-                    df_batch.to_csv(output_csv, index=False)
+                writer.write_chunk(df_batch.to_dict(orient="records"))
 
                 # Update checkpoint
                 with open(checkpoint_path, "w") as f:
@@ -324,12 +351,13 @@ def run_detection_rate(
         if results:
             completed = [r.get() for r in results]
             df_batch = pd.DataFrame(completed)
-            if output_csv.exists():
-                df_batch.to_csv(output_csv, mode="a", header=False, index=False)
-            else:
-                df_batch.to_csv(output_csv, index=False)
+            writer.write_chunk(df_batch.to_dict(orient="records"))
 
-    return pd.read_csv(output_csv)
+    writer.close()
+
+    if output_path.suffix.lower() in {".parquet", ".pq"}:
+        return pd.read_parquet(output_path)
+    return pd.read_csv(output_path)
 
 
 def compute_detection_summary(results_df: pd.DataFrame) -> dict:
@@ -376,7 +404,7 @@ Output structure (default --out-dir output/detection_rate):
     20250121_143052/             # Timestamped run directory
       run_params.json            # Full parameter dump
       results/
-        detection_rate_results.csv         # Trial-by-trial results
+        detection_rate_results.parquet     # Trial-by-trial results
         detection_rate_results_PROCESSED.txt  # Checkpoint
         detection_summary.json     # Detection rate summary
       plots/
@@ -397,7 +425,7 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
     parser.add_argument("--run-tag", type=str, default=None,
                         help="Optional tag to append to run directory name (e.g., 'mag12-13')")
     parser.add_argument("--out", type=Path, default=None,
-                        help="Override CSV output path (default: <out-dir>/<timestamp>/results/detection_rate_results.csv)")
+                        help="Override output path (default: <out-dir>/<timestamp>/results/detection_rate_results.parquet)")
     parser.add_argument(
         "--control-sample-size",
         dest="control_sample_size",
@@ -464,7 +492,7 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
 
     results_dir.mkdir(parents=True, exist_ok=True)
 
-    csv_out = args.out if args.out else (results_dir / "detection_rate_results.csv")
+    output_out = args.out if args.out else (results_dir / "detection_rate_results.parquet")
     summary_out = results_dir / "detection_summary.json"
 
     # Save run parameters to JSON
@@ -499,16 +527,16 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
 
     print(f"\nRun directory: {run_dir}")
     print(f"  Run params: {run_params_file}")
-    print(f"  Results CSV: {csv_out}")
+    print(f"  Results file: {output_out}")
     print(f"  Summary: {summary_out}")
     print(f"  Latest symlink: {latest_link} -> {run_name}\n")
 
     total_trials = args.max_trials if args.max_trials else args.control_sample_size
-    checkpoint_path = csv_out.with_name(f"{csv_out.stem}_PROCESSED.txt")
+    checkpoint_path = output_out.with_name(f"{output_out.stem}_PROCESSED.txt")
 
-    if args.overwrite and csv_out.exists():
-        csv_out.unlink()
-        print(f"Overwriting existing output: {csv_out}")
+    if args.overwrite and output_out.exists():
+        output_out.unlink()
+        print(f"Overwriting existing output: {output_out}")
     if args.overwrite and checkpoint_path.exists():
         checkpoint_path.unlink()
 
@@ -517,7 +545,7 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
         control_sample,
         total_trials=total_trials,
         detection_kwargs=detection_kwargs,
-        output_csv=csv_out,
+        output_path=output_out,
         checkpoint_path=checkpoint_path,
         checkpoint_interval=args.checkpoint_interval,
         workers=args.workers,
@@ -540,7 +568,7 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
     rate_str = f"{summary['detection_rate_percent']:.2f}%" if summary['detection_rate_percent'] is not None else "N/A"
     print(f"Detection rate:     {rate_str}")
     print("="*60)
-    print(f"\nResults saved to: {csv_out}")
+    print(f"\nResults saved to: {output_out}")
     print(f"Summary saved to: {summary_out}")
 
 

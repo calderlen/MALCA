@@ -39,6 +39,8 @@ from astropy.coordinates import SkyCoord
 from astroquery.gaia import Gaia
 from astroquery.vizier import Vizier
 
+from malca.config.config_parquet import PARQUET_CACHE_COMPRESSION, PARQUET_OUTPUT_COMPRESSION
+
 
 # =============================================================================
 # Catalog Query Helpers (with caching)
@@ -107,7 +109,7 @@ def fetch_chen2020_ztf_periodic(
         elif "GaiaDR2" in cat.columns:
             df["gaia_id"] = pd.to_numeric(cat["GaiaDR2"], errors="coerce").astype("Int64")
 
-        df.to_parquet(cache_file, index=False)
+        df.to_parquet(cache_file, index=False, compression=PARQUET_CACHE_COMPRESSION)
         if show_tqdm:
             tqdm.write(f"[fetch_chen2020] Cached {len(df)} sources to {cache_file}")
 
@@ -176,7 +178,7 @@ def fetch_gaia_dr3_variables(
             "BEST_CLASS_NAME": "best_class_name",
         })
 
-        df.to_parquet(cache_file, index=False)
+        df.to_parquet(cache_file, index=False, compression=PARQUET_CACHE_COMPRESSION)
         if show_tqdm:
             tqdm.write(f"[fetch_gaia_dr3_variables] Cached {len(df)} sources to {cache_file}")
 
@@ -284,7 +286,7 @@ def fetch_gaia_dr3_ruwe(
                     cached_df = new_df
 
                 # Save updated cache
-                cached_df.to_parquet(cache_file, index=False)
+                cached_df.to_parquet(cache_file, index=False, compression=PARQUET_CACHE_COMPRESSION)
                 if show_tqdm:
                     tqdm.write(f"[fetch_gaia_dr3_ruwe] Updated cache with {len(new_df)} new entries (total: {len(cached_df)})")
 
@@ -841,7 +843,7 @@ def _save_checkpoint(checkpoint_file: Path, completed: dict, new_results: list) 
             "lsp_is_alias": r.get("lsp_is_alias", False),
             "lsp_is_significant": r.get("lsp_is_significant", False),
         })
-    pd.DataFrame(clean_data).to_parquet(checkpoint_file, index=False)
+    pd.DataFrame(clean_data).to_parquet(checkpoint_file, index=False, compression=PARQUET_CACHE_COMPRESSION)
 
 
 def validate_gaia_ruwe(
@@ -1576,7 +1578,7 @@ Example usage:
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     if output_path.suffix.lower() in (".parquet", ".pq"):
-        df_filtered.to_parquet(output_path, index=False)
+        df_filtered.to_parquet(output_path, index=False, compression=PARQUET_OUTPUT_COMPRESSION)
     else:
         df_filtered.to_csv(output_path, index=False)
 
