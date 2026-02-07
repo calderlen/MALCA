@@ -91,7 +91,12 @@ def main_with_args(*, db: Path | None = None, input_path: Path | None = None, re
             continue
         if op == "show":
             payload = get_candidate_payload(conn, cid)
-            for k in ["path", "asas_sn_id", "periodicity_score", "lsp_power", "lsp_period", "dip_best_log_bf", "jump_best_log_bf"]:
+            for k in [
+                "path", "asas_sn_id", "periodicity_score", "lsp_power", "lsp_period", "dip_best_log_bf", "jump_best_log_bf",
+                "ruwe", "teff_gspphot", "logg_gspphot", "mh_gspphot", "distance_gspphot",
+                "A_v_3d", "ebv_3d", "yso_class", "galactic_pop", "age50", "mass50",
+                "banyan_field_prob", "banyan_best_assoc",
+            ]:
                 if k in payload:
                     print(f"  {k}: {payload[k]}")
             continue

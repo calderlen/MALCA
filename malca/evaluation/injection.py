@@ -31,7 +31,6 @@ from malca.baseline import (
     per_camera_median_baseline,
     per_camera_gp_baseline,
 )
-from malca.old.df_utils import peak_search_biweight_delta, peak_search_residual_baseline
 
 
 _GLOBAL: dict[str, object] = {}
@@ -282,69 +281,6 @@ def _default_detection_func(df: pd.DataFrame, detection_kwargs: dict, min_mag_of
     )
 
 
-def _legacy_detection_func(
-    df: pd.DataFrame,
-    *,
-    method: str,
-    detection_kwargs: dict,
-    min_mag_offset: float = 0.0,
-    mag_col: str = "mag",
-    err_col: str = "error",
-) -> dict:
-    if df.empty:
-        return dict(
-            detected=False,
-            dip_significant=False,
-            jump_significant=False,
-            dip_bayes_factor=np.nan,
-            jump_bayes_factor=np.nan,
-            dip_best_p=np.nan,
-            jump_best_p=np.nan,
-            baseline_mag=np.nan,
-            dip_best_mag_event=np.nan,
-            jump_best_mag_event=np.nan,
-        )
-
-    baseline_mag = float(np.nanmedian(df[mag_col].values)) if mag_col in df.columns else np.nan
-    dip_best_mag_event = (
-        float(np.nanmax(df[mag_col].values)) if mag_col in df.columns else np.nan
-    )
-
-    df_base = df
-    baseline_func = detection_kwargs.get("baseline_func")
-    baseline_kwargs = detection_kwargs.get("baseline_kwargs", {})
-    if baseline_func is not None:
-        try:
-            df_base = baseline_func(df, **baseline_kwargs)
-        except Exception:
-            df_base = df
-
-    if method == "naive":
-        peaks, _, n_peaks = peak_search_residual_baseline(df_base)
-    elif method == "biweight":
-        peaks, _, n_peaks = peak_search_biweight_delta(df_base, err_col=err_col)
-    else:
-        raise ValueError(f"Unknown legacy detection method: {method}")
-
-    dip_significant = n_peaks > 0
-    if min_mag_offset > 0 and np.isfinite(baseline_mag) and np.isfinite(dip_best_mag_event):
-        if abs(dip_best_mag_event - baseline_mag) <= min_mag_offset:
-            dip_significant = False
-
-    return dict(
-        detected=bool(dip_significant),
-        dip_significant=bool(dip_significant),
-        jump_significant=False,
-        dip_bayes_factor=np.nan,
-        jump_bayes_factor=np.nan,
-        dip_best_p=np.nan,
-        jump_best_p=np.nan,
-        baseline_mag=baseline_mag,
-        dip_best_mag_event=dip_best_mag_event,
-        jump_best_mag_event=np.nan,
-    )
-
-
 def _trial_indices_to_params(
     trial_index: int,
     n_injections_per_grid: int,
@@ -369,7 +305,6 @@ def _simulate_trial(
     skew_range: tuple[float, float],
     mag_err_poly: np.poly1d | None,
     detection_kwargs: dict,
-    detection_method: str,
     min_mag_offset: float,
     measure_pre_injection: bool,
     seed: int,
@@ -455,36 +390,20 @@ def _simulate_trial(
         # Measure pre-injection detection rate if requested
         pre_injection_result = {}
         if measure_pre_injection:
-            if detection_method == "bayes":
-                pre_inj = _default_detection_func(
-                    df,
-                    detection_kwargs,
-                    min_mag_offset=min_mag_offset,
-                )
-            else:
-                pre_inj = _legacy_detection_func(
-                    df,
-                    method=detection_method,
-                    detection_kwargs=detection_kwargs,
-                    min_mag_offset=min_mag_offset,
-                )
-            # Prefix all keys with pre_injection_
-            pre_injection_result = {f"pre_injection_{k}": v for k, v in pre_inj.items()}
-        
-        df_injected = inject_dip(df, t_center, duration, amplitude, skewness, mag_err_poly)
-        if detection_method == "bayes":
-            detection_result = _default_detection_func(
-                df_injected,
+            pre_inj = _default_detection_func(
+                df,
                 detection_kwargs,
                 min_mag_offset=min_mag_offset,
             )
-        else:
-            detection_result = _legacy_detection_func(
-                df_injected,
-                method=detection_method,
-                detection_kwargs=detection_kwargs,
-                min_mag_offset=min_mag_offset,
-            )
+            # Prefix all keys with pre_injection_
+            pre_injection_result = {f"pre_injection_{k}": v for k, v in pre_inj.items()}
+
+        df_injected = inject_dip(df, t_center, duration, amplitude, skewness, mag_err_poly)
+        detection_result = _default_detection_func(
+            df_injected,
+            detection_kwargs,
+            min_mag_offset=min_mag_offset,
+        )
 
         # Convert amplitude (mag) to fractional transit depth
         fractional_depth = 1.0 - 10 ** (-0.4 * amplitude)
@@ -520,7 +439,6 @@ def _init_worker(
     skew_range: tuple[float, float],
     mag_err_poly: np.poly1d | None,
     detection_kwargs: dict,
-    detection_method: str,
     min_mag_offset: float,
     measure_pre_injection: bool,
     seed: int,
@@ -532,7 +450,6 @@ def _init_worker(
     _GLOBAL["skew_range"] = skew_range
     _GLOBAL["mag_err_poly"] = mag_err_poly
     _GLOBAL["detection_kwargs"] = detection_kwargs
-    _GLOBAL["detection_method"] = detection_method
     _GLOBAL["min_mag_offset"] = min_mag_offset
     _GLOBAL["measure_pre_injection"] = measure_pre_injection
     _GLOBAL["seed"] = seed
@@ -551,7 +468,6 @@ def _process_trial_batch(trial_indices: list[int]) -> list[dict]:
                 skew_range=_GLOBAL["skew_range"],
                 mag_err_poly=_GLOBAL["mag_err_poly"],
                 detection_kwargs=_GLOBAL["detection_kwargs"],
-                detection_method=str(_GLOBAL["detection_method"]),
                 min_mag_offset=float(_GLOBAL["min_mag_offset"]),
                 measure_pre_injection=bool(_GLOBAL["measure_pre_injection"]),
                 seed=int(_GLOBAL["seed"]),
@@ -607,7 +523,6 @@ def run_injection_recovery(
     control_sample: pd.DataFrame,
     *,
     detection_kwargs: dict,
-    detection_method: str = "bayes",
     min_mag_offset: float = 0.0,
     measure_pre_injection: bool = False,
     total_trials: int = 10000,
@@ -634,9 +549,6 @@ def run_injection_recovery(
     """
     if max_trials is not None:
         total_trials = min(total_trials, max_trials)
-
-    if detection_method not in {"bayes", "naive", "biweight"}:
-        raise ValueError(f"Unknown detection_method: {detection_method}")
 
     if output_path is not None:
         output_path = Path(output_path)
@@ -727,7 +639,6 @@ def run_injection_recovery(
                 skew_range=skew_range,
                 mag_err_poly=mag_err_poly,
                 detection_kwargs=detection_kwargs,
-                detection_method=detection_method,
                 min_mag_offset=min_mag_offset,
                 measure_pre_injection=measure_pre_injection,
                 seed=seed,
@@ -758,7 +669,6 @@ def run_injection_recovery(
             skew_range,
             mag_err_poly,
             detection_kwargs,
-            detection_method,
             min_mag_offset,
             measure_pre_injection,
             seed,
@@ -1716,10 +1626,8 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
     parser.add_argument("--no-resume", action="store_true", help="Disable resume even if checkpoint exists.")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite output/checkpoint.")
 
-    parser.add_argument("--trigger-mode", type=str, default="posterior_prob", choices=["logbf", "posterior_prob"],
+    parser.add_argument("--trigger-mode", type=str, default="logbf", choices=["logbf"],
                         help="Trigger mode for injection testing")
-    parser.add_argument("--detection-method", type=str, default="bayes", choices=["bayes", "naive", "biweight"],
-                        help="Detection method for injections (default: bayes)")
     parser.add_argument("--logbf-threshold-dip", type=float, default=5.0)
     parser.add_argument("--logbf-threshold-jump", type=float, default=5.0)
     parser.add_argument("--significance-threshold", type=float, default=99.99997)
@@ -1752,9 +1660,9 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
     parser.add_argument("--mag-min-jump", type=float, default=None, help="Min magnitude for jump grid (overrides auto)")
     parser.add_argument("--mag-max-jump", type=float, default=None, help="Max magnitude for jump grid (overrides auto)")
     parser.add_argument("--no-event-prob", action="store_true", default=False,
-                        help="Disable event probability computation (faster but incompatible with trigger_mode='posterior_prob')")
+                        help="Disable event probability computation for faster runs")
     parser.add_argument("--compute-event-prob", dest="no_event_prob", action="store_false",
-                        help="Enable event probability computation (default, required for trigger_mode='posterior_prob')")
+                        help="Enable event probability computation (default)")
     parser.add_argument("--min-mag-offset", type=float, default=0.2,
                         help="Min magnitude offset for signal amplitude filter (0 to disable, default: 0.2)")
     parser.add_argument("--measure-pre-injection", action="store_true", default=True,
@@ -1841,7 +1749,6 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
     run_injection_recovery(
         control_sample,
         detection_kwargs=detection_kwargs,
-        detection_method=args.detection_method,
         min_mag_offset=args.min_mag_offset,
         measure_pre_injection=args.measure_pre_injection,
         total_trials=total_trials,

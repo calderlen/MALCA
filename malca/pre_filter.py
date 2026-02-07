@@ -732,6 +732,7 @@ def apply_pre_filters(
         }))
 
     # Apply filters and tag failures (all rows kept)
+    id_col = get_id_col(df_filtered)
     total_steps = len(filters)
     if total_steps > 0:
         with tqdm(total=total_steps, desc="apply_pre_filters", leave=True, disable=not show_tqdm) as pbar:
@@ -742,9 +743,10 @@ def apply_pre_filters(
                 df_passed = func(df_filtered, **kwargs_clean)
                 elapsed = perf_counter() - start
 
-                # Determine which rows failed by comparing paths
-                passed_paths = set(df_passed["path"].astype(str))
-                failed_mask = ~df_filtered["path"].astype(str).isin(passed_paths)
+                # Determine which rows failed using stable source IDs.
+                # Path values can be shared directory paths across many sources.
+                passed_ids = set(df_passed[id_col].astype(str))
+                failed_mask = ~df_filtered[id_col].astype(str).isin(passed_ids)
                 df_filtered[f"failed_{label}"] = failed_mask
 
                 n_failed = int(failed_mask.sum())

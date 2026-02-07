@@ -10,12 +10,9 @@ from typing import Iterable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
-from scipy import stats
 import matplotlib.pyplot as pl
 
-# NOTE: The 'naive' and 'biweight' methods are legacy implementations
-# kept for backward compatibility. New code should use method='bayes'.
-from malca.events import run_bayesian_significance
+from malca.events import score_lightcurve
 from malca.utils import read_lc_dat2
 from malca.baseline import (
     global_median_baseline,
@@ -36,9 +33,6 @@ from malca.characterize import query_gaia_by_ids, get_dust_extinction
 CANDIDATE_USECOLS = {
     "path",
     "source_id",
-    "Source_ID",
-    "Source ID",
-    "asas_sn_id",
     "mag_bin",
 }
 
@@ -134,8 +128,8 @@ def load_manifest_df(manifest_path: Path | str) -> pd.DataFrame:
         df = pd.read_parquet(path)
     else:
         df = pd.read_csv(path)
-    if "source_id" not in df.columns and "asas_sn_id" in df.columns:
-        df = df.rename(columns={"asas_sn_id": "source_id"})
+    if "source_id" not in df.columns:
+        raise ValueError("Manifest must include a 'source_id' column.")
     df["source_id"] = df["source_id"].astype(str)
     return df
 
@@ -185,7 +179,8 @@ def load_candidates_df(cand_path: Path) -> pd.DataFrame:
 
 def dataframe_from_candidates(data: Sequence[Mapping[str, object]] | None = None) -> pd.DataFrame:
     df = pd.DataFrame(data or brayden_candidates).copy()
-    df.rename(columns={"Source": "source", "Source ID": "source_id"}, inplace=True)
+    if "source_id" not in df.columns:
+        raise ValueError("Candidates must include a 'source_id' column.")
     df["source_id"] = df["source_id"].astype(str)
     return df
 
@@ -308,11 +303,7 @@ def coerce_candidate_records(data) -> list[dict[str, object]]:
             if not isinstance(rec, Mapping):
                 continue
             new = dict(rec)
-            source_id = str(new.get("source_id", new.get("Source_ID", ""))).strip()
-
-            if not source_id and "path" in new:
-                path_str = str(new["path"])
-                source_id = Path(path_str).stem
+            source_id = str(new.get("source_id", "")).strip()
 
             if not source_id:
                 continue
@@ -625,11 +616,11 @@ def build_reproduction_report(
     chunk_size: int = 250000,
     metrics_baseline_func=None,
     metrics_dip_threshold: float = 0.3,
-    # posterior-prob thresholding (legacy)
-    significance_threshold: float | None = 99.99997,
+    # Optional posterior threshold passthrough
+    significance_threshold: float | None = None,
     p_points: int = 80,
-    # NEW: log BF triggering
-    trigger_mode: str = "logbf",          # "logbf" or "posterior_prob"
+    # Log BF triggering
+    trigger_mode: str = "logbf",
     logbf_threshold_dip: float = 5.0,     # trigger if max log BF >= this
     logbf_threshold_jump: float = 5.0,
     # Probability grid bounds (matching events.py)
@@ -661,7 +652,7 @@ def build_reproduction_report(
     path_root: Path | str | None = None,
     extra_columns: Iterable[str] | None = None,
     manifest_path: Path | str | None = None,
-    method: str = "naive",
+    method: str = "bayes",
     verbose: bool = False,
     # Filter options
     skip_pre_filters: bool = False,
@@ -803,591 +794,519 @@ def build_reproduction_report(
         add_sigma_eff_col=True,
     )
 
-    if method == "naive":
-        if records_map is None or not records_map:
-            raise SystemExit("Naive method requires light-curve paths. Provide --manifest or --skypatrol-dir.")
+    if method != "bayes":
+        raise ValueError(f"Unsupported method '{method}'. Only 'bayes' is supported.")
+    if records_map is None or not records_map:
+        raise SystemExit("Bayesian method requires light-curve paths. Provide --manifest or --skypatrol-dir.")
 
-        from malca.old.lc_events_naive import lc_proc_naive
+    rows = []
 
-        rows = []
-        for mag_bin in sorted(records_map):
-            for rec in records_map[mag_bin]:
-                try:
-                    row = lc_proc_naive(
-                        rec,
-                        baseline_kwargs_dict,
-                        baseline_func=selected_baseline_func,
-                        metrics_baseline_func=selected_baseline_func,
-                        metrics_dip_threshold=metrics_dip_threshold,
+    for mag_bin in sorted(records_map):
+        for rec in records_map[mag_bin]:
+            asn = rec.get("asas_sn_id")
+            lc_dir = rec.get("lc_dir")
+            dat_path = rec.get("dat_path")
+            has_path = bool(dat_path) and Path(str(dat_path)).exists()
+
+            if verbose and not has_path:
+                print(f"[DEBUG] {asn}: dat_path missing: {dat_path}")
+
+            try:
+                if str(dat_path).endswith('.csv') and has_path:
+                    from malca.plot import read_skypatrol_csv
+                    df_all = read_skypatrol_csv(str(dat_path))
+                    # read_skypatrol_csv standardizes v_g_band to 0=g, 1=V
+                    if not df_all.empty and "v_g_band" in df_all.columns:
+                        dfg = df_all[df_all["v_g_band"] == 0].reset_index(drop=True)
+                        dfv = df_all[df_all["v_g_band"] == 1].reset_index(drop=True)
+                    else:
+                        dfg, dfv = pd.DataFrame(), pd.DataFrame()
+                else:
+                    dfg, dfv = (
+                        read_lc_dat2(asn, lc_dir)
+                        if asn and lc_dir and has_path
+                        else (pd.DataFrame(), pd.DataFrame())
                     )
-                    rows.append(row)
-                except Exception as e:
+            except Exception as e:
+                if verbose:
+                    print(f"[DEBUG] {asn}: data load failed: {e}")
+                dfg, dfv = pd.DataFrame(), pd.DataFrame()
+
+            if verbose:
+                print(f"[DEBUG] {asn}: loaded g={len(dfg)} rows, v={len(dfv)} rows from {dat_path}")
+
+            def apply_triggering(result: dict, band_name: str) -> dict:
+                """Apply log-BF thresholding to dip/jump result blocks."""
+                for kind in ("dip", "jump"):
+                    block = result.get(kind, {})
+                    if not isinstance(block, dict):
+                        result[kind] = {"significant": False}
+                        continue
+
+                    thr = logbf_threshold_dip if kind == "dip" else logbf_threshold_jump
+                    log_bf_local = block.get("log_bf_local", None)
+                    if log_bf_local is None:
+                        block["event_indices"] = np.array([], dtype=int)
+                        block["significant"] = False
+                        block["max_log_bf_local"] = np.nan
+                    else:
+                        lb = np.asarray(log_bf_local, float)
+                        finite = np.isfinite(lb)
+                        max_lb = float(np.nanmax(lb)) if finite.any() else np.nan
+                        idx = np.nonzero(finite & (lb >= float(thr)))[0].astype(int)
+                        block["event_indices"] = idx
+                        block["significant"] = bool(np.isfinite(max_lb) and (max_lb >= float(thr)))
+                        block["max_log_bf_local"] = max_lb
+
+                    block["max_event_prob"] = np.nan
+                    block["n_dips"] = int(len(block.get("event_indices", []))) if kind == "dip" else block.get("n_dips", 0)
+                    block["n_jumps"] = int(len(block.get("event_indices", []))) if kind == "jump" else block.get("n_jumps", 0)
+
                     if verbose:
-                        print(f"[DEBUG] naive {rec.get('asas_sn_id')}: {e}")
+                        mx = block.get("max_log_bf_local", np.nan)
+                        bf = block.get("bayes_factor", np.nan)
+                        ct = len(block.get("event_indices", []))
+                        print(f"[DEBUG] {asn} {band_name}: {kind} max_logBF={mx:.2f} thr={thr:.2f} "
+                              f"count={ct} globalBF={bf:.2f}")
 
-    elif method == "biweight":
-        if records_map is None or not records_map:
-            raise SystemExit("Biweight method requires light-curve paths. Provide --manifest or --skypatrol-dir.")
+                    result[kind] = block
 
-        from malca.old.lc_events import lc_proc as lc_proc_biweight
+                return result
 
-        rows = []
-        for mag_bin in sorted(records_map):
-            for rec in records_map[mag_bin]:
+            mag_grid_dip = None
+            mag_grid_jump = None
+            if mag_min_dip is not None and mag_max_dip is not None:
+                mag_grid_dip = np.linspace(mag_min_dip, mag_max_dip, mag_points)
+            if mag_min_jump is not None and mag_max_jump is not None:
+                mag_grid_jump = np.linspace(mag_min_jump, mag_max_jump, mag_points)
+
+            def bayes(df: pd.DataFrame, band_name: str):
+                dfc = clean_for_bayes(df)
+                if dfc is None or dfc.empty:
+                    return {
+                        "dip": {"significant": False, "bayes_factor": np.nan, "max_event_prob": np.nan, "n_dips": 0, "max_log_bf_local": np.nan},
+                        "jump": {"significant": False, "bayes_factor": np.nan, "max_event_prob": np.nan, "n_jumps": 0, "max_log_bf_local": np.nan},
+                    }
+
                 try:
-                    row = lc_proc_biweight(
-                        rec,
-                        mode="dips",
-                        peak_kwargs=None,
+                    result = score_lightcurve(
+                        dfc,
                         baseline_func=selected_baseline_func,
                         baseline_kwargs=baseline_kwargs_dict,
+                        significance_threshold=float(significance_threshold) if significance_threshold is not None else 99.99997,
+                        p_points=int(p_points),
+                        p_min_dip=p_min_dip,
+                        p_max_dip=p_max_dip,
+                        p_min_jump=p_min_jump,
+                        p_max_jump=p_max_jump,
+                        mag_points=mag_points,
+                        mag_grid_dip=mag_grid_dip,
+                        mag_grid_jump=mag_grid_jump,
+                        trigger_mode=trigger_mode,
+                        logbf_threshold_dip=logbf_threshold_dip,
+                        logbf_threshold_jump=logbf_threshold_jump,
+                        run_min_points=run_min_points,
+                        max_gap_points=max_gap_points,
+                        run_max_gap_days=run_max_gap_days,
+                        run_min_duration_days=run_min_duration_days,
                     )
-                    rows.append(row)
-                except Exception as e:
-                    if verbose:
-                        print(f"[DEBUG] biweight {rec.get('asas_sn_id')}: {e}")
-
-    elif method == "bayes":
-        if records_map is None or not records_map:
-            raise SystemExit("Bayesian method requires light-curve paths. Provide --manifest or --skypatrol-dir.")
-
-        rows = []
-
-        for mag_bin in sorted(records_map):
-            for rec in records_map[mag_bin]:
-                asn = rec.get("asas_sn_id")
-                lc_dir = rec.get("lc_dir")
-                dat_path = rec.get("dat_path")
-                has_path = bool(dat_path) and Path(str(dat_path)).exists()
-
-                if verbose and not has_path:
-                    print(f"[DEBUG] {asn}: dat_path missing: {dat_path}")
-
-                try:
-                    if str(dat_path).endswith('.csv') and has_path:
-                        from malca.plot import read_skypatrol_csv
-                        df_all = read_skypatrol_csv(str(dat_path))
-                        # read_skypatrol_csv standardizes v_g_band to 0=g, 1=V
-                        if not df_all.empty and "v_g_band" in df_all.columns:
-                            dfg = df_all[df_all["v_g_band"] == 0].reset_index(drop=True)
-                            dfv = df_all[df_all["v_g_band"] == 1].reset_index(drop=True)
-                        else:
-                            dfg, dfv = pd.DataFrame(), pd.DataFrame()
-                    else:
-                        dfg, dfv = (
-                            read_lc_dat2(asn, lc_dir)
-                            if asn and lc_dir and has_path
-                            else (pd.DataFrame(), pd.DataFrame())
-                        )
-                except Exception as e:
-                    if verbose:
-                        print(f"[DEBUG] {asn}: data load failed: {e}")
-                    dfg, dfv = pd.DataFrame(), pd.DataFrame()
-
-                if verbose:
-                    print(f"[DEBUG] {asn}: loaded g={len(dfg)} rows, v={len(dfv)} rows from {dat_path}")
-
-                def apply_triggering(result: dict, band_name: str) -> dict:
-                    """
-                    Force triggering to be based on either:
-                      - log BF local (preferred)
-                      - posterior probability threshold (legacy)
-                    """
-                    for kind in ("dip", "jump"):
-                        block = result.get(kind, {})
-                        if not isinstance(block, dict):
-                            result[kind] = {"significant": False}
-                            continue
-
-                        if trigger_mode == "logbf":
-                            thr = logbf_threshold_dip if kind == "dip" else logbf_threshold_jump
-                            log_bf_local = block.get("log_bf_local", None)
-                            if log_bf_local is None:
-                                # if the bayes module wasn't updated, this stays off
-                                block["event_indices"] = np.array([], dtype=int)
-                                block["significant"] = False
-                                block["max_log_bf_local"] = np.nan
-                            else:
-                                lb = np.asarray(log_bf_local, float)
-                                finite = np.isfinite(lb)
-                                max_lb = float(np.nanmax(lb)) if finite.any() else np.nan
-                                idx = np.nonzero(finite & (lb >= float(thr)))[0].astype(int)
-                                block["event_indices"] = idx
-                                block["significant"] = bool(np.isfinite(max_lb) and (max_lb >= float(thr)))
-                                block["max_log_bf_local"] = max_lb
-
-                            # counts
-                            block["max_event_prob"] = np.nan
-                            block["n_dips"] = int(len(block.get("event_indices", []))) if kind == "dip" else block.get("n_dips", 0)
-                            block["n_jumps"] = int(len(block.get("event_indices", []))) if kind == "jump" else block.get("n_jumps", 0)
-
-                            if verbose:
-                                mx = block.get("max_log_bf_local", np.nan)
-                                bf = block.get("bayes_factor", np.nan)
-                                ct = len(block.get("event_indices", []))
-                                print(f"[DEBUG] {asn} {band_name}: {kind} max_logBF={mx:.2f} thr={thr:.2f} "
-                                      f"count={ct} globalBF={bf:.2f}")
-
-                        else:
-                            # posterior_prob mode
-                            event_prob = np.asarray(block.get("event_probability", np.array([])), float)
-                            max_prob = float(np.nanmax(event_prob)) if event_prob.size else np.nan
-                            block["max_event_prob"] = max_prob
-
-                            event_indices = block.get("event_indices", np.array([], dtype=int))
-                            if isinstance(event_indices, (list, tuple)):
-                                event_indices = np.asarray(event_indices, dtype=int)
-                            if not isinstance(event_indices, np.ndarray):
-                                event_indices = np.array([], dtype=int)
-
-                            count_key = "n_dips" if kind == "dip" else "n_jumps"
-                            block[count_key] = int(event_indices.size)
-
-                            if verbose:
-                                dip_bf = block.get("bayes_factor", np.nan)
-                                print(f"[DEBUG] {asn} {band_name}: {kind} max_prob={max_prob:.6f} "
-                                      f"count={int(event_indices.size)} globalBF={dip_bf:.2f}")
-
-                        result[kind] = block
-
+                    result = apply_triggering(result, band_name)
                     return result
+                except Exception as e:
+                    if verbose:
+                        print(f"[DEBUG] {asn} {band_name}: run_bayesian_significance failed: {e}")
+                    return {
+                        "dip": {"significant": False, "bayes_factor": np.nan, "max_event_prob": np.nan, "n_dips": 0, "max_log_bf_local": np.nan},
+                        "jump": {"significant": False, "bayes_factor": np.nan, "max_event_prob": np.nan, "n_jumps": 0, "max_log_bf_local": np.nan},
+                    }
 
-                # Select baseline function
-                # Build mag grids from min/max/points if bounds are provided
-                mag_grid_dip = None
-                mag_grid_jump = None
-                if mag_min_dip is not None and mag_max_dip is not None:
-                    mag_grid_dip = np.linspace(mag_min_dip, mag_max_dip, mag_points)
-                if mag_min_jump is not None and mag_max_jump is not None:
-                    mag_grid_jump = np.linspace(mag_min_jump, mag_max_jump, mag_points)
+            res_g = bayes(dfg, "g")
+            res_v = bayes(dfv, "V")
 
-                def bayes(df: pd.DataFrame, band_name: str):
-                    dfc = clean_for_bayes(df)
-                    if dfc is None or dfc.empty:
-                        return {
-                            "dip": {"significant": False, "bayes_factor": np.nan, "max_event_prob": np.nan, "n_dips": 0, "max_log_bf_local": np.nan},
-                            "jump": {"significant": False, "bayes_factor": np.nan, "max_event_prob": np.nan, "n_jumps": 0, "max_log_bf_local": np.nan},
-                        }
+            # Apply morphology filtering to results
+            def count_accepted_runs(res: dict, kind: str) -> int:
+                """Count runs that pass morphology filter."""
+                run_summaries = res.get(kind, {}).get("run_summaries", [])
+                return sum(
+                    1 for s in run_summaries
+                    if s.get("morphology", "none").lower() in accepted_morphologies
+                )
 
-                    try:
-                        # physics convention note: if converting sigma->prob, we use one-tailed Gaussian CDF (norm.cdf)
-                        result = run_bayesian_significance(
-                            dfc,
-                            baseline_func=selected_baseline_func,
-                            baseline_kwargs=baseline_kwargs_dict,
-                            significance_threshold=float(significance_threshold) if significance_threshold is not None else 99.99997,
-                            p_points=int(p_points),
-                            p_min_dip=p_min_dip,
-                            p_max_dip=p_max_dip,
-                            p_min_jump=p_min_jump,
-                            p_max_jump=p_max_jump,
-                            mag_points=mag_points,
-                            mag_grid_dip=mag_grid_dip,
-                            mag_grid_jump=mag_grid_jump,
-                            trigger_mode=trigger_mode,
-                            logbf_threshold_dip=logbf_threshold_dip,
-                            logbf_threshold_jump=logbf_threshold_jump,
-                            # Run confirmation filters
-                            run_min_points=run_min_points,
-                            max_gap_points=max_gap_points,
-                            run_max_gap_days=run_max_gap_days,
-                            run_min_duration_days=run_min_duration_days,
-                        )
-                        result = apply_triggering(result, band_name)
-                        return result
-                    except Exception as e:
-                        if verbose:
-                            print(f"[DEBUG] {asn} {band_name}: run_bayesian_significance failed: {e}")
-                        return {
-                            "dip": {"significant": False, "bayes_factor": np.nan, "max_event_prob": np.nan, "n_dips": 0, "max_log_bf_local": np.nan},
-                            "jump": {"significant": False, "bayes_factor": np.nan, "max_event_prob": np.nan, "n_jumps": 0, "max_log_bf_local": np.nan},
-                        }
+            # Update significant flags based on morphology filter
+            res_g["dip"]["n_accepted"] = count_accepted_runs(res_g, "dip")
+            res_g["jump"]["n_accepted"] = count_accepted_runs(res_g, "jump")
+            res_v["dip"]["n_accepted"] = count_accepted_runs(res_v, "dip")
+            res_v["jump"]["n_accepted"] = count_accepted_runs(res_v, "jump")
 
-                res_g = bayes(dfg, "g")
-                res_v = bayes(dfv, "V")
+            def extract_run_info(res: dict, kind: str) -> dict:
+                """Extract summary info from the best accepted run."""
+                run_summaries = res.get(kind, {}).get("run_summaries", [])
+                n_runs = len(run_summaries)
+                n_triggered = len(res.get(kind, {}).get("event_indices", []))
 
-                # Apply morphology filtering to results
-                def count_accepted_runs(res: dict, kind: str) -> int:
-                    """Count runs that pass morphology filter."""
-                    run_summaries = res.get(kind, {}).get("run_summaries", [])
-                    return sum(1 for s in run_summaries
-                               if s.get("morphology", "none").lower() in accepted_morphologies)
+                # Find best accepted run (first one that passes morphology filter)
+                best_run = None
+                for s in run_summaries:
+                    if s.get("morphology", "none").lower() in accepted_morphologies:
+                        best_run = s
+                        break
 
-                # Update significant flags based on morphology filter
-                res_g["dip"]["n_accepted"] = count_accepted_runs(res_g, "dip")
-                res_g["jump"]["n_accepted"] = count_accepted_runs(res_g, "jump")
-                res_v["dip"]["n_accepted"] = count_accepted_runs(res_v, "dip")
-                res_v["jump"]["n_accepted"] = count_accepted_runs(res_v, "jump")
+                if best_run is None and run_summaries:
+                    # No accepted runs, use first run for info
+                    best_run = run_summaries[0]
 
-                def extract_run_info(res: dict, kind: str) -> dict:
-                    """Extract summary info from the best accepted run."""
-                    run_summaries = res.get(kind, {}).get("run_summaries", [])
-                    n_runs = len(run_summaries)
-                    n_triggered = len(res.get(kind, {}).get("event_indices", []))
-
-                    # Find best accepted run (first one that passes morphology filter)
-                    best_run = None
-                    for s in run_summaries:
-                        if s.get("morphology", "none").lower() in accepted_morphologies:
-                            best_run = s
-                            break
-
-                    if best_run is None and run_summaries:
-                        # No accepted runs, use first run for info
-                        best_run = run_summaries[0]
-
-                    if best_run:
-                        params = best_run.get("params", {})
-                        morph = best_run.get("morphology", "none")
-                        # Extract width param based on morphology type
-                        if morph == "gaussian":
-                            width_param = params.get("sigma", np.nan)
-                        elif morph == "paczynski":
-                            width_param = params.get("tE", np.nan)
-                        else:
-                            width_param = np.nan
-                        return {
-                            "n_runs": n_runs,
-                            "n_triggered": n_triggered,
-                            "best_morphology": morph,
-                            "best_t0": params.get("t0", np.nan),
-                            "best_amplitude": params.get("amplitude", np.nan),
-                            "best_duration": params.get("sigma", params.get("tau", np.nan)),
-                            "best_run_n_points": best_run.get("n_points", 0),
-                            "best_run_start_jd": best_run.get("start_jd", np.nan),
-                            "best_run_end_jd": best_run.get("end_jd", np.nan),
-                            # New fields from events.py
-                            "best_delta_bic": best_run.get("delta_bic_null", np.nan),
-                            "best_width_param": width_param,
-                            "best_symmetry_score": best_run.get("symmetry_score", np.nan),
-                        }
+                if best_run:
+                    params = best_run.get("params", {})
+                    morph = best_run.get("morphology", "none")
+                    # Extract width param based on morphology type
+                    if morph == "gaussian":
+                        width_param = params.get("sigma", np.nan)
+                    elif morph == "paczynski":
+                        width_param = params.get("tE", np.nan)
+                    else:
+                        width_param = np.nan
                     return {
                         "n_runs": n_runs,
                         "n_triggered": n_triggered,
-                        "best_morphology": "none",
-                        "best_t0": np.nan,
-                        "best_amplitude": np.nan,
-                        "best_duration": np.nan,
-                        "best_run_n_points": 0,
-                        "best_run_start_jd": np.nan,
-                        "best_run_end_jd": np.nan,
+                        "best_morphology": morph,
+                        "best_t0": params.get("t0", np.nan),
+                        "best_amplitude": params.get("amplitude", np.nan),
+                        "best_duration": params.get("sigma", params.get("tau", np.nan)),
+                        "best_run_n_points": best_run.get("n_points", 0),
+                        "best_run_start_jd": best_run.get("start_jd", np.nan),
+                        "best_run_end_jd": best_run.get("end_jd", np.nan),
                         # New fields from events.py
-                        "best_delta_bic": np.nan,
-                        "best_width_param": np.nan,
-                        "best_symmetry_score": np.nan,
+                        "best_delta_bic": best_run.get("delta_bic_null", np.nan),
+                        "best_width_param": width_param,
+                        "best_symmetry_score": best_run.get("symmetry_score", np.nan),
                     }
+                return {
+                    "n_runs": n_runs,
+                    "n_triggered": n_triggered,
+                    "best_morphology": "none",
+                    "best_t0": np.nan,
+                    "best_amplitude": np.nan,
+                    "best_duration": np.nan,
+                    "best_run_n_points": 0,
+                    "best_run_start_jd": np.nan,
+                    "best_run_end_jd": np.nan,
+                    # New fields from events.py
+                    "best_delta_bic": np.nan,
+                    "best_width_param": np.nan,
+                    "best_symmetry_score": np.nan,
+                }
 
-                g_run_info = extract_run_info(res_g, "dip")
-                v_run_info = extract_run_info(res_v, "dip")
+            g_run_info = extract_run_info(res_g, "dip")
+            v_run_info = extract_run_info(res_v, "dip")
 
-                # Light curve statistics
-                g_n_points = len(clean_for_bayes(dfg)) if not dfg.empty else 0
-                v_n_points = len(clean_for_bayes(dfv)) if not dfv.empty else 0
-                g_time_span = float(dfg["JD"].max() - dfg["JD"].min()) if not dfg.empty and len(dfg) > 1 else 0.0
-                v_time_span = float(dfv["JD"].max() - dfv["JD"].min()) if not dfv.empty and len(dfv) > 1 else 0.0
+            # Light curve statistics
+            g_n_points = len(clean_for_bayes(dfg)) if not dfg.empty else 0
+            v_n_points = len(clean_for_bayes(dfv)) if not dfv.empty else 0
+            g_time_span = float(dfg["JD"].max() - dfg["JD"].min()) if not dfg.empty and len(dfg) > 1 else 0.0
+            v_time_span = float(dfv["JD"].max() - dfv["JD"].min()) if not dfv.empty and len(dfv) > 1 else 0.0
 
-                # Additional timing stats (from events.py)
-                dfg_clean = clean_for_bayes(dfg) if not dfg.empty else pd.DataFrame()
-                dfv_clean = clean_for_bayes(dfv) if not dfv.empty else pd.DataFrame()
+            # Additional timing stats (from events.py)
+            dfg_clean = clean_for_bayes(dfg) if not dfg.empty else pd.DataFrame()
+            dfv_clean = clean_for_bayes(dfv) if not dfv.empty else pd.DataFrame()
 
-                g_jd_first = float(dfg_clean["JD"].min()) if not dfg_clean.empty else np.nan
-                g_jd_last = float(dfg_clean["JD"].max()) if not dfg_clean.empty else np.nan
-                g_cadence_median_days = float(median_dt(dfg_clean["JD"].to_numpy())) if not dfg_clean.empty else np.nan
+            g_jd_first = float(dfg_clean["JD"].min()) if not dfg_clean.empty else np.nan
+            g_jd_last = float(dfg_clean["JD"].max()) if not dfg_clean.empty else np.nan
+            g_cadence_median_days = float(median_dt(dfg_clean["JD"].to_numpy())) if not dfg_clean.empty else np.nan
 
-                v_jd_first = float(dfv_clean["JD"].min()) if not dfv_clean.empty else np.nan
-                v_jd_last = float(dfv_clean["JD"].max()) if not dfv_clean.empty else np.nan
-                v_cadence_median_days = float(median_dt(dfv_clean["JD"].to_numpy())) if not dfv_clean.empty else np.nan
+            v_jd_first = float(dfv_clean["JD"].min()) if not dfv_clean.empty else np.nan
+            v_jd_last = float(dfv_clean["JD"].max()) if not dfv_clean.empty else np.nan
+            v_cadence_median_days = float(median_dt(dfv_clean["JD"].to_numpy())) if not dfv_clean.empty else np.nan
 
-                # Camera statistics (from events.py)
-                def get_camera_stats(df_band: pd.DataFrame) -> dict:
-                    """Extract camera statistics for a band."""
-                    if df_band.empty or "camera#" not in df_band.columns:
-                        return {
-                            "n_cameras": 0,
-                            "camera_ids": "",
-                            "camera_min_points": 0,
-                            "camera_max_points": 0,
-                        }
-                    cams = df_band["camera#"].dropna()
-                    if len(cams) == 0:
-                        return {
-                            "n_cameras": 0,
-                            "camera_ids": "",
-                            "camera_min_points": 0,
-                            "camera_max_points": 0,
-                        }
-                    unique_cams = np.unique(cams.astype(str))
-                    cam_counts = cams.value_counts()
+            # Camera statistics (from events.py)
+            def get_camera_stats(df_band: pd.DataFrame) -> dict:
+                """Extract camera statistics for a band."""
+                if df_band.empty or "camera#" not in df_band.columns:
                     return {
-                        "n_cameras": int(unique_cams.size),
-                        "camera_ids": ",".join(sorted(unique_cams)),
-                        "camera_min_points": int(cam_counts.min()) if len(cam_counts) else 0,
-                        "camera_max_points": int(cam_counts.max()) if len(cam_counts) else 0,
+                        "n_cameras": 0,
+                        "camera_ids": "",
+                        "camera_min_points": 0,
+                        "camera_max_points": 0,
                     }
+                cams = df_band["camera#"].dropna()
+                if len(cams) == 0:
+                    return {
+                        "n_cameras": 0,
+                        "camera_ids": "",
+                        "camera_min_points": 0,
+                        "camera_max_points": 0,
+                    }
+                unique_cams = np.unique(cams.astype(str))
+                cam_counts = cams.value_counts()
+                return {
+                    "n_cameras": int(unique_cams.size),
+                    "camera_ids": ",".join(sorted(unique_cams)),
+                    "camera_min_points": int(cam_counts.min()) if len(cam_counts) else 0,
+                    "camera_max_points": int(cam_counts.max()) if len(cam_counts) else 0,
+                }
 
-                g_cam_stats = get_camera_stats(dfg_clean)
-                v_cam_stats = get_camera_stats(dfv_clean)
+            g_cam_stats = get_camera_stats(dfg_clean)
+            v_cam_stats = get_camera_stats(dfv_clean)
 
-                # Dipper score (from events.py) - only computed if significant
-                def compute_dipper_stats(df_band: pd.DataFrame, res_band: dict, kind: str = "dip") -> dict:
-                    """Compute dipper score for a band."""
-                    if df_band.empty or not res_band.get(kind, {}).get("significant", False):
-                        return {
-                            "dipper_score": 0.0,
-                            "dipper_n_dips": 0,
-                            "dipper_n_valid_dips": 0,
-                        }
-                    try:
-                        df_base = res_band.get("df_base")
-                        if df_base is not None and "baseline" in df_base.columns:
-                            baseline_mags = df_base["baseline"].to_numpy()
-                        else:
-                            baseline_mags = None
-                        score, events = compute_event_score(df_band, event_type='dip', baseline_mags=baseline_mags)
-                        return {
-                            "dipper_score": float(score),
-                            "dipper_n_dips": int(len(events)),
-                            "dipper_n_valid_dips": int(sum(1 for e in events if e.valid)),
-                        }
-                    except Exception:
-                        return {
-                            "dipper_score": 0.0,
-                            "dipper_n_dips": 0,
-                            "dipper_n_valid_dips": 0,
-                        }
-
-                g_dipper_stats = compute_dipper_stats(dfg_clean, res_g)
-                v_dipper_stats = compute_dipper_stats(dfv_clean, res_v)
-
-                # Also extract jump run info
-                g_jump_run_info = extract_run_info(res_g, "jump")
-                v_jump_run_info = extract_run_info(res_v, "jump")
-
-                # Override significant flag if no runs pass morphology filter
-                if res_g["dip"]["n_accepted"] == 0:
-                    res_g["dip"]["significant"] = False
-                if res_g["jump"]["n_accepted"] == 0:
-                    res_g["jump"]["significant"] = False
-                if res_v["dip"]["n_accepted"] == 0:
-                    res_v["dip"]["significant"] = False
-                if res_v["jump"]["n_accepted"] == 0:
-                    res_v["jump"]["significant"] = False
-
-                # Determine rejection reason (first filter that fails)
-                def get_rejection_reason(res: dict, kind: str) -> str | None:
-                    """Determine why a detection was rejected."""
-                    block = res.get(kind, {})
-
-                    # Check if any triggers
-                    n_triggers = len(block.get("event_indices", []))
-                    max_logbf = block.get("max_log_bf_local", np.nan)
-
-                    if n_triggers == 0 and (not np.isfinite(max_logbf) or max_logbf < 5.0):
-                        return "no_triggers"
-
-                    # Check if runs formed
-                    n_runs = block.get("n_runs", 0)
-                    if n_runs == 0:
-                        return "run_confirmation"
-
-                    # Check if morphology passed
-                    n_accepted = block.get("n_accepted", 0)
-                    if n_accepted == 0:
-                        return "morphology"
-
-                    # Passed all filters
-                    return None
-
-                g_dip_reason = get_rejection_reason(res_g, "dip")
-                v_dip_reason = get_rejection_reason(res_v, "dip")
-
-                # Combined rejection reason: None if either band passes, else first failure
-                if res_g["dip"].get("significant") or res_v["dip"].get("significant"):
-                    combined_rejection = None
-                else:
-                    # Report the "furthest" rejection (morphology > run_confirmation > no_triggers)
-                    priority = {"morphology": 3, "run_confirmation": 2, "no_triggers": 1, None: 0}
-                    if priority.get(g_dip_reason, 0) >= priority.get(v_dip_reason, 0):
-                        combined_rejection = g_dip_reason
+            # Dipper score (from events.py) - only computed if significant
+            def compute_dipper_stats(df_band: pd.DataFrame, res_band: dict, kind: str = "dip") -> dict:
+                """Compute dipper score for a band."""
+                if df_band.empty or not res_band.get(kind, {}).get("significant", False):
+                    return {
+                        "dipper_score": 0.0,
+                        "dipper_n_dips": 0,
+                        "dipper_n_valid_dips": 0,
+                    }
+                try:
+                    df_base = res_band.get("df_base")
+                    if df_base is not None and "baseline" in df_base.columns:
+                        baseline_mags = df_base["baseline"].to_numpy()
                     else:
-                        combined_rejection = v_dip_reason
-
-                if out_dir:
-                    plot_path = Path(out_dir) / f"{asn}_dips.{plot_format}"
-                    plot_light_curve_with_dips(
-                        clean_for_bayes(dfg),
-                        clean_for_bayes(dfv),
-                        res_g,
-                        res_v,
-                        str(asn),
-                        plot_path,
-                        accepted_morphologies=accepted_morphologies,
-                        g_significant=res_g["dip"].get("significant", False),
-                        v_significant=res_v["dip"].get("significant", False),
-                    )
-
-                rows.append(
-                    {
-                        "mag_bin": str(rec.get("mag_bin")),
-                        "asas_sn_id": asn,
-                        "index_num": rec.get("index_num"),
-                        "index_csv": rec.get("index_csv"),
-                        "lc_dir": lc_dir,
-                        "dat_path": dat_path,
-
-                        "g_bayes_dip_significant": bool(res_g["dip"].get("significant", False)),
-                        "v_bayes_dip_significant": bool(res_v["dip"].get("significant", False)),
-                        "g_bayes_jump_significant": bool(res_g["jump"].get("significant", False)),
-                        "v_bayes_jump_significant": bool(res_v["jump"].get("significant", False)),
-
-                        "g_bayes_dip_max_prob": float(res_g["dip"].get("max_event_prob", np.nan)),
-                        "v_bayes_dip_max_prob": float(res_v["dip"].get("max_event_prob", np.nan)),
-
-                        "g_bayes_dip_bayes_factor": float(res_g["dip"].get("bayes_factor", np.nan)),
-                        "v_bayes_dip_bayes_factor": float(res_v["dip"].get("bayes_factor", np.nan)),
-                        "g_bayes_jump_bayes_factor": float(res_g["jump"].get("bayes_factor", np.nan)),
-                        "v_bayes_jump_bayes_factor": float(res_v["jump"].get("bayes_factor", np.nan)),
-
-                        "g_bayes_dip_max_logbf": float(res_g["dip"].get("max_log_bf_local", np.nan)),
-                        "v_bayes_dip_max_logbf": float(res_v["dip"].get("max_log_bf_local", np.nan)),
-                        "g_bayes_jump_max_logbf": float(res_g["jump"].get("max_log_bf_local", np.nan)),
-                        "v_bayes_jump_max_logbf": float(res_v["jump"].get("max_log_bf_local", np.nan)),
-
-                        "g_bayes_n_dips": int(res_g["dip"].get("n_dips", 0)),
-                        "v_bayes_n_dips": int(res_v["dip"].get("n_dips", 0)),
-                        "g_bayes_n_jumps": int(res_g["jump"].get("n_jumps", 0)),
-                        "v_bayes_n_jumps": int(res_v["jump"].get("n_jumps", 0)),
-
-                        # Rejection tracking
-                        "g_rejection_reason": g_dip_reason,
-                        "v_rejection_reason": v_dip_reason,
-                        "rejection_reason": combined_rejection,
-
-                        # Light curve statistics
-                        "g_n_points": g_n_points,
-                        "v_n_points": v_n_points,
-                        "g_time_span": g_time_span,
-                        "v_time_span": v_time_span,
-
-                        # Timing stats (from events.py)
-                        "g_jd_first": g_jd_first,
-                        "v_jd_first": v_jd_first,
-                        "g_jd_last": g_jd_last,
-                        "v_jd_last": v_jd_last,
-                        "g_cadence_median_days": g_cadence_median_days,
-                        "v_cadence_median_days": v_cadence_median_days,
-
-                        # Run details - g band dips
-                        "g_n_runs": g_run_info["n_runs"],
-                        "g_n_triggered": g_run_info["n_triggered"],
-                        "g_best_morphology": g_run_info["best_morphology"],
-                        "g_best_t0": g_run_info["best_t0"],
-                        "g_best_amplitude": g_run_info["best_amplitude"],
-                        "g_best_duration": g_run_info["best_duration"],
-                        "g_best_run_n_points": g_run_info["best_run_n_points"],
-                        "g_best_run_start_jd": g_run_info["best_run_start_jd"],
-                        "g_best_run_end_jd": g_run_info["best_run_end_jd"],
-                        # New morphology fields (from events.py)
-                        "g_dip_best_delta_bic": g_run_info["best_delta_bic"],
-                        "g_dip_best_width_param": g_run_info["best_width_param"],
-                        "g_dip_symmetry_score": g_run_info["best_symmetry_score"],
-
-                        # Run details - V band dips
-                        "v_n_runs": v_run_info["n_runs"],
-                        "v_n_triggered": v_run_info["n_triggered"],
-                        "v_best_morphology": v_run_info["best_morphology"],
-                        "v_best_t0": v_run_info["best_t0"],
-                        "v_best_amplitude": v_run_info["best_amplitude"],
-                        "v_best_duration": v_run_info["best_duration"],
-                        "v_best_run_n_points": v_run_info["best_run_n_points"],
-                        "v_best_run_start_jd": v_run_info["best_run_start_jd"],
-                        "v_best_run_end_jd": v_run_info["best_run_end_jd"],
-                        # New morphology fields (from events.py)
-                        "v_dip_best_delta_bic": v_run_info["best_delta_bic"],
-                        "v_dip_best_width_param": v_run_info["best_width_param"],
-                        "v_dip_symmetry_score": v_run_info["best_symmetry_score"],
-
-                        # Run details - g band jumps (from events.py)
-                        "g_jump_n_runs": g_jump_run_info["n_runs"],
-                        "g_jump_n_triggered": g_jump_run_info["n_triggered"],
-                        "g_jump_best_morphology": g_jump_run_info["best_morphology"],
-                        "g_jump_best_delta_bic": g_jump_run_info["best_delta_bic"],
-                        "g_jump_best_width_param": g_jump_run_info["best_width_param"],
-
-                        # Run details - V band jumps (from events.py)
-                        "v_jump_n_runs": v_jump_run_info["n_runs"],
-                        "v_jump_n_triggered": v_jump_run_info["n_triggered"],
-                        "v_jump_best_morphology": v_jump_run_info["best_morphology"],
-                        "v_jump_best_delta_bic": v_jump_run_info["best_delta_bic"],
-                        "v_jump_best_width_param": v_jump_run_info["best_width_param"],
-
-                        # Run count/max stats (from events.py - using dip stats)
-                        "g_dip_run_count": int(res_g["dip"].get("n_runs", 0)),
-                        "v_dip_run_count": int(res_v["dip"].get("n_runs", 0)),
-                        "g_jump_run_count": int(res_g["jump"].get("n_runs", 0)),
-                        "v_jump_run_count": int(res_v["jump"].get("n_runs", 0)),
-                        "g_dip_max_run_points": int(res_g["dip"].get("max_run_points", 0)),
-                        "v_dip_max_run_points": int(res_v["dip"].get("max_run_points", 0)),
-                        "g_dip_max_run_duration": float(res_g["dip"].get("max_run_duration", np.nan)),
-                        "v_dip_max_run_duration": float(res_v["dip"].get("max_run_duration", np.nan)),
-                        "g_dip_max_run_sum": float(res_g["dip"].get("max_run_sum", np.nan)),
-                        "v_dip_max_run_sum": float(res_v["dip"].get("max_run_sum", np.nan)),
-                        "g_dip_max_run_max": float(res_g["dip"].get("max_run_max", np.nan)),
-                        "v_dip_max_run_max": float(res_v["dip"].get("max_run_max", np.nan)),
-                        "g_dip_max_run_cameras": int(res_g["dip"].get("max_run_cameras", 0)),
-                        "v_dip_max_run_cameras": int(res_v["dip"].get("max_run_cameras", 0)),
-                        "g_jump_max_run_points": int(res_g["jump"].get("max_run_points", 0)),
-                        "v_jump_max_run_points": int(res_v["jump"].get("max_run_points", 0)),
-                        "g_jump_max_run_cameras": int(res_g["jump"].get("max_run_cameras", 0)),
-                        "v_jump_max_run_cameras": int(res_v["jump"].get("max_run_cameras", 0)),
-
-                        # Detection parameters (from events.py)
-                        "g_baseline_mag": float(res_g["dip"].get("baseline_mag", np.nan)),
-                        "v_baseline_mag": float(res_v["dip"].get("baseline_mag", np.nan)),
-                        "g_dip_best_p": float(res_g["dip"].get("best_p", np.nan)),
-                        "v_dip_best_p": float(res_v["dip"].get("best_p", np.nan)),
-                        "g_jump_best_p": float(res_g["jump"].get("best_p", np.nan)),
-                        "v_jump_best_p": float(res_v["jump"].get("best_p", np.nan)),
-                        "g_dip_best_mag_event": float(res_g["dip"].get("best_mag_event", np.nan)),
-                        "v_dip_best_mag_event": float(res_v["dip"].get("best_mag_event", np.nan)),
-                        "g_jump_best_mag_event": float(res_g["jump"].get("best_mag_event", np.nan)),
-                        "v_jump_best_mag_event": float(res_v["jump"].get("best_mag_event", np.nan)),
-                        "g_dip_trigger_max": float(res_g["dip"].get("trigger_max", np.nan)),
-                        "v_dip_trigger_max": float(res_v["dip"].get("trigger_max", np.nan)),
-                        "g_jump_trigger_max": float(res_g["jump"].get("trigger_max", np.nan)),
-                        "v_jump_trigger_max": float(res_v["jump"].get("trigger_max", np.nan)),
-
-                        # Camera statistics (from events.py)
-                        "g_n_cameras": g_cam_stats["n_cameras"],
-                        "v_n_cameras": v_cam_stats["n_cameras"],
-                        "g_camera_ids": g_cam_stats["camera_ids"],
-                        "v_camera_ids": v_cam_stats["camera_ids"],
-                        "g_camera_min_points": g_cam_stats["camera_min_points"],
-                        "v_camera_min_points": v_cam_stats["camera_min_points"],
-                        "g_camera_max_points": g_cam_stats["camera_max_points"],
-                        "v_camera_max_points": v_cam_stats["camera_max_points"],
-
-                        # Dipper score (from events.py)
-                        "g_dipper_score": g_dipper_stats["dipper_score"],
-                        "v_dipper_score": v_dipper_stats["dipper_score"],
-                        "g_dipper_n_dips": g_dipper_stats["dipper_n_dips"],
-                        "v_dipper_n_dips": v_dipper_stats["dipper_n_dips"],
-                        "g_dipper_n_valid_dips": g_dipper_stats["dipper_n_valid_dips"],
-                        "v_dipper_n_valid_dips": v_dipper_stats["dipper_n_valid_dips"],
-
-                        # System info (from events.py)
-                        "g_used_sigma_eff": bool(res_g["dip"].get("used_sigma_eff", False)),
-                        "v_used_sigma_eff": bool(res_v["dip"].get("used_sigma_eff", False)),
-                        "g_baseline_source": str(res_g["dip"].get("baseline_source", "unknown")),
-                        "v_baseline_source": str(res_v["dip"].get("baseline_source", "unknown")),
-                        "g_trigger_mode": str(res_g["dip"].get("trigger_mode", trigger_mode)),
-                        "v_trigger_mode": str(res_v["dip"].get("trigger_mode", trigger_mode)),
-                        "g_dip_trigger_threshold": float(res_g["dip"].get("trigger_threshold", np.nan)),
-                        "v_dip_trigger_threshold": float(res_v["dip"].get("trigger_threshold", np.nan)),
-                        "g_jump_trigger_threshold": float(res_g["jump"].get("trigger_threshold", np.nan)),
-                        "v_jump_trigger_threshold": float(res_v["jump"].get("trigger_threshold", np.nan)),
+                        baseline_mags = None
+                    score, events = compute_event_score(df_band, event_type='dip', baseline_mags=baseline_mags)
+                    return {
+                        "dipper_score": float(score),
+                        "dipper_n_dips": int(len(events)),
+                        "dipper_n_valid_dips": int(sum(1 for e in events if e.valid)),
                     }
+                except Exception:
+                    return {
+                        "dipper_score": 0.0,
+                        "dipper_n_dips": 0,
+                        "dipper_n_valid_dips": 0,
+                    }
+
+            g_dipper_stats = compute_dipper_stats(dfg_clean, res_g)
+            v_dipper_stats = compute_dipper_stats(dfv_clean, res_v)
+
+            # Also extract jump run info
+            g_jump_run_info = extract_run_info(res_g, "jump")
+            v_jump_run_info = extract_run_info(res_v, "jump")
+
+            # Override significant flag if no runs pass morphology filter
+            if res_g["dip"]["n_accepted"] == 0:
+                res_g["dip"]["significant"] = False
+            if res_g["jump"]["n_accepted"] == 0:
+                res_g["jump"]["significant"] = False
+            if res_v["dip"]["n_accepted"] == 0:
+                res_v["dip"]["significant"] = False
+            if res_v["jump"]["n_accepted"] == 0:
+                res_v["jump"]["significant"] = False
+
+            # Determine rejection reason (first filter that fails)
+            def get_rejection_reason(res: dict, kind: str) -> str | None:
+                """Determine why a detection was rejected."""
+                block = res.get(kind, {})
+
+                # Check if any triggers
+                n_triggers = len(block.get("event_indices", []))
+                max_logbf = block.get("max_log_bf_local", np.nan)
+
+                if n_triggers == 0 and (not np.isfinite(max_logbf) or max_logbf < 5.0):
+                    return "no_triggers"
+
+                # Check if runs formed
+                n_runs = block.get("n_runs", 0)
+                if n_runs == 0:
+                    return "run_confirmation"
+
+                # Check if morphology passed
+                n_accepted = block.get("n_accepted", 0)
+                if n_accepted == 0:
+                    return "morphology"
+
+                # Passed all filters
+                return None
+
+            g_dip_reason = get_rejection_reason(res_g, "dip")
+            v_dip_reason = get_rejection_reason(res_v, "dip")
+
+            # Combined rejection reason: None if either band passes, else first failure
+            if res_g["dip"].get("significant") or res_v["dip"].get("significant"):
+                combined_rejection = None
+            else:
+                # Report the "furthest" rejection (morphology > run_confirmation > no_triggers)
+                priority = {"morphology": 3, "run_confirmation": 2, "no_triggers": 1, None: 0}
+                if priority.get(g_dip_reason, 0) >= priority.get(v_dip_reason, 0):
+                    combined_rejection = g_dip_reason
+                else:
+                    combined_rejection = v_dip_reason
+
+            if out_dir:
+                plot_path = Path(out_dir) / f"{asn}_dips.{plot_format}"
+                plot_light_curve_with_dips(
+                    clean_for_bayes(dfg),
+                    clean_for_bayes(dfv),
+                    res_g,
+                    res_v,
+                    str(asn),
+                    plot_path,
+                    accepted_morphologies=accepted_morphologies,
+                    g_significant=res_g["dip"].get("significant", False),
+                    v_significant=res_v["dip"].get("significant", False),
                 )
+
+            rows.append(
+                {
+                    "mag_bin": str(rec.get("mag_bin")),
+                    "asas_sn_id": asn,
+                    "index_num": rec.get("index_num"),
+                    "index_csv": rec.get("index_csv"),
+                    "lc_dir": lc_dir,
+                    "dat_path": dat_path,
+
+                    "g_bayes_dip_significant": bool(res_g["dip"].get("significant", False)),
+                    "v_bayes_dip_significant": bool(res_v["dip"].get("significant", False)),
+                    "g_bayes_jump_significant": bool(res_g["jump"].get("significant", False)),
+                    "v_bayes_jump_significant": bool(res_v["jump"].get("significant", False)),
+
+                    "g_bayes_dip_max_prob": float(res_g["dip"].get("max_event_prob", np.nan)),
+                    "v_bayes_dip_max_prob": float(res_v["dip"].get("max_event_prob", np.nan)),
+
+                    "g_bayes_dip_bayes_factor": float(res_g["dip"].get("bayes_factor", np.nan)),
+                    "v_bayes_dip_bayes_factor": float(res_v["dip"].get("bayes_factor", np.nan)),
+                    "g_bayes_jump_bayes_factor": float(res_g["jump"].get("bayes_factor", np.nan)),
+                    "v_bayes_jump_bayes_factor": float(res_v["jump"].get("bayes_factor", np.nan)),
+
+                    "g_bayes_dip_max_logbf": float(res_g["dip"].get("max_log_bf_local", np.nan)),
+                    "v_bayes_dip_max_logbf": float(res_v["dip"].get("max_log_bf_local", np.nan)),
+                    "g_bayes_jump_max_logbf": float(res_g["jump"].get("max_log_bf_local", np.nan)),
+                    "v_bayes_jump_max_logbf": float(res_v["jump"].get("max_log_bf_local", np.nan)),
+
+                    "g_bayes_n_dips": int(res_g["dip"].get("n_dips", 0)),
+                    "v_bayes_n_dips": int(res_v["dip"].get("n_dips", 0)),
+                    "g_bayes_n_jumps": int(res_g["jump"].get("n_jumps", 0)),
+                    "v_bayes_n_jumps": int(res_v["jump"].get("n_jumps", 0)),
+
+                    # Rejection tracking
+                    "g_rejection_reason": g_dip_reason,
+                    "v_rejection_reason": v_dip_reason,
+                    "rejection_reason": combined_rejection,
+
+                    # Light curve statistics
+                    "g_n_points": g_n_points,
+                    "v_n_points": v_n_points,
+                    "g_time_span": g_time_span,
+                    "v_time_span": v_time_span,
+
+                    # Timing stats (from events.py)
+                    "g_jd_first": g_jd_first,
+                    "v_jd_first": v_jd_first,
+                    "g_jd_last": g_jd_last,
+                    "v_jd_last": v_jd_last,
+                    "g_cadence_median_days": g_cadence_median_days,
+                    "v_cadence_median_days": v_cadence_median_days,
+
+                    # Run details - g band dips
+                    "g_n_runs": g_run_info["n_runs"],
+                    "g_n_triggered": g_run_info["n_triggered"],
+                    "g_best_morphology": g_run_info["best_morphology"],
+                    "g_best_t0": g_run_info["best_t0"],
+                    "g_best_amplitude": g_run_info["best_amplitude"],
+                    "g_best_duration": g_run_info["best_duration"],
+                    "g_best_run_n_points": g_run_info["best_run_n_points"],
+                    "g_best_run_start_jd": g_run_info["best_run_start_jd"],
+                    "g_best_run_end_jd": g_run_info["best_run_end_jd"],
+                    # New morphology fields (from events.py)
+                    "g_dip_best_delta_bic": g_run_info["best_delta_bic"],
+                    "g_dip_best_width_param": g_run_info["best_width_param"],
+                    "g_dip_symmetry_score": g_run_info["best_symmetry_score"],
+
+                    # Run details - V band dips
+                    "v_n_runs": v_run_info["n_runs"],
+                    "v_n_triggered": v_run_info["n_triggered"],
+                    "v_best_morphology": v_run_info["best_morphology"],
+                    "v_best_t0": v_run_info["best_t0"],
+                    "v_best_amplitude": v_run_info["best_amplitude"],
+                    "v_best_duration": v_run_info["best_duration"],
+                    "v_best_run_n_points": v_run_info["best_run_n_points"],
+                    "v_best_run_start_jd": v_run_info["best_run_start_jd"],
+                    "v_best_run_end_jd": v_run_info["best_run_end_jd"],
+                    # New morphology fields (from events.py)
+                    "v_dip_best_delta_bic": v_run_info["best_delta_bic"],
+                    "v_dip_best_width_param": v_run_info["best_width_param"],
+                    "v_dip_symmetry_score": v_run_info["best_symmetry_score"],
+
+                    # Run details - g band jumps (from events.py)
+                    "g_jump_n_runs": g_jump_run_info["n_runs"],
+                    "g_jump_n_triggered": g_jump_run_info["n_triggered"],
+                    "g_jump_best_morphology": g_jump_run_info["best_morphology"],
+                    "g_jump_best_delta_bic": g_jump_run_info["best_delta_bic"],
+                    "g_jump_best_width_param": g_jump_run_info["best_width_param"],
+
+                    # Run details - V band jumps (from events.py)
+                    "v_jump_n_runs": v_jump_run_info["n_runs"],
+                    "v_jump_n_triggered": v_jump_run_info["n_triggered"],
+                    "v_jump_best_morphology": v_jump_run_info["best_morphology"],
+                    "v_jump_best_delta_bic": v_jump_run_info["best_delta_bic"],
+                    "v_jump_best_width_param": v_jump_run_info["best_width_param"],
+
+                    # Run count/max stats (from events.py - using dip stats)
+                    "g_dip_run_count": int(res_g["dip"].get("n_runs", 0)),
+                    "v_dip_run_count": int(res_v["dip"].get("n_runs", 0)),
+                    "g_jump_run_count": int(res_g["jump"].get("n_runs", 0)),
+                    "v_jump_run_count": int(res_v["jump"].get("n_runs", 0)),
+                    "g_dip_max_run_points": int(res_g["dip"].get("max_run_points", 0)),
+                    "v_dip_max_run_points": int(res_v["dip"].get("max_run_points", 0)),
+                    "g_dip_max_run_duration": float(res_g["dip"].get("max_run_duration", np.nan)),
+                    "v_dip_max_run_duration": float(res_v["dip"].get("max_run_duration", np.nan)),
+                    "g_dip_max_run_sum": float(res_g["dip"].get("max_run_sum", np.nan)),
+                    "v_dip_max_run_sum": float(res_v["dip"].get("max_run_sum", np.nan)),
+                    "g_dip_max_run_max": float(res_g["dip"].get("max_run_max", np.nan)),
+                    "v_dip_max_run_max": float(res_v["dip"].get("max_run_max", np.nan)),
+                    "g_dip_max_run_cameras": int(res_g["dip"].get("max_run_cameras", 0)),
+                    "v_dip_max_run_cameras": int(res_v["dip"].get("max_run_cameras", 0)),
+                    "g_jump_max_run_points": int(res_g["jump"].get("max_run_points", 0)),
+                    "v_jump_max_run_points": int(res_v["jump"].get("max_run_points", 0)),
+                    "g_jump_max_run_cameras": int(res_g["jump"].get("max_run_cameras", 0)),
+                    "v_jump_max_run_cameras": int(res_v["jump"].get("max_run_cameras", 0)),
+
+                    # Detection parameters (from events.py)
+                    "g_baseline_mag": float(res_g["dip"].get("baseline_mag", np.nan)),
+                    "v_baseline_mag": float(res_v["dip"].get("baseline_mag", np.nan)),
+                    "g_dip_best_p": float(res_g["dip"].get("best_p", np.nan)),
+                    "v_dip_best_p": float(res_v["dip"].get("best_p", np.nan)),
+                    "g_jump_best_p": float(res_g["jump"].get("best_p", np.nan)),
+                    "v_jump_best_p": float(res_v["jump"].get("best_p", np.nan)),
+                    "g_dip_best_mag_event": float(res_g["dip"].get("best_mag_event", np.nan)),
+                    "v_dip_best_mag_event": float(res_v["dip"].get("best_mag_event", np.nan)),
+                    "g_jump_best_mag_event": float(res_g["jump"].get("best_mag_event", np.nan)),
+                    "v_jump_best_mag_event": float(res_v["jump"].get("best_mag_event", np.nan)),
+                    "g_dip_trigger_max": float(res_g["dip"].get("trigger_max", np.nan)),
+                    "v_dip_trigger_max": float(res_v["dip"].get("trigger_max", np.nan)),
+                    "g_jump_trigger_max": float(res_g["jump"].get("trigger_max", np.nan)),
+                    "v_jump_trigger_max": float(res_v["jump"].get("trigger_max", np.nan)),
+
+                    # Camera statistics (from events.py)
+                    "g_n_cameras": g_cam_stats["n_cameras"],
+                    "v_n_cameras": v_cam_stats["n_cameras"],
+                    "g_camera_ids": g_cam_stats["camera_ids"],
+                    "v_camera_ids": v_cam_stats["camera_ids"],
+                    "g_camera_min_points": g_cam_stats["camera_min_points"],
+                    "v_camera_min_points": v_cam_stats["camera_min_points"],
+                    "g_camera_max_points": g_cam_stats["camera_max_points"],
+                    "v_camera_max_points": v_cam_stats["camera_max_points"],
+
+                    # Dipper score (from events.py)
+                    "g_dipper_score": g_dipper_stats["dipper_score"],
+                    "v_dipper_score": v_dipper_stats["dipper_score"],
+                    "g_dipper_n_dips": g_dipper_stats["dipper_n_dips"],
+                    "v_dipper_n_dips": v_dipper_stats["dipper_n_dips"],
+                    "g_dipper_n_valid_dips": g_dipper_stats["dipper_n_valid_dips"],
+                    "v_dipper_n_valid_dips": v_dipper_stats["dipper_n_valid_dips"],
+
+                    # System info (from events.py)
+                    "g_used_sigma_eff": bool(res_g["dip"].get("used_sigma_eff", False)),
+                    "v_used_sigma_eff": bool(res_v["dip"].get("used_sigma_eff", False)),
+                    "g_baseline_source": str(res_g["dip"].get("baseline_source", "unknown")),
+                    "v_baseline_source": str(res_v["dip"].get("baseline_source", "unknown")),
+                    "g_trigger_mode": str(res_g["dip"].get("trigger_mode", trigger_mode)),
+                    "v_trigger_mode": str(res_v["dip"].get("trigger_mode", trigger_mode)),
+                    "g_dip_trigger_threshold": float(res_g["dip"].get("trigger_threshold", np.nan)),
+                    "v_dip_trigger_threshold": float(res_v["dip"].get("trigger_threshold", np.nan)),
+                    "g_jump_trigger_threshold": float(res_g["jump"].get("trigger_threshold", np.nan)),
+                    "v_jump_trigger_threshold": float(res_v["jump"].get("trigger_threshold", np.nan)),
+                }
+            )
     else:
         rows = None
 
@@ -1460,11 +1379,6 @@ def build_reproduction_report(
     # ==========================================================================
     # Post-processing: Post-filters (apply_post_filters)
     # ==========================================================================
-    if run_post_filter and method != "bayes":
-        if verbose:
-            print("[POST-FILTER] Warning: post-filtering only supported for --method bayes. Skipping.")
-        run_post_filter = False
-
     if run_post_filter and not rows_df.empty:
         if verbose:
             print("\n[POST-FILTER] Applying post-filters...")
@@ -1515,7 +1429,6 @@ def build_reproduction_report(
 
             rows_df = apply_post_filters(
                 df_for_post,
-                apply_posterior_strength=True,
                 min_bayes_factor=post_filter_min_bayes_factor,
                 apply_run_robustness=True,
                 min_run_points=post_filter_min_run_points,
@@ -2034,13 +1947,13 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="""
 Examples:
   # Run on events.py output CSV (uses 'path' column directly)
-  malca reproduce --candidates output/strong_candidates_12_12.5.csv --method bayes
+  malca reproduce --candidates output/strong_candidates_12_12.5.csv
 
-  # With manifest for legacy data
-  malca reproduce --candidates candidates.csv --manifest manifest.csv --method bayes
+  # With manifest data
+  malca reproduce --candidates candidates.csv --manifest manifest.csv
 
   # With SkyPatrol CSV files
-  malca reproduce --candidates candidates.csv --skypatrol-dir input/skypatrol2 --method bayes
+  malca reproduce --candidates candidates.csv --skypatrol-dir input/skypatrol2
 """,
     )
 
@@ -2072,7 +1985,7 @@ Examples:
         "--workers",
         type=int,
         default=10,
-        help="ProcessPool worker count for dip_finder_naive.",
+        help="ProcessPool worker count.",
     )
     parser.add_argument(
         "--chunk-size",
@@ -2095,48 +2008,22 @@ Examples:
 
     # Bayesian detection settings
     parser.add_argument(
-        "--method",
-        choices=("bayes", "naive", "biweight"),
-        default="bayes",
-        help="Detection method: bayes (Bayesian), naive (legacy per-point), biweight (legacy delta).",
-    )
-    parser.add_argument(
-        "--trigger-mode",
-        choices=("logbf", "posterior_prob"),
-        default="posterior_prob",
-        help="Trigger Bayesian detections using log BF (recommended) or posterior probability (legacy).",
-    )
-    parser.add_argument(
         "--logbf-threshold-dip",
         type=float,
         default=5.0,
-        help="Dip triggers when max per-point log BF >= this (only if --trigger-mode=logbf).",
+        help="Dip triggers when max per-point log BF >= this.",
     )
     parser.add_argument(
         "--logbf-threshold-jump",
         type=float,
         default=5.0,
-        help="Jump triggers when max per-point log BF >= this (only if --trigger-mode=logbf).",
+        help="Jump triggers when max per-point log BF >= this.",
     )
     parser.add_argument(
         "--p-points",
         type=int,
         default=50,
         help="Number of logit-spaced probability grid points",
-    )
-
-    # Bayesian legacy settings (posterior_prob)
-    parser.add_argument(
-        "--significance-threshold",
-        type=float,
-        default=None,
-        help="Per-point posterior threshold (percentage, e.g. 99.99997). Only used if --trigger-mode=posterior_prob.",
-    )
-    parser.add_argument(
-        "--sigma-threshold",
-        type=float,
-        default=None,
-        help="Sigma threshold converted to a one-tailed Gaussian CDF (%%). Only used if --trigger-mode=posterior_prob.",
     )
 
     # Probability grid bounds (matching events.py)
@@ -2455,24 +2342,9 @@ def _main_impl(args: argparse.Namespace, plot_out_dir: Path | None = None) -> pd
     # Use provided plot_out_dir or fall back to args.out_dir
     out_dir = plot_out_dir if plot_out_dir is not None else Path(args.out_dir)
 
-    # posterior-prob threshold (only if requested)
-    significance_threshold = args.significance_threshold
-    if args.trigger_mode == "posterior_prob":
-        # physics convention note: one-tailed Gaussian threshold uses CDF(sigma)
-        if args.sigma_threshold is not None:
-            prob = stats.norm.cdf(args.sigma_threshold)
-            significance_threshold = prob * 100.0
-            if args.verbose:
-                print(f"[DEBUG] Converting {args.sigma_threshold}-sigma to significance threshold: {significance_threshold:.8f}%")
-        elif significance_threshold is None:
-            prob = stats.norm.cdf(5.0)
-            significance_threshold = prob * 100.0
-            if args.verbose:
-                print(f"[DEBUG] Using default 5-sigma significance threshold: {significance_threshold:.8f}%")
-    else:
-        significance_threshold = None
-        if args.verbose:
-            print(f"[DEBUG] Using logBF triggering: dip_thr={args.logbf_threshold_dip}, jump_thr={args.logbf_threshold_jump}")
+    significance_threshold = None
+    if args.verbose:
+        print(f"[DEBUG] Using logBF triggering: dip_thr={args.logbf_threshold_dip}, jump_thr={args.logbf_threshold_jump}")
 
     # Parse accepted morphologies
     if args.accepted_morphologies.lower() == "all":
@@ -2492,7 +2364,7 @@ def _main_impl(args: argparse.Namespace, plot_out_dir: Path | None = None) -> pd
         metrics_dip_threshold=args.metrics_dip_threshold,
         significance_threshold=significance_threshold,
         p_points=args.p_points,
-        trigger_mode=args.trigger_mode,
+        trigger_mode="logbf",
         logbf_threshold_dip=args.logbf_threshold_dip,
         logbf_threshold_jump=args.logbf_threshold_jump,
         # Probability grid bounds
@@ -2523,7 +2395,7 @@ def _main_impl(args: argparse.Namespace, plot_out_dir: Path | None = None) -> pd
         path_prefix=args.path_prefix,
         path_root=args.path_root,
         manifest_path=args.manifest,
-        method=args.method,
+        method="bayes",
         verbose=args.verbose,
         # Filter parameters
         skip_pre_filters=args.skip_pre_filters,

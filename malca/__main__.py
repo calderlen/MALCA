@@ -19,6 +19,7 @@ Usage:
 
 import sys
 import argparse
+import importlib
 
 
 def main():
@@ -47,15 +48,15 @@ def main():
             sys.argv = [sys.argv[0]] + remaining
             reproduce.main()
         elif command == "injection":
-            from malca.analysis import injection
+            injection = importlib.import_module("malca.evaluation.injection")
             sys.argv = [sys.argv[0]] + remaining
             injection.main()
         elif command == "detection_rate":
-            from malca.analysis import rate
+            rate = importlib.import_module("malca.evaluation.rate")
             sys.argv = [sys.argv[0]] + remaining
             rate.main()
         elif command == "attrition":
-            from malca.analysis import attrition
+            attrition = importlib.import_module("malca.evaluation.attrition")
             sys.argv = [sys.argv[0]] + remaining
             attrition.main()
         elif command == "plot":
@@ -107,15 +108,15 @@ def main():
             sys.argv = [sys.argv[0]] + remaining
             review_dual.main()
         elif command == "review.tui":
-            from malca.review import dual as review_dual
+            from malca.review import tui as review_tui
             sys.argv = [sys.argv[0]] + remaining
-            review_dual.main()
+            review_tui.main()
         elif command == "review":
             from malca.review import dual as review_dual
             sys.argv = [sys.argv[0]] + remaining
             review_dual.main()
         elif command == "validate":
-            from malca import validation
+            validation = importlib.import_module("malca.evaluation.validation")
             sys.argv = [sys.argv[0]] + remaining
             validation.main()
         return 0
@@ -149,7 +150,7 @@ def main():
     subparsers.add_parser("attrition", help="Summarize pre/post-filter attrition")
     subparsers.add_parser("review.plot", help="Plot shortlist candidates for review")
     subparsers.add_parser("review.gui", help="Launch review GUI + TUI together")
-    subparsers.add_parser("review.tui", help="Launch review GUI + TUI together")
+    subparsers.add_parser("review.tui", help="Launch terminal review interface")
     subparsers.add_parser("review", help="Launch review GUI + TUI together")
     
     parser.print_help()

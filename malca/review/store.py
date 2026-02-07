@@ -49,12 +49,13 @@ def _to_float(v) -> float | None:
 
 
 def infer_candidate_id(df: pd.DataFrame) -> pd.Series:
-    for col in ("candidate_id", "asas_sn_id", "source_id", "id", "path"):
-        if col in df.columns:
-            vals = df[col].astype(str).str.strip()
-            if vals.nunique(dropna=True) == len(df):
-                return vals
-    return pd.Series([f"row_{i}" for i in range(len(df))], index=df.index)
+    if "candidate_id" not in df.columns:
+        raise ValueError("Input must include a 'candidate_id' column.")
+
+    vals = df["candidate_id"].astype(str).str.strip()
+    if not vals.nunique(dropna=True) == len(df):
+        raise ValueError("'candidate_id' values must be unique.")
+    return vals
 
 
 def load_candidates_file(path: Path) -> pd.DataFrame:
@@ -65,12 +66,6 @@ def load_candidates_file(path: Path) -> pd.DataFrame:
     if path.suffix.lower() == ".csv":
         return pd.read_csv(path)
     raise ValueError("Unsupported file type. Use CSV or Parquet.")
-
-
-def _ensure_column(conn: sqlite3.Connection, table: str, name: str, decl: str) -> None:
-    cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
-    if name not in cols:
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
 
 def init_db(conn: sqlite3.Connection) -> None:
@@ -111,12 +106,6 @@ def init_db(conn: sqlite3.Connection) -> None:
         )
         """
     )
-    # Backward-compatible columns from older schema
-    _ensure_column(conn, "reviews", "label", "TEXT")
-    _ensure_column(conn, "reviews", "confidence", "INTEGER")
-    _ensure_column(conn, "reviews", "interest_reason", "TEXT")
-    _ensure_column(conn, "reviews", "review_pass", "INTEGER")
-
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS review_history (
@@ -168,15 +157,46 @@ def load_app_state(conn: sqlite3.Connection, key: str, default: str = "") -> str
     return default if row is None else str(row[0])
 
 
-def import_candidates(conn: sqlite3.Connection, df: pd.DataFrame, source_path: str) -> tuple[int, int]:
+def import_candidates(
+    conn: sqlite3.Connection,
+    df: pd.DataFrame,
+    source_path: str,
+    *,
+    characterize_before_import: bool = True,
+    characterize_crossmatch: Path = Path("input/vsx/asassn_x_vsx_matches_20250919_2252.csv"),
+    characterize_chunk_size: int = 1000,
+    characterize_cache: Path = Path("output/gaia_cache.parquet"),
+    characterize_dust: bool = True,
+    characterize_starhorse: str | None = "tap",
+) -> tuple[int, int]:
     if df.empty:
         return 0, 0
-    df = df.copy()
-    df["candidate_id"] = infer_candidate_id(df)
+
+    df_use = df
+    if characterize_before_import:
+        try:
+            from malca.characterize import characterize_candidates_df
+
+            df_use = characterize_candidates_df(
+                df,
+                crossmatch=characterize_crossmatch,
+                chunk_size=characterize_chunk_size,
+                cache=characterize_cache,
+                dust=characterize_dust,
+                starhorse=characterize_starhorse,
+            )
+            if not isinstance(df_use, pd.DataFrame) or df_use.empty:
+                df_use = df
+        except Exception as e:
+            print(f"Warning: characterization before import failed: {e}")
+            df_use = df
+
+    df_use = df_use.copy()
+    df_use["candidate_id"] = infer_candidate_id(df_use)
     imported_at = _utc_now()
 
     rows = []
-    for _, row in df.iterrows():
+    for _, row in df_use.iterrows():
         row_dict = {k: (None if pd.isna(v) else v) for k, v in row.to_dict().items()}
         rows.append(
             (
@@ -445,7 +465,7 @@ def find_plot_image(payload: dict, plot_dir: Path) -> Path | None:
     if not plot_dir.exists():
         return None
     keys = []
-    for k in ("asas_sn_id", "candidate_id", "source_id", "id"):
+    for k in ("candidate_id", "asas_sn_id"):
         if k in payload and payload[k] is not None:
             keys.append(str(payload[k]))
     lc_path = payload.get("path")

@@ -1021,6 +1021,105 @@ def fit_cmd_slope(
             'ism_consistent': ism_consistent, 'implied_rv': implied_rv}
 
 
+def characterize_candidates_df(
+    df: pd.DataFrame,
+    *,
+    crossmatch: Path = Path("input/vsx/asassn_x_vsx_matches_20250919_2252.csv"),
+    chunk_size: int = 1000,
+    cache: Path = Path("output/gaia_cache.parquet"),
+    dust: bool = False,
+    starhorse: str | None = None,
+) -> pd.DataFrame:
+    """Characterize candidates and return an enriched dataframe."""
+    if "asas_sn_id" not in df.columns:
+        print("Warning: characterize skipped: missing 'asas_sn_id' column")
+        return df
+
+    df_in = df.copy()
+    xmatch_path = crossmatch.expanduser()
+
+    if not xmatch_path.exists():
+        print(f"Warning: Crossmatch file {xmatch_path} not found")
+        if "gaia_id" in df_in.columns:
+            print("Proceeding with existing gaia_id column")
+            df_merged = df_in
+        else:
+            return df_in
+    else:
+        print(f"Loading crossmatch file {xmatch_path}...")
+        xmatch_cols = ["asas_sn_id", "gaia_id", "tmass_id", "allwise_id"]
+        try:
+            header = pd.read_csv(xmatch_path, nrows=0).columns
+            use_cols = ["asas_sn_id"] + [c for c in xmatch_cols if c in header and c != "asas_sn_id"]
+            df_xmatch = pd.read_csv(xmatch_path, usecols=use_cols, dtype=str)
+            df_in["asas_sn_id"] = df_in["asas_sn_id"].astype(str)
+            df_xmatch["asas_sn_id"] = df_xmatch["asas_sn_id"].astype(str)
+            df_merged = df_in.merge(df_xmatch, on="asas_sn_id", how="left")
+            print(f"Merged {len(df_merged)} rows")
+        except Exception as e:
+            print(f"Warning: characterize crossmatch read failed: {e}")
+            return df_in
+
+    if "gaia_id" not in df_merged.columns:
+        print("Warning: characterize skipped Gaia query: gaia_id not present")
+        return df_merged
+
+    if cache:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+
+    missing_gaia = df_merged["gaia_id"].isna().sum()
+    print(f"Found Gaia IDs for {len(df_merged) - missing_gaia}/{len(df_merged)} sources")
+    gaia_ids = df_merged["gaia_id"].dropna().unique().tolist()
+
+    if not gaia_ids:
+        print("Warning: characterize found no Gaia IDs")
+        return df_merged
+
+    print(f"Querying Gaia DR3 for {len(gaia_ids)} sources...")
+    gaia_df = query_gaia_by_ids(
+        gaia_ids,
+        chunk_size=chunk_size,
+        cache_file=str(cache) if cache else None,
+    )
+    if gaia_df.empty:
+        print("Warning: characterize Gaia query returned no rows")
+        return df_merged
+
+    df_merged["gaia_id"] = df_merged["gaia_id"].astype(str)
+    gaia_df["source_id"] = gaia_df["source_id"].astype(str)
+
+    print("Merging Gaia results...")
+    df_char = df_merged.merge(gaia_df, left_on="gaia_id", right_on="source_id", how="left", suffixes=("", "_gaia"))
+
+    print("Classifying Galactic populations...")
+    df_char = classify_galactic_population(df_char)
+
+    if starhorse:
+        print("Loading StarHorse catalog for ages...")
+        use_tap_query = not Path(starhorse).exists() if starhorse != "tap" else True
+        sh_df = query_starhorse_by_ids(
+            gaia_ids,
+            starhorse_file=starhorse if not use_tap_query else None,
+            use_tap=use_tap_query,
+        )
+        if not sh_df.empty:
+            df_char = df_char.merge(sh_df, on="source_id", how="left", suffixes=("", "_sh"))
+            if "age50" in df_char.columns:
+                df_char = classify_galactic_population(df_char)
+
+    if dust:
+        print("Computing 3D dust extinction (dustmaps3d)...")
+        df_char = get_dust_extinction(df_char)
+
+    if "tmass_j" in df_char.columns:
+        print("Classifying YSOs...")
+        df_char = classify_yso(df_char)
+    else:
+        print("Warning: IR photometry columns not found for YSO classification")
+
+    return df_char
+
+
 # =============================================================================
 # MAIN CLI
 # =============================================================================
@@ -1046,99 +1145,14 @@ def main():
     else:
         df = pd.read_csv(args.input)
         
-    if "asas_sn_id" not in df.columns:
-        print(f"Error: 'asas_sn_id' column not found in input {args.input}")
-        return
-
-    # Load Crossmatch
-    xmatch_path = args.crossmatch.expanduser()
-    if not xmatch_path.exists():
-        print(f"Error: Crossmatch file {xmatch_path} not found.")
-        if "gaia_id" in df.columns:
-            print("Warning: Crossmatch not found, but 'gaia_id' is present in input. Proceeding with input IDs.")
-            df_merged = df
-        else:
-            return
-    else:
-        print(f"Loading crossmatch file {xmatch_path}...")
-        xmatch_cols = ["asas_sn_id", "gaia_id", "tmass_id", "allwise_id"]
-        try:
-            header = pd.read_csv(xmatch_path, nrows=0).columns
-            use_cols = ["asas_sn_id"] + [c for c in xmatch_cols if c in header and c != "asas_sn_id"]
-            df_xmatch = pd.read_csv(xmatch_path, usecols=use_cols, dtype=str)
-            
-            print("Merging events with crossmatch table...")
-            df["asas_sn_id"] = df["asas_sn_id"].astype(str)
-            df_xmatch["asas_sn_id"] = df_xmatch["asas_sn_id"].astype(str)
-            
-            df_merged = df.merge(df_xmatch, on="asas_sn_id", how="left")
-            print(f"Merged {len(df_merged)} rows.")
-            
-        except Exception as e:
-            print(f"Error reading crossmatch file: {e}")
-            return
-
-    # Extract Gaia IDs
-    if "gaia_id" not in df_merged.columns:
-        print("Error: 'gaia_id' not found after merge.")
-        df_char = df_merged
-    else:
-        if args.cache:
-            args.cache.parent.mkdir(parents=True, exist_ok=True)
-            
-        missing_gaia = df_merged["gaia_id"].isna().sum()
-        print(f"Found Gaia IDs for {len(df_merged) - missing_gaia}/{len(df_merged)} sources.")
-        
-        gaia_ids = df_merged["gaia_id"].dropna().unique().tolist()
-        
-        if not gaia_ids:
-            print("No Gaia IDs found to query.")
-            df_char = df_merged
-        else:
-            # Query Gaia
-            print(f"Querying Gaia DR3 for {len(gaia_ids)} sources...")
-            gaia_df = query_gaia_by_ids(
-                gaia_ids, 
-                chunk_size=args.chunk_size,
-                cache_file=str(args.cache) if args.cache else None
-            )
-            
-            if gaia_df.empty:
-                print("Warning: No results from Gaia query.")
-                df_char = df_merged
-            else:
-                df_merged["gaia_id"] = df_merged["gaia_id"].astype(str)
-                gaia_df["source_id"] = gaia_df["source_id"].astype(str)
-                
-                print("Merging Gaia results...")
-                df_char = df_merged.merge(gaia_df, left_on="gaia_id", right_on="source_id", how="left", suffixes=("", "_gaia"))
-                
-                # Galactic Population
-                print("Classifying Galactic populations...")
-                df_char = classify_galactic_population(df_char)
-                
-                # StarHorse join (TAP queries by default)
-                if args.starhorse:
-                    print("Loading StarHorse catalog for ages...")
-                    # If user provides a file path, use local catalog; otherwise use TAP
-                    use_tap_query = not Path(args.starhorse).exists() if args.starhorse != "tap" else True
-                    sh_df = query_starhorse_by_ids(gaia_ids, starhorse_file=args.starhorse if not use_tap_query else None, use_tap=use_tap_query)
-                    if not sh_df.empty:
-                        df_char = df_char.merge(sh_df, on='source_id', how='left', suffixes=('', '_sh'))
-                        if 'age50' in df_char.columns:
-                            df_char = classify_galactic_population(df_char)
-                
-                # Dust correction
-                if args.dust:
-                    print("Computing 3D dust extinction (dustmaps3d)...")
-                    df_char = get_dust_extinction(df_char)
-                
-                # YSO Classification
-                if "tmass_j" in df_char.columns:
-                    print("Classifying YSOs...")
-                    df_char = classify_yso(df_char)
-                else:
-                    print("Warning: IR photometry columns not found for YSO classification.")
+    df_char = characterize_candidates_df(
+        df,
+        crossmatch=args.crossmatch,
+        chunk_size=args.chunk_size,
+        cache=args.cache,
+        dust=args.dust,
+        starhorse=args.starhorse,
+    )
     
     # Save results
     print("Saving results...")

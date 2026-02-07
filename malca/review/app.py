@@ -30,6 +30,10 @@ from malca.review.store import (
 )
 
 
+DEFAULT_XMATCH = "input/vsx/asassn_x_vsx_matches_20250919_2252.csv"
+DEFAULT_GAIA_CACHE = "output/gaia_cache.parquet"
+
+
 def main() -> None:
     st.set_page_config(page_title="MALCA Candidate Review", layout="wide")
     st.title("MALCA Candidate Review")
@@ -43,13 +47,30 @@ def main() -> None:
 
     last_file = load_app_state(conn, "last_input_file", "")
     input_path_str = st.sidebar.text_input("Candidates file (CSV/Parquet)", value=last_file)
+    st.sidebar.markdown("**Characterize on import**")
+    characterize_crossmatch = st.sidebar.text_input("Crossmatch CSV", value=DEFAULT_XMATCH)
+    characterize_cache = st.sidebar.text_input("Gaia cache", value=DEFAULT_GAIA_CACHE)
+    characterize_chunk_size = st.sidebar.number_input("Gaia chunk size", min_value=1, value=1000, step=100)
+    characterize_dust = st.sidebar.checkbox("Enable dustmaps3d", value=True)
+    characterize_starhorse = st.sidebar.text_input("StarHorse", value="tap")
+
     if st.sidebar.button("Import / Refresh Candidates", type="primary"):
         if not input_path_str.strip():
             st.sidebar.error("Provide a file path first.")
         else:
             try:
                 src = Path(input_path_str).expanduser()
-                n_rows, n_new = import_candidates(conn, load_candidates_file(src), str(src))
+                n_rows, n_new = import_candidates(
+                    conn,
+                    load_candidates_file(src),
+                    str(src),
+                    characterize_before_import=True,
+                    characterize_crossmatch=Path(characterize_crossmatch).expanduser(),
+                    characterize_chunk_size=int(characterize_chunk_size),
+                    characterize_cache=Path(characterize_cache).expanduser(),
+                    characterize_dust=bool(characterize_dust),
+                    characterize_starhorse=(characterize_starhorse.strip() or None),
+                )
                 save_app_state(conn, "last_input_file", str(src))
                 st.sidebar.success(f"Imported {n_rows} rows ({n_new} new candidate IDs)")
             except Exception as e:
@@ -140,7 +161,9 @@ def main() -> None:
         show_keys = [
             "asas_sn_id", "path", "periodic_flag", "catalog_match", "high_ruwe_flag", "lsp_power",
             "lsp_period", "lsp_bootstrap_sig", "periodicity_score", "dip_best_log_bf", "jump_best_log_bf",
-            "dip_best_morph", "jump_best_morph",
+            "dip_best_morph", "jump_best_morph", "ruwe", "teff_gspphot", "logg_gspphot", "mh_gspphot",
+            "distance_gspphot", "A_v_3d", "ebv_3d", "yso_class", "yso_class_num", "galactic_pop",
+            "age50", "mass50", "banyan_field_prob", "banyan_best_assoc",
         ]
         summary = {k: payload.get(k) for k in show_keys if k in payload}
         st.dataframe(pd.DataFrame([summary]).T.rename(columns={0: "value"}), use_container_width=True)

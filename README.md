@@ -393,7 +393,7 @@ output/
   malca reproduce --method bayes --manifest output/lc_manifest.parquet \
       --candidates my_targets.csv --out-dir output/results_repro --workers 10
   ```
-  **Note**: Only `--method bayes` is supported. Legacy methods `naive` and `biweight` have been deprecated.
+  **Note**: Reproduction uses Bayesian detection.
   
 - Validate results without raw data:
   ```bash

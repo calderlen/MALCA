@@ -184,7 +184,7 @@ graph TB
 #### **Testing & Validation** (`tests/` directory)
 - **`tests/reproduce.py`**: Re-runs detection on known objects (dippers, eclipsing binaries)
   - Only supports `method='bayes'` (current implementation)
-  - Legacy methods `naive` and `biweight` have been deprecated
+  - Reproduction uses Bayesian detection
   - Requires raw light curve data
 - **`tests/validation.py`**: Validates detection results against known candidates
   - Compares events.py output to expected detections

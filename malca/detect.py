@@ -34,7 +34,7 @@ from malca.post_filter import apply_post_filters
 from malca.plot_candidates import plot_passing_candidates
 from malca.classify import compute_all_classifications
 from malca.stats import compute_stats
-from malca.characterize import query_gaia_by_ids, get_dust_extinction
+from malca.characterize import characterize_candidates_df
 from malca.utils import log as _log
 
 
@@ -170,12 +170,9 @@ def main():
     parser.add_argument("--run-characterize", dest="run_characterize", action="store_true", help="Run Gaia DR3 characterization after post_filter (default: enabled)")
     parser.add_argument("--no-run-characterize", dest="run_characterize", action="store_false", help="Skip characterization step")
     parser.add_argument("--gaia-cache", type=Path, default=None, help="Path to Gaia query cache file (parquet). Default: <out_dir>/gaia_cache/gaia_cache.parquet")
-    parser.add_argument(
-        "--index-file",
-        type=Path,
-        default=Path("output/asassn_index_masked_concat_cleaned_20250919_154524_brotli.parquet"),
-        help="Path to ASAS-SN index file with gaia_id, ra_deg, dec_deg columns",
-    )
+    parser.add_argument("--characterize-crossmatch", type=Path, default=Path("input/vsx/asassn_x_vsx_matches_20250919_2252.csv"), help="ASAS-SN x VSX crossmatch file for characterize step")
+    parser.add_argument("--characterize-chunk-size", type=int, default=1000, help="Gaia query chunk size for characterize step")
+    parser.add_argument("--characterize-starhorse", type=str, default="tap", help="StarHorse mode/path for characterize step (default: tap)")
     parser.add_argument("--run-dust", dest="run_dust", action="store_true", help="Run 3D dust extinction correction (default: enabled)")
     parser.add_argument("--no-run-dust", dest="run_dust", action="store_false", help="Skip dust extinction step")
 
@@ -372,7 +369,9 @@ def main():
             "run_characterize": args.run_characterize,
             "run_dust": args.run_dust,
             "gaia_cache": str(args.gaia_cache),
-            "index_file": str(args.index_file),
+            "characterize_crossmatch": str(args.characterize_crossmatch),
+            "characterize_chunk_size": args.characterize_chunk_size,
+            "characterize_starhorse": args.characterize_starhorse,
             # Step 8: Classify
             "run_classify": args.run_classify,
             # Step 9: Enrich
@@ -446,7 +445,7 @@ def main():
     if args.force_filter or not filtered_file.exists():
         log(f"\nApplying pre-filters with {args.workers} workers...")
 
-        # Use lc_dir as the directory path for pre_filter compatibility (path/<id>.dat2)
+        # Use lc_dir as the directory path for pre_filter input (path/<id>.dat2)
         df_to_filter = df_manifest.rename(columns={"lc_dir": "path"}).copy()
 
         df_filtered = apply_pre_filters(
@@ -493,14 +492,17 @@ def main():
     # Step 2.5: Apply camera median filter to identify cameras to exclude
     if not args.skip_camera_median and "mag_bin" in df_filtered.columns:
         log(f"\nApplying camera median filter (tolerance={args.camera_median_tolerance} mag)...")
-        # Ensure 'path' column exists for filter_camera_medians
-        if "path" not in df_filtered.columns and "dat_path" in df_filtered.columns:
-            df_filtered = df_filtered.rename(columns={"dat_path": "path"})
-        df_filtered = filter_camera_medians(
-            df_filtered,
+        # Camera median validation needs per-source file paths (.dat2 -> .raw2).
+        # Keep the original path column unchanged for downstream code.
+        camera_median_df = df_filtered.copy()
+        if "dat_path" in camera_median_df.columns:
+            camera_median_df["path"] = camera_median_df["dat_path"]
+        df_camera = filter_camera_medians(
+            camera_median_df,
             mag_tolerance=args.camera_median_tolerance,
             show_tqdm=args.verbose,
         )
+        df_filtered["excluded_cameras"] = df_camera["excluded_cameras"]
         n_with_exclusions = (df_filtered["excluded_cameras"].fillna("") != "").sum()
         log(f"Found {n_with_exclusions}/{len(df_filtered)} sources with excluded cameras")
 
@@ -809,47 +811,16 @@ def main():
 
                         df_char["asas_sn_id"] = df_char["path"].astype(str).map(_extract_id)
 
-                    index_path = args.index_file.expanduser() if args.index_file else None
-                    if index_path and index_path.exists():
-                        try:
-                            index_cols = ["asas_sn_id", "gaia_id", "ra_deg", "dec_deg"]
-                            if str(index_path).endswith(".parquet"):
-                                index_df = pd.read_parquet(index_path, columns=index_cols)
-                            else:
-                                index_df = pd.read_csv(index_path, usecols=index_cols)
-                            index_df["asas_sn_id"] = index_df["asas_sn_id"].astype(str)
-                            if "asas_sn_id" in df_char.columns:
-                                df_char["asas_sn_id"] = df_char["asas_sn_id"].astype(str)
-                                df_char = df_char.merge(index_df, on="asas_sn_id", how="left", suffixes=("", "_idx"))
-                        except Exception as e:
-                            print(f"Warning: could not load index file {index_path}: {e}")
-                    elif args.run_characterize or args.run_dust:
-                        print(f"Warning: index file not found: {index_path}")
-
-                    if args.run_characterize:
-                        gaia_ids = []
-                        if "gaia_id" in df_char.columns:
-                            gaia_ids = df_char["gaia_id"].dropna().astype(str).unique().tolist()
-                        if not gaia_ids:
-                            print("Warning: no Gaia IDs found for characterization. Provide --index-file with gaia_id.")
-                        else:
-                            gaia_df = query_gaia_by_ids(
-                                gaia_ids,
-                                cache_file=str(args.gaia_cache) if args.gaia_cache else None,
-                            )
-                            if not gaia_df.empty:
-                                df_char["gaia_id"] = df_char["gaia_id"].astype(str)
-                                gaia_df["source_id"] = gaia_df["source_id"].astype(str)
-                                df_char = df_char.merge(
-                                    gaia_df,
-                                    left_on="gaia_id",
-                                    right_on="source_id",
-                                    how="left",
-                                    suffixes=("", "_gaia"),
-                                )
-
-                    if args.run_dust:
-                        df_char = get_dust_extinction(df_char)
+                    # Use full characterize pipeline (single source of truth)
+                    starhorse_arg = args.characterize_starhorse if args.run_characterize else None
+                    df_char = characterize_candidates_df(
+                        df_char,
+                        crossmatch=args.characterize_crossmatch.expanduser(),
+                        chunk_size=args.characterize_chunk_size,
+                        cache=args.gaia_cache.expanduser() if args.gaia_cache else (out_dir / "gaia_cache" / "gaia_cache.parquet"),
+                        dust=args.run_dust,
+                        starhorse=starhorse_arg,
+                    )
 
                     characterize_output = results_dir / "lc_events_characterized.csv"
                     df_char.to_csv(characterize_output, index=False)
