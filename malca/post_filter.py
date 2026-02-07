@@ -619,6 +619,7 @@ def _lsp_worker(args: tuple) -> dict:
             "lsp_period": ls_result["ls_period_days"],
             "lsp_bootstrap_sig": ls_result["ls_bootstrap_sig"],
             "lsp_is_alias": ls_result["ls_is_alias"],
+            "lsp_is_significant": ls_result["ls_is_significant"],
             "error": None,
         }
     except Exception as e:
@@ -628,6 +629,7 @@ def _lsp_worker(args: tuple) -> dict:
             "lsp_period": np.nan,
             "lsp_bootstrap_sig": np.nan,
             "lsp_is_alias": False,
+            "lsp_is_significant": False,
             "error": str(e),
         }
 
@@ -638,6 +640,7 @@ def validate_periodicity(
     n_bootstrap: int = 1000,
     significance_level: float = 0.01,
     exclude_alias_periods: bool = True,
+    flag_only: bool = True,
     show_tqdm: bool = False,
     verbose: bool = False,
     rejected_log_csv: str | Path | None = None,
@@ -780,14 +783,25 @@ def validate_periodicity(
     periods = []
     bootstrap_significances = []
     is_alias = []
+    is_significant = []
+    periodicity_scores = []
     keep_flags = []
     
     for path_str in paths:
         result = all_results.get(path_str, {})
         powers.append(result.get("lsp_power", np.nan))
         periods.append(result.get("lsp_period", np.nan))
-        bootstrap_significances.append(result.get("lsp_bootstrap_sig", np.nan))
-        is_alias.append(result.get("lsp_is_alias", False))
+        sig = result.get("lsp_bootstrap_sig", np.nan)
+        bootstrap_significances.append(sig)
+        alias_flag = result.get("lsp_is_alias", False)
+        is_alias.append(alias_flag)
+        is_significant.append(bool(result.get("lsp_is_significant", False)))
+
+        if np.isfinite(sig):
+            min_p = max(1.0 / float(max(n_bootstrap, 1)), 1e-12)
+            periodicity_scores.append(float(-np.log10(np.clip(sig, min_p, 1.0))))
+        else:
+            periodicity_scores.append(np.nan)
         
         # Keep if NOT significantly periodic (or is an alias, or has error)
         keep = True
@@ -802,15 +816,28 @@ def validate_periodicity(
     df_out["lsp_period"] = periods
     df_out["lsp_bootstrap_sig"] = bootstrap_significances
     df_out["lsp_is_alias"] = is_alias
+    df_out["lsp_is_significant"] = is_significant
+    df_out["periodicity_score"] = periodicity_scores
 
-    df_filtered = df_out[keep_flags].reset_index(drop=True)
+    periodic_flags = [not x for x in keep_flags]
+    df_out["periodic_flag"] = periodic_flags
+
+    if flag_only:
+        df_filtered = df_out.reset_index(drop=True)
+    else:
+        df_filtered = df_out[keep_flags].reset_index(drop=True)
 
     if show_tqdm:
-        tqdm.write(f"[validate_periodicity] kept {len(df_filtered)}/{n0}")
+        n_flagged = int(np.sum(periodic_flags))
+        if flag_only:
+            tqdm.write(f"[validate_periodicity] flagged {n_flagged}/{n0} as periodic")
+        else:
+            tqdm.write(f"[validate_periodicity] kept {len(df_filtered)}/{n0}")
         if n_errors > 0:
             tqdm.write(f"[validate_periodicity] {n_errors} sources had errors (kept as-is)")
 
-    log_rejections(df_out, df_filtered, "validate_periodicity", rejected_log_csv)
+    if not flag_only:
+        log_rejections(df_out, df_filtered, "validate_periodicity", rejected_log_csv)
 
     return df_filtered
 
@@ -827,6 +854,7 @@ def _save_checkpoint(checkpoint_file: Path, completed: dict, new_results: list) 
             "lsp_period": r.get("lsp_period", np.nan),
             "lsp_bootstrap_sig": r.get("lsp_bootstrap_sig", np.nan),
             "lsp_is_alias": r.get("lsp_is_alias", False),
+            "lsp_is_significant": r.get("lsp_is_significant", False),
         })
     pd.DataFrame(clean_data).to_parquet(checkpoint_file, index=False)
 
@@ -1132,6 +1160,7 @@ def apply_post_filters(
     periodicity_n_bootstrap: int = 1000,
     periodicity_significance: float = 0.01,
     periodicity_exclude_aliases: bool = True,
+    periodicity_flag_only: bool = True,
     periodicity_workers: int = 1,
     periodicity_checkpoint_dir: Path | None = None,
     # Validation: Gaia RUWE
@@ -1216,6 +1245,7 @@ def apply_post_filters(
             "n_bootstrap": periodicity_n_bootstrap,
             "significance_level": periodicity_significance,
             "exclude_alias_periods": periodicity_exclude_aliases,
+            "flag_only": periodicity_flag_only,
             "workers": periodicity_workers,
             "checkpoint_dir": periodicity_checkpoint_dir,
             "show_tqdm": show_tqdm,
@@ -1284,10 +1314,10 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Example usage:
-  python -m malca.post_filter --input results.csv --output results_filtered.csv
-  python -m malca.post_filter --input results.csv --output results_filtered.csv --min-bayes-factor 20
-  python -m malca.post_filter --input results.csv --output results_filtered.csv --apply-periodicity-validation
-  python -m malca.post_filter --input results.csv --output results_filtered.csv --skip-gaia-ruwe-validation --skip-periodic-catalog-validation
+  malca post_filter --input results.csv --output results_filtered.csv
+  malca post_filter --input results.csv --output results_filtered.csv --min-bayes-factor 20
+  malca post_filter --input results.csv --output results_filtered.csv --apply-periodicity-validation
+  malca post_filter --input results.csv --output results_filtered.csv --skip-gaia-ruwe-validation --skip-periodic-catalog-validation
 """
     )
 
@@ -1343,6 +1373,8 @@ Example usage:
                         help="Significance threshold (default: 0.01)")
     parser.add_argument("--periodicity-no-exclude-aliases", action="store_true",
                         help="Do not exclude alias periods (1d, 29.53d, etc.)")
+    parser.add_argument("--periodicity-reject", action="store_true",
+                        help="Reject periodic candidates (default: flag only)")
     parser.add_argument("--workers", type=int, default=1,
                         help="Number of parallel workers for LSP validation (default: 1)")
     parser.add_argument("--checkpoint-dir", type=Path, default=None,
@@ -1478,6 +1510,7 @@ Example usage:
         periodicity_n_bootstrap=args.periodicity_n_bootstrap,
         periodicity_significance=args.periodicity_significance,
         periodicity_exclude_aliases=not args.periodicity_no_exclude_aliases,
+        periodicity_flag_only=not args.periodicity_reject,
         periodicity_workers=args.workers,
         periodicity_checkpoint_dir=args.checkpoint_dir.expanduser() if args.checkpoint_dir else (detect_run / "checkpoints" if args.detect_run and args.apply_periodicity_validation else None),
         # Gaia RUWE validation
@@ -1518,6 +1551,7 @@ Example usage:
                     "apply_morphology": args.apply_morphology,
                     "apply_score": args.apply_score_filter,
                     "apply_periodicity_validation": args.apply_periodicity_validation,
+                    "periodicity_reject": args.periodicity_reject if args.apply_periodicity_validation else None,
                     "apply_gaia_ruwe_validation": not args.skip_gaia_ruwe_validation,
                     "apply_periodic_catalog_validation": not args.skip_periodic_catalog_validation,
                     "min_bayes_factor": args.min_bayes_factor,

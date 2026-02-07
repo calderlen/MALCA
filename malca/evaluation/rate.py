@@ -400,7 +400,6 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
                         help="Override CSV output path (default: <out-dir>/<timestamp>/results/detection_rate_results.csv)")
     parser.add_argument(
         "--control-sample-size",
-        "--sample-size",
         dest="control_sample_size",
         type=int,
         default=10000,

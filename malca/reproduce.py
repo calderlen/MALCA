@@ -672,7 +672,6 @@ def build_reproduction_report(
     vsx_catalog: Path | str = Path("/home/lenhart.106/code/malca/input/vsx/vsxcat.090525.csv"),
     vsx_max_sep: float = 3.0,
     min_mag_offset: float = 0.05,
-    skip_post_filters: bool = False,
     run_post_filter: bool = False,
     post_filter_min_run_cameras: int = 2,
     post_filter_min_run_points: int = 2,
@@ -694,8 +693,6 @@ def build_reproduction_report(
     # Default morphologies: gaussian and paczynski (reject noise/none)
     if accepted_morphologies is None:
         accepted_morphologies = {"gaussian", "paczynski", "fred"}
-    if skip_post_filters:
-        run_post_filter = False
     manifest_df = load_manifest_df(manifest_path) if manifest_path is not None else None
 
     baseline_candidates = candidates if candidates is not None else brayden_candidates
@@ -2037,13 +2034,13 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="""
 Examples:
   # Run on events.py output CSV (uses 'path' column directly)
-  python -m malca.reproduction --input output/strong_candidates_12_12.5.csv --method bayes
+  malca reproduce --candidates output/strong_candidates_12_12.5.csv --method bayes
 
   # With manifest for legacy data
-  python -m malca.reproduction --candidates candidates.csv --manifest manifest.csv --method bayes
+  malca reproduce --candidates candidates.csv --manifest manifest.csv --method bayes
 
   # With SkyPatrol CSV files
-  python -m malca.reproduction --candidates candidates.csv --skypatrol-dir input/skypatrol2 --method bayes
+  malca reproduce --candidates candidates.csv --skypatrol-dir input/skypatrol2 --method bayes
 """,
     )
 
@@ -2344,12 +2341,6 @@ Examples:
         action="store_true",
         help="Include Lomb-Scargle periodogram in enrichment (expensive)",
     )
-    parser.add_argument(
-        "--skip-post-filters",
-        action="store_true",
-        help="Skip post-filtering step (deprecated, use --run-post-filter instead)",
-    )
-
     # Morphology filter options
     parser.add_argument(
         "--accepted-morphologies",
@@ -2373,11 +2364,6 @@ Examples:
         "--candidates",
         default=None,
         help="Candidate spec (built-in list name or path to CSV/Parquet file from events.py).",
-    )
-    parser.add_argument(
-        "--input",
-        default=None,
-        help="Alias for --candidates (path to events.py output CSV/Parquet).",
     )
     parser.add_argument(
         "--path-prefix",
@@ -2427,9 +2413,9 @@ def main(argv: Iterable[str] | None = None) -> None:
     try:
         # Log the full command
         if argv is not None:
-            cmd_str = f"python -m malca.reproduction {' '.join(str(a) for a in argv)}"
+            cmd_str = f"malca reproduce {' '.join(str(a) for a in argv)}"
         else:
-            cmd_str = f"python -m malca.reproduction {' '.join(sys.orig_argv[1:]) if hasattr(sys, 'orig_argv') else '(unknown)'}"
+            cmd_str = f"malca reproduce {' '.join(sys.orig_argv[1:]) if hasattr(sys, 'orig_argv') else '(unknown)'}"
         print(f"Command: {cmd_str}")
         print(f"Log file: {log_path}")
         print(f"Plot dir: {plot_out_dir}")
@@ -2463,7 +2449,7 @@ def main(argv: Iterable[str] | None = None) -> None:
 
 def _main_impl(args: argparse.Namespace, plot_out_dir: Path | None = None) -> pd.DataFrame:
     """Main implementation, called by main() with logging wrapper. Returns the report DataFrame."""
-    candidates_spec = args.input or args.candidates
+    candidates_spec = args.candidates
     candidate_data = resolve_candidates(candidates_spec)
 
     # Use provided plot_out_dir or fall back to args.out_dir
@@ -2548,7 +2534,6 @@ def _main_impl(args: argparse.Namespace, plot_out_dir: Path | None = None) -> pd
         vsx_catalog=args.vsx_catalog,
         vsx_max_sep=args.vsx_max_sep,
         min_mag_offset=args.min_mag_offset,
-        skip_post_filters=args.skip_post_filters,
         run_post_filter=args.run_post_filter,
         post_filter_min_run_cameras=args.post_filter_min_run_cameras,
         post_filter_min_run_points=args.post_filter_min_run_points,
@@ -2591,7 +2576,7 @@ def _main_impl(args: argparse.Namespace, plot_out_dir: Path | None = None) -> pd
     if args.run_min_duration_days is not None:
         print(f"                      min_duration_days={args.run_min_duration_days}")
     print(f"Morphology filter:    accepted={{{', '.join(sorted(accepted_morphologies))}}}")
-    post_filter_state = "APPLIED" if (args.run_post_filter and not args.skip_post_filters) else "SKIPPED"
+    post_filter_state = "APPLIED" if args.run_post_filter else "SKIPPED"
     print(f"Post-filters:         {post_filter_state}")
     if args.run_postprocess:
         print(f"Postprocess plots:    {'ENABLED' if args.run_post_filter else 'SKIPPED (requires post-filter)'}")

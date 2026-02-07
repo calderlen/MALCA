@@ -19,7 +19,7 @@ import re
 # Import from malca
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from malca.injection import load_efficiency_cube, plot_detection_efficiency
+from malca.analysis.injection import load_efficiency_cube, plot_detection_efficiency
 
 
 def find_latest_run_dir(base_dir: Path, tag: str) -> Path | None:

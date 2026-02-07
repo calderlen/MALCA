@@ -223,13 +223,13 @@ graph TB
 
 #### **CLI Entry Point**
 - **`__main__.py`**: Unified command-line interface
-  - `python -m malca manifest` → Build manifest
-  - `python -m malca detect` → Run event detection
-  - `python -m malca reproduce` → Re-run detection on known objects
-  - `python -m malca validate` → Validate results (no raw data)
-  - `python -m malca plot` → Plot light curves
-  - `python -m malca score` → Score events
-  - `python -m malca filter` → Apply filters
+  - `malca manifest` → Build manifest
+  - `malca detect` → Run event detection
+  - `malca reproduce` → Re-run detection on known objects
+  - `malca validate` → Validate results (no raw data)
+  - `malca plot` → Plot light curves
+  - `malca score` → Score events
+  - `malca filter` → Apply filters
 
 ## Key Insights
 

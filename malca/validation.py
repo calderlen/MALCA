@@ -6,7 +6,7 @@ candidates to compute validation metrics (precision, recall, etc.) WITHOUT
 requiring access to the original light curve data.
 
 Usage:
-    python -m malca.validation --results events_output.csv --candidates known_targets.csv
+    malca validate --results events_output.csv --candidates known_targets.csv
 """
 
 from __future__ import annotations

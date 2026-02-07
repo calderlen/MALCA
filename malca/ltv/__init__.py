@@ -13,7 +13,7 @@ Modules:
 
 Usage:
     # Core processing (compute seasonal trends)
-    python -m malca.ltv.core --mag-bin 13_13.5 --output ltv_output.csv
+    malca ltv.core --mag-bin 13_13.5 --output ltv_output.csv
     
     # Full pipeline (filtering + crossmatch + NEOWISE + extinction)
     from malca.ltv import run_full_pipeline

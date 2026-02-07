@@ -6,8 +6,13 @@ Reads the filtered events results and plots only sources with failed_any == Fals
 from __future__ import annotations
 
 import argparse
+import json
+import shlex
+import sys
+from datetime import datetime
 from pathlib import Path
 import pandas as pd
+import numpy as np
 from tqdm.auto import tqdm
 
 from malca.plot import plot_bayes_results, BASELINE_FUNCTIONS
@@ -16,6 +21,12 @@ from malca.plot import plot_bayes_results, BASELINE_FUNCTIONS
 def load_passing_candidates(
     filtered_path: Path,
     *,
+    require_failed_any_false: bool = True,
+    require_flags: list[str] | None = None,
+    exclude_flags: list[str] | None = None,
+    min_lsp_power: float | None = None,
+    max_lsp_bootstrap_sig: float | None = None,
+    min_periodicity_score: float | None = None,
     max_plots: int | None = None,
 ) -> pd.DataFrame:
     """
@@ -41,10 +52,45 @@ def load_passing_candidates(
         df = pd.read_csv(filtered_path)
 
     # Filter to passing candidates
-    if "failed_any" in df.columns:
+    if require_failed_any_false and "failed_any" in df.columns:
         df = df[~df["failed_any"]].copy()
-    else:
+    elif require_failed_any_false:
         print("Warning: 'failed_any' column not found, using all rows")
+
+    # Include only rows where all required flags are True
+    if require_flags:
+        for flag_col in require_flags:
+            if flag_col not in df.columns:
+                print(f"Warning: required flag column '{flag_col}' not found; skipping this requirement")
+                continue
+            df = df[df[flag_col].fillna(False)].copy()
+
+    # Exclude rows where any exclude flag is True
+    if exclude_flags:
+        for flag_col in exclude_flags:
+            if flag_col not in df.columns:
+                print(f"Warning: exclude flag column '{flag_col}' not found; skipping this exclusion")
+                continue
+            df = df[~df[flag_col].fillna(False)].copy()
+
+    # Optional quantitative periodicity filters
+    if min_lsp_power is not None:
+        if "lsp_power" in df.columns:
+            df = df[df["lsp_power"].fillna(-np.inf) >= float(min_lsp_power)].copy()
+        else:
+            print("Warning: 'lsp_power' column not found; skipping --min-lsp-power")
+
+    if max_lsp_bootstrap_sig is not None:
+        if "lsp_bootstrap_sig" in df.columns:
+            df = df[df["lsp_bootstrap_sig"].fillna(np.inf) <= float(max_lsp_bootstrap_sig)].copy()
+        else:
+            print("Warning: 'lsp_bootstrap_sig' column not found; skipping --max-lsp-bootstrap-sig")
+
+    if min_periodicity_score is not None:
+        if "periodicity_score" in df.columns:
+            df = df[df["periodicity_score"].fillna(-np.inf) >= float(min_periodicity_score)].copy()
+        else:
+            print("Warning: 'periodicity_score' column not found; skipping --min-periodicity-score")
 
     # Deduplicate by path
     if "path" in df.columns:
@@ -56,7 +102,7 @@ def load_passing_candidates(
     return df.reset_index(drop=True)
 
 
-def _plot_single_candidate(args: tuple) -> tuple[str, bool, str]:
+def _plot_single_candidate(args: tuple) -> tuple[str, bool, str, str]:
     """Worker function for parallel plotting."""
     (
         lc_path_str, out_path_str, baseline, baseline_kwargs,
@@ -106,6 +152,12 @@ def plot_passing_candidates(
     filtered_path: Path,
     out_dir: Path,
     *,
+    require_failed_any_false: bool = True,
+    require_flags: list[str] | None = None,
+    exclude_flags: list[str] | None = None,
+    min_lsp_power: float | None = None,
+    max_lsp_bootstrap_sig: float | None = None,
+    min_periodicity_score: float | None = None,
     max_plots: int | None = None,
     baseline: str = "per_camera_gp",
     baseline_kwargs: dict | None = None,
@@ -124,7 +176,8 @@ def plot_passing_candidates(
     run_params: dict | None = None,
     filter_bad_cameras: bool = True,
     bad_camera_scatter_ratio: float = 2.5,
-) -> int:
+    show_tqdm: bool = True,
+) -> dict[str, object]:
     """
     Plot all candidates that passed post-filters.
 
@@ -165,14 +218,32 @@ def plot_passing_candidates(
 
     Returns
     -------
-    int
-        Number of plots generated
+    dict[str, object]
+        Summary with plotted/failed counts and filtered camera details.
     """
-    df = load_passing_candidates(filtered_path, max_plots=max_plots)
+    df = load_passing_candidates(
+        filtered_path,
+        require_failed_any_false=require_failed_any_false,
+        require_flags=require_flags,
+        exclude_flags=exclude_flags,
+        min_lsp_power=min_lsp_power,
+        max_lsp_bootstrap_sig=max_lsp_bootstrap_sig,
+        min_periodicity_score=min_periodicity_score,
+        max_plots=max_plots,
+    )
+
+    total_selected = len(df)
 
     if df.empty:
         print("No passing candidates found")
-        return 0
+        return {
+            "total_selected": 0,
+            "plotted": 0,
+            "failed": 0,
+            "failed_paths": [],
+            "filtered_camera_sources": 0,
+            "filtered_cameras_by_path": {},
+        }
 
     print(f"Found {len(df)} candidates passing all filters")
 
@@ -199,6 +270,14 @@ def plot_passing_candidates(
             annotations["RUWE"] = f"{row['ruwe']:.2f}"
         if "catalog_match" in row.index:
             annotations["periodic"] = "Yes" if row["catalog_match"] else "No"
+        if "lsp_period" in row.index and pd.notna(row["lsp_period"]):
+            annotations["LSP_period_d"] = f"{row['lsp_period']:.4f}"
+        if "lsp_power" in row.index and pd.notna(row["lsp_power"]):
+            annotations["LSP_power"] = f"{row['lsp_power']:.4f}"
+        if "lsp_bootstrap_sig" in row.index and pd.notna(row["lsp_bootstrap_sig"]):
+            annotations["LSP_boot_sig"] = f"{row['lsp_bootstrap_sig']:.4g}"
+        if "periodicity_score" in row.index and pd.notna(row["periodicity_score"]):
+            annotations["periodicity_score"] = f"{row['periodicity_score']:.3f}"
 
         # Add dipper/jumper scores to annotations
         if "dipper_score" in row.index and pd.notna(row["dipper_score"]):
@@ -251,6 +330,7 @@ def plot_passing_candidates(
     n_plotted = 0
     n_failed = 0
     all_filtered_cameras: dict[str, str] = {}  # path -> filtered cameras string
+    results: list[tuple[str, bool, str, str]] = []
 
     if workers > 1:
         from multiprocessing import Pool, cpu_count
@@ -261,7 +341,8 @@ def plot_passing_candidates(
             results = list(tqdm(
                 pool.imap_unordered(_plot_single_candidate, work_items),
                 total=len(work_items),
-                desc="Plotting candidates"
+                desc="Plotting candidates",
+                disable=not show_tqdm,
             ))
 
         for lc_path, success, error, filtered_str in results:
@@ -274,8 +355,9 @@ def plot_passing_candidates(
                 if verbose:
                     print(f"Failed to plot {lc_path}: {error}")
     else:
-        for item in tqdm(work_items, desc="Plotting candidates"):
+        for item in tqdm(work_items, desc="Plotting candidates", disable=not show_tqdm):
             lc_path, success, error, filtered_str = _plot_single_candidate(item)
+            results.append((lc_path, success, error, filtered_str))
             if success:
                 n_plotted += 1
                 if filtered_str:
@@ -294,7 +376,16 @@ def plot_passing_candidates(
             print(f"  ... and {len(all_filtered_cameras) - 20} more")
 
     print(f"\nGenerated {n_plotted} plots, {n_failed} failed")
-    return n_plotted
+    failed_paths = [lc_path for lc_path, success, _, _ in results if not success]
+
+    return {
+        "total_selected": total_selected,
+        "plotted": n_plotted,
+        "failed": n_failed,
+        "failed_paths": failed_paths,
+        "filtered_camera_sources": len(all_filtered_cameras),
+        "filtered_cameras_by_path": all_filtered_cameras,
+    }
 
 
 def main():
@@ -303,9 +394,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Example usage:
-  python -m malca.plot_candidates --detect-run output/runs/20260128_163911
-  python -m malca.plot_candidates --input results_filtered.csv --out-dir plots/
-  python -m malca.plot_candidates --detect-run output/runs/20260128_163911 --max-plots 10
+  malca review.plot --detect-run output/runs/20260128_163911
+  malca review.plot --input results_filtered.csv --out-dir plots/
+  malca review.plot --detect-run output/runs/20260128_163911 --max-plots 10
 """
     )
 
@@ -332,6 +423,41 @@ Example usage:
         type=int,
         default=None,
         help="Maximum number of plots to generate.",
+    )
+    parser.add_argument(
+        "--ignore-failed-any",
+        action="store_true",
+        help="Do not require failed_any == False before plotting.",
+    )
+    parser.add_argument(
+        "--require-flag",
+        action="append",
+        default=[],
+        help="Require this boolean flag column to be True (repeatable).",
+    )
+    parser.add_argument(
+        "--exclude-flag",
+        action="append",
+        default=[],
+        help="Exclude rows where this boolean flag column is True (repeatable).",
+    )
+    parser.add_argument(
+        "--min-lsp-power",
+        type=float,
+        default=None,
+        help="Require lsp_power >= this value.",
+    )
+    parser.add_argument(
+        "--max-lsp-bootstrap-sig",
+        type=float,
+        default=None,
+        help="Require lsp_bootstrap_sig <= this value.",
+    )
+    parser.add_argument(
+        "--min-periodicity-score",
+        type=float,
+        default=None,
+        help="Require periodicity_score >= this value (score = -log10 bootstrap p).",
     )
     parser.add_argument(
         "--baseline",
@@ -401,6 +527,13 @@ Example usage:
     parser.add_argument(
         "--gp-jitter", type=float, default=None, help="GP jitter term"
     )
+    parser.add_argument("--gp-q", type=float, default=None, help="GP quality factor q")
+    parser.add_argument("--gp-s0", type=float, default=None, help="GP SHOTerm S0")
+    parser.add_argument("--gp-w0", type=float, default=None, help="GP SHOTerm w0")
+    parser.add_argument("--gp-sigma-floor", type=float, default=None, help="GP sigma floor")
+    parser.add_argument("--gp-floor-clip", type=float, default=None, help="GP floor clipping sigma")
+    parser.add_argument("--gp-floor-iters", type=int, default=None, help="GP floor clipping iterations")
+    parser.add_argument("--gp-min-floor-points", type=int, default=None, help="Min points for GP floor")
     parser.add_argument(
         "--workers",
         type=int,
@@ -417,6 +550,7 @@ Example usage:
         action="store_true",
         help="Print detailed progress",
     )
+    parser.add_argument("--no-tqdm", action="store_true", help="Disable progress bars")
     # Bad camera filtering
     parser.add_argument(
         "--no-filter-bad-cameras",
@@ -470,7 +604,14 @@ Example usage:
     gp_params = {
         "sigma": args.gp_sigma,
         "rho": args.gp_rho,
+        "q": args.gp_q,
+        "S0": args.gp_s0,
+        "w0": args.gp_w0,
         "jitter": args.gp_jitter,
+        "sigma_floor": args.gp_sigma_floor,
+        "floor_clip": args.gp_floor_clip,
+        "floor_iters": args.gp_floor_iters,
+        "min_floor_points": args.gp_min_floor_points,
     }
     gp_params = {k: v for k, v in gp_params.items() if v is not None}
     if gp_params and args.baseline.startswith("per_camera_gp"):
@@ -490,9 +631,15 @@ Example usage:
                 print(f"Warning: Could not load run_params.json: {e}")
 
     # Plot
-    n_plotted = plot_passing_candidates(
+    summary = plot_passing_candidates(
         input_path,
         out_dir,
+        require_failed_any_false=not args.ignore_failed_any,
+        require_flags=args.require_flag,
+        exclude_flags=args.exclude_flag,
+        min_lsp_power=args.min_lsp_power,
+        max_lsp_bootstrap_sig=args.max_lsp_bootstrap_sig,
+        min_periodicity_score=args.min_periodicity_score,
         max_plots=args.max_plots,
         baseline=args.baseline,
         baseline_kwargs=baseline_kwargs,
@@ -511,9 +658,51 @@ Example usage:
         run_params=run_params,
         filter_bad_cameras=args.filter_bad_cameras,
         bad_camera_scatter_ratio=args.bad_camera_scatter_ratio,
+        show_tqdm=not args.no_tqdm,
     )
 
+    # Write run config next to generated plots
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    orig_argv = getattr(sys, "orig_argv", None)
+    cmd = shlex.join(orig_argv) if orig_argv else shlex.join([sys.executable] + sys.argv)
+    config = {
+        "timestamp": timestamp,
+        "command": cmd,
+        "input_file": str(input_path),
+        "output_dir": str(out_dir),
+        "params": {
+            "require_failed_any_false": not args.ignore_failed_any,
+            "require_flags": args.require_flag,
+            "exclude_flags": args.exclude_flag,
+            "min_lsp_power": args.min_lsp_power,
+            "max_lsp_bootstrap_sig": args.max_lsp_bootstrap_sig,
+            "min_periodicity_score": args.min_periodicity_score,
+            "max_plots": args.max_plots,
+            "baseline": args.baseline,
+            "baseline_kwargs": baseline_kwargs if baseline_kwargs else None,
+            "skip_events": args.skip_events,
+            "plot_fits": args.plot_fits,
+            "format": args.format,
+            "show": args.show,
+            "workers": args.workers,
+            "logbf_threshold_dip": args.logbf_threshold_dip,
+            "logbf_threshold_jump": args.logbf_threshold_jump,
+            "jd_offset": args.jd_offset,
+            "clean_max_error_absolute": args.clean_max_error_absolute,
+            "clean_max_error_sigma": args.clean_max_error_sigma,
+            "detection_results": str(args.detection_results) if args.detection_results else None,
+            "filter_bad_cameras": args.filter_bad_cameras,
+            "bad_camera_scatter_ratio": args.bad_camera_scatter_ratio,
+            "show_tqdm": not args.no_tqdm,
+        },
+        "summary": summary,
+    }
+    config_path = out_dir / "plot_candidates_config.json"
+    with open(config_path, "w") as f:
+        json.dump(config, f, indent=2, default=str)
+
     print(f"\nPlots saved to {out_dir}")
+    print(f"Config saved to {config_path}")
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@ import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
+from typing import Literal, TypeAlias
 
 import numpy as np
 import pandas as pd
@@ -44,7 +45,6 @@ from malca.baseline import (
     per_camera_gp_baseline,
     per_camera_gp_baseline_masked,
 )
-from malca.validate_metadata import EventKind
 from malca.score import compute_event_score
 from malca.stats import log_gaussian, median_dt, bic
 
@@ -52,6 +52,8 @@ from numba import njit, prange
 
 
 MAG_BINS = ['12_12.5', '12.5_13', '13_13.5', '13.5_14', '14_14.5', '14.5_15']
+
+EventKind: TypeAlias = Literal["dip", "jump"]
 
 DEFAULT_BASELINE_KWARGS = dict(
     S0=0.0005,
@@ -62,9 +64,13 @@ DEFAULT_BASELINE_KWARGS = dict(
     add_sigma_eff_col=True,
 )
 
-def logit_spaced_grid(p_min=1e-4, p_max=1.0 - 1e-4, n=12):
+def sigmoid_spaced_p_grid(p_min=1e-4, p_max=1.0 - 1e-4, n=12):
     """
-    probability grid that is uniform in logit space, with minimum of 1e-12 and maximum of 1-1e-12
+    Probability grid that is uniform in logit/sigmoid space.
+
+    This corresponds to placing equal spacing in log-odds:
+      q = log(p / (1 - p))
+    then mapping back through the sigmoid.
     """
     p_min = float(np.clip(p_min, 1e-12, 1 - 1e-12))
     p_max = float(np.clip(p_max, 1e-12, 1 - 1e-12))
@@ -194,26 +200,25 @@ def classify_run_morphology(
     best_model = "noise"
     best_params = {}
 
-    try:
-        popt_g, _ = curve_fit(
-            gaussian, t_padded, mag_padded,
-            p0=[amp_guess, t0_guess, sigma_guess, baseline_guess],
-            sigma=err_padded, maxfev=2000
-        )
-        resid_g = mag_padded - gaussian(t_padded, *popt_g)
-        bic_g = bic(resid_g, err_padded, 4)
+    if kind == "dip":
+        try:
+            popt_g, _ = curve_fit(
+                gaussian, t_padded, mag_padded,
+                p0=[amp_guess, t0_guess, sigma_guess, baseline_guess],
+                sigma=err_padded, maxfev=2000
+            )
+            resid_g = mag_padded - gaussian(t_padded, *popt_g)
+            bic_g = bic(resid_g, err_padded, 4)
 
-        is_valid = (popt_g[0] > 0) if kind == "dip" else (popt_g[0] < 0)
-
-        if is_valid and bic_g < (best_bic - 10):
-            best_bic = bic_g
-            best_model = "gaussian"
-            best_params = {
-                "amp": popt_g[0], "t0": popt_g[1],
-                "sigma": popt_g[2], "baseline": popt_g[3]
-            }
-    except Exception:
-        pass
+            if (popt_g[0] > 0) and bic_g < (best_bic - 10):
+                best_bic = bic_g
+                best_model = "gaussian"
+                best_params = {
+                    "amp": popt_g[0], "t0": popt_g[1],
+                    "sigma": popt_g[2], "baseline": popt_g[3]
+                }
+        except Exception:
+            pass
 
     # skew_gaussian for dips (asymmetric profiles)
     if kind == "dip":

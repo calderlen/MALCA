@@ -6,9 +6,9 @@ and generates light curve plots via plot.py into a timestamped output directory
 with a config file recording all parameters.
 
 Usage:
-    python -m malca.postprocess --input results_filtered.parquet
-    python -m malca.postprocess --detect-run output/runs/20250121_143052
-    python -m malca postprocess --input results_filtered.csv --baseline per_camera_gp --plot-fits
+    malca postprocess --input results_filtered.parquet
+    malca postprocess --detect-run output/runs/20250121_143052
+    malca postprocess --input results_filtered.csv --baseline per_camera_gp --plot-fits
 """
 
 import argparse
@@ -227,9 +227,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Example usage:
-  python -m malca.postprocess --input results_filtered.parquet
-  python -m malca.postprocess --detect-run output/runs/20250121_143052
-  python -m malca.postprocess --input results_filtered.csv --baseline per_camera_gp --plot-fits --max-plots 50
+  malca postprocess --input results_filtered.parquet
+  malca postprocess --detect-run output/runs/20250121_143052
+  malca postprocess --input results_filtered.csv --baseline per_camera_gp --plot-fits --max-plots 50
 """,
     )
 

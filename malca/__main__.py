@@ -4,14 +4,17 @@ MALCA - Multi-timescale ASAS-SN Light Curve Analysis
 Unified command-line interface for the MALCA pipeline.
 
 Usage:
-    python -m malca manifest [options]    # Build source_id → path index
-    python -m malca detect [options]      # Run event detection
-    python -m malca validate [options]    # Validate on known objects
-    python -m malca injection [options]   # Run injection-recovery tests
-    python -m malca detection_rate [options]  # Measure detection rate
-    python -m malca plot [options]        # Plot light curves
-    python -m malca post_filter [options] # Apply post-filters
-    python -m malca postprocess [options] # Plot passing candidates
+    malca manifest [options]    # Build source_id → path index
+    malca detect [options]      # Run event detection
+    malca validate [options]    # Validate on known objects
+    malca injection [options]   # Run injection-recovery tests
+    malca detection_rate [options]  # Measure detection rate
+    malca plot [options]        # Plot light curves
+    malca post_filter [options] # Apply post-filters
+    malca postprocess [options] # Plot passing candidates
+    malca filter [options]      # Apply signal-amplitude filter
+    malca pre_filter [options]  # Apply pre-filters to manifest/candidate tables
+    malca score [options]       # Compute event score for one light curve table
 """
 
 import sys
@@ -22,8 +25,10 @@ def main():
     # Check if user is calling a subcommand with --help
     # If so, forward directly to the submodule
     if len(sys.argv) >= 2 and sys.argv[1] in [
-        "manifest", "detect", "reproduce", "injection", 
-        "detection_rate", "validate", "plot", "postprocess", "post_filter"
+        "manifest", "detect", "reproduce", "injection",
+        "detection_rate", "validate", "plot", "postprocess", "post_filter",
+        "events", "characterize", "classify", "filter", "pre_filter", "score",
+        "stats", "attrition", "review.plot", "review.gui", "review.tui", "review"
     ]:
         command = sys.argv[1]
         remaining = sys.argv[2:]
@@ -38,17 +43,21 @@ def main():
             sys.argv = [sys.argv[0]] + remaining
             detect.main()
         elif command == "reproduce":
-            from tests import reproduce
+            from malca import reproduce
             sys.argv = [sys.argv[0]] + remaining
             reproduce.main()
         elif command == "injection":
-            from malca import injection
+            from malca.analysis import injection
             sys.argv = [sys.argv[0]] + remaining
             injection.main()
         elif command == "detection_rate":
-            from malca import detection_rate
+            from malca.analysis import rate
             sys.argv = [sys.argv[0]] + remaining
-            detection_rate.main()
+            rate.main()
+        elif command == "attrition":
+            from malca.analysis import attrition
+            sys.argv = [sys.argv[0]] + remaining
+            attrition.main()
         elif command == "plot":
             from malca import plot
             sys.argv = [sys.argv[0]] + remaining
@@ -61,8 +70,52 @@ def main():
             from malca import post_filter
             sys.argv = [sys.argv[0]] + remaining
             post_filter.main()
+        elif command == "events":
+            from malca import events
+            sys.argv = [sys.argv[0]] + remaining
+            events.main()
+        elif command == "characterize":
+            from malca import characterize
+            sys.argv = [sys.argv[0]] + remaining
+            characterize.main()
+        elif command == "classify":
+            from malca import classify
+            sys.argv = [sys.argv[0]] + remaining
+            classify.main()
+        elif command == "stats":
+            from malca import stats
+            sys.argv = [sys.argv[0]] + remaining
+            stats.main()
+        elif command == "filter":
+            from malca import filter as signal_filter
+            sys.argv = [sys.argv[0]] + remaining
+            signal_filter.main()
+        elif command == "pre_filter":
+            from malca import pre_filter
+            sys.argv = [sys.argv[0]] + remaining
+            pre_filter.main()
+        elif command == "score":
+            from malca import score
+            sys.argv = [sys.argv[0]] + remaining
+            score.main()
+        elif command == "review.plot":
+            from malca import plot_candidates as review_plot
+            sys.argv = [sys.argv[0]] + remaining
+            review_plot.main()
+        elif command == "review.gui":
+            from malca.review import dual as review_dual
+            sys.argv = [sys.argv[0]] + remaining
+            review_dual.main()
+        elif command == "review.tui":
+            from malca.review import dual as review_dual
+            sys.argv = [sys.argv[0]] + remaining
+            review_dual.main()
+        elif command == "review":
+            from malca.review import dual as review_dual
+            sys.argv = [sys.argv[0]] + remaining
+            review_dual.main()
         elif command == "validate":
-            from tests import validation
+            from malca import validation
             sys.argv = [sys.argv[0]] + remaining
             validation.main()
         return 0
@@ -86,6 +139,18 @@ def main():
     subparsers.add_parser("plot", help="Plot light curves with events")
     subparsers.add_parser("postprocess", help="Plot passing candidates from post-filter output")
     subparsers.add_parser("post_filter", help="Apply quality post-filters")
+    subparsers.add_parser("filter", help="Apply signal-amplitude filter")
+    subparsers.add_parser("pre_filter", help="Apply pre-filters to candidate tables")
+    subparsers.add_parser("events", help="Run event detection directly")
+    subparsers.add_parser("characterize", help="Characterize candidates with external catalogs")
+    subparsers.add_parser("classify", help="Classify candidates by variability type")
+    subparsers.add_parser("score", help="Compute event score for one light curve table")
+    subparsers.add_parser("stats", help="Compute light-curve statistics")
+    subparsers.add_parser("attrition", help="Summarize pre/post-filter attrition")
+    subparsers.add_parser("review.plot", help="Plot shortlist candidates for review")
+    subparsers.add_parser("review.gui", help="Launch review GUI + TUI together")
+    subparsers.add_parser("review.tui", help="Launch review GUI + TUI together")
+    subparsers.add_parser("review", help="Launch review GUI + TUI together")
     
     parser.print_help()
     return 0

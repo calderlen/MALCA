@@ -9,7 +9,7 @@ This module consolidates:
 - Galactic population classification
 
 Usage:
-    python -m malca.characterize --input output/events.csv --output output/characterized.csv --dust
+    malca characterize --input output/events.csv --output output/characterized.csv --dust
 """
 
 import os

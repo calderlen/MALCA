@@ -10,7 +10,7 @@ Implements classification scenarios from Tzanidakis et al. (2025):
 - Disk occultation probability
 
 Usage:
-    python -m malca.classify --input output/events.csv --output output/classified.csv
+    malca classify --input output/events.csv --output output/classified.csv
 """
 
 import os

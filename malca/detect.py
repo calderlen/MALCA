@@ -14,8 +14,8 @@ Workflow:
 9. [Optional] Enrich passing candidates with comprehensive light curve stats
 
 Usage:
-    python -m malca detect --mag-bin 13_13.5 [options...]
-    python -m malca detect --mag-bin 13_13.5 --run-post-filter --run-classify --run-enrich
+    malca detect --mag-bin 13_13.5 [options...]
+    malca detect --mag-bin 13_13.5 --run-post-filter --run-classify --run-enrich
 """
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ import tempfile
 from malca.manifest import build_manifest_dataframe
 from malca.pre_filter import apply_pre_filters, filter_camera_medians
 from malca.post_filter import apply_post_filters
-from malca.postprocess import run_postprocess
+from malca.plot_candidates import plot_passing_candidates
 from malca.classify import compute_all_classifications
 from malca.stats import compute_stats
 from malca.characterize import query_gaia_by_ids, get_dust_extinction
@@ -746,27 +746,25 @@ def main():
                 import traceback
                 traceback.print_exc()
 
-    # Step 6: Generate postprocess plots (optional)
+    # Step 6: Generate candidate plots (optional)
     if args.run_postprocess:
         if not args.run_post_filter:
             print("Warning: --run-postprocess requires --run-post-filter. Skipping postprocess.")
         else:
-            log("\n=== Step 6: Generating postprocess plots ===")
+            log("\n=== Step 6: Generating candidate plots ===")
             try:
                 post_filter_output = results_dir / "lc_events_filtered.csv"
                 if post_filter_output.exists():
-                    df_post_filtered = pd.read_csv(post_filter_output)
-                    
                     postprocess_dir = out_dir / "plots"
                     postprocess_dir.mkdir(parents=True, exist_ok=True)
 
-                    postprocess_summary = run_postprocess(
-                        df_post_filtered,
-                        out_dir=postprocess_dir,
+                    postprocess_summary = plot_passing_candidates(
+                        post_filter_output,
+                        postprocess_dir,
                         baseline=args.baseline_func,
                         logbf_threshold_dip=args.logbf_threshold_dip,
                         logbf_threshold_jump=args.logbf_threshold_jump,
-                        plot_format=args.plot_format,
+                        format=args.plot_format,
                         max_plots=args.max_plots,
                         show_tqdm=args.verbose,
                     )
@@ -778,7 +776,7 @@ def main():
                     with open(run_summary_file, "w") as f:
                         json.dump(summary, f, indent=2, default=str)
 
-                    log(f"Postprocess: {postprocess_summary.get('plotted', 0)} plots generated in {postprocess_dir}")
+                    log(f"Candidate plotting: {postprocess_summary.get('plotted', 0)} plots generated in {postprocess_dir}")
                 else:
                     print(f"Warning: post-filter output not found at {post_filter_output}")
 

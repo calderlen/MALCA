@@ -23,52 +23,52 @@ _This README is a WIP._
 ## Quick Start
 ```bash
 # Build manifest (source_id → path index)
-python -m malca manifest --index-root /path/to/lcsv2 --lc-root /path/to/lcsv2 \
+malca manifest --index-root /path/to/lcsv2 --lc-root /path/to/lcsv2 \
     --mag-bin 13_13.5 --out output/manifest.parquet --workers 10
 
 # Run event detection pipeline
-python -m malca detect --mag-bin 13_13.5 --workers 10 \
+malca detect --mag-bin 13_13.5 --workers 10 \
     --lc-root /path/to/lcsv2 --index-root /path/to/lcsv2 \
     --output output/results.csv --min-mag-offset 0.1
 
 # Validate results against known candidates (no raw data needed)
-python -m malca validate --results output/results.csv
+malca validate --results output/results.csv
 
 # Plot light curves
-python -m malca plot --input /path/to/lc123.dat2 --out-dir output/plots
+malca plot --input /path/to/lc123.dat2 --out-dir output/plots
 
 # Apply quality filters
-python -m malca filter --input output/results.csv --output output/filtered.csv
+malca filter --input output/results.csv --output output/filtered.csv
 
 # Multi-wavelength characterization (post-detection)
-python -m malca.characterize --input output/filtered.csv --output output/characterized.csv --dust --starhorse input/starhorse/starhorse.parquet
+malca characterize --input output/filtered.csv --output output/characterized.csv --dust --starhorse input/starhorse/starhorse.parquet
 
 # Get help for any command
-python -m malca --help
-python -m malca detect --help
+malca --help
+malca detect --help
 ```
 
 #### More example variations
 ```bash
 # Detect on a single mag bin with logBF triggering (faster)
-python -m malca detect --mag-bin 13_13.5 --workers 8 \
+malca detect --mag-bin 13_13.5 --workers 8 \
     --lc-root /path/to/lcsv2 --index-root /path/to/lcsv2 \
     --output output/events_logbf.csv --trigger-mode logbf --baseline-func gp_masked --min-mag-offset 0.1
 
 # Detect on multiple mag bins (writes one output per bin)
-python -m malca detect --mag-bin 12_12.5 12.5_13 13_13.5 \
+malca detect --mag-bin 12_12.5 12.5_13 13_13.5 \
     --lc-root /path/to/lcsv2 --index-root /path/to/lcsv2 \
     --output output/lc_events_results.csv --trigger-mode logbf
 
 # Reproduce on built-in candidates using local SkyPatrol CSVs
-python -m malca validate --candidates brayden_candidates --skypatrol-dir input/skypatrol2 \
+malca validate --candidates brayden_candidates --skypatrol-dir input/skypatrol2 \
     --method bayes --trigger-mode logbf --workers 4
 
 # Reproduce using events.py output directly (uses the 'path' column)
-python -m malca validate --input output/events_logbf.csv --method bayes --trigger-mode logbf
+malca validate --input output/events_logbf.csv --method bayes --trigger-mode logbf
 
 # Injection-recovery quick test (small run)
-python -m malca.injection --manifest output/lc_manifest_all.parquet \
+malca injection --manifest output/lc_manifest_all.parquet \
     --control-sample-size 2000 --max-trials 2000 --workers 4 --overwrite
 ```
 
@@ -79,7 +79,7 @@ python -m malca.injection --manifest output/lc_manifest_all.parquet \
    ```
 2) Pre-filter and run events in batches with resume support:
    ```bash
-   python -m malca detect --mag-bin 13_13.5 --workers 10 \
+   malca detect --mag-bin 13_13.5 --workers 10 \
        --min-time-span 100 --min-points-per-day 0.05 --min-cameras 2 \
        --vsx-crossmatch input/vsx/asassn_x_vsx_matches_20250919_2252.csv \
        --batch-size 2000 \
@@ -98,10 +98,10 @@ python -m malca.injection --manifest output/lc_manifest_all.parquet \
 
 3) Post-filter events (strict quality cuts on candidates only):
    ```bash
-   python -m malca.post_filter --input /home/lenhart.106/code/malca/output/lc_events_results_13_13.5.csv --output /home/lenhart.106/code/malca/output/lc_events_results_13_13.5_filtered.csv
+   malca post_filter --input /home/lenhart.106/code/malca/output/lc_events_results_13_13.5.csv --output /home/lenhart.106/code/malca/output/lc_events_results_13_13.5_filtered.csv
 
    # With custom thresholds
-   python -m malca.post_filter --input results.csv --output filtered.csv --min-bayes-factor 20 --min-event-prob 0.7 --apply-morphology
+   malca post_filter --input results.csv --output filtered.csv --min-bayes-factor 20 --min-event-prob 0.7 --apply-morphology
    ```
    - **Implemented filters**: posterior strength (Bayes factors), event probability, run robustness, morphology
    - **Placeholder filters** (not yet implemented): periodicity (LSP), Gaia RUWE, periodic catalog crossmatch
@@ -226,7 +226,7 @@ graph TB
 **Key Components:**
 - **Production**: `manifest.py` → `pre_filter.py` → `events.py` → `post_filter.py`
 - **Testing**: `tests/reproduce.py` (re-runs detection), `tests/validation.py` (validates results), `injection.py` (synthetic dips)
-- **CLI**: Unified interface via `python -m malca [command]`
+- **CLI**: Unified interface via `malca [command]`
 
 See [docs/architecture.md](docs/architecture.md) for detailed documentation.
 
@@ -285,7 +285,7 @@ output/runs/20250121_143052/          # Timestamp-based run directory
 
 ### Standalone Module Outputs
 
-#### Injection Testing (`python -m malca.injection`)
+#### Injection Testing (`malca injection`)
 
 ```
 output/injection/                     # Default output directory
@@ -306,7 +306,7 @@ output/injection/                     # Default output directory
     └── efficiency_3d_volume.html      # Interactive 3D (if plotly installed)
 ```
 
-#### Detection Rate (`python -m malca.detection_rate`)
+#### Detection Rate (`malca detection_rate`)
 
 ```
 output/detection_rate/                # Default base directory
@@ -327,7 +327,7 @@ output/detection_rate/                # Default base directory
 └── latest -> 20250121_150318_custom_tag/  # Symlink to latest run
 ```
 
-#### Multi-Wavelength Characterization (`python -m malca.characterize`)
+#### Multi-Wavelength Characterization (`malca characterize`)
 
 ```
 output/
@@ -342,7 +342,7 @@ output/
     └── gaia_results_{hash}.parquet
 ```
 
-#### Dipper Classification (`python -m malca.classify`)
+#### Dipper Classification (`malca classify`)
 
 ```
 output/
@@ -353,7 +353,7 @@ output/
                                       #   - final_class (EB/CV/Starspot/Disk/YSO/Unknown)
 ```
 
-#### Manifest Building (`python -m malca.manifest`)
+#### Manifest Building (`malca manifest`)
 
 ```
 output/
@@ -371,18 +371,18 @@ output/
 - Build manifest only:
   `python malca/manifest.py --index-root <index_dir> --lc-root <lc_dir> --mag-bin 12_12.5 --out /home/lenhart.106/code/malca/output/lc_manifest.parquet`
 - Pre-filter only (expects columns `asas_sn_id` and `path` pointing to lc_dir):
-  `python -m malca.pre_filter --help`
+  `malca pre_filter --help`
 - Events only:
   ```bash
-  python -m malca.events --input /path/to/lc*_cal/*.dat2 --output output/results.parquet --workers 10
+  malca events --input /path/to/lc*_cal/*.dat2 --output output/results.parquet --workers 10
   
   # With signal amplitude filtering (requires |event_mag - baseline_mag| > 0.1)
-  python -m malca.events --input /path/to/lc*_cal/*.dat2 --output output/results.parquet --workers 10 --min-mag-offset 0.1
+  malca events --input /path/to/lc*_cal/*.dat2 --output output/results.parquet --workers 10 --min-mag-offset 0.1
   ```
   - Default Bayesian grid is 12x12 (12 p-grid points × 12 mag-grid points). Change p-grid with `--p-points`.
   - Signal amplitude filter (default: 0.1 mag) ensures detected events have sufficient deviation from baseline.
 - Post-filter only:
-  `python -m malca.post_filter --input /home/lenhart.106/code/malca/output/results.parquet --output /home/lenhart.106/code/malca/output/results_filtered.parquet`
+  `malca post_filter --input /home/lenhart.106/code/malca/output/results.parquet --output /home/lenhart.106/code/malca/output/results_filtered.parquet`
   - VSX handling in pre-filter:
     - Default is filter: drops VSX matches, but keeps `sep_arcsec` and `class` on survivors.
     - Use `--vsx-mode tag` (with `--skip-vsx` off) to keep all matches and only tag.
@@ -390,7 +390,7 @@ output/
 - Targeted reproduction of specific candidates (Bayesian only):
   ```bash
   # Re-run detection on raw data (requires manifest and .dat2 files)
-  python -m malca reproduce --method bayes --manifest output/lc_manifest.parquet \
+  malca reproduce --method bayes --manifest output/lc_manifest.parquet \
       --candidates my_targets.csv --out-dir output/results_repro --workers 10
   ```
   **Note**: Only `--method bayes` is supported. Legacy methods `naive` and `biweight` have been deprecated.
@@ -421,27 +421,27 @@ output/
 - Plot light curves with baseline/residuals:
   ```bash
   # Single file
-  python -m malca.plot --input /path/to/lc123.dat2 --out-dir /home/lenhart.106/code/malca/output/plots --format png
+  malca plot --input /path/to/lc123.dat2 --out-dir /home/lenhart.106/code/malca/output/plots --format png
 
   # Multiple files (glob patterns supported)
-  python -m malca.plot --input input/skypatrol2/*.csv --out-dir /home/lenhart.106/code/malca/output/plots --skip-events
+  malca plot --input input/skypatrol2/*.csv --out-dir /home/lenhart.106/code/malca/output/plots --skip-events
 
   # All files from events.py results
-  python -m malca.plot --events /home/lenhart.106/code/malca/output/lc_events_results_13_13.5_filtered.csv --out-dir /home/lenhart.106/code/malca/output/plots
+  malca plot --events /home/lenhart.106/code/malca/output/lc_events_results_13_13.5_filtered.csv --out-dir /home/lenhart.106/code/malca/output/plots
   ```
   **Note:** Event scores are computed automatically during detection and included in the results CSV (dipper_score, dipper_n_dips, dipper_n_valid_dips columns).
 - Batch plot Bayesian results (SkyPatrol CSVs, filtered by events output):
-  `python -m malca.old.plot_results_bayes /path/to/*.csv --results-csv /home/lenhart.106/code/malca/output/lc_events_results_13_13.5.csv --out-dir /home/lenhart.106/code/malca/output/plots`
+  `malca old.plot_results_bayes /path/to/*.csv --results-csv /home/lenhart.106/code/malca/output/lc_events_results_13_13.5.csv --out-dir /home/lenhart.106/code/malca/output/plots`
 - Injection-recovery testing (validate pipeline completeness/contamination):
   ```bash
   # Full run: uses default manifest (output/lc_manifest_all.parquet)
-  python -m malca.injection --workers 10
+  malca injection --workers 10
 
   # Quick test with limited trials
-  python -m malca.injection --max-trials 1000 --workers 10
+  malca injection --max-trials 1000 --workers 10
 
   # Custom manifest and output directory
-  python -m malca.injection --manifest /path/to/manifest.parquet --out-dir /custom/output/injection
+  malca injection --manifest /path/to/manifest.parquet --out-dir /custom/output/injection
   ```
   Output structure (default `output/injection/`):
   ```
@@ -459,7 +459,7 @@ output/
   ```
   Python API:
   ```python
-  from malca.injection import (
+  from malca.analysis.injection import (
       load_efficiency_cube,
       plot_efficiency_all,
       plot_efficiency_mag_slices,
@@ -484,7 +484,7 @@ After detecting dipper candidates, characterize them using multi-wavelength data
 
 ```bash
 # Full characterization with Gaia, dust extinction, and YSO classification
-python -m malca.characterize \
+malca characterize \
   --input output/filtered.csv \
   --output output/characterized.csv \
   --dust \
@@ -536,15 +536,28 @@ pip install -e ".[multiwavelength]"
 
   - Measures completeness as function of dip depth, duration, and stellar magnitude
   - 3D efficiency cube for completeness corrections in occurrence rate calculations
-- Seasonal trend summary (LTVar-style):
-  `python -m malca.ltv.core --mag-bin 13_13.5 --output /home/lenhart.106/code/malca/output/ltv_13_13.5.csv --workers 10`
 - Quick stats for a single LC file:
-  `python -m malca.stats /path/to/lc123.dat2`
+  `malca stats /path/to/lc123.dat2`
 - False-positive reduction summary (pre vs post filter):
-  `python -m malca.filter_attrition --pre /home/lenhart.106/code/malca/output/pre.csv --post /home/lenhart.106/code/malca/output/post.csv`
+  `malca attrition --pre /home/lenhart.106/code/malca/output/pre.csv --post /home/lenhart.106/code/malca/output/post.csv`
+
+### Candidate Review GUI (Streamlit + SQLite)
+- Install GUI dependency:
+  `python -m pip install -e ".[gui]"`
+- Launch reviewer app:
+  `streamlit run malca/review/app.py`
+- Launch terminal triage tool:
+  `malca review.tui --db output/review/review.db`
+- In the app:
+  - Set a SQLite path (default: `output/review/review.db`)
+  - Import a filtered candidates file (`CSV`/`Parquet`)
+  - Score candidates (`interest_score` integer 0-5, `interest_reason`, `review_pass`, `notes`, `status`)
+  - Filter by quantitative periodicity metrics (`periodicity_score`, `lsp_bootstrap_sig`, `lsp_power`)
+  - Export reviewed candidates to CSV/Parquet
 
 ### Dependencies
 - **Required**: numpy, pandas, scipy, numba, astropy, tqdm, matplotlib, celerite2, pyarrow
 - **Optional**:
   - `plotly` - Interactive 3D efficiency plots in injection testing
+  - `streamlit` - Candidate review GUI (`malca/review/app.py`)
   - `joblib`, `seaborn`, `scikit-learn` - Notebook analysis and profiling

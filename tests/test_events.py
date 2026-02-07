@@ -8,6 +8,7 @@ import pytest
 
 from malca.events import (
     build_runs,
+    classify_run_morphology,
     filter_runs,
     run_bayesian_significance,
 )
@@ -282,3 +283,17 @@ class TestEdgeCases:
         assert len(runs[0]) == 50
         assert runs[0][0] == 0
         assert runs[0][-1] == 49
+
+
+class TestMorphology:
+    def test_jump_morphology_never_returns_gaussian(self):
+        """Gaussian is not a valid winner for jump morphology."""
+        jd = np.linspace(0.0, 30.0, 120)
+        baseline = np.full_like(jd, 14.0)
+        # Synthetic brightening-like feature (negative in mag)
+        mag = baseline - 0.4 * np.exp(-0.5 * ((jd - 15.0) / 3.0) ** 2)
+        err = np.full_like(jd, 0.02)
+        run_idx = np.arange(45, 75)
+
+        out = classify_run_morphology(jd, mag, err, run_idx, baseline=baseline, kind="jump")
+        assert out["morphology"] != "gaussian"

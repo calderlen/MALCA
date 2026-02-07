@@ -90,3 +90,44 @@ def filter_signal_amplitude(
         pbar.close()
 
     return out
+
+
+def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Apply signal-amplitude filtering to events results",
+    )
+    parser.add_argument("--input", type=Path, required=True, help="Input CSV/Parquet")
+    parser.add_argument("--output", type=Path, required=True, help="Output CSV/Parquet")
+    parser.add_argument("--min-mag-offset", type=float, default=0.05, help="Minimum |event-baseline| mag")
+    parser.add_argument("--rejected-log-csv", type=Path, default=None, help="Optional rejection log CSV")
+    parser.add_argument("--no-tqdm", action="store_true", help="Disable progress output")
+    args = parser.parse_args()
+
+    input_path = args.input.expanduser()
+    output_path = args.output.expanduser()
+
+    if input_path.suffix.lower() in (".parquet", ".pq"):
+        df = pd.read_parquet(input_path)
+    else:
+        df = pd.read_csv(input_path)
+
+    out = filter_signal_amplitude(
+        df,
+        min_mag_offset=args.min_mag_offset,
+        show_tqdm=not args.no_tqdm,
+        rejected_log_csv=args.rejected_log_csv,
+    )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.suffix.lower() in (".parquet", ".pq"):
+        out.to_parquet(output_path, index=False)
+    else:
+        out.to_csv(output_path, index=False)
+
+    print(f"Saved filtered output: {output_path} ({len(out)}/{len(df)} kept)")
+
+
+if __name__ == "__main__":
+    main()

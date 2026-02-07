@@ -460,3 +460,41 @@ def compute_event_score(
     return float(np.log10(score)), events
 
 
+def main() -> None:
+    import argparse
+    from pathlib import Path
+
+    parser = argparse.ArgumentParser(description="Compute event score for a light curve table")
+    parser.add_argument("--input", type=Path, required=True, help="Input CSV/Parquet with JD, mag, error")
+    parser.add_argument("--event-type", choices=["dip", "jump", "microlensing"], default="dip")
+    parser.add_argument("--sigma-threshold", type=float, default=1.0)
+    parser.add_argument("--edge-sigma", type=float, default=0.5)
+    parser.add_argument("--min-fwhm-days", type=float, default=1.5)
+    parser.add_argument("--min-delta-mag", type=float, default=0.05)
+    args = parser.parse_args()
+
+    input_path = args.input.expanduser()
+    if input_path.suffix.lower() in (".parquet", ".pq"):
+        df = pd.read_parquet(input_path)
+    else:
+        df = pd.read_csv(input_path)
+
+    score, events = compute_event_score(
+        df,
+        event_type=args.event_type,
+        sigma_threshold=args.sigma_threshold,
+        edge_sigma=args.edge_sigma,
+        min_fwhm_days=args.min_fwhm_days,
+        min_delta_mag=args.min_delta_mag,
+    )
+
+    n_valid = int(sum(1 for e in events if e.valid))
+    print(f"event_type={args.event_type}")
+    print(f"score_log10={score}")
+    print(f"events_total={len(events)}")
+    print(f"events_valid={n_valid}")
+
+
+if __name__ == "__main__":
+    main()
+

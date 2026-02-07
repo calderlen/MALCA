@@ -705,6 +705,93 @@ def identify_offset_cameras(
     return bad_cameras, bad_windows
 
 
+def identify_catastrophic_outlier_cameras(
+    df_lc: pd.DataFrame,
+    *,
+    cam_col: str = "camera#",
+    t_col: str = "JD",
+    mag_col: str = "mag",
+    min_points_per_camera: int = 30,
+    mag_excursion_threshold: float = 3.0,
+    support_window_days: float = 2.0,
+    support_excursion_threshold: float = 0.75,
+    min_catastrophic_points: int = 1,
+    max_catastrophic_fraction: float = 0.03,
+) -> set[int]:
+    """
+    Identify cameras with isolated catastrophic magnitude excursions.
+
+    A point is considered catastrophic for a camera when its deviation from the
+    camera median is >= ``mag_excursion_threshold`` and nearby points from other
+    cameras (within ``support_window_days``) do not show a comparable excursion.
+
+    The camera is flagged if the number of such unsupported points is high enough
+    to indicate instrument/systematic behavior, while still rare in recurrence.
+    """
+    if df_lc.empty or cam_col not in df_lc.columns:
+        return set()
+
+    finite = np.isfinite(df_lc[t_col]) & np.isfinite(df_lc[mag_col])
+    df_use = df_lc.loc[finite, [cam_col, t_col, mag_col]].copy()
+    if df_use.empty:
+        return set()
+
+    camera_medians = df_use.groupby(cam_col)[mag_col].median().to_dict()
+    cameras = sorted(df_use[cam_col].dropna().unique())
+    bad_cameras: set[int] = set()
+
+    for cam in cameras:
+        cam_df = df_use[df_use[cam_col] == cam]
+        n_cam = len(cam_df)
+        if n_cam < int(min_points_per_camera):
+            continue
+
+        cam_med = camera_medians.get(cam, np.nan)
+        if not np.isfinite(cam_med):
+            continue
+
+        cam_dev = np.abs(cam_df[mag_col].to_numpy(dtype=float) - float(cam_med))
+        catastrophic_mask = cam_dev >= float(mag_excursion_threshold)
+        if not np.any(catastrophic_mask):
+            continue
+
+        catastrophic_points = cam_df.loc[catastrophic_mask, [t_col, mag_col]]
+        unsupported_count = 0
+
+        for _, row in catastrophic_points.iterrows():
+            t0 = float(row[t_col])
+            others = df_use[(df_use[cam_col] != cam) & (np.abs(df_use[t_col] - t0) <= float(support_window_days))]
+
+            if others.empty:
+                unsupported_count += 1
+                continue
+
+            other_devs = []
+            for other_cam, grp in others.groupby(cam_col):
+                other_med = camera_medians.get(other_cam, np.nan)
+                if not np.isfinite(other_med):
+                    continue
+                dev = np.abs(grp[mag_col].to_numpy(dtype=float) - float(other_med))
+                if dev.size:
+                    other_devs.append(float(np.nanmedian(dev)))
+
+            if not other_devs:
+                unsupported_count += 1
+                continue
+
+            if float(np.nanmax(other_devs)) < float(support_excursion_threshold):
+                unsupported_count += 1
+
+        frac = unsupported_count / float(n_cam)
+        if (unsupported_count >= int(min_catastrophic_points)) and (frac <= float(max_catastrophic_fraction)):
+            try:
+                bad_cameras.add(int(cam))
+            except Exception:
+                continue
+
+    return bad_cameras
+
+
 def filter_bad_cameras(
     df_lc: pd.DataFrame,
     raw2_df: pd.DataFrame | None = None,
@@ -712,6 +799,7 @@ def filter_bad_cameras(
     *,
     filter_scatter: bool = True,
     filter_offset: bool = True,
+    filter_catastrophic: bool = True,
     offset_sigma_threshold: float = 15.0,
     remove_full_camera: bool = True,
     **kwargs
@@ -719,9 +807,11 @@ def filter_bad_cameras(
     """
     Filter out cameras with anomalously high scatter or systematic offsets.
 
-    Combines two filters:
+    Combines three filters:
     1. Scatter filter (identify_bad_cameras): flags cameras with high MAD scatter
     2. Offset filter (identify_offset_cameras): flags cameras with systematic median offsets
+    3. Catastrophic outlier filter (identify_catastrophic_outlier_cameras):
+       flags cameras with isolated 3+ mag excursions unsupported by other cameras
 
     Parameters
     ----------
@@ -736,6 +826,8 @@ def filter_bad_cameras(
         Apply scatter-based filtering (default: True)
     filter_offset : bool
         Apply median-offset filtering (default: True)
+    filter_catastrophic : bool
+        Apply isolated catastrophic-outlier filtering (default: True)
     offset_sigma_threshold : float
         Sigma threshold for offset filtering (default: 5.0)
     remove_full_camera : bool
@@ -793,6 +885,22 @@ def filter_bad_cameras(
                 )
                 mask &= ~window_mask
             df_filtered = df_filtered[mask].reset_index(drop=True)
+
+    # 3. Catastrophic one-off outlier filter
+    if filter_catastrophic:
+        catastrophic_bad = identify_catastrophic_outlier_cameras(
+            df_lc if df_filtered is df_lc else df_filtered,
+            cam_col=cam_col,
+            t_col=t_col,
+            mag_col=kwargs.get("mag_col", "mag"),
+            min_points_per_camera=kwargs.get("catastrophic_min_points", 30),
+            mag_excursion_threshold=kwargs.get("catastrophic_mag_excursion", 3.0),
+            support_window_days=kwargs.get("catastrophic_support_window_days", 2.0),
+            support_excursion_threshold=kwargs.get("catastrophic_support_excursion", 0.75),
+            min_catastrophic_points=kwargs.get("catastrophic_min_count", 1),
+            max_catastrophic_fraction=kwargs.get("catastrophic_max_fraction", 0.03),
+        )
+        bad_cameras.update(catastrophic_bad)
     
     # Remove full cameras
     if bad_cameras and cam_col in df_filtered.columns:

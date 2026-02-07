@@ -761,3 +761,69 @@ def apply_pre_filters(
         tqdm.write(f"\n[apply_pre_filters] {n_failed_any}/{n_start} failed at least one filter")
 
     return df_filtered.reset_index(drop=True)
+
+
+def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Apply pre-filters to candidate/source table")
+    parser.add_argument("--input", type=Path, required=True, help="Input CSV/Parquet")
+    parser.add_argument("--output", type=Path, required=True, help="Output CSV/Parquet")
+
+    parser.add_argument("--apply-vsx", action="store_true", help="Enable VSX-based filtering/tagging")
+    parser.add_argument("--vsx-mode", choices=["filter", "tag"], default="filter")
+    parser.add_argument("--vsx-max-sep-arcsec", type=float, default=3.0)
+    parser.add_argument("--vsx-crossmatch-csv", type=Path, default=Path("input/vsx/asassn_x_vsx_matches_20250919_2252.csv"))
+
+    parser.add_argument("--no-sparse", dest="apply_sparse", action="store_false", help="Disable sparse-LC filter")
+    parser.add_argument("--min-time-span", type=float, default=100.0)
+    parser.add_argument("--min-points-per-day", type=float, default=0.05)
+
+    parser.add_argument("--no-multi-camera", dest="apply_multi_camera", action="store_false", help="Disable multi-camera filter")
+    parser.add_argument("--min-cameras", type=int, default=2)
+
+    parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument("--stats-checkpoint", type=Path, default=None)
+    parser.add_argument("--stats-chunk-size", type=int, default=5000)
+    parser.add_argument("--rejected-log-csv", type=Path, default=None)
+    parser.add_argument("--no-tqdm", action="store_true")
+    parser.set_defaults(apply_sparse=True, apply_multi_camera=True)
+
+    args = parser.parse_args()
+
+    input_path = args.input.expanduser()
+    output_path = args.output.expanduser()
+    if input_path.suffix.lower() in (".parquet", ".pq"):
+        df = pd.read_parquet(input_path)
+    else:
+        df = pd.read_csv(input_path)
+
+    out = apply_pre_filters(
+        df,
+        apply_vsx=args.apply_vsx,
+        vsx_mode=args.vsx_mode,
+        vsx_max_sep_arcsec=args.vsx_max_sep_arcsec,
+        vsx_crossmatch_csv=args.vsx_crossmatch_csv,
+        apply_sparse=args.apply_sparse,
+        min_time_span=args.min_time_span,
+        min_points_per_day=args.min_points_per_day,
+        apply_multi_camera=args.apply_multi_camera,
+        min_cameras=args.min_cameras,
+        n_workers=args.workers,
+        show_tqdm=not args.no_tqdm,
+        rejected_log_csv=args.rejected_log_csv,
+        stats_checkpoint=args.stats_checkpoint,
+        stats_chunk_size=args.stats_chunk_size,
+    )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.suffix.lower() in (".parquet", ".pq"):
+        out.to_parquet(output_path, index=False)
+    else:
+        out.to_csv(output_path, index=False)
+
+    print(f"Saved pre-filter output: {output_path} ({len(out)} rows)")
+
+
+if __name__ == "__main__":
+    main()

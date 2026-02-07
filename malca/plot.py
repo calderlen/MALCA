@@ -5,6 +5,7 @@ Plot light curves with Bayesian event detection results, showing run fits overla
 from __future__ import annotations
 
 import argparse
+import hashlib
 from pathlib import Path
 import pandas as pd
 import numpy as np
@@ -25,6 +26,24 @@ from malca.baseline import (
 
 
 JD_OFFSET = 2458000.0
+
+CAMERA_COLOR_PALETTE = [
+    "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+    "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
+    "#393b79", "#637939", "#8c6d31", "#843c39", "#7b4173",
+    "#3182bd", "#e6550d", "#31a354", "#756bb1", "#636363",
+]
+
+
+def _stable_camera_color(camera_label: str) -> str:
+    """Return a deterministic color for a camera label across all plots."""
+    s = str(camera_label)
+    try:
+        idx = int(s) % len(CAMERA_COLOR_PALETTE)
+    except Exception:
+        digest = hashlib.md5(s.encode("utf-8")).hexdigest()
+        idx = int(digest[:8], 16) % len(CAMERA_COLOR_PALETTE)
+    return CAMERA_COLOR_PALETTE[idx]
 
 asassn_columns = [
     "JD",
@@ -225,7 +244,7 @@ def lookup_metadata_for_path(path: Path, detection_results_csv=None):
     # Fallback to brayden_candidates if no metadata found from CSV
     if not meta:
         try:
-            from tests.reproduce import brayden_candidates
+            from malca.reproduce import brayden_candidates
             
             # Extract source_id from filename
             source_id = stem.split("-")[0]
@@ -401,8 +420,7 @@ def plot_bayes_results(
         df["camera_label"] = "unknown"
 
     camera_ids = sorted(df["camera_label"].dropna().unique())
-    cmap = plt.get_cmap("tab20", max(len(camera_ids), 1))
-    camera_colors = {cam: cmap(i % cmap.N) for i, cam in enumerate(camera_ids)}
+    camera_colors = {cam: _stable_camera_color(cam) for cam in camera_ids}
 
     # Compute baselines and residuals for each band
     band_dfs = {}
