@@ -25,7 +25,7 @@ from astropy.coordinates import SkyCoord
 from astropy.table import Table
 from astroquery.gaia import Gaia
 from astroquery.xmatch import XMatch
-from banyan_sigma import banyan_sigma
+import banyan_sigma as banyan_sigma_pkg
 from dustmaps3d import dustmaps3d
 from scipy.odr import ODR, Model, RealData
 
@@ -454,7 +454,10 @@ def query_banyan_sigma(df: pd.DataFrame) -> pd.DataFrame:
             rv = row.get('radial_velocity', np.nan)
             rv = float(rv) if np.isfinite(rv) else None
             
-            result = banyan_sigma(
+            if not hasattr(banyan_sigma_pkg, "banyan_sigma"):
+                raise RuntimeError("banyan_sigma package does not expose banyan_sigma()")
+
+            result = banyan_sigma_pkg.banyan_sigma(
                 ra=ra, dec=dec,
                 pmra=pmra, pmdec=pmdec,
                 plx=plx, rv=rv

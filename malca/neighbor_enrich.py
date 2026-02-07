@@ -1,0 +1,200 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import argparse
+import astropy.units as u
+from astropy.table import Table
+from astroquery.xmatch import XMatch
+
+
+DEFAULT_NEIGHBOR_CATALOGS: dict[str, str] = {
+    "gaia_dr3": "I/355/gaiadr3",
+    "2mass": "II/246/out",
+    "allwise": "II/328/allwise",
+    "vsx": "B/vsx/vsx",
+}
+
+
+def _ensure_candidate_id(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    if "candidate_id" not in out.columns:
+        if "asas_sn_id" in out.columns:
+            out["candidate_id"] = out["asas_sn_id"].astype(str)
+        elif "path" in out.columns:
+            out["candidate_id"] = out["path"].astype(str).map(lambda p: Path(p).stem.split("-")[0])
+        else:
+            out["candidate_id"] = np.arange(len(out)).astype(str)
+    return out
+
+
+def _query_catalog_bulk(
+    coords_df: pd.DataFrame,
+    *,
+    catalog: str,
+    radius_arcsec: float,
+    chunk_size: int,
+) -> pd.DataFrame:
+    chunks: list[pd.DataFrame] = []
+    n = len(coords_df)
+    for start in range(0, n, max(1, int(chunk_size))):
+        chunk = coords_df.iloc[start : start + int(chunk_size)].copy()
+        if chunk.empty:
+            continue
+        table = Table.from_pandas(chunk[["candidate_id", "ra_deg", "dec_deg"]].rename(columns={"ra_deg": "ra", "dec_deg": "dec"}))
+        try:
+            res = XMatch.query(
+                cat1=table,
+                cat2=f"vizier:{catalog}",
+                max_distance=float(radius_arcsec) * u.arcsec,
+                colRA1="ra",
+                colDec1="dec",
+            )
+        except Exception:
+            continue
+        if len(res) == 0:
+            continue
+        out = res.to_pandas()
+        sep_col = None
+        for candidate in ["angDist", "_r", "separation", "Sep"]:
+            if candidate in out.columns:
+                sep_col = candidate
+                break
+        if sep_col is None:
+            continue
+        out = out.rename(columns={sep_col: "sep_arcsec"})
+        out["catalog"] = catalog
+        chunks.append(out)
+
+    if not chunks:
+        return pd.DataFrame()
+    merged = pd.concat(chunks, ignore_index=True)
+    if "candidate_id" in merged.columns:
+        merged["candidate_id"] = merged["candidate_id"].astype(str)
+    return merged
+
+
+def run_neighbor_enrichment(
+    df: pd.DataFrame,
+    *,
+    out_dir: Path,
+    radius_arcsec: float = 15.0,
+    chunk_size: int = 2000,
+    cache_file: Path | None = None,
+    catalogs: dict[str, str] | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Bulk nearest-neighbor enrichment with optional cache."""
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    catalogs = catalogs or DEFAULT_NEIGHBOR_CATALOGS
+
+    df_use = _ensure_candidate_id(df)
+    coords_cols = ["candidate_id", "ra_deg", "dec_deg"]
+    if not all(c in df_use.columns for c in coords_cols):
+        empty = pd.DataFrame()
+        empty.to_parquet(out_dir / "neighbors_long.parquet", index=False)
+        empty.to_parquet(out_dir / "neighbors_summary.parquet", index=False)
+        return empty, empty
+
+    coords = df_use[coords_cols].dropna(subset=["ra_deg", "dec_deg"]).copy()
+    coords["candidate_id"] = coords["candidate_id"].astype(str)
+    coords = coords.drop_duplicates(subset=["candidate_id"])
+
+    cache_df = pd.DataFrame()
+    if cache_file and Path(cache_file).exists():
+        try:
+            cache_df = pd.read_parquet(cache_file)
+        except Exception:
+            cache_df = pd.DataFrame()
+
+    fresh_frames: list[pd.DataFrame] = []
+    for _, catalog_id in catalogs.items():
+        fresh = _query_catalog_bulk(
+            coords,
+            catalog=catalog_id,
+            radius_arcsec=radius_arcsec,
+            chunk_size=chunk_size,
+        )
+        if not fresh.empty:
+            fresh_frames.append(fresh)
+
+    if fresh_frames:
+        fresh_df = pd.concat(fresh_frames, ignore_index=True)
+    else:
+        fresh_df = pd.DataFrame()
+
+    neighbors_long = pd.concat([cache_df, fresh_df], ignore_index=True) if not cache_df.empty else fresh_df
+    if not neighbors_long.empty:
+        keep_cols = [c for c in ["candidate_id", "catalog", "sep_arcsec", "phot_g_mean_mag", "VarType", "Type"] if c in neighbors_long.columns]
+        keep_cols += [c for c in neighbors_long.columns if c not in keep_cols]
+        neighbors_long = neighbors_long[keep_cols]
+        if "candidate_id" in neighbors_long.columns:
+            neighbors_long["candidate_id"] = neighbors_long["candidate_id"].astype(str)
+
+    if cache_file and not neighbors_long.empty:
+        Path(cache_file).parent.mkdir(parents=True, exist_ok=True)
+        neighbors_long.to_parquet(cache_file, index=False)
+
+    summary = coords[["candidate_id"]].copy()
+    if neighbors_long.empty:
+        summary["neighbor_count"] = 0
+        summary["nearest_sep_arcsec"] = np.nan
+        summary["nearby_known_variable"] = False
+        summary["bright_close_neighbor"] = False
+        summary["local_density_n_15as"] = 0
+    else:
+        grp = neighbors_long.groupby("candidate_id")
+        summary = summary.merge(grp.size().rename("neighbor_count"), on="candidate_id", how="left")
+        summary = summary.merge(grp["sep_arcsec"].min().rename("nearest_sep_arcsec"), on="candidate_id", how="left")
+        summary["neighbor_count"] = summary["neighbor_count"].fillna(0).astype(int)
+        summary["local_density_n_15as"] = summary["neighbor_count"]
+
+        known_var_mask = neighbors_long["catalog"].astype(str).str.contains("vsx", case=False, na=False)
+        known_var = neighbors_long.loc[known_var_mask, ["candidate_id"]].drop_duplicates()
+        known_var["nearby_known_variable"] = True
+        summary = summary.merge(known_var, on="candidate_id", how="left")
+        summary["nearby_known_variable"] = summary["nearby_known_variable"].fillna(False)
+
+        if "phot_g_mean_mag" in neighbors_long.columns:
+            bright_mask = (pd.to_numeric(neighbors_long["phot_g_mean_mag"], errors="coerce") <= 13.0) & (
+                pd.to_numeric(neighbors_long["sep_arcsec"], errors="coerce") <= 5.0
+            )
+            bright = neighbors_long.loc[bright_mask, ["candidate_id"]].drop_duplicates()
+            bright["bright_close_neighbor"] = True
+            summary = summary.merge(bright, on="candidate_id", how="left")
+            summary["bright_close_neighbor"] = summary["bright_close_neighbor"].fillna(False)
+        else:
+            summary["bright_close_neighbor"] = False
+
+    neighbors_long.to_parquet(out_dir / "neighbors_long.parquet", index=False)
+    summary.to_parquet(out_dir / "neighbors_summary.parquet", index=False)
+    return neighbors_long, summary
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Bulk neighbor enrichment for candidate tables")
+    parser.add_argument("--input", type=Path, required=True, help="Input CSV/Parquet with candidate coordinates")
+    parser.add_argument("--out-dir", type=Path, required=True, help="Output directory")
+    parser.add_argument("--radius-arcsec", type=float, default=15.0)
+    parser.add_argument("--chunk-size", type=int, default=2000)
+    parser.add_argument("--cache", type=Path, default=None)
+    args = parser.parse_args()
+
+    if args.input.suffix.lower() in {".parquet", ".pq"}:
+        df = pd.read_parquet(args.input)
+    else:
+        df = pd.read_csv(args.input)
+    run_neighbor_enrichment(
+        df,
+        out_dir=args.out_dir,
+        radius_arcsec=args.radius_arcsec,
+        chunk_size=args.chunk_size,
+        cache_file=args.cache,
+    )
+    print(f"Neighbor enrichment written to {args.out_dir}")
+
+
+if __name__ == "__main__":
+    main()
