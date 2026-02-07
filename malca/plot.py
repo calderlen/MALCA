@@ -242,7 +242,7 @@ def lookup_metadata_for_path(path: Path, detection_results_csv=None):
 
     # Fallback to brayden_candidates if no metadata found from CSV
     if not meta:
-        from malca.reproduce import brayden_candidates
+        from malca.evaluation.reproduce import brayden_candidates
 
         source_id = stem.split("-")[0]
         for candidate in brayden_candidates:
@@ -261,6 +261,20 @@ def lookup_metadata_for_path(path: Path, detection_results_csv=None):
     meta = dict(meta)
     meta["data_source"] = source_type
     return meta
+
+
+def load_passing_candidates(*args, **kwargs):
+    """Forward to candidate-table loader used by consolidated plotting."""
+    from malca.review.plot_batch import load_passing_candidates as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def plot_passing_candidates(*args, **kwargs):
+    """Forward to candidate-table plotting implementation."""
+    from malca.review.plot_batch import plot_passing_candidates as _impl
+
+    return _impl(*args, **kwargs)
 
 
 
@@ -976,6 +990,41 @@ def main():
         help="Maximum number of light curves to plot.",
     )
     parser.add_argument(
+        "--ignore-failed-any",
+        action="store_true",
+        help="Do not require failed_any == False when plotting from --events.",
+    )
+    parser.add_argument(
+        "--require-flag",
+        action="append",
+        default=[],
+        help="Require this boolean flag column to be True (repeatable, --events mode).",
+    )
+    parser.add_argument(
+        "--exclude-flag",
+        action="append",
+        default=[],
+        help="Exclude rows where this boolean flag column is True (repeatable, --events mode).",
+    )
+    parser.add_argument(
+        "--min-lsp-power",
+        type=float,
+        default=None,
+        help="Require lsp_power >= this value (--events mode).",
+    )
+    parser.add_argument(
+        "--max-lsp-bootstrap-sig",
+        type=float,
+        default=None,
+        help="Require lsp_bootstrap_sig <= this value (--events mode).",
+    )
+    parser.add_argument(
+        "--min-periodicity-score",
+        type=float,
+        default=None,
+        help="Require periodicity_score >= this value (--events mode).",
+    )
+    parser.add_argument(
         "--results-csv",
         type=Path,
         help="Path to results CSV (optional, for filtering which to plot)",
@@ -1056,6 +1105,21 @@ def main():
         help="Optional detection results CSV for metadata lookup",
     )
     parser.add_argument("--show", action="store_true", help="Show plots interactively")
+    parser.add_argument("--workers", type=int, default=1, help="Parallel workers for candidate plotting")
+    parser.add_argument("--no-tqdm", action="store_true", help="Disable progress bars")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Verbose logging")
+    parser.add_argument(
+        "--filter-bad-cameras",
+        action="store_true",
+        default=True,
+        help="Filter bad cameras before plotting (default: enabled)",
+    )
+    parser.add_argument(
+        "--bad-camera-scatter-ratio",
+        type=float,
+        default=2.5,
+        help="Scatter ratio threshold for bad camera filtering",
+    )
 
     args = parser.parse_args()
 
@@ -1109,13 +1173,36 @@ def main():
 
 
     if args.events:
-        csv_paths = load_events_paths(
+        summary = plot_passing_candidates(
             args.events,
-            path_col=args.path_col,
-            only_significant=args.only_significant,
+            args.out_dir,
+            require_failed_any_false=not args.ignore_failed_any,
+            require_flags=args.require_flag,
+            exclude_flags=args.exclude_flag,
+            min_lsp_power=args.min_lsp_power,
+            max_lsp_bootstrap_sig=args.max_lsp_bootstrap_sig,
+            min_periodicity_score=args.min_periodicity_score,
             max_plots=args.max_plots,
+            baseline=args.baseline,
+            baseline_kwargs=baseline_kwargs,
+            skip_events=args.skip_events,
+            plot_fits=args.plot_fits,
+            format=args.format,
+            show=args.show,
+            verbose=args.verbose,
+            workers=args.workers,
+            logbf_threshold_dip=args.logbf_threshold_dip,
+            logbf_threshold_jump=args.logbf_threshold_jump,
+            jd_offset=args.jd_offset,
+            clean_max_error_absolute=args.clean_max_error_absolute,
+            clean_max_error_sigma=args.clean_max_error_sigma,
+            detection_results_csv=args.detection_results,
+            filter_bad_cameras=args.filter_bad_cameras,
+            bad_camera_scatter_ratio=args.bad_camera_scatter_ratio,
+            show_tqdm=not args.no_tqdm,
         )
-        print(f"Loaded {len(csv_paths)} light curves from {args.events}")
+        print(f"Generated {summary.get('plotted', 0)} candidate plots in {args.out_dir}")
+        return
     elif args.input:
         csv_paths = [Path(p) for p in args.input]
     else:

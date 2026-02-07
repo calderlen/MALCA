@@ -57,7 +57,7 @@ graph TB
       end
 
       subgraph "Evaluation"
-          REPRO[reproduce.py<br/>Known object validation<br/>Bayes only]
+          REPRO[evaluation/reproduce.py<br/>Known object validation<br/>Bayes only]
           VALID[evaluation/validation.py<br/>Results validation<br/>No raw data needed]
           INJ[evaluation/injection.py<br/>Synthetic dip testing]
 
@@ -181,8 +181,8 @@ graph TB
    - **`filter.py`**: Signal amplitude filtering (optional via `--min-mag-offset` flag)
 4. **`post_filter.py`**: Quality filters on candidates (posterior strength, morphology, RUWE)
 
-#### **Evaluation** (`malca/evaluation/` + `malca/reproduce.py`)
-- **`reproduce.py`**: Re-runs detection on known objects (dippers, eclipsing binaries)
+#### **Evaluation** (`malca/evaluation/`)
+- **`evaluation/reproduce.py`**: Re-runs detection on known objects (dippers, eclipsing binaries)
   - Only supports `method='bayes'` (current implementation)
   - Reproduction uses Bayesian detection
   - Requires raw light curve data
@@ -233,8 +233,8 @@ graph TB
 
 ## Key Insights
 
-- **`reproduce.py`** and **`evaluation/validation.py`** are validation tools, NOT part of production discovery
-- `reproduce.py` re-runs detection on raw data; `evaluation/validation.py` validates existing results
+- **`evaluation/reproduce.py`** and **`evaluation/validation.py`** are validation tools, NOT part of production discovery
+- `evaluation/reproduce.py` re-runs detection on raw data; `evaluation/validation.py` validates existing results
 - Both share core libraries (`utils.py`, `baseline.py`) with `events.py`
 - Take input from manifest, known candidates, OR production candidates
 - Output validation reports comparing expected vs actual detections

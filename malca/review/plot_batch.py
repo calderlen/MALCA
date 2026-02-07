@@ -20,7 +20,7 @@ from malca.review.metadata import REVIEW_METADATA_FIELDS, normalize_vsx_df, norm
 
 
 def load_passing_candidates(
-    filtered_path: Path,
+    filtered_path: Path | pd.DataFrame,
     *,
     require_failed_any_false: bool = True,
     require_flags: list[str] | None = None,
@@ -45,12 +45,14 @@ def load_passing_candidates(
     pd.DataFrame
         Candidates with failed_any == False
     """
-    filtered_path = Path(filtered_path)
-
-    if filtered_path.suffix.lower() in (".parquet", ".pq"):
-        df = pd.read_parquet(filtered_path)
+    if isinstance(filtered_path, pd.DataFrame):
+        df = filtered_path.copy()
     else:
-        df = pd.read_csv(filtered_path)
+        filtered_path = Path(filtered_path)
+        if filtered_path.suffix.lower() in (".parquet", ".pq"):
+            df = pd.read_parquet(filtered_path)
+        else:
+            df = pd.read_csv(filtered_path)
 
     df = normalize_vsx_df(df)
 
@@ -178,7 +180,7 @@ def _candidate_bucket(row: pd.Series) -> str:
 
 
 def plot_passing_candidates(
-    filtered_path: Path,
+    filtered_path: Path | pd.DataFrame,
     out_dir: Path,
     *,
     require_failed_any_false: bool = True,
@@ -461,9 +463,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Example usage:
-  malca review.plot --detect-run output/runs/20260128_163911
-  malca review.plot --input results_filtered.csv --out-dir plots/
-  malca review.plot --detect-run output/runs/20260128_163911 --max-plots 10
+  malca plot --detect-run output/runs/20260128_163911
+  malca plot --events results_filtered.csv --out-dir plots/
+  malca plot --detect-run output/runs/20260128_163911 --max-plots 10
 """
     )
 

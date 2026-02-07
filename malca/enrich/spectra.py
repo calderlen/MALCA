@@ -5,7 +5,7 @@ import argparse
 
 import pandas as pd
 
-from malca.neighbor_enrich import _ensure_candidate_id, _query_catalog_bulk
+from malca.enrich.neighbor import _ensure_candidate_id, _query_catalog_bulk
 
 
 DEFAULT_SPECTRA_CATALOGS: dict[str, str] = {

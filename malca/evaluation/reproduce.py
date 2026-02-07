@@ -23,7 +23,7 @@ from malca.baseline import (
 from malca.pre_filter import apply_pre_filters
 from malca.filter import filter_signal_amplitude
 from malca.post_filter import apply_post_filters
-from malca.postprocess import run_postprocess
+from malca.plot import plot_passing_candidates
 from malca.stats import median_dt, compute_stats
 from malca.score import compute_event_score
 from malca.classify import compute_all_classifications
@@ -1456,13 +1456,13 @@ def build_reproduction_report(
                 baseline_name = baseline_map.get(str(baseline_func), "per_camera_gp")
                 postprocess_dir = Path(out_dir) / "postprocess"
                 postprocess_dir.mkdir(parents=True, exist_ok=True)
-                run_postprocess(
+                plot_passing_candidates(
                     rows_df,
-                    out_dir=postprocess_dir,
+                    postprocess_dir,
                     baseline=baseline_name,
                     logbf_threshold_dip=logbf_threshold_dip,
                     logbf_threshold_jump=logbf_threshold_jump,
-                    plot_format=plot_format,
+                    format=plot_format,
                     max_plots=max_plots,
                     show_tqdm=verbose,
                 )

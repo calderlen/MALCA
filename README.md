@@ -138,7 +138,7 @@ graph TB
     end
 
     subgraph "Evaluation"
-        REPRO[reproduce.py<br/>Known objects]
+        REPRO[evaluation/reproduce.py<br/>Known objects]
         VALID[evaluation/validation.py<br/>Results validation]
         INJ[evaluation/injection.py<br/>Synthetic dips]
 
@@ -195,7 +195,7 @@ graph TB
 
 **Key Components:**
 - **Production**: `manifest.py` → `pre_filter.py` → `events.py` → `post_filter.py`
-- **Evaluation**: `reproduce.py` (re-runs detection), `evaluation/validation.py` (validates results), `evaluation/injection.py` (synthetic dips)
+- **Evaluation**: `evaluation/reproduce.py` (re-runs detection), `evaluation/validation.py` (validates results), `evaluation/injection.py` (synthetic dips)
 - **CLI**: Unified interface via `malca [command]`
 
 See [docs/architecture.md](docs/architecture.md) for detailed documentation.

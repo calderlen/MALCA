@@ -14,7 +14,6 @@ Usage:
     malca classify [options]       # Dipper classification
     malca injection [options]      # Injection-recovery tests
     malca detection_rate [options] # Measure detection rate
-    malca postprocess [options]    # Plot passing candidates
     malca review [options]         # Launch review GUI + TUI
     malca review.tui [options]     # Launch terminal review interface
     malca stats [options]          # Light-curve statistics
@@ -35,7 +34,7 @@ def main():
     # If so, forward directly to the submodule
     if len(sys.argv) >= 2 and sys.argv[1] in [
         "manifest", "detect", "reproduce", "injection",
-        "detection_rate", "validate", "plot", "postprocess", "post_filter",
+        "detection_rate", "validate", "plot", "post_filter",
         "events", "characterize", "classify", "filter", "pre_filter", "score",
         "stats", "attrition", "review.tui", "review",
         "neighbors", "spectra", "false_positive", "ml_train"
@@ -53,7 +52,7 @@ def main():
             sys.argv = [sys.argv[0]] + remaining
             detect.main()
         elif command == "reproduce":
-            from malca import reproduce
+            reproduce = importlib.import_module("malca.evaluation.reproduce")
             sys.argv = [sys.argv[0]] + remaining
             reproduce.main()
         elif command == "injection":
@@ -72,10 +71,6 @@ def main():
             from malca import plot
             sys.argv = [sys.argv[0]] + remaining
             plot.main()
-        elif command == "postprocess":
-            from malca import postprocess
-            sys.argv = [sys.argv[0]] + remaining
-            postprocess.main()
         elif command == "post_filter":
             from malca import post_filter
             sys.argv = [sys.argv[0]] + remaining
@@ -121,11 +116,11 @@ def main():
             sys.argv = [sys.argv[0]] + remaining
             validation.main()
         elif command == "neighbors":
-            from malca import neighbor_enrich
+            from malca.enrich import neighbor as neighbor_enrich
             sys.argv = [sys.argv[0]] + remaining
             neighbor_enrich.main()
         elif command == "spectra":
-            from malca import spectra_enrich
+            from malca.enrich import spectra as spectra_enrich
             sys.argv = [sys.argv[0]] + remaining
             spectra_enrich.main()
         elif command == "false_positive":
@@ -133,7 +128,7 @@ def main():
             sys.argv = [sys.argv[0]] + remaining
             fp.main()
         elif command == "ml_train":
-            from malca import ml_train
+            from malca.ml import train as ml_train
             sys.argv = [sys.argv[0]] + remaining
             ml_train.main()
         return 0
@@ -155,7 +150,6 @@ def main():
     subparsers.add_parser("detection_rate", help="Measure detection rate")
     subparsers.add_parser("validate", help="Validate results against known candidates")
     subparsers.add_parser("plot", help="Plot light curves with events")
-    subparsers.add_parser("postprocess", help="Plot passing candidates from post-filter output")
     subparsers.add_parser("post_filter", help="Apply quality post-filters")
     subparsers.add_parser("filter", help="Apply signal-amplitude filter")
     subparsers.add_parser("pre_filter", help="Apply pre-filters to candidate tables")

@@ -32,12 +32,12 @@ from tqdm.auto import tqdm
 from malca.manifest import build_manifest_dataframe
 from malca.pre_filter import apply_pre_filters, filter_camera_medians
 from malca.post_filter import apply_post_filters
-from malca.plot_candidates import plot_passing_candidates
+from malca.plot import plot_passing_candidates
 from malca.classify import compute_all_classifications
 from malca.stats import compute_stats
 from malca.characterize import characterize_candidates_df
-from malca.neighbor_enrich import run_neighbor_enrichment
-from malca.spectra_enrich import run_spectra_availability
+from malca.enrich.neighbor import run_neighbor_enrichment
+from malca.enrich.spectra import run_spectra_availability
 from malca.utils import log as _log
 
 
