@@ -16,7 +16,7 @@ MALCA is a Bayesian event-detection pipeline for finding dimming and dipping eve
   - [Individual Commands](#individual-commands)
   - [Candidate Review](#candidate-review)
 - [Output Directory Structure](#output-directory-structure)
-  - [Integrated Pipeline](#integrated-pipeline---detect-run)
+  - [Integrated Pipeline](#integrated-pipeline)
   - [Standalone Module Outputs](#standalone-module-outputs)
 - [Citation](#citation)
 - [License](#license)
@@ -27,6 +27,13 @@ MALCA is a Bayesian event-detection pipeline for finding dimming and dipping eve
 # Requires Python >= 3.10
 git clone https://github.com/calderlen/malca.git && cd malca
 pip install -e "."          # installs all runtime + test dependencies
+```
+
+Conda option:
+
+```bash
+conda env create -f environment.yml
+conda activate malca
 ```
 
 ### Input Files
@@ -230,7 +237,7 @@ The full detection workflow has three steps: build a manifest, run detection wit
        --output output/lc_events_results_13_13.5.csv \
        --trigger-mode posterior_prob --baseline-func gp --min-mag-offset 0.1
    ```
-   - The wrapper builds/loads the manifest, runs pre-filters, then calls `events.py` in batches.
+   - The pipeline command builds/loads the manifest, runs pre-filters, then calls `events.py` in batches.
    - Resume: if interrupted, skips already-processed paths using the checkpoint file.
    - VSX tags are saved to `prefilter/vsx_tags/` and merged into results.
    - To disable VSX handling: `--skip-vsx`. To tag instead of filter: `--vsx-mode tag`.
@@ -244,8 +251,7 @@ The full detection workflow has three steps: build a manifest, run detection wit
    malca post_filter --input results.csv --output filtered.csv \
        --min-bayes-factor 20 --min-event-prob 0.7 --apply-morphology
    ```
-   - **Implemented filters**: posterior strength, event probability, run robustness, morphology
-   - **Placeholder filters** (not yet implemented): periodicity (LSP), Gaia RUWE, periodic catalog crossmatch
+   - **Implemented filters**: posterior strength, event probability, run robustness, morphology, periodicity
 
 **Detect options:**
 ```bash
@@ -272,7 +278,7 @@ malca manifest --index-root <index_dir> --lc-root <lc_dir> \
 
 #### malca events
 
-Run event detection directly (without the detect wrapper):
+Run event detection directly (without the pipeline orchestrator):
 ```bash
 malca events --input /path/to/lc*_cal/*.dat2 --output output/results.parquet --workers 10
 
@@ -358,7 +364,7 @@ plot_efficiency_threshold_contour(cube, threshold=0.5, output_path="depth_at_50p
 
 ```bash
 # Re-run detection on raw data (requires manifest and .dat2 files)
-malca reproduce --method bayes --manifest output/lc_manifest.parquet \
+malca reproduce --manifest output/lc_manifest.parquet \
     --candidates my_targets.csv --out-dir output/results_repro --workers 10
 ```
 **Note**: Reproduction uses Bayesian detection.
@@ -389,10 +395,10 @@ malca validate --method loo --candidates my_targets.csv -v
 
 # Reproduce on built-in candidates using local SkyPatrol CSVs
 malca validate --candidates brayden_candidates --skypatrol-dir input/skypatrol2 \
-    --method bayes --trigger-mode logbf --workers 4
+    --method bf --workers 4
 
-# Reproduce using events.py output directly (uses the 'path' column)
-malca validate --input output/events_logbf.csv --method bayes --trigger-mode logbf
+# Validate using a direct results file path
+malca validate --results output/events_logbf.csv
 ```
 
 #### malca characterize
@@ -479,9 +485,9 @@ malca attrition --pre output/pre.csv --post output/post.csv
 
 ## Output Directory Structure
 
-### Integrated Pipeline (`--detect-run`)
+### Integrated Pipeline
 
-When running the full detection pipeline with `--detect-run`, the following directory structure is created for complete provenance tracking:
+When running `malca pipeline`, the following directory structure is created for complete provenance tracking:
 
 ```
 output/runs/20250121_143052/          # Timestamp-based run directory

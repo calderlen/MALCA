@@ -21,6 +21,4 @@ dependencies:
   - jupyterlab
   - pip
   - pip:
-      - celerite2
-      - astroquery>=0.4.6
-      - dustmaps3d
+      - -e .
