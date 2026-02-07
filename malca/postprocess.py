@@ -58,7 +58,7 @@ def _build_annotations(row: pd.Series, path: str) -> dict[str, str]:
         ann["morph"] = ", ".join(morph_parts)
 
     # VSX class (from pre_filter crossmatch)
-    vsx_class = row.get("class") or row.get("vsx_class")
+    vsx_class = row.get("vsx_class")
     if vsx_class and isinstance(vsx_class, str) and vsx_class.strip():
         ann["vsx"] = vsx_class.strip()
 

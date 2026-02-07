@@ -30,9 +30,14 @@ from __future__ import annotations
 from pathlib import Path
 from time import perf_counter
 import re
+import time
 import pandas as pd
 import numpy as np
 from tqdm.auto import tqdm
+from astropy import units as u
+from astropy.coordinates import SkyCoord
+from astroquery.gaia import Gaia
+from astroquery.vizier import Vizier
 
 
 # =============================================================================
@@ -80,19 +85,14 @@ def fetch_chen2020_ztf_periodic(
         tqdm.write("[fetch_chen2020] Querying VizieR J/ApJS/249/18 (this may take a few minutes)...")
 
     try:
-        from astroquery.vizier import Vizier
-
-        # Query the main table with all rows (include Gaia source_id if available)
         v = Vizier(columns=["RAJ2000", "DEJ2000", "Per", "Type", "GaiaEDR3"], row_limit=-1)
         tables = v.get_catalogs("J/ApJS/249/18")
 
         if not tables:
             raise ValueError("No tables returned from VizieR query")
 
-        # Main catalog is typically the first table
         cat = tables[0].to_pandas()
 
-        # Normalize column names
         df = pd.DataFrame({
             "ra": cat["RAJ2000"].astype(float),
             "dec": cat["DEJ2000"].astype(float),
@@ -100,7 +100,6 @@ def fetch_chen2020_ztf_periodic(
             "var_type": cat["Type"].astype(str),
         })
 
-        # Add Gaia ID if available
         if "GaiaEDR3" in cat.columns:
             df["gaia_id"] = pd.to_numeric(cat["GaiaEDR3"], errors="coerce").astype("Int64")
         elif "GaiaDR3" in cat.columns:
@@ -108,15 +107,12 @@ def fetch_chen2020_ztf_periodic(
         elif "GaiaDR2" in cat.columns:
             df["gaia_id"] = pd.to_numeric(cat["GaiaDR2"], errors="coerce").astype("Int64")
 
-        # Cache to disk
         df.to_parquet(cache_file, index=False)
         if show_tqdm:
             tqdm.write(f"[fetch_chen2020] Cached {len(df)} sources to {cache_file}")
 
         return df
 
-    except ImportError:
-        raise ImportError("astroquery is required for VizieR queries. Install with: pip install astroquery")
     except Exception as e:
         raise RuntimeError(f"Failed to fetch Chen+2020 catalog from VizieR: {e}")
 
@@ -161,9 +157,6 @@ def fetch_gaia_dr3_variables(
         tqdm.write("[fetch_gaia_dr3_variables] Querying Gaia DR3 via TAP (this may take several minutes)...")
 
     try:
-        from astroquery.gaia import Gaia
-
-        # Query classified variables with coordinates
         limit_clause = f"TOP {row_limit}" if row_limit > 0 else ""
         query = f"""
         SELECT {limit_clause}
@@ -176,7 +169,6 @@ def fetch_gaia_dr3_variables(
         result = job.get_results()
         df = result.to_pandas()
 
-        # Normalize column names
         df = df.rename(columns={
             "SOURCE_ID": "source_id",
             "RA": "ra",
@@ -184,15 +176,12 @@ def fetch_gaia_dr3_variables(
             "BEST_CLASS_NAME": "best_class_name",
         })
 
-        # Cache to disk
         df.to_parquet(cache_file, index=False)
         if show_tqdm:
             tqdm.write(f"[fetch_gaia_dr3_variables] Cached {len(df)} sources to {cache_file}")
 
         return df
 
-    except ImportError:
-        raise ImportError("astroquery is required for Gaia TAP queries. Install with: pip install astroquery")
     except Exception as e:
         raise RuntimeError(f"Failed to fetch Gaia DR3 variables: {e}")
 
@@ -227,8 +216,6 @@ def fetch_gaia_dr3_ruwe(
     pd.DataFrame
         Catalog with columns: source_id, ra, dec, ruwe
     """
-    import time
-
     cache_dir = Path(cache_dir) if cache_dir else DEFAULT_CACHE_DIR
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_file = cache_dir / "gaia_dr3_ruwe_cache.parquet"
@@ -261,8 +248,6 @@ def fetch_gaia_dr3_ruwe(
     # Query missing IDs
     if ids_to_query:
         try:
-            from astroquery.gaia import Gaia
-
             new_results = []
             n_batches = (len(ids_to_query) + batch_size - 1) // batch_size
 
@@ -303,8 +288,8 @@ def fetch_gaia_dr3_ruwe(
                 if show_tqdm:
                     tqdm.write(f"[fetch_gaia_dr3_ruwe] Updated cache with {len(new_df)} new entries (total: {len(cached_df)})")
 
-        except ImportError:
-            raise ImportError("astroquery is required for Gaia TAP queries. Install with: pip install astroquery")
+        except Exception as e:
+            raise RuntimeError(f"Failed querying Gaia RUWE batches: {e}")
 
     # Return only requested IDs
     if cached_df.empty:
@@ -1079,9 +1064,6 @@ def validate_periodic_catalog(
 
         if "ra_deg" not in df.columns or "dec_deg" not in df.columns:
             raise ValueError("[validate_periodic_catalog] Need ra_deg/dec_deg for coordinate fallback")
-
-        from astropy import units as u
-        from astropy.coordinates import SkyCoord
 
         candidates_coords = SkyCoord(
             ra=df["ra_deg"].values * u.deg,

@@ -56,10 +56,10 @@ graph TB
           POSTFILT --> CAND[(Final Candidates<br/>CSV/Parquet)]
       end
 
-      subgraph "Testing & Validation (tests/)"
-          REPRO[tests/reproduce.py<br/>Known object validation<br/>Bayes only]
-          VALID[tests/validation.py<br/>Results validation<br/>No raw data needed]
-          INJ[injection.py<br/>Synthetic dip testing]
+      subgraph "Evaluation"
+          REPRO[reproduce.py<br/>Known object validation<br/>Bayes only]
+          VALID[evaluation/validation.py<br/>Results validation<br/>No raw data needed]
+          INJ[evaluation/injection.py<br/>Synthetic dip testing]
 
           KNOWN[Known Candidates<br/>brayden_candidates] --> REPRO
           KNOWN --> VALID
@@ -79,7 +79,7 @@ graph TB
           PLOT[plot.py<br/>LC + event plots]
           SCORE_CLI[score.py<br/>Standalone scoring]
           LTV[ltv/pipeline.py<br/>Long-term variability]
-          FP[filter_attrition.py<br/>Pre/post comparison]
+          FP[evaluation/attrition.py<br/>Pre/post comparison]
 
           CAND --> PLOT
           RAW -.-> PLOT
@@ -181,23 +181,23 @@ graph TB
    - **`filter.py`**: Signal amplitude filtering (optional via `--min-mag-offset` flag)
 4. **`post_filter.py`**: Quality filters on candidates (posterior strength, morphology, RUWE)
 
-#### **Testing & Validation** (`tests/` directory)
-- **`tests/reproduce.py`**: Re-runs detection on known objects (dippers, eclipsing binaries)
+#### **Evaluation** (`malca/evaluation/` + `malca/reproduce.py`)
+- **`reproduce.py`**: Re-runs detection on known objects (dippers, eclipsing binaries)
   - Only supports `method='bayes'` (current implementation)
   - Reproduction uses Bayesian detection
   - Requires raw light curve data
-- **`tests/validation.py`**: Validates detection results against known candidates
+- **`evaluation/validation.py`**: Validates detection results against known candidates
   - Compares events.py output to expected detections
   - No raw data needed (results-only validation)
   - Includes default Brayden candidate list
-- **`injection.py`**: Synthetic dip injection for completeness testing
+- **`evaluation/injection.py`**: Synthetic dip injection for completeness testing
+- **`evaluation/attrition.py`**: Filter attrition analysis (pre vs post filter)
 - **`vsx/reproducibility.py`**: Validates recovery of VSX catalog objects
 
 #### **Analysis & Visualization**
 - **`plot.py`**: Light curve plotting with event overlays
 - **`score.py`**: Event scoring (library used in `events.py` + standalone CLI)
 - **`ltv/`**: Long-term variability pipeline (seasonal trend analysis)
-- **`filter_attrition.py`**: Filter attrition analysis (pre vs post filter)
 - **`characterize.py`**: Multi-wavelength characterization (Gaia DR3, dustmaps3d, StarHorse, YSO classification)
   - Queries Gaia DR3 for astrometry, astrophysics, 2MASS/AllWISE photometry
   - Applies 3D dust extinction correction using `dustmaps3d` (Wang et al. 2025)
@@ -233,8 +233,8 @@ graph TB
 
 ## Key Insights
 
-- **`tests/reproduce.py`** and **`tests/validation.py`** are validation tools, NOT part of production discovery
-- `reproduce.py` re-runs detection on raw data; `validation.py` validates existing results
+- **`reproduce.py`** and **`evaluation/validation.py`** are validation tools, NOT part of production discovery
+- `reproduce.py` re-runs detection on raw data; `evaluation/validation.py` validates existing results
 - Both share core libraries (`utils.py`, `baseline.py`) with `events.py`
 - Take input from manifest, known candidates, OR production candidates
 - Output validation reports comparing expected vs actual detections

@@ -28,6 +28,7 @@ from malca.review.store import (
     save_app_state,
     save_review,
 )
+from malca.review.metadata import extract_review_metadata
 
 
 DEFAULT_XMATCH = "input/vsx/asassn_x_vsx_matches_20250919_2252.csv"
@@ -158,14 +159,7 @@ def main() -> None:
     left, right = st.columns([2, 1])
     with left:
         st.markdown("**Candidate Context**")
-        show_keys = [
-            "asas_sn_id", "path", "periodic_flag", "catalog_match", "high_ruwe_flag", "lsp_power",
-            "lsp_period", "lsp_bootstrap_sig", "periodicity_score", "dip_best_log_bf", "jump_best_log_bf",
-            "dip_best_morph", "jump_best_morph", "ruwe", "teff_gspphot", "logg_gspphot", "mh_gspphot",
-            "distance_gspphot", "A_v_3d", "ebv_3d", "yso_class", "yso_class_num", "galactic_pop",
-            "age50", "mass50", "banyan_field_prob", "banyan_best_assoc",
-        ]
-        summary = {k: payload.get(k) for k in show_keys if k in payload}
+        summary = {k: v for k, v in extract_review_metadata(payload)}
         st.dataframe(pd.DataFrame([summary]).T.rename(columns={0: "value"}), use_container_width=True)
 
         st.markdown("**Light Curve Plot**")

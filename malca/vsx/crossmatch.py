@@ -78,11 +78,11 @@ def crossmatch_asassn_vsx(
         {
             "targ_idx": np.where(mask)[0],
             "vsx_idx": idx_vsx[mask],
-            "sep_arcsec": sep2d[mask].to(u.arcsec).value,
+            "vsx_sep_arcsec": sep2d[mask].to(u.arcsec).value,
         }
     )
 
-    return (
+    out = (
         df_pairs.merge(
             df_asassn, left_on="targ_idx", right_index=True, how="left"
         ).merge(
@@ -93,6 +93,9 @@ def crossmatch_asassn_vsx(
             suffixes=("_targ", "_vsx"),
         )
     )
+    if "class" in out.columns and "vsx_class" not in out.columns:
+        out = out.rename(columns={"class": "vsx_class"})
+    return out
 
 
 def write_crossmatch(

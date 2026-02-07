@@ -18,6 +18,7 @@ from typing import Sequence
 from malca.events import score_lightcurve
 from malca.utils import gaussian, paczynski_kernel, read_skypatrol_csv as _read_skypatrol_csv
 from malca.utils import clean_lc, read_lc_dat2, filter_bad_cameras
+from malca.review.metadata import REVIEW_METADATA_FIELDS, normalize_vsx_record
 from malca.baseline import (
     global_median_baseline,
     per_camera_median_baseline,
@@ -70,8 +71,6 @@ def read_asassn_dat(dat_path):
     """
     Read an ASAS-SN .dat file using whitespace separation.
     """
-    import pandas as pd
-
     df = pd.read_csv(
         dat_path,
         sep=r"\s+",
@@ -243,24 +242,18 @@ def lookup_metadata_for_path(path: Path, detection_results_csv=None):
 
     # Fallback to brayden_candidates if no metadata found from CSV
     if not meta:
-        try:
-            from malca.reproduce import brayden_candidates
-            
-            # Extract source_id from filename
-            source_id = stem.split("-")[0]
-            
-            # Look up in brayden_candidates
-            for candidate in brayden_candidates:
-                if candidate.get("source_id") == source_id:
-                    meta = {
-                        "source": candidate.get("source"),
-                        "source_id": source_id,
-                        "category": candidate.get("category"),
-                        "data_source": source_type,
-                    }
-                    return meta
-        except ImportError:
-            pass
+        from malca.reproduce import brayden_candidates
+
+        source_id = stem.split("-")[0]
+        for candidate in brayden_candidates:
+            if candidate.get("source_id") == source_id:
+                meta = {
+                    "source": candidate.get("source"),
+                    "source_id": source_id,
+                    "category": candidate.get("category"),
+                    "data_source": source_type,
+                }
+                return meta
     
     if not meta:
         return {"data_source": source_type}
@@ -786,6 +779,7 @@ def plot_bayes_results(
     meta = lookup_metadata_for_path(csv_path, detection_results_csv=detection_results_csv) or {}
     if metadata:
         meta.update(metadata)
+    meta = normalize_vsx_record(meta)
 
     # Build title: "Source (ID) – VSX Class – Category – JD range"
     source_name = meta.get("source")
@@ -900,6 +894,23 @@ def plot_bayes_results(
     if show_timestamp:
         timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M")
         info_lines.append(f"Generated: {timestamp_str}")
+
+    # Shared metadata fields for GUI/TUI/PNG parity
+    existing_lines = set(info_lines)
+    for label, key in REVIEW_METADATA_FIELDS:
+        if key not in meta:
+            continue
+        val = meta.get(key)
+        if val is None:
+            continue
+        if isinstance(val, float) and np.isnan(val):
+            continue
+        if isinstance(val, str) and not val.strip():
+            continue
+        line = f"{label}: {val}"
+        if line not in existing_lines:
+            info_lines.append(line)
+            existing_lines.add(line)
 
     # Display info panel at bottom-right, expanding upward
     if info_lines and unified_layout:

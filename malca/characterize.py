@@ -18,6 +18,16 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
+import astropy.units as u
+import pyvo
+import requests
+from astropy.coordinates import SkyCoord
+from astropy.table import Table
+from astroquery.gaia import Gaia
+from astroquery.xmatch import XMatch
+from banyan_sigma import banyan_sigma
+from dustmaps3d import dustmaps3d
+from scipy.odr import ODR, Model, RealData
 
 # Suppress astropy warnings
 import warnings
@@ -35,8 +45,6 @@ def query_gaia_by_ids(source_ids: list[str | int], chunk_size: int = 1000, cache
     
     Retrieves astrometry, astrophysics, and 2MASS/WISE photometry via ADQL joins.
     """
-    from astroquery.gaia import Gaia
-    
     cached_df = pd.DataFrame()
     ids_to_query = [str(x) for x in source_ids if str(x).isdigit()]
     
@@ -134,12 +142,6 @@ def query_starhorse_by_ids(source_ids: list[str | int], starhorse_file: str | Pa
     """
     if use_tap:
         # TAP query via pyvo
-        try:
-            import pyvo
-        except ImportError:
-            print("Error: 'pyvo' package required for TAP queries. Install with: pip install pyvo")
-            return pd.DataFrame()
-        
         # Convert IDs to strings
         valid_ids = [str(x) for x in source_ids if str(x).isdigit()]
         if not valid_ids:
@@ -204,7 +206,6 @@ def query_starhorse_by_ids(source_ids: list[str | int], starhorse_file: str | Pa
             if str(starhorse_path).endswith('.parquet'):
                 sh_df = pd.read_parquet(starhorse_path)
             elif str(starhorse_path).endswith('.fits') or str(starhorse_path).endswith('.fits.gz'):
-                from astropy.table import Table
                 sh_df = Table.read(starhorse_path).to_pandas()
             else:
                 sh_df = pd.read_csv(starhorse_path)
@@ -249,14 +250,6 @@ def get_dust_extinction(df: pd.DataFrame) -> pd.DataFrame:
     df['A_v_3d'] = 0.0
     df['ebv_3d'] = np.nan
     
-    try:
-        from dustmaps3d import dustmaps3d
-        from astropy.coordinates import SkyCoord
-        import astropy.units as u
-    except ImportError:
-        print("Error: 'dustmaps3d' package not installed. Run: pip install dustmaps3d")
-        return df
-
     if 'ra' in df.columns and 'dec' in df.columns:
         ra_col = 'ra'
         dec_col = 'dec'
@@ -441,15 +434,6 @@ def query_banyan_sigma(df: pd.DataFrame) -> pd.DataFrame:
         df['banyan_best_assoc'] = ''
         return df
     
-    try:
-        from banyan_sigma import banyan_sigma
-    except ImportError:
-        print("Warning: banyan_sigma package not installed. Skipping.")
-        print("Install with: pip install banyan-sigma")
-        df['banyan_field_prob'] = np.nan
-        df['banyan_best_assoc'] = ''
-        return df
-    
     field_probs = []
     best_assocs = []
     
@@ -513,17 +497,6 @@ def crossmatch_iphas(df: pd.DataFrame, max_sep_arcsec: float = 1.0) -> pd.DataFr
     
     if 'ra' not in df.columns or 'dec' not in df.columns:
         print("Warning: IPHAS crossmatch requires ra, dec columns")
-        df['iphas_r_ha'] = np.nan
-        df['iphas_r_i'] = np.nan
-        df['iphas_ha_excess'] = False
-        return df
-    
-    try:
-        from astroquery.xmatch import XMatch
-        from astropy.table import Table
-        import astropy.units as u
-    except ImportError:
-        print("Warning: astroquery required for IPHAS crossmatch")
         df['iphas_r_ha'] = np.nan
         df['iphas_r_i'] = np.nan
         df['iphas_ha_excess'] = False
@@ -625,9 +598,6 @@ def check_sfr_proximity(df: pd.DataFrame, max_dist_kpc: float = 1.5) -> pd.DataF
         df['sfr_name'] = ''
         return df
     
-    from astropy.coordinates import SkyCoord
-    import astropy.units as u
-    
     # Get distance column
     if 'distance_gspphot' in df.columns:
         dist_pc = df['distance_gspphot'].values.astype(float)
@@ -718,17 +688,6 @@ def crossmatch_open_clusters(df: pd.DataFrame, max_sep_arcsec: float = 1.0) -> p
         df['cluster_dist_pc'] = np.nan
         return df
     
-    try:
-        from astroquery.xmatch import XMatch
-        from astropy.table import Table
-        import astropy.units as u
-    except ImportError:
-        print("Warning: astroquery required for cluster crossmatch")
-        df['cluster_name'] = ''
-        df['cluster_age_myr'] = np.nan
-        df['cluster_dist_pc'] = np.nan
-        return df
-    
     # Initialize output columns
     df['cluster_name'] = ''
     df['cluster_age_myr'] = np.nan
@@ -805,15 +764,6 @@ def query_unwise_variability(df: pd.DataFrame, max_sep_arcsec: float = 3.0) -> p
     
     if 'ra' not in df.columns or 'dec' not in df.columns:
         print("Warning: unWISE query requires ra, dec columns")
-        df['unwise_w1_zscore'] = np.nan
-        df['unwise_w2_zscore'] = np.nan
-        df['unwise_w1_var'] = False
-        return df
-    
-    try:
-        import requests
-    except ImportError:
-        print("Warning: requests package required for unWISE query")
         df['unwise_w1_zscore'] = np.nan
         df['unwise_w2_zscore'] = np.nan
         df['unwise_w1_var'] = False
@@ -977,12 +927,6 @@ def fit_cmd_slope(
     -----
     ISM slopes: RV=3.1 -> 74.1°, RV=5.0 -> 79.2°
     """
-    try:
-        from scipy.odr import ODR, Model, RealData
-    except ImportError:
-        return {'slope': np.nan, 'slope_angle_deg': np.nan, 
-                'ism_consistent': False, 'implied_rv': np.nan}
-    
     mag = np.asarray(mag, float)
     color = np.asarray(color, float)
     valid = np.isfinite(mag) & np.isfinite(color)
@@ -1021,6 +965,44 @@ def fit_cmd_slope(
             'ism_consistent': ism_consistent, 'implied_rv': implied_rv}
 
 
+def _set_module_state(
+    df: pd.DataFrame,
+    module: str,
+    status: str,
+    error: str = "",
+) -> pd.DataFrame:
+    """Annotate module execution status on all rows."""
+    out = df.copy()
+    out[f"char_status_{module}"] = status
+    out[f"char_error_{module}"] = error
+    return out
+
+
+def _run_optional_module(
+    df: pd.DataFrame,
+    *,
+    module: str,
+    enabled: bool,
+    description: str,
+    func,
+    **kwargs,
+) -> pd.DataFrame:
+    """Run optional characterize module in fail-open mode."""
+    if not enabled:
+        return _set_module_state(df, module, "skipped", "")
+
+    print(description)
+    try:
+        out = func(df, **kwargs)
+        if not isinstance(out, pd.DataFrame):
+            raise TypeError(f"{module} did not return a pandas DataFrame")
+        return _set_module_state(out, module, "ok", "")
+    except Exception as e:
+        msg = str(e)
+        print(f"Warning: characterize module '{module}' failed: {msg}")
+        return _set_module_state(df, module, "error", msg)
+
+
 def characterize_candidates_df(
     df: pd.DataFrame,
     *,
@@ -1029,6 +1011,11 @@ def characterize_candidates_df(
     cache: Path = Path("output/gaia_cache.parquet"),
     dust: bool = False,
     starhorse: str | None = None,
+    run_banyan: bool = True,
+    run_iphas: bool = True,
+    run_sfr: bool = True,
+    run_clusters: bool = True,
+    run_unwise: bool = True,
 ) -> pd.DataFrame:
     """Characterize candidates and return an enriched dataframe."""
     if "asas_sn_id" not in df.columns:
@@ -1093,29 +1080,85 @@ def characterize_candidates_df(
 
     print("Classifying Galactic populations...")
     df_char = classify_galactic_population(df_char)
+    df_char = _set_module_state(df_char, "population", "ok", "")
 
     if starhorse:
         print("Loading StarHorse catalog for ages...")
-        use_tap_query = not Path(starhorse).exists() if starhorse != "tap" else True
-        sh_df = query_starhorse_by_ids(
-            gaia_ids,
-            starhorse_file=starhorse if not use_tap_query else None,
-            use_tap=use_tap_query,
-        )
-        if not sh_df.empty:
-            df_char = df_char.merge(sh_df, on="source_id", how="left", suffixes=("", "_sh"))
-            if "age50" in df_char.columns:
-                df_char = classify_galactic_population(df_char)
+        try:
+            use_tap_query = not Path(starhorse).exists() if starhorse != "tap" else True
+            sh_df = query_starhorse_by_ids(
+                gaia_ids,
+                starhorse_file=starhorse if not use_tap_query else None,
+                use_tap=use_tap_query,
+            )
+            if not sh_df.empty:
+                df_char = df_char.merge(sh_df, on="source_id", how="left", suffixes=("", "_sh"))
+                if "age50" in df_char.columns:
+                    df_char = classify_galactic_population(df_char)
+            df_char = _set_module_state(df_char, "starhorse", "ok", "")
+        except Exception as e:
+            msg = str(e)
+            print(f"Warning: characterize module 'starhorse' failed: {msg}")
+            df_char = _set_module_state(df_char, "starhorse", "error", msg)
+    else:
+        df_char = _set_module_state(df_char, "starhorse", "skipped", "")
 
-    if dust:
-        print("Computing 3D dust extinction (dustmaps3d)...")
-        df_char = get_dust_extinction(df_char)
+    df_char = _run_optional_module(
+        df_char,
+        module="dust",
+        enabled=dust,
+        description="Computing 3D dust extinction (dustmaps3d)...",
+        func=get_dust_extinction,
+    )
 
     if "tmass_j" in df_char.columns:
         print("Classifying YSOs...")
-        df_char = classify_yso(df_char)
+        try:
+            df_char = classify_yso(df_char)
+            df_char = _set_module_state(df_char, "yso", "ok", "")
+        except Exception as e:
+            msg = str(e)
+            print(f"Warning: characterize module 'yso' failed: {msg}")
+            df_char = _set_module_state(df_char, "yso", "error", msg)
     else:
         print("Warning: IR photometry columns not found for YSO classification")
+        df_char = _set_module_state(df_char, "yso", "skipped", "")
+
+    df_char = _run_optional_module(
+        df_char,
+        module="banyan",
+        enabled=run_banyan,
+        description="Running BANYAN Σ membership checks...",
+        func=query_banyan_sigma,
+    )
+    df_char = _run_optional_module(
+        df_char,
+        module="iphas",
+        enabled=run_iphas,
+        description="Running IPHAS H-alpha crossmatch...",
+        func=crossmatch_iphas,
+    )
+    df_char = _run_optional_module(
+        df_char,
+        module="sfr",
+        enabled=run_sfr,
+        description="Checking star-forming region proximity...",
+        func=check_sfr_proximity,
+    )
+    df_char = _run_optional_module(
+        df_char,
+        module="clusters",
+        enabled=run_clusters,
+        description="Running open cluster crossmatch...",
+        func=crossmatch_open_clusters,
+    )
+    df_char = _run_optional_module(
+        df_char,
+        module="unwise",
+        enabled=run_unwise,
+        description="Querying unWISE/unTimely variability...",
+        func=query_unwise_variability,
+    )
 
     return df_char
 
@@ -1135,6 +1178,18 @@ def main():
     parser.add_argument("--cache", type=Path, default=Path("output/gaia_cache.parquet"), help="Cache file for Gaia queries")
     parser.add_argument("--dust", action="store_true", help="Enable dustmaps3d 3D extinction query")
     parser.add_argument("--starhorse", type=str, default=None, help="StarHorse stellar ages/masses: 'tap' for remote TAP query (recommended), or path to local catalog file")
+    parser.add_argument("--no-characterize-banyan", dest="characterize_banyan", action="store_false", help="Disable BANYAN Sigma enrichment")
+    parser.add_argument("--no-characterize-iphas", dest="characterize_iphas", action="store_false", help="Disable IPHAS enrichment")
+    parser.add_argument("--no-characterize-sfr", dest="characterize_sfr", action="store_false", help="Disable star-forming-region enrichment")
+    parser.add_argument("--no-characterize-clusters", dest="characterize_clusters", action="store_false", help="Disable open-cluster enrichment")
+    parser.add_argument("--no-characterize-unwise", dest="characterize_unwise", action="store_false", help="Disable unWISE variability enrichment")
+    parser.set_defaults(
+        characterize_banyan=True,
+        characterize_iphas=True,
+        characterize_sfr=True,
+        characterize_clusters=True,
+        characterize_unwise=True,
+    )
     
     args = parser.parse_args()
     
@@ -1152,6 +1207,11 @@ def main():
         cache=args.cache,
         dust=args.dust,
         starhorse=args.starhorse,
+        run_banyan=args.characterize_banyan,
+        run_iphas=args.characterize_iphas,
+        run_sfr=args.characterize_sfr,
+        run_clusters=args.characterize_clusters,
+        run_unwise=args.characterize_unwise,
     )
     
     # Save results

@@ -14,7 +14,7 @@ Input format:
 
     Filters compute required stats from dat2 files on-the-fly:
     - time_span_days, points_per_day (computed from JD column)
-    - sep_arcsec, class (attached via VSX crossmatch)
+    - vsx_sep_arcsec, vsx_class (attached via VSX crossmatch)
     - n_cameras (counted from camera# column)
 
 Note:
@@ -329,16 +329,16 @@ def attach_vsx_info(
     vsx_crossmatch_csv: str | Path | None = "input/vsx/asassn_x_vsx_matches_20250919_2252.csv",
 ) -> pd.DataFrame:
     """
-    Attach VSX crossmatch info (sep_arcsec/class) to the dataframe.
+    Attach VSX crossmatch info (vsx_sep_arcsec/vsx_class) to the dataframe.
 
-    Uses the provided crossmatch CSV, or requires sep_arcsec/class columns.
+    Uses the provided crossmatch CSV, or requires vsx_sep_arcsec/vsx_class columns.
     """
-    if "sep_arcsec" in df.columns and "class" in df.columns:
+    if "vsx_sep_arcsec" in df.columns and "vsx_class" in df.columns:
         return df
     if vsx_crossmatch_csv is None:
         raise ValueError("vsx_crossmatch_csv is required to attach VSX info.")
 
-    xmatch = pd.read_csv(vsx_crossmatch_csv, usecols=["asas_sn_id", "sep_arcsec", "class"])
+    xmatch = pd.read_csv(vsx_crossmatch_csv, usecols=["asas_sn_id", "vsx_sep_arcsec", "vsx_class"])
     xmatch["asas_sn_id"] = xmatch["asas_sn_id"].astype(str)
     id_col = get_id_col(df)
     df = df.copy()
@@ -362,8 +362,8 @@ def filter_vsx_match(
     Filter candidates based on pre-crossmatched VSX results.
 
     Either:
-    - Provide vsx_crossmatch_csv: merges on asas_sn_id to get sep_arcsec/class
-    - Or have sep_arcsec/class columns already in df
+    - Provide vsx_crossmatch_csv: merges on asas_sn_id to get vsx_sep_arcsec/vsx_class
+    - Or have vsx_sep_arcsec/vsx_class columns already in df
 
     Removes candidates within max_sep_arcsec of a VSX source.
     """
@@ -371,14 +371,16 @@ def filter_vsx_match(
     df = attach_vsx_info(df, vsx_crossmatch_csv=vsx_crossmatch_csv)
 
     # Check required columns exist
-    if "sep_arcsec" not in df.columns or "class" not in df.columns:
-        raise ValueError(f"Missing required columns for VSX filter: need 'sep_arcsec' and 'class'. Got: {list(df.columns)}")
+    if "vsx_sep_arcsec" not in df.columns or "vsx_class" not in df.columns:
+        raise ValueError(
+            f"Missing required columns for VSX filter: need 'vsx_sep_arcsec' and 'vsx_class'. Got: {list(df.columns)}"
+        )
 
     # Apply filter
-    has_match = df["sep_arcsec"].fillna(999) <= max_sep_arcsec
+    has_match = df["vsx_sep_arcsec"].fillna(999) <= max_sep_arcsec
 
     if exclude_classes is not None:
-        is_excluded_type = df["class"].fillna("").isin(exclude_classes)
+        is_excluded_type = df["vsx_class"].fillna("").isin(exclude_classes)
         mask = ~(has_match & is_excluded_type)
     else:
         mask = ~has_match

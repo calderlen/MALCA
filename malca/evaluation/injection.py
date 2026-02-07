@@ -20,9 +20,10 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy.stats import skewnorm
+from scipy.stats import skewnorm, skew
 from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
+import plotly.graph_objects as go
 
 from malca.utils import read_lc_dat2
 from malca.events import run_bayesian_significance
@@ -1233,11 +1234,6 @@ def plot_efficiency_3d(
     
     Shows detection efficiency as colored points in 3D space.
     """
-    try:
-        import plotly.graph_objects as go
-    except ImportError:
-        raise ImportError("plotly required for 3D visualization. Install: pip install plotly")
-
     depth = cube["depth_centers"]
     duration = cube["duration_centers"]
     mag = cube["mag_centers"]
@@ -1323,11 +1319,6 @@ def plot_efficiency_isosurface(
     isovalue : float
         Efficiency value for isosurface (0-1)
     """
-    try:
-        import plotly.graph_objects as go
-    except ImportError:
-        raise ImportError("plotly required for 3D visualization. Install: pip install plotly")
-
     depth = cube["depth_centers"]
     duration = cube["duration_centers"]
     mag = cube["mag_centers"]
@@ -1446,18 +1437,15 @@ def plot_efficiency_all(
         plt.close()
 
     print("Generating interactive 3D plots...")
-    try:
-        plot_efficiency_3d(
-            cube,
-            output_path=output_dir / "efficiency_3d_volume.html",
-        )
-        plot_efficiency_isosurface(
-            cube,
-            isovalue=0.5,
-            output_path=output_dir / "efficiency_50pct_isosurface.html",
-        )
-    except ImportError:
-        print("  Skipping 3D plots (plotly not installed)")
+    plot_efficiency_3d(
+        cube,
+        output_path=output_dir / "efficiency_3d_volume.html",
+    )
+    plot_efficiency_isosurface(
+        cube,
+        isovalue=0.5,
+        output_path=output_dir / "efficiency_50pct_isosurface.html",
+    )
 
     print(f"All plots saved to {output_dir}")
 
@@ -1466,8 +1454,6 @@ def compute_auxiliary_statistics(df_lc: pd.DataFrame, mag_col: str = "mag") -> d
     """
     Compute auxiliary time-series statistics.
     """
-    from scipy.stats import skew
-
     mag = df_lc[mag_col].values
     mag_finite = mag[np.isfinite(mag)]
 

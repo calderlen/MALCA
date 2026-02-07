@@ -19,6 +19,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
+import astropy.units as u
+from astropy.coordinates import SkyCoord
+from astroquery.mast import Catalogs
+from astroquery.vizier import Vizier
 
 # Constants
 SOLAR_MASS_KG = 1.989e30
@@ -127,14 +131,6 @@ def query_iphas_by_coords(df: pd.DataFrame, radius_arcsec: float = 2.0) -> pd.Da
         print("Warning: No ra/dec for IPHAS query")
         return df
     
-    try:
-        from astroquery.vizier import Vizier
-        from astropy.coordinates import SkyCoord
-        import astropy.units as u
-    except ImportError:
-        print("Error: astroquery required for IPHAS query")
-        return df
-    
     df = df.copy()
     df['iphas_r'] = np.nan
     df['iphas_i'] = np.nan
@@ -182,12 +178,6 @@ def query_ps1_by_coords(df: pd.DataFrame, radius_arcsec: float = 2.0) -> pd.Data
     """
     if 'ra' not in df.columns or 'dec' not in df.columns:
         print("Warning: No ra/dec for PS1 query")
-        return df
-    
-    try:
-        from astroquery.mast import Catalogs
-    except ImportError:
-        print("Error: astroquery required for PS1 query")
         return df
     
     df = df.copy()

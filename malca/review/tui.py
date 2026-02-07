@@ -18,6 +18,7 @@ from malca.review.store import (
     query_queue,
     save_review,
 )
+from malca.review.metadata import extract_review_metadata
 
 
 def _print_candidate(row: pd.Series, review: dict) -> None:
@@ -91,14 +92,8 @@ def main_with_args(*, db: Path | None = None, input_path: Path | None = None, re
             continue
         if op == "show":
             payload = get_candidate_payload(conn, cid)
-            for k in [
-                "path", "asas_sn_id", "periodicity_score", "lsp_power", "lsp_period", "dip_best_log_bf", "jump_best_log_bf",
-                "ruwe", "teff_gspphot", "logg_gspphot", "mh_gspphot", "distance_gspphot",
-                "A_v_3d", "ebv_3d", "yso_class", "galactic_pop", "age50", "mass50",
-                "banyan_field_prob", "banyan_best_assoc",
-            ]:
-                if k in payload:
-                    print(f"  {k}: {payload[k]}")
+            for label, value in extract_review_metadata(payload):
+                print(f"  {label}: {value}")
             continue
 
         # edits

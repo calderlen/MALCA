@@ -16,6 +16,7 @@ import numpy as np
 from tqdm.auto import tqdm
 
 from malca.plot import plot_bayes_results, BASELINE_FUNCTIONS
+from malca.review.metadata import REVIEW_METADATA_FIELDS, normalize_vsx_df, normalize_vsx_record
 
 
 def load_passing_candidates(
@@ -50,6 +51,8 @@ def load_passing_candidates(
         df = pd.read_parquet(filtered_path)
     else:
         df = pd.read_csv(filtered_path)
+
+    df = normalize_vsx_df(df)
 
     # Filter to passing candidates
     if require_failed_any_false and "failed_any" in df.columns:
@@ -102,7 +105,7 @@ def load_passing_candidates(
     return df.reset_index(drop=True)
 
 
-def _plot_single_candidate(args: tuple) -> tuple[str, bool, str, str]:
+def _plot_single_candidate(args: tuple) -> tuple[str, str, bool, str, str]:
     """Worker function for parallel plotting."""
     (
         lc_path_str, out_path_str, baseline, baseline_kwargs,
@@ -116,7 +119,7 @@ def _plot_single_candidate(args: tuple) -> tuple[str, bool, str, str]:
     out_path = Path(out_path_str)
 
     if not lc_path.exists():
-        return (lc_path_str, False, "file not found")
+        return (lc_path_str, out_path_str, False, "file not found", "")
 
     try:
         baseline_func = BASELINE_FUNCTIONS.get(baseline, BASELINE_FUNCTIONS["per_camera_gp"])
@@ -143,9 +146,35 @@ def _plot_single_candidate(args: tuple) -> tuple[str, bool, str, str]:
         )
         # Format filtered cameras as comma-separated string
         filtered_str = ",".join(str(c) for c in sorted(filtered_cams)) if filtered_cams else ""
-        return (lc_path_str, True, "", filtered_str)
+        return (lc_path_str, out_path_str, True, "", filtered_str)
     except Exception as e:
-        return (lc_path_str, False, str(e), "")
+        return (lc_path_str, out_path_str, False, str(e), "")
+
+
+def _as_bool(v: object) -> bool:
+    if isinstance(v, (bool, np.bool_)):
+        return bool(v)
+    if isinstance(v, (int, np.integer, float, np.floating)):
+        return bool(v)
+    if isinstance(v, str):
+        return v.strip().lower() in {"1", "true", "t", "yes", "y"}
+    return False
+
+
+def _candidate_bucket(row: pd.Series) -> str:
+    dip_sig = _as_bool(row.get("dip_significant"))
+    jump_sig = _as_bool(row.get("jump_significant"))
+
+    if not dip_sig and not jump_sig and "event_type" in row.index and pd.notna(row.get("event_type")):
+        event_type = str(row.get("event_type")).lower()
+        dip_sig = ("dip" in event_type) or (event_type == "either")
+        jump_sig = ("jump" in event_type) or (event_type == "either")
+
+    if dip_sig and jump_sig:
+        return "both"
+    if jump_sig:
+        return "jump"
+    return "dip"
 
 
 def plot_passing_candidates(
@@ -253,12 +282,23 @@ def plot_passing_candidates(
     if baseline_kwargs is None:
         baseline_kwargs = {}
 
+    bucket_dirs = {
+        "dip": out_dir / "dip",
+        "jump": out_dir / "jump",
+        "both": out_dir / "both",
+    }
+    for d in bucket_dirs.values():
+        d.mkdir(parents=True, exist_ok=True)
+
     # Build work items
     work_items = []
+    manifest_rows: list[dict[str, object]] = []
     for _, row in df.iterrows():
+        row_dict = normalize_vsx_record({k: row[k] for k in row.index})
         lc_path = Path(row["path"])
         asas_sn_id = lc_path.stem.split("-")[0]
-        out_path = out_dir / f"{asas_sn_id}_candidate.{format}"
+        bucket = _candidate_bucket(row)
+        out_path = bucket_dirs[bucket] / f"{asas_sn_id}_candidate.{format}"
 
         # Build annotations from filter results
         annotations = {}
@@ -307,16 +347,13 @@ def plot_passing_candidates(
         if "gaia_id" in row.index and pd.notna(row["gaia_id"]):
             annotations["Gaia_ID"] = str(int(row["gaia_id"]))
 
-        # Build metadata from row
+        # Build metadata from row using shared review/plot schema
         metadata = {}
-        if "vsx_class" in row.index and pd.notna(row["vsx_class"]) and row["vsx_class"]:
-            metadata["vsx_class"] = str(row["vsx_class"])
-        if "asas_sn_id" in row.index and pd.notna(row["asas_sn_id"]):
-            metadata["asas_sn_id"] = str(row["asas_sn_id"])
-        if "external_id" in row.index and pd.notna(row["external_id"]):
-            metadata["external_id"] = str(row["external_id"])
-        if "trigger_type" in row.index and pd.notna(row["trigger_type"]):
-            metadata["trigger_type"] = str(row["trigger_type"])
+        for _, key in REVIEW_METADATA_FIELDS:
+            if key in row_dict and pd.notna(row_dict[key]) and row_dict[key] != "":
+                metadata[key] = row_dict[key]
+
+        metadata["plot_bucket"] = bucket
 
         work_items.append((
             str(lc_path), str(out_path), baseline, baseline_kwargs,
@@ -326,11 +363,20 @@ def plot_passing_candidates(
             annotations, metadata, run_params,
             filter_bad_cameras, bad_camera_scatter_ratio
         ))
+        manifest_rows.append(
+            {
+                "candidate_id": row_dict.get("candidate_id", asas_sn_id),
+                "asas_sn_id": row_dict.get("asas_sn_id", asas_sn_id),
+                "path": str(lc_path),
+                "plot_bucket": bucket,
+                "plot_path": str(out_path),
+            }
+        )
 
     n_plotted = 0
     n_failed = 0
     all_filtered_cameras: dict[str, str] = {}  # path -> filtered cameras string
-    results: list[tuple[str, bool, str, str]] = []
+    results: list[tuple[str, str, bool, str, str]] = []
 
     if workers > 1:
         from multiprocessing import Pool, cpu_count
@@ -345,7 +391,7 @@ def plot_passing_candidates(
                 disable=not show_tqdm,
             ))
 
-        for lc_path, success, error, filtered_str in results:
+        for lc_path, _, success, error, filtered_str in results:
             if success:
                 n_plotted += 1
                 if filtered_str:
@@ -356,8 +402,8 @@ def plot_passing_candidates(
                     print(f"Failed to plot {lc_path}: {error}")
     else:
         for item in tqdm(work_items, desc="Plotting candidates", disable=not show_tqdm):
-            lc_path, success, error, filtered_str = _plot_single_candidate(item)
-            results.append((lc_path, success, error, filtered_str))
+            lc_path, out_path_str, success, error, filtered_str = _plot_single_candidate(item)
+            results.append((lc_path, out_path_str, success, error, filtered_str))
             if success:
                 n_plotted += 1
                 if filtered_str:
@@ -376,7 +422,22 @@ def plot_passing_candidates(
             print(f"  ... and {len(all_filtered_cameras) - 20} more")
 
     print(f"\nGenerated {n_plotted} plots, {n_failed} failed")
-    failed_paths = [lc_path for lc_path, success, _, _ in results if not success]
+    failed_paths = [lc_path for lc_path, _, success, _, _ in results if not success]
+
+    result_by_path = {lc_path: (success, err) for lc_path, _, success, err, _ in results}
+    manifest_df = pd.DataFrame(manifest_rows)
+    if not manifest_df.empty:
+        manifest_df["plot_success"] = manifest_df["path"].map(lambda p: result_by_path.get(str(p), (False, "missing"))[0])
+        manifest_df["plot_error"] = manifest_df["path"].map(lambda p: result_by_path.get(str(p), (False, "missing"))[1])
+        for bucket in ("dip", "jump", "both"):
+            bucket_manifest = manifest_df[manifest_df["plot_bucket"] == bucket].copy()
+            bucket_manifest.to_csv(out_dir / f"manifest_{bucket}.csv", index=False)
+
+    plotted_by_bucket: dict[str, int] = {"dip": 0, "jump": 0, "both": 0}
+    if not manifest_df.empty:
+        bucket_counts = manifest_df[manifest_df["plot_success"]]["plot_bucket"].value_counts().to_dict()
+        for bucket, count in bucket_counts.items():
+            plotted_by_bucket[str(bucket)] = int(count)
 
     return {
         "total_selected": total_selected,
@@ -385,6 +446,12 @@ def plot_passing_candidates(
         "failed_paths": failed_paths,
         "filtered_camera_sources": len(all_filtered_cameras),
         "filtered_cameras_by_path": all_filtered_cameras,
+        "plotted_by_bucket": plotted_by_bucket,
+        "manifest_files": {
+            "dip": str(out_dir / "manifest_dip.csv"),
+            "jump": str(out_dir / "manifest_jump.csv"),
+            "both": str(out_dir / "manifest_both.csv"),
+        },
     }
 
 

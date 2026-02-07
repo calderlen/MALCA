@@ -8,6 +8,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from malca.review.metadata import normalize_vsx_record
+
 
 DEFAULT_DB_PATH = "output/review/review.db"
 STATUS_OPTIONS = ["unreviewed", "reviewed", "needs_followup"]
@@ -198,6 +200,7 @@ def import_candidates(
     rows = []
     for _, row in df_use.iterrows():
         row_dict = {k: (None if pd.isna(v) else v) for k, v in row.to_dict().items()}
+        row_dict = normalize_vsx_record(row_dict)
         rows.append(
             (
                 str(row_dict.get("candidate_id")),
@@ -503,13 +506,28 @@ def export_reviews(conn: sqlite3.Connection, out_path: Path, only_reviewed: bool
             r.notes,
             r.status,
             r.reviewer,
-            r.updated_at
+            r.updated_at,
+            c.payload_json
         FROM candidates c
         LEFT JOIN reviews r ON r.candidate_id = c.candidate_id
     """
     if only_reviewed:
         query += " WHERE r.status IS NOT NULL AND r.status != 'unreviewed'"
     df = pd.read_sql_query(query, conn)
+    if not df.empty and "payload_json" in df.columns:
+        payload_rows = []
+        for value in df["payload_json"]:
+            try:
+                row_dict = json.loads(value) if isinstance(value, str) else {}
+            except Exception:
+                row_dict = {}
+            payload_rows.append(normalize_vsx_record(row_dict))
+
+        payload_df = pd.DataFrame(payload_rows)
+        for col in ["vsx_class", "vsx_sep_arcsec", "population", "yso_class"]:
+            if col in payload_df.columns and col not in df.columns:
+                df[col] = payload_df[col]
+        df = df.drop(columns=["payload_json"])
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if out_path.suffix.lower() in {".parquet", ".pq"}:
         df.to_parquet(out_path, index=False)

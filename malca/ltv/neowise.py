@@ -25,6 +25,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
+from astroquery.ipac.irsa import Irsa
 
 
 # NEOWISE epoch grouping: combine points within this many days
@@ -56,8 +57,6 @@ def query_neowise_lc(
     Returns DataFrame with columns: mjd, w1mpro, w1sigmpro, w2mpro, w2sigmpro
     """
     try:
-        from astroquery.ipac.irsa import Irsa
-        
         query = f"""
         SELECT 
             mjd,
@@ -72,29 +71,27 @@ def query_neowise_lc(
         ) = 1
         ORDER BY mjd ASC
         """
-        
+
         result = Irsa.query_tap(query)
-        
+
         if result is None or len(result) == 0:
             return pd.DataFrame()
-        
+
         df = result.to_pandas()
-        
-        # Quality filtering (following Hwang & Zakamska 2020)
+
         if "qual_frame" in df.columns:
             df = df[df["qual_frame"].isin([0, 1])]
-        
+
         if "cc_flags" in df.columns:
             df = df[~df["cc_flags"].str.contains("[^0]", regex=True, na=False)]
-        
-        # SNR filtering
+
         if "w1snr" in df.columns:
             df = df[df["w1snr"] >= MIN_SNR]
         if "w2snr" in df.columns:
             df = df[df["w2snr"] >= MIN_SNR]
-        
+
         return df.reset_index(drop=True)
-        
+
     except Exception as e:
         if verbose:
             print(f"NEOWISE query error for ({ra}, {dec}): {e}")

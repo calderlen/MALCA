@@ -13,13 +13,9 @@ import sys, io, argparse, math
 from collections import OrderedDict
 import numpy as np
 import pandas as pd
+from astropy.timeseries import LombScargle
 
 from malca.utils import read_lc_dat2, read_lc_csv
-
-try:
-    from astropy.timeseries import LombScargle
-except Exception:
-    LombScargle = None
 
 # helpers
 def weighted_mean(x, w):

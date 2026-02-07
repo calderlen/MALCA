@@ -11,6 +11,7 @@ from typing import Iterable, Mapping, Sequence
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as pl
+import pyarrow.parquet as pq
 
 from malca.events import score_lightcurve
 from malca.utils import read_lc_dat2
@@ -157,15 +158,10 @@ def load_candidates_df(cand_path: Path) -> pd.DataFrame:
     if suffix in {".parquet", ".pq"}:
         usecols: list[str] | None = None
         try:
-            import pyarrow.parquet as pq
+            schema_cols = pq.ParquetFile(cand_path).schema.names
+            usecols = [col for col in schema_cols if col in CANDIDATE_USECOLS]
         except Exception:
             usecols = None
-        else:
-            try:
-                schema_cols = pq.ParquetFile(cand_path).schema.names
-                usecols = [col for col in schema_cols if col in CANDIDATE_USECOLS]
-            except Exception:
-                usecols = None
 
         if usecols:
             return pd.read_parquet(cand_path, columns=usecols)

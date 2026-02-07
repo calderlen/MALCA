@@ -4,17 +4,25 @@ MALCA - Multi-timescale ASAS-SN Light Curve Analysis
 Unified command-line interface for the MALCA pipeline.
 
 Usage:
-    malca manifest [options]    # Build source_id → path index
-    malca detect [options]      # Run event detection
-    malca validate [options]    # Validate on known objects
-    malca injection [options]   # Run injection-recovery tests
-    malca detection_rate [options]  # Measure detection rate
-    malca plot [options]        # Plot light curves
-    malca post_filter [options] # Apply post-filters
-    malca postprocess [options] # Plot passing candidates
-    malca filter [options]      # Apply signal-amplitude filter
-    malca pre_filter [options]  # Apply pre-filters to manifest/candidate tables
-    malca score [options]       # Compute event score for one light curve table
+    malca manifest [options]       # Build source_id → path index
+    malca detect [options]         # Run full detection pipeline
+    malca validate [options]       # Validate results against known candidates
+    malca plot [options]           # Plot light curves
+    malca filter [options]         # Apply signal-amplitude filter
+    malca post_filter [options]    # Apply quality post-filters
+    malca characterize [options]   # Multi-wavelength characterization
+    malca classify [options]       # Dipper classification
+    malca injection [options]      # Injection-recovery tests
+    malca detection_rate [options] # Measure detection rate
+    malca postprocess [options]    # Plot passing candidates
+    malca review [options]         # Launch review GUI + TUI
+    malca review.tui [options]     # Launch terminal review interface
+    malca stats [options]          # Light-curve statistics
+    malca attrition [options]      # Pre/post-filter attrition summary
+    malca reproduce [options]      # Re-run detection on known objects
+    malca events [options]         # Run event detection directly (low-level)
+    malca pre_filter [options]     # Apply pre-filters (low-level)
+    malca score [options]          # Compute event score (low-level)
 """
 
 import sys
@@ -29,7 +37,8 @@ def main():
         "manifest", "detect", "reproduce", "injection",
         "detection_rate", "validate", "plot", "postprocess", "post_filter",
         "events", "characterize", "classify", "filter", "pre_filter", "score",
-        "stats", "attrition", "review.plot", "review.gui", "review.tui", "review"
+        "stats", "attrition", "review.tui", "review",
+        "neighbors", "spectra", "false_positive", "ml_train"
     ]:
         command = sys.argv[1]
         remaining = sys.argv[2:]
@@ -99,14 +108,6 @@ def main():
             from malca import score
             sys.argv = [sys.argv[0]] + remaining
             score.main()
-        elif command == "review.plot":
-            from malca import plot_candidates as review_plot
-            sys.argv = [sys.argv[0]] + remaining
-            review_plot.main()
-        elif command == "review.gui":
-            from malca.review import dual as review_dual
-            sys.argv = [sys.argv[0]] + remaining
-            review_dual.main()
         elif command == "review.tui":
             from malca.review import tui as review_tui
             sys.argv = [sys.argv[0]] + remaining
@@ -119,6 +120,22 @@ def main():
             validation = importlib.import_module("malca.evaluation.validation")
             sys.argv = [sys.argv[0]] + remaining
             validation.main()
+        elif command == "neighbors":
+            from malca import neighbor_enrich
+            sys.argv = [sys.argv[0]] + remaining
+            neighbor_enrich.main()
+        elif command == "spectra":
+            from malca import spectra_enrich
+            sys.argv = [sys.argv[0]] + remaining
+            spectra_enrich.main()
+        elif command == "false_positive":
+            fp = importlib.import_module("malca.evaluation.false_positive")
+            sys.argv = [sys.argv[0]] + remaining
+            fp.main()
+        elif command == "ml_train":
+            from malca import ml_train
+            sys.argv = [sys.argv[0]] + remaining
+            ml_train.main()
         return 0
     
     # If no subcommand or just --help for main, show main help
@@ -148,10 +165,12 @@ def main():
     subparsers.add_parser("score", help="Compute event score for one light curve table")
     subparsers.add_parser("stats", help="Compute light-curve statistics")
     subparsers.add_parser("attrition", help="Summarize pre/post-filter attrition")
-    subparsers.add_parser("review.plot", help="Plot shortlist candidates for review")
-    subparsers.add_parser("review.gui", help="Launch review GUI + TUI together")
     subparsers.add_parser("review.tui", help="Launch terminal review interface")
     subparsers.add_parser("review", help="Launch review GUI + TUI together")
+    subparsers.add_parser("false_positive", help="Run false-positive contaminant benchmark")
+    subparsers.add_parser("ml_train", help="Train baseline ML classifier on reviewed labels")
+    subparsers.add_parser("neighbors", help="Run bulk nearest-neighbor enrichment")
+    subparsers.add_parser("spectra", help="Run bulk spectra-availability enrichment")
     
     parser.print_help()
     return 0

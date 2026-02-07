@@ -27,6 +27,7 @@ import sys
 from pathlib import Path
 import pandas as pd
 import tempfile
+from tqdm.auto import tqdm
 
 from malca.manifest import build_manifest_dataframe
 from malca.pre_filter import apply_pre_filters, filter_camera_medians
@@ -35,6 +36,8 @@ from malca.plot_candidates import plot_passing_candidates
 from malca.classify import compute_all_classifications
 from malca.stats import compute_stats
 from malca.characterize import characterize_candidates_df
+from malca.neighbor_enrich import run_neighbor_enrichment
+from malca.spectra_enrich import run_spectra_availability
 from malca.utils import log as _log
 
 
@@ -105,8 +108,8 @@ def main():
     parser.add_argument("--skip-camera-median", action="store_true", help="Skip camera median filter (identifies cameras to exclude from .raw2 files)")
     parser.add_argument("--camera-median-tolerance", type=float, default=0.2, help="Tolerance beyond mag bin for camera median filter (default: 0.2 mag)")
     parser.add_argument("--vsx-max-sep", type=float, default=3.0, help="Max separation for VSX match (arcsec)")
-    parser.add_argument("--vsx-mode", type=str, default="filter", choices=["tag", "filter"], help="VSX handling: tag adds sep_arcsec/class columns, filter removes matches (default: filter)")
-    parser.add_argument("--vsx-crossmatch", type=Path, default=Path("input/vsx/asassn_x_vsx_matches_20250919_2252.csv"), help="Path to pre-crossmatched VSX CSV (with asas_sn_id, sep_arcsec, class)")
+    parser.add_argument("--vsx-mode", type=str, default="tag", choices=["tag", "filter"], help="VSX handling: tag adds vsx_sep_arcsec/vsx_class columns, filter removes matches (default: tag)")
+    parser.add_argument("--vsx-crossmatch", type=Path, default=Path("input/vsx/asassn_x_vsx_matches_20250919_2252.csv"), help="Path to pre-crossmatched VSX CSV (with asas_sn_id, vsx_sep_arcsec, vsx_class)")
     parser.add_argument("--pass-all-prefilters", action="store_true", help="Pass all light curves to events.py regardless of pre-filter results (tags are still added)")
     parser.add_argument("--enforce-filters", type=str, default=None, help="Comma-separated list of pre-filters to enforce (e.g., 'sparse,multi_camera'). " "Only rows failing these filters are excluded. Default: enforce all enabled filters.")
     parser.add_argument("--workers", type=int, default=10, help="Workers for parallel processing")
@@ -173,6 +176,11 @@ def main():
     parser.add_argument("--characterize-crossmatch", type=Path, default=Path("input/vsx/asassn_x_vsx_matches_20250919_2252.csv"), help="ASAS-SN x VSX crossmatch file for characterize step")
     parser.add_argument("--characterize-chunk-size", type=int, default=1000, help="Gaia query chunk size for characterize step")
     parser.add_argument("--characterize-starhorse", type=str, default="tap", help="StarHorse mode/path for characterize step (default: tap)")
+    parser.add_argument("--no-characterize-banyan", dest="characterize_banyan", action="store_false", help="Disable BANYAN Sigma enrichment in characterize step")
+    parser.add_argument("--no-characterize-iphas", dest="characterize_iphas", action="store_false", help="Disable IPHAS enrichment in characterize step")
+    parser.add_argument("--no-characterize-sfr", dest="characterize_sfr", action="store_false", help="Disable star-forming-region enrichment in characterize step")
+    parser.add_argument("--no-characterize-clusters", dest="characterize_clusters", action="store_false", help="Disable open-cluster enrichment in characterize step")
+    parser.add_argument("--no-characterize-unwise", dest="characterize_unwise", action="store_false", help="Disable unWISE enrichment in characterize step")
     parser.add_argument("--run-dust", dest="run_dust", action="store_true", help="Run 3D dust extinction correction (default: enabled)")
     parser.add_argument("--no-run-dust", dest="run_dust", action="store_false", help="Skip dust extinction step")
 
@@ -185,6 +193,20 @@ def main():
     parser.add_argument("--no-run-enrich", dest="run_enrich", action="store_false", help="Skip enrichment step")
     parser.add_argument("--enrich-compute-ls", action="store_true", help="Include Lomb-Scargle periodogram in enrichment (expensive)")
 
+    # Step 10: Neighbor enrichment args (enabled by default)
+    parser.add_argument("--run-neighbor-enrich", dest="run_neighbor_enrich", action="store_true", help="Bulk neighbor enrichment for passing candidates (default: enabled)")
+    parser.add_argument("--no-run-neighbor-enrich", dest="run_neighbor_enrich", action="store_false", help="Skip neighbor enrichment step")
+    parser.add_argument("--neighbor-radius-arcsec", type=float, default=15.0, help="Neighbor search radius in arcsec (default: 15)")
+    parser.add_argument("--neighbor-chunk-size", type=int, default=2000, help="Bulk chunk size for neighbor lookups")
+    parser.add_argument("--neighbor-cache", type=Path, default=None, help="Optional cache parquet path for neighbor lookups")
+
+    # Step 11: Spectra availability args (enabled by default)
+    parser.add_argument("--run-spectra-enrich", dest="run_spectra_enrich", action="store_true", help="Bulk spectra-availability enrichment for passing candidates (default: enabled)")
+    parser.add_argument("--no-run-spectra-enrich", dest="run_spectra_enrich", action="store_false", help="Skip spectra enrichment step")
+    parser.add_argument("--spectra-radius-arcsec", type=float, default=3.0, help="Spectra crossmatch radius in arcsec (default: 3)")
+    parser.add_argument("--spectra-chunk-size", type=int, default=2000, help="Bulk chunk size for spectra lookups")
+    parser.add_argument("--spectra-cache", type=Path, default=None, help="Optional cache parquet path for spectra lookups")
+
     parser.add_argument("-o", "--overwrite", action="store_true", help="Overwrite checkpoint log and existing output if present (start fresh).")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output")
 
@@ -193,8 +215,15 @@ def main():
         run_postprocess=True,
         run_characterize=True,
         run_dust=True,
+        characterize_banyan=True,
+        characterize_iphas=True,
+        characterize_sfr=True,
+        characterize_clusters=True,
+        characterize_unwise=True,
         run_classify=True,
         run_enrich=True,
+        run_neighbor_enrich=True,
+        run_spectra_enrich=True,
     )
 
     args = parser.parse_args()
@@ -301,6 +330,43 @@ def main():
     import json
     run_start_time = datetime.now()
 
+    # Build a compact fingerprint of filtering/characterization behavior.
+    if args.pass_all_prefilters:
+        enforced_prefilters = []
+    elif args.enforce_filters:
+        enforced_prefilters = [f.strip() for f in args.enforce_filters.split(",") if f.strip()]
+    else:
+        enforced_prefilters = []
+        if not args.skip_sparse:
+            enforced_prefilters.append("sparse")
+        if not args.skip_multi_camera:
+            enforced_prefilters.append("multi_camera")
+        if (not args.skip_vsx) and args.vsx_mode == "filter":
+            enforced_prefilters.append("vsx")
+
+    config_fingerprint = {
+        "vsx_mode": args.vsx_mode,
+        "skip_vsx": args.skip_vsx,
+        "pass_all_prefilters": args.pass_all_prefilters,
+        "enforced_prefilters": enforced_prefilters,
+        "post_filter": {
+            "min_bayes_factor": args.min_bayes_factor,
+            "min_run_cameras": args.post_filter_min_run_cameras,
+            "min_run_points": args.post_filter_min_run_points,
+        },
+        "characterize": {
+            "run_characterize": args.run_characterize,
+            "run_dust": args.run_dust,
+            "starhorse": args.characterize_starhorse,
+            "banyan": args.characterize_banyan,
+            "iphas": args.characterize_iphas,
+            "sfr": args.characterize_sfr,
+            "clusters": args.characterize_clusters,
+            "unwise": args.characterize_unwise,
+        },
+        "downstream_pass_logic": "characterize/classify/enrich run on post-filter passers (failed_any == False)",
+    }
+
     run_params_file = out_dir / "run_params.json"
     try:
         orig_argv = getattr(sys, "orig_argv", None)
@@ -372,11 +438,26 @@ def main():
             "characterize_crossmatch": str(args.characterize_crossmatch),
             "characterize_chunk_size": args.characterize_chunk_size,
             "characterize_starhorse": args.characterize_starhorse,
+            "characterize_banyan": args.characterize_banyan,
+            "characterize_iphas": args.characterize_iphas,
+            "characterize_sfr": args.characterize_sfr,
+            "characterize_clusters": args.characterize_clusters,
+            "characterize_unwise": args.characterize_unwise,
             # Step 8: Classify
             "run_classify": args.run_classify,
             # Step 9: Enrich
             "run_enrich": args.run_enrich,
             "enrich_compute_ls": args.enrich_compute_ls,
+            # Step 10: Neighbor enrichment
+            "run_neighbor_enrich": args.run_neighbor_enrich,
+            "neighbor_radius_arcsec": args.neighbor_radius_arcsec,
+            "neighbor_chunk_size": args.neighbor_chunk_size,
+            "neighbor_cache": str(args.neighbor_cache) if args.neighbor_cache else None,
+            # Step 11: Spectra enrichment
+            "run_spectra_enrich": args.run_spectra_enrich,
+            "spectra_radius_arcsec": args.spectra_radius_arcsec,
+            "spectra_chunk_size": args.spectra_chunk_size,
+            "spectra_cache": str(args.spectra_cache) if args.spectra_cache else None,
             # File paths
             "index_root": str(args.index_root),
             "lc_root": str(args.lc_root),
@@ -512,8 +593,8 @@ def main():
     # Build metadata CSV with VSX tags and excluded_cameras
     metadata_file = None
     meta_cols = [file_col]
-    if not args.skip_vsx and "sep_arcsec" in df_filtered.columns and "class" in df_filtered.columns:
-        meta_cols.extend(["sep_arcsec", "class"])
+    if not args.skip_vsx and "vsx_sep_arcsec" in df_filtered.columns and "vsx_class" in df_filtered.columns:
+        meta_cols.extend(["vsx_sep_arcsec", "vsx_class"])
     if "excluded_cameras" in df_filtered.columns:
         meta_cols.append("excluded_cameras")
 
@@ -627,6 +708,7 @@ def main():
                 "end_time": run_end_time.isoformat(),
                 "duration_seconds": (run_end_time - run_start_time).total_seconds(),
             },
+            "config_fingerprint": config_fingerprint,
             "manifest_stats": {
                 "total_sources": len(df_manifest),
                 "filtered_sources": len(df_filtered),
@@ -820,6 +902,11 @@ def main():
                         cache=args.gaia_cache.expanduser() if args.gaia_cache else (out_dir / "gaia_cache" / "gaia_cache.parquet"),
                         dust=args.run_dust,
                         starhorse=starhorse_arg,
+                        run_banyan=args.run_characterize and args.characterize_banyan,
+                        run_iphas=args.run_characterize and args.characterize_iphas,
+                        run_sfr=args.run_characterize and args.characterize_sfr,
+                        run_clusters=args.run_characterize and args.characterize_clusters,
+                        run_unwise=args.run_characterize and args.characterize_unwise,
                     )
 
                     characterize_output = results_dir / "lc_events_characterized.csv"
@@ -916,8 +1003,6 @@ def main():
                         log(f"Enriching {len(df_passed)} candidates with compute_stats...")
                         
                         enriched_rows = []
-                        from tqdm.auto import tqdm
-                        
                         for idx, row in tqdm(df_passed.iterrows(), total=len(df_passed), 
                                             desc="compute_stats", disable=not args.verbose):
                             lc_path = Path(row["path"])
@@ -973,6 +1058,137 @@ def main():
 
             except Exception as e:
                 print(f"Error in enrichment step: {e}")
+                if args.verbose:
+                    import traceback
+                    traceback.print_exc()
+
+    # Step 10: Neighbor enrichment (optional)
+    if args.run_neighbor_enrich:
+        if not args.run_post_filter:
+            print("Warning: --run-neighbor-enrich requires --run-post-filter. Skipping neighbor enrichment.")
+        else:
+            log("\n=== Step 10: Bulk neighbor enrichment ===")
+            try:
+                enrich_output = results_dir / "lc_events_enriched.csv"
+                classify_output = results_dir / "lc_events_classified.csv"
+                characterize_output = results_dir / "lc_events_characterized.csv"
+                post_filter_output = results_dir / "lc_events_filtered.csv"
+
+                if enrich_output.exists():
+                    df_neighbors_in = pd.read_csv(enrich_output)
+                elif classify_output.exists():
+                    df_neighbors_in = pd.read_csv(classify_output)
+                elif characterize_output.exists():
+                    df_neighbors_in = pd.read_csv(characterize_output)
+                elif post_filter_output.exists():
+                    df_neighbors_in = pd.read_csv(post_filter_output)
+                else:
+                    df_neighbors_in = None
+
+                if df_neighbors_in is not None:
+                    if "failed_any" in df_neighbors_in.columns:
+                        df_neighbors_in = df_neighbors_in[~df_neighbors_in["failed_any"]].copy()
+
+                    neighbor_dir = results_dir / "neighbor_enrichment"
+                    neighbor_cache = args.neighbor_cache.expanduser() if args.neighbor_cache else (neighbor_dir / "neighbors_cache.parquet")
+                    _, df_neighbor_summary = run_neighbor_enrichment(
+                        df_neighbors_in,
+                        out_dir=neighbor_dir,
+                        radius_arcsec=args.neighbor_radius_arcsec,
+                        chunk_size=args.neighbor_chunk_size,
+                        cache_file=neighbor_cache,
+                    )
+
+                    if not df_neighbor_summary.empty:
+                        key_col = "candidate_id" if "candidate_id" in df_neighbors_in.columns else "asas_sn_id"
+                        left = df_neighbors_in.copy()
+                        if key_col not in left.columns and "path" in left.columns:
+                            left[key_col] = left["path"].astype(str).map(lambda p: Path(p).stem.split("-")[0])
+                        left[key_col] = left[key_col].astype(str)
+                        right = df_neighbor_summary.copy()
+                        right["candidate_id"] = right["candidate_id"].astype(str)
+                        merged = left.merge(right, left_on=key_col, right_on="candidate_id", how="left")
+                        merged.to_csv(results_dir / "lc_events_neighbors.csv", index=False)
+
+                    summary["neighbor_enrichment_stats"] = {
+                        "rows_input": int(len(df_neighbors_in)),
+                        "radius_arcsec": float(args.neighbor_radius_arcsec),
+                        "chunk_size": int(args.neighbor_chunk_size),
+                        "output_dir": str(neighbor_dir),
+                    }
+                    with open(run_summary_file, "w") as f:
+                        json.dump(summary, f, indent=2, default=str)
+                    log(f"Neighbor enrichment outputs written to {neighbor_dir}")
+
+            except Exception as e:
+                print(f"Error in neighbor enrichment step: {e}")
+                if args.verbose:
+                    import traceback
+                    traceback.print_exc()
+
+    # Step 11: Spectra availability enrichment (optional)
+    if args.run_spectra_enrich:
+        if not args.run_post_filter:
+            print("Warning: --run-spectra-enrich requires --run-post-filter. Skipping spectra enrichment.")
+        else:
+            log("\n=== Step 11: Spectra availability enrichment ===")
+            try:
+                neighbor_output = results_dir / "lc_events_neighbors.csv"
+                enrich_output = results_dir / "lc_events_enriched.csv"
+                classify_output = results_dir / "lc_events_classified.csv"
+                characterize_output = results_dir / "lc_events_characterized.csv"
+                post_filter_output = results_dir / "lc_events_filtered.csv"
+
+                if neighbor_output.exists():
+                    df_spectra_in = pd.read_csv(neighbor_output)
+                elif enrich_output.exists():
+                    df_spectra_in = pd.read_csv(enrich_output)
+                elif classify_output.exists():
+                    df_spectra_in = pd.read_csv(classify_output)
+                elif characterize_output.exists():
+                    df_spectra_in = pd.read_csv(characterize_output)
+                elif post_filter_output.exists():
+                    df_spectra_in = pd.read_csv(post_filter_output)
+                else:
+                    df_spectra_in = None
+
+                if df_spectra_in is not None:
+                    if "failed_any" in df_spectra_in.columns:
+                        df_spectra_in = df_spectra_in[~df_spectra_in["failed_any"]].copy()
+
+                    spectra_dir = results_dir / "spectra_enrichment"
+                    spectra_cache = args.spectra_cache.expanduser() if args.spectra_cache else (spectra_dir / "spectra_cache.parquet")
+                    _, spectra_summary = run_spectra_availability(
+                        df_spectra_in,
+                        out_dir=spectra_dir,
+                        radius_arcsec=args.spectra_radius_arcsec,
+                        chunk_size=args.spectra_chunk_size,
+                        cache_file=spectra_cache,
+                    )
+
+                    if not spectra_summary.empty:
+                        key_col = "candidate_id" if "candidate_id" in df_spectra_in.columns else "asas_sn_id"
+                        left = df_spectra_in.copy()
+                        if key_col not in left.columns and "path" in left.columns:
+                            left[key_col] = left["path"].astype(str).map(lambda p: Path(p).stem.split("-")[0])
+                        left[key_col] = left[key_col].astype(str)
+                        right = spectra_summary.copy()
+                        right["candidate_id"] = right["candidate_id"].astype(str)
+                        merged = left.merge(right, left_on=key_col, right_on="candidate_id", how="left")
+                        merged.to_csv(results_dir / "lc_events_spectra.csv", index=False)
+
+                    summary["spectra_enrichment_stats"] = {
+                        "rows_input": int(len(df_spectra_in)),
+                        "radius_arcsec": float(args.spectra_radius_arcsec),
+                        "chunk_size": int(args.spectra_chunk_size),
+                        "output_dir": str(spectra_dir),
+                    }
+                    with open(run_summary_file, "w") as f:
+                        json.dump(summary, f, indent=2, default=str)
+                    log(f"Spectra enrichment outputs written to {spectra_dir}")
+
+            except Exception as e:
+                print(f"Error in spectra enrichment step: {e}")
                 if args.verbose:
                     import traceback
                     traceback.print_exc()
