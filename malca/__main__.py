@@ -5,7 +5,7 @@ Unified command-line interface for the MALCA pipeline.
 
 Usage:
     malca manifest [options]       # Build source_id → path index
-    malca detect [options]         # Run full detection pipeline
+    malca pipeline [options]       # Run full pipeline
     malca validate [options]       # Validate results against known candidates
     malca plot [options]           # Plot light curves
     malca filter [options]         # Apply signal-amplitude filter
@@ -33,7 +33,7 @@ def main():
     # Check if user is calling a subcommand with --help
     # If so, forward directly to the submodule
     if len(sys.argv) >= 2 and sys.argv[1] in [
-        "manifest", "detect", "reproduce", "injection",
+        "manifest", "pipeline", "reproduce", "injection",
         "detection_rate", "validate", "plot", "post_filter",
         "events", "characterize", "classify", "filter", "pre_filter", "score",
         "stats", "attrition", "review.tui", "review",
@@ -47,7 +47,7 @@ def main():
             from malca import manifest
             sys.argv = [sys.argv[0]] + remaining
             manifest.main()
-        elif command == "detect":
+        elif command == "pipeline":
             from malca import detect
             sys.argv = [sys.argv[0]] + remaining
             detect.main()
@@ -60,9 +60,9 @@ def main():
             sys.argv = [sys.argv[0]] + remaining
             injection.main()
         elif command == "detection_rate":
-            rate = importlib.import_module("malca.evaluation.rate")
+            detection_rate_mod = importlib.import_module("malca.evaluation.detection_rate")
             sys.argv = [sys.argv[0]] + remaining
-            rate.main()
+            detection_rate_mod.main()
         elif command == "attrition":
             attrition = importlib.import_module("malca.evaluation.attrition")
             sys.argv = [sys.argv[0]] + remaining
@@ -144,7 +144,7 @@ def main():
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
     
     subparsers.add_parser("manifest", help="Build manifest (source_id → path index)")
-    subparsers.add_parser("detect", help="Run event detection pipeline")
+    subparsers.add_parser("pipeline", help="Run full discovery pipeline")
     subparsers.add_parser("reproduce", help="Re-run detection on known objects (needs raw data)")
     subparsers.add_parser("injection", help="Run injection-recovery tests")
     subparsers.add_parser("detection_rate", help="Measure detection rate")

@@ -224,7 +224,7 @@ graph TB
 #### **CLI Entry Point**
 - **`__main__.py`**: Unified command-line interface
   - `malca manifest` → Build manifest
-  - `malca detect` → Run event detection
+  - `malca pipeline` → Run event detection
   - `malca reproduce` → Re-run detection on known objects
   - `malca validate` → Validate results (no raw data)
   - `malca plot` → Plot light curves

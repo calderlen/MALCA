@@ -24,6 +24,7 @@ from datetime import datetime
 import shlex
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 import pandas as pd
 import tempfile
@@ -74,6 +75,60 @@ def clear_existing_output(path: Path | None, fmt: str) -> None:
 
     path.unlink()
     print(f"Overwriting existing output file: {path}")
+
+
+def import_bundle_zip(bundle_zip: Path, out_dir: Path) -> None:
+    """Extract a pipeline transfer bundle into out_dir."""
+    bundle_zip = Path(bundle_zip).expanduser()
+    if not bundle_zip.exists():
+        raise FileNotFoundError(f"Bundle not found: {bundle_zip}")
+    if not zipfile.is_zipfile(bundle_zip):
+        raise ValueError(f"Bundle is not a valid zip file: {bundle_zip}")
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(bundle_zip, "r") as zf:
+        zf.extractall(out_dir)
+
+
+def export_bundle_zip(bundle_zip: Path, out_dir: Path) -> list[str]:
+    """Create transfer bundle zip from a pipeline out_dir."""
+    bundle_zip = Path(bundle_zip).expanduser()
+    bundle_zip.parent.mkdir(parents=True, exist_ok=True)
+
+    include_rel_paths = [
+        "run_params.json",
+        "run_summary.json",
+        "run.log",
+        "results/lc_events_filtered.csv",
+        "results/lc_events_enriched.csv",
+        "results/lc_events_characterized.csv",
+        "results/lc_events_classified.csv",
+        "results/lc_events_neighbors.csv",
+        "results/lc_events_spectra.csv",
+    ]
+    include_globs = [
+        "results/lc_events_results.*",
+    ]
+
+    files_to_add: list[Path] = []
+    for rel in include_rel_paths:
+        p = out_dir / rel
+        if p.exists() and p.is_file():
+            files_to_add.append(p)
+
+    for pattern in include_globs:
+        for p in out_dir.glob(pattern):
+            if p.exists() and p.is_file() and p not in files_to_add:
+                files_to_add.append(p)
+
+    if not files_to_add:
+        raise FileNotFoundError(f"No bundle files found under {out_dir}")
+
+    with zipfile.ZipFile(bundle_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for p in files_to_add:
+            zf.write(p, arcname=str(p.relative_to(out_dir)))
+
+    return [str(p.relative_to(out_dir)) for p in files_to_add]
 
 
 def main():
@@ -155,6 +210,15 @@ def main():
     parser.add_argument("--out-dir", type=str, default=None, help="Directory for all outputs (default: output/runs/<timestamp>)")
     parser.add_argument("--output-format", type=str, default="csv", choices=["csv", "parquet", "parquet_chunk"], help="Output format")
     parser.add_argument("--chunk-size", type=int, default=10000, help="Write results in chunks of this many rows")
+    parser.add_argument(
+        "--stage",
+        type=str,
+        default="full",
+        choices=["full", "cluster", "home"],
+        help="Pipeline stage: full=all steps, cluster=raw-dependent upstream, home=downstream only",
+    )
+    parser.add_argument("--import-bundle", type=Path, default=None, help="Zip bundle produced by --export-bundle (for home stage)")
+    parser.add_argument("--export-bundle", type=Path, default=None, help="Write transferable zip bundle at end of run")
 
     # Step 5: Post-filter args (enabled by default)
     parser.add_argument("--run-post-filter", dest="run_post_filter", action="store_true", help="Run post_filter after events.py completes (default: enabled)")
@@ -228,6 +292,15 @@ def main():
 
     args = parser.parse_args()
 
+    stage = str(args.stage)
+    run_upstream = stage in {"full", "cluster"}
+    run_downstream = stage in {"full", "home"}
+
+    if stage == "cluster" and (args.run_characterize or args.run_dust or args.run_classify or args.run_neighbor_enrich or args.run_spectra_enrich):
+        print("Info: --stage cluster runs upstream only (steps 1-6 plus enrich). Downstream steps are skipped.")
+    if stage == "home" and (args.force_manifest or args.force_filter):
+        print("Info: --stage home skips manifest/pre-filter/events regardless of force flags.")
+
     # Build events.py args from parsed arguments
     events_args = []
     if args.verbose:
@@ -299,6 +372,9 @@ def main():
         out_dir = default_run_dir(base_output_root)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    if args.import_bundle is not None:
+        import_bundle_zip(args.import_bundle, out_dir)
+
     if args.gaia_cache is None:
         gaia_cache_dir = out_dir / "gaia_cache"
         gaia_cache_dir.mkdir(parents=True, exist_ok=True)
@@ -310,6 +386,15 @@ def main():
     results_dir = out_dir / "results"
     for d in (manifests_dir, prefilter_dir, paths_dir, results_dir):
         d.mkdir(parents=True, exist_ok=True)
+
+    if stage == "home":
+        required_filtered = results_dir / "lc_events_filtered.csv"
+        if not required_filtered.exists():
+            source_hint = f" from bundle {args.import_bundle}" if args.import_bundle else ""
+            raise FileNotFoundError(
+                f"Home stage requires {required_filtered}{source_hint}. "
+                "Run cluster/full stage first and transfer results/lc_events_filtered.csv."
+            )
 
     if args.output is None:
         events_output = results_dir / "lc_events_results.csv"
@@ -368,13 +453,22 @@ def main():
     }
 
     run_params_file = out_dir / "run_params.json"
+    run_summary_file = out_dir / "run_summary.json"
+    summary: dict[str, object] = {
+        "run_info": {
+            "start_time": run_start_time.isoformat(),
+            "stage": stage,
+        }
+    }
+    results_files: list[Path] = []
+    cmd = shlex.join(getattr(sys, "orig_argv", None) or ([sys.executable] + sys.argv))
     try:
-        orig_argv = getattr(sys, "orig_argv", None)
-        cmd = shlex.join(orig_argv) if orig_argv else shlex.join([sys.executable] + sys.argv)
-
         run_params = {
             "timestamp": run_start_time.isoformat(),
             "command": cmd,
+            "stage": stage,
+            "import_bundle": str(args.import_bundle) if args.import_bundle else None,
+            "export_bundle": str(args.export_bundle) if args.export_bundle else None,
             "mag_bin": args.mag_bin,
             # Pre-filter parameters
             "min_time_span": args.min_time_span,
@@ -500,78 +594,81 @@ def main():
         if args.verbose:
             print(f"Warning: could not write run log: {e}")
 
+    df_manifest = pd.DataFrame()
+    df_filtered = pd.DataFrame()
+
     # Step 1: Build or load manifest
-    if args.force_manifest or not manifest_file.exists():
-        log(f"Building manifest for mag_bin={args.mag_bin}...")
-        df_manifest = build_manifest_dataframe(
-            args.index_root,
-            args.lc_root,
-            mag_bins=args.mag_bin,
-            id_column="asas_sn_id",
-            show_progress=args.verbose
-        )
+    if run_upstream:
+        if args.force_manifest or not manifest_file.exists():
+            log(f"Building manifest for mag_bin={args.mag_bin}...")
+            df_manifest = build_manifest_dataframe(
+                args.index_root,
+                args.lc_root,
+                mag_bins=args.mag_bin,
+                id_column="asas_sn_id",
+                show_progress=args.verbose
+            )
 
-        # Only keep sources where .dat2 or .csv files exist
-        df_manifest = df_manifest[df_manifest["dat_exists"]].reset_index(drop=True)
+            # Only keep sources where .dat2 or .csv files exist
+            df_manifest = df_manifest[df_manifest["dat_exists"]].reset_index(drop=True)
 
-        log(f"Saving manifest to {manifest_file} ({len(df_manifest)} sources)")
-        safe_write_parquet(df_manifest, manifest_file)
-    else:
-        log(f"Loading existing manifest from {manifest_file}")
-        df_manifest = pd.read_parquet(manifest_file)
-        log(f"Loaded {len(df_manifest)} sources")
+            log(f"Saving manifest to {manifest_file} ({len(df_manifest)} sources)")
+            safe_write_parquet(df_manifest, manifest_file)
+        else:
+            log(f"Loading existing manifest from {manifest_file}")
+            df_manifest = pd.read_parquet(manifest_file)
+            log(f"Loaded {len(df_manifest)} sources")
 
-    # Step 2: Apply pre-filters
+        # Step 2: Apply pre-filters
+        if args.force_filter or not filtered_file.exists():
+            log(f"\nApplying pre-filters with {args.workers} workers...")
 
-    if args.force_filter or not filtered_file.exists():
-        log(f"\nApplying pre-filters with {args.workers} workers...")
+            # Use lc_dir as the directory path for pre_filter input (path/<id>.dat2)
+            df_to_filter = df_manifest.rename(columns={"lc_dir": "path"}).copy()
 
-        # Use lc_dir as the directory path for pre_filter input (path/<id>.dat2)
-        df_to_filter = df_manifest.rename(columns={"lc_dir": "path"}).copy()
+            df_filtered = apply_pre_filters(
+                df_to_filter,
+                apply_sparse=not args.skip_sparse,
+                min_time_span=args.min_time_span,
+                min_points_per_day=args.min_points_per_day,
+                apply_vsx=not args.skip_vsx,
+                vsx_max_sep_arcsec=args.vsx_max_sep,
+                vsx_mode=args.vsx_mode,
+                vsx_crossmatch_csv=args.vsx_crossmatch,
+                apply_multi_camera=not args.skip_multi_camera,
+                min_cameras=args.min_cameras,
+                n_workers=args.workers,
+                show_tqdm=args.verbose,
+                rejected_log_csv=str(prefilter_dir / f"rejected_pre_filter_{mag_bin_tag}.csv"),
+                stats_checkpoint=str(stats_checkpoint_file),
+                stats_chunk_size=args.stats_chunk_size,
+            )
 
-        df_filtered = apply_pre_filters(
-            df_to_filter,
-            apply_sparse=not args.skip_sparse,
-            min_time_span=args.min_time_span,
-            min_points_per_day=args.min_points_per_day,
-            apply_vsx=not args.skip_vsx,
-            vsx_max_sep_arcsec=args.vsx_max_sep,
-            vsx_mode=args.vsx_mode,
-            vsx_crossmatch_csv=args.vsx_crossmatch,
-            apply_multi_camera=not args.skip_multi_camera,
-            min_cameras=args.min_cameras,
-            n_workers=args.workers,
-            show_tqdm=args.verbose,
-            rejected_log_csv=str(prefilter_dir / f"rejected_pre_filter_{mag_bin_tag}.csv"),
-            stats_checkpoint=str(stats_checkpoint_file),
-            stats_chunk_size=args.stats_chunk_size,
-        )
+            # Exclude rows based on pre-filter results
+            if not args.pass_all_prefilters:
+                failed_cols = [c for c in df_filtered.columns if c.startswith("failed_") and c != "failed_any"]
 
-        # Exclude rows based on pre-filter results
-        if not args.pass_all_prefilters:
-            failed_cols = [c for c in df_filtered.columns if c.startswith("failed_") and c != "failed_any"]
+                if args.enforce_filters:
+                    # Only enforce specified filters
+                    enforce_set = {f"failed_{f.strip()}" for f in args.enforce_filters.split(",")}
+                    enforce_cols = [c for c in failed_cols if c in enforce_set]
+                else:
+                    enforce_cols = failed_cols
 
-            if args.enforce_filters:
-                # Only enforce specified filters
-                enforce_set = {f"failed_{f.strip()}" for f in args.enforce_filters.split(",")}
-                enforce_cols = [c for c in failed_cols if c in enforce_set]
-            else:
-                enforce_cols = failed_cols
+                if enforce_cols:
+                    exclude_mask = df_filtered[enforce_cols].any(axis=1)
+                    df_filtered = df_filtered[~exclude_mask].reset_index(drop=True)
 
-            if enforce_cols:
-                exclude_mask = df_filtered[enforce_cols].any(axis=1)
-                df_filtered = df_filtered[~exclude_mask].reset_index(drop=True)
-
-        log(f"\nKept {len(df_filtered)}/{len(df_manifest)} sources after pre-filtering")
-        log(f"Saving filtered manifest to {filtered_file}")
-        safe_write_parquet(df_filtered, filtered_file)
-    else:
-        log(f"\nLoading existing filtered manifest from {filtered_file}")
-        df_filtered = pd.read_parquet(filtered_file)
-        log(f"Loaded {len(df_filtered)} filtered sources")
+            log(f"\nKept {len(df_filtered)}/{len(df_manifest)} sources after pre-filtering")
+            log(f"Saving filtered manifest to {filtered_file}")
+            safe_write_parquet(df_filtered, filtered_file)
+        else:
+            log(f"\nLoading existing filtered manifest from {filtered_file}")
+            df_filtered = pd.read_parquet(filtered_file)
+            log(f"Loaded {len(df_filtered)} filtered sources")
 
     # Step 2.5: Apply camera median filter to identify cameras to exclude
-    if not args.skip_camera_median and "mag_bin" in df_filtered.columns:
+    if run_upstream and (not args.skip_camera_median) and ("mag_bin" in df_filtered.columns):
         log(f"\nApplying camera median filter (tolerance={args.camera_median_tolerance} mag)...")
         # Camera median validation needs per-source file paths (.dat2 -> .raw2).
         # Keep the original path column unchanged for downstream code.
@@ -598,7 +695,7 @@ def main():
     if "excluded_cameras" in df_filtered.columns:
         meta_cols.append("excluded_cameras")
 
-    if len(meta_cols) > 1:  # More than just file_col
+    if run_upstream and len(meta_cols) > 1:  # More than just file_col
         metadata_dir = prefilter_dir / "metadata"
         metadata_dir.mkdir(parents=True, exist_ok=True)
         metadata_file = metadata_dir / f"metadata_{mag_bin_tag}.csv"
@@ -607,27 +704,29 @@ def main():
         events_args.extend(["--metadata-csv", str(metadata_file)])
         log(f"Wrote metadata CSV with columns: {', '.join(meta_cols[1:])}")
 
-    file_paths = df_filtered[file_col].tolist()
+    file_paths = df_filtered[file_col].tolist() if run_upstream else []
 
-    if not file_paths:
+    if run_upstream and (not file_paths):
         log("\nNo sources to process after filtering!")
         return
 
     # Step 4: Call events.py with the filtered paths in batches, with resume support
-    log(f"\nPreparing to run events.py on {len(file_paths)} light curves...")
+    if run_upstream:
+        log(f"\nPreparing to run events.py on {len(file_paths)} light curves...")
 
     # Write paths to temp file for events.py to consume
     paths_file = paths_dir / f"filtered_paths_{mag_bin_tag}.txt"
-    with open(paths_file, "w") as f:
-        for path in file_paths:
-            f.write(f"{path}\n")
-    if run_log.exists():
-        try:
-            with run_log.open("a") as f:
-                f.write(f"paths_file: {paths_file}\n")
-        except Exception as e:
-            if args.verbose:
-                print(f"Warning: could not update run log with paths_file: {e}")
+    if run_upstream:
+        with open(paths_file, "w") as f:
+            for path in file_paths:
+                f.write(f"{path}\n")
+        if run_log.exists():
+            try:
+                with run_log.open("a") as f:
+                    f.write(f"paths_file: {paths_file}\n")
+            except Exception as e:
+                if args.verbose:
+                    print(f"Warning: could not update run log with paths_file: {e}")
 
     # Resume logic: skip paths already recorded in events checkpoint log if present
     base_output = events_output or (results_dir / "lc_events_results.csv")
@@ -637,7 +736,7 @@ def main():
         base_output = base_output.with_suffix(ext)
     checkpoint_log = base_output.with_name(f"{base_output.stem}_PROCESSED.txt")
     processed_paths: set[str] = set()
-    if checkpoint_log.exists() and args.overwrite:
+    if run_upstream and checkpoint_log.exists() and args.overwrite:
         try:
             with open(checkpoint_log, "w"):
                 pass
@@ -645,10 +744,10 @@ def main():
         except Exception as e:
             log(f"Warning: could not overwrite checkpoint log {checkpoint_log}: {e}")
 
-    if args.overwrite:
+    if run_upstream and args.overwrite:
         clear_existing_output(base_output, events_format)
 
-    if checkpoint_log.exists() and not args.overwrite:
+    if run_upstream and checkpoint_log.exists() and not args.overwrite:
         try:
             with open(checkpoint_log, "r") as f:
                 processed_paths = {line.strip() for line in f if line.strip()}
@@ -657,13 +756,12 @@ def main():
             log(f"Warning: could not read checkpoint log {checkpoint_log}: {e}")
 
     remaining = [p for p in file_paths if str(p) not in processed_paths]
-    if not remaining:
-        log("All paths already processed according to checkpoint. Exiting.")
-        return
+    if run_upstream and (not remaining):
+        log("All paths already processed according to checkpoint.")
 
     # Batch and run
     batch_size = max(1, args.batch_size)
-    total_batches = (len(remaining) + batch_size - 1) // batch_size
+    total_batches = (len(remaining) + batch_size - 1) // batch_size if run_upstream else 0
     for batch_idx in range(total_batches):
         start = batch_idx * batch_size
         end = min(len(remaining), start + batch_size)
@@ -696,7 +794,8 @@ def main():
             for p in batch_paths:
                 f.write(f"{p}\n")
 
-    log("\nAll batches completed.")
+    if run_upstream:
+        log("\nAll batches completed.")
 
     # Generate run summary with results statistics
     run_end_time = datetime.now()
@@ -782,7 +881,7 @@ def main():
             print(f"Warning: could not write run summary: {e}")
 
     # Step 5: Apply post-filters (optional)
-    if args.run_post_filter and results_files:
+    if run_upstream and args.run_post_filter and results_files:
         log("\n=== Step 5: Applying post-filters ===")
         try:
             # Load events results
@@ -830,8 +929,94 @@ def main():
                 import traceback
                 traceback.print_exc()
 
+    # Step 9: Enrich with compute_stats (optional, runs immediately after post-filter)
+    if run_upstream and args.run_enrich:
+        if not args.run_post_filter:
+            print("Warning: --run-enrich requires --run-post-filter. Skipping enrichment.")
+        else:
+            log("\n=== Step 9: Enriching with light curve stats ===")
+            try:
+                # Enrichment now runs directly from post-filter output
+                post_filter_output = results_dir / "lc_events_filtered.csv"
+
+                if post_filter_output.exists():
+                    df_to_enrich = pd.read_csv(post_filter_output)
+                else:
+                    print(f"Warning: No post-filter output found at {post_filter_output}")
+                    df_to_enrich = None
+
+                if df_to_enrich is not None:
+                    # Filter to passing candidates only
+                    if "failed_any" in df_to_enrich.columns:
+                        df_passed = df_to_enrich[~df_to_enrich["failed_any"]].copy()
+                    else:
+                        df_passed = df_to_enrich.copy()
+
+                    if len(df_passed) > 0:
+                        log(f"Enriching {len(df_passed)} candidates with compute_stats...")
+
+                        enriched_rows = []
+                        for idx, row in tqdm(df_passed.iterrows(), total=len(df_passed),
+                                            desc="compute_stats", disable=not args.verbose):
+                            lc_path = Path(row["path"])
+                            if not lc_path.exists():
+                                enriched_rows.append(row.to_dict())
+                                continue
+
+                            try:
+                                # Extract asassn_id from path
+                                asassn_id = lc_path.stem.split("-")[0]
+                                dir_path = str(lc_path.parent)
+
+                                # Run compute_stats
+                                _, stats_dict = compute_stats(
+                                    asassn_id,
+                                    dir_path,
+                                    use_only_good=True,
+                                    compute_ls=args.enrich_compute_ls,
+                                )
+
+                                # Merge stats into row
+                                merged = row.to_dict()
+                                for k, v in stats_dict.items():
+                                    if k not in merged:  # Don't overwrite existing columns
+                                        merged[f"stats_{k}"] = v
+                                enriched_rows.append(merged)
+
+                            except Exception as e:
+                                if args.verbose:
+                                    print(f"Warning: compute_stats failed for {lc_path}: {e}")
+                                enriched_rows.append(row.to_dict())
+
+                        df_enriched = pd.DataFrame(enriched_rows)
+
+                        # Save enriched results
+                        enrich_output = results_dir / "lc_events_enriched.csv"
+                        df_enriched.to_csv(enrich_output, index=False)
+                        log(f"Enriched results saved to {enrich_output}")
+
+                        # Update summary
+                        n_stats_cols = len([c for c in df_enriched.columns if c.startswith("stats_")])
+                        summary["enrichment_stats"] = {
+                            "total_enriched": len(df_enriched),
+                            "stats_columns_added": n_stats_cols,
+                        }
+
+                        with open(run_summary_file, "w") as f:
+                            json.dump(summary, f, indent=2, default=str)
+
+                        log(f"Enrichment: {len(df_enriched)} candidates, {n_stats_cols} stats columns added")
+                    else:
+                        log("No passing candidates to enrich.")
+
+            except Exception as e:
+                print(f"Error in enrichment step: {e}")
+                if args.verbose:
+                    import traceback
+                    traceback.print_exc()
+
     # Step 6: Generate candidate plots (optional)
-    if args.run_postprocess:
+    if run_upstream and args.run_postprocess:
         if not args.run_post_filter:
             print("Warning: --run-postprocess requires --run-post-filter. Skipping postprocess.")
         else:
@@ -870,59 +1055,58 @@ def main():
                     import traceback
                     traceback.print_exc()
 
+    post_filter_output = results_dir / "lc_events_filtered.csv"
+    has_post_filter_output = post_filter_output.exists()
+
+    if run_downstream and (args.run_characterize or args.run_dust) and (not has_post_filter_output):
+        print(f"Warning: downstream stage requires filtered results at {post_filter_output}. Skipping characterization.")
+
     # Step 7: Characterization + dust (optional)
-    if args.run_characterize or args.run_dust:
-        if not args.run_post_filter:
-            print("Warning: --run-characterize/--run-dust requires --run-post-filter. Skipping characterization.")
-        else:
-            log("\n=== Step 7: Characterizing candidates ===")
-            try:
-                post_filter_output = results_dir / "lc_events_filtered.csv"
-                if not post_filter_output.exists():
-                    print(f"Warning: post-filter output not found at {post_filter_output}")
-                else:
-                    df_char = pd.read_csv(post_filter_output)
+    if run_downstream and (args.run_characterize or args.run_dust) and has_post_filter_output:
+        log("\n=== Step 7: Characterizing candidates ===")
+        try:
+            df_char = pd.read_csv(post_filter_output)
 
-                    if "failed_any" in df_char.columns:
-                        df_char = df_char[~df_char["failed_any"]].copy()
+            if "failed_any" in df_char.columns:
+                df_char = df_char[~df_char["failed_any"]].copy()
 
-                    if "path" in df_char.columns and "asas_sn_id" not in df_char.columns:
-                        def _extract_id(path_str: str) -> str:
-                            name = Path(path_str).name
-                            return Path(name).stem.split("-")[0]
+            if "path" in df_char.columns and "asas_sn_id" not in df_char.columns:
+                def _extract_id(path_str: str) -> str:
+                    name = Path(path_str).name
+                    return Path(name).stem.split("-")[0]
 
-                        df_char["asas_sn_id"] = df_char["path"].astype(str).map(_extract_id)
+                df_char["asas_sn_id"] = df_char["path"].astype(str).map(_extract_id)
 
-                    # Use full characterize pipeline (single source of truth)
-                    starhorse_arg = args.characterize_starhorse if args.run_characterize else None
-                    df_char = characterize_candidates_df(
-                        df_char,
-                        crossmatch=args.characterize_crossmatch.expanduser(),
-                        chunk_size=args.characterize_chunk_size,
-                        cache=args.gaia_cache.expanduser() if args.gaia_cache else (out_dir / "gaia_cache" / "gaia_cache.parquet"),
-                        dust=args.run_dust,
-                        starhorse=starhorse_arg,
-                        run_banyan=args.run_characterize and args.characterize_banyan,
-                        run_iphas=args.run_characterize and args.characterize_iphas,
-                        run_sfr=args.run_characterize and args.characterize_sfr,
-                        run_clusters=args.run_characterize and args.characterize_clusters,
-                        run_unwise=args.run_characterize and args.characterize_unwise,
-                    )
+            # Use full characterize pipeline (single source of truth)
+            starhorse_arg = args.characterize_starhorse if args.run_characterize else None
+            df_char = characterize_candidates_df(
+                df_char,
+                crossmatch=args.characterize_crossmatch.expanduser(),
+                chunk_size=args.characterize_chunk_size,
+                cache=args.gaia_cache.expanduser() if args.gaia_cache else (out_dir / "gaia_cache" / "gaia_cache.parquet"),
+                dust=args.run_dust,
+                starhorse=starhorse_arg,
+                run_banyan=args.run_characterize and args.characterize_banyan,
+                run_iphas=args.run_characterize and args.characterize_iphas,
+                run_sfr=args.run_characterize and args.characterize_sfr,
+                run_clusters=args.run_characterize and args.characterize_clusters,
+                run_unwise=args.run_characterize and args.characterize_unwise,
+            )
 
-                    characterize_output = results_dir / "lc_events_characterized.csv"
-                    df_char.to_csv(characterize_output, index=False)
-                    log(f"Characterization results saved to {characterize_output}")
+            characterize_output = results_dir / "lc_events_characterized.csv"
+            df_char.to_csv(characterize_output, index=False)
+            log(f"Characterization results saved to {characterize_output}")
 
-            except Exception as e:
-                print(f"Error in characterization step: {e}")
-                if args.verbose:
-                    import traceback
-                    traceback.print_exc()
+        except Exception as e:
+            print(f"Error in characterization step: {e}")
+            if args.verbose:
+                import traceback
+                traceback.print_exc()
 
     # Step 8: Run classification (optional)
-    if args.run_classify:
-        if not args.run_post_filter:
-            print("Warning: --run-classify requires --run-post-filter. Skipping classification.")
+    if run_downstream and args.run_classify:
+        if not has_post_filter_output:
+            print(f"Warning: downstream stage requires filtered results at {post_filter_output}. Skipping classification.")
         else:
             log("\n=== Step 8: Running classification ===")
             try:
@@ -970,102 +1154,10 @@ def main():
                     import traceback
                     traceback.print_exc()
 
-    # Step 9: Enrich with compute_stats (optional)
-    if args.run_enrich:
-        if not args.run_post_filter:
-            print("Warning: --run-enrich requires --run-post-filter. Skipping enrichment.")
-        else:
-            log("\n=== Step 9: Enriching with light curve stats ===")
-            try:
-                # Load final results (classified if available, otherwise post-filtered)
-                classify_output = results_dir / "lc_events_classified.csv"
-                characterize_output = results_dir / "lc_events_characterized.csv"
-                post_filter_output = results_dir / "lc_events_filtered.csv"
-                
-                if classify_output.exists():
-                    df_to_enrich = pd.read_csv(classify_output)
-                elif characterize_output.exists():
-                    df_to_enrich = pd.read_csv(characterize_output)
-                elif post_filter_output.exists():
-                    df_to_enrich = pd.read_csv(post_filter_output)
-                else:
-                    print(f"Warning: No post-filter or classified output found")
-                    df_to_enrich = None
-                
-                if df_to_enrich is not None:
-                    # Filter to passing candidates only
-                    if "failed_any" in df_to_enrich.columns:
-                        df_passed = df_to_enrich[~df_to_enrich["failed_any"]].copy()
-                    else:
-                        df_passed = df_to_enrich.copy()
-                    
-                    if len(df_passed) > 0:
-                        log(f"Enriching {len(df_passed)} candidates with compute_stats...")
-                        
-                        enriched_rows = []
-                        for idx, row in tqdm(df_passed.iterrows(), total=len(df_passed), 
-                                            desc="compute_stats", disable=not args.verbose):
-                            lc_path = Path(row["path"])
-                            if not lc_path.exists():
-                                enriched_rows.append(row.to_dict())
-                                continue
-                            
-                            try:
-                                # Extract asassn_id from path
-                                asassn_id = lc_path.stem.split("-")[0]
-                                dir_path = str(lc_path.parent)
-                                
-                                # Run compute_stats
-                                _, stats_dict = compute_stats(
-                                    asassn_id, 
-                                    dir_path,
-                                    use_only_good=True,
-                                    compute_ls=args.enrich_compute_ls,
-                                )
-                                
-                                # Merge stats into row
-                                merged = row.to_dict()
-                                for k, v in stats_dict.items():
-                                    if k not in merged:  # Don't overwrite existing columns
-                                        merged[f"stats_{k}"] = v
-                                enriched_rows.append(merged)
-                                
-                            except Exception as e:
-                                if args.verbose:
-                                    print(f"Warning: compute_stats failed for {lc_path}: {e}")
-                                enriched_rows.append(row.to_dict())
-                        
-                        df_enriched = pd.DataFrame(enriched_rows)
-                        
-                        # Save enriched results
-                        enrich_output = results_dir / "lc_events_enriched.csv"
-                        df_enriched.to_csv(enrich_output, index=False)
-                        log(f"Enriched results saved to {enrich_output}")
-                        
-                        # Update summary
-                        n_stats_cols = len([c for c in df_enriched.columns if c.startswith("stats_")])
-                        summary["enrichment_stats"] = {
-                            "total_enriched": len(df_enriched),
-                            "stats_columns_added": n_stats_cols,
-                        }
-                        
-                        with open(run_summary_file, "w") as f:
-                            json.dump(summary, f, indent=2, default=str)
-                        
-                        log(f"Enrichment: {len(df_enriched)} candidates, {n_stats_cols} stats columns added")
-                    else:
-                        log("No passing candidates to enrich.")
-
-            except Exception as e:
-                print(f"Error in enrichment step: {e}")
-                if args.verbose:
-                    import traceback
-                    traceback.print_exc()
-
     # Step 10: Neighbor enrichment (optional)
-    if args.run_neighbor_enrich:
-        if not args.run_post_filter:
-            print("Warning: --run-neighbor-enrich requires --run-post-filter. Skipping neighbor enrichment.")
+    if run_downstream and args.run_neighbor_enrich:
+        if not has_post_filter_output:
+            print(f"Warning: downstream stage requires filtered results at {post_filter_output}. Skipping neighbor enrichment.")
         else:
             log("\n=== Step 10: Bulk neighbor enrichment ===")
             try:
@@ -1074,12 +1166,12 @@ def main():
                 characterize_output = results_dir / "lc_events_characterized.csv"
                 post_filter_output = results_dir / "lc_events_filtered.csv"
 
-                if enrich_output.exists():
-                    df_neighbors_in = pd.read_csv(enrich_output)
-                elif classify_output.exists():
+                if classify_output.exists():
                     df_neighbors_in = pd.read_csv(classify_output)
                 elif characterize_output.exists():
                     df_neighbors_in = pd.read_csv(characterize_output)
+                elif enrich_output.exists():
+                    df_neighbors_in = pd.read_csv(enrich_output)
                 elif post_filter_output.exists():
                     df_neighbors_in = pd.read_csv(post_filter_output)
                 else:
@@ -1127,9 +1219,9 @@ def main():
                     traceback.print_exc()
 
     # Step 11: Spectra availability enrichment (optional)
-    if args.run_spectra_enrich:
-        if not args.run_post_filter:
-            print("Warning: --run-spectra-enrich requires --run-post-filter. Skipping spectra enrichment.")
+    if run_downstream and args.run_spectra_enrich:
+        if not has_post_filter_output:
+            print(f"Warning: downstream stage requires filtered results at {post_filter_output}. Skipping spectra enrichment.")
         else:
             log("\n=== Step 11: Spectra availability enrichment ===")
             try:
@@ -1192,6 +1284,13 @@ def main():
                 if args.verbose:
                     import traceback
                     traceback.print_exc()
+
+    if args.export_bundle is not None:
+        try:
+            bundled = export_bundle_zip(args.export_bundle, out_dir)
+            log(f"Exported bundle to {args.export_bundle.expanduser()} with {len(bundled)} files")
+        except Exception as e:
+            print(f"Error creating export bundle: {e}")
 
 
 if __name__ == "__main__":

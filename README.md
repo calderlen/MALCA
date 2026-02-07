@@ -26,11 +26,8 @@ MALCA is a Bayesian event-detection pipeline for finding dimming and dipping eve
 ```bash
 # Requires Python >= 3.10
 git clone https://github.com/calderlen/malca.git && cd malca
-pip install -e "."          # core pipeline
-pip install -e ".[dev]"     # + pytest tooling
+pip install -e "."          # installs all runtime + test dependencies
 ```
-
-See `pyproject.toml` for optional extras: `[multiwavelength]`, `[visualization]`, `[gui]`, `[notebooks]`, `[all]`.
 
 ### Input Files
 - Per-mag-bin directories: `<lcsv2_root>/<mag_bin>/`
@@ -42,11 +39,10 @@ See `pyproject.toml` for optional extras: `[multiwavelength]`, `[visualization]`
   - Note: Bright nearby star (BNS) filtering is handled upstream by ASAS-SN during LC generation
 
 ### Dependencies
-- Core pipeline: numpy, pandas, scipy, numba, astropy, celerite2, matplotlib, tqdm
-- Required: pyarrow (imported by core pipeline; needed even if you only write CSV)
-- Optional visualization: plotly (3D injection plots)
-- Multi-wavelength characterization: astroquery (Gaia queries), dustmaps3d (3D dust extinction), pyvo (StarHorse TAP queries), banyan-sigma (young associations), requests (unWISE queries)
-- Notebooks/EDA: jupyterlab, ipykernel, seaborn, scikit-learn, joblib
+- Core + runtime modules: numpy, pandas, scipy, numba, astropy, celerite2, matplotlib, tqdm, pyarrow
+- Review + plotting: streamlit, plotly
+- Characterization + catalog access: astroquery, dustmaps3d, pyvo, banyan-sigma, requests
+- ML utilities: joblib
 
 ## Quick Start
 ```bash
@@ -55,7 +51,7 @@ malca manifest --index-root /path/to/lcsv2 --lc-root /path/to/lcsv2 \
     --mag-bin 13_13.5 --out output/manifest.parquet --workers 10
 
 # Run event detection pipeline
-malca detect --mag-bin 13_13.5 --workers 10 \
+malca pipeline --mag-bin 13_13.5 --workers 10 \
     --lc-root /path/to/lcsv2 --index-root /path/to/lcsv2 \
     --output output/results.csv --min-mag-offset 0.1
 
@@ -73,7 +69,19 @@ malca characterize --input output/filtered.csv --output output/characterized.csv
 
 # Get help for any command
 malca --help
-malca detect --help
+malca pipeline --help
+```
+
+Minimal split workflow (cluster -> home):
+
+```bash
+# On cluster: run upstream/raw-dependent steps and export transfer bundle
+malca pipeline --stage cluster --mag-bin 13_13.5 --out-dir output/run_001 \
+    --export-bundle output/run_001_bundle.zip
+
+# On home machine: import bundle and run downstream/catalog steps only
+malca pipeline --stage home --out-dir output/run_001 \
+    --import-bundle ~/Downloads/run_001_bundle.zip
 ```
 
 ## Pipeline Architecture
@@ -213,7 +221,7 @@ The full detection workflow has three steps: build a manifest, run detection wit
    ```
 2) Pre-filter and run events in batches with resume support:
    ```bash
-   malca detect --mag-bin 13_13.5 --workers 10 \
+   malca pipeline --mag-bin 13_13.5 --workers 10 \
        --min-time-span 100 --min-points-per-day 0.05 --min-cameras 2 \
        --vsx-crossmatch input/vsx/asassn_x_vsx_matches_20250919_2252.csv \
        --batch-size 2000 \
@@ -242,13 +250,13 @@ The full detection workflow has three steps: build a manifest, run detection wit
 **Detect options:**
 ```bash
 # logBF triggering (faster)
-malca detect --mag-bin 13_13.5 --workers 8 \
+malca pipeline --mag-bin 13_13.5 --workers 8 \
     --lc-root /path/to/lcsv2 --index-root /path/to/lcsv2 \
     --output output/events_logbf.csv --trigger-mode logbf \
     --baseline-func gp_masked --min-mag-offset 0.1
 
 # Multiple mag bins (writes one output per bin)
-malca detect --mag-bin 12_12.5 12.5_13 13_13.5 \
+malca pipeline --mag-bin 12_12.5 12.5_13 13_13.5 \
     --lc-root /path/to/lcsv2 --index-root /path/to/lcsv2 \
     --output output/lc_events_results.csv --trigger-mode logbf
 ```
@@ -404,7 +412,7 @@ malca characterize \
 - **3D Dust Extinction**: All-sky coverage via `dustmaps3d` (Wang et al. 2025, ~350MB)
 - **YSO Classification**: Koenig & Leisawitz (2014) IR color-color diagram with dust correction
 - **Galactic Population**: Thin/thick disk classification using metallicity or StarHorse ages
-- **StarHorse** (optional): Stellar ages, masses, distances from local catalog join
+- **StarHorse** (if provided): Stellar ages, masses, distances from local catalog join
 - **Auxiliary Catalog Crossmatches** (Tzanidakis+2025):
   - BANYAN Σ: Young stellar association membership probabilities
   - IPHAS DR2: Hα emission detection for Galactic plane sources
@@ -416,9 +424,6 @@ malca characterize \
 
 **Setup:**
 ```bash
-# Install multiwavelength dependencies
-pip install -e ".[multiwavelength]"
-
 # Dust maps auto-download on first use (~350MB)
 # For StarHorse, download catalog manually:
 # https://cdsarc.cds.unistra.fr/viz-bin/cat/I/354
@@ -461,8 +466,6 @@ malca attrition --pre output/pre.csv --post output/post.csv
 
 ### Candidate Review
 
-- Install GUI dependency:
-  `pip install -e ".[gui]"`
 - Launch reviewer app:
   `streamlit run malca/review/app.py`
 - Launch terminal triage tool:
@@ -582,7 +585,7 @@ output/
                                       #   - Galactic population (thin_disk/thick_disk)
                                       #   - StarHorse ages/masses (if provided)
                                       #   - Auxiliary crossmatches (BANYAN Σ, IPHAS, etc.)
-└── gaia_cache/                       # Gaia query cache (optional)
+└── gaia_cache/                       # Gaia query cache (created when cache is used)
     └── gaia_results_{hash}.parquet
 ```
 

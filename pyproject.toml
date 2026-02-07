@@ -19,15 +19,18 @@ dependencies = [
     "astropy",
     "celerite2",
     "pyarrow",
+    "plotly",
+    "streamlit>=1.30",
+    "astroquery>=0.4.6",
+    "dustmaps3d",
+    "pyvo",
+    "banyan-sigma",
+    "requests",
+    "joblib",
+    "pytest",
+    "pytest-cov",
+    "pytest-xdist",
 ]
-
-[project.optional-dependencies]
-visualization = ["plotly"]
-gui = ["streamlit>=1.30"]
-multiwavelength = ["astroquery>=0.4.6", "dustmaps3d", "pyvo", "banyan-sigma", "requests"]
-notebooks = ["jupyterlab", "ipykernel", "seaborn", "scikit-learn", "joblib"]
-dev = ["pytest", "pytest-cov", "pytest-xdist"]
-all = ["plotly", "streamlit>=1.30", "astroquery", "jupyterlab", "ipykernel", "seaborn", "scikit-learn", "joblib"]
 
 [project.scripts]
 malca = "malca.__main__:main"
