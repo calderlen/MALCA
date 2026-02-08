@@ -249,9 +249,26 @@ The full detection workflow has three steps: build a manifest, run detection wit
 
    # With custom thresholds
    malca post_filter --input results.parquet --output filtered.parquet \
-       --min-bayes-factor 20 --min-event-prob 0.7 --apply-morphology
+       --min-bayes-factor 20 --min-run-points 3 --apply-morphology
    ```
-   - **Implemented filters**: posterior strength, event probability, run robustness, morphology, periodicity
+   - **Implemented filters**: posterior strength, run robustness, score, morphology, periodicity, Gaia RUWE, periodic catalog
+
+4) Optional: tune post-filter behavior directly from `malca pipeline` / `malca detect`.
+   ```bash
+   # Keep pipeline defaults but disable score-based rejection
+   malca pipeline --mag-bin 13_13.5 --skip-score-filter
+
+   # Enable stricter optional validators
+   malca pipeline --mag-bin 13_13.5 \
+       --apply-morphology --min-delta-bic 12 \
+       --apply-periodicity-validation --periodicity-n-bootstrap 2000 \
+       --gaia-reject --periodic-catalog-reject
+   ```
+   - **Defaults in pipeline**: evidence strength, run robustness, score, Gaia RUWE, and periodic-catalog validation are on; morphology and periodicity-validation are off.
+   - **Control flags now available in pipeline**:
+     - Evidence/run: `--skip-evidence-strength`, `--allow-infinite-local-bf`, `--skip-run-robustness`, `--min-run-count`, `--post-filter-min-run-points`, `--post-filter-min-run-cameras`
+     - Morphology/score: `--apply-morphology`, `--dip-morphology`, `--jump-morphology`, `--min-delta-bic`, `--skip-score-filter`, `--min-score`
+     - Validators: `--apply-periodicity-validation` (+ periodicity knobs), `--skip-gaia-ruwe-validation|--gaia-reject`, `--skip-periodic-catalog-validation|--periodic-catalog-reject`
 
 **Detect options:**
 ```bash

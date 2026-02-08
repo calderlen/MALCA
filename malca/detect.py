@@ -26,6 +26,7 @@ import subprocess
 import sys
 import zipfile
 from pathlib import Path
+from typing import Any
 import pandas as pd
 import tempfile
 from tqdm.auto import tqdm
@@ -165,6 +166,44 @@ def export_bundle_zip(bundle_zip: Path, out_dir: Path) -> list[str]:
     return [str(p.relative_to(out_dir)) for p in files_to_add]
 
 
+def _build_post_filter_kwargs(args: argparse.Namespace) -> dict[str, Any]:
+    """Build apply_post_filters kwargs from detect CLI arguments."""
+    return {
+        # Core filters
+        "apply_evidence_strength": not args.skip_evidence_strength,
+        "min_bayes_factor": args.min_bayes_factor,
+        "require_finite_local_bf": not args.allow_infinite_local_bf,
+        "apply_run_robustness": not args.skip_run_robustness,
+        "min_run_count": args.min_run_count,
+        "min_run_points": args.post_filter_min_run_points,
+        "min_run_cameras": args.post_filter_min_run_cameras,
+        # Optional filters
+        "apply_morphology": args.apply_morphology,
+        "dip_morphology": args.dip_morphology,
+        "jump_morphology": args.jump_morphology,
+        "min_delta_bic": args.min_delta_bic,
+        "apply_score": not args.skip_score_filter,
+        "min_score": args.min_score,
+        # Validation filters
+        "apply_periodicity_validation": args.apply_periodicity_validation,
+        "periodicity_n_bootstrap": args.periodicity_n_bootstrap,
+        "periodicity_significance": args.periodicity_significance,
+        "periodicity_exclude_aliases": not args.periodicity_no_exclude_aliases,
+        "periodicity_flag_only": not args.periodicity_reject,
+        "periodicity_workers": args.periodicity_workers,
+        "periodicity_checkpoint_dir": args.periodicity_checkpoint_dir,
+        "apply_gaia_ruwe_validation": not args.skip_gaia_ruwe_validation,
+        "gaia_max_ruwe": args.gaia_max_ruwe,
+        "gaia_flag_only": not args.gaia_reject,
+        "apply_periodic_catalog_validation": not args.skip_periodic_catalog_validation,
+        "periodic_catalog_max_sep": args.periodic_catalog_max_sep,
+        "periodic_catalog_flag_only": not args.periodic_catalog_reject,
+        # Progress/logging
+        "show_tqdm": args.verbose,
+        "verbose": args.verbose,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Run events.py on pre-filtered light curves",
@@ -257,9 +296,32 @@ def main():
     # Step 5: Post-filter args (enabled by default)
     parser.add_argument("--run-post-filter", dest="run_post_filter", action="store_true", help="Run post_filter after events.py completes (default: enabled)")
     parser.add_argument("--no-run-post-filter", dest="run_post_filter", action="store_false", help="Skip post-filter step")
+    parser.add_argument("--skip-evidence-strength", action="store_true", help="Skip evidence-strength filter")
     parser.add_argument("--min-bayes-factor", type=float, default=MIN_BAYES_FACTOR, help="Min Bayes factor for post-filter (default: 10.0)")
+    parser.add_argument("--allow-infinite-local-bf", action="store_true", help="Allow infinite local Bayes factors (default: require finite)")
+    parser.add_argument("--skip-run-robustness", action="store_true", help="Skip run-robustness filter")
+    parser.add_argument("--min-run-count", type=int, default=1, help="Minimum run count for run-robustness filter (default: 1)")
     parser.add_argument("--post-filter-min-run-cameras", type=int, default=POST_FILTER_MIN_RUN_CAMERAS, help="Min cameras for run robustness filter (default: 2)")
     parser.add_argument("--post-filter-min-run-points", type=int, default=POST_FILTER_MIN_RUN_POINTS, help="Min points per run for robustness filter (default: 2)")
+    parser.add_argument("--apply-morphology", action="store_true", help="Apply morphology filter in post-filter stage")
+    parser.add_argument("--dip-morphology", type=str, default="gaussian", choices=["gaussian", "paczynski"], help="Required morphology for dip events (default: gaussian)")
+    parser.add_argument("--jump-morphology", type=str, default="paczynski", choices=["gaussian", "paczynski"], help="Required morphology for jump events (default: paczynski)")
+    parser.add_argument("--min-delta-bic", type=float, default=10.0, help="Minimum delta BIC for morphology filter (default: 10.0)")
+    parser.add_argument("--skip-score-filter", action="store_true", help="Skip score filter (enabled by default)")
+    parser.add_argument("--min-score", type=float, default=0.0, help="Minimum score threshold for score filter (default: 0.0)")
+    parser.add_argument("--apply-periodicity-validation", action="store_true", help="Enable bootstrap periodicity validation")
+    parser.add_argument("--periodicity-n-bootstrap", type=int, default=1000, help="Bootstrap iterations for periodicity validation (default: 1000)")
+    parser.add_argument("--periodicity-significance", type=float, default=0.01, help="Significance threshold for periodicity validation (default: 0.01)")
+    parser.add_argument("--periodicity-no-exclude-aliases", action="store_true", help="Do not exclude alias periods during periodicity validation")
+    parser.add_argument("--periodicity-reject", action="store_true", help="Reject periodicity matches instead of flagging only")
+    parser.add_argument("--periodicity-workers", type=int, default=WORKERS, help="Workers for periodicity validation (default: WORKERS)")
+    parser.add_argument("--periodicity-checkpoint-dir", type=Path, default=None, help="Checkpoint directory for periodicity validation")
+    parser.add_argument("--skip-gaia-ruwe-validation", action="store_true", help="Skip Gaia RUWE validation")
+    parser.add_argument("--gaia-max-ruwe", type=float, default=1.4, help="Maximum RUWE threshold (default: 1.4)")
+    parser.add_argument("--gaia-reject", action="store_true", help="Reject high-RUWE sources instead of flagging only")
+    parser.add_argument("--skip-periodic-catalog-validation", action="store_true", help="Skip periodic-catalog crossmatch validation")
+    parser.add_argument("--periodic-catalog-max-sep", type=float, default=3.0, help="Maximum separation for periodic-catalog matching in arcsec (default: 3.0)")
+    parser.add_argument("--periodic-catalog-reject", action="store_true", help="Reject periodic-catalog matches instead of flagging only")
 
     # Step 6: Postprocess args (enabled by default)
     parser.add_argument("--run-postprocess", dest="run_postprocess", action="store_true", help="Run postprocess (generate plots) after post_filter (default: enabled)")
@@ -469,9 +531,32 @@ def main():
         "pass_all_prefilters": args.pass_all_prefilters,
         "enforced_prefilters": enforced_prefilters,
         "post_filter": {
+            "apply_evidence_strength": not args.skip_evidence_strength,
             "min_bayes_factor": args.min_bayes_factor,
+            "require_finite_local_bf": not args.allow_infinite_local_bf,
+            "apply_run_robustness": not args.skip_run_robustness,
+            "min_run_count": args.min_run_count,
             "min_run_cameras": args.post_filter_min_run_cameras,
             "min_run_points": args.post_filter_min_run_points,
+            "apply_morphology": args.apply_morphology,
+            "dip_morphology": args.dip_morphology,
+            "jump_morphology": args.jump_morphology,
+            "min_delta_bic": args.min_delta_bic,
+            "apply_score": not args.skip_score_filter,
+            "min_score": args.min_score,
+            "apply_periodicity_validation": args.apply_periodicity_validation,
+            "periodicity_n_bootstrap": args.periodicity_n_bootstrap,
+            "periodicity_significance": args.periodicity_significance,
+            "periodicity_exclude_aliases": not args.periodicity_no_exclude_aliases,
+            "periodicity_flag_only": not args.periodicity_reject,
+            "periodicity_workers": args.periodicity_workers,
+            "periodicity_checkpoint_dir": str(args.periodicity_checkpoint_dir) if args.periodicity_checkpoint_dir else None,
+            "apply_gaia_ruwe_validation": not args.skip_gaia_ruwe_validation,
+            "gaia_max_ruwe": args.gaia_max_ruwe,
+            "gaia_flag_only": not args.gaia_reject,
+            "apply_periodic_catalog_validation": not args.skip_periodic_catalog_validation,
+            "periodic_catalog_max_sep": args.periodic_catalog_max_sep,
+            "periodic_catalog_flag_only": not args.periodic_catalog_reject,
         },
         "characterize": {
             "run_characterize": args.run_characterize,
@@ -552,9 +637,32 @@ def main():
             "camera_median_tolerance": args.camera_median_tolerance,
             # Step 5: Post-filter
             "run_post_filter": args.run_post_filter,
+            "skip_evidence_strength": args.skip_evidence_strength,
             "min_bayes_factor": args.min_bayes_factor,
+            "allow_infinite_local_bf": args.allow_infinite_local_bf,
+            "skip_run_robustness": args.skip_run_robustness,
+            "min_run_count": args.min_run_count,
             "post_filter_min_run_cameras": args.post_filter_min_run_cameras,
             "post_filter_min_run_points": args.post_filter_min_run_points,
+            "apply_morphology": args.apply_morphology,
+            "dip_morphology": args.dip_morphology,
+            "jump_morphology": args.jump_morphology,
+            "min_delta_bic": args.min_delta_bic,
+            "skip_score_filter": args.skip_score_filter,
+            "min_score": args.min_score,
+            "apply_periodicity_validation": args.apply_periodicity_validation,
+            "periodicity_n_bootstrap": args.periodicity_n_bootstrap,
+            "periodicity_significance": args.periodicity_significance,
+            "periodicity_no_exclude_aliases": args.periodicity_no_exclude_aliases,
+            "periodicity_reject": args.periodicity_reject,
+            "periodicity_workers": args.periodicity_workers,
+            "periodicity_checkpoint_dir": str(args.periodicity_checkpoint_dir) if args.periodicity_checkpoint_dir else None,
+            "skip_gaia_ruwe_validation": args.skip_gaia_ruwe_validation,
+            "gaia_max_ruwe": args.gaia_max_ruwe,
+            "gaia_reject": args.gaia_reject,
+            "skip_periodic_catalog_validation": args.skip_periodic_catalog_validation,
+            "periodic_catalog_max_sep": args.periodic_catalog_max_sep,
+            "periodic_catalog_reject": args.periodic_catalog_reject,
             # Step 6: Postprocess
             "run_postprocess": args.run_postprocess,
             "max_plots": args.max_plots,
@@ -925,16 +1033,7 @@ def main():
                 df_events = load_table(results_files[0])
 
             # Apply post-filters
-            df_post_filtered = apply_post_filters(
-                df_events,
-                apply_evidence_strength=True,
-                min_bayes_factor=args.min_bayes_factor,
-                apply_run_robustness=True,
-                min_run_cameras=args.post_filter_min_run_cameras,
-                min_run_points=args.post_filter_min_run_points,
-                show_tqdm=args.verbose,
-                verbose=args.verbose,
-            )
+            df_post_filtered = apply_post_filters(df_events, **_build_post_filter_kwargs(args))
 
             # Save filtered results
             post_filter_output = results_dir / "lc_events_filtered.parquet"
