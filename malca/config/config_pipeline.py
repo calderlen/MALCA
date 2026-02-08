@@ -1,0 +1,41 @@
+"""Pipeline settings: workers, batching, triggers, Bayesian grid, baseline GP kernel."""
+
+import math
+
+# Parallelism
+WORKERS = 10
+BATCH_SIZE = 2000
+
+# Bayesian detection
+TRIGGER_MODE = "posterior_prob"
+P_POINTS = 12
+MAG_POINTS = 12
+LOGBF_THRESHOLD_DIP = 5.0
+LOGBF_THRESHOLD_JUMP = 5.0
+SIGNIFICANCE_THRESHOLD = 99.99997
+MIN_MAG_OFFSET = 0.1
+
+# Run grouping
+RUN_MIN_POINTS = 2
+RUN_MAX_GAP_POINTS = 5
+
+# Baseline GP kernel (SHOTerm)
+BASELINE_FUNC = "gp"
+BASELINE_S0 = 0.0005
+BASELINE_W0 = math.pi / 1000
+BASELINE_Q = 0.7
+BASELINE_JITTER = 0.006
+
+# GP fitting
+GP_FLOOR_CLIP = 3.0
+GP_FLOOR_ITERS = 3
+GP_MIN_FLOOR_POINTS = 30
+GP_AUTO_SCALE_FRACTION = 0.5
+GP_MIN_GP_POINTS = 10
+GP_DIP_SIGMA_THRESH = -1.0
+GP_PAD_DAYS = 100.0
+
+# Rolling baseline
+ROLLING_WINDOW_DAYS = 300.0
+ROLLING_MIN_POINTS = 10
+ROLLING_MIN_DAYS = 30.0
