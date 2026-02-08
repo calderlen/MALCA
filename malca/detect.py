@@ -144,26 +144,45 @@ def export_bundle_zip(bundle_zip: Path, out_dir: Path) -> list[str]:
     include_globs = [
         "results/lc_events_results.*",
     ]
+    include_dirs = [
+        "results",
+        "plots",
+        "manifests",
+        "prefilter",
+        "paths",
+        "gaia_cache",
+    ]
 
-    files_to_add: list[Path] = []
+    files_to_add: set[Path] = set()
     for rel in include_rel_paths:
         p = out_dir / rel
         if p.exists() and p.is_file():
-            files_to_add.append(p)
+            files_to_add.add(p)
 
     for pattern in include_globs:
         for p in out_dir.glob(pattern):
-            if p.exists() and p.is_file() and p not in files_to_add:
-                files_to_add.append(p)
+            if p.exists() and p.is_file():
+                files_to_add.add(p)
+
+    for rel_dir in include_dirs:
+        d = out_dir / rel_dir
+        if d.exists() and d.is_dir():
+            for p in d.rglob("*"):
+                if p.is_file():
+                    files_to_add.add(p)
+
+    # Prevent accidental self-inclusion if bundle path is inside out_dir.
+    files_to_add.discard(bundle_zip)
 
     if not files_to_add:
         raise FileNotFoundError(f"No bundle files found under {out_dir}")
 
-    with zipfile.ZipFile(bundle_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for p in files_to_add:
+    ordered_files = sorted(files_to_add, key=lambda p: str(p.relative_to(out_dir)))
+    with zipfile.ZipFile(bundle_zip, "w", compression=zipfile.ZIP_LZMA) as zf:
+        for p in ordered_files:
             zf.write(p, arcname=str(p.relative_to(out_dir)))
 
-    return [str(p.relative_to(out_dir)) for p in files_to_add]
+    return [str(p.relative_to(out_dir)) for p in ordered_files]
 
 
 def _build_post_filter_kwargs(args: argparse.Namespace) -> dict[str, Any]:
