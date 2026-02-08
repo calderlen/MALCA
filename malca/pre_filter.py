@@ -31,7 +31,13 @@ import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 
-from malca.config.config_parquet import PARQUET_CACHE_COMPRESSION, PARQUET_OUTPUT_COMPRESSION
+from malca.config.config_io import PARQUET_CACHE_COMPRESSION, PARQUET_OUTPUT_COMPRESSION
+from malca.config.config_paths import VSX_CROSSMATCH_PATH
+from malca.config.config_pipeline import WORKERS
+from malca.config.config_filters import (
+    MIN_TIME_SPAN, MIN_POINTS_PER_DAY, MIN_CAMERAS,
+    VSX_MAX_SEP_ARCSEC, VSX_MODE, STATS_CHUNK_SIZE,
+)
 from malca.utils import (
     read_lc_dat2,
     get_id_col,
@@ -776,20 +782,20 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True, help="Output CSV/Parquet")
 
     parser.add_argument("--apply-vsx", action="store_true", help="Enable VSX-based filtering/tagging")
-    parser.add_argument("--vsx-mode", choices=["filter", "tag"], default="filter")
-    parser.add_argument("--vsx-max-sep-arcsec", type=float, default=3.0)
-    parser.add_argument("--vsx-crossmatch-csv", type=Path, default=Path("input/vsx/asassn_x_vsx_matches_20250919_2252.csv"))
+    parser.add_argument("--vsx-mode", choices=["filter", "tag"], default=VSX_MODE)
+    parser.add_argument("--vsx-max-sep-arcsec", type=float, default=VSX_MAX_SEP_ARCSEC)
+    parser.add_argument("--vsx-crossmatch-csv", type=Path, default=VSX_CROSSMATCH_PATH)
 
     parser.add_argument("--no-sparse", dest="apply_sparse", action="store_false", help="Disable sparse-LC filter")
-    parser.add_argument("--min-time-span", type=float, default=100.0)
-    parser.add_argument("--min-points-per-day", type=float, default=0.05)
+    parser.add_argument("--min-time-span", type=float, default=MIN_TIME_SPAN)
+    parser.add_argument("--min-points-per-day", type=float, default=MIN_POINTS_PER_DAY)
 
     parser.add_argument("--no-multi-camera", dest="apply_multi_camera", action="store_false", help="Disable multi-camera filter")
-    parser.add_argument("--min-cameras", type=int, default=2)
+    parser.add_argument("--min-cameras", type=int, default=MIN_CAMERAS)
 
-    parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument("--workers", type=int, default=WORKERS)
     parser.add_argument("--stats-checkpoint", type=Path, default=None)
-    parser.add_argument("--stats-chunk-size", type=int, default=5000)
+    parser.add_argument("--stats-chunk-size", type=int, default=STATS_CHUNK_SIZE)
     parser.add_argument("--rejected-log-csv", type=Path, default=None)
     parser.add_argument("--no-tqdm", action="store_true")
     parser.set_defaults(apply_sparse=True, apply_multi_camera=True)

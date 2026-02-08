@@ -24,11 +24,23 @@ from astropy.coordinates import SkyCoord
 from astroquery.mast import Catalogs
 from astroquery.vizier import Vizier
 
-# Constants
-SOLAR_MASS_KG = 1.989e30
-SOLAR_RADIUS_M = 6.957e8
-AU_M = 1.496e11
-DAY_S = 86400
+from malca.config.config_classify import (
+    SOLAR_MASS_KG, SOLAR_RADIUS_M, AU_M, DAY_S,
+    EB_SHORT_DIP_DAYS, EB_LONG_DIP_DAYS, EB_SHORT_P, EB_LONG_P, EB_VERY_LONG_P,
+    EB_PERIODIC_BONUS, EB_SYMMETRIC_BONUS, EB_BINARY_BONUS, EB_ASYMMETRY_THRESHOLD,
+    CV_BP_RP_THRESHOLD, CV_G_ABS_THRESHOLD, CV_BASE_P,
+    CV_HA_EW_THRESHOLD, CV_HA_BONUS, CV_KNOWN_P,
+    STARSPOT_SMALL_AMP, STARSPOT_MEDIUM_AMP, STARSPOT_SMALL_P,
+    STARSPOT_MEDIUM_P, STARSPOT_LARGE_P, STARSPOT_ROTATION_PERIOD_DAYS,
+    YSO_CLASS_I_W1W2, YSO_CLASS_II_W1W2_MIN, YSO_CLASS_II_HK,
+    YSO_DUST_CORRECTION_HK, YSO_DUST_CORRECTION_W1W2,
+    DISK_BASE_P, DISK_LARGE_A_AU, DISK_VERY_LARGE_A_AU,
+    DISK_LARGE_A_P, DISK_VERY_LARGE_A_P, DISK_LARGE_HILL_BONUS,
+    DISK_NO_IR_EXCESS_BONUS, DISK_P_CAP,
+    CLASSIFY_EB_THRESHOLD, CLASSIFY_CV_THRESHOLD, CLASSIFY_STARSPOT_THRESHOLD,
+    CLASSIFY_DISK_THRESHOLD, CLASSIFY_MS_EB_REJECTION, CLASSIFY_MS_CV_REJECTION,
+    CLASSIFY_IPHAS_RADIUS_ARCSEC, CLASSIFY_PS1_RADIUS_ARCSEC,
+)
 
 
 # =============================================================================
@@ -86,31 +98,31 @@ def check_eb_contamination(df: pd.DataFrame) -> pd.DataFrame:
     # Dips lasting weeks-months require 10-10000 AU separations
     # Transit probability at such separations: 10^-4 to 10^-7
     
-    # Simple heuristic: if duration > 10 days, unlikely to be EB
-    long_dip = duration_days > 10
-    very_long_dip = duration_days > 30
-    
+    # Simple heuristic: if duration > EB_SHORT_DIP_DAYS, unlikely to be EB
+    long_dip = duration_days > EB_SHORT_DIP_DAYS
+    very_long_dip = duration_days > EB_LONG_DIP_DAYS
+
     # Assign probabilities
-    df.loc[~long_dip, 'P_eb'] = 0.3  # Short dips could be EBs
-    df.loc[long_dip, 'P_eb'] = 0.05  # Long dips unlikely EBs
-    df.loc[very_long_dip, 'P_eb'] = 0.01  # Very long dips very unlikely EBs
+    df.loc[~long_dip, 'P_eb'] = EB_SHORT_P  # Short dips could be EBs
+    df.loc[long_dip, 'P_eb'] = EB_LONG_P  # Long dips unlikely EBs
+    df.loc[very_long_dip, 'P_eb'] = EB_VERY_LONG_P  # Very long dips very unlikely EBs
     
     # Check for periodicity if available
     if 'is_periodic' in df.columns:
         periodic = df['is_periodic'] == True
-        df.loc[periodic, 'P_eb'] = np.minimum(df.loc[periodic, 'P_eb'] + 0.4, 1.0)
+        df.loc[periodic, 'P_eb'] = np.minimum(df.loc[periodic, 'P_eb'] + EB_PERIODIC_BONUS, 1.0)
         df.loc[periodic, 'eb_notes'] += 'Periodic; '
     
     # Check for symmetry if available
     if 'asymmetry' in df.columns:
-        symmetric = np.abs(df['asymmetry']) < 0.1
-        df.loc[symmetric, 'P_eb'] = np.minimum(df.loc[symmetric, 'P_eb'] + 0.2, 1.0)
+        symmetric = np.abs(df['asymmetry']) < EB_ASYMMETRY_THRESHOLD
+        df.loc[symmetric, 'P_eb'] = np.minimum(df.loc[symmetric, 'P_eb'] + EB_SYMMETRIC_BONUS, 1.0)
         df.loc[symmetric, 'eb_notes'] += 'Symmetric; '
     
     # Gaia binary flag
     if 'non_single_star' in df.columns:
         binary = df['non_single_star'] > 0
-        df.loc[binary, 'P_eb'] = np.minimum(df.loc[binary, 'P_eb'] + 0.3, 1.0)
+        df.loc[binary, 'P_eb'] = np.minimum(df.loc[binary, 'P_eb'] + EB_BINARY_BONUS, 1.0)
         df.loc[binary, 'eb_notes'] += 'Gaia binary; '
     
     return df
@@ -120,7 +132,7 @@ def check_eb_contamination(df: pd.DataFrame) -> pd.DataFrame:
 # EXTERNAL CATALOG QUERIES (IPHAS, PS1)
 # =============================================================================
 
-def query_iphas_by_coords(df: pd.DataFrame, radius_arcsec: float = 2.0) -> pd.DataFrame:
+def query_iphas_by_coords(df: pd.DataFrame, radius_arcsec: float = CLASSIFY_IPHAS_RADIUS_ARCSEC) -> pd.DataFrame:
     """
     Query IPHAS DR2 for Hα photometry using VizieR TAP.
     
@@ -169,7 +181,7 @@ def query_iphas_by_coords(df: pd.DataFrame, radius_arcsec: float = 2.0) -> pd.Da
     return df
 
 
-def query_ps1_by_coords(df: pd.DataFrame, radius_arcsec: float = 2.0) -> pd.DataFrame:
+def query_ps1_by_coords(df: pd.DataFrame, radius_arcsec: float = CLASSIFY_PS1_RADIUS_ARCSEC) -> pd.DataFrame:
     """
     Query Pan-STARRS1 for grizy photometry using MAST.
     
@@ -243,20 +255,20 @@ def check_cv_contamination(df: pd.DataFrame) -> pd.DataFrame:
         G_abs = df.loc[valid, 'phot_g_mean_mag'] - 5 * np.log10(dist_pc / 10)
         bp_rp = df.loc[valid, 'bp_rp']
         
-        # CV region: blue (BP-RP < 0.5) and faint (G_abs > 8)
-        cv_like = (bp_rp < 0.5) & (G_abs > 8)
-        df.loc[valid, 'P_cv'] = np.where(cv_like, 0.3, 0.01)
+        # CV region: blue (BP-RP < CV_BP_RP_THRESHOLD) and faint (G_abs > CV_G_ABS_THRESHOLD)
+        cv_like = (bp_rp < CV_BP_RP_THRESHOLD) & (G_abs > CV_G_ABS_THRESHOLD)
+        df.loc[valid, 'P_cv'] = np.where(cv_like, CV_BASE_P, 0.01)
         df.loc[valid & cv_like.values, 'cv_notes'] += 'Blue+faint in CMD; '
     
     # Check Hα if IPHAS data available
     if 'ha_ew' in df.columns:
-        ha_excess = df['ha_ew'] > 10  # Å
-        df.loc[ha_excess, 'P_cv'] = np.minimum(df.loc[ha_excess, 'P_cv'] + 0.4, 1.0)
+        ha_excess = df['ha_ew'] > CV_HA_EW_THRESHOLD  # Å
+        df.loc[ha_excess, 'P_cv'] = np.minimum(df.loc[ha_excess, 'P_cv'] + CV_HA_BONUS, 1.0)
         df.loc[ha_excess, 'cv_notes'] += 'Hα excess; '
     
     # Check for known CV catalogs
     if 'is_known_cv' in df.columns:
-        df.loc[df['is_known_cv'], 'P_cv'] = 0.95
+        df.loc[df['is_known_cv'], 'P_cv'] = CV_KNOWN_P
         df.loc[df['is_known_cv'], 'cv_notes'] += 'Known CV; '
     
     return df
@@ -292,15 +304,15 @@ def check_starspot_contamination(df: pd.DataFrame) -> pd.DataFrame:
     # Starspots typically cause <0.05 mag variations
     # Dips >0.1 mag are unlikely to be starspots
     
-    small_amp = depth < 0.05
-    medium_amp = (depth >= 0.05) & (depth < 0.15)
-    large_amp = depth >= 0.15
-    
-    df.loc[small_amp, 'P_starspot'] = 0.4
+    small_amp = depth < STARSPOT_SMALL_AMP
+    medium_amp = (depth >= STARSPOT_SMALL_AMP) & (depth < STARSPOT_MEDIUM_AMP)
+    large_amp = depth >= STARSPOT_MEDIUM_AMP
+
+    df.loc[small_amp, 'P_starspot'] = STARSPOT_SMALL_P
     df.loc[small_amp, 'starspot_notes'] += 'Small amplitude; '
-    
-    df.loc[medium_amp, 'P_starspot'] = 0.1
-    df.loc[large_amp, 'P_starspot'] = 0.01
+
+    df.loc[medium_amp, 'P_starspot'] = STARSPOT_MEDIUM_P
+    df.loc[large_amp, 'P_starspot'] = STARSPOT_LARGE_P
     
     # Timescale check
     dur_col = None
@@ -311,10 +323,10 @@ def check_starspot_contamination(df: pd.DataFrame) -> pd.DataFrame:
     
     if dur_col:
         duration = df[dur_col].fillna(10)
-        # Starspot rotation periods are typically hours to ~30 days
-        short_timescale = duration < 30
+        # Starspot rotation periods are typically hours to ~STARSPOT_ROTATION_PERIOD_DAYS days
+        short_timescale = duration < STARSPOT_ROTATION_PERIOD_DAYS
         df.loc[short_timescale, 'P_starspot'] = np.minimum(
-            df.loc[short_timescale, 'P_starspot'] + 0.1, 1.0
+            df.loc[short_timescale, 'P_starspot'] + STARSPOT_MEDIUM_P, 1.0
         )
     
     return df
@@ -365,17 +377,17 @@ def classify_yso(df: pd.DataFrame) -> pd.DataFrame:
     # Dust correction if available
     if 'A_v_3d' in df.columns and df['A_v_3d'].sum() > 0:
         av = df['A_v_3d'].fillna(0.0)
-        hk_color = hk_color - (0.18 * av)
-        w1w2_color = w1w2_color - (0.05 * av)
+        hk_color = hk_color - (YSO_DUST_CORRECTION_HK * av)
+        w1w2_color = w1w2_color - (YSO_DUST_CORRECTION_W1W2 * av)
     
     df['H_K'] = hk_color 
     df['W1_W2'] = w1w2_color
     
     # Classification
-    class_i = df['W1_W2'] > 0.8
-    class_ii = ((df['W1_W2'] > 0.25) & (df['W1_W2'] < 0.8) & (df['H_K'] > 0.3))
-    trans = ((df['W1_W2'] > 0.25) & (df['W1_W2'] < 0.8) & (df['H_K'] < 0.3))
-    ms = df['W1_W2'] < 0.25
+    class_i = df['W1_W2'] > YSO_CLASS_I_W1W2
+    class_ii = ((df['W1_W2'] > YSO_CLASS_II_W1W2_MIN) & (df['W1_W2'] < YSO_CLASS_I_W1W2) & (df['H_K'] > YSO_CLASS_II_HK))
+    trans = ((df['W1_W2'] > YSO_CLASS_II_W1W2_MIN) & (df['W1_W2'] < YSO_CLASS_I_W1W2) & (df['H_K'] < YSO_CLASS_II_HK))
+    ms = df['W1_W2'] < YSO_CLASS_II_W1W2_MIN
     
     df['yso_class'] = 'unknown'
     df.loc[class_i, 'yso_class'] = 'Class I'
@@ -492,30 +504,30 @@ def estimate_disk_probability(df: pd.DataFrame) -> pd.DataFrame:
     Returns df with column: P_disk
     """
     df = df.copy()
-    df['P_disk'] = 0.1  # Base probability
-    
+    df['P_disk'] = DISK_BASE_P  # Base probability
+
     # Check semimajor axis
     if 'a_circ_au' in df.columns:
-        large_a = df['a_circ_au'] > 2
-        very_large_a = df['a_circ_au'] > 10
-        
-        df.loc[large_a, 'P_disk'] = 0.3
-        df.loc[very_large_a, 'P_disk'] = 0.5
-    
+        large_a = df['a_circ_au'] > DISK_LARGE_A_AU
+        very_large_a = df['a_circ_au'] > DISK_VERY_LARGE_A_AU
+
+        df.loc[large_a, 'P_disk'] = DISK_LARGE_A_P
+        df.loc[very_large_a, 'P_disk'] = DISK_VERY_LARGE_A_P
+
     # Check Hill radius
     if 'hill_radius_rsun' in df.columns:
         large_hill = df['hill_radius_rsun'] > 10
-        df.loc[large_hill, 'P_disk'] += 0.1
-    
+        df.loc[large_hill, 'P_disk'] += DISK_LARGE_HILL_BONUS
+
     # Check WISE upper limits (no hot disk)
     # If W3/W4 not detected, consistent with cool/no disk
     if 'unwise_w1' in df.columns and 'unwise_w2' in df.columns:
-        no_ir_excess = df['W1_W2'] < 0.25 if 'W1_W2' in df.columns else True
+        no_ir_excess = df['W1_W2'] < YSO_CLASS_II_W1W2_MIN if 'W1_W2' in df.columns else True
         if isinstance(no_ir_excess, pd.Series):
-            df.loc[no_ir_excess, 'P_disk'] += 0.1
-    
-    # Cap at 0.8 (never fully certain without RV confirmation)
-    df['P_disk'] = df['P_disk'].clip(upper=0.8)
+            df.loc[no_ir_excess, 'P_disk'] += DISK_NO_IR_EXCESS_BONUS
+
+    # Cap at DISK_P_CAP (never fully certain without RV confirmation)
+    df['P_disk'] = df['P_disk'].clip(upper=DISK_P_CAP)
     
     return df
 
@@ -563,16 +575,16 @@ def compute_all_classifications(df: pd.DataFrame) -> pd.DataFrame:
         df.loc[df['yso_class'] == yc, 'final_class'] = f'YSO ({yc})'
     
     # Contamination flags
-    df.loc[df['P_eb'] > 0.5, 'final_class'] = 'Likely EB'
-    df.loc[df['P_cv'] > 0.5, 'final_class'] = 'Likely CV'
-    df.loc[df['P_starspot'] > 0.5, 'final_class'] = 'Likely Starspot'
-    
+    df.loc[df['P_eb'] > CLASSIFY_EB_THRESHOLD, 'final_class'] = 'Likely EB'
+    df.loc[df['P_cv'] > CLASSIFY_CV_THRESHOLD, 'final_class'] = 'Likely CV'
+    df.loc[df['P_starspot'] > CLASSIFY_STARSPOT_THRESHOLD, 'final_class'] = 'Likely Starspot'
+
     # Disk candidates
-    disk_cand = (df['P_disk'] > 0.4) & (df['final_class'] == 'Unknown Dipper')
+    disk_cand = (df['P_disk'] > CLASSIFY_DISK_THRESHOLD) & (df['final_class'] == 'Unknown Dipper')
     df.loc[disk_cand, 'final_class'] = 'Disk Occultation Candidate'
-    
+
     # Main sequence dippers
-    ms_dipper = (df['yso_class'] == 'Main Sequence') & (df['P_eb'] < 0.3) & (df['P_cv'] < 0.3)
+    ms_dipper = (df['yso_class'] == 'Main Sequence') & (df['P_eb'] < CLASSIFY_MS_EB_REJECTION) & (df['P_cv'] < CLASSIFY_MS_CV_REJECTION)
     df.loc[ms_dipper, 'final_class'] = 'Main Sequence Dipper'
     
     print("Classification complete.")

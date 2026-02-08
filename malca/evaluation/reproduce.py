@@ -28,6 +28,33 @@ from malca.stats import median_dt, compute_stats
 from malca.score import compute_event_score
 from malca.classify import compute_all_classifications
 from malca.characterize import query_gaia_by_ids, get_dust_extinction
+from malca.config.config_pipeline import (
+    WORKERS,
+    LOGBF_THRESHOLD_DIP,
+    LOGBF_THRESHOLD_JUMP,
+    SIGNIFICANCE_THRESHOLD,
+    P_POINTS,
+    MAG_POINTS,
+    MIN_MAG_OFFSET,
+    RUN_MIN_POINTS,
+    RUN_MAX_GAP_POINTS,
+    BASELINE_FUNC,
+    BASELINE_S0,
+    BASELINE_W0,
+    BASELINE_Q,
+    BASELINE_JITTER,
+)
+from malca.config.config_io import REPRODUCE_CHUNK_SIZE
+from malca.config.config_filters import (
+    MIN_TIME_SPAN,
+    MIN_POINTS_PER_DAY,
+    MIN_CAMERAS,
+    VSX_MAX_SEP_ARCSEC,
+    MIN_BAYES_FACTOR,
+    POST_FILTER_MIN_RUN_CAMERAS,
+    POST_FILTER_MIN_RUN_POINTS,
+)
+from malca.config.config_paths import VSX_RAW_CATALOG_PATH
 
 
 
@@ -405,10 +432,10 @@ def plot_light_curve_with_dips(
 
     # Baseline parameters (match the SHO-ish defaults; note baseline function takes q not Q)
     baseline_kwargs = {
-        "S0": 0.0005,
-        "w0": 0.0031415926535897933,
-        "q": 0.7,
-        "jitter": 0.006,
+        "S0": BASELINE_S0,
+        "w0": BASELINE_W0,
+        "q": BASELINE_Q,
+        "jitter": BASELINE_JITTER,
         "sigma_floor": None,
         "add_sigma_eff_col": True,
     }
@@ -609,38 +636,38 @@ def build_reproduction_report(
     out_format: str = "csv",
     plot_format: str = "png",
     n_workers: int | None = None,
-    chunk_size: int = 250000,
+    chunk_size: int = REPRODUCE_CHUNK_SIZE,
     metrics_baseline_func=None,
     metrics_dip_threshold: float = 0.3,
     # Optional posterior threshold passthrough
     significance_threshold: float | None = None,
-    p_points: int = 80,
+    p_points: int = P_POINTS,
     # Log BF triggering
     trigger_mode: str = "logbf",
-    logbf_threshold_dip: float = 5.0,     # trigger if max log BF >= this
-    logbf_threshold_jump: float = 5.0,
+    logbf_threshold_dip: float = LOGBF_THRESHOLD_DIP,     # trigger if max log BF >= this
+    logbf_threshold_jump: float = LOGBF_THRESHOLD_JUMP,
     # Probability grid bounds (matching events.py)
     p_min_dip: float | None = None,
     p_max_dip: float | None = None,
     p_min_jump: float | None = None,
     p_max_jump: float | None = None,
     # Magnitude grid
-    mag_points: int = 12,
+    mag_points: int = MAG_POINTS,
     mag_min_dip: float | None = None,
     mag_max_dip: float | None = None,
     mag_min_jump: float | None = None,
     mag_max_jump: float | None = None,
     # Baseline function
-    baseline_func: str = "gp",            # "gp", "global_median", "per_camera_median"
+    baseline_func: str = BASELINE_FUNC,            # "gp", "global_median", "per_camera_median"
     # Baseline kwargs (GP kernel parameters)
-    baseline_s0: float = 0.0005,
-    baseline_w0: float = 0.0031415926535897933,
-    baseline_q: float = 0.7,
-    baseline_jitter: float = 0.006,
+    baseline_s0: float = BASELINE_S0,
+    baseline_w0: float = BASELINE_W0,
+    baseline_q: float = BASELINE_Q,
+    baseline_jitter: float = BASELINE_JITTER,
     baseline_sigma_floor: float | None = None,
     # Run confirmation filters
-    run_min_points: int = 2,
-    max_gap_points: int = 1,
+    run_min_points: int = RUN_MIN_POINTS,
+    max_gap_points: int = RUN_MAX_GAP_POINTS,
     run_max_gap_days: float | None = None,
     run_min_duration_days: float | None = None,
     skypatrol_dir: Path | str | None = None,
@@ -652,17 +679,17 @@ def build_reproduction_report(
     verbose: bool = False,
     # Filter options
     skip_pre_filters: bool = False,
-    min_time_span: float = 100.0,
-    min_points_per_day: float = 0.05,
-    min_cameras: int = 2,
+    min_time_span: float = MIN_TIME_SPAN,
+    min_points_per_day: float = MIN_POINTS_PER_DAY,
+    min_cameras: int = MIN_CAMERAS,
     skip_vsx: bool = False,
-    vsx_catalog: Path | str = Path("/home/lenhart.106/code/malca/input/vsx/vsxcat.090525.csv"),
-    vsx_max_sep: float = 3.0,
-    min_mag_offset: float = 0.05,
+    vsx_catalog: Path | str = VSX_RAW_CATALOG_PATH,
+    vsx_max_sep: float = VSX_MAX_SEP_ARCSEC,
+    min_mag_offset: float = MIN_MAG_OFFSET,
     run_post_filter: bool = False,
-    post_filter_min_run_cameras: int = 2,
-    post_filter_min_run_points: int = 2,
-    post_filter_min_bayes_factor: float = 10.0,
+    post_filter_min_run_cameras: int = POST_FILTER_MIN_RUN_CAMERAS,
+    post_filter_min_run_points: int = POST_FILTER_MIN_RUN_POINTS,
+    post_filter_min_bayes_factor: float = MIN_BAYES_FACTOR,
     run_postprocess: bool = False,
     max_plots: int | None = None,
     run_enrich: bool = False,
@@ -750,7 +777,7 @@ def build_reproduction_report(
                 vsx_mode="filter",
                 apply_multi_camera=True,
                 min_cameras=min_cameras,
-                n_workers=n_workers or 10,
+                n_workers=n_workers or WORKERS,
                 show_tqdm=verbose,
             )
             
@@ -889,7 +916,7 @@ def build_reproduction_report(
                         dfc,
                         baseline_func=selected_baseline_func,
                         baseline_kwargs=baseline_kwargs_dict,
-                        significance_threshold=float(significance_threshold) if significance_threshold is not None else 99.99997,
+                        significance_threshold=float(significance_threshold) if significance_threshold is not None else SIGNIFICANCE_THRESHOLD,
                         p_points=int(p_points),
                         p_min_dip=p_min_dip,
                         p_max_dip=p_max_dip,
@@ -1980,13 +2007,13 @@ Examples:
     parser.add_argument(
         "--workers",
         type=int,
-        default=10,
+        default=WORKERS,
         help="ProcessPool worker count.",
     )
     parser.add_argument(
         "--chunk-size",
         type=int,
-        default=250000,
+        default=REPRODUCE_CHUNK_SIZE,
         help="Rows per chunk flush for CSV output",
     )
     parser.add_argument(
@@ -2006,19 +2033,19 @@ Examples:
     parser.add_argument(
         "--logbf-threshold-dip",
         type=float,
-        default=5.0,
+        default=LOGBF_THRESHOLD_DIP,
         help="Dip triggers when max per-point log BF >= this.",
     )
     parser.add_argument(
         "--logbf-threshold-jump",
         type=float,
-        default=5.0,
+        default=LOGBF_THRESHOLD_JUMP,
         help="Jump triggers when max per-point log BF >= this.",
     )
     parser.add_argument(
         "--p-points",
         type=int,
-        default=50,
+        default=P_POINTS,
         help="Number of logit-spaced probability grid points",
     )
 
@@ -2052,8 +2079,8 @@ Examples:
     parser.add_argument(
         "--mag-points",
         type=int,
-        default=50,
-        help="Number of points in the magnitude grid (default: 12).",
+        default=MAG_POINTS,
+        help="Number of points in the magnitude grid.",
     )
 
     # Baseline function
@@ -2061,14 +2088,14 @@ Examples:
         "--baseline-func",
         type=str,
         choices=["gp", "global_median", "per_camera_median"],
-        default="gp",
+        default=BASELINE_FUNC,
         help="Baseline function to use: gp (default), global_median, or per_camera_median.",
     )
     # Baseline kwargs (GP kernel parameters)
-    parser.add_argument("--baseline-s0", type=float, default=0.0005, help="GP kernel S0 parameter (default: 0.0005)")
-    parser.add_argument("--baseline-w0", type=float, default=0.0031415926535897933, help="GP kernel w0 parameter (default: pi/1000)")
-    parser.add_argument("--baseline-q", type=float, default=0.7, help="GP kernel Q parameter (default: 0.7)")
-    parser.add_argument("--baseline-jitter", type=float, default=0.006, help="GP jitter term (default: 0.006)")
+    parser.add_argument("--baseline-s0", type=float, default=BASELINE_S0, help="GP kernel S0 parameter (default: 0.0005)")
+    parser.add_argument("--baseline-w0", type=float, default=BASELINE_W0, help="GP kernel w0 parameter (default: pi/1000)")
+    parser.add_argument("--baseline-q", type=float, default=BASELINE_Q, help="GP kernel Q parameter (default: 0.7)")
+    parser.add_argument("--baseline-jitter", type=float, default=BASELINE_JITTER, help="GP jitter term (default: 0.006)")
     parser.add_argument("--baseline-sigma-floor", type=float, default=None, help="Minimum sigma floor (default: None)")
     # Magnitude grid bounds (override auto-detection)
     parser.add_argument("--mag-min-dip", type=float, default=None, help="Min magnitude for dip grid (overrides auto)")
@@ -2080,14 +2107,14 @@ Examples:
     parser.add_argument(
         "--run-min-points",
         type=int,
-        default=2,
+        default=RUN_MIN_POINTS,
         help="Minimum triggered points required to confirm a run (default: 2).",
     )
     parser.add_argument(
         "--run-max-gap-points",
         type=int,
-        default=1,
-        help="Allow this many non-triggered points between triggered points in a run (default: 1).",
+        default=RUN_MAX_GAP_POINTS,
+        help="Allow this many non-triggered points between triggered points in a run.",
     )
     parser.add_argument(
         "--run-max-gap-days",
@@ -2111,19 +2138,19 @@ Examples:
     parser.add_argument(
         "--min-time-span",
         type=float,
-        default=100.0,
+        default=MIN_TIME_SPAN,
         help="Min time span in days for sparse LC filter (default: 100)",
     )
     parser.add_argument(
         "--min-points-per-day",
         type=float,
-        default=0.05,
+        default=MIN_POINTS_PER_DAY,
         help="Min cadence for sparse LC filter (default: 0.05)",
     )
     parser.add_argument(
         "--min-cameras",
         type=int,
-        default=2,
+        default=MIN_CAMERAS,
         help="Min cameras required for multi-camera filter (default: 2)",
     )
     parser.add_argument(
@@ -2134,13 +2161,13 @@ Examples:
     parser.add_argument(
         "--vsx-catalog",
         type=Path,
-        default=Path("input/vsx/vsxcat.090525.csv"),
+        default=VSX_RAW_CATALOG_PATH,
         help="Path to VSX catalog CSV",
     )
     parser.add_argument(
         "--vsx-max-sep",
         type=float,
-        default=3.0,
+        default=VSX_MAX_SEP_ARCSEC,
         help="Max separation for VSX match in arcsec (default: 3.0)",
     )
 
@@ -2148,8 +2175,8 @@ Examples:
     parser.add_argument(
         "--min-mag-offset",
         type=float,
-        default=0.05,
-        help="Min magnitude offset for signal amplitude filter (0 to disable, default: 0.05)",
+        default=MIN_MAG_OFFSET,
+        help="Min magnitude offset for signal amplitude filter (0 to disable)",
     )
 
     # Post-processing options
@@ -2188,19 +2215,19 @@ Examples:
     parser.add_argument(
         "--min-bayes-factor",
         type=float,
-        default=10.0,
+        default=MIN_BAYES_FACTOR,
         help="Min Bayes factor for post-filter (default: 10.0)",
     )
     parser.add_argument(
         "--post-filter-min-run-cameras",
         type=int,
-        default=2,
+        default=POST_FILTER_MIN_RUN_CAMERAS,
         help="Min cameras for run robustness filter (default: 2)",
     )
     parser.add_argument(
         "--post-filter-min-run-points",
         type=int,
-        default=2,
+        default=POST_FILTER_MIN_RUN_POINTS,
         help="Min points per run for robustness filter (default: 2)",
     )
     parser.add_argument(

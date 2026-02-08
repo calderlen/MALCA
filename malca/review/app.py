@@ -29,10 +29,12 @@ from malca.review.store import (
     save_review,
 )
 from malca.review.metadata import extract_review_metadata
+from malca.config.config_paths import VSX_CROSSMATCH_PATH, GAIA_CACHE_FILE
+from malca.config.config_characterize import GAIA_CHUNK_SIZE
 
 
-DEFAULT_XMATCH = "input/vsx/asassn_x_vsx_matches_20250919_2252.csv"
-DEFAULT_GAIA_CACHE = "output/gaia_cache.parquet"
+DEFAULT_XMATCH = str(VSX_CROSSMATCH_PATH)
+DEFAULT_GAIA_CACHE = str(GAIA_CACHE_FILE)
 
 
 def main() -> None:
@@ -51,7 +53,7 @@ def main() -> None:
     st.sidebar.markdown("**Characterize on import**")
     characterize_crossmatch = st.sidebar.text_input("Crossmatch CSV", value=DEFAULT_XMATCH)
     characterize_cache = st.sidebar.text_input("Gaia cache", value=DEFAULT_GAIA_CACHE)
-    characterize_chunk_size = st.sidebar.number_input("Gaia chunk size", min_value=1, value=1000, step=100)
+    characterize_chunk_size = st.sidebar.number_input("Gaia chunk size", min_value=1, value=GAIA_CHUNK_SIZE, step=100)
     characterize_dust = st.sidebar.checkbox("Enable dustmaps3d", value=True)
     characterize_starhorse = st.sidebar.text_input("StarHorse", value="tap")
 

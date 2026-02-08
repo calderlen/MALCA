@@ -47,7 +47,15 @@ from malca.baseline import (
 )
 from malca.score import compute_event_score
 from malca.stats import log_gaussian, median_dt, bic
-from malca.config.config_parquet import PARQUET_OUTPUT_COMPRESSION
+from malca.config.config_io import PARQUET_OUTPUT_COMPRESSION, OUTPUT_FORMAT, EVENTS_OUTPUT_CHUNK_SIZE
+from malca.config.config_paths import LCV2_ROOT
+from malca.config.config_pipeline import (
+    WORKERS, TRIGGER_MODE, P_POINTS, MAG_POINTS,
+    LOGBF_THRESHOLD_DIP, LOGBF_THRESHOLD_JUMP, SIGNIFICANCE_THRESHOLD,
+    MIN_MAG_OFFSET, RUN_MIN_POINTS, RUN_MAX_GAP_POINTS,
+    BASELINE_FUNC, BASELINE_S0, BASELINE_W0, BASELINE_Q, BASELINE_JITTER,
+)
+from malca.config.config_filters import BAD_CAMERA_SCATTER_RATIO_THRESHOLD
 
 from numba import njit, prange
 
@@ -57,10 +65,10 @@ MAG_BINS = ['12_12.5', '12.5_13', '13_13.5', '13.5_14', '14_14.5', '14.5_15']
 EventKind: TypeAlias = Literal["dip", "jump"]
 
 DEFAULT_BASELINE_KWARGS = dict(
-    S0=0.0005,
-    w0=0.0031415926535897933,
-    q=0.7,
-    jitter=0.006,
+    S0=BASELINE_S0,
+    w0=BASELINE_W0,
+    q=BASELINE_Q,
+    jitter=BASELINE_JITTER,
     sigma_floor=None,
     add_sigma_eff_col=True,
 )
@@ -1296,16 +1304,16 @@ def main():
     parser = argparse.ArgumentParser(description="Run Bayesian event scoring on light curves in parallel.")
     parser.add_argument("--input", dest="input_patterns", nargs="*", default=None, help="Paths or globs to light-curve files (repeatable).")
     parser.add_argument("--mag-bin", dest="mag_bins", action="append", choices=MAG_BINS, help="Process all light curves in this magnitude bin (choices: 12_12.5, 12.5_13, 13_13.5, 13.5_14, 14_14.5, 14.5_15).")
-    parser.add_argument("--lc-path", type=str, default="/data/poohbah/1/assassin/rowan.90/lcsv2", help="Base path to light curve directories")
-    parser.add_argument("--workers", type=int, default=10, help="Number of worker processes")
-    parser.add_argument("--trigger-mode", type=str, default="posterior_prob", choices=["logbf", "posterior_prob"], help="Triggering mode: logbf = per-point log Bayes factor threshold; posterior_prob = posterior probability threshold (requires event probs).")
-    parser.add_argument("--logbf-threshold-dip", type=float, default=5.0, help="Per-point dip trigger")
-    parser.add_argument("--logbf-threshold-jump", type=float, default=5.0, help="Per-point jump trigger")
-    parser.add_argument("--significance-threshold", type=float, default=99.99997, help="Only used if --trigger-mode posterior_prob")
-    parser.add_argument("--p-points", type=int, default=12, help="Number of points in the p grid")
-    parser.add_argument("--mag-points", type=int, default=12, help="Number of points in the magnitude grid")
-    parser.add_argument("--run-min-points", type=int, default=2, help="Min triggered points in a run")
-    parser.add_argument("--run-max-gap-points", type=int, default=1, help="Allow up to this many missing indices inside a run")
+    parser.add_argument("--lc-path", type=str, default=str(LCV2_ROOT), help="Base path to light curve directories")
+    parser.add_argument("--workers", type=int, default=WORKERS, help="Number of worker processes")
+    parser.add_argument("--trigger-mode", type=str, default=TRIGGER_MODE, choices=["logbf", "posterior_prob"], help="Triggering mode: logbf = per-point log Bayes factor threshold; posterior_prob = posterior probability threshold (requires event probs).")
+    parser.add_argument("--logbf-threshold-dip", type=float, default=LOGBF_THRESHOLD_DIP, help="Per-point dip trigger")
+    parser.add_argument("--logbf-threshold-jump", type=float, default=LOGBF_THRESHOLD_JUMP, help="Per-point jump trigger")
+    parser.add_argument("--significance-threshold", type=float, default=SIGNIFICANCE_THRESHOLD, help="Only used if --trigger-mode posterior_prob")
+    parser.add_argument("--p-points", type=int, default=P_POINTS, help="Number of points in the p grid")
+    parser.add_argument("--mag-points", type=int, default=MAG_POINTS, help="Number of points in the magnitude grid")
+    parser.add_argument("--run-min-points", type=int, default=RUN_MIN_POINTS, help="Min triggered points in a run")
+    parser.add_argument("--run-max-gap-points", type=int, default=RUN_MAX_GAP_POINTS, help="Allow up to this many missing indices inside a run")
     parser.add_argument("--run-max-gap-days", type=float, default=None, help="Break runs if JD gap exceeds this")
     parser.add_argument("--run-min-duration-days", type=float, default=0.0, help="Require run duration >= this (default: 0.0 = disabled)")
     parser.add_argument("--no-event-prob", action="store_true", help="Skip LOO event responsibilities")
@@ -1316,15 +1324,15 @@ def main():
     parser.add_argument(
         "--baseline-func",
         type=str,
-        default="gp",
+        default=BASELINE_FUNC,
         choices=["gp", "gp_masked", "global_median", "per_camera_median"],
         help="Baseline function to use",
     )
     # Baseline kwargs (GP kernel parameters)
-    parser.add_argument("--baseline-s0", type=float, default=0.0005, help="GP kernel S0 parameter (default: 0.0005)")
-    parser.add_argument("--baseline-w0", type=float, default=0.0031415926535897933, help="GP kernel w0 parameter (default: pi/1000)")
-    parser.add_argument("--baseline-q", type=float, default=0.7, help="GP kernel Q parameter (default: 0.7)")
-    parser.add_argument("--baseline-jitter", type=float, default=0.006, help="GP jitter term (default: 0.006)")
+    parser.add_argument("--baseline-s0", type=float, default=BASELINE_S0, help="GP kernel S0 parameter (default: 0.0005)")
+    parser.add_argument("--baseline-w0", type=float, default=BASELINE_W0, help="GP kernel w0 parameter (default: pi/1000)")
+    parser.add_argument("--baseline-q", type=float, default=BASELINE_Q, help="GP kernel Q parameter (default: 0.7)")
+    parser.add_argument("--baseline-jitter", type=float, default=BASELINE_JITTER, help="GP jitter term (default: 0.006)")
     parser.add_argument("--baseline-sigma-floor", type=float, default=None, help="Minimum sigma floor (default: None)")
     # Magnitude grid bounds (override auto-detection)
     parser.add_argument("--mag-min-dip", type=float, default=None, help="Min magnitude for dip grid (overrides auto)")
@@ -1333,12 +1341,12 @@ def main():
     parser.add_argument("--mag-max-jump", type=float, default=None, help="Max magnitude for jump grid (overrides auto)")
     # Bad camera filtering
     parser.add_argument("--no-filter-bad-cameras", dest="filter_bad_cameras", action="store_false", help="Disable auto-filtering of cameras with anomalously high scatter (enabled by default)")
-    parser.add_argument("--bad-camera-scatter-ratio", type=float, default=2.5, help="Scatter ratio threshold for bad camera filtering (default: 2.5)")
-    parser.add_argument("--min-mag-offset", type=float, default=0.1, help="Apply signal amplitude filter: require |event_mag - baseline_mag| > threshold (e.g., 0.05)")
+    parser.add_argument("--bad-camera-scatter-ratio", type=float, default=BAD_CAMERA_SCATTER_RATIO_THRESHOLD, help="Scatter ratio threshold for bad camera filtering (default: 2.5)")
+    parser.add_argument("--min-mag-offset", type=float, default=MIN_MAG_OFFSET, help="Apply signal amplitude filter: require |event_mag - baseline_mag| > threshold (e.g., 0.05)")
     parser.add_argument("--output", type=str, default=None, help="Output path for results (suffix adjusted per format).")
     parser.add_argument("--metadata-csv", type=str, default=None, help="Optional CSV with 'path' and extra metadata columns to attach to results.")
-    parser.add_argument("--output-format", type=str, default="parquet", choices=["csv", "parquet", "parquet_chunk"], help="Output format for results.")
-    parser.add_argument("--chunk-size", type=int, default=10000, help="Write results in chunks of this many rows.")
+    parser.add_argument("--output-format", type=str, default=OUTPUT_FORMAT, choices=["csv", "parquet", "parquet_chunk"], help="Output format for results.")
+    parser.add_argument("--chunk-size", type=int, default=EVENTS_OUTPUT_CHUNK_SIZE, help="Write results in chunks of this many rows.")
     parser.add_argument("-o", "--overwrite", action="store_true", help="Overwrite checkpoint log and existing output if present (start fresh).")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output (default: quiet).")
     parser.add_argument("--quiet", action="store_true", help=argparse.SUPPRESS)

@@ -39,6 +39,22 @@ from astropy.table import Table
 from astropy.timeseries import LombScargle
 from tqdm import tqdm
 
+from malca.config.config_ltv import (
+    LTV_DSPRING,
+    LTV_MAX_SEASONS,
+    LTV_MIN_POINTS_PER_SEASON,
+    LTV_MIN_SEASONS_FOR_QUADRATIC,
+    LTV_CORE_CHUNK_SIZE,
+    LTV_DIR_START,
+    LTV_DIR_END,
+    LTV_WORKERS,
+    LTV_LS_MIN_PERIOD_DAYS,
+    LTV_LS_MAX_PERIOD_DAYS,
+    LTV_LS_FAP_THRESHOLD,
+    LTV_LS_SAMPLES_PER_PEAK,
+)
+from malca.config.config_paths import LCV2_ROOT
+from malca.config.config_io import PARQUET_OUTPUT_COMPRESSION
 from malca.utils import read_lc_dat2, read_lc_csv, clean_lc
 
 from malca.ltv.optim import (
@@ -76,8 +92,8 @@ class Config:
 def parse_args() -> Config:
     p = argparse.ArgumentParser(prog="ltv", description="Compute seasonal trends for ASAS-SN light curves.")
 
-    p.add_argument("--root", 
-                   default="/data/poohbah/1/assassin/rowan.90/lcsv2/", 
+    p.add_argument("--root",
+                   default=str(LCV2_ROOT),
                    type=str)
     p.add_argument("--mag-bin", 
                    default="13_13.5", 
@@ -88,35 +104,35 @@ def parse_args() -> Config:
                    default=None, 
                    type=str, 
                    help="Combined output CSV (default: LTvar<MAG>.csv)")
-    p.add_argument("--dir-start", 
-                   type=int, 
-                   default=0)
-    p.add_argument("--dir-end", 
-                   type=int, 
-                   default=30)
+    p.add_argument("--dir-start",
+                   type=int,
+                   default=LTV_DIR_START)
+    p.add_argument("--dir-end",
+                   type=int,
+                   default=LTV_DIR_END)
     # Preserve constants/behavior
-    p.add_argument("--dspring", 
-                   type=float, 
-                   default=2460023.5)
+    p.add_argument("--dspring",
+                   type=float,
+                   default=LTV_DSPRING)
     p.add_argument("--ra-is-deg",
                     action="store_true",
                     help="Convert ID['ra_deg'] from degrees to hours before the dspring formula.")
     p.add_argument("--max-seasons",
                    type=int,
-                   default=12)
+                   default=LTV_MAX_SEASONS)
     p.add_argument("--n-midpoints", 
                    type=int, 
                    default=None, 
                    help="How many yearly midpoints to generate before filtering to data range (default: dir_end+1, like the snippet).",
     )
-    p.add_argument("--min-points-per-season", 
-                   type=int, 
-                   default=1, 
+    p.add_argument("--min-points-per-season",
+                   type=int,
+                   default=LTV_MIN_POINTS_PER_SEASON,
                    help="Treat seasons with < this many points as empty. (The snippet mostly uses 0, sometimes <=1; default 1 is safest.)",
     )
-    p.add_argument("--min-seasons-for-quadratic", 
-                   type=int, 
-                   default=3, 
+    p.add_argument("--min-seasons-for-quadratic",
+                   type=int,
+                   default=LTV_MIN_SEASONS_FOR_QUADRATIC,
                    help="Need at least this many non-empty seasons to do degree-2 polyfit (default 3).",
     )
     p.add_argument("--write-per-dir",
@@ -125,12 +141,12 @@ def parse_args() -> Config:
     )
     p.add_argument("--workers",
                    type=int,
-                   default=10,
+                   default=LTV_WORKERS,
                    help="Number of parallel workers (default: 10)")
     p.add_argument("--chunk-size",
                    type=int,
-                   default=10000,
-                   help="Number of results to accumulate before writing (default: 1000)")
+                   default=LTV_CORE_CHUNK_SIZE,
+                   help="Number of results to accumulate before writing (default: 10000)")
     p.add_argument("--output-format",
                    type=str,
                    default="csv",
@@ -397,10 +413,10 @@ def compute_lomb_scargle(
     quad_coeff: tuple[float, float, float] | None = None,
     detrend_mode: str = "linear",
     intercept: float | None = None,
-    min_period_days: float = 10.0,
-    max_period_days: float = 1000.0,
+    min_period_days: float = LTV_LS_MIN_PERIOD_DAYS,
+    max_period_days: float = LTV_LS_MAX_PERIOD_DAYS,
     fap_threshold: float | None = None,
-    samples_per_peak: int = 5,
+    samples_per_peak: int = LTV_LS_SAMPLES_PER_PEAK,
 ) -> dict:
     """
     Compute Lomb-Scargle periodogram on detrended light curve.
@@ -564,16 +580,16 @@ def process_one_lc(
     # Compute Lomb-Scargle on detrended light curve (paper: periods > 10 days)
     err = df["error"].to_numpy(dtype=float) if "error" in df.columns else None
     detrend_mode = "quadratic" if quad_coeff is not None else "linear"
-    max_period_days = avg_season_span_days if avg_season_span_days is not None else 1000.0
+    max_period_days = avg_season_span_days if avg_season_span_days is not None else LTV_LS_MAX_PERIOD_DAYS
     ls_result = compute_lomb_scargle(
         JD, mag, err,
         lin_coeff=lin_coeff,
         quad_coeff=quad_coeff,
         detrend_mode=detrend_mode,
         intercept=lc_median,
-        min_period_days=10.0,
+        min_period_days=LTV_LS_MIN_PERIOD_DAYS,
         max_period_days=max_period_days,
-        fap_threshold=0.1,
+        fap_threshold=LTV_LS_FAP_THRESHOLD,
     )
 
     return {
@@ -645,7 +661,7 @@ class ParquetChunkWriter:
         df_chunk = pd.DataFrame(chunk_results)
         table = pa.Table.from_pandas(df_chunk, preserve_index=False)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        pq.write_table(table, self.path, compression="zstd", append=self.append)
+        pq.write_table(table, self.path, compression=PARQUET_OUTPUT_COMPRESSION, append=self.append)
         self.append = True
 
     def close(self):
@@ -673,7 +689,7 @@ class ParquetDatasetWriter:
         table = pa.Table.from_pandas(df_chunk, preserve_index=False)
         tmp_path = self.path / f"chunk_{self.counter:06d}.parquet.tmp"
         final_path = self.path / f"chunk_{self.counter:06d}.parquet"
-        pq.write_table(table, tmp_path, compression="zstd")
+        pq.write_table(table, tmp_path, compression=PARQUET_OUTPUT_COMPRESSION)
         os.replace(tmp_path, final_path)
         self.counter += 1
 

@@ -18,6 +18,8 @@ from typing import Literal
 import pandas as pd
 import numpy as np
 
+from malca.config.config_filters import VSX_MAX_SEP_ARCSEC
+
 
 # Default validation candidates (Brayden's list)
 DEFAULT_CANDIDATES = [
@@ -58,7 +60,7 @@ def validate_detections(
     candidates_df: pd.DataFrame,
     *,
     id_column: str = "source_id",
-    match_tolerance_arcsec: float = 3.0,
+    match_tolerance_arcsec: float = VSX_MAX_SEP_ARCSEC,
     event_type: Literal["dip", "jump", "either"] = "dip",
     significance_column: str | None = None,
 ) -> dict:

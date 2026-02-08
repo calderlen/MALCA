@@ -21,6 +21,8 @@ import pandas as pd
 import numpy as np
 from tqdm.auto import tqdm
 
+from malca.config.config_pipeline import MIN_MAG_OFFSET
+
 
 def log_rejections(
     df_before: pd.DataFrame,
@@ -59,7 +61,7 @@ def log_rejections(
 def filter_signal_amplitude(
     df: pd.DataFrame,
     *,
-    min_mag_offset: float = 0.05,
+    min_mag_offset: float = MIN_MAG_OFFSET,
     show_tqdm: bool = False,
     rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
@@ -100,7 +102,7 @@ def main() -> None:
     )
     parser.add_argument("--input", type=Path, required=True, help="Input CSV/Parquet")
     parser.add_argument("--output", type=Path, required=True, help="Output CSV/Parquet")
-    parser.add_argument("--min-mag-offset", type=float, default=0.05, help="Minimum |event-baseline| mag")
+    parser.add_argument("--min-mag-offset", type=float, default=MIN_MAG_OFFSET, help="Minimum |event-baseline| mag")
     parser.add_argument("--rejected-log-csv", type=Path, default=None, help="Optional rejection log CSV")
     parser.add_argument("--no-tqdm", action="store_true", help="Disable progress output")
     args = parser.parse_args()

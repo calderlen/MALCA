@@ -39,7 +39,24 @@ from malca.stats import compute_stats
 from malca.characterize import characterize_candidates_df
 from malca.enrich.neighbor import run_neighbor_enrichment
 from malca.enrich.spectra import run_spectra_availability
-from malca.config.config_parquet import PARQUET_OUTPUT_COMPRESSION
+from malca.config.config_io import PARQUET_OUTPUT_COMPRESSION
+from malca.config.config_paths import LCV2_ROOT, VSX_CROSSMATCH_PATH
+from malca.config.config_pipeline import (
+    WORKERS, BATCH_SIZE, TRIGGER_MODE, P_POINTS, MAG_POINTS,
+    LOGBF_THRESHOLD_DIP, LOGBF_THRESHOLD_JUMP, SIGNIFICANCE_THRESHOLD,
+    MIN_MAG_OFFSET, RUN_MIN_POINTS, RUN_MAX_GAP_POINTS,
+    BASELINE_FUNC, BASELINE_S0, BASELINE_W0, BASELINE_Q, BASELINE_JITTER,
+)
+from malca.config.config_io import OUTPUT_FORMAT, EVENTS_OUTPUT_CHUNK_SIZE
+from malca.config.config_filters import (
+    MIN_TIME_SPAN, MIN_POINTS_PER_DAY, MIN_CAMERAS,
+    VSX_MAX_SEP_ARCSEC, VSX_MODE, CAMERA_MEDIAN_TOLERANCE, STATS_CHUNK_SIZE,
+    MIN_BAYES_FACTOR, POST_FILTER_MIN_RUN_CAMERAS, POST_FILTER_MIN_RUN_POINTS,
+)
+from malca.config.config_characterize import (
+    GAIA_CHUNK_SIZE, NEIGHBOR_RADIUS_ARCSEC, NEIGHBOR_CHUNK_SIZE,
+    SPECTRA_RADIUS_ARCSEC, SPECTRA_CHUNK_SIZE,
+)
 from malca.utils import log as _log
 
 
@@ -157,9 +174,9 @@ def main():
 
     # Manifest/pre-filter args
     parser.add_argument("--mag-bin", required=True, nargs="+", help="Magnitude bin(s) to process")
-    parser.add_argument("--index-root", type=Path, default=Path("/data/poohbah/1/assassin/rowan.90/lcsv2"),
+    parser.add_argument("--index-root", type=Path, default=LCV2_ROOT,
                         help="Index root directory (contains mag_bin/index*.csv)")
-    parser.add_argument("--lc-root", type=Path, default=Path("/data/poohbah/1/assassin/rowan.90/lcsv2"),
+    parser.add_argument("--lc-root", type=Path, default=LCV2_ROOT,
                         help="Light curve root directory (contains mag_bin/lc*_cal/)")
     parser.add_argument("--manifest-file", type=Path, default=None,
                         help="Manifest file (default: lc_manifest_{mag_bin}.parquet)")
@@ -171,32 +188,32 @@ def main():
                         help="Force re-run pre-filters even if filtered file exists")
 
     # Pre-filter args
-    parser.add_argument("--min-time-span", type=float, default=100.0, help="Min time span (days)")
-    parser.add_argument("--min-points-per-day", type=float, default=0.05, help="Min cadence")
-    parser.add_argument("--min-cameras", type=int, default=2, help="Min cameras required")
+    parser.add_argument("--min-time-span", type=float, default=MIN_TIME_SPAN, help="Min time span (days)")
+    parser.add_argument("--min-points-per-day", type=float, default=MIN_POINTS_PER_DAY, help="Min cadence")
+    parser.add_argument("--min-cameras", type=int, default=MIN_CAMERAS, help="Min cameras required")
     parser.add_argument("--skip-sparse", action="store_true", help="Skip sparse LC filter")
     parser.add_argument("--skip-multi-camera", action="store_true", help="Skip multi-camera filter")
     parser.add_argument("--skip-vsx", action="store_true", help="Skip VSX crossmatch/tagging")
     parser.add_argument("--skip-camera-median", action="store_true", help="Skip camera median filter (identifies cameras to exclude from .raw2 files)")
-    parser.add_argument("--camera-median-tolerance", type=float, default=0.2, help="Tolerance beyond mag bin for camera median filter (default: 0.2 mag)")
-    parser.add_argument("--vsx-max-sep", type=float, default=3.0, help="Max separation for VSX match (arcsec)")
-    parser.add_argument("--vsx-mode", type=str, default="tag", choices=["tag", "filter"], help="VSX handling: tag adds vsx_sep_arcsec/vsx_class columns, filter removes matches (default: tag)")
-    parser.add_argument("--vsx-crossmatch", type=Path, default=Path("input/vsx/asassn_x_vsx_matches_20250919_2252.csv"), help="Path to pre-crossmatched VSX CSV (with asas_sn_id, vsx_sep_arcsec, vsx_class)")
+    parser.add_argument("--camera-median-tolerance", type=float, default=CAMERA_MEDIAN_TOLERANCE, help="Tolerance beyond mag bin for camera median filter (default: 0.2 mag)")
+    parser.add_argument("--vsx-max-sep", type=float, default=VSX_MAX_SEP_ARCSEC, help="Max separation for VSX match (arcsec)")
+    parser.add_argument("--vsx-mode", type=str, default=VSX_MODE, choices=["tag", "filter"], help="VSX handling: tag adds vsx_sep_arcsec/vsx_class columns, filter removes matches (default: tag)")
+    parser.add_argument("--vsx-crossmatch", type=Path, default=VSX_CROSSMATCH_PATH, help="Path to pre-crossmatched VSX CSV (with asas_sn_id, vsx_sep_arcsec, vsx_class)")
     parser.add_argument("--pass-all-prefilters", action="store_true", help="Pass all light curves to events.py regardless of pre-filter results (tags are still added)")
     parser.add_argument("--enforce-filters", type=str, default=None, help="Comma-separated list of pre-filters to enforce (e.g., 'sparse,multi_camera'). " "Only rows failing these filters are excluded. Default: enforce all enabled filters.")
-    parser.add_argument("--workers", type=int, default=10, help="Workers for parallel processing")
-    parser.add_argument("--stats-chunk-size", type=int, default=5000, help="Rows per checkpoint save during stats computation")
-    parser.add_argument("--batch-size", type=int, default=2000, help="Max light curves per events.py call")
+    parser.add_argument("--workers", type=int, default=WORKERS, help="Workers for parallel processing")
+    parser.add_argument("--stats-chunk-size", type=int, default=STATS_CHUNK_SIZE, help="Rows per checkpoint save during stats computation")
+    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE, help="Max light curves per events.py call")
 
     # events.py args
-    parser.add_argument("--trigger-mode", type=str, default="posterior_prob", choices=["logbf", "posterior_prob"], help="Triggering mode")
-    parser.add_argument("--logbf-threshold-dip", type=float, default=5.0, help="Per-point dip trigger threshold")
-    parser.add_argument("--logbf-threshold-jump", type=float, default=5.0, help="Per-point jump trigger threshold")
-    parser.add_argument("--significance-threshold", type=float, default=99.99997, help="Posterior probability threshold (if trigger-mode=posterior_prob)")
-    parser.add_argument("--p-points", type=int, default=12, help="Number of points in the p grid")
-    parser.add_argument("--mag-points", type=int, default=12, help="Number of points in the magnitude grid")
-    parser.add_argument("--run-min-points", type=int, default=2, help="Min triggered points in a run")
-    parser.add_argument("--run-max-gap-points", type=int, default=5, help="Allow up to this many missing indices inside a run")
+    parser.add_argument("--trigger-mode", type=str, default=TRIGGER_MODE, choices=["logbf", "posterior_prob"], help="Triggering mode")
+    parser.add_argument("--logbf-threshold-dip", type=float, default=LOGBF_THRESHOLD_DIP, help="Per-point dip trigger threshold")
+    parser.add_argument("--logbf-threshold-jump", type=float, default=LOGBF_THRESHOLD_JUMP, help="Per-point jump trigger threshold")
+    parser.add_argument("--significance-threshold", type=float, default=SIGNIFICANCE_THRESHOLD, help="Posterior probability threshold (if trigger-mode=posterior_prob)")
+    parser.add_argument("--p-points", type=int, default=P_POINTS, help="Number of points in the p grid")
+    parser.add_argument("--mag-points", type=int, default=MAG_POINTS, help="Number of points in the magnitude grid")
+    parser.add_argument("--run-min-points", type=int, default=RUN_MIN_POINTS, help="Min triggered points in a run")
+    parser.add_argument("--run-max-gap-points", type=int, default=RUN_MAX_GAP_POINTS, help="Allow up to this many missing indices inside a run")
     parser.add_argument("--run-max-gap-days", type=float, default=None, help="Break runs if JD gap exceeds this")
     parser.add_argument("--run-min-duration-days", type=float, default=0.0, help="Require run duration >= this (default: 0.0 = disabled)")
     parser.add_argument("--no-event-prob", action="store_true", help="Skip LOO event responsibilities")
@@ -207,26 +224,26 @@ def main():
     parser.add_argument(
         "--baseline-func",
         type=str,
-        default="gp",
+        default=BASELINE_FUNC,
         choices=["gp", "gp_masked", "global_median", "per_camera_median"],
         help="Baseline function",
     )
     # Baseline kwargs (GP kernel parameters)
-    parser.add_argument("--baseline-s0", type=float, default=0.0005, help="GP kernel S0 parameter (default: 0.0005)")
-    parser.add_argument("--baseline-w0", type=float, default=0.0031415926535897933, help="GP kernel w0 parameter (default: pi/1000)")
-    parser.add_argument("--baseline-q", type=float, default=0.7, help="GP kernel Q parameter (default: 0.7)")
-    parser.add_argument("--baseline-jitter", type=float, default=0.006, help="GP jitter term (default: 0.006)")
+    parser.add_argument("--baseline-s0", type=float, default=BASELINE_S0, help="GP kernel S0 parameter (default: 0.0005)")
+    parser.add_argument("--baseline-w0", type=float, default=BASELINE_W0, help="GP kernel w0 parameter (default: pi/1000)")
+    parser.add_argument("--baseline-q", type=float, default=BASELINE_Q, help="GP kernel Q parameter (default: 0.7)")
+    parser.add_argument("--baseline-jitter", type=float, default=BASELINE_JITTER, help="GP jitter term (default: 0.006)")
     parser.add_argument("--baseline-sigma-floor", type=float, default=None, help="Minimum sigma floor (default: None)")
     # Magnitude grid bounds (override auto-detection)
     parser.add_argument("--mag-min-dip", type=float, default=None, help="Min magnitude for dip grid (overrides auto)")
     parser.add_argument("--mag-max-dip", type=float, default=None, help="Max magnitude for dip grid (overrides auto)")
     parser.add_argument("--mag-min-jump", type=float, default=None, help="Min magnitude for jump grid (overrides auto)")
     parser.add_argument("--mag-max-jump", type=float, default=None, help="Max magnitude for jump grid (overrides auto)")
-    parser.add_argument("--min-mag-offset", type=float, default=0.1, help="Require |event_mag - baseline_mag| > threshold")
+    parser.add_argument("--min-mag-offset", type=float, default=MIN_MAG_OFFSET, help="Require |event_mag - baseline_mag| > threshold")
     parser.add_argument("--output", type=str, default=None, help="Output path for results (default: <out_dir>/lc_events_results.parquet)")
     parser.add_argument("--out-dir", type=str, default=None, help="Directory for all outputs (default: output/runs/<timestamp>)")
-    parser.add_argument("--output-format", type=str, default="parquet", choices=["csv", "parquet", "parquet_chunk"], help="Output format")
-    parser.add_argument("--chunk-size", type=int, default=10000, help="Write results in chunks of this many rows")
+    parser.add_argument("--output-format", type=str, default=OUTPUT_FORMAT, choices=["csv", "parquet", "parquet_chunk"], help="Output format")
+    parser.add_argument("--chunk-size", type=int, default=EVENTS_OUTPUT_CHUNK_SIZE, help="Write results in chunks of this many rows")
     parser.add_argument(
         "--stage",
         type=str,
@@ -240,9 +257,9 @@ def main():
     # Step 5: Post-filter args (enabled by default)
     parser.add_argument("--run-post-filter", dest="run_post_filter", action="store_true", help="Run post_filter after events.py completes (default: enabled)")
     parser.add_argument("--no-run-post-filter", dest="run_post_filter", action="store_false", help="Skip post-filter step")
-    parser.add_argument("--min-bayes-factor", type=float, default=10.0, help="Min Bayes factor for post-filter (default: 10.0)")
-    parser.add_argument("--post-filter-min-run-cameras", type=int, default=2, help="Min cameras for run robustness filter (default: 2)")
-    parser.add_argument("--post-filter-min-run-points", type=int, default=2, help="Min points per run for robustness filter (default: 2)")
+    parser.add_argument("--min-bayes-factor", type=float, default=MIN_BAYES_FACTOR, help="Min Bayes factor for post-filter (default: 10.0)")
+    parser.add_argument("--post-filter-min-run-cameras", type=int, default=POST_FILTER_MIN_RUN_CAMERAS, help="Min cameras for run robustness filter (default: 2)")
+    parser.add_argument("--post-filter-min-run-points", type=int, default=POST_FILTER_MIN_RUN_POINTS, help="Min points per run for robustness filter (default: 2)")
 
     # Step 6: Postprocess args (enabled by default)
     parser.add_argument("--run-postprocess", dest="run_postprocess", action="store_true", help="Run postprocess (generate plots) after post_filter (default: enabled)")
@@ -254,8 +271,8 @@ def main():
     parser.add_argument("--run-characterize", dest="run_characterize", action="store_true", help="Run Gaia DR3 characterization after post_filter (default: enabled)")
     parser.add_argument("--no-run-characterize", dest="run_characterize", action="store_false", help="Skip characterization step")
     parser.add_argument("--gaia-cache", type=Path, default=None, help="Path to Gaia query cache file (parquet). Default: <out_dir>/gaia_cache/gaia_cache.parquet")
-    parser.add_argument("--characterize-crossmatch", type=Path, default=Path("input/vsx/asassn_x_vsx_matches_20250919_2252.csv"), help="ASAS-SN x VSX crossmatch file for characterize step")
-    parser.add_argument("--characterize-chunk-size", type=int, default=1000, help="Gaia query chunk size for characterize step")
+    parser.add_argument("--characterize-crossmatch", type=Path, default=VSX_CROSSMATCH_PATH, help="ASAS-SN x VSX crossmatch file for characterize step")
+    parser.add_argument("--characterize-chunk-size", type=int, default=GAIA_CHUNK_SIZE, help="Gaia query chunk size for characterize step")
     parser.add_argument("--characterize-starhorse", type=str, default="tap", help="StarHorse mode/path for characterize step (default: tap)")
     parser.add_argument("--no-characterize-banyan", dest="characterize_banyan", action="store_false", help="Disable BANYAN Sigma enrichment in characterize step")
     parser.add_argument("--no-characterize-iphas", dest="characterize_iphas", action="store_false", help="Disable IPHAS enrichment in characterize step")
@@ -277,15 +294,15 @@ def main():
     # Step 10: Neighbor enrichment args (enabled by default)
     parser.add_argument("--run-neighbor-enrich", dest="run_neighbor_enrich", action="store_true", help="Bulk neighbor enrichment for passing candidates (default: enabled)")
     parser.add_argument("--no-run-neighbor-enrich", dest="run_neighbor_enrich", action="store_false", help="Skip neighbor enrichment step")
-    parser.add_argument("--neighbor-radius-arcsec", type=float, default=15.0, help="Neighbor search radius in arcsec (default: 15)")
-    parser.add_argument("--neighbor-chunk-size", type=int, default=2000, help="Bulk chunk size for neighbor lookups")
+    parser.add_argument("--neighbor-radius-arcsec", type=float, default=NEIGHBOR_RADIUS_ARCSEC, help="Neighbor search radius in arcsec (default: 15)")
+    parser.add_argument("--neighbor-chunk-size", type=int, default=NEIGHBOR_CHUNK_SIZE, help="Bulk chunk size for neighbor lookups")
     parser.add_argument("--neighbor-cache", type=Path, default=None, help="Optional cache parquet path for neighbor lookups")
 
     # Step 11: Spectra availability args (enabled by default)
     parser.add_argument("--run-spectra-enrich", dest="run_spectra_enrich", action="store_true", help="Bulk spectra-availability enrichment for passing candidates (default: enabled)")
     parser.add_argument("--no-run-spectra-enrich", dest="run_spectra_enrich", action="store_false", help="Skip spectra enrichment step")
-    parser.add_argument("--spectra-radius-arcsec", type=float, default=3.0, help="Spectra crossmatch radius in arcsec (default: 3)")
-    parser.add_argument("--spectra-chunk-size", type=int, default=2000, help="Bulk chunk size for spectra lookups")
+    parser.add_argument("--spectra-radius-arcsec", type=float, default=SPECTRA_RADIUS_ARCSEC, help="Spectra crossmatch radius in arcsec (default: 3)")
+    parser.add_argument("--spectra-chunk-size", type=int, default=SPECTRA_CHUNK_SIZE, help="Bulk chunk size for spectra lookups")
     parser.add_argument("--spectra-cache", type=Path, default=None, help="Optional cache parquet path for spectra lookups")
 
     parser.add_argument("-o", "--overwrite", action="store_true", help="Overwrite checkpoint log and existing output if present (start fresh).")

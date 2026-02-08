@@ -39,14 +39,17 @@ from astropy.coordinates import SkyCoord
 from astroquery.gaia import Gaia
 from astroquery.vizier import Vizier
 
-from malca.config.config_parquet import PARQUET_CACHE_COMPRESSION, PARQUET_OUTPUT_COMPRESSION
+from malca.config.config_io import PARQUET_CACHE_COMPRESSION, PARQUET_OUTPUT_COMPRESSION
+from malca.config.config_paths import DEFAULT_CACHE_DIR
+from malca.config.config_pipeline import WORKERS
+from malca.config.config_filters import MIN_BAYES_FACTOR, POST_FILTER_MIN_RUN_CAMERAS, POST_FILTER_MIN_RUN_POINTS
 
 
 # =============================================================================
 # Catalog Query Helpers (with caching)
 # =============================================================================
 
-DEFAULT_CACHE_DIR = Path("~/.cache/malca/catalogs").expanduser()
+DEFAULT_CACHE_DIR = DEFAULT_CACHE_DIR.expanduser()
 
 
 def fetch_chen2020_ztf_periodic(
@@ -1310,7 +1313,8 @@ Example usage:
                         help="Detect run directory (e.g., output/runs/20250121_143052). If specified, reads from <detect-run>/results/ and writes filtered results there.")
     parser.add_argument("--input", type=Path, default=None, help="Input CSV/Parquet from events.py (overrides --detect-run)")
     parser.add_argument("--output", type=Path, default=None, help="Output CSV/Parquet path (overrides default location)")
-    parser.add_argument("--index-file", type=Path, default=Path("input/asassn_index_masked_concat_cleaned_20250919_154524_brotli.parquet"),
+    from malca.config.config_paths import ASASSN_INDEX_PATH
+    parser.add_argument("--index-file", type=Path, default=ASASSN_INDEX_PATH,
                         help="ASAS-SN index file to join ra_deg/dec_deg coordinates")
 
     # Filter toggles (all enabled by default except morphology)
@@ -1319,7 +1323,7 @@ Example usage:
     parser.add_argument("--apply-morphology", action="store_true", help="Apply morphology filter (off by default)")
 
     # Posterior strength parameters
-    parser.add_argument("--min-bayes-factor", type=float, default=10.0,
+    parser.add_argument("--min-bayes-factor", type=float, default=MIN_BAYES_FACTOR,
                         help="Minimum Bayes factor for posterior strength filter (default: 10)")
     parser.add_argument("--allow-infinite-local-bf", action="store_true",
                         help="Allow infinite local BF (default: require finite)")
@@ -1327,9 +1331,9 @@ Example usage:
     # Run robustness parameters
     parser.add_argument("--min-run-count", type=int, default=1,
                         help="Minimum number of runs (default: 1)")
-    parser.add_argument("--min-run-points", type=int, default=2,
+    parser.add_argument("--min-run-points", type=int, default=POST_FILTER_MIN_RUN_POINTS,
                         help="Minimum points per run (default: 2)")
-    parser.add_argument("--min-run-cameras", type=int, default=2,
+    parser.add_argument("--min-run-cameras", type=int, default=POST_FILTER_MIN_RUN_CAMERAS,
                         help="Minimum cameras per run (default: 2)")
 
     # Morphology parameters
@@ -1359,8 +1363,8 @@ Example usage:
                         help="Do not exclude alias periods (1d, 29.53d, etc.)")
     parser.add_argument("--periodicity-reject", action="store_true",
                         help="Reject periodic candidates (default: flag only)")
-    parser.add_argument("--workers", type=int, default=1,
-                        help="Number of parallel workers for LSP validation (default: 1)")
+    parser.add_argument("--workers", type=int, default=WORKERS,
+                        help="Number of parallel workers for LSP validation (default: 10)")
     parser.add_argument("--checkpoint-dir", type=Path, default=None,
                         help="Directory for checkpoints (enables resume on restart)")
 

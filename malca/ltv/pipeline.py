@@ -23,6 +23,18 @@ import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 
+from malca.config.config_ltv import (
+    LTV_MIN_SLOPE,
+    LTV_MIN_DIFF,
+    LTV_MIN_DEC,
+    LTV_MAX_PM,
+    LTV_MATCH_RADIUS_ARCSEC,
+    LTV_WORKERS,
+    LTV_CHUNK_SIZE,
+    GAIA_EPOCH_DATA_RELEASE,
+    GAIA_EPOCH_DATA_STRUCTURE,
+)
+from malca.config.config_io import PARQUET_OUTPUT_COMPRESSION
 from malca.ltv.filter import (
     apply_all_filters,
     filter_slope_threshold,
@@ -79,10 +91,10 @@ def run_full_pipeline(
     df: pd.DataFrame,
     *,
     # Filtering thresholds
-    min_slope: float = 0.03,
-    min_diff: float = 0.3,
-    min_dec: float = -88.0,
-    max_pm: float = 100.0,
+    min_slope: float = LTV_MIN_SLOPE,
+    min_diff: float = LTV_MIN_DIFF,
+    min_dec: float = LTV_MIN_DEC,
+    max_pm: float = LTV_MAX_PM,
     # Pipeline stages
     run_filters: bool = True,
     run_crossmatch: bool = True,
@@ -98,8 +110,8 @@ def run_full_pipeline(
     gaia_epoch_g_col: str = "g_mag",
     gaia_epoch_bp_col: str = "bp_mag",
     gaia_epoch_rp_col: str = "rp_mag",
-    gaia_epoch_data_release: str = "Gaia DR3",
-    gaia_epoch_data_structure: str = "RAW",
+    gaia_epoch_data_release: str = GAIA_EPOCH_DATA_RELEASE,
+    gaia_epoch_data_structure: str = GAIA_EPOCH_DATA_STRUCTURE,
     gaia_epoch_valid_data: bool = True,
     gaia_epoch_band: str | None = None,
     # Crossmatch options
@@ -108,10 +120,10 @@ def run_full_pipeline(
     include_vsx: bool = True,
     include_milliquas: bool = True,
     include_simbad: bool = True,
-    match_radius_arcsec: float = 3.0,
+    match_radius_arcsec: float = LTV_MATCH_RADIUS_ARCSEC,
     # Parallel processing
-    n_workers: int = 8,
-    chunk_size: int = 5000,
+    n_workers: int = LTV_WORKERS,
+    chunk_size: int = LTV_CHUNK_SIZE,
     # Output
     log_csv: str | Path | None = None,
     verbose: bool = True,
@@ -336,25 +348,25 @@ def add_pipeline_args(parser):
     parser.add_argument(
         "--min-slope",
         type=float,
-        default=0.03,
+        default=LTV_MIN_SLOPE,
         help="Minimum |Slope| threshold (mag/yr)",
     )
     parser.add_argument(
         "--min-diff",
         type=float,
-        default=0.3,
+        default=LTV_MIN_DIFF,
         help="Minimum |max diff| threshold (mag)",
     )
     parser.add_argument(
         "--n-workers",
         type=int,
-        default=8,
+        default=LTV_WORKERS,
         help="Number of parallel workers",
     )
     parser.add_argument(
         "--chunk-size",
         type=int,
-        default=5000,
+        default=LTV_CHUNK_SIZE,
         help="Chunk size for batch queries",
     )
     parser.add_argument(
@@ -396,13 +408,13 @@ def add_pipeline_args(parser):
     parser.add_argument(
         "--gaia-epoch-data-release",
         type=str,
-        default="Gaia DR3",
+        default=GAIA_EPOCH_DATA_RELEASE,
         help="Gaia data release for DataLink (default: Gaia DR3)",
     )
     parser.add_argument(
         "--gaia-epoch-data-structure",
         type=str,
-        default="RAW",
+        default=GAIA_EPOCH_DATA_STRUCTURE,
         help="DataLink structure: RAW or INDIVIDUAL (default: RAW)",
     )
     parser.add_argument(
@@ -472,7 +484,7 @@ def run_pipeline_cli(args):
     # Save output
     output_path = Path(args.output)
     if output_path.suffix == ".parquet":
-        df.to_parquet(output_path, index=False, compression="zstd")
+        df.to_parquet(output_path, index=False, compression=PARQUET_OUTPUT_COMPRESSION)
     else:
         df.to_csv(output_path, index=False)
     

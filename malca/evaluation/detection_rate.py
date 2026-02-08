@@ -30,6 +30,23 @@ from malca.baseline import (
     per_camera_median_baseline,
     per_camera_gp_baseline,
 )
+from malca.config.config_pipeline import (
+    WORKERS,
+    TRIGGER_MODE,
+    LOGBF_THRESHOLD_DIP,
+    LOGBF_THRESHOLD_JUMP,
+    SIGNIFICANCE_THRESHOLD,
+    P_POINTS,
+    MAG_POINTS,
+    MIN_MAG_OFFSET,
+    RUN_MIN_POINTS,
+    RUN_MAX_GAP_POINTS,
+    BASELINE_FUNC,
+    BASELINE_S0,
+    BASELINE_W0,
+    BASELINE_Q,
+    BASELINE_JITTER,
+)
 
 
 def get_id_column(df: pd.DataFrame) -> str:
@@ -436,47 +453,47 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
     parser.add_argument("--min-points", type=int, default=50, help="Minimum points in control sample if available.")
     parser.add_argument("--seed", type=int, default=42)
 
-    parser.add_argument("--workers", type=int, default=10, help="Parallel workers.")
+    parser.add_argument("--workers", type=int, default=WORKERS, help="Parallel workers.")
     parser.add_argument("--checkpoint-interval", type=int, default=1000, help="Trials per checkpoint update.")
     parser.add_argument("--max-trials", type=int, default=None, help="Limit total trials (debug).")
     parser.add_argument("--no-resume", action="store_true", help="Disable resume even if checkpoint exists.")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing output if present.")
 
     # Detection parameters
-    parser.add_argument("--trigger-mode", type=str, default="posterior_prob", choices=["logbf", "posterior_prob"])
-    parser.add_argument("--logbf-threshold-dip", type=float, default=5.0)
-    parser.add_argument("--logbf-threshold-jump", type=float, default=5.0)
-    parser.add_argument("--significance-threshold", type=float, default=99.99997)
-    parser.add_argument("--p-points", type=int, default=12)
+    parser.add_argument("--trigger-mode", type=str, default=TRIGGER_MODE, choices=["logbf", "posterior_prob"])
+    parser.add_argument("--logbf-threshold-dip", type=float, default=LOGBF_THRESHOLD_DIP)
+    parser.add_argument("--logbf-threshold-jump", type=float, default=LOGBF_THRESHOLD_JUMP)
+    parser.add_argument("--significance-threshold", type=float, default=SIGNIFICANCE_THRESHOLD)
+    parser.add_argument("--p-points", type=int, default=P_POINTS)
     parser.add_argument("--p-min-dip", type=float, default=None)
     parser.add_argument("--p-max-dip", type=float, default=None)
     parser.add_argument("--p-min-jump", type=float, default=None)
     parser.add_argument("--p-max-jump", type=float, default=None)
-    parser.add_argument("--mag-points", type=int, default=12)
+    parser.add_argument("--mag-points", type=int, default=MAG_POINTS)
     parser.add_argument("--mag-min-dip", type=float, default=None)
     parser.add_argument("--mag-max-dip", type=float, default=None)
     parser.add_argument("--mag-min-jump", type=float, default=None)
     parser.add_argument("--mag-max-jump", type=float, default=None)
-    parser.add_argument("--run-min-points", type=int, default=2)
-    parser.add_argument("--run-max-gap-points", type=int, default=1)
+    parser.add_argument("--run-min-points", type=int, default=RUN_MIN_POINTS)
+    parser.add_argument("--run-max-gap-points", type=int, default=RUN_MAX_GAP_POINTS)
     parser.add_argument("--run-max-gap-days", type=float, default=None)
     parser.add_argument("--run-min-duration-days", type=float, default=0.0)
     parser.add_argument(
         "--baseline-func",
         type=str,
-        default="gp",
+        default=BASELINE_FUNC,
         choices=["gp", "global_median", "per_camera_median"],
     )
-    parser.add_argument("--baseline-s0", type=float, default=0.0005)
-    parser.add_argument("--baseline-w0", type=float, default=0.0031415926535897933)
-    parser.add_argument("--baseline-q", type=float, default=0.7)
-    parser.add_argument("--baseline-jitter", type=float, default=0.006)
+    parser.add_argument("--baseline-s0", type=float, default=BASELINE_S0)
+    parser.add_argument("--baseline-w0", type=float, default=BASELINE_W0)
+    parser.add_argument("--baseline-q", type=float, default=BASELINE_Q)
+    parser.add_argument("--baseline-jitter", type=float, default=BASELINE_JITTER)
     parser.add_argument("--baseline-sigma-floor", type=float, default=None)
     parser.add_argument("--no-event-prob", action="store_true", default=False,
                         help="Disable event probability computation for faster runs")
     parser.add_argument("--compute-event-prob", dest="no_event_prob", action="store_false",
                         help="Enable event probability computation (default, required for trigger_mode='posterior_prob')")
-    parser.add_argument("--min-mag-offset", type=float, default=0.2)
+    parser.add_argument("--min-mag-offset", type=float, default=MIN_MAG_OFFSET)
 
     args = parser.parse_args()
 

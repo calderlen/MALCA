@@ -34,12 +34,27 @@ import warnings
 from astropy.utils.exceptions import AstropyWarning
 warnings.simplefilter('ignore', category=AstropyWarning)
 
+from malca.config.config_characterize import (
+    GAIA_CHUNK_SIZE, STARHORSE_TAP_CHUNK_SIZE,
+    IPHAS_MAX_SEP_ARCSEC, CLUSTER_MAX_SEP_ARCSEC, UNWISE_MAX_SEP_ARCSEC,
+    UNWISE_TIMEOUT_SECONDS, UNWISE_FRACFLUX_MIN, UNWISE_QF_MIN,
+    UNWISE_VARIABILITY_ZSCORE, UNWISE_EXPECTED_SCATTER_BASE,
+    UNWISE_EXPECTED_SCATTER_SLOPE, UNWISE_EXPECTED_SCATTER_MAG_REF,
+    SFR_MAX_DIST_KPC, SFR_DIST_TOLERANCE_FRACTION, SFR_CATALOG,
+    BANYAN_MIN_ASSOC_PROB, IPHAS_HA_EXCESS_THRESHOLD,
+    CMD_ISM_SLOPE_MIN, CMD_ISM_SLOPE_MAX, CMD_RV_STANDARD,
+)
+from malca.config.config_paths import (
+    VSX_CROSSMATCH_PATH, STARHORSE_DEFAULT_PATH, STARHORSE_TAP_URL,
+    UNTIMELY_API_URL, DEFAULT_CACHE_DIR, GAIA_CACHE_FILE,
+)
+
 
 # =============================================================================
 # GAIA DR3 QUERYING
 # =============================================================================
 
-def query_gaia_by_ids(source_ids: list[str | int], chunk_size: int = 1000, cache_file: str | None = None) -> pd.DataFrame:
+def query_gaia_by_ids(source_ids: list[str | int], chunk_size: int = GAIA_CHUNK_SIZE, cache_file: str | None = None) -> pd.DataFrame:
     """
     Query Gaia DR3 for a list of Source IDs.
     
@@ -150,7 +165,7 @@ def query_starhorse_by_ids(source_ids: list[str | int], starhorse_file: str | Pa
         print(f"Querying StarHorse via TAP for {len(valid_ids)} sources...")
         
         # Query in chunks (TAP has query length limits)
-        chunk_size = 1000
+        chunk_size = STARHORSE_TAP_CHUNK_SIZE
         results = []
         
         for i in tqdm(range(0, len(valid_ids), chunk_size), desc="StarHorse TAP"):
@@ -170,7 +185,7 @@ def query_starhorse_by_ids(source_ids: list[str | int], starhorse_file: str | Pa
             """
             
             try:
-                tap_service = pyvo.dal.TAPService("https://gaia.aip.de/tap")
+                tap_service = pyvo.dal.TAPService(STARHORSE_TAP_URL)
                 result = tap_service.search(query)
                 chunk_df = result.to_table().to_pandas()
                 results.append(chunk_df)
@@ -191,7 +206,7 @@ def query_starhorse_by_ids(source_ids: list[str | int], starhorse_file: str | Pa
     else:
         # Local catalog join (original implementation)
         if starhorse_file is None:
-            starhorse_file = os.environ.get('STARHORSE_PATH', 'input/starhorse/starhorse2021.parquet')
+            starhorse_file = os.environ.get('STARHORSE_PATH', STARHORSE_DEFAULT_PATH)
             
         starhorse_path = Path(starhorse_file)
         
@@ -469,7 +484,7 @@ def query_banyan_sigma(df: pd.DataFrame) -> pd.DataFrame:
             assoc_probs = {k: v for k, v in result.items() if k != 'field'}
             if assoc_probs:
                 best = max(assoc_probs, key=assoc_probs.get)
-                best_assocs.append(best if assoc_probs[best] > 0.1 else '')
+                best_assocs.append(best if assoc_probs[best] > BANYAN_MIN_ASSOC_PROB else '')
             else:
                 best_assocs.append('')
                 
@@ -488,7 +503,7 @@ def query_banyan_sigma(df: pd.DataFrame) -> pd.DataFrame:
 # IPHAS Hα CROSSMATCH (Barentsen+2014)
 # =============================================================================
 
-def crossmatch_iphas(df: pd.DataFrame, max_sep_arcsec: float = 1.0) -> pd.DataFrame:
+def crossmatch_iphas(df: pd.DataFrame, max_sep_arcsec: float = IPHAS_MAX_SEP_ARCSEC) -> pd.DataFrame:
     """
     Crossmatch to IPHAS DR2 for Hα emission detection.
     
@@ -551,7 +566,7 @@ def crossmatch_iphas(df: pd.DataFrame, max_sep_arcsec: float = 1.0) -> pd.DataFr
                 if np.isfinite(r_mag) and np.isfinite(ha_mag):
                     r_ha = r_mag - ha_mag
                     df.at[df.index[idx], 'iphas_r_ha'] = r_ha
-                    df.at[df.index[idx], 'iphas_ha_excess'] = r_ha > 0.25
+                    df.at[df.index[idx], 'iphas_ha_excess'] = r_ha > IPHAS_HA_EXCESS_THRESHOLD
                 
                 if np.isfinite(r_mag) and np.isfinite(i_mag):
                     df.at[df.index[idx], 'iphas_r_i'] = r_mag - i_mag
@@ -572,7 +587,7 @@ def crossmatch_iphas(df: pd.DataFrame, max_sep_arcsec: float = 1.0) -> pd.DataFr
 # STAR-FORMING REGION PROXIMITY (Prisinzano+2022)
 # =============================================================================
 
-def check_sfr_proximity(df: pd.DataFrame, max_dist_kpc: float = 1.5) -> pd.DataFrame:
+def check_sfr_proximity(df: pd.DataFrame, max_dist_kpc: float = SFR_MAX_DIST_KPC) -> pd.DataFrame:
     """
     Check proximity to known star-forming regions.
     
@@ -582,18 +597,6 @@ def check_sfr_proximity(df: pd.DataFrame, max_dist_kpc: float = 1.5) -> pd.DataF
     if df.empty:
         return df
     df = df.copy()
-    
-    # Major star-forming regions from Prisinzano+2022 Table 1
-    SFR_CATALOG = [
-        {'name': 'Orion Nebula Cluster', 'ra': 83.82, 'dec': -5.39, 'dist_pc': 400, 'radius_deg': 1.0},
-        {'name': 'Cygnus X', 'ra': 307.0, 'dec': 40.5, 'dist_pc': 1400, 'radius_deg': 3.0},
-        {'name': 'Taurus', 'ra': 68.0, 'dec': 26.0, 'dist_pc': 140, 'radius_deg': 5.0},
-        {'name': 'Ophiuchus', 'ra': 246.8, 'dec': -24.5, 'dist_pc': 140, 'radius_deg': 3.0},
-        {'name': 'Scorpius-Centaurus', 'ra': 240.0, 'dec': -25.0, 'dist_pc': 145, 'radius_deg': 10.0},
-        {'name': 'Perseus', 'ra': 55.0, 'dec': 32.0, 'dist_pc': 300, 'radius_deg': 3.0},
-        {'name': 'Serpens', 'ra': 277.5, 'dec': 1.2, 'dist_pc': 415, 'radius_deg': 1.0},
-        {'name': 'Lupus', 'ra': 240.0, 'dec': -38.0, 'dist_pc': 160, 'radius_deg': 3.0},
-    ]
     
     if 'ra' not in df.columns or 'dec' not in df.columns:
         print("Warning: SFR proximity check requires ra, dec columns")
@@ -654,7 +657,7 @@ def check_sfr_proximity(df: pd.DataFrame, max_dist_kpc: float = 1.5) -> pd.DataF
             d = valid_dist_pc[local_idx]
             if np.isfinite(d):
                 # Distance within 50% of SFR distance
-                if abs(d - sfr['dist_pc']) / sfr['dist_pc'] < 0.5:
+                if abs(d - sfr['dist_pc']) / sfr['dist_pc'] < SFR_DIST_TOLERANCE_FRACTION:
                     near_sfr[global_idx] = True
                     sfr_names[global_idx] = sfr['name']
             else:
@@ -673,7 +676,7 @@ def check_sfr_proximity(df: pd.DataFrame, max_dist_kpc: float = 1.5) -> pd.DataF
 # OPEN CLUSTER MEMBERSHIP (Cantat-Gaudin+2020)
 # =============================================================================
 
-def crossmatch_open_clusters(df: pd.DataFrame, max_sep_arcsec: float = 1.0) -> pd.DataFrame:
+def crossmatch_open_clusters(df: pd.DataFrame, max_sep_arcsec: float = CLUSTER_MAX_SEP_ARCSEC) -> pd.DataFrame:
     """
     Crossmatch to Cantat-Gaudin+2020 open cluster catalog.
     
@@ -755,7 +758,7 @@ def crossmatch_open_clusters(df: pd.DataFrame, max_sep_arcsec: float = 1.0) -> p
 # unWISE/unTimely IR VARIABILITY
 # =============================================================================
 
-def query_unwise_variability(df: pd.DataFrame, max_sep_arcsec: float = 3.0) -> pd.DataFrame:
+def query_unwise_variability(df: pd.DataFrame, max_sep_arcsec: float = UNWISE_MAX_SEP_ARCSEC) -> pd.DataFrame:
     """
     Query unWISE/unTimely for mid-IR variability (Meisner+2023).
     
@@ -777,7 +780,7 @@ def query_unwise_variability(df: pd.DataFrame, max_sep_arcsec: float = 3.0) -> p
     w1_var = []
     
     # unTimely API endpoint
-    base_url = "https://irsa.ipac.caltech.edu/cgi-bin/Gator/nph-query"
+    base_url = UNTIMELY_API_URL
     
     for _, row in tqdm(df.iterrows(), total=len(df), desc="unWISE variability"):
         try:
@@ -791,16 +794,16 @@ def query_unwise_variability(df: pd.DataFrame, max_sep_arcsec: float = 3.0) -> p
                 'outfmt': '1',  # JSON
             }
             
-            resp = requests.get(base_url, params=params, timeout=30)
+            resp = requests.get(base_url, params=params, timeout=UNWISE_TIMEOUT_SECONDS)
             
             if resp.status_code == 200:
                 data = resp.json()
                 
                 if data and len(data) > 0:
                     # Filter by quality (paper criteria)
-                    good = [d for d in data 
-                            if d.get('fracflux', 0) > 0.5 
-                            and d.get('qf', 0) > 0.9]
+                    good = [d for d in data
+                            if d.get('fracflux', 0) > UNWISE_FRACFLUX_MIN
+                            and d.get('qf', 0) > UNWISE_QF_MIN]
                     
                     if good:
                         w1_mags = [d['w1mpro'] for d in good if 'w1mpro' in d]
@@ -810,10 +813,10 @@ def query_unwise_variability(df: pd.DataFrame, max_sep_arcsec: float = 3.0) -> p
                             w1_std = np.std(w1_mags)
                             w1_med = np.median(w1_mags)
                             # Estimate expected scatter from magnitude
-                            expected_scatter = 0.02 + 0.01 * max(0, w1_med - 14)
+                            expected_scatter = UNWISE_EXPECTED_SCATTER_BASE + UNWISE_EXPECTED_SCATTER_SLOPE * max(0, w1_med - UNWISE_EXPECTED_SCATTER_MAG_REF)
                             z = w1_std / expected_scatter
                             w1_zscores.append(z)
-                            w1_var.append(z > 3.0)
+                            w1_var.append(z > UNWISE_VARIABILITY_ZSCORE)
                         else:
                             w1_zscores.append(np.nan)
                             w1_var.append(False)
@@ -821,7 +824,7 @@ def query_unwise_variability(df: pd.DataFrame, max_sep_arcsec: float = 3.0) -> p
                         if len(w2_mags) >= 3:
                             w2_std = np.std(w2_mags)
                             w2_med = np.median(w2_mags)
-                            expected_scatter = 0.02 + 0.01 * max(0, w2_med - 14)
+                            expected_scatter = UNWISE_EXPECTED_SCATTER_BASE + UNWISE_EXPECTED_SCATTER_SLOPE * max(0, w2_med - UNWISE_EXPECTED_SCATTER_MAG_REF)
                             w2_zscores.append(w2_std / expected_scatter)
                         else:
                             w2_zscores.append(np.nan)
@@ -958,8 +961,8 @@ def fit_cmd_slope(
         result = odr.run()
         slope = float(result.beta[0])
         slope_angle = np.degrees(np.arctan(slope))
-        ism_consistent = 74.1 <= slope_angle <= 79.2
-        implied_rv = 3.1 + (slope_angle - 74.1) / (79.2 - 74.1) * 1.9 if 60 < slope_angle < 85 else np.nan
+        ism_consistent = CMD_ISM_SLOPE_MIN <= slope_angle <= CMD_ISM_SLOPE_MAX
+        implied_rv = CMD_RV_STANDARD + (slope_angle - CMD_ISM_SLOPE_MIN) / (CMD_ISM_SLOPE_MAX - CMD_ISM_SLOPE_MIN) * 1.9 if 60 < slope_angle < 85 else np.nan
     except Exception:
         return {'slope': np.nan, 'slope_angle_deg': np.nan,
                 'ism_consistent': False, 'implied_rv': np.nan}
@@ -1009,9 +1012,9 @@ def _run_optional_module(
 def characterize_candidates_df(
     df: pd.DataFrame,
     *,
-    crossmatch: Path = Path("input/vsx/asassn_x_vsx_matches_20250919_2252.csv"),
-    chunk_size: int = 1000,
-    cache: Path = Path("output/gaia_cache.parquet"),
+    crossmatch: Path = VSX_CROSSMATCH_PATH,
+    chunk_size: int = GAIA_CHUNK_SIZE,
+    cache: Path = GAIA_CACHE_FILE,
     dust: bool = False,
     starhorse: str | None = None,
     run_banyan: bool = True,
@@ -1174,11 +1177,11 @@ def main():
     parser = argparse.ArgumentParser(description="Multi-wavelength characterization for dipper candidates")
     parser.add_argument("--input", type=Path, required=True, help="Input events CSV/Parquet (must have asas_sn_id)")
     parser.add_argument("--output", type=Path, required=True, help="Output CSV/Parquet")
-    parser.add_argument("--crossmatch", type=Path, 
-                        default=Path("input/vsx/asassn_x_vsx_matches_20250919_2252.csv"),
+    parser.add_argument("--crossmatch", type=Path,
+                        default=VSX_CROSSMATCH_PATH,
                         help="Path to ASAS-SN x VSX crossmatch CSV (must contain asas_sn_id and gaia_id)")
-    parser.add_argument("--chunk-size", type=int, default=1000, help="Gaia query chunk size")
-    parser.add_argument("--cache", type=Path, default=Path("output/gaia_cache.parquet"), help="Cache file for Gaia queries")
+    parser.add_argument("--chunk-size", type=int, default=GAIA_CHUNK_SIZE, help="Gaia query chunk size")
+    parser.add_argument("--cache", type=Path, default=GAIA_CACHE_FILE, help="Cache file for Gaia queries")
     parser.add_argument("--dust", action="store_true", help="Enable dustmaps3d 3D extinction query")
     parser.add_argument("--starhorse", type=str, default=None, help="StarHorse stellar ages/masses: 'tap' for remote TAP query (recommended), or path to local catalog file")
     parser.add_argument("--no-characterize-banyan", dest="characterize_banyan", action="store_false", help="Disable BANYAN Sigma enrichment")

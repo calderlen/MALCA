@@ -10,6 +10,16 @@ from astropy.coordinates import SkyCoord
 from astropy.stats import mad_std, sigma_clip
 from tqdm import tqdm
 
+from malca.config.config_filters import (
+    CLEAN_LC_MAX_ERROR_ABSOLUTE, CLEAN_LC_MAX_ERROR_SIGMA,
+    BAD_CAMERA_WINDOW_DAYS, BAD_CAMERA_MIN_OVERLAP_POINTS,
+    BAD_CAMERA_SCATTER_RATIO_THRESHOLD, BAD_CAMERA_MIN_CAMERAS,
+    OFFSET_CAMERA_SIGMA_THRESHOLD,
+    CATASTROPHIC_MIN_POINTS_PER_CAMERA, CATASTROPHIC_MAG_EXCURSION,
+    CATASTROPHIC_SUPPORT_WINDOW_DAYS, CATASTROPHIC_SUPPORT_EXCURSION,
+    CATASTROPHIC_MAX_FRACTION,
+)
+
 colors = ["#6b8bcd", "#b3b540", "#8f62ca", "#5eb550", "#c75d9c", "#4bb092", "#c5562f", "#6c7f39",
               "#ce5761", "#c68c45", '#b5b246', '#d77fcc', '#7362cf', '#ce443f', '#3fc1bf', '#cda735',
               '#a1b055']
@@ -128,7 +138,7 @@ def get_id_col(df: pd.DataFrame) -> str:
     raise ValueError("No ID column found. Expected one of: asas_sn_id, id, source_id, path")
 
 
-def clean_lc(df, max_error_absolute=1.0, max_error_sigma=5.0):
+def clean_lc(df, max_error_absolute=CLEAN_LC_MAX_ERROR_ABSOLUTE, max_error_sigma=CLEAN_LC_MAX_ERROR_SIGMA):
     base_mask = np.ones(len(df), dtype=bool)
     base_mask &= (df["saturated"] == 0)
     base_mask &= df["JD"].notna() & df["mag"].notna()
@@ -451,10 +461,10 @@ def identify_bad_cameras(
     df_lc: pd.DataFrame,
     raw2_df: pd.DataFrame | None = None,
     *,
-    window_days: float = 100.0,
-    min_overlap_points: int = 10,
-    scatter_ratio_threshold: float = 2.5,
-    min_cameras_for_comparison: int = 2,
+    window_days: float = BAD_CAMERA_WINDOW_DAYS,
+    min_overlap_points: int = BAD_CAMERA_MIN_OVERLAP_POINTS,
+    scatter_ratio_threshold: float = BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
+    min_cameras_for_comparison: int = BAD_CAMERA_MIN_CAMERAS,
     cam_col: str = "camera#",
     t_col: str = "JD",
     mag_col: str = "mag",
@@ -592,10 +602,10 @@ def identify_bad_cameras(
 def identify_offset_cameras(
     df_lc: pd.DataFrame,
     *,
-    window_days: float = 100.0,
-    min_overlap_points: int = 10,
-    offset_sigma_threshold: float = 15.0,
-    min_cameras_for_comparison: int = 2,
+    window_days: float = BAD_CAMERA_WINDOW_DAYS,
+    min_overlap_points: int = BAD_CAMERA_MIN_OVERLAP_POINTS,
+    offset_sigma_threshold: float = OFFSET_CAMERA_SIGMA_THRESHOLD,
+    min_cameras_for_comparison: int = BAD_CAMERA_MIN_CAMERAS,
     cam_col: str = "camera#",
     t_col: str = "JD",
     mag_col: str = "mag",
@@ -711,12 +721,12 @@ def identify_catastrophic_outlier_cameras(
     cam_col: str = "camera#",
     t_col: str = "JD",
     mag_col: str = "mag",
-    min_points_per_camera: int = 30,
-    mag_excursion_threshold: float = 3.0,
-    support_window_days: float = 2.0,
-    support_excursion_threshold: float = 0.75,
+    min_points_per_camera: int = CATASTROPHIC_MIN_POINTS_PER_CAMERA,
+    mag_excursion_threshold: float = CATASTROPHIC_MAG_EXCURSION,
+    support_window_days: float = CATASTROPHIC_SUPPORT_WINDOW_DAYS,
+    support_excursion_threshold: float = CATASTROPHIC_SUPPORT_EXCURSION,
     min_catastrophic_points: int = 1,
-    max_catastrophic_fraction: float = 0.03,
+    max_catastrophic_fraction: float = CATASTROPHIC_MAX_FRACTION,
 ) -> set[int]:
     """
     Identify cameras with isolated catastrophic magnitude excursions.

@@ -14,6 +14,12 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from malca.config.config_ltv import (
+    LTV_DUST_OPTICAL_SLOPE_THRESH,
+    LTV_DUST_COLOR_SLOPE_THRESH,
+    LTV_DUST_COLOR_EXCESS_THRESH,
+)
+
 
 def apply_dust_flags(
     df: pd.DataFrame,
@@ -21,9 +27,9 @@ def apply_dust_flags(
     optical_slope_col: str = "Slope",
     w1_w2_median_col: str = "w1_w2_median",
     w1_w2_slope_col: str = "w1_w2_slope",
-    optical_slope_thresh: float = 0.03,
-    color_slope_thresh: float = 0.004,
-    color_excess_thresh: float = 0.3,
+    optical_slope_thresh: float = LTV_DUST_OPTICAL_SLOPE_THRESH,
+    color_slope_thresh: float = LTV_DUST_COLOR_SLOPE_THRESH,
+    color_excess_thresh: float = LTV_DUST_COLOR_EXCESS_THRESH,
 ) -> pd.DataFrame:
     """
     Add dust-driven variability flags to a dataframe.

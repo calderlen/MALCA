@@ -18,6 +18,16 @@ import pandas as pd
 from astropy.table import Table
 from tqdm.auto import tqdm
 
+from malca.config.config_ltv import (
+    LTV_GAIA_CHUNK_SIZE,
+    LTV_WORKERS,
+    GAIA_EPOCH_DATA_RELEASE,
+    GAIA_EPOCH_DATA_STRUCTURE,
+    GAIA_EPOCH_RETRIEVAL_TYPE,
+    GAIA_EPOCH_DELTA_MAG_THRESH,
+    GAIA_EPOCH_DELTA_COLOR_THRESH,
+)
+
 
 def _chunked(iterable: Iterable, size: int):
     it = list(iterable)
@@ -33,8 +43,8 @@ def _batch_gaia_epoch_tap_query(
     g_col: str,
     bp_col: str,
     rp_col: str,
-    chunk_size: int = 2000,
-    n_workers: int = 4,
+    chunk_size: int = LTV_GAIA_CHUNK_SIZE,
+    n_workers: int = LTV_WORKERS,
     verbose: bool = False,
 ) -> pd.DataFrame:
     from astroquery.gaia import Gaia
@@ -266,9 +276,9 @@ def _summarize_epoch_table(
 def _batch_gaia_epoch_datalink(
     source_ids: list[int],
     *,
-    data_release: str = "Gaia DR3",
-    data_structure: str = "RAW",
-    retrieval_type: str = "EPOCH_PHOTOMETRY",
+    data_release: str = GAIA_EPOCH_DATA_RELEASE,
+    data_structure: str = GAIA_EPOCH_DATA_STRUCTURE,
+    retrieval_type: str = GAIA_EPOCH_RETRIEVAL_TYPE,
     valid_data: bool = True,
     band: str | None = None,
     fmt: str = "votable",
@@ -322,13 +332,13 @@ def query_gaia_epoch_photometry_batch(
     g_col: str = "g_mag",
     bp_col: str = "bp_mag",
     rp_col: str = "rp_mag",
-    data_release: str = "Gaia DR3",
-    data_structure: str = "RAW",
-    retrieval_type: str = "EPOCH_PHOTOMETRY",
+    data_release: str = GAIA_EPOCH_DATA_RELEASE,
+    data_structure: str = GAIA_EPOCH_DATA_STRUCTURE,
+    retrieval_type: str = GAIA_EPOCH_RETRIEVAL_TYPE,
     valid_data: bool = True,
     band: str | None = None,
-    chunk_size: int = 2000,
-    n_workers: int = 4,
+    chunk_size: int = LTV_GAIA_CHUNK_SIZE,
+    n_workers: int = LTV_WORKERS,
     verbose: bool = False,
 ) -> pd.DataFrame:
     """
@@ -438,8 +448,8 @@ def query_gaia_epoch_photometry_batch(
 def apply_gaia_epoch_flags(
     df: pd.DataFrame,
     *,
-    delta_mag_thresh: float = 0.5,
-    delta_color_thresh: float = 0.5,
+    delta_mag_thresh: float = GAIA_EPOCH_DELTA_MAG_THRESH,
+    delta_color_thresh: float = GAIA_EPOCH_DELTA_COLOR_THRESH,
 ) -> pd.DataFrame:
     """
     Add flags for large Gaia epoch changes.

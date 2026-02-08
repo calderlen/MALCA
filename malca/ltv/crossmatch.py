@@ -29,12 +29,20 @@ from astropy.coordinates import SkyCoord, match_coordinates_sky
 from astropy.table import Table
 from tqdm.auto import tqdm
 
+from malca.config.config_ltv import (
+    LTV_MATCH_RADIUS_ARCSEC,
+    LTV_HEALPIX_NSIDE,
+    LTV_WORKERS,
+    LTV_CROSSMATCH_CHUNK_SIZE,
+)
+from malca.config.config_paths import VSX_CROSSMATCH_PATH
+
 
 # =============================================================================
 # LOCAL CATALOG (Gaia DR3 + VSX — no API queries needed)
 # =============================================================================
 
-DEFAULT_CATALOG_PATH = Path(__file__).parent.parent.parent / "input" / "vsx" / "asassn_x_vsx_matches_20250919_2252.csv"
+DEFAULT_CATALOG_PATH = VSX_CROSSMATCH_PATH
 
 GAIA_COLUMN_MAP = {
     "gaia_id": "gaia_source_id",
@@ -149,7 +157,7 @@ def crossmatch_from_local(
     catalog_path: str | Path | None = None,
     ra_column: str = "ra_deg",
     dec_column: str = "dec_deg",
-    match_radius_arcsec: float = 3.0,
+    match_radius_arcsec: float = LTV_MATCH_RADIUS_ARCSEC,
     verbose: bool = False,
 ) -> pd.DataFrame:
     """Crossmatch by RA/Dec against local catalog (coordinate-based)."""
@@ -214,9 +222,9 @@ def _batch_tap_crossmatch(
     select_cols: str,
     ra_col: str = "RAJ2000",
     dec_col: str = "DEJ2000",
-    match_radius_arcsec: float = 3.0,
-    chunk_size: int = 1000,
-    n_workers: int = 4,
+    match_radius_arcsec: float = LTV_MATCH_RADIUS_ARCSEC,
+    chunk_size: int = LTV_CROSSMATCH_CHUNK_SIZE,
+    n_workers: int = LTV_WORKERS,
     verbose: bool = False,
     desc: str = "TAP crossmatch",
 ) -> pd.DataFrame:
@@ -288,9 +296,9 @@ def crossmatch_tap_catalog(
     dec_column: str = "dec_deg",
     ra_col: str = "RAJ2000",
     dec_col: str = "DEJ2000",
-    match_radius_arcsec: float = 3.0,
-    chunk_size: int = 1000,
-    n_workers: int = 4,
+    match_radius_arcsec: float = LTV_MATCH_RADIUS_ARCSEC,
+    chunk_size: int = LTV_CROSSMATCH_CHUNK_SIZE,
+    n_workers: int = LTV_WORKERS,
     col_prefix: str | None = None,
     verbose: bool = False,
 ) -> pd.DataFrame:
@@ -354,7 +362,7 @@ def _parallel_query(
     *,
     ra_column: str = "ra_deg",
     dec_column: str = "dec_deg",
-    n_workers: int = 8,
+    n_workers: int = LTV_WORKERS,
     desc: str = "Query",
     verbose: bool = False,
 ) -> list[dict]:
@@ -394,8 +402,8 @@ def crossmatch_milliquas(
     *,
     ra_column: str = "ra_deg",
     dec_column: str = "dec_deg",
-    match_radius_arcsec: float = 3.0,
-    n_workers: int = 8,
+    match_radius_arcsec: float = LTV_MATCH_RADIUS_ARCSEC,
+    n_workers: int = LTV_WORKERS,
     verbose: bool = False,
 ) -> pd.DataFrame:
     """
@@ -469,8 +477,8 @@ def crossmatch_gaia_alerts(
     *,
     ra_column: str = "ra_deg",
     dec_column: str = "dec_deg",
-    match_radius_arcsec: float = 3.0,
-    n_workers: int = 8,
+    match_radius_arcsec: float = LTV_MATCH_RADIUS_ARCSEC,
+    n_workers: int = LTV_WORKERS,
     verbose: bool = False,
 ) -> pd.DataFrame:
     """
@@ -542,8 +550,8 @@ def query_simbad_classification(
     *,
     ra_column: str = "ra_deg",
     dec_column: str = "dec_deg",
-    match_radius_arcsec: float = 3.0,
-    n_workers: int = 8,
+    match_radius_arcsec: float = LTV_MATCH_RADIUS_ARCSEC,
+    n_workers: int = LTV_WORKERS,
     verbose: bool = False,
 ) -> pd.DataFrame:
     """
@@ -625,10 +633,10 @@ def crossmatch_all_catalogs(
     include_vsx: bool = True,
     include_milliquas: bool = True,
     include_simbad: bool = True,
-    match_radius_arcsec: float = 3.0,
-    n_workers: int = 8,
+    match_radius_arcsec: float = LTV_MATCH_RADIUS_ARCSEC,
+    n_workers: int = LTV_WORKERS,
     use_healpix: bool = True,
-    healpix_nside: int = 32,
+    healpix_nside: int = LTV_HEALPIX_NSIDE,
     verbose: bool = False,
 ) -> pd.DataFrame:
     """

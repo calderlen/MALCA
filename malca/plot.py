@@ -24,6 +24,7 @@ from malca.baseline import (
     per_camera_median_baseline,
     per_camera_gp_baseline,
 )
+from malca.config.config_pipeline import WORKERS
 
 
 JD_OFFSET = 2458000.0
@@ -1105,7 +1106,7 @@ def main():
         help="Optional detection results CSV for metadata lookup",
     )
     parser.add_argument("--show", action="store_true", help="Show plots interactively")
-    parser.add_argument("--workers", type=int, default=1, help="Parallel workers for candidate plotting")
+    parser.add_argument("--workers", type=int, default=WORKERS, help="Parallel workers for candidate plotting")
     parser.add_argument("--no-tqdm", action="store_true", help="Disable progress bars")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose logging")
     parser.add_argument(

@@ -4,6 +4,14 @@ import warnings
 
 from celerite2 import GaussianProcess, terms
 
+from malca.config.config_pipeline import (
+    BASELINE_S0, BASELINE_W0, BASELINE_Q, BASELINE_JITTER,
+    GP_FLOOR_CLIP, GP_FLOOR_ITERS, GP_MIN_FLOOR_POINTS,
+    GP_AUTO_SCALE_FRACTION, GP_MIN_GP_POINTS,
+    GP_DIP_SIGMA_THRESH, GP_PAD_DAYS,
+    ROLLING_WINDOW_DAYS, ROLLING_MIN_POINTS, ROLLING_MIN_DAYS,
+)
+
 
 def global_median_baseline(
     df,
@@ -58,7 +66,7 @@ def global_median_baseline(
     return df_out
 
 
-def rolling_time_median(jd, mag, days=300.0, min_points=10, min_days=30.0, past_only=True):
+def rolling_time_median(jd, mag, days=ROLLING_WINDOW_DAYS, min_points=ROLLING_MIN_POINTS, min_days=ROLLING_MIN_DAYS, past_only=True):
     """Rolling time-window median using searchsorted (past-only by default)."""
     n = len(jd)
     out = np.full(n, np.nan, dtype=float)
@@ -92,8 +100,8 @@ def rolling_time_median(jd, mag, days=300.0, min_points=10, min_days=30.0, past_
 
 def per_camera_median_baseline(
     df,
-    days=300.0,
-    min_points=10,
+    days=ROLLING_WINDOW_DAYS,
+    min_points=ROLLING_MIN_POINTS,
     t_col="JD",
     mag_col="mag",
     err_col="error",
@@ -149,21 +157,21 @@ def per_camera_gp_baseline(
     *,
     sigma=None,
     rho=None,
-    q=0.7,
-    S0=0.0005,
-    w0=0.0031415926535897933,
-    jitter=0.006,
+    q=BASELINE_Q,
+    S0=BASELINE_S0,
+    w0=BASELINE_W0,
+    jitter=BASELINE_JITTER,
     t_col="JD",
     mag_col="mag",
     err_col="error",
     cam_col="camera#",
     sigma_floor=None,
-    floor_clip=3.0,
-    floor_iters=3,
-    min_floor_points=30,
+    floor_clip=GP_FLOOR_CLIP,
+    floor_iters=GP_FLOOR_ITERS,
+    min_floor_points=GP_MIN_FLOOR_POINTS,
     add_sigma_eff_col=True,
     auto_scale_gp=True,
-    auto_scale_fraction=0.5,
+    auto_scale_fraction=GP_AUTO_SCALE_FRACTION,
 ):
     """Per-camera GP baseline (fixed SHO kernel) with sigma_eff output."""
     df_out = df.copy()
@@ -318,29 +326,29 @@ def per_camera_gp_baseline(
 def per_camera_gp_baseline_masked(
     df,
     *,
-    dip_sigma_thresh=-1.0,
-    pad_days=100.0,
-    S0=0.0005,
-    w0=0.0031415926535897933,
-    q=0.7,
+    dip_sigma_thresh=GP_DIP_SIGMA_THRESH,
+    pad_days=GP_PAD_DAYS,
+    S0=BASELINE_S0,
+    w0=BASELINE_W0,
+    q=BASELINE_Q,
     a1=None,
     rho1=None,
     a2=None,
     rho2=None,
-    jitter=0.006,
+    jitter=BASELINE_JITTER,
     use_yerr=True,
     t_col="JD",
     mag_col="mag",
     err_col="error",
     cam_col="camera#",
-    min_gp_points=10,
+    min_gp_points=GP_MIN_GP_POINTS,
     add_sigma_eff_col=True,
     sigma_floor=None,
-    floor_clip=3.0,
-    floor_iters=3,
-    min_floor_points=30,
+    floor_clip=GP_FLOOR_CLIP,
+    floor_iters=GP_FLOOR_ITERS,
+    min_floor_points=GP_MIN_FLOOR_POINTS,
     auto_scale_gp=True,
-    auto_scale_fraction=0.5,
+    auto_scale_fraction=GP_AUTO_SCALE_FRACTION,
     **kwargs,
 ):
     """Per-camera GP baseline with dip masking (excludes significant dips from fit)."""

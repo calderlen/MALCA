@@ -9,6 +9,8 @@ import numpy as np
 import pandas as pd
 
 from malca.review.metadata import normalize_vsx_record
+from malca.config.config_paths import VSX_CROSSMATCH_PATH, GAIA_CACHE_FILE
+from malca.config.config_characterize import GAIA_CHUNK_SIZE
 
 
 DEFAULT_DB_PATH = "output/review/review.db"
@@ -165,9 +167,9 @@ def import_candidates(
     source_path: str,
     *,
     characterize_before_import: bool = True,
-    characterize_crossmatch: Path = Path("input/vsx/asassn_x_vsx_matches_20250919_2252.csv"),
-    characterize_chunk_size: int = 1000,
-    characterize_cache: Path = Path("output/gaia_cache.parquet"),
+    characterize_crossmatch: Path = VSX_CROSSMATCH_PATH,
+    characterize_chunk_size: int = GAIA_CHUNK_SIZE,
+    characterize_cache: Path = GAIA_CACHE_FILE,
     characterize_dust: bool = True,
     characterize_starhorse: str | None = "tap",
 ) -> tuple[int, int]:

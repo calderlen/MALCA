@@ -6,6 +6,7 @@ import argparse
 import pandas as pd
 
 from malca.enrich.neighbor import _ensure_candidate_id, _query_catalog_bulk
+from malca.config.config_characterize import SPECTRA_RADIUS_ARCSEC, SPECTRA_CHUNK_SIZE
 
 
 DEFAULT_SPECTRA_CATALOGS: dict[str, str] = {
@@ -19,8 +20,8 @@ def run_spectra_availability(
     df: pd.DataFrame,
     *,
     out_dir: Path,
-    radius_arcsec: float = 3.0,
-    chunk_size: int = 2000,
+    radius_arcsec: float = SPECTRA_RADIUS_ARCSEC,
+    chunk_size: int = SPECTRA_CHUNK_SIZE,
     cache_file: Path | None = None,
     catalogs: dict[str, str] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -93,8 +94,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Bulk spectra-availability enrichment")
     parser.add_argument("--input", type=Path, required=True, help="Input CSV/Parquet with candidate coordinates")
     parser.add_argument("--out-dir", type=Path, required=True, help="Output directory")
-    parser.add_argument("--radius-arcsec", type=float, default=3.0)
-    parser.add_argument("--chunk-size", type=int, default=2000)
+    parser.add_argument("--radius-arcsec", type=float, default=SPECTRA_RADIUS_ARCSEC)
+    parser.add_argument("--chunk-size", type=int, default=SPECTRA_CHUNK_SIZE)
     parser.add_argument("--cache", type=Path, default=None)
     args = parser.parse_args()
 

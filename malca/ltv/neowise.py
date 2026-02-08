@@ -27,15 +27,23 @@ import pandas as pd
 from tqdm.auto import tqdm
 from astroquery.ipac.irsa import Irsa
 
+from malca.config.config_ltv import (
+    NEOWISE_EPOCH_COMBINE_DAYS,
+    NEOWISE_MIN_SNR,
+    NEOWISE_RATE_LIMIT_SECONDS,
+    NEOWISE_MATCH_RADIUS_ARCSEC,
+    LTV_WORKERS,
+)
+
 
 # NEOWISE epoch grouping: combine points within this many days
-EPOCH_COMBINE_DAYS = 7.0
+EPOCH_COMBINE_DAYS = NEOWISE_EPOCH_COMBINE_DAYS
 
 # Minimum SNR for valid W1/W2 measurements
-MIN_SNR = 3.0
+MIN_SNR = NEOWISE_MIN_SNR
 
 # Rate limiting: seconds between requests per worker
-RATE_LIMIT_SECONDS = 0.1
+RATE_LIMIT_SECONDS = NEOWISE_RATE_LIMIT_SECONDS
 
 
 # =============================================================================
@@ -46,7 +54,7 @@ def query_neowise_lc(
     ra: float,
     dec: float,
     *,
-    match_radius_arcsec: float = 3.0,
+    match_radius_arcsec: float = NEOWISE_MATCH_RADIUS_ARCSEC,
     verbose: bool = False,
 ) -> pd.DataFrame:
     """
@@ -228,7 +236,7 @@ def _extract_one_source(
     dec: float,
     idx: int,
     *,
-    match_radius_arcsec: float = 3.0,
+    match_radius_arcsec: float = NEOWISE_MATCH_RADIUS_ARCSEC,
     epoch_days: float = EPOCH_COMBINE_DAYS,
 ) -> dict | None:
     """Extract NEOWISE trends for a single source."""
@@ -259,9 +267,9 @@ def extract_neowise_trends(
     *,
     ra_column: str = "ra_deg",
     dec_column: str = "dec_deg",
-    match_radius_arcsec: float = 3.0,
+    match_radius_arcsec: float = NEOWISE_MATCH_RADIUS_ARCSEC,
     epoch_days: float = EPOCH_COMBINE_DAYS,
-    n_workers: int = 8,
+    n_workers: int = LTV_WORKERS,
     verbose: bool = False,
 ) -> pd.DataFrame:
     """

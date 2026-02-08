@@ -10,7 +10,9 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import pandas as pd
 from tqdm import tqdm
 
-from malca.config.config_parquet import PARQUET_OUTPUT_COMPRESSION
+from malca.config.config_io import PARQUET_OUTPUT_COMPRESSION
+from malca.config.config_paths import LCV2_ROOT
+from malca.config.config_pipeline import WORKERS
 
 MAG_BINS = ['12_12.5', '12.5_13', '13_13.5', '13.5_14', '14_14.5', '14.5_15']
 
@@ -158,13 +160,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--index-root",
         type=Path,
-        default=Path("/data/poohbah/1/assassin/rowan.90/lcsv2"),
+        default=LCV2_ROOT,
         help="Root directory that contains <mag_bin>/index*.csv files.",
     )
     parser.add_argument(
         "--lc-root",
         type=Path,
-        default=Path("/data/poohbah/1/assassin/rowan.90/lcsv2"),
+        default=LCV2_ROOT,
         help="Root directory that contains <mag_bin>/lc*_cal/ light-curve folders.",
     )
     parser.add_argument(
@@ -192,7 +194,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--workers",
         type=int,
-        default=10,
+        default=WORKERS,
         help="Parallel workers to read index CSVs (default: 10, uses ProcessPoolExecutor).",
     )
     parser.add_argument(

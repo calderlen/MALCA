@@ -9,6 +9,8 @@ import astropy.units as u
 from astropy.table import Table
 from astroquery.xmatch import XMatch
 
+from malca.config.config_characterize import NEIGHBOR_RADIUS_ARCSEC, NEIGHBOR_CHUNK_SIZE
+
 
 DEFAULT_NEIGHBOR_CATALOGS: dict[str, str] = {
     "gaia_dr3": "I/355/gaiadr3",
@@ -80,8 +82,8 @@ def run_neighbor_enrichment(
     df: pd.DataFrame,
     *,
     out_dir: Path,
-    radius_arcsec: float = 15.0,
-    chunk_size: int = 2000,
+    radius_arcsec: float = NEIGHBOR_RADIUS_ARCSEC,
+    chunk_size: int = NEIGHBOR_CHUNK_SIZE,
     cache_file: Path | None = None,
     catalogs: dict[str, str] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -177,8 +179,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Bulk neighbor enrichment for candidate tables")
     parser.add_argument("--input", type=Path, required=True, help="Input CSV/Parquet with candidate coordinates")
     parser.add_argument("--out-dir", type=Path, required=True, help="Output directory")
-    parser.add_argument("--radius-arcsec", type=float, default=15.0)
-    parser.add_argument("--chunk-size", type=int, default=2000)
+    parser.add_argument("--radius-arcsec", type=float, default=NEIGHBOR_RADIUS_ARCSEC)
+    parser.add_argument("--chunk-size", type=int, default=NEIGHBOR_CHUNK_SIZE)
     parser.add_argument("--cache", type=Path, default=None)
     args = parser.parse_args()
 

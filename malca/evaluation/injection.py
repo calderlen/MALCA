@@ -32,6 +32,23 @@ from malca.baseline import (
     per_camera_median_baseline,
     per_camera_gp_baseline,
 )
+from malca.config.config_pipeline import (
+    WORKERS,
+    LOGBF_THRESHOLD_DIP,
+    LOGBF_THRESHOLD_JUMP,
+    SIGNIFICANCE_THRESHOLD,
+    P_POINTS,
+    MAG_POINTS,
+    MIN_MAG_OFFSET,
+    RUN_MIN_POINTS,
+    RUN_MAX_GAP_POINTS,
+    BASELINE_FUNC,
+    BASELINE_S0,
+    BASELINE_W0,
+    BASELINE_Q,
+    BASELINE_JITTER,
+)
+from malca.config.config_io import INJECTION_CHUNK_SIZE
 
 
 _GLOBAL: dict[str, object] = {}
@@ -1604,41 +1621,41 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
     parser.add_argument("--mag-err-order", type=int, default=5)
     parser.add_argument("--mag-err-sample", type=int, default=100)
 
-    parser.add_argument("--workers", type=int, default=10, help="Parallel workers.")
+    parser.add_argument("--workers", type=int, default=WORKERS, help="Parallel workers.")
     parser.add_argument("--task-size", type=int, default=50, help="Trials per worker task.")
     parser.add_argument("--checkpoint-interval", type=int, default=1000, help="Trials per checkpoint update.")
-    parser.add_argument("--chunk-size", type=int, default=1000, help="Rows per output flush.")
+    parser.add_argument("--chunk-size", type=int, default=INJECTION_CHUNK_SIZE, help="Rows per output flush.")
     parser.add_argument("--max-trials", type=int, default=None, help="Limit total trials (debug).")
     parser.add_argument("--no-resume", action="store_true", help="Disable resume even if checkpoint exists.")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite output/checkpoint.")
 
-    parser.add_argument("--trigger-mode", type=str, default="logbf", choices=["logbf"],
+    parser.add_argument("--trigger-mode", type=str, default=TRIGGER_MODE, choices=["logbf", "posterior_prob"],
                         help="Trigger mode for injection testing")
-    parser.add_argument("--logbf-threshold-dip", type=float, default=5.0)
-    parser.add_argument("--logbf-threshold-jump", type=float, default=5.0)
-    parser.add_argument("--significance-threshold", type=float, default=99.99997)
-    parser.add_argument("--p-points", type=int, default=15)
-    parser.add_argument("--mag-points", type=int, default=12, help="Number of points in the magnitude grid")
+    parser.add_argument("--logbf-threshold-dip", type=float, default=LOGBF_THRESHOLD_DIP)
+    parser.add_argument("--logbf-threshold-jump", type=float, default=LOGBF_THRESHOLD_JUMP)
+    parser.add_argument("--significance-threshold", type=float, default=SIGNIFICANCE_THRESHOLD)
+    parser.add_argument("--p-points", type=int, default=P_POINTS)
+    parser.add_argument("--mag-points", type=int, default=MAG_POINTS, help="Number of points in the magnitude grid")
     parser.add_argument("--p-min-dip", type=float, default=None)
     parser.add_argument("--p-max-dip", type=float, default=None)
     parser.add_argument("--p-min-jump", type=float, default=None)
     parser.add_argument("--p-max-jump", type=float, default=None)
-    parser.add_argument("--run-min-points", type=int, default=2)
-    parser.add_argument("--run-max-gap-points", type=int, default=1)
+    parser.add_argument("--run-min-points", type=int, default=RUN_MIN_POINTS)
+    parser.add_argument("--run-max-gap-points", type=int, default=RUN_MAX_GAP_POINTS)
     parser.add_argument("--run-max-gap-days", type=float, default=None)
     parser.add_argument("--run-min-duration-days", type=float, default=0.0)
     parser.add_argument(
         "--baseline-func",
         type=str,
-        default="gp",
+        default=BASELINE_FUNC,
         choices=["gp", "global_median", "per_camera_median"],
         help="Baseline function",
     )
     # Baseline kwargs (GP kernel parameters)
-    parser.add_argument("--baseline-s0", type=float, default=0.0005, help="GP kernel S0 parameter (default: 0.0005)")
-    parser.add_argument("--baseline-w0", type=float, default=0.0031415926535897933, help="GP kernel w0 parameter (default: pi/1000)")
-    parser.add_argument("--baseline-q", type=float, default=0.7, help="GP kernel Q parameter (default: 0.7)")
-    parser.add_argument("--baseline-jitter", type=float, default=0.006, help="GP jitter term (default: 0.006)")
+    parser.add_argument("--baseline-s0", type=float, default=BASELINE_S0, help="GP kernel S0 parameter (default: 0.0005)")
+    parser.add_argument("--baseline-w0", type=float, default=BASELINE_W0, help="GP kernel w0 parameter (default: pi/1000)")
+    parser.add_argument("--baseline-q", type=float, default=BASELINE_Q, help="GP kernel Q parameter (default: 0.7)")
+    parser.add_argument("--baseline-jitter", type=float, default=BASELINE_JITTER, help="GP jitter term (default: 0.006)")
     parser.add_argument("--baseline-sigma-floor", type=float, default=None, help="Minimum sigma floor (default: None)")
     # Magnitude grid bounds (override auto-detection)
     parser.add_argument("--mag-min-dip", type=float, default=None, help="Min magnitude for dip grid (overrides auto)")
@@ -1649,7 +1666,7 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
                         help="Disable event probability computation for faster runs")
     parser.add_argument("--compute-event-prob", dest="no_event_prob", action="store_false",
                         help="Enable event probability computation (default)")
-    parser.add_argument("--min-mag-offset", type=float, default=0.2,
+    parser.add_argument("--min-mag-offset", type=float, default=MIN_MAG_OFFSET,
                         help="Min magnitude offset for signal amplitude filter (0 to disable, default: 0.2)")
     parser.add_argument("--measure-pre-injection", action="store_true", default=True,
                         help="Measure detection rate on pre-injection light curves (default: enabled)")

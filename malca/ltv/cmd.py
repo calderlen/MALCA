@@ -15,8 +15,15 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 
+from malca.config.config_ltv import (
+    CMD_R_V,
+    CMD_A_G_PER_AV,
+    CMD_E_BP_RP_PER_AV,
+)
+from malca.config.config_paths import MIST_GRID_PATH
 
-DEFAULT_MIST_PATH = Path(__file__).resolve().parents[2] / "input" / "mist" / "mist_cmd_minimal.csv"
+
+DEFAULT_MIST_PATH = MIST_GRID_PATH
 
 
 def _first_existing_column(df: pd.DataFrame, candidates: Iterable[str]) -> str | None:
@@ -51,9 +58,9 @@ def compute_cmd_features(
     distance_pc_col: str | None = None,
     parallax_mas_col: str | None = None,
     av_col: str = "A_v_3d",
-    r_v: float = 3.1,
-    a_g_per_av: float = 0.789,
-    e_bp_rp_per_av: float = 1.3,
+    r_v: float = CMD_R_V,
+    a_g_per_av: float = CMD_A_G_PER_AV,
+    e_bp_rp_per_av: float = CMD_E_BP_RP_PER_AV,
 ) -> pd.DataFrame:
     """
     Compute CMD quantities (BP-RP, M_G), with optional extinction correction.

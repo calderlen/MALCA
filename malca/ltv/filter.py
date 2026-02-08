@@ -26,6 +26,31 @@ from astropy import units as u
 from astropy.coordinates import SkyCoord
 from tqdm.auto import tqdm
 
+from malca.config.config_ltv import (
+    LTV_MIN_SLOPE,
+    LTV_MIN_DIFF,
+    LTV_MIN_DEC,
+    LTV_MAX_PM,
+    LTV_MAX_REDUCED_CHI2,
+    LTV_MAX_SINGLE_JUMP_FRACTION,
+    LTV_MAX_EB_PERIOD_DAYS,
+    LTV_MIN_LS_POWER,
+    LTV_MAX_LS_FAP,
+    LTV_MAX_CROWDING_COUNT,
+    LTV_MATCH_RADIUS_ARCSEC,
+    LTV_CHUNK_SIZE,
+    LTV_GAIA_CHUNK_SIZE,
+    LTV_CROSSMATCH_CHUNK_SIZE,
+    LTV_BRIGHT_STAR_COEFF,
+    LTV_BRIGHT_STAR_MAG_OFFSET,
+    LTV_BRIGHT_STAR_BASE_ARCSEC,
+    LTV_BRIGHT_STAR_MAX_ARCSEC,
+    LTV_BRIGHT_MAG_LIMIT,
+    LTV_MIN_OVERLAP_DAYS,
+    LTV_MIN_OVERLAP_FRACTION,
+    LTV_CROWDING_SEARCH_RADIUS_ARCSEC,
+)
+
 
 # =============================================================================
 # LOGGING UTILITY
@@ -70,7 +95,7 @@ def log_rejections(
 def filter_slope_threshold(
     df: pd.DataFrame,
     *,
-    min_slope: float = 0.03,
+    min_slope: float = LTV_MIN_SLOPE,
     slope_column: str = "Slope",
     verbose: bool = False,
     log_csv: str | Path | None = None,
@@ -99,7 +124,7 @@ def filter_slope_threshold(
 def filter_max_diff_threshold(
     df: pd.DataFrame,
     *,
-    min_diff: float = 0.3,
+    min_diff: float = LTV_MIN_DIFF,
     diff_column: str = "max diff",
     verbose: bool = False,
     log_csv: str | Path | None = None,
@@ -128,7 +153,7 @@ def filter_max_diff_threshold(
 def filter_south_pole(
     df: pd.DataFrame,
     *,
-    min_dec: float = -88.0,
+    min_dec: float = LTV_MIN_DEC,
     dec_column: str = "dec_deg",
     verbose: bool = False,
     log_csv: str | Path | None = None,
@@ -157,7 +182,7 @@ def filter_south_pole(
 def filter_photometric_scatter(
     df: pd.DataFrame,
     *,
-    max_reduced_chi2: float = 5.0,
+    max_reduced_chi2: float = LTV_MAX_REDUCED_CHI2,
     slope_column: str = "Slope",
     dispersion_column: str = "Dispersion",
     median_err_column: str = "Median_err",
@@ -213,7 +238,7 @@ def filter_photometric_scatter(
 def filter_transient_contamination(
     df: pd.DataFrame,
     *,
-    max_single_jump_fraction: float = 0.6,
+    max_single_jump_fraction: float = LTV_MAX_SINGLE_JUMP_FRACTION,
     min_seasons: int = 3,
     coeff1_column: str = "coeff1",
     coeff2_column: str = "coeff2",
@@ -264,9 +289,9 @@ def filter_transient_contamination(
 def filter_eclipsing_binary_signature(
     df: pd.DataFrame,
     *,
-    max_eb_period_days: float = 100.0,
-    min_ls_power: float = 0.3,
-    max_ls_fap: float = 0.01,
+    max_eb_period_days: float = LTV_MAX_EB_PERIOD_DAYS,
+    min_ls_power: float = LTV_MIN_LS_POWER,
+    max_ls_fap: float = LTV_MAX_LS_FAP,
     ls_period_column: str = "ls_period",
     ls_power_column: str = "ls_power",
     ls_fap_column: str = "ls_fap",
@@ -315,9 +340,9 @@ def _batch_gaia_cone_query(
     *,
     select_cols: str,
     extra_where: str = "",
-    match_radius_arcsec: float = 3.0,
-    chunk_size: int = 5000,
-    n_workers: int = 4,
+    match_radius_arcsec: float = LTV_MATCH_RADIUS_ARCSEC,
+    chunk_size: int = LTV_CHUNK_SIZE,
+    n_workers: int = LTV_WORKERS,
     verbose: bool = False,
 ) -> pd.DataFrame:
     """
@@ -389,9 +414,9 @@ def query_gaia_proper_motions_batch(
     *,
     ra_column: str = "ra_deg",
     dec_column: str = "dec_deg",
-    match_radius_arcsec: float = 3.0,
-    chunk_size: int = 5000,
-    n_workers: int = 4,
+    match_radius_arcsec: float = LTV_MATCH_RADIUS_ARCSEC,
+    chunk_size: int = LTV_CHUNK_SIZE,
+    n_workers: int = LTV_WORKERS,
     verbose: bool = False,
 ) -> pd.DataFrame:
     """
@@ -459,11 +484,11 @@ def query_gaia_proper_motions_batch(
 def filter_high_proper_motion(
     df: pd.DataFrame,
     *,
-    max_pm: float = 100.0,
+    max_pm: float = LTV_MAX_PM,
     pm_column: str = "gaia_pm_total",
     query_gaia: bool = True,
-    chunk_size: int = 5000,
-    n_workers: int = 4,
+    chunk_size: int = LTV_CHUNK_SIZE,
+    n_workers: int = LTV_WORKERS,
     verbose: bool = False,
     log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
@@ -509,9 +534,9 @@ def query_nearby_bright_stars_batch(
     ra_column: str = "ra_deg",
     dec_column: str = "dec_deg",
     max_search_radius_deg: float = 1.0,
-    bright_mag_limit: float = 8.0,
-    chunk_size: int = 1000,
-    n_workers: int = 4,
+    bright_mag_limit: float = LTV_BRIGHT_MAG_LIMIT,
+    chunk_size: int = LTV_CROSSMATCH_CHUNK_SIZE,
+    n_workers: int = LTV_WORKERS,
     verbose: bool = False,
 ) -> pd.DataFrame:
     """
@@ -578,15 +603,15 @@ def bright_star_distance_curve(mag: np.ndarray) -> np.ndarray:
       R > 0.2 * exp(12.5 - g) + 70, capped at 3600 arcsec.
     """
     mag = np.asarray(mag, dtype=float)
-    dist = 0.2 * np.exp(12.5 - mag) + 70.0
-    return np.clip(dist, 0.0, 3600.0)
+    dist = LTV_BRIGHT_STAR_COEFF * np.exp(LTV_BRIGHT_STAR_MAG_OFFSET - mag) + LTV_BRIGHT_STAR_BASE_ARCSEC
+    return np.clip(dist, 0.0, LTV_BRIGHT_STAR_MAX_ARCSEC)
 
 
 def filter_vg_overlap(
     df: pd.DataFrame,
     *,
-    min_overlap_days: float = 30.0,
-    min_overlap_fraction: float = 0.1,
+    min_overlap_days: float = LTV_MIN_OVERLAP_DAYS,
+    min_overlap_fraction: float = LTV_MIN_OVERLAP_FRACTION,
     has_v_col: str = "vg_has_v",
     overlap_days_col: str = "vg_overlap_days",
     overlap_frac_col: str = "vg_overlap_fraction",
@@ -627,8 +652,8 @@ def filter_bright_star_artifacts(
     df: pd.DataFrame,
     *,
     query_gaia: bool = True,
-    chunk_size: int = 1000,
-    n_workers: int = 4,
+    chunk_size: int = LTV_CROSSMATCH_CHUNK_SIZE,
+    n_workers: int = LTV_WORKERS,
     verbose: bool = False,
     log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
@@ -674,10 +699,10 @@ def query_crowding_batch(
     *,
     ra_column: str = "ra_deg",
     dec_column: str = "dec_deg",
-    search_radius_arcsec: float = 30.0,
+    search_radius_arcsec: float = LTV_CROWDING_SEARCH_RADIUS_ARCSEC,
     target_mag_column: str = "Pstarss gmag",
-    chunk_size: int = 2000,
-    n_workers: int = 4,
+    chunk_size: int = LTV_GAIA_CHUNK_SIZE,
+    n_workers: int = LTV_WORKERS,
     verbose: bool = False,
 ) -> pd.DataFrame:
     """
@@ -748,10 +773,10 @@ def query_crowding_batch(
 def filter_crowding(
     df: pd.DataFrame,
     *,
-    max_crowding_count: int = 20,
+    max_crowding_count: int = LTV_MAX_CROWDING_COUNT,
     query_gaia: bool = True,
-    chunk_size: int = 2000,
-    n_workers: int = 4,
+    chunk_size: int = LTV_GAIA_CHUNK_SIZE,
+    n_workers: int = LTV_WORKERS,
     verbose: bool = False,
     log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
@@ -793,20 +818,20 @@ def apply_all_filters(
     df: pd.DataFrame,
     *,
     # Basic thresholds
-    min_slope: float = 0.03,
-    min_diff: float = 0.3,
-    min_dec: float = -88.0,
-    max_pm: float = 100.0,
+    min_slope: float = LTV_MIN_SLOPE,
+    min_diff: float = LTV_MIN_DIFF,
+    min_dec: float = LTV_MIN_DEC,
+    max_pm: float = LTV_MAX_PM,
     # Enhanced filter thresholds
-    max_reduced_chi2: float = 5.0,
-    max_single_jump_fraction: float = 0.6,
-    max_eb_period_days: float = 100.0,
-    max_crowding_count: int = 20,
+    max_reduced_chi2: float = LTV_MAX_REDUCED_CHI2,
+    max_single_jump_fraction: float = LTV_MAX_SINGLE_JUMP_FRACTION,
+    max_eb_period_days: float = LTV_MAX_EB_PERIOD_DAYS,
+    max_crowding_count: int = LTV_MAX_CROWDING_COUNT,
     # Options
     run_enhanced_filters: bool = True,
     query_gaia: bool = True,
-    chunk_size: int = 5000,
-    n_workers: int = 4,
+    chunk_size: int = LTV_CHUNK_SIZE,
+    n_workers: int = LTV_WORKERS,
     verbose: bool = False,
     log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
