@@ -388,6 +388,8 @@ def main():
     parser.add_argument("--spectra-chunk-size", type=int, default=SPECTRA_CHUNK_SIZE, help="Bulk chunk size for spectra lookups")
     parser.add_argument("--spectra-cache", type=Path, default=None, help="Optional cache parquet path for spectra lookups")
 
+    parser.add_argument("--test-run", action="store_true", help="Limit the number of light curves processed (for quick end-to-end validation)")
+    parser.add_argument("--test-run-n", type=int, default=10000, help="Number of light curves to sample in test-run mode (default: 10000)")
     parser.add_argument("-o", "--overwrite", action="store_true", help="Overwrite checkpoint log and existing output if present (start fresh).")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output")
 
@@ -829,6 +831,11 @@ def main():
             log(f"\nLoading existing filtered manifest from {filtered_file}")
             df_filtered = pd.read_parquet(filtered_file)
             log(f"Loaded {len(df_filtered)} filtered sources")
+
+    # Test-run sampling: cap sources to limit expensive downstream steps
+    if run_upstream and args.test_run and len(df_filtered) > args.test_run_n:
+        log(f"\n[TEST RUN] Sampling {args.test_run_n}/{len(df_filtered)} sources")
+        df_filtered = df_filtered.sample(n=args.test_run_n, random_state=42).reset_index(drop=True)
 
     # Step 2.5: Apply camera median filter to identify cameras to exclude
     if run_upstream and (not args.skip_camera_median) and ("mag_bin" in df_filtered.columns):
