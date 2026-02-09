@@ -965,7 +965,7 @@ def main():
         events_cmd = [
             sys.executable, "-m", "malca.events",
             *events_args,
-            "--",
+            "--input",
             *batch_paths,
         ]
 
