@@ -20,6 +20,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import shutil
 from datetime import datetime
 import shlex
 import subprocess
@@ -41,7 +42,7 @@ from malca.characterize import characterize_candidates_df
 from malca.enrich.neighbor import run_neighbor_enrichment
 from malca.enrich.spectra import run_spectra_availability
 from malca.config.config_io import PARQUET_OUTPUT_COMPRESSION
-from malca.config.config_paths import LCV2_ROOT, VSX_CROSSMATCH_PATH
+from malca.config.config_paths import ASASSN_INDEX_PATH, LCV2_ROOT, VSX_CROSSMATCH_PATH
 from malca.config.config_pipeline import (
     WORKERS, BATCH_SIZE, TRIGGER_MODE, P_POINTS, MAG_POINTS,
     LOGBF_THRESHOLD_DIP, LOGBF_THRESHOLD_JUMP, SIGNIFICANCE_THRESHOLD,
@@ -134,6 +135,7 @@ def export_bundle_zip(bundle_zip: Path, out_dir: Path) -> list[str]:
         "run_params.json",
         "run_summary.json",
         "run.log",
+        "bundle_assets/asassn_index_full.parquet",
         "results/lc_events_filtered.parquet",
         "results/lc_events_enriched.parquet",
         "results/lc_events_characterized.parquet",
@@ -342,13 +344,13 @@ def main():
     parser.add_argument("--periodic-catalog-max-sep", type=float, default=3.0, help="Maximum separation for periodic-catalog matching in arcsec (default: 3.0)")
     parser.add_argument("--periodic-catalog-reject", action="store_true", help="Reject periodic-catalog matches instead of flagging only")
 
-    # Step 6: Postprocess args (enabled by default)
+    # Step 7: Postprocess args (enabled by default)
     parser.add_argument("--run-postprocess", dest="run_postprocess", action="store_true", help="Run postprocess (generate plots) after post_filter (default: enabled)")
     parser.add_argument("--no-run-postprocess", dest="run_postprocess", action="store_false", help="Skip postprocess step")
     parser.add_argument("--max-plots", type=int, default=None, help="Limit number of plots generated (default: no limit)")
     parser.add_argument("--plot-format", type=str, default="png", choices=["png", "pdf"], help="Output format for plots (default: png)")
 
-    # Step 7: Characterization args (enabled by default)
+    # Step 8: Characterization args (enabled by default)
     parser.add_argument("--run-characterize", dest="run_characterize", action="store_true", help="Run Gaia DR3 characterization after post_filter (default: enabled)")
     parser.add_argument("--no-run-characterize", dest="run_characterize", action="store_false", help="Skip characterization step")
     parser.add_argument("--gaia-cache", type=Path, default=None, help="Path to Gaia query cache file (parquet). Default: <out_dir>/gaia_cache/gaia_cache.parquet")
@@ -363,11 +365,11 @@ def main():
     parser.add_argument("--run-dust", dest="run_dust", action="store_true", help="Run 3D dust extinction correction (default: enabled)")
     parser.add_argument("--no-run-dust", dest="run_dust", action="store_false", help="Skip dust extinction step")
 
-    # Step 8: Classify args (enabled by default)
+    # Step 9: Classify args (enabled by default)
     parser.add_argument("--run-classify", dest="run_classify", action="store_true", help="Run classification (EB/CV/starspot rejection, YSO) (default: enabled)")
     parser.add_argument("--no-run-classify", dest="run_classify", action="store_false", help="Skip classification step")
 
-    # Step 9: Enrich args (enabled by default)
+    # Step 6: Enrich args (enabled by default)
     parser.add_argument("--run-enrich", dest="run_enrich", action="store_true", help="Enrich passing candidates with comprehensive light curve stats (default: enabled)")
     parser.add_argument("--no-run-enrich", dest="run_enrich", action="store_false", help="Skip enrichment step")
     parser.add_argument("--enrich-compute-ls", action="store_true", help="Include Lomb-Scargle periodogram in enrichment (expensive)")
@@ -682,11 +684,11 @@ def main():
             "skip_periodic_catalog_validation": args.skip_periodic_catalog_validation,
             "periodic_catalog_max_sep": args.periodic_catalog_max_sep,
             "periodic_catalog_reject": args.periodic_catalog_reject,
-            # Step 6: Postprocess
+            # Step 7: Postprocess
             "run_postprocess": args.run_postprocess,
             "max_plots": args.max_plots,
             "plot_format": args.plot_format,
-            # Step 7: Characterization
+            # Step 8: Characterization
             "run_characterize": args.run_characterize,
             "run_dust": args.run_dust,
             "gaia_cache": str(args.gaia_cache),
@@ -698,9 +700,9 @@ def main():
             "characterize_sfr": args.characterize_sfr,
             "characterize_clusters": args.characterize_clusters,
             "characterize_unwise": args.characterize_unwise,
-            # Step 8: Classify
+            # Step 9: Classify
             "run_classify": args.run_classify,
-            # Step 9: Enrich
+            # Step 6: Enrich
             "run_enrich": args.run_enrich,
             "enrich_compute_ls": args.enrich_compute_ls,
             # Step 10: Neighbor enrichment
@@ -1052,7 +1054,12 @@ def main():
                 df_events = load_table(results_files[0])
 
             # Apply post-filters
-            df_post_filtered = apply_post_filters(df_events, **_build_post_filter_kwargs(args))
+            post_filter_kwargs = _build_post_filter_kwargs(args)
+            if stage == "cluster":
+                # Cluster stage must avoid internet catalog lookups.
+                post_filter_kwargs["apply_gaia_ruwe_validation"] = False
+                post_filter_kwargs["apply_periodic_catalog_validation"] = False
+            df_post_filtered = apply_post_filters(df_events, **post_filter_kwargs)
 
             # Save filtered results
             post_filter_output = results_dir / "lc_events_filtered.parquet"
@@ -1081,12 +1088,12 @@ def main():
                 import traceback
                 traceback.print_exc()
 
-    # Step 9: Enrich with compute_stats (optional, runs immediately after post-filter)
+    # Step 6: Enrich with compute_stats (optional, runs immediately after post-filter)
     if run_upstream and args.run_enrich:
         if not args.run_post_filter:
             print("Warning: --run-enrich requires --run-post-filter. Skipping enrichment.")
         else:
-            log("\n=== Step 9: Enriching with light curve stats ===")
+            log("\n=== Step 6: Enriching with light curve stats ===")
             try:
                 # Enrichment now runs directly from post-filter output
                 post_filter_output = results_dir / "lc_events_filtered.parquet"
@@ -1167,12 +1174,12 @@ def main():
                     import traceback
                     traceback.print_exc()
 
-    # Step 6: Generate candidate plots (optional)
+    # Step 7: Generate candidate plots (optional)
     if run_upstream and args.run_postprocess:
         if not args.run_post_filter:
             print("Warning: --run-postprocess requires --run-post-filter. Skipping postprocess.")
         else:
-            log("\n=== Step 6: Generating candidate plots ===")
+            log("\n=== Step 7: Generating candidate plots ===")
             try:
                 post_filter_output = results_dir / "lc_events_filtered.parquet"
                 if post_filter_output.exists():
@@ -1210,12 +1217,72 @@ def main():
     post_filter_output = results_dir / "lc_events_filtered.parquet"
     has_post_filter_output = post_filter_output.exists()
 
+    # Home-only external catalog validations (Gaia RUWE + periodic catalog)
+    if stage == "home" and args.run_post_filter and has_post_filter_output:
+        log("\n=== Home External Validation: Gaia RUWE + periodic catalog ===")
+        try:
+            bundled_index = out_dir / "bundle_assets" / "asassn_index_full.parquet"
+            if bundled_index.exists():
+                index_file = bundled_index
+            else:
+                index_file = ASASSN_INDEX_PATH.expanduser()
+
+            if not index_file.exists():
+                raise FileNotFoundError(
+                    f"Index file not found for home external validation: {index_file}. "
+                    "Expected bundle_assets/asassn_index_full.parquet from export bundle."
+                )
+
+            external_validation_cmd = [
+                sys.executable,
+                "-m",
+                "malca.post_filter",
+                "--input",
+                str(post_filter_output),
+                "--output",
+                str(post_filter_output),
+                "--index-file",
+                str(index_file),
+                "--skip-evidence-strength",
+                "--skip-run-robustness",
+                "--gaia-max-ruwe",
+                str(args.gaia_max_ruwe),
+                "--periodic-catalog-max-sep",
+                str(args.periodic_catalog_max_sep),
+            ]
+            if args.gaia_reject:
+                external_validation_cmd.append("--gaia-reject")
+            if args.periodic_catalog_reject:
+                external_validation_cmd.append("--periodic-catalog-reject")
+            if args.skip_gaia_ruwe_validation:
+                external_validation_cmd.append("--skip-gaia-ruwe-validation")
+            if args.skip_periodic_catalog_validation:
+                external_validation_cmd.append("--skip-periodic-catalog-validation")
+            if not args.verbose:
+                external_validation_cmd.append("--no-tqdm")
+            if args.verbose:
+                external_validation_cmd.append("--verbose")
+
+            result = subprocess.run(external_validation_cmd, check=False)
+            if result.returncode != 0:
+                print(f"Home external validation failed with exit code {result.returncode}")
+                sys.exit(result.returncode)
+
+            has_post_filter_output = post_filter_output.exists()
+            log(f"Home external validation wrote updated filtered results to {post_filter_output}")
+        except Exception as e:
+            print(f"Error in home external validation step: {e}")
+            if args.verbose:
+                import traceback
+                traceback.print_exc()
+            sys.exit(1)
+
     if run_downstream and (args.run_characterize or args.run_dust) and (not has_post_filter_output):
         print(f"Warning: downstream stage requires filtered results at {post_filter_output}. Skipping characterization.")
 
-    # Step 7: Characterization + dust (optional)
+    # Step 8: Characterization + dust (optional)
     if run_downstream and (args.run_characterize or args.run_dust) and has_post_filter_output:
-        log("\n=== Step 7: Characterizing candidates ===")
+        log("\n=== Step 8: Characterizing candidates ===")
         try:
             df_char = load_table(post_filter_output)
 
@@ -1255,12 +1322,12 @@ def main():
                 import traceback
                 traceback.print_exc()
 
-    # Step 8: Run classification (optional)
+    # Step 9: Run classification (optional)
     if run_downstream and args.run_classify:
         if not has_post_filter_output:
             print(f"Warning: downstream stage requires filtered results at {post_filter_output}. Skipping classification.")
         else:
-            log("\n=== Step 8: Running classification ===")
+            log("\n=== Step 9: Running classification ===")
             try:
                 characterize_output = results_dir / "lc_events_characterized.parquet"
                 post_filter_output = results_dir / "lc_events_filtered.parquet"
@@ -1439,6 +1506,19 @@ def main():
 
     if args.export_bundle is not None:
         try:
+            source_index_file = ASASSN_INDEX_PATH.expanduser()
+            if source_index_file.exists():
+                bundle_assets_dir = out_dir / "bundle_assets"
+                bundle_assets_dir.mkdir(parents=True, exist_ok=True)
+                bundle_index_file = bundle_assets_dir / "asassn_index_full.parquet"
+                if (not bundle_index_file.exists()) or (bundle_index_file.stat().st_size != source_index_file.stat().st_size):
+                    log(f"Copying full index into bundle assets: {source_index_file} -> {bundle_index_file}")
+                    shutil.copy2(source_index_file, bundle_index_file)
+            else:
+                raise FileNotFoundError(
+                    f"Required index file not found for bundle export: {source_index_file}"
+                )
+
             bundled = export_bundle_zip(args.export_bundle, out_dir)
             log(f"Exported bundle to {args.export_bundle.expanduser()} with {len(bundled)} files")
         except Exception as e:
