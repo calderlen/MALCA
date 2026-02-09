@@ -24,7 +24,7 @@ dependencies = [
     "astroquery>=0.4.6",
     "dustmaps3d",
     "pyvo",
-    "banyan-sigma",
+    "banyan-sigma @ git+https://github.com/jgagneastro/banyan_sigma.git",
     "requests",
     "joblib",
     "pytest",
