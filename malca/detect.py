@@ -97,6 +97,25 @@ def default_run_dir(base_root: Path) -> Path:
     return base_root / "runs" / timestamp
 
 
+def find_latest_run_dir(base_root: Path, mag_bin: list[str]) -> Path | None:
+    """Find the most recent run directory matching the given mag bin(s)."""
+    runs_dir = base_root / "runs"
+    if not runs_dir.is_dir():
+        return None
+    for d in sorted(runs_dir.iterdir(), reverse=True):
+        if not d.is_dir():
+            continue
+        params_file = d / "run_params.json"
+        if not params_file.exists():
+            continue
+        import json
+        with open(params_file) as f:
+            params = json.load(f)
+        if params.get("mag_bin") == mag_bin:
+            return d  # sorted reverse by timestamp, first match is latest
+    return None
+
+
 def clear_existing_output(path: Path | None, fmt: str) -> None:
     if path is None or (not path.exists()):
         return
@@ -488,7 +507,11 @@ def main():
     elif args.output is not None:
         out_dir = Path(args.output).expanduser().parent
     else:
-        out_dir = default_run_dir(base_output_root)
+        out_dir = find_latest_run_dir(base_output_root, args.mag_bin)
+        if out_dir is not None:
+            log(f"Reusing existing run directory: {out_dir}")
+        else:
+            out_dir = default_run_dir(base_output_root)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if args.import_bundle is not None:
