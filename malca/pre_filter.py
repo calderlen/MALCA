@@ -333,7 +333,7 @@ def filter_sparse_lightcurves(
 def attach_vsx_info(
     df: pd.DataFrame,
     *,
-    vsx_crossmatch_csv: str | Path | None = "input/vsx/asassn_x_vsx_matches_20250919_2252.csv",
+    vsx_crossmatch_csv: str | Path | None = "input/vsx/asassn_x_vsx_matches_20250919_2252_compat.csv",
 ) -> pd.DataFrame:
     """
     Attach VSX crossmatch info (vsx_sep_arcsec/vsx_class) to the dataframe.
@@ -345,7 +345,29 @@ def attach_vsx_info(
     if vsx_crossmatch_csv is None:
         raise ValueError("vsx_crossmatch_csv is required to attach VSX info.")
 
-    xmatch = pd.read_csv(vsx_crossmatch_csv, usecols=["asas_sn_id", "vsx_sep_arcsec", "vsx_class"])
+    vsx_crossmatch_csv = Path(vsx_crossmatch_csv)
+    if not vsx_crossmatch_csv.exists() and vsx_crossmatch_csv.name.endswith("_compat.csv"):
+        fallback_csv = vsx_crossmatch_csv.with_name(vsx_crossmatch_csv.name.replace("_compat.csv", ".csv"))
+        if fallback_csv.exists():
+            vsx_crossmatch_csv = fallback_csv
+
+    xmatch = pd.read_csv(vsx_crossmatch_csv)
+    rename_map = {}
+    if "vsx_sep_arcsec" not in xmatch.columns and "sep_arcsec" in xmatch.columns:
+        rename_map["sep_arcsec"] = "vsx_sep_arcsec"
+    if "vsx_class" not in xmatch.columns and "class" in xmatch.columns:
+        rename_map["class"] = "vsx_class"
+    if rename_map:
+        xmatch = xmatch.rename(columns=rename_map)
+
+    missing_cols = [c for c in ("asas_sn_id", "vsx_sep_arcsec", "vsx_class") if c not in xmatch.columns]
+    if missing_cols:
+        raise ValueError(
+            f"VSX crossmatch file {vsx_crossmatch_csv} is missing required columns {missing_cols}. "
+            f"Found columns: {list(xmatch.columns)}"
+        )
+
+    xmatch = xmatch[["asas_sn_id", "vsx_sep_arcsec", "vsx_class"]]
     xmatch["asas_sn_id"] = xmatch["asas_sn_id"].astype(str)
     id_col = get_id_col(df)
     df = df.copy()
@@ -361,7 +383,7 @@ def filter_vsx_match(
     *,
     max_sep_arcsec: float = 3.0,
     exclude_classes: list[str] | None = None,
-    vsx_crossmatch_csv: str | Path | None = "input/vsx/asassn_x_vsx_matches_20250919_2252.csv",
+    vsx_crossmatch_csv: str | Path | None = "input/vsx/asassn_x_vsx_matches_20250919_2252_compat.csv",
     show_tqdm: bool = False,
     rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
@@ -621,7 +643,7 @@ def apply_pre_filters(
     apply_vsx: bool = False,
     vsx_max_sep_arcsec: float = 3.0,
     vsx_exclude_classes: list[str] | None = None,
-    vsx_crossmatch_csv: str | Path = "input/vsx/asassn_x_vsx_matches_20250919_2252.csv",
+    vsx_crossmatch_csv: str | Path = "input/vsx/asassn_x_vsx_matches_20250919_2252_compat.csv",
     vsx_mode: str = "filter",
     # Filter 2: sparse lightcurves
     apply_sparse: bool = True,
