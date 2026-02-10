@@ -1,5 +1,5 @@
 # Core dependencies
-numpy>=2.0
+numpy
 pandas
 scipy
 numba
@@ -7,7 +7,7 @@ tqdm
 matplotlib
 astropy
 celerite2
-pyarrow>=15.0
+pyarrow
 
 # Optional: visualization
 plotly

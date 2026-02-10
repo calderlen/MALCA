@@ -158,8 +158,8 @@ def compute_symmetry_score(
     t_egress = jd[center_idx:end_idx + 1]
     resid_egress = resid[center_idx:end_idx + 1]
 
-    I_ingress = np.trapezoid(resid_ingress, t_ingress)
-    I_egress = np.trapezoid(resid_egress, t_egress)
+    I_ingress = np.trapz(resid_ingress, t_ingress)
+    I_egress = np.trapz(resid_egress, t_egress)
 
     denominator = np.sqrt(I_ingress**2 + I_egress**2)
     if denominator < 1e-10:
@@ -1562,7 +1562,10 @@ def main():
             df_chunk = pd.DataFrame(chunk_results)
             table = pa.Table.from_pandas(df_chunk, preserve_index=False)
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            pq.write_table(table, self.path, compression=PARQUET_OUTPUT_COMPRESSION, append=self.append)
+            if self.append:
+                existing = pq.read_table(self.path)
+                table = pa.concat_tables([existing, table])
+            pq.write_table(table, self.path, compression=PARQUET_OUTPUT_COMPRESSION)
             self.append = True
 
         def close(self):
