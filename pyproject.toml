@@ -21,6 +21,7 @@ dependencies = [
     "pyarrow",
     "plotly",
     "streamlit>=1.30",
+    "watchdog",
     "astroquery>=0.4.6",
     "dustmaps3d",
     "pyvo",

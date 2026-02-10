@@ -513,7 +513,7 @@ def main():
 
     # IMPORTANT: never write to filesystem root (/output). Default to a writable directory.
     events_format = str(args.output_format).lower()
-    base_output_root = Path("/home/lenhart.106/code/malca/output")
+    base_output_root = Path("output").resolve()
     if args.out_dir is not None:
         out_dir = Path(args.out_dir).expanduser()
     elif args.import_bundle is not None:
