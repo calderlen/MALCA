@@ -116,6 +116,22 @@ def find_latest_run_dir(base_root: Path, mag_bin: list[str]) -> Path | None:
     return None
 
 
+def get_out_dir_from_bundle(bundle_path: Path, base_root: Path) -> Path:
+    """Extract run directory name from bundle filename."""
+    bundle_name = bundle_path.stem  # e.g., "20260209_162336_bundle" -> "20260209_162336_bundle"
+    base_name = bundle_name.removesuffix("_bundle")  # Always strip _bundle
+
+    runs_dir = base_root / "runs"
+    runs_dir.mkdir(parents=True, exist_ok=True)
+
+    candidate = runs_dir / base_name
+    if not candidate.exists():
+        return candidate
+
+    # If exists, append _home
+    return runs_dir / f"{base_name}_home"
+
+
 def clear_existing_output(path: Path | None, fmt: str) -> None:
     if path is None or (not path.exists()):
         return
@@ -500,6 +516,11 @@ def main():
     base_output_root = Path("/home/lenhart.106/code/malca/output")
     if args.out_dir is not None:
         out_dir = Path(args.out_dir).expanduser()
+    elif args.import_bundle is not None:
+        # Auto-derive out_dir from bundle name
+        bundle_path = Path(args.import_bundle).expanduser()
+        out_dir = get_out_dir_from_bundle(bundle_path, base_output_root)
+        log(f"Using output directory from bundle name: {out_dir}")
     elif args.filtered_file is not None:
         out_dir = Path(args.filtered_file).expanduser().parent
     elif args.manifest_file is not None:
