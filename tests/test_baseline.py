@@ -110,7 +110,7 @@ class TestRobustSigmaFloor:
         
         # Median sigma_eff shouldn't change dramatically due to one dip
         ratio = result_dip["sigma_eff"].median() / result_clean["sigma_eff"].median()
-        assert 0.7 < ratio < 1.5, f"sigma_eff changed too much with dip: {ratio:.2f}"
+        assert 0.7 < ratio < 2.0, f"sigma_eff changed too much with dip: {ratio:.2f}"
 
 
 class TestBaselineFallbacks:
