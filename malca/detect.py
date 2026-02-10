@@ -951,10 +951,13 @@ def main():
             camera_median_df = df_filtered.copy()
             if "dat_path" in camera_median_df.columns:
                 camera_median_df["path"] = camera_median_df["dat_path"]
+            camera_median_checkpoint = prefilter_dir / f"camera_medians_{mag_bin_tag}_CHECKPOINT.parquet"
             df_camera = filter_camera_medians(
                 camera_median_df,
                 mag_tolerance=args.camera_median_tolerance,
                 show_tqdm=args.verbose,
+                n_workers=args.workers,
+                checkpoint_path=str(camera_median_checkpoint),
             )
             df_filtered["excluded_cameras"] = df_camera["excluded_cameras"]
             safe_write_parquet(df_filtered[["source_id", "excluded_cameras"]], camera_median_file)

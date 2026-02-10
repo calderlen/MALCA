@@ -528,6 +528,45 @@ def _read_raw2_camera_stats(raw2_path: Path) -> pd.DataFrame:
         return pd.DataFrame(columns=RAW2_COLUMNS)
 
 
+def _process_camera_median_row(
+    asas_sn_id: str,
+    path_str: str,
+    mag_bin: str,
+    mag_tolerance: float
+) -> tuple[str, str]:
+    """
+    Helper for parallel camera median filtering.
+    """
+    try:
+        path = Path(path_str)
+        if path.is_dir():
+            return asas_sn_id, ""
+
+        raw2_path = path.with_suffix(".raw2")
+        stats = _read_raw2_camera_stats(raw2_path)
+
+        if stats.empty:
+            return asas_sn_id, ""
+
+        mag_range = _parse_mag_bin_range(mag_bin)
+        if mag_range is None:
+            return asas_sn_id, ""
+
+        mag_min = mag_range[0] - mag_tolerance
+        mag_max = mag_range[1] + mag_tolerance
+
+        bad_cameras = stats[
+            (stats["median"] < mag_min) | (stats["median"] > mag_max)
+        ]["camera"].astype(int).tolist()
+
+        if bad_cameras:
+            return asas_sn_id, ",".join(map(str, bad_cameras))
+        
+        return asas_sn_id, ""
+    except Exception:
+        return asas_sn_id, ""
+
+
 def filter_camera_medians(
     df: pd.DataFrame,
     *,
@@ -535,103 +574,151 @@ def filter_camera_medians(
     show_tqdm: bool = False,
     n_workers: int = 1,
     rejected_log_csv: str | Path | None = None,
+    checkpoint_path: str | Path | None = None,
+    chunk_size: int = 5000,
 ) -> pd.DataFrame:
     """
     Identify cameras with median magnitudes outside the expected mag bin range.
-
+    Supports parallel execution and checkpointing.
+    
     Adds 'excluded_cameras' column (comma-separated camera IDs to exclude).
-    Does NOT reject sources - just marks which cameras to skip during LC loading.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Input dataframe with 'path' and 'mag_bin' columns
-    mag_tolerance : float
-        Tolerance beyond mag bin edges (default 0.2). Camera is excluded if
-        its median falls outside [mag_min - tolerance, mag_max + tolerance].
-    show_tqdm : bool
-        Show progress bar
-    n_workers : int
-        Number of parallel workers (not yet implemented, placeholder)
-
-    Returns
-    -------
-    pd.DataFrame
-        Input dataframe with added 'excluded_cameras' column containing
-        comma-separated camera IDs outside the expected magnitude range.
-
-    Notes
-    -----
-    The .raw2 file format:
-        camera_id median 1sig_low 1sig_high 90pct_low 90pct_high
-
-    Example (from guidance):
-        1   14.0666       14.0395       14.0981       14.0233 14.1128
-        6   12.9477       12.9177       12.9683       12.8972 12.9810
-
-    If mag_bin is 14_14.5, camera 6 (median 12.9) would be excluded.
     """
     if "path" not in df.columns:
         raise ValueError("Need 'path' column to find .raw2 files")
     if "mag_bin" not in df.columns:
         raise ValueError("Need 'mag_bin' column to determine expected magnitude range")
 
-    excluded_cameras_list = []
-    n_excluded_total = 0
-
-    paths = df["path"].astype(str).tolist()
-    mag_bins = df["mag_bin"].astype(str).tolist()
-
-    iterator = zip(paths, mag_bins)
-    if show_tqdm:
-        iterator = tqdm(list(iterator), desc="filter_camera_medians", leave=False)
-
-    for path_str, mag_bin in iterator:
-        path = Path(path_str)
-
-        # Determine .raw2 path (same as .dat2 but different extension)
-        if path.is_dir():
-            # path is directory, need source_id to construct filename
-            # This case requires the dat2 filename - skip for now
-            excluded_cameras_list.append("")
-            continue
-
-        raw2_path = path.with_suffix(".raw2")
-        stats = _read_raw2_camera_stats(raw2_path)
-
-        if stats.empty:
-            excluded_cameras_list.append("")
-            continue
-
-        mag_range = _parse_mag_bin_range(mag_bin)
-        if mag_range is None:
-            excluded_cameras_list.append("")
-            continue
-
-        mag_min = mag_range[0] - mag_tolerance
-        mag_max = mag_range[1] + mag_tolerance
-
-        # Find cameras with medians outside the expected range
-        bad_cameras = stats[
-            (stats["median"] < mag_min) | (stats["median"] > mag_max)
-        ]["camera"].astype(int).tolist()
-
-        if bad_cameras:
-            excluded_cameras_list.append(",".join(map(str, bad_cameras)))
-            n_excluded_total += len(bad_cameras)
-        else:
-            excluded_cameras_list.append("")
-
+    id_col = get_id_col(df)
+    
+    # Initialize results container
     df_out = df.copy()
-    df_out["excluded_cameras"] = excluded_cameras_list
+    
+    # Load checkpoint if exists
+    checkpoint_df = None
+    already_processed = set()
+    
+    if checkpoint_path is not None:
+        checkpoint_path = Path(checkpoint_path)
+        if checkpoint_path.exists():
+            try:
+                checkpoint_df = pd.read_parquet(checkpoint_path)
+                if id_col in checkpoint_df.columns:
+                    checkpoint_df[id_col] = checkpoint_df[id_col].astype(str)
+                    already_processed = set(checkpoint_df[id_col])
+                    if show_tqdm:
+                        tqdm.write(f"[filter_camera_medians] Loaded checkpoint with {len(checkpoint_df)} rows")
+            except Exception as e:
+                if show_tqdm:
+                    tqdm.write(f"[filter_camera_medians] Warning: Could not load checkpoint: {e}")
 
+    # Prepare tasks
+    tasks = []
+    df_out[id_col] = df_out[id_col].astype(str)
+    
+    for idx, row in df_out.iterrows():
+        asas_sn_id = str(row[id_col])
+        if asas_sn_id in already_processed:
+            continue
+            
+        path_str = str(row["path"])
+        mag_bin = str(row["mag_bin"])
+        tasks.append((asas_sn_id, path_str, mag_bin))
+
+    # If everything is checkpointed, just merge and return
+    if not tasks and checkpoint_df is not None:
+        if show_tqdm:
+            tqdm.write("[filter_camera_medians] All rows found in checkpoint.")
+        
+        # Merge checkpoint results
+        checkpoint_subset = checkpoint_df[[id_col, "excluded_cameras"]].drop_duplicates(subset=[id_col])
+        df_out = df_out.merge(checkpoint_subset, on=id_col, how="left")
+        
+        # Fill NaN with empty string
+        if "excluded_cameras" in df_out.columns:
+            df_out["excluded_cameras"] = df_out["excluded_cameras"].fillna("")
+        else:
+             df_out["excluded_cameras"] = ""
+             
+        return df_out
+
+    # Container for new results
+    new_results = []
+    
     if show_tqdm:
-        n_sources_with_exclusions = sum(1 for x in excluded_cameras_list if x)
-        tqdm.write(
-            f"[filter_camera_medians] {n_sources_with_exclusions}/{len(df)} sources have excluded cameras "
-            f"({n_excluded_total} total cameras excluded)"
-        )
+        tqdm.write(f"[filter_camera_medians] Processing {len(tasks)} rows with {n_workers} workers")
 
+    # Function to save checkpoint
+    def save_checkpoint(current_results):
+        if checkpoint_path is None:
+            return
+            
+        new_df = pd.DataFrame(current_results, columns=[id_col, "excluded_cameras"])
+        
+        if checkpoint_df is not None:
+            combined = pd.concat([checkpoint_df, new_df], ignore_index=True)
+        else:
+            combined = new_df
+            
+        combined = combined.drop_duplicates(subset=[id_col], keep="last")
+        
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        combined.to_parquet(checkpoint_path, index=False, compression=PARQUET_CACHE_COMPRESSION)
+
+    # Run in parallel
+    pbar = tqdm(total=len(tasks), desc="filter_camera_medians", leave=False, disable=not show_tqdm)
+    
+    # If n_workers is 1, run sequentially to avoid overhead
+    if n_workers <= 1:
+        for item in tasks:
+            tid, tpath, tbin = item
+            res_id, res_str = _process_camera_median_row(tid, tpath, tbin, mag_tolerance)
+            new_results.append((res_id, res_str))
+            pbar.update(1)
+            
+            if len(new_results) % chunk_size == 0:
+                save_checkpoint(new_results)
+    else:
+        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+            # Submit in chunks
+            for i in range(0, len(tasks), chunk_size):
+                chunk = tasks[i : i + chunk_size]
+                futures = [
+                    executor.submit(_process_camera_median_row, tid, tpath, tbin, mag_tolerance)
+                    for tid, tpath, tbin in chunk
+                ]
+                
+                chunk_results = []
+                for future in as_completed(futures):
+                    res_id, res_str = future.result()
+                    chunk_results.append((res_id, res_str))
+                    pbar.update(1)
+                
+                new_results.extend(chunk_results)
+                save_checkpoint(new_results)
+
+    pbar.close()
+    
+    # Final save
+    save_checkpoint(new_results)
+    
+    # Final merge
+    new_results_df = pd.DataFrame(new_results, columns=[id_col, "excluded_cameras"])
+    
+    if checkpoint_df is not None:
+        final_results_df = pd.concat([checkpoint_df, new_results_df], ignore_index=True)
+    else:
+        final_results_df = new_results_df
+        
+    final_results_df = final_results_df.drop_duplicates(subset=[id_col], keep="last")
+    
+    df_out = df_out.drop(columns=["excluded_cameras"], errors="ignore")
+    df_out = df_out.merge(final_results_df, on=id_col, how="left")
+    df_out["excluded_cameras"] = df_out["excluded_cameras"].fillna("")
+    
+    if show_tqdm:
+        n_excluded = sum(1 for x in df_out["excluded_cameras"] if x)
+        tqdm.write(f"[filter_camera_medians] {n_excluded}/{len(df_out)} sources have excluded cameras")
+        
     return df_out
 
 
