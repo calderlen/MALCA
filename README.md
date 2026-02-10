@@ -47,9 +47,9 @@ conda activate malca
 
 ### Dependencies
 - Core + runtime modules: numpy, pandas, scipy, numba, astropy, celerite2, matplotlib, tqdm, pyarrow
-- Review + plotting: dash, plotly
+- Review + plotting: dash, dash-bootstrap-components, plotly
 - Characterization + catalog access: astroquery, dustmaps3d, pyvo, banyan-sigma, requests
-- ML utilities: joblib
+- ML utilities: lightgbm, joblib
 
 ## Quick Start
 ```bash
@@ -127,7 +127,7 @@ graph TB
     subgraph "Production Pipeline"
         EV_FILT[detect.py<br/>Wrapper + Batching]
         PREFILT[pre_filter.py<br/>Quality filters]
-        EVENTS[events.py<br/>Bayesian Detection]
+        EVENTS[events.py<br/>Bayesian Detection<br/>+ Morphology + Recurrence]
         AMP_FILT[filter.py<br/>Signal amplitude filter]
         POSTFILT[post_filter.py<br/>Quality filters]
 
@@ -143,13 +143,35 @@ graph TB
     end
 
     subgraph "Post-Detection"
-        CHAR[characterize.py<br/>Multi-wavelength]
+        CHAR[characterize.py<br/>Multi-wavelength<br/>+ Galactic coords]
         CLASSIFY[classify.py<br/>Dipper classification]
 
         CAND -.-> CHAR
         CHAR --> CHAR_OUT[(Characterized)]
         CHAR_OUT -.-> CLASSIFY
         CLASSIFY --> CLASSIFY_OUT[(Classified)]
+    end
+
+    subgraph "Review & Labeling"
+        REVIEW_DB[(review.db<br/>SQLite)]
+        REVIEW_APP[review/app.py<br/>Dash GUI]
+        REVIEW_TUI[review/tui.py<br/>Terminal UI]
+
+        CAND -.-> REVIEW_DB
+        REVIEW_DB --> REVIEW_APP
+        REVIEW_DB --> REVIEW_TUI
+        REVIEW_APP --> LABELS[(Labeled Reviews<br/>score + class + reasons)]
+        REVIEW_TUI --> LABELS
+    end
+
+    subgraph "ML Training"
+        ML_FEAT[ml/features.py<br/>Feature curation]
+        ML_TRAIN[ml/train.py<br/>LightGBM classifier]
+
+        LABELS -.-> ML_TRAIN
+        CHAR_OUT -.-> ML_FEAT
+        ML_FEAT --> ML_TRAIN
+        ML_TRAIN --> ML_OUT[(Trained Model<br/>+ Feature importance)]
     end
 
     subgraph "Evaluation"
@@ -192,6 +214,8 @@ graph TB
         CLI -.-> VALID
         CLI -.-> PLOT
         CLI -.-> POSTFILT
+        CLI -.-> REVIEW_APP
+        CLI -.-> ML_TRAIN
     end
 
     %% Dependencies
@@ -206,11 +230,16 @@ graph TB
     style EVENTS fill:#9cf,stroke:#333,stroke-width:2px
     style REPRO fill:#ff9,stroke:#333,stroke-width:2px
     style CLI fill:#fcf,stroke:#333,stroke-width:2px
+    style REVIEW_APP fill:#f96,stroke:#333,stroke-width:2px
+    style ML_TRAIN fill:#9f9,stroke:#333,stroke-width:2px
 ```
 
 **Key Components:**
 - **Production**: `manifest.py` → `pre_filter.py` → `events.py` → `post_filter.py`
-- **Evaluation**: `evaluation/reproduce.py` (re-runs detection), `evaluation/validation.py` (validates results), `evaluation/injection.py` (synthetic dips)
+- **Post-detection**: `characterize.py` (Gaia, dust, galactic coords) → `classify.py`
+- **Review**: `review/app.py` (Dash GUI) / `review/tui.py` (terminal) → labeled training set
+- **ML**: `ml/features.py` (107 curated features) → `ml/train.py` (LightGBM classifier)
+- **Evaluation**: `evaluation/reproduce.py`, `evaluation/validation.py`, `evaluation/injection.py`
 - **CLI**: Unified interface via `malca [command]`
 
 See [docs/architecture.md](docs/architecture.md) for detailed documentation.
@@ -304,6 +333,7 @@ malca events --input /path/to/lc*_cal/*.dat2 --output output/results.parquet \
     --workers 10 --min-mag-offset 0.1
 ```
 - Default Bayesian grid is 12x12. Change p-grid with `--p-points`.
+- Output includes per-event morphology fit parameters (`best_amp`, `best_t0`, `best_alpha`, `best_tau`, `best_morph`, `delta_bic`, `width_param`, `symmetry_score`) and recurrence statistics (`is_single_event`, `inter_event_spacing_median/std`, `amplitude_consistency`, `duration_consistency`) for both dips and jumps.
 
 #### malca pre_filter
 
@@ -434,6 +464,7 @@ malca characterize \
 - **Gaia DR3 Queries**: Astrometry, astrophysics (Teff, logg, metallicity, distance), 2MASS/AllWISE photometry
 - **3D Dust Extinction**: All-sky coverage via `dustmaps3d` (Wang et al. 2025, ~350MB)
 - **YSO Classification**: Koenig & Leisawitz (2014) IR color-color diagram with dust correction
+- **Galactic Coordinates**: Galactic longitude/latitude (l, b) from ra/dec
 - **Galactic Population**: Thin/thick disk classification using metallicity or StarHorse ages
 - **StarHorse** (if provided): Stellar ages, masses, distances from local catalog join
 - **Auxiliary Catalog Crossmatches** (Tzanidakis+2025):
@@ -442,7 +473,6 @@ malca characterize \
   - Star-forming regions: Proximity check to known SFRs (Prisinzano+2022)
   - Open clusters: Cantat-Gaudin+2020 membership crossmatch
   - unWISE/unTimely: Mid-IR variability z-scores
-- **Color Evolution Analysis**: (g-r) color differences and CMD slope fitting
 - **Caching**: Gaia results cached locally to speed up repeated analyses
 
 **Setup:**
@@ -459,15 +489,13 @@ malca characterize \
 - `H_K`, `W1_W2`, `yso_class` (Class I/II/Transition Disk/Main Sequence)
 - `population` (thin_disk/thick_disk from metallicity or age)
 - `age50`, `mass50` (if StarHorse provided)
+- `gal_l`, `gal_b` (Galactic coordinates)
 - Auxiliary crossmatches (Tzanidakis+2025):
   - `banyan_field_prob`, `banyan_best_assoc` (BANYAN Σ membership)
   - `iphas_r_ha`, `iphas_ha_excess` (IPHAS Hα)
   - `near_sfr`, `sfr_name` (star-forming region proximity)
   - `cluster_name`, `cluster_age_myr` (open cluster membership)
   - `unwise_w1_zscore`, `unwise_w1_var` (IR variability)
-- Color evolution (if multi-band available):
-  - `color_baseline`, `color_dip`, `color_diff`, `is_redder`
-  - `cmd_slope`, `cmd_slope_angle`, `cmd_ism_consistent`
 
 #### malca classify
 
@@ -489,16 +517,37 @@ malca attrition --pre output/pre.parquet --post output/post.parquet
 
 ### Candidate Review
 
-- Launch Dash review GUI (keyboard-driven, fast):
-  `malca review --db ~/.cache/malca/review.db --plot-dir output/runs/YOUR_RUN/plots`
-- Launch terminal triage tool:
-  `malca review.tui --db output/review/review.db`
-- In the app:
-  - Set a SQLite path (default: `output/review/review.db`)
-  - Import a filtered candidates file (`CSV`/`Parquet`)
-  - Score candidates (`interest_score` integer 0-5, `interest_reason`, `review_pass`, `notes`, `status`)
-  - Filter by quantitative periodicity metrics (`periodicity_score`, `lsp_bootstrap_sig`, `lsp_power`)
-  - Export reviewed candidates to CSV/Parquet
+```bash
+# Launch Dash review GUI (keyboard-driven)
+malca review --db ~/.cache/malca/review.db --plot-dir output/runs/YOUR_RUN/plots
+
+# Launch terminal triage tool
+malca review.tui --db output/review/review.db
+```
+
+**Dash GUI features:**
+- Light curve plot display with grouped, collapsible metadata panels (~126 fields across 14 sections)
+- Interest scoring (0-5) via number keys or clickable buttons
+- Event class labeling (single-select): `circumstellar_dust`, `microlensing`, `flare`, `eclipsing_binary`, `instrumental`, `unknown_interesting`, `not_real`
+- Reason tagging (multi-select): `clean_event`, `multi_camera_support`, `interesting_morphology`, `periodic_contaminant`, `camera_artifact`, `known_object_nearby`, `needs_followup_data`
+- Leader-key prefix shortcuts (vim-style): `G`+key for class, `R`+key for reasons — all elements also clickable
+- Sidebar with import, queue filtering (unreviewed, score range, sort), characterize-on-import, and export controls
+- Freeform notes, followup flag, review pass tracking, recent activity log
+- Export reviewed candidates to CSV/Parquet
+
+**TUI features:**
+- Same scoring, class, reason, and notes workflow via text commands
+- `score`, `class`, `reason`, `note`, `pass`, `status`, `next`, `prev`, `goto`, `export`
+
+#### malca ml_train
+
+Train a baseline classifier on reviewed labels:
+```bash
+malca ml_train --db output/review/review.db --out-dir output/ml
+```
+- Uses a curated set of 107 physics-driven features (`malca/ml/features.py`)
+- Trains a LightGBM classifier on `event_class` labels from the review database
+- Outputs feature importance rankings and cross-validation metrics
 
 ## Output Directory Structure
 
