@@ -145,7 +145,7 @@ def import_bundle_zip(bundle_zip: Path, out_dir: Path) -> None:
         zf.extractall(out_dir)
 
 
-def export_bundle_zip(bundle_zip: Path, out_dir: Path) -> list[str]:
+def export_bundle_zip(bundle_zip: Path, out_dir: Path, include_all: bool = False) -> list[str]:
     """Create transfer bundle zip from a pipeline out_dir."""
     bundle_zip = Path(bundle_zip).expanduser()
     bundle_zip.parent.mkdir(parents=True, exist_ok=True)
@@ -154,7 +154,6 @@ def export_bundle_zip(bundle_zip: Path, out_dir: Path) -> list[str]:
         "run_params.json",
         "run_summary.json",
         "run.log",
-        "bundle_assets/asassn_index_full.parquet",
         "results/lc_events_filtered.parquet",
         "results/lc_events_enriched.parquet",
         "results/lc_events_characterized.parquet",
@@ -162,17 +161,17 @@ def export_bundle_zip(bundle_zip: Path, out_dir: Path) -> list[str]:
         "results/lc_events_neighbors.parquet",
         "results/lc_events_spectra.parquet",
     ]
+    if include_all:
+        include_rel_paths.append("bundle_assets/asassn_index_full.parquet")
     include_globs = [
         "results/lc_events_results.*",
     ]
     include_dirs = [
         "results",
         "plots",
-        "manifests",
-        "prefilter",
-        "paths",
-        "gaia_cache",
     ]
+    if include_all:
+        include_dirs.extend(["manifests", "prefilter", "paths", "gaia_cache"])
 
     files_to_add: set[Path] = set()
     for rel in include_rel_paths:
@@ -332,6 +331,7 @@ def main():
     )
     parser.add_argument("--import-bundle", type=Path, default=None, help="Zip bundle produced by --export-bundle (for home stage)")
     parser.add_argument("--export-bundle", type=Path, default=None, help="Write transferable zip bundle at end of run")
+    parser.add_argument("--full-bundle", action="store_true", default=False, help="Include all large assets in export bundle (index, gaia cache, manifests, prefilter, paths)")
 
     # Step 5: Post-filter args (enabled by default)
     parser.add_argument("--run-post-filter", dest="run_post_filter", action="store_true", help="Run post_filter after events.py completes (default: enabled)")
@@ -1544,20 +1544,21 @@ def main():
     export_bundle_path = args.export_bundle if args.export_bundle is not None else out_dir / f"{out_dir.name}_bundle.zip"
     if export_bundle_path is not None:
         try:
-            source_index_file = ASASSN_INDEX_PATH.expanduser()
-            if source_index_file.exists():
-                bundle_assets_dir = out_dir / "bundle_assets"
-                bundle_assets_dir.mkdir(parents=True, exist_ok=True)
-                bundle_index_file = bundle_assets_dir / "asassn_index_full.parquet"
-                if (not bundle_index_file.exists()) or (bundle_index_file.stat().st_size != source_index_file.stat().st_size):
-                    log(f"Copying full index into bundle assets: {source_index_file} -> {bundle_index_file}")
-                    shutil.copy2(source_index_file, bundle_index_file)
-            else:
-                raise FileNotFoundError(
-                    f"Required index file not found for bundle export: {source_index_file}"
-                )
+            if args.full_bundle:
+                source_index_file = ASASSN_INDEX_PATH.expanduser()
+                if source_index_file.exists():
+                    bundle_assets_dir = out_dir / "bundle_assets"
+                    bundle_assets_dir.mkdir(parents=True, exist_ok=True)
+                    bundle_index_file = bundle_assets_dir / "asassn_index_full.parquet"
+                    if (not bundle_index_file.exists()) or (bundle_index_file.stat().st_size != source_index_file.stat().st_size):
+                        log(f"Copying full index into bundle assets: {source_index_file} -> {bundle_index_file}")
+                        shutil.copy2(source_index_file, bundle_index_file)
+                else:
+                    raise FileNotFoundError(
+                        f"Required index file not found for bundle export: {source_index_file}"
+                    )
 
-            bundled = export_bundle_zip(export_bundle_path, out_dir)
+            bundled = export_bundle_zip(export_bundle_path, out_dir, include_all=args.full_bundle)
             log(f"Exported bundle to {export_bundle_path.expanduser()} with {len(bundled)} files")
         except Exception as e:
             print(f"Error creating export bundle: {e}")
