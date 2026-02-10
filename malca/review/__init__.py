@@ -1,6 +1,6 @@
 """Review utilities for candidate triage workflows.
 
 Canonical entrypoints:
-- Streamlit app + TUI: ``malca review``
+- Dash app: ``malca review``
 - Terminal triage CLI: ``malca review.tui``
 """

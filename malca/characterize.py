@@ -27,7 +27,6 @@ from astroquery.gaia import Gaia
 from astroquery.xmatch import XMatch
 import banyan_sigma as banyan_sigma_pkg
 from dustmaps3d import dustmaps3d
-from scipy.odr import ODR, Model, RealData
 
 # Suppress astropy warnings
 import warnings
@@ -42,7 +41,6 @@ from malca.config.config_characterize import (
     UNWISE_EXPECTED_SCATTER_SLOPE, UNWISE_EXPECTED_SCATTER_MAG_REF,
     SFR_MAX_DIST_KPC, SFR_DIST_TOLERANCE_FRACTION, SFR_CATALOG,
     BANYAN_MIN_ASSOC_PROB, IPHAS_HA_EXCESS_THRESHOLD,
-    CMD_ISM_SLOPE_MIN, CMD_ISM_SLOPE_MAX, CMD_RV_STANDARD,
 )
 from malca.config.config_paths import (
     VSX_CROSSMATCH_PATH, STARHORSE_DEFAULT_PATH, STARHORSE_TAP_URL,
@@ -855,122 +853,6 @@ def query_unwise_variability(df: pd.DataFrame, max_sep_arcsec: float = UNWISE_MA
     return df
 
 
-# =============================================================================
-# COLOR EVOLUTION ANALYSIS (Tzanidakis+2025 Section 4.3)
-# =============================================================================
-
-def analyze_color_evolution(
-    jd: np.ndarray,
-    mag_g: np.ndarray,
-    mag_r: np.ndarray,
-    dip_start_jd: float,
-    dip_end_jd: float,
-) -> dict:
-    """
-    Analyze (g-r) color evolution during dimming events.
-    
-    Implements Tzanidakis+2025 Section 4.3 color analysis.
-    
-    Parameters
-    ----------
-    jd : np.ndarray
-        Julian dates for observations
-    mag_g : np.ndarray
-        g-band magnitudes
-    mag_r : np.ndarray
-        r-band magnitudes (or V-band for ASAS-SN)
-    dip_start_jd, dip_end_jd : float
-        Start/end JD of dipping event
-    
-    Returns
-    -------
-    dict
-        Color evolution metrics (color_baseline, color_dip, color_diff, is_redder)
-    """
-    jd = np.asarray(jd, float)
-    mag_g = np.asarray(mag_g, float)
-    mag_r = np.asarray(mag_r, float)
-    
-    if len(jd) != len(mag_g) or len(jd) != len(mag_r):
-        return {'color_baseline': np.nan, 'color_dip': np.nan, 
-                'color_diff': np.nan, 'is_redder': False}
-    
-    color = mag_g - mag_r
-    valid = np.isfinite(color)
-    in_dip = (jd >= dip_start_jd) & (jd <= dip_end_jd) & valid
-    quiescent = ~in_dip & valid
-    
-    color_baseline = float(np.nanmedian(color[quiescent])) if quiescent.sum() >= 3 else np.nan
-    color_dip = float(np.nanmedian(color[in_dip])) if in_dip.sum() >= 1 else np.nan
-    
-    if np.isfinite(color_baseline) and np.isfinite(color_dip):
-        color_diff = color_baseline - color_dip
-        is_redder = color_diff < 0
-    else:
-        color_diff, is_redder = np.nan, False
-    
-    return {'color_baseline': color_baseline, 'color_dip': color_dip,
-            'color_diff': color_diff, 'is_redder': is_redder}
-
-
-def fit_cmd_slope(
-    mag: np.ndarray,
-    color: np.ndarray,
-    mag_err: np.ndarray | None = None,
-    color_err: np.ndarray | None = None,
-) -> dict:
-    """
-    Fit CMD slope using orthogonal distance regression.
-    
-    Implements Tzanidakis+2025 method for deriving extinction properties.
-    
-    Returns
-    -------
-    dict
-        slope, slope_angle_deg, ism_consistent, implied_rv
-    
-    Notes
-    -----
-    ISM slopes: RV=3.1 -> 74.1°, RV=5.0 -> 79.2°
-    """
-    mag = np.asarray(mag, float)
-    color = np.asarray(color, float)
-    valid = np.isfinite(mag) & np.isfinite(color)
-    mag, color = mag[valid], color[valid]
-    
-    if len(mag) < 5:
-        return {'slope': np.nan, 'slope_angle_deg': np.nan,
-                'ism_consistent': False, 'implied_rv': np.nan}
-    
-    # Errors
-    if mag_err is not None and color_err is not None:
-        mag_err = np.clip(np.asarray(mag_err, float)[valid], 0.01, np.inf)
-        color_err = np.clip(np.asarray(color_err, float)[valid], 0.01, np.inf)
-    else:
-        mag_err = np.full(len(mag), np.std(mag) * 0.1)
-        color_err = np.full(len(color), np.std(color) * 0.1)
-    
-    def linear_func(beta, x): return beta[0] * x + beta[1]
-    
-    model = Model(linear_func)
-    data = RealData(color, mag, sx=color_err, sy=mag_err)
-    slope_guess = (mag.max() - mag.min()) / (color.max() - color.min() + 1e-6)
-    odr = ODR(data, model, beta0=[slope_guess, np.median(mag) - slope_guess * np.median(color)])
-    
-    try:
-        result = odr.run()
-        slope = float(result.beta[0])
-        slope_angle = np.degrees(np.arctan(slope))
-        ism_consistent = CMD_ISM_SLOPE_MIN <= slope_angle <= CMD_ISM_SLOPE_MAX
-        implied_rv = CMD_RV_STANDARD + (slope_angle - CMD_ISM_SLOPE_MIN) / (CMD_ISM_SLOPE_MAX - CMD_ISM_SLOPE_MIN) * 1.9 if 60 < slope_angle < 85 else np.nan
-    except Exception:
-        return {'slope': np.nan, 'slope_angle_deg': np.nan,
-                'ism_consistent': False, 'implied_rv': np.nan}
-    
-    return {'slope': slope, 'slope_angle_deg': slope_angle,
-            'ism_consistent': ism_consistent, 'implied_rv': implied_rv}
-
-
 def _set_module_state(
     df: pd.DataFrame,
     module: str,
@@ -1083,6 +965,26 @@ def characterize_candidates_df(
 
     print("Merging Gaia results...")
     df_char = df_merged.merge(gaia_df, left_on="gaia_id", right_on="source_id", how="left", suffixes=("", "_gaia"))
+
+    # Compute Galactic coordinates from RA/Dec
+    _ra_col = "ra" if "ra" in df_char.columns else ("ra_deg" if "ra_deg" in df_char.columns else None)
+    _dec_col = "dec" if "dec" in df_char.columns else ("dec_deg" if "dec_deg" in df_char.columns else None)
+    if _ra_col and _dec_col:
+        _gc_mask = np.isfinite(df_char[_ra_col].astype(float)) & np.isfinite(df_char[_dec_col].astype(float))
+        if _gc_mask.any():
+            _gc_coords = SkyCoord(
+                ra=df_char.loc[_gc_mask, _ra_col].values * u.deg,
+                dec=df_char.loc[_gc_mask, _dec_col].values * u.deg,
+                frame="icrs",
+            )
+            df_char.loc[_gc_mask, "gal_l"] = _gc_coords.galactic.l.deg
+            df_char.loc[_gc_mask, "gal_b"] = _gc_coords.galactic.b.deg
+        if "gal_l" not in df_char.columns:
+            df_char["gal_l"] = np.nan
+            df_char["gal_b"] = np.nan
+    else:
+        df_char["gal_l"] = np.nan
+        df_char["gal_b"] = np.nan
 
     print("Classifying Galactic populations...")
     df_char = classify_galactic_population(df_char)

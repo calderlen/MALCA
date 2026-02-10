@@ -14,7 +14,7 @@ Usage:
     malca classify [options]       # Dipper classification
     malca injection [options]      # Injection-recovery tests
     malca detection_rate [options] # Measure detection rate
-    malca review [options]         # Launch review GUI + TUI
+    malca review [options]         # Launch Dash review GUI (keyboard-driven)
     malca review.tui [options]     # Launch terminal review interface
     malca stats [options]          # Light-curve statistics
     malca attrition [options]      # Pre/post-filter attrition summary
@@ -108,9 +108,9 @@ def main():
             sys.argv = [sys.argv[0]] + remaining
             review_tui.main()
         elif command == "review":
-            from malca.review import dual as review_dual
+            from malca.review import app
             sys.argv = [sys.argv[0]] + remaining
-            review_dual.main()
+            app.main()
         elif command == "validate":
             validation = importlib.import_module("malca.evaluation.validation")
             sys.argv = [sys.argv[0]] + remaining
@@ -160,7 +160,7 @@ def main():
     subparsers.add_parser("stats", help="Compute light-curve statistics")
     subparsers.add_parser("attrition", help="Summarize pre/post-filter attrition")
     subparsers.add_parser("review.tui", help="Launch terminal review interface")
-    subparsers.add_parser("review", help="Launch review GUI + TUI together")
+    subparsers.add_parser("review", help="Launch Dash review GUI (keyboard-driven, fast)")
     subparsers.add_parser("false_positive", help="Run false-positive contaminant benchmark")
     subparsers.add_parser("ml_train", help="Train baseline ML classifier on reviewed labels")
     subparsers.add_parser("neighbors", help="Run bulk nearest-neighbor enrichment")

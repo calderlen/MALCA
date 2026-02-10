@@ -210,9 +210,7 @@ graph TB
     - `check_sfr_proximity()`: Star-forming region proximity (Prisinzano+2022)
     - `crossmatch_open_clusters()`: Open cluster membership (Cantat-Gaudin+2020)
     - `query_unwise_variability()`: unTimely mid-IR variability z-scores
-  - **Color evolution analysis** (Tzanidakis+2025 Section 4.3):
-    - `analyze_color_evolution()`: (g−r) quiescent vs dip color differences
-    - `fit_cmd_slope()`: CMD slope fitting via ODR, ISM extinction comparison
+  - *(Removed)* Color evolution analysis (`analyze_color_evolution`, `fit_cmd_slope`) — dead code since ASAS-SN has no simultaneous multi-band data
 - **`classify.py`**: Dipper classification module (Tzanidakis et al. 2025)
   - Eclipsing Binary (EB) rejection: asymmetry, periodicity, Keplerian duration checks
   - Cataclysmic Variable (CV) rejection: Gaia CMD position, Hα excess, PS1 color locus

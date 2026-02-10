@@ -24,6 +24,16 @@ INTEREST_REASON_TAGS = [
     "known_object_nearby",
     "needs_followup_data",
 ]
+EVENT_CLASS_OPTIONS = [
+    "unclassified",
+    "circumstellar_dust",
+    "microlensing",
+    "flare",
+    "eclipsing_binary",
+    "instrumental",
+    "unknown_interesting",
+    "not_real",
+]
 
 
 def _utc_now() -> str:
@@ -72,24 +82,269 @@ def load_candidates_file(path: Path) -> pd.DataFrame:
     raise ValueError("Unsupported file type. Use CSV or Parquet.")
 
 
+def detect_run_directory_files(run_dir: Path) -> dict[str, Path | None]:
+    """
+    Auto-detect MALCA review files from a run directory.
+
+    Returns dict with keys:
+    - 'candidates': Path to best candidates file found (or None)
+    - 'plot_dir': Path to plots directory (or None)
+    - 'gaia_cache': Path to gaia cache (or None)
+    - 'run_params': Path to run_params.json (or None)
+    - 'warnings': List of warning messages
+    """
+    results = {
+        'candidates': None,
+        'plot_dir': None,
+        'gaia_cache': None,
+        'run_params': None,
+        'warnings': []
+    }
+
+    # Validate directory exists
+    if not run_dir.exists():
+        results['warnings'].append(f"Directory does not exist: {run_dir}")
+        return results
+
+    if not run_dir.is_dir():
+        results['warnings'].append(f"Path is not a directory: {run_dir}")
+        return results
+
+    # Check for run_params.json (validates it's a run directory)
+    run_params = run_dir / "run_params.json"
+    if run_params.exists():
+        results['run_params'] = run_params
+    else:
+        results['warnings'].append("run_params.json not found - may not be a MALCA run directory")
+
+    # Detect candidates file (priority: most enriched first)
+    candidates_priority = [
+        "results/lc_events_spectra.parquet",
+        "results/lc_events_neighbors.parquet",
+        "results/lc_events_classified.parquet",
+        "results/lc_events_enriched.parquet",
+        "results/lc_events_characterized.parquet",
+        "results/lc_events_filtered.parquet",
+    ]
+
+    for rel_path in candidates_priority:
+        candidate_file = run_dir / rel_path
+        if candidate_file.exists():
+            results['candidates'] = candidate_file
+            break
+
+    if results['candidates'] is None:
+        results['warnings'].append("No candidates file found in results/ directory")
+
+    # Detect plot directory
+    plot_dir = run_dir / "plots"
+    if plot_dir.exists() and plot_dir.is_dir():
+        results['plot_dir'] = plot_dir
+    else:
+        results['warnings'].append("plots/ directory not found")
+
+    # Detect gaia cache (optional, no warning if missing)
+    gaia_cache = run_dir / "gaia_cache" / "gaia_cache.parquet"
+    if gaia_cache.exists():
+        results['gaia_cache'] = gaia_cache
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Single source of truth for all extracted candidate columns.
+#
+# Each entry: (column_name, sql_type, extract_type)
+#   extract_type: 'bool' | 'float' | 'text'
+#
+# The order here determines column order in the DB table and INSERT.
+# 'candidate_id', 'source_path', 'payload_json', 'imported_at' are handled
+# separately (they aren't payload fields).
+# ---------------------------------------------------------------------------
+_CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
+    # -- identification --
+    ("asas_sn_id",               "TEXT",    "text"),
+    ("lc_path",                  "TEXT",    "text"),
+    # -- top-level filter flags --
+    ("failed_any",               "INTEGER", "bool"),
+    ("periodic_flag",            "INTEGER", "bool"),
+    ("catalog_match",            "INTEGER", "bool"),
+    ("high_ruwe_flag",           "INTEGER", "bool"),
+    # -- periodicity --
+    ("periodicity_score",        "REAL",    "float"),
+    ("lsp_bootstrap_sig",        "REAL",    "float"),
+    ("lsp_power",                "REAL",    "float"),
+    ("lsp_period",               "REAL",    "float"),
+    ("lsp_is_alias",             "INTEGER", "bool"),
+    ("lsp_is_significant",       "INTEGER", "bool"),
+    # -- dip detection --
+    ("dip_significant",          "INTEGER", "bool"),
+    ("dip_best_morph",           "TEXT",    "text"),
+    ("dip_best_log_bf",          "REAL",    "float"),
+    ("dip_best_delta_bic",       "REAL",    "float"),
+    ("dip_best_width_param",     "REAL",    "float"),
+    ("dip_symmetry_score",       "REAL",    "float"),
+    ("dip_best_amp",             "REAL",    "float"),
+    ("dip_best_t0",              "REAL",    "float"),
+    ("dip_best_alpha",           "REAL",    "float"),
+    ("dip_best_tau",             "REAL",    "float"),
+    ("dip_bayes_factor",         "REAL",    "float"),
+    ("dip_best_p",               "REAL",    "float"),
+    ("dip_best_mag_event",       "REAL",    "float"),
+    ("dip_trigger_max",          "REAL",    "float"),
+    ("dip_max_event_prob",       "REAL",    "float"),
+    ("dip_trigger_threshold",    "REAL",    "float"),
+    # -- dip runs --
+    ("dip_count",                "REAL",    "float"),
+    ("dip_run_count",            "REAL",    "float"),
+    ("dip_max_run_points",       "REAL",    "float"),
+    ("dip_max_run_duration",     "REAL",    "float"),
+    ("dip_max_run_sum",          "REAL",    "float"),
+    ("dip_max_run_max",          "REAL",    "float"),
+    ("dip_max_run_cameras",      "REAL",    "float"),
+    ("dip_max_log_bf_local",     "REAL",    "float"),
+    # -- jump detection --
+    ("jump_significant",         "INTEGER", "bool"),
+    ("jump_best_morph",          "TEXT",    "text"),
+    ("jump_best_log_bf",         "REAL",    "float"),
+    ("jump_best_delta_bic",      "REAL",    "float"),
+    ("jump_best_width_param",    "REAL",    "float"),
+    ("jump_best_amp",            "REAL",    "float"),
+    ("jump_best_t0",             "REAL",    "float"),
+    ("jump_best_alpha",          "REAL",    "float"),
+    ("jump_best_tau",            "REAL",    "float"),
+    ("jump_bayes_factor",        "REAL",    "float"),
+    ("jump_best_p",              "REAL",    "float"),
+    ("jump_best_mag_event",      "REAL",    "float"),
+    ("jump_trigger_max",         "REAL",    "float"),
+    ("jump_max_event_prob",      "REAL",    "float"),
+    ("jump_trigger_threshold",   "REAL",    "float"),
+    # -- jump runs --
+    ("jump_count",               "REAL",    "float"),
+    ("jump_run_count",           "REAL",    "float"),
+    ("jump_max_run_points",      "REAL",    "float"),
+    ("jump_max_run_duration",    "REAL",    "float"),
+    ("jump_max_run_sum",         "REAL",    "float"),
+    ("jump_max_run_max",         "REAL",    "float"),
+    ("jump_max_run_cameras",     "REAL",    "float"),
+    ("jump_max_log_bf_local",    "REAL",    "float"),
+    # -- dip recurrence --
+    ("dip_is_single_event",              "INTEGER", "bool"),
+    ("dip_inter_event_spacing_median",   "REAL",    "float"),
+    ("dip_inter_event_spacing_std",      "REAL",    "float"),
+    ("dip_amplitude_consistency",        "REAL",    "float"),
+    ("dip_duration_consistency",         "REAL",    "float"),
+    # -- jump recurrence --
+    ("jump_is_single_event",             "INTEGER", "bool"),
+    ("jump_inter_event_spacing_median",  "REAL",    "float"),
+    ("jump_inter_event_spacing_std",     "REAL",    "float"),
+    ("jump_amplitude_consistency",       "REAL",    "float"),
+    ("jump_duration_consistency",        "REAL",    "float"),
+    # -- event scoring --
+    ("dipper_score",             "REAL",    "float"),
+    ("dipper_n_dips",            "REAL",    "float"),
+    ("dipper_n_valid_dips",      "REAL",    "float"),
+    ("jumper_score",             "REAL",    "float"),
+    ("jumper_n_jumps",           "REAL",    "float"),
+    ("jumper_n_valid_jumps",     "REAL",    "float"),
+    # -- stellar parameters --
+    ("ruwe",                     "REAL",    "float"),
+    ("teff_gspphot",             "REAL",    "float"),
+    ("logg_gspphot",             "REAL",    "float"),
+    ("mh_gspphot",               "REAL",    "float"),
+    ("distance_gspphot",         "REAL",    "float"),
+    ("parallax",                 "REAL",    "float"),
+    ("pmra",                     "REAL",    "float"),
+    ("pmdec",                    "REAL",    "float"),
+    # -- photometry --
+    ("tmass_j",                  "REAL",    "float"),
+    ("tmass_h",                  "REAL",    "float"),
+    ("tmass_k",                  "REAL",    "float"),
+    ("unwise_w1",                "REAL",    "float"),
+    ("unwise_w2",                "REAL",    "float"),
+    ("H_K",                      "REAL",    "float"),
+    ("W1_W2",                    "REAL",    "float"),
+    ("iphas_ha_mag",             "REAL",    "float"),
+    ("unwise_w1_zscore",         "REAL",    "float"),
+    ("unwise_w2_zscore",         "REAL",    "float"),
+    # -- galactic coordinates --
+    ("gal_l",                    "REAL",    "float"),
+    ("gal_b",                    "REAL",    "float"),
+    # -- extinction & environment --
+    ("A_v_3d",                   "REAL",    "float"),
+    ("ebv_3d",                   "REAL",    "float"),
+    ("population",               "TEXT",    "text"),
+    ("age50",                    "REAL",    "float"),
+    ("mass50",                   "REAL",    "float"),
+    ("banyan_field_prob",        "REAL",    "float"),
+    ("banyan_best_assoc",        "TEXT",    "text"),
+    # -- crossmatch details --
+    ("vsx_class",                "TEXT",    "text"),
+    ("vsx_sep_arcsec",           "REAL",    "float"),
+    ("sfr_name",                 "TEXT",    "text"),
+    ("sfr_sep_arcmin",           "REAL",    "float"),
+    ("cluster_name",             "TEXT",    "text"),
+    ("cluster_membership_prob",  "REAL",    "float"),
+    # -- light curve basics --
+    ("n_points",                 "REAL",    "float"),
+    ("n_cameras",                "REAL",    "float"),
+    ("baseline_mag",             "REAL",    "float"),
+    ("baseline_source",          "TEXT",    "text"),
+    ("cadence_median_days",      "REAL",    "float"),
+    ("trigger_mode",             "TEXT",    "text"),
+    # -- YSO / classification --
+    ("trigger_type",             "TEXT",    "text"),
+    ("yso_class",                "TEXT",    "text"),
+    ("final_class",              "TEXT",    "text"),
+    ("P_eb",                     "REAL",    "float"),
+    ("P_cv",                     "REAL",    "float"),
+    ("P_starspot",               "REAL",    "float"),
+    ("P_disk",                   "REAL",    "float"),
+    ("a_circ_au",                "REAL",    "float"),
+    ("transit_prob",             "REAL",    "float"),
+    ("hill_radius_rsun",         "REAL",    "float"),
+    # -- individual fail flags --
+    ("failed_sparse",            "INTEGER", "bool"),
+    ("failed_multi_camera",      "INTEGER", "bool"),
+    ("failed_vsx",               "INTEGER", "bool"),
+    ("failed_evidence_strength", "INTEGER", "bool"),
+    ("failed_run_robustness",    "INTEGER", "bool"),
+    ("failed_morphology",        "INTEGER", "bool"),
+    ("failed_score",             "INTEGER", "bool"),
+    ("failed_periodicity",       "INTEGER", "bool"),
+    ("failed_gaia_ruwe",         "INTEGER", "bool"),
+    ("failed_periodic_catalog",  "INTEGER", "bool"),
+    ("failed_signal_amplitude",  "INTEGER", "bool"),
+    ("bad_cameras_filtered",     "INTEGER", "bool"),
+]
+
+# Derived helpers
+_COL_NAMES = [c[0] for c in _CANDIDATE_COLUMNS]
+_BOOL_COLS = {c[0] for c in _CANDIDATE_COLUMNS if c[2] == "bool"}
+_FLOAT_COLS = {c[0] for c in _CANDIDATE_COLUMNS if c[2] == "float"}
+_TEXT_COLS = {c[0] for c in _CANDIDATE_COLUMNS if c[2] == "text"}
+
+
+def _migrate_candidates_columns(conn: sqlite3.Connection) -> None:
+    """Add columns introduced after initial schema.  Safe to call repeatedly."""
+    for col, dtype, _ in _CANDIDATE_COLUMNS:
+        try:
+            conn.execute(f"ALTER TABLE candidates ADD COLUMN {col} {dtype}")
+        except Exception:
+            pass  # column already exists
+    conn.commit()
+
+
 def init_db(conn: sqlite3.Connection) -> None:
+    col_defs = ",\n            ".join(
+        f"{col} {dtype}" for col, dtype, _ in _CANDIDATE_COLUMNS
+    )
     conn.execute(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS candidates (
             candidate_id TEXT PRIMARY KEY,
             source_path TEXT,
-            asas_sn_id TEXT,
-            lc_path TEXT,
-            failed_any INTEGER,
-            periodic_flag INTEGER,
-            catalog_match INTEGER,
-            high_ruwe_flag INTEGER,
-            periodicity_score REAL,
-            lsp_bootstrap_sig REAL,
-            lsp_power REAL,
-            lsp_period REAL,
-            dip_best_log_bf REAL,
-            jump_best_log_bf REAL,
+            {col_defs},
             payload_json TEXT NOT NULL,
             imported_at TEXT NOT NULL
         )
@@ -101,6 +356,7 @@ def init_db(conn: sqlite3.Connection) -> None:
             candidate_id TEXT PRIMARY KEY,
             interest_score INTEGER,
             interest_reason TEXT,
+            event_class TEXT DEFAULT 'unclassified',
             review_pass INTEGER,
             notes TEXT,
             status TEXT,
@@ -135,10 +391,22 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_reviews_columns(conn: sqlite3.Connection) -> None:
+    """Add columns introduced after initial reviews schema.  Safe to call repeatedly."""
+    for col, dtype in [("event_class", "TEXT DEFAULT 'unclassified'")]:
+        try:
+            conn.execute(f"ALTER TABLE reviews ADD COLUMN {col} {dtype}")
+        except Exception:
+            pass  # column already exists
+    conn.commit()
+
+
 def db_connect(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
     init_db(conn)
+    _migrate_candidates_columns(conn)
+    _migrate_reviews_columns(conn)
     return conn
 
 
@@ -199,57 +467,47 @@ def import_candidates(
     df_use["candidate_id"] = infer_candidate_id(df_use)
     imported_at = _utc_now()
 
+    def _opt_str(d, key):
+        v = d.get(key)
+        return str(v) if v is not None else None
+
+    def _opt_bool(d, key):
+        v = d.get(key)
+        return int(_as_bool(v)) if v is not None else None
+
+    # Map payload key → column; most are identical to the column name.
+    _payload_alias = {"lc_path": "path"}
+
     rows = []
     for _, row in df_use.iterrows():
         row_dict = {k: (None if pd.isna(v) else v) for k, v in row.to_dict().items()}
         row_dict = normalize_vsx_record(row_dict)
-        rows.append(
-            (
-                str(row_dict.get("candidate_id")),
-                source_path,
-                str(row_dict.get("asas_sn_id")) if row_dict.get("asas_sn_id") is not None else None,
-                str(row_dict.get("path")) if row_dict.get("path") is not None else None,
-                int(_as_bool(row_dict.get("failed_any"))),
-                int(_as_bool(row_dict.get("periodic_flag"))),
-                int(_as_bool(row_dict.get("catalog_match"))),
-                int(_as_bool(row_dict.get("high_ruwe_flag"))),
-                _to_float(row_dict.get("periodicity_score")),
-                _to_float(row_dict.get("lsp_bootstrap_sig")),
-                _to_float(row_dict.get("lsp_power")),
-                _to_float(row_dict.get("lsp_period")),
-                _to_float(row_dict.get("dip_best_log_bf")),
-                _to_float(row_dict.get("jump_best_log_bf")),
-                json.dumps(row_dict, default=str),
-                imported_at,
-            )
-        )
+        vals: list = [str(row_dict.get("candidate_id")), source_path]
+        for col, _dtype, etype in _CANDIDATE_COLUMNS:
+            payload_key = _payload_alias.get(col, col)
+            raw = row_dict.get(payload_key)
+            if etype == "bool":
+                vals.append(_opt_bool(row_dict, payload_key))
+            elif etype == "float":
+                vals.append(_to_float(raw))
+            else:
+                vals.append(_opt_str(row_dict, payload_key))
+        vals.append(json.dumps(row_dict, default=str))
+        vals.append(imported_at)
+        rows.append(tuple(vals))
+
+    _all_col_names = ["candidate_id", "source_path"] + _COL_NAMES + ["payload_json", "imported_at"]
+    _candidate_cols = ", ".join(_all_col_names)
+    _placeholders = ", ".join(["?"] * len(_all_col_names))
+    _update_cols = [c for c in _all_col_names if c != "candidate_id"]
+    _conflict_set = ", ".join(f"{c}=excluded.{c}" for c in _update_cols)
 
     before = conn.execute("SELECT COUNT(*) FROM candidates").fetchone()[0]
     conn.executemany(
-        """
-        INSERT INTO candidates (
-            candidate_id, source_path, asas_sn_id, lc_path,
-            failed_any, periodic_flag, catalog_match, high_ruwe_flag,
-            periodicity_score, lsp_bootstrap_sig, lsp_power, lsp_period,
-            dip_best_log_bf, jump_best_log_bf, payload_json, imported_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(candidate_id) DO UPDATE SET
-            source_path=excluded.source_path,
-            asas_sn_id=excluded.asas_sn_id,
-            lc_path=excluded.lc_path,
-            failed_any=excluded.failed_any,
-            periodic_flag=excluded.periodic_flag,
-            catalog_match=excluded.catalog_match,
-            high_ruwe_flag=excluded.high_ruwe_flag,
-            periodicity_score=excluded.periodicity_score,
-            lsp_bootstrap_sig=excluded.lsp_bootstrap_sig,
-            lsp_power=excluded.lsp_power,
-            lsp_period=excluded.lsp_period,
-            dip_best_log_bf=excluded.dip_best_log_bf,
-            jump_best_log_bf=excluded.jump_best_log_bf,
-            payload_json=excluded.payload_json,
-            imported_at=excluded.imported_at
+        f"""
+        INSERT INTO candidates ({_candidate_cols})
+        VALUES ({_placeholders})
+        ON CONFLICT(candidate_id) DO UPDATE SET {_conflict_set}
         """,
         rows,
     )
@@ -258,60 +516,90 @@ def import_candidates(
     return len(rows), int(after - before)
 
 
-def query_queue(
-    conn: sqlite3.Connection,
-    *,
-    only_unreviewed: bool,
-    require_failed_any_false: bool,
-    periodic_flag_mode: str,
-    catalog_match_mode: str,
-    high_ruwe_mode: str,
-    min_periodicity_score: float | None,
-    max_lsp_bootstrap_sig: float | None,
-    min_lsp_power: float | None,
-    sort_col: str,
-    sort_desc: bool,
-) -> pd.DataFrame:
-    where = []
+def query_queue(conn: sqlite3.Connection, *, filters: dict | None = None,
+                # Legacy keyword args (still accepted for backward compat)
+                only_unreviewed: bool | None = None,
+                require_failed_any_false: bool | None = None,
+                periodic_flag_mode: str | None = None,
+                catalog_match_mode: str | None = None,
+                high_ruwe_mode: str | None = None,
+                min_periodicity_score: float | None = None,
+                max_lsp_bootstrap_sig: float | None = None,
+                min_lsp_power: float | None = None,
+                sort_col: str | None = None,
+                sort_desc: bool | None = None,
+                ) -> pd.DataFrame:
+    """Query the candidate queue with optional filters.
+
+    Accepts either a *filters* dict or the legacy keyword arguments.
+    If *filters* is provided it takes precedence.
+    """
+    if filters is None:
+        filters = {}
+    # Merge legacy kwargs as defaults (filters dict wins)
+    _defaults = {
+        'only_unreviewed': only_unreviewed if only_unreviewed is not None else False,
+        'require_failed_any_false': require_failed_any_false if require_failed_any_false is not None else False,
+        'periodic_flag_mode': periodic_flag_mode or 'Any',
+        'catalog_match_mode': catalog_match_mode or 'Any',
+        'high_ruwe_mode': high_ruwe_mode or 'Any',
+        'min_periodicity_score': min_periodicity_score,
+        'max_lsp_bootstrap_sig': max_lsp_bootstrap_sig,
+        'min_lsp_power': min_lsp_power,
+        'sort_col': sort_col or 'candidate_id',
+        'sort_desc': sort_desc if sort_desc is not None else False,
+    }
+    for k, v in _defaults.items():
+        filters.setdefault(k, v)
+
+    where: list[str] = []
     params: list = []
-    if only_unreviewed:
+
+    # --- review status ---
+    if filters.get('only_unreviewed'):
         where.append("(r.status IS NULL OR r.status='unreviewed')")
-    if require_failed_any_false:
+
+    # --- failed_any shortcut ---
+    if filters.get('require_failed_any_false'):
         where.append("(c.failed_any = 0)")
 
+    # --- Any / True / False bool-mode filters (auto-generated) ---
     mode_map = {"Any": None, "True": 1, "False": 0}
-    for mode, col in [
-        (periodic_flag_mode, "c.periodic_flag"),
-        (catalog_match_mode, "c.catalog_match"),
-        (high_ruwe_mode, "c.high_ruwe_flag"),
-    ]:
-        val = mode_map[mode]
+    for col in _BOOL_COLS:
+        key = f"{col}_mode"
+        mode = filters.get(key, "Any")
+        val = mode_map.get(mode)
         if val is not None:
-            where.append(f"({col} = ?)")
+            where.append(f"(c.{col} = ?)")
             params.append(val)
-    if min_periodicity_score is not None:
-        where.append("(c.periodicity_score IS NOT NULL AND c.periodicity_score >= ?)")
-        params.append(float(min_periodicity_score))
-    if max_lsp_bootstrap_sig is not None:
-        where.append("(c.lsp_bootstrap_sig IS NOT NULL AND c.lsp_bootstrap_sig <= ?)")
-        params.append(float(max_lsp_bootstrap_sig))
-    if min_lsp_power is not None:
-        where.append("(c.lsp_power IS NOT NULL AND c.lsp_power >= ?)")
-        params.append(float(min_lsp_power))
 
-    order_cols = {
-        "candidate_id": "c.candidate_id",
-        "periodicity_score": "c.periodicity_score",
-        "lsp_bootstrap_sig": "c.lsp_bootstrap_sig",
-        "lsp_power": "c.lsp_power",
-        "dip_best_log_bf": "c.dip_best_log_bf",
-        "jump_best_log_bf": "c.jump_best_log_bf",
-        "updated_at": "r.updated_at",
-        "interest_score": "r.interest_score",
-        "review_pass": "r.review_pass",
-    }
-    order_col = order_cols.get(sort_col, "c.candidate_id")
-    direction = "DESC" if sort_desc else "ASC"
+    # --- numeric range filters (auto-generated) ---
+    # Convention: "min_<col>" → >=, "max_<col>" → <=
+    for col in sorted(_FLOAT_COLS):
+        for prefix, op in [("min_", ">="), ("max_", "<=")]:
+            key = f"{prefix}{col}"
+            val = filters.get(key)
+            if val is not None:
+                where.append(f"(c.{col} IS NOT NULL AND c.{col} {op} ?)")
+                params.append(float(val))
+
+    # --- string filters (auto-generated; exact match) ---
+    for col in sorted(_TEXT_COLS):
+        val = filters.get(col)
+        if val:
+            val = str(val).strip()
+            if val:
+                where.append(f"(c.{col} IS NOT NULL AND c.{col} = ?)")
+                params.append(val)
+
+    # --- sorting (any float column + review columns) ---
+    _sortable = {c: f"c.{c}" for c in _FLOAT_COLS}
+    _sortable["candidate_id"] = "c.candidate_id"
+    _sortable.update({"updated_at": "r.updated_at", "interest_score": "r.interest_score",
+                       "review_pass": "r.review_pass"})
+    sc = filters.get('sort_col', 'candidate_id')
+    order_col = _sortable.get(sc, "c.candidate_id")
+    direction = "DESC" if filters.get('sort_desc') else "ASC"
 
     query = f"""
         SELECT
@@ -369,7 +657,7 @@ def _parse_reason_list(raw: str | None) -> list[str]:
 def get_review(conn: sqlite3.Connection, candidate_id: str) -> dict:
     row = conn.execute(
         """
-        SELECT interest_score, interest_reason, review_pass, notes, status, reviewer, updated_at
+        SELECT interest_score, interest_reason, review_pass, notes, status, reviewer, updated_at, event_class
         FROM reviews WHERE candidate_id=?
         """,
         (candidate_id,),
@@ -378,6 +666,7 @@ def get_review(conn: sqlite3.Connection, candidate_id: str) -> dict:
         return {
             "interest_score": 2,
             "interest_reason": [],
+            "event_class": "unclassified",
             "review_pass": 1,
             "notes": "",
             "status": "unreviewed",
@@ -389,6 +678,7 @@ def get_review(conn: sqlite3.Connection, candidate_id: str) -> dict:
     return {
         "interest_score": score,
         "interest_reason": _parse_reason_list(row[1]),
+        "event_class": str(row[7]) if row[7] else "unclassified",
         "review_pass": 1 if row[2] is None else max(1, int(row[2])),
         "notes": "" if row[3] is None else str(row[3]),
         "status": "unreviewed" if row[4] is None else str(row[4]),
@@ -403,6 +693,7 @@ def save_review(
     candidate_id: str,
     interest_score: int,
     interest_reason: list[str],
+    event_class: str = "unclassified",
     review_pass: int,
     notes: str,
     status: str,
@@ -413,24 +704,27 @@ def save_review(
     score_int = int(np.clip(int(interest_score), 0, 5))
     pass_int = max(1, int(review_pass))
     reason_json = json.dumps(sorted(set(interest_reason)))
+    ec = str(event_class) if event_class else "unclassified"
     conn.execute(
         """
-        INSERT INTO reviews (candidate_id, interest_score, interest_reason, review_pass, notes, status, reviewer, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO reviews (candidate_id, interest_score, interest_reason, event_class, review_pass, notes, status, reviewer, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(candidate_id) DO UPDATE SET
             interest_score=excluded.interest_score,
             interest_reason=excluded.interest_reason,
+            event_class=excluded.event_class,
             review_pass=excluded.review_pass,
             notes=excluded.notes,
             status=excluded.status,
             reviewer=excluded.reviewer,
             updated_at=excluded.updated_at
         """,
-        (candidate_id, score_int, reason_json, pass_int, notes, status, reviewer, ts),
+        (candidate_id, score_int, reason_json, ec, pass_int, notes, status, reviewer, ts),
     )
     payload = {
         "interest_score": score_int,
         "interest_reason": sorted(set(interest_reason)),
+        "event_class": ec,
         "review_pass": pass_int,
         "notes": notes,
         "status": status,
@@ -504,6 +798,7 @@ def export_reviews(conn: sqlite3.Connection, out_path: Path, only_reviewed: bool
             c.jump_best_log_bf,
             r.interest_score,
             r.interest_reason,
+            r.event_class,
             r.review_pass,
             r.notes,
             r.status,

@@ -1,29 +1,35 @@
 from __future__ import annotations
 
 import argparse
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pandas as pd
 
 from malca.review.store import (
     DEFAULT_DB_PATH,
+    EVENT_CLASS_OPTIONS,
     INTEREST_REASON_TAGS,
     STATUS_OPTIONS,
     db_connect,
     export_reviews,
     get_candidate_payload,
+    find_plot_image,
     get_review,
     import_candidates,
     load_candidates_file,
     query_queue,
     save_review,
 )
-from malca.review.metadata import extract_review_metadata
+from malca.review.metadata import extract_review_metadata_grouped
 
 
 def _print_candidate(row: pd.Series, review: dict) -> None:
     cid = str(row["candidate_id"])
-    print(f"\n[{cid}] score={review['interest_score']} pass={review['review_pass']} status={review['status']}")
+    ec = review.get('event_class', 'unclassified')
+    print(f"\n[{cid}] score={review['interest_score']} class={ec} pass={review['review_pass']} status={review['status']}")
     if review["interest_reason"]:
         print("  reasons:", ", ".join(review["interest_reason"]))
     print(
@@ -33,9 +39,60 @@ def _print_candidate(row: pd.Series, review: dict) -> None:
     )
 
 
-def main_with_args(*, db: Path | None = None, input_path: Path | None = None, reviewer: str = "") -> None:
+def _inspect_plot(plot_path: Path, backend: str) -> tuple[bool, str]:
+    chosen = backend
+    if chosen == "auto":
+        if sys.platform == "darwin" and shutil.which("qlmanage"):
+            chosen = "quicklook"
+        else:
+            chosen = "matplotlib"
+
+    if chosen == "quicklook":
+        if shutil.which("qlmanage") is None:
+            return False, "qlmanage not found"
+        try:
+            subprocess.run(
+                ["qlmanage", "-p", str(plot_path)],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True, ""
+        except Exception as exc:
+            return False, str(exc)
+
+    if chosen == "matplotlib":
+        try:
+            import matplotlib.pyplot as plt
+        except Exception as exc:
+            return False, f"matplotlib unavailable: {exc}"
+
+        try:
+            image = plt.imread(str(plot_path))
+            fig, ax = plt.subplots(figsize=(12, 8))
+            ax.imshow(image)
+            ax.axis("off")
+            ax.set_title(plot_path.name)
+            plt.show()
+            plt.close(fig)
+            return True, ""
+        except Exception as exc:
+            return False, str(exc)
+
+    return False, f"unsupported inspect backend: {backend}"
+
+
+def main_with_args(
+    *,
+    db: Path | None = None,
+    input_path: Path | None = None,
+    reviewer: str = "",
+    plot_dir: Path | None = None,
+    inspect_backend: str = "auto",
+) -> None:
     db_resolved = (db or Path(DEFAULT_DB_PATH)).expanduser()
     conn = db_connect(db_resolved)
+    plot_dir_resolved = plot_dir.expanduser() if plot_dir is not None else None
 
     if input_path:
         src = input_path.expanduser()
@@ -92,13 +149,34 @@ def main_with_args(*, db: Path | None = None, input_path: Path | None = None, re
             continue
         if op == "show":
             payload = get_candidate_payload(conn, cid)
-            for label, value in extract_review_metadata(payload):
-                print(f"  {label}: {value}")
+            for group_name, items in extract_review_metadata_grouped(payload):
+                print(f"  [{group_name}]")
+                for label, value in items:
+                    print(f"    {label}: {value}")
+            continue
+        if op in {"inspect", "i"}:
+            if plot_dir_resolved is None:
+                print("inspect unavailable: use --plot-dir to locate plot files")
+                continue
+            payload = get_candidate_payload(conn, cid)
+            plot_path = find_plot_image(payload, plot_dir_resolved)
+            if plot_path is None:
+                print(f"no plot found for {cid} under {plot_dir_resolved}")
+                continue
+
+            print(f"inspecting {plot_path.name} (close viewer to continue)")
+            ok, error = _inspect_plot(plot_path, inspect_backend)
+            if not ok:
+                print(f"inspect failed: {error}")
+                continue
+
+            idx = min(len(queue_df) - 1, idx + 1)
             continue
 
         # edits
         score = int(review["interest_score"])
         reasons = list(review["interest_reason"])
+        event_class = str(review.get("event_class", "unclassified"))
         review_pass = int(review["review_pass"])
         status = str(review["status"])
         notes = str(review["notes"])
@@ -110,6 +188,7 @@ def main_with_args(*, db: Path | None = None, input_path: Path | None = None, re
                 candidate_id=cid,
                 interest_score=score,
                 interest_reason=reasons,
+                event_class=event_class,
                 review_pass=review_pass,
                 notes=notes,
                 status=status,
@@ -117,6 +196,26 @@ def main_with_args(*, db: Path | None = None, input_path: Path | None = None, re
                 event_type="score",
             )
             print(f"saved score={score}")
+            continue
+        if op == "class" and len(parts) > 1:
+            val = parts[1]
+            if val in EVENT_CLASS_OPTIONS:
+                event_class = val
+                save_review(
+                    conn,
+                    candidate_id=cid,
+                    interest_score=score,
+                    interest_reason=reasons,
+                    event_class=event_class,
+                    review_pass=review_pass,
+                    notes=notes,
+                    status=status,
+                    reviewer=reviewer,
+                    event_type="class",
+                )
+                print(f"saved event_class={event_class}")
+            else:
+                print(f"event_class must be one of: {', '.join(EVENT_CLASS_OPTIONS)}")
             continue
         if op == "reason" and len(parts) >= 3:
             sub = parts[1].lower()
@@ -130,6 +229,7 @@ def main_with_args(*, db: Path | None = None, input_path: Path | None = None, re
                 candidate_id=cid,
                 interest_score=score,
                 interest_reason=reasons,
+                event_class=event_class,
                 review_pass=review_pass,
                 notes=notes,
                 status=status,
@@ -145,6 +245,7 @@ def main_with_args(*, db: Path | None = None, input_path: Path | None = None, re
                 candidate_id=cid,
                 interest_score=score,
                 interest_reason=reasons,
+                event_class=event_class,
                 review_pass=review_pass,
                 notes=notes,
                 status=status,
@@ -162,6 +263,7 @@ def main_with_args(*, db: Path | None = None, input_path: Path | None = None, re
                     candidate_id=cid,
                     interest_score=score,
                     interest_reason=reasons,
+                    event_class=event_class,
                     review_pass=review_pass,
                     notes=notes,
                     status=status,
@@ -179,6 +281,7 @@ def main_with_args(*, db: Path | None = None, input_path: Path | None = None, re
                 candidate_id=cid,
                 interest_score=score,
                 interest_reason=reasons,
+                event_class=event_class,
                 review_pass=review_pass,
                 notes=notes,
                 status=status,
@@ -193,6 +296,7 @@ def main_with_args(*, db: Path | None = None, input_path: Path | None = None, re
                 candidate_id=cid,
                 interest_score=score,
                 interest_reason=reasons,
+                event_class=event_class,
                 review_pass=review_pass,
                 notes=notes,
                 status=status,
@@ -206,13 +310,16 @@ def main_with_args(*, db: Path | None = None, input_path: Path | None = None, re
         if op == "tags":
             print("available reason tags:", ", ".join(INTEREST_REASON_TAGS))
             continue
+        if op == "classes":
+            print("available event classes:", ", ".join(EVENT_CLASS_OPTIONS))
+            continue
         if op == "export" and len(parts) > 1:
             out = Path(parts[1]).expanduser()
             export_reviews(conn, out, only_reviewed=True)
             print(f"exported: {out}")
             continue
 
-        print("commands: next/prev/goto/show/score/reason/pass/status/note/save [next]/tags/export/quit")
+        print("commands: next/prev/goto/show/inspect/score/class/reason/pass/status/note/save [next]/tags/classes/export/quit")
 
 
 def main() -> None:
@@ -220,8 +327,21 @@ def main() -> None:
     parser.add_argument("--db", type=Path, default=Path(DEFAULT_DB_PATH), help="SQLite DB path")
     parser.add_argument("--input", type=Path, default=None, help="Optional CSV/Parquet to import before start")
     parser.add_argument("--reviewer", type=str, default="", help="Reviewer name")
+    parser.add_argument("--plot-dir", type=Path, default=None, help="Directory containing plot images")
+    parser.add_argument(
+        "--inspect-backend",
+        choices=["auto", "quicklook", "matplotlib"],
+        default="auto",
+        help="How inspect opens images: auto (default), quicklook, or matplotlib",
+    )
     args = parser.parse_args()
-    main_with_args(db=args.db, input_path=args.input, reviewer=args.reviewer)
+    main_with_args(
+        db=args.db,
+        input_path=args.input,
+        reviewer=args.reviewer,
+        plot_dir=args.plot_dir,
+        inspect_backend=args.inspect_backend,
+    )
 
 
 if __name__ == "__main__":

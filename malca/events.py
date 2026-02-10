@@ -476,6 +476,74 @@ def summarize_kept_runs(
     )
 
 
+def compute_recurrence_stats(run_summaries: list[dict]) -> dict:
+    """Compute inter-event recurrence statistics from run summaries.
+
+    Parameters
+    ----------
+    run_summaries : list[dict]
+        Each dict must have ``start_jd``, ``end_jd``, ``duration_days``,
+        and ``run_max`` (peak significance amplitude).
+
+    Returns
+    -------
+    dict
+        is_single_event, inter_event_spacing_median, inter_event_spacing_std,
+        amplitude_consistency, duration_consistency.
+    """
+    empty = dict(
+        is_single_event=True,
+        inter_event_spacing_median=np.nan,
+        inter_event_spacing_std=np.nan,
+        amplitude_consistency=np.nan,
+        duration_consistency=np.nan,
+    )
+    if not run_summaries or len(run_summaries) < 1:
+        return empty
+
+    if len(run_summaries) == 1:
+        return empty
+
+    # Sort by start_jd to ensure chronological order
+    sorted_runs = sorted(run_summaries, key=lambda s: s.get("start_jd", 0.0))
+
+    # Inter-event spacing: gap between end of one event and start of the next
+    spacings = []
+    for i in range(1, len(sorted_runs)):
+        prev_end = sorted_runs[i - 1].get("end_jd", np.nan)
+        cur_start = sorted_runs[i].get("start_jd", np.nan)
+        if np.isfinite(prev_end) and np.isfinite(cur_start):
+            spacings.append(cur_start - prev_end)
+
+    spacings = np.asarray(spacings, float)
+    spacing_median = float(np.nanmedian(spacings)) if spacings.size else np.nan
+    spacing_std = float(np.nanstd(spacings, ddof=1)) if spacings.size >= 2 else np.nan
+
+    # Amplitude consistency: coefficient of variation of run_max across runs
+    amps = np.asarray([s.get("run_max", np.nan) for s in sorted_runs], float)
+    amps = amps[np.isfinite(amps)]
+    if amps.size >= 2 and np.mean(amps) != 0:
+        amplitude_consistency = float(np.std(amps, ddof=1) / np.mean(amps))
+    else:
+        amplitude_consistency = np.nan
+
+    # Duration consistency: coefficient of variation of duration_days
+    durs = np.asarray([s.get("duration_days", np.nan) for s in sorted_runs], float)
+    durs = durs[np.isfinite(durs)]
+    if durs.size >= 2 and np.mean(durs) != 0:
+        duration_consistency = float(np.std(durs, ddof=1) / np.mean(durs))
+    else:
+        duration_consistency = np.nan
+
+    return dict(
+        is_single_event=False,
+        inter_event_spacing_median=spacing_median,
+        inter_event_spacing_std=spacing_std,
+        amplitude_consistency=amplitude_consistency,
+        duration_consistency=duration_consistency,
+    )
+
+
 @njit(fastmath=True, cache=True, parallel=True)
 def marginal_loglikelihood_grid(log_Pb, log_Pf, log_p, log_1_minus_p):
     """Marginal log-likelihood over the (mag_grid × p_grid) posterior grid."""
@@ -1166,27 +1234,60 @@ def process_lightcurve(
         return float(np.nanmax(ep)) if ep.size else np.nan
 
     def get_best_morph_info(run_list):
-        """Extract morphology info and symmetry score from the best run."""
+        """Extract morphology info, full params, and symmetry from the best run.
+
+        Returns
+        -------
+        dict with keys: morph, delta_bic, width_param, symmetry,
+                        amp, t0, alpha, tau.
+        """
+        empty = dict(
+            morph="none", delta_bic=0.0, width_param=np.nan, symmetry=np.nan,
+            amp=np.nan, t0=np.nan, alpha=np.nan, tau=np.nan,
+        )
         if not run_list:
-            return "none", 0.0, 0.0, np.nan
+            return empty
         best_run = max(run_list, key=lambda x: x['run_max'])
-        
+
         morph = best_run.get('morphology', 'none')
         delta_bic = best_run.get('delta_bic_null', 0.0)
         symmetry = best_run.get('symmetry_score', np.nan)
 
         params = best_run.get('params', {})
-        if morph == 'gaussian':
-            main_param = params.get('sigma', np.nan)
-        elif morph == 'paczynski':
-            main_param = params.get('tE', np.nan)
-        else:
-            main_param = np.nan
-            
-        return morph, float(delta_bic), float(main_param), float(symmetry)
 
-    dip_morph, dip_dbic, dip_param, dip_symmetry = get_best_morph_info(dip["run_summaries"])
-    jump_morph, jump_dbic, jump_param, _ = get_best_morph_info(jump["run_summaries"])
+        # Main width parameter (backward-compatible)
+        if morph == 'gaussian':
+            width_param = params.get('sigma', np.nan)
+        elif morph == 'skew_gaussian':
+            width_param = params.get('sigma', np.nan)
+        elif morph == 'paczynski':
+            width_param = params.get('tE', np.nan)
+        elif morph == 'fred':
+            width_param = params.get('tau', np.nan)
+        else:
+            width_param = np.nan
+
+        amp = params.get('amp', np.nan)
+        t0 = params.get('t0', np.nan)
+        alpha = params.get('alpha', np.nan)      # skew_gaussian only
+        tau = params.get('tau', np.nan)           # fred only
+
+        return dict(
+            morph=str(morph),
+            delta_bic=float(delta_bic),
+            width_param=float(width_param) if np.isfinite(width_param) else np.nan,
+            symmetry=float(symmetry),
+            amp=float(amp) if np.isfinite(amp) else np.nan,
+            t0=float(t0) if np.isfinite(t0) else np.nan,
+            alpha=float(alpha) if np.isfinite(alpha) else np.nan,
+            tau=float(tau) if np.isfinite(tau) else np.nan,
+        )
+
+    dip_mi = get_best_morph_info(dip["run_summaries"])
+    jump_mi = get_best_morph_info(jump["run_summaries"])
+
+    dip_recurrence = compute_recurrence_stats(dip["run_summaries"])
+    jump_recurrence = compute_recurrence_stats(jump["run_summaries"])
 
     cams = df["camera#"].dropna() if "camera#" in df.columns else pd.Series([], dtype=str)
 
@@ -1237,14 +1338,22 @@ def process_lightcurve(
         jd_last=jd_last,
         cadence_median_days=cadence_median_days,
 
-        dip_best_morph=str(dip_morph),
-        dip_best_delta_bic=float(dip_dbic),
-        dip_best_width_param=float(dip_param),
-        dip_symmetry_score=float(dip_symmetry),
-        
-        jump_best_morph=str(jump_morph),
-        jump_best_delta_bic=float(jump_dbic),
-        jump_best_width_param=float(jump_param),
+        dip_best_morph=str(dip_mi["morph"]),
+        dip_best_delta_bic=float(dip_mi["delta_bic"]),
+        dip_best_width_param=float(dip_mi["width_param"]),
+        dip_symmetry_score=float(dip_mi["symmetry"]),
+        dip_best_amp=float(dip_mi["amp"]),
+        dip_best_t0=float(dip_mi["t0"]),
+        dip_best_alpha=float(dip_mi["alpha"]),
+        dip_best_tau=float(dip_mi["tau"]),
+
+        jump_best_morph=str(jump_mi["morph"]),
+        jump_best_delta_bic=float(jump_mi["delta_bic"]),
+        jump_best_width_param=float(jump_mi["width_param"]),
+        jump_best_amp=float(jump_mi["amp"]),
+        jump_best_t0=float(jump_mi["t0"]),
+        jump_best_alpha=float(jump_mi["alpha"]),
+        jump_best_tau=float(jump_mi["tau"]),
 
         dip_count=int(len(dip["event_indices"])),
         jump_count=int(len(jump["event_indices"])),
@@ -1297,6 +1406,19 @@ def process_lightcurve(
         dip_trigger_threshold=float(dip.get("trigger_threshold", np.nan)),
         jump_trigger_threshold=float(jump.get("trigger_threshold", np.nan)),
         bad_cameras_filtered=",".join(str(c) for c in sorted(bad_cameras_filtered)) if bad_cameras_filtered else "",
+
+        # Recurrence statistics
+        dip_is_single_event=bool(dip_recurrence["is_single_event"]),
+        dip_inter_event_spacing_median=float(dip_recurrence["inter_event_spacing_median"]),
+        dip_inter_event_spacing_std=float(dip_recurrence["inter_event_spacing_std"]),
+        dip_amplitude_consistency=float(dip_recurrence["amplitude_consistency"]),
+        dip_duration_consistency=float(dip_recurrence["duration_consistency"]),
+
+        jump_is_single_event=bool(jump_recurrence["is_single_event"]),
+        jump_inter_event_spacing_median=float(jump_recurrence["inter_event_spacing_median"]),
+        jump_inter_event_spacing_std=float(jump_recurrence["inter_event_spacing_std"]),
+        jump_amplitude_consistency=float(jump_recurrence["amplitude_consistency"]),
+        jump_duration_consistency=float(jump_recurrence["duration_consistency"]),
     )
 
 

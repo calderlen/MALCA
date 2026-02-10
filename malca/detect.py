@@ -161,6 +161,48 @@ def import_bundle_zip(bundle_zip: Path, out_dir: Path) -> None:
         zf.extractall(out_dir)
 
 
+def _collect_bundle_lightcurve_files(out_dir: Path) -> list[tuple[Path, str]]:
+    """Collect candidate .dat2/.raw2 files to include in bundle assets.
+
+    Source files are read directly from their original location and are never
+    modified in place.
+    """
+    filtered_candidates = out_dir / "results" / "lc_events_filtered.parquet"
+    if not filtered_candidates.exists():
+        return []
+
+    try:
+        df_candidates = pd.read_parquet(filtered_candidates)
+    except Exception as exc:
+        print(f"Warning: could not read {filtered_candidates} for light curve bundling: {exc}")
+        return []
+
+    if "path" not in df_candidates.columns:
+        return []
+
+    files_to_bundle: list[tuple[Path, str]] = []
+    seen_files: set[Path] = set()
+
+    for raw_path in df_candidates["path"].dropna().astype(str).unique().tolist():
+        dat_path = Path(raw_path).expanduser()
+        if dat_path.suffix.lower() != ".dat2":
+            continue
+
+        for source_file in (dat_path, dat_path.with_suffix(".raw2")):
+            if not source_file.exists() or (not source_file.is_file()):
+                continue
+
+            resolved = source_file.resolve()
+            if resolved in seen_files:
+                continue
+
+            seen_files.add(resolved)
+            arcname = f"bundle_assets/lightcurves/{resolved.name}"
+            files_to_bundle.append((resolved, arcname))
+
+    return files_to_bundle
+
+
 def export_bundle_zip(bundle_zip: Path, out_dir: Path, include_all: bool = False) -> list[str]:
     """Create transfer bundle zip from a pipeline out_dir."""
     bundle_zip = Path(bundle_zip).expanduser()
@@ -210,15 +252,25 @@ def export_bundle_zip(bundle_zip: Path, out_dir: Path, include_all: bool = False
     # Prevent accidental self-inclusion if bundle path is inside out_dir.
     files_to_add.discard(bundle_zip)
 
-    if not files_to_add:
+    lightcurve_files = _collect_bundle_lightcurve_files(out_dir)
+
+    if not files_to_add and not lightcurve_files:
         raise FileNotFoundError(f"No bundle files found under {out_dir}")
 
     ordered_files = sorted(files_to_add, key=lambda p: str(p.relative_to(out_dir)))
+    ordered_lightcurve_files = sorted(lightcurve_files, key=lambda item: item[1])
+
+    bundled_paths: list[str] = []
     with zipfile.ZipFile(bundle_zip, "w", compression=zipfile.ZIP_LZMA) as zf:
         for p in ordered_files:
-            zf.write(p, arcname=str(p.relative_to(out_dir)))
+            arcname = str(p.relative_to(out_dir))
+            zf.write(p, arcname=arcname)
+            bundled_paths.append(arcname)
+        for source_file, arcname in ordered_lightcurve_files:
+            zf.write(source_file, arcname=arcname)
+            bundled_paths.append(arcname)
 
-    return [str(p.relative_to(out_dir)) for p in ordered_files]
+    return bundled_paths
 
 
 def _build_post_filter_kwargs(args: argparse.Namespace) -> dict[str, Any]:

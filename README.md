@@ -47,7 +47,7 @@ conda activate malca
 
 ### Dependencies
 - Core + runtime modules: numpy, pandas, scipy, numba, astropy, celerite2, matplotlib, tqdm, pyarrow
-- Review + plotting: streamlit, plotly
+- Review + plotting: dash, plotly
 - Characterization + catalog access: astroquery, dustmaps3d, pyvo, banyan-sigma, requests
 - ML utilities: joblib
 
@@ -489,8 +489,8 @@ malca attrition --pre output/pre.parquet --post output/post.parquet
 
 ### Candidate Review
 
-- Launch reviewer app:
-  `streamlit run malca/review/app.py`
+- Launch Dash review GUI (keyboard-driven, fast):
+  `malca review --db ~/.cache/malca/review.db --plot-dir output/runs/YOUR_RUN/plots`
 - Launch terminal triage tool:
   `malca review.tui --db output/review/review.db`
 - In the app:

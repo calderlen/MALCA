@@ -9,17 +9,14 @@ import pandas as pd
 import joblib
 import lightgbm as lgb
 
+from malca.ml.features import ML_LABEL_COLUMN, select_ml_features
+
 
 def _prepare_xy(df: pd.DataFrame, label_col: str) -> tuple[pd.DataFrame, pd.Series]:
     if label_col not in df.columns:
         raise ValueError(f"Missing label column: {label_col}")
     y = df[label_col].astype(str)
-    drop_cols = {label_col, "candidate_id", "path", "asas_sn_id"}
-    x = df.drop(columns=[c for c in drop_cols if c in df.columns], errors="ignore").copy()
-    for col in x.columns:
-        if x[col].dtype == object:
-            x[col] = x[col].astype("category").cat.codes
-    x = x.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    x = select_ml_features(df)
     return x, y
 
 
@@ -70,7 +67,7 @@ def save_model_artifacts(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train baseline candidate classifier model")
     parser.add_argument("--input", type=Path, required=True, help="Input CSV/Parquet with reviewer labels")
-    parser.add_argument("--label-col", type=str, default="label", help="Supervised label column")
+    parser.add_argument("--label-col", type=str, default=ML_LABEL_COLUMN, help="Supervised label column (default: event_class)")
     parser.add_argument("--out-dir", type=Path, default=Path("output/ml"), help="Output directory for model artifacts")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
