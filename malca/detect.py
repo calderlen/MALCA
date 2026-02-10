@@ -706,6 +706,16 @@ def main():
             "stage": stage,
         }
     }
+    if run_summary_file.exists():
+        try:
+            with open(run_summary_file) as f:
+                existing_summary = json.load(f)
+            # Preserve existing stats, update run_info
+            existing_summary.update(summary)
+            summary = existing_summary
+        except Exception:
+            pass
+
     results_files: list[Path] = []
     cmd = shlex.join(getattr(sys, "orig_argv", None) or ([sys.executable] + sys.argv))
     try:
@@ -1302,45 +1312,7 @@ def main():
                     import traceback
                     traceback.print_exc()
 
-    # Step 7: Generate candidate plots (optional)
-    if run_upstream and args.run_postprocess:
-        if not args.run_post_filter:
-            print("Warning: --run-postprocess requires --run-post-filter. Skipping postprocess.")
-        else:
-            log("\n=== Step 7: Generating candidate plots ===")
-            try:
-                post_filter_output = results_dir / "lc_events_filtered.parquet"
-                if post_filter_output.exists():
-                    postprocess_dir = out_dir / "plots"
-                    postprocess_dir.mkdir(parents=True, exist_ok=True)
 
-                    postprocess_summary = plot_passing_candidates(
-                        post_filter_output,
-                        postprocess_dir,
-                        baseline=args.baseline_func,
-                        logbf_threshold_dip=args.logbf_threshold_dip,
-                        logbf_threshold_jump=args.logbf_threshold_jump,
-                        format=args.plot_format,
-                        max_plots=args.max_plots,
-                        show_tqdm=args.verbose,
-                    )
-
-                    # Update summary with postprocess stats
-                    summary["postprocess_stats"] = postprocess_summary
-
-                    # Overwrite summary with updated stats
-                    with open(run_summary_file, "w") as f:
-                        json.dump(summary, f, indent=2, default=str)
-
-                    log(f"Candidate plotting: {postprocess_summary.get('plotted', 0)} plots generated in {postprocess_dir}")
-                else:
-                    print(f"Warning: post-filter output not found at {post_filter_output}")
-
-            except Exception as e:
-                print(f"Error in postprocess step: {e}")
-                if args.verbose:
-                    import traceback
-                    traceback.print_exc()
 
     post_filter_output = results_dir / "lc_events_filtered.parquet"
     has_post_filter_output = post_filter_output.exists()
@@ -1404,6 +1376,8 @@ def main():
                 import traceback
                 traceback.print_exc()
             sys.exit(1)
+
+
 
     if run_downstream and (args.run_characterize or args.run_dust) and (not has_post_filter_output):
         print(f"Warning: downstream stage requires filtered results at {post_filter_output}. Skipping characterization.")
