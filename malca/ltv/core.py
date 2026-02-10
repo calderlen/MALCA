@@ -661,7 +661,10 @@ class ParquetChunkWriter:
         df_chunk = pd.DataFrame(chunk_results)
         table = pa.Table.from_pandas(df_chunk, preserve_index=False)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        pq.write_table(table, self.path, compression=PARQUET_OUTPUT_COMPRESSION, append=self.append)
+        if self.append:
+            existing = pq.read_table(self.path)
+            table = pa.concat_tables([existing, table])
+        pq.write_table(table, self.path, compression=PARQUET_OUTPUT_COMPRESSION)
         self.append = True
 
     def close(self):
