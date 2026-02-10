@@ -1541,7 +1541,8 @@ def main():
                     import traceback
                     traceback.print_exc()
 
-    if args.export_bundle is not None:
+    export_bundle_path = args.export_bundle if args.export_bundle is not None else out_dir / f"{out_dir.name}_bundle.zip"
+    if export_bundle_path is not None:
         try:
             source_index_file = ASASSN_INDEX_PATH.expanduser()
             if source_index_file.exists():
@@ -1556,8 +1557,8 @@ def main():
                     f"Required index file not found for bundle export: {source_index_file}"
                 )
 
-            bundled = export_bundle_zip(args.export_bundle, out_dir)
-            log(f"Exported bundle to {args.export_bundle.expanduser()} with {len(bundled)} files")
+            bundled = export_bundle_zip(export_bundle_path, out_dir)
+            log(f"Exported bundle to {export_bundle_path.expanduser()} with {len(bundled)} files")
         except Exception as e:
             print(f"Error creating export bundle: {e}")
 
