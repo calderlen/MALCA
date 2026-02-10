@@ -1677,6 +1677,7 @@ def main():
         def __init__(self, path: Path):
             self.path = Path(path)
             self.append = self.path.exists() and self.path.stat().st_size > 0
+            self.schema_invalidated = False
 
         def write_chunk(self, chunk_results):
             if not chunk_results:
@@ -1686,7 +1687,11 @@ def main():
             self.path.parent.mkdir(parents=True, exist_ok=True)
             if self.append:
                 existing = pq.read_table(self.path)
-                table = pa.concat_tables([existing, table])
+                if existing.schema.equals(table.schema):
+                    table = pa.concat_tables([existing, table])
+                else:
+                    _log(f"Schema mismatch in {self.path}; discarding old checkpoint data.", False)
+                    self.schema_invalidated = True
             pq.write_table(table, self.path, compression=PARQUET_OUTPUT_COMPRESSION)
             self.append = True
 
@@ -1775,7 +1780,12 @@ def main():
 
         if checkpoint_log:
             checkpoint_log.parent.mkdir(parents=True, exist_ok=True)
-            with open(checkpoint_log, "a") as f:
+            if hasattr(writer, 'schema_invalidated') and writer.schema_invalidated:
+                mode = "w"
+                writer.schema_invalidated = False
+            else:
+                mode = "a"
+            with open(checkpoint_log, mode) as f:
                 for row in chunk_results:
                     f.write(str(row['path']) + "\n")
 
