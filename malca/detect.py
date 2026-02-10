@@ -1168,7 +1168,14 @@ def main():
                                 # Merge stats into row
                                 merged = row.to_dict()
                                 for k, v in stats_dict.items():
-                                    if k not in merged:  # Don't overwrite existing columns
+                                    if isinstance(v, dict):
+                                        for sub_k, sub_v in v.items():
+                                            col = f"stats_{k}_{sub_k}"
+                                            if col not in merged:
+                                                merged[col] = sub_v
+                                    elif isinstance(v, (pd.DataFrame, pd.Series)):
+                                        continue
+                                    elif f"stats_{k}" not in merged:
                                         merged[f"stats_{k}"] = v
                                 enriched_rows.append(merged)
 
