@@ -3,6 +3,8 @@ _os.environ.setdefault("OMP_NUM_THREADS", "1")
 _os.environ.setdefault("MKL_NUM_THREADS", "1")
 _os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 _os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+# Prevent numba from spawning a thread pool in each worker process
+_os.environ.setdefault("NUMBA_NUM_THREADS", "1")
 
 import argparse
 import sys
