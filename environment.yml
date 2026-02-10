@@ -5,7 +5,7 @@ channels:
   - defaults
 dependencies:
   - python=3.10
-  - numpy
+  - numpy>=2.0
   - pandas
   - scipy
   - numba
@@ -14,7 +14,7 @@ dependencies:
   - seaborn
   - scikit-learn
   - joblib
-  - pyarrow
+  - pyarrow>=15.0
   - tqdm
   - ipython
   - ipykernel
