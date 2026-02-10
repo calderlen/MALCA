@@ -10,7 +10,7 @@ from malca.events import (
     build_runs,
     classify_run_morphology,
     filter_runs,
-    run_bayesian_significance,
+    score_lightcurve,
 )
 from malca.baseline import per_camera_gp_baseline
 
@@ -189,13 +189,13 @@ class TestFilterRuns:
 
 
 class TestRunBayesianSignificance:
-    """Test the high-level run_bayesian_significance function."""
+    """Test the high-level score_lightcurve function."""
 
     def test_basic_usage(self):
         """Basic usage should work without errors."""
         df = make_synthetic_lc(seed=400)
         
-        result = run_bayesian_significance(
+        result = score_lightcurve(
             df,
             logbf_threshold_dip=5.0,
             logbf_threshold_jump=5.0,
@@ -211,14 +211,14 @@ class TestRunBayesianSignificance:
         """Baselines should provide sigma_eff by default."""
         df = make_synthetic_lc(seed=500)
 
-        result = run_bayesian_significance(df)
+        result = score_lightcurve(df)
         assert "dip" in result
 
     def test_quiescent_lc_no_detection(self):
         """Flat light curve should not trigger detections."""
         df = make_synthetic_lc(scatter=0.01, seed=100)
         
-        result = run_bayesian_significance(
+        result = score_lightcurve(
             df,
             logbf_threshold_dip=5.0,
             logbf_threshold_jump=5.0,
@@ -234,7 +234,7 @@ class TestRunBayesianSignificance:
         t0 = df["JD"].median()
         df = inject_dip(df, t0=t0, amplitude=0.4, sigma=8.0)
         
-        result = run_bayesian_significance(
+        result = score_lightcurve(
             df,
             logbf_threshold_dip=3.0,  # Lower threshold for test
             trigger_mode="logbf",
@@ -253,7 +253,7 @@ class TestEdgeCases:
         """Handle very short light curves."""
         df = make_synthetic_lc(n_points=20, n_cameras=1)
         
-        result = run_bayesian_significance(df)
+        result = score_lightcurve(df)
         
         # Should complete without error
         assert "dip" in result

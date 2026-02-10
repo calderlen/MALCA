@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 from malca.baseline import global_median_baseline, per_camera_median_baseline, per_camera_gp_baseline
-from malca.events import run_bayesian_significance
+from malca.events import score_lightcurve
 
 
 def make_synthetic_lc(
@@ -78,7 +78,7 @@ class TestFullPipeline:
         """Quiescent light curve should not produce false positives with GP baselines."""
         df = make_synthetic_lc(n_points=300, scatter=0.015, seed=1000)
         
-        result = run_bayesian_significance(
+        result = score_lightcurve(
             df,
             baseline_func=baseline_func,
             logbf_threshold_dip=5.0,
@@ -101,7 +101,7 @@ class TestFullPipeline:
         t0 = df["JD"].median()
         df = inject_dip(df, t0=t0, amplitude=0.6, sigma=10.0)
         
-        result = run_bayesian_significance(
+        result = score_lightcurve(
             df,
             baseline_func=baseline_func,
             logbf_threshold_dip=3.0,
@@ -122,7 +122,7 @@ class TestFullPipeline:
         
         results = []
         for _ in range(3):
-            result = run_bayesian_significance(
+            result = score_lightcurve(
                 df.copy(),
                 logbf_threshold_dip=3.0,
             )
@@ -141,7 +141,7 @@ class TestRejectionTracking:
         """Light curves with no triggers should have empty event_indices."""
         df = make_synthetic_lc(n_points=200, scatter=0.01, seed=5000)
         
-        result = run_bayesian_significance(
+        result = score_lightcurve(
             df,
             logbf_threshold_dip=10.0,  # Very high threshold
         )
@@ -157,7 +157,7 @@ class TestRejectionTracking:
         idx = len(df) // 2
         df.loc[idx, "mag"] += 0.5
         
-        result = run_bayesian_significance(
+        result = score_lightcurve(
             df,
             logbf_threshold_dip=2.0,
             run_min_points=3,  # Require 3+ points
@@ -182,7 +182,7 @@ class TestMultiCameraConsistency:
         gaussian = 0.5 * np.exp(-0.5 * ((df_modified["JD"] - t0) / 8.0) ** 2)
         df_modified.loc[cam0_mask, "mag"] += gaussian[cam0_mask]
         
-        result = run_bayesian_significance(
+        result = score_lightcurve(
             df_modified,
             logbf_threshold_dip=3.0,
         )
@@ -198,7 +198,7 @@ class TestMultiCameraConsistency:
         t0 = df["JD"].median()
         df = inject_dip(df, t0=t0, amplitude=0.5, sigma=10.0)
         
-        result = run_bayesian_significance(
+        result = score_lightcurve(
             df,
             logbf_threshold_dip=3.0,
         )
@@ -218,7 +218,7 @@ class TestDipVsJump:
         t0 = df["JD"].median()
         df = inject_dip(df, t0=t0, amplitude=0.5, sigma=10.0)
         
-        result = run_bayesian_significance(
+        result = score_lightcurve(
             df,
             logbf_threshold_dip=3.0,
             logbf_threshold_jump=3.0,
@@ -244,7 +244,7 @@ class TestDipVsJump:
         t0 = df["JD"].median()
         df = inject_jump(df, t0=t0, amplitude=-0.6)  # Brightening
         
-        result = run_bayesian_significance(
+        result = score_lightcurve(
             df,
             logbf_threshold_dip=2.0,
             logbf_threshold_jump=2.0,
@@ -264,8 +264,8 @@ class TestParameterSensitivity:
         t0 = df["JD"].median()
         df = inject_dip(df, t0=t0, amplitude=0.3, sigma=8.0)
         
-        result_low = run_bayesian_significance(df, logbf_threshold_dip=2.0)
-        result_high = run_bayesian_significance(df, logbf_threshold_dip=8.0)
+        result_low = score_lightcurve(df, logbf_threshold_dip=2.0)
+        result_high = score_lightcurve(df, logbf_threshold_dip=8.0)
         
         n_low = len(result_low["dip"].get("event_indices", []))
         n_high = len(result_high["dip"].get("event_indices", []))
@@ -278,8 +278,8 @@ class TestParameterSensitivity:
         t0 = df["JD"].median()
         df = inject_dip(df, t0=t0, amplitude=0.4, sigma=5.0)  # Narrow dip
         
-        result_2pt = run_bayesian_significance(df, logbf_threshold_dip=2.0, run_min_points=2)
-        result_5pt = run_bayesian_significance(df, logbf_threshold_dip=2.0, run_min_points=5)
+        result_2pt = score_lightcurve(df, logbf_threshold_dip=2.0, run_min_points=2)
+        result_5pt = score_lightcurve(df, logbf_threshold_dip=2.0, run_min_points=5)
         
         n_runs_2 = result_2pt["dip"].get("n_runs", 0)
         n_runs_5 = result_5pt["dip"].get("n_runs", 0)
