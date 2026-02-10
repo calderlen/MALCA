@@ -934,19 +934,26 @@ def main():
         df_filtered = df_filtered.sample(n=args.test_run_n, random_state=42).reset_index(drop=True)
 
     # Step 2.5: Apply camera median filter to identify cameras to exclude
+    camera_median_file = prefilter_dir / f"camera_medians_{mag_bin_tag}.parquet"
     if run_upstream and (not args.skip_camera_median) and ("mag_bin" in df_filtered.columns):
-        log(f"\nApplying camera median filter (tolerance={args.camera_median_tolerance} mag)...")
-        # Camera median validation needs per-source file paths (.dat2 -> .raw2).
-        # Keep the original path column unchanged for downstream code.
-        camera_median_df = df_filtered.copy()
-        if "dat_path" in camera_median_df.columns:
-            camera_median_df["path"] = camera_median_df["dat_path"]
-        df_camera = filter_camera_medians(
-            camera_median_df,
-            mag_tolerance=args.camera_median_tolerance,
-            show_tqdm=args.verbose,
-        )
-        df_filtered["excluded_cameras"] = df_camera["excluded_cameras"]
+        if args.force_filter or not camera_median_file.exists():
+            log(f"\nApplying camera median filter (tolerance={args.camera_median_tolerance} mag)...")
+            # Camera median validation needs per-source file paths (.dat2 -> .raw2).
+            # Keep the original path column unchanged for downstream code.
+            camera_median_df = df_filtered.copy()
+            if "dat_path" in camera_median_df.columns:
+                camera_median_df["path"] = camera_median_df["dat_path"]
+            df_camera = filter_camera_medians(
+                camera_median_df,
+                mag_tolerance=args.camera_median_tolerance,
+                show_tqdm=args.verbose,
+            )
+            df_filtered["excluded_cameras"] = df_camera["excluded_cameras"]
+            safe_write_parquet(df_filtered[["source_id", "excluded_cameras"]], camera_median_file)
+        else:
+            log(f"\nLoading cached camera median results from {camera_median_file}")
+            cam_cache = pd.read_parquet(camera_median_file)
+            df_filtered = df_filtered.merge(cam_cache, on="source_id", how="left")
         n_with_exclusions = (df_filtered["excluded_cameras"].fillna("") != "").sum()
         log(f"Found {n_with_exclusions}/{len(df_filtered)} sources with excluded cameras")
 
