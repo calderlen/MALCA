@@ -385,7 +385,7 @@ def plot_passing_candidates(
         actual_workers = min(workers, cpu_count(), len(work_items))
         print(f"Plotting with {actual_workers} workers...")
 
-        with Pool(processes=actual_workers) as pool:
+        with Pool(processes=actual_workers, maxtasksperchild=50) as pool:
             results = list(tqdm(
                 pool.imap_unordered(_plot_single_candidate, work_items),
                 total=len(work_items),

@@ -943,12 +943,12 @@ def plot_bayes_results(
         out_path.parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(out_path, dpi=150, bbox_inches="tight")
         print(f"Saved plot to {out_path}")
-    
+
     if show:
         plt.show()
     else:
-        plt.close()
-    
+        plt.close(fig)
+
     if return_filtered_cameras:
         return filtered_cameras
     return fig
