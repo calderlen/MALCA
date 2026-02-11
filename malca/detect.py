@@ -268,6 +268,9 @@ def export_bundle_zip(bundle_zip: Path, out_dir: Path, include_all: bool = False
     ordered_files = sorted(files_to_add, key=lambda p: str(p.relative_to(out_dir)))
     ordered_lightcurve_files = sorted(lightcurve_files, key=lambda item: item[1])
 
+    total_files = len(ordered_files) + len(ordered_lightcurve_files)
+    log(f"Bundling {total_files} files with ZIP_LZMA compression...")
+
     bundled_paths: list[str] = []
     with zipfile.ZipFile(bundle_zip, "w", compression=zipfile.ZIP_LZMA) as zf:
         for p in ordered_files:
@@ -407,6 +410,8 @@ def main():
     )
     parser.add_argument("--import-bundle", type=Path, default=None, help="Zip bundle produced by --export-bundle (for home stage)")
     parser.add_argument("--export-bundle", type=Path, default=None, help="Write transferable zip bundle at end of run")
+    parser.add_argument("--no-export-bundle", dest="export_bundle_enabled", action="store_false",
+                        help="Skip export bundle creation at end of run")
     parser.add_argument("--full-bundle", action="store_true", default=False, help="Include all large assets in export bundle (index, gaia cache, manifests, prefilter, paths)")
 
     # Step 5: Post-filter args (enabled by default)
@@ -502,6 +507,7 @@ def main():
         run_enrich=True,
         run_neighbor_enrich=True,
         run_spectra_enrich=True,
+        export_bundle_enabled=True,
     )
 
     args = parser.parse_args()
@@ -725,6 +731,7 @@ def main():
             "stage": stage,
             "import_bundle": str(args.import_bundle) if args.import_bundle else None,
             "export_bundle": str(args.export_bundle) if args.export_bundle else None,
+            "export_bundle_enabled": args.export_bundle_enabled,
             "mag_bin": args.mag_bin,
             # Pre-filter parameters
             "min_time_span": args.min_time_span,
@@ -1606,8 +1613,9 @@ def main():
                     import traceback
                     traceback.print_exc()
 
-    export_bundle_path = args.export_bundle if args.export_bundle is not None else out_dir / f"{out_dir.name}_bundle.zip"
-    if export_bundle_path is not None:
+    if args.export_bundle_enabled:
+        export_bundle_path = args.export_bundle if args.export_bundle is not None else out_dir / f"{out_dir.name}_bundle.zip"
+        log(f"\n=== Exporting bundle to {export_bundle_path} ===")
         try:
             if args.full_bundle:
                 source_index_file = ASASSN_INDEX_PATH.expanduser()
