@@ -24,6 +24,7 @@ def run_spectra_availability(
     chunk_size: int = SPECTRA_CHUNK_SIZE,
     cache_file: Path | None = None,
     catalogs: dict[str, str] | None = None,
+    checkpoint_path: Path | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -40,28 +41,49 @@ def run_spectra_availability(
     coords = coords.drop_duplicates(subset=["candidate_id"])
     coords["candidate_id"] = coords["candidate_id"].astype(str)
 
+    # Load checkpoint to skip already-processed candidates
+    ckpt_df = pd.DataFrame()
+    cached_ids: set[str] = set()
+    if checkpoint_path and Path(checkpoint_path).exists():
+        try:
+            ckpt_df = pd.read_parquet(checkpoint_path)
+            if "candidate_id" in ckpt_df.columns:
+                cached_ids = set(ckpt_df["candidate_id"].astype(str))
+                print(f"[spectra] Loaded checkpoint: {len(cached_ids)} candidates already processed")
+        except Exception:
+            ckpt_df = pd.DataFrame()
+
+    coords_todo = coords[~coords["candidate_id"].isin(cached_ids)] if cached_ids else coords
+
+    # Load cache only if no checkpoint (checkpoint is a superset of cache)
     cache_df = pd.DataFrame()
-    if cache_file and Path(cache_file).exists():
+    if not cached_ids and cache_file and Path(cache_file).exists():
         try:
             cache_df = pd.read_parquet(cache_file)
         except Exception:
             cache_df = pd.DataFrame()
 
     frames: list[pd.DataFrame] = []
-    for survey, catalog_id in catalogs.items():
-        res = _query_catalog_bulk(
-            coords,
-            catalog=catalog_id,
-            radius_arcsec=radius_arcsec,
-            chunk_size=chunk_size,
-        )
-        if res.empty:
-            continue
-        res["survey"] = survey
-        frames.append(res)
+    if not coords_todo.empty:
+        for survey, catalog_id in catalogs.items():
+            res = _query_catalog_bulk(
+                coords_todo,
+                catalog=catalog_id,
+                radius_arcsec=radius_arcsec,
+                chunk_size=chunk_size,
+            )
+            if res.empty:
+                continue
+            res["survey"] = survey
+            frames.append(res)
+    elif cached_ids:
+        print(f"[spectra] All {len(coords)} candidates already in checkpoint, skipping queries")
 
     fresh = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-    spectra_long = pd.concat([cache_df, fresh], ignore_index=True) if not cache_df.empty else fresh
+
+    # Combine checkpoint + cache + fresh results
+    parts = [p for p in [ckpt_df, cache_df, fresh] if not p.empty]
+    spectra_long = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
     if not spectra_long.empty:
         spectra_long["candidate_id"] = spectra_long["candidate_id"].astype(str)
         keep_cols = [c for c in ["candidate_id", "survey", "catalog", "sep_arcsec"] if c in spectra_long.columns]
@@ -85,8 +107,18 @@ def run_spectra_availability(
         summary["has_spectrum"] = summary["spectrum_sources"].str.len() > 0
         summary["spectrum_links"] = ""
 
+    # Save checkpoint before final output
+    if checkpoint_path and not spectra_long.empty:
+        Path(checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
+        spectra_long.to_parquet(checkpoint_path, index=False, compression="snappy")
+
     spectra_long.to_parquet(out_dir / "spectra_long.parquet", index=False, compression="zstd")
     summary.to_parquet(out_dir / "spectra_summary.parquet", index=False, compression="zstd")
+
+    # Clean up checkpoint on success
+    if checkpoint_path and Path(checkpoint_path).exists():
+        Path(checkpoint_path).unlink()
+
     return spectra_long, summary
 
 

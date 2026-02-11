@@ -86,6 +86,7 @@ def run_neighbor_enrichment(
     chunk_size: int = NEIGHBOR_CHUNK_SIZE,
     cache_file: Path | None = None,
     catalogs: dict[str, str] | None = None,
+    checkpoint_path: Path | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Bulk nearest-neighbor enrichment with optional cache."""
     out_dir = Path(out_dir)
@@ -104,30 +105,50 @@ def run_neighbor_enrichment(
     coords["candidate_id"] = coords["candidate_id"].astype(str)
     coords = coords.drop_duplicates(subset=["candidate_id"])
 
+    # Load checkpoint to skip already-processed candidates
+    ckpt_df = pd.DataFrame()
+    cached_ids: set[str] = set()
+    if checkpoint_path and Path(checkpoint_path).exists():
+        try:
+            ckpt_df = pd.read_parquet(checkpoint_path)
+            if "candidate_id" in ckpt_df.columns:
+                cached_ids = set(ckpt_df["candidate_id"].astype(str))
+                print(f"[neighbor] Loaded checkpoint: {len(cached_ids)} candidates already processed")
+        except Exception:
+            ckpt_df = pd.DataFrame()
+
+    coords_todo = coords[~coords["candidate_id"].isin(cached_ids)] if cached_ids else coords
+
+    # Load cache only if no checkpoint (checkpoint is a superset of cache)
     cache_df = pd.DataFrame()
-    if cache_file and Path(cache_file).exists():
+    if not cached_ids and cache_file and Path(cache_file).exists():
         try:
             cache_df = pd.read_parquet(cache_file)
         except Exception:
             cache_df = pd.DataFrame()
 
     fresh_frames: list[pd.DataFrame] = []
-    for _, catalog_id in catalogs.items():
-        fresh = _query_catalog_bulk(
-            coords,
-            catalog=catalog_id,
-            radius_arcsec=radius_arcsec,
-            chunk_size=chunk_size,
-        )
-        if not fresh.empty:
-            fresh_frames.append(fresh)
+    if not coords_todo.empty:
+        for _, catalog_id in catalogs.items():
+            fresh = _query_catalog_bulk(
+                coords_todo,
+                catalog=catalog_id,
+                radius_arcsec=radius_arcsec,
+                chunk_size=chunk_size,
+            )
+            if not fresh.empty:
+                fresh_frames.append(fresh)
+    elif cached_ids:
+        print(f"[neighbor] All {len(coords)} candidates already in checkpoint, skipping queries")
 
     if fresh_frames:
         fresh_df = pd.concat(fresh_frames, ignore_index=True)
     else:
         fresh_df = pd.DataFrame()
 
-    neighbors_long = pd.concat([cache_df, fresh_df], ignore_index=True) if not cache_df.empty else fresh_df
+    # Combine: checkpoint OR cache, plus fresh results
+    parts = [p for p in [ckpt_df, cache_df, fresh_df] if not p.empty]
+    neighbors_long = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
     if not neighbors_long.empty:
         keep_cols = [c for c in ["candidate_id", "catalog", "sep_arcsec", "phot_g_mean_mag", "VarType", "Type"] if c in neighbors_long.columns]
         keep_cols += [c for c in neighbors_long.columns if c not in keep_cols]
@@ -170,8 +191,18 @@ def run_neighbor_enrichment(
         else:
             summary["bright_close_neighbor"] = False
 
+    # Save checkpoint before final output (protects against interruption during summary build)
+    if checkpoint_path and not neighbors_long.empty:
+        Path(checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
+        neighbors_long.to_parquet(checkpoint_path, index=False, compression="snappy")
+
     neighbors_long.to_parquet(out_dir / "neighbors_long.parquet", index=False, compression="zstd")
     summary.to_parquet(out_dir / "neighbors_summary.parquet", index=False, compression="zstd")
+
+    # Clean up checkpoint on success
+    if checkpoint_path and Path(checkpoint_path).exists():
+        Path(checkpoint_path).unlink()
+
     return neighbors_long, summary
 
 

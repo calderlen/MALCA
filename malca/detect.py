@@ -49,7 +49,7 @@ from malca.stats import compute_stats
 from malca.characterize import characterize_candidates_df
 from malca.enrich.neighbor import run_neighbor_enrichment
 from malca.enrich.spectra import run_spectra_availability
-from malca.config.config_io import PARQUET_OUTPUT_COMPRESSION
+from malca.config.config_io import PARQUET_OUTPUT_COMPRESSION, PARQUET_CACHE_COMPRESSION
 from malca.config.config_paths import ASASSN_INDEX_PATH, LCV2_ROOT, VSX_CROSSMATCH_PATH
 from malca.config.config_pipeline import (
     WORKERS, BATCH_SIZE, TRIGGER_MODE, P_POINTS, MAG_POINTS,
@@ -269,7 +269,7 @@ def export_bundle_zip(bundle_zip: Path, out_dir: Path, include_all: bool = False
     ordered_lightcurve_files = sorted(lightcurve_files, key=lambda item: item[1])
 
     total_files = len(ordered_files) + len(ordered_lightcurve_files)
-    log(f"Bundling {total_files} files with ZIP_LZMA compression...")
+    print(f"Bundling {total_files} files with ZIP_LZMA compression...")
 
     bundled_paths: list[str] = []
     with zipfile.ZipFile(bundle_zip, "w", compression=zipfile.ZIP_LZMA) as zf:
@@ -1252,12 +1252,32 @@ def main():
                     if len(df_passed) > 0:
                         log(f"Enriching {len(df_passed)} candidates with compute_stats...")
 
-                        enriched_rows = []
+                        # Checkpoint support
+                        enrich_checkpoint = results_dir / "lc_events_enriched_CHECKPOINT.parquet"
+                        if args.overwrite and enrich_checkpoint.exists():
+                            enrich_checkpoint.unlink()
+
+                        already_enriched: set[str] = set()
+                        enriched_rows: list[dict] = []
+                        if enrich_checkpoint.exists():
+                            try:
+                                df_ckpt = pd.read_parquet(enrich_checkpoint)
+                                enriched_rows = df_ckpt.to_dict("records")
+                                already_enriched = set(df_ckpt["path"].astype(str))
+                                log(f"Loaded enrichment checkpoint: {len(already_enriched)} already enriched")
+                            except Exception as e:
+                                log(f"Warning: could not load enrichment checkpoint: {e}")
+
+                        ENRICH_SAVE_INTERVAL = 100
+                        new_count = 0
                         for idx, row in tqdm(df_passed.iterrows(), total=len(df_passed),
                                             desc="compute_stats", disable=not args.verbose):
                             lc_path = Path(row["path"])
+                            if str(lc_path) in already_enriched:
+                                continue
                             if not lc_path.exists():
                                 enriched_rows.append(row.to_dict())
+                                new_count += 1
                                 continue
 
                             try:
@@ -1292,12 +1312,25 @@ def main():
                                     print(f"Warning: compute_stats failed for {lc_path}: {e}")
                                 enriched_rows.append(row.to_dict())
 
+                            new_count += 1
+                            if new_count % ENRICH_SAVE_INTERVAL == 0:
+                                pd.DataFrame(enriched_rows).to_parquet(
+                                    enrich_checkpoint, index=False,
+                                    compression=PARQUET_CACHE_COMPRESSION,
+                                )
+
                         df_enriched = pd.DataFrame(enriched_rows)
+                        if not df_enriched.empty:
+                            df_enriched = df_enriched.drop_duplicates(subset=["path"], keep="last")
 
                         # Save enriched results
                         enrich_output = results_dir / "lc_events_enriched.parquet"
                         save_table(df_enriched, enrich_output)
                         log(f"Enriched results saved to {enrich_output}")
+
+                        # Clean up checkpoint
+                        if enrich_checkpoint.exists():
+                            enrich_checkpoint.unlink()
 
                         # Update summary
                         n_stats_cols = len([c for c in df_enriched.columns if c.startswith("stats_")])
@@ -1406,6 +1439,10 @@ def main():
                 df_char["asas_sn_id"] = df_char["path"].astype(str).map(_extract_id)
 
             # Use full characterize pipeline (single source of truth)
+            char_checkpoint = results_dir / "lc_events_characterized_CHECKPOINT.parquet"
+            if args.overwrite and char_checkpoint.exists():
+                char_checkpoint.unlink()
+
             starhorse_arg = args.characterize_starhorse if args.run_characterize else None
             df_char = characterize_candidates_df(
                 df_char,
@@ -1419,6 +1456,7 @@ def main():
                 run_sfr=args.run_characterize and args.characterize_sfr,
                 run_clusters=args.run_characterize and args.characterize_clusters,
                 run_unwise=args.run_characterize and args.characterize_unwise,
+                checkpoint_path=char_checkpoint,
             )
 
             characterize_output = results_dir / "lc_events_characterized.parquet"
@@ -1436,51 +1474,54 @@ def main():
         if not has_post_filter_output:
             print(f"Warning: downstream stage requires filtered results at {post_filter_output}. Skipping classification.")
         else:
-            log("\n=== Step 9: Running classification ===")
-            try:
-                characterize_output = results_dir / "lc_events_characterized.parquet"
-                post_filter_output = results_dir / "lc_events_filtered.parquet"
+            classify_output = results_dir / "lc_events_classified.parquet"
+            if classify_output.exists() and not args.overwrite:
+                log(f"\n=== Step 9: Classification output exists, skipping: {classify_output} ===")
+            else:
+                log("\n=== Step 9: Running classification ===")
+                try:
+                    characterize_output = results_dir / "lc_events_characterized.parquet"
+                    post_filter_output = results_dir / "lc_events_filtered.parquet"
 
-                if characterize_output.exists():
-                    df_post_filtered = load_table(characterize_output)
-                elif post_filter_output.exists():
-                    df_post_filtered = load_table(post_filter_output)
-                else:
-                    df_post_filtered = None
-                    print(f"Warning: post-filter output not found at {post_filter_output}")
-
-                if df_post_filtered is not None:
-                    # Run classification on passing candidates
-                    df_passed = df_post_filtered[~df_post_filtered["failed_any"]].copy() if "failed_any" in df_post_filtered.columns else df_post_filtered.copy()
-                    
-                    if len(df_passed) > 0:
-                        df_classified = compute_all_classifications(df_passed)
-                        
-                        # Save classified results
-                        classify_output = results_dir / "lc_events_classified.parquet"
-                        save_table(df_classified, classify_output)
-                        log(f"Classification results saved to {classify_output}")
-                        
-                        # Update summary with classification stats
-                        class_counts = df_classified["final_class"].value_counts().to_dict() if "final_class" in df_classified.columns else {}
-                        summary["classification_stats"] = {
-                            "total_classified": len(df_classified),
-                            "by_class": class_counts,
-                        }
-                        
-                        # Overwrite summary with updated stats
-                        with open(run_summary_file, "w") as f:
-                            json.dump(summary, f, indent=2, default=str)
-                        
-                        log(f"Classification: {len(df_classified)} candidates classified")
+                    if characterize_output.exists():
+                        df_post_filtered = load_table(characterize_output)
+                    elif post_filter_output.exists():
+                        df_post_filtered = load_table(post_filter_output)
                     else:
-                        log("No passing candidates to classify.")
+                        df_post_filtered = None
+                        print(f"Warning: post-filter output not found at {post_filter_output}")
 
-            except Exception as e:
-                print(f"Error in classification step: {e}")
-                if args.verbose:
-                    import traceback
-                    traceback.print_exc()
+                    if df_post_filtered is not None:
+                        # Run classification on passing candidates
+                        df_passed = df_post_filtered[~df_post_filtered["failed_any"]].copy() if "failed_any" in df_post_filtered.columns else df_post_filtered.copy()
+
+                        if len(df_passed) > 0:
+                            df_classified = compute_all_classifications(df_passed)
+
+                            # Save classified results
+                            save_table(df_classified, classify_output)
+                            log(f"Classification results saved to {classify_output}")
+
+                            # Update summary with classification stats
+                            class_counts = df_classified["final_class"].value_counts().to_dict() if "final_class" in df_classified.columns else {}
+                            summary["classification_stats"] = {
+                                "total_classified": len(df_classified),
+                                "by_class": class_counts,
+                            }
+
+                            # Overwrite summary with updated stats
+                            with open(run_summary_file, "w") as f:
+                                json.dump(summary, f, indent=2, default=str)
+
+                            log(f"Classification: {len(df_classified)} candidates classified")
+                        else:
+                            log("No passing candidates to classify.")
+
+                except Exception as e:
+                    print(f"Error in classification step: {e}")
+                    if args.verbose:
+                        import traceback
+                        traceback.print_exc()
 
     # Step 10: Neighbor enrichment (optional)
     if run_downstream and args.run_neighbor_enrich:
@@ -1511,12 +1552,16 @@ def main():
 
                     neighbor_dir = results_dir / "neighbor_enrichment"
                     neighbor_cache = args.neighbor_cache.expanduser() if args.neighbor_cache else (neighbor_dir / "neighbors_cache.parquet")
+                    neighbor_checkpoint = neighbor_dir / "neighbors_CHECKPOINT.parquet"
+                    if args.overwrite and neighbor_checkpoint.exists():
+                        neighbor_checkpoint.unlink()
                     _, df_neighbor_summary = run_neighbor_enrichment(
                         df_neighbors_in,
                         out_dir=neighbor_dir,
                         radius_arcsec=args.neighbor_radius_arcsec,
                         chunk_size=args.neighbor_chunk_size,
                         cache_file=neighbor_cache,
+                        checkpoint_path=neighbor_checkpoint,
                     )
 
                     if not df_neighbor_summary.empty:
@@ -1578,12 +1623,16 @@ def main():
 
                     spectra_dir = results_dir / "spectra_enrichment"
                     spectra_cache = args.spectra_cache.expanduser() if args.spectra_cache else (spectra_dir / "spectra_cache.parquet")
+                    spectra_checkpoint = spectra_dir / "spectra_CHECKPOINT.parquet"
+                    if args.overwrite and spectra_checkpoint.exists():
+                        spectra_checkpoint.unlink()
                     _, spectra_summary = run_spectra_availability(
                         df_spectra_in,
                         out_dir=spectra_dir,
                         radius_arcsec=args.spectra_radius_arcsec,
                         chunk_size=args.spectra_chunk_size,
                         cache_file=spectra_cache,
+                        checkpoint_path=spectra_checkpoint,
                     )
 
                     if not spectra_summary.empty:

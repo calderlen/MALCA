@@ -46,6 +46,7 @@ from malca.config.config_paths import (
     VSX_CROSSMATCH_PATH, STARHORSE_DEFAULT_PATH, STARHORSE_TAP_URL,
     UNTIMELY_API_URL, DEFAULT_CACHE_DIR, GAIA_CACHE_FILE,
 )
+from malca.config.config_io import PARQUET_CACHE_COMPRESSION
 
 
 # =============================================================================
@@ -891,6 +892,22 @@ def _run_optional_module(
         return _set_module_state(df, module, "error", msg)
 
 
+def _save_char_checkpoint(df: pd.DataFrame, path: Path) -> None:
+    """Save characterization checkpoint."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(path, index=False, compression=PARQUET_CACHE_COMPRESSION)
+
+
+def _module_completed(df: pd.DataFrame, module: str) -> bool:
+    """Check if a characterization module already ran successfully."""
+    col = f"char_status_{module}"
+    if col not in df.columns:
+        return False
+    vals = df[col].dropna().unique()
+    return len(vals) > 0 and all(v in ("ok", "skipped") for v in vals)
+
+
 def characterize_candidates_df(
     df: pd.DataFrame,
     *,
@@ -904,169 +921,218 @@ def characterize_candidates_df(
     run_sfr: bool = True,
     run_clusters: bool = True,
     run_unwise: bool = True,
+    checkpoint_path: Path | None = None,
 ) -> pd.DataFrame:
     """Characterize candidates and return an enriched dataframe."""
     if "asas_sn_id" not in df.columns:
         print("Warning: characterize skipped: missing 'asas_sn_id' column")
         return df
 
-    df_in = df.copy()
-    xmatch_path = crossmatch.expanduser()
-
-    if not xmatch_path.exists():
-        print(f"Warning: Crossmatch file {xmatch_path} not found")
-        if "gaia_id" in df_in.columns:
-            print("Proceeding with existing gaia_id column")
-            df_merged = df_in
-        else:
-            return df_in
-    else:
-        print(f"Loading crossmatch file {xmatch_path}...")
-        xmatch_cols = ["asas_sn_id", "gaia_id", "tmass_id", "allwise_id"]
+    # Load checkpoint if available
+    df_char = None
+    if checkpoint_path and Path(checkpoint_path).exists():
         try:
-            header = pd.read_csv(xmatch_path, nrows=0).columns
-            use_cols = ["asas_sn_id"] + [c for c in xmatch_cols if c in header and c != "asas_sn_id"]
-            df_xmatch = pd.read_csv(xmatch_path, usecols=use_cols, dtype=str)
-            df_in["asas_sn_id"] = df_in["asas_sn_id"].astype(str)
-            df_xmatch["asas_sn_id"] = df_xmatch["asas_sn_id"].astype(str)
-            df_merged = df_in.merge(df_xmatch, on="asas_sn_id", how="left")
-            print(f"Merged {len(df_merged)} rows")
+            df_char = pd.read_parquet(checkpoint_path)
+            completed = [m for m in ["population", "starhorse", "dust", "yso",
+                                      "banyan", "iphas", "sfr", "clusters", "unwise"]
+                         if _module_completed(df_char, m)]
+            print(f"Loaded characterization checkpoint ({len(df_char)} rows)")
+            if completed:
+                print(f"  Modules already completed: {', '.join(completed)}")
         except Exception as e:
-            print(f"Warning: characterize crossmatch read failed: {e}")
-            return df_in
+            print(f"Warning: could not load characterization checkpoint: {e}")
+            df_char = None
 
-    if "gaia_id" not in df_merged.columns:
-        print("Warning: characterize skipped Gaia query: gaia_id not present")
-        return df_merged
+    # Run Gaia merge + galactic coords if not already done (checkpoint has source_id)
+    if df_char is None or "source_id" not in df_char.columns:
+        df_in = df.copy()
+        xmatch_path = crossmatch.expanduser()
 
-    if cache:
-        cache.parent.mkdir(parents=True, exist_ok=True)
+        if not xmatch_path.exists():
+            print(f"Warning: Crossmatch file {xmatch_path} not found")
+            if "gaia_id" in df_in.columns:
+                print("Proceeding with existing gaia_id column")
+                df_merged = df_in
+            else:
+                return df_in
+        else:
+            print(f"Loading crossmatch file {xmatch_path}...")
+            xmatch_cols = ["asas_sn_id", "gaia_id", "tmass_id", "allwise_id"]
+            try:
+                header = pd.read_csv(xmatch_path, nrows=0).columns
+                use_cols = ["asas_sn_id"] + [c for c in xmatch_cols if c in header and c != "asas_sn_id"]
+                df_xmatch = pd.read_csv(xmatch_path, usecols=use_cols, dtype=str)
+                df_in["asas_sn_id"] = df_in["asas_sn_id"].astype(str)
+                df_xmatch["asas_sn_id"] = df_xmatch["asas_sn_id"].astype(str)
+                df_merged = df_in.merge(df_xmatch, on="asas_sn_id", how="left")
+                print(f"Merged {len(df_merged)} rows")
+            except Exception as e:
+                print(f"Warning: characterize crossmatch read failed: {e}")
+                return df_in
 
-    missing_gaia = df_merged["gaia_id"].isna().sum()
-    print(f"Found Gaia IDs for {len(df_merged) - missing_gaia}/{len(df_merged)} sources")
-    gaia_ids = df_merged["gaia_id"].dropna().unique().tolist()
+        if "gaia_id" not in df_merged.columns:
+            print("Warning: characterize skipped Gaia query: gaia_id not present")
+            return df_merged
 
-    if not gaia_ids:
-        print("Warning: characterize found no Gaia IDs")
-        return df_merged
+        if cache:
+            cache.parent.mkdir(parents=True, exist_ok=True)
 
-    print(f"Querying Gaia DR3 for {len(gaia_ids)} sources...")
-    gaia_df = query_gaia_by_ids(
-        gaia_ids,
-        chunk_size=chunk_size,
-        cache_file=str(cache) if cache else None,
-    )
-    if gaia_df.empty:
-        print("Warning: characterize Gaia query returned no rows")
-        return df_merged
+        missing_gaia = df_merged["gaia_id"].isna().sum()
+        print(f"Found Gaia IDs for {len(df_merged) - missing_gaia}/{len(df_merged)} sources")
+        gaia_ids = df_merged["gaia_id"].dropna().unique().tolist()
 
-    df_merged["gaia_id"] = df_merged["gaia_id"].astype(str)
-    gaia_df["source_id"] = gaia_df["source_id"].astype(str)
+        if not gaia_ids:
+            print("Warning: characterize found no Gaia IDs")
+            return df_merged
 
-    print("Merging Gaia results...")
-    df_char = df_merged.merge(gaia_df, left_on="gaia_id", right_on="source_id", how="left", suffixes=("", "_gaia"))
+        print(f"Querying Gaia DR3 for {len(gaia_ids)} sources...")
+        gaia_df = query_gaia_by_ids(
+            gaia_ids,
+            chunk_size=chunk_size,
+            cache_file=str(cache) if cache else None,
+        )
+        if gaia_df.empty:
+            print("Warning: characterize Gaia query returned no rows")
+            return df_merged
 
-    # Compute Galactic coordinates from RA/Dec
-    _ra_col = "ra" if "ra" in df_char.columns else ("ra_deg" if "ra_deg" in df_char.columns else None)
-    _dec_col = "dec" if "dec" in df_char.columns else ("dec_deg" if "dec_deg" in df_char.columns else None)
-    if _ra_col and _dec_col:
-        _gc_mask = np.isfinite(df_char[_ra_col].astype(float)) & np.isfinite(df_char[_dec_col].astype(float))
-        if _gc_mask.any():
-            _gc_coords = SkyCoord(
-                ra=df_char.loc[_gc_mask, _ra_col].values * u.deg,
-                dec=df_char.loc[_gc_mask, _dec_col].values * u.deg,
-                frame="icrs",
-            )
-            df_char.loc[_gc_mask, "gal_l"] = _gc_coords.galactic.l.deg
-            df_char.loc[_gc_mask, "gal_b"] = _gc_coords.galactic.b.deg
-        if "gal_l" not in df_char.columns:
+        df_merged["gaia_id"] = df_merged["gaia_id"].astype(str)
+        gaia_df["source_id"] = gaia_df["source_id"].astype(str)
+
+        print("Merging Gaia results...")
+        df_char = df_merged.merge(gaia_df, left_on="gaia_id", right_on="source_id", how="left", suffixes=("", "_gaia"))
+
+        # Compute Galactic coordinates from RA/Dec
+        _ra_col = "ra" if "ra" in df_char.columns else ("ra_deg" if "ra_deg" in df_char.columns else None)
+        _dec_col = "dec" if "dec" in df_char.columns else ("dec_deg" if "dec_deg" in df_char.columns else None)
+        if _ra_col and _dec_col:
+            _gc_mask = np.isfinite(df_char[_ra_col].astype(float)) & np.isfinite(df_char[_dec_col].astype(float))
+            if _gc_mask.any():
+                _gc_coords = SkyCoord(
+                    ra=df_char.loc[_gc_mask, _ra_col].values * u.deg,
+                    dec=df_char.loc[_gc_mask, _dec_col].values * u.deg,
+                    frame="icrs",
+                )
+                df_char.loc[_gc_mask, "gal_l"] = _gc_coords.galactic.l.deg
+                df_char.loc[_gc_mask, "gal_b"] = _gc_coords.galactic.b.deg
+            if "gal_l" not in df_char.columns:
+                df_char["gal_l"] = np.nan
+                df_char["gal_b"] = np.nan
+        else:
             df_char["gal_l"] = np.nan
             df_char["gal_b"] = np.nan
-    else:
-        df_char["gal_l"] = np.nan
-        df_char["gal_b"] = np.nan
 
-    print("Classifying Galactic populations...")
-    df_char = classify_galactic_population(df_char)
-    df_char = _set_module_state(df_char, "population", "ok", "")
+        if checkpoint_path:
+            _save_char_checkpoint(df_char, checkpoint_path)
 
-    if starhorse:
-        print("Loading StarHorse catalog for ages...")
-        try:
-            use_tap_query = not Path(starhorse).exists() if starhorse != "tap" else True
-            sh_df = query_starhorse_by_ids(
-                gaia_ids,
-                starhorse_file=starhorse if not use_tap_query else None,
-                use_tap=use_tap_query,
-            )
-            if not sh_df.empty:
-                df_char = df_char.merge(sh_df, on="source_id", how="left", suffixes=("", "_sh"))
-                if "age50" in df_char.columns:
-                    df_char = classify_galactic_population(df_char)
-            df_char = _set_module_state(df_char, "starhorse", "ok", "")
-        except Exception as e:
-            msg = str(e)
-            print(f"Warning: characterize module 'starhorse' failed: {msg}")
-            df_char = _set_module_state(df_char, "starhorse", "error", msg)
-    else:
-        df_char = _set_module_state(df_char, "starhorse", "skipped", "")
+    if not _module_completed(df_char, "population"):
+        print("Classifying Galactic populations...")
+        df_char = classify_galactic_population(df_char)
+        df_char = _set_module_state(df_char, "population", "ok", "")
 
-    df_char = _run_optional_module(
-        df_char,
-        module="dust",
-        enabled=dust,
-        description="Computing 3D dust extinction (dustmaps3d)...",
-        func=get_dust_extinction,
-    )
+    if not _module_completed(df_char, "starhorse"):
+        if starhorse:
+            print("Loading StarHorse catalog for ages...")
+            gaia_ids = df_char["gaia_id"].dropna().unique().tolist() if "gaia_id" in df_char.columns else []
+            try:
+                use_tap_query = not Path(starhorse).exists() if starhorse != "tap" else True
+                sh_df = query_starhorse_by_ids(
+                    gaia_ids,
+                    starhorse_file=starhorse if not use_tap_query else None,
+                    use_tap=use_tap_query,
+                )
+                if not sh_df.empty:
+                    df_char = df_char.merge(sh_df, on="source_id", how="left", suffixes=("", "_sh"))
+                    if "age50" in df_char.columns:
+                        df_char = classify_galactic_population(df_char)
+                df_char = _set_module_state(df_char, "starhorse", "ok", "")
+            except Exception as e:
+                msg = str(e)
+                print(f"Warning: characterize module 'starhorse' failed: {msg}")
+                df_char = _set_module_state(df_char, "starhorse", "error", msg)
+        else:
+            df_char = _set_module_state(df_char, "starhorse", "skipped", "")
+        if checkpoint_path:
+            _save_char_checkpoint(df_char, checkpoint_path)
 
-    if "tmass_j" in df_char.columns:
-        print("Classifying YSOs...")
-        try:
-            df_char = classify_yso(df_char)
-            df_char = _set_module_state(df_char, "yso", "ok", "")
-        except Exception as e:
-            msg = str(e)
-            print(f"Warning: characterize module 'yso' failed: {msg}")
-            df_char = _set_module_state(df_char, "yso", "error", msg)
-    else:
-        print("Warning: IR photometry columns not found for YSO classification")
-        df_char = _set_module_state(df_char, "yso", "skipped", "")
+    if not _module_completed(df_char, "dust"):
+        df_char = _run_optional_module(
+            df_char,
+            module="dust",
+            enabled=dust,
+            description="Computing 3D dust extinction (dustmaps3d)...",
+            func=get_dust_extinction,
+        )
+        if checkpoint_path:
+            _save_char_checkpoint(df_char, checkpoint_path)
 
-    df_char = _run_optional_module(
-        df_char,
-        module="banyan",
-        enabled=run_banyan,
-        description="Running BANYAN Σ membership checks...",
-        func=query_banyan_sigma,
-    )
-    df_char = _run_optional_module(
-        df_char,
-        module="iphas",
-        enabled=run_iphas,
-        description="Running IPHAS H-alpha crossmatch...",
-        func=crossmatch_iphas,
-    )
-    df_char = _run_optional_module(
-        df_char,
-        module="sfr",
-        enabled=run_sfr,
-        description="Checking star-forming region proximity...",
-        func=check_sfr_proximity,
-    )
-    df_char = _run_optional_module(
-        df_char,
-        module="clusters",
-        enabled=run_clusters,
-        description="Running open cluster crossmatch...",
-        func=crossmatch_open_clusters,
-    )
-    df_char = _run_optional_module(
-        df_char,
-        module="unwise",
-        enabled=run_unwise,
-        description="Querying unWISE/unTimely variability...",
-        func=query_unwise_variability,
-    )
+    if not _module_completed(df_char, "yso"):
+        if "tmass_j" in df_char.columns:
+            print("Classifying YSOs...")
+            try:
+                df_char = classify_yso(df_char)
+                df_char = _set_module_state(df_char, "yso", "ok", "")
+            except Exception as e:
+                msg = str(e)
+                print(f"Warning: characterize module 'yso' failed: {msg}")
+                df_char = _set_module_state(df_char, "yso", "error", msg)
+        else:
+            print("Warning: IR photometry columns not found for YSO classification")
+            df_char = _set_module_state(df_char, "yso", "skipped", "")
+
+    if not _module_completed(df_char, "banyan"):
+        df_char = _run_optional_module(
+            df_char,
+            module="banyan",
+            enabled=run_banyan,
+            description="Running BANYAN Σ membership checks...",
+            func=query_banyan_sigma,
+        )
+        if checkpoint_path:
+            _save_char_checkpoint(df_char, checkpoint_path)
+
+    if not _module_completed(df_char, "iphas"):
+        df_char = _run_optional_module(
+            df_char,
+            module="iphas",
+            enabled=run_iphas,
+            description="Running IPHAS H-alpha crossmatch...",
+            func=crossmatch_iphas,
+        )
+        if checkpoint_path:
+            _save_char_checkpoint(df_char, checkpoint_path)
+
+    if not _module_completed(df_char, "sfr"):
+        df_char = _run_optional_module(
+            df_char,
+            module="sfr",
+            enabled=run_sfr,
+            description="Checking star-forming region proximity...",
+            func=check_sfr_proximity,
+        )
+
+    if not _module_completed(df_char, "clusters"):
+        df_char = _run_optional_module(
+            df_char,
+            module="clusters",
+            enabled=run_clusters,
+            description="Running open cluster crossmatch...",
+            func=crossmatch_open_clusters,
+        )
+        if checkpoint_path:
+            _save_char_checkpoint(df_char, checkpoint_path)
+
+    if not _module_completed(df_char, "unwise"):
+        df_char = _run_optional_module(
+            df_char,
+            module="unwise",
+            enabled=run_unwise,
+            description="Querying unWISE/unTimely variability...",
+            func=query_unwise_variability,
+        )
+
+    # Clean up checkpoint on success
+    if checkpoint_path and Path(checkpoint_path).exists():
+        Path(checkpoint_path).unlink()
 
     return df_char
 
