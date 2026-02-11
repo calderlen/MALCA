@@ -269,10 +269,10 @@ def export_bundle_zip(bundle_zip: Path, out_dir: Path, include_all: bool = False
     ordered_lightcurve_files = sorted(lightcurve_files, key=lambda item: item[1])
 
     total_files = len(ordered_files) + len(ordered_lightcurve_files)
-    print(f"Bundling {total_files} files with ZIP_LZMA compression...")
+    print(f"Bundling {total_files} files with ZIP_DEFLATED compression...")
 
     bundled_paths: list[str] = []
-    with zipfile.ZipFile(bundle_zip, "w", compression=zipfile.ZIP_LZMA) as zf:
+    with zipfile.ZipFile(bundle_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for p in ordered_files:
             arcname = str(p.relative_to(out_dir))
             zf.write(p, arcname=arcname)
