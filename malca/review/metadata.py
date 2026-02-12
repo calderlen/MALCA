@@ -25,7 +25,7 @@ REVIEW_METADATA_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("SFR name", "sfr_name"),
         ("SFR sep (arcmin)", "sfr_sep_arcmin"),
         ("Cluster name", "cluster_name"),
-        ("Cluster membership prob", "cluster_membership_prob"),
+        ("Cluster dist (pc)", "cluster_dist_pc"),
     ]),
     ("Light Curve Basics", [
         ("n_points", "n_points"),

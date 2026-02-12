@@ -30,6 +30,7 @@ os.environ.setdefault("NUMBA_NUM_THREADS", "1")
 import argparse
 import shutil
 from datetime import datetime
+import json
 import shlex
 import subprocess
 import sys
@@ -116,12 +117,54 @@ def find_latest_run_dir(base_root: Path, mag_bin: list[str]) -> Path | None:
         params_file = d / "run_params.json"
         if not params_file.exists():
             continue
-        import json
         with open(params_file) as f:
             params = json.load(f)
         if params.get("mag_bin") == mag_bin:
             return d  # sorted reverse by timestamp, first match is latest
     return None
+
+
+def _normalize_mag_bins(raw_value: Any) -> list[str] | None:
+    if raw_value is None:
+        return None
+    if isinstance(raw_value, str):
+        value = raw_value.strip()
+        return [value] if value else None
+    if isinstance(raw_value, (list, tuple)):
+        values = [str(v).strip() for v in raw_value if str(v).strip()]
+        return values or None
+    return None
+
+
+def _read_mag_bins_from_params_file(params_file: Path) -> list[str] | None:
+    if not params_file.exists():
+        return None
+    try:
+        with params_file.open() as f:
+            params = json.load(f)
+    except Exception:
+        return None
+    return _normalize_mag_bins(params.get("mag_bin"))
+
+
+def _read_mag_bins_from_bundle(bundle_zip: Path) -> list[str] | None:
+    bundle_zip = Path(bundle_zip).expanduser()
+    if not bundle_zip.exists() or (not zipfile.is_zipfile(bundle_zip)):
+        return None
+    try:
+        with zipfile.ZipFile(bundle_zip, "r") as zf:
+            with zf.open("run_params.json") as f:
+                params = json.load(f)
+    except Exception:
+        return None
+    return _normalize_mag_bins(params.get("mag_bin"))
+
+
+def _assert_mag_bin_match(expected: list[str], observed: list[str], source: str) -> None:
+    if expected != observed:
+        raise SystemExit(
+            f"Provided --mag-bin ({observed}) does not match {source} ({expected})."
+        )
 
 
 def get_out_dir_from_bundle(bundle_path: Path, base_root: Path) -> Path:
@@ -330,7 +373,7 @@ def main():
     )
 
     # Manifest/pre-filter args
-    parser.add_argument("--mag-bin", required=True, nargs="+", help="Magnitude bin(s) to process")
+    parser.add_argument("--mag-bin", nargs="+", help="Magnitude bin(s) to process")
     parser.add_argument("--index-root", type=Path, default=LCV2_ROOT,
                         help="Index root directory (contains mag_bin/index*.csv)")
     parser.add_argument("--lc-root", type=Path, default=LCV2_ROOT,
@@ -516,6 +559,45 @@ def main():
     run_upstream = stage in {"full", "cluster"}
     run_downstream = stage in {"full", "home"}
 
+    if stage != "home" and not args.mag_bin:
+        parser.error("--mag-bin is required unless --stage home is used.")
+
+    if stage == "home":
+        if args.mag_bin:
+            if args.import_bundle is not None:
+                bundle_mag_bins = _read_mag_bins_from_bundle(args.import_bundle)
+                if bundle_mag_bins is not None:
+                    _assert_mag_bin_match(bundle_mag_bins, args.mag_bin, f"{Path(args.import_bundle).expanduser()}/run_params.json")
+            if args.out_dir is not None:
+                out_dir_params = Path(args.out_dir).expanduser() / "run_params.json"
+                out_dir_mag_bins = _read_mag_bins_from_params_file(out_dir_params)
+                if out_dir_mag_bins is not None:
+                    _assert_mag_bin_match(out_dir_mag_bins, args.mag_bin, str(out_dir_params))
+        else:
+            if args.import_bundle is None and args.out_dir is None:
+                parser.error("--stage home without --mag-bin requires --import-bundle or --out-dir.")
+
+            detected_mag_bins = None
+            detected_source = None
+
+            if args.import_bundle is not None:
+                detected_mag_bins = _read_mag_bins_from_bundle(args.import_bundle)
+                detected_source = f"{Path(args.import_bundle).expanduser()}/run_params.json"
+
+            if detected_mag_bins is None and args.out_dir is not None:
+                out_dir_params = Path(args.out_dir).expanduser() / "run_params.json"
+                detected_mag_bins = _read_mag_bins_from_params_file(out_dir_params)
+                detected_source = str(out_dir_params)
+
+            if not detected_mag_bins:
+                parser.error(
+                    "Could not auto-detect --mag-bin for --stage home. "
+                    "Expected mag_bin in run_params.json from --import-bundle or --out-dir."
+                )
+
+            args.mag_bin = detected_mag_bins
+            print(f"Info: auto-detected --mag-bin={args.mag_bin} from {detected_source}")
+
     if stage == "cluster" and (args.run_characterize or args.run_dust or args.run_classify or args.run_neighbor_enrich or args.run_spectra_enrich):
         print("Info: --stage cluster runs upstream only (steps 1-6 plus enrich). Downstream steps are skipped.")
     if stage == "home" and (args.force_manifest or args.force_filter):
@@ -641,7 +723,6 @@ def main():
     stats_checkpoint_file = prefilter_dir / f"lc_stats_checkpoint_{mag_bin_tag}.parquet"
 
     # Save run parameters to JSON for full reproducibility
-    import json
     run_start_time = datetime.now()
 
     # Build a compact fingerprint of filtering/characterization behavior.

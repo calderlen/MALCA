@@ -29,6 +29,7 @@ dependencies = [
     "banyan-sigma @ git+https://github.com/jgagneastro/banyan_sigma.git",
     "requests",
     "joblib",
+    "lightgbm",
     "pytest",
     "pytest-cov",
     "pytest-xdist",

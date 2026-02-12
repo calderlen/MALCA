@@ -131,6 +131,7 @@ app.index_string = '''
             margin-bottom: 4px;
         }
         .sidebar-toggle {
+            appearance: none;
             position: fixed;
             left: 0;
             top: 50px;
@@ -146,6 +147,7 @@ app.index_string = '''
             color: #0af;
             font-size: 20px;
             transition: left 0.2s ease;
+            padding: 0;
         }
         .sidebar-toggle.sidebar-expanded {
             left: 280px;
@@ -175,9 +177,49 @@ app.index_string = '''
             align-items: stretch;
             background-color: #000;
             overflow: hidden;
-            max-height: 80vh;
+            min-height: 260px;
             padding: 8px 12px 10px 12px;
             gap: 8px;
+        }
+        .panel-splitter {
+            position: relative;
+            height: 12px;
+            flex: 0 0 12px;
+            margin: 0 12px;
+            cursor: row-resize;
+            user-select: none;
+            touch-action: none;
+        }
+        .panel-splitter::before {
+            content: '';
+            position: absolute;
+            left: 0;
+            right: 0;
+            top: 50%;
+            height: 1px;
+            transform: translateY(-50%);
+            background: rgba(126, 150, 166, 0.45);
+        }
+        .panel-splitter::after {
+            content: ':::';
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            transform: translate(-50%, -50%);
+            padding: 0 7px;
+            border-radius: 999px;
+            color: #8db0c8;
+            font-size: 10px;
+            letter-spacing: 2px;
+            background: rgba(8, 18, 25, 0.9);
+            border: 1px solid rgba(86, 114, 132, 0.55);
+            line-height: 1;
+        }
+        .panel-splitter:hover::after,
+        .panel-splitter.dragging::after {
+            color: #b5d4ea;
+            border-color: rgba(133, 171, 196, 0.9);
+            background: rgba(12, 26, 35, 0.96);
         }
         .plot-toolbar {
             display: flex;
@@ -478,9 +520,14 @@ app.index_string = '''
         .metadata-sections {
             background-color: #0a0a0a;
             border-top: 2px solid #555;
-            max-height: 300px;
             overflow-y: auto;
             padding: 0 12px;
+        }
+        .candidate-metadata {
+            flex: 0 0 auto;
+            min-height: 100px;
+            height: 220px;
+            max-height: 60vh;
         }
         .metadata-sections details {
             border-bottom: 1px solid #222;
@@ -515,7 +562,7 @@ app.index_string = '''
 '''
 
 # Global variables
-DB_PATH = None
+DB_PATH = str(DEFAULT_DB_PATH)
 PLOT_DIR = None
 
 PLOT_PRESETS = {
@@ -1003,13 +1050,14 @@ def create_layout():
         dcc.Store(id='plot-render-applied', data=0),
         dcc.Store(id='plot-defaults-initialized', data=False),
         dcc.Store(id='run-config-json-store', data=''),
+        dcc.Store(id='metadata-resize-init', data=0),
         dcc.Interval(id='plot-render-debounce', interval=180, n_intervals=0),
         dcc.Download(id='plot-export-download'),
         dcc.Download(id='run-config-download'),
         dcc.Interval(id='keyboard-init', interval=200, n_intervals=0, max_intervals=1),
 
         # Sidebar toggle button
-        html.Div('☰', id='sidebar-toggle', className='sidebar-toggle', title='Toggle sidebar [T]'),
+        html.Button('☰', id='sidebar-toggle', className='sidebar-toggle', title='Toggle sidebar [T]', n_clicks=0),
 
         # Collapsible sidebar
         html.Div([
@@ -1196,8 +1244,14 @@ def create_layout():
                 html.Div(id='plot-stats-cards', className='plot-stats'),
             ], className='plot-container'),
 
+            html.Div(
+                id='metadata-splitter',
+                className='panel-splitter',
+                title='Drag to resize metadata panel',
+            ),
+
             # Grouped candidate metadata sections (collapsible)
-            html.Div(id='candidate-info-grid', className='metadata-sections'),
+            html.Div(id='candidate-info-grid', className='metadata-sections candidate-metadata'),
 
             # Run config / reproducibility
             html.Details([
@@ -1221,12 +1275,12 @@ def create_layout():
                     for i in range(6)
                 ], style={'display': 'flex', 'align-items': 'center', 'margin-bottom': '6px'}),
 
-                # Reason toggle row (clickable buttons, R+key prefix)
+                # Reason toggle row (clickable buttons, [R]+key prefix)
                 html.Div([
                     html.Span('Reasons: ', style={'color': '#aaa', 'margin-right': '8px', 'font-size': '11px'}),
                 ] + [
                     html.Button(
-                        f'R {key.upper()}: {tag.replace("_", " ")}',
+                        f'[R] [{key.upper()}]: {tag.replace("_", " ")}',
                         id=f'reason-badge-{tag}',
                         n_clicks=0,
                         className='badge-btn',
@@ -1234,13 +1288,13 @@ def create_layout():
                     for key, tag in REASON_KEY_MAP.items()
                 ], style={'display': 'flex', 'align-items': 'center', 'flex-wrap': 'wrap', 'margin-bottom': '6px'}),
 
-                # Event class row (clickable buttons, G+key prefix)
+                # Event class row (clickable buttons, [C]+key prefix)
                 html.Div([
                     html.Span('Class: ', style={'color': '#aaa', 'margin-right': '8px', 'font-size': '11px'}),
                     html.Span(id='prefix-indicator', style={'margin-right': '6px', 'font-size': '11px'}),
                 ] + [
                     html.Button(
-                        f'G {key.upper()}: {tag.replace("_", " ")}',
+                        f'[{CLASS_PREFIX_KEY.upper()}] [{key.upper()}]: {tag.replace("_", " ")}',
                         id=f'class-badge-{tag}',
                         n_clicks=0,
                         className='badge-btn',
@@ -1262,7 +1316,7 @@ def create_layout():
 
             # Notes (M to enter, Esc to exit)
             html.Div([
-                html.Label('[M] Notes (Esc to exit):', style={'color': '#aaa', 'display': 'block', 'margin-bottom': '3px', 'font-size': '11px'}),
+                html.Label('[M] Notes ([Esc] to exit):', style={'color': '#aaa', 'display': 'block', 'margin-bottom': '3px', 'font-size': '11px'}),
                 dcc.Textarea(id='notes', style={'width': '100%', 'height': '50px', 'font-size': '11px'}),
             ], className='review-form'),
 
@@ -1292,32 +1346,32 @@ app.clientside_callback(
     """
     function() {
         // This runs once when the app loads
-
-        // Get the keyboard input element
-        const keyboardInput = document.getElementById('keyboard-input');
+        var keyboardInput = document.getElementById('keyboard-input');
 
         if (!keyboardInput) {
             console.error('keyboard-input element not found!');
-            return;
+            return window.dash_clientside.no_update;
         }
 
-        // Use the native HTMLInputElement value setter to bypass React's
-        // internal value tracking.  React overrides the .value setter so
-        // that its tracker stays in sync; if we set .value through that
-        // override *before* dispatching the event, React sees no change
-        // and never fires onChange → Dash callbacks never trigger.
-        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+        var valueDescriptor = Object.getOwnPropertyDescriptor(
             window.HTMLInputElement.prototype, 'value'
-        ).set;
+        );
+        var nativeInputValueSetter = valueDescriptor && valueDescriptor.set
+            ? valueDescriptor.set
+            : null;
 
-        const dispatchKeyToDash = function(key) {
+        var dispatchKeyToDash = function(key) {
             if (!key) {
                 return;
             }
-            nativeInputValueSetter.call(
-                keyboardInput, key + '\t' + String(Date.now())
-            );
-            keyboardInput.dispatchEvent(new Event('input', { bubbles: true }));
+            if (nativeInputValueSetter) {
+                nativeInputValueSetter.call(
+                    keyboardInput, key + '\t' + String(Date.now())
+                );
+            } else {
+                keyboardInput.value = key + '\t' + String(Date.now());
+            }
+            keyboardInput.dispatchEvent(new Event('input', {bubbles: true}));
         };
 
         // Register once: global keyboard listener that feeds Dash callbacks.
@@ -1327,9 +1381,9 @@ app.clientside_callback(
                     return;
                 }
 
-                const target = e.target;
-                const tag = target && target.tagName ? target.tagName : '';
-                const targetId = target && target.id ? target.id : '';
+                var target = e.target;
+                var tag = target && target.tagName ? target.tagName : '';
+                var targetId = target && target.id ? target.id : '';
 
                 // Inside a form field: allow Escape to exit, ignore everything else.
                 if ((tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') && targetId !== 'keyboard-input') {
@@ -1339,17 +1393,17 @@ app.clientside_callback(
                     return;
                 }
 
-                const key = e.key;
+                var key = e.key;
                 if (!key || key === 'Shift' || key === 'Control' || key === 'Alt' || key === 'Meta') {
                     return;
                 }
 
-                // M / m → focus the notes textarea (pure client-side).
+                // M/m: focus notes textarea (pure client-side).
                 if (key === 'm' || key === 'M') {
-                    e.preventDefault();  // don't type 'm' into the textarea
-                    const notesEl = document.getElementById('notes');
+                    e.preventDefault();
+                    var notesEl = document.getElementById('notes');
                     if (notesEl) {
-                        const ta = notesEl.querySelector('textarea') || notesEl;
+                        var ta = notesEl.querySelector('textarea') || notesEl;
                         ta.focus();
                     }
                     return;
@@ -1367,6 +1421,150 @@ app.clientside_callback(
     Output('keyboard-input', 'value', allow_duplicate=True),
     Input('keyboard-init', 'n_intervals'),
     prevent_initial_call='initial_duplicate'
+)
+
+
+app.clientside_callback(
+    """
+    function(_tick) {
+        var splitter = document.getElementById('metadata-splitter');
+        var metadataPanel = document.getElementById('candidate-info-grid');
+        if (!splitter || !metadataPanel) {
+            return window.dash_clientside.no_update;
+        }
+
+        var storageKey = 'malca.review.metadata.height.v1';
+        var minHeight = 100;
+        var defaultHeight = 220;
+
+        var computeMaxHeight = function() {
+            var viewportCap = Math.floor(window.innerHeight * 0.6);
+            var contentArea = document.querySelector('.content-area');
+            if (!contentArea) {
+                return Math.max(minHeight, viewportCap);
+            }
+            var reserved = 240;
+            var containerCap = Math.floor(contentArea.clientHeight - reserved);
+            var hardCap = Math.max(minHeight, Math.min(viewportCap, containerCap));
+            return hardCap;
+        };
+
+        var clampHeight = function(value) {
+            var maxHeight = computeMaxHeight();
+            var numeric = Number(value);
+            if (!isFinite(numeric)) {
+                numeric = defaultHeight;
+            }
+            if (numeric < minHeight) {
+                numeric = minHeight;
+            }
+            if (numeric > maxHeight) {
+                numeric = maxHeight;
+            }
+            return Math.round(numeric);
+        };
+
+        var applyHeight = function(value, persist) {
+            var h = clampHeight(value);
+            metadataPanel.style.height = String(h) + 'px';
+            metadataPanel.style.flex = '0 0 auto';
+            if (persist) {
+                try {
+                    window.localStorage.setItem(storageKey, String(h));
+                } catch (e) {
+                    // ignore storage failures
+                }
+            }
+            return h;
+        };
+
+        if (!window.__malcaMetadataSplitterAttached) {
+            var drag = {
+                active: false,
+                startY: 0,
+                startHeight: 0,
+                pointerId: null,
+            };
+
+            var onPointerMove = function(e) {
+                if (!drag.active) {
+                    return;
+                }
+                var nextHeight = drag.startHeight - (e.clientY - drag.startY);
+                applyHeight(nextHeight, false);
+                e.preventDefault();
+            };
+
+            var stopDrag = function(e) {
+                if (!drag.active) {
+                    return;
+                }
+                drag.active = false;
+                splitter.classList.remove('dragging');
+                window.removeEventListener('pointermove', onPointerMove);
+                window.removeEventListener('pointerup', stopDrag);
+                window.removeEventListener('pointercancel', stopDrag);
+                if (drag.pointerId !== null && splitter.releasePointerCapture) {
+                    try {
+                        splitter.releasePointerCapture(drag.pointerId);
+                    } catch (err) {
+                        // ignore capture-release failures
+                    }
+                }
+                drag.pointerId = null;
+                applyHeight(metadataPanel.getBoundingClientRect().height, true);
+                if (e) {
+                    e.preventDefault();
+                }
+            };
+
+            splitter.addEventListener('pointerdown', function(e) {
+                drag.active = true;
+                drag.startY = e.clientY;
+                drag.startHeight = metadataPanel.getBoundingClientRect().height;
+                drag.pointerId = (typeof e.pointerId === 'number') ? e.pointerId : null;
+                splitter.classList.add('dragging');
+                if (drag.pointerId !== null && splitter.setPointerCapture) {
+                    try {
+                        splitter.setPointerCapture(drag.pointerId);
+                    } catch (err) {
+                        // ignore capture failures
+                    }
+                }
+                window.addEventListener('pointermove', onPointerMove);
+                window.addEventListener('pointerup', stopDrag);
+                window.addEventListener('pointercancel', stopDrag);
+                e.preventDefault();
+            });
+
+            window.addEventListener('resize', function() {
+                applyHeight(metadataPanel.getBoundingClientRect().height, false);
+            });
+
+            window.__malcaMetadataSplitterAttached = true;
+        }
+
+        var saved = null;
+        try {
+            saved = window.localStorage.getItem(storageKey);
+        } catch (e) {
+            saved = null;
+        }
+        var initialHeight = defaultHeight;
+        if (saved !== null && saved !== '') {
+            var parsed = parseInt(saved, 10);
+            if (!isNaN(parsed)) {
+                initialHeight = parsed;
+            }
+        }
+        applyHeight(initialHeight, false);
+
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output('metadata-resize-init', 'data'),
+    Input('keyboard-init', 'n_intervals'),
+    prevent_initial_call=False,
 )
 
 
@@ -1436,13 +1634,12 @@ _queue_states = (
 # Initialize queue
 @app.callback(
     Output('queue-data', 'data'),
-    [Input('queue-data', 'data'),
-     Input('refresh-btn', 'n_clicks'),
+    [Input('refresh-btn', 'n_clicks'),
      Input('import-trigger', 'data')],
     _queue_states,
     prevent_initial_call=False
 )
-def load_queue(existing_data, refresh_clicks, import_trigger, *state_values):
+def load_queue(refresh_clicks, import_trigger, *state_values):
     """Load queue data from all sidebar filter states."""
     conn = db_connect(Path(DB_PATH))
 
@@ -1492,7 +1689,7 @@ def _do_save(candidate_id, score, interest_reasons, event_class, needs_followup,
     return new_pass, status
 
 
-# Keyboard handler (with G-prefix state machine for event class)
+# Keyboard handler (prefix-state machine for class/reason)
 @app.callback(
     [Output('current-index', 'data'),
      Output('notification', 'children'),
@@ -1533,7 +1730,7 @@ def handle_keyboard(key_value, current_idx, queue_data, current_score,
     candidate_id = (queue_data['candidate_ids'][current_idx]
                     if current_idx < queue_size else None)
 
-    # --- Prefix state machine (G → class, R → reason) ---
+    # --- Prefix state machine ([C] -> class, [R] -> reason) ---
     if pending_prefix:
         # We're waiting for the second key after a leader press
         if key == 'Escape':
@@ -1546,7 +1743,7 @@ def handle_keyboard(key_value, current_idx, queue_data, current_score,
                 if cur == class_tag:
                     return no_update, "Class: unclassified", no_update, no_update, no_update, no_update, 'unclassified', ''
                 return no_update, f"Class: {class_tag}", no_update, no_update, no_update, no_update, class_tag, ''
-            return no_update, f"G {key}: unknown class", no_update, no_update, no_update, no_update, no_update, ''
+            return no_update, f"[{CLASS_PREFIX_KEY.upper()}] {key}: unknown class", no_update, no_update, no_update, no_update, no_update, ''
 
         if pending_prefix == REASON_PREFIX_KEY:
             reason_tag = REASON_KEY_MAP.get(key.lower())
@@ -1559,7 +1756,7 @@ def handle_keyboard(key_value, current_idx, queue_data, current_score,
                     reasons.append(reason_tag)
                     msg = f"+ {reason_tag}"
                 return no_update, msg, no_update, reasons, no_update, no_update, no_update, ''
-            return no_update, f"R {key}: unknown reason", no_update, no_update, no_update, no_update, no_update, ''
+            return no_update, f"[{REASON_PREFIX_KEY.upper()}] {key}: unknown reason", no_update, no_update, no_update, no_update, no_update, ''
 
         # Unknown prefix (shouldn't happen) — cancel
         return no_update, "Cancelled", no_update, no_update, no_update, no_update, no_update, ''
@@ -1568,7 +1765,7 @@ def handle_keyboard(key_value, current_idx, queue_data, current_score,
     kl = key.lower()
     if kl in PREFIX_KEYS:
         label = kl.upper()
-        return no_update, f"{label} ...", no_update, no_update, no_update, no_update, no_update, kl
+        return no_update, f"[{label}] ...", no_update, no_update, no_update, no_update, no_update, kl
 
     # --- Followup toggle (F) ---
     if key.lower() == 'f':
@@ -1648,7 +1845,7 @@ def initialize_plot_defaults_from_run_params(queue_data, initialized):
 
 @app.callback(
     [Output('plot-overlays', 'value'),
-     Output('camera-checklist', 'value')],
+     Output('camera-checklist', 'value', allow_duplicate=True)],
     [Input('plot-preset', 'value'),
      Input('plot-reset-btn', 'n_clicks'),
      Input('cams-all-btn', 'n_clicks'),
@@ -1808,6 +2005,31 @@ def update_display(_tick, render_request, applied_nonce, queue_data):
         run_params=run_params or {},
         uirevision_key=uirevision_key,
     )
+
+    native_status = str(native.get('status', 'ok'))
+    native_message = str(native.get('status_message', '') or '')
+    native_warnings = list(native.get('warnings', []) or [])
+
+    if native_status in {"missing-file", "missing-columns", "empty-after-filter", "empty-camera-selection"} and plot_src:
+        fallback_warnings = native_warnings + mismatch_warnings
+        fallback_msg = native_message or "Native plot unavailable; showing PNG fallback."
+        return (
+            plot_src,
+            grid_items,
+            progress,
+            no_update,
+            {'display': 'none'},
+            {'display': 'block', 'width': '100%', 'height': '100%'},
+            [],
+            [],
+            [],
+            _render_plot_status_panel('warn', f"{fallback_msg} Showing PNG fallback.", fallback_warnings),
+            _render_camera_diag_panel(native.get('camera_diagnostics', {}), []),
+            _render_run_config_panel(run_params if run_params else None, run_params_path, fallback_warnings),
+            _render_repro_badge(run_params if run_params else None, fallback_warnings),
+            json.dumps(run_params, indent=2, sort_keys=True) if run_params else '',
+            nonce,
+        )
 
     filtered = []
     if 'Filtered cams' in {k for k, _ in native.get('stat_rows', [])}:
@@ -2149,7 +2371,7 @@ def handle_class_clicks(*args):
 def update_prefix_indicator(prefix):
     """Show pending prefix key."""
     if prefix:
-        return html.Span(f'{prefix.upper()} ...', style={'color': '#f80', 'font-weight': 'bold'})
+        return html.Span(f'[{prefix.upper()}] ...', style={'color': '#f80', 'font-weight': 'bold'})
     return ''
 
 
@@ -2271,7 +2493,7 @@ def auto_detect_files(n_clicks, run_dir_path):
         return no_update, no_update
 
     try:
-        run_dir = Path(run_dir_path).expanduser()
+        run_dir = Path(run_dir_path).expanduser().resolve()
         detected = detect_run_directory_files(run_dir)
 
         messages = []
@@ -2286,8 +2508,9 @@ def auto_detect_files(n_clicks, run_dir_path):
 
         if detected['plot_dir']:
             global PLOT_DIR
-            PLOT_DIR = str(detected['plot_dir'])
-            save_app_state(conn, "last_plot_dir", str(detected['plot_dir']))
+            detected_plot_dir = Path(detected['plot_dir']).expanduser().resolve()
+            PLOT_DIR = str(detected_plot_dir)
+            save_app_state(conn, "last_plot_dir", str(detected_plot_dir))
             messages.append(f"✓ Plots: {detected['plot_dir'].name}/")
 
         if detected['gaia_cache']:
@@ -2423,15 +2646,15 @@ def main():
     parser.add_argument('--debug', action='store_true', help="Debug mode")
     args = parser.parse_args()
 
-    DB_PATH = args.db
+    DB_PATH = str(Path(args.db).expanduser().resolve())
 
     # Auto-detect plot directory if not specified
     if args.plot_dir:
-        PLOT_DIR = args.plot_dir
+        PLOT_DIR = str(Path(args.plot_dir).expanduser().resolve())
     else:
         # Try current directory first
         if Path('./plots').is_dir():
-            PLOT_DIR = './plots'
+            PLOT_DIR = str(Path('./plots').resolve())
             print(f"📂 Auto-detected plot directory: {Path(PLOT_DIR).resolve()}")
         else:
             print("❌ Error: --plot-dir required (or run from a directory containing ./plots)")
@@ -2445,7 +2668,7 @@ def main():
     print(f"🖼️  Plot directory: {PLOT_DIR}")
     print(f"🌐 Server: http://{args.host}:{args.port}")
     print(f"\n⌨️  Keyboard shortcuts:")
-    print("  N - Next | P - Previous | 0-5 - Score | S - Save | D - Done | T - Toggle sidebar | ? - Help")
+    print("  [N] Next | [P] Previous | [0-5] Score | [S] Save | [D] Done | [T] Toggle sidebar | [?] Help")
     print("")
 
     # Auto-open browser

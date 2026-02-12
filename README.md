@@ -24,7 +24,7 @@ MALCA is a Bayesian event-detection pipeline for finding dimming and dipping eve
 ## Install
 
 ```bash
-# Requires Python >= 3.10
+# Requires Python >= 3.9
 git clone https://github.com/calderlen/malca.git && cd malca
 pip install -e "."          # installs all runtime + test dependencies
 ```
@@ -72,7 +72,7 @@ malca plot --input /path/to/lc123.dat2 --out-dir output/plots
 malca filter --input output/results.parquet --output output/filtered.parquet
 
 # Multi-wavelength characterization (post-detection)
-malca characterize --input output/filtered.parquet --output output/characterized.parquet --dust --starhorse input/starhorse/starhorse.parquet
+malca characterize --input output/filtered.parquet --output output/characterized.parquet --dust --starhorse input/starhorse/starhorse2021.parquet
 
 # Get help for any command
 malca --help
@@ -495,7 +495,7 @@ malca characterize \
   - `iphas_r_ha`, `iphas_ha_excess` (IPHAS Hα)
   - `near_sfr`, `sfr_name` (star-forming region proximity)
   - `cluster_name`, `cluster_age_myr` (open cluster membership)
-  - `unwise_w1_zscore`, `unwise_w1_var` (IR variability)
+  - `unwise_w1_zscore`, `unwise_w2_zscore`, `unwise_w1_var` (IR variability)
 
 #### malca classify
 
@@ -526,7 +526,7 @@ malca review.tui --db output/review/review.db
 ```
 
 **Dash GUI features:**
-- Light curve plot display with grouped, collapsible metadata panels (~126 fields across 14 sections)
+- Light curve plot display with grouped, collapsible metadata panels (~146 fields across 17 sections)
 - Interest scoring (0-5) via number keys or clickable buttons
 - Event class labeling (single-select): `circumstellar_dust`, `microlensing`, `flare`, `eclipsing_binary`, `instrumental`, `unknown_interesting`, `not_real`
 - Reason tagging (multi-select): `clean_event`, `multi_camera_support`, `interesting_morphology`, `periodic_contaminant`, `camera_artifact`, `known_object_nearby`, `needs_followup_data`

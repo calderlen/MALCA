@@ -3,8 +3,8 @@
 All tagging actions use a **leader-key prefix** so that single letters
 stay available for future features:
 
-    R <key>  →  toggle a reason tag  (multi-select)
-    G <key>  →  set event class      (single-select; same key again clears)
+    [R] <key>  ->  toggle a reason tag  (multi-select)
+    [C] <key>  ->  set event class      (single-select; same key again clears)
 
 Press Escape after the leader key to cancel.
 """
@@ -26,8 +26,8 @@ REASON_KEY_MAP = {
     'f': 'needs_followup_data',
 }
 
-# G prefix → event class (single-select)
-CLASS_PREFIX_KEY = 'g'
+# C prefix -> event class (single-select)
+CLASS_PREFIX_KEY = 'c'
 CLASS_KEY_MAP = {
     'd': 'circumstellar_dust',
     'l': 'microlensing',
@@ -83,35 +83,35 @@ KEYBOARD_SHORTCUTS = {
 
 HELP_TEXT = """
 Navigation:
-  N - Next | P - Previous | J - Jump
+  [N] Next | [P] Previous | [J] Jump
 
 Scoring (instant save, clickable):
-  0-5 - Set interest score
+  [0]-[5] Set interest score
 
-Event Class (G then key, single-select, clickable):
-  G D - circumstellar dust   G L - microlensing
-  G F - flare                G E - eclipsing binary
-  G I - instrumental         G U - unknown interesting
-  G N - not real             (Esc cancels)
+Event Class ([C] then key, single-select, clickable):
+  [C] [D] circumstellar dust   [C] [L] microlensing
+  [C] [F] flare                [C] [E] eclipsing binary
+  [C] [I] instrumental         [C] [U] unknown interesting
+  [C] [N] not real             ([Esc] cancels)
 
-Reason Tags (R then key, multi-select, clickable):
-  R C - clean event          R M - multi camera support
-  R I - interesting morph    R P - periodic contaminant
-  R A - camera artifact      R K - known object nearby
-  R F - needs followup data  (Esc cancels)
+Reason Tags ([R] then key, multi-select, clickable):
+  [R] [C] clean event          [R] [M] multi camera support
+  [R] [I] interesting morph    [R] [P] periodic contaminant
+  [R] [A] camera artifact      [R] [K] known object nearby
+  [R] [F] needs followup data  ([Esc] cancels)
 
 Status:
-  F - Toggle needs-followup flag
+  [F] Toggle needs-followup flag
   (status auto-set to reviewed on save)
 
 Actions:
-  S - Save | D - Done (Save + Next)
-  M - Enter notes (Esc to exit)
+  [S] Save | [D] Done (Save + Next)
+  [M] Enter notes ([Esc] to exit)
 
 UI:
-  T - Toggle sidebar | A - Toggle activity
+  [T] Toggle sidebar | [A] Toggle activity
   Plot controls are in-GUI (preset/actions/native export)
-  ? - Show this help
+  [?] Show this help
 """
 
 
