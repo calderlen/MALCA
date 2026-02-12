@@ -2,6 +2,9 @@
 
 import sys
 import argparse
+import json
+import time
+from functools import lru_cache
 from pathlib import Path
 import webbrowser
 from threading import Timer
@@ -11,6 +14,7 @@ from dash import dcc, html, Input, Output, State, callback_context, no_update
 import dash_bootstrap_components as dbc
 from flask import send_from_directory
 import pandas as pd
+import plotly.io as pio
 
 from malca.review.store import (
     DEFAULT_DB_PATH,
@@ -38,6 +42,7 @@ from malca.review.keyboard import (
     PREFIX_KEYS,
 )
 from malca.review.session import create_queue_data_dict
+from malca.review.interactive_plot import build_interactive_lightcurve_figure
 from malca.config.config_paths import VSX_CROSSMATCH_PATH, GAIA_CACHE_FILE
 from malca.config.config_characterize import GAIA_CHUNK_SIZE
 
@@ -165,16 +170,161 @@ app.index_string = '''
         .plot-container {
             flex: 1;
             display: flex;
-            justify-content: center;
-            align-items: center;
+            flex-direction: column;
+            justify-content: flex-start;
+            align-items: stretch;
             background-color: #000;
             overflow: hidden;
             max-height: 80vh;
+            padding: 8px 12px 10px 12px;
+            gap: 8px;
+        }
+        .plot-toolbar {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            flex-wrap: wrap;
+            padding: 8px 10px;
+            border: 1px solid rgba(84, 118, 140, 0.35);
+            background: linear-gradient(180deg, rgba(8, 18, 24, 0.9), rgba(3, 8, 12, 0.75));
+            border-radius: 8px;
+            font-size: 11px;
+        }
+        .plot-toolbar .compact-btn {
+            background-color: #14212b;
+            color: #c6d7e8;
+            border: 1px solid rgba(92, 129, 154, 0.6);
+            border-radius: 5px;
+            padding: 2px 7px;
+            font-size: 10px;
+            cursor: pointer;
+        }
+        .plot-toolbar .compact-btn:hover {
+            border-color: #7da8c4;
+            background-color: #1a2b38;
+        }
+        .plot-toolbar .label-chip {
+            color: #85a7bf;
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .plot-toolbar .dash-checklist label,
+        .plot-toolbar label {
+            color: #c9d4df !important;
+            margin-right: 8px;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .plot-frame {
+            flex: 1;
+            min-height: 340px;
+            border: 1px solid rgba(84, 118, 140, 0.35);
+            border-radius: 10px;
+            background: radial-gradient(circle at 20% 0%, rgba(17, 39, 54, 0.22), rgba(0, 0, 0, 0.05) 45%, rgba(0, 0, 0, 0));
+            overflow: hidden;
+            position: relative;
+        }
+        .plot-native {
+            width: 100%;
+            height: 100%;
         }
         .plot-container img {
             max-width: 100%;
             max-height: 100%;
             object-fit: contain;
+        }
+        .plot-stats {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 2px;
+        }
+        .plot-status {
+            border: 1px solid rgba(102, 126, 143, 0.45);
+            border-radius: 8px;
+            padding: 8px 10px;
+            background: rgba(9, 18, 25, 0.82);
+            color: #d4dfeb;
+            font-size: 11px;
+        }
+        .plot-status.warn {
+            border-color: rgba(186, 144, 44, 0.7);
+            background: rgba(41, 29, 6, 0.62);
+        }
+        .plot-status.error {
+            border-color: rgba(192, 72, 72, 0.78);
+            background: rgba(48, 12, 12, 0.58);
+        }
+        .camera-diag {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            font-size: 10px;
+            color: #b9cad9;
+        }
+        .camera-diag .item {
+            border: 1px solid rgba(90, 118, 138, 0.55);
+            border-radius: 999px;
+            padding: 2px 8px;
+            background: rgba(11, 23, 31, 0.7);
+        }
+        .stat-card {
+            padding: 6px 8px;
+            border-radius: 7px;
+            border: 1px solid rgba(64, 96, 116, 0.45);
+            background-color: rgba(8, 17, 24, 0.75);
+            min-width: 95px;
+        }
+        .stat-card .label {
+            color: #7fa3bc;
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .stat-card .value {
+            color: #e2edf6;
+            font-size: 13px;
+            font-weight: 600;
+            margin-top: 2px;
+        }
+        .run-config-panel {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+            gap: 6px;
+        }
+        .run-config-item {
+            border: 1px solid rgba(78, 110, 132, 0.45);
+            border-radius: 6px;
+            background: rgba(7, 16, 22, 0.68);
+            padding: 5px 7px;
+        }
+        .run-config-item .k {
+            color: #7fa3bc;
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.4px;
+        }
+        .run-config-item .v {
+            color: #dce8f2;
+            font-size: 11px;
+            font-weight: 600;
+            margin-top: 2px;
+            word-break: break-word;
+        }
+        .repro-badge {
+            border-radius: 999px;
+            border: 1px solid rgba(99, 129, 153, 0.6);
+            padding: 2px 8px;
+            font-size: 10px;
+            color: #9bc1dc;
+            background: rgba(12, 25, 33, 0.8);
+        }
+        .repro-badge.warn {
+            border-color: rgba(186, 144, 44, 0.75);
+            color: #e4c16d;
+            background: rgba(44, 30, 8, 0.62);
         }
         .metadata-bar {
             background-color: #0a0a0a;
@@ -367,6 +517,206 @@ app.index_string = '''
 # Global variables
 DB_PATH = None
 PLOT_DIR = None
+
+PLOT_PRESETS = {
+    'Clean': {
+        'overlays': ['markers', 'residuals', 'filter_bad_cameras'],
+        'camera_mode': 'all',
+    },
+    'Diagnostics': {
+        'overlays': ['baseline', 'markers', 'residuals', 'filter_bad_cameras', 'diagnostics'],
+        'camera_mode': 'all',
+    },
+    'Full': {
+        'overlays': ['baseline', 'markers', 'residuals', 'filter_bad_cameras', 'diagnostics', 'confidence'],
+        'camera_mode': 'all',
+    },
+}
+
+
+@lru_cache(maxsize=8)
+def _load_run_params_meta_for_plot_dir(plot_dir: str | None) -> tuple[dict | None, str, str]:
+    """Load run_params with status/meta from active plot directory."""
+    if not plot_dir:
+        return None, "missing", "No plot directory set"
+    run_params_path = Path(plot_dir).resolve().parent / "run_params.json"
+    if not run_params_path.exists():
+        return None, "missing", f"Missing {run_params_path}"
+    try:
+        with open(run_params_path) as f:
+            data = json.load(f)
+    except Exception as exc:
+        return None, "invalid", f"Could not parse run_params.json: {exc}"
+    if not isinstance(data, dict):
+        return None, "invalid", "run_params.json is not a JSON object"
+    return data, "loaded", f"Loaded from {run_params_path}"
+
+
+def _load_run_params_for_plot_dir(plot_dir: str | None) -> dict:
+    """Load run_params.json near the active plot directory."""
+    run_params, _status, _msg = _load_run_params_meta_for_plot_dir(plot_dir)
+    return run_params or {}
+
+
+def _render_stat_cards(stat_rows: list[tuple[str, str]]) -> list:
+    """Render compact stats cards below the native plot."""
+    cards = []
+    for label, value in stat_rows:
+        cards.append(
+            html.Div([
+                html.Div(label, className='label'),
+                html.Div(value, className='value'),
+            ], className='stat-card')
+        )
+    return cards
+
+
+def _render_plot_status_panel(status: str, message: str, warnings: list[str] | None) -> html.Div:
+    """Render native plot status and warnings panel."""
+    warnings = warnings or []
+    cls = 'plot-status'
+    if status in {'missing-file', 'missing-columns', 'empty-after-filter', 'empty-camera-selection', 'error'}:
+        cls += ' error'
+    elif warnings:
+        cls += ' warn'
+
+    if not message and not warnings:
+        return html.Div('Native interactive plot active.', className=cls)
+
+    lines = [html.Div(message)] if message else []
+    for w in warnings:
+        lines.append(html.Div(f"- {w}"))
+    return html.Div(lines, className=cls)
+
+
+def _render_camera_diag_panel(camera_diagnostics: dict[str, list[str]], filtered_values: list[str] | None) -> list:
+    """Render explainable camera filtering tags."""
+    if not filtered_values:
+        return [html.Div('No cameras filtered.', className='item')]
+
+    chips = []
+    for cam in sorted(filtered_values):
+        reasons = camera_diagnostics.get(str(cam), [])
+        label = f"Cam {cam}: {','.join(reasons) if reasons else 'unknown'}"
+        chips.append(html.Div(label, className='item'))
+    return chips
+
+
+def _run_params_path_for_plot_dir(plot_dir: str | None) -> Path | None:
+    """Get run_params.json path from current plot directory."""
+    if not plot_dir:
+        return None
+    candidate = Path(plot_dir).resolve().parent / "run_params.json"
+    return candidate if candidate.exists() else None
+
+
+def _derive_defaults_from_run_params(run_params: dict | None) -> tuple[str, list[str]]:
+    """Derive initial preset and overlays from run config."""
+    if not run_params:
+        preset = 'Diagnostics'
+        return preset, list(PLOT_PRESETS[preset]['overlays'])
+
+    run_post_filter = bool(run_params.get('run_post_filter', True))
+    run_postprocess = bool(run_params.get('run_postprocess', True))
+    min_bf = float(run_params.get('min_bayes_factor', 0.0) or 0.0)
+    if (not run_post_filter) and (not run_postprocess):
+        preset = 'Clean'
+    elif min_bf >= 12:
+        preset = 'Full'
+    else:
+        preset = 'Diagnostics'
+
+    overlays = set(PLOT_PRESETS[preset]['overlays'])
+    if bool(run_params.get('skip_camera_median', False)):
+        overlays.discard('filter_bad_cameras')
+    if not bool(run_params.get('run_postprocess', True)):
+        overlays.discard('diagnostics')
+        overlays.discard('confidence')
+    return preset, sorted(list(overlays))
+
+
+def _run_config_rows(run_params: dict) -> list[tuple[str, str]]:
+    """Compact rows for run config panel."""
+    rows: list[tuple[str, str]] = []
+    for label, key in (
+        ('Stage', 'stage'),
+        ('Baseline', 'baseline_func'),
+        ('Trigger mode', 'trigger_mode'),
+        ('Workers', 'workers'),
+        ('Batch size', 'batch_size'),
+        ('Min Bayes factor', 'min_bayes_factor'),
+        ('LogBF dip thr', 'logbf_threshold_dip'),
+        ('LogBF jump thr', 'logbf_threshold_jump'),
+        ('Significance thr', 'significance_threshold'),
+        ('Clean err abs', 'clean_max_error_absolute'),
+        ('Clean err sigma', 'clean_max_error_sigma'),
+        ('Bad cam scatter', 'bad_camera_scatter_ratio'),
+    ):
+        val = run_params.get(key)
+        if val is None:
+            continue
+        rows.append((label, str(val)))
+    return rows
+
+
+def _run_config_mismatch_warnings(run_params: dict | None, overlays: set[str]) -> list[str]:
+    """Warnings for GUI/view assumptions mismatching run config."""
+    if not run_params:
+        return ["run_params.json missing; native plot uses fallback defaults."]
+
+    warns: list[str] = []
+    expected_filter_bad = not bool(run_params.get('skip_camera_median', False))
+    if ('filter_bad_cameras' in overlays) != expected_filter_bad:
+        warns.append(
+            f"Bad-camera filter toggle differs from run config (expected {'on' if expected_filter_bad else 'off'})."
+        )
+
+    if run_params.get('baseline_func') is None:
+        warns.append("baseline_func missing in run_params; baseline defaults may differ from original run.")
+    if run_params.get('clean_max_error_absolute') is None or run_params.get('clean_max_error_sigma') is None:
+        warns.append("cleaning thresholds missing in run_params; fallback cleaning defaults are active.")
+    return warns
+
+
+def _render_run_config_panel(run_params: dict | None, run_params_path: Path | None, warnings: list[str]) -> list:
+    """Render run config info cards with warning summary."""
+    status = "Loaded" if run_params else "Missing"
+    cards = [
+        html.Div([
+            html.Div('Status', className='k'),
+            html.Div(status, className='v'),
+        ], className='run-config-item'),
+        html.Div([
+            html.Div('Path', className='k'),
+            html.Div(str(run_params_path) if run_params_path else 'not found', className='v'),
+        ], className='run-config-item'),
+    ]
+    for label, value in _run_config_rows(run_params or {}):
+        cards.append(
+            html.Div([
+                html.Div(label, className='k'),
+                html.Div(value, className='v'),
+            ], className='run-config-item')
+        )
+    if warnings:
+        cards.append(
+            html.Div([
+                html.Div('Warnings', className='k'),
+                html.Div(' | '.join(warnings), className='v'),
+            ], className='run-config-item')
+        )
+    return cards
+
+
+def _render_repro_badge(run_params: dict | None, warnings: list[str]) -> html.Span:
+    """Render reproducibility status badge."""
+    if (run_params is None) or warnings:
+        text = 'Repro: fallback/defaults'
+        cls = 'repro-badge warn'
+    else:
+        text = 'Repro: exact run params'
+        cls = 'repro-badge'
+    return html.Span(text, className=cls)
 
 
 def _keyboard_key(key_value: str | None) -> str:
@@ -649,6 +999,13 @@ def create_layout():
         dcc.Store(id='filter-params', data={}),
         dcc.Store(id='import-trigger', data=0),  # triggers queue refresh after import
         dcc.Store(id='activity-visible', data=False),  # collapsed by default
+        dcc.Store(id='plot-render-request', data={'nonce': 1, 'ts': 0.0, 'state': {'idx': 0, 'plot_mode': 'native', 'overlay_values': ['baseline', 'markers', 'residuals', 'filter_bad_cameras', 'diagnostics'], 'selected_cameras': [], 'preset': 'Diagnostics'}}),
+        dcc.Store(id='plot-render-applied', data=0),
+        dcc.Store(id='plot-defaults-initialized', data=False),
+        dcc.Store(id='run-config-json-store', data=''),
+        dcc.Interval(id='plot-render-debounce', interval=180, n_intervals=0),
+        dcc.Download(id='plot-export-download'),
+        dcc.Download(id='run-config-download'),
         dcc.Interval(id='keyboard-init', interval=200, n_intervals=0, max_intervals=1),
 
         # Sidebar toggle button
@@ -770,11 +1127,89 @@ def create_layout():
 
             # Plot area
             html.Div([
-                html.Img(id='plot-image', src='', alt='Light curve plot')
+                html.Div([
+                    dcc.Dropdown(
+                        id='plot-preset',
+                        options=[{'label': p, 'value': p} for p in ('Clean', 'Diagnostics', 'Full')],
+                        value='Diagnostics',
+                        clearable=False,
+                        style={'minWidth': '140px', 'font-size': '10px'},
+                    ),
+                    dcc.RadioItems(
+                        id='plot-mode',
+                        options=[
+                            {'label': ' Native', 'value': 'native'},
+                            {'label': ' PNG', 'value': 'png'},
+                        ],
+                        value='native',
+                        inline=True,
+                    ),
+                    dcc.Checklist(
+                        id='plot-overlays',
+                        options=[
+                            {'label': ' Baseline', 'value': 'baseline'},
+                            {'label': ' Dip/Jump markers', 'value': 'markers'},
+                            {'label': ' Residual panel', 'value': 'residuals'},
+                            {'label': ' Filter bad cameras', 'value': 'filter_bad_cameras'},
+                            {'label': ' Event diagnostics', 'value': 'diagnostics'},
+                            {'label': ' Confidence colors', 'value': 'confidence'},
+                        ],
+                        value=['baseline', 'markers', 'residuals', 'filter_bad_cameras', 'diagnostics'],
+                        inline=True,
+                    ),
+                    html.Button('Reset', id='plot-reset-btn', n_clicks=0, className='compact-btn'),
+                    html.Button('All cams', id='cams-all-btn', n_clicks=0, className='compact-btn'),
+                    html.Button('Clear cams', id='cams-clear-btn', n_clicks=0, className='compact-btn'),
+                    html.Button('Invert cams', id='cams-invert-btn', n_clicks=0, className='compact-btn'),
+                    html.Span('Cameras:', style={'color': '#86a7bf'}),
+                    dcc.Checklist(
+                        id='camera-checklist',
+                        options=[],
+                        value=[],
+                        inline=True,
+                    ),
+                    html.Span('Export:', className='label-chip'),
+                    html.Button('PNG', id='export-native-png', n_clicks=0, className='compact-btn'),
+                    html.Button('SVG', id='export-native-svg', n_clicks=0, className='compact-btn'),
+                    html.Span(id='repro-badge', className='label-chip', style={'margin-left': '6px'}),
+                ], className='plot-toolbar'),
+                html.Div([
+                    dcc.Graph(
+                        id='interactive-plot',
+                        className='plot-native',
+                        config={
+                            'displaylogo': False,
+                            'modeBarButtonsToRemove': ['lasso2d', 'select2d'],
+                            'responsive': True,
+                        },
+                        style={'display': 'block', 'width': '100%', 'height': '100%'},
+                    ),
+                    html.Img(
+                        id='plot-image',
+                        src='',
+                        alt='Light curve plot',
+                        style={'display': 'none', 'width': '100%', 'height': '100%'},
+                    ),
+                ], className='plot-frame'),
+                html.Div(id='plot-status-panel', className='plot-status'),
+                html.Div(id='camera-filter-panel', className='camera-diag'),
+                html.Div(id='plot-stats-cards', className='plot-stats'),
             ], className='plot-container'),
 
             # Grouped candidate metadata sections (collapsible)
             html.Div(id='candidate-info-grid', className='metadata-sections'),
+
+            # Run config / reproducibility
+            html.Details([
+                html.Summary('Run Config', style={'cursor': 'pointer'}),
+                html.Div([
+                    html.Div([
+                        html.Button('Copy Config JSON', id='copy-run-config-btn', n_clicks=0, className='compact-btn', style={'margin-right': '6px'}),
+                        html.Button('Download Config JSON', id='download-run-config-btn', n_clicks=0, className='compact-btn'),
+                    ], style={'margin-bottom': '6px'}),
+                    html.Div(id='run-config-panel', className='run-config-panel'),
+                ], style={'padding': '8px 10px'}),
+            ], id='run-config-details', open=False, className='metadata-sections', style={'margin-top': '4px'}),
 
             # Control bar
             html.Div([
@@ -1166,41 +1601,155 @@ def handle_keyboard(key_value, current_idx, queue_data, current_score,
 
 # Update plot and unified candidate info
 @app.callback(
+    Output('plot-render-request', 'data'),
+    [Input('current-index', 'data'),
+     Input('plot-mode', 'value'),
+     Input('plot-overlays', 'value'),
+     Input('camera-checklist', 'value'),
+     Input('plot-preset', 'value')],
+    State('plot-render-request', 'data'),
+    prevent_initial_call=True,
+)
+def queue_plot_render_request(idx, plot_mode, overlay_values, selected_cameras, preset, existing_request):
+    """Debounced render request queue for native plot UX."""
+    req = existing_request or {'nonce': 0, 'ts': 0.0}
+    return {
+        'nonce': int(req.get('nonce', 0)) + 1,
+        'ts': float(time.time()),
+        'state': {
+            'idx': idx,
+            'plot_mode': plot_mode,
+            'overlay_values': list(overlay_values or []),
+            'selected_cameras': list(selected_cameras or []),
+            'preset': preset,
+        },
+    }
+
+
+@app.callback(
+    [Output('plot-preset', 'value'),
+     Output('plot-overlays', 'value', allow_duplicate=True),
+     Output('plot-defaults-initialized', 'data')],
+    Input('queue-data', 'data'),
+    State('plot-defaults-initialized', 'data'),
+    prevent_initial_call=True,
+)
+def initialize_plot_defaults_from_run_params(queue_data, initialized):
+    """Initialize native plot defaults from run_params once per session."""
+    if initialized:
+        raise dash.exceptions.PreventUpdate
+    if not queue_data:
+        raise dash.exceptions.PreventUpdate
+
+    run_params = _load_run_params_for_plot_dir(str(PLOT_DIR) if PLOT_DIR else None)
+    preset, overlays = _derive_defaults_from_run_params(run_params)
+    return preset, overlays, True
+
+
+@app.callback(
+    [Output('plot-overlays', 'value'),
+     Output('camera-checklist', 'value')],
+    [Input('plot-preset', 'value'),
+     Input('plot-reset-btn', 'n_clicks'),
+     Input('cams-all-btn', 'n_clicks'),
+     Input('cams-clear-btn', 'n_clicks'),
+     Input('cams-invert-btn', 'n_clicks')],
+    [State('camera-checklist', 'options'),
+     State('camera-checklist', 'value'),
+     State('plot-overlays', 'value')],
+    prevent_initial_call=True,
+)
+def update_plot_controls(preset, n_reset, n_all, n_clear, n_invert, camera_options, camera_values, overlay_values):
+    """Preset mapping + camera selection action buttons."""
+    _ = n_reset, n_all, n_clear, n_invert
+    trig = callback_context.triggered[0]['prop_id'].split('.')[0] if callback_context.triggered else ''
+    cams = [str(opt.get('value')) for opt in (camera_options or [])]
+    selected = [str(v) for v in (camera_values or []) if str(v) in cams]
+    overlays = list(overlay_values or [])
+
+    if trig == 'plot-preset' or trig == 'plot-reset-btn':
+        cfg = PLOT_PRESETS.get(preset or 'Diagnostics', PLOT_PRESETS['Diagnostics'])
+        new_overlays = list(cfg['overlays'])
+        new_cams = list(cams)
+        return new_overlays, new_cams
+    if trig == 'cams-all-btn':
+        return overlays, list(cams)
+    if trig == 'cams-clear-btn':
+        return overlays, []
+    if trig == 'cams-invert-btn':
+        inv = [c for c in cams if c not in set(selected)]
+        return overlays, inv
+    return no_update, no_update
+
+
+@app.callback(
     [Output('plot-image', 'src'),
      Output('candidate-info-grid', 'children'),
-     Output('progress-text', 'children')],
-    Input('current-index', 'data'),
-    State('queue-data', 'data'),
-    prevent_initial_call=False
+     Output('progress-text', 'children'),
+     Output('interactive-plot', 'figure'),
+     Output('interactive-plot', 'style'),
+     Output('plot-image', 'style'),
+     Output('camera-checklist', 'options'),
+     Output('camera-checklist', 'value'),
+     Output('plot-stats-cards', 'children'),
+     Output('plot-status-panel', 'children'),
+     Output('camera-filter-panel', 'children'),
+     Output('run-config-panel', 'children'),
+     Output('repro-badge', 'children'),
+     Output('run-config-json-store', 'data'),
+     Output('plot-render-applied', 'data')],
+    Input('plot-render-debounce', 'n_intervals'),
+    [State('plot-render-request', 'data'),
+     State('plot-render-applied', 'data'),
+     State('queue-data', 'data')],
+    prevent_initial_call=False,
 )
-def update_display(idx, queue_data):
-    """Update plot and unified candidate info grid."""
+def update_display(_tick, render_request, applied_nonce, queue_data):
+    """Render candidate display with debounce and stable uirevision behavior."""
+    req = render_request or {'nonce': 0, 'ts': 0.0, 'state': {}}
+    nonce = int(req.get('nonce', 0))
+    applied = int(applied_nonce or 0)
+    ts = float(req.get('ts', 0.0))
+
+    if nonce <= applied or (time.time() - ts) < 0.16:
+        raise dash.exceptions.PreventUpdate
+
+    state = req.get('state', {}) if isinstance(req.get('state', {}), dict) else {}
+    idx = int(state.get('idx', 0) or 0)
+    plot_mode = state.get('plot_mode', 'native')
+    overlays = set(state.get('overlay_values') or [])
+    selected_cameras = list(state.get('selected_cameras') or [])
+
+    empty_fig = {
+        'data': [],
+        'layout': {
+            'paper_bgcolor': 'rgba(0,0,0,0)',
+            'plot_bgcolor': 'rgba(0,0,0,0)',
+            'margin': {'l': 40, 'r': 20, 't': 40, 'b': 30},
+        },
+    }
+
     if not queue_data or queue_data['queue_size'] == 0:
-        return '', 'No candidates in queue', '[0/0]'
+        return '', 'No candidates in queue', '[0/0]', empty_fig, {'display': 'block', 'width': '100%', 'height': '100%'}, {'display': 'none'}, [], [], [], _render_plot_status_panel('error', 'No candidates in queue.', []), _render_camera_diag_panel({}, []), _render_run_config_panel(None, None, ['Queue is empty']), _render_repro_badge(None, ['Queue is empty']), '', nonce
 
     queue_size = queue_data['queue_size']
     if idx < 0 or idx >= queue_size:
-        return '', 'Invalid index', f'[{idx}/{queue_size}]'
+        return '', 'Invalid index', f'[{idx}/{queue_size}]', empty_fig, {'display': 'block', 'width': '100%', 'height': '100%'}, {'display': 'none'}, [], [], [], _render_plot_status_panel('error', 'Invalid queue index.', []), _render_camera_diag_panel({}, []), _render_run_config_panel(None, None, ['Invalid queue index']), _render_repro_badge(None, ['Invalid queue index']), '', nonce
 
     candidate_id = queue_data['candidate_ids'][idx]
     payload = queue_data['payloads'].get(candidate_id, {})
 
-    # Find plot
-    plot_path = find_plot_image(payload, Path(PLOT_DIR))
+    plot_src = ''
+    plot_dir_path = Path(PLOT_DIR) if PLOT_DIR else Path('.')
+    plot_path = find_plot_image(payload, plot_dir_path)
     if plot_path and plot_path.exists():
-        # Get relative path from PLOT_DIR (includes subdirectory like 'jump/')
         try:
-            rel_path = plot_path.relative_to(Path(PLOT_DIR))
+            rel_path = plot_path.relative_to(plot_dir_path)
             plot_src = f'/plots/{rel_path}'
         except ValueError:
-            # Fallback if not relative
             plot_src = f'/plots/{plot_path.name}'
-    else:
-        plot_src = ''
 
-    # Build grouped collapsible metadata sections
     grouped = extract_review_metadata_grouped(payload)
-
     grid_items = []
     for group_name, items in grouped:
         field_divs = [
@@ -1211,17 +1760,147 @@ def update_display(idx, queue_data):
             for label, value in items
         ]
         details_attrs = {'open': True} if is_group_default_open(group_name) else {}
-        grid_items.append(
-            html.Details([
-                html.Summary(f"{group_name} ({len(items)})"),
-                html.Div(field_divs, className='meta-grid'),
-            ], **details_attrs)
-        )
+        grid_items.append(html.Details([html.Summary(f"{group_name} ({len(items)})"), html.Div(field_divs, className='meta-grid')], **details_attrs))
 
-    # Progress
     progress = f"[{idx + 1}/{queue_size}] Queue: {queue_size}"
 
-    return plot_src, grid_items, progress
+    if plot_mode == 'png':
+        run_params, run_params_status, run_params_msg = _load_run_params_meta_for_plot_dir(str(PLOT_DIR) if PLOT_DIR else None)
+        run_params_path = _run_params_path_for_plot_dir(str(PLOT_DIR) if PLOT_DIR else None)
+        mismatch_warnings = _run_config_mismatch_warnings(run_params if run_params else None, overlays)
+        if run_params_status != 'loaded':
+            mismatch_warnings.append(run_params_msg)
+        panel = _render_run_config_panel(run_params if run_params else None, run_params_path, mismatch_warnings)
+        return (
+            plot_src,
+            grid_items,
+            progress,
+            no_update,
+            {'display': 'none'},
+            {'display': 'block', 'width': '100%', 'height': '100%'},
+            no_update,
+            no_update,
+            [],
+            _render_plot_status_panel('ok', 'PNG view enabled. Switch to Native for interactive hover and diagnostics.', mismatch_warnings),
+            _render_camera_diag_panel({}, []),
+            panel,
+            _render_repro_badge(run_params if run_params else None, mismatch_warnings),
+            json.dumps(run_params, indent=2, sort_keys=True) if run_params else '',
+            nonce,
+        )
+
+    run_params, run_params_status, run_params_msg = _load_run_params_meta_for_plot_dir(str(PLOT_DIR) if PLOT_DIR else None)
+    run_params_path = _run_params_path_for_plot_dir(str(PLOT_DIR) if PLOT_DIR else None)
+    mismatch_warnings = _run_config_mismatch_warnings(run_params if run_params else None, overlays)
+    if run_params_status != 'loaded':
+        mismatch_warnings.append(run_params_msg)
+    uirevision_key = f"{candidate_id}|{','.join(sorted(str(c) for c in selected_cameras))}"
+    native = build_interactive_lightcurve_figure(
+        payload,
+        plot_dir=plot_dir_path,
+        selected_cameras=selected_cameras,
+        filter_bad_cameras='filter_bad_cameras' in overlays,
+        show_baseline='baseline' in overlays,
+        show_event_markers='markers' in overlays,
+        show_residuals='residuals' in overlays,
+        show_diagnostics='diagnostics' in overlays,
+        confidence_colors='confidence' in overlays,
+        run_params=run_params or {},
+        uirevision_key=uirevision_key,
+    )
+
+    filtered = []
+    if 'Filtered cams' in {k for k, _ in native.get('stat_rows', [])}:
+        for key, val in native.get('stat_rows', []):
+            if key == 'Filtered cams':
+                filtered = [x.strip() for x in str(val).split(',') if x.strip()]
+
+    return (
+        plot_src,
+        grid_items,
+        progress,
+        native['figure'],
+        {'display': 'block', 'width': '100%', 'height': '100%'},
+        {'display': 'none'},
+        native['camera_options'],
+        native['camera_values'],
+        _render_stat_cards(native['stat_rows']),
+        _render_plot_status_panel(native.get('status', 'ok'), native.get('status_message', ''), (native.get('warnings', []) + mismatch_warnings)),
+        _render_camera_diag_panel(native.get('camera_diagnostics', {}), filtered),
+        _render_run_config_panel(run_params if run_params else None, run_params_path, mismatch_warnings),
+        _render_repro_badge(run_params if run_params else None, mismatch_warnings),
+        json.dumps(run_params, indent=2, sort_keys=True) if run_params else '',
+        nonce,
+    )
+
+
+@app.callback(
+    [Output('plot-export-download', 'data'),
+     Output('notification', 'children', allow_duplicate=True)],
+    [Input('export-native-png', 'n_clicks'),
+     Input('export-native-svg', 'n_clicks')],
+    [State('interactive-plot', 'figure'),
+     State('plot-mode', 'value'),
+     State('current-index', 'data')],
+    prevent_initial_call=True,
+)
+def export_native_plot(n_png, n_svg, figure, plot_mode, idx):
+    """Export native plot in PNG/SVG using current interactive state."""
+    _ = n_png, n_svg
+    trig = callback_context.triggered[0]['prop_id'].split('.')[0] if callback_context.triggered else ''
+    if plot_mode != 'native':
+        return no_update, 'Switch to Native mode before exporting.'
+    if not figure:
+        return no_update, 'No native plot is available to export.'
+
+    fmt = 'png' if trig == 'export-native-png' else 'svg'
+    fname = f"malca_plot_{int(idx) + 1 if idx is not None else 0}.{fmt}"
+    try:
+        image_bytes = pio.to_image(figure, format=fmt)
+    except Exception as exc:
+        return no_update, f'Export failed ({fmt}). Install/enable kaleido. {exc}'
+
+    return dcc.send_bytes(image_bytes, fname), f'Exported {fname}'
+
+
+@app.callback(
+    [Output('run-config-download', 'data'),
+     Output('notification', 'children', allow_duplicate=True)],
+    Input('download-run-config-btn', 'n_clicks'),
+    State('run-config-json-store', 'data'),
+    prevent_initial_call=True,
+)
+def download_run_config(n_clicks, run_config_json):
+    """Download current run_params JSON shown in GUI."""
+    if not n_clicks:
+        return no_update, no_update
+    if not run_config_json:
+        return no_update, 'No run_params.json is loaded for this run.'
+    return dcc.send_string(run_config_json, 'run_params.json'), 'Downloaded run_params.json'
+
+
+app.clientside_callback(
+    """
+    async function(nClicks, runConfigJson) {
+        if (!nClicks) {
+            return window.dash_clientside.no_update;
+        }
+        if (!runConfigJson) {
+            return 'No run_params.json is loaded for this run.';
+        }
+        try {
+            await navigator.clipboard.writeText(runConfigJson);
+            return 'Copied run_params.json to clipboard';
+        } catch (e) {
+            return 'Clipboard copy failed; use Download Config JSON.';
+        }
+    }
+    """,
+    Output('notification', 'children', allow_duplicate=True),
+    Input('copy-run-config-btn', 'n_clicks'),
+    State('run-config-json-store', 'data'),
+    prevent_initial_call=True,
+)
 
 
 # Load review data for current candidate

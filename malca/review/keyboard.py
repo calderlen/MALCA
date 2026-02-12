@@ -110,6 +110,7 @@ Actions:
 
 UI:
   T - Toggle sidebar | A - Toggle activity
+  Plot controls are in-GUI (preset/actions/native export)
   ? - Show this help
 """
 
