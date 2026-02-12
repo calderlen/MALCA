@@ -10,12 +10,12 @@ Usage:
     malca plot [options]           # Plot light curves
     malca filter [options]         # Apply signal-amplitude filter
     malca post_filter [options]    # Apply quality post-filters
+    malca gaia-fetch [options]     # Download Gaia DR3 data for candidates
     malca characterize [options]   # Multi-wavelength characterization
     malca classify [options]       # Dipper classification
     malca injection [options]      # Injection-recovery tests
     malca detection_rate [options] # Measure detection rate
     malca review [options]         # Launch Dash review GUI (keyboard-driven)
-    malca review.tui [options]     # Launch terminal review interface
     malca stats [options]          # Light-curve statistics
     malca attrition [options]      # Pre/post-filter attrition summary
     malca reproduce [options]      # Re-run detection on known objects
@@ -35,8 +35,8 @@ def main():
     if len(sys.argv) >= 2 and sys.argv[1] in [
         "manifest", "pipeline", "reproduce", "injection",
         "detection_rate", "validate", "plot", "post_filter",
-        "events", "characterize", "classify", "filter", "pre_filter", "score",
-        "stats", "attrition", "review.tui", "review",
+        "events", "gaia-fetch", "characterize", "classify", "filter", "pre_filter", "score",
+        "stats", "attrition", "review",
         "neighbors", "spectra", "false_positive", "ml_train"
     ]:
         command = sys.argv[1]
@@ -79,6 +79,10 @@ def main():
             from malca import events
             sys.argv = [sys.argv[0]] + remaining
             events.main()
+        elif command == "gaia-fetch":
+            from malca import gaia_fetch
+            sys.argv = [sys.argv[0]] + remaining
+            gaia_fetch.main()
         elif command == "characterize":
             from malca import characterize
             sys.argv = [sys.argv[0]] + remaining
@@ -103,10 +107,6 @@ def main():
             from malca import score
             sys.argv = [sys.argv[0]] + remaining
             score.main()
-        elif command == "review.tui":
-            from malca.review import tui as review_tui
-            sys.argv = [sys.argv[0]] + remaining
-            review_tui.main()
         elif command == "review":
             from malca.review import app
             sys.argv = [sys.argv[0]] + remaining
@@ -154,12 +154,12 @@ def main():
     subparsers.add_parser("filter", help="Apply signal-amplitude filter")
     subparsers.add_parser("pre_filter", help="Apply pre-filters to candidate tables")
     subparsers.add_parser("events", help="Run event detection directly")
+    subparsers.add_parser("gaia-fetch", help="Download Gaia DR3 data for candidates (AIP TAP mirror)")
     subparsers.add_parser("characterize", help="Characterize candidates with external catalogs")
     subparsers.add_parser("classify", help="Classify candidates by variability type")
     subparsers.add_parser("score", help="Compute event score for one light curve table")
     subparsers.add_parser("stats", help="Compute light-curve statistics")
     subparsers.add_parser("attrition", help="Summarize pre/post-filter attrition")
-    subparsers.add_parser("review.tui", help="Launch terminal review interface")
     subparsers.add_parser("review", help="Launch Dash review GUI (keyboard-driven, fast)")
     subparsers.add_parser("false_positive", help="Run false-positive contaminant benchmark")
     subparsers.add_parser("ml_train", help="Train baseline ML classifier on reviewed labels")

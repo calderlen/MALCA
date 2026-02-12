@@ -191,7 +191,7 @@ REVIEW_METADATA_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
     ]),
 ]
 
-# Flat list derived from groups, for backward compatibility.
+# Flat list derived from grouped metadata fields.
 REVIEW_METADATA_FIELDS: list[tuple[str, str]] = [
     (label, key)
     for _group_name, fields in REVIEW_METADATA_GROUPS

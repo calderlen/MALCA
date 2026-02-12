@@ -15,7 +15,7 @@ import pandas as pd
 import numpy as np
 from tqdm.auto import tqdm
 
-from malca.plot import plot_bayes_results, BASELINE_FUNCTIONS
+from malca.plot import plot_bayes_results, plot_phase_folded_lightcurve, BASELINE_FUNCTIONS
 from malca.review.metadata import REVIEW_METADATA_FIELDS, normalize_vsx_df, normalize_vsx_record
 
 
@@ -107,21 +107,22 @@ def load_passing_candidates(
     return df.reset_index(drop=True)
 
 
-def _plot_single_candidate(args: tuple) -> tuple[str, str, bool, str, str]:
+def _plot_single_candidate(args: tuple) -> tuple[str, str, bool, str, str, str | None, bool, str]:
     """Worker function for parallel plotting."""
     (
         lc_path_str, out_path_str, baseline, baseline_kwargs,
         skip_events, plot_fits, logbf_threshold_dip, logbf_threshold_jump,
         jd_offset, clean_max_error_absolute, clean_max_error_sigma,
         detection_results_csv, annotations, metadata, run_params,
-        filter_bad_cameras, bad_camera_scatter_ratio
+        filter_bad_cameras, bad_camera_scatter_ratio,
+        phase_plot_ready, phase_period_days, phase_out_path_str,
     ) = args
 
     lc_path = Path(lc_path_str)
     out_path = Path(out_path_str)
 
     if not lc_path.exists():
-        return (lc_path_str, out_path_str, False, "file not found", "")
+        return (lc_path_str, out_path_str, False, "file not found", "", phase_out_path_str, False, "missing input file")
 
     try:
         baseline_func = BASELINE_FUNCTIONS.get(baseline, BASELINE_FUNCTIONS["per_camera_gp"])
@@ -148,9 +149,29 @@ def _plot_single_candidate(args: tuple) -> tuple[str, str, bool, str, str]:
         )
         # Format filtered cameras as comma-separated string
         filtered_str = ",".join(str(c) for c in sorted(filtered_cams)) if filtered_cams else ""
-        return (lc_path_str, out_path_str, True, "", filtered_str)
+
+        phase_success = False
+        phase_error = ""
+        if phase_plot_ready and phase_out_path_str:
+            try:
+                plot_phase_folded_lightcurve(
+                    lc_path,
+                    period_days=float(phase_period_days),
+                    out_path=Path(phase_out_path_str),
+                    show=False,
+                    clean_max_error_absolute=clean_max_error_absolute,
+                    clean_max_error_sigma=clean_max_error_sigma,
+                    filter_bad_cameras=filter_bad_cameras,
+                    bad_camera_scatter_ratio=bad_camera_scatter_ratio,
+                )
+                phase_success = True
+            except Exception as exc:
+                phase_success = False
+                phase_error = str(exc)
+
+        return (lc_path_str, out_path_str, True, "", filtered_str, phase_out_path_str, phase_success, phase_error)
     except Exception as e:
-        return (lc_path_str, out_path_str, False, str(e), "")
+        return (lc_path_str, out_path_str, False, str(e), "", phase_out_path_str, False, "")
 
 
 def _as_bool(v: object) -> bool:
@@ -271,6 +292,8 @@ def plot_passing_candidates(
             "total_selected": 0,
             "plotted": 0,
             "failed": 0,
+            "phase_plotted": 0,
+            "phase_failed": 0,
             "failed_paths": [],
             "filtered_camera_sources": 0,
             "filtered_cameras_by_path": {},
@@ -301,6 +324,18 @@ def plot_passing_candidates(
         asas_sn_id = lc_path.stem.split("-")[0]
         bucket = _candidate_bucket(row)
         out_path = bucket_dirs[bucket] / f"{asas_sn_id}_candidate.{format}"
+
+        phase_ready_raw = row.get("phase_plot_ready", False)
+        phase_period_raw = row.get("phase_period_days", np.nan)
+        if (pd.isna(phase_period_raw) or phase_period_raw is None) and ("lsp_period" in row.index):
+            phase_period_raw = row.get("lsp_period", np.nan)
+        try:
+            phase_period = float(phase_period_raw)
+            phase_ready = bool(phase_ready_raw) and np.isfinite(phase_period) and phase_period > 0
+        except Exception:
+            phase_period = np.nan
+            phase_ready = False
+        phase_out_path = bucket_dirs[bucket] / f"{asas_sn_id}_candidate_phase.{format}" if phase_ready else None
 
         # Build annotations from filter results
         annotations = {}
@@ -363,7 +398,9 @@ def plot_passing_candidates(
             jd_offset, clean_max_error_absolute, clean_max_error_sigma,
             str(detection_results_csv) if detection_results_csv else None,
             annotations, metadata, run_params,
-            filter_bad_cameras, bad_camera_scatter_ratio
+            filter_bad_cameras, bad_camera_scatter_ratio,
+            phase_ready, phase_period,
+            str(phase_out_path) if phase_out_path else None,
         ))
         manifest_rows.append(
             {
@@ -372,13 +409,18 @@ def plot_passing_candidates(
                 "path": str(lc_path),
                 "plot_bucket": bucket,
                 "plot_path": str(out_path),
+                "phase_plot_ready": bool(phase_ready),
+                "phase_period_days": phase_period if phase_ready else np.nan,
+                "phase_plot_path": str(phase_out_path) if phase_out_path else "",
             }
         )
 
     n_plotted = 0
     n_failed = 0
+    n_phase_plotted = 0
+    n_phase_failed = 0
     all_filtered_cameras: dict[str, str] = {}  # path -> filtered cameras string
-    results: list[tuple[str, str, bool, str, str]] = []
+    results: list[tuple[str, str, bool, str, str, str | None, bool, str]] = []
 
     if workers > 1:
         from multiprocessing import Pool, cpu_count
@@ -393,7 +435,7 @@ def plot_passing_candidates(
                 disable=not show_tqdm,
             ))
 
-        for lc_path, _, success, error, filtered_str in results:
+        for lc_path, _, success, error, filtered_str, _, phase_success, phase_error in results:
             if success:
                 n_plotted += 1
                 if filtered_str:
@@ -402,10 +444,16 @@ def plot_passing_candidates(
                 n_failed += 1
                 if verbose:
                     print(f"Failed to plot {lc_path}: {error}")
+            if phase_success:
+                n_phase_plotted += 1
+            elif phase_error:
+                n_phase_failed += 1
+                if verbose:
+                    print(f"Failed phase plot {lc_path}: {phase_error}")
     else:
         for item in tqdm(work_items, desc="Plotting candidates", disable=not show_tqdm):
-            lc_path, out_path_str, success, error, filtered_str = _plot_single_candidate(item)
-            results.append((lc_path, out_path_str, success, error, filtered_str))
+            lc_path, out_path_str, success, error, filtered_str, phase_out_path, phase_success, phase_error = _plot_single_candidate(item)
+            results.append((lc_path, out_path_str, success, error, filtered_str, phase_out_path, phase_success, phase_error))
             if success:
                 n_plotted += 1
                 if filtered_str:
@@ -414,6 +462,12 @@ def plot_passing_candidates(
                 n_failed += 1
                 if verbose:
                     print(f"Failed to plot {lc_path}: {error}")
+            if phase_success:
+                n_phase_plotted += 1
+            elif phase_error:
+                n_phase_failed += 1
+                if verbose:
+                    print(f"Failed phase plot {lc_path}: {phase_error}")
 
     # Report filtered cameras
     if all_filtered_cameras:
@@ -424,13 +478,18 @@ def plot_passing_candidates(
             print(f"  ... and {len(all_filtered_cameras) - 20} more")
 
     print(f"\nGenerated {n_plotted} plots, {n_failed} failed")
-    failed_paths = [lc_path for lc_path, _, success, _, _ in results if not success]
+    if n_phase_plotted or n_phase_failed:
+        print(f"Generated {n_phase_plotted} phase plots, {n_phase_failed} phase failures")
+    failed_paths = [lc_path for lc_path, _, success, _, _, _, _, _ in results if not success]
 
-    result_by_path = {lc_path: (success, err) for lc_path, _, success, err, _ in results}
+    result_by_path = {lc_path: (success, err) for lc_path, _, success, err, _, _, _, _ in results}
+    phase_by_path = {lc_path: (phase_success, phase_err) for lc_path, _, _, _, _, _, phase_success, phase_err in results}
     manifest_df = pd.DataFrame(manifest_rows)
     if not manifest_df.empty:
         manifest_df["plot_success"] = manifest_df["path"].map(lambda p: result_by_path.get(str(p), (False, "missing"))[0])
         manifest_df["plot_error"] = manifest_df["path"].map(lambda p: result_by_path.get(str(p), (False, "missing"))[1])
+        manifest_df["phase_plot_success"] = manifest_df["path"].map(lambda p: phase_by_path.get(str(p), (False, ""))[0])
+        manifest_df["phase_plot_error"] = manifest_df["path"].map(lambda p: phase_by_path.get(str(p), (False, ""))[1])
         for bucket in ("dip", "jump", "both"):
             bucket_manifest = manifest_df[manifest_df["plot_bucket"] == bucket].copy()
             bucket_manifest.to_csv(out_dir / f"manifest_{bucket}.csv", index=False)
@@ -445,6 +504,8 @@ def plot_passing_candidates(
         "total_selected": total_selected,
         "plotted": n_plotted,
         "failed": n_failed,
+        "phase_plotted": n_phase_plotted,
+        "phase_failed": n_phase_failed,
         "failed_paths": failed_paths,
         "filtered_camera_sources": len(all_filtered_cameras),
         "filtered_cameras_by_path": all_filtered_cameras,

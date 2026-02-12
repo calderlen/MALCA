@@ -347,27 +347,27 @@ def _batch_gaia_cone_query(
 ) -> pd.DataFrame:
     """
     Batch Gaia TAP query using table upload for efficient cone search.
-    
-    Uses async job with uploaded coordinate table for server-side crossmatch.
-    Much faster than row-by-row queries.
+
+    Uses pyvo async job with uploaded coordinate table for server-side crossmatch.
     """
-    from astroquery.gaia import Gaia
-    
+    import pyvo
+    from astropy.table import Table
+    from malca.config.config_paths import GAIA_AIP_TAP_URL
+
     if coords_df.empty:
         return pd.DataFrame()
-    
+
+    tap = pyvo.dal.TAPService(GAIA_AIP_TAP_URL)
     results = []
     chunks = [coords_df.iloc[i:i+chunk_size] for i in range(0, len(coords_df), chunk_size)]
-    
+
     def process_chunk(chunk_df):
         """Process a single chunk via TAP upload."""
         try:
-            # Create upload table
-            from astropy.table import Table
             upload_table = Table.from_pandas(chunk_df[["_idx", "ra", "dec"]])
-            
+
             query = f"""
-            SELECT 
+            SELECT
                 u._idx as _idx,
                 g.source_id,
                 {select_cols},
@@ -380,32 +380,26 @@ def _batch_gaia_cone_query(
             )
             {extra_where}
             """
-            
-            job = Gaia.launch_job_async(
-                query,
-                upload_resource=upload_table,
-                upload_table_name="upload_table",
-                verbose=False,
-            )
-            result = job.get_results()
-            return result.to_pandas() if result else pd.DataFrame()
+
+            result = tap.run_async(query, uploads={"upload_table": upload_table})
+            return result.to_table().to_pandas() if result else pd.DataFrame()
         except Exception as e:
             if verbose:
                 print(f"Gaia batch query error: {e}")
             return pd.DataFrame()
-    
+
     # Process chunks in parallel
     with ThreadPoolExecutor(max_workers=n_workers) as executor:
         futures = {executor.submit(process_chunk, chunk): i for i, chunk in enumerate(chunks)}
-        
+
         for future in tqdm(as_completed(futures), total=len(futures), desc="Gaia batch query", disable=not verbose):
             result = future.result()
             if not result.empty:
                 results.append(result)
-    
+
     if not results:
         return pd.DataFrame()
-    
+
     return pd.concat(results, ignore_index=True)
 
 

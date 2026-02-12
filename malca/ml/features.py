@@ -77,7 +77,6 @@ ML_DROP_COLUMNS: set[str] = {
 
     # Review metadata (not features)
     "interest_score",
-    "interest_reason",
     "review_pass",
     "notes",
     "status",

@@ -47,11 +47,13 @@ def _batch_gaia_epoch_tap_query(
     n_workers: int = LTV_WORKERS,
     verbose: bool = False,
 ) -> pd.DataFrame:
-    from astroquery.gaia import Gaia
+    import pyvo
+    from malca.config.config_paths import GAIA_AIP_TAP_URL
 
     if ids_df.empty:
         return pd.DataFrame()
 
+    tap = pyvo.dal.TAPService(GAIA_AIP_TAP_URL)
     results = []
     chunks = [ids_df.iloc[i:i + chunk_size] for i in range(0, len(ids_df), chunk_size)]
 
@@ -70,14 +72,8 @@ def _batch_gaia_epoch_tap_query(
             JOIN {tap_table} AS e
             ON e.source_id = u.source_id
             """
-            job = Gaia.launch_job_async(
-                query,
-                upload_resource=upload_table,
-                upload_table_name="upload_table",
-                verbose=False,
-            )
-            result = job.get_results()
-            return result.to_pandas() if result is not None else pd.DataFrame()
+            result = tap.run_async(query, uploads={"upload_table": upload_table})
+            return result.to_table().to_pandas() if result is not None else pd.DataFrame()
         except Exception as e:
             if verbose:
                 print(f"Gaia epoch query error: {e}")
@@ -284,43 +280,39 @@ def _batch_gaia_epoch_datalink(
     fmt: str = "votable",
     verbose: bool = False,
 ) -> list[dict]:
-    from astroquery.gaia import Gaia
+    """Fetch Gaia epoch photometry via TAP query on epoch_photometry table."""
+    import pyvo
+    from malca.config.config_paths import GAIA_AIP_TAP_URL
 
     if not source_ids:
         return []
 
-    datalink = Gaia.load_data(
-        ids=source_ids,
-        data_release=data_release,
-        data_structure=data_structure,
-        retrieval_type=retrieval_type,
-        valid_data=valid_data,
-        band=band,
-        format=fmt,
-        verbose=verbose,
-    )
+    tap = pyvo.dal.TAPService(GAIA_AIP_TAP_URL)
+    ids_str = ",".join(str(sid) for sid in source_ids)
 
-    rows: list[dict] = []
+    query = f"""
+    SELECT
+        source_id,
+        transit_id,
+        band,
+        time,
+        mag
+    FROM gaiadr3.epoch_photometry
+    WHERE source_id IN ({ids_str})
+    """
 
-    if isinstance(datalink, Table):
-        rows.extend(_summarize_epoch_table(datalink))
-        return rows
+    try:
+        result = tap.run_async(query)
+        epoch_table = result.to_table()
+    except Exception as e:
+        if verbose:
+            print(f"Gaia epoch TAP query error: {e}")
+        return []
 
-    if isinstance(datalink, Mapping):
-        for key, tables in datalink.items():
-            source_id_hint = _parse_source_id_from_key(key)
-            if not isinstance(tables, list):
-                tables = [tables]
-            for table in tables:
-                if isinstance(table, Table):
-                    rows.extend(_summarize_epoch_table(table, source_id_hint=source_id_hint))
-        return rows
+    if epoch_table is None or len(epoch_table) == 0:
+        return []
 
-    if isinstance(datalink, list):
-        for item in datalink:
-            if isinstance(item, Table):
-                rows.extend(_summarize_epoch_table(item))
-    return rows
+    return _summarize_epoch_table(epoch_table)
 
 
 def query_gaia_epoch_photometry_batch(

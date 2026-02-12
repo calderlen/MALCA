@@ -30,17 +30,15 @@ from __future__ import annotations
 from pathlib import Path
 from time import perf_counter
 import re
-import time
 import pandas as pd
 import numpy as np
 from tqdm.auto import tqdm
 from astropy import units as u
 from astropy.coordinates import SkyCoord
-from astroquery.gaia import Gaia
 from astroquery.vizier import Vizier
 
 from malca.config.config_io import PARQUET_CACHE_COMPRESSION, PARQUET_OUTPUT_COMPRESSION
-from malca.config.config_paths import DEFAULT_CACHE_DIR
+from malca.config.config_paths import DEFAULT_CACHE_DIR, GAIA_LOCAL_CATALOG
 from malca.config.config_pipeline import WORKERS
 from malca.config.config_filters import MIN_BAYES_FACTOR, POST_FILTER_MIN_RUN_CAMERAS, POST_FILTER_MIN_RUN_POINTS
 
@@ -122,185 +120,53 @@ def fetch_chen2020_ztf_periodic(
         raise RuntimeError(f"Failed to fetch Chen+2020 catalog from VizieR: {e}")
 
 
-def fetch_gaia_dr3_variables(
-    cache_dir: Path | None = None,
-    force_download: bool = False,
-    show_tqdm: bool = True,
-    row_limit: int = -1,
-) -> pd.DataFrame:
-    """
-    Fetch Gaia DR3 classified variable sources via TAP.
-
-    Queries gaiadr3.vari_classifier_result for sources with classifications.
-
-    Parameters
-    ----------
-    cache_dir : Path | None
-        Directory to cache downloaded catalog (default: ~/.cache/malca/catalogs)
-    force_download : bool
-        Re-download even if cached file exists
-    show_tqdm : bool
-        Show progress messages
-    row_limit : int
-        Max rows to fetch (-1 for all, ~10.5M sources)
-
-    Returns
-    -------
-    pd.DataFrame
-        Catalog with columns: source_id, ra, dec, best_class_name
-    """
-    cache_dir = Path(cache_dir) if cache_dir else DEFAULT_CACHE_DIR
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_file = cache_dir / "gaia_dr3_variables.parquet"
-
-    if cache_file.exists() and not force_download:
-        if show_tqdm:
-            tqdm.write(f"[fetch_gaia_dr3_variables] Loading cached catalog from {cache_file}")
-        return pd.read_parquet(cache_file)
-
-    if show_tqdm:
-        tqdm.write("[fetch_gaia_dr3_variables] Querying Gaia DR3 via TAP (this may take several minutes)...")
-
-    try:
-        limit_clause = f"TOP {row_limit}" if row_limit > 0 else ""
-        query = f"""
-        SELECT {limit_clause}
-            v.source_id, g.ra, g.dec, v.best_class_name
-        FROM gaiadr3.vari_classifier_result AS v
-        JOIN gaiadr3.gaia_source AS g ON v.source_id = g.source_id
-        """
-
-        job = Gaia.launch_job_async(query)
-        result = job.get_results()
-        df = result.to_pandas()
-
-        df = df.rename(columns={
-            "SOURCE_ID": "source_id",
-            "RA": "ra",
-            "DEC": "dec",
-            "BEST_CLASS_NAME": "best_class_name",
-        })
-
-        df.to_parquet(cache_file, index=False, compression=PARQUET_CACHE_COMPRESSION)
-        if show_tqdm:
-            tqdm.write(f"[fetch_gaia_dr3_variables] Cached {len(df)} sources to {cache_file}")
-
-        return df
-
-    except Exception as e:
-        raise RuntimeError(f"Failed to fetch Gaia DR3 variables: {e}")
-
-
 def fetch_gaia_dr3_ruwe(
     source_ids: list[int] | None = None,
-    cache_dir: Path | None = None,
     show_tqdm: bool = True,
-    batch_size: int = 10000,
-    throttle_seconds: float = 1.0,
+    **_kwargs,
 ) -> pd.DataFrame:
     """
-    Fetch Gaia DR3 RUWE values for specific sources.
+    Look up Gaia DR3 RUWE values from the local Gaia catalog.
 
-    Results are cached locally to avoid repeated queries.
+    The catalog is produced by ``malca gaia-fetch``.  No network call is made.
 
     Parameters
     ----------
     source_ids : list[int] | None
-        Gaia source IDs to query
-    cache_dir : Path | None
-        Cache directory (default: ~/.cache/malca/catalogs)
+        Gaia source IDs to look up
     show_tqdm : bool
         Show progress messages
-    batch_size : int
-        Number of source IDs per query batch (default: 10000)
-    throttle_seconds : float
-        Delay between batches to avoid rate limiting (default: 1.0)
 
     Returns
     -------
     pd.DataFrame
-        Catalog with columns: source_id, ra, dec, ruwe
+        Subset with columns: source_id, ra, dec, ruwe
     """
-    cache_dir = Path(cache_dir) if cache_dir else DEFAULT_CACHE_DIR
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_file = cache_dir / "gaia_dr3_ruwe_cache.parquet"
-
     if source_ids is None or len(source_ids) == 0:
         raise ValueError("Must provide source_ids")
 
-    # Load existing cache
-    cached_df = pd.DataFrame()
-    if cache_file.exists():
-        try:
-            cached_df = pd.read_parquet(cache_file)
-            if show_tqdm:
-                tqdm.write(f"[fetch_gaia_dr3_ruwe] Loaded {len(cached_df)} cached RUWE values")
-        except Exception as e:
-            if show_tqdm:
-                tqdm.write(f"[fetch_gaia_dr3_ruwe] Warning: Could not load cache: {e}")
-
-    # Determine which IDs need to be queried
-    requested_ids = set(int(sid) for sid in source_ids)
-    if not cached_df.empty and "source_id" in cached_df.columns:
-        cached_ids = set(cached_df["source_id"].astype(int))
-        ids_to_query = list(requested_ids - cached_ids)
-    else:
-        ids_to_query = list(requested_ids)
+    catalog_path = GAIA_LOCAL_CATALOG if GAIA_LOCAL_CATALOG.exists() else None
+    if catalog_path is None:
+        raise FileNotFoundError(
+            "Local Gaia catalog not found. Run:\n"
+            "  malca gaia-fetch --input <your_candidates.parquet>\n"
+            "to download Gaia DR3 data before running post-filter RUWE validation."
+        )
 
     if show_tqdm:
-        tqdm.write(f"[fetch_gaia_dr3_ruwe] {len(requested_ids) - len(ids_to_query)} already cached, {len(ids_to_query)} to query")
+        tqdm.write(f"[fetch_gaia_dr3_ruwe] Loading local Gaia catalog from {catalog_path}")
 
-    # Query missing IDs
-    if ids_to_query:
-        try:
-            new_results = []
-            n_batches = (len(ids_to_query) + batch_size - 1) // batch_size
+    gaia_df = pd.read_parquet(catalog_path)
+    if "source_id" not in gaia_df.columns or "ruwe" not in gaia_df.columns:
+        raise ValueError(f"Local Gaia catalog at {catalog_path} missing required columns (source_id, ruwe).")
 
-            for i in range(0, len(ids_to_query), batch_size):
-                batch = ids_to_query[i:i + batch_size]
-                id_list = ",".join(str(sid) for sid in batch)
-                query = f"""
-                SELECT source_id, ra, dec, ruwe
-                FROM gaiadr3.gaia_source
-                WHERE source_id IN ({id_list})
-                """
-                job = Gaia.launch_job(query)
-                result = job.get_results().to_pandas()
-                new_results.append(result)
+    gaia_df["source_id"] = gaia_df["source_id"].astype(int)
+    requested_ids = set(int(sid) for sid in source_ids)
+    result_df = gaia_df[gaia_df["source_id"].isin(requested_ids)][["source_id", "ra", "dec", "ruwe"]].copy()
 
-                batch_num = i // batch_size + 1
-                if show_tqdm:
-                    tqdm.write(f"[fetch_gaia_dr3_ruwe] Fetched batch {batch_num}/{n_batches} ({len(result)} results)")
+    if show_tqdm:
+        tqdm.write(f"[fetch_gaia_dr3_ruwe] Matched {len(result_df)}/{len(requested_ids)} sources from local catalog")
 
-                # Throttle between batches (except last)
-                if batch_num < n_batches and throttle_seconds > 0:
-                    time.sleep(throttle_seconds)
-
-            # Combine new results
-            if new_results:
-                new_df = pd.concat(new_results, ignore_index=True)
-                new_df.columns = new_df.columns.str.lower()
-
-                # Update cache
-                if not cached_df.empty:
-                    cached_df = pd.concat([cached_df, new_df], ignore_index=True)
-                    cached_df = cached_df.drop_duplicates(subset=["source_id"], keep="last")
-                else:
-                    cached_df = new_df
-
-                # Save updated cache
-                cached_df.to_parquet(cache_file, index=False, compression=PARQUET_CACHE_COMPRESSION)
-                if show_tqdm:
-                    tqdm.write(f"[fetch_gaia_dr3_ruwe] Updated cache with {len(new_df)} new entries (total: {len(cached_df)})")
-
-        except Exception as e:
-            raise RuntimeError(f"Failed querying Gaia RUWE batches: {e}")
-
-    # Return only requested IDs
-    if cached_df.empty:
-        return pd.DataFrame(columns=["source_id", "ra", "dec", "ruwe"])
-
-    result_df = cached_df[cached_df["source_id"].astype(int).isin(requested_ids)].copy()
     return result_df.reset_index(drop=True)
 
 
@@ -1118,6 +984,60 @@ def validate_periodic_catalog(
     return df_filtered
 
 
+def annotate_phase_plot_candidates(
+    df: pd.DataFrame,
+    *,
+    max_sig: float = 0.01,
+    min_power: float | None = 0.3,
+    allow_alias: bool = False,
+) -> pd.DataFrame:
+    """Annotate periodic candidates that are eligible for phase-fold plotting.
+
+    Eligibility uses bootstrap LSP significance and optional power thresholds.
+    This is a metadata-only annotation step (no rows are filtered).
+    """
+    out = df.copy()
+
+    out["phase_plot_ready"] = False
+    out["phase_period_days"] = np.nan
+    out["phase_source"] = ""
+    out["phase_quality_score"] = np.nan
+
+    if "lsp_period" not in out.columns or "lsp_bootstrap_sig" not in out.columns:
+        return out
+
+    period = pd.to_numeric(out["lsp_period"], errors="coerce")
+    sig = pd.to_numeric(out["lsp_bootstrap_sig"], errors="coerce")
+
+    ready = period.notna() & np.isfinite(period) & (period > 0)
+    ready &= sig.notna() & np.isfinite(sig) & (sig <= float(max_sig))
+
+    if min_power is not None:
+        if "lsp_power" not in out.columns:
+            ready &= False
+        else:
+            power = pd.to_numeric(out["lsp_power"], errors="coerce")
+            ready &= power.notna() & np.isfinite(power) & (power >= float(min_power))
+
+    if not allow_alias and "lsp_is_alias" in out.columns:
+        alias = out["lsp_is_alias"].fillna(False).astype(bool)
+        ready &= ~alias
+
+    if "periodicity_score" in out.columns:
+        quality = pd.to_numeric(out["periodicity_score"], errors="coerce")
+    else:
+        min_p = 1e-12
+        with np.errstate(invalid="ignore"):
+            quality = -np.log10(np.clip(sig.to_numpy(dtype=float), min_p, 1.0))
+        quality = pd.Series(quality, index=out.index)
+
+    out.loc[ready, "phase_plot_ready"] = True
+    out.loc[ready, "phase_period_days"] = period[ready].astype(float)
+    out.loc[ready, "phase_source"] = "lsp"
+    out.loc[ready, "phase_quality_score"] = quality[ready].astype(float)
+    return out
+
+
 # =============================================================================
 # Main orchestration
 # =============================================================================
@@ -1150,6 +1070,9 @@ def apply_post_filters(
     periodicity_flag_only: bool = True,
     periodicity_workers: int = 1,
     periodicity_checkpoint_dir: Path | None = None,
+    phase_plot_max_sig: float = 0.01,
+    phase_plot_min_power: float | None = 0.3,
+    phase_plot_allow_alias: bool = False,
     # Validation: Gaia RUWE
     apply_gaia_ruwe_validation: bool = True,
     gaia_max_ruwe: float = 1.4,
@@ -1277,6 +1200,14 @@ def apply_post_filters(
                     pbar.set_postfix_str("")
                 pbar.update(1)
 
+    # Phase-fold plotting metadata (annotation only; no filtering)
+    df_filtered = annotate_phase_plot_candidates(
+        df_filtered,
+        max_sig=phase_plot_max_sig,
+        min_power=phase_plot_min_power,
+        allow_alias=phase_plot_allow_alias,
+    )
+
     # Add summary column
     failed_cols = [c for c in df_filtered.columns if c.startswith("failed_")]
     if failed_cols:
@@ -1367,6 +1298,12 @@ Example usage:
                         help="Number of parallel workers for LSP validation (default: 10)")
     parser.add_argument("--checkpoint-dir", type=Path, default=None,
                         help="Directory for checkpoints (enables resume on restart)")
+    parser.add_argument("--phase-plot-max-sig", type=float, default=0.01,
+                        help="Require lsp_bootstrap_sig <= this for phase plots (default: 0.01)")
+    parser.add_argument("--phase-plot-min-power", type=float, default=0.3,
+                        help="Require lsp_power >= this for phase plots (default: 0.3)")
+    parser.add_argument("--phase-plot-allow-alias", action="store_true",
+                        help="Allow alias periods for phase plots (default: disabled)")
 
 
     # Gaia RUWE validation parameters
@@ -1501,6 +1438,9 @@ Example usage:
         periodicity_flag_only=not args.periodicity_reject,
         periodicity_workers=args.workers,
         periodicity_checkpoint_dir=args.checkpoint_dir.expanduser() if args.checkpoint_dir else (detect_run / "checkpoints" if args.detect_run and args.apply_periodicity_validation else None),
+        phase_plot_max_sig=args.phase_plot_max_sig,
+        phase_plot_min_power=args.phase_plot_min_power,
+        phase_plot_allow_alias=args.phase_plot_allow_alias,
         # Gaia RUWE validation
         apply_gaia_ruwe_validation=not args.skip_gaia_ruwe_validation,
         gaia_max_ruwe=args.gaia_max_ruwe,
@@ -1540,6 +1480,9 @@ Example usage:
                     "apply_score": args.apply_score_filter,
                     "apply_periodicity_validation": args.apply_periodicity_validation,
                     "periodicity_reject": args.periodicity_reject if args.apply_periodicity_validation else None,
+                    "phase_plot_max_sig": args.phase_plot_max_sig,
+                    "phase_plot_min_power": args.phase_plot_min_power,
+                    "phase_plot_allow_alias": args.phase_plot_allow_alias,
                     "apply_gaia_ruwe_validation": not args.skip_gaia_ruwe_validation,
                     "apply_periodic_catalog_validation": not args.skip_periodic_catalog_validation,
                     "min_bayes_factor": args.min_bayes_factor,

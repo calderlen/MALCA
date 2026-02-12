@@ -18,11 +18,11 @@ import plotly.io as pio
 
 from malca.review.store import (
     DEFAULT_DB_PATH,
-    INTEREST_REASON_TAGS,
     db_connect,
     get_review,
     save_review,
     find_plot_image,
+    find_phase_plot_image,
     load_app_state,
     save_app_state,
     import_candidates,
@@ -37,10 +37,11 @@ from malca.review.metadata import (
 )
 from malca.review.keyboard import (
     handle_key_action, HELP_TEXT,
-    REASON_KEY_MAP, REASON_PREFIX_KEY,
     CLASS_KEY_MAP, CLASS_PREFIX_KEY,
     PREFIX_KEYS,
 )
+
+CLASS_BADGE_TAGS = list(CLASS_KEY_MAP.values()) + ['not_real']
 from malca.review.session import create_queue_data_dict
 from malca.review.interactive_plot import build_interactive_lightcurve_figure
 from malca.config.config_paths import VSX_CROSSMATCH_PATH, GAIA_CACHE_FILE
@@ -165,9 +166,28 @@ app.index_string = '''
             border-bottom: 1px solid #555;
             padding: 6px 20px;
             display: flex;
-            justify-content: space-between;
+            justify-content: flex-start;
             align-items: center;
+            gap: 14px;
             font-size: 11px;
+        }
+        .header-key-info {
+            flex: 1;
+            min-width: 0;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .header-key-info .item {
+            color: #8fb1c8;
+            font-size: 10px;
+            white-space: nowrap;
+        }
+        .header-key-info .item.path {
+            flex: 1;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
         .plot-container {
             flex: 1;
@@ -221,6 +241,16 @@ app.index_string = '''
             border-color: rgba(133, 171, 196, 0.9);
             background: rgba(12, 26, 35, 0.96);
         }
+        .status-splitter {
+            height: 9px;
+            flex: 0 0 9px;
+            margin: 0;
+        }
+        .status-splitter::after {
+            font-size: 9px;
+            letter-spacing: 1.5px;
+            padding: 0 5px;
+        }
         .plot-toolbar {
             display: flex;
             align-items: center;
@@ -261,7 +291,7 @@ app.index_string = '''
         }
         .plot-frame {
             flex: 1;
-            min-height: 340px;
+            min-height: 260px;
             border: 1px solid rgba(84, 118, 140, 0.35);
             border-radius: 10px;
             background: radial-gradient(circle at 20% 0%, rgba(17, 39, 54, 0.22), rgba(0, 0, 0, 0.05) 45%, rgba(0, 0, 0, 0));
@@ -286,10 +316,36 @@ app.index_string = '''
         .plot-status {
             border: 1px solid rgba(102, 126, 143, 0.45);
             border-radius: 8px;
-            padding: 8px 10px;
+            padding: 4px 8px;
             background: rgba(9, 18, 25, 0.82);
             color: #d4dfeb;
-            font-size: 11px;
+            font-size: 10px;
+            line-height: 1.2;
+            overflow: hidden;
+        }
+        .plot-status .status-line {
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .plot-status details {
+            margin-top: 2px;
+        }
+        .plot-status summary {
+            cursor: pointer;
+            color: #8fb1c8;
+            font-size: 10px;
+            user-select: none;
+        }
+        .plot-status ul {
+            margin: 3px 0 0 14px;
+            padding: 0;
+        }
+        .plot-status li {
+            margin: 1px 0;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
         .plot-status.warn {
             border-color: rgba(186, 144, 44, 0.7);
@@ -311,6 +367,25 @@ app.index_string = '''
             border-radius: 999px;
             padding: 2px 8px;
             background: rgba(11, 23, 31, 0.7);
+        }
+        .sidebar-camera-actions {
+            display: flex;
+            gap: 5px;
+            flex-wrap: wrap;
+            margin-bottom: 4px;
+        }
+        .sidebar-camera-actions .action-btn {
+            margin-right: 0;
+            padding: 1px 6px;
+            font-size: 10px;
+        }
+        .sidebar-camera-checklist label {
+            color: #cad9e5 !important;
+            margin-right: 8px;
+            margin-bottom: 2px;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
         }
         .stat-card {
             padding: 6px 8px;
@@ -385,9 +460,8 @@ app.index_string = '''
         }
         .review-form {
             background-color: #0a0a0a;
-            padding: 6px 15px;
+            padding: 4px 12px;
             border-top: 1px solid #555;
-            max-height: 200px;
             overflow-y: auto;
             font-size: 11px;
         }
@@ -440,8 +514,13 @@ app.index_string = '''
             background-color: #003366;
         }
         .notification {
-            color: #0f0;
+            color: #7fd6a8;
             font-size: 11px;
+            max-width: 56vw;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            opacity: 0.95;
         }
         .help-link {
             color: #0af;
@@ -453,11 +532,15 @@ app.index_string = '''
             text-decoration: underline;
         }
         .Select-control {
-            background-color: #1a1a1a !important;
-            border-color: #444 !important;
+            background-color: #0f1418 !important;
+            border-color: #2f4658 !important;
+            min-height: 26px !important;
+            height: 26px !important;
+            box-shadow: none !important;
         }
         .Select-menu-outer {
-            background-color: #1a1a1a !important;
+            background-color: #0f1418 !important;
+            border-color: #2f4658 !important;
         }
         input, textarea {
             background-color: #1a1a1a !important;
@@ -466,12 +549,30 @@ app.index_string = '''
         }
         /* Dropdown styling */
         .Select-control, .Select-menu-outer, .Select-menu, .Select-option {
-            background-color: #1a1a1a !important;
-            color: #e0e0e0 !important;
-            border-color: #555 !important;
+            background-color: #0f1418 !important;
+            color: #d5e3ef !important;
+            border-color: #2f4658 !important;
         }
         .Select-placeholder, .Select-value-label {
-            color: #aaa !important;
+            color: #9db4c7 !important;
+            font-size: 10px !important;
+            line-height: 24px !important;
+        }
+        .Select-input {
+            height: 24px !important;
+        }
+        .Select-arrow-zone {
+            padding-right: 5px !important;
+        }
+        .Select-arrow {
+            border-top-color: #9db4c7 !important;
+            border-left-color: transparent !important;
+            border-right-color: transparent !important;
+            opacity: 1 !important;
+        }
+        .is-open > .Select-control .Select-arrow {
+            border-top-color: transparent !important;
+            border-bottom-color: #b8cede !important;
         }
         /* Checkbox and label styling */
         label, .form-label {
@@ -483,19 +584,70 @@ app.index_string = '''
             color: #e0e0e0 !important;
         }
         .dash-dropdown .Select-control {
-            background-color: #1a1a1a !important;
-            border-color: #444 !important;
+            background-color: #0f1418 !important;
+            border-color: #2f4658 !important;
         }
         .dash-dropdown .Select-menu-outer {
-            background-color: #1a1a1a !important;
-            border-color: #444 !important;
+            background-color: #0f1418 !important;
+            border-color: #2f4658 !important;
         }
         .dash-dropdown .Select-option {
-            background-color: #1a1a1a !important;
-            color: #e0e0e0 !important;
+            background-color: #10171d !important;
+            color: #dce8f2 !important;
         }
         .dash-dropdown .Select-option:hover {
-            background-color: #2a2a2a !important;
+            background-color: #1d2d3a !important;
+            color: #fff !important;
+        }
+        .dash-dropdown {
+            background-color: #0f1418 !important;
+            color: #dce8f2 !important;
+            border: 1px solid #2f4658 !important;
+            border-radius: 4px !important;
+            min-height: 24px !important;
+            height: 24px !important;
+            padding: 0 6px !important;
+            box-shadow: none !important;
+        }
+        .dash-dropdown-trigger {
+            min-height: 24px !important;
+            height: 24px !important;
+            background-color: #0f1418 !important;
+        }
+        .dash-dropdown-value,
+        .dash-dropdown-value-item {
+            color: #dce8f2 !important;
+            font-size: 10px !important;
+            line-height: 20px !important;
+        }
+        .dash-dropdown-content,
+        .dash-dropdown-options,
+        .dash-options-list,
+        .dash-dropdown-search-container {
+            background-color: #0f1418 !important;
+            border: 1px solid #2f4658 !important;
+            color: #dce8f2 !important;
+        }
+        .dash-dropdown-search {
+            background-color: #0f1418 !important;
+            color: #dce8f2 !important;
+            border: 1px solid #2f4658 !important;
+            font-size: 10px !important;
+            min-height: 22px !important;
+        }
+        .dash-dropdown-option,
+        .dash-options-list-option {
+            background-color: #10171d !important;
+            color: #dce8f2 !important;
+            font-size: 10px !important;
+            padding: 3px 8px !important;
+            min-height: 22px !important;
+        }
+        .dash-dropdown-option:hover,
+        .dash-options-list-option:hover,
+        .dash-dropdown-option.selected,
+        .dash-options-list-option.selected {
+            background-color: #1d2d3a !important;
             color: #fff !important;
         }
         /* Checklist items */
@@ -503,6 +655,10 @@ app.index_string = '''
             color: #e0e0e0 !important;
         }
         .dash-checklist input[type="checkbox"] {
+            accent-color: #0af;
+        }
+        .dash-radioitems input[type="radio"],
+        input[type="radio"] {
             accent-color: #0af;
         }
         /* Input placeholders */
@@ -620,26 +776,36 @@ def _render_stat_cards(stat_rows: list[tuple[str, str]]) -> list:
 
 def _render_plot_status_panel(status: str, message: str, warnings: list[str] | None) -> html.Div:
     """Render native plot status and warnings panel."""
-    warnings = warnings or []
+    warnings = [str(w) for w in (warnings or []) if str(w).strip()]
     cls = 'plot-status'
     if status in {'missing-file', 'missing-columns', 'empty-after-filter', 'empty-camera-selection', 'error'}:
         cls += ' error'
     elif warnings:
         cls += ' warn'
 
-    if not message and not warnings:
-        return html.Div('Native interactive plot active.', className=cls)
+    base_message = str(message or '').strip()
+    if not base_message:
+        base_message = 'Native interactive plot active.'
 
-    lines = [html.Div(message)] if message else []
-    for w in warnings:
-        lines.append(html.Div(f"- {w}"))
-    return html.Div(lines, className=cls)
+    headline = html.Div(base_message, className='status-line')
+    if not warnings:
+        return html.Div([headline], className=cls)
+
+    warning_items = [html.Li(w) for w in warnings[:8]]
+    if len(warnings) > 8:
+        warning_items.append(html.Li(f"...and {len(warnings) - 8} more"))
+
+    details = html.Details([
+        html.Summary(f"{len(warnings)} warning(s)"),
+        html.Ul(warning_items),
+    ])
+    return html.Div([headline, details], className=cls)
 
 
 def _render_camera_diag_panel(camera_diagnostics: dict[str, list[str]], filtered_values: list[str] | None) -> list:
     """Render explainable camera filtering tags."""
     if not filtered_values:
-        return [html.Div('No cameras filtered.', className='item')]
+        return []
 
     chips = []
     for cam in sorted(filtered_values):
@@ -831,11 +997,13 @@ def _make_filter_group(name: str, items: list, *, default_open: bool = False):
             children.append(_num_range_filter(col))
         elif ftype == 'text':
             children.append(_text_filter(col))
-    attrs = {'open': True} if default_open else {}
-    return html.Details([
+    block = [
         html.Summary(name),
         html.Div(children, style={'padding-left': '6px'}),
-    ], **attrs)
+    ]
+    if default_open:
+        return html.Details(block, open='open')
+    return html.Details(block)
 
 
 # ---------------------------------------------------------------------------
@@ -1037,7 +1205,6 @@ def create_layout():
         dcc.Store(id='queue-data'),
         dcc.Store(id='current-index', data=0),
         dcc.Store(id='current-score', data=0),
-        dcc.Store(id='interest-reasons-store', data=[]),
         dcc.Store(id='event-class-store', data='unclassified'),
         dcc.Store(id='pending-prefix', data=''),
         dcc.Store(id='needs-followup-store', data=False),
@@ -1051,6 +1218,7 @@ def create_layout():
         dcc.Store(id='plot-defaults-initialized', data=False),
         dcc.Store(id='run-config-json-store', data=''),
         dcc.Store(id='metadata-resize-init', data=0),
+        dcc.Store(id='status-resize-init', data=0),
         dcc.Interval(id='plot-render-debounce', interval=180, n_intervals=0),
         dcc.Download(id='plot-export-download'),
         dcc.Download(id='run-config-download'),
@@ -1117,6 +1285,22 @@ def create_layout():
 
             html.Hr(),
 
+            html.Div('Native Cameras', className='section-title'),
+            html.Div([
+                html.Button('All', id='cams-all-btn', n_clicks=0, className='action-btn'),
+                html.Button('Clear', id='cams-clear-btn', n_clicks=0, className='action-btn'),
+                html.Button('Invert', id='cams-invert-btn', n_clicks=0, className='action-btn'),
+            ], className='sidebar-camera-actions'),
+            dcc.Checklist(
+                id='camera-checklist',
+                options=[],
+                value=[],
+                className='sidebar-camera-checklist',
+                style={'margin-bottom': '6px'},
+            ),
+
+            html.Hr(),
+
             html.Div('Import', className='section-title'),
             dcc.Input(id='import-path', placeholder='Candidates file path', type='text',
                      style=_inp_style),
@@ -1170,6 +1354,12 @@ def create_layout():
             # Header bar
             html.Div([
                 html.Span(id='progress-text', style={'color': '#0af', 'font-size': '11px'}),
+                html.Div([
+                    html.Span(id='header-asas-sn-id', className='item'),
+                    html.Span(id='header-path', className='item path'),
+                    html.Span(id='header-gaia-id', className='item'),
+                ], className='header-key-info'),
+                html.Span(id='notification', className='notification'),
                 html.A('[?] Shortcuts', id='help-link', className='help-link'),
             ], className='header-bar'),
 
@@ -1206,19 +1396,7 @@ def create_layout():
                         inline=True,
                     ),
                     html.Button('Reset', id='plot-reset-btn', n_clicks=0, className='compact-btn'),
-                    html.Button('All cams', id='cams-all-btn', n_clicks=0, className='compact-btn'),
-                    html.Button('Clear cams', id='cams-clear-btn', n_clicks=0, className='compact-btn'),
-                    html.Button('Invert cams', id='cams-invert-btn', n_clicks=0, className='compact-btn'),
-                    html.Span('Cameras:', style={'color': '#86a7bf'}),
-                    dcc.Checklist(
-                        id='camera-checklist',
-                        options=[],
-                        value=[],
-                        inline=True,
-                    ),
-                    html.Span('Export:', className='label-chip'),
-                    html.Button('PNG', id='export-native-png', n_clicks=0, className='compact-btn'),
-                    html.Button('SVG', id='export-native-svg', n_clicks=0, className='compact-btn'),
+                    html.Button('Export', id='export-plot', n_clicks=0, className='compact-btn'),
                     html.Span(id='repro-badge', className='label-chip', style={'margin-left': '6px'}),
                 ], className='plot-toolbar'),
                 html.Div([
@@ -1239,6 +1417,11 @@ def create_layout():
                         style={'display': 'none', 'width': '100%', 'height': '100%'},
                     ),
                 ], className='plot-frame'),
+                html.Div(
+                    id='status-splitter',
+                    className='panel-splitter status-splitter',
+                    title='Drag to resize status panel',
+                ),
                 html.Div(id='plot-status-panel', className='plot-status'),
                 html.Div(id='camera-filter-panel', className='camera-diag'),
                 html.Div(id='plot-stats-cards', className='plot-stats'),
@@ -1275,19 +1458,6 @@ def create_layout():
                     for i in range(6)
                 ], style={'display': 'flex', 'align-items': 'center', 'margin-bottom': '6px'}),
 
-                # Reason toggle row (clickable buttons, [R]+key prefix)
-                html.Div([
-                    html.Span('Reasons: ', style={'color': '#aaa', 'margin-right': '8px', 'font-size': '11px'}),
-                ] + [
-                    html.Button(
-                        f'[R] [{key.upper()}]: {tag.replace("_", " ")}',
-                        id=f'reason-badge-{tag}',
-                        n_clicks=0,
-                        className='badge-btn',
-                    )
-                    for key, tag in REASON_KEY_MAP.items()
-                ], style={'display': 'flex', 'align-items': 'center', 'flex-wrap': 'wrap', 'margin-bottom': '6px'}),
-
                 # Event class row (clickable buttons, [C]+key prefix)
                 html.Div([
                     html.Span('Class: ', style={'color': '#aaa', 'margin-right': '8px', 'font-size': '11px'}),
@@ -1300,6 +1470,13 @@ def create_layout():
                         className='badge-btn',
                     )
                     for key, tag in CLASS_KEY_MAP.items()
+                ] + [
+                    html.Button(
+                        '[X]: not real',
+                        id='class-badge-not_real',
+                        n_clicks=0,
+                        className='badge-btn',
+                    )
                 ], style={'display': 'flex', 'align-items': 'center', 'flex-wrap': 'wrap', 'margin-bottom': '6px'}),
 
                 # Action row: Save, Done, Followup, Pass, Status, Notification
@@ -1310,21 +1487,24 @@ def create_layout():
                     html.Span(id='followup-indicator', style={'margin-right': '10px', 'font-size': '11px'}),
                     html.Span(id='pass-indicator', style={'color': '#888', 'margin-right': '10px', 'font-size': '11px'}),
                     html.Span(id='status-indicator', style={'color': '#888', 'margin-right': '10px', 'font-size': '11px'}),
-                    html.Div(id='notification', className='notification', style={'display': 'inline-block', 'margin-left': '10px'}),
                 ], style={'display': 'flex', 'align-items': 'center'}),
             ], className='control-bar'),
 
             # Notes (M to enter, Esc to exit)
             html.Div([
-                html.Label('[M] Notes ([Esc] to exit):', style={'color': '#aaa', 'display': 'block', 'margin-bottom': '3px', 'font-size': '11px'}),
-                dcc.Textarea(id='notes', style={'width': '100%', 'height': '50px', 'font-size': '11px'}),
+                dcc.Input(
+                    id='notes',
+                    type='text',
+                    placeholder='[M] Notes - press Esc to exit',
+                    style={'width': '100%', 'font-size': '11px', 'height': '26px'},
+                ),
             ], className='review-form'),
 
             # Recent activity
             html.Div([
                 html.Div([
-                    html.Span('[A] Activity', style={'color': '#0af', 'font-size': '11px', 'cursor': 'pointer'}),
-                ], id='activity-toggle', style={'padding': '5px 20px', 'background-color': '#0a0a0a', 'border-top': '1px solid #555', 'cursor': 'pointer'}),
+                    html.Span('[A] Activity', style={'color': '#0af', 'font-size': '10px', 'cursor': 'pointer'}),
+                ], id='activity-toggle', style={'padding': '2px 12px', 'background-color': '#0a0a0a', 'border-top': '1px solid #555', 'cursor': 'pointer', 'line-height': '1.2'}),
                 html.Div(id='recent-activity', style={'display': 'none'}),  # Hidden by default
             ], style={'border-top': '1px solid #555'}),
 
@@ -1568,6 +1748,142 @@ app.clientside_callback(
 )
 
 
+app.clientside_callback(
+    """
+    function(_tick) {
+        var splitter = document.getElementById('status-splitter');
+        var statusPanel = document.getElementById('plot-status-panel');
+        if (!splitter || !statusPanel) {
+            return window.dash_clientside.no_update;
+        }
+
+        var storageKey = 'malca.review.plot_status.height.v1';
+        var minHeight = 16;
+        var defaultHeight = 36;
+
+        var computeMaxHeight = function() {
+            return Math.max(64, Math.floor(window.innerHeight * 0.42));
+        };
+
+        var clampHeight = function(value) {
+            var maxHeight = computeMaxHeight();
+            var numeric = Number(value);
+            if (!isFinite(numeric)) {
+                numeric = defaultHeight;
+            }
+            if (numeric < minHeight) {
+                numeric = minHeight;
+            }
+            if (numeric > maxHeight) {
+                numeric = maxHeight;
+            }
+            return Math.round(numeric);
+        };
+
+        var applyHeight = function(value, persist) {
+            var h = clampHeight(value);
+            statusPanel.style.height = String(h) + 'px';
+            statusPanel.style.flex = '0 0 auto';
+            if (persist) {
+                try {
+                    window.localStorage.setItem(storageKey, String(h));
+                } catch (e) {
+                    // ignore storage failures
+                }
+            }
+            return h;
+        };
+
+        if (!window.__malcaStatusSplitterAttached) {
+            var drag = {
+                active: false,
+                startY: 0,
+                startHeight: 0,
+                pointerId: null,
+            };
+
+            var onPointerMove = function(e) {
+                if (!drag.active) {
+                    return;
+                }
+                var nextHeight = drag.startHeight - (e.clientY - drag.startY);
+                applyHeight(nextHeight, false);
+                e.preventDefault();
+            };
+
+            var stopDrag = function(e) {
+                if (!drag.active) {
+                    return;
+                }
+                drag.active = false;
+                splitter.classList.remove('dragging');
+                window.removeEventListener('pointermove', onPointerMove);
+                window.removeEventListener('pointerup', stopDrag);
+                window.removeEventListener('pointercancel', stopDrag);
+                if (drag.pointerId !== null && splitter.releasePointerCapture) {
+                    try {
+                        splitter.releasePointerCapture(drag.pointerId);
+                    } catch (err) {
+                        // ignore capture-release failures
+                    }
+                }
+                drag.pointerId = null;
+                applyHeight(statusPanel.getBoundingClientRect().height, true);
+                if (e) {
+                    e.preventDefault();
+                }
+            };
+
+            splitter.addEventListener('pointerdown', function(e) {
+                drag.active = true;
+                drag.startY = e.clientY;
+                drag.startHeight = statusPanel.getBoundingClientRect().height;
+                drag.pointerId = (typeof e.pointerId === 'number') ? e.pointerId : null;
+                splitter.classList.add('dragging');
+                if (drag.pointerId !== null && splitter.setPointerCapture) {
+                    try {
+                        splitter.setPointerCapture(drag.pointerId);
+                    } catch (err) {
+                        // ignore capture failures
+                    }
+                }
+                window.addEventListener('pointermove', onPointerMove);
+                window.addEventListener('pointerup', stopDrag);
+                window.addEventListener('pointercancel', stopDrag);
+                e.preventDefault();
+            });
+
+            window.addEventListener('resize', function() {
+                applyHeight(statusPanel.getBoundingClientRect().height, false);
+            });
+
+            window.__malcaStatusSplitterAttached = true;
+        }
+
+        var saved = null;
+        try {
+            saved = window.localStorage.getItem(storageKey);
+        } catch (e) {
+            saved = null;
+        }
+        var initialHeight = defaultHeight;
+        if (saved !== null && saved !== '') {
+            var parsed = parseInt(saved, 10);
+            if (!isNaN(parsed)) {
+                initialHeight = parsed;
+            }
+        }
+        applyHeight(initialHeight, false);
+
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output('status-resize-init', 'data'),
+    Input('keyboard-init', 'n_intervals'),
+    prevent_initial_call=False,
+)
+
+
 # Toggle sidebar
 @app.callback(
     [Output('sidebar', 'className'),
@@ -1668,7 +1984,7 @@ def load_queue(refresh_clicks, import_trigger, *state_values):
     return queue_data
 
 
-def _do_save(candidate_id, score, interest_reasons, event_class, needs_followup, notes, event_type):
+def _do_save(candidate_id, score, event_class, needs_followup, notes, event_type):
     """Shared save helper.  Auto-sets status and auto-increments review_pass."""
     conn = db_connect(Path(DB_PATH))
     review = get_review(conn, candidate_id)
@@ -1678,7 +1994,6 @@ def _do_save(candidate_id, score, interest_reasons, event_class, needs_followup,
         conn,
         candidate_id=candidate_id,
         interest_score=score,
-        interest_reason=interest_reasons or [],
         event_class=event_class or 'unclassified',
         review_pass=new_pass,
         notes=notes or '',
@@ -1689,12 +2004,11 @@ def _do_save(candidate_id, score, interest_reasons, event_class, needs_followup,
     return new_pass, status
 
 
-# Keyboard handler (prefix-state machine for class/reason)
+# Keyboard handler (prefix-state machine for class)
 @app.callback(
     [Output('current-index', 'data'),
      Output('notification', 'children'),
      Output('current-score', 'data', allow_duplicate=True),
-     Output('interest-reasons-store', 'data', allow_duplicate=True),
      Output('needs-followup-store', 'data', allow_duplicate=True),
      Output('review-pass-store', 'data', allow_duplicate=True),
      Output('event-class-store', 'data', allow_duplicate=True),
@@ -1703,7 +2017,6 @@ def _do_save(candidate_id, score, interest_reasons, event_class, needs_followup,
     [State('current-index', 'data'),
      State('queue-data', 'data'),
      State('current-score', 'data'),
-     State('interest-reasons-store', 'data'),
      State('event-class-store', 'data'),
      State('pending-prefix', 'data'),
      State('needs-followup-store', 'data'),
@@ -1711,9 +2024,9 @@ def _do_save(candidate_id, score, interest_reasons, event_class, needs_followup,
     prevent_initial_call=True
 )
 def handle_keyboard(key_value, current_idx, queue_data, current_score,
-                    interest_reasons, event_class, pending_prefix, needs_followup, notes):
+                    event_class, pending_prefix, needs_followup, notes):
     """Handle keyboard input."""
-    NO = (no_update,) * 8  # shorthand for all-no_update
+    NO = (no_update,) * 7  # shorthand for all-no_update
 
     key = _keyboard_key(key_value)
     if not key or not queue_data:
@@ -1725,53 +2038,47 @@ def handle_keyboard(key_value, current_idx, queue_data, current_score,
 
     queue_size = queue_data['queue_size']
     if queue_size == 0:
-        return no_update, "Queue is empty", *([no_update] * 6)
+        return no_update, "Queue is empty", *([no_update] * 5)
 
     candidate_id = (queue_data['candidate_ids'][current_idx]
                     if current_idx < queue_size else None)
 
-    # --- Prefix state machine ([C] -> class, [R] -> reason) ---
+    # --- Prefix state machine ([C] -> class) ---
     if pending_prefix:
         # We're waiting for the second key after a leader press
         if key == 'Escape':
-            return no_update, "Cancelled", no_update, no_update, no_update, no_update, no_update, ''
+            return no_update, "Cancelled", no_update, no_update, no_update, no_update, ''
 
         if pending_prefix == CLASS_PREFIX_KEY:
             class_tag = CLASS_KEY_MAP.get(key.lower())
             if class_tag is not None:
                 cur = event_class or 'unclassified'
                 if cur == class_tag:
-                    return no_update, "Class: unclassified", no_update, no_update, no_update, no_update, 'unclassified', ''
-                return no_update, f"Class: {class_tag}", no_update, no_update, no_update, no_update, class_tag, ''
-            return no_update, f"[{CLASS_PREFIX_KEY.upper()}] {key}: unknown class", no_update, no_update, no_update, no_update, no_update, ''
-
-        if pending_prefix == REASON_PREFIX_KEY:
-            reason_tag = REASON_KEY_MAP.get(key.lower())
-            if reason_tag is not None:
-                reasons = list(interest_reasons or [])
-                if reason_tag in reasons:
-                    reasons.remove(reason_tag)
-                    msg = f"- {reason_tag}"
-                else:
-                    reasons.append(reason_tag)
-                    msg = f"+ {reason_tag}"
-                return no_update, msg, no_update, reasons, no_update, no_update, no_update, ''
-            return no_update, f"[{REASON_PREFIX_KEY.upper()}] {key}: unknown reason", no_update, no_update, no_update, no_update, no_update, ''
+                    return no_update, "Class: unclassified", no_update, no_update, no_update, 'unclassified', ''
+                return no_update, f"Class: {class_tag}", no_update, no_update, no_update, class_tag, ''
+            return no_update, f"[{CLASS_PREFIX_KEY.upper()}] {key}: unknown class", no_update, no_update, no_update, no_update, ''
 
         # Unknown prefix (shouldn't happen) — cancel
-        return no_update, "Cancelled", no_update, no_update, no_update, no_update, no_update, ''
+        return no_update, "Cancelled", no_update, no_update, no_update, no_update, ''
 
     # --- Enter prefix mode when a leader key is pressed ---
     kl = key.lower()
     if kl in PREFIX_KEYS:
         label = kl.upper()
-        return no_update, f"[{label}] ...", no_update, no_update, no_update, no_update, no_update, kl
+        return no_update, f"[{label}] ...", no_update, no_update, no_update, no_update, kl
+
+    # --- Quick reject (X): toggle not_real class ---
+    if key.lower() == 'x':
+        cur = event_class or 'unclassified'
+        if cur == 'not_real':
+            return no_update, "Class: unclassified", no_update, no_update, no_update, 'unclassified', no_update
+        return no_update, "Class: not_real", no_update, no_update, no_update, 'not_real', no_update
 
     # --- Followup toggle (F) ---
     if key.lower() == 'f':
         new_state = not bool(needs_followup)
         label = "ON" if new_state else "OFF"
-        return no_update, f"Followup: {label}", no_update, no_update, new_state, no_update, no_update, no_update
+        return no_update, f"Followup: {label}", no_update, new_state, no_update, no_update, no_update
 
     # --- Navigation / scoring / save via handle_key_action ---
     conn = db_connect(Path(DB_PATH))
@@ -1784,7 +2091,7 @@ def handle_keyboard(key_value, current_idx, queue_data, current_score,
     if should_save and candidate_id:
         score = int(key) if key in '012345' else current_score
         pass_val, _ = _do_save(
-            candidate_id, score, interest_reasons, event_class, needs_followup, notes, 'keyboard',
+            candidate_id, score, event_class, needs_followup, notes, 'keyboard',
         )
         new_score = score
         new_pass = pass_val
@@ -1793,7 +2100,7 @@ def handle_keyboard(key_value, current_idx, queue_data, current_score,
     # Returning the same value would re-trigger load_review_form needlessly.
     idx_out = new_idx if new_idx != current_idx else no_update
 
-    return idx_out, notification, new_score, no_update, no_update, new_pass, no_update, no_update
+    return idx_out, notification, new_score, no_update, new_pass, no_update, no_update
 
 
 # Update plot and unified candidate info
@@ -1956,8 +2263,19 @@ def update_display(_tick, render_request, applied_nonce, queue_data):
             ], style={'white-space': 'nowrap', 'overflow': 'hidden', 'text-overflow': 'ellipsis'})
             for label, value in items
         ]
-        details_attrs = {'open': True} if is_group_default_open(group_name) else {}
-        grid_items.append(html.Details([html.Summary(f"{group_name} ({len(items)})"), html.Div(field_divs, className='meta-grid')], **details_attrs))
+        if is_group_default_open(group_name):
+            grid_items.append(
+                html.Details(
+                    [html.Summary(f"{group_name} ({len(items)})"), html.Div(field_divs, className='meta-grid')],
+                    open='open',
+                )
+            )
+        else:
+            grid_items.append(
+                html.Details(
+                    [html.Summary(f"{group_name} ({len(items)})"), html.Div(field_divs, className='meta-grid')]
+                )
+            )
 
     progress = f"[{idx + 1}/{queue_size}] Queue: {queue_size}"
 
@@ -2057,32 +2375,84 @@ def update_display(_tick, render_request, applied_nonce, queue_data):
 
 
 @app.callback(
+    [Output('header-asas-sn-id', 'children'),
+     Output('header-path', 'children'),
+     Output('header-gaia-id', 'children')],
+    [Input('current-index', 'data'),
+     Input('queue-data', 'data')],
+    prevent_initial_call=False,
+)
+def update_header_key_info(idx, queue_data):
+    """Render key candidate identifiers in the top header."""
+    if not queue_data or not queue_data.get('candidate_ids'):
+        return 'ASAS-SN ID: -', 'Path: -', 'Gaia ID: -'
+
+    candidate_ids = queue_data.get('candidate_ids', [])
+    if idx is None or idx < 0 or idx >= len(candidate_ids):
+        return 'ASAS-SN ID: -', 'Path: -', 'Gaia ID: -'
+
+    candidate_id = candidate_ids[idx]
+    payload = (queue_data.get('payloads') or {}).get(candidate_id, {}) or {}
+    asas_sn_id = payload.get('asas_sn_id')
+    gaia_id = payload.get('gaia_id')
+    lc_path = payload.get('path')
+
+    asas_text = f"ASAS-SN ID: {asas_sn_id}" if asas_sn_id else f"ASAS-SN ID: {candidate_id}"
+    path_text = f"Path: {lc_path}" if lc_path else 'Path: -'
+    gaia_text = f"Gaia ID: {gaia_id}" if gaia_id else 'Gaia ID: -'
+    return asas_text, path_text, gaia_text
+
+
+@app.callback(
     [Output('plot-export-download', 'data'),
      Output('notification', 'children', allow_duplicate=True)],
-    [Input('export-native-png', 'n_clicks'),
-     Input('export-native-svg', 'n_clicks')],
+    Input('export-plot', 'n_clicks'),
     [State('interactive-plot', 'figure'),
      State('plot-mode', 'value'),
+     State('plot-image', 'src'),
      State('current-index', 'data')],
     prevent_initial_call=True,
 )
-def export_native_plot(n_png, n_svg, figure, plot_mode, idx):
-    """Export native plot in PNG/SVG using current interactive state."""
-    _ = n_png, n_svg
-    trig = callback_context.triggered[0]['prop_id'].split('.')[0] if callback_context.triggered else ''
-    if plot_mode != 'native':
-        return no_update, 'Switch to Native mode before exporting.'
-    if not figure:
-        return no_update, 'No native plot is available to export.'
+def export_active_plot(n_clicks, figure, plot_mode, plot_src, idx):
+    """Export the currently shown plot.
 
-    fmt = 'png' if trig == 'export-native-png' else 'svg'
-    fname = f"malca_plot_{int(idx) + 1 if idx is not None else 0}.{fmt}"
-    try:
-        image_bytes = pio.to_image(figure, format=fmt)
-    except Exception as exc:
-        return no_update, f'Export failed ({fmt}). Install/enable kaleido. {exc}'
+    Native mode exports PDF, PNG mode exports the currently displayed PNG file.
+    """
+    if not n_clicks:
+        return no_update, no_update
 
-    return dcc.send_bytes(image_bytes, fname), f'Exported {fname}'
+    ordinal = int(idx) + 1 if idx is not None else 0
+
+    if plot_mode == 'native':
+        if not figure:
+            return no_update, 'No native plot is available to export.'
+        fname = f"malca_plot_{ordinal}.pdf"
+        try:
+            image_bytes = pio.to_image(figure, format='pdf')
+        except Exception as exc:
+            return no_update, f'Export failed (PDF). Install/enable kaleido. {exc}'
+        return dcc.send_bytes(image_bytes, fname), f'Exported {fname}'
+
+    if plot_mode == 'png':
+        if not plot_src:
+            return no_update, 'No PNG plot is available to export.'
+        src = str(plot_src)
+        plot_file: Path | None = None
+        if src.startswith('/plots/') and PLOT_DIR:
+            rel = src[len('/plots/'):]
+            plot_file = Path(PLOT_DIR) / rel
+        else:
+            candidate = Path(src)
+            if candidate.exists():
+                plot_file = candidate
+
+        if plot_file is None or not plot_file.exists():
+            return no_update, 'Current PNG file could not be found on disk.'
+
+        fname = plot_file.name
+        return dcc.send_file(str(plot_file)), f'Exported {fname}'
+
+    return no_update, 'Unknown plot mode; nothing exported.'
 
 
 @app.callback(
@@ -2127,8 +2497,7 @@ app.clientside_callback(
 
 # Load review data for current candidate
 @app.callback(
-    [Output('interest-reasons-store', 'data'),
-     Output('event-class-store', 'data'),
+    [Output('event-class-store', 'data'),
      Output('needs-followup-store', 'data'),
      Output('review-pass-store', 'data'),
      Output('notes', 'value'),
@@ -2140,14 +2509,13 @@ app.clientside_callback(
 def load_review_form(idx, queue_data):
     """Load existing review for current candidate into stores."""
     if not queue_data or queue_data['queue_size'] == 0:
-        return [], 'unclassified', False, 1, '', 0
+        return 'unclassified', False, 1, '', 0
 
     candidate_id = queue_data['candidate_ids'][idx]
     conn = db_connect(Path(DB_PATH))
     review = get_review(conn, candidate_id)
 
     return (
-        review.get('interest_reason', []),
         review.get('event_class', 'unclassified'),
         review.get('status', 'unreviewed') == 'needs_followup',
         review.get('review_pass', 1),
@@ -2164,7 +2532,6 @@ def load_review_form(idx, queue_data):
     [Input(f'score-{i}', 'n_clicks') for i in range(6)],
     [State('current-index', 'data'),
      State('queue-data', 'data'),
-     State('interest-reasons-store', 'data'),
      State('event-class-store', 'data'),
      State('needs-followup-store', 'data'),
      State('notes', 'value')],
@@ -2172,7 +2539,7 @@ def load_review_form(idx, queue_data):
 )
 def handle_score_clicks(*args):
     """Handle score button clicks."""
-    idx, queue_data, interest_reasons, event_class, needs_followup, notes = args[-6:]
+    idx, queue_data, event_class, needs_followup, notes = args[-5:]
 
     if not queue_data or not queue_data.get('candidate_ids'):
         return no_update, "Queue is empty", no_update
@@ -2189,7 +2556,7 @@ def handle_score_clicks(*args):
 
     candidate_id = queue_data['candidate_ids'][idx]
     new_pass, _ = _do_save(
-        candidate_id, score, interest_reasons, event_class, needs_followup, notes, 'button',
+        candidate_id, score, event_class, needs_followup, notes, 'button',
     )
 
     return score, f"✓ Score: {score}", new_pass
@@ -2203,14 +2570,13 @@ def handle_score_clicks(*args):
     [State('current-index', 'data'),
      State('queue-data', 'data'),
      State('current-score', 'data'),
-     State('interest-reasons-store', 'data'),
      State('event-class-store', 'data'),
      State('needs-followup-store', 'data'),
      State('notes', 'value')],
     prevent_initial_call=True
 )
 def save_review_callback(n_clicks, idx, queue_data, score,
-                         interest_reasons, event_class, needs_followup, notes):
+                         event_class, needs_followup, notes):
     """Save review."""
     if not n_clicks or not queue_data or not queue_data.get('candidate_ids'):
         return no_update, no_update
@@ -2220,7 +2586,7 @@ def save_review_callback(n_clicks, idx, queue_data, score,
 
     candidate_id = queue_data['candidate_ids'][idx]
     new_pass, _ = _do_save(
-        candidate_id, score or 0, interest_reasons, event_class, needs_followup, notes, 'save_button',
+        candidate_id, score or 0, event_class, needs_followup, notes, 'save_button',
     )
 
     return "✓ Saved", new_pass
@@ -2235,14 +2601,13 @@ def save_review_callback(n_clicks, idx, queue_data, score,
     [State('current-index', 'data'),
      State('queue-data', 'data'),
      State('current-score', 'data'),
-     State('interest-reasons-store', 'data'),
      State('event-class-store', 'data'),
      State('needs-followup-store', 'data'),
      State('notes', 'value')],
     prevent_initial_call=True
 )
 def done_callback(n_clicks, idx, queue_data, score,
-                  interest_reasons, event_class, needs_followup, notes):
+                  event_class, needs_followup, notes):
     """Save and go to next."""
     if not n_clicks or not queue_data or not queue_data.get('candidate_ids'):
         return no_update, no_update, no_update
@@ -2252,7 +2617,7 @@ def done_callback(n_clicks, idx, queue_data, score,
 
     candidate_id = queue_data['candidate_ids'][idx]
     new_pass, _ = _do_save(
-        candidate_id, score or 0, interest_reasons, event_class, needs_followup, notes, 'done_button',
+        candidate_id, score or 0, event_class, needs_followup, notes, 'done_button',
     )
 
     queue_size = queue_data['queue_size']
@@ -2263,12 +2628,6 @@ def done_callback(n_clicks, idx, queue_data, score,
 
 # --- Display callbacks for stores → visible indicators ---
 
-_REASON_ACTIVE_STYLE = {
-    'border': '1px solid #0af', 'color': '#0af', 'background-color': '#003366',
-}
-_REASON_INACTIVE_STYLE = {
-    'border': '1px solid #444', 'color': '#888', 'background-color': 'transparent',
-}
 _CLASS_ACTIVE_STYLE = {
     'border': '1px solid #0f0', 'color': '#0f0', 'background-color': '#003300',
 }
@@ -2289,47 +2648,9 @@ def update_score_buttons(current_score):
     return ['score-btn active' if i == score else 'score-btn' for i in range(6)]
 
 
-# Update reason badges styling
-@app.callback(
-    [Output(f'reason-badge-{tag}', 'style') for tag in INTEREST_REASON_TAGS],
-    Input('interest-reasons-store', 'data'),
-    prevent_initial_call=False
-)
-def update_reason_badges(active_reasons):
-    """Highlight active reason badges."""
-    active = set(active_reasons or [])
-    return [_REASON_ACTIVE_STYLE if tag in active else _REASON_INACTIVE_STYLE
-            for tag in INTEREST_REASON_TAGS]
-
-
-# Reason badge click handler
-@app.callback(
-    [Output('interest-reasons-store', 'data', allow_duplicate=True),
-     Output('notification', 'children', allow_duplicate=True)],
-    [Input(f'reason-badge-{tag}', 'n_clicks') for tag in INTEREST_REASON_TAGS],
-    State('interest-reasons-store', 'data'),
-    prevent_initial_call=True
-)
-def handle_reason_clicks(*args):
-    """Toggle a reason when its badge is clicked."""
-    reasons_state = args[-1]
-    ctx = callback_context
-    if not ctx.triggered:
-        return no_update, no_update
-    trigger = ctx.triggered[0]['prop_id'].split('.')[0]
-    # Extract tag from 'reason-badge-<tag>'
-    tag = trigger.replace('reason-badge-', '')
-    reasons = list(reasons_state or [])
-    if tag in reasons:
-        reasons.remove(tag)
-        return reasons, f"- {tag}"
-    reasons.append(tag)
-    return reasons, f"+ {tag}"
-
-
 # Update event class badge styling
 @app.callback(
-    [Output(f'class-badge-{tag}', 'style') for tag in CLASS_KEY_MAP.values()],
+    [Output(f'class-badge-{tag}', 'style') for tag in CLASS_BADGE_TAGS],
     Input('event-class-store', 'data'),
     prevent_initial_call=False
 )
@@ -2337,14 +2658,14 @@ def update_class_badges(active_class):
     """Highlight the active event class badge."""
     active = active_class or 'unclassified'
     return [_CLASS_ACTIVE_STYLE if tag == active else _CLASS_INACTIVE_STYLE
-            for tag in CLASS_KEY_MAP.values()]
+            for tag in CLASS_BADGE_TAGS]
 
 
 # Class badge click handler
 @app.callback(
     [Output('event-class-store', 'data', allow_duplicate=True),
      Output('notification', 'children', allow_duplicate=True)],
-    [Input(f'class-badge-{tag}', 'n_clicks') for tag in CLASS_KEY_MAP.values()],
+    [Input(f'class-badge-{tag}', 'n_clicks') for tag in CLASS_BADGE_TAGS],
     State('event-class-store', 'data'),
     prevent_initial_call=True
 )
@@ -2438,7 +2759,7 @@ def update_recent_activity(idx):
     for _, row in recent.iterrows():
         lines.append(f"• {row['candidate_id']} - {row['event_type']} ({row['created_at']})")
 
-    return html.Div([html.Div(line, style={'margin': '5px 0'}) for line in lines])
+    return html.Div([html.Div(line, style={'margin': '2px 0'}) for line in lines])
 
 
 # Toggle recent activity
@@ -2471,10 +2792,10 @@ def toggle_activity(n_clicks, key_value, is_visible):
     new_state = is_visible
     style = {
         'display': 'block',
-        'padding': '10px 20px',
+        'padding': '5px 12px',
         'background-color': '#0a0a0a',
         'color': '#aaa',
-        'font-size': '11px'
+        'font-size': '10px'
     } if new_state else {'display': 'none'}
     return style, new_state
 

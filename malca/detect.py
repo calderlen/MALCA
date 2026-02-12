@@ -48,10 +48,11 @@ from malca.plot import plot_passing_candidates
 from malca.classify import compute_all_classifications
 from malca.stats import compute_stats
 from malca.characterize import characterize_candidates_df
+from malca.gaia_fetch import _extract_gaia_ids, fetch_gaia_catalog
 from malca.enrich.neighbor import run_neighbor_enrichment
 from malca.enrich.spectra import run_spectra_availability
 from malca.config.config_io import PARQUET_OUTPUT_COMPRESSION, PARQUET_CACHE_COMPRESSION
-from malca.config.config_paths import ASASSN_INDEX_PATH, LCV2_ROOT, VSX_CROSSMATCH_PATH
+from malca.config.config_paths import ASASSN_INDEX_PATH, LCV2_ROOT, VSX_CROSSMATCH_PATH, GAIA_LOCAL_CATALOG
 from malca.config.config_pipeline import (
     WORKERS, BATCH_SIZE, TRIGGER_MODE, P_POINTS, MAG_POINTS,
     LOGBF_THRESHOLD_DIP, LOGBF_THRESHOLD_JUMP, SIGNIFICANCE_THRESHOLD,
@@ -353,6 +354,9 @@ def _build_post_filter_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "periodicity_flag_only": not args.periodicity_reject,
         "periodicity_workers": args.periodicity_workers,
         "periodicity_checkpoint_dir": args.periodicity_checkpoint_dir,
+        "phase_plot_max_sig": args.phase_plot_max_sig,
+        "phase_plot_min_power": args.phase_plot_min_power,
+        "phase_plot_allow_alias": args.phase_plot_allow_alias,
         "apply_gaia_ruwe_validation": not args.skip_gaia_ruwe_validation,
         "gaia_max_ruwe": args.gaia_max_ruwe,
         "gaia_flag_only": not args.gaia_reject,
@@ -480,6 +484,9 @@ def main():
     parser.add_argument("--periodicity-reject", action="store_true", help="Reject periodicity matches instead of flagging only")
     parser.add_argument("--periodicity-workers", type=int, default=WORKERS, help="Workers for periodicity validation (default: WORKERS)")
     parser.add_argument("--periodicity-checkpoint-dir", type=Path, default=None, help="Checkpoint directory for periodicity validation")
+    parser.add_argument("--phase-plot-max-sig", type=float, default=0.01, help="Require lsp_bootstrap_sig <= this for phase plotting (default: 0.01)")
+    parser.add_argument("--phase-plot-min-power", type=float, default=0.3, help="Require lsp_power >= this for phase plotting (default: 0.3)")
+    parser.add_argument("--phase-plot-allow-alias", action="store_true", help="Allow alias periods for phase plotting")
     parser.add_argument("--skip-gaia-ruwe-validation", action="store_true", help="Skip Gaia RUWE validation")
     parser.add_argument("--gaia-max-ruwe", type=float, default=1.4, help="Maximum RUWE threshold (default: 1.4)")
     parser.add_argument("--gaia-reject", action="store_true", help="Reject high-RUWE sources instead of flagging only")
@@ -765,6 +772,9 @@ def main():
             "periodicity_flag_only": not args.periodicity_reject,
             "periodicity_workers": args.periodicity_workers,
             "periodicity_checkpoint_dir": str(args.periodicity_checkpoint_dir) if args.periodicity_checkpoint_dir else None,
+            "phase_plot_max_sig": args.phase_plot_max_sig,
+            "phase_plot_min_power": args.phase_plot_min_power,
+            "phase_plot_allow_alias": args.phase_plot_allow_alias,
             "apply_gaia_ruwe_validation": not args.skip_gaia_ruwe_validation,
             "gaia_max_ruwe": args.gaia_max_ruwe,
             "gaia_flag_only": not args.gaia_reject,
@@ -882,6 +892,9 @@ def main():
             "periodicity_reject": args.periodicity_reject,
             "periodicity_workers": args.periodicity_workers,
             "periodicity_checkpoint_dir": str(args.periodicity_checkpoint_dir) if args.periodicity_checkpoint_dir else None,
+            "phase_plot_max_sig": args.phase_plot_max_sig,
+            "phase_plot_min_power": args.phase_plot_min_power,
+            "phase_plot_allow_alias": args.phase_plot_allow_alias,
             "skip_gaia_ruwe_validation": args.skip_gaia_ruwe_validation,
             "gaia_max_ruwe": args.gaia_max_ruwe,
             "gaia_reject": args.gaia_reject,
@@ -1433,6 +1446,65 @@ def main():
                     import traceback
                     traceback.print_exc()
 
+    # Step 7: Generate review plots (optional)
+    if run_upstream and args.run_postprocess:
+        if not args.run_post_filter:
+            print("Warning: --run-postprocess requires --run-post-filter. Skipping postprocess plots.")
+        else:
+            log("\n=== Step 7: Generating candidate plots ===")
+            try:
+                post_filter_output = results_dir / "lc_events_filtered.parquet"
+                if not post_filter_output.exists():
+                    print(f"Warning: No post-filter output found at {post_filter_output}; skipping postprocess plots.")
+                else:
+                    plots_out = out_dir / "plots" / "candidates"
+                    baseline_for_plots = {
+                        "gp": "per_camera_gp",
+                        "gp_masked": "per_camera_gp",
+                        "per_camera_median": "per_camera_median",
+                        "global_median": "global_median",
+                    }.get(str(args.baseline_func), "per_camera_gp")
+
+                    plot_summary = plot_passing_candidates(
+                        post_filter_output,
+                        plots_out,
+                        require_failed_any_false=True,
+                        max_plots=args.max_plots,
+                        baseline=baseline_for_plots,
+                        baseline_kwargs={},
+                        skip_events=False,
+                        plot_fits=False,
+                        format=args.plot_format,
+                        show=False,
+                        verbose=args.verbose,
+                        workers=max(1, int(args.workers)),
+                        logbf_threshold_dip=float(args.logbf_threshold_dip),
+                        logbf_threshold_jump=float(args.logbf_threshold_jump),
+                        jd_offset=2458000.0,
+                        clean_max_error_absolute=1.0,
+                        clean_max_error_sigma=5.0,
+                        run_params=run_params if 'run_params' in locals() else None,
+                        filter_bad_cameras=True,
+                        bad_camera_scatter_ratio=2.5,
+                        show_tqdm=args.verbose,
+                    )
+
+                    summary["postprocess_stats"] = {
+                        "output_dir": str(plots_out),
+                        "total_selected": int(plot_summary.get("total_selected", 0)),
+                        "plotted": int(plot_summary.get("plotted", 0)),
+                        "failed": int(plot_summary.get("failed", 0)),
+                        "phase_plotted": int(plot_summary.get("phase_plotted", 0)),
+                    }
+                    with open(run_summary_file, "w") as f:
+                        json.dump(summary, f, indent=2, default=str)
+                    log(f"Postprocess plots written to {plots_out}")
+            except Exception as e:
+                print(f"Error in postprocess plotting step: {e}")
+                if args.verbose:
+                    import traceback
+                    traceback.print_exc()
+
 
 
     post_filter_output = results_dir / "lc_events_filtered.parquet"
@@ -1502,6 +1574,25 @@ def main():
 
     if run_downstream and (args.run_characterize or args.run_dust) and (not has_post_filter_output):
         print(f"Warning: downstream stage requires filtered results at {post_filter_output}. Skipping characterization.")
+
+    # Step 7b: Auto-fetch Gaia data for characterization (incremental)
+    if run_downstream and (args.run_characterize or args.run_dust) and has_post_filter_output:
+        log("\n=== Ensuring local Gaia catalog is up to date ===")
+        try:
+            gaia_catalog_path = args.gaia_cache.expanduser() if args.gaia_cache else GAIA_LOCAL_CATALOG
+            gaia_ids = _extract_gaia_ids(
+                post_filter_output,
+                args.characterize_crossmatch.expanduser(),
+            )
+            if gaia_ids:
+                fetch_gaia_catalog(gaia_ids, output_path=gaia_catalog_path)
+            else:
+                log("No Gaia IDs found; skipping Gaia fetch.")
+        except Exception as e:
+            print(f"Warning: Gaia auto-fetch failed: {e}")
+            if args.verbose:
+                import traceback
+                traceback.print_exc()
 
     # Step 8: Characterization + dust (optional)
     if run_downstream and (args.run_characterize or args.run_dust) and has_post_filter_output:

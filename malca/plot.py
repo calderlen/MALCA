@@ -178,6 +178,140 @@ def load_events_paths(
     return [Path(p) for p in paths]
 
 
+def _phase_fold_dataframe(df: pd.DataFrame, period_days: float) -> pd.DataFrame:
+    """Return a 0-2 cycle phase-folded dataframe."""
+    if period_days <= 0 or (not np.isfinite(period_days)):
+        raise ValueError("period_days must be positive and finite")
+
+    out = df.copy()
+    out = out[np.isfinite(out["JD"]) & np.isfinite(out["mag"])].copy()
+    if out.empty:
+        return out
+
+    jd0 = float(out["JD"].min())
+    phase = ((out["JD"].to_numpy(dtype=float) - jd0) / float(period_days)) % 1.0
+    out["phase"] = phase
+
+    wrap = out.copy()
+    wrap["phase"] = wrap["phase"] + 1.0
+    return pd.concat([out, wrap], ignore_index=True)
+
+
+def plot_phase_folded_lightcurve(
+    csv_path: Path,
+    *,
+    period_days: float,
+    out_path: Path | None = None,
+    show: bool = False,
+    figsize: tuple[float, float] = (10, 6),
+    clean_max_error_absolute: float = 1.0,
+    clean_max_error_sigma: float = 5.0,
+    filter_bad_cameras: bool = True,
+    bad_camera_scatter_ratio: float = 2.5,
+    return_filtered_cameras: bool = False,
+) -> set[int] | None:
+    """Plot a phase-folded light curve (0-2 cycles) for a given period."""
+    if period_days <= 0 or (not np.isfinite(period_days)):
+        raise ValueError("period_days must be positive and finite")
+
+    df, filtered_cameras = load_lightcurve_df(
+        csv_path,
+        filter_bad_cameras_enabled=filter_bad_cameras,
+        bad_camera_scatter_ratio=bad_camera_scatter_ratio,
+        return_filtered_info=True,
+    )
+    df = clean_lc(
+        df,
+        max_error_absolute=clean_max_error_absolute,
+        max_error_sigma=clean_max_error_sigma,
+    )
+    if df.empty:
+        raise ValueError(f"Light curve file is empty after cleaning: {csv_path}")
+
+    if "camera_name" in df.columns:
+        df["camera_label"] = df["camera_name"].astype(str)
+    elif "camera#" in df.columns:
+        df["camera_label"] = df["camera#"].astype(str)
+    elif "camera" in df.columns:
+        df["camera_label"] = df["camera"].astype(str)
+    else:
+        df["camera_label"] = "unknown"
+
+    phase_df = _phase_fold_dataframe(df, float(period_days))
+    if phase_df.empty:
+        raise ValueError(f"No finite points for phase folding: {csv_path}")
+
+    fig, ax = plt.subplots(1, 1, figsize=figsize, constrained_layout=True)
+    bands = [0, 1]
+    band_labels = {0: "g", 1: "V"}
+    band_markers = {0: "o", 1: "s"}
+
+    for band in bands:
+        bdf = phase_df[phase_df["v_g_band"] == band].copy()
+        if bdf.empty:
+            continue
+        for cam in sorted(bdf["camera_label"].dropna().unique()):
+            cdf = bdf[bdf["camera_label"] == cam]
+            if cdf.empty:
+                continue
+            color = _stable_camera_color(cam)
+            label = f"{cam} ({band_labels[band]})"
+            ax.errorbar(
+                cdf["phase"],
+                cdf["mag"],
+                yerr=cdf["error"] if "error" in cdf.columns else None,
+                fmt=band_markers[band],
+                ms=4.0,
+                color=color,
+                alpha=0.75,
+                ecolor=color,
+                elinewidth=0.7,
+                capsize=1.2,
+                markeredgecolor="black",
+                markeredgewidth=0.6,
+                label=label,
+            )
+
+    asas_sn_id = csv_path.stem.split("-")[0]
+    ax.set_title(f"{asas_sn_id} phase-folded (P={float(period_days):.5f} d)")
+    ax.set_xlabel("Phase")
+    ax.set_ylabel("Magnitude [mag]")
+    ax.set_xlim(-0.02, 2.02)
+    ax.invert_yaxis()
+    ax.grid(True, alpha=0.25)
+    ax.axvline(0.0, color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
+    ax.axvline(1.0, color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
+    ax.axvline(2.0, color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
+
+    handles, labels = ax.get_legend_handles_labels()
+    if handles:
+        # De-duplicate legend labels while preserving order.
+        seen: set[str] = set()
+        uniq_h = []
+        uniq_l = []
+        for h, l in zip(handles, labels):
+            if l in seen:
+                continue
+            seen.add(l)
+            uniq_h.append(h)
+            uniq_l.append(l)
+        ax.legend(uniq_h, uniq_l, fontsize=8, ncol=2, loc="best")
+
+    if out_path:
+        out_path = Path(out_path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(out_path, dpi=150, bbox_inches="tight")
+
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    if return_filtered_cameras:
+        return filtered_cameras
+    return None
+
+
 def load_detection_results(csv_path):
     """
     Load detection_results.csv with trimmed strings; used for metadata lookup.

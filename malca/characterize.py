@@ -23,7 +23,6 @@ import pyvo
 import requests
 from astropy.coordinates import SkyCoord
 from astropy.table import Table
-from astroquery.gaia import Gaia
 from astroquery.xmatch import XMatch
 import banyan_sigma as banyan_sigma_pkg
 from dustmaps3d import dustmaps3d
@@ -45,6 +44,7 @@ from malca.config.config_characterize import (
 from malca.config.config_paths import (
     VSX_CROSSMATCH_PATH, STARHORSE_DEFAULT_PATH, STARHORSE_TAP_URL,
     UNTIMELY_API_URL, DEFAULT_CACHE_DIR, GAIA_CACHE_FILE,
+    GAIA_LOCAL_CATALOG,
 )
 from malca.config.config_io import PARQUET_CACHE_COMPRESSION
 
@@ -55,86 +55,41 @@ from malca.config.config_io import PARQUET_CACHE_COMPRESSION
 
 def query_gaia_by_ids(source_ids: list[str | int], chunk_size: int = GAIA_CHUNK_SIZE, cache_file: str | None = None) -> pd.DataFrame:
     """
-    Query Gaia DR3 for a list of Source IDs.
-    
-    Retrieves astrometry, astrophysics, and 2MASS/WISE photometry via ADQL joins.
-    """
-    cached_df = pd.DataFrame()
-    ids_to_query = [str(x) for x in source_ids if str(x).isdigit()]
-    
-    if cache_file and Path(cache_file).exists():
-        print(f"Loading Gaia cache from {cache_file}...")
-        cached_df = pd.read_parquet(cache_file)
-        if "source_id" in cached_df.columns:
-            cached_df["source_id"] = cached_df["source_id"].astype(str)
-            processed_ids = set(cached_df["source_id"])
-            ids_to_query = [x for x in ids_to_query if x not in processed_ids]
-            if ids_to_query:
-                print(f"Use {len(processed_ids)} cached sources. Querying {len(ids_to_query)} new sources.")
-            else:
-                return cached_df
-    
-    if not ids_to_query:
-        return cached_df
+    Look up Gaia DR3 data from a local Parquet catalog.
 
-    results = []
-    
-    for i in tqdm(range(0, len(ids_to_query), chunk_size), desc="Querying Gaia DR3"):
-        chunk_ids = ids_to_query[i : i + chunk_size]
-        ids_str = ",".join(chunk_ids)
-        
-        query = f"""
-        SELECT
-            g.source_id,
-            g.ra, g.dec,
-            g.parallax, g.parallax_error, g.ruwe,
-            g.pmra, g.pmdec,
-            g.phot_g_mean_mag, g.bp_rp,
-            g.teff_gspphot, g.logg_gspphot, g.mh_gspphot,
-            g.distance_gspphot, g.ag_gspphot,
-            
-            xm_tm.original_ext_source_id AS tmass_id,
-            tm.j_m AS tmass_j, tm.h_m AS tmass_h, tm.ks_m AS tmass_k,
-            tm.j_msigcom AS tmass_j_err, tm.h_msigcom AS tmass_h_err, tm.ks_msigcom AS tmass_k_err,
-            
-            xm_aw.original_ext_source_id AS allwise_id,
-            aw.w1mpro AS unwise_w1, aw.w2mpro AS unwise_w2,
-            aw.w1sigmpro AS unwise_w1_err, aw.w2sigmpro AS unwise_w2_err
-            
-        FROM gaiadr3.gaia_source AS g
-        
-        LEFT JOIN gaiadr3.tmass_psc_xsc_best_neighbour AS xm_tm
-            ON g.source_id = xm_tm.source_id
-        LEFT JOIN external.tmass_psc AS tm
-            ON xm_tm.original_ext_source_id = tm.designation
-            
-        LEFT JOIN gaiadr3.allwise_best_neighbour AS xm_aw
-            ON g.source_id = xm_aw.source_id
-        LEFT JOIN external.allwise AS aw
-            ON xm_aw.original_ext_source_id = aw.designation
-            
-        WHERE g.source_id IN ({ids_str})
-        """
-        
-        try:
-            job = Gaia.launch_job_async(query)
-            chunk_df = job.get_results().to_pandas()
-            results.append(chunk_df)
-        except Exception as e:
-            print(f"Error querying Gaia chunk {i}: {e}")
-            continue
-            
-    new_results = pd.concat(results, ignore_index=True) if results else pd.DataFrame()
-    
-    if not new_results.empty and "source_id" in new_results.columns:
-        new_results["source_id"] = new_results["source_id"].astype(str)
-        
-    full_df = pd.concat([cached_df, new_results], ignore_index=True) if not new_results.empty else cached_df
-    
-    if cache_file and not new_results.empty:
-        full_df.to_parquet(cache_file, index=False, compression="snappy")
-        
-    return full_df
+    The catalog is produced by ``malca gaia-fetch``.  This function reads it
+    and returns the subset matching *source_ids* — no network call is made.
+
+    Lookup order for the catalog file:
+    1. *cache_file* argument (legacy name kept for API compat)
+    2. ``GAIA_LOCAL_CATALOG`` default path
+    """
+    # Resolve catalog path
+    catalog_path: Path | None = None
+    for candidate in [cache_file, GAIA_LOCAL_CATALOG]:
+        if candidate and Path(candidate).exists():
+            catalog_path = Path(candidate)
+            break
+
+    if catalog_path is None:
+        raise FileNotFoundError(
+            "Local Gaia catalog not found. Run:\n"
+            "  malca gaia-fetch --input <your_candidates.parquet>\n"
+            "to download Gaia DR3 data before characterization."
+        )
+
+    print(f"Loading local Gaia catalog from {catalog_path}...")
+    gaia_df = pd.read_parquet(catalog_path)
+
+    if "source_id" not in gaia_df.columns:
+        raise ValueError(f"Local Gaia catalog at {catalog_path} missing 'source_id' column.")
+
+    gaia_df["source_id"] = gaia_df["source_id"].astype(str)
+    requested = {str(x) for x in source_ids if str(x).isdigit()}
+    result = gaia_df[gaia_df["source_id"].isin(requested)].copy()
+
+    print(f"Matched {len(result)}/{len(requested)} requested Gaia IDs from local catalog.")
+    return result
 
 
 # =============================================================================

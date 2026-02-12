@@ -1,45 +1,32 @@
 """Keyboard shortcut handlers for Dash review app.
 
-All tagging actions use a **leader-key prefix** so that single letters
-stay available for future features:
+Class tagging uses a leader-key prefix so single letters remain available
+for navigation and actions:
 
-    [R] <key>  ->  toggle a reason tag  (multi-select)
-    [C] <key>  ->  set event class      (single-select; same key again clears)
+    [C] <key>  ->  set event class  (single-select; same key again clears)
 
 Press Escape after the leader key to cancel.
 """
 
 # ---------------------------------------------------------------------------
-# Prefix-key maps.  The first keypress (leader) selects the group, the
-# second keypress selects the item within that group.
+# Prefix-key maps. The first keypress enters class mode and the
+# second keypress selects the class.
 # ---------------------------------------------------------------------------
-
-# R prefix → reason tags (multi-select toggle)
-REASON_PREFIX_KEY = 'r'
-REASON_KEY_MAP = {
-    'c': 'clean_event',
-    'm': 'multi_camera_support',
-    'i': 'interesting_morphology',
-    'p': 'periodic_contaminant',
-    'a': 'camera_artifact',
-    'k': 'known_object_nearby',
-    'f': 'needs_followup_data',
-}
 
 # C prefix -> event class (single-select)
 CLASS_PREFIX_KEY = 'c'
 CLASS_KEY_MAP = {
-    'd': 'circumstellar_dust',
-    'l': 'microlensing',
+    'd': 'dipper',
+    'y': 'yso',
+    'm': 'microlensing',
     'f': 'flare',
     'e': 'eclipsing_binary',
     'i': 'instrumental',
     'u': 'unknown_interesting',
-    'n': 'not_real',
 }
 
-# All prefix leader keys (used by app.py to detect prefix entry)
-PREFIX_KEYS = {REASON_PREFIX_KEY, CLASS_PREFIX_KEY}
+# Prefix leader keys (used by app.py to detect prefix entry)
+PREFIX_KEYS = {CLASS_PREFIX_KEY}
 
 # ---------------------------------------------------------------------------
 # Single-key shortcuts (no prefix required)
@@ -89,16 +76,14 @@ Scoring (instant save, clickable):
   [0]-[5] Set interest score
 
 Event Class ([C] then key, single-select, clickable):
-  [C] [D] circumstellar dust   [C] [L] microlensing
-  [C] [F] flare                [C] [E] eclipsing binary
-  [C] [I] instrumental         [C] [U] unknown interesting
-  [C] [N] not real             ([Esc] cancels)
+  [C] [D] dipper               [C] [Y] yso
+  [C] [M] microlensing         [C] [F] flare
+  [C] [E] eclipsing binary     [C] [I] instrumental
+  [C] [U] unknown interesting
+  ([Esc] cancels)
 
-Reason Tags ([R] then key, multi-select, clickable):
-  [R] [C] clean event          [R] [M] multi camera support
-  [R] [I] interesting morph    [R] [P] periodic contaminant
-  [R] [A] camera artifact      [R] [K] known object nearby
-  [R] [F] needs followup data  ([Esc] cancels)
+Quick Reject:
+  [X] Set class to not real (toggle)
 
 Status:
   [F] Toggle needs-followup flag
@@ -159,5 +144,5 @@ def handle_key_action(key, current_idx, queue_size, conn, candidate_id):
     elif action == 'show_shortcuts':
         return current_idx, "Help displayed", False
 
-    # Reason toggles and followup are handled inline in app.py
+    # Class toggles and followup are handled inline in app.py
     return current_idx, "", False

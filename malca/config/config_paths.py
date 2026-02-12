@@ -12,3 +12,5 @@ GAIA_CACHE_FILE = Path("output/gaia_cache.parquet")
 LCV2_ROOT = Path("/data/poohbah/1/assassin/rowan.90/lcsv2")
 UNTIMELY_API_URL = "https://irsa.ipac.caltech.edu/cgi-bin/Gator/nph-query"
 STARHORSE_TAP_URL = "https://gaia.aip.de/tap"
+GAIA_AIP_TAP_URL = "https://gea.esac.esa.int/tap-server/tap"
+GAIA_LOCAL_CATALOG = Path("input/gaia/gaia_dr3_crossmatched.parquet")

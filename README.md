@@ -155,13 +155,10 @@ graph TB
     subgraph "Review & Labeling"
         REVIEW_DB[(review.db<br/>SQLite)]
         REVIEW_APP[review/app.py<br/>Dash GUI]
-        REVIEW_TUI[review/tui.py<br/>Terminal UI]
 
         CAND -.-> REVIEW_DB
         REVIEW_DB --> REVIEW_APP
-        REVIEW_DB --> REVIEW_TUI
-        REVIEW_APP --> LABELS[(Labeled Reviews<br/>score + class + reasons)]
-        REVIEW_TUI --> LABELS
+        REVIEW_APP --> LABELS[(Labeled Reviews<br/>score + class)]
     end
 
     subgraph "ML Training"
@@ -237,7 +234,7 @@ graph TB
 **Key Components:**
 - **Production**: `manifest.py` → `pre_filter.py` → `events.py` → `post_filter.py`
 - **Post-detection**: `characterize.py` (Gaia, dust, galactic coords) → `classify.py`
-- **Review**: `review/app.py` (Dash GUI) / `review/tui.py` (terminal) → labeled training set
+- **Review**: `review/app.py` (Dash GUI) → labeled training set
 - **ML**: `ml/features.py` (107 curated features) → `ml/train.py` (LightGBM classifier)
 - **Evaluation**: `evaluation/reproduce.py`, `evaluation/validation.py`, `evaluation/injection.py`
 - **CLI**: Unified interface via `malca [command]`
@@ -520,24 +517,16 @@ malca attrition --pre output/pre.parquet --post output/post.parquet
 ```bash
 # Launch Dash review GUI (keyboard-driven)
 malca review --db ~/.cache/malca/review.db --plot-dir output/runs/YOUR_RUN/plots
-
-# Launch terminal triage tool
-malca review.tui --db output/review/review.db
 ```
 
 **Dash GUI features:**
 - Light curve plot display with grouped, collapsible metadata panels (~146 fields across 17 sections)
 - Interest scoring (0-5) via number keys or clickable buttons
-- Event class labeling (single-select): `circumstellar_dust`, `microlensing`, `flare`, `eclipsing_binary`, `instrumental`, `unknown_interesting`, `not_real`
-- Reason tagging (multi-select): `clean_event`, `multi_camera_support`, `interesting_morphology`, `periodic_contaminant`, `camera_artifact`, `known_object_nearby`, `needs_followup_data`
-- Leader-key prefix shortcuts (vim-style): `G`+key for class, `R`+key for reasons — all elements also clickable
+- Event class labeling (single-select): `dipper`, `yso`, `microlensing`, `flare`, `eclipsing_binary`, `instrumental`, `unknown_interesting`, `not_real`
+- Leader-key class shortcut: `C`+key — class badges are also clickable
 - Sidebar with import, queue filtering (unreviewed, score range, sort), characterize-on-import, and export controls
 - Freeform notes, followup flag, review pass tracking, recent activity log
 - Export reviewed candidates to CSV/Parquet
-
-**TUI features:**
-- Same scoring, class, reason, and notes workflow via text commands
-- `score`, `class`, `reason`, `note`, `pass`, `status`, `next`, `prev`, `goto`, `export`
 
 #### malca ml_train
 

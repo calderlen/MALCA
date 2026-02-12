@@ -15,18 +15,10 @@ from malca.config.config_characterize import GAIA_CHUNK_SIZE
 
 DEFAULT_DB_PATH = "output/review/review.db"
 STATUS_OPTIONS = ["unreviewed", "reviewed", "needs_followup"]
-INTEREST_REASON_TAGS = [
-    "clean_event",
-    "multi_camera_support",
-    "interesting_morphology",
-    "periodic_contaminant",
-    "camera_artifact",
-    "known_object_nearby",
-    "needs_followup_data",
-]
 EVENT_CLASS_OPTIONS = [
     "unclassified",
-    "circumstellar_dust",
+    "dipper",
+    "yso",
     "microlensing",
     "flare",
     "eclipsing_binary",
@@ -177,6 +169,10 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("lsp_period",               "REAL",    "float"),
     ("lsp_is_alias",             "INTEGER", "bool"),
     ("lsp_is_significant",       "INTEGER", "bool"),
+    ("phase_plot_ready",         "INTEGER", "bool"),
+    ("phase_period_days",        "REAL",    "float"),
+    ("phase_source",             "TEXT",    "text"),
+    ("phase_quality_score",      "REAL",    "float"),
     # -- dip detection --
     ("dip_significant",          "INTEGER", "bool"),
     ("dip_best_morph",           "TEXT",    "text"),
@@ -325,16 +321,6 @@ _FLOAT_COLS = {c[0] for c in _CANDIDATE_COLUMNS if c[2] == "float"}
 _TEXT_COLS = {c[0] for c in _CANDIDATE_COLUMNS if c[2] == "text"}
 
 
-def _migrate_candidates_columns(conn: sqlite3.Connection) -> None:
-    """Add columns introduced after initial schema.  Safe to call repeatedly."""
-    for col, dtype, _ in _CANDIDATE_COLUMNS:
-        try:
-            conn.execute(f"ALTER TABLE candidates ADD COLUMN {col} {dtype}")
-        except Exception:
-            pass  # column already exists
-    conn.commit()
-
-
 def init_db(conn: sqlite3.Connection) -> None:
     col_defs = ",\n            ".join(
         f"{col} {dtype}" for col, dtype, _ in _CANDIDATE_COLUMNS
@@ -355,7 +341,6 @@ def init_db(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS reviews (
             candidate_id TEXT PRIMARY KEY,
             interest_score INTEGER,
-            interest_reason TEXT,
             event_class TEXT DEFAULT 'unclassified',
             review_pass INTEGER,
             notes TEXT,
@@ -391,22 +376,10 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def _migrate_reviews_columns(conn: sqlite3.Connection) -> None:
-    """Add columns introduced after initial reviews schema.  Safe to call repeatedly."""
-    for col, dtype in [("event_class", "TEXT DEFAULT 'unclassified'")]:
-        try:
-            conn.execute(f"ALTER TABLE reviews ADD COLUMN {col} {dtype}")
-        except Exception:
-            pass  # column already exists
-    conn.commit()
-
-
 def db_connect(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
     init_db(conn)
-    _migrate_candidates_columns(conn)
-    _migrate_reviews_columns(conn)
     return conn
 
 
@@ -475,16 +448,13 @@ def import_candidates(
         v = d.get(key)
         return int(_as_bool(v)) if v is not None else None
 
-    # Map payload key → column; most are identical to the column name.
-    _payload_alias = {"lc_path": "path"}
-
     rows = []
     for _, row in df_use.iterrows():
         row_dict = {k: (None if pd.isna(v) else v) for k, v in row.to_dict().items()}
         row_dict = normalize_vsx_record(row_dict)
         vals: list = [str(row_dict.get("candidate_id")), source_path]
         for col, _dtype, etype in _CANDIDATE_COLUMNS:
-            payload_key = _payload_alias.get(col, col)
+            payload_key = col
             raw = row_dict.get(payload_key)
             if etype == "bool":
                 vals.append(_opt_bool(row_dict, payload_key))
@@ -516,41 +486,10 @@ def import_candidates(
     return len(rows), int(after - before)
 
 
-def query_queue(conn: sqlite3.Connection, *, filters: dict | None = None,
-                # Legacy keyword args (still accepted for backward compat)
-                only_unreviewed: bool | None = None,
-                require_failed_any_false: bool | None = None,
-                periodic_flag_mode: str | None = None,
-                catalog_match_mode: str | None = None,
-                high_ruwe_mode: str | None = None,
-                min_periodicity_score: float | None = None,
-                max_lsp_bootstrap_sig: float | None = None,
-                min_lsp_power: float | None = None,
-                sort_col: str | None = None,
-                sort_desc: bool | None = None,
-                ) -> pd.DataFrame:
-    """Query the candidate queue with optional filters.
-
-    Accepts either a *filters* dict or the legacy keyword arguments.
-    If *filters* is provided it takes precedence.
-    """
+def query_queue(conn: sqlite3.Connection, *, filters: dict | None = None) -> pd.DataFrame:
+    """Query the candidate queue using filter parameters."""
     if filters is None:
         filters = {}
-    # Merge legacy kwargs as defaults (filters dict wins)
-    _defaults = {
-        'only_unreviewed': only_unreviewed if only_unreviewed is not None else False,
-        'require_failed_any_false': require_failed_any_false if require_failed_any_false is not None else False,
-        'periodic_flag_mode': periodic_flag_mode or 'Any',
-        'catalog_match_mode': catalog_match_mode or 'Any',
-        'high_ruwe_mode': high_ruwe_mode or 'Any',
-        'min_periodicity_score': min_periodicity_score,
-        'max_lsp_bootstrap_sig': max_lsp_bootstrap_sig,
-        'min_lsp_power': min_lsp_power,
-        'sort_col': sort_col or 'candidate_id',
-        'sort_desc': sort_desc if sort_desc is not None else False,
-    }
-    for k, v in _defaults.items():
-        filters.setdefault(k, v)
 
     where: list[str] = []
     params: list = []
@@ -617,7 +556,6 @@ def query_queue(conn: sqlite3.Connection, *, filters: dict | None = None,
             c.dip_best_log_bf,
             c.jump_best_log_bf,
             r.interest_score,
-            r.interest_reason,
             r.review_pass,
             r.status,
             r.notes,
@@ -642,22 +580,10 @@ def get_candidate_payload(conn: sqlite3.Connection, candidate_id: str) -> dict:
         return {}
 
 
-def _parse_reason_list(raw: str | None) -> list[str]:
-    if not raw:
-        return []
-    try:
-        out = json.loads(raw)
-        if isinstance(out, list):
-            return [str(x) for x in out if str(x).strip()]
-    except Exception:
-        pass
-    return []
-
-
 def get_review(conn: sqlite3.Connection, candidate_id: str) -> dict:
     row = conn.execute(
         """
-        SELECT interest_score, interest_reason, review_pass, notes, status, reviewer, updated_at, event_class
+        SELECT interest_score, review_pass, notes, status, reviewer, updated_at, event_class
         FROM reviews WHERE candidate_id=?
         """,
         (candidate_id,),
@@ -665,7 +591,6 @@ def get_review(conn: sqlite3.Connection, candidate_id: str) -> dict:
     if row is None:
         return {
             "interest_score": 2,
-            "interest_reason": [],
             "event_class": "unclassified",
             "review_pass": 1,
             "notes": "",
@@ -677,13 +602,12 @@ def get_review(conn: sqlite3.Connection, candidate_id: str) -> dict:
     score = int(np.clip(score, 0, 5))
     return {
         "interest_score": score,
-        "interest_reason": _parse_reason_list(row[1]),
-        "event_class": str(row[7]) if row[7] else "unclassified",
-        "review_pass": 1 if row[2] is None else max(1, int(row[2])),
-        "notes": "" if row[3] is None else str(row[3]),
-        "status": "unreviewed" if row[4] is None else str(row[4]),
-        "reviewer": "" if row[5] is None else str(row[5]),
-        "updated_at": row[6],
+        "event_class": str(row[6]) if row[6] else "unclassified",
+        "review_pass": 1 if row[1] is None else max(1, int(row[1])),
+        "notes": "" if row[2] is None else str(row[2]),
+        "status": "unreviewed" if row[3] is None else str(row[3]),
+        "reviewer": "" if row[4] is None else str(row[4]),
+        "updated_at": row[5],
     }
 
 
@@ -692,7 +616,6 @@ def save_review(
     *,
     candidate_id: str,
     interest_score: int,
-    interest_reason: list[str],
     event_class: str = "unclassified",
     review_pass: int,
     notes: str,
@@ -703,15 +626,13 @@ def save_review(
     ts = _utc_now()
     score_int = int(np.clip(int(interest_score), 0, 5))
     pass_int = max(1, int(review_pass))
-    reason_json = json.dumps(sorted(set(interest_reason)))
     ec = str(event_class) if event_class else "unclassified"
     conn.execute(
         """
-        INSERT INTO reviews (candidate_id, interest_score, interest_reason, event_class, review_pass, notes, status, reviewer, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO reviews (candidate_id, interest_score, event_class, review_pass, notes, status, reviewer, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(candidate_id) DO UPDATE SET
             interest_score=excluded.interest_score,
-            interest_reason=excluded.interest_reason,
             event_class=excluded.event_class,
             review_pass=excluded.review_pass,
             notes=excluded.notes,
@@ -719,11 +640,10 @@ def save_review(
             reviewer=excluded.reviewer,
             updated_at=excluded.updated_at
         """,
-        (candidate_id, score_int, reason_json, ec, pass_int, notes, status, reviewer, ts),
+        (candidate_id, score_int, ec, pass_int, notes, status, reviewer, ts),
     )
     payload = {
         "interest_score": score_int,
-        "interest_reason": sorted(set(interest_reason)),
         "event_class": ec,
         "review_pass": pass_int,
         "notes": notes,
@@ -774,7 +694,41 @@ def find_plot_image(payload: dict, plot_dir: Path) -> Path | None:
     keys = [k for k in keys if not (k in seen or seen.add(k))]
     for key in keys:
         for ext in ("*.png", "*.jpg", "*.jpeg", "*.pdf"):
-            matches = list(plot_dir.rglob(f"*{key}*{ext[1:]}"))
+            matches = sorted(plot_dir.rglob(f"*{key}*{ext[1:]}"), key=lambda p: str(p))
+            if not matches:
+                continue
+            non_phase = [p for p in matches if "phase" not in p.stem.lower()]
+            return non_phase[0] if non_phase else matches[0]
+    return None
+
+
+def find_phase_plot_image(payload: dict, plot_dir: Path) -> Path | None:
+    """Locate a phase-folded plot image for a candidate."""
+    if not plot_dir.exists():
+        return None
+    keys = []
+    for k in ("candidate_id", "asas_sn_id"):
+        if k in payload and payload[k] is not None:
+            keys.append(str(payload[k]))
+    lc_path = payload.get("path")
+    if lc_path:
+        keys.append(Path(str(lc_path)).stem)
+    seen = set()
+    keys = [k for k in keys if not (k in seen or seen.add(k))]
+
+    for key in keys:
+        phase_patterns = (
+            f"*{key}*candidate_phase*.png",
+            f"*{key}*phase*.png",
+            f"*{key}*candidate_phase*.jpg",
+            f"*{key}*phase*.jpg",
+            f"*{key}*candidate_phase*.jpeg",
+            f"*{key}*phase*.jpeg",
+            f"*{key}*candidate_phase*.pdf",
+            f"*{key}*phase*.pdf",
+        )
+        for pattern in phase_patterns:
+            matches = sorted(plot_dir.rglob(pattern), key=lambda p: str(p))
             if matches:
                 return matches[0]
     return None
@@ -797,7 +751,6 @@ def export_reviews(conn: sqlite3.Connection, out_path: Path, only_reviewed: bool
             c.dip_best_log_bf,
             c.jump_best_log_bf,
             r.interest_score,
-            r.interest_reason,
             r.event_class,
             r.review_pass,
             r.notes,
