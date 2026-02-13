@@ -34,6 +34,9 @@ def _base_args() -> argparse.Namespace:
         skip_periodic_catalog_validation=False,
         periodic_catalog_max_sep=3.0,
         periodic_catalog_reject=False,
+        phase_plot_max_sig=0.01,
+        phase_plot_min_power=0.3,
+        phase_plot_allow_alias=False,
         verbose=False,
     )
 
@@ -54,6 +57,10 @@ def test_build_post_filter_kwargs_defaults_match_pipeline_behavior() -> None:
     assert kwargs["periodic_catalog_flag_only"] is True
     assert kwargs["periodicity_flag_only"] is True
 
+    assert kwargs["phase_plot_max_sig"] == 0.01
+    assert kwargs["phase_plot_min_power"] == 0.3
+    assert kwargs["phase_plot_allow_alias"] is False
+
 
 def test_build_post_filter_kwargs_respects_cli_overrides() -> None:
     args = _base_args()
@@ -69,6 +76,9 @@ def test_build_post_filter_kwargs_respects_cli_overrides() -> None:
     args.periodicity_reject = True
     args.periodicity_workers = 2
     args.periodicity_checkpoint_dir = Path("output/checkpoints")
+    args.phase_plot_max_sig = 0.05
+    args.phase_plot_min_power = 0.5
+    args.phase_plot_allow_alias = True
     args.skip_gaia_ruwe_validation = True
     args.gaia_reject = True
     args.skip_periodic_catalog_validation = True
@@ -89,6 +99,10 @@ def test_build_post_filter_kwargs_respects_cli_overrides() -> None:
     assert kwargs["periodicity_flag_only"] is False
     assert kwargs["periodicity_workers"] == 2
     assert kwargs["periodicity_checkpoint_dir"] == Path("output/checkpoints")
+
+    assert kwargs["phase_plot_max_sig"] == 0.05
+    assert kwargs["phase_plot_min_power"] == 0.5
+    assert kwargs["phase_plot_allow_alias"] is True
 
     assert kwargs["apply_gaia_ruwe_validation"] is False
     assert kwargs["gaia_flag_only"] is False
