@@ -9,9 +9,9 @@ from astropy import units as u
 from astropy.coordinates import SkyCoord
 from astropy.time import Time
 
-DEFAULT_ASASSN_PATH = Path(__file__).parent.parent.parent / "input" / "vsx" / "asassn_x_vsx_matches_20250919_2252.csv"
-DEFAULT_VSX_PATH = Path(__file__).parent.parent.parent / "input" / "vsx" / "vsxcat.090525.csv"
-DEFAULT_OUTPUT_DIR = Path("/home/lenhart.106/code/malca/output")
+DEFAULT_ASASSN_PATH = Path(__file__).parent.parent.parent / "input" / "vsx" / "asassn_catalog.csv"
+DEFAULT_VSX_PATH = Path(__file__).parent.parent.parent / "input" / "vsx" / "vsx_cleaned.csv"
+DEFAULT_OUTPUT_DIR = Path(__file__).parent.parent.parent / "input" / "vsx"
 
 
 def load_asassn_catalog(path: Path) -> pd.DataFrame:
@@ -124,6 +124,30 @@ def main(
     return write_crossmatch(matches, output_dir=output_dir)
 
 
+def cli():
+    """CLI entry point for ``malca vsx-crossmatch``."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Crossmatch ASAS-SN catalog with VSX catalog."
+    )
+    parser.add_argument("--asassn-csv", type=Path, default=DEFAULT_ASASSN_PATH,
+                        help=f"Cleaned ASAS-SN index CSV (default: {DEFAULT_ASASSN_PATH})")
+    parser.add_argument("--vsx-csv", type=Path, default=DEFAULT_VSX_PATH,
+                        help=f"Cleaned VSX catalog CSV (default: {DEFAULT_VSX_PATH})")
+    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR,
+                        help=f"Output directory (default: {DEFAULT_OUTPUT_DIR})")
+    parser.add_argument("--radius", type=float, default=3.0,
+                        help="Match radius in arcseconds (default: 3.0)")
+    parser.add_argument("--stamp", type=str, default=None,
+                        help="Timestamp suffix for output filename (default: current time)")
+    args = parser.parse_args()
+
+    matches = crossmatch_asassn_vsx(args.asassn_csv, args.vsx_csv,
+                                     match_radius=args.radius * u.arcsec)
+    path = write_crossmatch(matches, output_dir=args.output_dir, stamp=args.stamp)
+    print(f"Wrote crossmatch catalog to {path}")
+
+
 if __name__ == "__main__":
-    OUTPUT_PATH = main()
-    print(f"Wrote crossmatch catalog to {OUTPUT_PATH}")
+    cli()

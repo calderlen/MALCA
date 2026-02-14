@@ -550,6 +550,18 @@ malca vsx-filter --stamp 20260213_120000   # timestamped output filenames
 - Concatenates masked ASAS-SN index CSVs from all magnitude bins
 - Outputs `asassn_catalog.csv` and `vsx_cleaned.csv` (or timestamped variants with `--stamp`)
 
+#### malca vsx-crossmatch
+
+Crossmatch ASAS-SN sources with VSX by position (with proper-motion correction):
+```bash
+malca vsx-crossmatch --help
+malca vsx-crossmatch --asassn-csv input/vsx/asassn_catalog.csv --vsx-csv input/vsx/vsx_cleaned.csv
+malca vsx-crossmatch --radius 5.0 --stamp 20260213_120000
+```
+- Propagates ASAS-SN coordinates from epoch 2016.0 to 2000.0 using proper motions
+- Default match radius is 3 arcseconds
+- Outputs `asassn_x_vsx_matches_{stamp}.csv` to `input/vsx/`
+
 ## Output Directory Structure
 
 ### Integrated Pipeline
