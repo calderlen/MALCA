@@ -1294,7 +1294,7 @@ def main():
             df_post_filtered = apply_post_filters(df_events, **post_filter_kwargs)
 
             # Save filtered results
-            post_filter_output = results_dir / "lc_events_filtered.parquet"
+            post_filter_output = results_dir / f"lc_events_filtered_{mag_bin_tag}.parquet"
             save_table(df_post_filtered, post_filter_output)
             log(f"Post-filtered results saved to {post_filter_output}")
 
@@ -1328,7 +1328,7 @@ def main():
             log("\n=== Step 6: Enriching with light curve stats ===")
             try:
                 # Enrichment now runs directly from post-filter output
-                post_filter_output = results_dir / "lc_events_filtered.parquet"
+                post_filter_output = results_dir / f"lc_events_filtered_{mag_bin_tag}.parquet"
 
                 if post_filter_output.exists():
                     df_to_enrich = load_table(post_filter_output)
@@ -1347,7 +1347,7 @@ def main():
                         log(f"Enriching {len(df_passed)} candidates with compute_stats...")
 
                         # Checkpoint support
-                        enrich_checkpoint = results_dir / "lc_events_enriched_CHECKPOINT.parquet"
+                        enrich_checkpoint = results_dir / f"lc_events_enriched_{mag_bin_tag}_CHECKPOINT.parquet"
                         if args.overwrite and enrich_checkpoint.exists():
                             enrich_checkpoint.unlink()
 
@@ -1418,7 +1418,7 @@ def main():
                             df_enriched = df_enriched.drop_duplicates(subset=["path"], keep="last")
 
                         # Save enriched results
-                        enrich_output = results_dir / "lc_events_enriched.parquet"
+                        enrich_output = results_dir / f"lc_events_enriched_{mag_bin_tag}.parquet"
                         save_table(df_enriched, enrich_output)
                         log(f"Enriched results saved to {enrich_output}")
 
@@ -1453,7 +1453,7 @@ def main():
         else:
             log("\n=== Step 7: Generating candidate plots ===")
             try:
-                post_filter_output = results_dir / "lc_events_filtered.parquet"
+                post_filter_output = results_dir / f"lc_events_filtered_{mag_bin_tag}.parquet"
                 if not post_filter_output.exists():
                     print(f"Warning: No post-filter output found at {post_filter_output}; skipping postprocess plots.")
                 else:
@@ -1506,6 +1506,29 @@ def main():
                     traceback.print_exc()
 
 
+
+    # Merge per-mag-bin outputs into canonical (untagged) files for downstream stages.
+    # Only merge when entering downstream/home phase — NOT during concurrent cluster runs.
+    if run_downstream:
+        log("\n=== Merging per-mag-bin outputs ===")
+        for merge_prefix in ("lc_events_results", "lc_events_filtered", "lc_events_enriched"):
+            tagged_files = sorted(results_dir.glob(f"{merge_prefix}_*.parquet"))
+            # Exclude checkpoint and temp files from merging
+            tagged_files = [
+                f for f in tagged_files
+                if "_CHECKPOINT" not in f.name and "_PROCESSED" not in f.name and not f.name.endswith(".tmp")
+            ]
+            merged_path = results_dir / f"{merge_prefix}.parquet"
+            if tagged_files:
+                try:
+                    dfs = [pd.read_parquet(f) for f in tagged_files]
+                    merged = pd.concat(dfs, ignore_index=True)
+                    if "path" in merged.columns:
+                        merged = merged.drop_duplicates(subset=["path"], keep="last")
+                    save_table(merged, merged_path)
+                    log(f"Merged {len(tagged_files)} files into {merged_path} ({len(merged)} rows)")
+                except Exception as e:
+                    log(f"Warning: could not merge {merge_prefix} files: {e}")
 
     post_filter_output = results_dir / "lc_events_filtered.parquet"
     has_post_filter_output = post_filter_output.exists()
