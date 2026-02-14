@@ -9,8 +9,8 @@ from astropy import units as u
 from astropy.coordinates import SkyCoord
 from astropy.time import Time
 
-DEFAULT_ASASSN_PATH = Path(__file__).parent.parent / "input" / "vsx" / "asassn_x_vsx_matches_20250919_2252.csv"
-DEFAULT_VSX_PATH = Path(__file__).parent.parent / "input" / "vsx" / "vsxcat.090525.csv"
+DEFAULT_ASASSN_PATH = Path(__file__).parent.parent.parent / "input" / "vsx" / "asassn_x_vsx_matches_20250919_2252.csv"
+DEFAULT_VSX_PATH = Path(__file__).parent.parent.parent / "input" / "vsx" / "vsxcat.090525.csv"
 DEFAULT_OUTPUT_DIR = Path("/home/lenhart.106/code/malca/output")
 
 

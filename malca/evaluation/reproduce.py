@@ -103,7 +103,7 @@ def _parse_tzanidakis_candidates() -> list[dict[str, object]]:
     Parse Tzanidakis+2025 candidates from the fixed-width .sty file.
     Returns a list of candidate dictionaries with gaia_id (Gaia DR3 source_id).
     """
-    input_path = Path(__file__).parent.parent / "input" / "Tzanidakis+2025.sty"
+    input_path = Path(__file__).parent.parent.parent / "input" / "Tzanidakis+2025.sty"
     if not input_path.exists():
         return []
     

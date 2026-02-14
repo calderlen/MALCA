@@ -10,8 +10,8 @@ MAG_BINS = ("12_12.5", "12.5_13", "13_13.5", "13.5_14", "14_14.5", "14.5_15")
 
 DEFAULT_LC_DIR = Path("/data/poohbah/1/assassin/rowan.90/lcsv2")
 DEFAULT_LC_DIR_MASKED = Path("/data/poohbah/1/assassin/lenhart/code/calder/lcsv2_masked")
-DEFAULT_VSX_FILE = Path(__file__).parent.parent / "input" / "vsx" / "vsxcat.090525.csv"
-DEFAULT_OUTPUT_DIR = Path(__file__).parent.parent / "input" / "vsx"
+DEFAULT_VSX_FILE = Path(__file__).parent.parent.parent / "input" / "vsx" / "vsxcat.090525.csv"
+DEFAULT_OUTPUT_DIR = Path(__file__).parent.parent.parent / "input" / "vsx"
 
 
 colspecs = [
