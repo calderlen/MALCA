@@ -1633,18 +1633,12 @@ def main():
     errors = []
     
     if args.chunk_size is None:
-        if len(expanded_inputs) < 10000: chunk_size = 500
-        elif len(expanded_inputs) < 100000: chunk_size = 1000
-        else: chunk_size = 5000
+        chunk_size = 100000
         _log(f"Auto-selected chunk size: {chunk_size}", quiet)
     elif args.chunk_size > 0:
         chunk_size = args.chunk_size
     else:
         chunk_size = None
-
-    if output_format == "csv" and chunk_size is not None and args.chunk_size == 10000:
-        # default to per-LC append for the line-oriented CSV mode
-        chunk_size = 1
 
     total_written = 0
     total_dip_sig = 0
