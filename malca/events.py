@@ -1682,13 +1682,20 @@ def main():
             table = pa.Table.from_pandas(df_chunk, preserve_index=False)
             self.path.parent.mkdir(parents=True, exist_ok=True)
             if self.append:
-                existing = pq.read_table(self.path)
-                if existing.schema.equals(table.schema):
-                    table = pa.concat_tables([existing, table])
-                else:
-                    _log(f"Schema mismatch in {self.path}; discarding old checkpoint data.", False)
-                    self.schema_invalidated = True
-            pq.write_table(table, self.path, compression=PARQUET_OUTPUT_COMPRESSION)
+                try:
+                    existing = pq.read_table(self.path)
+                except Exception as e:
+                    _log(f"Warning: could not read existing {self.path}, starting fresh: {e}", False)
+                    existing = None
+                if existing is not None:
+                    if existing.schema.equals(table.schema):
+                        table = pa.concat_tables([existing, table])
+                    else:
+                        _log(f"Schema mismatch in {self.path}; discarding old checkpoint data.", False)
+                        self.schema_invalidated = True
+            tmp_path = self.path.with_suffix('.parquet.tmp')
+            pq.write_table(table, tmp_path, compression=PARQUET_OUTPUT_COMPRESSION)
+            os.replace(tmp_path, self.path)
             self.append = True
 
         def close(self):
