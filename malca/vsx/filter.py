@@ -9,7 +9,7 @@ from tqdm.auto import tqdm
 MAG_BINS = ("12_12.5", "12.5_13", "13_13.5", "13.5_14", "14_14.5", "14.5_15")
 
 DEFAULT_LC_DIR = Path("/data/poohbah/1/assassin/rowan.90/lcsv2")
-DEFAULT_LC_DIR_MASKED = Path("/data/poohbah/1/assassin/lenhart/code/calder/lcsv2_masked")
+DEFAULT_LC_DIR_MASKED = Path("/data/poohbah/1/assassin/lenhart/malca-older/calder/lcsv2_masked")
 DEFAULT_VSX_FILE = Path(__file__).parent.parent.parent / "input" / "vsx" / "vsxcat.090525.csv"
 DEFAULT_OUTPUT_DIR = Path(__file__).parent.parent.parent / "input" / "vsx"
 
@@ -308,16 +308,45 @@ def main(
     lc_dir: Path | str = DEFAULT_LC_DIR,
     masked_dir: Path | str = DEFAULT_LC_DIR_MASKED,
     output_dir: Path | str = DEFAULT_OUTPUT_DIR,
+    stamp: str | None = None,
 ) -> tuple[Path, Path]:
     """Run VSX filtering and ASAS-SN index cleaning and write cleaned CSVs."""
     df_vsx_raw = load_vsx_catalog(vsx_file)
     df_vsx_clean = filter_vsx(df_vsx_raw)
     df_asassn_clean = load_masked_indexes(masked_dir)
-    _ = collect_present_ids(lc_dir)                                            
-    return write_clean_outputs(df_asassn_clean, df_vsx_clean, output_dir=output_dir)
+    _ = collect_present_ids(lc_dir)
+    return write_clean_outputs(df_asassn_clean, df_vsx_clean, output_dir=output_dir, stamp=stamp)
+
+
+def cli():
+    """CLI entry point for ``malca vsx-filter``."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Build cleaned ASAS-SN index and filtered VSX catalog."
+    )
+    parser.add_argument("--vsx-file", type=Path, default=DEFAULT_VSX_FILE,
+                        help=f"Raw VSX catalog (default: {DEFAULT_VSX_FILE})")
+    parser.add_argument("--masked-dir", type=Path, default=DEFAULT_LC_DIR_MASKED,
+                        help=f"Masked light-curve index root (default: {DEFAULT_LC_DIR_MASKED})")
+    parser.add_argument("--lc-dir", type=Path, default=DEFAULT_LC_DIR,
+                        help=f"Light-curve root for present-ID check (default: {DEFAULT_LC_DIR})")
+    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR,
+                        help=f"Output directory (default: {DEFAULT_OUTPUT_DIR})")
+    parser.add_argument("--stamp", type=str, default=None,
+                        help="Timestamp suffix for output filenames (default: no stamp)")
+    args = parser.parse_args()
+
+    asas_path, vsx_path = main(
+        vsx_file=args.vsx_file,
+        lc_dir=args.lc_dir,
+        masked_dir=args.masked_dir,
+        output_dir=args.output_dir,
+        stamp=args.stamp,
+    )
+    print(f"Wrote ASAS-SN cleaned index to {asas_path}")
+    print(f"Wrote VSX cleaned catalog to {vsx_path}")
 
 
 if __name__ == "__main__":
-    asas_path, vsx_path = main()
-    print(f"Wrote ASAS-SN cleaned index to {asas_path}")
-    print(f"Wrote VSX cleaned catalog to {vsx_path}")
+    cli()

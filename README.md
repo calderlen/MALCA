@@ -538,6 +538,18 @@ malca ml_train --db output/review/review.db --out-dir output/ml
 - Trains a LightGBM classifier on `event_class` labels from the review database
 - Outputs feature importance rankings and cross-validation metrics
 
+#### malca vsx-filter
+
+Build the cleaned ASAS-SN index and filtered VSX catalog:
+```bash
+malca vsx-filter --help
+malca vsx-filter --vsx-file input/vsx/vsxcat.090525.csv --masked-dir /path/to/lcsv2_masked --output-dir input/vsx
+malca vsx-filter --stamp 20260213_120000   # timestamped output filenames
+```
+- Reads the raw fixed-width VSX catalog and filters out unwanted variability classes (eclipsing binaries, supernovae, AGN, etc.)
+- Concatenates masked ASAS-SN index CSVs from all magnitude bins
+- Outputs `asassn_catalog.csv` and `vsx_cleaned.csv` (or timestamped variants with `--stamp`)
+
 ## Output Directory Structure
 
 ### Integrated Pipeline
