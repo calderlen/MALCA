@@ -4,7 +4,7 @@ import math
 
 # Parallelism
 WORKERS = 10
-BATCH_SIZE = 100000
+BATCH_SIZE = 10000
 
 # Bayesian detection
 TRIGGER_MODE = "posterior_prob"

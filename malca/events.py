@@ -1633,7 +1633,7 @@ def main():
     errors = []
     
     if args.chunk_size is None:
-        chunk_size = 100000
+        chunk_size = 10000
         _log(f"Auto-selected chunk size: {chunk_size}", quiet)
     elif args.chunk_size > 0:
         chunk_size = args.chunk_size

@@ -84,7 +84,7 @@ def _compute_stats_parallel(
     n_workers: int = 4,
     show_tqdm: bool = False,
     checkpoint_path: str | Path | None = None,
-    chunk_size: int = 100000,
+    chunk_size: int = 10000,
 ) -> pd.DataFrame:
     """
     Compute stats for all rows in parallel using ProcessPoolExecutor.
@@ -96,7 +96,7 @@ def _compute_stats_parallel(
         Path to parquet file for saving/resuming progress. If provided and file exists,
         already-computed stats will be loaded and only missing rows will be processed.
     chunk_size : int
-        Number of rows to process before saving a checkpoint (default 100000).
+        Number of rows to process before saving a checkpoint (default 10000).
     """
     df_with_stats = df.copy()
 
@@ -575,7 +575,7 @@ def filter_camera_medians(
     n_workers: int = 1,
     rejected_log_csv: str | Path | None = None,
     checkpoint_path: str | Path | None = None,
-    chunk_size: int = 100000,
+    chunk_size: int = 10000,
 ) -> pd.DataFrame:
     """
     Identify cameras with median magnitudes outside the expected mag bin range.
@@ -745,7 +745,7 @@ def apply_pre_filters(
     rejected_log_csv: str | Path | None = "rejected_pre_filter.csv",
     # Checkpoint for stats computation
     stats_checkpoint: str | Path | None = None,
-    stats_chunk_size: int = 100000,
+    stats_chunk_size: int = 10000,
 ) -> pd.DataFrame:
     """
     Apply pre-filters before running events.py.
@@ -772,7 +772,7 @@ def apply_pre_filters(
         Path to parquet file for checkpointing stats computation. If provided,
         progress can be resumed if interrupted.
     stats_chunk_size : int
-        Number of rows to process before saving checkpoint (default 100000).
+        Number of rows to process before saving checkpoint (default 10000).
 
     Returns
     -------

@@ -1362,7 +1362,7 @@ def main():
                             except Exception as e:
                                 log(f"Warning: could not load enrichment checkpoint: {e}")
 
-                        ENRICH_SAVE_INTERVAL = 100000
+                        ENRICH_SAVE_INTERVAL = 10000
                         new_count = 0
                         for idx, row in tqdm(df_passed.iterrows(), total=len(df_passed),
                                             desc="compute_stats", disable=not args.verbose):
