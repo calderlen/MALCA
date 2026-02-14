@@ -305,7 +305,6 @@ def write_clean_outputs(
 
 def main(
     vsx_file: Path | str = DEFAULT_VSX_FILE,
-    lc_dir: Path | str = DEFAULT_LC_DIR,
     masked_dir: Path | str = DEFAULT_LC_DIR_MASKED,
     output_dir: Path | str = DEFAULT_OUTPUT_DIR,
     stamp: str | None = None,
@@ -314,7 +313,6 @@ def main(
     df_vsx_raw = load_vsx_catalog(vsx_file)
     df_vsx_clean = filter_vsx(df_vsx_raw)
     df_asassn_clean = load_masked_indexes(masked_dir)
-    _ = collect_present_ids(lc_dir)
     return write_clean_outputs(df_asassn_clean, df_vsx_clean, output_dir=output_dir, stamp=stamp)
 
 
@@ -329,8 +327,6 @@ def cli():
                         help=f"Raw VSX catalog (default: {DEFAULT_VSX_FILE})")
     parser.add_argument("--masked-dir", type=Path, default=DEFAULT_LC_DIR_MASKED,
                         help=f"Masked light-curve index root (default: {DEFAULT_LC_DIR_MASKED})")
-    parser.add_argument("--lc-dir", type=Path, default=DEFAULT_LC_DIR,
-                        help=f"Light-curve root for present-ID check (default: {DEFAULT_LC_DIR})")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR,
                         help=f"Output directory (default: {DEFAULT_OUTPUT_DIR})")
     parser.add_argument("--stamp", type=str, default=None,
@@ -339,7 +335,6 @@ def cli():
 
     asas_path, vsx_path = main(
         vsx_file=args.vsx_file,
-        lc_dir=args.lc_dir,
         masked_dir=args.masked_dir,
         output_dir=args.output_dir,
         stamp=args.stamp,
