@@ -274,7 +274,7 @@ def export_bundle_zip(bundle_zip: Path, out_dir: Path, include_all: bool = False
     if include_all:
         include_rel_paths.append("bundle_assets/asassn_index_full.parquet")
     include_globs = [
-        "results/lc_events_results.*",
+        "results/lc_events_results*",
     ]
     include_dirs = [
         "results",
@@ -715,7 +715,7 @@ def main():
             )
 
     if args.output is None:
-        events_output = results_dir / "lc_events_results.parquet"
+        events_output = results_dir / f"lc_events_results_{mag_bin_tag}.parquet"
     else:
         events_output = Path(args.output).expanduser()
         if args.out_dir is not None and not events_output.is_absolute():
