@@ -324,7 +324,7 @@ def export_bundle_zip(bundle_zip: Path, out_dir: Path, include_all: bool = False
     print(f"Bundling {total_files} files with ZIP_DEFLATED compression...")
 
     bundled_paths: list[str] = []
-    with zipfile.ZipFile(bundle_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+    with zipfile.ZipFile(bundle_zip, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
         for p in ordered_files:
             arcname = str(p.relative_to(out_dir))
             zf.write(p, arcname=arcname)
