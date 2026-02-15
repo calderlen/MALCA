@@ -213,13 +213,16 @@ def import_bundle_zip(bundle_zip: Path, out_dir: Path) -> None:
         zf.extractall(out_dir)
 
 
-def _collect_bundle_lightcurve_files(out_dir: Path) -> list[tuple[Path, str]]:
+def _collect_bundle_lightcurve_files(out_dir: Path, mag_bin_tag: str | None = None) -> list[tuple[Path, str]]:
     """Collect candidate .dat2/.raw2 files to include in bundle assets.
 
     Source files are read directly from their original location and are never
     modified in place.
     """
-    filtered_candidates = out_dir / "results" / "lc_events_filtered.parquet"
+    if mag_bin_tag:
+        filtered_candidates = out_dir / "results" / f"lc_events_filtered_{mag_bin_tag}.parquet"
+    else:
+        filtered_candidates = out_dir / "results" / "lc_events_filtered.parquet"
     if not filtered_candidates.exists():
         return []
 
@@ -255,7 +258,7 @@ def _collect_bundle_lightcurve_files(out_dir: Path) -> list[tuple[Path, str]]:
     return files_to_bundle
 
 
-def export_bundle_zip(bundle_zip: Path, out_dir: Path, include_all: bool = False) -> list[str]:
+def export_bundle_zip(bundle_zip: Path, out_dir: Path, include_all: bool = False, mag_bin_tag: str | None = None) -> list[str]:
     """Create transfer bundle zip from a pipeline out_dir."""
     bundle_zip = Path(bundle_zip).expanduser()
     bundle_zip.parent.mkdir(parents=True, exist_ok=True)
@@ -271,13 +274,18 @@ def export_bundle_zip(bundle_zip: Path, out_dir: Path, include_all: bool = False
         "results/lc_events_neighbors.parquet",
         "results/lc_events_spectra.parquet",
     ]
+    if mag_bin_tag:
+        include_rel_paths.extend([
+            f"results/lc_events_results_{mag_bin_tag}.parquet",
+            f"results/lc_events_filtered_{mag_bin_tag}.parquet",
+            f"results/lc_events_enriched_{mag_bin_tag}.parquet",
+        ])
     if include_all:
         include_rel_paths.append("bundle_assets/asassn_index_full.parquet")
     include_globs = [
-        "results/lc_events_results*",
+        f"results/lc_events_results_{mag_bin_tag}*" if mag_bin_tag else "results/lc_events_results*",
     ]
     include_dirs = [
-        "results",
         "plots",
     ]
     if include_all:
@@ -304,7 +312,7 @@ def export_bundle_zip(bundle_zip: Path, out_dir: Path, include_all: bool = False
     # Prevent accidental self-inclusion if bundle path is inside out_dir.
     files_to_add.discard(bundle_zip)
 
-    lightcurve_files = _collect_bundle_lightcurve_files(out_dir)
+    lightcurve_files = _collect_bundle_lightcurve_files(out_dir, mag_bin_tag=mag_bin_tag)
 
     if not files_to_add and not lightcurve_files:
         raise FileNotFoundError(f"No bundle files found under {out_dir}")
@@ -1858,7 +1866,7 @@ def main():
                     traceback.print_exc()
 
     if args.export_bundle_enabled:
-        export_bundle_path = args.export_bundle if args.export_bundle is not None else out_dir / f"{out_dir.name}_bundle.zip"
+        export_bundle_path = args.export_bundle if args.export_bundle is not None else out_dir / f"{out_dir.name}_bundle_{mag_bin_tag}.zip"
         log(f"\n=== Exporting bundle to {export_bundle_path} ===")
         try:
             if args.full_bundle:
@@ -1875,7 +1883,7 @@ def main():
                         f"Required index file not found for bundle export: {source_index_file}"
                     )
 
-            bundled = export_bundle_zip(export_bundle_path, out_dir, include_all=args.full_bundle)
+            bundled = export_bundle_zip(export_bundle_path, out_dir, include_all=args.full_bundle, mag_bin_tag=mag_bin_tag)
             log(f"Exported bundle to {export_bundle_path.expanduser()} with {len(bundled)} files")
         except Exception as e:
             print(f"Error creating export bundle: {e}")
