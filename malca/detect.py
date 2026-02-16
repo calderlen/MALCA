@@ -524,6 +524,7 @@ def main():
     parser.add_argument("--run-characterize", dest="run_characterize", action="store_true", help="Run Gaia DR3 characterization after post_filter (default: enabled)")
     parser.add_argument("--no-run-characterize", dest="run_characterize", action="store_false", help="Skip characterization step")
     parser.add_argument("--gaia-cache", type=Path, default=None, help="Path to Gaia query cache file (parquet). Default: <out_dir>/gaia_cache/gaia_cache.parquet")
+    parser.add_argument("--gaia-fetch-chunk-size", type=int, default=GAIA_CHUNK_SIZE, help="Gaia fetch chunk size for pre-characterization local catalog sync (default: 1000)")
     parser.add_argument("--characterize-crossmatch", type=Path, default=VSX_CROSSMATCH_PATH, help="ASAS-SN x VSX crossmatch file for characterize step")
     parser.add_argument("--characterize-chunk-size", type=int, default=GAIA_CHUNK_SIZE, help="Gaia query chunk size for characterize step")
     parser.add_argument("--characterize-starhorse", type=str, default="tap", help="StarHorse mode/path for characterize step (default: tap)")
@@ -932,6 +933,7 @@ def main():
             "run_characterize": args.run_characterize,
             "run_dust": args.run_dust,
             "gaia_cache": str(args.gaia_cache),
+            "gaia_fetch_chunk_size": args.gaia_fetch_chunk_size,
             "characterize_crossmatch": str(args.characterize_crossmatch),
             "characterize_chunk_size": args.characterize_chunk_size,
             "characterize_starhorse": args.characterize_starhorse,
@@ -1636,7 +1638,7 @@ def main():
                 args.characterize_crossmatch.expanduser(),
             )
             if gaia_ids:
-                fetch_gaia_catalog(gaia_ids, output_path=gaia_catalog_path)
+                fetch_gaia_catalog(gaia_ids, output_path=gaia_catalog_path, chunk_size=args.gaia_fetch_chunk_size)
             else:
                 log("No Gaia IDs found; skipping Gaia fetch.")
             log(f"Gaia catalog check completed in {time.perf_counter() - gaia_fetch_started:.1f}s")

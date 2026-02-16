@@ -1397,6 +1397,16 @@ Example usage:
     if "gaia_id" not in available_cols:
         raise ValueError(f"Index file missing gaia_id column")
 
+    # Preserve Gaia IDs as exact digit strings (avoid float/scientific notation).
+    gaia_series = pd.to_numeric(index_df["gaia_id"], errors="coerce")
+    index_df["gaia_id"] = gaia_series.astype("Int64").astype(str)
+    index_df.loc[gaia_series.isna(), "gaia_id"] = pd.NA
+
+    # Replace any pre-existing joined columns from prior runs to avoid _x/_y suffixes.
+    existing_join_cols = [c for c in join_cols if c in df.columns]
+    if existing_join_cols:
+        df = df.drop(columns=existing_join_cols)
+
     df = df.merge(
         index_df[[join_col] + available_cols].drop_duplicates(subset=[join_col]),
         on=join_col,

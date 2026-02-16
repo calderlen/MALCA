@@ -12,11 +12,14 @@ Usage:
 """
 
 import argparse
+import hashlib
+import json
 import time
 from pathlib import Path
 
 import pandas as pd
 import pyvo
+from astropy.table import Table
 from tqdm import tqdm
 
 from malca.config.config_characterize import GAIA_CHUNK_SIZE
@@ -26,9 +29,7 @@ from malca.config.config_paths import (
     VSX_CROSSMATCH_PATH,
 )
 
-# Same ADQL query used by the old query_gaia_by_ids() in characterize.py
-# ESA Gaia archive hosts gaiadr3.gaia_source, crossmatch tables, and the
-# external photometry catalogs (gaiadr1.tmass_original_valid, gaiadr1.allwise_original_valid).
+# Gaia ADQL query executed via TAP async upload chunks.
 _GAIA_QUERY_TEMPLATE = """
 SELECT
     g.source_id,
@@ -47,7 +48,9 @@ SELECT
     aw.w1mpro AS unwise_w1, aw.w2mpro AS unwise_w2,
     aw.w1mpro_error AS unwise_w1_err, aw.w2mpro_error AS unwise_w2_err
 
-FROM gaiadr3.gaia_source AS g
+FROM TAP_UPLOAD.upload_table AS u
+JOIN gaiadr3.gaia_source AS g
+    ON g.source_id = u.source_id
 
 LEFT JOIN gaiadr3.tmass_psc_xsc_best_neighbour AS xm_tm
     ON g.source_id = xm_tm.source_id
@@ -58,12 +61,34 @@ LEFT JOIN gaiadr3.allwise_best_neighbour AS xm_aw
     ON g.source_id = xm_aw.source_id
 LEFT JOIN gaiadr1.allwise_original_valid AS aw
     ON xm_aw.original_ext_source_id = aw.designation
-
-WHERE g.source_id IN ({ids_str})
 """
 
 MAX_RETRIES = 3
 RETRY_BACKOFF_BASE = 2  # seconds
+
+
+def _normalize_gaia_ids(values: list[object]) -> list[str]:
+    """Normalize mixed-type Gaia IDs to digit strings."""
+    normalized: list[str] = []
+    seen: set[str] = set()
+
+    for value in values:
+        if bool(pd.isna(value)):
+            continue
+
+        s = str(value).strip()
+        if not s:
+            continue
+
+        gid: str | None = s if s.isdigit() else None
+
+        if gid is None:
+            continue
+        if gid not in seen:
+            seen.add(gid)
+            normalized.append(gid)
+
+    return normalized
 
 
 def _extract_gaia_ids(
@@ -79,9 +104,10 @@ def _extract_gaia_ids(
 
     if "gaia_id" in df.columns:
         # Already has gaia_id (e.g. from a previous merge)
-        gaia_ids = df["gaia_id"].dropna().astype(str).unique().tolist()
-        print(f"Found {len(gaia_ids)} Gaia IDs directly in input file.")
-        return [g for g in gaia_ids if g.isdigit()]
+        raw_gaia_ids = df["gaia_id"].dropna().tolist()
+        gaia_ids = _normalize_gaia_ids(raw_gaia_ids)
+        print(f"Found {len(raw_gaia_ids)} Gaia IDs directly in input file; normalized to {len(gaia_ids)} unique valid IDs.")
+        return gaia_ids
 
     if "asas_sn_id" not in df.columns:
         raise ValueError(
@@ -101,7 +127,8 @@ def _extract_gaia_ids(
     use_cols = ["asas_sn_id"] + [
         c for c in xmatch_cols if c in header and c != "asas_sn_id"
     ]
-    df_xmatch = pd.read_csv(xmatch_path, usecols=use_cols, dtype=str)
+    use_cols_set = set(use_cols)
+    df_xmatch = pd.read_csv(xmatch_path, usecols=lambda c: c in use_cols_set, dtype=str)
 
     df["asas_sn_id"] = df["asas_sn_id"].astype(str)
     df_xmatch["asas_sn_id"] = df_xmatch["asas_sn_id"].astype(str)
@@ -110,20 +137,86 @@ def _extract_gaia_ids(
     if "gaia_id" not in df_merged.columns:
         raise ValueError("Crossmatch file does not contain 'gaia_id' column.")
 
-    gaia_ids = df_merged["gaia_id"].dropna().astype(str).unique().tolist()
-    gaia_ids = [g for g in gaia_ids if g.isdigit()]
+    gaia_ids = _normalize_gaia_ids(df_merged["gaia_id"].dropna().tolist())
     print(f"Extracted {len(gaia_ids)} unique Gaia IDs from {len(df_merged)} candidates.")
     return gaia_ids
 
 
-def _fetch_chunk(tap_service: pyvo.dal.TAPService, chunk_ids: list[str]) -> pd.DataFrame:
-    """Query a single chunk of Gaia IDs with retry logic."""
-    ids_str = ",".join(chunk_ids)
-    query = _GAIA_QUERY_TEMPLATE.format(ids_str=ids_str)
+def _checkpoint_dir_for_output(output_path: Path) -> Path:
+    """Return directory used for durable chunk checkpoints."""
+    return output_path.parent / f"{output_path.stem}.chunks"
+
+
+def _chunk_key(chunk_ids: list[str]) -> str:
+    """Stable key for a chunk based on exact ID membership and order."""
+    payload = ",".join(chunk_ids).encode("ascii")
+    hasher = hashlib.sha1()
+    hasher.update(payload)
+    return hasher.hexdigest()[:16]
+
+
+def _done_marker_path(checkpoint_dir: Path, key: str) -> Path:
+    return checkpoint_dir / f"{key}.done"
+
+
+def _chunk_part_path(checkpoint_dir: Path, key: str) -> Path:
+    return checkpoint_dir / f"{key}.parquet"
+
+
+def _chunk_is_checkpointed(checkpoint_dir: Path, key: str) -> bool:
+    return _done_marker_path(checkpoint_dir, key).exists() or _chunk_part_path(checkpoint_dir, key).exists()
+
+
+def _write_done_marker_with_ids(checkpoint_dir: Path, key: str, row_count: int, chunk_ids: list[str]) -> None:
+    """Write done marker including queried IDs for chunk-size-agnostic resume."""
+    marker = _done_marker_path(checkpoint_dir, key)
+    marker.write_text(
+        json.dumps({"row_count": int(row_count), "ids": chunk_ids}),
+        encoding="utf-8",
+    )
+
+
+def _load_checkpoint_parts(checkpoint_dir: Path) -> pd.DataFrame:
+    """Load all persisted chunk parquet parts from checkpoint directory."""
+    part_files = sorted(checkpoint_dir.glob("*.parquet"))
+    if not part_files:
+        return pd.DataFrame()
+    return pd.concat([pd.read_parquet(p) for p in part_files], ignore_index=True)
+
+
+def _load_checkpointed_ids(checkpoint_dir: Path) -> set[str]:
+    """Load Gaia IDs known to be completed from checkpoint parts and markers."""
+    completed: set[str] = set()
+
+    parts_df = _load_checkpoint_parts(checkpoint_dir)
+    if (not parts_df.empty) and ("source_id" in parts_df.columns):
+        completed.update(parts_df["source_id"].dropna().astype(str).tolist())
+
+    for marker in checkpoint_dir.glob("*.done"):
+        try:
+            payload = json.loads(marker.read_text(encoding="utf-8"))
+            ids = payload.get("ids") if isinstance(payload, dict) else None
+            if isinstance(ids, list):
+                completed.update(str(x) for x in ids if str(x))
+        except Exception:
+            continue
+
+    return completed
+
+
+def _chunk_upload_table(chunk_ids: list[str]) -> Table:
+    """Build TAP upload table for one chunk of Gaia source IDs."""
+    return Table({"source_id": [int(x) for x in chunk_ids]})
+
+
+def _fetch_chunk(tap_service: pyvo.dal.TAPService, chunk_ids: list[str]) -> pd.DataFrame | None:
+    """Query a single chunk of Gaia IDs with retry logic (async TAP upload)."""
+    query = _GAIA_QUERY_TEMPLATE
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            result = tap_service.search(query)
+            upload_table = _chunk_upload_table(chunk_ids)
+            result = tap_service.run_async(query, uploads={"upload_table": upload_table})
             chunk_df = result.to_table().to_pandas()
             # Normalize column names to lowercase
             chunk_df.columns = [c.lower() for c in chunk_df.columns]
@@ -136,7 +229,7 @@ def _fetch_chunk(tap_service: pyvo.dal.TAPService, chunk_ids: list[str]) -> pd.D
                 time.sleep(wait)
             else:
                 print(f"  Chunk query failed after {MAX_RETRIES} attempts: {e}")
-                return pd.DataFrame()
+                return None
 
 
 def fetch_gaia_catalog(
@@ -152,6 +245,18 @@ def fetch_gaia_catalog(
     """
     output_path = Path(output_path)
     cached_df = pd.DataFrame()
+
+    checkpoint_dir = _checkpoint_dir_for_output(output_path)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    checkpointed_ids = _load_checkpointed_ids(checkpoint_dir)
+    if checkpointed_ids:
+        before = len(gaia_ids)
+        gaia_ids = [g for g in gaia_ids if g not in checkpointed_ids]
+        print(
+            f"  {len(checkpointed_ids)} IDs already checkpointed, "
+            f"{len(gaia_ids)} IDs remain after checkpoint resume filtering."
+        )
 
     # Load existing catalog for incremental fetch
     if output_path.exists():
@@ -174,14 +279,30 @@ def fetch_gaia_catalog(
     print(f"Fetching Gaia DR3 data for {len(gaia_ids)} sources from {GAIA_AIP_TAP_URL}...")
     tap_service = pyvo.dal.TAPService(GAIA_AIP_TAP_URL)
 
-    results = []
+    n_chunks_done = 0
+    n_chunks_failed = 0
+    n_rows_written = 0
     for i in tqdm(range(0, len(gaia_ids), chunk_size), desc="Gaia DR3 TAP"):
         chunk_ids = gaia_ids[i : i + chunk_size]
-        chunk_df = _fetch_chunk(tap_service, chunk_ids)
-        if not chunk_df.empty:
-            results.append(chunk_df)
+        key = _chunk_key(chunk_ids)
 
-    new_df = pd.concat(results, ignore_index=True) if results else pd.DataFrame()
+        if _chunk_is_checkpointed(checkpoint_dir, key):
+            n_chunks_done += 1
+            continue
+
+        chunk_df = _fetch_chunk(tap_service, chunk_ids)
+        if chunk_df is None:
+            n_chunks_failed += 1
+            continue
+
+        if not chunk_df.empty:
+            chunk_df.to_parquet(_chunk_part_path(checkpoint_dir, key), index=False, compression="snappy")
+            n_rows_written += len(chunk_df)
+        _write_done_marker_with_ids(checkpoint_dir, key, row_count=len(chunk_df), chunk_ids=chunk_ids)
+        n_chunks_done += 1
+
+    checkpoint_df = _load_checkpoint_parts(checkpoint_dir)
+    new_df = checkpoint_df.copy()
 
     if not new_df.empty and "source_id" in new_df.columns:
         new_df["source_id"] = new_df["source_id"].astype(str)
@@ -202,6 +323,11 @@ def fetch_gaia_catalog(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     full_df.to_parquet(output_path, index=False, compression="snappy")
     print(f"Saved {len(full_df)} Gaia rows to {output_path}")
+    print(
+        "  "
+        f"(chunks checkpointed: {n_chunks_done}, chunks failed this run: {n_chunks_failed}, "
+        f"rows written to chunk parts this run: {n_rows_written})"
+    )
 
     fetched = len(new_df) if not new_df.empty else 0
     print(f"  ({fetched} newly fetched, {len(full_df) - fetched} from cache)")

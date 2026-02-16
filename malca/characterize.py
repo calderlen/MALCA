@@ -53,6 +53,30 @@ from malca.config.config_io import PARQUET_CACHE_COMPRESSION
 # GAIA DR3 QUERYING
 # =============================================================================
 
+
+def _normalize_source_ids(source_ids: list[str | int]) -> list[str]:
+    """Normalize mixed-type source IDs to digit strings."""
+    normalized: list[str] = []
+    seen: set[str] = set()
+
+    for value in source_ids:
+        if pd.isna(value):
+            continue
+
+        s = str(value).strip()
+        if not s:
+            continue
+
+        sid: str | None = s if s.isdigit() else None
+
+        if sid is None:
+            continue
+        if sid not in seen:
+            seen.add(sid)
+            normalized.append(sid)
+
+    return normalized
+
 def query_gaia_by_ids(source_ids: list[str | int], chunk_size: int = GAIA_CHUNK_SIZE, cache_file: str | None = None) -> pd.DataFrame:
     """
     Look up Gaia DR3 data from a local Parquet catalog.
@@ -85,7 +109,7 @@ def query_gaia_by_ids(source_ids: list[str | int], chunk_size: int = GAIA_CHUNK_
         raise ValueError(f"Local Gaia catalog at {catalog_path} missing 'source_id' column.")
 
     gaia_df["source_id"] = gaia_df["source_id"].astype(str)
-    requested = {str(x) for x in source_ids if str(x).isdigit()}
+    requested = _normalize_source_ids(source_ids)
     result = gaia_df[gaia_df["source_id"].isin(requested)].copy()
 
     print(f"Matched {len(result)}/{len(requested)} requested Gaia IDs from local catalog.")
@@ -112,7 +136,7 @@ def query_starhorse_by_ids(source_ids: list[str | int], starhorse_file: str | Pa
     if use_tap:
         # TAP query via pyvo
         # Convert IDs to strings
-        valid_ids = [str(x) for x in source_ids if str(x).isdigit()]
+        valid_ids = _normalize_source_ids(source_ids)
         if not valid_ids:
             return pd.DataFrame()
             
@@ -195,9 +219,9 @@ def query_starhorse_by_ids(source_ids: list[str | int], starhorse_file: str | Pa
         sh_df['source_id'] = sh_df['source_id'].astype(str)
         
         # Filter to requested IDs
-        valid_ids = set(str(x) for x in source_ids if str(x).isdigit())
+        valid_ids = _normalize_source_ids(source_ids)
         sh_filtered = sh_df[sh_df['source_id'].isin(valid_ids)]
-        
+
         print(f"Found {len(sh_filtered)}/{len(valid_ids)} sources in StarHorse catalog.")
         
         return sh_filtered
