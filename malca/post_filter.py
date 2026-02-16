@@ -936,32 +936,46 @@ def validate_periodic_catalog(
         if "ra_deg" not in df.columns or "dec_deg" not in df.columns:
             raise ValueError("[validate_periodic_catalog] Need ra_deg/dec_deg for coordinate fallback")
 
-        candidates_coords = SkyCoord(
-            ra=df["ra_deg"].values * u.deg,
-            dec=df["dec_deg"].values * u.deg
-        )
+        cand_ra = pd.to_numeric(df["ra_deg"], errors="coerce").to_numpy(dtype=float)
+        cand_dec = pd.to_numeric(df["dec_deg"], errors="coerce").to_numpy(dtype=float)
+        valid_cand_mask = np.isfinite(cand_ra) & np.isfinite(cand_dec)
 
-        catalog_coords = SkyCoord(
-            ra=catalog_df["ra"].values * u.deg,
-            dec=catalog_df["dec"].values * u.deg
-        )
+        cat_ra = pd.to_numeric(catalog_df["ra"], errors="coerce")
+        cat_dec = pd.to_numeric(catalog_df["dec"], errors="coerce")
+        valid_catalog_mask = cat_ra.notna() & cat_dec.notna()
+        catalog_valid = catalog_df.loc[valid_catalog_mask].reset_index(drop=True)
 
-        idx_catalog, sep2d, _ = candidates_coords.match_to_catalog_sky(catalog_coords)
+        matches = [False] * n0
+        periods = [np.nan] * n0
+        classes = [""] * n0
 
-        matches = []
-        periods = []
-        classes = []
+        if valid_cand_mask.any() and len(catalog_valid) > 0:
+            candidates_coords = SkyCoord(
+                ra=cand_ra[valid_cand_mask] * u.deg,
+                dec=cand_dec[valid_cand_mask] * u.deg,
+            )
 
-        for i, (cat_idx, sep) in enumerate(zip(idx_catalog, sep2d)):
-            sep_arcsec = sep.to(u.arcsec).value
-            if sep_arcsec < max_sep_arcsec:
-                matches.append(True)
-                periods.append(float(catalog_df.iloc[cat_idx].get("period", np.nan)))
-                classes.append(str(catalog_df.iloc[cat_idx].get("class", "")))
-            else:
-                matches.append(False)
-                periods.append(np.nan)
-                classes.append("")
+            catalog_coords = SkyCoord(
+                ra=pd.to_numeric(catalog_valid["ra"], errors="coerce").to_numpy(dtype=float) * u.deg,
+                dec=pd.to_numeric(catalog_valid["dec"], errors="coerce").to_numpy(dtype=float) * u.deg,
+            )
+
+            idx_catalog, sep2d, _ = candidates_coords.match_to_catalog_sky(catalog_coords)
+
+            valid_indices = np.flatnonzero(valid_cand_mask)
+            for out_idx, cat_idx, sep in zip(valid_indices, idx_catalog, sep2d):
+                sep_arcsec = sep.to(u.arcsec).value
+                if sep_arcsec < max_sep_arcsec:
+                    matches[out_idx] = True
+                    periods[out_idx] = float(catalog_valid.iloc[cat_idx].get("period", np.nan))
+                    classes[out_idx] = str(catalog_valid.iloc[cat_idx].get("class", ""))
+
+        if show_tqdm:
+            n_skipped = int((~valid_cand_mask).sum())
+            if n_skipped > 0:
+                tqdm.write(
+                    f"[validate_periodic_catalog] Skipping {n_skipped}/{n0} candidates with missing ra/dec"
+                )
 
     df_out = df.copy()
     df_out["catalog_match"] = matches

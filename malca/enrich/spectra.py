@@ -4,6 +4,7 @@ from pathlib import Path
 import argparse
 
 import pandas as pd
+from tqdm.auto import tqdm
 
 from malca.enrich.neighbor import _ensure_candidate_id, _query_catalog_bulk
 from malca.config.config_characterize import SPECTRA_RADIUS_ARCSEC, SPECTRA_CHUNK_SIZE
@@ -25,6 +26,7 @@ def run_spectra_availability(
     cache_file: Path | None = None,
     catalogs: dict[str, str] | None = None,
     checkpoint_path: Path | None = None,
+    show_progress: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -65,12 +67,16 @@ def run_spectra_availability(
 
     frames: list[pd.DataFrame] = []
     if not coords_todo.empty:
-        for survey, catalog_id in catalogs.items():
+        catalog_items = list(catalogs.items())
+        catalog_iter = tqdm(catalog_items, desc="Spectra catalogs", disable=not show_progress)
+        for survey, catalog_id in catalog_iter:
             res = _query_catalog_bulk(
                 coords_todo,
                 catalog=catalog_id,
                 radius_arcsec=radius_arcsec,
                 chunk_size=chunk_size,
+                show_progress=show_progress,
+                progress_desc=f"spectra:{survey}",
             )
             if res.empty:
                 continue

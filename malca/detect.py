@@ -34,6 +34,7 @@ import json
 import shlex
 import subprocess
 import sys
+import time
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -200,7 +201,7 @@ def clear_existing_output(path: Path | None, fmt: str) -> None:
     print(f"Overwriting existing output file: {path}")
 
 
-def import_bundle_zip(bundle_zip: Path, out_dir: Path) -> None:
+def import_bundle_zip(bundle_zip: Path, out_dir: Path, *, show_progress: bool = False) -> None:
     """Extract a pipeline transfer bundle into out_dir."""
     bundle_zip = Path(bundle_zip).expanduser()
     if not bundle_zip.exists():
@@ -210,7 +211,18 @@ def import_bundle_zip(bundle_zip: Path, out_dir: Path) -> None:
 
     out_dir.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(bundle_zip, "r") as zf:
-        zf.extractall(out_dir)
+        members = zf.infolist()
+        files = [m for m in members if not m.is_dir()]
+        total_bytes = sum(m.file_size for m in files)
+
+        if show_progress:
+            with tqdm(total=total_bytes, desc="Import bundle", unit="B", unit_scale=True) as pbar:
+                for member in members:
+                    zf.extract(member, out_dir)
+                    if not member.is_dir():
+                        pbar.update(member.file_size)
+        else:
+            zf.extractall(out_dir)
 
 
 def _collect_bundle_lightcurve_files(out_dir: Path, mag_bin_tag: str | None = None) -> list[tuple[Path, str]]:
@@ -699,7 +711,10 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if args.import_bundle is not None:
-        import_bundle_zip(args.import_bundle, out_dir)
+        import_started = time.perf_counter()
+        log(f"Importing bundle from {Path(args.import_bundle).expanduser()} to {out_dir}...")
+        import_bundle_zip(args.import_bundle, out_dir, show_progress=args.verbose)
+        log(f"Bundle import completed in {time.perf_counter() - import_started:.1f}s")
 
     if args.gaia_cache is None:
         gaia_cache_dir = out_dir / "gaia_cache"
@@ -1519,6 +1534,7 @@ def main():
     # Only merge when entering downstream/home phase — NOT during concurrent cluster runs.
     if run_downstream:
         log("\n=== Merging per-mag-bin outputs ===")
+        merge_started = time.perf_counter()
         for merge_prefix in ("lc_events_results", "lc_events_filtered", "lc_events_enriched"):
             tagged_files = sorted(results_dir.glob(f"{merge_prefix}_*.parquet"))
             # Exclude checkpoint and temp files from merging
@@ -1537,6 +1553,7 @@ def main():
                     log(f"Merged {len(tagged_files)} files into {merged_path} ({len(merged)} rows)")
                 except Exception as e:
                     log(f"Warning: could not merge {merge_prefix} files: {e}")
+        log(f"Merge step completed in {time.perf_counter() - merge_started:.1f}s")
 
     post_filter_output = results_dir / "lc_events_filtered.parquet"
     has_post_filter_output = post_filter_output.exists()
@@ -1544,6 +1561,7 @@ def main():
     # Home-only external catalog validations (Gaia RUWE + periodic catalog)
     if stage == "home" and args.run_post_filter and has_post_filter_output:
         log("\n=== Home External Validation: Gaia RUWE + periodic catalog ===")
+        validation_started = time.perf_counter()
         try:
             bundled_index = out_dir / "bundle_assets" / "asassn_index_full.parquet"
             if bundled_index.exists():
@@ -1594,6 +1612,7 @@ def main():
 
             has_post_filter_output = post_filter_output.exists()
             log(f"Home external validation wrote updated filtered results to {post_filter_output}")
+            log(f"Home external validation completed in {time.perf_counter() - validation_started:.1f}s")
         except Exception as e:
             print(f"Error in home external validation step: {e}")
             if args.verbose:
@@ -1609,6 +1628,7 @@ def main():
     # Step 7b: Auto-fetch Gaia data for characterization (incremental)
     if run_downstream and (args.run_characterize or args.run_dust) and has_post_filter_output:
         log("\n=== Ensuring local Gaia catalog is up to date ===")
+        gaia_fetch_started = time.perf_counter()
         try:
             gaia_catalog_path = args.gaia_cache.expanduser() if args.gaia_cache else GAIA_LOCAL_CATALOG
             gaia_ids = _extract_gaia_ids(
@@ -1619,6 +1639,7 @@ def main():
                 fetch_gaia_catalog(gaia_ids, output_path=gaia_catalog_path)
             else:
                 log("No Gaia IDs found; skipping Gaia fetch.")
+            log(f"Gaia catalog check completed in {time.perf_counter() - gaia_fetch_started:.1f}s")
         except Exception as e:
             print(f"Warning: Gaia auto-fetch failed: {e}")
             if args.verbose:
@@ -1628,6 +1649,7 @@ def main():
     # Step 8: Characterization + dust (optional)
     if run_downstream and (args.run_characterize or args.run_dust) and has_post_filter_output:
         log("\n=== Step 8: Characterizing candidates ===")
+        characterize_started = time.perf_counter()
         try:
             df_char = load_table(post_filter_output)
 
@@ -1665,6 +1687,7 @@ def main():
             characterize_output = results_dir / "lc_events_characterized.parquet"
             save_table(df_char, characterize_output)
             log(f"Characterization results saved to {characterize_output}")
+            log(f"Step 8 completed in {time.perf_counter() - characterize_started:.1f}s")
 
         except Exception as e:
             print(f"Error in characterization step: {e}")
@@ -1682,6 +1705,7 @@ def main():
                 log(f"\n=== Step 9: Classification output exists, skipping: {classify_output} ===")
             else:
                 log("\n=== Step 9: Running classification ===")
+                classify_started = time.perf_counter()
                 try:
                     characterize_output = results_dir / "lc_events_characterized.parquet"
                     post_filter_output = results_dir / "lc_events_filtered.parquet"
@@ -1717,8 +1741,10 @@ def main():
                                 json.dump(summary, f, indent=2, default=str)
 
                             log(f"Classification: {len(df_classified)} candidates classified")
+                            log(f"Step 9 completed in {time.perf_counter() - classify_started:.1f}s")
                         else:
                             log("No passing candidates to classify.")
+                            log(f"Step 9 completed in {time.perf_counter() - classify_started:.1f}s")
 
                 except Exception as e:
                     print(f"Error in classification step: {e}")
@@ -1732,6 +1758,7 @@ def main():
             print(f"Warning: downstream stage requires filtered results at {post_filter_output}. Skipping neighbor enrichment.")
         else:
             log("\n=== Step 10: Bulk neighbor enrichment ===")
+            neighbor_started = time.perf_counter()
             try:
                 enrich_output = results_dir / "lc_events_enriched.parquet"
                 classify_output = results_dir / "lc_events_classified.parquet"
@@ -1765,6 +1792,7 @@ def main():
                         chunk_size=args.neighbor_chunk_size,
                         cache_file=neighbor_cache,
                         checkpoint_path=neighbor_checkpoint,
+                        show_progress=args.verbose,
                     )
 
                     if not df_neighbor_summary.empty:
@@ -1787,6 +1815,7 @@ def main():
                     with open(run_summary_file, "w") as f:
                         json.dump(summary, f, indent=2, default=str)
                     log(f"Neighbor enrichment outputs written to {neighbor_dir}")
+                    log(f"Step 10 completed in {time.perf_counter() - neighbor_started:.1f}s")
 
             except Exception as e:
                 print(f"Error in neighbor enrichment step: {e}")
@@ -1800,6 +1829,7 @@ def main():
             print(f"Warning: downstream stage requires filtered results at {post_filter_output}. Skipping spectra enrichment.")
         else:
             log("\n=== Step 11: Spectra availability enrichment ===")
+            spectra_started = time.perf_counter()
             try:
                 neighbor_output = results_dir / "lc_events_neighbors.parquet"
                 enrich_output = results_dir / "lc_events_enriched.parquet"
@@ -1836,6 +1866,7 @@ def main():
                         chunk_size=args.spectra_chunk_size,
                         cache_file=spectra_cache,
                         checkpoint_path=spectra_checkpoint,
+                        show_progress=args.verbose,
                     )
 
                     if not spectra_summary.empty:
@@ -1858,6 +1889,7 @@ def main():
                     with open(run_summary_file, "w") as f:
                         json.dump(summary, f, indent=2, default=str)
                     log(f"Spectra enrichment outputs written to {spectra_dir}")
+                    log(f"Step 11 completed in {time.perf_counter() - spectra_started:.1f}s")
 
             except Exception as e:
                 print(f"Error in spectra enrichment step: {e}")

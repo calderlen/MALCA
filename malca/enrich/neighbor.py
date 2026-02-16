@@ -8,6 +8,7 @@ import argparse
 import astropy.units as u
 from astropy.table import Table
 from astroquery.xmatch import XMatch
+from tqdm.auto import tqdm
 
 from malca.config.config_characterize import NEIGHBOR_RADIUS_ARCSEC, NEIGHBOR_CHUNK_SIZE
 
@@ -38,10 +39,21 @@ def _query_catalog_bulk(
     catalog: str,
     radius_arcsec: float,
     chunk_size: int,
+    show_progress: bool = False,
+    progress_desc: str | None = None,
 ) -> pd.DataFrame:
     chunks: list[pd.DataFrame] = []
     n = len(coords_df)
-    for start in range(0, n, max(1, int(chunk_size))):
+    step = max(1, int(chunk_size))
+    starts = range(0, n, step)
+    total_chunks = (n + step - 1) // step
+    iterator = tqdm(
+        starts,
+        total=total_chunks,
+        desc=progress_desc or f"xmatch:{catalog}",
+        disable=not show_progress,
+    )
+    for start in iterator:
         chunk = coords_df.iloc[start : start + int(chunk_size)].copy()
         if chunk.empty:
             continue
@@ -87,6 +99,7 @@ def run_neighbor_enrichment(
     cache_file: Path | None = None,
     catalogs: dict[str, str] | None = None,
     checkpoint_path: Path | None = None,
+    show_progress: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Bulk nearest-neighbor enrichment with optional cache."""
     out_dir = Path(out_dir)
@@ -129,12 +142,16 @@ def run_neighbor_enrichment(
 
     fresh_frames: list[pd.DataFrame] = []
     if not coords_todo.empty:
-        for _, catalog_id in catalogs.items():
+        catalog_items = list(catalogs.items())
+        catalog_iter = tqdm(catalog_items, desc="Neighbor catalogs", disable=not show_progress)
+        for catalog_name, catalog_id in catalog_iter:
             fresh = _query_catalog_bulk(
                 coords_todo,
                 catalog=catalog_id,
                 radius_arcsec=radius_arcsec,
                 chunk_size=chunk_size,
+                show_progress=show_progress,
+                progress_desc=f"neighbor:{catalog_name}",
             )
             if not fresh.empty:
                 fresh_frames.append(fresh)
