@@ -364,7 +364,7 @@ def build_interactive_lightcurve_figure(
     show_baseline: bool,
     show_event_markers: bool,
     show_residuals: bool,
-    show_phase_fold: bool,
+    show_phase_fold: bool = False,
     show_diagnostics: bool,
     confidence_colors: bool,
     run_params: dict | None,

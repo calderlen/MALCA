@@ -69,6 +69,7 @@ from malca.config.config_filters import (
 from malca.config.config_characterize import (
     GAIA_CHUNK_SIZE, NEIGHBOR_RADIUS_ARCSEC, NEIGHBOR_CHUNK_SIZE,
     SPECTRA_RADIUS_ARCSEC, SPECTRA_CHUNK_SIZE,
+    UNWISE_CHECKPOINT_EVERY,
 )
 from malca.utils import log as _log
 
@@ -528,6 +529,8 @@ def main():
     parser.add_argument("--characterize-crossmatch", type=Path, default=VSX_CROSSMATCH_PATH, help="ASAS-SN x VSX crossmatch file for characterize step")
     parser.add_argument("--characterize-chunk-size", type=int, default=GAIA_CHUNK_SIZE, help="Gaia query chunk size for characterize step")
     parser.add_argument("--characterize-starhorse", type=str, default="tap", help="StarHorse mode/path for characterize step (default: tap)")
+    parser.add_argument("--characterize-starhorse-cache", type=Path, default=None, help="Optional StarHorse TAP cache parquet path (default: ~/.cache/malca/catalogs/starhorse_tap_cache.parquet)")
+    parser.add_argument("--characterize-unwise-checkpoint-every", type=int, default=UNWISE_CHECKPOINT_EVERY, help="Persist unWISE checkpoint every N completed candidates")
     parser.add_argument("--no-characterize-banyan", dest="characterize_banyan", action="store_false", help="Disable BANYAN Sigma enrichment in characterize step")
     parser.add_argument("--no-characterize-iphas", dest="characterize_iphas", action="store_false", help="Disable IPHAS enrichment in characterize step")
     parser.add_argument("--no-characterize-sfr", dest="characterize_sfr", action="store_false", help="Disable star-forming-region enrichment in characterize step")
@@ -810,6 +813,8 @@ def main():
             "run_characterize": args.run_characterize,
             "run_dust": args.run_dust,
             "starhorse": args.characterize_starhorse,
+            "starhorse_cache": str(args.characterize_starhorse_cache) if args.characterize_starhorse_cache else None,
+            "unwise_checkpoint_every": args.characterize_unwise_checkpoint_every,
             "banyan": args.characterize_banyan,
             "iphas": args.characterize_iphas,
             "sfr": args.characterize_sfr,
@@ -937,6 +942,8 @@ def main():
             "characterize_crossmatch": str(args.characterize_crossmatch),
             "characterize_chunk_size": args.characterize_chunk_size,
             "characterize_starhorse": args.characterize_starhorse,
+            "characterize_starhorse_cache": str(args.characterize_starhorse_cache) if args.characterize_starhorse_cache else None,
+            "characterize_unwise_checkpoint_every": args.characterize_unwise_checkpoint_every,
             "characterize_banyan": args.characterize_banyan,
             "characterize_iphas": args.characterize_iphas,
             "characterize_sfr": args.characterize_sfr,
@@ -1678,11 +1685,13 @@ def main():
                 cache=args.gaia_cache.expanduser() if args.gaia_cache else (out_dir / "gaia_cache" / "gaia_cache.parquet"),
                 dust=args.run_dust,
                 starhorse=starhorse_arg,
+                starhorse_cache=args.characterize_starhorse_cache.expanduser() if args.characterize_starhorse_cache else None,
                 run_banyan=args.run_characterize and args.characterize_banyan,
                 run_iphas=args.run_characterize and args.characterize_iphas,
                 run_sfr=args.run_characterize and args.characterize_sfr,
                 run_clusters=args.run_characterize and args.characterize_clusters,
                 run_unwise=args.run_characterize and args.characterize_unwise,
+                unwise_checkpoint_every=args.characterize_unwise_checkpoint_every,
                 checkpoint_path=char_checkpoint,
             )
 

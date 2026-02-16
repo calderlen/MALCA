@@ -14,16 +14,18 @@ Usage:
 
 import os
 import argparse
+import time
 from pathlib import Path
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
 import astropy.units as u
 import pyvo
-import requests
 from astropy.coordinates import SkyCoord
 from astropy.table import Table
 from astroquery.xmatch import XMatch
+from astroquery.vizier import Vizier
+from astroquery.ipac.irsa import Irsa
 import banyan_sigma as banyan_sigma_pkg
 from dustmaps3d import dustmaps3d
 
@@ -35,18 +37,25 @@ warnings.simplefilter('ignore', category=AstropyWarning)
 from malca.config.config_characterize import (
     GAIA_CHUNK_SIZE, STARHORSE_TAP_CHUNK_SIZE,
     IPHAS_MAX_SEP_ARCSEC, CLUSTER_MAX_SEP_ARCSEC, UNWISE_MAX_SEP_ARCSEC,
-    UNWISE_TIMEOUT_SECONDS, UNWISE_FRACFLUX_MIN, UNWISE_QF_MIN,
+    UNWISE_QF_MIN,
     UNWISE_VARIABILITY_ZSCORE, UNWISE_EXPECTED_SCATTER_BASE,
     UNWISE_EXPECTED_SCATTER_SLOPE, UNWISE_EXPECTED_SCATTER_MAG_REF,
+    UNWISE_CHECKPOINT_EVERY, UNWISE_MAX_RETRIES,
     SFR_MAX_DIST_KPC, SFR_DIST_TOLERANCE_FRACTION, SFR_CATALOG,
     BANYAN_MIN_ASSOC_PROB, IPHAS_HA_EXCESS_THRESHOLD,
 )
 from malca.config.config_paths import (
     VSX_CROSSMATCH_PATH, STARHORSE_DEFAULT_PATH, STARHORSE_TAP_URL,
-    UNTIMELY_API_URL, DEFAULT_CACHE_DIR, GAIA_CACHE_FILE,
+    DEFAULT_CACHE_DIR, GAIA_CACHE_FILE,
     GAIA_LOCAL_CATALOG,
 )
 from malca.config.config_io import PARQUET_CACHE_COMPRESSION
+
+
+CATALOG_CACHE_DIR = DEFAULT_CACHE_DIR.expanduser()
+STARHORSE_TAP_CACHE_FILE = CATALOG_CACHE_DIR / "starhorse_tap_cache.parquet"
+OPEN_CLUSTER_META_CACHE_FILE = CATALOG_CACHE_DIR / "cantat_gaudin2020_table1.parquet"
+UNWISE_CHECKPOINT_BASENAME = "unwise_variability_CHECKPOINT.parquet"
 
 
 # =============================================================================
@@ -120,7 +129,109 @@ def query_gaia_by_ids(source_ids: list[str | int], chunk_size: int = GAIA_CHUNK_
 # STARHORSE LOCAL CATALOG
 # =============================================================================
 
-def query_starhorse_by_ids(source_ids: list[str | int], starhorse_file: str | Path | None = None, use_tap: bool = True) -> pd.DataFrame:
+STARHORSE_TAP_TABLE_CANDIDATES = (
+    "gaiaedr3_contrib.starhorse",
+    "gaiaedr3_contrib.starhorse_1_1",
+    "gaiadr2_contrib.starhorse",
+    "gaiadr2_contrib.starhorse_v05",
+)
+
+STARHORSE_PREFERRED_COLUMNS = (
+    "source_id",
+    "teff16",
+    "teff50",
+    "teff84",
+    "logg16",
+    "logg50",
+    "logg84",
+    "met16",
+    "met50",
+    "met84",
+    "dist05",
+    "dist16",
+    "dist50",
+    "dist84",
+    "dist95",
+    "av05",
+    "av16",
+    "av50",
+    "av84",
+    "av95",
+    "mass16",
+    "mass50",
+    "mass84",
+    "age16",
+    "age50",
+    "age84",
+    "ag50",
+    "abp50",
+    "arp50",
+    "bprp0",
+    "mg0",
+    "xgal",
+    "ygal",
+    "zgal",
+    "rgal",
+    "fidelity",
+    "bp_rp_excess_corr",
+    "sh_photoflag",
+    "sh_outflag",
+)
+
+
+def _load_starhorse_cache(cache_path: Path) -> pd.DataFrame:
+    """Load StarHorse TAP cache parquet if present."""
+    if not cache_path.exists():
+        return pd.DataFrame()
+    try:
+        df_cache = pd.read_parquet(cache_path)
+    except Exception:
+        return pd.DataFrame()
+
+    if "source_id" not in df_cache.columns:
+        return pd.DataFrame()
+
+    df_cache = df_cache.copy()
+    df_cache["source_id"] = df_cache["source_id"].astype(str)
+    return df_cache.drop_duplicates(subset=["source_id"], keep="last")
+
+
+def _save_starhorse_cache(df_cache: pd.DataFrame, cache_path: Path) -> None:
+    """Persist StarHorse TAP cache parquet."""
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    df_cache.to_parquet(cache_path, index=False, compression=PARQUET_CACHE_COMPRESSION)
+
+
+def _resolve_starhorse_tap_table(tap_service: pyvo.dal.TAPService) -> tuple[str, list[str]]:
+    """Return a StarHorse TAP table and supported column list."""
+    for table_name in STARHORSE_TAP_TABLE_CANDIDATES:
+        try:
+            query = (
+                "SELECT column_name FROM TAP_SCHEMA.columns "
+                f"WHERE table_name = '{table_name}' "
+                "ORDER BY column_index"
+            )
+            cols_tab = tap_service.search(query=query).to_table()
+        except Exception:
+            continue
+
+        if "column_name" not in cols_tab.colnames:
+            continue
+
+        available_cols = {str(v) for v in cols_tab["column_name"]}
+        selected_cols = [c for c in STARHORSE_PREFERRED_COLUMNS if c in available_cols]
+        if "source_id" in selected_cols:
+            return table_name, selected_cols
+
+    raise RuntimeError("No compatible StarHorse TAP table found")
+
+
+def query_starhorse_by_ids(
+    source_ids: list[str | int],
+    starhorse_file: str | Path | None = None,
+    use_tap: bool = True,
+    cache_file: str | Path | None = None,
+) -> pd.DataFrame:
     """
     Retrieve StarHorse 2021 stellar parameters (Anders et al.).
     
@@ -134,53 +245,64 @@ def query_starhorse_by_ids(source_ids: list[str | int], starhorse_file: str | Pa
     - Faster for repeated queries on same dataset
     """
     if use_tap:
-        # TAP query via pyvo
-        # Convert IDs to strings
         valid_ids = _normalize_source_ids(source_ids)
         if not valid_ids:
             return pd.DataFrame()
-            
+
         print(f"Querying StarHorse via TAP for {len(valid_ids)} sources...")
-        
-        # Query in chunks (TAP has query length limits)
+
+        cache_path = Path(cache_file).expanduser() if cache_file else STARHORSE_TAP_CACHE_FILE.expanduser()
+        cache_df = _load_starhorse_cache(cache_path)
+        cached_ids = set(cache_df["source_id"].astype(str)) if not cache_df.empty else set()
+
+        missing_ids = [sid for sid in valid_ids if sid not in cached_ids]
+        if missing_ids:
+            print(f"StarHorse cache hit: {len(valid_ids) - len(missing_ids)}/{len(valid_ids)}")
+        else:
+            print("StarHorse cache hit: all requested IDs")
+
+        new_rows: list[pd.DataFrame] = []
         chunk_size = STARHORSE_TAP_CHUNK_SIZE
-        results = []
-        
-        for i in tqdm(range(0, len(valid_ids), chunk_size), desc="StarHorse TAP"):
-            chunk_ids = valid_ids[i:i+chunk_size]
-            ids_str = ",".join(chunk_ids)
-            
-            query = f"""
-            SELECT 
-                source_id,
-                teff50, logg50, met50,
-                dist50, dist16, dist84,
-                av50, av16, av84,
-                mass50, mass16, mass84,
-                age50, age16, age84
-            FROM gaiaedr3_contrib.starhorse
-            WHERE source_id IN ({ids_str})
-            """
-            
-            try:
-                tap_service = pyvo.dal.TAPService(STARHORSE_TAP_URL)
-                result = tap_service.search(query)
-                chunk_df = result.to_table().to_pandas()
-                results.append(chunk_df)
-            except Exception as e:
-                print(f"TAP query error for chunk {i}: {e}")
-                continue
-        
-        if not results:
+
+        if missing_ids:
+            tap_service = pyvo.dal.TAPService(STARHORSE_TAP_URL)
+            table_name, select_cols = _resolve_starhorse_tap_table(tap_service)
+            select_cols_sql = ", ".join(select_cols)
+
+            for i in tqdm(range(0, len(missing_ids), chunk_size), desc="StarHorse TAP"):
+                chunk_ids = missing_ids[i : i + chunk_size]
+                ids_str = ",".join(chunk_ids)
+
+                query = (
+                    f"SELECT {select_cols_sql} "
+                    f"FROM {table_name} "
+                    f"WHERE source_id IN ({ids_str})"
+                )
+
+                try:
+                    chunk_df = tap_service.search(query=query).to_table().to_pandas()
+                    if not chunk_df.empty:
+                        chunk_df["source_id"] = chunk_df["source_id"].astype(str)
+                        new_rows.append(chunk_df)
+                except Exception as e:
+                    print(f"TAP query error for chunk {i}: {e}")
+                    continue
+
+        new_df = pd.concat(new_rows, ignore_index=True) if new_rows else pd.DataFrame()
+        if not new_df.empty:
+            cache_df = pd.concat([cache_df, new_df], ignore_index=True) if not cache_df.empty else new_df
+            cache_df = cache_df.drop_duplicates(subset=["source_id"], keep="last")
+            _save_starhorse_cache(cache_df, cache_path)
+            print(f"Updated StarHorse cache: {len(cache_df)} rows at {cache_path}")
+
+        if cache_df.empty:
             print("Warning: No StarHorse results from TAP queries.")
             return pd.DataFrame()
-            
-        sh_df = pd.concat(results, ignore_index=True)
-        sh_df['source_id'] = sh_df['source_id'].astype(str)
-        
-        print(f"Retrieved {len(sh_df)} StarHorse entries via TAP.")
-        return sh_df
-        
+
+        out_df = cache_df[cache_df["source_id"].isin(valid_ids)].copy()
+        print(f"Retrieved {len(out_df)}/{len(valid_ids)} StarHorse entries via cache+TAP.")
+        return out_df
+
     else:
         # Local catalog join (original implementation)
         if starhorse_file is None:
@@ -289,19 +411,36 @@ def get_dust_extinction(df: pd.DataFrame) -> pd.DataFrame:
     try:
         print(f"Querying dustmaps3d for {valid_mask.sum()} sources...")
         ebv, dust_density, sigma, max_dist = dustmaps3d(l, b, d)
-        
-        A_V = 3.1 * ebv
-        
-        df.loc[valid_mask, 'ebv_3d'] = ebv
-        df.loc[valid_mask, 'A_v_3d'] = A_V
-        df.loc[valid_mask, 'dust_sigma'] = sigma
-        df.loc[valid_mask, 'dust_max_dist_kpc'] = max_dist
-        
-        print(f"Dust query complete. Mean A_V = {A_V[np.isfinite(A_V)].mean():.3f}")
+
+        # dustmaps3d returns pandas Series indexed by healpix cell, which can
+        # contain duplicate labels. Convert to numpy arrays before assignment
+        # to avoid pandas index alignment/reindex errors.
+        ebv_arr = np.asarray(ebv, dtype=float)
+        sigma_arr = np.asarray(sigma, dtype=float)
+        max_dist_arr = np.asarray(max_dist, dtype=float)
+
+        n_valid = int(valid_mask.sum())
+        if len(ebv_arr) != n_valid:
+            raise ValueError(f"dustmaps3d returned {len(ebv_arr)} rows for {n_valid} inputs")
+
+        A_V = 3.1 * ebv_arr
+        valid_mask_arr = np.asarray(valid_mask, dtype=bool)
+
+        df.loc[valid_mask_arr, 'ebv_3d'] = ebv_arr
+        df.loc[valid_mask_arr, 'A_v_3d'] = A_V
+        df.loc[valid_mask_arr, 'dust_sigma'] = sigma_arr
+        df.loc[valid_mask_arr, 'dust_max_dist_kpc'] = max_dist_arr
+
+        finite_av = A_V[np.isfinite(A_V)]
+        if finite_av.size > 0:
+            print(f"Dust query complete. Mean A_V = {finite_av.mean():.3f}")
+        else:
+            print("Dust query complete. No finite A_V values returned.")
         
     except Exception as e:
         print(f"Error querying dustmaps3d: {e}")
-        
+        raise
+
     df['A_v_3d'] = df['A_v_3d'].fillna(0.0)
     
     return df
@@ -557,7 +696,8 @@ def crossmatch_iphas(df: pd.DataFrame, max_sep_arcsec: float = IPHAS_MAX_SEP_ARC
             
     except Exception as e:
         print(f"IPHAS XMatch error: {e}")
-    
+        raise
+
     return df
 
 
@@ -654,6 +794,44 @@ def check_sfr_proximity(df: pd.DataFrame, max_dist_kpc: float = SFR_MAX_DIST_KPC
 # OPEN CLUSTER MEMBERSHIP (Cantat-Gaudin+2020)
 # =============================================================================
 
+def _load_open_cluster_metadata(cache_file: Path | None = None) -> pd.DataFrame:
+    """Load Cantat-Gaudin+2020 cluster metadata (age, distance) with local cache."""
+    cache_path = Path(cache_file).expanduser() if cache_file else OPEN_CLUSTER_META_CACHE_FILE.expanduser()
+
+    if cache_path.exists():
+        try:
+            cached = pd.read_parquet(cache_path)
+            if {"cluster_name", "cluster_age_myr", "cluster_dist_pc"}.issubset(cached.columns):
+                return cached
+        except Exception:
+            pass
+
+    try:
+        viz = Vizier(columns=["Cluster", "AgeNN", "DistPc"], row_limit=-1)
+        tables = viz.get_catalogs("J/A+A/640/A1/table1")
+        if not tables:
+            raise RuntimeError("No tables returned for J/A+A/640/A1/table1")
+
+        tab = tables[0].to_pandas()
+        out = pd.DataFrame()
+        out["cluster_name"] = tab.get("Cluster", pd.Series(dtype=str)).astype(str)
+
+        age_log = pd.to_numeric(tab.get("AgeNN", np.nan), errors="coerce")
+        out["cluster_age_myr"] = np.where(np.isfinite(age_log), np.power(10.0, age_log - 6.0), np.nan)
+        out["cluster_dist_pc"] = pd.to_numeric(tab.get("DistPc", np.nan), errors="coerce")
+
+        out = out.replace({"cluster_name": {"nan": ""}})
+        out = out[out["cluster_name"].astype(str).str.len() > 0]
+        out = out.drop_duplicates(subset=["cluster_name"], keep="first")
+
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        out.to_parquet(cache_path, index=False, compression=PARQUET_CACHE_COMPRESSION)
+        return out
+    except Exception as e:
+        print(f"Warning: failed loading open-cluster metadata: {e}")
+        return pd.DataFrame(columns=["cluster_name", "cluster_age_myr", "cluster_dist_pc"])
+
+
 def crossmatch_open_clusters(df: pd.DataFrame, max_sep_arcsec: float = CLUSTER_MAX_SEP_ARCSEC) -> pd.DataFrame:
     """
     Crossmatch to Cantat-Gaudin+2020 open cluster catalog.
@@ -691,12 +869,16 @@ def crossmatch_open_clusters(df: pd.DataFrame, max_sep_arcsec: float = CLUSTER_M
     print(f"Running open cluster XMatch for {len(source_table)} sources...")
     
     try:
+        cluster_meta = _load_open_cluster_metadata()
+        age_map = dict(zip(cluster_meta["cluster_name"], cluster_meta["cluster_age_myr"])) if not cluster_meta.empty else {}
+        dist_map = dict(zip(cluster_meta["cluster_name"], cluster_meta["cluster_dist_pc"])) if not cluster_meta.empty else {}
+
         result = XMatch.query(
             cat1=source_table,
-            cat2='vizier:J/A+A/640/A1/members',  # Cantat-Gaudin+2020 members
+            cat2='vizier:J/A+A/640/A1/nodup',
             max_distance=max_sep_arcsec * u.arcsec,
             colRA1='ra', colDec1='dec',
-            colRA2='RAJ2000', colDec2='DEJ2000'
+            colRA2='RA_ICRS', colDec2='DE_ICRS'
         )
         
         if result is not None and len(result) > 0:
@@ -711,14 +893,14 @@ def crossmatch_open_clusters(df: pd.DataFrame, max_sep_arcsec: float = CLUSTER_M
             # Assign cluster properties
             for _, row in result_df.iterrows():
                 idx = int(row['_idx'])
-                df.at[df.index[idx], 'cluster_name'] = str(row.get('Cluster', ''))
-                
-                age_val = row.get('Age', np.nan)
-                if age_val is not None:
+                cluster_name = str(row.get('Cluster', ''))
+                df.at[df.index[idx], 'cluster_name'] = cluster_name
+
+                age_val = age_map.get(cluster_name, np.nan)
+                dist_val = dist_map.get(cluster_name, np.nan)
+                if pd.notna(age_val):
                     df.at[df.index[idx], 'cluster_age_myr'] = float(age_val)
-                
-                dist_val = row.get('Dist', np.nan)
-                if dist_val is not None:
+                if pd.notna(dist_val):
                     df.at[df.index[idx], 'cluster_dist_pc'] = float(dist_val)
             
             matched = len(result_df)
@@ -728,7 +910,8 @@ def crossmatch_open_clusters(df: pd.DataFrame, max_sep_arcsec: float = CLUSTER_M
             
     except Exception as e:
         print(f"Cluster XMatch error: {e}")
-    
+        raise
+
     return df
 
 
@@ -736,7 +919,131 @@ def crossmatch_open_clusters(df: pd.DataFrame, max_sep_arcsec: float = CLUSTER_M
 # unWISE/unTimely IR VARIABILITY
 # =============================================================================
 
-def query_unwise_variability(df: pd.DataFrame, max_sep_arcsec: float = UNWISE_MAX_SEP_ARCSEC) -> pd.DataFrame:
+def _unwise_empty_result(candidate_id: str) -> dict[str, object]:
+    return {
+        "candidate_id": candidate_id,
+        "unwise_w1_zscore": np.nan,
+        "unwise_w2_zscore": np.nan,
+        "unwise_w1_var": False,
+    }
+
+
+def _query_unwise_single(
+    candidate_id: str,
+    ra: float,
+    dec: float,
+    *,
+    max_sep_arcsec: float,
+    max_retries: int,
+) -> dict[str, object]:
+    """Query NEOWISE single-exposure photometry for one source and compute variability."""
+    if not (np.isfinite(ra) and np.isfinite(dec)):
+        return _unwise_empty_result(candidate_id)
+
+    query = f"""
+    SELECT
+        mjd,
+        w1mpro, w1snr,
+        w2mpro, w2snr,
+        qual_frame,
+        qi_fact,
+        cc_flags
+    FROM neowiser_p1bs_psd
+    WHERE CONTAINS(
+        POINT('ICRS', ra, dec),
+        CIRCLE('ICRS', {ra:.7f}, {dec:.7f}, {max_sep_arcsec / 3600.0})
+    ) = 1
+    ORDER BY mjd ASC
+    """
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            result = Irsa.query_tap(query)
+            table = result.to_table()
+            if table is None or len(table) == 0:
+                return _unwise_empty_result(candidate_id)
+
+            df_lc = table.to_pandas()
+
+            if "qual_frame" in df_lc.columns:
+                qual = pd.to_numeric(df_lc["qual_frame"], errors="coerce")
+                df_lc = df_lc[qual.isin([0, 1])]
+
+            if "cc_flags" in df_lc.columns:
+                cc = df_lc["cc_flags"].astype(str)
+                df_lc = df_lc[~cc.str.contains("[^0]", regex=True, na=False)]
+
+            if "qi_fact" in df_lc.columns:
+                qf = pd.to_numeric(df_lc["qi_fact"], errors="coerce")
+                df_lc = df_lc[qf >= UNWISE_QF_MIN]
+
+            if "w1snr" in df_lc.columns:
+                w1snr = pd.to_numeric(df_lc["w1snr"], errors="coerce")
+                df_lc = df_lc[w1snr >= 3.0]
+            if "w2snr" in df_lc.columns:
+                w2snr = pd.to_numeric(df_lc["w2snr"], errors="coerce")
+                df_lc = df_lc[w2snr >= 3.0]
+
+            if df_lc.empty:
+                return _unwise_empty_result(candidate_id)
+
+            w1_mags = pd.to_numeric(df_lc.get("w1mpro"), errors="coerce").dropna().to_numpy()
+            w2_mags = pd.to_numeric(df_lc.get("w2mpro"), errors="coerce").dropna().to_numpy()
+
+            out = _unwise_empty_result(candidate_id)
+
+            if len(w1_mags) >= 3:
+                w1_std = float(np.std(w1_mags))
+                w1_med = float(np.median(w1_mags))
+                expected_scatter = UNWISE_EXPECTED_SCATTER_BASE + UNWISE_EXPECTED_SCATTER_SLOPE * max(
+                    0.0, w1_med - UNWISE_EXPECTED_SCATTER_MAG_REF
+                )
+                if expected_scatter > 0:
+                    w1_z = w1_std / expected_scatter
+                    out["unwise_w1_zscore"] = w1_z
+                    out["unwise_w1_var"] = bool(w1_z > UNWISE_VARIABILITY_ZSCORE)
+
+            if len(w2_mags) >= 3:
+                w2_std = float(np.std(w2_mags))
+                w2_med = float(np.median(w2_mags))
+                expected_scatter = UNWISE_EXPECTED_SCATTER_BASE + UNWISE_EXPECTED_SCATTER_SLOPE * max(
+                    0.0, w2_med - UNWISE_EXPECTED_SCATTER_MAG_REF
+                )
+                if expected_scatter > 0:
+                    out["unwise_w2_zscore"] = w2_std / expected_scatter
+
+            return out
+        except Exception:
+            if attempt >= max_retries:
+                return _unwise_empty_result(candidate_id)
+            time.sleep(float(2 ** (attempt - 1)))
+
+    return _unwise_empty_result(candidate_id)
+
+
+def _merge_unwise_checkpoint(existing: pd.DataFrame, fresh_rows: list[dict[str, object]]) -> pd.DataFrame:
+    """Merge incremental unWISE rows into checkpoint dataframe."""
+    if not fresh_rows:
+        return existing
+
+    fresh_df = pd.DataFrame(fresh_rows)
+    if existing.empty:
+        merged = fresh_df
+    else:
+        merged = pd.concat([existing, fresh_df], ignore_index=True)
+
+    merged = merged.drop_duplicates(subset=["candidate_id"], keep="last")
+    return merged
+
+
+def query_unwise_variability(
+    df: pd.DataFrame,
+    max_sep_arcsec: float = UNWISE_MAX_SEP_ARCSEC,
+    *,
+    checkpoint_path: Path | None = None,
+    checkpoint_every: int = UNWISE_CHECKPOINT_EVERY,
+    max_retries: int = UNWISE_MAX_RETRIES,
+) -> pd.DataFrame:
     """
     Query unWISE/unTimely for mid-IR variability (Meisner+2023).
     
@@ -753,82 +1060,79 @@ def query_unwise_variability(df: pd.DataFrame, max_sep_arcsec: float = UNWISE_MA
         df['unwise_w1_var'] = False
         return df
     
-    w1_zscores = []
-    w2_zscores = []
-    w1_var = []
-    
-    # unTimely API endpoint
-    base_url = UNTIMELY_API_URL
-    
-    for _, row in tqdm(df.iterrows(), total=len(df), desc="unWISE variability"):
+    id_col = "candidate_id" if "candidate_id" in df.columns else "asas_sn_id"
+    if id_col not in df.columns:
+        id_col = "candidate_id"
+        df[id_col] = df.index.astype(str)
+    else:
+        df[id_col] = df[id_col].astype(str)
+
+    coords = df[[id_col, "ra", "dec"]].dropna(subset=["ra", "dec"]).copy()
+    if coords.empty:
+        df['unwise_w1_zscore'] = np.nan
+        df['unwise_w2_zscore'] = np.nan
+        df['unwise_w1_var'] = False
+        return df
+
+    coords = coords.drop_duplicates(subset=[id_col], keep="first")
+    coords = coords.rename(columns={id_col: "candidate_id"})
+
+    ckpt_df = pd.DataFrame(columns=["candidate_id", "unwise_w1_zscore", "unwise_w2_zscore", "unwise_w1_var"])
+    if checkpoint_path and Path(checkpoint_path).exists():
         try:
-            # Query unTimely catalog
-            params = {
-                'catalog': 'untimely',
-                'spatial': 'cone',
-                'radius': max_sep_arcsec,
-                'radunits': 'arcsec',
-                'objstr': f"{row['ra']} {row['dec']}",
-                'outfmt': '1',  # JSON
-            }
-            
-            resp = requests.get(base_url, params=params, timeout=UNWISE_TIMEOUT_SECONDS)
-            
-            if resp.status_code == 200:
-                data = resp.json()
-                
-                if data and len(data) > 0:
-                    # Filter by quality (paper criteria)
-                    good = [d for d in data
-                            if d.get('fracflux', 0) > UNWISE_FRACFLUX_MIN
-                            and d.get('qf', 0) > UNWISE_QF_MIN]
-                    
-                    if good:
-                        w1_mags = [d['w1mpro'] for d in good if 'w1mpro' in d]
-                        w2_mags = [d['w2mpro'] for d in good if 'w2mpro' in d]
-                        
-                        if len(w1_mags) >= 3:
-                            w1_std = np.std(w1_mags)
-                            w1_med = np.median(w1_mags)
-                            # Estimate expected scatter from magnitude
-                            expected_scatter = UNWISE_EXPECTED_SCATTER_BASE + UNWISE_EXPECTED_SCATTER_SLOPE * max(0, w1_med - UNWISE_EXPECTED_SCATTER_MAG_REF)
-                            z = w1_std / expected_scatter
-                            w1_zscores.append(z)
-                            w1_var.append(z > UNWISE_VARIABILITY_ZSCORE)
-                        else:
-                            w1_zscores.append(np.nan)
-                            w1_var.append(False)
-                        
-                        if len(w2_mags) >= 3:
-                            w2_std = np.std(w2_mags)
-                            w2_med = np.median(w2_mags)
-                            expected_scatter = UNWISE_EXPECTED_SCATTER_BASE + UNWISE_EXPECTED_SCATTER_SLOPE * max(0, w2_med - UNWISE_EXPECTED_SCATTER_MAG_REF)
-                            w2_zscores.append(w2_std / expected_scatter)
-                        else:
-                            w2_zscores.append(np.nan)
-                    else:
-                        w1_zscores.append(np.nan)
-                        w2_zscores.append(np.nan)
-                        w1_var.append(False)
-                else:
-                    w1_zscores.append(np.nan)
-                    w2_zscores.append(np.nan)
-                    w1_var.append(False)
-            else:
-                w1_zscores.append(np.nan)
-                w2_zscores.append(np.nan)
-                w1_var.append(False)
-                
+            loaded = pd.read_parquet(checkpoint_path)
+            required = {"candidate_id", "unwise_w1_zscore", "unwise_w2_zscore", "unwise_w1_var"}
+            if required.issubset(loaded.columns):
+                ckpt_df = loaded[list(required)].copy()
+                ckpt_df["candidate_id"] = ckpt_df["candidate_id"].astype(str)
+                ckpt_df = ckpt_df.drop_duplicates(subset=["candidate_id"], keep="last")
+                print(f"[unwise] Loaded checkpoint: {len(ckpt_df)} candidates")
         except Exception:
-            w1_zscores.append(np.nan)
-            w2_zscores.append(np.nan)
-            w1_var.append(False)
-    
-    df['unwise_w1_zscore'] = w1_zscores
-    df['unwise_w2_zscore'] = w2_zscores
-    df['unwise_w1_var'] = w1_var
-    
-    n_var = sum(w1_var)
+            ckpt_df = pd.DataFrame(columns=["candidate_id", "unwise_w1_zscore", "unwise_w2_zscore", "unwise_w1_var"])
+
+    done_ids = set(ckpt_df["candidate_id"]) if not ckpt_df.empty else set()
+    coords_todo = coords[~coords["candidate_id"].isin(done_ids)] if done_ids else coords
+
+    if not coords_todo.empty:
+        pending_rows: list[dict[str, object]] = []
+
+        progress = tqdm(coords_todo.itertuples(index=False), total=len(coords_todo), desc="unWISE variability")
+        for n_done, row in enumerate(progress, start=1):
+            try:
+                pending_rows.append(_query_unwise_single(
+                    str(row.candidate_id), float(row.ra), float(row.dec),
+                    max_sep_arcsec=max_sep_arcsec, max_retries=max_retries,
+                ))
+            except Exception:
+                pending_rows.append(_unwise_empty_result(str(row.candidate_id)))
+
+            if checkpoint_path and (n_done % max(1, int(checkpoint_every)) == 0):
+                ckpt_df = _merge_unwise_checkpoint(ckpt_df, pending_rows)
+                pending_rows = []
+                Path(checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
+                ckpt_df.to_parquet(checkpoint_path, index=False, compression=PARQUET_CACHE_COMPRESSION)
+
+        if pending_rows:
+            ckpt_df = _merge_unwise_checkpoint(ckpt_df, pending_rows)
+            if checkpoint_path:
+                Path(checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
+                ckpt_df.to_parquet(checkpoint_path, index=False, compression=PARQUET_CACHE_COMPRESSION)
+    elif done_ids:
+        print(f"[unwise] All {len(coords)} candidates already in checkpoint, skipping queries")
+
+    if ckpt_df.empty:
+        df['unwise_w1_zscore'] = np.nan
+        df['unwise_w2_zscore'] = np.nan
+        df['unwise_w1_var'] = False
+        return df
+
+    ckpt_idx = ckpt_df.set_index("candidate_id")
+    key = df[id_col].astype(str)
+    df['unwise_w1_zscore'] = key.map(ckpt_idx['unwise_w1_zscore'])
+    df['unwise_w2_zscore'] = key.map(ckpt_idx['unwise_w2_zscore'])
+    df['unwise_w1_var'] = key.map(ckpt_idx['unwise_w1_var']).fillna(False).astype(bool)
+
+    n_var = int(df['unwise_w1_var'].fillna(False).sum())
     print(f"unWISE: {n_var}/{len(df)} sources with W1 variability z-score > 3")
     return df
 
@@ -895,11 +1199,13 @@ def characterize_candidates_df(
     cache: Path = GAIA_CACHE_FILE,
     dust: bool = False,
     starhorse: str | None = None,
+    starhorse_cache: Path | None = None,
     run_banyan: bool = True,
     run_iphas: bool = True,
     run_sfr: bool = True,
     run_clusters: bool = True,
     run_unwise: bool = True,
+    unwise_checkpoint_every: int = UNWISE_CHECKPOINT_EVERY,
     checkpoint_path: Path | None = None,
 ) -> pd.DataFrame:
     """Characterize candidates and return an enriched dataframe."""
@@ -1018,12 +1324,15 @@ def characterize_candidates_df(
                     gaia_ids,
                     starhorse_file=starhorse if not use_tap_query else None,
                     use_tap=use_tap_query,
+                    cache_file=starhorse_cache,
                 )
                 if not sh_df.empty:
                     df_char = df_char.merge(sh_df, on="source_id", how="left", suffixes=("", "_sh"))
                     if "age50" in df_char.columns:
                         df_char = classify_galactic_population(df_char)
-                df_char = _set_module_state(df_char, "starhorse", "ok", "")
+                    df_char = _set_module_state(df_char, "starhorse", "ok", "")
+                else:
+                    df_char = _set_module_state(df_char, "starhorse", "skipped", "no StarHorse TAP rows returned")
             except Exception as e:
                 msg = str(e)
                 print(f"Warning: characterize module 'starhorse' failed: {msg}")
@@ -1101,13 +1410,21 @@ def characterize_candidates_df(
             _save_char_checkpoint(df_char, checkpoint_path)
 
     if not _module_completed(df_char, "unwise"):
+        unwise_checkpoint = None
+        if checkpoint_path:
+            unwise_checkpoint = Path(checkpoint_path).with_name(UNWISE_CHECKPOINT_BASENAME)
+
         df_char = _run_optional_module(
             df_char,
             module="unwise",
             enabled=run_unwise,
             description="Querying unWISE/unTimely variability...",
             func=query_unwise_variability,
+            checkpoint_path=unwise_checkpoint,
+            checkpoint_every=unwise_checkpoint_every,
         )
+        if checkpoint_path:
+            _save_char_checkpoint(df_char, checkpoint_path)
 
     # Clean up checkpoint on success
     if checkpoint_path and Path(checkpoint_path).exists():
@@ -1131,6 +1448,8 @@ def main():
     parser.add_argument("--cache", type=Path, default=GAIA_CACHE_FILE, help="Cache file for Gaia queries")
     parser.add_argument("--dust", action="store_true", help="Enable dustmaps3d 3D extinction query")
     parser.add_argument("--starhorse", type=str, default=None, help="StarHorse stellar ages/masses: 'tap' for remote TAP query (recommended), or path to local catalog file")
+    parser.add_argument("--starhorse-cache", type=Path, default=STARHORSE_TAP_CACHE_FILE, help="StarHorse TAP cache parquet path (default: ~/.cache/malca/catalogs/starhorse_tap_cache.parquet)")
+    parser.add_argument("--unwise-checkpoint-every", type=int, default=UNWISE_CHECKPOINT_EVERY, help="Persist unWISE checkpoint every N completed sources")
     parser.add_argument("--no-characterize-banyan", dest="characterize_banyan", action="store_false", help="Disable BANYAN Sigma enrichment")
     parser.add_argument("--no-characterize-iphas", dest="characterize_iphas", action="store_false", help="Disable IPHAS enrichment")
     parser.add_argument("--no-characterize-sfr", dest="characterize_sfr", action="store_false", help="Disable star-forming-region enrichment")
@@ -1160,11 +1479,13 @@ def main():
         cache=args.cache,
         dust=args.dust,
         starhorse=args.starhorse,
+        starhorse_cache=args.starhorse_cache,
         run_banyan=args.characterize_banyan,
         run_iphas=args.characterize_iphas,
         run_sfr=args.characterize_sfr,
         run_clusters=args.characterize_clusters,
         run_unwise=args.characterize_unwise,
+        unwise_checkpoint_every=args.unwise_checkpoint_every,
     )
     
     # Save results

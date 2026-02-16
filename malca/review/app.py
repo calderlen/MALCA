@@ -2318,6 +2318,7 @@ def update_display(_tick, render_request, applied_nonce, queue_data):
         show_baseline='baseline' in overlays,
         show_event_markers='markers' in overlays,
         show_residuals='residuals' in overlays,
+        show_phase_fold=False,
         show_diagnostics='diagnostics' in overlays,
         confidence_colors='confidence' in overlays,
         run_params=run_params or {},
