@@ -2,15 +2,18 @@
 Post-review vetting: check whether candidates are already known objects.
 
 Queries:
-1. SIMBAD — object type, identifiers, bibliography count
-2. Gaia DR3 variability tables — variability flag + classification
-3. ASAS-SN Variable Stars Database (VizieR II/366) — known ASAS-SN variables
-4. ALeRCE ZTF broker — ZTF ML classification
-5. ATLAS forced photometry — independent cyan/orange confirmation
-6. Gaia DR3 epoch photometry — space-based variability confirmation
-7. eROSITA X-ray catalog — youth indicator
-8. Proper motion consistency — cluster membership validation
-9. NEOWISE light curves — IR time-series for dipper confirmation
+ 1. SIMBAD — object type, identifiers, bibliography count
+ 2. Gaia DR3 variability tables — variability flag + classification
+ 3. ASAS-SN Variable Stars Database (VizieR II/366) — known ASAS-SN variables
+ 4. ZTF periodic variables (Chen+ 2020, VizieR J/ApJS/249/18) — recent ZTF discoveries
+ 5. TNS (Transient Name Server) — supernovae, novae, CVs, transients
+ 6. Gaia DR3 eclipsing binary parameters — periods for dominant contaminant class
+ 7. ALeRCE ZTF broker — ZTF ML classification
+ 8. ATLAS forced photometry — independent cyan/orange confirmation
+ 9. Gaia DR3 epoch photometry — space-based variability confirmation
+10. eROSITA X-ray catalog — youth indicator
+11. Proper motion consistency — cluster membership validation
+12. NEOWISE light curves — IR time-series for dipper confirmation
 
 Usage:
     from malca.vetting import vet_candidates
@@ -54,6 +57,13 @@ ATLAS_API_BASE = "https://fallingstar-data.com/forcedphot"
 ATLAS_POLL_INTERVAL = 10
 ATLAS_MAX_POLL = 120
 ATLAS_MJD_MIN = 57000  # ~2015
+
+ZTF_VAR_CATALOG = "J/ApJS/249/18/table2"
+ZTF_VAR_RADIUS_ARCSEC = 3.0
+
+TNS_API_BASE = "https://www.wis-tns.org/api"
+TNS_RADIUS_ARCSEC = 5.0
+TNS_BATCH_SIZE = 50
 
 EROSITA_CATALOG = "J/A+A/682/A34/erass1-m"
 EROSITA_RADIUS_ARCSEC = 10.0
@@ -341,6 +351,288 @@ def crossmatch_asassn_variables(
             matched += 1
 
     print(f"ASAS-SN variables: {matched} matches")
+    return df
+
+
+# =============================================================================
+# ZTF PERIODIC VARIABLES (Chen+ 2020, VizieR J/ApJS/249/18)
+# =============================================================================
+
+
+def crossmatch_ztf_variables(
+    df: pd.DataFrame,
+    radius_arcsec: float = ZTF_VAR_RADIUS_ARCSEC,
+    batch_size: int = 50,
+) -> pd.DataFrame:
+    """
+    Crossmatch against ZTF periodic variable catalog (Chen+ 2020).
+
+    ~781k periodic variables from ZTF DR2.  Many recent discoveries not yet
+    in SIMBAD.  Adds columns: ztf_var_type, ztf_var_period, ztf_var_amp.
+    """
+    from astroquery.vizier import Vizier
+
+    df = df.copy()
+    df["ztf_var_type"] = ""
+    df["ztf_var_period"] = np.nan
+    df["ztf_var_amp"] = np.nan
+
+    valid = df["ra"].notna() & df["dec"].notna()
+    if not valid.any():
+        return df
+
+    n_valid = int(valid.sum())
+    print(f"ZTF variables: crossmatching {n_valid} candidates (radius={radius_arcsec}\")")
+
+    viz = Vizier(columns=["RAJ2000", "DEJ2000", "Type", "Per", "gAmp", "rAmp"], row_limit=-1)
+    radius = radius_arcsec * u.arcsec
+    matched = 0
+    valid_indices = df.index[valid]
+
+    for i in tqdm(range(0, n_valid, batch_size), desc="ZTF vars"):
+        batch_idx = valid_indices[i : i + batch_size]
+        batch = df.loc[batch_idx]
+        coords = SkyCoord(
+            ra=batch["ra"].values, dec=batch["dec"].values, unit="deg", frame="icrs"
+        )
+
+        for attempt in range(3):
+            try:
+                results = viz.query_region(coords, radius=radius, catalog=ZTF_VAR_CATALOG)
+                break
+            except Exception as e:
+                if attempt < 2:
+                    time.sleep(3 * (attempt + 1))
+                else:
+                    print(f"  ZTF batch {i} failed: {e}")
+                    results = None
+
+        if results is None or len(results) == 0:
+            continue
+
+        result_table = results[0]
+        result_coords = SkyCoord(
+            ra=result_table["RAJ2000"], dec=result_table["DEJ2000"], unit="deg", frame="icrs"
+        )
+
+        for j, idx in enumerate(batch_idx):
+            src = SkyCoord(ra=df.loc[idx, "ra"], dec=df.loc[idx, "dec"], unit="deg", frame="icrs")
+            seps = src.separation(result_coords).arcsec
+            within = seps <= radius_arcsec
+            if not within.any():
+                continue
+
+            best = np.argmin(seps)
+            row = result_table[best]
+            vtype = str(row["Type"]) if row["Type"] and row["Type"] is not np.ma.masked else ""
+            try:
+                period = float(row["Per"]) if row["Per"] is not None and row["Per"] is not np.ma.masked else np.nan
+            except (ValueError, TypeError):
+                period = np.nan
+            # Use g-band amplitude, fall back to r-band
+            amp = np.nan
+            for amp_col in ("gAmp", "rAmp"):
+                if amp_col in result_table.colnames:
+                    try:
+                        v = row[amp_col]
+                        if v is not None and v is not np.ma.masked:
+                            amp = float(v)
+                            break
+                    except (ValueError, TypeError, KeyError):
+                        pass
+
+            df.loc[idx, "ztf_var_type"] = vtype
+            df.loc[idx, "ztf_var_period"] = period
+            df.loc[idx, "ztf_var_amp"] = amp
+            matched += 1
+
+    print(f"ZTF variables: {matched} matches")
+    return df
+
+
+# =============================================================================
+# TNS (TRANSIENT NAME SERVER)
+# =============================================================================
+
+
+def crossmatch_tns(
+    df: pd.DataFrame,
+    radius_arcsec: float = TNS_RADIUS_ARCSEC,
+    tns_api_key: str | None = None,
+    batch_size: int = TNS_BATCH_SIZE,
+) -> pd.DataFrame:
+    """
+    Crossmatch against the Transient Name Server via VizieR mirror.
+
+    Uses the VizieR TNS catalog (VII/295/tns) for cone-search without needing
+    a TNS API key.  Catches supernovae, novae, CVs, and other transients.
+    Adds columns: tns_name, tns_type, tns_redshift, tns_disc_date.
+    """
+    from astroquery.vizier import Vizier
+
+    df = df.copy()
+    df["tns_name"] = ""
+    df["tns_type"] = ""
+    df["tns_redshift"] = np.nan
+    df["tns_disc_date"] = ""
+
+    valid = df["ra"].notna() & df["dec"].notna()
+    if not valid.any():
+        return df
+
+    n_valid = int(valid.sum())
+    print(f"TNS: crossmatching {n_valid} candidates (radius={radius_arcsec}\")")
+
+    viz = Vizier(
+        columns=["Name", "Type", "z", "DDate", "RAJ2000", "DEJ2000"],
+        row_limit=-1,
+    )
+    radius = radius_arcsec * u.arcsec
+    matched = 0
+    valid_indices = df.index[valid]
+
+    for i in tqdm(range(0, n_valid, batch_size), desc="TNS"):
+        batch_idx = valid_indices[i : i + batch_size]
+        batch = df.loc[batch_idx]
+        coords = SkyCoord(
+            ra=batch["ra"].values, dec=batch["dec"].values, unit="deg", frame="icrs"
+        )
+
+        for attempt in range(3):
+            try:
+                results = viz.query_region(coords, radius=radius, catalog="VII/295/tns")
+                break
+            except Exception as e:
+                if attempt < 2:
+                    time.sleep(3 * (attempt + 1))
+                else:
+                    print(f"  TNS batch {i} failed: {e}")
+                    results = None
+
+        if results is None or len(results) == 0:
+            continue
+
+        result_table = results[0]
+        ra_col = "RAJ2000" if "RAJ2000" in result_table.colnames else "RA_ICRS" if "RA_ICRS" in result_table.colnames else None
+        dec_col = "DEJ2000" if "DEJ2000" in result_table.colnames else "DE_ICRS" if "DE_ICRS" in result_table.colnames else None
+        if ra_col is None or dec_col is None:
+            continue
+
+        result_coords = SkyCoord(
+            ra=result_table[ra_col], dec=result_table[dec_col], unit="deg", frame="icrs"
+        )
+
+        for j, idx in enumerate(batch_idx):
+            src = SkyCoord(ra=df.loc[idx, "ra"], dec=df.loc[idx, "dec"], unit="deg", frame="icrs")
+            seps = src.separation(result_coords).arcsec
+            within = seps <= radius_arcsec
+            if not within.any():
+                continue
+
+            best = np.argmin(seps)
+            row = result_table[best]
+            name = str(row["Name"]) if row["Name"] and row["Name"] is not np.ma.masked else ""
+            ttype = str(row["Type"]) if "Type" in result_table.colnames and row["Type"] and row["Type"] is not np.ma.masked else ""
+            try:
+                z = float(row["z"]) if "z" in result_table.colnames and row["z"] is not None and row["z"] is not np.ma.masked else np.nan
+            except (ValueError, TypeError):
+                z = np.nan
+            ddate = str(row["DDate"]) if "DDate" in result_table.colnames and row["DDate"] and row["DDate"] is not np.ma.masked else ""
+
+            df.loc[idx, "tns_name"] = name
+            df.loc[idx, "tns_type"] = ttype
+            df.loc[idx, "tns_redshift"] = z
+            df.loc[idx, "tns_disc_date"] = ddate
+            matched += 1
+
+    print(f"TNS: {matched} transient matches")
+    return df
+
+
+# =============================================================================
+# GAIA DR3 ECLIPSING BINARY PARAMETERS
+# =============================================================================
+
+
+def query_gaia_eb_params(
+    df: pd.DataFrame,
+    chunk_size: int = GAIA_VAR_CHUNK_SIZE,
+) -> pd.DataFrame:
+    """
+    Query Gaia DR3 vari_eclipsing_binary for detailed EB parameters.
+
+    Only queries sources already classified as ECL by the Gaia classifier.
+    Adds columns: gaia_eb_period, gaia_eb_morph, gaia_eb_global_ranking.
+    """
+    df = df.copy()
+    df["gaia_eb_period"] = np.nan
+    df["gaia_eb_morph"] = ""
+    df["gaia_eb_global_ranking"] = np.nan
+
+    if "gaia_id" not in df.columns:
+        return df
+
+    # Only look up sources classified as ECL
+    ecl_mask = df.get("gaia_var_class", pd.Series("", index=df.index)).str.upper() == "ECL"
+    if not ecl_mask.any():
+        print("Gaia EB params: no ECL-classified sources, skipping")
+        return df
+
+    gaia_ids = []
+    idx_map = {}
+    for idx, val in df.loc[ecl_mask, "gaia_id"].items():
+        sid = str(val).strip()
+        if sid.isdigit():
+            gaia_ids.append(sid)
+            idx_map.setdefault(sid, []).append(idx)
+    gaia_ids = list(set(gaia_ids))
+
+    if not gaia_ids:
+        return df
+
+    n_ecl = len(gaia_ids)
+    print(f"Gaia EB params: querying {n_ecl} ECL-classified sources")
+    tap = pyvo.dal.TAPService("https://gea.esac.esa.int/tap-server/tap")
+
+    eb_results = {}
+    for i in tqdm(range(0, len(gaia_ids), chunk_size), desc="Gaia EB params"):
+        chunk = gaia_ids[i : i + chunk_size]
+        ids_str = ",".join(chunk)
+        query = f"""
+            SELECT source_id, frequency, model_type, global_ranking
+            FROM gaiadr3.vari_eclipsing_binary
+            WHERE source_id IN ({ids_str})
+        """
+        for attempt in range(3):
+            try:
+                result = tap.run_sync(query)
+                for row in result:
+                    sid = str(row["source_id"])
+                    freq = row["frequency"]
+                    period = 1.0 / float(freq) if freq and float(freq) > 0 else np.nan
+                    morph = str(row["model_type"]) if row["model_type"] else ""
+                    ranking = float(row["global_ranking"]) if row["global_ranking"] is not None else np.nan
+                    eb_results[sid] = (period, morph, ranking)
+                break
+            except Exception as e:
+                if attempt < 2:
+                    time.sleep(5 * (attempt + 1))
+                else:
+                    print(f"  Gaia EB chunk {i} failed: {e}")
+
+    matched = 0
+    for sid, indices in idx_map.items():
+        info = eb_results.get(sid)
+        if info is None:
+            continue
+        period, morph, ranking = info
+        for idx in indices:
+            df.loc[idx, "gaia_eb_period"] = period
+            df.loc[idx, "gaia_eb_morph"] = morph
+            df.loc[idx, "gaia_eb_global_ranking"] = ranking
+            matched += 1
+
+    print(f"Gaia EB params: {matched} sources with orbital parameters")
     return df
 
 
@@ -954,6 +1246,9 @@ def vet_candidates(
     run_simbad: bool = True,
     run_gaia_var: bool = True,
     run_asassn_var: bool = True,
+    run_ztf_var: bool = True,
+    run_tns: bool = True,
+    run_gaia_eb: bool = True,
     run_alerce: bool = True,
     run_atlas: bool = False,
     run_gaia_epoch: bool = True,
@@ -962,10 +1257,13 @@ def vet_candidates(
     run_neowise_lc: bool = False,
     simbad_radius_arcsec: float = SIMBAD_RADIUS_ARCSEC,
     asassn_radius_arcsec: float = ASASSN_VAR_RADIUS_ARCSEC,
+    ztf_var_radius_arcsec: float = ZTF_VAR_RADIUS_ARCSEC,
+    tns_radius_arcsec: float = TNS_RADIUS_ARCSEC,
     alerce_radius_arcsec: float = ALERCE_RADIUS_ARCSEC,
     erosita_radius_arcsec: float = EROSITA_RADIUS_ARCSEC,
     gaia_var_chunk_size: int = GAIA_VAR_CHUNK_SIZE,
     atlas_token: str | None = None,
+    tns_api_key: str | None = None,
     neowise_output_dir: Path | None = None,
     neowise_workers: int = 4,
     checkpoint_path: Path | None = None,
@@ -980,6 +1278,9 @@ def vet_candidates(
     run_simbad : query SIMBAD for object type, bibliography
     run_gaia_var : query Gaia DR3 variability tables
     run_asassn_var : crossmatch ASAS-SN variable star catalog
+    run_ztf_var : crossmatch ZTF periodic variables (Chen+ 2020)
+    run_tns : crossmatch Transient Name Server
+    run_gaia_eb : query Gaia DR3 eclipsing binary parameters (ECL sources only)
     run_alerce : query ALeRCE ZTF broker
     run_atlas : query ATLAS forced photometry (requires token)
     run_gaia_epoch : check Gaia epoch photometry availability
@@ -1016,6 +1317,15 @@ def vet_candidates(
 
     if run_asassn_var:
         _run_module("ASAS-SN variables", crossmatch_asassn_variables, radius_arcsec=asassn_radius_arcsec)
+
+    if run_ztf_var:
+        _run_module("ZTF variables", crossmatch_ztf_variables, radius_arcsec=ztf_var_radius_arcsec)
+
+    if run_tns:
+        _run_module("TNS", crossmatch_tns, radius_arcsec=tns_radius_arcsec, tns_api_key=tns_api_key)
+
+    if run_gaia_eb:
+        _run_module("Gaia EB params", query_gaia_eb_params, chunk_size=gaia_var_chunk_size)
 
     if run_alerce:
         _run_module("ALeRCE", query_alerce, radius_arcsec=alerce_radius_arcsec)
@@ -1066,6 +1376,24 @@ def _print_vetting_summary(df: pd.DataFrame, total_start: float) -> None:
         n = (df["asassn_var_type"] != "").sum()
         print(f"  ASAS-SN var matches:    {n}/{len(df)}")
 
+    if "ztf_var_type" in df.columns:
+        n = (df["ztf_var_type"] != "").sum()
+        print(f"  ZTF var matches:        {n}/{len(df)}")
+        if n > 0:
+            for cls, cnt in df.loc[df["ztf_var_type"] != "", "ztf_var_type"].value_counts().head(5).items():
+                print(f"    {cls}: {cnt}")
+
+    if "tns_name" in df.columns:
+        n = (df["tns_name"] != "").sum()
+        print(f"  TNS transients:         {n}/{len(df)}")
+        if n > 0:
+            for cls, cnt in df.loc[df["tns_type"] != "", "tns_type"].value_counts().head(5).items():
+                print(f"    {cls}: {cnt}")
+
+    if "gaia_eb_period" in df.columns:
+        n = df["gaia_eb_period"].notna().sum()
+        print(f"  Gaia EB params:         {n}/{len(df)}")
+
     if "alerce_oid" in df.columns:
         n = (df["alerce_oid"] != "").sum()
         print(f"  ALeRCE matches:         {n}/{len(df)}")
@@ -1102,6 +1430,10 @@ def _print_vetting_summary(df: pd.DataFrame, total_start: float) -> None:
         known_mask |= df["gaia_var_class"] != ""
     if "asassn_var_type" in df.columns:
         known_mask |= df["asassn_var_type"] != ""
+    if "ztf_var_type" in df.columns:
+        known_mask |= df["ztf_var_type"] != ""
+    if "tns_name" in df.columns:
+        known_mask |= df["tns_name"] != ""
     if "alerce_lc_class" in df.columns:
         known_mask |= df["alerce_lc_class"] != ""
     df["vetting_likely_known"] = known_mask
@@ -1134,6 +1466,12 @@ def main():
     parser.add_argument("--no-gaia-var", action="store_true", help="Skip Gaia DR3 variability query")
     parser.add_argument("--no-gaia-epoch", action="store_true", help="Skip Gaia DR3 epoch photometry check")
     parser.add_argument("--no-asassn-var", action="store_true", help="Skip ASAS-SN variable catalog crossmatch")
+    parser.add_argument("--no-ztf-var", action="store_true", help="Skip ZTF periodic variables crossmatch")
+    parser.add_argument("--ztf-var-radius", type=float, default=ZTF_VAR_RADIUS_ARCSEC, help=f"ZTF variable crossmatch radius in arcsec (default: {ZTF_VAR_RADIUS_ARCSEC})")
+    parser.add_argument("--no-tns", action="store_true", help="Skip TNS transient crossmatch")
+    parser.add_argument("--tns-radius", type=float, default=TNS_RADIUS_ARCSEC, help=f"TNS crossmatch radius in arcsec (default: {TNS_RADIUS_ARCSEC})")
+    parser.add_argument("--tns-api-key", type=str, default=None, help="TNS API key (optional, uses VizieR mirror by default)")
+    parser.add_argument("--no-gaia-eb", action="store_true", help="Skip Gaia DR3 eclipsing binary parameters")
     parser.add_argument("--no-alerce", action="store_true", help="Skip ALeRCE ZTF query")
     parser.add_argument("--no-erosita", action="store_true", help="Skip eROSITA X-ray crossmatch")
     parser.add_argument("--no-pm-check", action="store_true", help="Skip proper motion consistency check")
@@ -1169,6 +1507,9 @@ def main():
         run_gaia_var=not args.no_gaia_var,
         run_gaia_epoch=not args.no_gaia_epoch,
         run_asassn_var=not args.no_asassn_var,
+        run_ztf_var=not args.no_ztf_var,
+        run_tns=not args.no_tns,
+        run_gaia_eb=not args.no_gaia_eb,
         run_alerce=not args.no_alerce,
         run_erosita=not args.no_erosita,
         run_atlas=args.atlas_token is not None,
@@ -1176,9 +1517,12 @@ def main():
         run_neowise_lc=args.neowise_lc,
         simbad_radius_arcsec=args.simbad_radius,
         asassn_radius_arcsec=args.asassn_radius,
+        ztf_var_radius_arcsec=args.ztf_var_radius,
+        tns_radius_arcsec=args.tns_radius,
         alerce_radius_arcsec=args.alerce_radius,
         erosita_radius_arcsec=args.erosita_radius,
         atlas_token=args.atlas_token,
+        tns_api_key=args.tns_api_key,
         neowise_output_dir=args.neowise_output_dir,
         neowise_workers=args.neowise_workers,
         checkpoint_path=args.checkpoint,

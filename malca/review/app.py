@@ -374,57 +374,57 @@ app.index_string = '''
             margin: 0 0 0 2px;
         }
         .residual-split-control .rc-slider-rail {
-            background-color: #284256;
+            background-color: #284256 !important;
         }
         .residual-split-control .rc-slider-track {
-            background-color: #2aa198;
+            background-color: #0af !important;
         }
         .residual-split-control .rc-slider-handle {
-            border-color: #2aa198;
-            background-color: #0b141d;
+            border-color: #0af !important;
+            background-color: #0b141d !important;
         }
         .residual-split-control .rc-slider-handle:hover,
         .residual-split-control .rc-slider-handle:focus,
         .residual-split-control .rc-slider-handle:active {
-            border-color: #2aa198 !important;
-            box-shadow: 0 0 0 3px rgba(42, 161, 152, 0.2) !important;
+            border-color: #0af !important;
+            box-shadow: 0 0 0 3px rgba(0, 170, 255, 0.2) !important;
         }
         .residual-split-control .rc-slider-dot-active {
-            border-color: #2aa198 !important;
+            border-color: #0af !important;
         }
         .residual-split-control .rc-slider-mark-text-active {
-            color: #9fd6d0 !important;
+            color: #7dd !important;
         }
         #residual-height-slider .rc-slider-rail {
             background-color: #284256 !important;
         }
         #residual-height-slider .rc-slider-track,
         #residual-height-slider .rc-slider-track-1 {
-            background-color: #2aa198 !important;
+            background-color: #0af !important;
         }
         #residual-height-slider .rc-slider-handle,
         #residual-height-slider .rc-slider-handle-1,
         #residual-height-slider .rc-slider-handle-dragging,
         #residual-height-slider .rc-slider-handle-click-focused {
-            border-color: #2aa198 !important;
+            border-color: #0af !important;
             background-color: #0b141d !important;
-            box-shadow: 0 0 0 3px rgba(42, 161, 152, 0.2) !important;
+            box-shadow: 0 0 0 3px rgba(0, 170, 255, 0.2) !important;
             outline: none !important;
         }
         #residual-height-slider .rc-slider-dot-active {
-            border-color: #2aa198 !important;
+            border-color: #0af !important;
         }
         #residual-height-slider .rc-slider-mark-text-active {
-            color: #9fd6d0 !important;
+            color: #7dd !important;
         }
         #residual-height-slider .rc-slider-tooltip-inner {
-            background-color: #2aa198 !important;
-            border: 1px solid #2aa198 !important;
-            color: #fdf6e3 !important;
+            background-color: #0af !important;
+            border: 1px solid #0af !important;
+            color: #fff !important;
         }
         #residual-height-slider .rc-slider-tooltip-arrow {
-            border-top-color: #2aa198 !important;
-            border-bottom-color: #2aa198 !important;
+            border-top-color: #0af !important;
+            border-bottom-color: #0af !important;
         }
         .plot-frame {
             flex: 1;
@@ -1033,54 +1033,54 @@ app.index_string = '''
             background-color: #d8ccb3 !important;
         }
         body[data-theme="solarized"] .residual-split-control .rc-slider-track {
-            background-color: #2aa198 !important;
+            background-color: #268bd2 !important;
         }
         body[data-theme="solarized"] .residual-split-control .rc-slider-handle {
-            border-color: #2aa198 !important;
+            border-color: #268bd2 !important;
             background-color: #fdf6e3 !important;
         }
         body[data-theme="solarized"] .residual-split-control .rc-slider-handle:hover,
         body[data-theme="solarized"] .residual-split-control .rc-slider-handle:focus,
         body[data-theme="solarized"] .residual-split-control .rc-slider-handle:active {
-            border-color: #2aa198 !important;
-            box-shadow: 0 0 0 3px rgba(42, 161, 152, 0.18) !important;
+            border-color: #268bd2 !important;
+            box-shadow: 0 0 0 3px rgba(38, 139, 210, 0.18) !important;
         }
         body[data-theme="solarized"] .residual-split-control .rc-slider-dot-active {
-            border-color: #2aa198 !important;
+            border-color: #268bd2 !important;
         }
         body[data-theme="solarized"] .residual-split-control .rc-slider-mark-text-active {
-            color: #2aa198 !important;
+            color: #268bd2 !important;
         }
         body[data-theme="solarized"] #residual-height-slider .rc-slider-rail {
             background-color: #d8ccb3 !important;
         }
         body[data-theme="solarized"] #residual-height-slider .rc-slider-track,
         body[data-theme="solarized"] #residual-height-slider .rc-slider-track-1 {
-            background-color: #2aa198 !important;
+            background-color: #268bd2 !important;
         }
         body[data-theme="solarized"] #residual-height-slider .rc-slider-handle,
         body[data-theme="solarized"] #residual-height-slider .rc-slider-handle-1,
         body[data-theme="solarized"] #residual-height-slider .rc-slider-handle-dragging,
         body[data-theme="solarized"] #residual-height-slider .rc-slider-handle-click-focused {
-            border-color: #2aa198 !important;
+            border-color: #268bd2 !important;
             background-color: #fdf6e3 !important;
-            box-shadow: 0 0 0 3px rgba(42, 161, 152, 0.18) !important;
+            box-shadow: 0 0 0 3px rgba(38, 139, 210, 0.18) !important;
             outline: none !important;
         }
         body[data-theme="solarized"] #residual-height-slider .rc-slider-dot-active {
-            border-color: #2aa198 !important;
+            border-color: #268bd2 !important;
         }
         body[data-theme="solarized"] #residual-height-slider .rc-slider-mark-text-active {
-            color: #2aa198 !important;
+            color: #268bd2 !important;
         }
         body[data-theme="solarized"] #residual-height-slider .rc-slider-tooltip-inner {
-            background-color: #2aa198 !important;
-            border: 1px solid #2aa198 !important;
+            background-color: #268bd2 !important;
+            border: 1px solid #268bd2 !important;
             color: #fdf6e3 !important;
         }
         body[data-theme="solarized"] #residual-height-slider .rc-slider-tooltip-arrow {
-            border-top-color: #2aa198 !important;
-            border-bottom-color: #2aa198 !important;
+            border-top-color: #268bd2 !important;
+            border-bottom-color: #268bd2 !important;
         }
     </style>
 </head>
@@ -1377,7 +1377,7 @@ def _render_metadata_health(grouped: list[tuple[str, list[tuple[str, object]]]] 
 
 
 def _render_vetting_banner(payload: dict | None) -> html.Div:
-    """Render a vetting status banner above the metadata grid."""
+    """Render a vetting status panel with source cards above the metadata grid."""
     if not payload or 'vetting_likely_known' not in payload:
         return html.Div(
             "Not vetted",
@@ -1387,37 +1387,145 @@ def _render_vetting_banner(payload: dict | None) -> html.Div:
                 'text-align': 'center',
             },
         )
+
     known = payload.get('vetting_likely_known')
+
+    # Status header
     if known:
-        details = []
-        simbad_type = payload.get('simbad_otype')
-        if simbad_type:
-            details.append(f"SIMBAD: {simbad_type}")
-        gaia_class = payload.get('gaia_var_class')
-        if gaia_class:
-            details.append(f"Gaia: {gaia_class}")
-        asassn_type = payload.get('asassn_var_type')
-        if asassn_type:
-            details.append(f"ASAS-SN: {asassn_type}")
-        detail_str = f" ({', '.join(details)})" if details else ""
-        return html.Div(
-            f"KNOWN OBJECT{detail_str}",
-            style={
-                'padding': '6px 12px', 'margin': '4px 0', 'border-radius': '4px',
-                'background': '#4a1111', 'color': '#ff6b6b', 'font-weight': 'bold',
-                'font-size': '0.85em', 'text-align': 'center',
-                'border': '1px solid #ff6b6b',
-            },
-        )
-    return html.Div(
-        "POTENTIALLY NEW",
-        style={
-            'padding': '6px 12px', 'margin': '4px 0', 'border-radius': '4px',
+        header_style = {
+            'padding': '5px 10px', 'border-radius': '4px 4px 0 0',
+            'background': '#4a1111', 'color': '#ff6b6b', 'font-weight': 'bold',
+            'font-size': '0.82em', 'text-align': 'center',
+            'border': '1px solid #ff6b6b', 'border-bottom': 'none',
+        }
+        header_text = "KNOWN OBJECT"
+    else:
+        header_style = {
+            'padding': '5px 10px', 'border-radius': '4px 4px 0 0',
             'background': '#114a11', 'color': '#6bff6b', 'font-weight': 'bold',
-            'font-size': '0.85em', 'text-align': 'center',
-            'border': '1px solid #6bff6b',
-        },
-    )
+            'font-size': '0.82em', 'text-align': 'center',
+            'border': '1px solid #6bff6b', 'border-bottom': 'none',
+        }
+        header_text = "POTENTIALLY NEW"
+
+    # Build source cards
+    cell_style = {
+        'padding': '4px 8px', 'border-radius': '3px', 'font-size': '0.78em',
+        'background': '#1a2a1a' if not known else '#2a1a1a',
+        'border': '1px solid #333', 'text-align': 'center',
+        'overflow': 'hidden', 'text-overflow': 'ellipsis',
+    }
+    label_style = {'color': '#888', 'font-size': '0.9em', 'display': 'block'}
+    value_style = {'color': '#e0e0e0', 'font-weight': 'bold', 'display': 'block'}
+    hit_style = {**value_style, 'color': '#ff6b6b' if known else '#6bff6b'}
+
+    cards = []
+
+    # SIMBAD cell
+    simbad_id = payload.get('simbad_otype') or payload.get('simbad_main_id')
+    if simbad_id:
+        refs = payload.get('simbad_nbref')
+        ref_str = f" ({refs} refs)" if refs else ""
+        cards.append(html.Div([
+            html.Span("SIMBAD", style=label_style),
+            html.Span(f"{simbad_id}{ref_str}", style=hit_style, title=str(payload.get('simbad_main_id', ''))),
+        ], style=cell_style))
+
+    # Gaia variability cell
+    gaia_cls = payload.get('gaia_var_class')
+    if gaia_cls:
+        score = payload.get('gaia_var_score')
+        score_str = f" ({score:.2f})" if score and not pd.isna(score) else ""
+        cards.append(html.Div([
+            html.Span("Gaia DR3", style=label_style),
+            html.Span(f"{gaia_cls}{score_str}", style=hit_style),
+        ], style=cell_style))
+
+    # Gaia EB period cell
+    eb_period = payload.get('gaia_eb_period')
+    if eb_period and not pd.isna(eb_period):
+        cards.append(html.Div([
+            html.Span("Gaia EB", style=label_style),
+            html.Span(f"P={eb_period:.4f} d", style=hit_style),
+        ], style=cell_style))
+
+    # ASAS-SN cell
+    asassn_type = payload.get('asassn_var_type')
+    if asassn_type:
+        period = payload.get('asassn_var_period')
+        p_str = f" P={period:.4f}d" if period and not pd.isna(period) else ""
+        cards.append(html.Div([
+            html.Span("ASAS-SN", style=label_style),
+            html.Span(f"{asassn_type}{p_str}", style=hit_style),
+        ], style=cell_style))
+
+    # ZTF cell
+    ztf_type = payload.get('ztf_var_type')
+    if ztf_type:
+        ztf_p = payload.get('ztf_var_period')
+        zp_str = f" P={ztf_p:.4f}d" if ztf_p and not pd.isna(ztf_p) else ""
+        cards.append(html.Div([
+            html.Span("ZTF", style=label_style),
+            html.Span(f"{ztf_type}{zp_str}", style=hit_style),
+        ], style=cell_style))
+
+    # TNS cell
+    tns_name = payload.get('tns_name')
+    if tns_name:
+        tns_type = payload.get('tns_type', '')
+        cards.append(html.Div([
+            html.Span("TNS", style=label_style),
+            html.Span(f"{tns_name} ({tns_type})" if tns_type else tns_name, style=hit_style),
+        ], style=cell_style))
+
+    # ALeRCE cell
+    alerce_cls = payload.get('alerce_lc_class')
+    if alerce_cls:
+        prob = payload.get('alerce_lc_prob')
+        prob_str = f" ({prob:.0%})" if prob and not pd.isna(prob) else ""
+        cards.append(html.Div([
+            html.Span("ALeRCE", style=label_style),
+            html.Span(f"{alerce_cls}{prob_str}", style=hit_style),
+        ], style=cell_style))
+
+    # X-ray cell
+    xray = payload.get('xray_det')
+    if xray:
+        flux = payload.get('xray_flux')
+        flux_str = f" {flux:.1e}" if flux and not pd.isna(flux) else ""
+        cards.append(html.Div([
+            html.Span("X-ray", style=label_style),
+            html.Span(f"Detected{flux_str}", style=hit_style),
+        ], style=cell_style))
+
+    # Gaia epoch cell (non-hit, informational)
+    epoch_n = payload.get('gaia_epoch_n_obs')
+    if epoch_n and int(epoch_n) > 0:
+        g_range = payload.get('gaia_epoch_g_range')
+        r_str = f", dG={g_range:.2f}" if g_range and not pd.isna(g_range) else ""
+        cards.append(html.Div([
+            html.Span("Gaia epoch", style=label_style),
+            html.Span(f"{int(epoch_n)} obs{r_str}", style=value_style),
+        ], style=cell_style))
+
+    if not cards and not known:
+        # No matches at all — emphasize "new"
+        cards.append(html.Div([
+            html.Span("No catalog matches found", style={**value_style, 'color': '#6bff6b'}),
+        ], style={**cell_style, 'grid-column': '1 / -1'}))
+
+    grid_style = {
+        'display': 'grid', 'grid-template-columns': 'repeat(auto-fill, minmax(110px, 1fr))',
+        'gap': '3px', 'padding': '5px 6px 6px',
+        'background': '#1a1a1a',
+        'border': '1px solid #333', 'border-top': 'none',
+        'border-radius': '0 0 4px 4px',
+    }
+
+    return html.Div([
+        html.Div(header_text, style=header_style),
+        html.Div(cards, style=grid_style),
+    ], style={'margin': '4px 0'})
 
 
 def _keyboard_key(key_value: str | None) -> str:
