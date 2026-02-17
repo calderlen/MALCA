@@ -1436,6 +1436,8 @@ def _print_vetting_summary(df: pd.DataFrame, total_start: float) -> None:
         known_mask |= df["tns_name"] != ""
     if "alerce_lc_class" in df.columns:
         known_mask |= df["alerce_lc_class"] != ""
+    if "vsx_class" in df.columns:
+        known_mask |= df["vsx_class"].fillna("").astype(str).str.strip() != ""
     df["vetting_likely_known"] = known_mask
 
     n_known = known_mask.sum()

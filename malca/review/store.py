@@ -625,6 +625,12 @@ VETTING_COLUMNS = [
     "alerce_oid", "alerce_ndet", "alerce_lc_class", "alerce_lc_prob",
     "alerce_stamp_class", "alerce_stamp_prob",
     "xray_det", "xray_flux", "xray_sep_arcsec",
+    "vsx_class", "vsx_sep_arcsec",
+    "sfr_name", "sfr_sep_arcmin",
+    "cluster_name", "cluster_dist_pc",
+    "banyan_best_assoc", "banyan_field_prob",
+    "yso_class",
+    "iphas_ha_excess",
     "pm_cluster_offset_sigma",
     "atlas_has_phot", "atlas_n_det_cyan", "atlas_n_det_orange",
     "atlas_cyan_range", "atlas_orange_range",
@@ -723,7 +729,7 @@ def get_review(conn: sqlite3.Connection, candidate_id: str) -> dict:
             "reviewer": "",
             "updated_at": None,
         }
-    score = 2 if row[0] is None else int(row[0])
+    score = 0 if row[0] is None else int(row[0])
     score = int(np.clip(score, 0, 5))
     return {
         "interest_score": score,

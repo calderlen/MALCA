@@ -1431,6 +1431,16 @@ def _render_vetting_banner(payload: dict | None) -> html.Div:
             html.Span(f"{simbad_id}{ref_str}", style=hit_style, title=str(payload.get('simbad_main_id', ''))),
         ], style=cell_style))
 
+    # VSX cell
+    vsx_cls = payload.get('vsx_class')
+    if vsx_cls and str(vsx_cls).strip() and str(vsx_cls).strip().lower() not in ('nan', '<na>'):
+        vsx_sep = payload.get('vsx_sep_arcsec')
+        sep_str = f" ({vsx_sep:.1f}\")" if vsx_sep and not pd.isna(vsx_sep) else ""
+        cards.append(html.Div([
+            html.Span("VSX", style=label_style),
+            html.Span(f"{vsx_cls}{sep_str}", style=hit_style),
+        ], style=cell_style))
+
     # Gaia variability cell
     gaia_cls = payload.get('gaia_var_class')
     if gaia_cls:
@@ -1496,6 +1506,52 @@ def _render_vetting_banner(payload: dict | None) -> html.Div:
         cards.append(html.Div([
             html.Span("X-ray", style=label_style),
             html.Span(f"Detected{flux_str}", style=hit_style),
+        ], style=cell_style))
+
+    # SFR cell
+    sfr_name = payload.get('sfr_name')
+    if sfr_name and str(sfr_name).strip() and str(sfr_name).strip().lower() not in ('nan', '<na>'):
+        sfr_sep = payload.get('sfr_sep_arcmin')
+        sep_str = f" ({sfr_sep:.1f}')" if sfr_sep and not pd.isna(sfr_sep) else ""
+        cards.append(html.Div([
+            html.Span("SFR", style=label_style),
+            html.Span(f"{sfr_name}{sep_str}", style=hit_style),
+        ], style=cell_style))
+
+    # Cluster cell
+    cluster_name = payload.get('cluster_name')
+    if cluster_name and str(cluster_name).strip() and str(cluster_name).strip().lower() not in ('nan', '<na>'):
+        cluster_dist = payload.get('cluster_dist_pc')
+        d_str = f" ({cluster_dist:.0f} pc)" if cluster_dist and not pd.isna(cluster_dist) else ""
+        cards.append(html.Div([
+            html.Span("Cluster", style=label_style),
+            html.Span(f"{cluster_name}{d_str}", style=hit_style),
+        ], style=cell_style))
+
+    # BANYAN cell
+    banyan_assoc = payload.get('banyan_best_assoc')
+    banyan_fp = payload.get('banyan_field_prob')
+    if banyan_assoc and str(banyan_assoc).strip() and str(banyan_assoc).strip().lower() not in ('nan', '<na>', 'field'):
+        fp_str = f" (P_field={banyan_fp:.0%})" if banyan_fp and not pd.isna(banyan_fp) else ""
+        cards.append(html.Div([
+            html.Span("BANYAN", style=label_style),
+            html.Span(f"{banyan_assoc}{fp_str}", style=hit_style),
+        ], style=cell_style))
+
+    # YSO class cell
+    yso_cls = payload.get('yso_class')
+    if yso_cls and str(yso_cls).strip() and str(yso_cls).strip().lower() not in ('nan', '<na>'):
+        cards.append(html.Div([
+            html.Span("YSO", style=label_style),
+            html.Span(str(yso_cls), style=hit_style),
+        ], style=cell_style))
+
+    # IPHAS H-alpha excess cell
+    ha_excess = payload.get('iphas_ha_excess')
+    if ha_excess and not pd.isna(ha_excess) and float(ha_excess) > 0:
+        cards.append(html.Div([
+            html.Span("IPHAS Hα", style=label_style),
+            html.Span(f"excess={float(ha_excess):.2f}", style=hit_style),
         ], style=cell_style))
 
     # Gaia epoch cell (non-hit, informational)

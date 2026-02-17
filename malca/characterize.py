@@ -1265,6 +1265,11 @@ def characterize_candidates_df(
         df_in = df.copy()
         xmatch_path = crossmatch.expanduser()
 
+        if (not xmatch_path.exists()) and xmatch_path.name.endswith("_compat.csv"):
+            fallback = xmatch_path.with_name(xmatch_path.name.replace("_compat.csv", ".csv"))
+            if fallback.exists():
+                xmatch_path = fallback
+
         if not xmatch_path.exists():
             print(f"Warning: Crossmatch file {xmatch_path} not found")
             if "gaia_id" in df_in.columns:
@@ -1274,14 +1279,69 @@ def characterize_candidates_df(
                 return df_in
         else:
             print(f"Loading crossmatch file {xmatch_path}...")
-            xmatch_cols = ["asas_sn_id", "gaia_id", "tmass_id", "allwise_id"]
             try:
-                header = pd.read_csv(xmatch_path, nrows=0).columns
-                use_cols = ["asas_sn_id"] + [c for c in xmatch_cols if c in header and c != "asas_sn_id"]
-                df_xmatch = pd.read_csv(xmatch_path, usecols=use_cols, dtype=str)
-                df_in["asas_sn_id"] = df_in["asas_sn_id"].astype(str)
-                df_xmatch["asas_sn_id"] = df_xmatch["asas_sn_id"].astype(str)
+                header = list(pd.read_csv(xmatch_path, nrows=0).columns)
+                id_col = next((c for c in ("asas_sn_id", "ASAS-SN ID", "asassn_id") if c in header), None)
+                if id_col is None:
+                    raise ValueError(f"crossmatch missing ASAS-SN ID column; found columns: {header[:15]}")
+
+                requested = {
+                    id_col,
+                    "gaia_id",
+                    "tmass_id",
+                    "allwise_id",
+                    "vsx_class",
+                    "vsx_sep_arcsec",
+                    "class",
+                    "sep_arcsec",
+                }
+                df_xmatch = pd.read_csv(xmatch_path, usecols=lambda c: c in requested, dtype=str)
+
+                rename_map: dict[str, str] = {}
+                if id_col != "asas_sn_id":
+                    rename_map[id_col] = "asas_sn_id"
+                if "class" in df_xmatch.columns and "vsx_class" not in df_xmatch.columns:
+                    rename_map["class"] = "vsx_class"
+                if "sep_arcsec" in df_xmatch.columns and "vsx_sep_arcsec" not in df_xmatch.columns:
+                    rename_map["sep_arcsec"] = "vsx_sep_arcsec"
+                if rename_map:
+                    df_xmatch = df_xmatch.rename(columns=rename_map)
+
+                def _normalize_asas_ids(series: pd.Series) -> pd.Series:
+                    s = series.astype(str).str.strip()
+                    s = s.replace({"nan": pd.NA, "None": pd.NA, "<NA>": pd.NA, "": pd.NA})
+                    num = pd.to_numeric(s, errors="coerce")
+                    integral_mask = num.notna() & np.isfinite(num) & (num % 1 == 0)
+                    if integral_mask.any():
+                        s.loc[integral_mask] = num.loc[integral_mask].astype("Int64").astype(str)
+                    return s
+
+                df_in = df_in.copy()
+                df_in["asas_sn_id"] = _normalize_asas_ids(df_in["asas_sn_id"])
+                df_xmatch["asas_sn_id"] = _normalize_asas_ids(df_xmatch["asas_sn_id"])
+                df_xmatch = df_xmatch.drop_duplicates(subset=["asas_sn_id"], keep="first")
+
+                overlap_cols = [c for c in df_xmatch.columns if c != "asas_sn_id" and c in df_in.columns]
+                if overlap_cols:
+                    df_xmatch = df_xmatch.rename(columns={c: f"{c}_xmatch" for c in overlap_cols})
+
                 df_merged = df_in.merge(df_xmatch, on="asas_sn_id", how="left")
+
+                for col in overlap_cols:
+                    xcol = f"{col}_xmatch"
+                    if col == "vsx_sep_arcsec":
+                        base_num = pd.to_numeric(df_merged[col], errors="coerce")
+                        fill_num = pd.to_numeric(df_merged[xcol], errors="coerce")
+                        df_merged[col] = base_num.combine_first(fill_num)
+                    else:
+                        base = df_merged[col]
+                        base_str = base.astype(str).str.strip().str.lower()
+                        missing = base.isna() | base_str.isin({"", "nan", "none", "<na>"})
+                        df_merged.loc[missing, col] = df_merged.loc[missing, xcol]
+                    df_merged = df_merged.drop(columns=[xcol])
+
+                if "vsx_sep_arcsec" in df_merged.columns:
+                    df_merged["vsx_sep_arcsec"] = pd.to_numeric(df_merged["vsx_sep_arcsec"], errors="coerce")
                 print(f"Merged {len(df_merged)} rows")
             except Exception as e:
                 print(f"Warning: characterize crossmatch read failed: {e}")
