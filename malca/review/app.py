@@ -4,6 +4,7 @@ import sys
 import argparse
 import json
 import time
+from contextlib import closing
 from functools import lru_cache
 from pathlib import Path
 import webbrowser
@@ -23,6 +24,7 @@ from malca.review.store import (
     save_review,
     find_plot_image,
     find_phase_plot_image,
+    get_candidate_payload,
     load_app_state,
     save_app_state,
     import_candidates,
@@ -160,6 +162,44 @@ app.index_string = '''
             flex: 1;
             display: flex;
             flex-direction: column;
+            min-height: 0;
+            min-width: 0;
+        }
+        .workspace-panels {
+            flex: 1;
+            min-height: 0;
+            min-width: 0;
+            display: flex;
+            overflow: hidden;
+            padding: 8px 10px 10px 10px;
+            gap: 0;
+        }
+        .left-info-panel {
+            flex: 0 0 420px;
+            width: 420px;
+            min-width: 260px;
+            max-width: 72vw;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            min-height: 0;
+            overflow: hidden;
+            padding-right: 8px;
+        }
+        .left-info-scroll {
+            flex: 1;
+            min-height: 0;
+            overflow-y: auto;
+            overflow-x: hidden;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            padding-right: 2px;
+        }
+        .right-plot-panel {
+            flex: 1;
+            min-width: 0;
+            min-height: 0;
         }
         .header-bar {
             background-color: #0a0a0a;
@@ -198,7 +238,7 @@ app.index_string = '''
             background-color: #000;
             overflow: hidden;
             min-height: 260px;
-            padding: 8px 12px 10px 12px;
+            padding: 0 2px 0 8px;
             gap: 8px;
         }
         .panel-splitter {
@@ -250,6 +290,30 @@ app.index_string = '''
             font-size: 9px;
             letter-spacing: 1.5px;
             padding: 0 5px;
+        }
+        .panel-splitter-vertical {
+            width: 12px;
+            flex: 0 0 12px;
+            height: auto;
+            margin: 0 2px;
+            cursor: col-resize;
+        }
+        .panel-splitter-vertical::before {
+            left: 50%;
+            right: auto;
+            top: 0;
+            bottom: 0;
+            width: 1px;
+            height: auto;
+            transform: translateX(-50%);
+        }
+        .panel-splitter-vertical::after {
+            content: '::';
+            letter-spacing: 1px;
+            padding: 6px 3px;
+            writing-mode: vertical-rl;
+            text-orientation: mixed;
+            transform: translate(-50%, -50%);
         }
         .plot-toolbar {
             display: flex;
@@ -678,12 +742,13 @@ app.index_string = '''
             border-top: 2px solid #555;
             overflow-y: auto;
             padding: 0 12px;
+            border-radius: 8px;
         }
         .candidate-metadata {
-            flex: 0 0 auto;
+            flex: 1;
             min-height: 100px;
-            height: 220px;
-            max-height: 60vh;
+            height: auto;
+            max-height: none;
         }
         .metadata-sections details {
             border-bottom: 1px solid #222;
@@ -1219,7 +1284,6 @@ def create_layout():
         dcc.Store(id='run-config-json-store', data=''),
         dcc.Store(id='metadata-resize-init', data=0),
         dcc.Store(id='status-resize-init', data=0),
-        dcc.Interval(id='plot-render-debounce', interval=180, n_intervals=0),
         dcc.Download(id='plot-export-download'),
         dcc.Download(id='run-config-download'),
         dcc.Interval(id='keyboard-init', interval=200, n_intervals=0, max_intervals=1),
@@ -1363,90 +1427,90 @@ def create_layout():
                 html.A('[?] Shortcuts', id='help-link', className='help-link'),
             ], className='header-bar'),
 
-            # Plot area
+            # Split workspace: info left, light curve right
             html.Div([
                 html.Div([
-                    dcc.Dropdown(
-                        id='plot-preset',
-                        options=[{'label': p, 'value': p} for p in ('Clean', 'Diagnostics', 'Full')],
-                        value='Diagnostics',
-                        clearable=False,
-                        style={'minWidth': '140px', 'font-size': '10px'},
-                    ),
-                    dcc.RadioItems(
-                        id='plot-mode',
-                        options=[
-                            {'label': ' Native', 'value': 'native'},
-                            {'label': ' PNG', 'value': 'png'},
-                        ],
-                        value='native',
-                        inline=True,
-                    ),
-                    dcc.Checklist(
-                        id='plot-overlays',
-                        options=[
-                            {'label': ' Baseline', 'value': 'baseline'},
-                            {'label': ' Dip/Jump markers', 'value': 'markers'},
-                            {'label': ' Residual panel', 'value': 'residuals'},
-                            {'label': ' Filter bad cameras', 'value': 'filter_bad_cameras'},
-                            {'label': ' Event diagnostics', 'value': 'diagnostics'},
-                            {'label': ' Confidence colors', 'value': 'confidence'},
-                        ],
-                        value=['baseline', 'markers', 'residuals', 'filter_bad_cameras', 'diagnostics'],
-                        inline=True,
-                    ),
-                    html.Button('Reset', id='plot-reset-btn', n_clicks=0, className='compact-btn'),
-                    html.Button('Export', id='export-plot', n_clicks=0, className='compact-btn'),
-                    html.Span(id='repro-badge', className='label-chip', style={'margin-left': '6px'}),
-                ], className='plot-toolbar'),
-                html.Div([
-                    dcc.Graph(
-                        id='interactive-plot',
-                        className='plot-native',
-                        config={
-                            'displaylogo': False,
-                            'modeBarButtonsToRemove': ['lasso2d', 'select2d'],
-                            'responsive': True,
-                        },
-                        style={'display': 'block', 'width': '100%', 'height': '100%'},
-                    ),
-                    html.Img(
-                        id='plot-image',
-                        src='',
-                        alt='Light curve plot',
-                        style={'display': 'none', 'width': '100%', 'height': '100%'},
-                    ),
-                ], className='plot-frame'),
+                    html.Div([
+                        html.Div([
+                            dcc.Dropdown(
+                                id='plot-preset',
+                                options=[{'label': p, 'value': p} for p in ('Clean', 'Diagnostics', 'Full')],
+                                value='Diagnostics',
+                                clearable=False,
+                                style={'minWidth': '140px', 'font-size': '10px'},
+                            ),
+                            dcc.RadioItems(
+                                id='plot-mode',
+                                options=[
+                                    {'label': ' Native', 'value': 'native'},
+                                    {'label': ' PNG', 'value': 'png'},
+                                ],
+                                value='native',
+                                inline=True,
+                            ),
+                            dcc.Checklist(
+                                id='plot-overlays',
+                                options=[
+                                    {'label': ' Baseline', 'value': 'baseline'},
+                                    {'label': ' Dip/Jump markers', 'value': 'markers'},
+                                    {'label': ' Residual panel', 'value': 'residuals'},
+                                    {'label': ' Filter bad cameras', 'value': 'filter_bad_cameras'},
+                                    {'label': ' Event diagnostics', 'value': 'diagnostics'},
+                                    {'label': ' Confidence colors', 'value': 'confidence'},
+                                ],
+                                value=['baseline', 'markers', 'residuals', 'filter_bad_cameras', 'diagnostics'],
+                                inline=True,
+                            ),
+                            html.Button('Reset', id='plot-reset-btn', n_clicks=0, className='compact-btn'),
+                            html.Button('Export', id='export-plot', n_clicks=0, className='compact-btn'),
+                            html.Span(id='repro-badge', className='label-chip', style={'margin-left': '6px'}),
+                        ], className='plot-toolbar'),
+                        html.Div(id='plot-status-panel', className='plot-status'),
+                        html.Div(id='camera-filter-panel', className='camera-diag'),
+                        html.Div(id='plot-stats-cards', className='plot-stats'),
+                        # Grouped candidate metadata sections (collapsible)
+                        html.Div(id='candidate-info-grid', className='metadata-sections candidate-metadata'),
+                        # Run config / reproducibility
+                        html.Details([
+                            html.Summary('Run Config', style={'cursor': 'pointer'}),
+                            html.Div([
+                                html.Div([
+                                    html.Button('Copy Config JSON', id='copy-run-config-btn', n_clicks=0, className='compact-btn', style={'margin-right': '6px'}),
+                                    html.Button('Download Config JSON', id='download-run-config-btn', n_clicks=0, className='compact-btn'),
+                                ], style={'margin-bottom': '6px'}),
+                                html.Div(id='run-config-panel', className='run-config-panel'),
+                            ], style={'padding': '8px 10px'}),
+                        ], id='run-config-details', open=False, className='metadata-sections', style={'margin-top': '0'}),
+                    ], className='left-info-scroll'),
+                ], id='left-info-panel', className='left-info-panel'),
+
                 html.Div(
-                    id='status-splitter',
-                    className='panel-splitter status-splitter',
-                    title='Drag to resize status panel',
+                    id='metadata-splitter',
+                    className='panel-splitter panel-splitter-vertical',
+                    title='Drag to resize information panel',
                 ),
-                html.Div(id='plot-status-panel', className='plot-status'),
-                html.Div(id='camera-filter-panel', className='camera-diag'),
-                html.Div(id='plot-stats-cards', className='plot-stats'),
-            ], className='plot-container'),
 
-            html.Div(
-                id='metadata-splitter',
-                className='panel-splitter',
-                title='Drag to resize metadata panel',
-            ),
-
-            # Grouped candidate metadata sections (collapsible)
-            html.Div(id='candidate-info-grid', className='metadata-sections candidate-metadata'),
-
-            # Run config / reproducibility
-            html.Details([
-                html.Summary('Run Config', style={'cursor': 'pointer'}),
                 html.Div([
                     html.Div([
-                        html.Button('Copy Config JSON', id='copy-run-config-btn', n_clicks=0, className='compact-btn', style={'margin-right': '6px'}),
-                        html.Button('Download Config JSON', id='download-run-config-btn', n_clicks=0, className='compact-btn'),
-                    ], style={'margin-bottom': '6px'}),
-                    html.Div(id='run-config-panel', className='run-config-panel'),
-                ], style={'padding': '8px 10px'}),
-            ], id='run-config-details', open=False, className='metadata-sections', style={'margin-top': '4px'}),
+                        dcc.Graph(
+                            id='interactive-plot',
+                            className='plot-native',
+                            config={
+                                'displaylogo': False,
+                                'modeBarButtonsToRemove': ['lasso2d', 'select2d'],
+                                'responsive': True,
+                            },
+                            style={'display': 'block', 'width': '100%', 'height': '100%'},
+                        ),
+                        html.Img(
+                            id='plot-image',
+                            src='',
+                            alt='Light curve plot',
+                            style={'display': 'none', 'width': '100%', 'height': '100%'},
+                        ),
+                    ], className='plot-frame'),
+                ], className='plot-container right-plot-panel'),
+            ], className='workspace-panels'),
 
             # Control bar
             html.Div([
@@ -1557,19 +1621,29 @@ app.clientside_callback(
         // Register once: global keyboard listener that feeds Dash callbacks.
         if (!window.__malcaKeyboardListenerAttached) {
             document.addEventListener('keydown', function(e) {
-                if (e.ctrlKey || e.metaKey || e.altKey) {
-                    return;
-                }
-
                 var target = e.target;
                 var tag = target && target.tagName ? target.tagName : '';
                 var targetId = target && target.id ? target.id : '';
+                var inFormField = (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') && targetId !== 'keyboard-input';
 
-                // Inside a form field: allow Escape to exit, ignore everything else.
-                if ((tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') && targetId !== 'keyboard-input') {
+                // Inside a form field: keep typing behavior unchanged.
+                // To trigger shortcuts while focused in inputs, use Alt+<key>.
+                if (inFormField) {
                     if (e.key === 'Escape') {
                         target.blur();
+                        return;
                     }
+                    var allowWithFormModifier = e.altKey && !e.ctrlKey && !e.metaKey;
+                    if (!allowWithFormModifier) {
+                        return;
+                    }
+                    e.preventDefault();
+                    dispatchKeyToDash(e.key);
+                    return;
+                }
+
+                // Outside form fields, shortcuts are single-key only.
+                if (e.ctrlKey || e.metaKey || e.altKey) {
                     return;
                 }
 
@@ -1608,61 +1682,57 @@ app.clientside_callback(
     """
     function(_tick) {
         var splitter = document.getElementById('metadata-splitter');
-        var metadataPanel = document.getElementById('candidate-info-grid');
-        if (!splitter || !metadataPanel) {
+        var leftPanel = document.getElementById('left-info-panel');
+        var workspace = document.querySelector('.workspace-panels');
+        if (!splitter || !leftPanel || !workspace) {
             return window.dash_clientside.no_update;
         }
 
-        var storageKey = 'malca.review.metadata.height.v1';
-        var minHeight = 100;
-        var defaultHeight = 220;
+        var storageKey = 'malca.review.left_panel.width.v1';
+        var minWidth = 260;
+        var defaultWidth = 420;
 
-        var computeMaxHeight = function() {
-            var viewportCap = Math.floor(window.innerHeight * 0.6);
-            var contentArea = document.querySelector('.content-area');
-            if (!contentArea) {
-                return Math.max(minHeight, viewportCap);
-            }
-            var reserved = 240;
-            var containerCap = Math.floor(contentArea.clientHeight - reserved);
-            var hardCap = Math.max(minHeight, Math.min(viewportCap, containerCap));
-            return hardCap;
+        var computeMaxWidth = function() {
+            var total = workspace.clientWidth || window.innerWidth;
+            var cap = Math.floor(total * 0.72);
+            var floorCap = Math.max(minWidth + 40, cap);
+            return floorCap;
         };
 
-        var clampHeight = function(value) {
-            var maxHeight = computeMaxHeight();
+        var clampWidth = function(value) {
+            var maxWidth = computeMaxWidth();
             var numeric = Number(value);
             if (!isFinite(numeric)) {
-                numeric = defaultHeight;
+                numeric = defaultWidth;
             }
-            if (numeric < minHeight) {
-                numeric = minHeight;
+            if (numeric < minWidth) {
+                numeric = minWidth;
             }
-            if (numeric > maxHeight) {
-                numeric = maxHeight;
+            if (numeric > maxWidth) {
+                numeric = maxWidth;
             }
             return Math.round(numeric);
         };
 
-        var applyHeight = function(value, persist) {
-            var h = clampHeight(value);
-            metadataPanel.style.height = String(h) + 'px';
-            metadataPanel.style.flex = '0 0 auto';
+        var applyWidth = function(value, persist) {
+            var w = clampWidth(value);
+            leftPanel.style.width = String(w) + 'px';
+            leftPanel.style.flex = '0 0 ' + String(w) + 'px';
             if (persist) {
                 try {
-                    window.localStorage.setItem(storageKey, String(h));
+                    window.localStorage.setItem(storageKey, String(w));
                 } catch (e) {
                     // ignore storage failures
                 }
             }
-            return h;
+            return w;
         };
 
         if (!window.__malcaMetadataSplitterAttached) {
             var drag = {
                 active: false,
-                startY: 0,
-                startHeight: 0,
+                startX: 0,
+                startWidth: 0,
                 pointerId: null,
             };
 
@@ -1670,8 +1740,8 @@ app.clientside_callback(
                 if (!drag.active) {
                     return;
                 }
-                var nextHeight = drag.startHeight - (e.clientY - drag.startY);
-                applyHeight(nextHeight, false);
+                var nextWidth = drag.startWidth + (e.clientX - drag.startX);
+                applyWidth(nextWidth, false);
                 e.preventDefault();
             };
 
@@ -1692,7 +1762,7 @@ app.clientside_callback(
                     }
                 }
                 drag.pointerId = null;
-                applyHeight(metadataPanel.getBoundingClientRect().height, true);
+                applyWidth(leftPanel.getBoundingClientRect().width, true);
                 if (e) {
                     e.preventDefault();
                 }
@@ -1700,8 +1770,8 @@ app.clientside_callback(
 
             splitter.addEventListener('pointerdown', function(e) {
                 drag.active = true;
-                drag.startY = e.clientY;
-                drag.startHeight = metadataPanel.getBoundingClientRect().height;
+                drag.startX = e.clientX;
+                drag.startWidth = leftPanel.getBoundingClientRect().width;
                 drag.pointerId = (typeof e.pointerId === 'number') ? e.pointerId : null;
                 splitter.classList.add('dragging');
                 if (drag.pointerId !== null && splitter.setPointerCapture) {
@@ -1718,7 +1788,7 @@ app.clientside_callback(
             });
 
             window.addEventListener('resize', function() {
-                applyHeight(metadataPanel.getBoundingClientRect().height, false);
+                applyWidth(leftPanel.getBoundingClientRect().width, false);
             });
 
             window.__malcaMetadataSplitterAttached = true;
@@ -1730,14 +1800,14 @@ app.clientside_callback(
         } catch (e) {
             saved = null;
         }
-        var initialHeight = defaultHeight;
+        var initialWidth = defaultWidth;
         if (saved !== null && saved !== '') {
             var parsed = parseInt(saved, 10);
             if (!isNaN(parsed)) {
-                initialHeight = parsed;
+                initialWidth = parsed;
             }
         }
-        applyHeight(initialHeight, false);
+        applyWidth(initialWidth, false);
 
         return window.dash_clientside.no_update;
     }
@@ -1957,51 +2027,50 @@ _queue_states = (
 )
 def load_queue(refresh_clicks, import_trigger, *state_values):
     """Load queue data from all sidebar filter states."""
-    conn = db_connect(Path(DB_PATH))
+    with closing(db_connect(Path(DB_PATH))) as conn:
+        # Unpack state values in the same order as _queue_states
+        it = iter(state_values)
+        filter_unreviewed = next(it)
+        filter_failed = next(it)
 
-    # Unpack state values in the same order as _queue_states
-    it = iter(state_values)
-    filter_unreviewed = next(it)
-    filter_failed = next(it)
+        filter_params: dict = {
+            'only_unreviewed': 'yes' in (filter_unreviewed or []),
+            'require_failed_any_false': 'yes' in (filter_failed or []),
+        }
+        for _, fkey in _BOOL_MODE_STATES:
+            filter_params[fkey] = next(it) or 'Any'
+        for _, fkey in _NUM_STATES:
+            val = next(it)
+            filter_params[fkey] = val if val is not None else None
+        for _, fkey in _TEXT_STATES:
+            val = next(it)
+            filter_params[fkey] = val.strip() if val else None
 
-    filter_params: dict = {
-        'only_unreviewed': 'yes' in (filter_unreviewed or []),
-        'require_failed_any_false': 'yes' in (filter_failed or []),
-    }
-    for _, fkey in _BOOL_MODE_STATES:
-        filter_params[fkey] = next(it) or 'Any'
-    for _, fkey in _NUM_STATES:
-        val = next(it)
-        filter_params[fkey] = val if val is not None else None
-    for _, fkey in _TEXT_STATES:
-        val = next(it)
-        filter_params[fkey] = val.strip() if val else None
+        filter_params['sort_col'] = next(it) or 'candidate_id'
+        filter_params['sort_desc'] = 'yes' in (next(it) or [])
 
-    filter_params['sort_col'] = next(it) or 'candidate_id'
-    filter_params['sort_desc'] = 'yes' in (next(it) or [])
-
-    queue_data = create_queue_data_dict(conn, filter_params)
-    return queue_data
+        queue_data = create_queue_data_dict(conn, filter_params)
+        return queue_data
 
 
 def _do_save(candidate_id, score, event_class, needs_followup, notes, event_type):
     """Shared save helper.  Auto-sets status and auto-increments review_pass."""
-    conn = db_connect(Path(DB_PATH))
-    review = get_review(conn, candidate_id)
-    new_pass = max(1, review.get('review_pass', 0)) + 1
-    status = 'needs_followup' if needs_followup else 'reviewed'
-    save_review(
-        conn,
-        candidate_id=candidate_id,
-        interest_score=score,
-        event_class=event_class or 'unclassified',
-        review_pass=new_pass,
-        notes=notes or '',
-        status=status,
-        reviewer='calder',
-        event_type=event_type,
-    )
-    return new_pass, status
+    with closing(db_connect(Path(DB_PATH))) as conn:
+        review = get_review(conn, candidate_id)
+        new_pass = max(1, review.get('review_pass', 0)) + 1
+        status = 'needs_followup' if needs_followup else 'reviewed'
+        save_review(
+            conn,
+            candidate_id=candidate_id,
+            interest_score=score,
+            event_class=event_class or 'unclassified',
+            review_pass=new_pass,
+            notes=notes or '',
+            status=status,
+            reviewer='calder',
+            event_type=event_type,
+        )
+        return new_pass, status
 
 
 # Keyboard handler (prefix-state machine for class)
@@ -2081,10 +2150,10 @@ def handle_keyboard(key_value, current_idx, queue_data, current_score,
         return no_update, f"Followup: {label}", no_update, new_state, no_update, no_update, no_update
 
     # --- Navigation / scoring / save via handle_key_action ---
-    conn = db_connect(Path(DB_PATH))
-    new_idx, notification, should_save = handle_key_action(
-        key, current_idx, queue_size, conn, candidate_id
-    )
+    with closing(db_connect(Path(DB_PATH))) as conn:
+        new_idx, notification, should_save = handle_key_action(
+            key, current_idx, queue_size, conn, candidate_id
+        )
 
     new_score = no_update
     new_pass = no_update
@@ -2110,11 +2179,12 @@ def handle_keyboard(key_value, current_idx, queue_data, current_score,
      Input('plot-mode', 'value'),
      Input('plot-overlays', 'value'),
      Input('camera-checklist', 'value'),
-     Input('plot-preset', 'value')],
+     Input('plot-preset', 'value'),
+     Input('queue-data', 'data')],
     State('plot-render-request', 'data'),
     prevent_initial_call=True,
 )
-def queue_plot_render_request(idx, plot_mode, overlay_values, selected_cameras, preset, existing_request):
+def queue_plot_render_request(idx, plot_mode, overlay_values, selected_cameras, preset, _queue_data, existing_request):
     """Debounced render request queue for native plot UX."""
     req = existing_request or {'nonce': 0, 'ts': 0.0}
     return {
@@ -2194,7 +2264,6 @@ def update_plot_controls(preset, n_reset, n_all, n_clear, n_invert, camera_optio
      Output('interactive-plot', 'style'),
      Output('plot-image', 'style'),
      Output('camera-checklist', 'options'),
-     Output('camera-checklist', 'value'),
      Output('plot-stats-cards', 'children'),
      Output('plot-status-panel', 'children'),
      Output('camera-filter-panel', 'children'),
@@ -2202,20 +2271,17 @@ def update_plot_controls(preset, n_reset, n_all, n_clear, n_invert, camera_optio
      Output('repro-badge', 'children'),
      Output('run-config-json-store', 'data'),
      Output('plot-render-applied', 'data')],
-    Input('plot-render-debounce', 'n_intervals'),
-    [State('plot-render-request', 'data'),
-     State('plot-render-applied', 'data'),
+    Input('plot-render-request', 'data'),
+    [State('plot-render-applied', 'data'),
      State('queue-data', 'data')],
     prevent_initial_call=False,
 )
-def update_display(_tick, render_request, applied_nonce, queue_data):
+def update_display(render_request, applied_nonce, queue_data):
     """Render candidate display with debounce and stable uirevision behavior."""
     req = render_request or {'nonce': 0, 'ts': 0.0, 'state': {}}
     nonce = int(req.get('nonce', 0))
     applied = int(applied_nonce or 0)
-    ts = float(req.get('ts', 0.0))
-
-    if nonce <= applied or (time.time() - ts) < 0.16:
+    if nonce <= applied:
         raise dash.exceptions.PreventUpdate
 
     state = req.get('state', {}) if isinstance(req.get('state', {}), dict) else {}
@@ -2234,14 +2300,15 @@ def update_display(_tick, render_request, applied_nonce, queue_data):
     }
 
     if not queue_data or queue_data['queue_size'] == 0:
-        return '', 'No candidates in queue', '[0/0]', empty_fig, {'display': 'block', 'width': '100%', 'height': '100%'}, {'display': 'none'}, [], [], [], _render_plot_status_panel('error', 'No candidates in queue.', []), _render_camera_diag_panel({}, []), _render_run_config_panel(None, None, ['Queue is empty']), _render_repro_badge(None, ['Queue is empty']), '', nonce
+        return '', 'No candidates in queue', '[0/0]', empty_fig, {'display': 'block', 'width': '100%', 'height': '100%'}, {'display': 'none'}, [], [], _render_plot_status_panel('error', 'No candidates in queue.', []), _render_camera_diag_panel({}, []), _render_run_config_panel(None, None, ['Queue is empty']), _render_repro_badge(None, ['Queue is empty']), '', nonce
 
     queue_size = queue_data['queue_size']
     if idx < 0 or idx >= queue_size:
-        return '', 'Invalid index', f'[{idx}/{queue_size}]', empty_fig, {'display': 'block', 'width': '100%', 'height': '100%'}, {'display': 'none'}, [], [], [], _render_plot_status_panel('error', 'Invalid queue index.', []), _render_camera_diag_panel({}, []), _render_run_config_panel(None, None, ['Invalid queue index']), _render_repro_badge(None, ['Invalid queue index']), '', nonce
+        return '', 'Invalid index', f'[{idx}/{queue_size}]', empty_fig, {'display': 'block', 'width': '100%', 'height': '100%'}, {'display': 'none'}, [], [], _render_plot_status_panel('error', 'Invalid queue index.', []), _render_camera_diag_panel({}, []), _render_run_config_panel(None, None, ['Invalid queue index']), _render_repro_badge(None, ['Invalid queue index']), '', nonce
 
     candidate_id = queue_data['candidate_ids'][idx]
-    payload = queue_data['payloads'].get(candidate_id, {})
+    with closing(db_connect(Path(DB_PATH))) as conn:
+        payload = get_candidate_payload(conn, candidate_id)
 
     plot_src = ''
     plot_dir_path = Path(PLOT_DIR) if PLOT_DIR else Path('.')
@@ -2294,7 +2361,6 @@ def update_display(_tick, render_request, applied_nonce, queue_data):
             {'display': 'none'},
             {'display': 'block', 'width': '100%', 'height': '100%'},
             no_update,
-            no_update,
             [],
             _render_plot_status_panel('ok', 'PNG view enabled. Switch to Native for interactive hover and diagnostics.', mismatch_warnings),
             _render_camera_diag_panel({}, []),
@@ -2310,20 +2376,48 @@ def update_display(_tick, render_request, applied_nonce, queue_data):
     if run_params_status != 'loaded':
         mismatch_warnings.append(run_params_msg)
     uirevision_key = f"{candidate_id}|{','.join(sorted(str(c) for c in selected_cameras))}"
-    native = build_interactive_lightcurve_figure(
-        payload,
-        plot_dir=plot_dir_path,
-        selected_cameras=selected_cameras,
-        filter_bad_cameras='filter_bad_cameras' in overlays,
-        show_baseline='baseline' in overlays,
-        show_event_markers='markers' in overlays,
-        show_residuals='residuals' in overlays,
-        show_phase_fold=False,
-        show_diagnostics='diagnostics' in overlays,
-        confidence_colors='confidence' in overlays,
-        run_params=run_params or {},
-        uirevision_key=uirevision_key,
-    )
+    try:
+        native = build_interactive_lightcurve_figure(
+            payload,
+            plot_dir=plot_dir_path,
+            selected_cameras=selected_cameras,
+            filter_bad_cameras='filter_bad_cameras' in overlays,
+            show_baseline='baseline' in overlays,
+            show_event_markers='markers' in overlays,
+            show_residuals='residuals' in overlays,
+            show_phase_fold=False,
+            show_diagnostics='diagnostics' in overlays,
+            confidence_colors='confidence' in overlays,
+            run_params=run_params or {},
+            uirevision_key=uirevision_key,
+        )
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        panel = _render_run_config_panel(run_params if run_params else None, run_params_path, [str(exc)])
+        if plot_src:
+            return (
+                plot_src, grid_items, progress, no_update,
+                {'display': 'none'},
+                {'display': 'block', 'width': '100%', 'height': '100%'},
+                [], [],
+                _render_plot_status_panel('error', f'Native plot error: {exc}', mismatch_warnings),
+                _render_camera_diag_panel({}, []),
+                panel,
+                _render_repro_badge(None, [str(exc)]),
+                '', nonce,
+            )
+        return (
+            '', grid_items, progress, empty_fig,
+            {'display': 'block', 'width': '100%', 'height': '100%'},
+            {'display': 'none'},
+            [], [],
+            _render_plot_status_panel('error', f'Native plot error: {exc}', mismatch_warnings),
+            _render_camera_diag_panel({}, []),
+            panel,
+            _render_repro_badge(None, [str(exc)]),
+            '', nonce,
+        )
 
     native_status = str(native.get('status', 'ok'))
     native_message = str(native.get('status_message', '') or '')
@@ -2339,7 +2433,6 @@ def update_display(_tick, render_request, applied_nonce, queue_data):
             no_update,
             {'display': 'none'},
             {'display': 'block', 'width': '100%', 'height': '100%'},
-            [],
             [],
             [],
             _render_plot_status_panel('warn', f"{fallback_msg} Showing PNG fallback.", fallback_warnings),
@@ -2364,7 +2457,6 @@ def update_display(_tick, render_request, applied_nonce, queue_data):
         {'display': 'block', 'width': '100%', 'height': '100%'},
         {'display': 'none'},
         native['camera_options'],
-        native['camera_values'],
         _render_stat_cards(native['stat_rows']),
         _render_plot_status_panel(native.get('status', 'ok'), native.get('status_message', ''), (native.get('warnings', []) + mismatch_warnings)),
         _render_camera_diag_panel(native.get('camera_diagnostics', {}), filtered),
@@ -2393,7 +2485,8 @@ def update_header_key_info(idx, queue_data):
         return 'ASAS-SN ID: -', 'Path: -', 'Gaia ID: -'
 
     candidate_id = candidate_ids[idx]
-    payload = (queue_data.get('payloads') or {}).get(candidate_id, {}) or {}
+    with closing(db_connect(Path(DB_PATH))) as conn:
+        payload = get_candidate_payload(conn, candidate_id) or {}
     asas_sn_id = payload.get('asas_sn_id')
     gaia_id = payload.get('gaia_id')
     lc_path = payload.get('path')
@@ -2513,8 +2606,8 @@ def load_review_form(idx, queue_data):
         return 'unclassified', False, 1, '', 0
 
     candidate_id = queue_data['candidate_ids'][idx]
-    conn = db_connect(Path(DB_PATH))
-    review = get_review(conn, candidate_id)
+    with closing(db_connect(Path(DB_PATH))) as conn:
+        review = get_review(conn, candidate_id)
 
     return (
         review.get('event_class', 'unclassified'),
@@ -2735,8 +2828,8 @@ def update_status_indicator(needs_followup, score, idx, queue_data):
     if not queue_data or queue_data['queue_size'] == 0:
         return "Status: —"
     candidate_id = queue_data['candidate_ids'][idx]
-    conn = db_connect(Path(DB_PATH))
-    review = get_review(conn, candidate_id)
+    with closing(db_connect(Path(DB_PATH))) as conn:
+        review = get_review(conn, candidate_id)
     status = review.get('status', 'unreviewed')
     color = '#0f0' if status == 'reviewed' else '#f80' if status == 'needs_followup' else '#888'
     return html.Span(f"Status: {status}", style={'color': color})
@@ -2750,8 +2843,8 @@ def update_status_indicator(needs_followup, score, idx, queue_data):
 )
 def update_recent_activity(idx):
     """Update recent activity display."""
-    conn = db_connect(Path(DB_PATH))
-    recent = recent_history(conn, limit=5)
+    with closing(db_connect(Path(DB_PATH))) as conn:
+        recent = recent_history(conn, limit=5)
 
     if recent.empty:
         return "No recent activity"
@@ -2821,25 +2914,24 @@ def auto_detect_files(n_clicks, run_dir_path):
         messages = []
         import_path_value = no_update
 
-        conn = db_connect(Path(DB_PATH))
+        with closing(db_connect(Path(DB_PATH))) as conn:
+            if detected['candidates']:
+                import_path_value = str(detected['candidates'])
+                save_app_state(conn, "last_input_file", str(detected['candidates']))
+                messages.append(f"✓ Candidates: {detected['candidates'].name}")
 
-        if detected['candidates']:
-            import_path_value = str(detected['candidates'])
-            save_app_state(conn, "last_input_file", str(detected['candidates']))
-            messages.append(f"✓ Candidates: {detected['candidates'].name}")
+            if detected['plot_dir']:
+                global PLOT_DIR
+                detected_plot_dir = Path(detected['plot_dir']).expanduser().resolve()
+                PLOT_DIR = str(detected_plot_dir)
+                save_app_state(conn, "last_plot_dir", str(detected_plot_dir))
+                messages.append(f"✓ Plots: {detected['plot_dir'].name}/")
 
-        if detected['plot_dir']:
-            global PLOT_DIR
-            detected_plot_dir = Path(detected['plot_dir']).expanduser().resolve()
-            PLOT_DIR = str(detected_plot_dir)
-            save_app_state(conn, "last_plot_dir", str(detected_plot_dir))
-            messages.append(f"✓ Plots: {detected['plot_dir'].name}/")
+            if detected['gaia_cache']:
+                save_app_state(conn, "last_gaia_cache", str(detected['gaia_cache']))
+                messages.append(f"✓ Gaia cache")
 
-        if detected['gaia_cache']:
-            save_app_state(conn, "last_gaia_cache", str(detected['gaia_cache']))
-            messages.append(f"✓ Gaia cache")
-
-        save_app_state(conn, "last_run_dir", str(run_dir))
+            save_app_state(conn, "last_run_dir", str(run_dir))
 
         if detected['warnings']:
             for warn in detected['warnings']:
@@ -2876,24 +2968,24 @@ def import_candidates_callback(n_clicks, import_path, characterize_on,
         return no_update, no_update
 
     try:
-        conn = db_connect(Path(DB_PATH))
-        src = Path(import_path).expanduser()
-        df = load_candidates_file(src)
+        with closing(db_connect(Path(DB_PATH))) as conn:
+            src = Path(import_path).expanduser()
+            df = load_candidates_file(src)
 
-        enable_characterize = 'yes' in (characterize_on or [])
+            enable_characterize = 'yes' in (characterize_on or [])
 
-        n_rows, n_new = import_candidates(
-            conn, df, str(src),
-            characterize_before_import=enable_characterize,
-            characterize_crossmatch=Path(crossmatch).expanduser() if enable_characterize and crossmatch else None,
-            characterize_cache=Path(gaia_cache).expanduser() if enable_characterize and gaia_cache else None,
-            characterize_chunk_size=int(chunk_size) if enable_characterize and chunk_size else GAIA_CHUNK_SIZE,
-            characterize_dust='yes' in (dust_on or []) if enable_characterize else False,
-            characterize_starhorse=starhorse.strip() if enable_characterize and starhorse and starhorse.strip() else None,
-        )
-        save_app_state(conn, "last_input_file", str(src))
-        # Increment trigger to cause queue refresh
-        return f"✓ Imported {n_rows} rows ({n_new} new)", (current_trigger or 0) + 1
+            n_rows, n_new = import_candidates(
+                conn, df, str(src),
+                characterize_before_import=enable_characterize,
+                characterize_crossmatch=Path(crossmatch).expanduser() if enable_characterize and crossmatch else None,
+                characterize_cache=Path(gaia_cache).expanduser() if enable_characterize and gaia_cache else None,
+                characterize_chunk_size=int(chunk_size) if enable_characterize and chunk_size else GAIA_CHUNK_SIZE,
+                characterize_dust='yes' in (dust_on or []) if enable_characterize else False,
+                characterize_starhorse=starhorse.strip() if enable_characterize and starhorse and starhorse.strip() else None,
+            )
+            save_app_state(conn, "last_input_file", str(src))
+            # Increment trigger to cause queue refresh
+            return f"✓ Imported {n_rows} rows ({n_new} new)", (current_trigger or 0) + 1
     except Exception as e:
         return f"✗ Import failed: {str(e)}", no_update
 
@@ -2912,12 +3004,12 @@ def export_reviews_callback(n_clicks, export_path, only_reviewed):
         return no_update
 
     try:
-        conn = db_connect(Path(DB_PATH))
-        out_path = Path(export_path).expanduser()
-        only_reviewed_flag = 'yes' in (only_reviewed or [])
-        export_reviews(conn, out_path, only_reviewed=only_reviewed_flag)
-        reviewed_text = " (reviewed only)" if only_reviewed_flag else ""
-        return f"✓ Exported to {out_path.name}{reviewed_text}"
+        with closing(db_connect(Path(DB_PATH))) as conn:
+            out_path = Path(export_path).expanduser()
+            only_reviewed_flag = 'yes' in (only_reviewed or [])
+            export_reviews(conn, out_path, only_reviewed=only_reviewed_flag)
+            reviewed_text = " (reviewed only)" if only_reviewed_flag else ""
+            return f"✓ Exported to {out_path.name}{reviewed_text}"
     except Exception as e:
         return f"✗ Export failed: {str(e)}"
 

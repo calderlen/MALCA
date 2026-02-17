@@ -15,6 +15,7 @@ Usage:
 import os
 import argparse
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -40,7 +41,7 @@ from malca.config.config_characterize import (
     UNWISE_QF_MIN,
     UNWISE_VARIABILITY_ZSCORE, UNWISE_EXPECTED_SCATTER_BASE,
     UNWISE_EXPECTED_SCATTER_SLOPE, UNWISE_EXPECTED_SCATTER_MAG_REF,
-    UNWISE_CHECKPOINT_EVERY, UNWISE_MAX_RETRIES,
+    UNWISE_WORKERS, UNWISE_CHECKPOINT_EVERY, UNWISE_MAX_RETRIES,
     SFR_MAX_DIST_KPC, SFR_DIST_TOLERANCE_FRACTION, SFR_CATALOG,
     BANYAN_MIN_ASSOC_PROB, IPHAS_HA_EXCESS_THRESHOLD,
 )
@@ -1040,6 +1041,7 @@ def query_unwise_variability(
     df: pd.DataFrame,
     max_sep_arcsec: float = UNWISE_MAX_SEP_ARCSEC,
     *,
+    workers: int = UNWISE_WORKERS,
     checkpoint_path: Path | None = None,
     checkpoint_every: int = UNWISE_CHECKPOINT_EVERY,
     max_retries: int = UNWISE_MAX_RETRIES,
@@ -1095,22 +1097,51 @@ def query_unwise_variability(
 
     if not coords_todo.empty:
         pending_rows: list[dict[str, object]] = []
+        workers_n = max(1, int(workers))
 
-        progress = tqdm(coords_todo.itertuples(index=False), total=len(coords_todo), desc="unWISE variability")
-        for n_done, row in enumerate(progress, start=1):
-            try:
-                pending_rows.append(_query_unwise_single(
-                    str(row.candidate_id), float(row.ra), float(row.dec),
-                    max_sep_arcsec=max_sep_arcsec, max_retries=max_retries,
-                ))
-            except Exception:
-                pending_rows.append(_unwise_empty_result(str(row.candidate_id)))
+        if workers_n == 1:
+            progress = tqdm(coords_todo.itertuples(index=False), total=len(coords_todo), desc="unWISE variability")
+            for n_done, row in enumerate(progress, start=1):
+                try:
+                    pending_rows.append(_query_unwise_single(
+                        str(row.candidate_id), float(row.ra), float(row.dec),
+                        max_sep_arcsec=max_sep_arcsec, max_retries=max_retries,
+                    ))
+                except Exception:
+                    pending_rows.append(_unwise_empty_result(str(row.candidate_id)))
 
-            if checkpoint_path and (n_done % max(1, int(checkpoint_every)) == 0):
-                ckpt_df = _merge_unwise_checkpoint(ckpt_df, pending_rows)
-                pending_rows = []
-                Path(checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
-                ckpt_df.to_parquet(checkpoint_path, index=False, compression=PARQUET_CACHE_COMPRESSION)
+                if checkpoint_path and (n_done % max(1, int(checkpoint_every)) == 0):
+                    ckpt_df = _merge_unwise_checkpoint(ckpt_df, pending_rows)
+                    pending_rows = []
+                    Path(checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
+                    ckpt_df.to_parquet(checkpoint_path, index=False, compression=PARQUET_CACHE_COMPRESSION)
+        else:
+            with ThreadPoolExecutor(max_workers=workers_n) as executor:
+                futures = {
+                    executor.submit(
+                        _query_unwise_single,
+                        str(row.candidate_id),
+                        float(row.ra),
+                        float(row.dec),
+                        max_sep_arcsec=max_sep_arcsec,
+                        max_retries=max_retries,
+                    ): str(row.candidate_id)
+                    for row in coords_todo.itertuples(index=False)
+                }
+
+                progress = tqdm(as_completed(futures), total=len(futures), desc="unWISE variability")
+                for n_done, fut in enumerate(progress, start=1):
+                    candidate_id = futures[fut]
+                    try:
+                        pending_rows.append(fut.result())
+                    except Exception:
+                        pending_rows.append(_unwise_empty_result(candidate_id))
+
+                    if checkpoint_path and (n_done % max(1, int(checkpoint_every)) == 0):
+                        ckpt_df = _merge_unwise_checkpoint(ckpt_df, pending_rows)
+                        pending_rows = []
+                        Path(checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
+                        ckpt_df.to_parquet(checkpoint_path, index=False, compression=PARQUET_CACHE_COMPRESSION)
 
         if pending_rows:
             ckpt_df = _merge_unwise_checkpoint(ckpt_df, pending_rows)
@@ -1205,6 +1236,7 @@ def characterize_candidates_df(
     run_sfr: bool = True,
     run_clusters: bool = True,
     run_unwise: bool = True,
+    unwise_workers: int = UNWISE_WORKERS,
     unwise_checkpoint_every: int = UNWISE_CHECKPOINT_EVERY,
     checkpoint_path: Path | None = None,
 ) -> pd.DataFrame:
@@ -1420,6 +1452,7 @@ def characterize_candidates_df(
             enabled=run_unwise,
             description="Querying unWISE/unTimely variability...",
             func=query_unwise_variability,
+            workers=unwise_workers,
             checkpoint_path=unwise_checkpoint,
             checkpoint_every=unwise_checkpoint_every,
         )
@@ -1449,6 +1482,7 @@ def main():
     parser.add_argument("--dust", action="store_true", help="Enable dustmaps3d 3D extinction query")
     parser.add_argument("--starhorse", type=str, default=None, help="StarHorse stellar ages/masses: 'tap' for remote TAP query (recommended), or path to local catalog file")
     parser.add_argument("--starhorse-cache", type=Path, default=STARHORSE_TAP_CACHE_FILE, help="StarHorse TAP cache parquet path (default: ~/.cache/malca/catalogs/starhorse_tap_cache.parquet)")
+    parser.add_argument("--unwise-workers", type=int, default=UNWISE_WORKERS, help="Parallel workers for unWISE variability queries")
     parser.add_argument("--unwise-checkpoint-every", type=int, default=UNWISE_CHECKPOINT_EVERY, help="Persist unWISE checkpoint every N completed sources")
     parser.add_argument("--no-characterize-banyan", dest="characterize_banyan", action="store_false", help="Disable BANYAN Sigma enrichment")
     parser.add_argument("--no-characterize-iphas", dest="characterize_iphas", action="store_false", help="Disable IPHAS enrichment")
@@ -1485,6 +1519,7 @@ def main():
         run_sfr=args.characterize_sfr,
         run_clusters=args.characterize_clusters,
         run_unwise=args.characterize_unwise,
+        unwise_workers=args.unwise_workers,
         unwise_checkpoint_every=args.unwise_checkpoint_every,
     )
     

@@ -28,7 +28,8 @@ BASELINE_FUNCTIONS = {
 
 REQUIRED_COLUMNS = {"JD", "mag", "v_g_band"}
 
-_CACHE_LIMIT = 64
+# Keep plotting caches bounded; large values can inflate long-running GUI memory.
+_CACHE_LIMIT = 16
 _CLEAN_CACHE: OrderedDict[tuple, tuple[pd.DataFrame, set[int], dict[str, list[str]]]] = OrderedDict()
 _BASELINE_CACHE: OrderedDict[tuple, dict[int, pd.DataFrame]] = OrderedDict()
 _EVENT_CACHE: OrderedDict[tuple, list[dict[str, object]]] = OrderedDict()

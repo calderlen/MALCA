@@ -68,12 +68,11 @@ def create_queue_data_dict(conn, filter_params):
     Returns:
         dict: {
             'candidate_ids': list,
-            'payloads': dict,
             'queue_size': int,
             'filter_hash': str
         }
     """
-    from malca.review.store import query_queue, get_candidate_payload
+    from malca.review.store import query_queue
 
     # Query queue with filters (pass the whole dict through)
     df = query_queue(conn, filters=filter_params)
@@ -81,18 +80,11 @@ def create_queue_data_dict(conn, filter_params):
     # Extract candidate IDs
     candidate_ids = df['candidate_id'].tolist() if not df.empty else []
 
-    # Get payloads for each candidate
-    payloads = {}
-    for cid in candidate_ids:
-        payload = get_candidate_payload(conn, cid)
-        payloads[cid] = payload
-
     # Compute filter hash
     filter_hash = hashlib.md5(str(sorted(filter_params.items())).encode()).hexdigest()
 
     return {
         'candidate_ids': candidate_ids,
-        'payloads': payloads,
         'queue_size': len(candidate_ids),
         'filter_hash': filter_hash
     }
