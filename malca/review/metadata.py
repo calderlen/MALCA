@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import pandas as pd
@@ -26,6 +27,26 @@ REVIEW_METADATA_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("SFR sep (arcmin)", "sfr_sep_arcmin"),
         ("Cluster name", "cluster_name"),
         ("Cluster dist (pc)", "cluster_dist_pc"),
+    ]),
+    ("Vetting", [
+        ("Known?", "vetting_likely_known"),
+        ("SIMBAD ID", "simbad_main_id"),
+        ("SIMBAD type", "simbad_otype"),
+        ("SIMBAD refs", "simbad_nbref"),
+        ("SIMBAD sep (\")", "simbad_sep_arcsec"),
+        ("Gaia variable", "gaia_var_flag"),
+        ("Gaia var class", "gaia_var_class"),
+        ("Gaia var score", "gaia_var_score"),
+        ("Gaia epoch obs", "gaia_epoch_n_obs"),
+        ("Gaia G range", "gaia_epoch_g_range"),
+        ("ASAS-SN var name", "asassn_var_name"),
+        ("ASAS-SN var type", "asassn_var_type"),
+        ("ASAS-SN period", "asassn_var_period"),
+        ("ALeRCE LC class", "alerce_lc_class"),
+        ("ALeRCE LC prob", "alerce_lc_prob"),
+        ("X-ray detected", "xray_det"),
+        ("X-ray flux", "xray_flux"),
+        ("PM cluster offset", "pm_cluster_offset_sigma"),
     ]),
     ("Light Curve Basics", [
         ("n_points", "n_points"),
@@ -136,6 +157,8 @@ REVIEW_METADATA_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("Parallax (mas)", "parallax"),
         ("PM RA (mas/yr)", "pmra"),
         ("PM Dec (mas/yr)", "pmdec"),
+        ("Total PM (mas/yr)", "pm_total"),
+        ("high_pm_flag", "high_pm_flag"),
     ]),
     ("Photometry", [
         ("2MASS J", "tmass_j"),
@@ -185,6 +208,7 @@ REVIEW_METADATA_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("failed_score", "failed_score"),
         ("failed_periodicity", "failed_periodicity"),
         ("failed_gaia_ruwe", "failed_gaia_ruwe"),
+        ("failed_gaia_pm", "failed_gaia_pm"),
         ("failed_periodic_catalog", "failed_periodic_catalog"),
         ("failed_signal_amplitude", "failed_signal_amplitude"),
         ("Bad cameras filtered", "bad_cameras_filtered"),
@@ -202,6 +226,7 @@ REVIEW_METADATA_FIELDS: list[tuple[str, str]] = [
 _DEFAULT_OPEN_GROUPS: set[str] = {
     "Identification",
     "Crossmatch",
+    "Vetting",
     "Periodicity",
     "Dip Detection",
     "Jump Detection",
@@ -236,6 +261,35 @@ def _is_present(val: Any) -> bool:
     return True
 
 
+def _format_large_integer_like(val: Any) -> Any:
+    """Return non-scientific integer string when *val* is integer-like.
+
+    Gaia IDs often arrive as float/scientific-notation strings (e.g. "4.27e+17").
+    For display we normalize those to full integer strings.
+    """
+    if val is None:
+        return val
+    s = str(val).strip()
+    if not s:
+        return val
+    try:
+        d = Decimal(s)
+    except (InvalidOperation, ValueError):
+        return val
+    if d != d.to_integral_value():
+        return val
+    try:
+        return format(d.to_integral_value(), "f")
+    except Exception:
+        return val
+
+
+def _format_value_for_display(key: str, val: Any) -> Any:
+    if key == "gaia_id":
+        return _format_large_integer_like(val)
+    return val
+
+
 def extract_review_metadata(
     payload: dict[str, Any],
 ) -> list[tuple[str, Any]]:
@@ -250,6 +304,7 @@ def extract_review_metadata(
         val = p.get(key)
         if not _is_present(val):
             continue
+        val = _format_value_for_display(key, val)
         rows.append((label, val))
     return rows
 
@@ -271,6 +326,7 @@ def extract_review_metadata_grouped(
             val = p.get(key)
             if not _is_present(val):
                 continue
+            val = _format_value_for_display(key, val)
             items.append((label, val))
         if items:
             groups.append((group_name, items))

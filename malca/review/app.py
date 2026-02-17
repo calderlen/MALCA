@@ -4,6 +4,7 @@ import sys
 import argparse
 import json
 import time
+from decimal import Decimal, InvalidOperation
 from contextlib import closing
 from functools import lru_cache
 from pathlib import Path
@@ -15,6 +16,7 @@ from dash import dcc, html, Input, Output, State, callback_context, no_update
 import dash_bootstrap_components as dbc
 from flask import send_from_directory
 import pandas as pd
+import plotly.graph_objects as go
 import plotly.io as pio
 
 from malca.review.store import (
@@ -32,6 +34,7 @@ from malca.review.store import (
     recent_history,
     export_reviews,
     detect_run_directory_files,
+    merge_vetting_results,
 )
 from malca.review.metadata import (
     extract_review_metadata_grouped,
@@ -352,6 +355,76 @@ app.index_string = '''
             display: inline-flex;
             align-items: center;
             gap: 4px;
+        }
+        .residual-split-control {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            min-width: 220px;
+            max-width: 320px;
+        }
+        .residual-split-label {
+            color: #9fb6cb;
+            font-size: 10px;
+            white-space: nowrap;
+            letter-spacing: 0.2px;
+        }
+        .residual-split-control .rc-slider {
+            flex: 1;
+            margin: 0 0 0 2px;
+        }
+        .residual-split-control .rc-slider-rail {
+            background-color: #284256;
+        }
+        .residual-split-control .rc-slider-track {
+            background-color: #2aa198;
+        }
+        .residual-split-control .rc-slider-handle {
+            border-color: #2aa198;
+            background-color: #0b141d;
+        }
+        .residual-split-control .rc-slider-handle:hover,
+        .residual-split-control .rc-slider-handle:focus,
+        .residual-split-control .rc-slider-handle:active {
+            border-color: #2aa198 !important;
+            box-shadow: 0 0 0 3px rgba(42, 161, 152, 0.2) !important;
+        }
+        .residual-split-control .rc-slider-dot-active {
+            border-color: #2aa198 !important;
+        }
+        .residual-split-control .rc-slider-mark-text-active {
+            color: #9fd6d0 !important;
+        }
+        #residual-height-slider .rc-slider-rail {
+            background-color: #284256 !important;
+        }
+        #residual-height-slider .rc-slider-track,
+        #residual-height-slider .rc-slider-track-1 {
+            background-color: #2aa198 !important;
+        }
+        #residual-height-slider .rc-slider-handle,
+        #residual-height-slider .rc-slider-handle-1,
+        #residual-height-slider .rc-slider-handle-dragging,
+        #residual-height-slider .rc-slider-handle-click-focused {
+            border-color: #2aa198 !important;
+            background-color: #0b141d !important;
+            box-shadow: 0 0 0 3px rgba(42, 161, 152, 0.2) !important;
+            outline: none !important;
+        }
+        #residual-height-slider .rc-slider-dot-active {
+            border-color: #2aa198 !important;
+        }
+        #residual-height-slider .rc-slider-mark-text-active {
+            color: #9fd6d0 !important;
+        }
+        #residual-height-slider .rc-slider-tooltip-inner {
+            background-color: #2aa198 !important;
+            border: 1px solid #2aa198 !important;
+            color: #fdf6e3 !important;
+        }
+        #residual-height-slider .rc-slider-tooltip-arrow {
+            border-top-color: #2aa198 !important;
+            border-bottom-color: #2aa198 !important;
         }
         .plot-frame {
             flex: 1;
@@ -750,6 +823,52 @@ app.index_string = '''
             height: auto;
             max-height: none;
         }
+        .metadata-health {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            border: 1px solid rgba(83, 113, 133, 0.5);
+            border-radius: 8px;
+            padding: 5px 8px;
+            margin: 5px 0 6px 0;
+            background: rgba(8, 16, 23, 0.72);
+            font-size: 10px;
+            line-height: 1.3;
+        }
+        .metadata-health .chip {
+            display: inline-flex;
+            align-items: center;
+            border-radius: 999px;
+            border: 1px solid rgba(99, 129, 153, 0.6);
+            padding: 1px 7px;
+            text-transform: uppercase;
+            letter-spacing: 0.4px;
+            white-space: nowrap;
+            font-weight: 600;
+            color: #9bc1dc;
+            background: rgba(12, 25, 33, 0.82);
+        }
+        .metadata-health .detail {
+            color: #adbfce;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .metadata-health.metadata-health-base .chip {
+            color: #e4c16d;
+            border-color: rgba(186, 144, 44, 0.75);
+            background: rgba(44, 30, 8, 0.62);
+        }
+        .metadata-health.metadata-health-partial .chip {
+            color: #8dc6de;
+            border-color: rgba(96, 146, 174, 0.7);
+            background: rgba(10, 31, 44, 0.64);
+        }
+        .metadata-health.metadata-health-enriched .chip {
+            color: #9fd4b7;
+            border-color: rgba(72, 148, 112, 0.72);
+            background: rgba(10, 35, 23, 0.62);
+        }
         .metadata-sections details {
             border-bottom: 1px solid #222;
         }
@@ -770,6 +889,198 @@ app.index_string = '''
             gap: 4px 8px;
             padding: 2px 6px 6px 6px;
             font-size: 11px;
+        }
+
+        /* ------------------------------------------------------------------ */
+        /* Solarized light theme overrides (easy-on-eyes, not pure white)     */
+        /* ------------------------------------------------------------------ */
+        body[data-theme="solarized"] {
+            background-color: #fdf6e3 !important;
+            color: #586e75 !important;
+        }
+        body[data-theme="solarized"] .main-container {
+            background-color: #fdf6e3 !important;
+        }
+        body[data-theme="solarized"] .sidebar {
+            background-color: #eee8d5 !important;
+            border-right: 1px solid #93a1a1 !important;
+            color: #586e75 !important;
+        }
+        body[data-theme="solarized"] .sidebar .section-title,
+        body[data-theme="solarized"] .sidebar details summary,
+        body[data-theme="solarized"] .help-link {
+            color: #268bd2 !important;
+        }
+        body[data-theme="solarized"] .sidebar details summary:hover,
+        body[data-theme="solarized"] .help-link:hover {
+            color: #2aa198 !important;
+        }
+        body[data-theme="solarized"] .sidebar hr {
+            border-top: 1px solid #93a1a1 !important;
+        }
+        body[data-theme="solarized"] .sidebar label,
+        body[data-theme="solarized"] .header-key-info .item,
+        body[data-theme="solarized"] .plot-status,
+        body[data-theme="solarized"] .camera-diag,
+        body[data-theme="solarized"] .plot-stats,
+        body[data-theme="solarized"] .run-config-panel,
+        body[data-theme="solarized"] .metadata-sections,
+        body[data-theme="solarized"] .control-bar,
+        body[data-theme="solarized"] .review-form,
+        body[data-theme="solarized"] .recent-activity {
+            color: #586e75 !important;
+        }
+        body[data-theme="solarized"] .header-bar {
+            background-color: #eee8d5 !important;
+            border-bottom: 1px solid #93a1a1 !important;
+        }
+        body[data-theme="solarized"] #progress-text {
+            color: #268bd2 !important;
+        }
+        body[data-theme="solarized"] .notification {
+            color: #586e75 !important;
+        }
+        body[data-theme="solarized"] .plot-container,
+        body[data-theme="solarized"] .plot-frame {
+            background-color: #fdf6e3 !important;
+        }
+        body[data-theme="solarized"] .metadata-sections,
+        body[data-theme="solarized"] .plot-status,
+        body[data-theme="solarized"] .camera-diag,
+        body[data-theme="solarized"] .plot-stats,
+        body[data-theme="solarized"] .run-config-panel,
+        body[data-theme="solarized"] .control-bar,
+        body[data-theme="solarized"] .review-form,
+        body[data-theme="solarized"] .recent-activity {
+            background-color: #f5efdc !important;
+            border-color: #93a1a1 !important;
+        }
+        body[data-theme="solarized"] .metadata-health {
+            background-color: #f5efdc !important;
+            border-color: #93a1a1 !important;
+        }
+        body[data-theme="solarized"] .metadata-health .chip {
+            background-color: #eee8d5 !important;
+            border-color: #93a1a1 !important;
+            color: #586e75 !important;
+        }
+        body[data-theme="solarized"] .metadata-health .detail {
+            color: #586e75 !important;
+        }
+        body[data-theme="solarized"] .metadata-health.metadata-health-base .chip {
+            color: #b58900 !important;
+            border-color: rgba(181, 137, 0, 0.55) !important;
+            background-color: rgba(238, 232, 213, 0.9) !important;
+        }
+        body[data-theme="solarized"] .metadata-health.metadata-health-partial .chip {
+            color: #268bd2 !important;
+            border-color: rgba(38, 139, 210, 0.5) !important;
+            background-color: rgba(238, 232, 213, 0.92) !important;
+        }
+        body[data-theme="solarized"] .metadata-health.metadata-health-enriched .chip {
+            color: #2aa198 !important;
+            border-color: rgba(42, 161, 152, 0.5) !important;
+            background-color: rgba(238, 232, 213, 0.92) !important;
+        }
+        body[data-theme="solarized"] .metadata-sections summary {
+            color: #268bd2 !important;
+        }
+        body[data-theme="solarized"] .metadata-sections summary:hover {
+            color: #2aa198 !important;
+        }
+        body[data-theme="solarized"] .action-btn,
+        body[data-theme="solarized"] .badge-btn,
+        body[data-theme="solarized"] .score-btn,
+        body[data-theme="solarized"] .compact-btn,
+        body[data-theme="solarized"] .label-chip,
+        body[data-theme="solarized"] .status-chip {
+            background-color: #eee8d5 !important;
+            color: #586e75 !important;
+            border-color: #93a1a1 !important;
+        }
+        body[data-theme="solarized"] .action-btn.primary {
+            background-color: #268bd2 !important;
+            color: #fdf6e3 !important;
+            border-color: #268bd2 !important;
+        }
+        body[data-theme="solarized"] input,
+        body[data-theme="solarized"] textarea,
+        body[data-theme="solarized"] select {
+            background-color: #fdf6e3 !important;
+            color: #586e75 !important;
+            border-color: #93a1a1 !important;
+        }
+        body[data-theme="solarized"] ::placeholder {
+            color: #93a1a1 !important;
+        }
+        body[data-theme="solarized"] .dash-checklist label,
+        body[data-theme="solarized"] .dash-radioitems label {
+            color: #586e75 !important;
+        }
+        body[data-theme="solarized"] .dash-dropdown,
+        body[data-theme="solarized"] .dash-dropdown .Select-control,
+        body[data-theme="solarized"] .dash-dropdown .Select-menu-outer,
+        body[data-theme="solarized"] .dash-dropdown .Select-input input,
+        body[data-theme="solarized"] .dash-dropdown .Select-value-label {
+            background-color: #fdf6e3 !important;
+            color: #586e75 !important;
+            border-color: #93a1a1 !important;
+        }
+        body[data-theme="solarized"] .residual-split-label {
+            color: #657b83 !important;
+        }
+        body[data-theme="solarized"] .residual-split-control .rc-slider-rail {
+            background-color: #d8ccb3 !important;
+        }
+        body[data-theme="solarized"] .residual-split-control .rc-slider-track {
+            background-color: #2aa198 !important;
+        }
+        body[data-theme="solarized"] .residual-split-control .rc-slider-handle {
+            border-color: #2aa198 !important;
+            background-color: #fdf6e3 !important;
+        }
+        body[data-theme="solarized"] .residual-split-control .rc-slider-handle:hover,
+        body[data-theme="solarized"] .residual-split-control .rc-slider-handle:focus,
+        body[data-theme="solarized"] .residual-split-control .rc-slider-handle:active {
+            border-color: #2aa198 !important;
+            box-shadow: 0 0 0 3px rgba(42, 161, 152, 0.18) !important;
+        }
+        body[data-theme="solarized"] .residual-split-control .rc-slider-dot-active {
+            border-color: #2aa198 !important;
+        }
+        body[data-theme="solarized"] .residual-split-control .rc-slider-mark-text-active {
+            color: #2aa198 !important;
+        }
+        body[data-theme="solarized"] #residual-height-slider .rc-slider-rail {
+            background-color: #d8ccb3 !important;
+        }
+        body[data-theme="solarized"] #residual-height-slider .rc-slider-track,
+        body[data-theme="solarized"] #residual-height-slider .rc-slider-track-1 {
+            background-color: #2aa198 !important;
+        }
+        body[data-theme="solarized"] #residual-height-slider .rc-slider-handle,
+        body[data-theme="solarized"] #residual-height-slider .rc-slider-handle-1,
+        body[data-theme="solarized"] #residual-height-slider .rc-slider-handle-dragging,
+        body[data-theme="solarized"] #residual-height-slider .rc-slider-handle-click-focused {
+            border-color: #2aa198 !important;
+            background-color: #fdf6e3 !important;
+            box-shadow: 0 0 0 3px rgba(42, 161, 152, 0.18) !important;
+            outline: none !important;
+        }
+        body[data-theme="solarized"] #residual-height-slider .rc-slider-dot-active {
+            border-color: #2aa198 !important;
+        }
+        body[data-theme="solarized"] #residual-height-slider .rc-slider-mark-text-active {
+            color: #2aa198 !important;
+        }
+        body[data-theme="solarized"] #residual-height-slider .rc-slider-tooltip-inner {
+            background-color: #2aa198 !important;
+            border: 1px solid #2aa198 !important;
+            color: #fdf6e3 !important;
+        }
+        body[data-theme="solarized"] #residual-height-slider .rc-slider-tooltip-arrow {
+            border-top-color: #2aa198 !important;
+            border-bottom-color: #2aa198 !important;
         }
     </style>
 </head>
@@ -997,11 +1308,142 @@ def _render_repro_badge(run_params: dict | None, warnings: list[str]) -> html.Sp
     return html.Span(text, className=cls)
 
 
+_METADATA_EXTRA_GROUPS = (
+    "Crossmatch",
+    "Stellar Parameters",
+    "Photometry",
+    "Galactic Coordinates",
+    "Extinction & Environment",
+    "YSO / Classification",
+)
+
+_METADATA_CATALOG_GROUPS = (
+    "Stellar Parameters",
+    "Photometry",
+    "Galactic Coordinates",
+    "Extinction & Environment",
+)
+
+
+def _summarize_group_names(group_names: list[str], max_items: int = 2) -> str:
+    names = [str(n) for n in group_names if str(n).strip()]
+    if not names:
+        return "none"
+    if len(names) <= max_items:
+        return ", ".join(names)
+    return f"{', '.join(names[:max_items])} +{len(names) - max_items}"
+
+
+def _render_metadata_health(grouped: list[tuple[str, list[tuple[str, object]]]] | None, *, context_msg: str | None = None) -> html.Div:
+    """Render compact metadata-enrichment status for current candidate."""
+    if context_msg:
+        return html.Div([
+            html.Span("Base only", className='chip'),
+            html.Span(str(context_msg), className='detail'),
+        ], className='metadata-health metadata-health-base')
+
+    grouped_map = {name: items for name, items in (grouped or [])}
+    extra_present = [name for name in _METADATA_EXTRA_GROUPS if grouped_map.get(name)]
+    catalog_present = [name for name in _METADATA_CATALOG_GROUPS if grouped_map.get(name)]
+    extra_fields = int(sum(len(grouped_map.get(name) or []) for name in extra_present))
+
+    if not extra_present:
+        return html.Div([
+            html.Span("Base only", className='chip'),
+            html.Span(
+                "No crossmatch/classification/catalog metadata fields are present for this candidate.",
+                className='detail',
+            ),
+        ], className='metadata-health metadata-health-base')
+
+    if catalog_present:
+        detail = (
+            f"Catalog metadata present in {_summarize_group_names(catalog_present)} "
+            f"({extra_fields} extra fields total)."
+        )
+        return html.Div([
+            html.Span("Catalog enriched", className='chip'),
+            html.Span(detail, className='detail'),
+        ], className='metadata-health metadata-health-enriched')
+
+    extra_label = _summarize_group_names(extra_present)
+    return html.Div([
+        html.Span("Partial", className='chip'),
+        html.Span(
+            f"Only {extra_label} metadata is present ({extra_fields} extra fields); no catalog stellar/photometric enrichment.",
+            className='detail',
+        ),
+    ], className='metadata-health metadata-health-partial')
+
+
+def _render_vetting_banner(payload: dict | None) -> html.Div:
+    """Render a vetting status banner above the metadata grid."""
+    if not payload or 'vetting_likely_known' not in payload:
+        return html.Div(
+            "Not vetted",
+            style={
+                'padding': '6px 12px', 'margin': '4px 0', 'border-radius': '4px',
+                'background': '#333', 'color': '#999', 'font-size': '0.85em',
+                'text-align': 'center',
+            },
+        )
+    known = payload.get('vetting_likely_known')
+    if known:
+        details = []
+        simbad_type = payload.get('simbad_otype')
+        if simbad_type:
+            details.append(f"SIMBAD: {simbad_type}")
+        gaia_class = payload.get('gaia_var_class')
+        if gaia_class:
+            details.append(f"Gaia: {gaia_class}")
+        asassn_type = payload.get('asassn_var_type')
+        if asassn_type:
+            details.append(f"ASAS-SN: {asassn_type}")
+        detail_str = f" ({', '.join(details)})" if details else ""
+        return html.Div(
+            f"KNOWN OBJECT{detail_str}",
+            style={
+                'padding': '6px 12px', 'margin': '4px 0', 'border-radius': '4px',
+                'background': '#4a1111', 'color': '#ff6b6b', 'font-weight': 'bold',
+                'font-size': '0.85em', 'text-align': 'center',
+                'border': '1px solid #ff6b6b',
+            },
+        )
+    return html.Div(
+        "POTENTIALLY NEW",
+        style={
+            'padding': '6px 12px', 'margin': '4px 0', 'border-radius': '4px',
+            'background': '#114a11', 'color': '#6bff6b', 'font-weight': 'bold',
+            'font-size': '0.85em', 'text-align': 'center',
+            'border': '1px solid #6bff6b',
+        },
+    )
+
+
 def _keyboard_key(key_value: str | None) -> str:
     """Extract raw key token from encoded keyboard input value."""
     if not key_value:
         return ""
     return str(key_value).split("\t", 1)[0].strip()
+
+
+def _format_large_integer_like_display(value) -> str:
+    """Format integer-like values without scientific notation for display."""
+    if value is None:
+        return ""
+    s = str(value).strip()
+    if not s:
+        return ""
+    try:
+        d = Decimal(s)
+    except (InvalidOperation, ValueError):
+        return s
+    if d != d.to_integral_value():
+        return s
+    try:
+        return format(d.to_integral_value(), "f")
+    except Exception:
+        return s
 
 
 # ---- sidebar filter helpers ------------------------------------------------
@@ -1278,10 +1720,11 @@ def create_layout():
         dcc.Store(id='filter-params', data={}),
         dcc.Store(id='import-trigger', data=0),  # triggers queue refresh after import
         dcc.Store(id='activity-visible', data=False),  # collapsed by default
-        dcc.Store(id='plot-render-request', data={'nonce': 1, 'ts': 0.0, 'state': {'idx': 0, 'plot_mode': 'native', 'overlay_values': ['baseline', 'markers', 'residuals', 'filter_bad_cameras', 'diagnostics'], 'selected_cameras': [], 'preset': 'Diagnostics'}}),
+        dcc.Store(id='plot-render-request', data={'nonce': 1, 'ts': 0.0, 'state': {'idx': 0, 'plot_mode': 'native', 'overlay_values': ['baseline', 'markers', 'residuals', 'filter_bad_cameras', 'diagnostics'], 'selected_cameras': [], 'preset': 'Diagnostics', 'theme': 'dark', 'residual_height': 0.28}}),
         dcc.Store(id='plot-render-applied', data=0),
         dcc.Store(id='plot-defaults-initialized', data=False),
         dcc.Store(id='run-config-json-store', data=''),
+        dcc.Store(id='theme-mode-store', data='dark'),
         dcc.Store(id='metadata-resize-init', data=0),
         dcc.Store(id='status-resize-init', data=0),
         dcc.Download(id='plot-export-download'),
@@ -1409,6 +1852,19 @@ def create_layout():
             html.Button('Export Reviews', id='export-btn', n_clicks=0, className='action-btn',
                        style={'width': '100%', 'font-size': '11px'}),
 
+            html.Hr(),
+
+            html.Div('Theme', className='section-title'),
+            dcc.RadioItems(
+                id='theme-mode',
+                options=[
+                    {'label': ' Dark', 'value': 'dark'},
+                    {'label': ' Solarized Light', 'value': 'solarized'},
+                ],
+                value='dark',
+                style={'margin-bottom': '4px'},
+            ),
+
             html.Div(id='sidebar-status', style={'margin-top': '10px', 'color': '#0f0', 'font-size': '11px'}),
 
         ], id='sidebar', className='sidebar'),
@@ -1461,6 +1917,19 @@ def create_layout():
                                 value=['baseline', 'markers', 'residuals', 'filter_bad_cameras', 'diagnostics'],
                                 inline=True,
                             ),
+                            html.Div([
+                                html.Span('Residual size', className='residual-split-label'),
+                                dcc.Slider(
+                                    id='residual-height-slider',
+                                    min=0.15,
+                                    max=0.45,
+                                    step=0.01,
+                                    value=0.28,
+                                    marks={0.18: '18%', 0.28: '28%', 0.38: '38%'},
+                                    tooltip={'placement': 'bottom', 'always_visible': False},
+                                    updatemode='drag',
+                                ),
+                            ], className='residual-split-control'),
                             html.Button('Reset', id='plot-reset-btn', n_clicks=0, className='compact-btn'),
                             html.Button('Export', id='export-plot', n_clicks=0, className='compact-btn'),
                             html.Span(id='repro-badge', className='label-chip', style={'margin-left': '6px'}),
@@ -1468,6 +1937,8 @@ def create_layout():
                         html.Div(id='plot-status-panel', className='plot-status'),
                         html.Div(id='camera-filter-panel', className='camera-diag'),
                         html.Div(id='plot-stats-cards', className='plot-stats'),
+                        html.Div(id='metadata-health-indicator'),
+                        html.Div(id='vetting-banner'),
                         # Grouped candidate metadata sections (collapsible)
                         html.Div(id='candidate-info-grid', className='metadata-sections candidate-metadata'),
                         # Run config / reproducibility
@@ -1675,6 +2146,46 @@ app.clientside_callback(
     Output('keyboard-input', 'value', allow_duplicate=True),
     Input('keyboard-init', 'n_intervals'),
     prevent_initial_call='initial_duplicate'
+)
+
+
+app.clientside_callback(
+    """
+    function(_tick, currentTheme) {
+        try {
+            var saved = window.localStorage.getItem('malca.review.theme');
+            if (saved === 'dark' || saved === 'solarized') {
+                return saved;
+            }
+        } catch (e) {
+            // ignore storage read failures
+        }
+        return currentTheme || 'dark';
+    }
+    """,
+    Output('theme-mode', 'value'),
+    Input('keyboard-init', 'n_intervals'),
+    State('theme-mode', 'value'),
+    prevent_initial_call=False,
+)
+
+
+app.clientside_callback(
+    """
+    function(theme) {
+        var t = (theme === 'solarized') ? 'solarized' : 'dark';
+        try {
+            document.body.setAttribute('data-theme', t);
+            window.localStorage.setItem('malca.review.theme', t);
+        } catch (e) {
+            // ignore storage/document failures
+        }
+        return t;
+    }
+    """,
+    Output('theme-mode-store', 'data'),
+    Input('theme-mode', 'value'),
+    prevent_initial_call=False,
 )
 
 
@@ -2180,11 +2691,13 @@ def handle_keyboard(key_value, current_idx, queue_data, current_score,
      Input('plot-overlays', 'value'),
      Input('camera-checklist', 'value'),
      Input('plot-preset', 'value'),
+     Input('residual-height-slider', 'value'),
+     Input('theme-mode-store', 'data'),
      Input('queue-data', 'data')],
     State('plot-render-request', 'data'),
     prevent_initial_call=True,
 )
-def queue_plot_render_request(idx, plot_mode, overlay_values, selected_cameras, preset, _queue_data, existing_request):
+def queue_plot_render_request(idx, plot_mode, overlay_values, selected_cameras, preset, residual_height, theme_mode, _queue_data, existing_request):
     """Debounced render request queue for native plot UX."""
     req = existing_request or {'nonce': 0, 'ts': 0.0}
     return {
@@ -2196,6 +2709,8 @@ def queue_plot_render_request(idx, plot_mode, overlay_values, selected_cameras, 
             'overlay_values': list(overlay_values or []),
             'selected_cameras': list(selected_cameras or []),
             'preset': preset,
+            'residual_height': float(residual_height or 0.28),
+            'theme': theme_mode or 'dark',
         },
     }
 
@@ -2259,6 +2774,8 @@ def update_plot_controls(preset, n_reset, n_all, n_clear, n_invert, camera_optio
 @app.callback(
     [Output('plot-image', 'src'),
      Output('candidate-info-grid', 'children'),
+     Output('metadata-health-indicator', 'children'),
+     Output('vetting-banner', 'children'),
      Output('progress-text', 'children'),
      Output('interactive-plot', 'figure'),
      Output('interactive-plot', 'style'),
@@ -2289,6 +2806,8 @@ def update_display(render_request, applied_nonce, queue_data):
     plot_mode = state.get('plot_mode', 'native')
     overlays = set(state.get('overlay_values') or [])
     selected_cameras = list(state.get('selected_cameras') or [])
+    theme_mode = str(state.get('theme', 'dark') or 'dark')
+    residual_height = float(state.get('residual_height', 0.28) or 0.28)
 
     empty_fig = {
         'data': [],
@@ -2300,11 +2819,11 @@ def update_display(render_request, applied_nonce, queue_data):
     }
 
     if not queue_data or queue_data['queue_size'] == 0:
-        return '', 'No candidates in queue', '[0/0]', empty_fig, {'display': 'block', 'width': '100%', 'height': '100%'}, {'display': 'none'}, [], [], _render_plot_status_panel('error', 'No candidates in queue.', []), _render_camera_diag_panel({}, []), _render_run_config_panel(None, None, ['Queue is empty']), _render_repro_badge(None, ['Queue is empty']), '', nonce
+        return '', 'No candidates in queue', _render_metadata_health(None, context_msg='Queue is empty.'), _render_vetting_banner(None), '[0/0]', empty_fig, {'display': 'block', 'width': '100%', 'height': '100%'}, {'display': 'none'}, [], [], _render_plot_status_panel('error', 'No candidates in queue.', []), _render_camera_diag_panel({}, []), _render_run_config_panel(None, None, ['Queue is empty']), _render_repro_badge(None, ['Queue is empty']), '', nonce
 
     queue_size = queue_data['queue_size']
     if idx < 0 or idx >= queue_size:
-        return '', 'Invalid index', f'[{idx}/{queue_size}]', empty_fig, {'display': 'block', 'width': '100%', 'height': '100%'}, {'display': 'none'}, [], [], _render_plot_status_panel('error', 'Invalid queue index.', []), _render_camera_diag_panel({}, []), _render_run_config_panel(None, None, ['Invalid queue index']), _render_repro_badge(None, ['Invalid queue index']), '', nonce
+        return '', 'Invalid index', _render_metadata_health(None, context_msg='Invalid queue index.'), _render_vetting_banner(None), f'[{idx}/{queue_size}]', empty_fig, {'display': 'block', 'width': '100%', 'height': '100%'}, {'display': 'none'}, [], [], _render_plot_status_panel('error', 'Invalid queue index.', []), _render_camera_diag_panel({}, []), _render_run_config_panel(None, None, ['Invalid queue index']), _render_repro_badge(None, ['Invalid queue index']), '', nonce
 
     candidate_id = queue_data['candidate_ids'][idx]
     with closing(db_connect(Path(DB_PATH))) as conn:
@@ -2321,12 +2840,16 @@ def update_display(render_request, applied_nonce, queue_data):
             plot_src = f'/plots/{plot_path.name}'
 
     grouped = extract_review_metadata_grouped(payload)
+    metadata_health = _render_metadata_health(grouped)
+    vetting_banner = _render_vetting_banner(payload)
+    label_color = '#657b83' if theme_mode == 'solarized' else '#888'
+    value_color = '#586e75' if theme_mode == 'solarized' else '#e0e0e0'
     grid_items = []
     for group_name, items in grouped:
         field_divs = [
             html.Div([
-                html.Span(f"{label}: ", style={'color': '#888'}),
-                html.Span(str(value), style={'color': '#e0e0e0'}),
+                html.Span(f"{label}: ", style={'color': label_color}),
+                html.Span(str(value), style={'color': value_color}),
             ], style={'white-space': 'nowrap', 'overflow': 'hidden', 'text-overflow': 'ellipsis'})
             for label, value in items
         ]
@@ -2356,6 +2879,8 @@ def update_display(render_request, applied_nonce, queue_data):
         return (
             plot_src,
             grid_items,
+            metadata_health,
+            vetting_banner,
             progress,
             no_update,
             {'display': 'none'},
@@ -2375,7 +2900,7 @@ def update_display(render_request, applied_nonce, queue_data):
     mismatch_warnings = _run_config_mismatch_warnings(run_params if run_params else None, overlays)
     if run_params_status != 'loaded':
         mismatch_warnings.append(run_params_msg)
-    uirevision_key = f"{candidate_id}|{','.join(sorted(str(c) for c in selected_cameras))}"
+    uirevision_key = f"{candidate_id}|{','.join(sorted(str(c) for c in selected_cameras))}|{theme_mode}|{residual_height:.3f}"
     try:
         native = build_interactive_lightcurve_figure(
             payload,
@@ -2390,6 +2915,8 @@ def update_display(render_request, applied_nonce, queue_data):
             confidence_colors='confidence' in overlays,
             run_params=run_params or {},
             uirevision_key=uirevision_key,
+            theme=theme_mode,
+            residual_fraction=residual_height,
         )
     except Exception as exc:
         import traceback
@@ -2397,7 +2924,7 @@ def update_display(render_request, applied_nonce, queue_data):
         panel = _render_run_config_panel(run_params if run_params else None, run_params_path, [str(exc)])
         if plot_src:
             return (
-                plot_src, grid_items, progress, no_update,
+                plot_src, grid_items, metadata_health, vetting_banner, progress, no_update,
                 {'display': 'none'},
                 {'display': 'block', 'width': '100%', 'height': '100%'},
                 [], [],
@@ -2408,7 +2935,7 @@ def update_display(render_request, applied_nonce, queue_data):
                 '', nonce,
             )
         return (
-            '', grid_items, progress, empty_fig,
+            '', grid_items, metadata_health, vetting_banner, progress, empty_fig,
             {'display': 'block', 'width': '100%', 'height': '100%'},
             {'display': 'none'},
             [], [],
@@ -2429,6 +2956,8 @@ def update_display(render_request, applied_nonce, queue_data):
         return (
             plot_src,
             grid_items,
+            metadata_health,
+            vetting_banner,
             progress,
             no_update,
             {'display': 'none'},
@@ -2452,6 +2981,8 @@ def update_display(render_request, applied_nonce, queue_data):
     return (
         plot_src,
         grid_items,
+        metadata_health,
+        vetting_banner,
         progress,
         native['figure'],
         {'display': 'block', 'width': '100%', 'height': '100%'},
@@ -2493,7 +3024,8 @@ def update_header_key_info(idx, queue_data):
 
     asas_text = f"ASAS-SN ID: {asas_sn_id}" if asas_sn_id else f"ASAS-SN ID: {candidate_id}"
     path_text = f"Path: {lc_path}" if lc_path else 'Path: -'
-    gaia_text = f"Gaia ID: {gaia_id}" if gaia_id else 'Gaia ID: -'
+    gaia_fmt = _format_large_integer_like_display(gaia_id)
+    gaia_text = f"Gaia ID: {gaia_fmt}" if gaia_fmt else 'Gaia ID: -'
     return asas_text, path_text, gaia_text
 
 
@@ -2522,7 +3054,37 @@ def export_active_plot(n_clicks, figure, plot_mode, plot_src, idx):
             return no_update, 'No native plot is available to export.'
         fname = f"malca_plot_{ordinal}.pdf"
         try:
-            image_bytes = pio.to_image(figure, format='pdf')
+            export_fig = go.Figure(figure)
+            export_fig.update_layout(
+                template='plotly_white',
+                paper_bgcolor='white',
+                plot_bgcolor='white',
+                font={'color': '#111111', 'family': 'Monaco, Courier New, monospace', 'size': 11},
+                title_font={'color': '#111111'},
+                legend={
+                    'bgcolor': 'rgba(255,255,255,0.95)',
+                    'bordercolor': 'rgba(40,40,40,0.25)',
+                    'borderwidth': 1,
+                    'font': {'color': '#111111', 'size': 10},
+                },
+            )
+            export_fig.update_xaxes(
+                color='#111111',
+                title_font={'color': '#111111'},
+                tickfont={'color': '#111111'},
+                showgrid=True,
+                gridcolor='rgba(0,0,0,0.15)',
+                zeroline=False,
+            )
+            export_fig.update_yaxes(
+                color='#111111',
+                title_font={'color': '#111111'},
+                tickfont={'color': '#111111'},
+                showgrid=True,
+                gridcolor='rgba(0,0,0,0.15)',
+                zeroline=False,
+            )
+            image_bytes = pio.to_image(export_fig, format='pdf')
         except Exception as exc:
             return no_update, f'Export failed (PDF). Install/enable kaleido. {exc}'
         return dcc.send_bytes(image_bytes, fname), f'Exported {fname}'
@@ -3058,9 +3620,24 @@ def main():
     parser.add_argument('--host', default='127.0.0.1', help="Host")
     parser.add_argument('--port', default=8050, type=int, help="Port")
     parser.add_argument('--debug', action='store_true', help="Debug mode")
+    parser.add_argument('--merge-vetting', metavar='PATH',
+                        help="Merge vetting results from a parquet file into the review DB and exit")
     args = parser.parse_args()
 
     DB_PATH = str(Path(args.db).expanduser().resolve())
+
+    if args.merge_vetting:
+        vetting_path = Path(args.merge_vetting).expanduser().resolve()
+        if not vetting_path.exists():
+            print(f"Error: vetting file not found: {vetting_path}")
+            sys.exit(1)
+        vetting_df = pd.read_parquet(vetting_path)
+        print(f"Merging {len(vetting_df)} vetting results from {vetting_path}")
+        print(f"  into review DB: {DB_PATH}")
+        with closing(db_connect(Path(DB_PATH))) as conn:
+            updated = merge_vetting_results(conn, vetting_df)
+        print(f"Updated {updated} candidates with vetting data.")
+        sys.exit(0)
 
     # Auto-detect plot directory if not specified
     if args.plot_dir:

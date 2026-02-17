@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal, InvalidOperation
 import json
 import sqlite3
 from datetime import datetime, timezone
@@ -52,6 +53,31 @@ def _to_float(v) -> float | None:
         return x
     except Exception:
         return None
+
+
+def _normalize_large_integer_like_id(v) -> str | None:
+    """Normalize large integer-like identifiers to plain strings.
+
+    Converts values like 4.272990850383009e+17 -> "427299085038300900".
+    Returns None for missing values.
+    """
+    if v is None:
+        return None
+    if isinstance(v, float) and np.isnan(v):
+        return None
+    s = str(v).strip()
+    if not s:
+        return None
+    try:
+        d = Decimal(s)
+    except (InvalidOperation, ValueError):
+        return s
+    if d == d.to_integral_value():
+        try:
+            return format(d.to_integral_value(), "f")
+        except Exception:
+            return s
+    return s
 
 
 def infer_candidate_id(df: pd.DataFrame) -> pd.Series:
@@ -452,6 +478,13 @@ def import_candidates(
     for _, row in df_use.iterrows():
         row_dict = {k: (None if pd.isna(v) else v) for k, v in row.to_dict().items()}
         row_dict = normalize_vsx_record(row_dict)
+
+        # Preserve large integer identifiers as non-scientific strings.
+        if "gaia_id" in row_dict:
+            row_dict["gaia_id"] = _normalize_large_integer_like_id(row_dict.get("gaia_id"))
+        if "source_id" in row_dict and row_dict.get("source_id") is not None:
+            row_dict["source_id"] = _normalize_large_integer_like_id(row_dict.get("source_id"))
+
         vals: list = [str(row_dict.get("candidate_id")), source_path]
         for col, _dtype, etype in _CANDIDATE_COLUMNS:
             payload_key = col
@@ -578,6 +611,95 @@ def get_candidate_payload(conn: sqlite3.Connection, candidate_id: str) -> dict:
         return json.loads(row[0])
     except Exception:
         return {}
+
+
+VETTING_COLUMNS = [
+    "vetting_likely_known",
+    "simbad_main_id", "simbad_otype", "simbad_nbref", "simbad_sep_arcsec",
+    "gaia_var_flag", "gaia_var_class", "gaia_var_score",
+    "gaia_epoch_available", "gaia_epoch_n_obs", "gaia_epoch_g_range",
+    "asassn_var_name", "asassn_var_type", "asassn_var_period",
+    "alerce_oid", "alerce_ndet", "alerce_lc_class", "alerce_lc_prob",
+    "alerce_stamp_class", "alerce_stamp_prob",
+    "xray_det", "xray_flux", "xray_sep_arcsec",
+    "pm_cluster_offset_sigma",
+    "atlas_has_phot", "atlas_n_det_cyan", "atlas_n_det_orange",
+    "atlas_cyan_range", "atlas_orange_range",
+    "neowise_n_epochs", "neowise_w1_range", "neowise_w2_range",
+]
+
+
+def merge_vetting_results(
+    conn: sqlite3.Connection,
+    vetting_df: pd.DataFrame,
+    id_column: str | None = None,
+) -> int:
+    """Merge vetting results into existing candidate payload_json.
+
+    Matches candidates by candidate_id or asas_sn_id. Updates only
+    vetting-related columns in the payload, preserving all other data.
+
+    Returns number of candidates updated.
+    """
+    if vetting_df.empty:
+        return 0
+
+    # Determine ID column
+    if id_column is None:
+        for col in ("candidate_id", "asas_sn_id"):
+            if col in vetting_df.columns:
+                id_column = col
+                break
+    if id_column is None:
+        raise ValueError("Vetting DataFrame must have 'candidate_id' or 'asas_sn_id' column")
+
+    # Build lookup: id -> vetting dict
+    vetting_cols = [c for c in VETTING_COLUMNS if c in vetting_df.columns]
+    if not vetting_cols:
+        print("Warning: no vetting columns found in DataFrame")
+        return 0
+
+    vetting_df = vetting_df.copy()
+    vetting_df[id_column] = vetting_df[id_column].astype(str).str.strip()
+    lookup = {}
+    for _, row in vetting_df.iterrows():
+        cid = row[id_column]
+        d = {}
+        for col in vetting_cols:
+            val = row[col]
+            if val is not None and not (isinstance(val, float) and np.isnan(val)):
+                d[col] = val
+        if d:
+            lookup[cid] = d
+
+    if not lookup:
+        return 0
+
+    # Fetch all candidates and update payloads
+    rows = conn.execute("SELECT candidate_id, payload_json FROM candidates").fetchall()
+    updated = 0
+    for cid, payload_json in rows:
+        cid_str = str(cid).strip()
+        vetting_data = lookup.get(cid_str)
+        if vetting_data is None:
+            continue
+
+        try:
+            payload = json.loads(payload_json) if payload_json else {}
+        except Exception:
+            payload = {}
+
+        payload.update(vetting_data)
+
+        conn.execute(
+            "UPDATE candidates SET payload_json=? WHERE candidate_id=?",
+            (json.dumps(payload, default=str), cid),
+        )
+        updated += 1
+
+    conn.commit()
+    print(f"Merged vetting data for {updated}/{len(rows)} candidates ({len(vetting_cols)} columns)")
+    return updated
 
 
 def get_review(conn: sqlite3.Connection, candidate_id: str) -> dict:

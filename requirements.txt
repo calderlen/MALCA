@@ -11,6 +11,7 @@ pyarrow
 
 # Optional: visualization
 plotly
+kaleido
 
 # Optional: multiwavelength analysis
 astroquery>=0.4.6

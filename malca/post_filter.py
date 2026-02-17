@@ -12,7 +12,8 @@ Filters:
 Validation filters (expensive, run on candidates only):
 11. validate_periodicity - bootstrap LSP to check if source is periodic
 12. validate_gaia_ruwe - flag/reject high RUWE sources from Gaia
-13. validate_periodic_catalog - cross-match against known periodic catalogs
+13. validate_gaia_proper_motion - flag/reject high proper motion sources
+14. validate_periodic_catalog - cross-match against known periodic catalogs
 
 Required input columns (from events.py):
     dip_bayes_factor, jump_bayes_factor,
@@ -30,6 +31,7 @@ from __future__ import annotations
 from pathlib import Path
 from time import perf_counter
 import re
+from decimal import Decimal, InvalidOperation
 import pandas as pd
 import numpy as np
 from tqdm.auto import tqdm
@@ -140,7 +142,8 @@ def fetch_gaia_dr3_ruwe(
     Returns
     -------
     pd.DataFrame
-        Subset with columns: source_id, ra, dec, ruwe
+        Subset with columns: source_id, ruwe, and optional astrometry columns
+        available in the local cache (ra, dec, pmra, pmdec).
     """
     if source_ids is None or len(source_ids) == 0:
         raise ValueError("Must provide source_ids")
@@ -162,7 +165,9 @@ def fetch_gaia_dr3_ruwe(
 
     gaia_df["source_id"] = gaia_df["source_id"].astype(int)
     requested_ids = set(int(sid) for sid in source_ids)
-    result_df = gaia_df[gaia_df["source_id"].isin(requested_ids)][["source_id", "ra", "dec", "ruwe"]].copy()
+    optional_cols = [c for c in ("ra", "dec", "pmra", "pmdec") if c in gaia_df.columns]
+    selected_cols = ["source_id", "ruwe"] + optional_cols
+    result_df = gaia_df[gaia_df["source_id"].isin(requested_ids)][selected_cols].copy()
 
     if show_tqdm:
         tqdm.write(f"[fetch_gaia_dr3_ruwe] Matched {len(result_df)}/{len(requested_ids)} sources from local catalog")
@@ -193,6 +198,29 @@ def log_rejections(
     log_path.parent.mkdir(parents=True, exist_ok=True)
     df_log = pd.DataFrame({"path": rejected, "filter": filter_name})
     df_log.to_csv(log_path, mode="a", header=not log_path.exists(), index=False)
+
+
+def _parse_gaia_id_int(value: object) -> int | None:
+    """Parse Gaia source ID-like values to int when possible."""
+    if pd.isna(value):
+        return None
+
+    s = str(value).strip()
+    if not s:
+        return None
+
+    try:
+        d = Decimal(s)
+    except (InvalidOperation, ValueError):
+        return None
+
+    if d != d.to_integral_value():
+        return None
+
+    try:
+        return int(d)
+    except Exception:
+        return None
 
 
 def filter_evidence_strength(
@@ -764,8 +792,8 @@ def validate_gaia_ruwe(
         raise ValueError("[validate_gaia_ruwe] Missing gaia_id column")
 
     # Get unique Gaia IDs (excluding NaN/invalid)
-    valid_mask = df["gaia_id"].notna() & (df["gaia_id"] != 0)
-    unique_ids = df.loc[valid_mask, "gaia_id"].astype(int).unique().tolist()
+    parsed_ids = [_parse_gaia_id_int(v) for v in df["gaia_id"].tolist()]
+    unique_ids = sorted({gid for gid in parsed_ids if gid is not None})
 
     if not unique_ids:
         if show_tqdm:
@@ -804,9 +832,9 @@ def validate_gaia_ruwe(
     # Map RUWE values to candidates
     ruwes = []
     high_ruwe_flags = []
-    for gaia_id in df["gaia_id"]:
-        if pd.notna(gaia_id) and int(gaia_id) in ruwe_lookup:
-            ruwe_val = float(ruwe_lookup[int(gaia_id)])
+    for gid in parsed_ids:
+        if gid is not None and gid in ruwe_lookup:
+            ruwe_val = float(ruwe_lookup[gid])
             ruwes.append(ruwe_val)
             high_ruwe_flags.append(ruwe_val > max_ruwe)
         else:
@@ -829,6 +857,99 @@ def validate_gaia_ruwe(
 
     if not flag_only:
         log_rejections(df_out, df_filtered, "validate_gaia_ruwe", rejected_log_csv)
+
+    return df_filtered
+
+
+def validate_gaia_proper_motion(
+    df: pd.DataFrame,
+    *,
+    max_pm: float = 100.0,
+    flag_only: bool = True,
+    show_tqdm: bool = False,
+    verbose: bool = False,
+    rejected_log_csv: str | Path | None = None,
+) -> pd.DataFrame:
+    """Validate candidates using Gaia proper motion magnitude.
+
+    Uses local Gaia cache values for ``pmra``/``pmdec`` (mas/yr), computes
+    ``pm_total = sqrt(pmra^2 + pmdec^2)``, and flags or rejects sources above
+    ``max_pm``.
+    """
+    _ = verbose
+    n0 = len(df)
+
+    if "gaia_id" not in df.columns:
+        raise ValueError("[validate_gaia_proper_motion] Missing gaia_id column")
+
+    df_out = df.copy()
+    pmra = pd.to_numeric(df_out["pmra"], errors="coerce") if "pmra" in df_out.columns else pd.Series(np.nan, index=df_out.index, dtype=float)
+    pmdec = pd.to_numeric(df_out["pmdec"], errors="coerce") if "pmdec" in df_out.columns else pd.Series(np.nan, index=df_out.index, dtype=float)
+
+    gaia_ids = [_parse_gaia_id_int(v) for v in df_out["gaia_id"].tolist()]
+    unique_ids = sorted({gid for gid in gaia_ids if gid is not None})
+
+    if unique_ids:
+        if show_tqdm:
+            tqdm.write(f"[validate_gaia_proper_motion] Looking up PM for {len(unique_ids)} unique Gaia IDs...")
+        try:
+            gaia_df = fetch_gaia_dr3_ruwe(source_ids=unique_ids, show_tqdm=show_tqdm)
+        except Exception as e:
+            gaia_df = pd.DataFrame()
+            if show_tqdm:
+                tqdm.write(f"[validate_gaia_proper_motion] Gaia lookup failed: {e} - using existing PM columns only")
+
+        if not gaia_df.empty:
+            if "pmra" in gaia_df.columns and "pmdec" in gaia_df.columns:
+                gaia_df = gaia_df.copy()
+                gaia_df["source_id"] = pd.to_numeric(gaia_df["source_id"], errors="coerce")
+                gaia_df["pmra"] = pd.to_numeric(gaia_df["pmra"], errors="coerce")
+                gaia_df["pmdec"] = pd.to_numeric(gaia_df["pmdec"], errors="coerce")
+
+                pm_lookup: dict[int, tuple[float, float]] = {}
+                for _, row in gaia_df.iterrows():
+                    sid = row.get("source_id")
+                    if pd.isna(sid):
+                        continue
+                    pm_lookup[int(sid)] = (row.get("pmra", np.nan), row.get("pmdec", np.nan))
+
+                for i, gid in enumerate(gaia_ids):
+                    if gid is None:
+                        continue
+                    vals = pm_lookup.get(gid)
+                    if vals is None:
+                        continue
+                    if pd.isna(pmra.iat[i]) and pd.notna(vals[0]):
+                        pmra.iat[i] = float(vals[0])
+                    if pd.isna(pmdec.iat[i]) and pd.notna(vals[1]):
+                        pmdec.iat[i] = float(vals[1])
+            elif show_tqdm:
+                tqdm.write("[validate_gaia_proper_motion] Local Gaia cache has no pmra/pmdec columns - using existing PM columns only")
+    elif show_tqdm:
+        tqdm.write("[validate_gaia_proper_motion] No valid Gaia IDs - using existing PM columns only")
+
+    valid_pm = pmra.notna() & pmdec.notna()
+    pm_total = pd.Series(np.nan, index=df_out.index, dtype=float)
+    pm_total.loc[valid_pm] = np.sqrt(pmra.loc[valid_pm] ** 2 + pmdec.loc[valid_pm] ** 2)
+    high_pm_flags = (pm_total > max_pm).fillna(False)
+
+    df_out["pmra"] = pmra
+    df_out["pmdec"] = pmdec
+    df_out["pm_total"] = pm_total
+    df_out["high_pm_flag"] = high_pm_flags
+
+    if flag_only:
+        df_filtered = df_out
+    else:
+        df_filtered = df_out[~df_out["high_pm_flag"]].reset_index(drop=True)
+
+    if show_tqdm:
+        n_flagged = int(high_pm_flags.sum())
+        tqdm.write(f"[validate_gaia_proper_motion] flagged {n_flagged}/{n0} with PM > {max_pm} mas/yr")
+        tqdm.write(f"[validate_gaia_proper_motion] kept {len(df_filtered)}/{n0}")
+
+    if not flag_only:
+        log_rejections(df_out, df_filtered, "validate_gaia_proper_motion", rejected_log_csv)
 
     return df_filtered
 
@@ -1091,6 +1212,10 @@ def apply_post_filters(
     apply_gaia_ruwe_validation: bool = True,
     gaia_max_ruwe: float = 1.4,
     gaia_flag_only: bool = True,
+    # Validation: Gaia proper motion
+    apply_gaia_pm_validation: bool = True,
+    gaia_max_pm: float = 100.0,
+    gaia_pm_flag_only: bool = True,
     # Validation: periodic catalog
     apply_periodic_catalog_validation: bool = True,
     periodic_catalog_max_sep: float = 3.0,
@@ -1112,6 +1237,8 @@ def apply_post_filters(
         Apply bootstrap LSP validation (expensive, off by default)
     apply_gaia_ruwe_validation : bool
         Apply Gaia RUWE validation (queries Gaia TAP)
+    apply_gaia_pm_validation : bool
+        Apply Gaia proper-motion validation (uses local Gaia catalog)
     apply_periodic_catalog_validation : bool
         Apply periodic catalog crossmatch (fetches Chen+2020 from VizieR)
     show_tqdm : bool
@@ -1180,6 +1307,14 @@ def apply_post_filters(
         filters.append(("gaia_ruwe", validate_gaia_ruwe, {
             "max_ruwe": gaia_max_ruwe,
             "flag_only": gaia_flag_only,
+            "show_tqdm": show_tqdm,
+            "verbose": verbose,
+        }))
+
+    if apply_gaia_pm_validation:
+        filters.append(("gaia_pm", validate_gaia_proper_motion, {
+            "max_pm": gaia_max_pm,
+            "flag_only": gaia_pm_flag_only,
             "show_tqdm": show_tqdm,
             "verbose": verbose,
         }))
@@ -1328,6 +1463,14 @@ Example usage:
     parser.add_argument("--gaia-reject", action="store_true",
                         help="Reject high RUWE sources (default: flag only)")
 
+    # Gaia proper-motion validation parameters
+    parser.add_argument("--skip-gaia-pm-validation", action="store_true",
+                        help="Skip Gaia proper-motion validation (on by default, uses local Gaia cache)")
+    parser.add_argument("--gaia-max-pm", type=float, default=100.0,
+                        help="Maximum total proper motion to keep in mas/yr (default: 100.0)")
+    parser.add_argument("--gaia-pm-reject", action="store_true",
+                        help="Reject high proper-motion sources (default: flag only)")
+
     # Periodic catalog validation parameters
     parser.add_argument("--skip-periodic-catalog-validation", action="store_true",
                         help="Skip periodic catalog crossmatch (on by default, fetches Chen+2020 from VizieR)")
@@ -1469,6 +1612,10 @@ Example usage:
         apply_gaia_ruwe_validation=not args.skip_gaia_ruwe_validation,
         gaia_max_ruwe=args.gaia_max_ruwe,
         gaia_flag_only=not args.gaia_reject,
+        # Gaia PM validation
+        apply_gaia_pm_validation=not args.skip_gaia_pm_validation,
+        gaia_max_pm=args.gaia_max_pm,
+        gaia_pm_flag_only=not args.gaia_pm_reject,
         # Periodic catalog validation
         apply_periodic_catalog_validation=not args.skip_periodic_catalog_validation,
         periodic_catalog_max_sep=args.periodic_catalog_max_sep,
@@ -1508,6 +1655,7 @@ Example usage:
                     "phase_plot_min_power": args.phase_plot_min_power,
                     "phase_plot_allow_alias": args.phase_plot_allow_alias,
                     "apply_gaia_ruwe_validation": not args.skip_gaia_ruwe_validation,
+                    "apply_gaia_pm_validation": not args.skip_gaia_pm_validation,
                     "apply_periodic_catalog_validation": not args.skip_periodic_catalog_validation,
                     "min_bayes_factor": args.min_bayes_factor,
                     "require_finite_local_bf": not args.allow_infinite_local_bf,
@@ -1520,6 +1668,8 @@ Example usage:
                     "min_score": args.min_score if args.apply_score_filter else None,
                     "gaia_max_ruwe": args.gaia_max_ruwe if not args.skip_gaia_ruwe_validation else None,
                     "gaia_reject": args.gaia_reject if not args.skip_gaia_ruwe_validation else None,
+                    "gaia_max_pm": args.gaia_max_pm if not args.skip_gaia_pm_validation else None,
+                    "gaia_pm_reject": args.gaia_pm_reject if not args.skip_gaia_pm_validation else None,
                     "periodic_catalog_max_sep": args.periodic_catalog_max_sep if not args.skip_periodic_catalog_validation else None,
                     "periodic_catalog_reject": args.periodic_catalog_reject if not args.skip_periodic_catalog_validation else None,
                 },

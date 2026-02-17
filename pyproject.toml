@@ -20,6 +20,7 @@ dependencies = [
     "celerite2",
     "pyarrow",
     "plotly",
+    "kaleido",
     "watchdog",
     "dash>=2.14.0",
     "dash-bootstrap-components>=1.5.0",

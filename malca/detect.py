@@ -52,6 +52,7 @@ from malca.characterize import characterize_candidates_df
 from malca.gaia_fetch import _extract_gaia_ids, fetch_gaia_catalog
 from malca.enrich.neighbor import run_neighbor_enrichment
 from malca.enrich.spectra import run_spectra_availability
+from malca.vetting import vet_candidates
 from malca.config.config_io import PARQUET_OUTPUT_COMPRESSION, PARQUET_CACHE_COMPRESSION
 from malca.config.config_paths import ASASSN_INDEX_PATH, LCV2_ROOT, VSX_CROSSMATCH_PATH, GAIA_LOCAL_CATALOG
 from malca.config.config_pipeline import (
@@ -381,6 +382,9 @@ def _build_post_filter_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "apply_gaia_ruwe_validation": not args.skip_gaia_ruwe_validation,
         "gaia_max_ruwe": args.gaia_max_ruwe,
         "gaia_flag_only": not args.gaia_reject,
+        "apply_gaia_pm_validation": not args.skip_gaia_pm_validation,
+        "gaia_max_pm": args.gaia_max_pm,
+        "gaia_pm_flag_only": not args.gaia_pm_reject,
         "apply_periodic_catalog_validation": not args.skip_periodic_catalog_validation,
         "periodic_catalog_max_sep": args.periodic_catalog_max_sep,
         "periodic_catalog_flag_only": not args.periodic_catalog_reject,
@@ -511,6 +515,9 @@ def main():
     parser.add_argument("--skip-gaia-ruwe-validation", action="store_true", help="Skip Gaia RUWE validation")
     parser.add_argument("--gaia-max-ruwe", type=float, default=1.4, help="Maximum RUWE threshold (default: 1.4)")
     parser.add_argument("--gaia-reject", action="store_true", help="Reject high-RUWE sources instead of flagging only")
+    parser.add_argument("--skip-gaia-pm-validation", action="store_true", help="Skip Gaia proper-motion validation")
+    parser.add_argument("--gaia-max-pm", type=float, default=100.0, help="Maximum proper-motion threshold in mas/yr (default: 100.0)")
+    parser.add_argument("--gaia-pm-reject", action="store_true", help="Reject high proper-motion sources instead of flagging only")
     parser.add_argument("--skip-periodic-catalog-validation", action="store_true", help="Skip periodic-catalog crossmatch validation")
     parser.add_argument("--periodic-catalog-max-sep", type=float, default=3.0, help="Maximum separation for periodic-catalog matching in arcsec (default: 3.0)")
     parser.add_argument("--periodic-catalog-reject", action="store_true", help="Reject periodic-catalog matches instead of flagging only")
@@ -562,6 +569,23 @@ def main():
     parser.add_argument("--spectra-chunk-size", type=int, default=SPECTRA_CHUNK_SIZE, help="Bulk chunk size for spectra lookups")
     parser.add_argument("--spectra-cache", type=Path, default=None, help="Optional cache parquet path for spectra lookups")
 
+    # Step 12: Post-review vetting args (disabled by default — runs after review)
+    parser.add_argument("--run-vetting", dest="run_vetting", action="store_true", help="Run post-review vetting (SIMBAD, Gaia variability, ASAS-SN variables)")
+    parser.add_argument("--no-run-vetting", dest="run_vetting", action="store_false", help="Skip vetting step")
+    parser.add_argument("--vetting-min-score", type=float, default=None, help="Only vet candidates with interest_score >= this value")
+    parser.add_argument("--vetting-simbad-radius", type=float, default=5.0, help="SIMBAD search radius in arcsec (default: 5)")
+    parser.add_argument("--vetting-asassn-radius", type=float, default=5.0, help="ASAS-SN crossmatch radius in arcsec (default: 5)")
+    parser.add_argument("--no-vetting-simbad", action="store_true", help="Skip SIMBAD query in vetting")
+    parser.add_argument("--no-vetting-gaia-var", action="store_true", help="Skip Gaia DR3 variability query in vetting")
+    parser.add_argument("--no-vetting-gaia-epoch", action="store_true", help="Skip Gaia epoch photometry check in vetting")
+    parser.add_argument("--no-vetting-asassn-var", action="store_true", help="Skip ASAS-SN variable catalog crossmatch in vetting")
+    parser.add_argument("--no-vetting-alerce", action="store_true", help="Skip ALeRCE ZTF query in vetting")
+    parser.add_argument("--no-vetting-erosita", action="store_true", help="Skip eROSITA X-ray crossmatch in vetting")
+    parser.add_argument("--no-vetting-pm-check", action="store_true", help="Skip proper motion consistency check in vetting")
+    parser.add_argument("--vetting-atlas-token", type=str, default=None, help="ATLAS forced photometry API token (enables ATLAS vetting)")
+    parser.add_argument("--vetting-neowise-lc", action="store_true", help="Fetch full NEOWISE light curves in vetting")
+    parser.add_argument("--vetting-input", type=Path, default=None, help="Explicit input file for vetting (default: latest enriched/characterized output)")
+
     parser.add_argument("--test-run", action="store_true", help="Limit the number of light curves processed (for quick end-to-end validation)")
     parser.add_argument("--test-run-n", type=int, default=10000, help="Number of light curves to sample in test-run mode (default: 10000)")
     parser.add_argument("-o", "--overwrite", action="store_true", help="Overwrite checkpoint log and existing output if present (start fresh).")
@@ -581,6 +605,7 @@ def main():
         run_enrich=True,
         run_neighbor_enrich=True,
         run_spectra_enrich=True,
+        run_vetting=False,
         export_bundle_enabled=True,
     )
 
@@ -805,6 +830,9 @@ def main():
             "apply_gaia_ruwe_validation": not args.skip_gaia_ruwe_validation,
             "gaia_max_ruwe": args.gaia_max_ruwe,
             "gaia_flag_only": not args.gaia_reject,
+            "apply_gaia_pm_validation": not args.skip_gaia_pm_validation,
+            "gaia_max_pm": args.gaia_max_pm,
+            "gaia_pm_flag_only": not args.gaia_pm_reject,
             "apply_periodic_catalog_validation": not args.skip_periodic_catalog_validation,
             "periodic_catalog_max_sep": args.periodic_catalog_max_sep,
             "periodic_catalog_flag_only": not args.periodic_catalog_reject,
@@ -927,6 +955,9 @@ def main():
             "skip_gaia_ruwe_validation": args.skip_gaia_ruwe_validation,
             "gaia_max_ruwe": args.gaia_max_ruwe,
             "gaia_reject": args.gaia_reject,
+            "skip_gaia_pm_validation": args.skip_gaia_pm_validation,
+            "gaia_max_pm": args.gaia_max_pm,
+            "gaia_pm_reject": args.gaia_pm_reject,
             "skip_periodic_catalog_validation": args.skip_periodic_catalog_validation,
             "periodic_catalog_max_sep": args.periodic_catalog_max_sep,
             "periodic_catalog_reject": args.periodic_catalog_reject,
@@ -964,6 +995,11 @@ def main():
             "spectra_radius_arcsec": args.spectra_radius_arcsec,
             "spectra_chunk_size": args.spectra_chunk_size,
             "spectra_cache": str(args.spectra_cache) if args.spectra_cache else None,
+            # Step 12: Vetting
+            "run_vetting": args.run_vetting,
+            "vetting_min_score": args.vetting_min_score,
+            "vetting_simbad_radius": args.vetting_simbad_radius,
+            "vetting_asassn_radius": args.vetting_asassn_radius,
             # File paths
             "index_root": str(args.index_root),
             "lc_root": str(args.lc_root),
@@ -1598,15 +1634,21 @@ def main():
                 "--skip-run-robustness",
                 "--gaia-max-ruwe",
                 str(args.gaia_max_ruwe),
+                "--gaia-max-pm",
+                str(args.gaia_max_pm),
                 "--periodic-catalog-max-sep",
                 str(args.periodic_catalog_max_sep),
             ]
             if args.gaia_reject:
                 external_validation_cmd.append("--gaia-reject")
+            if args.gaia_pm_reject:
+                external_validation_cmd.append("--gaia-pm-reject")
             if args.periodic_catalog_reject:
                 external_validation_cmd.append("--periodic-catalog-reject")
             if args.skip_gaia_ruwe_validation:
                 external_validation_cmd.append("--skip-gaia-ruwe-validation")
+            if args.skip_gaia_pm_validation:
+                external_validation_cmd.append("--skip-gaia-pm-validation")
             if args.skip_periodic_catalog_validation:
                 external_validation_cmd.append("--skip-periodic-catalog-validation")
             if not args.verbose:
@@ -1907,6 +1949,81 @@ def main():
                 if args.verbose:
                     import traceback
                     traceback.print_exc()
+
+    # Step 12: Post-review vetting (optional, off by default)
+    if run_downstream and args.run_vetting:
+        log("\n=== Step 12: Post-review vetting ===")
+        vetting_started = time.perf_counter()
+        try:
+            # Find the best input file for vetting
+            vetting_input = args.vetting_input
+            if vetting_input is None:
+                for candidate_file in [
+                    results_dir / "lc_events_spectra.parquet",
+                    results_dir / "lc_events_neighbors.parquet",
+                    results_dir / "lc_events_characterized.parquet",
+                    post_filter_output,
+                ]:
+                    if candidate_file.exists():
+                        vetting_input = candidate_file
+                        break
+
+            if vetting_input is None or not Path(vetting_input).exists():
+                log("Warning: no suitable input found for vetting, skipping")
+            else:
+                df_vet = load_table(vetting_input)
+                log(f"Vetting input: {vetting_input} ({len(df_vet)} candidates)")
+
+                if args.vetting_min_score is not None and "interest_score" in df_vet.columns:
+                    before = len(df_vet)
+                    df_vet = df_vet[df_vet["interest_score"] >= args.vetting_min_score].copy()
+                    log(f"Filtered to {len(df_vet)} candidates with score >= {args.vetting_min_score} (from {before})")
+
+                vetting_checkpoint = results_dir / "lc_events_vetting_CHECKPOINT.parquet"
+                df_vet = vet_candidates(
+                    df_vet,
+                    run_simbad=not args.no_vetting_simbad,
+                    run_gaia_var=not args.no_vetting_gaia_var,
+                    run_gaia_epoch=not args.no_vetting_gaia_epoch,
+                    run_asassn_var=not args.no_vetting_asassn_var,
+                    run_alerce=not args.no_vetting_alerce,
+                    run_erosita=not args.no_vetting_erosita,
+                    run_atlas=args.vetting_atlas_token is not None,
+                    run_pm_check=not args.no_vetting_pm_check,
+                    run_neowise_lc=args.vetting_neowise_lc,
+                    simbad_radius_arcsec=args.vetting_simbad_radius,
+                    asassn_radius_arcsec=args.vetting_asassn_radius,
+                    atlas_token=args.vetting_atlas_token,
+                    checkpoint_path=vetting_checkpoint,
+                )
+
+                vetting_output = results_dir / "lc_events_vetted.parquet"
+                save_table(df_vet, vetting_output)
+                log(f"Vetting output: {vetting_output}")
+
+                def _count_col(col, empty=""):
+                    s = df_vet.get(col, pd.Series(dtype=str))
+                    return int((s != empty).sum()) if not s.empty else 0
+
+                summary["vetting_stats"] = {
+                    "rows_input": int(len(df_vet)),
+                    "simbad_matches": _count_col("simbad_main_id"),
+                    "gaia_var_flagged": int(df_vet.get("gaia_var_flag", pd.Series(dtype=bool)).sum()),
+                    "gaia_epoch_available": int(df_vet.get("gaia_epoch_available", pd.Series(dtype=bool)).sum()),
+                    "asassn_var_matches": _count_col("asassn_var_type"),
+                    "alerce_matches": _count_col("alerce_oid"),
+                    "erosita_xray_det": int(df_vet.get("xray_det", pd.Series(dtype=bool)).sum()),
+                    "likely_known": int(df_vet.get("vetting_likely_known", pd.Series(dtype=bool)).sum()),
+                }
+                with open(run_summary_file, "w") as f:
+                    json.dump(summary, f, indent=2, default=str)
+                log(f"Step 12 completed in {time.perf_counter() - vetting_started:.1f}s")
+
+        except Exception as e:
+            print(f"Error in vetting step: {e}")
+            if args.verbose:
+                import traceback
+                traceback.print_exc()
 
     if args.export_bundle_enabled:
         export_bundle_path = args.export_bundle if args.export_bundle is not None else out_dir / f"{out_dir.name}_bundle_{mag_bin_tag}.zip"

@@ -335,20 +335,50 @@ def _phase_fold_df(df: pd.DataFrame, period_days: float) -> pd.DataFrame:
     return pd.concat([out, wrap], ignore_index=True)
 
 
-def _status_figure(message: str) -> go.Figure:
+def _theme_palette(theme: str) -> dict[str, str]:
+    mode = str(theme or "dark").lower()
+    if mode == "solarized":
+        return {
+            "text": "#586e75",
+            "title": "#073642",
+            "paper_bg": "#fdf6e3",
+            "plot_bg": "#fdf6e3",
+            "grid": "rgba(88,110,117,0.22)",
+            "legend_bg": "rgba(238,232,213,0.94)",
+            "legend_border": "rgba(88,110,117,0.35)",
+            "annotation": "#586e75",
+            "marker_line": "rgba(88,110,117,0.85)",
+            "guide_line": "rgba(88,110,117,0.40)",
+        }
+    return {
+        "text": "#dce5ef",
+        "title": "#dce5ef",
+        "paper_bg": "rgba(0,0,0,0)",
+        "plot_bg": "rgba(0,0,0,0)",
+        "grid": "rgba(96,116,130,0.25)",
+        "legend_bg": "rgba(0,0,0,0.22)",
+        "legend_border": "rgba(113,140,160,0.35)",
+        "annotation": "#bcd0e1",
+        "marker_line": "rgba(10,10,10,0.95)",
+        "guide_line": "rgba(210,210,210,0.35)",
+    }
+
+
+def _status_figure(message: str, theme: str = "dark") -> go.Figure:
+    colors = _theme_palette(theme)
     fig = go.Figure()
     fig.add_annotation(
         text=message,
         showarrow=False,
-        font={"size": 13, "color": "#d4ddeb"},
+        font={"size": 13, "color": colors["text"]},
         x=0.5,
         y=0.5,
         xref="paper",
         yref="paper",
     )
     fig.update_layout(
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor=colors["paper_bg"],
+        plot_bgcolor=colors["plot_bg"],
         margin={"l": 40, "r": 20, "t": 38, "b": 30},
         xaxis={"visible": False},
         yaxis={"visible": False},
@@ -370,13 +400,17 @@ def build_interactive_lightcurve_figure(
     confidence_colors: bool,
     run_params: dict | None,
     uirevision_key: str,
+    theme: str = "dark",
+    residual_fraction: float = 0.28,
 ) -> dict:
     """Build a native Plotly light-curve figure for review mode."""
+    colors = _theme_palette(theme)
+
     plot_dir = Path(plot_dir) if plot_dir else None
     lc_path = resolve_lightcurve_path(payload, plot_dir)
     if lc_path is None:
         return {
-            "figure": _status_figure("No light-curve file found. Try PNG mode or check bundle_assets/lightcurves."),
+            "figure": _status_figure("No light-curve file found. Try PNG mode or check bundle_assets/lightcurves.", theme=theme),
             "camera_options": [],
             "camera_values": [],
             "stat_rows": [],
@@ -402,7 +436,8 @@ def build_interactive_lightcurve_figure(
     if missing_cols:
         return {
             "figure": _status_figure(
-                f"Missing required columns: {', '.join(missing_cols)}. Switch to PNG mode or verify light-curve schema."
+                f"Missing required columns: {', '.join(missing_cols)}. Switch to PNG mode or verify light-curve schema.",
+                theme=theme,
             ),
             "camera_options": [],
             "camera_values": [],
@@ -415,7 +450,7 @@ def build_interactive_lightcurve_figure(
 
     if df.empty:
         return {
-            "figure": _status_figure("No points remain after cleaning/filtering. Try Select all cameras or disable bad-camera filtering."),
+            "figure": _status_figure("No points remain after cleaning/filtering. Try Select all cameras or disable bad-camera filtering.", theme=theme),
             "camera_options": [],
             "camera_values": [],
             "stat_rows": [],
@@ -439,7 +474,7 @@ def build_interactive_lightcurve_figure(
 
     if df.empty:
         return {
-            "figure": _status_figure("Camera selection removed all points. Use Select all cameras or Reset."),
+            "figure": _status_figure("Camera selection removed all points. Use Select all cameras or Reset.", theme=theme),
             "camera_options": [{"label": f"{cam}", "value": str(cam)} for cam in camera_ids],
             "camera_values": selected,
             "stat_rows": [],
@@ -466,13 +501,24 @@ def build_interactive_lightcurve_figure(
     if show_phase_fold and not phase_enabled:
         warnings.append("Phase panel requested, but no valid period was found.")
 
+    try:
+        residual_fraction = float(residual_fraction)
+    except Exception:
+        residual_fraction = 0.28
+    if not np.isfinite(residual_fraction):
+        residual_fraction = 0.28
+    residual_fraction = float(np.clip(residual_fraction, 0.15, 0.45))
+
     n_rows = 1 + (1 if show_residuals else 0) + (1 if phase_enabled else 0)
     if n_rows == 1:
         row_heights = [1.0]
     elif n_rows == 2:
-        row_heights = [0.72, 0.28] if show_residuals else [0.68, 0.32]
+        row_heights = [1.0 - residual_fraction, residual_fraction] if show_residuals else [0.68, 0.32]
     else:
-        row_heights = [0.56, 0.22, 0.22]
+        phase_fraction = 0.22
+        residual_fraction_3 = float(np.clip(residual_fraction, 0.15, 0.40))
+        main_fraction = 1.0 - phase_fraction - residual_fraction_3
+        row_heights = [main_fraction, residual_fraction_3, phase_fraction]
 
     residual_row = 2 if show_residuals else None
     phase_row = (3 if show_residuals else 2) if phase_enabled else None
@@ -512,7 +558,7 @@ def build_interactive_lightcurve_figure(
                         "size": 7,
                         "symbol": band_markers[band],
                         "color": color,
-                        "line": {"width": 0.8, "color": "rgba(10,10,10,0.95)"},
+                        "line": {"width": 0.8, "color": colors["marker_line"]},
                     },
                     error_y={"type": "data", "array": err, "visible": True, "thickness": 1, "width": 0, "color": color},
                     customdata=hover,
@@ -541,7 +587,7 @@ def build_interactive_lightcurve_figure(
                             "size": 6,
                             "symbol": band_markers[band],
                             "color": color,
-                            "line": {"width": 0.8, "color": "rgba(10,10,10,0.95)"},
+                            "line": {"width": 0.8, "color": colors["marker_line"]},
                         },
                         customdata=hover,
                         hovertemplate=(
@@ -611,7 +657,7 @@ def build_interactive_lightcurve_figure(
                         f"{str(entry['kind']).title()} thr logBF={logbf_thr_text}, sig={sig_thr_text}"
                     ),
                     showarrow=False,
-                    font={"size": 9, "color": "#bcd0e1"},
+                    font={"size": 9, "color": colors["annotation"]},
                     yshift=-12 if entry["kind"] == "dip" else -24,
                 )
 
@@ -676,14 +722,14 @@ def build_interactive_lightcurve_figure(
                     col=1,
                 )
 
-        fig.add_vline(x=0.0, line_color="rgba(210,210,210,0.35)", line_dash="dot", line_width=1.0, row=phase_row, col=1)
-        fig.add_vline(x=1.0, line_color="rgba(210,210,210,0.35)", line_dash="dot", line_width=1.0, row=phase_row, col=1)
-        fig.add_vline(x=2.0, line_color="rgba(210,210,210,0.35)", line_dash="dot", line_width=1.0, row=phase_row, col=1)
+        fig.add_vline(x=0.0, line_color=colors["guide_line"], line_dash="dot", line_width=1.0, row=phase_row, col=1)
+        fig.add_vline(x=1.0, line_color=colors["guide_line"], line_dash="dot", line_width=1.0, row=phase_row, col=1)
+        fig.add_vline(x=2.0, line_color=colors["guide_line"], line_dash="dot", line_width=1.0, row=phase_row, col=1)
 
     fig.update_yaxes(title_text="Magnitude [mag]", row=1, col=1, autorange="reversed")
     if show_residuals:
         fig.update_yaxes(title_text="Residual [mag]", row=residual_row, col=1, autorange="reversed")
-        fig.add_hline(y=0.0, line_color="rgba(220,220,220,0.45)", line_dash="dot", row=residual_row, col=1)
+        fig.add_hline(y=0.0, line_color=colors["guide_line"], line_dash="dot", row=residual_row, col=1)
 
     if phase_enabled and phase_row is not None and phase_period is not None:
         if show_residuals:
@@ -698,23 +744,23 @@ def build_interactive_lightcurve_figure(
 
     fig.update_layout(
         title=_build_title(payload, df),
-        title_font={"size": 14, "color": "#dce5ef"},
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
+        title_font={"size": 14, "color": colors["title"]},
+        paper_bgcolor=colors["paper_bg"],
+        plot_bgcolor=colors["plot_bg"],
         margin={"l": 55, "r": 20, "t": 54, "b": 44},
-        font={"color": "#dce5ef", "family": "Monaco, Courier New, monospace", "size": 11},
+        font={"color": colors["text"], "family": "Monaco, Courier New, monospace", "size": 11},
         hovermode="closest",
         legend={
-            "bgcolor": "rgba(0,0,0,0.22)",
-            "bordercolor": "rgba(113,140,160,0.35)",
+            "bgcolor": colors["legend_bg"],
+            "bordercolor": colors["legend_border"],
             "borderwidth": 1,
             "font": {"size": 10},
         },
         height=760 if phase_enabled and show_residuals else (640 if phase_enabled else (650 if show_residuals else 480)),
         uirevision=uirevision_key,
     )
-    fig.update_xaxes(showgrid=True, gridcolor="rgba(96,116,130,0.25)", zeroline=False)
-    fig.update_yaxes(showgrid=True, gridcolor="rgba(96,116,130,0.25)", zeroline=False)
+    fig.update_xaxes(showgrid=True, gridcolor=colors["grid"], zeroline=False)
+    fig.update_yaxes(showgrid=True, gridcolor=colors["grid"], zeroline=False)
 
     camera_options = [{"label": f"{cam}", "value": str(cam)} for cam in camera_ids]
     return {

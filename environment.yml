@@ -15,6 +15,7 @@ dependencies:
   - scikit-learn
   - joblib
   - pyarrow
+  - kaleido
   - tqdm
   - ipython
   - ipykernel
