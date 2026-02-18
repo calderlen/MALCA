@@ -1,45 +1,28 @@
 """Keyboard shortcut handlers for Dash review app.
 
-Class tagging uses a leader-key prefix so single letters remain available
-for navigation and actions:
-
-    [C] <key>  ->  set event class  (single-select; same key again clears)
-
-Press Escape after the leader key to cancel.
+Single-key class shortcuts — letter keys set the event class directly
+(pressing the same key again clears to unclassified).  Non-letter keys
+handle navigation, saving, and UI control.
 """
 
 # ---------------------------------------------------------------------------
-# Prefix-key maps. The first keypress enters class mode and the
-# second keypress selects the class.
+# Class key map — single press sets the class (toggle: same key clears)
 # ---------------------------------------------------------------------------
-
-# C prefix -> event class (single-select)
-CLASS_PREFIX_KEY = 'c'
 CLASS_KEY_MAP = {
     'd': 'dipper',
     'y': 'yso',
     'm': 'microlensing',
-    'f': 'flare',
     'e': 'eclipsing_binary',
     'i': 'instrumental',
     'u': 'unknown_interesting',
+    'x': 'not_real',
+    'r': 'flare',
 }
 
-# Prefix leader keys (used by app.py to detect prefix entry)
-PREFIX_KEYS = {CLASS_PREFIX_KEY}
-
 # ---------------------------------------------------------------------------
-# Single-key shortcuts (no prefix required)
+# Single-key shortcuts (non-letter keys for navigation / actions)
 # ---------------------------------------------------------------------------
 KEYBOARD_SHORTCUTS = {
-    # Navigation
-    'n': 'next_candidate',
-    'N': 'next_candidate',
-    'p': 'previous_candidate',
-    'P': 'previous_candidate',
-    'j': 'jump_to_index',
-    'J': 'jump_to_index',
-
     # Scoring (instant save)
     '0': 'set_score_0',
     '1': 'set_score_1',
@@ -48,55 +31,37 @@ KEYBOARD_SHORTCUTS = {
     '4': 'set_score_4',
     '5': 'set_score_5',
 
-    # Prefix leaders are handled by the state machine in app.py
-
-    # Followup flag toggle
-    'f': 'toggle_followup',
-    'F': 'toggle_followup',
-
-    # Actions
-    's': 'save_review',
-    'S': 'save_review',
-    'd': 'save_and_next',
-    'D': 'save_and_next',
+    # Navigation / actions
+    'Backspace': 'previous_candidate',
+    'Enter': 'save_and_next',
+    'Tab': 'next_candidate',
+    '.': 'save_review',
+    ',': 'toggle_followup',
 
     # UI Control
-    't': 'toggle_sidebar',
-    'T': 'toggle_sidebar',
-    'a': 'toggle_recent_activity',
-    'A': 'toggle_recent_activity',
+    'Escape': 'toggle_sidebar',
     '?': 'show_shortcuts',
 }
 
 HELP_TEXT = """
-Navigation:
-  [N] Next | [P] Previous | [J] Jump
+Classes (single key, toggle):
+  [D] dipper         [Y] yso
+  [M] microlensing   [E] eclipsing binary
+  [I] instrumental   [U] unknown interesting
+  [X] not real       [R] flare
 
-Scoring (instant save, clickable):
+Scoring (instant save):
   [0]-[5] Set interest score
 
-Event Class ([C] then key, single-select, clickable):
-  [C] [D] dipper               [C] [Y] yso
-  [C] [M] microlensing         [C] [F] flare
-  [C] [E] eclipsing binary     [C] [I] instrumental
-  [C] [U] unknown interesting
-  ([Esc] cancels)
-
-Quick Reject:
-  [X] Set class to not real (toggle)
-
-Status:
-  [F] Toggle needs-followup flag
-  (status auto-set to reviewed on save)
+Navigation:
+  [Backspace] Previous  [Tab] Next (no save)
+  [Enter] Save + Next
 
 Actions:
-  [S] Save | [D] Done (Save + Next)
-  [M] Enter notes ([Esc] to exit)
+  [.] Save  [,] Toggle followup
 
 UI:
-  [T] Toggle sidebar | [A] Toggle activity
-  Plot controls are in-GUI (preset/actions/native export)
-  [?] Show this help
+  [Esc] Toggle sidebar  [?] Show this help
 """
 
 
@@ -137,9 +102,6 @@ def handle_key_action(key, current_idx, queue_size, conn, candidate_id):
     # UI Control (handled by other callbacks, included for completeness)
     elif action == 'toggle_sidebar':
         return current_idx, "Sidebar toggled", False
-
-    elif action == 'toggle_recent_activity':
-        return current_idx, "Activity toggled", False
 
     elif action == 'show_shortcuts':
         return current_idx, "Help displayed", False

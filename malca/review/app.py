@@ -43,11 +43,10 @@ from malca.review.metadata import (
 )
 from malca.review.keyboard import (
     handle_key_action, HELP_TEXT,
-    CLASS_KEY_MAP, CLASS_PREFIX_KEY,
-    PREFIX_KEYS,
+    CLASS_KEY_MAP,
 )
 
-CLASS_BADGE_TAGS = list(CLASS_KEY_MAP.values()) + ['not_real']
+CLASS_BADGE_TAGS = list(CLASS_KEY_MAP.values())
 from malca.review.session import create_queue_data_dict
 from malca.review.interactive_plot import build_interactive_lightcurve_figure
 from malca.config.config_paths import VSX_CROSSMATCH_PATH, GAIA_CACHE_FILE
@@ -70,11 +69,12 @@ app.index_string = '''
     <title>MALCA Review</title>
     {%metas%}
     {%css%}
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
     <style>
         body {
             background-color: #000;
             color: #e0e0e0;
-            font-family: 'Monaco', 'Courier New', monospace;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
             margin: 0;
             padding: 0;
         }
@@ -179,8 +179,8 @@ app.index_string = '''
             gap: 0;
         }
         .left-info-panel {
-            flex: 0 0 420px;
-            width: 420px;
+            flex: 0 0 340px;
+            width: 340px;
             min-width: 260px;
             max-width: 72vw;
             display: flex;
@@ -357,73 +357,43 @@ app.index_string = '''
             align-items: center;
             gap: 4px;
         }
-        .residual-split-control {
+        .toolbar-slider-control {
             display: inline-flex;
             align-items: center;
-            gap: 8px;
-            min-width: 220px;
-            max-width: 320px;
+            gap: 6px;
+            min-width: 140px;
+            max-width: 200px;
         }
-        .residual-split-label {
-            color: #9fb6cb;
-            font-size: 10px;
-            white-space: nowrap;
-            letter-spacing: 0.2px;
-        }
-        .residual-split-control .rc-slider {
-            flex: 1;
-            margin: 0 0 0 2px;
-        }
-        .residual-split-control .rc-slider-rail {
+        /* Blue slider theming — global override for all Dash sliders in toolbar */
+        .plot-toolbar .rc-slider-rail {
             background-color: #284256 !important;
         }
-        .residual-split-control .rc-slider-track {
+        .plot-toolbar .rc-slider-track {
             background-color: #0af !important;
         }
-        .residual-split-control .rc-slider-handle {
-            border-color: #0af !important;
-            background-color: #0b141d !important;
-        }
-        .residual-split-control .rc-slider-handle:hover,
-        .residual-split-control .rc-slider-handle:focus,
-        .residual-split-control .rc-slider-handle:active {
-            border-color: #0af !important;
-            box-shadow: 0 0 0 3px rgba(0, 170, 255, 0.2) !important;
-        }
-        .residual-split-control .rc-slider-dot-active {
-            border-color: #0af !important;
-        }
-        .residual-split-control .rc-slider-mark-text-active {
-            color: #7dd !important;
-        }
-        #residual-height-slider .rc-slider-rail {
-            background-color: #284256 !important;
-        }
-        #residual-height-slider .rc-slider-track,
-        #residual-height-slider .rc-slider-track-1 {
-            background-color: #0af !important;
-        }
-        #residual-height-slider .rc-slider-handle,
-        #residual-height-slider .rc-slider-handle-1,
-        #residual-height-slider .rc-slider-handle-dragging,
-        #residual-height-slider .rc-slider-handle-click-focused {
+        .plot-toolbar .rc-slider-handle {
             border-color: #0af !important;
             background-color: #0b141d !important;
             box-shadow: 0 0 0 3px rgba(0, 170, 255, 0.2) !important;
             outline: none !important;
         }
-        #residual-height-slider .rc-slider-dot-active {
+        .plot-toolbar .rc-slider-handle:hover,
+        .plot-toolbar .rc-slider-handle:focus,
+        .plot-toolbar .rc-slider-handle:active,
+        .plot-toolbar .rc-slider-handle-dragging {
+            border-color: #0af !important;
+            background-color: #0b141d !important;
+            box-shadow: 0 0 0 5px rgba(0, 170, 255, 0.3) !important;
+        }
+        .plot-toolbar .rc-slider-dot-active {
             border-color: #0af !important;
         }
-        #residual-height-slider .rc-slider-mark-text-active {
-            color: #7dd !important;
-        }
-        #residual-height-slider .rc-slider-tooltip-inner {
+        .plot-toolbar .rc-slider-tooltip-inner {
             background-color: #0af !important;
             border: 1px solid #0af !important;
             color: #fff !important;
         }
-        #residual-height-slider .rc-slider-tooltip-arrow {
+        .plot-toolbar .rc-slider-tooltip-arrow {
             border-top-color: #0af !important;
             border-bottom-color: #0af !important;
         }
@@ -447,8 +417,8 @@ app.index_string = '''
         }
         .plot-stats {
             display: flex;
-            flex-wrap: wrap;
-            gap: 8px;
+            flex-direction: column;
+            gap: 4px;
             margin-top: 2px;
         }
         .plot-status {
@@ -526,11 +496,14 @@ app.index_string = '''
             gap: 4px;
         }
         .stat-card {
-            padding: 6px 8px;
-            border-radius: 7px;
+            padding: 4px 8px;
+            border-radius: 5px;
             border: 1px solid rgba(64, 96, 116, 0.45);
             background-color: rgba(8, 17, 24, 0.75);
-            min-width: 95px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 8px;
         }
         .stat-card .label {
             color: #7fa3bc;
@@ -540,13 +513,13 @@ app.index_string = '''
         }
         .stat-card .value {
             color: #e2edf6;
-            font-size: 13px;
+            font-size: 12px;
             font-weight: 600;
-            margin-top: 2px;
+            text-align: right;
         }
         .run-config-panel {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+            grid-template-columns: 1fr;
             gap: 6px;
         }
         .run-config-item {
@@ -885,9 +858,9 @@ app.index_string = '''
             color: #4cf;
         }
         .metadata-sections .meta-grid {
-            display: grid;
-            grid-template-columns: repeat(3, 1fr);
-            gap: 4px 8px;
+            display: flex;
+            flex-direction: column;
+            gap: 0;
             padding: 2px 6px 6px 6px;
             font-size: 11px;
         }
@@ -1027,59 +1000,24 @@ app.index_string = '''
             color: #586e75 !important;
             border-color: #93a1a1 !important;
         }
-        body[data-theme="solarized"] .residual-split-label {
-            color: #657b83 !important;
-        }
-        body[data-theme="solarized"] .residual-split-control .rc-slider-rail {
+        body[data-theme="solarized"] .plot-toolbar .rc-slider-rail {
             background-color: #d8ccb3 !important;
         }
-        body[data-theme="solarized"] .residual-split-control .rc-slider-track {
+        body[data-theme="solarized"] .plot-toolbar .rc-slider-track {
             background-color: #268bd2 !important;
         }
-        body[data-theme="solarized"] .residual-split-control .rc-slider-handle {
-            border-color: #268bd2 !important;
-            background-color: #fdf6e3 !important;
-        }
-        body[data-theme="solarized"] .residual-split-control .rc-slider-handle:hover,
-        body[data-theme="solarized"] .residual-split-control .rc-slider-handle:focus,
-        body[data-theme="solarized"] .residual-split-control .rc-slider-handle:active {
-            border-color: #268bd2 !important;
-            box-shadow: 0 0 0 3px rgba(38, 139, 210, 0.18) !important;
-        }
-        body[data-theme="solarized"] .residual-split-control .rc-slider-dot-active {
-            border-color: #268bd2 !important;
-        }
-        body[data-theme="solarized"] .residual-split-control .rc-slider-mark-text-active {
-            color: #268bd2 !important;
-        }
-        body[data-theme="solarized"] #residual-height-slider .rc-slider-rail {
-            background-color: #d8ccb3 !important;
-        }
-        body[data-theme="solarized"] #residual-height-slider .rc-slider-track,
-        body[data-theme="solarized"] #residual-height-slider .rc-slider-track-1 {
-            background-color: #268bd2 !important;
-        }
-        body[data-theme="solarized"] #residual-height-slider .rc-slider-handle,
-        body[data-theme="solarized"] #residual-height-slider .rc-slider-handle-1,
-        body[data-theme="solarized"] #residual-height-slider .rc-slider-handle-dragging,
-        body[data-theme="solarized"] #residual-height-slider .rc-slider-handle-click-focused {
+        body[data-theme="solarized"] .plot-toolbar .rc-slider-handle {
             border-color: #268bd2 !important;
             background-color: #fdf6e3 !important;
             box-shadow: 0 0 0 3px rgba(38, 139, 210, 0.18) !important;
             outline: none !important;
         }
-        body[data-theme="solarized"] #residual-height-slider .rc-slider-dot-active {
-            border-color: #268bd2 !important;
-        }
-        body[data-theme="solarized"] #residual-height-slider .rc-slider-mark-text-active {
-            color: #268bd2 !important;
-        }
-        body[data-theme="solarized"] #residual-height-slider .rc-slider-tooltip-inner {
+        body[data-theme="solarized"] .plot-toolbar .rc-slider-tooltip-inner {
             background-color: #268bd2 !important;
             border: 1px solid #268bd2 !important;
             color: #fdf6e3 !important;
         }
-        body[data-theme="solarized"] #residual-height-slider .rc-slider-tooltip-arrow {
+        body[data-theme="solarized"] .plot-toolbar .rc-slider-tooltip-arrow {
             border-top-color: #268bd2 !important;
             border-bottom-color: #268bd2 !important;
         }
@@ -1104,11 +1042,11 @@ PLOT_PRESETS = {
         'camera_mode': 'all',
     },
     'Diagnostics': {
-        'overlays': ['baseline', 'markers', 'residuals', 'filter_bad_cameras', 'diagnostics'],
+        'overlays': ['markers', 'residuals', 'filter_bad_cameras', 'diagnostics'],
         'camera_mode': 'all',
     },
     'Full': {
-        'overlays': ['baseline', 'markers', 'residuals', 'filter_bad_cameras', 'diagnostics', 'confidence'],
+        'overlays': ['markers', 'residuals', 'filter_bad_cameras', 'diagnostics', 'confidence'],
         'camera_mode': 'all',
     },
 }
@@ -1139,16 +1077,23 @@ def _load_run_params_for_plot_dir(plot_dir: str | None) -> dict:
 
 
 def _render_stat_cards(stat_rows: list[tuple[str, str]]) -> list:
-    """Render compact stats cards below the native plot."""
-    cards = []
-    for label, value in stat_rows:
-        cards.append(
-            html.Div([
-                html.Div(label, className='label'),
-                html.Div(value, className='value'),
-            ], className='stat-card')
-        )
-    return cards
+    """Render stats as a collapsible Details/Summary group."""
+    if not stat_rows:
+        return []
+    field_divs = [
+        html.Div([
+            html.Span(label, style={'color': '#7fa3bc', 'flex-shrink': '0', 'font-size': '10px',
+                                     'text-transform': 'uppercase', 'letter-spacing': '0.5px'}),
+            html.Span(str(value), style={'color': '#e2edf6', 'text-align': 'right',
+                                          'font-weight': '600'}),
+        ], style={'display': 'flex', 'justify-content': 'space-between', 'gap': '8px',
+                  'padding': '2px 0', 'border-bottom': '1px solid #1a1a1a'})
+        for label, value in stat_rows
+    ]
+    return [html.Details(
+        [html.Summary(f"Stats ({len(stat_rows)})"), html.Div(field_divs, className='meta-grid')],
+        open='open',
+    )]
 
 
 def _render_plot_status_panel(status: str, message: str, warnings: list[str] | None) -> html.Div:
@@ -1411,13 +1356,15 @@ def _render_vetting_banner(payload: dict | None) -> html.Div:
 
     # Build source cards
     cell_style = {
-        'padding': '4px 8px', 'border-radius': '3px', 'font-size': '0.78em',
+        'padding': '3px 8px', 'border-radius': '3px', 'font-size': '0.78em',
         'background': '#1a2a1a' if not known else '#2a1a1a',
-        'border': '1px solid #333', 'text-align': 'center',
-        'overflow': 'hidden', 'text-overflow': 'ellipsis',
+        'border': '1px solid #333',
+        'display': 'flex', 'justify-content': 'space-between', 'align-items': 'center',
+        'gap': '8px', 'overflow': 'hidden',
     }
-    label_style = {'color': '#888', 'font-size': '0.9em', 'display': 'block'}
-    value_style = {'color': '#e0e0e0', 'font-weight': 'bold', 'display': 'block'}
+    label_style = {'color': '#888', 'font-size': '0.9em', 'flex-shrink': '0'}
+    value_style = {'color': '#e0e0e0', 'font-weight': 'bold',
+                   'text-align': 'right', 'word-break': 'break-word', 'white-space': 'normal'}
     hit_style = {**value_style, 'color': '#ff6b6b' if known else '#6bff6b'}
 
     cards = []
@@ -1572,8 +1519,8 @@ def _render_vetting_banner(payload: dict | None) -> html.Div:
         ], style={**cell_style, 'grid-column': '1 / -1'}))
 
     grid_style = {
-        'display': 'grid', 'grid-template-columns': 'repeat(auto-fill, minmax(110px, 1fr))',
-        'gap': '3px', 'padding': '5px 6px 6px',
+        'display': 'flex', 'flex-direction': 'column',
+        'gap': '2px', 'padding': '5px 6px 6px',
         'background': '#1a1a1a',
         'border': '1px solid #333', 'border-top': 'none',
         'border-radius': '0 0 4px 4px',
@@ -1906,20 +1853,21 @@ def create_layout():
         dcc.Store(id='current-index', data=0),
         dcc.Store(id='current-score', data=0),
         dcc.Store(id='event-class-store', data='unclassified'),
-        dcc.Store(id='pending-prefix', data=''),
+        dcc.Store(id='pending-prefix', data=''),  # kept for callback compatibility
         dcc.Store(id='needs-followup-store', data=False),
         dcc.Store(id='review-pass-store', data=1),
         dcc.Store(id='sidebar-state', data=False),  # collapsed by default
         dcc.Store(id='filter-params', data={}),
         dcc.Store(id='import-trigger', data=0),  # triggers queue refresh after import
         dcc.Store(id='activity-visible', data=False),  # collapsed by default
-        dcc.Store(id='plot-render-request', data={'nonce': 1, 'ts': 0.0, 'state': {'idx': 0, 'plot_mode': 'native', 'overlay_values': ['baseline', 'markers', 'residuals', 'filter_bad_cameras', 'diagnostics'], 'selected_cameras': [], 'preset': 'Diagnostics', 'theme': 'dark', 'residual_height': 0.28}}),
+        dcc.Store(id='plot-render-request', data={'nonce': 1, 'ts': 0.0, 'state': {'idx': 0, 'plot_mode': 'native', 'overlay_values': ['baseline', 'markers', 'residuals', 'filter_bad_cameras', 'diagnostics'], 'selected_cameras': [], 'preset': 'Diagnostics', 'theme': 'dark', 'residual_height': 0.28, 'baseline_opacity': 0.5}}),
         dcc.Store(id='plot-render-applied', data=0),
         dcc.Store(id='plot-defaults-initialized', data=False),
         dcc.Store(id='run-config-json-store', data=''),
         dcc.Store(id='theme-mode-store', data='dark'),
         dcc.Store(id='metadata-resize-init', data=0),
         dcc.Store(id='status-resize-init', data=0),
+        dcc.Store(id='section-splitters-init', data=0),
         dcc.Download(id='plot-export-download'),
         dcc.Download(id='run-config-download'),
         dcc.Interval(id='keyboard-init', interval=200, n_intervals=0, max_intervals=1),
@@ -2088,60 +2036,85 @@ def create_layout():
             html.Div([
                 html.Div([
                     html.Div([
-                        html.Div([
-                            dcc.Dropdown(
-                                id='plot-preset',
-                                options=[{'label': p, 'value': p} for p in ('Clean', 'Diagnostics', 'Full')],
-                                value='Diagnostics',
-                                clearable=False,
-                                style={'minWidth': '140px', 'font-size': '10px'},
-                            ),
-                            dcc.RadioItems(
-                                id='plot-mode',
-                                options=[
-                                    {'label': ' Native', 'value': 'native'},
-                                    {'label': ' PNG', 'value': 'png'},
-                                ],
-                                value='native',
-                                inline=True,
-                            ),
-                            dcc.Checklist(
-                                id='plot-overlays',
-                                options=[
-                                    {'label': ' Baseline', 'value': 'baseline'},
-                                    {'label': ' Dip/Jump markers', 'value': 'markers'},
-                                    {'label': ' Residual panel', 'value': 'residuals'},
-                                    {'label': ' Filter bad cameras', 'value': 'filter_bad_cameras'},
-                                    {'label': ' Event diagnostics', 'value': 'diagnostics'},
-                                    {'label': ' Confidence colors', 'value': 'confidence'},
-                                ],
-                                value=['baseline', 'markers', 'residuals', 'filter_bad_cameras', 'diagnostics'],
-                                inline=True,
-                            ),
+                        html.Details([
+                            html.Summary('Plot Controls'),
                             html.Div([
-                                html.Span('Residual size', className='residual-split-label'),
-                                dcc.Slider(
-                                    id='residual-height-slider',
-                                    min=0.15,
-                                    max=0.45,
-                                    step=0.01,
-                                    value=0.28,
-                                    marks={0.18: '18%', 0.28: '28%', 0.38: '38%'},
-                                    tooltip={'placement': 'bottom', 'always_visible': False},
-                                    updatemode='drag',
+                                dcc.Dropdown(
+                                    id='plot-preset',
+                                    options=[{'label': p, 'value': p} for p in ('Clean', 'Diagnostics', 'Full')],
+                                    value='Diagnostics',
+                                    clearable=False,
+                                    style={'minWidth': '140px', 'font-size': '10px'},
                                 ),
-                            ], className='residual-split-control'),
-                            html.Button('Reset', id='plot-reset-btn', n_clicks=0, className='compact-btn'),
-                            html.Button('Export', id='export-plot', n_clicks=0, className='compact-btn'),
-                            html.Span(id='repro-badge', className='label-chip', style={'margin-left': '6px'}),
-                        ], className='plot-toolbar'),
-                        html.Div(id='plot-status-panel', className='plot-status'),
-                        html.Div(id='camera-filter-panel', className='camera-diag'),
-                        html.Div(id='plot-stats-cards', className='plot-stats'),
-                        html.Div(id='metadata-health-indicator'),
+                                dcc.RadioItems(
+                                    id='plot-mode',
+                                    options=[
+                                        {'label': ' Native', 'value': 'native'},
+                                        {'label': ' PNG', 'value': 'png'},
+                                    ],
+                                    value='native',
+                                    inline=True,
+                                ),
+                                dcc.Checklist(
+                                    id='plot-overlays',
+                                    options=[
+                                        {'label': ' Dip/Jump markers', 'value': 'markers'},
+                                        {'label': ' Residual panel', 'value': 'residuals'},
+                                        {'label': ' Filter bad cameras', 'value': 'filter_bad_cameras'},
+                                        {'label': ' Event diagnostics', 'value': 'diagnostics'},
+                                        {'label': ' Confidence colors', 'value': 'confidence'},
+                                    ],
+                                    value=['markers', 'residuals', 'filter_bad_cameras', 'diagnostics'],
+                                    inline=True,
+                                ),
+                                html.Div([
+                                    html.Span('Baseline', style={'color': '#9fb6cb', 'font-size': '10px',
+                                                                  'white-space': 'nowrap'}),
+                                    dcc.Slider(
+                                        id='baseline-opacity-slider',
+                                        min=0.0,
+                                        max=1.0,
+                                        step=0.05,
+                                        value=0.5,
+                                        marks=None,
+                                        tooltip={'placement': 'bottom', 'always_visible': False},
+                                        updatemode='drag',
+                                    ),
+                                ], className='toolbar-slider-control'),
+                                html.Div([
+                                    html.Span('Residual', style={'color': '#9fb6cb', 'font-size': '10px',
+                                                                  'white-space': 'nowrap'}),
+                                    dcc.Slider(
+                                        id='residual-height-slider',
+                                        min=0.15,
+                                        max=0.45,
+                                        step=0.01,
+                                        value=0.28,
+                                        marks=None,
+                                        tooltip={'placement': 'bottom', 'always_visible': False},
+                                        updatemode='drag',
+                                    ),
+                                ], className='toolbar-slider-control'),
+                                html.Button('Reset', id='plot-reset-btn', n_clicks=0, className='compact-btn'),
+                                html.Button('Export', id='export-plot', n_clicks=0, className='compact-btn'),
+                                html.Span(id='repro-badge', className='label-chip', style={'margin-left': '6px'}),
+                            ], className='plot-toolbar'),
+                        ], open=True),
                         html.Div(id='vetting-banner'),
-                        # Grouped candidate metadata sections (collapsible)
+                        html.Div(id='splitter-vetting', className='panel-splitter status-splitter',
+                                 title='Drag to resize'),
+                        html.Div(id='plot-stats-cards', className='plot-stats', style={'display': 'none'}),
+                        html.Div([
+                            html.Div(id='plot-status-panel', className='plot-status'),
+                            html.Div(id='camera-filter-panel', className='camera-diag'),
+                            html.Div(id='metadata-health-indicator'),
+                        ], id='diagnostics-section'),
+                        html.Div(id='splitter-diagnostics', className='panel-splitter status-splitter',
+                                 title='Drag to resize'),
+                        # Grouped candidate metadata sections (collapsible, includes stats)
                         html.Div(id='candidate-info-grid', className='metadata-sections candidate-metadata'),
+                        html.Div(id='splitter-metadata', className='panel-splitter status-splitter',
+                                 title='Drag to resize'),
                         # Run config / reproducibility
                         html.Details([
                             html.Summary('Run Config', style={'cursor': 'pointer'}),
@@ -2194,31 +2167,25 @@ def create_layout():
                     for i in range(6)
                 ], style={'display': 'flex', 'align-items': 'center', 'margin-bottom': '6px'}),
 
-                # Event class row (clickable buttons, [C]+key prefix)
+                # Event class row (clickable buttons, single-key shortcuts)
                 html.Div([
                     html.Span('Class: ', style={'color': '#aaa', 'margin-right': '8px', 'font-size': '11px'}),
                     html.Span(id='prefix-indicator', style={'margin-right': '6px', 'font-size': '11px'}),
                 ] + [
                     html.Button(
-                        f'[{CLASS_PREFIX_KEY.upper()}] [{key.upper()}]: {tag.replace("_", " ")}',
+                        f'[{key.upper()}] {tag.replace("_", " ")}',
                         id=f'class-badge-{tag}',
                         n_clicks=0,
                         className='badge-btn',
                     )
                     for key, tag in CLASS_KEY_MAP.items()
-                ] + [
-                    html.Button(
-                        '[X]: not real',
-                        id='class-badge-not_real',
-                        n_clicks=0,
-                        className='badge-btn',
-                    )
                 ], style={'display': 'flex', 'align-items': 'center', 'flex-wrap': 'wrap', 'margin-bottom': '6px'}),
 
                 # Action row: Save, Done, Followup, Pass, Status, Notification
                 html.Div([
-                    html.Button('Save [S]', id='save-btn', n_clicks=0, className='action-btn'),
-                    html.Button('Done [D]', id='done-btn', n_clicks=0, className='action-btn primary'),
+                    html.Button('← Back', id='back-btn', n_clicks=0, className='action-btn'),
+                    html.Button('Save [.]', id='save-btn', n_clicks=0, className='action-btn'),
+                    html.Button('Done [Enter]', id='done-btn', n_clicks=0, className='action-btn primary'),
                     html.Span('', style={'width': '20px', 'display': 'inline-block'}),
                     html.Span(id='followup-indicator', style={'margin-right': '10px', 'font-size': '11px'}),
                     html.Span(id='pass-indicator', style={'color': '#888', 'margin-right': '10px', 'font-size': '11px'}),
@@ -2231,7 +2198,7 @@ def create_layout():
                 dcc.Input(
                     id='notes',
                     type='text',
-                    placeholder='[M] Notes - press Esc to exit',
+                    placeholder='Notes - click to type, Esc to exit',
                     style={'width': '100%', 'font-size': '11px', 'height': '26px'},
                 ),
             ], className='review-form'),
@@ -2324,15 +2291,9 @@ app.clientside_callback(
                     return;
                 }
 
-                // M/m: focus notes textarea (pure client-side).
-                if (key === 'm' || key === 'M') {
+                // Prevent browser defaults for keys we use as shortcuts
+                if (key === 'Backspace' || key === 'Tab' || key === 'Enter') {
                     e.preventDefault();
-                    var notesEl = document.getElementById('notes');
-                    if (notesEl) {
-                        var ta = notesEl.querySelector('textarea') || notesEl;
-                        ta.focus();
-                    }
-                    return;
                 }
 
                 dispatchKeyToDash(key);
@@ -2666,6 +2627,112 @@ app.clientside_callback(
 )
 
 
+# Section splitters in the left info panel
+app.clientside_callback(
+    """
+    function(_tick) {
+        if (window.__malcaSectionSplittersAttached) {
+            return window.dash_clientside.no_update;
+        }
+
+        var configs = [
+            {splitterId: 'splitter-vetting', targetId: 'vetting-banner', storageKey: 'malca.review.vetting.height.v1', defaultHeight: null, minHeight: 20},
+            {splitterId: 'splitter-diagnostics', targetId: 'diagnostics-section', storageKey: 'malca.review.diagnostics.height.v1', defaultHeight: null, minHeight: 20},
+            {splitterId: 'splitter-metadata', targetId: 'candidate-info-grid', storageKey: 'malca.review.metadata.height.v1', defaultHeight: null, minHeight: 40},
+        ];
+
+        configs.forEach(function(cfg) {
+            var splitter = document.getElementById(cfg.splitterId);
+            var target = document.getElementById(cfg.targetId);
+            if (!splitter || !target) return;
+
+            var drag = {active: false, startY: 0, startHeight: 0, pointerId: null};
+
+            var clamp = function(h) {
+                var maxH = Math.max(120, Math.floor(window.innerHeight * 0.6));
+                h = Math.max(cfg.minHeight, Math.min(maxH, h));
+                return Math.round(h);
+            };
+
+            var apply = function(h, persist) {
+                h = clamp(h);
+                target.style.maxHeight = h + 'px';
+                target.style.overflow = 'auto';
+                if (persist) {
+                    try { window.localStorage.setItem(cfg.storageKey, String(h)); } catch(e) {}
+                }
+            };
+
+            var onMove = function(e) {
+                if (!drag.active) return;
+                var next = drag.startHeight + (e.clientY - drag.startY);
+                apply(next, false);
+                e.preventDefault();
+            };
+
+            var onUp = function(e) {
+                if (!drag.active) return;
+                drag.active = false;
+                splitter.classList.remove('dragging');
+                window.removeEventListener('pointermove', onMove);
+                window.removeEventListener('pointerup', onUp);
+                window.removeEventListener('pointercancel', onUp);
+                if (drag.pointerId !== null && splitter.releasePointerCapture) {
+                    try { splitter.releasePointerCapture(drag.pointerId); } catch(e) {}
+                }
+                drag.pointerId = null;
+                apply(target.getBoundingClientRect().height, true);
+                if (e) e.preventDefault();
+            };
+
+            splitter.addEventListener('pointerdown', function(e) {
+                drag.active = true;
+                drag.startY = e.clientY;
+                drag.startHeight = target.getBoundingClientRect().height;
+                drag.pointerId = (typeof e.pointerId === 'number') ? e.pointerId : null;
+                splitter.classList.add('dragging');
+                if (drag.pointerId !== null && splitter.setPointerCapture) {
+                    try { splitter.setPointerCapture(drag.pointerId); } catch(e) {}
+                }
+                window.addEventListener('pointermove', onMove);
+                window.addEventListener('pointerup', onUp);
+                window.addEventListener('pointercancel', onUp);
+                e.preventDefault();
+            });
+
+            // Restore saved height
+            if (cfg.defaultHeight === null) {
+                // Don't constrain by default — only after user drags
+                try {
+                    var saved = window.localStorage.getItem(cfg.storageKey);
+                    if (saved !== null && saved !== '') {
+                        var parsed = parseInt(saved, 10);
+                        if (!isNaN(parsed)) apply(parsed, false);
+                    }
+                } catch(e) {}
+            } else {
+                var initH = cfg.defaultHeight;
+                try {
+                    var saved = window.localStorage.getItem(cfg.storageKey);
+                    if (saved !== null && saved !== '') {
+                        var parsed = parseInt(saved, 10);
+                        if (!isNaN(parsed)) initH = parsed;
+                    }
+                } catch(e) {}
+                apply(initH, false);
+            }
+        });
+
+        window.__malcaSectionSplittersAttached = true;
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output('section-splitters-init', 'data'),
+    Input('keyboard-init', 'n_intervals'),
+    prevent_initial_call=False,
+)
+
+
 # Toggle sidebar
 @app.callback(
     [Output('sidebar', 'className'),
@@ -2793,7 +2860,7 @@ def _do_save(candidate_id, score, event_class, needs_followup, notes, event_type
         return new_pass, status
 
 
-# Keyboard handler (prefix-state machine for class)
+# Keyboard handler (single-key class shortcuts)
 @app.callback(
     [Output('current-index', 'data'),
      Output('notification', 'children'),
@@ -2822,7 +2889,7 @@ def handle_keyboard(key_value, current_idx, queue_data, current_score,
         return NO
 
     # Skip keys handled by other callbacks / keydown listener
-    if key.lower() in ['t', 'm', 'a', '?']:
+    if key in ['?']:
         return NO
 
     queue_size = queue_data['queue_size']
@@ -2832,39 +2899,17 @@ def handle_keyboard(key_value, current_idx, queue_data, current_score,
     candidate_id = (queue_data['candidate_ids'][current_idx]
                     if current_idx < queue_size else None)
 
-    # --- Prefix state machine ([C] -> class) ---
-    if pending_prefix:
-        # We're waiting for the second key after a leader press
-        if key == 'Escape':
-            return no_update, "Cancelled", no_update, no_update, no_update, no_update, ''
-
-        if pending_prefix == CLASS_PREFIX_KEY:
-            class_tag = CLASS_KEY_MAP.get(key.lower())
-            if class_tag is not None:
-                cur = event_class or 'unclassified'
-                if cur == class_tag:
-                    return no_update, "Class: unclassified", no_update, no_update, no_update, 'unclassified', ''
-                return no_update, f"Class: {class_tag}", no_update, no_update, no_update, class_tag, ''
-            return no_update, f"[{CLASS_PREFIX_KEY.upper()}] {key}: unknown class", no_update, no_update, no_update, no_update, ''
-
-        # Unknown prefix (shouldn't happen) — cancel
-        return no_update, "Cancelled", no_update, no_update, no_update, no_update, ''
-
-    # --- Enter prefix mode when a leader key is pressed ---
+    # --- Direct class key shortcuts (single key toggles class) ---
     kl = key.lower()
-    if kl in PREFIX_KEYS:
-        label = kl.upper()
-        return no_update, f"[{label}] ...", no_update, no_update, no_update, no_update, kl
-
-    # --- Quick reject (X): toggle not_real class ---
-    if key.lower() == 'x':
+    class_tag = CLASS_KEY_MAP.get(kl)
+    if class_tag is not None:
         cur = event_class or 'unclassified'
-        if cur == 'not_real':
+        if cur == class_tag:
             return no_update, "Class: unclassified", no_update, no_update, no_update, 'unclassified', no_update
-        return no_update, "Class: not_real", no_update, no_update, no_update, 'not_real', no_update
+        return no_update, f"Class: {class_tag}", no_update, no_update, no_update, class_tag, no_update
 
-    # --- Followup toggle (F) ---
-    if key.lower() == 'f':
+    # --- Followup toggle (,) ---
+    if key == ',':
         new_state = not bool(needs_followup)
         label = "ON" if new_state else "OFF"
         return no_update, f"Followup: {label}", no_update, new_state, no_update, no_update, no_update
@@ -2902,11 +2947,12 @@ def handle_keyboard(key_value, current_idx, queue_data, current_score,
      Input('plot-preset', 'value'),
      Input('residual-height-slider', 'value'),
      Input('theme-mode-store', 'data'),
-     Input('queue-data', 'data')],
+     Input('queue-data', 'data'),
+     Input('baseline-opacity-slider', 'value')],
     State('plot-render-request', 'data'),
     prevent_initial_call=True,
 )
-def queue_plot_render_request(idx, plot_mode, overlay_values, selected_cameras, preset, residual_height, theme_mode, _queue_data, existing_request):
+def queue_plot_render_request(idx, plot_mode, overlay_values, selected_cameras, preset, residual_height, theme_mode, _queue_data, baseline_opacity, existing_request):
     """Debounced render request queue for native plot UX."""
     req = existing_request or {'nonce': 0, 'ts': 0.0}
     return {
@@ -2920,6 +2966,7 @@ def queue_plot_render_request(idx, plot_mode, overlay_values, selected_cameras, 
             'preset': preset,
             'residual_height': float(residual_height or 0.28),
             'theme': theme_mode or 'dark',
+            'baseline_opacity': float(baseline_opacity if baseline_opacity is not None else 0.5),
         },
     }
 
@@ -3017,6 +3064,7 @@ def update_display(render_request, applied_nonce, queue_data):
     selected_cameras = list(state.get('selected_cameras') or [])
     theme_mode = str(state.get('theme', 'dark') or 'dark')
     residual_height = float(state.get('residual_height', 0.28) or 0.28)
+    baseline_opacity = float(state.get('baseline_opacity', 0.5) if state.get('baseline_opacity') is not None else 0.5)
 
     empty_fig = {
         'data': [],
@@ -3057,9 +3105,11 @@ def update_display(render_request, applied_nonce, queue_data):
     for group_name, items in grouped:
         field_divs = [
             html.Div([
-                html.Span(f"{label}: ", style={'color': label_color}),
-                html.Span(str(value), style={'color': value_color}),
-            ], style={'white-space': 'nowrap', 'overflow': 'hidden', 'text-overflow': 'ellipsis'})
+                html.Span(label, style={'color': label_color, 'flex-shrink': '0'}),
+                html.Span(str(value), style={'color': value_color, 'text-align': 'right',
+                                              'word-break': 'break-word', 'white-space': 'normal'}),
+            ], style={'display': 'flex', 'justify-content': 'space-between', 'gap': '8px',
+                      'padding': '2px 0', 'border-bottom': '1px solid #1a1a1a'})
             for label, value in items
         ]
         if is_group_default_open(group_name):
@@ -3109,14 +3159,14 @@ def update_display(render_request, applied_nonce, queue_data):
     mismatch_warnings = _run_config_mismatch_warnings(run_params if run_params else None, overlays)
     if run_params_status != 'loaded':
         mismatch_warnings.append(run_params_msg)
-    uirevision_key = f"{candidate_id}|{','.join(sorted(str(c) for c in selected_cameras))}|{theme_mode}|{residual_height:.3f}"
+    uirevision_key = f"{candidate_id}|{','.join(sorted(str(c) for c in selected_cameras))}|{theme_mode}|{residual_height:.3f}|{baseline_opacity:.2f}"
     try:
         native = build_interactive_lightcurve_figure(
             payload,
             plot_dir=plot_dir_path,
             selected_cameras=selected_cameras,
             filter_bad_cameras='filter_bad_cameras' in overlays,
-            show_baseline='baseline' in overlays,
+            show_baseline=baseline_opacity > 0,
             show_event_markers='markers' in overlays,
             show_residuals='residuals' in overlays,
             show_phase_fold=False,
@@ -3126,6 +3176,7 @@ def update_display(render_request, applied_nonce, queue_data):
             uirevision_key=uirevision_key,
             theme=theme_mode,
             residual_fraction=residual_height,
+            baseline_opacity=baseline_opacity,
         )
     except Exception as exc:
         import traceback
@@ -3187,9 +3238,13 @@ def update_display(render_request, applied_nonce, queue_data):
             if key == 'Filtered cams':
                 filtered = [x.strip() for x in str(val).split(',') if x.strip()]
 
+    # Merge stats into the metadata grid as the first collapsible group
+    stats_group = _render_stat_cards(native['stat_rows'])
+    merged_grid = stats_group + grid_items
+
     return (
         plot_src,
-        grid_items,
+        merged_grid,
         metadata_health,
         vetting_banner,
         progress,
@@ -3197,7 +3252,7 @@ def update_display(render_request, applied_nonce, queue_data):
         {'display': 'block', 'width': '100%', 'height': '100%'},
         {'display': 'none'},
         native['camera_options'],
-        _render_stat_cards(native['stat_rows']),
+        [],  # stats merged into candidate-info-grid
         _render_plot_status_panel(native.get('status', 'ok'), native.get('status_message', ''), (native.get('warnings', []) + mismatch_warnings)),
         _render_camera_diag_panel(native.get('camera_diagnostics', {}), filtered),
         _render_run_config_panel(run_params if run_params else None, run_params_path, mismatch_warnings),
@@ -3455,6 +3510,24 @@ def save_review_callback(n_clicks, idx, queue_data, score,
     )
 
     return "✓ Saved", new_pass
+
+
+# Back button (previous candidate)
+@app.callback(
+    [Output('current-index', 'data', allow_duplicate=True),
+     Output('notification', 'children', allow_duplicate=True)],
+    Input('back-btn', 'n_clicks'),
+    State('current-index', 'data'),
+    prevent_initial_call=True
+)
+def back_callback(n_clicks, idx):
+    """Go to previous candidate."""
+    if not n_clicks:
+        return no_update, no_update
+    new_idx = max(0, (idx or 0) - 1)
+    if new_idx == idx:
+        return no_update, "Already at first candidate"
+    return new_idx, "← Previous"
 
 
 # Done button (save + next)
@@ -3870,7 +3943,7 @@ def main():
     print(f"🖼️  Plot directory: {PLOT_DIR}")
     print(f"🌐 Server: http://{args.host}:{args.port}")
     print(f"\n⌨️  Keyboard shortcuts:")
-    print("  [N] Next | [P] Previous | [0-5] Score | [S] Save | [D] Done | [T] Toggle sidebar | [?] Help")
+    print("  [D]ipper [Y]so [M]icrolensing [E]B [I]nstrumental [U]nknown [X]not_real [R]flare | [0-5] Score | [.] Save | [Enter] Done | [Backspace] Back | [?] Help")
     print("")
 
     # Auto-open browser

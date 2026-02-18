@@ -254,6 +254,33 @@ ML_FEATURE_COLUMNS: list[str] = [
     "a_circ_au",
     "transit_prob",
     "hill_radius_rsun",
+
+    # -- Vetting (categorical — encoded as category codes) --
+    "simbad_otype",
+    "gaia_var_class",
+    "asassn_var_type",
+    "ztf_var_type",
+    "alerce_lc_class",
+    "tns_type",
+
+    # -- Vetting (numeric) --
+    "vetting_likely_known",
+    "simbad_nbref",
+    "simbad_sep_arcsec",
+    "gaia_var_flag",
+    "gaia_var_score",
+    "gaia_eb_period",
+    "gaia_eb_global_ranking",
+    "gaia_epoch_n_obs",
+    "gaia_epoch_g_range",
+    "asassn_var_period",
+    "ztf_var_period",
+    "ztf_var_amp",
+    "alerce_lc_prob",
+    "alerce_ndet",
+    "xray_det",
+    "xray_flux",
+    "pm_cluster_offset_sigma",
 ]
 
 # ---- MORPHOLOGY FEATURE (categorical) --------------------------------------

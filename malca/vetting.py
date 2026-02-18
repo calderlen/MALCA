@@ -22,6 +22,7 @@ Usage:
 from __future__ import annotations
 
 import io
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -641,66 +642,81 @@ def query_gaia_eb_params(
 # =============================================================================
 
 
-def _alerce_conesearch_single(ra: float, dec: float, radius_arcsec: float) -> dict | None:
-    """Query ALeRCE for a single coordinate. Returns best match or None."""
-    try:
-        resp = requests.get(
-            f"{ALERCE_API_BASE}/ztf/v1/objects/",
-            params={
-                "conesearch_input[ra]": ra,
-                "conesearch_input[dec]": dec,
-                "conesearch_input[radius]": radius_arcsec,
-                "page_size": 5,
-                "order_by": "ndet",
-                "order_mode": "DESC",
-            },
-            timeout=60,
-        )
-        if resp.status_code == 429:
-            time.sleep(5)
-            return None
-        if resp.status_code != 200:
-            return None
-        data = resp.json()
-        items = data.get("items", [])
-        if not items:
-            return None
-        return items[0]  # most detections = most relevant
-    except Exception:
+def _alerce_request_with_retry(method, url, max_retries=3, **kwargs):
+    """HTTP request with retry on 429 rate-limit responses."""
+    kwargs.setdefault("timeout", 60)
+    for attempt in range(max_retries):
+        try:
+            resp = method(url, **kwargs)
+            if resp.status_code == 429:
+                time.sleep(min(2 ** attempt, 8))
+                continue
+            return resp
+        except Exception:
+            if attempt < max_retries - 1:
+                time.sleep(1)
+    return None
+
+
+def _alerce_query_single(ra: float, dec: float, radius_arcsec: float) -> dict | None:
+    """Cone search + probability lookup for one candidate. Returns result dict or None."""
+    defaults = {
+        "alerce_oid": "", "alerce_ndet": 0,
+        "alerce_lc_class": "", "alerce_lc_prob": np.nan,
+        "alerce_stamp_class": "", "alerce_stamp_prob": np.nan,
+    }
+
+    # Cone search
+    resp = _alerce_request_with_retry(
+        requests.get,
+        f"{ALERCE_API_BASE}/ztf/v1/objects/",
+        params={
+            "conesearch_input[ra]": ra,
+            "conesearch_input[dec]": dec,
+            "conesearch_input[radius]": radius_arcsec,
+            "page_size": 5,
+            "order_by": "ndet",
+            "order_mode": "DESC",
+        },
+    )
+    if resp is None or resp.status_code != 200:
+        return None
+    items = resp.json().get("items", [])
+    if not items:
         return None
 
+    obj = items[0]
+    oid = obj.get("oid", "")
+    result = dict(defaults)
+    result["alerce_oid"] = oid
+    result["alerce_ndet"] = int(obj.get("ndet", 0))
 
-def _alerce_get_probabilities(oid: str) -> dict:
-    """Get classification probabilities for an ALeRCE object."""
-    out = {"lc_class": "", "lc_prob": np.nan, "stamp_class": "", "stamp_prob": np.nan}
-    try:
-        resp = requests.get(
+    # Probability lookup
+    if oid:
+        resp = _alerce_request_with_retry(
+            requests.get,
             f"{ALERCE_API_BASE}/ztf/v1/objects/{oid}/probabilities",
-            timeout=60,
         )
-        if resp.status_code != 200:
-            return out
-        probs = resp.json()
-        # Find best LC classifier result
-        lc_probs = [p for p in probs if p.get("classifier_name", "").startswith("lc_classifier")]
-        if lc_probs:
-            best_lc = max(lc_probs, key=lambda p: p.get("probability", 0))
-            out["lc_class"] = best_lc.get("class_name", "")
-            out["lc_prob"] = best_lc.get("probability", np.nan)
-        # Find best stamp classifier result
-        stamp_probs = [p for p in probs if p.get("classifier_name", "").startswith("stamp_classifier")]
-        if stamp_probs:
-            best_stamp = max(stamp_probs, key=lambda p: p.get("probability", 0))
-            out["stamp_class"] = best_stamp.get("class_name", "")
-            out["stamp_prob"] = best_stamp.get("probability", np.nan)
-    except Exception:
-        pass
-    return out
+        if resp is not None and resp.status_code == 200:
+            probs = resp.json()
+            lc_probs = [p for p in probs if p.get("classifier_name", "").startswith("lc_classifier")]
+            if lc_probs:
+                best_lc = max(lc_probs, key=lambda p: p.get("probability", 0))
+                result["alerce_lc_class"] = best_lc.get("class_name", "")
+                result["alerce_lc_prob"] = best_lc.get("probability", np.nan)
+            stamp_probs = [p for p in probs if p.get("classifier_name", "").startswith("stamp_classifier")]
+            if stamp_probs:
+                best_stamp = max(stamp_probs, key=lambda p: p.get("probability", 0))
+                result["alerce_stamp_class"] = best_stamp.get("class_name", "")
+                result["alerce_stamp_prob"] = best_stamp.get("probability", np.nan)
+
+    return result
 
 
 def query_alerce(
     df: pd.DataFrame,
     radius_arcsec: float = ALERCE_RADIUS_ARCSEC,
+    workers: int = 8,
 ) -> pd.DataFrame:
     """
     Query ALeRCE ZTF broker for classification.
@@ -721,27 +737,26 @@ def query_alerce(
         return df
 
     n_valid = int(valid.sum())
-    print(f"ALeRCE: querying {n_valid} candidates (radius={radius_arcsec}\")")
+    print(f"ALeRCE: querying {n_valid} candidates (radius={radius_arcsec}\", workers={workers})")
     matched = 0
 
-    for idx in tqdm(df.index[valid], desc="ALeRCE"):
-        ra, dec = float(df.loc[idx, "ra"]), float(df.loc[idx, "dec"])
-        obj = _alerce_conesearch_single(ra, dec, radius_arcsec)
-        if obj is None:
-            continue
-
-        oid = obj.get("oid", "")
-        df.loc[idx, "alerce_oid"] = oid
-        df.loc[idx, "alerce_ndet"] = int(obj.get("ndet", 0))
-
-        # Get classification probabilities
-        if oid:
-            probs = _alerce_get_probabilities(oid)
-            df.loc[idx, "alerce_lc_class"] = probs["lc_class"]
-            df.loc[idx, "alerce_lc_prob"] = probs["lc_prob"]
-            df.loc[idx, "alerce_stamp_class"] = probs["stamp_class"]
-            df.loc[idx, "alerce_stamp_prob"] = probs["stamp_prob"]
-        matched += 1
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(_alerce_query_single, float(df.loc[idx, "ra"]),
+                            float(df.loc[idx, "dec"]), radius_arcsec): idx
+            for idx in df.index[valid]
+        }
+        for fut in tqdm(as_completed(futures), total=len(futures), desc="ALeRCE"):
+            idx = futures[fut]
+            try:
+                result = fut.result()
+            except Exception:
+                continue
+            if result is None:
+                continue
+            for k, v in result.items():
+                df.loc[idx, k] = v
+            matched += 1
 
     print(f"ALeRCE: {matched}/{n_valid} candidates matched")
     return df
@@ -1264,6 +1279,7 @@ def vet_candidates(
     gaia_var_chunk_size: int = GAIA_VAR_CHUNK_SIZE,
     atlas_token: str | None = None,
     tns_api_key: str | None = None,
+    alerce_workers: int = 8,
     neowise_output_dir: Path | None = None,
     neowise_workers: int = 4,
     checkpoint_path: Path | None = None,
@@ -1299,13 +1315,54 @@ def vet_candidates(
     if "dec" not in df.columns and "dec_deg" in df.columns:
         df = df.rename(columns={"dec_deg": "dec"})
 
+    # Resume from checkpoint if available.
+    _resumed = False
+    if checkpoint_path and checkpoint_path.exists():
+        try:
+            df = pd.read_parquet(checkpoint_path)
+            _resumed = True
+            print(f"Resumed from checkpoint: {checkpoint_path}")
+        except Exception:
+            pass
+
     total_start = time.perf_counter()
     print(f"\n{'='*60}")
     print(f"POST-REVIEW VETTING: {len(df)} candidates")
     print(f"{'='*60}\n")
 
+    # Map each module to a marker column — if that column has data, skip.
+    _MODULE_MARKERS = {
+        "SIMBAD": "simbad_main_id",
+        "Gaia variability": "gaia_var_flag",
+        "Gaia epoch photometry": "gaia_epoch_available",
+        "ASAS-SN variables": "asassn_var_name",
+        "ZTF variables": "ztf_var_type",
+        "TNS": "tns_name",
+        "Gaia EB params": "gaia_eb_period",
+        "ALeRCE": "alerce_oid",
+        "eROSITA": "xray_det",
+        "ATLAS forced phot": "atlas_has_phot",
+        "PM consistency": "pm_cluster_offset_sigma",
+        "NEOWISE LCs": "neowise_n_epochs",
+    }
+
+    def _module_done(name):
+        """Check if a module's marker column already has data (from checkpoint)."""
+        if not _resumed:
+            return False
+        col = _MODULE_MARKERS.get(name)
+        if col is None or col not in df.columns:
+            return False
+        s = df[col]
+        if s.dtype == object:
+            return (s.fillna("").astype(str).str.strip() != "").any()
+        return s.notna().any()
+
     def _run_module(name, func, **kwargs):
         nonlocal df
+        if _module_done(name):
+            print(f"  {name} — skipped (already in checkpoint)\n")
+            return
         t0 = time.perf_counter()
         df = func(df, **kwargs)
         print(f"  {name} completed in {time.perf_counter() - t0:.1f}s\n")
@@ -1334,7 +1391,7 @@ def vet_candidates(
         _run_module("Gaia EB params", query_gaia_eb_params, chunk_size=gaia_var_chunk_size)
 
     if run_alerce:
-        _run_module("ALeRCE", query_alerce, radius_arcsec=alerce_radius_arcsec)
+        _run_module("ALeRCE", query_alerce, radius_arcsec=alerce_radius_arcsec, workers=alerce_workers)
 
     if run_erosita:
         _run_module("eROSITA", crossmatch_erosita, radius_arcsec=erosita_radius_arcsec)
@@ -1478,16 +1535,18 @@ def main():
     parser.add_argument("--ztf-var-radius", type=float, default=ZTF_VAR_RADIUS_ARCSEC, help=f"ZTF variable crossmatch radius in arcsec (default: {ZTF_VAR_RADIUS_ARCSEC})")
     parser.add_argument("--no-tns", action="store_true", help="Skip TNS transient crossmatch")
     parser.add_argument("--tns-radius", type=float, default=TNS_RADIUS_ARCSEC, help=f"TNS crossmatch radius in arcsec (default: {TNS_RADIUS_ARCSEC})")
-    parser.add_argument("--tns-api-key", type=str, default=None, help="TNS API key (optional, uses VizieR mirror by default)")
+    parser.add_argument("--tns-api-key", type=str, default=None, help="TNS API key (or set MALCA_TNS_API_KEY env var; optional, uses VizieR mirror by default)")
     parser.add_argument("--no-gaia-eb", action="store_true", help="Skip Gaia DR3 eclipsing binary parameters")
     parser.add_argument("--no-alerce", action="store_true", help="Skip ALeRCE ZTF query")
+    parser.add_argument("--alerce-workers", type=int, default=8, help="Parallel workers for ALeRCE queries (default: 8)")
     parser.add_argument("--no-erosita", action="store_true", help="Skip eROSITA X-ray crossmatch")
     parser.add_argument("--no-pm-check", action="store_true", help="Skip proper motion consistency check")
-    parser.add_argument("--atlas-token", type=str, default=None, help="ATLAS forced photometry API token")
+    parser.add_argument("--atlas-token", type=str, default=None, help="ATLAS forced photometry API token (or set MALCA_ATLAS_TOKEN env var)")
     parser.add_argument("--neowise-lc", action="store_true", help="Fetch full NEOWISE light curves")
     parser.add_argument("--neowise-output-dir", type=Path, default=None, help="Directory to save individual NEOWISE LCs")
     parser.add_argument("--neowise-workers", type=int, default=4, help="Parallel workers for NEOWISE queries")
-    parser.add_argument("--checkpoint", type=Path, default=None, help="Checkpoint path for intermediate saves")
+    parser.add_argument("--checkpoint", type=Path, default=None, help="Checkpoint path (default: <input>_vetting_CHECKPOINT.parquet)")
+    parser.add_argument("--no-checkpoint", action="store_true", help="Disable checkpoint saving/resume")
 
     args = parser.parse_args()
 
@@ -1501,6 +1560,14 @@ def main():
         raise ValueError(f"Unsupported file type: {path.suffix}")
 
     print(f"Loaded {len(df)} candidates from {path}")
+
+    # Default checkpoint: <input>_vetting_CHECKPOINT.parquet
+    if args.no_checkpoint:
+        _ckpt_path = None
+    elif args.checkpoint:
+        _ckpt_path = args.checkpoint
+    else:
+        _ckpt_path = path.with_name(path.stem + "_vetting_CHECKPOINT.parquet")
 
     # Filter by score if requested
     if args.min_score is not None and "interest_score" in df.columns:
@@ -1528,18 +1595,24 @@ def main():
         ztf_var_radius_arcsec=args.ztf_var_radius,
         tns_radius_arcsec=args.tns_radius,
         alerce_radius_arcsec=args.alerce_radius,
+        alerce_workers=args.alerce_workers,
         erosita_radius_arcsec=args.erosita_radius,
-        atlas_token=args.atlas_token,
-        tns_api_key=args.tns_api_key,
+        atlas_token=args.atlas_token or os.environ.get("MALCA_ATLAS_TOKEN"),
+        tns_api_key=args.tns_api_key or os.environ.get("MALCA_TNS_API_KEY"),
         neowise_output_dir=args.neowise_output_dir,
         neowise_workers=args.neowise_workers,
-        checkpoint_path=args.checkpoint,
+        checkpoint_path=_ckpt_path,
     )
 
     # Save output
     out_path = args.output or path.with_name(path.stem + "_vetted.parquet")
     df.to_parquet(out_path, index=False)
     print(f"\nSaved vetted results to {out_path}")
+
+    # Clean up checkpoint on successful completion.
+    if _ckpt_path and _ckpt_path.exists():
+        _ckpt_path.unlink()
+        print(f"Checkpoint removed: {_ckpt_path}")
 
 
 if __name__ == "__main__":

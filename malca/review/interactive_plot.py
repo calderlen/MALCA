@@ -402,6 +402,7 @@ def build_interactive_lightcurve_figure(
     uirevision_key: str,
     theme: str = "dark",
     residual_fraction: float = 0.28,
+    baseline_opacity: float = 0.5,
 ) -> dict:
     """Build a native Plotly light-curve figure for review mode."""
     colors = _theme_palette(theme)
@@ -612,7 +613,7 @@ def build_interactive_lightcurve_figure(
                         mode="lines",
                         showlegend=False,
                         line={"width": 1.6, "color": _stable_camera_color(cam)},
-                        opacity=0.9,
+                        opacity=baseline_opacity,
                         hovertemplate="Baseline: %{y:.4f}<extra></extra>",
                     ),
                     row=1,
