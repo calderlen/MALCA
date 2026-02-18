@@ -208,6 +208,8 @@ ML_FEATURE_COLUMNS: list[str] = [
 
     # -- Stellar parameters (Gaia DR3) --
     "ruwe",
+    "radial_velocity",
+    "rv_amplitude_robust",
     "high_ruwe_flag",
     "teff_gspphot",
     "logg_gspphot",

@@ -36,6 +36,8 @@ SELECT
     g.ra, g.dec,
     g.parallax, g.parallax_error, g.ruwe,
     g.pmra, g.pmdec,
+    g.radial_velocity,
+    g.rv_amplitude_robust,
     g.phot_g_mean_mag, g.bp_rp,
     g.teff_gspphot, g.logg_gspphot, g.mh_gspphot,
     g.distance_gspphot, g.ag_gspphot,

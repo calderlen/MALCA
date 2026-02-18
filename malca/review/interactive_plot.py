@@ -508,7 +508,7 @@ def build_interactive_lightcurve_figure(
         residual_fraction = 0.28
     if not np.isfinite(residual_fraction):
         residual_fraction = 0.28
-    residual_fraction = float(np.clip(residual_fraction, 0.15, 0.45))
+    residual_fraction = float(np.clip(residual_fraction, 0.15, 0.85))
 
     n_rows = 1 + (1 if show_residuals else 0) + (1 if phase_enabled else 0)
     if n_rows == 1:
@@ -517,7 +517,9 @@ def build_interactive_lightcurve_figure(
         row_heights = [1.0 - residual_fraction, residual_fraction] if show_residuals else [0.68, 0.32]
     else:
         phase_fraction = 0.22
-        residual_fraction_3 = float(np.clip(residual_fraction, 0.15, 0.40))
+        # Keep a usable main panel height even if residual slider is large.
+        max_resid = max(0.15, 1.0 - phase_fraction - 0.05)
+        residual_fraction_3 = float(np.clip(residual_fraction, 0.15, max_resid))
         main_fraction = 1.0 - phase_fraction - residual_fraction_3
         row_heights = [main_fraction, residual_fraction_3, phase_fraction]
 

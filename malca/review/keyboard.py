@@ -10,13 +10,12 @@ handle navigation, saving, and UI control.
 # ---------------------------------------------------------------------------
 CLASS_KEY_MAP = {
     'd': 'dipper',
-    'y': 'yso',
     'm': 'microlensing',
-    'e': 'eclipsing_binary',
-    'i': 'instrumental',
+    'f': 'flare',
+    'y': 'yso',
     'u': 'unknown_interesting',
-    'x': 'not_real',
-    'r': 'flare',
+    'i': 'instrumental',
+    'o': 'other',
 }
 
 # ---------------------------------------------------------------------------
@@ -24,12 +23,10 @@ CLASS_KEY_MAP = {
 # ---------------------------------------------------------------------------
 KEYBOARD_SHORTCUTS = {
     # Scoring (instant save)
-    '0': 'set_score_0',
     '1': 'set_score_1',
     '2': 'set_score_2',
     '3': 'set_score_3',
     '4': 'set_score_4',
-    '5': 'set_score_5',
 
     # Navigation / actions
     'Backspace': 'previous_candidate',
@@ -45,13 +42,13 @@ KEYBOARD_SHORTCUTS = {
 
 HELP_TEXT = """
 Classes (single key, toggle):
-  [D] dipper         [Y] yso
-  [M] microlensing   [E] eclipsing binary
-  [I] instrumental   [U] unknown interesting
-  [X] not real       [R] flare
+  [D] dipper         [M] microlensing
+  [F] flare          [Y] yso
+  [U] unknown interesting
+  [I] instrumental   [O] other
 
-Scoring (instant save):
-  [0]-[5] Set interest score
+Confidence (instant save):
+  [1]-[4] Set confidence level
 
 Navigation:
   [Backspace] Previous  [Tab] Next (no save)
@@ -89,7 +86,7 @@ def handle_key_action(key, current_idx, queue_size, conn, candidate_id):
     # Scoring (instant save)
     elif action.startswith('set_score_'):
         score = int(action[-1])
-        return current_idx, f"✓ Score: {score}", True
+        return current_idx, f"✓ Confidence: {score}", True
 
     # Actions
     elif action == 'save_review':

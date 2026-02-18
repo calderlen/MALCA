@@ -22,10 +22,9 @@ EVENT_CLASS_OPTIONS = [
     "yso",
     "microlensing",
     "flare",
-    "eclipsing_binary",
     "instrumental",
     "unknown_interesting",
-    "not_real",
+    "other",
 ]
 
 
@@ -271,6 +270,8 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("jumper_n_valid_jumps",     "REAL",    "float"),
     # -- stellar parameters --
     ("ruwe",                     "REAL",    "float"),
+    ("radial_velocity",          "REAL",    "float"),
+    ("rv_amplitude_robust",      "REAL",    "float"),
     ("teff_gspphot",             "REAL",    "float"),
     ("logg_gspphot",             "REAL",    "float"),
     ("mh_gspphot",               "REAL",    "float"),
@@ -901,8 +902,8 @@ def get_review(conn: sqlite3.Connection, candidate_id: str) -> dict:
             "reviewer": "",
             "updated_at": None,
         }
-    score = 0 if row[0] is None else int(row[0])
-    score = int(np.clip(score, 0, 5))
+    score = 2 if row[0] is None else int(row[0])
+    score = int(np.clip(score, 1, 4))
     return {
         "interest_score": score,
         "event_class": str(row[6]) if row[6] else "unclassified",
@@ -927,7 +928,7 @@ def save_review(
     event_type: str = "save",
 ) -> None:
     ts = _utc_now()
-    score_int = int(np.clip(int(interest_score), 0, 5))
+    score_int = int(np.clip(int(interest_score), 1, 4))
     pass_int = max(1, int(review_pass))
     ec = str(event_class) if event_class else "unclassified"
     conn.execute(

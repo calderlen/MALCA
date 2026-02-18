@@ -170,6 +170,8 @@ REVIEW_METADATA_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("BP-RP", "bp_rp"),
         ("BP-RP excess", "bp_rp_excess_corr"),
         ("ruwe", "ruwe"),
+        ("RV (km/s)", "radial_velocity"),
+        ("RV amp robust (km/s)", "rv_amplitude_robust"),
         ("high_ruwe_flag", "high_ruwe_flag"),
         ("Fidelity", "fidelity"),
         ("teff_gspphot", "teff_gspphot"),

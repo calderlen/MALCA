@@ -12,7 +12,7 @@ import webbrowser
 from threading import Timer
 
 import dash
-from dash import dcc, html, Input, Output, State, callback_context, no_update
+from dash import dcc, html, Input, Output, State, callback_context, no_update, ALL
 import dash_bootstrap_components as dbc
 from flask import send_from_directory
 import pandas as pd
@@ -71,6 +71,9 @@ app.index_string = '''
     {%css%}
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
     <style>
+        *, *::before, *::after {
+            box-sizing: border-box;
+        }
         body {
             background-color: #000;
             color: #e0e0e0;
@@ -168,6 +171,12 @@ app.index_string = '''
             flex-direction: column;
             min-height: 0;
             min-width: 0;
+            padding-left: 0;
+            transition: padding-left 0.2s ease;
+        }
+        /* When sidebar is open, push main content so it doesn't get covered */
+        .sidebar.expanded + .content-area {
+            padding-left: 280px;
         }
         .workspace-panels {
             flex: 1;
@@ -210,6 +219,7 @@ app.index_string = '''
             border-bottom: 1px solid #555;
             padding: 6px 20px;
             display: flex;
+            flex-wrap: wrap;
             justify-content: flex-start;
             align-items: center;
             gap: 14px;
@@ -330,7 +340,7 @@ app.index_string = '''
             border-radius: 8px;
             font-size: 11px;
         }
-        .plot-toolbar .compact-btn {
+        .compact-btn {
             background-color: #14212b;
             color: #c6d7e8;
             border: 1px solid rgba(92, 129, 154, 0.6);
@@ -339,9 +349,25 @@ app.index_string = '''
             font-size: 10px;
             cursor: pointer;
         }
-        .plot-toolbar .compact-btn:hover {
+        .compact-btn:hover {
             border-color: #7da8c4;
             background-color: #1a2b38;
+        }
+        .meta-toolbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            padding: 6px 10px;
+            border: 1px solid rgba(84, 118, 140, 0.25);
+            border-radius: 8px;
+            background: rgba(6, 14, 20, 0.7);
+        }
+        .meta-toolbar .title {
+            color: #8fb1c8;
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.6px;
         }
         .plot-toolbar .label-chip {
             color: #85a7bf;
@@ -432,9 +458,9 @@ app.index_string = '''
             overflow: hidden;
         }
         .plot-status .status-line {
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
+            white-space: normal;
+            overflow-wrap: anywhere;
+            word-break: break-word;
         }
         .plot-status details {
             margin-top: 2px;
@@ -451,9 +477,9 @@ app.index_string = '''
         }
         .plot-status li {
             margin: 1px 0;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
+            white-space: normal;
+            overflow-wrap: anywhere;
+            word-break: break-word;
         }
         .plot-status.warn {
             border-color: rgba(186, 144, 44, 0.7);
@@ -627,10 +653,12 @@ app.index_string = '''
         .notification {
             color: #7fd6a8;
             font-size: 11px;
-            max-width: 56vw;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
+            flex: 1 1 280px;
+            min-width: 0;
+            max-width: 100%;
+            white-space: normal;
+            overflow-wrap: anywhere;
+            word-break: break-word;
             opacity: 0.95;
         }
         .help-link {
@@ -1851,7 +1879,7 @@ def create_layout():
         # Data stores
         dcc.Store(id='queue-data'),
         dcc.Store(id='current-index', data=0),
-        dcc.Store(id='current-score', data=0),
+        dcc.Store(id='current-score', data=2),
         dcc.Store(id='event-class-store', data='unclassified'),
         dcc.Store(id='pending-prefix', data=''),  # kept for callback compatibility
         dcc.Store(id='needs-followup-store', data=False),
@@ -1873,7 +1901,7 @@ def create_layout():
         dcc.Interval(id='keyboard-init', interval=200, n_intervals=0, max_intervals=1),
 
         # Sidebar toggle button
-        html.Button('☰', id='sidebar-toggle', className='sidebar-toggle', title='Toggle sidebar [T]', n_clicks=0),
+        html.Button('☰', id='sidebar-toggle', className='sidebar-toggle', title='Toggle sidebar [Esc]', n_clicks=0),
 
         # Collapsible sidebar
         html.Div([
@@ -1913,9 +1941,9 @@ def create_layout():
                     + [{'label': col, 'value': col}
                        for _, items in _SIDEBAR_GROUPS
                        for ftype, col in items if ftype == 'num']
-                    + [{'label': 'Interest Score', 'value': 'interest_score'},
-                       {'label': 'Review Pass', 'value': 'review_pass'},
-                       {'label': 'Updated At', 'value': 'updated_at'}]
+                     + [{'label': 'Confidence', 'value': 'interest_score'},
+                        {'label': 'Review Pass', 'value': 'review_pass'},
+                        {'label': 'Updated At', 'value': 'updated_at'}]
                 ),
                 value='candidate_id',
                 clearable=False,
@@ -2087,7 +2115,7 @@ def create_layout():
                                     dcc.Slider(
                                         id='residual-height-slider',
                                         min=0.15,
-                                        max=0.45,
+                                        max=0.85,
                                         step=0.01,
                                         value=0.28,
                                         marks=None,
@@ -2112,7 +2140,13 @@ def create_layout():
                         html.Div(id='splitter-diagnostics', className='panel-splitter status-splitter',
                                  title='Drag to resize'),
                         # Grouped candidate metadata sections (collapsible, includes stats)
-                        html.Div(id='candidate-info-grid', className='metadata-sections candidate-metadata'),
+                        html.Div([
+                            html.Div([
+                                html.Span('Candidate Panels', className='title'),
+                                html.Button('Expand all', id='toggle-meta-all', n_clicks=0, className='compact-btn'),
+                            ], className='meta-toolbar'),
+                            html.Div(id='candidate-info-grid', className='metadata-sections candidate-metadata'),
+                        ]),
                         html.Div(id='splitter-metadata', className='panel-splitter status-splitter',
                                  title='Drag to resize'),
                         # Run config / reproducibility
@@ -2161,10 +2195,10 @@ def create_layout():
             html.Div([
                 # Score row
                 html.Div([
-                    html.Span('Score: ', style={'color': '#aaa', 'margin-right': '8px', 'font-size': '11px'}),
+                    html.Span('Confidence: ', style={'color': '#aaa', 'margin-right': '8px', 'font-size': '11px'}),
                 ] + [
                     html.Button(str(i), id=f'score-{i}', n_clicks=0, className='score-btn')
-                    for i in range(6)
+                    for i in range(1, 5)
                 ], style={'display': 'flex', 'align-items': 'center', 'margin-bottom': '6px'}),
 
                 # Event class row (clickable buttons, single-key shortcuts)
@@ -2206,7 +2240,7 @@ def create_layout():
             # Recent activity
             html.Div([
                 html.Div([
-                    html.Span('[A] Activity', style={'color': '#0af', 'font-size': '10px', 'cursor': 'pointer'}),
+                    html.Span('Activity', style={'color': '#0af', 'font-size': '10px', 'cursor': 'pointer'}),
                 ], id='activity-toggle', style={'padding': '2px 12px', 'background-color': '#0a0a0a', 'border-top': '1px solid #555', 'cursor': 'pointer', 'line-height': '1.2'}),
                 html.Div(id='recent-activity', style={'display': 'none'}),  # Hidden by default
             ], style={'border-top': '1px solid #555'}),
@@ -2923,7 +2957,7 @@ def handle_keyboard(key_value, current_idx, queue_data, current_score,
     new_score = no_update
     new_pass = no_update
     if should_save and candidate_id:
-        score = int(key) if key in '012345' else current_score
+        score = int(key) if key in '1234' else current_score
         pass_val, _ = _do_save(
             candidate_id, score, event_class, needs_followup, notes, 'keyboard',
         )
@@ -3112,17 +3146,22 @@ def update_display(render_request, applied_nonce, queue_data):
                       'padding': '2px 0', 'border-bottom': '1px solid #1a1a1a'})
             for label, value in items
         ]
+
+        details_id = {'type': 'meta-details', 'group': str(group_name)}
         if is_group_default_open(group_name):
             grid_items.append(
                 html.Details(
                     [html.Summary(f"{group_name} ({len(items)})"), html.Div(field_divs, className='meta-grid')],
-                    open='open',
+                    id=details_id,
+                    open=True,
                 )
             )
         else:
             grid_items.append(
                 html.Details(
-                    [html.Summary(f"{group_name} ({len(items)})"), html.Div(field_divs, className='meta-grid')]
+                    [html.Summary(f"{group_name} ({len(items)})"), html.Div(field_divs, className='meta-grid')],
+                    id=details_id,
+                    open=False,
                 )
             )
 
@@ -3429,33 +3468,39 @@ app.clientside_callback(
 def load_review_form(idx, queue_data):
     """Load existing review for current candidate into stores."""
     if not queue_data or queue_data['queue_size'] == 0:
-        return 'unclassified', False, 1, '', 0
+        return 'unclassified', False, 1, '', 2
 
     candidate_id = queue_data['candidate_ids'][idx]
     with closing(db_connect(Path(DB_PATH))) as conn:
         review = get_review(conn, candidate_id)
 
+    # Coerce legacy/unknown classes into the current tag set.
+    allowed_classes = {'unclassified'} | set(CLASS_KEY_MAP.values())
+    event_class = (review.get('event_class') or 'unclassified')
+    if event_class not in allowed_classes:
+        event_class = 'other'
+
     return (
-        review.get('event_class', 'unclassified'),
+        event_class,
         review.get('status', 'unreviewed') == 'needs_followup',
         review.get('review_pass', 1),
         review.get('notes', ''),
-        review.get('interest_score', 0),
+        review.get('interest_score', 2),
     )
 
 
 # Score button clicks
 @app.callback(
-    [Output('current-score', 'data', allow_duplicate=True),
-     Output('notification', 'children', allow_duplicate=True),
-     Output('review-pass-store', 'data', allow_duplicate=True)],
-    [Input(f'score-{i}', 'n_clicks') for i in range(6)],
-    [State('current-index', 'data'),
-     State('queue-data', 'data'),
-     State('event-class-store', 'data'),
-     State('needs-followup-store', 'data'),
-     State('notes', 'value')],
-    prevent_initial_call=True
+     [Output('current-score', 'data', allow_duplicate=True),
+      Output('notification', 'children', allow_duplicate=True),
+      Output('review-pass-store', 'data', allow_duplicate=True)],
+     [Input(f'score-{i}', 'n_clicks') for i in range(1, 5)],
+     [State('current-index', 'data'),
+      State('queue-data', 'data'),
+      State('event-class-store', 'data'),
+      State('needs-followup-store', 'data'),
+      State('notes', 'value')],
+     prevent_initial_call=True
 )
 def handle_score_clicks(*args):
     """Handle score button clicks."""
@@ -3479,7 +3524,7 @@ def handle_score_clicks(*args):
         candidate_id, score, event_class, needs_followup, notes, 'button',
     )
 
-    return score, f"✓ Score: {score}", new_pass
+    return score, f"✓ Confidence: {score}", new_pass
 
 
 # Save button
@@ -3576,14 +3621,19 @@ _CLASS_INACTIVE_STYLE = {
 
 # Update score button highlighting
 @app.callback(
-    [Output(f'score-{i}', 'className') for i in range(6)],
+    [Output(f'score-{i}', 'className') for i in range(1, 5)],
     Input('current-score', 'data'),
     prevent_initial_call=False
 )
 def update_score_buttons(current_score):
     """Highlight the active score button."""
-    score = current_score or 0
-    return ['score-btn active' if i == score else 'score-btn' for i in range(6)]
+    try:
+        score = int(current_score)
+    except Exception:
+        score = None
+    if score not in (1, 2, 3, 4):
+        score = None
+    return ['score-btn active' if i == score else 'score-btn' for i in range(1, 5)]
 
 
 # Update event class badge styling
@@ -3632,6 +3682,25 @@ def update_prefix_indicator(prefix):
     if prefix:
         return html.Span(f'[{prefix.upper()}] ...', style={'color': '#f80', 'font-weight': 'bold'})
     return ''
+
+
+# Expand/collapse all candidate metadata panels
+@app.callback(
+    [Output({'type': 'meta-details', 'group': ALL}, 'open'),
+     Output('toggle-meta-all', 'children')],
+    Input('toggle-meta-all', 'n_clicks'),
+    State({'type': 'meta-details', 'group': ALL}, 'open'),
+    prevent_initial_call=True,
+)
+def toggle_all_metadata_panels(n_clicks, open_states):
+    _ = n_clicks
+    if not open_states:
+        return no_update, no_update
+
+    any_closed = any(not bool(v) for v in open_states)
+    new_open = True if any_closed else False
+    label = 'Collapse all' if new_open else 'Expand all'
+    return [new_open for _ in open_states], label
 
 
 # Followup indicator
@@ -3943,7 +4012,7 @@ def main():
     print(f"🖼️  Plot directory: {PLOT_DIR}")
     print(f"🌐 Server: http://{args.host}:{args.port}")
     print(f"\n⌨️  Keyboard shortcuts:")
-    print("  [D]ipper [Y]so [M]icrolensing [E]B [I]nstrumental [U]nknown [X]not_real [R]flare | [0-5] Score | [.] Save | [Enter] Done | [Backspace] Back | [?] Help")
+    print("  [D]ipper [M]icrolensing [F]lare [Y]so [U]nknown [I]nstrumental [O]ther | [1-4] Confidence | [.] Save | [Enter] Done | [Backspace] Back | [?] Help")
     print("")
 
     # Auto-open browser
