@@ -35,6 +35,7 @@ from malca.review.store import (
     export_reviews,
     detect_run_directory_files,
     merge_vetting_results,
+    get_distinct_values,
 )
 from malca.review.metadata import (
     extract_review_metadata_grouped,
@@ -1658,6 +1659,25 @@ def _text_filter(col: str):
     ])
 
 
+def _select_filter(col: str):
+    """Multi-select dropdown for exclude filtering (options loaded from DB)."""
+    cid = _col_id(col)
+    try:
+        with closing(db_connect(Path(DB_PATH))) as conn:
+            values = get_distinct_values(conn, col)
+        options = [{'label': v, 'value': v} for v in values]
+    except Exception:
+        options = []
+    return html.Div([
+        html.Label(f'{col} (exclude):'),
+        dcc.Dropdown(
+            id=f'exclude-{cid}', options=options, multi=True,
+            placeholder='None excluded',
+            style={'margin-bottom': '4px', 'font-size': '11px'},
+        ),
+    ])
+
+
 def _make_filter_group(name: str, items: list, *, default_open: bool = False):
     """Build a collapsible html.Details for a group of filters."""
     children = []
@@ -1668,6 +1688,8 @@ def _make_filter_group(name: str, items: list, *, default_open: bool = False):
             children.append(_num_range_filter(col))
         elif ftype == 'text':
             children.append(_text_filter(col))
+        elif ftype == 'select':
+            children.append(_select_filter(col))
     block = [
         html.Summary(name),
         html.Div(children, style={'padding-left': '6px'}),
@@ -1682,6 +1704,13 @@ def _make_filter_group(name: str, items: list, *, default_open: bool = False):
 # Each item: ('bool', col_name) | ('num', col_name) | ('text', col_name)
 # ---------------------------------------------------------------------------
 _SIDEBAR_GROUPS = [
+    ('Vetting', [
+        ('bool', 'vetting_likely_known'),
+        ('select', 'asassn_var_type'),
+        ('select', 'gaia_var_class'),
+        ('select', 'simbad_otype'),
+        ('select', 'ztf_var_type'),
+    ]),
     ('General Flags', [
         ('bool', 'periodic_flag'),
         ('bool', 'catalog_match'),
@@ -1999,6 +2028,14 @@ def create_layout():
             dcc.Input(id='characterize-starhorse', placeholder='StarHorse (tap or path)', type='text',
                      value='tap', style=_inp_style),
 
+            html.Label('Vet on import:'),
+            dcc.Checklist(
+                id='vet-on-import',
+                options=[{'label': ' Enable', 'value': 'yes'}],
+                value=['yes'],
+                style={'margin-bottom': '4px'}
+            ),
+
             html.Button('Import', id='import-btn', n_clicks=0, className='action-btn',
                        style={'width': '100%', 'font-size': '11px'}),
 
@@ -2217,7 +2254,7 @@ def create_layout():
     ], className='main-container')
 
 
-app.layout = create_layout()
+app.layout = create_layout
 
 
 # Global keyboard listener (set up once on page load)
@@ -2668,6 +2705,7 @@ def toggle_sidebar(n_clicks, key_value, is_expanded):
 _BOOL_MODE_STATES: list[tuple[str, str]] = []
 _NUM_STATES: list[tuple[str, str]] = []
 _TEXT_STATES: list[tuple[str, str]] = []
+_SELECT_STATES: list[tuple[str, str]] = []
 
 for _grp_name, _grp_items in _SIDEBAR_GROUPS:
     for _ftype, _col in _grp_items:
@@ -2679,6 +2717,8 @@ for _grp_name, _grp_items in _SIDEBAR_GROUPS:
             _NUM_STATES.append((f'max-{_cid}', f'max_{_col}'))
         elif _ftype == 'text':
             _TEXT_STATES.append((f'filter-{_cid}', _col))
+        elif _ftype == 'select':
+            _SELECT_STATES.append((f'exclude-{_cid}', f'exclude_{_col}'))
 
 # Build the State list for the callback decorator dynamically.
 _queue_states = (
@@ -2687,6 +2727,7 @@ _queue_states = (
     + [State(cid, 'value') for cid, _ in _BOOL_MODE_STATES]
     + [State(cid, 'value') for cid, _ in _NUM_STATES]
     + [State(cid, 'value') for cid, _ in _TEXT_STATES]
+    + [State(cid, 'value') for cid, _ in _SELECT_STATES]
     + [State('sort-col', 'value'),
        State('sort-desc', 'value')]
 )
@@ -2720,12 +2761,16 @@ def load_queue(refresh_clicks, import_trigger, *state_values):
         for _, fkey in _TEXT_STATES:
             val = next(it)
             filter_params[fkey] = val.strip() if val else None
+        for _, fkey in _SELECT_STATES:
+            val = next(it)
+            filter_params[fkey] = val if val else None
 
         filter_params['sort_col'] = next(it) or 'candidate_id'
         filter_params['sort_desc'] = 'yes' in (next(it) or [])
 
         queue_data = create_queue_data_dict(conn, filter_params)
         return queue_data
+
 
 
 def _do_save(candidate_id, score, event_class, needs_followup, notes, event_type):
@@ -3684,11 +3729,12 @@ def auto_detect_files(n_clicks, run_dir_path):
      State('characterize-chunk-size', 'value'),
      State('characterize-dust', 'value'),
      State('characterize-starhorse', 'value'),
+     State('vet-on-import', 'value'),
      State('import-trigger', 'data')],
     prevent_initial_call=True
 )
 def import_candidates_callback(n_clicks, import_path, characterize_on,
-                               crossmatch, gaia_cache, chunk_size, dust_on, starhorse, current_trigger):
+                               crossmatch, gaia_cache, chunk_size, dust_on, starhorse, vet_on, current_trigger):
     """Import candidates from file."""
     if not n_clicks or not import_path:
         return no_update, no_update
@@ -3708,6 +3754,7 @@ def import_candidates_callback(n_clicks, import_path, characterize_on,
                 characterize_chunk_size=int(chunk_size) if enable_characterize and chunk_size else GAIA_CHUNK_SIZE,
                 characterize_dust='yes' in (dust_on or []) if enable_characterize else False,
                 characterize_starhorse=starhorse.strip() if enable_characterize and starhorse and starhorse.strip() else None,
+                vet_before_import='yes' in (vet_on or []),
             )
             save_app_state(conn, "last_input_file", str(src))
             # Increment trigger to cause queue refresh

@@ -1293,6 +1293,12 @@ def vet_candidates(
     -------
     DataFrame with vetting columns added.
     """
+    # Normalise coordinate column names (pipeline uses ra_deg/dec_deg).
+    if "ra" not in df.columns and "ra_deg" in df.columns:
+        df = df.rename(columns={"ra_deg": "ra"})
+    if "dec" not in df.columns and "dec_deg" in df.columns:
+        df = df.rename(columns={"dec_deg": "dec"})
+
     total_start = time.perf_counter()
     print(f"\n{'='*60}")
     print(f"POST-REVIEW VETTING: {len(df)} candidates")

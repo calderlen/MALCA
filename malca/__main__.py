@@ -20,6 +20,7 @@ Usage:
     malca attrition [options]      # Pre/post-filter attrition summary
     malca vsx-filter [options]     # Build cleaned ASAS-SN index & filtered VSX catalog
     malca vsx-crossmatch [options] # Crossmatch ASAS-SN with VSX
+    malca vetting [options]        # Run post-review vetting
     malca reproduce [options]      # Re-run detection on known objects
     malca events [options]         # Run event detection directly (low-level)
     malca pre_filter [options]     # Apply pre-filters (low-level)
@@ -39,7 +40,8 @@ def main():
         "detection_rate", "validate", "plot", "post_filter",
         "events", "gaia-fetch", "characterize", "classify", "filter", "pre_filter", "score",
         "stats", "attrition", "review",
-        "neighbors", "spectra", "false_positive", "ml_train", "vsx-filter", "vsx-crossmatch"
+        "neighbors", "spectra", "false_positive", "ml_train", "vsx-filter", "vsx-crossmatch",
+        "vetting"
     ]:
         command = sys.argv[1]
         remaining = sys.argv[2:]
@@ -141,6 +143,10 @@ def main():
             from malca.vsx import crossmatch as vsx_crossmatch
             sys.argv = [sys.argv[0]] + remaining
             vsx_crossmatch.cli()
+        elif command == "vetting":
+            from malca import vetting
+            sys.argv = [sys.argv[0]] + remaining
+            vetting.main()
         return 0
     
     # If no subcommand or just --help for main, show main help
@@ -177,6 +183,7 @@ def main():
     subparsers.add_parser("spectra", help="Run bulk spectra-availability enrichment")
     subparsers.add_parser("vsx-filter", help="Build cleaned ASAS-SN index and filtered VSX catalog")
     subparsers.add_parser("vsx-crossmatch", help="Crossmatch ASAS-SN catalog with VSX catalog")
+    subparsers.add_parser("vetting", help="Run post-review vetting (SIMBAD, Gaia, ASAS-SN, ZTF, TNS, eROSITA, ...)")
     
     parser.print_help()
     return 0

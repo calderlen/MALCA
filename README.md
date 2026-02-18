@@ -233,7 +233,7 @@ graph TB
 
 **Key Components:**
 - **Production**: `manifest.py` → `pre_filter.py` → `events.py` → `post_filter.py`
-- **Post-detection**: `characterize.py` (Gaia, dust, galactic coords) → `classify.py`
+- **Post-detection**: `characterize.py` (Gaia, dust, galactic coords) → `vetting.py` (SIMBAD, ZTF, TNS, eROSITA, ...) → `classify.py`
 - **Review**: `review/app.py` (Dash GUI) → labeled training set
 - **ML**: `ml/features.py` (107 curated features) → `ml/train.py` (LightGBM classifier)
 - **Evaluation**: `evaluation/reproduce.py`, `evaluation/validation.py`, `evaluation/injection.py`
@@ -493,6 +493,40 @@ malca characterize \
   - `near_sfr`, `sfr_name` (star-forming region proximity)
   - `cluster_name`, `cluster_age_myr` (open cluster membership)
   - `unwise_w1_zscore`, `unwise_w2_zscore`, `unwise_w1_var` (IR variability)
+
+#### malca vetting
+
+Run post-review vetting against external catalogs:
+
+```bash
+# Vet all candidates in a characterized parquet
+malca vetting output/characterized.parquet -o output/vetted.parquet
+
+# Skip slow modules
+malca vetting output/characterized.parquet --no-simbad --no-alerce
+
+# Only vet high-scoring candidates
+malca vetting output/characterized.parquet --min-score 3.0
+
+# With crash-resume checkpoint
+malca vetting output/characterized.parquet --checkpoint output/vetting_checkpoint.parquet
+```
+
+**Modules** (all on by default, disable with `--no-*`):
+- **SIMBAD**: Object type, bibliography, cross-IDs
+- **Gaia DR3 variability**: Variable flag, classification, score
+- **Gaia DR3 eclipsing binaries**: Period, morphology, global ranking
+- **Gaia epoch photometry**: Availability, observation count, G-band range
+- **ASAS-SN variables**: Variable star catalog crossmatch
+- **ZTF variables**: Chen+ 2020 periodic variables (type, period, amplitude)
+- **TNS**: Transient Name Server (name, type, redshift, discovery date)
+- **ALeRCE**: ZTF broker classifications and stamp probabilities
+- **eROSITA**: X-ray detection, flux, separation
+- **PM consistency**: Proper motion agreement with host cluster
+- **ATLAS** (opt-in, `--atlas-token`): Forced photometry light curves
+- **NEOWISE** (opt-in, `--neowise-lc`): Full NEOWISE light curves
+
+**Vetting is also available during import** in the review GUI ("Vet on import" toggle). Results are cached per input file so re-imports skip already-vetted candidates.
 
 #### malca classify
 

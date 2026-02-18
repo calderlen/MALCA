@@ -307,6 +307,64 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("sfr_sep_arcmin",           "REAL",    "float"),
     ("cluster_name",             "TEXT",    "text"),
     ("cluster_membership_prob",  "REAL",    "float"),
+    # -- vetting classification --
+    ("vetting_likely_known",     "INTEGER", "bool"),
+    ("asassn_var_type",          "TEXT",    "select"),
+    ("gaia_var_class",           "TEXT",    "select"),
+    ("simbad_otype",             "TEXT",    "select"),
+    ("ztf_var_type",             "TEXT",    "select"),
+    # -- vetting details: SIMBAD --
+    ("simbad_main_id",           "TEXT",    "text"),
+    ("simbad_nbref",             "REAL",    "float"),
+    ("simbad_sep_arcsec",        "REAL",    "float"),
+    # -- vetting details: Gaia variability --
+    ("gaia_var_flag",            "TEXT",    "text"),
+    ("gaia_var_score",           "REAL",    "float"),
+    # -- vetting details: Gaia EB --
+    ("gaia_eb_period",           "REAL",    "float"),
+    ("gaia_eb_morph",            "TEXT",    "text"),
+    ("gaia_eb_global_ranking",   "REAL",    "float"),
+    # -- vetting details: Gaia epoch --
+    ("gaia_epoch_available",     "INTEGER", "bool"),
+    ("gaia_epoch_n_obs",         "REAL",    "float"),
+    ("gaia_epoch_g_range",       "REAL",    "float"),
+    # -- vetting details: ASAS-SN --
+    ("asassn_var_name",          "TEXT",    "text"),
+    ("asassn_var_period",        "REAL",    "float"),
+    # -- vetting details: ZTF --
+    ("ztf_var_period",           "REAL",    "float"),
+    ("ztf_var_amp",              "REAL",    "float"),
+    # -- vetting details: TNS --
+    ("tns_name",                 "TEXT",    "text"),
+    ("tns_type",                 "TEXT",    "text"),
+    ("tns_redshift",             "REAL",    "float"),
+    ("tns_disc_date",            "TEXT",    "text"),
+    # -- vetting details: ALeRCE --
+    ("alerce_oid",               "TEXT",    "text"),
+    ("alerce_ndet",              "REAL",    "float"),
+    ("alerce_lc_class",          "TEXT",    "text"),
+    ("alerce_lc_prob",           "REAL",    "float"),
+    ("alerce_stamp_class",       "TEXT",    "text"),
+    ("alerce_stamp_prob",        "REAL",    "float"),
+    # -- vetting details: X-ray --
+    ("xray_det",                 "INTEGER", "bool"),
+    ("xray_flux",                "REAL",    "float"),
+    ("xray_sep_arcsec",          "REAL",    "float"),
+    # -- vetting details: proper motion --
+    ("pm_cluster_offset_sigma",  "REAL",    "float"),
+    # -- vetting details: ATLAS --
+    ("atlas_has_phot",           "INTEGER", "bool"),
+    ("atlas_n_det_cyan",         "REAL",    "float"),
+    ("atlas_n_det_orange",       "REAL",    "float"),
+    ("atlas_cyan_range",         "REAL",    "float"),
+    ("atlas_orange_range",       "REAL",    "float"),
+    # -- vetting details: NEOWISE --
+    ("neowise_n_epochs",         "REAL",    "float"),
+    ("neowise_w1_range",         "REAL",    "float"),
+    ("neowise_w2_range",         "REAL",    "float"),
+    # -- vetting details: other --
+    ("cluster_dist_pc",          "REAL",    "float"),
+    ("iphas_ha_excess",          "REAL",    "float"),
     # -- light curve basics --
     ("n_points",                 "REAL",    "float"),
     ("n_cameras",                "REAL",    "float"),
@@ -345,6 +403,19 @@ _COL_NAMES = [c[0] for c in _CANDIDATE_COLUMNS]
 _BOOL_COLS = {c[0] for c in _CANDIDATE_COLUMNS if c[2] == "bool"}
 _FLOAT_COLS = {c[0] for c in _CANDIDATE_COLUMNS if c[2] == "float"}
 _TEXT_COLS = {c[0] for c in _CANDIDATE_COLUMNS if c[2] == "text"}
+_SELECT_COLS = {c[0] for c in _CANDIDATE_COLUMNS if c[2] == "select"}
+
+
+def get_distinct_values(conn: sqlite3.Connection, column: str) -> list[str]:
+    """Return sorted distinct non-empty values for a select-filter column."""
+    if column not in _SELECT_COLS:
+        return []
+    rows = conn.execute(
+        f"SELECT DISTINCT {column} FROM candidates "
+        f"WHERE {column} IS NOT NULL AND {column} != '' "
+        f"ORDER BY {column}"
+    ).fetchall()
+    return [r[0] for r in rows]
 
 
 def init_db(conn: sqlite3.Connection) -> None:
@@ -399,6 +470,11 @@ def init_db(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    # Migrate: add any columns missing from older DBs.
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(candidates)").fetchall()}
+    for col, dtype, _ in _CANDIDATE_COLUMNS:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE candidates ADD COLUMN {col} {dtype}")
     conn.commit()
 
 
@@ -439,6 +515,7 @@ def import_candidates(
     characterize_cache: Path = GAIA_CACHE_FILE,
     characterize_dust: bool = True,
     characterize_starhorse: str | None = "tap",
+    vet_before_import: bool = True,
 ) -> tuple[int, int]:
     if df.empty:
         return 0, 0
@@ -461,6 +538,69 @@ def import_candidates(
         except Exception as e:
             print(f"Warning: characterization before import failed: {e}")
             df_use = df
+
+    if vet_before_import:
+        try:
+            from malca.vetting import vet_candidates
+
+            # --- vetting cache: skip candidates already vetted ----
+            _vetting_cache_path = Path(source_path + ".vetting_cache.parquet")
+            _cache_df = None
+            _id_col = "candidate_id" if "candidate_id" in df_use.columns else None
+            n_new = len(df_use)  # default: vet everything
+
+            if _id_col and _vetting_cache_path.exists():
+                try:
+                    _cache_df = pd.read_parquet(_vetting_cache_path)
+                    cached_ids = set(_cache_df[_id_col])
+                    mask_new = ~df_use[_id_col].isin(cached_ids)
+                    n_cached = (~mask_new).sum()
+                    n_new = mask_new.sum()
+                    print(f"Vetting cache: {n_cached} cached, {n_new} to vet")
+                except Exception:
+                    _cache_df = None
+
+            if _cache_df is not None and n_new == 0:
+                # All candidates cached — merge vetting columns from cache
+                cache_cols = [c for c in VETTING_COLUMNS if c in _cache_df.columns]
+                df_use = df_use.merge(
+                    _cache_df[[_id_col] + cache_cols],
+                    on=_id_col, how="left", suffixes=("", "_cached"),
+                )
+                df_use = df_use[[c for c in df_use.columns if not c.endswith("_cached")]]
+                print("Vetting: all candidates served from cache")
+            else:
+                if _cache_df is not None and n_new > 0:
+                    # Vet only the new candidates
+                    df_new = vet_candidates(df_use.loc[mask_new])
+                    # Merge cached vetting columns onto cached rows
+                    cache_cols = [c for c in VETTING_COLUMNS if c in _cache_df.columns]
+                    df_old = df_use.loc[~mask_new].merge(
+                        _cache_df[[_id_col] + cache_cols],
+                        on=_id_col, how="left", suffixes=("", "_cached"),
+                    )
+                    df_old = df_old[[c for c in df_old.columns if not c.endswith("_cached")]]
+                    df_use = pd.concat([df_old, df_new], ignore_index=True)
+                else:
+                    # No cache or no candidate_id — vet everything
+                    df_use = vet_candidates(df_use)
+
+                # Update cache
+                if _id_col:
+                    try:
+                        vet_cols = [c for c in VETTING_COLUMNS if c in df_use.columns]
+                        new_cache = df_use[[_id_col] + vet_cols].copy()
+                        if _cache_df is not None:
+                            new_cache = pd.concat([
+                                _cache_df[~_cache_df[_id_col].isin(new_cache[_id_col])],
+                                new_cache,
+                            ], ignore_index=True)
+                        new_cache.to_parquet(_vetting_cache_path, index=False)
+                        print(f"Vetting cache saved: {len(new_cache)} entries → {_vetting_cache_path}")
+                    except Exception as e:
+                        print(f"Warning: failed to save vetting cache: {e}")
+        except Exception as e:
+            print(f"Warning: vetting before import failed: {e}")
 
     df_use = df_use.copy()
     df_use["candidate_id"] = infer_candidate_id(df_use)
@@ -563,6 +703,14 @@ def query_queue(conn: sqlite3.Connection, *, filters: dict | None = None) -> pd.
             if val:
                 where.append(f"(c.{col} IS NOT NULL AND c.{col} = ?)")
                 params.append(val)
+
+    # --- select-exclude filters (multi-value dropdown) ---
+    for col in sorted(_SELECT_COLS):
+        exc = filters.get(f"exclude_{col}")
+        if exc:
+            placeholders = ",".join(["?"] * len(exc))
+            where.append(f"(c.{col} IS NULL OR c.{col} NOT IN ({placeholders}))")
+            params.extend(exc)
 
     # --- sorting (any float column + review columns) ---
     _sortable = {c: f"c.{c}" for c in _FLOAT_COLS}
@@ -700,10 +848,23 @@ def merge_vetting_results(
 
         payload.update(vetting_data)
 
+        # Update payload JSON
         conn.execute(
             "UPDATE candidates SET payload_json=? WHERE candidate_id=?",
             (json.dumps(payload, default=str), cid),
         )
+        # Also update real columns for SQL-filterable vetting fields
+        _REAL_VETTING_COLS = {"vetting_likely_known", "asassn_var_type",
+                              "gaia_var_class", "simbad_otype", "ztf_var_type"}
+        for col in _REAL_VETTING_COLS:
+            if col in vetting_data:
+                val = vetting_data[col]
+                if col == "vetting_likely_known":
+                    val = int(bool(val))
+                conn.execute(
+                    f"UPDATE candidates SET {col}=? WHERE candidate_id=?",
+                    (val, cid),
+                )
         updated += 1
 
     conn.commit()
