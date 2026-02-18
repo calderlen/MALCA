@@ -540,6 +540,17 @@ def import_candidates(
             df_use = df
 
     if vet_before_import:
+        # Auto-detect: skip if vetting columns already populated (e.g. from malca vetting).
+        _VET_DETECT_COLS = {"simbad_main_id", "gaia_var_flag", "alerce_oid"}
+        _has_vetting = any(
+            col in df_use.columns and df_use[col].notna().any()
+            for col in _VET_DETECT_COLS
+        )
+        if _has_vetting:
+            print("Vetting: columns already present in input, skipping re-vetting")
+            vet_before_import = False
+
+    if vet_before_import:
         try:
             from malca.vetting import vet_candidates
 
