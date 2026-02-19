@@ -30,6 +30,7 @@ from malca.classify import compute_all_classifications
 from malca.characterize import query_gaia_by_ids, get_dust_extinction
 from malca.config.config_pipeline import (
     WORKERS,
+    TRIGGER_MODE,
     LOGBF_THRESHOLD_DIP,
     LOGBF_THRESHOLD_JUMP,
     SIGNIFICANCE_THRESHOLD,
@@ -642,8 +643,8 @@ def build_reproduction_report(
     # Optional posterior threshold passthrough
     significance_threshold: float | None = None,
     p_points: int = P_POINTS,
-    # Log BF triggering
-    trigger_mode: str = "logbf",
+    # Triggering mode
+    trigger_mode: str = TRIGGER_MODE,
     logbf_threshold_dip: float = LOGBF_THRESHOLD_DIP,     # trigger if max log BF >= this
     logbf_threshold_jump: float = LOGBF_THRESHOLD_JUMP,
     # Probability grid bounds (matching events.py)
@@ -859,38 +860,55 @@ def build_reproduction_report(
                 print(f"[DEBUG] {asn}: loaded g={len(dfg)} rows, v={len(dfv)} rows from {dat_path}")
 
             def apply_triggering(result: dict, band_name: str) -> dict:
-                """Apply log-BF thresholding to dip/jump result blocks."""
+                """Normalize dip/jump trigger metadata without overriding trigger logic."""
                 for kind in ("dip", "jump"):
                     block = result.get(kind, {})
                     if not isinstance(block, dict):
                         result[kind] = {"significant": False}
                         continue
 
-                    thr = logbf_threshold_dip if kind == "dip" else logbf_threshold_jump
-                    log_bf_local = block.get("log_bf_local", None)
-                    if log_bf_local is None:
-                        block["event_indices"] = np.array([], dtype=int)
-                        block["significant"] = False
-                        block["max_log_bf_local"] = np.nan
-                    else:
-                        lb = np.asarray(log_bf_local, float)
-                        finite = np.isfinite(lb)
-                        max_lb = float(np.nanmax(lb)) if finite.any() else np.nan
-                        idx = np.nonzero(finite & (lb >= float(thr)))[0].astype(int)
-                        block["event_indices"] = idx
-                        block["significant"] = bool(np.isfinite(max_lb) and (max_lb >= float(thr)))
-                        block["max_log_bf_local"] = max_lb
+                    idx = np.asarray(block.get("event_indices", np.array([], dtype=int)), dtype=int)
+                    block["event_indices"] = idx
 
-                    block["max_event_prob"] = np.nan
-                    block["n_dips"] = int(len(block.get("event_indices", []))) if kind == "dip" else block.get("n_dips", 0)
-                    block["n_jumps"] = int(len(block.get("event_indices", []))) if kind == "jump" else block.get("n_jumps", 0)
+                    if "max_log_bf_local" not in block or not np.isfinite(block.get("max_log_bf_local", np.nan)):
+                        log_bf_local = block.get("log_bf_local", None)
+                        if log_bf_local is None:
+                            block["max_log_bf_local"] = np.nan
+                        else:
+                            lb = np.asarray(log_bf_local, float)
+                            finite = np.isfinite(lb)
+                            block["max_log_bf_local"] = float(np.nanmax(lb)) if finite.any() else np.nan
+
+                    event_prob = block.get("event_probability", None)
+                    if event_prob is None:
+                        block["max_event_prob"] = np.nan
+                    else:
+                        ep = np.asarray(event_prob, float)
+                        finite = np.isfinite(ep)
+                        block["max_event_prob"] = float(np.nanmax(ep)) if finite.any() else np.nan
+
+                    if kind == "dip":
+                        block["n_dips"] = int(len(idx))
+                    else:
+                        block["n_jumps"] = int(len(idx))
 
                     if verbose:
+                        mode = str(block.get("trigger_mode", trigger_mode))
+                        thr = float(block.get("trigger_threshold", np.nan))
+                        trig_max = float(block.get("trigger_max", np.nan))
                         mx = block.get("max_log_bf_local", np.nan)
                         bf = block.get("bayes_factor", np.nan)
-                        ct = len(block.get("event_indices", []))
-                        print(f"[DEBUG] {asn} {band_name}: {kind} max_logBF={mx:.2f} thr={thr:.2f} "
-                              f"count={ct} globalBF={bf:.2f}")
+                        ct = len(idx)
+                        sig = bool(block.get("significant", False))
+                        thr_txt = f"{thr:.3g}" if np.isfinite(thr) else "nan"
+                        trig_txt = f"{trig_max:.3g}" if np.isfinite(trig_max) else "nan"
+                        mx_txt = f"{mx:.2f}" if np.isfinite(mx) else "nan"
+                        bf_txt = f"{bf:.2f}" if np.isfinite(bf) else "nan"
+                        print(
+                            f"[DEBUG] {asn} {band_name}: {kind} mode={mode} thr={thr_txt} "
+                            f"trigger_max={trig_txt} max_logBF={mx_txt} count={ct} "
+                            f"significant={sig} globalBF={bf_txt}"
+                        )
 
                     result[kind] = block
 
@@ -1122,9 +1140,8 @@ def build_reproduction_report(
 
                 # Check if any triggers
                 n_triggers = len(block.get("event_indices", []))
-                max_logbf = block.get("max_log_bf_local", np.nan)
 
-                if n_triggers == 0 and (not np.isfinite(max_logbf) or max_logbf < 5.0):
+                if n_triggers == 0:
                     return "no_triggers"
 
                 # Check if runs formed
@@ -2038,6 +2055,18 @@ Examples:
 
     # Bayesian detection settings
     parser.add_argument(
+        "--trigger-mode",
+        choices=("logbf", "posterior_prob"),
+        default=TRIGGER_MODE,
+        help="Triggering mode used by score_lightcurve (default: pipeline config)",
+    )
+    parser.add_argument(
+        "--significance-threshold",
+        type=float,
+        default=SIGNIFICANCE_THRESHOLD,
+        help="Posterior-probability threshold (percent if >1) when --trigger-mode posterior_prob",
+    )
+    parser.add_argument(
         "--logbf-threshold-dip",
         type=float,
         default=LOGBF_THRESHOLD_DIP,
@@ -2372,9 +2401,18 @@ def _main_impl(args: argparse.Namespace, plot_out_dir: Path | None = None) -> pd
     # Use provided plot_out_dir or fall back to args.out_dir
     out_dir = plot_out_dir if plot_out_dir is not None else Path(args.out_dir)
 
-    significance_threshold = None
+    significance_threshold = float(args.significance_threshold) if args.significance_threshold is not None else None
     if args.verbose:
-        print(f"[DEBUG] Using logBF triggering: dip_thr={args.logbf_threshold_dip}, jump_thr={args.logbf_threshold_jump}")
+        if args.trigger_mode == "posterior_prob":
+            print(
+                "[DEBUG] Using posterior-probability triggering: "
+                f"significance_threshold={significance_threshold}"
+            )
+        else:
+            print(
+                "[DEBUG] Using logBF triggering: "
+                f"dip_thr={args.logbf_threshold_dip}, jump_thr={args.logbf_threshold_jump}"
+            )
 
     # Parse accepted morphologies
     if args.accepted_morphologies.lower() == "all":
@@ -2394,7 +2432,7 @@ def _main_impl(args: argparse.Namespace, plot_out_dir: Path | None = None) -> pd
         metrics_dip_threshold=args.metrics_dip_threshold,
         significance_threshold=significance_threshold,
         p_points=args.p_points,
-        trigger_mode="logbf",
+        trigger_mode=args.trigger_mode,
         logbf_threshold_dip=args.logbf_threshold_dip,
         logbf_threshold_jump=args.logbf_threshold_jump,
         # Probability grid bounds
@@ -2460,6 +2498,11 @@ def _main_impl(args: argparse.Namespace, plot_out_dir: Path | None = None) -> pd
     print("=" * 60)
     print(f"Plot format:          {args.plot_format}")
     print(f"Baseline function:    {args.baseline_func}")
+    print(f"Trigger mode:         {args.trigger_mode}")
+    if args.trigger_mode == "posterior_prob":
+        print(f"Posterior threshold:  {args.significance_threshold}")
+    else:
+        print(f"logBF thresholds:     dip={args.logbf_threshold_dip}, jump={args.logbf_threshold_jump}")
     print("Sigma_eff:            enabled (mandatory)")
     print(f"Mag grid points:      {args.mag_points}")
     if args.p_min_dip is not None or args.p_max_dip is not None:

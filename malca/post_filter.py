@@ -5,9 +5,10 @@ median validation also reads per-camera stats from .raw2 files via path.
 
 Filters:
 7. filter_evidence_strength - require strong Bayes factors
-8. filter_run_robustness - require sufficient run count and points
-9. filter_morphology - require specific morphology with good BIC
-10. filter_score - require minimum dipper_score (log10 event score)
+8. filter_significant_detection - require explicit significant run/peak evidence
+9. filter_run_robustness - require sufficient run count and points
+10. filter_morphology - require specific morphology with good BIC
+11. filter_score - require minimum dipper/jumper scores (log10 event score)
 
 Validation filters (expensive, run on candidates only):
 11. validate_periodicity - bootstrap LSP to check if source is periodic
@@ -16,6 +17,8 @@ Validation filters (expensive, run on candidates only):
 14. validate_periodic_catalog - cross-match against known periodic catalogs
 
 Required input columns (from events.py):
+    dip_significant, jump_significant,
+    dip_count, jump_count,
     dip_bayes_factor, jump_bayes_factor,
     dip_max_log_bf_local, jump_max_log_bf_local,
     dip_run_count, jump_run_count,
@@ -223,6 +226,16 @@ def _parse_gaia_id_int(value: object) -> int | None:
         return None
 
 
+def _to_bool_mask(series: pd.Series) -> pd.Series:
+    """Convert mixed boolean-like values into a pandas bool mask."""
+    if pd.api.types.is_bool_dtype(series):
+        return series.fillna(False).astype(bool)
+    if pd.api.types.is_numeric_dtype(series):
+        return series.fillna(0).astype(float) != 0.0
+    lowered = series.fillna("").astype(str).str.strip().str.lower()
+    return lowered.isin({"1", "true", "t", "yes", "y"})
+
+
 def filter_evidence_strength(
     df: pd.DataFrame,
     *,
@@ -274,6 +287,7 @@ def filter_run_robustness(
     df: pd.DataFrame,
     *,
     min_run_count: int = 1,
+    max_run_count: int | None = None,
     min_run_points: int = 2,
     min_run_cameras: int = 2,
     show_tqdm: bool = False,
@@ -281,7 +295,7 @@ def filter_run_robustness(
     rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
     """
-    Require dip_run_count or jump_run_count >= min_run_count.
+    Require dip_run_count or jump_run_count in [min_run_count, max_run_count] (if max set).
     Require dip_max_run_points or jump_max_run_points >= min_run_points.
     Require dip_max_run_cameras or jump_max_run_cameras >= min_run_cameras.
     """
@@ -289,8 +303,13 @@ def filter_run_robustness(
     pbar = tqdm(total=2, desc="filter_run_robustness", leave=False) if show_tqdm else None
 
     # Check run counts
-    dip_count_ok = df["dip_run_count"].fillna(0) >= min_run_count
-    jump_count_ok = df["jump_run_count"].fillna(0) >= min_run_count
+    dip_counts = pd.to_numeric(df["dip_run_count"], errors="coerce").fillna(0)
+    jump_counts = pd.to_numeric(df["jump_run_count"], errors="coerce").fillna(0)
+    dip_count_ok = dip_counts >= min_run_count
+    jump_count_ok = jump_counts >= min_run_count
+    if max_run_count is not None:
+        dip_count_ok &= dip_counts <= int(max_run_count)
+        jump_count_ok &= jump_counts <= int(max_run_count)
 
     # Check run points
     dip_points_ok = df["dip_max_run_points"].fillna(0) >= min_run_points
@@ -317,6 +336,67 @@ def filter_run_robustness(
         pbar.update(1)
         pbar.close()
 
+    return out
+
+
+# =============================================================================
+# Filter 8.5: Significant run/peak gate
+# =============================================================================
+
+def filter_significant_detection(
+    df: pd.DataFrame,
+    *,
+    require_significant_flag: bool = True,
+    min_peak_count: int = 1,
+    min_run_count: int = 1,
+    show_tqdm: bool = False,
+    verbose: bool = False,
+    rejected_log_csv: str | Path | None = None,
+) -> pd.DataFrame:
+    """
+    Require at least one branch (dip or jump) to pass explicit significant detection gates.
+
+    A branch passes when:
+    - run_count >= min_run_count
+    - peak_count >= min_peak_count
+    - (optionally) corresponding *_significant flag is True
+    """
+    n0 = len(df)
+
+    required_cols = {
+        "dip_run_count", "jump_run_count",
+        "dip_count", "jump_count",
+    }
+    if require_significant_flag:
+        required_cols.update({"dip_significant", "jump_significant"})
+
+    missing = sorted(c for c in required_cols if c not in df.columns)
+    if missing:
+        if verbose:
+            tqdm.write(
+                "[filter_significant_detection] WARNING: missing columns "
+                f"{missing}; skipping significant detection gate"
+            )
+        return df.copy()
+
+    dip_runs = pd.to_numeric(df["dip_run_count"], errors="coerce").fillna(0)
+    jump_runs = pd.to_numeric(df["jump_run_count"], errors="coerce").fillna(0)
+    dip_peaks = pd.to_numeric(df["dip_count"], errors="coerce").fillna(0)
+    jump_peaks = pd.to_numeric(df["jump_count"], errors="coerce").fillna(0)
+
+    dip_ok = (dip_runs >= int(min_run_count)) & (dip_peaks >= int(min_peak_count))
+    jump_ok = (jump_runs >= int(min_run_count)) & (jump_peaks >= int(min_peak_count))
+
+    if require_significant_flag:
+        dip_ok &= _to_bool_mask(df["dip_significant"])
+        jump_ok &= _to_bool_mask(df["jump_significant"])
+
+    mask = dip_ok | jump_ok
+    out = df.loc[mask].reset_index(drop=True)
+
+    if show_tqdm and verbose:
+        tqdm.write(f"[filter_significant_detection] kept {len(out)}/{n0}")
+    log_rejections(df, out, "filter_significant_detection", rejected_log_csv)
     return out
 
 
@@ -373,31 +453,57 @@ def filter_morphology(
 def filter_score(
     df: pd.DataFrame,
     *,
-    min_score: float = -3.0,
+    min_dip_score: float | None = None,
+    min_jump_score: float | None = None,
+    min_score: float | None = None,
     show_tqdm: bool = False,
     verbose: bool = False,
     rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
     """
-    Require dipper_score >= min_score.
+    Require dipper/jumper score thresholds with branch-aware limits.
 
-    The dipper_score is the log10 event score computed during detection
-    (higher = more significant events). Candidates with -inf score
-    (no valid events detected) are always rejected.
+    If ``min_score`` is provided, it is used as a legacy fallback for both
+    branches unless branch-specific thresholds are also provided.
 
     Parameters
     ----------
-    min_score : float
-        Minimum log10 event score to keep (default: -3.0).
+    min_dip_score : float | None
+        Minimum dipper_score threshold.
+    min_jump_score : float | None
+        Minimum jumper_score threshold.
+    min_score : float | None
+        Legacy threshold applied to both branches when branch-specific
+        thresholds are not provided.
     """
     n0 = len(df)
 
-    if "dipper_score" not in df.columns:
+    if min_score is not None:
+        if min_dip_score is None:
+            min_dip_score = float(min_score)
+        if min_jump_score is None:
+            min_jump_score = float(min_score)
+
+    if min_dip_score is None:
+        min_dip_score = -3.0
+    if min_jump_score is None:
+        min_jump_score = -3.0
+
+    has_dip = "dipper_score" in df.columns
+    has_jump = "jumper_score" in df.columns
+    if not has_dip and not has_jump:
         if verbose:
-            tqdm.write("[filter_score] WARNING: 'dipper_score' column missing, skipping filter")
+            tqdm.write("[filter_score] WARNING: score columns missing, skipping filter")
         return df.copy()
 
-    mask = df["dipper_score"].fillna(-np.inf) >= min_score
+    dip_ok = pd.Series(False, index=df.index)
+    jump_ok = pd.Series(False, index=df.index)
+    if has_dip:
+        dip_ok = pd.to_numeric(df["dipper_score"], errors="coerce").fillna(-np.inf) >= float(min_dip_score)
+    if has_jump:
+        jump_ok = pd.to_numeric(df["jumper_score"], errors="coerce").fillna(-np.inf) >= float(min_jump_score)
+
+    mask = dip_ok | jump_ok
     out = df.loc[mask].reset_index(drop=True)
 
     if show_tqdm and verbose:
@@ -1184,9 +1290,15 @@ def apply_post_filters(
     apply_evidence_strength: bool = True,
     min_bayes_factor: float = 10.0,
     require_finite_local_bf: bool = True,
+    # Filter 8: explicit significant detection gate
+    apply_significant_detection: bool = True,
+    significant_require_flag: bool = True,
+    significant_min_peak_count: int = 1,
+    significant_min_run_count: int = 1,
     # Filter 9: run robustness
     apply_run_robustness: bool = True,
     min_run_count: int = 1,
+    max_run_count: int | None = None,
     min_run_points: int = 2,
     min_run_cameras: int = 2,
     # Filter 10: morphology
@@ -1196,7 +1308,9 @@ def apply_post_filters(
     min_delta_bic: float = 10.0,
     # Filter 11: event score
     apply_score: bool = True,
-    min_score: float = 0.0,
+    min_dip_score: float | None = 0.0,
+    min_jump_score: float | None = 0.0,
+    min_score: float | None = None,
     # Validation: periodicity
     apply_periodicity_validation: bool = False,
     periodicity_n_bootstrap: int = 1000,
@@ -1266,9 +1380,19 @@ def apply_post_filters(
             "verbose": verbose,
         }))
 
+    if apply_significant_detection:
+        filters.append(("significant_detection", filter_significant_detection, {
+            "require_significant_flag": significant_require_flag,
+            "min_peak_count": significant_min_peak_count,
+            "min_run_count": significant_min_run_count,
+            "show_tqdm": show_tqdm,
+            "verbose": verbose,
+        }))
+
     if apply_run_robustness:
         filters.append(("run_robustness", filter_run_robustness, {
             "min_run_count": min_run_count,
+            "max_run_count": max_run_count,
             "min_run_points": min_run_points,
             "min_run_cameras": min_run_cameras,
             "show_tqdm": show_tqdm,
@@ -1286,6 +1410,8 @@ def apply_post_filters(
 
     if apply_score:
         filters.append(("score", filter_score, {
+            "min_dip_score": min_dip_score,
+            "min_jump_score": min_jump_score,
             "min_score": min_score,
             "show_tqdm": show_tqdm,
             "verbose": verbose,
@@ -1399,6 +1525,7 @@ Example usage:
 
     # Filter toggles (all enabled by default except morphology)
     parser.add_argument("--skip-evidence-strength", action="store_true", help="Skip evidence strength filter (Bayes factor threshold)")
+    parser.add_argument("--skip-significant-detection", action="store_true", help="Skip explicit significant run/peak gate")
     parser.add_argument("--skip-run-robustness", action="store_true", help="Skip run robustness filter")
     parser.add_argument("--apply-morphology", action="store_true", help="Apply morphology filter (off by default)")
 
@@ -1408,9 +1535,19 @@ Example usage:
     parser.add_argument("--allow-infinite-local-bf", action="store_true",
                         help="Allow infinite local BF (default: require finite)")
 
+    # Significant detection gate parameters
+    parser.add_argument("--significant-no-require-flag", action="store_true",
+                        help="Do not require dip_significant/jump_significant for significant detection gate")
+    parser.add_argument("--significant-min-peak-count", type=int, default=1,
+                        help="Minimum dip_count/jump_count for significant detection gate (default: 1)")
+    parser.add_argument("--significant-min-run-count", type=int, default=1,
+                        help="Minimum dip_run_count/jump_run_count for significant detection gate (default: 1)")
+
     # Run robustness parameters
     parser.add_argument("--min-run-count", type=int, default=1,
                         help="Minimum number of runs (default: 1)")
+    parser.add_argument("--max-run-count", type=int, default=None,
+                        help="Maximum number of runs (default: disabled)")
     parser.add_argument("--min-run-points", type=int, default=POST_FILTER_MIN_RUN_POINTS,
                         help="Minimum points per run (default: 2)")
     parser.add_argument("--min-run-cameras", type=int, default=POST_FILTER_MIN_RUN_CAMERAS,
@@ -1430,7 +1567,11 @@ Example usage:
     parser.add_argument("--apply-score-filter", action="store_true",
                         help="Apply event score filter (off by default)")
     parser.add_argument("--min-score", type=float, default=-3.0,
-                        help="Minimum log10 event score (dipper_score) to keep (default: -3.0)")
+                        help="Legacy minimum log10 event score applied to dip and jump branches (default: -3.0)")
+    parser.add_argument("--min-dip-score", type=float, default=None,
+                        help="Minimum dipper_score threshold (overrides --min-score for dips)")
+    parser.add_argument("--min-jump-score", type=float, default=None,
+                        help="Minimum jumper_score threshold (overrides --min-score for jumps)")
 
     # Periodicity validation parameters
     parser.add_argument("--apply-periodicity-validation", action="store_true",
@@ -1581,13 +1722,19 @@ Example usage:
         df,
         # Filter toggles
         apply_evidence_strength=not args.skip_evidence_strength,
+        apply_significant_detection=not args.skip_significant_detection,
         apply_run_robustness=not args.skip_run_robustness,
         apply_morphology=args.apply_morphology,
         # Posterior strength
         min_bayes_factor=args.min_bayes_factor,
         require_finite_local_bf=not args.allow_infinite_local_bf,
+        # Significant detection gate
+        significant_require_flag=not args.significant_no_require_flag,
+        significant_min_peak_count=args.significant_min_peak_count,
+        significant_min_run_count=args.significant_min_run_count,
         # Run robustness
         min_run_count=args.min_run_count,
+        max_run_count=args.max_run_count,
         min_run_points=args.min_run_points,
         min_run_cameras=args.min_run_cameras,
         # Morphology
@@ -1596,6 +1743,8 @@ Example usage:
         min_delta_bic=args.min_delta_bic,
         # Score
         apply_score=args.apply_score_filter,
+        min_dip_score=args.min_dip_score,
+        min_jump_score=args.min_jump_score,
         min_score=args.min_score,
         # Periodicity validation
         apply_periodicity_validation=args.apply_periodicity_validation,
@@ -1646,6 +1795,7 @@ Example usage:
                 "output_file": str(output_path),
                 "filter_params": {
                     "apply_evidence_strength": not args.skip_evidence_strength,
+                    "apply_significant_detection": not args.skip_significant_detection,
                     "apply_run_robustness": not args.skip_run_robustness,
                     "apply_morphology": args.apply_morphology,
                     "apply_score": args.apply_score_filter,
@@ -1659,13 +1809,19 @@ Example usage:
                     "apply_periodic_catalog_validation": not args.skip_periodic_catalog_validation,
                     "min_bayes_factor": args.min_bayes_factor,
                     "require_finite_local_bf": not args.allow_infinite_local_bf,
+                    "significant_require_flag": not args.significant_no_require_flag,
+                    "significant_min_peak_count": args.significant_min_peak_count,
+                    "significant_min_run_count": args.significant_min_run_count,
                     "min_run_count": args.min_run_count,
+                    "max_run_count": args.max_run_count,
                     "min_run_points": args.min_run_points,
                     "min_run_cameras": args.min_run_cameras,
                     "dip_morphology": args.dip_morphology if args.apply_morphology else None,
                     "jump_morphology": args.jump_morphology if args.apply_morphology else None,
                     "min_delta_bic": args.min_delta_bic if args.apply_morphology else None,
                     "min_score": args.min_score if args.apply_score_filter else None,
+                    "min_dip_score": args.min_dip_score if args.apply_score_filter else None,
+                    "min_jump_score": args.min_jump_score if args.apply_score_filter else None,
                     "gaia_max_ruwe": args.gaia_max_ruwe if not args.skip_gaia_ruwe_validation else None,
                     "gaia_reject": args.gaia_reject if not args.skip_gaia_ruwe_validation else None,
                     "gaia_max_pm": args.gaia_max_pm if not args.skip_gaia_pm_validation else None,

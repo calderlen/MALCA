@@ -3,6 +3,11 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import pytest
+
+pytest.importorskip("astroquery")
+pytest.importorskip("celerite2")
+
 from malca.detect import _build_post_filter_kwargs
 
 
@@ -11,8 +16,13 @@ def _base_args() -> argparse.Namespace:
         skip_evidence_strength=False,
         min_bayes_factor=10.0,
         allow_infinite_local_bf=False,
+        skip_significant_detection=False,
+        significant_no_require_flag=False,
+        significant_min_peak_count=1,
+        significant_min_run_count=1,
         skip_run_robustness=False,
         min_run_count=1,
+        max_run_count=None,
         post_filter_min_run_points=2,
         post_filter_min_run_cameras=2,
         apply_morphology=False,
@@ -21,6 +31,8 @@ def _base_args() -> argparse.Namespace:
         min_delta_bic=10.0,
         skip_score_filter=False,
         min_score=0.0,
+        min_dip_score=None,
+        min_jump_score=None,
         apply_periodicity_validation=False,
         periodicity_n_bootstrap=1000,
         periodicity_significance=0.01,
@@ -48,8 +60,15 @@ def test_build_post_filter_kwargs_defaults_match_pipeline_behavior() -> None:
     kwargs = _build_post_filter_kwargs(_base_args())
 
     assert kwargs["apply_evidence_strength"] is True
+    assert kwargs["apply_significant_detection"] is True
+    assert kwargs["significant_require_flag"] is True
+    assert kwargs["significant_min_peak_count"] == 1
+    assert kwargs["significant_min_run_count"] == 1
     assert kwargs["apply_run_robustness"] is True
+    assert kwargs["max_run_count"] is None
     assert kwargs["apply_score"] is True
+    assert kwargs["min_dip_score"] is None
+    assert kwargs["min_jump_score"] is None
     assert kwargs["apply_gaia_ruwe_validation"] is True
     assert kwargs["apply_gaia_pm_validation"] is True
     assert kwargs["apply_periodic_catalog_validation"] is True
@@ -71,10 +90,17 @@ def test_build_post_filter_kwargs_defaults_match_pipeline_behavior() -> None:
 def test_build_post_filter_kwargs_respects_cli_overrides() -> None:
     args = _base_args()
     args.skip_score_filter = True
+    args.skip_significant_detection = True
+    args.significant_no_require_flag = True
+    args.significant_min_peak_count = 3
+    args.significant_min_run_count = 2
     args.apply_morphology = True
     args.dip_morphology = "paczynski"
     args.jump_morphology = "gaussian"
     args.min_delta_bic = 7.5
+    args.max_run_count = 4
+    args.min_dip_score = 1.2
+    args.min_jump_score = 0.4
     args.apply_periodicity_validation = True
     args.periodicity_n_bootstrap = 250
     args.periodicity_significance = 0.02
@@ -96,10 +122,17 @@ def test_build_post_filter_kwargs_respects_cli_overrides() -> None:
     kwargs = _build_post_filter_kwargs(args)
 
     assert kwargs["apply_score"] is False
+    assert kwargs["apply_significant_detection"] is False
+    assert kwargs["significant_require_flag"] is False
+    assert kwargs["significant_min_peak_count"] == 3
+    assert kwargs["significant_min_run_count"] == 2
+    assert kwargs["max_run_count"] == 4
     assert kwargs["apply_morphology"] is True
     assert kwargs["dip_morphology"] == "paczynski"
     assert kwargs["jump_morphology"] == "gaussian"
     assert kwargs["min_delta_bic"] == 7.5
+    assert kwargs["min_dip_score"] == 1.2
+    assert kwargs["min_jump_score"] == 0.4
 
     assert kwargs["apply_periodicity_validation"] is True
     assert kwargs["periodicity_n_bootstrap"] == 250

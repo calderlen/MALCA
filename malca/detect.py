@@ -391,8 +391,13 @@ def _build_post_filter_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "apply_evidence_strength": not args.skip_evidence_strength,
         "min_bayes_factor": args.min_bayes_factor,
         "require_finite_local_bf": not args.allow_infinite_local_bf,
+        "apply_significant_detection": not args.skip_significant_detection,
+        "significant_require_flag": not args.significant_no_require_flag,
+        "significant_min_peak_count": args.significant_min_peak_count,
+        "significant_min_run_count": args.significant_min_run_count,
         "apply_run_robustness": not args.skip_run_robustness,
         "min_run_count": args.min_run_count,
+        "max_run_count": args.max_run_count,
         "min_run_points": args.post_filter_min_run_points,
         "min_run_cameras": args.post_filter_min_run_cameras,
         # Optional filters
@@ -401,6 +406,8 @@ def _build_post_filter_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "jump_morphology": args.jump_morphology,
         "min_delta_bic": args.min_delta_bic,
         "apply_score": not args.skip_score_filter,
+        "min_dip_score": args.min_dip_score,
+        "min_jump_score": args.min_jump_score,
         "min_score": args.min_score,
         # Validation filters
         "apply_periodicity_validation": args.apply_periodicity_validation,
@@ -526,8 +533,13 @@ def main():
     parser.add_argument("--skip-evidence-strength", action="store_true", help="Skip evidence-strength filter")
     parser.add_argument("--min-bayes-factor", type=float, default=MIN_BAYES_FACTOR, help="Min Bayes factor for post-filter (default: 10.0)")
     parser.add_argument("--allow-infinite-local-bf", action="store_true", help="Allow infinite local Bayes factors (default: require finite)")
+    parser.add_argument("--skip-significant-detection", action="store_true", help="Skip explicit significant run/peak gate")
+    parser.add_argument("--significant-no-require-flag", action="store_true", help="Do not require dip/jump significant flags in significant detection gate")
+    parser.add_argument("--significant-min-peak-count", type=int, default=1, help="Minimum dip_count/jump_count for significant detection gate (default: 1)")
+    parser.add_argument("--significant-min-run-count", type=int, default=1, help="Minimum dip_run_count/jump_run_count for significant detection gate (default: 1)")
     parser.add_argument("--skip-run-robustness", action="store_true", help="Skip run-robustness filter")
     parser.add_argument("--min-run-count", type=int, default=1, help="Minimum run count for run-robustness filter (default: 1)")
+    parser.add_argument("--max-run-count", type=int, default=None, help="Maximum run count for run-robustness filter (default: disabled)")
     parser.add_argument("--post-filter-min-run-cameras", type=int, default=POST_FILTER_MIN_RUN_CAMERAS, help="Min cameras for run robustness filter (default: 2)")
     parser.add_argument("--post-filter-min-run-points", type=int, default=POST_FILTER_MIN_RUN_POINTS, help="Min points per run for robustness filter (default: 2)")
     parser.add_argument("--apply-morphology", action="store_true", help="Apply morphology filter in post-filter stage")
@@ -535,7 +547,9 @@ def main():
     parser.add_argument("--jump-morphology", type=str, default="paczynski", choices=["gaussian", "paczynski"], help="Required morphology for jump events (default: paczynski)")
     parser.add_argument("--min-delta-bic", type=float, default=10.0, help="Minimum delta BIC for morphology filter (default: 10.0)")
     parser.add_argument("--skip-score-filter", action="store_true", help="Skip score filter (enabled by default)")
-    parser.add_argument("--min-score", type=float, default=0.0, help="Minimum score threshold for score filter (default: 0.0)")
+    parser.add_argument("--min-score", type=float, default=0.0, help="Legacy minimum score threshold applied to dipper/jumper score filters (default: 0.0)")
+    parser.add_argument("--min-dip-score", type=float, default=None, help="Minimum dipper_score threshold (overrides --min-score for dips)")
+    parser.add_argument("--min-jump-score", type=float, default=None, help="Minimum jumper_score threshold (overrides --min-score for jumps)")
     parser.add_argument("--apply-periodicity-validation", action="store_true", help="Enable bootstrap periodicity validation")
     parser.add_argument("--periodicity-n-bootstrap", type=int, default=1000, help="Bootstrap iterations for periodicity validation (default: 1000)")
     parser.add_argument("--periodicity-significance", type=float, default=0.01, help="Significance threshold for periodicity validation (default: 0.01)")
@@ -556,9 +570,9 @@ def main():
     parser.add_argument("--periodic-catalog-max-sep", type=float, default=3.0, help="Maximum separation for periodic-catalog matching in arcsec (default: 3.0)")
     parser.add_argument("--periodic-catalog-reject", action="store_true", help="Reject periodic-catalog matches instead of flagging only")
 
-    # Step 7: Postprocess args (enabled by default)
-    parser.add_argument("--run-postprocess", dest="run_postprocess", action="store_true", help="Run postprocess (generate plots) after post_filter (default: enabled)")
-    parser.add_argument("--no-run-postprocess", dest="run_postprocess", action="store_false", help="Skip postprocess step")
+    # Step 7: Postprocess args (disabled by default)
+    parser.add_argument("--run-postprocess", dest="run_postprocess", action="store_true", help="Run postprocess (generate plots) after post_filter")
+    parser.add_argument("--no-run-postprocess", dest="run_postprocess", action="store_false", help="Skip postprocess step (default)")
     parser.add_argument("--max-plots", type=int, default=None, help="Limit number of plots generated (default: no limit)")
     parser.add_argument("--plot-format", type=str, default="png", choices=["png", "pdf"], help="Output format for plots (default: png)")
 
@@ -627,7 +641,7 @@ def main():
 
     parser.set_defaults(
         run_post_filter=True,
-        run_postprocess=True,
+        run_postprocess=False,
         run_characterize=True,
         run_dust=True,
         characterize_banyan=True,
@@ -841,8 +855,13 @@ def main():
             "apply_evidence_strength": not args.skip_evidence_strength,
             "min_bayes_factor": args.min_bayes_factor,
             "require_finite_local_bf": not args.allow_infinite_local_bf,
+            "apply_significant_detection": not args.skip_significant_detection,
+            "significant_require_flag": not args.significant_no_require_flag,
+            "significant_min_peak_count": args.significant_min_peak_count,
+            "significant_min_run_count": args.significant_min_run_count,
             "apply_run_robustness": not args.skip_run_robustness,
             "min_run_count": args.min_run_count,
+            "max_run_count": args.max_run_count,
             "min_run_cameras": args.post_filter_min_run_cameras,
             "min_run_points": args.post_filter_min_run_points,
             "apply_morphology": args.apply_morphology,
@@ -850,6 +869,8 @@ def main():
             "jump_morphology": args.jump_morphology,
             "min_delta_bic": args.min_delta_bic,
             "apply_score": not args.skip_score_filter,
+            "min_dip_score": args.min_dip_score,
+            "min_jump_score": args.min_jump_score,
             "min_score": args.min_score,
             "apply_periodicity_validation": args.apply_periodicity_validation,
             "periodicity_n_bootstrap": args.periodicity_n_bootstrap,
@@ -967,8 +988,13 @@ def main():
             "skip_evidence_strength": args.skip_evidence_strength,
             "min_bayes_factor": args.min_bayes_factor,
             "allow_infinite_local_bf": args.allow_infinite_local_bf,
+            "skip_significant_detection": args.skip_significant_detection,
+            "significant_no_require_flag": args.significant_no_require_flag,
+            "significant_min_peak_count": args.significant_min_peak_count,
+            "significant_min_run_count": args.significant_min_run_count,
             "skip_run_robustness": args.skip_run_robustness,
             "min_run_count": args.min_run_count,
+            "max_run_count": args.max_run_count,
             "post_filter_min_run_cameras": args.post_filter_min_run_cameras,
             "post_filter_min_run_points": args.post_filter_min_run_points,
             "apply_morphology": args.apply_morphology,
@@ -976,6 +1002,8 @@ def main():
             "jump_morphology": args.jump_morphology,
             "min_delta_bic": args.min_delta_bic,
             "skip_score_filter": args.skip_score_filter,
+            "min_dip_score": args.min_dip_score,
+            "min_jump_score": args.min_jump_score,
             "min_score": args.min_score,
             "apply_periodicity_validation": args.apply_periodicity_validation,
             "periodicity_n_bootstrap": args.periodicity_n_bootstrap,

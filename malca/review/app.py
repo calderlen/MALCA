@@ -22,6 +22,7 @@ import plotly.io as pio
 from malca.review.store import (
     DEFAULT_DB_PATH,
     db_connect,
+    count_progress,
     get_review,
     save_review,
     find_plot_image,
@@ -1893,12 +1894,14 @@ def create_layout():
         dcc.Store(id='plot-defaults-initialized', data=False),
         dcc.Store(id='run-config-json-store', data=''),
         dcc.Store(id='theme-mode-store', data='dark'),
+        dcc.Store(id='review-session-start', data=None, storage_type='session'),
         dcc.Store(id='metadata-resize-init', data=0),
         dcc.Store(id='status-resize-init', data=0),
         dcc.Store(id='section-splitters-init', data=0),
         dcc.Download(id='plot-export-download'),
         dcc.Download(id='run-config-download'),
         dcc.Interval(id='keyboard-init', interval=200, n_intervals=0, max_intervals=1),
+        dcc.Interval(id='review-metrics-interval', interval=1000, n_intervals=0),
 
         # Sidebar toggle button
         html.Button('☰', id='sidebar-toggle', className='sidebar-toggle', title='Toggle sidebar [Esc]', n_clicks=0),
@@ -2051,6 +2054,7 @@ def create_layout():
             # Header bar
             html.Div([
                 html.Span(id='progress-text', style={'color': '#0af', 'font-size': '11px'}),
+                html.Span(id='review-progress-indicator', style={'color': '#9fb6cb', 'font-size': '11px', 'margin-left': '10px'}),
                 html.Div([
                     html.Span(id='header-asas-sn-id', className='item'),
                     html.Span(id='header-path', className='item path'),
@@ -2088,6 +2092,7 @@ def create_layout():
                                     options=[
                                         {'label': ' Dip/Jump markers', 'value': 'markers'},
                                         {'label': ' Residual panel', 'value': 'residuals'},
+                                        {'label': ' Phase-fold panel', 'value': 'phase'},
                                         {'label': ' Filter bad cameras', 'value': 'filter_bad_cameras'},
                                         {'label': ' Event diagnostics', 'value': 'diagnostics'},
                                         {'label': ' Confidence colors', 'value': 'confidence'},
@@ -3173,9 +3178,23 @@ def update_display(render_request, applied_nonce, queue_data):
         mismatch_warnings = _run_config_mismatch_warnings(run_params if run_params else None, overlays)
         if run_params_status != 'loaded':
             mismatch_warnings.append(run_params_msg)
+
+        png_src = plot_src
+        png_msg = 'PNG view enabled. Switch to Native for interactive hover and diagnostics.'
+        if 'phase' in overlays:
+            phase_plot_path = find_phase_plot_image(payload, plot_dir_path)
+            if phase_plot_path and phase_plot_path.exists():
+                try:
+                    rel_phase = phase_plot_path.relative_to(plot_dir_path)
+                    png_src = f'/plots/{rel_phase}'
+                except ValueError:
+                    png_src = f'/plots/{phase_plot_path.name}'
+                png_msg = 'Showing phase-folded PNG view.'
+            else:
+                mismatch_warnings.append('Phase-fold overlay selected, but no phase PNG was found for this candidate.')
         panel = _render_run_config_panel(run_params if run_params else None, run_params_path, mismatch_warnings)
         return (
-            plot_src,
+            png_src,
             grid_items,
             metadata_health,
             vetting_banner,
@@ -3185,7 +3204,7 @@ def update_display(render_request, applied_nonce, queue_data):
             {'display': 'block', 'width': '100%', 'height': '100%'},
             no_update,
             [],
-            _render_plot_status_panel('ok', 'PNG view enabled. Switch to Native for interactive hover and diagnostics.', mismatch_warnings),
+            _render_plot_status_panel('ok', png_msg, mismatch_warnings),
             _render_camera_diag_panel({}, []),
             panel,
             _render_repro_badge(run_params if run_params else None, mismatch_warnings),
@@ -3208,7 +3227,7 @@ def update_display(render_request, applied_nonce, queue_data):
             show_baseline=baseline_opacity > 0,
             show_event_markers='markers' in overlays,
             show_residuals='residuals' in overlays,
-            show_phase_fold=False,
+            show_phase_fold='phase' in overlays,
             show_diagnostics='diagnostics' in overlays,
             confidence_colors='confidence' in overlays,
             run_params=run_params or {},
@@ -3714,6 +3733,97 @@ def update_followup_indicator(needs_followup):
     if needs_followup:
         return html.Span('[F] Followup: ON', style={'color': '#f80'})
     return html.Span('[F] Followup: off', style={'color': '#666'})
+
+
+def _format_hms(total_seconds: float) -> str:
+    seconds = max(0, int(total_seconds))
+    hours, rem = divmod(seconds, 3600)
+    minutes, sec = divmod(rem, 60)
+    return f"{hours:02d}:{minutes:02d}:{sec:02d}"
+
+
+@app.callback(
+    Output('review-session-start', 'data'),
+    Input('queue-data', 'data'),
+    State('review-session-start', 'data'),
+    prevent_initial_call=False,
+)
+def sync_review_session_start(queue_data, session_start):
+    """Reset session-timer origin when the active queue changes."""
+    queue_hash = None
+    if isinstance(queue_data, dict):
+        queue_hash = queue_data.get('filter_hash')
+
+    now = time.time()
+    if not isinstance(session_start, dict):
+        return {'ts': now, 'filter_hash': queue_hash}
+
+    if session_start.get('filter_hash') != queue_hash:
+        return {'ts': now, 'filter_hash': queue_hash}
+
+    ts = session_start.get('ts')
+    if ts is None:
+        return {'ts': now, 'filter_hash': queue_hash}
+
+    return session_start
+
+
+@app.callback(
+    Output('review-progress-indicator', 'children'),
+    Input('review-metrics-interval', 'n_intervals'),
+    Input('queue-data', 'data'),
+    Input('current-index', 'data'),
+    Input('review-pass-store', 'data'),
+    State('review-session-start', 'data'),
+    prevent_initial_call=False,
+)
+def update_review_progress_indicator(_tick, queue_data, _idx, _review_pass, session_start):
+    """Render reviewed/total progress with session pace + elapsed timer."""
+    _ = _tick, _idx, _review_pass
+
+    with closing(db_connect(Path(DB_PATH))) as conn:
+        reviewed, total = count_progress(conn)
+
+    queue_size = 0
+    if isinstance(queue_data, dict):
+        queue_size = int(queue_data.get('queue_size') or 0)
+
+    if total <= 0:
+        total = queue_size
+
+    pct = (100.0 * reviewed / total) if total > 0 else 0.0
+
+    start_ts = None
+    if isinstance(session_start, dict):
+        start_ts = session_start.get('ts')
+    try:
+        start_ts = float(start_ts) if start_ts is not None else None
+    except Exception:
+        start_ts = None
+    if start_ts is None or (not np.isfinite(start_ts)):
+        start_ts = time.time()
+
+    elapsed_s = max(0.0, time.time() - start_ts)
+    elapsed_txt = _format_hms(elapsed_s)
+
+    pace_per_min = 0.0
+    if elapsed_s > 0 and reviewed > 0:
+        pace_per_min = float(reviewed) / (elapsed_s / 60.0)
+
+    if pace_per_min > 0 and total > reviewed:
+        remaining = total - reviewed
+        eta_s = (remaining / pace_per_min) * 60.0
+        eta_txt = _format_hms(eta_s)
+    else:
+        eta_txt = "--:--:--"
+
+    pace_txt = f"{pace_per_min:.2f}/min" if pace_per_min > 0 else "--/min"
+    return (
+        f"Reviewed: {reviewed}/{total} ({pct:.1f}%) "
+        f"| Elapsed: {elapsed_txt} "
+        f"| Pace: {pace_txt} "
+        f"| ETA: {eta_txt}"
+    )
 
 
 # Pass indicator
