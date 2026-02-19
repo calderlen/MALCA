@@ -96,6 +96,8 @@ def _normalize_gaia_ids(values: list[object]) -> list[str]:
 def _extract_gaia_ids(
     input_path: Path,
     crossmatch_path: Path,
+    *,
+    only_passers: bool = False,
 ) -> list[str]:
     """Read candidates and merge with VSX crossmatch to get Gaia source IDs."""
     print(f"Loading candidates from {input_path}...")
@@ -103,6 +105,12 @@ def _extract_gaia_ids(
         df = pd.read_parquet(input_path)
     else:
         df = pd.read_csv(input_path)
+
+    if only_passers and ("failed_any" in df.columns):
+        before = len(df)
+        failed = df["failed_any"].fillna(False).astype(bool)
+        df = df.loc[~failed].copy()
+        print(f"Using passers only (failed_any=False): {len(df)}/{before} rows")
 
     if "gaia_id" in df.columns:
         # Already has gaia_id (e.g. from a previous merge)

@@ -258,7 +258,11 @@ def check_cv_contamination(df: pd.DataFrame) -> pd.DataFrame:
         # CV region: blue (BP-RP < CV_BP_RP_THRESHOLD) and faint (G_abs > CV_G_ABS_THRESHOLD)
         cv_like = (bp_rp < CV_BP_RP_THRESHOLD) & (G_abs > CV_G_ABS_THRESHOLD)
         df.loc[valid, 'P_cv'] = np.where(cv_like, CV_BASE_P, 0.01)
-        df.loc[valid & cv_like.values, 'cv_notes'] += 'Blue+faint in CMD; '
+
+        # cv_like is indexed only over the valid-distance subset; use its index
+        # to avoid boolean mask shape mismatches when some rows are invalid.
+        cv_like_idx = cv_like[cv_like].index
+        df.loc[cv_like_idx, 'cv_notes'] += 'Blue+faint in CMD; '
     
     # Check Hα if IPHAS data available
     if 'ha_ew' in df.columns:

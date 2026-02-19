@@ -28,6 +28,7 @@ os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 os.environ.setdefault("NUMBA_NUM_THREADS", "1")
 
 import argparse
+import re
 import shutil
 from datetime import datetime
 import json
@@ -151,17 +152,48 @@ def _read_mag_bins_from_params_file(params_file: Path) -> list[str] | None:
     return _normalize_mag_bins(params.get("mag_bin"))
 
 
+_BUNDLE_MAG_BIN_RE = re.compile(
+    r"^results/lc_events_(?:results|filtered|enriched)_([0-9.]+_[0-9.]+)\.parquet$"
+)
+
+
+def _infer_mag_bins_from_bundle_contents(zf: zipfile.ZipFile) -> list[str] | None:
+    tags: set[str] = set()
+    for name in zf.namelist():
+        m = _BUNDLE_MAG_BIN_RE.match(str(name))
+        if not m:
+            continue
+        tag = str(m.group(1))
+        if tag and tag != "multi":
+            tags.add(tag)
+    if not tags:
+        return None
+    return sorted(tags)
+
+
 def _read_mag_bins_from_bundle(bundle_zip: Path) -> list[str] | None:
     bundle_zip = Path(bundle_zip).expanduser()
     if not bundle_zip.exists() or (not zipfile.is_zipfile(bundle_zip)):
         return None
     try:
         with zipfile.ZipFile(bundle_zip, "r") as zf:
-            with zf.open("run_params.json") as f:
-                params = json.load(f)
+            inferred = _infer_mag_bins_from_bundle_contents(zf)
+            params = None
+            try:
+                with zf.open("run_params.json") as f:
+                    params = json.load(f)
+            except Exception:
+                params = None
     except Exception:
         return None
-    return _normalize_mag_bins(params.get("mag_bin"))
+
+    from_params = _normalize_mag_bins(params.get("mag_bin")) if isinstance(params, dict) else None
+
+    # Prefer inference from bundled per-mag-bin result filenames, since run_params.json can be
+    # overwritten when multiple mag bins share one out_dir (concurrent runs).
+    if inferred:
+        return inferred
+    return from_params
 
 
 def _assert_mag_bin_match(expected: list[str], observed: list[str], source: str) -> None:
@@ -290,6 +322,8 @@ def export_bundle_zip(bundle_zip: Path, out_dir: Path, include_all: bool = False
     ]
     if mag_bin_tag:
         include_rel_paths.extend([
+            f"run_params_{mag_bin_tag}.json",
+            f"run_{mag_bin_tag}.log",
             f"results/lc_events_results_{mag_bin_tag}.parquet",
             f"results/lc_events_filtered_{mag_bin_tag}.parquet",
             f"results/lc_events_enriched_{mag_bin_tag}.parquet",
@@ -853,6 +887,7 @@ def main():
     }
 
     run_params_file = out_dir / "run_params.json"
+    run_params_tagged_file = out_dir / f"run_params_{mag_bin_tag}.json"
     run_summary_file = out_dir / "run_summary.json"
     summary: dict[str, object] = {
         "run_info": {
@@ -1009,8 +1044,13 @@ def main():
             "events_output": str(events_output),
         }
 
-        with open(run_params_file, "w") as f:
-            json.dump(run_params, f, indent=2, default=str)
+        for p in (run_params_file, run_params_tagged_file):
+            try:
+                with open(p, "w") as f:
+                    json.dump(run_params, f, indent=2, default=str)
+            except Exception as e:
+                if args.verbose:
+                    print(f"Warning: could not write {p.name}: {e}")
 
     except Exception as e:
         if args.verbose:
@@ -1018,10 +1058,10 @@ def main():
 
     # Write a simple run log with the command and key paths.
     run_log = out_dir / "run.log"
+    run_log_tagged = out_dir / f"run_{mag_bin_tag}.log"
     try:
         events_cmd_preview = shlex.join([sys.executable, "-m", "malca.events", *events_args, "--", "<paths_file>"])
-        run_log.write_text(
-            "\n".join([
+        run_log_text = "\n".join([
                 f"timestamp: {run_start_time.isoformat()}",
                 f"command: {cmd}",
                 f"events_cmd: {events_cmd_preview}",
@@ -1037,7 +1077,8 @@ def main():
                 f"stats_checkpoint: {stats_checkpoint_file}",
                 f"rejected_pre_filter: {prefilter_dir / f'rejected_pre_filter_{mag_bin_tag}.csv'}",
             ]) + "\n"
-        )
+        for p in (run_log, run_log_tagged):
+            p.write_text(run_log_text)
     except Exception as e:
         if args.verbose:
             print(f"Warning: could not write run log: {e}")
@@ -1685,6 +1726,7 @@ def main():
             gaia_ids = _extract_gaia_ids(
                 post_filter_output,
                 args.characterize_crossmatch.expanduser(),
+                only_passers=True,
             )
             if gaia_ids:
                 fetch_gaia_catalog(gaia_ids, output_path=gaia_catalog_path, chunk_size=args.gaia_fetch_chunk_size)
