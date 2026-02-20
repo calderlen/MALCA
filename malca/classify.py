@@ -21,8 +21,14 @@ import pandas as pd
 from tqdm import tqdm
 import astropy.units as u
 from astropy.coordinates import SkyCoord
-from astroquery.mast import Catalogs
-from astroquery.vizier import Vizier
+try:
+    from astroquery.mast import Catalogs
+except Exception:
+    Catalogs = None
+try:
+    from astroquery.vizier import Vizier
+except Exception:
+    Vizier = None
 
 from malca.config.config_classify import (
     SOLAR_MASS_KG, SOLAR_RADIUS_M, AU_M, DAY_S,
@@ -149,6 +155,10 @@ def query_iphas_by_coords(df: pd.DataFrame, radius_arcsec: float = CLASSIFY_IPHA
     df['iphas_ha'] = np.nan
     df['r_ha'] = np.nan
     df['ha_ew'] = np.nan
+
+    if Vizier is None:
+        print("Warning: astroquery.vizier unavailable; skipping IPHAS query")
+        return df
     
     # IPHAS DR2 catalog
     Vizier.ROW_LIMIT = -1
@@ -195,6 +205,10 @@ def query_ps1_by_coords(df: pd.DataFrame, radius_arcsec: float = CLASSIFY_PS1_RA
     df = df.copy()
     for band in ['g', 'r', 'i', 'z', 'y']:
         df[f'ps1_{band}'] = np.nan
+
+    if Catalogs is None:
+        print("Warning: astroquery.mast unavailable; skipping PS1 query")
+        return df
     
     print(f"Querying PS1 for {len(df)} sources...")
     

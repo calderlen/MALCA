@@ -40,7 +40,10 @@ import numpy as np
 from tqdm.auto import tqdm
 from astropy import units as u
 from astropy.coordinates import SkyCoord
-from astroquery.vizier import Vizier
+try:
+    from astroquery.vizier import Vizier
+except Exception:
+    Vizier = None
 
 from malca.config.config_io import PARQUET_CACHE_COMPRESSION, PARQUET_OUTPUT_COMPRESSION
 from malca.config.config_paths import DEFAULT_CACHE_DIR, GAIA_LOCAL_CATALOG
@@ -80,6 +83,12 @@ def fetch_chen2020_ztf_periodic(
     pd.DataFrame
         Catalog with columns: ra, dec, period, var_type
     """
+    if Vizier is None:
+        raise ImportError(
+            "astroquery is required for periodic catalog download. "
+            "Install with `pip install astroquery` or use cached parquet data."
+        )
+
     cache_dir = Path(cache_dir) if cache_dir else DEFAULT_CACHE_DIR
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_file = cache_dir / "chen2020_ztf_periodic.parquet"
@@ -1370,9 +1379,49 @@ def apply_post_filters(
     df_filtered = df.copy()
     n_start = len(df_filtered)
 
+    def _merge_columns_by_path(
+        df_base: pd.DataFrame,
+        df_updates: pd.DataFrame,
+        *,
+        include_columns: list[str] | None = None,
+    ) -> pd.DataFrame:
+        """Merge columns from df_updates into df_base by stringified path."""
+        if "path" not in df_base.columns:
+            return df_base
+        if df_updates is None or df_updates.empty or "path" not in df_updates.columns:
+            return df_base
+
+        updates = df_updates.copy()
+        updates["_path_key"] = updates["path"].astype(str)
+        updates = updates.drop_duplicates(subset=["_path_key"], keep="first")
+        updates_idx = updates.set_index("_path_key")
+
+        if include_columns is None:
+            cols = [c for c in updates_idx.columns if c != "path"]
+        else:
+            cols = [c for c in include_columns if c in updates_idx.columns]
+        if not cols:
+            return df_base
+
+        base_keys = df_base["path"].astype(str)
+        matched = base_keys.isin(updates_idx.index)
+        if not bool(matched.any()):
+            return df_base
+
+        for col in cols:
+            mapped = base_keys.map(updates_idx[col])
+            if col in df_base.columns:
+                df_base.loc[matched, col] = mapped.loc[matched].to_numpy()
+            else:
+                df_base[col] = mapped.to_numpy()
+        return df_base
+
     filters = []
 
+    periodicity_prefilter_labels: list[str] = []
+
     if apply_evidence_strength:
+        periodicity_prefilter_labels.append("posterior_strength")
         filters.append(("posterior_strength", filter_evidence_strength, {
             "min_bayes_factor": min_bayes_factor,
             "require_finite_local_bf": require_finite_local_bf,
@@ -1381,6 +1430,7 @@ def apply_post_filters(
         }))
 
     if apply_significant_detection:
+        periodicity_prefilter_labels.append("significant_detection")
         filters.append(("significant_detection", filter_significant_detection, {
             "require_significant_flag": significant_require_flag,
             "min_peak_count": significant_min_peak_count,
@@ -1390,6 +1440,7 @@ def apply_post_filters(
         }))
 
     if apply_run_robustness:
+        periodicity_prefilter_labels.append("run_robustness")
         filters.append(("run_robustness", filter_run_robustness, {
             "min_run_count": min_run_count,
             "max_run_count": max_run_count,
@@ -1400,6 +1451,7 @@ def apply_post_filters(
         }))
 
     if apply_morphology:
+        periodicity_prefilter_labels.append("morphology")
         filters.append(("morphology", filter_morphology, {
             "dip_morphology": dip_morphology,
             "jump_morphology": jump_morphology,
@@ -1409,6 +1461,7 @@ def apply_post_filters(
         }))
 
     if apply_score:
+        periodicity_prefilter_labels.append("score")
         filters.append(("score", filter_score, {
             "min_dip_score": min_dip_score,
             "min_jump_score": min_jump_score,
@@ -1459,6 +1512,60 @@ def apply_post_filters(
         with tqdm(total=total_steps, desc="apply_post_filters", leave=True, disable=not show_tqdm) as pbar:
             for label, func, kwargs in filters:
                 start = perf_counter()
+
+                if label == "periodicity":
+                    # Only run expensive periodicity bootstrap on rows that passed
+                    # all enabled pre-periodicity filters.
+                    eligible_mask = pd.Series(True, index=df_filtered.index, dtype=bool)
+                    for pre_label in periodicity_prefilter_labels:
+                        fail_col = f"failed_{pre_label}"
+                        if fail_col in df_filtered.columns:
+                            eligible_mask &= ~_to_bool_mask(df_filtered[fail_col])
+
+                    n_checked = int(eligible_mask.sum())
+                    failed_mask = pd.Series(False, index=df_filtered.index, dtype=bool)
+
+                    if n_checked > 0:
+                        df_to_check = df_filtered.loc[eligible_mask].copy()
+
+                        # Always annotate checked rows; if reject mode is enabled,
+                        # derive failed_periodicity from periodic_flag afterward.
+                        periodicity_kwargs = dict(kwargs)
+                        periodicity_reject = not bool(periodicity_kwargs.get("flag_only", True))
+                        periodicity_kwargs["flag_only"] = True
+
+                        df_period = func(df_to_check, **periodicity_kwargs)
+                        df_filtered = _merge_columns_by_path(
+                            df_filtered,
+                            df_period,
+                            include_columns=[
+                                "lsp_power",
+                                "lsp_period",
+                                "lsp_bootstrap_sig",
+                                "lsp_is_alias",
+                                "lsp_is_significant",
+                                "periodicity_score",
+                                "periodic_flag",
+                            ],
+                        )
+
+                        if periodicity_reject and "periodic_flag" in df_filtered.columns:
+                            checked_flags = _to_bool_mask(df_filtered.loc[eligible_mask, "periodic_flag"])
+                            failed_mask.loc[eligible_mask] = checked_flags.to_numpy()
+
+                    elapsed = perf_counter() - start
+                    df_filtered[f"failed_{label}"] = failed_mask
+
+                    n_failed = int(failed_mask.sum())
+                    if verbose:
+                        pbar.set_postfix_str(
+                            f"{label}: checked {n_checked}/{n_start}, {n_failed}/{n_start} failed ({elapsed:.2f}s)"
+                        )
+                    else:
+                        pbar.set_postfix_str("")
+                    pbar.update(1)
+                    continue
+
                 # Run filter on full dataframe to identify which rows pass
                 df_passed = func(df_filtered, **kwargs)
                 elapsed = perf_counter() - start

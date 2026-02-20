@@ -18,7 +18,21 @@ import time
 from pathlib import Path
 
 import pandas as pd
-import pyvo
+try:
+    import pyvo
+except Exception:
+    class _MissingTAPService:
+        def __init__(self, *_args, **_kwargs) -> None:
+            raise ImportError(
+                "pyvo is required for Gaia TAP queries. "
+                "Install with `pip install pyvo` to use gaia-fetch."
+            )
+
+    class _PyvoStub:
+        class dal:
+            TAPService = _MissingTAPService
+
+    pyvo = _PyvoStub()
 from astropy.table import Table
 from tqdm import tqdm
 

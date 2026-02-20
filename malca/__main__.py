@@ -24,6 +24,7 @@ Usage:
     malca reproduce [options]      # Re-run detection on known objects
     malca events [options]         # Run event detection directly (low-level)
     malca pre_filter [options]     # Apply pre-filters (low-level)
+    malca pre_tag [options]        # Apply pre-tagging filters (alias)
     malca score [options]          # Compute event score (low-level)
 """
 
@@ -38,7 +39,7 @@ def main():
     if len(sys.argv) >= 2 and sys.argv[1] in [
         "manifest", "pipeline", "reproduce", "injection",
         "detection_rate", "validate", "plot", "post_filter",
-        "events", "gaia-fetch", "characterize", "classify", "filter", "pre_filter", "score",
+        "events", "gaia-fetch", "characterize", "classify", "filter", "pre_filter", "pre_tag", "score",
         "stats", "attrition", "review",
         "neighbors", "spectra", "false_positive", "ml_train", "vsx-filter", "vsx-crossmatch",
         "vetting"
@@ -107,6 +108,10 @@ def main():
             from malca import pre_filter
             sys.argv = [sys.argv[0]] + remaining
             pre_filter.main()
+        elif command == "pre_tag":
+            from malca import pre_tag
+            sys.argv = [sys.argv[0]] + remaining
+            pre_tag.main()
         elif command == "score":
             from malca import score
             sys.argv = [sys.argv[0]] + remaining
@@ -169,6 +174,7 @@ def main():
     subparsers.add_parser("post_filter", help="Apply quality post-filters")
     subparsers.add_parser("filter", help="Apply signal-amplitude filter")
     subparsers.add_parser("pre_filter", help="Apply pre-filters to candidate tables")
+    subparsers.add_parser("pre_tag", help="Apply pre-tagging filters to candidate tables (alias of pre_filter)")
     subparsers.add_parser("events", help="Run event detection directly")
     subparsers.add_parser("gaia-fetch", help="Download Gaia DR3 data for candidates (AIP TAP mirror)")
     subparsers.add_parser("characterize", help="Characterize candidates with external catalogs")

@@ -1,6 +1,7 @@
 """
-Pre-filters that run BEFORE events.py.
-These filters depend only on raw light curve data (dat2 files) and external catalogs.
+Pre-tagging filters that run BEFORE events.py.
+These checks primarily annotate candidates with `failed_*` flags and keep rows,
+so downstream steps can decide how strictly to enforce exclusion.
 
 Filters (ordered by execution speed for efficiency):
 1. filter_sparse_lightcurves - remove LCs with insufficient time span or cadence
@@ -881,6 +882,11 @@ def apply_pre_filters(
         tqdm.write(f"\n[apply_pre_filters] {n_failed_any}/{n_start} failed at least one filter")
 
     return df_filtered.reset_index(drop=True)
+
+
+def apply_pre_tags(*args, **kwargs) -> pd.DataFrame:
+    """Alias for apply_pre_filters with clearer tagging semantics."""
+    return apply_pre_filters(*args, **kwargs)
 
 
 def main() -> None:

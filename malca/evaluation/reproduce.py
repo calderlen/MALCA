@@ -14,13 +14,14 @@ import matplotlib.pyplot as pl
 import pyarrow.parquet as pq
 
 from malca.events import score_lightcurve
+from malca.triggering import normalize_trigger_block
 from malca.utils import read_lc_dat2
 from malca.baseline import (
     global_median_baseline,
     per_camera_median_baseline,
     per_camera_gp_baseline,
 )
-from malca.pre_filter import apply_pre_filters
+from malca.pre_tag import apply_pre_tags
 from malca.filter import filter_signal_amplitude
 from malca.post_filter import apply_post_filters
 from malca.plot import plot_passing_candidates
@@ -763,11 +764,11 @@ def build_reproduction_report(
             total_before = sum(len(v) for v in records_map.values())
             print(f"\n[PRE-FILTER] Applying pre-filters to {total_before} candidates...")
         
-        # Prepare dataframe for pre_filter (needs 'path' column pointing to lc_dir)
+        # Prepare dataframe for pre-tagging stage (needs 'path' column pointing to lc_dir)
         df_pre = manifest_subset.rename(columns={"lc_dir": "path"}).copy()
         
         try:
-            df_filtered = apply_pre_filters(
+            df_filtered = apply_pre_tags(
                 df_pre,
                 apply_sparse=True,
                 min_time_span=min_time_span,
@@ -867,30 +868,12 @@ def build_reproduction_report(
                         result[kind] = {"significant": False}
                         continue
 
+                    block = normalize_trigger_block(
+                        block,
+                        kind=kind,
+                        default_trigger_mode=trigger_mode,
+                    )
                     idx = np.asarray(block.get("event_indices", np.array([], dtype=int)), dtype=int)
-                    block["event_indices"] = idx
-
-                    if "max_log_bf_local" not in block or not np.isfinite(block.get("max_log_bf_local", np.nan)):
-                        log_bf_local = block.get("log_bf_local", None)
-                        if log_bf_local is None:
-                            block["max_log_bf_local"] = np.nan
-                        else:
-                            lb = np.asarray(log_bf_local, float)
-                            finite = np.isfinite(lb)
-                            block["max_log_bf_local"] = float(np.nanmax(lb)) if finite.any() else np.nan
-
-                    event_prob = block.get("event_probability", None)
-                    if event_prob is None:
-                        block["max_event_prob"] = np.nan
-                    else:
-                        ep = np.asarray(event_prob, float)
-                        finite = np.isfinite(ep)
-                        block["max_event_prob"] = float(np.nanmax(ep)) if finite.any() else np.nan
-
-                    if kind == "dip":
-                        block["n_dips"] = int(len(idx))
-                    else:
-                        block["n_jumps"] = int(len(idx))
 
                     if verbose:
                         mode = str(block.get("trigger_mode", trigger_mode))

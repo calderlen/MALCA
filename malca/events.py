@@ -49,6 +49,7 @@ from malca.baseline import (
 )
 from malca.score import compute_event_score
 from malca.stats import log_gaussian, median_dt, bic
+from malca.triggering import resolve_trigger_indices
 from malca.config.config_io import PARQUET_OUTPUT_COMPRESSION, OUTPUT_FORMAT, EVENTS_OUTPUT_CHUNK_SIZE
 from malca.config.config_paths import LCV2_ROOT
 from malca.config.config_pipeline import (
@@ -170,60 +171,6 @@ def compute_symmetry_score(
     return float((I_ingress - I_egress) / denominator)
 
 
-def eb_like_trapezoid(
-    t: np.ndarray,
-    depth: float,
-    t0: float,
-    half_duration: float,
-    ingress_frac: float,
-    baseline: float,
-) -> np.ndarray:
-    """Simple symmetric trapezoid-like eclipse profile for rejector prototyping."""
-    t = np.asarray(t, float)
-    hd = max(float(half_duration), 1e-6)
-    ingress_frac = float(np.clip(ingress_frac, 1e-3, 0.49))
-
-    dt = np.abs(t - float(t0))
-    flat_half = hd * (1.0 - ingress_frac)
-    scale = np.zeros_like(dt)
-
-    in_flat = dt <= flat_half
-    in_edge = (dt > flat_half) & (dt <= hd)
-    scale[in_flat] = 1.0
-    if np.any(in_edge):
-        denom = max(hd - flat_half, 1e-8)
-        scale[in_edge] = 1.0 - ((dt[in_edge] - flat_half) / denom)
-
-    return float(baseline) + float(depth) * scale
-
-
-def _peak_index_from_strategy(
-    mag_padded: np.ndarray,
-    baseline_guess: float,
-    run_idx: np.ndarray,
-    start_i: int,
-    *,
-    init_strategy: str,
-) -> int:
-    """Choose the morphology fit initialization index for t0/amp."""
-    strategy = str(init_strategy or "peak_abs").strip().lower()
-    abs_diff = np.abs(mag_padded - baseline_guess)
-
-    if strategy == "run_midpoint":
-        run_mid_global = int(run_idx[len(run_idx) // 2])
-        run_mid_local = int(np.clip(run_mid_global - start_i, 0, len(mag_padded) - 1))
-        return run_mid_local
-
-    if strategy == "run_peak":
-        local_run = np.asarray(run_idx, int) - int(start_i)
-        local_run = local_run[(local_run >= 0) & (local_run < len(mag_padded))]
-        if local_run.size > 0:
-            return int(local_run[np.argmax(abs_diff[local_run])])
-
-    # Default: "peak_abs" over full padded window.
-    return int(np.argmax(abs_diff))
-
-
 def classify_run_morphology(
     jd: np.ndarray,
     mag: np.ndarray,
@@ -232,18 +179,12 @@ def classify_run_morphology(
     *,
     baseline: np.ndarray | None = None,
     kind: EventKind = "dip",
-    pad_points: int = 5,
-    init_strategy: str = "peak_abs",
-    delta_bic_threshold: float = 10.0,
-    include_jump_skew_gaussian: bool = False,
-    enable_rejector_models: bool = False,
 ):
     """
     Fits gaussian / skew_gaussian / paczynski / fred / noise to a padded run segment.
     *baseline* – full-length baseline array (use baseline[slice] as baseline_guess).
     """
-    pad = max(0, int(pad_points))
-    delta_bic_threshold = float(max(delta_bic_threshold, 0.0))
+    pad = 5
     start_i = int(max(0, run_idx[0] - pad))
     end_i = int(min(len(jd), run_idx[-1] + pad + 1))
 
@@ -257,20 +198,14 @@ def classify_run_morphology(
     else:
         baseline_guess = float(np.nanmedian(mag_padded))
 
-    peak_local_idx = _peak_index_from_strategy(
-        mag_padded,
-        baseline_guess,
-        run_idx,
-        start_i,
-        init_strategy=init_strategy,
-    )
-
+    abs_diff = np.abs(mag_padded - baseline_guess)
+    peak_local_idx = int(np.argmax(abs_diff))
     t0_guess = t_padded[peak_local_idx]
     amp_guess_raw = float(mag_padded[peak_local_idx] - baseline_guess)
     amp_guess_dip = abs(amp_guess_raw) if np.isfinite(amp_guess_raw) else 0.1
     amp_guess_jump = -abs(amp_guess_raw) if np.isfinite(amp_guess_raw) else -0.1
     sigma_guess = max((t_padded[-1] - t_padded[0]) / 4.0, 0.01)
-    duration_guess = max((t_padded[-1] - t_padded[0]) / 3.0, 0.05)
+    delta_bic_threshold = 10.0
 
     resid_null = mag_padded - baseline_guess
     bic_null = bic(resid_null, err_padded, 1)
@@ -278,9 +213,6 @@ def classify_run_morphology(
     best_bic = bic_null
     best_model = "noise"
     best_params = {}
-    bic_by_model = {"noise": float(bic_null)}
-    rejector_model = "none"
-    rejector_delta_bic = np.nan
 
     if kind == "dip":
         try:
@@ -291,7 +223,6 @@ def classify_run_morphology(
             )
             resid_g = mag_padded - gaussian(t_padded, *popt_g)
             bic_g = bic(resid_g, err_padded, 4)
-            bic_by_model["gaussian"] = float(bic_g)
 
             if (popt_g[0] > 0) and bic_g < (best_bic - delta_bic_threshold):
                 best_bic = bic_g
@@ -317,7 +248,6 @@ def classify_run_morphology(
             )
             resid_sg = mag_padded - skew_gaussian(t_padded, *popt_sg)
             bic_sg = bic(resid_sg, err_padded, 5)
-            bic_by_model["skew_gaussian"] = float(bic_sg)
 
             if (popt_sg[0] > 0) and bic_sg < (best_bic - delta_bic_threshold):
                 best_bic = bic_sg
@@ -339,7 +269,6 @@ def classify_run_morphology(
             )
             resid_p = mag_padded - paczynski_kernel(t_padded, *popt_p)
             bic_p = bic(resid_p, err_padded, 4)
-            bic_by_model["paczynski"] = float(bic_p)
 
             if (popt_p[0] < 0) and bic_p < (best_bic - delta_bic_threshold):
                 best_bic = bic_p
@@ -360,7 +289,6 @@ def classify_run_morphology(
             if popt_f[0] < 0:
                 resid_f = mag_padded - fred(t_padded, *popt_f)
                 bic_f = bic(resid_f, err_padded, 4)
-                bic_by_model["fred"] = float(bic_f)
 
                 if bic_f < (best_bic - delta_bic_threshold):
                     best_bic = bic_f
@@ -372,84 +300,11 @@ def classify_run_morphology(
         except Exception:
             pass
 
-        if include_jump_skew_gaussian:
-            try:
-                popt_sg_j, _ = curve_fit(
-                    skew_gaussian,
-                    t_padded,
-                    mag_padded,
-                    p0=[amp_guess_jump, t0_guess, sigma_guess, baseline_guess, 0.0],
-                    sigma=err_padded,
-                    maxfev=3000,
-                    bounds=(
-                        [-np.inf, t_padded[0], 1e-5, -np.inf, -10],
-                        [0.0, t_padded[-1], np.inf, np.inf, 10],
-                    ),
-                )
-                resid_sg_j = mag_padded - skew_gaussian(t_padded, *popt_sg_j)
-                bic_sg_j = bic(resid_sg_j, err_padded, 5)
-                bic_by_model["skew_gaussian"] = float(bic_sg_j)
-
-                if (popt_sg_j[0] < 0) and bic_sg_j < (best_bic - delta_bic_threshold):
-                    best_bic = bic_sg_j
-                    best_model = "skew_gaussian"
-                    best_params = {
-                        "amp": popt_sg_j[0],
-                        "t0": popt_sg_j[1],
-                        "sigma": popt_sg_j[2],
-                        "baseline": popt_sg_j[3],
-                        "alpha": popt_sg_j[4],
-                    }
-            except Exception:
-                pass
-
-    if enable_rejector_models:
-        try:
-            depth_guess = amp_guess_dip if kind == "dip" else amp_guess_jump
-            depth_bounds = (0.0, np.inf) if kind == "dip" else (-np.inf, 0.0)
-            popt_eb, _ = curve_fit(
-                eb_like_trapezoid,
-                t_padded,
-                mag_padded,
-                p0=[depth_guess, t0_guess, duration_guess, 0.2, baseline_guess],
-                sigma=err_padded,
-                maxfev=4000,
-                bounds=(
-                    [depth_bounds[0], t_padded[0], 1e-4, 0.02, -np.inf],
-                    [depth_bounds[1], t_padded[-1], max((t_padded[-1] - t_padded[0]) * 2.0, 0.1), 0.49, np.inf],
-                ),
-            )
-            resid_eb = mag_padded - eb_like_trapezoid(t_padded, *popt_eb)
-            bic_eb = bic(resid_eb, err_padded, 5)
-            bic_by_model["eb_like_rejector"] = float(bic_eb)
-            rejector_model = "eb_like_rejector"
-            rejector_delta_bic = float(bic_null - bic_eb)
-
-            amp_ok = (popt_eb[0] > 0) if kind == "dip" else (popt_eb[0] < 0)
-            if amp_ok and bic_eb < (best_bic - delta_bic_threshold):
-                best_bic = bic_eb
-                best_model = "eb_like_rejector"
-                best_params = {
-                    "depth": popt_eb[0],
-                    "t0": popt_eb[1],
-                    "half_duration": popt_eb[2],
-                    "ingress_frac": popt_eb[3],
-                    "baseline": popt_eb[4],
-                }
-        except Exception:
-            pass
-
     return {
         "morphology": best_model,
         "bic": float(best_bic),
         "delta_bic_null": float(bic_null - best_bic),
-        "params": best_params,
-        "bic_by_model": bic_by_model,
-        "pad_points": int(pad),
-        "init_strategy": str(init_strategy),
-        "delta_bic_threshold": float(delta_bic_threshold),
-        "rejector_model": rejector_model,
-        "rejector_delta_bic": float(rejector_delta_bic) if np.isfinite(rejector_delta_bic) else np.nan,
+        "params": best_params
     }
 
 
@@ -810,12 +665,6 @@ def score_events_bayesian(
     run_max_gap_days: float | None = None,
     run_min_duration_days: float | None = None,
 
-    morph_pad_points: int = 5,
-    morph_init_strategy: str = "peak_abs",
-    morph_delta_bic_threshold: float = 10.0,
-    include_jump_skew_gaussian: bool = False,
-    enable_rejector_models: bool = False,
-
     compute_event_prob: bool = True,
 ):
     """
@@ -952,13 +801,17 @@ def score_events_bayesian(
 
     baseline_mag = float(np.nanmedian(baseline_mags))
 
-    if p_min is None and p_max is None:
-        if kind == "dip":
-            p_min, p_max = 0.5, 1.0 - 1e-4
-        elif kind == "jump":
-            p_min, p_max = 1e-4, 0.5
-        else:
-            raise ValueError("kind must be 'dip' or 'jump'")
+    if kind == "dip":
+        default_p_min, default_p_max = 0.5, 1.0 - 1e-4
+    elif kind == "jump":
+        default_p_min, default_p_max = 1e-4, 0.5
+    else:
+        raise ValueError("kind must be 'dip' or 'jump'")
+
+    if p_min is None:
+        p_min = default_p_min
+    if p_max is None:
+        p_max = default_p_max
 
     p_grid = uniform_p_grid(p_min=p_min, p_max=p_max, n=p_points)
 
@@ -1097,25 +950,17 @@ def score_events_bayesian(
     else:
         event_prob = None
 
-    if trigger_mode == "logbf":
-        per_point_thr = float(logbf_threshold)
-        point_significance = np.asarray(log_bf_local, float)
-        raw_idx = np.nonzero(np.isfinite(point_significance) & (point_significance >= per_point_thr))[0]
-        trigger_threshold_used = per_point_thr
-        trigger_value_max = max_log_bf_local
-
-    elif trigger_mode == "posterior_prob":
-        if event_prob is None:
-            raise RuntimeError("trigger_mode='posterior_prob' requires compute_event_prob=True")
-
-        thr_prob = significance_threshold / 100.0 if significance_threshold > 1.0 else float(significance_threshold)
-        point_significance = np.asarray(event_prob, float)
-        raw_idx = np.nonzero(np.isfinite(point_significance) & (point_significance >= thr_prob))[0]
-        trigger_threshold_used = thr_prob
-        trigger_value_max = float(np.nanmax(point_significance)) if point_significance.size else np.nan
-
-    else:
-        raise ValueError("trigger_mode must be 'logbf' or 'posterior_prob'")
+    trigger = resolve_trigger_indices(
+        trigger_mode=trigger_mode,
+        log_bf_local=log_bf_local,
+        event_probability=event_prob,
+        logbf_threshold=logbf_threshold,
+        significance_threshold=significance_threshold,
+    )
+    point_significance = trigger["point_significance"]
+    raw_idx = trigger["event_indices"]
+    trigger_threshold_used = trigger["trigger_threshold"]
+    trigger_value_max = trigger["trigger_max"]
 
     kept_runs = []
     run_summaries = []
@@ -1155,11 +1000,6 @@ def score_events_bayesian(
                 r,
                 baseline=baseline_arr,
                 kind=kind,
-                pad_points=morph_pad_points,
-                init_strategy=morph_init_strategy,
-                delta_bic_threshold=morph_delta_bic_threshold,
-                include_jump_skew_gaussian=include_jump_skew_gaussian,
-                enable_rejector_models=enable_rejector_models,
             )
             summary.update(morph_res)
             
@@ -1235,12 +1075,6 @@ def score_lightcurve(
     run_max_gap_days: float | None = None,
     run_min_duration_days: float | None = None,
 
-    morph_pad_points: int = 5,
-    morph_init_strategy: str = "peak_abs",
-    morph_delta_bic_threshold: float = 10.0,
-    include_jump_skew_gaussian: bool = False,
-    enable_rejector_models: bool = False,
-
     compute_event_prob: bool = True,
 
     p_min_dip: float | None = None,
@@ -1281,11 +1115,6 @@ def score_lightcurve(
             run_min_points=run_min_points, max_gap_points=max_gap_points,
             run_max_gap_days=run_max_gap_days,
             run_min_duration_days=run_min_duration_days,
-            morph_pad_points=morph_pad_points,
-            morph_init_strategy=morph_init_strategy,
-            morph_delta_bic_threshold=morph_delta_bic_threshold,
-            include_jump_skew_gaussian=include_jump_skew_gaussian,
-            enable_rejector_models=enable_rejector_models,
             compute_event_prob=compute_event_prob,
         )
 

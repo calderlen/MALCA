@@ -43,17 +43,38 @@ import pandas as pd
 import tempfile
 from tqdm.auto import tqdm
 
-from malca.manifest import build_manifest_dataframe
-from malca.pre_filter import apply_pre_filters, filter_camera_medians
+from malca.manifest import build_manifest
+from malca.pre_tag import apply_pre_tags, filter_camera_medians
 from malca.post_filter import apply_post_filters
 from malca.plot import plot_passing_candidates
 from malca.classify import compute_all_classifications
 from malca.stats import compute_stats
-from malca.characterize import characterize_candidates_df
-from malca.gaia_fetch import _extract_gaia_ids, fetch_gaia_catalog
-from malca.enrich.neighbor import run_neighbor_enrichment
-from malca.enrich.spectra import run_spectra_availability
-from malca.vetting import vet_candidates
+
+try:
+    from malca.gaia_fetch import _extract_gaia_ids, fetch_gaia_catalog
+except Exception:
+    _extract_gaia_ids = None
+    fetch_gaia_catalog = None
+
+try:
+    from malca.characterize import characterize_candidates_df
+except Exception:
+    characterize_candidates_df = None
+
+try:
+    from malca.enrich.neighbor import run_neighbor_enrichment
+except Exception:
+    run_neighbor_enrichment = None
+
+try:
+    from malca.enrich.spectra import run_spectra_availability
+except Exception:
+    run_spectra_availability = None
+
+try:
+    from malca.vetting import vet_candidates
+except Exception:
+    vet_candidates = None
 from malca.config.config_io import PARQUET_OUTPUT_COMPRESSION, PARQUET_CACHE_COMPRESSION
 from malca.config.config_paths import ASASSN_INDEX_PATH, LCV2_ROOT, VSX_CROSSMATCH_PATH, GAIA_LOCAL_CATALOG
 from malca.config.config_pipeline import (
@@ -1118,7 +1139,7 @@ def main():
     if run_upstream:
         if args.force_manifest or not manifest_file.exists():
             log(f"Building manifest for mag_bin={args.mag_bin}...")
-            df_manifest = build_manifest_dataframe(
+            df_manifest = build_manifest(
                 args.index_root,
                 args.lc_root,
                 mag_bins=args.mag_bin,
@@ -1143,7 +1164,7 @@ def main():
             # Use lc_dir as the directory path for pre_filter input (path/<id>.dat2)
             df_to_filter = df_manifest.rename(columns={"lc_dir": "path"}).copy()
 
-            df_filtered = apply_pre_filters(
+            df_filtered = apply_pre_tags(
                 df_to_filter,
                 apply_sparse=not args.skip_sparse,
                 min_time_span=args.min_time_span,
@@ -1750,6 +1771,12 @@ def main():
         log("\n=== Ensuring local Gaia catalog is up to date ===")
         gaia_fetch_started = time.perf_counter()
         try:
+            if _extract_gaia_ids is None or fetch_gaia_catalog is None:
+                raise ImportError(
+                    "Gaia fetch dependencies are unavailable. "
+                    "Install optional gaia-fetch extras (e.g. pyvo) to enable auto-fetch."
+                )
+
             gaia_catalog_path = args.gaia_cache.expanduser() if args.gaia_cache else GAIA_LOCAL_CATALOG
             gaia_ids = _extract_gaia_ids(
                 post_filter_output,
@@ -1772,6 +1799,12 @@ def main():
         log("\n=== Step 8: Characterizing candidates ===")
         characterize_started = time.perf_counter()
         try:
+            if characterize_candidates_df is None:
+                raise ImportError(
+                    "Characterization dependencies are unavailable. "
+                    "Install optional characterize extras (e.g. pyvo, astroquery, banyan-sigma, dustmaps3d)."
+                )
+
             df_char = load_table(post_filter_output)
 
             if "failed_any" in df_char.columns:
@@ -1883,6 +1916,12 @@ def main():
             log("\n=== Step 10: Bulk neighbor enrichment ===")
             neighbor_started = time.perf_counter()
             try:
+                if run_neighbor_enrichment is None:
+                    raise ImportError(
+                        "Neighbor enrichment dependencies are unavailable. "
+                        "Install optional astroquery extras to enable this stage."
+                    )
+
                 enrich_output = results_dir / "lc_events_enriched.parquet"
                 classify_output = results_dir / "lc_events_classified.parquet"
                 characterize_output = results_dir / "lc_events_characterized.parquet"
@@ -1954,6 +1993,12 @@ def main():
             log("\n=== Step 11: Spectra availability enrichment ===")
             spectra_started = time.perf_counter()
             try:
+                if run_spectra_availability is None:
+                    raise ImportError(
+                        "Spectra enrichment dependencies are unavailable. "
+                        "Install optional astroquery extras to enable this stage."
+                    )
+
                 neighbor_output = results_dir / "lc_events_neighbors.parquet"
                 enrich_output = results_dir / "lc_events_enriched.parquet"
                 classify_output = results_dir / "lc_events_classified.parquet"
@@ -2025,6 +2070,12 @@ def main():
         log("\n=== Step 12: Post-review vetting ===")
         vetting_started = time.perf_counter()
         try:
+            if vet_candidates is None:
+                raise ImportError(
+                    "Vetting dependencies are unavailable. "
+                    "Install optional vetting extras (e.g. pyvo, astroquery) to enable this stage."
+                )
+
             # Find the best input file for vetting
             vetting_input = args.vetting_input
             if vetting_input is None:

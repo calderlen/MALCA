@@ -2,7 +2,13 @@ import numpy as np
 import pandas as pd
 import warnings
 
-from celerite2 import GaussianProcess, terms
+try:
+    from celerite2 import GaussianProcess, terms  # type: ignore[import-not-found]
+    _HAS_CELERITE2 = True
+except Exception:
+    GaussianProcess = None
+    terms = None
+    _HAS_CELERITE2 = False
 
 from malca.config.config_pipeline import (
     BASELINE_S0, BASELINE_W0, BASELINE_Q, BASELINE_JITTER,
@@ -152,6 +158,63 @@ def per_camera_median_baseline(
     return df_out
 
 
+def _stabilize_median_fallback(
+    df_in: pd.DataFrame,
+    *,
+    mag_col: str,
+    err_col: str,
+    cam_col: str,
+) -> pd.DataFrame:
+    """Fill median-fallback gaps so GP-style outputs stay dense."""
+    df_out = df_in.copy()
+    for _, sub in df_out.groupby(cam_col, group_keys=False):
+        idx = sub.index
+        m = df_out.loc[idx, mag_col].to_numpy(dtype=float)
+        e = df_out.loc[idx, err_col].to_numpy(dtype=float)
+        base = df_out.loc[idx, "baseline"].to_numpy(dtype=float)
+
+        finite_base = np.isfinite(base)
+        if finite_base.any():
+            fallback_base = float(np.nanmedian(base[finite_base]))
+        elif np.isfinite(m).any():
+            fallback_base = float(np.nanmedian(m[np.isfinite(m)]))
+        else:
+            fallback_base = 0.0
+
+        base = np.where(np.isfinite(base), base, fallback_base)
+        resid = m - base
+
+        resid_good = np.isfinite(resid)
+        if resid_good.any():
+            resid_vals = resid[resid_good]
+            med_resid = float(np.nanmedian(resid_vals))
+            mad = float(1.4826 * np.nanmedian(np.abs(resid_vals - med_resid)))
+        else:
+            mad = np.nan
+
+        e_good = np.isfinite(e)
+        e_med = float(np.nanmedian(e[e_good])) if e_good.any() else np.nan
+
+        mad_num = mad if np.isfinite(mad) else 0.0
+        e_med_num = e_med if np.isfinite(e_med) else 0.0
+        robust_std = float(np.sqrt(mad_num**2 + e_med_num**2))
+        robust_std = max(robust_std, 1e-6)
+
+        sigma_resid = resid / robust_std
+
+        e_safe = np.where(np.isfinite(e) & (e > 0), e, e_med_num)
+        sigma_eff = np.sqrt(e_safe**2 + mad_num**2)
+        sigma_eff = np.maximum(sigma_eff, 1e-6)
+
+        df_out.loc[idx, "baseline"] = base
+        df_out.loc[idx, "resid"] = resid
+        df_out.loc[idx, "sigma_resid"] = sigma_resid
+        if "sigma_eff" in df_out.columns:
+            df_out.loc[idx, "sigma_eff"] = sigma_eff
+
+    return df_out
+
+
 def per_camera_gp_baseline(
     df,
     *,
@@ -174,6 +237,30 @@ def per_camera_gp_baseline(
     auto_scale_fraction=GP_AUTO_SCALE_FRACTION,
 ):
     """Per-camera GP baseline (fixed SHO kernel) with sigma_eff output."""
+    if not _HAS_CELERITE2:
+        out = per_camera_median_baseline(
+            df,
+            days=ROLLING_WINDOW_DAYS,
+            min_points=ROLLING_MIN_POINTS,
+            t_col=t_col,
+            mag_col=mag_col,
+            err_col=err_col,
+            cam_col=cam_col,
+        )
+        out = _stabilize_median_fallback(
+            out,
+            mag_col=mag_col,
+            err_col=err_col,
+            cam_col=cam_col,
+        )
+        if "baseline_source" not in out.columns:
+            out["baseline_source"] = "median_fallback_no_celerite2"
+        else:
+            out.loc[:, "baseline_source"] = "median_fallback_no_celerite2"
+        if not add_sigma_eff_col and "sigma_eff" in out.columns:
+            out = out.drop(columns=["sigma_eff"])
+        return out
+
     df_out = df.copy()
     out_cols = ("baseline", "resid", "sigma_resid", "baseline_source") + (("sigma_eff",) if add_sigma_eff_col else ())
     for col in out_cols:
@@ -353,6 +440,26 @@ def per_camera_gp_baseline_masked(
 ):
     """Per-camera GP baseline with dip masking (excludes significant dips from fit)."""
 
+    if not _HAS_CELERITE2:
+        out = per_camera_median_baseline(
+            df,
+            days=ROLLING_WINDOW_DAYS,
+            min_points=ROLLING_MIN_POINTS,
+            t_col=t_col,
+            mag_col=mag_col,
+            err_col=err_col,
+            cam_col=cam_col,
+        )
+        out = _stabilize_median_fallback(
+            out,
+            mag_col=mag_col,
+            err_col=err_col,
+            cam_col=cam_col,
+        )
+        if not add_sigma_eff_col and "sigma_eff" in out.columns:
+            out = out.drop(columns=["sigma_eff"])
+        return out
+
     def robust_sigma_floor(resid, yerr_here, var_here):
         finite0 = np.isfinite(resid) & np.isfinite(yerr_here) & np.isfinite(var_here)
         if finite0.sum() < max(10, min_floor_points):
@@ -528,4 +635,3 @@ def per_camera_gp_baseline_masked(
         df_out.loc[idx, "sigma_resid"] = sigma_resid
 
     return df_out
-

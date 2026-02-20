@@ -15,6 +15,7 @@ import dash
 from dash import dcc, html, Input, Output, State, callback_context, no_update, ALL
 import dash_bootstrap_components as dbc
 from flask import send_from_directory
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.io as pio
@@ -1587,6 +1588,245 @@ def _format_large_integer_like_display(value) -> str:
         return s
 
 
+def _resolve_run_dir_from_plot_dir(plot_dir: str | None) -> Path | None:
+    """Infer run directory from plot-dir or run-dir style path."""
+    if not plot_dir:
+        return None
+    p = Path(str(plot_dir)).expanduser().resolve()
+    if (p / "results").is_dir():
+        return p
+    if p.name == "plots" and (p.parent / "results").is_dir():
+        return p.parent
+    if (p.parent / "results").is_dir():
+        return p.parent
+    return None
+
+
+def _load_spectra_rows(candidate_id: str, run_dir: Path | None) -> pd.DataFrame:
+    """Load spectra matches for one candidate if local enrichment exists."""
+    if run_dir is None:
+        return pd.DataFrame()
+    spectra_long = run_dir / "results" / "spectra_enrichment" / "spectra_long.parquet"
+    if not spectra_long.exists():
+        return pd.DataFrame()
+
+    cid = str(candidate_id)
+    cols = ["candidate_id", "survey", "catalog", "sep_arcsec"]
+    try:
+        df = pd.read_parquet(spectra_long, columns=cols, filters=[("candidate_id", "==", cid)])
+    except Exception:
+        try:
+            df = pd.read_parquet(spectra_long, columns=cols)
+        except Exception:
+            return pd.DataFrame()
+        if "candidate_id" in df.columns:
+            df = df[df["candidate_id"].astype(str) == cid]
+    return df.reset_index(drop=True)
+
+
+@lru_cache(maxsize=4)
+def _index_neowise_paths(run_dir_text: str) -> dict[str, str]:
+    """Index candidate->NEOWISE parquet paths once per run directory."""
+    root = Path(run_dir_text) / "results"
+    mapping: dict[str, str] = {}
+    if not root.exists():
+        return mapping
+    for p in root.rglob("neowise_lc_*.parquet"):
+        cid = p.stem.replace("neowise_lc_", "")
+        if cid:
+            mapping[cid] = str(p)
+    return mapping
+
+
+def _build_neowise_figure(df_neowise: pd.DataFrame) -> go.Figure:
+    """Build a compact NEOWISE light-curve panel."""
+    fig = go.Figure()
+    if df_neowise is None or df_neowise.empty:
+        fig.update_layout(height=220, margin=dict(l=36, r=10, t=30, b=28), title="NEOWISE")
+        return fig
+
+    time_col = "mjd" if "mjd" in df_neowise.columns else ("MJD" if "MJD" in df_neowise.columns else None)
+    if time_col is None:
+        fig.update_layout(height=220, margin=dict(l=36, r=10, t=30, b=28), title="NEOWISE (missing MJD column)")
+        return fig
+
+    x = pd.to_numeric(df_neowise[time_col], errors="coerce")
+    band_specs = [
+        ("W1", "w1mpro", "w1sigmpro", "#4fa3ff"),
+        ("W2", "w2mpro", "w2sigmpro", "#ff8c42"),
+    ]
+    added = 0
+    for name, mag_col, err_col, color in band_specs:
+        if mag_col not in df_neowise.columns:
+            continue
+        y = pd.to_numeric(df_neowise[mag_col], errors="coerce")
+        good = np.isfinite(x) & np.isfinite(y)
+        if not bool(good.any()):
+            continue
+        err_vals = None
+        if err_col in df_neowise.columns:
+            ev = pd.to_numeric(df_neowise[err_col], errors="coerce")
+            if np.isfinite(ev[good]).any():
+                err_vals = ev[good]
+        fig.add_trace(
+            go.Scattergl(
+                x=x[good],
+                y=y[good],
+                mode="markers",
+                name=name,
+                marker=dict(size=5, color=color, opacity=0.85),
+                error_y=dict(type="data", array=err_vals, visible=err_vals is not None, thickness=0.7),
+            )
+        )
+        added += 1
+
+    fig.update_layout(
+        height=240,
+        margin=dict(l=42, r=10, t=34, b=32),
+        title="NEOWISE Light Curve",
+        legend=dict(orientation="h", x=0.0, y=1.1),
+        template="plotly_dark",
+    )
+    fig.update_xaxes(title="MJD")
+    fig.update_yaxes(title="mag", autorange="reversed")
+    if added == 0:
+        fig.add_annotation(text="No finite W1/W2 points", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False)
+    return fig
+
+
+def _coerce_bool(value: object) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, (list, tuple, dict, set, np.ndarray, pd.Series)):
+        return bool(len(value))
+    try:
+        if pd.isna(value):
+            return False
+    except Exception:
+        pass
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        return float(value) != 0.0
+    s = str(value).strip().lower()
+    return s in {"1", "true", "t", "yes", "y"}
+
+
+def _candidate_lookup_keys(candidate_id: str, payload: dict) -> list[str]:
+    keys = [str(candidate_id)]
+    for key in ("candidate_id", "asas_sn_id"):
+        v = payload.get(key)
+        if v is not None:
+            keys.append(str(v))
+    path_v = payload.get("path")
+    if path_v:
+        keys.append(Path(str(path_v)).stem)
+    seen = set()
+    return [k for k in keys if k and not (k in seen or seen.add(k))]
+
+
+def _render_external_followup(payload: dict, candidate_id: str) -> list:
+    card_style = {
+        'border': '1px solid #2a2a2a',
+        'borderRadius': '6px',
+        'padding': '8px 10px',
+        'background': '#0d0d0d',
+    }
+    run_dir = _resolve_run_dir_from_plot_dir(PLOT_DIR)
+    lookup_keys = _candidate_lookup_keys(candidate_id, payload)
+
+    # Spectra
+    has_spectrum = _coerce_bool(payload.get('has_spectrum'))
+    spectrum_sources = str(payload.get('spectrum_sources') or '').strip()
+    spectrum_links_raw = str(payload.get('spectrum_links') or '').strip()
+    spectrum_links = [x.strip() for x in spectrum_links_raw.replace(';', ',').split(',') if x.strip()]
+    spectra_rows = pd.DataFrame()
+    for key in lookup_keys:
+        spectra_rows = _load_spectra_rows(key, run_dir)
+        if not spectra_rows.empty:
+            break
+
+    spectra_children = [
+        html.Div(f"Has spectra: {'yes' if has_spectrum else 'no'}", style={'fontSize': '11px'}),
+        html.Div(f"Sources: {spectrum_sources or 'none'}", style={'fontSize': '11px', 'color': '#9fb6cb'}),
+    ]
+    if not spectra_rows.empty:
+        spectra_rows = spectra_rows.head(8)
+        hdr = html.Tr([html.Th('survey'), html.Th('catalog'), html.Th('sep\"')])
+        body = [
+            html.Tr([
+                html.Td(str(r.get('survey', ''))),
+                html.Td(str(r.get('catalog', ''))),
+                html.Td(f"{float(r.get('sep_arcsec')):.2f}" if pd.notna(r.get('sep_arcsec')) else ''),
+            ])
+            for _, r in spectra_rows.iterrows()
+        ]
+        spectra_children.append(html.Table([html.Thead(hdr), html.Tbody(body)], style={'width': '100%', 'fontSize': '10px'}))
+    if spectrum_links:
+        spectra_children.append(
+            html.Div([
+                html.Div('Links:', style={'fontSize': '11px', 'marginTop': '4px'}),
+                html.Div([
+                    html.A(link, href=link, target='_blank', rel='noopener noreferrer', style={'display': 'block', 'fontSize': '10px'})
+                    for link in spectrum_links
+                ]),
+            ])
+        )
+
+    spectra_card = html.Div([
+        html.Div('Spectra', style={'fontWeight': '600', 'marginBottom': '4px'}),
+        *spectra_children,
+    ], style=card_style)
+
+    # ATLAS summary
+    atlas_card = html.Div([
+        html.Div('ATLAS', style={'fontWeight': '600', 'marginBottom': '4px'}),
+        html.Div(f"Photometry: {'yes' if _coerce_bool(payload.get('atlas_has_phot')) else 'no'}", style={'fontSize': '11px'}),
+        html.Div(f"cyan n/range: {payload.get('atlas_n_det_cyan', 'n/a')} / {payload.get('atlas_cyan_range', 'n/a')}", style={'fontSize': '11px'}),
+        html.Div(f"orange n/range: {payload.get('atlas_n_det_orange', 'n/a')} / {payload.get('atlas_orange_range', 'n/a')}", style={'fontSize': '11px'}),
+    ], style=card_style)
+
+    # NEOWISE summary + optional light curve panel
+    neowise_epochs = payload.get('neowise_n_epochs', 0)
+    neowise_rows = pd.DataFrame()
+    neowise_path = None
+    if run_dir is not None:
+        idx_map = _index_neowise_paths(str(run_dir.resolve()))
+        for key in lookup_keys:
+            path_str = idx_map.get(str(key))
+            if path_str:
+                neowise_path = Path(path_str)
+                break
+    neowise_plot = None
+    if neowise_path and neowise_path.exists():
+        try:
+            neowise_rows = pd.read_parquet(neowise_path)
+            neowise_plot = dcc.Graph(
+                figure=_build_neowise_figure(neowise_rows),
+                config={'displayModeBar': False},
+                style={'height': '250px'},
+            )
+        except Exception:
+            neowise_plot = html.Div(f"Could not load NEOWISE parquet: {neowise_path}", style={'fontSize': '10px', 'color': '#c77'})
+
+    neowise_children = [
+        html.Div(f"Epochs: {neowise_epochs}", style={'fontSize': '11px'}),
+        html.Div(f"W1 range: {payload.get('neowise_w1_range', 'n/a')}", style={'fontSize': '11px'}),
+        html.Div(f"W2 range: {payload.get('neowise_w2_range', 'n/a')}", style={'fontSize': '11px'}),
+    ]
+    if neowise_path:
+        neowise_children.append(html.Div(f"File: {neowise_path.name}", style={'fontSize': '10px', 'color': '#9fb6cb'}))
+    if neowise_plot is not None:
+        neowise_children.append(neowise_plot)
+
+    neowise_card = html.Div([
+        html.Div('NEOWISE', style={'fontWeight': '600', 'marginBottom': '4px'}),
+        *neowise_children,
+    ], style=card_style)
+
+    return [spectra_card, atlas_card, neowise_card]
+
+
 # ---- sidebar filter helpers ------------------------------------------------
 _ATF_OPTS = [{'label': v, 'value': v} for v in ('Any', 'True', 'False')]
 _inp_style = {'width': '100%', 'margin-bottom': '4px', 'font-size': '11px'}
@@ -2152,6 +2392,16 @@ def create_layout():
                             ], className='meta-toolbar'),
                             html.Div(id='candidate-info-grid', className='metadata-sections candidate-metadata'),
                         ]),
+                        html.Details([
+                            html.Summary('External Data', style={'cursor': 'pointer'}),
+                            dcc.Loading(
+                                html.Div(
+                                    id='external-followup-panel',
+                                    style={'padding': '8px 10px', 'display': 'grid', 'gap': '8px'},
+                                ),
+                                type='default',
+                            ),
+                        ], id='external-followup-details', open=False, className='metadata-sections', style={'margin-top': '0'}),
                         html.Div(id='splitter-metadata', className='panel-splitter status-splitter',
                                  title='Drag to resize'),
                         # Run config / reproducibility
@@ -3318,6 +3568,35 @@ def update_display(render_request, applied_nonce, queue_data):
         json.dumps(run_params, indent=2, sort_keys=True) if run_params else '',
         nonce,
     )
+
+
+@app.callback(
+    Output('external-followup-panel', 'children'),
+    [Input('external-followup-details', 'open'),
+     Input('current-index', 'data'),
+     Input('queue-data', 'data')],
+    prevent_initial_call=False,
+)
+def update_external_followup_panel(is_open, idx, queue_data):
+    """Lazy-load external follow-up artifacts only when panel is open."""
+    if not is_open:
+        return html.Div(
+            "Expand this section to load external spectra/light-curve artifacts.",
+            style={'font-size': '11px', 'color': '#8a99a8'}
+        )
+
+    if not queue_data or not queue_data.get('candidate_ids'):
+        return html.Div("No candidates loaded.", style={'font-size': '11px', 'color': '#c77'})
+
+    candidate_ids = queue_data.get('candidate_ids', [])
+    if idx is None or idx < 0 or idx >= len(candidate_ids):
+        return html.Div("Invalid candidate index.", style={'font-size': '11px', 'color': '#c77'})
+
+    candidate_id = str(candidate_ids[idx])
+    with closing(db_connect(Path(DB_PATH))) as conn:
+        payload = get_candidate_payload(conn, candidate_id) or {}
+
+    return _render_external_followup(payload, candidate_id)
 
 
 @app.callback(

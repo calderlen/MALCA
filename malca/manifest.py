@@ -57,7 +57,7 @@ def _process_index_file(csv_path: Path, mag_bin: str, lc_root: Path, id_column: 
     return records
 
 
-def iter_source_records(
+def iter_light_curve_entries(
     index_root: Path,
     lc_root: Path,
     mag_bins: Sequence[str],
@@ -67,7 +67,7 @@ def iter_source_records(
     n_workers: int = 1,
 ) -> Iterable[dict[str, object]]:
     """
-    Yield dictionaries that describe each source found in the index files.
+    Yield dictionaries that describe each light-curve entry in index files.
     """
     for mag_bin in tqdm(mag_bins, desc="mag bins", disable=not show_progress):
         idx_dir = index_root / mag_bin
@@ -104,7 +104,7 @@ def iter_source_records(
                     yield rec
 
 
-def build_manifest_dataframe(
+def build_manifest(
     index_root: Path,
     lc_root: Path,
     *,
@@ -115,7 +115,7 @@ def build_manifest_dataframe(
 ) -> pd.DataFrame:
     seen: dict[str, dict[str, object]] = {}
     duplicates = 0
-    for record in iter_source_records(
+    for record in iter_light_curve_entries(
         index_root,
         lc_root,
         mag_bins,
@@ -149,6 +149,46 @@ def build_manifest_dataframe(
     df = pd.DataFrame(seen.values())
     df = df.sort_values(["mag_bin", "source_id"]).reset_index(drop=True)
     return df
+
+
+def iter_source_records(
+    index_root: Path,
+    lc_root: Path,
+    mag_bins: Sequence[str],
+    *,
+    id_column: str = "asas_sn_id",
+    show_progress: bool = True,
+    n_workers: int = 1,
+) -> Iterable[dict[str, object]]:
+    """Compatibility wrapper for older name; use iter_light_curve_entries."""
+    yield from iter_light_curve_entries(
+        index_root,
+        lc_root,
+        mag_bins,
+        id_column=id_column,
+        show_progress=show_progress,
+        n_workers=n_workers,
+    )
+
+
+def build_manifest_dataframe(
+    index_root: Path,
+    lc_root: Path,
+    *,
+    mag_bins: Sequence[str],
+    id_column: str,
+    show_progress: bool = True,
+    n_workers: int = 1,
+) -> pd.DataFrame:
+    """Compatibility wrapper for older name; use build_manifest."""
+    return build_manifest(
+        index_root,
+        lc_root,
+        mag_bins=mag_bins,
+        id_column=id_column,
+        show_progress=show_progress,
+        n_workers=n_workers,
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -208,7 +248,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     mag_bins = args.mag_bins if args.mag_bins else MAG_BINS
-    df = build_manifest_dataframe(
+    df = build_manifest(
         index_root=args.index_root.expanduser(),
         lc_root=args.lc_root.expanduser(),
         mag_bins=mag_bins,

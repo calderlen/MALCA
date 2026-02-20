@@ -21,14 +21,68 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 import astropy.units as u
-import pyvo
+
+try:
+    import pyvo
+except Exception:
+    class _MissingTAPService:
+        def __init__(self, *_args, **_kwargs) -> None:
+            raise ImportError(
+                "pyvo is required for StarHorse/remote TAP queries. "
+                "Install with `pip install pyvo` to enable this functionality."
+            )
+
+    class _PyvoStub:
+        class dal:
+            TAPService = _MissingTAPService
+
+    pyvo = _PyvoStub()
+
 from astropy.coordinates import SkyCoord
 from astropy.table import Table
-from astroquery.xmatch import XMatch
-from astroquery.vizier import Vizier
-from astroquery.ipac.irsa import Irsa
-import banyan_sigma as banyan_sigma_pkg
-from dustmaps3d import dustmaps3d
+
+try:
+    from astroquery.xmatch import XMatch
+except Exception:
+    class XMatch:  # type: ignore[no-redef]
+        @staticmethod
+        def query(*_args, **_kwargs):
+            raise ImportError("astroquery is required for XMatch queries")
+
+try:
+    from astroquery.vizier import Vizier
+except Exception:
+    class Vizier:  # type: ignore[no-redef]
+        ROW_LIMIT = -1
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            raise ImportError("astroquery is required for VizieR queries")
+
+        @staticmethod
+        def query_region(*_args, **_kwargs):
+            raise ImportError("astroquery is required for VizieR queries")
+
+try:
+    from astroquery.ipac.irsa import Irsa
+except Exception:
+    class Irsa:  # type: ignore[no-redef]
+        @staticmethod
+        def query_tap(*_args, **_kwargs):
+            raise ImportError("astroquery is required for IRSA TAP queries")
+
+try:
+    import banyan_sigma as banyan_sigma_pkg
+except Exception:
+    class _BanyanStub:
+        pass
+
+    banyan_sigma_pkg = _BanyanStub()
+
+try:
+    from dustmaps3d import dustmaps3d
+except Exception:
+    def dustmaps3d(*_args, **_kwargs):
+        raise ImportError("dustmaps3d is required for 3D dust extinction queries")
 
 # Suppress astropy warnings
 import warnings

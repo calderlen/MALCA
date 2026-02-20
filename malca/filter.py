@@ -4,7 +4,7 @@ These filters use both baseline data and event detection results.
 
 Note: This module is currently for signal amplitude filtering only.
 Other filters have been separated into:
-    - pre_filter.py: filters before events.py (based on raw LC data)
+    - pre_filter.py / pre_tag.py: pre-event tagging filters
     - post_filter.py: filters after events.py (based on events.py output)
 
 Filters:
