@@ -4,6 +4,8 @@ import sys
 import argparse
 import json
 import time
+import sqlite3
+import re
 from decimal import Decimal, InvalidOperation
 from contextlib import closing
 from functools import lru_cache
@@ -895,162 +897,72 @@ app.index_string = '''
             font-size: 11px;
         }
 
-        /* ------------------------------------------------------------------ */
-        /* Solarized light theme overrides (easy-on-eyes, not pure white)     */
-        /* ------------------------------------------------------------------ */
-        body[data-theme="solarized"] {
-            background-color: #fdf6e3 !important;
-            color: #586e75 !important;
+        /* Theme overrides: dark-only options */
+        body[data-theme="dracula"] {
+            background-color: #282a36 !important;
+            color: #f8f8f2 !important;
         }
-        body[data-theme="solarized"] .main-container {
-            background-color: #fdf6e3 !important;
+        body[data-theme="nord"] {
+            background-color: #2e3440 !important;
+            color: #d8dee9 !important;
         }
-        body[data-theme="solarized"] .sidebar {
-            background-color: #eee8d5 !important;
-            border-right: 1px solid #93a1a1 !important;
-            color: #586e75 !important;
+        body[data-theme="gruvbox"] {
+            background-color: #282828 !important;
+            color: #ebdbb2 !important;
         }
-        body[data-theme="solarized"] .sidebar .section-title,
-        body[data-theme="solarized"] .sidebar details summary,
-        body[data-theme="solarized"] .help-link {
-            color: #268bd2 !important;
+        body[data-theme="dracula"] .main-container,
+        body[data-theme="nord"] .main-container,
+        body[data-theme="gruvbox"] .main-container {
+            background-color: inherit !important;
         }
-        body[data-theme="solarized"] .sidebar details summary:hover,
-        body[data-theme="solarized"] .help-link:hover {
-            color: #2aa198 !important;
-        }
-        body[data-theme="solarized"] .sidebar hr {
-            border-top: 1px solid #93a1a1 !important;
-        }
-        body[data-theme="solarized"] .sidebar label,
-        body[data-theme="solarized"] .header-key-info .item,
-        body[data-theme="solarized"] .plot-status,
-        body[data-theme="solarized"] .camera-diag,
-        body[data-theme="solarized"] .plot-stats,
-        body[data-theme="solarized"] .run-config-panel,
-        body[data-theme="solarized"] .metadata-sections,
-        body[data-theme="solarized"] .control-bar,
-        body[data-theme="solarized"] .review-form,
-        body[data-theme="solarized"] .recent-activity {
-            color: #586e75 !important;
-        }
-        body[data-theme="solarized"] .header-bar {
-            background-color: #eee8d5 !important;
-            border-bottom: 1px solid #93a1a1 !important;
-        }
-        body[data-theme="solarized"] #progress-text {
-            color: #268bd2 !important;
-        }
-        body[data-theme="solarized"] .notification {
-            color: #586e75 !important;
-        }
-        body[data-theme="solarized"] .plot-container,
-        body[data-theme="solarized"] .plot-frame {
-            background-color: #fdf6e3 !important;
-        }
-        body[data-theme="solarized"] .metadata-sections,
-        body[data-theme="solarized"] .plot-status,
-        body[data-theme="solarized"] .camera-diag,
-        body[data-theme="solarized"] .plot-stats,
-        body[data-theme="solarized"] .run-config-panel,
-        body[data-theme="solarized"] .control-bar,
-        body[data-theme="solarized"] .review-form,
-        body[data-theme="solarized"] .recent-activity {
-            background-color: #f5efdc !important;
-            border-color: #93a1a1 !important;
-        }
-        body[data-theme="solarized"] .metadata-health {
-            background-color: #f5efdc !important;
-            border-color: #93a1a1 !important;
-        }
-        body[data-theme="solarized"] .metadata-health .chip {
-            background-color: #eee8d5 !important;
-            border-color: #93a1a1 !important;
-            color: #586e75 !important;
-        }
-        body[data-theme="solarized"] .metadata-health .detail {
-            color: #586e75 !important;
-        }
-        body[data-theme="solarized"] .metadata-health.metadata-health-base .chip {
-            color: #b58900 !important;
-            border-color: rgba(181, 137, 0, 0.55) !important;
-            background-color: rgba(238, 232, 213, 0.9) !important;
-        }
-        body[data-theme="solarized"] .metadata-health.metadata-health-partial .chip {
-            color: #268bd2 !important;
-            border-color: rgba(38, 139, 210, 0.5) !important;
-            background-color: rgba(238, 232, 213, 0.92) !important;
-        }
-        body[data-theme="solarized"] .metadata-health.metadata-health-enriched .chip {
-            color: #2aa198 !important;
-            border-color: rgba(42, 161, 152, 0.5) !important;
-            background-color: rgba(238, 232, 213, 0.92) !important;
-        }
-        body[data-theme="solarized"] .metadata-sections summary {
-            color: #268bd2 !important;
-        }
-        body[data-theme="solarized"] .metadata-sections summary:hover {
-            color: #2aa198 !important;
-        }
-        body[data-theme="solarized"] .action-btn,
-        body[data-theme="solarized"] .badge-btn,
-        body[data-theme="solarized"] .score-btn,
-        body[data-theme="solarized"] .compact-btn,
-        body[data-theme="solarized"] .label-chip,
-        body[data-theme="solarized"] .status-chip {
-            background-color: #eee8d5 !important;
-            color: #586e75 !important;
-            border-color: #93a1a1 !important;
-        }
-        body[data-theme="solarized"] .action-btn.primary {
-            background-color: #268bd2 !important;
-            color: #fdf6e3 !important;
-            border-color: #268bd2 !important;
-        }
-        body[data-theme="solarized"] input,
-        body[data-theme="solarized"] textarea,
-        body[data-theme="solarized"] select {
-            background-color: #fdf6e3 !important;
-            color: #586e75 !important;
-            border-color: #93a1a1 !important;
-        }
-        body[data-theme="solarized"] ::placeholder {
-            color: #93a1a1 !important;
-        }
-        body[data-theme="solarized"] .dash-checklist label,
-        body[data-theme="solarized"] .dash-radioitems label {
-            color: #586e75 !important;
-        }
-        body[data-theme="solarized"] .dash-dropdown,
-        body[data-theme="solarized"] .dash-dropdown .Select-control,
-        body[data-theme="solarized"] .dash-dropdown .Select-menu-outer,
-        body[data-theme="solarized"] .dash-dropdown .Select-input input,
-        body[data-theme="solarized"] .dash-dropdown .Select-value-label {
-            background-color: #fdf6e3 !important;
-            color: #586e75 !important;
-            border-color: #93a1a1 !important;
-        }
-        body[data-theme="solarized"] .plot-toolbar .rc-slider-rail {
-            background-color: #d8ccb3 !important;
-        }
-        body[data-theme="solarized"] .plot-toolbar .rc-slider-track {
-            background-color: #268bd2 !important;
-        }
-        body[data-theme="solarized"] .plot-toolbar .rc-slider-handle {
-            border-color: #268bd2 !important;
-            background-color: #fdf6e3 !important;
-            box-shadow: 0 0 0 3px rgba(38, 139, 210, 0.18) !important;
-            outline: none !important;
-        }
-        body[data-theme="solarized"] .plot-toolbar .rc-slider-tooltip-inner {
-            background-color: #268bd2 !important;
-            border: 1px solid #268bd2 !important;
-            color: #fdf6e3 !important;
-        }
-        body[data-theme="solarized"] .plot-toolbar .rc-slider-tooltip-arrow {
-            border-top-color: #268bd2 !important;
-            border-bottom-color: #268bd2 !important;
-        }
+        body[data-theme="dracula"] .sidebar,
+        body[data-theme="dracula"] .header-bar,
+        body[data-theme="dracula"] .metadata-sections,
+        body[data-theme="dracula"] .control-bar,
+        body[data-theme="dracula"] .review-form,
+        body[data-theme="dracula"] .plot-status,
+        body[data-theme="dracula"] .run-config-item,
+        body[data-theme="dracula"] .plot-toolbar { background-color: #44475a !important; border-color: #6272a4 !important; color: #f8f8f2 !important; }
+        body[data-theme="nord"] .sidebar,
+        body[data-theme="nord"] .header-bar,
+        body[data-theme="nord"] .metadata-sections,
+        body[data-theme="nord"] .control-bar,
+        body[data-theme="nord"] .review-form,
+        body[data-theme="nord"] .plot-status,
+        body[data-theme="nord"] .run-config-item,
+        body[data-theme="nord"] .plot-toolbar { background-color: #3b4252 !important; border-color: #4c566a !important; color: #d8dee9 !important; }
+        body[data-theme="gruvbox"] .sidebar,
+        body[data-theme="gruvbox"] .header-bar,
+        body[data-theme="gruvbox"] .metadata-sections,
+        body[data-theme="gruvbox"] .control-bar,
+        body[data-theme="gruvbox"] .review-form,
+        body[data-theme="gruvbox"] .plot-status,
+        body[data-theme="gruvbox"] .run-config-item,
+        body[data-theme="gruvbox"] .plot-toolbar { background-color: #3c3836 !important; border-color: #504945 !important; color: #ebdbb2 !important; }
+        body[data-theme="dracula"] .section-title,
+        body[data-theme="dracula"] .help-link,
+        body[data-theme="dracula"] .metadata-sections summary,
+        body[data-theme="dracula"] #progress-text { color: #bd93f9 !important; }
+        body[data-theme="nord"] .section-title,
+        body[data-theme="nord"] .help-link,
+        body[data-theme="nord"] .metadata-sections summary,
+        body[data-theme="nord"] #progress-text { color: #88c0d0 !important; }
+        body[data-theme="gruvbox"] .section-title,
+        body[data-theme="gruvbox"] .help-link,
+        body[data-theme="gruvbox"] .metadata-sections summary,
+        body[data-theme="gruvbox"] #progress-text { color: #fabd2f !important; }
+        body[data-theme="dracula"] .action-btn.primary { background-color: #bd93f9 !important; color: #282a36 !important; border-color: #bd93f9 !important; }
+        body[data-theme="nord"] .action-btn.primary { background-color: #88c0d0 !important; color: #2e3440 !important; border-color: #88c0d0 !important; }
+        body[data-theme="gruvbox"] .action-btn.primary { background-color: #fabd2f !important; color: #282828 !important; border-color: #fabd2f !important; }
+        body[data-theme="dracula"] input, body[data-theme="dracula"] textarea, body[data-theme="dracula"] select,
+        body[data-theme="dracula"] .dash-dropdown .Select-control,
+        body[data-theme="dracula"] .dash-dropdown .Select-menu-outer { background-color: #44475a !important; color: #f8f8f2 !important; border-color: #6272a4 !important; }
+        body[data-theme="nord"] input, body[data-theme="nord"] textarea, body[data-theme="nord"] select,
+        body[data-theme="nord"] .dash-dropdown .Select-control,
+        body[data-theme="nord"] .dash-dropdown .Select-menu-outer { background-color: #3b4252 !important; color: #eceff4 !important; border-color: #4c566a !important; }
+        body[data-theme="gruvbox"] input, body[data-theme="gruvbox"] textarea, body[data-theme="gruvbox"] select,
+        body[data-theme="gruvbox"] .dash-dropdown .Select-control,
+        body[data-theme="gruvbox"] .dash-dropdown .Select-menu-outer { background-color: #3c3836 !important; color: #fbf1c7 !important; border-color: #504945 !important; }
     </style>
 </head>
 <body>
@@ -1593,13 +1505,104 @@ def _resolve_run_dir_from_plot_dir(plot_dir: str | None) -> Path | None:
     if not plot_dir:
         return None
     p = Path(str(plot_dir)).expanduser().resolve()
+    if p.name == "plots":
+        return p.parent
+    if (p / "plots").is_dir():
+        return p
     if (p / "results").is_dir():
         return p
-    if p.name == "plots" and (p.parent / "results").is_dir():
-        return p.parent
     if (p.parent / "results").is_dir():
         return p.parent
+    if (p.parent / "plots").is_dir():
+        return p.parent
     return None
+
+
+def _project_root() -> Path:
+    """Repository root inferred from this file location."""
+    return Path(__file__).resolve().parents[2]
+
+
+def _count_candidates_in_db(path: Path) -> int:
+    """Return number of candidates in DB, or -1 when unavailable."""
+    try:
+        with closing(sqlite3.connect(path)) as conn:
+            row = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='candidates'"
+            ).fetchone()
+            if not row:
+                return -1
+            return int(conn.execute("SELECT COUNT(*) FROM candidates").fetchone()[0])
+    except Exception:
+        return -1
+
+
+def _resolve_db_cli_path(raw_path: str) -> Path:
+    """Resolve --db robustly for both cwd-relative and repo-relative usage."""
+    p = Path(raw_path).expanduser()
+    if p.is_absolute():
+        return p.resolve()
+
+    cwd_candidate = (Path.cwd() / p).resolve()
+    repo_candidate = (_project_root() / p).resolve()
+    existing = [x for x in (cwd_candidate, repo_candidate) if x.exists()]
+
+    if len(existing) == 2:
+        ranked = sorted(
+            existing,
+            key=lambda x: (_count_candidates_in_db(x), x.stat().st_size),
+            reverse=True,
+        )
+        return ranked[0]
+    if len(existing) == 1:
+        return existing[0]
+    return repo_candidate
+
+
+def _resolve_plot_cli_path(raw_path: str) -> Path:
+    """Resolve --plot-dir robustly for both cwd-relative and repo-relative usage."""
+    p = Path(raw_path).expanduser()
+    if p.is_absolute():
+        return p.resolve()
+
+    cwd_candidate = (Path.cwd() / p).resolve()
+    repo_candidate = (_project_root() / p).resolve()
+
+    if cwd_candidate.exists() and cwd_candidate.is_dir():
+        return cwd_candidate
+    if repo_candidate.exists() and repo_candidate.is_dir():
+        return repo_candidate
+    return repo_candidate
+
+
+def _extract_bundle_scope(path_text: str | None) -> str:
+    """Extract output_bundle_* token from a path-like string."""
+    if not path_text:
+        return ""
+    text = str(path_text)
+    m = re.search(r"(output_bundle_[^/\\]+)", text)
+    return m.group(1) if m else ""
+
+
+def _vetting_mode_for_input(input_path: str | Path | None) -> str:
+    """Classify how import vetting will be satisfied for a source file."""
+    if not input_path:
+        return "re-vetting needed"
+
+    p = Path(str(input_path)).expanduser()
+    try:
+        p = p.resolve()
+    except Exception:
+        pass
+
+    if "vetted" in p.stem.lower():
+        return "Using vetted input"
+
+    cache_path = Path(str(p) + ".vetting_cache.parquet")
+    if cache_path.exists():
+        return "cache hit"
+
+    return "re-vetting needed"
 
 
 def _load_spectra_rows(candidate_id: str, run_dir: Path | None) -> pd.DataFrame:
@@ -2120,7 +2123,7 @@ def create_layout():
         # Data stores
         dcc.Store(id='queue-data'),
         dcc.Store(id='current-index', data=0),
-        dcc.Store(id='current-score', data=2),
+        dcc.Store(id='current-score', data=None),
         dcc.Store(id='event-class-store', data='unclassified'),
         dcc.Store(id='pending-prefix', data=''),  # kept for callback compatibility
         dcc.Store(id='needs-followup-store', data=False),
@@ -2132,6 +2135,7 @@ def create_layout():
         dcc.Store(id='plot-render-request', data={'nonce': 1, 'ts': 0.0, 'state': {'idx': 0, 'plot_mode': 'native', 'overlay_values': ['baseline', 'markers', 'residuals', 'filter_bad_cameras', 'diagnostics'], 'selected_cameras': [], 'preset': 'Diagnostics', 'theme': 'dark', 'residual_height': 0.28, 'baseline_opacity': 0.5}}),
         dcc.Store(id='plot-render-applied', data=0),
         dcc.Store(id='plot-defaults-initialized', data=False),
+        dcc.Store(id='queue-source-path', data=''),
         dcc.Store(id='run-config-json-store', data=''),
         dcc.Store(id='theme-mode-store', data='dark'),
         dcc.Store(id='review-session-start', data=None, storage_type='session'),
@@ -2148,14 +2152,6 @@ def create_layout():
 
         # Collapsible sidebar
         html.Div([
-            html.Div('Run Directory', className='section-title'),
-            dcc.Input(id='run-dir-path', placeholder='Run directory path', type='text',
-                     style=_inp_style),
-            html.Button('Auto-Detect Files', id='auto-detect-btn', n_clicks=0, className='action-btn',
-                       style={'width': '100%', 'font-size': '11px', 'margin-bottom': '4px'}),
-
-            html.Hr(),
-
             html.Div('Filters', className='section-title'),
 
             dcc.Checklist(
@@ -2279,7 +2275,9 @@ def create_layout():
                 id='theme-mode',
                 options=[
                     {'label': ' Dark', 'value': 'dark'},
-                    {'label': ' Solarized Light', 'value': 'solarized'},
+                    {'label': ' Dracula', 'value': 'dracula'},
+                    {'label': ' Nord', 'value': 'nord'},
+                    {'label': ' Gruvbox', 'value': 'gruvbox'},
                 ],
                 value='dark',
                 style={'margin-bottom': '4px'},
@@ -2605,7 +2603,7 @@ app.clientside_callback(
     function(_tick, currentTheme) {
         try {
             var saved = window.localStorage.getItem('malca.review.theme');
-            if (saved === 'dark' || saved === 'solarized') {
+            if (saved && ['dark', 'dracula', 'nord', 'gruvbox'].includes(saved)) {
                 return saved;
             }
         } catch (e) {
@@ -2624,7 +2622,7 @@ app.clientside_callback(
 app.clientside_callback(
     """
     function(theme) {
-        var t = (theme === 'solarized') ? 'solarized' : 'dark';
+        var t = ['dark', 'dracula', 'nord', 'gruvbox'].includes(theme) ? theme : 'dark';
         try {
             document.body.setAttribute('data-theme', t);
             window.localStorage.setItem('malca.review.theme', t);
@@ -3093,11 +3091,12 @@ _queue_states = (
 @app.callback(
     Output('queue-data', 'data'),
     [Input('refresh-btn', 'n_clicks'),
-     Input('import-trigger', 'data')],
+     Input('import-trigger', 'data'),
+     Input('queue-source-path', 'data')],
     _queue_states,
     prevent_initial_call=False
 )
-def load_queue(refresh_clicks, import_trigger, *state_values):
+def load_queue(refresh_clicks, import_trigger, queue_source_scope, *state_values):
     """Load queue data from all sidebar filter states."""
     with closing(db_connect(Path(DB_PATH))) as conn:
         # Unpack state values in the same order as _queue_states
@@ -3123,6 +3122,9 @@ def load_queue(refresh_clicks, import_trigger, *state_values):
 
         filter_params['sort_col'] = next(it) or 'candidate_id'
         filter_params['sort_desc'] = 'yes' in (next(it) or [])
+
+        if queue_source_scope:
+            filter_params['source_path_like'] = str(queue_source_scope)
 
         queue_data = create_queue_data_dict(conn, filter_params)
         return queue_data
@@ -3202,6 +3204,12 @@ def handle_keyboard(key_value, current_idx, queue_data, current_score,
         new_state = not bool(needs_followup)
         label = "ON" if new_state else "OFF"
         return no_update, f"Followup: {label}", no_update, new_state, no_update, no_update, no_update
+
+    if key == 'Enter':
+        if current_score is None:
+            return no_update, "⚠ Confidence required", no_update, no_update, no_update, no_update, no_update
+        if not event_class or event_class == 'unclassified':
+            return no_update, "⚠ Class required", no_update, no_update, no_update, no_update, no_update
 
     # --- Navigation / scoring / save via handle_key_action ---
     with closing(db_connect(Path(DB_PATH))) as conn:
@@ -3388,8 +3396,8 @@ def update_display(render_request, applied_nonce, queue_data):
     grouped = extract_review_metadata_grouped(payload)
     metadata_health = _render_metadata_health(grouped)
     vetting_banner = _render_vetting_banner(payload)
-    label_color = '#657b83' if theme_mode == 'solarized' else '#888'
-    value_color = '#586e75' if theme_mode == 'solarized' else '#e0e0e0'
+    label_color = '#888'
+    value_color = '#e0e0e0'
     grid_items = []
     for group_name, items in grouped:
         field_divs = [
@@ -3766,7 +3774,7 @@ app.clientside_callback(
 def load_review_form(idx, queue_data):
     """Load existing review for current candidate into stores."""
     if not queue_data or queue_data['queue_size'] == 0:
-        return 'unclassified', False, 1, '', 2
+        return 'unclassified', False, 1, '', None
 
     candidate_id = queue_data['candidate_ids'][idx]
     with closing(db_connect(Path(DB_PATH))) as conn:
@@ -3783,7 +3791,7 @@ def load_review_form(idx, queue_data):
         review.get('status', 'unreviewed') == 'needs_followup',
         review.get('review_pass', 1),
         review.get('notes', ''),
-        review.get('interest_score', 2),
+        review.get('interest_score'),
     )
 
 
@@ -3849,7 +3857,7 @@ def save_review_callback(n_clicks, idx, queue_data, score,
 
     candidate_id = queue_data['candidate_ids'][idx]
     new_pass, _ = _do_save(
-        candidate_id, score or 0, event_class, needs_followup, notes, 'save_button',
+        candidate_id, score, event_class, needs_followup, notes, 'save_button',
     )
 
     return "✓ Saved", new_pass
@@ -3896,9 +3904,15 @@ def done_callback(n_clicks, idx, queue_data, score,
     if idx >= len(queue_data['candidate_ids']):
         return no_update, "Invalid candidate index", no_update
 
+    if score is None:
+        return no_update, "⚠ Confidence required", no_update
+
+    if not event_class or event_class == 'unclassified':
+        return no_update, "⚠ Class required", no_update
+
     candidate_id = queue_data['candidate_ids'][idx]
     new_pass, _ = _do_save(
-        candidate_id, score or 0, event_class, needs_followup, notes, 'done_button',
+        candidate_id, score, event_class, needs_followup, notes, 'done_button',
     )
 
     queue_size = queue_data['queue_size']
@@ -4196,56 +4210,93 @@ def toggle_activity(n_clicks, key_value, is_visible):
     return style, new_state
 
 
-# Auto-detect run directory files
+# Auto-populate import candidates from run directory inferred via plot directory
 @app.callback(
     [Output('import-path', 'value'),
      Output('sidebar-status', 'children', allow_duplicate=True)],
-    Input('auto-detect-btn', 'n_clicks'),
-    State('run-dir-path', 'value'),
-    prevent_initial_call=True
+    Input('keyboard-init', 'n_intervals'),
+    State('import-path', 'value'),
+    prevent_initial_call='initial_duplicate',
 )
-def auto_detect_files(n_clicks, run_dir_path):
-    """Auto-detect files from run directory."""
-    if not n_clicks or not run_dir_path:
+def auto_populate_detected_files(_n_intervals, current_import_path):
+    """Auto-detect linked run files on app startup and fill import path."""
+    if current_import_path:
         return no_update, no_update
 
-    try:
-        run_dir = Path(run_dir_path).expanduser().resolve()
-        detected = detect_run_directory_files(run_dir)
+    restored_path = None
+    with closing(db_connect(Path(DB_PATH))) as conn:
+        restored_path = str(load_app_state(conn, "last_input_file", "") or "").strip()
 
-        messages = []
-        import_path_value = no_update
+    run_dir = _resolve_run_dir_from_plot_dir(PLOT_DIR)
+    if run_dir:
+        try:
+            detected = detect_run_directory_files(run_dir)
+        except Exception as e:
+            detected = {'candidates': None, 'warnings': [f"Auto-detect failed: {str(e)}"]}
 
-        with closing(db_connect(Path(DB_PATH))) as conn:
-            if detected['candidates']:
-                import_path_value = str(detected['candidates'])
-                save_app_state(conn, "last_input_file", str(detected['candidates']))
-                messages.append(f"✓ Candidates: {detected['candidates'].name}")
+        candidates_path = detected.get('candidates')
+        if candidates_path:
+            resolved_candidates = str(Path(candidates_path).expanduser().resolve())
+            vetting_mode = _vetting_mode_for_input(resolved_candidates)
+            with closing(db_connect(Path(DB_PATH))) as conn:
+                save_app_state(conn, "last_input_file", resolved_candidates)
+            return resolved_candidates, (
+                f"✓ Auto-detected candidates: {Path(resolved_candidates).name} | "
+                f"Vetting mode: {vetting_mode}"
+            )
 
-            if detected['plot_dir']:
-                global PLOT_DIR
-                detected_plot_dir = Path(detected['plot_dir']).expanduser().resolve()
-                PLOT_DIR = str(detected_plot_dir)
-                save_app_state(conn, "last_plot_dir", str(detected_plot_dir))
-                messages.append(f"✓ Plots: {detected['plot_dir'].name}/")
+        warnings = detected.get('warnings') or []
+        if restored_path and Path(restored_path).exists():
+            restored_mode = _vetting_mode_for_input(restored_path)
+            return str(Path(restored_path).resolve()), (
+                f"⚠ {warnings[0]} | restored last candidates: {Path(restored_path).name} | "
+                f"Vetting mode: {restored_mode}"
+                if warnings else (
+                    f"✓ Restored last candidates: {Path(restored_path).name} | "
+                    f"Vetting mode: {restored_mode}"
+                )
+            )
 
-            if detected['gaia_cache']:
-                save_app_state(conn, "last_gaia_cache", str(detected['gaia_cache']))
-                messages.append(f"✓ Gaia cache")
+        if warnings:
+            return no_update, f"⚠ {warnings[0]}"
 
-            save_app_state(conn, "last_run_dir", str(run_dir))
+    if restored_path and Path(restored_path).exists():
+        restored_mode = _vetting_mode_for_input(restored_path)
+        return str(Path(restored_path).resolve()), (
+            f"✓ Restored last candidates: {Path(restored_path).name} | "
+            f"Vetting mode: {restored_mode}"
+        )
 
-        if detected['warnings']:
-            for warn in detected['warnings']:
-                messages.append(f"⚠ {warn}")
+    return no_update, "⚠ Could not auto-detect candidates; set import path manually."
 
-        if not detected['candidates'] and not detected['plot_dir']:
-            return no_update, "✗ No files detected"
 
-        return import_path_value, " | ".join(messages)
+@app.callback(
+    Output('queue-source-path', 'data'),
+    [Input('keyboard-init', 'n_intervals'),
+     Input('import-path', 'value')],
+    prevent_initial_call=False,
+)
+def update_queue_source_scope(_n_intervals, import_path):
+    """Scope queue to the active run bundle token when possible."""
+    run_dir = _resolve_run_dir_from_plot_dir(PLOT_DIR)
+    if run_dir is not None:
+        return run_dir.name
 
-    except Exception as e:
-        return no_update, f"✗ Auto-detect failed: {str(e)}"
+    scope = _extract_bundle_scope(import_path)
+    return scope or ''
+
+
+@app.callback(
+    Output('sidebar-status', 'children', allow_duplicate=True),
+    Input('import-path', 'value'),
+    prevent_initial_call=True,
+)
+def show_vetting_mode_status(import_path):
+    """Show whether import will use vetted input, cache, or re-vetting."""
+    if not import_path:
+        return no_update
+    mode = _vetting_mode_for_input(import_path)
+    return f"Vetting mode: {mode}"
 
 
 # Import candidates
@@ -4276,6 +4327,8 @@ def import_candidates_callback(n_clicks, import_path, characterize_on,
             df = load_candidates_file(src)
 
             enable_characterize = 'yes' in (characterize_on or [])
+            enable_vetting = 'yes' in (vet_on or [])
+            vetting_mode = _vetting_mode_for_input(src) if enable_vetting else "vetting disabled"
 
             n_rows, n_new = import_candidates(
                 conn, df, str(src),
@@ -4285,11 +4338,14 @@ def import_candidates_callback(n_clicks, import_path, characterize_on,
                 characterize_chunk_size=int(chunk_size) if enable_characterize and chunk_size else GAIA_CHUNK_SIZE,
                 characterize_dust='yes' in (dust_on or []) if enable_characterize else False,
                 characterize_starhorse=starhorse.strip() if enable_characterize and starhorse and starhorse.strip() else None,
-                vet_before_import='yes' in (vet_on or []),
+                vet_before_import=enable_vetting,
             )
             save_app_state(conn, "last_input_file", str(src))
             # Increment trigger to cause queue refresh
-            return f"✓ Imported {n_rows} rows ({n_new} new)", (current_trigger or 0) + 1
+            return (
+                f"✓ Imported {n_rows} rows ({n_new} new) | Vetting mode: {vetting_mode}",
+                (current_trigger or 0) + 1,
+            )
     except Exception as e:
         return f"✗ Import failed: {str(e)}", no_update
 
@@ -4366,7 +4422,7 @@ def main():
                         help="Merge vetting results from a parquet file into the review DB and exit")
     args = parser.parse_args()
 
-    DB_PATH = str(Path(args.db).expanduser().resolve())
+    DB_PATH = str(_resolve_db_cli_path(args.db))
 
     if args.merge_vetting:
         vetting_path = Path(args.merge_vetting).expanduser().resolve()
@@ -4383,7 +4439,12 @@ def main():
 
     # Auto-detect plot directory if not specified
     if args.plot_dir:
-        PLOT_DIR = str(Path(args.plot_dir).expanduser().resolve())
+        PLOT_DIR = str(_resolve_plot_cli_path(args.plot_dir))
+        if not Path(PLOT_DIR).exists() or not Path(PLOT_DIR).is_dir():
+            print(f"❌ Error: plot directory does not exist: {PLOT_DIR}")
+            print("Use an existing run bundle plots directory, for example:")
+            print("  malca review --plot-dir output/runs/output_bundle_13_13.5/plots")
+            sys.exit(1)
     else:
         # Try current directory first
         if Path('./plots').is_dir():

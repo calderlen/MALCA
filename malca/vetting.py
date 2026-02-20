@@ -671,9 +671,9 @@ def _alerce_query_single(ra: float, dec: float, radius_arcsec: float) -> dict | 
         requests.get,
         f"{ALERCE_API_BASE}/ztf/v1/objects/",
         params={
-            "conesearch_input[ra]": ra,
-            "conesearch_input[dec]": dec,
-            "conesearch_input[radius]": radius_arcsec,
+            "ra": ra,
+            "dec": dec,
+            "radius": radius_arcsec,
             "page_size": 5,
             "order_by": "ndet",
             "order_mode": "DESC",

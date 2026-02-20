@@ -52,19 +52,46 @@ def _cache_put(cache: OrderedDict, key, value) -> None:
 
 def resolve_lightcurve_path(payload: dict, plot_dir: Path | None) -> Path | None:
     """Resolve a candidate light-curve path for native plotting."""
+    bundle_dir = None
+    if plot_dir is not None:
+        bundle_dir = plot_dir.parent / "bundle_assets" / "lightcurves"
+
+    candidate_names: list[str] = []
+
     keys = ("path", "lc_path")
     for key in keys:
         raw_path = payload.get(key)
         if not raw_path:
             continue
         candidate = Path(str(raw_path)).expanduser()
+        candidate_names.append(candidate.name)
+        if candidate.suffix == ".dat2":
+            candidate_names.append(candidate.with_suffix(".raw2").name)
         if candidate.exists():
             return candidate
-        if plot_dir is None:
-            continue
-        bundle_candidate = plot_dir.parent / "bundle_assets" / "lightcurves" / candidate.name
-        if bundle_candidate.exists():
-            return bundle_candidate
+
+    candidate_id = payload.get("candidate_id")
+    if candidate_id is not None:
+        cid = str(candidate_id).strip()
+        if cid:
+            candidate_names.extend([f"{cid}.dat2", f"{cid}.raw2"])
+
+    asas_sn_id = payload.get("asas_sn_id")
+    if asas_sn_id is not None:
+        sid = str(asas_sn_id).strip()
+        if sid:
+            candidate_names.extend([f"{sid}.dat2", f"{sid}.raw2"])
+
+    if bundle_dir is not None:
+        seen: set[str] = set()
+        for name in candidate_names:
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            bundle_candidate = bundle_dir / name
+            if bundle_candidate.exists():
+                return bundle_candidate
+
     return None
 
 
@@ -337,18 +364,44 @@ def _phase_fold_df(df: pd.DataFrame, period_days: float) -> pd.DataFrame:
 
 def _theme_palette(theme: str) -> dict[str, str]:
     mode = str(theme or "dark").lower()
-    if mode == "solarized":
+    if mode == "dracula":
         return {
-            "text": "#586e75",
-            "title": "#073642",
-            "paper_bg": "#fdf6e3",
-            "plot_bg": "#fdf6e3",
-            "grid": "rgba(88,110,117,0.22)",
-            "legend_bg": "rgba(238,232,213,0.94)",
-            "legend_border": "rgba(88,110,117,0.35)",
-            "annotation": "#586e75",
-            "marker_line": "rgba(88,110,117,0.85)",
-            "guide_line": "rgba(88,110,117,0.40)",
+            "text": "#f8f8f2",
+            "title": "#f8f8f2",
+            "paper_bg": "#282a36",
+            "plot_bg": "#282a36",
+            "grid": "rgba(98, 114, 164, 0.25)",
+            "legend_bg": "rgba(40, 42, 54, 0.9)",
+            "legend_border": "rgba(98, 114, 164, 0.4)",
+            "annotation": "#f1fa8c",
+            "marker_line": "rgba(255, 255, 255, 0.9)",
+            "guide_line": "rgba(189, 147, 249, 0.3)",
+        }
+    if mode == "nord":
+        return {
+            "text": "#d8dee9",
+            "title": "#eceff4",
+            "paper_bg": "#2e3440",
+            "plot_bg": "#2e3440",
+            "grid": "rgba(129, 161, 193, 0.15)",
+            "legend_bg": "rgba(59, 66, 82, 0.9)",
+            "legend_border": "rgba(129, 161, 193, 0.3)",
+            "annotation": "#88c0d0",
+            "marker_line": "rgba(236, 239, 244, 0.8)",
+            "guide_line": "rgba(129, 161, 193, 0.3)",
+        }
+    if mode == "gruvbox":
+        return {
+            "text": "#ebdbb2",
+            "title": "#fbf1c7",
+            "paper_bg": "#282828",
+            "plot_bg": "#282828",
+            "grid": "rgba(168, 153, 132, 0.15)",
+            "legend_bg": "rgba(60, 56, 54, 0.9)",
+            "legend_border": "rgba(168, 153, 132, 0.3)",
+            "annotation": "#d79921",
+            "marker_line": "rgba(235, 219, 178, 0.8)",
+            "guide_line": "rgba(254, 128, 25, 0.3)",
         }
     return {
         "text": "#dce5ef",

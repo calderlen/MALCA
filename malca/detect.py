@@ -224,8 +224,13 @@ def _assert_mag_bin_match(expected: list[str], observed: list[str], source: str)
         )
 
 
-def get_out_dir_from_bundle(bundle_path: Path, base_root: Path) -> Path:
-    """Extract run directory name from bundle filename."""
+def get_out_dir_from_bundle(bundle_path: Path, base_root: Path, *, overwrite: bool = False) -> Path:
+    """Extract run directory name from bundle filename.
+
+    If the derived run directory already exists:
+      - return it directly when ``overwrite`` is True
+      - otherwise return a ``_home``-suffixed directory for safety
+    """
     bundle_name = bundle_path.stem  # e.g., "20260209_162336_bundle" -> "20260209_162336_bundle"
     base_name = bundle_name.removesuffix("_bundle")  # Always strip _bundle
 
@@ -234,6 +239,9 @@ def get_out_dir_from_bundle(bundle_path: Path, base_root: Path) -> Path:
 
     candidate = runs_dir / base_name
     if not candidate.exists():
+        return candidate
+
+    if overwrite:
         return candidate
 
     # If exists, append _home
@@ -792,7 +800,7 @@ def main():
     elif args.import_bundle is not None:
         # Auto-derive out_dir from bundle name
         bundle_path = Path(args.import_bundle).expanduser()
-        out_dir = get_out_dir_from_bundle(bundle_path, base_output_root)
+        out_dir = get_out_dir_from_bundle(bundle_path, base_output_root, overwrite=bool(args.overwrite))
         log(f"Using output directory from bundle name: {out_dir}")
     elif args.filtered_file is not None:
         out_dir = Path(args.filtered_file).expanduser().parent
@@ -806,6 +814,13 @@ def main():
             log(f"Reusing existing run directory: {out_dir}")
         else:
             out_dir = default_run_dir(base_output_root)
+    if args.import_bundle is not None and args.overwrite and out_dir.exists():
+        log(f"Overwriting existing imported run directory: {out_dir}")
+        if out_dir.is_dir():
+            shutil.rmtree(out_dir)
+        else:
+            out_dir.unlink()
+
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if args.import_bundle is not None:

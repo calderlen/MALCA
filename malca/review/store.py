@@ -14,7 +14,7 @@ from malca.config.config_paths import VSX_CROSSMATCH_PATH, GAIA_CACHE_FILE
 from malca.config.config_characterize import GAIA_CHUNK_SIZE
 
 
-DEFAULT_DB_PATH = "output/review/review.db"
+DEFAULT_DB_PATH = Path(__file__).resolve().parents[2] / "output" / "review" / "review.db"
 STATUS_OPTIONS = ["unreviewed", "reviewed", "needs_followup"]
 EVENT_CLASS_OPTIONS = [
     "unclassified",
@@ -134,18 +134,34 @@ def detect_run_directory_files(run_dir: Path) -> dict[str, Path | None]:
     else:
         results['warnings'].append("run_params.json not found - may not be a MALCA run directory")
 
-    # Detect candidates file (priority: most enriched first)
-    candidates_priority = [
+    # Detect candidates file.
+    # Priority: vetted products first, then non-vetted products.
+    candidates_priority: list[Path] = []
+
+    vetted_exact = run_dir / "results" / "lc_events_vetted.parquet"
+    if vetted_exact.exists():
+        candidates_priority.append(vetted_exact)
+
+    vetted_pattern = sorted(
+        (run_dir / "results").glob("lc_events_vetted_*.parquet"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    candidates_priority.extend(vetted_pattern)
+
+    for rel_path in (
         "results/lc_events_spectra.parquet",
         "results/lc_events_neighbors.parquet",
         "results/lc_events_classified.parquet",
         "results/lc_events_enriched.parquet",
         "results/lc_events_characterized.parquet",
         "results/lc_events_filtered.parquet",
-    ]
-
-    for rel_path in candidates_priority:
+    ):
         candidate_file = run_dir / rel_path
+        if candidate_file.exists():
+            candidates_priority.append(candidate_file)
+
+    for candidate_file in candidates_priority:
         if candidate_file.exists():
             results['candidates'] = candidate_file
             break
@@ -687,6 +703,18 @@ def query_queue(conn: sqlite3.Connection, *, filters: dict | None = None) -> pd.
     if filters.get('require_failed_any_false'):
         where.append("(c.failed_any = 0)")
 
+    # --- optional source-path scoping (exact path) ---
+    source_path = filters.get('source_path')
+    if source_path:
+        where.append("(c.source_path = ?)")
+        params.append(str(source_path))
+
+    # --- optional source-path scope token (bundle-like substring) ---
+    source_path_like = filters.get('source_path_like')
+    if source_path_like:
+        where.append("(c.source_path LIKE ?)")
+        params.append(f"%{str(source_path_like)}%")
+
     # --- Any / True / False bool-mode filters (auto-generated) ---
     mode_map = {"Any": None, "True": 1, "False": 0}
     for col in _BOOL_COLS:
@@ -894,7 +922,7 @@ def get_review(conn: sqlite3.Connection, candidate_id: str) -> dict:
     ).fetchone()
     if row is None:
         return {
-            "interest_score": 2,
+            "interest_score": None,
             "event_class": "unclassified",
             "review_pass": 1,
             "notes": "",
@@ -902,8 +930,9 @@ def get_review(conn: sqlite3.Connection, candidate_id: str) -> dict:
             "reviewer": "",
             "updated_at": None,
         }
-    score = 2 if row[0] is None else int(row[0])
-    score = int(np.clip(score, 1, 4))
+    score = None if row[0] is None else int(row[0])
+    if score is not None:
+        score = int(np.clip(score, 1, 4))
     return {
         "interest_score": score,
         "event_class": str(row[6]) if row[6] else "unclassified",
@@ -919,7 +948,7 @@ def save_review(
     conn: sqlite3.Connection,
     *,
     candidate_id: str,
-    interest_score: int,
+    interest_score: int | None,
     event_class: str = "unclassified",
     review_pass: int,
     notes: str,
@@ -928,7 +957,10 @@ def save_review(
     event_type: str = "save",
 ) -> None:
     ts = _utc_now()
-    score_int = int(np.clip(int(interest_score), 1, 4))
+    if interest_score is None:
+        score_int = None
+    else:
+        score_int = int(np.clip(int(interest_score), 1, 4))
     pass_int = max(1, int(review_pass))
     ec = str(event_class) if event_class else "unclassified"
     conn.execute(

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import math
 from decimal import Decimal, InvalidOperation
 from typing import Any
+from urllib.parse import quote, quote_plus
 
 import pandas as pd
 
@@ -419,3 +421,128 @@ def extract_review_metadata_grouped(
 def is_group_default_open(group_name: str) -> bool:
     """Whether *group_name* should start expanded in the Dash GUI."""
     return group_name in _DEFAULT_OPEN_GROUPS
+
+
+# ---------------------------------------------------------------------------
+# External lookup URL construction
+# ---------------------------------------------------------------------------
+
+def _safe_float(val: Any) -> float | None:
+    """Return *val* as a float if finite, else ``None``."""
+    if val is None:
+        return None
+    try:
+        f = float(val)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(f):
+        return None
+    return f
+
+
+def _safe_str(val: Any) -> str | None:
+    """Return *val* as a non-empty stripped string, or ``None``."""
+    if val is None:
+        return None
+    if isinstance(val, float) and pd.isna(val):
+        return None
+    s = str(val).strip()
+    return s if s else None
+
+
+def build_external_lookup_links(
+    payload: dict[str, Any],
+) -> list[tuple[str, str]]:
+    """Build ``(label, url)`` pairs for external astronomical services.
+
+    Uses identifier-based URLs when a catalogue ID is available, falling
+    back to coordinate-based (RA/Dec) cone searches otherwise.  Links
+    whose required fields are missing are silently omitted.
+    """
+    links: list[tuple[str, str]] = []
+
+    ra = _safe_float(payload.get("ra"))
+    if ra is None:
+        ra = _safe_float(payload.get("ra_deg"))
+
+    dec = _safe_float(payload.get("dec"))
+    if dec is None:
+        dec = _safe_float(payload.get("dec_deg"))
+
+    has_coords = ra is not None and dec is not None
+
+    # -- SIMBAD ---------------------------------------------------------------
+    simbad_id = _safe_str(payload.get("simbad_main_id"))
+    if simbad_id:
+        links.append((
+            "SIMBAD",
+            f"https://simbad.u-strasbg.fr/simbad/sim-id?Ident={quote_plus(simbad_id)}",
+        ))
+    elif has_coords:
+        links.append((
+            "SIMBAD",
+            f"https://simbad.u-strasbg.fr/simbad/sim-coo?Coord={ra}+{dec}&CooFrame=FK5&CooEpoch=2000&Radius=10&Radius.unit=arcsec",
+        ))
+
+    # -- VizieR ---------------------------------------------------------------
+    if has_coords:
+        links.append((
+            "VizieR",
+            f"https://vizier.cds.unistra.fr/viz-bin/VizieR-4?-c={ra}+{dec}&-c.rs=10",
+        ))
+
+    # -- ADS ------------------------------------------------------------------
+    if simbad_id:
+        links.append((
+            "ADS",
+            f"https://ui.adsabs.harvard.edu/search/q=object%3A%22{quote(simbad_id)}%22",
+        ))
+    elif has_coords:
+        links.append((
+            "ADS",
+            f"https://ui.adsabs.harvard.edu/search/q=pos(%22{ra}+{dec}%22%2C+10s)",
+        ))
+
+    # -- ASAS-SN Sky Patrol ---------------------------------------------------
+    if has_coords:
+        links.append((
+            "Sky Patrol",
+            f"https://asas-sn.osu.edu/sky-patrol/coordinate/{ra}/{dec}",
+        ))
+
+    # -- ALeRCE Explorer ------------------------------------------------------
+    alerce_oid = _safe_str(payload.get("alerce_oid"))
+    if alerce_oid:
+        links.append((
+            "ALeRCE",
+            f"https://alerce.online/object/{quote(alerce_oid)}",
+        ))
+
+    # -- Gaia Archive ---------------------------------------------------------
+    gaia_id = _safe_str(payload.get("gaia_id"))
+    if gaia_id:
+        gaia_id_norm = _format_large_integer_like(gaia_id)
+        links.append((
+            "Gaia",
+            f"https://gea.esac.esa.int/archive/#sourceId={gaia_id_norm}",
+        ))
+
+    # -- TNS ------------------------------------------------------------------
+    tns_name = _safe_str(payload.get("tns_name"))
+    if tns_name:
+        # TNS names are like "AT2021abc" or "SN2020xyz"; strip leading
+        # prefixes that the URL path doesn't expect.
+        tns_slug = tns_name.strip()
+        links.append((
+            "TNS",
+            f"https://www.wis-tns.org/object/{quote(tns_slug)}",
+        ))
+
+    # -- ZTF / IRSA -----------------------------------------------------------
+    if has_coords:
+        links.append((
+            "ZTF",
+            f"https://irsa.ipac.caltech.edu/cgi-bin/Gator/nph-query?catalog=ztf_objects_dr22&objstr={ra}+{dec}&radius=5&radunits=arcsec",
+        ))
+
+    return links
