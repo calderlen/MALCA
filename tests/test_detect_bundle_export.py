@@ -5,7 +5,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from malca.detect import export_bundle_zip
+from malca.config.config_paths import ASASSN_INDEX_PATH
+from malca.detect import _resolve_asassn_index_path, export_bundle_zip
 
 
 def _write_text(path: Path, content: str) -> None:
@@ -40,3 +41,40 @@ def test_export_bundle_includes_candidate_dat2_and_raw2(tmp_path: Path) -> None:
         assert "results/lc_events_filtered.parquet" in names
         assert expected_dat2 in names
         assert expected_raw2 in names
+
+
+def test_resolve_index_prefers_bundle_assets_file(tmp_path: Path) -> None:
+    out_dir = tmp_path / "output" / "runs" / "run_a"
+    bundled_index = out_dir / "bundle_assets" / "asassn_index_full.parquet"
+    _write_text(bundled_index, "bundle index\n")
+
+    output_root_index = out_dir.parents[1] / ASASSN_INDEX_PATH.name
+    _write_text(output_root_index, "output root index\n")
+
+    resolved, _ = _resolve_asassn_index_path(out_dir)
+
+    assert resolved == bundled_index
+
+
+def test_resolve_index_falls_back_to_output_root(tmp_path: Path) -> None:
+    out_dir = tmp_path / "output" / "runs" / "run_b"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    output_root_index = out_dir.parents[1] / ASASSN_INDEX_PATH.name
+    _write_text(output_root_index, "output root index\n")
+
+    resolved, _ = _resolve_asassn_index_path(out_dir)
+
+    assert resolved == output_root_index
+
+
+def test_resolve_index_honors_explicit_override(tmp_path: Path) -> None:
+    out_dir = tmp_path / "output" / "runs" / "run_c"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    override_index = tmp_path / "custom" / "manual_index.parquet"
+    _write_text(override_index, "manual index\n")
+
+    resolved, _ = _resolve_asassn_index_path(out_dir, index_override=override_index)
+
+    assert resolved == override_index

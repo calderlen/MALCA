@@ -127,6 +127,65 @@ def save_table(df: pd.DataFrame, path: Path) -> None:
         df.to_csv(path, index=False)
 
 
+def _unique_paths(paths: list[Path]) -> list[Path]:
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for raw_path in paths:
+        path = Path(raw_path).expanduser()
+        try:
+            key = str(path.resolve(strict=False))
+        except Exception:
+            key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(path)
+    return unique
+
+
+def _candidate_asassn_index_paths(out_dir: Path, index_override: Path | None = None) -> list[Path]:
+    out_dir = Path(out_dir).expanduser()
+    default_index = ASASSN_INDEX_PATH.expanduser()
+    output_root = out_dir.parents[1] if len(out_dir.parents) >= 2 else out_dir.parent
+
+    candidates: list[Path] = []
+    if index_override is not None:
+        candidates.append(Path(index_override).expanduser())
+
+    candidates.extend([
+        out_dir / "bundle_assets" / "asassn_index_full.parquet",
+        out_dir / "bundle_assets" / default_index.name,
+        out_dir / default_index.name,
+        out_dir / "input" / default_index.name,
+        default_index,
+        output_root / default_index.name,
+    ])
+
+    search_dirs = [
+        out_dir / "bundle_assets",
+        out_dir / "input",
+        out_dir,
+        output_root,
+        Path("input"),
+        Path("output"),
+    ]
+    for search_dir in _unique_paths(search_dirs):
+        if not search_dir.exists() or (not search_dir.is_dir()):
+            continue
+        for pattern in ("asassn_index*.parquet", "asassn_index*.pq", "asassn_index*.csv"):
+            candidates.extend(sorted(search_dir.glob(pattern)))
+
+    return _unique_paths(candidates)
+
+
+def _resolve_asassn_index_path(out_dir: Path, index_override: Path | None = None) -> tuple[Path | None, list[Path]]:
+    candidates = _candidate_asassn_index_paths(out_dir, index_override=index_override)
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return candidate, candidates
+    return None, candidates
+
+
 def default_run_dir(base_root: Path) -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return base_root / "runs" / timestamp
@@ -477,6 +536,8 @@ def main():
                         help="Index root directory (contains mag_bin/index*.csv)")
     parser.add_argument("--lc-root", type=Path, default=LCV2_ROOT,
                         help="Light curve root directory (contains mag_bin/lc*_cal/)")
+    parser.add_argument("--index-file", type=Path, default=None,
+                        help="Override ASAS-SN index file used by home external validation and --full-bundle export")
     parser.add_argument("--manifest-file", type=Path, default=None,
                         help="Manifest file (default: lc_manifest_{mag_bin}.parquet)")
     parser.add_argument("--filtered-file", type=Path, default=None,
@@ -1102,6 +1163,7 @@ def main():
             # File paths
             "index_root": str(args.index_root),
             "lc_root": str(args.lc_root),
+            "index_file": str(args.index_file.expanduser()) if args.index_file else None,
             "out_dir": str(out_dir),
             "manifest_file": str(manifest_file),
             "filtered_file": str(filtered_file),
@@ -1713,17 +1775,20 @@ def main():
         log("\n=== Home External Validation: Gaia RUWE + periodic catalog ===")
         validation_started = time.perf_counter()
         try:
-            bundled_index = out_dir / "bundle_assets" / "asassn_index_full.parquet"
-            if bundled_index.exists():
-                index_file = bundled_index
-            else:
-                index_file = ASASSN_INDEX_PATH.expanduser()
-
-            if not index_file.exists():
+            index_file, index_candidates = _resolve_asassn_index_path(out_dir, index_override=args.index_file)
+            if index_file is None:
+                tried_paths = ", ".join(str(p) for p in index_candidates[:6])
+                if len(index_candidates) > 6:
+                    tried_paths += ", ..."
+                if not tried_paths:
+                    tried_paths = "(no candidate paths)"
                 raise FileNotFoundError(
-                    f"Index file not found for home external validation: {index_file}. "
-                    "Expected bundle_assets/asassn_index_full.parquet from export bundle."
+                    "Index file not found for home external validation. "
+                    f"Tried: {tried_paths}. "
+                    "Expected bundle_assets/asassn_index_full.parquet from a --full-bundle export, "
+                    "or pass --index-file explicitly."
                 )
+            log(f"Using index file for home external validation: {index_file}")
 
             external_validation_cmd = [
                 sys.executable,
@@ -2166,18 +2231,30 @@ def main():
         log(f"\n=== Exporting bundle to {export_bundle_path} ===")
         try:
             if args.full_bundle:
-                source_index_file = ASASSN_INDEX_PATH.expanduser()
-                if source_index_file.exists():
-                    bundle_assets_dir = out_dir / "bundle_assets"
-                    bundle_assets_dir.mkdir(parents=True, exist_ok=True)
-                    bundle_index_file = bundle_assets_dir / "asassn_index_full.parquet"
-                    if (not bundle_index_file.exists()) or (bundle_index_file.stat().st_size != source_index_file.stat().st_size):
-                        log(f"Copying full index into bundle assets: {source_index_file} -> {bundle_index_file}")
-                        shutil.copy2(source_index_file, bundle_index_file)
-                else:
+                source_index_file, index_candidates = _resolve_asassn_index_path(out_dir, index_override=args.index_file)
+                if source_index_file is None:
+                    tried_paths = ", ".join(str(p) for p in index_candidates[:6])
+                    if len(index_candidates) > 6:
+                        tried_paths += ", ..."
+                    if not tried_paths:
+                        tried_paths = "(no candidate paths)"
                     raise FileNotFoundError(
-                        f"Required index file not found for bundle export: {source_index_file}"
+                        "Required index file not found for bundle export. "
+                        f"Tried: {tried_paths}. "
+                        "Pass --index-file or place the index at input/asassn_index_*.parquet."
                     )
+
+                if source_index_file.suffix.lower() not in {".parquet", ".pq"}:
+                    raise ValueError(
+                        f"--full-bundle requires a parquet ASAS-SN index file, got: {source_index_file}"
+                    )
+
+                bundle_assets_dir = out_dir / "bundle_assets"
+                bundle_assets_dir.mkdir(parents=True, exist_ok=True)
+                bundle_index_file = bundle_assets_dir / "asassn_index_full.parquet"
+                if (not bundle_index_file.exists()) or (bundle_index_file.stat().st_size != source_index_file.stat().st_size):
+                    log(f"Copying full index into bundle assets: {source_index_file} -> {bundle_index_file}")
+                    shutil.copy2(source_index_file, bundle_index_file)
 
             bundled = export_bundle_zip(export_bundle_path, out_dir, include_all=args.full_bundle, mag_bin_tag=mag_bin_tag)
             log(f"Exported bundle to {export_bundle_path.expanduser()} with {len(bundled)} files")
