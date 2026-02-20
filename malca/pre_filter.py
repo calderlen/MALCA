@@ -482,6 +482,43 @@ def filter_multi_camera(
     return out
 
 
+def filter_mag_range(
+    df: pd.DataFrame,
+    *,
+    mag_lo: float = 10.0,
+    mag_hi: float = 18.0,
+    show_tqdm: bool = False,
+    rejected_log_csv: str | Path | None = None,
+) -> pd.DataFrame:
+    """
+    Remove sources whose mag_bin falls entirely outside the [mag_lo, mag_hi] range.
+
+    Uses the mag_bin column (e.g. '13_13.5') to determine source magnitude.
+    A source is kept if its mag_bin overlaps with [mag_lo, mag_hi].
+    """
+    n0 = len(df)
+    if "mag_bin" not in df.columns:
+        if show_tqdm:
+            tqdm.write("[filter_mag_range] no mag_bin column; skipping")
+        return df
+
+    def _in_range(mb: str) -> bool:
+        parsed = _parse_mag_bin_range(mb)
+        if parsed is None:
+            return True  # keep rows with unparseable mag_bin
+        lo, hi = parsed
+        return hi >= mag_lo and lo <= mag_hi
+
+    mask = df["mag_bin"].astype(str).map(_in_range)
+    out = df.loc[mask].reset_index(drop=True)
+
+    if show_tqdm:
+        tqdm.write(f"[filter_mag_range] kept {len(out)}/{n0} (range {mag_lo}-{mag_hi})")
+    log_rejections(df, out, "filter_mag_range", rejected_log_csv)
+
+    return out
+
+
 # =============================================================================
 # Filter: Camera Median Validation
 # =============================================================================
@@ -740,6 +777,10 @@ def apply_pre_filters(
     # Filter 3: multi camera
     apply_multi_camera: bool = True,
     min_cameras: int = 2,
+    # Filter 4: magnitude range
+    apply_mag_range: bool = True,
+    mag_lo: float = 10.0,
+    mag_hi: float = 18.0,
     # General
     n_workers: int = 1,
     show_tqdm: bool = True,
@@ -840,7 +881,16 @@ def apply_pre_filters(
             "rejected_log_csv": rejected_log_csv,
         }))
 
-    # Filter 3: VSX crossmatch
+    # Filter 3: Magnitude range - instant, uses mag_bin column
+    if apply_mag_range:
+        filters.append(("mag_range", filter_mag_range, {
+            "mag_lo": mag_lo,
+            "mag_hi": mag_hi,
+            "show_tqdm": show_tqdm,
+            "rejected_log_csv": rejected_log_csv,
+        }))
+
+    # Filter 4: VSX crossmatch
     if apply_vsx and vsx_mode == "filter":
         filters.append(("vsx_match", filter_vsx_match, {
             "max_sep_arcsec": vsx_max_sep_arcsec,

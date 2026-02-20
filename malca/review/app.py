@@ -2142,6 +2142,7 @@ def create_layout():
         dcc.Store(id='metadata-resize-init', data=0),
         dcc.Store(id='status-resize-init', data=0),
         dcc.Store(id='section-splitters-init', data=0),
+        dcc.Store(id='sidebar-plot-saved', data=0),  # dummy sink for plot prefs save callback
         dcc.Download(id='plot-export-download'),
         dcc.Download(id='run-config-download'),
         dcc.Interval(id='keyboard-init', interval=200, n_intervals=0, max_intervals=1),
@@ -2184,7 +2185,8 @@ def create_layout():
                         {'label': 'Review Pass', 'value': 'review_pass'},
                         {'label': 'Updated At', 'value': 'updated_at'}]
                 ),
-                value='candidate_id',
+                value=['candidate_id'],
+                multi=True,
                 clearable=False,
                 style={'margin-bottom': '4px', 'font-size': '11px'}
             ),
@@ -2638,6 +2640,70 @@ app.clientside_callback(
 )
 
 
+# --- Sidebar plot prefs: save to localStorage on change ---
+app.clientside_callback(
+    """
+    function(preset, overlays, mode, opacity, resHeight) {
+        try {
+            var obj = {
+                preset: preset,
+                overlays: overlays || [],
+                mode: mode,
+                opacity: opacity,
+                resHeight: resHeight
+            };
+            window.localStorage.setItem('malca.review.sidebar.plot.v1', JSON.stringify(obj));
+        } catch (e) {}
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output('sidebar-plot-saved', 'data'),
+    [Input('plot-preset', 'value'),
+     Input('plot-overlays', 'value'),
+     Input('plot-mode', 'value'),
+     Input('baseline-opacity-slider', 'value'),
+     Input('residual-height-slider', 'value')],
+    prevent_initial_call=True,
+)
+
+
+# --- Sidebar plot prefs: load from localStorage on init ---
+app.clientside_callback(
+    """
+    function(_tick, curPreset, curOverlays, curMode, curOpacity, curResHeight) {
+        var nu = window.dash_clientside.no_update;
+        try {
+            var raw = window.localStorage.getItem('malca.review.sidebar.plot.v1');
+            if (!raw) return [nu, nu, nu, nu, nu, false];
+            var obj = JSON.parse(raw);
+            var preset = (obj.preset && ['Clean', 'Diagnostics', 'Full'].includes(obj.preset))
+                ? obj.preset : nu;
+            var overlays = Array.isArray(obj.overlays) ? obj.overlays : nu;
+            var mode = (obj.mode && ['native', 'png'].includes(obj.mode)) ? obj.mode : nu;
+            var opacity = (typeof obj.opacity === 'number') ? obj.opacity : nu;
+            var resHeight = (typeof obj.resHeight === 'number') ? obj.resHeight : nu;
+            return [preset, overlays, mode, opacity, resHeight, true];
+        } catch (e) {
+            return [nu, nu, nu, nu, nu, false];
+        }
+    }
+    """,
+    [Output('plot-preset', 'value', allow_duplicate=True),
+     Output('plot-overlays', 'value', allow_duplicate=True),
+     Output('plot-mode', 'value', allow_duplicate=True),
+     Output('baseline-opacity-slider', 'value', allow_duplicate=True),
+     Output('residual-height-slider', 'value', allow_duplicate=True),
+     Output('plot-defaults-initialized', 'data', allow_duplicate=True)],
+    Input('keyboard-init', 'n_intervals'),
+    [State('plot-preset', 'value'),
+     State('plot-overlays', 'value'),
+     State('plot-mode', 'value'),
+     State('baseline-opacity-slider', 'value'),
+     State('residual-height-slider', 'value')],
+    prevent_initial_call=False,
+)
+
+
 app.clientside_callback(
     """
     function(_tick) {
@@ -2936,9 +3002,7 @@ app.clientside_callback(
             var drag = {active: false, startY: 0, startHeight: 0, pointerId: null};
 
             var clamp = function(h) {
-                var maxH = Math.max(120, Math.floor(window.innerHeight * 0.6));
-                h = Math.max(cfg.minHeight, Math.min(maxH, h));
-                return Math.round(h);
+                return Math.max(cfg.minHeight, Math.round(h));
             };
 
             var apply = function(h, persist) {
@@ -3120,7 +3184,11 @@ def load_queue(refresh_clicks, import_trigger, queue_source_scope, *state_values
             val = next(it)
             filter_params[fkey] = val if val else None
 
-        filter_params['sort_col'] = next(it) or 'candidate_id'
+        sort_val = next(it)
+        if isinstance(sort_val, list):
+            filter_params['sort_cols'] = sort_val or ['candidate_id']
+        else:
+            filter_params['sort_cols'] = [sort_val] if sort_val else ['candidate_id']
         filter_params['sort_desc'] = 'yes' in (next(it) or [])
 
         if queue_source_scope:
@@ -4024,8 +4092,8 @@ def toggle_all_metadata_panels(n_clicks, open_states):
 def update_followup_indicator(needs_followup):
     """Show followup flag status."""
     if needs_followup:
-        return html.Span('[F] Followup: ON', style={'color': '#f80'})
-    return html.Span('[F] Followup: off', style={'color': '#666'})
+        return html.Span('[,] Followup: ON', style={'color': '#f80'})
+    return html.Span('[,] Followup: off', style={'color': '#666'})
 
 
 def _format_hms(total_seconds: float) -> str:

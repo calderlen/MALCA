@@ -551,8 +551,11 @@ def main():
     parser.add_argument("--min-time-span", type=float, default=MIN_TIME_SPAN, help="Min time span (days)")
     parser.add_argument("--min-points-per-day", type=float, default=MIN_POINTS_PER_DAY, help="Min cadence")
     parser.add_argument("--min-cameras", type=int, default=MIN_CAMERAS, help="Min cameras required")
+    parser.add_argument("--mag-lo", type=float, default=10.0, help="Min baseline magnitude for mag range filter (default: 10)")
+    parser.add_argument("--mag-hi", type=float, default=18.0, help="Max baseline magnitude for mag range filter (default: 18)")
     parser.add_argument("--skip-sparse", action="store_true", help="Skip sparse LC filter")
     parser.add_argument("--skip-multi-camera", action="store_true", help="Skip multi-camera filter")
+    parser.add_argument("--skip-mag-range", action="store_true", help="Skip magnitude range filter")
     parser.add_argument("--skip-vsx", action="store_true", help="Skip VSX crossmatch/tagging")
     parser.add_argument("--skip-camera-median", action="store_true", help="Skip camera median filter (identifies cameras to exclude from .raw2 files)")
     parser.add_argument("--camera-median-tolerance", type=float, default=CAMERA_MEDIAN_TOLERANCE, help="Tolerance beyond mag bin for camera median filter (default: 0.2 mag)")
@@ -940,6 +943,8 @@ def main():
             enforced_prefilters.append("sparse")
         if not args.skip_multi_camera:
             enforced_prefilters.append("multi_camera")
+        if not args.skip_mag_range:
+            enforced_prefilters.append("mag_range")
         if (not args.skip_vsx) and args.vsx_mode == "filter":
             enforced_prefilters.append("vsx")
 
@@ -1038,8 +1043,11 @@ def main():
             "min_time_span": args.min_time_span,
             "min_points_per_day": args.min_points_per_day,
             "min_cameras": args.min_cameras,
+            "mag_lo": args.mag_lo,
+            "mag_hi": args.mag_hi,
             "skip_sparse": args.skip_sparse,
             "skip_multi_camera": args.skip_multi_camera,
+            "skip_mag_range": args.skip_mag_range,
             "skip_vsx": args.skip_vsx,
             "vsx_max_sep": args.vsx_max_sep,
             "vsx_mode": args.vsx_mode,
@@ -1252,6 +1260,9 @@ def main():
                 vsx_crossmatch_csv=args.vsx_crossmatch,
                 apply_multi_camera=not args.skip_multi_camera,
                 min_cameras=args.min_cameras,
+                apply_mag_range=not args.skip_mag_range,
+                mag_lo=args.mag_lo,
+                mag_hi=args.mag_hi,
                 n_workers=args.workers,
                 show_tqdm=args.verbose,
                 rejected_log_csv=str(prefilter_dir / f"rejected_pre_filter_{mag_bin_tag}.csv"),

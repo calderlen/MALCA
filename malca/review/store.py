@@ -752,14 +752,20 @@ def query_queue(conn: sqlite3.Connection, *, filters: dict | None = None) -> pd.
             where.append(f"(c.{col} IS NULL OR c.{col} NOT IN ({placeholders}))")
             params.extend(exc)
 
-    # --- sorting (any float column + review columns) ---
+    # --- sorting (any float column + review columns, multi-column) ---
     _sortable = {c: f"c.{c}" for c in _FLOAT_COLS}
     _sortable["candidate_id"] = "c.candidate_id"
     _sortable.update({"updated_at": "r.updated_at", "interest_score": "r.interest_score",
                        "review_pass": "r.review_pass"})
-    sc = filters.get('sort_col', 'candidate_id')
-    order_col = _sortable.get(sc, "c.candidate_id")
+    sort_cols = filters.get('sort_cols') or [filters.get('sort_col', 'candidate_id')]
     direction = "DESC" if filters.get('sort_desc') else "ASC"
+    order_parts = []
+    for sc in sort_cols:
+        col_expr = _sortable.get(sc)
+        if col_expr:
+            order_parts.append(f"{col_expr} {direction}")
+    if not order_parts:
+        order_parts.append(f"c.candidate_id {direction}")
 
     query = f"""
         SELECT
@@ -787,7 +793,10 @@ def query_queue(conn: sqlite3.Connection, *, filters: dict | None = None) -> pd.
     """
     if where:
         query += " WHERE " + " AND ".join(where)
-    query += f" ORDER BY {order_col} {direction}, c.candidate_id ASC"
+    order_clause = ", ".join(order_parts)
+    if "c.candidate_id" not in order_clause:
+        order_clause += ", c.candidate_id ASC"
+    query += f" ORDER BY {order_clause}"
     return pd.read_sql_query(query, conn, params=params)
 
 
