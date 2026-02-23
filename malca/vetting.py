@@ -1265,11 +1265,11 @@ def vet_candidates(
     run_tns: bool = True,
     run_gaia_eb: bool = True,
     run_alerce: bool = True,
-    run_atlas: bool = False,
+    run_atlas: bool = True,
     run_gaia_epoch: bool = True,
     run_erosita: bool = True,
     run_pm_check: bool = True,
-    run_neowise_lc: bool = False,
+    run_neowise_lc: bool = True,
     simbad_radius_arcsec: float = SIMBAD_RADIUS_ARCSEC,
     asassn_radius_arcsec: float = ASASSN_VAR_RADIUS_ARCSEC,
     ztf_var_radius_arcsec: float = ZTF_VAR_RADIUS_ARCSEC,
@@ -1541,12 +1541,16 @@ def main():
     parser.add_argument("--alerce-workers", type=int, default=8, help="Parallel workers for ALeRCE queries (default: 8)")
     parser.add_argument("--no-erosita", action="store_true", help="Skip eROSITA X-ray crossmatch")
     parser.add_argument("--no-pm-check", action="store_true", help="Skip proper motion consistency check")
+    parser.add_argument("--no-atlas", action="store_true", help="Skip ATLAS forced photometry (default: enabled)")
     parser.add_argument("--atlas-token", type=str, default=None, help="ATLAS forced photometry API token (or set MALCA_ATLAS_TOKEN env var)")
-    parser.add_argument("--neowise-lc", action="store_true", help="Fetch full NEOWISE light curves")
+    parser.add_argument("--neowise-lc", dest="neowise_lc", action="store_true", help="Fetch full NEOWISE light curves (default: enabled)")
+    parser.add_argument("--no-neowise-lc", dest="neowise_lc", action="store_false", help="Skip full NEOWISE light curves")
     parser.add_argument("--neowise-output-dir", type=Path, default=None, help="Directory to save individual NEOWISE LCs")
     parser.add_argument("--neowise-workers", type=int, default=4, help="Parallel workers for NEOWISE queries")
     parser.add_argument("--checkpoint", type=Path, default=None, help="Checkpoint path (default: <input>_vetting_CHECKPOINT.parquet)")
     parser.add_argument("--no-checkpoint", action="store_true", help="Disable checkpoint saving/resume")
+
+    parser.set_defaults(neowise_lc=True)
 
     args = parser.parse_args()
 
@@ -1587,7 +1591,7 @@ def main():
         run_gaia_eb=not args.no_gaia_eb,
         run_alerce=not args.no_alerce,
         run_erosita=not args.no_erosita,
-        run_atlas=args.atlas_token is not None,
+        run_atlas=not args.no_atlas,
         run_pm_check=not args.no_pm_check,
         run_neowise_lc=args.neowise_lc,
         simbad_radius_arcsec=args.simbad_radius,

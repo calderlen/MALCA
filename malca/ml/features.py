@@ -59,10 +59,7 @@ ML_DROP_COLUMNS: set[str] = {
     # Filter flags — pipeline gating decisions, not physical features.
     # The ML model should learn its own gating from the raw data.
     "failed_any",
-    "failed_sparse",
-    "failed_multi_camera",
-    "failed_vsx",
-    "failed_evidence_strength",
+    "failed_posterior_strength",
     "failed_run_robustness",
     "failed_morphology",
     "failed_score",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import numbers
 from decimal import Decimal, InvalidOperation
 from typing import Any
 from urllib.parse import quote, quote_plus
@@ -25,6 +26,12 @@ REVIEW_METADATA_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("VSX class", "vsx_class"),
         ("VSX sep (arcsec)", "vsx_sep_arcsec"),
         ("catalog_match", "catalog_match"),
+        ("Catalog source", "catalog_source"),
+        ("Period sources", "period_sources"),
+        ("Period N sources", "period_n_sources"),
+        ("Period consensus (d)", "period_consensus_days"),
+        ("Period consensus agree", "period_consensus_agree"),
+        ("Period conflict", "period_conflict_flag"),
         ("SFR name", "sfr_name"),
         ("SFR sep (arcmin)", "sfr_sep_arcmin"),
         ("Near SFR", "near_sfr"),
@@ -181,7 +188,6 @@ REVIEW_METADATA_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("mh_gspphot", "mh_gspphot"),
         ("distance_gspphot", "distance_gspphot"),
         ("Parallax (mas)", "parallax"),
-        ("Parallax err (mas)", "parallax_error"),
         ("PM RA (mas/yr)", "pmra"),
         ("PM Dec (mas/yr)", "pmdec"),
         ("Total PM (mas/yr)", "pm_total"),
@@ -189,15 +195,10 @@ REVIEW_METADATA_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
     ]),
     ("Photometry", [
         ("2MASS J", "tmass_j"),
-        ("2MASS J err", "tmass_j_err"),
         ("2MASS H", "tmass_h"),
-        ("2MASS H err", "tmass_h_err"),
         ("2MASS K", "tmass_k"),
-        ("2MASS K err", "tmass_k_err"),
         ("unWISE W1", "unwise_w1"),
-        ("unWISE W1 err", "unwise_w1_err"),
         ("unWISE W2", "unwise_w2"),
-        ("unWISE W2 err", "unwise_w2_err"),
         ("H-K", "H_K"),
         ("H-K (dered)", "H_K_dered"),
         ("W1-W2", "W1_W2"),
@@ -215,22 +216,11 @@ REVIEW_METADATA_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
     ]),
     ("StarHorse", [
         ("Distance (kpc)", "dist50"),
-        ("Distance 16th", "dist16"),
-        ("Distance 84th", "dist84"),
         ("Teff", "teff50"),
-        ("Teff 16th", "teff16"),
-        ("Teff 84th", "teff84"),
         ("log g", "logg50"),
-        ("log g 16th", "logg16"),
-        ("log g 84th", "logg84"),
         ("[M/H]", "met50"),
-        ("[M/H] 16th", "met16"),
-        ("[M/H] 84th", "met84"),
-        ("Mass 16th", "mass16"),
-        ("Mass 84th", "mass84"),
+        ("Mass", "mass50"),
         ("A_V", "av50"),
-        ("A_V 16th", "av16"),
-        ("A_V 84th", "av84"),
         ("A_G", "ag50"),
         ("A_BP", "abp50"),
         ("A_RP", "arp50"),
@@ -283,10 +273,7 @@ REVIEW_METADATA_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
     ]),
     ("Filter Flags", [
         ("failed_any", "failed_any"),
-        ("failed_sparse", "failed_sparse"),
-        ("failed_multi_camera", "failed_multi_camera"),
-        ("failed_vsx", "failed_vsx"),
-        ("failed_evidence_strength", "failed_evidence_strength"),
+        ("failed_posterior_strength", "failed_posterior_strength"),
         ("failed_run_robustness", "failed_run_robustness"),
         ("failed_morphology", "failed_morphology"),
         ("failed_score", "failed_score"),
@@ -318,6 +305,28 @@ _DEFAULT_OPEN_GROUPS: set[str] = {
     "Stellar Parameters",
     "Extinction & Environment",
     "YSO / Classification",
+}
+
+
+# Maps a value key to its symmetric error key (displayed as "value ± err").
+_ERROR_KEYS: dict[str, str] = {
+    "parallax": "parallax_error",
+    "tmass_j": "tmass_j_err",
+    "tmass_h": "tmass_h_err",
+    "tmass_k": "tmass_k_err",
+    "unwise_w1": "unwise_w1_err",
+    "unwise_w2": "unwise_w2_err",
+}
+
+# Maps a value key to its (lo_percentile, hi_percentile) keys
+# (displayed as "value (+hi/-lo)" where lo/hi are absolute bounds).
+_RANGE_KEYS: dict[str, tuple[str, str]] = {
+    "dist50": ("dist16", "dist84"),
+    "teff50": ("teff16", "teff84"),
+    "logg50": ("logg16", "logg84"),
+    "met50": ("met16", "met84"),
+    "mass50": ("mass16", "mass84"),
+    "av50": ("av16", "av84"),
 }
 
 
@@ -375,8 +384,74 @@ def _format_value_for_display(key: str, val: Any) -> Any:
     return val
 
 
+_SIGFIG_DEFAULT = 4
+
+
+def _round_sigfigs(val: Any, n: int = _SIGFIG_DEFAULT) -> str:
+    """Round a numeric value to *n* significant figures for display.
+
+    Only rounds real non-integer values; strings, booleans, and integers are
+    returned as-is to avoid mangling IDs or text that happen to look numeric.
+    """
+    if isinstance(val, bool):
+        return str(val)
+    if isinstance(val, numbers.Integral):
+        return str(val)
+    if not isinstance(val, numbers.Real):
+        return str(val)
+    f = float(val)
+    if not math.isfinite(f):
+        return str(val)
+    if f == 0.0:
+        return "0"
+    return f"{f:.{n}g}"
+
+
+def _format_with_uncertainty(
+    key: str, val: Any, payload: dict[str, Any], *, round_sf: bool = False,
+) -> str:
+    """Format a value with its error/range if available."""
+    displayed = _format_value_for_display(key, val)
+
+    def _fmt(v: Any) -> str:
+        if round_sf:
+            return _round_sigfigs(v)
+        return str(v)
+
+    val_str = _fmt(displayed)
+
+    # Symmetric error: value ± err
+    err_key = _ERROR_KEYS.get(key)
+    if err_key:
+        err_val = payload.get(err_key)
+        if _is_present(err_val):
+            return f"{val_str} \u00b1 {_fmt(err_val)}"
+
+    # Percentile range: value (+hi/-lo)
+    range_keys = _RANGE_KEYS.get(key)
+    if range_keys:
+        lo_val = payload.get(range_keys[0])
+        hi_val = payload.get(range_keys[1])
+        if _is_present(lo_val) and _is_present(hi_val):
+            try:
+                v = float(val)
+                lo = float(lo_val)
+                hi = float(hi_val)
+                plus = hi - v
+                minus = v - lo
+                if round_sf:
+                    return f"{val_str} (+{_round_sigfigs(plus)}/-{_round_sigfigs(minus)})"
+                return f"{val_str} (+{plus:.4g}/-{minus:.4g})"
+            except (TypeError, ValueError):
+                pass
+
+    return val_str
+
+
 def extract_review_metadata(
     payload: dict[str, Any],
+    *,
+    round_sigfigs: bool = False,
 ) -> list[tuple[str, Any]]:
     """Return a flat list of ``(label, value)`` pairs for display.
 
@@ -389,13 +464,14 @@ def extract_review_metadata(
         val = p.get(key)
         if not _is_present(val):
             continue
-        val = _format_value_for_display(key, val)
-        rows.append((label, val))
+        rows.append((label, _format_with_uncertainty(key, val, p, round_sf=round_sigfigs)))
     return rows
 
 
 def extract_review_metadata_grouped(
     payload: dict[str, Any],
+    *,
+    round_sigfigs: bool = False,
 ) -> list[tuple[str, list[tuple[str, Any]]]]:
     """Return metadata organised by group.
 
@@ -411,8 +487,7 @@ def extract_review_metadata_grouped(
             val = p.get(key)
             if not _is_present(val):
                 continue
-            val = _format_value_for_display(key, val)
-            items.append((label, val))
+            items.append((label, _format_with_uncertainty(key, val, p, round_sf=round_sigfigs)))
         if items:
             groups.append((group_name, items))
     return groups

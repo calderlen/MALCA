@@ -157,8 +157,8 @@ def _candidate_asassn_index_paths(out_dir: Path, index_override: Path | None = N
         out_dir / "bundle_assets" / default_index.name,
         out_dir / default_index.name,
         out_dir / "input" / default_index.name,
-        default_index,
         output_root / default_index.name,
+        default_index,
     ])
 
     search_dirs = [
@@ -710,8 +710,8 @@ def main():
     parser.add_argument("--spectra-chunk-size", type=int, default=SPECTRA_CHUNK_SIZE, help="Bulk chunk size for spectra lookups")
     parser.add_argument("--spectra-cache", type=Path, default=None, help="Optional cache parquet path for spectra lookups")
 
-    # Step 12: Post-review vetting args (disabled by default — runs after review)
-    parser.add_argument("--run-vetting", dest="run_vetting", action="store_true", help="Run post-review vetting (SIMBAD, Gaia variability, ASAS-SN variables)")
+    # Step 12: Post-review vetting args (enabled by default — runs after review)
+    parser.add_argument("--run-vetting", dest="run_vetting", action="store_true", help="Run post-review vetting (SIMBAD, Gaia variability, ASAS-SN variables) (default: enabled)")
     parser.add_argument("--no-run-vetting", dest="run_vetting", action="store_false", help="Skip vetting step")
     parser.add_argument("--vetting-min-score", type=float, default=None, help="Only vet candidates with interest_score >= this value")
     parser.add_argument("--vetting-simbad-radius", type=float, default=5.0, help="SIMBAD search radius in arcsec (default: 5)")
@@ -723,8 +723,11 @@ def main():
     parser.add_argument("--no-vetting-alerce", action="store_true", help="Skip ALeRCE ZTF query in vetting")
     parser.add_argument("--no-vetting-erosita", action="store_true", help="Skip eROSITA X-ray crossmatch in vetting")
     parser.add_argument("--no-vetting-pm-check", action="store_true", help="Skip proper motion consistency check in vetting")
-    parser.add_argument("--vetting-atlas-token", type=str, default=None, help="ATLAS forced photometry API token (enables ATLAS vetting)")
-    parser.add_argument("--vetting-neowise-lc", action="store_true", help="Fetch full NEOWISE light curves in vetting")
+    parser.add_argument("--vetting-atlas", dest="vetting_atlas", action="store_true", help="Run ATLAS forced photometry in vetting (default: enabled)")
+    parser.add_argument("--no-vetting-atlas", dest="vetting_atlas", action="store_false", help="Skip ATLAS forced photometry in vetting")
+    parser.add_argument("--vetting-atlas-token", type=str, default=None, help="ATLAS forced photometry API token")
+    parser.add_argument("--vetting-neowise-lc", dest="vetting_neowise_lc", action="store_true", help="Fetch full NEOWISE light curves in vetting (default: enabled)")
+    parser.add_argument("--no-vetting-neowise-lc", dest="vetting_neowise_lc", action="store_false", help="Skip full NEOWISE light curves in vetting")
     parser.add_argument("--vetting-input", type=Path, default=None, help="Explicit input file for vetting (default: latest enriched/characterized output)")
 
     parser.add_argument("--test-run", action="store_true", help="Limit the number of light curves processed (for quick end-to-end validation)")
@@ -746,7 +749,9 @@ def main():
         run_enrich=True,
         run_neighbor_enrich=True,
         run_spectra_enrich=True,
-        run_vetting=False,
+        run_vetting=True,
+        vetting_atlas=True,
+        vetting_neowise_lc=True,
         export_bundle_enabled=True,
     )
 
@@ -2156,7 +2161,7 @@ def main():
                     import traceback
                     traceback.print_exc()
 
-    # Step 12: Post-review vetting (optional, off by default)
+    # Step 12: Post-review vetting (enabled by default)
     if run_downstream and args.run_vetting:
         log("\n=== Step 12: Post-review vetting ===")
         vetting_started = time.perf_counter()
@@ -2200,7 +2205,7 @@ def main():
                     run_asassn_var=not args.no_vetting_asassn_var,
                     run_alerce=not args.no_vetting_alerce,
                     run_erosita=not args.no_vetting_erosita,
-                    run_atlas=args.vetting_atlas_token is not None,
+                    run_atlas=args.vetting_atlas,
                     run_pm_check=not args.no_vetting_pm_check,
                     run_neowise_lc=args.vetting_neowise_lc,
                     simbad_radius_arcsec=args.vetting_simbad_radius,

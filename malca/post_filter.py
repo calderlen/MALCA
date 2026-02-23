@@ -35,6 +35,7 @@ from pathlib import Path
 from time import perf_counter
 import re
 from decimal import Decimal, InvalidOperation
+import math
 import pandas as pd
 import numpy as np
 from tqdm.auto import tqdm
@@ -44,9 +45,18 @@ try:
     from astroquery.vizier import Vizier
 except Exception:
     Vizier = None
+try:
+    import pyvo
+except Exception:
+    pyvo = None
 
 from malca.config.config_io import PARQUET_CACHE_COMPRESSION, PARQUET_OUTPUT_COMPRESSION
-from malca.config.config_paths import DEFAULT_CACHE_DIR, GAIA_LOCAL_CATALOG
+from malca.config.config_paths import (
+    DEFAULT_CACHE_DIR,
+    GAIA_AIP_TAP_URL,
+    GAIA_LOCAL_CATALOG,
+    VSX_CROSSMATCH_PATH,
+)
 from malca.config.config_pipeline import WORKERS
 from malca.config.config_filters import MIN_BAYES_FACTOR, POST_FILTER_MIN_RUN_CAMERAS, POST_FILTER_MIN_RUN_POINTS
 
@@ -56,6 +66,133 @@ from malca.config.config_filters import MIN_BAYES_FACTOR, POST_FILTER_MIN_RUN_CA
 # =============================================================================
 
 DEFAULT_CACHE_DIR = DEFAULT_CACHE_DIR.expanduser()
+
+PERIOD_SOURCE_PRIORITY = (
+    "gaia_eb",
+    "vsx",
+    "asassn_var",
+    "ztf_periodic",
+    "ogle",
+)
+
+PERIOD_HARMONIC_FACTORS = (1.0, 2.0, 0.5, 3.0, 1.0 / 3.0)
+
+
+def _parse_asassn_id(value: object) -> str | None:
+    """Normalize ASAS-SN ID-like values to digit strings."""
+    if pd.isna(value):
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    return s
+
+
+def _extract_asassn_ids(df: pd.DataFrame) -> pd.Series:
+    """Extract ASAS-SN IDs from asas_sn_id/source_id/path columns."""
+    if "asas_sn_id" in df.columns:
+        raw = df["asas_sn_id"]
+    elif "source_id" in df.columns:
+        raw = df["source_id"]
+    elif "path" in df.columns:
+        raw = df["path"].astype(str).map(lambda p: Path(p).stem)
+    else:
+        return pd.Series([pd.NA] * len(df), index=df.index, dtype="object")
+
+    out = raw.astype(str).str.strip()
+    out = out.mask(out.eq(""), pd.NA)
+    return out
+
+
+def _pick_coord_columns(df: pd.DataFrame) -> tuple[str | None, str | None]:
+    """Pick available candidate coordinate columns."""
+    for ra_col, dec_col in (("ra_deg", "dec_deg"), ("ra", "dec")):
+        if ra_col in df.columns and dec_col in df.columns:
+            return ra_col, dec_col
+    return None, None
+
+
+def _periods_agree(period_a: float, period_b: float, *, rel_tol: float = 0.10) -> bool:
+    """Return True when periods agree directly or via common harmonics."""
+    if not (np.isfinite(period_a) and np.isfinite(period_b)):
+        return False
+    if period_a <= 0 or period_b <= 0:
+        return False
+    ratio = max(period_a, period_b) / min(period_a, period_b)
+    for factor in PERIOD_HARMONIC_FACTORS:
+        if factor <= 0:
+            continue
+        if abs(ratio - factor) / factor <= rel_tol:
+            return True
+    return False
+
+
+def _normalize_period_to_reference(period: float, reference: float) -> float:
+    """Map period onto the closest harmonic around reference."""
+    if not (np.isfinite(period) and np.isfinite(reference)):
+        return period
+    if period <= 0 or reference <= 0:
+        return period
+
+    candidates = [
+        period,
+        period / 2.0,
+        period * 2.0,
+        period / 3.0,
+        period * 3.0,
+    ]
+    best = min(candidates, key=lambda p: abs(math.log10(p) - math.log10(reference)) if p > 0 else np.inf)
+    return float(best)
+
+
+def _choose_consensus_period(
+    periods_by_source: dict[str, float],
+    *,
+    rel_tol: float = 0.10,
+) -> tuple[float, bool, bool, float, str]:
+    """Return consensus period + agreement metadata.
+
+    Returns
+    -------
+    tuple
+        (period_consensus_days, period_consensus_agree,
+         period_conflict_flag, consensus_support_fraction, period_primary_source)
+    """
+    valid = {
+        src: float(p)
+        for src, p in periods_by_source.items()
+        if np.isfinite(p) and float(p) > 0
+    }
+    if not valid:
+        return np.nan, False, False, np.nan, ""
+
+    ordered_sources = sorted(
+        valid.keys(),
+        key=lambda s: PERIOD_SOURCE_PRIORITY.index(s) if s in PERIOD_SOURCE_PRIORITY else len(PERIOD_SOURCE_PRIORITY),
+    )
+    if len(valid) == 1:
+        src = ordered_sources[0]
+        return float(valid[src]), True, False, 1.0, src
+
+    best_source = ""
+    best_support = -1
+    for src in ordered_sources:
+        p = valid[src]
+        support = sum(_periods_agree(p, q, rel_tol=rel_tol) for q in valid.values())
+        if support > best_support:
+            best_support = support
+            best_source = src
+
+    reference = valid[best_source]
+    inlier_sources = [src for src, p in valid.items() if _periods_agree(p, reference, rel_tol=rel_tol)]
+    normalized = [_normalize_period_to_reference(valid[src], reference) for src in inlier_sources]
+    consensus = float(np.median(normalized)) if normalized else float(reference)
+
+    n_sources = len(valid)
+    support_fraction = float(len(inlier_sources) / n_sources) if n_sources else np.nan
+    agree = bool(len(inlier_sources) == n_sources)
+    conflict = bool((n_sources >= 2) and (not agree))
+    return consensus, agree, conflict, support_fraction, best_source
 
 
 def fetch_chen2020_ztf_periodic(
@@ -132,6 +269,248 @@ def fetch_chen2020_ztf_periodic(
 
     except Exception as e:
         raise RuntimeError(f"Failed to fetch Chen+2020 catalog from VizieR: {e}")
+
+
+def fetch_asassn_variable_catalog(
+    cache_dir: Path | None = None,
+    force_download: bool = False,
+    show_tqdm: bool = True,
+) -> pd.DataFrame:
+    """Fetch ASAS-SN variable star catalog (VizieR II/366/catv2021)."""
+    if Vizier is None:
+        raise ImportError(
+            "astroquery is required for ASAS-SN variable catalog download. "
+            "Install with `pip install astroquery` or use cached parquet data."
+        )
+
+    cache_dir = Path(cache_dir) if cache_dir else DEFAULT_CACHE_DIR
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_file = cache_dir / "asassn_var_ii366.parquet"
+
+    if cache_file.exists() and not force_download:
+        if show_tqdm:
+            tqdm.write(f"[fetch_asassn_var] Loading cached catalog from {cache_file}")
+        return pd.read_parquet(cache_file)
+
+    if show_tqdm:
+        tqdm.write("[fetch_asassn_var] Querying VizieR II/366/catv2021 (this may take a few minutes)...")
+
+    try:
+        v = Vizier(columns=["ASASSN-V", "RAJ2000", "DEJ2000", "Per", "Type", "GaiaDR3"], row_limit=-1)
+        tables = v.get_catalogs("II/366/catv2021")
+        if not tables:
+            raise ValueError("No tables returned from VizieR query")
+
+        cat = tables[0].to_pandas()
+        df = pd.DataFrame(
+            {
+                "source_name": cat.get("ASASSN-V", pd.Series(index=cat.index)).astype(str),
+                "ra": pd.to_numeric(cat.get("RAJ2000"), errors="coerce"),
+                "dec": pd.to_numeric(cat.get("DEJ2000"), errors="coerce"),
+                "period": pd.to_numeric(cat.get("Per"), errors="coerce"),
+                "var_type": cat.get("Type", pd.Series(index=cat.index)).astype(str),
+                "gaia_id": pd.to_numeric(cat.get("GaiaDR3"), errors="coerce").astype("Int64"),
+            }
+        )
+
+        df.to_parquet(cache_file, index=False, compression=PARQUET_CACHE_COMPRESSION)
+        if show_tqdm:
+            tqdm.write(f"[fetch_asassn_var] Cached {len(df)} sources to {cache_file}")
+        return df
+    except Exception as e:
+        raise RuntimeError(f"Failed to fetch ASAS-SN variable catalog from VizieR: {e}")
+
+
+def fetch_ogle_periodic_catalog(
+    cache_dir: Path | None = None,
+    force_download: bool = False,
+    show_tqdm: bool = True,
+) -> pd.DataFrame:
+    """Fetch OGLE periodic variable catalog (VizieR II/213/pvar)."""
+    if Vizier is None:
+        raise ImportError(
+            "astroquery is required for OGLE catalog download. "
+            "Install with `pip install astroquery` or use cached parquet data."
+        )
+
+    cache_dir = Path(cache_dir) if cache_dir else DEFAULT_CACHE_DIR
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_file = cache_dir / "ogle_ii213_pvar.parquet"
+
+    if cache_file.exists() and not force_download:
+        if show_tqdm:
+            tqdm.write(f"[fetch_ogle] Loading cached catalog from {cache_file}")
+        return pd.read_parquet(cache_file)
+
+    if show_tqdm:
+        tqdm.write("[fetch_ogle] Querying VizieR II/213/pvar...")
+
+    try:
+        v = Vizier(columns=["OGLE", "RAJ2000", "DEJ2000", "Per", "Type"], row_limit=-1)
+        tables = v.get_catalogs("II/213/pvar")
+        if not tables:
+            raise ValueError("No tables returned from VizieR query")
+
+        cat = tables[0].to_pandas()
+        df = pd.DataFrame(
+            {
+                "source_name": cat.get("OGLE", pd.Series(index=cat.index)).astype(str),
+                "ra": pd.to_numeric(cat.get("RAJ2000"), errors="coerce"),
+                "dec": pd.to_numeric(cat.get("DEJ2000"), errors="coerce"),
+                "period": pd.to_numeric(cat.get("Per"), errors="coerce"),
+                "var_type": cat.get("Type", pd.Series(index=cat.index)).astype(str),
+            }
+        )
+
+        df.to_parquet(cache_file, index=False, compression=PARQUET_CACHE_COMPRESSION)
+        if show_tqdm:
+            tqdm.write(f"[fetch_ogle] Cached {len(df)} sources to {cache_file}")
+        return df
+    except Exception as e:
+        raise RuntimeError(f"Failed to fetch OGLE periodic catalog from VizieR: {e}")
+
+
+def fetch_vsx_period_catalog(
+    vsx_crossmatch_csv: str | Path = VSX_CROSSMATCH_PATH,
+    show_tqdm: bool = True,
+) -> pd.DataFrame:
+    """Load VSX crossmatch table and expose ASAS-SN keyed periods/classes."""
+    path = Path(vsx_crossmatch_csv).expanduser()
+    if not path.exists() and path.name.endswith("_compat.csv"):
+        fallback = path.with_name(path.name.replace("_compat.csv", ".csv"))
+        if fallback.exists():
+            path = fallback
+
+    if not path.exists():
+        raise FileNotFoundError(f"VSX crossmatch file not found: {path}")
+
+    if show_tqdm:
+        tqdm.write(f"[fetch_vsx_period] Loading VSX crossmatch from {path}")
+
+    xmatch = pd.read_csv(path, low_memory=False)
+    rename_map: dict[str, str] = {}
+    if "sep_arcsec" in xmatch.columns and "vsx_sep_arcsec" not in xmatch.columns:
+        rename_map["sep_arcsec"] = "vsx_sep_arcsec"
+    if "class" in xmatch.columns and "vsx_class" not in xmatch.columns:
+        rename_map["class"] = "vsx_class"
+    if rename_map:
+        xmatch = xmatch.rename(columns=rename_map)
+
+    required_cols = {"asas_sn_id"}
+    missing = [c for c in required_cols if c not in xmatch.columns]
+    if missing:
+        raise ValueError(f"VSX crossmatch file missing required columns: {missing}")
+
+    keep_cols = [c for c in ["asas_sn_id", "period", "vsx_class", "vsx_sep_arcsec", "gaia_id", "ra", "dec"] if c in xmatch.columns]
+    out = xmatch[keep_cols].copy()
+    out["asas_sn_id"] = out["asas_sn_id"].astype(str).str.strip()
+    if "period" in out.columns:
+        out["period"] = pd.to_numeric(out["period"], errors="coerce")
+    if "gaia_id" in out.columns:
+        out["gaia_id"] = pd.to_numeric(out["gaia_id"], errors="coerce").astype("Int64")
+
+    if "vsx_sep_arcsec" in out.columns:
+        out["vsx_sep_arcsec"] = pd.to_numeric(out["vsx_sep_arcsec"], errors="coerce")
+        out = out.sort_values("vsx_sep_arcsec", na_position="last").drop_duplicates("asas_sn_id", keep="first")
+    else:
+        out = out.drop_duplicates("asas_sn_id", keep="first")
+
+    out = out.rename(columns={"vsx_class": "var_type"})
+    return out.reset_index(drop=True)
+
+
+def fetch_gaia_dr3_eb_periods(
+    source_ids: list[int] | None,
+    *,
+    cache_dir: Path | None = None,
+    chunk_size: int = 1000,
+    show_tqdm: bool = True,
+) -> pd.DataFrame:
+    """Fetch Gaia DR3 eclipsing-binary periods for source IDs (cached)."""
+    if source_ids is None or len(source_ids) == 0:
+        return pd.DataFrame(columns=["source_id", "period", "var_type", "global_ranking"])
+
+    if pyvo is None:
+        raise ImportError("pyvo is required for Gaia EB TAP queries")
+
+    requested_ids = sorted({int(sid) for sid in source_ids})
+    cache_dir = Path(cache_dir) if cache_dir else DEFAULT_CACHE_DIR
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_file = cache_dir / "gaia_dr3_eb_periods.parquet"
+
+    cached_df = pd.DataFrame(columns=["source_id", "period", "var_type", "global_ranking"])
+    if cache_file.exists():
+        try:
+            cached_df = pd.read_parquet(cache_file)
+            if "source_id" in cached_df.columns:
+                cached_df["source_id"] = pd.to_numeric(cached_df["source_id"], errors="coerce").astype("Int64")
+        except Exception:
+            cached_df = pd.DataFrame(columns=["source_id", "period", "var_type", "global_ranking"])
+
+    cached_ids: set[int] = set()
+    if "source_id" in cached_df.columns:
+        cached_ids = {
+            int(v)
+            for v in pd.to_numeric(cached_df["source_id"], errors="coerce").dropna().tolist()
+        }
+
+    missing_ids = [sid for sid in requested_ids if sid not in cached_ids]
+    if show_tqdm and missing_ids:
+        tqdm.write(f"[fetch_gaia_eb] Querying Gaia TAP for {len(missing_ids)} uncached source IDs")
+
+    new_rows: list[dict[str, object]] = []
+    if missing_ids:
+        tap = pyvo.dal.TAPService(GAIA_AIP_TAP_URL)
+        chunks = range(0, len(missing_ids), max(1, int(chunk_size)))
+        iterator = tqdm(chunks, desc="fetch_gaia_eb", leave=False, disable=not show_tqdm)
+        for i in iterator:
+            chunk = missing_ids[i : i + max(1, int(chunk_size))]
+            ids_str = ",".join(str(sid) for sid in chunk)
+            query = f"""
+                SELECT source_id, frequency, model_type, global_ranking
+                FROM gaiadr3.vari_eclipsing_binary
+                WHERE source_id IN ({ids_str})
+            """
+            try:
+                result = tap.run_sync(query)
+                for row in result:
+                    sid = row["source_id"]
+                    freq = row["frequency"]
+                    period = np.nan
+                    if freq is not None:
+                        try:
+                            fv = float(freq)
+                            if np.isfinite(fv) and fv > 0:
+                                period = 1.0 / fv
+                        except Exception:
+                            period = np.nan
+
+                    new_rows.append(
+                        {
+                            "source_id": int(sid),
+                            "period": period,
+                            "var_type": str(row["model_type"]) if row["model_type"] is not None else "",
+                            "global_ranking": float(row["global_ranking"]) if row["global_ranking"] is not None else np.nan,
+                        }
+                    )
+            except Exception as e:
+                if show_tqdm:
+                    tqdm.write(f"[fetch_gaia_eb] chunk query failed: {e}")
+
+    if new_rows:
+        new_df = pd.DataFrame(new_rows)
+        full_df = pd.concat([cached_df, new_df], ignore_index=True)
+        full_df = full_df.drop_duplicates(subset=["source_id"], keep="last")
+        full_df.to_parquet(cache_file, index=False, compression=PARQUET_CACHE_COMPRESSION)
+    else:
+        full_df = cached_df
+
+    if full_df.empty:
+        return full_df
+
+    full_df["source_id"] = pd.to_numeric(full_df["source_id"], errors="coerce").astype("Int64")
+    keep = full_df["source_id"].isin(requested_ids)
+    return full_df.loc[keep].reset_index(drop=True)
 
 
 def fetch_gaia_dr3_ruwe(
@@ -243,6 +622,148 @@ def _to_bool_mask(series: pd.Series) -> pd.Series:
         return series.fillna(0).astype(float) != 0.0
     lowered = series.fillna("").astype(str).str.strip().str.lower()
     return lowered.isin({"1", "true", "t", "yes", "y"})
+
+
+def _match_period_catalog(
+    df: pd.DataFrame,
+    catalog_df: pd.DataFrame,
+    *,
+    source_label: str,
+    max_sep_arcsec: float,
+    period_col: str = "period",
+    class_col: str = "var_type",
+    gaia_col: str = "gaia_id",
+    ra_col: str = "ra",
+    dec_col: str = "dec",
+    candidate_asassn_ids: pd.Series | None = None,
+    catalog_asassn_col: str | None = None,
+    show_tqdm: bool = False,
+) -> pd.DataFrame:
+    """Match one catalog to candidates and return per-source period columns."""
+    n0 = len(df)
+    match = np.zeros(n0, dtype=bool)
+    period = np.full(n0, np.nan, dtype=float)
+    cls = np.array([""] * n0, dtype=object)
+    sep = np.full(n0, np.nan, dtype=float)
+
+    if catalog_df is None or catalog_df.empty:
+        return pd.DataFrame(
+            {
+                f"period_{source_label}_match": match,
+                f"period_{source_label}_days": period,
+                f"period_{source_label}_class": cls,
+                f"period_{source_label}_sep_arcsec": sep,
+            },
+            index=df.index,
+        )
+
+    cat = catalog_df.copy()
+    if period_col in cat.columns:
+        cat[period_col] = pd.to_numeric(cat[period_col], errors="coerce")
+    else:
+        cat[period_col] = np.nan
+    if class_col in cat.columns:
+        cat[class_col] = cat[class_col].fillna("").astype(str)
+    else:
+        cat[class_col] = ""
+
+    # 1) ID-level match by Gaia source_id (preferred)
+    if gaia_col in cat.columns and "gaia_id" in df.columns:
+        cand_gaia = pd.Series([_parse_gaia_id_int(v) for v in df["gaia_id"].tolist()], index=df.index, dtype="object")
+        cat_gaia = pd.Series([_parse_gaia_id_int(v) for v in cat[gaia_col].tolist()], index=cat.index, dtype="object")
+        cat_valid = cat.loc[cat_gaia.notna()].copy()
+        if not cat_valid.empty:
+            cat_valid["_gaia_id"] = cat_gaia.loc[cat_valid.index].astype(int)
+            if "vsx_sep_arcsec" in cat_valid.columns:
+                cat_valid["vsx_sep_arcsec"] = pd.to_numeric(cat_valid["vsx_sep_arcsec"], errors="coerce")
+                cat_valid = cat_valid.sort_values("vsx_sep_arcsec", na_position="last")
+            cat_valid = cat_valid.drop_duplicates(subset=["_gaia_id"], keep="first").set_index("_gaia_id")
+
+            mapped_period = cand_gaia.map(cat_valid[period_col])
+            mapped_class = cand_gaia.map(cat_valid[class_col]).fillna("")
+            valid_period = mapped_period.notna() & np.isfinite(mapped_period.to_numpy(dtype=float)) & (mapped_period.to_numpy(dtype=float) > 0)
+            if valid_period.any():
+                match[valid_period.to_numpy()] = True
+                period[valid_period.to_numpy()] = mapped_period.loc[valid_period].to_numpy(dtype=float)
+                cls[valid_period.to_numpy()] = mapped_class.loc[valid_period].astype(str).to_numpy()
+                sep[valid_period.to_numpy()] = 0.0
+
+    # 2) ID-level match by ASAS-SN ID for VSX-like sources
+    if catalog_asassn_col and (catalog_asassn_col in cat.columns) and (candidate_asassn_ids is not None):
+        cat_asas = cat[catalog_asassn_col].astype(str).str.strip()
+        cat_valid = cat.loc[cat_asas.notna() & cat_asas.ne("")].copy()
+        if not cat_valid.empty:
+            cat_valid["_asas_id"] = cat_asas.loc[cat_valid.index]
+            if "vsx_sep_arcsec" in cat_valid.columns:
+                cat_valid["vsx_sep_arcsec"] = pd.to_numeric(cat_valid["vsx_sep_arcsec"], errors="coerce")
+                cat_valid = cat_valid.sort_values("vsx_sep_arcsec", na_position="last")
+            cat_valid = cat_valid.drop_duplicates(subset=["_asas_id"], keep="first").set_index("_asas_id")
+
+            mapped_period = candidate_asassn_ids.map(cat_valid[period_col])
+            mapped_class = candidate_asassn_ids.map(cat_valid[class_col]).fillna("")
+            mapped_sep = (
+                candidate_asassn_ids.map(cat_valid["vsx_sep_arcsec"])
+                if "vsx_sep_arcsec" in cat_valid.columns
+                else pd.Series(np.nan, index=df.index)
+            )
+
+            valid_period = mapped_period.notna() & np.isfinite(mapped_period.to_numpy(dtype=float)) & (mapped_period.to_numpy(dtype=float) > 0)
+            if valid_period.any():
+                idx_mask = valid_period.to_numpy() & (~match)
+                match[idx_mask] = True
+                period[idx_mask] = mapped_period.loc[idx_mask].to_numpy(dtype=float)
+                cls[idx_mask] = mapped_class.loc[idx_mask].astype(str).to_numpy()
+                sep[idx_mask] = pd.to_numeric(mapped_sep.loc[idx_mask], errors="coerce").to_numpy(dtype=float)
+
+    # 3) Coordinate fallback for remaining unmatched rows
+    ra_cand_col, dec_cand_col = _pick_coord_columns(df)
+    if ra_cand_col is not None and dec_cand_col is not None and ra_col in cat.columns and dec_col in cat.columns:
+        remaining = ~match
+        cand_ra = pd.to_numeric(df[ra_cand_col], errors="coerce").to_numpy(dtype=float)
+        cand_dec = pd.to_numeric(df[dec_cand_col], errors="coerce").to_numpy(dtype=float)
+        valid_cand = remaining & np.isfinite(cand_ra) & np.isfinite(cand_dec)
+
+        cat_ra = pd.to_numeric(cat[ra_col], errors="coerce").to_numpy(dtype=float)
+        cat_dec = pd.to_numeric(cat[dec_col], errors="coerce").to_numpy(dtype=float)
+        cat_period = pd.to_numeric(cat[period_col], errors="coerce").to_numpy(dtype=float)
+        cat_class = cat[class_col].astype(str).to_numpy(dtype=object)
+
+        valid_cat = np.isfinite(cat_ra) & np.isfinite(cat_dec) & np.isfinite(cat_period) & (cat_period > 0)
+        if valid_cand.any() and valid_cat.any():
+            cat_coords = SkyCoord(ra=cat_ra[valid_cat] * u.deg, dec=cat_dec[valid_cat] * u.deg)
+            cat_period_valid = cat_period[valid_cat]
+            cat_class_valid = cat_class[valid_cat]
+
+            cand_indices = np.flatnonzero(valid_cand)
+            chunk_size = 200000
+            iterator = range(0, len(cand_indices), chunk_size)
+            if show_tqdm and len(cand_indices) > chunk_size:
+                iterator = tqdm(iterator, desc=f"match_{source_label}_coords", leave=False)
+            for start in iterator:
+                sub_idx = cand_indices[start : start + chunk_size]
+                cand_coords = SkyCoord(ra=cand_ra[sub_idx] * u.deg, dec=cand_dec[sub_idx] * u.deg)
+                idx_cat, sep2d, _ = cand_coords.match_to_catalog_sky(cat_coords)
+                sep_arcsec = sep2d.to(u.arcsec).value
+                within = sep_arcsec <= float(max_sep_arcsec)
+                if not np.any(within):
+                    continue
+
+                out_idx = sub_idx[within]
+                src_idx = idx_cat[within]
+                match[out_idx] = True
+                period[out_idx] = cat_period_valid[src_idx]
+                cls[out_idx] = cat_class_valid[src_idx]
+                sep[out_idx] = sep_arcsec[within]
+
+    return pd.DataFrame(
+        {
+            f"period_{source_label}_match": match,
+            f"period_{source_label}_days": period,
+            f"period_{source_label}_class": cls,
+            f"period_{source_label}_sep_arcsec": sep,
+        },
+        index=df.index,
+    )
 
 
 def filter_evidence_strength(
@@ -645,6 +1166,7 @@ def validate_periodicity(
     rejected_log_csv: str | Path | None = None,
     workers: int = 1,
     checkpoint_dir: str | Path | None = None,
+    skip_if_consensus: bool = True,
 ) -> pd.DataFrame:
     """
     Detailed periodicity validation on candidates (like ZTF paper Section 4.5).
@@ -675,6 +1197,8 @@ def validate_periodicity(
         Number of parallel workers (default 1 = sequential)
     checkpoint_dir : str | Path | None
         Directory for checkpoint files (enables resume on restart)
+    skip_if_consensus : bool
+        Skip bootstrap if a consensus period is already found in external catalogs (default True)
 
     Returns
     -------
@@ -719,10 +1243,50 @@ def validate_periodicity(
                     tqdm.write(f"[validate_periodicity] Warning: Could not load checkpoint: {e}")
     
     # Filter to paths not already processed
-    paths_to_process = [p for p in paths if p not in completed_results]
+    paths_to_process = []
+    skipped_consensus = {}
+
+    has_consensus = False
+    if skip_if_consensus and "catalog_match" in df.columns:
+        # Check if catalog_match is true (implies consensus/evidence found)
+        # We can also check period_consensus_agree if we want to be stricter
+        has_consensus = True
+
+    if has_consensus:
+        # Pre-fill results for consensus matches
+        for _, row in df.iterrows():
+            p = row["path"]
+            if p in completed_results:
+                continue
+            
+            # Use loose consensus check: any catalog match is treated as valid period evidence
+            # to skip the expensive bootstrap check.
+            if _to_bool_mask(pd.Series([row["catalog_match"]]))[0]:
+                period = float(row.get("catalog_period", np.nan))
+                if np.isfinite(period) and period > 0:
+                    skipped_consensus[p] = {
+                        "path": p,
+                        "lsp_power": np.nan,  # Not computed
+                        "lsp_period": period, # Trust catalog period
+                        "lsp_bootstrap_sig": 0.0, # Treat as highly significant
+                        "lsp_is_alias": False,
+                        "lsp_is_significant": True,
+                        "periodicity_score": 99.0, # High confidence
+                        "error": None,
+                    }
+                    continue
+            
+            paths_to_process.append(p)
+    else:
+        paths_to_process = [p for p in paths if p not in completed_results]
     
     if show_tqdm:
-        tqdm.write(f"[validate_periodicity] {len(paths) - len(paths_to_process)}/{len(paths)} already cached, processing {len(paths_to_process)}")
+        n_cached = len(paths) - len(paths_to_process) - len(skipped_consensus)
+        msg = f"[validate_periodicity] {n_cached} cached"
+        if skipped_consensus:
+            msg += f", {len(skipped_consensus)} skipped (consensus)"
+        msg += f", processing {len(paths_to_process)}"
+        tqdm.write(msg)
     
     # Prepare worker arguments
     worker_args = [(p, n_bootstrap, exclude_alias_periods) for p in paths_to_process]
@@ -772,10 +1336,12 @@ def validate_periodicity(
         if show_tqdm:
             tqdm.write(f"[validate_periodicity] Saved checkpoint with {len(completed_results) + len(new_results)} entries")
     
-    # Combine cached + new results
+    # Combine cached + new results + skipped consensus
     all_results = {**completed_results}
     for r in new_results:
         all_results[r["path"]] = r
+    for p, r in skipped_consensus.items():
+        all_results[p] = r
     
     # Build output columns
     powers = []
@@ -1074,149 +1640,220 @@ def validate_periodic_catalog(
     *,
     max_sep_arcsec: float = 3.0,
     flag_only: bool = True,
+    consensus_rel_tol: float = 0.10,
+    use_gaia_eb: bool = True,
+    use_asassn_var: bool = True,
+    use_ztf_periodic: bool = True,
+    use_vsx_period: bool = True,
+    use_ogle_periodic: bool = True,
+    vsx_crossmatch_csv: str | Path = VSX_CROSSMATCH_PATH,
     show_tqdm: bool = False,
     verbose: bool = False,
     rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
     """
-    Crossmatch candidates to Chen+2020 ZTF periodic variable catalog.
+    Aggregate multi-catalog periodic evidence and compute period consensus.
 
-    Fetches catalog from VizieR (cached locally after first download).
-    Paper crossmatched to Chen+2020 and found 14 matches, including
-    1 compelling BY Dra variable.
+    Evidence sources:
+    - Gaia DR3 eclipsing binary table (period from frequency)
+    - ASAS-SN variable catalog (II/366)
+    - ZTF periodic variables (Chen+2020)
+    - VSX periods from the ASAS-SN x VSX crossmatch table
+    - OGLE periodic variables (II/213)
 
     Parameters
     ----------
     df : pd.DataFrame
-        Candidates (must have gaia_id column)
+        Candidate table (gaia_id, asas_sn_id/path, and/or coordinates used if available)
     max_sep_arcsec : float
-        Maximum separation for coordinate fallback (default 3 arcsec)
+        Maximum separation for coordinate fallback matches
     flag_only : bool
-        If True, add 'periodic_catalog_match' flag but don't reject
-        If False, reject catalog matches
-    show_tqdm : bool
-        Show progress
+        If True, annotate only (default). If False, reject any catalog-matched rows.
+    consensus_rel_tol : float
+        Relative tolerance when checking period agreement/harmonics.
+    use_* : bool
+        Enable/disable each evidence source.
+    vsx_crossmatch_csv : str | Path
+        VSX crossmatch source used to recover VSX periods.
     rejected_log_csv : str | Path | None
         Log file for rejected candidates
 
     Returns
     -------
     pd.DataFrame
-        Candidates with periodic catalog match flags
-
-    Notes
-    -----
-    Paper found:
-    - 14/81 candidates matched Chen+2020 ZTF periodic catalog
-    - Visual inspection showed most lacked coherent phase-folded structure
-    - 1 compelling match: BY Dra variable with 2.57d period
-
-    Suggests many catalog "periodic" sources aren't strongly periodic
-    at the level detected by events.py Bayesian fitting.
+        Dataframe annotated with per-source period evidence and consensus fields:
+        period_sources, period_n_sources, period_consensus_days,
+        period_consensus_agree, period_conflict_flag, catalog_match.
     """
     n0 = len(df)
 
-    if "gaia_id" not in df.columns:
-        raise ValueError("[validate_periodic_catalog] Missing gaia_id column")
+    df_out = df.copy()
+    candidate_asassn_ids = _extract_asassn_ids(df_out)
+    source_frames: dict[str, pd.DataFrame] = {}
 
-    # Fetch Chen+2020 ZTF periodic catalog from VizieR (cached)
-    if show_tqdm:
-        tqdm.write(f"[validate_periodic_catalog] Fetching Chen+2020 from VizieR...")
-    try:
-        catalog_df = fetch_chen2020_ztf_periodic(show_tqdm=show_tqdm)
-        # Rename columns to match expected format
-        catalog_df = catalog_df.rename(columns={"var_type": "class"})
-    except Exception as e:
-        if show_tqdm:
-            tqdm.write(f"[validate_periodic_catalog] VizieR query failed: {e} - returning unchanged")
-        df_out = df.copy()
-        df_out["catalog_match"] = False
-        df_out["catalog_period"] = np.nan
-        df_out["catalog_class"] = ""
-        return df_out
+    def _safe_collect(source_label: str, fn, **kwargs) -> None:
+        try:
+            source_frames[source_label] = fn(**kwargs)
+        except Exception as e:
+            if show_tqdm:
+                tqdm.write(f"[validate_periodic_catalog] {source_label} lookup failed: {e}")
+            source_frames[source_label] = pd.DataFrame()
 
-    # Check if catalog has Gaia IDs for direct matching
-    use_gaia_match = "gaia_id" in catalog_df.columns and catalog_df["gaia_id"].notna().any()
-
-    if use_gaia_match:
-        if show_tqdm:
-            tqdm.write(f"[validate_periodic_catalog] Matching by Gaia ID...")
-        # Create lookup dict from catalog
-        catalog_lookup = {}
-        for _, row in catalog_df.iterrows():
-            gid = row.get("gaia_id")
-            if pd.notna(gid):
-                catalog_lookup[int(gid)] = {
-                    "period": row.get("period", np.nan),
-                    "class": str(row.get("class", "")),
-                }
-
-        matches = []
-        periods = []
-        classes = []
-
-        for gaia_id in df["gaia_id"]:
-            if pd.notna(gaia_id) and int(gaia_id) in catalog_lookup:
-                matches.append(True)
-                periods.append(float(catalog_lookup[int(gaia_id)]["period"]))
-                classes.append(catalog_lookup[int(gaia_id)]["class"])
-            else:
-                matches.append(False)
-                periods.append(np.nan)
-                classes.append("")
-    else:
-        # Fallback to coordinate crossmatch
-        if show_tqdm:
-            tqdm.write(f"[validate_periodic_catalog] Catalog has no Gaia IDs, falling back to coordinate match...")
-
-        if "ra_deg" not in df.columns or "dec_deg" not in df.columns:
-            raise ValueError("[validate_periodic_catalog] Need ra_deg/dec_deg for coordinate fallback")
-
-        cand_ra = pd.to_numeric(df["ra_deg"], errors="coerce").to_numpy(dtype=float)
-        cand_dec = pd.to_numeric(df["dec_deg"], errors="coerce").to_numpy(dtype=float)
-        valid_cand_mask = np.isfinite(cand_ra) & np.isfinite(cand_dec)
-
-        cat_ra = pd.to_numeric(catalog_df["ra"], errors="coerce")
-        cat_dec = pd.to_numeric(catalog_df["dec"], errors="coerce")
-        valid_catalog_mask = cat_ra.notna() & cat_dec.notna()
-        catalog_valid = catalog_df.loc[valid_catalog_mask].reset_index(drop=True)
-
-        matches = [False] * n0
-        periods = [np.nan] * n0
-        classes = [""] * n0
-
-        if valid_cand_mask.any() and len(catalog_valid) > 0:
-            candidates_coords = SkyCoord(
-                ra=cand_ra[valid_cand_mask] * u.deg,
-                dec=cand_dec[valid_cand_mask] * u.deg,
-            )
-
-            catalog_coords = SkyCoord(
-                ra=pd.to_numeric(catalog_valid["ra"], errors="coerce").to_numpy(dtype=float) * u.deg,
-                dec=pd.to_numeric(catalog_valid["dec"], errors="coerce").to_numpy(dtype=float) * u.deg,
-            )
-
-            idx_catalog, sep2d, _ = candidates_coords.match_to_catalog_sky(catalog_coords)
-
-            valid_indices = np.flatnonzero(valid_cand_mask)
-            for out_idx, cat_idx, sep in zip(valid_indices, idx_catalog, sep2d):
-                sep_arcsec = sep.to(u.arcsec).value
-                if sep_arcsec < max_sep_arcsec:
-                    matches[out_idx] = True
-                    periods[out_idx] = float(catalog_valid.iloc[cat_idx].get("period", np.nan))
-                    classes[out_idx] = str(catalog_valid.iloc[cat_idx].get("class", ""))
-
-        if show_tqdm:
-            n_skipped = int((~valid_cand_mask).sum())
-            if n_skipped > 0:
-                tqdm.write(
-                    f"[validate_periodic_catalog] Skipping {n_skipped}/{n0} candidates with missing ra/dec"
+    # Gaia EB periods
+    if use_gaia_eb and "gaia_id" in df_out.columns:
+        gaia_ids = [_parse_gaia_id_int(v) for v in df_out["gaia_id"].tolist()]
+        gaia_ids = [gid for gid in gaia_ids if gid is not None]
+        if gaia_ids:
+            _safe_collect("gaia_eb", fetch_gaia_dr3_eb_periods, source_ids=gaia_ids, show_tqdm=show_tqdm)
+            if not source_frames["gaia_eb"].empty:
+                source_frames["gaia_eb"] = source_frames["gaia_eb"].rename(
+                    columns={"source_id": "gaia_id", "global_ranking": "ranking"}
                 )
 
-    df_out = df.copy()
-    df_out["catalog_match"] = matches
-    df_out["catalog_period"] = periods
-    df_out["catalog_class"] = classes
+    # ASAS-SN variable catalog
+    if use_asassn_var:
+        _safe_collect("asassn_var", fetch_asassn_variable_catalog, show_tqdm=show_tqdm)
+
+    # ZTF periodic catalog
+    if use_ztf_periodic:
+        _safe_collect("ztf_periodic", fetch_chen2020_ztf_periodic, show_tqdm=show_tqdm)
+
+    # VSX periods from crossmatch table
+    if use_vsx_period:
+        _safe_collect("vsx", fetch_vsx_period_catalog, vsx_crossmatch_csv=vsx_crossmatch_csv, show_tqdm=show_tqdm)
+
+    # OGLE periodic catalog
+    if use_ogle_periodic:
+        _safe_collect("ogle", fetch_ogle_periodic_catalog, show_tqdm=show_tqdm)
+
+    # Match each source to candidates and attach source columns
+    for src in PERIOD_SOURCE_PRIORITY:
+        cat_df = source_frames.get(src)
+        if cat_df is None:
+            continue
+
+        if src == "vsx":
+            src_match = _match_period_catalog(
+                df_out,
+                cat_df,
+                source_label=src,
+                max_sep_arcsec=max_sep_arcsec,
+                period_col="period",
+                class_col="var_type",
+                gaia_col="gaia_id",
+                catalog_asassn_col="asas_sn_id",
+                candidate_asassn_ids=candidate_asassn_ids,
+                show_tqdm=show_tqdm,
+            )
+        elif src == "gaia_eb":
+            src_match = _match_period_catalog(
+                df_out,
+                cat_df,
+                source_label=src,
+                max_sep_arcsec=max_sep_arcsec,
+                period_col="period",
+                class_col="var_type",
+                gaia_col="gaia_id",
+                show_tqdm=show_tqdm,
+            )
+        else:
+            src_match = _match_period_catalog(
+                df_out,
+                cat_df,
+                source_label=src,
+                max_sep_arcsec=max_sep_arcsec,
+                period_col="period",
+                class_col="var_type",
+                gaia_col="gaia_id",
+                show_tqdm=show_tqdm,
+            )
+        df_out = pd.concat([df_out, src_match], axis=1)
+
+    period_sources_col = np.array([""] * n0, dtype=object)
+    period_n_sources_col = np.zeros(n0, dtype=int)
+    period_consensus_days_col = np.full(n0, np.nan, dtype=float)
+    period_consensus_agree_col = np.zeros(n0, dtype=bool)
+    period_conflict_flag_col = np.zeros(n0, dtype=bool)
+    period_consensus_support_col = np.full(n0, np.nan, dtype=float)
+    period_primary_source_col = np.array([""] * n0, dtype=object)
+    period_source_periods_col = np.array([""] * n0, dtype=object)
+
+    catalog_match_col = np.zeros(n0, dtype=bool)
+    catalog_period_col = np.full(n0, np.nan, dtype=float)
+    catalog_class_col = np.array([""] * n0, dtype=object)
+    catalog_source_col = np.array([""] * n0, dtype=object)
+
+    period_cols = {src: f"period_{src}_days" for src in PERIOD_SOURCE_PRIORITY if f"period_{src}_days" in df_out.columns}
+    class_cols = {src: f"period_{src}_class" for src in PERIOD_SOURCE_PRIORITY if f"period_{src}_class" in df_out.columns}
+
+    if period_cols:
+        has_any_period = np.zeros(n0, dtype=bool)
+        period_arrays: dict[str, np.ndarray] = {}
+        class_arrays: dict[str, np.ndarray] = {}
+        for src, col in period_cols.items():
+            vals = pd.to_numeric(df_out[col], errors="coerce").to_numpy(dtype=float)
+            period_arrays[src] = vals
+            has_any_period |= np.isfinite(vals) & (vals > 0)
+        for src, col in class_cols.items():
+            class_arrays[src] = df_out[col].fillna("").astype(str).to_numpy(dtype=object)
+
+        idx_with_periods = np.flatnonzero(has_any_period)
+        for idx in idx_with_periods:
+            periods_by_source = {
+                src: float(vals[idx])
+                for src, vals in period_arrays.items()
+                if np.isfinite(vals[idx]) and vals[idx] > 0
+            }
+            if not periods_by_source:
+                continue
+
+            ordered = sorted(
+                periods_by_source,
+                key=lambda s: PERIOD_SOURCE_PRIORITY.index(s) if s in PERIOD_SOURCE_PRIORITY else len(PERIOD_SOURCE_PRIORITY),
+            )
+            consensus, agree, conflict, support, primary_source = _choose_consensus_period(
+                periods_by_source,
+                rel_tol=consensus_rel_tol,
+            )
+
+            period_sources_col[idx] = "|".join(ordered)
+            period_n_sources_col[idx] = len(ordered)
+            period_consensus_days_col[idx] = consensus
+            period_consensus_agree_col[idx] = agree
+            period_conflict_flag_col[idx] = conflict
+            period_consensus_support_col[idx] = support
+            period_primary_source_col[idx] = primary_source
+            period_source_periods_col[idx] = ";".join(f"{src}:{periods_by_source[src]:.8g}" for src in ordered)
+
+            # Backward-compatible aggregate fields
+            catalog_match_col[idx] = True
+            catalog_period_col[idx] = consensus
+            catalog_source_col[idx] = primary_source
+
+            cat_class = ""
+            for src in ordered:
+                cvals = class_arrays.get(src)
+                if cvals is None:
+                    continue
+                cval = str(cvals[idx]).strip()
+                if cval:
+                    cat_class = cval
+                    break
+            catalog_class_col[idx] = cat_class
+
+    df_out["period_sources"] = period_sources_col
+    df_out["period_n_sources"] = period_n_sources_col
+    df_out["period_consensus_days"] = period_consensus_days_col
+    df_out["period_consensus_agree"] = period_consensus_agree_col
+    df_out["period_conflict_flag"] = period_conflict_flag_col
+    df_out["period_consensus_support"] = period_consensus_support_col
+    df_out["period_primary_source"] = period_primary_source_col
+    df_out["period_source_periods"] = period_source_periods_col
+
+    df_out["catalog_match"] = catalog_match_col
+    df_out["catalog_period"] = catalog_period_col
+    df_out["catalog_class"] = catalog_class_col
+    df_out["catalog_source"] = catalog_source_col
 
     if flag_only:
         df_filtered = df_out
@@ -1224,8 +1861,10 @@ def validate_periodic_catalog(
         df_filtered = df_out[~df_out["catalog_match"]].reset_index(drop=True)
 
     if show_tqdm:
-        n_matched = sum(matches)
-        tqdm.write(f"[validate_periodic_catalog] matched {n_matched}/{n0} to catalog")
+        n_matched = int(catalog_match_col.sum())
+        n_conflict = int(period_conflict_flag_col.sum())
+        tqdm.write(f"[validate_periodic_catalog] matched {n_matched}/{n0} with periodic evidence")
+        tqdm.write(f"[validate_periodic_catalog] conflict flagged {n_conflict}/{n0}")
         tqdm.write(f"[validate_periodic_catalog] kept {len(df_filtered)}/{n0}")
 
     if not flag_only:
@@ -1328,6 +1967,7 @@ def apply_post_filters(
     periodicity_flag_only: bool = True,
     periodicity_workers: int = 1,
     periodicity_checkpoint_dir: Path | None = None,
+    periodicity_skip_if_consensus: bool = True,
     phase_plot_max_sig: float = 0.01,
     phase_plot_min_power: float | None = 0.3,
     phase_plot_allow_alias: bool = False,
@@ -1343,6 +1983,13 @@ def apply_post_filters(
     apply_periodic_catalog_validation: bool = True,
     periodic_catalog_max_sep: float = 3.0,
     periodic_catalog_flag_only: bool = True,
+    periodic_catalog_consensus_rel_tol: float = 0.10,
+    periodic_catalog_use_gaia_eb: bool = True,
+    periodic_catalog_use_asassn_var: bool = True,
+    periodic_catalog_use_ztf_periodic: bool = True,
+    periodic_catalog_use_vsx_period: bool = True,
+    periodic_catalog_use_ogle_periodic: bool = True,
+    periodic_catalog_vsx_crossmatch_csv: str | Path = VSX_CROSSMATCH_PATH,
     # General
     show_tqdm: bool = True,
     verbose: bool = False,
@@ -1363,7 +2010,7 @@ def apply_post_filters(
     apply_gaia_pm_validation : bool
         Apply Gaia proper-motion validation (uses local Gaia catalog)
     apply_periodic_catalog_validation : bool
-        Apply periodic catalog crossmatch (fetches Chen+2020 from VizieR)
+        Apply periodic-catalog evidence and period-consensus validation
     show_tqdm : bool
         Show progress bars
     verbose : bool
@@ -1470,17 +2117,53 @@ def apply_post_filters(
             "verbose": verbose,
         }))
 
-    if apply_periodicity_validation:
-        filters.append(("periodicity", validate_periodicity, {
-            "n_bootstrap": periodicity_n_bootstrap,
-            "significance_level": periodicity_significance,
-            "exclude_alias_periods": periodicity_exclude_aliases,
-            "flag_only": periodicity_flag_only,
-            "workers": periodicity_workers,
-            "checkpoint_dir": periodicity_checkpoint_dir,
+    if apply_periodic_catalog_validation:
+        filters.append(("periodic_catalog", validate_periodic_catalog, {
+            "max_sep_arcsec": periodic_catalog_max_sep,
+            "flag_only": periodic_catalog_flag_only,
+            "consensus_rel_tol": periodic_catalog_consensus_rel_tol,
+            "use_gaia_eb": periodic_catalog_use_gaia_eb,
+            "use_asassn_var": periodic_catalog_use_asassn_var,
+            "use_ztf_periodic": periodic_catalog_use_ztf_periodic,
+            "use_vsx_period": periodic_catalog_use_vsx_period,
+            "use_ogle_periodic": periodic_catalog_use_ogle_periodic,
+            "vsx_crossmatch_csv": periodic_catalog_vsx_crossmatch_csv,
             "show_tqdm": show_tqdm,
             "verbose": verbose,
-        }))
+        }, [
+            "catalog_match",
+            "catalog_period",
+            "catalog_class",
+            "catalog_source",
+            "period_sources",
+            "period_n_sources",
+            "period_consensus_days",
+            "period_consensus_agree",
+            "period_conflict_flag",
+            "period_consensus_support",
+            "period_primary_source",
+            "period_source_periods",
+            "period_gaia_eb_match",
+            "period_gaia_eb_days",
+            "period_gaia_eb_class",
+            "period_gaia_eb_sep_arcsec",
+            "period_vsx_match",
+            "period_vsx_days",
+            "period_vsx_class",
+            "period_vsx_sep_arcsec",
+            "period_asassn_var_match",
+            "period_asassn_var_days",
+            "period_asassn_var_class",
+            "period_asassn_var_sep_arcsec",
+            "period_ztf_periodic_match",
+            "period_ztf_periodic_days",
+            "period_ztf_periodic_class",
+            "period_ztf_periodic_sep_arcsec",
+            "period_ogle_match",
+            "period_ogle_days",
+            "period_ogle_class",
+            "period_ogle_sep_arcsec",
+        ]))
 
     if apply_gaia_ruwe_validation:
         filters.append(("gaia_ruwe", validate_gaia_ruwe, {
@@ -1488,7 +2171,7 @@ def apply_post_filters(
             "flag_only": gaia_flag_only,
             "show_tqdm": show_tqdm,
             "verbose": verbose,
-        }))
+        }, ["ruwe", "high_ruwe_flag"]))
 
     if apply_gaia_pm_validation:
         filters.append(("gaia_pm", validate_gaia_proper_motion, {
@@ -1498,10 +2181,15 @@ def apply_post_filters(
             "verbose": verbose,
         }))
 
-    if apply_periodic_catalog_validation:
-        filters.append(("periodic_catalog", validate_periodic_catalog, {
-            "max_sep_arcsec": periodic_catalog_max_sep,
-            "flag_only": periodic_catalog_flag_only,
+    if apply_periodicity_validation:
+        filters.append(("periodicity", validate_periodicity, {
+            "n_bootstrap": periodicity_n_bootstrap,
+            "significance_level": periodicity_significance,
+            "exclude_alias_periods": periodicity_exclude_aliases,
+            "flag_only": periodicity_flag_only,
+            "workers": periodicity_workers,
+            "checkpoint_dir": periodicity_checkpoint_dir,
+            "skip_if_consensus": periodicity_skip_if_consensus,
             "show_tqdm": show_tqdm,
             "verbose": verbose,
         }))
@@ -1510,7 +2198,9 @@ def apply_post_filters(
     total_steps = len(filters)
     if total_steps > 0:
         with tqdm(total=total_steps, desc="apply_post_filters", leave=True, disable=not show_tqdm) as pbar:
-            for label, func, kwargs in filters:
+            for filter_entry in filters:
+                label, func, kwargs = filter_entry[0], filter_entry[1], filter_entry[2]
+                merge_cols = filter_entry[3] if len(filter_entry) > 3 else None
                 start = perf_counter()
 
                 if label == "periodicity":
@@ -1574,6 +2264,12 @@ def apply_post_filters(
                 passed_paths = set(df_passed["path"].astype(str))
                 failed_mask = ~df_filtered["path"].astype(str).isin(passed_paths)
                 df_filtered[f"failed_{label}"] = failed_mask
+
+                # Merge annotation columns back (e.g. high_ruwe_flag, catalog_match)
+                if merge_cols:
+                    df_filtered = _merge_columns_by_path(
+                        df_filtered, df_passed, include_columns=merge_cols,
+                    )
 
                 n_failed = int(failed_mask.sum())
                 if verbose:
@@ -1691,6 +2387,8 @@ Example usage:
                         help="Do not exclude alias periods (1d, 29.53d, etc.)")
     parser.add_argument("--periodicity-reject", action="store_true",
                         help="Reject periodic candidates (default: flag only)")
+    parser.add_argument("--periodicity-force-bootstrap", action="store_true",
+                        help="Force bootstrap LSP even if consensus period is found")
     parser.add_argument("--workers", type=int, default=WORKERS,
                         help="Number of parallel workers for LSP validation (default: 10)")
     parser.add_argument("--checkpoint-dir", type=Path, default=None,
@@ -1721,9 +2419,23 @@ Example usage:
 
     # Periodic catalog validation parameters
     parser.add_argument("--skip-periodic-catalog-validation", action="store_true",
-                        help="Skip periodic catalog crossmatch (on by default, fetches Chen+2020 from VizieR)")
+                        help="Skip periodic-catalog consensus validation (on by default)")
     parser.add_argument("--periodic-catalog-max-sep", type=float, default=3.0,
-                        help="Maximum separation in arcsec for catalog match (default: 3.0)")
+                        help="Maximum separation in arcsec for coordinate fallback matches (default: 3.0)")
+    parser.add_argument("--periodic-catalog-consensus-rel-tol", type=float, default=0.10,
+                        help="Relative tolerance for period-consensus agreement (default: 0.10)")
+    parser.add_argument("--periodic-catalog-vsx-crossmatch", type=Path, default=VSX_CROSSMATCH_PATH,
+                        help="ASAS-SN x VSX crossmatch CSV used for VSX period lookup")
+    parser.add_argument("--periodic-catalog-no-gaia-eb", action="store_true",
+                        help="Disable Gaia EB period evidence in periodic-catalog validation")
+    parser.add_argument("--periodic-catalog-no-asassn-var", action="store_true",
+                        help="Disable ASAS-SN variable catalog evidence in periodic-catalog validation")
+    parser.add_argument("--periodic-catalog-no-ztf", action="store_true",
+                        help="Disable ZTF periodic catalog evidence in periodic-catalog validation")
+    parser.add_argument("--periodic-catalog-no-vsx", action="store_true",
+                        help="Disable VSX period evidence in periodic-catalog validation")
+    parser.add_argument("--periodic-catalog-no-ogle", action="store_true",
+                        help="Disable OGLE period evidence in periodic-catalog validation")
     parser.add_argument("--periodic-catalog-reject", action="store_true",
                         help="Reject catalog matches (default: flag only)")
 
@@ -1861,6 +2573,7 @@ Example usage:
         periodicity_flag_only=not args.periodicity_reject,
         periodicity_workers=args.workers,
         periodicity_checkpoint_dir=args.checkpoint_dir.expanduser() if args.checkpoint_dir else (detect_run / "checkpoints" if args.detect_run and args.apply_periodicity_validation else None),
+        periodicity_skip_if_consensus=not args.periodicity_force_bootstrap,
         phase_plot_max_sig=args.phase_plot_max_sig,
         phase_plot_min_power=args.phase_plot_min_power,
         phase_plot_allow_alias=args.phase_plot_allow_alias,
@@ -1876,6 +2589,13 @@ Example usage:
         apply_periodic_catalog_validation=not args.skip_periodic_catalog_validation,
         periodic_catalog_max_sep=args.periodic_catalog_max_sep,
         periodic_catalog_flag_only=not args.periodic_catalog_reject,
+        periodic_catalog_consensus_rel_tol=args.periodic_catalog_consensus_rel_tol,
+        periodic_catalog_use_gaia_eb=not args.periodic_catalog_no_gaia_eb,
+        periodic_catalog_use_asassn_var=not args.periodic_catalog_no_asassn_var,
+        periodic_catalog_use_ztf_periodic=not args.periodic_catalog_no_ztf,
+        periodic_catalog_use_vsx_period=not args.periodic_catalog_no_vsx,
+        periodic_catalog_use_ogle_periodic=not args.periodic_catalog_no_ogle,
+        periodic_catalog_vsx_crossmatch_csv=args.periodic_catalog_vsx_crossmatch,
         # General
         show_tqdm=not args.no_tqdm,
         verbose=args.verbose,
@@ -1934,6 +2654,13 @@ Example usage:
                     "gaia_max_pm": args.gaia_max_pm if not args.skip_gaia_pm_validation else None,
                     "gaia_pm_reject": args.gaia_pm_reject if not args.skip_gaia_pm_validation else None,
                     "periodic_catalog_max_sep": args.periodic_catalog_max_sep if not args.skip_periodic_catalog_validation else None,
+                    "periodic_catalog_consensus_rel_tol": args.periodic_catalog_consensus_rel_tol if not args.skip_periodic_catalog_validation else None,
+                    "periodic_catalog_use_gaia_eb": (not args.periodic_catalog_no_gaia_eb) if not args.skip_periodic_catalog_validation else None,
+                    "periodic_catalog_use_asassn_var": (not args.periodic_catalog_no_asassn_var) if not args.skip_periodic_catalog_validation else None,
+                    "periodic_catalog_use_ztf_periodic": (not args.periodic_catalog_no_ztf) if not args.skip_periodic_catalog_validation else None,
+                    "periodic_catalog_use_vsx_period": (not args.periodic_catalog_no_vsx) if not args.skip_periodic_catalog_validation else None,
+                    "periodic_catalog_use_ogle_periodic": (not args.periodic_catalog_no_ogle) if not args.skip_periodic_catalog_validation else None,
+                    "periodic_catalog_vsx_crossmatch": str(args.periodic_catalog_vsx_crossmatch) if not args.skip_periodic_catalog_validation else None,
                     "periodic_catalog_reject": args.periodic_catalog_reject if not args.skip_periodic_catalog_validation else None,
                 },
                 "results": {

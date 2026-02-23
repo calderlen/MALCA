@@ -1326,9 +1326,11 @@ def _render_vetting_banner(payload: dict | None) -> html.Div:
     if vsx_cls and str(vsx_cls).strip() and str(vsx_cls).strip().lower() not in ('nan', '<na>'):
         vsx_sep = payload.get('vsx_sep_arcsec')
         sep_str = f" ({vsx_sep:.1f}\")" if vsx_sep and not pd.isna(vsx_sep) else ""
+        vsx_p = payload.get('vsx_period')
+        p_str = f", P={vsx_p:.4f}d" if vsx_p and not pd.isna(vsx_p) else ""
         cards.append(html.Div([
             html.Span("VSX", style=label_style),
-            html.Span(f"{vsx_cls}{sep_str}", style=hit_style),
+            html.Span(f"{vsx_cls}{p_str}{sep_str}", style=hit_style),
         ], style=cell_style))
 
     # Gaia variability cell
@@ -2084,10 +2086,7 @@ _SIDEBAR_GROUPS = [
         ('num', 'hill_radius_rsun'),
     ]),
     ('Fail Flags', [
-        ('bool', 'failed_sparse'),
-        ('bool', 'failed_multi_camera'),
-        ('bool', 'failed_vsx'),
-        ('bool', 'failed_evidence_strength'),
+        ('bool', 'failed_posterior_strength'),
         ('bool', 'failed_run_robustness'),
         ('bool', 'failed_morphology'),
         ('bool', 'failed_score'),
@@ -2143,6 +2142,7 @@ def create_layout():
         dcc.Store(id='status-resize-init', data=0),
         dcc.Store(id='section-splitters-init', data=0),
         dcc.Store(id='sidebar-plot-saved', data=0),  # dummy sink for plot prefs save callback
+        dcc.Store(id='candidate-start-time', data=0),
         dcc.Download(id='plot-export-download'),
         dcc.Download(id='run-config-download'),
         dcc.Interval(id='keyboard-init', interval=200, n_intervals=0, max_intervals=1),
@@ -2271,6 +2271,14 @@ def create_layout():
                        style={'width': '100%', 'font-size': '11px'}),
 
             html.Hr(),
+            
+            html.Div('Pace Timer', className='section-title'),
+            dcc.Checklist(
+                id='pace-timer-toggle',
+                options=[{'label': ' Show Timer', 'value': 'yes'}],
+                value=[],
+                style={'margin-bottom': '4px'}
+            ),
 
             html.Div('Theme', className='section-title'),
             dcc.RadioItems(
@@ -2295,6 +2303,7 @@ def create_layout():
             html.Div([
                 html.Span(id='progress-text', style={'color': '#0af', 'font-size': '11px'}),
                 html.Span(id='review-progress-indicator', style={'color': '#9fb6cb', 'font-size': '11px', 'margin-left': '10px'}),
+                html.Span(id='pace-timer-display', style={'color': '#aaa', 'font-size': '11px', 'margin-left': '10px', 'font-family': 'monospace'}),
                 html.Div([
                     html.Span(id='header-asas-sn-id', className='item'),
                     html.Span(id='header-path', className='item path'),
@@ -2388,6 +2397,12 @@ def create_layout():
                         html.Div([
                             html.Div([
                                 html.Span('Candidate Panels', className='title'),
+                                dcc.Checklist(
+                                    id='round-sigfigs',
+                                    options=[{'label': ' Round', 'value': 'yes'}],
+                                    value=[],
+                                    style={'display': 'inline-block', 'font-size': '11px', 'margin-right': '6px'},
+                                ),
                                 html.Button('Expand all', id='toggle-meta-all', n_clicks=0, className='compact-btn'),
                             ], className='meta-toolbar'),
                             html.Div(id='candidate-info-grid', className='metadata-sections candidate-metadata'),
@@ -2511,6 +2526,37 @@ def create_layout():
 
 
 app.layout = create_layout
+
+
+# --- Pace Timer Callbacks ---
+
+app.clientside_callback(
+    """
+    function(idx) {
+        return Date.now();
+    }
+    """,
+    Output('candidate-start-time', 'data'),
+    Input('current-index', 'data')
+)
+
+app.clientside_callback(
+    """
+    function(n_intervals, startTime, toggle) {
+        if (!toggle || !toggle.length || toggle.indexOf('yes') === -1 || !startTime) {
+            return '';
+        }
+        var elapsed = (Date.now() - startTime) / 1000;
+        var mins = Math.floor(elapsed / 60);
+        var secs = Math.floor(elapsed % 60);
+        return '⏱ ' + (mins > 0 ? mins + 'm ' : '') + secs + 's';
+    }
+    """,
+    Output('pace-timer-display', 'children'),
+    Input('review-metrics-interval', 'n_intervals'),
+    [State('candidate-start-time', 'data'),
+     State('pace-timer-toggle', 'value')]
+)
 
 
 # Global keyboard listener (set up once on page load)
@@ -2700,7 +2746,7 @@ app.clientside_callback(
      State('plot-mode', 'value'),
      State('baseline-opacity-slider', 'value'),
      State('residual-height-slider', 'value')],
-    prevent_initial_call=False,
+    prevent_initial_call='initial_duplicate',
 )
 
 
@@ -3199,11 +3245,12 @@ def load_queue(refresh_clicks, import_trigger, queue_source_scope, *state_values
 
 
 
-def _do_save(candidate_id, score, event_class, needs_followup, notes, event_type):
-    """Shared save helper.  Auto-sets status and auto-increments review_pass."""
+def _do_save(candidate_id, score, event_class, needs_followup, notes, event_type, *, increment_pass=False):
+    """Shared save helper.  Auto-sets status; only increments review_pass on Done."""
     with closing(db_connect(Path(DB_PATH))) as conn:
         review = get_review(conn, candidate_id)
-        new_pass = max(1, review.get('review_pass', 0)) + 1
+        current_pass = max(1, review.get('review_pass', 0))
+        new_pass = current_pass + 1 if increment_pass else current_pass
         status = 'needs_followup' if needs_followup else 'reviewed'
         save_review(
             conn,
@@ -3289,8 +3336,10 @@ def handle_keyboard(key_value, current_idx, queue_data, current_score,
     new_pass = no_update
     if should_save and candidate_id:
         score = int(key) if key in '1234' else current_score
+        is_done = (key == 'Enter')
         pass_val, _ = _do_save(
             candidate_id, score, event_class, needs_followup, notes, 'keyboard',
+            increment_pass=is_done,
         )
         new_score = score
         new_pass = pass_val
@@ -3313,11 +3362,12 @@ def handle_keyboard(key_value, current_idx, queue_data, current_score,
      Input('residual-height-slider', 'value'),
      Input('theme-mode-store', 'data'),
      Input('queue-data', 'data'),
-     Input('baseline-opacity-slider', 'value')],
+     Input('baseline-opacity-slider', 'value'),
+     Input('round-sigfigs', 'value')],
     State('plot-render-request', 'data'),
     prevent_initial_call=True,
 )
-def queue_plot_render_request(idx, plot_mode, overlay_values, selected_cameras, preset, residual_height, theme_mode, _queue_data, baseline_opacity, existing_request):
+def queue_plot_render_request(idx, plot_mode, overlay_values, selected_cameras, preset, residual_height, theme_mode, _queue_data, baseline_opacity, round_sigfigs, existing_request):
     """Debounced render request queue for native plot UX."""
     req = existing_request or {'nonce': 0, 'ts': 0.0}
     return {
@@ -3332,6 +3382,7 @@ def queue_plot_render_request(idx, plot_mode, overlay_values, selected_cameras, 
             'residual_height': float(residual_height or 0.28),
             'theme': theme_mode or 'dark',
             'baseline_opacity': float(baseline_opacity if baseline_opacity is not None else 0.5),
+            'round_sigfigs': bool(round_sigfigs and 'yes' in round_sigfigs),
         },
     }
 
@@ -3430,6 +3481,7 @@ def update_display(render_request, applied_nonce, queue_data):
     theme_mode = str(state.get('theme', 'dark') or 'dark')
     residual_height = float(state.get('residual_height', 0.28) or 0.28)
     baseline_opacity = float(state.get('baseline_opacity', 0.5) if state.get('baseline_opacity') is not None else 0.5)
+    round_sigfigs = bool(state.get('round_sigfigs', False))
 
     empty_fig = {
         'data': [],
@@ -3461,7 +3513,7 @@ def update_display(render_request, applied_nonce, queue_data):
         except ValueError:
             plot_src = f'/plots/{plot_path.name}'
 
-    grouped = extract_review_metadata_grouped(payload)
+    grouped = extract_review_metadata_grouped(payload, round_sigfigs=round_sigfigs)
     metadata_health = _render_metadata_health(grouped)
     vetting_banner = _render_vetting_banner(payload)
     label_color = '#888'
@@ -3496,7 +3548,7 @@ def update_display(render_request, applied_nonce, queue_data):
                 )
             )
 
-    progress = f"[{idx + 1}/{queue_size}] Queue: {queue_size}"
+    progress = f"[{idx + 1}/{queue_size}]"
 
     if plot_mode == 'png':
         run_params, run_params_status, run_params_msg = _load_run_params_meta_for_plot_dir(str(PLOT_DIR) if PLOT_DIR else None)
@@ -3981,6 +4033,7 @@ def done_callback(n_clicks, idx, queue_data, score,
     candidate_id = queue_data['candidate_ids'][idx]
     new_pass, _ = _do_save(
         candidate_id, score, event_class, needs_followup, notes, 'done_button',
+        increment_pass=True,
     )
 
     queue_size = queue_data['queue_size']

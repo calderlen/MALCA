@@ -277,7 +277,7 @@ The full detection workflow has three steps: build a manifest, run detection wit
    malca post_filter --input results.parquet --output filtered.parquet \
        --min-bayes-factor 20 --min-run-points 3 --apply-morphology
    ```
-   - **Implemented filters**: posterior strength, run robustness, score, morphology, periodicity, Gaia RUWE, periodic catalog
+   - **Implemented filters**: posterior strength, run robustness, score, morphology, periodicity, Gaia RUWE, Gaia PM, multi-catalog periodic consensus
 
 4) Optional: tune post-filter behavior directly from `malca pipeline` / `malca detect`.
    ```bash
@@ -290,11 +290,11 @@ The full detection workflow has three steps: build a manifest, run detection wit
        --apply-periodicity-validation --periodicity-n-bootstrap 2000 \
        --gaia-reject --periodic-catalog-reject
    ```
-   - **Defaults in pipeline**: evidence strength, run robustness, score, Gaia RUWE, and periodic-catalog validation are on; morphology and periodicity-validation are off.
+   - **Defaults in pipeline**: evidence strength, run robustness, score, Gaia RUWE, Gaia PM, and periodic-catalog consensus validation are on; morphology and periodicity-validation are off.
    - **Control flags now available in pipeline**:
      - Evidence/run: `--skip-evidence-strength`, `--allow-infinite-local-bf`, `--skip-run-robustness`, `--min-run-count`, `--post-filter-min-run-points`, `--post-filter-min-run-cameras`
      - Morphology/score: `--apply-morphology`, `--dip-morphology`, `--jump-morphology`, `--min-delta-bic`, `--skip-score-filter`, `--min-score`
-     - Validators: `--apply-periodicity-validation` (+ periodicity knobs), `--skip-gaia-ruwe-validation|--gaia-reject`, `--skip-periodic-catalog-validation|--periodic-catalog-reject`
+     - Validators: `--apply-periodicity-validation` (+ periodicity knobs), `--skip-gaia-ruwe-validation|--gaia-reject`, `--skip-gaia-pm-validation|--gaia-pm-reject`, `--skip-periodic-catalog-validation|--periodic-catalog-reject`
 
 **Detect options:**
 ```bash
@@ -338,7 +338,7 @@ malca events --input /path/to/lc*_cal/*.dat2 --output output/results.parquet \
 malca pre_filter --help
 ```
 - Expects columns `asas_sn_id` and `path` pointing to lc_dir.
-- VSX handling: default is filter (drops VSX matches but keeps `sep_arcsec` and `class` on survivors). Use `--vsx-mode tag` to keep all matches and only tag.
+- VSX handling: default is `tag` (keeps all rows and attaches `vsx_sep_arcsec`/`vsx_class`). Use `--vsx-mode filter` only when you explicitly want VSX-based rejection.
 
 #### malca post_filter
 
@@ -525,6 +525,8 @@ malca vetting output/characterized.parquet --checkpoint output/vetting_checkpoin
 - **PM consistency**: Proper motion agreement with host cluster
 - **ATLAS** (opt-in, `--atlas-token`): Forced photometry light curves
 - **NEOWISE** (opt-in, `--neowise-lc`): Full NEOWISE light curves
+
+**Pipeline default:** vetting runs by default in `malca pipeline`; use `--no-run-vetting` to opt out.
 
 **Vetting is also available during import** in the review GUI ("Vet on import" toggle). Results are cached per input file so re-imports skip already-vetted candidates.
 
