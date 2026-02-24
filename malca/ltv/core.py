@@ -195,7 +195,7 @@ def parse_args() -> tuple[list[Config], bool]:
 
 
 def read_index_csv(path: Path) -> pd.DataFrame:
-    return pd.read_csv(path)
+    return pd.read_csv(path, low_memory=False)
 
 
 def filter_lc_for_ltv(df_g: pd.DataFrame, target_id: int) -> pd.DataFrame:
