@@ -25,6 +25,7 @@ import argparse
 import csv
 import multiprocessing as mp
 import os
+import re
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -45,8 +46,6 @@ from malca.config.config_ltv import (
     LTV_MIN_POINTS_PER_SEASON,
     LTV_MIN_SEASONS_FOR_QUADRATIC,
     LTV_CORE_CHUNK_SIZE,
-    LTV_DIR_START,
-    LTV_DIR_END,
     LTV_WORKERS,
     LTV_LS_MIN_PERIOD_DAYS,
     LTV_LS_MAX_PERIOD_DAYS,
@@ -67,17 +66,17 @@ from malca.ltv.optim import (
 LC_COLUMNS = ["jd", "mag", "error", "good/bad", "camera", "v/g?", "saturated/unsaturated", "camera,field"]
 MAG_BINS = ["12_12.5", "12.5_13", "13_13.5", "13.5_14", "14_14.5", "14.5_15"]
 
+IDX_PATTERN = re.compile(r"lc(\d+)_cal$")
+
+
 @dataclass(frozen=True)
 class Config:
     root: Path
     mag_bin: str
     output: Path
-    dir_start: int
-    dir_end: int
     dspring: float
     ra_is_deg: bool
     max_seasons: int
-    n_midpoints: int
     min_points_per_season: int
     min_seasons_for_quadratic: int
     write_per_dir: bool
@@ -104,13 +103,6 @@ def parse_args() -> Config:
                    default=None, 
                    type=str, 
                    help="Combined output CSV (default: LTvar<MAG>.csv)")
-    p.add_argument("--dir-start",
-                   type=int,
-                   default=LTV_DIR_START)
-    p.add_argument("--dir-end",
-                   type=int,
-                   default=LTV_DIR_END)
-    # Preserve constants/behavior
     p.add_argument("--dspring",
                    type=float,
                    default=LTV_DSPRING)
@@ -120,11 +112,6 @@ def parse_args() -> Config:
     p.add_argument("--max-seasons",
                    type=int,
                    default=LTV_MAX_SEASONS)
-    p.add_argument("--n-midpoints", 
-                   type=int, 
-                   default=None, 
-                   help="How many yearly midpoints to generate before filtering to data range (default: dir_end+1, like the snippet).",
-    )
     p.add_argument("--min-points-per-season",
                    type=int,
                    default=LTV_MIN_POINTS_PER_SEASON,
@@ -168,20 +155,15 @@ def parse_args() -> Config:
         out = f"LTvar{mag_bin.replace('_','-')}.csv"
     output = Path(out)
 
-    n_midpoints = a.n_midpoints if a.n_midpoints is not None else (a.dir_end + 1)
-
     resume = bool(a.resume or a.overwrite)
 
     return Config(
         root=root,
         mag_bin=mag_bin,
         output=output,
-        dir_start=a.dir_start,
-        dir_end=a.dir_end,
         dspring=float(a.dspring),
         ra_is_deg=bool(a.ra_is_deg),
         max_seasons=int(a.max_seasons),
-        n_midpoints=int(n_midpoints),
         min_points_per_season=int(a.min_points_per_season),
         min_seasons_for_quadratic=int(a.min_seasons_for_quadratic),
         write_per_dir=bool(a.write_per_dir),
@@ -537,7 +519,7 @@ def process_one_lc(
         ra_val,
         ra_is_deg=cfg.ra_is_deg,
         dspring=cfg.dspring,
-        n_midpoints=cfg.n_midpoints,
+        n_midpoints=cfg.max_seasons,
     )
     mids = choose_midpoints_in_range(mid_all, float(JD.min()), float(JD.max()), cfg.max_seasons)
 
@@ -717,7 +699,11 @@ def make_writer(path: Path | None, fmt: str):
 def main() -> None:
     cfg = parse_args()
 
-    print(f"Processing mag_bin={cfg.mag_bin} directories {cfg.dir_start} to {cfg.dir_end}")
+    mag_bin_dir = cfg.root / cfg.mag_bin
+    lc_dirs = sorted(mag_bin_dir.glob("lc*_cal"))
+    lc_dirs = [d for d in lc_dirs if d.is_dir() and IDX_PATTERN.search(d.name)]
+
+    print(f"Processing mag_bin={cfg.mag_bin}: found {len(lc_dirs)} lc_cal directories")
     print(f"Workers: {cfg.workers}, Chunk size: {cfg.chunk_size}, Format: {cfg.output_format}")
 
     output_path = Path(cfg.output)
@@ -741,12 +727,12 @@ def main() -> None:
     all_files = []
     id_map = {}
 
-    for x in range(cfg.dir_start, cfg.dir_end + 1):
-        index_path = cfg.root / cfg.mag_bin / f"index{x}.csv"
-        lc_dir = cfg.root / cfg.mag_bin / f"lc{x}_cal"
+    for lc_dir in lc_dirs:
+        x = int(IDX_PATTERN.search(lc_dir.name).group(1))
+        index_path = mag_bin_dir / f"index{x}.csv"
 
-        if not index_path.exists() or not lc_dir.exists():
-            print(f"Skipping directory {x}: missing index or lc_dir")
+        if not index_path.exists():
+            print(f"Skipping lc{x}_cal: missing index{x}.csv")
             continue
 
         id_df = read_index_csv(index_path)
