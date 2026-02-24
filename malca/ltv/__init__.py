@@ -86,7 +86,6 @@ from malca.ltv.optim import (
     check_optimizations,
     cached,
     clear_cache,
-    healpix_partition,
     get_pooled_session,
 )
 

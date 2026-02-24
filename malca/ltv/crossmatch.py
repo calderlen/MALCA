@@ -31,7 +31,6 @@ from tqdm.auto import tqdm
 
 from malca.config.config_ltv import (
     LTV_MATCH_RADIUS_ARCSEC,
-    LTV_HEALPIX_NSIDE,
     LTV_WORKERS,
     LTV_CROSSMATCH_CHUNK_SIZE,
 )
@@ -635,8 +634,6 @@ def crossmatch_all_catalogs(
     include_simbad: bool = True,
     match_radius_arcsec: float = LTV_MATCH_RADIUS_ARCSEC,
     n_workers: int = LTV_WORKERS,
-    use_healpix: bool = True,
-    healpix_nside: int = LTV_HEALPIX_NSIDE,
     verbose: bool = False,
 ) -> pd.DataFrame:
     """
@@ -645,7 +642,6 @@ def crossmatch_all_catalogs(
     Optimizations:
     - LOCAL CATALOG: Uses pre-matched ASAS-SN × VSX file for Gaia DR3 & VSX
       data, ELIMINATING those API queries entirely (~99K sources available)
-    - HEALPix spatial chunking for remaining API queries
     - Parallel processing via ThreadPoolExecutor
     
     Data sources:
@@ -712,31 +708,15 @@ def crossmatch_all_catalogs(
     if verbose and api_queries_needed:
         print(f"  API queries needed: {', '.join(api_queries_needed)}")
     
-    # HEALPix partitioning for API queries
-    if use_healpix and api_queries_needed:
-        from malca.ltv.optim import healpix_partition
-        partitions = healpix_partition(df, nside=healpix_nside)
-        
-        if verbose:
-            print(f"  Partitioned into {len(partitions)} HEALPix pixels for API queries")
-    else:
-        partitions = {0: df}
-    
-    # Process each partition (API queries only)
-    results = []
-    for pix, partition in tqdm(partitions.items(), desc="HEALPix chunks", disable=not verbose or len(partitions) == 1):
-        if include_gaia_alerts:
-            partition = crossmatch_gaia_alerts(partition, match_radius_arcsec=match_radius_arcsec, n_workers=n_workers, verbose=False)
-        
-        if include_milliquas:
-            partition = crossmatch_milliquas(partition, match_radius_arcsec=match_radius_arcsec, n_workers=n_workers, verbose=False)
-        
-        if include_simbad:
-            partition = query_simbad_classification(partition, match_radius_arcsec=match_radius_arcsec, n_workers=n_workers, verbose=False)
-        
-        results.append(partition)
-    
-    df = pd.concat(results, ignore_index=True)
+    # Process API queries on the full (already-filtered) dataset
+    if include_gaia_alerts:
+        df = crossmatch_gaia_alerts(df, match_radius_arcsec=match_radius_arcsec, n_workers=n_workers, verbose=False)
+
+    if include_milliquas:
+        df = crossmatch_milliquas(df, match_radius_arcsec=match_radius_arcsec, n_workers=n_workers, verbose=False)
+
+    if include_simbad:
+        df = query_simbad_classification(df, match_radius_arcsec=match_radius_arcsec, n_workers=n_workers, verbose=False)
     
     if verbose:
         print(f"[crossmatch_all_catalogs] Complete")

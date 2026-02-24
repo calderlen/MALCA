@@ -5,7 +5,7 @@ Advanced optimizations for 17M+ source processing:
 - Numba JIT for numerical computations
 - Caching layer (joblib) for API results
 - Connection pooling for TAP services
-- HEALPix spatial chunking for efficient queries
+
 """
 
 from __future__ import annotations
@@ -208,119 +208,6 @@ def close_session():
         _session = None
 
 
-import healpy as hp
-
-
-def healpix_partition(
-    df,
-    *,
-    ra_column: str = "ra_deg",
-    dec_column: str = "dec_deg",
-    nside: int = 32,
-) -> dict:
-    """
-    Partition DataFrame by HEALPix pixel for efficient spatial queries.
-    
-    Groups sources by sky location so batch queries cover contiguous regions,
-    improving server-side index efficiency.
-    
-    Parameters
-    ----------
-    df : pd.DataFrame
-        DataFrame with RA/Dec columns
-    ra_column : str
-        RA column name
-    dec_column : str
-        Dec column name
-    nside : int
-        HEALPix nside (32 = ~1.8° pixels, 64 = ~0.9° pixels)
-    
-    Returns
-    -------
-    dict
-        Mapping of HEALPix pixel ID to DataFrame subset
-    """
-    if ra_column not in df.columns or dec_column not in df.columns:
-        return {0: df}
-    
-    if ra_column not in df.columns or dec_column not in df.columns:
-        return {0: df}
-    
-    # Convert RA/Dec to HEALPix pixels
-    ra = df[ra_column].values
-    dec = df[dec_column].values
-    
-    # healpy uses theta (colatitude) and phi (longitude) in radians
-    # theta = 90 - dec, phi = ra
-    theta = np.radians(90.0 - dec)
-    phi = np.radians(ra)
-    
-    valid_mask = np.isfinite(theta) & np.isfinite(phi)
-    
-    pixels = np.full(len(df), -1, dtype=np.int64)
-    pixels[valid_mask] = hp.ang2pix(nside, theta[valid_mask], phi[valid_mask])
-    
-    df = df.copy()
-    df["_healpix"] = pixels
-    
-    # Group by pixel
-    partitions = {}
-    for pix, group in df.groupby("_healpix"):
-        if pix >= 0:
-            partitions[pix] = group.drop(columns=["_healpix"]).reset_index(drop=True)
-    
-    return partitions
-
-
-def healpix_batch_query(
-    df,
-    query_func: Callable,
-    *,
-    ra_column: str = "ra_deg",
-    dec_column: str = "dec_deg",
-    nside: int = 32,
-    verbose: bool = False,
-):
-    """
-    Run batch queries with HEALPix spatial chunking.
-    
-    Partitions sources by sky location, then runs query_func on each partition.
-    Results are merged back into a single DataFrame.
-    
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Input DataFrame
-    query_func : Callable
-        Function that takes a DataFrame partition and returns enriched DataFrame
-    nside : int
-        HEALPix nside for partitioning
-    verbose : bool
-        Print progress
-    
-    Returns
-    -------
-    pd.DataFrame
-        Merged results
-    """
-    from tqdm.auto import tqdm
-    
-    partitions = healpix_partition(df, ra_column=ra_column, dec_column=dec_column, nside=nside)
-    
-    if verbose:
-        print(f"Partitioned {len(df)} sources into {len(partitions)} HEALPix pixels")
-    
-    results = []
-    iterator = tqdm(partitions.items(), desc="HEALPix chunks", disable=not verbose)
-    
-    for pix, partition in iterator:
-        result = query_func(partition)
-        results.append(result)
-    
-    import pandas as pd
-    return pd.concat(results, ignore_index=True)
-
-
 # =============================================================================
 # UTILITY: Check available optimizations
 # =============================================================================
@@ -330,6 +217,5 @@ def check_optimizations():
     print("LTV Optimization Status:")
     print("  Numba JIT:        ✓ Available")
     print(f"  Joblib cache:     ✓ Available (dir: {CACHE_DIR})")
-    print("  HEALPix:          ✓ Available")
     print("  Connection pool:  ✓ Available")
 
