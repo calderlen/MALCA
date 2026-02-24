@@ -34,11 +34,12 @@ import requests
 from astropy.coordinates import SkyCoord
 from astropy.table import Table
 import astropy.units as u
-from astroquery.simbad import Simbad
 from tqdm import tqdm
 
 from malca.config.config_paths import GAIA_AIP_TAP_URL
 from malca.config.config_characterize import GAIA_CHUNK_SIZE
+from malca.config.config_ltv import VIZIER_TAP_URL, SIMBAD_TAP_URL
+from malca.utils import batch_tap_crossmatch
 
 # Vetting configuration
 SIMBAD_RADIUS_ARCSEC = 5.0
@@ -80,12 +81,12 @@ NEOWISE_MAX_SEP_ARCSEC = 3.0
 def query_simbad_batch(
     df: pd.DataFrame,
     radius_arcsec: float = SIMBAD_RADIUS_ARCSEC,
+    chunk_size: int = SIMBAD_BATCH_SIZE,
 ) -> pd.DataFrame:
     """
-    Query SIMBAD by coordinates for all candidates.
+    Query SIMBAD by coordinates for all candidates via batch TAP upload.
 
     Adds columns: simbad_main_id, simbad_otype, simbad_nbref, simbad_sep_arcsec.
-    Uses the SIMBAD TAP service for efficient batch queries.
     """
     df = df.copy()
     for col in ("simbad_main_id", "simbad_otype", "simbad_nbref", "simbad_sep_arcsec"):
@@ -95,64 +96,42 @@ def query_simbad_batch(
     if not valid.any():
         return df
 
-    df_valid = df.loc[valid].copy()
-    n = len(df_valid)
-    print(f"SIMBAD: querying {n} candidates (radius={radius_arcsec}\")")
+    n = int(valid.sum())
+    print(f"SIMBAD: querying {n} candidates via TAP (radius={radius_arcsec}\")")
 
-    simbad = Simbad()
-    simbad.add_votable_fields("otype", "nbref")
-    simbad.ROW_LIMIT = -1  # no row limit
-    simbad.timeout = 120
+    coords_df = pd.DataFrame({
+        "_idx": df.index[valid],
+        "ra": df.loc[valid, "ra"].values,
+        "dec": df.loc[valid, "dec"].values,
+    })
 
-    radius = radius_arcsec * u.arcsec
+    result = batch_tap_crossmatch(
+        coords_df,
+        tap_url=SIMBAD_TAP_URL,
+        catalog_table="basic",
+        select_cols="c.main_id, c.otype, c.nbref",
+        ra_col="ra",
+        dec_col="dec",
+        match_radius_arcsec=radius_arcsec,
+        chunk_size=chunk_size,
+        n_workers=4,
+        verbose=True,
+        desc="SIMBAD TAP",
+    )
+
     matched = 0
-
-    for i in tqdm(range(0, n, SIMBAD_BATCH_SIZE), desc="SIMBAD batch"):
-        batch = df_valid.iloc[i : i + SIMBAD_BATCH_SIZE]
-        coords = SkyCoord(
-            ra=batch["ra"].values, dec=batch["dec"].values, unit="deg", frame="icrs"
-        )
-
-        for attempt in range(SIMBAD_MAX_RETRIES):
-            try:
-                result = simbad.query_region(coords, radius=radius)
-                break
-            except Exception as e:
-                if attempt < SIMBAD_MAX_RETRIES - 1:
-                    print(f"  SIMBAD retry {attempt + 1}: {e}")
-                    time.sleep(SIMBAD_RETRY_DELAY * (attempt + 1))
-                else:
-                    print(f"  SIMBAD batch {i}-{i+len(batch)} failed: {e}")
-                    result = None
-
-        if result is None or len(result) == 0:
-            continue
-
-        # Match results back to input by nearest coord
-        result_coords = SkyCoord(
-            ra=result["ra"], dec=result["dec"], unit="deg", frame="icrs"
-        )
-
-        for j, (idx, row) in enumerate(batch.iterrows()):
-            src = SkyCoord(ra=row["ra"], dec=row["dec"], unit="deg", frame="icrs")
-            seps = src.separation(result_coords).arcsec
-            within = seps <= radius_arcsec
-            if not within.any():
-                continue
-
-            # Take the match with most references (most studied object)
-            candidates_within = np.where(within)[0]
-            nbrefs = np.array([
-                int(result["nbref"][k]) if result["nbref"][k] is not None else 0
-                for k in candidates_within
-            ])
-            best = candidates_within[np.argmax(nbrefs)]
-
-            df.loc[idx, "simbad_main_id"] = str(result["main_id"][best])
-            df.loc[idx, "simbad_otype"] = str(result["otype"][best])
-            df.loc[idx, "simbad_nbref"] = int(nbrefs[np.argmax(nbrefs)])
-            df.loc[idx, "simbad_sep_arcsec"] = round(seps[best], 3)
-            matched += 1
+    if not result.empty:
+        # Keep best match per source (most references)
+        result["nbref"] = pd.to_numeric(result.get("nbref"), errors="coerce").fillna(0).astype(int)
+        result = result.sort_values("nbref", ascending=False).drop_duplicates(subset="_idx", keep="first")
+        for _, row in result.iterrows():
+            idx = int(row["_idx"])
+            if idx in df.index:
+                df.loc[idx, "simbad_main_id"] = str(row.get("main_id", ""))
+                df.loc[idx, "simbad_otype"] = str(row.get("otype", ""))
+                df.loc[idx, "simbad_nbref"] = int(row["nbref"])
+                df.loc[idx, "simbad_sep_arcsec"] = round(float(row["sep_arcsec"]), 3)
+                matched += 1
 
     print(f"SIMBAD: {matched}/{n} candidates matched")
     return df
@@ -277,15 +256,13 @@ def query_gaia_variability(
 def crossmatch_asassn_variables(
     df: pd.DataFrame,
     radius_arcsec: float = ASASSN_VAR_RADIUS_ARCSEC,
-    batch_size: int = 50,
+    chunk_size: int = 1000,
 ) -> pd.DataFrame:
     """
-    Crossmatch against the ASAS-SN Variable Stars Database (Jayasinghe+ 2018-2021).
+    Crossmatch against the ASAS-SN Variable Stars Database via batch VizieR TAP.
 
-    Uses VizieR query_region in batches. Adds columns: asassn_var_name, asassn_var_type, asassn_var_period.
+    Adds columns: asassn_var_name, asassn_var_type, asassn_var_period.
     """
-    from astroquery.vizier import Vizier
-
     df = df.copy()
     df["asassn_var_name"] = ""
     df["asassn_var_type"] = ""
@@ -296,60 +273,41 @@ def crossmatch_asassn_variables(
         return df
 
     n_valid = int(valid.sum())
-    print(f"ASAS-SN variables: crossmatching {n_valid} candidates (radius={radius_arcsec}\")")
+    print(f"ASAS-SN variables: crossmatching {n_valid} candidates via TAP (radius={radius_arcsec}\")")
 
-    viz = Vizier(columns=["ASASSN-V", "Type", "Per", "RAJ2000", "DEJ2000"], row_limit=-1)
-    radius = radius_arcsec * u.arcsec
+    coords_df = pd.DataFrame({
+        "_idx": df.index[valid],
+        "ra": df.loc[valid, "ra"].values,
+        "dec": df.loc[valid, "dec"].values,
+    })
+
+    result = batch_tap_crossmatch(
+        coords_df,
+        tap_url=VIZIER_TAP_URL,
+        catalog_table='"II/366/catalog"',
+        select_cols='c."ASASSN-V", c."Type", c."Per"',
+        ra_col="RAJ2000",
+        dec_col="DEJ2000",
+        match_radius_arcsec=radius_arcsec,
+        chunk_size=chunk_size,
+        n_workers=4,
+        verbose=True,
+        desc="ASAS-SN vars TAP",
+    )
+
     matched = 0
-    valid_indices = df.index[valid]
-
-    for i in tqdm(range(0, n_valid, batch_size), desc="ASAS-SN vars"):
-        batch_idx = valid_indices[i : i + batch_size]
-        batch = df.loc[batch_idx]
-        coords = SkyCoord(
-            ra=batch["ra"].values, dec=batch["dec"].values, unit="deg", frame="icrs"
-        )
-
-        for attempt in range(3):
-            try:
-                results = viz.query_region(coords, radius=radius, catalog=ASASSN_VAR_CATALOG)
-                break
-            except Exception as e:
-                if attempt < 2:
-                    time.sleep(3 * (attempt + 1))
-                else:
-                    print(f"  ASAS-SN batch {i} failed: {e}")
-                    results = None
-
-        if results is None or len(results) == 0:
-            continue
-
-        result_table = results[0]
-        result_coords = SkyCoord(
-            ra=result_table["RAJ2000"], dec=result_table["DEJ2000"], unit="deg", frame="icrs"
-        )
-
-        for j, idx in enumerate(batch_idx):
-            src = SkyCoord(ra=df.loc[idx, "ra"], dec=df.loc[idx, "dec"], unit="deg", frame="icrs")
-            seps = src.separation(result_coords).arcsec
-            within = seps <= radius_arcsec
-            if not within.any():
-                continue
-
-            best = np.argmin(seps)
-            row = result_table[best]
-            name = str(row["ASASSN-V"]) if row["ASASSN-V"] else ""
-            vtype = str(row["Type"]) if row["Type"] else ""
-            try:
-                p = row["Per"]
-                period = float(p) if p is not None and p is not np.ma.masked else np.nan
-            except (ValueError, TypeError):
-                period = np.nan
-
-            df.loc[idx, "asassn_var_name"] = name
-            df.loc[idx, "asassn_var_type"] = vtype
-            df.loc[idx, "asassn_var_period"] = period
-            matched += 1
+    if not result.empty:
+        result = result.sort_values("sep_arcsec").drop_duplicates(subset="_idx", keep="first")
+        for _, row in result.iterrows():
+            idx = int(row["_idx"])
+            if idx in df.index:
+                df.loc[idx, "asassn_var_name"] = str(row.get("ASASSN-V", "") or "")
+                df.loc[idx, "asassn_var_type"] = str(row.get("Type", "") or "")
+                try:
+                    df.loc[idx, "asassn_var_period"] = float(row["Per"]) if pd.notna(row.get("Per")) else np.nan
+                except (ValueError, TypeError):
+                    pass
+                matched += 1
 
     print(f"ASAS-SN variables: {matched} matches")
     return df
@@ -363,16 +321,13 @@ def crossmatch_asassn_variables(
 def crossmatch_ztf_variables(
     df: pd.DataFrame,
     radius_arcsec: float = ZTF_VAR_RADIUS_ARCSEC,
-    batch_size: int = 50,
+    chunk_size: int = 1000,
 ) -> pd.DataFrame:
     """
-    Crossmatch against ZTF periodic variable catalog (Chen+ 2020).
+    Crossmatch against ZTF periodic variable catalog (Chen+ 2020) via batch VizieR TAP.
 
-    ~781k periodic variables from ZTF DR2.  Many recent discoveries not yet
-    in SIMBAD.  Adds columns: ztf_var_type, ztf_var_period, ztf_var_amp.
+    ~781k periodic variables from ZTF DR2.  Adds columns: ztf_var_type, ztf_var_period, ztf_var_amp.
     """
-    from astroquery.vizier import Vizier
-
     df = df.copy()
     df["ztf_var_type"] = ""
     df["ztf_var_period"] = np.nan
@@ -383,69 +338,51 @@ def crossmatch_ztf_variables(
         return df
 
     n_valid = int(valid.sum())
-    print(f"ZTF variables: crossmatching {n_valid} candidates (radius={radius_arcsec}\")")
+    print(f"ZTF variables: crossmatching {n_valid} candidates via TAP (radius={radius_arcsec}\")")
 
-    viz = Vizier(columns=["RAJ2000", "DEJ2000", "Type", "Per", "gAmp", "rAmp"], row_limit=-1)
-    radius = radius_arcsec * u.arcsec
+    coords_df = pd.DataFrame({
+        "_idx": df.index[valid],
+        "ra": df.loc[valid, "ra"].values,
+        "dec": df.loc[valid, "dec"].values,
+    })
+
+    result = batch_tap_crossmatch(
+        coords_df,
+        tap_url=VIZIER_TAP_URL,
+        catalog_table='"J/ApJS/249/18/table2"',
+        select_cols='c."Type", c."Per", c."gAmp", c."rAmp"',
+        ra_col="RAJ2000",
+        dec_col="DEJ2000",
+        match_radius_arcsec=radius_arcsec,
+        chunk_size=chunk_size,
+        n_workers=4,
+        verbose=True,
+        desc="ZTF vars TAP",
+    )
+
     matched = 0
-    valid_indices = df.index[valid]
-
-    for i in tqdm(range(0, n_valid, batch_size), desc="ZTF vars"):
-        batch_idx = valid_indices[i : i + batch_size]
-        batch = df.loc[batch_idx]
-        coords = SkyCoord(
-            ra=batch["ra"].values, dec=batch["dec"].values, unit="deg", frame="icrs"
-        )
-
-        for attempt in range(3):
-            try:
-                results = viz.query_region(coords, radius=radius, catalog=ZTF_VAR_CATALOG)
-                break
-            except Exception as e:
-                if attempt < 2:
-                    time.sleep(3 * (attempt + 1))
-                else:
-                    print(f"  ZTF batch {i} failed: {e}")
-                    results = None
-
-        if results is None or len(results) == 0:
-            continue
-
-        result_table = results[0]
-        result_coords = SkyCoord(
-            ra=result_table["RAJ2000"], dec=result_table["DEJ2000"], unit="deg", frame="icrs"
-        )
-
-        for j, idx in enumerate(batch_idx):
-            src = SkyCoord(ra=df.loc[idx, "ra"], dec=df.loc[idx, "dec"], unit="deg", frame="icrs")
-            seps = src.separation(result_coords).arcsec
-            within = seps <= radius_arcsec
-            if not within.any():
-                continue
-
-            best = np.argmin(seps)
-            row = result_table[best]
-            vtype = str(row["Type"]) if row["Type"] and row["Type"] is not np.ma.masked else ""
-            try:
-                period = float(row["Per"]) if row["Per"] is not None and row["Per"] is not np.ma.masked else np.nan
-            except (ValueError, TypeError):
-                period = np.nan
-            # Use g-band amplitude, fall back to r-band
-            amp = np.nan
-            for amp_col in ("gAmp", "rAmp"):
-                if amp_col in result_table.colnames:
+    if not result.empty:
+        result = result.sort_values("sep_arcsec").drop_duplicates(subset="_idx", keep="first")
+        for _, row in result.iterrows():
+            idx = int(row["_idx"])
+            if idx in df.index:
+                df.loc[idx, "ztf_var_type"] = str(row.get("Type", "") or "")
+                try:
+                    df.loc[idx, "ztf_var_period"] = float(row["Per"]) if pd.notna(row.get("Per")) else np.nan
+                except (ValueError, TypeError):
+                    pass
+                # Use g-band amplitude, fall back to r-band
+                amp = np.nan
+                for amp_col in ("gAmp", "rAmp"):
                     try:
-                        v = row[amp_col]
-                        if v is not None and v is not np.ma.masked:
+                        v = row.get(amp_col)
+                        if pd.notna(v):
                             amp = float(v)
                             break
-                    except (ValueError, TypeError, KeyError):
+                    except (ValueError, TypeError):
                         pass
-
-            df.loc[idx, "ztf_var_type"] = vtype
-            df.loc[idx, "ztf_var_period"] = period
-            df.loc[idx, "ztf_var_amp"] = amp
-            matched += 1
+                df.loc[idx, "ztf_var_amp"] = amp
+                matched += 1
 
     print(f"ZTF variables: {matched} matches")
     return df
@@ -460,17 +397,13 @@ def crossmatch_tns(
     df: pd.DataFrame,
     radius_arcsec: float = TNS_RADIUS_ARCSEC,
     tns_api_key: str | None = None,
-    batch_size: int = TNS_BATCH_SIZE,
+    chunk_size: int = 1000,
 ) -> pd.DataFrame:
     """
-    Crossmatch against the Transient Name Server via VizieR mirror.
+    Crossmatch against the Transient Name Server via batch VizieR TAP.
 
-    Uses the VizieR TNS catalog (VII/295/tns) for cone-search without needing
-    a TNS API key.  Catches supernovae, novae, CVs, and other transients.
     Adds columns: tns_name, tns_type, tns_redshift, tns_disc_date.
     """
-    from astroquery.vizier import Vizier
-
     df = df.copy()
     df["tns_name"] = ""
     df["tns_type"] = ""
@@ -482,69 +415,42 @@ def crossmatch_tns(
         return df
 
     n_valid = int(valid.sum())
-    print(f"TNS: crossmatching {n_valid} candidates (radius={radius_arcsec}\")")
+    print(f"TNS: crossmatching {n_valid} candidates via TAP (radius={radius_arcsec}\")")
 
-    viz = Vizier(
-        columns=["Name", "Type", "z", "DDate", "RAJ2000", "DEJ2000"],
-        row_limit=-1,
+    coords_df = pd.DataFrame({
+        "_idx": df.index[valid],
+        "ra": df.loc[valid, "ra"].values,
+        "dec": df.loc[valid, "dec"].values,
+    })
+
+    result = batch_tap_crossmatch(
+        coords_df,
+        tap_url=VIZIER_TAP_URL,
+        catalog_table='"VII/295/tns"',
+        select_cols='c."Name", c."Type", c.z, c."DDate"',
+        ra_col="RAJ2000",
+        dec_col="DEJ2000",
+        match_radius_arcsec=radius_arcsec,
+        chunk_size=chunk_size,
+        n_workers=4,
+        verbose=True,
+        desc="TNS TAP",
     )
-    radius = radius_arcsec * u.arcsec
+
     matched = 0
-    valid_indices = df.index[valid]
-
-    for i in tqdm(range(0, n_valid, batch_size), desc="TNS"):
-        batch_idx = valid_indices[i : i + batch_size]
-        batch = df.loc[batch_idx]
-        coords = SkyCoord(
-            ra=batch["ra"].values, dec=batch["dec"].values, unit="deg", frame="icrs"
-        )
-
-        for attempt in range(3):
-            try:
-                results = viz.query_region(coords, radius=radius, catalog="VII/295/tns")
-                break
-            except Exception as e:
-                if attempt < 2:
-                    time.sleep(3 * (attempt + 1))
-                else:
-                    print(f"  TNS batch {i} failed: {e}")
-                    results = None
-
-        if results is None or len(results) == 0:
-            continue
-
-        result_table = results[0]
-        ra_col = "RAJ2000" if "RAJ2000" in result_table.colnames else "RA_ICRS" if "RA_ICRS" in result_table.colnames else None
-        dec_col = "DEJ2000" if "DEJ2000" in result_table.colnames else "DE_ICRS" if "DE_ICRS" in result_table.colnames else None
-        if ra_col is None or dec_col is None:
-            continue
-
-        result_coords = SkyCoord(
-            ra=result_table[ra_col], dec=result_table[dec_col], unit="deg", frame="icrs"
-        )
-
-        for j, idx in enumerate(batch_idx):
-            src = SkyCoord(ra=df.loc[idx, "ra"], dec=df.loc[idx, "dec"], unit="deg", frame="icrs")
-            seps = src.separation(result_coords).arcsec
-            within = seps <= radius_arcsec
-            if not within.any():
-                continue
-
-            best = np.argmin(seps)
-            row = result_table[best]
-            name = str(row["Name"]) if row["Name"] and row["Name"] is not np.ma.masked else ""
-            ttype = str(row["Type"]) if "Type" in result_table.colnames and row["Type"] and row["Type"] is not np.ma.masked else ""
-            try:
-                z = float(row["z"]) if "z" in result_table.colnames and row["z"] is not None and row["z"] is not np.ma.masked else np.nan
-            except (ValueError, TypeError):
-                z = np.nan
-            ddate = str(row["DDate"]) if "DDate" in result_table.colnames and row["DDate"] and row["DDate"] is not np.ma.masked else ""
-
-            df.loc[idx, "tns_name"] = name
-            df.loc[idx, "tns_type"] = ttype
-            df.loc[idx, "tns_redshift"] = z
-            df.loc[idx, "tns_disc_date"] = ddate
-            matched += 1
+    if not result.empty:
+        result = result.sort_values("sep_arcsec").drop_duplicates(subset="_idx", keep="first")
+        for _, row in result.iterrows():
+            idx = int(row["_idx"])
+            if idx in df.index:
+                df.loc[idx, "tns_name"] = str(row.get("Name", "") or "")
+                df.loc[idx, "tns_type"] = str(row.get("Type", "") or "")
+                try:
+                    df.loc[idx, "tns_redshift"] = float(row["z"]) if pd.notna(row.get("z")) else np.nan
+                except (ValueError, TypeError):
+                    pass
+                df.loc[idx, "tns_disc_date"] = str(row.get("DDate", "") or "")
+                matched += 1
 
     print(f"TNS: {matched} transient matches")
     return df
@@ -993,16 +899,14 @@ def query_gaia_epoch_photometry(
 def crossmatch_erosita(
     df: pd.DataFrame,
     radius_arcsec: float = EROSITA_RADIUS_ARCSEC,
-    batch_size: int = 50,
+    chunk_size: int = 1000,
 ) -> pd.DataFrame:
     """
-    Crossmatch against eROSITA-DE DR1 (Merloni+2024).
+    Crossmatch against eROSITA-DE DR1 (Merloni+2024) via batch VizieR TAP.
 
     X-ray detection is a strong youth indicator for YSO candidates.
     Adds columns: xray_det, xray_flux, xray_sep_arcsec.
     """
-    from astroquery.vizier import Vizier
-
     df = df.copy()
     df["xray_det"] = False
     df["xray_flux"] = np.nan
@@ -1013,56 +917,41 @@ def crossmatch_erosita(
         return df
 
     n_valid = int(valid.sum())
-    print(f"eROSITA: crossmatching {n_valid} candidates (radius={radius_arcsec}\")")
+    print(f"eROSITA: crossmatching {n_valid} candidates via TAP (radius={radius_arcsec}\")")
 
-    viz = Vizier(columns=["RA_ICRS", "DE_ICRS", "MLFlux1", "DetLike0"], row_limit=-1)
-    radius = radius_arcsec * u.arcsec
+    coords_df = pd.DataFrame({
+        "_idx": df.index[valid],
+        "ra": df.loc[valid, "ra"].values,
+        "dec": df.loc[valid, "dec"].values,
+    })
+
+    result = batch_tap_crossmatch(
+        coords_df,
+        tap_url=VIZIER_TAP_URL,
+        catalog_table='"J/A+A/682/A34/erass1-m"',
+        select_cols='c."MLFlux1"',
+        ra_col="RA_ICRS",
+        dec_col="DE_ICRS",
+        match_radius_arcsec=radius_arcsec,
+        chunk_size=chunk_size,
+        n_workers=4,
+        verbose=True,
+        desc="eROSITA TAP",
+    )
+
     matched = 0
-    valid_indices = df.index[valid]
-
-    for i in tqdm(range(0, n_valid, batch_size), desc="eROSITA"):
-        batch_idx = valid_indices[i : i + batch_size]
-        batch = df.loc[batch_idx]
-        coords = SkyCoord(
-            ra=batch["ra"].values, dec=batch["dec"].values, unit="deg", frame="icrs"
-        )
-
-        for attempt in range(3):
-            try:
-                results = viz.query_region(coords, radius=radius, catalog=EROSITA_CATALOG)
-                break
-            except Exception as e:
-                if attempt < 2:
-                    time.sleep(3 * (attempt + 1))
-                else:
-                    print(f"  eROSITA batch {i} failed: {e}")
-                    results = None
-
-        if results is None or len(results) == 0:
-            continue
-
-        result_table = results[0]
-        result_coords = SkyCoord(
-            ra=result_table["RA_ICRS"], dec=result_table["DE_ICRS"], unit="deg", frame="icrs"
-        )
-
-        for j, idx in enumerate(batch_idx):
-            src = SkyCoord(ra=df.loc[idx, "ra"], dec=df.loc[idx, "dec"], unit="deg", frame="icrs")
-            seps = src.separation(result_coords).arcsec
-            within = seps <= radius_arcsec
-            if not within.any():
-                continue
-
-            best = np.argmin(seps)
-            row = result_table[best]
-
-            df.loc[idx, "xray_det"] = True
-            df.loc[idx, "xray_sep_arcsec"] = round(float(seps[best]), 3)
-            try:
-                df.loc[idx, "xray_flux"] = float(row["MLFlux1"])
-            except (ValueError, TypeError):
-                pass
-            matched += 1
+    if not result.empty:
+        result = result.sort_values("sep_arcsec").drop_duplicates(subset="_idx", keep="first")
+        for _, row in result.iterrows():
+            idx = int(row["_idx"])
+            if idx in df.index:
+                df.loc[idx, "xray_det"] = True
+                df.loc[idx, "xray_sep_arcsec"] = round(float(row["sep_arcsec"]), 3)
+                try:
+                    df.loc[idx, "xray_flux"] = float(row["MLFlux1"])
+                except (ValueError, TypeError):
+                    pass
+                matched += 1
 
     print(f"eROSITA: {matched} X-ray matches")
     return df

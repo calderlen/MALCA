@@ -1113,3 +1113,83 @@ def batch_gaia_cone_query(
         return pd.DataFrame()
 
     return pd.concat(results, ignore_index=True)
+
+
+def batch_tap_crossmatch(
+    coords_df: pd.DataFrame,
+    *,
+    tap_url: str,
+    catalog_table: str,
+    select_cols: str,
+    ra_col: str = "RAJ2000",
+    dec_col: str = "DEJ2000",
+    match_radius_arcsec: float = 3.0,
+    chunk_size: int = 1000,
+    n_workers: int = 4,
+    verbose: bool = False,
+    desc: str = "TAP crossmatch",
+) -> pd.DataFrame:
+    """Batch TAP crossmatch using coordinate upload.
+
+    Generic utility for any TAP service that supports TAP_UPLOAD (VizieR,
+    SIMBAD, etc).  ``coords_df`` must have columns ``_idx``, ``ra``, ``dec``.
+
+    Returns a DataFrame with ``_idx``, the selected columns, and
+    ``sep_arcsec``.  Callers should de-duplicate by ``_idx`` as needed.
+    """
+    from astroquery.utils.tap.core import TapPlus
+    from astropy.table import Table
+
+    if coords_df.empty:
+        return pd.DataFrame()
+
+    results: list[pd.DataFrame] = []
+    chunks = [coords_df.iloc[i:i + chunk_size] for i in range(0, len(coords_df), chunk_size)]
+
+    def process_chunk(chunk_df):
+        try:
+            tap = TapPlus(url=tap_url)
+            upload_table = Table.from_pandas(chunk_df[["_idx", "ra", "dec"]])
+
+            query = f"""
+            SELECT
+                u._idx AS _idx,
+                {select_cols},
+                DISTANCE(POINT('ICRS', c.{ra_col}, c.{dec_col}),
+                         POINT('ICRS', u.ra, u.dec)) * 3600.0 AS sep_arcsec
+            FROM TAP_UPLOAD.upload_table AS u
+            JOIN {catalog_table} AS c
+            ON 1=CONTAINS(
+                POINT('ICRS', c.{ra_col}, c.{dec_col}),
+                CIRCLE('ICRS', u.ra, u.dec, {match_radius_arcsec / 3600.0})
+            )
+            """
+
+            job = tap.launch_job_async(
+                query,
+                upload_resource=upload_table,
+                upload_table_name="upload_table",
+                verbose=False,
+            )
+            result = job.get_results()
+            return result.to_pandas() if result is not None and len(result) > 0 else pd.DataFrame()
+        except Exception as e:
+            if verbose:
+                print(f"  {desc} chunk error: {e}")
+            return pd.DataFrame()
+
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        futures = {executor.submit(process_chunk, chunk): i for i, chunk in enumerate(chunks)}
+
+        for future in tqdm(
+            as_completed(futures), total=len(futures),
+            desc=desc, disable=not verbose,
+        ):
+            result = future.result()
+            if not result.empty:
+                results.append(result)
+
+    if not results:
+        return pd.DataFrame()
+
+    return pd.concat(results, ignore_index=True)

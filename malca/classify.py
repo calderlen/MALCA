@@ -140,11 +140,14 @@ def check_eb_contamination(df: pd.DataFrame) -> pd.DataFrame:
 
 def query_iphas_by_coords(df: pd.DataFrame, radius_arcsec: float = CLASSIFY_IPHAS_RADIUS_ARCSEC) -> pd.DataFrame:
     """
-    Query IPHAS DR2 for Hα photometry using VizieR TAP.
+    Query IPHAS DR2 for Hα photometry using batch VizieR TAP upload.
     
     IPHAS covers Northern Galactic Plane: -5° < b < 5°, 30° < l < 215°
     Returns r, i, Hα magnitudes and r-Hα color
     """
+    from malca.utils import batch_tap_crossmatch
+    from malca.config.config_ltv import VIZIER_TAP_URL
+
     if 'ra' not in df.columns or 'dec' not in df.columns:
         print("Warning: No ra/dec for IPHAS query")
         return df
@@ -156,35 +159,46 @@ def query_iphas_by_coords(df: pd.DataFrame, radius_arcsec: float = CLASSIFY_IPHA
     df['r_ha'] = np.nan
     df['ha_ew'] = np.nan
 
-    if Vizier is None:
-        print("Warning: astroquery.vizier unavailable; skipping IPHAS query")
+    valid = df['ra'].notna() & df['dec'].notna()
+    if not valid.any():
         return df
-    
-    # IPHAS DR2 catalog
-    Vizier.ROW_LIMIT = -1
-    
-    print(f"Querying IPHAS for {len(df)} sources...")
-    
-    for idx in tqdm(df.index, desc="IPHAS"):
-        ra, dec = df.loc[idx, 'ra'], df.loc[idx, 'dec']
-        if pd.isna(ra) or pd.isna(dec):
-            continue
-            
-        coord = SkyCoord(ra=ra*u.deg, dec=dec*u.deg)
-        
-        try:
-            result = Vizier.query_region(coord, radius=radius_arcsec*u.arcsec, catalog='II/321/iphas2')
-            if result and len(result) > 0 and len(result[0]) > 0:
-                row = result[0][0]
-                df.loc[idx, 'iphas_r'] = row['rmag'] if 'rmag' in row.colnames else np.nan
-                df.loc[idx, 'iphas_i'] = row['imag'] if 'imag' in row.colnames else np.nan
-                df.loc[idx, 'iphas_ha'] = row['Hamag'] if 'Hamag' in row.colnames else np.nan
-                
-                if not pd.isna(df.loc[idx, 'iphas_r']) and not pd.isna(df.loc[idx, 'iphas_ha']):
-                    df.loc[idx, 'r_ha'] = df.loc[idx, 'iphas_r'] - df.loc[idx, 'iphas_ha']
-        except Exception:
-            continue
-    
+
+    print(f"Querying IPHAS for {int(valid.sum())} sources via TAP...")
+
+    coords_df = pd.DataFrame({
+        "_idx": df.index[valid],
+        "ra": df.loc[valid, "ra"].values,
+        "dec": df.loc[valid, "dec"].values,
+    })
+
+    result = batch_tap_crossmatch(
+        coords_df,
+        tap_url=VIZIER_TAP_URL,
+        catalog_table='"II/321/iphas2"',
+        select_cols='c.rmag, c.imag, c."Hamag"',
+        ra_col="RAJ2000",
+        dec_col="DEJ2000",
+        match_radius_arcsec=radius_arcsec,
+        chunk_size=1000,
+        n_workers=4,
+        verbose=True,
+        desc="IPHAS TAP",
+    )
+
+    if not result.empty:
+        result = result.sort_values("sep_arcsec").drop_duplicates(subset="_idx", keep="first")
+        for _, row in result.iterrows():
+            idx = int(row["_idx"])
+            if idx in df.index:
+                r = float(row["rmag"]) if pd.notna(row.get("rmag")) else np.nan
+                i = float(row["imag"]) if pd.notna(row.get("imag")) else np.nan
+                ha = float(row["Hamag"]) if pd.notna(row.get("Hamag")) else np.nan
+                df.loc[idx, 'iphas_r'] = r
+                df.loc[idx, 'iphas_i'] = i
+                df.loc[idx, 'iphas_ha'] = ha
+                if not pd.isna(r) and not pd.isna(ha):
+                    df.loc[idx, 'r_ha'] = r - ha
+
     n_found = df['iphas_r'].notna().sum()
     print(f"Found IPHAS photometry for {n_found}/{len(df)} sources")
     
