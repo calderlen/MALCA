@@ -200,7 +200,6 @@ app.index_string = '''
             flex-direction: column;
             gap: 8px;
             min-height: 0;
-            overflow: hidden;
             padding-right: 8px;
         }
         .left-info-scroll {
@@ -259,79 +258,49 @@ app.index_string = '''
             padding: 0 2px 0 8px;
             gap: 8px;
         }
-        .panel-splitter {
-            position: relative;
-            height: 12px;
-            flex: 0 0 12px;
-            margin: 0 12px;
-            cursor: row-resize;
-            user-select: none;
-            touch-action: none;
-        }
-        .panel-splitter::before {
-            content: '';
-            position: absolute;
-            left: 0;
-            right: 0;
-            top: 50%;
-            height: 1px;
-            transform: translateY(-50%);
-            background: rgba(126, 150, 166, 0.45);
-        }
-        .panel-splitter::after {
-            content: ':::';
-            position: absolute;
-            left: 50%;
-            top: 50%;
-            transform: translate(-50%, -50%);
-            padding: 0 7px;
-            border-radius: 999px;
-            color: #8db0c8;
-            font-size: 10px;
-            letter-spacing: 2px;
-            background: rgba(8, 18, 25, 0.9);
-            border: 1px solid rgba(86, 114, 132, 0.55);
-            line-height: 1;
-        }
-        .panel-splitter:hover::after,
-        .panel-splitter.dragging::after {
-            color: #b5d4ea;
-            border-color: rgba(133, 171, 196, 0.9);
-            background: rgba(12, 26, 35, 0.96);
-        }
-        .status-splitter {
-            height: 9px;
-            flex: 0 0 9px;
-            margin: 0;
-        }
-        .status-splitter::after {
-            font-size: 9px;
-            letter-spacing: 1.5px;
-            padding: 0 5px;
-        }
         .panel-splitter-vertical {
+            position: relative;
             width: 12px;
             flex: 0 0 12px;
             height: auto;
             margin: 0 2px;
             cursor: col-resize;
+            user-select: none;
+            touch-action: none;
         }
         .panel-splitter-vertical::before {
+            content: '';
+            position: absolute;
             left: 50%;
-            right: auto;
             top: 0;
             bottom: 0;
             width: 1px;
             height: auto;
             transform: translateX(-50%);
+            background: rgba(126, 150, 166, 0.45);
         }
         .panel-splitter-vertical::after {
             content: '::';
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            transform: translate(-50%, -50%);
             letter-spacing: 1px;
             padding: 6px 3px;
             writing-mode: vertical-rl;
             text-orientation: mixed;
-            transform: translate(-50%, -50%);
+            border-radius: 999px;
+            color: #8db0c8;
+            font-size: 10px;
+            background: rgba(8, 18, 25, 0.9);
+            border: 1px solid rgba(86, 114, 132, 0.55);
+            line-height: 1;
+        }
+        .panel-splitter-vertical:hover::after,
+        .panel-splitter-vertical.dragging::after {
+            color: #b5d4ea;
+            border-color: rgba(133, 171, 196, 0.9);
+            background: rgba(12, 26, 35, 0.96);
         }
         .plot-toolbar {
             display: flex;
@@ -829,6 +798,14 @@ app.index_string = '''
             height: auto;
             max-height: none;
         }
+        @media (min-width: 1600px) {
+            .candidate-metadata {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 12px;
+                align-items: start;
+            }
+        }
         .metadata-health {
             display: flex;
             align-items: center;
@@ -980,15 +957,15 @@ PLOT_DIR = None
 
 PLOT_PRESETS = {
     'Clean': {
-        'overlays': ['markers', 'residuals', 'filter_bad_cameras'],
+        'overlays': ['raw', 'markers', 'residuals', 'filter_bad_cameras'],
         'camera_mode': 'all',
     },
     'Diagnostics': {
-        'overlays': ['markers', 'residuals', 'filter_bad_cameras', 'diagnostics'],
+        'overlays': ['raw', 'markers', 'residuals', 'filter_bad_cameras', 'diagnostics'],
         'camera_mode': 'all',
     },
     'Full': {
-        'overlays': ['markers', 'residuals', 'filter_bad_cameras', 'diagnostics', 'confidence'],
+        'overlays': ['raw', 'markers', 'residuals', 'filter_bad_cameras', 'diagnostics', 'confidence'],
         'camera_mode': 'all',
     },
 }
@@ -1197,7 +1174,7 @@ def _render_repro_badge(run_params: dict | None, warnings: list[str]) -> html.Sp
 
 
 _METADATA_EXTRA_GROUPS = (
-    "Crossmatch",
+    "Period Consensus",
     "Stellar Parameters",
     "Photometry",
     "Galactic Coordinates",
@@ -1281,30 +1258,30 @@ def _render_vetting_banner(payload: dict | None) -> html.Div:
     # Status header
     if known:
         header_style = {
-            'padding': '5px 10px', 'border-radius': '4px 4px 0 0',
+            'padding': '3px 8px', 'border-radius': '4px 4px 0 0',
             'background': '#4a1111', 'color': '#ff6b6b', 'font-weight': 'bold',
-            'font-size': '0.82em', 'text-align': 'center',
+            'font-size': '11px', 'text-align': 'center',
             'border': '1px solid #ff6b6b', 'border-bottom': 'none',
         }
         header_text = "KNOWN OBJECT"
     else:
         header_style = {
-            'padding': '5px 10px', 'border-radius': '4px 4px 0 0',
+            'padding': '3px 8px', 'border-radius': '4px 4px 0 0',
             'background': '#114a11', 'color': '#6bff6b', 'font-weight': 'bold',
-            'font-size': '0.82em', 'text-align': 'center',
+            'font-size': '11px', 'text-align': 'center',
             'border': '1px solid #6bff6b', 'border-bottom': 'none',
         }
         header_text = "POTENTIALLY NEW"
 
     # Build source cards
     cell_style = {
-        'padding': '3px 8px', 'border-radius': '3px', 'font-size': '0.78em',
+        'padding': '2px 6px', 'border-radius': '3px', 'font-size': '11px',
         'background': '#1a2a1a' if not known else '#2a1a1a',
         'border': '1px solid #333',
         'display': 'flex', 'justify-content': 'space-between', 'align-items': 'center',
         'gap': '8px', 'overflow': 'hidden',
     }
-    label_style = {'color': '#888', 'font-size': '0.9em', 'flex-shrink': '0'}
+    label_style = {'color': '#888', 'font-size': '11px', 'flex-shrink': '0'}
     value_style = {'color': '#e0e0e0', 'font-weight': 'bold',
                    'text-align': 'right', 'word-break': 'break-word', 'white-space': 'normal'}
     hit_style = {**value_style, 'color': '#ff6b6b' if known else '#6bff6b'}
@@ -1895,6 +1872,8 @@ def _select_filter(col: str):
             id=f'exclude-{cid}', options=options, multi=True,
             placeholder='None excluded',
             style={'margin-bottom': '4px', 'font-size': '11px'},
+            maxHeight=400,
+            optionHeight=28,
         ),
     ])
 
@@ -1927,6 +1906,7 @@ def _make_filter_group(name: str, items: list, *, default_open: bool = False):
 _SIDEBAR_GROUPS = [
     ('Vetting', [
         ('bool', 'vetting_likely_known'),
+        ('select', 'vsx_class'),
         ('select', 'asassn_var_type'),
         ('select', 'gaia_var_class'),
         ('select', 'simbad_otype'),
@@ -2057,9 +2037,7 @@ _SIDEBAR_GROUPS = [
         ('num', 'mass50'),
         ('num', 'banyan_field_prob'),
     ]),
-    ('Crossmatch', [
-        ('text', 'vsx_class'),
-        ('num', 'vsx_sep_arcsec'),
+    ('Period Consensus', [
         ('text', 'sfr_name'),
         ('num', 'sfr_sep_arcmin'),
         ('text', 'cluster_name'),
@@ -2140,7 +2118,6 @@ def create_layout():
         dcc.Store(id='review-session-start', data=None, storage_type='session'),
         dcc.Store(id='metadata-resize-init', data=0),
         dcc.Store(id='status-resize-init', data=0),
-        dcc.Store(id='section-splitters-init', data=0),
         dcc.Store(id='sidebar-plot-saved', data=0),  # dummy sink for plot prefs save callback
         dcc.Store(id='candidate-start-time', data=0),
         dcc.Download(id='plot-export-download'),
@@ -2339,6 +2316,7 @@ def create_layout():
                                 dcc.Checklist(
                                     id='plot-overlays',
                                     options=[
+                                        {'label': ' Raw lightcurve', 'value': 'raw'},
                                         {'label': ' Dip/Jump markers', 'value': 'markers'},
                                         {'label': ' Residual panel', 'value': 'residuals'},
                                         {'label': ' Phase-fold panel', 'value': 'phase'},
@@ -2346,7 +2324,7 @@ def create_layout():
                                         {'label': ' Event diagnostics', 'value': 'diagnostics'},
                                         {'label': ' Confidence colors', 'value': 'confidence'},
                                     ],
-                                    value=['markers', 'residuals', 'filter_bad_cameras', 'diagnostics'],
+                                    value=['raw', 'markers', 'residuals', 'filter_bad_cameras', 'diagnostics'],
                                     inline=True,
                                 ),
                                 html.Div([
@@ -2382,17 +2360,12 @@ def create_layout():
                                 html.Span(id='repro-badge', className='label-chip', style={'margin-left': '6px'}),
                             ], className='plot-toolbar'),
                         ], open=True),
-                        html.Div(id='vetting-banner'),
-                        html.Div(id='splitter-vetting', className='panel-splitter status-splitter',
-                                 title='Drag to resize'),
                         html.Div(id='plot-stats-cards', className='plot-stats', style={'display': 'none'}),
                         html.Div([
                             html.Div(id='plot-status-panel', className='plot-status'),
                             html.Div(id='camera-filter-panel', className='camera-diag'),
                             html.Div(id='metadata-health-indicator'),
                         ], id='diagnostics-section'),
-                        html.Div(id='splitter-diagnostics', className='panel-splitter status-splitter',
-                                 title='Drag to resize'),
                         # Grouped candidate metadata sections (collapsible, includes stats)
                         html.Div([
                             html.Div([
@@ -2405,7 +2378,10 @@ def create_layout():
                                 ),
                                 html.Button('Expand all', id='toggle-meta-all', n_clicks=0, className='compact-btn'),
                             ], className='meta-toolbar'),
-                            html.Div(id='candidate-info-grid', className='metadata-sections candidate-metadata'),
+                            html.Div([
+                                html.Div(id='vetting-banner'),
+                                html.Div(id='candidate-info-grid', className='candidate-metadata'),
+                            ], className='metadata-sections'),
                         ]),
                         html.Details([
                             html.Summary('External Data', style={'cursor': 'pointer'}),
@@ -2417,8 +2393,6 @@ def create_layout():
                                 type='default',
                             ),
                         ], id='external-followup-details', open=False, className='metadata-sections', style={'margin-top': '0'}),
-                        html.Div(id='splitter-metadata', className='panel-splitter status-splitter',
-                                 title='Drag to resize'),
                         # Run config / reproducibility
                         html.Details([
                             html.Summary('Run Config', style={'cursor': 'pointer'}),
@@ -2435,7 +2409,7 @@ def create_layout():
 
                 html.Div(
                     id='metadata-splitter',
-                    className='panel-splitter panel-splitter-vertical',
+                    className='panel-splitter-vertical',
                     title='Drag to resize information panel',
                 ),
 
@@ -2449,7 +2423,7 @@ def create_layout():
                                 'modeBarButtonsToRemove': ['lasso2d', 'select2d'],
                                 'responsive': True,
                             },
-                            style={'display': 'block', 'width': '100%', 'height': '100%'},
+                            style={'display': 'block', 'width': '100%', 'height': '100%', 'min-height': '600px'},
                         ),
                         html.Img(
                             id='plot-image',
@@ -2774,15 +2748,9 @@ app.clientside_callback(
         var clampWidth = function(value) {
             var maxWidth = computeMaxWidth();
             var numeric = Number(value);
-            if (!isFinite(numeric)) {
-                numeric = defaultWidth;
-            }
-            if (numeric < minWidth) {
-                numeric = minWidth;
-            }
-            if (numeric > maxWidth) {
-                numeric = maxWidth;
-            }
+            if (!isFinite(numeric)) numeric = defaultWidth;
+            if (numeric < minWidth) numeric = minWidth;
+            if (numeric > maxWidth) numeric = maxWidth;
             return Math.round(numeric);
         };
 
@@ -2791,53 +2759,34 @@ app.clientside_callback(
             leftPanel.style.width = String(w) + 'px';
             leftPanel.style.flex = '0 0 ' + String(w) + 'px';
             if (persist) {
-                try {
-                    window.localStorage.setItem(storageKey, String(w));
-                } catch (e) {
-                    // ignore storage failures
-                }
+                try { window.localStorage.setItem(storageKey, String(w)); } catch (e) {}
             }
             return w;
         };
 
         if (!window.__malcaMetadataSplitterAttached) {
-            var drag = {
-                active: false,
-                startX: 0,
-                startWidth: 0,
-                pointerId: null,
-            };
+            var drag = { active: false, startX: 0, startWidth: 0, pointerId: null };
 
             var onPointerMove = function(e) {
-                if (!drag.active) {
-                    return;
-                }
+                if (!drag.active) return;
                 var nextWidth = drag.startWidth + (e.clientX - drag.startX);
                 applyWidth(nextWidth, false);
                 e.preventDefault();
             };
 
             var stopDrag = function(e) {
-                if (!drag.active) {
-                    return;
-                }
+                if (!drag.active) return;
                 drag.active = false;
                 splitter.classList.remove('dragging');
                 window.removeEventListener('pointermove', onPointerMove);
                 window.removeEventListener('pointerup', stopDrag);
                 window.removeEventListener('pointercancel', stopDrag);
                 if (drag.pointerId !== null && splitter.releasePointerCapture) {
-                    try {
-                        splitter.releasePointerCapture(drag.pointerId);
-                    } catch (err) {
-                        // ignore capture-release failures
-                    }
+                    try { splitter.releasePointerCapture(drag.pointerId); } catch (err) {}
                 }
                 drag.pointerId = null;
                 applyWidth(leftPanel.getBoundingClientRect().width, true);
-                if (e) {
-                    e.preventDefault();
-                }
+                if (e) e.preventDefault();
             };
 
             splitter.addEventListener('pointerdown', function(e) {
@@ -2847,11 +2796,7 @@ app.clientside_callback(
                 drag.pointerId = (typeof e.pointerId === 'number') ? e.pointerId : null;
                 splitter.classList.add('dragging');
                 if (drag.pointerId !== null && splitter.setPointerCapture) {
-                    try {
-                        splitter.setPointerCapture(drag.pointerId);
-                    } catch (err) {
-                        // ignore capture failures
-                    }
+                    try { splitter.setPointerCapture(drag.pointerId); } catch (err) {}
                 }
                 window.addEventListener('pointermove', onPointerMove);
                 window.addEventListener('pointerup', stopDrag);
@@ -2867,17 +2812,11 @@ app.clientside_callback(
         }
 
         var saved = null;
-        try {
-            saved = window.localStorage.getItem(storageKey);
-        } catch (e) {
-            saved = null;
-        }
+        try { saved = window.localStorage.getItem(storageKey); } catch (e) { saved = null; }
         var initialWidth = defaultWidth;
         if (saved !== null && saved !== '') {
             var parsed = parseInt(saved, 10);
-            if (!isNaN(parsed)) {
-                initialWidth = parsed;
-            }
+            if (!isNaN(parsed)) initialWidth = parsed;
         }
         applyWidth(initialWidth, false);
 
@@ -3021,110 +2960,6 @@ app.clientside_callback(
     }
     """,
     Output('status-resize-init', 'data'),
-    Input('keyboard-init', 'n_intervals'),
-    prevent_initial_call=False,
-)
-
-
-# Section splitters in the left info panel
-app.clientside_callback(
-    """
-    function(_tick) {
-        if (window.__malcaSectionSplittersAttached) {
-            return window.dash_clientside.no_update;
-        }
-
-        var configs = [
-            {splitterId: 'splitter-vetting', targetId: 'vetting-banner', storageKey: 'malca.review.vetting.height.v1', defaultHeight: null, minHeight: 20},
-            {splitterId: 'splitter-diagnostics', targetId: 'diagnostics-section', storageKey: 'malca.review.diagnostics.height.v1', defaultHeight: null, minHeight: 20},
-            {splitterId: 'splitter-metadata', targetId: 'candidate-info-grid', storageKey: 'malca.review.metadata.height.v1', defaultHeight: null, minHeight: 40},
-        ];
-
-        configs.forEach(function(cfg) {
-            var splitter = document.getElementById(cfg.splitterId);
-            var target = document.getElementById(cfg.targetId);
-            if (!splitter || !target) return;
-
-            var drag = {active: false, startY: 0, startHeight: 0, pointerId: null};
-
-            var clamp = function(h) {
-                return Math.max(cfg.minHeight, Math.round(h));
-            };
-
-            var apply = function(h, persist) {
-                h = clamp(h);
-                target.style.maxHeight = h + 'px';
-                target.style.overflow = 'auto';
-                if (persist) {
-                    try { window.localStorage.setItem(cfg.storageKey, String(h)); } catch(e) {}
-                }
-            };
-
-            var onMove = function(e) {
-                if (!drag.active) return;
-                var next = drag.startHeight + (e.clientY - drag.startY);
-                apply(next, false);
-                e.preventDefault();
-            };
-
-            var onUp = function(e) {
-                if (!drag.active) return;
-                drag.active = false;
-                splitter.classList.remove('dragging');
-                window.removeEventListener('pointermove', onMove);
-                window.removeEventListener('pointerup', onUp);
-                window.removeEventListener('pointercancel', onUp);
-                if (drag.pointerId !== null && splitter.releasePointerCapture) {
-                    try { splitter.releasePointerCapture(drag.pointerId); } catch(e) {}
-                }
-                drag.pointerId = null;
-                apply(target.getBoundingClientRect().height, true);
-                if (e) e.preventDefault();
-            };
-
-            splitter.addEventListener('pointerdown', function(e) {
-                drag.active = true;
-                drag.startY = e.clientY;
-                drag.startHeight = target.getBoundingClientRect().height;
-                drag.pointerId = (typeof e.pointerId === 'number') ? e.pointerId : null;
-                splitter.classList.add('dragging');
-                if (drag.pointerId !== null && splitter.setPointerCapture) {
-                    try { splitter.setPointerCapture(drag.pointerId); } catch(e) {}
-                }
-                window.addEventListener('pointermove', onMove);
-                window.addEventListener('pointerup', onUp);
-                window.addEventListener('pointercancel', onUp);
-                e.preventDefault();
-            });
-
-            // Restore saved height
-            if (cfg.defaultHeight === null) {
-                // Don't constrain by default — only after user drags
-                try {
-                    var saved = window.localStorage.getItem(cfg.storageKey);
-                    if (saved !== null && saved !== '') {
-                        var parsed = parseInt(saved, 10);
-                        if (!isNaN(parsed)) apply(parsed, false);
-                    }
-                } catch(e) {}
-            } else {
-                var initH = cfg.defaultHeight;
-                try {
-                    var saved = window.localStorage.getItem(cfg.storageKey);
-                    if (saved !== null && saved !== '') {
-                        var parsed = parseInt(saved, 10);
-                        if (!isNaN(parsed)) initH = parsed;
-                    }
-                } catch(e) {}
-                apply(initH, false);
-            }
-        });
-
-        window.__malcaSectionSplittersAttached = true;
-        return window.dash_clientside.no_update;
-    }
-    """,
-    Output('section-splitters-init', 'data'),
     Input('keyboard-init', 'n_intervals'),
     prevent_initial_call=False,
 )
@@ -3606,6 +3441,7 @@ def update_display(render_request, applied_nonce, queue_data):
             show_event_markers='markers' in overlays,
             show_residuals='residuals' in overlays,
             show_phase_fold='phase' in overlays,
+            show_raw_mag='raw' in overlays,
             show_diagnostics='diagnostics' in overlays,
             confidence_colors='confidence' in overlays,
             run_params=run_params or {},
@@ -3765,13 +3601,15 @@ def update_header_key_info(idx, queue_data):
     [State('interactive-plot', 'figure'),
      State('plot-mode', 'value'),
      State('plot-image', 'src'),
-     State('current-index', 'data')],
+     State('current-index', 'data'),
+     State('queue-data', 'data')],
     prevent_initial_call=True,
 )
-def export_active_plot(n_clicks, figure, plot_mode, plot_src, idx):
+def export_active_plot(n_clicks, figure, plot_mode, plot_src, idx, queue_data):
     """Export the currently shown plot.
 
-    Native mode exports PDF, PNG mode exports the currently displayed PNG file.
+    Native mode exports PDF with enhanced metadata and high resolution.
+    PNG mode exports the currently displayed PNG file.
     """
     if not n_clicks:
         return no_update, no_update
@@ -3781,36 +3619,50 @@ def export_active_plot(n_clicks, figure, plot_mode, plot_src, idx):
     if plot_mode == 'native':
         if not figure:
             return no_update, 'No native plot is available to export.'
-        fname = f"malca_plot_{ordinal}.pdf"
+
+        # Get ASAS-SN ID for filename
+        asas_sn_id = 'unknown'
+        try:
+            if queue_data and idx is not None:
+                dfq = pd.DataFrame(queue_data)
+                if int(idx) < len(dfq):
+                    cid = dfq.iloc[int(idx)]['candidate_id']
+                    with closing(db_connect(Path(DB_PATH))) as conn:
+                        payload = get_candidate_payload(conn, cid)
+                    asas_sn_id = str(payload.get('asas_sn_id') or payload.get('candidate_id') or 'unknown')
+        except Exception:
+            pass
+
+        fname = f"malca_plot_{ordinal}_{asas_sn_id}.pdf"
         try:
             export_fig = go.Figure(figure)
             export_fig.update_layout(
-                template='plotly_white',
                 paper_bgcolor='white',
                 plot_bgcolor='white',
-                font={'color': '#111111', 'family': 'Monaco, Courier New, monospace', 'size': 11},
-                title_font={'color': '#111111'},
-                legend={
-                    'bgcolor': 'rgba(255,255,255,0.95)',
-                    'bordercolor': 'rgba(40,40,40,0.25)',
-                    'borderwidth': 1,
-                    'font': {'color': '#111111', 'size': 10},
-                },
+                font=dict(color='#111111', family='Monaco, Courier New, monospace', size=11),
+                title_font=dict(color='#111111'),
+                margin=dict(t=54, l=60, r=20, b=50),
+                legend=dict(
+                    bgcolor='rgba(255,255,255,0.95)',
+                    bordercolor='rgba(40,40,40,0.25)',
+                    borderwidth=1,
+                    font=dict(color='#111111', size=9),
+                ),
             )
             export_fig.update_xaxes(
                 color='#111111',
-                title_font={'color': '#111111'},
-                tickfont={'color': '#111111'},
+                title_font_color='#111111',
+                tickfont_color='#111111',
                 showgrid=True,
-                gridcolor='rgba(0,0,0,0.15)',
+                gridcolor='rgba(0,0,0,0.12)',
                 zeroline=False,
             )
             export_fig.update_yaxes(
                 color='#111111',
-                title_font={'color': '#111111'},
-                tickfont={'color': '#111111'},
+                title_font_color='#111111',
+                tickfont_color='#111111',
                 showgrid=True,
-                gridcolor='rgba(0,0,0,0.15)',
+                gridcolor='rgba(0,0,0,0.12)',
                 zeroline=False,
             )
             image_bytes = pio.to_image(export_fig, format='pdf')

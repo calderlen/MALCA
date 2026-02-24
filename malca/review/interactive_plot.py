@@ -340,13 +340,41 @@ def _event_entries(payload: dict, jd_offset: float, run_params: dict | None) -> 
 
 
 def _phase_period_days(payload: dict) -> float | None:
-    """Return preferred phase-fold period from payload metadata."""
-    phase_period = _parse_num(payload, "phase_period_days")
-    if phase_period is None:
-        phase_period = _parse_num(payload, "lsp_period")
-    if phase_period is None or (not np.isfinite(phase_period)) or phase_period <= 0:
-        return None
-    return float(phase_period)
+    """Return preferred phase-fold period from payload metadata.
+    
+    Checks in order of reliability:
+    1. Validated phase period (consensus or significant LSP)
+    2. Specific catalog periods (VSX, ASAS-SN, Gaia EB, ZTF)
+    3. Generic catalog period
+    4. Raw LSP period
+    """
+    # 1. Validated pipeline period
+    p = _parse_num(payload, "phase_period_days")
+    if p is not None and p > 0:
+        return float(p)
+
+    # 2. Known catalog periods (trust these highly)
+    for key in (
+        "vsx_period",
+        "asassn_var_period", 
+        "gaia_eb_period",
+        "ztf_var_period"
+    ):
+        p = _parse_num(payload, key)
+        if p is not None and p > 0:
+            return float(p)
+
+    # 3. Generic catalog period match
+    p = _parse_num(payload, "catalog_period")
+    if p is not None and p > 0:
+        return float(p)
+
+    # 4. Raw LSP period (least reliable, often alias)
+    p = _parse_num(payload, "lsp_period")
+    if p is not None and p > 0:
+        return float(p)
+
+    return None
 
 
 def _phase_fold_df(df: pd.DataFrame, period_days: float) -> pd.DataFrame:
@@ -449,6 +477,7 @@ def build_interactive_lightcurve_figure(
     show_event_markers: bool,
     show_residuals: bool,
     show_phase_fold: bool = False,
+    show_raw_mag: bool = True,
     show_diagnostics: bool,
     confidence_colors: bool,
     run_params: dict | None,
@@ -563,26 +592,65 @@ def build_interactive_lightcurve_figure(
         residual_fraction = 0.28
     residual_fraction = float(np.clip(residual_fraction, 0.15, 0.85))
 
-    n_rows = 1 + (1 if show_residuals else 0) + (1 if phase_enabled else 0)
+    # Dynamic row allocation
+    # Row indices are 1-based
+    row_map = {}
+    current_row = 1
+    
+    if show_raw_mag:
+        row_map['raw'] = current_row
+        current_row += 1
+    
+    if show_residuals:
+        row_map['resid'] = current_row
+        current_row += 1
+        
+    if phase_enabled:
+        row_map['phase'] = current_row
+        current_row += 1
+        
+    n_rows = current_row - 1
+    if n_rows == 0:
+        return {
+            "figure": _status_figure("No panels selected. Enable Raw, Residuals, or Phase-fold.", theme=theme),
+            "camera_options": [{"label": f"{cam}", "value": str(cam)} for cam in camera_ids],
+            "camera_values": selected,
+            "stat_rows": [],
+            "status": "ok",
+            "status_message": "No panels selected.",
+            "camera_diagnostics": camera_diagnostics,
+            "warnings": ["No panels selected"],
+        }
+
+    # Calculate row heights
+    # Logic:
+    # - If 1 row: 1.0
+    # - If 2 rows: raw/resid split or raw/phase split or resid/phase split
+    # - If 3 rows: raw/resid/phase
+    
+    row_heights = []
+    
     if n_rows == 1:
         row_heights = [1.0]
     elif n_rows == 2:
-        row_heights = [1.0 - residual_fraction, residual_fraction] if show_residuals else [0.68, 0.32]
-    else:
+        if show_raw_mag and show_residuals:
+            row_heights = [1.0 - residual_fraction, residual_fraction]
+        elif show_raw_mag and phase_enabled:
+            row_heights = [0.68, 0.32]
+        else:
+            # Resid + Phase or just two unknown panels (unlikely with current logic)
+            row_heights = [0.5, 0.5]
+    elif n_rows == 3:
         phase_fraction = 0.22
-        # Keep a usable main panel height even if residual slider is large.
         max_resid = max(0.15, 1.0 - phase_fraction - 0.05)
         residual_fraction_3 = float(np.clip(residual_fraction, 0.15, max_resid))
         main_fraction = 1.0 - phase_fraction - residual_fraction_3
         row_heights = [main_fraction, residual_fraction_3, phase_fraction]
 
-    residual_row = 2 if show_residuals else None
-    phase_row = (3 if show_residuals else 2) if phase_enabled else None
-
     fig = make_subplots(
         rows=n_rows,
         cols=1,
-        shared_xaxes=(not phase_enabled),
+        shared_xaxes=(not phase_enabled) if show_raw_mag else False,
         vertical_spacing=0.05,
         row_heights=row_heights,
     )
@@ -604,33 +672,34 @@ def build_interactive_lightcurve_figure(
             baseline = cdf["baseline"].to_numpy() if "baseline" in cdf.columns else np.full(len(cdf), np.nan)
             hover = np.column_stack([cdf["JD"].to_numpy(), err, resid, baseline])
 
-            fig.add_trace(
-                go.Scatter(
-                    x=cdf["JD_plot"],
-                    y=cdf["mag"],
-                    mode="markers",
-                    name=f"{cam} ({band_labels[band]})",
-                    marker={
-                        "size": 7,
-                        "symbol": band_markers[band],
-                        "color": color,
-                        "line": {"width": 0.8, "color": colors["marker_line"]},
-                    },
-                    error_y={"type": "data", "array": err, "visible": True, "thickness": 1, "width": 0, "color": color},
-                    customdata=hover,
-                    hovertemplate=(
-                        "<b>%{fullData.name}</b><br>"
-                        "JD: %{customdata[0]:.5f}<br>"
-                        "JD plot: %{x:.5f}<br>"
-                        "Mag: %{y:.4f}<br>"
-                        "Err: %{customdata[1]:.4f}<br>"
-                        "Resid: %{customdata[2]:.4f}<br>"
-                        "Baseline: %{customdata[3]:.4f}<extra></extra>"
+            if show_raw_mag:
+                fig.add_trace(
+                    go.Scatter(
+                        x=cdf["JD_plot"],
+                        y=cdf["mag"],
+                        mode="markers",
+                        name=f"{cam} ({band_labels[band]})",
+                        marker={
+                            "size": 7,
+                            "symbol": band_markers[band],
+                            "color": color,
+                            "line": {"width": 0.8, "color": colors["marker_line"]},
+                        },
+                        error_y={"type": "data", "array": err, "visible": True, "thickness": 1, "width": 0, "color": color},
+                        customdata=hover,
+                        hovertemplate=(
+                            "<b>%{fullData.name}</b><br>"
+                            "JD: %{customdata[0]:.5f}<br>"
+                            "JD plot: %{x:.5f}<br>"
+                            "Mag: %{y:.4f}<br>"
+                            "Err: %{customdata[1]:.4f}<br>"
+                            "Resid: %{customdata[2]:.4f}<br>"
+                            "Baseline: %{customdata[3]:.4f}<extra></extra>"
+                        ),
                     ),
-                ),
-                row=1,
-                col=1,
-            )
+                    row=row_map['raw'],
+                    col=1,
+                )
 
             if show_residuals:
                 fig.add_trace(
@@ -652,11 +721,11 @@ def build_interactive_lightcurve_figure(
                             "Residual: %{y:.4f}<extra></extra>"
                         ),
                     ),
-                    row=residual_row,
+                    row=row_map['resid'],
                     col=1,
                 )
 
-        if show_baseline and "baseline" in bdf.columns:
+        if show_raw_mag and show_baseline and "baseline" in bdf.columns:
             for cam in selected:
                 cbase = bdf[(bdf["camera_label"] == cam) & np.isfinite(bdf["baseline"])].sort_values("JD_plot")
                 if cbase.empty:
@@ -671,12 +740,12 @@ def build_interactive_lightcurve_figure(
                         opacity=baseline_opacity,
                         hovertemplate="Baseline: %{y:.4f}<extra></extra>",
                     ),
-                    row=1,
+                    row=row_map['raw'],
                     col=1,
                 )
 
     event_entries = _event_entries(payload, jd_offset, run_params)
-    if show_event_markers:
+    if show_event_markers and show_raw_mag:
         y_ref = float(df["mag"].min()) if not df.empty else 0.0
         for entry in event_entries:
             color = entry["base_color"]
@@ -693,7 +762,7 @@ def build_interactive_lightcurve_figure(
                 else:
                     color = f"rgba(92,214,110,{alpha:.3f})"
 
-            fig.add_vline(x=float(entry["x0"]), line_color=color, line_dash="dash", line_width=1.8)
+            fig.add_vline(x=float(entry["x0"]), line_color=color, line_dash="dash", line_width=1.8, row=row_map['raw'], col=1)
 
             if show_diagnostics and float(entry["half_width"]) > 0:
                 fig.add_vrect(
@@ -703,6 +772,8 @@ def build_interactive_lightcurve_figure(
                     opacity=0.11,
                     line_width=0,
                     layer="below",
+                    row=row_map['raw'],
+                    col=1,
                 )
                 fig.add_annotation(
                     x=float(entry["x0"]),
@@ -715,6 +786,8 @@ def build_interactive_lightcurve_figure(
                     showarrow=False,
                     font={"size": 9, "color": colors["annotation"]},
                     yshift=-12 if entry["kind"] == "dip" else -24,
+                    row=row_map['raw'],
+                    col=1,
                 )
 
             fig.add_trace(
@@ -735,11 +808,11 @@ def build_interactive_lightcurve_figure(
                         f"confidence: {float(entry['confidence']):.2f}<extra></extra>"
                     ),
                 ),
-                row=1,
+                row=row_map['raw'],
                 col=1,
             )
 
-    if phase_enabled and phase_row is not None and phase_period is not None:
+    if phase_enabled and 'phase' in row_map and phase_period is not None:
         phase_df = _phase_fold_df(df, phase_period)
         for band in (0, 1):
             bdf = phase_df[phase_df["v_g_band"] == band]
@@ -774,29 +847,58 @@ def build_interactive_lightcurve_figure(
                             "Err: %{customdata[1]:.4f}<extra></extra>"
                         ),
                     ),
-                    row=phase_row,
+                    row=row_map['phase'],
                     col=1,
                 )
 
-        fig.add_vline(x=0.0, line_color=colors["guide_line"], line_dash="dot", line_width=1.0, row=phase_row, col=1)
-        fig.add_vline(x=1.0, line_color=colors["guide_line"], line_dash="dot", line_width=1.0, row=phase_row, col=1)
-        fig.add_vline(x=2.0, line_color=colors["guide_line"], line_dash="dot", line_width=1.0, row=phase_row, col=1)
+        fig.add_vline(x=0.0, line_color=colors["guide_line"], line_dash="dot", line_width=1.0, row=row_map['phase'], col=1)
+        fig.add_vline(x=1.0, line_color=colors["guide_line"], line_dash="dot", line_width=1.0, row=row_map['phase'], col=1)
+        fig.add_vline(x=2.0, line_color=colors["guide_line"], line_dash="dot", line_width=1.0, row=row_map['phase'], col=1)
 
-    fig.update_yaxes(title_text="Magnitude [mag]", row=1, col=1, autorange="reversed")
-    if show_residuals:
-        fig.update_yaxes(title_text="Residual [mag]", row=residual_row, col=1, autorange="reversed")
-        fig.add_hline(y=0.0, line_color=colors["guide_line"], line_dash="dot", row=residual_row, col=1)
-
-    if phase_enabled and phase_row is not None and phase_period is not None:
-        if show_residuals:
-            fig.update_xaxes(title_text=f"JD - {int(jd_offset)}", row=residual_row, col=1)
-            fig.update_xaxes(matches="x", row=residual_row, col=1)
+    if show_raw_mag:
+        # Explicitly calculate range to ensure full visibility
+        y_vals = df["mag"].to_numpy()
+        if show_baseline and "baseline" in df.columns:
+            # Include baseline in range calculation
+            b_vals = df["baseline"].dropna().to_numpy()
+            if b_vals.size > 0:
+                y_vals = np.concatenate([y_vals, b_vals])
+        
+        if y_vals.size > 0:
+            y_min, y_max = np.nanmin(y_vals), np.nanmax(y_vals)
+            y_pad = (y_max - y_min) * 0.05
+            if y_pad == 0:
+                y_pad = 0.5
+            # Reversed range: max at bottom, min at top
+            fig.update_yaxes(
+                title_text="Magnitude [mag]", 
+                row=row_map['raw'], 
+                col=1, 
+                range=[y_max + y_pad, y_min - y_pad]
+            )
         else:
-            fig.update_xaxes(title_text=f"JD - {int(jd_offset)}", row=1, col=1)
-        fig.update_xaxes(title_text=f"Phase (P={phase_period:.5f} d)", row=phase_row, col=1, range=[-0.02, 2.02])
-        fig.update_yaxes(title_text="Phase mag [mag]", row=phase_row, col=1, autorange="reversed")
-    else:
-        fig.update_xaxes(title_text=f"JD - {int(jd_offset)}", row=n_rows, col=1)
+            fig.update_yaxes(title_text="Magnitude [mag]", row=row_map['raw'], col=1, autorange="reversed")
+    
+    if show_residuals:
+        fig.update_yaxes(title_text="Residual [mag]", row=row_map['resid'], col=1, autorange="reversed")
+        fig.add_hline(y=0.0, line_color=colors["guide_line"], line_dash="dot", row=row_map['resid'], col=1)
+
+    if phase_enabled and 'phase' in row_map and phase_period is not None:
+        fig.update_xaxes(title_text=f"Phase (P={phase_period:.5f} d)", row=row_map['phase'], col=1, range=[-0.02, 2.02])
+        fig.update_yaxes(title_text="Phase mag [mag]", row=row_map['phase'], col=1, autorange="reversed")
+
+    # Set JD axis on the bottom-most plot that uses JD
+    jd_axis_row = None
+    if show_residuals:
+        jd_axis_row = row_map['resid']
+    elif show_raw_mag:
+        jd_axis_row = row_map['raw']
+        
+    if jd_axis_row is not None:
+        fig.update_xaxes(title_text="JD - 2458000", row=jd_axis_row, col=1)
+        # Link x-axes if both raw and resid are present
+        if show_raw_mag and show_residuals:
+             fig.update_xaxes(matches="x", row=row_map['resid'], col=1)
 
     fig.update_layout(
         title=_build_title(payload, df),
@@ -812,7 +914,7 @@ def build_interactive_lightcurve_figure(
             "borderwidth": 1,
             "font": {"size": 10},
         },
-        height=760 if phase_enabled and show_residuals else (640 if phase_enabled else (650 if show_residuals else 480)),
+        height=None,
         uirevision=uirevision_key,
     )
     fig.update_xaxes(showgrid=True, gridcolor=colors["grid"], zeroline=False)
