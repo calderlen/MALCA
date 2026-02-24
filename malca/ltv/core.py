@@ -131,12 +131,8 @@ def parse_args() -> tuple[list[Config], bool]:
     p.add_argument("--mag-bin",
                    default="13_13.5",
                    type=str,
-                   choices=MAG_BINS,
-                   help=f"Magnitude bin to process (choices: {', '.join(MAG_BINS)})")
-    p.add_argument("--all",
-                   action="store_true",
-                   dest="run_all",
-                   help="Process all magnitude bins sequentially (ignores --mag-bin)")
+                   choices=[*MAG_BINS, "all"],
+                   help=f"Magnitude bin to process (choices: {', '.join(MAG_BINS)}, all)")
     p.add_argument("--output",
                    default=None,
                    type=str,
@@ -186,14 +182,16 @@ def parse_args() -> tuple[list[Config], bool]:
 
     a = p.parse_args()
 
-    if a.run_all:
+    run_all = a.mag_bin == "all"
+
+    if run_all:
         if a.output is not None:
             p.error("--output cannot be used with --all (each mag bin auto-resolves its own output path)")
         configs = [_build_config(a, mb) for mb in MAG_BINS]
     else:
         configs = [_build_config(a, a.mag_bin)]
 
-    return configs, a.run_all
+    return configs, run_all
 
 
 def read_index_csv(path: Path) -> pd.DataFrame:
