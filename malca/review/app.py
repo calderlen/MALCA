@@ -1525,6 +1525,29 @@ def _render_vetting_banner(payload: dict | None, radius_arcsec: float = 10.0) ->
             html.Span(str(yso_cls), style=hit_style),
         ], style=cell_style))
 
+    # OGLE cell
+    ogle_match = payload.get('period_ogle_match')
+    if ogle_match:
+        ogle_cls = payload.get('period_ogle_class', '')
+        ogle_p = payload.get('period_ogle_days')
+        ogle_sep = payload.get('period_ogle_sep_arcsec')
+        p_str = f" P={ogle_p:.4f}d" if ogle_p and not pd.isna(ogle_p) else ""
+        sep_str = f" ({ogle_sep:.1f}\")" if ogle_sep and not pd.isna(ogle_sep) else ""
+        cards.append(html.Div([
+            html.Span("OGLE", style=label_style),
+            html.Span(f"{ogle_cls}{p_str}{sep_str}" if ogle_cls else f"Match{p_str}{sep_str}", style=hit_style),
+        ], style=cell_style))
+
+    # unWISE W1 variability cell
+    w1_var = payload.get('unwise_w1_var')
+    if w1_var:
+        w1_z = payload.get('unwise_w1_zscore')
+        z_str = f" (z={w1_z:.1f})" if w1_z and not pd.isna(w1_z) else ""
+        cards.append(html.Div([
+            html.Span("unWISE W1", style=label_style),
+            html.Span(f"Variable{z_str}", style=hit_style),
+        ], style=cell_style))
+
     # IPHAS H-alpha excess cell
     ha_excess = payload.get('iphas_ha_excess')
     if ha_excess and not pd.isna(ha_excess) and float(ha_excess) > 0:
@@ -2067,6 +2090,9 @@ _SIDEBAR_GROUPS = [
         ('select', 'gaia_var_class'),
         ('select', 'simbad_otype'),
         ('select', 'ztf_var_type'),
+        ('select', 'tns_type'),
+        ('select', 'alerce_lc_class'),
+        ('select', 'yso_class'),
     ]),
     ('External Coverage', [
         ('num', 'neowise_n_epochs'),

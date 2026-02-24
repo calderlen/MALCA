@@ -211,6 +211,10 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("period_consensus_support", "REAL",    "float"),
     ("period_primary_source",    "TEXT",    "text"),
     ("period_source_periods",    "TEXT",    "text"),
+    ("period_ogle_match",        "INTEGER", "bool"),
+    ("period_ogle_days",         "REAL",    "float"),
+    ("period_ogle_class",        "TEXT",    "text"),
+    ("period_ogle_sep_arcsec",   "REAL",    "float"),
     ("high_ruwe_flag",           "INTEGER", "bool"),
     # -- periodicity --
     ("periodicity_score",        "REAL",    "float"),
@@ -390,13 +394,13 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("ztf_var_amp",              "REAL",    "float"),
     # -- vetting details: TNS --
     ("tns_name",                 "TEXT",    "text"),
-    ("tns_type",                 "TEXT",    "text"),
+    ("tns_type",                 "TEXT",    "select"),
     ("tns_redshift",             "REAL",    "float"),
     ("tns_disc_date",            "TEXT",    "text"),
     # -- vetting details: ALeRCE --
     ("alerce_oid",               "TEXT",    "text"),
     ("alerce_ndet",              "REAL",    "float"),
-    ("alerce_lc_class",          "TEXT",    "text"),
+    ("alerce_lc_class",          "TEXT",    "select"),
     ("alerce_lc_prob",           "REAL",    "float"),
     ("alerce_stamp_class",       "TEXT",    "text"),
     ("alerce_stamp_prob",        "REAL",    "float"),
@@ -428,7 +432,7 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("trigger_mode",             "TEXT",    "text"),
     # -- YSO / classification --
     ("trigger_type",             "TEXT",    "text"),
-    ("yso_class",                "TEXT",    "text"),
+    ("yso_class",                "TEXT",    "select"),
     ("final_class",              "TEXT",    "text"),
     ("P_eb",                     "REAL",    "float"),
     ("P_cv",                     "REAL",    "float"),
