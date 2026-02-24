@@ -72,11 +72,11 @@ def run_full_pipeline(
     run_neowise: bool = True,
     run_extinction: bool = True,
     run_dust_flags: bool = True,
-    run_cmd: bool = False,
-    run_bailer_jones: bool = False,
+    run_cmd: bool = True,
+    run_bailer_jones: bool = True,
     mist_path: str | Path | None = None,
     cmd_boundaries: dict | None = None,
-    run_gaia_epoch: bool = False,
+    run_gaia_epoch: bool = True,
     gaia_epoch_table: str | None = None,
     gaia_epoch_time_col: str = "time",
     gaia_epoch_g_col: str = "g_mag",
@@ -387,9 +387,9 @@ def add_pipeline_args(parser):
         help="Skip dust-driven variability flags",
     )
     parser.add_argument(
-        "--run-gaia-epoch",
+        "--skip-gaia-epoch",
         action="store_true",
-        help="Query Gaia epoch photometry and compute delta MG / delta (BP-RP)",
+        help="Skip Gaia epoch photometry stage",
     )
     parser.add_argument(
         "--gaia-epoch-table",
@@ -421,14 +421,14 @@ def add_pipeline_args(parser):
         help="Include invalid epoch photometry (valid_data=False)",
     )
     parser.add_argument(
-        "--run-bailer-jones",
+        "--skip-bailer-jones",
         action="store_true",
-        help="Fetch Bailer-Jones (2023) photogeometric distances before CMD stage",
+        help="Skip Bailer-Jones distance fetch stage",
     )
     parser.add_argument(
-        "--run-cmd",
+        "--skip-cmd",
         action="store_true",
-        help="Compute CMD features (BP-RP, M_G) after extinction correction",
+        help="Skip CMD features stage",
     )
     parser.add_argument(
         "--log-rejections",
@@ -465,9 +465,9 @@ def run_pipeline_cli(args):
         run_neowise=not args.skip_neowise,
         run_extinction=not args.skip_extinction,
         run_dust_flags=not args.skip_dust_flags,
-        run_cmd=args.run_cmd,
-        run_bailer_jones=args.run_bailer_jones,
-        run_gaia_epoch=args.run_gaia_epoch,
+        run_cmd=not args.skip_cmd,
+        run_bailer_jones=not args.skip_bailer_jones,
+        run_gaia_epoch=not args.skip_gaia_epoch,
         gaia_epoch_table=args.gaia_epoch_table,
         gaia_epoch_data_release=args.gaia_epoch_data_release,
         gaia_epoch_data_structure=args.gaia_epoch_data_structure,
