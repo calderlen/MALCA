@@ -14,6 +14,8 @@ LTV_MAX_CROWDING_COUNT = 20
 
 # LTV crossmatch
 LTV_MATCH_RADIUS_ARCSEC = 3.0
+VIZIER_TAP_URL = "https://tapvizier.cds.unistra.fr/TAPVizieR/tap"
+SIMBAD_TAP_URL = "https://simbad.cds.unistra.fr/simbad/sim-tap"
 
 # LTV workers / chunking
 LTV_WORKERS = 10

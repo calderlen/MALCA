@@ -33,6 +33,8 @@ from malca.config.config_ltv import (
     LTV_MATCH_RADIUS_ARCSEC,
     LTV_WORKERS,
     LTV_CROSSMATCH_CHUNK_SIZE,
+    VIZIER_TAP_URL,
+    SIMBAD_TAP_URL,
 )
 from malca.config.config_paths import VSX_CROSSMATCH_PATH
 
@@ -355,41 +357,7 @@ def crossmatch_tap_catalog(
     return df_out
 
 
-def _parallel_query(
-    df: pd.DataFrame,
-    query_func,
-    *,
-    ra_column: str = "ra_deg",
-    dec_column: str = "dec_deg",
-    n_workers: int = LTV_WORKERS,
-    desc: str = "Query",
-    verbose: bool = False,
-) -> list[dict]:
-    """
-    Run queries in parallel using ThreadPoolExecutor.
-    
-    query_func should take (ra, dec, idx) and return a dict or None.
-    """
-    if ra_column not in df.columns or dec_column not in df.columns:
-        return []
-    
-    valid_mask = df[ra_column].notna() & df[dec_column].notna()
-    tasks = [
-        (df.loc[idx, ra_column], df.loc[idx, dec_column], idx)
-        for idx in df.index[valid_mask]
-    ]
-    
-    results = []
-    
-    with ThreadPoolExecutor(max_workers=n_workers) as executor:
-        futures = {executor.submit(query_func, ra, dec, idx): idx for ra, dec, idx in tasks}
-        
-        for future in tqdm(as_completed(futures), total=len(futures), desc=desc, disable=not verbose):
-            result = future.result()
-            if result is not None:
-                results.append(result)
-    
-    return results
+
 
 
 # =============================================================================
@@ -402,68 +370,63 @@ def crossmatch_milliquas(
     ra_column: str = "ra_deg",
     dec_column: str = "dec_deg",
     match_radius_arcsec: float = LTV_MATCH_RADIUS_ARCSEC,
+    chunk_size: int = LTV_CROSSMATCH_CHUNK_SIZE,
     n_workers: int = LTV_WORKERS,
     verbose: bool = False,
 ) -> pd.DataFrame:
     """
-    Crossmatch to MILLIQUAS v8 via parallel VizieR queries.
-    
+    Crossmatch to MILLIQUAS v8 via batch VizieR TAP upload.
+
     Adds columns: milliquas_name, milliquas_type, milliquas_z, milliquas_sep_arcsec
     """
-    from astroquery.vizier import Vizier
-    
     if ra_column not in df.columns or dec_column not in df.columns:
         if verbose:
             print("Warning: RA/Dec columns not found for MILLIQUAS crossmatch")
         return df
-    
+
     df = df.copy()
     df["milliquas_name"] = None
     df["milliquas_type"] = None
     df["milliquas_z"] = np.nan
     df["milliquas_sep_arcsec"] = np.nan
-    
-    vizier = Vizier(columns=["Name", "Type", "z", "RAJ2000", "DEJ2000"], row_limit=1)
-    
-    def query_one(ra, dec, idx):
-        try:
-            coord = SkyCoord(ra=ra * u.deg, dec=dec * u.deg, frame="icrs")
-            result = vizier.query_region(coord, radius=match_radius_arcsec * u.arcsec, catalog="VII/294/milliqua")
-            
-            if result and len(result) > 0 and len(result[0]) > 0:
-                row = result[0][0]
-                result_coord = SkyCoord(
-                    ra=float(row["RAJ2000"]) * u.deg,
-                    dec=float(row["DEJ2000"]) * u.deg,
-                    frame="icrs"
-                )
-                return {
-                    "_idx": idx,
-                    "milliquas_name": str(row["Name"]) if "Name" in row.colnames else None,
-                    "milliquas_type": str(row["Type"]) if "Type" in row.colnames else None,
-                    "milliquas_z": float(row["z"]) if "z" in row.colnames and row["z"] else np.nan,
-                    "milliquas_sep_arcsec": coord.separation(result_coord).arcsec,
-                }
-        except Exception:
-            pass
-        return None
-    
+
+    coords_df = pd.DataFrame({
+        "_idx": df.index,
+        "ra": df[ra_column].values,
+        "dec": df[dec_column].values,
+    })
+
     if verbose:
-        print(f"[crossmatch_milliquas] Querying {len(df)} sources...")
-    
-    results = _parallel_query(df, query_one, ra_column=ra_column, dec_column=dec_column,
-                              n_workers=n_workers, desc="MILLIQUAS", verbose=verbose)
-    
-    for r in results:
-        idx = r["_idx"]
-        if idx in df.index:
-            for col in ["milliquas_name", "milliquas_type", "milliquas_z", "milliquas_sep_arcsec"]:
-                df.loc[idx, col] = r[col]
-    
+        print(f"[crossmatch_milliquas] Querying {len(df)} sources via TAP...")
+
+    result = _batch_tap_crossmatch(
+        coords_df,
+        tap_service=VIZIER_TAP_URL,
+        catalog_table='"VII/294/milliqua"',
+        select_cols='c."Name", c."Type", c.z',
+        ra_col="RAJ2000",
+        dec_col="DEJ2000",
+        match_radius_arcsec=match_radius_arcsec,
+        chunk_size=chunk_size,
+        n_workers=n_workers,
+        verbose=verbose,
+        desc="MILLIQUAS TAP",
+    )
+
+    if not result.empty:
+        result = result.sort_values("sep_arcsec").drop_duplicates(subset="_idx", keep="first")
+        for _, row in result.iterrows():
+            idx = int(row["_idx"])
+            if idx in df.index:
+                df.loc[idx, "milliquas_name"] = row.get("Name")
+                df.loc[idx, "milliquas_type"] = row.get("Type")
+                df.loc[idx, "milliquas_z"] = float(row["z"]) if pd.notna(row.get("z")) else np.nan
+                df.loc[idx, "milliquas_sep_arcsec"] = row["sep_arcsec"]
+
     if verbose:
         n_matched = df["milliquas_name"].notna().sum()
         print(f"[crossmatch_milliquas] Matched {n_matched}/{len(df)}")
-    
+
     return df
 
 
@@ -477,66 +440,61 @@ def crossmatch_gaia_alerts(
     ra_column: str = "ra_deg",
     dec_column: str = "dec_deg",
     match_radius_arcsec: float = LTV_MATCH_RADIUS_ARCSEC,
+    chunk_size: int = LTV_CROSSMATCH_CHUNK_SIZE,
     n_workers: int = LTV_WORKERS,
     verbose: bool = False,
 ) -> pd.DataFrame:
     """
-    Crossmatch to Gaia Alerts via parallel VizieR queries.
-    
+    Crossmatch to Gaia Alerts via batch VizieR TAP upload.
+
     Adds columns: gaia_alert_name, gaia_alert_class, gaia_alert_sep_arcsec
     """
-    from astroquery.vizier import Vizier
-    
     if ra_column not in df.columns or dec_column not in df.columns:
         if verbose:
             print("Warning: RA/Dec columns not found for Gaia Alerts crossmatch")
         return df
-    
+
     df = df.copy()
     df["gaia_alert_name"] = None
     df["gaia_alert_class"] = None
     df["gaia_alert_sep_arcsec"] = np.nan
-    
-    vizier = Vizier(columns=["*"], row_limit=1)
-    
-    def query_one(ra, dec, idx):
-        try:
-            coord = SkyCoord(ra=ra * u.deg, dec=dec * u.deg, frame="icrs")
-            result = vizier.query_region(coord, radius=match_radius_arcsec * u.arcsec, catalog="I/358/vari")
-            
-            if result and len(result) > 0 and len(result[0]) > 0:
-                row = result[0][0]
-                result_coord = SkyCoord(
-                    ra=float(row["RA_ICRS"]) * u.deg,
-                    dec=float(row["DE_ICRS"]) * u.deg,
-                    frame="icrs"
-                )
-                return {
-                    "_idx": idx,
-                    "gaia_alert_name": str(row["Name"]) if "Name" in row.colnames else None,
-                    "gaia_alert_class": str(row["Class"]) if "Class" in row.colnames else None,
-                    "gaia_alert_sep_arcsec": coord.separation(result_coord).arcsec,
-                }
-        except Exception:
-            pass
-        return None
-    
+
+    coords_df = pd.DataFrame({
+        "_idx": df.index,
+        "ra": df[ra_column].values,
+        "dec": df[dec_column].values,
+    })
+
     if verbose:
-        print(f"[crossmatch_gaia_alerts] Querying {len(df)} sources...")
-    
-    results = _parallel_query(df, query_one, ra_column=ra_column, dec_column=dec_column,
-                              n_workers=n_workers, desc="Gaia Alerts", verbose=verbose)
-    
-    for r in results:
-        idx = r["_idx"]
-        if idx in df.index:
-            for col in ["gaia_alert_name", "gaia_alert_class", "gaia_alert_sep_arcsec"]:
-                df.loc[idx, col] = r[col]
-    
+        print(f"[crossmatch_gaia_alerts] Querying {len(df)} sources via TAP...")
+
+    result = _batch_tap_crossmatch(
+        coords_df,
+        tap_service=VIZIER_TAP_URL,
+        catalog_table='"I/358/vari"',
+        select_cols='c."Name", c."Class"',
+        ra_col="RA_ICRS",
+        dec_col="DE_ICRS",
+        match_radius_arcsec=match_radius_arcsec,
+        chunk_size=chunk_size,
+        n_workers=n_workers,
+        verbose=verbose,
+        desc="Gaia Alerts TAP",
+    )
+
+    if not result.empty:
+        result = result.sort_values("sep_arcsec").drop_duplicates(subset="_idx", keep="first")
+        for _, row in result.iterrows():
+            idx = int(row["_idx"])
+            if idx in df.index:
+                df.loc[idx, "gaia_alert_name"] = row.get("Name")
+                df.loc[idx, "gaia_alert_class"] = row.get("Class")
+                df.loc[idx, "gaia_alert_sep_arcsec"] = row["sep_arcsec"]
+
     if verbose:
         n_matched = df["gaia_alert_name"].notna().sum()
         print(f"[crossmatch_gaia_alerts] Matched {n_matched}/{len(df)}")
-    
+
     return df
 
 
@@ -550,69 +508,63 @@ def query_simbad_classification(
     ra_column: str = "ra_deg",
     dec_column: str = "dec_deg",
     match_radius_arcsec: float = LTV_MATCH_RADIUS_ARCSEC,
+    chunk_size: int = LTV_CROSSMATCH_CHUNK_SIZE,
     n_workers: int = LTV_WORKERS,
     verbose: bool = False,
 ) -> pd.DataFrame:
     """
-    Query SIMBAD for classifications via parallel queries.
-    
+    Query SIMBAD for classifications via batch TAP upload.
+
     Adds columns: simbad_main_id, simbad_otype, simbad_sp_type, simbad_sep_arcsec
     """
-    from astroquery.simbad import Simbad
-    
     if ra_column not in df.columns or dec_column not in df.columns:
         if verbose:
             print("Warning: RA/Dec columns not found for SIMBAD query")
         return df
-    
+
     df = df.copy()
     df["simbad_main_id"] = None
     df["simbad_otype"] = None
     df["simbad_sp_type"] = None
     df["simbad_sep_arcsec"] = np.nan
-    
-    simbad = Simbad()
-    simbad.add_votable_fields("otype", "sp")
-    
-    def query_one(ra, dec, idx):
-        try:
-            coord = SkyCoord(ra=ra * u.deg, dec=dec * u.deg, frame="icrs")
-            result = simbad.query_region(coord, radius=match_radius_arcsec * u.arcsec)
-            
-            if result is not None and len(result) > 0:
-                row = result[0]
-                sep = np.nan
-                if "RA" in result.colnames and "DEC" in result.colnames:
-                    result_coord = SkyCoord(result["RA"][0], result["DEC"][0], unit=(u.hourangle, u.deg), frame="icrs")
-                    sep = coord.separation(result_coord).arcsec
-                
-                return {
-                    "_idx": idx,
-                    "simbad_main_id": str(row["MAIN_ID"]) if "MAIN_ID" in result.colnames else None,
-                    "simbad_otype": str(row["OTYPE"]) if "OTYPE" in result.colnames else None,
-                    "simbad_sp_type": str(row["SP_TYPE"]) if "SP_TYPE" in result.colnames else None,
-                    "simbad_sep_arcsec": sep,
-                }
-        except Exception:
-            pass
-        return None
-    
+
+    coords_df = pd.DataFrame({
+        "_idx": df.index,
+        "ra": df[ra_column].values,
+        "dec": df[dec_column].values,
+    })
+
     if verbose:
-        print(f"[query_simbad_classification] Querying {len(df)} sources...")
-    
-    results = _parallel_query(df, query_one, ra_column=ra_column, dec_column=dec_column,
-                              n_workers=n_workers, desc="SIMBAD", verbose=verbose)
-    
-    for r in results:
-        idx = r["_idx"]
-        if idx in df.index:
-            for col in ["simbad_main_id", "simbad_otype", "simbad_sp_type", "simbad_sep_arcsec"]:
-                df.loc[idx, col] = r[col]
-    
+        print(f"[query_simbad_classification] Querying {len(df)} sources via TAP...")
+
+    result = _batch_tap_crossmatch(
+        coords_df,
+        tap_service=SIMBAD_TAP_URL,
+        catalog_table="basic",
+        select_cols="c.main_id, c.otype, c.sp_type",
+        ra_col="ra",
+        dec_col="dec",
+        match_radius_arcsec=match_radius_arcsec,
+        chunk_size=chunk_size,
+        n_workers=n_workers,
+        verbose=verbose,
+        desc="SIMBAD TAP",
+    )
+
+    if not result.empty:
+        result = result.sort_values("sep_arcsec").drop_duplicates(subset="_idx", keep="first")
+        for _, row in result.iterrows():
+            idx = int(row["_idx"])
+            if idx in df.index:
+                df.loc[idx, "simbad_main_id"] = row.get("main_id")
+                df.loc[idx, "simbad_otype"] = row.get("otype")
+                df.loc[idx, "simbad_sp_type"] = row.get("sp_type")
+                df.loc[idx, "simbad_sep_arcsec"] = row["sep_arcsec"]
+
     if verbose:
         n_matched = df["simbad_main_id"].notna().sum()
         print(f"[query_simbad_classification] Matched {n_matched}/{len(df)}")
-    
+
     return df
 
 
