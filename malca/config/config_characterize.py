@@ -1,7 +1,7 @@
 """Characterization settings: Gaia/StarHorse/dust/BANYAN/IPHAS/unWISE/cluster/SFR query params."""
 
 # Gaia query
-GAIA_CHUNK_SIZE = 1000
+GAIA_CHUNK_SIZE = 500
 STARHORSE_TAP_CHUNK_SIZE = 1000
 
 # Crossmatch radii

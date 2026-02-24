@@ -1351,7 +1351,7 @@ def _render_metadata_health(grouped: list[tuple[str, list[tuple[str, object]]]] 
     ], className='metadata-health metadata-health-partial')
 
 
-def _render_vetting_banner(payload: dict | None) -> html.Div:
+def _render_vetting_banner(payload: dict | None, radius_arcsec: float = 10.0) -> html.Div:
     """Render a vetting status panel with source cards above the metadata grid."""
     if not payload or 'vetting_likely_known' not in payload:
         return html.Div(
@@ -1558,7 +1558,7 @@ def _render_vetting_banner(payload: dict | None) -> html.Div:
     }
 
     # External links toolbar
-    links = build_external_lookup_links(payload)
+    links = build_external_lookup_links(payload, radius_arcsec=radius_arcsec)
     links_row = None
     if links:
         link_els = []
@@ -2214,6 +2214,41 @@ _SIDEBAR_GROUPS = [
         ('bool', 'period_consensus_agree'),
         ('bool', 'period_conflict_flag'),
     ]),
+    ('LC Cadence & Coverage', [
+        ('num', 'stats_time_span_days'),
+        ('num', 'stats_n_unique_nights'),
+        ('num', 'stats_duty_cycle_fraction'),
+        ('num', 'stats_cadence_mean_dt_days'),
+        ('num', 'stats_cadence_median_dt_days'),
+        ('num', 'stats_cadence_p05_dt_days'),
+        ('num', 'stats_cadence_p95_dt_days'),
+        ('num', 'stats_file_points_total'),
+        ('num', 'stats_file_points_kept_after_filter'),
+    ]),
+    ('LC Photometric Scatter', [
+        ('num', 'stats_photometry_std_mag'),
+        ('num', 'stats_photometry_robust_sigma_mag'),
+        ('num', 'stats_photometry_IQR_mag'),
+        ('num', 'stats_photometry_mean_mag'),
+        ('num', 'stats_photometry_median_mag'),
+        ('num', 'stats_photometry_weighted_mean_mag'),
+        ('num', 'stats_clipped_std_mag_3sigma_about_median'),
+        ('num', 'stats_n_outliers_removed_robust_3sigma'),
+    ]),
+    ('LC Variability', [
+        ('num', 'stats_variability_reduced_chi2_vs_constant'),
+        ('num', 'stats_variability_von_neumann_ratio'),
+        ('num', 'stats_variability_lag1_autocorr'),
+        ('num', 'stats_variability_stetson_I'),
+        ('num', 'stats_variability_stetson_J'),
+        ('num', 'stats_variability_stetson_K'),
+    ]),
+    ('LC Error / SNR / Trend', [
+        ('num', 'stats_error_and_snr_stats_snr_median'),
+        ('num', 'stats_error_and_snr_stats_error_median'),
+        ('num', 'stats_trend_slope_mag_per_year'),
+        ('num', 'stats_trend_r2'),
+    ]),
     ('Light Curve Basics', [
         ('text', 'baseline_source'),
         ('text', 'trigger_mode'),
@@ -2438,6 +2473,14 @@ def create_layout():
 
             html.Hr(),
             
+            html.Div('External Links', className='section-title'),
+            html.Label('Search Radius (arcsec):'),
+            dcc.Input(id='link-radius-arcsec', placeholder='Radius (arcsec)', type='number',
+                     value=10.0, min=0.1, step=1.0, style=_inp_style,
+                     persistence=True, persistence_type='local'),
+                     
+            html.Hr(),
+
             html.Div('Pace Timer', className='section-title'),
             dcc.Checklist(
                 id='pace-timer-toggle',
@@ -3375,7 +3418,6 @@ def handle_keyboard(key_value, current_idx, queue_data, current_score,
     return idx_out, notification, new_score, no_update, new_pass, no_update, no_update
 
 
-# Update plot and unified candidate info
 @app.callback(
     Output('plot-render-request', 'data'),
     [Input('current-index', 'data'),
@@ -3387,11 +3429,12 @@ def handle_keyboard(key_value, current_idx, queue_data, current_score,
      Input('theme-mode-store', 'data'),
      Input('queue-data', 'data'),
      Input('baseline-opacity-slider', 'value'),
-     Input('round-sigfigs', 'value')],
+     Input('round-sigfigs', 'value'),
+     Input('link-radius-arcsec', 'value')],
     State('plot-render-request', 'data'),
     prevent_initial_call=True,
 )
-def queue_plot_render_request(idx, plot_mode, overlay_values, selected_cameras, preset, residual_height, theme_mode, _queue_data, baseline_opacity, round_sigfigs, existing_request):
+def queue_plot_render_request(idx, plot_mode, overlay_values, selected_cameras, preset, residual_height, theme_mode, _queue_data, baseline_opacity, round_sigfigs, link_radius, existing_request):
     """Debounced render request queue for native plot UX."""
     req = existing_request or {'nonce': 0, 'ts': 0.0}
     return {
@@ -3407,6 +3450,7 @@ def queue_plot_render_request(idx, plot_mode, overlay_values, selected_cameras, 
             'theme': theme_mode or 'dark',
             'baseline_opacity': float(baseline_opacity if baseline_opacity is not None else 0.5),
             'round_sigfigs': bool(round_sigfigs and 'yes' in round_sigfigs),
+            'link_radius': float(link_radius) if link_radius is not None else 10.0,
         },
     }
 
@@ -3506,6 +3550,7 @@ def update_display(render_request, applied_nonce, queue_data):
     residual_height = float(state.get('residual_height', 0.28) or 0.28)
     baseline_opacity = float(state.get('baseline_opacity', 0.5) if state.get('baseline_opacity') is not None else 0.5)
     round_sigfigs = bool(state.get('round_sigfigs', False))
+    link_radius = float(state.get('link_radius', 10.0))
 
     empty_fig = {
         'data': [],
@@ -3517,11 +3562,11 @@ def update_display(render_request, applied_nonce, queue_data):
     }
 
     if not queue_data or queue_data['queue_size'] == 0:
-        return '', 'No candidates in queue', _render_metadata_health(None, context_msg='Queue is empty.'), _render_vetting_banner(None), '[0/0]', empty_fig, {'display': 'block', 'width': '100%', 'height': '100%'}, {'display': 'none'}, [], [], _render_plot_status_panel('error', 'No candidates in queue.', []), _render_camera_diag_panel({}, []), _render_run_config_panel(None, None, ['Queue is empty']), _render_repro_badge(None, ['Queue is empty']), '', nonce
+        return '', 'No candidates in queue', _render_metadata_health(None, context_msg='Queue is empty.'), _render_vetting_banner(None, radius_arcsec=link_radius), '[0/0]', empty_fig, {'display': 'block', 'width': '100%', 'height': '100%'}, {'display': 'none'}, [], [], _render_plot_status_panel('error', 'No candidates in queue.', []), _render_camera_diag_panel({}, []), _render_run_config_panel(None, None, ['Queue is empty']), _render_repro_badge(None, ['Queue is empty']), '', nonce
 
     queue_size = queue_data['queue_size']
     if idx < 0 or idx >= queue_size:
-        return '', 'Invalid index', _render_metadata_health(None, context_msg='Invalid queue index.'), _render_vetting_banner(None), f'[{idx}/{queue_size}]', empty_fig, {'display': 'block', 'width': '100%', 'height': '100%'}, {'display': 'none'}, [], [], _render_plot_status_panel('error', 'Invalid queue index.', []), _render_camera_diag_panel({}, []), _render_run_config_panel(None, None, ['Invalid queue index']), _render_repro_badge(None, ['Invalid queue index']), '', nonce
+        return '', 'Invalid index', _render_metadata_health(None, context_msg='Invalid queue index.'), _render_vetting_banner(None, radius_arcsec=link_radius), f'[{idx}/{queue_size}]', empty_fig, {'display': 'block', 'width': '100%', 'height': '100%'}, {'display': 'none'}, [], [], _render_plot_status_panel('error', 'Invalid queue index.', []), _render_camera_diag_panel({}, []), _render_run_config_panel(None, None, ['Invalid queue index']), _render_repro_badge(None, ['Invalid queue index']), '', nonce
 
     candidate_id = queue_data['candidate_ids'][idx]
     with closing(db_connect(Path(DB_PATH))) as conn:
@@ -3539,7 +3584,7 @@ def update_display(render_request, applied_nonce, queue_data):
 
     grouped = extract_review_metadata_grouped(payload, round_sigfigs=round_sigfigs)
     metadata_health = _render_metadata_health(grouped)
-    vetting_banner = _render_vetting_banner(payload)
+    vetting_banner = _render_vetting_banner(payload, radius_arcsec=link_radius)
     label_color = '#888'
     value_color = '#e0e0e0'
     grid_items = []

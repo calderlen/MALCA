@@ -257,6 +257,21 @@ def _build_stat_rows(payload: dict, df: pd.DataFrame, filtered_cameras: set[int]
         ("Periodicity", "periodicity_score", "{:.3f}"),
         ("Phase P (d)", "phase_period_days", "{:.5f}"),
         ("Phase quality", "phase_quality_score", "{:.3f}"),
+        # light curve stats
+        ("σ mag", "stats_photometry_robust_sigma_mag", "{:.4f}"),
+        ("std mag", "stats_photometry_std_mag", "{:.4f}"),
+        ("IQR mag", "stats_photometry_IQR_mag", "{:.4f}"),
+        ("χ² vs const", "stats_variability_reduced_chi2_vs_constant", "{:.2f}"),
+        ("von Neumann", "stats_variability_von_neumann_ratio", "{:.3f}"),
+        ("lag-1 ρ", "stats_variability_lag1_autocorr", "{:.3f}"),
+        ("Stetson J", "stats_variability_stetson_J", "{:.3f}"),
+        ("Stetson K", "stats_variability_stetson_K", "{:.3f}"),
+        ("SNR med", "stats_error_and_snr_stats_snr_median", "{:.1f}"),
+        ("Duty cycle", "stats_duty_cycle_fraction", "{:.3f}"),
+        ("Δt med (d)", "stats_cadence_median_dt_days", "{:.3f}"),
+        ("Span (d)", "stats_time_span_days", "{:.1f}"),
+        ("Trend (mag/yr)", "stats_trend_slope_mag_per_year", "{:.4f}"),
+        ("Trend R²", "stats_trend_r2", "{:.3f}"),
     ):
         value = _parse_num(payload, key)
         if value is not None:

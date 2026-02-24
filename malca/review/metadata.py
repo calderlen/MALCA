@@ -570,6 +570,7 @@ def _jd_to_mpc_iso(jd: float) -> str | None:
 
 def build_external_lookup_links(
     payload: dict[str, Any],
+    radius_arcsec: float = 10.0,
 ) -> list[tuple[str, str]]:
     """Build ``(label, url)`` pairs for external astronomical services.
 
@@ -600,14 +601,15 @@ def build_external_lookup_links(
     elif has_coords:
         links.append((
             "SIMBAD",
-            f"https://simbad.u-strasbg.fr/simbad/sim-coo?Coord={ra}+{dec}&CooFrame=FK5&CooEpoch=2000&Radius=10&Radius.unit=arcsec",
+            f"https://simbad.u-strasbg.fr/simbad/sim-coo?Coord={ra}+{dec}&CooFrame=FK5&CooEpoch=2000&Radius={radius_arcsec}&Radius.unit=arcsec",
         ))
 
     # -- NED (IPAC) -----------------------------------------------------------
     if has_coords:
+        radius_arcmin = radius_arcsec / 60.0
         links.append((
             "NED",
-            f"https://ned.ipac.caltech.edu/cgi-bin/objsearch?search_type=Near+Position+Search&in_csys=Equatorial&in_equinox=J2000.0&lon={ra}d&lat={dec}d&radius=1.0",
+            f"https://ned.ipac.caltech.edu/cgi-bin/objsearch?search_type=Near+Position+Search&in_csys=Equatorial&in_equinox=J2000.0&lon={ra}d&lat={dec}d&radius={radius_arcmin}",
         ))
 
     # -- ADS ------------------------------------------------------------------
@@ -619,7 +621,7 @@ def build_external_lookup_links(
     elif has_coords:
         links.append((
             "ADS",
-            f"https://ui.adsabs.harvard.edu/search/q=pos(%22{ra}+{dec}%22%2C+10s)",
+            f"https://ui.adsabs.harvard.edu/search/q=pos(%22{ra}+{dec}%22%2C+{radius_arcsec}s)",
         ))
 
     # -- TNS ------------------------------------------------------------------
@@ -654,7 +656,7 @@ def build_external_lookup_links(
     if has_coords:
         links.append((
             "VizieR",
-            f"https://vizier.cds.unistra.fr/viz-bin/VizieR-4?-c={ra}+{dec}&-c.rs=10",
+            f"https://vizier.cds.unistra.fr/viz-bin/VizieR-4?-c={ra}+{dec}&-c.rs={radius_arcsec}",
         ))
 
     # -- MPChecker (MPC) ------------------------------------------------------
@@ -670,30 +672,33 @@ def build_external_lookup_links(
         if iso_date:
             links.append((
                 "MPChecker",
-                f"https://minorplanetcenter.net/cgi-bin/checkmp.cgi?ra={ra}&decl={dec}&radius=15&iso={quote(iso_date)}",
+                f"https://minorplanetcenter.net/cgi-bin/checkmp.cgi?ra={ra}&decl={dec}&radius={radius_arcsec}&iso={quote(iso_date)}",
             ))
 
 
     # --- Visualizers / Surveys ---
     # -- ASAS-SN (Variable Stars Database) ------------------------------------
     if has_coords:
+        radius_arcmin = radius_arcsec / 60.0
         links.append((
             "ASAS-SN",
-            f"https://asas-sn.osu.edu/variables?ra={ra}&dec={dec}&radius=1.0",
+            f"https://asas-sn.osu.edu/variables?ra={ra}&dec={dec}&radius={radius_arcmin}",
         ))
 
     # -- ZTF / IRSA -----------------------------------------------------------
     if has_coords:
         links.append((
             "ZTF",
-            f"https://irsa.ipac.caltech.edu/cgi-bin/Gator/nph-query?catalog=ztf_objects_dr22&objstr={ra}+{dec}&radius=5&radunits=arcsec",
+            f"https://irsa.ipac.caltech.edu/cgi-bin/Gator/nph-query?catalog=ztf_objects_dr22&objstr={ra}+{dec}&radius={radius_arcsec}&radunits=arcsec",
         ))
 
     # -- DSS (STScI) ----------------------------------------------------------
     if has_coords:
+        radius_arcmin = radius_arcsec / 60.0
+        # h/w are in arcminutes
         links.append((
             "DSS",
-            f"https://archive.stsci.edu/cgi-bin/dss_search?v=poss2ukstu_red&r={ra}&d={dec}&e=J2000&h=12&w=12&f=gif&c=none",
+            f"https://archive.stsci.edu/cgi-bin/dss_search?v=poss2ukstu_red&r={ra}&d={dec}&e=J2000&h={radius_arcmin * 2}&w={radius_arcmin * 2}&f=gif&c=none",
         ))
 
     # -- DECaLS (Legacy Survey) -----------------------------------------------
@@ -705,9 +710,11 @@ def build_external_lookup_links(
 
     # -- SDSS (SkyServer) -----------------------------------------------------
     if has_coords:
+        # scale is roughly 0.396 sec/pixel for SDSS. Width/height of 500 max.
+        width_pixels = min(1000, max(200, int((radius_arcsec * 2) / 0.396)))
         links.append((
             "SDSS",
-            f"http://skyserver.sdss.org/dr17/en/tools/chart/navi.aspx?ra={ra}&dec={dec}&scale=0.2&width=200&height=200",
+            f"http://skyserver.sdss.org/dr17/en/tools/chart/navi.aspx?ra={ra}&dec={dec}&scale=0.396&width={width_pixels}&height={width_pixels}",
         ))
 
     return links
