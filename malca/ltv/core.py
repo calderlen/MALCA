@@ -52,7 +52,7 @@ from malca.config.config_ltv import (
     LTV_LS_FAP_THRESHOLD,
     LTV_LS_SAMPLES_PER_PEAK,
 )
-from malca.config.config_paths import LCV2_ROOT
+from malca.config.config_paths import LCV2_ROOT, LTV_OUTPUT_DIR
 from malca.config.config_io import PARQUET_OUTPUT_COMPRESSION
 from malca.utils import read_lc_dat2, read_lc_csv, clean_lc
 
@@ -152,7 +152,8 @@ def parse_args() -> Config:
     mag_bin = a.mag_bin
     out = a.output
     if out is None:
-        out = f"LTvar{mag_bin.replace('_','-')}.csv"
+        LTV_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        out = str(LTV_OUTPUT_DIR / f"LTvar{mag_bin.replace('_','-')}.csv")
     output = Path(out)
 
     resume = bool(a.resume or a.overwrite)

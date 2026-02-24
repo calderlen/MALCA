@@ -23,6 +23,7 @@ import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 
+from malca.config.config_paths import LTV_OUTPUT_DIR
 from malca.config.config_ltv import (
     LTV_MIN_SLOPE,
     LTV_MIN_DIFF,
@@ -326,16 +327,23 @@ def run_full_pipeline(
 def add_pipeline_args(parser):
     """Add pipeline arguments to argparse."""
     parser.add_argument(
+        "--mag-bin",
+        type=str,
+        default=None,
+        choices=["12_12.5", "12.5_13", "13_13.5", "13.5_14", "14_14.5", "14.5_15"],
+        help="Magnitude bin (auto-resolves input/output in output/ltv/)",
+    )
+    parser.add_argument(
         "--input",
         type=str,
-        required=True,
-        help="Input CSV/Parquet from ltv.core processing",
+        default=None,
+        help="Input CSV/Parquet from ltv.core (default: output/ltv/LTvar<MAG>.csv)",
     )
     parser.add_argument(
         "--output",
         type=str,
-        required=True,
-        help="Output CSV/Parquet for pipeline results",
+        default=None,
+        help="Output CSV/Parquet for pipeline results (default: output/ltv/LTvar<MAG>_pipeline.csv)",
     )
     parser.add_argument(
         "--min-slope",
@@ -446,6 +454,16 @@ def add_pipeline_args(parser):
 
 def run_pipeline_cli(args):
     """Run pipeline from CLI arguments."""
+    # Resolve input/output from --mag-bin if not given explicitly
+    if args.input is None:
+        if args.mag_bin is None:
+            raise SystemExit("Error: must specify --input or --mag-bin")
+        args.input = str(LTV_OUTPUT_DIR / f"LTvar{args.mag_bin.replace('_', '-')}.csv")
+    if args.output is None:
+        if args.mag_bin is None:
+            raise SystemExit("Error: must specify --output or --mag-bin")
+        args.output = str(LTV_OUTPUT_DIR / f"LTvar{args.mag_bin.replace('_', '-')}_pipeline.csv")
+
     # Load input
     input_path = Path(args.input)
     if input_path.suffix == ".parquet":

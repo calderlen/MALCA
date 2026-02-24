@@ -9,6 +9,7 @@ STARHORSE_DEFAULT_PATH = "input/starhorse/starhorse2021.parquet"
 MIST_GRID_PATH = Path("input/mist/mist_cmd_minimal.csv")
 DEFAULT_CACHE_DIR = Path("~/.cache/malca/catalogs")
 GAIA_CACHE_FILE = Path("output/gaia_cache.parquet")
+LTV_OUTPUT_DIR = Path("output/ltv")
 LCV2_ROOT = Path("/data/poohbah/1/assassin/rowan.90/lcsv2")
 UNTIMELY_API_URL = "https://irsa.ipac.caltech.edu/cgi-bin/Gator/nph-query"
 STARHORSE_TAP_URL = "https://gaia.aip.de/tap"
