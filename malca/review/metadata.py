@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import math
 import numbers
 from decimal import Decimal, InvalidOperation
@@ -194,6 +195,7 @@ REVIEW_METADATA_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("SH log g", "logg50"),
         ("SH [M/H]", "met50"),
         ("SH Mass", "mass50"),
+        ("SH Age (Gyr)", "age50"),
         ("SH A_V", "av50"),
         ("SH A_G", "ag50"),
         ("SH A_BP", "abp50"),
@@ -206,16 +208,27 @@ REVIEW_METADATA_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("2MASS K", "tmass_k"),
         ("unWISE W1", "unwise_w1"),
         ("unWISE W2", "unwise_w2"),
+        ("AllWISE W3", "allwise_w3"),
+        ("AllWISE W4", "allwise_w4"),
+        ("APASS V", "apass_v"),
+        ("APASS B", "apass_b"),
+        ("APASS g'", "apass_g"),
+        ("APASS r'", "apass_r"),
+        ("APASS i'", "apass_i"),
+        ("GALEX FUV", "galex_fuv"),
+        ("GALEX NUV", "galex_nuv"),
         ("H-K", "H_K"),
         ("H-K (dered)", "H_K_dered"),
         ("W1-W2", "W1_W2"),
         ("W1-W2 (dered)", "W1_W2_dered"),
         ("BP-RP (dered)", "bprp0"),
         ("IPHAS H-alpha", "iphas_ha_mag"),
+        ("IPHAS r-Halpha", "iphas_r_ha"),
         ("IPHAS R-I", "iphas_r_i"),
         ("IPHAS H-alpha excess", "iphas_ha_excess"),
         ("unWISE W1 z-score", "unwise_w1_zscore"),
         ("unWISE W2 z-score", "unwise_w2_zscore"),
+        ("unWISE W1 var", "unwise_w1_var"),
     ]),
     ("Phase Folding", [
         ("Period (d)", "phase_period_days"),
@@ -247,6 +260,7 @@ REVIEW_METADATA_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         # -- Extinction --
         ("A_V (3D)", "A_v_3d"),
         ("E(B-V) (3D)", "ebv_3d"),
+        ("Dust sigma", "dust_sigma"),
         ("Dust max dist (kpc)", "dust_max_dist_kpc"),
         # -- Spatial associations --
         ("Population", "population"),
@@ -312,11 +326,22 @@ _DEFAULT_OPEN_GROUPS: set[str] = {
 # Maps a value key to its symmetric error key (displayed as "value ± err").
 _ERROR_KEYS: dict[str, str] = {
     "parallax": "parallax_error",
+    "pmra": "e_PMRA",  # Will need to make sure this is available/renamed if needed
+    "pmdec": "e_PMDEC",
     "tmass_j": "tmass_j_err",
     "tmass_h": "tmass_h_err",
     "tmass_k": "tmass_k_err",
     "unwise_w1": "unwise_w1_err",
     "unwise_w2": "unwise_w2_err",
+    "allwise_w3": "allwise_w3_err",
+    "allwise_w4": "allwise_w4_err",
+    "apass_v": "apass_v_err",
+    "apass_b": "apass_b_err",
+    "apass_g": "apass_g_err",
+    "apass_r": "apass_r_err",
+    "apass_i": "apass_i_err",
+    "galex_fuv": "galex_fuv_err",
+    "galex_nuv": "galex_nuv_err",
 }
 
 # Maps a value key to its (lo_percentile, hi_percentile) keys
@@ -327,6 +352,7 @@ _RANGE_KEYS: dict[str, tuple[str, str]] = {
     "logg50": ("logg16", "logg84"),
     "met50": ("met16", "met84"),
     "mass50": ("mass16", "mass84"),
+    "age50": ("age16", "age84"),
     "av50": ("av16", "av84"),
 }
 
@@ -526,6 +552,22 @@ def _safe_str(val: Any) -> str | None:
     return s if s else None
 
 
+def _jd_to_mpc_iso(jd: float) -> str | None:
+    """Convert JD to ISO format YYYY-MM-DD HH:MM:SS (UTC) for MPChecker."""
+    if not math.isfinite(jd):
+        return None
+    try:
+        # JD -> MJD -> datetime
+        # JD starts at noon, so subtract 0.5 to get to midnight-based MJD?
+        # Standard: MJD = JD - 2400000.5
+        mjd = jd - 2400000.5
+        epoch = datetime(1858, 11, 17, tzinfo=timezone.utc)
+        dt = epoch + timedelta(days=mjd)
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return None
+
+
 def build_external_lookup_links(
     payload: dict[str, Any],
 ) -> list[tuple[str, str]]:
@@ -547,6 +589,7 @@ def build_external_lookup_links(
 
     has_coords = ra is not None and dec is not None
 
+    # --- Aggregators ---
     # -- SIMBAD ---------------------------------------------------------------
     simbad_id = _safe_str(payload.get("simbad_main_id"))
     if simbad_id:
@@ -560,11 +603,11 @@ def build_external_lookup_links(
             f"https://simbad.u-strasbg.fr/simbad/sim-coo?Coord={ra}+{dec}&CooFrame=FK5&CooEpoch=2000&Radius=10&Radius.unit=arcsec",
         ))
 
-    # -- VizieR ---------------------------------------------------------------
+    # -- NED (IPAC) -----------------------------------------------------------
     if has_coords:
         links.append((
-            "VizieR",
-            f"https://vizier.cds.unistra.fr/viz-bin/VizieR-4?-c={ra}+{dec}&-c.rs=10",
+            "NED",
+            f"https://ned.ipac.caltech.edu/cgi-bin/objsearch?search_type=Near+Position+Search&in_csys=Equatorial&in_equinox=J2000.0&lon={ra}d&lat={dec}d&radius=1.0",
         ))
 
     # -- ADS ------------------------------------------------------------------
@@ -579,30 +622,6 @@ def build_external_lookup_links(
             f"https://ui.adsabs.harvard.edu/search/q=pos(%22{ra}+{dec}%22%2C+10s)",
         ))
 
-    # -- ASAS-SN Sky Patrol ---------------------------------------------------
-    if has_coords:
-        links.append((
-            "Sky Patrol",
-            f"https://asas-sn.osu.edu/sky-patrol/coordinate/{ra}/{dec}",
-        ))
-
-    # -- ALeRCE Explorer ------------------------------------------------------
-    alerce_oid = _safe_str(payload.get("alerce_oid"))
-    if alerce_oid:
-        links.append((
-            "ALeRCE",
-            f"https://alerce.online/object/{quote(alerce_oid)}",
-        ))
-
-    # -- Gaia Archive ---------------------------------------------------------
-    gaia_id = _safe_str(payload.get("gaia_id"))
-    if gaia_id:
-        gaia_id_norm = _format_large_integer_like(gaia_id)
-        links.append((
-            "Gaia",
-            f"https://gea.esac.esa.int/archive/#sourceId={gaia_id_norm}",
-        ))
-
     # -- TNS ------------------------------------------------------------------
     tns_name = _safe_str(payload.get("tns_name"))
     if tns_name:
@@ -614,11 +633,81 @@ def build_external_lookup_links(
             f"https://www.wis-tns.org/object/{quote(tns_slug)}",
         ))
 
+    # -- AAVSO VSX ------------------------------------------------------------
+    if has_coords:
+        links.append((
+            "VSX",
+            f"https://www.aavso.org/vsx/index.php?view=results.get&coords={ra}+{dec}&format=d&num=1",
+        ))
+
+    # -- ALeRCE Explorer ------------------------------------------------------
+    alerce_oid = _safe_str(payload.get("alerce_oid"))
+    if alerce_oid:
+        links.append((
+            "ALeRCE",
+            f"https://alerce.online/object/{quote(alerce_oid)}",
+        ))
+
+
+    # --- Catalogs ---
+    # -- VizieR ---------------------------------------------------------------
+    if has_coords:
+        links.append((
+            "VizieR",
+            f"https://vizier.cds.unistra.fr/viz-bin/VizieR-4?-c={ra}+{dec}&-c.rs=10",
+        ))
+
+    # -- MPChecker (MPC) ------------------------------------------------------
+    if has_coords:
+        # Prefer dip/jump event time, then first observation
+        event_time = _safe_float(payload.get("dip_best_t0"))
+        if event_time is None:
+            event_time = _safe_float(payload.get("jump_best_t0"))
+        if event_time is None:
+            event_time = _safe_float(payload.get("jd_first"))
+
+        iso_date = _jd_to_mpc_iso(event_time) if event_time else None
+        if iso_date:
+            links.append((
+                "MPChecker",
+                f"https://minorplanetcenter.net/cgi-bin/checkmp.cgi?ra={ra}&decl={dec}&radius=15&iso={quote(iso_date)}",
+            ))
+
+
+    # --- Visualizers / Surveys ---
+    # -- ASAS-SN (Variable Stars Database) ------------------------------------
+    if has_coords:
+        links.append((
+            "ASAS-SN",
+            f"https://asas-sn.osu.edu/variables?ra={ra}&dec={dec}&radius=1.0",
+        ))
+
     # -- ZTF / IRSA -----------------------------------------------------------
     if has_coords:
         links.append((
             "ZTF",
             f"https://irsa.ipac.caltech.edu/cgi-bin/Gator/nph-query?catalog=ztf_objects_dr22&objstr={ra}+{dec}&radius=5&radunits=arcsec",
+        ))
+
+    # -- DSS (STScI) ----------------------------------------------------------
+    if has_coords:
+        links.append((
+            "DSS",
+            f"https://archive.stsci.edu/cgi-bin/dss_search?v=poss2ukstu_red&r={ra}&d={dec}&e=J2000&h=12&w=12&f=gif&c=none",
+        ))
+
+    # -- DECaLS (Legacy Survey) -----------------------------------------------
+    if has_coords:
+        links.append((
+            "DECaLS",
+            f"https://www.legacysurvey.org/viewer?ra={ra}&dec={dec}&zoom=14&layer=ls-dr10",
+        ))
+
+    # -- SDSS (SkyServer) -----------------------------------------------------
+    if has_coords:
+        links.append((
+            "SDSS",
+            f"http://skyserver.sdss.org/dr17/en/tools/chart/navi.aspx?ra={ra}&dec={dec}&scale=0.2&width=200&height=200",
         ))
 
     return links

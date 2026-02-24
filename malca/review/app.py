@@ -44,6 +44,7 @@ from malca.review.store import (
 from malca.review.metadata import (
     extract_review_metadata_grouped,
     is_group_default_open,
+    build_external_lookup_links,
 )
 from malca.review.keyboard import (
     handle_key_action, HELP_TEXT,
@@ -665,6 +666,95 @@ app.index_string = '''
             color: #d5e3ef !important;
             border-color: #2f4658 !important;
         }
+        .Select-menu-outer {
+            overscroll-behavior: contain;
+            -webkit-overflow-scrolling: touch;
+            /* Fix scroll feel */
+            scrollbar-color: #2f4658 #0f1418;
+            scrollbar-width: thin;
+        }
+        /* Custom scrollbar for Webkit */
+        .Select-menu-outer::-webkit-scrollbar {
+            width: 8px;
+            background-color: #0f1418;
+        }
+        .Select-menu-outer::-webkit-scrollbar-thumb {
+            background-color: #2f4658;
+            border-radius: 4px;
+        }
+        .Select-menu-outer::-webkit-scrollbar-thumb:hover {
+            background-color: #0af;
+        }
+        /* NUCLEAR OPTION: Force text color on EVERYTHING inside the dropdown menu */
+        body .Select-menu-outer,
+        body .Select-menu-outer *,
+        body .Select-menu-outer div,
+        body .Select-menu-outer span,
+        body .Select-menu-outer label,
+        body .Select-menu-outer a,
+        body .Select-menu-outer button,
+        body .Select-menu-outer strong,
+        body .Select-menu-outer b,
+        body .Select-menu-outer i,
+        body .Select-menu-outer em,
+        body .Select-menu-outer small,
+        body .Select-option,
+        body .VirtualizedSelectOption,
+        body .Select * {
+            color: #dce8f2 !important;
+            opacity: 1 !important;
+        }
+
+        /* Force dividers (borders) between options */
+        body .Select-option,
+        body .VirtualizedSelectOption,
+        body [class*="Select-option"] {
+            border-bottom: 1px solid #2f4658 !important;
+            padding: 8px 10px !important; /* Ensure enough space for divider to be seen */
+        }
+        
+        /* Last child should not have a border usually, but for clarity let's keep it or remove it */
+        body .Select-option:last-child,
+        body .VirtualizedSelectOption:last-child {
+            border-bottom: none !important;
+        }
+
+        /* Ensure hover state stays readable and distinct */
+        body .Select-option.is-focused,
+        body .VirtualizedSelectOption.is-focused,
+        body .Select-option:hover,
+        body .VirtualizedSelectOption:hover {
+            background-color: #1d2d3a !important;
+            color: #ffffff !important;
+            cursor: pointer !important;
+        }
+
+        /* Specific fix for VirtualizedSelectOption "Select All" helper text container */
+        .VirtualizedSelectOption {
+             display: flex !important;
+             align-items: center !important;
+        }
+
+        /* Force any SVG icons (checkmarks) to be visible */
+        .Select-menu-outer svg,
+        .Select-menu-outer path {
+            fill: #dce8f2 !important;
+            stroke: #dce8f2 !important;
+        }
+
+        /* Force high specificity on the option text itself */
+        .VirtualizedSelectOption, .Select-option {
+            color: #dce8f2 !important;
+            text-shadow: none !important;
+        }
+        
+        /* Pseudo-elements just in case */
+        body .Select-menu-outer *::before,
+        body .Select-menu-outer *::after,
+        body .Select *::before,
+        body .Select *::after {
+            color: #dce8f2 !important;
+        }
         .Select-placeholder, .Select-value-label {
             color: #9db4c7 !important;
             font-size: 10px !important;
@@ -690,26 +780,45 @@ app.index_string = '''
         label, .form-label {
             color: #aaa !important;
         }
-        /* Dash dropdown specific */
-        .dash-dropdown .Select-value-label,
-        .dash-dropdown .Select-input > input {
-            color: #e0e0e0 !important;
-        }
-        .dash-dropdown .Select-control {
+        /* DASH/REACT-SELECT COMPONENT OVERRIDES - THE FINAL HAMMER */
+        
+        /* 1. The Menu Container */
+        .Select-menu-outer {
             background-color: #0f1418 !important;
             border-color: #2f4658 !important;
         }
-        .dash-dropdown .Select-menu-outer {
-            background-color: #0f1418 !important;
-            border-color: #2f4658 !important;
-        }
-        .dash-dropdown .Select-option {
+
+        /* 2. The Options (including Select All) */
+        .VirtualizedSelectOption, 
+        .Select-option,
+        .dash-dropdown-option,
+        div[role="option"] {
             background-color: #10171d !important;
             color: #dce8f2 !important;
+            border-bottom: 1px solid #2f4658 !important; /* Visible divider */
+            opacity: 1 !important;
         }
-        .dash-dropdown .Select-option:hover {
+
+        /* 3. Hover/Focused State */
+        .VirtualizedSelectOption.is-focused,
+        .Select-option.is-focused,
+        .dash-dropdown-option:hover,
+        .VirtualizedSelectOption:hover {
             background-color: #1d2d3a !important;
-            color: #fff !important;
+            color: #ffffff !important;
+            cursor: pointer !important;
+        }
+
+        /* 4. "Select All" / "Deselect All" often lives in a special header or div at the top */
+        .Select-menu-outer > div:first-child,
+        .Select-menu-outer > div:nth-child(1) {
+             color: #dce8f2 !important;
+        }
+        
+        /* 5. Force text color on children (labels, spans) inside options */
+        .VirtualizedSelectOption *,
+        .Select-option * {
+            color: inherit !important;
         }
         .dash-dropdown {
             background-color: #0f1418 !important;
@@ -754,6 +863,7 @@ app.index_string = '''
             font-size: 10px !important;
             padding: 3px 8px !important;
             min-height: 22px !important;
+            border-bottom: 1px solid #2f4658 !important;
         }
         .dash-dropdown-option:hover,
         .dash-options-list-option:hover,
@@ -1447,10 +1557,48 @@ def _render_vetting_banner(payload: dict | None) -> html.Div:
         'border-radius': '0 0 4px 4px',
     }
 
-    return html.Div([
+    # External links toolbar
+    links = build_external_lookup_links(payload)
+    links_row = None
+    if links:
+        link_els = []
+        for label, url in links:
+            link_els.append(html.A(
+                label,
+                href=url,
+                target='_blank',
+                rel='noopener noreferrer',
+                style={
+                    'display': 'inline-block',
+                    'padding': '2px 6px',
+                    'background': '#222',
+                    'border': '1px solid #444',
+                    'border-radius': '3px',
+                    'color': '#8af',
+                    'text-decoration': 'none',
+                    'font-size': '10px',
+                    'white-space': 'nowrap',
+                }
+            ))
+
+        # Attach links seamlessy to the bottom of the grid
+        grid_style['border-radius'] = '0'
+        links_row = html.Div(link_els, style={
+            'display': 'flex', 'flex-wrap': 'wrap', 'gap': '4px',
+            'padding': '6px',
+            'background': '#161616',
+            'border': '1px solid #333', 'border-top': 'none',
+            'border-radius': '0 0 4px 4px',
+        })
+
+    children = [
         html.Div(header_text, style=header_style),
         html.Div(cards, style=grid_style),
-    ], style={'margin': '4px 0'})
+    ]
+    if links_row:
+        children.append(links_row)
+
+    return html.Div(children, style={'margin': '4px 0'})
 
 
 def _keyboard_key(key_value: str | None) -> str:
@@ -1824,6 +1972,8 @@ def _bool_mode_filter(label: str, component_id: str):
             value='Any',
             clearable=False,
             style={'margin-bottom': '4px', 'font-size': '11px'},
+            persistence=True,
+            persistence_type='local',
         ),
     ]
 
@@ -1840,9 +1990,11 @@ def _num_range_filter(col: str):
         html.Label(f'{col}:'),
         html.Div([
             dcc.Input(id=f'min-{cid}', type='number', placeholder='min',
-                      style={'width': '48%', 'font-size': '11px', 'margin-right': '4%'}),
+                      style={'width': '48%', 'font-size': '11px', 'margin-right': '4%'},
+                      persistence=True, persistence_type='local'),
             dcc.Input(id=f'max-{cid}', type='number', placeholder='max',
-                      style={'width': '48%', 'font-size': '11px'}),
+                      style={'width': '48%', 'font-size': '11px'},
+                      persistence=True, persistence_type='local'),
         ], style={'display': 'flex', 'margin-bottom': '4px'}),
     ])
 
@@ -1853,7 +2005,8 @@ def _text_filter(col: str):
     return html.Div([
         html.Label(f'{col}:'),
         dcc.Input(id=f'filter-{cid}', type='text', placeholder='Any',
-                  style=_inp_style),
+                  style=_inp_style,
+                  persistence=True, persistence_type='local'),
     ])
 
 
@@ -1874,6 +2027,8 @@ def _select_filter(col: str):
             style={'margin-bottom': '4px', 'font-size': '11px'},
             maxHeight=400,
             optionHeight=28,
+            persistence=True,
+            persistence_type='local',
         ),
     ])
 
@@ -1906,11 +2061,19 @@ def _make_filter_group(name: str, items: list, *, default_open: bool = False):
 _SIDEBAR_GROUPS = [
     ('Vetting', [
         ('bool', 'vetting_likely_known'),
+        ('num', 'pm_cluster_offset_sigma'),
         ('select', 'vsx_class'),
         ('select', 'asassn_var_type'),
         ('select', 'gaia_var_class'),
         ('select', 'simbad_otype'),
         ('select', 'ztf_var_type'),
+    ]),
+    ('External Coverage', [
+        ('num', 'neowise_n_epochs'),
+        ('num', 'atlas_n_det_cyan'),
+        ('num', 'atlas_n_det_orange'),
+        ('num', 'gaia_epoch_n_obs'),
+        ('num', 'xray_flux'),
     ]),
     ('General Flags', [
         ('bool', 'periodic_flag'),
@@ -1921,6 +2084,7 @@ _SIDEBAR_GROUPS = [
         ('bool', 'lsp_is_alias'),
         ('bool', 'lsp_is_significant'),
         ('num', 'periodicity_score'),
+        ('num', 'phase_quality_score'),
         ('num', 'lsp_bootstrap_sig'),
         ('num', 'lsp_power'),
         ('num', 'lsp_period'),
@@ -2037,11 +2201,18 @@ _SIDEBAR_GROUPS = [
         ('num', 'mass50'),
         ('num', 'banyan_field_prob'),
     ]),
-    ('Period Consensus', [
+    ('Associations', [
         ('text', 'sfr_name'),
         ('num', 'sfr_sep_arcmin'),
         ('text', 'cluster_name'),
         ('num', 'cluster_membership_prob'),
+    ]),
+    ('Period Consensus', [
+        ('num', 'period_n_sources'),
+        ('num', 'period_consensus_days'),
+        ('num', 'period_consensus_support'),
+        ('bool', 'period_consensus_agree'),
+        ('bool', 'period_conflict_flag'),
     ]),
     ('Light Curve Basics', [
         ('text', 'baseline_source'),
@@ -2136,13 +2307,17 @@ def create_layout():
                 id='filter-unreviewed',
                 options=[{'label': ' Only unreviewed', 'value': 'yes'}],
                 value=['yes'],
-                style={'margin-bottom': '3px'}
+                style={'margin-bottom': '3px'},
+                persistence=True,
+                persistence_type='local',
             ),
             dcc.Checklist(
                 id='filter-failed',
                 options=[{'label': ' Require failed_any=False', 'value': 'yes'}],
                 value=['yes'],
-                style={'margin-bottom': '6px'}
+                style={'margin-bottom': '6px'},
+                persistence=True,
+                persistence_type='local',
             ),
 
             # -- All filter groups (auto-generated from _SIDEBAR_GROUPS) --
@@ -2165,13 +2340,17 @@ def create_layout():
                 value=['candidate_id'],
                 multi=True,
                 clearable=False,
-                style={'margin-bottom': '4px', 'font-size': '11px'}
+                style={'margin-bottom': '4px', 'font-size': '11px'},
+                persistence=True,
+                persistence_type='local',
             ),
             dcc.Checklist(
                 id='sort-desc',
                 options=[{'label': ' Descending', 'value': 'yes'}],
                 value=[],
-                style={'margin-bottom': '6px'}
+                style={'margin-bottom': '6px'},
+                persistence=True,
+                persistence_type='local',
             ),
 
             html.Button('Refresh Queue [Shift+R]', id='refresh-btn', n_clicks=0,
@@ -2191,43 +2370,53 @@ def create_layout():
                 value=[],
                 className='sidebar-camera-checklist',
                 style={'margin-bottom': '6px'},
+                persistence=True,
+                persistence_type='local',
             ),
 
             html.Hr(),
 
             html.Div('Import', className='section-title'),
             dcc.Input(id='import-path', placeholder='Candidates file path', type='text',
-                     style=_inp_style),
+                     style=_inp_style,
+                     persistence=True, persistence_type='local'),
 
             html.Label('Characterize on import:'),
             dcc.Checklist(
                 id='characterize-on-import',
                 options=[{'label': ' Enable', 'value': 'yes'}],
                 value=['yes'],
-                style={'margin-bottom': '4px'}
+                style={'margin-bottom': '4px'},
+                persistence=True, persistence_type='local',
             ),
 
             dcc.Input(id='characterize-crossmatch', placeholder='Crossmatch CSV', type='text',
-                     value=str(VSX_CROSSMATCH_PATH), style=_inp_style),
+                     value=str(VSX_CROSSMATCH_PATH), style=_inp_style,
+                     persistence=True, persistence_type='local'),
             dcc.Input(id='characterize-gaia-cache', placeholder='Gaia cache', type='text',
-                     value=str(GAIA_CACHE_FILE), style=_inp_style),
+                     value=str(GAIA_CACHE_FILE), style=_inp_style,
+                     persistence=True, persistence_type='local'),
             dcc.Input(id='characterize-chunk-size', placeholder='Chunk size', type='number',
-                     value=GAIA_CHUNK_SIZE, style=_inp_style),
+                     value=GAIA_CHUNK_SIZE, style=_inp_style,
+                     persistence=True, persistence_type='local'),
             dcc.Checklist(
                 id='characterize-dust',
                 options=[{'label': ' Enable dustmaps3d', 'value': 'yes'}],
                 value=['yes'],
-                style={'margin-bottom': '4px'}
+                style={'margin-bottom': '4px'},
+                persistence=True, persistence_type='local',
             ),
             dcc.Input(id='characterize-starhorse', placeholder='StarHorse (tap or path)', type='text',
-                     value='tap', style=_inp_style),
+                     value='tap', style=_inp_style,
+                     persistence=True, persistence_type='local'),
 
             html.Label('Vet on import:'),
             dcc.Checklist(
                 id='vet-on-import',
                 options=[{'label': ' Enable', 'value': 'yes'}],
                 value=['yes'],
-                style={'margin-bottom': '4px'}
+                style={'margin-bottom': '4px'},
+                persistence=True, persistence_type='local',
             ),
 
             html.Button('Import', id='import-btn', n_clicks=0, className='action-btn',

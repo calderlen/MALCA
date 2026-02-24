@@ -98,6 +98,7 @@ from malca.config.config_characterize import (
     UNWISE_WORKERS, UNWISE_CHECKPOINT_EVERY, UNWISE_MAX_RETRIES,
     SFR_MAX_DIST_KPC, SFR_DIST_TOLERANCE_FRACTION, SFR_CATALOG,
     BANYAN_MIN_ASSOC_PROB, IPHAS_HA_EXCESS_THRESHOLD,
+    GALEX_MAX_SEP_ARCSEC, APASS_MAX_SEP_ARCSEC, ALLWISE_MAX_SEP_ARCSEC,
 )
 from malca.config.config_paths import (
     VSX_CROSSMATCH_PATH, STARHORSE_DEFAULT_PATH, STARHORSE_TAP_URL,
@@ -757,6 +758,187 @@ def crossmatch_iphas(df: pd.DataFrame, max_sep_arcsec: float = IPHAS_MAX_SEP_ARC
 
 
 # =============================================================================
+# APASS (Optical), GALEX (UV), and AllWISE (Mid-IR) CROSSMATCH
+# =============================================================================
+
+def crossmatch_apass(df: pd.DataFrame, max_sep_arcsec: float = APASS_MAX_SEP_ARCSEC) -> pd.DataFrame:
+    """
+    Crossmatch to APASS DR9 (Vizier II/336/apass9).
+    Returns B, V, g', r', i' magnitudes.
+    """
+    if df.empty:
+        return df
+    df = df.copy()
+    
+    # Initialize output columns
+    for col in ["apass_v", "apass_v_err", "apass_b", "apass_b_err", 
+                "apass_g", "apass_g_err", "apass_r", "apass_r_err", "apass_i", "apass_i_err"]:
+        df[col] = np.nan
+        
+    valid_mask = df['ra'].notna() & df['dec'].notna()
+    if not valid_mask.any():
+        return df
+        
+    source_table = Table()
+    source_table['_idx'] = np.where(valid_mask)[0]
+    source_table['ra'] = df.loc[valid_mask, 'ra'].values
+    source_table['dec'] = df.loc[valid_mask, 'dec'].values
+    
+    print(f"Running APASS DR9 XMatch for {len(source_table)} sources...")
+    try:
+        result = XMatch.query(
+            cat1=source_table,
+            cat2='vizier:II/336/apass9',
+            max_distance=max_sep_arcsec * u.arcsec,
+            colRA1='ra', colDec1='dec',
+            colRA2='RAJ2000', colDec2='DEJ2000'
+        )
+        if result is not None and len(result) > 0:
+            result_df = result.to_pandas()
+            if 'angDist' in result_df.columns:
+                result_df = result_df.sort_values('angDist').drop_duplicates(subset='_idx', keep='first')
+            else:
+                result_df = result_df.drop_duplicates(subset='_idx', keep='first')
+                
+            # Map Vizier columns to internal names
+            # APASS DR9 cols: Vmag, e_Vmag, Bmag, e_Bmag, g_mag, e_g_mag, r_mag, e_r_mag, i_mag, e_i_mag
+            col_map = {
+                "Vmag": "apass_v", "e_Vmag": "apass_v_err",
+                "Bmag": "apass_b", "e_Bmag": "apass_b_err",
+                "g_mag": "apass_g", "e_g_mag": "apass_g_err",
+                "r_mag": "apass_r", "e_r_mag": "apass_r_err",
+                "i_mag": "apass_i", "e_i_mag": "apass_i_err"
+            }
+            
+            for _, row in result_df.iterrows():
+                idx = int(row['_idx'])
+                for viz_col, my_col in col_map.items():
+                    val = row.get(viz_col, np.nan)
+                    if pd.notna(val):
+                        df.at[df.index[idx], my_col] = float(val)
+            
+            print(f"APASS: {len(result_df)} matches found")
+    except Exception as e:
+        print(f"APASS XMatch error: {e}")
+        
+    return df
+
+
+def crossmatch_galex(df: pd.DataFrame, max_sep_arcsec: float = GALEX_MAX_SEP_ARCSEC) -> pd.DataFrame:
+    """
+    Crossmatch to GALEX AIS (Vizier II/312/ais).
+    Returns FUV and NUV magnitudes.
+    """
+    if df.empty:
+        return df
+    df = df.copy()
+    
+    # Initialize output columns
+    for col in ["galex_fuv", "galex_fuv_err", "galex_nuv", "galex_nuv_err"]:
+        df[col] = np.nan
+        
+    valid_mask = df['ra'].notna() & df['dec'].notna()
+    if not valid_mask.any():
+        return df
+        
+    source_table = Table()
+    source_table['_idx'] = np.where(valid_mask)[0]
+    source_table['ra'] = df.loc[valid_mask, 'ra'].values
+    source_table['dec'] = df.loc[valid_mask, 'dec'].values
+    
+    print(f"Running GALEX AIS XMatch for {len(source_table)} sources...")
+    try:
+        result = XMatch.query(
+            cat1=source_table,
+            cat2='vizier:II/312/ais',
+            max_distance=max_sep_arcsec * u.arcsec,
+            colRA1='ra', colDec1='dec',
+            colRA2='RAJ2000', colDec2='DEJ2000'
+        )
+        if result is not None and len(result) > 0:
+            result_df = result.to_pandas()
+            if 'angDist' in result_df.columns:
+                result_df = result_df.sort_values('angDist').drop_duplicates(subset='_idx', keep='first')
+            else:
+                result_df = result_df.drop_duplicates(subset='_idx', keep='first')
+                
+            col_map = {
+                "FUVmag": "galex_fuv", "e_FUVmag": "galex_fuv_err",
+                "NUVmag": "galex_nuv", "e_NUVmag": "galex_nuv_err"
+            }
+            
+            for _, row in result_df.iterrows():
+                idx = int(row['_idx'])
+                for viz_col, my_col in col_map.items():
+                    val = row.get(viz_col, np.nan)
+                    if pd.notna(val):
+                        df.at[df.index[idx], my_col] = float(val)
+            
+            print(f"GALEX: {len(result_df)} matches found")
+    except Exception as e:
+        print(f"GALEX XMatch error: {e}")
+        
+    return df
+
+
+def crossmatch_allwise_w3w4(df: pd.DataFrame, max_sep_arcsec: float = ALLWISE_MAX_SEP_ARCSEC) -> pd.DataFrame:
+    """
+    Crossmatch to AllWISE (Vizier II/328/allwise) for W3 and W4 magnitudes.
+    (W1 and W2 are usually taken from unWISE or catwise, but AllWISE provides W3/W4).
+    """
+    if df.empty:
+        return df
+    df = df.copy()
+    
+    # Initialize output columns
+    for col in ["allwise_w3", "allwise_w3_err", "allwise_w4", "allwise_w4_err"]:
+        df[col] = np.nan
+        
+    valid_mask = df['ra'].notna() & df['dec'].notna()
+    if not valid_mask.any():
+        return df
+        
+    source_table = Table()
+    source_table['_idx'] = np.where(valid_mask)[0]
+    source_table['ra'] = df.loc[valid_mask, 'ra'].values
+    source_table['dec'] = df.loc[valid_mask, 'dec'].values
+    
+    print(f"Running AllWISE XMatch (W3/W4) for {len(source_table)} sources...")
+    try:
+        result = XMatch.query(
+            cat1=source_table,
+            cat2='vizier:II/328/allwise',
+            max_distance=max_sep_arcsec * u.arcsec,
+            colRA1='ra', colDec1='dec',
+            colRA2='RAJ2000', colDec2='DEJ2000'
+        )
+        if result is not None and len(result) > 0:
+            result_df = result.to_pandas()
+            if 'angDist' in result_df.columns:
+                result_df = result_df.sort_values('angDist').drop_duplicates(subset='_idx', keep='first')
+            else:
+                result_df = result_df.drop_duplicates(subset='_idx', keep='first')
+                
+            col_map = {
+                "W3mag": "allwise_w3", "e_W3mag": "allwise_w3_err",
+                "W4mag": "allwise_w4", "e_W4mag": "allwise_w4_err"
+            }
+            
+            for _, row in result_df.iterrows():
+                idx = int(row['_idx'])
+                for viz_col, my_col in col_map.items():
+                    val = row.get(viz_col, np.nan)
+                    if pd.notna(val):
+                        df.at[df.index[idx], my_col] = float(val)
+            
+            print(f"AllWISE: {len(result_df)} matches found")
+    except Exception as e:
+        print(f"AllWISE XMatch error: {e}")
+        
+    return df
+
+
+# =============================================================================
 # STAR-FORMING REGION PROXIMITY (Prisinzano+2022)
 # =============================================================================
 
@@ -1290,6 +1472,9 @@ def characterize_candidates_df(
     run_sfr: bool = True,
     run_clusters: bool = True,
     run_unwise: bool = True,
+    run_apass: bool = True,
+    run_galex: bool = True,
+    run_allwise: bool = True,
     unwise_workers: int = UNWISE_WORKERS,
     unwise_checkpoint_every: int = UNWISE_CHECKPOINT_EVERY,
     checkpoint_path: Path | None = None,
@@ -1305,7 +1490,8 @@ def characterize_candidates_df(
         try:
             df_char = pd.read_parquet(checkpoint_path)
             completed = [m for m in ["population", "starhorse", "dust", "yso",
-                                      "banyan", "iphas", "sfr", "clusters", "unwise"]
+                                      "banyan", "iphas", "sfr", "clusters", "unwise",
+                                      "apass", "galex", "allwise"]
                          if _module_completed(df_char, m)]
             print(f"Loaded characterization checkpoint ({len(df_char)} rows)")
             if completed:
@@ -1511,7 +1697,34 @@ def characterize_candidates_df(
                 df_char = _set_module_state(df_char, "yso", "error", msg)
         else:
             print("Warning: IR photometry columns not found for YSO classification")
-            df_char = _set_module_state(df_char, "yso", "skipped", "")
+            df_char = _set_module_state(df_char, "yso", "skipped", "missing IR photometry")
+        if checkpoint_path:
+            _save_char_checkpoint(df_char, checkpoint_path)
+
+    # Run new crossmatches
+    if not _module_completed(df_char, "apass"):
+        df_char = _run_optional_module(
+            df_char, module="apass", enabled=run_apass,
+            description="Running APASS DR9 crossmatch...",
+            func=crossmatch_apass
+        )
+        if checkpoint_path: _save_char_checkpoint(df_char, checkpoint_path)
+
+    if not _module_completed(df_char, "galex"):
+        df_char = _run_optional_module(
+            df_char, module="galex", enabled=run_galex,
+            description="Running GALEX AIS crossmatch...",
+            func=crossmatch_galex
+        )
+        if checkpoint_path: _save_char_checkpoint(df_char, checkpoint_path)
+
+    if not _module_completed(df_char, "allwise"):
+        df_char = _run_optional_module(
+            df_char, module="allwise", enabled=run_allwise,
+            description="Running AllWISE (W3/W4) crossmatch...",
+            func=crossmatch_allwise_w3w4
+        )
+        if checkpoint_path: _save_char_checkpoint(df_char, checkpoint_path)
 
     if not _module_completed(df_char, "banyan"):
         df_char = _run_optional_module(

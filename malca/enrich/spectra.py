@@ -11,10 +11,39 @@ from malca.config.config_characterize import SPECTRA_RADIUS_ARCSEC, SPECTRA_CHUN
 
 
 DEFAULT_SPECTRA_CATALOGS: dict[str, str] = {
-    "sdss_dr16_spec": "V/154/sdss16",
-    "lamost": "V/164/dr8",
+    "sdss_dr17_spec": "V/156/dr17",
+    "lamost_dr8": "V/164/dr8",
+    "galah_dr3": "III/283/galah_dr3",
     "rave_dr5": "III/279/rave_dr5",
 }
+
+
+def _generate_link(row: pd.Series) -> str | None:
+    """Generate a direct URL to the spectrum based on catalog metadata."""
+    survey = str(row.get("survey", "")).lower()
+
+    # SDSS DR17 (VizieR V/156/dr17 usually has 'SpObjID')
+    if "sdss" in survey:
+        sid = row.get("SpObjID") or row.get("SpecObjID")
+        if sid:
+            # Link to SDSS Explorer using the spectral ID (sid)
+            return f"http://skyserver.sdss.org/dr17/en/tools/explore/Summary.aspx?sid={sid}"
+
+    # LAMOST DR8 (VizieR V/164/dr8 usually has 'ObsID')
+    if "lamost" in survey:
+        obsid = row.get("ObsID")
+        if obsid:
+            return f"http://dr8.lamost.org/v2/spectrum/view?obsid={obsid}"
+
+    # GALAH DR3 (VizieR III/283/galah_dr3 has 'sobject_id')
+    if "galah" in survey:
+        # GALAH Data Central doesn't have a simple public GET link for a spectrum view,
+        # but we can link to the Data Central search.
+        sobj = row.get("sobject_id")
+        if sobj:
+            return f"https://cloud.datacentral.org.au/teamdata/GALAH/public/GALAH_DR3/spectra/{sobj}.fits"
+
+    return None
 
 
 def run_spectra_availability(
@@ -92,7 +121,10 @@ def run_spectra_availability(
     spectra_long = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
     if not spectra_long.empty:
         spectra_long["candidate_id"] = spectra_long["candidate_id"].astype(str)
-        keep_cols = [c for c in ["candidate_id", "survey", "catalog", "sep_arcsec"] if c in spectra_long.columns]
+        # Generate links before filtering columns
+        spectra_long["link"] = spectra_long.apply(_generate_link, axis=1)
+
+        keep_cols = [c for c in ["candidate_id", "survey", "catalog", "sep_arcsec", "link"] if c in spectra_long.columns]
         keep_cols += [c for c in spectra_long.columns if c not in keep_cols]
         spectra_long = spectra_long[keep_cols]
 
@@ -108,10 +140,20 @@ def run_spectra_availability(
     else:
         by_id = spectra_long.groupby("candidate_id")
         sources = by_id["survey"].apply(lambda s: ",".join(sorted({str(x) for x in s.dropna()}))).rename("spectrum_sources")
+        
+        def _agg_links(group):
+            # Collect unique non-empty links
+            links = sorted({str(x) for x in group["link"].dropna() if x})
+            return ",".join(links)
+
+        links_agg = by_id.apply(_agg_links).rename("spectrum_links")
+
         summary = summary.merge(sources, on="candidate_id", how="left")
+        summary = summary.merge(links_agg, on="candidate_id", how="left")
+        
         summary["spectrum_sources"] = summary["spectrum_sources"].fillna("")
+        summary["spectrum_links"] = summary["spectrum_links"].fillna("")
         summary["has_spectrum"] = summary["spectrum_sources"].str.len() > 0
-        summary["spectrum_links"] = ""
 
     # Save checkpoint before final output
     if checkpoint_path and not spectra_long.empty:
