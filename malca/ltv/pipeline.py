@@ -41,7 +41,6 @@ from malca.ltv.filter import (
     filter_max_diff_threshold,
     filter_south_pole,
     filter_high_proper_motion,
-    filter_bright_star_artifacts,
 )
 from malca.ltv.crossmatch import (
     crossmatch_all_catalogs,

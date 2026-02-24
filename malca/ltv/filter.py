@@ -41,11 +41,7 @@ from malca.config.config_ltv import (
     LTV_GAIA_CHUNK_SIZE,
     LTV_CROSSMATCH_CHUNK_SIZE,
     LTV_WORKERS,
-    LTV_BRIGHT_STAR_COEFF,
-    LTV_BRIGHT_STAR_MAG_OFFSET,
-    LTV_BRIGHT_STAR_BASE_ARCSEC,
-    LTV_BRIGHT_STAR_MAX_ARCSEC,
-    LTV_BRIGHT_MAG_LIMIT,
+
     LTV_MIN_OVERLAP_DAYS,
     LTV_MIN_OVERLAP_FRACTION,
     LTV_CROWDING_SEARCH_RADIUS_ARCSEC,
@@ -416,89 +412,6 @@ def filter_high_proper_motion(
     return df_out
 
 
-# =============================================================================
-# BRIGHT STAR ARTIFACT FILTER (batch)
-# =============================================================================
-
-def query_nearby_bright_stars_batch(
-    df: pd.DataFrame,
-    *,
-    ra_column: str = "ra_deg",
-    dec_column: str = "dec_deg",
-    max_search_radius_deg: float = 1.0,
-    bright_mag_limit: float = LTV_BRIGHT_MAG_LIMIT,
-    chunk_size: int = LTV_CROSSMATCH_CHUNK_SIZE,
-    n_workers: int = LTV_WORKERS,
-    verbose: bool = False,
-) -> pd.DataFrame:
-    """
-    Batch query Gaia DR3 for nearby bright stars (g < bright_mag_limit).
-    Uses TAP upload for efficient server-side crossmatch.
-    """
-    if ra_column not in df.columns or dec_column not in df.columns:
-        if verbose:
-            print("Warning: RA/Dec columns not found for bright star query")
-        return df
-    
-    df = df.copy()
-    df["nearby_bright_dist_arcsec"] = np.nan
-    df["nearby_bright_mag"] = np.nan
-    
-    valid_mask = df[ra_column].notna() & df[dec_column].notna()
-    
-    if not valid_mask.any():
-        return df
-    
-    coords_df = pd.DataFrame({
-        "_idx": df.index[valid_mask],
-        "ra": df.loc[valid_mask, ra_column].values,
-        "dec": df.loc[valid_mask, dec_column].values,
-    })
-    
-    if verbose:
-        print(f"Querying bright stars near {len(coords_df)} sources...")
-    
-    result = batch_gaia_cone_query(
-        coords_df,
-        select_cols="g.phot_g_mean_mag",
-        extra_where=f"WHERE g.phot_g_mean_mag < {bright_mag_limit}",
-        match_radius_arcsec=max_search_radius_deg * 3600.0,
-        chunk_size=chunk_size,
-        n_workers=n_workers,
-        verbose=verbose,
-    )
-    
-    if result.empty:
-        return df
-    
-    # Keep only closest bright star per source
-    result = result.sort_values("sep_arcsec").drop_duplicates(subset="_idx", keep="first")
-    
-    for _, row in result.iterrows():
-        idx = int(row["_idx"])
-        if idx in df.index:
-            df.loc[idx, "nearby_bright_dist_arcsec"] = row["sep_arcsec"]
-            df.loc[idx, "nearby_bright_mag"] = row["phot_g_mean_mag"]
-    
-    if verbose:
-        n_with_bright = df["nearby_bright_dist_arcsec"].notna().sum()
-        print(f"[query_nearby_bright_stars_batch] {n_with_bright}/{len(df)} have nearby bright stars")
-    
-    return df
-
-
-def bright_star_distance_curve(mag: np.ndarray) -> np.ndarray:
-    """
-    Empirical curve defining minimum acceptable distance from bright stars.
-
-    Paper formula (PK25 / continued search):
-      R > 0.2 * exp(12.5 - g) + 70, capped at 3600 arcsec.
-    """
-    mag = np.asarray(mag, dtype=float)
-    dist = LTV_BRIGHT_STAR_COEFF * np.exp(LTV_BRIGHT_STAR_MAG_OFFSET - mag) + LTV_BRIGHT_STAR_BASE_ARCSEC
-    return np.clip(dist, 0.0, LTV_BRIGHT_STAR_MAX_ARCSEC)
-
-
 def filter_vg_overlap(
     df: pd.DataFrame,
     *,
@@ -540,46 +453,6 @@ def filter_vg_overlap(
     return df_out
 
 
-def filter_bright_star_artifacts(
-    df: pd.DataFrame,
-    *,
-    query_gaia: bool = True,
-    chunk_size: int = LTV_CROSSMATCH_CHUNK_SIZE,
-    n_workers: int = LTV_WORKERS,
-    verbose: bool = False,
-    log_csv: str | Path | None = None,
-) -> pd.DataFrame:
-    """
-    Remove sources that may be artifacts from nearby bright stars.
-    Uses batch Gaia TAP queries for efficiency.
-    """
-    n0 = len(df)
-    
-    if "nearby_bright_dist_arcsec" not in df.columns and query_gaia:
-        df = query_nearby_bright_stars_batch(
-            df,
-            chunk_size=chunk_size,
-            n_workers=n_workers,
-            verbose=verbose,
-        )
-    
-    if "nearby_bright_dist_arcsec" not in df.columns:
-        if verbose:
-            print("Warning: 'nearby_bright_dist_arcsec' not found, skipping filter")
-        return df
-    
-    dist = df["nearby_bright_dist_arcsec"].values
-    mag = df["nearby_bright_mag"].values
-    min_dist = bright_star_distance_curve(mag)
-    
-    mask = (dist >= min_dist) | np.isnan(dist)
-    df_out = df[mask].reset_index(drop=True)
-    
-    if verbose:
-        print(f"[filter_bright_star_artifacts] {n0} → {len(df_out)} (removed {n0 - len(df_out)})")
-    
-    log_rejections(df, df_out, "filter_bright_star_artifacts", log_csv)
-    return df_out
 
 
 # =============================================================================
@@ -1026,14 +899,6 @@ def apply_all_filters(
         print("Phase 2: Gaia TAP queries (batch)...")
 
     # Gaia queries only on reduced dataset
-    df = filter_bright_star_artifacts(
-        df,
-        query_gaia=query_gaia,
-        chunk_size=chunk_size,
-        n_workers=n_workers,
-        verbose=verbose,
-        log_csv=log_csv,
-    )
     df = filter_high_proper_motion(
         df,
         max_pm=max_pm,

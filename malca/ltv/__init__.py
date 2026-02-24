@@ -40,7 +40,6 @@ from malca.ltv.filter import (
     filter_eclipsing_binary_signature,
     filter_crowding,
     filter_high_proper_motion,
-    filter_bright_star_artifacts,
     filter_neighbor_high_pm,
     apply_all_filters,
 )
@@ -114,7 +113,6 @@ __all__ = [
     "filter_eclipsing_binary_signature",
     "filter_crowding",
     "filter_high_proper_motion",
-    "filter_bright_star_artifacts",
     "filter_neighbor_high_pm",
     "apply_all_filters",
     # Crossmatch (API only — Gaia DR3 and VSX use local catalog)
