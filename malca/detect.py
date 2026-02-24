@@ -347,11 +347,13 @@ def import_bundle_zip(bundle_zip: Path, out_dir: Path, *, show_progress: bool = 
             zf.extractall(out_dir)
 
 
-def _collect_bundle_lightcurve_files(out_dir: Path, mag_bin_tag: str | None = None) -> list[tuple[Path, str]]:
+def _collect_bundle_lightcurve_files(out_dir: Path, mag_bin_tag: str | None = None, include_all: bool = False) -> list[tuple[Path, str]]:
     """Collect candidate .dat2/.raw2 files to include in bundle assets.
 
-    Source files are read directly from their original location and are never
-    modified in place.
+    By default only includes light curves for candidates that passed all
+    post-filters (failed_any=False). Pass include_all=True to bundle every
+    candidate regardless of filter outcome. Source files are read directly from
+    their original location and are never modified in place.
     """
     if mag_bin_tag:
         filtered_candidates = out_dir / "results" / f"lc_events_filtered_{mag_bin_tag}.parquet"
@@ -368,6 +370,11 @@ def _collect_bundle_lightcurve_files(out_dir: Path, mag_bin_tag: str | None = No
 
     if "path" not in df_candidates.columns:
         return []
+
+    if not include_all and "failed_any" in df_candidates.columns:
+        n_before = len(df_candidates)
+        df_candidates = df_candidates[~df_candidates["failed_any"].astype(bool)]
+        print(f"Bundling light curves for {len(df_candidates)}/{n_before} passing candidates (failed_any=False)")
 
     files_to_bundle: list[tuple[Path, str]] = []
     seen_files: set[Path] = set()
@@ -448,7 +455,7 @@ def export_bundle_zip(bundle_zip: Path, out_dir: Path, include_all: bool = False
     # Prevent accidental self-inclusion if bundle path is inside out_dir.
     files_to_add.discard(bundle_zip)
 
-    lightcurve_files = _collect_bundle_lightcurve_files(out_dir, mag_bin_tag=mag_bin_tag)
+    lightcurve_files = _collect_bundle_lightcurve_files(out_dir, mag_bin_tag=mag_bin_tag, include_all=include_all)
 
     if not files_to_add and not lightcurve_files:
         raise FileNotFoundError(f"No bundle files found under {out_dir}")
