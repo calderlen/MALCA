@@ -611,6 +611,7 @@ def process_one_lc(
         "ls_period": ls_result["ls_period"],
         "ls_power": ls_result["ls_power"],
         "ls_fap": ls_result["ls_fap"],
+        "lc_path": path,
     }
 
 

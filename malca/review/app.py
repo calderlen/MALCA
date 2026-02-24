@@ -1548,6 +1548,19 @@ def _render_vetting_banner(payload: dict | None, radius_arcsec: float = 10.0) ->
             html.Span(f"Variable{z_str}", style=hit_style),
         ], style=cell_style))
 
+    # LTV trend cell
+    ltv_slope = payload.get('ltv_slope')
+    if ltv_slope is not None and not pd.isna(ltv_slope):
+        ltv_diff = payload.get('ltv_max_diff')
+        ltv_fap = payload.get('ltv_ls_fap')
+        direction = "▲" if ltv_slope > 0 else "▼"
+        diff_str = f" Δ{ltv_diff:.3f}mag" if ltv_diff and not pd.isna(ltv_diff) else ""
+        fap_str = f" FAP={ltv_fap:.2e}" if ltv_fap and not pd.isna(ltv_fap) else ""
+        cards.append(html.Div([
+            html.Span("LTV", style=label_style),
+            html.Span(f"{direction}{ltv_slope:+.4f} mag/yr{diff_str}{fap_str}", style=hit_style),
+        ], style=cell_style))
+
     # IPHAS H-alpha excess cell
     ha_excess = payload.get('iphas_ha_excess')
     if ha_excess and not pd.isna(ha_excess) and float(ha_excess) > 0:
@@ -2093,6 +2106,17 @@ _SIDEBAR_GROUPS = [
         ('select', 'tns_type'),
         ('select', 'alerce_lc_class'),
         ('select', 'yso_class'),
+    ]),
+    ('LTV', [
+        ('num', 'ltv_slope'),
+        ('num', 'ltv_max_diff'),
+        ('num', 'ltv_ls_period'),
+        ('num', 'ltv_ls_fap'),
+        ('bool', 'ltv_passed_filters'),
+        ('bool', 'ltv_dust_candidate'),
+        ('bool', 'ltv_vsx_match'),
+        ('bool', 'ltv_milliquas_match'),
+        ('bool', 'ltv_gaia_alert_match'),
     ]),
     ('External Coverage', [
         ('num', 'neowise_n_epochs'),

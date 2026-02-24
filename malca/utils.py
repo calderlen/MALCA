@@ -1,5 +1,6 @@
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from glob import glob
 from pathlib import Path
 
@@ -999,3 +1000,116 @@ def divide_cameras():
     ADAPTED FROM BRAYDEN JOHANTGEN'S CODE: https://github.com/johantgen13/Dippers_Project.git
     """
     pass
+
+
+# =============================================================================
+# Shared rejection-logging utility
+# =============================================================================
+
+def log_rejections(
+    df_before: pd.DataFrame,
+    df_after: pd.DataFrame,
+    filter_name: str,
+    log_csv: "str | Path | None",
+) -> None:
+    """Log rejected candidates to a CSV file.
+
+    Searches for an ID column in order: "ASAS-SN ID", "path", "asas_sn_id",
+    "id", "source_id", then falls back to the first column.  Appends the full
+    rows of rejected candidates plus a ``rejection_reason`` column.
+    """
+    if log_csv is None:
+        return
+
+    id_col = None
+    for candidate in ["ASAS-SN ID", "path", "asas_sn_id", "id", "source_id"]:
+        if candidate in df_before.columns:
+            id_col = candidate
+            break
+    if id_col is None:
+        id_col = df_before.columns[0]
+
+    before_ids = set(df_before[id_col].astype(str))
+    after_ids = set(df_after[id_col].astype(str))
+    rejected_ids = before_ids - after_ids
+
+    if not rejected_ids:
+        return
+
+    rejected = df_before[df_before[id_col].astype(str).isin(rejected_ids)].copy()
+    rejected["rejection_reason"] = filter_name
+
+    log_path = Path(log_csv)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    header = not log_path.exists() or log_path.stat().st_size == 0
+    rejected.to_csv(log_path, mode="a", header=header, index=False)
+
+
+# =============================================================================
+# Shared Gaia TAP batch cone-search utility
+# =============================================================================
+
+def batch_gaia_cone_query(
+    coords_df: pd.DataFrame,
+    *,
+    select_cols: str,
+    extra_where: str = "",
+    match_radius_arcsec: float,
+    chunk_size: int,
+    n_workers: int,
+    verbose: bool = False,
+) -> pd.DataFrame:
+    """Batch Gaia TAP query using table upload for efficient cone search.
+
+    Uses a pyvo async job with an uploaded coordinate table for server-side
+    crossmatch.  ``coords_df`` must have columns ``_idx``, ``ra``, ``dec``.
+    """
+    import pyvo
+    from astropy.table import Table
+    from malca.config.config_paths import GAIA_AIP_TAP_URL
+
+    if coords_df.empty:
+        return pd.DataFrame()
+
+    tap = pyvo.dal.TAPService(GAIA_AIP_TAP_URL)
+    results = []
+    chunks = [coords_df.iloc[i:i + chunk_size] for i in range(0, len(coords_df), chunk_size)]
+
+    def process_chunk(chunk_df):
+        try:
+            upload_table = Table.from_pandas(chunk_df[["_idx", "ra", "dec"]])
+            query = f"""
+            SELECT
+                u._idx as _idx,
+                g.source_id,
+                {select_cols},
+                DISTANCE(POINT('ICRS', g.ra, g.dec), POINT('ICRS', u.ra, u.dec)) * 3600.0 as sep_arcsec
+            FROM TAP_UPLOAD.upload_table AS u
+            JOIN gaiadr3.gaia_source AS g
+            ON 1=CONTAINS(
+                POINT('ICRS', g.ra, g.dec),
+                CIRCLE('ICRS', u.ra, u.dec, {match_radius_arcsec / 3600.0})
+            )
+            {extra_where}
+            """
+            result = tap.run_async(query, uploads={"upload_table": upload_table})
+            return result.to_table().to_pandas() if result else pd.DataFrame()
+        except Exception as e:
+            if verbose:
+                print(f"Gaia batch query error: {e}")
+            return pd.DataFrame()
+
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        futures = {executor.submit(process_chunk, chunk): i for i, chunk in enumerate(chunks)}
+        for future in tqdm(
+            as_completed(futures), total=len(futures),
+            desc="Gaia batch query", disable=not verbose,
+        ):
+            result = future.result()
+            if not result.empty:
+                results.append(result)
+
+    if not results:
+        return pd.DataFrame()
+
+    return pd.concat(results, ignore_index=True)

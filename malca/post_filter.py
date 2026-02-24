@@ -59,6 +59,7 @@ from malca.config.config_paths import (
 )
 from malca.config.config_pipeline import WORKERS
 from malca.config.config_filters import MIN_BAYES_FACTOR, POST_FILTER_MIN_RUN_CAMERAS, POST_FILTER_MIN_RUN_POINTS
+from malca.utils import log_rejections
 
 
 # =============================================================================
@@ -564,31 +565,6 @@ def fetch_gaia_dr3_ruwe(
         tqdm.write(f"[fetch_gaia_dr3_ruwe] Matched {len(result_df)}/{len(requested_ids)} sources from local catalog")
 
     return result_df.reset_index(drop=True)
-
-
-def log_rejections(
-    df_before: pd.DataFrame,
-    df_after: pd.DataFrame,
-    filter_name: str,
-    log_csv: str | Path | None,
-) -> None:
-    """
-    Log rejected candidates to a CSV file.
-    Assumes 'path' column exists (from events.py).
-    """
-    if log_csv is None:
-        return
-
-    before_ids = set(df_before["path"].astype(str))
-    after_ids = set(df_after["path"].astype(str))
-    rejected = sorted(before_ids - after_ids)
-    if not rejected:
-        return
-
-    log_path = Path(log_csv)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    df_log = pd.DataFrame({"path": rejected, "filter": filter_name})
-    df_log.to_csv(log_path, mode="a", header=not log_path.exists(), index=False)
 
 
 def _parse_gaia_id_int(value: object) -> int | None:

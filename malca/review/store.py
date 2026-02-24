@@ -496,6 +496,29 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("stats_trend_slope_mag_per_day",              "REAL", "float"),
     ("stats_trend_slope_mag_per_year",             "REAL", "float"),
     ("stats_trend_r2",                             "REAL", "float"),
+    # -- LTV: long-term variability core metrics --
+    ("ltv_slope",                    "REAL",    "float"),  # mag/year linear slope
+    ("ltv_slope_quad",               "REAL",    "float"),  # quadratic term (mag/yr^2)
+    ("ltv_max_diff",                 "REAL",    "float"),  # max seasonal difference (mag)
+    ("ltv_dispersion",               "REAL",    "float"),  # peak-to-peak dispersion (mag)
+    ("ltv_median",                   "REAL",    "float"),  # median magnitude
+    ("ltv_n_seasons",                "INTEGER", "float"),  # number of non-empty seasons
+    ("ltv_ls_period",                "REAL",    "float"),  # best LS period (days)
+    ("ltv_ls_power",                 "REAL",    "float"),  # LS power at best period
+    ("ltv_ls_fap",                   "REAL",    "float"),  # LS false alarm probability
+    # -- LTV: filter flags --
+    ("ltv_passed_filters",           "INTEGER", "bool"),   # passed all false positive filters
+    ("ltv_dust_candidate",           "INTEGER", "bool"),   # dust-driven variability flag
+    ("ltv_dust_excess",              "INTEGER", "bool"),   # mid-IR excess flag
+    # -- LTV: crossmatch --
+    ("ltv_vsx_match",                "INTEGER", "bool"),
+    ("ltv_vsx_name",                 "TEXT",    "text"),
+    ("ltv_milliquas_match",          "INTEGER", "bool"),   # AGN/QSO flag
+    ("ltv_gaia_alert_match",         "INTEGER", "bool"),   # Gaia photometric alert
+    # -- LTV: NEOWISE time-series --
+    ("ltv_neowise_w1_slope",         "REAL",    "float"),  # NEOWISE W1 trend slope (mag/yr)
+    ("ltv_neowise_w1_w2_slope",      "REAL",    "float"),  # NEOWISE W1-W2 color trend slope
+    ("ltv_neowise_n_epochs",         "INTEGER", "float"),  # number of NEOWISE epochs
 ]
 
 # Derived helpers

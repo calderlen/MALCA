@@ -45,42 +45,14 @@ from malca.ltv.filter import (
 )
 from malca.ltv.crossmatch import (
     crossmatch_all_catalogs,
-    crossmatch_gaia_dr3,
-    crossmatch_vsx,
     crossmatch_milliquas,
     query_simbad_classification,
 )
 from malca.ltv.neowise import extract_neowise_trends
 from malca.ltv.dust import apply_dust_flags
-from malca.ltv.cmd import compute_cmd_features, assign_cmd_groups, load_mist_grid
+from malca.ltv.cmd import compute_cmd_features, assign_cmd_groups, load_mist_grid, fetch_bailer_jones_distances
 from malca.ltv.gaia_epoch import query_gaia_epoch_photometry_batch, apply_gaia_epoch_flags
-
-
-# =============================================================================
-# EXTINCTION CORRECTION
-# =============================================================================
-
-def apply_extinction_correction(
-    df: pd.DataFrame,
-    *,
-    verbose: bool = False,
-) -> pd.DataFrame:
-    """
-    Apply dust extinction correction using dustmaps3d.
-    Vectorized operation — fast on any size.
-    """
-    from malca.characterize import get_dust_extinction
-    
-    if verbose:
-        print("Applying extinction correction...")
-    
-    df = get_dust_extinction(df)
-    
-    if verbose:
-        n_with_av = (df["A_v_3d"] > 0).sum() if "A_v_3d" in df.columns else 0
-        print(f"[apply_extinction_correction] {n_with_av}/{len(df)} sources have A_V > 0")
-    
-    return df
+from malca.characterize import get_dust_extinction
 
 
 # =============================================================================
@@ -102,6 +74,7 @@ def run_full_pipeline(
     run_extinction: bool = True,
     run_dust_flags: bool = True,
     run_cmd: bool = False,
+    run_bailer_jones: bool = False,
     mist_path: str | Path | None = None,
     cmd_boundaries: dict | None = None,
     run_gaia_epoch: bool = False,
@@ -243,8 +216,12 @@ def run_full_pipeline(
             print("-" * 60)
             print("STAGE 4: EXTINCTION CORRECTION")
             print("-" * 60)
-        
-        df = apply_extinction_correction(df, verbose=verbose)
+
+        df = get_dust_extinction(df)
+
+        if verbose:
+            n_with_av = (df["A_v_3d"] > 0).sum() if "A_v_3d" in df.columns else 0
+            print(f"[extinction] {n_with_av}/{len(df)} sources have A_V > 0")
         print()
 
     # =========================================================================
@@ -271,6 +248,22 @@ def run_full_pipeline(
             verbose=verbose,
         )
         df = apply_gaia_epoch_flags(df)
+        print()
+
+    # =========================================================================
+    # Stage 4c: Bailer-Jones (2023) distances (optional, feeds CMD M_G)
+    # =========================================================================
+    if run_bailer_jones:
+        if verbose:
+            print("-" * 60)
+            print("STAGE 4c: BAILER-JONES DISTANCES")
+            print("-" * 60)
+        df = fetch_bailer_jones_distances(
+            df,
+            chunk_size=chunk_size,
+            n_workers=n_workers,
+            verbose=verbose,
+        )
         print()
 
     # =========================================================================
@@ -429,6 +422,11 @@ def add_pipeline_args(parser):
         help="Include invalid epoch photometry (valid_data=False)",
     )
     parser.add_argument(
+        "--run-bailer-jones",
+        action="store_true",
+        help="Fetch Bailer-Jones (2023) photogeometric distances before CMD stage",
+    )
+    parser.add_argument(
         "--run-cmd",
         action="store_true",
         help="Compute CMD features (BP-RP, M_G) after extinction correction",
@@ -469,6 +467,7 @@ def run_pipeline_cli(args):
         run_extinction=not args.skip_extinction,
         run_dust_flags=not args.skip_dust_flags,
         run_cmd=args.run_cmd,
+        run_bailer_jones=args.run_bailer_jones,
         run_gaia_epoch=args.run_gaia_epoch,
         gaia_epoch_table=args.gaia_epoch_table,
         gaia_epoch_data_release=args.gaia_epoch_data_release,

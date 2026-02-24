@@ -17,7 +17,6 @@ Optimized for 17M+ sources with:
 from __future__ import annotations
 
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -41,6 +40,7 @@ from malca.config.config_ltv import (
     LTV_CHUNK_SIZE,
     LTV_GAIA_CHUNK_SIZE,
     LTV_CROSSMATCH_CHUNK_SIZE,
+    LTV_WORKERS,
     LTV_BRIGHT_STAR_COEFF,
     LTV_BRIGHT_STAR_MAG_OFFSET,
     LTV_BRIGHT_STAR_BASE_ARCSEC,
@@ -49,43 +49,13 @@ from malca.config.config_ltv import (
     LTV_MIN_OVERLAP_DAYS,
     LTV_MIN_OVERLAP_FRACTION,
     LTV_CROWDING_SEARCH_RADIUS_ARCSEC,
+    LTV_MAX_REFCAT_OFFSET,
+    LTV_APERTURE_RADIUS_ARCSEC,
+    LTV_ASASSN_BASELINE_YEARS,
+    LTV_NEIGHBOR_FLUX_RATIO_LIMIT,
+    LTV_NEIGHBOR_SEARCH_RADIUS_ARCSEC,
 )
-
-
-# =============================================================================
-# LOGGING UTILITY
-# =============================================================================
-
-def log_rejections(
-    df_before: pd.DataFrame,
-    df_after: pd.DataFrame,
-    filter_name: str,
-    log_csv: str | Path | None = None,
-) -> None:
-    """Log rejected candidates to a CSV file."""
-    if log_csv is None:
-        return
-    
-    if "ASAS-SN ID" in df_before.columns:
-        id_col = "ASAS-SN ID"
-    else:
-        id_col = df_before.columns[0]
-    
-    before_ids = set(df_before[id_col].astype(str))
-    after_ids = set(df_after[id_col].astype(str))
-    rejected_ids = before_ids - after_ids
-    
-    if not rejected_ids:
-        return
-    
-    rejected = df_before[df_before[id_col].astype(str).isin(rejected_ids)].copy()
-    rejected["rejection_reason"] = filter_name
-    
-    log_path = Path(log_csv)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    
-    header = not log_path.exists() or log_path.stat().st_size == 0
-    rejected.to_csv(log_path, mode="a", header=header, index=False)
+from malca.utils import log_rejections, batch_gaia_cone_query
 
 
 # =============================================================================
@@ -331,78 +301,6 @@ def filter_eclipsing_binary_signature(
     return df_out
 
 
-# =============================================================================
-# BATCH GAIA TAP QUERIES
-# =============================================================================
-
-def _batch_gaia_cone_query(
-    coords_df: pd.DataFrame,
-    *,
-    select_cols: str,
-    extra_where: str = "",
-    match_radius_arcsec: float = LTV_MATCH_RADIUS_ARCSEC,
-    chunk_size: int = LTV_CHUNK_SIZE,
-    n_workers: int = LTV_WORKERS,
-    verbose: bool = False,
-) -> pd.DataFrame:
-    """
-    Batch Gaia TAP query using table upload for efficient cone search.
-
-    Uses pyvo async job with uploaded coordinate table for server-side crossmatch.
-    """
-    import pyvo
-    from astropy.table import Table
-    from malca.config.config_paths import GAIA_AIP_TAP_URL
-
-    if coords_df.empty:
-        return pd.DataFrame()
-
-    tap = pyvo.dal.TAPService(GAIA_AIP_TAP_URL)
-    results = []
-    chunks = [coords_df.iloc[i:i+chunk_size] for i in range(0, len(coords_df), chunk_size)]
-
-    def process_chunk(chunk_df):
-        """Process a single chunk via TAP upload."""
-        try:
-            upload_table = Table.from_pandas(chunk_df[["_idx", "ra", "dec"]])
-
-            query = f"""
-            SELECT
-                u._idx as _idx,
-                g.source_id,
-                {select_cols},
-                DISTANCE(POINT('ICRS', g.ra, g.dec), POINT('ICRS', u.ra, u.dec)) * 3600.0 as sep_arcsec
-            FROM TAP_UPLOAD.upload_table AS u
-            JOIN gaiadr3.gaia_source AS g
-            ON 1=CONTAINS(
-                POINT('ICRS', g.ra, g.dec),
-                CIRCLE('ICRS', u.ra, u.dec, {match_radius_arcsec / 3600.0})
-            )
-            {extra_where}
-            """
-
-            result = tap.run_async(query, uploads={"upload_table": upload_table})
-            return result.to_table().to_pandas() if result else pd.DataFrame()
-        except Exception as e:
-            if verbose:
-                print(f"Gaia batch query error: {e}")
-            return pd.DataFrame()
-
-    # Process chunks in parallel
-    with ThreadPoolExecutor(max_workers=n_workers) as executor:
-        futures = {executor.submit(process_chunk, chunk): i for i, chunk in enumerate(chunks)}
-
-        for future in tqdm(as_completed(futures), total=len(futures), desc="Gaia batch query", disable=not verbose):
-            result = future.result()
-            if not result.empty:
-                results.append(result)
-
-    if not results:
-        return pd.DataFrame()
-
-    return pd.concat(results, ignore_index=True)
-
-
 def query_gaia_proper_motions_batch(
     df: pd.DataFrame,
     *,
@@ -444,7 +342,7 @@ def query_gaia_proper_motions_batch(
     if verbose:
         print(f"Querying Gaia for {len(coords_df)} sources...")
     
-    result = _batch_gaia_cone_query(
+    result = batch_gaia_cone_query(
         coords_df,
         select_cols="g.pmra, g.pmdec",
         match_radius_arcsec=match_radius_arcsec,
@@ -560,7 +458,7 @@ def query_nearby_bright_stars_batch(
     if verbose:
         print(f"Querying bright stars near {len(coords_df)} sources...")
     
-    result = _batch_gaia_cone_query(
+    result = batch_gaia_cone_query(
         coords_df,
         select_cols="g.phot_g_mean_mag",
         extra_where=f"WHERE g.phot_g_mean_mag < {bright_mag_limit}",
@@ -734,7 +632,7 @@ def query_crowding_batch(
         print(f"Querying crowding for {len(coords_df)} sources...")
     
     # Query all sources within radius
-    result = _batch_gaia_cone_query(
+    result = batch_gaia_cone_query(
         coords_df,
         select_cols="g.phot_g_mean_mag",
         match_radius_arcsec=search_radius_arcsec,
@@ -805,6 +703,228 @@ def filter_crowding(
 
 
 # =============================================================================
+# REFCAT MAGNITUDE OFFSET FILTER (vectorized)
+# =============================================================================
+
+def filter_refcat_offset(
+    df: pd.DataFrame,
+    *,
+    max_refcat_offset: float = LTV_MAX_REFCAT_OFFSET,
+    asas_mag_col: str = "Median",
+    refcat_mag_col: str = "Pstarss gmag",
+    verbose: bool = False,
+    log_csv: str | Path | None = None,
+) -> pd.DataFrame:
+    """
+    Remove sources where gASAS is more than max_refcat_offset mag brighter than gREFCAT.
+
+    ASAS-SN uses a ~25" aperture; if a nearby bright star is blended in, the
+    ASAS-SN median will be anomalously bright relative to the REFCAT/PanSTARRS
+    single-star magnitude.  Keep condition: gASAS − gREFCAT ≥ −max_refcat_offset
+    (i.e. ASAS-SN is not more than 1.5 mag brighter than expected).
+
+    Sources without a REFCAT match (NaN diff) are kept.
+    Vectorized — instant on any size.
+    """
+    n0 = len(df)
+
+    if asas_mag_col not in df.columns or refcat_mag_col not in df.columns:
+        if verbose:
+            print(
+                f"Warning: '{asas_mag_col}' or '{refcat_mag_col}' not found, "
+                "skipping REFCAT offset filter"
+            )
+        return df
+
+    asas_mag = df[asas_mag_col].values.astype(float)
+    refcat_mag = df[refcat_mag_col].values.astype(float)
+    diff = asas_mag - refcat_mag
+
+    mask = (diff >= -max_refcat_offset) | np.isnan(diff)
+    df_out = df[mask].reset_index(drop=True)
+
+    if verbose:
+        print(f"[filter_refcat_offset] {n0} → {len(df_out)} (removed {n0 - len(df_out)})")
+
+    log_rejections(df, df_out, "filter_refcat_offset", log_csv)
+    return df_out
+
+
+# =============================================================================
+# NEIGHBOR HIGH-PM STAR FILTER (batch Gaia TAP)
+# =============================================================================
+
+def query_neighbor_high_pm_batch(
+    df: pd.DataFrame,
+    *,
+    ra_column: str = "ra_deg",
+    dec_column: str = "dec_deg",
+    target_mag_col: str = "Pstarss gmag",
+    search_radius_arcsec: float = LTV_NEIGHBOR_SEARCH_RADIUS_ARCSEC,
+    aperture_radius_arcsec: float = LTV_APERTURE_RADIUS_ARCSEC,
+    flux_ratio_limit: float = LTV_NEIGHBOR_FLUX_RATIO_LIMIT,
+    t_start_year: float = -4.0,
+    t_end_year: float = 6.0,
+    chunk_size: int = LTV_GAIA_CHUNK_SIZE,
+    n_workers: int = LTV_WORKERS,
+    verbose: bool = False,
+) -> pd.DataFrame:
+    """
+    Flag targets contaminated by a high-PM Gaia neighbor during the ASAS-SN baseline.
+
+    For each target, queries all Gaia DR3 neighbors within search_radius_arcsec
+    (large enough to capture stars that may walk into the aperture over the
+    baseline).  For every neighbor with a Gaia proper-motion measurement:
+
+      1. Skip if the neighbor's flux ratio F_nb/F_target < flux_ratio_limit
+         (too faint to matter; corresponds to >5 mag fainter).
+      2. Propagate the neighbor's position analytically over [t_start_year,
+         t_end_year] relative to the Gaia DR3 reference epoch (J2016.0).
+      3. If the minimum separation drops below aperture_radius_arcsec, mark
+         the target as contaminated.
+
+    Adds column: neighbor_pm_contam (bool).
+    """
+    if ra_column not in df.columns or dec_column not in df.columns:
+        if verbose:
+            print("Warning: RA/Dec columns not found for neighbor PM query")
+        df = df.copy()
+        df["neighbor_pm_contam"] = False
+        return df
+
+    df = df.copy()
+    df["neighbor_pm_contam"] = False
+
+    valid_mask = df[ra_column].notna() & df[dec_column].notna()
+    if not valid_mask.any():
+        return df
+
+    coords_df = pd.DataFrame({
+        "_idx": df.index[valid_mask],
+        "ra": df.loc[valid_mask, ra_column].values,
+        "dec": df.loc[valid_mask, dec_column].values,
+    })
+
+    if verbose:
+        print(f"Querying Gaia neighbors for {len(coords_df)} sources...")
+
+    result = batch_gaia_cone_query(
+        coords_df,
+        select_cols="g.ra, g.dec, g.pmra, g.pmdec, g.phot_g_mean_mag",
+        match_radius_arcsec=search_radius_arcsec,
+        chunk_size=chunk_size,
+        n_workers=n_workers,
+        verbose=verbose,
+    )
+
+    if result.empty:
+        return df
+
+    mag_col = target_mag_col if target_mag_col in df.columns else None
+    n_contam = 0
+
+    for idx, neighbors in result.groupby("_idx"):
+        if idx not in df.index:
+            continue
+
+        target_ra = float(df.loc[idx, ra_column])
+        target_dec = float(df.loc[idx, dec_column])
+        target_mag = float(df.loc[idx, mag_col]) if mag_col else 14.0
+        cos_dec = np.cos(np.radians(target_dec))
+
+        for _, nb in neighbors.iterrows():
+            nb_pmra = nb.get("pmra", np.nan)
+            nb_pmdec = nb.get("pmdec", np.nan)
+            nb_mag = nb.get("phot_g_mean_mag", np.nan)
+
+            if pd.isna(nb_pmra) or pd.isna(nb_pmdec):
+                continue
+
+            # Skip neighbors too faint to matter
+            if not (pd.isna(nb_mag) or pd.isna(target_mag)):
+                flux_ratio = 10.0 ** (-0.4 * (float(nb_mag) - float(target_mag)))
+                if flux_ratio < flux_ratio_limit:
+                    continue
+
+            # Initial offset (arcsec) and PM (arcsec/yr)
+            dx0 = (float(nb["ra"]) - target_ra) * cos_dec * 3600.0
+            dy0 = (float(nb["dec"]) - target_dec) * 3600.0
+            a = float(nb_pmra) / 1000.0
+            b = float(nb_pmdec) / 1000.0
+
+            # Minimum separation over [t_start_year, t_end_year]
+            denom = a * a + b * b
+            if denom < 1e-12:
+                min_sep = np.sqrt(dx0 * dx0 + dy0 * dy0)
+            else:
+                t_closest = -(a * dx0 + b * dy0) / denom
+                t_clamped = float(np.clip(t_closest, t_start_year, t_end_year))
+                seps = []
+                for t in (t_start_year, t_clamped, t_end_year):
+                    seps.append(np.sqrt((dx0 + a * t) ** 2 + (dy0 + b * t) ** 2))
+                min_sep = min(seps)
+
+            if min_sep < aperture_radius_arcsec:
+                df.loc[idx, "neighbor_pm_contam"] = True
+                n_contam += 1
+                break  # one contaminating neighbor is enough
+
+    if verbose:
+        print(
+            f"[query_neighbor_high_pm_batch] "
+            f"{n_contam} targets flagged as contaminated by a passing high-PM neighbor"
+        )
+
+    return df
+
+
+def filter_neighbor_high_pm(
+    df: pd.DataFrame,
+    *,
+    search_radius_arcsec: float = LTV_NEIGHBOR_SEARCH_RADIUS_ARCSEC,
+    aperture_radius_arcsec: float = LTV_APERTURE_RADIUS_ARCSEC,
+    flux_ratio_limit: float = LTV_NEIGHBOR_FLUX_RATIO_LIMIT,
+    query_gaia: bool = True,
+    chunk_size: int = LTV_GAIA_CHUNK_SIZE,
+    n_workers: int = LTV_WORKERS,
+    verbose: bool = False,
+    log_csv: str | Path | None = None,
+) -> pd.DataFrame:
+    """
+    Remove targets contaminated by a passing high-PM Gaia neighbor.
+
+    Uses batch Gaia TAP queries plus an analytic trajectory check (paper §2).
+    If 'neighbor_pm_contam' is already present in df it is used directly.
+    """
+    n0 = len(df)
+
+    if "neighbor_pm_contam" not in df.columns and query_gaia:
+        df = query_neighbor_high_pm_batch(
+            df,
+            search_radius_arcsec=search_radius_arcsec,
+            aperture_radius_arcsec=aperture_radius_arcsec,
+            flux_ratio_limit=flux_ratio_limit,
+            chunk_size=chunk_size,
+            n_workers=n_workers,
+            verbose=verbose,
+        )
+
+    if "neighbor_pm_contam" not in df.columns:
+        if verbose:
+            print("Warning: 'neighbor_pm_contam' not found, skipping filter")
+        return df
+
+    mask = ~df["neighbor_pm_contam"].fillna(False).astype(bool)
+    df_out = df[mask].reset_index(drop=True)
+
+    if verbose:
+        print(f"[filter_neighbor_high_pm] {n0} → {len(df_out)} (removed {n0 - len(df_out)})")
+
+    log_rejections(df, df_out, "filter_neighbor_high_pm", log_csv)
+    return df_out
+
+
+# =============================================================================
 # COMBINED FILTER PIPELINE
 # =============================================================================
 
@@ -816,13 +936,20 @@ def apply_all_filters(
     min_diff: float = LTV_MIN_DIFF,
     min_dec: float = LTV_MIN_DEC,
     max_pm: float = LTV_MAX_PM,
+    # Paper filter thresholds
+    max_refcat_offset: float = LTV_MAX_REFCAT_OFFSET,
     # Enhanced filter thresholds
     max_reduced_chi2: float = LTV_MAX_REDUCED_CHI2,
     max_single_jump_fraction: float = LTV_MAX_SINGLE_JUMP_FRACTION,
     max_eb_period_days: float = LTV_MAX_EB_PERIOD_DAYS,
     max_crowding_count: int = LTV_MAX_CROWDING_COUNT,
+    # Neighbor PM filter
+    aperture_radius_arcsec: float = LTV_APERTURE_RADIUS_ARCSEC,
+    neighbor_flux_ratio_limit: float = LTV_NEIGHBOR_FLUX_RATIO_LIMIT,
+    neighbor_search_radius_arcsec: float = LTV_NEIGHBOR_SEARCH_RADIUS_ARCSEC,
     # Options
     run_enhanced_filters: bool = True,
+    run_neighbor_pm_filter: bool = True,
     query_gaia: bool = True,
     chunk_size: int = LTV_CHUNK_SIZE,
     n_workers: int = LTV_WORKERS,
@@ -831,37 +958,45 @@ def apply_all_filters(
 ) -> pd.DataFrame:
     """
     Apply all paper filters in sequence.
-    
+
     IMPORTANT: Vectorized filters run FIRST to reduce data size before
     expensive Gaia queries. This is critical for performance.
-    
+
     Order:
-    1. Slope threshold (vectorized, instant)
-    2. Max diff threshold (vectorized, instant)
-    3. South pole (vectorized, instant)
-    4. Photometric scatter (vectorized) — NEW
-    5. Transient contamination (vectorized) — NEW
-    6. Eclipsing binary signature (vectorized) — NEW
-    7. Bright star artifacts (batch Gaia TAP)
-    8. High proper motion (batch Gaia TAP)
-    9. Crowding (batch Gaia TAP) — NEW
+    1. Slope threshold (vectorized)
+    2. Max diff threshold (vectorized)
+    3. South pole (vectorized)
+    4. REFCAT magnitude offset (vectorized) — paper Fig. 1
+    5. Photometric scatter (vectorized)
+    6. Transient contamination (vectorized)
+    7. Eclipsing binary signature (vectorized)
+    8. Bright star artifacts (batch Gaia TAP)
+    9. High proper motion (batch Gaia TAP)
+    10. Neighbor high-PM contamination (batch Gaia TAP) — paper §2
+    11. Crowding (batch Gaia TAP)
     """
     n0 = len(df)
-    
+
     if verbose:
         print(f"Starting with {n0} sources")
         print("Phase 1: Vectorized filters (instant)...")
-    
+
     # Vectorized filters first — instant, reduces data size
     df = filter_slope_threshold(df, min_slope=min_slope, verbose=verbose, log_csv=log_csv)
     df = filter_max_diff_threshold(df, min_diff=min_diff, verbose=verbose, log_csv=log_csv)
     df = filter_south_pole(df, min_dec=min_dec, verbose=verbose, log_csv=log_csv)
-    
+    df = filter_refcat_offset(
+        df,
+        max_refcat_offset=max_refcat_offset,
+        verbose=verbose,
+        log_csv=log_csv,
+    )
+
     # Enhanced vectorized filters
     if run_enhanced_filters:
         if verbose:
             print("\nPhase 1b: Enhanced vectorized filters...")
-        
+
         df = filter_photometric_scatter(
             df,
             max_reduced_chi2=max_reduced_chi2,
@@ -885,11 +1020,11 @@ def apply_all_filters(
             verbose=verbose,
             log_csv=log_csv,
         )
-    
+
     if verbose:
         print(f"\nAfter vectorized filters: {len(df)} sources ({len(df)/n0*100:.2f}% remaining)")
         print("Phase 2: Gaia TAP queries (batch)...")
-    
+
     # Gaia queries only on reduced dataset
     df = filter_bright_star_artifacts(
         df,
@@ -908,7 +1043,21 @@ def apply_all_filters(
         verbose=verbose,
         log_csv=log_csv,
     )
-    
+
+    # Neighbor high-PM contamination filter (paper §2)
+    if run_neighbor_pm_filter:
+        df = filter_neighbor_high_pm(
+            df,
+            search_radius_arcsec=neighbor_search_radius_arcsec,
+            aperture_radius_arcsec=aperture_radius_arcsec,
+            flux_ratio_limit=neighbor_flux_ratio_limit,
+            query_gaia=query_gaia,
+            chunk_size=chunk_size,
+            n_workers=n_workers,
+            verbose=verbose,
+            log_csv=log_csv,
+        )
+
     # Enhanced crowding filter
     if run_enhanced_filters:
         df = filter_crowding(
@@ -920,8 +1069,8 @@ def apply_all_filters(
             verbose=verbose,
             log_csv=log_csv,
         )
-    
+
     if verbose:
         print(f"\n[apply_all_filters] TOTAL: {n0} → {len(df)} ({len(df)/n0*100:.2f}% remaining)")
-    
+
     return df

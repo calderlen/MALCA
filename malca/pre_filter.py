@@ -44,6 +44,7 @@ from malca.utils import (
     get_id_col,
     compute_time_stats,
     compute_n_cameras,
+    log_rejections,
 )
 
 
@@ -229,40 +230,6 @@ def _compute_stats_parallel(
             tqdm.write(f"[stats] Final checkpoint saved to {checkpoint_path}")
 
     return df_with_stats
-
-
-def log_rejections(
-    df_before: pd.DataFrame,
-    df_after: pd.DataFrame,
-    filter_name: str,
-    log_csv: str | Path | None,
-) -> None:
-    """
-    Log rejected candidates to a CSV file.
-    """
-    if log_csv is None:
-        return
-
-    # Prefer stable IDs over path (path can be a shared directory).
-    id_col = None
-    for candidate in ["source_id", "asas_sn_id", "id", "path"]:
-        if candidate in df_before.columns:
-            id_col = candidate
-            break
-
-    if id_col is None:
-        return
-
-    before_ids = set(df_before[id_col].astype(str))
-    after_ids = set(df_after[id_col].astype(str))
-    rejected = sorted(before_ids - after_ids)
-    if not rejected:
-        return
-
-    log_path = Path(log_csv)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    df_log = pd.DataFrame({id_col: rejected, "filter": filter_name})
-    df_log.to_csv(log_path, mode="a", header=not log_path.exists(), index=False)
 
 
 def filter_sparse_lightcurves(

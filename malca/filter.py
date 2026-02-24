@@ -22,40 +22,7 @@ import numpy as np
 from tqdm.auto import tqdm
 
 from malca.config.config_pipeline import MIN_MAG_OFFSET
-
-
-def log_rejections(
-    df_before: pd.DataFrame,
-    df_after: pd.DataFrame,
-    filter_name: str,
-    log_csv: str | Path | None,
-) -> None:
-    """
-    Log rejected candidates to a CSV file.
-    """
-    if log_csv is None:
-        return
-
-    # Try to find an ID column
-    id_col = None
-    for candidate in ["path", "asas_sn_id", "id", "source_id"]:
-        if candidate in df_before.columns:
-            id_col = candidate
-            break
-
-    if id_col is None:
-        return
-
-    before_ids = set(df_before[id_col].astype(str))
-    after_ids = set(df_after[id_col].astype(str))
-    rejected = sorted(before_ids - after_ids)
-    if not rejected:
-        return
-
-    log_path = Path(log_csv)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    df_log = pd.DataFrame({id_col: rejected, "filter": filter_name})
-    df_log.to_csv(log_path, mode="a", header=not log_path.exists(), index=False)
+from malca.utils import log_rejections
 
 
 def filter_signal_amplitude(

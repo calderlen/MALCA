@@ -26,6 +26,9 @@ Usage:
     malca pre_filter [options]     # Apply pre-filters (low-level)
     malca pre_tag [options]        # Apply pre-tagging filters (alias)
     malca score [options]          # Compute event score (low-level)
+    malca ltv-core [options]       # Compute seasonal trends for LTV (long-term variability)
+    malca ltv-pipeline [options]   # Run full LTV pipeline (filters + crossmatch + NEOWISE)
+    malca ltv-ingest [options]     # Ingest LTV pipeline results into a review DB
 """
 
 import sys
@@ -42,7 +45,8 @@ def main():
         "events", "gaia-fetch", "characterize", "classify", "filter", "pre_filter", "pre_tag", "score",
         "stats", "attrition", "review",
         "neighbors", "spectra", "false_positive", "ml_train", "vsx-filter", "vsx-crossmatch",
-        "vetting"
+        "vetting",
+        "ltv-core", "ltv-pipeline", "ltv-ingest",
     ]:
         command = sys.argv[1]
         remaining = sys.argv[2:]
@@ -152,6 +156,20 @@ def main():
             from malca import vetting
             sys.argv = [sys.argv[0]] + remaining
             vetting.main()
+        elif command == "ltv-core":
+            from malca.ltv import core as ltv_core
+            sys.argv = [sys.argv[0]] + remaining
+            ltv_core.main()
+        elif command == "ltv-pipeline":
+            from malca.ltv import pipeline as ltv_pipeline
+            sys.argv = [sys.argv[0]] + remaining
+            ltv_pipeline.run_pipeline_cli(
+                ltv_pipeline.add_pipeline_args(argparse.ArgumentParser()).parse_args()
+            )
+        elif command == "ltv-ingest":
+            from malca.ltv import review as ltv_review
+            sys.argv = [sys.argv[0]] + remaining
+            ltv_review.main()
         return 0
     
     # If no subcommand or just --help for main, show main help
@@ -190,7 +208,10 @@ def main():
     subparsers.add_parser("vsx-filter", help="Build cleaned ASAS-SN index and filtered VSX catalog")
     subparsers.add_parser("vsx-crossmatch", help="Crossmatch ASAS-SN catalog with VSX catalog")
     subparsers.add_parser("vetting", help="Run post-review vetting (SIMBAD, Gaia, ASAS-SN, ZTF, TNS, eROSITA, ...)")
-    
+    subparsers.add_parser("ltv-core", help="Compute seasonal trends for long-term variability detection")
+    subparsers.add_parser("ltv-pipeline", help="Run full LTV pipeline (filters + crossmatch + NEOWISE + extinction)")
+    subparsers.add_parser("ltv-ingest", help="Ingest LTV pipeline results into a review DB")
+
     parser.print_help()
     return 0
 
