@@ -88,20 +88,58 @@ class Config:
     overwrite: bool
 
 
-def parse_args() -> Config:
+def _build_config(a, mag_bin: str) -> Config:
+    """Build a Config for a single mag bin from parsed args."""
+    root = Path(a.root)
+    out = a.output
+    if out is None:
+        LTV_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        out = str(LTV_OUTPUT_DIR / f"LTvar{mag_bin.replace('_','-')}.csv")
+    output = Path(out)
+
+    resume = bool(a.resume or a.overwrite)
+
+    return Config(
+        root=root,
+        mag_bin=mag_bin,
+        output=output,
+        dspring=float(a.dspring),
+        ra_is_deg=bool(a.ra_is_deg),
+        max_seasons=int(a.max_seasons),
+        min_points_per_season=int(a.min_points_per_season),
+        min_seasons_for_quadratic=int(a.min_seasons_for_quadratic),
+        write_per_dir=bool(a.write_per_dir),
+        workers=int(a.workers),
+        chunk_size=int(a.chunk_size),
+        output_format=str(a.output_format),
+        resume=resume,
+        overwrite=bool(a.overwrite),
+    )
+
+
+def parse_args() -> tuple[list[Config], bool]:
+    """Parse CLI args and return (list_of_configs, run_all).
+
+    When ``--all`` is set the list contains one Config per mag bin;
+    otherwise it contains a single Config for the requested ``--mag-bin``.
+    """
     p = argparse.ArgumentParser(prog="ltv", description="Compute seasonal trends for ASAS-SN light curves.")
 
     p.add_argument("--root",
                    default=str(LCV2_ROOT),
                    type=str)
-    p.add_argument("--mag-bin", 
-                   default="13_13.5", 
+    p.add_argument("--mag-bin",
+                   default="13_13.5",
                    type=str,
                    choices=MAG_BINS,
                    help=f"Magnitude bin to process (choices: {', '.join(MAG_BINS)})")
-    p.add_argument("--output", 
-                   default=None, 
-                   type=str, 
+    p.add_argument("--all",
+                   action="store_true",
+                   dest="run_all",
+                   help="Process all magnitude bins sequentially (ignores --mag-bin)")
+    p.add_argument("--output",
+                   default=None,
+                   type=str,
                    help="Combined output CSV (default: LTvar<MAG>.csv)")
     p.add_argument("--dspring",
                    type=float,
@@ -148,32 +186,14 @@ def parse_args() -> Config:
 
     a = p.parse_args()
 
-    root = Path(a.root)
-    mag_bin = a.mag_bin
-    out = a.output
-    if out is None:
-        LTV_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        out = str(LTV_OUTPUT_DIR / f"LTvar{mag_bin.replace('_','-')}.csv")
-    output = Path(out)
+    if a.run_all:
+        if a.output is not None:
+            p.error("--output cannot be used with --all (each mag bin auto-resolves its own output path)")
+        configs = [_build_config(a, mb) for mb in MAG_BINS]
+    else:
+        configs = [_build_config(a, a.mag_bin)]
 
-    resume = bool(a.resume or a.overwrite)
-
-    return Config(
-        root=root,
-        mag_bin=mag_bin,
-        output=output,
-        dspring=float(a.dspring),
-        ra_is_deg=bool(a.ra_is_deg),
-        max_seasons=int(a.max_seasons),
-        min_points_per_season=int(a.min_points_per_season),
-        min_seasons_for_quadratic=int(a.min_seasons_for_quadratic),
-        write_per_dir=bool(a.write_per_dir),
-        workers=int(a.workers),
-        chunk_size=int(a.chunk_size),
-        output_format=str(a.output_format),
-        resume=resume,
-        overwrite=bool(a.overwrite),
-    )
+    return configs, a.run_all
 
 
 def read_index_csv(path: Path) -> pd.DataFrame:
@@ -697,9 +717,8 @@ def make_writer(path: Path | None, fmt: str):
         raise ValueError(f"Unknown output format: {fmt}")
 
 
-def main() -> None:
-    cfg = parse_args()
-
+def run_mag_bin(cfg: Config) -> None:
+    """Run the full LTV pipeline for a single magnitude bin."""
     mag_bin_dir = cfg.root / cfg.mag_bin
     lc_dirs = sorted(mag_bin_dir.glob("lc*_cal"))
     lc_dirs = [d for d in lc_dirs if d.is_dir() and IDX_PATTERN.search(d.name)]
@@ -798,6 +817,20 @@ def main() -> None:
         writer.close()
 
     print(f"Complete! Wrote {total_written} rows to {output_path}")
+
+
+def main() -> None:
+    configs, run_all = parse_args()
+
+    if run_all:
+        for i, cfg in enumerate(configs, 1):
+            print(f"\n{'='*60}")
+            print(f"  Mag bin {i}/{len(configs)}: {cfg.mag_bin}")
+            print(f"{'='*60}")
+            run_mag_bin(cfg)
+        print(f"\nAll {len(configs)} mag bins complete!")
+    else:
+        run_mag_bin(configs[0])
 
 
 if __name__ == "__main__":
