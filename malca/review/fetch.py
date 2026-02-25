@@ -5,7 +5,7 @@ Supports three search modes:
   - Gaia DR3 ID → download_lightcurve_by_gaia_id
   - RA/Dec      → cone_search (returns catalog rows; caller picks target)
 
-After downloading, we run compute_stats and optionally events detection,
+After downloading, we compute stats from the SkyPatrol CSV directly,
 then hand the result to import_candidates.
 """
 
@@ -13,13 +13,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from malca.fetch import (
     cone_search,
     download_lightcurve_by_id,
     download_lightcurve_by_gaia_id,
-    download_lightcurve_for_target,
 )
 
 
@@ -29,13 +29,10 @@ def fetch_and_analyze_by_id(
     run_stats: bool = True,
     run_events: bool = False,
 ) -> tuple[pd.DataFrame, Path]:
-    """Download LC by ASAS-SN ID, compute basic stats, return (1-row DF, lc_path).
-
-    The returned DataFrame has at minimum ``candidate_id`` and ``lc_path``
-    columns so it can be passed directly to ``import_candidates``.
-    """
-    lc_path = download_lightcurve_by_id(asas_sn_id)
-    df = _build_candidate_row(asas_sn_id, lc_path, run_stats=run_stats, run_events=run_events)
+    """Download LC by ASAS-SN ID, compute basic stats, return (1-row DF, lc_path)."""
+    lc_path, catalog_info = download_lightcurve_by_id(asas_sn_id)
+    df = _build_candidate_row(asas_sn_id, lc_path, catalog_info,
+                              run_stats=run_stats, run_events=run_events)
     return df, lc_path
 
 
@@ -46,9 +43,10 @@ def fetch_and_analyze_by_gaia_id(
     run_events: bool = False,
 ) -> tuple[pd.DataFrame, Path]:
     """Download LC by Gaia DR3 source_id, compute basic stats."""
-    lc_path = download_lightcurve_by_gaia_id(gaia_id)
-    candidate_id = f"gaia_{gaia_id}"
-    df = _build_candidate_row(candidate_id, lc_path, run_stats=run_stats, run_events=run_events)
+    lc_path, catalog_info = download_lightcurve_by_gaia_id(gaia_id)
+    candidate_id = str(catalog_info.get("asas_sn_id", f"gaia_{gaia_id}"))
+    df = _build_candidate_row(candidate_id, lc_path, catalog_info,
+                              run_stats=run_stats, run_events=run_events)
     return df, lc_path
 
 
@@ -69,6 +67,7 @@ def fetch_cone_search(
 def _build_candidate_row(
     candidate_id: str,
     lc_path: Path,
+    catalog_info: dict,
     *,
     run_stats: bool = True,
     run_events: bool = False,
@@ -79,8 +78,21 @@ def _build_candidate_row(
         "lc_path": str(lc_path),
     }
 
+    # Populate asas_sn_id, ra_deg, dec_deg from catalog query
+    if catalog_info:
+        for key in ("asas_sn_id", "ra_deg", "dec_deg", "gaia_id",
+                     "mean_vmag", "catalog_sources"):
+            if key in catalog_info and catalog_info[key] is not None:
+                row[key] = catalog_info[key]
+
+    # Alias ra/dec for downstream modules that expect these names
+    if "ra_deg" in row:
+        row["ra"] = row["ra_deg"]
+    if "dec_deg" in row:
+        row["dec"] = row["dec_deg"]
+
     if run_stats:
-        stats = _compute_stats_for_csv(lc_path)
+        stats = _compute_stats_from_skypatrol_csv(lc_path)
         row.update(stats)
 
     if run_events:
@@ -90,16 +102,63 @@ def _build_candidate_row(
     return pd.DataFrame([row])
 
 
-def _compute_stats_for_csv(lc_path: Path) -> dict:
-    """Run compute_stats on a SkyPatrol CSV file and return a flat dict."""
+def _compute_stats_from_skypatrol_csv(lc_path: Path) -> dict:
+    """Compute basic stats directly from a SkyPatrol-format CSV.
+
+    Uses ``read_skypatrol_csv`` which handles the column remapping
+    (JD, Mag, Mag Error, Filter, Quality, Camera → internal names).
+    """
     try:
-        from malca.stats import compute_stats
-        candidate_id = lc_path.stem
-        parent = str(lc_path.parent)
-        _df, summary = compute_stats(candidate_id, parent)
-        return summary if isinstance(summary, dict) else {}
+        from malca.utils import read_skypatrol_csv
+
+        df = read_skypatrol_csv(lc_path)
+        if df.empty:
+            return {}
+
+        # Use g-band preferentially
+        df_g = df[df["v_g_band"] == 0]
+        if df_g.empty:
+            df_g = df  # fall back to all data
+
+        # Filter to good data
+        good = df_g[(df_g["good_bad"] == 1)].copy()
+        if good.empty:
+            good = df_g.copy()
+
+        jd = good["JD"].values
+        mag = good["mag"].values
+        err = good["error"].values
+
+        n_points = len(good)
+        jd_start = float(np.nanmin(jd)) if n_points else np.nan
+        jd_end = float(np.nanmax(jd)) if n_points else np.nan
+        span = jd_end - jd_start if n_points else 0.0
+
+        dt = np.diff(np.sort(jd))
+        cadence_median = float(np.nanmedian(dt)) if len(dt) else np.nan
+
+        mean_mag = float(np.nanmean(mag))
+        median_mag = float(np.nanmedian(mag))
+        std_mag = float(np.nanstd(mag, ddof=1)) if n_points > 1 else 0.0
+
+        n_cameras = int(good["camera#"].nunique()) if "camera#" in good.columns else 0
+
+        return {
+            "n_points": n_points,
+            "n_cameras": n_cameras,
+            "baseline_mag": median_mag,
+            "cadence_median_days": cadence_median,
+            "stats_jd_start": jd_start,
+            "stats_jd_end": jd_end,
+            "stats_time_span_days": span,
+            "stats_photometry_mean_mag": mean_mag,
+            "stats_photometry_median_mag": median_mag,
+            "stats_photometry_std_mag": std_mag,
+            "stats_file_points_total": len(df),
+            "stats_file_points_kept_after_filter": n_points,
+        }
     except Exception as e:
-        print(f"[fetch] Warning: compute_stats failed: {e}")
+        print(f"[fetch] Warning: stats computation failed: {e}")
         return {}
 
 

@@ -4,7 +4,6 @@ Provides three entry points:
   - download_lightcurve_by_id(asas_sn_id)
   - download_lightcurve_by_gaia_id(gaia_id)
   - cone_search(ra, dec, radius_arcsec)
-  - download_lightcurve_for_target(asas_sn_id)
 
 Downloaded CSVs are saved in SkyPatrol web-CSV format so that
 ``malca.utils.read_skypatrol_csv`` can read them unchanged.
@@ -12,9 +11,7 @@ Downloaded CSVs are saved in SkyPatrol web-CSV format so that
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
-from typing import Optional
 
 import pandas as pd
 
@@ -47,12 +44,6 @@ def _ensure_cache(cache_dir: Path) -> Path:
 # ---------------------------------------------------------------------------
 # Column remapping: pyasassn -> SkyPatrol web-CSV format
 # ---------------------------------------------------------------------------
-# pyasassn LightCurve.data has columns:
-#   jd, flux, flux_err, mag, mag_err, limit, fwhm, asas_sn_id, cam
-#
-# SkyPatrol web CSV (what read_skypatrol_csv expects):
-#   JD, Flux, Flux Error, Mag, Mag Error, Limit, FWHM, Filter, Quality, Camera
-#
 _PYASASSN_TO_WEB = {
     "jd": "JD",
     "flux": "Flux",
@@ -69,13 +60,11 @@ def _save_lc_as_skypatrol_csv(lc_data: pd.DataFrame, out_path: Path, filter_band
     """Remap pyasassn DataFrame columns and save as SkyPatrol web-CSV format."""
     df = lc_data.rename(columns=_PYASASSN_TO_WEB).copy()
 
-    # pyasassn has no Filter or Quality columns — synthesize them
     if "Filter" not in df.columns:
         df["Filter"] = filter_band
     if "Quality" not in df.columns:
-        df["Quality"] = "G"  # mark all as good by default
+        df["Quality"] = "G"
 
-    # Keep only the web-CSV columns in order
     web_cols = ["JD", "Flux", "Flux Error", "Mag", "Mag Error", "Limit", "FWHM", "Filter", "Quality", "Camera"]
     for c in web_cols:
         if c not in df.columns:
@@ -86,6 +75,47 @@ def _save_lc_as_skypatrol_csv(lc_data: pd.DataFrame, out_path: Path, filter_band
     return out_path
 
 
+def _query_catalog_info(
+    target_ids: list,
+    id_col: str = "asas_sn_id",
+    catalog: str = "master_list",
+) -> dict:
+    """Query SkyPatrol catalog for metadata (RA, Dec, etc.) without downloading LCs.
+
+    Returns a dict with keys: asas_sn_id, ra_deg, dec_deg (and any other catalog columns).
+    """
+    client = _get_client()
+    result = client.query_list(target_ids, id_col=id_col, catalog=catalog, download=False)
+
+    if result is None or (isinstance(result, pd.DataFrame) and result.empty):
+        return {}
+    if isinstance(result, pd.DataFrame) and len(result) > 0:
+        return result.iloc[0].to_dict()
+    return {}
+
+
+def _download_lc(
+    target_ids: list,
+    id_col: str = "asas_sn_id",
+    catalog: str = "master_list",
+    out_path: Path | None = None,
+) -> pd.DataFrame | None:
+    """Download light curve data. Returns the LC DataFrame or None."""
+    client = _get_client()
+    result = client.query_list(target_ids, id_col=id_col, catalog=catalog, download=True)
+
+    # pyasassn returns different types depending on success — handle both
+    if result is None:
+        return None
+    if hasattr(result, "data"):
+        return result.data
+    if isinstance(result, pd.DataFrame) and not result.empty:
+        # Sometimes it returns the LC directly as a DataFrame
+        if "jd" in result.columns or "JD" in result.columns:
+            return result
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -93,51 +123,50 @@ def _save_lc_as_skypatrol_csv(lc_data: pd.DataFrame, out_path: Path, filter_band
 def download_lightcurve_by_id(
     asas_sn_id: str,
     cache_dir: str | Path = _DEFAULT_CACHE,
-) -> Path:
-    """Download a light curve by ASAS-SN ID.  Returns path to saved CSV."""
+) -> tuple[Path, dict]:
+    """Download a light curve by ASAS-SN ID.
+
+    Returns (path_to_csv, catalog_info_dict).
+    """
     cache = _ensure_cache(cache_dir)
     out = cache / f"{asas_sn_id}.csv"
-    if out.exists() and out.stat().st_size > 0:
-        return out
 
-    client = _get_client()
-    result = client.query_list(
-        [int(asas_sn_id)],
-        id_col="asas_sn_id",
-        catalog="master_list",
-        download=True,
-    )
-    lc = result.data
+    # Always query catalog for metadata
+    catalog_info = _query_catalog_info([int(asas_sn_id)], id_col="asas_sn_id", catalog="master_list")
+
+    if out.exists() and out.stat().st_size > 0:
+        return out, catalog_info
+
+    lc = _download_lc([int(asas_sn_id)], id_col="asas_sn_id", catalog="master_list")
     if lc is None or lc.empty:
         raise RuntimeError(f"No light curve returned for ASAS-SN ID {asas_sn_id}")
 
     _save_lc_as_skypatrol_csv(lc, out)
-    return out
+    return out, catalog_info
 
 
 def download_lightcurve_by_gaia_id(
     gaia_id: str,
     cache_dir: str | Path = _DEFAULT_CACHE,
-) -> Path:
-    """Download a light curve by Gaia DR3 source_id.  Returns path to saved CSV."""
+) -> tuple[Path, dict]:
+    """Download a light curve by Gaia DR3 source_id.
+
+    Returns (path_to_csv, catalog_info_dict).
+    """
     cache = _ensure_cache(cache_dir)
     out = cache / f"gaia_{gaia_id}.csv"
-    if out.exists() and out.stat().st_size > 0:
-        return out
 
-    client = _get_client()
-    result = client.query_list(
-        [int(gaia_id)],
-        id_col="gaia_id",
-        catalog="stellar_main",
-        download=True,
-    )
-    lc = result.data
+    catalog_info = _query_catalog_info([int(gaia_id)], id_col="gaia_id", catalog="stellar_main")
+
+    if out.exists() and out.stat().st_size > 0:
+        return out, catalog_info
+
+    lc = _download_lc([int(gaia_id)], id_col="gaia_id", catalog="stellar_main")
     if lc is None or lc.empty:
         raise RuntimeError(f"No light curve returned for Gaia ID {gaia_id}")
 
     _save_lc_as_skypatrol_csv(lc, out)
-    return out
+    return out, catalog_info
 
 
 def cone_search(
@@ -146,7 +175,7 @@ def cone_search(
     radius_arcsec: float = 5.0,
     catalog: str = "stellar_main",
 ) -> pd.DataFrame:
-    """Cone search on SkyPatrol.  Returns catalog DataFrame (no LC download)."""
+    """Cone search on SkyPatrol. Returns catalog DataFrame (no LC download)."""
     client = _get_client()
     radius_deg = radius_arcsec / 3600.0
     result = client.cone_search(
@@ -157,15 +186,10 @@ def cone_search(
         catalog=catalog,
         download=False,
     )
-    if result is None or (hasattr(result, "catalog_info") and result.catalog_info.empty):
+    if result is None:
         return pd.DataFrame()
-
-    return result.catalog_info
-
-
-def download_lightcurve_for_target(
-    asas_sn_id: str,
-    cache_dir: str | Path = _DEFAULT_CACHE,
-) -> Path:
-    """Alias for download_lightcurve_by_id."""
-    return download_lightcurve_by_id(asas_sn_id, cache_dir=cache_dir)
+    if isinstance(result, pd.DataFrame):
+        return result
+    if hasattr(result, "catalog_info"):
+        return result.catalog_info
+    return pd.DataFrame()
