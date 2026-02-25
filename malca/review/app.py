@@ -2392,7 +2392,7 @@ def create_layout():
             dcc.Checklist(
                 id='filter-unreviewed',
                 options=[{'label': ' Only unreviewed', 'value': 'yes'}],
-                value=['yes'],
+                value=[],
                 style={'margin-bottom': '3px'},
                 persistence=True,
                 persistence_type='local',
@@ -2400,7 +2400,7 @@ def create_layout():
             dcc.Checklist(
                 id='filter-failed',
                 options=[{'label': ' Require failed_any=False', 'value': 'yes'}],
-                value=['yes'],
+                value=[],
                 style={'margin-bottom': '6px'},
                 persistence=True,
                 persistence_type='local',

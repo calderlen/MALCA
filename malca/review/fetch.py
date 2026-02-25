@@ -78,12 +78,22 @@ def _build_candidate_row(
         "lc_path": str(lc_path),
     }
 
-    # Populate metadata from catalog query
+    # Forward ALL catalog metadata into the candidate row
     if catalog_info:
-        for key in ("asas_sn_id", "ra_deg", "dec_deg", "gaia_id", "source_id",
-                     "mean_vmag", "phot_g_mean_mag", "catalog_sources"):
-            if key in catalog_info and catalog_info[key] is not None:
-                row[key] = catalog_info[key]
+        # Column name mapping: SkyPatrol → MALCA
+        _CATALOG_TO_MALCA = {
+            "plx": "parallax",
+            "plx_d": "parallax_error",
+            "pm_ra": "pmra",
+            "pm_dec": "pmdec",
+            "gaia_eff_temp": "teff_gspphot",
+            "gaia_mag": "phot_g_mean_mag",
+        }
+        for key, val in catalog_info.items():
+            if val is None:
+                continue
+            malca_key = _CATALOG_TO_MALCA.get(key, key)
+            row[malca_key] = val
 
     # Alias ra/dec for downstream modules that expect these names
     if "ra_deg" in row:
