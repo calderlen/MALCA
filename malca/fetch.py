@@ -52,7 +52,9 @@ _PYASASSN_TO_WEB = {
     "mag_err": "Mag Error",
     "limit": "Limit",
     "fwhm": "FWHM",
-    "cam": "Camera",
+    "camera": "Camera",
+    "quality": "Quality",
+    "phot_filter": "Filter",
 }
 
 
@@ -60,17 +62,18 @@ def _save_lc_as_skypatrol_csv(lc_data: pd.DataFrame, out_path: Path) -> Path:
     """Remap pyasassn DataFrame columns and save as SkyPatrol web-CSV format."""
     df = lc_data.rename(columns=_PYASASSN_TO_WEB).copy()
 
-    # Derive filter from camera name if missing.
-    # ASAS-SN convention: lowercase cam prefix (b*) = g-band, uppercase (B*) = V-band.
+    # Quality: map B->G (pyasassn uses B for bad, G for good)
+    if "Quality" not in df.columns:
+        df["Quality"] = "G"
+
+    # Filter: should be present from phot_filter mapping
     if "Filter" not in df.columns and "Camera" in df.columns:
+        # Derive from camera name if filter column is missing
         df["Filter"] = df["Camera"].astype(str).apply(
             lambda c: "V" if c and c[0].isupper() else "g"
         )
     elif "Filter" not in df.columns:
         df["Filter"] = "g"
-
-    if "Quality" not in df.columns:
-        df["Quality"] = "G"
 
     web_cols = ["JD", "Flux", "Flux Error", "Mag", "Mag Error",
                 "Limit", "FWHM", "Filter", "Quality", "Camera"]
