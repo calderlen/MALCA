@@ -54,7 +54,7 @@ from malca.config.config_ltv import (
 )
 from malca.config.config_paths import LCV2_ROOT, LTV_OUTPUT_DIR
 from malca.config.config_io import PARQUET_OUTPUT_COMPRESSION
-from malca.utils import read_lc_dat2, read_lc_csv, clean_lc
+from malca.utils import read_lc_dat2, clean_lc
 
 from malca.ltv.optim import (
     _detrend_fast,
@@ -503,7 +503,7 @@ def process_one_lc(
     cfg: Config,
 ) -> dict | None:
     basename = os.path.basename(path)
-    asassn_id = basename.replace('.csv', '')
+    asassn_id = basename.replace('.dat2', '')
     target = int(asassn_id)
 
     rows = id_df.loc[id_df["asas_sn_id"] == target]
@@ -515,7 +515,7 @@ def process_one_lc(
     p_mag = float(row["pstarrs_g_mag"])
 
     dir_path = os.path.dirname(path)
-    df_g, df_v = read_lc_csv(asassn_id, dir_path)
+    df_g, df_v = read_lc_dat2(asassn_id, dir_path)
 
     if df_g.empty:
         return None
@@ -756,7 +756,7 @@ def run_mag_bin(cfg: Config) -> None:
         id_df = read_index_csv(index_path)
         id_map[str(lc_dir)] = id_df
 
-        csv_files = sorted(lc_dir.glob("*.csv"))
+        csv_files = sorted(lc_dir.glob("*.dat2"))
 
         for file_path in csv_files:
             if str(file_path) not in processed_files:
