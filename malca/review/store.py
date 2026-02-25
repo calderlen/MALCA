@@ -1234,3 +1234,73 @@ def export_reviews(conn: sqlite3.Connection, out_path: Path, only_reviewed: bool
         df.to_parquet(out_path, index=False, compression="zstd")
     else:
         df.to_csv(out_path, index=False)
+
+
+# ---------------------------------------------------------------------------
+# Raw light-curve file import
+# ---------------------------------------------------------------------------
+_LC_CACHE_DIR = Path("~/.malca/cache/imported").expanduser()
+
+
+def import_lightcurve_files(
+    conn: sqlite3.Connection,
+    file_path: Path,
+    *,
+    characterize: bool = False,
+    vet: bool = False,
+) -> tuple[int, int]:
+    """Import raw light-curve CSV/parquet files into the review DB.
+
+    If the file has an ``asas_sn_id`` column with multiple unique values,
+    each source is split into its own cached CSV.  Otherwise the file is
+    treated as a single source and the filename stem is used as candidate_id.
+
+    Returns (n_rows, n_new) like ``import_candidates``.
+    """
+    file_path = Path(file_path).expanduser().resolve()
+    if not file_path.exists():
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    df = load_candidates_file(file_path)
+    if df.empty:
+        return 0, 0
+
+    _LC_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Detect multi-source files
+    id_col = None
+    for col in ("asas_sn_id", "source_id", "candidate_id"):
+        if col in df.columns and df[col].nunique() > 1:
+            id_col = col
+            break
+
+    if id_col and df[id_col].nunique() > 1:
+        # Multi-source: split into individual LC files
+        rows = []
+        for src_id, sub in df.groupby(id_col):
+            cache_file = _LC_CACHE_DIR / f"{src_id}.csv"
+            sub.to_csv(cache_file, index=False)
+            rows.append({
+                "candidate_id": str(src_id),
+                "lc_path": str(cache_file),
+            })
+        candidate_df = pd.DataFrame(rows)
+    else:
+        # Single-source: copy to cache
+        candidate_id = file_path.stem
+        cache_file = _LC_CACHE_DIR / file_path.name
+        if cache_file != file_path:
+            import shutil
+            shutil.copy2(file_path, cache_file)
+        candidate_df = pd.DataFrame([{
+            "candidate_id": candidate_id,
+            "lc_path": str(cache_file),
+        }])
+
+    return import_candidates(
+        conn,
+        candidate_df,
+        source_path=str(file_path),
+        characterize_before_import=characterize,
+        vet_before_import=vet,
+    )

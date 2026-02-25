@@ -2365,6 +2365,7 @@ def create_layout():
         dcc.Store(id='filter-params', data={}),
         dcc.Store(id='import-trigger', data=0),  # triggers queue refresh after import
         dcc.Store(id='activity-visible', data=False),  # collapsed by default
+        dcc.Store(id='cone-results-data', data=None),  # cone search catalog rows
         dcc.Store(id='plot-render-request', data={'nonce': 1, 'ts': 0.0, 'state': {'idx': 0, 'plot_mode': 'native', 'overlay_values': ['baseline', 'markers', 'residuals', 'filter_bad_cameras', 'diagnostics'], 'selected_cameras': [], 'preset': 'Diagnostics', 'theme': 'dark', 'residual_height': 0.28, 'baseline_opacity': 0.5}}),
         dcc.Store(id='plot-render-applied', data=0),
         dcc.Store(id='plot-defaults-initialized', data=False),
@@ -2461,10 +2462,47 @@ def create_layout():
 
             html.Hr(),
 
+            # -- Fetch Candidate --
+            html.Div('Fetch Candidate', className='section-title', style={'color': '#0af'}),
+            dcc.Dropdown(
+                id='fetch-type',
+                options=[
+                    {'label': 'ASAS-SN ID', 'value': 'asassn'},
+                    {'label': 'Gaia DR3 ID', 'value': 'gaia'},
+                    {'label': 'Coords (RA Dec)', 'value': 'coords'},
+                ],
+                value='asassn',
+                clearable=False,
+                style={'margin-bottom': '4px', 'font-size': '11px'},
+            ),
+            dcc.Input(id='fetch-query', placeholder='e.g. 427299085038300900', type='text',
+                      style={**_inp_style, 'marginBottom': '4px'}),
+            html.Button('Fetch & Analyze', id='fetch-btn', n_clicks=0,
+                        className='action-btn',
+                        style={'width': '100%', 'fontSize': '11px', 'fontWeight': 'bold',
+                               'backgroundColor': '#1a4023', 'borderColor': '#216135', 'color': '#6f6'}),
+            dcc.Loading(
+                id='loading-fetch', type='dot',
+                children=html.Div(id='fetch-status',
+                                  style={'fontSize': '11px', 'marginTop': '4px', 'color': '#7da8c4'}),
+            ),
+            html.Div(id='cone-results-container', style={'fontSize': '10px', 'marginTop': '4px'}),
+
+            html.Hr(),
+
+            # -- Import --
             html.Div('Import', className='section-title'),
             dcc.Input(id='import-path', placeholder='Candidates file path', type='text',
                      style=_inp_style,
                      persistence=True, persistence_type='local'),
+
+            dcc.Checklist(
+                id='import-lc-mode',
+                options=[{'label': ' Raw light curve file (CSV/parquet with JD, mag columns)', 'value': 'yes'}],
+                value=[],
+                style={'margin-bottom': '4px', 'fontSize': '10px'},
+                persistence=True, persistence_type='local',
+            ),
 
             html.Label('Characterize on import:'),
             dcc.Checklist(
@@ -2647,6 +2685,21 @@ def create_layout():
                             html.Div(id='plot-status-panel', className='plot-status'),
                             html.Div(id='camera-filter-panel', className='camera-diag'),
                             html.Div(id='metadata-health-indicator'),
+                            # Pipeline status chips
+                            html.Div([
+                                html.Div(id='pipeline-status-chips',
+                                         style={'display': 'flex', 'gap': '6px', 'marginTop': '6px',
+                                                'flexWrap': 'wrap', 'fontSize': '10px'}),
+                                html.Button('Run All Missing', id='run-pipeline-btn', n_clicks=0,
+                                            className='compact-btn',
+                                            style={'fontSize': '10px', 'marginTop': '4px'}),
+                                dcc.Loading(
+                                    id='loading-pipeline', type='dot',
+                                    children=html.Div(id='pipeline-run-status',
+                                                      style={'fontSize': '10px', 'marginTop': '2px',
+                                                             'color': '#7da8c4'}),
+                                ),
+                            ], style={'marginTop': '6px'}),
                         ], id='diagnostics-section'),
                         # Grouped candidate metadata sections (collapsible, includes stats)
                         html.Div([
@@ -4569,14 +4622,35 @@ def show_vetting_mode_status(import_path):
      State('characterize-dust', 'value'),
      State('characterize-starhorse', 'value'),
      State('vet-on-import', 'value'),
+     State('import-lc-mode', 'value'),
      State('import-trigger', 'data')],
     prevent_initial_call=True
 )
 def import_candidates_callback(n_clicks, import_path, characterize_on,
-                               crossmatch, gaia_cache, chunk_size, dust_on, starhorse, vet_on, current_trigger):
+                               crossmatch, gaia_cache, chunk_size, dust_on, starhorse, vet_on,
+                               lc_mode, current_trigger):
     """Import candidates from file."""
     if not n_clicks or not import_path:
         return no_update, no_update
+
+    # Raw light curve mode
+    if 'yes' in (lc_mode or []):
+        try:
+            from malca.review.store import import_lightcurve_files
+            with closing(db_connect(Path(DB_PATH))) as conn:
+                enable_characterize = 'yes' in (characterize_on or [])
+                enable_vetting = 'yes' in (vet_on or [])
+                n_rows, n_new = import_lightcurve_files(
+                    conn, Path(import_path),
+                    characterize=enable_characterize,
+                    vet=enable_vetting,
+                )
+                return (
+                    f"✓ LC import: {n_rows} rows ({n_new} new)",
+                    (current_trigger or 0) + 1,
+                )
+        except Exception as e:
+            return f"✗ LC import failed: {str(e)}", no_update
 
     try:
         with closing(db_connect(Path(DB_PATH))) as conn:
@@ -4605,6 +4679,171 @@ def import_candidates_callback(n_clicks, import_path, characterize_on,
             )
     except Exception as e:
         return f"✗ Import failed: {str(e)}", no_update
+
+
+# Fetch and Analyze Candidate
+@app.callback(
+    [Output('fetch-status', 'children'),
+     Output('import-trigger', 'data', allow_duplicate=True),
+     Output('cone-results-container', 'children'),
+     Output('cone-results-data', 'data')],
+    Input('fetch-btn', 'n_clicks'),
+    [State('fetch-type', 'value'),
+     State('fetch-query', 'value'),
+     State('import-trigger', 'data')],
+    prevent_initial_call=True
+)
+def fetch_candidate_callback(n_clicks, fetch_type, fetch_query, current_trigger):
+    """Fetch an ASAS-SN light curve, process, and import it."""
+    if not n_clicks or not fetch_query:
+        return no_update, no_update, no_update, no_update
+
+    query = fetch_query.strip()
+    if not query:
+        return "✗ Query cannot be empty", no_update, no_update, no_update
+
+    try:
+        if fetch_type == 'coords':
+            # Parse RA/Dec
+            from malca.review.fetch import fetch_cone_search
+            parts = query.replace(',', ' ').split()
+            if len(parts) < 2:
+                return "✗ Enter RA and Dec separated by space", no_update, no_update, no_update
+            ra, dec = float(parts[0]), float(parts[1])
+            radius = float(parts[2]) if len(parts) > 2 else 5.0
+            catalog_df = fetch_cone_search(ra, dec, radius_arcsec=radius)
+            if catalog_df.empty:
+                return "✗ No sources found in cone search", no_update, '', no_update
+            # Show results as clickable list
+            show_cols = [c for c in ['asas_sn_id', 'ra_deg', 'dec_deg', 'gaia_id', 'mean_vmag']
+                         if c in catalog_df.columns]
+            if not show_cols:
+                show_cols = catalog_df.columns[:5].tolist()
+            table = html.Table([
+                html.Thead(html.Tr([html.Th(c, style={'padding': '2px 6px'}) for c in show_cols])),
+                html.Tbody([
+                    html.Tr(
+                        [html.Td(str(row.get(c, '')), style={'padding': '2px 6px'}) for c in show_cols],
+                        id={'type': 'cone-row', 'index': i},
+                        style={'cursor': 'pointer'},
+                        className='cone-result-row',
+                    )
+                    for i, row in catalog_df[show_cols].iterrows()
+                ]),
+            ], style={'borderCollapse': 'collapse', 'width': '100%', 'marginTop': '4px',
+                      'border': '1px solid #3c5e75', 'color': '#cad9e5'})
+            n_found = len(catalog_df)
+            cone_data = catalog_df.to_dict('records')
+            return (
+                f"Found {n_found} source(s). Click a row to fetch its LC.",
+                no_update,
+                table,
+                cone_data,
+            )
+
+        elif fetch_type == 'gaia':
+            from malca.review.fetch import fetch_and_analyze_by_gaia_id
+            df, lc_path = fetch_and_analyze_by_gaia_id(query)
+        else:
+            # Default: ASAS-SN ID
+            from malca.review.fetch import fetch_and_analyze_by_id
+            df, lc_path = fetch_and_analyze_by_id(query)
+
+        if df is None or df.empty:
+            return f"✗ No data for {query}", no_update, '', no_update
+
+        with closing(db_connect(Path(DB_PATH))) as conn:
+            n_rows, n_new = import_candidates(
+                conn, df, source_path=f"fetch://{fetch_type}/{query}",
+                characterize_before_import=True,
+                vet_before_import=True,
+            )
+            status = f"✓ Added {query} ({n_new} new)"
+            return status, (current_trigger or 0) + 1, '', no_update
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return f"✗ Fetch failed: {str(e)}", no_update, '', no_update
+
+
+# Pipeline status chips (updated when candidate changes)
+@app.callback(
+    Output('pipeline-status-chips', 'children'),
+    Input('queue-data', 'data'),
+    State('current-index', 'data'),
+    prevent_initial_call=True
+)
+def update_pipeline_status_chips(queue_data, idx):
+    """Show pipeline stage completion status for the current candidate."""
+    if not queue_data or idx is None:
+        return []
+    items = queue_data if isinstance(queue_data, list) else []
+    if not items or idx >= len(items):
+        return []
+
+    try:
+        payload = items[idx].get('payload', {})
+        if isinstance(payload, str):
+            import json
+            payload = json.loads(payload)
+
+        from malca.review.pipeline import detect_pipeline_status
+        status = detect_pipeline_status(payload)
+
+        color_map = {'complete': '#2d6a2d', 'partial': '#6a5c2d', 'missing': '#444'}
+        chips = []
+        for stage, state in status.items():
+            chips.append(html.Span(
+                f"{'●' if state == 'complete' else '○'} {stage.capitalize()}",
+                style={
+                    'padding': '1px 6px',
+                    'borderRadius': '8px',
+                    'backgroundColor': color_map.get(state, '#444'),
+                    'color': '#e0e0e0' if state != 'missing' else '#666',
+                    'fontSize': '10px',
+                },
+            ))
+        return chips
+    except Exception:
+        return []
+
+
+# Run missing pipeline stages
+@app.callback(
+    [Output('pipeline-run-status', 'children'),
+     Output('import-trigger', 'data', allow_duplicate=True)],
+    Input('run-pipeline-btn', 'n_clicks'),
+    [State('queue-data', 'data'),
+     State('current-index', 'data'),
+     State('import-trigger', 'data')],
+    prevent_initial_call=True
+)
+def run_pipeline_callback(n_clicks, queue_data, idx, current_trigger):
+    """Run missing pipeline stages for the current candidate."""
+    if not n_clicks or not queue_data or idx is None:
+        return no_update, no_update
+
+    items = queue_data if isinstance(queue_data, list) else []
+    if not items or idx >= len(items):
+        return "No candidate selected", no_update
+
+    candidate_id = items[idx].get('candidate_id')
+    if not candidate_id:
+        return "No candidate_id", no_update
+
+    try:
+        from malca.review.pipeline import run_missing_stages
+        with closing(db_connect(Path(DB_PATH))) as conn:
+            stages = run_missing_stages(conn, candidate_id)
+        if stages:
+            return f"✓ Ran: {', '.join(stages)}", (current_trigger or 0) + 1
+        else:
+            return "All stages already complete (or missing requirements)", no_update
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return f"✗ Pipeline failed: {str(e)}", no_update
 
 
 # Export reviews
@@ -4708,11 +4947,9 @@ def main():
             PLOT_DIR = str(Path('./plots').resolve())
             print(f"📂 Auto-detected plot directory: {Path(PLOT_DIR).resolve()}")
         else:
-            print("❌ Error: --plot-dir required (or run from a directory containing ./plots)")
-            print("\nUsage:")
-            print("  1. From run directory: cd output/runs/YOUR_RUN && malca review")
-            print("  2. With explicit path: malca review --plot-dir /path/to/plots")
-            sys.exit(1)
+            # Standalone mode — no plot dir required
+            PLOT_DIR = None
+            print("ℹ️  Running in standalone mode (no --plot-dir)")
 
     print(f"🚀 Starting MALCA Dash Review App...")
     print(f"💾 Database: {DB_PATH}")

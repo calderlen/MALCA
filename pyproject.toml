@@ -29,6 +29,7 @@ dependencies = [
     "pyvo",
     "banyan-sigma @ git+https://github.com/jgagneastro/banyan_sigma.git",
     "requests",
+    "skypatrol",
     "joblib",
     "lightgbm",
     "pytest",
