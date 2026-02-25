@@ -678,12 +678,14 @@ def import_candidates(
             from malca.vetting import vet_candidates
 
             # --- vetting cache: skip candidates already vetted ----
-            _vetting_cache_path = Path(source_path + ".vetting_cache.parquet")
+            # Only use file-based cache when source_path is a real filesystem path
+            _use_cache = source_path and not source_path.startswith("fetch://")
+            _vetting_cache_path = Path(source_path + ".vetting_cache.parquet") if _use_cache else None
             _cache_df = None
             _id_col = "candidate_id" if "candidate_id" in df_use.columns else None
             n_new = len(df_use)  # default: vet everything
 
-            if _id_col and _vetting_cache_path.exists():
+            if _id_col and _vetting_cache_path is not None and _vetting_cache_path.exists():
                 try:
                     _cache_df = pd.read_parquet(_vetting_cache_path)
                     cached_ids = set(_cache_df[_id_col])

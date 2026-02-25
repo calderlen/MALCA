@@ -469,7 +469,7 @@ def identify_bad_cameras(
     cam_col: str = "camera#",
     t_col: str = "JD",
     mag_col: str = "mag",
-) -> set[int]:
+) -> set:
     """
     Identify cameras with anomalously high scatter compared to other cameras
     in overlapping time windows.
@@ -503,7 +503,7 @@ def identify_bad_cameras(
 
     Returns
     -------
-    set[int]
+    set
         Camera IDs identified as having anomalously high scatter
     """
     if df_lc.empty:
@@ -569,13 +569,13 @@ def identify_bad_cameras(
         t_window += step
 
     # Identify bad cameras: those with consistently high scatter ratios
-    bad_cameras = set()
+    bad_cameras: set = set()
     for cam, ratios in cam_scatter_ratios.items():
         if len(ratios) >= 3:  # Need at least 3 comparisons
             # Use median ratio to be robust to outliers
             median_ratio = np.median(ratios)
             if median_ratio > scatter_ratio_threshold:
-                bad_cameras.add(int(cam))
+                bad_cameras.add(cam)
 
     # Optional: also check against raw2 expected scatter
     if raw2_df is not None and not raw2_df.empty:
@@ -595,7 +595,7 @@ def identify_bad_cameras(
             expected = raw2_row["expected_scatter"].values[0]
             if expected > 0 and actual_scatter > 3 * expected:
                 # Actual scatter is way higher than expected from raw data
-                bad_cameras.add(int(cam))
+                bad_cameras.add(cam)
 
     return bad_cameras
 
@@ -611,7 +611,7 @@ def identify_offset_cameras(
     t_col: str = "JD",
     mag_col: str = "mag",
     remove_full_camera: bool = True,
-) -> tuple[set[int], set[tuple[int, float, float]]]:
+) -> tuple[set, set[tuple]]:
     """
     Identify cameras with systematic median offsets from other cameras.
 
@@ -639,7 +639,7 @@ def identify_offset_cameras(
 
     Returns
     -------
-    bad_cameras : set[int]
+    bad_cameras : set
         Camera IDs flagged for removal (entire camera)
     bad_windows : set[tuple[int, float, float]]
         (camera_id, window_start_jd, window_end_jd) tuples for targeted removal
@@ -656,7 +656,7 @@ def identify_offset_cameras(
     jd_max = df_lc[t_col].max()
 
     # Track offset violations per camera
-    cam_offset_violations: dict[int, list[tuple[float, float]]] = {int(c): [] for c in cameras}
+    cam_offset_violations = {c: [] for c in cameras}
 
     # Slide window across time range
     window_start = jd_min
@@ -676,7 +676,7 @@ def identify_offset_cameras(
         for cam in cameras:
             cam_df = window_df[window_df[cam_col] == cam]
             if len(cam_df) >= min_overlap_points:
-                cam_medians[int(cam)] = np.median(cam_df[mag_col].dropna().values)
+                cam_medians[cam] = np.median(cam_df[mag_col].dropna().values)
 
         if len(cam_medians) < min_cameras_for_comparison + 1:
             window_start += window_step
@@ -702,8 +702,8 @@ def identify_offset_cameras(
         window_start += window_step
 
     # Determine which cameras to flag
-    bad_cameras: set[int] = set()
-    bad_windows: set[tuple[int, float, float]] = set()
+    bad_cameras: set = set()
+    bad_windows: set[tuple] = set()
 
     for cam, violations in cam_offset_violations.items():
         if len(violations) >= 2:  # Need at least 2 violations to be confident
@@ -728,7 +728,7 @@ def identify_catastrophic_outlier_cameras(
     support_excursion_threshold: float = CATASTROPHIC_SUPPORT_EXCURSION,
     min_catastrophic_points: int = 1,
     max_catastrophic_fraction: float = CATASTROPHIC_MAX_FRACTION,
-) -> set[int]:
+) -> set:
     """
     Identify cameras with isolated catastrophic magnitude excursions.
 
@@ -749,7 +749,7 @@ def identify_catastrophic_outlier_cameras(
 
     camera_medians = df_use.groupby(cam_col)[mag_col].median().to_dict()
     cameras = sorted(df_use[cam_col].dropna().unique())
-    bad_cameras: set[int] = set()
+    bad_cameras: set = set()
 
     for cam in cameras:
         cam_df = df_use[df_use[cam_col] == cam]
@@ -795,10 +795,7 @@ def identify_catastrophic_outlier_cameras(
 
         frac = unsupported_count / float(n_cam)
         if (unsupported_count >= int(min_catastrophic_points)) and (frac <= float(max_catastrophic_fraction)):
-            try:
-                bad_cameras.add(int(cam))
-            except Exception:
-                continue
+            bad_cameras.add(cam)
 
     return bad_cameras
 
@@ -814,7 +811,7 @@ def filter_bad_cameras(
     offset_sigma_threshold: float = 15.0,
     remove_full_camera: bool = True,
     **kwargs
-) -> tuple[pd.DataFrame, set[int]]:
+) -> tuple[pd.DataFrame, set]:
     """
     Filter out cameras with anomalously high scatter or systematic offsets.
 
@@ -851,7 +848,7 @@ def filter_bad_cameras(
     -------
     df_filtered : pd.DataFrame
         DataFrame with bad cameras/points removed
-    bad_cameras : set[int]
+    bad_cameras : set
         Set of camera IDs that were fully removed
     """
     # Auto-load raw2 if lc_path provided and raw2_df not explicitly given
@@ -865,7 +862,7 @@ def filter_bad_cameras(
     
     cam_col = kwargs.get("cam_col", "camera#")
     t_col = kwargs.get("t_col", "JD")
-    bad_cameras: set[int] = set()
+    bad_cameras: set = set()
     df_filtered = df_lc
     
     # 1. Scatter filter

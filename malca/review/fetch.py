@@ -134,9 +134,6 @@ def _compute_stats_from_skypatrol_csv(lc_path: Path) -> dict:
         if good.empty:
             good = df_g.copy()
 
-        jd = np.sort(good["JD"].values)
-        mag = good.loc[good["JD"].argsort() if len(good) else [], "mag"].values
-        # re-sort together
         sort_idx = np.argsort(good["JD"].values)
         jd = good["JD"].values[sort_idx]
         mag = good["mag"].values[sort_idx]
