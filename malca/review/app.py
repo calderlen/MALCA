@@ -2609,7 +2609,7 @@ def create_layout():
             html.Div([
                 html.Span(id='progress-text', style={'color': '#0af', 'font-size': '11px'}),
                 html.Span(id='review-progress-indicator', style={'color': '#9fb6cb', 'font-size': '11px', 'margin-left': '10px'}),
-                html.Span(id='pace-timer-display', style={'color': '#aaa', 'font-size': '11px', 'margin-left': '10px', 'font-family': 'monospace'}),
+                html.Span(id='pace-timer-display', style={'display': 'none'}),  # hidden placeholder
                 html.Div([
                     html.Span(id='header-asas-sn-id', className='item'),
                     html.Span(id='header-path', className='item path'),
@@ -2861,13 +2861,16 @@ app.clientside_callback(
 app.clientside_callback(
     """
     function(n_intervals, startTime, toggle) {
-        if (!toggle || !toggle.length || toggle.indexOf('yes') === -1 || !startTime) {
-            return '';
+        // Toggle the review-progress-indicator visibility
+        var el = document.getElementById('review-progress-indicator');
+        if (el) {
+            if (toggle && toggle.indexOf('yes') !== -1) {
+                el.style.display = '';
+            } else {
+                el.style.display = 'none';
+            }
         }
-        var elapsed = (Date.now() - startTime) / 1000;
-        var mins = Math.floor(elapsed / 60);
-        var secs = Math.floor(elapsed % 60);
-        return '⏱ ' + (mins > 0 ? mins + 'm ' : '') + secs + 's';
+        return '';
     }
     """,
     Output('pace-timer-display', 'children'),
@@ -4766,10 +4769,10 @@ def fetch_candidate_callback(n_clicks, fetch_type, fetch_query, fetch_mode, curr
         with closing(db_connect(Path(DB_PATH))) as conn:
             n_rows, n_new = import_candidates(
                 conn, df, source_path=f"fetch://{fetch_type}/{query}",
-                # Skip characterize + vet — stellar_main catalog already provides
-                # Gaia data; vetting can be run on-demand via pipeline button
+                # Skip characterize — stellar_main catalog already provides Gaia data
                 characterize_before_import=False,
-                vet_before_import=False,
+                # Full mode runs vetting (SIMBAD, Gaia var, ZTF, etc.)
+                vet_before_import=is_full,
             )
             status = f"✓ Added {query} ({n_new} new)"
             return status, (current_trigger or 0) + 1, '', no_update
