@@ -24,6 +24,7 @@ import plotly.io as pio
 
 from malca.review.store import (
     DEFAULT_DB_PATH,
+    DEFAULT_STANDALONE_DB_PATH,
     db_connect,
     count_progress,
     get_review,
@@ -3423,6 +3424,8 @@ def load_queue(refresh_clicks, import_trigger, queue_source_scope, *state_values
             filter_params['source_path_like'] = str(queue_source_scope)
 
         queue_data = create_queue_data_dict(conn, filter_params)
+        active_filters = {k: v for k, v in filter_params.items() if v and v != 'Any'}
+        print(f"[queue] size={queue_data['queue_size']} active_filters={active_filters}")
         return queue_data
 
 
@@ -4329,7 +4332,7 @@ def update_prefix_indicator(prefix):
 def toggle_all_metadata_panels(n_clicks, open_states):
     _ = n_clicks
     if not open_states:
-        return no_update, no_update
+        return [], no_update
 
     any_closed = any(not bool(v) for v in open_states)
     new_open = True if any_closed else False
@@ -4756,11 +4759,11 @@ def fetch_candidate_callback(n_clicks, fetch_type, fetch_query, fetch_mode, curr
 
         elif fetch_type == 'gaia':
             from malca.review.fetch import fetch_and_analyze_by_gaia_id
-            df, lc_path = fetch_and_analyze_by_gaia_id(query, run_stats=(fetch_mode == 'full'))
+            df, lc_path = fetch_and_analyze_by_gaia_id(query, run_stats=True)
         else:
             # Default: ASAS-SN ID
             from malca.review.fetch import fetch_and_analyze_by_id
-            df, lc_path = fetch_and_analyze_by_id(query, run_stats=(fetch_mode == 'full'))
+            df, lc_path = fetch_and_analyze_by_id(query, run_stats=True)
 
         if df is None or df.empty:
             return f"✗ No data for {query}", no_update, '', no_update
@@ -4925,7 +4928,7 @@ def main():
     global DB_PATH, PLOT_DIR
 
     parser = argparse.ArgumentParser(description="MALCA Dash Review App")
-    parser.add_argument('--db', default=str(DEFAULT_DB_PATH), help="SQLite database path")
+    parser.add_argument('--db', default=None, help="SQLite database path (default: standalone.db without --plot-dir, review.db with --plot-dir)")
     parser.add_argument('--plot-dir', help="Plot directory path (auto-detects ./plots if not specified)")
     parser.add_argument('--host', default='127.0.0.1', help="Host")
     parser.add_argument('--port', default=8050, type=int, help="Port")
@@ -4933,21 +4936,6 @@ def main():
     parser.add_argument('--merge-vetting', metavar='PATH',
                         help="Merge vetting results from a parquet file into the review DB and exit")
     args = parser.parse_args()
-
-    DB_PATH = str(_resolve_db_cli_path(args.db))
-
-    if args.merge_vetting:
-        vetting_path = Path(args.merge_vetting).expanduser().resolve()
-        if not vetting_path.exists():
-            print(f"Error: vetting file not found: {vetting_path}")
-            sys.exit(1)
-        vetting_df = pd.read_parquet(vetting_path)
-        print(f"Merging {len(vetting_df)} vetting results from {vetting_path}")
-        print(f"  into review DB: {DB_PATH}")
-        with closing(db_connect(Path(DB_PATH))) as conn:
-            updated = merge_vetting_results(conn, vetting_df)
-        print(f"Updated {updated} candidates with vetting data.")
-        sys.exit(0)
 
     # Auto-detect plot directory if not specified
     if args.plot_dir:
@@ -4966,6 +4954,28 @@ def main():
             # Standalone mode — no plot dir required
             PLOT_DIR = None
             print("Running in standalone mode (no --plot-dir)")
+
+    # Choose DB: explicit --db overrides; otherwise standalone gets its own DB
+    if args.db is not None:
+        DB_PATH = str(_resolve_db_cli_path(args.db))
+    elif PLOT_DIR is None:
+        # Standalone mode: use a separate DB so pipeline candidates don't bleed in
+        DB_PATH = str(_resolve_db_cli_path(str(DEFAULT_STANDALONE_DB_PATH)))
+    else:
+        DB_PATH = str(_resolve_db_cli_path(str(DEFAULT_DB_PATH)))
+
+    if args.merge_vetting:
+        vetting_path = Path(args.merge_vetting).expanduser().resolve()
+        if not vetting_path.exists():
+            print(f"Error: vetting file not found: {vetting_path}")
+            sys.exit(1)
+        vetting_df = pd.read_parquet(vetting_path)
+        print(f"Merging {len(vetting_df)} vetting results from {vetting_path}")
+        print(f"  into review DB: {DB_PATH}")
+        with closing(db_connect(Path(DB_PATH))) as conn:
+            updated = merge_vetting_results(conn, vetting_df)
+        print(f"Updated {updated} candidates with vetting data.")
+        sys.exit(0)
 
     print(f"Starting MALCA Review App...")
     print(f"  Database:  {DB_PATH}")

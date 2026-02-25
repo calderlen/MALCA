@@ -106,6 +106,7 @@ def _build_candidate_row(
 
     if run_stats:
         stats = _compute_stats_from_skypatrol_csv(lc_path)
+        print(f"[fetch] Stats computed: {len(stats)} keys: {sorted(stats.keys())}")
         row.update(stats)
 
     if run_events:

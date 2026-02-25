@@ -139,7 +139,6 @@ __all__ = [
     "run_full_pipeline",
     # Optimization
     "check_optimizations",
-    "NUMBA_AVAILABLE",
     # Local catalog
     "load_local_catalog",
     "merge_local_catalog",

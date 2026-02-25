@@ -15,6 +15,7 @@ from malca.config.config_characterize import GAIA_CHUNK_SIZE
 
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parents[2] / "output" / "review" / "review.db"
+DEFAULT_STANDALONE_DB_PATH = Path(__file__).resolve().parents[2] / "output" / "review" / "standalone.db"
 STATUS_OPTIONS = ["unreviewed", "reviewed", "needs_followup"]
 EVENT_CLASS_OPTIONS = [
     "unclassified",
@@ -821,7 +822,7 @@ def query_queue(conn: sqlite3.Connection, *, filters: dict | None = None) -> pd.
 
     # --- failed_any shortcut ---
     if filters.get('require_failed_any_false'):
-        where.append("(c.failed_any = 0)")
+        where.append("(c.failed_any IS NULL OR c.failed_any = 0)")
 
     # --- optional source-path scoping (exact path) ---
     source_path = filters.get('source_path')

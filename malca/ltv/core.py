@@ -315,44 +315,20 @@ def season_medians_with_gap_indices(
     """
     Compute median and MAD per season for seasons that have enough points.
     Return (indexes, meds, meds_err) where indexes are the *season numbers* (gap-preserving).
-    
-    Uses Numba JIT if available for 10x speedup.
     """
     good = season_idx > 0
     if not np.any(good):
         return np.array([]), np.array([]), np.array([])
-    
-    # Use Numba-accelerated version if available
-    if NUMBA_AVAILABLE:
-        indexes, meds, errs, count = _season_medians_fast(
-            mags.astype(np.float64),
-            season_idx.astype(np.int64),
-            min_points_per_season,
-        )
-        if count == 0:
-            return np.array([]), np.array([]), np.array([])
-        order = np.argsort(indexes)
-        return indexes[order], meds[order], errs[order]
-    
-    # Fallback to pure Python/NumPy
-    idxs = []
-    meds = []
-    errs = []
 
-    for s in np.unique(season_idx[good]):
-        sel = (season_idx == s)
-        m = mags[sel]
-        if m.size >= min_points_per_season:
-            idxs.append(int(s))
-            meds.append(float(np.median(m)))
-            errs.append(float(mad_std(m)))
-
-    if len(idxs) == 0:
+    indexes, meds, errs, count = _season_medians_fast(
+        mags.astype(np.float64),
+        season_idx.astype(np.int64),
+        min_points_per_season,
+    )
+    if count == 0:
         return np.array([]), np.array([]), np.array([])
-
-    # Ensure sorted by season number
-    order = np.argsort(idxs)
-    return np.asarray(idxs)[order], np.asarray(meds)[order], np.asarray(errs)[order]
+    order = np.argsort(indexes)
+    return indexes[order], meds[order], errs[order]
 
 
 def compute_trend_metrics(indexes: np.ndarray, meds: np.ndarray) -> tuple[float, float, float, float, float]:
