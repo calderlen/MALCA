@@ -54,7 +54,12 @@ from malca.review.keyboard import (
 
 CLASS_BADGE_TAGS = list(CLASS_KEY_MAP.values())
 from malca.review.session import create_queue_data_dict
-from malca.review.interactive_plot import build_interactive_lightcurve_figure
+from malca.review.interactive_plot import (
+    build_interactive_lightcurve_figure,
+    resolve_lightcurve_path,
+    _load_cleaned_df,
+    _compute_baseline_bands,
+)
 from malca.config.config_paths import VSX_CROSSMATCH_PATH, GAIA_CACHE_FILE
 from malca.config.config_characterize import GAIA_CHUNK_SIZE
 
@@ -2688,6 +2693,38 @@ def create_layout():
                                 html.Button('Reset', id='plot-reset-btn', n_clicks=0, className='compact-btn'),
                                 html.Button('Export', id='export-plot', n_clicks=0, className='compact-btn'),
                                 html.Span(id='repro-badge', className='label-chip', style={'margin-left': '6px'}),
+                                html.Div([
+                                    html.Span('Period', style={'color': '#9fb6cb', 'font-size': '10px',
+                                                               'white-space': 'nowrap', 'margin-right': '4px'}),
+                                    dcc.Dropdown(
+                                        id='period-method',
+                                        options=[
+                                            {'label': 'LSP', 'value': 'lsp'},
+                                            {'label': 'PDM', 'value': 'pdm'},
+                                            {'label': 'CE', 'value': 'ce'},
+                                        ],
+                                        value='lsp',
+                                        clearable=False,
+                                        style={'width': '70px', 'font-size': '10px'},
+                                    ),
+                                    dcc.Input(id='pdm-min-period', type='number', value=0.1, min=0.001,
+                                              step='any', debounce=True, placeholder='Min P',
+                                              style={'width': '72px', 'font-size': '10px'}),
+                                    html.Span('–', style={'color': '#9fb6cb', 'margin': '0 2px', 'font-size': '10px'}),
+                                    dcc.Input(id='pdm-max-period', type='number', value=100, min=0.001,
+                                              step='any', debounce=True, placeholder='Max P',
+                                              style={'width': '72px', 'font-size': '10px'}),
+                                    html.Span('d', style={'color': '#9fb6cb', 'font-size': '10px', 'margin-right': '4px'}),
+                                    html.Button('Find Period', id='pdm-run-btn', n_clicks=0, className='compact-btn'),
+                                    dcc.Input(id='pdm-manual-period', type='number', min=0.001,
+                                              step=0.001, placeholder='Manual P (d)',
+                                              style={'width': '90px', 'font-size': '10px', 'margin-left': '4px'}),
+                                    html.Span(id='pdm-result-label', style={'color': '#7da8c4', 'font-size': '10px',
+                                                                             'margin-left': '4px'}),
+                                ], style={'display': 'flex', 'alignItems': 'center', 'gap': '2px',
+                                          'margin-left': '10px', 'border-left': '1px solid #444',
+                                          'padding-left': '10px'}),
+                                dcc.Store(id='pdm-result-store', data=None),
                             ], className='plot-toolbar'),
                         ], open=True),
                         html.Div(id='plot-stats-cards', className='plot-stats', style={'display': 'none'}),
@@ -3548,13 +3585,26 @@ def handle_keyboard(key_value, current_idx, queue_data, current_score,
      Input('queue-data', 'data'),
      Input('baseline-opacity-slider', 'value'),
      Input('round-sigfigs', 'value'),
-     Input('link-radius-arcsec', 'value')],
+     Input('link-radius-arcsec', 'value'),
+     Input('pdm-result-store', 'data'),
+     Input('pdm-manual-period', 'value')],
     State('plot-render-request', 'data'),
     prevent_initial_call=True,
 )
-def queue_plot_render_request(idx, plot_mode, overlay_values, selected_cameras, preset, residual_height, theme_mode, _queue_data, baseline_opacity, round_sigfigs, link_radius, existing_request):
+def queue_plot_render_request(idx, plot_mode, overlay_values, selected_cameras, preset, residual_height, theme_mode, _queue_data, baseline_opacity, round_sigfigs, link_radius, pdm_result, pdm_manual_period, existing_request):
     """Debounced render request queue for native plot UX."""
     req = existing_request or {'nonce': 0, 'ts': 0.0}
+    # Determine effective PDM period: manual override > PDM result
+    override_period = None
+    if pdm_manual_period is not None:
+        try:
+            p = float(pdm_manual_period)
+            if p > 0:
+                override_period = p
+        except (TypeError, ValueError):
+            pass
+    if override_period is None and pdm_result and isinstance(pdm_result, dict):
+        override_period = pdm_result.get('best_period')
     return {
         'nonce': int(req.get('nonce', 0)) + 1,
         'ts': float(time.time()),
@@ -3569,8 +3619,102 @@ def queue_plot_render_request(idx, plot_mode, overlay_values, selected_cameras, 
             'baseline_opacity': float(baseline_opacity if baseline_opacity is not None else 0.5),
             'round_sigfigs': bool(round_sigfigs and 'yes' in round_sigfigs),
             'link_radius': float(link_radius) if link_radius is not None else 10.0,
+            'override_period': override_period,
         },
     }
+
+
+@app.callback(
+    [Output('pdm-result-store', 'data'),
+     Output('pdm-result-label', 'children')],
+    Input('pdm-run-btn', 'n_clicks'),
+    [State('current-index', 'data'),
+     State('queue-data', 'data'),
+     State('pdm-min-period', 'value'),
+     State('pdm-max-period', 'value'),
+     State('period-method', 'value')],
+    prevent_initial_call=True,
+)
+def run_period_search(n_clicks, idx, queue_data, min_period, max_period, method):
+    """Run period search (LSP/PDM/CE) on current candidate's light curve."""
+    if not n_clicks or not queue_data or queue_data['queue_size'] == 0:
+        raise dash.exceptions.PreventUpdate
+    try:
+        min_p = float(min_period) if min_period else 0.1
+        max_p = float(max_period) if max_period else 100.0
+    except (TypeError, ValueError):
+        min_p, max_p = 0.1, 100.0
+    if min_p <= 0:
+        min_p = 0.01
+    if max_p <= min_p:
+        max_p = min_p + 1.0
+    method = str(method or 'lsp').lower()
+
+    idx = int(idx or 0)
+    if idx < 0 or idx >= queue_data['queue_size']:
+        raise dash.exceptions.PreventUpdate
+
+    candidate_id = queue_data['candidate_ids'][idx]
+    with closing(db_connect(Path(DB_PATH))) as conn:
+        payload = get_candidate_payload(conn, candidate_id)
+
+    plot_dir_path = Path(PLOT_DIR) if PLOT_DIR else Path('.')
+    lc_path = resolve_lightcurve_path(payload, plot_dir_path)
+    if lc_path is None:
+        return None, 'No LC file'
+
+    from malca.periodogram import lsp_find_period, pdm_find_period, ce_find_period
+    import numpy as np
+
+    # Use the same cleaned df + GP baseline residuals as the plot
+    df, _, _ = _load_cleaned_df(
+        lc_path,
+        filter_bad_cameras=True,
+        scatter_ratio=2.5,
+        clean_max_error_absolute=1.0,
+        clean_max_error_sigma=5.0,
+    )
+    if df is None or df.empty:
+        return None, 'Empty LC'
+
+    baseline_cache_key = (str(lc_path.resolve()), (), True, 2.5, 1.0, 5.0)
+    band_dfs = _compute_baseline_bands(df, "per_camera_gp", baseline_cache_key)
+
+    # Collect residuals from all bands
+    resid_parts = []
+    for bdf in band_dfs.values():
+        if "resid" in bdf.columns:
+            mask = np.isfinite(bdf["JD"].to_numpy()) & np.isfinite(bdf["resid"].to_numpy())
+            resid_parts.append(bdf[mask][["JD", "resid"]])
+    if not resid_parts:
+        return None, 'No residuals'
+    resid_df = pd.concat(resid_parts, ignore_index=True)
+    times = resid_df['JD'].to_numpy()
+    values = resid_df['resid'].to_numpy()
+    if len(times) < 10:
+        return None, 'Too few points'
+
+    if method == 'pdm':
+        best_period, _, _ = pdm_find_period(times, values, min_period=min_p, max_period=max_p)
+        label = method.upper()
+    elif method == 'ce':
+        best_period, _, _ = ce_find_period(times, values, min_period=min_p, max_period=max_p)
+        label = method.upper()
+    else:
+        best_period, _, _ = lsp_find_period(times, values, min_period=min_p, max_period=max_p)
+        label = 'LSP'
+
+    return {'best_period': best_period, 'method': label}, f'{label}: P={best_period:.5f} d'
+
+
+@app.callback(
+    Output('pdm-result-store', 'data', allow_duplicate=True),
+    Input('current-index', 'data'),
+    prevent_initial_call=True,
+)
+def clear_pdm_on_navigate(_idx):
+    """Clear PDM result when navigating to a different candidate."""
+    return None
 
 
 @app.callback(
@@ -3669,6 +3813,14 @@ def update_display(render_request, applied_nonce, queue_data):
     baseline_opacity = float(state.get('baseline_opacity', 0.5) if state.get('baseline_opacity') is not None else 0.5)
     round_sigfigs = bool(state.get('round_sigfigs', False))
     link_radius = float(state.get('link_radius', 10.0))
+    override_period = state.get('override_period')
+    if override_period is not None:
+        try:
+            override_period = float(override_period)
+            if override_period <= 0:
+                override_period = None
+        except (TypeError, ValueError):
+            override_period = None
 
     empty_fig = {
         'data': [],
@@ -3794,6 +3946,7 @@ def update_display(render_request, applied_nonce, queue_data):
             show_residuals='residuals' in overlays,
             show_phase_fold='phase' in overlays,
             show_raw_mag='raw' in overlays,
+            override_period=override_period,
             show_diagnostics='diagnostics' in overlays,
             confidence_colors='confidence' in overlays,
             run_params=run_params or {},

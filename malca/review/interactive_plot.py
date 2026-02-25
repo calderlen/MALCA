@@ -356,35 +356,43 @@ def _event_entries(payload: dict, jd_offset: float, run_params: dict | None) -> 
 
 def _phase_period_days(payload: dict) -> float | None:
     """Return preferred phase-fold period from payload metadata.
-    
+
     Checks in order of reliability:
     1. Validated phase period (consensus or significant LSP)
-    2. Specific catalog periods (VSX, ASAS-SN, Gaia EB, ZTF)
-    3. Generic catalog period
-    4. Raw LSP period
+    2. Period consensus from post-filter catalog validation
+    3. Specific catalog periods — checks both vetting names and post-filter names
+    4. Generic catalog period
+    5. Raw LSP period
     """
     # 1. Validated pipeline period
     p = _parse_num(payload, "phase_period_days")
     if p is not None and p > 0:
         return float(p)
 
-    # 2. Known catalog periods (trust these highly)
-    for key in (
-        "vsx_period",
-        "asassn_var_period", 
-        "gaia_eb_period",
-        "ztf_var_period"
-    ):
-        p = _parse_num(payload, key)
-        if p is not None and p > 0:
-            return float(p)
+    # 2. Post-filter consensus period
+    p = _parse_num(payload, "period_consensus_days")
+    if p is not None and p > 0:
+        return float(p)
 
-    # 3. Generic catalog period match
+    # 3. Known catalog periods (check both naming conventions)
+    # Each tuple: (vetting column name, post_filter column name)
+    for keys in (
+        ("vsx_period", "period_vsx_days"),
+        ("asassn_var_period", "period_asassn_var_days"),
+        ("gaia_eb_period", "period_gaia_eb_days"),
+        ("ztf_var_period", "period_ztf_periodic_days"),
+    ):
+        for key in keys:
+            p = _parse_num(payload, key)
+            if p is not None and p > 0:
+                return float(p)
+
+    # 4. Generic catalog period match
     p = _parse_num(payload, "catalog_period")
     if p is not None and p > 0:
         return float(p)
 
-    # 4. Raw LSP period (least reliable, often alias)
+    # 5. Raw LSP period (least reliable, often alias)
     p = _parse_num(payload, "lsp_period")
     if p is not None and p > 0:
         return float(p)
@@ -493,6 +501,7 @@ def build_interactive_lightcurve_figure(
     show_residuals: bool,
     show_phase_fold: bool = False,
     show_raw_mag: bool = True,
+    override_period: float | None = None,
     show_diagnostics: bool,
     confidence_colors: bool,
     run_params: dict | None,
@@ -594,10 +603,19 @@ def build_interactive_lightcurve_figure(
     band_dfs = _compute_baseline_bands(df, baseline_name, baseline_cache_key)
 
     warnings: list[str] = []
-    phase_period = _phase_period_days(payload) if show_phase_fold else None
+    phase_source = ""
+    if show_phase_fold:
+        if override_period is not None and override_period > 0:
+            phase_period = override_period
+            phase_source = "manual/search"
+        else:
+            phase_period = _phase_period_days(payload)
+            phase_source = "catalog/pipeline"
+    else:
+        phase_period = None
     phase_enabled = bool(show_phase_fold and phase_period is not None)
     if show_phase_fold and not phase_enabled:
-        warnings.append("Phase panel requested, but no valid period was found.")
+        warnings.append("Phase panel requested, but no valid period was found. Try Run PDM.")
 
     try:
         residual_fraction = float(residual_fraction)
@@ -828,22 +846,26 @@ def build_interactive_lightcurve_figure(
             )
 
     if phase_enabled and 'phase' in row_map and phase_period is not None:
-        phase_df = _phase_fold_df(df, phase_period)
+        # Phase-fold uses residuals (mag - baseline) from band_dfs
         for band in (0, 1):
-            bdf = phase_df[phase_df["v_g_band"] == band]
-            if bdf.empty:
+            src_bdf = band_dfs.get(band)
+            if src_bdf is None or src_bdf.empty:
+                continue
+            phase_bdf = _phase_fold_df(src_bdf, phase_period)
+            if phase_bdf.empty:
                 continue
             for cam in selected:
-                cdf = bdf[bdf["camera_label"] == cam]
+                cdf = phase_bdf[phase_bdf["camera_label"] == cam]
                 if cdf.empty:
                     continue
                 color = _stable_camera_color(cam)
                 err = cdf["error"].to_numpy() if "error" in cdf.columns else np.full(len(cdf), np.nan)
-                hover = np.column_stack([cdf["JD"].to_numpy(), err])
+                resid = cdf["resid"].to_numpy() if "resid" in cdf.columns else cdf["mag"].to_numpy()
+                hover = np.column_stack([cdf["JD"].to_numpy(), err, cdf["mag"].to_numpy()])
                 fig.add_trace(
                     go.Scatter(
                         x=cdf["phase"],
-                        y=cdf["mag"],
+                        y=resid,
                         mode="markers",
                         showlegend=False,
                         marker={
@@ -855,11 +877,12 @@ def build_interactive_lightcurve_figure(
                         error_y={"type": "data", "array": err, "visible": True, "thickness": 1, "width": 0, "color": color},
                         customdata=hover,
                         hovertemplate=(
-                            "<b>Phase-folded</b><br>"
+                            "<b>Phase-folded (residual)</b><br>"
                             "Phase: %{x:.4f}<br>"
-                            "Mag: %{y:.4f}<br>"
+                            "Resid: %{y:.4f}<br>"
                             "JD: %{customdata[0]:.5f}<br>"
-                            "Err: %{customdata[1]:.4f}<extra></extra>"
+                            "Err: %{customdata[1]:.4f}<br>"
+                            "Raw mag: %{customdata[2]:.4f}<extra></extra>"
                         ),
                     ),
                     row=row_map['phase'],
@@ -869,6 +892,7 @@ def build_interactive_lightcurve_figure(
         fig.add_vline(x=0.0, line_color=colors["guide_line"], line_dash="dot", line_width=1.0, row=row_map['phase'], col=1)
         fig.add_vline(x=1.0, line_color=colors["guide_line"], line_dash="dot", line_width=1.0, row=row_map['phase'], col=1)
         fig.add_vline(x=2.0, line_color=colors["guide_line"], line_dash="dot", line_width=1.0, row=row_map['phase'], col=1)
+        fig.add_hline(y=0.0, line_color=colors["guide_line"], line_dash="dot", row=row_map['phase'], col=1)
 
     if show_raw_mag:
         # Explicitly calculate range to ensure full visibility
@@ -899,8 +923,9 @@ def build_interactive_lightcurve_figure(
         fig.add_hline(y=0.0, line_color=colors["guide_line"], line_dash="dot", row=row_map['resid'], col=1)
 
     if phase_enabled and 'phase' in row_map and phase_period is not None:
-        fig.update_xaxes(title_text=f"Phase (P={phase_period:.5f} d)", row=row_map['phase'], col=1, range=[-0.02, 2.02])
-        fig.update_yaxes(title_text="Phase mag [mag]", row=row_map['phase'], col=1, autorange="reversed")
+        source_tag = f", {phase_source}" if phase_source else ""
+        fig.update_xaxes(title_text=f"Phase (P={phase_period:.5f} d{source_tag})", row=row_map['phase'], col=1, range=[-0.02, 2.02])
+        fig.update_yaxes(title_text="Phase residual [mag]", row=row_map['phase'], col=1, autorange="reversed")
 
     # Set JD axis on the bottom-most plot that uses JD
     jd_axis_row = None
