@@ -137,10 +137,15 @@ def load_lightcurve_df(
     else:
         df = read_asassn_dat(path)
     
-    # Optionally filter bad cameras
+    # Optionally filter bad cameras (only works with numeric camera IDs from .dat2 files)
     filtered_cameras: set[int] = set()
     if filter_bad_cameras_enabled and not df.empty and "camera#" in df.columns:
-        df, filtered_cameras = filter_bad_cameras(df, lc_path=str(path), scatter_ratio_threshold=bad_camera_scatter_ratio)
+        # Check if camera IDs are numeric (dat2 format) vs string names (SkyPatrol)
+        try:
+            df["camera#"].iloc[0] if df["camera#"].dtype != object else int(str(df["camera#"].iloc[0]))
+            df, filtered_cameras = filter_bad_cameras(df, lc_path=str(path), scatter_ratio_threshold=bad_camera_scatter_ratio)
+        except (ValueError, TypeError):
+            pass  # String camera names (e.g. 'ba') — skip numeric filtering
     
     if return_filtered_info:
         return df, filtered_cameras
