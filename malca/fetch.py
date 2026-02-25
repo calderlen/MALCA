@@ -32,7 +32,7 @@ def _get_client():
 # ---------------------------------------------------------------------------
 # Default cache directory
 # ---------------------------------------------------------------------------
-_DEFAULT_CACHE = Path("~/.malca/cache/skypatrol").expanduser()
+_DEFAULT_CACHE = Path("output/cache/skypatrol")
 
 
 def _ensure_cache(cache_dir: Path) -> Path:
