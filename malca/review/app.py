@@ -4766,8 +4766,10 @@ def fetch_candidate_callback(n_clicks, fetch_type, fetch_query, fetch_mode, curr
         with closing(db_connect(Path(DB_PATH))) as conn:
             n_rows, n_new = import_candidates(
                 conn, df, source_path=f"fetch://{fetch_type}/{query}",
-                characterize_before_import=is_full,
-                vet_before_import=is_full,
+                # Skip characterize + vet — stellar_main catalog already provides
+                # Gaia data; vetting can be run on-demand via pipeline button
+                characterize_before_import=False,
+                vet_before_import=False,
             )
             status = f"✓ Added {query} ({n_new} new)"
             return status, (current_trigger or 0) + 1, '', no_update

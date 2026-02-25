@@ -706,7 +706,7 @@ def import_candidates(
             else:
                 if _cache_df is not None and n_new > 0:
                     # Vet only the new candidates
-                    df_new = vet_candidates(df_use.loc[mask_new])
+                    df_new = vet_candidates(df_use.loc[mask_new], run_asassn_var=False)
                     # Merge cached vetting columns onto cached rows
                     cache_cols = [c for c in VETTING_COLUMNS if c in _cache_df.columns]
                     df_old = df_use.loc[~mask_new].merge(
@@ -717,7 +717,7 @@ def import_candidates(
                     df_use = pd.concat([df_old, df_new], ignore_index=True)
                 else:
                     # No cache or no candidate_id — vet everything
-                    df_use = vet_candidates(df_use)
+                    df_use = vet_candidates(df_use, run_asassn_var=False)
 
                 # Update cache
                 if _id_col:
