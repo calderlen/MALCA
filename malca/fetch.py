@@ -131,8 +131,8 @@ def download_lightcurve_by_id(
     cache = _ensure_cache(cache_dir)
     out = cache / f"{asas_sn_id}.csv"
 
-    # Always query catalog for metadata
-    catalog_info = _query_catalog_info([int(asas_sn_id)], id_col="asas_sn_id", catalog="master_list")
+    # Query stellar_main (has gaia_id) instead of master_list (which lacks it)
+    catalog_info = _query_catalog_info([int(asas_sn_id)], id_col="asas_sn_id", catalog="stellar_main")
 
     if out.exists() and out.stat().st_size > 0:
         return out, catalog_info

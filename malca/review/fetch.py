@@ -78,10 +78,10 @@ def _build_candidate_row(
         "lc_path": str(lc_path),
     }
 
-    # Populate asas_sn_id, ra_deg, dec_deg from catalog query
+    # Populate metadata from catalog query
     if catalog_info:
-        for key in ("asas_sn_id", "ra_deg", "dec_deg", "gaia_id",
-                     "mean_vmag", "catalog_sources"):
+        for key in ("asas_sn_id", "ra_deg", "dec_deg", "gaia_id", "source_id",
+                     "mean_vmag", "phot_g_mean_mag", "catalog_sources"):
             if key in catalog_info and catalog_info[key] is not None:
                 row[key] = catalog_info[key]
 
@@ -90,6 +90,9 @@ def _build_candidate_row(
         row["ra"] = row["ra_deg"]
     if "dec_deg" in row:
         row["dec"] = row["dec_deg"]
+    # characterize looks for source_id (= Gaia DR3 source_id)
+    if "gaia_id" in row and "source_id" not in row:
+        row["source_id"] = row["gaia_id"]
 
     if run_stats:
         stats = _compute_stats_from_skypatrol_csv(lc_path)

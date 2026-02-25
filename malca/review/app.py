@@ -2463,7 +2463,7 @@ def create_layout():
             html.Hr(),
 
             # -- Fetch Candidate --
-            html.Div('Fetch Candidate', className='section-title', style={'color': '#0af'}),
+            html.Div('Fetch Candidate', className='section-title'),
             dcc.Dropdown(
                 id='fetch-type',
                 options=[
@@ -2477,10 +2477,19 @@ def create_layout():
             ),
             dcc.Input(id='fetch-query', placeholder='e.g. 427299085038300900', type='text',
                       style={**_inp_style, 'marginBottom': '4px'}),
-            html.Button('Fetch & Analyze', id='fetch-btn', n_clicks=0,
+            dcc.Dropdown(
+                id='fetch-mode',
+                options=[
+                    {'label': 'Quick (LC only)', 'value': 'quick'},
+                    {'label': 'Full (analyze + vet)', 'value': 'full'},
+                ],
+                value='quick',
+                clearable=False,
+                style={'margin-bottom': '4px', 'font-size': '11px'},
+            ),
+            html.Button('Fetch', id='fetch-btn', n_clicks=0,
                         className='action-btn',
-                        style={'width': '100%', 'fontSize': '11px', 'fontWeight': 'bold',
-                               'backgroundColor': '#1a4023', 'borderColor': '#216135', 'color': '#6f6'}),
+                        style={'width': '100%'}),
             dcc.Loading(
                 id='loading-fetch', type='dot',
                 children=html.Div(id='fetch-status',
@@ -2543,7 +2552,7 @@ def create_layout():
             ),
 
             html.Button('Import', id='import-btn', n_clicks=0, className='action-btn',
-                       style={'width': '100%', 'font-size': '11px'}),
+                       style={'width': '100%'}),
 
             html.Hr(),
 
@@ -2557,7 +2566,7 @@ def create_layout():
                 style={'margin-bottom': '4px'}
             ),
             html.Button('Export Reviews', id='export-btn', n_clicks=0, className='action-btn',
-                       style={'width': '100%', 'font-size': '11px'}),
+                       style={'width': '100%'}),
 
             html.Hr(),
             
@@ -4690,10 +4699,11 @@ def import_candidates_callback(n_clicks, import_path, characterize_on,
     Input('fetch-btn', 'n_clicks'),
     [State('fetch-type', 'value'),
      State('fetch-query', 'value'),
+     State('fetch-mode', 'value'),
      State('import-trigger', 'data')],
     prevent_initial_call=True
 )
-def fetch_candidate_callback(n_clicks, fetch_type, fetch_query, current_trigger):
+def fetch_candidate_callback(n_clicks, fetch_type, fetch_query, fetch_mode, current_trigger):
     """Fetch an ASAS-SN light curve, process, and import it."""
     if not n_clicks or not fetch_query:
         return no_update, no_update, no_update, no_update
@@ -4743,20 +4753,21 @@ def fetch_candidate_callback(n_clicks, fetch_type, fetch_query, current_trigger)
 
         elif fetch_type == 'gaia':
             from malca.review.fetch import fetch_and_analyze_by_gaia_id
-            df, lc_path = fetch_and_analyze_by_gaia_id(query)
+            df, lc_path = fetch_and_analyze_by_gaia_id(query, run_stats=(fetch_mode == 'full'))
         else:
             # Default: ASAS-SN ID
             from malca.review.fetch import fetch_and_analyze_by_id
-            df, lc_path = fetch_and_analyze_by_id(query)
+            df, lc_path = fetch_and_analyze_by_id(query, run_stats=(fetch_mode == 'full'))
 
         if df is None or df.empty:
             return f"✗ No data for {query}", no_update, '', no_update
 
+        is_full = (fetch_mode == 'full')
         with closing(db_connect(Path(DB_PATH))) as conn:
             n_rows, n_new = import_candidates(
                 conn, df, source_path=f"fetch://{fetch_type}/{query}",
-                characterize_before_import=True,
-                vet_before_import=True,
+                characterize_before_import=is_full,
+                vet_before_import=is_full,
             )
             status = f"✓ Added {query} ({n_new} new)"
             return status, (current_trigger or 0) + 1, '', no_update
@@ -4937,7 +4948,7 @@ def main():
     if args.plot_dir:
         PLOT_DIR = str(_resolve_plot_cli_path(args.plot_dir))
         if not Path(PLOT_DIR).exists() or not Path(PLOT_DIR).is_dir():
-            print(f"❌ Error: plot directory does not exist: {PLOT_DIR}")
+            print(f"Error: plot directory does not exist: {PLOT_DIR}")
             print("Use an existing run bundle plots directory, for example:")
             print("  malca review --plot-dir output/runs/output_bundle_13_13.5/plots")
             sys.exit(1)
@@ -4945,17 +4956,17 @@ def main():
         # Try current directory first
         if Path('./plots').is_dir():
             PLOT_DIR = str(Path('./plots').resolve())
-            print(f"📂 Auto-detected plot directory: {Path(PLOT_DIR).resolve()}")
+            print(f"Auto-detected plot directory: {Path(PLOT_DIR).resolve()}")
         else:
             # Standalone mode — no plot dir required
             PLOT_DIR = None
-            print("ℹ️  Running in standalone mode (no --plot-dir)")
+            print("Running in standalone mode (no --plot-dir)")
 
-    print(f"🚀 Starting MALCA Dash Review App...")
-    print(f"💾 Database: {DB_PATH}")
-    print(f"🖼️  Plot directory: {PLOT_DIR}")
-    print(f"🌐 Server: http://{args.host}:{args.port}")
-    print(f"\n⌨️  Keyboard shortcuts:")
+    print(f"Starting MALCA Review App...")
+    print(f"  Database:  {DB_PATH}")
+    print(f"  Plot dir:  {PLOT_DIR}")
+    print(f"  Server:    http://{args.host}:{args.port}")
+    print(f"\nKeyboard shortcuts:")
     print("  [D]ipper [M]icrolensing [F]lare [Y]so [U]nknown [I]nstrumental [O]ther | [1-4] Confidence | [.] Save | [Enter] Done | [Backspace] Back | [?] Help")
     print("")
 
