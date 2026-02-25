@@ -458,11 +458,11 @@ def run_pipeline_cli(args):
     if args.input is None:
         if args.mag_bin is None:
             raise SystemExit("Error: must specify --input or --mag-bin")
-        args.input = str(LTV_OUTPUT_DIR / f"LTvar{args.mag_bin.replace('_', '-')}.csv")
+        args.input = str(LTV_OUTPUT_DIR / f"LTvar{args.mag_bin.replace('_', '-')}.parquet")
     if args.output is None:
         if args.mag_bin is None:
             raise SystemExit("Error: must specify --output or --mag-bin")
-        args.output = str(LTV_OUTPUT_DIR / f"LTvar{args.mag_bin.replace('_', '-')}_pipeline.csv")
+        args.output = str(LTV_OUTPUT_DIR / f"LTvar{args.mag_bin.replace('_', '-')}_pipeline.parquet")
 
     # Load input
     input_path = Path(args.input)

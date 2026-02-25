@@ -94,7 +94,7 @@ def _build_config(a, mag_bin: str) -> Config:
     out = a.output
     if out is None:
         LTV_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        out = str(LTV_OUTPUT_DIR / f"LTvar{mag_bin.replace('_','-')}.csv")
+        out = str(LTV_OUTPUT_DIR / f"LTvar{mag_bin.replace('_','-')}.parquet")
     output = Path(out)
 
     resume = bool(a.resume or a.overwrite)
@@ -170,7 +170,7 @@ def parse_args() -> tuple[list[Config], bool]:
                    help="Number of results to accumulate before writing (default: 10000)")
     p.add_argument("--output-format",
                    type=str,
-                   default="csv",
+                   default="parquet",
                    choices=["csv", "parquet", "parquet_chunk"],
                    help="Output format (default: csv)")
     p.add_argument("--resume",
