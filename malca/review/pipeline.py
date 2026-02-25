@@ -239,7 +239,17 @@ def _run_vetting_stage(payload: dict) -> None:
     try:
         from malca.vetting import vet_candidates
         df = pd.DataFrame([payload])
-        df_out = vet_candidates(df, run_asassn_var=False)
+        df_out = vet_candidates(
+            df,
+            run_asassn_var=False,
+            run_ztf_var=False,
+            run_tns=False,
+            run_alerce=False,
+            run_atlas=False,
+            run_erosita=False,
+            run_neowise_lc=False,
+            run_pm_check=False,
+        )
         if isinstance(df_out, pd.DataFrame) and not df_out.empty:
             row = df_out.iloc[0].to_dict()
             for k, v in row.items():

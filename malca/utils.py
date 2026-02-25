@@ -1128,6 +1128,7 @@ def batch_tap_crossmatch(
     n_workers: int = 4,
     verbose: bool = False,
     desc: str = "TAP crossmatch",
+
 ) -> pd.DataFrame:
     """Batch TAP crossmatch using coordinate upload.
 
