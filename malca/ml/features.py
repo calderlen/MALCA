@@ -17,6 +17,9 @@ Or, for a safer approach that handles missing columns::
 
 from __future__ import annotations
 
+from typing import Any
+
+import numpy as np
 import pandas as pd
 
 # ---- TARGET VARIABLE --------------------------------------------------------
@@ -280,6 +283,58 @@ ML_FEATURE_COLUMNS: list[str] = [
     "xray_det",
     "xray_flux",
     "pm_cluster_offset_sigma",
+
+    # -- ALeRCE variability features --
+    "stats_amplitude",
+    "stats_beyond_1_std",
+    "stats_con",
+    "stats_delta_mag_fid",
+    "stats_excess_var",
+    "stats_first_mag",
+    "stats_gskew",
+    "stats_max_slope",
+    "stats_meanvariance",
+    "stats_median_abs_dev",
+    "stats_median_brp",
+    "stats_percent_amplitude",
+    "stats_q31",
+    "stats_skew",
+    "stats_small_kurtosis",
+    "stats_pvar",
+    "stats_anderson_darling",
+    "stats_pair_slope_trend",
+    "stats_rcs",
+    "stats_autocor_length",
+    "stats_sf_ml_amplitude",
+    "stats_sf_ml_gamma",
+
+    # -- Harmonics (folded LC) --
+    "stats_harmonics_mag_1",
+    "stats_harmonics_mag_2",
+    "stats_harmonics_mag_3",
+    "stats_harmonics_mag_4",
+    "stats_harmonics_mag_5",
+    "stats_harmonics_mag_6",
+    "stats_harmonics_mag_7",
+    "stats_harmonics_phase_2",
+    "stats_harmonics_phase_3",
+    "stats_harmonics_phase_4",
+    "stats_harmonics_phase_5",
+    "stats_harmonics_phase_6",
+    "stats_harmonics_phase_7",
+    "stats_harmonics_mse",
+    "stats_psi_cs",
+    "stats_psi_eta",
+
+    # -- Stochastic models --
+    "stats_gp_drw_sigma",
+    "stats_gp_drw_tau",
+    "stats_iar_phi",
+    "stats_mhps_high",
+    "stats_mhps_low",
+    "stats_mhps_non_zero",
+    "stats_mhps_pn_flag",
+    "stats_mhps_ratio",
 ]
 
 # ---- MORPHOLOGY FEATURE (categorical) --------------------------------------
@@ -288,6 +343,97 @@ ML_MORPH_COLUMNS: list[str] = [
     "dip_best_morph",
     "jump_best_morph",
 ]
+
+# String/categorical feature columns requiring stable mapping across train/infer.
+ML_CATEGORICAL_COLUMNS: list[str] = [
+    "population",
+    "banyan_best_assoc",
+    "vsx_class",
+    "sfr_name",
+    "cluster_name",
+    "simbad_otype",
+    "gaia_var_class",
+    "asassn_var_type",
+    "ztf_var_type",
+    "alerce_lc_class",
+    "tns_type",
+    "gaia_var_flag",
+    *ML_MORPH_COLUMNS,
+]
+
+
+def infer_ml_feature_columns(
+    df: pd.DataFrame,
+    *,
+    include_morph: bool = True,
+) -> list[str]:
+    """Return model feature columns present in *df* in stable order."""
+    cols = [c for c in ML_FEATURE_COLUMNS if c in df.columns]
+    if include_morph:
+        cols += [c for c in ML_MORPH_COLUMNS if c in df.columns]
+    return cols
+
+
+def build_ml_feature_schema(
+    df: pd.DataFrame,
+    *,
+    include_morph: bool = True,
+) -> dict[str, Any]:
+    """Fit a feature schema containing feature order and categorical maps."""
+    features = infer_ml_feature_columns(df, include_morph=include_morph)
+    categorical_columns = [c for c in features if c in ML_CATEGORICAL_COLUMNS]
+
+    categorical_mappings: dict[str, dict[str, int]] = {}
+    for col in categorical_columns:
+        seen: set[str] = set()
+        values: list[str] = []
+        for value in df[col].tolist():
+            if pd.isna(value):
+                continue
+            text = str(value)
+            if text in seen:
+                continue
+            seen.add(text)
+            values.append(text)
+        values.sort()
+        categorical_mappings[col] = {text: idx for idx, text in enumerate(values)}
+
+    return {
+        "features": features,
+        "categorical_columns": categorical_columns,
+        "categorical_mappings": categorical_mappings,
+        "unknown_category_code": -1,
+    }
+
+
+def transform_ml_features(
+    df: pd.DataFrame,
+    feature_schema: dict[str, Any],
+) -> pd.DataFrame:
+    """Transform *df* into the model feature matrix using *feature_schema*."""
+    features = [str(c) for c in feature_schema.get("features", [])]
+    categorical_mappings = feature_schema.get("categorical_mappings", {}) or {}
+    unknown_code = int(feature_schema.get("unknown_category_code", -1))
+
+    if not features:
+        return pd.DataFrame(index=df.index)
+
+    X = pd.DataFrame(index=df.index)
+    missing_series = pd.Series([pd.NA] * len(df), index=df.index, dtype="object")
+
+    for col in features:
+        if col in categorical_mappings:
+            mapping = {str(k): int(v) for k, v in dict(categorical_mappings[col]).items()}
+            raw = df[col] if col in df.columns else missing_series
+            keys = raw.map(lambda v: None if pd.isna(v) else str(v))
+            codes = keys.map(lambda v: mapping.get(v) if v is not None else np.nan).fillna(float(unknown_code))
+            X[col] = pd.to_numeric(codes, errors="coerce")
+        else:
+            raw = df[col] if col in df.columns else np.nan
+            X[col] = pd.to_numeric(raw, errors="coerce")
+
+    X = X.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    return X
 
 
 def select_ml_features(
@@ -298,7 +444,7 @@ def select_ml_features(
     """Select and prepare ML-ready feature columns from *df*.
 
     - Keeps only columns listed in ``ML_FEATURE_COLUMNS`` (+ morph).
-    - Encodes object/string columns as category codes.
+    - Encodes categorical columns with deterministic integer mappings.
     - Replaces inf with NaN, then fills NaN with 0.0.
     - Returns a copy; never mutates the input.
 
@@ -315,15 +461,5 @@ def select_ml_features(
     pd.DataFrame
         Feature matrix ready for model training.
     """
-    import numpy as np
-
-    cols = [c for c in ML_FEATURE_COLUMNS if c in df.columns]
-    if include_morph:
-        cols += [c for c in ML_MORPH_COLUMNS if c in df.columns]
-
-    X = df[cols].copy()
-    for col in X.columns:
-        if X[col].dtype == object:
-            X[col] = X[col].astype("category").cat.codes
-    X = X.replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    return X
+    schema = build_ml_feature_schema(df, include_morph=include_morph)
+    return transform_ml_features(df, schema)

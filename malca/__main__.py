@@ -26,6 +26,8 @@ Usage:
     malca pre_filter [options]     # Apply pre-filters (low-level)
     malca pre_tag [options]        # Apply pre-tagging filters (alias)
     malca score [options]          # Compute event score (low-level)
+    malca ml_train [options]       # Train ML classifier on reviewed labels
+    malca ml_predict [options]     # Score candidates with a trained ML model
     malca ltv-core [options]       # Compute seasonal trends for LTV (long-term variability)
     malca ltv-pipeline [options]   # Run full LTV pipeline (filters + crossmatch + NEOWISE)
     malca ltv-ingest [options]     # Ingest LTV pipeline results into a review DB
@@ -47,7 +49,7 @@ def main():
         "detection_rate", "validate", "plot", "post_filter",
         "events", "gaia-fetch", "characterize", "classify", "filter", "pre_filter", "pre_tag", "score",
         "stats", "attrition", "review",
-        "neighbors", "spectra", "false_positive", "ml_train", "vsx-filter", "vsx-crossmatch",
+        "neighbors", "spectra", "false_positive", "ml_train", "ml_predict", "vsx-filter", "vsx-crossmatch",
         "vetting",
         "ltv-core", "ltv-pipeline", "ltv-ingest",
     ]:
@@ -147,6 +149,10 @@ def main():
             from malca.ml import train as ml_train
             sys.argv = [sys.argv[0]] + remaining
             ml_train.main()
+        elif command == "ml_predict":
+            from malca.ml import predict as ml_predict
+            sys.argv = [sys.argv[0]] + remaining
+            ml_predict.main()
         elif command == "vsx-filter":
             from malca.vsx import filter as vsx_filter
             sys.argv = [sys.argv[0]] + remaining
@@ -206,6 +212,7 @@ def main():
     subparsers.add_parser("review", help="Launch Dash review GUI (keyboard-driven, fast)")
     subparsers.add_parser("false_positive", help="Run false-positive contaminant benchmark")
     subparsers.add_parser("ml_train", help="Train baseline ML classifier on reviewed labels")
+    subparsers.add_parser("ml_predict", help="Score candidates with a trained ML model")
     subparsers.add_parser("neighbors", help="Run bulk nearest-neighbor enrichment")
     subparsers.add_parser("spectra", help="Run bulk spectra-availability enrichment")
     subparsers.add_parser("vsx-filter", help="Build cleaned ASAS-SN index and filtered VSX catalog")

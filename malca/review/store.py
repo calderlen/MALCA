@@ -518,6 +518,55 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("stats_trend_slope_mag_per_day",              "REAL", "float"),
     ("stats_trend_slope_mag_per_year",             "REAL", "float"),
     ("stats_trend_r2",                             "REAL", "float"),
+    # -- ALeRCE-style features --
+    ("stats_amplitude",                            "REAL", "float"),
+    ("stats_beyond_1_std",                         "REAL", "float"),
+    ("stats_con",                                  "REAL", "float"),
+    ("stats_delta_mag_fid",                        "REAL", "float"),
+    ("stats_excess_var",                           "REAL", "float"),
+    ("stats_first_mag",                            "REAL", "float"),
+    ("stats_gskew",                                "REAL", "float"),
+    ("stats_max_slope",                            "REAL", "float"),
+    ("stats_meanvariance",                         "REAL", "float"),
+    ("stats_median_abs_dev",                       "REAL", "float"),
+    ("stats_median_brp",                           "REAL", "float"),
+    ("stats_percent_amplitude",                    "REAL", "float"),
+    ("stats_q31",                                  "REAL", "float"),
+    ("stats_skew",                                 "REAL", "float"),
+    ("stats_small_kurtosis",                       "REAL", "float"),
+    ("stats_pvar",                                 "REAL", "float"),
+    ("stats_anderson_darling",                     "REAL", "float"),
+    ("stats_pair_slope_trend",                     "REAL", "float"),
+    ("stats_rcs",                                  "REAL", "float"),
+    ("stats_autocor_length",                       "REAL", "float"),
+    ("stats_sf_ml_amplitude",                      "REAL", "float"),
+    ("stats_sf_ml_gamma",                          "REAL", "float"),
+    # -- period-dependent features --
+    ("stats_harmonics_mag_1",                      "REAL", "float"),
+    ("stats_harmonics_mag_2",                      "REAL", "float"),
+    ("stats_harmonics_mag_3",                      "REAL", "float"),
+    ("stats_harmonics_mag_4",                      "REAL", "float"),
+    ("stats_harmonics_mag_5",                      "REAL", "float"),
+    ("stats_harmonics_mag_6",                      "REAL", "float"),
+    ("stats_harmonics_mag_7",                      "REAL", "float"),
+    ("stats_harmonics_phase_2",                    "REAL", "float"),
+    ("stats_harmonics_phase_3",                    "REAL", "float"),
+    ("stats_harmonics_phase_4",                    "REAL", "float"),
+    ("stats_harmonics_phase_5",                    "REAL", "float"),
+    ("stats_harmonics_phase_6",                    "REAL", "float"),
+    ("stats_harmonics_phase_7",                    "REAL", "float"),
+    ("stats_harmonics_mse",                        "REAL", "float"),
+    ("stats_psi_cs",                               "REAL", "float"),
+    ("stats_psi_eta",                              "REAL", "float"),
+    # -- stochastic model features --
+    ("stats_gp_drw_sigma",                         "REAL", "float"),
+    ("stats_gp_drw_tau",                           "REAL", "float"),
+    ("stats_iar_phi",                              "REAL", "float"),
+    ("stats_mhps_high",                            "REAL", "float"),
+    ("stats_mhps_low",                             "REAL", "float"),
+    ("stats_mhps_non_zero",                        "REAL", "float"),
+    ("stats_mhps_pn_flag",                         "REAL", "float"),
+    ("stats_mhps_ratio",                           "REAL", "float"),
     # -- LTV: long-term variability core metrics --
     ("ltv_slope",                    "REAL",    "float"),  # mag/year linear slope
     ("ltv_slope_quad",               "REAL",    "float"),  # quadratic term (mag/yr^2)
@@ -1232,49 +1281,29 @@ def find_phase_plot_image(payload: dict, plot_dir: Path) -> Path | None:
 
 
 def export_reviews(conn: sqlite3.Connection, out_path: Path, only_reviewed: bool = True) -> None:
-    query = """
+    candidate_cols = ["candidate_id", "source_path"] + _COL_NAMES
+    review_cols = [
+        "interest_score",
+        "event_class",
+        "review_pass",
+        "notes",
+        "status",
+        "reviewer",
+        "updated_at",
+    ]
+    select_cols = [
+        *[f"c.{col}" for col in candidate_cols],
+        *[f"r.{col}" for col in review_cols],
+    ]
+    query = f"""
         SELECT
-            c.candidate_id,
-            c.asas_sn_id,
-            c.lc_path,
-            c.failed_any,
-            c.periodic_flag,
-            c.catalog_match,
-            c.high_ruwe_flag,
-            c.periodicity_score,
-            c.lsp_bootstrap_sig,
-            c.lsp_power,
-            c.lsp_period,
-            c.dip_best_log_bf,
-            c.jump_best_log_bf,
-            r.interest_score,
-            r.event_class,
-            r.review_pass,
-            r.notes,
-            r.status,
-            r.reviewer,
-            r.updated_at,
-            c.payload_json
+            {",\n            ".join(select_cols)}
         FROM candidates c
         LEFT JOIN reviews r ON r.candidate_id = c.candidate_id
     """
     if only_reviewed:
         query += " WHERE r.status IS NOT NULL AND r.status != 'unreviewed'"
     df = pd.read_sql_query(query, conn)
-    if not df.empty and "payload_json" in df.columns:
-        payload_rows = []
-        for value in df["payload_json"]:
-            try:
-                row_dict = json.loads(value) if isinstance(value, str) else {}
-            except Exception:
-                row_dict = {}
-            payload_rows.append(normalize_vsx_record(row_dict))
-
-        payload_df = pd.DataFrame(payload_rows)
-        for col in ["vsx_class", "vsx_sep_arcsec", "population", "yso_class"]:
-            if col in payload_df.columns and col not in df.columns:
-                df[col] = payload_df[col]
-        df = df.drop(columns=["payload_json"])
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if out_path.suffix.lower() in {".parquet", ".pq"}:
         df.to_parquet(out_path, index=False, compression="zstd")

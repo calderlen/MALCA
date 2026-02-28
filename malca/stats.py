@@ -13,6 +13,7 @@ import sys, io, argparse, math
 from collections import OrderedDict
 import numpy as np
 import pandas as pd
+from scipy import stats as sp_stats
 from astropy.timeseries import LombScargle
 
 from malca.utils import read_lc_dat2, read_lc_csv
@@ -362,6 +363,601 @@ def linear_trend(x, y):
     r2 = 1 - ss_res/ss_tot if ss_tot > 0 else np.nan
     return float(p[0]), float(p[1]), float(r2)
 
+# ---------------------------------------------------------------------------
+# ALeRCE-style light-curve features
+# ---------------------------------------------------------------------------
+
+def amplitude(mag):
+    """Half the difference between median of top 5% and bottom 5% magnitudes."""
+    mag = np.asarray(mag, float)
+    mag = mag[np.isfinite(mag)]
+    if mag.size < 20:
+        return np.nan
+    n5 = max(1, int(np.ceil(0.05 * mag.size)))
+    sorted_mag = np.sort(mag)
+    return float((np.median(sorted_mag[-n5:]) - np.median(sorted_mag[:n5])) / 2.0)
+
+
+def beyond_1_std(mag):
+    """Fraction of points beyond 1 sigma from the weighted mean."""
+    mag = np.asarray(mag, float)
+    mag = mag[np.isfinite(mag)]
+    if mag.size < 3:
+        return np.nan
+    mu = np.mean(mag)
+    sigma = np.std(mag, ddof=1)
+    if sigma <= 0:
+        return np.nan
+    return float(np.sum(np.abs(mag - mu) > sigma) / mag.size)
+
+
+def con(mag, threshold=2.0):
+    """Number of 3 consecutive points brighter/fainter than threshold*sigma."""
+    mag = np.asarray(mag, float)
+    mag = mag[np.isfinite(mag)]
+    if mag.size < 3:
+        return 0
+    mu = np.mean(mag)
+    sigma = np.std(mag, ddof=1)
+    if sigma <= 0:
+        return 0
+    beyond = np.abs(mag - mu) > threshold * sigma
+    count = 0
+    for i in range(len(beyond) - 2):
+        if beyond[i] and beyond[i + 1] and beyond[i + 2]:
+            count += 1
+    return count
+
+
+def delta_mag(mag):
+    """Difference between max and min magnitude."""
+    mag = np.asarray(mag, float)
+    mag = mag[np.isfinite(mag)]
+    if mag.size < 2:
+        return np.nan
+    return float(np.max(mag) - np.min(mag))
+
+
+def excess_var(mag, err):
+    """Intrinsic variability amplitude: sqrt((Var - mean(err^2)) / mean^2)."""
+    mag = np.asarray(mag, float)
+    err = np.asarray(err, float)
+    mask = np.isfinite(mag) & np.isfinite(err) & (err > 0)
+    if mask.sum() < 3:
+        return np.nan
+    mag = mag[mask]
+    err = err[mask]
+    mu = np.mean(mag)
+    if mu == 0:
+        return np.nan
+    var = np.var(mag, ddof=1)
+    mean_err2 = np.mean(err ** 2)
+    inner = (var - mean_err2) / (mu ** 2)
+    return float(np.sqrt(inner)) if inner > 0 else 0.0
+
+
+def gskew(mag):
+    """Median-based skewness: (mean - median) / std."""
+    mag = np.asarray(mag, float)
+    mag = mag[np.isfinite(mag)]
+    if mag.size < 3:
+        return np.nan
+    sigma = np.std(mag, ddof=1)
+    if sigma <= 0:
+        return np.nan
+    return float((np.mean(mag) - np.median(mag)) / sigma)
+
+
+def max_slope(mag, time):
+    """Maximum absolute magnitude slope between consecutive observations."""
+    mag = np.asarray(mag, float)
+    time = np.asarray(time, float)
+    mask = np.isfinite(mag) & np.isfinite(time)
+    if mask.sum() < 2:
+        return np.nan
+    mag = mag[mask]
+    time = time[mask]
+    dt = np.diff(time)
+    dm = np.abs(np.diff(mag))
+    valid = dt > 0
+    if not np.any(valid):
+        return np.nan
+    slopes = dm[valid] / dt[valid]
+    return float(np.max(slopes))
+
+
+def meanvariance(mag):
+    """Ratio of standard deviation to mean magnitude."""
+    mag = np.asarray(mag, float)
+    mag = mag[np.isfinite(mag)]
+    if mag.size < 3:
+        return np.nan
+    mu = np.mean(mag)
+    if mu == 0:
+        return np.nan
+    return float(np.std(mag, ddof=1) / mu)
+
+
+def median_abs_dev(mag):
+    """Median absolute deviation (raw, not scaled)."""
+    mag = np.asarray(mag, float)
+    mag = mag[np.isfinite(mag)]
+    if mag.size == 0:
+        return np.nan
+    return float(np.median(np.abs(mag - np.median(mag))))
+
+
+def median_brp(mag):
+    """Fraction of points within amplitude/10 of the median."""
+    mag = np.asarray(mag, float)
+    mag = mag[np.isfinite(mag)]
+    if mag.size < 5:
+        return np.nan
+    amp = amplitude(mag)
+    if not np.isfinite(amp) or amp <= 0:
+        return np.nan
+    med = np.median(mag)
+    return float(np.sum(np.abs(mag - med) < amp / 10.0) / mag.size)
+
+
+def percent_amplitude(mag):
+    """Largest percentage difference between max or min and median."""
+    mag = np.asarray(mag, float)
+    mag = mag[np.isfinite(mag)]
+    if mag.size < 3:
+        return np.nan
+    med = np.median(mag)
+    if med == 0:
+        return np.nan
+    return float(max(abs(np.max(mag) - med), abs(np.min(mag) - med)) / abs(med))
+
+
+def q31(mag):
+    """Difference between 75th and 25th percentile."""
+    mag = np.asarray(mag, float)
+    mag = mag[np.isfinite(mag)]
+    if mag.size < 4:
+        return np.nan
+    return float(np.percentile(mag, 75) - np.percentile(mag, 25))
+
+
+def skew(mag):
+    """Skewness of the magnitude distribution."""
+    mag = np.asarray(mag, float)
+    mag = mag[np.isfinite(mag)]
+    if mag.size < 3:
+        return np.nan
+    return float(sp_stats.skew(mag, bias=False))
+
+
+def small_kurtosis(mag):
+    """Small-sample kurtosis of magnitudes."""
+    mag = np.asarray(mag, float)
+    mag = mag[np.isfinite(mag)]
+    if mag.size < 4:
+        return np.nan
+    return float(sp_stats.kurtosis(mag, bias=False))
+
+
+def pvar(mag, err):
+    """Probability that the source is variable (1 - chi2 CDF)."""
+    mag = np.asarray(mag, float)
+    err = np.asarray(err, float)
+    mask = np.isfinite(mag) & np.isfinite(err) & (err > 0)
+    if mask.sum() < 3:
+        return np.nan
+    mag = mag[mask]
+    err = err[mask]
+    w = 1.0 / err ** 2
+    mu = np.sum(w * mag) / np.sum(w)
+    chi2_val = np.sum(((mag - mu) / err) ** 2)
+    dof = len(mag) - 1
+    if dof <= 0:
+        return np.nan
+    return float(1.0 - sp_stats.chi2.cdf(chi2_val, dof))
+
+
+def anderson_darling(mag):
+    """Anderson-Darling test statistic for normality."""
+    mag = np.asarray(mag, float)
+    mag = mag[np.isfinite(mag)]
+    if mag.size < 8:
+        return np.nan
+    result = sp_stats.anderson(mag, dist='norm')
+    return float(result.statistic)
+
+
+def pair_slope_trend(mag, n=30):
+    """Fraction of increasing minus decreasing consecutive differences (last n points)."""
+    mag = np.asarray(mag, float)
+    mag = mag[np.isfinite(mag)]
+    if mag.size < 3:
+        return np.nan
+    tail = mag[-n:] if mag.size >= n else mag
+    diffs = np.diff(tail)
+    if diffs.size == 0:
+        return np.nan
+    n_inc = np.sum(diffs > 0)
+    n_dec = np.sum(diffs < 0)
+    return float((n_inc - n_dec) / diffs.size)
+
+
+def rcs(mag):
+    """Range of cumulative sum."""
+    mag = np.asarray(mag, float)
+    mag = mag[np.isfinite(mag)]
+    n = mag.size
+    if n < 3:
+        return np.nan
+    sigma = np.std(mag, ddof=1)
+    if sigma <= 0:
+        return np.nan
+    s = np.cumsum(mag - np.mean(mag)) / (n * sigma)
+    return float(np.max(s) - np.min(s))
+
+
+def autocor_length(mag, eta_e):
+    """Lag where ACF drops below eta_e (von Neumann ratio)."""
+    mag = np.asarray(mag, float)
+    mag = mag[np.isfinite(mag)]
+    n = mag.size
+    if n < 10 or not np.isfinite(eta_e):
+        return 0
+    mu = np.mean(mag)
+    var = np.var(mag, ddof=0)
+    if var <= 0:
+        return 0
+    max_lag = min(n // 2, 100)
+    for lag in range(1, max_lag + 1):
+        acf = np.mean((mag[:n - lag] - mu) * (mag[lag:] - mu)) / var
+        if acf < eta_e:
+            return lag
+    return max_lag
+
+
+def structure_function(mag, time):
+    """
+    Structure function analysis.
+
+    Returns (sf_amplitude, sf_gamma) where:
+    - sf_amplitude = sqrt(SF at 1 year timescale)
+    - sf_gamma = log slope of SF vs tau
+    """
+    mag = np.asarray(mag, float)
+    time = np.asarray(time, float)
+    mask = np.isfinite(mag) & np.isfinite(time)
+    if mask.sum() < 10:
+        return np.nan, np.nan
+    mag = mag[mask]
+    time = time[mask]
+
+    # compute all pairwise differences (upper triangle only)
+    n = len(mag)
+    dt_list = []
+    dm2_list = []
+    for i in range(n):
+        dt_arr = time[i + 1:] - time[i]
+        dm_arr = (mag[i + 1:] - mag[i]) ** 2
+        dt_list.append(dt_arr)
+        dm2_list.append(dm_arr)
+
+    all_dt = np.concatenate(dt_list)
+    all_dm2 = np.concatenate(dm2_list)
+    valid = all_dt > 0
+    all_dt = all_dt[valid]
+    all_dm2 = all_dm2[valid]
+
+    if len(all_dt) < 10:
+        return np.nan, np.nan
+
+    # bin by log(dt)
+    log_dt = np.log10(all_dt)
+    n_bins = 20
+    bins = np.linspace(log_dt.min(), log_dt.max(), n_bins + 1)
+    bin_centers = []
+    bin_sf = []
+    for i in range(n_bins):
+        in_bin = (log_dt >= bins[i]) & (log_dt < bins[i + 1])
+        if in_bin.sum() >= 3:
+            bin_centers.append((bins[i] + bins[i + 1]) / 2.0)
+            bin_sf.append(np.mean(all_dm2[in_bin]))
+
+    if len(bin_centers) < 3:
+        return np.nan, np.nan
+
+    log_tau = np.array(bin_centers)
+    log_sf = np.log10(np.array(bin_sf))
+    valid_sf = np.isfinite(log_sf)
+    if valid_sf.sum() < 3:
+        return np.nan, np.nan
+
+    # linear fit in log-log space: log(SF) = gamma * log(tau) + const
+    coeffs = np.polyfit(log_tau[valid_sf], log_sf[valid_sf], 1)
+    sf_gamma = float(coeffs[0])
+
+    # SF at 1 year (365.25 days)
+    log_tau_1yr = np.log10(365.25)
+    sf_at_1yr = 10.0 ** (coeffs[0] * log_tau_1yr + coeffs[1])
+    sf_amplitude = float(np.sqrt(sf_at_1yr))
+
+    return sf_amplitude, sf_gamma
+
+
+def fit_harmonics(mag, time, period, n_harmonics=7):
+    """
+    Fit a Fourier/harmonic series to the phase-folded light curve.
+
+    Returns dict with:
+    - harmonics_mag_1..N: amplitudes of each harmonic
+    - harmonics_phase_2..N: phases relative to fundamental
+    - harmonics_mse: mean squared error of the fit
+    """
+    nan_result = {}
+    for k in range(1, n_harmonics + 1):
+        nan_result[f"harmonics_mag_{k}"] = np.nan
+    for k in range(2, n_harmonics + 1):
+        nan_result[f"harmonics_phase_{k}"] = np.nan
+    nan_result["harmonics_mse"] = np.nan
+
+    mag = np.asarray(mag, float)
+    time = np.asarray(time, float)
+    mask = np.isfinite(mag) & np.isfinite(time)
+    if mask.sum() < 2 * n_harmonics + 1 or not np.isfinite(period) or period <= 0:
+        return nan_result
+
+    mag = mag[mask]
+    time = time[mask]
+
+    phase = (time / period) % 1.0
+
+    # design matrix: [1, cos(2pi*phase), sin(2pi*phase), cos(4pi*phase), ...]
+    n = len(mag)
+    X = np.ones((n, 1 + 2 * n_harmonics))
+    for k in range(1, n_harmonics + 1):
+        X[:, 2 * k - 1] = np.cos(2 * np.pi * k * phase)
+        X[:, 2 * k] = np.sin(2 * np.pi * k * phase)
+
+    try:
+        coeffs, residuals, _, _ = np.linalg.lstsq(X, mag, rcond=None)
+    except np.linalg.LinAlgError:
+        return nan_result
+
+    result = {}
+    phase_1 = np.arctan2(coeffs[2], coeffs[1])  # phase of fundamental
+
+    for k in range(1, n_harmonics + 1):
+        a_k = coeffs[2 * k - 1]
+        b_k = coeffs[2 * k]
+        result[f"harmonics_mag_{k}"] = float(np.sqrt(a_k ** 2 + b_k ** 2))
+
+    for k in range(2, n_harmonics + 1):
+        a_k = coeffs[2 * k - 1]
+        b_k = coeffs[2 * k]
+        phase_k = np.arctan2(b_k, a_k)
+        # phase relative to fundamental
+        result[f"harmonics_phase_{k}"] = float(phase_k - k * phase_1)
+
+    fitted = X @ coeffs
+    result["harmonics_mse"] = float(np.mean((mag - fitted) ** 2))
+
+    return result
+
+
+def psi_cs(mag, time, period):
+    """Range of cumulative sum on the phase-folded light curve."""
+    mag = np.asarray(mag, float)
+    time = np.asarray(time, float)
+    mask = np.isfinite(mag) & np.isfinite(time)
+    if mask.sum() < 3 or not np.isfinite(period) or period <= 0:
+        return np.nan
+    mag = mag[mask]
+    time = time[mask]
+
+    phase = (time / period) % 1.0
+    order = np.argsort(phase)
+    mag_sorted = mag[order]
+    return rcs(mag_sorted)
+
+
+def psi_eta(mag, time, period):
+    """Eta_e on the phase-folded light curve."""
+    mag = np.asarray(mag, float)
+    time = np.asarray(time, float)
+    mask = np.isfinite(mag) & np.isfinite(time)
+    if mask.sum() < 3 or not np.isfinite(period) or period <= 0:
+        return np.nan
+    mag = mag[mask]
+    time = time[mask]
+
+    phase = (time / period) % 1.0
+    order = np.argsort(phase)
+    mag_sorted = mag[order]
+    return von_neumann_ratio(mag_sorted)
+
+
+# ---------------------------------------------------------------------------
+# GP_DRW: Damped Random Walk via celerite2
+# ---------------------------------------------------------------------------
+try:
+    from celerite2 import GaussianProcess as _GP, terms as _cterms
+    _HAS_CELERITE2 = True
+except Exception:
+    _GP = None
+    _cterms = None
+    _HAS_CELERITE2 = False
+
+
+def fit_drw(jd, mag, err):
+    """Fit a Damped Random Walk GP model and return (sigma, tau).
+
+    Uses celerite2 SHOTerm with Q = 1/sqrt(2) (the DRW limit).
+    Returns (NaN, NaN) if fit fails or < 20 points.
+    """
+    jd = np.asarray(jd, float)
+    mag = np.asarray(mag, float)
+    err = np.asarray(err, float)
+    mask = np.isfinite(jd) & np.isfinite(mag) & np.isfinite(err) & (err > 0)
+    if mask.sum() < 20 or not _HAS_CELERITE2:
+        return np.nan, np.nan
+
+    t = jd[mask]
+    y = mag[mask]
+    yerr = err[mask]
+
+    # Subtract mean for numerical stability
+    y_mean = np.mean(y)
+    y = y - y_mean
+
+    # Initial guesses
+    var = np.var(y)
+    tau0 = (t[-1] - t[0]) / 10.0
+    if tau0 <= 0 or var <= 0:
+        return np.nan, np.nan
+
+    Q = 1.0 / np.sqrt(2.0)
+    w0_init = 1.0 / tau0
+    S0_init = var * tau0
+
+    from scipy.optimize import minimize
+
+    def neg_log_like(params):
+        log_S0, log_w0 = params
+        S0 = np.exp(log_S0)
+        w0 = np.exp(log_w0)
+        kernel = _cterms.SHOTerm(S0=S0, w0=w0, Q=Q)
+        gp = _GP(kernel)
+        gp.compute(t, diag=yerr**2)
+        return -gp.log_likelihood(y)
+
+    try:
+        x0 = np.array([np.log(S0_init), np.log(w0_init)])
+        result = minimize(neg_log_like, x0, method="L-BFGS-B")
+        if not result.success:
+            return np.nan, np.nan
+        log_S0, log_w0 = result.x
+        S0 = np.exp(log_S0)
+        w0 = np.exp(log_w0)
+        tau = 1.0 / w0
+        sigma = np.sqrt(S0 / tau)
+        if not (np.isfinite(sigma) and np.isfinite(tau) and sigma > 0 and tau > 0):
+            return np.nan, np.nan
+        return float(sigma), float(tau)
+    except Exception:
+        return np.nan, np.nan
+
+
+# ---------------------------------------------------------------------------
+# IAR_phi: Irregular Autoregressive coefficient
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# IAR_phi: Irregular Autoregressive coefficient
+# ---------------------------------------------------------------------------
+try:
+    from iar.IARModel import IARphikalman as _IARphikalman
+    _HAS_IAR = True
+except Exception:
+    _IARphikalman = None
+    _HAS_IAR = False
+
+
+def iar_phi_fit(jd, mag, err):
+    """Fit an IAR(1) model and return phi.
+
+    phi ~ 1 means smooth slow variability, phi ~ 0 means uncorrelated noise.
+    Returns NaN if fit fails or < 10 points.
+    """
+    if not _HAS_IAR:
+        return np.nan
+
+    jd = np.asarray(jd, float)
+    mag = np.asarray(mag, float)
+    err = np.asarray(err, float)
+    mask = np.isfinite(jd) & np.isfinite(mag) & np.isfinite(err) & (err > 0)
+    if mask.sum() < 10:
+        return np.nan
+
+    t = jd[mask]
+    y = mag[mask] - np.mean(mag[mask])
+    yerr = err[mask]
+
+    try:
+        from scipy.optimize import minimize_scalar
+        result = minimize_scalar(
+            lambda phi: float(_IARphikalman(phi, y, yerr, t, zero_mean=False)),
+            bounds=(1e-6, 1 - 1e-6),
+            method="bounded",
+        )
+        phi = float(result.x)
+        return phi if np.isfinite(phi) else np.nan
+    except Exception:
+        return np.nan
+
+
+# ---------------------------------------------------------------------------
+# MHPS: Mexican Hat Power Spectrum (wavelet variance at two timescales)
+# ---------------------------------------------------------------------------
+def mhps(jd, mag, err):
+    """Mexican Hat Power Spectrum features at 10d and 100d timescales.
+
+    Returns dict with keys: mhps_high, mhps_low, mhps_non_zero,
+    mhps_pn_flag, mhps_ratio.  All NaN if < 20 points.
+    """
+    nan_result = {
+        "mhps_high": np.nan,
+        "mhps_low": np.nan,
+        "mhps_non_zero": np.nan,
+        "mhps_pn_flag": np.nan,
+        "mhps_ratio": np.nan,
+    }
+
+    jd = np.asarray(jd, float)
+    mag = np.asarray(mag, float)
+    err = np.asarray(err, float)
+    mask = np.isfinite(jd) & np.isfinite(mag) & np.isfinite(err)
+    if mask.sum() < 20:
+        return nan_result
+
+    t = jd[mask]
+    y = mag[mask]
+    e = err[mask]
+    y = y - np.mean(y)
+
+    def wavelet_variance(scale):
+        """Compute Mexican Hat wavelet variance at given scale (days)."""
+        n = len(t)
+        coeffs = np.zeros(n)
+        for i in range(n):
+            dt = (t - t[i]) / scale
+            # Mexican Hat (Ricker) wavelet: (1 - t^2) * exp(-t^2/2)
+            psi = (1.0 - dt**2) * np.exp(-0.5 * dt**2)
+            # Normalize
+            norm = np.sum(psi**2)
+            if norm > 0:
+                coeffs[i] = np.sum(y * psi) / np.sqrt(norm)
+        return float(np.var(coeffs))
+
+    scale_short = 10.0   # days
+    scale_long = 100.0   # days
+
+    try:
+        var_high = wavelet_variance(scale_short)
+        var_low = wavelet_variance(scale_long)
+        n_non_zero = int(mask.sum())
+        mean_err_sq = float(np.mean(e**2))
+        pn_flag = 1.0 if mean_err_sq > var_high else 0.0
+        ratio = var_low / var_high if var_high > 0 else np.nan
+
+        return {
+            "mhps_high": var_high,
+            "mhps_low": var_low,
+            "mhps_non_zero": float(n_non_zero),
+            "mhps_pn_flag": pn_flag,
+            "mhps_ratio": ratio,
+        }
+    except Exception:
+        return nan_result
+
+
 def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=True, compute_ls=False):
 
     df_g, df_v = read_lc_csv(asassn_id, path)
@@ -515,6 +1111,41 @@ def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=Tr
         "ls_fap": np.nan,
     }
 
+    # ALeRCE-style features
+    jd_arr = df["JD"].values
+    _amplitude = amplitude(mag)
+    _beyond1std = beyond_1_std(mag)
+    _con = con(mag)
+    _delta_mag = delta_mag(mag)
+    _excess_var = excess_var(mag, merr)
+    _first_mag = float(mag[0]) if mag.size > 0 else np.nan
+    _gskew = gskew(mag)
+    _max_slope = max_slope(mag, jd_arr)
+    _meanvariance = meanvariance(mag)
+    _median_abs_dev = median_abs_dev(mag)
+    _median_brp = median_brp(mag)
+    _percent_amplitude = percent_amplitude(mag)
+    _q31 = q31(mag)
+    _skew = skew(mag)
+    _small_kurtosis = small_kurtosis(mag)
+    _pvar = pvar(mag, merr)
+    _anderson_darling = anderson_darling(mag)
+    _pair_slope_trend = pair_slope_trend(mag)
+    _rcs = rcs(mag)
+    _autocor_length = autocor_length(mag, vnr)
+    _sf_amplitude, _sf_gamma = structure_function(mag, jd_arr)
+
+    # period-dependent features (use LS best period)
+    best_period = ls_stats["ls_best_period_days"]
+    _harmonics = fit_harmonics(mag, jd_arr, best_period)
+    _psi_cs = psi_cs(mag, jd_arr, best_period)
+    _psi_eta = psi_eta(mag, jd_arr, best_period)
+
+    # stochastic model features
+    _drw_sigma, _drw_tau = fit_drw(jd_arr, mag, merr)
+    _iar_phi = iar_phi_fit(jd_arr, mag, merr)
+    _mhps = mhps(jd_arr, mag, merr)
+
     # per camera/field/band usage + offsets and scatter
     global_med = median_mag
     def per_group_stats(group, name):
@@ -596,6 +1227,55 @@ def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=Tr
         ("trend_slope_mag_per_day", slope_d_per_day),
         ("trend_slope_mag_per_year", slope_d_per_year),
         ("trend_r2", r2),
+        # ALeRCE-style features
+        ("amplitude", _amplitude),
+        ("beyond_1_std", _beyond1std),
+        ("con", _con),
+        ("delta_mag_fid", _delta_mag),
+        ("excess_var", _excess_var),
+        ("first_mag", _first_mag),
+        ("gskew", _gskew),
+        ("max_slope", _max_slope),
+        ("meanvariance", _meanvariance),
+        ("median_abs_dev", _median_abs_dev),
+        ("median_brp", _median_brp),
+        ("percent_amplitude", _percent_amplitude),
+        ("q31", _q31),
+        ("skew", _skew),
+        ("small_kurtosis", _small_kurtosis),
+        ("pvar", _pvar),
+        ("anderson_darling", _anderson_darling),
+        ("pair_slope_trend", _pair_slope_trend),
+        ("rcs", _rcs),
+        ("autocor_length", _autocor_length),
+        ("sf_ml_amplitude", _sf_amplitude),
+        ("sf_ml_gamma", _sf_gamma),
+        # period-dependent features
+        ("harmonics_mag_1", _harmonics["harmonics_mag_1"]),
+        ("harmonics_mag_2", _harmonics["harmonics_mag_2"]),
+        ("harmonics_mag_3", _harmonics["harmonics_mag_3"]),
+        ("harmonics_mag_4", _harmonics["harmonics_mag_4"]),
+        ("harmonics_mag_5", _harmonics["harmonics_mag_5"]),
+        ("harmonics_mag_6", _harmonics["harmonics_mag_6"]),
+        ("harmonics_mag_7", _harmonics["harmonics_mag_7"]),
+        ("harmonics_phase_2", _harmonics["harmonics_phase_2"]),
+        ("harmonics_phase_3", _harmonics["harmonics_phase_3"]),
+        ("harmonics_phase_4", _harmonics["harmonics_phase_4"]),
+        ("harmonics_phase_5", _harmonics["harmonics_phase_5"]),
+        ("harmonics_phase_6", _harmonics["harmonics_phase_6"]),
+        ("harmonics_phase_7", _harmonics["harmonics_phase_7"]),
+        ("harmonics_mse", _harmonics["harmonics_mse"]),
+        ("psi_cs", _psi_cs),
+        ("psi_eta", _psi_eta),
+        # stochastic model features
+        ("gp_drw_sigma", _drw_sigma),
+        ("gp_drw_tau", _drw_tau),
+        ("iar_phi", _iar_phi),
+        ("mhps_high", _mhps["mhps_high"]),
+        ("mhps_low", _mhps["mhps_low"]),
+        ("mhps_non_zero", _mhps["mhps_non_zero"]),
+        ("mhps_pn_flag", _mhps["mhps_pn_flag"]),
+        ("mhps_ratio", _mhps["mhps_ratio"]),
         ("by_camera", by_camera),
         ("by_field", by_field),
         ("by_band", by_band),
@@ -643,6 +1323,29 @@ def print_summary(summary, max_rows=10):
     if "variability_lomb_scargle_best_period_days" in summary:
         print(f"Lomb-Scargle: best_period_days={summary['variability_lomb_scargle_best_period_days']:.6f}  peak_power={summary['variability_lomb_scargle_peak_power']:.6f}  fap={summary['variability_lomb_scargle_fap']:.3e}")
     print(f"trend slope={summary['trend_slope_mag_per_day']:.6e} mag/day ({summary['trend_slope_mag_per_year']:.6e} mag/yr),  R²={summary['trend_r2']:.3f}")
+
+    def _fmt(v, d=4):
+        return f"{v:.{d}f}" if np.isfinite(v) else "NaN"
+
+    print("\n=== ALeRCE FEATURES ===")
+    print(f"Amplitude={_fmt(summary['amplitude'])}  Beyond1Std={_fmt(summary['beyond_1_std'])}  Con={summary['con']}  delta_mag={_fmt(summary['delta_mag_fid'])}")
+    print(f"ExcessVar={_fmt(summary['excess_var'])}  first_mag={_fmt(summary['first_mag'],3)}  Gskew={_fmt(summary['gskew'])}  MaxSlope={_fmt(summary['max_slope'])}")
+    print(f"Meanvariance={_fmt(summary['meanvariance'])}  MedianAbsDev={_fmt(summary['median_abs_dev'])}  MedianBRP={_fmt(summary['median_brp'])}  PercentAmplitude={_fmt(summary['percent_amplitude'])}")
+    print(f"Q31={_fmt(summary['q31'])}  Skew={_fmt(summary['skew'])}  SmallKurtosis={_fmt(summary['small_kurtosis'])}  Pvar={_fmt(summary['pvar'])}")
+    print(f"AndersonDarling={_fmt(summary['anderson_darling'])}  PairSlopeTrend={_fmt(summary['pair_slope_trend'])}  Rcs={_fmt(summary['rcs'])}  Autocor_length={summary['autocor_length']}")
+    print(f"SF_ML_amplitude={_fmt(summary['sf_ml_amplitude'])}  SF_ML_gamma={_fmt(summary['sf_ml_gamma'])}")
+
+    print("\n=== HARMONICS (folded LC) ===")
+    h_mags = "  ".join(f"H{k}={_fmt(summary[f'harmonics_mag_{k}'])}" for k in range(1, 8))
+    print(f"Mag: {h_mags}")
+    h_phases = "  ".join(f"φ{k}={_fmt(summary[f'harmonics_phase_{k}'])}" for k in range(2, 8))
+    print(f"Phase: {h_phases}")
+    print(f"MSE={_fmt(summary['harmonics_mse'])}  Psi_CS={_fmt(summary['psi_cs'])}  Psi_eta={_fmt(summary['psi_eta'])}")
+
+    print("\n=== STOCHASTIC MODELS ===")
+    print(f"GP_DRW: sigma={_fmt(summary['gp_drw_sigma'])}  tau={_fmt(summary['gp_drw_tau'])} d")
+    print(f"IAR: phi={_fmt(summary['iar_phi'])}")
+    print(f"MHPS: high={_fmt(summary['mhps_high'])}  low={_fmt(summary['mhps_low'])}  ratio={_fmt(summary['mhps_ratio'])}  PN_flag={summary['mhps_pn_flag']}  non_zero={summary['mhps_non_zero']}")
 
     print("\n=== BY CAMERA (top) ===")
     print(headframe(summary["by_camera"]))

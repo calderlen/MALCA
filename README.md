@@ -568,11 +568,23 @@ malca review --db ~/.cache/malca/review.db --plot-dir output/runs/YOUR_RUN/plots
 
 Train a baseline classifier on reviewed labels:
 ```bash
-malca ml_train --db output/review/review.db --out-dir output/ml
+malca ml_train --input output/review/reviewed.parquet --out-dir output/ml --cv-folds 5
 ```
-- Uses a curated set of 107 physics-driven features (`malca/ml/features.py`)
-- Trains a LightGBM classifier on `event_class` labels from the review database
-- Outputs feature importance rankings and cross-validation metrics
+- Uses curated physics/context features from `malca/ml/features.py`
+- Trains a LightGBM classifier on labeled `event_class` values (dropping `unclassified` by default)
+- Saves model artifacts to `output/ml/` (`candidate_classifier.joblib`, `feature_schema.json`, `metrics.json`)
+
+#### malca ml_predict
+
+Score candidates with a trained classifier:
+
+```bash
+malca ml_predict --model-dir output/ml --input output/review/reviewed.parquet --output output/review/scored.parquet
+```
+
+- Loads `candidate_classifier.joblib` + `feature_schema.json`
+- Applies the same feature transforms used during training
+- Appends `ml_predicted_class` and `ml_prob_<class>` columns to the output table
 
 #### malca vsx-filter
 
