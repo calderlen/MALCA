@@ -1295,9 +1295,10 @@ def export_reviews(conn: sqlite3.Connection, out_path: Path, only_reviewed: bool
         *[f"c.{col}" for col in candidate_cols],
         *[f"r.{col}" for col in review_cols],
     ]
+    select_clause = ",\n            ".join(select_cols)
     query = f"""
         SELECT
-            {",\n            ".join(select_cols)}
+            {select_clause}
         FROM candidates c
         LEFT JOIN reviews r ON r.candidate_id = c.candidate_id
     """
