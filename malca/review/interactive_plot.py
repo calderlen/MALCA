@@ -258,19 +258,8 @@ def _build_title(payload: dict, df: pd.DataFrame) -> str:
 
 
 def _build_stat_rows(payload: dict, df: pd.DataFrame, filtered_cameras: set[int]) -> list[tuple[str, str]]:
-    rows: list[tuple[str, str]] = [
-        ("Points", f"{len(df):,}"),
-        ("Cameras", str(int(df["camera_label"].nunique())) if "camera_label" in df.columns else "0"),
-    ]
+    rows: list[tuple[str, str]] = []
     for label, key, fmt in (
-        ("Dipper score", "dipper_score", "{:.2f}"),
-        ("Jumper score", "jumper_score", "{:.2f}"),
-        ("Dip logBF", "dip_bayes_factor", "{:.1f}"),
-        ("Jump logBF", "jump_bayes_factor", "{:.1f}"),
-        ("RUWE", "ruwe", "{:.2f}"),
-        ("Periodicity", "periodicity_score", "{:.3f}"),
-        ("Phase P (d)", "phase_period_days", "{:.5f}"),
-        ("Phase quality", "phase_quality_score", "{:.3f}"),
         # light curve stats
         ("σ mag", "stats_photometry_robust_sigma_mag", "{:.4f}"),
         ("std mag", "stats_photometry_std_mag", "{:.4f}"),
@@ -434,10 +423,6 @@ def _phase_fold_df(
 
 def _theme_palette(theme: str) -> dict[str, str]:
     mode = str(theme or "black").lower()
-    if mode == "grey":
-        mode = "gray"
-    elif mode == "light":
-        mode = "white"
     if mode == "black":
         return {
             "text": "#dce5ef",

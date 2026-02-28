@@ -241,8 +241,6 @@ app.index_string = '''
         }
         .left-info-scroll {
             flex: 1 1 auto;
-            height: 100%;
-            max-height: 100%;
             min-height: 0;
             overflow-y: auto;
             overflow-x: hidden;
@@ -699,14 +697,22 @@ app.index_string = '''
         }
         .run-config-panel {
             display: grid;
-            grid-template-columns: 1fr;
-            gap: 6px;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 8px;
         }
         .run-config-item {
             border: 1px solid rgba(78, 110, 132, 0.45);
             border-radius: 6px;
             background: rgba(7, 16, 22, 0.68);
-            padding: 5px 7px;
+            padding: 6px 8px;
+            min-height: 52px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+        .run-config-item.wide {
+            grid-column: 1 / -1;
+            min-height: 0;
         }
         .run-config-item .k {
             color: #7fa3bc;
@@ -719,7 +725,19 @@ app.index_string = '''
             font-size: 11px;
             font-weight: 600;
             margin-top: 2px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .run-config-item.wide .v {
+            white-space: normal;
+            overflow: visible;
+            text-overflow: clip;
             word-break: break-word;
+        }
+        .run-config-item.warning {
+            border-color: rgba(186, 144, 44, 0.75);
+            background: rgba(44, 30, 8, 0.2);
         }
         .repro-badge {
             border-radius: 999px;
@@ -790,6 +808,11 @@ app.index_string = '''
             border-color: #666;
             color: #bbb;
             background-color: #1a1a1a;
+        }
+        .badge-btn.active {
+            border-color: #0f0;
+            color: #0f0;
+            background-color: #003300;
         }
         .action-btn {
             background-color: #1a1a1a;
@@ -1083,7 +1106,8 @@ app.index_string = '''
         .metadata-sections {
             background-color: #0a0a0a;
             border-top: 2px solid #555;
-            overflow-y: auto;
+            overflow: visible;
+            flex-shrink: 0;
             padding: 0 12px;
             border-radius: 8px;
         }
@@ -1132,6 +1156,37 @@ app.index_string = '''
             text-overflow: ellipsis;
             white-space: nowrap;
         }
+        .bottom-context-bar {
+            display: flex;
+            align-items: center;
+            gap: 22px;
+            flex-wrap: wrap;
+            min-width: 0;
+        }
+        .bottom-context-item {
+            display: flex;
+            align-items: baseline;
+            gap: 8px;
+            min-width: 0;
+            flex: 1 1 320px;
+        }
+        .bottom-context-k {
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.4px;
+            white-space: nowrap;
+            color: #86a7bd;
+        }
+        .bottom-context-v {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-family: 'Monaco', 'Courier New', monospace;
+            font-size: 10px;
+            color: #c5d5e1;
+        }
         .metadata-health.metadata-health-base .chip {
             color: #e4c16d;
             border-color: rgba(186, 144, 44, 0.75);
@@ -1174,17 +1229,17 @@ app.index_string = '''
             background-color: #000 !important;
             color: #e0e0e0 !important;
         }
-        body[data-theme="grey"] {
+        body[data-theme="gray"] {
             background-color: #2e3440 !important;
             color: #d8dee9 !important;
         }
-        body[data-theme="light"] {
+        body[data-theme="white"] {
             background-color: #eef2f6 !important;
             color: #1c2733 !important;
         }
         body[data-theme="black"] .main-container,
-        body[data-theme="grey"] .main-container,
-        body[data-theme="light"] .main-container {
+        body[data-theme="gray"] .main-container,
+        body[data-theme="white"] .main-container {
             background-color: inherit !important;
         }
         body[data-theme="black"] .sidebar,
@@ -1195,350 +1250,359 @@ app.index_string = '''
         body[data-theme="black"] .plot-status,
         body[data-theme="black"] .run-config-item,
         body[data-theme="black"] .plot-toolbar { background-color: #0a0a0a !important; border-color: #555 !important; color: #e0e0e0 !important; }
-        body[data-theme="grey"] .sidebar,
-        body[data-theme="grey"] .header-bar,
-        body[data-theme="grey"] .metadata-sections,
-        body[data-theme="grey"] .control-bar,
-        body[data-theme="grey"] .review-form,
-        body[data-theme="grey"] .plot-status,
-        body[data-theme="grey"] .run-config-item,
-        body[data-theme="grey"] .plot-toolbar { background-color: #3b4252 !important; border-color: #4c566a !important; color: #d8dee9 !important; }
-        body[data-theme="light"] .sidebar,
-        body[data-theme="light"] .header-bar,
-        body[data-theme="light"] .metadata-sections,
-        body[data-theme="light"] .control-bar,
-        body[data-theme="light"] .review-form,
-        body[data-theme="light"] .plot-status,
-        body[data-theme="light"] .run-config-item,
-        body[data-theme="light"] .plot-toolbar { background-color: #ffffff !important; border-color: #c5d0da !important; color: #1c2733 !important; }
+        body[data-theme="gray"] .sidebar,
+        body[data-theme="gray"] .header-bar,
+        body[data-theme="gray"] .metadata-sections,
+        body[data-theme="gray"] .control-bar,
+        body[data-theme="gray"] .review-form,
+        body[data-theme="gray"] .plot-status,
+        body[data-theme="gray"] .run-config-item,
+        body[data-theme="gray"] .plot-toolbar { background-color: #3b4252 !important; border-color: #4c566a !important; color: #d8dee9 !important; }
+        body[data-theme="white"] .sidebar,
+        body[data-theme="white"] .header-bar,
+        body[data-theme="white"] .metadata-sections,
+        body[data-theme="white"] .control-bar,
+        body[data-theme="white"] .review-form,
+        body[data-theme="white"] .plot-status,
+        body[data-theme="white"] .run-config-item,
+        body[data-theme="white"] .plot-toolbar { background-color: #ffffff !important; border-color: #c5d0da !important; color: #1c2733 !important; }
         body[data-theme="black"] .section-title,
         body[data-theme="black"] .help-link,
         body[data-theme="black"] .metadata-sections summary,
         body[data-theme="black"] #progress-text { color: #0af !important; }
-        body[data-theme="grey"] .section-title,
-        body[data-theme="grey"] .help-link,
-        body[data-theme="grey"] .metadata-sections summary,
-        body[data-theme="grey"] #progress-text { color: #88c0d0 !important; }
-        body[data-theme="light"] .section-title,
-        body[data-theme="light"] .help-link,
-        body[data-theme="light"] .metadata-sections summary,
-        body[data-theme="light"] #progress-text { color: #245f8f !important; }
+        body[data-theme="gray"] .section-title,
+        body[data-theme="gray"] .help-link,
+        body[data-theme="gray"] .metadata-sections summary,
+        body[data-theme="gray"] #progress-text { color: #88c0d0 !important; }
+        body[data-theme="white"] .section-title,
+        body[data-theme="white"] .help-link,
+        body[data-theme="white"] .metadata-sections summary,
+        body[data-theme="white"] #progress-text { color: #245f8f !important; }
         body[data-theme="black"] .action-btn.primary { background-color: #0af !important; color: #08131d !important; border-color: #0af !important; }
-        body[data-theme="grey"] .action-btn.primary { background-color: #88c0d0 !important; color: #2e3440 !important; border-color: #88c0d0 !important; }
-        body[data-theme="light"] .action-btn.primary { background-color: #245f8f !important; color: #f5f7fa !important; border-color: #245f8f !important; }
+        body[data-theme="gray"] .action-btn.primary { background-color: #88c0d0 !important; color: #2e3440 !important; border-color: #88c0d0 !important; }
+        body[data-theme="white"] .action-btn.primary { background-color: #245f8f !important; color: #f5f7fa !important; border-color: #245f8f !important; }
         body[data-theme="black"] input, body[data-theme="black"] textarea, body[data-theme="black"] select,
         body[data-theme="black"] .dash-dropdown .Select-control,
         body[data-theme="black"] .dash-dropdown .Select-menu-outer { background-color: #0a0a0a !important; color: #e0e0e0 !important; border-color: #555 !important; }
-        body[data-theme="grey"] input, body[data-theme="grey"] textarea, body[data-theme="grey"] select,
-        body[data-theme="grey"] .dash-dropdown .Select-control,
-        body[data-theme="grey"] .dash-dropdown .Select-menu-outer { background-color: #3b4252 !important; color: #eceff4 !important; border-color: #4c566a !important; }
-        body[data-theme="light"] input, body[data-theme="light"] textarea, body[data-theme="light"] select,
-        body[data-theme="light"] .dash-dropdown .Select-control,
-        body[data-theme="light"] .dash-dropdown .Select-menu-outer { background-color: #ffffff !important; color: #1c2733 !important; border-color: #c5d0da !important; }
-        body[data-theme="light"] .plot-container,
-        body[data-theme="light"] .metadata-bar,
-        body[data-theme="light"] #bottom-context-info {
+        body[data-theme="gray"] input, body[data-theme="gray"] textarea, body[data-theme="gray"] select,
+        body[data-theme="gray"] .dash-dropdown .Select-control,
+        body[data-theme="gray"] .dash-dropdown .Select-menu-outer { background-color: #3b4252 !important; color: #eceff4 !important; border-color: #4c566a !important; }
+        body[data-theme="white"] input, body[data-theme="white"] textarea, body[data-theme="white"] select,
+        body[data-theme="white"] .dash-dropdown .Select-control,
+        body[data-theme="white"] .dash-dropdown .Select-menu-outer { background-color: #ffffff !important; color: #1c2733 !important; border-color: #c5d0da !important; }
+        body[data-theme="white"] .plot-container,
+        body[data-theme="white"] .metadata-bar,
+        body[data-theme="white"] #bottom-context-info {
             background-color: #eef2f6 !important;
             border-color: #c5d0da !important;
             color: #4f6273 !important;
         }
-        body[data-theme="light"] .plot-toolbar,
-        body[data-theme="light"] .meta-toolbar,
-        body[data-theme="light"] .camera-diag .item,
-        body[data-theme="light"] .run-config-item,
-        body[data-theme="light"] .repro-badge,
-        body[data-theme="light"] .metadata-health,
-        body[data-theme="light"] .compact-btn,
-        body[data-theme="light"] .score-btn,
-        body[data-theme="light"] .badge-btn,
-        body[data-theme="light"] .action-btn:not(.primary),
-        body[data-theme="light"] .sidebar-toggle,
-        body[data-theme="light"] #help-modal .modal-content {
+        body[data-theme="white"] .plot-toolbar,
+        body[data-theme="white"] .meta-toolbar,
+        body[data-theme="white"] .camera-diag .item,
+        body[data-theme="white"] .run-config-item,
+        body[data-theme="white"] .repro-badge,
+        body[data-theme="white"] .metadata-health,
+        body[data-theme="white"] .compact-btn,
+        body[data-theme="white"] .score-btn,
+        body[data-theme="white"] .badge-btn,
+        body[data-theme="white"] .action-btn:not(.primary),
+        body[data-theme="white"] .sidebar-toggle,
+        body[data-theme="white"] #help-modal .modal-content {
             background: #ffffff !important;
             background-image: none !important;
             border-color: #c5d0da !important;
             color: #1c2733 !important;
         }
-        body[data-theme="light"] .sidebar-toggle {
+        body[data-theme="white"] .sidebar-toggle {
             color: #245f8f !important;
         }
-        body[data-theme="light"] .sidebar-toggle:hover,
-        body[data-theme="light"] .compact-btn:hover,
-        body[data-theme="light"] .score-btn:hover,
-        body[data-theme="light"] .badge-btn:hover,
-        body[data-theme="light"] .action-btn:not(.primary):hover {
+        body[data-theme="white"] .sidebar-toggle:hover,
+        body[data-theme="white"] .compact-btn:hover,
+        body[data-theme="white"] .score-btn:hover,
+        body[data-theme="white"] .badge-btn:hover,
+        body[data-theme="white"] .action-btn:not(.primary):hover {
             background: #e7edf3 !important;
             border-color: #9fb1bf !important;
             color: #1c2733 !important;
         }
-        body[data-theme="light"] .score-btn.active {
+        body[data-theme="white"] .score-btn.active {
             background: #dbe7f1 !important;
             border-color: #245f8f !important;
             color: #163b57 !important;
         }
-        body[data-theme="light"] .header-key-info .item,
-        body[data-theme="light"] .notification,
-        body[data-theme="light"] .camera-diag,
-        body[data-theme="light"] .run-config-item .k,
-        body[data-theme="light"] .plot-toolbar .label-chip,
-        body[data-theme="light"] .plot-toolbar .dash-checklist label,
-        body[data-theme="light"] .plot-toolbar label,
-        body[data-theme="light"] .meta-toolbar .title,
-        body[data-theme="light"] .metadata-health .detail,
-        body[data-theme="light"] .plot-status summary,
-        body[data-theme="light"] .sidebar label,
-        body[data-theme="light"] .sidebar details summary,
-        body[data-theme="light"] .dash-checklist label,
-        body[data-theme="light"] .sidebar-camera-checklist label,
-        body[data-theme="light"] #review-progress-indicator,
-        body[data-theme="light"] #pdm-result-label,
-        body[data-theme="light"] #bottom-pipeline-status,
-        body[data-theme="light"] #pass-indicator,
-        body[data-theme="light"] #status-indicator {
+        body[data-theme="white"] .badge-btn.active {
+            background: #e8f7ec !important;
+            border-color: #2f7a57 !important;
+            color: #2f7a57 !important;
+        }
+        body[data-theme="white"] .header-key-info .item,
+        body[data-theme="white"] .notification,
+        body[data-theme="white"] .camera-diag,
+        body[data-theme="white"] .run-config-item .k,
+        body[data-theme="white"] .plot-toolbar .label-chip,
+        body[data-theme="white"] .plot-toolbar .dash-checklist label,
+        body[data-theme="white"] .plot-toolbar label,
+        body[data-theme="white"] .meta-toolbar .title,
+        body[data-theme="white"] .metadata-health .detail,
+        body[data-theme="white"] .plot-status summary,
+        body[data-theme="white"] .sidebar label,
+        body[data-theme="white"] .sidebar details summary,
+        body[data-theme="white"] .dash-checklist label,
+        body[data-theme="white"] .sidebar-camera-checklist label,
+        body[data-theme="white"] #review-progress-indicator,
+        body[data-theme="white"] #pdm-result-label,
+        body[data-theme="white"] #bottom-pipeline-status,
+        body[data-theme="white"] #pass-indicator,
+        body[data-theme="white"] #status-indicator {
             color: #4f6273 !important;
         }
-        body[data-theme="light"] .sidebar details summary:hover,
-        body[data-theme="light"] .metadata-sections summary:hover,
-        body[data-theme="light"] .plot-status summary:hover,
-        body[data-theme="light"] .help-link:hover {
+        body[data-theme="white"] .sidebar details summary:hover,
+        body[data-theme="white"] .metadata-sections summary:hover,
+        body[data-theme="white"] .plot-status summary:hover,
+        body[data-theme="white"] .help-link:hover {
             color: #245f8f !important;
         }
-        body[data-theme="light"] .run-config-item .v,
-        body[data-theme="light"] .plot-status,
-        body[data-theme="light"] .plot-status .status-line,
-        body[data-theme="light"] .plot-status li,
-        body[data-theme="light"] .metadata-health,
-        body[data-theme="light"] .meta-field-label,
-        body[data-theme="light"] .meta-field-value,
-        body[data-theme="light"] .vetting-banner-label,
-        body[data-theme="light"] .vetting-banner-value,
-        body[data-theme="light"] .vetting-banner-empty,
-        body[data-theme="light"] #help-modal .modal-body,
-        body[data-theme="light"] #help-modal .modal-footer,
-        body[data-theme="light"] #help-modal pre {
+        body[data-theme="white"] .run-config-item .v,
+        body[data-theme="white"] .plot-status,
+        body[data-theme="white"] .plot-status .status-line,
+        body[data-theme="white"] .plot-status li,
+        body[data-theme="white"] .metadata-health,
+        body[data-theme="white"] .bottom-context-v,
+        body[data-theme="white"] .meta-field-label,
+        body[data-theme="white"] .meta-field-value,
+        body[data-theme="white"] .vetting-banner-label,
+        body[data-theme="white"] .vetting-banner-value,
+        body[data-theme="white"] .vetting-banner-empty,
+        body[data-theme="white"] #help-modal .modal-body,
+        body[data-theme="white"] #help-modal .modal-footer,
+        body[data-theme="white"] #help-modal pre {
             color: #1c2733 !important;
         }
-        body[data-theme="light"] .meta-field-row {
+        body[data-theme="white"] .bottom-context-k {
+            color: #5f7384 !important;
+        }
+        body[data-theme="white"] .meta-field-row {
             border-color: #d6e0e8 !important;
         }
-        body[data-theme="light"] .plot-status.warn {
+        body[data-theme="white"] .plot-status.warn {
             border-color: rgba(186, 144, 44, 0.45) !important;
             background: rgba(255, 239, 202, 0.88) !important;
         }
-        body[data-theme="light"] .plot-status.error {
+        body[data-theme="white"] .plot-status.error {
             border-color: rgba(192, 72, 72, 0.45) !important;
             background: rgba(255, 226, 226, 0.92) !important;
         }
-        body[data-theme="light"] .metadata-health .chip,
-        body[data-theme="light"] .repro-badge {
+        body[data-theme="white"] .metadata-health .chip,
+        body[data-theme="white"] .repro-badge {
             color: #245f8f !important;
             background: #edf4fa !important;
             border-color: #b9c9d7 !important;
         }
-        body[data-theme="light"] .metadata-health.metadata-health-base .chip {
+        body[data-theme="white"] .metadata-health.metadata-health-base .chip {
             color: #946200 !important;
             border-color: #e0c27b !important;
             background: #fff3d8 !important;
         }
-        body[data-theme="light"] .metadata-health.metadata-health-partial .chip {
+        body[data-theme="white"] .metadata-health.metadata-health-partial .chip {
             color: #1f6485 !important;
             border-color: #a7cad9 !important;
             background: #e8f5fb !important;
         }
-        body[data-theme="light"] .metadata-health.metadata-health-enriched .chip {
+        body[data-theme="white"] .metadata-health.metadata-health-enriched .chip {
             color: #2f7a57 !important;
             border-color: #a8d0ba !important;
             background: #e9f7ef !important;
         }
-        body[data-theme="light"] .repro-badge.warn {
+        body[data-theme="white"] .repro-badge.warn {
             color: #946200 !important;
             border-color: #e0c27b !important;
             background: #fff3d8 !important;
         }
-        body[data-theme="light"] .sidebar hr,
-        body[data-theme="light"] .metadata-sections details {
+        body[data-theme="white"] .sidebar hr,
+        body[data-theme="white"] .metadata-sections details {
             border-color: #d6e0e8 !important;
         }
-        body[data-theme="light"] .dash-checklist label,
-        body[data-theme="light"] .dash-radioitems label {
+        body[data-theme="white"] .dash-checklist label,
+        body[data-theme="white"] .dash-radioitems label {
             box-shadow: none !important;
         }
-        body[data-theme="light"] .panel-splitter-vertical::after {
+        body[data-theme="white"] .panel-splitter-vertical::after {
             color: #4f6273 !important;
             background: rgba(255, 255, 255, 0.96) !important;
             border-color: rgba(159, 177, 191, 0.75) !important;
         }
-        body[data-theme="light"] .panel-splitter-vertical::before {
+        body[data-theme="white"] .panel-splitter-vertical::before {
             background: rgba(159, 177, 191, 0.6) !important;
         }
-        body[data-theme="light"] .Select-control,
-        body[data-theme="light"] .Select-menu-outer,
-        body[data-theme="light"] .Select-menu,
-        body[data-theme="light"] .Select-option,
-        body[data-theme="light"] .VirtualizedSelectOption,
-        body[data-theme="light"] .Select-placeholder,
-        body[data-theme="light"] .Select-value,
-        body[data-theme="light"] .Select-value-label,
-        body[data-theme="light"] .Select-input,
-        body[data-theme="light"] .Select-clear-zone,
-        body[data-theme="light"] .Select-arrow-zone,
-        body[data-theme="light"] .Select-menu-outer,
-        body[data-theme="light"] .Select-menu-outer *,
-        body[data-theme="light"] .Select * {
+        body[data-theme="white"] .Select-control,
+        body[data-theme="white"] .Select-menu-outer,
+        body[data-theme="white"] .Select-menu,
+        body[data-theme="white"] .Select-option,
+        body[data-theme="white"] .VirtualizedSelectOption,
+        body[data-theme="white"] .Select-placeholder,
+        body[data-theme="white"] .Select-value,
+        body[data-theme="white"] .Select-value-label,
+        body[data-theme="white"] .Select-input,
+        body[data-theme="white"] .Select-clear-zone,
+        body[data-theme="white"] .Select-arrow-zone,
+        body[data-theme="white"] .Select-menu-outer,
+        body[data-theme="white"] .Select-menu-outer *,
+        body[data-theme="white"] .Select * {
             background-color: #ffffff !important;
             color: #1c2733 !important;
             border-color: #c5d0da !important;
         }
-        body[data-theme="light"] .Select-option,
-        body[data-theme="light"] .VirtualizedSelectOption,
-        body[data-theme="light"] [class*="Select-option"] {
+        body[data-theme="white"] .Select-option,
+        body[data-theme="white"] .VirtualizedSelectOption,
+        body[data-theme="white"] [class*="Select-option"] {
             border-bottom: 1px solid #dde6ee !important;
         }
-        body[data-theme="light"] .form-select,
-        body[data-theme="light"] .form-control,
-        body[data-theme="light"] .sidebar .form-select,
-        body[data-theme="light"] .sidebar .form-control,
-        body[data-theme="light"] .plot-toolbar .form-select,
-        body[data-theme="light"] .plot-toolbar .form-control {
+        body[data-theme="white"] .form-select,
+        body[data-theme="white"] .form-control,
+        body[data-theme="white"] .sidebar .form-select,
+        body[data-theme="white"] .sidebar .form-control,
+        body[data-theme="white"] .plot-toolbar .form-select,
+        body[data-theme="white"] .plot-toolbar .form-control {
             background-color: #ffffff !important;
             background-image: none !important;
             color: #1c2733 !important;
             border-color: #c5d0da !important;
             box-shadow: none !important;
         }
-        body[data-theme="light"] .form-select:focus,
-        body[data-theme="light"] .form-control:focus,
-        body[data-theme="light"] .sidebar .form-select:focus,
-        body[data-theme="light"] .sidebar .form-control:focus,
-        body[data-theme="light"] .plot-toolbar .form-select:focus,
-        body[data-theme="light"] .plot-toolbar .form-control:focus {
+        body[data-theme="white"] .form-select:focus,
+        body[data-theme="white"] .form-control:focus,
+        body[data-theme="white"] .sidebar .form-select:focus,
+        body[data-theme="white"] .sidebar .form-control:focus,
+        body[data-theme="white"] .plot-toolbar .form-select:focus,
+        body[data-theme="white"] .plot-toolbar .form-control:focus {
             border-color: #7da8c4 !important;
             box-shadow: 0 0 0 2px rgba(36, 95, 143, 0.12) !important;
         }
-        body[data-theme="light"] .dash-dropdown,
-        body[data-theme="light"] .dash-dropdown-trigger,
-        body[data-theme="light"] .dash-dropdown-value,
-        body[data-theme="light"] .dash-dropdown-value-item,
-        body[data-theme="light"] .dash-dropdown-content,
-        body[data-theme="light"] .dash-dropdown-options,
-        body[data-theme="light"] .dash-options-list,
-        body[data-theme="light"] .dash-dropdown-search-container,
-        body[data-theme="light"] .dash-dropdown-search {
+        body[data-theme="white"] .dash-dropdown,
+        body[data-theme="white"] .dash-dropdown-trigger,
+        body[data-theme="white"] .dash-dropdown-value,
+        body[data-theme="white"] .dash-dropdown-value-item,
+        body[data-theme="white"] .dash-dropdown-content,
+        body[data-theme="white"] .dash-dropdown-options,
+        body[data-theme="white"] .dash-options-list,
+        body[data-theme="white"] .dash-dropdown-search-container,
+        body[data-theme="white"] .dash-dropdown-search {
             background-color: #ffffff !important;
             background-image: none !important;
             color: #1c2733 !important;
             border-color: #c5d0da !important;
         }
-        body[data-theme="light"] .dash-dropdown-option,
-        body[data-theme="light"] .dash-options-list-option {
+        body[data-theme="white"] .dash-dropdown-option,
+        body[data-theme="white"] .dash-options-list-option {
             background-color: #ffffff !important;
             color: #1c2733 !important;
             border-color: #dde6ee !important;
         }
-        body[data-theme="light"] .dash-dropdown-option:hover,
-        body[data-theme="light"] .dash-options-list-option:hover,
-        body[data-theme="light"] .dash-dropdown-option.selected,
-        body[data-theme="light"] .dash-options-list-option.selected {
+        body[data-theme="white"] .dash-dropdown-option:hover,
+        body[data-theme="white"] .dash-options-list-option:hover,
+        body[data-theme="white"] .dash-dropdown-option.selected,
+        body[data-theme="white"] .dash-options-list-option.selected {
             background-color: #eaf1f6 !important;
             color: #1c2733 !important;
         }
-        body[data-theme="light"] .Select-control .Select-input > input {
+        body[data-theme="white"] .Select-control .Select-input > input {
             color: #1c2733 !important;
         }
-        body[data-theme="light"] .Select.has-value.Select--single > .Select-control .Select-value,
-        body[data-theme="light"] .Select.has-value.is-pseudo-focused.Select--single > .Select-control .Select-value {
+        body[data-theme="white"] .Select.has-value.Select--single > .Select-control .Select-value,
+        body[data-theme="white"] .Select.has-value.is-pseudo-focused.Select--single > .Select-control .Select-value {
             background: #ffffff !important;
             background-image: none !important;
             border-color: transparent !important;
             color: #1c2733 !important;
         }
-        body[data-theme="light"] .Select.has-value.Select--single > .Select-control .Select-value .Select-value-label,
-        body[data-theme="light"] .Select.has-value.is-pseudo-focused.Select--single > .Select-control .Select-value .Select-value-label,
-        body[data-theme="light"] .has-value.Select--single > .Select-control .Select-value a.Select-value-label,
-        body[data-theme="light"] .has-value.is-pseudo-focused.Select--single > .Select-control .Select-value a.Select-value-label {
+        body[data-theme="white"] .Select.has-value.Select--single > .Select-control .Select-value .Select-value-label,
+        body[data-theme="white"] .Select.has-value.is-pseudo-focused.Select--single > .Select-control .Select-value .Select-value-label,
+        body[data-theme="white"] .has-value.Select--single > .Select-control .Select-value a.Select-value-label,
+        body[data-theme="white"] .has-value.is-pseudo-focused.Select--single > .Select-control .Select-value a.Select-value-label {
             color: #1c2733 !important;
         }
-        body[data-theme="light"] .Select.is-focused:not(.is-open) > .Select-control {
+        body[data-theme="white"] .Select.is-focused:not(.is-open) > .Select-control {
             border-color: #7da8c4 !important;
             box-shadow: 0 0 0 2px rgba(36, 95, 143, 0.12) !important;
         }
-        body[data-theme="light"] .sidebar .dash-checklist,
-        body[data-theme="light"] .sidebar .dash-radioitems,
-        body[data-theme="light"] .meta-toolbar .dash-checklist,
-        body[data-theme="light"] .meta-toolbar .dash-radioitems,
-        body[data-theme="light"] .plot-toolbar .dash-checklist,
-        body[data-theme="light"] .plot-toolbar .dash-radioitems {
+        body[data-theme="white"] .sidebar .dash-checklist,
+        body[data-theme="white"] .sidebar .dash-radioitems,
+        body[data-theme="white"] .meta-toolbar .dash-checklist,
+        body[data-theme="white"] .meta-toolbar .dash-radioitems,
+        body[data-theme="white"] .plot-toolbar .dash-checklist,
+        body[data-theme="white"] .plot-toolbar .dash-radioitems {
             background: transparent !important;
         }
-        body[data-theme="light"] .sidebar .dash-checklist label,
-        body[data-theme="light"] .sidebar .dash-radioitems label,
-        body[data-theme="light"] .sidebar-camera-checklist label {
+        body[data-theme="white"] .sidebar .dash-checklist label,
+        body[data-theme="white"] .sidebar .dash-radioitems label,
+        body[data-theme="white"] .sidebar-camera-checklist label {
             background: #f5f8fb !important;
             border: 1px solid #d6e0e8 !important;
             color: #1c2733 !important;
         }
-        body[data-theme="light"] .meta-toolbar .dash-checklist label,
-        body[data-theme="light"] .meta-toolbar .dash-radioitems label,
-        body[data-theme="light"] .meta-toolbar label,
-        body[data-theme="light"] .plot-toolbar .dash-checklist label,
-        body[data-theme="light"] .plot-toolbar .dash-radioitems label,
-        body[data-theme="light"] .plot-toolbar label {
+        body[data-theme="white"] .meta-toolbar .dash-checklist label,
+        body[data-theme="white"] .meta-toolbar .dash-radioitems label,
+        body[data-theme="white"] .meta-toolbar label,
+        body[data-theme="white"] .plot-toolbar .dash-checklist label,
+        body[data-theme="white"] .plot-toolbar .dash-radioitems label,
+        body[data-theme="white"] .plot-toolbar label {
             background: #f5f8fb !important;
             border: 1px solid #d6e0e8 !important;
             color: #1c2733 !important;
         }
-        body[data-theme="light"] .sidebar .dash-checklist label:hover,
-        body[data-theme="light"] .sidebar .dash-radioitems label:hover,
-        body[data-theme="light"] .sidebar-camera-checklist label:hover,
-        body[data-theme="light"] .meta-toolbar .dash-checklist label:hover,
-        body[data-theme="light"] .meta-toolbar .dash-radioitems label:hover,
-        body[data-theme="light"] .meta-toolbar label:hover,
-        body[data-theme="light"] .plot-toolbar .dash-checklist label:hover,
-        body[data-theme="light"] .plot-toolbar .dash-radioitems label:hover,
-        body[data-theme="light"] .plot-toolbar label:hover {
+        body[data-theme="white"] .sidebar .dash-checklist label:hover,
+        body[data-theme="white"] .sidebar .dash-radioitems label:hover,
+        body[data-theme="white"] .sidebar-camera-checklist label:hover,
+        body[data-theme="white"] .meta-toolbar .dash-checklist label:hover,
+        body[data-theme="white"] .meta-toolbar .dash-radioitems label:hover,
+        body[data-theme="white"] .meta-toolbar label:hover,
+        body[data-theme="white"] .plot-toolbar .dash-checklist label:hover,
+        body[data-theme="white"] .plot-toolbar .dash-radioitems label:hover,
+        body[data-theme="white"] .plot-toolbar label:hover {
             background: #eaf1f6 !important;
             border-color: #b8c8d5 !important;
         }
-        body[data-theme="light"] #sidebar-status {
+        body[data-theme="white"] #sidebar-status {
             color: #2f7a57 !important;
         }
-        body[data-theme="light"] #help-modal .modal-content,
-        body[data-theme="light"] #help-modal .modal-header,
-        body[data-theme="light"] #help-modal .modal-body,
-        body[data-theme="light"] #help-modal .modal-footer {
+        body[data-theme="white"] #help-modal .modal-content,
+        body[data-theme="white"] #help-modal .modal-header,
+        body[data-theme="white"] #help-modal .modal-body,
+        body[data-theme="white"] #help-modal .modal-footer {
             background-color: #ffffff !important;
             border-color: #c5d0da !important;
         }
-        body[data-theme="light"] .vetting-banner-empty,
-        body[data-theme="light"] .vetting-banner-grid,
-        body[data-theme="light"] .vetting-banner-links {
+        body[data-theme="white"] .vetting-banner-empty,
+        body[data-theme="white"] .vetting-banner-grid,
+        body[data-theme="white"] .vetting-banner-links {
             background: #ffffff !important;
             border-color: #c5d0da !important;
         }
-        body[data-theme="light"] .vetting-banner-cell {
+        body[data-theme="white"] .vetting-banner-cell {
             border-color: #d6e0e8 !important;
         }
-        body[data-theme="light"] .vetting-banner-shell.known .vetting-banner-cell,
-        body[data-theme="light"] .vetting-banner-shell.new .vetting-banner-cell {
+        body[data-theme="white"] .vetting-banner-shell.known .vetting-banner-cell,
+        body[data-theme="white"] .vetting-banner-shell.new .vetting-banner-cell {
             background: #f7fafc !important;
         }
-        body[data-theme="light"] .vetting-banner-header.known {
+        body[data-theme="white"] .vetting-banner-header.known {
             background: #fbe7e7 !important;
             color: #9f2d2d !important;
             border-color: #e4b4b4 !important;
         }
-        body[data-theme="light"] .vetting-banner-header.new {
+        body[data-theme="white"] .vetting-banner-header.new {
             background: #e8f7ec !important;
             color: #2f7a57 !important;
             border-color: #b7dcbf !important;
         }
-        body[data-theme="light"] .vetting-banner-hit.known {
+        body[data-theme="white"] .vetting-banner-hit.known {
             color: #9f2d2d !important;
         }
-        body[data-theme="light"] .vetting-banner-hit.new {
+        body[data-theme="white"] .vetting-banner-hit.new {
             color: #2f7a57 !important;
         }
-        body[data-theme="light"] .vetting-banner-link {
+        body[data-theme="white"] .vetting-banner-link {
             background: #f5f8fb !important;
             border-color: #c5d0da !important;
             color: #245f8f !important;
@@ -1744,32 +1808,33 @@ def _run_config_mismatch_warnings(run_params: dict | None, overlays: set[str]) -
 
 
 def _render_run_config_panel(run_params: dict | None, run_params_path: Path | None, warnings: list[str]) -> list:
-    """Render run config info cards with warning summary."""
+    """Render compact run config cells with an inline warning row."""
     status = "Loaded" if run_params else "Missing"
+
+    def _card(label: str, value: str, *, title: str | None = None, wide: bool = False, warning: bool = False) -> html.Div:
+        classes = ['run-config-item']
+        if wide:
+            classes.append('wide')
+        if warning:
+            classes.append('warning')
+        return html.Div([
+            html.Div(label, className='k'),
+            html.Div(value, className='v', title=title),
+        ], className=' '.join(classes))
+
     cards = [
-        html.Div([
-            html.Div('Status', className='k'),
-            html.Div(status, className='v'),
-        ], className='run-config-item'),
-        html.Div([
-            html.Div('Path', className='k'),
-            html.Div(str(run_params_path) if run_params_path else 'not found', className='v'),
-        ], className='run-config-item'),
+        _card('Status', status),
+        _card(
+            'Path',
+            str(run_params_path) if run_params_path else 'not found',
+            title=str(run_params_path) if run_params_path else 'not found',
+        ),
     ]
     for label, value in _run_config_rows(run_params or {}):
-        cards.append(
-            html.Div([
-                html.Div(label, className='k'),
-                html.Div(value, className='v'),
-            ], className='run-config-item')
-        )
+        cards.append(_card(label, value, title=value))
     if warnings:
-        cards.append(
-            html.Div([
-                html.Div('Warnings', className='k'),
-                html.Div(' | '.join(warnings), className='v'),
-            ], className='run-config-item')
-        )
+        warning_text = ' | '.join(warnings)
+        cards.append(_card('Warnings', warning_text, title=warning_text, wide=True, warning=True))
     return cards
 
 
@@ -1785,19 +1850,23 @@ def _render_repro_badge(run_params: dict | None, warnings: list[str]) -> html.Sp
 
 
 _METADATA_EXTRA_GROUPS = (
+    "Triage Summary",
+    "Vetting",
     "Period Consensus",
+    "External Follow-up",
     "Stellar Parameters",
     "Photometry",
-    "Galactic Coordinates",
-    "Extinction & Environment",
+    "Environment",
     "YSO / Classification",
 )
 
 _METADATA_CATALOG_GROUPS = (
+    "Vetting",
+    "Period Consensus",
+    "External Follow-up",
     "Stellar Parameters",
     "Photometry",
-    "Galactic Coordinates",
-    "Extinction & Environment",
+    "Environment",
 )
 
 
@@ -2065,6 +2134,38 @@ def _format_large_integer_like_display(value) -> str:
         return s
 
 
+def _truncate_bottom_context_value(value: object, *, max_len: int = 84, tail_parts: int = 4) -> tuple[str, str]:
+    """Return (full_text, display_text) for compact bottom-bar display."""
+    full = str(value or "-").strip() or "-"
+    if len(full) <= max_len:
+        return full, full
+
+    normalized = full.replace("\\", "/")
+    if "/" in normalized:
+        parts = [p for p in normalized.split("/") if p]
+        prefix = "/" if normalized.startswith("/") else ""
+        if len(parts) > tail_parts:
+            display = f"{prefix}.../{'/'.join(parts[-tail_parts:])}"
+            if len(display) <= max_len:
+                return full, display
+
+    head = max(12, max_len // 2 - 6)
+    tail = max(12, max_len - head - 3)
+    return full, f"{full[:head]}...{full[-tail:]}"
+
+
+def _render_bottom_context(label: str, value: object) -> html.Div:
+    """Render one labeled bottom-bar context item."""
+    full, display = _truncate_bottom_context_value(value)
+    return html.Div(
+        [
+            html.Span(f"{label}:", className='bottom-context-k'),
+            html.Span(display, className='bottom-context-v', title=full),
+        ],
+        className='bottom-context-item',
+    )
+
+
 def _resolve_run_dir_from_plot_dir(plot_dir: str | None) -> Path | None:
     """Infer run directory from plot-dir or run-dir style path."""
     if not plot_dir:
@@ -2208,17 +2309,150 @@ def _index_neowise_paths(run_dir_text: str) -> dict[str, str]:
 
 def _build_neowise_figure(df_neowise: pd.DataFrame) -> go.Figure:
     """Build a compact NEOWISE light-curve panel."""
+    return _build_neowise_figure_with_theme(df_neowise, DEFAULT_THEME)
+
+
+def _external_followup_theme(theme: str | None) -> dict[str, object]:
+    """Theme tokens for external follow-up cards and mini plots."""
+    mode = str(theme or DEFAULT_THEME).strip().lower()
+    if mode == "white":
+        return {
+            "card_style": {
+                'border': '1px solid #c5d0da',
+                'borderRadius': '6px',
+                'padding': '8px 10px',
+                'background': '#ffffff',
+                'color': '#1c2733',
+            },
+            "muted": '#5a6b7b',
+            "error": '#a53a3a',
+            "paper_bg": '#ffffff',
+            "plot_bg": '#ffffff',
+            "font": '#1c2733',
+            "grid": 'rgba(104, 128, 149, 0.18)',
+            "legend_bg": 'rgba(255, 255, 255, 0.92)',
+            "legend_border": 'rgba(120, 140, 158, 0.35)',
+        }
+    if mode == "gray":
+        return {
+            "card_style": {
+                'border': '1px solid #4c566a',
+                'borderRadius': '6px',
+                'padding': '8px 10px',
+                'background': '#3b4252',
+                'color': '#d8dee9',
+            },
+            "muted": '#aab6c7',
+            "error": '#f29f9f',
+            "paper_bg": '#2e3440',
+            "plot_bg": '#2e3440',
+            "font": '#d8dee9',
+            "grid": 'rgba(129, 161, 193, 0.15)',
+            "legend_bg": 'rgba(59, 66, 82, 0.9)',
+            "legend_border": 'rgba(129, 161, 193, 0.3)',
+        }
+    return {
+        "card_style": {
+            'border': '1px solid #2a2a2a',
+            'borderRadius': '6px',
+            'padding': '8px 10px',
+            'background': '#0d0d0d',
+            'color': '#e0e0e0',
+        },
+        "muted": '#9fb6cb',
+        "error": '#dd8080',
+        "paper_bg": '#0d0d0d',
+        "plot_bg": '#0d0d0d',
+        "font": '#dce8f2',
+        "grid": 'rgba(96, 116, 130, 0.22)',
+        "legend_bg": 'rgba(13, 13, 13, 0.88)',
+        "legend_border": 'rgba(113, 140, 160, 0.3)',
+    }
+
+
+def _convert_external_times_to_review_axis(values, jd_system: str = "mjd") -> np.ndarray:
+    """Convert source-native time values into the review axis: JD - 2458000."""
+    t = pd.to_numeric(values, errors="coerce").to_numpy()
+    finite_t = t[np.isfinite(t)]
+    if jd_system == "mjd":
+        if finite_t.size and float(np.nanmedian(finite_t)) > 1_000_000.0:
+            jd = t
+        else:
+            jd = t + 2400000.5
+    elif jd_system == "bjd_gaia":
+        jd = t + 2455197.5
+    elif jd_system == "btjd":
+        jd = t + 2457000.0
+    elif jd_system == "bkjd":
+        jd = t + 2454833.0
+    else:
+        jd = t
+    return jd - 2458000.0
+
+
+def _apply_external_figure_layout(
+    fig: go.Figure,
+    *,
+    title: str,
+    theme: str,
+    yaxis_label: str,
+    reverse_y: bool,
+    height: int = 240,
+) -> go.Figure:
+    """Apply a consistent themed layout for external mini plots."""
+    spec = _external_followup_theme(theme)
+    fig.update_layout(
+        height=height,
+        margin=dict(l=42, r=10, t=34, b=32),
+        title=title,
+        legend=dict(
+            orientation="h",
+            x=0.0,
+            y=1.1,
+            bgcolor=spec["legend_bg"],
+            bordercolor=spec["legend_border"],
+            borderwidth=1,
+            font=dict(color=spec["font"]),
+        ),
+        paper_bgcolor=spec["paper_bg"],
+        plot_bgcolor=spec["plot_bg"],
+        font=dict(color=spec["font"]),
+    )
+    fig.update_xaxes(title="JD - 2458000", gridcolor=spec["grid"], zeroline=False)
+    fig.update_yaxes(
+        title=yaxis_label,
+        autorange="reversed" if reverse_y else True,
+        gridcolor=spec["grid"],
+        zeroline=False,
+    )
+    return fig
+
+
+def _build_neowise_figure_with_theme(df_neowise: pd.DataFrame, theme: str) -> go.Figure:
+    """Build a compact NEOWISE light-curve panel."""
     fig = go.Figure()
     if df_neowise is None or df_neowise.empty:
-        fig.update_layout(height=220, margin=dict(l=36, r=10, t=30, b=28), title="NEOWISE")
-        return fig
+        return _apply_external_figure_layout(
+            fig,
+            title="NEOWISE",
+            theme=theme,
+            yaxis_label="mag",
+            reverse_y=True,
+            height=220,
+        )
 
     time_col = "mjd" if "mjd" in df_neowise.columns else ("MJD" if "MJD" in df_neowise.columns else None)
     if time_col is None:
-        fig.update_layout(height=220, margin=dict(l=36, r=10, t=30, b=28), title="NEOWISE (missing MJD column)")
-        return fig
+        return _apply_external_figure_layout(
+            fig,
+            title="NEOWISE (missing MJD column)",
+            theme=theme,
+            yaxis_label="mag",
+            reverse_y=True,
+            height=220,
+        )
 
-    x = pd.to_numeric(df_neowise[time_col], errors="coerce")
+    x = _convert_external_times_to_review_axis(df_neowise[time_col], "mjd")
     band_specs = [
         ("W1", "w1mpro", "w1sigmpro", "#4fa3ff"),
         ("W2", "w2mpro", "w2sigmpro", "#ff8c42"),
@@ -2248,15 +2482,13 @@ def _build_neowise_figure(df_neowise: pd.DataFrame) -> go.Figure:
         )
         added += 1
 
-    fig.update_layout(
-        height=240,
-        margin=dict(l=42, r=10, t=34, b=32),
+    _apply_external_figure_layout(
+        fig,
         title="NEOWISE Light Curve",
-        legend=dict(orientation="h", x=0.0, y=1.1),
-        template="plotly_dark",
+        theme=theme,
+        yaxis_label="mag",
+        reverse_y=True,
     )
-    fig.update_xaxes(title="MJD")
-    fig.update_yaxes(title="mag", autorange="reversed")
     if added == 0:
         fig.add_annotation(text="No finite W1/W2 points", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False)
     return fig
@@ -2292,6 +2524,8 @@ def _build_external_lc_figure(
     reverse_y: bool = True,
     filter_col: str | None = None,
     source_name: str | None = None,
+    theme: str | None = None,
+    jd_system: str = "mjd",
 ) -> go.Figure:
     """Build a compact LC panel for any external source.
 
@@ -2301,21 +2535,39 @@ def _build_external_lc_figure(
     """
     fig = go.Figure()
     if df_lc is None or df_lc.empty:
-        fig.update_layout(height=220, margin=dict(l=36, r=10, t=30, b=28), title=title)
-        return fig
+        return _apply_external_figure_layout(
+            fig,
+            title=title,
+            theme=theme,
+            yaxis_label=yaxis_label,
+            reverse_y=reverse_y,
+            height=220,
+        )
 
     if source_name:
         df_lc = normalize_external_lc_dataframe(source_name, df_lc)
         if df_lc is None or df_lc.empty:
-            fig.update_layout(height=220, margin=dict(l=36, r=10, t=30, b=28), title=title)
-            return fig
+            return _apply_external_figure_layout(
+                fig,
+                title=title,
+                theme=theme,
+                yaxis_label=yaxis_label,
+                reverse_y=reverse_y,
+                height=220,
+            )
 
     # Resolve time column (case-insensitive)
     col_lookup = {c.lower(): c for c in df_lc.columns}
     actual_time_col = col_lookup.get(time_col.lower())
     if actual_time_col is None:
-        fig.update_layout(height=220, margin=dict(l=36, r=10, t=30, b=28), title=f"{title} (missing {time_col})")
-        return fig
+        return _apply_external_figure_layout(
+            fig,
+            title=f"{title} (missing {time_col})",
+            theme=theme,
+            yaxis_label=yaxis_label,
+            reverse_y=reverse_y,
+            height=220,
+        )
 
     added = 0
     for band_value, mag_col, err_col, color in band_specs:
@@ -2330,7 +2582,7 @@ def _build_external_lc_figure(
         if subset.empty or actual_mag_col is None:
             continue
 
-        x = pd.to_numeric(subset[actual_time_col], errors="coerce")
+        x = _convert_external_times_to_review_axis(subset[actual_time_col], jd_system)
         y = pd.to_numeric(subset[actual_mag_col], errors="coerce")
         good = np.isfinite(x) & np.isfinite(y)
         if not bool(good.any()):
@@ -2352,15 +2604,13 @@ def _build_external_lc_figure(
         )
         added += 1
 
-    fig.update_layout(
-        height=240,
-        margin=dict(l=42, r=10, t=34, b=32),
+    _apply_external_figure_layout(
+        fig,
         title=f"{title} Light Curve",
-        legend=dict(orientation="h", x=0.0, y=1.1),
-        template="plotly_dark",
+        theme=theme,
+        yaxis_label=yaxis_label,
+        reverse_y=reverse_y,
     )
-    fig.update_xaxes(title=time_col.upper())
-    fig.update_yaxes(title=yaxis_label, autorange="reversed" if reverse_y else True)
     if added == 0:
         fig.add_annotation(text="No finite data points", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False)
     return fig
@@ -2397,13 +2647,11 @@ def _candidate_lookup_keys(candidate_id: str, payload: dict) -> list[str]:
     return [k for k in keys if k and not (k in seen or seen.add(k))]
 
 
-def _render_external_followup(payload: dict, candidate_id: str) -> list:
-    card_style = {
-        'border': '1px solid #2a2a2a',
-        'borderRadius': '6px',
-        'padding': '8px 10px',
-        'background': '#0d0d0d',
-    }
+def _render_external_followup(payload: dict, candidate_id: str, theme: str | None = None) -> list:
+    theme_spec = _external_followup_theme(theme)
+    card_style = theme_spec["card_style"]
+    muted_text_style = {'fontSize': '10px', 'color': theme_spec["muted"]}
+    error_text_style = {'fontSize': '10px', 'color': theme_spec["error"]}
     run_dir = _resolve_run_dir_from_plot_dir(PLOT_DIR)
     lookup_keys = _candidate_lookup_keys(candidate_id, payload)
 
@@ -2420,7 +2668,7 @@ def _render_external_followup(payload: dict, candidate_id: str) -> list:
 
     spectra_children = [
         html.Div(f"Has spectra: {'yes' if has_spectrum else 'no'}", style={'fontSize': '11px'}),
-        html.Div(f"Sources: {spectrum_sources or 'none'}", style={'fontSize': '11px', 'color': '#9fb6cb'}),
+        html.Div(f"Sources: {spectrum_sources or 'none'}", style={'fontSize': '11px', 'color': theme_spec["muted"]}),
     ]
     if not spectra_rows.empty:
         spectra_rows = spectra_rows.head(8)
@@ -2439,7 +2687,13 @@ def _render_external_followup(payload: dict, candidate_id: str) -> list:
             html.Div([
                 html.Div('Links:', style={'fontSize': '11px', 'marginTop': '4px'}),
                 html.Div([
-                    html.A(link, href=link, target='_blank', rel='noopener noreferrer', style={'display': 'block', 'fontSize': '10px'})
+                    html.A(
+                        link,
+                        href=link,
+                        target='_blank',
+                        rel='noopener noreferrer',
+                        style={'display': 'block', 'fontSize': '10px', 'color': theme_spec["muted"]},
+                    )
                     for link in spectrum_links
                 ]),
             ])
@@ -2472,6 +2726,8 @@ def _render_external_followup(payload: dict, candidate_id: str) -> list:
                             time_col="mjd",
                             filter_col="filter",
                             source_name="atlas",
+                            theme=theme,
+                            jd_system="mjd",
                         )
                         atlas_children.append(dcc.Graph(figure=atlas_fig, config={'displayModeBar': False}, style={'height': '250px'}))
                     except Exception:
@@ -2499,12 +2755,12 @@ def _render_external_followup(payload: dict, candidate_id: str) -> list:
         try:
             neowise_rows = pd.read_parquet(neowise_path)
             neowise_plot = dcc.Graph(
-                figure=_build_neowise_figure(neowise_rows),
+                figure=_build_neowise_figure_with_theme(neowise_rows, theme),
                 config={'displayModeBar': False},
                 style={'height': '250px'},
             )
         except Exception:
-            neowise_plot = html.Div(f"Could not load NEOWISE parquet: {neowise_path}", style={'fontSize': '10px', 'color': '#c77'})
+            neowise_plot = html.Div(f"Could not load NEOWISE parquet: {neowise_path}", style=error_text_style)
 
     neowise_children = [
         html.Div(f"Epochs: {neowise_epochs}", style={'fontSize': '11px'}),
@@ -2512,7 +2768,7 @@ def _render_external_followup(payload: dict, candidate_id: str) -> list:
         html.Div(f"W2 range: {payload.get('neowise_w2_range', 'n/a')}", style={'fontSize': '11px'}),
     ]
     if neowise_path:
-        neowise_children.append(html.Div(f"File: {neowise_path.name}", style={'fontSize': '10px', 'color': '#9fb6cb'}))
+        neowise_children.append(html.Div(f"File: {neowise_path.name}", style=muted_text_style))
     if neowise_plot is not None:
         neowise_children.append(neowise_plot)
 
@@ -2544,6 +2800,8 @@ def _render_external_followup(payload: dict, candidate_id: str) -> list:
                             time_col="mjd",
                             filter_col="band",
                             source_name="ztf",
+                            theme=theme,
+                            jd_system="mjd",
                         )
                         ztf_children.append(dcc.Graph(figure=ztf_fig, config={'displayModeBar': False}, style={'height': '250px'}))
                     except Exception:
@@ -2575,6 +2833,8 @@ def _render_external_followup(payload: dict, candidate_id: str) -> list:
                             time_col="time",
                             yaxis_label="G mag",
                             source_name="gaia_epoch",
+                            theme=theme,
+                            jd_system="bjd_gaia",
                         )
                         gaia_epoch_children.append(dcc.Graph(figure=gaia_fig, config={'displayModeBar': False}, style={'height': '250px'}))
                     except Exception:
@@ -2609,6 +2869,8 @@ def _render_external_followup(payload: dict, candidate_id: str) -> list:
                             time_col="mjd",
                             filter_col="filter",
                             source_name="ps1",
+                            theme=theme,
+                            jd_system="mjd",
                         )
                         ps1_children.append(dcc.Graph(figure=ps1_fig, config={'displayModeBar': False}, style={'height': '250px'}))
                     except Exception:
@@ -2638,6 +2900,8 @@ def _render_external_followup(payload: dict, candidate_id: str) -> list:
                             [("CV", "mag", "mag_err", "#bbbbbb")],
                             time_col="mjd",
                             source_name="crts",
+                            theme=theme,
+                            jd_system="mjd",
                         )
                         crts_children.append(dcc.Graph(figure=crts_fig, config={'displayModeBar': False}, style={'height': '250px'}))
                     except Exception:
@@ -3457,7 +3721,7 @@ def create_layout():
                                 dcc.Checklist(
                                     id='round-sigfigs',
                                     options=[{'label': ' Round', 'value': 'yes'}],
-                                    value=[],
+                                    value=['yes'],
                                     style={'display': 'inline-block', 'font-size': '11px', 'margin-right': '6px'},
                                 ),
                                 html.Button('Collapse all', id='toggle-meta-all', n_clicks=0, className='compact-btn'),
@@ -3732,6 +3996,12 @@ app.clientside_callback(
                     return;
                 }
 
+                if (e.shiftKey && (key === 'R' || key === 'r')) {
+                    e.preventDefault();
+                    dispatchKeyToDash('Shift+R');
+                    return;
+                }
+
                 // Prevent browser defaults for keys we use as shortcuts
                 if (key === 'Backspace' || key === 'Tab' || key === 'Enter') {
                     e.preventDefault();
@@ -3755,26 +4025,15 @@ app.clientside_callback(
 app.clientside_callback(
     """
     function(_tick, currentTheme) {
-        var normalizeTheme = function(value) {
-            if (value === 'grey') {
-                return 'gray';
-            }
-            if (value === 'light') {
-                return 'white';
-            }
-            return ['black', 'gray', 'white'].includes(value) ? value : null;
-        };
         try {
             var saved = window.localStorage.getItem('malca.review.theme');
-            var normalizedSaved = normalizeTheme(saved);
-            if (normalizedSaved) {
-                return normalizedSaved;
+            if (saved && ['black', 'gray', 'white'].includes(saved)) {
+                return saved;
             }
         } catch (e) {
             // ignore storage read failures
         }
-        var normalizedCurrent = normalizeTheme(currentTheme);
-        return normalizedCurrent || 'black';
+        return ['black', 'gray', 'white'].includes(currentTheme) ? currentTheme : 'black';
     }
     """,
     Output('theme-mode', 'value'),
@@ -3787,16 +4046,10 @@ app.clientside_callback(
 app.clientside_callback(
     """
     function(theme) {
-        var chosen = ['black', 'gray', 'white'].includes(theme) ? theme : 'black';
-        var t = chosen;
-        if (chosen === 'gray') {
-            t = 'grey';
-        } else if (chosen === 'white') {
-            t = 'light';
-        }
+        var t = ['black', 'gray', 'white'].includes(theme) ? theme : 'black';
         try {
             document.body.setAttribute('data-theme', t);
-            window.localStorage.setItem('malca.review.theme', chosen);
+            window.localStorage.setItem('malca.review.theme', t);
         } catch (e) {
             // ignore storage/document failures
         }
@@ -4139,9 +4392,9 @@ def toggle_sidebar(n_clicks, key_value, is_expanded):
 
     trigger = ctx.triggered[0]['prop_id']
 
-    # Check if 'T' key was pressed
+    # Check if Escape was pressed
     key = _keyboard_key(key_value)
-    if 'keyboard-input' in trigger and key.lower() == 't':
+    if 'keyboard-input' in trigger and key == 'Escape':
         is_expanded = not is_expanded
 
     # Check if toggle button was clicked
@@ -4153,6 +4406,19 @@ def toggle_sidebar(n_clicks, key_value, is_expanded):
     sidebar_class = 'sidebar expanded' if is_expanded else 'sidebar'
     toggle_class = 'sidebar-toggle sidebar-expanded' if is_expanded else 'sidebar-toggle'
     return sidebar_class, toggle_class, is_expanded
+
+
+@app.callback(
+    Output('refresh-btn', 'n_clicks', allow_duplicate=True),
+    Input('keyboard-input', 'value'),
+    State('refresh-btn', 'n_clicks'),
+    prevent_initial_call=True,
+)
+def keyboard_refresh_queue(key_value, current_clicks):
+    """Trigger Refresh Queue from Shift+R."""
+    if _keyboard_key(key_value) != 'Shift+R':
+        raise dash.exceptions.PreventUpdate
+    return int(current_clicks or 0) + 1
 
 
 # --- All filter State components used by load_queue -------------------------
@@ -4427,7 +4693,7 @@ def handle_keyboard(key_value, current_idx, queue_size, current_candidate_id, cu
         return NO
 
     # Skip keys handled by other callbacks / keydown listener
-    if key in ['?']:
+    if key in ['?', 'Escape', 'Shift+R']:
         return NO
 
     queue_size = int(queue_size or 0)
@@ -4528,7 +4794,7 @@ def queue_plot_render_request(idx, plot_mode, overlay_values, selected_cameras, 
             'residual_height': float(residual_height if residual_height is not None else DEFAULT_RESIDUAL_FRACTION),
             'theme': theme_mode or DEFAULT_THEME,
             'baseline_opacity': float(baseline_opacity if baseline_opacity is not None else 0.5),
-            'round_sigfigs': bool(round_sigfigs and 'yes' in round_sigfigs),
+            'round_sigfigs': bool(True if round_sigfigs is None else ('yes' in round_sigfigs)),
             'link_radius': float(link_radius) if link_radius is not None else 10.0,
             'override_period': override_period,
             'yaxis_mode': str(yaxis_mode or 'mag'),
@@ -4728,7 +4994,7 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
     theme_mode = str(state.get('theme', DEFAULT_THEME) or DEFAULT_THEME)
     residual_height = float(state.get('residual_height', DEFAULT_RESIDUAL_FRACTION) or DEFAULT_RESIDUAL_FRACTION)
     baseline_opacity = float(state.get('baseline_opacity', 0.5) if state.get('baseline_opacity') is not None else 0.5)
-    round_sigfigs = bool(state.get('round_sigfigs', False))
+    round_sigfigs = bool(state.get('round_sigfigs', True))
     link_radius = float(state.get('link_radius', 10.0))
     yaxis_mode = str(state.get('yaxis_mode', 'mag') or 'mag')
     external_source_view = str(state.get('external_source_view', 'all') or 'all')
@@ -4985,23 +5251,19 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
 @app.callback(
     Output('external-followup-panel', 'children'),
     [Input('external-followup-details', 'open'),
-     Input('current-candidate-id', 'data')],
+     Input('current-candidate-id', 'data'),
+     Input('theme-mode-store', 'data')],
     prevent_initial_call=False,
 )
-def update_external_followup_panel(is_open, candidate_id):
-    """Lazy-load external follow-up artifacts only when panel is open."""
-    if not is_open:
-        return html.Div(
-            "Expand this section to load external spectra/light-curve artifacts.",
-            style={'font-size': '11px', 'color': '#8a99a8'}
-        )
-
+def update_external_followup_panel(is_open, candidate_id, theme_mode):
+    """Render external follow-up artifacts for the current candidate."""
+    _ = is_open
     if not candidate_id:
         return html.Div("No candidates loaded.", style={'font-size': '11px', 'color': '#c77'})
     with closing(db_connect(Path(DB_PATH))) as conn:
         payload = get_candidate_payload(conn, str(candidate_id)) or {}
 
-    return _render_external_followup(payload, str(candidate_id))
+    return _render_external_followup(payload, str(candidate_id), str(theme_mode or DEFAULT_THEME))
 
 
 @app.callback(
@@ -5024,9 +5286,18 @@ def update_header_key_info(candidate_id, queue_size, queue_filter_hash, import_p
     elif queue_source_path:
         queue_label = str(queue_source_path)
 
+    def _bottom_bar(path_value: object) -> html.Div:
+        return html.Div(
+            [
+                _render_bottom_context("Path", path_value if path_value else "-"),
+                _render_bottom_context("DB", DB_PATH),
+                _render_bottom_context("Queue", queue_label),
+            ],
+            className='bottom-context-bar',
+        )
+
     if int(queue_size or 0) <= 0 or not candidate_id:
-        bottom_context = f"Path: - | DB: {DB_PATH} | Queue: {queue_label}"
-        return 'ASAS-SN ID: -', 'Gaia ID: -', bottom_context
+        return 'ASAS-SN ID: -', 'Gaia ID: -', _bottom_bar("-")
 
     with closing(db_connect(Path(DB_PATH))) as conn:
         payload = get_candidate_payload(conn, str(candidate_id)) or {}
@@ -5037,8 +5308,7 @@ def update_header_key_info(candidate_id, queue_size, queue_filter_hash, import_p
     asas_text = f"ASAS-SN ID: {asas_sn_id}" if asas_sn_id else f"ASAS-SN ID: {candidate_id}"
     gaia_fmt = _format_large_integer_like_display(gaia_id)
     gaia_text = f"Gaia ID: {gaia_fmt}" if gaia_fmt else 'Gaia ID: -'
-    bottom_context = f"Path: {lc_path if lc_path else '-'} | DB: {DB_PATH} | Queue: {queue_label}"
-    return asas_text, gaia_text, bottom_context
+    return asas_text, gaia_text, _bottom_bar(lc_path)
 
 
 @app.callback(
@@ -5328,14 +5598,6 @@ def done_callback(n_clicks, idx, queue_size, candidate_id, score,
 
 # --- Display callbacks for stores → visible indicators ---
 
-_CLASS_ACTIVE_STYLE = {
-    'border': '1px solid #0f0', 'color': '#0f0', 'background-color': '#003300',
-}
-_CLASS_INACTIVE_STYLE = {
-    'border': '1px solid #444', 'color': '#888', 'background-color': 'transparent',
-}
-
-
 # Update score button highlighting
 @app.callback(
     [Output(f'score-{i}', 'className') for i in range(1, 5)],
@@ -5355,14 +5617,14 @@ def update_score_buttons(current_score):
 
 # Update event class badge styling
 @app.callback(
-    [Output(f'class-badge-{tag}', 'style') for tag in CLASS_BADGE_TAGS],
+    [Output(f'class-badge-{tag}', 'className') for tag in CLASS_BADGE_TAGS],
     Input('event-class-store', 'data'),
     prevent_initial_call=False
 )
 def update_class_badges(active_class):
     """Highlight the active event class badge."""
     active = active_class or 'unclassified'
-    return [_CLASS_ACTIVE_STYLE if tag == active else _CLASS_INACTIVE_STYLE
+    return ['badge-btn active' if tag == active else 'badge-btn'
             for tag in CLASS_BADGE_TAGS]
 
 
@@ -6153,7 +6415,7 @@ def main():
     print(f"  Plot dir:  {PLOT_DIR}")
     print(f"  Server:    http://{args.host}:{args.port}")
     print(f"\nKeyboard shortcuts:")
-    print("  [D]ipper [M]icrolensing [F]lare [Y]so [U]nknown [I]nstrumental [O]ther | [1-4] Confidence | [.] Save | [Enter] Done | [Backspace] Back | [?] Help")
+    print("  [D]ipper [M]icrolensing [F]lare [Y]so [U]nknown [I]nstrumental [O]ther | [1-4] Confidence | [.] Save | [Enter] Done | [Backspace] Back | [Esc] Sidebar | [Shift+R] Refresh | [?] Help")
     print("")
 
     # Auto-open browser

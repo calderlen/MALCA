@@ -58,7 +58,7 @@ Actions:
   [.] Save  [,] Toggle followup
 
 UI:
-  [Esc] Toggle sidebar  [?] Show this help
+  [Esc] Toggle sidebar  [Shift+R] Refresh queue  [?] Show this help
 """
 
 
@@ -72,7 +72,7 @@ def handle_key_action(key, current_idx, queue_size, conn, candidate_id):
     action = KEYBOARD_SHORTCUTS.get(key)
 
     if not action:
-        return current_idx, f"Unknown key: {key}", False
+        return current_idx, "", False
 
     # Navigation
     if action == 'next_candidate':

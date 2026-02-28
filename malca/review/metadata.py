@@ -14,17 +14,134 @@ import pandas as pd
 # a (label, key) tuple.  Groups are rendered as collapsible sections in the
 # Dash app and as headed blocks in the TUI.
 REVIEW_METADATA_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
+    ("Triage Summary", [
+        ("Known?", "vetting_likely_known"),
+        ("Final class", "final_class"),
+        ("YSO class", "yso_class"),
+        ("Dipper score", "dipper_score"),
+        ("Jumper score", "jumper_score"),
+        ("Period consensus (d)", "period_consensus_days"),
+        ("Plot ready", "phase_plot_ready"),
+        ("Failed any", "failed_any"),
+    ]),
     ("Identification", [
         ("ASAS-SN ID", "asas_sn_id"),
-        ("Path", "path"),
         ("Gaia ID", "gaia_id"),
         ("RA", "ra"),
         ("Dec", "dec"),
         ("2MASS ID", "tmass_id"),
         ("AllWISE ID", "allwise_id"),
     ]),
+    ("Light Curve Basics", [
+        ("N points", "n_points"),
+        ("JD first", "jd_first"),
+        ("JD last", "jd_last"),
+        ("Cadence median (d)", "cadence_median_days"),
+        ("N cameras", "n_cameras"),
+        ("Camera IDs", "camera_ids"),
+        ("Camera min points", "camera_min_points"),
+        ("Camera max points", "camera_max_points"),
+        ("Baseline mag", "baseline_mag"),
+        ("Baseline source", "baseline_source"),
+    ]),
+    ("Event Scoring", [
+        ("Dipper N dips", "dipper_n_dips"),
+        ("Dipper N valid dips", "dipper_n_valid_dips"),
+        ("Jumper N jumps", "jumper_n_jumps"),
+        ("Jumper N valid jumps", "jumper_n_valid_jumps"),
+    ]),
+    ("Dip Detection", [
+        ("Dip significant", "dip_significant"),
+        ("Dip best morph", "dip_best_morph"),
+        ("Dip best log BF", "dip_best_log_bf"),
+        ("Dip best delta BIC", "dip_best_delta_bic"),
+        ("Dip best width param", "dip_best_width_param"),
+        ("Dip symmetry score", "dip_symmetry_score"),
+        ("Dip best amp", "dip_best_amp"),
+        ("Dip best t0", "dip_best_t0"),
+        ("Dip best alpha", "dip_best_alpha"),
+        ("Dip best tau", "dip_best_tau"),
+        ("Dip Bayes factor", "dip_bayes_factor"),
+        ("Dip best p", "dip_best_p"),
+        ("Dip best mag event", "dip_best_mag_event"),
+        ("Dip trigger max", "dip_trigger_max"),
+        ("Dip max event prob", "dip_max_event_prob"),
+        ("Dip trigger threshold", "dip_trigger_threshold"),
+    ]),
+    ("Dip Runs", [
+        ("Dip count", "dip_count"),
+        ("Dip run count", "dip_run_count"),
+        ("Dip max run points", "dip_max_run_points"),
+        ("Dip max run duration", "dip_max_run_duration"),
+        ("Dip max run sum", "dip_max_run_sum"),
+        ("Dip max run max", "dip_max_run_max"),
+        ("Dip max run cameras", "dip_max_run_cameras"),
+        ("Dip max log BF local", "dip_max_log_bf_local"),
+    ]),
+    ("Dip Recurrence", [
+        ("Dip single event", "dip_is_single_event"),
+        ("Dip spacing median", "dip_inter_event_spacing_median"),
+        ("Dip spacing std", "dip_inter_event_spacing_std"),
+        ("Dip amplitude consistency", "dip_amplitude_consistency"),
+        ("Dip duration consistency", "dip_duration_consistency"),
+    ]),
+    ("Jump Detection", [
+        ("Jump significant", "jump_significant"),
+        ("Jump best morph", "jump_best_morph"),
+        ("Jump best log BF", "jump_best_log_bf"),
+        ("Jump best delta BIC", "jump_best_delta_bic"),
+        ("Jump best width param", "jump_best_width_param"),
+        ("Jump best amp", "jump_best_amp"),
+        ("Jump best t0", "jump_best_t0"),
+        ("Jump best alpha", "jump_best_alpha"),
+        ("Jump best tau", "jump_best_tau"),
+        ("Jump Bayes factor", "jump_bayes_factor"),
+        ("Jump best p", "jump_best_p"),
+        ("Jump best mag event", "jump_best_mag_event"),
+        ("Jump trigger max", "jump_trigger_max"),
+        ("Jump max event prob", "jump_max_event_prob"),
+        ("Jump trigger threshold", "jump_trigger_threshold"),
+    ]),
+    ("Jump Runs", [
+        ("Jump count", "jump_count"),
+        ("Jump run count", "jump_run_count"),
+        ("Jump max run points", "jump_max_run_points"),
+        ("Jump max run duration", "jump_max_run_duration"),
+        ("Jump max run sum", "jump_max_run_sum"),
+        ("Jump max run max", "jump_max_run_max"),
+        ("Jump max run cameras", "jump_max_run_cameras"),
+        ("Jump max log BF local", "jump_max_log_bf_local"),
+    ]),
+    ("Jump Recurrence", [
+        ("Jump single event", "jump_is_single_event"),
+        ("Jump spacing median", "jump_inter_event_spacing_median"),
+        ("Jump spacing std", "jump_inter_event_spacing_std"),
+        ("Jump amplitude consistency", "jump_amplitude_consistency"),
+        ("Jump duration consistency", "jump_duration_consistency"),
+    ]),
+    ("Period Consensus", [
+        ("Catalog match", "catalog_match"),
+        ("Catalog source", "catalog_source"),
+        ("Period sources", "period_sources"),
+        ("Period N sources", "period_n_sources"),
+        ("Period consensus agree", "period_consensus_agree"),
+        ("Period conflict", "period_conflict_flag"),
+    ]),
+    ("Periodicity", [
+        ("Periodic", "periodic_flag"),
+        ("Periodicity score", "periodicity_score"),
+        ("LSP power", "lsp_power"),
+        ("LSP period (d)", "lsp_period"),
+        ("LSP bootstrap sig", "lsp_bootstrap_sig"),
+        ("LSP is alias", "lsp_is_alias"),
+        ("LSP is significant", "lsp_is_significant"),
+    ]),
+    ("Phase Folding", [
+        ("Period (d)", "phase_period_days"),
+        ("Source", "phase_source"),
+        ("Quality score", "phase_quality_score"),
+    ]),
     ("Vetting", [
-        ("Known?", "vetting_likely_known"),
         ("VSX class", "vsx_class"),
         ("VSX period (d)", "vsx_period"),
         ("VSX sep (arcsec)", "vsx_sep_arcsec"),
@@ -61,114 +178,6 @@ REVIEW_METADATA_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("X-ray flux", "xray_flux"),
         ("X-ray sep (\")", "xray_sep_arcsec"),
         ("PM cluster offset", "pm_cluster_offset_sigma"),
-    ]),
-    ("Period Consensus", [
-        ("Catalog match", "catalog_match"),
-        ("Catalog source", "catalog_source"),
-        ("Period sources", "period_sources"),
-        ("Period N sources", "period_n_sources"),
-        ("Period consensus (d)", "period_consensus_days"),
-        ("Period consensus agree", "period_consensus_agree"),
-        ("Period conflict", "period_conflict_flag"),
-    ]),
-    ("Light Curve Basics", [
-        ("N points", "n_points"),
-        ("JD first", "jd_first"),
-        ("JD last", "jd_last"),
-        ("Cadence median (d)", "cadence_median_days"),
-        ("N cameras", "n_cameras"),
-        ("Camera IDs", "camera_ids"),
-        ("Camera min points", "camera_min_points"),
-        ("Camera max points", "camera_max_points"),
-        ("Baseline mag", "baseline_mag"),
-        ("Baseline source", "baseline_source"),
-        ("Trigger mode", "trigger_mode"),
-    ]),
-    ("Periodicity", [
-        ("Periodic", "periodic_flag"),
-        ("Periodicity score", "periodicity_score"),
-        ("LSP power", "lsp_power"),
-        ("LSP period (d)", "lsp_period"),
-        ("LSP bootstrap sig", "lsp_bootstrap_sig"),
-        ("LSP is alias", "lsp_is_alias"),
-        ("LSP is significant", "lsp_is_significant"),
-    ]),
-    ("Dip Detection", [
-        ("Significant", "dip_significant"),
-        ("Best morph", "dip_best_morph"),
-        ("Best log BF", "dip_best_log_bf"),
-        ("Best delta BIC", "dip_best_delta_bic"),
-        ("Best width param", "dip_best_width_param"),
-        ("Symmetry score", "dip_symmetry_score"),
-        ("Best amp", "dip_best_amp"),
-        ("Best t0", "dip_best_t0"),
-        ("Best alpha", "dip_best_alpha"),
-        ("Best tau", "dip_best_tau"),
-        ("Bayes factor", "dip_bayes_factor"),
-        ("Best p", "dip_best_p"),
-        ("Best mag event", "dip_best_mag_event"),
-        ("Trigger max", "dip_trigger_max"),
-        ("Max event prob", "dip_max_event_prob"),
-        ("Trigger threshold", "dip_trigger_threshold"),
-    ]),
-    ("Dip Runs", [
-        ("Count", "dip_count"),
-        ("Run count", "dip_run_count"),
-        ("Max run points", "dip_max_run_points"),
-        ("Max run duration", "dip_max_run_duration"),
-        ("Max run sum", "dip_max_run_sum"),
-        ("Max run max", "dip_max_run_max"),
-        ("Max run cameras", "dip_max_run_cameras"),
-        ("Max log BF local", "dip_max_log_bf_local"),
-    ]),
-    ("Jump Detection", [
-        ("Significant", "jump_significant"),
-        ("Best morph", "jump_best_morph"),
-        ("Best log BF", "jump_best_log_bf"),
-        ("Best delta BIC", "jump_best_delta_bic"),
-        ("Best width param", "jump_best_width_param"),
-        ("Best amp", "jump_best_amp"),
-        ("Best t0", "jump_best_t0"),
-        ("Best alpha", "jump_best_alpha"),
-        ("Best tau", "jump_best_tau"),
-        ("Bayes factor", "jump_bayes_factor"),
-        ("Best p", "jump_best_p"),
-        ("Best mag event", "jump_best_mag_event"),
-        ("Trigger max", "jump_trigger_max"),
-        ("Max event prob", "jump_max_event_prob"),
-        ("Trigger threshold", "jump_trigger_threshold"),
-    ]),
-    ("Jump Runs", [
-        ("Count", "jump_count"),
-        ("Run count", "jump_run_count"),
-        ("Max run points", "jump_max_run_points"),
-        ("Max run duration", "jump_max_run_duration"),
-        ("Max run sum", "jump_max_run_sum"),
-        ("Max run max", "jump_max_run_max"),
-        ("Max run cameras", "jump_max_run_cameras"),
-        ("Max log BF local", "jump_max_log_bf_local"),
-    ]),
-    ("Dip Recurrence", [
-        ("Single event", "dip_is_single_event"),
-        ("Event spacing median", "dip_inter_event_spacing_median"),
-        ("Event spacing std", "dip_inter_event_spacing_std"),
-        ("Amplitude consistency", "dip_amplitude_consistency"),
-        ("Duration consistency", "dip_duration_consistency"),
-    ]),
-    ("Jump Recurrence", [
-        ("Single event", "jump_is_single_event"),
-        ("Event spacing median", "jump_inter_event_spacing_median"),
-        ("Event spacing std", "jump_inter_event_spacing_std"),
-        ("Amplitude consistency", "jump_amplitude_consistency"),
-        ("Duration consistency", "jump_duration_consistency"),
-    ]),
-    ("Event Scoring", [
-        ("Dipper score", "dipper_score"),
-        ("Dipper N dips", "dipper_n_dips"),
-        ("Dipper N valid dips", "dipper_n_valid_dips"),
-        ("Jumper score", "jumper_score"),
-        ("Jumper N jumps", "jumper_n_jumps"),
-        ("Jumper N valid jumps", "jumper_n_valid_jumps"),
     ]),
     ("Stellar Parameters", [
         # -- Gaia DR3 --
@@ -230,12 +239,6 @@ REVIEW_METADATA_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("unWISE W2 z-score", "unwise_w2_zscore"),
         ("unWISE W1 var", "unwise_w1_var"),
     ]),
-    ("Phase Folding", [
-        ("Period (d)", "phase_period_days"),
-        ("Source", "phase_source"),
-        ("Plot ready", "phase_plot_ready"),
-        ("Quality score", "phase_quality_score"),
-    ]),
     ("External Follow-up", [
         ("Has spectrum", "has_spectrum"),
         ("Spectrum sources", "spectrum_sources"),
@@ -274,9 +277,7 @@ REVIEW_METADATA_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("Cluster age (Myr)", "cluster_age_myr"),
     ]),
     ("YSO / Classification", [
-        ("YSO class", "yso_class"),
         ("Trigger", "trigger_type"),
-        ("Final class", "final_class"),
         ("P_eb", "P_eb"),
         ("P_cv", "P_cv"),
         ("P_starspot", "P_starspot"),
@@ -286,7 +287,6 @@ REVIEW_METADATA_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("Hill radius (Rsun)", "hill_radius_rsun"),
     ]),
     ("Filter Flags", [
-        ("Failed any", "failed_any"),
         ("Posterior strength", "failed_posterior_strength"),
         ("Run robustness", "failed_run_robustness"),
         ("Morphology", "failed_morphology"),
@@ -403,6 +403,74 @@ def _format_value_for_display(key: str, val: Any) -> Any:
 
 
 _SIGFIG_DEFAULT = 4
+_TINY_DISPLAY_THRESHOLD = 1e-6
+
+_FIXED_DECIMAL_KEYS: dict[str, int] = {
+    "ra": 6,
+    "dec": 6,
+    "gal_l": 5,
+    "gal_b": 5,
+    "parallax": 4,
+    "pmra": 3,
+    "pmdec": 3,
+    "pm_total": 3,
+    "baseline_mag": 3,
+    "phot_g_mean_mag": 3,
+    "vsx_sep_arcsec": 2,
+    "simbad_sep_arcsec": 2,
+    "xray_sep_arcsec": 2,
+    "sfr_sep_arcmin": 2,
+    "phase_period_days": 4,
+    "period_consensus_days": 4,
+    "vsx_period": 4,
+    "gaia_eb_period": 4,
+    "asassn_var_period": 4,
+    "ztf_var_period": 4,
+    "lsp_period": 4,
+    "period_ogle_days": 4,
+}
+
+
+def _trim_fixed(value: float, decimals: int) -> str:
+    text = f"{value:.{decimals}f}"
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _rounded_display_text(key: str, val: Any) -> str:
+    if isinstance(val, bool):
+        return str(val)
+    if isinstance(val, numbers.Integral):
+        return str(val)
+    if not isinstance(val, numbers.Real):
+        return str(val)
+
+    f = float(val)
+    if not math.isfinite(f):
+        return str(val)
+    if abs(f) < _TINY_DISPLAY_THRESHOLD:
+        return "0"
+
+    decimals = _FIXED_DECIMAL_KEYS.get(key)
+    if decimals is None:
+        if ("bayes_factor" in key) or ("log_bf" in key) or (key in {"dipper_score", "jumper_score"}):
+            decimals = 1
+        elif (
+            key.startswith("P_")
+            or ("prob" in key)
+            or key.endswith("_score")
+            or key.endswith("_fraction")
+            or key.endswith("_threshold")
+            or key.endswith("_fap")
+        ):
+            return _round_sigfigs(f, n=3)
+        elif any(token in key for token in ("cadence", "duration", "spacing", "width", "range", "slope")):
+            decimals = 3
+
+    if decimals is not None:
+        return _trim_fixed(f, decimals)
+    return _round_sigfigs(f, n=_SIGFIG_DEFAULT)
 
 
 def _round_sigfigs(val: Any, n: int = _SIGFIG_DEFAULT) -> str:
@@ -433,7 +501,7 @@ def _format_with_uncertainty(
 
     def _fmt(v: Any) -> str:
         if round_sf:
-            return _round_sigfigs(v)
+            return _rounded_display_text(key, v)
         return str(v)
 
     val_str = _fmt(displayed)
@@ -458,7 +526,7 @@ def _format_with_uncertainty(
                 plus = hi - v
                 minus = v - lo
                 if round_sf:
-                    return f"{val_str} (+{_round_sigfigs(plus)}/-{_round_sigfigs(minus)})"
+                    return f"{val_str} (+{_fmt(plus)}/-{_fmt(minus)})"
                 return f"{val_str} (+{plus:.4g}/-{minus:.4g})"
             except (TypeError, ValueError):
                 pass
