@@ -43,9 +43,7 @@ STAGE_SIGNATURES: dict[str, list[str]] = {
     "external_lcs": [
         "atlas_has_phot",
         "ztf_lc_n_det",
-        "tess_n_sectors",
-        "kepler_n_quarters",
-        "aavso_lc_n_points",
+        "gaia_epoch_lc_n_g",
         "ps1_lc_n_points",
         "crts_lc_n_points",
     ],
@@ -259,7 +257,7 @@ def _run_characterize_stage(payload: dict, p: Callable | None = None) -> None:
     try:
         from malca.characterize import characterize_candidates_df
         df = pd.DataFrame([payload])
-        df_out = characterize_candidates_df(df, progress_callback=p)
+        df_out = characterize_candidates_df(df)
         if isinstance(df_out, pd.DataFrame) and not df_out.empty:
             row = df_out.iloc[0].to_dict()
             for k, v in row.items():
@@ -279,7 +277,6 @@ def _run_vetting_stage(payload: dict, p: Callable | None = None) -> None:
             df,
             run_atlas=False,
             # (other vetting happens unconditionally in vet_candidates if columns missing)
-            progress_callback=p,
         )
         if isinstance(df_out, pd.DataFrame) and not df_out.empty:
             row = df_out.iloc[0].to_dict()
@@ -315,7 +312,19 @@ def _run_external_lcs_stage(payload: dict, output_dir: Path, p: Callable | None 
     try:
         from malca.vetting import fetch_external_lcs
         df = pd.DataFrame([payload])
-        df_out = fetch_external_lcs(df, output_dir=output_dir, progress_callback=p)
+        df_out = fetch_external_lcs(
+            df,
+            output_dir=output_dir,
+            run_atlas=True,
+            run_ztf=True,
+            run_gaia_epoch=True,
+            run_tess=False,
+            run_kepler=False,
+            run_aavso=False,
+            run_ps1=True,
+            run_crts=True,
+            progress_callback=p,
+        )
         if isinstance(df_out, pd.DataFrame) and not df_out.empty:
             row = df_out.iloc[0].to_dict()
             for k, v in row.items():

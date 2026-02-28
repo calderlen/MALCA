@@ -3,6 +3,7 @@
 import sys
 import warnings
 import argparse
+import logging
 
 # Suppress known multiprocessing/diskcache semaphore leak warning at worker shutdown
 warnings.filterwarnings(
@@ -50,7 +51,6 @@ from malca.review.store import (
     save_app_state,
     import_candidates,
     load_candidates_file,
-    recent_history,
     export_reviews,
     detect_run_directory_files,
     merge_vetting_results,
@@ -73,6 +73,7 @@ from malca.review.interactive_plot import (
     resolve_lightcurve_path,
     _load_cleaned_df,
     _compute_baseline_bands,
+    normalize_external_lc_dataframe,
 )
 from malca.config.config_paths import VSX_CROSSMATCH_PATH, GAIA_CACHE_FILE
 from malca.config.config_characterize import GAIA_CHUNK_SIZE
@@ -233,19 +234,24 @@ app.index_string = '''
             display: flex;
             flex-direction: column;
             gap: 8px;
+            height: 100%;
             min-height: 0;
             overflow: hidden;
             padding-right: 8px;
         }
         .left-info-scroll {
-            flex: 1;
+            flex: 1 1 auto;
+            height: 100%;
+            max-height: 100%;
             min-height: 0;
             overflow-y: auto;
             overflow-x: hidden;
+            overscroll-behavior: contain;
             display: flex;
             flex-direction: column;
             gap: 8px;
             padding-right: 2px;
+            padding-bottom: 12px;
         }
         .right-plot-panel {
             flex: 1;
@@ -391,12 +397,152 @@ app.index_string = '''
             align-items: center;
             gap: 4px;
         }
+        .plot-toolbar .dash-checklist label,
+        .plot-toolbar .dash-radioitems label {
+            padding: 4px 9px;
+            border-radius: 4px;
+            border: 1px solid rgba(60, 92, 112, 0.55);
+            background: rgba(7, 16, 22, 0.9);
+        }
+        .sidebar .dash-checklist label,
+        .sidebar .dash-radioitems label {
+            padding: 4px 8px;
+            border-radius: 4px;
+            border: 1px solid rgba(60, 92, 112, 0.55);
+            background: rgba(7, 16, 22, 0.9);
+            margin-bottom: 4px;
+        }
         .toolbar-slider-control {
             display: inline-flex;
             align-items: center;
             gap: 6px;
             min-width: 140px;
             max-width: 200px;
+        }
+        .meta-field-row {
+            display: flex;
+            justify-content: space-between;
+            gap: 8px;
+            padding: 2px 0;
+            border-bottom: 1px solid #1a1a1a;
+        }
+        .meta-field-label {
+            color: #7fa3bc;
+            flex-shrink: 0;
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .meta-field-value {
+            color: #e2edf6;
+            text-align: right;
+            font-weight: 600;
+            word-break: break-word;
+            white-space: normal;
+        }
+        .vetting-banner-empty {
+            padding: 6px 12px;
+            margin: 4px 0;
+            border-radius: 4px;
+            background: #333;
+            color: #999;
+            font-size: 0.85em;
+            text-align: center;
+        }
+        .vetting-banner-shell {
+            margin: 4px 0;
+        }
+        .vetting-banner-header {
+            padding: 3px 8px;
+            border-radius: 4px 4px 0 0;
+            font-weight: bold;
+            font-size: 11px;
+            text-align: center;
+        }
+        .vetting-banner-header.known {
+            background: #4a1111;
+            color: #ff6b6b;
+            border: 1px solid #ff6b6b;
+            border-bottom: none;
+        }
+        .vetting-banner-header.new {
+            background: #114a11;
+            color: #6bff6b;
+            border: 1px solid #6bff6b;
+            border-bottom: none;
+        }
+        .vetting-banner-grid {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            padding: 5px 6px 6px;
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-top: none;
+            border-radius: 0 0 4px 4px;
+        }
+        .vetting-banner-grid.with-links {
+            border-radius: 0;
+        }
+        .vetting-banner-cell {
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 11px;
+            border: 1px solid #333;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 8px;
+            overflow: hidden;
+        }
+        .vetting-banner-shell.known .vetting-banner-cell {
+            background: #2a1a1a;
+        }
+        .vetting-banner-shell.new .vetting-banner-cell {
+            background: #1a2a1a;
+        }
+        .vetting-banner-label {
+            color: #888;
+            font-size: 11px;
+            flex-shrink: 0;
+        }
+        .vetting-banner-value {
+            color: #e0e0e0;
+            font-weight: bold;
+            text-align: right;
+            word-break: break-word;
+            white-space: normal;
+        }
+        .vetting-banner-hit.known {
+            color: #ff6b6b;
+        }
+        .vetting-banner-hit.new {
+            color: #6bff6b;
+        }
+        .vetting-banner-links {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 4px;
+            padding: 6px;
+            background: #161616;
+            border: 1px solid #333;
+            border-top: none;
+            border-radius: 0 0 4px 4px;
+        }
+        .vetting-banner-link {
+            display: inline-block;
+            padding: 2px 6px;
+            background: #222;
+            border: 1px solid #444;
+            border-radius: 3px;
+            color: #8af;
+            text-decoration: none;
+            font-size: 10px;
+            white-space: nowrap;
+        }
+        .vetting-banner-link:hover {
+            text-decoration: none;
+            border-color: #6a8ca6;
         }
         /* Blue slider theming — global override for all Dash sliders in toolbar */
         .plot-toolbar .rc-slider-rail {
@@ -689,7 +835,12 @@ app.index_string = '''
             background-color: #0f1418 !important;
             border-color: #2f4658 !important;
         }
-        input, textarea {
+        input[type="text"],
+        input[type="number"],
+        input[type="search"],
+        input[type="email"],
+        input[type="password"],
+        textarea {
             background-color: #1a1a1a !important;
             border: 1px solid #555 !important;
             color: #e0e0e0 !important;
@@ -1018,72 +1169,380 @@ app.index_string = '''
             font-size: 11px;
         }
 
-        /* Theme overrides: dark-only options */
-        body[data-theme="dracula"] {
-            background-color: #282a36 !important;
-            color: #f8f8f2 !important;
+        /* Theme overrides */
+        body[data-theme="black"] {
+            background-color: #000 !important;
+            color: #e0e0e0 !important;
         }
-        body[data-theme="nord"] {
+        body[data-theme="grey"] {
             background-color: #2e3440 !important;
             color: #d8dee9 !important;
         }
-        body[data-theme="gruvbox"] {
-            background-color: #282828 !important;
-            color: #ebdbb2 !important;
+        body[data-theme="light"] {
+            background-color: #eef2f6 !important;
+            color: #1c2733 !important;
         }
-        body[data-theme="dracula"] .main-container,
-        body[data-theme="nord"] .main-container,
-        body[data-theme="gruvbox"] .main-container {
+        body[data-theme="black"] .main-container,
+        body[data-theme="grey"] .main-container,
+        body[data-theme="light"] .main-container {
             background-color: inherit !important;
         }
-        body[data-theme="dracula"] .sidebar,
-        body[data-theme="dracula"] .header-bar,
-        body[data-theme="dracula"] .metadata-sections,
-        body[data-theme="dracula"] .control-bar,
-        body[data-theme="dracula"] .review-form,
-        body[data-theme="dracula"] .plot-status,
-        body[data-theme="dracula"] .run-config-item,
-        body[data-theme="dracula"] .plot-toolbar { background-color: #44475a !important; border-color: #6272a4 !important; color: #f8f8f2 !important; }
-        body[data-theme="nord"] .sidebar,
-        body[data-theme="nord"] .header-bar,
-        body[data-theme="nord"] .metadata-sections,
-        body[data-theme="nord"] .control-bar,
-        body[data-theme="nord"] .review-form,
-        body[data-theme="nord"] .plot-status,
-        body[data-theme="nord"] .run-config-item,
-        body[data-theme="nord"] .plot-toolbar { background-color: #3b4252 !important; border-color: #4c566a !important; color: #d8dee9 !important; }
-        body[data-theme="gruvbox"] .sidebar,
-        body[data-theme="gruvbox"] .header-bar,
-        body[data-theme="gruvbox"] .metadata-sections,
-        body[data-theme="gruvbox"] .control-bar,
-        body[data-theme="gruvbox"] .review-form,
-        body[data-theme="gruvbox"] .plot-status,
-        body[data-theme="gruvbox"] .run-config-item,
-        body[data-theme="gruvbox"] .plot-toolbar { background-color: #3c3836 !important; border-color: #504945 !important; color: #ebdbb2 !important; }
-        body[data-theme="dracula"] .section-title,
-        body[data-theme="dracula"] .help-link,
-        body[data-theme="dracula"] .metadata-sections summary,
-        body[data-theme="dracula"] #progress-text { color: #bd93f9 !important; }
-        body[data-theme="nord"] .section-title,
-        body[data-theme="nord"] .help-link,
-        body[data-theme="nord"] .metadata-sections summary,
-        body[data-theme="nord"] #progress-text { color: #88c0d0 !important; }
-        body[data-theme="gruvbox"] .section-title,
-        body[data-theme="gruvbox"] .help-link,
-        body[data-theme="gruvbox"] .metadata-sections summary,
-        body[data-theme="gruvbox"] #progress-text { color: #fabd2f !important; }
-        body[data-theme="dracula"] .action-btn.primary { background-color: #bd93f9 !important; color: #282a36 !important; border-color: #bd93f9 !important; }
-        body[data-theme="nord"] .action-btn.primary { background-color: #88c0d0 !important; color: #2e3440 !important; border-color: #88c0d0 !important; }
-        body[data-theme="gruvbox"] .action-btn.primary { background-color: #fabd2f !important; color: #282828 !important; border-color: #fabd2f !important; }
-        body[data-theme="dracula"] input, body[data-theme="dracula"] textarea, body[data-theme="dracula"] select,
-        body[data-theme="dracula"] .dash-dropdown .Select-control,
-        body[data-theme="dracula"] .dash-dropdown .Select-menu-outer { background-color: #44475a !important; color: #f8f8f2 !important; border-color: #6272a4 !important; }
-        body[data-theme="nord"] input, body[data-theme="nord"] textarea, body[data-theme="nord"] select,
-        body[data-theme="nord"] .dash-dropdown .Select-control,
-        body[data-theme="nord"] .dash-dropdown .Select-menu-outer { background-color: #3b4252 !important; color: #eceff4 !important; border-color: #4c566a !important; }
-        body[data-theme="gruvbox"] input, body[data-theme="gruvbox"] textarea, body[data-theme="gruvbox"] select,
-        body[data-theme="gruvbox"] .dash-dropdown .Select-control,
-        body[data-theme="gruvbox"] .dash-dropdown .Select-menu-outer { background-color: #3c3836 !important; color: #fbf1c7 !important; border-color: #504945 !important; }
+        body[data-theme="black"] .sidebar,
+        body[data-theme="black"] .header-bar,
+        body[data-theme="black"] .metadata-sections,
+        body[data-theme="black"] .control-bar,
+        body[data-theme="black"] .review-form,
+        body[data-theme="black"] .plot-status,
+        body[data-theme="black"] .run-config-item,
+        body[data-theme="black"] .plot-toolbar { background-color: #0a0a0a !important; border-color: #555 !important; color: #e0e0e0 !important; }
+        body[data-theme="grey"] .sidebar,
+        body[data-theme="grey"] .header-bar,
+        body[data-theme="grey"] .metadata-sections,
+        body[data-theme="grey"] .control-bar,
+        body[data-theme="grey"] .review-form,
+        body[data-theme="grey"] .plot-status,
+        body[data-theme="grey"] .run-config-item,
+        body[data-theme="grey"] .plot-toolbar { background-color: #3b4252 !important; border-color: #4c566a !important; color: #d8dee9 !important; }
+        body[data-theme="light"] .sidebar,
+        body[data-theme="light"] .header-bar,
+        body[data-theme="light"] .metadata-sections,
+        body[data-theme="light"] .control-bar,
+        body[data-theme="light"] .review-form,
+        body[data-theme="light"] .plot-status,
+        body[data-theme="light"] .run-config-item,
+        body[data-theme="light"] .plot-toolbar { background-color: #ffffff !important; border-color: #c5d0da !important; color: #1c2733 !important; }
+        body[data-theme="black"] .section-title,
+        body[data-theme="black"] .help-link,
+        body[data-theme="black"] .metadata-sections summary,
+        body[data-theme="black"] #progress-text { color: #0af !important; }
+        body[data-theme="grey"] .section-title,
+        body[data-theme="grey"] .help-link,
+        body[data-theme="grey"] .metadata-sections summary,
+        body[data-theme="grey"] #progress-text { color: #88c0d0 !important; }
+        body[data-theme="light"] .section-title,
+        body[data-theme="light"] .help-link,
+        body[data-theme="light"] .metadata-sections summary,
+        body[data-theme="light"] #progress-text { color: #245f8f !important; }
+        body[data-theme="black"] .action-btn.primary { background-color: #0af !important; color: #08131d !important; border-color: #0af !important; }
+        body[data-theme="grey"] .action-btn.primary { background-color: #88c0d0 !important; color: #2e3440 !important; border-color: #88c0d0 !important; }
+        body[data-theme="light"] .action-btn.primary { background-color: #245f8f !important; color: #f5f7fa !important; border-color: #245f8f !important; }
+        body[data-theme="black"] input, body[data-theme="black"] textarea, body[data-theme="black"] select,
+        body[data-theme="black"] .dash-dropdown .Select-control,
+        body[data-theme="black"] .dash-dropdown .Select-menu-outer { background-color: #0a0a0a !important; color: #e0e0e0 !important; border-color: #555 !important; }
+        body[data-theme="grey"] input, body[data-theme="grey"] textarea, body[data-theme="grey"] select,
+        body[data-theme="grey"] .dash-dropdown .Select-control,
+        body[data-theme="grey"] .dash-dropdown .Select-menu-outer { background-color: #3b4252 !important; color: #eceff4 !important; border-color: #4c566a !important; }
+        body[data-theme="light"] input, body[data-theme="light"] textarea, body[data-theme="light"] select,
+        body[data-theme="light"] .dash-dropdown .Select-control,
+        body[data-theme="light"] .dash-dropdown .Select-menu-outer { background-color: #ffffff !important; color: #1c2733 !important; border-color: #c5d0da !important; }
+        body[data-theme="light"] .plot-container,
+        body[data-theme="light"] .metadata-bar,
+        body[data-theme="light"] #bottom-context-info {
+            background-color: #eef2f6 !important;
+            border-color: #c5d0da !important;
+            color: #4f6273 !important;
+        }
+        body[data-theme="light"] .plot-toolbar,
+        body[data-theme="light"] .meta-toolbar,
+        body[data-theme="light"] .camera-diag .item,
+        body[data-theme="light"] .run-config-item,
+        body[data-theme="light"] .repro-badge,
+        body[data-theme="light"] .metadata-health,
+        body[data-theme="light"] .compact-btn,
+        body[data-theme="light"] .score-btn,
+        body[data-theme="light"] .badge-btn,
+        body[data-theme="light"] .action-btn:not(.primary),
+        body[data-theme="light"] .sidebar-toggle,
+        body[data-theme="light"] #help-modal .modal-content {
+            background: #ffffff !important;
+            background-image: none !important;
+            border-color: #c5d0da !important;
+            color: #1c2733 !important;
+        }
+        body[data-theme="light"] .sidebar-toggle {
+            color: #245f8f !important;
+        }
+        body[data-theme="light"] .sidebar-toggle:hover,
+        body[data-theme="light"] .compact-btn:hover,
+        body[data-theme="light"] .score-btn:hover,
+        body[data-theme="light"] .badge-btn:hover,
+        body[data-theme="light"] .action-btn:not(.primary):hover {
+            background: #e7edf3 !important;
+            border-color: #9fb1bf !important;
+            color: #1c2733 !important;
+        }
+        body[data-theme="light"] .score-btn.active {
+            background: #dbe7f1 !important;
+            border-color: #245f8f !important;
+            color: #163b57 !important;
+        }
+        body[data-theme="light"] .header-key-info .item,
+        body[data-theme="light"] .notification,
+        body[data-theme="light"] .camera-diag,
+        body[data-theme="light"] .run-config-item .k,
+        body[data-theme="light"] .plot-toolbar .label-chip,
+        body[data-theme="light"] .plot-toolbar .dash-checklist label,
+        body[data-theme="light"] .plot-toolbar label,
+        body[data-theme="light"] .meta-toolbar .title,
+        body[data-theme="light"] .metadata-health .detail,
+        body[data-theme="light"] .plot-status summary,
+        body[data-theme="light"] .sidebar label,
+        body[data-theme="light"] .sidebar details summary,
+        body[data-theme="light"] .dash-checklist label,
+        body[data-theme="light"] .sidebar-camera-checklist label,
+        body[data-theme="light"] #review-progress-indicator,
+        body[data-theme="light"] #pdm-result-label,
+        body[data-theme="light"] #bottom-pipeline-status,
+        body[data-theme="light"] #pass-indicator,
+        body[data-theme="light"] #status-indicator {
+            color: #4f6273 !important;
+        }
+        body[data-theme="light"] .sidebar details summary:hover,
+        body[data-theme="light"] .metadata-sections summary:hover,
+        body[data-theme="light"] .plot-status summary:hover,
+        body[data-theme="light"] .help-link:hover {
+            color: #245f8f !important;
+        }
+        body[data-theme="light"] .run-config-item .v,
+        body[data-theme="light"] .plot-status,
+        body[data-theme="light"] .plot-status .status-line,
+        body[data-theme="light"] .plot-status li,
+        body[data-theme="light"] .metadata-health,
+        body[data-theme="light"] .meta-field-label,
+        body[data-theme="light"] .meta-field-value,
+        body[data-theme="light"] .vetting-banner-label,
+        body[data-theme="light"] .vetting-banner-value,
+        body[data-theme="light"] .vetting-banner-empty,
+        body[data-theme="light"] #help-modal .modal-body,
+        body[data-theme="light"] #help-modal .modal-footer,
+        body[data-theme="light"] #help-modal pre {
+            color: #1c2733 !important;
+        }
+        body[data-theme="light"] .meta-field-row {
+            border-color: #d6e0e8 !important;
+        }
+        body[data-theme="light"] .plot-status.warn {
+            border-color: rgba(186, 144, 44, 0.45) !important;
+            background: rgba(255, 239, 202, 0.88) !important;
+        }
+        body[data-theme="light"] .plot-status.error {
+            border-color: rgba(192, 72, 72, 0.45) !important;
+            background: rgba(255, 226, 226, 0.92) !important;
+        }
+        body[data-theme="light"] .metadata-health .chip,
+        body[data-theme="light"] .repro-badge {
+            color: #245f8f !important;
+            background: #edf4fa !important;
+            border-color: #b9c9d7 !important;
+        }
+        body[data-theme="light"] .metadata-health.metadata-health-base .chip {
+            color: #946200 !important;
+            border-color: #e0c27b !important;
+            background: #fff3d8 !important;
+        }
+        body[data-theme="light"] .metadata-health.metadata-health-partial .chip {
+            color: #1f6485 !important;
+            border-color: #a7cad9 !important;
+            background: #e8f5fb !important;
+        }
+        body[data-theme="light"] .metadata-health.metadata-health-enriched .chip {
+            color: #2f7a57 !important;
+            border-color: #a8d0ba !important;
+            background: #e9f7ef !important;
+        }
+        body[data-theme="light"] .repro-badge.warn {
+            color: #946200 !important;
+            border-color: #e0c27b !important;
+            background: #fff3d8 !important;
+        }
+        body[data-theme="light"] .sidebar hr,
+        body[data-theme="light"] .metadata-sections details {
+            border-color: #d6e0e8 !important;
+        }
+        body[data-theme="light"] .dash-checklist label,
+        body[data-theme="light"] .dash-radioitems label {
+            box-shadow: none !important;
+        }
+        body[data-theme="light"] .panel-splitter-vertical::after {
+            color: #4f6273 !important;
+            background: rgba(255, 255, 255, 0.96) !important;
+            border-color: rgba(159, 177, 191, 0.75) !important;
+        }
+        body[data-theme="light"] .panel-splitter-vertical::before {
+            background: rgba(159, 177, 191, 0.6) !important;
+        }
+        body[data-theme="light"] .Select-control,
+        body[data-theme="light"] .Select-menu-outer,
+        body[data-theme="light"] .Select-menu,
+        body[data-theme="light"] .Select-option,
+        body[data-theme="light"] .VirtualizedSelectOption,
+        body[data-theme="light"] .Select-placeholder,
+        body[data-theme="light"] .Select-value,
+        body[data-theme="light"] .Select-value-label,
+        body[data-theme="light"] .Select-input,
+        body[data-theme="light"] .Select-clear-zone,
+        body[data-theme="light"] .Select-arrow-zone,
+        body[data-theme="light"] .Select-menu-outer,
+        body[data-theme="light"] .Select-menu-outer *,
+        body[data-theme="light"] .Select * {
+            background-color: #ffffff !important;
+            color: #1c2733 !important;
+            border-color: #c5d0da !important;
+        }
+        body[data-theme="light"] .Select-option,
+        body[data-theme="light"] .VirtualizedSelectOption,
+        body[data-theme="light"] [class*="Select-option"] {
+            border-bottom: 1px solid #dde6ee !important;
+        }
+        body[data-theme="light"] .form-select,
+        body[data-theme="light"] .form-control,
+        body[data-theme="light"] .sidebar .form-select,
+        body[data-theme="light"] .sidebar .form-control,
+        body[data-theme="light"] .plot-toolbar .form-select,
+        body[data-theme="light"] .plot-toolbar .form-control {
+            background-color: #ffffff !important;
+            background-image: none !important;
+            color: #1c2733 !important;
+            border-color: #c5d0da !important;
+            box-shadow: none !important;
+        }
+        body[data-theme="light"] .form-select:focus,
+        body[data-theme="light"] .form-control:focus,
+        body[data-theme="light"] .sidebar .form-select:focus,
+        body[data-theme="light"] .sidebar .form-control:focus,
+        body[data-theme="light"] .plot-toolbar .form-select:focus,
+        body[data-theme="light"] .plot-toolbar .form-control:focus {
+            border-color: #7da8c4 !important;
+            box-shadow: 0 0 0 2px rgba(36, 95, 143, 0.12) !important;
+        }
+        body[data-theme="light"] .dash-dropdown,
+        body[data-theme="light"] .dash-dropdown-trigger,
+        body[data-theme="light"] .dash-dropdown-value,
+        body[data-theme="light"] .dash-dropdown-value-item,
+        body[data-theme="light"] .dash-dropdown-content,
+        body[data-theme="light"] .dash-dropdown-options,
+        body[data-theme="light"] .dash-options-list,
+        body[data-theme="light"] .dash-dropdown-search-container,
+        body[data-theme="light"] .dash-dropdown-search {
+            background-color: #ffffff !important;
+            background-image: none !important;
+            color: #1c2733 !important;
+            border-color: #c5d0da !important;
+        }
+        body[data-theme="light"] .dash-dropdown-option,
+        body[data-theme="light"] .dash-options-list-option {
+            background-color: #ffffff !important;
+            color: #1c2733 !important;
+            border-color: #dde6ee !important;
+        }
+        body[data-theme="light"] .dash-dropdown-option:hover,
+        body[data-theme="light"] .dash-options-list-option:hover,
+        body[data-theme="light"] .dash-dropdown-option.selected,
+        body[data-theme="light"] .dash-options-list-option.selected {
+            background-color: #eaf1f6 !important;
+            color: #1c2733 !important;
+        }
+        body[data-theme="light"] .Select-control .Select-input > input {
+            color: #1c2733 !important;
+        }
+        body[data-theme="light"] .Select.has-value.Select--single > .Select-control .Select-value,
+        body[data-theme="light"] .Select.has-value.is-pseudo-focused.Select--single > .Select-control .Select-value {
+            background: #ffffff !important;
+            background-image: none !important;
+            border-color: transparent !important;
+            color: #1c2733 !important;
+        }
+        body[data-theme="light"] .Select.has-value.Select--single > .Select-control .Select-value .Select-value-label,
+        body[data-theme="light"] .Select.has-value.is-pseudo-focused.Select--single > .Select-control .Select-value .Select-value-label,
+        body[data-theme="light"] .has-value.Select--single > .Select-control .Select-value a.Select-value-label,
+        body[data-theme="light"] .has-value.is-pseudo-focused.Select--single > .Select-control .Select-value a.Select-value-label {
+            color: #1c2733 !important;
+        }
+        body[data-theme="light"] .Select.is-focused:not(.is-open) > .Select-control {
+            border-color: #7da8c4 !important;
+            box-shadow: 0 0 0 2px rgba(36, 95, 143, 0.12) !important;
+        }
+        body[data-theme="light"] .sidebar .dash-checklist,
+        body[data-theme="light"] .sidebar .dash-radioitems,
+        body[data-theme="light"] .meta-toolbar .dash-checklist,
+        body[data-theme="light"] .meta-toolbar .dash-radioitems,
+        body[data-theme="light"] .plot-toolbar .dash-checklist,
+        body[data-theme="light"] .plot-toolbar .dash-radioitems {
+            background: transparent !important;
+        }
+        body[data-theme="light"] .sidebar .dash-checklist label,
+        body[data-theme="light"] .sidebar .dash-radioitems label,
+        body[data-theme="light"] .sidebar-camera-checklist label {
+            background: #f5f8fb !important;
+            border: 1px solid #d6e0e8 !important;
+            color: #1c2733 !important;
+        }
+        body[data-theme="light"] .meta-toolbar .dash-checklist label,
+        body[data-theme="light"] .meta-toolbar .dash-radioitems label,
+        body[data-theme="light"] .meta-toolbar label,
+        body[data-theme="light"] .plot-toolbar .dash-checklist label,
+        body[data-theme="light"] .plot-toolbar .dash-radioitems label,
+        body[data-theme="light"] .plot-toolbar label {
+            background: #f5f8fb !important;
+            border: 1px solid #d6e0e8 !important;
+            color: #1c2733 !important;
+        }
+        body[data-theme="light"] .sidebar .dash-checklist label:hover,
+        body[data-theme="light"] .sidebar .dash-radioitems label:hover,
+        body[data-theme="light"] .sidebar-camera-checklist label:hover,
+        body[data-theme="light"] .meta-toolbar .dash-checklist label:hover,
+        body[data-theme="light"] .meta-toolbar .dash-radioitems label:hover,
+        body[data-theme="light"] .meta-toolbar label:hover,
+        body[data-theme="light"] .plot-toolbar .dash-checklist label:hover,
+        body[data-theme="light"] .plot-toolbar .dash-radioitems label:hover,
+        body[data-theme="light"] .plot-toolbar label:hover {
+            background: #eaf1f6 !important;
+            border-color: #b8c8d5 !important;
+        }
+        body[data-theme="light"] #sidebar-status {
+            color: #2f7a57 !important;
+        }
+        body[data-theme="light"] #help-modal .modal-content,
+        body[data-theme="light"] #help-modal .modal-header,
+        body[data-theme="light"] #help-modal .modal-body,
+        body[data-theme="light"] #help-modal .modal-footer {
+            background-color: #ffffff !important;
+            border-color: #c5d0da !important;
+        }
+        body[data-theme="light"] .vetting-banner-empty,
+        body[data-theme="light"] .vetting-banner-grid,
+        body[data-theme="light"] .vetting-banner-links {
+            background: #ffffff !important;
+            border-color: #c5d0da !important;
+        }
+        body[data-theme="light"] .vetting-banner-cell {
+            border-color: #d6e0e8 !important;
+        }
+        body[data-theme="light"] .vetting-banner-shell.known .vetting-banner-cell,
+        body[data-theme="light"] .vetting-banner-shell.new .vetting-banner-cell {
+            background: #f7fafc !important;
+        }
+        body[data-theme="light"] .vetting-banner-header.known {
+            background: #fbe7e7 !important;
+            color: #9f2d2d !important;
+            border-color: #e4b4b4 !important;
+        }
+        body[data-theme="light"] .vetting-banner-header.new {
+            background: #e8f7ec !important;
+            color: #2f7a57 !important;
+            border-color: #b7dcbf !important;
+        }
+        body[data-theme="light"] .vetting-banner-hit.known {
+            color: #9f2d2d !important;
+        }
+        body[data-theme="light"] .vetting-banner-hit.new {
+            color: #2f7a57 !important;
+        }
+        body[data-theme="light"] .vetting-banner-link {
+            background: #f5f8fb !important;
+            border-color: #c5d0da !important;
+            color: #245f8f !important;
+        }
     </style>
 </head>
 <body>
@@ -1098,18 +1557,29 @@ app.index_string = '''
 # Global variables
 DB_PATH = str(DEFAULT_DB_PATH)
 PLOT_DIR = None
+DEFAULT_THEME = "black"
+DEFAULT_RESIDUAL_FRACTION = 0.33
+EXTERNAL_SOURCE_VIEW_OPTIONS = [
+    {"label": "All", "value": "all"},
+    {"label": "ASAS-SN Only", "value": "asassn"},
+    {"label": "ATLAS", "value": "atlas"},
+    {"label": "ZTF", "value": "ztf"},
+    {"label": "Gaia Epoch", "value": "gaia_epoch"},
+    {"label": "PS1", "value": "ps1"},
+    {"label": "CRTS", "value": "crts"},
+]
 
 PLOT_PRESETS = {
     'Clean': {
-        'overlays': ['raw', 'markers', 'residuals', 'filter_bad_cameras'],
+        'overlays': ['raw', 'markers', 'residuals', 'phase', 'filter_bad_cameras'],
         'camera_mode': 'all',
     },
     'Diagnostics': {
-        'overlays': ['raw', 'markers', 'residuals', 'filter_bad_cameras', 'diagnostics'],
+        'overlays': ['raw', 'markers', 'residuals', 'phase', 'filter_bad_cameras', 'diagnostics'],
         'camera_mode': 'all',
     },
     'Full': {
-        'overlays': ['raw', 'markers', 'residuals', 'filter_bad_cameras', 'diagnostics', 'confidence'],
+        'overlays': ['raw', 'markers', 'residuals', 'phase', 'filter_bad_cameras', 'diagnostics', 'confidence'],
         'camera_mode': 'all',
     },
 }
@@ -1145,12 +1615,9 @@ def _render_stat_cards(stat_rows: list[tuple[str, str]]) -> list:
         return []
     field_divs = [
         html.Div([
-            html.Span(label, style={'color': '#7fa3bc', 'flex-shrink': '0', 'font-size': '10px',
-                                     'text-transform': 'uppercase', 'letter-spacing': '0.5px'}),
-            html.Span(str(value), style={'color': '#e2edf6', 'text-align': 'right',
-                                          'font-weight': '600'}),
-        ], style={'display': 'flex', 'justify-content': 'space-between', 'gap': '8px',
-                  'padding': '2px 0', 'border-bottom': '1px solid #1a1a1a'})
+            html.Span(label, className='meta-field-label'),
+            html.Span(str(value), className='meta-field-value'),
+        ], className='meta-field-row')
         for label, value in stat_rows
     ]
     return [html.Details(
@@ -1388,59 +1855,37 @@ def _render_metadata_health(grouped: list[tuple[str, list[tuple[str, object]]]] 
 def _render_vetting_banner(payload: dict | None, radius_arcsec: float = 10.0) -> html.Div:
     """Render a vetting status panel with source cards above the metadata grid."""
     if not payload or 'vetting_likely_known' not in payload:
-        return html.Div(
-            "Not vetted",
-            style={
-                'padding': '6px 12px', 'margin': '4px 0', 'border-radius': '4px',
-                'background': '#333', 'color': '#999', 'font-size': '0.85em',
-                'text-align': 'center',
-            },
-        )
+        return html.Div("Not vetted", className='vetting-banner-empty')
 
     known = payload.get('vetting_likely_known')
+    banner_state = 'known' if known else 'new'
 
     # Status header
-    if known:
-        header_style = {
-            'padding': '3px 8px', 'border-radius': '4px 4px 0 0',
-            'background': '#4a1111', 'color': '#ff6b6b', 'font-weight': 'bold',
-            'font-size': '11px', 'text-align': 'center',
-            'border': '1px solid #ff6b6b', 'border-bottom': 'none',
-        }
-        header_text = "KNOWN OBJECT"
-    else:
-        header_style = {
-            'padding': '3px 8px', 'border-radius': '4px 4px 0 0',
-            'background': '#114a11', 'color': '#6bff6b', 'font-weight': 'bold',
-            'font-size': '11px', 'text-align': 'center',
-            'border': '1px solid #6bff6b', 'border-bottom': 'none',
-        }
-        header_text = "POTENTIALLY NEW"
-
-    # Build source cards
-    cell_style = {
-        'padding': '2px 6px', 'border-radius': '3px', 'font-size': '11px',
-        'background': '#1a2a1a' if not known else '#2a1a1a',
-        'border': '1px solid #333',
-        'display': 'flex', 'justify-content': 'space-between', 'align-items': 'center',
-        'gap': '8px', 'overflow': 'hidden',
-    }
-    label_style = {'color': '#888', 'font-size': '11px', 'flex-shrink': '0'}
-    value_style = {'color': '#e0e0e0', 'font-weight': 'bold',
-                   'text-align': 'right', 'word-break': 'break-word', 'white-space': 'normal'}
-    hit_style = {**value_style, 'color': '#ff6b6b' if known else '#6bff6b'}
+    header_text = "KNOWN OBJECT" if known else "POTENTIALLY NEW"
 
     cards = []
+
+    def _label(text: str) -> html.Span:
+        return html.Span(text, className='vetting-banner-label')
+
+    def _value(text: str, *, hit: bool = False, title: str | None = None) -> html.Span:
+        cls = 'vetting-banner-value'
+        if hit:
+            cls += f' vetting-banner-hit {banner_state}'
+        return html.Span(text, className=cls, title=title)
+
+    def _cell(left: str, right: str, *, hit: bool = False, title: str | None = None) -> html.Div:
+        return html.Div([
+            _label(left),
+            _value(right, hit=hit, title=title),
+        ], className='vetting-banner-cell')
 
     # SIMBAD cell
     simbad_id = payload.get('simbad_otype') or payload.get('simbad_main_id')
     if simbad_id:
         refs = payload.get('simbad_nbref')
         ref_str = f" ({refs} refs)" if refs else ""
-        cards.append(html.Div([
-            html.Span("SIMBAD", style=label_style),
-            html.Span(f"{simbad_id}{ref_str}", style=hit_style, title=str(payload.get('simbad_main_id', ''))),
-        ], style=cell_style))
+        cards.append(_cell("SIMBAD", f"{simbad_id}{ref_str}", hit=True, title=str(payload.get('simbad_main_id', ''))))
 
     # VSX cell
     vsx_cls = payload.get('vsx_class')
@@ -1449,115 +1894,79 @@ def _render_vetting_banner(payload: dict | None, radius_arcsec: float = 10.0) ->
         sep_str = f" ({vsx_sep:.1f}\")" if vsx_sep and not pd.isna(vsx_sep) else ""
         vsx_p = payload.get('vsx_period')
         p_str = f", P={vsx_p:.4f}d" if vsx_p and not pd.isna(vsx_p) else ""
-        cards.append(html.Div([
-            html.Span("VSX", style=label_style),
-            html.Span(f"{vsx_cls}{p_str}{sep_str}", style=hit_style),
-        ], style=cell_style))
+        cards.append(_cell("VSX", f"{vsx_cls}{p_str}{sep_str}", hit=True))
 
     # Gaia variability cell
     gaia_cls = payload.get('gaia_var_class')
     if gaia_cls:
         score = payload.get('gaia_var_score')
         score_str = f" ({score:.2f})" if score and not pd.isna(score) else ""
-        cards.append(html.Div([
-            html.Span("Gaia DR3", style=label_style),
-            html.Span(f"{gaia_cls}{score_str}", style=hit_style),
-        ], style=cell_style))
+        cards.append(_cell("Gaia DR3", f"{gaia_cls}{score_str}", hit=True))
 
     # Gaia EB period cell
     eb_period = payload.get('gaia_eb_period')
     if eb_period and not pd.isna(eb_period):
-        cards.append(html.Div([
-            html.Span("Gaia EB", style=label_style),
-            html.Span(f"P={eb_period:.4f} d", style=hit_style),
-        ], style=cell_style))
+        cards.append(_cell("Gaia EB", f"P={eb_period:.4f} d", hit=True))
 
     # ASAS-SN cell
     asassn_type = payload.get('asassn_var_type')
     if asassn_type:
         period = payload.get('asassn_var_period')
         p_str = f" P={period:.4f}d" if period and not pd.isna(period) else ""
-        cards.append(html.Div([
-            html.Span("ASAS-SN", style=label_style),
-            html.Span(f"{asassn_type}{p_str}", style=hit_style),
-        ], style=cell_style))
+        cards.append(_cell("ASAS-SN", f"{asassn_type}{p_str}", hit=True))
 
     # ZTF cell
     ztf_type = payload.get('ztf_var_type')
     if ztf_type:
         ztf_p = payload.get('ztf_var_period')
         zp_str = f" P={ztf_p:.4f}d" if ztf_p and not pd.isna(ztf_p) else ""
-        cards.append(html.Div([
-            html.Span("ZTF", style=label_style),
-            html.Span(f"{ztf_type}{zp_str}", style=hit_style),
-        ], style=cell_style))
+        cards.append(_cell("ZTF", f"{ztf_type}{zp_str}", hit=True))
 
     # TNS cell
     tns_name = payload.get('tns_name')
     if tns_name:
         tns_type = payload.get('tns_type', '')
-        cards.append(html.Div([
-            html.Span("TNS", style=label_style),
-            html.Span(f"{tns_name} ({tns_type})" if tns_type else tns_name, style=hit_style),
-        ], style=cell_style))
+        cards.append(_cell("TNS", f"{tns_name} ({tns_type})" if tns_type else tns_name, hit=True))
 
     # ALeRCE cell
     alerce_cls = payload.get('alerce_lc_class')
     if alerce_cls:
         prob = payload.get('alerce_lc_prob')
         prob_str = f" ({prob:.0%})" if prob and not pd.isna(prob) else ""
-        cards.append(html.Div([
-            html.Span("ALeRCE", style=label_style),
-            html.Span(f"{alerce_cls}{prob_str}", style=hit_style),
-        ], style=cell_style))
+        cards.append(_cell("ALeRCE", f"{alerce_cls}{prob_str}", hit=True))
 
     # X-ray cell
     xray = payload.get('xray_det')
     if xray:
         flux = payload.get('xray_flux')
         flux_str = f" {flux:.1e}" if flux and not pd.isna(flux) else ""
-        cards.append(html.Div([
-            html.Span("X-ray", style=label_style),
-            html.Span(f"Detected{flux_str}", style=hit_style),
-        ], style=cell_style))
+        cards.append(_cell("X-ray", f"Detected{flux_str}", hit=True))
 
     # SFR cell
     sfr_name = payload.get('sfr_name')
     if sfr_name and str(sfr_name).strip() and str(sfr_name).strip().lower() not in ('nan', '<na>'):
         sfr_sep = payload.get('sfr_sep_arcmin')
         sep_str = f" ({sfr_sep:.1f}')" if sfr_sep and not pd.isna(sfr_sep) else ""
-        cards.append(html.Div([
-            html.Span("SFR", style=label_style),
-            html.Span(f"{sfr_name}{sep_str}", style=hit_style),
-        ], style=cell_style))
+        cards.append(_cell("SFR", f"{sfr_name}{sep_str}", hit=True))
 
     # Cluster cell
     cluster_name = payload.get('cluster_name')
     if cluster_name and str(cluster_name).strip() and str(cluster_name).strip().lower() not in ('nan', '<na>'):
         cluster_dist = payload.get('cluster_dist_pc')
         d_str = f" ({cluster_dist:.0f} pc)" if cluster_dist and not pd.isna(cluster_dist) else ""
-        cards.append(html.Div([
-            html.Span("Cluster", style=label_style),
-            html.Span(f"{cluster_name}{d_str}", style=hit_style),
-        ], style=cell_style))
+        cards.append(_cell("Cluster", f"{cluster_name}{d_str}", hit=True))
 
     # BANYAN cell
     banyan_assoc = payload.get('banyan_best_assoc')
     banyan_fp = payload.get('banyan_field_prob')
     if banyan_assoc and str(banyan_assoc).strip() and str(banyan_assoc).strip().lower() not in ('nan', '<na>', 'field'):
         fp_str = f" (P_field={banyan_fp:.0%})" if banyan_fp and not pd.isna(banyan_fp) else ""
-        cards.append(html.Div([
-            html.Span("BANYAN", style=label_style),
-            html.Span(f"{banyan_assoc}{fp_str}", style=hit_style),
-        ], style=cell_style))
+        cards.append(_cell("BANYAN", f"{banyan_assoc}{fp_str}", hit=True))
 
     # YSO class cell
     yso_cls = payload.get('yso_class')
     if yso_cls and str(yso_cls).strip() and str(yso_cls).strip().lower() not in ('nan', '<na>'):
-        cards.append(html.Div([
-            html.Span("YSO", style=label_style),
-            html.Span(str(yso_cls), style=hit_style),
-        ], style=cell_style))
+        cards.append(_cell("YSO", str(yso_cls), hit=True))
 
     # OGLE cell
     ogle_match = payload.get('period_ogle_match')
@@ -1567,20 +1976,14 @@ def _render_vetting_banner(payload: dict | None, radius_arcsec: float = 10.0) ->
         ogle_sep = payload.get('period_ogle_sep_arcsec')
         p_str = f" P={ogle_p:.4f}d" if ogle_p and not pd.isna(ogle_p) else ""
         sep_str = f" ({ogle_sep:.1f}\")" if ogle_sep and not pd.isna(ogle_sep) else ""
-        cards.append(html.Div([
-            html.Span("OGLE", style=label_style),
-            html.Span(f"{ogle_cls}{p_str}{sep_str}" if ogle_cls else f"Match{p_str}{sep_str}", style=hit_style),
-        ], style=cell_style))
+        cards.append(_cell("OGLE", f"{ogle_cls}{p_str}{sep_str}" if ogle_cls else f"Match{p_str}{sep_str}", hit=True))
 
     # unWISE W1 variability cell
     w1_var = payload.get('unwise_w1_var')
     if w1_var:
         w1_z = payload.get('unwise_w1_zscore')
         z_str = f" (z={w1_z:.1f})" if w1_z and not pd.isna(w1_z) else ""
-        cards.append(html.Div([
-            html.Span("unWISE W1", style=label_style),
-            html.Span(f"Variable{z_str}", style=hit_style),
-        ], style=cell_style))
+        cards.append(_cell("unWISE W1", f"Variable{z_str}", hit=True))
 
     # LTV trend cell
     ltv_slope = payload.get('ltv_slope')
@@ -1590,42 +1993,25 @@ def _render_vetting_banner(payload: dict | None, radius_arcsec: float = 10.0) ->
         direction = "▲" if ltv_slope > 0 else "▼"
         diff_str = f" Δ{ltv_diff:.3f}mag" if ltv_diff and not pd.isna(ltv_diff) else ""
         fap_str = f" FAP={ltv_fap:.2e}" if ltv_fap and not pd.isna(ltv_fap) else ""
-        cards.append(html.Div([
-            html.Span("LTV", style=label_style),
-            html.Span(f"{direction}{ltv_slope:+.4f} mag/yr{diff_str}{fap_str}", style=hit_style),
-        ], style=cell_style))
+        cards.append(_cell("LTV", f"{direction}{ltv_slope:+.4f} mag/yr{diff_str}{fap_str}", hit=True))
 
     # IPHAS H-alpha excess cell
     ha_excess = payload.get('iphas_ha_excess')
     if ha_excess and not pd.isna(ha_excess) and float(ha_excess) > 0:
-        cards.append(html.Div([
-            html.Span("IPHAS Hα", style=label_style),
-            html.Span(f"excess={float(ha_excess):.2f}", style=hit_style),
-        ], style=cell_style))
+        cards.append(_cell("IPHAS Hα", f"excess={float(ha_excess):.2f}", hit=True))
 
     # Gaia epoch cell (non-hit, informational)
     epoch_n = payload.get('gaia_epoch_n_obs')
     if epoch_n and int(epoch_n) > 0:
         g_range = payload.get('gaia_epoch_g_range')
         r_str = f", dG={g_range:.2f}" if g_range and not pd.isna(g_range) else ""
-        cards.append(html.Div([
-            html.Span("Gaia epoch", style=label_style),
-            html.Span(f"{int(epoch_n)} obs{r_str}", style=value_style),
-        ], style=cell_style))
+        cards.append(_cell("Gaia epoch", f"{int(epoch_n)} obs{r_str}"))
 
     if not cards and not known:
         # No matches at all — emphasize "new"
         cards.append(html.Div([
-            html.Span("No catalog matches found", style={**value_style, 'color': '#6bff6b'}),
-        ], style={**cell_style, 'grid-column': '1 / -1'}))
-
-    grid_style = {
-        'display': 'flex', 'flex-direction': 'column',
-        'gap': '2px', 'padding': '5px 6px 6px',
-        'background': '#1a1a1a',
-        'border': '1px solid #333', 'border-top': 'none',
-        'border-radius': '0 0 4px 4px',
-    }
+            _value("No catalog matches found", hit=True),
+        ], className='vetting-banner-cell'))
 
     # External links toolbar
     links = build_external_lookup_links(payload, radius_arcsec=radius_arcsec)
@@ -1638,37 +2024,19 @@ def _render_vetting_banner(payload: dict | None, radius_arcsec: float = 10.0) ->
                 href=url,
                 target='_blank',
                 rel='noopener noreferrer',
-                style={
-                    'display': 'inline-block',
-                    'padding': '2px 6px',
-                    'background': '#222',
-                    'border': '1px solid #444',
-                    'border-radius': '3px',
-                    'color': '#8af',
-                    'text-decoration': 'none',
-                    'font-size': '10px',
-                    'white-space': 'nowrap',
-                }
+                className='vetting-banner-link',
             ))
 
-        # Attach links seamlessy to the bottom of the grid
-        grid_style['border-radius'] = '0'
-        links_row = html.Div(link_els, style={
-            'display': 'flex', 'flex-wrap': 'wrap', 'gap': '4px',
-            'padding': '6px',
-            'background': '#161616',
-            'border': '1px solid #333', 'border-top': 'none',
-            'border-radius': '0 0 4px 4px',
-        })
+        links_row = html.Div(link_els, className='vetting-banner-links')
 
     children = [
-        html.Div(header_text, style=header_style),
-        html.Div(cards, style=grid_style),
+        html.Div(header_text, className=f'vetting-banner-header {banner_state}'),
+        html.Div(cards, className='vetting-banner-grid with-links' if links_row else 'vetting-banner-grid'),
     ]
     if links_row:
         children.append(links_row)
 
-    return html.Div(children, style={'margin': '4px 0'})
+    return html.Div(children, className=f'vetting-banner-shell {banner_state}')
 
 
 def _keyboard_key(key_value: str | None) -> str:
@@ -1894,10 +2262,17 @@ def _build_neowise_figure(df_neowise: pd.DataFrame) -> go.Figure:
     return fig
 
 
-@lru_cache(maxsize=4)
+@lru_cache(maxsize=32)
 def _index_external_lc_paths(run_dir_text: str, prefix: str) -> dict[str, str]:
     """Index candidate -> external LC parquet paths for a given prefix."""
     root = Path(run_dir_text) / "results"
+    return _index_external_lc_paths_from_root(str(root), prefix)
+
+
+@lru_cache(maxsize=64)
+def _index_external_lc_paths_from_root(root_text: str, prefix: str) -> dict[str, str]:
+    """Index candidate -> external LC parquet paths for a results root."""
+    root = Path(root_text)
     mapping: dict[str, str] = {}
     if not root.exists():
         return mapping
@@ -1916,6 +2291,7 @@ def _build_external_lc_figure(
     yaxis_label: str = "mag",
     reverse_y: bool = True,
     filter_col: str | None = None,
+    source_name: str | None = None,
 ) -> go.Figure:
     """Build a compact LC panel for any external source.
 
@@ -1928,34 +2304,40 @@ def _build_external_lc_figure(
         fig.update_layout(height=220, margin=dict(l=36, r=10, t=30, b=28), title=title)
         return fig
 
+    if source_name:
+        df_lc = normalize_external_lc_dataframe(source_name, df_lc)
+        if df_lc is None or df_lc.empty:
+            fig.update_layout(height=220, margin=dict(l=36, r=10, t=30, b=28), title=title)
+            return fig
+
     # Resolve time column (case-insensitive)
-    actual_time_col = None
-    for c in df_lc.columns:
-        if c.lower() == time_col.lower():
-            actual_time_col = c
-            break
+    col_lookup = {c.lower(): c for c in df_lc.columns}
+    actual_time_col = col_lookup.get(time_col.lower())
     if actual_time_col is None:
         fig.update_layout(height=220, margin=dict(l=36, r=10, t=30, b=28), title=f"{title} (missing {time_col})")
         return fig
 
     added = 0
     for band_value, mag_col, err_col, color in band_specs:
+        actual_filter_col = col_lookup.get(filter_col.lower()) if filter_col else None
+        actual_mag_col = col_lookup.get(mag_col.lower())
+        actual_err_col = col_lookup.get(err_col.lower()) if err_col else None
         # Filter rows for this band if filter_col is specified
-        if filter_col and filter_col in df_lc.columns:
-            subset = df_lc[df_lc[filter_col].astype(str) == band_value]
+        if actual_filter_col:
+            subset = df_lc[df_lc[actual_filter_col].astype(str) == band_value]
         else:
             subset = df_lc
-        if subset.empty or mag_col not in subset.columns:
+        if subset.empty or actual_mag_col is None:
             continue
 
         x = pd.to_numeric(subset[actual_time_col], errors="coerce")
-        y = pd.to_numeric(subset[mag_col], errors="coerce")
+        y = pd.to_numeric(subset[actual_mag_col], errors="coerce")
         good = np.isfinite(x) & np.isfinite(y)
         if not bool(good.any()):
             continue
         err_vals = None
-        if err_col and err_col in subset.columns:
-            ev = pd.to_numeric(subset[err_col], errors="coerce")
+        if actual_err_col and actual_err_col in subset.columns:
+            ev = pd.to_numeric(subset[actual_err_col], errors="coerce")
             if np.isfinite(ev[good]).any():
                 err_vals = ev[good]
         fig.add_trace(
@@ -2083,19 +2465,15 @@ def _render_external_followup(payload: dict, candidate_id: str) -> list:
                 if atlas_path.exists():
                     try:
                         atlas_lc = pd.read_parquet(atlas_path)
-                        filt_col = "F" if "F" in atlas_lc.columns else ("filter" if "filter" in atlas_lc.columns else None)
-                        mag_col = "m" if "m" in atlas_lc.columns else ("mag" if "mag" in atlas_lc.columns else None)
-                        err_col = "dm" if "dm" in atlas_lc.columns else ("magerr" if "magerr" in atlas_lc.columns else "")
-                        if filt_col and mag_col:
-                            time_c = "MJD" if "MJD" in atlas_lc.columns else "mjd"
-                            atlas_fig = _build_external_lc_figure(
-                                atlas_lc, "ATLAS",
-                                [("c", mag_col, err_col, "#00ccff"),
-                                 ("o", mag_col, err_col, "#ff8c42")],
-                                time_col=time_c,
-                                filter_col=filt_col,
-                            )
-                            atlas_children.append(dcc.Graph(figure=atlas_fig, config={'displayModeBar': False}, style={'height': '250px'}))
+                        atlas_fig = _build_external_lc_figure(
+                            atlas_lc, "ATLAS",
+                            [("c", "mag", "mag_err", "#00ccff"),
+                             ("o", "mag", "mag_err", "#ff8c42")],
+                            time_col="mjd",
+                            filter_col="filter",
+                            source_name="atlas",
+                        )
+                        atlas_children.append(dcc.Graph(figure=atlas_fig, config={'displayModeBar': False}, style={'height': '250px'}))
                     except Exception:
                         pass
                 break
@@ -2160,11 +2538,12 @@ def _render_external_followup(payload: dict, candidate_id: str) -> list:
                         ztf_lc = pd.read_parquet(ztf_path)
                         ztf_fig = _build_external_lc_figure(
                             ztf_lc, "ZTF",
-                            [("zg", "mag", "magerr", "#44aa44"),
-                             ("zr", "mag", "magerr", "#dd4444"),
-                             ("zi", "mag", "magerr", "#8844cc")],
+                            [("zg", "mag", "mag_err", "#44aa44"),
+                             ("zr", "mag", "mag_err", "#dd4444"),
+                             ("zi", "mag", "mag_err", "#8844cc")],
                             time_col="mjd",
                             filter_col="band",
+                            source_name="ztf",
                         )
                         ztf_children.append(dcc.Graph(figure=ztf_fig, config={'displayModeBar': False}, style={'height': '250px'}))
                     except Exception:
@@ -2192,9 +2571,10 @@ def _render_external_followup(payload: dict, candidate_id: str) -> list:
                         gaia_lc = pd.read_parquet(gaia_path)
                         gaia_fig = _build_external_lc_figure(
                             gaia_lc, "Gaia Epoch",
-                            [("G", "mag", "mag_error", "#e8c547")],
+                            [("G", "mag", "mag_err", "#e8c547")],
                             time_col="time",
                             yaxis_label="G mag",
+                            source_name="gaia_epoch",
                         )
                         gaia_epoch_children.append(dcc.Graph(figure=gaia_fig, config={'displayModeBar': False}, style={'height': '250px'}))
                     except Exception:
@@ -2204,101 +2584,6 @@ def _render_external_followup(payload: dict, candidate_id: str) -> list:
     gaia_epoch_card = html.Div([
         html.Div('Gaia Epoch', style={'fontWeight': '600', 'marginBottom': '4px'}),
         *gaia_epoch_children,
-    ], style=card_style)
-
-    # TESS LC card
-    tess_children = [
-        html.Div(f"Sectors: {payload.get('tess_n_sectors', 'n/a')}", style={'fontSize': '11px'}),
-        html.Div(f"Total points: {payload.get('tess_total_points', 'n/a')}", style={'fontSize': '11px'}),
-        html.Div(f"Flux range: {payload.get('tess_flux_range', 'n/a')}", style={'fontSize': '11px'}),
-    ]
-    if run_dir is not None:
-        tess_idx = _index_external_lc_paths(str(run_dir.resolve()), "tess")
-        for key in lookup_keys:
-            path_str = tess_idx.get(str(key))
-            if path_str:
-                tess_path = Path(path_str)
-                if tess_path.exists():
-                    try:
-                        tess_lc = pd.read_parquet(tess_path)
-                        tess_fig = _build_external_lc_figure(
-                            tess_lc, "TESS",
-                            [("TESS", "flux", "flux_err", "#cc66ff")],
-                            time_col="time",
-                            yaxis_label="flux",
-                            reverse_y=False,
-                        )
-                        tess_children.append(dcc.Graph(figure=tess_fig, config={'displayModeBar': False}, style={'height': '250px'}))
-                    except Exception:
-                        pass
-                break
-
-    tess_card = html.Div([
-        html.Div('TESS', style={'fontWeight': '600', 'marginBottom': '4px'}),
-        *tess_children,
-    ], style=card_style)
-
-    # Kepler/K2 LC card
-    kepler_children = [
-        html.Div(f"Quarters/Campaigns: {payload.get('kepler_n_quarters', 'n/a')}", style={'fontSize': '11px'}),
-        html.Div(f"Total points: {payload.get('kepler_total_points', 'n/a')}", style={'fontSize': '11px'}),
-        html.Div(f"Flux range: {payload.get('kepler_flux_range', 'n/a')}", style={'fontSize': '11px'}),
-    ]
-    if run_dir is not None:
-        kepler_idx = _index_external_lc_paths(str(run_dir.resolve()), "kepler")
-        for key in lookup_keys:
-            path_str = kepler_idx.get(str(key))
-            if path_str:
-                kepler_path = Path(path_str)
-                if kepler_path.exists():
-                    try:
-                        kepler_lc = pd.read_parquet(kepler_path)
-                        kepler_fig = _build_external_lc_figure(
-                            kepler_lc, "Kepler/K2",
-                            [("Kepler", "flux", "flux_err", "#ffb6c1")],
-                            time_col="time",
-                            yaxis_label="flux",
-                            reverse_y=False,
-                        )
-                        kepler_children.append(dcc.Graph(figure=kepler_fig, config={'displayModeBar': False}, style={'height': '250px'}))
-                    except Exception:
-                        pass
-                break
-
-    kepler_card = html.Div([
-        html.Div('Kepler/K2', style={'fontWeight': '600', 'marginBottom': '4px'}),
-        *kepler_children,
-    ], style=card_style)
-
-    # AAVSO LC card
-    aavso_children = [
-        html.Div(f"Points: {payload.get('aavso_lc_n_points', 'n/a')}", style={'fontSize': '11px'}),
-    ]
-    if run_dir is not None:
-        aavso_idx = _index_external_lc_paths(str(run_dir.resolve()), "aavso")
-        for key in lookup_keys:
-            path_str = aavso_idx.get(str(key))
-            if path_str:
-                aavso_path = Path(path_str)
-                if aavso_path.exists():
-                    try:
-                        aavso_lc = pd.read_parquet(aavso_path)
-                        aavso_fig = _build_external_lc_figure(
-                            aavso_lc, "AAVSO",
-                            [("V", "mag", "mag_err", "#00ff00"),
-                             ("B", "mag", "mag_err", "#0000ff"),
-                             ("CV", "mag", "mag_err", "#aaaaaa")],
-                            time_col="mjd",
-                            filter_col="filter",
-                        )
-                        aavso_children.append(dcc.Graph(figure=aavso_fig, config={'displayModeBar': False}, style={'height': '250px'}))
-                    except Exception:
-                        pass
-                break
-
-    aavso_card = html.Div([
-        html.Div('AAVSO', style={'fontWeight': '600', 'marginBottom': '4px'}),
-        *aavso_children,
     ], style=card_style)
 
     # Pan-STARRS LC card
@@ -2316,13 +2601,14 @@ def _render_external_followup(payload: dict, candidate_id: str) -> list:
                         ps1_lc = pd.read_parquet(ps1_path)
                         ps1_fig = _build_external_lc_figure(
                             ps1_lc, "Pan-STARRS",
-                            [("g", "mag", "mag_err", "#44aa44"),
-                             ("r", "mag", "mag_err", "#dd4444"),
-                             ("i", "mag", "mag_err", "#8844cc"),
-                             ("z", "mag", "mag_err", "#ccaa44"),
-                             ("y", "mag", "mag_err", "#aaaa33")],
-                            time_col="obsTime",
+                            [("g_ps", "mag", "mag_err", "#44aa44"),
+                             ("r_ps", "mag", "mag_err", "#dd4444"),
+                             ("i_ps", "mag", "mag_err", "#8844cc"),
+                             ("z_ps", "mag", "mag_err", "#ccaa44"),
+                             ("y_ps", "mag", "mag_err", "#aaaa33")],
+                            time_col="mjd",
                             filter_col="filter",
+                            source_name="ps1",
                         )
                         ps1_children.append(dcc.Graph(figure=ps1_fig, config={'displayModeBar': False}, style={'height': '250px'}))
                     except Exception:
@@ -2349,8 +2635,9 @@ def _render_external_followup(payload: dict, candidate_id: str) -> list:
                         crts_lc = pd.read_parquet(crts_path)
                         crts_fig = _build_external_lc_figure(
                             crts_lc, "CRTS",
-                            [("CV", "mag", "magerr", "#bbbbbb")],
+                            [("CV", "mag", "mag_err", "#bbbbbb")],
                             time_col="mjd",
+                            source_name="crts",
                         )
                         crts_children.append(dcc.Graph(figure=crts_fig, config={'displayModeBar': False}, style={'height': '250px'}))
                     except Exception:
@@ -2362,7 +2649,7 @@ def _render_external_followup(payload: dict, candidate_id: str) -> list:
         *crts_children,
     ], style=card_style)
 
-    return [spectra_card, atlas_card, neowise_card, ztf_card, gaia_epoch_card, tess_card, kepler_card, aavso_card, ps1_card, crts_card]
+    return [spectra_card, atlas_card, neowise_card, ztf_card, gaia_epoch_card, ps1_card, crts_card]
 
 
 # ---- sidebar filter helpers ------------------------------------------------
@@ -2728,6 +3015,9 @@ def create_layout():
         # Data stores
         dcc.Store(id='queue-data'),
         dcc.Store(id='current-index', data=0),
+        dcc.Store(id='current-candidate-id', data=None),
+        dcc.Store(id='queue-size-store', data=0),
+        dcc.Store(id='queue-filter-hash-store', data=''),
         dcc.Store(id='current-score', data=None),
         dcc.Store(id='event-class-store', data='unclassified'),
         dcc.Store(id='pending-prefix', data=''),  # kept for callback compatibility
@@ -2738,14 +3028,14 @@ def create_layout():
         dcc.Store(id='import-trigger', data=0),  # triggers queue refresh after import
         dcc.Store(id='auto-run-pipeline-trigger', data=None),
         dcc.Store(id='pending-auto-run', data=None),
-        dcc.Store(id='activity-visible', data=False),  # collapsed by default
         dcc.Store(id='cone-results-data', data=None),  # cone search catalog rows
-        dcc.Store(id='plot-render-request', data={'nonce': 1, 'ts': 0.0, 'state': {'idx': 0, 'plot_mode': 'native', 'overlay_values': ['baseline', 'markers', 'residuals', 'filter_bad_cameras', 'diagnostics'], 'selected_cameras': [], 'preset': 'Diagnostics', 'theme': 'dark', 'residual_height': 0.28, 'baseline_opacity': 0.5}}),
+        dcc.Store(id='auto-period-cache', data={}, storage_type='session'),
+        dcc.Store(id='plot-render-request', data={'nonce': 1, 'ts': 0.0, 'state': {'idx': 0, 'plot_mode': 'native', 'overlay_values': list(PLOT_PRESETS['Diagnostics']['overlays']), 'selected_cameras': [], 'preset': 'Diagnostics', 'theme': DEFAULT_THEME, 'residual_height': DEFAULT_RESIDUAL_FRACTION, 'baseline_opacity': 0.5, 'external_source_view': 'all'}}),
         dcc.Store(id='plot-render-applied', data=0),
         dcc.Store(id='plot-defaults-initialized', data=False),
         dcc.Store(id='queue-source-path', data=''),
         dcc.Store(id='run-config-json-store', data=''),
-        dcc.Store(id='theme-mode-store', data='dark'),
+        dcc.Store(id='theme-mode-store', data=DEFAULT_THEME),
         dcc.Store(id='review-session-start', data=None, storage_type='session'),
         dcc.Store(id='metadata-resize-init', data=0),
         dcc.Store(id='status-resize-init', data=0),
@@ -2815,6 +3105,21 @@ def create_layout():
 
             html.Button('Refresh Queue [Shift+R]', id='refresh-btn', n_clicks=0,
                        style={'width': '100%', 'font-size': '11px'}, className='action-btn'),
+
+            html.Div('Open Existing', className='section-title', style={'margin-top': '8px'}),
+            dcc.Input(
+                id='candidate-search-query',
+                placeholder='candidate_id or ASAS-SN ID',
+                type='text',
+                style={**_inp_style, 'marginBottom': '4px'},
+            ),
+            html.Button(
+                'View Candidate',
+                id='candidate-search-btn',
+                n_clicks=0,
+                className='action-btn',
+                style={'width': '100%'},
+            ),
 
             html.Hr(),
 
@@ -2965,12 +3270,11 @@ def create_layout():
             dcc.RadioItems(
                 id='theme-mode',
                 options=[
-                    {'label': ' Dark', 'value': 'dark'},
-                    {'label': ' Dracula', 'value': 'dracula'},
-                    {'label': ' Nord', 'value': 'nord'},
-                    {'label': ' Gruvbox', 'value': 'gruvbox'},
+                    {'label': ' Black', 'value': 'black'},
+                    {'label': ' Gray', 'value': 'gray'},
+                    {'label': ' White', 'value': 'white'},
                 ],
-                value='dark',
+                value=DEFAULT_THEME,
                 style={'margin-bottom': '4px'},
             ),
 
@@ -2987,7 +3291,6 @@ def create_layout():
                 html.Span(id='pace-timer-display', style={'display': 'none'}),  # hidden placeholder
                 html.Div([
                     html.Span(id='header-asas-sn-id', className='item'),
-                    html.Span(id='header-path', className='item path'),
                     html.Span(id='header-gaia-id', className='item'),
                 ], className='header-key-info'),
                 html.Span(id='notification', className='notification'),
@@ -3028,7 +3331,7 @@ def create_layout():
                                         {'label': ' Event diagnostics', 'value': 'diagnostics'},
                                         {'label': ' Confidence colors', 'value': 'confidence'},
                                     ],
-                                    value=['raw', 'markers', 'residuals', 'filter_bad_cameras', 'diagnostics'],
+                                    value=list(PLOT_PRESETS['Diagnostics']['overlays']),
                                     inline=True,
                                 ),
                                 dcc.RadioItems(
@@ -3065,7 +3368,7 @@ def create_layout():
                                         min=0.15,
                                         max=0.85,
                                         step=0.01,
-                                        value=0.28,
+                                        value=DEFAULT_RESIDUAL_FRACTION,
                                         marks=None,
                                         tooltip={'placement': 'bottom', 'always_visible': False},
                                         updatemode='drag',
@@ -3074,6 +3377,19 @@ def create_layout():
                                 html.Button('Reset', id='plot-reset-btn', n_clicks=0, className='compact-btn'),
                                 html.Button('Export', id='export-plot', n_clicks=0, className='compact-btn'),
                                 html.Span(id='repro-badge', className='label-chip', style={'margin-left': '6px'}),
+                                html.Div([
+                                    html.Span('LC Source', style={'color': '#9fb6cb', 'font-size': '10px',
+                                                                  'white-space': 'nowrap', 'margin-right': '4px'}),
+                                    dbc.Select(
+                                        id='external-source-view',
+                                        options=EXTERNAL_SOURCE_VIEW_OPTIONS,
+                                        value='all',
+                                        size='sm',
+                                        style={'width': '140px', 'font-size': '10px', 'minWidth': '140px'},
+                                    ),
+                                ], style={'display': 'flex', 'alignItems': 'center', 'gap': '2px',
+                                          'margin-left': '10px', 'border-left': '1px solid #444',
+                                          'padding-left': '10px'}),
                                 html.Div([
                                     html.Span('Period', style={'color': '#9fb6cb', 'font-size': '10px',
                                                                'white-space': 'nowrap', 'margin-right': '4px'}),
@@ -3084,7 +3400,7 @@ def create_layout():
                                             {'label': 'PDM', 'value': 'pdm'},
                                             {'label': 'CE', 'value': 'ce'},
                                         ],
-                                        value='lsp',
+                                        value='pdm',
                                         clearable=False,
                                         style={'width': '85px', 'font-size': '10px'},
                                     ),
@@ -3118,9 +3434,14 @@ def create_layout():
                                 html.Div(id='pipeline-status-chips',
                                          style={'display': 'flex', 'gap': '6px', 'marginTop': '6px',
                                                 'flexWrap': 'wrap', 'fontSize': '10px'}),
-                                html.Button('Run All Missing', id='run-pipeline-btn', n_clicks=0,
-                                            className='compact-btn',
-                                            style={'fontSize': '10px', 'marginTop': '4px'}),
+                                html.Div([
+                                    html.Button('Run All Missing', id='run-pipeline-btn', n_clicks=0,
+                                                className='compact-btn',
+                                                style={'fontSize': '10px'}),
+                                    html.Button('Re-run Current', id='rerun-pipeline-btn', n_clicks=0,
+                                                className='compact-btn',
+                                                style={'fontSize': '10px'}),
+                                ], style={'display': 'flex', 'gap': '6px', 'marginTop': '4px'}),
                                 dcc.Loading(
                                     id='loading-pipeline', type='dot',
                                     children=html.Div(id='pipeline-run-status',
@@ -3139,7 +3460,7 @@ def create_layout():
                                     value=[],
                                     style={'display': 'inline-block', 'font-size': '11px', 'margin-right': '6px'},
                                 ),
-                                html.Button('Expand all', id='toggle-meta-all', n_clicks=0, className='compact-btn'),
+                                html.Button('Collapse all', id='toggle-meta-all', n_clicks=0, className='compact-btn'),
                             ], className='meta-toolbar'),
                             html.Div([
                                 html.Div(id='vetting-banner'),
@@ -3249,13 +3570,18 @@ def create_layout():
                 ),
             ], className='review-form'),
 
-            # Recent activity
             html.Div([
-                html.Div([
-                    html.Span('Activity', style={'color': '#0af', 'font-size': '10px', 'cursor': 'pointer'}),
-                ], id='activity-toggle', style={'padding': '2px 12px', 'background-color': '#0a0a0a', 'border-top': '1px solid #555', 'cursor': 'pointer', 'line-height': '1.2'}),
-                html.Div(id='recent-activity', style={'display': 'none'}),  # Hidden by default
-            ], style={'border-top': '1px solid #555'}),
+                html.Div(id='bottom-context-info', style={
+                    'padding': '5px 12px',
+                    'background-color': '#0a0a0a',
+                    'border-top': '1px solid #555',
+                    'color': '#9fb6cb',
+                    'font-size': '10px',
+                    'line-height': '1.35',
+                    'white-space': 'normal',
+                    'word-break': 'break-all',
+                }),
+            ]),
 
         ], className='content-area'),
 
@@ -3291,6 +3617,30 @@ app.clientside_callback(
     """,
     Output('candidate-start-time', 'data'),
     Input('current-index', 'data')
+)
+
+app.clientside_callback(
+    """
+    function(idx, queueData) {
+        if (!queueData || !Array.isArray(queueData.candidate_ids)) {
+            return [null, 0, ''];
+        }
+        var ids = queueData.candidate_ids || [];
+        var size = (typeof queueData.queue_size === 'number') ? queueData.queue_size : ids.length;
+        var filterHash = (typeof queueData.filter_hash === 'string') ? queueData.filter_hash : '';
+        var i = parseInt(idx == null ? 0 : idx, 10);
+        if (!Number.isFinite(i) || i < 0 || i >= ids.length) {
+            return [null, size, filterHash];
+        }
+        return [String(ids[i]), size, filterHash];
+    }
+    """,
+    [Output('current-candidate-id', 'data'),
+     Output('queue-size-store', 'data'),
+     Output('queue-filter-hash-store', 'data')],
+    [Input('current-index', 'data'),
+     Input('queue-data', 'data')],
+    prevent_initial_call=False
 )
 
 app.clientside_callback(
@@ -3405,15 +3755,26 @@ app.clientside_callback(
 app.clientside_callback(
     """
     function(_tick, currentTheme) {
+        var normalizeTheme = function(value) {
+            if (value === 'grey') {
+                return 'gray';
+            }
+            if (value === 'light') {
+                return 'white';
+            }
+            return ['black', 'gray', 'white'].includes(value) ? value : null;
+        };
         try {
             var saved = window.localStorage.getItem('malca.review.theme');
-            if (saved && ['dark', 'dracula', 'nord', 'gruvbox'].includes(saved)) {
-                return saved;
+            var normalizedSaved = normalizeTheme(saved);
+            if (normalizedSaved) {
+                return normalizedSaved;
             }
         } catch (e) {
             // ignore storage read failures
         }
-        return currentTheme || 'dark';
+        var normalizedCurrent = normalizeTheme(currentTheme);
+        return normalizedCurrent || 'black';
     }
     """,
     Output('theme-mode', 'value'),
@@ -3426,10 +3787,16 @@ app.clientside_callback(
 app.clientside_callback(
     """
     function(theme) {
-        var t = ['dark', 'dracula', 'nord', 'gruvbox'].includes(theme) ? theme : 'dark';
+        var chosen = ['black', 'gray', 'white'].includes(theme) ? theme : 'black';
+        var t = chosen;
+        if (chosen === 'gray') {
+            t = 'grey';
+        } else if (chosen === 'white') {
+            t = 'light';
+        }
         try {
             document.body.setAttribute('data-theme', t);
-            window.localStorage.setItem('malca.review.theme', t);
+            window.localStorage.setItem('malca.review.theme', chosen);
         } catch (e) {
             // ignore storage/document failures
         }
@@ -3445,16 +3812,17 @@ app.clientside_callback(
 # --- Sidebar plot prefs: save to localStorage on change ---
 app.clientside_callback(
     """
-    function(preset, overlays, mode, opacity, resHeight) {
+    function(preset, overlays, mode, opacity, resHeight, externalSource) {
         try {
             var obj = {
                 preset: preset,
                 overlays: overlays || [],
                 mode: mode,
                 opacity: opacity,
-                resHeight: resHeight
+                resHeight: resHeight,
+                externalSource: externalSource
             };
-            window.localStorage.setItem('malca.review.sidebar.plot.v1', JSON.stringify(obj));
+            window.localStorage.setItem('malca.review.sidebar.plot.v2', JSON.stringify(obj));
         } catch (e) {}
         return window.dash_clientside.no_update;
     }
@@ -3464,7 +3832,8 @@ app.clientside_callback(
      Input('plot-overlays', 'value'),
      Input('plot-mode', 'value'),
      Input('baseline-opacity-slider', 'value'),
-     Input('residual-height-slider', 'value')],
+     Input('residual-height-slider', 'value'),
+     Input('external-source-view', 'value')],
     prevent_initial_call=True,
 )
 
@@ -3472,11 +3841,11 @@ app.clientside_callback(
 # --- Sidebar plot prefs: load from localStorage on init ---
 app.clientside_callback(
     """
-    function(_tick, curPreset, curOverlays, curMode, curOpacity, curResHeight) {
+    function(_tick, curPreset, curOverlays, curMode, curOpacity, curResHeight, curExternalSource) {
         var nu = window.dash_clientside.no_update;
         try {
-            var raw = window.localStorage.getItem('malca.review.sidebar.plot.v1');
-            if (!raw) return [nu, nu, nu, nu, nu, false];
+            var raw = window.localStorage.getItem('malca.review.sidebar.plot.v2');
+            if (!raw) return [nu, nu, nu, nu, nu, nu, false];
             var obj = JSON.parse(raw);
             var preset = (obj.preset && ['Clean', 'Diagnostics', 'Full'].includes(obj.preset))
                 ? obj.preset : nu;
@@ -3484,9 +3853,12 @@ app.clientside_callback(
             var mode = (obj.mode && ['native', 'png'].includes(obj.mode)) ? obj.mode : nu;
             var opacity = (typeof obj.opacity === 'number') ? obj.opacity : nu;
             var resHeight = (typeof obj.resHeight === 'number') ? obj.resHeight : nu;
-            return [preset, overlays, mode, opacity, resHeight, true];
+            var allowedSources = ['all', 'asassn', 'atlas', 'ztf', 'gaia_epoch', 'ps1', 'crts'];
+            var externalSource = (obj.externalSource && allowedSources.includes(obj.externalSource))
+                ? obj.externalSource : nu;
+            return [preset, overlays, mode, opacity, resHeight, externalSource, true];
         } catch (e) {
-            return [nu, nu, nu, nu, nu, false];
+            return [nu, nu, nu, nu, nu, nu, false];
         }
     }
     """,
@@ -3495,13 +3867,15 @@ app.clientside_callback(
      Output('plot-mode', 'value', allow_duplicate=True),
      Output('baseline-opacity-slider', 'value', allow_duplicate=True),
      Output('residual-height-slider', 'value', allow_duplicate=True),
+     Output('external-source-view', 'value', allow_duplicate=True),
      Output('plot-defaults-initialized', 'data', allow_duplicate=True)],
     Input('keyboard-init', 'n_intervals'),
     [State('plot-preset', 'value'),
      State('plot-overlays', 'value'),
      State('plot-mode', 'value'),
      State('baseline-opacity-slider', 'value'),
-     State('residual-height-slider', 'value')],
+     State('residual-height-slider', 'value'),
+     State('external-source-view', 'value')],
     prevent_initial_call='initial_duplicate',
 )
 
@@ -3863,6 +4237,144 @@ def load_queue(refresh_clicks, import_trigger, queue_source_scope, *state_values
         return queue_data
 
 
+def _queue_candidate_id(queue_data, idx) -> str | None:
+    """Return the active candidate ID from queue-data dict storage."""
+    if not isinstance(queue_data, dict):
+        return None
+    candidate_ids = queue_data.get('candidate_ids') or []
+    if idx is None:
+        return None
+    try:
+        idx = int(idx)
+    except (TypeError, ValueError):
+        return None
+    if idx < 0 or idx >= len(candidate_ids):
+        return None
+    return str(candidate_ids[idx])
+
+
+def _has_external_period(payload: dict | None) -> bool:
+    """Whether a payload already has a catalog or validated pipeline period."""
+    payload = payload or {}
+    for keys in (
+        ("phase_period_days",),
+        ("period_consensus_days",),
+        ("vsx_period", "period_vsx_days"),
+        ("asassn_var_period", "period_asassn_var_days"),
+        ("gaia_eb_period", "period_gaia_eb_days"),
+        ("ztf_var_period", "period_ztf_periodic_days"),
+        ("catalog_period",),
+    ):
+        for key in keys:
+            try:
+                value = float(payload.get(key))
+            except (TypeError, ValueError):
+                continue
+            if np.isfinite(value) and value > 0:
+                return True
+    return False
+
+
+def _run_period_search_for_payload(
+    payload: dict,
+    *,
+    min_period: float,
+    max_period: float,
+    method: str,
+) -> tuple[dict | None, str]:
+    """Run a period search against the current candidate payload."""
+    plot_dir_path = Path(PLOT_DIR) if PLOT_DIR else Path('.')
+    lc_path = resolve_lightcurve_path(payload, plot_dir_path)
+    if lc_path is None:
+        return None, 'No LC file'
+
+    from malca.periodogram import ce_find_period, lsp_find_period, pdm_find_period
+
+    df, _, _ = _load_cleaned_df(
+        lc_path,
+        filter_bad_cameras=True,
+        scatter_ratio=2.5,
+        clean_max_error_absolute=1.0,
+        clean_max_error_sigma=5.0,
+    )
+    if df is None or df.empty:
+        return None, 'Empty LC'
+
+    baseline_cache_key = (str(lc_path.resolve()), (), True, 2.5, 1.0, 5.0)
+    band_dfs = _compute_baseline_bands(df, "per_camera_gp", baseline_cache_key)
+
+    resid_parts = []
+    for bdf in band_dfs.values():
+        if "resid" not in bdf.columns:
+            continue
+        mask = np.isfinite(bdf["JD"].to_numpy()) & np.isfinite(bdf["resid"].to_numpy())
+        resid_parts.append(bdf[mask][["JD", "resid"]])
+    if not resid_parts:
+        return None, 'No residuals'
+
+    resid_df = pd.concat(resid_parts, ignore_index=True)
+    times = resid_df['JD'].to_numpy()
+    values = resid_df['resid'].to_numpy()
+    if len(times) < 10:
+        return None, 'Too few points'
+
+    method = str(method or 'pdm').lower()
+    if method == 'pdm':
+        best_period, _, _ = pdm_find_period(times, values, min_period=min_period, max_period=max_period)
+        label = 'PDM'
+    elif method == 'ce':
+        best_period, _, _ = ce_find_period(times, values, min_period=min_period, max_period=max_period)
+        label = 'CE'
+    else:
+        best_period, _, _ = lsp_find_period(times, values, min_period=min_period, max_period=max_period)
+        label = 'LSP'
+
+    return {'best_period': float(best_period), 'method': label}, f'{label}: P={best_period:.5f} d'
+
+
+
+@app.callback(
+    [Output('queue-data', 'data', allow_duplicate=True),
+     Output('current-index', 'data', allow_duplicate=True),
+     Output('notification', 'children', allow_duplicate=True)],
+    [Input('candidate-search-btn', 'n_clicks'),
+     Input('candidate-search-query', 'n_submit')],
+    [State('candidate-search-query', 'value'),
+     State('queue-data', 'data')],
+    prevent_initial_call=True,
+)
+def open_existing_candidate(n_clicks, n_submit, query, queue_data):
+    """Jump to an existing candidate in the DB by candidate_id or ASAS-SN ID."""
+    _ = n_clicks, n_submit
+    query_text = str(query or '').strip()
+    if not query_text:
+        raise dash.exceptions.PreventUpdate
+
+    with closing(db_connect(Path(DB_PATH))) as conn:
+        row = conn.execute(
+            "SELECT candidate_id FROM candidates WHERE candidate_id = ? COLLATE NOCASE LIMIT 1",
+            (query_text,),
+        ).fetchone()
+        if row is None:
+            row = conn.execute(
+                "SELECT candidate_id FROM candidates WHERE asas_sn_id = ? COLLATE NOCASE LIMIT 1",
+                (query_text,),
+            ).fetchone()
+
+    if row is None:
+        return no_update, no_update, f"Candidate not found in DB: {query_text}"
+
+    candidate_id = str(row[0])
+    candidate_ids = list((queue_data or {}).get('candidate_ids') or []) if isinstance(queue_data, dict) else []
+    if candidate_id in candidate_ids:
+        return no_update, candidate_ids.index(candidate_id), f"Jumped to {candidate_id} in the current queue."
+
+    return (
+        {'candidate_ids': [candidate_id], 'queue_size': 1, 'filter_hash': f'view:{candidate_id}'},
+        0,
+        f"Viewing {candidate_id}. Refresh Queue to restore the filtered queue.",
+    )
+
 
 def _do_save(candidate_id, score, event_class, needs_followup, notes, event_type, *, increment_pass=False):
     """Shared save helper.  Auto-sets status; only increments review_pass on Done."""
@@ -3896,7 +4408,8 @@ def _do_save(candidate_id, score, event_class, needs_followup, notes, event_type
      Output('pending-prefix', 'data', allow_duplicate=True)],
     Input('keyboard-input', 'value'),
     [State('current-index', 'data'),
-     State('queue-data', 'data'),
+     State('queue-size-store', 'data'),
+     State('current-candidate-id', 'data'),
      State('current-score', 'data'),
      State('event-class-store', 'data'),
      State('pending-prefix', 'data'),
@@ -3904,25 +4417,24 @@ def _do_save(candidate_id, score, event_class, needs_followup, notes, event_type
      State('notes', 'value')],
     prevent_initial_call=True
 )
-def handle_keyboard(key_value, current_idx, queue_data, current_score,
+def handle_keyboard(key_value, current_idx, queue_size, current_candidate_id, current_score,
                     event_class, pending_prefix, needs_followup, notes):
     """Handle keyboard input."""
     NO = (no_update,) * 7  # shorthand for all-no_update
 
     key = _keyboard_key(key_value)
-    if not key or not queue_data:
+    if not key:
         return NO
 
     # Skip keys handled by other callbacks / keydown listener
     if key in ['?']:
         return NO
 
-    queue_size = queue_data['queue_size']
+    queue_size = int(queue_size or 0)
     if queue_size == 0:
         return no_update, "Queue is empty", *([no_update] * 5)
 
-    candidate_id = (queue_data['candidate_ids'][current_idx]
-                    if current_idx < queue_size else None)
+    candidate_id = str(current_candidate_id) if current_candidate_id else None
 
     # --- Direct class key shortcuts (single key toggles class) ---
     kl = key.lower()
@@ -3979,17 +4491,18 @@ def handle_keyboard(key_value, current_idx, queue_data, current_score,
      Input('plot-preset', 'value'),
      Input('residual-height-slider', 'value'),
      Input('theme-mode-store', 'data'),
-     Input('queue-data', 'data'),
+     Input('queue-size-store', 'data'),
      Input('baseline-opacity-slider', 'value'),
      Input('round-sigfigs', 'value'),
      Input('link-radius-arcsec', 'value'),
      Input('pdm-result-store', 'data'),
      Input('pdm-manual-period', 'value'),
-     Input('yaxis-mode', 'value')],
+     Input('yaxis-mode', 'value'),
+     Input('external-source-view', 'value')],
     State('plot-render-request', 'data'),
     prevent_initial_call=True,
 )
-def queue_plot_render_request(idx, plot_mode, overlay_values, selected_cameras, preset, residual_height, theme_mode, _queue_data, baseline_opacity, round_sigfigs, link_radius, pdm_result, pdm_manual_period, yaxis_mode, existing_request):
+def queue_plot_render_request(idx, plot_mode, overlay_values, selected_cameras, preset, residual_height, theme_mode, _queue_size, baseline_opacity, round_sigfigs, link_radius, pdm_result, pdm_manual_period, yaxis_mode, external_source_view, existing_request):
     """Debounced render request queue for native plot UX."""
     req = existing_request or {'nonce': 0, 'ts': 0.0}
     # Determine effective PDM period: manual override > PDM result
@@ -4012,32 +4525,36 @@ def queue_plot_render_request(idx, plot_mode, overlay_values, selected_cameras, 
             'overlay_values': list(overlay_values or []),
             'selected_cameras': list(selected_cameras or []),
             'preset': preset,
-            'residual_height': float(residual_height or 0.28),
-            'theme': theme_mode or 'dark',
+            'residual_height': float(residual_height if residual_height is not None else DEFAULT_RESIDUAL_FRACTION),
+            'theme': theme_mode or DEFAULT_THEME,
             'baseline_opacity': float(baseline_opacity if baseline_opacity is not None else 0.5),
             'round_sigfigs': bool(round_sigfigs and 'yes' in round_sigfigs),
             'link_radius': float(link_radius) if link_radius is not None else 10.0,
             'override_period': override_period,
             'yaxis_mode': str(yaxis_mode or 'mag'),
+            'external_source_view': str(external_source_view or 'all'),
         },
     }
 
 
 @app.callback(
     [Output('pdm-result-store', 'data'),
-     Output('pdm-result-label', 'children')],
+     Output('pdm-result-label', 'children'),
+     Output('auto-period-cache', 'data', allow_duplicate=True)],
     Input('pdm-run-btn', 'n_clicks'),
-    [State('current-index', 'data'),
-     State('queue-data', 'data'),
+    [State('current-candidate-id', 'data'),
      State('pdm-min-period', 'value'),
      State('pdm-max-period', 'value'),
-     State('period-method', 'value')],
+     State('period-method', 'value'),
+     State('auto-period-cache', 'data')],
     prevent_initial_call=True,
 )
-def run_period_search(n_clicks, idx, queue_data, min_period, max_period, method):
+def run_period_search(n_clicks, candidate_id, min_period, max_period, method, auto_period_cache):
     """Run period search (LSP/PDM/CE) on current candidate's light curve."""
-    if not n_clicks or not queue_data or queue_data['queue_size'] == 0:
+    if not n_clicks or not candidate_id:
         raise dash.exceptions.PreventUpdate
+    candidate_id = str(candidate_id)
+    auto_period_cache = dict(auto_period_cache or {})
     try:
         min_p = float(min_period) if min_period else 0.1
         max_p = float(max_period) if max_period else 100.0
@@ -4047,88 +4564,87 @@ def run_period_search(n_clicks, idx, queue_data, min_period, max_period, method)
         min_p = 0.01
     if max_p <= min_p:
         max_p = min_p + 1.0
-    method = str(method or 'lsp').lower()
+    method = str(method or 'pdm').lower()
 
-    idx = int(idx or 0)
-    if idx < 0 or idx >= queue_data['queue_size']:
-        raise dash.exceptions.PreventUpdate
-
-    candidate_id = queue_data['candidate_ids'][idx]
     with closing(db_connect(Path(DB_PATH))) as conn:
         payload = get_candidate_payload(conn, candidate_id)
 
-    plot_dir_path = Path(PLOT_DIR) if PLOT_DIR else Path('.')
-    lc_path = resolve_lightcurve_path(payload, plot_dir_path)
-    if lc_path is None:
-        return None, 'No LC file'
-
-    from malca.periodogram import lsp_find_period, pdm_find_period, ce_find_period
-    import numpy as np
-
-    # Use the same cleaned df + GP baseline residuals as the plot
-    df, _, _ = _load_cleaned_df(
-        lc_path,
-        filter_bad_cameras=True,
-        scatter_ratio=2.5,
-        clean_max_error_absolute=1.0,
-        clean_max_error_sigma=5.0,
-    )
-    if df is None or df.empty:
-        return None, 'Empty LC'
-
-    baseline_cache_key = (str(lc_path.resolve()), (), True, 2.5, 1.0, 5.0)
-    band_dfs = _compute_baseline_bands(df, "per_camera_gp", baseline_cache_key)
-
-    # Collect residuals from all bands
-    resid_parts = []
-    for bdf in band_dfs.values():
-        if "resid" in bdf.columns:
-            mask = np.isfinite(bdf["JD"].to_numpy()) & np.isfinite(bdf["resid"].to_numpy())
-            resid_parts.append(bdf[mask][["JD", "resid"]])
-    if not resid_parts:
-        return None, 'No residuals'
-    resid_df = pd.concat(resid_parts, ignore_index=True)
-    times = resid_df['JD'].to_numpy()
-    values = resid_df['resid'].to_numpy()
-    if len(times) < 10:
-        return None, 'Too few points'
-
-    if method == 'pdm':
-        best_period, _, _ = pdm_find_period(times, values, min_period=min_p, max_period=max_p)
-        label = method.upper()
-    elif method == 'ce':
-        best_period, _, _ = ce_find_period(times, values, min_period=min_p, max_period=max_p)
-        label = method.upper()
-    else:
-        best_period, _, _ = lsp_find_period(times, values, min_period=min_p, max_period=max_p)
-        label = 'LSP'
-
-    return {'best_period': best_period, 'method': label}, f'{label}: P={best_period:.5f} d'
+    result, label = _run_period_search_for_payload(payload, min_period=min_p, max_period=max_p, method=method)
+    auto_period_cache[candidate_id] = {'result': result, 'label': label}
+    return result, label, auto_period_cache
 
 
 @app.callback(
-    Output('pdm-result-store', 'data', allow_duplicate=True),
-    Input('current-index', 'data'),
+    [Output('pdm-result-store', 'data', allow_duplicate=True),
+     Output('pdm-result-label', 'children', allow_duplicate=True),
+     Output('pdm-manual-period', 'value', allow_duplicate=True),
+     Output('auto-period-cache', 'data', allow_duplicate=True)],
+    Input('current-candidate-id', 'data'),
+    [State('pdm-min-period', 'value'),
+     State('pdm-max-period', 'value'),
+     State('auto-period-cache', 'data')],
     prevent_initial_call=True,
 )
-def clear_pdm_on_navigate(_idx):
-    """Clear PDM result when navigating to a different candidate."""
-    return None
+def auto_period_on_navigate(candidate_id, min_period, max_period, auto_period_cache):
+    """Auto-run a first-pass PDM search for the currently viewed candidate."""
+    if candidate_id is None:
+        return None, '', None, no_update
+    candidate_id = str(candidate_id)
+    auto_period_cache = dict(auto_period_cache or {})
+
+    cached_entry = auto_period_cache.get(candidate_id)
+    if isinstance(cached_entry, dict):
+        return (
+            cached_entry.get('result'),
+            str(cached_entry.get('label', '')),
+            None,
+            no_update,
+        )
+
+    try:
+        min_p = float(min_period) if min_period else 0.1
+        max_p = float(max_period) if max_period else 100.0
+    except (TypeError, ValueError):
+        min_p, max_p = 0.1, 100.0
+    if min_p <= 0:
+        min_p = 0.01
+    if max_p <= min_p:
+        max_p = min_p + 1.0
+
+    with closing(db_connect(Path(DB_PATH))) as conn:
+        payload = get_candidate_payload(conn, candidate_id)
+
+    if _has_external_period(payload):
+        return None, 'Catalog/pipeline period', None, no_update
+
+    result, label = _run_period_search_for_payload(
+        payload,
+        min_period=min_p,
+        max_period=max_p,
+        method='pdm',
+    )
+    display_label = f'Auto {label}' if result is not None else f'Auto search: {label}'
+    if result is None:
+        auto_period_cache[candidate_id] = {'result': None, 'label': display_label}
+        return None, display_label, None, auto_period_cache
+    result['auto'] = True
+    auto_period_cache[candidate_id] = {'result': result, 'label': display_label}
+    return result, display_label, None, auto_period_cache
 
 
 @app.callback(
     [Output('plot-preset', 'value'),
      Output('plot-overlays', 'value', allow_duplicate=True),
      Output('plot-defaults-initialized', 'data')],
-    Input('queue-data', 'data'),
+    Input('queue-size-store', 'data'),
     State('plot-defaults-initialized', 'data'),
     prevent_initial_call=True,
 )
-def initialize_plot_defaults_from_run_params(queue_data, initialized):
+def initialize_plot_defaults_from_run_params(queue_size, initialized):
     """Initialize native plot defaults from run_params once per session."""
     if initialized:
         raise dash.exceptions.PreventUpdate
-    if not queue_data:
+    if int(queue_size or 0) <= 0:
         raise dash.exceptions.PreventUpdate
 
     run_params = _load_run_params_for_plot_dir(str(PLOT_DIR) if PLOT_DIR else None)
@@ -4138,7 +4654,8 @@ def initialize_plot_defaults_from_run_params(queue_data, initialized):
 
 @app.callback(
     [Output('plot-overlays', 'value'),
-     Output('camera-checklist', 'value', allow_duplicate=True)],
+     Output('camera-checklist', 'value', allow_duplicate=True),
+     Output('external-source-view', 'value', allow_duplicate=True)],
     [Input('plot-preset', 'value'),
      Input('plot-reset-btn', 'n_clicks'),
      Input('cams-all-btn', 'n_clicks'),
@@ -4161,15 +4678,15 @@ def update_plot_controls(preset, n_reset, n_all, n_clear, n_invert, camera_optio
         cfg = PLOT_PRESETS.get(preset or 'Diagnostics', PLOT_PRESETS['Diagnostics'])
         new_overlays = list(cfg['overlays'])
         new_cams = list(cams)
-        return new_overlays, new_cams
+        return new_overlays, new_cams, 'all'
     if trig == 'cams-all-btn':
-        return overlays, list(cams)
+        return overlays, list(cams), no_update
     if trig == 'cams-clear-btn':
-        return overlays, []
+        return overlays, [], no_update
     if trig == 'cams-invert-btn':
         inv = [c for c in cams if c not in set(selected)]
-        return overlays, inv
-    return no_update, no_update
+        return overlays, inv, no_update
+    return no_update, no_update, no_update
 
 
 @app.callback(
@@ -4191,10 +4708,11 @@ def update_plot_controls(preset, n_reset, n_all, n_clear, n_invert, camera_optio
      Output('plot-render-applied', 'data')],
     Input('plot-render-request', 'data'),
     [State('plot-render-applied', 'data'),
-     State('queue-data', 'data')],
+     State('current-candidate-id', 'data'),
+     State('queue-size-store', 'data')],
     prevent_initial_call=False,
 )
-def update_display(render_request, applied_nonce, queue_data):
+def update_display(render_request, applied_nonce, current_candidate_id, queue_size_data):
     """Render candidate display with debounce and stable uirevision behavior."""
     req = render_request or {'nonce': 0, 'ts': 0.0, 'state': {}}
     nonce = int(req.get('nonce', 0))
@@ -4207,12 +4725,13 @@ def update_display(render_request, applied_nonce, queue_data):
     plot_mode = state.get('plot_mode', 'native')
     overlays = set(state.get('overlay_values') or [])
     selected_cameras = list(state.get('selected_cameras') or [])
-    theme_mode = str(state.get('theme', 'dark') or 'dark')
-    residual_height = float(state.get('residual_height', 0.28) or 0.28)
+    theme_mode = str(state.get('theme', DEFAULT_THEME) or DEFAULT_THEME)
+    residual_height = float(state.get('residual_height', DEFAULT_RESIDUAL_FRACTION) or DEFAULT_RESIDUAL_FRACTION)
     baseline_opacity = float(state.get('baseline_opacity', 0.5) if state.get('baseline_opacity') is not None else 0.5)
     round_sigfigs = bool(state.get('round_sigfigs', False))
     link_radius = float(state.get('link_radius', 10.0))
     yaxis_mode = str(state.get('yaxis_mode', 'mag') or 'mag')
+    external_source_view = str(state.get('external_source_view', 'all') or 'all')
     override_period = state.get('override_period')
     if override_period is not None:
         try:
@@ -4231,14 +4750,14 @@ def update_display(render_request, applied_nonce, queue_data):
         },
     }
 
-    if not queue_data or queue_data['queue_size'] == 0:
+    queue_size = int(queue_size_data or 0)
+    if queue_size <= 0 or not current_candidate_id:
         return '', 'No candidates in queue', _render_metadata_health(None, context_msg='Queue is empty.'), _render_vetting_banner(None, radius_arcsec=link_radius), '[0/0]', empty_fig, {'display': 'block', 'width': '100%', 'height': '100%'}, {'display': 'none'}, [], [], _render_plot_status_panel('error', 'No candidates in queue.', []), _render_camera_diag_panel({}, []), _render_run_config_panel(None, None, ['Queue is empty']), _render_repro_badge(None, ['Queue is empty']), '', nonce
 
-    queue_size = queue_data['queue_size']
     if idx < 0 or idx >= queue_size:
         return '', 'Invalid index', _render_metadata_health(None, context_msg='Invalid queue index.'), _render_vetting_banner(None, radius_arcsec=link_radius), f'[{idx}/{queue_size}]', empty_fig, {'display': 'block', 'width': '100%', 'height': '100%'}, {'display': 'none'}, [], [], _render_plot_status_panel('error', 'Invalid queue index.', []), _render_camera_diag_panel({}, []), _render_run_config_panel(None, None, ['Invalid queue index']), _render_repro_badge(None, ['Invalid queue index']), '', nonce
 
-    candidate_id = queue_data['candidate_ids'][idx]
+    candidate_id = str(current_candidate_id)
     with closing(db_connect(Path(DB_PATH))) as conn:
         payload = get_candidate_payload(conn, candidate_id)
 
@@ -4255,17 +4774,13 @@ def update_display(render_request, applied_nonce, queue_data):
     grouped = extract_review_metadata_grouped(payload, round_sigfigs=round_sigfigs)
     metadata_health = _render_metadata_health(grouped)
     vetting_banner = _render_vetting_banner(payload, radius_arcsec=link_radius)
-    label_color = '#888'
-    value_color = '#e0e0e0'
     grid_items = []
     for group_name, items in grouped:
         field_divs = [
             html.Div([
-                html.Span(label, style={'color': label_color, 'flex-shrink': '0'}),
-                html.Span(str(value), style={'color': value_color, 'text-align': 'right',
-                                              'word-break': 'break-word', 'white-space': 'normal'}),
-            ], style={'display': 'flex', 'justify-content': 'space-between', 'gap': '8px',
-                      'padding': '2px 0', 'border-bottom': '1px solid #1a1a1a'})
+                html.Span(label, className='meta-field-label'),
+                html.Span(str(value), className='meta-field-value'),
+            ], className='meta-field-row')
             for label, value in items
         ]
 
@@ -4334,23 +4849,31 @@ def update_display(render_request, applied_nonce, queue_data):
     mismatch_warnings = _run_config_mismatch_warnings(run_params if run_params else None, overlays)
     if run_params_status != 'loaded':
         mismatch_warnings.append(run_params_msg)
-    uirevision_key = f"{candidate_id}|{','.join(sorted(str(c) for c in selected_cameras))}|{theme_mode}|{residual_height:.3f}|{baseline_opacity:.2f}|{yaxis_mode}"
+    uirevision_key = f"{candidate_id}|{','.join(sorted(str(c) for c in selected_cameras))}|{theme_mode}|{residual_height:.3f}|{baseline_opacity:.2f}|{yaxis_mode}|{external_source_view}"
 
     # Discover external LC parquets for this candidate
     ext_lcs: dict[str, Path] | None = None
     run_dir = _resolve_run_dir_from_plot_dir(PLOT_DIR)
+    lk = _candidate_lookup_keys(candidate_id, payload)
+    found: dict[str, Path] = {}
+    search_roots: list[Path] = []
     if run_dir is not None:
-        lk = _candidate_lookup_keys(candidate_id, payload)
-        found: dict[str, Path] = {}
-        for prefix in ("atlas", "ztf", "gaia_epoch", "tess"):
-            idx_map = _index_external_lc_paths(str(run_dir.resolve()), prefix)
+        search_roots.append(run_dir / "results")
+    default_results_root = Path(__file__).resolve().parents[2] / "output" / "results"
+    if default_results_root not in search_roots:
+        search_roots.append(default_results_root)
+    for prefix in ("atlas", "ztf", "gaia_epoch", "ps1", "crts"):
+        for root in search_roots:
+            idx_map = _index_external_lc_paths_from_root(str(root.resolve()), prefix)
             for key in lk:
                 p = idx_map.get(str(key))
                 if p:
                     found[prefix] = Path(p)
                     break
-        if found:
-            ext_lcs = found
+            if prefix in found:
+                break
+    if found:
+        ext_lcs = found
 
     try:
         native = build_interactive_lightcurve_figure(
@@ -4373,6 +4896,7 @@ def update_display(render_request, applied_nonce, queue_data):
             baseline_opacity=baseline_opacity,
             yaxis_mode=yaxis_mode,
             external_lcs=ext_lcs,
+            external_source_view=external_source_view,
         )
     except Exception as exc:
         import traceback
@@ -4461,11 +4985,10 @@ def update_display(render_request, applied_nonce, queue_data):
 @app.callback(
     Output('external-followup-panel', 'children'),
     [Input('external-followup-details', 'open'),
-     Input('current-index', 'data'),
-     Input('queue-data', 'data')],
+     Input('current-candidate-id', 'data')],
     prevent_initial_call=False,
 )
-def update_external_followup_panel(is_open, idx, queue_data):
+def update_external_followup_panel(is_open, candidate_id):
     """Lazy-load external follow-up artifacts only when panel is open."""
     if not is_open:
         return html.Div(
@@ -4473,49 +4996,49 @@ def update_external_followup_panel(is_open, idx, queue_data):
             style={'font-size': '11px', 'color': '#8a99a8'}
         )
 
-    if not queue_data or not queue_data.get('candidate_ids'):
+    if not candidate_id:
         return html.Div("No candidates loaded.", style={'font-size': '11px', 'color': '#c77'})
-
-    candidate_ids = queue_data.get('candidate_ids', [])
-    if idx is None or idx < 0 or idx >= len(candidate_ids):
-        return html.Div("Invalid candidate index.", style={'font-size': '11px', 'color': '#c77'})
-
-    candidate_id = str(candidate_ids[idx])
     with closing(db_connect(Path(DB_PATH))) as conn:
-        payload = get_candidate_payload(conn, candidate_id) or {}
+        payload = get_candidate_payload(conn, str(candidate_id)) or {}
 
-    return _render_external_followup(payload, candidate_id)
+    return _render_external_followup(payload, str(candidate_id))
 
 
 @app.callback(
     [Output('header-asas-sn-id', 'children'),
-     Output('header-path', 'children'),
-     Output('header-gaia-id', 'children')],
-    [Input('current-index', 'data'),
-     Input('queue-data', 'data')],
+     Output('header-gaia-id', 'children'),
+     Output('bottom-context-info', 'children')],
+    [Input('current-candidate-id', 'data'),
+     Input('queue-size-store', 'data'),
+     Input('queue-filter-hash-store', 'data'),
+     Input('import-path', 'value'),
+     Input('queue-source-path', 'data')],
     prevent_initial_call=False,
 )
-def update_header_key_info(idx, queue_data):
-    """Render key candidate identifiers in the top header."""
-    if not queue_data or not queue_data.get('candidate_ids'):
-        return 'ASAS-SN ID: -', 'Path: -', 'Gaia ID: -'
+def update_header_key_info(candidate_id, queue_size, queue_filter_hash, import_path, queue_source_path):
+    """Render short identifiers in the header and long context in the bottom panel."""
+    queue_label = str(import_path) if import_path else 'all candidates'
+    filter_hash = str(queue_filter_hash or '')
+    if filter_hash.startswith('view:') or filter_hash.startswith('fetch:'):
+        queue_label = filter_hash.split(':', 1)[1]
+    elif queue_source_path:
+        queue_label = str(queue_source_path)
 
-    candidate_ids = queue_data.get('candidate_ids', [])
-    if idx is None or idx < 0 or idx >= len(candidate_ids):
-        return 'ASAS-SN ID: -', 'Path: -', 'Gaia ID: -'
+    if int(queue_size or 0) <= 0 or not candidate_id:
+        bottom_context = f"Path: - | DB: {DB_PATH} | Queue: {queue_label}"
+        return 'ASAS-SN ID: -', 'Gaia ID: -', bottom_context
 
-    candidate_id = candidate_ids[idx]
     with closing(db_connect(Path(DB_PATH))) as conn:
-        payload = get_candidate_payload(conn, candidate_id) or {}
+        payload = get_candidate_payload(conn, str(candidate_id)) or {}
     asas_sn_id = payload.get('asas_sn_id')
     gaia_id = payload.get('gaia_id')
     lc_path = payload.get('path')
 
     asas_text = f"ASAS-SN ID: {asas_sn_id}" if asas_sn_id else f"ASAS-SN ID: {candidate_id}"
-    path_text = f"Path: {lc_path}" if lc_path else 'Path: -'
     gaia_fmt = _format_large_integer_like_display(gaia_id)
     gaia_text = f"Gaia ID: {gaia_fmt}" if gaia_fmt else 'Gaia ID: -'
-    return asas_text, path_text, gaia_text
+    bottom_context = f"Path: {lc_path if lc_path else '-'} | DB: {DB_PATH} | Queue: {queue_label}"
+    return asas_text, gaia_text, bottom_context
 
 
 @app.callback(
@@ -4526,10 +5049,10 @@ def update_header_key_info(idx, queue_data):
      State('plot-mode', 'value'),
      State('plot-image', 'src'),
      State('current-index', 'data'),
-     State('queue-data', 'data')],
+     State('current-candidate-id', 'data')],
     prevent_initial_call=True,
 )
-def export_active_plot(n_clicks, figure, plot_mode, plot_src, idx, queue_data):
+def export_active_plot(n_clicks, figure, plot_mode, plot_src, idx, candidate_id):
     """Export the currently shown plot.
 
     Native mode exports PDF with enhanced metadata and high resolution.
@@ -4547,13 +5070,10 @@ def export_active_plot(n_clicks, figure, plot_mode, plot_src, idx, queue_data):
         # Get ASAS-SN ID for filename
         asas_sn_id = 'unknown'
         try:
-            if queue_data and idx is not None:
-                dfq = pd.DataFrame(queue_data)
-                if int(idx) < len(dfq):
-                    cid = dfq.iloc[int(idx)]['candidate_id']
-                    with closing(db_connect(Path(DB_PATH))) as conn:
-                        payload = get_candidate_payload(conn, cid)
-                    asas_sn_id = str(payload.get('asas_sn_id') or payload.get('candidate_id') or 'unknown')
+            if candidate_id:
+                with closing(db_connect(Path(DB_PATH))) as conn:
+                    payload = get_candidate_payload(conn, str(candidate_id))
+                asas_sn_id = str(payload.get('asas_sn_id') or payload.get('candidate_id') or 'unknown')
         except Exception:
             pass
 
@@ -4663,18 +5183,17 @@ app.clientside_callback(
      Output('review-pass-store', 'data'),
      Output('notes', 'value'),
      Output('current-score', 'data')],
-    Input('current-index', 'data'),
-    State('queue-data', 'data'),
+    Input('current-candidate-id', 'data'),
+    State('queue-size-store', 'data'),
     prevent_initial_call=False
 )
-def load_review_form(idx, queue_data):
+def load_review_form(candidate_id, queue_size):
     """Load existing review for current candidate into stores."""
-    if not queue_data or queue_data['queue_size'] == 0:
+    if not candidate_id or int(queue_size or 0) == 0:
         return 'unclassified', False, 1, '', None
 
-    candidate_id = queue_data['candidate_ids'][idx]
     with closing(db_connect(Path(DB_PATH))) as conn:
-        review = get_review(conn, candidate_id)
+        review = get_review(conn, str(candidate_id))
 
     # Coerce legacy/unknown classes into the current tag set.
     allowed_classes = {'unclassified'} | set(CLASS_KEY_MAP.values())
@@ -4697,8 +5216,8 @@ def load_review_form(idx, queue_data):
       Output('notification', 'children', allow_duplicate=True),
       Output('review-pass-store', 'data', allow_duplicate=True)],
      [Input(f'score-{i}', 'n_clicks') for i in range(1, 5)],
-     [State('current-index', 'data'),
-      State('queue-data', 'data'),
+     [State('queue-size-store', 'data'),
+      State('current-candidate-id', 'data'),
       State('event-class-store', 'data'),
       State('needs-followup-store', 'data'),
       State('notes', 'value')],
@@ -4706,13 +5225,10 @@ def load_review_form(idx, queue_data):
 )
 def handle_score_clicks(*args):
     """Handle score button clicks."""
-    idx, queue_data, event_class, needs_followup, notes = args[-5:]
+    queue_size, candidate_id, event_class, needs_followup, notes = args[-5:]
 
-    if not queue_data or not queue_data.get('candidate_ids'):
+    if int(queue_size or 0) <= 0 or not candidate_id:
         return no_update, "Queue is empty", no_update
-
-    if idx >= len(queue_data['candidate_ids']):
-        return no_update, "Invalid candidate index", no_update
 
     ctx = callback_context
     if not ctx.triggered:
@@ -4721,9 +5237,8 @@ def handle_score_clicks(*args):
     button_id = ctx.triggered[0]['prop_id'].split('.')[0]
     score = int(button_id.split('-')[1])
 
-    candidate_id = queue_data['candidate_ids'][idx]
     new_pass, _ = _do_save(
-        candidate_id, score, event_class, needs_followup, notes, 'button',
+        str(candidate_id), score, event_class, needs_followup, notes, 'button',
     )
 
     return score, f"✓ Confidence: {score}", new_pass
@@ -4734,26 +5249,22 @@ def handle_score_clicks(*args):
     [Output('notification', 'children', allow_duplicate=True),
      Output('review-pass-store', 'data', allow_duplicate=True)],
     Input('save-btn', 'n_clicks'),
-    [State('current-index', 'data'),
-     State('queue-data', 'data'),
+    [State('queue-size-store', 'data'),
+     State('current-candidate-id', 'data'),
      State('current-score', 'data'),
      State('event-class-store', 'data'),
      State('needs-followup-store', 'data'),
      State('notes', 'value')],
     prevent_initial_call=True
 )
-def save_review_callback(n_clicks, idx, queue_data, score,
+def save_review_callback(n_clicks, queue_size, candidate_id, score,
                          event_class, needs_followup, notes):
     """Save review."""
-    if not n_clicks or not queue_data or not queue_data.get('candidate_ids'):
+    if not n_clicks or int(queue_size or 0) <= 0 or not candidate_id:
         return no_update, no_update
 
-    if idx >= len(queue_data['candidate_ids']):
-        return "Invalid candidate index", no_update
-
-    candidate_id = queue_data['candidate_ids'][idx]
     new_pass, _ = _do_save(
-        candidate_id, score, event_class, needs_followup, notes, 'save_button',
+        str(candidate_id), score, event_class, needs_followup, notes, 'save_button',
     )
 
     return "✓ Saved", new_pass
@@ -4784,21 +5295,19 @@ def back_callback(n_clicks, idx):
      Output('review-pass-store', 'data', allow_duplicate=True)],
     Input('done-btn', 'n_clicks'),
     [State('current-index', 'data'),
-     State('queue-data', 'data'),
+     State('queue-size-store', 'data'),
+     State('current-candidate-id', 'data'),
      State('current-score', 'data'),
      State('event-class-store', 'data'),
      State('needs-followup-store', 'data'),
      State('notes', 'value')],
     prevent_initial_call=True
 )
-def done_callback(n_clicks, idx, queue_data, score,
+def done_callback(n_clicks, idx, queue_size, candidate_id, score,
                   event_class, needs_followup, notes):
     """Save and go to next."""
-    if not n_clicks or not queue_data or not queue_data.get('candidate_ids'):
+    if not n_clicks or int(queue_size or 0) <= 0 or not candidate_id:
         return no_update, no_update, no_update
-
-    if idx >= len(queue_data['candidate_ids']):
-        return no_update, "Invalid candidate index", no_update
 
     if score is None:
         return no_update, "⚠ Confidence required", no_update
@@ -4806,13 +5315,12 @@ def done_callback(n_clicks, idx, queue_data, score,
     if not event_class or event_class == 'unclassified':
         return no_update, "⚠ Class required", no_update
 
-    candidate_id = queue_data['candidate_ids'][idx]
     new_pass, _ = _do_save(
-        candidate_id, score, event_class, needs_followup, notes, 'done_button',
+        str(candidate_id), score, event_class, needs_followup, notes, 'done_button',
         increment_pass=True,
     )
 
-    queue_size = queue_data['queue_size']
+    queue_size = int(queue_size or 0)
     new_idx = min(idx + 1, queue_size - 1)
 
     return new_idx, "✓ Saved + Next →", new_pass
@@ -4934,16 +5442,12 @@ def _format_hms(total_seconds: float) -> str:
 
 @app.callback(
     Output('review-session-start', 'data'),
-    Input('queue-data', 'data'),
+    Input('queue-filter-hash-store', 'data'),
     State('review-session-start', 'data'),
     prevent_initial_call=False,
 )
-def sync_review_session_start(queue_data, session_start):
+def sync_review_session_start(queue_hash, session_start):
     """Reset session-timer origin when the active queue changes."""
-    queue_hash = None
-    if isinstance(queue_data, dict):
-        queue_hash = queue_data.get('filter_hash')
-
     now = time.time()
     if not isinstance(session_start, dict):
         return {'ts': now, 'filter_hash': queue_hash}
@@ -4961,22 +5465,20 @@ def sync_review_session_start(queue_data, session_start):
 @app.callback(
     Output('review-progress-indicator', 'children'),
     Input('review-metrics-interval', 'n_intervals'),
-    Input('queue-data', 'data'),
+    Input('queue-size-store', 'data'),
     Input('current-index', 'data'),
     Input('review-pass-store', 'data'),
     State('review-session-start', 'data'),
     prevent_initial_call=False,
 )
-def update_review_progress_indicator(_tick, queue_data, _idx, _review_pass, session_start):
+def update_review_progress_indicator(_tick, queue_size, _idx, _review_pass, session_start):
     """Render reviewed/total progress with session pace + elapsed timer."""
     _ = _tick, _idx, _review_pass
 
     with closing(db_connect(Path(DB_PATH))) as conn:
         reviewed, total = count_progress(conn)
 
-    queue_size = 0
-    if isinstance(queue_data, dict):
-        queue_size = int(queue_data.get('queue_size') or 0)
+    queue_size = int(queue_size or 0)
 
     if total <= 0:
         total = queue_size
@@ -5032,80 +5534,19 @@ def update_pass_indicator(review_pass):
     Output('status-indicator', 'children'),
     Input('needs-followup-store', 'data'),
     Input('current-score', 'data'),
-    State('current-index', 'data'),
-    State('queue-data', 'data'),
+    [State('current-candidate-id', 'data'),
+     State('queue-size-store', 'data')],
     prevent_initial_call=False
 )
-def update_status_indicator(needs_followup, score, idx, queue_data):
+def update_status_indicator(needs_followup, score, candidate_id, queue_size):
     """Show current effective status."""
-    if not queue_data or queue_data['queue_size'] == 0:
+    if not candidate_id or int(queue_size or 0) == 0:
         return "Status: —"
-    candidate_id = queue_data['candidate_ids'][idx]
     with closing(db_connect(Path(DB_PATH))) as conn:
-        review = get_review(conn, candidate_id)
+        review = get_review(conn, str(candidate_id))
     status = review.get('status', 'unreviewed')
     color = '#0f0' if status == 'reviewed' else '#f80' if status == 'needs_followup' else '#888'
     return html.Span(f"Status: {status}", style={'color': color})
-
-
-# Recent activity
-@app.callback(
-    Output('recent-activity', 'children'),
-    Input('current-index', 'data'),
-    prevent_initial_call=False
-)
-def update_recent_activity(idx):
-    """Update recent activity display."""
-    with closing(db_connect(Path(DB_PATH))) as conn:
-        recent = recent_history(conn, limit=5)
-
-    if recent.empty:
-        return "No recent activity"
-
-    lines = []
-    for _, row in recent.iterrows():
-        lines.append(f"• {row['candidate_id']} - {row['event_type']} ({row['created_at']})")
-
-    return html.Div([html.Div(line, style={'margin': '2px 0'}) for line in lines])
-
-
-# Toggle recent activity
-@app.callback(
-    [Output('recent-activity', 'style'),
-     Output('activity-visible', 'data')],
-    [Input('activity-toggle', 'n_clicks'),
-     Input('keyboard-input', 'value')],
-    State('activity-visible', 'data'),
-    prevent_initial_call=True
-)
-def toggle_activity(n_clicks, key_value, is_visible):
-    """Toggle recent activity visibility."""
-    ctx = callback_context
-    if not ctx.triggered:
-        return no_update, no_update
-
-    trigger = ctx.triggered[0]['prop_id']
-
-    # Check if 'A' key was pressed
-    key = _keyboard_key(key_value)
-    if 'keyboard-input' in trigger and key.lower() == 'a':
-        is_visible = not is_visible
-    # Check if toggle was clicked
-    elif 'activity-toggle' in trigger and n_clicks:
-        is_visible = not is_visible
-    else:
-        return no_update, no_update
-
-    new_state = is_visible
-    style = {
-        'display': 'block',
-        'padding': '5px 12px',
-        'background-color': '#0a0a0a',
-        'color': '#aaa',
-        'font-size': '10px'
-    } if new_state else {'display': 'none'}
-    return style, new_state
-
 
 # Auto-populate import candidates from run directory inferred via plot directory
 @app.callback(
@@ -5278,11 +5719,11 @@ def _fetch_candidate_impl(set_progress, n_clicks, fetch_type, fetch_query, fetch
                 pass
 
     if not n_clicks or not fetch_query:
-        return no_update, no_update, no_update, no_update
+        return no_update, no_update, no_update, no_update, no_update, no_update, no_update
 
     query = fetch_query.strip()
     if not query:
-        return "✗ Query cannot be empty", no_update, no_update, no_update
+        return "✗ Query cannot be empty", no_update, no_update, no_update, no_update, no_update, no_update
 
     try:
         if fetch_type == 'coords':
@@ -5290,12 +5731,12 @@ def _fetch_candidate_impl(set_progress, n_clicks, fetch_type, fetch_query, fetch
             from malca.review.fetch import fetch_cone_search
             parts = query.replace(',', ' ').split()
             if len(parts) < 2:
-                return "✗ Enter RA and Dec separated by space", no_update, no_update, no_update
+                return "✗ Enter RA and Dec separated by space", no_update, no_update, no_update, no_update, no_update, no_update
             ra, dec = float(parts[0]), float(parts[1])
             radius = float(parts[2]) if len(parts) > 2 else 5.0
             catalog_df = fetch_cone_search(ra, dec, radius_arcsec=radius)
             if catalog_df.empty:
-                return "✗ No sources found in cone search", no_update, '', no_update
+                return "✗ No sources found in cone search", no_update, no_update, '', no_update, no_update, no_update
             show_cols = [c for c in ['asas_sn_id', 'ra_deg', 'dec_deg', 'gaia_id', 'mean_vmag']
                          if c in catalog_df.columns]
             if not show_cols:
@@ -5319,8 +5760,11 @@ def _fetch_candidate_impl(set_progress, n_clicks, fetch_type, fetch_query, fetch
             return (
                 f"Found {n_found} source(s). Click a row to fetch its LC.",
                 no_update,
+                no_update,
                 table,
                 cone_data,
+                no_update,
+                no_update,
             )
 
         progress("Fetching light curve...")
@@ -5332,7 +5776,7 @@ def _fetch_candidate_impl(set_progress, n_clicks, fetch_type, fetch_query, fetch
             df, lc_path = fetch_and_analyze_by_id(query, run_stats=True)
 
         if df is None or df.empty:
-            return f"✗ No data for {query}", no_update, no_update, '', no_update
+            return f"✗ No data for {query}", no_update, no_update, '', no_update, no_update, no_update
 
         progress("Importing basic light curve...")
         
@@ -5346,18 +5790,28 @@ def _fetch_candidate_impl(set_progress, n_clicks, fetch_type, fetch_query, fetch
             )
 
         cid = str(df.iloc[0]['candidate_id']) if 'candidate_id' in df.columns else query
+        _index_external_lc_paths.cache_clear()
+        _index_external_lc_paths_from_root.cache_clear()
         
         auto_run = no_update
         if fetch_mode in ('full', 'full_ext'):
             auto_run = {'candidate_id': cid, 'mode': fetch_mode, 'ts': time.time()}
 
         status = f"✓ Added {query} ({n_new} new)"
-        return status, (current_trigger or 0) + 1, auto_run, '', no_update
+        return (
+            status,
+            no_update,
+            auto_run,
+            '',
+            no_update,
+            {'candidate_ids': [cid], 'queue_size': 1, 'filter_hash': f'fetch:{cid}'},
+            0,
+        )
 
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return f"✗ Fetch failed: {str(e)}", no_update, no_update, '', no_update
+        return f"✗ Fetch failed: {str(e)}", no_update, no_update, '', no_update, no_update, no_update
 
 
 # Fetch and Analyze Candidate
@@ -5367,7 +5821,9 @@ if _background_callback_manager is not None:
          Output('import-trigger', 'data', allow_duplicate=True),
          Output('pending-auto-run', 'data', allow_duplicate=True),
          Output('cone-results-container', 'children'),
-         Output('cone-results-data', 'data')],
+         Output('cone-results-data', 'data'),
+         Output('queue-data', 'data', allow_duplicate=True),
+         Output('current-index', 'data', allow_duplicate=True)],
         Input('fetch-btn', 'n_clicks'),
         [State('fetch-type', 'value'),
          State('fetch-query', 'value'),
@@ -5388,7 +5844,9 @@ else:
          Output('import-trigger', 'data', allow_duplicate=True),
          Output('pending-auto-run', 'data', allow_duplicate=True),
          Output('cone-results-container', 'children'),
-         Output('cone-results-data', 'data')],
+         Output('cone-results-data', 'data'),
+         Output('queue-data', 'data', allow_duplicate=True),
+         Output('current-index', 'data', allow_duplicate=True)],
         Input('fetch-btn', 'n_clicks'),
         [State('fetch-type', 'value'),
          State('fetch-query', 'value'),
@@ -5404,40 +5862,37 @@ else:
 @app.callback(
     [Output('pipeline-status-chips', 'children'),
      Output('auto-run-pipeline-trigger', 'data', allow_duplicate=True)],
-    Input('queue-data', 'data'),
-    [State('current-index', 'data'),
-     State('pending-auto-run', 'data')],
+    [Input('queue-data', 'modified_timestamp'),
+     Input('current-candidate-id', 'data')],
+    State('pending-auto-run', 'data'),
     prevent_initial_call=True
 )
-def update_pipeline_status_chips(queue_data, idx, pending_auto_run):
+def update_pipeline_status_chips(_queue_data_ts, candidate_id, pending_auto_run):
     """Show pipeline stage completion status for the current candidate, and cascade auto-run if pending."""
     chips = []
     auto_run_out = no_update
+    triggered_ids = {
+        item['prop_id'].split('.')[0]
+        for item in (callback_context.triggered or [])
+        if item.get('prop_id')
+    }
     
-    if not queue_data or idx is None:
-        return chips, auto_run_out
-    items = queue_data if isinstance(queue_data, list) else []
-    if not items or idx >= len(items):
+    if candidate_id is None:
         return chips, auto_run_out
 
     try:
-        candidate = items[idx]
-        payload = candidate.get('payload', {})
-        cid = candidate.get('candidate_id')
-        
-        if isinstance(payload, str):
-            import json
-            payload = json.loads(payload)
-
-        # Check if we should auto-run based on the pending state
-        if pending_auto_run and str(pending_auto_run.get('candidate_id')) == str(cid):
-            # Pass it down the chain
-            auto_run_out = pending_auto_run
-            # Note: We don't clear pending_auto_run here, it gets naturally overwritten on next fetch.
-            # But we only fire it once because the pipeline run callback resets its own states.
+        with closing(db_connect(Path(DB_PATH))) as conn:
+            payload = get_candidate_payload(conn, str(candidate_id)) or {}
 
         from malca.review.pipeline import detect_pipeline_status
         status = detect_pipeline_status(payload)
+        if (
+            'queue-data' in triggered_ids
+            and pending_auto_run
+            and str(pending_auto_run.get('candidate_id')) == str(candidate_id)
+        ):
+            if any(state in {'missing', 'partial'} for state in status.values()):
+                auto_run_out = pending_auto_run
 
         color_map = {'complete': '#2d6a2d', 'partial': '#6a5c2d', 'missing': '#444'}
         for stage, state in status.items():
@@ -5456,16 +5911,17 @@ def update_pipeline_status_chips(queue_data, idx, pending_auto_run):
         return chips, auto_run_out
 
 
-def _run_pipeline_impl(set_progress, n_clicks, auto_trigger, queue_data, idx, current_trigger):
+def _run_pipeline_impl(set_progress, run_clicks, rerun_clicks, auto_trigger, queue_data, idx, current_trigger):
     import dash
     ctx = dash.callback_context
     triggered_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else None
+    queue_size = int((queue_data or {}).get('queue_size') or 0) if isinstance(queue_data, dict) else 0
     
-    print(f"[run_pipeline_callback] Triggered by: {triggered_id}, auto_trigger: {auto_trigger}, queue_size: {len(queue_data) if isinstance(queue_data, list) else 0}, idx: {idx}")
+    print(f"[run_pipeline_callback] Triggered by: {triggered_id}, auto_trigger: {auto_trigger}, queue_size: {queue_size}, idx: {idx}")
 
-    if not n_clicks and not auto_trigger:
+    if not run_clicks and not rerun_clicks and not auto_trigger:
         print("[run_pipeline_callback] No clicks and no auto_trigger, aborting.")
-        return no_update, no_update
+        return no_update, no_update, no_update
         
     candidate_id = None
     fetch_mode = None
@@ -5473,13 +5929,12 @@ def _run_pipeline_impl(set_progress, n_clicks, auto_trigger, queue_data, idx, cu
         candidate_id = auto_trigger.get('candidate_id')
         fetch_mode = auto_trigger.get('mode')
     else:
-        items = queue_data if isinstance(queue_data, list) else []
-        if not items or idx >= len(items):
-            return "No candidate selected", no_update
-        candidate_id = items[idx].get('candidate_id')
+        candidate_id = _queue_candidate_id(queue_data, idx)
+        if candidate_id is None:
+            return "No candidate selected", no_update, no_update
         
     if not candidate_id:
-        return "No candidate_id", no_update
+        return "No candidate_id", no_update, no_update
 
     try:
         from malca.review.pipeline import run_missing_stages
@@ -5497,7 +5952,9 @@ def _run_pipeline_impl(set_progress, n_clicks, auto_trigger, queue_data, idx, cu
             
             # Determine if this was an explicit deep fetch that should bypass caching
             force_stages = []
-            if fetch_mode == 'full':
+            if triggered_id == 'rerun-pipeline-btn':
+                force_stages = ['stats', 'events', 'characterize', 'vetting', 'external_lcs']
+            elif fetch_mode == 'full':
                 force_stages = ['stats', 'events', 'characterize', 'vetting']
             elif fetch_mode in ('full_ext', 'full_ext_crts'):
                 force_stages = ['stats', 'events', 'characterize', 'vetting', 'external_lcs']
@@ -5513,7 +5970,11 @@ def _run_pipeline_impl(set_progress, n_clicks, auto_trigger, queue_data, idx, cu
                 payload = get_candidate_payload(conn, candidate_id)
                 df = pd.DataFrame([payload])
                 run_dir = _resolve_run_dir_from_plot_dir(PLOT_DIR)
-                ext_output = run_dir / "results" if run_dir else Path("output") / "results"
+                ext_output = (
+                    run_dir / "results"
+                    if run_dir
+                    else (Path(__file__).resolve().parents[2] / "output" / "results")
+                )
                 ext_output.mkdir(parents=True, exist_ok=True)
                 df_ext = fetch_external_lcs(df, output_dir=ext_output, progress_callback=p)
                 if isinstance(df_ext, pd.DataFrame) and not df_ext.empty:
@@ -5521,44 +5982,56 @@ def _run_pipeline_impl(set_progress, n_clicks, auto_trigger, queue_data, idx, cu
                     update_candidate_payload(conn, candidate_id, row)
                     stages.append('external_lcs')
 
+        refresh_idx = int(idx or 0) if idx is not None else 0
         if stages:
-            return f"✓ Ran: {', '.join(stages)}", (current_trigger or 0) + 1
+            _index_external_lc_paths.cache_clear()
+            _index_external_lc_paths_from_root.cache_clear()
+            return f"✓ Ran: {', '.join(stages)}", no_update, refresh_idx
         else:
-            return "All stages already complete (or missing requirements)", no_update
+            if triggered_id == 'rerun-pipeline-btn':
+                return "No stages could be rerun (missing requirements)", no_update, no_update
+            return "All stages already complete (or missing requirements)", no_update, no_update
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return f"✗ Pipeline failed: {str(e)}", no_update
+        return f"✗ Pipeline failed: {str(e)}", no_update, no_update
 
 if _background_callback_manager is not None:
     @app.callback(
         [Output('pipeline-run-status', 'children'),
-         Output('import-trigger', 'data', allow_duplicate=True)],
+         Output('import-trigger', 'data', allow_duplicate=True),
+         Output('current-index', 'data', allow_duplicate=True)],
         [Input('run-pipeline-btn', 'n_clicks'),
+         Input('rerun-pipeline-btn', 'n_clicks'),
          Input('auto-run-pipeline-trigger', 'data')],
         [State('queue-data', 'data'),
          State('current-index', 'data'),
          State('import-trigger', 'data')],
         background=True,
-        running=[(Output('run-pipeline-btn', 'disabled'), True, False)],
+        running=[
+            (Output('run-pipeline-btn', 'disabled'), True, False),
+            (Output('rerun-pipeline-btn', 'disabled'), True, False),
+        ],
         progress=[Output('pipeline-run-status', 'children')],
         prevent_initial_call='initial_duplicate'
     )
-    def run_pipeline_callback(set_progress, n_clicks, auto_trigger, queue_data, idx, current_trigger):
-        return _run_pipeline_impl(set_progress, n_clicks, auto_trigger, queue_data, idx, current_trigger)
+    def run_pipeline_callback(set_progress, n_clicks, rerun_clicks, auto_trigger, queue_data, idx, current_trigger):
+        return _run_pipeline_impl(set_progress, n_clicks, rerun_clicks, auto_trigger, queue_data, idx, current_trigger)
 else:
     @app.callback(
         [Output('pipeline-run-status', 'children'),
-         Output('import-trigger', 'data', allow_duplicate=True)],
+         Output('import-trigger', 'data', allow_duplicate=True),
+         Output('current-index', 'data', allow_duplicate=True)],
         [Input('run-pipeline-btn', 'n_clicks'),
+         Input('rerun-pipeline-btn', 'n_clicks'),
          Input('auto-run-pipeline-trigger', 'data')],
         [State('queue-data', 'data'),
          State('current-index', 'data'),
          State('import-trigger', 'data')],
         prevent_initial_call='initial_duplicate'
     )
-    def run_pipeline_callback(n_clicks, auto_trigger, queue_data, idx, current_trigger):
-        return _run_pipeline_impl(None, n_clicks, auto_trigger, queue_data, idx, current_trigger)
+    def run_pipeline_callback(n_clicks, rerun_clicks, auto_trigger, queue_data, idx, current_trigger):
+        return _run_pipeline_impl(None, n_clicks, rerun_clicks, auto_trigger, queue_data, idx, current_trigger)
 
 
 # Export reviews
@@ -5629,6 +6102,8 @@ def main():
     parser.add_argument('--host', default='127.0.0.1', help="Host")
     parser.add_argument('--port', default=8050, type=int, help="Port")
     parser.add_argument('--debug', action='store_true', help="Debug mode")
+    parser.add_argument('--verbose-http', action='store_true',
+                        help="Show Flask/Werkzeug per-request access logs")
     parser.add_argument('--merge-vetting', metavar='PATH',
                         help="Merge vetting results from a parquet file into the review DB and exit")
     args = parser.parse_args()
@@ -5684,6 +6159,12 @@ def main():
     # Auto-open browser
     url = f"http://{args.host}:{args.port}"
     Timer(0.1, lambda: webbrowser.open(url)).start()
+
+    if not args.verbose_http:
+        # Keep explicit pipeline/status prints, but hide the noisy per-request
+        # development-server access lines so long-running actions are readable.
+        logging.getLogger("werkzeug").setLevel(logging.ERROR)
+        app.server.logger.setLevel(logging.ERROR)
 
     app.run(debug=args.debug, host=args.host, port=args.port)
 

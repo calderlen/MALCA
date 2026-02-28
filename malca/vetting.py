@@ -26,7 +26,7 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal
 
 import numpy as np
 import pandas as pd
@@ -1043,6 +1043,7 @@ def query_atlas_forced_phot(
     df["atlas_cyan_range"] = np.nan
     df["atlas_orange_range"] = np.nan
 
+    token = token or os.environ.get("MALCA_ATLAS_TOKEN") or os.environ.get("ATLAS_API_TOKEN")
     if not token:
         print("ATLAS: no API token provided, skipping (register at https://fallingstar-data.com/forcedphot/)")
         return df
@@ -1818,6 +1819,9 @@ def fetch_tess_lightcurves(
     Fetch TESS light curves via ``lightkurve``.
 
     Prefers 2-min cadence SPOC, falls back to QLP/FFI products.
+    If review-mode TESS overlays are re-enabled later, this fetcher should be
+    tightened to choose one best search match/product per sector instead of
+    concatenating every light curve returned by the search cone.
 
     Adds columns: tess_n_sectors, tess_total_points, tess_flux_range.
     If *output_dir* is set, saves per-candidate parquet files as
@@ -2235,6 +2239,9 @@ def fetch_panstarrs_lightcurves(
             
             # Cleanup
             lc_df = lc_df.dropna(subset=["mjd", "mag"])
+            # MAST's obsTime can arrive as JD; normalize to actual MJD to match our schema.
+            if not lc_df.empty and float(pd.to_numeric(lc_df["mjd"], errors="coerce").median()) > 1_000_000.0:
+                lc_df["mjd"] = pd.to_numeric(lc_df["mjd"], errors="coerce") - 2400000.5
             n_points = len(lc_df)
 
             if output_dir and n_points > 0:
@@ -2399,14 +2406,15 @@ def fetch_external_lcs(
     run_atlas: bool = True,
     run_ztf: bool = True,
     run_gaia_epoch: bool = True,
-    run_tess: bool = True,
-    run_kepler: bool = True,
-    run_aavso: bool = True,
+    run_tess: bool = False,
+    run_kepler: bool = False,
+    run_aavso: bool = False,
     run_ps1: bool = True,
     run_crts: bool = True,
     atlas_token: str | None = None,
     workers: int = 4,
     checkpoint_path: Path | None = None,
+    progress_callback: Callable[[str], None] | None = None,
 ) -> pd.DataFrame:
     """
     Orchestrator for fetching external light curves from all sources.
@@ -2415,6 +2423,12 @@ def fetch_external_lcs(
     Supports checkpoint resume (same pattern as ``vet_candidates``).
     NEOWISE is NOT included here (already part of vetting).
     """
+    def _emit(msg: str) -> None:
+        if progress_callback:
+            progress_callback(msg)
+        else:
+            print(msg)
+
     # Normalise coordinate column names
     if "ra" not in df.columns and "ra_deg" in df.columns:
         df = df.rename(columns={"ra_deg": "ra"})
@@ -2427,14 +2441,12 @@ def fetch_external_lcs(
         try:
             df = pd.read_parquet(checkpoint_path)
             _resumed = True
-            print(f"Resumed external LCs from checkpoint: {checkpoint_path}")
+            _emit(f"Resumed external LCs from checkpoint: {checkpoint_path}")
         except Exception:
             pass
 
     total_start = time.perf_counter()
-    print(f"\n{'='*60}")
-    print(f"EXTERNAL LIGHT CURVES: {len(df)} candidates")
-    print(f"{'='*60}\n")
+    _emit(f"EXTERNAL LIGHT CURVES: {len(df)} candidates")
 
     _MODULE_MARKERS = {
         "ATLAS LCs": "atlas_has_phot",
@@ -2459,11 +2471,11 @@ def fetch_external_lcs(
     def _run_module(name, func, **kwargs):
         nonlocal df
         if _module_done(name):
-            print(f"  {name} — skipped (already in checkpoint)\n")
+            _emit(f"{name} skipped (already in checkpoint)")
             return
         t0 = time.perf_counter()
         df = func(df, **kwargs)
-        print(f"  {name} completed in {time.perf_counter() - t0:.1f}s\n")
+        _emit(f"{name} completed in {time.perf_counter() - t0:.1f}s")
         if checkpoint_path:
             df.to_parquet(checkpoint_path, index=False)
 
@@ -2492,7 +2504,7 @@ def fetch_external_lcs(
         _run_module("CRTS LCs", fetch_crts_lightcurves, output_dir=output_dir)
 
     elapsed = time.perf_counter() - total_start
-    print(f"\nExternal LCs completed in {elapsed:.1f}s")
+    _emit(f"External LCs completed in {elapsed:.1f}s")
     return df
 
 

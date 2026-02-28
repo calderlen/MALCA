@@ -42,9 +42,11 @@ def _flux_err_from_mag_err(flux: np.ndarray, mag_err: np.ndarray) -> np.ndarray:
 
 # Keep plotting caches bounded; large values can inflate long-running GUI memory.
 _CACHE_LIMIT = 16
+_MAX_EXTERNAL_TRACE_POINTS = 20000
 _CLEAN_CACHE: OrderedDict[tuple, tuple[pd.DataFrame, set[int], dict[str, list[str]]]] = OrderedDict()
 _BASELINE_CACHE: OrderedDict[tuple, dict[int, pd.DataFrame]] = OrderedDict()
 _EVENT_CACHE: OrderedDict[tuple, list[dict[str, object]]] = OrderedDict()
+_EXTERNAL_LC_CACHE: OrderedDict[tuple, pd.DataFrame] = OrderedDict()
 
 
 def _cache_get(cache: OrderedDict, key):
@@ -412,13 +414,18 @@ def _phase_period_days(payload: dict) -> float | None:
     return None
 
 
-def _phase_fold_df(df: pd.DataFrame, period_days: float) -> pd.DataFrame:
-    """Phase-fold dataframe to 0-2 cycles."""
+def _phase_fold_df(
+    df: pd.DataFrame,
+    period_days: float,
+    *,
+    phase_zero_jd: float | None = None,
+) -> pd.DataFrame:
+    """Phase-fold dataframe to 0-2 cycles with an optional shared phase epoch."""
     out = df.copy()
     out = out[np.isfinite(out["JD"]) & np.isfinite(out["mag"])].copy()
     if out.empty:
         return out
-    jd0 = float(out["JD"].min())
+    jd0 = float(phase_zero_jd) if phase_zero_jd is not None else float(out["JD"].min())
     out["phase"] = ((out["JD"].to_numpy(dtype=float) - jd0) / float(period_days)) % 1.0
     wrap = out.copy()
     wrap["phase"] = wrap["phase"] + 1.0
@@ -426,21 +433,25 @@ def _phase_fold_df(df: pd.DataFrame, period_days: float) -> pd.DataFrame:
 
 
 def _theme_palette(theme: str) -> dict[str, str]:
-    mode = str(theme or "dark").lower()
-    if mode == "dracula":
+    mode = str(theme or "black").lower()
+    if mode == "grey":
+        mode = "gray"
+    elif mode == "light":
+        mode = "white"
+    if mode == "black":
         return {
-            "text": "#f8f8f2",
-            "title": "#f8f8f2",
-            "paper_bg": "#282a36",
-            "plot_bg": "#282a36",
-            "grid": "rgba(98, 114, 164, 0.25)",
-            "legend_bg": "rgba(40, 42, 54, 0.9)",
-            "legend_border": "rgba(98, 114, 164, 0.4)",
-            "annotation": "#f1fa8c",
-            "marker_line": "rgba(255, 255, 255, 0.9)",
-            "guide_line": "rgba(189, 147, 249, 0.3)",
+            "text": "#dce5ef",
+            "title": "#dce5ef",
+            "paper_bg": "rgba(0,0,0,0)",
+            "plot_bg": "rgba(0,0,0,0)",
+            "grid": "rgba(96,116,130,0.25)",
+            "legend_bg": "rgba(0,0,0,0.22)",
+            "legend_border": "rgba(113,140,160,0.35)",
+            "annotation": "#bcd0e1",
+            "marker_line": "rgba(10,10,10,0.95)",
+            "guide_line": "rgba(210,210,210,0.35)",
         }
-    if mode == "nord":
+    if mode == "gray":
         return {
             "text": "#d8dee9",
             "title": "#eceff4",
@@ -453,18 +464,18 @@ def _theme_palette(theme: str) -> dict[str, str]:
             "marker_line": "rgba(236, 239, 244, 0.8)",
             "guide_line": "rgba(129, 161, 193, 0.3)",
         }
-    if mode == "gruvbox":
+    if mode == "white":
         return {
-            "text": "#ebdbb2",
-            "title": "#fbf1c7",
-            "paper_bg": "#282828",
-            "plot_bg": "#282828",
-            "grid": "rgba(168, 153, 132, 0.15)",
-            "legend_bg": "rgba(60, 56, 54, 0.9)",
-            "legend_border": "rgba(168, 153, 132, 0.3)",
-            "annotation": "#d79921",
-            "marker_line": "rgba(235, 219, 178, 0.8)",
-            "guide_line": "rgba(254, 128, 25, 0.3)",
+            "text": "#15202b",
+            "title": "#15202b",
+            "paper_bg": "#f5f7fa",
+            "plot_bg": "#f5f7fa",
+            "grid": "rgba(104, 128, 149, 0.22)",
+            "legend_bg": "rgba(255, 255, 255, 0.92)",
+            "legend_border": "rgba(120, 140, 158, 0.35)",
+            "annotation": "#245f8f",
+            "marker_line": "rgba(255, 255, 255, 0.95)",
+            "guide_line": "rgba(86, 112, 137, 0.28)",
         }
     return {
         "text": "#dce5ef",
@@ -480,7 +491,7 @@ def _theme_palette(theme: str) -> dict[str, str]:
     }
 
 
-def _status_figure(message: str, theme: str = "dark") -> go.Figure:
+def _status_figure(message: str, theme: str = "black") -> go.Figure:
     colors = _theme_palette(theme)
     fig = go.Figure()
     fig.add_annotation(
@@ -504,16 +515,16 @@ def _status_figure(message: str, theme: str = "dark") -> go.Figure:
 
 _EXTERNAL_LC_SPECS: dict[str, dict] = {
     "atlas": {
-        "time_col": "MJD",
+        "time_col": "mjd",
         "time_offset": 2400000.5,  # MJD already in MJD, but check for JD
         "jd_system": "mjd",
         "bands": {
             "c": {"color": "#00ccff", "marker": "diamond", "label": "ATLAS c"},
             "o": {"color": "#ff8c42", "marker": "diamond", "label": "ATLAS o"},
         },
-        "filter_col": "F",
-        "mag_col": "m",
-        "err_col": "dm",
+        "filter_col": "filter",
+        "mag_col": "mag",
+        "err_col": "mag_err",
     },
     "ztf": {
         "time_col": "mjd",
@@ -525,7 +536,7 @@ _EXTERNAL_LC_SPECS: dict[str, dict] = {
         },
         "filter_col": "band",
         "mag_col": "mag",
-        "err_col": "magerr",
+        "err_col": "mag_err",
     },
     "gaia_epoch": {
         "time_col": "time",
@@ -535,7 +546,7 @@ _EXTERNAL_LC_SPECS: dict[str, dict] = {
         },
         "filter_col": "band",
         "mag_col": "mag",
-        "err_col": "mag_error",
+        "err_col": "mag_err",
     },
     "tess": {
         "time_col": "time",
@@ -572,14 +583,14 @@ _EXTERNAL_LC_SPECS: dict[str, dict] = {
         "err_col": "mag_err",
     },
     "ps1": {
-        "time_col": "obsTime",
+        "time_col": "mjd",
         "jd_system": "mjd",
         "bands": {
-            "g": {"color": "#44aa44", "marker": "star", "label": "PS1 g"},
-            "r": {"color": "#dd4444", "marker": "star", "label": "PS1 r"},
-            "i": {"color": "#8844cc", "marker": "star", "label": "PS1 i"},
-            "z": {"color": "#ccaa44", "marker": "star", "label": "PS1 z"},
-            "y": {"color": "#aaaa33", "marker": "star", "label": "PS1 y"},
+            "g_ps": {"color": "#44aa44", "marker": "star", "label": "PS1 g"},
+            "r_ps": {"color": "#dd4444", "marker": "star", "label": "PS1 r"},
+            "i_ps": {"color": "#8844cc", "marker": "star", "label": "PS1 i"},
+            "z_ps": {"color": "#ccaa44", "marker": "star", "label": "PS1 z"},
+            "y_ps": {"color": "#aaaa33", "marker": "star", "label": "PS1 y"},
         },
         "filter_col": "filter",
         "mag_col": "mag",
@@ -593,9 +604,164 @@ _EXTERNAL_LC_SPECS: dict[str, dict] = {
         },
         "filter_col": None,
         "mag_col": "mag",
-        "err_col": "magerr",
+        "err_col": "mag_err",
     },
 }
+
+
+def _rename_first_present(df: pd.DataFrame, canonical: str, aliases: tuple[str, ...]) -> pd.DataFrame:
+    """Rename the first matching alias to *canonical* if needed."""
+    if canonical in df.columns:
+        return df
+    for alias in aliases:
+        if alias in df.columns:
+            return df.rename(columns={alias: canonical})
+    return df
+
+
+def _coerce_numeric_column(df: pd.DataFrame, column: str) -> None:
+    if column in df.columns:
+        df[column] = pd.to_numeric(df[column], errors="coerce")
+
+
+def _normalize_mjd_column(df: pd.DataFrame, column: str = "mjd") -> None:
+    """Normalize a time column to true MJD, tolerating JD-valued inputs."""
+    if column not in df.columns:
+        return
+    df[column] = pd.to_numeric(df[column], errors="coerce")
+    finite = df[column].to_numpy()
+    finite = finite[np.isfinite(finite)]
+    if finite.size and float(np.nanmedian(finite)) > 1_000_000.0:
+        df[column] = df[column] - 2400000.5
+
+
+def normalize_external_lc_dataframe(source_name: str, df_ext: pd.DataFrame) -> pd.DataFrame:
+    """Normalize heterogeneous external-LC schemas to the viewer's expected columns."""
+    if df_ext is None or df_ext.empty:
+        return df_ext
+
+    source = str(source_name or "").strip().lower()
+    df = df_ext.copy()
+
+    if source == "atlas":
+        df = _rename_first_present(df, "mjd", ("MJD", "mjd", "JD"))
+        df = _rename_first_present(df, "filter", ("F", "filter"))
+        df = _rename_first_present(df, "mag", ("m", "mag"))
+        df = _rename_first_present(df, "mag_err", ("dm", "mag_err", "magerr"))
+        _normalize_mjd_column(df)
+        if "filter" in df.columns:
+            df["filter"] = df["filter"].astype(str).str.strip().str.lower()
+    elif source == "ztf":
+        df = _rename_first_present(df, "mjd", ("mjd", "hjd"))
+        df = _rename_first_present(df, "band", ("band", "filtercode"))
+        df = _rename_first_present(df, "mag", ("mag",))
+        df = _rename_first_present(df, "mag_err", ("mag_err", "magerr"))
+        _normalize_mjd_column(df)
+        if "band" in df.columns:
+            band_map = {
+                "1": "zg", "1.0": "zg",
+                "2": "zr", "2.0": "zr",
+                "3": "zi", "3.0": "zi",
+                "zg": "zg", "zr": "zr", "zi": "zi",
+            }
+            df["band"] = (
+                df["band"]
+                .astype(str)
+                .str.strip()
+                .str.lower()
+                .map(lambda v: band_map.get(v, v))
+            )
+    elif source == "gaia_epoch":
+        df = _rename_first_present(df, "time", ("time", "g_transit_time"))
+        df = _rename_first_present(df, "band", ("band",))
+        df = _rename_first_present(df, "mag", ("mag", "g_transit_mag"))
+        df = _rename_first_present(df, "mag_err", ("mag_err", "mag_error", "g_transit_mag_error"))
+        _coerce_numeric_column(df, "time")
+        if "band" in df.columns:
+            df["band"] = df["band"].astype(str).str.strip().str.upper()
+    elif source == "tess":
+        df = _rename_first_present(df, "time", ("time",))
+        df = _rename_first_present(df, "flux", ("flux",))
+        df = _rename_first_present(df, "flux_err", ("flux_err",))
+        _coerce_numeric_column(df, "time")
+    elif source == "kepler":
+        df = _rename_first_present(df, "time", ("time",))
+        df = _rename_first_present(df, "flux", ("flux",))
+        df = _rename_first_present(df, "flux_err", ("flux_err",))
+        _coerce_numeric_column(df, "time")
+    elif source == "aavso":
+        df = _rename_first_present(df, "mjd", ("mjd", "JD"))
+        df = _rename_first_present(df, "filter", ("filter", "Filter"))
+        df = _rename_first_present(df, "mag", ("mag", "Mag"))
+        df = _rename_first_present(df, "mag_err", ("mag_err", "Err"))
+        _normalize_mjd_column(df)
+        if "filter" in df.columns:
+            df["filter"] = df["filter"].astype(str).str.strip().str.upper()
+    elif source == "ps1":
+        df = _rename_first_present(df, "mjd", ("mjd", "obsTime"))
+        df = _rename_first_present(df, "filter", ("filter", "filterID"))
+        df = _rename_first_present(df, "flux_psf", ("flux_psf", "psfFlux"))
+        df = _rename_first_present(df, "flux_psf_err", ("flux_psf_err", "psfFluxErr"))
+        df = _rename_first_present(df, "mag", ("mag",))
+        df = _rename_first_present(df, "mag_err", ("mag_err", "magerr"))
+        _normalize_mjd_column(df)
+        if "filter" in df.columns:
+            filter_map = {
+                "1": "g_ps", "1.0": "g_ps",
+                "2": "r_ps", "2.0": "r_ps",
+                "3": "i_ps", "3.0": "i_ps",
+                "4": "z_ps", "4.0": "z_ps",
+                "5": "y_ps", "5.0": "y_ps",
+                "g": "g_ps", "r": "r_ps", "i": "i_ps", "z": "z_ps", "y": "y_ps",
+                "g_ps": "g_ps", "r_ps": "r_ps", "i_ps": "i_ps", "z_ps": "z_ps", "y_ps": "y_ps",
+            }
+            df["filter"] = (
+                df["filter"]
+                .astype(str)
+                .str.strip()
+                .str.lower()
+                .map(lambda v: filter_map.get(v, v))
+            )
+        if "mag" not in df.columns and "flux_psf" in df.columns:
+            flux = pd.to_numeric(df["flux_psf"], errors="coerce")
+            valid_flux = flux > 0
+            df["mag"] = np.nan
+            df.loc[valid_flux, "mag"] = -2.5 * np.log10(flux[valid_flux]) + 8.90
+        if "mag_err" not in df.columns and "flux_psf" in df.columns and "flux_psf_err" in df.columns:
+            flux = pd.to_numeric(df["flux_psf"], errors="coerce")
+            flux_err = pd.to_numeric(df["flux_psf_err"], errors="coerce")
+            df["mag_err"] = np.nan
+            valid_flux = flux > 0
+            df.loc[valid_flux, "mag_err"] = 1.08 * (flux_err[valid_flux] / flux[valid_flux])
+    elif source == "crts":
+        df = _rename_first_present(df, "mjd", ("mjd", "ObsTime"))
+        df = _rename_first_present(df, "mag", ("mag", "Mag"))
+        df = _rename_first_present(df, "mag_err", ("mag_err", "magerr", "e_Mag"))
+        _normalize_mjd_column(df)
+
+    return df
+
+
+def _load_external_lc_frame(source_name: str, lc_path: Path) -> pd.DataFrame:
+    """Load and normalize an external LC parquet with a small in-memory cache."""
+    try:
+        lc_path = Path(lc_path)
+        stat = lc_path.stat()
+        key = (str(source_name), str(lc_path.resolve()), int(stat.st_mtime_ns), int(stat.st_size))
+    except Exception:
+        return pd.DataFrame()
+
+    cached = _cache_get(_EXTERNAL_LC_CACHE, key)
+    if cached is not None:
+        return cached.copy()
+
+    try:
+        df = normalize_external_lc_dataframe(source_name, pd.read_parquet(lc_path))
+    except Exception:
+        return pd.DataFrame()
+
+    _cache_put(_EXTERNAL_LC_CACHE, key, df.copy())
+    return df
 
 
 def _overlay_external_lcs(
@@ -611,16 +777,23 @@ def _overlay_external_lcs(
 ) -> None:
     """Load external LC parquets and overlay traces on the raw magnitude panel."""
     current_trace = len(fig.data)
+    # The raw-panel x-axis is always intended to be JD - 2458000, even when the
+    # native ASAS-SN file stores reduced JD and the main trace uses an internal
+    # 8000 shift to reach that same frame.
+    plot_jd_offset = 2458000.0
 
     for source_name, lc_path in external_lcs.items():
         spec = _EXTERNAL_LC_SPECS.get(source_name)
         if spec is None:
             continue
+        is_flux_source = bool(spec.get("is_flux", False))
+        if is_flux_source and not is_flux:
+            continue
         try:
             lc_path = Path(lc_path)
             if not lc_path.exists():
                 continue
-            df_ext = pd.read_parquet(lc_path)
+            df_ext = _load_external_lc_frame(source_name, lc_path)
             if df_ext.empty:
                 continue
         except Exception:
@@ -643,25 +816,28 @@ def _overlay_external_lcs(
         # Convert to JD_plot (JD - jd_offset, same as ASAS-SN)
         jd_sys = spec.get("jd_system", "mjd")
         if jd_sys == "mjd":
-            # MJD → JD → JD_plot
-            jd = t + 2400000.5
-            x_plot = jd - jd_offset
+            # Most sources store MJD here, but tolerate mislabeled JD-valued columns.
+            finite_t = t[np.isfinite(t)]
+            if finite_t.size and float(np.nanmedian(finite_t)) > 1_000_000.0:
+                jd = t
+            else:
+                jd = t + 2400000.5
+            x_plot = jd - plot_jd_offset
         elif jd_sys == "bjd_gaia":
             # Gaia TCB days since J2010.0 → JD → JD_plot
             jd = t + 2455197.5
-            x_plot = jd - jd_offset
+            x_plot = jd - plot_jd_offset
         elif jd_sys == "btjd":
             # BTJD → JD → JD_plot
             jd = t + 2457000.0
-            x_plot = jd - jd_offset
+            x_plot = jd - plot_jd_offset
         elif jd_sys == "bkjd":
             # BKJD → JD → JD_plot
             jd = t + 2454833.0
-            x_plot = jd - jd_offset
+            x_plot = jd - plot_jd_offset
         else:
             x_plot = t - jd_offset
 
-        is_flux_source = spec.get("is_flux", False)
         filter_col = spec.get("filter_col")
         mag_col = spec["mag_col"]
         err_col = spec.get("err_col", "")
@@ -692,9 +868,6 @@ def _overlay_external_lcs(
             if not good.any():
                 continue
 
-            # Convert flux source to mag if main plot is mag mode (skip TESS overlay in mag mode)
-            if is_flux_source and not is_flux:
-                continue  # Can't meaningfully overlay flux on mag
             if not is_flux_source and is_flux:
                 y = np.power(10.0, -0.4 * y)
 
@@ -707,10 +880,20 @@ def _overlay_external_lcs(
                     else:
                         err_array = ev[good]
 
+            good_idx = np.flatnonzero(good)
+            if good_idx.size > _MAX_EXTERNAL_TRACE_POINTS:
+                step = int(np.ceil(good_idx.size / float(_MAX_EXTERNAL_TRACE_POINTS)))
+                good_idx = good_idx[::step]
+
+            x_vals = band_x[good_idx]
+            y_vals = y[good_idx]
+            if err_array is not None:
+                err_array = err_array[good_idx]
+
             fig.add_trace(
                 go.Scatter(
-                    x=band_x[good],
-                    y=y[good],
+                    x=x_vals,
+                    y=y_vals,
                     mode="markers",
                     name=band_info["label"],
                     marker={
@@ -735,7 +918,7 @@ def _overlay_external_lcs(
 
         end_idx = len(fig.data)
         if end_idx > start_idx:
-            ext_source_ranges[source_name.upper().replace("_", " ")] = (start_idx, end_idx)
+            ext_source_ranges[str(source_name).strip().lower()] = (start_idx, end_idx)
 
 
 def build_interactive_lightcurve_figure(
@@ -754,11 +937,12 @@ def build_interactive_lightcurve_figure(
     confidence_colors: bool,
     run_params: dict | None,
     uirevision_key: str,
-    theme: str = "dark",
-    residual_fraction: float = 0.28,
+    theme: str = "black",
+    residual_fraction: float = 0.33,
     baseline_opacity: float = 0.5,
     yaxis_mode: Literal["mag", "flux"] = "mag",
     external_lcs: dict[str, Path] | None = None,
+    external_source_view: str = "all",
 ) -> dict:
     """Build a native Plotly light-curve figure for review mode."""
     colors = _theme_palette(theme)
@@ -865,14 +1049,14 @@ def build_interactive_lightcurve_figure(
         phase_period = None
     phase_enabled = bool(show_phase_fold and phase_period is not None)
     if show_phase_fold and not phase_enabled:
-        warnings.append("Phase panel requested, but no valid period was found. Try Run PDM.")
+        warnings.append("Phase panel requested, but no valid period was found. Use Find Period to search manually.")
 
     try:
         residual_fraction = float(residual_fraction)
     except Exception:
-        residual_fraction = 0.28
+        residual_fraction = 0.33
     if not np.isfinite(residual_fraction):
-        residual_fraction = 0.28
+        residual_fraction = 0.33
     residual_fraction = float(np.clip(residual_fraction, 0.15, 0.85))
 
     # Dynamic row allocation
@@ -919,16 +1103,14 @@ def build_interactive_lightcurve_figure(
         if show_raw_mag and show_residuals:
             row_heights = [1.0 - residual_fraction, residual_fraction]
         elif show_raw_mag and phase_enabled:
-            row_heights = [0.68, 0.32]
+            row_heights = [0.5, 0.5]
         else:
             # Resid + Phase or just two unknown panels (unlikely with current logic)
             row_heights = [0.5, 0.5]
     elif n_rows == 3:
-        phase_fraction = 0.22
-        max_resid = max(0.15, 1.0 - phase_fraction - 0.05)
-        residual_fraction_3 = float(np.clip(residual_fraction, 0.15, max_resid))
-        main_fraction = 1.0 - phase_fraction - residual_fraction_3
-        row_heights = [main_fraction, residual_fraction_3, phase_fraction]
+        lower_fraction = float(np.clip(residual_fraction, 0.15, 0.425))
+        main_fraction = 1.0 - (2.0 * lower_fraction)
+        row_heights = [main_fraction, lower_fraction, lower_fraction]
 
     fig = make_subplots(
         rows=n_rows,
@@ -1105,11 +1287,12 @@ def build_interactive_lightcurve_figure(
 
     if phase_enabled and 'phase' in row_map and phase_period is not None:
         # Phase-fold uses residuals (mag - baseline) from band_dfs
+        phase_zero_jd = float(df["JD"].min()) if not df.empty else None
         for band in (0, 1):
             src_bdf = band_dfs.get(band)
             if src_bdf is None or src_bdf.empty:
                 continue
-            phase_bdf = _phase_fold_df(src_bdf, phase_period)
+            phase_bdf = _phase_fold_df(src_bdf, phase_period, phase_zero_jd=phase_zero_jd)
             if phase_bdf.empty:
                 continue
             for cam in selected:
@@ -1231,15 +1414,25 @@ def build_interactive_lightcurve_figure(
     # Overlay external light curves on raw magnitude panel
     ext_trace_start = len(fig.data)
     ext_source_ranges: dict[str, tuple[int, int]] = {}
-    if external_lcs and 'raw' in row_map:
-        _overlay_external_lcs(fig, row_map['raw'], external_lcs, jd_offset, colors, theme, is_flux, ext_source_ranges, ext_trace_start)
+    requested_source = str(external_source_view or "all").strip().lower()
+    active_external_lcs: dict[str, Path] | None = None
+    if external_lcs:
+        if requested_source == "asassn":
+            active_external_lcs = {}
+        elif requested_source in {"", "all"}:
+            active_external_lcs = dict(external_lcs)
+        else:
+            active_external_lcs = ({requested_source: external_lcs[requested_source]}
+                                   if requested_source in external_lcs else {})
+    if active_external_lcs and 'raw' in row_map:
+        _overlay_external_lcs(fig, row_map['raw'], active_external_lcs, jd_offset, colors, theme, is_flux, ext_source_ranges, ext_trace_start)
 
     fig.update_layout(
         title=_build_title(payload, df),
         title_font={"size": 14, "color": colors["title"]},
         paper_bgcolor=colors["paper_bg"],
         plot_bgcolor=colors["plot_bg"],
-        margin={"l": 55, "r": 20, "t": 54, "b": 44},
+        margin={"l": 55, "r": 20, "t": 68, "b": 44},
         font={"color": colors["text"], "family": "Monaco, Courier New, monospace", "size": 11},
         hovermode="closest",
         legend={
@@ -1252,36 +1445,30 @@ def build_interactive_lightcurve_figure(
         uirevision=uirevision_key,
     )
 
-    # Add toggle buttons for external LC sources
+    # Apply external source visibility from sidebar control.
     if ext_source_ranges:
         n_total = len(fig.data)
         all_visible = [True] * n_total
-
-        buttons = [dict(label="All", method="update", args=[{"visible": all_visible}])]
-        # ASAS-SN only (hide external traces)
         asassn_only = [True] * ext_trace_start + [False] * (n_total - ext_trace_start)
-        buttons.append(dict(label="ASAS-SN only", method="update", args=[{"visible": asassn_only}]))
+        visible = all_visible
 
-        for source_name, (start, end) in ext_source_ranges.items():
-            vis = [True] * ext_trace_start + [False] * (n_total - ext_trace_start)
-            for i in range(start, end):
-                vis[i] = True
-            buttons.append(dict(label=source_name, method="update", args=[{"visible": vis}]))
+        if requested_source == "asassn":
+            visible = asassn_only
+        elif requested_source not in {"", "all"}:
+            source_range = ext_source_ranges.get(requested_source)
+            if source_range is None:
+                visible = asassn_only
+                warnings.append(f"{requested_source.upper()} light curve is not available for this candidate.")
+            else:
+                start, end = source_range
+                visible = [True] * ext_trace_start + [False] * (n_total - ext_trace_start)
+                for i in range(start, end):
+                    visible[i] = True
 
-        fig.update_layout(
-            updatemenus=[dict(
-                type="buttons",
-                buttons=buttons,
-                direction="right",
-                x=0.0,
-                xanchor="left",
-                y=1.12,
-                yanchor="top",
-                showactive=True,
-                font=dict(size=9),
-                bgcolor="rgba(30,30,30,0.7)",
-            )]
-        )
+        for trace_idx, is_visible in enumerate(visible):
+            fig.data[trace_idx].visible = bool(is_visible)
+    elif external_lcs and requested_source not in {"", "all", "asassn"}:
+        warnings.append(f"{requested_source.upper()} light curve is not available for this candidate.")
 
     fig.update_xaxes(showgrid=True, gridcolor=colors["grid"], zeroline=False)
     fig.update_yaxes(showgrid=True, gridcolor=colors["grid"], zeroline=False)

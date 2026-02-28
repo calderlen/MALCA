@@ -309,17 +309,8 @@ REVIEW_METADATA_FIELDS: list[tuple[str, str]] = [
 
 # Groups that start expanded in the Dash GUI.
 _DEFAULT_OPEN_GROUPS: set[str] = {
-    "Identification",
-    "Period Consensus",
-    "Vetting",
-    "External Follow-up",
-    "Phase Folding",
-    "Periodicity",
-    "Dip Detection",
-    "Jump Detection",
-    "Stellar Parameters",
-    "Environment",
-    "YSO / Classification",
+    group_name
+    for group_name, _fields in REVIEW_METADATA_GROUPS
 }
 
 
