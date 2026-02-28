@@ -1125,6 +1125,7 @@ def batch_tap_crossmatch(
     n_workers: int = 4,
     verbose: bool = False,
     desc: str = "TAP crossmatch",
+    timeout: float = 120,
 
 ) -> pd.DataFrame:
     """Batch TAP crossmatch using coordinate upload.
@@ -1163,12 +1164,20 @@ def batch_tap_crossmatch(
             )
             """
 
-            job = tap.launch_job_async(
-                query,
-                upload_resource=upload_table,
-                upload_table_name="upload_table",
-                verbose=False,
-            )
+            if len(chunk_df) <= 50:
+                job = tap.launch_job(
+                    query,
+                    upload_resource=upload_table,
+                    upload_table_name="upload_table",
+                    verbose=False,
+                )
+            else:
+                job = tap.launch_job_async(
+                    query,
+                    upload_resource=upload_table,
+                    upload_table_name="upload_table",
+                    verbose=False,
+                )
             result = job.get_results()
             return result.to_pandas() if result is not None and len(result) > 0 else pd.DataFrame()
         except Exception as e:
@@ -1179,13 +1188,24 @@ def batch_tap_crossmatch(
     with ThreadPoolExecutor(max_workers=n_workers) as executor:
         futures = {executor.submit(process_chunk, chunk): i for i, chunk in enumerate(chunks)}
 
-        for future in tqdm(
-            as_completed(futures), total=len(futures),
-            desc=desc, disable=not verbose,
-        ):
-            result = future.result()
-            if not result.empty:
-                results.append(result)
+        try:
+            for future in tqdm(
+                as_completed(futures, timeout=timeout),
+                total=len(futures),
+                desc=desc, disable=not verbose,
+            ):
+                try:
+                    result = future.result(timeout=0)
+                except Exception:
+                    continue
+                if not result.empty:
+                    results.append(result)
+        except TimeoutError:
+            n_pending = sum(1 for f in futures if not f.done())
+            if verbose or n_pending:
+                print(f"  {desc}: timed out after {timeout}s ({n_pending} chunk(s) still pending)")
+            for f in futures:
+                f.cancel()
 
     if not results:
         return pd.DataFrame()

@@ -31,12 +31,15 @@ Usage:
     malca ltv-ingest [options]     # Ingest LTV pipeline results into a review DB
 """
 
+import os
 import sys
 import argparse
 import importlib
 
 
 def main():
+    # Avoid CoreFoundation fork crash on macOS when subprocesses (e.g. TAP) run from within Dash
+    os.environ.setdefault("OBJC_DISABLE_INITIALIZE_FORK_SAFETY", "YES")
     # Check if user is calling a subcommand with --help
     # If so, forward directly to the submodule
     if len(sys.argv) >= 2 and sys.argv[1] in [

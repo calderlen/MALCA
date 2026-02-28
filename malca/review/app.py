@@ -1,7 +1,15 @@
 """Dash-based keyboard-driven review app for MALCA candidates."""
 
 import sys
+import warnings
 import argparse
+
+# Suppress known multiprocessing/diskcache semaphore leak warning at worker shutdown
+warnings.filterwarnings(
+    "ignore",
+    message="resource_tracker: There appear to be.*leaked semaphore",
+    module="multiprocessing.resource_tracker",
+)
 import json
 import time
 import sqlite3
@@ -12,6 +20,12 @@ from functools import lru_cache
 from pathlib import Path
 import webbrowser
 from threading import Timer
+import multiprocessing
+
+try:
+    multiprocessing.set_start_method("spawn", force=True)
+except RuntimeError:
+    pass
 
 import dash
 from dash import dcc, html, Input, Output, State, callback_context, no_update, ALL
@@ -63,12 +77,25 @@ from malca.review.interactive_plot import (
 from malca.config.config_paths import VSX_CROSSMATCH_PATH, GAIA_CACHE_FILE
 from malca.config.config_characterize import GAIA_CHUNK_SIZE
 
+# Background callback manager for long-running fetch/import (DiskCache for local dev)
+try:
+    import diskcache
+    try:
+        from dash import DiskcacheManager
+    except ImportError:
+        from dash.long_callback import DiskcacheManager
+    _bc_cache = diskcache.Cache(Path(__file__).resolve().parents[2] / "output" / "review" / ".dash_cache")
+    _background_callback_manager = DiskcacheManager(_bc_cache)
+except Exception:
+    _background_callback_manager = None
+
 # Initialize Dash app
 app = dash.Dash(
     __name__,
     external_stylesheets=[dbc.themes.CYBORG],
     suppress_callback_exceptions=True,
-    title="MALCA Review"
+    title="MALCA Review",
+    background_callback_manager=_background_callback_manager,
 )
 
 # Custom OLED black CSS
@@ -207,6 +234,7 @@ app.index_string = '''
             flex-direction: column;
             gap: 8px;
             min-height: 0;
+            overflow: hidden;
             padding-right: 8px;
         }
         .left-info-scroll {
@@ -1866,6 +1894,96 @@ def _build_neowise_figure(df_neowise: pd.DataFrame) -> go.Figure:
     return fig
 
 
+@lru_cache(maxsize=4)
+def _index_external_lc_paths(run_dir_text: str, prefix: str) -> dict[str, str]:
+    """Index candidate -> external LC parquet paths for a given prefix."""
+    root = Path(run_dir_text) / "results"
+    mapping: dict[str, str] = {}
+    if not root.exists():
+        return mapping
+    for p in root.rglob(f"{prefix}_lc_*.parquet"):
+        cid = p.stem.replace(f"{prefix}_lc_", "")
+        if cid:
+            mapping[cid] = str(p)
+    return mapping
+
+
+def _build_external_lc_figure(
+    df_lc: pd.DataFrame,
+    title: str,
+    band_specs: list[tuple[str, str, str, str]],
+    time_col: str = "mjd",
+    yaxis_label: str = "mag",
+    reverse_y: bool = True,
+    filter_col: str | None = None,
+) -> go.Figure:
+    """Build a compact LC panel for any external source.
+
+    *band_specs* is a list of (band_value, mag_col, err_col, color) tuples.
+    When *filter_col* is set, only rows where ``df[filter_col] == band_value``
+    are plotted for each band.
+    """
+    fig = go.Figure()
+    if df_lc is None or df_lc.empty:
+        fig.update_layout(height=220, margin=dict(l=36, r=10, t=30, b=28), title=title)
+        return fig
+
+    # Resolve time column (case-insensitive)
+    actual_time_col = None
+    for c in df_lc.columns:
+        if c.lower() == time_col.lower():
+            actual_time_col = c
+            break
+    if actual_time_col is None:
+        fig.update_layout(height=220, margin=dict(l=36, r=10, t=30, b=28), title=f"{title} (missing {time_col})")
+        return fig
+
+    added = 0
+    for band_value, mag_col, err_col, color in band_specs:
+        # Filter rows for this band if filter_col is specified
+        if filter_col and filter_col in df_lc.columns:
+            subset = df_lc[df_lc[filter_col].astype(str) == band_value]
+        else:
+            subset = df_lc
+        if subset.empty or mag_col not in subset.columns:
+            continue
+
+        x = pd.to_numeric(subset[actual_time_col], errors="coerce")
+        y = pd.to_numeric(subset[mag_col], errors="coerce")
+        good = np.isfinite(x) & np.isfinite(y)
+        if not bool(good.any()):
+            continue
+        err_vals = None
+        if err_col and err_col in subset.columns:
+            ev = pd.to_numeric(subset[err_col], errors="coerce")
+            if np.isfinite(ev[good]).any():
+                err_vals = ev[good]
+        fig.add_trace(
+            go.Scattergl(
+                x=x[good],
+                y=y[good],
+                mode="markers",
+                name=band_value,
+                marker=dict(size=5, color=color, opacity=0.85),
+                error_y=dict(type="data", array=err_vals, visible=err_vals is not None, thickness=0.7),
+            )
+        )
+        added += 1
+
+    fig.update_layout(
+        height=240,
+        margin=dict(l=42, r=10, t=34, b=32),
+        title=f"{title} Light Curve",
+        legend=dict(orientation="h", x=0.0, y=1.1),
+        template="plotly_dark",
+    )
+    fig.update_xaxes(title=time_col.upper())
+    fig.update_yaxes(title=yaxis_label, autorange="reversed" if reverse_y else True)
+    if added == 0:
+        fig.add_annotation(text="No finite data points", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False)
+    return fig
+
+
 def _coerce_bool(value: object) -> bool:
     if value is None:
         return False
@@ -1950,12 +2068,41 @@ def _render_external_followup(payload: dict, candidate_id: str) -> list:
         *spectra_children,
     ], style=card_style)
 
-    # ATLAS summary
-    atlas_card = html.Div([
-        html.Div('ATLAS', style={'fontWeight': '600', 'marginBottom': '4px'}),
+    # ATLAS summary + optional light curve panel
+    atlas_children = [
         html.Div(f"Photometry: {'yes' if _coerce_bool(payload.get('atlas_has_phot')) else 'no'}", style={'fontSize': '11px'}),
         html.Div(f"cyan n/range: {payload.get('atlas_n_det_cyan', 'n/a')} / {payload.get('atlas_cyan_range', 'n/a')}", style={'fontSize': '11px'}),
         html.Div(f"orange n/range: {payload.get('atlas_n_det_orange', 'n/a')} / {payload.get('atlas_orange_range', 'n/a')}", style={'fontSize': '11px'}),
+    ]
+    if run_dir is not None:
+        atlas_idx = _index_external_lc_paths(str(run_dir.resolve()), "atlas")
+        for key in lookup_keys:
+            path_str = atlas_idx.get(str(key))
+            if path_str:
+                atlas_path = Path(path_str)
+                if atlas_path.exists():
+                    try:
+                        atlas_lc = pd.read_parquet(atlas_path)
+                        filt_col = "F" if "F" in atlas_lc.columns else ("filter" if "filter" in atlas_lc.columns else None)
+                        mag_col = "m" if "m" in atlas_lc.columns else ("mag" if "mag" in atlas_lc.columns else None)
+                        err_col = "dm" if "dm" in atlas_lc.columns else ("magerr" if "magerr" in atlas_lc.columns else "")
+                        if filt_col and mag_col:
+                            time_c = "MJD" if "MJD" in atlas_lc.columns else "mjd"
+                            atlas_fig = _build_external_lc_figure(
+                                atlas_lc, "ATLAS",
+                                [("c", mag_col, err_col, "#00ccff"),
+                                 ("o", mag_col, err_col, "#ff8c42")],
+                                time_col=time_c,
+                                filter_col=filt_col,
+                            )
+                            atlas_children.append(dcc.Graph(figure=atlas_fig, config={'displayModeBar': False}, style={'height': '250px'}))
+                    except Exception:
+                        pass
+                break
+
+    atlas_card = html.Div([
+        html.Div('ATLAS', style={'fontWeight': '600', 'marginBottom': '4px'}),
+        *atlas_children,
     ], style=card_style)
 
     # NEOWISE summary + optional light curve panel
@@ -1996,7 +2143,226 @@ def _render_external_followup(payload: dict, candidate_id: str) -> list:
         *neowise_children,
     ], style=card_style)
 
-    return [spectra_card, atlas_card, neowise_card]
+    # ZTF LC card
+    ztf_children = [
+        html.Div(f"Detections: {payload.get('ztf_lc_n_det', 'n/a')}", style={'fontSize': '11px'}),
+        html.Div(f"g range: {payload.get('ztf_lc_g_range', 'n/a')}", style={'fontSize': '11px'}),
+        html.Div(f"r range: {payload.get('ztf_lc_r_range', 'n/a')}", style={'fontSize': '11px'}),
+    ]
+    if run_dir is not None:
+        ztf_idx = _index_external_lc_paths(str(run_dir.resolve()), "ztf")
+        for key in lookup_keys:
+            path_str = ztf_idx.get(str(key))
+            if path_str:
+                ztf_path = Path(path_str)
+                if ztf_path.exists():
+                    try:
+                        ztf_lc = pd.read_parquet(ztf_path)
+                        ztf_fig = _build_external_lc_figure(
+                            ztf_lc, "ZTF",
+                            [("zg", "mag", "magerr", "#44aa44"),
+                             ("zr", "mag", "magerr", "#dd4444"),
+                             ("zi", "mag", "magerr", "#8844cc")],
+                            time_col="mjd",
+                            filter_col="band",
+                        )
+                        ztf_children.append(dcc.Graph(figure=ztf_fig, config={'displayModeBar': False}, style={'height': '250px'}))
+                    except Exception:
+                        pass
+                break
+
+    ztf_card = html.Div([
+        html.Div('ZTF', style={'fontWeight': '600', 'marginBottom': '4px'}),
+        *ztf_children,
+    ], style=card_style)
+
+    # Gaia epoch LC card
+    gaia_epoch_children = [
+        html.Div(f"G points: {payload.get('gaia_epoch_lc_n_g', 'n/a')}", style={'fontSize': '11px'}),
+        html.Div(f"G range: {payload.get('gaia_epoch_lc_g_range', 'n/a')}", style={'fontSize': '11px'}),
+    ]
+    if run_dir is not None:
+        gaia_idx = _index_external_lc_paths(str(run_dir.resolve()), "gaia_epoch")
+        for key in lookup_keys:
+            path_str = gaia_idx.get(str(key))
+            if path_str:
+                gaia_path = Path(path_str)
+                if gaia_path.exists():
+                    try:
+                        gaia_lc = pd.read_parquet(gaia_path)
+                        gaia_fig = _build_external_lc_figure(
+                            gaia_lc, "Gaia Epoch",
+                            [("G", "mag", "mag_error", "#e8c547")],
+                            time_col="time",
+                            yaxis_label="G mag",
+                        )
+                        gaia_epoch_children.append(dcc.Graph(figure=gaia_fig, config={'displayModeBar': False}, style={'height': '250px'}))
+                    except Exception:
+                        pass
+                break
+
+    gaia_epoch_card = html.Div([
+        html.Div('Gaia Epoch', style={'fontWeight': '600', 'marginBottom': '4px'}),
+        *gaia_epoch_children,
+    ], style=card_style)
+
+    # TESS LC card
+    tess_children = [
+        html.Div(f"Sectors: {payload.get('tess_n_sectors', 'n/a')}", style={'fontSize': '11px'}),
+        html.Div(f"Total points: {payload.get('tess_total_points', 'n/a')}", style={'fontSize': '11px'}),
+        html.Div(f"Flux range: {payload.get('tess_flux_range', 'n/a')}", style={'fontSize': '11px'}),
+    ]
+    if run_dir is not None:
+        tess_idx = _index_external_lc_paths(str(run_dir.resolve()), "tess")
+        for key in lookup_keys:
+            path_str = tess_idx.get(str(key))
+            if path_str:
+                tess_path = Path(path_str)
+                if tess_path.exists():
+                    try:
+                        tess_lc = pd.read_parquet(tess_path)
+                        tess_fig = _build_external_lc_figure(
+                            tess_lc, "TESS",
+                            [("TESS", "flux", "flux_err", "#cc66ff")],
+                            time_col="time",
+                            yaxis_label="flux",
+                            reverse_y=False,
+                        )
+                        tess_children.append(dcc.Graph(figure=tess_fig, config={'displayModeBar': False}, style={'height': '250px'}))
+                    except Exception:
+                        pass
+                break
+
+    tess_card = html.Div([
+        html.Div('TESS', style={'fontWeight': '600', 'marginBottom': '4px'}),
+        *tess_children,
+    ], style=card_style)
+
+    # Kepler/K2 LC card
+    kepler_children = [
+        html.Div(f"Quarters/Campaigns: {payload.get('kepler_n_quarters', 'n/a')}", style={'fontSize': '11px'}),
+        html.Div(f"Total points: {payload.get('kepler_total_points', 'n/a')}", style={'fontSize': '11px'}),
+        html.Div(f"Flux range: {payload.get('kepler_flux_range', 'n/a')}", style={'fontSize': '11px'}),
+    ]
+    if run_dir is not None:
+        kepler_idx = _index_external_lc_paths(str(run_dir.resolve()), "kepler")
+        for key in lookup_keys:
+            path_str = kepler_idx.get(str(key))
+            if path_str:
+                kepler_path = Path(path_str)
+                if kepler_path.exists():
+                    try:
+                        kepler_lc = pd.read_parquet(kepler_path)
+                        kepler_fig = _build_external_lc_figure(
+                            kepler_lc, "Kepler/K2",
+                            [("Kepler", "flux", "flux_err", "#ffb6c1")],
+                            time_col="time",
+                            yaxis_label="flux",
+                            reverse_y=False,
+                        )
+                        kepler_children.append(dcc.Graph(figure=kepler_fig, config={'displayModeBar': False}, style={'height': '250px'}))
+                    except Exception:
+                        pass
+                break
+
+    kepler_card = html.Div([
+        html.Div('Kepler/K2', style={'fontWeight': '600', 'marginBottom': '4px'}),
+        *kepler_children,
+    ], style=card_style)
+
+    # AAVSO LC card
+    aavso_children = [
+        html.Div(f"Points: {payload.get('aavso_lc_n_points', 'n/a')}", style={'fontSize': '11px'}),
+    ]
+    if run_dir is not None:
+        aavso_idx = _index_external_lc_paths(str(run_dir.resolve()), "aavso")
+        for key in lookup_keys:
+            path_str = aavso_idx.get(str(key))
+            if path_str:
+                aavso_path = Path(path_str)
+                if aavso_path.exists():
+                    try:
+                        aavso_lc = pd.read_parquet(aavso_path)
+                        aavso_fig = _build_external_lc_figure(
+                            aavso_lc, "AAVSO",
+                            [("V", "mag", "mag_err", "#00ff00"),
+                             ("B", "mag", "mag_err", "#0000ff"),
+                             ("CV", "mag", "mag_err", "#aaaaaa")],
+                            time_col="mjd",
+                            filter_col="filter",
+                        )
+                        aavso_children.append(dcc.Graph(figure=aavso_fig, config={'displayModeBar': False}, style={'height': '250px'}))
+                    except Exception:
+                        pass
+                break
+
+    aavso_card = html.Div([
+        html.Div('AAVSO', style={'fontWeight': '600', 'marginBottom': '4px'}),
+        *aavso_children,
+    ], style=card_style)
+
+    # Pan-STARRS LC card
+    ps1_children = [
+        html.Div(f"Points: {payload.get('ps1_lc_n_points', 'n/a')}", style={'fontSize': '11px'}),
+    ]
+    if run_dir is not None:
+        ps1_idx = _index_external_lc_paths(str(run_dir.resolve()), "ps1")
+        for key in lookup_keys:
+            path_str = ps1_idx.get(str(key))
+            if path_str:
+                ps1_path = Path(path_str)
+                if ps1_path.exists():
+                    try:
+                        ps1_lc = pd.read_parquet(ps1_path)
+                        ps1_fig = _build_external_lc_figure(
+                            ps1_lc, "Pan-STARRS",
+                            [("g", "mag", "mag_err", "#44aa44"),
+                             ("r", "mag", "mag_err", "#dd4444"),
+                             ("i", "mag", "mag_err", "#8844cc"),
+                             ("z", "mag", "mag_err", "#ccaa44"),
+                             ("y", "mag", "mag_err", "#aaaa33")],
+                            time_col="obsTime",
+                            filter_col="filter",
+                        )
+                        ps1_children.append(dcc.Graph(figure=ps1_fig, config={'displayModeBar': False}, style={'height': '250px'}))
+                    except Exception:
+                        pass
+                break
+
+    ps1_card = html.Div([
+        html.Div('Pan-STARRS', style={'fontWeight': '600', 'marginBottom': '4px'}),
+        *ps1_children,
+    ], style=card_style)
+
+    # CRTS LC card
+    crts_children = [
+        html.Div(f"Points: {payload.get('crts_lc_n_points', 'n/a')}", style={'fontSize': '11px'}),
+    ]
+    if run_dir is not None:
+        crts_idx = _index_external_lc_paths(str(run_dir.resolve()), "crts")
+        for key in lookup_keys:
+            path_str = crts_idx.get(str(key))
+            if path_str:
+                crts_path = Path(path_str)
+                if crts_path.exists():
+                    try:
+                        crts_lc = pd.read_parquet(crts_path)
+                        crts_fig = _build_external_lc_figure(
+                            crts_lc, "CRTS",
+                            [("CV", "mag", "magerr", "#bbbbbb")],
+                            time_col="mjd",
+                        )
+                        crts_children.append(dcc.Graph(figure=crts_fig, config={'displayModeBar': False}, style={'height': '250px'}))
+                    except Exception:
+                        pass
+                break
+
+    crts_card = html.Div([
+        html.Div('CRTS', style={'fontWeight': '600', 'marginBottom': '4px'}),
+        *crts_children,
+    ], style=card_style)
+
+    return [spectra_card, atlas_card, neowise_card, ztf_card, gaia_epoch_card, tess_card, kepler_card, aavso_card, ps1_card, crts_card]
 
 
 # ---- sidebar filter helpers ------------------------------------------------
@@ -2370,6 +2736,8 @@ def create_layout():
         dcc.Store(id='sidebar-state', data=False),  # collapsed by default
         dcc.Store(id='filter-params', data={}),
         dcc.Store(id='import-trigger', data=0),  # triggers queue refresh after import
+        dcc.Store(id='auto-run-pipeline-trigger', data=None),
+        dcc.Store(id='pending-auto-run', data=None),
         dcc.Store(id='activity-visible', data=False),  # collapsed by default
         dcc.Store(id='cone-results-data', data=None),  # cone search catalog rows
         dcc.Store(id='plot-render-request', data={'nonce': 1, 'ts': 0.0, 'state': {'idx': 0, 'plot_mode': 'native', 'overlay_values': ['baseline', 'markers', 'residuals', 'filter_bad_cameras', 'diagnostics'], 'selected_cameras': [], 'preset': 'Diagnostics', 'theme': 'dark', 'residual_height': 0.28, 'baseline_opacity': 0.5}}),
@@ -2488,6 +2856,7 @@ def create_layout():
                 options=[
                     {'label': 'Quick (LC only)', 'value': 'quick'},
                     {'label': 'Full (analyze + vet)', 'value': 'full'},
+                    {'label': 'Full + External LCs', 'value': 'full_ext'},
                 ],
                 value='quick',
                 clearable=False,
@@ -2662,6 +3031,18 @@ def create_layout():
                                     value=['raw', 'markers', 'residuals', 'filter_bad_cameras', 'diagnostics'],
                                     inline=True,
                                 ),
+                                dcc.RadioItems(
+                                    id='yaxis-mode',
+                                    options=[
+                                        {'label': ' Mag', 'value': 'mag'},
+                                        {'label': ' Flux', 'value': 'flux'},
+                                    ],
+                                    value='mag',
+                                    inline=True,
+                                    style={'font-size': '10px', 'margin-left': '8px'},
+                                    persistence=True,
+                                    persistence_type='local',
+                                ),
                                 html.Div([
                                     html.Span('Baseline', style={'color': '#9fb6cb', 'font-size': '10px',
                                                                   'white-space': 'nowrap'}),
@@ -2705,13 +3086,13 @@ def create_layout():
                                         ],
                                         value='lsp',
                                         clearable=False,
-                                        style={'width': '70px', 'font-size': '10px'},
+                                        style={'width': '85px', 'font-size': '10px'},
                                     ),
                                     dcc.Input(id='pdm-min-period', type='number', value=0.1, min=0.001,
                                               step='any', debounce=True, placeholder='Min P',
                                               style={'width': '72px', 'font-size': '10px'}),
                                     html.Span('–', style={'color': '#9fb6cb', 'margin': '0 2px', 'font-size': '10px'}),
-                                    dcc.Input(id='pdm-max-period', type='number', value=100, min=0.001,
+                                    dcc.Input(id='pdm-max-period', type='number', value=10, min=0.001,
                                               step='any', debounce=True, placeholder='Max P',
                                               style={'width': '72px', 'font-size': '10px'}),
                                     html.Span('d', style={'color': '#9fb6cb', 'font-size': '10px', 'margin-right': '4px'}),
@@ -2850,6 +3231,11 @@ def create_layout():
                     html.Span(id='followup-indicator', style={'margin-right': '10px', 'font-size': '11px'}),
                     html.Span(id='pass-indicator', style={'color': '#888', 'margin-right': '10px', 'font-size': '11px'}),
                     html.Span(id='status-indicator', style={'color': '#888', 'margin-right': '10px', 'font-size': '11px'}),
+                    html.Span(' | ', style={'color': '#444', 'margin-right': '10px'}),
+                    dcc.Loading(
+                        id='loading-pipeline-bottom', type='dot',
+                        children=html.Span(id='bottom-pipeline-status', style={'color': '#7da8c4', 'font-size': '11px'}),
+                    ),
                 ], style={'display': 'flex', 'align-items': 'center'}),
             ], className='control-bar'),
 
@@ -2885,6 +3271,17 @@ app.layout = create_layout
 
 
 # --- Pace Timer Callbacks ---
+
+app.clientside_callback(
+    """
+    function(text) {
+        return text;
+    }
+    """,
+    Output('bottom-pipeline-status', 'children'),
+    Input('pipeline-run-status', 'children'),
+    prevent_initial_call=False
+)
 
 app.clientside_callback(
     """
@@ -3587,11 +3984,12 @@ def handle_keyboard(key_value, current_idx, queue_data, current_score,
      Input('round-sigfigs', 'value'),
      Input('link-radius-arcsec', 'value'),
      Input('pdm-result-store', 'data'),
-     Input('pdm-manual-period', 'value')],
+     Input('pdm-manual-period', 'value'),
+     Input('yaxis-mode', 'value')],
     State('plot-render-request', 'data'),
     prevent_initial_call=True,
 )
-def queue_plot_render_request(idx, plot_mode, overlay_values, selected_cameras, preset, residual_height, theme_mode, _queue_data, baseline_opacity, round_sigfigs, link_radius, pdm_result, pdm_manual_period, existing_request):
+def queue_plot_render_request(idx, plot_mode, overlay_values, selected_cameras, preset, residual_height, theme_mode, _queue_data, baseline_opacity, round_sigfigs, link_radius, pdm_result, pdm_manual_period, yaxis_mode, existing_request):
     """Debounced render request queue for native plot UX."""
     req = existing_request or {'nonce': 0, 'ts': 0.0}
     # Determine effective PDM period: manual override > PDM result
@@ -3620,6 +4018,7 @@ def queue_plot_render_request(idx, plot_mode, overlay_values, selected_cameras, 
             'round_sigfigs': bool(round_sigfigs and 'yes' in round_sigfigs),
             'link_radius': float(link_radius) if link_radius is not None else 10.0,
             'override_period': override_period,
+            'yaxis_mode': str(yaxis_mode or 'mag'),
         },
     }
 
@@ -3813,6 +4212,7 @@ def update_display(render_request, applied_nonce, queue_data):
     baseline_opacity = float(state.get('baseline_opacity', 0.5) if state.get('baseline_opacity') is not None else 0.5)
     round_sigfigs = bool(state.get('round_sigfigs', False))
     link_radius = float(state.get('link_radius', 10.0))
+    yaxis_mode = str(state.get('yaxis_mode', 'mag') or 'mag')
     override_period = state.get('override_period')
     if override_period is not None:
         try:
@@ -3934,7 +4334,24 @@ def update_display(render_request, applied_nonce, queue_data):
     mismatch_warnings = _run_config_mismatch_warnings(run_params if run_params else None, overlays)
     if run_params_status != 'loaded':
         mismatch_warnings.append(run_params_msg)
-    uirevision_key = f"{candidate_id}|{','.join(sorted(str(c) for c in selected_cameras))}|{theme_mode}|{residual_height:.3f}|{baseline_opacity:.2f}"
+    uirevision_key = f"{candidate_id}|{','.join(sorted(str(c) for c in selected_cameras))}|{theme_mode}|{residual_height:.3f}|{baseline_opacity:.2f}|{yaxis_mode}"
+
+    # Discover external LC parquets for this candidate
+    ext_lcs: dict[str, Path] | None = None
+    run_dir = _resolve_run_dir_from_plot_dir(PLOT_DIR)
+    if run_dir is not None:
+        lk = _candidate_lookup_keys(candidate_id, payload)
+        found: dict[str, Path] = {}
+        for prefix in ("atlas", "ztf", "gaia_epoch", "tess"):
+            idx_map = _index_external_lc_paths(str(run_dir.resolve()), prefix)
+            for key in lk:
+                p = idx_map.get(str(key))
+                if p:
+                    found[prefix] = Path(p)
+                    break
+        if found:
+            ext_lcs = found
+
     try:
         native = build_interactive_lightcurve_figure(
             payload,
@@ -3954,6 +4371,8 @@ def update_display(render_request, applied_nonce, queue_data):
             theme=theme_mode,
             residual_fraction=residual_height,
             baseline_opacity=baseline_opacity,
+            yaxis_mode=yaxis_mode,
+            external_lcs=ext_lcs,
         )
     except Exception as exc:
         import traceback
@@ -4849,21 +5268,15 @@ def import_candidates_callback(n_clicks, import_path, characterize_on,
         return f"✗ Import failed: {str(e)}", no_update
 
 
-# Fetch and Analyze Candidate
-@app.callback(
-    [Output('fetch-status', 'children'),
-     Output('import-trigger', 'data', allow_duplicate=True),
-     Output('cone-results-container', 'children'),
-     Output('cone-results-data', 'data')],
-    Input('fetch-btn', 'n_clicks'),
-    [State('fetch-type', 'value'),
-     State('fetch-query', 'value'),
-     State('fetch-mode', 'value'),
-     State('import-trigger', 'data')],
-    prevent_initial_call=True
-)
-def fetch_candidate_callback(n_clicks, fetch_type, fetch_query, fetch_mode, current_trigger):
-    """Fetch an ASAS-SN light curve, process, and import it."""
+def _fetch_candidate_impl(set_progress, n_clicks, fetch_type, fetch_query, fetch_mode, current_trigger):
+    """Core fetch logic; set_progress is optional for streaming status to GUI."""
+    def progress(msg):
+        if set_progress and msg:
+            try:
+                set_progress(msg[:400] if len(msg) > 400 else msg)
+            except Exception:
+                pass
+
     if not n_clicks or not fetch_query:
         return no_update, no_update, no_update, no_update
 
@@ -4873,7 +5286,7 @@ def fetch_candidate_callback(n_clicks, fetch_type, fetch_query, fetch_mode, curr
 
     try:
         if fetch_type == 'coords':
-            # Parse RA/Dec
+            progress("Searching cone...")
             from malca.review.fetch import fetch_cone_search
             parts = query.replace(',', ' ').split()
             if len(parts) < 2:
@@ -4883,7 +5296,6 @@ def fetch_candidate_callback(n_clicks, fetch_type, fetch_query, fetch_mode, curr
             catalog_df = fetch_cone_search(ra, dec, radius_arcsec=radius)
             if catalog_df.empty:
                 return "✗ No sources found in cone search", no_update, '', no_update
-            # Show results as clickable list
             show_cols = [c for c in ['asas_sn_id', 'ra_deg', 'dec_deg', 'gaia_id', 'mean_vmag']
                          if c in catalog_df.columns]
             if not show_cols:
@@ -4903,6 +5315,7 @@ def fetch_candidate_callback(n_clicks, fetch_type, fetch_query, fetch_mode, curr
                       'border': '1px solid #3c5e75', 'color': '#cad9e5'})
             n_found = len(catalog_df)
             cone_data = catalog_df.to_dict('records')
+            progress(f"Found {n_found} source(s)")
             return (
                 f"Found {n_found} source(s). Click a row to fetch its LC.",
                 no_update,
@@ -4910,61 +5323,123 @@ def fetch_candidate_callback(n_clicks, fetch_type, fetch_query, fetch_mode, curr
                 cone_data,
             )
 
-        elif fetch_type == 'gaia':
+        progress("Fetching light curve...")
+        if fetch_type == 'gaia':
             from malca.review.fetch import fetch_and_analyze_by_gaia_id
             df, lc_path = fetch_and_analyze_by_gaia_id(query, run_stats=True)
         else:
-            # Default: ASAS-SN ID
             from malca.review.fetch import fetch_and_analyze_by_id
             df, lc_path = fetch_and_analyze_by_id(query, run_stats=True)
 
         if df is None or df.empty:
-            return f"✗ No data for {query}", no_update, '', no_update
+            return f"✗ No data for {query}", no_update, no_update, '', no_update
 
-        is_full = (fetch_mode == 'full')
+        progress("Importing basic light curve...")
+        
+        # We NEVER run characterization/vetting in the fetch callback anymore,
+        # so the GUI can render the light curve IMMEDIATELY.
         with closing(db_connect(Path(DB_PATH))) as conn:
             n_rows, n_new = import_candidates(
                 conn, df, source_path=f"fetch://{fetch_type}/{query}",
-                # Skip characterize — stellar_main catalog already provides Gaia data
                 characterize_before_import=False,
-                # Full mode runs vetting (SIMBAD, Gaia var, ZTF, etc.)
-                vet_before_import=is_full,
+                vet_before_import=False,
             )
-            status = f"✓ Added {query} ({n_new} new)"
-            return status, (current_trigger or 0) + 1, '', no_update
+
+        cid = str(df.iloc[0]['candidate_id']) if 'candidate_id' in df.columns else query
+        
+        auto_run = no_update
+        if fetch_mode in ('full', 'full_ext'):
+            auto_run = {'candidate_id': cid, 'mode': fetch_mode, 'ts': time.time()}
+
+        status = f"✓ Added {query} ({n_new} new)"
+        return status, (current_trigger or 0) + 1, auto_run, '', no_update
 
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return f"✗ Fetch failed: {str(e)}", no_update, '', no_update
+        return f"✗ Fetch failed: {str(e)}", no_update, no_update, '', no_update
+
+
+# Fetch and Analyze Candidate
+if _background_callback_manager is not None:
+    @app.callback(
+        [Output('fetch-status', 'children'),
+         Output('import-trigger', 'data', allow_duplicate=True),
+         Output('pending-auto-run', 'data', allow_duplicate=True),
+         Output('cone-results-container', 'children'),
+         Output('cone-results-data', 'data')],
+        Input('fetch-btn', 'n_clicks'),
+        [State('fetch-type', 'value'),
+         State('fetch-query', 'value'),
+         State('fetch-mode', 'value'),
+         State('import-trigger', 'data')],
+        background=True,
+        running=[
+            (Output('fetch-btn', 'disabled'), True, False),
+        ],
+        progress=[Output('fetch-status', 'children')],
+        prevent_initial_call=True,
+    )
+    def fetch_candidate_callback(set_progress, n_clicks, fetch_type, fetch_query, fetch_mode, current_trigger):
+        return _fetch_candidate_impl(set_progress, n_clicks, fetch_type, fetch_query, fetch_mode, current_trigger)
+else:
+    @app.callback(
+        [Output('fetch-status', 'children'),
+         Output('import-trigger', 'data', allow_duplicate=True),
+         Output('pending-auto-run', 'data', allow_duplicate=True),
+         Output('cone-results-container', 'children'),
+         Output('cone-results-data', 'data')],
+        Input('fetch-btn', 'n_clicks'),
+        [State('fetch-type', 'value'),
+         State('fetch-query', 'value'),
+         State('fetch-mode', 'value'),
+         State('import-trigger', 'data')],
+        prevent_initial_call=True,
+    )
+    def fetch_candidate_callback(n_clicks, fetch_type, fetch_query, fetch_mode, current_trigger):
+        return _fetch_candidate_impl(None, n_clicks, fetch_type, fetch_query, fetch_mode, current_trigger)
 
 
 # Pipeline status chips (updated when candidate changes)
 @app.callback(
-    Output('pipeline-status-chips', 'children'),
+    [Output('pipeline-status-chips', 'children'),
+     Output('auto-run-pipeline-trigger', 'data', allow_duplicate=True)],
     Input('queue-data', 'data'),
-    State('current-index', 'data'),
+    [State('current-index', 'data'),
+     State('pending-auto-run', 'data')],
     prevent_initial_call=True
 )
-def update_pipeline_status_chips(queue_data, idx):
-    """Show pipeline stage completion status for the current candidate."""
+def update_pipeline_status_chips(queue_data, idx, pending_auto_run):
+    """Show pipeline stage completion status for the current candidate, and cascade auto-run if pending."""
+    chips = []
+    auto_run_out = no_update
+    
     if not queue_data or idx is None:
-        return []
+        return chips, auto_run_out
     items = queue_data if isinstance(queue_data, list) else []
     if not items or idx >= len(items):
-        return []
+        return chips, auto_run_out
 
     try:
-        payload = items[idx].get('payload', {})
+        candidate = items[idx]
+        payload = candidate.get('payload', {})
+        cid = candidate.get('candidate_id')
+        
         if isinstance(payload, str):
             import json
             payload = json.loads(payload)
+
+        # Check if we should auto-run based on the pending state
+        if pending_auto_run and str(pending_auto_run.get('candidate_id')) == str(cid):
+            # Pass it down the chain
+            auto_run_out = pending_auto_run
+            # Note: We don't clear pending_auto_run here, it gets naturally overwritten on next fetch.
+            # But we only fire it once because the pipeline run callback resets its own states.
 
         from malca.review.pipeline import detect_pipeline_status
         status = detect_pipeline_status(payload)
 
         color_map = {'complete': '#2d6a2d', 'partial': '#6a5c2d', 'missing': '#444'}
-        chips = []
         for stage, state in status.items():
             chips.append(html.Span(
                 f"{'●' if state == 'complete' else '○'} {stage.capitalize()}",
@@ -4976,38 +5451,76 @@ def update_pipeline_status_chips(queue_data, idx):
                     'fontSize': '10px',
                 },
             ))
-        return chips
+        return chips, auto_run_out
     except Exception:
-        return []
+        return chips, auto_run_out
 
 
-# Run missing pipeline stages
-@app.callback(
-    [Output('pipeline-run-status', 'children'),
-     Output('import-trigger', 'data', allow_duplicate=True)],
-    Input('run-pipeline-btn', 'n_clicks'),
-    [State('queue-data', 'data'),
-     State('current-index', 'data'),
-     State('import-trigger', 'data')],
-    prevent_initial_call=True
-)
-def run_pipeline_callback(n_clicks, queue_data, idx, current_trigger):
-    """Run missing pipeline stages for the current candidate."""
-    if not n_clicks or not queue_data or idx is None:
+def _run_pipeline_impl(set_progress, n_clicks, auto_trigger, queue_data, idx, current_trigger):
+    import dash
+    ctx = dash.callback_context
+    triggered_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else None
+    
+    print(f"[run_pipeline_callback] Triggered by: {triggered_id}, auto_trigger: {auto_trigger}, queue_size: {len(queue_data) if isinstance(queue_data, list) else 0}, idx: {idx}")
+
+    if not n_clicks and not auto_trigger:
+        print("[run_pipeline_callback] No clicks and no auto_trigger, aborting.")
         return no_update, no_update
-
-    items = queue_data if isinstance(queue_data, list) else []
-    if not items or idx >= len(items):
-        return "No candidate selected", no_update
-
-    candidate_id = items[idx].get('candidate_id')
+        
+    candidate_id = None
+    fetch_mode = None
+    if auto_trigger:
+        candidate_id = auto_trigger.get('candidate_id')
+        fetch_mode = auto_trigger.get('mode')
+    else:
+        items = queue_data if isinstance(queue_data, list) else []
+        if not items or idx >= len(items):
+            return "No candidate selected", no_update
+        candidate_id = items[idx].get('candidate_id')
+        
     if not candidate_id:
         return "No candidate_id", no_update
 
     try:
         from malca.review.pipeline import run_missing_stages
+        
+        def p(msg):
+            if set_progress:
+                try:
+                    set_progress(msg[:300] if len(msg) > 300 else msg)
+                except Exception:
+                    pass
+            else:
+                print(f"[pipeline] {msg}")
+            
         with closing(db_connect(Path(DB_PATH))) as conn:
-            stages = run_missing_stages(conn, candidate_id)
+            
+            # Determine if this was an explicit deep fetch that should bypass caching
+            force_stages = []
+            if fetch_mode == 'full':
+                force_stages = ['stats', 'events', 'characterize', 'vetting']
+            elif fetch_mode in ('full_ext', 'full_ext_crts'):
+                force_stages = ['stats', 'events', 'characterize', 'vetting', 'external_lcs']
+                
+            stages = run_missing_stages(conn, candidate_id, progress_callback=p, force_stages=force_stages)
+            
+            # If triggered by a full_ext fetch, ensure we run external LCs
+            if fetch_mode == 'full_ext' and 'external_lcs' not in stages:
+                p("Running external LCs...")
+                from malca.vetting import fetch_external_lcs
+                from malca.review.store import get_candidate_payload
+                from malca.review.pipeline import update_candidate_payload
+                payload = get_candidate_payload(conn, candidate_id)
+                df = pd.DataFrame([payload])
+                run_dir = _resolve_run_dir_from_plot_dir(PLOT_DIR)
+                ext_output = run_dir / "results" if run_dir else Path("output") / "results"
+                ext_output.mkdir(parents=True, exist_ok=True)
+                df_ext = fetch_external_lcs(df, output_dir=ext_output, progress_callback=p)
+                if isinstance(df_ext, pd.DataFrame) and not df_ext.empty:
+                    row = df_ext.iloc[0].to_dict()
+                    update_candidate_payload(conn, candidate_id, row)
+                    stages.append('external_lcs')
+
         if stages:
             return f"✓ Ran: {', '.join(stages)}", (current_trigger or 0) + 1
         else:
@@ -5016,6 +5529,36 @@ def run_pipeline_callback(n_clicks, queue_data, idx, current_trigger):
         import traceback
         traceback.print_exc()
         return f"✗ Pipeline failed: {str(e)}", no_update
+
+if _background_callback_manager is not None:
+    @app.callback(
+        [Output('pipeline-run-status', 'children'),
+         Output('import-trigger', 'data', allow_duplicate=True)],
+        [Input('run-pipeline-btn', 'n_clicks'),
+         Input('auto-run-pipeline-trigger', 'data')],
+        [State('queue-data', 'data'),
+         State('current-index', 'data'),
+         State('import-trigger', 'data')],
+        background=True,
+        running=[(Output('run-pipeline-btn', 'disabled'), True, False)],
+        progress=[Output('pipeline-run-status', 'children')],
+        prevent_initial_call='initial_duplicate'
+    )
+    def run_pipeline_callback(set_progress, n_clicks, auto_trigger, queue_data, idx, current_trigger):
+        return _run_pipeline_impl(set_progress, n_clicks, auto_trigger, queue_data, idx, current_trigger)
+else:
+    @app.callback(
+        [Output('pipeline-run-status', 'children'),
+         Output('import-trigger', 'data', allow_duplicate=True)],
+        [Input('run-pipeline-btn', 'n_clicks'),
+         Input('auto-run-pipeline-trigger', 'data')],
+        [State('queue-data', 'data'),
+         State('current-index', 'data'),
+         State('import-trigger', 'data')],
+        prevent_initial_call='initial_duplicate'
+    )
+    def run_pipeline_callback(n_clicks, auto_trigger, queue_data, idx, current_trigger):
+        return _run_pipeline_impl(None, n_clicks, auto_trigger, queue_data, idx, current_trigger)
 
 
 # Export reviews

@@ -421,6 +421,27 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("neowise_n_epochs",         "REAL",    "float"),
     ("neowise_w1_range",         "REAL",    "float"),
     ("neowise_w2_range",         "REAL",    "float"),
+    # -- external light curves: ZTF --
+    ("ztf_lc_n_det",             "INTEGER", "float"),
+    ("ztf_lc_g_range",           "REAL",    "float"),
+    ("ztf_lc_r_range",           "REAL",    "float"),
+    # -- external light curves: Gaia epoch --
+    ("gaia_epoch_lc_n_g",        "INTEGER", "float"),
+    ("gaia_epoch_lc_g_range",    "REAL",    "float"),
+    # -- external light curves: TESS --
+    ("tess_n_sectors",           "INTEGER", "float"),
+    ("tess_total_points",        "INTEGER", "float"),
+    ("tess_flux_range",          "REAL",    "float"),
+    # -- external light curves: Kepler --
+    ("kepler_n_quarters",        "INTEGER", "float"),
+    ("kepler_total_points",      "INTEGER", "float"),
+    ("kepler_flux_range",        "REAL",    "float"),
+    # -- external light curves: AAVSO --
+    ("aavso_lc_n_points",        "INTEGER", "float"),
+    # -- external light curves: Pan-STARRS --
+    ("ps1_lc_n_points",          "INTEGER", "float"),
+    # -- external light curves: CRTS --
+    ("crts_lc_n_points",         "INTEGER", "float"),
     # -- vetting details: other --
     ("cluster_dist_pc",          "REAL",    "float"),
     ("iphas_ha_excess",          "REAL",    "float"),
@@ -679,9 +700,19 @@ def import_candidates(
             from malca.vetting import vet_candidates
 
             # --- vetting cache: skip candidates already vetted ----
-            # Only use file-based cache when source_path is a real filesystem path
-            _use_cache = source_path and not source_path.startswith("fetch://")
-            _vetting_cache_path = Path(source_path + ".vetting_cache.parquet") if _use_cache else None
+            # Use file-based cache for real paths or fetch:// sources
+            if source_path and source_path.startswith("fetch://"):
+                _vetting_cache_dir = Path("output") / "cache" / "vetting_cache"
+                _vetting_cache_dir.mkdir(parents=True, exist_ok=True)
+                _cache_name = source_path.replace("fetch://", "").replace("/", "_") + ".parquet"
+                _vetting_cache_path = _vetting_cache_dir / _cache_name
+                _use_cache = True
+            elif source_path:
+                _vetting_cache_path = Path(source_path + ".vetting_cache.parquet")
+                _use_cache = True
+            else:
+                _vetting_cache_path = None
+                _use_cache = False
             _cache_df = None
             _id_col = "candidate_id" if "candidate_id" in df_use.columns else None
             n_new = len(df_use)  # default: vet everything
@@ -709,12 +740,12 @@ def import_candidates(
             else:
                 if _cache_df is not None and n_new > 0:
                     # Vet only the new candidates
+                    _run_tns = not (source_path and source_path.startswith("fetch://"))
                     df_new = vet_candidates(
                         df_use.loc[mask_new],
-                        run_asassn_var=False,
-                        run_ztf_var=False, run_tns=False, run_alerce=False,
-                        run_atlas=False, run_erosita=False, run_neowise_lc=False,
                         run_pm_check=False,
+                        run_tns=_run_tns,
+                        method="xmatch",
                     )
                     # Merge cached vetting columns onto cached rows
                     cache_cols = [c for c in VETTING_COLUMNS if c in _cache_df.columns]
@@ -726,16 +757,16 @@ def import_candidates(
                     df_use = pd.concat([df_old, df_new], ignore_index=True)
                 else:
                     # No cache or no candidate_id — vet everything
+                    _run_tns = not (source_path and source_path.startswith("fetch://"))
                     df_use = vet_candidates(
                         df_use,
-                        run_asassn_var=False,
-                        run_ztf_var=False, run_tns=False, run_alerce=False,
-                        run_atlas=False, run_erosita=False, run_neowise_lc=False,
                         run_pm_check=False,
+                        run_tns=_run_tns,
+                        method="xmatch",
                     )
 
                 # Update cache
-                if _id_col:
+                if _id_col and _vetting_cache_path is not None:
                     try:
                         vet_cols = [c for c in VETTING_COLUMNS if c in df_use.columns]
                         new_cache = df_use[[_id_col] + vet_cols].copy()

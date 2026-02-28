@@ -40,6 +40,15 @@ STAGE_SIGNATURES: dict[str, list[str]] = {
         "gaia_var_flag",
         "vetting_likely_known",
     ],
+    "external_lcs": [
+        "atlas_has_phot",
+        "ztf_lc_n_det",
+        "tess_n_sectors",
+        "kepler_n_quarters",
+        "aavso_lc_n_points",
+        "ps1_lc_n_points",
+        "crts_lc_n_points",
+    ],
 }
 
 
@@ -70,6 +79,8 @@ def detect_pipeline_status(payload: dict) -> dict[str, str]:
 def run_missing_stages(
     conn: sqlite3.Connection,
     candidate_id: str,
+    progress_callback: Callable[[str], None] | None = None,
+    force_stages: list[str] | None = None,
 ) -> list[str]:
     """Detect and run missing pipeline stages for a candidate.
 
@@ -80,6 +91,8 @@ def run_missing_stages(
         "SELECT payload_json, lc_path FROM candidates WHERE candidate_id = ?",
         (candidate_id,),
     ).fetchone()
+    conn.commit()  # Release structural read lock during heavy API wait times
+    
     if row is None:
         raise ValueError(f"Candidate {candidate_id} not found in DB")
 
@@ -90,30 +103,50 @@ def run_missing_stages(
     status = detect_pipeline_status(payload)
     stages_run: list[str] = []
 
+    def p(msg: str):
+        if progress_callback:
+            progress_callback(msg)
+        else:
+            print(f"[pipeline] {msg}")
+
     # 3. Run missing stages in order
-    if status.get("stats") in ("missing", "partial"):
+    force = force_stages or []
+
+    if status.get("stats") in ("missing", "partial") or "stats" in force:
         if lc_path and Path(lc_path).exists():
-            _run_stats_stage(payload, lc_path)
+            p("Computing LC stats...")
+            _run_stats_stage(payload, lc_path, p)
             stages_run.append("stats")
 
-    if status.get("events") in ("missing", "partial"):
+    if status.get("events") in ("missing", "partial") or "events" in force:
         if lc_path and Path(lc_path).exists():
-            _run_events_stage(payload, lc_path)
+            p("Running event detection...")
+            _run_events_stage(payload, lc_path, p)
             stages_run.append("events")
 
-    if status.get("characterize") in ("missing", "partial"):
+    if status.get("characterize") in ("missing", "partial") or "characterize" in force:
         ra = payload.get("ra_deg")
         dec = payload.get("dec_deg")
         if ra is not None and dec is not None:
-            _run_characterize_stage(payload)
+            p("Characterizing...")
+            _run_characterize_stage(payload, p)
             stages_run.append("characterize")
 
-    if status.get("vetting") in ("missing", "partial"):
+    if status.get("vetting") in ("missing", "partial") or "vetting" in force:
         ra = payload.get("ra_deg")
         dec = payload.get("dec_deg")
         if ra is not None and dec is not None:
-            _run_vetting_stage(payload)
+            p("Vetting crossmatches...")
+            _run_vetting_stage(payload, p)
             stages_run.append("vetting")
+
+    if status.get("external_lcs") in ("missing", "partial") or "external_lcs" in force:
+        ra = payload.get("ra_deg")
+        dec = payload.get("dec_deg")
+        if ra is not None and dec is not None:
+            p("Fetching external LCs...")
+            _run_external_lcs_stage(payload, output_dir=_resolve_output_dir(conn, candidate_id), p=p)
+            stages_run.append("external_lcs")
 
     # 4. Write updated payload back to DB
     if stages_run:
@@ -169,7 +202,7 @@ def update_candidate_payload(
 # ---------------------------------------------------------------------------
 
 
-def _run_stats_stage(payload: dict, lc_path: str) -> None:
+def _run_stats_stage(payload: dict, lc_path: str, p: Callable | None = None) -> None:
     """Run compute_stats and merge results into payload."""
     try:
         from malca.stats import compute_stats
@@ -179,10 +212,11 @@ def _run_stats_stage(payload: dict, lc_path: str) -> None:
         if isinstance(summary, dict):
             payload.update(summary)
     except Exception as e:
-        print(f"[pipeline] Stats stage failed: {e}")
+        if p: p(f"Stats stage failed: {e}")
+        else: print(f"[pipeline] Stats stage failed: {e}")
 
 
-def _run_events_stage(payload: dict, lc_path: str) -> None:
+def _run_events_stage(payload: dict, lc_path: str, p: Callable | None = None) -> None:
     """Run process_lightcurve and merge results into payload."""
     try:
         from malca.events import process_lightcurve
@@ -216,39 +250,36 @@ def _run_events_stage(payload: dict, lc_path: str) -> None:
         if isinstance(result, dict):
             payload.update(result)
     except Exception as e:
-        print(f"[pipeline] Events stage failed: {e}")
+        if p: p(f"Events stage failed: {e}")
+        else: print(f"[pipeline] Events stage failed: {e}")
 
 
-def _run_characterize_stage(payload: dict) -> None:
+def _run_characterize_stage(payload: dict, p: Callable | None = None) -> None:
     """Run characterize_candidates_df on a 1-row DataFrame."""
     try:
         from malca.characterize import characterize_candidates_df
         df = pd.DataFrame([payload])
-        df_out = characterize_candidates_df(df)
+        df_out = characterize_candidates_df(df, progress_callback=p)
         if isinstance(df_out, pd.DataFrame) and not df_out.empty:
             row = df_out.iloc[0].to_dict()
             for k, v in row.items():
                 if v is not None and not (isinstance(v, float) and np.isnan(v)):
                     payload[k] = v
     except Exception as e:
-        print(f"[pipeline] Characterize stage failed: {e}")
+        if p: p(f"Characterize stage failed: {e}")
+        else: print(f"[pipeline] Characterize stage failed: {e}")
 
 
-def _run_vetting_stage(payload: dict) -> None:
+def _run_vetting_stage(payload: dict, p: Callable | None = None) -> None:
     """Run vet_candidates on a 1-row DataFrame."""
     try:
         from malca.vetting import vet_candidates
         df = pd.DataFrame([payload])
         df_out = vet_candidates(
             df,
-            run_asassn_var=False,
-            run_ztf_var=False,
-            run_tns=False,
-            run_alerce=False,
             run_atlas=False,
-            run_erosita=False,
-            run_neowise_lc=False,
-            run_pm_check=False,
+            # (other vetting happens unconditionally in vet_candidates if columns missing)
+            progress_callback=p,
         )
         if isinstance(df_out, pd.DataFrame) and not df_out.empty:
             row = df_out.iloc[0].to_dict()
@@ -256,4 +287,40 @@ def _run_vetting_stage(payload: dict) -> None:
                 if v is not None and not (isinstance(v, float) and np.isnan(v)):
                     payload[k] = v
     except Exception as e:
-        print(f"[pipeline] Vetting stage failed: {e}")
+        if p: p(f"Vetting stage failed: {e}")
+        else: print(f"[pipeline] Vetting stage failed: {e}")
+
+
+def _resolve_output_dir(conn: sqlite3.Connection, candidate_id: str) -> Path:
+    """Resolve the results output directory for a candidate's run."""
+    row = conn.execute(
+        "SELECT source_path FROM candidates WHERE candidate_id = ?",
+        (candidate_id,),
+    ).fetchone()
+    if row and row[0]:
+        src = Path(str(row[0]))
+        # If source_path is under a run directory, use its results/ dir
+        if src.parent.name == "results":
+            return src.parent
+        if (src.parent / "results").is_dir():
+            return src.parent / "results"
+    # Fallback: use the default output directory
+    default = Path(__file__).resolve().parents[2] / "output" / "results"
+    default.mkdir(parents=True, exist_ok=True)
+    return default
+
+
+def _run_external_lcs_stage(payload: dict, output_dir: Path, p: Callable | None = None) -> None:
+    """Run fetch_external_lcs on a 1-row DataFrame."""
+    try:
+        from malca.vetting import fetch_external_lcs
+        df = pd.DataFrame([payload])
+        df_out = fetch_external_lcs(df, output_dir=output_dir, progress_callback=p)
+        if isinstance(df_out, pd.DataFrame) and not df_out.empty:
+            row = df_out.iloc[0].to_dict()
+            for k, v in row.items():
+                if v is not None and not (isinstance(v, float) and np.isnan(v)):
+                    payload[k] = v
+    except Exception as e:
+        if p: p(f"External LCs stage failed: {e}")
+        else: print(f"[pipeline] External LCs stage failed: {e}")

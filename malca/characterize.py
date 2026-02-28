@@ -99,6 +99,7 @@ from malca.config.config_characterize import (
     SFR_MAX_DIST_KPC, SFR_DIST_TOLERANCE_FRACTION, SFR_CATALOG,
     BANYAN_MIN_ASSOC_PROB, IPHAS_HA_EXCESS_THRESHOLD,
     GALEX_MAX_SEP_ARCSEC, APASS_MAX_SEP_ARCSEC, ALLWISE_MAX_SEP_ARCSEC,
+    TMASS_MAX_SEP_ARCSEC,
 )
 from malca.config.config_paths import (
     VSX_CROSSMATCH_PATH, STARHORSE_DEFAULT_PATH, STARHORSE_TAP_URL,
@@ -938,6 +939,65 @@ def crossmatch_allwise_w3w4(df: pd.DataFrame, max_sep_arcsec: float = ALLWISE_MA
     return df
 
 
+def crossmatch_2mass(df: pd.DataFrame, max_sep_arcsec: float = TMASS_MAX_SEP_ARCSEC) -> pd.DataFrame:
+    """
+    Crossmatch to 2MASS PSC (Vizier II/246/out) for J, H, Ks magnitudes.
+    Used when Gaia merge is skipped (e.g. fetch path) so YSO classification can run.
+    """
+    if df.empty:
+        return df
+    df = df.copy()
+
+    for col in ["tmass_j", "tmass_j_err", "tmass_h", "tmass_h_err", "tmass_k", "tmass_k_err"]:
+        if col not in df.columns:
+            df[col] = np.nan
+
+    valid_mask = df["ra"].notna() & df["dec"].notna()
+    if not valid_mask.any():
+        return df
+
+    source_table = Table()
+    source_table["_idx"] = np.where(valid_mask)[0]
+    source_table["ra"] = df.loc[valid_mask, "ra"].values
+    source_table["dec"] = df.loc[valid_mask, "dec"].values
+
+    print("Running 2MASS XMatch for J/H/Ks photometry...")
+    try:
+        result = XMatch.query(
+            cat1=source_table,
+            cat2="vizier:II/246/out",
+            max_distance=max_sep_arcsec * u.arcsec,
+            colRA1="ra", colDec1="dec",
+            colRA2="RAJ2000", colDec2="DEJ2000",
+        )
+        if result is not None and len(result) > 0:
+            result_df = result.to_pandas()
+            if "angDist" in result_df.columns:
+                result_df = result_df.sort_values("angDist").drop_duplicates(subset="_idx", keep="first")
+            else:
+                result_df = result_df.drop_duplicates(subset="_idx", keep="first")
+
+            col_map = {
+                "Jmag": "tmass_j", "e_Jmag": "tmass_j_err",
+                "Hmag": "tmass_h", "e_Hmag": "tmass_h_err",
+                "Kmag": "tmass_k", "e_Kmag": "tmass_k_err",
+            }
+            for viz_col, my_col in col_map.items():
+                if viz_col not in result_df.columns:
+                    continue
+                for _, row in result_df.iterrows():
+                    idx = int(row["_idx"])
+                    val = row.get(viz_col, np.nan)
+                    if pd.notna(val):
+                        df.at[df.index[idx], my_col] = float(val)
+
+            print(f"2MASS: {len(result_df)} matches found")
+    except Exception as e:
+        print(f"2MASS XMatch error: {e}")
+
+    return df
+
+
 # =============================================================================
 # STAR-FORMING REGION PROXIMITY (Prisinzano+2022)
 # =============================================================================
@@ -1480,8 +1540,15 @@ def characterize_candidates_df(
     checkpoint_path: Path | None = None,
 ) -> pd.DataFrame:
     """Characterize candidates and return an enriched dataframe."""
-    if "asas_sn_id" not in df.columns:
-        print("Warning: characterize skipped: missing 'asas_sn_id' column")
+    # If source_id + coordinates already present (e.g. from SkyPatrol fetch),
+    # we can skip the crossmatch+Gaia query and proceed to enrichment modules.
+    _has_gaia_already = (
+        "source_id" in df.columns
+        and "ra" in df.columns
+        and "dec" in df.columns
+    )
+    if not _has_gaia_already and "asas_sn_id" not in df.columns:
+        print("Warning: characterize skipped: missing 'asas_sn_id' (and no source_id+coords)")
         return df
 
     # Load checkpoint if available
@@ -1499,6 +1566,29 @@ def characterize_candidates_df(
         except Exception as e:
             print(f"Warning: could not load characterization checkpoint: {e}")
             df_char = None
+
+    # If source_id + coords already present, skip the crossmatch+Gaia block
+    if df_char is None and _has_gaia_already:
+        print("Gaia data already present (source_id + coords), skipping crossmatch+Gaia query")
+        df_char = df.copy()
+        if "source_id" in df_char.columns:
+            df_char["source_id"] = df_char["source_id"].astype(str)
+        _ra_col = "ra"
+        _dec_col = "dec"
+        _gc_mask = np.isfinite(df_char[_ra_col].astype(float)) & np.isfinite(df_char[_dec_col].astype(float))
+        if _gc_mask.any():
+            _gc_coords = SkyCoord(
+                ra=df_char.loc[_gc_mask, _ra_col].values * u.deg,
+                dec=df_char.loc[_gc_mask, _dec_col].values * u.deg,
+                frame="icrs",
+            )
+            df_char.loc[_gc_mask, "gal_l"] = _gc_coords.galactic.l.deg
+            df_char.loc[_gc_mask, "gal_b"] = _gc_coords.galactic.b.deg
+        if "gal_l" not in df_char.columns:
+            df_char["gal_l"] = np.nan
+            df_char["gal_b"] = np.nan
+        if checkpoint_path:
+            _save_char_checkpoint(df_char, checkpoint_path)
 
     # Run Gaia merge + galactic coords if not already done (checkpoint has source_id)
     if df_char is None or "source_id" not in df_char.columns:
@@ -1659,6 +1749,8 @@ def characterize_candidates_df(
                     cache_file=starhorse_cache,
                 )
                 if not sh_df.empty:
+                    df_char["source_id"] = df_char["source_id"].astype(str)
+                    sh_df["source_id"] = sh_df["source_id"].astype(str)
                     df_char = df_char.merge(sh_df, on="source_id", how="left", suffixes=("", "_sh"))
                     if "age50" in df_char.columns:
                         df_char = classify_galactic_population(df_char)
@@ -1686,6 +1778,8 @@ def characterize_candidates_df(
             _save_char_checkpoint(df_char, checkpoint_path)
 
     if not _module_completed(df_char, "yso"):
+        if ("tmass_j" not in df_char.columns or df_char["tmass_j"].isna().all()) and "ra" in df_char.columns and "dec" in df_char.columns and df_char["ra"].notna().any():
+            df_char = crossmatch_2mass(df_char)
         if "tmass_j" in df_char.columns:
             print("Classifying YSOs...")
             try:

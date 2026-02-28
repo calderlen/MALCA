@@ -634,6 +634,11 @@ def build_external_lookup_links(
             "TNS",
             f"https://www.wis-tns.org/object/{quote(tns_slug)}",
         ))
+    elif has_coords:
+        links.append((
+            "TNS",
+            f"https://www.wis-tns.org/search?ra={ra}&decl={dec}&radius={radius_arcsec}&coords_unit=arcsec",
+        ))
 
     # -- AAVSO VSX ------------------------------------------------------------
     if has_coords:

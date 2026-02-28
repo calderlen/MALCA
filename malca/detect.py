@@ -684,7 +684,7 @@ def main():
     parser.add_argument("--characterize-crossmatch", type=Path, default=VSX_CROSSMATCH_PATH, help="ASAS-SN x VSX crossmatch file for characterize step")
     parser.add_argument("--characterize-chunk-size", type=int, default=GAIA_CHUNK_SIZE, help="Gaia query chunk size for characterize step")
     parser.add_argument("--characterize-starhorse", type=str, default="tap", help="StarHorse mode/path for characterize step (default: tap)")
-    parser.add_argument("--characterize-starhorse-cache", type=Path, default=None, help="Optional StarHorse TAP cache parquet path (default: ~/.cache/malca/catalogs/starhorse_tap_cache.parquet)")
+    parser.add_argument("--characterize-starhorse-cache", type=Path, default=None, help="Optional StarHorse TAP cache parquet path (default: output/cache/catalogs/starhorse_tap_cache.parquet)")
     parser.add_argument("--characterize-unwise-checkpoint-every", type=int, default=UNWISE_CHECKPOINT_EVERY, help="Persist unWISE checkpoint every N completed candidates")
     parser.add_argument("--no-characterize-banyan", dest="characterize_banyan", action="store_false", help="Disable BANYAN Sigma enrichment in characterize step")
     parser.add_argument("--no-characterize-iphas", dest="characterize_iphas", action="store_false", help="Disable IPHAS enrichment in characterize step")

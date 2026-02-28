@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import pandas as pd
@@ -27,6 +28,17 @@ BASELINE_FUNCTIONS = {
 }
 
 REQUIRED_COLUMNS = {"JD", "mag", "v_g_band"}
+
+
+def _mag_to_flux(mag: np.ndarray) -> np.ndarray:
+    """Convert magnitude to flux: flux = 10^(-0.4 * mag)."""
+    return np.power(10.0, -0.4 * mag)
+
+
+def _flux_err_from_mag_err(flux: np.ndarray, mag_err: np.ndarray) -> np.ndarray:
+    """Propagate magnitude error to flux: flux_err ≈ 0.921 * flux * mag_err."""
+    return np.where(np.isfinite(flux) & np.isfinite(mag_err), 0.921 * flux * mag_err, np.nan)
+
 
 # Keep plotting caches bounded; large values can inflate long-running GUI memory.
 _CACHE_LIMIT = 16
@@ -490,6 +502,242 @@ def _status_figure(message: str, theme: str = "dark") -> go.Figure:
     return fig
 
 
+_EXTERNAL_LC_SPECS: dict[str, dict] = {
+    "atlas": {
+        "time_col": "MJD",
+        "time_offset": 2400000.5,  # MJD already in MJD, but check for JD
+        "jd_system": "mjd",
+        "bands": {
+            "c": {"color": "#00ccff", "marker": "diamond", "label": "ATLAS c"},
+            "o": {"color": "#ff8c42", "marker": "diamond", "label": "ATLAS o"},
+        },
+        "filter_col": "F",
+        "mag_col": "m",
+        "err_col": "dm",
+    },
+    "ztf": {
+        "time_col": "mjd",
+        "jd_system": "mjd",
+        "bands": {
+            "zg": {"color": "#44aa44", "marker": "triangle-up", "label": "ZTF g"},
+            "zr": {"color": "#dd4444", "marker": "triangle-up", "label": "ZTF r"},
+            "zi": {"color": "#8844cc", "marker": "triangle-up", "label": "ZTF i"},
+        },
+        "filter_col": "band",
+        "mag_col": "mag",
+        "err_col": "magerr",
+    },
+    "gaia_epoch": {
+        "time_col": "time",
+        "jd_system": "bjd_gaia",  # Gaia TCB in days since J2010.0 (JD 2455197.5)
+        "bands": {
+            "G": {"color": "#e8c547", "marker": "star", "label": "Gaia G"},
+        },
+        "filter_col": "band",
+        "mag_col": "mag",
+        "err_col": "mag_error",
+    },
+    "tess": {
+        "time_col": "time",
+        "jd_system": "btjd",  # BTJD = BJD - 2457000.0
+        "is_flux": True,
+        "bands": {
+            "TESS": {"color": "#cc66ff", "marker": "hexagon", "label": "TESS"},
+        },
+        "filter_col": None,
+        "mag_col": "flux",
+        "err_col": "flux_err",
+    },
+    "kepler": {
+        "time_col": "time",
+        "jd_system": "bkjd",  # BKJD = BJD - 2454833.0
+        "is_flux": True,
+        "bands": {
+            "Kepler": {"color": "#ffb6c1", "marker": "hexagon", "label": "Kepler/K2"},
+        },
+        "filter_col": None,
+        "mag_col": "flux",
+        "err_col": "flux_err",
+    },
+    "aavso": {
+        "time_col": "mjd",
+        "jd_system": "mjd",
+        "bands": {
+            "V": {"color": "#00ff00", "marker": "circle", "label": "AAVSO V"},
+            "B": {"color": "#0000ff", "marker": "circle", "label": "AAVSO B"},
+            "CV": {"color": "#aaaaaa", "marker": "circle", "label": "AAVSO CV"},
+        },
+        "filter_col": "filter",
+        "mag_col": "mag",
+        "err_col": "mag_err",
+    },
+    "ps1": {
+        "time_col": "obsTime",
+        "jd_system": "mjd",
+        "bands": {
+            "g": {"color": "#44aa44", "marker": "star", "label": "PS1 g"},
+            "r": {"color": "#dd4444", "marker": "star", "label": "PS1 r"},
+            "i": {"color": "#8844cc", "marker": "star", "label": "PS1 i"},
+            "z": {"color": "#ccaa44", "marker": "star", "label": "PS1 z"},
+            "y": {"color": "#aaaa33", "marker": "star", "label": "PS1 y"},
+        },
+        "filter_col": "filter",
+        "mag_col": "mag",
+        "err_col": "mag_err",
+    },
+    "crts": {
+        "time_col": "mjd",
+        "jd_system": "mjd",
+        "bands": {
+            "CV": {"color": "#bbbbbb", "marker": "square", "label": "CRTS CV"},
+        },
+        "filter_col": None,
+        "mag_col": "mag",
+        "err_col": "magerr",
+    },
+}
+
+
+def _overlay_external_lcs(
+    fig: go.Figure,
+    raw_row: int,
+    external_lcs: dict[str, Path],
+    jd_offset: float,
+    colors: dict,
+    theme: str,
+    is_flux: bool,
+    ext_source_ranges: dict[str, tuple[int, int]],
+    trace_offset: int,
+) -> None:
+    """Load external LC parquets and overlay traces on the raw magnitude panel."""
+    current_trace = len(fig.data)
+
+    for source_name, lc_path in external_lcs.items():
+        spec = _EXTERNAL_LC_SPECS.get(source_name)
+        if spec is None:
+            continue
+        try:
+            lc_path = Path(lc_path)
+            if not lc_path.exists():
+                continue
+            df_ext = pd.read_parquet(lc_path)
+            if df_ext.empty:
+                continue
+        except Exception:
+            continue
+
+        start_idx = len(fig.data)
+
+        # Resolve time column
+        time_col = spec["time_col"]
+        actual_time = None
+        for c in df_ext.columns:
+            if c.lower() == time_col.lower():
+                actual_time = c
+                break
+        if actual_time is None:
+            continue
+
+        t = pd.to_numeric(df_ext[actual_time], errors="coerce").to_numpy()
+
+        # Convert to JD_plot (JD - jd_offset, same as ASAS-SN)
+        jd_sys = spec.get("jd_system", "mjd")
+        if jd_sys == "mjd":
+            # MJD → JD → JD_plot
+            jd = t + 2400000.5
+            x_plot = jd - jd_offset
+        elif jd_sys == "bjd_gaia":
+            # Gaia TCB days since J2010.0 → JD → JD_plot
+            jd = t + 2455197.5
+            x_plot = jd - jd_offset
+        elif jd_sys == "btjd":
+            # BTJD → JD → JD_plot
+            jd = t + 2457000.0
+            x_plot = jd - jd_offset
+        elif jd_sys == "bkjd":
+            # BKJD → JD → JD_plot
+            jd = t + 2454833.0
+            x_plot = jd - jd_offset
+        else:
+            x_plot = t - jd_offset
+
+        is_flux_source = spec.get("is_flux", False)
+        filter_col = spec.get("filter_col")
+        mag_col = spec["mag_col"]
+        err_col = spec.get("err_col", "")
+
+        # Resolve actual column names (case-insensitive)
+        col_lookup = {c.lower(): c for c in df_ext.columns}
+        actual_mag = col_lookup.get(mag_col.lower())
+        actual_err = col_lookup.get(err_col.lower()) if err_col else None
+        actual_filt = col_lookup.get(filter_col.lower()) if filter_col else None
+
+        if actual_mag is None:
+            continue
+
+        for band_key, band_info in spec["bands"].items():
+            if actual_filt:
+                mask = df_ext[actual_filt].astype(str) == band_key
+                band_df = df_ext[mask]
+                band_x = x_plot[mask.to_numpy()]
+            else:
+                band_df = df_ext
+                band_x = x_plot
+
+            if band_df.empty:
+                continue
+
+            y = pd.to_numeric(band_df[actual_mag], errors="coerce").to_numpy()
+            good = np.isfinite(band_x) & np.isfinite(y)
+            if not good.any():
+                continue
+
+            # Convert flux source to mag if main plot is mag mode (skip TESS overlay in mag mode)
+            if is_flux_source and not is_flux:
+                continue  # Can't meaningfully overlay flux on mag
+            if not is_flux_source and is_flux:
+                y = np.power(10.0, -0.4 * y)
+
+            err_array = None
+            if actual_err and actual_err in band_df.columns:
+                ev = pd.to_numeric(band_df[actual_err], errors="coerce").to_numpy()
+                if np.isfinite(ev[good]).any():
+                    if not is_flux_source and is_flux:
+                        err_array = 0.921 * y[good] * ev[good]
+                    else:
+                        err_array = ev[good]
+
+            fig.add_trace(
+                go.Scatter(
+                    x=band_x[good],
+                    y=y[good],
+                    mode="markers",
+                    name=band_info["label"],
+                    marker={
+                        "size": 6,
+                        "symbol": band_info["marker"],
+                        "color": band_info["color"],
+                        "opacity": 0.8,
+                        "line": {"width": 0.5, "color": "rgba(255,255,255,0.5)"},
+                    },
+                    error_y={"type": "data", "array": err_array, "visible": err_array is not None, "thickness": 0.7, "width": 0, "color": band_info["color"]} if err_array is not None else None,
+                    hovertemplate=(
+                        f"<b>{band_info['label']}</b><br>"
+                        "JD plot: %{x:.5f}<br>"
+                        + ("Flux: %{y:.4e}<br>" if is_flux_source else "Mag: %{y:.4f}<br>")
+                        + "<extra></extra>"
+                    ),
+                    legendgroup=source_name,
+                ),
+                row=raw_row,
+                col=1,
+            )
+
+        end_idx = len(fig.data)
+        if end_idx > start_idx:
+            ext_source_ranges[source_name.upper().replace("_", " ")] = (start_idx, end_idx)
+
+
 def build_interactive_lightcurve_figure(
     payload: dict,
     *,
@@ -509,6 +757,8 @@ def build_interactive_lightcurve_figure(
     theme: str = "dark",
     residual_fraction: float = 0.28,
     baseline_opacity: float = 0.5,
+    yaxis_mode: Literal["mag", "flux"] = "mag",
+    external_lcs: dict[str, Path] | None = None,
 ) -> dict:
     """Build a native Plotly light-curve figure for review mode."""
     colors = _theme_palette(theme)
@@ -690,6 +940,7 @@ def build_interactive_lightcurve_figure(
 
     band_labels = {0: "g", 1: "V"}
     band_markers = {0: "circle", 1: "square"}
+    is_flux = yaxis_mode == "flux"
 
     for band in (0, 1):
         bdf = band_dfs.get(band)
@@ -706,10 +957,12 @@ def build_interactive_lightcurve_figure(
             hover = np.column_stack([cdf["JD"].to_numpy(), err, resid, baseline])
 
             if show_raw_mag:
+                y_raw = _mag_to_flux(cdf["mag"].to_numpy()) if is_flux else cdf["mag"].to_numpy()
+                err_raw = _flux_err_from_mag_err(y_raw, err) if is_flux else err
                 fig.add_trace(
                     go.Scatter(
                         x=cdf["JD_plot"],
-                        y=cdf["mag"],
+                        y=y_raw,
                         mode="markers",
                         name=f"{cam} ({band_labels[band]})",
                         marker={
@@ -718,14 +971,14 @@ def build_interactive_lightcurve_figure(
                             "color": color,
                             "line": {"width": 0.8, "color": colors["marker_line"]},
                         },
-                        error_y={"type": "data", "array": err, "visible": True, "thickness": 1, "width": 0, "color": color},
+                        error_y={"type": "data", "array": err_raw, "visible": True, "thickness": 1, "width": 0, "color": color},
                         customdata=hover,
                         hovertemplate=(
                             "<b>%{fullData.name}</b><br>"
                             "JD: %{customdata[0]:.5f}<br>"
                             "JD plot: %{x:.5f}<br>"
-                            "Mag: %{y:.4f}<br>"
-                            "Err: %{customdata[1]:.4f}<br>"
+                            + ("Flux: %{y:.4e}<br>" if is_flux else "Mag: %{y:.4f}<br>")
+                            + "Err: %{customdata[1]:.4f}<br>"
                             "Resid: %{customdata[2]:.4f}<br>"
                             "Baseline: %{customdata[3]:.4f}<extra></extra>"
                         ),
@@ -735,10 +988,11 @@ def build_interactive_lightcurve_figure(
                 )
 
             if show_residuals:
+                y_resid = (_mag_to_flux(resid) - 1.0) if is_flux else resid
                 fig.add_trace(
                     go.Scatter(
                         x=cdf["JD_plot"],
-                        y=resid,
+                        y=y_resid,
                         mode="markers",
                         showlegend=False,
                         marker={
@@ -751,7 +1005,7 @@ def build_interactive_lightcurve_figure(
                         hovertemplate=(
                             "<b>%{fullData.name}</b><br>"
                             "JD: %{customdata[0]:.5f}<br>"
-                            "Residual: %{y:.4f}<extra></extra>"
+                            + ("ΔF/F: %{y:.4f}<extra></extra>" if is_flux else "Residual: %{y:.4f}<extra></extra>")
                         ),
                     ),
                     row=row_map['resid'],
@@ -763,15 +1017,16 @@ def build_interactive_lightcurve_figure(
                 cbase = bdf[(bdf["camera_label"] == cam) & np.isfinite(bdf["baseline"])].sort_values("JD_plot")
                 if cbase.empty:
                     continue
+                y_base = _mag_to_flux(cbase["baseline"].to_numpy()) if is_flux else cbase["baseline"].to_numpy()
                 fig.add_trace(
                     go.Scatter(
                         x=cbase["JD_plot"],
-                        y=cbase["baseline"],
+                        y=y_base,
                         mode="lines",
                         showlegend=False,
                         line={"width": 1.6, "color": _stable_camera_color(cam)},
                         opacity=baseline_opacity,
-                        hovertemplate="Baseline: %{y:.4f}<extra></extra>",
+                        hovertemplate=("Baseline flux: %{y:.4e}<extra></extra>" if is_flux else "Baseline: %{y:.4f}<extra></extra>"),
                     ),
                     row=row_map['raw'],
                     col=1,
@@ -779,7 +1034,10 @@ def build_interactive_lightcurve_figure(
 
     event_entries = _event_entries(payload, jd_offset, run_params)
     if show_event_markers and show_raw_mag:
-        y_ref = float(df["mag"].min()) if not df.empty else 0.0
+        if is_flux and not df.empty:
+            y_ref = float(_mag_to_flux(np.array([df["mag"].min()]))[0])
+        else:
+            y_ref = float(df["mag"].min()) if not df.empty else 0.0
         for entry in event_entries:
             color = entry["base_color"]
             conf = float(entry["confidence"])
@@ -861,11 +1119,13 @@ def build_interactive_lightcurve_figure(
                 color = _stable_camera_color(cam)
                 err = cdf["error"].to_numpy() if "error" in cdf.columns else np.full(len(cdf), np.nan)
                 resid = cdf["resid"].to_numpy() if "resid" in cdf.columns else cdf["mag"].to_numpy()
+                y_phase = (_mag_to_flux(resid) - 1.0) if is_flux else resid
+                err_phase = _flux_err_from_mag_err(_mag_to_flux(resid), err) if is_flux else err
                 hover = np.column_stack([cdf["JD"].to_numpy(), err, cdf["mag"].to_numpy()])
                 fig.add_trace(
                     go.Scatter(
                         x=cdf["phase"],
-                        y=resid,
+                        y=y_phase,
                         mode="markers",
                         showlegend=False,
                         marker={
@@ -874,13 +1134,13 @@ def build_interactive_lightcurve_figure(
                             "color": color,
                             "line": {"width": 0.7, "color": "rgba(10,10,10,0.95)"},
                         },
-                        error_y={"type": "data", "array": err, "visible": True, "thickness": 1, "width": 0, "color": color},
+                        error_y={"type": "data", "array": err_phase, "visible": True, "thickness": 1, "width": 0, "color": color},
                         customdata=hover,
                         hovertemplate=(
                             "<b>Phase-folded (residual)</b><br>"
                             "Phase: %{x:.4f}<br>"
-                            "Resid: %{y:.4f}<br>"
-                            "JD: %{customdata[0]:.5f}<br>"
+                            + ("ΔF/F: %{y:.4f}<br>" if is_flux else "Resid: %{y:.4f}<br>")
+                            + "JD: %{customdata[0]:.5f}<br>"
                             "Err: %{customdata[1]:.4f}<br>"
                             "Raw mag: %{customdata[2]:.4f}<extra></extra>"
                         ),
@@ -896,36 +1156,64 @@ def build_interactive_lightcurve_figure(
 
     if show_raw_mag:
         # Explicitly calculate range to ensure full visibility
-        y_vals = df["mag"].to_numpy()
-        if show_baseline and "baseline" in df.columns:
-            # Include baseline in range calculation
-            b_vals = df["baseline"].dropna().to_numpy()
-            if b_vals.size > 0:
-                y_vals = np.concatenate([y_vals, b_vals])
+        if is_flux:
+            y_vals = _mag_to_flux(df["mag"].to_numpy())
+            if show_baseline and "baseline" in df.columns:
+                b_vals = df["baseline"].dropna().to_numpy()
+                if b_vals.size > 0:
+                    y_vals = np.concatenate([y_vals, _mag_to_flux(b_vals)])
+        else:
+            y_vals = df["mag"].to_numpy()
+            if show_baseline and "baseline" in df.columns:
+                b_vals = df["baseline"].dropna().to_numpy()
+                if b_vals.size > 0:
+                    y_vals = np.concatenate([y_vals, b_vals])
         
         if y_vals.size > 0:
             y_min, y_max = np.nanmin(y_vals), np.nanmax(y_vals)
             y_pad = (y_max - y_min) * 0.05
             if y_pad == 0:
-                y_pad = 0.5
-            # Reversed range: max at bottom, min at top
-            fig.update_yaxes(
-                title_text="Magnitude [mag]", 
-                row=row_map['raw'], 
-                col=1, 
-                range=[y_max + y_pad, y_min - y_pad]
-            )
+                y_pad = 0.5 if not is_flux else y_max * 0.05
+            if is_flux:
+                fig.update_yaxes(
+                    title_text="Flux [arb]",
+                    row=row_map['raw'],
+                    col=1,
+                    range=[max(0, y_min - y_pad), y_max + y_pad],
+                )
+            else:
+                fig.update_yaxes(
+                    title_text="Magnitude [mag]",
+                    row=row_map['raw'],
+                    col=1,
+                    range=[y_max + y_pad, y_min - y_pad],
+                )
         else:
-            fig.update_yaxes(title_text="Magnitude [mag]", row=row_map['raw'], col=1, autorange="reversed")
+            fig.update_yaxes(
+                title_text="Flux [arb]" if is_flux else "Magnitude [mag]",
+                row=row_map['raw'],
+                col=1,
+                autorange="reversed" if not is_flux else True,
+            )
     
     if show_residuals:
-        fig.update_yaxes(title_text="Residual [mag]", row=row_map['resid'], col=1, autorange="reversed")
+        fig.update_yaxes(
+            title_text="ΔF/F (flux residual)" if is_flux else "Residual [mag]",
+            row=row_map['resid'],
+            col=1,
+            autorange="reversed" if not is_flux else True,
+        )
         fig.add_hline(y=0.0, line_color=colors["guide_line"], line_dash="dot", row=row_map['resid'], col=1)
 
     if phase_enabled and 'phase' in row_map and phase_period is not None:
         source_tag = f", {phase_source}" if phase_source else ""
         fig.update_xaxes(title_text=f"Phase (P={phase_period:.5f} d{source_tag})", row=row_map['phase'], col=1, range=[-0.02, 2.02])
-        fig.update_yaxes(title_text="Phase residual [mag]", row=row_map['phase'], col=1, autorange="reversed")
+        fig.update_yaxes(
+            title_text="Phase ΔF/F" if is_flux else "Phase residual [mag]",
+            row=row_map['phase'],
+            col=1,
+            autorange="reversed" if not is_flux else True,
+        )
 
     # Set JD axis on the bottom-most plot that uses JD
     jd_axis_row = None
@@ -939,6 +1227,12 @@ def build_interactive_lightcurve_figure(
         # Link x-axes if both raw and resid are present
         if show_raw_mag and show_residuals:
              fig.update_xaxes(matches="x", row=row_map['resid'], col=1)
+
+    # Overlay external light curves on raw magnitude panel
+    ext_trace_start = len(fig.data)
+    ext_source_ranges: dict[str, tuple[int, int]] = {}
+    if external_lcs and 'raw' in row_map:
+        _overlay_external_lcs(fig, row_map['raw'], external_lcs, jd_offset, colors, theme, is_flux, ext_source_ranges, ext_trace_start)
 
     fig.update_layout(
         title=_build_title(payload, df),
@@ -957,6 +1251,38 @@ def build_interactive_lightcurve_figure(
         height=None,
         uirevision=uirevision_key,
     )
+
+    # Add toggle buttons for external LC sources
+    if ext_source_ranges:
+        n_total = len(fig.data)
+        all_visible = [True] * n_total
+
+        buttons = [dict(label="All", method="update", args=[{"visible": all_visible}])]
+        # ASAS-SN only (hide external traces)
+        asassn_only = [True] * ext_trace_start + [False] * (n_total - ext_trace_start)
+        buttons.append(dict(label="ASAS-SN only", method="update", args=[{"visible": asassn_only}]))
+
+        for source_name, (start, end) in ext_source_ranges.items():
+            vis = [True] * ext_trace_start + [False] * (n_total - ext_trace_start)
+            for i in range(start, end):
+                vis[i] = True
+            buttons.append(dict(label=source_name, method="update", args=[{"visible": vis}]))
+
+        fig.update_layout(
+            updatemenus=[dict(
+                type="buttons",
+                buttons=buttons,
+                direction="right",
+                x=0.0,
+                xanchor="left",
+                y=1.12,
+                yanchor="top",
+                showactive=True,
+                font=dict(size=9),
+                bgcolor="rgba(30,30,30,0.7)",
+            )]
+        )
+
     fig.update_xaxes(showgrid=True, gridcolor=colors["grid"], zeroline=False)
     fig.update_yaxes(showgrid=True, gridcolor=colors["grid"], zeroline=False)
 

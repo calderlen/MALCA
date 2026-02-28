@@ -208,9 +208,6 @@ def download_lightcurve_by_id(
                                      if k in ("asas_sn_id", "ra_deg", "dec_deg")})
                     catalog_info = enriched
 
-    if out.exists() and out.stat().st_size > 0:
-        return out, catalog_info
-
     # Download LC from master_list (which indexes all targets)
     lc = _download_lc([int(asas_sn_id)], id_col="asas_sn_id", catalog="master_list")
     if lc is None or lc.empty:
@@ -235,9 +232,6 @@ def download_lightcurve_by_gaia_id(
     catalog_info = _query_catalog_info(
         [int(gaia_id)], id_col="gaia_id", catalog="stellar_main"
     )
-
-    if out.exists() and out.stat().st_size > 0:
-        return out, catalog_info
 
     # Download via stellar_main (gaia_id lookup)
     lc = _download_lc([int(gaia_id)], id_col="gaia_id", catalog="stellar_main")
