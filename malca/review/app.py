@@ -77,6 +77,11 @@ from malca.review.interactive_plot import (
 )
 from malca.config.config_paths import VSX_CROSSMATCH_PATH, GAIA_CACHE_FILE
 from malca.config.config_characterize import GAIA_CHUNK_SIZE
+from malca.review.diagnostic_plots import (
+    build_cmd_figure,
+    build_ir_colorcolor_figure,
+    build_kiel_figure,
+)
 
 # Background callback manager for long-running fetch/import (DiskCache for local dev)
 try:
@@ -3793,6 +3798,16 @@ def create_layout():
                                 type='default',
                             ),
                         ], id='external-followup-details', open=False, className='metadata-sections', style={'margin-top': '0'}),
+                        html.Details([
+                            html.Summary('Diagnostic Plots', style={'cursor': 'pointer'}),
+                            dcc.Loading(
+                                html.Div(
+                                    id='diagnostic-plots-panel',
+                                    style={'padding': '8px 10px', 'display': 'grid', 'gap': '8px'},
+                                ),
+                                type='default',
+                            ),
+                        ], id='diagnostic-plots-details', open=False, className='metadata-sections', style={'margin-top': '0'}),
                         # Run config / reproducibility
                         html.Details([
                             html.Summary('Run Config', style={'cursor': 'pointer'}),
@@ -5316,6 +5331,39 @@ def update_external_followup_panel(is_open, candidate_id, theme_mode):
         payload = get_candidate_payload(conn, str(candidate_id)) or {}
 
     return _render_external_followup(payload, str(candidate_id), str(theme_mode or DEFAULT_THEME))
+
+
+def _render_diagnostic_plots(payload: dict, theme: str) -> list:
+    """Build diagnostic plot cards from candidate payload data."""
+    theme_tokens = _external_followup_theme(theme)
+    card_style = theme_tokens["card_style"]
+    cards = []
+    for builder in (build_cmd_figure, build_ir_colorcolor_figure, build_kiel_figure):
+        fig = builder(payload, theme)
+        if fig is not None:
+            cards.append(html.Div(
+                dcc.Graph(figure=fig, config={'displayModeBar': False},
+                          style={'height': '280px'}),
+                style=card_style,
+            ))
+    return cards
+
+
+@app.callback(
+    Output('diagnostic-plots-panel', 'children'),
+    [Input('diagnostic-plots-details', 'open'),
+     Input('current-candidate-id', 'data'),
+     Input('theme-mode-store', 'data')],
+    prevent_initial_call=False,
+)
+def update_diagnostic_plots(is_open, candidate_id, theme_mode):
+    """Render diagnostic plots for the current candidate."""
+    _ = is_open
+    if not candidate_id:
+        return []
+    with closing(db_connect(Path(DB_PATH))) as conn:
+        payload = get_candidate_payload(conn, str(candidate_id)) or {}
+    return _render_diagnostic_plots(payload, str(theme_mode or DEFAULT_THEME))
 
 
 @app.callback(
