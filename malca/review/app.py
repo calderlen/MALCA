@@ -55,6 +55,7 @@ from malca.review.store import (
     detect_run_directory_files,
     merge_vetting_results,
     get_distinct_values,
+    get_diagnostic_background,
 )
 from malca.review.metadata import (
     extract_review_metadata_grouped,
@@ -81,6 +82,8 @@ from malca.review.diagnostic_plots import (
     build_cmd_figure,
     build_ir_colorcolor_figure,
     build_kiel_figure,
+    build_rpm_figure,
+    build_uv_optical_figure,
 )
 
 # Background callback manager for long-running fetch/import (DiskCache for local dev)
@@ -1813,34 +1816,23 @@ def _run_config_mismatch_warnings(run_params: dict | None, overlays: set[str]) -
 
 
 def _render_run_config_panel(run_params: dict | None, run_params_path: Path | None, warnings: list[str]) -> list:
-    """Render compact run config cells with an inline warning row."""
-    status = "Loaded" if run_params else "Missing"
-
-    def _card(label: str, value: str, *, title: str | None = None, wide: bool = False, warning: bool = False) -> html.Div:
-        classes = ['run-config-item']
-        if wide:
-            classes.append('wide')
-        if warning:
-            classes.append('warning')
-        return html.Div([
-            html.Div(label, className='k'),
-            html.Div(value, className='v', title=title),
-        ], className=' '.join(classes))
-
-    cards = [
-        _card('Status', status),
-        _card(
-            'Path',
-            str(run_params_path) if run_params_path else 'not found',
-            title=str(run_params_path) if run_params_path else 'not found',
-        ),
+    """Render run config as simple meta-field rows (same style as stats/metadata)."""
+    rows: list[tuple[str, str]] = [
+        ('Status', 'Loaded' if run_params else 'Missing'),
+        ('Path', str(run_params_path) if run_params_path else 'not found'),
     ]
-    for label, value in _run_config_rows(run_params or {}):
-        cards.append(_card(label, value, title=value))
+    rows.extend(_run_config_rows(run_params or {}))
     if warnings:
-        warning_text = ' | '.join(warnings)
-        cards.append(_card('Warnings', warning_text, title=warning_text, wide=True, warning=True))
-    return cards
+        rows.append(('Warnings', ' | '.join(warnings)))
+
+    field_divs = [
+        html.Div([
+            html.Span(label, className='meta-field-label'),
+            html.Span(str(value), className='meta-field-value'),
+        ], className='meta-field-row')
+        for label, value in rows
+    ]
+    return [html.Div(field_divs, className='meta-grid')]
 
 
 def _render_repro_badge(run_params: dict | None, warnings: list[str]) -> html.Span:
@@ -1939,6 +1931,10 @@ def _render_vetting_banner(payload: dict | None, radius_arcsec: float = 10.0) ->
 
     cards = []
 
+    def _ok(v) -> bool:
+        """True if v is a non-empty, non-NaN string."""
+        return bool(v) and str(v).strip().lower() not in ('nan', '<na>')
+
     def _label(text: str) -> html.Span:
         return html.Span(text, className='vetting-banner-label')
 
@@ -1955,15 +1951,22 @@ def _render_vetting_banner(payload: dict | None, radius_arcsec: float = 10.0) ->
         ], className='vetting-banner-cell')
 
     # SIMBAD cell
-    simbad_id = payload.get('simbad_otype') or payload.get('simbad_main_id')
-    if simbad_id:
+    simbad_id = payload.get('simbad_main_id')
+    simbad_otype = payload.get('simbad_otype')
+    if _ok(simbad_id) or _ok(simbad_otype):
         refs = payload.get('simbad_nbref')
-        ref_str = f" ({refs} refs)" if refs else ""
-        cards.append(_cell("SIMBAD", f"{simbad_id}{ref_str}", hit=True, title=str(payload.get('simbad_main_id', ''))))
+        parts = []
+        if _ok(simbad_otype):
+            parts.append(str(simbad_otype))
+        if _ok(simbad_id):
+            parts.append(str(simbad_id))
+        if refs:
+            parts.append(f"({refs} refs)")
+        cards.append(_cell("SIMBAD", " \u00b7 ".join(parts), hit=True, title=str(simbad_id or '')))
 
     # VSX cell
     vsx_cls = payload.get('vsx_class')
-    if vsx_cls and str(vsx_cls).strip() and str(vsx_cls).strip().lower() not in ('nan', '<na>'):
+    if _ok(vsx_cls):
         vsx_sep = payload.get('vsx_sep_arcsec')
         sep_str = f" ({vsx_sep:.1f}\")" if vsx_sep and not pd.isna(vsx_sep) else ""
         vsx_p = payload.get('vsx_period')
@@ -1972,7 +1975,7 @@ def _render_vetting_banner(payload: dict | None, radius_arcsec: float = 10.0) ->
 
     # Gaia variability cell
     gaia_cls = payload.get('gaia_var_class')
-    if gaia_cls:
+    if _ok(gaia_cls):
         score = payload.get('gaia_var_score')
         score_str = f" ({score:.2f})" if score and not pd.isna(score) else ""
         cards.append(_cell("Gaia DR3", f"{gaia_cls}{score_str}", hit=True))
@@ -1984,27 +1987,27 @@ def _render_vetting_banner(payload: dict | None, radius_arcsec: float = 10.0) ->
 
     # ASAS-SN cell
     asassn_type = payload.get('asassn_var_type')
-    if asassn_type:
+    if _ok(asassn_type):
         period = payload.get('asassn_var_period')
         p_str = f" P={period:.4f}d" if period and not pd.isna(period) else ""
         cards.append(_cell("ASAS-SN", f"{asassn_type}{p_str}", hit=True))
 
     # ZTF cell
     ztf_type = payload.get('ztf_var_type')
-    if ztf_type:
+    if _ok(ztf_type):
         ztf_p = payload.get('ztf_var_period')
         zp_str = f" P={ztf_p:.4f}d" if ztf_p and not pd.isna(ztf_p) else ""
         cards.append(_cell("ZTF", f"{ztf_type}{zp_str}", hit=True))
 
     # TNS cell
     tns_name = payload.get('tns_name')
-    if tns_name:
+    if _ok(tns_name):
         tns_type = payload.get('tns_type', '')
         cards.append(_cell("TNS", f"{tns_name} ({tns_type})" if tns_type else tns_name, hit=True))
 
     # ALeRCE cell
     alerce_cls = payload.get('alerce_lc_class')
-    if alerce_cls:
+    if _ok(alerce_cls):
         prob = payload.get('alerce_lc_prob')
         prob_str = f" ({prob:.0%})" if prob and not pd.isna(prob) else ""
         cards.append(_cell("ALeRCE", f"{alerce_cls}{prob_str}", hit=True))
@@ -2018,14 +2021,14 @@ def _render_vetting_banner(payload: dict | None, radius_arcsec: float = 10.0) ->
 
     # SFR cell
     sfr_name = payload.get('sfr_name')
-    if sfr_name and str(sfr_name).strip() and str(sfr_name).strip().lower() not in ('nan', '<na>'):
+    if _ok(sfr_name):
         sfr_sep = payload.get('sfr_sep_arcmin')
         sep_str = f" ({sfr_sep:.1f}')" if sfr_sep and not pd.isna(sfr_sep) else ""
         cards.append(_cell("SFR", f"{sfr_name}{sep_str}", hit=True))
 
     # Cluster cell
     cluster_name = payload.get('cluster_name')
-    if cluster_name and str(cluster_name).strip() and str(cluster_name).strip().lower() not in ('nan', '<na>'):
+    if _ok(cluster_name):
         cluster_dist = payload.get('cluster_dist_pc')
         d_str = f" ({cluster_dist:.0f} pc)" if cluster_dist and not pd.isna(cluster_dist) else ""
         cards.append(_cell("Cluster", f"{cluster_name}{d_str}", hit=True))
@@ -2033,13 +2036,13 @@ def _render_vetting_banner(payload: dict | None, radius_arcsec: float = 10.0) ->
     # BANYAN cell
     banyan_assoc = payload.get('banyan_best_assoc')
     banyan_fp = payload.get('banyan_field_prob')
-    if banyan_assoc and str(banyan_assoc).strip() and str(banyan_assoc).strip().lower() not in ('nan', '<na>', 'field'):
+    if _ok(banyan_assoc) and str(banyan_assoc).strip().lower() != 'field':
         fp_str = f" (P_field={banyan_fp:.0%})" if banyan_fp and not pd.isna(banyan_fp) else ""
         cards.append(_cell("BANYAN", f"{banyan_assoc}{fp_str}", hit=True))
 
-    # YSO class cell
+    # YSO class cell (skip generic classifications from IR color-color)
     yso_cls = payload.get('yso_class')
-    if yso_cls and str(yso_cls).strip() and str(yso_cls).strip().lower() not in ('nan', '<na>'):
+    if yso_cls and str(yso_cls).strip().lower() not in ('nan', '<na>', '', 'main sequence', 'unknown'):
         cards.append(_cell("YSO", str(yso_cls), hit=True))
 
     # OGLE cell
@@ -3816,7 +3819,7 @@ def create_layout():
                                     html.Button('Copy Config JSON', id='copy-run-config-btn', n_clicks=0, className='compact-btn', style={'margin-right': '6px'}),
                                     html.Button('Download Config JSON', id='download-run-config-btn', n_clicks=0, className='compact-btn'),
                                 ], style={'margin-bottom': '6px'}),
-                                html.Div(id='run-config-panel', className='run-config-panel'),
+                                html.Div(id='run-config-panel'),
                             ], style={'padding': '8px 10px'}),
                         ], id='run-config-details', open=False, className='metadata-sections', style={'margin-top': '0'}),
                     ], className='left-info-scroll'),
@@ -5333,13 +5336,13 @@ def update_external_followup_panel(is_open, candidate_id, theme_mode):
     return _render_external_followup(payload, str(candidate_id), str(theme_mode or DEFAULT_THEME))
 
 
-def _render_diagnostic_plots(payload: dict, theme: str) -> list:
+def _render_diagnostic_plots(payload: dict, theme: str, background: dict | None = None) -> list:
     """Build diagnostic plot cards from candidate payload data."""
     theme_tokens = _external_followup_theme(theme)
     card_style = theme_tokens["card_style"]
     cards = []
-    for builder in (build_cmd_figure, build_ir_colorcolor_figure, build_kiel_figure):
-        fig = builder(payload, theme)
+    for builder in (build_cmd_figure, build_ir_colorcolor_figure, build_kiel_figure, build_rpm_figure, build_uv_optical_figure):
+        fig = builder(payload, theme, background=background)
         if fig is not None:
             cards.append(html.Div(
                 dcc.Graph(figure=fig, config={'displayModeBar': False},
@@ -5363,7 +5366,8 @@ def update_diagnostic_plots(is_open, candidate_id, theme_mode):
         return []
     with closing(db_connect(Path(DB_PATH))) as conn:
         payload = get_candidate_payload(conn, str(candidate_id)) or {}
-    return _render_diagnostic_plots(payload, str(theme_mode or DEFAULT_THEME))
+        background = get_diagnostic_background(conn)
+    return _render_diagnostic_plots(payload, str(theme_mode or DEFAULT_THEME), background=background)
 
 
 @app.callback(

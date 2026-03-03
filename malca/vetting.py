@@ -2757,6 +2757,8 @@ def _print_vetting_summary(df: pd.DataFrame, total_start: float) -> None:
     known_mask = pd.Series(False, index=df.index)
     if "simbad_nbref" in df.columns:
         known_mask |= df["simbad_nbref"].fillna(0) >= 5
+    if "simbad_otype" in df.columns:
+        known_mask |= df["simbad_otype"].fillna("").astype(str).str.strip() != ""
     if "gaia_var_class" in df.columns:
         known_mask |= df["gaia_var_class"] != ""
     if "asassn_var_type" in df.columns:

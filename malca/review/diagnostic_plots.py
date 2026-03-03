@@ -43,7 +43,7 @@ def _theme_spec(theme: str) -> dict:
             "font": "#1c2733",
             "grid": "rgba(104, 128, 149, 0.18)",
             "muted": "#5a6b7b",
-            "marker": "#1f77b4",
+            "marker": "#e03e2d",
             "region_alpha": 0.12,
         }
     if mode == "gray":
@@ -89,14 +89,16 @@ def _apply_layout(fig: go.Figure, *, title: str, spec: dict, height: int = 280) 
 
 _CMD_REGIONS = [
     # (label, x, y)  — approximate positions for text annotations
-    ("Main Sequence", 1.2, 6.0),
-    ("Red Giant Branch", 1.8, 0.5),
-    ("White Dwarfs", 0.2, 12.0),
-    ("Pre-MS", 2.5, 4.0),
+    ("Main Sequence", 2.0, 8.0),
+    ("Red Giant Branch", 2.5, -1.0),
+    ("White Dwarfs", -0.2, 13.0),
+    ("Pre-MS", 3.5, 5.5),
 ]
 
 
-def build_cmd_figure(payload: dict, theme: str) -> go.Figure | None:
+def build_cmd_figure(
+    payload: dict, theme: str, *, background: dict | None = None,
+) -> go.Figure | None:
     """Gaia extinction-corrected color-magnitude diagram."""
     g_mag = _safe_float(payload, "phot_g_mean_mag")
     bp_rp = _safe_float(payload, "bp_rp")
@@ -134,12 +136,25 @@ def build_cmd_figure(payload: dict, theme: str) -> go.Figure | None:
     spec = _theme_spec(theme)
     fig = go.Figure()
 
+    # Background sample
+    bg = background or {}
+    bg_x = bg.get("cmd_bprp0")
+    bg_y = bg.get("cmd_mg0")
+    if bg_x is not None and bg_y is not None and len(bg_x) > 0:
+        fig.add_trace(go.Scattergl(
+            x=bg_x, y=bg_y,
+            mode="markers",
+            marker=dict(size=2, color=spec["muted"], opacity=0.25),
+            hoverinfo="skip",
+            name="Sample",
+        ))
+
     # Candidate marker
-    fig.add_trace(go.Scatter(
+    fig.add_trace(go.Scattergl(
         x=[bp_rp0], y=[m_g0],
         mode="markers",
-        marker=dict(size=10, color=spec["marker"], symbol="star",
-                    line=dict(width=1, color=spec["font"])),
+        marker=dict(size=12, color=spec["marker"], symbol="star",
+                    line=dict(width=2, color=spec["font"])),
         name="Candidate",
         hovertemplate=f"BP-RP₀ = {bp_rp0:.2f}<br>M_G₀ = {m_g0:.2f}<extra></extra>",
     ))
@@ -153,8 +168,8 @@ def build_cmd_figure(payload: dict, theme: str) -> go.Figure | None:
         )
 
     _apply_layout(fig, title="Gaia CMD", spec=spec)
-    fig.update_xaxes(title="BP - RP₀")
-    fig.update_yaxes(title="M<sub>G,0</sub>", autorange="reversed")
+    fig.update_xaxes(title="BP - RP₀", range=[-0.5, 5.0])
+    fig.update_yaxes(title="M<sub>G,0</sub>", range=[16, -8])
 
     return fig
 
@@ -163,7 +178,9 @@ def build_cmd_figure(payload: dict, theme: str) -> go.Figure | None:
 # 2. IR Color-Color Diagram
 # ---------------------------------------------------------------------------
 
-def build_ir_colorcolor_figure(payload: dict, theme: str) -> go.Figure | None:
+def build_ir_colorcolor_figure(
+    payload: dict, theme: str, *, background: dict | None = None,
+) -> go.Figure | None:
     """H-K vs W1-W2 infrared color-color diagram with YSO regions."""
     # Observed magnitudes
     h = _safe_float(payload, "tmass_h")
@@ -193,6 +210,19 @@ def build_ir_colorcolor_figure(payload: dict, theme: str) -> go.Figure | None:
     spec = _theme_spec(theme)
     fig = go.Figure()
 
+    # Background sample
+    bg = background or {}
+    bg_x = bg.get("ir_w1w2")
+    bg_y = bg.get("ir_hk")
+    if bg_x is not None and bg_y is not None and len(bg_x) > 0:
+        fig.add_trace(go.Scattergl(
+            x=bg_x, y=bg_y,
+            mode="markers",
+            marker=dict(size=2, color=spec["muted"], opacity=0.25),
+            hoverinfo="skip",
+            name="Sample",
+        ))
+
     # YSO classification regions (x = W1-W2, y = H-K)
     # Axis ranges for shaded rectangles
     x_lo, x_hi = -0.5, 2.5
@@ -209,11 +239,12 @@ def build_ir_colorcolor_figure(payload: dict, theme: str) -> go.Figure | None:
     for label, x0, x1, y0, y1, color in regions:
         fig.add_shape(
             type="rect", x0=x0, x1=x1, y0=y0, y1=y1,
-            fillcolor=color, opacity=spec["region_alpha"],
-            line=dict(width=0), layer="below",
+            fillcolor=color, opacity=spec["region_alpha"] * 0.5,
+            line=dict(width=1, dash="dot", color=spec["muted"]),
+            layer="below",
         )
         fig.add_annotation(
-            x=(x0 + x1) / 2, y=(y0 + y1) / 2, text=label,
+            x=(x0 + x1) / 2, y=y_hi - 0.1, text=label,
             showarrow=False, font=dict(size=8, color=spec["muted"]),
             opacity=0.7,
         )
@@ -223,7 +254,7 @@ def build_ir_colorcolor_figure(payload: dict, theme: str) -> go.Figure | None:
 
     if show_vector:
         # Observed (hollow)
-        fig.add_trace(go.Scatter(
+        fig.add_trace(go.Scattergl(
             x=[w1w2_obs], y=[hk_obs],
             mode="markers",
             marker=dict(size=8, color=spec["plot_bg"], symbol="circle",
@@ -240,11 +271,11 @@ def build_ir_colorcolor_figure(payload: dict, theme: str) -> go.Figure | None:
         )
 
     # Dereddened (filled)
-    fig.add_trace(go.Scatter(
+    fig.add_trace(go.Scattergl(
         x=[w1w2_dered], y=[hk_dered],
         mode="markers",
-        marker=dict(size=9, color=spec["marker"], symbol="circle",
-                    line=dict(width=1, color=spec["font"])),
+        marker=dict(size=11, color=spec["marker"], symbol="circle",
+                    line=dict(width=2, color=spec["font"])),
         name="Dereddened",
         hovertemplate=f"W1-W2₀ = {w1w2_dered:.2f}<br>H-K₀ = {hk_dered:.2f}<extra>dereddened</extra>",
     ))
@@ -261,14 +292,16 @@ def build_ir_colorcolor_figure(payload: dict, theme: str) -> go.Figure | None:
 # ---------------------------------------------------------------------------
 
 _KIEL_REGIONS = [
-    ("Main Sequence", 6000, 4.2),
-    ("Subgiant", 5500, 3.5),
-    ("Red Giant Branch", 4500, 2.0),
-    ("Pre-MS", 4000, 3.8),
+    ("Main Sequence", 7000, 4.5),
+    ("Subgiant", 5800, 3.2),
+    ("Red Giant Branch", 3800, 1.5),
+    ("Pre-MS", 3500, 3.8),
 ]
 
 
-def build_kiel_figure(payload: dict, theme: str) -> go.Figure | None:
+def build_kiel_figure(
+    payload: dict, theme: str, *, background: dict | None = None,
+) -> go.Figure | None:
     """Teff vs log g (Kiel diagram) with StarHorse error bars."""
     # Prefer StarHorse, fall back to Gaia GSP-Phot
     teff = _safe_float(payload, "teff50")
@@ -303,11 +336,24 @@ def build_kiel_figure(payload: dict, theme: str) -> go.Figure | None:
     spec = _theme_spec(theme)
     fig = go.Figure()
 
-    fig.add_trace(go.Scatter(
+    # Background sample
+    bg = background or {}
+    bg_x = bg.get("kiel_teff")
+    bg_y = bg.get("kiel_logg")
+    if bg_x is not None and bg_y is not None and len(bg_x) > 0:
+        fig.add_trace(go.Scattergl(
+            x=bg_x, y=bg_y,
+            mode="markers",
+            marker=dict(size=2, color=spec["muted"], opacity=0.25),
+            hoverinfo="skip",
+            name="Sample",
+        ))
+
+    fig.add_trace(go.Scattergl(
         x=[teff], y=[logg],
         mode="markers",
-        marker=dict(size=10, color=spec["marker"], symbol="star",
-                    line=dict(width=1, color=spec["font"])),
+        marker=dict(size=12, color=spec["marker"], symbol="star",
+                    line=dict(width=2, color=spec["font"])),
         error_x=error_x,
         error_y=error_y,
         name="Candidate",
@@ -322,7 +368,148 @@ def build_kiel_figure(payload: dict, theme: str) -> go.Figure | None:
         )
 
     _apply_layout(fig, title="Kiel Diagram", spec=spec)
-    fig.update_xaxes(title="T<sub>eff</sub> (K)", autorange="reversed")
-    fig.update_yaxes(title="log g (cgs)", autorange="reversed")
+    fig.update_xaxes(title="T<sub>eff</sub> (K)", range=[40000, 2500])
+    fig.update_yaxes(title="log g (cgs)", range=[6, -1])
+
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# 4. Reduced Proper Motion Diagram
+# ---------------------------------------------------------------------------
+
+_RPM_REGIONS = [
+    ("Main Sequence", 1.5, 12),
+    ("White Dwarfs", 0.2, 16),
+    ("Subdwarfs", 0.8, 14),
+    ("Giants", 2.0, 5),
+]
+
+
+def build_rpm_figure(
+    payload: dict, theme: str, *, background: dict | None = None,
+) -> go.Figure | None:
+    """Reduced proper motion diagram (H_G vs BP-RP)."""
+    g_mag = _safe_float(payload, "phot_g_mean_mag")
+    pmra = _safe_float(payload, "pmra")
+    pmdec = _safe_float(payload, "pmdec")
+
+    if g_mag is None or pmra is None or pmdec is None:
+        return None
+
+    bp_rp = _safe_float(payload, "bp_rp")
+    if bp_rp is None:
+        bp = _safe_float(payload, "phot_bp_mean_mag")
+        rp = _safe_float(payload, "phot_rp_mean_mag")
+        if bp is not None and rp is not None:
+            bp_rp = bp - rp
+        else:
+            return None
+
+    pm_total = math.sqrt(pmra**2 + pmdec**2)  # mas/yr
+    if pm_total <= 0:
+        return None
+    pm_arcsec = pm_total / 1000.0
+    h_g = g_mag + 5.0 * math.log10(pm_arcsec) + 5.0
+
+    spec = _theme_spec(theme)
+    fig = go.Figure()
+
+    # Background sample
+    bg = background or {}
+    bg_x = bg.get("rpm_bprp")
+    bg_y = bg.get("rpm_hg")
+    if bg_x is not None and bg_y is not None and len(bg_x) > 0:
+        fig.add_trace(go.Scattergl(
+            x=bg_x, y=bg_y,
+            mode="markers",
+            marker=dict(size=2, color=spec["muted"], opacity=0.25),
+            hoverinfo="skip",
+            name="Sample",
+        ))
+
+    # Candidate marker
+    fig.add_trace(go.Scattergl(
+        x=[bp_rp], y=[h_g],
+        mode="markers",
+        marker=dict(size=12, color=spec["marker"], symbol="star",
+                    line=dict(width=2, color=spec["font"])),
+        name="Candidate",
+        hovertemplate=f"BP-RP = {bp_rp:.2f}<br>H_G = {h_g:.2f}<extra></extra>",
+    ))
+
+    for label, rx, ry in _RPM_REGIONS:
+        fig.add_annotation(
+            x=rx, y=ry, text=label, showarrow=False,
+            font=dict(size=8, color=spec["muted"]),
+            opacity=0.7,
+        )
+
+    _apply_layout(fig, title="Reduced Proper Motion", spec=spec)
+    fig.update_xaxes(title="BP - RP")
+    fig.update_yaxes(title="H<sub>G</sub>", autorange="reversed")
+
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# 5. UV-Optical Color Diagram
+# ---------------------------------------------------------------------------
+
+_UV_OPTICAL_REGIONS = [
+    ("UV Excess", 0.5, 2),
+    ("Normal MS", 1.5, 8),
+]
+
+
+def build_uv_optical_figure(
+    payload: dict, theme: str, *, background: dict | None = None,
+) -> go.Figure | None:
+    """GALEX NUV - G vs BP-RP UV-optical color diagram."""
+    nuv = _safe_float(payload, "galex_nuv")
+    g_mag = _safe_float(payload, "phot_g_mean_mag")
+    bp_rp = _safe_float(payload, "bp_rp")
+
+    if nuv is None or g_mag is None or bp_rp is None:
+        return None
+
+    nuv_g = nuv - g_mag
+
+    spec = _theme_spec(theme)
+    fig = go.Figure()
+
+    # Background sample
+    bg = background or {}
+    bg_x = bg.get("uv_bprp")
+    bg_y = bg.get("uv_nuv_g")
+    if bg_x is not None and bg_y is not None and len(bg_x) > 0:
+        fig.add_trace(go.Scattergl(
+            x=bg_x, y=bg_y,
+            mode="markers",
+            marker=dict(size=2, color=spec["muted"], opacity=0.25),
+            hoverinfo="skip",
+            name="Sample",
+        ))
+
+    # Candidate marker
+    fig.add_trace(go.Scattergl(
+        x=[bp_rp], y=[nuv_g],
+        mode="markers",
+        marker=dict(size=12, color=spec["marker"], symbol="star",
+                    line=dict(width=2, color=spec["font"])),
+        name="Candidate",
+        hovertemplate=f"BP-RP = {bp_rp:.2f}<br>NUV-G = {nuv_g:.2f}<extra></extra>",
+    ))
+
+    for label, rx, ry in _UV_OPTICAL_REGIONS:
+        fig.add_annotation(
+            x=rx, y=ry, text=label, showarrow=False,
+            font=dict(size=8, color=spec["muted"]),
+            opacity=0.7,
+        )
+
+    _apply_layout(fig, title="UV-Optical Color", spec=spec)
+    fig.update_xaxes(title="BP - RP")
+    fig.update_yaxes(title="NUV - G")
 
     return fig

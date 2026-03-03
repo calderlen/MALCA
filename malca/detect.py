@@ -1097,6 +1097,10 @@ def main():
             "workers": args.workers,
             "batch_size": args.batch_size,
             "output_format": args.output_format,
+            # Cleaning thresholds (hardcoded, not CLI args)
+            "clean_max_error_absolute": 1.0,
+            "clean_max_error_sigma": 5.0,
+            "bad_camera_scatter_ratio": 2.5,
             # Pre-filter (camera median)
             "skip_camera_median": args.skip_camera_median,
             "camera_median_tolerance": args.camera_median_tolerance,

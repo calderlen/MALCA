@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from decimal import Decimal, InvalidOperation
 import json
 import sqlite3
@@ -1009,6 +1010,123 @@ def get_candidate_payload(conn: sqlite3.Connection, candidate_id: str) -> dict:
         return json.loads(row[0])
     except Exception:
         return {}
+
+
+def get_diagnostic_background(conn: sqlite3.Connection) -> dict:
+    """Load background arrays for diagnostic plots.
+
+    Returns a dict with keys: cmd_bprp0, cmd_mg0, kiel_teff, kiel_logg,
+    ir_hk, ir_w1w2, rpm_bprp, rpm_hg, uv_bprp, uv_nuv_g.
+    Values are numpy arrays (may be empty).
+    """
+    result: dict = {}
+
+    # Kiel: prefer StarHorse teff50/logg50 from payload, fall back to GSP-Phot columns
+    rows = conn.execute(
+        "SELECT teff_gspphot, logg_gspphot, "
+        "       json_extract(payload_json, '$.teff50'), "
+        "       json_extract(payload_json, '$.logg50') "
+        "FROM candidates"
+    ).fetchall()
+    teff_list, logg_list = [], []
+    for gsp_t, gsp_g, sh_t, sh_g in rows:
+        t = sh_t if sh_t is not None else gsp_t
+        g = sh_g if sh_g is not None else gsp_g
+        if t is not None and g is not None:
+            try:
+                tf, gf = float(t), float(g)
+                if math.isfinite(tf) and math.isfinite(gf):
+                    teff_list.append(tf)
+                    logg_list.append(gf)
+            except (TypeError, ValueError):
+                pass
+    result["kiel_teff"] = np.array(teff_list, dtype=np.float64)
+    result["kiel_logg"] = np.array(logg_list, dtype=np.float64)
+
+    # CMD: mg0 and bprp0 are in payload_json
+    rows = conn.execute(
+        "SELECT json_extract(payload_json, '$.mg0'), "
+        "       json_extract(payload_json, '$.bprp0') "
+        "FROM candidates "
+        "WHERE json_extract(payload_json, '$.mg0') IS NOT NULL "
+        "  AND json_extract(payload_json, '$.bprp0') IS NOT NULL"
+    ).fetchall()
+    if rows:
+        arr = np.array(rows, dtype=np.float64)
+        mask = np.isfinite(arr).all(axis=1)
+        result["cmd_bprp0"] = arr[mask, 1]
+        result["cmd_mg0"] = arr[mask, 0]
+    else:
+        result["cmd_bprp0"] = np.empty(0)
+        result["cmd_mg0"] = np.empty(0)
+
+    # IR color-color: prefer dereddened from payload, fall back to observed
+    rows = conn.execute(
+        "SELECT tmass_h - tmass_k, unwise_w1 - unwise_w2, "
+        "       json_extract(payload_json, '$.H_K_dered'), "
+        "       json_extract(payload_json, '$.W1_W2_dered') "
+        "FROM candidates "
+        "WHERE tmass_h IS NOT NULL AND tmass_k IS NOT NULL "
+        "  AND unwise_w1 IS NOT NULL AND unwise_w2 IS NOT NULL"
+    ).fetchall()
+    hk_list, w1w2_list = [], []
+    for hk_obs, w1w2_obs, hk_d, w1w2_d in rows:
+        hk = hk_d if hk_d is not None else hk_obs
+        w1w2 = w1w2_d if w1w2_d is not None else w1w2_obs
+        if hk is not None and w1w2 is not None:
+            try:
+                hkf, wf = float(hk), float(w1w2)
+                if math.isfinite(hkf) and math.isfinite(wf):
+                    hk_list.append(hkf)
+                    w1w2_list.append(wf)
+            except (TypeError, ValueError):
+                pass
+    result["ir_hk"] = np.array(hk_list, dtype=np.float64)
+    result["ir_w1w2"] = np.array(w1w2_list, dtype=np.float64)
+
+    # RPM: H_G = G + 5*log10(pm_arcsec) + 5
+    rows = conn.execute(
+        "SELECT json_extract(payload_json, '$.phot_g_mean_mag'), "
+        "       json_extract(payload_json, '$.bp_rp'), pmra, pmdec "
+        "FROM candidates "
+        "WHERE json_extract(payload_json, '$.phot_g_mean_mag') IS NOT NULL "
+        "  AND json_extract(payload_json, '$.bp_rp') IS NOT NULL "
+        "  AND pmra IS NOT NULL AND pmdec IS NOT NULL"
+    ).fetchall()
+    rpm_bprp_list, rpm_hg_list = [], []
+    for g_mag, bprp, pmra, pmdec in rows:
+        try:
+            g_f, bprp_f = float(g_mag), float(bprp)
+            pm_total = math.sqrt(float(pmra) ** 2 + float(pmdec) ** 2)
+            if pm_total > 0 and math.isfinite(g_f) and math.isfinite(bprp_f):
+                pm_arcsec = pm_total / 1000.0
+                h_g = g_f + 5.0 * math.log10(pm_arcsec) + 5.0
+                rpm_bprp_list.append(bprp_f)
+                rpm_hg_list.append(h_g)
+        except (TypeError, ValueError):
+            pass
+    result["rpm_bprp"] = np.array(rpm_bprp_list, dtype=np.float64)
+    result["rpm_hg"] = np.array(rpm_hg_list, dtype=np.float64)
+
+    # UV-Optical: NUV - G vs BP-RP
+    rows = conn.execute(
+        "SELECT galex_nuv - json_extract(payload_json, '$.phot_g_mean_mag'), "
+        "       json_extract(payload_json, '$.bp_rp') "
+        "FROM candidates "
+        "WHERE galex_nuv IS NOT NULL "
+        "  AND json_extract(payload_json, '$.phot_g_mean_mag') IS NOT NULL "
+        "  AND json_extract(payload_json, '$.bp_rp') IS NOT NULL"
+    ).fetchall()
+    if rows:
+        arr = np.array(rows, dtype=np.float64)
+        mask = np.isfinite(arr).all(axis=1)
+        result["uv_nuv_g"] = arr[mask, 0]
+        result["uv_bprp"] = arr[mask, 1]
+    else:
+        result["uv_nuv_g"] = np.empty(0)
+        result["uv_bprp"] = np.empty(0)
+
+    return result
 
 
 VETTING_COLUMNS = [
