@@ -1552,6 +1552,7 @@ def main():
             if stage == "cluster":
                 # Cluster stage must avoid internet catalog lookups.
                 post_filter_kwargs["apply_gaia_ruwe_validation"] = False
+                post_filter_kwargs["apply_gaia_pm_validation"] = False
                 post_filter_kwargs["apply_periodic_catalog_validation"] = False
             df_post_filtered = apply_post_filters(df_events, **post_filter_kwargs)
 
