@@ -1,6 +1,7 @@
 """Dash-based keyboard-driven review app for MALCA candidates."""
 
 import sys
+import os
 import warnings
 import argparse
 import logging
@@ -1626,9 +1627,23 @@ app.index_string = '''
 </html>
 '''
 
+# Global runtime path env keys (used by background workers on Windows spawn).
+_REVIEW_DB_ENV = "MALCA_REVIEW_DB_PATH"
+_REVIEW_PLOT_ENV = "MALCA_REVIEW_PLOT_DIR"
+
+
+def _env_path_or_none(name: str) -> str | None:
+    """Return a stripped env path value, or None when unset/empty."""
+    value = os.environ.get(name)
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 # Global variables
-DB_PATH = str(DEFAULT_DB_PATH)
-PLOT_DIR = None
+DB_PATH = _env_path_or_none(_REVIEW_DB_ENV) or str(DEFAULT_DB_PATH)
+PLOT_DIR = _env_path_or_none(_REVIEW_PLOT_ENV)
 DEFAULT_THEME = "black"
 DEFAULT_RESIDUAL_FRACTION = 0.33
 EXTERNAL_SOURCE_VIEW_OPTIONS = [
@@ -6519,6 +6534,13 @@ def main():
         DB_PATH = str(_resolve_db_cli_path(str(DEFAULT_STANDALONE_DB_PATH)))
     else:
         DB_PATH = str(_resolve_db_cli_path(str(DEFAULT_DB_PATH)))
+
+    # Publish runtime paths so spawned background workers inherit the same config.
+    os.environ[_REVIEW_DB_ENV] = str(DB_PATH)
+    if PLOT_DIR:
+        os.environ[_REVIEW_PLOT_ENV] = str(PLOT_DIR)
+    else:
+        os.environ.pop(_REVIEW_PLOT_ENV, None)
 
     if args.merge_vetting:
         vetting_path = Path(args.merge_vetting).expanduser().resolve()
