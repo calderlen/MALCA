@@ -135,6 +135,12 @@ REVIEW_METADATA_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("LSP bootstrap sig", "lsp_bootstrap_sig"),
         ("LSP is alias", "lsp_is_alias"),
         ("LSP is significant", "lsp_is_significant"),
+        ("PDM period (d)", "pdm_period"),
+        ("PDM theta", "pdm_theta"),
+        ("PDM SNR", "pdm_snr"),
+        ("CE period (d)", "ce_period"),
+        ("CE entropy", "ce_entropy"),
+        ("CE SNR", "ce_snr"),
     ]),
     ("Phase Folding", [
         ("Period (d)", "phase_period_days"),
@@ -427,6 +433,8 @@ _FIXED_DECIMAL_KEYS: dict[str, int] = {
     "asassn_var_period": 4,
     "ztf_var_period": 4,
     "lsp_period": 4,
+    "pdm_period": 4,
+    "ce_period": 4,
     "period_ogle_days": 4,
 }
 

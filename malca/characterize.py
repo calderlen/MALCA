@@ -500,6 +500,35 @@ def get_dust_extinction(df: pd.DataFrame) -> pd.DataFrame:
 
     df['A_v_3d'] = df['A_v_3d'].fillna(0.0)
     
+    # Compute dereddened magnitudes for active pipeline bands if they exist
+    extinction_coeffs = {
+        'phot_g_mean_mag': 0.789,
+        'phot_bp_mean_mag': 1.002,
+        'phot_rp_mean_mag': 0.589,
+        'tmass_j': 0.282,
+        'tmass_h': 0.175,
+        'tmass_k': 0.112,
+        'unwise_w1': 0.061,
+        'unwise_w2': 0.047,
+        'apass_b': 1.321,
+        'apass_v': 1.000,
+        'apass_g': 1.199,
+        'apass_r': 0.858,
+        'apass_i': 0.639,
+        'galex_fuv': 2.61,  # typical values
+        'galex_nuv': 2.76,  
+        'baseline_mag': 1.199,  # Default to g-band for ASAS-SN if unspecified
+        'g': 1.199,
+        'r': 0.858,
+        'i': 0.639,
+    }
+
+    av_col = df['A_v_3d']
+    for col, coeff in extinction_coeffs.items():
+        if col in df.columns:
+            # For each magnitude column present, compute dereddened
+            df[f'{col}_dered'] = df[col] - (coeff * av_col)
+            
     return df
 
 

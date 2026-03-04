@@ -149,14 +149,35 @@ def build_cmd_figure(
             name="Sample",
         ))
 
-    # Candidate marker
+    # If dereddened differs from observed, show both with reddening vector
+    show_vector = (abs(bp_rp0 - bp_rp) > 0.01 or abs(m_g0 - m_g) > 0.01)
+
+    if show_vector:
+        # Observed (hollow)
+        fig.add_trace(go.Scattergl(
+            x=[bp_rp], y=[m_g],
+            mode="markers",
+            marker=dict(size=10, color=spec["plot_bg"], symbol="star",
+                        line=dict(width=1.5, color=spec["marker"])),
+            name="Observed",
+            hovertemplate=f"BP-RP = {bp_rp:.2f}<br>M_G = {m_g:.2f}<extra>observed</extra>",
+        ))
+        # Reddening vector arrow
+        fig.add_annotation(
+            x=bp_rp0, y=m_g0, ax=bp_rp, ay=m_g,
+            xref="x", yref="y", axref="x", ayref="y",
+            showarrow=True, arrowhead=3, arrowsize=1.2, arrowwidth=1.2,
+            arrowcolor=spec["muted"], opacity=0.6,
+        )
+
+    # Dereddened (filled)
     fig.add_trace(go.Scattergl(
         x=[bp_rp0], y=[m_g0],
         mode="markers",
         marker=dict(size=12, color=spec["marker"], symbol="star",
                     line=dict(width=2, color=spec["font"])),
-        name="Candidate",
-        hovertemplate=f"BP-RP₀ = {bp_rp0:.2f}<br>M_G₀ = {m_g0:.2f}<extra></extra>",
+        name="Dereddened",
+        hovertemplate=f"BP-RP₀ = {bp_rp0:.2f}<br>M_G₀ = {m_g0:.2f}<extra>dereddened</extra>",
     ))
 
     # Region labels

@@ -17,6 +17,7 @@ from scipy import stats as sp_stats
 from astropy.timeseries import LombScargle
 
 from malca.utils import read_lc_dat2, read_lc_csv
+from malca.periodogram import pdm_find_period, ce_find_period
 
 # helpers
 def weighted_mean(x, w):
@@ -297,6 +298,74 @@ def bootstrap_lomb_scargle(
 
     # Known alias periods (sidereal day, half-day, lunar month, year, half-year)
     alias_periods = [1.0, 0.5, 29.53, 365.25, 182.625]
+
+def compute_pdm_stats(
+    jd: np.ndarray,
+    mag: np.ndarray,
+    err: np.ndarray,
+    min_period: float = 1.0,
+    max_period: float = 100.0,
+    n_periods: int = 10000,
+) -> dict:
+    """
+    Run Phase Dispersion Minimization and compute significance metrics.
+    
+    Returns:
+        pdm_period: float, best period
+        pdm_min_theta: float, lowest theta value (0-1, lower is better)
+        pdm_snr: float, SNR of the theta dip relative to background
+    """
+    mask = np.isfinite(jd) & np.isfinite(mag)
+    if mask.sum() < 50:
+        return {"pdm_period": np.nan, "pdm_min_theta": np.nan, "pdm_snr": np.nan}
+    
+    try:
+        best_p, periods, thetas = pdm_find_period(
+            jd[mask], mag[mask], min_period=min_period, max_period=max_period, n_periods=n_periods
+        )
+        min_theta = np.min(thetas)
+        pdm_snr = (np.mean(thetas) - min_theta) / np.std(thetas)
+        return {
+            "pdm_period": float(best_p),
+            "pdm_min_theta": float(min_theta),
+            "pdm_snr": float(pdm_snr),
+        }
+    except Exception:
+        return {"pdm_period": np.nan, "pdm_min_theta": np.nan, "pdm_snr": np.nan}
+
+def compute_ce_stats(
+    jd: np.ndarray,
+    mag: np.ndarray,
+    err: np.ndarray,
+    min_period: float = 1.0,
+    max_period: float = 100.0,
+    n_periods: int = 10000,
+) -> dict:
+    """
+    Run Conditional Entropy and compute significance metrics.
+    
+    Returns:
+        ce_period: float, best period
+        ce_min_entropy: float, lowest entropy value
+        ce_snr: float, SNR of the entropy dip relative to background
+    """
+    mask = np.isfinite(jd) & np.isfinite(mag)
+    if mask.sum() < 50:
+        return {"ce_period": np.nan, "ce_min_entropy": np.nan, "ce_snr": np.nan}
+    
+    try:
+        best_p, periods, entropies = ce_find_period(
+            jd[mask], mag[mask], min_period=min_period, max_period=max_period, n_periods=n_periods
+        )
+        min_entropy = np.min(entropies)
+        ce_snr = (np.mean(entropies) - min_entropy) / np.std(entropies)
+        return {
+            "ce_period": float(best_p),
+            "ce_min_entropy": float(min_entropy),
+            "ce_snr": float(ce_snr),
+        }
+    except Exception:
+        return {"ce_period": np.nan, "ce_min_entropy": np.nan, "ce_snr": np.nan}
 
     try:
         ls = LombScargle(jd, mag, err)

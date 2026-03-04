@@ -304,7 +304,7 @@ def classify_run_morphology(
         "morphology": best_model,
         "bic": float(best_bic),
         "delta_bic_null": float(bic_null - best_bic),
-        "params": best_params
+        "params": best_params,
     }
 
 
@@ -1318,6 +1318,7 @@ def process_lightcurve(
             baseline_mags = None
         score, events = compute_event_score(df, event_type='dip', baseline_mags=baseline_mags)
         dipper_score = float(score)
+
         dipper_n_dips = int(len(events))
         dipper_n_valid_dips = int(sum(1 for e in events if e.valid))
 
@@ -1332,6 +1333,7 @@ def process_lightcurve(
             baseline_mags = None
         score, events = compute_event_score(df, event_type='jump', baseline_mags=baseline_mags)
         jumper_score = float(score)
+
         jumper_n_jumps = int(len(events))
         jumper_n_valid_jumps = int(sum(1 for e in events if e.valid))
 
@@ -1354,7 +1356,6 @@ def process_lightcurve(
         dip_best_t0=float(dip_mi["t0"]),
         dip_best_alpha=float(dip_mi["alpha"]),
         dip_best_tau=float(dip_mi["tau"]),
-
         jump_best_morph=str(jump_mi["morph"]),
         jump_best_delta_bic=float(jump_mi["delta_bic"]),
         jump_best_width_param=float(jump_mi["width_param"]),
@@ -1362,7 +1363,6 @@ def process_lightcurve(
         jump_best_t0=float(jump_mi["t0"]),
         jump_best_alpha=float(jump_mi["alpha"]),
         jump_best_tau=float(jump_mi["tau"]),
-
         dip_count=int(len(dip["event_indices"])),
         jump_count=int(len(jump["event_indices"])),
 

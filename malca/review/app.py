@@ -1927,7 +1927,7 @@ def _render_vetting_banner(payload: dict | None, radius_arcsec: float = 10.0) ->
     banner_state = 'known' if known else 'new'
 
     # Status header
-    header_text = "KNOWN OBJECT" if known else "POTENTIALLY NEW"
+    header_text = "KNOWN VARIABLE" if known else "POTENTIALLY NEW"
 
     cards = []
 
@@ -2044,6 +2044,13 @@ def _render_vetting_banner(payload: dict | None, radius_arcsec: float = 10.0) ->
     yso_cls = payload.get('yso_class')
     if yso_cls and str(yso_cls).strip().lower() not in ('nan', '<na>', '', 'main sequence', 'unknown'):
         cards.append(_cell("YSO", str(yso_cls), hit=True))
+
+    # Spectra cell
+    has_spectrum = _coerce_bool(payload.get('has_spectrum'))
+    if has_spectrum:
+        sources = payload.get('spectrum_sources')
+        src_str = f" ({sources})" if sources and not pd.isna(sources) else ""
+        cards.append(_cell("Spectra", f"Available{src_str}", hit=True))
 
     # OGLE cell
     ogle_match = payload.get('period_ogle_match')
@@ -2967,13 +2974,25 @@ def _num_range_filter(col: str):
 
 
 def _text_filter(col: str):
-    """Text input for exact-match string filter."""
+    """Dropdown for exact-match string filter (options loaded from DB)."""
     cid = _col_id(col)
+    try:
+        with closing(db_connect(Path(DB_PATH))) as conn:
+            values = get_distinct_values(conn, col)
+        options = [{'label': 'Any', 'value': 'Any'}] + [{'label': str(v), 'value': str(v)} for v in values if v is not None and str(v).strip() != ""]
+    except Exception:
+        options = [{'label': 'Any', 'value': 'Any'}]
+        
     return html.Div([
         html.Label(f'{col}:'),
-        dcc.Input(id=f'filter-{cid}', type='text', placeholder='Any',
-                  style=_inp_style,
-                  persistence=True, persistence_type='local'),
+        dcc.Dropdown(
+            id=f'filter-{cid}',
+            options=options,
+            value='Any',
+            clearable=False,
+            style={'margin-bottom': '4px', 'font-size': '11px'},
+            persistence=True, persistence_type='local'
+        ),
     ])
 
 
@@ -2983,7 +3002,7 @@ def _select_filter(col: str):
     try:
         with closing(db_connect(Path(DB_PATH))) as conn:
             values = get_distinct_values(conn, col)
-        options = [{'label': v, 'value': v} for v in values]
+        options = [{'label': str(v), 'value': str(v)} for v in values if v is not None and str(v).strip() != ""]
     except Exception:
         options = []
     return html.Div([

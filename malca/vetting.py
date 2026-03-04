@@ -2213,6 +2213,19 @@ def fetch_panstarrs_lightcurves(
             
             if lc_df.empty or "obsTime" not in lc_df.columns:
                 return (idx, 0)
+
+            # Filter by infoFlag if present
+            if "infoFlag" in lc_df.columns:
+                # Keep only detections without DEFECT(2048), SATURATED(4096), FIT_FAIL(8)
+                bad_mask = (
+                    ((lc_df["infoFlag"] & 2048) != 0) | 
+                    ((lc_df["infoFlag"] & 4096) != 0) | 
+                    ((lc_df["infoFlag"] & 8) != 0)
+                )
+                lc_df = lc_df[~bad_mask].copy()
+
+            if lc_df.empty:
+                return (idx, 0)
                 
             # Rename for consistency mapping
             lc_df = lc_df.rename(columns={
@@ -2755,10 +2768,8 @@ def _print_vetting_summary(df: pd.DataFrame, total_start: float) -> None:
 
     # Flag "likely known" vs "potentially new"
     known_mask = pd.Series(False, index=df.index)
-    if "simbad_nbref" in df.columns:
-        known_mask |= df["simbad_nbref"].fillna(0) >= 5
-    if "simbad_otype" in df.columns:
-        known_mask |= df["simbad_otype"].fillna("").astype(str).str.strip() != ""
+    
+    # We only want to flag true for variables, not just generic objects.
     if "gaia_var_class" in df.columns:
         known_mask |= df["gaia_var_class"] != ""
     if "asassn_var_type" in df.columns:
@@ -2771,6 +2782,16 @@ def _print_vetting_summary(df: pd.DataFrame, total_start: float) -> None:
         known_mask |= df["alerce_lc_class"] != ""
     if "vsx_class" in df.columns:
         known_mask |= df["vsx_class"].fillna("").astype(str).str.strip() != ""
+
+    if "simbad_otype" in df.columns:
+        def is_var_otype(x):
+            s = str(x).strip()
+            if not s: return False
+            if 'V*' in s: return True
+            matches = {'EB*', 'YSO', 'SN', 'Nova', 'Catac', 'RR*', 'Cepheid', 'Mira', 'BYDra', 'RSCVn', 'Symbiotic', 'ELL', 'Blazar', 'QSO', 'AGN'}
+            s_low = s.lower()
+            return any(m.lower() in s_low for m in matches)
+        known_mask |= df["simbad_otype"].apply(is_var_otype)
     df["vetting_likely_known"] = known_mask
 
     n_known = known_mask.sum()

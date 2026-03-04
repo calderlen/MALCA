@@ -1077,55 +1077,65 @@ def _read_raw_camera_stats(path: Path) -> pd.DataFrame:
 
 def _lsp_worker(args: tuple) -> dict:
     """
-    Worker function for parallel LSP computation.
-    
+    Worker function for parallel periodicity computation (PDM + CE).
+
     Args:
         args: Tuple of (path_str, n_bootstrap, exclude_alias_periods)
-        
+
     Returns:
-        Dict with path and LSP results
+        Dict with path and periodicity results
     """
     from pathlib import Path as WorkerPath
     from malca.utils import read_lc_dat2
-    from malca.stats import bootstrap_lomb_scargle
-    
+    from malca.stats import compute_pdm_stats, compute_ce_stats
+
     path_str, n_bootstrap, exclude_alias_periods = args
-    
+
     try:
         path = WorkerPath(path_str)
         asassn_id = path.stem
         dir_path = str(path.parent)
-        
+
         dfg, dfv = read_lc_dat2(asassn_id, dir_path)
         df_lc = pd.concat([dfg, dfv], ignore_index=True)
-        
+
         jd = df_lc["JD"].values
         mag = df_lc["mag"].values
         err = df_lc["error"].values
-        
-        ls_result = bootstrap_lomb_scargle(
-            jd, mag, err,
-            n_bootstrap=n_bootstrap,
-            exclude_alias_periods=exclude_alias_periods,
-        )
-        
+
+        # PDM
+        pdm_result = compute_pdm_stats(jd, mag, err)
+
+        # CE
+        ce_result = compute_ce_stats(jd, mag, err)
+
+        # Decide if rejected (either method hits threshold)
+        pdm_rej = (pdm_result["pdm_snr"] >= 5.0) and (pdm_result["pdm_min_theta"] <= 0.6)
+        ce_rej = (ce_result["ce_snr"] >= 5.0) and (ce_result["ce_min_entropy"] <= 0.6)
+
+        is_rejected = pdm_rej or ce_rej
+
         return {
             "path": path_str,
-            "lsp_power": ls_result["ls_power"],
-            "lsp_period": ls_result["ls_period_days"],
-            "lsp_bootstrap_sig": ls_result["ls_bootstrap_sig"],
-            "lsp_is_alias": ls_result["ls_is_alias"],
-            "lsp_is_significant": ls_result["ls_is_significant"],
+            "pdm_period": pdm_result["pdm_period"],
+            "pdm_min_theta": pdm_result["pdm_min_theta"],
+            "pdm_snr": pdm_result["pdm_snr"],
+            "ce_period": ce_result["ce_period"],
+            "ce_min_entropy": ce_result["ce_min_entropy"],
+            "ce_snr": ce_result["ce_snr"],
+            "periodicity_is_rejected": is_rejected,
             "error": None,
         }
     except Exception as e:
         return {
             "path": path_str,
-            "lsp_power": np.nan,
-            "lsp_period": np.nan,
-            "lsp_bootstrap_sig": np.nan,
-            "lsp_is_alias": False,
-            "lsp_is_significant": False,
+            "pdm_period": np.nan,
+            "pdm_min_theta": np.nan,
+            "pdm_snr": np.nan,
+            "ce_period": np.nan,
+            "ce_min_entropy": np.nan,
+            "ce_snr": np.nan,
+            "periodicity_is_rejected": False,
             "error": str(e),
         }
 
@@ -1145,14 +1155,13 @@ def validate_periodicity(
     skip_if_consensus: bool = True,
 ) -> pd.DataFrame:
     """
-    Detailed periodicity validation on candidates (like ZTF paper Section 4.5).
+    Detailed periodicity validation on candidates using PDM + CE.
 
-    Uses bootstrap Lomb-Scargle periodogram with significance testing to identify:
+    Uses Phase Dispersion Minimization and Conditional Entropy to identify:
     - Eclipsing binaries (short periods ~1 day)
     - Rotating variables (periods ~30 days)
     - Other periodic contamination
 
-    Much more expensive than pre-filter LSP - uses bootstrap for significance.
     Only run on detected candidates, not all sources.
 
     Parameters
@@ -1160,11 +1169,11 @@ def validate_periodicity(
     df : pd.DataFrame
         Candidates from events.py (must have 'path' column)
     n_bootstrap : int
-        Number of bootstrap iterations for significance (default 1000)
+        Unused, kept for API compatibility.
     significance_level : float
-        Significance threshold (default 0.01 = 1% like paper)
+        Unused, kept for API compatibility.
     exclude_alias_periods : bool
-        Exclude known alias periods (sidereal day, lunar month, ZTF cadence)
+        Unused, kept for API compatibility.
     show_tqdm : bool
         Show progress
     rejected_log_csv : str | Path | None
@@ -1174,20 +1183,12 @@ def validate_periodicity(
     checkpoint_dir : str | Path | None
         Directory for checkpoint files (enables resume on restart)
     skip_if_consensus : bool
-        Skip bootstrap if a consensus period is already found in external catalogs (default True)
+        Skip if a consensus period is already found in external catalogs (default True)
 
     Returns
     -------
     pd.DataFrame
         Candidates without strong periodic signals
-
-    Notes
-    -----
-    This implements the paper's approach:
-    - Bootstrap LSP for significance levels
-    - Phase-fold at best period
-    - Exclude alias frequencies
-    - Flag coherent periodic structure
     """
     from multiprocessing import Pool, cpu_count
     import json
@@ -1325,6 +1326,15 @@ def validate_periodicity(
     bootstrap_significances = []
     is_alias = []
     is_significant = []
+    
+    pdm_periods = []
+    pdm_thetas = []
+    pdm_snrs = []
+    
+    ce_periods = []
+    ce_entropies = []
+    ce_snrs = []
+    
     periodicity_scores = []
     keep_flags = []
     
@@ -1338,18 +1348,24 @@ def validate_periodicity(
         is_alias.append(alias_flag)
         is_significant.append(bool(result.get("lsp_is_significant", False)))
 
+        # New PDM/CE columns
+        pdm_periods.append(result.get("pdm_period", np.nan))
+        pdm_thetas.append(result.get("pdm_min_theta", np.nan))
+        pdm_snrs.append(result.get("pdm_snr", np.nan))
+        
+        ce_periods.append(result.get("ce_period", np.nan))
+        ce_entropies.append(result.get("ce_min_entropy", np.nan))
+        ce_snrs.append(result.get("ce_snr", np.nan))
+
         if np.isfinite(sig):
             min_p = max(1.0 / float(max(n_bootstrap, 1)), 1e-12)
             periodicity_scores.append(float(-np.log10(np.clip(sig, min_p, 1.0))))
         else:
             periodicity_scores.append(np.nan)
         
-        # Keep if NOT significantly periodic (or is an alias, or has error)
-        keep = True
-        if not result.get("lsp_is_alias", False) and result.get("error") is None:
-            sig = result.get("lsp_bootstrap_sig", np.nan)
-            if not np.isnan(sig) and sig < significance_level:
-                keep = False
+        # Use the combined rejection flag from the worker
+        is_rej = result.get("periodicity_is_rejected", False)
+        keep = not is_rej
         keep_flags.append(keep)
 
     df_out = df.copy()
@@ -1358,6 +1374,15 @@ def validate_periodicity(
     df_out["lsp_bootstrap_sig"] = bootstrap_significances
     df_out["lsp_is_alias"] = is_alias
     df_out["lsp_is_significant"] = is_significant
+    
+    df_out["pdm_period"] = pdm_periods
+    df_out["pdm_theta"] = pdm_thetas
+    df_out["pdm_snr"] = pdm_snrs
+    
+    df_out["ce_period"] = ce_periods
+    df_out["ce_entropy"] = ce_entropies
+    df_out["ce_snr"] = ce_snrs
+    
     df_out["periodicity_score"] = periodicity_scores
 
     periodic_flags = [not x for x in keep_flags]
@@ -1396,6 +1421,13 @@ def _save_checkpoint(checkpoint_file: Path, completed: dict, new_results: list) 
             "lsp_bootstrap_sig": r.get("lsp_bootstrap_sig", np.nan),
             "lsp_is_alias": r.get("lsp_is_alias", False),
             "lsp_is_significant": r.get("lsp_is_significant", False),
+            "pdm_period": r.get("pdm_period", np.nan),
+            "pdm_min_theta": r.get("pdm_min_theta", np.nan),
+            "pdm_snr": r.get("pdm_snr", np.nan),
+            "ce_period": r.get("ce_period", np.nan),
+            "ce_min_entropy": r.get("ce_min_entropy", np.nan),
+            "ce_snr": r.get("ce_snr", np.nan),
+            "periodicity_is_rejected": r.get("periodicity_is_rejected", False),
         })
     pd.DataFrame(clean_data).to_parquet(checkpoint_file, index=False, compression=PARQUET_CACHE_COMPRESSION)
 

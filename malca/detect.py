@@ -2254,6 +2254,48 @@ def main():
                 import traceback
                 traceback.print_exc()
 
+    # Step 13: Auto-import into review DB
+    if run_downstream and has_post_filter_output:
+        log("\n=== Step 13: Importing candidates into review DB ===")
+        try:
+            from malca.review.store import db_connect, import_candidates
+
+            # Find best available results file
+            _import_file = None
+            for _candidate_path in [
+                results_dir / "lc_events_vetted.parquet",
+                results_dir / "lc_events_spectra.parquet",
+                results_dir / "lc_events_neighbors.parquet",
+                results_dir / "lc_events_classified.parquet",
+                results_dir / "lc_events_characterized.parquet",
+                results_dir / "lc_events_filtered.parquet",
+            ]:
+                if _candidate_path.exists():
+                    _import_file = _candidate_path
+                    break
+
+            if _import_file is not None:
+                review_db_path = out_dir / "review" / "review.db"
+                conn = db_connect(review_db_path)
+                df_import = load_table(_import_file)
+                n_total, n_new = import_candidates(
+                    conn,
+                    df_import,
+                    source_path=str(out_dir.resolve()),
+                    characterize_before_import=False,
+                    vet_before_import=False,
+                )
+                conn.close()
+                log(f"Imported {n_new} new candidates ({n_total} total) into {review_db_path}")
+            else:
+                log("No results file found for review DB import, skipping")
+
+        except Exception as e:
+            print(f"Warning: review DB import failed: {e}")
+            if args.verbose:
+                import traceback
+                traceback.print_exc()
+
     if args.export_bundle_enabled:
         export_bundle_path = args.export_bundle if args.export_bundle is not None else out_dir / f"{out_dir.name}_bundle_{mag_bin_tag}.zip"
         log(f"\n=== Exporting bundle to {export_bundle_path} ===")

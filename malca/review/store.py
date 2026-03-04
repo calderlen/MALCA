@@ -603,14 +603,25 @@ _SELECT_COLS = {c[0] for c in _CANDIDATE_COLUMNS if c[2] == "select"}
 
 def get_distinct_values(conn: sqlite3.Connection, column: str) -> list[str]:
     """Return sorted distinct non-empty values for a select-filter column."""
-    if column not in _SELECT_COLS:
+    if column not in _SELECT_COLS and column not in _TEXT_COLS:
         return []
     rows = conn.execute(
         f"SELECT DISTINCT {column} FROM candidates "
         f"WHERE {column} IS NOT NULL AND {column} != '' "
         f"ORDER BY {column}"
     ).fetchall()
-    return [r[0] for r in rows]
+    cleaned = set()
+    for r in rows:
+        val = r[0]
+        if isinstance(val, (bytes, bytearray)):
+            try:
+                val = val.decode("utf-8", errors="replace")
+            except Exception:
+                val = str(val)
+        val_str = str(val).strip()
+        if val_str and val_str not in ("None", "NaN", "nan"):
+            cleaned.add(val_str)
+    return sorted(list(cleaned))
 
 
 def init_db(conn: sqlite3.Connection) -> None:
@@ -940,9 +951,9 @@ def query_queue(conn: sqlite3.Connection, *, filters: dict | None = None) -> pd.
     # --- string filters (auto-generated; exact match) ---
     for col in sorted(_TEXT_COLS):
         val = filters.get(col)
-        if val:
+        if val and val != "Any":
             val = str(val).strip()
-            if val:
+            if val and val != "Any":
                 where.append(f"(c.{col} IS NOT NULL AND c.{col} = ?)")
                 params.append(val)
 
