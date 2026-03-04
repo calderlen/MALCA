@@ -58,7 +58,24 @@ from malca.config.config_paths import (
     VSX_CROSSMATCH_PATH,
 )
 from malca.config.config_pipeline import WORKERS
-from malca.config.config_filters import MIN_BAYES_FACTOR, POST_FILTER_MIN_RUN_CAMERAS, POST_FILTER_MIN_RUN_POINTS
+from malca.config.config_filters import (
+    MIN_BAYES_FACTOR,
+    POST_FILTER_MIN_RUN_CAMERAS,
+    POST_FILTER_MIN_RUN_POINTS,
+    POST_FILTER_MAX_RUWE,
+    POST_FILTER_MAX_PM,
+    POST_FILTER_MAX_SEP_ARCSEC,
+    POST_FILTER_REL_TOL,
+    POST_FILTER_MIN_DELTA_BIC,
+    POST_FILTER_MIN_DIP_SCORE,
+    POST_FILTER_MIN_JUMP_SCORE,
+    POST_FILTER_PDM_SNR_THRESHOLD,
+    POST_FILTER_CE_SNR_THRESHOLD,
+    POST_FILTER_PDM_MIN_THETA,
+    POST_FILTER_CE_MIN_ENTROPY,
+    POST_FILTER_PERIODICITY_SCORE,
+    POST_FILTER_COORD_CHUNK_SIZE,
+)
 from malca.utils import log_rejections
 
 
@@ -113,7 +130,7 @@ def _pick_coord_columns(df: pd.DataFrame) -> tuple[str | None, str | None]:
     return None, None
 
 
-def _periods_agree(period_a: float, period_b: float, *, rel_tol: float = 0.10) -> bool:
+def _periods_agree(period_a: float, period_b: float, *, rel_tol: float = POST_FILTER_REL_TOL) -> bool:
     """Return True when periods agree directly or via common harmonics."""
     if not (np.isfinite(period_a) and np.isfinite(period_b)):
         return False
@@ -149,7 +166,7 @@ def _normalize_period_to_reference(period: float, reference: float) -> float:
 def _choose_consensus_period(
     periods_by_source: dict[str, float],
     *,
-    rel_tol: float = 0.10,
+    rel_tol: float = POST_FILTER_REL_TOL,
 ) -> tuple[float, bool, bool, float, str]:
     """Return consensus period + agreement metadata.
 
@@ -711,7 +728,7 @@ def _match_period_catalog(
             cat_class_valid = cat_class[valid_cat]
 
             cand_indices = np.flatnonzero(valid_cand)
-            chunk_size = 200000
+            chunk_size = POST_FILTER_COORD_CHUNK_SIZE
             iterator = range(0, len(cand_indices), chunk_size)
             if show_tqdm and len(cand_indices) > chunk_size:
                 iterator = tqdm(iterator, desc=f"match_{source_label}_coords", leave=False)
@@ -745,7 +762,7 @@ def _match_period_catalog(
 def filter_evidence_strength(
     df: pd.DataFrame,
     *,
-    min_bayes_factor: float = 10.0,
+    min_bayes_factor: float = MIN_BAYES_FACTOR,
     require_finite_local_bf: bool = True,
     show_tqdm: bool = False,
     verbose: bool = False,
@@ -915,7 +932,7 @@ def filter_morphology(
     *,
     dip_morphology: str = "gaussian",
     jump_morphology: str = "paczynski",
-    min_delta_bic: float = 10.0,
+    min_delta_bic: float = POST_FILTER_MIN_DELTA_BIC,
     show_tqdm: bool = False,
     verbose: bool = False,
     rejected_log_csv: str | Path | None = None,
@@ -991,9 +1008,9 @@ def filter_score(
             min_jump_score = float(min_score)
 
     if min_dip_score is None:
-        min_dip_score = -3.0
+        min_dip_score = POST_FILTER_MIN_DIP_SCORE
     if min_jump_score is None:
-        min_jump_score = -3.0
+        min_jump_score = POST_FILTER_MIN_JUMP_SCORE
 
     has_dip = "dipper_score" in df.columns
     has_jump = "jumper_score" in df.columns
@@ -1110,8 +1127,8 @@ def _lsp_worker(args: tuple) -> dict:
         ce_result = compute_ce_stats(jd, mag, err)
 
         # Decide if rejected (either method hits threshold)
-        pdm_rej = (pdm_result["pdm_snr"] >= 5.0) and (pdm_result["pdm_min_theta"] <= 0.6)
-        ce_rej = (ce_result["ce_snr"] >= 5.0) and (ce_result["ce_min_entropy"] <= 0.6)
+        pdm_rej = (pdm_result["pdm_snr"] >= POST_FILTER_PDM_SNR_THRESHOLD) and (pdm_result["pdm_min_theta"] <= POST_FILTER_PDM_MIN_THETA)
+        ce_rej = (ce_result["ce_snr"] >= POST_FILTER_CE_SNR_THRESHOLD) and (ce_result["ce_min_entropy"] <= POST_FILTER_CE_MIN_ENTROPY)
 
         is_rejected = pdm_rej or ce_rej
 
@@ -1248,7 +1265,7 @@ def validate_periodicity(
                         "lsp_bootstrap_sig": 0.0, # Treat as highly significant
                         "lsp_is_alias": False,
                         "lsp_is_significant": True,
-                        "periodicity_score": 99.0, # High confidence
+                        "periodicity_score": POST_FILTER_PERIODICITY_SCORE,
                         "error": None,
                     }
                     continue
@@ -1435,7 +1452,7 @@ def _save_checkpoint(checkpoint_file: Path, completed: dict, new_results: list) 
 def validate_gaia_ruwe(
     df: pd.DataFrame,
     *,
-    max_ruwe: float = 1.4,
+    max_ruwe: float = POST_FILTER_MAX_RUWE,
     flag_only: bool = True,
     show_tqdm: bool = False,
     verbose: bool = False,
@@ -1553,7 +1570,7 @@ def validate_gaia_ruwe(
 def validate_gaia_proper_motion(
     df: pd.DataFrame,
     *,
-    max_pm: float = 100.0,
+    max_pm: float = POST_FILTER_MAX_PM,
     flag_only: bool = True,
     show_tqdm: bool = False,
     verbose: bool = False,
@@ -1646,9 +1663,9 @@ def validate_gaia_proper_motion(
 def validate_periodic_catalog(
     df: pd.DataFrame,
     *,
-    max_sep_arcsec: float = 3.0,
+    max_sep_arcsec: float = POST_FILTER_MAX_SEP_ARCSEC,
     flag_only: bool = True,
-    consensus_rel_tol: float = 0.10,
+    consensus_rel_tol: float = POST_FILTER_REL_TOL,
     use_gaia_eb: bool = True,
     use_asassn_var: bool = True,
     use_ztf_periodic: bool = True,
@@ -1944,7 +1961,7 @@ def apply_post_filters(
     *,
     # Filter 7: evidence strength
     apply_evidence_strength: bool = True,
-    min_bayes_factor: float = 10.0,
+    min_bayes_factor: float = MIN_BAYES_FACTOR,
     require_finite_local_bf: bool = True,
     # Filter 8: explicit significant detection gate
     apply_significant_detection: bool = True,
@@ -1961,7 +1978,7 @@ def apply_post_filters(
     apply_morphology: bool = False,
     dip_morphology: str = "gaussian",
     jump_morphology: str = "paczynski",
-    min_delta_bic: float = 10.0,
+    min_delta_bic: float = POST_FILTER_MIN_DELTA_BIC,
     # Filter 11: event score
     apply_score: bool = True,
     min_dip_score: float | None = 0.0,
@@ -1981,17 +1998,17 @@ def apply_post_filters(
     phase_plot_allow_alias: bool = False,
     # Validation: Gaia RUWE
     apply_gaia_ruwe_validation: bool = True,
-    gaia_max_ruwe: float = 1.4,
+    gaia_max_ruwe: float = POST_FILTER_MAX_RUWE,
     gaia_flag_only: bool = True,
     # Validation: Gaia proper motion
     apply_gaia_pm_validation: bool = True,
-    gaia_max_pm: float = 100.0,
+    gaia_max_pm: float = POST_FILTER_MAX_PM,
     gaia_pm_flag_only: bool = True,
     # Validation: periodic catalog
     apply_periodic_catalog_validation: bool = True,
-    periodic_catalog_max_sep: float = 3.0,
+    periodic_catalog_max_sep: float = POST_FILTER_MAX_SEP_ARCSEC,
     periodic_catalog_flag_only: bool = True,
-    periodic_catalog_consensus_rel_tol: float = 0.10,
+    periodic_catalog_consensus_rel_tol: float = POST_FILTER_REL_TOL,
     periodic_catalog_use_gaia_eb: bool = True,
     periodic_catalog_use_asassn_var: bool = True,
     periodic_catalog_use_ztf_periodic: bool = True,
@@ -2371,13 +2388,13 @@ Example usage:
     parser.add_argument("--jump-morphology", type=str, default="paczynski",
                         choices=["gaussian", "paczynski"],
                         help="Required morphology for jumps (default: paczynski)")
-    parser.add_argument("--min-delta-bic", type=float, default=10.0,
+    parser.add_argument("--min-delta-bic", type=float, default=POST_FILTER_MIN_DELTA_BIC,
                         help="Minimum delta BIC for morphology filter (default: 10)")
 
     # Score filter parameters
     parser.add_argument("--apply-score-filter", action="store_true",
                         help="Apply event score filter (off by default)")
-    parser.add_argument("--min-score", type=float, default=-3.0,
+    parser.add_argument("--min-score", type=float, default=POST_FILTER_MIN_DIP_SCORE,
                         help="Legacy minimum log10 event score applied to dip and jump branches (default: -3.0)")
     parser.add_argument("--min-dip-score", type=float, default=None,
                         help="Minimum dipper_score threshold (overrides --min-score for dips)")
@@ -2412,7 +2429,7 @@ Example usage:
     # Gaia RUWE validation parameters
     parser.add_argument("--skip-gaia-ruwe-validation", action="store_true",
                         help="Skip Gaia RUWE validation (on by default, queries Gaia TAP)")
-    parser.add_argument("--gaia-max-ruwe", type=float, default=1.4,
+    parser.add_argument("--gaia-max-ruwe", type=float, default=POST_FILTER_MAX_RUWE,
                         help="Maximum RUWE to keep (default: 1.4)")
     parser.add_argument("--gaia-reject", action="store_true",
                         help="Reject high RUWE sources (default: flag only)")
@@ -2420,7 +2437,7 @@ Example usage:
     # Gaia proper-motion validation parameters
     parser.add_argument("--skip-gaia-pm-validation", action="store_true",
                         help="Skip Gaia proper-motion validation (on by default, uses local Gaia cache)")
-    parser.add_argument("--gaia-max-pm", type=float, default=100.0,
+    parser.add_argument("--gaia-max-pm", type=float, default=POST_FILTER_MAX_PM,
                         help="Maximum total proper motion to keep in mas/yr (default: 100.0)")
     parser.add_argument("--gaia-pm-reject", action="store_true",
                         help="Reject high proper-motion sources (default: flag only)")
@@ -2428,9 +2445,9 @@ Example usage:
     # Periodic catalog validation parameters
     parser.add_argument("--skip-periodic-catalog-validation", action="store_true",
                         help="Skip periodic-catalog consensus validation (on by default)")
-    parser.add_argument("--periodic-catalog-max-sep", type=float, default=3.0,
+    parser.add_argument("--periodic-catalog-max-sep", type=float, default=POST_FILTER_MAX_SEP_ARCSEC,
                         help="Maximum separation in arcsec for coordinate fallback matches (default: 3.0)")
-    parser.add_argument("--periodic-catalog-consensus-rel-tol", type=float, default=0.10,
+    parser.add_argument("--periodic-catalog-consensus-rel-tol", type=float, default=POST_FILTER_REL_TOL,
                         help="Relative tolerance for period-consensus agreement (default: 0.10)")
     parser.add_argument("--periodic-catalog-vsx-crossmatch", type=Path, default=VSX_CROSSMATCH_PATH,
                         help="ASAS-SN x VSX crossmatch CSV used for VSX period lookup")

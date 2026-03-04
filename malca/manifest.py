@@ -11,10 +11,8 @@ import pandas as pd
 from tqdm import tqdm
 
 from malca.config.config_io import PARQUET_OUTPUT_COMPRESSION
-from malca.config.config_paths import LCV2_ROOT
-from malca.config.config_pipeline import WORKERS
-
-MAG_BINS = ['12_12.5', '12.5_13', '13_13.5', '13.5_14', '14_14.5', '14.5_15']
+from malca.config.config_paths import LCV2_ROOT, DEFAULT_OUTPUT_DIR
+from malca.config.config_pipeline import WORKERS, MAG_BINS
 
 IDX_PATTERN = re.compile(r"index(\d+)\.csv$", re.IGNORECASE)
 
@@ -212,7 +210,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--out",
         type=Path,
-        default=Path("/home/lenhart.106/code/malca/output/lc_manifest.parquet"),
+        default=DEFAULT_OUTPUT_DIR / "lc_manifest.parquet",
         help="Output Parquet file path. Default: %(default)s",
     )
     parser.add_argument(

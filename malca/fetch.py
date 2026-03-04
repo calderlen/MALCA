@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from malca.config.config_paths import SKYPATROL_CACHE_DIR
+
 # ---------------------------------------------------------------------------
 # Lazy singleton for the SkyPatrolClient
 # ---------------------------------------------------------------------------
@@ -32,7 +34,7 @@ def _get_client():
 # ---------------------------------------------------------------------------
 # Default cache directory
 # ---------------------------------------------------------------------------
-_DEFAULT_CACHE = Path("output/cache/skypatrol")
+_DEFAULT_CACHE = SKYPATROL_CACHE_DIR
 
 
 def _ensure_cache(cache_dir: Path) -> Path:

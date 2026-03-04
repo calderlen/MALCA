@@ -18,6 +18,15 @@ from astropy.timeseries import LombScargle
 
 from malca.utils import read_lc_dat2, read_lc_csv
 from malca.periodogram import pdm_find_period, ce_find_period
+from malca.config.config_stats import (
+    MAD_SCALE,
+    STETSON_K_NORM,
+    SNR_CONVERSION_FACTOR,
+    LS_MIN_FREQUENCY,
+    LS_MAX_FREQUENCY,
+    LS_ALIAS_TOLERANCE,
+    LS_ALIAS_PERIODS,
+)
 
 # helpers
 def weighted_mean(x, w):
@@ -38,8 +47,7 @@ def robust_sigma(x):
     x = x[np.isfinite(x)]
     if x.size == 0:
         return np.nan
-    # 1.4826 * MAD (median absolute deviation)
-    return 1.4826 * np.median(np.abs(x - np.median(x)))
+    return MAD_SCALE * np.median(np.abs(x - np.median(x)))
 
 def log_gaussian(x, mu, sigma):
     """
@@ -174,7 +182,7 @@ def stetson_indices(mag, err):
     if not np.isfinite(denom) or denom <= 0:
         stetson_K = np.nan
     else:
-        stetson_K = float((1.0 / 0.798) * np.mean(np.abs(d)) / denom)
+        stetson_K = float(STETSON_K_NORM * np.mean(np.abs(d)) / denom)
 
     return {"stetson_I": stetson_I, "stetson_J": stetson_J, "stetson_K": stetson_K}
 
@@ -230,10 +238,10 @@ def bootstrap_lomb_scargle(
     err: np.ndarray,
     *,
     n_bootstrap: int = 1000,
-    min_frequency: float = 1.0 / 365.25,
-    max_frequency: float = 10.0,
+    min_frequency: float = LS_MIN_FREQUENCY,
+    max_frequency: float = LS_MAX_FREQUENCY,
     exclude_alias_periods: bool = True,
-    alias_tolerance: float = 0.1,
+    alias_tolerance: float = LS_ALIAS_TOLERANCE,
 ) -> dict:
     """
     Bootstrap Lomb-Scargle periodogram with significance testing.
@@ -297,7 +305,7 @@ def bootstrap_lomb_scargle(
     err = err[mask]
 
     # Known alias periods (sidereal day, half-day, lunar month, year, half-year)
-    alias_periods = [1.0, 0.5, 29.53, 365.25, 182.625]
+    alias_periods = LS_ALIAS_PERIODS
 
 def compute_pdm_stats(
     jd: np.ndarray,
@@ -1154,8 +1162,7 @@ def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=Tr
     std_clip  = float(np.nanstd(mag_clip, ddof=1))
     n_outliers = int(np.size(mag) - np.size(mag_clip))
 
-    # error and SNR stats (SNR ~= 1.0857 / err )
-    snr = 1.0857 / merr
+    snr = SNR_CONVERSION_FACTOR / merr
     err_stats = {
         "error_mean": float(np.nanmean(merr)),
         "error_median": float(np.nanmedian(merr)),

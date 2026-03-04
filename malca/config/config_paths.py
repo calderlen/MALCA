@@ -3,6 +3,7 @@
 from pathlib import Path
 
 VSX_CROSSMATCH_PATH = Path("input/vsx/asassn_x_vsx_matches_20250919_2252.csv")
+VSX_CROSSMATCH_COMPAT_PATH = Path("input/vsx/asassn_x_vsx_matches_20250919_2252_compat.csv")
 VSX_RAW_CATALOG_PATH = Path("input/vsx/vsxcat.090525.csv")
 ASASSN_INDEX_PATH = Path("input/asassn_index_masked_concat_cleaned_20250919_154524_brotli.parquet")
 STARHORSE_DEFAULT_PATH = "input/starhorse/starhorse2021.parquet"
@@ -15,3 +16,7 @@ UNTIMELY_API_URL = "https://irsa.ipac.caltech.edu/cgi-bin/Gator/nph-query"
 STARHORSE_TAP_URL = "https://gaia.aip.de/tap"
 GAIA_AIP_TAP_URL = "https://gaia.aip.de/tap"
 GAIA_LOCAL_CATALOG = Path("input/gaia/gaia_dr3_crossmatched.parquet")
+DEFAULT_OUTPUT_DIR = Path("output")
+LCV2_MASKED_ROOT = Path("/data/poohbah/1/assassin/lenhart/malca-older/calder/lcsv2_masked")
+SKYPATROL_CACHE_DIR = Path("output/cache/skypatrol")
+LTV_CACHE_DIR = Path("/tmp/ltv_cache")

@@ -45,6 +45,7 @@ from malca.config.config_pipeline import (
     BASELINE_W0,
     BASELINE_Q,
     BASELINE_JITTER,
+    JD_OFFSET,
 )
 from malca.config.config_io import REPRODUCE_CHUNK_SIZE
 from malca.config.config_filters import (
@@ -443,7 +444,6 @@ def plot_light_curve_with_dips(
     }
 
     camera_colors = pl.cm.tab10(np.linspace(0, 1, 10))
-    JD_OFFSET = 2458000.0
     band_labels = {0: "g band", 1: "V band"}
     band_markers = {0: "o", 1: "s"}
 

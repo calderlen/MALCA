@@ -17,6 +17,14 @@ from tqdm.auto import tqdm
 
 from malca.plot import plot_bayes_results, plot_phase_folded_lightcurve, BASELINE_FUNCTIONS
 from malca.review.metadata import REVIEW_METADATA_FIELDS, normalize_vsx_df, normalize_vsx_record
+from malca.config.config_pipeline import (
+    JD_OFFSET, LOGBF_THRESHOLD_DIP, LOGBF_THRESHOLD_JUMP,
+)
+from malca.config.config_filters import (
+    CLEAN_LC_MAX_ERROR_ABSOLUTE,
+    CLEAN_LC_MAX_ERROR_SIGMA,
+    BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
+)
 
 
 def load_passing_candidates(
@@ -219,15 +227,15 @@ def plot_passing_candidates(
     show: bool = False,
     verbose: bool = False,
     workers: int = 1,
-    logbf_threshold_dip: float = 5.0,
-    logbf_threshold_jump: float = 5.0,
-    jd_offset: float = 2458000.0,
-    clean_max_error_absolute: float = 1.0,
-    clean_max_error_sigma: float = 5.0,
+    logbf_threshold_dip: float = LOGBF_THRESHOLD_DIP,
+    logbf_threshold_jump: float = LOGBF_THRESHOLD_JUMP,
+    jd_offset: float = JD_OFFSET,
+    clean_max_error_absolute: float = CLEAN_LC_MAX_ERROR_ABSOLUTE,
+    clean_max_error_sigma: float = CLEAN_LC_MAX_ERROR_SIGMA,
     detection_results_csv: Path | None = None,
     run_params: dict | None = None,
     filter_bad_cameras: bool = True,
-    bad_camera_scatter_ratio: float = 2.5,
+    bad_camera_scatter_ratio: float = BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
     show_tqdm: bool = True,
 ) -> dict[str, object]:
     """
@@ -615,31 +623,31 @@ Example usage:
     parser.add_argument(
         "--logbf-threshold-dip",
         type=float,
-        default=5.0,
+        default=LOGBF_THRESHOLD_DIP,
         help="Log BF threshold for dips (default: 5.0)",
     )
     parser.add_argument(
         "--logbf-threshold-jump",
         type=float,
-        default=5.0,
+        default=LOGBF_THRESHOLD_JUMP,
         help="Log BF threshold for jumps (default: 5.0)",
     )
     parser.add_argument(
         "--jd-offset",
         type=float,
-        default=2458000.0,
+        default=JD_OFFSET,
         help="JD offset for plotting (default: 2458000.0)",
     )
     parser.add_argument(
         "--clean-max-error-absolute",
         type=float,
-        default=1.0,
+        default=CLEAN_LC_MAX_ERROR_ABSOLUTE,
         help="Absolute error cutoff for clean_lc (default: 1.0)",
     )
     parser.add_argument(
         "--clean-max-error-sigma",
         type=float,
-        default=5.0,
+        default=CLEAN_LC_MAX_ERROR_SIGMA,
         help="Sigma cutoff for clean_lc MAD filter (default: 5.0)",
     )
     parser.add_argument(
@@ -691,7 +699,7 @@ Example usage:
     parser.add_argument(
         "--bad-camera-scatter-ratio",
         type=float,
-        default=2.5,
+        default=BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
         help="Scatter ratio threshold for bad camera filtering (default: 2.5)",
     )
     parser.set_defaults(filter_bad_cameras=True)

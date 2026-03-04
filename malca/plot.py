@@ -26,10 +26,16 @@ from malca.baseline import (
     per_camera_median_baseline,
     per_camera_gp_baseline,
 )
-from malca.config.config_pipeline import WORKERS
-
-
-JD_OFFSET = 2458000.0
+from malca.config.config_pipeline import (
+    WORKERS, JD_OFFSET, PLOT_FIGSIZE,
+    LOGBF_THRESHOLD_DIP, LOGBF_THRESHOLD_JUMP,
+)
+from malca.config.config_filters import (
+    CLEAN_LC_MAX_ERROR_ABSOLUTE,
+    CLEAN_LC_MAX_ERROR_SIGMA,
+    BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
+)
+from malca.config.config_stats import MAD_SCALE
 
 CAMERA_COLOR_PALETTE = [
     "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
@@ -99,7 +105,7 @@ def load_lightcurve_df(
     path,
     *,
     filter_bad_cameras_enabled: bool = False,
-    bad_camera_scatter_ratio: float = 2.5,
+    bad_camera_scatter_ratio: float = BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
     return_filtered_info: bool = False,
 ):
     """
@@ -437,18 +443,18 @@ def plot_bayes_results(
     results_csv: Path | None = None,
     *,
     out_path: Path | None = None,
-    figsize=(14, 8),
+    figsize=PLOT_FIGSIZE,
     show=False,
     baseline_func=None,
     baseline_kwargs=None,
-    logbf_threshold_dip=5.0,
-    logbf_threshold_jump=5.0,
+    logbf_threshold_dip=LOGBF_THRESHOLD_DIP,
+    logbf_threshold_jump=LOGBF_THRESHOLD_JUMP,
     skip_events=False,
     plot_fits=False,
-    jd_offset=2458000.0,
+    jd_offset=JD_OFFSET,
     detection_results_csv=None,
-    clean_max_error_absolute=1.0,
-    clean_max_error_sigma=5.0,
+    clean_max_error_absolute=CLEAN_LC_MAX_ERROR_ABSOLUTE,
+    clean_max_error_sigma=CLEAN_LC_MAX_ERROR_SIGMA,
     annotations: dict[str, str] | None = None,
     # New parameters
     metadata: dict | None = None,
@@ -458,7 +464,7 @@ def plot_bayes_results(
     robust_threshold: bool = True,
     show_timestamp: bool = True,
     filter_bad_cameras: bool = True,
-    bad_camera_scatter_ratio: float = 2.5,
+    bad_camera_scatter_ratio: float = BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
     return_filtered_cameras: bool = False,
 ) -> set[int] | None:
     """Plot a light curve with Bayesian detection results and run fits.
@@ -586,7 +592,7 @@ def plot_bayes_results(
         all_resids_arr = np.array(all_resids)
         all_resids_finite = all_resids_arr[np.isfinite(all_resids_arr)]
         if len(all_resids_finite) > 10:
-            mad = 1.4826 * np.median(np.abs(all_resids_finite - np.median(all_resids_finite)))
+            mad = MAD_SCALE * np.median(np.abs(all_resids_finite - np.median(all_resids_finite)))
             sigma_5 = 5 * mad
         else:
             sigma_5 = 0.5  # fallback ~5-sigma for typical scatter
@@ -1210,19 +1216,19 @@ def main():
     parser.add_argument(
         "--jd-offset",
         type=float,
-        default=2458000.0,
+        default=JD_OFFSET,
         help="JD offset for plotting (default: 2458000.0)",
     )
     parser.add_argument(
         "--clean-max-error-absolute",
         type=float,
-        default=1.0,
+        default=CLEAN_LC_MAX_ERROR_ABSOLUTE,
         help="Absolute error cutoff for clean_lc (default: 1.0)",
     )
     parser.add_argument(
         "--clean-max-error-sigma",
         type=float,
-        default=5.0,
+        default=CLEAN_LC_MAX_ERROR_SIGMA,
         help="Sigma cutoff for clean_lc MAD filter (default: 5.0)",
     )
     parser.add_argument("--gp-sigma", type=float, default=None, help="GP sigma parameter.")

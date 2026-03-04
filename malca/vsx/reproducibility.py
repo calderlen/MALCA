@@ -8,40 +8,25 @@ import pandas as pd
 import astropy.units as u
 from astropy.coordinates import SkyCoord
 
-
-DEFAULT_VSX_CROSSMATCH = Path(
-    "/data/poohbah/1/assassin/lenhart/code/calder/calder/output/"
-    "asassn_x_vsx_matches_20250920_1415.csv"
-)
-DEFAULT_EXISTING = Path(
-    "/data/poohbah/1/assassin/lenhart/code/calder/calder/output/bj_objects.csv"
-)
-DEFAULT_ASASSN_CATALOG = Path(
-    "/data/poohbah/1/assassin/lenhart/code/calder/calder/output/"
-    "asassn_index_masked_concat_cleaned_20250920_1351.csv"
-)
-DEFAULT_VSX_CLEAN = Path(
-    "/data/poohbah/1/assassin/lenhart/code/calder/calder/output/vsx_cleaned_20250920_1351.csv"
-)
-DEFAULT_VSX_RAW = Path(
-    "/data/poohbah/1/assassin/lenhart/code/calder/calder/output/vsx_raw_20250921_0408.csv"
+from malca.config.config_paths import (
+    VSX_CROSSMATCH_PATH,
+    ASASSN_INDEX_PATH,
+    VSX_RAW_CATALOG_PATH,
+    DEFAULT_OUTPUT_DIR,
 )
 
-DEFAULT_OUT_MATCH_VSX = Path(
-    "/data/poohbah/1/assassin/lenhart/code/calder/calder/output/bj_objects_matched.csv"
-)
-DEFAULT_OUT_UNMATCH_VSX = Path(
-    "/data/poohbah/1/assassin/lenhart/code/calder/calder/output/bj_objects_unmatched.csv"
-)
-DEFAULT_OUT_MATCH_ASASSN = Path(
-    "/data/poohbah/1/assassin/lenhart/code/calder/calder/output/bj_objects_matched_asassn.csv"
-)
-DEFAULT_OUT_MATCH_VSXCLEAN = Path(
-    "/data/poohbah/1/assassin/lenhart/code/calder/calder/output/bj_objects_x_vsxclean.csv"
-)
-DEFAULT_OUT_MATCH_VSXRAW = Path(
-    "/data/poohbah/1/assassin/lenhart/code/calder/calder/output/bj_objects_x_vsxraw.csv"
-)
+
+DEFAULT_VSX_CROSSMATCH = VSX_CROSSMATCH_PATH
+DEFAULT_EXISTING = DEFAULT_OUTPUT_DIR / "bj_objects.csv"
+DEFAULT_ASASSN_CATALOG = ASASSN_INDEX_PATH
+DEFAULT_VSX_CLEAN = DEFAULT_OUTPUT_DIR / "vsx_cleaned_20250920_1351.csv"
+DEFAULT_VSX_RAW = VSX_RAW_CATALOG_PATH
+
+DEFAULT_OUT_MATCH_VSX = DEFAULT_OUTPUT_DIR / "bj_objects_matched.csv"
+DEFAULT_OUT_UNMATCH_VSX = DEFAULT_OUTPUT_DIR / "bj_objects_unmatched.csv"
+DEFAULT_OUT_MATCH_ASASSN = DEFAULT_OUTPUT_DIR / "bj_objects_matched_asassn.csv"
+DEFAULT_OUT_MATCH_VSXCLEAN = DEFAULT_OUTPUT_DIR / "bj_objects_x_vsxclean.csv"
+DEFAULT_OUT_MATCH_VSXRAW = DEFAULT_OUTPUT_DIR / "bj_objects_x_vsxraw.csv"
 
 DEFAULT_TOL_ARCSEC = 2.0
 

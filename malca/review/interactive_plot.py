@@ -19,6 +19,16 @@ from malca.utils import (
     identify_catastrophic_outlier_cameras,
     identify_offset_cameras,
 )
+from malca.config.config_pipeline import (
+    JD_OFFSET, MJD_TO_JD, GAIA_TCB_EPOCH_JD, TESS_BTJD_OFFSET, KEPLER_BKJD_OFFSET,
+    REVIEW_CACHE_LIMIT, REVIEW_MAX_EXTERNAL_POINTS, REVIEW_RESIDUAL_FRACTION,
+)
+from malca.config.config_filters import (
+    BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
+    CLEAN_LC_MAX_ERROR_ABSOLUTE,
+    CLEAN_LC_MAX_ERROR_SIGMA,
+    OFFSET_CAMERA_SIGMA_THRESHOLD,
+)
 
 
 BASELINE_FUNCTIONS = {
@@ -41,8 +51,8 @@ def _flux_err_from_mag_err(flux: np.ndarray, mag_err: np.ndarray) -> np.ndarray:
 
 
 # Keep plotting caches bounded; large values can inflate long-running GUI memory.
-_CACHE_LIMIT = 16
-_MAX_EXTERNAL_TRACE_POINTS = 20000
+_CACHE_LIMIT = REVIEW_CACHE_LIMIT
+_MAX_EXTERNAL_TRACE_POINTS = REVIEW_MAX_EXTERNAL_POINTS
 _CLEAN_CACHE: OrderedDict[tuple, tuple[pd.DataFrame, set[int], dict[str, list[str]]]] = OrderedDict()
 _BASELINE_CACHE: OrderedDict[tuple, dict[int, pd.DataFrame]] = OrderedDict()
 _EVENT_CACHE: OrderedDict[tuple, list[dict[str, object]]] = OrderedDict()
@@ -142,7 +152,7 @@ def _get_camera_reason_diagnostics(df: pd.DataFrame, scatter_ratio: float) -> di
     except Exception:
         scatter_bad = set()
     try:
-        offset_bad, _ = identify_offset_cameras(df, offset_sigma_threshold=15.0, remove_full_camera=True)
+        offset_bad, _ = identify_offset_cameras(df, offset_sigma_threshold=OFFSET_CAMERA_SIGMA_THRESHOLD, remove_full_camera=True)
     except Exception:
         offset_bad = set()
     try:
@@ -501,7 +511,7 @@ def _status_figure(message: str, theme: str = "black") -> go.Figure:
 _EXTERNAL_LC_SPECS: dict[str, dict] = {
     "atlas": {
         "time_col": "mjd",
-        "time_offset": 2400000.5,  # MJD already in MJD, but check for JD
+        "time_offset": MJD_TO_JD,
         "jd_system": "mjd",
         "bands": {
             "c": {"color": "#00ccff", "marker": "diamond", "label": "ATLAS c"},
@@ -617,7 +627,7 @@ def _normalize_mjd_column(df: pd.DataFrame, column: str = "mjd") -> None:
     finite = df[column].to_numpy()
     finite = finite[np.isfinite(finite)]
     if finite.size and float(np.nanmedian(finite)) > 1_000_000.0:
-        df[column] = df[column] - 2400000.5
+        df[column] = df[column] - MJD_TO_JD
 
 
 def normalize_external_lc_dataframe(source_name: str, df_ext: pd.DataFrame) -> pd.DataFrame:
@@ -765,7 +775,7 @@ def _overlay_external_lcs(
     # The raw-panel x-axis is always intended to be JD - 2458000, even when the
     # native ASAS-SN file stores reduced JD and the main trace uses an internal
     # 8000 shift to reach that same frame.
-    plot_jd_offset = 2458000.0
+    plot_jd_offset = JD_OFFSET
 
     for source_name, lc_path in external_lcs.items():
         spec = _EXTERNAL_LC_SPECS.get(source_name)
@@ -806,19 +816,19 @@ def _overlay_external_lcs(
             if finite_t.size and float(np.nanmedian(finite_t)) > 1_000_000.0:
                 jd = t
             else:
-                jd = t + 2400000.5
+                jd = t + MJD_TO_JD
             x_plot = jd - plot_jd_offset
         elif jd_sys == "bjd_gaia":
             # Gaia TCB days since J2010.0 → JD → JD_plot
-            jd = t + 2455197.5
+            jd = t + GAIA_TCB_EPOCH_JD
             x_plot = jd - plot_jd_offset
         elif jd_sys == "btjd":
             # BTJD → JD → JD_plot
-            jd = t + 2457000.0
+            jd = t + TESS_BTJD_OFFSET
             x_plot = jd - plot_jd_offset
         elif jd_sys == "bkjd":
             # BKJD → JD → JD_plot
-            jd = t + 2454833.0
+            jd = t + KEPLER_BKJD_OFFSET
             x_plot = jd - plot_jd_offset
         else:
             x_plot = t - jd_offset
@@ -923,7 +933,7 @@ def build_interactive_lightcurve_figure(
     run_params: dict | None,
     uirevision_key: str,
     theme: str = "black",
-    residual_fraction: float = 0.33,
+    residual_fraction: float = REVIEW_RESIDUAL_FRACTION,
     baseline_opacity: float = 0.5,
     yaxis_mode: Literal["mag", "flux"] = "mag",
     external_lcs: dict[str, Path] | None = None,
@@ -946,9 +956,9 @@ def build_interactive_lightcurve_figure(
             "warnings": ["Missing LC file"],
         }
 
-    scatter_ratio = float(run_params.get("bad_camera_scatter_ratio", 2.5)) if run_params else 2.5
-    clean_abs = float(run_params.get("clean_max_error_absolute", 1.0)) if run_params else 1.0
-    clean_sig = float(run_params.get("clean_max_error_sigma", 5.0)) if run_params else 5.0
+    scatter_ratio = float(run_params.get("bad_camera_scatter_ratio", BAD_CAMERA_SCATTER_RATIO_THRESHOLD)) if run_params else BAD_CAMERA_SCATTER_RATIO_THRESHOLD
+    clean_abs = float(run_params.get("clean_max_error_absolute", CLEAN_LC_MAX_ERROR_ABSOLUTE)) if run_params else CLEAN_LC_MAX_ERROR_ABSOLUTE
+    clean_sig = float(run_params.get("clean_max_error_sigma", CLEAN_LC_MAX_ERROR_SIGMA)) if run_params else CLEAN_LC_MAX_ERROR_SIGMA
 
     df, filtered_cameras, camera_diagnostics = _load_cleaned_df(
         lc_path,
@@ -987,7 +997,7 @@ def build_interactive_lightcurve_figure(
         }
 
     median_jd = float(df["JD"].median())
-    jd_offset = 2458000.0 if median_jd > 2000000 else 8000.0
+    jd_offset = JD_OFFSET if median_jd > 2000000 else 8000.0
     df = df[np.isfinite(df["JD"]) & np.isfinite(df["mag"])].copy()
     df["JD_plot"] = df["JD"] - jd_offset
     df["camera_label"] = _camera_labels(df)
@@ -1039,9 +1049,9 @@ def build_interactive_lightcurve_figure(
     try:
         residual_fraction = float(residual_fraction)
     except Exception:
-        residual_fraction = 0.33
+        residual_fraction = REVIEW_RESIDUAL_FRACTION
     if not np.isfinite(residual_fraction):
-        residual_fraction = 0.33
+        residual_fraction = REVIEW_RESIDUAL_FRACTION
     residual_fraction = float(np.clip(residual_fraction, 0.15, 0.85))
 
     # Dynamic row allocation
@@ -1391,7 +1401,7 @@ def build_interactive_lightcurve_figure(
         jd_axis_row = row_map['raw']
         
     if jd_axis_row is not None:
-        fig.update_xaxes(title_text="JD - 2458000", row=jd_axis_row, col=1)
+        fig.update_xaxes(title_text=f"JD - {int(JD_OFFSET)}", row=jd_axis_row, col=1)
         # Link x-axes if both raw and resid are present
         if show_raw_mag and show_residuals:
              fig.update_xaxes(matches="x", row=row_map['resid'], col=1)

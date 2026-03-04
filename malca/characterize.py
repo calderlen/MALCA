@@ -107,6 +107,14 @@ from malca.config.config_paths import (
     GAIA_LOCAL_CATALOG,
 )
 from malca.config.config_io import PARQUET_CACHE_COMPRESSION
+from malca.config.config_io import PARQUET_OUTPUT_COMPRESSION
+from malca.config.config_classify import (
+    YSO_CLASS_I_W1W2,
+    YSO_CLASS_II_W1W2_MIN,
+    YSO_CLASS_II_HK,
+    YSO_DUST_CORRECTION_HK,
+    YSO_DUST_CORRECTION_W1W2,
+)
 
 
 CATALOG_CACHE_DIR = DEFAULT_CACHE_DIR.expanduser()
@@ -575,8 +583,8 @@ def classify_yso(df: pd.DataFrame) -> pd.DataFrame:
     # Dust Correction
     if 'A_v_3d' in df.columns and df['A_v_3d'].sum() > 0:
         av = df['A_v_3d'].fillna(0.0)
-        hk_color = hk_color - (0.18 * av)
-        w1w2_color = w1w2_color - (0.05 * av)
+        hk_color = hk_color - (YSO_DUST_CORRECTION_HK * av)
+        w1w2_color = w1w2_color - (YSO_DUST_CORRECTION_W1W2 * av)
         df['H_K_dered'] = hk_color
         df['W1_W2_dered'] = w1w2_color
     
@@ -584,10 +592,10 @@ def classify_yso(df: pd.DataFrame) -> pd.DataFrame:
     df['W1_W2'] = w1w2_color
     
     # Classification criteria
-    class_i = df['W1_W2'] > 0.8
-    class_ii = ((df['W1_W2'] > 0.25) & (df['W1_W2'] < 0.8) & (df['H_K'] > 0.3))
-    trans = ((df['W1_W2'] > 0.25) & (df['W1_W2'] < 0.8) & (df['H_K'] < 0.3))
-    ms = df['W1_W2'] < 0.25
+    class_i = df['W1_W2'] > YSO_CLASS_I_W1W2
+    class_ii = ((df['W1_W2'] > YSO_CLASS_II_W1W2_MIN) & (df['W1_W2'] < YSO_CLASS_I_W1W2) & (df['H_K'] > YSO_CLASS_II_HK))
+    trans = ((df['W1_W2'] > YSO_CLASS_II_W1W2_MIN) & (df['W1_W2'] < YSO_CLASS_I_W1W2) & (df['H_K'] < YSO_CLASS_II_HK))
+    ms = df['W1_W2'] < YSO_CLASS_II_W1W2_MIN
     
     df['yso_class'] = 'unknown'
     df.loc[class_i, 'yso_class'] = 'Class I'
@@ -1979,7 +1987,7 @@ def main():
     output_path.parent.mkdir(parents=True, exist_ok=True)
     
     if str(output_path).endswith(".parquet"):
-        df_char.to_parquet(output_path, index=False, compression="zstd")
+        df_char.to_parquet(output_path, index=False, compression=PARQUET_OUTPUT_COMPRESSION)
     else:
         df_char.to_csv(output_path, index=False)
         

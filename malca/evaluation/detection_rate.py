@@ -46,6 +46,11 @@ from malca.config.config_pipeline import (
     BASELINE_W0,
     BASELINE_Q,
     BASELINE_JITTER,
+    INJECTION_MAG_LO,
+    INJECTION_MAG_HI,
+    INJECTION_N_SAMPLE,
+    INJECTION_MIN_POINTS,
+    INJECTION_SEED,
 )
 
 
@@ -68,9 +73,9 @@ def _load_lc(asas_sn_id: str, lc_dir: Path) -> pd.DataFrame:
 
 def select_control_sample(
     manifest: pd.DataFrame,
-    n_sample: int = 10000,
-    min_points: int = 50,
-    seed: int = 42,
+    n_sample: int = INJECTION_N_SAMPLE,
+    min_points: int = INJECTION_MIN_POINTS,
+    seed: int = INJECTION_SEED,
     reject_candidates: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Select control sample of light curves."""
@@ -184,7 +189,7 @@ def run_detection_rate_trial(
     control_ids: np.ndarray,
     control_dirs: np.ndarray,
     detection_kwargs: dict,
-    seed: int = 42,
+    seed: int = INJECTION_SEED,
 ) -> dict:
     """Run detection on a single light curve (no injection)."""
     rng = np.random.default_rng(seed + int(trial_index))
@@ -211,7 +216,7 @@ def run_detection_rate_trial(
             median_mag = float(np.nanmedian(df["mag"].values))
 
             # Only process stars with median magnitude between 12 and 15
-            if median_mag < 12.0 or median_mag > 15.0:
+            if median_mag < INJECTION_MAG_LO or median_mag > INJECTION_MAG_HI:
                 if attempt == max_attempts - 1:
                      return dict(
                         trial_index=trial_index,
@@ -447,11 +452,11 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
         "--control-sample-size",
         dest="control_sample_size",
         type=int,
-        default=10000,
+        default=INJECTION_N_SAMPLE,
         help="Number of light curves to sample.",
     )
-    parser.add_argument("--min-points", type=int, default=50, help="Minimum points in control sample if available.")
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--min-points", type=int, default=INJECTION_MIN_POINTS, help="Minimum points in control sample if available.")
+    parser.add_argument("--seed", type=int, default=INJECTION_SEED)
 
     parser.add_argument("--workers", type=int, default=WORKERS, help="Parallel workers.")
     parser.add_argument("--checkpoint-interval", type=int, default=1000, help="Trials per checkpoint update.")

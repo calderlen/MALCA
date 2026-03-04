@@ -82,12 +82,15 @@ from malca.config.config_pipeline import (
     LOGBF_THRESHOLD_DIP, LOGBF_THRESHOLD_JUMP, SIGNIFICANCE_THRESHOLD,
     MIN_MAG_OFFSET, RUN_MIN_POINTS, RUN_MAX_GAP_POINTS,
     BASELINE_FUNC, BASELINE_S0, BASELINE_W0, BASELINE_Q, BASELINE_JITTER,
+    JD_OFFSET,
 )
 from malca.config.config_io import OUTPUT_FORMAT, EVENTS_OUTPUT_CHUNK_SIZE
 from malca.config.config_filters import (
     MIN_TIME_SPAN, MIN_POINTS_PER_DAY, MIN_CAMERAS,
     VSX_MAX_SEP_ARCSEC, VSX_MODE, CAMERA_MEDIAN_TOLERANCE, STATS_CHUNK_SIZE,
     MIN_BAYES_FACTOR, POST_FILTER_MIN_RUN_CAMERAS, POST_FILTER_MIN_RUN_POINTS,
+    CLEAN_LC_MAX_ERROR_ABSOLUTE, CLEAN_LC_MAX_ERROR_SIGMA,
+    BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
 )
 from malca.config.config_characterize import (
     GAIA_CHUNK_SIZE, NEIGHBOR_RADIUS_ARCSEC, NEIGHBOR_CHUNK_SIZE,
@@ -1743,12 +1746,12 @@ def main():
                         workers=max(1, int(args.workers)),
                         logbf_threshold_dip=float(args.logbf_threshold_dip),
                         logbf_threshold_jump=float(args.logbf_threshold_jump),
-                        jd_offset=2458000.0,
-                        clean_max_error_absolute=1.0,
-                        clean_max_error_sigma=5.0,
+                        jd_offset=JD_OFFSET,
+                        clean_max_error_absolute=CLEAN_LC_MAX_ERROR_ABSOLUTE,
+                        clean_max_error_sigma=CLEAN_LC_MAX_ERROR_SIGMA,
                         run_params=run_params if 'run_params' in locals() else None,
                         filter_bad_cameras=True,
-                        bad_camera_scatter_ratio=2.5,
+                        bad_camera_scatter_ratio=BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
                         show_tqdm=args.verbose,
                     )
 

@@ -33,7 +33,7 @@ import pandas as pd
 from tqdm.auto import tqdm
 
 from malca.config.config_io import PARQUET_CACHE_COMPRESSION, PARQUET_OUTPUT_COMPRESSION
-from malca.config.config_paths import VSX_CROSSMATCH_PATH
+from malca.config.config_paths import VSX_CROSSMATCH_COMPAT_PATH, VSX_CROSSMATCH_PATH
 from malca.config.config_pipeline import WORKERS
 from malca.config.config_filters import (
     MIN_TIME_SPAN, MIN_POINTS_PER_DAY, MIN_CAMERAS,
@@ -301,7 +301,7 @@ def filter_sparse_lightcurves(
 def attach_vsx_info(
     df: pd.DataFrame,
     *,
-    vsx_crossmatch_csv: str | Path | None = "input/vsx/asassn_x_vsx_matches_20250919_2252_compat.csv",
+    vsx_crossmatch_csv: str | Path | None = VSX_CROSSMATCH_COMPAT_PATH,
 ) -> pd.DataFrame:
     """
     Attach VSX crossmatch info (vsx_sep_arcsec/vsx_class) to the dataframe.
@@ -351,7 +351,7 @@ def filter_vsx_match(
     *,
     max_sep_arcsec: float = 3.0,
     exclude_classes: list[str] | None = None,
-    vsx_crossmatch_csv: str | Path | None = "input/vsx/asassn_x_vsx_matches_20250919_2252_compat.csv",
+    vsx_crossmatch_csv: str | Path | None = VSX_CROSSMATCH_COMPAT_PATH,
     show_tqdm: bool = False,
     rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
@@ -735,7 +735,7 @@ def apply_pre_filters(
     apply_vsx: bool = False,
     vsx_max_sep_arcsec: float = 3.0,
     vsx_exclude_classes: list[str] | None = None,
-    vsx_crossmatch_csv: str | Path = "input/vsx/asassn_x_vsx_matches_20250919_2252_compat.csv",
+    vsx_crossmatch_csv: str | Path = VSX_CROSSMATCH_COMPAT_PATH,
     vsx_mode: str = "filter",
     # Filter 2: sparse lightcurves
     apply_sparse: bool = True,

@@ -32,6 +32,7 @@ except Exception:
 
 from malca.config.config_classify import (
     SOLAR_MASS_KG, SOLAR_RADIUS_M, AU_M, DAY_S,
+    GRAVITATIONAL_CONSTANT_SI, EARTH_MASS_KG,
     EB_SHORT_DIP_DAYS, EB_LONG_DIP_DAYS, EB_SHORT_P, EB_LONG_P, EB_VERY_LONG_P,
     EB_PERIODIC_BONUS, EB_SYMMETRIC_BONUS, EB_BINARY_BONUS, EB_ASYMMETRY_THRESHOLD,
     CV_BP_RP_THRESHOLD, CV_G_ABS_THRESHOLD, CV_BASE_P,
@@ -47,6 +48,7 @@ from malca.config.config_classify import (
     CLASSIFY_DISK_THRESHOLD, CLASSIFY_MS_EB_REJECTION, CLASSIFY_MS_CV_REJECTION,
     CLASSIFY_IPHAS_RADIUS_ARCSEC, CLASSIFY_PS1_RADIUS_ARCSEC,
 )
+from malca.config.config_io import PARQUET_OUTPUT_COMPRESSION
 
 
 # =============================================================================
@@ -496,14 +498,13 @@ def estimate_semimajor_axis(df: pd.DataFrame) -> pd.DataFrame:
     # Transit duration ~ 2(S+R*) * P / (2π * a) = (S+R*) * sqrt(a / GM)
     # Solving for a: a = (GM * dt^2) / (S+R*)^2
     
-    G_SI = 6.674e-11
     M_kg = M_star * SOLAR_MASS_KG
     R_m = R_star * SOLAR_RADIUS_M
     S_m = S * SOLAR_RADIUS_M
     dt_s = dt_days * DAY_S
     
     # a = GM * dt^2 / (S+R)^2
-    a_m = (G_SI * M_kg * dt_s**2) / ((S_m + R_m)**2)
+    a_m = (GRAVITATIONAL_CONSTANT_SI * M_kg * dt_s**2) / ((S_m + R_m)**2)
     a_au = a_m / AU_M
     
     df['a_circ_au'] = a_au
@@ -513,8 +514,7 @@ def estimate_semimajor_axis(df: pd.DataFrame) -> pd.DataFrame:
     
     # Hill radius for 1 Earth mass at estimated a
     # R_H = a * (M_planet / 3*M_star)^(1/3)
-    M_earth = 5.972e24  # kg
-    r_hill_m = a_m * (M_earth / (3 * M_kg))**(1/3)
+    r_hill_m = a_m * (EARTH_MASS_KG / (3 * M_kg))**(1/3)
     df['hill_radius_rsun'] = r_hill_m / SOLAR_RADIUS_M
     
     return df
@@ -670,7 +670,7 @@ def main():
     args.output.parent.mkdir(parents=True, exist_ok=True)
     
     if str(args.output).endswith('.parquet'):
-        df.to_parquet(args.output, index=False, compression="zstd")
+        df.to_parquet(args.output, index=False, compression=PARQUET_OUTPUT_COMPRESSION)
     else:
         df.to_csv(args.output, index=False)
     

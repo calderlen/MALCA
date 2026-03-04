@@ -47,6 +47,12 @@ from malca.config.config_pipeline import (
     BASELINE_W0,
     BASELINE_Q,
     BASELINE_JITTER,
+    INJECTION_MAG_LO,
+    INJECTION_MAG_HI,
+    INJECTION_N_SAMPLE,
+    INJECTION_MIN_POINTS,
+    INJECTION_SEED,
+    INJECTION_MAX_ATTEMPTS,
 )
 from malca.config.config_io import INJECTION_CHUNK_SIZE
 
@@ -192,10 +198,10 @@ def _load_lc(asas_sn_id: str, lc_dir: Path) -> pd.DataFrame:
 
 def select_control_sample(
     manifest_df: pd.DataFrame,
-    n_sample: int = 10000,
+    n_sample: int = INJECTION_N_SAMPLE,
     reject_candidates: pd.DataFrame | None = None,
-    min_points: int = 50,
-    seed: int = 42,
+    min_points: int = INJECTION_MIN_POINTS,
+    seed: int = INJECTION_SEED,
 ) -> pd.DataFrame:
     """
     Select clean light curves for injection testing.
@@ -338,7 +344,7 @@ def _simulate_trial(
     duration = 10 ** rng.uniform(log_dur_min, log_dur_max)
 
     # Retry loop to find a star with valid magnitude (12-15)
-    max_attempts = 10
+    max_attempts = INJECTION_MAX_ATTEMPTS
     for attempt in range(max_attempts):
         control_idx = int(rng.integers(0, len(control_ids)))
         asas_sn_id = str(control_ids[control_idx])
@@ -361,7 +367,7 @@ def _simulate_trial(
             median_mag = float(np.nanmedian(df["mag"].values))
             
             # Only inject into stars with median magnitude between 12 and 15
-            if median_mag < 12.0 or median_mag > 15.0:
+            if median_mag < INJECTION_MAG_LO or median_mag > INJECTION_MAG_HI:
                 if attempt == max_attempts - 1:
                      return dict(
                         trial_index=trial_index,
@@ -543,13 +549,13 @@ def run_injection_recovery(
     detection_kwargs: dict,
     min_mag_offset: float = 0.0,
     measure_pre_injection: bool = False,
-    total_trials: int = 10000,
+    total_trials: int = INJECTION_N_SAMPLE,
     amplitude_range: tuple[float, float] = (0.05, 2.0),
     duration_range: tuple[float, float] = (1.0, 300.0),
     skewness_range: tuple[float, float] = (-0.5, 0.5),
     mag_err_order: int = 5,
     mag_err_sample: int = 100,
-    seed: int = 42,
+    seed: int = INJECTION_SEED,
     workers: int = 1,
     task_size: int = 50,
     checkpoint_interval: int = 1000,
@@ -1603,11 +1609,11 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
         "--control-sample-size",
         dest="control_sample_size",
         type=int,
-        default=10000,
+        default=INJECTION_N_SAMPLE,
         help="Number of control LCs to sample.",
     )
-    parser.add_argument("--min-points", type=int, default=50, help="Minimum points in control sample if available.")
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--min-points", type=int, default=INJECTION_MIN_POINTS, help="Minimum points in control sample if available.")
+    parser.add_argument("--seed", type=int, default=INJECTION_SEED)
 
     parser.add_argument("--amp-min", type=float, default=0.05)
     parser.add_argument("--amp-max", type=float, default=3.0)

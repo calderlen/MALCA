@@ -15,6 +15,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from malca.config.config_stats import MAD_SCALE
 
 from malca.fetch import (
     cone_search,
@@ -157,7 +158,7 @@ def _compute_stats_from_skypatrol_csv(lc_path: Path) -> dict:
 
         # Robust sigma (MAD-based)
         mad = np.nanmedian(np.abs(mag - median_mag))
-        robust_sigma = float(1.4826 * mad) if np.isfinite(mad) else std_mag
+        robust_sigma = float(MAD_SCALE * mad) if np.isfinite(mad) else std_mag
 
         # IQR
         q75, q25 = np.nanpercentile(mag, [75, 25])

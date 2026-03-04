@@ -6,11 +6,12 @@ from pathlib import Path
 import pandas as pd
 from tqdm.auto import tqdm
 
-MAG_BINS = ("12_12.5", "12.5_13", "13_13.5", "13.5_14", "14_14.5", "14.5_15")
+from malca.config.config_pipeline import MAG_BINS
+from malca.config.config_paths import LCV2_ROOT, LCV2_MASKED_ROOT, VSX_RAW_CATALOG_PATH
 
-DEFAULT_LC_DIR = Path("/data/poohbah/1/assassin/rowan.90/lcsv2")
-DEFAULT_LC_DIR_MASKED = Path("/data/poohbah/1/assassin/lenhart/malca-older/calder/lcsv2_masked")
-DEFAULT_VSX_FILE = Path(__file__).parent.parent.parent / "input" / "vsx" / "vsxcat.090525.csv"
+DEFAULT_LC_DIR = LCV2_ROOT
+DEFAULT_LC_DIR_MASKED = LCV2_MASKED_ROOT
+DEFAULT_VSX_FILE = VSX_RAW_CATALOG_PATH
 DEFAULT_OUTPUT_DIR = Path(__file__).parent.parent.parent / "input" / "vsx"
 
 

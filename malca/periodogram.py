@@ -5,13 +5,23 @@ from __future__ import annotations
 import numba
 import numpy as np
 
+from malca.config.config_stats import (
+    PDM_MIN_PERIOD,
+    PDM_MAX_PERIOD,
+    PDM_N_PERIODS,
+    PDM_N_BINS,
+    CE_N_PHASE_BINS,
+    CE_N_MAG_BINS,
+    LS_SAMPLES_PER_PEAK,
+)
+
 
 # ---------------------------------------------------------------------------
 # PDM (Phase Dispersion Minimization)
 # ---------------------------------------------------------------------------
 
 @numba.jit(nopython=True)
-def _pdm_theta(times: np.ndarray, yvals: np.ndarray, period: float, n_bins: int = 20) -> float:
+def _pdm_theta(times: np.ndarray, yvals: np.ndarray, period: float, n_bins: int = PDM_N_BINS) -> float:
     """Compute PDM theta statistic for a single trial period.
 
     Theta = (sum of within-bin variances) / (total variance).
@@ -65,10 +75,10 @@ def _pdm_theta(times: np.ndarray, yvals: np.ndarray, period: float, n_bins: int 
 def pdm_find_period(
     times: np.ndarray,
     yvals: np.ndarray,
-    min_period: float = 0.1,
-    max_period: float = 100.0,
-    n_periods: int = 10000,
-    n_bins: int = 20,
+    min_period: float = PDM_MIN_PERIOD,
+    max_period: float = PDM_MAX_PERIOD,
+    n_periods: int = PDM_N_PERIODS,
+    n_bins: int = PDM_N_BINS,
 ) -> tuple[float, np.ndarray, np.ndarray]:
     """Run PDM over a grid of trial periods.
 
@@ -91,7 +101,7 @@ def pdm_find_period(
 
 @numba.jit(nopython=True)
 def _ce_evaluate(times: np.ndarray, yvals: np.ndarray, period: float,
-                 n_phase_bins: int = 20, n_mag_bins: int = 10) -> float:
+                 n_phase_bins: int = CE_N_PHASE_BINS, n_mag_bins: int = CE_N_MAG_BINS) -> float:
     """Compute conditional entropy H(mag|phase) for a single trial period.
 
     Lower entropy = better period (data concentrates in fewer phase-mag cells).
@@ -149,11 +159,11 @@ def _ce_evaluate(times: np.ndarray, yvals: np.ndarray, period: float,
 def ce_find_period(
     times: np.ndarray,
     yvals: np.ndarray,
-    min_period: float = 0.1,
-    max_period: float = 100.0,
-    n_periods: int = 10000,
-    n_phase_bins: int = 20,
-    n_mag_bins: int = 10,
+    min_period: float = PDM_MIN_PERIOD,
+    max_period: float = PDM_MAX_PERIOD,
+    n_periods: int = PDM_N_PERIODS,
+    n_phase_bins: int = CE_N_PHASE_BINS,
+    n_mag_bins: int = CE_N_MAG_BINS,
 ) -> tuple[float, np.ndarray, np.ndarray]:
     """Run Conditional Entropy period search.
 
@@ -178,9 +188,9 @@ def ce_find_period(
 def lsp_find_period(
     times: np.ndarray,
     yvals: np.ndarray,
-    min_period: float = 0.1,
-    max_period: float = 100.0,
-    samples_per_peak: int = 10,
+    min_period: float = PDM_MIN_PERIOD,
+    max_period: float = PDM_MAX_PERIOD,
+    samples_per_peak: int = LS_SAMPLES_PER_PEAK,
 ) -> tuple[float, np.ndarray, np.ndarray]:
     """Run Lomb-Scargle periodogram via astropy.
 

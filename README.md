@@ -54,13 +54,10 @@ conda activate malca
 ## Quick Start
 ```bash
 # Build manifest (source_id → path index)
-malca manifest --index-root /path/to/lcsv2 --lc-root /path/to/lcsv2 \
-    --mag-bin 13_13.5 --out output/manifest.parquet --workers 10
+malca manifest --index-root /path/to/lcsv2 --lc-root /path/to/lcsv2 --mag-bin 13_13.5 --out output/manifest.parquet --workers 10
 
 # Run event detection pipeline
-malca pipeline --mag-bin 13_13.5 --workers 10 \
-    --lc-root /path/to/lcsv2 --index-root /path/to/lcsv2 \
-    --output output/results.parquet --min-mag-offset 0.1
+malca pipeline --mag-bin 13_13.5 --workers 10 --lc-root /path/to/lcsv2 --index-root /path/to/lcsv2 --output output/results.parquet --min-mag-offset 0.1
 
 # Validate results against known candidates (no raw data needed)
 malca validate --results output/results.parquet
@@ -83,12 +80,10 @@ Minimal split workflow (cluster -> home):
 
 ```bash
 # On cluster: run upstream/raw-dependent steps and export transfer bundle
-malca pipeline --stage cluster --mag-bin 13_13.5 --out-dir output/run_001 \
-    --export-bundle output/run_001_bundle.zip
+malca pipeline --stage cluster --mag-bin 13_13.5 --out-dir output/run_001 --export-bundle output/run_001_bundle.zip
 
 # On home machine: import bundle and run downstream/catalog steps only
-malca pipeline --stage home --out-dir output/run_001 \
-    --import-bundle ~/Downloads/run_001_bundle.zip
+malca pipeline --stage home --out-dir output/run_001 --import-bundle ~/Downloads/run_001_bundle.zip
 ```
 
 ## Pipeline Architecture
@@ -249,19 +244,11 @@ The full detection workflow has three steps: build a manifest, run detection wit
 
 1) Build a manifest (map IDs -> light-curve directories):
    ```bash
-   malca manifest --index-root /path/to/lcsv2 --lc-root /path/to/lcsv2 \
-       --mag-bin 13_13.5 --out output/lc_manifest_13_13.5.parquet --workers 10
+   malca manifest --index-root /path/to/lcsv2 --lc-root /path/to/lcsv2 --mag-bin 13_13.5 --out output/lc_manifest_13_13.5.parquet --workers 10
    ```
 2) Pre-filter and run events in batches with resume support:
    ```bash
-   malca pipeline --mag-bin 13_13.5 --workers 10 \
-       --min-time-span 100 --min-points-per-day 0.05 --min-cameras 2 \
-       --vsx-crossmatch input/vsx/asassn_x_vsx_matches_20250919_2252.csv \
-       --batch-size 2000 \
-       --lc-root /path/to/lcsv2 \
-       --index-root /path/to/lcsv2 \
-       --output output/lc_events_results_13_13.5.parquet \
-       --trigger-mode posterior_prob --baseline-func gp --min-mag-offset 0.1
+   malca pipeline --mag-bin 13_13.5 --workers 10 --min-time-span 100 --min-points-per-day 0.05 --min-cameras 2 --vsx-crossmatch input/vsx/asassn_x_vsx_matches_20250919_2252.csv --batch-size 2000 --lc-root /path/to/lcsv2 --index-root /path/to/lcsv2 --output output/lc_events_results_13_13.5.parquet --trigger-mode posterior_prob --baseline-func gp --min-mag-offset 0.1
    ```
    - The pipeline command builds/loads the manifest, runs pre-filters, then calls `events.py` in batches.
    - Resume: if interrupted, skips already-processed paths using the checkpoint file.
@@ -270,12 +257,10 @@ The full detection workflow has three steps: build a manifest, run detection wit
 
 3) Post-filter events:
    ```bash
-   malca post_filter --input output/lc_events_results_13_13.5.parquet \
-       --output output/lc_events_results_13_13.5_filtered.parquet
+   malca post_filter --input output/lc_events_results_13_13.5.parquet --output output/lc_events_results_13_13.5_filtered.parquet
 
    # With custom thresholds
-   malca post_filter --input results.parquet --output filtered.parquet \
-       --min-bayes-factor 20 --min-run-points 3 --apply-morphology
+   malca post_filter --input results.parquet --output filtered.parquet --min-bayes-factor 20 --min-run-points 3 --apply-morphology
    ```
    - **Implemented filters**: posterior strength, run robustness, score, morphology, periodicity, Gaia RUWE, Gaia PM, multi-catalog periodic consensus
 
@@ -285,10 +270,7 @@ The full detection workflow has three steps: build a manifest, run detection wit
    malca pipeline --mag-bin 13_13.5 --skip-score-filter
 
    # Enable stricter optional validators
-   malca pipeline --mag-bin 13_13.5 \
-       --apply-morphology --min-delta-bic 12 \
-       --apply-periodicity-validation --periodicity-n-bootstrap 2000 \
-       --gaia-reject --periodic-catalog-reject
+   malca pipeline --mag-bin 13_13.5 --apply-morphology --min-delta-bic 12 --apply-periodicity-validation --periodicity-n-bootstrap 2000 --gaia-reject --periodic-catalog-reject
    ```
    - **Defaults in pipeline**: evidence strength, run robustness, score, Gaia RUWE, Gaia PM, and periodic-catalog consensus validation are on; morphology and periodicity-validation are off.
    - **Control flags now available in pipeline**:
@@ -299,15 +281,10 @@ The full detection workflow has three steps: build a manifest, run detection wit
 **Detect options:**
 ```bash
 # logBF triggering (faster)
-malca pipeline --mag-bin 13_13.5 --workers 8 \
-    --lc-root /path/to/lcsv2 --index-root /path/to/lcsv2 \
-    --output output/events_logbf.parquet --trigger-mode logbf \
-    --baseline-func gp_masked --min-mag-offset 0.1
+malca pipeline --mag-bin 13_13.5 --workers 8 --lc-root /path/to/lcsv2 --index-root /path/to/lcsv2 --output output/events_logbf.parquet --trigger-mode logbf --baseline-func gp_masked --min-mag-offset 0.1
 
 # Multiple mag bins (writes one output per bin)
-malca pipeline --mag-bin 12_12.5 12.5_13 13_13.5 \
-    --lc-root /path/to/lcsv2 --index-root /path/to/lcsv2 \
-    --output output/lc_events_results.parquet --trigger-mode logbf
+malca pipeline --mag-bin 12_12.5 12.5_13 13_13.5 --lc-root /path/to/lcsv2 --index-root /path/to/lcsv2 --output output/lc_events_results.parquet --trigger-mode logbf
 ```
 
 ### Individual Commands
@@ -315,8 +292,7 @@ malca pipeline --mag-bin 12_12.5 12.5_13 13_13.5 \
 #### malca manifest
 
 ```bash
-malca manifest --index-root <index_dir> --lc-root <lc_dir> \
-    --mag-bin 12_12.5 --out output/lc_manifest.parquet
+malca manifest --index-root <index_dir> --lc-root <lc_dir> --mag-bin 12_12.5 --out output/lc_manifest.parquet
 ```
 
 #### malca events
@@ -326,8 +302,7 @@ Run event detection directly (without the pipeline orchestrator):
 malca events --input /path/to/lc*_cal/*.dat2 --output output/results.parquet --workers 10
 
 # With signal amplitude filtering (requires |event_mag - baseline_mag| > 0.1)
-malca events --input /path/to/lc*_cal/*.dat2 --output output/results.parquet \
-    --workers 10 --min-mag-offset 0.1
+malca events --input /path/to/lc*_cal/*.dat2 --output output/results.parquet --workers 10 --min-mag-offset 0.1
 ```
 - Default Bayesian grid is 12x12. Change p-grid with `--p-points`.
 - Output includes per-event morphology fit parameters (`best_amp`, `best_t0`, `best_alpha`, `best_tau`, `best_morph`, `delta_bic`, `width_param`, `symmetry_score`) and recurrence statistics (`is_single_event`, `inter_event_spacing_median/std`, `amplitude_consistency`, `duration_consistency`) for both dips and jumps.
@@ -408,8 +383,7 @@ plot_efficiency_threshold_contour(cube, threshold=0.5, output_path="depth_at_50p
 
 ```bash
 # Re-run detection on raw data (requires manifest and .dat2 files)
-malca reproduce --manifest output/lc_manifest.parquet \
-    --candidates my_targets.csv --out-dir output/results_repro --workers 10
+malca reproduce --manifest output/lc_manifest.parquet --candidates my_targets.csv --out-dir output/results_repro --workers 10
 ```
 **Note**: Reproduction uses Bayesian detection.
 
@@ -438,8 +412,7 @@ malca validate --run-dir output/runs/20250119_1349
 malca validate --method loo --candidates my_targets.csv -v
 
 # Reproduce on built-in candidates using local SkyPatrol CSVs
-malca validate --candidates brayden_candidates --skypatrol-dir input/skypatrol2 \
-    --method bf --workers 4
+malca validate --candidates brayden_candidates --skypatrol-dir input/skypatrol2 --method bf --workers 4
 
 # Validate using a direct results file path
 malca validate --results output/events_logbf.parquet
@@ -450,11 +423,7 @@ malca validate --results output/events_logbf.parquet
 After detecting dipper candidates, characterize them using multi-wavelength data:
 
 ```bash
-malca characterize \
-  --input output/filtered.parquet \
-  --output output/characterized.parquet \
-  --dust \
-  --starhorse input/starhorse/starhorse2021.parquet
+malca characterize --input output/filtered.parquet --output output/characterized.parquet --dust --starhorse input/starhorse/starhorse2021.parquet
 ```
 
 **Features:**
@@ -551,18 +520,21 @@ malca attrition --pre output/pre.parquet --post output/post.parquet
 ### Candidate Review
 
 ```bash
-# Launch Dash review GUI (keyboard-driven)
-malca review --db ~/.cache/malca/review.db --plot-dir output/runs/YOUR_RUN/plots
+# Launch Dash review GUI against an existing run bundle
+malca review --plot-dir output/runs/YOUR_RUN/plots
+
+# Standalone mode (no plot directory required)
+malca review
 ```
 
 **Dash GUI features:**
-- Light curve plot display with grouped, collapsible metadata panels (~146 fields across 17 sections)
-- Interest scoring (0-5) via number keys or clickable buttons
-- Event class labeling (single-select): `dipper`, `yso`, `microlensing`, `flare`, `eclipsing_binary`, `instrumental`, `unknown_interesting`, `not_real`
-- Leader-key class shortcut: `C`+key — class badges are also clickable
-- Sidebar with import, queue filtering (unreviewed, score range, sort), characterize-on-import, and export controls
-- Freeform notes, followup flag, review pass tracking, recent activity log
-- Export reviewed candidates to CSV/Parquet
+- Native Plotly light-curve viewer with PNG fallback, camera filtering, and plot presets/overlays (raw points, dip/jump markers, residuals, phase-fold, diagnostics)
+- Confidence scoring (`1-4`) via number keys or clickable buttons
+- Event class labeling (single-select) with direct key shortcuts and clickable badges: `dipper`, `microlensing`, `flare`, `yso`, `unknown_interesting`, `instrumental`, `other` (toggle off to `unclassified`)
+- Collapsible candidate panels with metadata health, vetting banner, external follow-up cards, diagnostic plots, and run-config provenance
+- Sidebar queue controls: unreviewed/failed filters, grouped numeric/text/select filters, multi-column sort, open-existing jump, and native camera selection
+- Import/fetch workflows: import tables or raw LC files (optional characterize + vet on import), or fetch by ASAS-SN ID, Gaia DR3 ID, or coordinates
+- Per-candidate pipeline stage chips with "Run All Missing" / "Re-run Current", plus notes/followup/review-pass tracking and CSV/Parquet export
 
 #### malca ml_train
 

@@ -9,18 +9,29 @@ import pandas as pd
 from malca.events import score_lightcurve
 from malca.baseline import per_camera_gp_baseline
 from malca.utils import read_lc_dat2
+from malca.config.config_pipeline import (
+    LOGBF_THRESHOLD_DIP,
+    LOGBF_THRESHOLD_JUMP,
+    SIGNIFICANCE_THRESHOLD,
+    P_POINTS,
+    MAG_POINTS,
+    RUN_MIN_POINTS,
+    RUN_MAX_GAP_POINTS,
+    FP_TRIALS_PER_FAMILY,
+    INJECTION_SEED,
+)
 
 
 def _build_detection_kwargs(trigger_mode: str) -> dict:
     return dict(
         trigger_mode=trigger_mode,
-        logbf_threshold_dip=5.0,
-        logbf_threshold_jump=5.0,
-        significance_threshold=99.99997,
-        p_points=12,
-        mag_points=12,
-        run_min_points=2,
-        max_gap_points=5,
+        logbf_threshold_dip=LOGBF_THRESHOLD_DIP,
+        logbf_threshold_jump=LOGBF_THRESHOLD_JUMP,
+        significance_threshold=SIGNIFICANCE_THRESHOLD,
+        p_points=P_POINTS,
+        mag_points=MAG_POINTS,
+        run_min_points=RUN_MIN_POINTS,
+        max_gap_points=RUN_MAX_GAP_POINTS,
         run_max_gap_days=None,
         run_min_duration_days=None,
         compute_event_prob=True,
@@ -160,8 +171,8 @@ def main() -> None:
     parser.add_argument("--manifest", type=Path, required=True, help="Manifest CSV/Parquet with asas_sn_id and path")
     parser.add_argument("--out-dir", type=Path, default=Path("output/false_positive"))
     parser.add_argument("--families", type=str, default="camera_offset,camera_cluster,semiregular,rcb_like")
-    parser.add_argument("--n-trials-per-family", type=int, default=200)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--n-trials-per-family", type=int, default=FP_TRIALS_PER_FAMILY)
+    parser.add_argument("--seed", type=int, default=INJECTION_SEED)
     parser.add_argument("--trigger-mode", type=str, default="posterior_prob", choices=["logbf", "posterior_prob"])
     args = parser.parse_args()
 

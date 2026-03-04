@@ -51,19 +51,17 @@ from malca.score import compute_event_score
 from malca.stats import log_gaussian, median_dt, bic
 from malca.triggering import resolve_trigger_indices
 from malca.config.config_io import PARQUET_OUTPUT_COMPRESSION, OUTPUT_FORMAT, EVENTS_OUTPUT_CHUNK_SIZE
-from malca.config.config_paths import LCV2_ROOT
+from malca.config.config_paths import LCV2_ROOT, DEFAULT_OUTPUT_DIR
 from malca.config.config_pipeline import (
     WORKERS, TRIGGER_MODE, P_POINTS, MAG_POINTS,
     LOGBF_THRESHOLD_DIP, LOGBF_THRESHOLD_JUMP, SIGNIFICANCE_THRESHOLD,
-    MIN_MAG_OFFSET, RUN_MIN_POINTS, RUN_MAX_GAP_POINTS,
+    MIN_MAG_OFFSET, RUN_MIN_POINTS, RUN_MAX_GAP_POINTS, MAG_BINS,
     BASELINE_FUNC, BASELINE_S0, BASELINE_W0, BASELINE_Q, BASELINE_JITTER,
 )
 from malca.config.config_filters import BAD_CAMERA_SCATTER_RATIO_THRESHOLD
 
 from numba import njit, prange
 
-
-MAG_BINS = ['12_12.5', '12.5_13', '13_13.5', '13.5_14', '14_14.5', '14.5_15']
 
 EventKind: TypeAlias = Literal["dip", "jump"]
 
@@ -1493,7 +1491,7 @@ def main():
     quiet = not args.verbose
 
     def default_output_dir() -> Path:
-        base_dir = Path("/home/lenhart.106/code/malca/output")
+        base_dir = DEFAULT_OUTPUT_DIR
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         return base_dir / "runs" / timestamp / "results"
 

@@ -79,6 +79,15 @@ from malca.review.interactive_plot import (
 )
 from malca.config.config_paths import VSX_CROSSMATCH_PATH, GAIA_CACHE_FILE
 from malca.config.config_characterize import GAIA_CHUNK_SIZE
+from malca.config.config_pipeline import (
+    JD_OFFSET, MJD_TO_JD, GAIA_TCB_EPOCH_JD, TESS_BTJD_OFFSET, KEPLER_BKJD_OFFSET,
+    REVIEW_RESIDUAL_FRACTION,
+)
+from malca.config.config_filters import (
+    BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
+    CLEAN_LC_MAX_ERROR_ABSOLUTE,
+    CLEAN_LC_MAX_ERROR_SIGMA,
+)
 from malca.review.diagnostic_plots import (
     build_cmd_figure,
     build_ir_colorcolor_figure,
@@ -1645,7 +1654,7 @@ def _env_path_or_none(name: str) -> str | None:
 DB_PATH = _env_path_or_none(_REVIEW_DB_ENV) or str(DEFAULT_DB_PATH)
 PLOT_DIR = _env_path_or_none(_REVIEW_PLOT_ENV)
 DEFAULT_THEME = "black"
-DEFAULT_RESIDUAL_FRACTION = 0.33
+DEFAULT_RESIDUAL_FRACTION = REVIEW_RESIDUAL_FRACTION
 EXTERNAL_SOURCE_VIEW_OPTIONS = [
     {"label": "All", "value": "all"},
     {"label": "ASAS-SN Only", "value": "asassn"},
@@ -2401,23 +2410,23 @@ def _external_followup_theme(theme: str | None) -> dict[str, object]:
 
 
 def _convert_external_times_to_review_axis(values, jd_system: str = "mjd") -> np.ndarray:
-    """Convert source-native time values into the review axis: JD - 2458000."""
+    """Convert source-native time values into the review axis: JD - JD_OFFSET."""
     t = pd.to_numeric(values, errors="coerce").to_numpy()
     finite_t = t[np.isfinite(t)]
     if jd_system == "mjd":
         if finite_t.size and float(np.nanmedian(finite_t)) > 1_000_000.0:
             jd = t
         else:
-            jd = t + 2400000.5
+            jd = t + MJD_TO_JD
     elif jd_system == "bjd_gaia":
-        jd = t + 2455197.5
+        jd = t + GAIA_TCB_EPOCH_JD
     elif jd_system == "btjd":
-        jd = t + 2457000.0
+        jd = t + TESS_BTJD_OFFSET
     elif jd_system == "bkjd":
-        jd = t + 2454833.0
+        jd = t + KEPLER_BKJD_OFFSET
     else:
         jd = t
-    return jd - 2458000.0
+    return jd - JD_OFFSET
 
 
 def _apply_external_figure_layout(
@@ -4663,14 +4672,21 @@ def _run_period_search_for_payload(
     df, _, _ = _load_cleaned_df(
         lc_path,
         filter_bad_cameras=True,
-        scatter_ratio=2.5,
-        clean_max_error_absolute=1.0,
-        clean_max_error_sigma=5.0,
+        scatter_ratio=BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
+        clean_max_error_absolute=CLEAN_LC_MAX_ERROR_ABSOLUTE,
+        clean_max_error_sigma=CLEAN_LC_MAX_ERROR_SIGMA,
     )
     if df is None or df.empty:
         return None, 'Empty LC'
 
-    baseline_cache_key = (str(lc_path.resolve()), (), True, 2.5, 1.0, 5.0)
+    baseline_cache_key = (
+        str(lc_path.resolve()),
+        (),
+        True,
+        BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
+        CLEAN_LC_MAX_ERROR_ABSOLUTE,
+        CLEAN_LC_MAX_ERROR_SIGMA,
+    )
     band_dfs = _compute_baseline_bands(df, "per_camera_gp", baseline_cache_key)
 
     resid_parts = []

@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Callable
 
 import numpy as np
+from malca.config.config_paths import LTV_CACHE_DIR
+from malca.config.config_stats import MAD_SCALE
 
 # =============================================================================
 # NUMBA JIT FUNCTIONS
@@ -84,7 +86,7 @@ def _mad_fast(arr: np.ndarray) -> float:
     deviations = np.empty(n)
     for i in range(n):
         deviations[i] = abs(arr[i] - med)
-    return _median_fast(deviations) * 1.4826  # Scale factor for normal distribution
+    return _median_fast(deviations) * MAD_SCALE
 
 
 @jit(nopython=True, cache=True)
@@ -136,7 +138,7 @@ def _season_medians_fast(
 from joblib import Memory
 
 # Default cache directory
-CACHE_DIR = Path(os.environ.get("LTV_CACHE_DIR", "/tmp/ltv_cache"))
+CACHE_DIR = Path(os.environ.get("LTV_CACHE_DIR", str(LTV_CACHE_DIR)))
 
 _memory = None
 
@@ -218,4 +220,3 @@ def check_optimizations():
     print("  Numba JIT:        ✓ Available")
     print(f"  Joblib cache:     ✓ Available (dir: {CACHE_DIR})")
     print("  Connection pool:  ✓ Available")
-

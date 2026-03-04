@@ -20,6 +20,9 @@ from malca.config.config_filters import (
     CATASTROPHIC_SUPPORT_WINDOW_DAYS, CATASTROPHIC_SUPPORT_EXCURSION,
     CATASTROPHIC_MAX_FRACTION,
 )
+from malca.config.config_pipeline import SKYPATROL_JD_OFFSET
+from malca.config.config_pipeline import MAG_BINS
+from malca.config.config_paths import LCV2_MASKED_ROOT, LCV2_ROOT
 
 colors = ["#6b8bcd", "#b3b540", "#8f62ca", "#5eb550", "#c75d9c", "#4bb092", "#c5562f", "#6c7f39",
               "#ce5761", "#c68c45", '#b5b246', '#d77fcc', '#7362cf', '#ce443f', '#3fc1bf', '#cda735',
@@ -200,7 +203,7 @@ def year_to_jd(year):
     year_epoch = 1995
     days_in_year = 365.25
 
-    return (year - year_epoch) * days_in_year + (jd_epoch - 2450000.0)
+    return (year - year_epoch) * days_in_year + (jd_epoch - SKYPATROL_JD_OFFSET)
 
 
 def jd_to_year(jd):
@@ -208,7 +211,7 @@ def jd_to_year(jd):
     year_epoch = 1995
     days_in_year = 365.25
 
-    return year_epoch + ((jd + 2450000.0) - jd_epoch) / days_in_year
+    return year_epoch + ((jd + SKYPATROL_JD_OFFSET) - jd_epoch) / days_in_year
 
 
 def read_lc_dat2(asassn_id, path, excluded_cameras: set[int] | str | None = None):
@@ -305,7 +308,7 @@ def read_lc_csv(asassn_id, path):
     if df.empty:
         return pd.DataFrame(), pd.DataFrame()
 
-    df["JD"] = df["jd"] + 2450000.0
+    df["JD"] = df["jd"] + SKYPATROL_JD_OFFSET
 
     df_g = df[df["phot_filter"] == "g"].copy().reset_index(drop=True)
     df_v = df[df["phot_filter"] == "V"].copy().reset_index(drop=True)
@@ -918,9 +921,9 @@ def filter_bad_cameras(
 
 
 def match_index_to_lc(
-    index_path: str = "/data/poohbah/1/assassin/lenhart/code/calder/lcsv2_masked/",
-    lc_path:    str = "/data/poohbah/1/assassin/rowan.90/lcsv2",
-    mag_bins:   list = ['12_12.5','12.5_13','13_13.5','13.5_14','14_14.5','14.5_15'],
+    index_path: str | Path = LCV2_MASKED_ROOT,
+    lc_path: str | Path = LCV2_ROOT,
+    mag_bins: list = MAG_BINS,
     id_column:  str = "asas_sn_id",
 ):
     """
@@ -930,13 +933,13 @@ def match_index_to_lc(
     idx_pattern = re.compile(r"index(\d+)_masked\.csv$", re.IGNORECASE)
 
     for mag_bin in tqdm(mag_bins, desc="Bins", unit="bin"):
-        idx_paths = sorted(glob(os.path.join(index_path, mag_bin, "index*_masked.csv")))
+        idx_paths = sorted(glob(os.path.join(str(index_path), mag_bin, "index*_masked.csv")))
         for idx_csv in tqdm(idx_paths, desc=f"{mag_bin} index CSVs", leave=False):
 
                                                         
             idx_num = int(idx_pattern.search(os.path.basename(idx_csv)).group(1))
 
-            lc_dir = os.path.join(lc_path, mag_bin, f"lc{idx_num}_cal")
+            lc_dir = os.path.join(str(lc_path), mag_bin, f"lc{idx_num}_cal")
 
             ids = (
                 pd.read_csv(idx_csv, dtype={id_column: "string"})[id_column]

@@ -48,39 +48,71 @@ except Exception:
 from malca.config.config_paths import GAIA_AIP_TAP_URL
 from malca.config.config_characterize import GAIA_CHUNK_SIZE
 from malca.config.config_ltv import VIZIER_TAP_URL, SIMBAD_TAP_URL
+from malca.config.config_vetting import (
+    VETTING_SIMBAD_BATCH_SIZE,
+    VETTING_SIMBAD_RETRY_DELAY,
+    VETTING_SIMBAD_MAX_RETRIES,
+    GAIA_ESA_TAP_URL,
+    ALERCE_API_BASE,
+    ATLAS_API_BASE,
+    TNS_API_BASE,
+    IRSA_TAP_URL,
+    ASASSN_VAR_CATALOG_ID,
+    ZTF_VAR_CATALOG_ID,
+    EROSITA_CATALOG_ID,
+    ALERCE_RADIUS_ARCSEC as CFG_ALERCE_RADIUS_ARCSEC,
+    ATLAS_MJD_MIN as CFG_ATLAS_MJD_MIN,
+    ZTF_VAR_RADIUS_ARCSEC as CFG_ZTF_VAR_RADIUS_ARCSEC,
+    TNS_RADIUS_ARCSEC as CFG_TNS_RADIUS_ARCSEC,
+    EROSITA_RADIUS_ARCSEC as CFG_EROSITA_RADIUS_ARCSEC,
+    NEOWISE_VET_MAX_SEP_ARCSEC,
+    ZTF_LC_RADIUS_ARCSEC,
+    CRTS_MATCH_RADIUS_ARCSEC,
+    ALERCE_BATCH_SIZE as CFG_ALERCE_BATCH_SIZE,
+    TNS_BATCH_SIZE as CFG_TNS_BATCH_SIZE,
+    ALERCE_WORKERS as CFG_ALERCE_WORKERS,
+    NEOWISE_VET_WORKERS as CFG_NEOWISE_VET_WORKERS,
+    CRTS_CHUNK_SIZE as CFG_CRTS_CHUNK_SIZE,
+    GAIA_EPOCH_VET_CHUNK_SIZE as CFG_GAIA_EPOCH_VET_CHUNK_SIZE,
+    ATLAS_POLL_INTERVAL as CFG_ATLAS_POLL_INTERVAL,
+    ATLAS_MAX_POLL as CFG_ATLAS_MAX_POLL,
+    VETTING_HTTP_TIMEOUT,
+    VETTING_BACKOFF_CAP,
+    PANSTARRS_DEC_LIMIT,
+    TESS_SEARCH_RADIUS_ARCSEC,
+    AAVSO_MAX_PAGES,
+    AAVSO_RESULTS_PER_PAGE,
+)
 from malca.utils import batch_tap_crossmatch
 
 # Vetting configuration
 SIMBAD_RADIUS_ARCSEC = 5.0
-SIMBAD_BATCH_SIZE = 500
-SIMBAD_RETRY_DELAY = 5
-SIMBAD_MAX_RETRIES = 3
+SIMBAD_BATCH_SIZE = VETTING_SIMBAD_BATCH_SIZE
+SIMBAD_RETRY_DELAY = VETTING_SIMBAD_RETRY_DELAY
+SIMBAD_MAX_RETRIES = VETTING_SIMBAD_MAX_RETRIES
 
 GAIA_VAR_CHUNK_SIZE = GAIA_CHUNK_SIZE
-GAIA_ESA_TAP_URL = "https://gea.esac.esa.int/tap-server/tap"
 GAIA_TAP_URLS = [GAIA_ESA_TAP_URL, GAIA_AIP_TAP_URL]
-ASASSN_VAR_CATALOG = "II/366/catv2021"
+ASASSN_VAR_CATALOG = ASASSN_VAR_CATALOG_ID
 ASASSN_VAR_LOCAL_CSV = Path(__file__).resolve().parent.parent / "input" / "asassn_variables_x.csv"
 ASASSN_VAR_RADIUS_ARCSEC = 5.0
 
 # Module-level cache for the local ASAS-SN catalog
 _asassn_cache: dict = {}
 
-ALERCE_API_BASE = "https://api.alerce.online"
-ALERCE_RADIUS_ARCSEC = 3.0
-ALERCE_BATCH_SIZE = 50
+ALERCE_RADIUS_ARCSEC = CFG_ALERCE_RADIUS_ARCSEC
+ALERCE_BATCH_SIZE = CFG_ALERCE_BATCH_SIZE
+ALERCE_WORKERS = CFG_ALERCE_WORKERS
 
-ATLAS_API_BASE = "https://fallingstar-data.com/forcedphot"
-ATLAS_POLL_INTERVAL = 10
-ATLAS_MAX_POLL = 120
-ATLAS_MJD_MIN = 57000  # ~2015
+ATLAS_MJD_MIN = CFG_ATLAS_MJD_MIN
+ATLAS_POLL_INTERVAL = CFG_ATLAS_POLL_INTERVAL
+ATLAS_MAX_POLL = CFG_ATLAS_MAX_POLL
 
-ZTF_VAR_CATALOG = "J/ApJS/249/18/table2"
-ZTF_VAR_RADIUS_ARCSEC = 3.0
+ZTF_VAR_CATALOG = ZTF_VAR_CATALOG_ID
 
-TNS_API_BASE = "https://www.wis-tns.org/api"
-TNS_RADIUS_ARCSEC = 5.0
-TNS_BATCH_SIZE = 50
+ZTF_VAR_RADIUS_ARCSEC = CFG_ZTF_VAR_RADIUS_ARCSEC
+TNS_RADIUS_ARCSEC = CFG_TNS_RADIUS_ARCSEC
+TNS_BATCH_SIZE = CFG_TNS_BATCH_SIZE
 TNS_LOCAL_INPUT_DIR = Path(__file__).resolve().parent.parent / "input"
 TNS_LOCAL_CSVS = [
     TNS_LOCAL_INPUT_DIR / "tns_public_objects.csv",
@@ -90,14 +122,17 @@ TNS_LOCAL_CSVS = [
 # Module-level cache for the local TNS catalog
 _tns_cache: dict = {}
 
-EROSITA_CATALOG = "J/A+A/682/A34/erass1-m"
+EROSITA_CATALOG = EROSITA_CATALOG_ID
 EROSITA_LOCAL_FITS = Path(__file__).resolve().parent.parent / "input" / "eRASS1_Main.v1.2.fits"
-EROSITA_RADIUS_ARCSEC = 10.0
+EROSITA_RADIUS_ARCSEC = CFG_EROSITA_RADIUS_ARCSEC
 
 # Module-level cache for the local eROSITA catalog
 _erosita_cache: dict = {}
 
-NEOWISE_MAX_SEP_ARCSEC = 3.0
+NEOWISE_MAX_SEP_ARCSEC = NEOWISE_VET_MAX_SEP_ARCSEC
+NEOWISE_VET_WORKERS = CFG_NEOWISE_VET_WORKERS
+CRTS_CHUNK_SIZE = CFG_CRTS_CHUNK_SIZE
+GAIA_EPOCH_VET_CHUNK_SIZE = CFG_GAIA_EPOCH_VET_CHUNK_SIZE
 
 
 # =============================================================================
@@ -845,14 +880,14 @@ def query_gaia_eb_params(
 # =============================================================================
 
 
-def _alerce_request_with_retry(method, url, max_retries=3, **kwargs):
+def _alerce_request_with_retry(method, url, max_retries=VETTING_SIMBAD_MAX_RETRIES, **kwargs):
     """HTTP request with retry on 429 rate-limit responses."""
-    kwargs.setdefault("timeout", 60)
+    kwargs.setdefault("timeout", VETTING_HTTP_TIMEOUT)
     for attempt in range(max_retries):
         try:
             resp = method(url, **kwargs)
             if resp.status_code == 429:
-                time.sleep(min(2 ** attempt, 8))
+                time.sleep(min(2 ** attempt, VETTING_BACKOFF_CAP))
                 continue
             return resp
         except Exception:
@@ -996,7 +1031,7 @@ def _atlas_poll_result(task_url: str, token: str) -> pd.DataFrame | None:
             resp = requests.get(
                 task_url,
                 headers={"Authorization": f"Token {token}"},
-                timeout=30,
+                timeout=VETTING_HTTP_TIMEOUT,
             )
             resp.raise_for_status()
             data = resp.json()
@@ -1006,7 +1041,7 @@ def _atlas_poll_result(task_url: str, token: str) -> pd.DataFrame | None:
                     phot_resp = requests.get(
                         result_url,
                         headers={"Authorization": f"Token {token}"},
-                        timeout=60,
+                        timeout=VETTING_HTTP_TIMEOUT,
                     )
                     phot_resp.raise_for_status()
                     text = phot_resp.text

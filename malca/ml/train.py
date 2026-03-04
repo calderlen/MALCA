@@ -16,6 +16,16 @@ from malca.ml.features import (
     build_ml_feature_schema,
     transform_ml_features,
 )
+from malca.config.config_ml import (
+    ML_N_ESTIMATORS,
+    ML_LEARNING_RATE,
+    ML_NUM_LEAVES,
+    ML_SUBSAMPLE,
+    ML_COLSAMPLE_BYTREE,
+    ML_MIN_SAMPLES,
+    ML_CV_FOLDS,
+    ML_TOP_FEATURES,
+)
 
 
 def _load_input_table(path: Path) -> pd.DataFrame:
@@ -41,11 +51,11 @@ def _build_model(seed: int) -> object:
         ) from exc
 
     return lgb.LGBMClassifier(
-        n_estimators=500,
-        learning_rate=0.05,
-        num_leaves=63,
-        subsample=0.8,
-        colsample_bytree=0.8,
+        n_estimators=ML_N_ESTIMATORS,
+        learning_rate=ML_LEARNING_RATE,
+        num_leaves=ML_NUM_LEAVES,
+        subsample=ML_SUBSAMPLE,
+        colsample_bytree=ML_COLSAMPLE_BYTREE,
         random_state=seed,
         class_weight="balanced",
     )
@@ -169,8 +179,8 @@ def train_baseline_model(
     *,
     label_col: str,
     seed: int = 42,
-    cv_folds: int = 5,
-    min_samples: int = 30,
+    cv_folds: int = ML_CV_FOLDS,
+    min_samples: int = ML_MIN_SAMPLES,
     drop_unclassified: bool = True,
 ) -> tuple[object, dict[str, Any], dict[str, Any]]:
     df_train = _filter_training_rows(df, label_col=label_col, drop_unclassified=drop_unclassified)
@@ -199,7 +209,7 @@ def train_baseline_model(
         importances.sort(key=lambda t: t[1], reverse=True)
         top_features = [
             {"feature": str(name), "importance": float(score)}
-            for name, score in importances[:20]
+            for name, score in importances[:ML_TOP_FEATURES]
         ]
 
     metrics = {
@@ -239,8 +249,8 @@ def main() -> None:
     parser.add_argument("--label-col", type=str, default=ML_LABEL_COLUMN, help="Supervised label column (default: event_class)")
     parser.add_argument("--out-dir", type=Path, default=Path("output/ml"), help="Output directory for model artifacts")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--cv-folds", type=int, default=5, help="Requested stratified CV folds (default: 5)")
-    parser.add_argument("--min-samples", type=int, default=30, help="Minimum labeled sample count required to train")
+    parser.add_argument("--cv-folds", type=int, default=ML_CV_FOLDS, help="Requested stratified CV folds")
+    parser.add_argument("--min-samples", type=int, default=ML_MIN_SAMPLES, help="Minimum labeled sample count required to train")
     parser.add_argument(
         "--include-unclassified",
         action="store_true",

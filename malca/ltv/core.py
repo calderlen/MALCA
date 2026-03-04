@@ -53,6 +53,7 @@ from malca.config.config_ltv import (
     LTV_LS_SAMPLES_PER_PEAK,
 )
 from malca.config.config_paths import LCV2_ROOT, LTV_OUTPUT_DIR
+from malca.config.config_pipeline import MAG_BINS
 from malca.config.config_io import PARQUET_OUTPUT_COMPRESSION
 from malca.utils import read_lc_dat2, clean_lc
 
@@ -64,7 +65,6 @@ from malca.ltv.optim import (
 
 
 LC_COLUMNS = ["jd", "mag", "error", "good/bad", "camera", "v/g?", "saturated/unsaturated", "camera,field"]
-MAG_BINS = ["12_12.5", "12.5_13", "13_13.5", "13.5_14", "14_14.5", "14.5_15"]
 
 IDX_PATTERN = re.compile(r"lc(\d+)_cal$")
 

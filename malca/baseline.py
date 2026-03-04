@@ -17,6 +17,7 @@ from malca.config.config_pipeline import (
     GP_DIP_SIGMA_THRESH, GP_PAD_DAYS,
     ROLLING_WINDOW_DAYS, ROLLING_MIN_POINTS, ROLLING_MIN_DAYS,
 )
+from malca.config.config_stats import MAD_SCALE
 
 
 def global_median_baseline(
@@ -47,7 +48,7 @@ def global_median_baseline(
     if resid_good.any():
         resid_vals = resid[resid_good]
         med_resid = float(np.median(resid_vals))
-        mad = float(1.4826 * np.median(np.abs(resid_vals - med_resid)))
+        mad = float(MAD_SCALE * np.median(np.abs(resid_vals - med_resid)))
     else:
         mad = np.nan
 
@@ -132,7 +133,7 @@ def per_camera_median_baseline(
         resid_good = np.isfinite(resid)
         if resid_good.any():
             resid_vals = resid[resid_good]
-            mad = float(1.4826 * np.median(np.abs(resid_vals - np.median(resid_vals))))
+            mad = float(MAD_SCALE * np.median(np.abs(resid_vals - np.median(resid_vals))))
         else:
             mad = np.nan
 
@@ -188,7 +189,7 @@ def _stabilize_median_fallback(
         if resid_good.any():
             resid_vals = resid[resid_good]
             med_resid = float(np.nanmedian(resid_vals))
-            mad = float(1.4826 * np.nanmedian(np.abs(resid_vals - med_resid)))
+            mad = float(MAD_SCALE * np.nanmedian(np.abs(resid_vals - med_resid)))
         else:
             mad = np.nan
 
@@ -279,7 +280,7 @@ def per_camera_gp_baseline(
             if rr.size < max(10, min_floor_points):
                 break
             med = float(np.median(rr))
-            mad = 1.4826 * float(np.median(np.abs(rr - med)))
+            mad = MAD_SCALE * float(np.median(np.abs(rr - med)))
             mad = max(mad, 1e-12)
             keep = np.abs(r - med) <= float(floor_clip) * mad
 
@@ -287,7 +288,7 @@ def per_camera_gp_baseline(
         if rr.size < max(10, min_floor_points):
             rr = r
 
-        s_quiet = 1.4826 * float(np.median(np.abs(rr - float(np.median(rr)))))
+        s_quiet = MAD_SCALE * float(np.median(np.abs(rr - float(np.median(rr)))))
         s_quiet = max(s_quiet, 1e-12)
 
         yerr2_med = float(
@@ -472,7 +473,7 @@ def per_camera_gp_baseline_masked(
             if rr.size < max(10, min_floor_points):
                 break
             med = float(np.median(rr))
-            mad = 1.4826 * float(np.median(np.abs(rr - med)))
+            mad = MAD_SCALE * float(np.median(np.abs(rr - med)))
             mad = max(mad, 1e-12)
             keep = np.abs(r - med) <= float(floor_clip) * mad
 
@@ -480,7 +481,7 @@ def per_camera_gp_baseline_masked(
         if rr.size < max(10, min_floor_points):
             rr = r
 
-        s_quiet = 1.4826 * float(np.median(np.abs(rr - float(np.median(rr)))))
+        s_quiet = MAD_SCALE * float(np.median(np.abs(rr - float(np.median(rr)))))
         s_quiet = max(s_quiet, 1e-12)
 
         yerr2_med = float(
@@ -516,7 +517,7 @@ def per_camera_gp_baseline_masked(
 
         r0_f = r0[finite]
         med_r = float(np.nanmedian(r0_f))
-        mad_r = 1.4826 * float(np.nanmedian(np.abs(r0_f - med_r)))
+        mad_r = MAD_SCALE * float(np.nanmedian(np.abs(r0_f - med_r)))
 
         if use_yerr and np.isfinite(yerr).any():
             e_med = float(np.nanmedian(yerr[finite & np.isfinite(yerr)]))
