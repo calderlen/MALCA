@@ -1,13 +1,19 @@
 from __future__ import annotations
-import glob
-import re
+
 from datetime import datetime
 from pathlib import Path
-import pandas as pd
-from tqdm.auto import tqdm
+import argparse
+import glob
+import re
 
-from malca.config.config_pipeline import MAG_BINS
+from tqdm.auto import tqdm
+import pandas as pd
+
 from malca.config.config_paths import LCV2_ROOT, LCV2_MASKED_ROOT, VSX_RAW_CATALOG_PATH
+from malca.config.config_pipeline import MAG_BINS
+
+
+
 
 DEFAULT_LC_DIR = LCV2_ROOT
 DEFAULT_LC_DIR_MASKED = LCV2_MASKED_ROOT
@@ -295,7 +301,7 @@ def write_clean_outputs(
         asas_out = output_dir / f"asassn_index_masked_concat_cleaned_{stamp}.csv"
         vsx_out = output_dir / f"vsx_cleaned_{stamp}.csv"
     else:
-        # Use simple default names matching pre_filter.py expectations
+        # Use simple default names matching tag.py expectations
         asas_out = output_dir / "asassn_catalog.csv"
         vsx_out = output_dir / "vsx_cleaned.csv"
 
@@ -319,7 +325,7 @@ def main(
 
 def cli():
     """CLI entry point for ``malca vsx-filter``."""
-    import argparse
+
 
     parser = argparse.ArgumentParser(
         description="Build cleaned ASAS-SN index and filtered VSX catalog."

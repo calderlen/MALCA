@@ -9,22 +9,20 @@ to measure the baseline detection rate. This provides:
 
 Complements injection-recovery testing which measures completeness.
 """
-
 from __future__ import annotations
 
-import argparse
-import json
 from datetime import datetime
 from pathlib import Path
+import argparse
+import json
+import multiprocessing as mp
 
+from tqdm.auto import tqdm
 import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
-from tqdm.auto import tqdm
 
-from malca.utils import read_lc_dat2
-from malca.events import run_bayesian_significance
 from malca.baseline import (
     global_median_baseline,
     per_camera_median_baseline,
@@ -52,6 +50,14 @@ from malca.config.config_pipeline import (
     INJECTION_MIN_POINTS,
     INJECTION_SEED,
 )
+from malca.events import run_bayesian_significance
+from malca.utils import read_lc_dat2
+
+
+
+
+
+
 
 
 def get_id_column(df: pd.DataFrame) -> str:
@@ -301,7 +307,7 @@ def run_detection_rate(
     no_resume: bool = False,
 ) -> pd.DataFrame:
     """Run detection rate trials in parallel with checkpointing."""
-    import multiprocessing as mp
+
 
     class _Writer:
         def __init__(self, path: Path):

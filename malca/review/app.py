@@ -1,43 +1,75 @@
 """Dash-based keyboard-driven review app for MALCA candidates."""
-
-import sys
-import os
-import warnings
-import argparse
-import logging
-
-# Suppress known multiprocessing/diskcache semaphore leak warning at worker shutdown
-warnings.filterwarnings(
-    "ignore",
-    message="resource_tracker: There appear to be.*leaked semaphore",
-    module="multiprocessing.resource_tracker",
-)
-import json
-import time
-import sqlite3
-import re
-from decimal import Decimal, InvalidOperation
 from contextlib import closing
+from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 from pathlib import Path
-import webbrowser
 from threading import Timer
+import argparse
+import json
+import logging
 import multiprocessing
+import os
+import re
+import sqlite3
+import sys
+import time
+import traceback
+import warnings
+import webbrowser
 
-try:
-    multiprocessing.set_start_method("spawn", force=True)
-except RuntimeError:
-    pass
-
-import dash
 from dash import dcc, html, Input, Output, State, callback_context, no_update, ALL
-import dash_bootstrap_components as dbc
+from dash import DiskcacheManager
 from flask import send_from_directory
+import dash
+import dash_bootstrap_components as dbc
+import diskcache
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.io as pio
 
+from malca.config.config_characterize import GAIA_CHUNK_SIZE
+from malca.config.config_filters import (
+    BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
+    CLEAN_LC_MAX_ERROR_ABSOLUTE,
+    CLEAN_LC_MAX_ERROR_SIGMA,
+)
+from malca.config.config_paths import VSX_CROSSMATCH_PATH, GAIA_CACHE_FILE
+from malca.config.config_pipeline import (
+    JD_OFFSET, MJD_TO_JD, GAIA_TCB_EPOCH_JD, TESS_BTJD_OFFSET, KEPLER_BKJD_OFFSET,
+    REVIEW_RESIDUAL_FRACTION,
+)
+from malca.periodogram import ce_find_period, lsp_find_period, pdm_find_period
+from malca.review.diagnostic_plots import (
+    build_cmd_figure,
+    build_ir_colorcolor_figure,
+    build_kiel_figure,
+    build_rpm_figure,
+    build_uv_optical_figure,
+)
+from malca.review.fetch import fetch_and_analyze_by_gaia_id
+from malca.review.fetch import fetch_and_analyze_by_id
+from malca.review.fetch import fetch_cone_search
+from malca.review.interactive_plot import (
+    build_interactive_lightcurve_figure,
+    resolve_lightcurve_path,
+    _load_cleaned_df,
+    _compute_baseline_bands,
+    normalize_external_lc_dataframe,
+)
+from malca.review.keyboard import (
+    handle_key_action, HELP_TEXT,
+    CLASS_KEY_MAP,
+)
+from malca.review.metadata import (
+    extract_review_metadata_grouped,
+    is_group_default_open,
+    build_external_lookup_links,
+)
+from malca.review.pipeline import detect_pipeline_status
+from malca.review.pipeline import run_missing_stages
+from malca.review.pipeline import update_candidate_payload
+from malca.review.session import create_queue_data_dict
 from malca.review.store import (
     DEFAULT_DB_PATH,
     DEFAULT_STANDALONE_DB_PATH,
@@ -58,55 +90,32 @@ from malca.review.store import (
     get_distinct_values,
     get_diagnostic_background,
 )
-from malca.review.metadata import (
-    extract_review_metadata_grouped,
-    is_group_default_open,
-    build_external_lookup_links,
+from malca.review.store import get_candidate_payload
+from malca.review.store import import_lightcurve_files
+from malca.vetting import fetch_external_lcs
+
+
+
+
+# Suppress known multiprocessing/diskcache semaphore leak warning at worker shutdown
+warnings.filterwarnings(
+    "ignore",
+    message="resource_tracker: There appear to be.*leaked semaphore",
+    module="multiprocessing.resource_tracker",
 )
-from malca.review.keyboard import (
-    handle_key_action, HELP_TEXT,
-    CLASS_KEY_MAP,
-)
+
+try:
+    multiprocessing.set_start_method("spawn", force=True)
+except RuntimeError:
+    pass
+
+
 
 CLASS_BADGE_TAGS = list(CLASS_KEY_MAP.values())
-from malca.review.session import create_queue_data_dict
-from malca.review.interactive_plot import (
-    build_interactive_lightcurve_figure,
-    resolve_lightcurve_path,
-    _load_cleaned_df,
-    _compute_baseline_bands,
-    normalize_external_lc_dataframe,
-)
-from malca.config.config_paths import VSX_CROSSMATCH_PATH, GAIA_CACHE_FILE
-from malca.config.config_characterize import GAIA_CHUNK_SIZE
-from malca.config.config_pipeline import (
-    JD_OFFSET, MJD_TO_JD, GAIA_TCB_EPOCH_JD, TESS_BTJD_OFFSET, KEPLER_BKJD_OFFSET,
-    REVIEW_RESIDUAL_FRACTION,
-)
-from malca.config.config_filters import (
-    BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
-    CLEAN_LC_MAX_ERROR_ABSOLUTE,
-    CLEAN_LC_MAX_ERROR_SIGMA,
-)
-from malca.review.diagnostic_plots import (
-    build_cmd_figure,
-    build_ir_colorcolor_figure,
-    build_kiel_figure,
-    build_rpm_figure,
-    build_uv_optical_figure,
-)
 
 # Background callback manager for long-running fetch/import (DiskCache for local dev)
-try:
-    import diskcache
-    try:
-        from dash import DiskcacheManager
-    except ImportError:
-        from dash.long_callback import DiskcacheManager
-    _bc_cache = diskcache.Cache(Path(__file__).resolve().parents[2] / "output" / "review" / ".dash_cache")
-    _background_callback_manager = DiskcacheManager(_bc_cache)
-except Exception:
-    _background_callback_manager = None
+_bc_cache = diskcache.Cache(Path(__file__).resolve().parents[2] / "output" / "review" / ".dash_cache")
+_background_callback_manager = DiskcacheManager(_bc_cache)
 
 # Initialize Dash app
 app = dash.Dash(
@@ -1777,10 +1786,10 @@ def _derive_defaults_from_run_params(run_params: dict | None) -> tuple[str, list
         preset = 'Diagnostics'
         return preset, list(PLOT_PRESETS[preset]['overlays'])
 
-    run_post_filter = bool(run_params.get('run_post_filter', True))
+    run_filter = bool(run_params.get('run_filter', True))
     run_postprocess = bool(run_params.get('run_postprocess', True))
     min_bf = float(run_params.get('min_bayes_factor', 0.0) or 0.0)
-    if (not run_post_filter) and (not run_postprocess):
+    if (not run_filter) and (not run_postprocess):
         preset = 'Clean'
     elif min_bf >= 12:
         preset = 'Full'
@@ -4667,7 +4676,7 @@ def _run_period_search_for_payload(
     if lc_path is None:
         return None, 'No LC file'
 
-    from malca.periodogram import ce_find_period, lsp_find_period, pdm_find_period
+
 
     df, _, _ = _load_cleaned_df(
         lc_path,
@@ -5285,7 +5294,7 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
             external_source_view=external_source_view,
         )
     except Exception as exc:
-        import traceback
+
         traceback.print_exc()
         panel = _render_run_config_panel(run_params if run_params else None, run_params_path, [str(exc)])
         if plot_src:
@@ -6080,7 +6089,7 @@ def import_candidates_callback(n_clicks, import_path, characterize_on,
     # Raw light curve mode
     if 'yes' in (lc_mode or []):
         try:
-            from malca.review.store import import_lightcurve_files
+
             with closing(db_connect(Path(DB_PATH))) as conn:
                 enable_characterize = 'yes' in (characterize_on or [])
                 enable_vetting = 'yes' in (vet_on or [])
@@ -6144,7 +6153,7 @@ def _fetch_candidate_impl(set_progress, n_clicks, fetch_type, fetch_query, fetch
     try:
         if fetch_type == 'coords':
             progress("Searching cone...")
-            from malca.review.fetch import fetch_cone_search
+
             parts = query.replace(',', ' ').split()
             if len(parts) < 2:
                 return "✗ Enter RA and Dec separated by space", no_update, no_update, no_update, no_update, no_update, no_update
@@ -6185,10 +6194,10 @@ def _fetch_candidate_impl(set_progress, n_clicks, fetch_type, fetch_query, fetch
 
         progress("Fetching light curve...")
         if fetch_type == 'gaia':
-            from malca.review.fetch import fetch_and_analyze_by_gaia_id
+
             df, lc_path = fetch_and_analyze_by_gaia_id(query, run_stats=True)
         else:
-            from malca.review.fetch import fetch_and_analyze_by_id
+
             df, lc_path = fetch_and_analyze_by_id(query, run_stats=True)
 
         if df is None or df.empty:
@@ -6225,7 +6234,7 @@ def _fetch_candidate_impl(set_progress, n_clicks, fetch_type, fetch_query, fetch
         )
 
     except Exception as e:
-        import traceback
+
         traceback.print_exc()
         return f"✗ Fetch failed: {str(e)}", no_update, no_update, '', no_update, no_update, no_update
 
@@ -6300,7 +6309,7 @@ def update_pipeline_status_chips(_queue_data_ts, candidate_id, pending_auto_run)
         with closing(db_connect(Path(DB_PATH))) as conn:
             payload = get_candidate_payload(conn, str(candidate_id)) or {}
 
-        from malca.review.pipeline import detect_pipeline_status
+
         status = detect_pipeline_status(payload)
         if (
             'queue-data' in triggered_ids
@@ -6328,7 +6337,7 @@ def update_pipeline_status_chips(_queue_data_ts, candidate_id, pending_auto_run)
 
 
 def _run_pipeline_impl(set_progress, run_clicks, rerun_clicks, auto_trigger, queue_data, idx, current_trigger):
-    import dash
+
     ctx = dash.callback_context
     triggered_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else None
     queue_size = int((queue_data or {}).get('queue_size') or 0) if isinstance(queue_data, dict) else 0
@@ -6353,7 +6362,7 @@ def _run_pipeline_impl(set_progress, run_clicks, rerun_clicks, auto_trigger, que
         return "No candidate_id", no_update, no_update
 
     try:
-        from malca.review.pipeline import run_missing_stages
+
         
         def p(msg):
             if set_progress:
@@ -6380,9 +6389,9 @@ def _run_pipeline_impl(set_progress, run_clicks, rerun_clicks, auto_trigger, que
             # If triggered by a full_ext fetch, ensure we run external LCs
             if fetch_mode == 'full_ext' and 'external_lcs' not in stages:
                 p("Running external LCs...")
-                from malca.vetting import fetch_external_lcs
-                from malca.review.store import get_candidate_payload
-                from malca.review.pipeline import update_candidate_payload
+
+
+
                 payload = get_candidate_payload(conn, candidate_id)
                 df = pd.DataFrame([payload])
                 run_dir = _resolve_run_dir_from_plot_dir(PLOT_DIR)
@@ -6408,7 +6417,7 @@ def _run_pipeline_impl(set_progress, run_clicks, rerun_clicks, auto_trigger, que
                 return "No stages could be rerun (missing requirements)", no_update, no_update
             return "All stages already complete (or missing requirements)", no_update, no_update
     except Exception as e:
-        import traceback
+
         traceback.print_exc()
         return f"✗ Pipeline failed: {str(e)}", no_update, no_update
 

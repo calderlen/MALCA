@@ -1,18 +1,26 @@
 from __future__ import annotations
 
-import math
-from decimal import Decimal, InvalidOperation
-import json
-import sqlite3
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
+import json
+import math
+import shutil
+import sqlite3
 
 import numpy as np
 import pandas as pd
 
-from malca.review.metadata import normalize_vsx_record
-from malca.config.config_paths import VSX_CROSSMATCH_PATH, GAIA_CACHE_FILE
+from malca.characterize import characterize_candidates_df
 from malca.config.config_characterize import GAIA_CHUNK_SIZE
+from malca.config.config_paths import VSX_CROSSMATCH_PATH, GAIA_CACHE_FILE
+from malca.review.metadata import normalize_vsx_record
+from malca.vetting import vet_candidates
+
+
+
+
+
 
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parents[2] / "output" / "review" / "review.db"
@@ -729,8 +737,6 @@ def import_candidates(
     df_use = df
     if characterize_before_import:
         try:
-            from malca.characterize import characterize_candidates_df
-
             df_use = characterize_candidates_df(
                 df,
                 crossmatch=characterize_crossmatch,
@@ -758,8 +764,6 @@ def import_candidates(
 
     if vet_before_import:
         try:
-            from malca.vetting import vet_candidates
-
             # --- vetting cache: skip candidates already vetted ----
             # Use file-based cache for real paths or fetch:// sources
             if source_path and source_path.startswith("fetch://"):
@@ -1495,7 +1499,7 @@ def import_lightcurve_files(
         candidate_id = file_path.stem
         cache_file = _LC_CACHE_DIR / file_path.name
         if cache_file != file_path:
-            import shutil
+
             shutil.copy2(file_path, cache_file)
         candidate_df = pd.DataFrame([{
             "candidate_id": candidate_id,

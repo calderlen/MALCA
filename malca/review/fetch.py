@@ -8,20 +8,36 @@ Supports three search modes:
 After downloading, we compute stats from the SkyPatrol CSV directly,
 then hand the result to import_candidates.
 """
-
 from __future__ import annotations
 
 from pathlib import Path
+import traceback
 
 import numpy as np
 import pandas as pd
-from malca.config.config_stats import MAD_SCALE
 
+from malca.config.config_events import (
+    TRIGGER_MODE, LOGBF_THRESHOLD_DIP, LOGBF_THRESHOLD_JUMP,
+    SIGNIFICANCE_THRESHOLD, P_POINTS,
+    P_MIN_DIP, P_MAX_DIP, P_MIN_JUMP, P_MAX_JUMP,
+    MAG_POINTS, RUN_MIN_POINTS, MAX_GAP_POINTS,
+    RUN_MAX_GAP_DAYS, RUN_MIN_DURATION_DAYS,
+    BASELINE_TAG,
+)
+from malca.config.config_stats import MAD_SCALE
+from malca.events import process_lightcurve
 from malca.fetch import (
     cone_search,
     download_lightcurve_by_id,
     download_lightcurve_by_gaia_id,
 )
+from malca.utils import read_skypatrol_csv
+
+
+
+
+
+
 
 
 def fetch_and_analyze_by_id(
@@ -120,8 +136,6 @@ def _build_candidate_row(
 def _compute_stats_from_skypatrol_csv(lc_path: Path) -> dict:
     """Compute full variability stats from a SkyPatrol-format CSV."""
     try:
-        from malca.utils import read_skypatrol_csv
-
         df = read_skypatrol_csv(lc_path)
         if df.empty:
             return {}
@@ -262,22 +276,13 @@ def _compute_stats_from_skypatrol_csv(lc_path: Path) -> dict:
         }
     except Exception as e:
         print(f"[fetch] Warning: stats computation failed: {e}")
-        import traceback; traceback.print_exc()
+
         return {}
 
 
 def _compute_events_for_csv(lc_path: Path) -> dict:
     """Run process_lightcurve on a SkyPatrol CSV file and return key columns."""
     try:
-        from malca.events import process_lightcurve
-        from malca.config.config_events import (
-            TRIGGER_MODE, LOGBF_THRESHOLD_DIP, LOGBF_THRESHOLD_JUMP,
-            SIGNIFICANCE_THRESHOLD, P_POINTS,
-            P_MIN_DIP, P_MAX_DIP, P_MIN_JUMP, P_MAX_JUMP,
-            MAG_POINTS, RUN_MIN_POINTS, MAX_GAP_POINTS,
-            RUN_MAX_GAP_DAYS, RUN_MIN_DURATION_DAYS,
-            BASELINE_TAG,
-        )
         result = process_lightcurve(
             str(lc_path),
             trigger_mode=TRIGGER_MODE,

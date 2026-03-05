@@ -1,9 +1,29 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import pytest
 
-post_filter = pytest.importorskip("malca.post_filter")
+post_filter = pytest.importorskip("malca.filter")
+
+
+@pytest.mark.parametrize(
+    ("pdm_snr", "ce_snr", "expected"),
+    [
+        (5.0, 5.0, True),
+        (7.2, 5.1, True),
+        (4.99, 8.0, False),
+        (8.0, 4.99, False),
+        (np.nan, 6.0, False),
+        (6.0, np.nan, False),
+    ],
+)
+def test_is_periodic_by_snr_requires_both_metrics(
+    pdm_snr: float,
+    ce_snr: float,
+    expected: bool,
+) -> None:
+    assert post_filter._is_periodic_by_snr(pdm_snr, ce_snr) is expected
 
 
 def test_filter_run_robustness_respects_max_run_count() -> None:
@@ -66,7 +86,7 @@ def test_filter_significant_detection_explicit_gate() -> None:
     assert set(out["path"]) == {"dip_ok.csv", "jump_ok.csv"}
 
 
-def test_apply_post_filters_tags_significant_detection_failures() -> None:
+def test_apply_filters_tags_significant_detection_failures() -> None:
     df = pd.DataFrame(
         {
             "path": ["pass.csv", "fail.csv"],
@@ -79,7 +99,7 @@ def test_apply_post_filters_tags_significant_detection_failures() -> None:
         }
     )
 
-    out = post_filter.apply_post_filters(
+    out = post_filter.apply_filters(
         df,
         apply_evidence_strength=False,
         apply_significant_detection=True,
@@ -101,7 +121,7 @@ def test_apply_post_filters_tags_significant_detection_failures() -> None:
     assert out.set_index("path").loc["fail.csv", "failed_any"] == 1
 
 
-def test_apply_post_filters_periodicity_checks_only_prefilter_passers(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_apply_filters_periodicity_checks_only_prereq_passers(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: dict[str, list[str]] = {}
 
     def _fake_validate_periodicity(df: pd.DataFrame, **_kwargs) -> pd.DataFrame:
@@ -130,7 +150,7 @@ def test_apply_post_filters_periodicity_checks_only_prefilter_passers(monkeypatc
         }
     )
 
-    out = post_filter.apply_post_filters(
+    out = post_filter.apply_filters(
         df,
         apply_evidence_strength=False,
         apply_significant_detection=True,
@@ -153,7 +173,7 @@ def test_apply_post_filters_periodicity_checks_only_prefilter_passers(monkeypatc
     assert int(out_by_path.loc["prefail.csv", "failed_periodicity"]) == 0
 
 
-def test_apply_post_filters_periodicity_reject_only_marks_checked_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_apply_filters_periodicity_reject_only_marks_checked_rows(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: dict[str, list[str]] = {}
 
     def _fake_validate_periodicity(df: pd.DataFrame, **_kwargs) -> pd.DataFrame:
@@ -182,7 +202,7 @@ def test_apply_post_filters_periodicity_reject_only_marks_checked_rows(monkeypat
         }
     )
 
-    out = post_filter.apply_post_filters(
+    out = post_filter.apply_filters(
         df,
         apply_evidence_strength=False,
         apply_significant_detection=True,

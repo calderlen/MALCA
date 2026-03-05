@@ -26,21 +26,21 @@
     - `iter_source_records` is an abstruse name. at the very least write words out in full and use lc instead of source. also why "records"?
     - `build_manifest_dataframe` can probably be shortened to build_manifest
 
-- **pre-filtering**
-    - since the pre-filters are now mostly intended to tag light curves, make a rename of the module should be in order to reduce confusion? think more about this
+- **tagging**
+    - the tag stage now reflects that this step mainly annotates failures before events.py
     - maybe some of the catalog crossmatches done in the reivew/chacterization stage would be more suitably done here. but i think mostly not because these are expensive (?) however maybe just biting the bullet and doing a bulk lookup (where possible) for a bunch of these canddiates and storing the catalog locally would be a lot better than doing a lookup each time in the later stages. think more about this
     - i think at the very least the crossmatch to gaia dr3 variability, asas-sn catalog, ztf catalog, and atlas catalog would be more sensibly done here instead of downstream. this information would be useful beyond just this narrow pipeline.
     - chunk size should be increased from 5000 to 100000
 
-- **post-filtering**
+- **filtering**
     - should add a MAX run count to `filter_run_robustness` in addition to the minimum run count. this may be a cheap way to filter out periodic candidates
-    - `filter_score` does not have a dipping and jumpng minimum score and i think the current minimum is log10(score) >= 0.0? for all of these post-filtering steps get a notebook set up that explores attrition of these filters, both numerically and visually.
-    - post-filtering orders
+    - `filter_score` does not have a dipping and jumpng minimum score and i think the current minimum is log10(score) >= 0.0? for all of these filtering steps get a notebook set up that explores attrition of these filters, both numerically and visually.
+    - filtering order
         `filter_posterior_strength` -> `filter_run_robustness` -> `filter_morphology` -> 
 
 - **validation**
     - validation filters are disabled by default? 
-    - why are the post-filter and validation modules separate?
+    - why are the filter and validation modules separate?
 
 - **data output**
     - generating plots with malca plot before review may just be a waste of space. at the very least add a toggle on/off for plot generation at this stage since the LC info is bundled anyway and looked at in the reviews stage. default behavior should be NOT to plot at this stage.

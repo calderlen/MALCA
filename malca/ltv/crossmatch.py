@@ -16,18 +16,18 @@ Optimized for scale with:
 
 NOTE: These should run AFTER filtering to reduce the dataset from 17M to ~36K.
 """
-
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-import numpy as np
-import pandas as pd
 from astropy import units as u
 from astropy.coordinates import SkyCoord, match_coordinates_sky
 from astropy.table import Table
+from astroquery.utils.tap.core import TapPlus
 from tqdm.auto import tqdm
+import numpy as np
+import pandas as pd
 
 from malca.config.config_ltv import (
     LTV_MATCH_RADIUS_ARCSEC,
@@ -37,6 +37,13 @@ from malca.config.config_ltv import (
     SIMBAD_TAP_URL,
 )
 from malca.config.config_paths import VSX_CROSSMATCH_PATH
+from malca.ltv.local_catalog import merge_local_catalog, crossmatch_from_local
+
+
+
+
+
+
 
 
 # =============================================================================
@@ -234,7 +241,7 @@ def _batch_tap_crossmatch(
     
     For catalogs that support TAP uploads, this is much faster than row-by-row.
     """
-    from astroquery.utils.tap.core import TapPlus
+
     
     if coords_df.empty:
         return pd.DataFrame()
@@ -612,33 +619,26 @@ def crossmatch_all_catalogs(
     # LOCAL CATALOG (Gaia DR3 + VSX — no API queries needed)
     # =========================================================================
     if use_local_catalog and (include_gaia_dr3 or include_vsx):
-        try:
-            from malca.ltv.local_catalog import merge_local_catalog, crossmatch_from_local
-            
-            # Try ID-based merge first (faster)
-            if "ASAS-SN ID" in df.columns:
-                df = merge_local_catalog(df, catalog_path=local_catalog_path, verbose=verbose)
-            else:
-                # Fall back to coordinate crossmatch
-                df = crossmatch_from_local(
-                    df,
-                    catalog_path=local_catalog_path,
-                    match_radius_arcsec=match_radius_arcsec,
-                    verbose=verbose,
-                )
-            
-            if verbose:
-                n_gaia = df["gaia_source_id"].notna().sum() if "gaia_source_id" in df.columns else 0
-                n_vsx = df["vsx_name"].notna().sum() if "vsx_name" in df.columns else 0
-                print(f"  Local catalog: {n_gaia} Gaia, {n_vsx} VSX matches (no API queries)")
-            
-            # Mark these as done so we don't query APIs
-            include_gaia_dr3 = False
-            include_vsx = False
-            
-        except (ImportError, FileNotFoundError) as e:
-            if verbose:
-                print(f"  Local catalog not available ({e}), falling back to API queries")
+        # Try ID-based merge first (faster)
+        if "ASAS-SN ID" in df.columns:
+            df = merge_local_catalog(df, catalog_path=local_catalog_path, verbose=verbose)
+        else:
+            # Fall back to coordinate crossmatch
+            df = crossmatch_from_local(
+                df,
+                catalog_path=local_catalog_path,
+                match_radius_arcsec=match_radius_arcsec,
+                verbose=verbose,
+            )
+
+        if verbose:
+            n_gaia = df["gaia_source_id"].notna().sum() if "gaia_source_id" in df.columns else 0
+            n_vsx = df["vsx_name"].notna().sum() if "vsx_name" in df.columns else 0
+            print(f"  Local catalog: {n_gaia} Gaia, {n_vsx} VSX matches (no API queries)")
+
+        # Mark these as done so we don't query APIs
+        include_gaia_dr3 = False
+        include_vsx = False
     
     # =========================================================================
     # API QUERIES (only for data NOT in local catalog)
@@ -682,4 +682,3 @@ def crossmatch_all_catalogs(
             print(f"  SIMBAD: {df['simbad_main_id'].notna().sum()}/{len(df)} matched")
     
     return df
-

@@ -1,5 +1,5 @@
 """
-Pre-tagging filters that run BEFORE events.py.
+Tagging filters that run BEFORE events.py.
 These checks primarily annotate candidates with `failed_*` flags and keep rows,
 so downstream steps can decide how strictly to enforce exclusion.
 
@@ -21,24 +21,26 @@ Input format:
 Note:
 - Bright nearby star (BNS) filtering is handled upstream by ASAS-SN pipeline.
   LC files are only generated for sources without BNS contamination.
-- Periodic variable filtering moved to post_filter.py (expensive LSP, run after event detection).
+- Periodic variable filtering moved to filter.py (expensive LSP, run after event detection).
 """
-
 from __future__ import annotations
+
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from time import perf_counter
-from concurrent.futures import ProcessPoolExecutor, as_completed
+import argparse
+
+from tqdm.auto import tqdm
 import numpy as np
 import pandas as pd
-from tqdm.auto import tqdm
 
-from malca.config.config_io import PARQUET_CACHE_COMPRESSION, PARQUET_OUTPUT_COMPRESSION
-from malca.config.config_paths import VSX_CROSSMATCH_COMPAT_PATH, VSX_CROSSMATCH_PATH
-from malca.config.config_pipeline import WORKERS
 from malca.config.config_filters import (
     MIN_TIME_SPAN, MIN_POINTS_PER_DAY, MIN_CAMERAS,
     VSX_MAX_SEP_ARCSEC, VSX_MODE, STATS_CHUNK_SIZE,
 )
+from malca.config.config_io import PARQUET_CACHE_COMPRESSION, PARQUET_OUTPUT_COMPRESSION
+from malca.config.config_paths import VSX_CROSSMATCH_PATH
+from malca.config.config_pipeline import WORKERS
 from malca.utils import (
     read_lc_dat2,
     get_id_col,
@@ -46,6 +48,10 @@ from malca.utils import (
     compute_n_cameras,
     log_rejections,
 )
+
+
+
+
 
 
 def _compute_stats_for_row(asas_sn_id: str, dir_path: str, compute_time: bool, compute_cameras: bool) -> dict:
@@ -301,7 +307,7 @@ def filter_sparse_lightcurves(
 def attach_vsx_info(
     df: pd.DataFrame,
     *,
-    vsx_crossmatch_csv: str | Path | None = VSX_CROSSMATCH_COMPAT_PATH,
+    vsx_crossmatch_csv: str | Path | None = VSX_CROSSMATCH_PATH,
 ) -> pd.DataFrame:
     """
     Attach VSX crossmatch info (vsx_sep_arcsec/vsx_class) to the dataframe.
@@ -314,11 +320,6 @@ def attach_vsx_info(
         raise ValueError("vsx_crossmatch_csv is required to attach VSX info.")
 
     vsx_crossmatch_csv = Path(vsx_crossmatch_csv)
-    if not vsx_crossmatch_csv.exists() and vsx_crossmatch_csv.name.endswith("_compat.csv"):
-        fallback_csv = vsx_crossmatch_csv.with_name(vsx_crossmatch_csv.name.replace("_compat.csv", ".csv"))
-        if fallback_csv.exists():
-            vsx_crossmatch_csv = fallback_csv
-
     xmatch = pd.read_csv(vsx_crossmatch_csv)
     rename_map = {}
     if "vsx_sep_arcsec" not in xmatch.columns and "sep_arcsec" in xmatch.columns:
@@ -351,7 +352,7 @@ def filter_vsx_match(
     *,
     max_sep_arcsec: float = 3.0,
     exclude_classes: list[str] | None = None,
-    vsx_crossmatch_csv: str | Path | None = VSX_CROSSMATCH_COMPAT_PATH,
+    vsx_crossmatch_csv: str | Path | None = VSX_CROSSMATCH_PATH,
     show_tqdm: bool = False,
     rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
@@ -727,7 +728,7 @@ def filter_camera_medians(
     return df_out
 
 
-def apply_pre_filters(
+def apply_tags(
 
     df: pd.DataFrame,
     *,
@@ -735,7 +736,7 @@ def apply_pre_filters(
     apply_vsx: bool = False,
     vsx_max_sep_arcsec: float = 3.0,
     vsx_exclude_classes: list[str] | None = None,
-    vsx_crossmatch_csv: str | Path = VSX_CROSSMATCH_COMPAT_PATH,
+    vsx_crossmatch_csv: str | Path = VSX_CROSSMATCH_PATH,
     vsx_mode: str = "filter",
     # Filter 2: sparse lightcurves
     apply_sparse: bool = True,
@@ -751,16 +752,16 @@ def apply_pre_filters(
     # General
     n_workers: int = 1,
     show_tqdm: bool = True,
-    rejected_log_csv: str | Path | None = "rejected_pre_filter.csv",
+    rejected_log_csv: str | Path | None = "rejected_tag.csv",
     # Checkpoint for stats computation
     stats_checkpoint: str | Path | None = None,
     stats_chunk_size: int = 10000,
 ) -> pd.DataFrame:
     """
-    Apply pre-filters before running events.py.
+    Apply tagging filters before running events.py.
 
     Filters are applied in order of execution speed (fast to slow) for efficiency.
-    Note: Periodic variable filtering moved to post_filter.py (expensive, run after event detection).
+    Note: Periodic variable filtering moved to filter.py (expensive, run after event detection).
 
     Parameters
     ----------
@@ -805,7 +806,7 @@ def apply_pre_filters(
 
         if compute_time or compute_cameras:
             if show_tqdm:
-                tqdm.write(f"[apply_pre_filters] Pre-computing stats with {n_workers} workers")
+                tqdm.write(f"[apply_tags] Pre-computing stats with {n_workers} workers")
             df_filtered = _compute_stats_parallel(
                 df_filtered, id_col, "path",
                 compute_time=compute_time,
@@ -871,7 +872,7 @@ def apply_pre_filters(
     id_col = get_id_col(df_filtered)
     total_steps = len(filters)
     if total_steps > 0:
-        with tqdm(total=total_steps, desc="apply_pre_filters", leave=True, disable=not show_tqdm) as pbar:
+        with tqdm(total=total_steps, desc="apply_tags", leave=True, disable=not show_tqdm) as pbar:
             for label, func, kwargs in filters:
                 start = perf_counter()
                 # Run filter to identify which rows pass
@@ -896,20 +897,16 @@ def apply_pre_filters(
 
     if show_tqdm:
         n_failed_any = int(df_filtered["failed_any"].sum()) if "failed_any" in df_filtered.columns else 0
-        tqdm.write(f"\n[apply_pre_filters] {n_failed_any}/{n_start} failed at least one filter")
+        tqdm.write(f"\n[apply_tags] {n_failed_any}/{n_start} failed at least one filter")
 
     return df_filtered.reset_index(drop=True)
 
 
-def apply_pre_tags(*args, **kwargs) -> pd.DataFrame:
-    """Alias for apply_pre_filters with clearer tagging semantics."""
-    return apply_pre_filters(*args, **kwargs)
-
 
 def main() -> None:
-    import argparse
 
-    parser = argparse.ArgumentParser(description="Apply pre-filters to candidate/source table")
+
+    parser = argparse.ArgumentParser(description="Apply tagging filters to candidate/source table")
     parser.add_argument("--input", type=Path, required=True, help="Input CSV/Parquet")
     parser.add_argument("--output", type=Path, required=True, help="Output CSV/Parquet")
 
@@ -941,7 +938,7 @@ def main() -> None:
     else:
         df = pd.read_csv(input_path)
 
-    out = apply_pre_filters(
+    out = apply_tags(
         df,
         apply_vsx=args.apply_vsx,
         vsx_mode=args.vsx_mode,
@@ -965,7 +962,7 @@ def main() -> None:
     else:
         out.to_csv(output_path, index=False)
 
-    print(f"Saved pre-filter output: {output_path} ({len(out)} rows)")
+    print(f"Saved tag output: {output_path} ({len(out)} rows)")
 
 
 if __name__ == "__main__":

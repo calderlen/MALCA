@@ -124,8 +124,8 @@ def retention(pre: pd.DataFrame, post: pd.DataFrame, id_col: str = "asas_sn_id")
 
 
 def main(argv: Iterable[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="False-positive reduction summary (pre vs post filter).")
-    parser.add_argument("--pre", nargs="+", required=True, help="Pre-filter CSV(s) or directory.")
+    parser = argparse.ArgumentParser(description="False-positive reduction summary (tag vs post filter).")
+    parser.add_argument("--pre", nargs="+", required=True, help="Tag-stage CSV(s) or directory.")
     parser.add_argument("--post", nargs="+", required=True, help="Post-filter CSV(s) or directory.")
     parser.add_argument("--id-col", default="asas_sn_id", help="ID column for retention match.")
     args = parser.parse_args(argv)

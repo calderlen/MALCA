@@ -1,21 +1,17 @@
 from __future__ import annotations
 
-import argparse
-import json
 from pathlib import Path
 from typing import Any
+import argparse
+import json
 
-import numpy as np
-import pandas as pd
-import joblib
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score
 from sklearn.model_selection import StratifiedKFold
+import joblib
+import lightgbm as lgb
+import numpy as np
+import pandas as pd
 
-from malca.ml.features import (
-    ML_LABEL_COLUMN,
-    build_ml_feature_schema,
-    transform_ml_features,
-)
 from malca.config.config_ml import (
     ML_N_ESTIMATORS,
     ML_LEARNING_RATE,
@@ -26,6 +22,15 @@ from malca.config.config_ml import (
     ML_CV_FOLDS,
     ML_TOP_FEATURES,
 )
+from malca.ml.features import (
+    ML_LABEL_COLUMN,
+    build_ml_feature_schema,
+    transform_ml_features,
+)
+
+
+
+
 
 
 def _load_input_table(path: Path) -> pd.DataFrame:
@@ -43,13 +48,6 @@ def _load_input_table(path: Path) -> pd.DataFrame:
 
 
 def _build_model(seed: int) -> object:
-    try:
-        import lightgbm as lgb
-    except ModuleNotFoundError as exc:
-        raise ModuleNotFoundError(
-            "lightgbm is required for ml_train. Install it with: pip install lightgbm"
-        ) from exc
-
     return lgb.LGBMClassifier(
         n_estimators=ML_N_ESTIMATORS,
         learning_rate=ML_LEARNING_RATE,

@@ -21,33 +21,30 @@ Usage:
 """
 from __future__ import annotations
 
-import io
-import os
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable, Literal
+import argparse
+import io
+import os
+import time
 
+from astropy.coordinates import SkyCoord
+from astropy.io import fits as pyfits
+from astropy.table import Table
+from astroquery.ipac.irsa import Irsa
+from astroquery.xmatch import XMatch
+from tqdm import tqdm
+import astropy.units as u
+import lightkurve as lk
 import numpy as np
 import pandas as pd
 import pyvo
 import requests
-from astropy.coordinates import SkyCoord
-from astropy.table import Table
-import astropy.units as u
-from tqdm import tqdm
 
-try:
-    from astroquery.xmatch import XMatch
-except Exception:
-    class XMatch:  # type: ignore[no-redef]
-        @staticmethod
-        def query(*_args, **_kwargs):
-            raise ImportError("astroquery is required for XMatch queries")
-
-from malca.config.config_paths import GAIA_AIP_TAP_URL
 from malca.config.config_characterize import GAIA_CHUNK_SIZE
 from malca.config.config_ltv import VIZIER_TAP_URL, SIMBAD_TAP_URL
+from malca.config.config_paths import GAIA_AIP_TAP_URL
 from malca.config.config_vetting import (
     VETTING_SIMBAD_BATCH_SIZE,
     VETTING_SIMBAD_RETRY_DELAY,
@@ -84,6 +81,11 @@ from malca.config.config_vetting import (
     AAVSO_RESULTS_PER_PAGE,
 )
 from malca.utils import batch_tap_crossmatch
+
+
+
+
+
 
 # Vetting configuration
 SIMBAD_RADIUS_ARCSEC = 5.0
@@ -1613,7 +1615,7 @@ def _erosita_via_local(
     local_fits: Path | str | None = None,
 ) -> pd.DataFrame:
     """eROSITA crossmatch via local FITS + SkyCoord (instant)."""
-    from astropy.io import fits as pyfits
+
 
     fits_path = Path(local_fits) if local_fits else EROSITA_LOCAL_FITS
     if not fits_path.exists():
@@ -1752,7 +1754,7 @@ def query_neowise_lightcurves(
     Stores per-epoch W1/W2 photometry (if output_dir set, saves individual LC parquets).
     Adds columns: neowise_n_epochs, neowise_w1_range, neowise_w2_range.
     """
-    from astroquery.ipac.irsa import Irsa
+
 
     df = df.copy()
     df["neowise_n_epochs"] = 0
@@ -1862,16 +1864,6 @@ def fetch_tess_lightcurves(
     If *output_dir* is set, saves per-candidate parquet files as
     ``tess_lc_<candidate_id>.parquet``.
     """
-    try:
-        import lightkurve as lk
-    except ImportError:
-        print("TESS LCs: lightkurve not installed, skipping (pip install lightkurve)")
-        df = df.copy()
-        df["tess_n_sectors"] = 0
-        df["tess_total_points"] = 0
-        df["tess_flux_range"] = np.nan
-        return df
-
     df = df.copy()
     df["tess_n_sectors"] = 0
     df["tess_total_points"] = 0
@@ -1986,16 +1978,6 @@ def fetch_kepler_k2_lightcurves(
     If *output_dir* is set, saves per-candidate parquet files as
     ``kepler_lc_<candidate_id>.parquet``.
     """
-    try:
-        import lightkurve as lk
-    except ImportError:
-        print("Kepler LCs: lightkurve not installed, skipping")
-        df = df.copy()
-        df["kepler_n_quarters"] = 0
-        df["kepler_total_points"] = 0
-        df["kepler_flux_range"] = np.nan
-        return df
-
     df = df.copy()
     df["kepler_n_quarters"] = 0
     df["kepler_total_points"] = 0
@@ -2135,7 +2117,6 @@ def fetch_aavso_lightcurves(
         
         try:
             dfs = []
-            import io
             for page in range(1, num_pages + 1):
                 url = f"https://app.aavso.org/webobs/results/?star={obj_url}&num_results=200&obs_types=ccd&page={page}"
                 res = requests.get(url, timeout=10)
@@ -2243,7 +2224,6 @@ def fetch_panstarrs_lightcurves(
             if res.status_code != 200 or "obsTime" not in res.text:
                 return (idx, 0)
 
-            import io
             lc_df = pd.read_csv(io.StringIO(res.text))
             
             if lc_df.empty or "obsTime" not in lc_df.columns:
@@ -2343,12 +2323,6 @@ def fetch_crts_lightcurves(
 
     n_valid = int(valid.sum())
     print(f"CRTS LCs: fetching {n_valid} light curves via TAP")
-
-    try:
-        import pyvo
-    except ImportError:
-        print("CRTS LCs: pyvo not installed, skipping")
-        return df
 
     # We do a batch query against II/341/data which has epoch photometry.
     # Because II/341/data is massive, doing a batch crossmatch is best.
@@ -2843,7 +2817,7 @@ def _print_vetting_summary(df: pd.DataFrame, total_start: float) -> None:
 
 def main():
     """CLI for standalone vetting."""
-    import argparse
+
 
     parser = argparse.ArgumentParser(description="Post-review vetting of MALCA candidates")
     parser.add_argument("input", type=Path, help="Input parquet/CSV with candidates (needs ra, dec columns)")

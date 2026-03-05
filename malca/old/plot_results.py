@@ -4,15 +4,17 @@ Plot SkyPatrol light curves with vertical lines marking detected peaks.
 """
 from __future__ import annotations
 
+from pathlib import Path
 import argparse
 import ast
-from pathlib import Path
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
+import sys
+import traceback
 
-from malca.plot import read_skypatrol_csv, JD_OFFSET
+from matplotlib.lines import Line2D
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+
 from malca.baseline import (
     global_mean_baseline,
     global_median_baseline,
@@ -22,6 +24,11 @@ from malca.baseline import (
     per_camera_median_baseline,
     per_camera_trend_baseline,
 )
+from malca.plot import read_skypatrol_csv, JD_OFFSET
+
+
+
+
 
 PER_CAMERA_BASELINES = {
     per_camera_mean_baseline,
@@ -661,7 +668,7 @@ def main():
                 skipped += 1
         except Exception as e:
             print(f"Error plotting {asas_sn_id}: {e}")
-            import traceback
+
             traceback.print_exc()
             skipped += 1
     
@@ -672,5 +679,5 @@ def main():
 
 
 if __name__ == "__main__":
-    import sys
+
     sys.exit(main())

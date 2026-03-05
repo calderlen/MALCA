@@ -8,16 +8,18 @@ Outputs:
 - Nightly/seasonal coverage & duty cycle
 - Per-camera / per-field / per-band usage + offsets and scatter
 """
-
-import sys, io, argparse, math
 from collections import OrderedDict
+import sys, io, argparse, math
+
+from astropy.timeseries import LombScargle
+from celerite2 import GaussianProcess as _GP, terms as _cterms
+from iar.IARModel import IARphikalman as _IARphikalman
+from scipy import stats as sp_stats
+from scipy.optimize import minimize
+from scipy.optimize import minimize_scalar
 import numpy as np
 import pandas as pd
-from scipy import stats as sp_stats
-from astropy.timeseries import LombScargle
 
-from malca.utils import read_lc_dat2, read_lc_csv
-from malca.periodogram import pdm_find_period, ce_find_period
 from malca.config.config_stats import (
     MAD_SCALE,
     STETSON_K_NORM,
@@ -27,6 +29,12 @@ from malca.config.config_stats import (
     LS_ALIAS_TOLERANCE,
     LS_ALIAS_PERIODS,
 )
+from malca.periodogram import pdm_find_period, ce_find_period
+from malca.utils import read_lc_dat2, read_lc_csv
+
+
+
+
 
 # helpers
 def weighted_mean(x, w):
@@ -307,6 +315,41 @@ def bootstrap_lomb_scargle(
     # Known alias periods (sidereal day, half-day, lunar month, year, half-year)
     alias_periods = LS_ALIAS_PERIODS
 
+def _bootstrap_min_metric(
+    period_finder,
+    jd: np.ndarray,
+    mag: np.ndarray,
+    *,
+    n_bootstrap: int,
+    min_period: float,
+    max_period: float,
+    n_periods: int,
+) -> np.ndarray:
+    """Return bootstrap distribution of minimum periodogram statistic."""
+    n_bootstrap = int(max(n_bootstrap, 0))
+    if n_bootstrap == 0:
+        return np.empty(0, dtype=float)
+
+    mins = np.full(n_bootstrap, np.nan, dtype=float)
+    rng = np.random.default_rng()
+    for i in range(n_bootstrap):
+        try:
+            shuffled_mag = rng.permutation(mag)
+            _, _, metric = period_finder(
+                jd,
+                shuffled_mag,
+                min_period=min_period,
+                max_period=max_period,
+                n_periods=n_periods,
+            )
+            if metric.size > 0:
+                mins[i] = float(np.min(metric))
+        except Exception:
+            mins[i] = np.nan
+
+    return mins
+
+
 def compute_pdm_stats(
     jd: np.ndarray,
     mag: np.ndarray,
@@ -314,32 +357,75 @@ def compute_pdm_stats(
     min_period: float = 1.0,
     max_period: float = 100.0,
     n_periods: int = 10000,
+    n_bootstrap: int = 0,
+    significance_level: float = 0.01,
 ) -> dict:
     """
     Run Phase Dispersion Minimization and compute significance metrics.
-    
+
     Returns:
         pdm_period: float, best period
         pdm_min_theta: float, lowest theta value (0-1, lower is better)
         pdm_snr: float, SNR of the theta dip relative to background
+        pdm_bootstrap_sig: float, bootstrap significance (fraction of shuffles with lower/equal theta)
+        pdm_is_significant: bool, True if bootstrap significance is below threshold
     """
+    out = {
+        "pdm_period": np.nan,
+        "pdm_min_theta": np.nan,
+        "pdm_snr": np.nan,
+        "pdm_bootstrap_sig": np.nan,
+        "pdm_is_significant": False,
+    }
+
     mask = np.isfinite(jd) & np.isfinite(mag)
     if mask.sum() < 50:
-        return {"pdm_period": np.nan, "pdm_min_theta": np.nan, "pdm_snr": np.nan}
-    
+        return out
+
     try:
-        best_p, periods, thetas = pdm_find_period(
-            jd[mask], mag[mask], min_period=min_period, max_period=max_period, n_periods=n_periods
+        jd_clean = np.asarray(jd[mask], dtype=float)
+        mag_clean = np.asarray(mag[mask], dtype=float)
+
+        best_p, _, thetas = pdm_find_period(
+            jd_clean,
+            mag_clean,
+            min_period=min_period,
+            max_period=max_period,
+            n_periods=n_periods,
         )
-        min_theta = np.min(thetas)
-        pdm_snr = (np.mean(thetas) - min_theta) / np.std(thetas)
-        return {
+
+        min_theta = float(np.min(thetas))
+        theta_std = float(np.std(thetas))
+        if np.isfinite(theta_std) and theta_std > 0:
+            pdm_snr = float((np.mean(thetas) - min_theta) / theta_std)
+        else:
+            pdm_snr = np.nan
+
+        out.update({
             "pdm_period": float(best_p),
-            "pdm_min_theta": float(min_theta),
-            "pdm_snr": float(pdm_snr),
-        }
+            "pdm_min_theta": min_theta,
+            "pdm_snr": pdm_snr,
+        })
+
+        if int(n_bootstrap) > 0 and np.isfinite(min_theta):
+            null_min_theta = _bootstrap_min_metric(
+                pdm_find_period,
+                jd_clean,
+                mag_clean,
+                n_bootstrap=n_bootstrap,
+                min_period=min_period,
+                max_period=max_period,
+                n_periods=n_periods,
+            )
+            finite = null_min_theta[np.isfinite(null_min_theta)]
+            if finite.size > 0:
+                bootstrap_sig = float(np.mean(finite <= min_theta))
+                out["pdm_bootstrap_sig"] = bootstrap_sig
+                out["pdm_is_significant"] = bool(bootstrap_sig < float(significance_level))
+
+        return out
     except Exception:
-        return {"pdm_period": np.nan, "pdm_min_theta": np.nan, "pdm_snr": np.nan}
+        return out
 
 def compute_ce_stats(
     jd: np.ndarray,
@@ -348,32 +434,74 @@ def compute_ce_stats(
     min_period: float = 1.0,
     max_period: float = 100.0,
     n_periods: int = 10000,
+    n_bootstrap: int = 0,
+    significance_level: float = 0.01,
 ) -> dict:
     """
     Run Conditional Entropy and compute significance metrics.
-    
+
     Returns:
         ce_period: float, best period
         ce_min_entropy: float, lowest entropy value
         ce_snr: float, SNR of the entropy dip relative to background
+        ce_bootstrap_sig: float, bootstrap significance (fraction of shuffles with lower/equal entropy)
+        ce_is_significant: bool, True if bootstrap significance is below threshold
     """
+    out = {
+        "ce_period": np.nan,
+        "ce_min_entropy": np.nan,
+        "ce_snr": np.nan,
+        "ce_bootstrap_sig": np.nan,
+        "ce_is_significant": False,
+    }
+
     mask = np.isfinite(jd) & np.isfinite(mag)
     if mask.sum() < 50:
-        return {"ce_period": np.nan, "ce_min_entropy": np.nan, "ce_snr": np.nan}
-    
+        return out
+
     try:
-        best_p, periods, entropies = ce_find_period(
-            jd[mask], mag[mask], min_period=min_period, max_period=max_period, n_periods=n_periods
+        jd_clean = np.asarray(jd[mask], dtype=float)
+        mag_clean = np.asarray(mag[mask], dtype=float)
+
+        best_p, _, entropies = ce_find_period(
+            jd_clean,
+            mag_clean,
+            min_period=min_period,
+            max_period=max_period,
+            n_periods=n_periods,
         )
-        min_entropy = np.min(entropies)
-        ce_snr = (np.mean(entropies) - min_entropy) / np.std(entropies)
-        return {
+        min_entropy = float(np.min(entropies))
+        entropy_std = float(np.std(entropies))
+        if np.isfinite(entropy_std) and entropy_std > 0:
+            ce_snr = float((np.mean(entropies) - min_entropy) / entropy_std)
+        else:
+            ce_snr = np.nan
+
+        out.update({
             "ce_period": float(best_p),
-            "ce_min_entropy": float(min_entropy),
-            "ce_snr": float(ce_snr),
-        }
+            "ce_min_entropy": min_entropy,
+            "ce_snr": ce_snr,
+        })
+
+        if int(n_bootstrap) > 0 and np.isfinite(min_entropy):
+            null_min_entropy = _bootstrap_min_metric(
+                ce_find_period,
+                jd_clean,
+                mag_clean,
+                n_bootstrap=n_bootstrap,
+                min_period=min_period,
+                max_period=max_period,
+                n_periods=n_periods,
+            )
+            finite = null_min_entropy[np.isfinite(null_min_entropy)]
+            if finite.size > 0:
+                bootstrap_sig = float(np.mean(finite <= min_entropy))
+                out["ce_bootstrap_sig"] = bootstrap_sig
+                out["ce_is_significant"] = bool(bootstrap_sig < float(significance_level))
+
+        return out
     except Exception:
-        return {"ce_period": np.nan, "ce_min_entropy": np.nan, "ce_snr": np.nan}
+        return out
 
     try:
         ls = LombScargle(jd, mag, err)
@@ -855,13 +983,7 @@ def psi_eta(mag, time, period):
 # ---------------------------------------------------------------------------
 # GP_DRW: Damped Random Walk via celerite2
 # ---------------------------------------------------------------------------
-try:
-    from celerite2 import GaussianProcess as _GP, terms as _cterms
-    _HAS_CELERITE2 = True
-except Exception:
-    _GP = None
-    _cterms = None
-    _HAS_CELERITE2 = False
+_HAS_CELERITE2 = True
 
 
 def fit_drw(jd, mag, err):
@@ -895,7 +1017,7 @@ def fit_drw(jd, mag, err):
     w0_init = 1.0 / tau0
     S0_init = var * tau0
 
-    from scipy.optimize import minimize
+
 
     def neg_log_like(params):
         log_S0, log_w0 = params
@@ -929,12 +1051,7 @@ def fit_drw(jd, mag, err):
 # ---------------------------------------------------------------------------
 # IAR_phi: Irregular Autoregressive coefficient
 # ---------------------------------------------------------------------------
-try:
-    from iar.IARModel import IARphikalman as _IARphikalman
-    _HAS_IAR = True
-except Exception:
-    _IARphikalman = None
-    _HAS_IAR = False
+_HAS_IAR = True
 
 
 def iar_phi_fit(jd, mag, err):
@@ -958,7 +1075,7 @@ def iar_phi_fit(jd, mag, err):
     yerr = err[mask]
 
     try:
-        from scipy.optimize import minimize_scalar
+
         result = minimize_scalar(
             lambda phi: float(_IARphikalman(phi, y, yerr, t, zero_mean=False)),
             bounds=(1e-6, 1 - 1e-6),

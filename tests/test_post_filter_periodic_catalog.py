@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-post_filter = pytest.importorskip("malca.post_filter")
+post_filter = pytest.importorskip("malca.filter")
 
 
 def _empty_catalog() -> pd.DataFrame:

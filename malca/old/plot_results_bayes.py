@@ -4,18 +4,17 @@ Plot light curves with Bayesian event detection results, showing run fits overla
 """
 from __future__ import annotations
 
-import argparse
-import json
-import ast
 from pathlib import Path
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
+import argparse
+import ast
+import json
+import traceback
 
-from malca.plot import read_skypatrol_csv, JD_OFFSET
-from malca.events import run_bayesian_significance
-from malca.utils import gaussian, paczynski_kernel
+from matplotlib.lines import Line2D
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+
 from malca.baseline import (
     per_camera_gp_baseline,
     global_mean_baseline,
@@ -26,6 +25,13 @@ from malca.baseline import (
     per_camera_median_baseline,
     per_camera_trend_baseline,
 )
+from malca.events import run_bayesian_significance
+from malca.plot import read_skypatrol_csv, JD_OFFSET
+from malca.utils import gaussian, paczynski_kernel
+
+
+
+
 
 
 BASELINE_FUNCTIONS = {
@@ -464,7 +470,7 @@ def main():
             )
         except Exception as e:
             print(f"Error plotting {csv_path}: {e}")
-            import traceback
+
             traceback.print_exc()
 
 

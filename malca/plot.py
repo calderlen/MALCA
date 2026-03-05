@@ -4,38 +4,49 @@ Plot light curves with Bayesian event detection results, showing run fits overla
 """
 from __future__ import annotations
 
+from datetime import datetime
+from pathlib import Path
+from typing import Sequence
 import argparse
 import hashlib
-from pathlib import Path
-import pandas as pd
-import numpy as np
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
+import json
+import shlex
+import sys
 import time
-from datetime import datetime
-from typing import Sequence
 
-from malca.events import score_lightcurve
-from malca.utils import gaussian, paczynski_kernel, read_skypatrol_csv as _read_skypatrol_csv
-from malca.utils import clean_lc, read_lc_dat2, filter_bad_cameras
-from malca.review.metadata import REVIEW_METADATA_FIELDS, normalize_vsx_record
+from matplotlib.lines import Line2D
+import matplotlib
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+
 from malca.baseline import (
     global_median_baseline,
     per_camera_median_baseline,
     per_camera_gp_baseline,
-)
-from malca.config.config_pipeline import (
-    WORKERS, JD_OFFSET, PLOT_FIGSIZE,
-    LOGBF_THRESHOLD_DIP, LOGBF_THRESHOLD_JUMP,
 )
 from malca.config.config_filters import (
     CLEAN_LC_MAX_ERROR_ABSOLUTE,
     CLEAN_LC_MAX_ERROR_SIGMA,
     BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
 )
+from malca.config.config_pipeline import (
+    WORKERS, JD_OFFSET, PLOT_FIGSIZE,
+    LOGBF_THRESHOLD_DIP, LOGBF_THRESHOLD_JUMP,
+)
 from malca.config.config_stats import MAD_SCALE
+from malca.evaluation.reproduce import brayden_candidates
+from malca.events import score_lightcurve
+from malca.review.metadata import REVIEW_METADATA_FIELDS, normalize_vsx_record
+from malca.review.plot_batch import load_passing_candidates as _impl
+from malca.review.plot_batch import plot_passing_candidates as _impl
+from malca.utils import clean_lc, read_lc_dat2, filter_bad_cameras
+from malca.utils import gaussian, paczynski_kernel, read_skypatrol_csv as _read_skypatrol_csv
+
+
+
+matplotlib.use('Agg')
+
 
 CAMERA_COLOR_PALETTE = [
     "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
@@ -385,7 +396,7 @@ def lookup_metadata_for_path(path: Path, detection_results_csv=None):
 
     # Fallback to brayden_candidates if no metadata found from CSV
     if not meta:
-        from malca.evaluation.reproduce import brayden_candidates
+
 
         source_id = stem.split("-")[0]
         for candidate in brayden_candidates:
@@ -408,14 +419,14 @@ def lookup_metadata_for_path(path: Path, detection_results_csv=None):
 
 def load_passing_candidates(*args, **kwargs):
     """Forward to candidate-table loader used by consolidated plotting."""
-    from malca.review.plot_batch import load_passing_candidates as _impl
+
 
     return _impl(*args, **kwargs)
 
 
 def plot_passing_candidates(*args, **kwargs):
     """Forward to candidate-table plotting implementation."""
-    from malca.review.plot_batch import plot_passing_candidates as _impl
+
 
     return _impl(*args, **kwargs)
 
@@ -1395,10 +1406,10 @@ def main():
     # Generate plot log with comprehensive statistics
     if args.detect_run:
         try:
-            import json
-            import sys
-            import shlex
-            from datetime import datetime
+
+
+
+
 
             detect_run = args.detect_run.expanduser()
             plot_log_file = detect_run / "plot_log.json"

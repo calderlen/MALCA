@@ -12,23 +12,17 @@ Implements classification scenarios from Tzanidakis et al. (2025):
 Usage:
     malca classify --input output/events.csv --output output/classified.csv
 """
-
-import os
-import argparse
 from pathlib import Path
-import numpy as np
-import pandas as pd
+import argparse
+import os
+
+from astropy.coordinates import SkyCoord
+from astroquery.mast import Catalogs
+from astroquery.vizier import Vizier
 from tqdm import tqdm
 import astropy.units as u
-from astropy.coordinates import SkyCoord
-try:
-    from astroquery.mast import Catalogs
-except Exception:
-    Catalogs = None
-try:
-    from astroquery.vizier import Vizier
-except Exception:
-    Vizier = None
+import numpy as np
+import pandas as pd
 
 from malca.config.config_classify import (
     SOLAR_MASS_KG, SOLAR_RADIUS_M, AU_M, DAY_S,
@@ -49,6 +43,12 @@ from malca.config.config_classify import (
     CLASSIFY_IPHAS_RADIUS_ARCSEC, CLASSIFY_PS1_RADIUS_ARCSEC,
 )
 from malca.config.config_io import PARQUET_OUTPUT_COMPRESSION
+from malca.config.config_ltv import VIZIER_TAP_URL
+from malca.utils import batch_tap_crossmatch
+
+
+
+
 
 
 # =============================================================================
@@ -147,8 +147,8 @@ def query_iphas_by_coords(df: pd.DataFrame, radius_arcsec: float = CLASSIFY_IPHA
     IPHAS covers Northern Galactic Plane: -5° < b < 5°, 30° < l < 215°
     Returns r, i, Hα magnitudes and r-Hα color
     """
-    from malca.utils import batch_tap_crossmatch
-    from malca.config.config_ltv import VIZIER_TAP_URL
+
+
 
     if 'ra' not in df.columns or 'dec' not in df.columns:
         print("Warning: No ra/dec for IPHAS query")
@@ -222,10 +222,6 @@ def query_ps1_by_coords(df: pd.DataFrame, radius_arcsec: float = CLASSIFY_PS1_RA
     for band in ['g', 'r', 'i', 'z', 'y']:
         df[f'ps1_{band}'] = np.nan
 
-    if Catalogs is None:
-        print("Warning: astroquery.mast unavailable; skipping PS1 query")
-        return df
-    
     print(f"Querying PS1 for {len(df)} sources...")
     
     for idx in tqdm(df.index, desc="PS1"):

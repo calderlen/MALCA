@@ -1,34 +1,37 @@
 from __future__ import annotations
 
-import argparse
-import csv
-import io
-import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
+import argparse
+import csv
+import io
+import re
+import sys
 
+import matplotlib.pyplot as pl
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as pl
 import pyarrow.parquet as pq
 
-from malca.events import score_lightcurve
-from malca.triggering import normalize_trigger_block
-from malca.utils import read_lc_dat2
 from malca.baseline import (
     global_median_baseline,
     per_camera_median_baseline,
     per_camera_gp_baseline,
 )
-from malca.pre_tag import apply_pre_tags
-from malca.filter import filter_signal_amplitude
-from malca.post_filter import apply_post_filters
-from malca.plot import plot_passing_candidates
-from malca.stats import median_dt, compute_stats
-from malca.score import compute_event_score
-from malca.classify import compute_all_classifications
 from malca.characterize import query_gaia_by_ids, get_dust_extinction
+from malca.classify import compute_all_classifications
+from malca.config.config_filters import (
+    MIN_TIME_SPAN,
+    MIN_POINTS_PER_DAY,
+    MIN_CAMERAS,
+    VSX_MAX_SEP_ARCSEC,
+    MIN_BAYES_FACTOR,
+    POST_FILTER_MIN_RUN_CAMERAS,
+    POST_FILTER_MIN_RUN_POINTS,
+)
+from malca.config.config_io import REPRODUCE_CHUNK_SIZE
+from malca.config.config_paths import VSX_RAW_CATALOG_PATH
 from malca.config.config_pipeline import (
     WORKERS,
     TRIGGER_MODE,
@@ -47,17 +50,20 @@ from malca.config.config_pipeline import (
     BASELINE_JITTER,
     JD_OFFSET,
 )
-from malca.config.config_io import REPRODUCE_CHUNK_SIZE
-from malca.config.config_filters import (
-    MIN_TIME_SPAN,
-    MIN_POINTS_PER_DAY,
-    MIN_CAMERAS,
-    VSX_MAX_SEP_ARCSEC,
-    MIN_BAYES_FACTOR,
-    POST_FILTER_MIN_RUN_CAMERAS,
-    POST_FILTER_MIN_RUN_POINTS,
-)
-from malca.config.config_paths import VSX_RAW_CATALOG_PATH
+from malca.events import score_lightcurve
+from malca.filter import apply_filters, filter_signal_amplitude
+from malca.plot import plot_passing_candidates
+from malca.plot import read_skypatrol_csv
+from malca.score import compute_event_score
+from malca.stats import median_dt, compute_stats
+from malca.tag import apply_tags
+from malca.triggering import normalize_trigger_block
+from malca.utils import read_lc_dat2
+
+
+
+
+
 
 
 
@@ -323,7 +329,7 @@ def coerce_candidate_records(data) -> list[dict[str, object]]:
 
     first = records[0]
     if isinstance(first, Mapping):
-        import re
+
         coerced: list[dict[str, object]] = []
         for rec in records:
             if not isinstance(rec, Mapping):
@@ -680,7 +686,7 @@ def build_reproduction_report(
     method: str = "bayes",
     verbose: bool = False,
     # Filter options
-    skip_pre_filters: bool = False,
+    skip_tags: bool = False,
     min_time_span: float = MIN_TIME_SPAN,
     min_points_per_day: float = MIN_POINTS_PER_DAY,
     min_cameras: int = MIN_CAMERAS,
@@ -688,10 +694,10 @@ def build_reproduction_report(
     vsx_catalog: Path | str = VSX_RAW_CATALOG_PATH,
     vsx_max_sep: float = VSX_MAX_SEP_ARCSEC,
     min_mag_offset: float = MIN_MAG_OFFSET,
-    run_post_filter: bool = False,
-    post_filter_min_run_cameras: int = POST_FILTER_MIN_RUN_CAMERAS,
-    post_filter_min_run_points: int = POST_FILTER_MIN_RUN_POINTS,
-    post_filter_min_bayes_factor: float = MIN_BAYES_FACTOR,
+    run_filter: bool = False,
+    filter_min_run_cameras: int = POST_FILTER_MIN_RUN_CAMERAS,
+    filter_min_run_points: int = POST_FILTER_MIN_RUN_POINTS,
+    filter_min_bayes_factor: float = MIN_BAYES_FACTOR,
     run_postprocess: bool = False,
     max_plots: int | None = None,
     run_enrich: bool = False,
@@ -758,17 +764,17 @@ def build_reproduction_report(
             n_found = sum(len(v) for v in records_map.values())
             print(f"[DEBUG] Built records_map from manifest: {n_found} light curves found")
 
-    # Apply pre-filters if manifest is provided and not skipped
-    if manifest_subset is not None and not skip_pre_filters and records_map:
+    # Apply tag filters if manifest is provided and not skipped
+    if manifest_subset is not None and not skip_tags and records_map:
         if verbose:
             total_before = sum(len(v) for v in records_map.values())
-            print(f"\n[PRE-FILTER] Applying pre-filters to {total_before} candidates...")
+            print(f"\n[TAG] Applying tag filters to {total_before} candidates...")
         
-        # Prepare dataframe for pre-tagging stage (needs 'path' column pointing to lc_dir)
+        # Prepare dataframe for tagging stage (needs 'path' column pointing to lc_dir)
         df_pre = manifest_subset.rename(columns={"lc_dir": "path"}).copy()
         
         try:
-            df_filtered = apply_pre_tags(
+            df_filtered = apply_tags(
                 df_pre,
                 apply_sparse=True,
                 min_time_span=min_time_span,
@@ -796,13 +802,13 @@ def build_reproduction_report(
             
             total_after = sum(len(v) for v in records_map.values())
             if verbose:
-                print(f"[PRE-FILTER] Kept {total_after}/{total_before} candidates after pre-filtering")
-                print(f"[PRE-FILTER] Rejected {total_before - total_after} candidates")
+                print(f"[TAG] Kept {total_after}/{total_before} candidates after tagging")
+                print(f"[TAG] Rejected {total_before - total_after} candidates")
         
         except Exception as e:
             if verbose:
-                print(f"[PRE-FILTER] Warning: pre-filter failed: {e}")
-                print(f"[PRE-FILTER] Continuing without pre-filtering...")
+                print(f"[TAG] Warning: tagging failed: {e}")
+                print(f"[TAG] Continuing without tagging...")
 
     baseline_func_map = {
         "gp": per_camera_gp_baseline,
@@ -838,7 +844,7 @@ def build_reproduction_report(
 
             try:
                 if str(dat_path).endswith('.csv') and has_path:
-                    from malca.plot import read_skypatrol_csv
+
                     df_all = read_skypatrol_csv(str(dat_path))
                     # read_skypatrol_csv standardizes v_g_band to 0=g, 1=V
                     if not df_all.empty and "v_g_band" in df_all.columns:
@@ -1400,11 +1406,11 @@ def build_reproduction_report(
                 print(f"[SIGNAL-FILTER] Continuing without signal amplitude filtering...")
 
     # ==========================================================================
-    # Post-processing: Post-filters (apply_post_filters)
+    # Post-processing: Filters (apply_filters)
     # ==========================================================================
-    if run_post_filter and not rows_df.empty:
+    if run_filter and not rows_df.empty:
         if verbose:
-            print("\n[POST-FILTER] Applying post-filters...")
+            print("\n[FILTER] Applying filters...")
 
         try:
             df_for_post = rows_df.copy()
@@ -1450,27 +1456,27 @@ def build_reproduction_report(
             df_for_post["dip_max_run_points"] = _max_cols("g_dip_max_run_points", "v_dip_max_run_points")
             df_for_post["jump_max_run_points"] = _max_cols("g_jump_max_run_points", "v_jump_max_run_points")
 
-            rows_df = apply_post_filters(
+            rows_df = apply_filters(
                 df_for_post,
-                min_bayes_factor=post_filter_min_bayes_factor,
+                min_bayes_factor=filter_min_bayes_factor,
                 apply_run_robustness=True,
-                min_run_points=post_filter_min_run_points,
-                min_run_cameras=post_filter_min_run_cameras,
+                min_run_points=filter_min_run_points,
+                min_run_cameras=filter_min_run_cameras,
                 show_tqdm=verbose,
                 verbose=verbose,
             )
         except Exception as e:
             if verbose:
-                print(f"[POST-FILTER] Warning: post-filter failed: {e}")
-                print("[POST-FILTER] Continuing without post-filtering...")
+                print(f"[FILTER] Warning: filter step failed: {e}")
+                print("[FILTER] Continuing without filtering...")
 
     # ==========================================================================
     # Post-processing: Postprocess plots (optional)
     # ==========================================================================
     if run_postprocess:
-        if not run_post_filter:
+        if not run_filter:
             if verbose:
-                print("[POSTPROCESS] Warning: --run-postprocess requires --run-post-filter. Skipping.")
+                print("[POSTPROCESS] Warning: --run-postprocess requires --run-filter. Skipping.")
         elif not rows_df.empty:
             if verbose:
                 print("\n[POSTPROCESS] Generating postprocess plots...")
@@ -1501,9 +1507,9 @@ def build_reproduction_report(
     # Post-processing: Enrich with compute_stats (optional)
     # ==========================================================================
     if run_enrich:
-        if not run_post_filter:
+        if not run_filter:
             if verbose:
-                print("[ENRICH] Warning: --run-enrich requires --run-post-filter. Skipping.")
+                print("[ENRICH] Warning: --run-enrich requires --run-filter. Skipping.")
         elif not rows_df.empty:
             if verbose:
                 print("\n[ENRICH] Enriching with light curve stats...")
@@ -2148,11 +2154,11 @@ Examples:
         help="Minimum duration in days for a confirmed run (default: 0.0 = disabled).",
     )
 
-    # Pre-filter options
+    # Tag options
     parser.add_argument(
-        "--skip-pre-filters",
+        "--skip-tags",
         action="store_true",
-        help="Skip pre-filtering step (sparse LC, multi-camera, VSX)",
+        help="Skip tagging step (sparse LC, multi-camera, VSX)",
     )
     parser.add_argument(
         "--min-time-span",
@@ -2227,24 +2233,27 @@ Examples:
         help="Run 3D dust extinction correction (requires dustmaps3d)",
     )
     parser.add_argument(
-        "--run-post-filter",
+        "--run-filter",
+        dest="run_filter",
         action="store_true",
-        help="Apply post-filters (Bayes factor, run robustness, morphology)",
+        help="Apply candidate filters (Bayes factor, run robustness, morphology)",
     )
     parser.add_argument(
         "--min-bayes-factor",
         type=float,
         default=MIN_BAYES_FACTOR,
-        help="Min Bayes factor for post-filter (default: 10.0)",
+        help="Min Bayes factor for filter stage (default: 10.0)",
     )
     parser.add_argument(
-        "--post-filter-min-run-cameras",
+        "--filter-min-run-cameras",
+        dest="filter_min_run_cameras",
         type=int,
         default=POST_FILTER_MIN_RUN_CAMERAS,
         help="Min cameras for run robustness filter (default: 2)",
     )
     parser.add_argument(
-        "--post-filter-min-run-points",
+        "--filter-min-run-points",
+        dest="filter_min_run_points",
         type=int,
         default=POST_FILTER_MIN_RUN_POINTS,
         help="Min points per run for robustness filter (default: 2)",
@@ -2449,7 +2458,7 @@ def _main_impl(args: argparse.Namespace, plot_out_dir: Path | None = None) -> pd
         method="bayes",
         verbose=args.verbose,
         # Filter parameters
-        skip_pre_filters=args.skip_pre_filters,
+        skip_tags=args.skip_tags,
         min_time_span=args.min_time_span,
         min_points_per_day=args.min_points_per_day,
         min_cameras=args.min_cameras,
@@ -2457,10 +2466,10 @@ def _main_impl(args: argparse.Namespace, plot_out_dir: Path | None = None) -> pd
         vsx_catalog=args.vsx_catalog,
         vsx_max_sep=args.vsx_max_sep,
         min_mag_offset=args.min_mag_offset,
-        run_post_filter=args.run_post_filter,
-        post_filter_min_run_cameras=args.post_filter_min_run_cameras,
-        post_filter_min_run_points=args.post_filter_min_run_points,
-        post_filter_min_bayes_factor=args.min_bayes_factor,
+        run_filter=args.run_filter,
+        filter_min_run_cameras=args.filter_min_run_cameras,
+        filter_min_run_points=args.filter_min_run_points,
+        filter_min_bayes_factor=args.min_bayes_factor,
         run_postprocess=args.run_postprocess,
         max_plots=args.max_plots,
         run_enrich=args.run_enrich,
@@ -2492,8 +2501,8 @@ def _main_impl(args: argparse.Namespace, plot_out_dir: Path | None = None) -> pd
         print(f"P-grid (dip):         min={args.p_min_dip}, max={args.p_max_dip}")
     if args.p_min_jump is not None or args.p_max_jump is not None:
         print(f"P-grid (jump):        min={args.p_min_jump}, max={args.p_max_jump}")
-    print(f"Pre-filters:          {'APPLIED' if not args.skip_pre_filters else 'SKIPPED'}")
-    if not args.skip_pre_filters:
+    print(f"Tags:          {'APPLIED' if not args.skip_tags else 'SKIPPED'}")
+    if not args.skip_tags:
         print(f"  - Sparse LC filter:   min_time_span={args.min_time_span}d, min_cadence={args.min_points_per_day}/d")
         print(f"  - Multi-camera:       min_cameras={args.min_cameras}")
         print(f"  - VSX filter:         {'APPLIED' if not args.skip_vsx else 'SKIPPED'}")
@@ -2504,12 +2513,12 @@ def _main_impl(args: argparse.Namespace, plot_out_dir: Path | None = None) -> pd
     if args.run_min_duration_days is not None:
         print(f"                      min_duration_days={args.run_min_duration_days}")
     print(f"Morphology filter:    accepted={{{', '.join(sorted(accepted_morphologies))}}}")
-    post_filter_state = "APPLIED" if args.run_post_filter else "SKIPPED"
-    print(f"Post-filters:         {post_filter_state}")
+    filter_state = "APPLIED" if args.run_filter else "SKIPPED"
+    print(f"Filters:              {filter_state}")
     if args.run_postprocess:
-        print(f"Postprocess plots:    {'ENABLED' if args.run_post_filter else 'SKIPPED (requires post-filter)'}")
+        print(f"Postprocess plots:    {'ENABLED' if args.run_filter else 'SKIPPED (requires filter)'}")
     if args.run_enrich:
-        print(f"Enrichment:           {'ENABLED' if args.run_post_filter else 'SKIPPED (requires post-filter)'}")
+        print(f"Enrichment:           {'ENABLED' if args.run_filter else 'SKIPPED (requires filter)'}")
     print("=" * 60 + "\n")
 
     columns = [

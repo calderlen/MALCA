@@ -1,14 +1,8 @@
-import numpy as np
-import pandas as pd
 import warnings
 
-try:
-    from celerite2 import GaussianProcess, terms  # type: ignore[import-not-found]
-    _HAS_CELERITE2 = True
-except Exception:
-    GaussianProcess = None
-    terms = None
-    _HAS_CELERITE2 = False
+from celerite2 import GaussianProcess, terms
+import numpy as np
+import pandas as pd
 
 from malca.config.config_pipeline import (
     BASELINE_S0, BASELINE_W0, BASELINE_Q, BASELINE_JITTER,
@@ -18,6 +12,10 @@ from malca.config.config_pipeline import (
     ROLLING_WINDOW_DAYS, ROLLING_MIN_POINTS, ROLLING_MIN_DAYS,
 )
 from malca.config.config_stats import MAD_SCALE
+
+
+_HAS_CELERITE2 = True
+
 
 
 def global_median_baseline(

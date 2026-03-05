@@ -15,18 +15,25 @@ The reported score is log10(S).
 This module provides compute_event_score() which is called automatically during
 event detection in events.py on significant detections.
 """
-
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
+import argparse
 
+from scipy.optimize import curve_fit
 import numpy as np
 import pandas as pd
-from scipy.optimize import curve_fit
 
-from malca.utils import gaussian
 from malca.stats import robust_sigma
+from malca.utils import gaussian
+
+
+
+
+
+
 
 
 @dataclass
@@ -461,8 +468,8 @@ def compute_event_score(
 
 
 def main() -> None:
-    import argparse
-    from pathlib import Path
+
+
 
     parser = argparse.ArgumentParser(description="Compute event score for a light curve table")
     parser.add_argument("--input", type=Path, required=True, help="Input CSV/Parquet with JD, mag, error")

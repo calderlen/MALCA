@@ -8,7 +8,7 @@ import pytest
 pytest.importorskip("astroquery")
 pytest.importorskip("celerite2")
 
-from malca.detect import _build_post_filter_kwargs
+from malca.detect import _build_filter_kwargs
 
 
 def _base_args() -> argparse.Namespace:
@@ -23,8 +23,8 @@ def _base_args() -> argparse.Namespace:
         skip_run_robustness=False,
         min_run_count=1,
         max_run_count=None,
-        post_filter_min_run_points=2,
-        post_filter_min_run_cameras=2,
+        filter_min_run_points=2,
+        filter_min_run_cameras=2,
         apply_morphology=False,
         dip_morphology="gaussian",
         jump_morphology="paczynski",
@@ -56,8 +56,8 @@ def _base_args() -> argparse.Namespace:
     )
 
 
-def test_build_post_filter_kwargs_defaults_match_pipeline_behavior() -> None:
-    kwargs = _build_post_filter_kwargs(_base_args())
+def test_build_filter_kwargs_defaults_match_pipeline_behavior() -> None:
+    kwargs = _build_filter_kwargs(_base_args())
 
     assert kwargs["apply_evidence_strength"] is True
     assert kwargs["apply_significant_detection"] is True
@@ -87,7 +87,7 @@ def test_build_post_filter_kwargs_defaults_match_pipeline_behavior() -> None:
     assert kwargs["phase_plot_allow_alias"] is False
 
 
-def test_build_post_filter_kwargs_respects_cli_overrides() -> None:
+def test_build_filter_kwargs_respects_cli_overrides() -> None:
     args = _base_args()
     args.skip_score_filter = True
     args.skip_significant_detection = True
@@ -119,7 +119,7 @@ def test_build_post_filter_kwargs_respects_cli_overrides() -> None:
     args.skip_periodic_catalog_validation = True
     args.periodic_catalog_reject = True
 
-    kwargs = _build_post_filter_kwargs(args)
+    kwargs = _build_filter_kwargs(args)
 
     assert kwargs["apply_score"] is False
     assert kwargs["apply_significant_detection"] is False

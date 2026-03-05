@@ -1,7 +1,7 @@
 """
 Bulk-download Gaia DR3 data via the AIP TAP mirror.
 
-Reads a candidate Parquet file (post-filter output), extracts Gaia source IDs
+Reads a candidate Parquet file (filter output), extracts Gaia source IDs
 via the VSX crossmatch, and downloads astrometry + photometry in chunks.
 Saves results as a local Parquet catalog for offline use by characterize.py.
 
@@ -10,31 +10,16 @@ Usage:
     malca gaia-fetch --input candidates.parquet --output my_gaia_catalog.parquet
     malca gaia-fetch --input candidates.parquet --crossmatch input/vsx/my_crossmatch.csv
 """
-
+from pathlib import Path
 import argparse
 import hashlib
 import json
 import time
-from pathlib import Path
 
-import pandas as pd
-try:
-    import pyvo
-except Exception:
-    class _MissingTAPService:
-        def __init__(self, *_args, **_kwargs) -> None:
-            raise ImportError(
-                "pyvo is required for Gaia TAP queries. "
-                "Install with `pip install pyvo` to use gaia-fetch."
-            )
-
-    class _PyvoStub:
-        class dal:
-            TAPService = _MissingTAPService
-
-    pyvo = _PyvoStub()
 from astropy.table import Table
 from tqdm import tqdm
+import pandas as pd
+import pyvo
 
 from malca.config.config_characterize import GAIA_CHUNK_SIZE
 from malca.config.config_paths import (
@@ -42,6 +27,10 @@ from malca.config.config_paths import (
     GAIA_LOCAL_CATALOG,
     VSX_CROSSMATCH_PATH,
 )
+
+
+
+
 
 # Gaia ADQL query executed via TAP async upload chunks.
 _GAIA_QUERY_TEMPLATE = """
@@ -367,7 +356,7 @@ def main():
         "--input",
         type=Path,
         required=True,
-        help="Candidate Parquet/CSV file (post-filter output with asas_sn_id or gaia_id column)",
+        help="Candidate Parquet/CSV file (filter output with asas_sn_id or gaia_id column)",
     )
     parser.add_argument(
         "--output",

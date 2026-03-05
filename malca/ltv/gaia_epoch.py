@@ -6,17 +6,17 @@ and compute Delta(M_G) and Delta(BP-RP) between first and last epochs.
 
 Optionally, a TAP table can be used if provided.
 """
-
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import re
 from typing import Iterable, Mapping
+import re
 
-import numpy as np
-import pandas as pd
 from astropy.table import Table
 from tqdm.auto import tqdm
+import numpy as np
+import pandas as pd
+import pyvo
 
 from malca.config.config_ltv import (
     LTV_GAIA_CHUNK_SIZE,
@@ -27,6 +27,13 @@ from malca.config.config_ltv import (
     GAIA_EPOCH_DELTA_MAG_THRESH,
     GAIA_EPOCH_DELTA_COLOR_THRESH,
 )
+from malca.config.config_paths import GAIA_AIP_TAP_URL
+
+
+
+
+
+
 
 
 def _chunked(iterable: Iterable, size: int):
@@ -47,8 +54,8 @@ def _batch_gaia_epoch_tap_query(
     n_workers: int = LTV_WORKERS,
     verbose: bool = False,
 ) -> pd.DataFrame:
-    import pyvo
-    from malca.config.config_paths import GAIA_AIP_TAP_URL
+
+
 
     if ids_df.empty:
         return pd.DataFrame()
@@ -281,8 +288,8 @@ def _batch_gaia_epoch_datalink(
     verbose: bool = False,
 ) -> list[dict]:
     """Fetch Gaia epoch photometry via TAP query on epoch_photometry table."""
-    import pyvo
-    from malca.config.config_paths import GAIA_AIP_TAP_URL
+
+
 
     if not source_ids:
         return []

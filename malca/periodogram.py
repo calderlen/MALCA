@@ -1,7 +1,7 @@
 """Period-finding methods for malca review: LSP, PDM, and Conditional Entropy."""
-
 from __future__ import annotations
 
+from astropy.timeseries import LombScargle
 import numba
 import numpy as np
 
@@ -16,11 +16,16 @@ from malca.config.config_stats import (
 )
 
 
+
+
+
+
+
 # ---------------------------------------------------------------------------
 # PDM (Phase Dispersion Minimization)
 # ---------------------------------------------------------------------------
 
-@numba.jit(nopython=True)
+@numba.jit(nopython=True, cache=True)
 def _pdm_theta(times: np.ndarray, yvals: np.ndarray, period: float, n_bins: int = PDM_N_BINS) -> float:
     """Compute PDM theta statistic for a single trial period.
 
@@ -72,6 +77,29 @@ def _pdm_theta(times: np.ndarray, yvals: np.ndarray, period: float, n_bins: int 
     return (numerator / denom) / var_total
 
 
+@numba.jit(nopython=True, cache=True)
+def _pdm_scan_grid(
+    times: np.ndarray,
+    yvals: np.ndarray,
+    period_arr: np.ndarray,
+    n_bins: int = PDM_N_BINS,
+) -> tuple[int, np.ndarray]:
+    """Evaluate PDM theta across a period grid in numba."""
+    n_periods = len(period_arr)
+    theta = np.empty(n_periods)
+
+    best_idx = 0
+    best_theta = np.inf
+    for i in range(n_periods):
+        theta_i = _pdm_theta(times, yvals, period_arr[i], n_bins)
+        theta[i] = theta_i
+        if theta_i < best_theta:
+            best_theta = theta_i
+            best_idx = i
+
+    return best_idx, theta
+
+
 def pdm_find_period(
     times: np.ndarray,
     yvals: np.ndarray,
@@ -85,13 +113,13 @@ def pdm_find_period(
     Returns (best_period, period_array, theta_array).
     Theta is normalized 0-1; lower = better period.
     """
+    times = np.asarray(times, dtype=np.float64)
+    yvals = np.asarray(yvals, dtype=np.float64)
     t0 = np.min(times)
     t_shifted = times - t0
     period_arr = np.linspace(min_period, max_period, n_periods)
-    theta = np.empty(n_periods)
-    for i in range(n_periods):
-        theta[i] = _pdm_theta(t_shifted, yvals, period_arr[i], n_bins=n_bins)
-    best_idx = int(np.argmin(theta))
+    best_idx, theta = _pdm_scan_grid(t_shifted, yvals, period_arr, n_bins)
+    best_idx = int(best_idx)
     return float(period_arr[best_idx]), period_arr, theta
 
 
@@ -99,7 +127,7 @@ def pdm_find_period(
 # Conditional Entropy (CE)
 # ---------------------------------------------------------------------------
 
-@numba.jit(nopython=True)
+@numba.jit(nopython=True, cache=True)
 def _ce_evaluate(times: np.ndarray, yvals: np.ndarray, period: float,
                  n_phase_bins: int = CE_N_PHASE_BINS, n_mag_bins: int = CE_N_MAG_BINS) -> float:
     """Compute conditional entropy H(mag|phase) for a single trial period.
@@ -156,6 +184,30 @@ def _ce_evaluate(times: np.ndarray, yvals: np.ndarray, period: float,
     return entropy
 
 
+@numba.jit(nopython=True, cache=True)
+def _ce_scan_grid(
+    times: np.ndarray,
+    yvals: np.ndarray,
+    period_arr: np.ndarray,
+    n_phase_bins: int = CE_N_PHASE_BINS,
+    n_mag_bins: int = CE_N_MAG_BINS,
+) -> tuple[int, np.ndarray]:
+    """Evaluate conditional entropy across a period grid in numba."""
+    n_periods = len(period_arr)
+    entropy = np.empty(n_periods)
+
+    best_idx = 0
+    best_entropy = np.inf
+    for i in range(n_periods):
+        entropy_i = _ce_evaluate(times, yvals, period_arr[i], n_phase_bins, n_mag_bins)
+        entropy[i] = entropy_i
+        if entropy_i < best_entropy:
+            best_entropy = entropy_i
+            best_idx = i
+
+    return best_idx, entropy
+
+
 def ce_find_period(
     times: np.ndarray,
     yvals: np.ndarray,
@@ -170,14 +222,13 @@ def ce_find_period(
     Returns (best_period, period_array, entropy_array).
     Lower entropy = better period.
     """
+    times = np.asarray(times, dtype=np.float64)
+    yvals = np.asarray(yvals, dtype=np.float64)
     t0 = np.min(times)
     t_shifted = times - t0
     period_arr = np.linspace(min_period, max_period, n_periods)
-    entropy = np.empty(n_periods)
-    for i in range(n_periods):
-        entropy[i] = _ce_evaluate(t_shifted, yvals, period_arr[i],
-                                  n_phase_bins=n_phase_bins, n_mag_bins=n_mag_bins)
-    best_idx = int(np.argmin(entropy))
+    best_idx, entropy = _ce_scan_grid(t_shifted, yvals, period_arr, n_phase_bins, n_mag_bins)
+    best_idx = int(best_idx)
     return float(period_arr[best_idx]), period_arr, entropy
 
 
@@ -197,7 +248,7 @@ def lsp_find_period(
     Returns (best_period, period_array, power_array).
     Higher power = better period.
     """
-    from astropy.timeseries import LombScargle
+
 
     ls = LombScargle(times, yvals)
     min_freq = 1.0 / max_period

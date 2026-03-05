@@ -121,20 +121,17 @@ graph TB
 
     subgraph "Production Pipeline"
         EV_FILT[detect.py<br/>Wrapper + Batching]
-        PREFILT[pre_filter.py<br/>Quality filters]
+        PREFILT[tag.py<br/>Quality filters]
         EVENTS[events.py<br/>Bayesian Detection<br/>+ Morphology + Recurrence]
-        AMP_FILT[filter.py<br/>Signal amplitude filter]
-        POSTFILT[post_filter.py<br/>Quality filters]
+        FILTER[filter.py<br/>Candidate filters]
 
         MAN_OUT --> EV_FILT
         VSX_MATCH -.-> PREFILT
         EV_FILT --> PREFILT
         PREFILT --> EVENTS
-        EVENTS --> POSTFILT
-        EVENTS -.-> AMP_FILT
-        AMP_FILT -.-> POSTFILT
-        GAIA -.-> POSTFILT
-        POSTFILT --> CAND[(Final Candidates)]
+        EVENTS --> FILTER
+        GAIA -.-> FILTER
+        FILTER --> CAND[(Final Candidates)]
     end
 
     subgraph "Post-Detection"
@@ -205,7 +202,7 @@ graph TB
         CLI -.-> REPRO
         CLI -.-> VALID
         CLI -.-> PLOT
-        CLI -.-> POSTFILT
+        CLI -.-> FILTER
         CLI -.-> REVIEW_APP
         CLI -.-> ML_TRAIN
     end
@@ -227,7 +224,7 @@ graph TB
 ```
 
 **Key Components:**
-- **Production**: `manifest.py` → `pre_filter.py` → `events.py` → `post_filter.py`
+- **Production**: `manifest.py` → `tag.py` → `events.py` → `filter.py`
 - **Post-detection**: `characterize.py` (Gaia, dust, galactic coords) → `vetting.py` (SIMBAD, ZTF, TNS, eROSITA, ...) → `classify.py`
 - **Review**: `review/app.py` (Dash GUI) → labeled training set
 - **ML**: `ml/features.py` (107 curated features) → `ml/train.py` (LightGBM classifier)
@@ -240,31 +237,31 @@ See [docs/architecture.md](docs/architecture.md) for detailed documentation.
 
 ### Detection Pipeline
 
-The full detection workflow has three steps: build a manifest, run detection with batching/resume, then post-filter.
+The full detection workflow has three steps: build a manifest, run detection with batching/resume, then filter.
 
 1) Build a manifest (map IDs -> light-curve directories):
    ```bash
    malca manifest --index-root /path/to/lcsv2 --lc-root /path/to/lcsv2 --mag-bin 13_13.5 --out output/lc_manifest_13_13.5.parquet --workers 10
    ```
-2) Pre-filter and run events in batches with resume support:
+2) Tag and run events in batches with resume support:
    ```bash
    malca pipeline --mag-bin 13_13.5 --workers 10 --min-time-span 100 --min-points-per-day 0.05 --min-cameras 2 --vsx-crossmatch input/vsx/asassn_x_vsx_matches_20250919_2252.csv --batch-size 2000 --lc-root /path/to/lcsv2 --index-root /path/to/lcsv2 --output output/lc_events_results_13_13.5.parquet --trigger-mode posterior_prob --baseline-func gp --min-mag-offset 0.1
    ```
-   - The pipeline command builds/loads the manifest, runs pre-filters, then calls `events.py` in batches.
+   - The pipeline command builds/loads the manifest, runs tag checks, then calls `events.py` in batches.
    - Resume: if interrupted, skips already-processed paths using the checkpoint file.
-   - VSX tags are saved to `prefilter/vsx_tags/` and merged into results.
+   - VSX tags are saved to `tags/vsx_tags/` and merged into results.
    - To disable VSX handling: `--skip-vsx`. To tag instead of filter: `--vsx-mode tag`.
 
-3) Post-filter events:
+3) Filter events:
    ```bash
-   malca post_filter --input output/lc_events_results_13_13.5.parquet --output output/lc_events_results_13_13.5_filtered.parquet
+   malca filter --input output/lc_events_results_13_13.5.parquet --output output/lc_events_results_13_13.5_filtered.parquet
 
    # With custom thresholds
-   malca post_filter --input results.parquet --output filtered.parquet --min-bayes-factor 20 --min-run-points 3 --apply-morphology
+   malca filter --input results.parquet --output filtered.parquet --min-bayes-factor 20 --min-run-points 3 --apply-morphology
    ```
    - **Implemented filters**: posterior strength, run robustness, score, morphology, periodicity, Gaia RUWE, Gaia PM, multi-catalog periodic consensus
 
-4) Optional: tune post-filter behavior directly from `malca pipeline` / `malca detect`.
+4) Optional: tune filter behavior directly from `malca pipeline` / `malca detect`.
    ```bash
    # Keep pipeline defaults but disable score-based rejection
    malca pipeline --mag-bin 13_13.5 --skip-score-filter
@@ -274,7 +271,7 @@ The full detection workflow has three steps: build a manifest, run detection wit
    ```
    - **Defaults in pipeline**: evidence strength, run robustness, score, Gaia RUWE, Gaia PM, and periodic-catalog consensus validation are on; morphology and periodicity-validation are off.
    - **Control flags now available in pipeline**:
-     - Evidence/run: `--skip-evidence-strength`, `--allow-infinite-local-bf`, `--skip-run-robustness`, `--min-run-count`, `--post-filter-min-run-points`, `--post-filter-min-run-cameras`
+     - Evidence/run: `--skip-evidence-strength`, `--allow-infinite-local-bf`, `--skip-run-robustness`, `--min-run-count`, `--filter-min-run-points`, `--filter-min-run-cameras`
      - Morphology/score: `--apply-morphology`, `--dip-morphology`, `--jump-morphology`, `--min-delta-bic`, `--skip-score-filter`, `--min-score`
      - Validators: `--apply-periodicity-validation` (+ periodicity knobs), `--skip-gaia-ruwe-validation|--gaia-reject`, `--skip-gaia-pm-validation|--gaia-pm-reject`, `--skip-periodic-catalog-validation|--periodic-catalog-reject`
 
@@ -307,24 +304,18 @@ malca events --input /path/to/lc*_cal/*.dat2 --output output/results.parquet --w
 - Default Bayesian grid is 12x12. Change p-grid with `--p-points`.
 - Output includes per-event morphology fit parameters (`best_amp`, `best_t0`, `best_alpha`, `best_tau`, `best_morph`, `delta_bic`, `width_param`, `symmetry_score`) and recurrence statistics (`is_single_event`, `inter_event_spacing_median/std`, `amplitude_consistency`, `duration_consistency`) for both dips and jumps.
 
-#### malca pre_filter
+#### malca tag
 
 ```bash
-malca pre_filter --help
+malca tag --help
 ```
 - Expects columns `asas_sn_id` and `path` pointing to lc_dir.
 - VSX handling: default is `tag` (keeps all rows and attaches `vsx_sep_arcsec`/`vsx_class`). Use `--vsx-mode filter` only when you explicitly want VSX-based rejection.
 
-#### malca post_filter
-
-```bash
-malca post_filter --input output/results.parquet --output output/results_filtered.parquet
-```
-
 #### malca filter
 
 ```bash
-malca filter --input output/results.parquet --output output/filtered.parquet
+malca filter --input output/results.parquet --output output/results_filtered.parquet
 ```
 
 #### malca plot
@@ -592,17 +583,17 @@ When running `malca pipeline`, the following directory structure is created for 
 output/runs/20250121_143052/          # Timestamp-based run directory
 ├── run_params.json                   # Detection parameters (detect.py)
 ├── run_summary.json                 # Detection results stats (detect.py)
-├── filter_log.json                   # Filtering parameters & stats (post_filter.py)
+├── filter_log.json                   # Filtering parameters & stats (filter.py)
 ├── plot_log.json                     # Plotting parameters (plot.py)
 ├── run.log                           # Simple text log with paths
 │
 ├── manifests/                        # Manifest files
 │   └── lc_manifest_{mag_bin}.parquet
 │
-├── prefilter/                        # Pre-filtering results
+├── tags/                             # Tagging results
 │   ├── lc_filtered_{mag_bin}.parquet
 │   ├── lc_stats_checkpoint_{mag_bin}.parquet
-│   ├── rejected_pre_filter_{mag_bin}.csv
+│   ├── rejected_tag_{mag_bin}.csv
 │   └── vsx_tags/
 │       └── vsx_tags_{mag_bin}.csv
 │
@@ -612,8 +603,8 @@ output/runs/20250121_143052/          # Timestamp-based run directory
 ├── results/                          # Detection results
 │   ├── lc_events_results.parquet     # Raw detection output (includes dipper_score)
 │   ├── lc_events_results_PROCESSED.txt  # Checkpoint log
-│   ├── lc_events_results_filtered.parquet   # After post_filter.py
-│   └── rejected_post_filter.csv      # Post-filter rejections
+│   ├── lc_events_results_filtered.parquet   # After filter.py
+│   └── rejected_filter.csv           # Filter rejections
 │
 └── plots/                            # Visualizations (plot.py)
     ├── {source_id}_dips.png
@@ -625,11 +616,11 @@ output/runs/20250121_143052/          # Timestamp-based run directory
 - **JSON logs track full provenance**: Every parameter and result is logged for reproducibility
 - **Self-contained runs**: Each timestamped directory contains everything needed to reproduce the analysis
 - **Checkpoint support**: Detection runs can be interrupted and resumed using `*_PROCESSED.txt` files
-- **Rejection tracking**: Both pre-filter and post-filter rejections are logged with reasons
+- **Rejection tracking**: Both tagging and filter rejections are logged with reasons
 
 **JSON Log Contents:**
-- `run_params.json`: All pre-filter and detection parameters (thresholds, workers, baseline settings)
-- `run_summary.json`: Manifest statistics, pre-filter rejection breakdown, detection results
+- `run_params.json`: All tagging and detection parameters (thresholds, workers, baseline settings)
+- `run_summary.json`: Manifest statistics, tag rejection breakdown, detection results
 - `filter_log.json`: Filter toggles, thresholds, input/output counts, rejection breakdown
 - `plot_log.json`: Plotting parameters, GP settings, number of plots generated
 

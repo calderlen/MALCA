@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Wrapper script to run events.py on pre-filtered light curves.
+Wrapper script to run events.py on tagged light curves.
 
 Workflow:
 1. Build/load manifest (source_id → lc_dir mapping)
-2. Apply pre-filters (sparse, periodic, multi-camera)
+2. Apply tags (sparse, periodic, multi-camera)
 3. Construct file paths for kept sources
 4. Pass to events.py
-5. [Optional] Apply post-filters (posterior strength, run robustness, etc.)
+5. [Optional] Apply filters (posterior strength, run robustness, etc.)
 6. [Optional] Generate postprocess plots for passing candidates
 7. [Optional] Run characterization (Gaia DR3 + dust extinction)
 8. [Optional] Run classification (EB/CV/starspot rejection, YSO classification)
@@ -15,66 +15,44 @@ Workflow:
 
 Usage:
     malca detect --mag-bin 13_13.5 [options...]
-    malca detect --mag-bin 13_13.5 --run-post-filter --run-classify --run-enrich
+    malca detect --mag-bin 13_13.5 --run-filter --run-classify --run-enrich
 """
 from __future__ import annotations
 
-import os
-# Set threading environment variables before importing numpy/pandas/numba
-os.environ.setdefault("OMP_NUM_THREADS", "1")
-os.environ.setdefault("MKL_NUM_THREADS", "1")
-os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
-os.environ.setdefault("NUMBA_NUM_THREADS", "1")
-
-import argparse
-import re
-import shutil
 from datetime import datetime
-import json
-import shlex
-import subprocess
-import sys
-import time
-import zipfile
 from pathlib import Path
 from typing import Any
-import pandas as pd
+import argparse
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
 import tempfile
+import time
+import traceback
+import zipfile
+
 from tqdm.auto import tqdm
+import pandas as pd
 
-from malca.manifest import build_manifest
-from malca.pre_tag import apply_pre_tags, filter_camera_medians
-from malca.post_filter import apply_post_filters
-from malca.plot import plot_passing_candidates
+from malca.characterize import characterize_candidates_df
 from malca.classify import compute_all_classifications
-from malca.stats import compute_stats
-
-try:
-    from malca.gaia_fetch import _extract_gaia_ids, fetch_gaia_catalog
-except Exception:
-    _extract_gaia_ids = None
-    fetch_gaia_catalog = None
-
-try:
-    from malca.characterize import characterize_candidates_df
-except Exception:
-    characterize_candidates_df = None
-
-try:
-    from malca.enrich.neighbor import run_neighbor_enrichment
-except Exception:
-    run_neighbor_enrichment = None
-
-try:
-    from malca.enrich.spectra import run_spectra_availability
-except Exception:
-    run_spectra_availability = None
-
-try:
-    from malca.vetting import vet_candidates
-except Exception:
-    vet_candidates = None
+from malca.config.config_characterize import (
+    GAIA_CHUNK_SIZE, NEIGHBOR_RADIUS_ARCSEC, NEIGHBOR_CHUNK_SIZE,
+    SPECTRA_RADIUS_ARCSEC, SPECTRA_CHUNK_SIZE,
+    UNWISE_CHECKPOINT_EVERY,
+)
+from malca.config.config_filters import (
+    MIN_TIME_SPAN, MIN_POINTS_PER_DAY, MIN_CAMERAS,
+    VSX_MAX_SEP_ARCSEC, VSX_MODE, CAMERA_MEDIAN_TOLERANCE, STATS_CHUNK_SIZE,
+    MIN_BAYES_FACTOR, POST_FILTER_MIN_RUN_CAMERAS, POST_FILTER_MIN_RUN_POINTS,
+    CLEAN_LC_MAX_ERROR_ABSOLUTE, CLEAN_LC_MAX_ERROR_SIGMA,
+    BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
+)
+from malca.config.config_io import OUTPUT_FORMAT, EVENTS_OUTPUT_CHUNK_SIZE
 from malca.config.config_io import PARQUET_OUTPUT_COMPRESSION, PARQUET_CACHE_COMPRESSION
 from malca.config.config_paths import ASASSN_INDEX_PATH, LCV2_ROOT, VSX_CROSSMATCH_PATH, GAIA_LOCAL_CATALOG
 from malca.config.config_pipeline import (
@@ -84,20 +62,28 @@ from malca.config.config_pipeline import (
     BASELINE_FUNC, BASELINE_S0, BASELINE_W0, BASELINE_Q, BASELINE_JITTER,
     JD_OFFSET,
 )
-from malca.config.config_io import OUTPUT_FORMAT, EVENTS_OUTPUT_CHUNK_SIZE
-from malca.config.config_filters import (
-    MIN_TIME_SPAN, MIN_POINTS_PER_DAY, MIN_CAMERAS,
-    VSX_MAX_SEP_ARCSEC, VSX_MODE, CAMERA_MEDIAN_TOLERANCE, STATS_CHUNK_SIZE,
-    MIN_BAYES_FACTOR, POST_FILTER_MIN_RUN_CAMERAS, POST_FILTER_MIN_RUN_POINTS,
-    CLEAN_LC_MAX_ERROR_ABSOLUTE, CLEAN_LC_MAX_ERROR_SIGMA,
-    BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
-)
-from malca.config.config_characterize import (
-    GAIA_CHUNK_SIZE, NEIGHBOR_RADIUS_ARCSEC, NEIGHBOR_CHUNK_SIZE,
-    SPECTRA_RADIUS_ARCSEC, SPECTRA_CHUNK_SIZE,
-    UNWISE_CHECKPOINT_EVERY,
-)
+from malca.enrich.neighbor import run_neighbor_enrichment
+from malca.enrich.spectra import run_spectra_availability
+from malca.gaia_fetch import _extract_gaia_ids, fetch_gaia_catalog
+from malca.manifest import build_manifest
+from malca.plot import plot_passing_candidates
+from malca.filter import apply_filters
+from malca.review.store import db_connect, import_candidates
+from malca.stats import compute_stats
+from malca.tag import apply_tags, filter_camera_medians
 from malca.utils import log as _log
+from malca.vetting import vet_candidates
+
+
+
+# Set threading environment variables before importing numpy/pandas/numba
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+os.environ.setdefault("NUMBA_NUM_THREADS", "1")
+
+
 
 
 def safe_write_parquet(df: pd.DataFrame, path: Path) -> None:
@@ -354,7 +340,7 @@ def _collect_bundle_lightcurve_files(out_dir: Path, mag_bin_tag: str | None = No
     """Collect candidate .dat2/.raw2 files to include in bundle assets.
 
     By default only includes light curves for candidates that passed all
-    post-filters (failed_any=False). Pass include_all=True to bundle every
+    filters (failed_any=False). Pass include_all=True to bundle every
     candidate regardless of filter outcome. Source files are read directly from
     their original location and are never modified in place.
     """
@@ -435,7 +421,7 @@ def export_bundle_zip(bundle_zip: Path, out_dir: Path, include_all: bool = False
         "plots",
     ]
     if include_all:
-        include_dirs.extend(["manifests", "prefilter", "paths", "gaia_cache"])
+        include_dirs.extend(["manifests", "tags", "paths", "gaia_cache"])
 
     files_to_add: set[Path] = set()
     for rel in include_rel_paths:
@@ -482,8 +468,8 @@ def export_bundle_zip(bundle_zip: Path, out_dir: Path, include_all: bool = False
     return bundled_paths
 
 
-def _build_post_filter_kwargs(args: argparse.Namespace) -> dict[str, Any]:
-    """Build apply_post_filters kwargs from detect CLI arguments."""
+def _build_filter_kwargs(args: argparse.Namespace) -> dict[str, Any]:
+    """Build apply_filters kwargs from detect CLI arguments."""
     return {
         # Core filters
         "apply_evidence_strength": not args.skip_evidence_strength,
@@ -496,8 +482,8 @@ def _build_post_filter_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "apply_run_robustness": not args.skip_run_robustness,
         "min_run_count": args.min_run_count,
         "max_run_count": args.max_run_count,
-        "min_run_points": args.post_filter_min_run_points,
-        "min_run_cameras": args.post_filter_min_run_cameras,
+        "min_run_points": args.filter_min_run_points,
+        "min_run_cameras": args.filter_min_run_cameras,
         # Optional filters
         "apply_morphology": args.apply_morphology,
         "dip_morphology": args.dip_morphology,
@@ -535,12 +521,12 @@ def _build_post_filter_kwargs(args: argparse.Namespace) -> dict[str, Any]:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run events.py on pre-filtered light curves",
+        description="Run events.py on tagged light curves",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="All other arguments are passed directly to events.py"
     )
 
-    # Manifest/pre-filter args
+    # Manifest/tag args
     parser.add_argument("--mag-bin", nargs="+", help="Magnitude bin(s) to process")
     parser.add_argument("--index-root", type=Path, default=LCV2_ROOT,
                         help="Index root directory (contains mag_bin/index*.csv)")
@@ -554,10 +540,10 @@ def main():
                         help="Filtered manifest file (default: lc_filtered_{mag_bin}.parquet)")
     parser.add_argument("--force-manifest", action="store_true",
                         help="Force rebuild manifest even if exists")
-    parser.add_argument("--force-filter", action="store_true",
-                        help="Force re-run pre-filters even if filtered file exists")
+    parser.add_argument("--force-tag", action="store_true",
+                        help="Force re-run tagging even if tagged file exists")
 
-    # Pre-filter args
+    # Tag args
     parser.add_argument("--min-time-span", type=float, default=MIN_TIME_SPAN, help="Min time span (days)")
     parser.add_argument("--min-points-per-day", type=float, default=MIN_POINTS_PER_DAY, help="Min cadence")
     parser.add_argument("--min-cameras", type=int, default=MIN_CAMERAS, help="Min cameras required")
@@ -572,8 +558,8 @@ def main():
     parser.add_argument("--vsx-max-sep", type=float, default=VSX_MAX_SEP_ARCSEC, help="Max separation for VSX match (arcsec)")
     parser.add_argument("--vsx-mode", type=str, default=VSX_MODE, choices=["tag", "filter"], help="VSX handling: tag adds vsx_sep_arcsec/vsx_class columns, filter removes matches (default: tag)")
     parser.add_argument("--vsx-crossmatch", type=Path, default=VSX_CROSSMATCH_PATH, help="Path to pre-crossmatched VSX CSV (with asas_sn_id, vsx_sep_arcsec, vsx_class)")
-    parser.add_argument("--pass-all-prefilters", action="store_true", help="Pass all light curves to events.py regardless of pre-filter results (tags are still added)")
-    parser.add_argument("--enforce-filters", type=str, default=None, help="Comma-separated list of pre-filters to enforce (e.g., 'sparse,multi_camera'). " "Only rows failing these filters are excluded. Default: enforce all enabled filters.")
+    parser.add_argument("--pass-all-tags", action="store_true", help="Pass all light curves to events.py regardless of tag results (failure tags are still added)")
+    parser.add_argument("--enforce-tags", type=str, default=None, help="Comma-separated list of tag checks to enforce (e.g., 'sparse,multi_camera'). " "Only rows failing these checks are excluded. Default: enforce all enabled checks.")
     parser.add_argument("--workers", type=int, default=WORKERS, help="Workers for parallel processing")
     parser.add_argument("--stats-chunk-size", type=int, default=STATS_CHUNK_SIZE, help="Rows per checkpoint save during stats computation")
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE, help="Max light curves per events.py call")
@@ -628,13 +614,13 @@ def main():
     parser.add_argument("--export-bundle", type=Path, default=None, help="Write transferable zip bundle at end of run")
     parser.add_argument("--no-export-bundle", dest="export_bundle_enabled", action="store_false",
                         help="Skip export bundle creation at end of run")
-    parser.add_argument("--full-bundle", action="store_true", default=False, help="Include all large assets in export bundle (index, gaia cache, manifests, prefilter, paths)")
+    parser.add_argument("--full-bundle", action="store_true", default=False, help="Include all large assets in export bundle (index, gaia cache, manifests, tags, paths)")
 
-    # Step 5: Post-filter args (enabled by default)
-    parser.add_argument("--run-post-filter", dest="run_post_filter", action="store_true", help="Run post_filter after events.py completes (default: enabled)")
-    parser.add_argument("--no-run-post-filter", dest="run_post_filter", action="store_false", help="Skip post-filter step")
+    # Step 5: Filter args (enabled by default)
+    parser.add_argument("--run-filter", dest="run_filter", action="store_true", help="Run filter after events.py completes (default: enabled)")
+    parser.add_argument("--no-run-filter", dest="run_filter", action="store_false", help="Skip filter step")
     parser.add_argument("--skip-evidence-strength", action="store_true", help="Skip evidence-strength filter")
-    parser.add_argument("--min-bayes-factor", type=float, default=MIN_BAYES_FACTOR, help="Min Bayes factor for post-filter (default: 10.0)")
+    parser.add_argument("--min-bayes-factor", type=float, default=MIN_BAYES_FACTOR, help="Min Bayes factor for filter stage (default: 10.0)")
     parser.add_argument("--allow-infinite-local-bf", action="store_true", help="Allow infinite local Bayes factors (default: require finite)")
     parser.add_argument("--skip-significant-detection", action="store_true", help="Skip explicit significant run/peak gate")
     parser.add_argument("--significant-no-require-flag", action="store_true", help="Do not require dip/jump significant flags in significant detection gate")
@@ -643,9 +629,9 @@ def main():
     parser.add_argument("--skip-run-robustness", action="store_true", help="Skip run-robustness filter")
     parser.add_argument("--min-run-count", type=int, default=1, help="Minimum run count for run-robustness filter (default: 1)")
     parser.add_argument("--max-run-count", type=int, default=None, help="Maximum run count for run-robustness filter (default: disabled)")
-    parser.add_argument("--post-filter-min-run-cameras", type=int, default=POST_FILTER_MIN_RUN_CAMERAS, help="Min cameras for run robustness filter (default: 2)")
-    parser.add_argument("--post-filter-min-run-points", type=int, default=POST_FILTER_MIN_RUN_POINTS, help="Min points per run for robustness filter (default: 2)")
-    parser.add_argument("--apply-morphology", action="store_true", help="Apply morphology filter in post-filter stage")
+    parser.add_argument("--filter-min-run-cameras", dest="filter_min_run_cameras", type=int, default=POST_FILTER_MIN_RUN_CAMERAS, help="Min cameras for run robustness filter (default: 2)")
+    parser.add_argument("--filter-min-run-points", dest="filter_min_run_points", type=int, default=POST_FILTER_MIN_RUN_POINTS, help="Min points per run for robustness filter (default: 2)")
+    parser.add_argument("--apply-morphology", action="store_true", help="Apply morphology filter in filter stage")
     parser.add_argument("--dip-morphology", type=str, default="gaussian", choices=["gaussian", "paczynski"], help="Required morphology for dip events (default: gaussian)")
     parser.add_argument("--jump-morphology", type=str, default="paczynski", choices=["gaussian", "paczynski"], help="Required morphology for jump events (default: paczynski)")
     parser.add_argument("--min-delta-bic", type=float, default=10.0, help="Minimum delta BIC for morphology filter (default: 10.0)")
@@ -674,13 +660,13 @@ def main():
     parser.add_argument("--periodic-catalog-reject", action="store_true", help="Reject periodic-catalog matches instead of flagging only")
 
     # Step 7: Postprocess args (disabled by default)
-    parser.add_argument("--run-postprocess", dest="run_postprocess", action="store_true", help="Run postprocess (generate plots) after post_filter")
+    parser.add_argument("--run-postprocess", dest="run_postprocess", action="store_true", help="Run postprocess (generate plots) after filtering")
     parser.add_argument("--no-run-postprocess", dest="run_postprocess", action="store_false", help="Skip postprocess step (default)")
     parser.add_argument("--max-plots", type=int, default=None, help="Limit number of plots generated (default: no limit)")
     parser.add_argument("--plot-format", type=str, default="png", choices=["png", "pdf"], help="Output format for plots (default: png)")
 
     # Step 8: Characterization args (enabled by default)
-    parser.add_argument("--run-characterize", dest="run_characterize", action="store_true", help="Run Gaia DR3 characterization after post_filter (default: enabled)")
+    parser.add_argument("--run-characterize", dest="run_characterize", action="store_true", help="Run Gaia DR3 characterization after filtering (default: enabled)")
     parser.add_argument("--no-run-characterize", dest="run_characterize", action="store_false", help="Skip characterization step")
     parser.add_argument("--gaia-cache", type=Path, default=None, help="Path to Gaia query cache file (parquet). Default: <out_dir>/gaia_cache/gaia_cache.parquet")
     parser.add_argument("--gaia-fetch-chunk-size", type=int, default=GAIA_CHUNK_SIZE, help="Gaia fetch chunk size for pre-characterization local catalog sync (default: 1000)")
@@ -746,7 +732,7 @@ def main():
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output")
 
     parser.set_defaults(
-        run_post_filter=True,
+        run_filter=True,
         run_postprocess=False,
         run_characterize=True,
         run_dust=True,
@@ -812,8 +798,8 @@ def main():
 
     if stage == "cluster" and (args.run_characterize or args.run_dust or args.run_classify or args.run_neighbor_enrich or args.run_spectra_enrich):
         print("Info: --stage cluster runs upstream only (steps 1-6 plus enrich). Downstream steps are skipped.")
-    if stage == "home" and (args.force_manifest or args.force_filter):
-        print("Info: --stage home skips manifest/pre-filter/events regardless of force flags.")
+    if stage == "home" and (args.force_manifest or args.force_tag):
+        print("Info: --stage home skips manifest/tag/events regardless of force flags.")
 
     # Build events.py args from parsed arguments
     events_args = []
@@ -914,10 +900,10 @@ def main():
         args.gaia_cache = gaia_cache_dir / "gaia_cache.parquet"
 
     manifests_dir = out_dir / "manifests"
-    prefilter_dir = out_dir / "prefilter"
+    tags_dir = out_dir / "tags"
     paths_dir = out_dir / "paths"
     results_dir = out_dir / "results"
-    for d in (manifests_dir, prefilter_dir, paths_dir, results_dir):
+    for d in (manifests_dir, tags_dir, paths_dir, results_dir):
         d.mkdir(parents=True, exist_ok=True)
 
     if stage == "home":
@@ -941,34 +927,34 @@ def main():
     events_args.extend(["--output", str(events_output)])
 
     manifest_file = Path(args.manifest_file).expanduser() if args.manifest_file else (manifests_dir / f"lc_manifest_{mag_bin_tag}.parquet")
-    filtered_file = Path(args.filtered_file).expanduser() if args.filtered_file else (prefilter_dir / f"lc_filtered_{mag_bin_tag}.parquet")
-    stats_checkpoint_file = prefilter_dir / f"lc_stats_checkpoint_{mag_bin_tag}.parquet"
+    filtered_file = Path(args.filtered_file).expanduser() if args.filtered_file else (tags_dir / f"lc_filtered_{mag_bin_tag}.parquet")
+    stats_checkpoint_file = tags_dir / f"lc_stats_checkpoint_{mag_bin_tag}.parquet"
 
     # Save run parameters to JSON for full reproducibility
     run_start_time = datetime.now()
 
     # Build a compact fingerprint of filtering/characterization behavior.
-    if args.pass_all_prefilters:
-        enforced_prefilters = []
-    elif args.enforce_filters:
-        enforced_prefilters = [f.strip() for f in args.enforce_filters.split(",") if f.strip()]
+    if args.pass_all_tags:
+        enforced_tags = []
+    elif args.enforce_tags:
+        enforced_tags = [f.strip() for f in args.enforce_tags.split(",") if f.strip()]
     else:
-        enforced_prefilters = []
+        enforced_tags = []
         if not args.skip_sparse:
-            enforced_prefilters.append("sparse")
+            enforced_tags.append("sparse")
         if not args.skip_multi_camera:
-            enforced_prefilters.append("multi_camera")
+            enforced_tags.append("multi_camera")
         if not args.skip_mag_range:
-            enforced_prefilters.append("mag_range")
+            enforced_tags.append("mag_range")
         if (not args.skip_vsx) and args.vsx_mode == "filter":
-            enforced_prefilters.append("vsx")
+            enforced_tags.append("vsx")
 
     config_fingerprint = {
         "vsx_mode": args.vsx_mode,
         "skip_vsx": args.skip_vsx,
-        "pass_all_prefilters": args.pass_all_prefilters,
-        "enforced_prefilters": enforced_prefilters,
-        "post_filter": {
+        "pass_all_tags": args.pass_all_tags,
+        "enforced_tags": enforced_tags,
+        "filter": {
             "apply_evidence_strength": not args.skip_evidence_strength,
             "min_bayes_factor": args.min_bayes_factor,
             "require_finite_local_bf": not args.allow_infinite_local_bf,
@@ -979,8 +965,8 @@ def main():
             "apply_run_robustness": not args.skip_run_robustness,
             "min_run_count": args.min_run_count,
             "max_run_count": args.max_run_count,
-            "min_run_cameras": args.post_filter_min_run_cameras,
-            "min_run_points": args.post_filter_min_run_points,
+            "min_run_cameras": args.filter_min_run_cameras,
+            "min_run_points": args.filter_min_run_points,
             "apply_morphology": args.apply_morphology,
             "dip_morphology": args.dip_morphology,
             "jump_morphology": args.jump_morphology,
@@ -1021,7 +1007,7 @@ def main():
             "clusters": args.characterize_clusters,
             "unwise": args.characterize_unwise,
         },
-        "downstream_pass_logic": "characterize/classify/enrich run on post-filter passers (failed_any == False)",
+        "downstream_pass_logic": "characterize/classify/enrich run on filter passers (failed_any == False)",
     }
 
     run_params_file = out_dir / "run_params.json"
@@ -1054,7 +1040,7 @@ def main():
             "export_bundle": str(args.export_bundle) if args.export_bundle else None,
             "export_bundle_enabled": args.export_bundle_enabled,
             "mag_bin": args.mag_bin,
-            # Pre-filter parameters
+            # Tag parameters
             "min_time_span": args.min_time_span,
             "min_points_per_day": args.min_points_per_day,
             "min_cameras": args.min_cameras,
@@ -1104,11 +1090,11 @@ def main():
             "clean_max_error_absolute": 1.0,
             "clean_max_error_sigma": 5.0,
             "bad_camera_scatter_ratio": 2.5,
-            # Pre-filter (camera median)
+            # Tag stage (camera median)
             "skip_camera_median": args.skip_camera_median,
             "camera_median_tolerance": args.camera_median_tolerance,
-            # Step 5: Post-filter
-            "run_post_filter": args.run_post_filter,
+            # Step 5: Filter
+            "run_filter": args.run_filter,
             "skip_evidence_strength": args.skip_evidence_strength,
             "min_bayes_factor": args.min_bayes_factor,
             "allow_infinite_local_bf": args.allow_infinite_local_bf,
@@ -1119,8 +1105,8 @@ def main():
             "skip_run_robustness": args.skip_run_robustness,
             "min_run_count": args.min_run_count,
             "max_run_count": args.max_run_count,
-            "post_filter_min_run_cameras": args.post_filter_min_run_cameras,
-            "post_filter_min_run_points": args.post_filter_min_run_points,
+            "filter_min_run_cameras": args.filter_min_run_cameras,
+            "filter_min_run_points": args.filter_min_run_points,
             "apply_morphology": args.apply_morphology,
             "dip_morphology": args.dip_morphology,
             "jump_morphology": args.jump_morphology,
@@ -1221,14 +1207,14 @@ def main():
                 f"out_dir: {out_dir}",
                 f"run_params: {run_params_file}",
                 f"manifests_dir: {manifests_dir}",
-                f"prefilter_dir: {prefilter_dir}",
+                f"tags_dir: {tags_dir}",
                 f"paths_dir: {paths_dir}",
                 f"results_dir: {results_dir}",
                 f"results_output: {events_output}",
                 f"manifest_file: {manifest_file}",
                 f"filtered_file: {filtered_file}",
                 f"stats_checkpoint: {stats_checkpoint_file}",
-                f"rejected_pre_filter: {prefilter_dir / f'rejected_pre_filter_{mag_bin_tag}.csv'}",
+                f"rejected_tag: {tags_dir / f'rejected_tag_{mag_bin_tag}.csv'}",
             ]) + "\n"
         for p in (run_log, run_log_tagged):
             p.write_text(run_log_text)
@@ -1261,14 +1247,14 @@ def main():
             df_manifest = pd.read_parquet(manifest_file)
             log(f"Loaded {len(df_manifest)} sources")
 
-        # Step 2: Apply pre-filters
-        if args.force_filter or not filtered_file.exists():
-            log(f"\nApplying pre-filters with {args.workers} workers...")
+        # Step 2: Apply tags
+        if args.force_tag or not filtered_file.exists():
+            log(f"\nApplying tags with {args.workers} workers...")
 
-            # Use lc_dir as the directory path for pre_filter input (path/<id>.dat2)
+            # Use lc_dir as the directory path for tag input (path/<id>.dat2)
             df_to_filter = df_manifest.rename(columns={"lc_dir": "path"}).copy()
 
-            df_filtered = apply_pre_tags(
+            df_filtered = apply_tags(
                 df_to_filter,
                 apply_sparse=not args.skip_sparse,
                 min_time_span=args.min_time_span,
@@ -1284,18 +1270,18 @@ def main():
                 mag_hi=args.mag_hi,
                 n_workers=args.workers,
                 show_tqdm=args.verbose,
-                rejected_log_csv=str(prefilter_dir / f"rejected_pre_filter_{mag_bin_tag}.csv"),
+                rejected_log_csv=str(tags_dir / f"rejected_tag_{mag_bin_tag}.csv"),
                 stats_checkpoint=str(stats_checkpoint_file),
                 stats_chunk_size=args.stats_chunk_size,
             )
 
-            # Exclude rows based on pre-filter results
-            if not args.pass_all_prefilters:
+            # Exclude rows based on tag results
+            if not args.pass_all_tags:
                 failed_cols = [c for c in df_filtered.columns if c.startswith("failed_") and c != "failed_any"]
 
-                if args.enforce_filters:
+                if args.enforce_tags:
                     # Only enforce specified filters
-                    enforce_set = {f"failed_{f.strip()}" for f in args.enforce_filters.split(",")}
+                    enforce_set = {f"failed_{f.strip()}" for f in args.enforce_tags.split(",")}
                     enforce_cols = [c for c in failed_cols if c in enforce_set]
                 else:
                     enforce_cols = failed_cols
@@ -1304,7 +1290,7 @@ def main():
                     exclude_mask = df_filtered[enforce_cols].any(axis=1)
                     df_filtered = df_filtered[~exclude_mask].reset_index(drop=True)
 
-            log(f"\nKept {len(df_filtered)}/{len(df_manifest)} sources after pre-filtering")
+            log(f"\nKept {len(df_filtered)}/{len(df_manifest)} sources after tagging")
             log(f"Saving filtered manifest to {filtered_file}")
             safe_write_parquet(df_filtered, filtered_file)
         else:
@@ -1318,16 +1304,16 @@ def main():
         df_filtered = df_filtered.sample(n=args.test_run_n, random_state=42).reset_index(drop=True)
 
     # Step 2.5: Apply camera median filter to identify cameras to exclude
-    camera_median_file = prefilter_dir / f"camera_medians_{mag_bin_tag}.parquet"
+    camera_median_file = tags_dir / f"camera_medians_{mag_bin_tag}.parquet"
     if run_upstream and (not args.skip_camera_median) and ("mag_bin" in df_filtered.columns):
-        if args.force_filter or not camera_median_file.exists():
+        if args.force_tag or not camera_median_file.exists():
             log(f"\nApplying camera median filter (tolerance={args.camera_median_tolerance} mag)...")
             # Camera median validation needs per-source file paths (.dat2 -> .raw2).
             # Keep the original path column unchanged for downstream code.
             camera_median_df = df_filtered.copy()
             if "dat_path" in camera_median_df.columns:
                 camera_median_df["path"] = camera_median_df["dat_path"]
-            camera_median_checkpoint = prefilter_dir / f"camera_medians_{mag_bin_tag}_CHECKPOINT.parquet"
+            camera_median_checkpoint = tags_dir / f"camera_medians_{mag_bin_tag}_CHECKPOINT.parquet"
             df_camera = filter_camera_medians(
                 camera_median_df,
                 mag_tolerance=args.camera_median_tolerance,
@@ -1356,7 +1342,7 @@ def main():
         meta_cols.append("excluded_cameras")
 
     if run_upstream and len(meta_cols) > 1:  # More than just file_col
-        metadata_dir = prefilter_dir / "metadata"
+        metadata_dir = tags_dir / "metadata"
         metadata_dir.mkdir(parents=True, exist_ok=True)
         metadata_file = metadata_dir / f"metadata_{mag_bin_tag}.csv"
         meta_df = df_filtered[meta_cols].rename(columns={file_col: "path"})
@@ -1475,14 +1461,14 @@ def main():
             },
         }
 
-        # Pre-filter rejection breakdown
-        rejected_log = prefilter_dir / f"rejected_pre_filter_{mag_bin_tag}.csv"
+        # Tag rejection breakdown
+        rejected_log = tags_dir / f"rejected_tag_{mag_bin_tag}.csv"
         if rejected_log.exists():
             try:
                 df_rejected = pd.read_csv(rejected_log)
                 if "reason" in df_rejected.columns:
                     rejection_counts = df_rejected["reason"].value_counts().to_dict()
-                    summary["pre_filter_rejections"] = {
+                    summary["tag_rejections"] = {
                         "total_rejected": len(df_rejected),
                         "by_reason": rejection_counts,
                     }
@@ -1530,7 +1516,7 @@ def main():
                 if args.verbose:
                     print(f"Warning: could not parse detection results: {e}")
 
-        # Write summary (will be updated again if post-filter/postprocess run)
+        # Write summary (will be updated again if filter/postprocess run)
         with open(run_summary_file, "w") as f:
             json.dump(summary, f, indent=2, default=str)
 
@@ -1540,9 +1526,9 @@ def main():
         if args.verbose:
             print(f"Warning: could not write run summary: {e}")
 
-    # Step 5: Apply post-filters (optional)
-    if run_upstream and args.run_post_filter and results_files:
-        log("\n=== Step 5: Applying post-filters ===")
+    # Step 5: Apply filters (optional)
+    if run_upstream and args.run_filter and results_files:
+        log("\n=== Step 5: Applying filters ===")
         try:
             # Load events results
             if events_format == "parquet_chunk":
@@ -1550,56 +1536,57 @@ def main():
             else:
                 df_events = load_table(results_files[0])
 
-            # Apply post-filters
-            post_filter_kwargs = _build_post_filter_kwargs(args)
+            # Apply filters
+            filter_kwargs = _build_filter_kwargs(args)
             if stage == "cluster":
                 # Cluster stage must avoid internet catalog lookups.
-                post_filter_kwargs["apply_gaia_ruwe_validation"] = False
-                post_filter_kwargs["apply_gaia_pm_validation"] = False
-                post_filter_kwargs["apply_periodic_catalog_validation"] = False
-            df_post_filtered = apply_post_filters(df_events, **post_filter_kwargs)
+                filter_kwargs["apply_gaia_ruwe_validation"] = False
+                filter_kwargs["apply_gaia_pm_validation"] = False
+                filter_kwargs["apply_periodic_catalog_validation"] = False
+            df_post_filtered = apply_filters(df_events, **filter_kwargs)
 
             # Save filtered results
             post_filter_output = results_dir / f"lc_events_filtered_{mag_bin_tag}.parquet"
             save_table(df_post_filtered, post_filter_output)
-            log(f"Post-filtered results saved to {post_filter_output}")
+            log(f"Filtered results saved to {post_filter_output}")
 
-            # Update summary with post-filter stats
+            # Update summary with filter stats
             n_passed = int((~df_post_filtered["failed_any"]).sum()) if "failed_any" in df_post_filtered.columns else len(df_post_filtered)
             n_failed = int(df_post_filtered["failed_any"].sum()) if "failed_any" in df_post_filtered.columns else 0
-            summary["post_filter_stats"] = {
+            summary["filter_stats"] = {
                 "total_input": len(df_events),
                 "passed": n_passed,
                 "failed": n_failed,
                 "pass_rate": n_passed / len(df_events) if len(df_events) > 0 else 0.0,
             }
+            summary["post_filter_stats"] = summary["filter_stats"]
 
             # Overwrite summary with updated stats
             with open(run_summary_file, "w") as f:
                 json.dump(summary, f, indent=2, default=str)
 
-            log(f"Post-filter: {n_passed}/{len(df_events)} passed")
+            log(f"Filter: {n_passed}/{len(df_events)} passed")
 
         except Exception as e:
-            print(f"Error in post-filter step: {e}")
+            print(f"Error in filter step: {e}")
             if args.verbose:
-                import traceback
+
                 traceback.print_exc()
 
-    # Step 6: Enrich with compute_stats (optional, runs immediately after post-filter)
+    # Step 6: Enrich with compute_stats (optional, runs immediately after filter)
     if run_upstream and args.run_enrich:
-        if not args.run_post_filter:
-            print("Warning: --run-enrich requires --run-post-filter. Skipping enrichment.")
+        if not args.run_filter:
+            print("Warning: --run-enrich requires --run-filter. Skipping enrichment.")
         else:
             log("\n=== Step 6: Enriching with light curve stats ===")
             try:
-                # Enrichment now runs directly from post-filter output
+                # Enrichment now runs directly from filter output
                 post_filter_output = results_dir / f"lc_events_filtered_{mag_bin_tag}.parquet"
 
                 if post_filter_output.exists():
                     df_to_enrich = load_table(post_filter_output)
                 else:
-                    print(f"Warning: No post-filter output found at {post_filter_output}")
+                    print(f"Warning: No filter output found at {post_filter_output}")
                     df_to_enrich = None
 
                 if df_to_enrich is not None:
@@ -1709,19 +1696,19 @@ def main():
             except Exception as e:
                 print(f"Error in enrichment step: {e}")
                 if args.verbose:
-                    import traceback
+
                     traceback.print_exc()
 
     # Step 7: Generate review plots (optional)
     if run_upstream and args.run_postprocess:
-        if not args.run_post_filter:
-            print("Warning: --run-postprocess requires --run-post-filter. Skipping postprocess plots.")
+        if not args.run_filter:
+            print("Warning: --run-postprocess requires --run-filter. Skipping postprocess plots.")
         else:
             log("\n=== Step 7: Generating candidate plots ===")
             try:
                 post_filter_output = results_dir / f"lc_events_filtered_{mag_bin_tag}.parquet"
                 if not post_filter_output.exists():
-                    print(f"Warning: No post-filter output found at {post_filter_output}; skipping postprocess plots.")
+                    print(f"Warning: No filter output found at {post_filter_output}; skipping postprocess plots.")
                 else:
                     plots_out = out_dir / "plots" / "candidates"
                     baseline_for_plots = {
@@ -1768,7 +1755,7 @@ def main():
             except Exception as e:
                 print(f"Error in postprocess plotting step: {e}")
                 if args.verbose:
-                    import traceback
+
                     traceback.print_exc()
 
 
@@ -1802,7 +1789,7 @@ def main():
     has_post_filter_output = post_filter_output.exists()
 
     # Home-only external catalog validations (Gaia RUWE + periodic catalog)
-    if stage == "home" and args.run_post_filter and has_post_filter_output:
+    if stage == "home" and args.run_filter and has_post_filter_output:
         log("\n=== Home External Validation: Gaia RUWE + periodic catalog ===")
         validation_started = time.perf_counter()
         try:
@@ -1824,7 +1811,7 @@ def main():
             external_validation_cmd = [
                 sys.executable,
                 "-m",
-                "malca.post_filter",
+                "malca.filter",
                 "--input",
                 str(post_filter_output),
                 "--output",
@@ -1868,7 +1855,7 @@ def main():
         except Exception as e:
             print(f"Error in home external validation step: {e}")
             if args.verbose:
-                import traceback
+
                 traceback.print_exc()
             sys.exit(1)
 
@@ -1882,12 +1869,6 @@ def main():
         log("\n=== Ensuring local Gaia catalog is up to date ===")
         gaia_fetch_started = time.perf_counter()
         try:
-            if _extract_gaia_ids is None or fetch_gaia_catalog is None:
-                raise ImportError(
-                    "Gaia fetch dependencies are unavailable. "
-                    "Install optional gaia-fetch extras (e.g. pyvo) to enable auto-fetch."
-                )
-
             gaia_catalog_path = args.gaia_cache.expanduser() if args.gaia_cache else GAIA_LOCAL_CATALOG
             gaia_ids = _extract_gaia_ids(
                 post_filter_output,
@@ -1902,7 +1883,7 @@ def main():
         except Exception as e:
             print(f"Warning: Gaia auto-fetch failed: {e}")
             if args.verbose:
-                import traceback
+
                 traceback.print_exc()
 
     # Step 8: Characterization + dust (optional)
@@ -1910,12 +1891,6 @@ def main():
         log("\n=== Step 8: Characterizing candidates ===")
         characterize_started = time.perf_counter()
         try:
-            if characterize_candidates_df is None:
-                raise ImportError(
-                    "Characterization dependencies are unavailable. "
-                    "Install optional characterize extras (e.g. pyvo, astroquery, banyan-sigma, dustmaps3d)."
-                )
-
             df_char = load_table(post_filter_output)
 
             if "failed_any" in df_char.columns:
@@ -1959,7 +1934,7 @@ def main():
         except Exception as e:
             print(f"Error in characterization step: {e}")
             if args.verbose:
-                import traceback
+
                 traceback.print_exc()
 
     # Step 9: Run classification (optional)
@@ -1983,7 +1958,7 @@ def main():
                         df_post_filtered = load_table(post_filter_output)
                     else:
                         df_post_filtered = None
-                        print(f"Warning: post-filter output not found at {post_filter_output}")
+                        print(f"Warning: filter output not found at {post_filter_output}")
 
                     if df_post_filtered is not None:
                         # Run classification on passing candidates
@@ -2016,7 +1991,7 @@ def main():
                 except Exception as e:
                     print(f"Error in classification step: {e}")
                     if args.verbose:
-                        import traceback
+
                         traceback.print_exc()
 
     # Step 10: Neighbor enrichment (optional)
@@ -2027,12 +2002,6 @@ def main():
             log("\n=== Step 10: Bulk neighbor enrichment ===")
             neighbor_started = time.perf_counter()
             try:
-                if run_neighbor_enrichment is None:
-                    raise ImportError(
-                        "Neighbor enrichment dependencies are unavailable. "
-                        "Install optional astroquery extras to enable this stage."
-                    )
-
                 enrich_output = results_dir / "lc_events_enriched.parquet"
                 classify_output = results_dir / "lc_events_classified.parquet"
                 characterize_output = results_dir / "lc_events_characterized.parquet"
@@ -2093,7 +2062,7 @@ def main():
             except Exception as e:
                 print(f"Error in neighbor enrichment step: {e}")
                 if args.verbose:
-                    import traceback
+
                     traceback.print_exc()
 
     # Step 11: Spectra availability enrichment (optional)
@@ -2104,12 +2073,6 @@ def main():
             log("\n=== Step 11: Spectra availability enrichment ===")
             spectra_started = time.perf_counter()
             try:
-                if run_spectra_availability is None:
-                    raise ImportError(
-                        "Spectra enrichment dependencies are unavailable. "
-                        "Install optional astroquery extras to enable this stage."
-                    )
-
                 neighbor_output = results_dir / "lc_events_neighbors.parquet"
                 enrich_output = results_dir / "lc_events_enriched.parquet"
                 classify_output = results_dir / "lc_events_classified.parquet"
@@ -2173,7 +2136,7 @@ def main():
             except Exception as e:
                 print(f"Error in spectra enrichment step: {e}")
                 if args.verbose:
-                    import traceback
+
                     traceback.print_exc()
 
     # Step 12: Post-review vetting (enabled by default)
@@ -2181,12 +2144,6 @@ def main():
         log("\n=== Step 12: Post-review vetting ===")
         vetting_started = time.perf_counter()
         try:
-            if vet_candidates is None:
-                raise ImportError(
-                    "Vetting dependencies are unavailable. "
-                    "Install optional vetting extras (e.g. pyvo, astroquery) to enable this stage."
-                )
-
             # Find the best input file for vetting
             vetting_input = args.vetting_input
             if vetting_input is None:
@@ -2254,14 +2211,14 @@ def main():
         except Exception as e:
             print(f"Error in vetting step: {e}")
             if args.verbose:
-                import traceback
+
                 traceback.print_exc()
 
     # Step 13: Auto-import into review DB
     if run_downstream and has_post_filter_output:
         log("\n=== Step 13: Importing candidates into review DB ===")
         try:
-            from malca.review.store import db_connect, import_candidates
+
 
             # Find best available results file
             _import_file = None
@@ -2296,7 +2253,7 @@ def main():
         except Exception as e:
             print(f"Warning: review DB import failed: {e}")
             if args.verbose:
-                import traceback
+
                 traceback.print_exc()
 
     if args.export_bundle_enabled:

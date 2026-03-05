@@ -1,6 +1,6 @@
-"""Filter settings: pre-filter, post-filter, camera filter, LC cleaning thresholds."""
+"""Filter settings: tagging, post-filter, camera filter, LC cleaning thresholds."""
 
-# Pre-filter
+# Tagging
 MIN_TIME_SPAN = 100.0
 MIN_POINTS_PER_DAY = 0.05
 MIN_CAMERAS = 2

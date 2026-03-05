@@ -1,34 +1,44 @@
-import os as _os
-_os.environ.setdefault("OMP_NUM_THREADS", "1")
-_os.environ.setdefault("MKL_NUM_THREADS", "1")
-_os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-_os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
-# Prevent numba from spawning a thread pool in each worker process
-_os.environ.setdefault("NUMBA_NUM_THREADS", "1")
-
-import argparse
-import sys
-import glob
-import os
-import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 from typing import Literal, TypeAlias
+import argparse
+import glob
+import multiprocessing as mp
+import os
+import os as _os
+import sys
+import traceback
+import warnings
 
+from numba import njit, prange
+from scipy.optimize import curve_fit
+from scipy.special import logsumexp
+from tqdm import tqdm
 import numpy as np
 import pandas as pd
-from scipy.special import logsumexp
-from scipy.optimize import curve_fit
-from tqdm import tqdm
-import warnings
 import pyarrow as pa
+import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 
-warnings.filterwarnings("ignore", message=".*Covariance of the parameters could not be estimated.*")
-warnings.filterwarnings("ignore", message=".*overflow encountered in.*")
-warnings.filterwarnings("ignore", message=".*invalid value encountered in.*", category=RuntimeWarning)
-
+from malca.baseline import (
+    global_median_baseline,
+    per_camera_median_baseline,
+    per_camera_gp_baseline,
+    per_camera_gp_baseline_masked,
+)
+from malca.config.config_filters import BAD_CAMERA_SCATTER_RATIO_THRESHOLD
+from malca.config.config_io import PARQUET_OUTPUT_COMPRESSION, OUTPUT_FORMAT, EVENTS_OUTPUT_CHUNK_SIZE
+from malca.config.config_paths import LCV2_ROOT, DEFAULT_OUTPUT_DIR
+from malca.config.config_pipeline import (
+    WORKERS, TRIGGER_MODE, P_POINTS, MAG_POINTS,
+    LOGBF_THRESHOLD_DIP, LOGBF_THRESHOLD_JUMP, SIGNIFICANCE_THRESHOLD,
+    MIN_MAG_OFFSET, RUN_MIN_POINTS, RUN_MAX_GAP_POINTS, MAG_BINS,
+    BASELINE_FUNC, BASELINE_S0, BASELINE_W0, BASELINE_Q, BASELINE_JITTER,
+)
+from malca.score import compute_event_score
+from malca.stats import log_gaussian, median_dt, bic
+from malca.triggering import resolve_trigger_indices
 from malca.utils import (
     read_lc_dat2,
     read_lc_csv,
@@ -41,26 +51,22 @@ from malca.utils import (
     filter_bad_cameras,
     log as _log,
 )
-from malca.baseline import (
-    global_median_baseline,
-    per_camera_median_baseline,
-    per_camera_gp_baseline,
-    per_camera_gp_baseline_masked,
-)
-from malca.score import compute_event_score
-from malca.stats import log_gaussian, median_dt, bic
-from malca.triggering import resolve_trigger_indices
-from malca.config.config_io import PARQUET_OUTPUT_COMPRESSION, OUTPUT_FORMAT, EVENTS_OUTPUT_CHUNK_SIZE
-from malca.config.config_paths import LCV2_ROOT, DEFAULT_OUTPUT_DIR
-from malca.config.config_pipeline import (
-    WORKERS, TRIGGER_MODE, P_POINTS, MAG_POINTS,
-    LOGBF_THRESHOLD_DIP, LOGBF_THRESHOLD_JUMP, SIGNIFICANCE_THRESHOLD,
-    MIN_MAG_OFFSET, RUN_MIN_POINTS, RUN_MAX_GAP_POINTS, MAG_BINS,
-    BASELINE_FUNC, BASELINE_S0, BASELINE_W0, BASELINE_Q, BASELINE_JITTER,
-)
-from malca.config.config_filters import BAD_CAMERA_SCATTER_RATIO_THRESHOLD
 
-from numba import njit, prange
+
+_os.environ.setdefault("OMP_NUM_THREADS", "1")
+_os.environ.setdefault("MKL_NUM_THREADS", "1")
+_os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+_os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+# Prevent numba from spawning a thread pool in each worker process
+_os.environ.setdefault("NUMBA_NUM_THREADS", "1")
+
+
+
+warnings.filterwarnings("ignore", message=".*Covariance of the parameters could not be estimated.*")
+warnings.filterwarnings("ignore", message=".*overflow encountered in.*")
+warnings.filterwarnings("ignore", message=".*invalid value encountered in.*", category=RuntimeWarning)
+
+
 
 
 EventKind: TypeAlias = Literal["dip", "jump"]
@@ -1527,7 +1533,7 @@ def main():
                 table = pq.read_table(path, columns=["path"])
                 df_existing = table.to_pandas()
             elif fmt == "parquet_chunk":
-                import pyarrow.dataset as ds
+
                 dataset = ds.dataset(path, format="parquet")
                 table = dataset.to_table(columns=["path"])
                 df_existing = table.to_pandas()
@@ -1868,7 +1874,7 @@ def main():
                     write_chunk(results)
                     results = []
             except Exception as e:
-                import traceback
+
                 tb_str = traceback.format_exc()
                 errors.append(dict(path=str(path), error=repr(e), traceback=tb_str))
                 print(f"ERROR processing {path}: {e}", flush=True)

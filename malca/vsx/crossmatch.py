@@ -1,13 +1,18 @@
 from __future__ import annotations
 
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
+import argparse
 
-import numpy as np
-import pandas as pd
 from astropy import units as u
 from astropy.coordinates import SkyCoord
 from astropy.time import Time
+import numpy as np
+import pandas as pd
+
+
+
+
 
 DEFAULT_ASASSN_PATH = Path(__file__).parent.parent.parent / "input" / "vsx" / "asassn_catalog.csv"
 DEFAULT_VSX_PATH = Path(__file__).parent.parent.parent / "input" / "vsx" / "vsx_cleaned.csv"
@@ -126,7 +131,7 @@ def main(
 
 def cli():
     """CLI entry point for ``malca vsx-crossmatch``."""
-    import argparse
+
 
     parser = argparse.ArgumentParser(
         description="Crossmatch ASAS-SN catalog with VSX catalog."

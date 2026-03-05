@@ -8,14 +8,20 @@ Provides three entry points:
 Downloaded CSVs are saved in SkyPatrol web-CSV format so that
 ``malca.utils.read_skypatrol_csv`` can read them unchanged.
 """
-
 from __future__ import annotations
 
 from pathlib import Path
 
+from pyasassn.client import SkyPatrolClient
 import pandas as pd
 
 from malca.config.config_paths import SKYPATROL_CACHE_DIR
+
+
+
+
+
+
 
 # ---------------------------------------------------------------------------
 # Lazy singleton for the SkyPatrolClient
@@ -26,7 +32,7 @@ _client = None
 def _get_client():
     global _client
     if _client is None:
-        from pyasassn.client import SkyPatrolClient
+
         _client = SkyPatrolClient(verbose=False)
     return _client
 

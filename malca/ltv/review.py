@@ -12,16 +12,23 @@ Usage:
     from malca.ltv.review import ingest_ltv_results
     n_total, n_new = ingest_ltv_results("ltv_candidates.db", ltv_df)
 """
-
 from __future__ import annotations
 
+from pathlib import Path
 import argparse
 import os
-from pathlib import Path
 
+from tqdm.auto import tqdm
 import numpy as np
 import pandas as pd
-from tqdm.auto import tqdm
+
+from malca.review.store import db_connect, import_candidates
+from malca.stats import compute_stats
+
+
+
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +153,7 @@ def enrich_with_stats(
     The flattening logic mirrors detect.py's --run-enrich step, producing
     the same stats_* column names that live in _CANDIDATE_COLUMNS.
     """
-    from malca.stats import compute_stats
+
 
     if "lc_path" not in df.columns:
         if verbose:
@@ -241,7 +248,7 @@ def ingest_ltv_results(
     Returns:
         (total_rows, new_rows): Total rows processed and how many were new.
     """
-    from malca.review.store import db_connect, import_candidates
+
 
     db_path = Path(db_path)
     if verbose:

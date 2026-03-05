@@ -4,13 +4,14 @@ Test the event finder pipeline on SkyPatrol light curves.
 """
 from __future__ import annotations
 
-import argparse
 from pathlib import Path
-import pandas as pd
-import numpy as np
+import argparse
+import sys
 
-from malca.plot import read_skypatrol_csv
-from malca.old.lc_events import lc_band_proc, per_camera_median_baseline
+from old.lc_events import prefix_metrics
+import numpy as np
+import pandas as pd
+
 from malca.baseline import (
     global_mean_baseline,
     global_median_baseline,
@@ -20,6 +21,12 @@ from malca.baseline import (
     per_camera_median_baseline,
     per_camera_trend_baseline,
 )
+from malca.old.lc_events import lc_band_proc, per_camera_median_baseline
+from malca.plot import read_skypatrol_csv
+
+
+
+
 
 
 def process_skypatrol_csv(csv_path: Path, **kwargs) -> dict:
@@ -79,7 +86,7 @@ def process_skypatrol_csv(csv_path: Path, **kwargs) -> dict:
             jd_last = float(df_v["JD"].iloc[-1])
     
                       
-    from old.lc_events import prefix_metrics
+
     g_metrics = prefix_metrics("g", g_res["metrics"])
     v_metrics = prefix_metrics("v", v_res["metrics"])
     
@@ -241,5 +248,5 @@ def main():
 
 
 if __name__ == "__main__":
-    import sys
+
     sys.exit(main())

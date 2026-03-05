@@ -1,30 +1,36 @@
 """
-Plot light curves for candidates that passed all post-filters.
+Plot light curves for candidates that passed all filters.
 
 Reads the filtered events results and plots only sources with failed_any == False.
 """
 from __future__ import annotations
 
+from datetime import datetime
+from multiprocessing import Pool, cpu_count
+from pathlib import Path
 import argparse
 import json
 import shlex
 import sys
-from datetime import datetime
-from pathlib import Path
-import pandas as pd
-import numpy as np
-from tqdm.auto import tqdm
 
-from malca.plot import plot_bayes_results, plot_phase_folded_lightcurve, BASELINE_FUNCTIONS
-from malca.review.metadata import REVIEW_METADATA_FIELDS, normalize_vsx_df, normalize_vsx_record
-from malca.config.config_pipeline import (
-    JD_OFFSET, LOGBF_THRESHOLD_DIP, LOGBF_THRESHOLD_JUMP,
-)
+from tqdm.auto import tqdm
+import numpy as np
+import pandas as pd
+
 from malca.config.config_filters import (
     CLEAN_LC_MAX_ERROR_ABSOLUTE,
     CLEAN_LC_MAX_ERROR_SIGMA,
     BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
 )
+from malca.config.config_pipeline import (
+    JD_OFFSET, LOGBF_THRESHOLD_DIP, LOGBF_THRESHOLD_JUMP,
+)
+from malca.plot import plot_bayes_results, plot_phase_folded_lightcurve, BASELINE_FUNCTIONS
+from malca.review.metadata import REVIEW_METADATA_FIELDS, normalize_vsx_df, normalize_vsx_record
+
+
+
+
 
 
 def load_passing_candidates(
@@ -39,7 +45,7 @@ def load_passing_candidates(
     max_plots: int | None = None,
 ) -> pd.DataFrame:
     """
-    Load candidates that passed all post-filters.
+    Load candidates that passed all filters.
 
     Parameters
     ----------
@@ -239,7 +245,7 @@ def plot_passing_candidates(
     show_tqdm: bool = True,
 ) -> dict[str, object]:
     """
-    Plot all candidates that passed post-filters.
+    Plot all candidates that passed filters.
 
     Parameters
     ----------
@@ -431,7 +437,7 @@ def plot_passing_candidates(
     results: list[tuple[str, str, bool, str, str, str | None, bool, str]] = []
 
     if workers > 1:
-        from multiprocessing import Pool, cpu_count
+
         actual_workers = min(workers, cpu_count(), len(work_items))
         print(f"Plotting with {actual_workers} workers...")
 
@@ -528,7 +534,7 @@ def plot_passing_candidates(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Plot light curves for candidates passing all post-filters",
+        description="Plot light curves for candidates passing all filters",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Example usage:
@@ -758,7 +764,7 @@ Example usage:
     # Load run_params.json if available from detect_run
     run_params = None
     if args.detect_run:
-        import json
+
         run_params_path = args.detect_run.expanduser() / "run_params.json"
         if run_params_path.exists():
             try:

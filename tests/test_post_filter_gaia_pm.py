@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-post_filter = pytest.importorskip("malca.post_filter")
+post_filter = pytest.importorskip("malca.filter")
 
 
 def test_validate_gaia_proper_motion_flags_without_reject(monkeypatch) -> None:

@@ -10,28 +10,27 @@ Implements approach similar to ZTF paper Section 3.5:
 This validates the completeness and contamination of the pipeline
 and characterizes sensitivity to different dip morphologies.
 """
-
 from __future__ import annotations
 
-import argparse
-import json
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
+import argparse
+import json
 
-import numpy as np
-import pandas as pd
 from scipy.stats import skewnorm, skew
 from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 import plotly.graph_objects as go
 
-from malca.utils import read_lc_dat2
-from malca.events import run_bayesian_significance
 from malca.baseline import (
     global_median_baseline,
     per_camera_median_baseline,
     per_camera_gp_baseline,
 )
+from malca.config.config_io import INJECTION_CHUNK_SIZE
 from malca.config.config_pipeline import (
     WORKERS,
     LOGBF_THRESHOLD_DIP,
@@ -54,7 +53,14 @@ from malca.config.config_pipeline import (
     INJECTION_SEED,
     INJECTION_MAX_ATTEMPTS,
 )
-from malca.config.config_io import INJECTION_CHUNK_SIZE
+from malca.events import run_bayesian_significance
+from malca.utils import read_lc_dat2
+
+
+
+
+
+
 
 
 _GLOBAL: dict[str, object] = {}
@@ -680,7 +686,7 @@ def run_injection_recovery(
         pbar.close()
         return None if output_path else pd.DataFrame(results)
 
-    from concurrent.futures import ProcessPoolExecutor, as_completed
+
 
     with ProcessPoolExecutor(
         max_workers=workers,

@@ -1,15 +1,19 @@
-import os
-import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from glob import glob
 from pathlib import Path
+import os
+import re
 
-import numpy as np
-import pandas as pd
 from astropy import units as u
 from astropy.coordinates import SkyCoord
 from astropy.stats import mad_std, sigma_clip
+from astropy.table import Table
+from astroquery.utils.tap.core import TapPlus
+from scipy.special import erf
 from tqdm import tqdm
+import numpy as np
+import pandas as pd
+import pyvo
 
 from malca.config.config_filters import (
     CLEAN_LC_MAX_ERROR_ABSOLUTE, CLEAN_LC_MAX_ERROR_SIGMA,
@@ -20,9 +24,14 @@ from malca.config.config_filters import (
     CATASTROPHIC_SUPPORT_WINDOW_DAYS, CATASTROPHIC_SUPPORT_EXCURSION,
     CATASTROPHIC_MAX_FRACTION,
 )
-from malca.config.config_pipeline import SKYPATROL_JD_OFFSET
-from malca.config.config_pipeline import MAG_BINS
+from malca.config.config_paths import GAIA_AIP_TAP_URL
 from malca.config.config_paths import LCV2_MASKED_ROOT, LCV2_ROOT
+from malca.config.config_pipeline import MAG_BINS
+from malca.config.config_pipeline import SKYPATROL_JD_OFFSET
+
+
+
+
 
 colors = ["#6b8bcd", "#b3b540", "#8f62ca", "#5eb550", "#c75d9c", "#4bb092", "#c5562f", "#6c7f39",
               "#ce5761", "#c68c45", '#b5b246', '#d77fcc', '#7362cf', '#ce443f', '#3fc1bf', '#cda735',
@@ -125,7 +134,7 @@ def skew_gaussian(t, amp, t0, sigma, baseline, alpha):
     array-like
         Model magnitudes
     """
-    from scipy.special import erf
+
     sigma = np.maximum(np.abs(sigma), 1e-5)
     z = (t - t0) / sigma
     # Skew-normal: gaussian * (1 + erf(alpha * z / sqrt(2)))
@@ -856,7 +865,7 @@ def filter_bad_cameras(
     """
     # Auto-load raw2 if lc_path provided and raw2_df not explicitly given
     if raw2_df is None and lc_path is not None:
-        from pathlib import Path
+
         lc_path_obj = Path(lc_path)
         if lc_path_obj.suffix.lower() == ".dat2":
             raw2_path = lc_path_obj.with_suffix(".raw2")
@@ -1064,9 +1073,9 @@ def batch_gaia_cone_query(
     Uses a pyvo async job with an uploaded coordinate table for server-side
     crossmatch.  ``coords_df`` must have columns ``_idx``, ``ra``, ``dec``.
     """
-    import pyvo
-    from astropy.table import Table
-    from malca.config.config_paths import GAIA_AIP_TAP_URL
+
+
+
 
     if coords_df.empty:
         return pd.DataFrame()
@@ -1139,8 +1148,8 @@ def batch_tap_crossmatch(
     Returns a DataFrame with ``_idx``, the selected columns, and
     ``sep_arcsec``.  Callers should de-duplicate by ``_idx`` as needed.
     """
-    from astroquery.utils.tap.core import TapPlus
-    from astropy.table import Table
+
+
 
     if coords_df.empty:
         return pd.DataFrame()

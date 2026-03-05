@@ -1,8 +1,12 @@
-import pandas as pd
-import numpy as np
 from pathlib import Path
 from unittest.mock import patch, MagicMock
+import sys
+import tempfile
+
+import numpy as np
+import pandas as pd
 import pytest
+import pyvo
 
 from malca.vetting import (
     fetch_kepler_k2_lightcurves,
@@ -10,6 +14,9 @@ from malca.vetting import (
     fetch_panstarrs_lightcurves,
     fetch_crts_lightcurves
 )
+
+
+
 
 def get_mock_df():
     return pd.DataFrame({
@@ -20,7 +27,7 @@ def get_mock_df():
     })
 
 def test_fetch_kepler_k2(mock_df, tmp_path):
-    import sys
+
     mock_lk = MagicMock()
     sys.modules["lightkurve"] = mock_lk
     try:
@@ -86,11 +93,6 @@ def test_fetch_panstarrs(mock_df, tmp_path):
         assert (tmp_path / "ps1_lc_cand_1.parquet").exists()
 
 def test_fetch_crts(mock_df, tmp_path):
-    try:
-        import pyvo
-    except ImportError:
-        pytest.skip("pyvo not installed")
-
     with patch("malca.vetting.batch_tap_crossmatch") as mock_prss, \
          patch("malca.vetting.pyvo.dal.TAPService") as mock_tap:
         
@@ -120,7 +122,7 @@ def test_fetch_crts(mock_df, tmp_path):
         assert (tmp_path / "crts_lc_cand_1.parquet").exists()
 
 if __name__ == "__main__":
-    import tempfile
+
     df = get_mock_df()
     with tempfile.TemporaryDirectory() as td:
         p = Path(td)

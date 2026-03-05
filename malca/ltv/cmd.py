@@ -6,15 +6,17 @@ Scaffolding for:
 - MIST isochrone loading (vendored grid)
 - Group assignment (rules supplied later)
 """
-
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Iterable
 
+from astropy.table import Table
+from tqdm.auto import tqdm
 import numpy as np
 import pandas as pd
-from tqdm.auto import tqdm
+import pyvo
 
 from malca.config.config_ltv import (
     CMD_R_V,
@@ -24,6 +26,12 @@ from malca.config.config_ltv import (
     LTV_WORKERS,
 )
 from malca.config.config_paths import GAIA_AIP_TAP_URL, MIST_GRID_PATH
+
+
+
+
+
+
 
 
 DEFAULT_MIST_PATH = MIST_GRID_PATH
@@ -72,9 +80,9 @@ def fetch_bailer_jones_distances(
     Uses TAP_UPLOAD for batch efficiency — one async job per chunk.
     Distances are matched by source_id; sources without a BJ entry get NaN.
     """
-    import pyvo
-    from astropy.table import Table
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+
+
 
     if df.empty:
         return df

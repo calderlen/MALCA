@@ -11,83 +11,26 @@ This module consolidates:
 Usage:
     malca characterize --input output/events.csv --output output/characterized.csv --dust
 """
-
-import os
-import argparse
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-import numpy as np
-import pandas as pd
-from tqdm import tqdm
-import astropy.units as u
-
-try:
-    import pyvo
-except Exception:
-    class _MissingTAPService:
-        def __init__(self, *_args, **_kwargs) -> None:
-            raise ImportError(
-                "pyvo is required for StarHorse/remote TAP queries. "
-                "Install with `pip install pyvo` to enable this functionality."
-            )
-
-    class _PyvoStub:
-        class dal:
-            TAPService = _MissingTAPService
-
-    pyvo = _PyvoStub()
+import argparse
+import os
+import time
+import warnings
 
 from astropy.coordinates import SkyCoord
 from astropy.table import Table
-
-try:
-    from astroquery.xmatch import XMatch
-except Exception:
-    class XMatch:  # type: ignore[no-redef]
-        @staticmethod
-        def query(*_args, **_kwargs):
-            raise ImportError("astroquery is required for XMatch queries")
-
-try:
-    from astroquery.vizier import Vizier
-except Exception:
-    class Vizier:  # type: ignore[no-redef]
-        ROW_LIMIT = -1
-
-        def __init__(self, *_args, **_kwargs) -> None:
-            raise ImportError("astroquery is required for VizieR queries")
-
-        @staticmethod
-        def query_region(*_args, **_kwargs):
-            raise ImportError("astroquery is required for VizieR queries")
-
-try:
-    from astroquery.ipac.irsa import Irsa
-except Exception:
-    class Irsa:  # type: ignore[no-redef]
-        @staticmethod
-        def query_tap(*_args, **_kwargs):
-            raise ImportError("astroquery is required for IRSA TAP queries")
-
-try:
-    import banyan_sigma as banyan_sigma_pkg
-except Exception:
-    class _BanyanStub:
-        pass
-
-    banyan_sigma_pkg = _BanyanStub()
-
-try:
-    from dustmaps3d import dustmaps3d
-except Exception:
-    def dustmaps3d(*_args, **_kwargs):
-        raise ImportError("dustmaps3d is required for 3D dust extinction queries")
-
-# Suppress astropy warnings
-import warnings
 from astropy.utils.exceptions import AstropyWarning
-warnings.simplefilter('ignore', category=AstropyWarning)
+from astroquery.ipac.irsa import Irsa
+from astroquery.vizier import Vizier
+from astroquery.xmatch import XMatch
+from dustmaps3d import dustmaps3d
+from tqdm import tqdm
+import astropy.units as u
+import banyan_sigma as banyan_sigma_pkg
+import numpy as np
+import pandas as pd
+import pyvo
 
 from malca.config.config_characterize import (
     GAIA_CHUNK_SIZE, STARHORSE_TAP_CHUNK_SIZE,
@@ -101,13 +44,6 @@ from malca.config.config_characterize import (
     GALEX_MAX_SEP_ARCSEC, APASS_MAX_SEP_ARCSEC, ALLWISE_MAX_SEP_ARCSEC,
     TMASS_MAX_SEP_ARCSEC,
 )
-from malca.config.config_paths import (
-    VSX_CROSSMATCH_PATH, STARHORSE_DEFAULT_PATH, STARHORSE_TAP_URL,
-    DEFAULT_CACHE_DIR, GAIA_CACHE_FILE,
-    GAIA_LOCAL_CATALOG,
-)
-from malca.config.config_io import PARQUET_CACHE_COMPRESSION
-from malca.config.config_io import PARQUET_OUTPUT_COMPRESSION
 from malca.config.config_classify import (
     YSO_CLASS_I_W1W2,
     YSO_CLASS_II_W1W2_MIN,
@@ -115,6 +51,19 @@ from malca.config.config_classify import (
     YSO_DUST_CORRECTION_HK,
     YSO_DUST_CORRECTION_W1W2,
 )
+from malca.config.config_io import PARQUET_CACHE_COMPRESSION
+from malca.config.config_io import PARQUET_OUTPUT_COMPRESSION
+from malca.config.config_paths import (
+    VSX_CROSSMATCH_PATH, STARHORSE_DEFAULT_PATH, STARHORSE_TAP_URL,
+    DEFAULT_CACHE_DIR, GAIA_CACHE_FILE,
+    GAIA_LOCAL_CATALOG,
+)
+
+
+
+# Suppress astropy warnings
+warnings.simplefilter('ignore', category=AstropyWarning)
+
 
 
 CATALOG_CACHE_DIR = DEFAULT_CACHE_DIR.expanduser()
@@ -1631,11 +1580,6 @@ def characterize_candidates_df(
     if df_char is None or "source_id" not in df_char.columns:
         df_in = df.copy()
         xmatch_path = crossmatch.expanduser()
-
-        if (not xmatch_path.exists()) and xmatch_path.name.endswith("_compat.csv"):
-            fallback = xmatch_path.with_name(xmatch_path.name.replace("_compat.csv", ".csv"))
-            if fallback.exists():
-                xmatch_path = fallback
 
         if not xmatch_path.exists():
             print(f"Warning: Crossmatch file {xmatch_path} not found")

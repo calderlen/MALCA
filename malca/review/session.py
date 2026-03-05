@@ -1,8 +1,13 @@
 """Session state management for Dash review app."""
-
 from pathlib import Path
 import hashlib
+
 import pandas as pd
+
+from malca.review.store import query_queue
+
+
+
 
 
 class SessionState:
@@ -72,7 +77,7 @@ def create_queue_data_dict(conn, filter_params):
             'filter_hash': str
         }
     """
-    from malca.review.store import query_queue
+
 
     # Query queue with filters (pass the whole dict through)
     df = query_queue(conn, filters=filter_params)
