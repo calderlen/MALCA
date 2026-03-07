@@ -37,7 +37,6 @@ from malca.config.config_ltv import (
     SIMBAD_TAP_URL,
 )
 from malca.config.config_paths import VSX_CROSSMATCH_PATH
-from malca.ltv.local_catalog import merge_local_catalog, crossmatch_from_local
 
 
 

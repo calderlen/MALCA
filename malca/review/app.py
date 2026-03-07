@@ -1663,6 +1663,13 @@ def _env_path_or_none(name: str) -> str | None:
 DB_PATH = _env_path_or_none(_REVIEW_DB_ENV) or str(DEFAULT_DB_PATH)
 PLOT_DIR = _env_path_or_none(_REVIEW_PLOT_ENV)
 DEFAULT_THEME = "black"
+FETCH_BACKEND_OPTIONS = [
+    {"label": "SkyPatrol2 API", "value": "skypatrol2"},
+    {"label": "SkyPatrol1 Web", "value": "skypatrol1"},
+]
+DEFAULT_FETCH_BACKEND = str(os.environ.get("MALCA_FETCH_BACKEND", "skypatrol2")).strip().lower()
+if DEFAULT_FETCH_BACKEND not in {"skypatrol2", "skypatrol1"}:
+    DEFAULT_FETCH_BACKEND = "skypatrol2"
 DEFAULT_RESIDUAL_FRACTION = REVIEW_RESIDUAL_FRACTION
 EXTERNAL_SOURCE_VIEW_OPTIONS = [
     {"label": "All", "value": "all"},
@@ -3520,6 +3527,15 @@ def create_layout():
             # -- Fetch Candidate --
             html.Div('Fetch Candidate', className='section-title'),
             dcc.Dropdown(
+                id='fetch-backend',
+                options=FETCH_BACKEND_OPTIONS,
+                value=DEFAULT_FETCH_BACKEND,
+                clearable=False,
+                style={'margin-bottom': '4px', 'font-size': '11px'},
+                persistence=True,
+                persistence_type='local',
+            ),
+            dcc.Dropdown(
                 id='fetch-type',
                 options=[
                     {'label': 'ASAS-SN ID', 'value': 'asassn'},
@@ -3530,7 +3546,7 @@ def create_layout():
                 clearable=False,
                 style={'margin-bottom': '4px', 'font-size': '11px'},
             ),
-            dcc.Input(id='fetch-query', placeholder='e.g. 427299085038300900', type='text',
+            dcc.Input(id='fetch-query', placeholder='ID or RA Dec [radius_arcsec]', type='text',
                       style={**_inp_style, 'marginBottom': '4px'}),
             dcc.Dropdown(
                 id='fetch-mode',
@@ -6134,7 +6150,76 @@ def import_candidates_callback(n_clicks, import_path, characterize_on,
         return f"✗ Import failed: {str(e)}", no_update
 
 
-def _fetch_candidate_impl(set_progress, n_clicks, fetch_type, fetch_query, fetch_mode, current_trigger):
+def _try_float(value) -> float | None:
+    """Parse finite float values; return None on invalid input."""
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(out):
+        return None
+    return out
+
+
+def _extract_first_nonempty_id(row: dict, keys: tuple[str, ...]) -> str | None:
+    """Return first non-empty identifier found in row for candidate key names."""
+    for key in keys:
+        if key not in row:
+            continue
+        raw = row.get(key)
+        if raw is None:
+            continue
+        try:
+            if pd.isna(raw):
+                continue
+        except Exception:
+            pass
+        text = _format_large_integer_like_display(raw).strip()
+        if text and text.lower() not in {'nan', 'none'}:
+            return text
+    return None
+
+
+def _nearest_catalog_match_by_coords(catalog_df: pd.DataFrame, ra_deg: float, dec_deg: float) -> tuple[dict | None, float | None]:
+    """Return nearest cone-search row and separation (arcsec) for target coords."""
+    if catalog_df is None or catalog_df.empty:
+        return None, None
+
+    ra_col = next((c for c in ('ra_deg', 'ra', 'RAJ2000', 'RA', 'raj2000') if c in catalog_df.columns), None)
+    dec_col = next((c for c in ('dec_deg', 'dec', 'DEJ2000', 'DEC', 'Dec', 'dej2000') if c in catalog_df.columns), None)
+    if ra_col is None or dec_col is None:
+        return None, None
+
+    ra_vals = pd.to_numeric(catalog_df[ra_col], errors='coerce').to_numpy(dtype=float)
+    dec_vals = pd.to_numeric(catalog_df[dec_col], errors='coerce').to_numpy(dtype=float)
+    valid = np.isfinite(ra_vals) & np.isfinite(dec_vals)
+    if not np.any(valid):
+        return None, None
+
+    ra0 = float(ra_deg) % 360.0
+    dec0 = float(dec_deg)
+    ra = np.mod(ra_vals[valid], 360.0)
+    dec = dec_vals[valid]
+
+    ra0_rad = np.deg2rad(ra0)
+    dec0_rad = np.deg2rad(dec0)
+    dra = np.deg2rad(((ra - ra0 + 180.0) % 360.0) - 180.0)
+    dec_rad = np.deg2rad(dec)
+
+    sin_ddec = np.sin((dec_rad - dec0_rad) / 2.0)
+    sin_dra = np.sin(dra / 2.0)
+    a = sin_ddec * sin_ddec + np.cos(dec0_rad) * np.cos(dec_rad) * sin_dra * sin_dra
+    a = np.clip(a, 0.0, 1.0)
+    sep_rad = 2.0 * np.arcsin(np.sqrt(a))
+    sep_arcsec = np.rad2deg(sep_rad) * 3600.0
+
+    nearest_local = int(np.argmin(sep_arcsec))
+    valid_indices = np.flatnonzero(valid)
+    nearest_idx = int(valid_indices[nearest_local])
+    return catalog_df.iloc[nearest_idx].to_dict(), float(sep_arcsec[nearest_local])
+
+
+def _fetch_candidate_impl(set_progress, n_clicks, fetch_type, fetch_query, fetch_mode, fetch_backend, current_trigger):
     """Core fetch logic; set_progress is optional for streaming status to GUI."""
     def progress(msg):
         if set_progress and msg:
@@ -6151,57 +6236,73 @@ def _fetch_candidate_impl(set_progress, n_clicks, fetch_type, fetch_query, fetch
         return "✗ Query cannot be empty", no_update, no_update, no_update, no_update, no_update, no_update
 
     try:
-        if fetch_type == 'coords':
-            progress("Searching cone...")
+        effective_backend = str(fetch_backend or DEFAULT_FETCH_BACKEND).strip().lower()
+        if effective_backend not in {'skypatrol2', 'skypatrol1'}:
+            effective_backend = DEFAULT_FETCH_BACKEND
 
-            parts = query.replace(',', ' ').split()
+        effective_fetch_type = str(fetch_type or 'asassn')
+        effective_query = query
+        cone_status_text = ''
+
+        if effective_fetch_type == 'coords':
+            progress('Searching SkyPatrol cone...')
+
+            parts = [p for p in query.replace(',', ' ').split() if p]
             if len(parts) < 2:
-                return "✗ Enter RA and Dec separated by space", no_update, no_update, no_update, no_update, no_update, no_update
-            ra, dec = float(parts[0]), float(parts[1])
-            radius = float(parts[2]) if len(parts) > 2 else 5.0
-            catalog_df = fetch_cone_search(ra, dec, radius_arcsec=radius)
+                return "✗ Enter coordinates as 'RA Dec [radius_arcsec]'", no_update, no_update, '', None, no_update, no_update
+
+            ra = _try_float(parts[0])
+            dec = _try_float(parts[1])
+            if ra is None or dec is None:
+                return "✗ Invalid RA/Dec. Use decimal degrees: 'RA Dec [radius_arcsec]'", no_update, no_update, '', None, no_update, no_update
+            if dec < -90.0 or dec > 90.0:
+                return '✗ Dec must be between -90 and +90 degrees', no_update, no_update, '', None, no_update, no_update
+
+            radius = 5.0
+            if len(parts) > 2:
+                radius = _try_float(parts[2])
+                if radius is None or radius <= 0.0:
+                    return '✗ Radius must be a positive number (arcsec)', no_update, no_update, '', None, no_update, no_update
+
+            ra = ra % 360.0
+            catalog_df = fetch_cone_search(ra, dec, radius_arcsec=radius, backend=effective_backend)
             if catalog_df.empty:
-                return "✗ No sources found in cone search", no_update, no_update, '', no_update, no_update, no_update
-            show_cols = [c for c in ['asas_sn_id', 'ra_deg', 'dec_deg', 'gaia_id', 'mean_vmag']
-                         if c in catalog_df.columns]
-            if not show_cols:
-                show_cols = catalog_df.columns[:5].tolist()
-            table = html.Table([
-                html.Thead(html.Tr([html.Th(c, style={'padding': '2px 6px'}) for c in show_cols])),
-                html.Tbody([
-                    html.Tr(
-                        [html.Td(str(row.get(c, '')), style={'padding': '2px 6px'}) for c in show_cols],
-                        id={'type': 'cone-row', 'index': i},
-                        style={'cursor': 'pointer'},
-                        className='cone-result-row',
-                    )
-                    for i, row in catalog_df[show_cols].iterrows()
-                ]),
-            ], style={'borderCollapse': 'collapse', 'width': '100%', 'marginTop': '4px',
-                      'border': '1px solid #3c5e75', 'color': '#cad9e5'})
-            n_found = len(catalog_df)
-            cone_data = catalog_df.to_dict('records')
-            progress(f"Found {n_found} source(s)")
-            return (
-                f"Found {n_found} source(s). Click a row to fetch its LC.",
-                no_update,
-                no_update,
-                table,
-                cone_data,
-                no_update,
-                no_update,
+                return f'✗ No sources found within {radius:.2f}"', no_update, no_update, '', None, no_update, no_update
+
+            nearest_row, sep_arcsec = _nearest_catalog_match_by_coords(catalog_df, ra, dec)
+            if nearest_row is None or sep_arcsec is None:
+                return '✗ Cone search returned rows without usable coordinates', no_update, no_update, '', None, no_update, no_update
+
+            nearest_asas = _extract_first_nonempty_id(nearest_row, ('asas_sn_id', 'asassn_id'))
+            nearest_gaia = _extract_first_nonempty_id(nearest_row, ('gaia_id', 'source_id'))
+
+            if nearest_asas:
+                effective_fetch_type = 'asassn'
+                effective_query = nearest_asas
+            elif nearest_gaia:
+                effective_fetch_type = 'gaia'
+                effective_query = nearest_gaia
+            else:
+                return '✗ Nearest cone match has no ASAS-SN ID or Gaia ID to fetch', no_update, no_update, '', None, no_update, no_update
+
+            n_found = int(len(catalog_df))
+            match_word = 'match' if n_found == 1 else 'matches'
+            cone_status_text = (
+                f' | cone nearest {effective_query} at {sep_arcsec:.2f}" '
+                f'({n_found} {match_word} in {radius:.2f}")'
             )
+            progress(f'SkyPatrol cone resolved: {effective_query} ({sep_arcsec:.2f}")')
 
         progress("Fetching light curve...")
-        if fetch_type == 'gaia':
+        if effective_fetch_type == 'gaia':
 
-            df, lc_path = fetch_and_analyze_by_gaia_id(query, run_stats=True)
+            df, lc_path = fetch_and_analyze_by_gaia_id(effective_query, run_stats=True, backend=effective_backend)
         else:
 
-            df, lc_path = fetch_and_analyze_by_id(query, run_stats=True)
+            df, lc_path = fetch_and_analyze_by_id(effective_query, run_stats=True, backend=effective_backend)
 
         if df is None or df.empty:
-            return f"✗ No data for {query}", no_update, no_update, '', no_update, no_update, no_update
+            return f"✗ No data for {effective_query}", no_update, no_update, '', None, no_update, no_update
 
         progress("Importing basic light curve...")
         
@@ -6209,12 +6310,12 @@ def _fetch_candidate_impl(set_progress, n_clicks, fetch_type, fetch_query, fetch
         # so the GUI can render the light curve IMMEDIATELY.
         with closing(db_connect(Path(DB_PATH))) as conn:
             n_rows, n_new = import_candidates(
-                conn, df, source_path=f"fetch://{fetch_type}/{query}",
+                conn, df, source_path=f"fetch://{effective_backend}/{effective_fetch_type}/{effective_query}",
                 characterize_before_import=False,
                 vet_before_import=False,
             )
 
-        cid = str(df.iloc[0]['candidate_id']) if 'candidate_id' in df.columns else query
+        cid = str(df.iloc[0]['candidate_id']) if 'candidate_id' in df.columns else effective_query
         _index_external_lc_paths.cache_clear()
         _index_external_lc_paths_from_root.cache_clear()
         
@@ -6222,13 +6323,13 @@ def _fetch_candidate_impl(set_progress, n_clicks, fetch_type, fetch_query, fetch
         if fetch_mode in ('full', 'full_ext'):
             auto_run = {'candidate_id': cid, 'mode': fetch_mode, 'ts': time.time()}
 
-        status = f"✓ Added {query} ({n_new} new)"
+        status = f"✓ Added {effective_query} ({n_new} new) [{effective_backend}]{cone_status_text}"
         return (
             status,
             no_update,
             auto_run,
             '',
-            no_update,
+            None,
             {'candidate_ids': [cid], 'queue_size': 1, 'filter_hash': f'fetch:{cid}'},
             0,
         )
@@ -6236,7 +6337,7 @@ def _fetch_candidate_impl(set_progress, n_clicks, fetch_type, fetch_query, fetch
     except Exception as e:
 
         traceback.print_exc()
-        return f"✗ Fetch failed: {str(e)}", no_update, no_update, '', no_update, no_update, no_update
+        return f"✗ Fetch failed: {str(e)}", no_update, no_update, '', None, no_update, no_update
 
 
 # Fetch and Analyze Candidate
@@ -6253,6 +6354,7 @@ if _background_callback_manager is not None:
         [State('fetch-type', 'value'),
          State('fetch-query', 'value'),
          State('fetch-mode', 'value'),
+         State('fetch-backend', 'value'),
          State('import-trigger', 'data')],
         background=True,
         running=[
@@ -6261,8 +6363,8 @@ if _background_callback_manager is not None:
         progress=[Output('fetch-status', 'children')],
         prevent_initial_call=True,
     )
-    def fetch_candidate_callback(set_progress, n_clicks, fetch_type, fetch_query, fetch_mode, current_trigger):
-        return _fetch_candidate_impl(set_progress, n_clicks, fetch_type, fetch_query, fetch_mode, current_trigger)
+    def fetch_candidate_callback(set_progress, n_clicks, fetch_type, fetch_query, fetch_mode, fetch_backend, current_trigger):
+        return _fetch_candidate_impl(set_progress, n_clicks, fetch_type, fetch_query, fetch_mode, fetch_backend, current_trigger)
 else:
     @app.callback(
         [Output('fetch-status', 'children'),
@@ -6276,11 +6378,12 @@ else:
         [State('fetch-type', 'value'),
          State('fetch-query', 'value'),
          State('fetch-mode', 'value'),
+         State('fetch-backend', 'value'),
          State('import-trigger', 'data')],
         prevent_initial_call=True,
     )
-    def fetch_candidate_callback(n_clicks, fetch_type, fetch_query, fetch_mode, current_trigger):
-        return _fetch_candidate_impl(None, n_clicks, fetch_type, fetch_query, fetch_mode, current_trigger)
+    def fetch_candidate_callback(n_clicks, fetch_type, fetch_query, fetch_mode, fetch_backend, current_trigger):
+        return _fetch_candidate_impl(None, n_clicks, fetch_type, fetch_query, fetch_mode, fetch_backend, current_trigger)
 
 
 # Pipeline status chips (updated when candidate changes)

@@ -14,18 +14,25 @@ import numpy as np
 import pandas as pd
 
 from malca.characterize import characterize_candidates_df
-from malca.config.config_events import (
+from malca.config.config_pipeline import (
     TRIGGER_MODE, LOGBF_THRESHOLD_DIP, LOGBF_THRESHOLD_JUMP,
-    SIGNIFICANCE_THRESHOLD, P_POINTS,
-    P_MIN_DIP, P_MAX_DIP, P_MIN_JUMP, P_MAX_JUMP,
-    MAG_POINTS, RUN_MIN_POINTS, MAX_GAP_POINTS,
-    RUN_MAX_GAP_DAYS, RUN_MIN_DURATION_DAYS,
-    BASELINE_TAG,
+    SIGNIFICANCE_THRESHOLD, P_POINTS, MAG_POINTS,
+    RUN_MIN_POINTS, RUN_MAX_GAP_POINTS, BASELINE_FUNC,
 )
 from malca.events import process_lightcurve
 from malca.review.store import _CANDIDATE_COLUMNS, _as_bool, _to_float
 from malca.stats import compute_stats
 from malca.vetting import vet_candidates, fetch_external_lcs
+
+
+P_MIN_DIP = None
+P_MAX_DIP = None
+P_MIN_JUMP = None
+P_MAX_JUMP = None
+MAX_GAP_POINTS = RUN_MAX_GAP_POINTS
+RUN_MAX_GAP_DAYS = None
+RUN_MIN_DURATION_DAYS = 0.0
+BASELINE_TAG = BASELINE_FUNC
 
 
 

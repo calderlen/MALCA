@@ -35,28 +35,11 @@ import importlib
 import os
 import sys
 
-from malca import characterize
-from malca import classify
-from malca import detect
-from malca import events
-from malca import filter as filter_mod
-from malca import gaia_fetch
-from malca import manifest
-from malca import plot
-from malca import score
-from malca import stats
-from malca import tag
-from malca import vetting
-from malca.enrich import neighbor as neighbor_enrich
-from malca.enrich import spectra as spectra_enrich
-from malca.ltv import core as ltv_core
-from malca.ltv import pipeline as ltv_pipeline
-from malca.ltv import review as ltv_review
-from malca.ml import predict as ml_predict
-from malca.ml import train as ml_train
-from malca.review import app
-from malca.vsx import crossmatch as vsx_crossmatch
-from malca.vsx import filter as vsx_filter
+
+def _run_module_main(module_name: str, remaining_args: list[str]) -> None:
+    mod = importlib.import_module(module_name)
+    sys.argv = [sys.argv[0]] + remaining_args
+    mod.main()
 
 
 
@@ -81,13 +64,9 @@ def main():
         
         # Dispatch to appropriate module (--help will be handled by that module)
         if command == "manifest":
-
-            sys.argv = [sys.argv[0]] + remaining
-            manifest.main()
+            _run_module_main("malca.manifest", remaining)
         elif command == "pipeline":
-
-            sys.argv = [sys.argv[0]] + remaining
-            detect.main()
+            _run_module_main("malca.detect", remaining)
         elif command == "reproduce":
             reproduce = importlib.import_module("malca.evaluation.reproduce")
             sys.argv = [sys.argv[0]] + remaining
@@ -105,95 +84,61 @@ def main():
             sys.argv = [sys.argv[0]] + remaining
             attrition.main()
         elif command == "plot":
-
-            sys.argv = [sys.argv[0]] + remaining
-            plot.main()
+            _run_module_main("malca.plot", remaining)
         elif command == "events":
-
-            sys.argv = [sys.argv[0]] + remaining
-            events.main()
+            _run_module_main("malca.events", remaining)
         elif command == "gaia-fetch":
-
-            sys.argv = [sys.argv[0]] + remaining
-            gaia_fetch.main()
+            _run_module_main("malca.gaia_fetch", remaining)
         elif command == "characterize":
-
-            sys.argv = [sys.argv[0]] + remaining
-            characterize.main()
+            _run_module_main("malca.characterize", remaining)
         elif command == "classify":
-
-            sys.argv = [sys.argv[0]] + remaining
-            classify.main()
+            _run_module_main("malca.classify", remaining)
         elif command == "stats":
-
-            sys.argv = [sys.argv[0]] + remaining
-            stats.main()
+            _run_module_main("malca.stats", remaining)
         elif command == "filter":
-
-            sys.argv = [sys.argv[0]] + remaining
-            filter_mod.main()
+            _run_module_main("malca.filter", remaining)
         elif command == "tag":
-
-            sys.argv = [sys.argv[0]] + remaining
-            tag.main()
+            _run_module_main("malca.tag", remaining)
         elif command == "score":
-
-            sys.argv = [sys.argv[0]] + remaining
-            score.main()
+            _run_module_main("malca.score", remaining)
         elif command == "review":
-
-            sys.argv = [sys.argv[0]] + remaining
-            app.main()
+            _run_module_main("malca.review.app", remaining)
         elif command == "validate":
             validation = importlib.import_module("malca.evaluation.validation")
             sys.argv = [sys.argv[0]] + remaining
             validation.main()
         elif command == "neighbors":
-
-            sys.argv = [sys.argv[0]] + remaining
-            neighbor_enrich.main()
+            _run_module_main("malca.enrich.neighbor", remaining)
         elif command == "spectra":
-
-            sys.argv = [sys.argv[0]] + remaining
-            spectra_enrich.main()
+            _run_module_main("malca.enrich.spectra", remaining)
         elif command == "false_positive":
             fp = importlib.import_module("malca.evaluation.false_positive")
             sys.argv = [sys.argv[0]] + remaining
             fp.main()
         elif command == "ml_train":
-
-            sys.argv = [sys.argv[0]] + remaining
-            ml_train.main()
+            _run_module_main("malca.ml.train", remaining)
         elif command == "ml_predict":
-
-            sys.argv = [sys.argv[0]] + remaining
-            ml_predict.main()
+            _run_module_main("malca.ml.predict", remaining)
         elif command == "vsx-filter":
-
             sys.argv = [sys.argv[0]] + remaining
+            vsx_filter = importlib.import_module("malca.vsx.filter")
             vsx_filter.cli()
         elif command == "vsx-crossmatch":
-
             sys.argv = [sys.argv[0]] + remaining
+            vsx_crossmatch = importlib.import_module("malca.vsx.crossmatch")
             vsx_crossmatch.cli()
         elif command == "vetting":
-
-            sys.argv = [sys.argv[0]] + remaining
-            vetting.main()
+            _run_module_main("malca.vetting", remaining)
         elif command == "ltv-core":
-
-            sys.argv = [sys.argv[0]] + remaining
-            ltv_core.main()
+            _run_module_main("malca.ltv.core", remaining)
         elif command == "ltv-pipeline":
-
+            ltv_pipeline = importlib.import_module("malca.ltv.pipeline")
             sys.argv = [sys.argv[0]] + remaining
             ltv_pipeline.run_pipeline_cli(
                 ltv_pipeline.add_pipeline_args(argparse.ArgumentParser()).parse_args()
             )
         elif command == "ltv-ingest":
-
-            sys.argv = [sys.argv[0]] + remaining
-            ltv_review.main()
+            _run_module_main("malca.ltv.review", remaining)
         return 0
     
     # If no subcommand or just --help for main, show main help

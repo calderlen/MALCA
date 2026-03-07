@@ -780,6 +780,16 @@ def build_external_lookup_links(
             f"https://www.legacysurvey.org/viewer?ra={ra}&dec={dec}&zoom=14&layer=ls-dr10",
         ))
 
+    # -- Aladin Sky Atlas -----------------------------------------------------
+    if has_coords:
+        # Use a modest default field of view around the target while scaling
+        # with the requested search radius.
+        fov_deg = max(0.03, min(2.0, (radius_arcsec * 2.0) / 3600.0))
+        links.append((
+            "Aladin",
+            f"https://aladin.cds.unistra.fr/AladinLite/?target={quote_plus(f'{ra} {dec}')}&fov={fov_deg:.4f}&survey=P%2FDSS2%2Fcolor",
+        ))
+
     # -- SDSS (SkyServer) -----------------------------------------------------
     if has_coords:
         # scale is roughly 0.396 sec/pixel for SDSS. Width/height of 500 max.

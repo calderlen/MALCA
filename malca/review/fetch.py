@@ -16,13 +16,10 @@ import traceback
 import numpy as np
 import pandas as pd
 
-from malca.config.config_events import (
+from malca.config.config_pipeline import (
     TRIGGER_MODE, LOGBF_THRESHOLD_DIP, LOGBF_THRESHOLD_JUMP,
-    SIGNIFICANCE_THRESHOLD, P_POINTS,
-    P_MIN_DIP, P_MAX_DIP, P_MIN_JUMP, P_MAX_JUMP,
-    MAG_POINTS, RUN_MIN_POINTS, MAX_GAP_POINTS,
-    RUN_MAX_GAP_DAYS, RUN_MIN_DURATION_DAYS,
-    BASELINE_TAG,
+    SIGNIFICANCE_THRESHOLD, P_POINTS, MAG_POINTS,
+    RUN_MIN_POINTS, RUN_MAX_GAP_POINTS, BASELINE_FUNC,
 )
 from malca.config.config_stats import MAD_SCALE
 from malca.events import process_lightcurve
@@ -32,6 +29,16 @@ from malca.fetch import (
     download_lightcurve_by_gaia_id,
 )
 from malca.utils import read_skypatrol_csv
+
+
+P_MIN_DIP = None
+P_MAX_DIP = None
+P_MIN_JUMP = None
+P_MAX_JUMP = None
+MAX_GAP_POINTS = RUN_MAX_GAP_POINTS
+RUN_MAX_GAP_DAYS = None
+RUN_MIN_DURATION_DAYS = 0.0
+BASELINE_TAG = BASELINE_FUNC
 
 
 
@@ -45,9 +52,10 @@ def fetch_and_analyze_by_id(
     *,
     run_stats: bool = True,
     run_events: bool = False,
+    backend: str = "skypatrol2",
 ) -> tuple[pd.DataFrame, Path]:
     """Download LC by ASAS-SN ID, compute basic stats, return (1-row DF, lc_path)."""
-    lc_path, catalog_info = download_lightcurve_by_id(asas_sn_id)
+    lc_path, catalog_info = download_lightcurve_by_id(asas_sn_id, backend=backend)
     df = _build_candidate_row(asas_sn_id, lc_path, catalog_info,
                               run_stats=run_stats, run_events=run_events)
     return df, lc_path
@@ -58,9 +66,10 @@ def fetch_and_analyze_by_gaia_id(
     *,
     run_stats: bool = True,
     run_events: bool = False,
+    backend: str = "skypatrol2",
 ) -> tuple[pd.DataFrame, Path]:
     """Download LC by Gaia DR3 source_id, compute basic stats."""
-    lc_path, catalog_info = download_lightcurve_by_gaia_id(gaia_id)
+    lc_path, catalog_info = download_lightcurve_by_gaia_id(gaia_id, backend=backend)
     candidate_id = str(catalog_info.get("asas_sn_id", f"gaia_{gaia_id}"))
     df = _build_candidate_row(candidate_id, lc_path, catalog_info,
                               run_stats=run_stats, run_events=run_events)
@@ -71,9 +80,10 @@ def fetch_cone_search(
     ra: float,
     dec: float,
     radius_arcsec: float = 5.0,
+    backend: str = "skypatrol2",
 ) -> pd.DataFrame:
     """Return catalog rows from a cone search (no LC download)."""
-    return cone_search(ra, dec, radius_arcsec=radius_arcsec)
+    return cone_search(ra, dec, radius_arcsec=radius_arcsec, backend=backend)
 
 
 # ---------------------------------------------------------------------------

@@ -35,11 +35,8 @@ from malca.config.config_pipeline import (
     LOGBF_THRESHOLD_DIP, LOGBF_THRESHOLD_JUMP,
 )
 from malca.config.config_stats import MAD_SCALE
-from malca.evaluation.reproduce import brayden_candidates
 from malca.events import score_lightcurve
 from malca.review.metadata import REVIEW_METADATA_FIELDS, normalize_vsx_record
-from malca.review.plot_batch import load_passing_candidates as _impl
-from malca.review.plot_batch import plot_passing_candidates as _impl
 from malca.utils import clean_lc, read_lc_dat2, filter_bad_cameras
 from malca.utils import gaussian, paczynski_kernel, read_skypatrol_csv as _read_skypatrol_csv
 
@@ -394,10 +391,12 @@ def lookup_metadata_for_path(path: Path, detection_results_csv=None):
     if not meta and "-" in stem:
         meta = lookup_source_metadata(asassn_id=stem.split("-")[0], csv_path=detection_results_csv)
 
-    # Fallback to brayden_candidates if no metadata found from CSV
+    # Fallback to reproduction candidate metadata if no CSV metadata found.
     if not meta:
-
-
+        try:
+            from malca.evaluation.reproduce import brayden_candidates
+        except Exception:
+            brayden_candidates = []
         source_id = stem.split("-")[0]
         for candidate in brayden_candidates:
             if candidate.get("source_id") == source_id:
@@ -419,16 +418,14 @@ def lookup_metadata_for_path(path: Path, detection_results_csv=None):
 
 def load_passing_candidates(*args, **kwargs):
     """Forward to candidate-table loader used by consolidated plotting."""
-
-
-    return _impl(*args, **kwargs)
+    from malca.review.plot_batch import load_passing_candidates as _load_impl
+    return _load_impl(*args, **kwargs)
 
 
 def plot_passing_candidates(*args, **kwargs):
     """Forward to candidate-table plotting implementation."""
-
-
-    return _impl(*args, **kwargs)
+    from malca.review.plot_batch import plot_passing_candidates as _plot_impl
+    return _plot_impl(*args, **kwargs)
 
 
 
