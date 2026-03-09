@@ -20,6 +20,7 @@ from scipy.optimize import minimize_scalar
 import numpy as np
 import pandas as pd
 
+from malca.baseline import per_camera_gp_baseline
 from malca.config.config_stats import (
     MAD_SCALE,
     STETSON_K_NORM,
@@ -30,7 +31,7 @@ from malca.config.config_stats import (
     LS_ALIAS_PERIODS,
 )
 from malca.periodogram import pdm_find_period, ce_find_period
-from malca.utils import read_lc_dat2, read_lc_csv
+from malca.utils import read_lc_dat2, read_lc_csv, read_skypatrol_lc_csv
 
 
 
@@ -161,6 +162,88 @@ def lag1_autocorr(x):
     x1 = x[1:]  - x[1:].mean()
     den = np.sqrt(np.sum(x0**2) * np.sum(x1**2))
     return float(np.sum(x0 * x1) / den) if den > 0 else np.nan
+
+
+def baseline_subtracted_string_length(
+    df: pd.DataFrame,
+    *,
+    t_col: str = "JD",
+    mag_col: str = "mag",
+    err_col: str = "error",
+) -> dict[str, float]:
+    """Compute LC string-length roughness on baseline-subtracted residuals.
+
+    Uses per-camera baseline subtraction first, then treats the light curve as a
+    single time-ordered sequence and sums |Δresidual| between consecutive points.
+    Time spacing is intentionally ignored.
+    """
+    out: dict[str, float] = {
+        "string_length_total": np.nan,
+        "string_length_mean_step": np.nan,
+        "string_length_n_steps": np.nan,
+    }
+
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return out
+    if any(col not in df.columns for col in (t_col, mag_col, err_col)):
+        return out
+
+    cols = [t_col, mag_col, err_col]
+    for optional_col in ("camera_name", "camera#", "camera"):
+        if optional_col in df.columns:
+            cols.append(optional_col)
+    work = df[cols].copy()
+
+    work[t_col] = pd.to_numeric(work[t_col], errors="coerce")
+    work[mag_col] = pd.to_numeric(work[mag_col], errors="coerce")
+    work[err_col] = pd.to_numeric(work[err_col], errors="coerce")
+    work = work.dropna(subset=[t_col, mag_col, err_col])
+    if len(work) < 2:
+        return out
+
+    if "camera_name" in work.columns:
+        cam = work["camera_name"]
+    elif "camera#" in work.columns:
+        cam = work["camera#"]
+    elif "camera" in work.columns:
+        cam = work["camera"]
+    else:
+        cam = pd.Series("all", index=work.index, dtype="string")
+
+    cam = pd.Series(cam, index=work.index).astype("string").fillna("").str.strip()
+    work["_stringlen_cam"] = cam.where(cam != "", "all")
+
+    try:
+        baseline_df = per_camera_gp_baseline(
+            work,
+            t_col=t_col,
+            mag_col=mag_col,
+            err_col=err_col,
+            cam_col="_stringlen_cam",
+        )
+    except Exception:
+        return out
+
+    if "resid" not in baseline_df.columns:
+        return out
+
+    t = pd.to_numeric(baseline_df[t_col], errors="coerce").to_numpy(dtype=float)
+    resid = pd.to_numeric(baseline_df["resid"], errors="coerce").to_numpy(dtype=float)
+    finite = np.isfinite(t) & np.isfinite(resid)
+    if int(finite.sum()) < 2:
+        return out
+
+    order = np.argsort(t[finite], kind="mergesort")
+    resid_sorted = resid[finite][order]
+    step_lengths = np.abs(np.diff(resid_sorted))
+    step_lengths = step_lengths[np.isfinite(step_lengths)]
+    if step_lengths.size == 0:
+        return out
+
+    out["string_length_total"] = float(np.sum(step_lengths))
+    out["string_length_mean_step"] = float(np.mean(step_lengths))
+    out["string_length_n_steps"] = float(step_lengths.size)
+    return out
 
 def stetson_indices(mag, err):
     mag = np.asarray(mag, float)
@@ -1156,6 +1239,8 @@ def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=Tr
 
     df_g, df_v = read_lc_csv(asassn_id, path)
     if df_g.empty and df_v.empty:
+        df_g, df_v = read_skypatrol_lc_csv(asassn_id, path)
+    if df_g.empty and df_v.empty:
         df_g, df_v = read_lc_dat2(asassn_id, path)
 
     if use_g:
@@ -1298,6 +1383,7 @@ def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=Tr
     slope_d_per_day, intercept, r2 = linear_trend(df["t_days"].values, mag)
     slope_d_per_year = slope_d_per_day * 365.25 if np.isfinite(slope_d_per_day) else np.nan
     stetson = stetson_indices(mag, merr)
+    string_length_stats = baseline_subtracted_string_length(df)
     ls_stats = lomb_scargle_summary(df["JD"].values, mag, merr) if compute_ls else {
         "ls_best_period_days": np.nan,
         "ls_peak_power": np.nan,
@@ -1414,6 +1500,9 @@ def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=Tr
         ("variability_stetson_I", stetson["stetson_I"]),
         ("variability_stetson_J", stetson["stetson_J"]),
         ("variability_stetson_K", stetson["stetson_K"]),
+        ("variability_string_length_resid_total", string_length_stats["string_length_total"]),
+        ("variability_string_length_resid_mean_step", string_length_stats["string_length_mean_step"]),
+        ("variability_string_length_resid_n_steps", string_length_stats["string_length_n_steps"]),
         ("variability_lomb_scargle_best_period_days", ls_stats["ls_best_period_days"]),
         ("variability_lomb_scargle_peak_power", ls_stats["ls_peak_power"]),
         ("variability_lomb_scargle_fap", ls_stats["ls_fap"]),
@@ -1484,6 +1573,9 @@ def print_summary(summary, max_rows=10):
     def headframe(x, n=max_rows):
         return x.head(n).to_string(index=False)
 
+    def _fmt(v, d=4):
+        return f"{v:.{d}f}" if np.isfinite(v) else "NaN"
+
     print("\n=== CORE TIMING ===")
     print(f"JD start/end: {summary['jd_start']:.6f} → {summary['jd_end']:.6f}  | span: {summary['time_span_days']:.2f} d")
     print(f"Unique nights: {summary['n_unique_nights']}  | Duty cycle: {summary['duty_cycle_fraction']:.3f}")
@@ -1513,12 +1605,17 @@ def print_summary(summary, max_rows=10):
     print("\n=== VARIABILITY / TREND ===")
     print(f"reduced χ² vs constant={summary['variability_reduced_chi2_vs_constant']:.3f}  | von Neumann={summary['variability_von_neumann_ratio']:.3f}  | lag-1 ρ={summary['variability_lag1_autocorr']:.3f}")
     print(f"Stetson I/J/K={summary['variability_stetson_I']:.3f} / {summary['variability_stetson_J']:.3f} / {summary['variability_stetson_K']:.3f}")
+    sl_steps = summary.get("variability_string_length_resid_n_steps", np.nan)
+    sl_steps_text = str(int(sl_steps)) if np.isfinite(sl_steps) else "NaN"
+    print(
+        "String length |Δresid| "
+        f"total={_fmt(summary.get('variability_string_length_resid_total', np.nan))} "
+        f"mean_step={_fmt(summary.get('variability_string_length_resid_mean_step', np.nan))} "
+        f"n_steps={sl_steps_text}"
+    )
     if "variability_lomb_scargle_best_period_days" in summary:
         print(f"Lomb-Scargle: best_period_days={summary['variability_lomb_scargle_best_period_days']:.6f}  peak_power={summary['variability_lomb_scargle_peak_power']:.6f}  fap={summary['variability_lomb_scargle_fap']:.3e}")
     print(f"trend slope={summary['trend_slope_mag_per_day']:.6e} mag/day ({summary['trend_slope_mag_per_year']:.6e} mag/yr),  R²={summary['trend_r2']:.3f}")
-
-    def _fmt(v, d=4):
-        return f"{v:.{d}f}" if np.isfinite(v) else "NaN"
 
     print("\n=== ALeRCE FEATURES ===")
     print(f"Amplitude={_fmt(summary['amplitude'])}  Beyond1Std={_fmt(summary['beyond_1_std'])}  Con={summary['con']}  delta_mag={_fmt(summary['delta_mag_fid'])}")

@@ -393,10 +393,7 @@ def lookup_metadata_for_path(path: Path, detection_results_csv=None):
 
     # Fallback to reproduction candidate metadata if no CSV metadata found.
     if not meta:
-        try:
-            from malca.evaluation.reproduce import brayden_candidates
-        except Exception:
-            brayden_candidates = []
+        from malca.evaluation.reproduce import brayden_candidates
         source_id = stem.split("-")[0]
         for candidate in brayden_candidates:
             if candidate.get("source_id") == source_id:

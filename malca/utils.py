@@ -312,9 +312,16 @@ def read_lc_csv(asassn_id, path):
     if not os.path.exists(csv_path):
         return pd.DataFrame(), pd.DataFrame()
 
-    df = pd.read_csv(csv_path)
+    # Some SkyPatrol exports include leading comment lines ("# ...") before the header.
+    # `comment="#"` keeps parsing robust across CSV formats; we only accept the
+    # legacy schema here (jd + phot_filter).
+    df = pd.read_csv(csv_path, comment="#", skip_blank_lines=True)
 
     if df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    # Legacy SkyPatrol CSV format: columns like "jd" and "phot_filter".
+    if "jd" not in df.columns or "phot_filter" not in df.columns:
         return pd.DataFrame(), pd.DataFrame()
 
     df["JD"] = df["jd"] + SKYPATROL_JD_OFFSET
@@ -390,6 +397,44 @@ def read_skypatrol_csv(csv_path: str | Path) -> pd.DataFrame:
     df = df[pd.notna(df["JD"]) & pd.notna(df["mag"])].copy()
     df = df.sort_values("JD").reset_index(drop=True)
     return df
+
+
+def read_skypatrol_lc_csv(asassn_id: str, path: str | Path) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Read a SkyPatrol web-CSV light curve and return (df_g, df_v).
+
+    The SkyPatrol web-CSV schema is the canonical format downloaded by
+    `malca.fetch` and parsed by `read_skypatrol_csv`.
+    """
+    csv_path = os.path.join(path, f"{asassn_id}.csv")
+    if not os.path.exists(csv_path):
+        return pd.DataFrame(), pd.DataFrame()
+
+    df_raw = read_skypatrol_csv(csv_path)
+    if df_raw.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    cam_name = df_raw.get("camera", pd.Series(["unknown"] * len(df_raw), index=df_raw.index))
+    cam_name = pd.Series(cam_name, index=df_raw.index).astype("string").fillna("").str.strip()
+    cam_name = cam_name.where(cam_name != "", "unknown")
+    cam_codes, _ = pd.factorize(cam_name, sort=True)
+
+    df_norm = pd.DataFrame(
+        {
+            "JD": pd.to_numeric(df_raw.get("JD"), errors="coerce"),
+            "mag": pd.to_numeric(df_raw.get("mag"), errors="coerce"),
+            "error": pd.to_numeric(df_raw.get("error"), errors="coerce"),
+            "good_bad": pd.to_numeric(df_raw.get("good_bad", 1), errors="coerce"),
+            "camera#": cam_codes.astype(int) + 1,
+            "v_g_band": pd.to_numeric(df_raw.get("v_g_band"), errors="coerce"),
+            "saturated": pd.to_numeric(df_raw.get("saturated", 0), errors="coerce"),
+            "camera_name": cam_name,
+            "field": "unknown",
+        }
+    )
+
+    df_g = df_norm.loc[df_norm["v_g_band"] == 0].reset_index(drop=True)
+    df_v = df_norm.loc[df_norm["v_g_band"] == 1].reset_index(drop=True)
+    return df_g, df_v
 
 
 def read_lc_raw(asassn_id, path):
