@@ -408,6 +408,14 @@ def _format_value_for_display(key: str, val: Any) -> Any:
     return val
 
 
+def _display_label_for_group(group_name: str, label: str) -> str:
+    if group_name.startswith("Dip ") and label.startswith("Dip "):
+        return label[4:]
+    if group_name.startswith("Jump ") and label.startswith("Jump "):
+        return label[5:]
+    return label
+
+
 _SIGFIG_DEFAULT = 4
 _TINY_DISPLAY_THRESHOLD = 1e-6
 
@@ -581,7 +589,10 @@ def extract_review_metadata_grouped(
             val = p.get(key)
             if not _is_present(val):
                 continue
-            items.append((label, _format_with_uncertainty(key, val, p, round_sf=round_sigfigs)))
+            items.append((
+                _display_label_for_group(group_name, label),
+                _format_with_uncertainty(key, val, p, round_sf=round_sigfigs),
+            ))
         if items:
             groups.append((group_name, items))
     return groups

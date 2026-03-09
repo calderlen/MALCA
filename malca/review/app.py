@@ -5,6 +5,7 @@ from functools import lru_cache
 from pathlib import Path
 from threading import Timer
 import argparse
+import importlib
 import json
 import logging
 import multiprocessing
@@ -55,6 +56,7 @@ from malca.review.interactive_plot import (
     resolve_lightcurve_path,
     _load_cleaned_df,
     _compute_baseline_bands,
+    _build_stat_rows,
     normalize_external_lc_dataframe,
 )
 from malca.review.keyboard import (
@@ -108,6 +110,13 @@ try:
     multiprocessing.set_start_method("spawn", force=True)
 except RuntimeError:
     pass
+
+if sys.platform == "darwin":
+    try:
+        multiprocess = importlib.import_module("multiprocess")
+        multiprocess.set_start_method("spawn", force=True)
+    except (ModuleNotFoundError, RuntimeError):
+        pass
 
 
 
@@ -458,12 +467,20 @@ app.index_string = '''
             text-transform: uppercase;
             letter-spacing: 0.5px;
         }
+        .stat-field-label {
+            text-transform: none;
+            letter-spacing: 0.2px;
+        }
         .meta-field-value {
             color: #e2edf6;
             text-align: right;
             font-weight: 600;
             word-break: break-word;
             white-space: normal;
+        }
+        .meta-field-label p,
+        .meta-field-value p {
+            margin: 0;
         }
         .vetting-banner-empty {
             padding: 6px 12px;
@@ -1722,18 +1739,234 @@ def _load_run_params_for_plot_dir(plot_dir: str | None) -> dict:
 
 
 def _render_stat_cards(stat_rows: list[tuple[str, str]]) -> list:
-    """Render stats as a collapsible Details/Summary group."""
+    """Render stats as grouped collapsible sections with readable labels."""
     if not stat_rows:
         return []
-    field_divs = [
-        html.Div([
-            html.Span(label, className='meta-field-label'),
-            html.Span(str(value), className='meta-field-value'),
-        ], className='meta-field-row')
-        for label, value in stat_rows
+
+    label_overrides = {
+        "stats_jd_start": "JD start (day)",
+        "stats_jd_end": "JD end (day)",
+        "stats_time_span_days": "Time span (days)",
+        "stats_n_unique_nights": "Unique nights",
+        "stats_duty_cycle_fraction": "Duty cycle",
+        "stats_file_points_total": "Points total",
+        "stats_file_points_kept_after_filter": "Points kept after filter",
+        "stats_cadence_mean_dt_days": r"Cadence mean $\Delta t$ (days)",
+        "stats_cadence_median_dt_days": r"Cadence median $\Delta t$ (days)",
+        "stats_cadence_p05_dt_days": r"Cadence $P_{05}$ $\Delta t$ (days)",
+        "stats_cadence_p95_dt_days": r"Cadence $P_{95}$ $\Delta t$ (days)",
+        "stats_photometry_robust_sigma_mag": r"Robust $\sigma_m$ (mag)",
+        "stats_photometry_std_mag": r"$\sigma_m$ (mag)",
+        "stats_photometry_IQR_mag": r"IQR($m$) (mag)",
+        "stats_photometry_mean_mag": r"Mean($m$) (mag)",
+        "stats_photometry_median_mag": r"Median($m$) (mag)",
+        "stats_photometry_weighted_mean_mag": r"Weighted mean($m$) (mag)",
+        "stats_photometry_weighted_mean_sem": r"SEM($\bar{m}_w$) (mag)",
+        "stats_photometry_p05_mag": r"$P_{05}(m)$ (mag)",
+        "stats_photometry_p16_mag": r"$P_{16}(m)$ (mag)",
+        "stats_photometry_p84_mag": r"$P_{84}(m)$ (mag)",
+        "stats_photometry_p95_mag": r"$P_{95}(m)$ (mag)",
+        "stats_clipped_mean_mag_3sigma_about_median": r"Clipped mean (3$\sigma$ about median) (mag)",
+        "stats_clipped_std_mag_3sigma_about_median": r"Clipped std (3$\sigma$ about median) (mag)",
+        "stats_n_outliers_removed_robust_3sigma": r"Outliers removed (robust 3$\sigma$)",
+        "stats_error_and_snr_stats_error_mean": "Error mean (mag)",
+        "stats_error_and_snr_stats_error_median": "Error median (mag)",
+        "stats_error_and_snr_stats_error_p05": r"Error $P_{05}$ (mag)",
+        "stats_error_and_snr_stats_error_p95": r"Error $P_{95}$ (mag)",
+        "stats_error_and_snr_stats_snr_median": "SNR median",
+        "stats_error_and_snr_stats_snr_p05": r"SNR $P_{05}$",
+        "stats_error_and_snr_stats_snr_p95": r"SNR $P_{95}$",
+        "stats_variability_reduced_chi2_vs_constant": r"Reduced $\chi^2$ vs constant",
+        "stats_variability_von_neumann_ratio": "von Neumann ratio",
+        "stats_variability_lag1_autocorr": r"Lag-1 $\rho$",
+        "stats_variability_stetson_I": r"Stetson $I$",
+        "stats_variability_stetson_J": r"Stetson $J$",
+        "stats_variability_stetson_K": r"Stetson $K$",
+        "stats_variability_string_length_resid_total": "String length total (mag)",
+        "stats_variability_string_length_resid_mean_step": "String length mean step (mag)",
+        "stats_variability_string_length_resid_n_steps": "String length n steps",
+        "stats_variability_lomb_scargle_best_period_days": "Lomb-Scargle best period (days)",
+        "stats_variability_lomb_scargle_peak_power": "Lomb-Scargle peak power",
+        "stats_variability_lomb_scargle_fap": "Lomb-Scargle FAP",
+        "stats_trend_slope_mag_per_day": r"$\mathrm{d}m/\mathrm{d}t$ (mag/day)",
+        "stats_trend_slope_mag_per_year": r"$\mathrm{d}m/\mathrm{d}t$ (mag/year)",
+        "stats_trend_r2": r"Trend $R^2$",
+        "stats_gp_drw_sigma": r"GP-DRW $\sigma$ (mag)",
+        "stats_gp_drw_tau": r"GP-DRW $\tau$",
+        "stats_iar_phi": r"IAR $\phi$",
+        "stats_sf_ml_amplitude": "SF-ML amplitude (mag)",
+        "stats_sf_ml_gamma": r"SF-ML $\gamma$",
+        "stats_psi_cs": r"Psi CS ($\psi_{\mathrm{CS}}$)",
+        "stats_psi_eta": r"Psi eta ($\psi_{\eta}$)",
+        "stats_con": "Con statistic",
+        "stats_intrinsic_sigma_mag": r"Intrinsic $\sigma$ (mag)",
+        "stats_excess_var": r"Intrinsic $\sigma$ (mag)",
+        "stats_amplitude": "Amplitude (mag)",
+        "stats_first_mag": r"First $m$ (mag)",
+        "stats_max_slope": "Max slope (mag/day)",
+        "stats_median_abs_dev": r"Median abs dev (mag)",
+        "stats_gskew": "g-skew",
+        "stats_meanvariance": "Mean/variance",
+        "stats_median_brp": "Median BRP",
+        "stats_constancy_p_value": "Constancy p-value",
+        "stats_pvar": "Constancy p-value",
+        "stats_q31": r"$Q_{31}$ (mag)",
+        "stats_rcs": "RCS",
+        "stats_autocor_length": "Autocorrelation length",
+        "stats_delta_mag_fid": r"$\Delta m_{\mathrm{fid}}$ (mag)",
+        "stats_beyond_1_std": "Beyond 1 std",
+        "stats_small_kurtosis": "Small kurtosis",
+        "stats_pair_slope_trend": "Pair slope trend",
+        "stats_harmonics_mse": r"$\mathrm{MSE}$ ($\mathrm{mag}^2$)",
+        "stats_mhps_pn_flag": "MHPS PN flag",
+        "stats_mhps_non_zero": "MHPS non-zero count",
+        "filtered_cams": "Filtered cameras",
+    }
+
+    alerce_feature_keys = {
+        "stats_amplitude",
+        "stats_beyond_1_std",
+        "stats_con",
+        "stats_delta_mag_fid",
+        "stats_intrinsic_sigma_mag",
+        "stats_excess_var",
+        "stats_first_mag",
+        "stats_gskew",
+        "stats_max_slope",
+        "stats_meanvariance",
+        "stats_median_abs_dev",
+        "stats_median_brp",
+        "stats_percent_amplitude",
+        "stats_q31",
+        "stats_skew",
+        "stats_small_kurtosis",
+        "stats_constancy_p_value",
+        "stats_pvar",
+        "stats_anderson_darling",
+        "stats_pair_slope_trend",
+        "stats_rcs",
+        "stats_autocor_length",
+    }
+
+    group_order = [
+        "Coverage & Cadence",
+        "Photometry & SNR",
+        "Periodicity",
+        "Variability",
+        "Trend",
+        "Harmonics",
+        "Stochastic Models",
+        "MHPS / Structure Function",
+        "ALeRCE Features",
+        "Camera Diagnostics",
+        "Other",
     ]
+
+    def _stat_group(key: str) -> str:
+        if key == "filtered_cams":
+            return "Camera Diagnostics"
+        if key.startswith("stats_file_points_") or key in {
+            "stats_jd_start", "stats_jd_end", "stats_time_span_days",
+            "stats_n_unique_nights", "stats_duty_cycle_fraction",
+        } or key.startswith("stats_cadence_"):
+            return "Coverage & Cadence"
+        if key.startswith("stats_photometry_") or key.startswith("stats_error_and_snr_stats_") or key.startswith("stats_clipped_") or key == "stats_n_outliers_removed_robust_3sigma":
+            return "Photometry & SNR"
+        if key.startswith("stats_variability_lomb_scargle_") or key.startswith("stats_psi_"):
+            return "Periodicity"
+        if key.startswith("stats_variability_"):
+            return "Variability"
+        if key.startswith("stats_trend_"):
+            return "Trend"
+        if key.startswith("stats_harmonics_"):
+            return "Harmonics"
+        if key.startswith("stats_gp_drw_") or key.startswith("stats_iar_"):
+            return "Stochastic Models"
+        if key.startswith("stats_mhps_") or key.startswith("stats_sf_ml_"):
+            return "MHPS / Structure Function"
+        if key in alerce_feature_keys:
+            return "ALeRCE Features"
+        return "Other"
+
+    def _fallback_label(key: str) -> str:
+        raw = key[6:] if key.startswith("stats_") else key
+        token_map = {
+            "jd": "JD",
+            "snr": "SNR",
+            "iqr": "IQR",
+            "std": "Std",
+            "gp": "GP",
+            "drw": "DRW",
+            "iar": "IAR",
+            "mhps": "MHPS",
+            "rcs": "RCS",
+            "fap": "FAP",
+            "ls": "LS",
+            "ml": "ML",
+            "chi2": r"$\chi^2$",
+            "r2": r"$R^2$",
+            "sigma": r"$\sigma$",
+            "tau": r"$\tau$",
+            "phi": r"$\phi$",
+            "rho": r"$\rho$",
+            "gamma": r"$\gamma$",
+            "eta": r"$\eta$",
+            "psi": r"$\psi$",
+        }
+        parts: list[str] = []
+        for tok in [t for t in raw.split("_") if t]:
+            lower = tok.lower()
+            p_match = re.fullmatch(r"p(\d{2})", lower)
+            if p_match:
+                parts.append(rf"$P_{{{p_match.group(1)}}}$")
+            elif lower in token_map:
+                parts.append(token_map[lower])
+            elif lower.isdigit():
+                parts.append(lower)
+            else:
+                parts.append(lower.capitalize())
+        return " ".join(parts)
+
+    def _stat_label(key: str) -> str:
+        if key in label_overrides:
+            return label_overrides[key]
+        mag_match = re.fullmatch(r"stats_harmonics_mag_(\d+)", key)
+        if mag_match:
+            n = mag_match.group(1)
+            return rf"Amplitude $A_{{{n}}}$ (mag)"
+        phase_match = re.fullmatch(r"stats_harmonics_phase_(\d+)", key)
+        if phase_match:
+            n = phase_match.group(1)
+            return rf"Phase $\phi_{{{n}}}$ (rad)"
+        return _fallback_label(key)
+
+    grouped: dict[str, list[tuple[str, str]]] = {name: [] for name in group_order}
+    for key_raw, value in stat_rows:
+        key = str(key_raw)
+        grouped.setdefault(_stat_group(key), []).append((_stat_label(key), str(value)))
+
+    sections = []
+    for group_name in group_order:
+        rows = grouped.get(group_name, [])
+        if not rows:
+            continue
+        field_divs = [
+            html.Div([
+                dcc.Markdown(label, className='meta-field-label stat-field-label', mathjax=True),
+                dcc.Markdown(value, className='meta-field-value', mathjax=True),
+            ], className='meta-field-row')
+            for label, value in rows
+        ]
+        sections.append(
+            html.Details(
+                [html.Summary(f"{group_name} ({len(rows)})"), html.Div(field_divs, className='meta-grid')],
+                open=group_name in {"Coverage & Cadence", "Photometry & SNR"},
+            )
+        )
+
+    total_rows = sum(len(grouped.get(name, [])) for name in group_order)
     return [html.Details(
-        [html.Summary(f"Stats ({len(stat_rows)})"), html.Div(field_divs, className='meta-grid')],
+        [html.Summary(f"Stats ({total_rows})"), html.Div(sections, className='metadata-sections')],
         open='open',
     )]
 
@@ -2784,7 +3017,7 @@ def _render_external_followup(payload: dict, candidate_id: str, theme: str | Non
                             theme=theme,
                             jd_system="mjd",
                         )
-                        atlas_children.append(dcc.Graph(figure=atlas_fig, config={'displayModeBar': False}, style={'height': '250px'}))
+                        atlas_children.append(dcc.Graph(figure=atlas_fig, mathjax=True, config={'displayModeBar': False}, style={'height': '250px'}))
                     except Exception:
                         pass
                 break
@@ -2811,6 +3044,7 @@ def _render_external_followup(payload: dict, candidate_id: str, theme: str | Non
             neowise_rows = pd.read_parquet(neowise_path)
             neowise_plot = dcc.Graph(
                 figure=_build_neowise_figure_with_theme(neowise_rows, theme),
+                mathjax=True,
                 config={'displayModeBar': False},
                 style={'height': '250px'},
             )
@@ -2858,7 +3092,7 @@ def _render_external_followup(payload: dict, candidate_id: str, theme: str | Non
                             theme=theme,
                             jd_system="mjd",
                         )
-                        ztf_children.append(dcc.Graph(figure=ztf_fig, config={'displayModeBar': False}, style={'height': '250px'}))
+                        ztf_children.append(dcc.Graph(figure=ztf_fig, mathjax=True, config={'displayModeBar': False}, style={'height': '250px'}))
                     except Exception:
                         pass
                 break
@@ -2891,7 +3125,7 @@ def _render_external_followup(payload: dict, candidate_id: str, theme: str | Non
                             theme=theme,
                             jd_system="bjd_gaia",
                         )
-                        gaia_epoch_children.append(dcc.Graph(figure=gaia_fig, config={'displayModeBar': False}, style={'height': '250px'}))
+                        gaia_epoch_children.append(dcc.Graph(figure=gaia_fig, mathjax=True, config={'displayModeBar': False}, style={'height': '250px'}))
                     except Exception:
                         pass
                 break
@@ -2927,7 +3161,7 @@ def _render_external_followup(payload: dict, candidate_id: str, theme: str | Non
                             theme=theme,
                             jd_system="mjd",
                         )
-                        ps1_children.append(dcc.Graph(figure=ps1_fig, config={'displayModeBar': False}, style={'height': '250px'}))
+                        ps1_children.append(dcc.Graph(figure=ps1_fig, mathjax=True, config={'displayModeBar': False}, style={'height': '250px'}))
                     except Exception:
                         pass
                 break
@@ -2958,7 +3192,7 @@ def _render_external_followup(payload: dict, candidate_id: str, theme: str | Non
                             theme=theme,
                             jd_system="mjd",
                         )
-                        crts_children.append(dcc.Graph(figure=crts_fig, config={'displayModeBar': False}, style={'height': '250px'}))
+                        crts_children.append(dcc.Graph(figure=crts_fig, mathjax=True, config={'displayModeBar': False}, style={'height': '250px'}))
                     except Exception:
                         pass
                 break
@@ -3286,7 +3520,7 @@ _SIDEBAR_GROUPS = [
         ('num', 'stats_beyond_1_std'),
         ('num', 'stats_con'),
         ('num', 'stats_delta_mag_fid'),
-        ('num', 'stats_excess_var'),
+        ('num', 'stats_intrinsic_sigma_mag'),
         ('num', 'stats_first_mag'),
         ('num', 'stats_gskew'),
         ('num', 'stats_max_slope'),
@@ -3297,7 +3531,7 @@ _SIDEBAR_GROUPS = [
         ('num', 'stats_q31'),
         ('num', 'stats_skew'),
         ('num', 'stats_small_kurtosis'),
-        ('num', 'stats_pvar'),
+        ('num', 'stats_constancy_p_value'),
         ('num', 'stats_anderson_darling'),
         ('num', 'stats_pair_slope_trend'),
         ('num', 'stats_rcs'),
@@ -3411,6 +3645,8 @@ def create_layout():
         dcc.Store(id='import-trigger', data=0),  # triggers queue refresh after import
         dcc.Store(id='auto-run-pipeline-trigger', data=None),
         dcc.Store(id='pending-auto-run', data=None),
+        dcc.Store(id='pipeline-progress-trigger', data=0),
+        dcc.Store(id='pipeline-module-log', data={'lines': []}),
         dcc.Store(id='cone-results-data', data=None),  # cone search catalog rows
         dcc.Store(id='auto-period-cache', data={}, storage_type='session'),
         dcc.Store(id='plot-render-request', data={'nonce': 1, 'ts': 0.0, 'state': {'idx': 0, 'plot_mode': 'native', 'overlay_values': list(PLOT_PRESETS['Diagnostics']['overlays']), 'selected_cameras': [], 'preset': 'Diagnostics', 'theme': DEFAULT_THEME, 'residual_height': DEFAULT_RESIDUAL_FRACTION, 'baseline_opacity': 0.5, 'external_source_view': 'all'}}),
@@ -3840,6 +4076,26 @@ def create_layout():
                                                       style={'fontSize': '10px', 'marginTop': '2px',
                                                              'color': '#7da8c4'}),
                                 ),
+                                html.Details([
+                                    html.Summary('Module Run Log (temp)', style={'cursor': 'pointer', 'marginTop': '4px'}),
+                                    html.Pre(
+                                        id='pipeline-module-log-panel',
+                                        style={
+                                            'fontSize': '10px',
+                                            'lineHeight': '1.35',
+                                            'marginTop': '6px',
+                                            'maxHeight': '220px',
+                                            'overflowY': 'auto',
+                                            'padding': '8px',
+                                            'background': 'rgba(8, 16, 24, 0.75)',
+                                            'border': '1px solid #284059',
+                                            'borderRadius': '6px',
+                                            'whiteSpace': 'pre-wrap',
+                                            'wordBreak': 'break-word',
+                                            'color': '#9fc6df',
+                                        },
+                                    ),
+                                ], open=True, style={'marginTop': '4px'}),
                             ], style={'marginTop': '6px'}),
                         ], id='diagnostics-section'),
                         # Grouped candidate metadata sections (collapsible, includes stats)
@@ -3904,6 +4160,7 @@ def create_layout():
                         dcc.Graph(
                             id='interactive-plot',
                             className='plot-native',
+                            mathjax=True,
                             config={
                                 'displaylogo': False,
                                 'modeBarButtonsToRemove': ['lasso2d', 'select2d'],
@@ -4903,6 +5160,7 @@ def handle_keyboard(key_value, current_idx, queue_size, current_candidate_id, cu
      Input('residual-height-slider', 'value'),
      Input('theme-mode-store', 'data'),
      Input('queue-size-store', 'data'),
+     Input('pipeline-progress-trigger', 'data'),
      Input('baseline-opacity-slider', 'value'),
      Input('round-sigfigs', 'value'),
      Input('link-radius-arcsec', 'value'),
@@ -4913,7 +5171,7 @@ def handle_keyboard(key_value, current_idx, queue_size, current_candidate_id, cu
     State('plot-render-request', 'data'),
     prevent_initial_call=True,
 )
-def queue_plot_render_request(idx, plot_mode, overlay_values, selected_cameras, preset, residual_height, theme_mode, _queue_size, baseline_opacity, round_sigfigs, link_radius, pdm_result, pdm_manual_period, yaxis_mode, external_source_view, existing_request):
+def queue_plot_render_request(idx, plot_mode, overlay_values, selected_cameras, preset, residual_height, theme_mode, _queue_size, _pipeline_progress, baseline_opacity, round_sigfigs, link_radius, pdm_result, pdm_manual_period, yaxis_mode, external_source_view, existing_request):
     """Debounced render request queue for native plot UX."""
     req = existing_request or {'nonce': 0, 'ts': 0.0}
     # Determine effective PDM period: manual override > PDM result
@@ -5222,6 +5480,9 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
         if run_params_status != 'loaded':
             mismatch_warnings.append(run_params_msg)
 
+        stats_group = _render_stat_cards(_build_stat_rows(payload, pd.DataFrame(), set()))
+        merged_grid = stats_group + grid_items
+
         png_src = plot_src
         png_msg = 'PNG view enabled. Switch to Native for interactive hover and diagnostics.'
         if 'phase' in overlays:
@@ -5238,7 +5499,7 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
         panel = _render_run_config_panel(run_params if run_params else None, run_params_path, mismatch_warnings)
         return (
             png_src,
-            grid_items,
+            merged_grid,
             metadata_health,
             vetting_banner,
             progress,
@@ -5364,9 +5625,9 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
         )
 
     filtered = []
-    if 'Filtered cams' in {k for k, _ in native.get('stat_rows', [])}:
+    if 'filtered_cams' in {k for k, _ in native.get('stat_rows', [])}:
         for key, val in native.get('stat_rows', []):
-            if key == 'Filtered cams':
+            if key == 'filtered_cams':
                 filtered = [x.strip() for x in str(val).split(',') if x.strip()]
 
     # Merge stats into the metadata grid as the first collapsible group
@@ -5420,7 +5681,7 @@ def _render_diagnostic_plots(payload: dict, theme: str, background: dict | None 
         fig = builder(payload, theme, background=background)
         if fig is not None:
             cards.append(html.Div(
-                dcc.Graph(figure=fig, config={'displayModeBar': False},
+                dcc.Graph(figure=fig, mathjax=True, config={'displayModeBar': False},
                           style={'height': '280px'}),
                 style=card_style,
             ))
@@ -6386,42 +6647,15 @@ else:
         return _fetch_candidate_impl(None, n_clicks, fetch_type, fetch_query, fetch_mode, fetch_backend, current_trigger)
 
 
-# Pipeline status chips (updated when candidate changes)
-@app.callback(
-    [Output('pipeline-status-chips', 'children'),
-     Output('auto-run-pipeline-trigger', 'data', allow_duplicate=True)],
-    [Input('queue-data', 'modified_timestamp'),
-     Input('current-candidate-id', 'data')],
-    State('pending-auto-run', 'data'),
-    prevent_initial_call=True
-)
-def update_pipeline_status_chips(_queue_data_ts, candidate_id, pending_auto_run):
-    """Show pipeline stage completion status for the current candidate, and cascade auto-run if pending."""
+def _pipeline_status_chip_elements(candidate_id) -> list:
+    """Build pipeline status chips for the active candidate."""
     chips = []
-    auto_run_out = no_update
-    triggered_ids = {
-        item['prop_id'].split('.')[0]
-        for item in (callback_context.triggered or [])
-        if item.get('prop_id')
-    }
-    
     if candidate_id is None:
-        return chips, auto_run_out
-
+        return chips
     try:
         with closing(db_connect(Path(DB_PATH))) as conn:
             payload = get_candidate_payload(conn, str(candidate_id)) or {}
-
-
         status = detect_pipeline_status(payload)
-        if (
-            'queue-data' in triggered_ids
-            and pending_auto_run
-            and str(pending_auto_run.get('candidate_id')) == str(candidate_id)
-        ):
-            if any(state in {'missing', 'partial'} for state in status.values()):
-                auto_run_out = pending_auto_run
-
         color_map = {'complete': '#2d6a2d', 'partial': '#6a5c2d', 'missing': '#444'}
         for stage, state in status.items():
             chips.append(html.Span(
@@ -6434,12 +6668,76 @@ def update_pipeline_status_chips(_queue_data_ts, candidate_id, pending_auto_run)
                     'fontSize': '10px',
                 },
             ))
-        return chips, auto_run_out
     except Exception:
-        return chips, auto_run_out
+        return []
+    return chips
 
 
-def _run_pipeline_impl(set_progress, run_clicks, rerun_clicks, auto_trigger, queue_data, idx, current_trigger):
+# Pipeline status chips (updated when candidate changes and stages complete)
+@app.callback(
+    Output('pipeline-status-chips', 'children'),
+    [Input('queue-data', 'modified_timestamp'),
+     Input('current-candidate-id', 'data'),
+     Input('pipeline-progress-trigger', 'data')],
+    prevent_initial_call=True
+)
+def update_pipeline_status_chips(_queue_data_ts, candidate_id, _pipeline_progress):
+    """Show pipeline stage completion status for the current candidate."""
+    return _pipeline_status_chip_elements(candidate_id)
+
+
+# Cascade auto-run once queue updates for fetched candidate
+@app.callback(
+    Output('auto-run-pipeline-trigger', 'data', allow_duplicate=True),
+    [Input('queue-data', 'modified_timestamp'),
+     Input('current-candidate-id', 'data')],
+    State('pending-auto-run', 'data'),
+    prevent_initial_call=True,
+)
+def maybe_cascade_auto_run(_queue_data_ts, candidate_id, pending_auto_run):
+    """Emit pending auto-run token when fetched candidate enters queue."""
+    if candidate_id is None or not pending_auto_run:
+        return no_update
+
+    triggered_ids = {
+        item['prop_id'].split('.')[0]
+        for item in (callback_context.triggered or [])
+        if item.get('prop_id')
+    }
+    if 'queue-data' not in triggered_ids:
+        return no_update
+    if str(pending_auto_run.get('candidate_id')) != str(candidate_id):
+        return no_update
+
+    try:
+        with closing(db_connect(Path(DB_PATH))) as conn:
+            payload = get_candidate_payload(conn, str(candidate_id)) or {}
+        status = detect_pipeline_status(payload)
+        if any(state in {'missing', 'partial'} for state in status.values()):
+            return pending_auto_run
+    except Exception:
+        return no_update
+    return no_update
+
+
+@app.callback(
+    Output('pipeline-module-log-panel', 'children'),
+    Input('pipeline-module-log', 'data'),
+    prevent_initial_call=False,
+)
+def render_pipeline_module_log(log_data):
+    """Render temporary in-GUI module run log lines."""
+    lines = []
+    if isinstance(log_data, dict):
+        raw = log_data.get('lines')
+        if isinstance(raw, list):
+            lines = [str(x) for x in raw if x is not None]
+    if not lines:
+        return "No pipeline run log yet."
+    return "\n".join(lines[-300:])
+
+
+def _run_pipeline_impl(set_progress, run_clicks, rerun_clicks, auto_trigger, queue_data, idx, current_trigger, current_progress_tick):
 
     ctx = dash.callback_context
     triggered_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else None
@@ -6465,16 +6763,47 @@ def _run_pipeline_impl(set_progress, run_clicks, rerun_clicks, auto_trigger, que
         return "No candidate_id", no_update, no_update
 
     try:
+        try:
+            progress_tick = int(current_progress_tick or 0)
+        except Exception:
+            progress_tick = 0
+        log_lines: list[str] = []
 
-        
-        def p(msg):
+        def append_log_line(text: str) -> None:
+            nonlocal log_lines
+            line = str(text or '').strip()
+            if not line:
+                return
+            if log_lines and log_lines[-1] == line:
+                return
+            log_lines.append(line)
+            if len(log_lines) > 300:
+                log_lines = log_lines[-300:]
+
+        def emit_progress(msg: str, *, bump_render: bool = False, reset_log: bool = False):
+            nonlocal progress_tick
+            text = str(msg or "")
+            text = text[:300] if len(text) > 300 else text
+            if reset_log:
+                log_lines.clear()
+            append_log_line(text)
+            if bump_render:
+                progress_tick += 1
             if set_progress:
                 try:
-                    set_progress(msg[:300] if len(msg) > 300 else msg)
+                    set_progress((text, progress_tick, {'lines': list(log_lines)}))
                 except Exception:
                     pass
             else:
-                print(f"[pipeline] {msg}")
+                print(f"[pipeline] {text}")
+
+        def p(msg):
+            emit_progress(msg, bump_render=False)
+
+        def on_stage_complete(stage_name: str):
+            emit_progress(f"✓ {stage_name} complete", bump_render=True)
+
+        emit_progress(f"Running pipeline for {candidate_id}...", reset_log=True)
             
         with closing(db_connect(Path(DB_PATH))) as conn:
             
@@ -6487,7 +6816,13 @@ def _run_pipeline_impl(set_progress, run_clicks, rerun_clicks, auto_trigger, que
             elif fetch_mode in ('full_ext', 'full_ext_crts'):
                 force_stages = ['stats', 'events', 'characterize', 'vetting', 'external_lcs']
                 
-            stages = run_missing_stages(conn, candidate_id, progress_callback=p, force_stages=force_stages)
+            stages = run_missing_stages(
+                conn,
+                candidate_id,
+                progress_callback=p,
+                stage_complete_callback=on_stage_complete,
+                force_stages=force_stages,
+            )
             
             # If triggered by a full_ext fetch, ensure we run external LCs
             if fetch_mode == 'full_ext' and 'external_lcs' not in stages:
@@ -6509,6 +6844,7 @@ def _run_pipeline_impl(set_progress, run_clicks, rerun_clicks, auto_trigger, que
                     row = df_ext.iloc[0].to_dict()
                     update_candidate_payload(conn, candidate_id, row)
                     stages.append('external_lcs')
+                    on_stage_complete('external_lcs')
 
         refresh_idx = int(idx or 0) if idx is not None else 0
         if stages:
@@ -6534,17 +6870,22 @@ if _background_callback_manager is not None:
          Input('auto-run-pipeline-trigger', 'data')],
         [State('queue-data', 'data'),
          State('current-index', 'data'),
-         State('import-trigger', 'data')],
+         State('import-trigger', 'data'),
+         State('pipeline-progress-trigger', 'data')],
         background=True,
         running=[
             (Output('run-pipeline-btn', 'disabled'), True, False),
             (Output('rerun-pipeline-btn', 'disabled'), True, False),
         ],
-        progress=[Output('pipeline-run-status', 'children')],
+        progress=[
+            Output('pipeline-run-status', 'children'),
+            Output('pipeline-progress-trigger', 'data'),
+            Output('pipeline-module-log', 'data'),
+        ],
         prevent_initial_call='initial_duplicate'
     )
-    def run_pipeline_callback(set_progress, n_clicks, rerun_clicks, auto_trigger, queue_data, idx, current_trigger):
-        return _run_pipeline_impl(set_progress, n_clicks, rerun_clicks, auto_trigger, queue_data, idx, current_trigger)
+    def run_pipeline_callback(set_progress, n_clicks, rerun_clicks, auto_trigger, queue_data, idx, current_trigger, current_progress_tick):
+        return _run_pipeline_impl(set_progress, n_clicks, rerun_clicks, auto_trigger, queue_data, idx, current_trigger, current_progress_tick)
 else:
     @app.callback(
         [Output('pipeline-run-status', 'children'),
@@ -6555,11 +6896,12 @@ else:
          Input('auto-run-pipeline-trigger', 'data')],
         [State('queue-data', 'data'),
          State('current-index', 'data'),
-         State('import-trigger', 'data')],
+         State('import-trigger', 'data'),
+         State('pipeline-progress-trigger', 'data')],
         prevent_initial_call='initial_duplicate'
     )
-    def run_pipeline_callback(n_clicks, rerun_clicks, auto_trigger, queue_data, idx, current_trigger):
-        return _run_pipeline_impl(None, n_clicks, rerun_clicks, auto_trigger, queue_data, idx, current_trigger)
+    def run_pipeline_callback(n_clicks, rerun_clicks, auto_trigger, queue_data, idx, current_trigger, current_progress_tick):
+        return _run_pipeline_impl(None, n_clicks, rerun_clicks, auto_trigger, queue_data, idx, current_trigger, current_progress_tick)
 
 
 # Export reviews

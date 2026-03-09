@@ -706,8 +706,8 @@ def delta_mag(mag):
     return float(np.max(mag) - np.min(mag))
 
 
-def excess_var(mag, err):
-    """Intrinsic variability amplitude: sqrt((Var - mean(err^2)) / mean^2)."""
+def intrinsic_sigma_mag(mag, err):
+    """Magnitude-space intrinsic scatter: sqrt(max(Var - mean(err^2), 0))."""
     mag = np.asarray(mag, float)
     err = np.asarray(err, float)
     mask = np.isfinite(mag) & np.isfinite(err) & (err > 0)
@@ -715,12 +715,9 @@ def excess_var(mag, err):
         return np.nan
     mag = mag[mask]
     err = err[mask]
-    mu = np.mean(mag)
-    if mu == 0:
-        return np.nan
     var = np.var(mag, ddof=1)
     mean_err2 = np.mean(err ** 2)
-    inner = (var - mean_err2) / (mu ** 2)
+    inner = var - mean_err2
     return float(np.sqrt(inner)) if inner > 0 else 0.0
 
 
@@ -827,8 +824,8 @@ def small_kurtosis(mag):
     return float(sp_stats.kurtosis(mag, bias=False))
 
 
-def pvar(mag, err):
-    """Probability that the source is variable (1 - chi2 CDF)."""
+def constancy_p_value(mag, err):
+    """Chi-square tail p-value under a constant-flux null model."""
     mag = np.asarray(mag, float)
     err = np.asarray(err, float)
     mask = np.isfinite(mag) & np.isfinite(err) & (err > 0)
@@ -1396,7 +1393,7 @@ def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=Tr
     _beyond1std = beyond_1_std(mag)
     _con = con(mag)
     _delta_mag = delta_mag(mag)
-    _excess_var = excess_var(mag, merr)
+    _intrinsic_sigma_mag = intrinsic_sigma_mag(mag, merr)
     _first_mag = float(mag[0]) if mag.size > 0 else np.nan
     _gskew = gskew(mag)
     _max_slope = max_slope(mag, jd_arr)
@@ -1407,7 +1404,7 @@ def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=Tr
     _q31 = q31(mag)
     _skew = skew(mag)
     _small_kurtosis = small_kurtosis(mag)
-    _pvar = pvar(mag, merr)
+    _constancy_p_value = constancy_p_value(mag, merr)
     _anderson_darling = anderson_darling(mag)
     _pair_slope_trend = pair_slope_trend(mag)
     _rcs = rcs(mag)
@@ -1514,7 +1511,7 @@ def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=Tr
         ("beyond_1_std", _beyond1std),
         ("con", _con),
         ("delta_mag_fid", _delta_mag),
-        ("excess_var", _excess_var),
+        ("intrinsic_sigma_mag", _intrinsic_sigma_mag),
         ("first_mag", _first_mag),
         ("gskew", _gskew),
         ("max_slope", _max_slope),
@@ -1525,7 +1522,7 @@ def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=Tr
         ("q31", _q31),
         ("skew", _skew),
         ("small_kurtosis", _small_kurtosis),
-        ("pvar", _pvar),
+        ("constancy_p_value", _constancy_p_value),
         ("anderson_darling", _anderson_darling),
         ("pair_slope_trend", _pair_slope_trend),
         ("rcs", _rcs),
@@ -1619,9 +1616,9 @@ def print_summary(summary, max_rows=10):
 
     print("\n=== ALeRCE FEATURES ===")
     print(f"Amplitude={_fmt(summary['amplitude'])}  Beyond1Std={_fmt(summary['beyond_1_std'])}  Con={summary['con']}  delta_mag={_fmt(summary['delta_mag_fid'])}")
-    print(f"ExcessVar={_fmt(summary['excess_var'])}  first_mag={_fmt(summary['first_mag'],3)}  Gskew={_fmt(summary['gskew'])}  MaxSlope={_fmt(summary['max_slope'])}")
+    print(f"IntrinsicSigmaMag={_fmt(summary['intrinsic_sigma_mag'])}  first_mag={_fmt(summary['first_mag'],3)}  Gskew={_fmt(summary['gskew'])}  MaxSlope={_fmt(summary['max_slope'])}")
     print(f"Meanvariance={_fmt(summary['meanvariance'])}  MedianAbsDev={_fmt(summary['median_abs_dev'])}  MedianBRP={_fmt(summary['median_brp'])}  PercentAmplitude={_fmt(summary['percent_amplitude'])}")
-    print(f"Q31={_fmt(summary['q31'])}  Skew={_fmt(summary['skew'])}  SmallKurtosis={_fmt(summary['small_kurtosis'])}  Pvar={_fmt(summary['pvar'])}")
+    print(f"Q31={_fmt(summary['q31'])}  Skew={_fmt(summary['skew'])}  SmallKurtosis={_fmt(summary['small_kurtosis'])}  ConstancyPValue={_fmt(summary['constancy_p_value'])}")
     print(f"AndersonDarling={_fmt(summary['anderson_darling'])}  PairSlopeTrend={_fmt(summary['pair_slope_trend'])}  Rcs={_fmt(summary['rcs'])}  Autocor_length={summary['autocor_length']}")
     print(f"SF_ML_amplitude={_fmt(summary['sf_ml_amplitude'])}  SF_ML_gamma={_fmt(summary['sf_ml_gamma'])}")
 

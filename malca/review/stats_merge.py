@@ -71,7 +71,7 @@ def merge_stats_summary_into_payload(payload: dict, summary: dict) -> None:
         "beyond_1_std": "stats_beyond_1_std",
         "con": "stats_con",
         "delta_mag_fid": "stats_delta_mag_fid",
-        "excess_var": "stats_excess_var",
+        "intrinsic_sigma_mag": "stats_intrinsic_sigma_mag",
         "first_mag": "stats_first_mag",
         "gskew": "stats_gskew",
         "max_slope": "stats_max_slope",
@@ -82,7 +82,7 @@ def merge_stats_summary_into_payload(payload: dict, summary: dict) -> None:
         "q31": "stats_q31",
         "skew": "stats_skew",
         "small_kurtosis": "stats_small_kurtosis",
-        "pvar": "stats_pvar",
+        "constancy_p_value": "stats_constancy_p_value",
         "anderson_darling": "stats_anderson_darling",
         "pair_slope_trend": "stats_pair_slope_trend",
         "rcs": "stats_rcs",
@@ -125,6 +125,21 @@ def merge_stats_summary_into_payload(payload: dict, summary: dict) -> None:
             continue
         payload[target_key] = value
 
+    # Backward compatibility for older summary payloads.
+    legacy_scalar_map = {
+        "excess_var": "stats_intrinsic_sigma_mag",
+        "pvar": "stats_constancy_p_value",
+    }
+    for source_key, target_key in legacy_scalar_map.items():
+        if target_key in payload:
+            continue
+        value = summary.get(source_key)
+        if _is_missing_value(value):
+            continue
+        if isinstance(value, (pd.DataFrame, pd.Series, dict, list, tuple, set)):
+            continue
+        payload[target_key] = value
+
     err_stats = summary.get("error_and_snr_stats")
     if isinstance(err_stats, dict):
         for subkey, value in err_stats.items():
@@ -151,4 +166,3 @@ def merge_stats_summary_into_payload(payload: dict, summary: dict) -> None:
     by_camera = summary.get("by_camera")
     if isinstance(by_camera, pd.DataFrame) and not by_camera.empty:
         payload["n_cameras"] = int(len(by_camera))
-

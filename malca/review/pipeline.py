@@ -5,8 +5,10 @@ columns in the candidate payload) and can run missing stages on demand.
 """
 from __future__ import annotations
 
+import contextlib
+import io
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 import json
 import sqlite3
 
@@ -34,6 +36,53 @@ MAX_GAP_POINTS = RUN_MAX_GAP_POINTS
 RUN_MAX_GAP_DAYS = None
 RUN_MIN_DURATION_DAYS = 0.0
 BASELINE_TAG = BASELINE_FUNC
+
+
+class _ProgressCaptureStream(io.TextIOBase):
+    """Stream that forwards stdout/stderr lines to a progress callback."""
+
+    def __init__(self, sink: Callable[[str], None]) -> None:
+        super().__init__()
+        self._sink = sink
+        self._buffer = ""
+        self._last_line = ""
+
+    def write(self, text: str) -> int:
+        if not text:
+            return 0
+        for ch in str(text):
+            if ch in "\r\n":
+                self._emit_buffer()
+            else:
+                self._buffer += ch
+        return len(text)
+
+    def flush(self) -> None:
+        self._emit_buffer()
+
+    def _emit_buffer(self) -> None:
+        line = self._buffer.strip()
+        self._buffer = ""
+        if not line:
+            return
+        if line == self._last_line:
+            return
+        self._last_line = line
+        try:
+            self._sink(line)
+        except Exception:
+            pass
+
+
+def _run_with_progress_capture(func: Callable[[], object], p: Callable[[str], None] | None) -> object:
+    """Run *func* while forwarding printed lines to progress callback *p*."""
+    if p is None:
+        return func()
+    stream = _ProgressCaptureStream(p)
+    with contextlib.redirect_stdout(stream), contextlib.redirect_stderr(stream):
+        result = func()
+    stream.flush()
+    return result
 
 
 
@@ -105,6 +154,7 @@ def run_missing_stages(
     conn: sqlite3.Connection,
     candidate_id: str,
     progress_callback: Callable[[str], None] | None = None,
+    stage_complete_callback: Callable[[str], None] | None = None,
     force_stages: list[str] | None = None,
 ) -> list[str]:
     """Detect and run missing pipeline stages for a candidate.
@@ -134,6 +184,12 @@ def run_missing_stages(
         else:
             print(f"[pipeline] {msg}")
 
+    def mark_stage_complete(stage_name: str) -> None:
+        """Persist payload after each stage and notify listeners."""
+        update_candidate_payload(conn, candidate_id, payload)
+        if stage_complete_callback:
+            stage_complete_callback(stage_name)
+
     # 3. Run missing stages in order
     force = force_stages or []
 
@@ -142,12 +198,14 @@ def run_missing_stages(
             p("Computing LC stats...")
             _run_stats_stage(payload, lc_path, p)
             stages_run.append("stats")
+            mark_stage_complete("stats")
 
     if status.get("events") in ("missing", "partial") or "events" in force:
         if lc_path and Path(lc_path).exists():
             p("Running event detection...")
             _run_events_stage(payload, lc_path, p)
             stages_run.append("events")
+            mark_stage_complete("events")
 
     if status.get("characterize") in ("missing", "partial") or "characterize" in force:
         ra = payload.get("ra_deg")
@@ -156,6 +214,7 @@ def run_missing_stages(
             p("Characterizing...")
             _run_characterize_stage(payload, p)
             stages_run.append("characterize")
+            mark_stage_complete("characterize")
 
     if status.get("vetting") in ("missing", "partial") or "vetting" in force:
         ra = payload.get("ra_deg")
@@ -164,6 +223,7 @@ def run_missing_stages(
             p("Vetting crossmatches...")
             _run_vetting_stage(payload, p)
             stages_run.append("vetting")
+            mark_stage_complete("vetting")
 
     if status.get("external_lcs") in ("missing", "partial") or "external_lcs" in force:
         ra = payload.get("ra_deg")
@@ -172,10 +232,7 @@ def run_missing_stages(
             p("Fetching external LCs...")
             _run_external_lcs_stage(payload, output_dir=_resolve_output_dir(conn, candidate_id), p=p)
             stages_run.append("external_lcs")
-
-    # 4. Write updated payload back to DB
-    if stages_run:
-        update_candidate_payload(conn, candidate_id, payload)
+            mark_stage_complete("external_lcs")
 
     return stages_run
 
@@ -272,7 +329,7 @@ def _run_characterize_stage(payload: dict, p: Callable | None = None) -> None:
     """Run characterize_candidates_df on a 1-row DataFrame."""
     try:
         df = pd.DataFrame([payload])
-        df_out = characterize_candidates_df(df)
+        df_out = _run_with_progress_capture(lambda: characterize_candidates_df(df), p)
         if isinstance(df_out, pd.DataFrame) and not df_out.empty:
             row = df_out.iloc[0].to_dict()
             for k, v in row.items():
@@ -287,10 +344,13 @@ def _run_vetting_stage(payload: dict, p: Callable | None = None) -> None:
     """Run vet_candidates on a 1-row DataFrame."""
     try:
         df = pd.DataFrame([payload])
-        df_out = vet_candidates(
-            df,
-            run_atlas=False,
-            # (other vetting happens unconditionally in vet_candidates if columns missing)
+        df_out = _run_with_progress_capture(
+            lambda: vet_candidates(
+                df,
+                run_atlas=False,
+                # (other vetting happens unconditionally in vet_candidates if columns missing)
+            ),
+            p,
         )
         if isinstance(df_out, pd.DataFrame) and not df_out.empty:
             row = df_out.iloc[0].to_dict()
@@ -325,18 +385,21 @@ def _run_external_lcs_stage(payload: dict, output_dir: Path, p: Callable | None 
     """Run fetch_external_lcs on a 1-row DataFrame."""
     try:
         df = pd.DataFrame([payload])
-        df_out = fetch_external_lcs(
-            df,
-            output_dir=output_dir,
-            run_atlas=True,
-            run_ztf=True,
-            run_gaia_epoch=True,
-            run_tess=False,
-            run_kepler=False,
-            run_aavso=False,
-            run_ps1=True,
-            run_crts=True,
-            progress_callback=p,
+        df_out = _run_with_progress_capture(
+            lambda: fetch_external_lcs(
+                df,
+                output_dir=output_dir,
+                run_atlas=True,
+                run_ztf=True,
+                run_gaia_epoch=True,
+                run_tess=False,
+                run_kepler=False,
+                run_aavso=False,
+                run_ps1=True,
+                run_crts=True,
+                progress_callback=p,
+            ),
+            p,
         )
         if isinstance(df_out, pd.DataFrame) and not df_out.empty:
             row = df_out.iloc[0].to_dict()

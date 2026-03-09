@@ -268,29 +268,39 @@ def _build_title(payload: dict, df: pd.DataFrame) -> str:
 
 
 def _build_stat_rows(payload: dict, df: pd.DataFrame, filtered_cameras: set[int]) -> list[tuple[str, str]]:
+    _ = df
+
+    def _format_value(value: object) -> str:
+        if isinstance(value, (bool, np.bool_)):
+            return "True" if bool(value) else "False"
+        if isinstance(value, (int, np.integer)):
+            return f"{int(value):,}"
+        if isinstance(value, (float, np.floating)):
+            f = float(value)
+            if not np.isfinite(f):
+                return ""
+            if f != 0.0 and (abs(f) < 1e-3 or abs(f) >= 1e4):
+                mantissa, exponent = f"{f:.6e}".split("e")
+                mantissa = mantissa.rstrip("0").rstrip(".")
+                exp = int(exponent)
+                return rf"${mantissa}\times10^{{{exp}}}$"
+            return f"{f:.6g}"
+        return str(value)
+
     rows: list[tuple[str, str]] = []
-    for label, key, fmt in (
-        # light curve stats
-        ("σ mag", "stats_photometry_robust_sigma_mag", "{:.4f}"),
-        ("std mag", "stats_photometry_std_mag", "{:.4f}"),
-        ("IQR mag", "stats_photometry_IQR_mag", "{:.4f}"),
-        ("χ² vs const", "stats_variability_reduced_chi2_vs_constant", "{:.2f}"),
-        ("von Neumann", "stats_variability_von_neumann_ratio", "{:.3f}"),
-        ("lag-1 ρ", "stats_variability_lag1_autocorr", "{:.3f}"),
-        ("Stetson J", "stats_variability_stetson_J", "{:.3f}"),
-        ("Stetson K", "stats_variability_stetson_K", "{:.3f}"),
-        ("SNR med", "stats_error_and_snr_stats_snr_median", "{:.1f}"),
-        ("Duty cycle", "stats_duty_cycle_fraction", "{:.3f}"),
-        ("Δt med (d)", "stats_cadence_median_dt_days", "{:.3f}"),
-        ("Span (d)", "stats_time_span_days", "{:.1f}"),
-        ("Trend (mag/yr)", "stats_trend_slope_mag_per_year", "{:.4f}"),
-        ("Trend R²", "stats_trend_r2", "{:.3f}"),
-    ):
-        value = _parse_num(payload, key)
-        if value is not None:
-            rows.append((label, fmt.format(value)))
+    for key in sorted(k for k in payload.keys() if isinstance(k, str) and k.startswith("stats_")):
+        value = payload.get(key)
+        if value is None:
+            continue
+        if isinstance(value, (pd.DataFrame, pd.Series, np.ndarray, dict, list, tuple, set)):
+            continue
+        display = _format_value(value)
+        if not display or display in {"nan", "NaN", "None"}:
+            continue
+        rows.append((key, display))
+
     if filtered_cameras:
-        rows.append(("Filtered cams", ",".join(str(c) for c in sorted(filtered_cameras))))
+        rows.append(("filtered_cams", ",".join(str(c) for c in sorted(filtered_cameras))))
     return rows
 
 
@@ -882,8 +892,28 @@ def _overlay_external_lcs(
 
             x_vals = band_x[good_idx]
             y_vals = y[good_idx]
+            jd_vals = x_vals + plot_jd_offset
             if err_array is not None:
                 err_array = err_array[good_idx]
+
+            if err_array is not None:
+                custom_ext = np.column_stack([jd_vals, err_array])
+                hover_ext = (
+                    f"<b>{band_info['label']}</b><br>"
+                    "JD: %{customdata[0]:.5f}<br>"
+                    f"JD - {int(plot_jd_offset)}: %{{x:.5f}}<br>"
+                    + ("F: %{y:.4e}<br>" if is_flux else "m: %{y:.4f}<br>")
+                    + ("σ<sub>F</sub>: %{customdata[1]:.3e}<extra></extra>" if is_flux else "σ<sub>m</sub>: %{customdata[1]:.4f}<extra></extra>")
+                )
+            else:
+                custom_ext = jd_vals.reshape(-1, 1)
+                hover_ext = (
+                    f"<b>{band_info['label']}</b><br>"
+                    "JD: %{customdata[0]:.5f}<br>"
+                    f"JD - {int(plot_jd_offset)}: %{{x:.5f}}<br>"
+                    + ("F: %{y:.4e}<br>" if is_flux else "m: %{y:.4f}<br>")
+                    + "<extra></extra>"
+                )
 
             fig.add_trace(
                 go.Scatter(
@@ -899,12 +929,8 @@ def _overlay_external_lcs(
                         "line": {"width": 0.5, "color": "rgba(255,255,255,0.5)"},
                     },
                     error_y={"type": "data", "array": err_array, "visible": err_array is not None, "thickness": 0.7, "width": 0, "color": band_info["color"]} if err_array is not None else None,
-                    hovertemplate=(
-                        f"<b>{band_info['label']}</b><br>"
-                        "JD plot: %{x:.5f}<br>"
-                        + ("Flux: %{y:.4e}<br>" if is_flux_source else "Mag: %{y:.4f}<br>")
-                        + "<extra></extra>"
-                    ),
+                    customdata=custom_ext,
+                    hovertemplate=hover_ext,
                     legendgroup=source_name,
                 ),
                 row=raw_row,
@@ -1131,11 +1157,35 @@ def build_interactive_lightcurve_figure(
             err = cdf["error"].to_numpy() if "error" in cdf.columns else np.full(len(cdf), np.nan)
             resid = cdf["resid"].to_numpy() if "resid" in cdf.columns else np.full(len(cdf), np.nan)
             baseline = cdf["baseline"].to_numpy() if "baseline" in cdf.columns else np.full(len(cdf), np.nan)
-            hover = np.column_stack([cdf["JD"].to_numpy(), err, resid, baseline])
+            jd_full = cdf["JD_plot"].to_numpy() + JD_OFFSET
+            mag_raw = cdf["mag"].to_numpy()
 
             if show_raw_mag:
-                y_raw = _mag_to_flux(cdf["mag"].to_numpy()) if is_flux else cdf["mag"].to_numpy()
+                y_raw = _mag_to_flux(mag_raw) if is_flux else mag_raw
                 err_raw = _flux_err_from_mag_err(y_raw, err) if is_flux else err
+                hover_raw = np.column_stack([jd_full, err, resid, baseline, err_raw, mag_raw])
+                raw_hovertemplate = (
+                    "<b>%{fullData.name}</b><br>"
+                    "JD: %{customdata[0]:.5f}<br>"
+                    f"JD - {int(JD_OFFSET)}: %{{x:.5f}}<br>"
+                )
+                if is_flux:
+                    raw_hovertemplate += (
+                        "F: %{y:.4e}<br>"
+                        "σ<sub>F</sub>: %{customdata[4]:.3e}<br>"
+                        "m: %{customdata[5]:.4f}<br>"
+                        "σ<sub>m</sub>: %{customdata[1]:.4f}<br>"
+                        "Δm: %{customdata[2]:.4f}<br>"
+                        "m<sub>base</sub>: %{customdata[3]:.4f}<extra></extra>"
+                    )
+                else:
+                    raw_hovertemplate += (
+                        "m: %{y:.4f}<br>"
+                        "σ<sub>m</sub>: %{customdata[1]:.4f}<br>"
+                        "Δm: %{customdata[2]:.4f}<br>"
+                        "m<sub>base</sub>: %{customdata[3]:.4f}<extra></extra>"
+                    )
+
                 fig.add_trace(
                     go.Scatter(
                         x=cdf["JD_plot"],
@@ -1149,16 +1199,8 @@ def build_interactive_lightcurve_figure(
                             "line": {"width": 0.8, "color": colors["marker_line"]},
                         },
                         error_y={"type": "data", "array": err_raw, "visible": True, "thickness": 1, "width": 0, "color": color},
-                        customdata=hover,
-                        hovertemplate=(
-                            "<b>%{fullData.name}</b><br>"
-                            "JD: %{customdata[0]:.5f}<br>"
-                            "JD plot: %{x:.5f}<br>"
-                            + ("Flux: %{y:.4e}<br>" if is_flux else "Mag: %{y:.4f}<br>")
-                            + "Err: %{customdata[1]:.4f}<br>"
-                            "Resid: %{customdata[2]:.4f}<br>"
-                            "Baseline: %{customdata[3]:.4f}<extra></extra>"
-                        ),
+                        customdata=hover_raw,
+                        hovertemplate=raw_hovertemplate,
                     ),
                     row=row_map['raw'],
                     col=1,
@@ -1166,6 +1208,25 @@ def build_interactive_lightcurve_figure(
 
             if show_residuals:
                 y_resid = (_mag_to_flux(resid) - 1.0) if is_flux else resid
+                err_resid = _flux_err_from_mag_err(_mag_to_flux(resid), err) if is_flux else err
+                hover_resid = np.column_stack([jd_full, err, resid, baseline, err_resid, mag_raw])
+                resid_hovertemplate = (
+                    "<b>%{fullData.name}</b><br>"
+                    "JD: %{customdata[0]:.5f}<br>"
+                    f"JD - {int(JD_OFFSET)}: %{{x:.5f}}<br>"
+                )
+                if is_flux:
+                    resid_hovertemplate += (
+                        "ΔF/F: %{y:.4f}<br>"
+                        "σ<sub>F</sub>: %{customdata[4]:.3e}<br>"
+                        "Δm: %{customdata[2]:.4f}<extra></extra>"
+                    )
+                else:
+                    resid_hovertemplate += (
+                        "Δm: %{y:.4f}<br>"
+                        "σ<sub>m</sub>: %{customdata[1]:.4f}<extra></extra>"
+                    )
+
                 fig.add_trace(
                     go.Scatter(
                         x=cdf["JD_plot"],
@@ -1178,12 +1239,8 @@ def build_interactive_lightcurve_figure(
                             "color": color,
                             "line": {"width": 0.8, "color": colors["marker_line"]},
                         },
-                        customdata=hover,
-                        hovertemplate=(
-                            "<b>%{fullData.name}</b><br>"
-                            "JD: %{customdata[0]:.5f}<br>"
-                            + ("ΔF/F: %{y:.4f}<extra></extra>" if is_flux else "Residual: %{y:.4f}<extra></extra>")
-                        ),
+                        customdata=hover_resid,
+                        hovertemplate=resid_hovertemplate,
                     ),
                     row=row_map['resid'],
                     col=1,
@@ -1203,7 +1260,12 @@ def build_interactive_lightcurve_figure(
                         showlegend=False,
                         line={"width": 1.6, "color": _stable_camera_color(cam)},
                         opacity=baseline_opacity,
-                        hovertemplate=("Baseline flux: %{y:.4e}<extra></extra>" if is_flux else "Baseline: %{y:.4f}<extra></extra>"),
+                        customdata=cbase["JD_plot"].to_numpy() + JD_OFFSET,
+                        hovertemplate=(
+                            f"JD: %{{customdata:.5f}}<br>JD - {int(JD_OFFSET)}: %{{x:.5f}}<br>F<sub>base</sub>: %{{y:.4e}}<extra></extra>"
+                            if is_flux
+                            else f"JD: %{{customdata:.5f}}<br>JD - {int(JD_OFFSET)}: %{{x:.5f}}<br>m<sub>base</sub>: %{{y:.4f}}<extra></extra>"
+                        ),
                     ),
                     row=row_map['raw'],
                     col=1,
@@ -1267,13 +1329,13 @@ def build_interactive_lightcurve_figure(
                     showlegend=False,
                     hovertemplate=(
                         f"<b>{str(entry['kind']).title()} event</b><br>"
-                        f"t0 (JD): {float(entry['t0']):.5f}<br>"
-                        f"width param: {float(entry['half_width']) / 2.0:.3f}<br>"
-                        f"logBF: {bf_text}<br>"
-                        f"logBF threshold: {logbf_thr_text}<br>"
-                        f"significance threshold: {sig_thr_text}<br>"
+                        f"t<sub>0</sub> (JD): {float(entry['t0']):.5f}<br>"
+                        f"w: {float(entry['half_width']) / 2.0:.3f}<br>"
+                        f"log BF: {bf_text}<br>"
+                        f"log BF<sub>thr</sub>: {logbf_thr_text}<br>"
+                        f"sig<sub>thr</sub>: {sig_thr_text}<br>"
                         f"morph: {entry['morph'] or 'n/a'}<br>"
-                        f"confidence: {float(entry['confidence']):.2f}<extra></extra>"
+                        f"c: {float(entry['confidence']):.2f}<extra></extra>"
                     ),
                 ),
                 row=row_map['raw'],
@@ -1299,7 +1361,28 @@ def build_interactive_lightcurve_figure(
                 resid = cdf["resid"].to_numpy() if "resid" in cdf.columns else cdf["mag"].to_numpy()
                 y_phase = (_mag_to_flux(resid) - 1.0) if is_flux else resid
                 err_phase = _flux_err_from_mag_err(_mag_to_flux(resid), err) if is_flux else err
-                hover = np.column_stack([cdf["JD"].to_numpy(), err, cdf["mag"].to_numpy()])
+                jd_full_phase = cdf["JD_plot"].to_numpy() + JD_OFFSET
+                hover_phase = np.column_stack([jd_full_phase, err, cdf["mag"].to_numpy(), resid, err_phase])
+                phase_hovertemplate = (
+                    "<b>Phase-folded residual</b><br>"
+                    "φ: %{x:.4f}<br>"
+                    "JD: %{customdata[0]:.5f}<br>"
+                )
+                if is_flux:
+                    phase_hovertemplate += (
+                        "ΔF/F: %{y:.4f}<br>"
+                        "σ<sub>F</sub>: %{customdata[4]:.3e}<br>"
+                        "Δm: %{customdata[3]:.4f}<br>"
+                        "m: %{customdata[2]:.4f}<br>"
+                        "σ<sub>m</sub>: %{customdata[1]:.4f}<extra></extra>"
+                    )
+                else:
+                    phase_hovertemplate += (
+                        "Δm: %{y:.4f}<br>"
+                        "σ<sub>m</sub>: %{customdata[1]:.4f}<br>"
+                        "m: %{customdata[2]:.4f}<extra></extra>"
+                    )
+
                 fig.add_trace(
                     go.Scatter(
                         x=cdf["phase"],
@@ -1313,15 +1396,8 @@ def build_interactive_lightcurve_figure(
                             "line": {"width": 0.7, "color": "rgba(10,10,10,0.95)"},
                         },
                         error_y={"type": "data", "array": err_phase, "visible": True, "thickness": 1, "width": 0, "color": color},
-                        customdata=hover,
-                        hovertemplate=(
-                            "<b>Phase-folded (residual)</b><br>"
-                            "Phase: %{x:.4f}<br>"
-                            + ("ΔF/F: %{y:.4f}<br>" if is_flux else "Resid: %{y:.4f}<br>")
-                            + "JD: %{customdata[0]:.5f}<br>"
-                            "Err: %{customdata[1]:.4f}<br>"
-                            "Raw mag: %{customdata[2]:.4f}<extra></extra>"
-                        ),
+                        customdata=hover_phase,
+                        hovertemplate=phase_hovertemplate,
                     ),
                     row=row_map['phase'],
                     col=1,
@@ -1354,21 +1430,21 @@ def build_interactive_lightcurve_figure(
                 y_pad = 0.5 if not is_flux else y_max * 0.05
             if is_flux:
                 fig.update_yaxes(
-                    title_text="Flux [arb]",
+                    title_text=r"$F$ [arb]",
                     row=row_map['raw'],
                     col=1,
                     range=[max(0, y_min - y_pad), y_max + y_pad],
                 )
             else:
                 fig.update_yaxes(
-                    title_text="Magnitude [mag]",
+                    title_text=r"$m$ [mag]",
                     row=row_map['raw'],
                     col=1,
                     range=[y_max + y_pad, y_min - y_pad],
                 )
         else:
             fig.update_yaxes(
-                title_text="Flux [arb]" if is_flux else "Magnitude [mag]",
+                title_text=r"$F$ [arb]" if is_flux else r"$m$ [mag]",
                 row=row_map['raw'],
                 col=1,
                 autorange="reversed" if not is_flux else True,
@@ -1376,7 +1452,7 @@ def build_interactive_lightcurve_figure(
     
     if show_residuals:
         fig.update_yaxes(
-            title_text="ΔF/F (flux residual)" if is_flux else "Residual [mag]",
+            title_text=r"$\Delta F/F$" if is_flux else r"$\Delta m$ [mag]",
             row=row_map['resid'],
             col=1,
             autorange="reversed" if not is_flux else True,
@@ -1384,10 +1460,10 @@ def build_interactive_lightcurve_figure(
         fig.add_hline(y=0.0, line_color=colors["guide_line"], line_dash="dot", row=row_map['resid'], col=1)
 
     if phase_enabled and 'phase' in row_map and phase_period is not None:
-        source_tag = f", {phase_source}" if phase_source else ""
-        fig.update_xaxes(title_text=f"Phase (P={phase_period:.5f} d{source_tag})", row=row_map['phase'], col=1, range=[-0.02, 2.02])
+        phase_axis_title = rf"$\phi\,(P={phase_period:.5f}\,\mathrm{{d}})$"
+        fig.update_xaxes(title_text=phase_axis_title, row=row_map['phase'], col=1, range=[-0.02, 2.02])
         fig.update_yaxes(
-            title_text="Phase ΔF/F" if is_flux else "Phase residual [mag]",
+            title_text=r"$\Delta F/F$" if is_flux else r"$\Delta m$ [mag]",
             row=row_map['phase'],
             col=1,
             autorange="reversed" if not is_flux else True,
@@ -1401,7 +1477,7 @@ def build_interactive_lightcurve_figure(
         jd_axis_row = row_map['raw']
         
     if jd_axis_row is not None:
-        fig.update_xaxes(title_text=f"JD - {int(JD_OFFSET)}", row=jd_axis_row, col=1)
+        fig.update_xaxes(title_text=rf"$\mathrm{{JD}} - {int(JD_OFFSET)}$", row=jd_axis_row, col=1)
         # Link x-axes if both raw and resid are present
         if show_raw_mag and show_residuals:
              fig.update_xaxes(matches="x", row=row_map['resid'], col=1)
