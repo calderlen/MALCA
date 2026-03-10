@@ -13,12 +13,158 @@ from malca.config.config_stats import (
     CE_N_PHASE_BINS,
     CE_N_MAG_BINS,
     LS_SAMPLES_PER_PEAK,
+    PERIODOGRAM_REFINE_TOP_K,
+    PERIODOGRAM_REFINE_WINDOW_STEPS,
+    PERIODOGRAM_REFINE_N_GRID,
 )
 
 
+def _top_indices(
+    metric: np.ndarray,
+    *,
+    n_top: int,
+    maximize: bool,
+    min_separation: int = 1,
+) -> list[int]:
+    """Select top candidate indices with simple index-space separation."""
+    arr = np.asarray(metric, dtype=float)
+    finite = np.isfinite(arr)
+    if not np.any(finite):
+        return []
+
+    n_top = max(1, int(n_top))
+    min_separation = max(1, int(min_separation))
+    order = np.argsort(-arr if maximize else arr)
+
+    chosen: list[int] = []
+    for idx in order:
+        i = int(idx)
+        if not finite[i]:
+            continue
+        if any(abs(i - j) < min_separation for j in chosen):
+            continue
+        chosen.append(i)
+        if len(chosen) >= n_top:
+            break
+    return chosen
 
 
+def _refine_best_period_from_min_metric(
+    times: np.ndarray,
+    yvals: np.ndarray,
+    period_arr: np.ndarray,
+    metric_arr: np.ndarray,
+    *,
+    min_period: float,
+    max_period: float,
+    n_top: int,
+    window_steps: float,
+    refine_n_grid: int,
+    scan_fn,
+    scan_args: tuple,
+) -> float:
+    """Refine a minimum-metric period by rescanning small windows around top minima."""
+    best_idx = int(np.nanargmin(metric_arr))
+    best_period = float(period_arr[best_idx])
+    best_metric = float(metric_arr[best_idx])
 
+    if period_arr.size < 2:
+        return best_period
+
+    refine_n_grid = int(refine_n_grid)
+    if refine_n_grid < 3:
+        return best_period
+
+    step = float(abs(period_arr[1] - period_arr[0]))
+    if not np.isfinite(step) or step <= 0:
+        return best_period
+
+    half_window = max(step, float(abs(window_steps)) * step)
+    separation = max(1, int(round(abs(window_steps))))
+    candidates = _top_indices(
+        metric_arr,
+        n_top=n_top,
+        maximize=False,
+        min_separation=separation,
+    )
+    if not candidates:
+        return best_period
+
+    for idx in candidates:
+        center = float(period_arr[int(idx)])
+        lo = max(float(min_period), center - half_window)
+        hi = min(float(max_period), center + half_window)
+        if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+            continue
+
+        local_grid = np.linspace(lo, hi, refine_n_grid)
+        local_idx, local_metric = scan_fn(times, yvals, local_grid, *scan_args)
+        local_idx = int(local_idx)
+        local_best_metric = float(local_metric[local_idx])
+        if local_best_metric < best_metric:
+            best_metric = local_best_metric
+            best_period = float(local_grid[local_idx])
+
+    return best_period
+
+
+def _refine_lsp_period(
+    ls: LombScargle,
+    *,
+    frequency: np.ndarray,
+    power: np.ndarray,
+    min_frequency: float,
+    max_frequency: float,
+    n_top: int,
+    window_steps: float,
+    refine_n_grid: int,
+) -> float:
+    """Refine an LSP maximum by rescanning small windows around top peaks."""
+    best_idx = int(np.nanargmax(power))
+    best_frequency = float(frequency[best_idx])
+    best_power = float(power[best_idx])
+
+    if frequency.size < 2:
+        return float(1.0 / best_frequency)
+
+    refine_n_grid = int(refine_n_grid)
+    if refine_n_grid < 3:
+        return float(1.0 / best_frequency)
+
+    dfreq = np.diff(frequency)
+    freq_step = float(np.nanmedian(dfreq))
+    if not np.isfinite(freq_step) or freq_step <= 0:
+        return float(1.0 / best_frequency)
+
+    half_window = max(freq_step, float(abs(window_steps)) * freq_step)
+    separation = max(1, int(round(abs(window_steps))))
+    candidates = _top_indices(
+        power,
+        n_top=n_top,
+        maximize=True,
+        min_separation=separation,
+    )
+    if not candidates:
+        return float(1.0 / best_frequency)
+
+    for idx in candidates:
+        center = float(frequency[int(idx)])
+        lo = max(float(min_frequency), center - half_window)
+        hi = min(float(max_frequency), center + half_window)
+        if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+            continue
+
+        local_frequency = np.linspace(lo, hi, refine_n_grid)
+        local_power = np.asarray(ls.power(local_frequency))
+        if local_power.size == 0:
+            continue
+        local_idx = int(np.argmax(local_power))
+        local_best_power = float(local_power[local_idx])
+        if local_best_power > best_power:
+            best_power = local_best_power
+            best_frequency = float(local_frequency[local_idx])
+
+    return float(1.0 / best_frequency)
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +253,10 @@ def pdm_find_period(
     max_period: float = PDM_MAX_PERIOD,
     n_periods: int = PDM_N_PERIODS,
     n_bins: int = PDM_N_BINS,
+    refine: bool = False,
+    refine_top_k: int = PERIODOGRAM_REFINE_TOP_K,
+    refine_window_steps: float = PERIODOGRAM_REFINE_WINDOW_STEPS,
+    refine_n_grid: int = PERIODOGRAM_REFINE_N_GRID,
 ) -> tuple[float, np.ndarray, np.ndarray]:
     """Run PDM over a grid of trial periods.
 
@@ -120,7 +270,22 @@ def pdm_find_period(
     period_arr = np.linspace(min_period, max_period, n_periods)
     best_idx, theta = _pdm_scan_grid(t_shifted, yvals, period_arr, n_bins)
     best_idx = int(best_idx)
-    return float(period_arr[best_idx]), period_arr, theta
+    best_period = float(period_arr[best_idx])
+    if bool(refine):
+        best_period = _refine_best_period_from_min_metric(
+            t_shifted,
+            yvals,
+            period_arr,
+            theta,
+            min_period=min_period,
+            max_period=max_period,
+            n_top=refine_top_k,
+            window_steps=refine_window_steps,
+            refine_n_grid=refine_n_grid,
+            scan_fn=_pdm_scan_grid,
+            scan_args=(n_bins,),
+        )
+    return best_period, period_arr, theta
 
 
 # ---------------------------------------------------------------------------
@@ -216,6 +381,10 @@ def ce_find_period(
     n_periods: int = PDM_N_PERIODS,
     n_phase_bins: int = CE_N_PHASE_BINS,
     n_mag_bins: int = CE_N_MAG_BINS,
+    refine: bool = False,
+    refine_top_k: int = PERIODOGRAM_REFINE_TOP_K,
+    refine_window_steps: float = PERIODOGRAM_REFINE_WINDOW_STEPS,
+    refine_n_grid: int = PERIODOGRAM_REFINE_N_GRID,
 ) -> tuple[float, np.ndarray, np.ndarray]:
     """Run Conditional Entropy period search.
 
@@ -229,7 +398,22 @@ def ce_find_period(
     period_arr = np.linspace(min_period, max_period, n_periods)
     best_idx, entropy = _ce_scan_grid(t_shifted, yvals, period_arr, n_phase_bins, n_mag_bins)
     best_idx = int(best_idx)
-    return float(period_arr[best_idx]), period_arr, entropy
+    best_period = float(period_arr[best_idx])
+    if bool(refine):
+        best_period = _refine_best_period_from_min_metric(
+            t_shifted,
+            yvals,
+            period_arr,
+            entropy,
+            min_period=min_period,
+            max_period=max_period,
+            n_top=refine_top_k,
+            window_steps=refine_window_steps,
+            refine_n_grid=refine_n_grid,
+            scan_fn=_ce_scan_grid,
+            scan_args=(n_phase_bins, n_mag_bins),
+        )
+    return best_period, period_arr, entropy
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +426,10 @@ def lsp_find_period(
     min_period: float = PDM_MIN_PERIOD,
     max_period: float = PDM_MAX_PERIOD,
     samples_per_peak: int = LS_SAMPLES_PER_PEAK,
+    refine: bool = False,
+    refine_top_k: int = PERIODOGRAM_REFINE_TOP_K,
+    refine_window_steps: float = PERIODOGRAM_REFINE_WINDOW_STEPS,
+    refine_n_grid: int = PERIODOGRAM_REFINE_N_GRID,
 ) -> tuple[float, np.ndarray, np.ndarray]:
     """Run Lomb-Scargle periodogram via astropy.
 
@@ -260,4 +448,16 @@ def lsp_find_period(
     )
     period_arr = 1.0 / frequency
     best_idx = int(np.argmax(power))
-    return float(period_arr[best_idx]), period_arr, np.asarray(power)
+    best_period = float(period_arr[best_idx])
+    if bool(refine):
+        best_period = _refine_lsp_period(
+            ls,
+            frequency=np.asarray(frequency),
+            power=np.asarray(power),
+            min_frequency=min_freq,
+            max_frequency=max_freq,
+            n_top=refine_top_k,
+            window_steps=refine_window_steps,
+            refine_n_grid=refine_n_grid,
+        )
+    return best_period, period_arr, np.asarray(power)

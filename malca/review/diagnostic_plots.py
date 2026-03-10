@@ -83,6 +83,20 @@ def _apply_layout(fig: go.Figure, *, title: str, spec: dict, height: int = 280) 
     return fig
 
 
+def _axis_range_with_padding(values: list[float], *, pad_fraction: float, min_pad: float) -> list[float] | None:
+    """Return a padded axis range covering finite values, or None."""
+    finite = [float(v) for v in values if v is not None and math.isfinite(float(v))]
+    if not finite:
+        return None
+    lo = min(finite)
+    hi = max(finite)
+    span = hi - lo
+    pad = max(min_pad, span * pad_fraction)
+    if span <= 0:
+        pad = max(min_pad, abs(lo) * pad_fraction, 0.25)
+    return [float(lo - pad), float(hi + pad)]
+
+
 # ---------------------------------------------------------------------------
 # 1. Gaia CMD
 # ---------------------------------------------------------------------------
@@ -103,6 +117,8 @@ def build_cmd_figure(
     g_mag = _safe_float(payload, "phot_g_mean_mag")
     bp_rp = _safe_float(payload, "bp_rp")
     av = _safe_float(payload, "A_v_3d")
+    bprp0_payload = _safe_float(payload, "bprp0")
+    mg0_payload = _safe_float(payload, "mg0")
 
     # Distance: prefer distance_gspphot, fall back to parallax
     dist = _safe_float(payload, "distance_gspphot")
@@ -126,7 +142,10 @@ def build_cmd_figure(
 
     m_g = g_mag - 5.0 * math.log10(dist) + 5.0
 
-    if av is not None and av >= 0:
+    if mg0_payload is not None and bprp0_payload is not None:
+        m_g0 = mg0_payload
+        bp_rp0 = bprp0_payload
+    elif av is not None and av >= 0:
         m_g0 = m_g - CMD_A_G_PER_AV * av
         bp_rp0 = bp_rp - CMD_E_BP_RP_PER_AV * av
     else:
@@ -188,9 +207,22 @@ def build_cmd_figure(
             opacity=0.7,
         )
 
+    default_x_range = [-0.5, 5.0]
+    default_y_range = [16, -8]
+    x_range = _axis_range_with_padding(
+        [default_x_range[0], default_x_range[1], bp_rp, bp_rp0],
+        pad_fraction=0.08,
+        min_pad=0.2,
+    ) or default_x_range
+    y_range = _axis_range_with_padding(
+        [-8.0, 16.0, m_g, m_g0],
+        pad_fraction=0.08,
+        min_pad=0.6,
+    ) or [-8.0, 16.0]
+
     _apply_layout(fig, title="Gaia CMD", spec=spec)
-    fig.update_xaxes(title="BP - RP₀", range=[-0.5, 5.0])
-    fig.update_yaxes(title="M<sub>G,0</sub>", range=[16, -8])
+    fig.update_xaxes(title="BP - RP₀", range=x_range)
+    fig.update_yaxes(title="M<sub>G,0</sub>", range=[y_range[1], y_range[0]])
 
     return fig
 

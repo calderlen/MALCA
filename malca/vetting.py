@@ -43,7 +43,7 @@ import pyvo
 import requests
 
 from malca.config.config_characterize import GAIA_CHUNK_SIZE
-from malca.config.config_ltv import VIZIER_TAP_URL, SIMBAD_TAP_URL
+from malca.config.config_ltv import VIZIER_TAP_URL
 from malca.config.config_paths import GAIA_AIP_TAP_URL
 from malca.config.config_vetting import (
     VETTING_SIMBAD_BATCH_SIZE,
@@ -147,14 +147,9 @@ GAIA_EPOCH_VET_CHUNK_SIZE = CFG_GAIA_EPOCH_VET_CHUNK_SIZE
 def query_simbad_batch(
     df: pd.DataFrame,
     radius_arcsec: float = SIMBAD_RADIUS_ARCSEC,
-    chunk_size: int = SIMBAD_BATCH_SIZE,
-    method: Literal["tap", "xmatch"] = "tap",
 ) -> pd.DataFrame:
     """
-    Query SIMBAD by coordinates for all candidates.
-
-    method='tap'    — batch TAP upload (best for large batches).
-    method='xmatch' — CDS XMatch service (reliable for small batches).
+    Query SIMBAD by coordinates via CDS XMatch.
 
     Adds columns: simbad_main_id, simbad_otype, simbad_nbref, simbad_sep_arcsec.
     """
@@ -167,11 +162,7 @@ def query_simbad_batch(
         return df
 
     n = int(valid.sum())
-
-    if method == "xmatch":
-        return _simbad_via_xmatch(df, valid, n, radius_arcsec)
-    else:
-        return _simbad_via_tap(df, valid, n, radius_arcsec, chunk_size)
+    return _simbad_via_xmatch(df, valid, n, radius_arcsec)
 
 
 def _simbad_via_xmatch(
@@ -255,61 +246,6 @@ def _simbad_via_xmatch(
 
     print(f"SIMBAD: {matched}/{n} candidates matched")
     return df
-
-
-def _simbad_via_tap(
-    df: pd.DataFrame, valid, n: int, radius_arcsec: float, chunk_size: int,
-) -> pd.DataFrame:
-    """SIMBAD lookup via batch TAP upload (original bulk path)."""
-    print(f"SIMBAD: querying {n} candidates via TAP (radius={radius_arcsec}\")")
-
-    coords_df = pd.DataFrame({
-        "_idx": df.index[valid],
-        "ra": df.loc[valid, "ra"].values,
-        "dec": df.loc[valid, "dec"].values,
-    })
-
-    try:
-        result = batch_tap_crossmatch(
-            coords_df,
-            tap_url=SIMBAD_TAP_URL,
-            catalog_table="basic",
-            select_cols="c.main_id, c.otype, c.nbref",
-            ra_col="ra",
-            dec_col="dec",
-            match_radius_arcsec=radius_arcsec,
-            chunk_size=chunk_size,
-            n_workers=4,
-            verbose=True,
-            desc="SIMBAD TAP",
-            raise_on_all_failed=True,
-        )
-    except RuntimeError as e:
-        err_text = str(e)
-        if "unsupported MIME type" in err_text or "upload_table" in err_text:
-            print("SIMBAD: TAP upload rejected (MIME/upload_table issue); switching to CDS XMatch safe mode")
-        else:
-            print(f"SIMBAD: TAP query failed ({e}); falling back to CDS XMatch")
-        return _simbad_via_xmatch(df, valid, n, radius_arcsec)
-
-    matched = 0
-    if not result.empty:
-        # Keep best match per source (most references)
-        result["nbref"] = pd.to_numeric(result.get("nbref"), errors="coerce").fillna(0).astype(int)
-        result = result.sort_values("nbref", ascending=False).drop_duplicates(subset="_idx", keep="first")
-        for _, row in result.iterrows():
-            idx = int(row["_idx"])
-            if idx in df.index:
-                df.loc[idx, "simbad_main_id"] = str(row.get("main_id", ""))
-                df.loc[idx, "simbad_otype"] = str(row.get("otype", ""))
-                df.loc[idx, "simbad_nbref"] = int(row["nbref"])
-                df.loc[idx, "simbad_sep_arcsec"] = round(float(row["sep_arcsec"]), 3)
-                matched += 1
-
-    print(f"SIMBAD: {matched}/{n} candidates matched")
-    return df
-
-
 # =============================================================================
 # GAIA DR3 VARIABILITY TABLES
 # =============================================================================
@@ -2645,7 +2581,7 @@ def vet_candidates(
     run_gaia_epoch: bool = True,
     run_erosita: bool = True,
     run_pm_check: bool = True,
-    run_neowise_lc: bool = True,
+    run_neowise_lc: bool = False,
     simbad_radius_arcsec: float = SIMBAD_RADIUS_ARCSEC,
     asassn_radius_arcsec: float = ASASSN_VAR_RADIUS_ARCSEC,
     ztf_var_radius_arcsec: float = ZTF_VAR_RADIUS_ARCSEC,
@@ -2680,11 +2616,10 @@ def vet_candidates(
     run_gaia_epoch : check Gaia epoch photometry availability
     run_erosita : crossmatch eROSITA X-ray catalog
     run_pm_check : proper motion consistency with clusters
-    run_neowise_lc : fetch full NEOWISE light curves
+    run_neowise_lc : fetch full NEOWISE light curves (opt-in)
     checkpoint_path : if set, save intermediate results after each module
-    method : 'tap' (batch TAP upload, default) or 'xmatch' (CDS XMatch,
-        better for small batches / review GUI).  Propagated to SIMBAD,
-        ZTF vars, TNS, and eROSITA crossmatch functions.
+    method : Propagated to non-SIMBAD crossmatch functions such as ZTF vars,
+        TNS, and eROSITA. SIMBAD always uses CDS XMatch.
 
     Returns
     -------
@@ -2751,7 +2686,7 @@ def vet_candidates(
             df.to_parquet(checkpoint_path, index=False)
 
     if run_simbad:
-        _run_module("SIMBAD", query_simbad_batch, radius_arcsec=simbad_radius_arcsec, method=method)
+        _run_module("SIMBAD", query_simbad_batch, radius_arcsec=simbad_radius_arcsec)
 
     if run_gaia_var:
         _run_module("Gaia variability", query_gaia_variability, chunk_size=gaia_var_chunk_size)
@@ -2939,14 +2874,14 @@ def main():
     parser.add_argument("--no-pm-check", action="store_true", help="Skip proper motion consistency check")
     parser.add_argument("--no-atlas", action="store_true", help="Skip ATLAS forced photometry (default: enabled)")
     parser.add_argument("--atlas-token", type=str, default=None, help="ATLAS forced photometry API token (or set MALCA_ATLAS_TOKEN env var)")
-    parser.add_argument("--neowise-lc", dest="neowise_lc", action="store_true", help="Fetch full NEOWISE light curves (default: enabled)")
+    parser.add_argument("--neowise-lc", dest="neowise_lc", action="store_true", help="Fetch full NEOWISE light curves (default: disabled)")
     parser.add_argument("--no-neowise-lc", dest="neowise_lc", action="store_false", help="Skip full NEOWISE light curves")
     parser.add_argument("--neowise-output-dir", type=Path, default=None, help="Directory to save individual NEOWISE LCs")
     parser.add_argument("--neowise-workers", type=int, default=4, help="Parallel workers for NEOWISE queries")
     parser.add_argument("--checkpoint", type=Path, default=None, help="Checkpoint path (default: <input>_vetting_CHECKPOINT.parquet)")
     parser.add_argument("--no-checkpoint", action="store_true", help="Disable checkpoint saving/resume")
 
-    parser.set_defaults(neowise_lc=True)
+    parser.set_defaults(neowise_lc=False)
 
     args = parser.parse_args()
 

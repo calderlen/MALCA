@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from malca.review import app as review_app
@@ -25,6 +26,16 @@ def _write_skypatrol_csv(path: Path) -> None:
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(path, index=False)
+
+
+def _make_band_df(jd: np.ndarray, true_period: float, seed: int) -> pd.DataFrame:
+    rng = np.random.default_rng(seed)
+    phase = np.mod((jd - jd.min()) / true_period, 1.0)
+    # Asymmetric folded shape to distinguish P from P/2 harmonics.
+    resid = 0.20 * np.exp(-0.5 * ((phase - 0.35) / 0.06) ** 2)
+    resid += 0.05 * np.exp(-0.5 * ((phase - 0.62) / 0.03) ** 2)
+    resid += rng.normal(0.0, 0.01, size=jd.size)
+    return pd.DataFrame({"JD": jd, "resid": resid})
 
 
 def test_plot_url_and_route_work_without_plot_dir(tmp_path: Path, monkeypatch) -> None:
@@ -157,3 +168,49 @@ def test_update_display_uses_render_request_candidate_and_skips_static_lookup(tm
     assert out[5]["data"]
     assert out[6]["display"] == "block"
     assert out[15] == 7
+
+
+def test_arbitrate_harmonic_period_prefers_double_when_base_is_half() -> None:
+    true_period = 2.8912
+    base_period = true_period / 2.0
+    rng = np.random.default_rng(456)
+    jd_g = np.sort(rng.uniform(0.0, 1200.0, 420))
+    jd_v = np.sort(rng.uniform(2600.0, 3800.0, 420))
+
+    band_dfs = {
+        0: _make_band_df(jd_g, true_period=true_period, seed=10),
+        1: _make_band_df(jd_v, true_period=true_period, seed=20),
+    }
+    selected_period, factor, diag = review_app._arbitrate_harmonic_period(
+        band_dfs,
+        base_period,
+        min_period=0.1,
+        max_period=4.0,
+    )
+
+    assert factor == 2.0
+    assert abs(selected_period - true_period) < abs(base_period - true_period)
+    assert np.isfinite(diag["objective"])
+
+
+def test_arbitrate_harmonic_period_respects_search_bounds() -> None:
+    true_period = 2.8912
+    base_period = true_period / 2.0
+    rng = np.random.default_rng(789)
+    jd_g = np.sort(rng.uniform(0.0, 1200.0, 420))
+    jd_v = np.sort(rng.uniform(2600.0, 3800.0, 420))
+
+    band_dfs = {
+        0: _make_band_df(jd_g, true_period=true_period, seed=30),
+        1: _make_band_df(jd_v, true_period=true_period, seed=40),
+    }
+    selected_period, factor, _ = review_app._arbitrate_harmonic_period(
+        band_dfs,
+        base_period,
+        min_period=0.1,
+        max_period=2.0,
+    )
+
+    # 2x harmonic is out of range, so arbitration should keep the base period.
+    assert factor == 1.0
+    assert abs(selected_period - base_period) < 1e-10

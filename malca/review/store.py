@@ -647,6 +647,54 @@ def get_distinct_values(conn: sqlite3.Connection, column: str) -> list[str]:
     return sorted(list(cleaned))
 
 
+def get_numeric_bounds(
+    conn: sqlite3.Connection,
+    *,
+    columns: list[str] | None = None,
+    source_path: str | None = None,
+    source_path_like: str | None = None,
+) -> dict[str, dict[str, float | None]]:
+    """Return min/max bounds for numeric candidate columns."""
+    selected_cols = columns or sorted(_FLOAT_COLS)
+    selected_cols = [col for col in selected_cols if col in _FLOAT_COLS]
+    if not selected_cols:
+        return {}
+
+    select_parts = []
+    for col in selected_cols:
+        select_parts.append(f"MIN({col}) AS min_{col}")
+        select_parts.append(f"MAX({col}) AS max_{col}")
+
+    where: list[str] = []
+    params: list[str] = []
+    if source_path:
+        where.append("source_path = ?")
+        params.append(str(source_path))
+    if source_path_like:
+        where.append("source_path LIKE ?")
+        params.append(f"%{str(source_path_like)}%")
+
+    query = f"SELECT {', '.join(select_parts)} FROM candidates"
+    if where:
+        query += " WHERE " + " AND ".join(where)
+
+    cursor = conn.execute(query, params)
+    row = cursor.fetchone()
+    if row is None:
+        return {}
+    col_index = {desc[0]: idx for idx, desc in enumerate(cursor.description or [])}
+
+    bounds: dict[str, dict[str, float | None]] = {}
+    for col in selected_cols:
+        lo = row[col_index[f"min_{col}"]]
+        hi = row[col_index[f"max_{col}"]]
+        bounds[col] = {
+            "min": float(lo) if lo is not None else None,
+            "max": float(hi) if hi is not None else None,
+        }
+    return bounds
+
+
 def init_db(conn: sqlite3.Connection) -> None:
     col_defs = ",\n            ".join(
         f"{col} {dtype}" for col, dtype, _ in _CANDIDATE_COLUMNS
@@ -953,13 +1001,15 @@ def query_queue(conn: sqlite3.Connection, *, filters: dict | None = None) -> pd.
         where.append("(c.source_path LIKE ?)")
         params.append(f"%{str(source_path_like)}%")
 
-    # --- Any / True / False bool-mode filters (auto-generated) ---
-    mode_map = {"Any": None, "True": 1, "False": 0}
+    # --- Any / True / False / Unset bool-mode filters (auto-generated) ---
+    mode_map = {"Any": None, "True": 1, "False": 0, "Unset": "unset"}
     for col in _BOOL_COLS:
         key = f"{col}_mode"
         mode = filters.get(key, "Any")
         val = mode_map.get(mode)
-        if val is not None:
+        if val == "unset":
+            where.append(f"(c.{col} IS NULL)")
+        elif val is not None:
             where.append(f"(c.{col} = ?)")
             params.append(val)
 

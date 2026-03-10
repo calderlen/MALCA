@@ -22,6 +22,11 @@ CE_N_MAG_BINS = 10
 # LS oversampling
 LS_SAMPLES_PER_PEAK = 10
 
+# Period-search local refinement (coarse global scan + local rescan)
+PERIODOGRAM_REFINE_TOP_K = 5
+PERIODOGRAM_REFINE_WINDOW_STEPS = 3.0
+PERIODOGRAM_REFINE_N_GRID = 2001
+
 # Bootstrap
 BOOTSTRAP_MIN_POINTS = 50
 BOOTSTRAP_SIGNIFICANCE = 0.01

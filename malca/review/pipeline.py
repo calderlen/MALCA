@@ -156,6 +156,7 @@ def run_missing_stages(
     progress_callback: Callable[[str], None] | None = None,
     stage_complete_callback: Callable[[str], None] | None = None,
     force_stages: list[str] | None = None,
+    only_force: bool = False,
 ) -> list[str]:
     """Detect and run missing pipeline stages for a candidate.
 
@@ -191,23 +192,28 @@ def run_missing_stages(
             stage_complete_callback(stage_name)
 
     # 3. Run missing stages in order
-    force = force_stages or []
+    force = set(force_stages or [])
 
-    if status.get("stats") in ("missing", "partial") or "stats" in force:
+    def should_run(stage_name: str) -> bool:
+        if only_force:
+            return stage_name in force
+        return (status.get(stage_name) in ("missing", "partial")) or (stage_name in force)
+
+    if should_run("stats"):
         if lc_path and Path(lc_path).exists():
             p("Computing LC stats...")
             _run_stats_stage(payload, lc_path, p)
             stages_run.append("stats")
             mark_stage_complete("stats")
 
-    if status.get("events") in ("missing", "partial") or "events" in force:
+    if should_run("events"):
         if lc_path and Path(lc_path).exists():
             p("Running event detection...")
             _run_events_stage(payload, lc_path, p)
             stages_run.append("events")
             mark_stage_complete("events")
 
-    if status.get("characterize") in ("missing", "partial") or "characterize" in force:
+    if should_run("characterize"):
         ra = payload.get("ra_deg")
         dec = payload.get("dec_deg")
         if ra is not None and dec is not None:
@@ -216,7 +222,7 @@ def run_missing_stages(
             stages_run.append("characterize")
             mark_stage_complete("characterize")
 
-    if status.get("vetting") in ("missing", "partial") or "vetting" in force:
+    if should_run("vetting"):
         ra = payload.get("ra_deg")
         dec = payload.get("dec_deg")
         if ra is not None and dec is not None:
@@ -225,7 +231,7 @@ def run_missing_stages(
             stages_run.append("vetting")
             mark_stage_complete("vetting")
 
-    if status.get("external_lcs") in ("missing", "partial") or "external_lcs" in force:
+    if should_run("external_lcs"):
         ra = payload.get("ra_deg")
         dec = payload.get("dec_deg")
         if ra is not None and dec is not None:

@@ -73,4 +73,6 @@ GAIA_EPOCH_DELTA_COLOR_THRESH = 0.5
 # CMD features
 CMD_R_V = 3.1
 CMD_A_G_PER_AV = 0.789
-CMD_E_BP_RP_PER_AV = 1.3
+# Keep this consistent with the Gaia extinction coefficients used in
+# characterize.py: A_BP / A_V = 1.002 and A_RP / A_V = 0.589.
+CMD_E_BP_RP_PER_AV = 1.002 - 0.589

@@ -91,6 +91,7 @@ from malca.review.store import (
     merge_vetting_results,
     get_distinct_values,
     get_diagnostic_background,
+    get_numeric_bounds,
 )
 from malca.review.store import get_candidate_payload
 from malca.review.store import import_lightcurve_files
@@ -198,6 +199,16 @@ app.index_string = '''
             color: #777;
             font-size: 11px;
             margin-bottom: 2px;
+        }
+        .sidebar-field-label {
+            color: #8ba4b8;
+            font-size: 10px;
+            line-height: 1.25;
+            margin-bottom: 2px;
+            letter-spacing: 0.15px;
+        }
+        .sidebar-field-label p {
+            margin: 0;
         }
         .sidebar details {
             margin-bottom: 2px;
@@ -3302,12 +3313,17 @@ def _render_external_followup(payload: dict, candidate_id: str, theme: str | Non
 
 
 # ---- sidebar filter helpers ------------------------------------------------
-_ATF_OPTS = [{'label': v, 'value': v} for v in ('Any', 'True', 'False')]
+_ATF_OPTS = [
+    {'label': 'Any', 'value': 'Any'},
+    {'label': 'True', 'value': 'True'},
+    {'label': 'False', 'value': 'False'},
+    {'label': 'Unset', 'value': 'Unset'},
+]
 _inp_style = {'width': '100%', 'margin-bottom': '4px', 'font-size': '11px'}
 
 
 def _bool_mode_filter(label: str, component_id: str):
-    """Return a (Label, Dropdown) pair for an Any/True/False bool filter."""
+    """Return a (Label, Dropdown) pair for Any/True/False/Unset bool filter."""
     return [
         html.Label(f'{label}:'),
         dcc.Dropdown(
@@ -3328,18 +3344,37 @@ def _col_id(col: str) -> str:
 
 
 def _num_range_filter(col: str):
-    """Compact min+max inputs for a numeric column on one line."""
-    cid = _col_id(col)
+    """Numeric filter with end inputs and a shared range slider."""
     return html.Div([
         html.Label(f'{col}:'),
         html.Div([
-            dcc.Input(id=f'min-{cid}', type='number', placeholder='min',
-                      style={'width': '48%', 'font-size': '11px', 'margin-right': '4%'},
-                      persistence=True, persistence_type='local'),
-            dcc.Input(id=f'max-{cid}', type='number', placeholder='max',
-                      style={'width': '48%', 'font-size': '11px'},
-                      persistence=True, persistence_type='local'),
-        ], style={'display': 'flex', 'margin-bottom': '4px'}),
+            dcc.Input(
+                id={'type': 'num-filter-min-input', 'col': col},
+                type='number',
+                placeholder='min',
+                debounce=True,
+                style={'width': '68px', 'font-size': '11px', 'flex': '0 0 68px'},
+            ),
+            dcc.RangeSlider(
+                id={'type': 'num-filter-range', 'col': col},
+                min=0,
+                max=1,
+                value=[0, 1],
+                step=0.01,
+                allowCross=False,
+                marks=None,
+                tooltip={'placement': 'bottom', 'always_visible': False},
+                updatemode='mouseup',
+                disabled=True,
+            ),
+            dcc.Input(
+                id={'type': 'num-filter-max-input', 'col': col},
+                type='number',
+                placeholder='max',
+                debounce=True,
+                style={'width': '68px', 'font-size': '11px', 'flex': '0 0 68px'},
+            ),
+        ], style={'display': 'flex', 'alignItems': 'center', 'gap': '8px', 'margin-bottom': '4px'}),
     ])
 
 
@@ -3446,7 +3481,6 @@ _SIDEBAR_GROUPS = [
         ('num', 'xray_flux'),
     ]),
     ('General Flags', [
-        ('bool', 'periodic_flag'),
         ('bool', 'catalog_match'),
         ('bool', 'high_ruwe_flag'),
     ]),
@@ -3582,7 +3616,6 @@ _SIDEBAR_GROUPS = [
         ('num', 'period_consensus_days'),
         ('num', 'period_consensus_support'),
         ('bool', 'period_consensus_agree'),
-        ('bool', 'period_conflict_flag'),
     ]),
     ('LC Cadence & Coverage', [
         ('num', 'stats_time_span_days'),
@@ -3708,8 +3741,6 @@ _SIDEBAR_GROUPS = [
         ('bool', 'failed_morphology'),
         ('bool', 'failed_score'),
         ('bool', 'failed_periodicity'),
-        ('bool', 'failed_gaia_ruwe'),
-        ('bool', 'failed_periodic_catalog'),
         ('bool', 'failed_signal_amplitude'),
         ('bool', 'bad_cameras_filtered'),
     ]),
@@ -3738,6 +3769,8 @@ def create_layout():
 
         # Data stores
         dcc.Store(id='queue-data'),
+        dcc.Store(id='numeric-filter-bounds', data={}),
+        dcc.Store(id='numeric-filter-state', data={}, storage_type='local'),
         dcc.Store(id='current-index', data=0),
         dcc.Store(id='current-candidate-id', data=None),
         dcc.Store(id='queue-size-store', data=0),
@@ -4177,6 +4210,18 @@ def create_layout():
                                                 className='compact-btn',
                                                 style={'fontSize': '10px'}),
                                 ], style={'display': 'flex', 'gap': '6px', 'marginTop': '4px'}),
+                                html.Div([
+                                    html.Button('Recompute Stats', id='rerun-stage-stats-btn', n_clicks=0,
+                                                className='compact-btn', style={'fontSize': '10px'}),
+                                    html.Button('Recompute Events', id='rerun-stage-events-btn', n_clicks=0,
+                                                className='compact-btn', style={'fontSize': '10px'}),
+                                    html.Button('Recompute Characterize', id='rerun-stage-characterize-btn', n_clicks=0,
+                                                className='compact-btn', style={'fontSize': '10px'}),
+                                    html.Button('Recompute Vetting', id='rerun-stage-vetting-btn', n_clicks=0,
+                                                className='compact-btn', style={'fontSize': '10px'}),
+                                    html.Button('Recompute External LCs', id='rerun-stage-external-lcs-btn', n_clicks=0,
+                                                className='compact-btn', style={'fontSize': '10px'}),
+                                ], style={'display': 'flex', 'gap': '6px', 'marginTop': '4px', 'flexWrap': 'wrap'}),
                                 dcc.Loading(
                                     id='loading-pipeline', type='dot',
                                     children=html.Div(id='pipeline-run-status',
@@ -4926,7 +4971,7 @@ def keyboard_refresh_queue(key_value, current_clicks):
 # --- All filter State components used by load_queue -------------------------
 # Auto-generated from _SIDEBAR_GROUPS so the UI and callback always stay in sync.
 _BOOL_MODE_STATES: list[tuple[str, str]] = []
-_NUM_STATES: list[tuple[str, str]] = []
+_NUM_COLUMNS: list[str] = []
 _TEXT_STATES: list[tuple[str, str]] = []
 _SELECT_STATES: list[tuple[str, str]] = []
 
@@ -4936,8 +4981,7 @@ for _grp_name, _grp_items in _SIDEBAR_GROUPS:
         if _ftype == 'bool':
             _BOOL_MODE_STATES.append((f'{_cid}-mode', f'{_col}_mode'))
         elif _ftype == 'num':
-            _NUM_STATES.append((f'min-{_cid}', f'min_{_col}'))
-            _NUM_STATES.append((f'max-{_cid}', f'max_{_col}'))
+            _NUM_COLUMNS.append(_col)
         elif _ftype == 'text':
             _TEXT_STATES.append((f'filter-{_cid}', _col))
         elif _ftype == 'select':
@@ -4948,11 +4992,249 @@ _queue_states = (
     [State('filter-unreviewed', 'value'),
      State('filter-failed', 'value')]
     + [State(cid, 'value') for cid, _ in _BOOL_MODE_STATES]
-    + [State(cid, 'value') for cid, _ in _NUM_STATES]
+    + [State('numeric-filter-state', 'data')]
     + [State(cid, 'value') for cid, _ in _TEXT_STATES]
     + [State(cid, 'value') for cid, _ in _SELECT_STATES]
     + [State('sort-col', 'value'),
        State('sort-desc', 'value')]
+)
+
+
+@app.callback(
+    Output('numeric-filter-bounds', 'data'),
+    [Input('import-trigger', 'data'),
+     Input('queue-source-path', 'data')],
+    prevent_initial_call=False,
+)
+def load_numeric_filter_bounds(_import_trigger, queue_source_scope):
+    """Load numeric slider bounds from the largest available queue."""
+    with closing(db_connect(Path(DB_PATH))) as conn:
+        kwargs = {'columns': _NUM_COLUMNS}
+        if queue_source_scope:
+            kwargs['source_path_like'] = str(queue_source_scope)
+        return get_numeric_bounds(conn, **kwargs)
+
+
+app.clientside_callback(
+    """
+    function(boundsData, minValues, maxValues, rangeValues, rangeIds, currentState) {
+        const ids = Array.isArray(rangeIds) ? rangeIds : [];
+        const mins = Array.isArray(minValues) ? minValues : [];
+        const maxs = Array.isArray(maxValues) ? maxValues : [];
+        const ranges = Array.isArray(rangeValues) ? rangeValues : [];
+        const state = (currentState && typeof currentState === 'object')
+            ? JSON.parse(JSON.stringify(currentState))
+            : {};
+        const ctx = dash_clientside.callback_context;
+        const triggered = ctx ? ctx.triggered_id : null;
+
+        function toNumber(value) {
+            if (value === null || value === undefined || value === '') {
+                return null;
+            }
+            const number = Number(value);
+            return Number.isFinite(number) ? number : null;
+        }
+
+        function clamp(value, lo, hi, fallback) {
+            const number = toNumber(value);
+            const base = number === null ? fallback : number;
+            return Math.min(Math.max(base, lo), hi);
+        }
+
+        function boundsFor(col) {
+            const info = boundsData && typeof boundsData === 'object' ? boundsData[col] : null;
+            let dataLo = info ? toNumber(info.min) : null;
+            let dataHi = info ? toNumber(info.max) : null;
+            if (dataLo === null || dataHi === null) {
+                return {
+                    hasData: false,
+                    dataLo: null,
+                    dataHi: null,
+                    sliderLo: 0,
+                    sliderHi: 1,
+                    step: 1,
+                    disabled: true,
+                };
+            }
+            if (dataHi < dataLo) {
+                const temp = dataLo;
+                dataLo = dataHi;
+                dataHi = temp;
+            }
+            let sliderLo = dataLo;
+            let sliderHi = dataHi;
+            let disabled = false;
+            if (sliderHi === sliderLo) {
+                const pad = Math.max(Math.abs(sliderLo) * 0.01, 1.0);
+                sliderLo -= pad;
+                sliderHi += pad;
+                disabled = true;
+            }
+            const span = sliderHi - sliderLo;
+            return {
+                hasData: true,
+                dataLo: dataLo,
+                dataHi: dataHi,
+                sliderLo: sliderLo,
+                sliderHi: sliderHi,
+                step: span > 0 ? span / 200.0 : 1,
+                disabled: disabled,
+            };
+        }
+
+        function effectiveBounds(col, info) {
+            const saved = state && state[col] && typeof state[col] === 'object' ? state[col] : {};
+            let lower = clamp(saved.min, info.sliderLo, info.sliderHi, info.dataLo);
+            let upper = clamp(saved.max, info.sliderLo, info.sliderHi, info.dataHi);
+            if (lower > upper) {
+                const temp = lower;
+                lower = upper;
+                upper = temp;
+            }
+            return {lower: lower, upper: upper};
+        }
+
+        function normalizeEntry(lower, upper, info) {
+            if (!info.hasData) {
+                return null;
+            }
+            const entry = {};
+            if (Math.abs(lower - info.dataLo) > 1e-12) {
+                entry.min = lower;
+            }
+            if (Math.abs(upper - info.dataHi) > 1e-12) {
+                entry.max = upper;
+            }
+            return Object.keys(entry).length ? entry : null;
+        }
+
+        function saveState(col, entry) {
+            if (entry && Object.keys(entry).length) {
+                state[col] = entry;
+            } else {
+                delete state[col];
+            }
+        }
+
+        function applyTriggeredChange() {
+            if (!triggered || typeof triggered !== 'object' || !triggered.col) {
+                return false;
+            }
+            const idx = ids.findIndex(function(item) {
+                return item && item.col === triggered.col;
+            });
+            if (idx === -1) {
+                return false;
+            }
+            const info = boundsFor(triggered.col);
+            if (!info.hasData) {
+                delete state[triggered.col];
+                return true;
+            }
+            const current = effectiveBounds(triggered.col, info);
+            let lower = current.lower;
+            let upper = current.upper;
+
+            if (triggered.type === 'num-filter-range') {
+                const sliderValue = Array.isArray(ranges[idx]) ? ranges[idx] : [];
+                lower = clamp(sliderValue[0], info.sliderLo, info.sliderHi, info.dataLo);
+                upper = clamp(sliderValue[1], info.sliderLo, info.sliderHi, info.dataHi);
+                if (lower > upper) {
+                    const temp = lower;
+                    lower = upper;
+                    upper = temp;
+                }
+            } else if (triggered.type === 'num-filter-min-input') {
+                const nextMin = toNumber(mins[idx]);
+                lower = nextMin === null ? info.dataLo : clamp(nextMin, info.sliderLo, info.sliderHi, info.dataLo);
+                if (lower > upper) {
+                    upper = lower;
+                }
+            } else if (triggered.type === 'num-filter-max-input') {
+                const nextMax = toNumber(maxs[idx]);
+                upper = nextMax === null ? info.dataHi : clamp(nextMax, info.sliderLo, info.sliderHi, info.dataHi);
+                if (lower > upper) {
+                    lower = upper;
+                }
+            } else {
+                return false;
+            }
+
+            saveState(triggered.col, normalizeEntry(lower, upper, info));
+            return true;
+        }
+
+        if (!applyTriggeredChange()) {
+            ids.forEach(function(item) {
+                const col = item && item.col ? item.col : null;
+                if (!col) {
+                    return;
+                }
+                const info = boundsFor(col);
+                if (!info.hasData) {
+                    delete state[col];
+                    return;
+                }
+                const current = effectiveBounds(col, info);
+                saveState(col, normalizeEntry(current.lower, current.upper, info));
+            });
+        }
+
+        const minOut = [];
+        const maxOut = [];
+        const rangeMinOut = [];
+        const rangeMaxOut = [];
+        const rangeValueOut = [];
+        const stepOut = [];
+        const disabledOut = [];
+
+        ids.forEach(function(item) {
+            const col = item && item.col ? item.col : null;
+            const info = col ? boundsFor(col) : boundsFor('');
+            rangeMinOut.push(info.sliderLo);
+            rangeMaxOut.push(info.sliderHi);
+            stepOut.push(info.step);
+            disabledOut.push(info.disabled);
+            if (!col || !info.hasData) {
+                minOut.push(null);
+                maxOut.push(null);
+                rangeValueOut.push([info.sliderLo, info.sliderHi]);
+                return;
+            }
+            const current = effectiveBounds(col, info);
+            minOut.push(current.lower);
+            maxOut.push(current.upper);
+            rangeValueOut.push([current.lower, current.upper]);
+        });
+
+        return [
+            state,
+            minOut,
+            maxOut,
+            rangeMinOut,
+            rangeMaxOut,
+            rangeValueOut,
+            stepOut,
+            disabledOut,
+        ];
+    }
+    """,
+    [Output('numeric-filter-state', 'data'),
+     Output({'type': 'num-filter-min-input', 'col': ALL}, 'value'),
+     Output({'type': 'num-filter-max-input', 'col': ALL}, 'value'),
+     Output({'type': 'num-filter-range', 'col': ALL}, 'min'),
+     Output({'type': 'num-filter-range', 'col': ALL}, 'max'),
+     Output({'type': 'num-filter-range', 'col': ALL}, 'value'),
+     Output({'type': 'num-filter-range', 'col': ALL}, 'step'),
+     Output({'type': 'num-filter-range', 'col': ALL}, 'disabled')],
+    [Input('numeric-filter-bounds', 'data'),
+     Input({'type': 'num-filter-min-input', 'col': ALL}, 'value'),
+     Input({'type': 'num-filter-max-input', 'col': ALL}, 'value'),
+     Input({'type': 'num-filter-range', 'col': ALL}, 'value')],
+    [State({'type': 'num-filter-range', 'col': ALL}, 'id'),
+     State('numeric-filter-state', 'data')],
+    prevent_initial_call=False,
 )
 
 
@@ -4979,9 +5261,17 @@ def load_queue(refresh_clicks, import_trigger, queue_source_scope, *state_values
         }
         for _, fkey in _BOOL_MODE_STATES:
             filter_params[fkey] = next(it) or 'Any'
-        for _, fkey in _NUM_STATES:
-            val = next(it)
-            filter_params[fkey] = val if val is not None else None
+        numeric_filter_state = next(it) or {}
+        if not isinstance(numeric_filter_state, dict):
+            numeric_filter_state = {}
+        for col in _NUM_COLUMNS:
+            entry = numeric_filter_state.get(col)
+            if not isinstance(entry, dict):
+                entry = {}
+            min_val = entry.get('min')
+            max_val = entry.get('max')
+            filter_params[f'min_{col}'] = min_val if min_val is not None else None
+            filter_params[f'max_{col}'] = max_val if max_val is not None else None
         for _, fkey in _TEXT_STATES:
             val = next(it)
             filter_params[fkey] = val.strip() if val else None
@@ -5043,6 +5333,195 @@ def _has_external_period(payload: dict | None) -> bool:
     return False
 
 
+def _robust_sigma(values: np.ndarray) -> float:
+    vals = np.asarray(values, dtype=float)
+    vals = vals[np.isfinite(vals)]
+    if vals.size < 3:
+        return np.nan
+    med = float(np.median(vals))
+    mad = float(np.median(np.abs(vals - med)))
+    sigma = 1.4826 * mad
+    if not np.isfinite(sigma) or sigma <= 0:
+        sigma = float(np.nanstd(vals))
+    return sigma if np.isfinite(sigma) and sigma > 0 else np.nan
+
+
+def _phase_template(
+    phase: np.ndarray,
+    resid: np.ndarray,
+    *,
+    n_bins: int = 48,
+    min_bin_points: int = 3,
+) -> tuple[np.ndarray, np.ndarray]:
+    template = np.full(n_bins, np.nan, dtype=float)
+    counts = np.zeros(n_bins, dtype=int)
+
+    phase = np.asarray(phase, dtype=float)
+    resid = np.asarray(resid, dtype=float)
+    valid = np.isfinite(phase) & np.isfinite(resid)
+    if np.count_nonzero(valid) == 0:
+        return template, counts
+
+    phase_valid = np.mod(phase[valid], 1.0)
+    resid_valid = resid[valid]
+    idx = np.floor(phase_valid * n_bins).astype(int)
+    idx = np.clip(idx, 0, n_bins - 1)
+
+    for b in range(n_bins):
+        vals = resid_valid[idx == b]
+        if vals.size >= min_bin_points:
+            template[b] = float(np.median(vals))
+            counts[b] = int(vals.size)
+
+    return template, counts
+
+
+def _template_phase_lag(template_a: np.ndarray, template_b: np.ndarray) -> float:
+    template_a = np.asarray(template_a, dtype=float)
+    template_b = np.asarray(template_b, dtype=float)
+    if template_a.size == 0 or template_a.size != template_b.size:
+        return np.nan
+
+    n = int(template_a.size)
+    best_corr = -np.inf
+    best_shift = 0
+    min_overlap = max(6, n // 4)
+
+    for shift in range(n):
+        shifted = np.roll(template_b, shift)
+        mask = np.isfinite(template_a) & np.isfinite(shifted)
+        if np.count_nonzero(mask) < min_overlap:
+            continue
+        a = template_a[mask]
+        b = shifted[mask]
+        a = a - np.mean(a)
+        b = b - np.mean(b)
+        sa = float(np.std(a))
+        sb = float(np.std(b))
+        if sa <= 0 or sb <= 0:
+            continue
+        corr = float(np.mean((a / sa) * (b / sb)))
+        if corr > best_corr:
+            best_corr = corr
+            best_shift = shift
+
+    if not np.isfinite(best_corr):
+        return np.nan
+    lag_bins = min(best_shift, n - best_shift)
+    return float(lag_bins / n)
+
+
+def _score_period_harmonic_candidate(
+    band_resid: dict[int, tuple[np.ndarray, np.ndarray]],
+    period: float,
+    *,
+    n_bins: int = 48,
+    lag_weight: float = 2.5,
+) -> dict[str, float]:
+    if not np.isfinite(period) or period <= 0:
+        return {"objective": np.inf, "scatter_ratio": np.inf, "lag_phase": np.nan}
+
+    all_jd = [jd for jd, _ in band_resid.values() if jd.size > 0]
+    if not all_jd:
+        return {"objective": np.inf, "scatter_ratio": np.inf, "lag_phase": np.nan}
+    jd0 = float(min(np.min(jd) for jd in all_jd))
+
+    templates: dict[int, np.ndarray] = {}
+    scatter_ratios: list[float] = []
+
+    for band, (jd, resid) in band_resid.items():
+        phase = np.mod((jd - jd0) / float(period), 1.0)
+        template, _ = _phase_template(phase, resid, n_bins=n_bins)
+        templates[band] = template
+
+        bin_idx = np.floor(phase * n_bins).astype(int)
+        bin_idx = np.clip(bin_idx, 0, n_bins - 1)
+        model = template[bin_idx]
+        valid = np.isfinite(model) & np.isfinite(resid)
+        if np.count_nonzero(valid) < 20:
+            continue
+
+        raw_sigma = _robust_sigma(resid[valid])
+        folded_sigma = _robust_sigma(resid[valid] - model[valid])
+        if np.isfinite(raw_sigma) and raw_sigma > 0 and np.isfinite(folded_sigma):
+            scatter_ratios.append(float(folded_sigma / raw_sigma))
+
+    if not scatter_ratios:
+        return {"objective": np.inf, "scatter_ratio": np.inf, "lag_phase": np.nan}
+
+    scatter_ratio = float(np.mean(scatter_ratios))
+    lag_phase = np.nan
+    if 0 in templates and 1 in templates:
+        lag_phase = _template_phase_lag(templates[0], templates[1])
+    lag_term = 0.0 if not np.isfinite(lag_phase) else float(lag_phase)
+
+    objective = float(scatter_ratio + lag_weight * lag_term)
+    return {"objective": objective, "scatter_ratio": scatter_ratio, "lag_phase": lag_phase}
+
+
+def _arbitrate_harmonic_period(
+    band_dfs: dict[int, pd.DataFrame],
+    base_period: float,
+    *,
+    min_period: float,
+    max_period: float,
+) -> tuple[float, float, dict[str, float]]:
+    if not np.isfinite(base_period) or base_period <= 0:
+        return float(base_period), 1.0, {"objective": np.nan, "base_objective": np.nan}
+
+    band_resid: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    for band in (0, 1):
+        bdf = band_dfs.get(band)
+        if bdf is None or bdf.empty or "resid" not in bdf.columns:
+            continue
+        jd = bdf["JD"].to_numpy(dtype=float)
+        resid = bdf["resid"].to_numpy(dtype=float)
+        mask = np.isfinite(jd) & np.isfinite(resid)
+        if np.count_nonzero(mask) < 30:
+            continue
+        band_resid[band] = (jd[mask], resid[mask])
+
+    if not band_resid:
+        return float(base_period), 1.0, {"objective": np.nan, "base_objective": np.nan}
+
+    candidates: list[tuple[float, float, dict[str, float]]] = []
+    for factor in (1.0, 2.0, 0.5):
+        p = float(base_period) * float(factor)
+        if not np.isfinite(p) or p <= 0:
+            continue
+        if p < float(min_period) or p > float(max_period):
+            continue
+        if any(abs(p - p_prev) <= 1e-10 * max(1.0, abs(p), abs(p_prev)) for _, p_prev, _ in candidates):
+            continue
+        score = _score_period_harmonic_candidate(band_resid, p)
+        candidates.append((float(factor), p, score))
+
+    if not candidates:
+        return float(base_period), 1.0, {"objective": np.nan, "base_objective": np.nan}
+
+    finite_candidates = [c for c in candidates if np.isfinite(c[2].get("objective", np.nan))]
+    if not finite_candidates:
+        return float(base_period), 1.0, {"objective": np.nan, "base_objective": np.nan}
+
+    best_factor, best_period, best_score = min(finite_candidates, key=lambda x: float(x[2]["objective"]))
+    base_entry = next((c for c in finite_candidates if abs(c[0] - 1.0) < 1e-12), None)
+    base_objective = float(base_entry[2]["objective"]) if base_entry is not None else np.nan
+
+    # Avoid jittery harmonic flips unless improvement is meaningful.
+    if base_entry is not None and abs(best_factor - 1.0) > 1e-12:
+        improvement = (base_objective - float(best_score["objective"])) / max(abs(base_objective), 1e-9)
+        if not np.isfinite(improvement) or improvement < 0.02:
+            best_factor, best_period, best_score = base_entry
+
+    diag = {
+        "objective": float(best_score.get("objective", np.nan)),
+        "scatter_ratio": float(best_score.get("scatter_ratio", np.nan)),
+        "lag_phase": float(best_score.get("lag_phase", np.nan)),
+        "base_objective": base_objective,
+    }
+    return float(best_period), float(best_factor), diag
+
+
 def _run_period_search_for_payload(
     payload: dict,
     *,
@@ -5095,16 +5574,54 @@ def _run_period_search_for_payload(
 
     method = str(method or 'pdm').lower()
     if method == 'pdm':
-        best_period, _, _ = pdm_find_period(times, values, min_period=min_period, max_period=max_period)
+        best_period, _, _ = pdm_find_period(
+            times,
+            values,
+            min_period=min_period,
+            max_period=max_period,
+            refine=True,
+        )
         label = 'PDM'
     elif method == 'ce':
-        best_period, _, _ = ce_find_period(times, values, min_period=min_period, max_period=max_period)
+        best_period, _, _ = ce_find_period(
+            times,
+            values,
+            min_period=min_period,
+            max_period=max_period,
+            refine=True,
+        )
         label = 'CE'
     else:
-        best_period, _, _ = lsp_find_period(times, values, min_period=min_period, max_period=max_period)
+        best_period, _, _ = lsp_find_period(
+            times,
+            values,
+            min_period=min_period,
+            max_period=max_period,
+            refine=True,
+        )
         label = 'LSP'
 
-    return {'best_period': float(best_period), 'method': label}, f'{label}: P={best_period:.5f} d'
+    raw_best_period = float(best_period)
+    best_period, harmonic_factor, harmonic_diag = _arbitrate_harmonic_period(
+        band_dfs,
+        raw_best_period,
+        min_period=min_period,
+        max_period=max_period,
+    )
+
+    summary = f'{label}: P={best_period:.5f} d'
+    if abs(harmonic_factor - 1.0) > 1e-12:
+        summary += f' (harmonic ×{harmonic_factor:g}; base={raw_best_period:.5f} d)'
+
+    return {
+        'best_period': float(best_period),
+        'method': label,
+        'harmonic_factor': float(harmonic_factor),
+        'base_period': raw_best_period,
+        'harmonic_objective': float(harmonic_diag.get('objective', np.nan)),
+        'harmonic_lag_phase': float(harmonic_diag.get('lag_phase', np.nan)),
+        'harmonic_scatter_ratio': float(harmonic_diag.get('scatter_ratio', np.nan)),
+    }, summary
 
 
 
@@ -5773,7 +6290,8 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
 )
 def update_external_followup_panel(is_open, candidate_id, theme_mode):
     """Render external follow-up artifacts for the current candidate."""
-    _ = is_open
+    if not is_open:
+        return []
     if not candidate_id:
         return html.Div("No candidates loaded.", style={'font-size': '11px', 'color': '#c77'})
     with closing(db_connect(Path(DB_PATH))) as conn:
@@ -5807,7 +6325,8 @@ def _render_diagnostic_plots(payload: dict, theme: str, background: dict | None 
 )
 def update_diagnostic_plots(is_open, candidate_id, theme_mode):
     """Render diagnostic plots for the current candidate."""
-    _ = is_open
+    if not is_open:
+        return []
     if not candidate_id:
         return []
     with closing(db_connect(Path(DB_PATH))) as conn:
@@ -6761,6 +7280,7 @@ def _pipeline_status_chip_elements(candidate_id) -> list:
     chips = []
     stage_labels = {
         'external_lcs': 'External LCs',
+        'periodicity': 'Periodicity',
     }
     if candidate_id is None:
         return chips
@@ -6768,6 +7288,26 @@ def _pipeline_status_chip_elements(candidate_id) -> list:
         with closing(db_connect(Path(DB_PATH))) as conn:
             payload = get_candidate_payload(conn, str(candidate_id)) or {}
         status = detect_pipeline_status(payload)
+
+        periodicity_sig_cols = (
+            'periodicity_score',
+            'lsp_period',
+            'lsp_power',
+            'lsp_is_significant',
+        )
+        periodicity_present = sum(
+            1
+            for col in periodicity_sig_cols
+            if col in payload and payload[col] is not None
+            and not (isinstance(payload[col], float) and np.isnan(payload[col]))
+        )
+        if periodicity_present == 0:
+            status['periodicity'] = 'missing'
+        elif periodicity_present == len(periodicity_sig_cols):
+            status['periodicity'] = 'complete'
+        else:
+            status['periodicity'] = 'partial'
+
         color_map = {'complete': '#2d6a2d', 'partial': '#6a5c2d', 'missing': '#444'}
         for stage, state in status.items():
             chips.append(html.Span(
@@ -6849,7 +7389,7 @@ def render_pipeline_module_log(log_data):
     return "\n".join(lines[-300:])
 
 
-def _run_pipeline_impl(set_progress, run_clicks, rerun_clicks, auto_trigger, queue_data, idx, current_trigger, current_progress_tick):
+def _run_pipeline_impl(set_progress, run_clicks, rerun_clicks, rerun_stats_clicks, rerun_events_clicks, rerun_characterize_clicks, rerun_vetting_clicks, rerun_external_lcs_clicks, auto_trigger, queue_data, idx, current_trigger, current_progress_tick):
 
     ctx = dash.callback_context
     triggered_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else None
@@ -6857,9 +7397,20 @@ def _run_pipeline_impl(set_progress, run_clicks, rerun_clicks, auto_trigger, que
     
     print(f"[run_pipeline_callback] Triggered by: {triggered_id}, auto_trigger: {auto_trigger}, queue_size: {queue_size}, idx: {idx}")
 
-    if not run_clicks and not rerun_clicks and not auto_trigger:
-        print("[run_pipeline_callback] No clicks and no auto_trigger, aborting.")
-        return no_update, no_update, no_update
+    if triggered_id == 'auto-run-pipeline-trigger' and not auto_trigger:
+        raise dash.exceptions.PreventUpdate
+
+    if (
+        not run_clicks
+        and not rerun_clicks
+        and not rerun_stats_clicks
+        and not rerun_events_clicks
+        and not rerun_characterize_clicks
+        and not rerun_vetting_clicks
+        and not rerun_external_lcs_clicks
+        and not auto_trigger
+    ):
+        raise dash.exceptions.PreventUpdate
         
     candidate_id = None
     fetch_mode = None
@@ -6921,8 +7472,24 @@ def _run_pipeline_impl(set_progress, run_clicks, rerun_clicks, auto_trigger, que
             
             # Determine if this was an explicit deep fetch that should bypass caching
             force_stages = []
+            force_only = False
             if triggered_id == 'rerun-pipeline-btn':
                 force_stages = ['stats', 'events', 'characterize', 'vetting', 'external_lcs']
+            elif triggered_id == 'rerun-stage-stats-btn':
+                force_stages = ['stats']
+                force_only = True
+            elif triggered_id == 'rerun-stage-events-btn':
+                force_stages = ['events']
+                force_only = True
+            elif triggered_id == 'rerun-stage-characterize-btn':
+                force_stages = ['characterize']
+                force_only = True
+            elif triggered_id == 'rerun-stage-vetting-btn':
+                force_stages = ['vetting']
+                force_only = True
+            elif triggered_id == 'rerun-stage-external-lcs-btn':
+                force_stages = ['external_lcs']
+                force_only = True
             elif fetch_mode == 'full':
                 force_stages = ['stats', 'events', 'characterize', 'vetting']
             elif fetch_mode in ('full_ext', 'full_ext_crts'):
@@ -6934,6 +7501,7 @@ def _run_pipeline_impl(set_progress, run_clicks, rerun_clicks, auto_trigger, que
                 progress_callback=p,
                 stage_complete_callback=on_stage_complete,
                 force_stages=force_stages,
+                only_force=force_only,
             )
             
             # If triggered by a full_ext fetch, ensure we run external LCs
@@ -6964,7 +7532,14 @@ def _run_pipeline_impl(set_progress, run_clicks, rerun_clicks, auto_trigger, que
             _index_external_lc_paths_from_root.cache_clear()
             return f"✓ Ran: {', '.join(stages)}", no_update, refresh_idx
         else:
-            if triggered_id == 'rerun-pipeline-btn':
+            if triggered_id in {
+                'rerun-pipeline-btn',
+                'rerun-stage-stats-btn',
+                'rerun-stage-events-btn',
+                'rerun-stage-characterize-btn',
+                'rerun-stage-vetting-btn',
+                'rerun-stage-external-lcs-btn',
+            }:
                 return "No stages could be rerun (missing requirements)", no_update, no_update
             return "All stages already complete (or missing requirements)", no_update, no_update
     except Exception as e:
@@ -6979,6 +7554,11 @@ if _background_callback_manager is not None:
          Output('current-index', 'data', allow_duplicate=True)],
         [Input('run-pipeline-btn', 'n_clicks'),
          Input('rerun-pipeline-btn', 'n_clicks'),
+         Input('rerun-stage-stats-btn', 'n_clicks'),
+         Input('rerun-stage-events-btn', 'n_clicks'),
+         Input('rerun-stage-characterize-btn', 'n_clicks'),
+         Input('rerun-stage-vetting-btn', 'n_clicks'),
+         Input('rerun-stage-external-lcs-btn', 'n_clicks'),
          Input('auto-run-pipeline-trigger', 'data')],
         [State('queue-data', 'data'),
          State('current-index', 'data'),
@@ -6988,6 +7568,11 @@ if _background_callback_manager is not None:
         running=[
             (Output('run-pipeline-btn', 'disabled'), True, False),
             (Output('rerun-pipeline-btn', 'disabled'), True, False),
+            (Output('rerun-stage-stats-btn', 'disabled'), True, False),
+            (Output('rerun-stage-events-btn', 'disabled'), True, False),
+            (Output('rerun-stage-characterize-btn', 'disabled'), True, False),
+            (Output('rerun-stage-vetting-btn', 'disabled'), True, False),
+            (Output('rerun-stage-external-lcs-btn', 'disabled'), True, False),
         ],
         progress=[
             Output('pipeline-run-status', 'children'),
@@ -6996,8 +7581,8 @@ if _background_callback_manager is not None:
         ],
         prevent_initial_call='initial_duplicate'
     )
-    def run_pipeline_callback(set_progress, n_clicks, rerun_clicks, auto_trigger, queue_data, idx, current_trigger, current_progress_tick):
-        return _run_pipeline_impl(set_progress, n_clicks, rerun_clicks, auto_trigger, queue_data, idx, current_trigger, current_progress_tick)
+    def run_pipeline_callback(set_progress, n_clicks, rerun_clicks, rerun_stats_clicks, rerun_events_clicks, rerun_characterize_clicks, rerun_vetting_clicks, rerun_external_lcs_clicks, auto_trigger, queue_data, idx, current_trigger, current_progress_tick):
+        return _run_pipeline_impl(set_progress, n_clicks, rerun_clicks, rerun_stats_clicks, rerun_events_clicks, rerun_characterize_clicks, rerun_vetting_clicks, rerun_external_lcs_clicks, auto_trigger, queue_data, idx, current_trigger, current_progress_tick)
 else:
     @app.callback(
         [Output('pipeline-run-status', 'children'),
@@ -7005,6 +7590,11 @@ else:
          Output('current-index', 'data', allow_duplicate=True)],
         [Input('run-pipeline-btn', 'n_clicks'),
          Input('rerun-pipeline-btn', 'n_clicks'),
+         Input('rerun-stage-stats-btn', 'n_clicks'),
+         Input('rerun-stage-events-btn', 'n_clicks'),
+         Input('rerun-stage-characterize-btn', 'n_clicks'),
+         Input('rerun-stage-vetting-btn', 'n_clicks'),
+         Input('rerun-stage-external-lcs-btn', 'n_clicks'),
          Input('auto-run-pipeline-trigger', 'data')],
         [State('queue-data', 'data'),
          State('current-index', 'data'),
@@ -7012,8 +7602,8 @@ else:
          State('pipeline-progress-trigger', 'data')],
         prevent_initial_call='initial_duplicate'
     )
-    def run_pipeline_callback(n_clicks, rerun_clicks, auto_trigger, queue_data, idx, current_trigger, current_progress_tick):
-        return _run_pipeline_impl(None, n_clicks, rerun_clicks, auto_trigger, queue_data, idx, current_trigger, current_progress_tick)
+    def run_pipeline_callback(n_clicks, rerun_clicks, rerun_stats_clicks, rerun_events_clicks, rerun_characterize_clicks, rerun_vetting_clicks, rerun_external_lcs_clicks, auto_trigger, queue_data, idx, current_trigger, current_progress_tick):
+        return _run_pipeline_impl(None, n_clicks, rerun_clicks, rerun_stats_clicks, rerun_events_clicks, rerun_characterize_clicks, rerun_vetting_clicks, rerun_external_lcs_clicks, auto_trigger, queue_data, idx, current_trigger, current_progress_tick)
 
 
 # Export reviews
