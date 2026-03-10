@@ -622,6 +622,7 @@ _BOOL_COLS = {c[0] for c in _CANDIDATE_COLUMNS if c[2] == "bool"}
 _FLOAT_COLS = {c[0] for c in _CANDIDATE_COLUMNS if c[2] == "float"}
 _TEXT_COLS = {c[0] for c in _CANDIDATE_COLUMNS if c[2] == "text"}
 _SELECT_COLS = {c[0] for c in _CANDIDATE_COLUMNS if c[2] == "select"}
+_COL_TYPE_MAP = {c[0]: c[2] for c in _CANDIDATE_COLUMNS}
 
 
 def get_distinct_values(conn: sqlite3.Connection, column: str) -> list[str]:
@@ -1096,6 +1097,78 @@ def get_candidate_payload(conn: sqlite3.Connection, candidate_id: str) -> dict:
         return json.loads(row[0])
     except Exception:
         return {}
+
+
+def replace_candidate_payload_fields(
+    conn: sqlite3.Connection,
+    candidate_id: str,
+    updates: dict[str, object],
+    *,
+    clear_keys: set[str] | None = None,
+    commit: bool = True,
+) -> bool:
+    """Replace selected payload fields while keeping unrelated candidate data.
+
+    Keys in ``clear_keys`` are removed from ``payload_json`` before ``updates``
+    are merged in. Matching SQL columns are cleared to ``NULL`` unless a new
+    value is supplied in ``updates``.
+    """
+    row = conn.execute(
+        "SELECT payload_json FROM candidates WHERE candidate_id=?",
+        (candidate_id,),
+    ).fetchone()
+    if row is None:
+        return False
+
+    try:
+        payload = json.loads(row[0]) if row[0] else {}
+    except Exception:
+        payload = {}
+
+    clear = set(clear_keys or ())
+    for key in clear:
+        payload.pop(key, None)
+    payload.update(updates)
+
+    conn.execute(
+        "UPDATE candidates SET payload_json = ? WHERE candidate_id = ?",
+        (json.dumps(payload, default=str), candidate_id),
+    )
+
+    table_cols = {
+        str(info[1])
+        for info in conn.execute("PRAGMA table_info(candidates)").fetchall()
+    }
+    sql_targets = {key for key in clear if key in table_cols}
+    sql_targets.update(key for key in updates if key in table_cols)
+
+    if sql_targets:
+        assignments: list[str] = []
+        params: list[object] = []
+        for col in sorted(sql_targets):
+            assignments.append(f"{col} = ?")
+            if col not in updates:
+                params.append(None)
+                continue
+
+            raw = updates[col]
+            etype = _COL_TYPE_MAP.get(col)
+            if etype == "bool":
+                params.append(int(_as_bool(raw)) if raw is not None else None)
+            elif etype == "float":
+                params.append(_to_float(raw))
+            else:
+                params.append(str(raw) if raw is not None else None)
+
+        params.append(candidate_id)
+        conn.execute(
+            f"UPDATE candidates SET {', '.join(assignments)} WHERE candidate_id = ?",
+            params,
+        )
+
+    if commit:
+        conn.commit()
+    return True
 
 
 def get_diagnostic_background(conn: sqlite3.Connection) -> dict:

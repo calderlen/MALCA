@@ -15,6 +15,7 @@ Usage:
     malca injection [options]      # Injection-recovery tests
     malca detection_rate [options] # Measure detection rate
     malca review [options]         # Launch Dash review GUI (keyboard-driven)
+    malca review-refresh [options] # Refresh review DB stats from a run/bundle
     malca stats [options]          # Light-curve statistics
     malca attrition [options]      # Pre/filter attrition summary
     malca vsx-filter [options]     # Build cleaned ASAS-SN index & filtered VSX catalog
@@ -54,7 +55,7 @@ def main():
         "manifest", "pipeline", "reproduce", "injection",
         "detection_rate", "validate", "plot",
         "events", "gaia-fetch", "characterize", "classify", "filter", "tag", "score",
-        "stats", "attrition", "review",
+        "stats", "attrition", "review", "review-refresh",
         "neighbors", "spectra", "false_positive", "ml_train", "ml_predict", "vsx-filter", "vsx-crossmatch",
         "vetting",
         "ltv-core", "ltv-pipeline", "ltv-ingest",
@@ -103,6 +104,8 @@ def main():
             _run_module_main("malca.score", remaining)
         elif command == "review":
             _run_module_main("malca.review.app", remaining)
+        elif command == "review-refresh":
+            _run_module_main("malca.review.refresh", remaining)
         elif command == "validate":
             validation = importlib.import_module("malca.evaluation.validation")
             sys.argv = [sys.argv[0]] + remaining
@@ -168,6 +171,7 @@ def main():
     subparsers.add_parser("stats", help="Compute light-curve statistics")
     subparsers.add_parser("attrition", help="Summarize pre/filter attrition")
     subparsers.add_parser("review", help="Launch Dash review GUI (keyboard-driven, fast)")
+    subparsers.add_parser("review-refresh", help="Refresh review DB stats from a run or bundle")
     subparsers.add_parser("false_positive", help="Run false-positive contaminant benchmark")
     subparsers.add_parser("ml_train", help="Train baseline ML classifier on reviewed labels")
     subparsers.add_parser("ml_predict", help="Score candidates with a trained ML model")
