@@ -1,6 +1,5 @@
 from pathlib import Path
 from unittest.mock import patch, MagicMock
-import sys
 import tempfile
 
 import numpy as np
@@ -26,35 +25,36 @@ def get_mock_df():
         "best_name": ["V* TEST 1", "V* TEST 2"]
     })
 
-def test_fetch_kepler_k2(mock_df, tmp_path):
 
-    mock_lk = MagicMock()
-    sys.modules["lightkurve"] = mock_lk
-    try:
+@pytest.fixture
+def mock_df():
+    return get_mock_df()
+
+def test_fetch_kepler_k2(mock_df, tmp_path):
+    with patch("malca.vetting.lk.search_lightcurve") as mock_search_lightcurve:
         mock_search = MagicMock()
         mock_search.__len__.return_value = 1
-        mock_lk.search_lightcurve.return_value = mock_search
+        mock_search_lightcurve.return_value = mock_search
+
         mock_lc1 = MagicMock()
         mock_lc1.time.value = np.array([1, 2, 3])
         mock_lc1.flux.value = np.array([100, 101, 100])
         mock_lc1.flux_err.value = np.array([1, 1, 1])
         mock_lc1.quality.value = np.array([0, 0, 0])
         mock_lc1.meta.QUARTER = 1
-        
+
         mock_collection = MagicMock()
         mock_collection.__len__.return_value = 1
         mock_collection.__iter__.return_value = iter([mock_lc1])
         mock_search.download_all.return_value = mock_collection
-        
+
         df_out = fetch_kepler_k2_lightcurves(mock_df, output_dir=tmp_path)
-        
+
         assert "kepler_n_quarters" in df_out.columns
         assert df_out.loc[0, "kepler_n_quarters"] == 1
         assert df_out.loc[0, "kepler_total_points"] == 3
-        
+
         assert (tmp_path / "kepler_lc_cand_1.parquet").exists()
-    finally:
-        del sys.modules["lightkurve"]
 
 def test_fetch_aavso(mock_df, tmp_path):
     with patch("malca.vetting.requests.get") as mock_get, \

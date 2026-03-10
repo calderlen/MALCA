@@ -968,64 +968,180 @@ def structure_function(mag, time):
     return sf_amplitude, sf_gamma
 
 
-def fit_harmonics(mag, time, period, n_harmonics=7):
-    """
-    Fit a Fourier/harmonic series to the phase-folded light curve.
+def _wrap_angle_2pi(angle: float) -> float:
+    if not np.isfinite(angle):
+        return np.nan
+    return float(np.mod(angle, 2.0 * np.pi))
 
-    Returns dict with:
-    - harmonics_mag_1..N: amplitudes of each harmonic
-    - harmonics_phase_2..N: phases relative to fundamental
-    - harmonics_mse: mean squared error of the fit
-    """
-    nan_result = {}
+
+def _fourier_nan_result(max_harmonics: int) -> dict[str, float]:
+    result: dict[str, float] = {
+        "harmonics_order": np.nan,
+        "harmonics_period": np.nan,
+        "harmonics_a0": np.nan,
+        "harmonics_model_amplitude": np.nan,
+        "harmonics_reduced_chi2": np.nan,
+        "harmonics_mse": np.nan,
+    }
+    for k in range(1, max_harmonics + 1):
+        result[f"harmonics_mag_{k}"] = np.nan
+    for k in range(2, max_harmonics + 1):
+        result[f"harmonics_phase_{k}"] = np.nan
+        result[f"harmonics_r{k}1"] = np.nan
+    return result
+
+
+def _build_fourier_design_matrix(phase: np.ndarray, n_harmonics: int) -> np.ndarray:
+    design = np.ones((len(phase), 1 + 2 * n_harmonics), dtype=float)
     for k in range(1, n_harmonics + 1):
-        nan_result[f"harmonics_mag_{k}"] = np.nan
-    for k in range(2, n_harmonics + 1):
-        nan_result[f"harmonics_phase_{k}"] = np.nan
-    nan_result["harmonics_mse"] = np.nan
+        angle = 2.0 * np.pi * k * phase
+        design[:, 2 * k - 1] = np.cos(angle)
+        design[:, 2 * k] = np.sin(angle)
+    return design
+
+
+def _solve_fourier_least_squares(
+    mag: np.ndarray,
+    design: np.ndarray,
+    err: np.ndarray | None = None,
+) -> dict[str, float | np.ndarray]:
+    mag = np.asarray(mag, float)
+    if err is not None:
+        err = np.asarray(err, float)
+        weights = np.where(np.isfinite(err) & (err > 0), 1.0 / np.square(err), np.nan)
+        use_weights = np.isfinite(weights).all()
+    else:
+        weights = None
+        use_weights = False
+
+    try:
+        if use_weights:
+            sqrt_w = np.sqrt(weights)
+            coeffs, _, _, _ = np.linalg.lstsq(design * sqrt_w[:, None], mag * sqrt_w, rcond=None)
+        else:
+            coeffs, _, _, _ = np.linalg.lstsq(design, mag, rcond=None)
+    except np.linalg.LinAlgError:
+        return {
+            "coeffs": np.full(design.shape[1], np.nan, dtype=float),
+            "fitted": np.full(len(mag), np.nan, dtype=float),
+            "bic": np.nan,
+            "mse": np.nan,
+            "reduced_chi2": np.nan,
+        }
+
+    fitted = design @ coeffs
+    resid = mag - fitted
+    n = len(mag)
+    n_params = design.shape[1]
+    mse = float(np.mean(np.square(resid))) if n > 0 else np.nan
+
+    if use_weights:
+        chi2 = float(np.sum(np.square(resid / err)))
+        bic = chi2 + n_params * np.log(max(n, 1))
+        dof = n - n_params
+        reduced_chi2 = chi2 / dof if dof > 0 else np.nan
+    else:
+        rss = float(np.sum(np.square(resid)))
+        bic = n * np.log(max(rss / max(n, 1), 1e-12)) + n_params * np.log(max(n, 1))
+        reduced_chi2 = np.nan
+
+    return {
+        "coeffs": coeffs,
+        "fitted": fitted,
+        "bic": float(bic),
+        "mse": mse,
+        "reduced_chi2": float(reduced_chi2) if np.isfinite(reduced_chi2) else np.nan,
+    }
+
+
+def fit_fourier_decomposition(mag, time, period, err=None, max_harmonics=7):
+    """Fit a classical harmonic series to a phase-folded light curve.
+
+    The returned amplitudes are the Fourier ``A_k`` terms. The returned
+    ``harmonics_phase_k`` values are the classical phase combinations
+    ``phi_k1 = phi_k - k * phi_1`` in a cosine-series convention, wrapped onto
+    ``[0, 2pi)``.
+    """
+    result = _fourier_nan_result(max_harmonics)
 
     mag = np.asarray(mag, float)
     time = np.asarray(time, float)
-    mask = np.isfinite(mag) & np.isfinite(time)
-    if mask.sum() < 2 * n_harmonics + 1 or not np.isfinite(period) or period <= 0:
-        return nan_result
+    if err is not None:
+        err = np.asarray(err, float)
+        mask = np.isfinite(mag) & np.isfinite(time) & np.isfinite(err) & (err > 0)
+    else:
+        mask = np.isfinite(mag) & np.isfinite(time)
+
+    if (not np.isfinite(period)) or period <= 0:
+        return result
+    if int(mask.sum()) < 5:
+        return result
 
     mag = mag[mask]
     time = time[mask]
+    err = err[mask] if err is not None else None
 
-    phase = (time / period) % 1.0
-
-    # design matrix: [1, cos(2pi*phase), sin(2pi*phase), cos(4pi*phase), ...]
     n = len(mag)
-    X = np.ones((n, 1 + 2 * n_harmonics))
-    for k in range(1, n_harmonics + 1):
-        X[:, 2 * k - 1] = np.cos(2 * np.pi * k * phase)
-        X[:, 2 * k] = np.sin(2 * np.pi * k * phase)
+    max_order = min(int(max_harmonics), max((n - 2) // 2, 0))
+    if max_order < 1:
+        return result
 
-    try:
-        coeffs, residuals, _, _ = np.linalg.lstsq(X, mag, rcond=None)
-    except np.linalg.LinAlgError:
-        return nan_result
+    t0 = float(np.min(time))
+    phase = np.mod((time - t0) / float(period), 1.0)
 
-    result = {}
-    phase_1 = np.arctan2(coeffs[2], coeffs[1])  # phase of fundamental
+    fits: list[dict[str, float | np.ndarray]] = []
+    for order in range(1, max_order + 1):
+        design = _build_fourier_design_matrix(phase, order)
+        fit = _solve_fourier_least_squares(mag, design, err=err)
+        fit["order"] = order
+        fits.append(fit)
 
-    for k in range(1, n_harmonics + 1):
-        a_k = coeffs[2 * k - 1]
-        b_k = coeffs[2 * k]
-        result[f"harmonics_mag_{k}"] = float(np.sqrt(a_k ** 2 + b_k ** 2))
+    fits = [fit for fit in fits if np.isfinite(fit["bic"])]
+    if not fits:
+        return result
 
-    for k in range(2, n_harmonics + 1):
-        a_k = coeffs[2 * k - 1]
-        b_k = coeffs[2 * k]
-        phase_k = np.arctan2(b_k, a_k)
-        # phase relative to fundamental
-        result[f"harmonics_phase_{k}"] = float(phase_k - k * phase_1)
+    best_fit = min(fits, key=lambda fit: float(fit["bic"]))
+    full_fit = fits[-1]
+    coeffs = np.asarray(full_fit["coeffs"], float)
 
-    fitted = X @ coeffs
-    result["harmonics_mse"] = float(np.mean((mag - fitted) ** 2))
+    result["harmonics_order"] = int(best_fit["order"])
+    result["harmonics_period"] = float(period)
+    result["harmonics_a0"] = float(coeffs[0])
+    result["harmonics_reduced_chi2"] = float(full_fit["reduced_chi2"]) if np.isfinite(full_fit["reduced_chi2"]) else np.nan
+    result["harmonics_mse"] = float(full_fit["mse"])
 
+    amplitudes: dict[int, float] = {}
+    phases_abs: dict[int, float] = {}
+    for k in range(1, max_order + 1):
+        cos_coeff = float(coeffs[2 * k - 1])
+        sin_coeff = float(coeffs[2 * k])
+        amplitudes[k] = float(np.hypot(cos_coeff, sin_coeff))
+        phases_abs[k] = _wrap_angle_2pi(np.arctan2(-sin_coeff, cos_coeff))
+        result[f"harmonics_mag_{k}"] = amplitudes[k]
+
+    amp1 = amplitudes.get(1, np.nan)
+    phi1 = phases_abs.get(1, np.nan)
+    for k in range(2, max_order + 1):
+        phi_k1 = _wrap_angle_2pi(phases_abs[k] - k * phi1)
+        result[f"harmonics_phase_{k}"] = phi_k1
+        if np.isfinite(amp1) and amp1 > 0:
+            result[f"harmonics_r{k}1"] = float(amplitudes[k] / amp1)
+
+    phase_grid = np.linspace(0.0, 1.0, 1024, endpoint=False)
+    model_grid = _build_fourier_design_matrix(phase_grid, max_order) @ coeffs
+    result["harmonics_model_amplitude"] = float(np.nanmax(model_grid) - np.nanmin(model_grid))
     return result
+
+
+def fit_harmonics(mag, time, period, n_harmonics=7, err=None):
+    """Backward-compatible wrapper around the full Fourier decomposition."""
+    return fit_fourier_decomposition(
+        mag,
+        time,
+        period,
+        err=err,
+        max_harmonics=n_harmonics,
+    )
 
 
 def psi_cs(mag, time, period):
@@ -1413,7 +1529,7 @@ def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=Tr
 
     # period-dependent features (use LS best period)
     best_period = ls_stats["ls_best_period_days"]
-    _harmonics = fit_harmonics(mag, jd_arr, best_period)
+    _harmonics = fit_fourier_decomposition(mag, jd_arr, best_period, err=merr)
     _psi_cs = psi_cs(mag, jd_arr, best_period)
     _psi_eta = psi_eta(mag, jd_arr, best_period)
 
@@ -1530,6 +1646,11 @@ def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=Tr
         ("sf_ml_amplitude", _sf_amplitude),
         ("sf_ml_gamma", _sf_gamma),
         # period-dependent features
+        ("harmonics_order", _harmonics["harmonics_order"]),
+        ("harmonics_period", _harmonics["harmonics_period"]),
+        ("harmonics_a0", _harmonics["harmonics_a0"]),
+        ("harmonics_model_amplitude", _harmonics["harmonics_model_amplitude"]),
+        ("harmonics_reduced_chi2", _harmonics["harmonics_reduced_chi2"]),
         ("harmonics_mag_1", _harmonics["harmonics_mag_1"]),
         ("harmonics_mag_2", _harmonics["harmonics_mag_2"]),
         ("harmonics_mag_3", _harmonics["harmonics_mag_3"]),
@@ -1537,6 +1658,12 @@ def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=Tr
         ("harmonics_mag_5", _harmonics["harmonics_mag_5"]),
         ("harmonics_mag_6", _harmonics["harmonics_mag_6"]),
         ("harmonics_mag_7", _harmonics["harmonics_mag_7"]),
+        ("harmonics_r21", _harmonics["harmonics_r21"]),
+        ("harmonics_r31", _harmonics["harmonics_r31"]),
+        ("harmonics_r41", _harmonics["harmonics_r41"]),
+        ("harmonics_r51", _harmonics["harmonics_r51"]),
+        ("harmonics_r61", _harmonics["harmonics_r61"]),
+        ("harmonics_r71", _harmonics["harmonics_r71"]),
         ("harmonics_phase_2", _harmonics["harmonics_phase_2"]),
         ("harmonics_phase_3", _harmonics["harmonics_phase_3"]),
         ("harmonics_phase_4", _harmonics["harmonics_phase_4"]),
@@ -1623,9 +1750,18 @@ def print_summary(summary, max_rows=10):
     print(f"SF_ML_amplitude={_fmt(summary['sf_ml_amplitude'])}  SF_ML_gamma={_fmt(summary['sf_ml_gamma'])}")
 
     print("\n=== HARMONICS (folded LC) ===")
+    print(
+        f"order={_fmt(summary['harmonics_order'], 0)}  "
+        f"period={_fmt(summary['harmonics_period'], 6)} d  "
+        f"A0={_fmt(summary['harmonics_a0'])}  "
+        f"model_amp={_fmt(summary['harmonics_model_amplitude'])}  "
+        f"red_chi2={_fmt(summary['harmonics_reduced_chi2'])}"
+    )
     h_mags = "  ".join(f"H{k}={_fmt(summary[f'harmonics_mag_{k}'])}" for k in range(1, 8))
     print(f"Mag: {h_mags}")
-    h_phases = "  ".join(f"φ{k}={_fmt(summary[f'harmonics_phase_{k}'])}" for k in range(2, 8))
+    h_ratios = "  ".join(f"R{k}1={_fmt(summary[f'harmonics_r{k}1'])}" for k in range(2, 8))
+    print(f"Ratios: {h_ratios}")
+    h_phases = "  ".join(f"φ{k}1={_fmt(summary[f'harmonics_phase_{k}'])}" for k in range(2, 8))
     print(f"Phase: {h_phases}")
     print(f"MSE={_fmt(summary['harmonics_mse'])}  Psi_CS={_fmt(summary['psi_cs'])}  Psi_eta={_fmt(summary['psi_eta'])}")
 

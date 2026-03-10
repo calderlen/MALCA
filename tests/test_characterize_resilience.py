@@ -187,3 +187,56 @@ def test_unwise_variability_resumes_from_checkpoint(tmp_path: Path, monkeypatch)
 
     ckpt = pd.read_parquet(checkpoint_path)
     assert len(ckpt) == 4
+
+
+def test_characterize_queries_gaia_when_only_source_id_and_coords_present(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_query_gaia_by_ids(source_ids, chunk_size: int = 0, cache_file=None):
+        _ = (chunk_size, cache_file)
+        ids = [str(v) for v in source_ids]
+        calls.append(ids)
+        return pd.DataFrame(
+            {
+                "source_id": ids,
+                "phot_g_mean_mag": [15.3],
+                "bp_rp": [1.2],
+                "parallax": [0.4],
+                "pmra": [2.1],
+                "pmdec": [-1.9],
+            }
+        )
+
+    monkeypatch.setattr(characterize, "query_gaia_by_ids", fake_query_gaia_by_ids)
+
+    df = pd.DataFrame(
+        {
+            "candidate_id": ["c1"],
+            "source_id": ["123456789"],
+            "gaia_id": ["123456789"],
+            "ra": [10.0],
+            "dec": [-20.0],
+            "tmass_j": [12.0],
+        }
+    )
+
+    out = characterize.characterize_candidates_df(
+        df,
+        dust=False,
+        starhorse=None,
+        run_banyan=False,
+        run_iphas=False,
+        run_sfr=False,
+        run_clusters=False,
+        run_unwise=False,
+        run_apass=False,
+        run_galex=False,
+        run_allwise=False,
+    )
+
+    assert calls == [["123456789"]]
+    assert out.loc[0, "phot_g_mean_mag"] == 15.3
+    assert out.loc[0, "bp_rp"] == 1.2
+    assert out.loc[0, "parallax"] == 0.4
+    assert out.loc[0, "pmra"] == 2.1
+    assert out.loc[0, "pmdec"] == -1.9

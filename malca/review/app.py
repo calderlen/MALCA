@@ -20,7 +20,7 @@ import webbrowser
 
 from dash import dcc, html, Input, Output, State, callback_context, no_update, ALL
 from dash import DiskcacheManager
-from flask import send_from_directory
+from flask import abort, send_from_directory
 import dash
 import dash_bootstrap_components as dbc
 import diskcache
@@ -1679,6 +1679,7 @@ def _env_path_or_none(name: str) -> str | None:
 # Global variables
 DB_PATH = _env_path_or_none(_REVIEW_DB_ENV) or str(DEFAULT_DB_PATH)
 PLOT_DIR = _env_path_or_none(_REVIEW_PLOT_ENV)
+_PLOT_STATIC_EXTENSIONS = {".png", ".jpg", ".jpeg", ".pdf", ".svg", ".webp"}
 DEFAULT_THEME = "black"
 FETCH_BACKEND_OPTIONS = [
     {"label": "SkyPatrol2 API", "value": "skypatrol2"},
@@ -1818,6 +1819,11 @@ def _render_stat_cards(stat_rows: list[tuple[str, str]]) -> list:
         "stats_small_kurtosis": "Small kurtosis",
         "stats_pair_slope_trend": "Pair slope trend",
         "stats_harmonics_mse": r"$\mathrm{MSE}$ ($\mathrm{mag}^2$)",
+        "stats_harmonics_order": "Recommended harmonic order",
+        "stats_harmonics_period": "Adopted period (d)",
+        "stats_harmonics_a0": r"Zero-point $A_0$ (mag)",
+        "stats_harmonics_model_amplitude": "Model amplitude (mag)",
+        "stats_harmonics_reduced_chi2": r"Reduced $\chi^2$",
         "stats_mhps_pn_flag": "MHPS PN flag",
         "stats_mhps_non_zero": "MHPS non-zero count",
         "filtered_cams": "Filtered cameras",
@@ -1934,10 +1940,14 @@ def _render_stat_cards(stat_rows: list[tuple[str, str]]) -> list:
         if mag_match:
             n = mag_match.group(1)
             return rf"Amplitude $A_{{{n}}}$ (mag)"
+        ratio_match = re.fullmatch(r"stats_harmonics_r(\d+)1", key)
+        if ratio_match:
+            n = ratio_match.group(1)
+            return rf"Amplitude ratio $R_{{{n}1}}$"
         phase_match = re.fullmatch(r"stats_harmonics_phase_(\d+)", key)
         if phase_match:
             n = phase_match.group(1)
-            return rf"Phase $\phi_{{{n}}}$ (rad)"
+            return rf"Phase combination $\phi_{{{n}1}}$ (rad)"
         return _fallback_label(key)
 
     grouped: dict[str, list[tuple[str, str]]] = {name: [] for name in group_order}
@@ -2477,10 +2487,96 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def _configured_plot_dir() -> Path | None:
+    """Return the configured plot directory, if any."""
+    if not PLOT_DIR:
+        return None
+    return Path(str(PLOT_DIR)).expanduser().resolve()
+
+
+def _plot_asset_root() -> Path:
+    """Root used for locating and serving static plot files."""
+    plot_dir = _configured_plot_dir()
+    return plot_dir if plot_dir is not None else _project_root()
+
+
+def _plot_url_for_path(plot_path: Path) -> str:
+    """Return a `/plots/...` URL for a discovered plot path."""
+    root = _plot_asset_root().resolve()
+    candidate = Path(plot_path).expanduser().resolve()
+    try:
+        rel_path = candidate.relative_to(root)
+    except ValueError:
+        return ""
+    return f"/plots/{rel_path.as_posix()}"
+
+
+def _plot_file_from_src(src: str) -> Path | None:
+    """Resolve a static plot URL back to an on-disk file path."""
+    text = str(src or "")
+    if not text.startswith('/plots/'):
+        return None
+
+    rel = text[len('/plots/'):]
+    suffix = Path(rel).suffix.lower()
+    if suffix not in _PLOT_STATIC_EXTENSIONS:
+        return None
+
+    root = _plot_asset_root().resolve()
+    candidate = (root / rel).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return None
+    return candidate
+
+
+def _plot_search_root_for_payload(payload: dict | None) -> Path | None:
+    """Return the best plot directory to search for a candidate payload."""
+    plot_dir = _configured_plot_dir()
+    if plot_dir is not None:
+        return plot_dir
+
+    for key in ("plot_path", "png_path", "path", "lc_path"):
+        raw_path = (payload or {}).get(key)
+        if not raw_path:
+            continue
+        candidate = Path(str(raw_path)).expanduser()
+        try:
+            candidate = candidate.resolve()
+        except Exception:
+            pass
+
+        if candidate.suffix.lower() in _PLOT_STATIC_EXTENSIONS and candidate.exists():
+            return candidate.parent
+
+        for parent in candidate.parents:
+            run_dir = _resolve_run_dir_from_plot_dir(str(parent))
+            if run_dir is None:
+                continue
+            plot_candidate = run_dir / "plots"
+            if plot_candidate.is_dir():
+                return plot_candidate
+
+    return None
+
+
+def _candidate_plot_src(payload: dict | None) -> str:
+    """Return a static plot URL for *payload*, if one can be located."""
+    plot_root = _plot_search_root_for_payload(payload)
+    if plot_root is None:
+        return ""
+
+    plot_path = find_plot_image(payload or {}, plot_root)
+    if plot_path and plot_path.exists():
+        return _plot_url_for_path(plot_path)
+    return ""
+
+
 def _count_candidates_in_db(path: Path) -> int:
     """Return number of candidates in DB, or -1 when unavailable."""
     try:
-        with closing(sqlite3.connect(path)) as conn:
+        with closing(sqlite3.connect(str(path), timeout=30.0)) as conn:
             row = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='candidates'"
             ).fetchone()
@@ -3542,6 +3638,11 @@ _SIDEBAR_GROUPS = [
         ('num', 'stats_sf_ml_gamma'),
     ]),
     ('LC Harmonics (folded)', [
+        ('num', 'stats_harmonics_order'),
+        ('num', 'stats_harmonics_period'),
+        ('num', 'stats_harmonics_a0'),
+        ('num', 'stats_harmonics_model_amplitude'),
+        ('num', 'stats_harmonics_reduced_chi2'),
         ('num', 'stats_harmonics_mag_1'),
         ('num', 'stats_harmonics_mag_2'),
         ('num', 'stats_harmonics_mag_3'),
@@ -3549,6 +3650,12 @@ _SIDEBAR_GROUPS = [
         ('num', 'stats_harmonics_mag_5'),
         ('num', 'stats_harmonics_mag_6'),
         ('num', 'stats_harmonics_mag_7'),
+        ('num', 'stats_harmonics_r21'),
+        ('num', 'stats_harmonics_r31'),
+        ('num', 'stats_harmonics_r41'),
+        ('num', 'stats_harmonics_r51'),
+        ('num', 'stats_harmonics_r61'),
+        ('num', 'stats_harmonics_r71'),
         ('num', 'stats_harmonics_phase_2'),
         ('num', 'stats_harmonics_phase_3'),
         ('num', 'stats_harmonics_phase_4'),
@@ -3649,7 +3756,7 @@ def create_layout():
         dcc.Store(id='pipeline-module-log', data={'lines': []}),
         dcc.Store(id='cone-results-data', data=None),  # cone search catalog rows
         dcc.Store(id='auto-period-cache', data={}, storage_type='session'),
-        dcc.Store(id='plot-render-request', data={'nonce': 1, 'ts': 0.0, 'state': {'idx': 0, 'plot_mode': 'native', 'overlay_values': list(PLOT_PRESETS['Diagnostics']['overlays']), 'selected_cameras': [], 'preset': 'Diagnostics', 'theme': DEFAULT_THEME, 'residual_height': DEFAULT_RESIDUAL_FRACTION, 'baseline_opacity': 0.5, 'external_source_view': 'all'}}),
+        dcc.Store(id='plot-render-request', data={'nonce': 1, 'ts': 0.0, 'state': {'idx': 0, 'candidate_id': None, 'plot_mode': 'native', 'overlay_values': list(PLOT_PRESETS['Diagnostics']['overlays']), 'selected_cameras': [], 'preset': 'Diagnostics', 'theme': DEFAULT_THEME, 'residual_height': DEFAULT_RESIDUAL_FRACTION, 'baseline_opacity': 0.5, 'external_source_view': 'all'}}),
         dcc.Store(id='plot-render-applied', data=0),
         dcc.Store(id='plot-defaults-initialized', data=False),
         dcc.Store(id='queue-source-path', data=''),
@@ -4077,7 +4184,7 @@ def create_layout():
                                                              'color': '#7da8c4'}),
                                 ),
                                 html.Details([
-                                    html.Summary('Module Run Log (temp)', style={'cursor': 'pointer', 'marginTop': '4px'}),
+                                    html.Summary('Log', style={'cursor': 'pointer', 'marginTop': '4px'}),
                                     html.Pre(
                                         id='pipeline-module-log-panel',
                                         style={
@@ -4944,7 +5051,7 @@ def _run_period_search_for_payload(
     method: str,
 ) -> tuple[dict | None, str]:
     """Run a period search against the current candidate payload."""
-    plot_dir_path = Path(PLOT_DIR) if PLOT_DIR else Path('.')
+    plot_dir_path = _configured_plot_dir()
     lc_path = resolve_lightcurve_path(payload, plot_dir_path)
     if lc_path is None:
         return None, 'No LC file'
@@ -5153,6 +5260,7 @@ def handle_keyboard(key_value, current_idx, queue_size, current_candidate_id, cu
 @app.callback(
     Output('plot-render-request', 'data'),
     [Input('current-index', 'data'),
+     Input('current-candidate-id', 'data'),
      Input('plot-mode', 'value'),
      Input('plot-overlays', 'value'),
      Input('camera-checklist', 'value'),
@@ -5168,10 +5276,10 @@ def handle_keyboard(key_value, current_idx, queue_size, current_candidate_id, cu
      Input('pdm-manual-period', 'value'),
      Input('yaxis-mode', 'value'),
      Input('external-source-view', 'value')],
-    State('plot-render-request', 'data'),
+     State('plot-render-request', 'data'),
     prevent_initial_call=True,
 )
-def queue_plot_render_request(idx, plot_mode, overlay_values, selected_cameras, preset, residual_height, theme_mode, _queue_size, _pipeline_progress, baseline_opacity, round_sigfigs, link_radius, pdm_result, pdm_manual_period, yaxis_mode, external_source_view, existing_request):
+def queue_plot_render_request(idx, current_candidate_id, plot_mode, overlay_values, selected_cameras, preset, residual_height, theme_mode, _queue_size, _pipeline_progress, baseline_opacity, round_sigfigs, link_radius, pdm_result, pdm_manual_period, yaxis_mode, external_source_view, existing_request):
     """Debounced render request queue for native plot UX."""
     req = existing_request or {'nonce': 0, 'ts': 0.0}
     # Determine effective PDM period: manual override > PDM result
@@ -5190,6 +5298,7 @@ def queue_plot_render_request(idx, plot_mode, overlay_values, selected_cameras, 
         'ts': float(time.time()),
         'state': {
             'idx': idx,
+            'candidate_id': str(current_candidate_id) if current_candidate_id is not None else None,
             'plot_mode': plot_mode,
             'overlay_values': list(overlay_values or []),
             'selected_cameras': list(selected_cameras or []),
@@ -5420,25 +5529,23 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
     }
 
     queue_size = int(queue_size_data or 0)
-    if queue_size <= 0 or not current_candidate_id:
+    candidate_id = state.get('candidate_id')
+    if candidate_id is None and current_candidate_id is not None:
+        candidate_id = str(current_candidate_id)
+    elif candidate_id is not None:
+        candidate_id = str(candidate_id)
+
+    if queue_size <= 0 or not candidate_id:
         return '', 'No candidates in queue', _render_metadata_health(None, context_msg='Queue is empty.'), _render_vetting_banner(None, radius_arcsec=link_radius), '[0/0]', empty_fig, {'display': 'block', 'width': '100%', 'height': '100%'}, {'display': 'none'}, [], [], _render_plot_status_panel('error', 'No candidates in queue.', []), _render_camera_diag_panel({}, []), _render_run_config_panel(None, None, ['Queue is empty']), _render_repro_badge(None, ['Queue is empty']), '', nonce
 
     if idx < 0 or idx >= queue_size:
         return '', 'Invalid index', _render_metadata_health(None, context_msg='Invalid queue index.'), _render_vetting_banner(None, radius_arcsec=link_radius), f'[{idx}/{queue_size}]', empty_fig, {'display': 'block', 'width': '100%', 'height': '100%'}, {'display': 'none'}, [], [], _render_plot_status_panel('error', 'Invalid queue index.', []), _render_camera_diag_panel({}, []), _render_run_config_panel(None, None, ['Invalid queue index']), _render_repro_badge(None, ['Invalid queue index']), '', nonce
 
-    candidate_id = str(current_candidate_id)
     with closing(db_connect(Path(DB_PATH))) as conn:
         payload = get_candidate_payload(conn, candidate_id)
 
-    plot_src = ''
-    plot_dir_path = Path(PLOT_DIR) if PLOT_DIR else Path('.')
-    plot_path = find_plot_image(payload, plot_dir_path)
-    if plot_path and plot_path.exists():
-        try:
-            rel_path = plot_path.relative_to(plot_dir_path)
-            plot_src = f'/plots/{rel_path}'
-        except ValueError:
-            plot_src = f'/plots/{plot_path.name}'
+    plot_dir_path = _configured_plot_dir()
+    plot_search_root = _plot_search_root_for_payload(payload)
 
     grouped = extract_review_metadata_grouped(payload, round_sigfigs=round_sigfigs)
     metadata_health = _render_metadata_health(grouped)
@@ -5483,19 +5590,17 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
         stats_group = _render_stat_cards(_build_stat_rows(payload, pd.DataFrame(), set()))
         merged_grid = stats_group + grid_items
 
-        png_src = plot_src
+        png_src = _candidate_plot_src(payload)
         png_msg = 'PNG view enabled. Switch to Native for interactive hover and diagnostics.'
-        if 'phase' in overlays:
-            phase_plot_path = find_phase_plot_image(payload, plot_dir_path)
+        if 'phase' in overlays and plot_search_root is not None:
+            phase_plot_path = find_phase_plot_image(payload, plot_search_root)
             if phase_plot_path and phase_plot_path.exists():
-                try:
-                    rel_phase = phase_plot_path.relative_to(plot_dir_path)
-                    png_src = f'/plots/{rel_phase}'
-                except ValueError:
-                    png_src = f'/plots/{phase_plot_path.name}'
+                png_src = _plot_url_for_path(phase_plot_path)
                 png_msg = 'Showing phase-folded PNG view.'
             else:
                 mismatch_warnings.append('Phase-fold overlay selected, but no phase PNG was found for this candidate.')
+        elif 'phase' in overlays:
+            mismatch_warnings.append('Phase-fold overlay selected, but no phase PNG was found for this candidate.')
         panel = _render_run_config_panel(run_params if run_params else None, run_params_path, mismatch_warnings)
         return (
             png_src,
@@ -5574,6 +5679,7 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
 
         traceback.print_exc()
         panel = _render_run_config_panel(run_params if run_params else None, run_params_path, [str(exc)])
+        plot_src = _candidate_plot_src(payload)
         if plot_src:
             return (
                 plot_src, grid_items, metadata_health, vetting_banner, progress, no_update,
@@ -5601,6 +5707,10 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
     native_status = str(native.get('status', 'ok'))
     native_message = str(native.get('status_message', '') or '')
     native_warnings = list(native.get('warnings', []) or [])
+
+    plot_src = ''
+    if native_status in {"missing-file", "missing-columns", "empty-after-filter", "empty-camera-selection"}:
+        plot_src = _candidate_plot_src(payload)
 
     if native_status in {"missing-file", "missing-columns", "empty-after-filter", "empty-camera-selection"} and plot_src:
         fallback_warnings = native_warnings + mismatch_warnings
@@ -5829,9 +5939,8 @@ def export_active_plot(n_clicks, figure, plot_mode, plot_src, idx, candidate_id)
             return no_update, 'No PNG plot is available to export.'
         src = str(plot_src)
         plot_file: Path | None = None
-        if src.startswith('/plots/') and PLOT_DIR:
-            rel = src[len('/plots/'):]
-            plot_file = Path(PLOT_DIR) / rel
+        if src.startswith('/plots/'):
+            plot_file = _plot_file_from_src(src)
         else:
             candidate = Path(src)
             if candidate.exists():
@@ -6650,6 +6759,9 @@ else:
 def _pipeline_status_chip_elements(candidate_id) -> list:
     """Build pipeline status chips for the active candidate."""
     chips = []
+    stage_labels = {
+        'external_lcs': 'External LCs',
+    }
     if candidate_id is None:
         return chips
     try:
@@ -6659,7 +6771,7 @@ def _pipeline_status_chip_elements(candidate_id) -> list:
         color_map = {'complete': '#2d6a2d', 'partial': '#6a5c2d', 'missing': '#444'}
         for stage, state in status.items():
             chips.append(html.Span(
-                f"{'●' if state == 'complete' else '○'} {stage.capitalize()}",
+                f"{'●' if state == 'complete' else '○'} {stage_labels.get(stage, stage.capitalize())}",
                 style={
                     'padding': '1px 6px',
                     'borderRadius': '8px',
@@ -6959,7 +7071,10 @@ def toggle_help_modal(n1, n2, key_value, is_open):
 @app.server.route('/plots/<path:filename>')
 def serve_plot(filename):
     """Serve plot images."""
-    return send_from_directory(PLOT_DIR, filename)
+    suffix = Path(str(filename)).suffix.lower()
+    if suffix not in _PLOT_STATIC_EXTENSIONS:
+        abort(404)
+    return send_from_directory(str(_plot_asset_root()), filename)
 
 
 def main():

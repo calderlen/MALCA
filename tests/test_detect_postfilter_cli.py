@@ -3,12 +3,13 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 pytest.importorskip("astroquery")
 pytest.importorskip("celerite2")
 
-from malca.detect import _build_filter_kwargs
+from malca.detect import _build_filter_kwargs, _select_passing_candidates
 
 
 def _base_args() -> argparse.Namespace:
@@ -154,3 +155,16 @@ def test_build_filter_kwargs_respects_cli_overrides() -> None:
 
     assert kwargs["apply_periodic_catalog_validation"] is False
     assert kwargs["periodic_catalog_flag_only"] is False
+
+
+def test_select_passing_candidates_filters_truthy_failed_any_values() -> None:
+    df = pd.DataFrame(
+        {
+            "path": ["a", "b", "c", "d"],
+            "failed_any": [False, True, "yes", 0],
+        }
+    )
+
+    out = _select_passing_candidates(df)
+
+    assert out["path"].tolist() == ["a", "d"]

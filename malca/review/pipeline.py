@@ -289,7 +289,7 @@ def _run_stats_stage(payload: dict, lc_path: str, p: Callable | None = None) -> 
     try:
         candidate_id = Path(lc_path).stem
         parent = str(Path(lc_path).parent)
-        _df, summary = compute_stats(candidate_id, parent)
+        _df, summary = compute_stats(candidate_id, parent, compute_ls=True)
         _merge_stats_summary_into_payload(payload, summary)
     except Exception as e:
         if p: p(f"Stats stage failed: {e}")

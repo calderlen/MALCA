@@ -25,6 +25,7 @@ from malca.vetting import vet_candidates
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parents[2] / "output" / "review" / "review.db"
 DEFAULT_STANDALONE_DB_PATH = Path(__file__).resolve().parents[2] / "output" / "review" / "standalone.db"
+SQLITE_BUSY_TIMEOUT_MS = 30_000
 STATUS_OPTIONS = ["unreviewed", "reviewed", "needs_followup"]
 EVENT_CLASS_OPTIONS = [
     "unclassified",
@@ -554,6 +555,11 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("stats_sf_ml_amplitude",                      "REAL", "float"),
     ("stats_sf_ml_gamma",                          "REAL", "float"),
     # -- period-dependent features --
+    ("stats_harmonics_order",                      "INTEGER", "float"),
+    ("stats_harmonics_period",                     "REAL", "float"),
+    ("stats_harmonics_a0",                         "REAL", "float"),
+    ("stats_harmonics_model_amplitude",            "REAL", "float"),
+    ("stats_harmonics_reduced_chi2",               "REAL", "float"),
     ("stats_harmonics_mag_1",                      "REAL", "float"),
     ("stats_harmonics_mag_2",                      "REAL", "float"),
     ("stats_harmonics_mag_3",                      "REAL", "float"),
@@ -561,6 +567,12 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("stats_harmonics_mag_5",                      "REAL", "float"),
     ("stats_harmonics_mag_6",                      "REAL", "float"),
     ("stats_harmonics_mag_7",                      "REAL", "float"),
+    ("stats_harmonics_r21",                        "REAL", "float"),
+    ("stats_harmonics_r31",                        "REAL", "float"),
+    ("stats_harmonics_r41",                        "REAL", "float"),
+    ("stats_harmonics_r51",                        "REAL", "float"),
+    ("stats_harmonics_r61",                        "REAL", "float"),
+    ("stats_harmonics_r71",                        "REAL", "float"),
     ("stats_harmonics_phase_2",                    "REAL", "float"),
     ("stats_harmonics_phase_3",                    "REAL", "float"),
     ("stats_harmonics_phase_4",                    "REAL", "float"),
@@ -697,7 +709,13 @@ def init_db(conn: sqlite3.Connection) -> None:
 
 def db_connect(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path), check_same_thread=False)
+    conn = sqlite3.connect(
+        str(db_path),
+        timeout=SQLITE_BUSY_TIMEOUT_MS / 1000.0,
+        check_same_thread=False,
+    )
+    conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
+    conn.execute("PRAGMA journal_mode = WAL")
     init_db(conn)
     return conn
 

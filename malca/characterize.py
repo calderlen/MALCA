@@ -1526,8 +1526,70 @@ def characterize_candidates_df(
     checkpoint_path: Path | None = None,
 ) -> pd.DataFrame:
     """Characterize candidates and return an enriched dataframe."""
+    def _has_finite_values(frame: pd.DataFrame, *columns: str) -> bool:
+        for column in columns:
+            if column not in frame.columns:
+                continue
+            values = pd.to_numeric(frame[column], errors="coerce")
+            if values.notna().any():
+                return True
+        return False
+
+    def _needs_gaia_enrichment(frame: pd.DataFrame) -> bool:
+        has_g_mag = _has_finite_values(frame, "phot_g_mean_mag")
+        has_color = _has_finite_values(frame, "bp_rp") or (
+            _has_finite_values(frame, "phot_bp_mean_mag")
+            and _has_finite_values(frame, "phot_rp_mean_mag")
+        )
+        has_distance = _has_finite_values(frame, "distance_gspphot", "parallax")
+        has_motion = _has_finite_values(frame, "pmra") and _has_finite_values(frame, "pmdec")
+        return not (has_g_mag and has_color and has_distance and has_motion)
+
+    def _merge_missing_gaia_columns(frame: pd.DataFrame) -> pd.DataFrame:
+        if "source_id" not in frame.columns:
+            return frame
+
+        gaia_ids = _normalize_source_ids(frame["source_id"].dropna().tolist())
+        if not gaia_ids:
+            return frame
+
+        print(f"Querying Gaia DR3 for {len(gaia_ids)} sources...")
+        try:
+            gaia_df = query_gaia_by_ids(
+                gaia_ids,
+                chunk_size=chunk_size,
+                cache_file=str(cache) if cache else None,
+            )
+        except Exception as e:
+            print(f"Warning: characterize Gaia query failed: {e}")
+            return frame
+
+        if gaia_df.empty:
+            print("Warning: characterize Gaia query returned no rows")
+            return frame
+
+        gaia_df = gaia_df.copy()
+        gaia_df["source_id"] = gaia_df["source_id"].astype(str)
+        lookup = gaia_df.drop_duplicates(subset=["source_id"], keep="last").set_index("source_id")
+
+        out = frame.copy()
+        source_ids = out["source_id"].astype(str)
+        for column in lookup.columns:
+            values = source_ids.map(lookup[column])
+            if column in out.columns:
+                base = out[column]
+                if pd.api.types.is_object_dtype(base) or pd.api.types.is_string_dtype(base):
+                    base_str = base.astype(str).str.strip().str.lower()
+                    missing = base.isna() | base_str.isin({"", "nan", "none", "<na>"})
+                    out.loc[missing, column] = values.loc[missing]
+                else:
+                    out[column] = base.combine_first(values)
+            else:
+                out[column] = values
+        return out
+
     # If source_id + coordinates already present (e.g. from SkyPatrol fetch),
-    # we can skip the crossmatch+Gaia query and proceed to enrichment modules.
+    # we can skip the crossmatch step and use source_id directly for Gaia enrichment.
     _has_gaia_already = (
         "source_id" in df.columns
         and "ra" in df.columns
@@ -1555,10 +1617,13 @@ def characterize_candidates_df(
 
     # If source_id + coords already present, skip the crossmatch+Gaia block
     if df_char is None and _has_gaia_already:
-        print("Gaia data already present (source_id + coords), skipping crossmatch+Gaia query")
+        print("Gaia identifiers already present (source_id + coords), skipping crossmatch")
         df_char = df.copy()
         if "source_id" in df_char.columns:
             df_char["source_id"] = df_char["source_id"].astype(str)
+        if _needs_gaia_enrichment(df_char):
+            print("Gaia photometry/astrometry incomplete; fetching Gaia catalog rows")
+            df_char = _merge_missing_gaia_columns(df_char)
         _ra_col = "ra"
         _dec_col = "dec"
         _gc_mask = np.isfinite(df_char[_ra_col].astype(float)) & np.isfinite(df_char[_dec_col].astype(float))

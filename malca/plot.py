@@ -40,6 +40,8 @@ from malca.review.metadata import REVIEW_METADATA_FIELDS, normalize_vsx_record
 from malca.utils import clean_lc, read_lc_dat2, filter_bad_cameras
 from malca.utils import gaussian, paczynski_kernel, read_skypatrol_csv as _read_skypatrol_csv
 
+read_skypatrol_csv = _read_skypatrol_csv
+
 
 
 matplotlib.use('Agg')

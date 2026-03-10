@@ -116,6 +116,23 @@ def save_table(df: pd.DataFrame, path: Path) -> None:
         df.to_csv(path, index=False)
 
 
+def _select_passing_candidates(df: pd.DataFrame) -> pd.DataFrame:
+    """Return only rows with failed_any == False when that column exists."""
+    if "failed_any" not in df.columns:
+        return df.copy()
+
+    failed = df["failed_any"]
+    if pd.api.types.is_bool_dtype(failed):
+        keep = ~failed.fillna(False).astype(bool)
+    elif pd.api.types.is_numeric_dtype(failed):
+        keep = failed.fillna(0).astype(float) == 0.0
+    else:
+        lowered = failed.fillna("").astype(str).str.strip().str.lower()
+        keep = ~lowered.isin({"1", "true", "t", "yes", "y"})
+
+    return df.loc[keep].copy()
+
+
 def _unique_paths(paths: list[Path]) -> list[Path]:
     unique: list[Path] = []
     seen: set[str] = set()
@@ -368,7 +385,8 @@ def _collect_bundle_lightcurve_files(out_dir: Path, mag_bin_tag: str | None = No
     files_to_bundle: list[tuple[Path, str]] = []
     seen_files: set[Path] = set()
 
-    for raw_path in df_candidates["path"].dropna().astype(str).unique().tolist():
+    path_series = pd.Series(df_candidates["path"])
+    for raw_path in path_series.dropna().astype(str).unique().tolist():
         dat_path = Path(raw_path).expanduser()
         if dat_path.suffix.lower() != ".dat2":
             continue
@@ -1818,7 +1836,9 @@ def main():
                 str(post_filter_output),
                 "--index-file",
                 str(index_file),
+                "--home-passers-only",
                 "--skip-evidence-strength",
+                "--skip-significant-detection",
                 "--skip-run-robustness",
                 "--gaia-max-ruwe",
                 str(args.gaia_max_ruwe),
@@ -2161,7 +2181,8 @@ def main():
                 log("Warning: no suitable input found for vetting, skipping")
             else:
                 df_vet = load_table(vetting_input)
-                log(f"Vetting input: {vetting_input} ({len(df_vet)} candidates)")
+                df_vet = _select_passing_candidates(df_vet)
+                log(f"Vetting input: {vetting_input} ({len(df_vet)} passing candidates)")
 
                 if args.vetting_min_score is not None and "interest_score" in df_vet.columns:
                     before = len(df_vet)
@@ -2238,15 +2259,20 @@ def main():
                 review_db_path = out_dir / "review" / "review.db"
                 conn = db_connect(review_db_path)
                 df_import = load_table(_import_file)
-                n_total, n_new = import_candidates(
-                    conn,
-                    df_import,
-                    source_path=str(out_dir.resolve()),
-                    characterize_before_import=False,
-                    vet_before_import=False,
-                )
-                conn.close()
-                log(f"Imported {n_new} new candidates ({n_total} total) into {review_db_path}")
+                df_import = _select_passing_candidates(df_import)
+                if df_import.empty:
+                    conn.close()
+                    log(f"No passing candidates to import into {review_db_path}")
+                else:
+                    n_total, n_new = import_candidates(
+                        conn,
+                        df_import,
+                        source_path=str(out_dir.resolve()),
+                        characterize_before_import=False,
+                        vet_before_import=False,
+                    )
+                    conn.close()
+                    log(f"Imported {n_new} new candidates ({n_total} total) into {review_db_path}")
             else:
                 log("No results file found for review DB import, skipping")
 

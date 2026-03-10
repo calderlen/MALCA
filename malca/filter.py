@@ -104,6 +104,128 @@ PERIOD_SOURCE_PRIORITY = (
 
 PERIOD_HARMONIC_FACTORS = (1.0, 2.0, 0.5, 3.0, 1.0 / 3.0)
 
+HOME_ONLY_FILTER_LABELS = (
+    "periodic_catalog",
+    "gaia_ruwe",
+    "gaia_pm",
+)
+
+PERIODIC_CATALOG_MERGE_COLS = (
+    "catalog_match",
+    "catalog_period",
+    "catalog_class",
+    "catalog_source",
+    "period_sources",
+    "period_n_sources",
+    "period_consensus_days",
+    "period_consensus_agree",
+    "period_conflict_flag",
+    "period_consensus_support",
+    "period_primary_source",
+    "period_source_periods",
+    "period_gaia_eb_match",
+    "period_gaia_eb_days",
+    "period_gaia_eb_class",
+    "period_gaia_eb_sep_arcsec",
+    "period_vsx_match",
+    "period_vsx_days",
+    "period_vsx_class",
+    "period_vsx_sep_arcsec",
+    "period_asassn_var_match",
+    "period_asassn_var_days",
+    "period_asassn_var_class",
+    "period_asassn_var_sep_arcsec",
+    "period_ztf_periodic_match",
+    "period_ztf_periodic_days",
+    "period_ztf_periodic_class",
+    "period_ztf_periodic_sep_arcsec",
+    "period_ogle_match",
+    "period_ogle_days",
+    "period_ogle_class",
+    "period_ogle_sep_arcsec",
+)
+
+GAIA_RUWE_MERGE_COLS = (
+    "ruwe",
+    "high_ruwe_flag",
+)
+
+GAIA_PM_MERGE_COLS = (
+    "pmra",
+    "pmdec",
+    "pm_total",
+    "high_pm_flag",
+)
+
+PERIODICITY_MERGE_COLS = (
+    "lsp_power",
+    "lsp_period",
+    "lsp_bootstrap_sig",
+    "lsp_is_alias",
+    "lsp_is_significant",
+    "pdm_period",
+    "pdm_theta",
+    "pdm_snr",
+    "pdm_bootstrap_sig",
+    "pdm_is_significant",
+    "ce_period",
+    "ce_entropy",
+    "ce_snr",
+    "ce_bootstrap_sig",
+    "ce_is_significant",
+    "periodicity_bootstrap_sig",
+    "periodicity_is_significant",
+    "periodicity_score",
+    "periodic_flag",
+)
+
+HOME_ONLY_CLEAR_DEFAULTS: dict[str, dict[str, object]] = {
+    "periodic_catalog": {
+        "catalog_match": False,
+        "catalog_period": np.nan,
+        "catalog_class": "",
+        "catalog_source": "",
+        "period_sources": "",
+        "period_n_sources": 0,
+        "period_consensus_days": np.nan,
+        "period_consensus_agree": False,
+        "period_conflict_flag": False,
+        "period_consensus_support": np.nan,
+        "period_primary_source": "",
+        "period_source_periods": "",
+        "period_gaia_eb_match": False,
+        "period_gaia_eb_days": np.nan,
+        "period_gaia_eb_class": "",
+        "period_gaia_eb_sep_arcsec": np.nan,
+        "period_vsx_match": False,
+        "period_vsx_days": np.nan,
+        "period_vsx_class": "",
+        "period_vsx_sep_arcsec": np.nan,
+        "period_asassn_var_match": False,
+        "period_asassn_var_days": np.nan,
+        "period_asassn_var_class": "",
+        "period_asassn_var_sep_arcsec": np.nan,
+        "period_ztf_periodic_match": False,
+        "period_ztf_periodic_days": np.nan,
+        "period_ztf_periodic_class": "",
+        "period_ztf_periodic_sep_arcsec": np.nan,
+        "period_ogle_match": False,
+        "period_ogle_days": np.nan,
+        "period_ogle_class": "",
+        "period_ogle_sep_arcsec": np.nan,
+    },
+    "gaia_ruwe": {
+        "ruwe": np.nan,
+        "high_ruwe_flag": False,
+    },
+    "gaia_pm": {
+        "pmra": np.nan,
+        "pmdec": np.nan,
+        "pm_total": np.nan,
+        "high_pm_flag": False,
+    },
+}
+
 
 def _parse_asassn_id(value: object) -> str | None:
     """Normalize ASAS-SN ID-like values to digit strings."""
@@ -598,6 +720,53 @@ def _to_bool_mask(series: pd.Series) -> pd.Series:
         return series.fillna(0).astype(float) != 0.0
     lowered = series.fillna("").astype(str).str.strip().str.lower()
     return lowered.isin({"1", "true", "t", "yes", "y"})
+
+
+def _passing_mask_from_failures(
+    df: pd.DataFrame,
+    *,
+    include_labels: tuple[str, ...] | list[str] | None = None,
+    ignore_labels: tuple[str, ...] | list[str] | None = None,
+) -> pd.Series:
+    """Return rows with no failures in the selected failed_* columns."""
+    mask = pd.Series(True, index=df.index, dtype=bool)
+
+    if include_labels is not None:
+        failure_cols = [f"failed_{label}" for label in include_labels]
+    else:
+        ignored = {"failed_any"}
+        if ignore_labels is not None:
+            ignored.update(f"failed_{label}" for label in ignore_labels)
+        failure_cols = [
+            col
+            for col in df.columns
+            if col.startswith("failed_") and col not in ignored
+        ]
+
+    for col in failure_cols:
+        if col in df.columns:
+            mask &= ~_to_bool_mask(df[col])
+
+    return mask
+
+
+def _clear_annotation_columns(
+    df: pd.DataFrame,
+    *,
+    mask: pd.Series,
+    defaults: dict[str, object] | None,
+) -> pd.DataFrame:
+    """Reset annotation columns for rows intentionally skipped this pass."""
+    if not defaults:
+        return df
+
+    out = df.copy()
+    for col, default in defaults.items():
+        if col not in out.columns:
+            out[col] = default
+        if bool(mask.any()):
+            out.loc[mask, col] = default
+    return out
 
 
 def _match_period_catalog(
@@ -1126,6 +1295,20 @@ def _read_raw_camera_stats(path: Path) -> pd.DataFrame:
     return df
 
 
+def _is_periodic_by_snr(pdm_snr: float, ce_snr: float) -> bool:
+    try:
+        pdm_val = float(pdm_snr)
+        ce_val = float(ce_snr)
+    except (TypeError, ValueError):
+        return False
+    if not np.isfinite(pdm_val) or not np.isfinite(ce_val):
+        return False
+    return (
+        pdm_val >= float(POST_FILTER_PDM_SNR_THRESHOLD)
+        and ce_val >= float(POST_FILTER_CE_SNR_THRESHOLD)
+    )
+
+
 def _lsp_worker(args: tuple) -> dict:
     """
     Worker function for parallel periodicity computation (PDM + CE).
@@ -1136,9 +1319,6 @@ def _lsp_worker(args: tuple) -> dict:
     Returns:
         Dict with path and periodicity results
     """
-
-
-
 
     path_str, n_bootstrap, significance_level, exclude_alias_periods = args
     _ = exclude_alias_periods
@@ -1818,6 +1998,9 @@ def validate_periodic_catalog(
     n0 = len(df)
 
     df_out = df.copy()
+    existing_output_cols = [col for col in PERIODIC_CATALOG_MERGE_COLS if col in df_out.columns]
+    if existing_output_cols:
+        df_out = df_out.drop(columns=existing_output_cols)
     candidate_asassn_ids = _extract_asassn_ids(df_out)
     source_frames: dict[str, pd.DataFrame] = {}
 
@@ -2120,6 +2303,7 @@ def apply_filters(
     periodic_catalog_use_vsx_period: bool = True,
     periodic_catalog_use_ogle_periodic: bool = True,
     periodic_catalog_vsx_crossmatch_csv: str | Path = VSX_CROSSMATCH_PATH,
+    home_passers_only: bool = False,
     # General
     show_tqdm: bool = True,
     verbose: bool = False,
@@ -2141,6 +2325,9 @@ def apply_filters(
         Apply Gaia proper-motion validation (uses local Gaia catalog)
     apply_periodic_catalog_validation : bool
         Apply periodic-catalog evidence and period-consensus validation
+    home_passers_only : bool
+        During home-stage revalidation, run home-only validations only on rows
+        with no upstream failed_* flags while keeping the full output table.
     show_tqdm : bool
         Show progress bars
     verbose : bool
@@ -2260,40 +2447,7 @@ def apply_filters(
             "vsx_crossmatch_csv": periodic_catalog_vsx_crossmatch_csv,
             "show_tqdm": show_tqdm,
             "verbose": verbose,
-        }, [
-            "catalog_match",
-            "catalog_period",
-            "catalog_class",
-            "catalog_source",
-            "period_sources",
-            "period_n_sources",
-            "period_consensus_days",
-            "period_consensus_agree",
-            "period_conflict_flag",
-            "period_consensus_support",
-            "period_primary_source",
-            "period_source_periods",
-            "period_gaia_eb_match",
-            "period_gaia_eb_days",
-            "period_gaia_eb_class",
-            "period_gaia_eb_sep_arcsec",
-            "period_vsx_match",
-            "period_vsx_days",
-            "period_vsx_class",
-            "period_vsx_sep_arcsec",
-            "period_asassn_var_match",
-            "period_asassn_var_days",
-            "period_asassn_var_class",
-            "period_asassn_var_sep_arcsec",
-            "period_ztf_periodic_match",
-            "period_ztf_periodic_days",
-            "period_ztf_periodic_class",
-            "period_ztf_periodic_sep_arcsec",
-            "period_ogle_match",
-            "period_ogle_days",
-            "period_ogle_class",
-            "period_ogle_sep_arcsec",
-        ]))
+        }, list(PERIODIC_CATALOG_MERGE_COLS)))
 
     if apply_gaia_ruwe_validation:
         filters.append(("gaia_ruwe", validate_gaia_ruwe, {
@@ -2301,7 +2455,7 @@ def apply_filters(
             "flag_only": gaia_flag_only,
             "show_tqdm": show_tqdm,
             "verbose": verbose,
-        }, ["ruwe", "high_ruwe_flag"]))
+        }, list(GAIA_RUWE_MERGE_COLS)))
 
     if apply_gaia_pm_validation:
         filters.append(("gaia_pm", validate_gaia_proper_motion, {
@@ -2309,7 +2463,7 @@ def apply_filters(
             "flag_only": gaia_pm_flag_only,
             "show_tqdm": show_tqdm,
             "verbose": verbose,
-        }))
+        }, list(GAIA_PM_MERGE_COLS)))
 
     if apply_periodicity_validation:
         filters.append(("periodicity", validate_periodicity, {
@@ -2322,7 +2476,83 @@ def apply_filters(
             "skip_if_consensus": periodicity_skip_if_consensus,
             "show_tqdm": show_tqdm,
             "verbose": verbose,
-        }))
+        }, list(PERIODICITY_MERGE_COLS)))
+
+    subset_filter_configs: dict[str, dict[str, object]] = {
+        "periodic_catalog": {
+            "failure_indicator_col": "catalog_match",
+            "clear_defaults": HOME_ONLY_CLEAR_DEFAULTS["periodic_catalog"] if home_passers_only else None,
+            "eligible_mask_fn": (
+                lambda frame: _passing_mask_from_failures(frame, ignore_labels=HOME_ONLY_FILTER_LABELS)
+                if home_passers_only else pd.Series(True, index=frame.index, dtype=bool)
+            ),
+        },
+        "gaia_ruwe": {
+            "failure_indicator_col": "high_ruwe_flag",
+            "clear_defaults": HOME_ONLY_CLEAR_DEFAULTS["gaia_ruwe"] if home_passers_only else None,
+            "eligible_mask_fn": (
+                lambda frame: _passing_mask_from_failures(frame, ignore_labels=HOME_ONLY_FILTER_LABELS)
+                if home_passers_only else pd.Series(True, index=frame.index, dtype=bool)
+            ),
+        },
+        "gaia_pm": {
+            "failure_indicator_col": "high_pm_flag",
+            "clear_defaults": HOME_ONLY_CLEAR_DEFAULTS["gaia_pm"] if home_passers_only else None,
+            "eligible_mask_fn": (
+                lambda frame: _passing_mask_from_failures(frame, ignore_labels=HOME_ONLY_FILTER_LABELS)
+                if home_passers_only else pd.Series(True, index=frame.index, dtype=bool)
+            ),
+        },
+        "periodicity": {
+            "failure_indicator_col": "periodic_flag",
+            "clear_defaults": None,
+            "eligible_mask_fn": lambda frame: _passing_mask_from_failures(
+                frame,
+                include_labels=tuple(periodicity_prereq_labels),
+            ),
+        },
+    }
+
+    def _run_subset_filter(
+        df_base: pd.DataFrame,
+        *,
+        func,
+        kwargs: dict[str, object],
+        eligible_mask: pd.Series,
+        merge_cols: list[str] | None,
+        failure_indicator_col: str | None,
+        clear_defaults: dict[str, object] | None,
+    ) -> tuple[pd.DataFrame, pd.Series, int]:
+        failed_mask = pd.Series(False, index=df_base.index, dtype=bool)
+        checked_mask = eligible_mask.reindex(df_base.index, fill_value=False).astype(bool)
+        skipped_mask = ~checked_mask
+
+        out = _clear_annotation_columns(df_base, mask=skipped_mask, defaults=clear_defaults)
+        n_checked = int(checked_mask.sum())
+        if n_checked == 0:
+            return out, failed_mask, 0
+
+        df_to_check = out.loc[checked_mask].copy()
+        subset_kwargs = dict(kwargs)
+        reject_mode = bool(failure_indicator_col) and (not bool(subset_kwargs.get("flag_only", True)))
+        if reject_mode:
+            subset_kwargs["flag_only"] = True
+
+        df_result = func(df_to_check, **subset_kwargs)
+
+        if merge_cols:
+            out = _merge_columns_by_path(out, df_result, include_columns=merge_cols)
+
+        if reject_mode:
+            if failure_indicator_col and failure_indicator_col in out.columns:
+                checked_flags = _to_bool_mask(out.loc[checked_mask, failure_indicator_col])
+                failed_mask.loc[checked_mask] = checked_flags.to_numpy()
+            else:
+                passed_paths = set(df_result["path"].astype(str))
+                checked_paths = out.loc[checked_mask, "path"].astype(str)
+                failed_mask.loc[checked_mask] = (~checked_paths.isin(passed_paths)).to_numpy()
+
+        return out, failed_mask, n_checked
 
     # Apply filters and tag failures (all rows kept)
     total_steps = len(filters)
@@ -2333,58 +2563,18 @@ def apply_filters(
                 merge_cols = filter_entry[3] if len(filter_entry) > 3 else None
                 start = perf_counter()
 
-                if label == "periodicity":
-                    # Only run expensive periodicity bootstrap on rows that passed
-                    # all enabled pre-periodicity filters.
-                    eligible_mask = pd.Series(True, index=df_filtered.index, dtype=bool)
-                    for pre_label in periodicity_prereq_labels:
-                        fail_col = f"failed_{pre_label}"
-                        if fail_col in df_filtered.columns:
-                            eligible_mask &= ~_to_bool_mask(df_filtered[fail_col])
-
-                    n_checked = int(eligible_mask.sum())
-                    failed_mask = pd.Series(False, index=df_filtered.index, dtype=bool)
-
-                    if n_checked > 0:
-                        df_to_check = df_filtered.loc[eligible_mask].copy()
-
-                        # Always annotate checked rows; if reject mode is enabled,
-                        # derive failed_periodicity from periodic_flag afterward.
-                        periodicity_kwargs = dict(kwargs)
-                        periodicity_reject = not bool(periodicity_kwargs.get("flag_only", True))
-                        periodicity_kwargs["flag_only"] = True
-
-                        df_period = func(df_to_check, **periodicity_kwargs)
-                        df_filtered = _merge_columns_by_path(
-                            df_filtered,
-                            df_period,
-                            include_columns=[
-                                "lsp_power",
-                                "lsp_period",
-                                "lsp_bootstrap_sig",
-                                "lsp_is_alias",
-                                "lsp_is_significant",
-                                "pdm_period",
-                                "pdm_theta",
-                                "pdm_snr",
-                                "pdm_bootstrap_sig",
-                                "pdm_is_significant",
-                                "ce_period",
-                                "ce_entropy",
-                                "ce_snr",
-                                "ce_bootstrap_sig",
-                                "ce_is_significant",
-                                "periodicity_bootstrap_sig",
-                                "periodicity_is_significant",
-                                "periodicity_score",
-                                "periodic_flag",
-                            ],
-                        )
-
-                        if periodicity_reject and "periodic_flag" in df_filtered.columns:
-                            checked_flags = _to_bool_mask(df_filtered.loc[eligible_mask, "periodic_flag"])
-                            failed_mask.loc[eligible_mask] = checked_flags.to_numpy()
-
+                subset_cfg = subset_filter_configs.get(label)
+                if subset_cfg is not None:
+                    eligible_mask = subset_cfg["eligible_mask_fn"](df_filtered)
+                    df_filtered, failed_mask, n_checked = _run_subset_filter(
+                        df_filtered,
+                        func=func,
+                        kwargs=kwargs,
+                        eligible_mask=eligible_mask,
+                        merge_cols=merge_cols,
+                        failure_indicator_col=subset_cfg["failure_indicator_col"],
+                        clear_defaults=subset_cfg["clear_defaults"],
+                    )
                     elapsed = perf_counter() - start
                     df_filtered[f"failed_{label}"] = failed_mask
 
@@ -2429,7 +2619,7 @@ def apply_filters(
     )
 
     # Add summary column
-    failed_cols = [c for c in df_filtered.columns if c.startswith("failed_")]
+    failed_cols = [c for c in df_filtered.columns if c.startswith("failed_") and c != "failed_any"]
     if failed_cols:
         df_filtered["failed_any"] = df_filtered[failed_cols].any(axis=1)
 
@@ -2580,6 +2770,8 @@ Example usage:
                         help="Disable OGLE period evidence in periodic-catalog validation")
     parser.add_argument("--periodic-catalog-reject", action="store_true",
                         help="Reject catalog matches (default: flag only)")
+    parser.add_argument("--home-passers-only", action="store_true",
+                        help="Run home-only validations only on rows that already pass upstream filters")
 
     # General options
     parser.add_argument("--no-tqdm", action="store_true", help="Disable progress bars")
@@ -2738,6 +2930,7 @@ Example usage:
         periodic_catalog_use_vsx_period=not args.periodic_catalog_no_vsx,
         periodic_catalog_use_ogle_periodic=not args.periodic_catalog_no_ogle,
         periodic_catalog_vsx_crossmatch_csv=args.periodic_catalog_vsx_crossmatch,
+        home_passers_only=args.home_passers_only,
         # General
         show_tqdm=not args.no_tqdm,
         verbose=args.verbose,
@@ -2776,6 +2969,7 @@ Example usage:
                     "apply_gaia_ruwe_validation": not args.skip_gaia_ruwe_validation,
                     "apply_gaia_pm_validation": not args.skip_gaia_pm_validation,
                     "apply_periodic_catalog_validation": not args.skip_periodic_catalog_validation,
+                    "home_passers_only": args.home_passers_only,
                     "min_bayes_factor": args.min_bayes_factor,
                     "require_finite_local_bf": not args.allow_infinite_local_bf,
                     "significant_require_flag": not args.significant_no_require_flag,
