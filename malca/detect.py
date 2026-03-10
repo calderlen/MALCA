@@ -697,6 +697,7 @@ def main():
     parser.add_argument("--no-characterize-iphas", dest="characterize_iphas", action="store_false", help="Disable IPHAS enrichment in characterize step")
     parser.add_argument("--no-characterize-sfr", dest="characterize_sfr", action="store_false", help="Disable star-forming-region enrichment in characterize step")
     parser.add_argument("--no-characterize-clusters", dest="characterize_clusters", action="store_false", help="Disable open-cluster enrichment in characterize step")
+    parser.add_argument("--characterize-unwise", dest="characterize_unwise", action="store_true", help="Enable unWISE/unTimely variability enrichment in characterize step (default: disabled)")
     parser.add_argument("--no-characterize-unwise", dest="characterize_unwise", action="store_false", help="Disable unWISE enrichment in characterize step")
     parser.add_argument("--run-dust", dest="run_dust", action="store_true", help="Run 3D dust extinction correction (default: enabled)")
     parser.add_argument("--no-run-dust", dest="run_dust", action="store_false", help="Skip dust extinction step")
@@ -758,7 +759,7 @@ def main():
         characterize_iphas=True,
         characterize_sfr=True,
         characterize_clusters=True,
-        characterize_unwise=True,
+        characterize_unwise=False,
         run_classify=True,
         run_enrich=True,
         run_neighbor_enrich=True,

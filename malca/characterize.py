@@ -1969,13 +1969,14 @@ def main():
     parser.add_argument("--no-characterize-iphas", dest="characterize_iphas", action="store_false", help="Disable IPHAS enrichment")
     parser.add_argument("--no-characterize-sfr", dest="characterize_sfr", action="store_false", help="Disable star-forming-region enrichment")
     parser.add_argument("--no-characterize-clusters", dest="characterize_clusters", action="store_false", help="Disable open-cluster enrichment")
+    parser.add_argument("--characterize-unwise", dest="characterize_unwise", action="store_true", help="Enable unWISE/unTimely variability enrichment (default: disabled)")
     parser.add_argument("--no-characterize-unwise", dest="characterize_unwise", action="store_false", help="Disable unWISE variability enrichment")
     parser.set_defaults(
         characterize_banyan=True,
         characterize_iphas=True,
         characterize_sfr=True,
         characterize_clusters=True,
-        characterize_unwise=True,
+        characterize_unwise=False,
     )
     
     args = parser.parse_args()
