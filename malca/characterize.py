@@ -111,25 +111,39 @@ def query_gaia_by_ids(source_ids: list[str | int], chunk_size: int = GAIA_CHUNK_
     1. *cache_file* argument (legacy name kept for API compat)
     2. ``GAIA_LOCAL_CATALOG`` default path
     """
-    # Resolve catalog path
+    attempted_paths: list[Path] = []
+    gaia_df: pd.DataFrame | None = None
     catalog_path: Path | None = None
-    for candidate in [cache_file, GAIA_LOCAL_CATALOG]:
-        if candidate and Path(candidate).exists():
-            catalog_path = Path(candidate)
-            break
 
-    if catalog_path is None:
+    for candidate in [cache_file, GAIA_LOCAL_CATALOG]:
+        if not candidate:
+            continue
+        path = Path(candidate)
+        if not path.exists() or path in attempted_paths:
+            continue
+        attempted_paths.append(path)
+
+        print(f"Loading local Gaia catalog from {path}...")
+        try:
+            candidate_df = pd.read_parquet(path)
+        except Exception as e:
+            print(f"Warning: ignoring unreadable Gaia catalog at {path}: {e}")
+            continue
+
+        if "source_id" not in candidate_df.columns or candidate_df.empty:
+            print(f"Warning: ignoring invalid Gaia catalog at {path}")
+            continue
+
+        catalog_path = path
+        gaia_df = candidate_df
+        break
+
+    if catalog_path is None or gaia_df is None:
         raise FileNotFoundError(
-            "Local Gaia catalog not found. Run:\n"
+            "Local Gaia catalog not found or invalid. Run:\n"
             "  malca gaia-fetch --input <your_candidates.parquet>\n"
             "to download Gaia DR3 data before characterization."
         )
-
-    print(f"Loading local Gaia catalog from {catalog_path}...")
-    gaia_df = pd.read_parquet(catalog_path)
-
-    if "source_id" not in gaia_df.columns:
-        raise ValueError(f"Local Gaia catalog at {catalog_path} missing 'source_id' column.")
 
     gaia_df["source_id"] = gaia_df["source_id"].astype(str)
     requested = _normalize_source_ids(source_ids)

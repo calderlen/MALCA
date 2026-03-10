@@ -3,6 +3,7 @@ from glob import glob
 from pathlib import Path
 import os
 import re
+import time
 
 from astropy import units as u
 from astropy.coordinates import SkyCoord
@@ -1183,6 +1184,7 @@ def batch_tap_crossmatch(
     verbose: bool = False,
     desc: str = "TAP crossmatch",
     timeout: float = 120,
+    raise_on_all_failed: bool = False,
 
 ) -> pd.DataFrame:
     """Batch TAP crossmatch using coordinate upload.
@@ -1193,19 +1195,94 @@ def batch_tap_crossmatch(
     Returns a DataFrame with ``_idx``, the selected columns, and
     ``sep_arcsec``.  Callers should de-duplicate by ``_idx`` as needed.
     """
-
-
-
     if coords_df.empty:
         return pd.DataFrame()
 
     results: list[pd.DataFrame] = []
     chunks = [coords_df.iloc[i:i + chunk_size] for i in range(0, len(coords_df), chunk_size)]
+    n_failed_chunks = 0
+    failure_messages: list[str] = []
+    timed_out = False
+
+    def _result_not_ready_error(exc: Exception) -> bool:
+        return 'No result identified with "result"' in str(exc)
+
+    def _results_to_frame(result) -> pd.DataFrame:
+        if result is None or len(result) == 0:
+            return pd.DataFrame()
+        return result.to_pandas()
+
+    def _run_sync_job(tap: TapPlus, query: str, upload_table: Table) -> pd.DataFrame:
+        job = tap.launch_job(
+            query,
+            upload_resource=upload_table,
+            upload_table_name="upload_table",
+            verbose=False,
+        )
+        return _results_to_frame(job.get_results())
+
+    def _run_async_job(tap: TapPlus, query: str, upload_table: Table) -> pd.DataFrame:
+        job = tap.launch_job_async(
+            query,
+            upload_resource=upload_table,
+            upload_table_name="upload_table",
+            verbose=False,
+            background=True,
+        )
+
+        try:
+            _, phase = job.wait_for_job_end(verbose=False)
+        except Exception as exc:
+            raise RuntimeError(f"{desc} async wait failed: {exc}") from exc
+
+        phase = str(phase or job.get_phase(update=False)).upper().strip()
+        if phase in {"ERROR", "ABORTED"}:
+            try:
+                error_text = job.get_error(verbose=False)
+            except Exception as exc:
+                error_text = str(exc)
+            raise RuntimeError(f"{desc} async job {phase.lower()}: {error_text}")
+
+        last_exc: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                return _results_to_frame(job.get_results())
+            except Exception as exc:
+                last_exc = exc
+                if attempt < 3 and _result_not_ready_error(exc):
+                    wait = attempt
+                    if verbose:
+                        print(f"  {desc}: async results not ready yet; retrying in {wait}s...")
+                    time.sleep(wait)
+                    continue
+                raise RuntimeError(f"{desc} async result fetch failed: {exc}") from exc
+
+        raise RuntimeError(f"{desc} async result fetch failed: {last_exc}")
+
+    def _run_sync_subchunks(tap: TapPlus, query: str, chunk_df: pd.DataFrame) -> tuple[pd.DataFrame, str | None]:
+        subresults: list[pd.DataFrame] = []
+        suberrors: list[str] = []
+
+        for start in range(0, len(chunk_df), 50):
+            subchunk = chunk_df.iloc[start:start + 50]
+            upload_table = Table.from_pandas(subchunk[["_idx", "ra", "dec"]])
+            try:
+                subresult = _run_sync_job(tap, query, upload_table)
+            except Exception as exc:
+                suberrors.append(str(exc))
+                continue
+            if not subresult.empty:
+                subresults.append(subresult)
+
+        combined = pd.concat(subresults, ignore_index=True) if subresults else pd.DataFrame()
+        if suberrors:
+            return combined, suberrors[0]
+        return combined, None
 
     def process_chunk(chunk_df):
+        error_message: str | None = None
         try:
             tap = TapPlus(url=tap_url)
-            upload_table = Table.from_pandas(chunk_df[["_idx", "ra", "dec"]])
 
             query = f"""
             SELECT
@@ -1222,25 +1299,23 @@ def batch_tap_crossmatch(
             """
 
             if len(chunk_df) <= 50:
-                job = tap.launch_job(
-                    query,
-                    upload_resource=upload_table,
-                    upload_table_name="upload_table",
-                    verbose=False,
-                )
-            else:
-                job = tap.launch_job_async(
-                    query,
-                    upload_resource=upload_table,
-                    upload_table_name="upload_table",
-                    verbose=False,
-                )
-            result = job.get_results()
-            return result.to_pandas() if result is not None and len(result) > 0 else pd.DataFrame()
+                upload_table = Table.from_pandas(chunk_df[["_idx", "ra", "dec"]])
+                return _run_sync_job(tap, query, upload_table), None
+
+            upload_table = Table.from_pandas(chunk_df[["_idx", "ra", "dec"]])
+            try:
+                return _run_async_job(tap, query, upload_table), None
+            except Exception as exc:
+                error_message = str(exc)
+                if verbose:
+                    print(f"  {desc} async chunk error: {error_message}; retrying via sync subchunks")
+
+            fallback_result, fallback_error = _run_sync_subchunks(tap, query, chunk_df)
+            if fallback_error is not None:
+                return fallback_result, f"{error_message}; sync fallback error: {fallback_error}"
+            return fallback_result, None
         except Exception as e:
-            if verbose:
-                print(f"  {desc} chunk error: {e}")
-            return pd.DataFrame()
+            return pd.DataFrame(), str(e)
 
     with ThreadPoolExecutor(max_workers=n_workers) as executor:
         futures = {executor.submit(process_chunk, chunk): i for i, chunk in enumerate(chunks)}
@@ -1252,19 +1327,34 @@ def batch_tap_crossmatch(
                 desc=desc, disable=not verbose,
             ):
                 try:
-                    result = future.result(timeout=0)
-                except Exception:
+                    result, error = future.result(timeout=0)
+                except Exception as exc:
+                    n_failed_chunks += 1
+                    failure_messages.append(str(exc))
                     continue
+                if error is not None:
+                    n_failed_chunks += 1
+                    failure_messages.append(error)
                 if not result.empty:
                     results.append(result)
         except TimeoutError:
+            timed_out = True
             n_pending = sum(1 for f in futures if not f.done())
             if verbose or n_pending:
                 print(f"  {desc}: timed out after {timeout}s ({n_pending} chunk(s) still pending)")
+            n_failed_chunks += n_pending
+            if n_pending:
+                failure_messages.append(f"timed out with {n_pending} pending chunk(s)")
             for f in futures:
                 f.cancel()
 
+    if n_failed_chunks and (verbose or raise_on_all_failed):
+        print(f"  {desc}: {n_failed_chunks}/{len(chunks)} chunk(s) failed; results may be incomplete")
+
     if not results:
+        if raise_on_all_failed and (n_failed_chunks or timed_out):
+            detail = failure_messages[0] if failure_messages else "unknown TAP failure"
+            raise RuntimeError(f"{desc}: all chunk queries failed ({detail})")
         return pd.DataFrame()
 
     return pd.concat(results, ignore_index=True)

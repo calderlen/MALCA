@@ -18,6 +18,7 @@ import time
 
 from astropy.table import Table
 from tqdm import tqdm
+import numpy as np
 import pandas as pd
 import pyvo
 
@@ -46,12 +47,7 @@ SELECT
     g.distance_gspphot, g.ag_gspphot,
 
     xm_tm.original_ext_source_id AS tmass_id,
-    tm.j_m AS tmass_j, tm.h_m AS tmass_h, tm.ks_m AS tmass_k,
-    tm.j_msigcom AS tmass_j_err, tm.h_msigcom AS tmass_h_err, tm.ks_msigcom AS tmass_k_err,
-
-    xm_aw.original_ext_source_id AS allwise_id,
-    aw.w1mpro AS unwise_w1, aw.w2mpro AS unwise_w2,
-    aw.w1mpro_error AS unwise_w1_err, aw.w2mpro_error AS unwise_w2_err
+    xm_aw.original_ext_source_id AS allwise_id
 
 FROM TAP_UPLOAD.upload_table AS u
 JOIN gaiadr3.gaia_source AS g
@@ -59,17 +55,66 @@ JOIN gaiadr3.gaia_source AS g
 
 LEFT JOIN gaiadr3.tmass_psc_xsc_best_neighbour AS xm_tm
     ON g.source_id = xm_tm.source_id
-LEFT JOIN gaiadr1.tmass_original_valid AS tm
-    ON xm_tm.original_ext_source_id = tm.designation
 
 LEFT JOIN gaiadr3.allwise_best_neighbour AS xm_aw
     ON g.source_id = xm_aw.source_id
-LEFT JOIN gaiadr1.allwise_original_valid AS aw
-    ON xm_aw.original_ext_source_id = aw.designation
 """
 
 MAX_RETRIES = 3
 RETRY_BACKOFF_BASE = 2  # seconds
+
+GAIA_REQUIRED_COLUMNS = ("source_id",)
+GAIA_EXPECTED_COLUMNS = (
+    "source_id",
+    "ra",
+    "dec",
+    "parallax",
+    "parallax_error",
+    "ruwe",
+    "pmra",
+    "pmdec",
+    "radial_velocity",
+    "rv_amplitude_robust",
+    "phot_g_mean_mag",
+    "bp_rp",
+    "teff_gspphot",
+    "logg_gspphot",
+    "mh_gspphot",
+    "distance_gspphot",
+    "ag_gspphot",
+    "tmass_id",
+    "tmass_j",
+    "tmass_h",
+    "tmass_k",
+    "tmass_j_err",
+    "tmass_h_err",
+    "tmass_k_err",
+    "allwise_id",
+    "unwise_w1",
+    "unwise_w2",
+    "unwise_w1_err",
+    "unwise_w2_err",
+)
+GAIA_STRING_COLUMNS = {"source_id", "tmass_id", "allwise_id"}
+
+
+def _has_required_gaia_columns(df: pd.DataFrame | None) -> bool:
+    return df is not None and all(col in df.columns for col in GAIA_REQUIRED_COLUMNS)
+
+
+def _ensure_gaia_schema(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize Gaia cache schema for downstream consumers."""
+    out = df.copy()
+    out.columns = [str(c).lower() for c in out.columns]
+
+    if not _has_required_gaia_columns(out):
+        return out
+
+    for col in GAIA_EXPECTED_COLUMNS:
+        if col not in out.columns:
+            out[col] = pd.NA if col in GAIA_STRING_COLUMNS else np.nan
+
+    return out.loc[:, list(GAIA_EXPECTED_COLUMNS)]
 
 
 def _normalize_gaia_ids(values: list[object]) -> list[str]:
@@ -231,8 +276,9 @@ def _fetch_chunk(tap_service: pyvo.dal.TAPService, chunk_ids: list[str]) -> pd.D
             upload_table = _chunk_upload_table(chunk_ids)
             result = tap_service.run_async(query, uploads={"upload_table": upload_table})
             chunk_df = result.to_table().to_pandas()
-            # Normalize column names to lowercase
-            chunk_df.columns = [c.lower() for c in chunk_df.columns]
+            chunk_df = _ensure_gaia_schema(chunk_df)
+            if not _has_required_gaia_columns(chunk_df):
+                raise RuntimeError("Gaia TAP response missing required 'source_id' column")
             return chunk_df
         except Exception as e:
             if attempt < MAX_RETRIES:
@@ -274,26 +320,52 @@ def fetch_gaia_catalog(
     # Load existing catalog for incremental fetch
     if output_path.exists():
         print(f"Loading existing Gaia catalog from {output_path}...")
-        cached_df = pd.read_parquet(output_path)
-        if "source_id" in cached_df.columns:
-            cached_df["source_id"] = cached_df["source_id"].astype(str)
-            existing_ids = set(cached_df["source_id"])
-            before = len(gaia_ids)
-            gaia_ids = [g for g in gaia_ids if g not in existing_ids]
-            print(f"  {len(existing_ids)} IDs already cached, {len(gaia_ids)} new IDs to fetch.")
-            if not gaia_ids:
-                print("All IDs already present in local catalog. Nothing to fetch.")
-                return cached_df
+        try:
+            cached_candidate = pd.read_parquet(output_path)
+        except Exception as e:
+            print(f"  Warning: could not read existing Gaia cache at {output_path}: {e}")
+        else:
+            cached_candidate = _ensure_gaia_schema(cached_candidate)
+            if _has_required_gaia_columns(cached_candidate) and not cached_candidate.empty:
+                cached_df = cached_candidate
+                cached_df["source_id"] = cached_df["source_id"].astype(str)
+                existing_ids = set(cached_df["source_id"])
+                before = len(gaia_ids)
+                gaia_ids = [g for g in gaia_ids if g not in existing_ids]
+                print(f"  {len(existing_ids)} IDs already cached, {len(gaia_ids)} new IDs to fetch.")
+                if not gaia_ids:
+                    print("All IDs already present in local catalog. Nothing to fetch.")
+                    return cached_df
+            else:
+                print(f"  Warning: ignoring invalid existing Gaia cache at {output_path}")
 
     if not gaia_ids:
-        print("No Gaia IDs to fetch.")
-        return cached_df
+        checkpoint_df = _load_checkpoint_parts(checkpoint_dir)
+        if not checkpoint_df.empty:
+            checkpoint_df = _ensure_gaia_schema(checkpoint_df)
+            if _has_required_gaia_columns(checkpoint_df):
+                checkpoint_df["source_id"] = checkpoint_df["source_id"].astype(str)
+                if not cached_df.empty:
+                    checkpoint_df = pd.concat([cached_df, checkpoint_df], ignore_index=True)
+                checkpoint_df = checkpoint_df.drop_duplicates(subset="source_id", keep="last")
+                print("No Gaia IDs to fetch; returning checkpointed Gaia rows.")
+                return checkpoint_df
+
+        if not cached_df.empty:
+            print("No Gaia IDs to fetch.")
+            return cached_df
+
+        raise RuntimeError(
+            "No Gaia IDs remain to fetch, but no valid Gaia cache rows are available. "
+            "Remove stale checkpoint markers and retry."
+        )
 
     print(f"Fetching Gaia DR3 data for {len(gaia_ids)} sources from {GAIA_AIP_TAP_URL}...")
     tap_service = pyvo.dal.TAPService(GAIA_AIP_TAP_URL)
 
     n_chunks_done = 0
     n_chunks_failed = 0
+    n_chunks_empty = 0
     n_rows_written = 0
     for i in tqdm(range(0, len(gaia_ids), chunk_size), desc="Gaia DR3 TAP"):
         chunk_ids = gaia_ids[i : i + chunk_size]
@@ -310,14 +382,16 @@ def fetch_gaia_catalog(
 
         if not chunk_df.empty:
             chunk_df.to_parquet(_chunk_part_path(checkpoint_dir, key), index=False, compression="snappy")
+            _write_done_marker_with_ids(checkpoint_dir, key, row_count=len(chunk_df), chunk_ids=chunk_ids)
             n_rows_written += len(chunk_df)
-        _write_done_marker_with_ids(checkpoint_dir, key, row_count=len(chunk_df), chunk_ids=chunk_ids)
+        else:
+            n_chunks_empty += 1
         n_chunks_done += 1
 
     checkpoint_df = _load_checkpoint_parts(checkpoint_dir)
-    new_df = checkpoint_df.copy()
+    new_df = _ensure_gaia_schema(checkpoint_df) if not checkpoint_df.empty else checkpoint_df.copy()
 
-    if not new_df.empty and "source_id" in new_df.columns:
+    if not new_df.empty and _has_required_gaia_columns(new_df):
         new_df["source_id"] = new_df["source_id"].astype(str)
 
     # Merge with cached data
@@ -329,8 +403,16 @@ def fetch_gaia_catalog(
         full_df = cached_df
 
     # Deduplicate on source_id
-    if "source_id" in full_df.columns:
+    if not full_df.empty:
+        full_df = _ensure_gaia_schema(full_df)
+
+    if _has_required_gaia_columns(full_df):
         full_df = full_df.drop_duplicates(subset="source_id", keep="last")
+
+    if full_df.empty or not _has_required_gaia_columns(full_df):
+        raise RuntimeError(
+            "Gaia fetch produced no valid rows; leaving the previous cache untouched."
+        )
 
     # Save
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -339,7 +421,7 @@ def fetch_gaia_catalog(
     print(
         "  "
         f"(chunks checkpointed: {n_chunks_done}, chunks failed this run: {n_chunks_failed}, "
-        f"rows written to chunk parts this run: {n_rows_written})"
+        f"chunks empty this run: {n_chunks_empty}, rows written to chunk parts this run: {n_rows_written})"
     )
 
     fetched = len(new_df) if not new_df.empty else 0

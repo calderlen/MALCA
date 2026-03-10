@@ -737,7 +737,7 @@ def main():
     parser.add_argument("--no-vetting-alerce", action="store_true", help="Skip ALeRCE ZTF query in vetting")
     parser.add_argument("--no-vetting-erosita", action="store_true", help="Skip eROSITA X-ray crossmatch in vetting")
     parser.add_argument("--no-vetting-pm-check", action="store_true", help="Skip proper motion consistency check in vetting")
-    parser.add_argument("--vetting-atlas", dest="vetting_atlas", action="store_true", help="Run ATLAS forced photometry in vetting (default: enabled)")
+    parser.add_argument("--vetting-atlas", dest="vetting_atlas", action="store_true", help="Run ATLAS forced photometry in vetting (default: disabled)")
     parser.add_argument("--no-vetting-atlas", dest="vetting_atlas", action="store_false", help="Skip ATLAS forced photometry in vetting")
     parser.add_argument("--vetting-atlas-token", type=str, default=None, help="ATLAS forced photometry API token")
     parser.add_argument("--vetting-neowise-lc", dest="vetting_neowise_lc", action="store_true", help="Fetch full NEOWISE light curves in vetting (default: enabled)")
@@ -764,7 +764,7 @@ def main():
         run_neighbor_enrich=True,
         run_spectra_enrich=True,
         run_vetting=True,
-        vetting_atlas=True,
+        vetting_atlas=False,
         vetting_neowise_lc=True,
         export_bundle_enabled=True,
     )

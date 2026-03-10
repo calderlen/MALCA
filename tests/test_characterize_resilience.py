@@ -240,3 +240,18 @@ def test_characterize_queries_gaia_when_only_source_id_and_coords_present(monkey
     assert out.loc[0, "parallax"] == 0.4
     assert out.loc[0, "pmra"] == 2.1
     assert out.loc[0, "pmdec"] == -1.9
+
+
+def test_query_gaia_by_ids_skips_invalid_preferred_cache(tmp_path: Path, monkeypatch) -> None:
+    preferred = tmp_path / "bad_cache.parquet"
+    fallback = tmp_path / "good_cache.parquet"
+
+    pd.DataFrame().to_parquet(preferred, index=False)
+    pd.DataFrame({"source_id": ["42"], "ruwe": [1.1]}).to_parquet(fallback, index=False)
+
+    monkeypatch.setattr(characterize, "GAIA_LOCAL_CATALOG", fallback)
+
+    out = characterize.query_gaia_by_ids(["42"], cache_file=str(preferred))
+
+    assert list(out["source_id"].astype(str)) == ["42"]
+    assert list(out["ruwe"].astype(float)) == [1.1]

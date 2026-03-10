@@ -241,19 +241,24 @@ def _simbad_via_tap(
         "dec": df.loc[valid, "dec"].values,
     })
 
-    result = batch_tap_crossmatch(
-        coords_df,
-        tap_url=SIMBAD_TAP_URL,
-        catalog_table="basic",
-        select_cols="c.main_id, c.otype, c.nbref",
-        ra_col="ra",
-        dec_col="dec",
-        match_radius_arcsec=radius_arcsec,
-        chunk_size=chunk_size,
-        n_workers=4,
-        verbose=True,
-        desc="SIMBAD TAP",
-    )
+    try:
+        result = batch_tap_crossmatch(
+            coords_df,
+            tap_url=SIMBAD_TAP_URL,
+            catalog_table="basic",
+            select_cols="c.main_id, c.otype, c.nbref",
+            ra_col="ra",
+            dec_col="dec",
+            match_radius_arcsec=radius_arcsec,
+            chunk_size=chunk_size,
+            n_workers=4,
+            verbose=True,
+            desc="SIMBAD TAP",
+            raise_on_all_failed=True,
+        )
+    except RuntimeError as e:
+        print(f"SIMBAD: TAP query failed ({e}); falling back to CDS XMatch")
+        return _simbad_via_xmatch(df, valid, n, radius_arcsec)
 
     matched = 0
     if not result.empty:
@@ -436,7 +441,7 @@ def crossmatch_asassn_variables(
     if method == "local":
         return _asassn_via_local(df, valid, n_valid, radius_arcsec, local_csv)
     else:
-        return _asassn_via_tap(df, valid, n_valid, radius_arcsec, chunk_size)
+        return _asassn_via_tap(df, valid, n_valid, radius_arcsec, chunk_size, local_csv)
 
 
 def _asassn_via_local(
@@ -486,7 +491,12 @@ def _asassn_via_local(
 
 
 def _asassn_via_tap(
-    df: pd.DataFrame, valid, n_valid: int, radius_arcsec: float, chunk_size: int,
+    df: pd.DataFrame,
+    valid,
+    n_valid: int,
+    radius_arcsec: float,
+    chunk_size: int,
+    local_csv: Path | str | None = None,
 ) -> pd.DataFrame:
     """ASAS-SN crossmatch via batch VizieR TAP (original bulk path)."""
     print(f"ASAS-SN variables: crossmatching {n_valid} candidates via TAP (radius={radius_arcsec}\")")
@@ -497,19 +507,24 @@ def _asassn_via_tap(
         "dec": df.loc[valid, "dec"].values,
     })
 
-    result = batch_tap_crossmatch(
-        coords_df,
-        tap_url=VIZIER_TAP_URL,
-        catalog_table=f'"{ASASSN_VAR_CATALOG}"',
-        select_cols='c."ASASSN-V", c."Type", c."Per"',
-        ra_col="RAJ2000",
-        dec_col="DEJ2000",
-        match_radius_arcsec=radius_arcsec,
-        chunk_size=chunk_size,
-        n_workers=4,
-        verbose=True,
-        desc="ASAS-SN TAP",
-    )
+    try:
+        result = batch_tap_crossmatch(
+            coords_df,
+            tap_url=VIZIER_TAP_URL,
+            catalog_table=f'"{ASASSN_VAR_CATALOG}"',
+            select_cols='c."ASASSN-V", c."Type", c."Per"',
+            ra_col="RAJ2000",
+            dec_col="DEJ2000",
+            match_radius_arcsec=radius_arcsec,
+            chunk_size=chunk_size,
+            n_workers=4,
+            verbose=True,
+            desc="ASAS-SN TAP",
+            raise_on_all_failed=True,
+        )
+    except RuntimeError as e:
+        print(f"ASAS-SN variables: TAP query failed ({e}); falling back to local catalog")
+        return _asassn_via_local(df, valid, n_valid, radius_arcsec, local_csv)
 
     matched = 0
     if not result.empty:
