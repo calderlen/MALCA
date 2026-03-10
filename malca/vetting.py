@@ -93,7 +93,9 @@ SIMBAD_BATCH_SIZE = VETTING_SIMBAD_BATCH_SIZE
 SIMBAD_RETRY_DELAY = VETTING_SIMBAD_RETRY_DELAY
 SIMBAD_MAX_RETRIES = VETTING_SIMBAD_MAX_RETRIES
 
-GAIA_VAR_CHUNK_SIZE = GAIA_CHUNK_SIZE
+# Gaia archive endpoints can reject very long IN(...) clauses; keep this
+# conservative for robustness across mirrors.
+GAIA_VAR_CHUNK_SIZE = min(GAIA_CHUNK_SIZE, 100)
 GAIA_TAP_URLS = [GAIA_ESA_TAP_URL, GAIA_AIP_TAP_URL]
 ASASSN_VAR_CATALOG = ASASSN_VAR_CATALOG_ID
 ASASSN_VAR_LOCAL_CSV = Path(__file__).resolve().parent.parent / "input" / "asassn_variables_x.csv"
@@ -178,6 +180,23 @@ def _simbad_via_xmatch(
     """SIMBAD lookup via CDS XMatch (reliable for small batches)."""
     print(f"SIMBAD: querying {n} candidates via CDS XMatch (radius={radius_arcsec}\")")
 
+    def _row_value(row: pd.Series, key: str, default=None):
+        """Return scalar value even if duplicate column names exist."""
+        if key not in row.index:
+            return default
+        value = row[key]
+        if isinstance(value, pd.Series):
+            if value.empty:
+                return default
+            value = value.iloc[0]
+        if value is None:
+            return default
+        if isinstance(value, str):
+            return value
+        if pd.isna(value):
+            return default
+        return value
+
     source_table = Table()
     source_table["_idx"] = np.array(df.index[valid])
     source_table["ra"] = df.loc[valid, "ra"].values
@@ -195,15 +214,18 @@ def _simbad_via_xmatch(
             result_df = result.to_pandas()
             # Normalise column names (XMatch may return main_id or main_type)
             col_map = {}
+            has_otype = any(str(c).lower() == "otype" for c in result_df.columns)
             for c in result_df.columns:
                 cl = c.lower()
-                if cl == "main_id":
+                if cl == "main_id" and c != "main_id":
                     col_map[c] = "main_id"
-                elif cl == "main_type":
+                elif cl == "main_type" and not has_otype and c != "main_type":
                     col_map[c] = "otype"
-                elif cl == "nbref":
+                elif cl == "nbref" and c != "nbref":
                     col_map[c] = "nbref"
             result_df = result_df.rename(columns=col_map)
+            if result_df.columns.duplicated().any():
+                result_df = result_df.loc[:, ~result_df.columns.duplicated(keep="first")]
 
             if "nbref" in result_df.columns:
                 result_df["nbref"] = pd.to_numeric(result_df["nbref"], errors="coerce").fillna(0).astype(int)
@@ -216,10 +238,16 @@ def _simbad_via_xmatch(
             for _, row in result_df.iterrows():
                 idx = int(row["_idx"])
                 if idx in df.index:
-                    df.loc[idx, "simbad_main_id"] = str(row.get("main_id", "") or "")
-                    df.loc[idx, "simbad_otype"] = str(row.get("otype", "") or "")
-                    df.loc[idx, "simbad_nbref"] = int(row.get("nbref", 0) or 0)
-                    sep = row.get("angDist", np.nan)
+                    main_id = _row_value(row, "main_id", "")
+                    otype = _row_value(row, "otype", "")
+                    nbref_val = _row_value(row, "nbref", 0)
+                    sep = _row_value(row, "angDist", np.nan)
+
+                    df.loc[idx, "simbad_main_id"] = str(main_id) if main_id is not None else ""
+                    df.loc[idx, "simbad_otype"] = str(otype) if otype is not None else ""
+
+                    nbref_num = pd.to_numeric(nbref_val, errors="coerce")
+                    df.loc[idx, "simbad_nbref"] = int(nbref_num) if pd.notna(nbref_num) else 0
                     df.loc[idx, "simbad_sep_arcsec"] = round(float(sep), 3) if pd.notna(sep) else np.nan
                     matched += 1
     except Exception as e:
@@ -257,7 +285,11 @@ def _simbad_via_tap(
             raise_on_all_failed=True,
         )
     except RuntimeError as e:
-        print(f"SIMBAD: TAP query failed ({e}); falling back to CDS XMatch")
+        err_text = str(e)
+        if "unsupported MIME type" in err_text or "upload_table" in err_text:
+            print("SIMBAD: TAP upload rejected (MIME/upload_table issue); switching to CDS XMatch safe mode")
+        else:
+            print(f"SIMBAD: TAP query failed ({e}); falling back to CDS XMatch")
         return _simbad_via_xmatch(df, valid, n, radius_arcsec)
 
     matched = 0
@@ -321,72 +353,121 @@ def query_gaia_variability(
 
     print(f"Gaia variability: querying {len(gaia_ids)} source_ids")
 
-    # Try multiple TAP servers (ESA primary, AIP mirror as fallback)
-    tap = None
-    for tap_url in GAIA_TAP_URLS:
+    try:
+        effective_chunk_size = max(1, min(int(chunk_size), 100))
+    except Exception:
+        effective_chunk_size = 100
+    if effective_chunk_size != int(chunk_size):
+        print(f"  Gaia variability: reducing chunk size {chunk_size} -> {effective_chunk_size} for TAP compatibility")
+
+    # Build an ordered list of working TAP services.
+    preferred_tap_urls = [GAIA_AIP_TAP_URL] + [u for u in GAIA_TAP_URLS if u != GAIA_AIP_TAP_URL]
+    test_query = f"SELECT source_id FROM gaiadr3.vari_summary WHERE source_id = {gaia_ids[0]}"
+    taps: list[tuple[str, pyvo.dal.TAPService]] = []
+    for tap_url in preferred_tap_urls:
         try:
-            _tap = pyvo.dal.TAPService(tap_url)
-            test_query = f"SELECT source_id FROM gaiadr3.vari_summary WHERE source_id = {gaia_ids[0]}"
-            _tap.run_sync(test_query)
-            tap = _tap
-            break
+            tap = pyvo.dal.TAPService(tap_url)
+            tap.run_sync(test_query)
+            taps.append((tap_url, tap))
         except Exception:
             print(f"  Gaia TAP {tap_url} unavailable, trying next...")
             continue
 
-    if tap is None:
+    if not taps:
         print("  Warning: all Gaia TAP servers unreachable, skipping variability query")
         return df
 
-    # Query vari_summary (is it flagged as variable?)
-    summary_results = {}
-    for i in tqdm(range(0, len(gaia_ids), chunk_size), desc="Gaia vari_summary"):
-        chunk = gaia_ids[i : i + chunk_size]
-        ids_str = ",".join(chunk)
-        query = f"""
+    def _short_error(exc: Exception, max_len: int = 240) -> str:
+        msg = str(exc).splitlines()[0].strip()
+        return msg if len(msg) <= max_len else msg[:max_len - 3] + "..."
+
+    def _run_with_tap_fallback(query: str):
+        """Run query, trying TAP mirrors in order and promoting last success."""
+        errors: list[str] = []
+        for i, (tap_url, tap) in enumerate(list(taps)):
+            try:
+                result = tap.run_sync(query)
+                if i != 0:
+                    taps.insert(0, taps.pop(i))
+                return result
+            except Exception as exc:
+                errors.append(f"{tap_url}: {exc}")
+        raise RuntimeError(" | ".join(errors))
+
+    def _query_chunk_rows(ids_chunk: list[str], query_builder: Callable[[list[str]], str], retries: int = 3):
+        """Execute one chunk with retries; split chunk recursively on persistent failures."""
+        query = query_builder(ids_chunk)
+        last_exc: Exception | None = None
+
+        for attempt in range(retries):
+            try:
+                return list(_run_with_tap_fallback(query))
+            except Exception as exc:
+                last_exc = exc
+                if attempt < retries - 1:
+                    time.sleep(5 * (attempt + 1))
+
+        if len(ids_chunk) > 20:
+            mid = len(ids_chunk) // 2
+            rows = []
+            split_errors: list[Exception] = []
+            for subchunk in (ids_chunk[:mid], ids_chunk[mid:]):
+                try:
+                    rows.extend(_query_chunk_rows(subchunk, query_builder, retries=2))
+                except Exception as exc:
+                    split_errors.append(exc)
+            if rows:
+                return rows
+            if split_errors:
+                raise split_errors[0]
+
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("Gaia TAP query failed")
+
+    def _summary_query(ids_chunk: list[str]) -> str:
+        ids_str = ",".join(ids_chunk)
+        return f"""
             SELECT source_id,
                    in_vari_classification_result
             FROM gaiadr3.vari_summary
             WHERE source_id IN ({ids_str})
         """
-        for attempt in range(3):
-            try:
-                result = tap.run_sync(query)
-                for row in result:
-                    sid = str(row["source_id"])
-                    summary_results[sid] = bool(row["in_vari_classification_result"])
-                break
-            except Exception as e:
-                if attempt < 2:
-                    time.sleep(5 * (attempt + 1))
-                else:
-                    print(f"  Gaia vari_summary chunk {i} failed: {e}")
 
-    # Query vari_classifier_result (what class?)
-    classifier_results = {}
-    for i in tqdm(range(0, len(gaia_ids), chunk_size), desc="Gaia vari_classifier"):
-        chunk = gaia_ids[i : i + chunk_size]
-        ids_str = ",".join(chunk)
-        query = f"""
+    def _classifier_query(ids_chunk: list[str]) -> str:
+        ids_str = ",".join(ids_chunk)
+        return f"""
             SELECT source_id, best_class_name, best_class_score
             FROM gaiadr3.vari_classifier_result
             WHERE source_id IN ({ids_str})
         """
-        for attempt in range(3):
-            try:
-                result = tap.run_sync(query)
-                for row in result:
-                    sid = str(row["source_id"])
-                    classifier_results[sid] = (
-                        str(row["best_class_name"]),
-                        float(row["best_class_score"]) if row["best_class_score"] is not None else np.nan,
-                    )
-                break
-            except Exception as e:
-                if attempt < 2:
-                    time.sleep(5 * (attempt + 1))
-                else:
-                    print(f"  Gaia vari_classifier chunk {i} failed: {e}")
+
+    # Query vari_summary (is it flagged as variable?)
+    summary_results = {}
+    for i in tqdm(range(0, len(gaia_ids), effective_chunk_size), desc="Gaia vari_summary"):
+        chunk = gaia_ids[i : i + effective_chunk_size]
+        try:
+            rows = _query_chunk_rows(chunk, _summary_query)
+            for row in rows:
+                sid = str(row["source_id"])
+                summary_results[sid] = bool(row["in_vari_classification_result"])
+        except Exception as e:
+            print(f"  Gaia vari_summary chunk {i} failed: {_short_error(e)}")
+
+    # Query vari_classifier_result (what class?)
+    classifier_results = {}
+    for i in tqdm(range(0, len(gaia_ids), effective_chunk_size), desc="Gaia vari_classifier"):
+        chunk = gaia_ids[i : i + effective_chunk_size]
+        try:
+            rows = _query_chunk_rows(chunk, _classifier_query)
+            for row in rows:
+                sid = str(row["source_id"])
+                classifier_results[sid] = (
+                    str(row["best_class_name"]),
+                    float(row["best_class_score"]) if row["best_class_score"] is not None else np.nan,
+                )
+        except Exception as e:
+            print(f"  Gaia vari_classifier chunk {i} failed: {_short_error(e)}")
 
     # Apply results
     matched = 0
