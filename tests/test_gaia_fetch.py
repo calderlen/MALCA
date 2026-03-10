@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -226,3 +227,26 @@ def test_existing_valid_cache_is_not_overwritten_on_failed_refresh(tmp_path: Pat
     assert sorted(out["source_id"].astype(str).tolist()) == ["1", "2"]
     reloaded = pd.read_parquet(output)
     assert sorted(reloaded["source_id"].astype(str).tolist()) == ["1", "2"]
+
+
+def test_stale_done_marker_does_not_block_refetch(tmp_path: Path, monkeypatch) -> None:
+    output = tmp_path / "gaia_catalog.parquet"
+    ckpt_dir = gaia_fetch._checkpoint_dir_for_output(output)
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    stale_marker = ckpt_dir / f"{gaia_fetch._chunk_key(['1', '2'])}.done"
+    stale_marker.write_text(json.dumps({"row_count": 0, "ids": ["1", "2"]}), encoding="utf-8")
+
+    monkeypatch.setattr(gaia_fetch.pyvo.dal, "TAPService", lambda *_args, **_kwargs: object())
+
+    calls: list[str] = []
+
+    def fake_fetch(_tap, chunk_ids: list[str]):
+        calls.append(",".join(chunk_ids))
+        return _mk_chunk_df(chunk_ids)
+
+    monkeypatch.setattr(gaia_fetch, "_fetch_chunk", fake_fetch)
+
+    out = gaia_fetch.fetch_gaia_catalog(["1", "2"], output_path=output, chunk_size=2)
+
+    assert calls == ["1,2"]
+    assert sorted(out["source_id"].astype(str).tolist()) == ["1", "2"]

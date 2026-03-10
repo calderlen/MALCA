@@ -13,7 +13,6 @@ Usage:
 from pathlib import Path
 import argparse
 import hashlib
-import json
 import time
 
 from astropy.table import Table
@@ -213,25 +212,12 @@ def _chunk_key(chunk_ids: list[str]) -> str:
     return hasher.hexdigest()[:16]
 
 
-def _done_marker_path(checkpoint_dir: Path, key: str) -> Path:
-    return checkpoint_dir / f"{key}.done"
-
-
 def _chunk_part_path(checkpoint_dir: Path, key: str) -> Path:
     return checkpoint_dir / f"{key}.parquet"
 
 
 def _chunk_is_checkpointed(checkpoint_dir: Path, key: str) -> bool:
-    return _done_marker_path(checkpoint_dir, key).exists() or _chunk_part_path(checkpoint_dir, key).exists()
-
-
-def _write_done_marker_with_ids(checkpoint_dir: Path, key: str, row_count: int, chunk_ids: list[str]) -> None:
-    """Write done marker including queried IDs for chunk-size-agnostic resume."""
-    marker = _done_marker_path(checkpoint_dir, key)
-    marker.write_text(
-        json.dumps({"row_count": int(row_count), "ids": chunk_ids}),
-        encoding="utf-8",
-    )
+    return _chunk_part_path(checkpoint_dir, key).exists()
 
 
 def _load_checkpoint_parts(checkpoint_dir: Path) -> pd.DataFrame:
@@ -243,21 +229,12 @@ def _load_checkpoint_parts(checkpoint_dir: Path) -> pd.DataFrame:
 
 
 def _load_checkpointed_ids(checkpoint_dir: Path) -> set[str]:
-    """Load Gaia IDs known to be completed from checkpoint parts and markers."""
+    """Load Gaia IDs known to be completed from checkpoint parts."""
     completed: set[str] = set()
 
     parts_df = _load_checkpoint_parts(checkpoint_dir)
     if (not parts_df.empty) and ("source_id" in parts_df.columns):
         completed.update(parts_df["source_id"].dropna().astype(str).tolist())
-
-    for marker in checkpoint_dir.glob("*.done"):
-        try:
-            payload = json.loads(marker.read_text(encoding="utf-8"))
-            ids = payload.get("ids") if isinstance(payload, dict) else None
-            if isinstance(ids, list):
-                completed.update(str(x) for x in ids if str(x))
-        except Exception:
-            continue
 
     return completed
 
@@ -382,7 +359,6 @@ def fetch_gaia_catalog(
 
         if not chunk_df.empty:
             chunk_df.to_parquet(_chunk_part_path(checkpoint_dir, key), index=False, compression="snappy")
-            _write_done_marker_with_ids(checkpoint_dir, key, row_count=len(chunk_df), chunk_ids=chunk_ids)
             n_rows_written += len(chunk_df)
         else:
             n_chunks_empty += 1
