@@ -2580,6 +2580,66 @@ def _configured_plot_dir() -> Path | None:
     return Path(str(PLOT_DIR)).expanduser().resolve()
 
 
+def _run_dir_from_source_path(source_path: object = None) -> Path | None:
+    """Infer a run directory from a candidate source path when possible."""
+    text = str(source_path or "").strip()
+    if text:
+        try:
+            source = Path(text).expanduser().resolve()
+        except Exception:
+            source = Path(text).expanduser()
+
+        for candidate in (source, source.parent, source.parent.parent):
+            if (candidate / "results").is_dir() or (candidate / "bundle_assets" / "lightcurves").is_dir():
+                return candidate
+
+    return _resolve_run_dir_from_db_path(DB_PATH)
+
+
+def _effective_local_lc_path(
+    payload: dict | None,
+    *,
+    stored_lc_path: object = None,
+    source_path: object = None,
+) -> str | None:
+    """Return the best local/bundled LC path for review UI display and lookup."""
+    payload_dict = dict(payload) if isinstance(payload, dict) else {}
+
+    explicit_local_paths: list[str] = []
+    for raw in (stored_lc_path, payload_dict.get("lc_path")):
+        text = str(raw or "").strip()
+        if not text or text in explicit_local_paths:
+            continue
+        explicit_local_paths.append(text)
+        try:
+            if Path(text).expanduser().exists():
+                return text
+        except Exception:
+            continue
+
+    if explicit_local_paths and not payload_dict.get("lc_path"):
+        payload_dict["lc_path"] = explicit_local_paths[0]
+
+    plot_dir = _configured_plot_dir()
+    if plot_dir is None:
+        run_dir = _run_dir_from_source_path(source_path)
+        if run_dir is not None:
+            plot_dir = run_dir / "plots"
+
+    try:
+        resolved = resolve_lightcurve_path(payload_dict, plot_dir)
+    except Exception:
+        resolved = None
+
+    cluster_lc_path = str(payload_dict.get("path") or "").strip()
+    if resolved is not None:
+        resolved_text = str(resolved)
+        if resolved_text and resolved_text != cluster_lc_path:
+            return resolved_text
+
+    return explicit_local_paths[0] if explicit_local_paths else None
+
+
 def _plot_asset_root() -> Path:
     """Root used for locating and serving static plot files."""
     plot_dir = _configured_plot_dir()
@@ -5905,14 +5965,30 @@ def _lookup_candidate_id_for_query(conn: sqlite3.Connection, query_text: str) ->
 
     stem_query = normalized.lower()
     rows = conn.execute(
-        "SELECT candidate_id, lc_path, "
+        "SELECT candidate_id, lc_path, source_path, "
         "CAST(json_extract(payload_json, '$.path') AS TEXT), "
-        "CAST(json_extract(payload_json, '$.gaia_id') AS TEXT) "
+        "CAST(json_extract(payload_json, '$.gaia_id') AS TEXT), "
+        "payload_json "
         "FROM candidates"
     ).fetchall()
-    for candidate_id, local_lc_path, cluster_lc_path, gaia_id in rows:
+    for candidate_id, local_lc_path, source_path, cluster_lc_path, gaia_id, payload_json in rows:
+        try:
+            payload = json.loads(payload_json) if payload_json else {}
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        if candidate_id is not None and not payload.get("candidate_id"):
+            payload["candidate_id"] = str(candidate_id)
+        if cluster_lc_path and not payload.get("path"):
+            payload["path"] = cluster_lc_path
+        effective_local_lc_path = _effective_local_lc_path(
+            payload,
+            stored_lc_path=local_lc_path,
+            source_path=source_path,
+        )
         for label, raw in (
-            ("local LC stem", local_lc_path),
+            ("local LC stem", effective_local_lc_path),
             ("cluster LC stem", cluster_lc_path),
             ("Gaia ID", gaia_id),
         ):
@@ -6688,14 +6764,22 @@ def update_header_key_info(candidate_id, queue_size, queue_filter_hash, import_p
 
     with closing(db_connect(Path(DB_PATH))) as conn:
         payload = get_candidate_payload(conn, str(candidate_id)) or {}
+        if not isinstance(payload, dict):
+            payload = {}
+        if not payload.get('candidate_id'):
+            payload['candidate_id'] = str(candidate_id)
         row = conn.execute(
-            "SELECT lc_path FROM candidates WHERE candidate_id=?",
+            "SELECT lc_path, source_path FROM candidates WHERE candidate_id=?",
             (str(candidate_id),),
         ).fetchone()
     asas_sn_id = payload.get('asas_sn_id')
     gaia_id = payload.get('gaia_id')
     cluster_lc_path = payload.get('path')
-    local_lc_path = (row[0] if row and row[0] else None) or payload.get('lc_path')
+    local_lc_path = _effective_local_lc_path(
+        payload,
+        stored_lc_path=row[0] if row else None,
+        source_path=row[1] if row else None,
+    )
 
     asas_text = f"ASAS-SN ID: {asas_sn_id}" if asas_sn_id else f"ASAS-SN ID: {candidate_id}"
     gaia_fmt = _format_large_integer_like_display(gaia_id)

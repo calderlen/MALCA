@@ -53,7 +53,7 @@ from malca.config.config_ltv import (
     LTV_LS_SAMPLES_PER_PEAK,
 )
 from malca.config.config_paths import LCV2_ROOT, LTV_OUTPUT_DIR
-from malca.config.config_pipeline import MAG_BINS
+from malca.config.config_pipeline import MAG_BINS, SKYPATROL_JD_OFFSET
 from malca.config.config_io import PARQUET_OUTPUT_COMPRESSION
 from malca.utils import read_lc_dat2, clean_lc
 
@@ -136,12 +136,13 @@ def parse_args() -> tuple[list[Config], bool]:
     p.add_argument("--output",
                    default=None,
                    type=str,
-                   help="Combined output CSV (default: LTvar<MAG>.csv)")
+                   help="Combined output Parquet/CSV (default: LTvar<MAG>.parquet)")
     p.add_argument("--dspring",
                    type=float,
                    default=LTV_DSPRING)
     p.add_argument("--ra-is-deg",
-                    action="store_true",
+                    action=argparse.BooleanOptionalAction,
+                    default=True,
                     help="Convert ID['ra_deg'] from degrees to hours before the dspring formula.")
     p.add_argument("--max-seasons",
                    type=int,
@@ -172,7 +173,7 @@ def parse_args() -> tuple[list[Config], bool]:
                    type=str,
                    default="parquet",
                    choices=["csv", "parquet", "parquet_chunk"],
-                   help="Output format (default: csv)")
+                   help="Output format (default: parquet)")
     p.add_argument("--resume",
                    action="store_true",
                    help="Enable checkpointing to resume interrupted runs")
@@ -495,6 +496,11 @@ def process_one_lc(
 
     if df_g.empty:
         return None
+    
+    df_g["JD"] += SKYPATROL_JD_OFFSET
+    if not df_v.empty:
+        df_v["JD"] += SKYPATROL_JD_OFFSET
+
     df = filter_lc_for_ltv(df_g, target)
 
     if df.empty:
