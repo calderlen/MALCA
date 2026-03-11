@@ -653,7 +653,9 @@ def get_numeric_bounds(
     *,
     columns: list[str] | None = None,
     source_path: str | None = None,
+    source_paths: list[str] | None = None,
     source_path_like: str | None = None,
+    source_path_like_any: list[str] | None = None,
 ) -> dict[str, dict[str, float | None]]:
     """Return min/max bounds for numeric candidate columns."""
     selected_cols = columns or sorted(_FLOAT_COLS)
@@ -671,9 +673,20 @@ def get_numeric_bounds(
     if source_path:
         where.append("source_path = ?")
         params.append(str(source_path))
+    if source_paths:
+        source_paths = [str(p) for p in source_paths if str(p)]
+        if source_paths:
+            placeholders = ",".join(["?"] * len(source_paths))
+            where.append(f"source_path IN ({placeholders})")
+            params.extend(source_paths)
     if source_path_like:
         where.append("source_path LIKE ?")
         params.append(f"%{str(source_path_like)}%")
+    if source_path_like_any:
+        source_path_like_any = [str(v) for v in source_path_like_any if str(v)]
+        if source_path_like_any:
+            where.append("(" + " OR ".join(["source_path LIKE ?"] * len(source_path_like_any)) + ")")
+            params.extend([f"%{value}%" for value in source_path_like_any])
 
     query = f"SELECT {', '.join(select_parts)} FROM candidates"
     if where:
@@ -996,11 +1009,26 @@ def query_queue(conn: sqlite3.Connection, *, filters: dict | None = None) -> pd.
         where.append("(c.source_path = ?)")
         params.append(str(source_path))
 
+    source_paths = filters.get('source_paths')
+    if source_paths:
+        source_paths = [str(p) for p in source_paths if str(p)]
+        if source_paths:
+            placeholders = ",".join(["?"] * len(source_paths))
+            where.append(f"(c.source_path IN ({placeholders}))")
+            params.extend(source_paths)
+
     # --- optional source-path scope token (bundle-like substring) ---
     source_path_like = filters.get('source_path_like')
     if source_path_like:
         where.append("(c.source_path LIKE ?)")
         params.append(f"%{str(source_path_like)}%")
+
+    source_path_like_any = filters.get('source_path_like_any')
+    if source_path_like_any:
+        source_path_like_any = [str(v) for v in source_path_like_any if str(v)]
+        if source_path_like_any:
+            where.append("(" + " OR ".join(["c.source_path LIKE ?"] * len(source_path_like_any)) + ")")
+            params.extend([f"%{value}%" for value in source_path_like_any])
 
     # --- Any / True / False / Unset bool-mode filters (auto-generated) ---
     mode_map = {"Any": None, "True": 1, "False": 0, "Unset": "unset"}
@@ -1171,11 +1199,27 @@ def replace_candidate_payload_fields(
     return True
 
 
+def _load_background_pair(conn: sqlite3.Connection, x_expr: str, y_expr: str) -> tuple[np.ndarray, np.ndarray]:
+    """Return finite paired arrays for a diagnostic background plane."""
+    rows = conn.execute(
+        f"SELECT {x_expr}, {y_expr} FROM candidates "
+        f"WHERE {x_expr} IS NOT NULL AND {y_expr} IS NOT NULL"
+    ).fetchall()
+    if not rows:
+        return np.empty(0), np.empty(0)
+    arr = np.array(rows, dtype=np.float64)
+    if arr.ndim != 2 or arr.shape[1] != 2:
+        return np.empty(0), np.empty(0)
+    mask = np.isfinite(arr).all(axis=1)
+    if not mask.any():
+        return np.empty(0), np.empty(0)
+    return arr[mask, 0], arr[mask, 1]
+
+
 def get_diagnostic_background(conn: sqlite3.Connection) -> dict:
     """Load background arrays for diagnostic plots.
 
-    Returns a dict with keys: cmd_bprp0, cmd_mg0, kiel_teff, kiel_logg,
-    ir_hk, ir_w1w2, rpm_bprp, rpm_hg, uv_bprp, uv_nuv_g.
+    Returns a dict with keys for the review GUI diagnostic planes.
     Values are numpy arrays (may be empty).
     """
     result: dict = {}
@@ -1284,6 +1328,29 @@ def get_diagnostic_background(conn: sqlite3.Connection) -> dict:
     else:
         result["uv_nuv_g"] = np.empty(0)
         result["uv_bprp"] = np.empty(0)
+
+    pair_specs = (
+        ("metric_periodicity_score", "metric_phase_quality_score", "periodicity_score", "phase_quality_score"),
+        ("metric_dipper_score", "metric_jumper_score", "dipper_score", "jumper_score"),
+        ("plane_catalog_support_x", "plane_catalog_support_y", "period_n_sources", "dip_run_count"),
+        ("plane_recurrence_regularity_x", "plane_recurrence_regularity_y", "dip_inter_event_spacing_median", "dip_inter_event_spacing_std"),
+        ("plane_dip_repeatability_x", "plane_dip_repeatability_y", "dip_amplitude_consistency", "dip_duration_consistency"),
+        ("plane_var_strength_x", "plane_var_strength_y", "stats_photometry_robust_sigma_mag", "dipper_score"),
+        ("plane_stetson_x", "plane_stetson_y", "stats_photometry_robust_sigma_mag", "stats_variability_stetson_J"),
+        ("plane_shape_x", "plane_shape_y", "stats_skew", "stats_max_slope"),
+        ("plane_harmonic_x", "plane_harmonic_y", "stats_harmonics_model_amplitude", "stats_harmonics_reduced_chi2"),
+        ("plane_autocorr_x", "plane_autocorr_y", "stats_variability_lag1_autocorr", "stats_autocor_length"),
+        ("plane_cluster_x", "plane_cluster_y", "pm_cluster_offset_sigma", "ruwe"),
+        ("plane_classifier_x", "plane_classifier_y", "P_disk", "P_eb"),
+        ("plane_atlas_x", "plane_atlas_y", "atlas_cyan_range", "atlas_orange_range"),
+        ("plane_ztf_x", "plane_ztf_y", "ztf_lc_g_range", "ztf_lc_r_range"),
+        ("plane_neowise_range_x", "plane_neowise_range_y", "neowise_w1_range", "neowise_w2_range"),
+        ("plane_gaia_epoch_x", "plane_gaia_epoch_y", "gaia_epoch_n_obs", "gaia_epoch_g_range"),
+        ("plane_ltv_x", "plane_ltv_y", "ltv_slope", "ltv_dispersion"),
+        ("plane_neowise_trend_x", "plane_neowise_trend_y", "ltv_neowise_w1_slope", "ltv_neowise_w1_w2_slope"),
+    )
+    for x_key, y_key, x_expr, y_expr in pair_specs:
+        result[x_key], result[y_key] = _load_background_pair(conn, x_expr, y_expr)
 
     return result
 

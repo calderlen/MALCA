@@ -5,6 +5,7 @@ from functools import lru_cache
 from pathlib import Path
 from threading import Timer
 import argparse
+import glob as globlib
 import importlib
 import json
 import logging
@@ -42,11 +43,29 @@ from malca.config.config_pipeline import (
 )
 from malca.periodogram import ce_find_period, lsp_find_period, pdm_find_period
 from malca.review.diagnostic_plots import (
+    build_atlas_range_figure,
+    build_autocorr_memory_figure,
+    build_catalog_support_figure,
+    build_classifier_plane_figure,
+    build_cluster_astrometry_figure,
     build_cmd_figure,
+    build_dip_repeatability_figure,
+    build_gaia_epoch_figure,
+    build_harmonic_quality_figure,
     build_ir_colorcolor_figure,
     build_kiel_figure,
+    build_ltv_trend_figure,
+    build_neowise_range_figure,
+    build_neowise_trend_figure,
+    build_periodicity_plane_figure,
+    build_recurrence_regularity_figure,
     build_rpm_figure,
+    build_score_balance_figure,
+    build_shape_impulsiveness_figure,
+    build_stetson_scatter_figure,
     build_uv_optical_figure,
+    build_variability_strength_figure,
+    build_ztf_range_figure,
 )
 from malca.review.fetch import fetch_and_analyze_by_gaia_id
 from malca.review.fetch import fetch_and_analyze_by_id
@@ -1725,6 +1744,11 @@ PLOT_PRESETS = {
     },
 }
 
+NATIVE_BAND_OPTIONS = [
+    {'label': ' g', 'value': 'g'},
+    {'label': ' V', 'value': 'V'},
+]
+
 
 @lru_cache(maxsize=8)
 def _load_run_params_meta_for_plot_dir(plot_dir: str | None) -> tuple[dict | None, str, str]:
@@ -2493,6 +2517,57 @@ def _resolve_run_dir_from_plot_dir(plot_dir: str | None) -> Path | None:
     return None
 
 
+def _resolve_run_dir_from_db_path(db_path: str | Path | None) -> Path | None:
+    """Infer run directory from a run-local review DB path."""
+    if not db_path:
+        return None
+    p = Path(str(db_path)).expanduser().resolve()
+    if p.suffix.lower() != ".db":
+        return None
+    if p.parent.name != "review":
+        return None
+    run_dir = p.parent.parent
+    if (run_dir / "results").is_dir() or (run_dir / "plots").is_dir():
+        return run_dir
+    return None
+
+
+def _review_db_for_plot_dir(plot_dir: str | None) -> Path | None:
+    """Return the sibling run-local review DB for a plot dir, if present."""
+    run_dir = _resolve_run_dir_from_plot_dir(plot_dir)
+    if run_dir is None:
+        return None
+    candidate = run_dir / "review" / "review.db"
+    if candidate.exists():
+        return candidate.resolve()
+    return None
+
+
+def _db_plot_mismatch_warning(db_path: str | Path | None, plot_dir: str | None) -> str:
+    """Describe likely DB/plot-dir mismatches that would hide candidates."""
+    if not plot_dir or not db_path:
+        return ""
+
+    selected = Path(str(db_path)).expanduser().resolve()
+    sibling = _review_db_for_plot_dir(plot_dir)
+    if sibling is None or sibling == selected:
+        return ""
+
+    selected_count = _count_candidates_in_db(selected)
+    sibling_count = _count_candidates_in_db(sibling)
+    if sibling_count < 0:
+        return ""
+
+    if selected_count == 0 and sibling_count > 0:
+        return (
+            f"Selected DB {selected} has 0 candidates, but the run-local DB for "
+            f"{Path(str(plot_dir)).expanduser().resolve()} is {sibling} with {sibling_count} candidates. "
+            f"Use --db {sibling} or omit --db to use the run-local DB automatically."
+        )
+
+    return ""
+
+
 def _project_root() -> Path:
     """Repository root inferred from this file location."""
     return Path(__file__).resolve().parents[2]
@@ -2643,6 +2718,167 @@ def _extract_bundle_scope(path_text: str | None) -> str:
     text = str(path_text)
     m = re.search(r"(output_bundle_[^/\\]+)", text)
     return m.group(1) if m else ""
+
+
+def _split_import_sources(path_text: str | None) -> list[str]:
+    """Split import-path text into individual path tokens."""
+    if not path_text:
+        return []
+    tokens: list[str] = []
+    for line in str(path_text).replace(";", "\n").splitlines():
+        for piece in line.split(","):
+            text = piece.strip()
+            if text:
+                tokens.append(text)
+    return tokens
+
+
+def _candidate_files_for_run_dir(run_dir: Path) -> list[Path]:
+    """Return candidate files for a run/results directory, including multi-bin outputs."""
+    root = run_dir / "results"
+    if run_dir.name == "results":
+        root = run_dir
+    if not root.exists() or not root.is_dir():
+        return []
+
+    exact_vetted = root / "lc_events_vetted.parquet"
+    if exact_vetted.exists():
+        return [exact_vetted.resolve()]
+
+    tagged_vetted = sorted(root.glob("lc_events_vetted_*.parquet"), key=lambda p: str(p))
+    if tagged_vetted:
+        return [p.resolve() for p in tagged_vetted]
+
+    fallback_names = (
+        "lc_events_spectra.parquet",
+        "lc_events_neighbors.parquet",
+        "lc_events_classified.parquet",
+        "lc_events_enriched.parquet",
+        "lc_events_characterized.parquet",
+        "lc_events_filtered.parquet",
+    )
+    matches = [root / name for name in fallback_names if (root / name).exists()]
+    return [p.resolve() for p in matches]
+
+
+def _resolve_import_sources(path_text: str | None, *, allow_run_dirs: bool = True) -> list[Path]:
+    """Resolve import-path text into one or more source files."""
+    resolved: list[Path] = []
+    seen: set[str] = set()
+    for token in _split_import_sources(path_text):
+        matches: list[Path] = []
+        if any(ch in token for ch in "*?[]"):
+            matches = [Path(p).expanduser().resolve() for p in sorted(globlib.glob(token, recursive=True))]
+        else:
+            raw = Path(token).expanduser()
+            candidates = [raw]
+            if not raw.is_absolute():
+                candidates.append((_project_root() / raw).expanduser())
+            for candidate in candidates:
+                try:
+                    if candidate.exists():
+                        matches = [candidate.resolve()]
+                        break
+                except Exception:
+                    continue
+        if not matches:
+            continue
+        for match in matches:
+            sources = _candidate_files_for_run_dir(match) if (allow_run_dirs and match.is_dir()) else [match]
+            for source in sources:
+                key = str(source)
+                if key in seen:
+                    continue
+                seen.add(key)
+                resolved.append(source)
+    return resolved
+
+
+def _summarize_source_paths(paths: list[Path]) -> str:
+    """Return a compact human-readable label for a source list."""
+    if not paths:
+        return ""
+    names = [p.name for p in paths]
+    if len(names) == 1:
+        return names[0]
+    if len(names) == 2:
+        return f"{names[0]}, {names[1]}"
+    return f"{names[0]}, {names[1]} (+{len(names) - 2} more)"
+
+
+def _extract_bundle_scopes(path_text: str | None) -> list[str]:
+    """Extract all bundle tokens from import text."""
+    scopes: list[str] = []
+    seen: set[str] = set()
+    for token in _split_import_sources(path_text):
+        scope = _extract_bundle_scope(token)
+        if scope and scope not in seen:
+            seen.add(scope)
+            scopes.append(scope)
+    return scopes
+
+
+def _queue_scope_from_import_text(path_text: str | None) -> object:
+    """Build queue scoping metadata from import-path text."""
+    paths = _resolve_import_sources(path_text)
+    if paths:
+        return {
+            'source_paths': [str(p) for p in paths],
+            'label': _summarize_source_paths(paths),
+        }
+    scopes = _extract_bundle_scopes(path_text)
+    if scopes:
+        return {
+            'source_path_like_any': scopes,
+            'label': ", ".join(scopes),
+        }
+    return ''
+
+
+def _queue_scope_filter_kwargs(scope_value: object) -> dict[str, object]:
+    """Translate queue-source store payload into DB filter kwargs."""
+    if isinstance(scope_value, dict):
+        if scope_value.get('source_paths'):
+            return {'source_paths': list(scope_value['source_paths'])}
+        if scope_value.get('source_path_like_any'):
+            return {'source_path_like_any': list(scope_value['source_path_like_any'])}
+        return {}
+    if scope_value:
+        return {'source_path_like': str(scope_value)}
+    return {}
+
+
+def _queue_scope_label(scope_value: object) -> str:
+    """Return a short label for queue scoping metadata."""
+    if isinstance(scope_value, dict):
+        label = scope_value.get('label')
+        if label:
+            return str(label)
+        paths = scope_value.get('source_paths') or []
+        if paths:
+            return _summarize_source_paths([Path(str(p)) for p in paths])
+        likes = scope_value.get('source_path_like_any') or []
+        if likes:
+            return ", ".join(str(v) for v in likes)
+        return ''
+    return str(scope_value or '')
+
+
+def _vetting_mode_for_sources(path_text: str | None) -> str:
+    """Summarize vetting-mode status for one or more import sources."""
+    paths = _resolve_import_sources(path_text)
+    if not paths:
+        return _vetting_mode_for_input(path_text)
+    modes = [_vetting_mode_for_input(p) for p in paths]
+    if len(modes) == 1:
+        return modes[0]
+    counts: dict[str, int] = {}
+    for mode in modes:
+        counts[mode] = counts.get(mode, 0) + 1
+    return "; ".join(
+        f"{count} {mode.lower()}" if count != 1 else mode
+        for mode, count in sorted(counts.items(), key=lambda item: item[0])
+    )
 
 
 def _vetting_mode_for_input(input_path: str | Path | None) -> str:
@@ -3464,11 +3700,17 @@ _SIDEBAR_GROUPS = [
     ]),
     ('LTV', [
         ('num', 'ltv_slope'),
+        ('num', 'ltv_slope_quad'),
+        ('num', 'ltv_dispersion'),
         ('num', 'ltv_max_diff'),
         ('num', 'ltv_ls_period'),
         ('num', 'ltv_ls_fap'),
+        ('num', 'ltv_neowise_w1_slope'),
+        ('num', 'ltv_neowise_w1_w2_slope'),
+        ('num', 'ltv_neowise_n_epochs'),
         ('bool', 'ltv_passed_filters'),
         ('bool', 'ltv_dust_candidate'),
+        ('bool', 'ltv_dust_excess'),
         ('bool', 'ltv_vsx_match'),
         ('bool', 'ltv_milliquas_match'),
         ('bool', 'ltv_gaia_alert_match'),
@@ -3789,7 +4031,7 @@ def create_layout():
         dcc.Store(id='pipeline-module-log', data={'lines': []}),
         dcc.Store(id='cone-results-data', data=None),  # cone search catalog rows
         dcc.Store(id='auto-period-cache', data={}, storage_type='session'),
-        dcc.Store(id='plot-render-request', data={'nonce': 1, 'ts': 0.0, 'state': {'idx': 0, 'candidate_id': None, 'plot_mode': 'native', 'overlay_values': list(PLOT_PRESETS['Diagnostics']['overlays']), 'selected_cameras': [], 'preset': 'Diagnostics', 'theme': DEFAULT_THEME, 'residual_height': DEFAULT_RESIDUAL_FRACTION, 'baseline_opacity': 0.5, 'external_source_view': 'all'}}),
+        dcc.Store(id='plot-render-request', data={'nonce': 1, 'ts': 0.0, 'state': {'idx': 0, 'candidate_id': None, 'plot_mode': 'native', 'overlay_values': list(PLOT_PRESETS['Diagnostics']['overlays']), 'selected_cameras': [], 'selected_bands': ['g', 'V'], 'preset': 'Diagnostics', 'theme': DEFAULT_THEME, 'residual_height': DEFAULT_RESIDUAL_FRACTION, 'baseline_opacity': 0.5, 'external_source_view': 'all'}}),
         dcc.Store(id='plot-render-applied', data=0),
         dcc.Store(id='plot-defaults-initialized', data=False),
         dcc.Store(id='queue-source-path', data=''),
@@ -3868,12 +4110,12 @@ def create_layout():
             html.Div('Open Existing', className='section-title', style={'margin-top': '8px'}),
             dcc.Input(
                 id='candidate-search-query',
-                placeholder='candidate_id or ASAS-SN ID',
+                placeholder='candidate / ASAS-SN / Gaia / LC stem',
                 type='text',
                 style={**_inp_style, 'marginBottom': '4px'},
             ),
             html.Button(
-                'View Candidate',
+                'Search / View',
                 id='candidate-search-btn',
                 n_clicks=0,
                 className='action-btn',
@@ -3892,6 +4134,17 @@ def create_layout():
                 id='camera-checklist',
                 options=[],
                 value=[],
+                className='sidebar-camera-checklist',
+                style={'margin-bottom': '6px'},
+                persistence=True,
+                persistence_type='local',
+            ),
+
+            html.Div('Native Bands', className='section-title'),
+            dcc.Checklist(
+                id='band-checklist',
+                options=NATIVE_BAND_OPTIONS,
+                value=['g', 'V'],
                 className='sidebar-camera-checklist',
                 style={'margin-bottom': '6px'},
                 persistence=True,
@@ -3952,6 +4205,8 @@ def create_layout():
             dcc.Input(id='import-path', placeholder='Candidates file path', type='text',
                      style=_inp_style,
                      persistence=True, persistence_type='local'),
+            html.Div('Tip: use one path, a run directory, a glob, or multiple newline-separated files.',
+                     style={'fontSize': '10px', 'color': '#7d91a6', 'margin': '4px 0 6px'}),
 
             dcc.Checklist(
                 id='import-lc-mode',
@@ -5010,8 +5265,7 @@ def load_numeric_filter_bounds(_import_trigger, queue_source_scope):
     """Load numeric slider bounds from the largest available queue."""
     with closing(db_connect(Path(DB_PATH))) as conn:
         kwargs = {'columns': _NUM_COLUMNS}
-        if queue_source_scope:
-            kwargs['source_path_like'] = str(queue_source_scope)
+        kwargs.update(_queue_scope_filter_kwargs(queue_source_scope))
         return get_numeric_bounds(conn, **kwargs)
 
 
@@ -5286,8 +5540,7 @@ def load_queue(refresh_clicks, import_trigger, queue_source_scope, *state_values
             filter_params['sort_cols'] = [sort_val] if sort_val else ['candidate_id']
         filter_params['sort_desc'] = 'yes' in (next(it) or [])
 
-        if queue_source_scope:
-            filter_params['source_path_like'] = str(queue_source_scope)
+        filter_params.update(_queue_scope_filter_kwargs(queue_source_scope))
 
         queue_data = create_queue_data_dict(conn, filter_params)
         active_filters = {k: v for k, v in filter_params.items() if v and v != 'Any'}
@@ -5635,36 +5888,71 @@ def _run_period_search_for_payload(
      State('queue-data', 'data')],
     prevent_initial_call=True,
 )
+def _lookup_candidate_id_for_query(conn: sqlite3.Connection, query_text: str) -> tuple[str | None, str | None]:
+    """Resolve a search query to a candidate_id and match label."""
+    normalized = _format_large_integer_like_display(query_text).strip()
+    exact_queries = (
+        ("candidate_id", "SELECT candidate_id FROM candidates WHERE candidate_id = ? COLLATE NOCASE LIMIT 1"),
+        ("ASAS-SN ID", "SELECT candidate_id FROM candidates WHERE asas_sn_id = ? COLLATE NOCASE LIMIT 1"),
+        ("local LC path", "SELECT candidate_id FROM candidates WHERE lc_path = ? COLLATE NOCASE LIMIT 1"),
+        ("Gaia ID", "SELECT candidate_id FROM candidates WHERE CAST(json_extract(payload_json, '$.gaia_id') AS TEXT) = ? COLLATE NOCASE LIMIT 1"),
+        ("cluster LC path", "SELECT candidate_id FROM candidates WHERE CAST(json_extract(payload_json, '$.path') AS TEXT) = ? COLLATE NOCASE LIMIT 1"),
+    )
+    for label, query in exact_queries:
+        row = conn.execute(query, (normalized,)).fetchone()
+        if row is not None:
+            return str(row[0]), label
+
+    stem_query = normalized.lower()
+    rows = conn.execute(
+        "SELECT candidate_id, lc_path, "
+        "CAST(json_extract(payload_json, '$.path') AS TEXT), "
+        "CAST(json_extract(payload_json, '$.gaia_id') AS TEXT) "
+        "FROM candidates"
+    ).fetchall()
+    for candidate_id, local_lc_path, cluster_lc_path, gaia_id in rows:
+        for label, raw in (
+            ("local LC stem", local_lc_path),
+            ("cluster LC stem", cluster_lc_path),
+            ("Gaia ID", gaia_id),
+        ):
+            if not raw:
+                continue
+            text = _format_large_integer_like_display(raw).strip()
+            if not text:
+                continue
+            if text.lower() == stem_query:
+                return str(candidate_id), label
+            try:
+                path_obj = Path(text)
+            except Exception:
+                continue
+            if path_obj.stem.lower() == stem_query or path_obj.name.lower() == stem_query:
+                return str(candidate_id), label
+    return None, None
+
+
 def open_existing_candidate(n_clicks, n_submit, query, queue_data):
-    """Jump to an existing candidate in the DB by candidate_id or ASAS-SN ID."""
+    """Jump to an existing candidate in the DB by common identifiers or LC stem."""
     _ = n_clicks, n_submit
     query_text = str(query or '').strip()
     if not query_text:
         raise dash.exceptions.PreventUpdate
 
     with closing(db_connect(Path(DB_PATH))) as conn:
-        row = conn.execute(
-            "SELECT candidate_id FROM candidates WHERE candidate_id = ? COLLATE NOCASE LIMIT 1",
-            (query_text,),
-        ).fetchone()
-        if row is None:
-            row = conn.execute(
-                "SELECT candidate_id FROM candidates WHERE asas_sn_id = ? COLLATE NOCASE LIMIT 1",
-                (query_text,),
-            ).fetchone()
+        candidate_id, match_label = _lookup_candidate_id_for_query(conn, query_text)
 
-    if row is None:
+    if candidate_id is None:
         return no_update, no_update, f"Candidate not found in DB: {query_text}"
 
-    candidate_id = str(row[0])
     candidate_ids = list((queue_data or {}).get('candidate_ids') or []) if isinstance(queue_data, dict) else []
     if candidate_id in candidate_ids:
-        return no_update, candidate_ids.index(candidate_id), f"Jumped to {candidate_id} in the current queue."
+        return no_update, candidate_ids.index(candidate_id), f"Jumped to {candidate_id} in the current queue via {match_label or 'search'}."
 
     return (
         {'candidate_ids': [candidate_id], 'queue_size': 1, 'filter_hash': f'view:{candidate_id}'},
         0,
-        f"Viewing {candidate_id}. Refresh Queue to restore the filtered queue.",
+        f"Viewing {candidate_id} via {match_label or 'search'}. Refresh Queue to restore the filtered queue.",
     )
 
 
@@ -5787,6 +6075,7 @@ def handle_keyboard(key_value, current_idx, queue_size, current_candidate_id, cu
      Input('queue-size-store', 'data'),
      Input('pipeline-progress-trigger', 'data'),
      Input('baseline-opacity-slider', 'value'),
+     Input('band-checklist', 'value'),
      Input('round-sigfigs', 'value'),
      Input('link-radius-arcsec', 'value'),
      Input('pdm-result-store', 'data'),
@@ -5796,7 +6085,7 @@ def handle_keyboard(key_value, current_idx, queue_size, current_candidate_id, cu
      State('plot-render-request', 'data'),
     prevent_initial_call=True,
 )
-def queue_plot_render_request(idx, current_candidate_id, plot_mode, overlay_values, selected_cameras, preset, residual_height, theme_mode, _queue_size, _pipeline_progress, baseline_opacity, round_sigfigs, link_radius, pdm_result, pdm_manual_period, yaxis_mode, external_source_view, existing_request):
+def queue_plot_render_request(idx, current_candidate_id, plot_mode, overlay_values, selected_cameras, preset, residual_height, theme_mode, _queue_size, _pipeline_progress, baseline_opacity, selected_bands, round_sigfigs, link_radius, pdm_result, pdm_manual_period, yaxis_mode, external_source_view, existing_request):
     """Debounced render request queue for native plot UX."""
     req = existing_request or {'nonce': 0, 'ts': 0.0}
     # Determine effective PDM period: manual override > PDM result
@@ -5819,6 +6108,7 @@ def queue_plot_render_request(idx, current_candidate_id, plot_mode, overlay_valu
             'plot_mode': plot_mode,
             'overlay_values': list(overlay_values or []),
             'selected_cameras': list(selected_cameras or []),
+            'selected_bands': list(selected_bands or ['g', 'V']),
             'preset': preset,
             'residual_height': float(residual_height if residual_height is not None else DEFAULT_RESIDUAL_FRACTION),
             'theme': theme_mode or DEFAULT_THEME,
@@ -5950,6 +6240,7 @@ def initialize_plot_defaults_from_run_params(queue_size, initialized):
 @app.callback(
     [Output('plot-overlays', 'value'),
      Output('camera-checklist', 'value', allow_duplicate=True),
+     Output('band-checklist', 'value', allow_duplicate=True),
      Output('external-source-view', 'value', allow_duplicate=True)],
     [Input('plot-preset', 'value'),
      Input('plot-reset-btn', 'n_clicks'),
@@ -5973,15 +6264,15 @@ def update_plot_controls(preset, n_reset, n_all, n_clear, n_invert, camera_optio
         cfg = PLOT_PRESETS.get(preset or 'Diagnostics', PLOT_PRESETS['Diagnostics'])
         new_overlays = list(cfg['overlays'])
         new_cams = list(cams)
-        return new_overlays, new_cams, 'all'
+        return new_overlays, new_cams, ['g', 'V'], 'all'
     if trig == 'cams-all-btn':
-        return overlays, list(cams), no_update
+        return overlays, list(cams), no_update, no_update
     if trig == 'cams-clear-btn':
-        return overlays, [], no_update
+        return overlays, [], no_update, no_update
     if trig == 'cams-invert-btn':
         inv = [c for c in cams if c not in set(selected)]
-        return overlays, inv, no_update
-    return no_update, no_update, no_update
+        return overlays, inv, no_update, no_update
+    return no_update, no_update, no_update, no_update
 
 
 @app.callback(
@@ -6020,6 +6311,7 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
     plot_mode = state.get('plot_mode', 'native')
     overlays = set(state.get('overlay_values') or [])
     selected_cameras = list(state.get('selected_cameras') or [])
+    selected_bands = list(state.get('selected_bands') or ['g', 'V'])
     theme_mode = str(state.get('theme', DEFAULT_THEME) or DEFAULT_THEME)
     residual_height = float(state.get('residual_height', DEFAULT_RESIDUAL_FRACTION) or DEFAULT_RESIDUAL_FRACTION)
     baseline_opacity = float(state.get('baseline_opacity', 0.5) if state.get('baseline_opacity') is not None else 0.5)
@@ -6143,7 +6435,7 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
     mismatch_warnings = _run_config_mismatch_warnings(run_params if run_params else None, overlays)
     if run_params_status != 'loaded':
         mismatch_warnings.append(run_params_msg)
-    uirevision_key = f"{candidate_id}|{','.join(sorted(str(c) for c in selected_cameras))}|{theme_mode}|{residual_height:.3f}|{baseline_opacity:.2f}|{yaxis_mode}|{external_source_view}"
+    uirevision_key = f"{candidate_id}|{','.join(sorted(str(c) for c in selected_cameras))}|{','.join(sorted(str(b) for b in selected_bands))}|{theme_mode}|{residual_height:.3f}|{baseline_opacity:.2f}|{yaxis_mode}|{external_source_view}"
 
     # Discover external LC parquets for this candidate
     ext_lcs: dict[str, Path] | None = None
@@ -6174,6 +6466,7 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
             payload,
             plot_dir=plot_dir_path,
             selected_cameras=selected_cameras,
+            selected_bands=selected_bands,
             filter_bad_cameras='filter_bad_cameras' in overlays,
             show_baseline=baseline_opacity > 0,
             show_event_markers='markers' in overlays,
@@ -6226,10 +6519,10 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
     native_warnings = list(native.get('warnings', []) or [])
 
     plot_src = ''
-    if native_status in {"missing-file", "missing-columns", "empty-after-filter", "empty-camera-selection"}:
+    if native_status in {"missing-file", "missing-columns", "empty-after-filter", "empty-camera-selection", "empty-band-selection"}:
         plot_src = _candidate_plot_src(payload)
 
-    if native_status in {"missing-file", "missing-columns", "empty-after-filter", "empty-camera-selection"} and plot_src:
+    if native_status in {"missing-file", "missing-columns", "empty-after-filter", "empty-camera-selection", "empty-band-selection"} and plot_src:
         fallback_warnings = native_warnings + mismatch_warnings
         fallback_msg = native_message or "Native plot unavailable; showing PNG fallback."
         return (
@@ -6305,7 +6598,31 @@ def _render_diagnostic_plots(payload: dict, theme: str, background: dict | None 
     theme_tokens = _external_followup_theme(theme)
     card_style = theme_tokens["card_style"]
     cards = []
-    for builder in (build_cmd_figure, build_ir_colorcolor_figure, build_kiel_figure, build_rpm_figure, build_uv_optical_figure):
+    for builder in (
+        build_cmd_figure,
+        build_ir_colorcolor_figure,
+        build_kiel_figure,
+        build_rpm_figure,
+        build_uv_optical_figure,
+        build_periodicity_plane_figure,
+        build_score_balance_figure,
+        build_catalog_support_figure,
+        build_recurrence_regularity_figure,
+        build_dip_repeatability_figure,
+        build_variability_strength_figure,
+        build_stetson_scatter_figure,
+        build_shape_impulsiveness_figure,
+        build_harmonic_quality_figure,
+        build_autocorr_memory_figure,
+        build_cluster_astrometry_figure,
+        build_classifier_plane_figure,
+        build_atlas_range_figure,
+        build_ztf_range_figure,
+        build_neowise_range_figure,
+        build_gaia_epoch_figure,
+        build_ltv_trend_figure,
+        build_neowise_trend_figure,
+    ):
         fig = builder(payload, theme, background=background)
         if fig is not None:
             cards.append(html.Div(
@@ -6353,12 +6670,13 @@ def update_header_key_info(candidate_id, queue_size, queue_filter_hash, import_p
     if filter_hash.startswith('view:') or filter_hash.startswith('fetch:'):
         queue_label = filter_hash.split(':', 1)[1]
     elif queue_source_path:
-        queue_label = str(queue_source_path)
+        queue_label = _queue_scope_label(queue_source_path)
 
-    def _bottom_bar(path_value: object) -> html.Div:
+    def _bottom_bar(cluster_path_value: object, local_path_value: object) -> html.Div:
         return html.Div(
             [
-                _render_bottom_context("Path", path_value if path_value else "-"),
+                _render_bottom_context("Cluster LC", cluster_path_value if cluster_path_value else "-"),
+                _render_bottom_context("Local LC", local_path_value if local_path_value else "-"),
                 _render_bottom_context("DB", DB_PATH),
                 _render_bottom_context("Queue", queue_label),
             ],
@@ -6366,18 +6684,23 @@ def update_header_key_info(candidate_id, queue_size, queue_filter_hash, import_p
         )
 
     if int(queue_size or 0) <= 0 or not candidate_id:
-        return 'ASAS-SN ID: -', 'Gaia ID: -', _bottom_bar("-")
+        return 'ASAS-SN ID: -', 'Gaia ID: -', _bottom_bar("-", "-")
 
     with closing(db_connect(Path(DB_PATH))) as conn:
         payload = get_candidate_payload(conn, str(candidate_id)) or {}
+        row = conn.execute(
+            "SELECT lc_path FROM candidates WHERE candidate_id=?",
+            (str(candidate_id),),
+        ).fetchone()
     asas_sn_id = payload.get('asas_sn_id')
     gaia_id = payload.get('gaia_id')
-    lc_path = payload.get('path')
+    cluster_lc_path = payload.get('path')
+    local_lc_path = (row[0] if row and row[0] else None) or payload.get('lc_path')
 
     asas_text = f"ASAS-SN ID: {asas_sn_id}" if asas_sn_id else f"ASAS-SN ID: {candidate_id}"
     gaia_fmt = _format_large_integer_like_display(gaia_id)
     gaia_text = f"Gaia ID: {gaia_fmt}" if gaia_fmt else 'Gaia ID: -'
-    return asas_text, gaia_text, _bottom_bar(lc_path)
+    return asas_text, gaia_text, _bottom_bar(cluster_lc_path, local_lc_path)
 
 
 @app.callback(
@@ -6899,28 +7222,31 @@ def auto_populate_detected_files(_n_intervals, current_import_path):
     if run_dir:
         try:
             detected = detect_run_directory_files(run_dir)
+            detected_sources = _candidate_files_for_run_dir(run_dir)
         except Exception as e:
             detected = {'candidates': None, 'warnings': [f"Auto-detect failed: {str(e)}"]}
+            detected_sources = []
 
-        candidates_path = detected.get('candidates')
-        if candidates_path:
-            resolved_candidates = str(Path(candidates_path).expanduser().resolve())
-            vetting_mode = _vetting_mode_for_input(resolved_candidates)
+        if detected_sources:
+            resolved_candidates = "\n".join(str(p) for p in detected_sources)
+            vetting_mode = _vetting_mode_for_sources(resolved_candidates)
             with closing(db_connect(Path(DB_PATH))) as conn:
                 save_app_state(conn, "last_input_file", resolved_candidates)
             return resolved_candidates, (
-                f"✓ Auto-detected candidates: {Path(resolved_candidates).name} | "
+                f"✓ Auto-detected {len(detected_sources)} candidates file(s): {_summarize_source_paths(detected_sources)} | "
                 f"Vetting mode: {vetting_mode}"
             )
 
         warnings = detected.get('warnings') or []
-        if restored_path and Path(restored_path).exists():
-            restored_mode = _vetting_mode_for_input(restored_path)
-            return str(Path(restored_path).resolve()), (
-                f"⚠ {warnings[0]} | restored last candidates: {Path(restored_path).name} | "
+        restored_sources = _resolve_import_sources(restored_path)
+        if restored_sources:
+            restored_mode = _vetting_mode_for_sources(restored_path)
+            restored_text = "\n".join(str(p) for p in restored_sources)
+            return restored_text, (
+                f"⚠ {warnings[0]} | restored last candidates: {_summarize_source_paths(restored_sources)} | "
                 f"Vetting mode: {restored_mode}"
                 if warnings else (
-                    f"✓ Restored last candidates: {Path(restored_path).name} | "
+                    f"✓ Restored last candidates: {_summarize_source_paths(restored_sources)} | "
                     f"Vetting mode: {restored_mode}"
                 )
             )
@@ -6928,10 +7254,12 @@ def auto_populate_detected_files(_n_intervals, current_import_path):
         if warnings:
             return no_update, f"⚠ {warnings[0]}"
 
-    if restored_path and Path(restored_path).exists():
-        restored_mode = _vetting_mode_for_input(restored_path)
-        return str(Path(restored_path).resolve()), (
-            f"✓ Restored last candidates: {Path(restored_path).name} | "
+    restored_sources = _resolve_import_sources(restored_path)
+    if restored_sources:
+        restored_mode = _vetting_mode_for_sources(restored_path)
+        restored_text = "\n".join(str(p) for p in restored_sources)
+        return restored_text, (
+            f"✓ Restored last candidates: {_summarize_source_paths(restored_sources)} | "
             f"Vetting mode: {restored_mode}"
         )
 
@@ -6946,12 +7274,17 @@ def auto_populate_detected_files(_n_intervals, current_import_path):
 )
 def update_queue_source_scope(_n_intervals, import_path):
     """Scope queue to the active run bundle token when possible."""
+    if _resolve_run_dir_from_db_path(DB_PATH) is not None:
+        return ''
+    scope = _queue_scope_from_import_text(import_path)
+    if scope:
+        return scope
+
     run_dir = _resolve_run_dir_from_plot_dir(PLOT_DIR)
     if run_dir is not None:
-        return run_dir.name
+        return {'source_path_like_any': [run_dir.name], 'label': run_dir.name}
 
-    scope = _extract_bundle_scope(import_path)
-    return scope or ''
+    return ''
 
 
 @app.callback(
@@ -6963,8 +7296,71 @@ def show_vetting_mode_status(import_path):
     """Show whether import will use vetted input, cache, or re-vetting."""
     if not import_path:
         return no_update
-    mode = _vetting_mode_for_input(import_path)
+    mode = _vetting_mode_for_sources(import_path)
     return f"Vetting mode: {mode}"
+
+
+def _import_sources_with_options(
+    sources: list[Path],
+    *,
+    characterize_on,
+    crossmatch,
+    gaia_cache,
+    chunk_size,
+    dust_on,
+    starhorse,
+    vet_on,
+    lc_mode,
+    current_trigger,
+) -> tuple[str, int]:
+    """Import one or more candidate/light-curve sources into the review DB."""
+    if not sources:
+        raise ValueError("No import sources resolved")
+
+    raw_lc_mode = 'yes' in (lc_mode or [])
+    with closing(db_connect(Path(DB_PATH))) as conn:
+        enable_characterize = 'yes' in (characterize_on or [])
+        enable_vetting = 'yes' in (vet_on or [])
+
+        if raw_lc_mode:
+            total_rows = 0
+            total_new = 0
+            for src in sources:
+                n_rows, n_new = import_lightcurve_files(
+                    conn, src,
+                    characterize=enable_characterize,
+                    vet=enable_vetting,
+                )
+                total_rows += int(n_rows)
+                total_new += int(n_new)
+            save_app_state(conn, "last_input_file", "\n".join(str(p) for p in sources))
+            return (
+                f"✓ LC import: {total_rows} rows ({total_new} new) from {len(sources)} file(s)",
+                (current_trigger or 0) + 1,
+            )
+
+        vetting_mode = _vetting_mode_for_sources("\n".join(str(p) for p in sources)) if enable_vetting else "vetting disabled"
+        total_rows = 0
+        total_new = 0
+        for src in sources:
+            df = load_candidates_file(src)
+            n_rows, n_new = import_candidates(
+                conn, df, str(src),
+                characterize_before_import=enable_characterize,
+                characterize_crossmatch=Path(crossmatch).expanduser() if enable_characterize and crossmatch else None,
+                characterize_cache=Path(gaia_cache).expanduser() if enable_characterize and gaia_cache else None,
+                characterize_chunk_size=int(chunk_size) if enable_characterize and chunk_size else GAIA_CHUNK_SIZE,
+                characterize_dust='yes' in (dust_on or []) if enable_characterize else False,
+                characterize_starhorse=starhorse.strip() if enable_characterize and starhorse and starhorse.strip() else None,
+                vet_before_import=enable_vetting,
+            )
+            total_rows += int(n_rows)
+            total_new += int(n_new)
+        save_app_state(conn, "last_input_file", "\n".join(str(p) for p in sources))
+        return (
+            f"✓ Imported {total_rows} rows ({total_new} new) from {len(sources)} file(s) | Vetting mode: {vetting_mode}",
+            (current_trigger or 0) + 1,
+        )
 
 
 # Import candidates
@@ -6991,50 +7387,24 @@ def import_candidates_callback(n_clicks, import_path, characterize_on,
     if not n_clicks or not import_path:
         return no_update, no_update
 
-    # Raw light curve mode
-    if 'yes' in (lc_mode or []):
-        try:
-
-            with closing(db_connect(Path(DB_PATH))) as conn:
-                enable_characterize = 'yes' in (characterize_on or [])
-                enable_vetting = 'yes' in (vet_on or [])
-                n_rows, n_new = import_lightcurve_files(
-                    conn, Path(import_path),
-                    characterize=enable_characterize,
-                    vet=enable_vetting,
-                )
-                return (
-                    f"✓ LC import: {n_rows} rows ({n_new} new)",
-                    (current_trigger or 0) + 1,
-                )
-        except Exception as e:
-            return f"✗ LC import failed: {str(e)}", no_update
+    raw_lc_mode = 'yes' in (lc_mode or [])
+    sources = _resolve_import_sources(import_path, allow_run_dirs=not raw_lc_mode)
+    if not sources:
+        sources = [Path(str(import_path)).expanduser()]
 
     try:
-        with closing(db_connect(Path(DB_PATH))) as conn:
-            src = Path(import_path).expanduser()
-            df = load_candidates_file(src)
-
-            enable_characterize = 'yes' in (characterize_on or [])
-            enable_vetting = 'yes' in (vet_on or [])
-            vetting_mode = _vetting_mode_for_input(src) if enable_vetting else "vetting disabled"
-
-            n_rows, n_new = import_candidates(
-                conn, df, str(src),
-                characterize_before_import=enable_characterize,
-                characterize_crossmatch=Path(crossmatch).expanduser() if enable_characterize and crossmatch else None,
-                characterize_cache=Path(gaia_cache).expanduser() if enable_characterize and gaia_cache else None,
-                characterize_chunk_size=int(chunk_size) if enable_characterize and chunk_size else GAIA_CHUNK_SIZE,
-                characterize_dust='yes' in (dust_on or []) if enable_characterize else False,
-                characterize_starhorse=starhorse.strip() if enable_characterize and starhorse and starhorse.strip() else None,
-                vet_before_import=enable_vetting,
-            )
-            save_app_state(conn, "last_input_file", str(src))
-            # Increment trigger to cause queue refresh
-            return (
-                f"✓ Imported {n_rows} rows ({n_new} new) | Vetting mode: {vetting_mode}",
-                (current_trigger or 0) + 1,
-            )
+        return _import_sources_with_options(
+            sources,
+            characterize_on=characterize_on,
+            crossmatch=crossmatch,
+            gaia_cache=gaia_cache,
+            chunk_size=chunk_size,
+            dust_on=dust_on,
+            starhorse=starhorse,
+            vet_on=vet_on,
+            lc_mode=lc_mode,
+            current_trigger=current_trigger,
+        )
     except Exception as e:
         return f"✗ Import failed: {str(e)}", no_update
 
@@ -7701,12 +8071,16 @@ def main():
             PLOT_DIR = None
             print("Running in standalone mode (no --plot-dir)")
 
+    inferred_plot_db = _review_db_for_plot_dir(PLOT_DIR)
+
     # Choose DB: explicit --db overrides; otherwise standalone gets its own DB
     if args.db is not None:
         DB_PATH = str(_resolve_db_cli_path(args.db))
     elif PLOT_DIR is None:
         # Standalone mode: use a separate DB so pipeline candidates don't bleed in
         DB_PATH = str(_resolve_db_cli_path(str(DEFAULT_STANDALONE_DB_PATH)))
+    elif inferred_plot_db is not None:
+        DB_PATH = str(inferred_plot_db)
     else:
         DB_PATH = str(_resolve_db_cli_path(str(DEFAULT_DB_PATH)))
 
@@ -7716,6 +8090,10 @@ def main():
         os.environ[_REVIEW_PLOT_ENV] = str(PLOT_DIR)
     else:
         os.environ.pop(_REVIEW_PLOT_ENV, None)
+
+    mismatch_warning = _db_plot_mismatch_warning(DB_PATH, PLOT_DIR)
+    if mismatch_warning:
+        print(f"Warning: {mismatch_warning}")
 
     if args.merge_vetting:
         vetting_path = Path(args.merge_vetting).expanduser().resolve()

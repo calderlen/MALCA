@@ -12,7 +12,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from malca.baseline import global_median_baseline, per_camera_gp_baseline, per_camera_median_baseline
-from malca.plot import _stable_camera_color, load_lightcurve_df
+from malca.lightcurve_io import load_lightcurve_df, stable_camera_color
 from malca.utils import (
     clean_lc,
     identify_bad_cameras,
@@ -964,6 +964,7 @@ def build_interactive_lightcurve_figure(
     yaxis_mode: Literal["mag", "flux"] = "mag",
     external_lcs: dict[str, Path] | None = None,
     external_source_view: str = "all",
+    selected_bands: list[str] | None = None,
 ) -> dict:
     """Build a native Plotly light-curve figure for review mode."""
     colors = _theme_palette(theme)
@@ -1044,6 +1045,34 @@ def build_interactive_lightcurve_figure(
             "status_message": "Current camera selection has no points.",
             "camera_diagnostics": camera_diagnostics,
             "warnings": ["No points for selected cameras"],
+        }
+
+    band_labels = {0: "g", 1: "V"}
+    available_band_labels = [
+        label
+        for band, label in band_labels.items()
+        if int((df["v_g_band"] == band).sum()) > 0
+    ]
+    selected_band_lookup = {
+        str(value).strip().lower()
+        for value in (selected_bands if selected_bands is not None else available_band_labels)
+        if str(value).strip()
+    }
+    active_bands = [
+        band
+        for band, label in band_labels.items()
+        if label.lower() in selected_band_lookup and label in available_band_labels
+    ]
+    if not active_bands:
+        return {
+            "figure": _status_figure("No native bands selected. Re-enable g or V in the sidebar band controls.", theme=theme),
+            "camera_options": [{"label": f"{cam}", "value": str(cam)} for cam in camera_ids],
+            "camera_values": selected,
+            "stat_rows": [],
+            "status": "empty-band-selection",
+            "status_message": "Current band selection has no visible points.",
+            "camera_diagnostics": camera_diagnostics,
+            "warnings": ["No points for selected bands"],
         }
 
     baseline_name = str(run_params.get("baseline_func", "per_camera_gp")) if run_params else "per_camera_gp"
@@ -1141,11 +1170,10 @@ def build_interactive_lightcurve_figure(
         row_heights=row_heights,
     )
 
-    band_labels = {0: "g", 1: "V"}
     band_markers = {0: "circle", 1: "square"}
     is_flux = yaxis_mode == "flux"
 
-    for band in (0, 1):
+    for band in active_bands:
         bdf = band_dfs.get(band)
         if bdf is None or bdf.empty:
             continue
@@ -1153,7 +1181,7 @@ def build_interactive_lightcurve_figure(
             cdf = bdf[bdf["camera_label"] == cam]
             if cdf.empty:
                 continue
-            color = _stable_camera_color(cam)
+            color = stable_camera_color(cam)
             err = cdf["error"].to_numpy() if "error" in cdf.columns else np.full(len(cdf), np.nan)
             resid = cdf["resid"].to_numpy() if "resid" in cdf.columns else np.full(len(cdf), np.nan)
             baseline = cdf["baseline"].to_numpy() if "baseline" in cdf.columns else np.full(len(cdf), np.nan)
@@ -1258,7 +1286,7 @@ def build_interactive_lightcurve_figure(
                         y=y_base,
                         mode="lines",
                         showlegend=False,
-                        line={"width": 1.6, "color": _stable_camera_color(cam)},
+                        line={"width": 1.6, "color": stable_camera_color(cam)},
                         opacity=baseline_opacity,
                         customdata=cbase["JD_plot"].to_numpy() + JD_OFFSET,
                         hovertemplate=(
@@ -1356,7 +1384,7 @@ def build_interactive_lightcurve_figure(
                 cdf = phase_bdf[phase_bdf["camera_label"] == cam]
                 if cdf.empty:
                     continue
-                color = _stable_camera_color(cam)
+                color = stable_camera_color(cam)
                 err = cdf["error"].to_numpy() if "error" in cdf.columns else np.full(len(cdf), np.nan)
                 resid = cdf["resid"].to_numpy() if "resid" in cdf.columns else cdf["mag"].to_numpy()
                 y_phase = (_mag_to_flux(resid) - 1.0) if is_flux else resid
@@ -1511,6 +1539,8 @@ def build_interactive_lightcurve_figure(
             "bordercolor": colors["legend_border"],
             "borderwidth": 1,
             "font": {"size": 10},
+            "itemclick": False,
+            "itemdoubleclick": False,
         },
         height=None,
         uirevision=uirevision_key,

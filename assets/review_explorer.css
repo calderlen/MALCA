@@ -1,0 +1,61 @@
+.review-explorer-app {
+  color: #f4f8fb;
+}
+
+.review-explorer-app label,
+.review-explorer-app summary,
+.review-explorer-app .dash-table-container,
+.review-explorer-app .dash-table-container * {
+  color: #f4f8fb;
+}
+
+.review-explorer-app input,
+.review-explorer-app textarea {
+  background: #101923;
+  color: #f4f8fb;
+  border: 1px solid #243645;
+}
+
+.review-explorer-app input::placeholder,
+.review-explorer-app textarea::placeholder {
+  color: #8da4b5;
+}
+
+.review-explorer-app .Select-control,
+.review-explorer-app .Select-menu-outer,
+.review-explorer-app .Select-menu,
+.review-explorer-app .Select-value,
+.review-explorer-app .Select--multi .Select-value,
+.review-explorer-app .VirtualizedSelectOption,
+.review-explorer-app .VirtualizedSelectFocusedOption {
+  background-color: #101923 !important;
+  color: #f4f8fb !important;
+  border-color: #243645 !important;
+}
+
+.review-explorer-app .Select-control {
+  border-radius: 6px;
+}
+
+.review-explorer-app .Select-placeholder,
+.review-explorer-app .Select-value-label,
+.review-explorer-app .Select-input > input,
+.review-explorer-app .Select-arrow-zone,
+.review-explorer-app .Select-clear-zone,
+.review-explorer-app .VirtualizedSelectOption {
+  color: #f4f8fb !important;
+}
+
+.review-explorer-app .VirtualizedSelectFocusedOption {
+  background-color: #1c2a36 !important;
+}
+
+.review-explorer-app .Select.is-focused > .Select-control {
+  border-color: #6fd4ff !important;
+  box-shadow: 0 0 0 1px rgba(111, 212, 255, 0.35) !important;
+}
+
+.review-explorer-app .dash-table-container .dash-spreadsheet-container .dash-spreadsheet-inner td,
+.review-explorer-app .dash-table-container .dash-spreadsheet-container .dash-spreadsheet-inner th {
+  color: #f4f8fb !important;
+}

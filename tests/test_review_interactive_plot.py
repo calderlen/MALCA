@@ -137,6 +137,59 @@ def test_interactive_plot_camera_filter_changes_visible_extent(tmp_path: Path) -
     assert full["figure"].layout.uirevision == "case-full"
 
 
+def test_interactive_plot_band_filter_replaces_legend_toggles(tmp_path: Path) -> None:
+    plot_dir = tmp_path / "plots"
+    plot_dir.mkdir(parents=True)
+    lc_file = tmp_path / "ASASSN-TEST-BANDS.csv"
+    _write_skypatrol_csv(lc_file)
+
+    payload = {
+        "path": str(lc_file),
+        "asas_sn_id": "ASASSN-TEST-BANDS",
+    }
+
+    full = build_interactive_lightcurve_figure(
+        payload,
+        plot_dir=plot_dir,
+        selected_cameras=None,
+        filter_bad_cameras=False,
+        show_baseline=False,
+        show_event_markers=False,
+        show_residuals=False,
+        show_phase_fold=False,
+        show_raw_mag=True,
+        show_diagnostics=False,
+        confidence_colors=False,
+        run_params={"baseline_func": "global_median"},
+        uirevision_key="bands-full",
+    )
+
+    g_only = build_interactive_lightcurve_figure(
+        payload,
+        plot_dir=plot_dir,
+        selected_cameras=None,
+        selected_bands=["g"],
+        filter_bad_cameras=False,
+        show_baseline=False,
+        show_event_markers=False,
+        show_residuals=False,
+        show_phase_fold=False,
+        show_raw_mag=True,
+        show_diagnostics=False,
+        confidence_colors=False,
+        run_params={"baseline_func": "global_median"},
+        uirevision_key="bands-g-only",
+    )
+
+    assert full["status"] == "ok"
+    assert len(full["figure"].data) == 4
+    assert full["figure"].layout.legend.itemclick is False
+    assert full["figure"].layout.legend.itemdoubleclick is False
+    assert g_only["status"] == "ok"
+    assert len(g_only["figure"].data) == 2
+    assert {trace.name for trace in g_only["figure"].data} == {"camA (g)", "camB (g)"}
+
+
 def test_interactive_plot_missing_file_has_actionable_status(tmp_path: Path) -> None:
     payload = {"path": "/missing/lightcurve.csv", "asas_sn_id": "ASASSN-TEST-999"}
     out = build_interactive_lightcurve_figure(

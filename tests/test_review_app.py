@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 from malca.review import app as review_app
-from malca.review.store import SQLITE_BUSY_TIMEOUT_MS, db_connect, import_candidates
+from malca.review.store import SQLITE_BUSY_TIMEOUT_MS, db_connect, import_candidates, query_queue
 
 
 def _write_skypatrol_csv(path: Path) -> None:
@@ -67,6 +67,57 @@ def test_db_connect_configures_busy_timeout_and_wal(tmp_path: Path) -> None:
     assert journal_mode == "wal"
 
 
+def test_review_db_for_plot_dir_prefers_run_local_db(tmp_path: Path) -> None:
+    run_dir = tmp_path / "output" / "runs" / "demo"
+    plot_dir = run_dir / "plots"
+    db_path = run_dir / "review" / "review.db"
+    plot_dir.mkdir(parents=True)
+    with db_connect(db_path):
+        pass
+
+    assert review_app._review_db_for_plot_dir(str(plot_dir)) == db_path.resolve()
+    assert review_app._resolve_run_dir_from_db_path(db_path) == run_dir.resolve()
+
+
+def test_db_plot_mismatch_warning_points_to_populated_run_db(tmp_path: Path) -> None:
+    run_dir = tmp_path / "output" / "runs" / "demo"
+    plot_dir = run_dir / "plots"
+    plot_dir.mkdir(parents=True)
+    run_db = run_dir / "review" / "review.db"
+    empty_db = tmp_path / "output" / "review" / "review.db"
+
+    with db_connect(run_db) as conn:
+        import_candidates(
+            conn,
+            pd.DataFrame([{"candidate_id": "RUN-1", "asas_sn_id": "RUN-1"}]),
+            source_path=str(run_dir),
+            characterize_before_import=False,
+            vet_before_import=False,
+        )
+    with db_connect(empty_db):
+        pass
+
+    warning = review_app._db_plot_mismatch_warning(empty_db, str(plot_dir))
+
+    assert str(empty_db.resolve()) in warning
+    assert str(run_db.resolve()) in warning
+    assert "1 candidates" in warning
+
+
+def test_update_queue_source_scope_skips_source_filter_for_run_local_db(tmp_path: Path, monkeypatch) -> None:
+    run_dir = tmp_path / "output" / "runs" / "demo"
+    plot_dir = run_dir / "plots"
+    db_path = run_dir / "review" / "review.db"
+    plot_dir.mkdir(parents=True)
+    with db_connect(db_path):
+        pass
+
+    monkeypatch.setattr(review_app, "DB_PATH", str(db_path))
+    monkeypatch.setattr(review_app, "PLOT_DIR", str(plot_dir))
+
+    assert review_app.update_queue_source_scope(0, None) == ""
+
+
 def test_queue_plot_render_request_tracks_candidate_id() -> None:
     request = review_app.queue_plot_render_request(
         idx=0,
@@ -80,6 +131,7 @@ def test_queue_plot_render_request_tracks_candidate_id() -> None:
         _queue_size=1,
         _pipeline_progress=0,
         baseline_opacity=0.5,
+        selected_bands=["g", "V"],
         round_sigfigs=["yes"],
         link_radius=10.0,
         pdm_result=None,
@@ -168,6 +220,164 @@ def test_update_display_uses_render_request_candidate_and_skips_static_lookup(tm
     assert out[5]["data"]
     assert out[6]["display"] == "block"
     assert out[15] == 7
+
+
+def test_update_header_key_info_shows_cluster_and_local_lc_paths(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "review.db"
+    cluster_lc_path = "/cluster/lightcurves/FETCH-TEST-1.dat2"
+    local_lc_path = str(tmp_path / "FETCH-TEST-1.csv")
+
+    with db_connect(db_path) as conn:
+        import_candidates(
+            conn,
+            pd.DataFrame(
+                [
+                    {
+                        "candidate_id": "FETCH-TEST-1",
+                        "asas_sn_id": "FETCH-TEST-1",
+                        "path": cluster_lc_path,
+                        "lc_path": local_lc_path,
+                    }
+                ]
+            ),
+            source_path="cluster://demo",
+            characterize_before_import=False,
+            vet_before_import=False,
+        )
+
+    monkeypatch.setattr(review_app, "DB_PATH", str(db_path))
+
+    asas_text, gaia_text, bottom_bar = review_app.update_header_key_info(
+        "FETCH-TEST-1", 1, "", None, ""
+    )
+
+    bottom_items = {
+        str(item.children[0].children).rstrip(":"): str(item.children[1].title)
+        for item in bottom_bar.children
+    }
+
+    assert asas_text == "ASAS-SN ID: FETCH-TEST-1"
+    assert gaia_text == "Gaia ID: -"
+    assert bottom_items["Cluster LC"] == cluster_lc_path
+    assert bottom_items["Local LC"] == local_lc_path
+    assert bottom_items["DB"] == str(db_path)
+
+
+def test_open_existing_candidate_matches_local_lc_stem(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "review.db"
+    local_lc_path = tmp_path / "lightcurves" / "LC-SEARCH-1.csv"
+    cluster_lc_path = "/cluster/bundle/LC-SEARCH-1.dat2"
+
+    with db_connect(db_path) as conn:
+        import_candidates(
+            conn,
+            pd.DataFrame(
+                [
+                    {
+                        "candidate_id": "SEARCH-CAND-1",
+                        "asas_sn_id": "ASASSN-SEARCH-1",
+                        "path": cluster_lc_path,
+                        "lc_path": str(local_lc_path),
+                    }
+                ]
+            ),
+            source_path="cluster://search",
+            characterize_before_import=False,
+            vet_before_import=False,
+        )
+
+    monkeypatch.setattr(review_app, "DB_PATH", str(db_path))
+
+    queue_data, current_index, notice = review_app.open_existing_candidate(1, None, "LC-SEARCH-1", {"candidate_ids": []})
+
+    assert queue_data["candidate_ids"] == ["SEARCH-CAND-1"]
+    assert current_index == 0
+    assert "local LC stem" in notice
+
+
+def test_resolve_import_sources_accepts_multi_mag_bin_run_dir(tmp_path: Path) -> None:
+    run_dir = tmp_path / "output" / "runs" / "demo"
+    results_dir = run_dir / "results"
+    results_dir.mkdir(parents=True)
+    file_a = results_dir / "lc_events_vetted_13_13.5.parquet"
+    file_b = results_dir / "lc_events_vetted_13.5_14.parquet"
+    file_a.touch()
+    file_b.touch()
+
+    sources = review_app._resolve_import_sources(str(run_dir))
+
+    assert sources == [file_a.resolve(), file_b.resolve()]
+
+
+def test_update_queue_source_scope_tracks_multiple_import_paths(tmp_path: Path, monkeypatch) -> None:
+    first = tmp_path / "bin_a.parquet"
+    second = tmp_path / "bin_b.parquet"
+    first.touch()
+    second.touch()
+
+    monkeypatch.setattr(review_app, "DB_PATH", str(tmp_path / "review.db"))
+    monkeypatch.setattr(review_app, "PLOT_DIR", None)
+
+    scope = review_app.update_queue_source_scope(0, f"{first}\n{second}")
+
+    assert scope["source_paths"] == [str(first.resolve()), str(second.resolve())]
+    assert "bin_a.parquet" in scope["label"]
+
+
+def test_query_queue_supports_multiple_source_paths(tmp_path: Path) -> None:
+    db_path = tmp_path / "review.db"
+    source_a = str((tmp_path / "a.parquet").resolve())
+    source_b = str((tmp_path / "b.parquet").resolve())
+
+    with db_connect(db_path) as conn:
+        import_candidates(
+            conn,
+            pd.DataFrame([{"candidate_id": "A-1"}]),
+            source_path=source_a,
+            characterize_before_import=False,
+            vet_before_import=False,
+        )
+        import_candidates(
+            conn,
+            pd.DataFrame([{"candidate_id": "B-1"}]),
+            source_path=source_b,
+            characterize_before_import=False,
+            vet_before_import=False,
+        )
+        out = query_queue(conn, filters={"source_paths": [source_a, source_b]})
+
+    assert set(out["candidate_id"].tolist()) == {"A-1", "B-1"}
+
+
+def test_import_candidates_callback_accepts_multiple_files(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "review.db"
+    src_a = tmp_path / "first.csv"
+    src_b = tmp_path / "second.csv"
+    pd.DataFrame([{"candidate_id": "M-1"}]).to_csv(src_a, index=False)
+    pd.DataFrame([{"candidate_id": "M-2"}]).to_csv(src_b, index=False)
+
+    monkeypatch.setattr(review_app, "DB_PATH", str(db_path))
+
+    status, trigger = review_app.import_candidates_callback(
+        1,
+        f"{src_a}\n{src_b}",
+        [],
+        None,
+        None,
+        None,
+        [],
+        None,
+        [],
+        [],
+        0,
+    )
+
+    with db_connect(db_path) as conn:
+        count = int(conn.execute("SELECT COUNT(*) FROM candidates").fetchone()[0])
+
+    assert trigger == 1
+    assert count == 2
+    assert "from 2 file(s)" in status
 
 
 def test_arbitrate_harmonic_period_prefers_double_when_base_is_half() -> None:

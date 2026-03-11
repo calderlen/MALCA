@@ -21,6 +21,9 @@ from malca.config.config_classify import (
 )
 
 
+_BACKGROUND_POINT_LIMIT = 4000
+
+
 def _safe_float(payload: dict, key: str) -> float | None:
     """Extract a finite float from the payload, or None."""
     v = payload.get(key)
@@ -95,6 +98,174 @@ def _axis_range_with_padding(values: list[float], *, pad_fraction: float, min_pa
     if span <= 0:
         pad = max(min_pad, abs(lo) * pad_fraction, 0.25)
     return [float(lo - pad), float(hi + pad)]
+
+
+def _finite_xy(background: dict | None, x_key: str, y_key: str) -> tuple[np.ndarray, np.ndarray]:
+    """Return finite paired background arrays for a diagnostic plane."""
+    bg = background or {}
+    raw_x = bg.get(x_key)
+    raw_y = bg.get(y_key)
+    if raw_x is None or raw_y is None:
+        return np.empty(0, dtype=np.float64), np.empty(0, dtype=np.float64)
+    try:
+        arr_x = np.asarray(raw_x, dtype=np.float64).reshape(-1)
+        arr_y = np.asarray(raw_y, dtype=np.float64).reshape(-1)
+    except Exception:
+        return np.empty(0, dtype=np.float64), np.empty(0, dtype=np.float64)
+    if arr_x.size == 0 or arr_y.size == 0 or arr_x.size != arr_y.size:
+        return np.empty(0, dtype=np.float64), np.empty(0, dtype=np.float64)
+    mask = np.isfinite(arr_x) & np.isfinite(arr_y)
+    if not mask.any():
+        return np.empty(0, dtype=np.float64), np.empty(0, dtype=np.float64)
+    arr_x = arr_x[mask]
+    arr_y = arr_y[mask]
+    if arr_x.size > _BACKGROUND_POINT_LIMIT:
+        idx = np.linspace(0, arr_x.size - 1, _BACKGROUND_POINT_LIMIT, dtype=int)
+        arr_x = arr_x[idx]
+        arr_y = arr_y[idx]
+    return arr_x, arr_y
+
+
+def _safe_float_from_keys(payload: dict, keys: tuple[str, ...]) -> float | None:
+    """Return the first present finite float from *keys*."""
+    for key in keys:
+        value = _safe_float(payload, key)
+        if value is not None:
+            return value
+    return None
+
+
+def _log_axis_range(values: list[float], *, pad_fraction: float = 0.08, min_pad: float = 0.12) -> list[float] | None:
+    """Return plotly log10 axis bounds for positive values."""
+    positive = [float(v) for v in values if v is not None and math.isfinite(float(v)) and float(v) > 0]
+    if not positive:
+        return None
+    lo = math.log10(min(positive))
+    hi = math.log10(max(positive))
+    span = hi - lo
+    pad = max(min_pad, span * pad_fraction)
+    if span <= 0:
+        pad = max(min_pad, 0.25)
+    return [float(lo - pad), float(hi + pad)]
+
+
+def _metric_plane_figure(
+    payload: dict,
+    theme: str,
+    *,
+    background: dict | None,
+    title: str,
+    x_keys: tuple[str, ...],
+    y_keys: tuple[str, ...],
+    background_x_key: str,
+    background_y_key: str,
+    x_title: str,
+    y_title: str,
+    x_log: bool = False,
+    y_log: bool = False,
+    x_range: list[float] | None = None,
+    y_range: list[float] | None = None,
+    x_pad_fraction: float = 0.08,
+    y_pad_fraction: float = 0.08,
+    x_min_pad: float = 0.2,
+    y_min_pad: float = 0.2,
+    vlines: tuple[float, ...] = (),
+    hlines: tuple[float, ...] = (),
+    diagonal: bool = False,
+    annotations: tuple[tuple[float, float, str], ...] = (),
+) -> go.Figure | None:
+    """Build a generic candidate-vs-population metric plane."""
+    x_val = _safe_float_from_keys(payload, x_keys)
+    y_val = _safe_float_from_keys(payload, y_keys)
+    if x_val is None or y_val is None:
+        return None
+    if (x_log and x_val <= 0) or (y_log and y_val <= 0):
+        return None
+
+    spec = _theme_spec(theme)
+    fig = go.Figure()
+    bg_x, bg_y = _finite_xy(background, background_x_key, background_y_key)
+    if bg_x.size > 0:
+        mask = np.ones(bg_x.size, dtype=bool)
+        if x_log:
+            mask &= bg_x > 0
+        if y_log:
+            mask &= bg_y > 0
+        bg_x = bg_x[mask]
+        bg_y = bg_y[mask]
+    if bg_x.size > 0:
+        fig.add_trace(go.Scattergl(
+            x=bg_x,
+            y=bg_y,
+            mode="markers",
+            marker=dict(size=2, color=spec["muted"], opacity=0.22),
+            hoverinfo="skip",
+            name="Sample",
+        ))
+
+    for value in vlines:
+        fig.add_vline(x=float(value), line_color=spec["muted"], line_dash="dot", line_width=1.0, opacity=0.6)
+    for value in hlines:
+        fig.add_hline(y=float(value), line_color=spec["muted"], line_dash="dot", line_width=1.0, opacity=0.6)
+
+    if diagonal:
+        diag_vals = [x_val, y_val]
+        if bg_x.size > 0:
+            diag_vals.extend(bg_x.tolist())
+            diag_vals.extend(bg_y.tolist())
+        diag_vals = [float(v) for v in diag_vals if math.isfinite(float(v)) and ((not x_log and not y_log) or float(v) > 0)]
+        if diag_vals:
+            d0 = min(diag_vals)
+            d1 = max(diag_vals)
+            fig.add_shape(
+                type="line",
+                x0=d0,
+                y0=d0,
+                x1=d1,
+                y1=d1,
+                line=dict(color=spec["muted"], dash="dot", width=1.0),
+                opacity=0.7,
+            )
+
+    for ann_x, ann_y, text in annotations:
+        fig.add_annotation(
+            x=float(ann_x),
+            y=float(ann_y),
+            text=text,
+            showarrow=False,
+            font=dict(size=8, color=spec["muted"]),
+            opacity=0.8,
+        )
+
+    fig.add_trace(go.Scattergl(
+        x=[x_val],
+        y=[y_val],
+        mode="markers",
+        marker=dict(size=12, color=spec["marker"], symbol="star", line=dict(width=2, color=spec["font"])),
+        name="Candidate",
+        hovertemplate=f"{x_title} = {x_val:.3g}<br>{y_title} = {y_val:.3g}<extra></extra>",
+    ))
+
+    _apply_layout(fig, title=title, spec=spec)
+
+    x_values = [x_val]
+    y_values = [y_val]
+    if bg_x.size > 0:
+        x_values.extend(bg_x.tolist())
+    if bg_y.size > 0:
+        y_values.extend(bg_y.tolist())
+
+    if x_log:
+        fig.update_xaxes(title=x_title, type="log", range=_log_axis_range(x_values) if x_range is None else [math.log10(x_range[0]), math.log10(x_range[1])])
+    else:
+        fig.update_xaxes(title=x_title, range=x_range or _axis_range_with_padding(x_values, pad_fraction=x_pad_fraction, min_pad=x_min_pad))
+
+    if y_log:
+        fig.update_yaxes(title=y_title, type="log", range=_log_axis_range(y_values) if y_range is None else [math.log10(y_range[0]), math.log10(y_range[1])])
+    else:
+        fig.update_yaxes(title=y_title, range=y_range or _axis_range_with_padding(y_values, pad_fraction=y_pad_fraction, min_pad=y_min_pad))
+
+    return fig
 
 
 # ---------------------------------------------------------------------------
@@ -566,3 +737,445 @@ def build_uv_optical_figure(
     fig.update_yaxes(title="NUV - G")
 
     return fig
+
+
+# ---------------------------------------------------------------------------
+# 6. Periodicity Plane
+# ---------------------------------------------------------------------------
+
+def build_periodicity_plane_figure(
+    payload: dict, theme: str, *, background: dict | None = None,
+) -> go.Figure | None:
+    """Phase quality vs periodicity score against the review population."""
+    periodicity = _safe_float(payload, "periodicity_score")
+    phase_quality = _safe_float(payload, "phase_quality_score")
+    if periodicity is None or phase_quality is None:
+        return None
+
+    spec = _theme_spec(theme)
+    fig = go.Figure()
+    bg_x, bg_y = _finite_xy(background, "metric_periodicity_score", "metric_phase_quality_score")
+    if bg_x.size > 0:
+        fig.add_trace(go.Scattergl(
+            x=bg_x,
+            y=bg_y,
+            mode="markers",
+            marker=dict(size=2, color=spec["muted"], opacity=0.22),
+            hoverinfo="skip",
+            name="Sample",
+        ))
+
+    fig.add_vline(x=0.5, line_color=spec["muted"], line_dash="dot", line_width=1.0, opacity=0.6)
+    fig.add_hline(y=0.5, line_color=spec["muted"], line_dash="dot", line_width=1.0, opacity=0.6)
+    fig.add_trace(go.Scattergl(
+        x=[periodicity],
+        y=[phase_quality],
+        mode="markers",
+        marker=dict(size=12, color=spec["marker"], symbol="star", line=dict(width=2, color=spec["font"])),
+        name="Candidate",
+        hovertemplate=(
+            f"Periodicity score = {periodicity:.3f}<br>"
+            f"Phase quality = {phase_quality:.3f}<extra></extra>"
+        ),
+    ))
+
+    max_x = max(1.05, periodicity * 1.12)
+    max_y = max(1.05, phase_quality * 1.12)
+    if bg_x.size > 0:
+        max_x = max(max_x, float(np.nanpercentile(bg_x, 99.0)) * 1.05)
+    if bg_y.size > 0:
+        max_y = max(max_y, float(np.nanpercentile(bg_y, 99.0)) * 1.05)
+
+    _apply_layout(fig, title="Periodicity Plane", spec=spec)
+    fig.update_xaxes(title="Periodicity score", range=[-0.05, max_x])
+    fig.update_yaxes(title="Phase quality score", range=[-0.05, max_y])
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# 7. Morphology Score Plane
+# ---------------------------------------------------------------------------
+
+def build_score_balance_figure(
+    payload: dict, theme: str, *, background: dict | None = None,
+) -> go.Figure | None:
+    """Dipper score vs jumper score against the review population."""
+    dipper_score = _safe_float(payload, "dipper_score")
+    jumper_score = _safe_float(payload, "jumper_score")
+    if dipper_score is None or jumper_score is None:
+        return None
+
+    spec = _theme_spec(theme)
+    fig = go.Figure()
+    bg_x, bg_y = _finite_xy(background, "metric_dipper_score", "metric_jumper_score")
+    if bg_x.size > 0:
+        fig.add_trace(go.Scattergl(
+            x=bg_x,
+            y=bg_y,
+            mode="markers",
+            marker=dict(size=2, color=spec["muted"], opacity=0.22),
+            hoverinfo="skip",
+            name="Sample",
+        ))
+
+    upper = max(6.0, dipper_score, jumper_score)
+    if bg_x.size > 0:
+        upper = max(upper, float(np.nanpercentile(bg_x, 99.0)))
+    if bg_y.size > 0:
+        upper = max(upper, float(np.nanpercentile(bg_y, 99.0)))
+    upper *= 1.08
+
+    fig.add_shape(
+        type="line",
+        x0=0.0,
+        y0=0.0,
+        x1=upper,
+        y1=upper,
+        line=dict(color=spec["muted"], dash="dot", width=1.0),
+        opacity=0.7,
+    )
+    fig.add_annotation(x=upper * 0.78, y=upper * 0.18, text="Dip-like", showarrow=False, font=dict(size=8, color=spec["muted"]), opacity=0.8)
+    fig.add_annotation(x=upper * 0.18, y=upper * 0.78, text="Jump-like", showarrow=False, font=dict(size=8, color=spec["muted"]), opacity=0.8)
+    fig.add_trace(go.Scattergl(
+        x=[dipper_score],
+        y=[jumper_score],
+        mode="markers",
+        marker=dict(size=12, color=spec["marker"], symbol="star", line=dict(width=2, color=spec["font"])),
+        name="Candidate",
+        hovertemplate=(
+            f"Dipper score = {dipper_score:.3f}<br>"
+            f"Jumper score = {jumper_score:.3f}<extra></extra>"
+        ),
+    ))
+
+    _apply_layout(fig, title="Morphology Scores", spec=spec)
+    fig.update_xaxes(title="Dipper score", range=[-0.25, upper])
+    fig.update_yaxes(title="Jumper score", range=[-0.25, upper])
+    return fig
+
+
+def build_catalog_support_figure(
+    payload: dict, theme: str, *, background: dict | None = None,
+) -> go.Figure | None:
+    """Period-support count vs dip recurrence."""
+    return _metric_plane_figure(
+        payload,
+        theme,
+        background=background,
+        title="Catalog Support vs Dip Recurrence",
+        x_keys=("period_n_sources",),
+        y_keys=("dip_run_count",),
+        background_x_key="plane_catalog_support_x",
+        background_y_key="plane_catalog_support_y",
+        x_title="Period N sources",
+        y_title="Dip run count",
+        x_range=[-0.25, 5.25],
+        y_range=[-0.25, 8.25],
+        vlines=(2.0,),
+        hlines=(2.0,),
+    )
+
+
+def build_recurrence_regularity_figure(
+    payload: dict, theme: str, *, background: dict | None = None,
+) -> go.Figure | None:
+    """Dip spacing median vs spacing scatter."""
+    return _metric_plane_figure(
+        payload,
+        theme,
+        background=background,
+        title="Recurrence Regularity",
+        x_keys=("dip_inter_event_spacing_median",),
+        y_keys=("dip_inter_event_spacing_std",),
+        background_x_key="plane_recurrence_regularity_x",
+        background_y_key="plane_recurrence_regularity_y",
+        x_title="Dip spacing median (d)",
+        y_title="Dip spacing std (d)",
+        x_log=True,
+        y_log=True,
+        diagonal=True,
+    )
+
+
+def build_dip_repeatability_figure(
+    payload: dict, theme: str, *, background: dict | None = None,
+) -> go.Figure | None:
+    """Amplitude-consistency vs duration-consistency plane."""
+    return _metric_plane_figure(
+        payload,
+        theme,
+        background=background,
+        title="Dip Repeatability",
+        x_keys=("dip_amplitude_consistency",),
+        y_keys=("dip_duration_consistency",),
+        background_x_key="plane_dip_repeatability_x",
+        background_y_key="plane_dip_repeatability_y",
+        x_title="Amplitude consistency",
+        y_title="Duration consistency",
+        x_range=[-0.05, 1.05],
+        y_range=[-0.05, 1.05],
+        vlines=(0.5,),
+        hlines=(0.5,),
+    )
+
+
+def build_variability_strength_figure(
+    payload: dict, theme: str, *, background: dict | None = None,
+) -> go.Figure | None:
+    """Scatter amplitude vs dipper score."""
+    return _metric_plane_figure(
+        payload,
+        theme,
+        background=background,
+        title="Dipper Score vs Scatter",
+        x_keys=("stats_photometry_robust_sigma_mag",),
+        y_keys=("dipper_score",),
+        background_x_key="plane_var_strength_x",
+        background_y_key="plane_var_strength_y",
+        x_title="Robust sigma (mag)",
+        y_title="Dipper score",
+        x_log=True,
+        hlines=(5.0,),
+    )
+
+
+def build_stetson_scatter_figure(
+    payload: dict, theme: str, *, background: dict | None = None,
+) -> go.Figure | None:
+    """Scatter vs Stetson-J variability plane."""
+    return _metric_plane_figure(
+        payload,
+        theme,
+        background=background,
+        title="Scatter vs Stetson J",
+        x_keys=("stats_photometry_robust_sigma_mag",),
+        y_keys=("stats_variability_stetson_J",),
+        background_x_key="plane_stetson_x",
+        background_y_key="plane_stetson_y",
+        x_title="Robust sigma (mag)",
+        y_title="Stetson J",
+        x_log=True,
+    )
+
+
+def build_shape_impulsiveness_figure(
+    payload: dict, theme: str, *, background: dict | None = None,
+) -> go.Figure | None:
+    """Shape asymmetry vs impulsive slope."""
+    return _metric_plane_figure(
+        payload,
+        theme,
+        background=background,
+        title="Shape and Impulsiveness",
+        x_keys=("stats_skew",),
+        y_keys=("stats_max_slope",),
+        background_x_key="plane_shape_x",
+        background_y_key="plane_shape_y",
+        x_title="Skew",
+        y_title="Max slope",
+        y_log=True,
+    )
+
+
+def build_harmonic_quality_figure(
+    payload: dict, theme: str, *, background: dict | None = None,
+) -> go.Figure | None:
+    """Harmonic model amplitude vs reduced chi^2."""
+    return _metric_plane_figure(
+        payload,
+        theme,
+        background=background,
+        title="Harmonic Fit Quality",
+        x_keys=("stats_harmonics_model_amplitude",),
+        y_keys=("stats_harmonics_reduced_chi2",),
+        background_x_key="plane_harmonic_x",
+        background_y_key="plane_harmonic_y",
+        x_title="Harmonic amplitude",
+        y_title="Harmonic reduced chi^2",
+        x_log=True,
+        y_log=True,
+    )
+
+
+def build_autocorr_memory_figure(
+    payload: dict, theme: str, *, background: dict | None = None,
+) -> go.Figure | None:
+    """Lag-1 autocorrelation vs autocorrelation length."""
+    return _metric_plane_figure(
+        payload,
+        theme,
+        background=background,
+        title="Autocorrelation Memory",
+        x_keys=("stats_variability_lag1_autocorr",),
+        y_keys=("stats_autocor_length",),
+        background_x_key="plane_autocorr_x",
+        background_y_key="plane_autocorr_y",
+        x_title="Lag-1 autocorr",
+        y_title="Autocorr length",
+        x_range=[-1.05, 1.05],
+        y_log=True,
+    )
+
+
+def build_cluster_astrometry_figure(
+    payload: dict, theme: str, *, background: dict | None = None,
+) -> go.Figure | None:
+    """Cluster offset sigma vs RUWE."""
+    return _metric_plane_figure(
+        payload,
+        theme,
+        background=background,
+        title="Cluster Astrometry",
+        x_keys=("pm_cluster_offset_sigma",),
+        y_keys=("ruwe",),
+        background_x_key="plane_cluster_x",
+        background_y_key="plane_cluster_y",
+        x_title="PM cluster offset sigma",
+        y_title="RUWE",
+        x_log=True,
+        y_log=True,
+        vlines=(3.0,),
+        hlines=(1.4,),
+    )
+
+
+def build_classifier_plane_figure(
+    payload: dict, theme: str, *, background: dict | None = None,
+) -> go.Figure | None:
+    """Disk-vs-EB classifier probability plane."""
+    return _metric_plane_figure(
+        payload,
+        theme,
+        background=background,
+        title="Classifier Plane",
+        x_keys=("P_disk",),
+        y_keys=("P_eb",),
+        background_x_key="plane_classifier_x",
+        background_y_key="plane_classifier_y",
+        x_title="P_disk",
+        y_title="P_eb",
+        x_range=[-0.05, 1.05],
+        y_range=[-0.05, 1.05],
+        diagonal=True,
+        annotations=((0.78, 0.18, "disk-like"), (0.2, 0.8, "EB-like")),
+    )
+
+
+def build_atlas_range_figure(
+    payload: dict, theme: str, *, background: dict | None = None,
+) -> go.Figure | None:
+    """ATLAS cyan vs orange range plane."""
+    return _metric_plane_figure(
+        payload,
+        theme,
+        background=background,
+        title="ATLAS Range Plane",
+        x_keys=("atlas_cyan_range",),
+        y_keys=("atlas_orange_range",),
+        background_x_key="plane_atlas_x",
+        background_y_key="plane_atlas_y",
+        x_title="ATLAS cyan range",
+        y_title="ATLAS orange range",
+        x_log=True,
+        y_log=True,
+        diagonal=True,
+    )
+
+
+def build_ztf_range_figure(
+    payload: dict, theme: str, *, background: dict | None = None,
+) -> go.Figure | None:
+    """ZTF g vs r variability range plane."""
+    return _metric_plane_figure(
+        payload,
+        theme,
+        background=background,
+        title="ZTF Range Plane",
+        x_keys=("ztf_lc_g_range",),
+        y_keys=("ztf_lc_r_range",),
+        background_x_key="plane_ztf_x",
+        background_y_key="plane_ztf_y",
+        x_title="ZTF g range",
+        y_title="ZTF r range",
+        x_log=True,
+        y_log=True,
+        diagonal=True,
+    )
+
+
+def build_neowise_range_figure(
+    payload: dict, theme: str, *, background: dict | None = None,
+) -> go.Figure | None:
+    """NEOWISE W1 vs W2 range plane."""
+    return _metric_plane_figure(
+        payload,
+        theme,
+        background=background,
+        title="NEOWISE Range Plane",
+        x_keys=("neowise_w1_range",),
+        y_keys=("neowise_w2_range",),
+        background_x_key="plane_neowise_range_x",
+        background_y_key="plane_neowise_range_y",
+        x_title="NEOWISE W1 range",
+        y_title="NEOWISE W2 range",
+        x_log=True,
+        y_log=True,
+        diagonal=True,
+    )
+
+
+def build_gaia_epoch_figure(
+    payload: dict, theme: str, *, background: dict | None = None,
+) -> go.Figure | None:
+    """Gaia-epoch coverage vs amplitude plane."""
+    return _metric_plane_figure(
+        payload,
+        theme,
+        background=background,
+        title="Gaia Epoch Coverage",
+        x_keys=("gaia_epoch_n_obs",),
+        y_keys=("gaia_epoch_g_range",),
+        background_x_key="plane_gaia_epoch_x",
+        background_y_key="plane_gaia_epoch_y",
+        x_title="Gaia epoch N obs",
+        y_title="Gaia epoch G range",
+        x_log=True,
+        y_log=True,
+    )
+
+
+def build_ltv_trend_figure(
+    payload: dict, theme: str, *, background: dict | None = None,
+) -> go.Figure | None:
+    """Long-term trend slope vs dispersion plane."""
+    return _metric_plane_figure(
+        payload,
+        theme,
+        background=background,
+        title="LTV Trend vs Dispersion",
+        x_keys=("ltv_slope",),
+        y_keys=("ltv_dispersion",),
+        background_x_key="plane_ltv_x",
+        background_y_key="plane_ltv_y",
+        x_title="LTV slope (mag/yr)",
+        y_title="LTV dispersion (mag)",
+        y_log=True,
+    )
+
+
+def build_neowise_trend_figure(
+    payload: dict, theme: str, *, background: dict | None = None,
+) -> go.Figure | None:
+    """NEOWISE W1 slope vs W1-W2 color slope."""
+    return _metric_plane_figure(
+        payload,
+        theme,
+        background=background,
+        title="NEOWISE Trend Plane",
+        x_keys=("ltv_neowise_w1_slope",),
+        y_keys=("ltv_neowise_w1_w2_slope",),
+        background_x_key="plane_neowise_trend_x",
+        background_y_key="plane_neowise_trend_y",
+        x_title="W1 slope (mag/yr)",
+        y_title="W1-W2 slope (mag/yr)",
+    )
