@@ -25,6 +25,11 @@ import argparse
 import csv
 import multiprocessing as mp
 import os
+
+# Put this before importing malca.ltv.optim (which uses numba) to prevent 
+# thread pool multiplication when using ProcessPoolExecutor
+os.environ.setdefault("NUMBA_NUM_THREADS", "1")
+
 import re
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
