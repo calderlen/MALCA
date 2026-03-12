@@ -42,6 +42,7 @@ _CORE_COL_MAP = {
     "max diff":    "ltv_max_diff",
     "Dispersion":  "ltv_dispersion",
     "Median":      "ltv_median",
+    "n_seasons":   "ltv_n_seasons",
     "ls_period":   "ltv_ls_period",
     "ls_power":    "ltv_ls_power",
     "ls_fap":      "ltv_ls_fap",
@@ -58,6 +59,17 @@ _PIPELINE_COL_MAP = {
     # Dust flags
     "dust_candidate":   "ltv_dust_candidate",
     "dust_excess":      "ltv_dust_excess",
+    # Stochastic post-filter features
+    "stoch_sf_ml_amplitude": "ltv_stoch_sf_ml_amplitude",
+    "stoch_sf_ml_gamma":     "ltv_stoch_sf_ml_gamma",
+    "stoch_iar_phi":         "ltv_stoch_iar_phi",
+    "stoch_mhps_high":       "ltv_stoch_mhps_high",
+    "stoch_mhps_low":        "ltv_stoch_mhps_low",
+    "stoch_mhps_non_zero":   "ltv_stoch_mhps_non_zero",
+    "stoch_mhps_pn_flag":    "ltv_stoch_mhps_pn_flag",
+    "stoch_mhps_ratio":      "ltv_stoch_mhps_ratio",
+    "stoch_gp_drw_sigma":    "ltv_stoch_gp_drw_sigma",
+    "stoch_gp_drw_tau":      "ltv_stoch_gp_drw_tau",
 }
 
 
@@ -129,8 +141,15 @@ def map_ltv_columns(df: pd.DataFrame) -> pd.DataFrame:
         df = df.drop(columns=["Pstarss gmag"])
 
     # --- Cast int bool columns ---
-    for col in ("ltv_passed_filters", "ltv_dust_candidate", "ltv_dust_excess",
-                "ltv_vsx_match", "ltv_milliquas_match", "ltv_gaia_alert_match"):
+    for col in (
+        "ltv_passed_filters",
+        "ltv_dust_candidate",
+        "ltv_dust_excess",
+        "ltv_vsx_match",
+        "ltv_milliquas_match",
+        "ltv_gaia_alert_match",
+        "ltv_stoch_mhps_pn_flag",
+    ):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
 

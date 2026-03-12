@@ -387,6 +387,167 @@ def compute_trend_metrics(indexes: np.ndarray, meds: np.ndarray) -> tuple[float,
     return lin_slope, a, c1, c2, float(diff)
 
 
+def compute_basic_lc_stats(JD: np.ndarray) -> dict[str, float | int]:
+    """Compute cheap whole-light-curve coverage stats."""
+    if JD.size == 0:
+        return {
+            "n_points": 0,
+            "time_span_days": np.nan,
+            "n_unique_nights": 0,
+        }
+
+    return {
+        "n_points": int(JD.size),
+        "time_span_days": float(JD.max() - JD.min()),
+        "n_unique_nights": int(np.unique(np.floor(JD)).size),
+    }
+
+
+def compute_season_diagnostics(
+    meds: np.ndarray,
+    season_times: np.ndarray,
+    season_spans: np.ndarray,
+    season_counts: np.ndarray,
+) -> dict[str, float | int]:
+    """Compute season-level robustness diagnostics."""
+    out: dict[str, float | int] = {
+        "n_seasons": int(meds.size),
+        "season_points_min": np.nan,
+        "season_points_median": np.nan,
+        "season_points_max": np.nan,
+        "season_span_days_mean": np.nan,
+        "season_span_days_median": np.nan,
+        "season_span_days_max": np.nan,
+        "season_step_max_mag": np.nan,
+        "season_step_mean_abs_mag": np.nan,
+        "season_step_max_fraction": np.nan,
+        "season_monotonicity_fraction": np.nan,
+        "season_spearman_rho": np.nan,
+        "season_kendall_tau": np.nan,
+        "leave1out_slope_std": np.nan,
+        "leave1out_slope_range": np.nan,
+    }
+
+    if season_counts.size > 0:
+        out["season_points_min"] = int(np.min(season_counts))
+        out["season_points_median"] = float(np.median(season_counts))
+        out["season_points_max"] = int(np.max(season_counts))
+
+    if season_spans.size > 0:
+        out["season_span_days_mean"] = float(np.mean(season_spans))
+        out["season_span_days_median"] = float(np.median(season_spans))
+        out["season_span_days_max"] = float(np.max(season_spans))
+
+    if meds.size >= 2:
+        steps = np.diff(meds)
+        abs_steps = np.abs(steps)
+        total_change = float(abs(meds[-1] - meds[0]))
+        out["season_step_max_mag"] = float(np.max(abs_steps))
+        out["season_step_mean_abs_mag"] = float(np.mean(abs_steps))
+        out["season_step_max_fraction"] = float(np.max(abs_steps) / max(total_change, 1e-6))
+        if total_change > 0:
+            out["season_monotonicity_fraction"] = float(np.mean((steps * (meds[-1] - meds[0])) >= 0.0))
+
+    if season_times.size >= 2:
+        try:
+            rho = pd.Series(season_times).corr(pd.Series(meds), method="spearman")
+            out["season_spearman_rho"] = float(rho)
+        except Exception:
+            pass
+        try:
+            tau = pd.Series(season_times).corr(pd.Series(meds), method="kendall")
+            out["season_kendall_tau"] = float(tau)
+        except Exception:
+            pass
+
+    if season_times.size >= 3:
+        loo_slopes = []
+        for i in range(season_times.size):
+            mask = np.ones(season_times.size, dtype=bool)
+            mask[i] = False
+            x = season_times[mask]
+            y = meds[mask]
+            if x.size < 2 or np.allclose(x, x[0]):
+                continue
+            try:
+                loo_slopes.append(float(np.polyfit(x, y, 1)[0]))
+            except Exception:
+                continue
+        if loo_slopes:
+            loo_arr = np.asarray(loo_slopes, dtype=float)
+            out["leave1out_slope_std"] = float(np.std(loo_arr, ddof=0))
+            out["leave1out_slope_range"] = float(np.max(loo_arr) - np.min(loo_arr))
+
+    return out
+
+
+def _bic_from_residuals(resid: np.ndarray, n_params: int) -> float:
+    resid = np.asarray(resid, dtype=float)
+    resid = resid[np.isfinite(resid)]
+    n = resid.size
+    if n <= n_params:
+        return np.nan
+    rss = float(np.sum(resid * resid))
+    return float(n * np.log(max(rss / n, 1e-12)) + n_params * np.log(n))
+
+
+def compute_time_trend_diagnostics(t_years: np.ndarray, meds: np.ndarray) -> dict[str, float]:
+    """Compute time-based trend diagnostics from seasonal medians."""
+    out = {
+        "trend_slope_mag_per_year": np.nan,
+        "trend_quad_mag_per_year2": np.nan,
+        "trend_slope_err_mag_per_year": np.nan,
+        "trend_slope_snr": np.nan,
+        "trend_r2": np.nan,
+        "trend_delta_bic_linear": np.nan,
+        "trend_delta_bic_quadratic": np.nan,
+    }
+
+    x = np.asarray(t_years, dtype=float)
+    y = np.asarray(meds, dtype=float)
+    mask = np.isfinite(x) & np.isfinite(y)
+    if int(mask.sum()) < 2:
+        return out
+
+    x = x[mask]
+    y = y[mask]
+    if np.allclose(x, x[0]):
+        return out
+
+    lin = np.polyfit(x, y, 1)
+    yhat_lin = np.polyval(lin, x)
+    resid_lin = y - yhat_lin
+    ss_res = float(np.sum(resid_lin * resid_lin))
+    ss_tot = float(np.sum((y - np.mean(y)) ** 2))
+
+    out["trend_slope_mag_per_year"] = float(lin[0])
+    out["trend_r2"] = float(1.0 - ss_res / ss_tot) if ss_tot > 0 else np.nan
+
+    sxx = float(np.sum((x - np.mean(x)) ** 2))
+    if x.size > 2 and sxx > 0:
+        sigma2 = ss_res / (x.size - 2)
+        if np.isfinite(sigma2) and sigma2 >= 0:
+            slope_err = float(np.sqrt(sigma2 / sxx))
+            out["trend_slope_err_mag_per_year"] = slope_err
+            if slope_err > 0:
+                out["trend_slope_snr"] = float(lin[0] / slope_err)
+
+    bic_const = _bic_from_residuals(y - np.mean(y), 1)
+    bic_lin = _bic_from_residuals(resid_lin, 2)
+    if np.isfinite(bic_const) and np.isfinite(bic_lin):
+        out["trend_delta_bic_linear"] = float(bic_const - bic_lin)
+
+    if x.size >= 3:
+        quad = np.polyfit(x, y, 2)
+        yhat_quad = np.polyval(quad, x)
+        bic_quad = _bic_from_residuals(y - yhat_quad, 3)
+        out["trend_quad_mag_per_year2"] = float(quad[0])
+        if np.isfinite(bic_lin) and np.isfinite(bic_quad):
+            out["trend_delta_bic_quadratic"] = float(bic_lin - bic_quad)
+
+    return out
+
+
 def compute_lomb_scargle(
     JD: np.ndarray,
     mag: np.ndarray,
@@ -520,6 +681,7 @@ def process_one_lc(
     lc_median = float(np.median(mag))
     lc_mad = float(mad_std(mag))
     lc_dispersion = float(np.ptp(mag))
+    basic_stats = compute_basic_lc_stats(JD)
 
     mid_all = seasonal_midpoints_from_ra(
         ra_val,
@@ -545,16 +707,21 @@ def process_one_lc(
     # Fit seasonal medians vs time for LS detrending
     season_times = []
     season_spans = []
+    season_counts = []
     for s in indexes:
         sel = season_idx == s
         if not np.any(sel):
             continue
         season_times.append(np.median(JD[sel]))
         season_spans.append(JD[sel].max() - JD[sel].min())
+        season_counts.append(int(np.count_nonzero(sel)))
 
     season_times = np.asarray(season_times, dtype=float)
     season_spans = np.asarray(season_spans, dtype=float)
+    season_counts = np.asarray(season_counts, dtype=int)
     t_years = (season_times - JD.min()) / 365.25 if season_times.size > 0 else np.array([])
+    season_stats = compute_season_diagnostics(meds, t_years, season_spans, season_counts)
+    trend_stats = compute_time_trend_diagnostics(t_years, meds)
 
     lin_coeff = None
     quad_coeff = None
@@ -585,6 +752,7 @@ def process_one_lc(
         "ra_deg": ra_val,
         "dec_deg": float(row["dec_deg"]) if "dec_deg" in row.index else np.nan,
         "Pstarss gmag": p_mag,
+        **basic_stats,
         "Median": lc_median,
         "Median_err": lc_mad,
         "Dispersion": lc_dispersion,
@@ -593,6 +761,8 @@ def process_one_lc(
         "coeff1": c1,
         "coeff2": c2,
         "max diff": diff,
+        **season_stats,
+        **trend_stats,
         "vg_has_v": vg_has_v,
         "vg_overlap_days": vg_overlap_days,
         "vg_overlap_fraction": vg_overlap_frac,
@@ -715,7 +885,7 @@ def run_mag_bin(cfg: Config) -> None:
     checkpoint_log = output_path.with_name(f"{output_path.stem}_PROCESSED.txt") if cfg.resume else None
 
     processed_files = set()
-    if checkpoint_log and checkpoint_log.exists() and cfg.overwrite:
+    if checkpoint_log is not None and checkpoint_log.exists() and cfg.overwrite:
         try:
             with open(checkpoint_log, "w"):
                 pass
@@ -723,7 +893,7 @@ def run_mag_bin(cfg: Config) -> None:
         except Exception as e:
             print(f"Warning: could not overwrite checkpoint log {checkpoint_log}: {e}")
 
-    if checkpoint_log and checkpoint_log.exists() and not cfg.overwrite:
+    if checkpoint_log is not None and checkpoint_log.exists() and not cfg.overwrite:
         print(f"Resume mode: loading checkpoint from {checkpoint_log}")
         with open(checkpoint_log, "r") as f:
             processed_files = set(line.strip() for line in f)
@@ -733,7 +903,10 @@ def run_mag_bin(cfg: Config) -> None:
     id_map = {}
 
     for lc_dir in lc_dirs:
-        x = int(IDX_PATTERN.search(lc_dir.name).group(1))
+        match = IDX_PATTERN.search(lc_dir.name)
+        if match is None:
+            continue
+        x = int(match.group(1))
         index_path = mag_bin_dir / f"index{x}.csv"
 
         if not index_path.exists():
@@ -756,6 +929,8 @@ def run_mag_bin(cfg: Config) -> None:
     print(f"Processing {len(all_files)} light curve files")
 
     writer = make_writer(output_path, cfg.output_format)
+    if writer is None:
+        raise ValueError(f"Could not create writer for output path: {output_path}")
     results = []
     total_written = 0
 

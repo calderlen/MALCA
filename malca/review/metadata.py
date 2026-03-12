@@ -40,6 +40,18 @@ REVIEW_METADATA_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("NEOWISE W1-W2 slope", "ltv_neowise_w1_w2_slope"),
         ("NEOWISE epochs", "ltv_neowise_n_epochs"),
     ]),
+    ("LTV Stochastic", [
+        ("SF amplitude (mag)", "ltv_stoch_sf_ml_amplitude"),
+        ("SF gamma", "ltv_stoch_sf_ml_gamma"),
+        ("IAR phi", "ltv_stoch_iar_phi"),
+        ("MHPS high", "ltv_stoch_mhps_high"),
+        ("MHPS low", "ltv_stoch_mhps_low"),
+        ("MHPS non-zero", "ltv_stoch_mhps_non_zero"),
+        ("MHPS PN flag", "ltv_stoch_mhps_pn_flag"),
+        ("MHPS ratio", "ltv_stoch_mhps_ratio"),
+        ("GP-DRW sigma", "ltv_stoch_gp_drw_sigma"),
+        ("GP-DRW tau", "ltv_stoch_gp_drw_tau"),
+    ]),
     ("Identification", [
         ("ASAS-SN ID", "asas_sn_id"),
         ("Gaia ID", "gaia_id"),

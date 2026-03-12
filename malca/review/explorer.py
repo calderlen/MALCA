@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import glob
 from pathlib import Path
+from threading import Timer
 from typing import Any
+import webbrowser
 
 import dash
 from dash import ALL, Input, Output, State, dash_table, dcc, html
@@ -38,18 +40,24 @@ from malca.review.mini_viewer import _render_stats, _render_summary, _summary_it
 from malca.review.period_search import has_external_period, run_period_search_for_payload
 
 
-APP_BG = "#0a1016"
-PANEL_BG = "#101923"
-PANEL_BG_ALT = "#0f1720"
-PANEL_BORDER = "#243645"
-TEXT = "#f4f8fb"
-TEXT_MUTED = "#a6bac9"
-TEXT_FAINT = "#88a4b7"
-ACCENT = "#6fd4ff"
-ACCENT_2 = "#ffb36f"
-GRID = "rgba(140, 170, 192, 0.18)"
-PLOT_BG = "#111a23"
-PLOT_PAPER = "#0c1218"
+DEFAULT_THEME = "black"
+
+APP_BG = "var(--explorer-app-bg)"
+PANEL_BG = "var(--explorer-panel-bg)"
+PANEL_BG_ALT = "var(--explorer-panel-bg-alt)"
+PANEL_BORDER = "var(--explorer-panel-border)"
+TEXT = "var(--explorer-text)"
+TEXT_MUTED = "var(--explorer-text-muted)"
+TEXT_FAINT = "var(--explorer-text-faint)"
+ACCENT = "var(--explorer-accent)"
+ACCENT_2 = "var(--explorer-accent-2)"
+
+UI_FONT_FAMILY = "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+
+EXPLORER_PLOT_KEYS = (
+    "custom",
+    "lightcurve",
+)
 
 BASE_INPUT_STYLE = {
     "width": "100%",
@@ -57,18 +65,36 @@ BASE_INPUT_STYLE = {
     "background": PANEL_BG,
     "color": TEXT,
     "border": f"1px solid {PANEL_BORDER}",
-    "borderRadius": "6px",
-    "fontFamily": "Monaco, Courier New, monospace",
-    "fontSize": "11px",
+    "borderRadius": "8px",
+    "fontFamily": UI_FONT_FAMILY,
+    "fontSize": "12px",
 }
 
 PANEL_STYLE = {
     "background": PANEL_BG_ALT,
     "border": f"1px solid {PANEL_BORDER}",
-    "borderRadius": "12px",
-    "padding": "12px",
-    "boxShadow": "0 0 0 1px rgba(255,255,255,0.015) inset",
+    "borderRadius": "14px",
+    "padding": "14px",
+    "boxShadow": "0 12px 28px rgba(15, 23, 32, 0.08)",
 }
+
+AUTO_FILTER_EXCLUDE_COLUMNS = {
+    "candidate_id",
+    "asas_sn_id",
+    "gaia_id",
+    "candidate_key",
+    "source_file",
+    "source_label",
+    "source_path",
+    "plot_dir",
+    "path",
+    "lc_path",
+    "payload_json",
+    "notes",
+    "imported_at",
+}
+
+AUTO_FILTER_TEXT_ONLY_MAX_UNIQUES = 200
 
 ADV_FILTER_INPUTS = [
     Input({"type": "adv-bool-mode", "col": ALL}, "value"),
@@ -97,38 +123,106 @@ def _resolve_sources(args) -> list[Path]:
     return discover_default_sources()
 
 
-def _graph_layout(height: int) -> dict[str, object]:
+def _theme_palette(theme: str | None) -> dict[str, str]:
+    if str(theme or DEFAULT_THEME).strip().lower() == "white":
+        return {
+            "template": "plotly_white",
+            "paper_bg": "#f2f6fa",
+            "plot_bg": "#ffffff",
+            "text": "#182633",
+            "text_muted": "#4d6476",
+            "accent": "#245f8f",
+            "accent_2": "#b05e2d",
+            "grid": "rgba(74, 101, 122, 0.18)",
+            "legend_bg": "rgba(255, 255, 255, 0.96)",
+            "legend_border": "rgba(133, 157, 177, 0.55)",
+            "hover_bg": "#ffffff",
+            "marker_line": "rgba(24, 38, 51, 0.22)",
+        }
     return {
         "template": "plotly_dark",
-        "height": height,
-        "paper_bgcolor": PLOT_PAPER,
-        "plot_bgcolor": PLOT_BG,
-        "font": {"color": TEXT, "family": "Monaco, Courier New, monospace", "size": 11},
-        "title_font": {"color": TEXT, "size": 13},
-        "margin": {"l": 46, "r": 18, "t": 46, "b": 38},
-        "legend": {
-            "orientation": "h",
-            "yanchor": "bottom",
-            "y": 1.02,
-            "xanchor": "left",
-            "x": 0,
-            "bgcolor": "rgba(15, 23, 32, 0.65)",
-            "bordercolor": "rgba(120, 150, 170, 0.22)",
-            "borderwidth": 1,
-            "font": {"size": 10, "color": TEXT},
-        },
-        "hoverlabel": {"bgcolor": "#0f1720", "font": {"color": TEXT}},
+        "paper_bg": "#0c1218",
+        "plot_bg": "#111a23",
+        "text": "#f4f8fb",
+        "text_muted": "#a6bac9",
+        "accent": "#6fd4ff",
+        "accent_2": "#ffb36f",
+        "grid": "rgba(140, 170, 192, 0.18)",
+        "legend_bg": "rgba(15, 23, 32, 0.78)",
+        "legend_border": "rgba(120, 150, 170, 0.22)",
+        "hover_bg": "#0f1720",
+        "marker_line": "rgba(230, 240, 248, 0.24)",
     }
 
 
-def _style_plot(fig: go.Figure, *, height: int) -> go.Figure:
-    fig.update_layout(**_graph_layout(height))
-    fig.update_xaxes(showgrid=True, gridcolor=GRID, zeroline=False, color=TEXT)
-    fig.update_yaxes(showgrid=True, gridcolor=GRID, zeroline=False, color=TEXT)
+def _default_plot_reset_data() -> dict[str, int]:
+    return {key: 0 for key in EXPLORER_PLOT_KEYS}
+
+
+def _plot_uirevision(reset_data: dict[str, object] | None, key: str) -> str:
+    try:
+        token = int(dict(reset_data or {}).get(key, 0) or 0)
+    except Exception:
+        token = 0
+    return f"explorer:{key}:{token}"
+
+
+def _graph_layout(height: int | None, *, theme: str = DEFAULT_THEME, uirevision: str | None = None) -> dict[str, object]:
+    colors = _theme_palette(theme)
+    layout: dict[str, object] = {
+        "template": colors["template"],
+        "autosize": True,
+        "paper_bgcolor": colors["paper_bg"],
+        "plot_bgcolor": colors["plot_bg"],
+        "font": {"color": colors["text"], "family": UI_FONT_FAMILY, "size": 12},
+        "title": {"x": 0.01, "xanchor": "left", "y": 0.98, "yanchor": "top", "pad": {"t": 2, "b": 8}},
+        "title_automargin": True,
+        "title_font": {"color": colors["text"], "size": 14, "family": UI_FONT_FAMILY},
+        "margin": {"l": 46, "r": 18, "t": 92, "b": 38},
+        "legend": {
+            "orientation": "h",
+            "yanchor": "bottom",
+            "y": 1.14,
+            "xanchor": "left",
+            "x": 0,
+            "bgcolor": colors["legend_bg"],
+            "bordercolor": colors["legend_border"],
+            "borderwidth": 1,
+            "font": {"size": 11, "color": colors["text"], "family": UI_FONT_FAMILY},
+        },
+        "hoverlabel": {"bgcolor": colors["hover_bg"], "font": {"color": colors["text"], "family": UI_FONT_FAMILY}},
+        "uirevision": uirevision or "explorer:static",
+    }
+    if height is not None:
+        layout["height"] = int(height)
+    return layout
+
+
+def _style_plot(fig: go.Figure, *, height: int | None, theme: str = DEFAULT_THEME, uirevision: str | None = None) -> go.Figure:
+    colors = _theme_palette(theme)
+    fig.update_layout(**_graph_layout(height, theme=theme, uirevision=uirevision))
+    fig.update_xaxes(showgrid=True, gridcolor=colors["grid"], zeroline=False, color=colors["text"])
+    fig.update_yaxes(showgrid=True, gridcolor=colors["grid"], zeroline=False, color=colors["text"])
     return fig
 
 
-def _status_figure(message: str, *, height: int = 320) -> go.Figure:
+def _style_native_explorer_figure(fig: go.Figure) -> go.Figure:
+    margin = fig.layout.margin.to_plotly_json() if fig.layout.margin else {}
+    fig.update_layout(
+        title={"x": 0.01, "xanchor": "left", "y": 0.98, "yanchor": "top", "pad": {"t": 2, "b": 8}},
+        title_automargin=True,
+        margin={
+            "l": int(margin.get("l", 55) or 55),
+            "r": int(margin.get("r", 20) or 20),
+            "t": max(int(margin.get("t", 0) or 0), 84),
+            "b": int(margin.get("b", 44) or 44),
+        },
+    )
+    return fig
+
+
+def _status_figure(message: str, *, height: int | None = 320, theme: str = DEFAULT_THEME, uirevision: str | None = None) -> go.Figure:
+    colors = _theme_palette(theme)
     fig = go.Figure()
     fig.add_annotation(
         text=message,
@@ -137,9 +231,9 @@ def _status_figure(message: str, *, height: int = 320) -> go.Figure:
         xref="paper",
         yref="paper",
         showarrow=False,
-        font={"size": 15, "color": TEXT},
+        font={"size": 15, "color": colors["text"], "family": UI_FONT_FAMILY},
     )
-    _style_plot(fig, height=height)
+    _style_plot(fig, height=height, theme=theme, uirevision=uirevision)
     fig.update_xaxes(visible=False)
     fig.update_yaxes(visible=False)
     return fig
@@ -157,7 +251,32 @@ def _distinct_values(frame: pd.DataFrame, col: str, *, max_values: int = 250) ->
 
 
 def _label(text: str) -> html.Div:
-    return html.Div(text, style={"fontSize": "10px", "color": TEXT_FAINT, "textTransform": "uppercase", "marginBottom": "4px"})
+    return html.Div(text, className="explorer-field-label")
+
+
+def _section_title(text: str) -> html.Div:
+    return html.Div(text, className="explorer-section-title")
+
+
+def _reset_button(button_id: str) -> html.Button:
+    return html.Button("Reset view", id=button_id, n_clicks=0, className="explorer-reset-btn")
+
+
+def _graph_card(graph_id: str, reset_button_id: str, *, height: str, class_name: str = "") -> html.Div:
+    card_class = f"explorer-graph-card {class_name}".strip()
+    return html.Div(
+        [
+            html.Div([_reset_button(reset_button_id)], className="explorer-graph-toolbar"),
+            dcc.Graph(
+                id=graph_id,
+                mathjax=True,
+                config={"displaylogo": False, "scrollZoom": True, "doubleClick": False},
+                style={"height": height},
+                className="explorer-graph",
+            ),
+        ],
+        className=card_class,
+    )
 
 
 def _bool_filter_control(col: str) -> html.Div:
@@ -169,6 +288,8 @@ def _bool_filter_control(col: str) -> html.Div:
                 options=[{"label": "Any", "value": "Any"}, {"label": "True", "value": "True"}, {"label": "False", "value": "False"}],
                 value="Any",
                 clearable=False,
+                persistence=True,
+                persistence_type="local",
             ),
         ],
         style={"marginBottom": "8px"},
@@ -181,8 +302,8 @@ def _num_filter_control(col: str) -> html.Div:
             _label(col),
             html.Div(
                 [
-                    dcc.Input(id={"type": "adv-num-min", "col": col}, type="number", debounce=True, placeholder="min", style={**BASE_INPUT_STYLE, "padding": "6px 8px"}),
-                    dcc.Input(id={"type": "adv-num-max", "col": col}, type="number", debounce=True, placeholder="max", style={**BASE_INPUT_STYLE, "padding": "6px 8px"}),
+                    dcc.Input(id={"type": "adv-num-min", "col": col}, type="number", debounce=True, placeholder="min", style={**BASE_INPUT_STYLE, "padding": "6px 8px"}, persistence=True, persistence_type="local"),
+                    dcc.Input(id={"type": "adv-num-max", "col": col}, type="number", debounce=True, placeholder="max", style={**BASE_INPUT_STYLE, "padding": "6px 8px"}, persistence=True, persistence_type="local"),
                 ],
                 style={"display": "grid", "gridTemplateColumns": "1fr 1fr", "gap": "8px"},
             ),
@@ -197,7 +318,7 @@ def _text_filter_control(frame: pd.DataFrame, col: str) -> html.Div:
     return html.Div(
         [
             _label(col),
-            dcc.Dropdown(id={"type": "adv-text-value", "col": col}, options=options, value="Any", clearable=False),
+            dcc.Dropdown(id={"type": "adv-text-value", "col": col}, options=options, value="Any", clearable=False, persistence=True, persistence_type="local"),
         ],
         style={"marginBottom": "8px"},
     )
@@ -209,7 +330,7 @@ def _select_filter_control(frame: pd.DataFrame, col: str) -> html.Div:
     return html.Div(
         [
             _label(f"{col} (exclude)"),
-            dcc.Dropdown(id={"type": "adv-select-exclude", "col": col}, options=options, value=[], multi=True, placeholder="None excluded"),
+            dcc.Dropdown(id={"type": "adv-select-exclude", "col": col}, options=options, value=[], multi=True, placeholder="None excluded", persistence=True, persistence_type="local"),
         ],
         style={"marginBottom": "8px"},
     )
@@ -235,8 +356,68 @@ def _make_filter_group(frame: pd.DataFrame, name: str, items: list[tuple[str, st
     )
 
 
+def _covered_filter_columns() -> set[str]:
+    return {str(col) for _group_name, items in SIDEBAR_GROUPS for _kind, col in items}
+
+
+def _infer_auto_filter_kind(frame: pd.DataFrame, col: str) -> str | None:
+    if col in AUTO_FILTER_EXCLUDE_COLUMNS or col.startswith("_"):
+        return None
+    if col not in frame.columns:
+        return None
+
+    series = frame[col]
+    if pd.api.types.is_bool_dtype(series):
+        return "bool"
+    if pd.api.types.is_numeric_dtype(series):
+        return "num"
+
+    raw = frame[col]
+    try:
+        values = raw.astype("string").fillna("").str.strip()
+    except Exception:
+        values = raw.astype(str).replace({"nan": "", "None": ""}).str.strip()
+    nonempty = values[values != ""]
+    if nonempty.empty:
+        return None
+
+    unique_values = {str(v).strip().lower() for v in nonempty.drop_duplicates().tolist()}
+    if unique_values and unique_values.issubset({"0", "1", "true", "false", "t", "f", "yes", "no", "y", "n"}):
+        return "bool"
+
+    if len(unique_values) <= AUTO_FILTER_TEXT_ONLY_MAX_UNIQUES:
+        return "select"
+    return "text"
+
+
+def _build_auto_filter_groups(frame: pd.DataFrame) -> list[tuple[str, list[tuple[str, str]]]]:
+    covered = _covered_filter_columns()
+    groups: dict[str, list[tuple[str, str]]] = {
+        "Additional Flags": [],
+        "Additional Numeric": [],
+        "Additional Categorical": [],
+        "Additional Text": [],
+    }
+
+    for col in sorted(str(c) for c in frame.columns):
+        if col in covered:
+            continue
+        kind = _infer_auto_filter_kind(frame, col)
+        if kind == "bool":
+            groups["Additional Flags"].append(("bool", col))
+        elif kind == "num":
+            groups["Additional Numeric"].append(("num", col))
+        elif kind == "select":
+            groups["Additional Categorical"].append(("select", col))
+        elif kind == "text":
+            groups["Additional Text"].append(("text", col))
+
+    return [(name, items) for name, items in groups.items() if items]
+
+
 def _build_advanced_filter_sections(frame: pd.DataFrame) -> list[html.Details]:
-    return [_make_filter_group(frame, name, items) for name, items in SIDEBAR_GROUPS]
+    groups = list(SIDEBAR_GROUPS) + _build_auto_filter_groups(frame)
+    return [_make_filter_group(frame, name, items) for name, items in groups]
 
 
 def _build_advanced_filter_state(
@@ -424,14 +605,22 @@ def _scatter_figure(
     x_max: float | None = None,
     y_min: float | None = None,
     y_max: float | None = None,
-    height: int = 360,
+    height: int | None = 360,
+    theme: str = DEFAULT_THEME,
+    uirevision: str | None = None,
 ) -> go.Figure:
+    colors = _theme_palette(theme)
     if x not in frame.columns or y not in frame.columns:
-        return _status_figure(f"Missing columns: {', '.join(col for col in (x, y) if col not in frame.columns)}", height=height)
+        return _status_figure(
+            f"Missing columns: {', '.join(col for col in (x, y) if col not in frame.columns)}",
+            height=height,
+            theme=theme,
+            uirevision=uirevision,
+        )
 
     data = frame.loc[frame[x].notna() & frame[y].notna()].copy()
     if data.empty:
-        return _status_figure(f"No rows with both `{x}` and `{y}`", height=height)
+        return _status_figure(f"No rows with both `{x}` and `{y}`", height=height, theme=theme, uirevision=uirevision)
     data = _sample_frame(data, max_points=max_points, selected_key=selected_key)
 
     plot_data = data.copy()
@@ -452,8 +641,8 @@ def _scatter_figure(
         opacity=0.72,
         title=title,
     )
-    _style_plot(fig, height=height)
-    fig.update_traces(marker={"size": 8, "line": {"width": 0.7, "color": "rgba(230,240,248,0.24)"}})
+    _style_plot(fig, height=height, theme=theme, uirevision=uirevision)
+    fig.update_traces(marker={"size": 8, "line": {"width": 0.7, "color": colors["marker_line"]}})
     fig.update_xaxes(type="log" if log_x else "linear")
     fig.update_yaxes(type="log" if log_y else "linear")
 
@@ -465,7 +654,7 @@ def _scatter_figure(
                     x=selected[x],
                     y=selected[y],
                     mode="markers",
-                    marker={"size": 16, "symbol": "diamond-open", "color": TEXT, "line": {"width": 2.2, "color": ACCENT}},
+                    marker={"size": 16, "symbol": "diamond-open", "color": colors["text"], "line": {"width": 2.2, "color": colors["accent"]}},
                     name="selected",
                     customdata=np.column_stack([selected["candidate_key"]]),
                     hovertemplate="selected<extra></extra>",
@@ -478,7 +667,7 @@ def _scatter_figure(
         x1 = x_max if x_max is not None else float(data[x].max())
         y0 = y_min if y_min is not None else float(data[y].min())
         y1 = y_max if y_max is not None else float(data[y].max())
-        fig.add_shape(type="rect", x0=x0, x1=x1, y0=y0, y1=y1, line={"color": ACCENT_2, "width": 2}, fillcolor="rgba(0,0,0,0)")
+        fig.add_shape(type="rect", x0=x0, x1=x1, y0=y0, y1=y1, line={"color": colors["accent_2"], "width": 2}, fillcolor="rgba(0,0,0,0)")
     return fig
 
 
@@ -494,13 +683,15 @@ def _metric_pair_figure(
     max_points: int,
     log_x: bool = False,
     log_y: bool = False,
-    height: int = 340,
+    height: int | None = 340,
+    theme: str = DEFAULT_THEME,
+    uirevision: str | None = None,
 ) -> go.Figure:
     x = _resolve_metric(frame, x_candidates)
     y = _resolve_metric(frame, y_candidates)
     if x is None or y is None:
         missing = "/".join(x_candidates if x is None else y_candidates)
-        return _status_figure(f"No data for {title} ({missing})", height=height)
+        return _status_figure(f"No data for {title} ({missing})", height=height, theme=theme, uirevision=uirevision)
     return _scatter_figure(
         frame,
         x=x,
@@ -513,15 +704,25 @@ def _metric_pair_figure(
         log_x=log_x,
         log_y=log_y,
         height=height,
+        theme=theme,
+        uirevision=uirevision,
     )
 
 
-def _hist_figure(frame: pd.DataFrame, metric: str, color: str | None, *, height: int = 340) -> go.Figure:
+def _hist_figure(
+    frame: pd.DataFrame,
+    metric: str,
+    color: str | None,
+    *,
+    height: int | None = 340,
+    theme: str = DEFAULT_THEME,
+    uirevision: str | None = None,
+) -> go.Figure:
     if metric not in frame.columns:
-        return _status_figure(f"Missing column: {metric}", height=height)
+        return _status_figure(f"Missing column: {metric}", height=height, theme=theme, uirevision=uirevision)
     data = frame.loc[frame[metric].notna()].copy()
     if data.empty:
-        return _status_figure(f"No rows with `{metric}`", height=height)
+        return _status_figure(f"No rows with `{metric}`", height=height, theme=theme, uirevision=uirevision)
     if color and color in data.columns:
         data[color] = _series_for_plot(data, color)
     fig = px.histogram(
@@ -534,7 +735,7 @@ def _hist_figure(frame: pd.DataFrame, metric: str, color: str | None, *, height:
         opacity=0.7,
         title=f"Distribution of {metric}",
     )
-    _style_plot(fig, height=height)
+    _style_plot(fig, height=height, theme=theme, uirevision=uirevision)
     return fig
 
 
@@ -546,7 +747,7 @@ def _default_native_plot(frame: pd.DataFrame) -> tuple[str, str, str, bool, bool
     return "period_consensus_days", "dipper_score", "Catalog period vs dipper score", True, False
 
 
-def _table_rows(frame: pd.DataFrame, sort_by: str, limit: int = 40) -> list[dict[str, object]]:
+def _table_rows(frame: pd.DataFrame, sort_by: str) -> list[dict[str, object]]:
     cols = [
         "candidate_key",
         "candidate_id",
@@ -569,7 +770,7 @@ def _table_rows(frame: pd.DataFrame, sort_by: str, limit: int = 40) -> list[dict
         data = data.sort_values(sort_by, ascending=False, na_position="last")
     else:
         data = data.sort_values("dipper_score", ascending=False, na_position="last")
-    return data.loc[:, cols].head(limit).to_dict("records")
+    return data.loc[:, cols].to_dict("records")
 
 
 def _selection_status(selected_record: dict | None, filtered_count: int, query_error: str, active_filters: int) -> str:
@@ -594,222 +795,500 @@ def build_explorer_app(combined: CombinedCandidateData, *, host: str, port: int)
         title="MALCA Explorer",
         assets_folder=str(Path(__file__).resolve().parent / "assets"),
     )
+    app.index_string = """
+<!DOCTYPE html>
+<html>
+<head>
+    {%metas%}
+    <title>MALCA Explorer</title>
+    {%css%}
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+</head>
+<body data-explorer-theme="black">
+    {%app_entry%}
+    <footer>
+        {%config%}
+        {%scripts%}
+        {%renderer%}
+    </footer>
+</body>
+</html>
+"""
     app.layout = html.Div(
         [
-            dcc.Store(id="selected-key-store", data=combined.default_candidate_key),
+            dcc.Store(id="selected-key-store", data=combined.default_candidate_key, storage_type="local"),
             dcc.Store(id="period-search-store", data=None),
             dcc.Store(id="period-cache-store", data={}, storage_type="session"),
+            dcc.Store(id="theme-mode-store", data=DEFAULT_THEME),
+            dcc.Store(id="plot-reset-store", data=_default_plot_reset_data()),
+            dcc.Store(id="explorer-split-init", data=0),
+            dcc.Store(id="explorer-sidebar-open", data=True, storage_type="local"),
+            dcc.Interval(id="explorer-init", interval=200, n_intervals=0, max_intervals=1),
             html.Div(
                 [
-                    html.Div("MALCA Explorer", style={"fontSize": "24px", "fontWeight": "600", "color": TEXT}),
-                    html.Div(f"Sources: {len(combined.sources)} | Rows: {len(combined.df):,}", style={"fontSize": "12px", "color": TEXT_MUTED}),
+                    html.Button("Hide Sidebar", id="explorer-sidebar-toggle", n_clicks=0, className="explorer-action-btn explorer-sidebar-toggle"),
+                    html.Div(
+                        [
+                            html.Div("MALCA Explorer", className="explorer-main-title"),
+                            html.Div(f"Sources: {len(combined.sources)} | Rows: {len(combined.df):,}", className="explorer-main-subtitle"),
+                        ],
+                        className="explorer-main-header",
+                    ),
                 ],
-                style={"paddingBottom": "10px"},
+                className="explorer-topbar",
             ),
             html.Div(
                 [
                     html.Div(
                         [
+                            _section_title("Filters"),
                             _label("Sources"),
-                            dcc.Dropdown(id="source-filter", options=[{"label": label, "value": label} for label in all_source_labels], value=all_source_labels, multi=True),
-                        ],
-                        style={"minWidth": "280px", "flex": "1 1 280px"},
-                    ),
-                    html.Div(
-                        [
+                            dcc.Dropdown(id="source-filter", options=[{"label": label, "value": label} for label in all_source_labels], value=all_source_labels, multi=True, persistence=True, persistence_type="local"),
                             _label("Query"),
-                            dcc.Input(id="query-input", debounce=True, placeholder="pandas query, e.g. dipper_score >= 5 and period_n_sources <= 1", style=BASE_INPUT_STYLE),
-                        ],
-                        style={"minWidth": "340px", "flex": "2 1 420px"},
-                    ),
-                    html.Div(
-                        [
+                            dcc.Input(id="query-input", debounce=True, placeholder="pandas query, e.g. dipper_score >= 5 and period_n_sources <= 1", style=BASE_INPUT_STYLE, persistence=True, persistence_type="local"),
+                            dcc.Checklist(id="only-unreviewed", options=[{"label": " Only unreviewed", "value": "yes"}], value=[], className="explorer-stack-checklist", persistence=True, persistence_type="local"),
+                            dcc.Checklist(id="require-failed-any-false", options=[{"label": " Require failed_any=False", "value": "yes"}], value=[], className="explorer-stack-checklist", persistence=True, persistence_type="local"),
+                            html.Div(advanced_sections, className="explorer-advanced-sections"),
+                            html.Hr(className="explorer-rule"),
+                            _section_title("Plot Maker"),
+                            _label("X metric"),
+                            dcc.Dropdown(id="x-metric", options=[{"label": col, "value": col} for col in metric_options], value=None, clearable=True, placeholder="Choose x metric", className="explorer-plotmaker-dropdown"),
+                            _label("Y metric"),
+                            dcc.Dropdown(id="y-metric", options=[{"label": col, "value": col} for col in metric_options], value=None, clearable=True, placeholder="Choose y metric", className="explorer-plotmaker-dropdown"),
+                            _label("Color metric"),
+                            dcc.Dropdown(id="color-metric", options=[{"label": col, "value": col} for col in metric_options], value=None, clearable=True, placeholder="Optional", className="explorer-plotmaker-dropdown"),
+                            _label("Symbol metric"),
+                            dcc.Dropdown(id="symbol-metric", options=[{"label": col, "value": col} for col in metric_options], value=None, clearable=True, placeholder="Optional", className="explorer-plotmaker-dropdown"),
+                            html.Div(
+                                [
+                                    html.Div([_label("X min"), dcc.Input(id="x-min", type="number", placeholder="x min", style=BASE_INPUT_STYLE)], className="explorer-two-up-item"),
+                                    html.Div([_label("X max"), dcc.Input(id="x-max", type="number", placeholder="x max", style=BASE_INPUT_STYLE)], className="explorer-two-up-item"),
+                                ],
+                                className="explorer-two-up",
+                            ),
+                            html.Div(
+                                [
+                                    html.Div([_label("Y min"), dcc.Input(id="y-min", type="number", placeholder="y min", style=BASE_INPUT_STYLE)], className="explorer-two-up-item"),
+                                    html.Div([_label("Y max"), dcc.Input(id="y-max", type="number", placeholder="y max", style=BASE_INPUT_STYLE)], className="explorer-two-up-item"),
+                                ],
+                                className="explorer-two-up",
+                            ),
+                            _label("Axis scaling"),
+                            dcc.Checklist(id="log-flags", options=[{"label": " log x", "value": "logx"}, {"label": " log y", "value": "logy"}], value=[], className="explorer-inline-checklist"),
+                            _label("Table sort"),
+                            dcc.Dropdown(id="table-sort", options=[{"label": col, "value": col} for col in metric_options], value="dipper_score" if "dipper_score" in metric_options else (metric_options[0] if metric_options else None), clearable=False),
+                            html.Hr(className="explorer-rule"),
+                            _section_title("Open Existing"),
                             _label("Find candidate"),
-                            dcc.Input(id="candidate-search", debounce=True, placeholder="candidate_id / asas_sn_id / gaia_id", style=BASE_INPUT_STYLE),
+                            dcc.Input(id="candidate-search", debounce=True, placeholder="candidate_id / asas_sn_id / gaia_id / LC stem", style=BASE_INPUT_STYLE),
+                            html.Div(id="explorer-status", className="explorer-status-line"),
+                            html.Hr(className="explorer-rule"),
+                            _section_title("Native Cameras"),
+                            html.Div(
+                                [
+                                    html.Button("All", id="cams-all-btn", n_clicks=0, className="explorer-action-btn"),
+                                    html.Button("Clear", id="cams-clear-btn", n_clicks=0, className="explorer-action-btn"),
+                                    html.Button("Invert", id="cams-invert-btn", n_clicks=0, className="explorer-action-btn"),
+                                ],
+                                className="explorer-button-row",
+                            ),
+                            dcc.Checklist(id="camera-checklist", options=[], value=[], className="explorer-camera-checklist"),
+                            _section_title("Native Bands"),
+                            dcc.Checklist(id="band-checklist", options=[{"label": " g", "value": "g"}, {"label": " V", "value": "V"}], value=["g", "V"], className="explorer-camera-checklist"),
+                            html.Hr(className="explorer-rule"),
+                            _section_title("Light Curve Panels"),
+                            dcc.Checklist(
+                                id="panel-options",
+                                options=[
+                                    {"label": " Raw", "value": "raw"},
+                                    {"label": " Residuals", "value": "resid"},
+                                    {"label": " Phase", "value": "phase"},
+                                    {"label": " Baseline", "value": "baseline"},
+                                    {"label": " Events", "value": "events"},
+                                    {"label": " Diagnostics", "value": "diagnostics"},
+                                    {"label": " Filter bad cameras", "value": "filter_bad_cameras"},
+                                ],
+                                value=["raw", "resid", "phase", "baseline", "events", "filter_bad_cameras"],
+                                className="explorer-stack-checklist",
+                            ),
+                            html.Div(
+                                [
+                                    html.Div([_label("Manual period"), dcc.Input(id="period-input", type="number", debounce=True, placeholder="days", style=BASE_INPUT_STYLE)], className="explorer-two-up-item"),
+                                    html.Div([_label("Y-axis"), dcc.RadioItems(id="yaxis-mode", options=[{"label": " mag", "value": "mag"}, {"label": " flux", "value": "flux"}], value="mag", className="explorer-inline-radio")], className="explorer-two-up-item"),
+                                ],
+                                className="explorer-two-up",
+                            ),
+                            _section_title("Period Search"),
+                            _label("Method"),
+                            dcc.Dropdown(id="period-method", options=[{"label": "PDM", "value": "pdm"}, {"label": "CE", "value": "ce"}, {"label": "LSP", "value": "lsp"}], value="pdm", clearable=False),
+                            html.Div(
+                                [
+                                    html.Div([_label("Min period"), dcc.Input(id="period-min", type="number", debounce=True, placeholder="min d", value=0.1, style=BASE_INPUT_STYLE)], className="explorer-two-up-item"),
+                                    html.Div([_label("Max period"), dcc.Input(id="period-max", type="number", debounce=True, placeholder="max d", value=100.0, style=BASE_INPUT_STYLE)], className="explorer-two-up-item"),
+                                ],
+                                className="explorer-two-up",
+                            ),
+                            html.Div(
+                                [
+                                    html.Button("Auto", id="period-auto-btn", n_clicks=0, className="explorer-action-btn"),
+                                    html.Button("Find Period", id="period-search-btn", n_clicks=0, className="explorer-action-btn explorer-primary-btn"),
+                                ],
+                                className="explorer-button-row",
+                            ),
+                            html.Div(id="period-search-label", className="explorer-status-line"),
+                            html.Hr(className="explorer-rule"),
+                            _section_title("Theme"),
+                            dcc.RadioItems(id="theme-mode", options=[{"label": " Dark", "value": "black"}, {"label": " Light", "value": "white"}], value=DEFAULT_THEME, className="explorer-inline-radio"),
                         ],
-                        style={"minWidth": "240px", "flex": "1 1 260px"},
-                    ),
-                ],
-                style={**PANEL_STYLE, "display": "flex", "gap": "10px", "flexWrap": "wrap"},
-            ),
-            html.Div(
-                [
-                    html.Div(
-                        [
-                            html.Div("Diagnostics", style={"fontSize": "13px", "fontWeight": "600", "color": TEXT, "paddingBottom": "8px"}),
-                            html.Div(
-                                [
-                                    dcc.Dropdown(id="x-metric", options=[{"label": col, "value": col} for col in metric_options], value=DEFAULT_MAIN_X if DEFAULT_MAIN_X in metric_options else (metric_options[0] if metric_options else None), clearable=False),
-                                    dcc.Dropdown(id="y-metric", options=[{"label": col, "value": col} for col in metric_options], value=DEFAULT_MAIN_Y if DEFAULT_MAIN_Y in metric_options else (metric_options[0] if metric_options else None), clearable=False),
-                                    dcc.Dropdown(id="color-metric", options=[{"label": col, "value": col} for col in metric_options], value=DEFAULT_COLOR if DEFAULT_COLOR in metric_options else None, clearable=True),
-                                    dcc.Dropdown(id="symbol-metric", options=[{"label": col, "value": col} for col in metric_options], value=DEFAULT_SYMBOL if DEFAULT_SYMBOL in metric_options else None, clearable=True),
-                                    dcc.Input(id="sample-size", type="number", min=200, step=200, value=4000, placeholder="sample", style=BASE_INPUT_STYLE),
-                                    dcc.Checklist(id="log-flags", options=[{"label": " log x", "value": "logx"}, {"label": " log y", "value": "logy"}], value=[], inline=True, style={"color": TEXT, "fontSize": "12px", "display": "flex", "alignItems": "center"}),
-                                ],
-                                style={"display": "grid", "gridTemplateColumns": "repeat(6, minmax(120px, 1fr))", "gap": "8px", "marginBottom": "10px"},
-                            ),
-                            html.Div(
-                                [
-                                    dcc.Input(id="x-min", type="number", placeholder="x min", style=BASE_INPUT_STYLE),
-                                    dcc.Input(id="x-max", type="number", placeholder="x max", style=BASE_INPUT_STYLE),
-                                    dcc.Input(id="y-min", type="number", placeholder="y min", style=BASE_INPUT_STYLE),
-                                    dcc.Input(id="y-max", type="number", placeholder="y max", style=BASE_INPUT_STYLE),
-                                    dcc.Dropdown(id="hist-metric", options=[{"label": col, "value": col} for col in metric_options], value=default_hist_metric, clearable=False),
-                                    dcc.Dropdown(id="table-sort", options=[{"label": col, "value": col} for col in metric_options], value="dipper_score" if "dipper_score" in metric_options else default_hist_metric, clearable=False),
-                                ],
-                                style={"display": "grid", "gridTemplateColumns": "repeat(6, minmax(120px, 1fr))", "gap": "8px", "marginBottom": "10px"},
-                            ),
-                            html.Div(id="explorer-status", style={"fontSize": "12px", "color": TEXT_MUTED, "padding": "2px 0 10px 0"}),
-                            html.Details(
-                                [
-                                    html.Summary("Advanced Filters (all regular GUI filters)", style={"color": TEXT, "cursor": "pointer", "fontSize": "12px", "fontWeight": "600"}),
-                                    html.Div(
-                                        [
-                                            dcc.Checklist(id="only-unreviewed", options=[{"label": " Only unreviewed", "value": "yes"}], value=[], style={"color": TEXT, "marginBottom": "6px", "fontSize": "11px"}),
-                                            dcc.Checklist(id="require-failed-any-false", options=[{"label": " Require failed_any=False", "value": "yes"}], value=[], style={"color": TEXT, "marginBottom": "10px", "fontSize": "11px"}),
-                                            *advanced_sections,
-                                        ],
-                                        style={"paddingTop": "10px"},
-                                    ),
-                                ],
-                                style={**PANEL_STYLE, "marginBottom": "12px"},
-                            ),
-                            dcc.Graph(id="main-graph", mathjax=True, config={"displaylogo": False, "scrollZoom": True}, style={"height": "470px"}),
-                            html.Div(id="cut-summary", style={"fontSize": "12px", "color": TEXT_MUTED, "padding": "6px 0 4px 0"}),
-                            html.Div(
-                                [
-                                    dcc.Graph(id="catalog-graph", mathjax=True, config={"displaylogo": False}, style={"height": "340px"}),
-                                    dcc.Graph(id="regularity-graph", mathjax=True, config={"displaylogo": False}, style={"height": "340px"}),
-                                    dcc.Graph(id="repeatability-graph", mathjax=True, config={"displaylogo": False}, style={"height": "340px"}),
-                                    dcc.Graph(id="score-variability-graph", mathjax=True, config={"displaylogo": False}, style={"height": "340px"}),
-                                    dcc.Graph(id="stetson-graph", mathjax=True, config={"displaylogo": False}, style={"height": "340px"}),
-                                    dcc.Graph(id="shape-graph", mathjax=True, config={"displaylogo": False}, style={"height": "340px"}),
-                                    dcc.Graph(id="native-graph", mathjax=True, config={"displaylogo": False}, style={"height": "340px"}),
-                                    dcc.Graph(id="hist-graph", mathjax=True, config={"displaylogo": False}, style={"height": "340px"}),
-                                ],
-                                style={"display": "grid", "gridTemplateColumns": "repeat(2, minmax(280px, 1fr))", "gap": "10px", "marginTop": "10px"},
-                            ),
-                            dash_table.DataTable(
-                                id="candidate-table",
-                                columns=[
-                                    {"name": "candidate_id", "id": "candidate_id"},
-                                    {"name": "source_label", "id": "source_label"},
-                                    {"name": "final_class", "id": "final_class"},
-                                    {"name": "status", "id": "status"},
-                                    {"name": "event_class", "id": "event_class"},
-                                    {"name": "dipper_score", "id": "dipper_score"},
-                                    {"name": "period_n_sources", "id": "period_n_sources"},
-                                    {"name": "period_consensus_days", "id": "period_consensus_days"},
-                                    {"name": "dip_run_count", "id": "dip_run_count"},
-                                    {"name": "known_periodic_catalog", "id": "known_periodic_catalog"},
-                                    {"name": "oneoff_like", "id": "oneoff_like"},
-                                    {"name": "candidate_key", "id": "candidate_key"},
-                                ],
-                                hidden_columns=["candidate_key"],
-                                data=[],
-                                page_size=12,
-                                style_table={"overflowX": "auto", "marginTop": "12px"},
-                                style_cell={"backgroundColor": PANEL_BG, "color": TEXT, "border": f"1px solid {PANEL_BORDER}", "fontFamily": "Monaco, Courier New, monospace", "fontSize": "11px", "padding": "6px"},
-                                style_header={"backgroundColor": "#172430", "color": TEXT, "fontWeight": "600", "border": f"1px solid {PANEL_BORDER}"},
-                                row_selectable="single",
-                            ),
-                        ],
-                        style={"minHeight": 0, "overflowY": "auto", "paddingRight": "10px"},
+                        id="explorer-sidebar",
+                        className="explorer-sidebar",
                     ),
                     html.Div(
                         [
-                            html.Div("Selected candidate", style={"fontSize": "13px", "fontWeight": "600", "color": TEXT, "paddingBottom": "6px"}),
-                            html.Div(id="selected-status", style={"fontSize": "12px", "color": TEXT_MUTED, "paddingBottom": "6px"}),
-                            html.Div(id="viewer-summary", style={"paddingBottom": "10px"}),
                             html.Div(
                                 [
                                     html.Div(
                                         [
-                                            dcc.Dropdown(id="camera-dropdown", multi=True, placeholder="All cameras"),
-                                            dcc.Checklist(
-                                                id="panel-options",
-                                                options=[
-                                                    {"label": " Raw", "value": "raw"},
-                                                    {"label": " Residuals", "value": "resid"},
-                                                    {"label": " Phase", "value": "phase"},
-                                                    {"label": " Baseline", "value": "baseline"},
-                                                    {"label": " Events", "value": "events"},
-                                                    {"label": " Diagnostics", "value": "diagnostics"},
-                                                    {"label": " Filter bad cameras", "value": "filter_bad_cameras"},
-                                                ],
-                                                value=["raw", "resid", "phase", "baseline", "events", "filter_bad_cameras"],
-                                                inline=True,
-                                                style={"color": TEXT, "fontSize": "12px", "display": "flex", "flexWrap": "wrap", "gap": "8px"},
-                                            ),
                                             html.Div(
                                                 [
-                                                    dcc.Input(id="period-input", type="number", debounce=True, placeholder="Manual period override (days)", style={**BASE_INPUT_STYLE, "width": "220px"}),
-                                                    dcc.RadioItems(id="yaxis-mode", options=[{"label": " mag", "value": "mag"}, {"label": " flux", "value": "flux"}], value="mag", inline=True, style={"color": TEXT, "fontSize": "12px"}),
+                                                    html.Div("Custom plot", className="explorer-card-title"),
+                                                    _reset_button("custom-reset-btn"),
                                                 ],
-                                                style={"display": "flex", "gap": "10px", "alignItems": "center", "paddingTop": "8px", "flexWrap": "wrap"},
+                                                className="explorer-graph-toolbar",
                                             ),
+                                            dcc.Graph(
+                                                id="custom-graph",
+                                                mathjax=True,
+                                                config={"displaylogo": False, "scrollZoom": True, "doubleClick": False, "responsive": True},
+                                                responsive=True,
+                                                style={"height": "clamp(360px, 56vh, 760px)", "width": "100%"},
+                                                className="explorer-graph",
+                                            ),
+                                            html.Div(id="plot-summary", className="explorer-status-line"),
                                         ],
-                                        style={"paddingBottom": "10px"},
+                                        className="explorer-graph-card",
                                     ),
                                     html.Div(
                                         [
-                                            _label("Period search"),
-                                            html.Div(
-                                                [
-                                                    dcc.Dropdown(id="period-method", options=[{"label": "PDM", "value": "pdm"}, {"label": "CE", "value": "ce"}, {"label": "LSP", "value": "lsp"}], value="pdm", clearable=False, style={"minWidth": "120px"}),
-                                                    dcc.Input(id="period-min", type="number", debounce=True, placeholder="min d", value=0.1, style={**BASE_INPUT_STYLE, "width": "100px"}),
-                                                    dcc.Input(id="period-max", type="number", debounce=True, placeholder="max d", value=100.0, style={**BASE_INPUT_STYLE, "width": "100px"}),
-                                                    html.Button("Auto", id="period-auto-btn", n_clicks=0, style={"padding": "8px 12px", "background": "#173246", "color": TEXT, "border": f"1px solid {PANEL_BORDER}", "borderRadius": "6px", "cursor": "pointer"}),
-                                                    html.Button("Find Period", id="period-search-btn", n_clicks=0, style={"padding": "8px 12px", "background": "#264b2a", "color": TEXT, "border": f"1px solid {PANEL_BORDER}", "borderRadius": "6px", "cursor": "pointer"}),
+                                            html.Div("Candidates", className="explorer-card-title"),
+                                            dash_table.DataTable(
+                                                id="candidate-table",
+                                                columns=[
+                                                    {"name": "candidate_id", "id": "candidate_id"},
+                                                    {"name": "source_label", "id": "source_label"},
+                                                    {"name": "final_class", "id": "final_class"},
+                                                    {"name": "status", "id": "status"},
+                                                    {"name": "event_class", "id": "event_class"},
+                                                    {"name": "dipper_score", "id": "dipper_score"},
+                                                    {"name": "period_n_sources", "id": "period_n_sources"},
+                                                    {"name": "period_consensus_days", "id": "period_consensus_days"},
+                                                    {"name": "dip_run_count", "id": "dip_run_count"},
+                                                    {"name": "known_periodic_catalog", "id": "known_periodic_catalog"},
+                                                    {"name": "oneoff_like", "id": "oneoff_like"},
+                                                    {"name": "candidate_key", "id": "candidate_key"},
                                                 ],
-                                                style={"display": "flex", "gap": "8px", "alignItems": "center", "flexWrap": "wrap"},
+                                                hidden_columns=["candidate_key"],
+                                                data=[],
+                                                page_action="native",
+                                                page_size=12,
+                                                style_table={"overflowX": "auto"},
+                                                style_cell={"backgroundColor": PANEL_BG, "color": TEXT, "border": f"1px solid {PANEL_BORDER}", "fontFamily": UI_FONT_FAMILY, "fontSize": "12px", "padding": "7px 8px"},
+                                                style_header={"backgroundColor": PANEL_BG_ALT, "color": TEXT, "fontWeight": "600", "border": f"1px solid {PANEL_BORDER}"},
+                                                row_selectable="single",
                                             ),
-                                            html.Div(id="period-search-label", style={"fontSize": "12px", "color": TEXT_MUTED, "paddingTop": "8px"}),
                                         ],
-                                        style={"paddingTop": "4px"},
+                                        className="explorer-card explorer-table-card",
                                     ),
                                 ],
-                                style={**PANEL_STYLE, "marginBottom": "10px"},
+                                id="explorer-left-panel",
+                                className="explorer-left-panel",
                             ),
-                            dcc.Graph(id="lightcurve-graph", mathjax=True, config={"displaylogo": False, "scrollZoom": True}, style={"height": "72vh", "border": f"1px solid {PANEL_BORDER}", "borderRadius": "10px", "background": "#0c1218"}),
+                            html.Div(id="explorer-main-splitter", className="explorer-panel-splitter", title="Drag to resize panels"),
                             html.Div(
                                 [
-                                    html.Div("Precomputed stats", style={"fontSize": "13px", "fontWeight": "600", "color": TEXT, "paddingBottom": "6px"}),
-                                    html.Div(id="viewer-stats"),
+                                    html.Div(
+                                        [
+                                            html.Div("Selected candidate", className="explorer-card-title"),
+                                            html.Div(id="selected-status", className="explorer-status-line"),
+                                            html.Div(id="viewer-summary", className="explorer-summary"),
+                                        ],
+                                        className="explorer-card",
+                                    ),
+                                    html.Div(
+                                        [
+                                            html.Div(
+                                                [
+                                                    html.Div("Native light curve", className="explorer-card-title"),
+                                                    _reset_button("lightcurve-reset-btn"),
+                                                ],
+                                                className="explorer-graph-toolbar",
+                                            ),
+                                            dcc.Graph(
+                                                id="lightcurve-graph",
+                                                mathjax=True,
+                                                config={"displaylogo": False, "scrollZoom": True, "doubleClick": False, "responsive": True},
+                                                responsive=True,
+                                                style={"height": "clamp(420px, 72vh, 1100px)", "width": "100%"},
+                                                className="explorer-graph",
+                                            ),
+                                        ],
+                                        className="explorer-graph-card explorer-lightcurve-card",
+                                    ),
+                                    html.Div(
+                                        [
+                                            html.Div("Precomputed stats", className="explorer-card-title"),
+                                            html.Div(id="viewer-stats"),
+                                        ],
+                                        className="explorer-card",
+                                    ),
                                 ],
-                                style={**PANEL_STYLE, "marginTop": "10px"},
+                                className="explorer-right-panel",
                             ),
                         ],
-                        style={"minHeight": 0, "overflowY": "auto", "paddingLeft": "10px"},
+                        className="explorer-workspace",
                     ),
                 ],
-                style={"display": "grid", "gridTemplateColumns": "minmax(760px, 1.6fr) minmax(520px, 1fr)", "gap": "10px", "minHeight": 0, "paddingTop": "12px"},
+                id="explorer-shell",
+                className="explorer-shell",
             ),
         ],
         className="review-explorer-app",
         style={
             "background": APP_BG,
             "height": "100vh",
-            "display": "grid",
-            "gridTemplateRows": "auto auto minmax(0, 1fr)",
-            "padding": "16px",
-            "gap": "10px",
-            "fontFamily": "Monaco, Courier New, monospace",
+            "padding": "12px",
+            "fontFamily": UI_FONT_FAMILY,
             "overflow": "hidden",
         },
     )
 
+    app.clientside_callback(
+        """
+        function(_tick, currentTheme) {
+            try {
+                var saved = window.localStorage.getItem('malca.explorer.theme');
+                if (saved && ['black', 'white'].includes(saved)) {
+                    return saved;
+                }
+            } catch (e) {
+                // ignore storage failures
+            }
+            return ['black', 'white'].includes(currentTheme) ? currentTheme : 'black';
+        }
+        """,
+        Output("theme-mode", "value"),
+        Input("explorer-init", "n_intervals"),
+        State("theme-mode", "value"),
+        prevent_initial_call=False,
+    )
+
+    app.clientside_callback(
+        """
+        function(theme) {
+            var resolved = ['black', 'white'].includes(theme) ? theme : 'black';
+            try {
+                document.body.setAttribute('data-explorer-theme', resolved);
+                window.localStorage.setItem('malca.explorer.theme', resolved);
+            } catch (e) {
+                // ignore storage/document failures
+            }
+            return resolved;
+        }
+        """,
+        Output("theme-mode-store", "data"),
+        Input("theme-mode", "value"),
+        prevent_initial_call=False,
+    )
+
+    app.clientside_callback(
+        """
+        function(_tick) {
+            var splitter = document.getElementById('explorer-main-splitter');
+            var leftPanel = document.getElementById('explorer-left-panel');
+            if (!splitter || !leftPanel) {
+                return window.dash_clientside.no_update;
+            }
+
+            var workspace = splitter.parentElement;
+            if (!workspace) {
+                return window.dash_clientside.no_update;
+            }
+
+            var scheduleResize = function() {
+                if (window.__malcaExplorerResizeFrame) {
+                    window.cancelAnimationFrame(window.__malcaExplorerResizeFrame);
+                }
+                window.__malcaExplorerResizeFrame = window.requestAnimationFrame(function() {
+                    window.dispatchEvent(new Event('resize'));
+                    window.__malcaExplorerResizeFrame = null;
+                });
+            };
+
+            var storageKey = 'malca.explorer.left_panel.width.v1';
+            var defaultWidth = Math.min(Math.max(window.innerWidth * 0.46, 760), 1080);
+            var minWidth = 620;
+
+            var computeMaxWidth = function() {
+                var workspaceWidth = workspace.getBoundingClientRect().width;
+                return Math.max(minWidth, Math.floor(workspaceWidth - 480));
+            };
+
+            var clampWidth = function(value) {
+                var maxWidth = computeMaxWidth();
+                var numeric = Number(value);
+                if (!isFinite(numeric)) {
+                    numeric = defaultWidth;
+                }
+                if (numeric < minWidth) {
+                    numeric = minWidth;
+                }
+                if (numeric > maxWidth) {
+                    numeric = maxWidth;
+                }
+                return Math.round(numeric);
+            };
+
+            var applyWidth = function(value, persist) {
+                var w = clampWidth(value);
+                leftPanel.style.width = String(w) + 'px';
+                leftPanel.style.flex = '0 0 auto';
+                leftPanel.style.minWidth = String(minWidth) + 'px';
+                if (persist) {
+                    try {
+                        window.localStorage.setItem(storageKey, String(w));
+                    } catch (e) {
+                        // ignore storage failures
+                    }
+                }
+                scheduleResize();
+                return w;
+            };
+
+            if (!window.__malcaExplorerSplitterAttached) {
+                var drag = {active: false, startX: 0, startWidth: 0, pointerId: null};
+
+                var onPointerMove = function(e) {
+                    if (!drag.active) {
+                        return;
+                    }
+                    applyWidth(drag.startWidth + (e.clientX - drag.startX), false);
+                    e.preventDefault();
+                };
+
+                var stopDrag = function(e) {
+                    if (!drag.active) {
+                        return;
+                    }
+                    drag.active = false;
+                    splitter.classList.remove('dragging');
+                    window.removeEventListener('pointermove', onPointerMove);
+                    window.removeEventListener('pointerup', stopDrag);
+                    window.removeEventListener('pointercancel', stopDrag);
+                    if (drag.pointerId !== null && splitter.releasePointerCapture) {
+                        try { splitter.releasePointerCapture(drag.pointerId); } catch (err) {}
+                    }
+                    drag.pointerId = null;
+                    applyWidth(leftPanel.getBoundingClientRect().width, true);
+                    if (e) {
+                        e.preventDefault();
+                    }
+                };
+
+                splitter.addEventListener('pointerdown', function(e) {
+                    drag.active = true;
+                    drag.startX = e.clientX;
+                    drag.startWidth = leftPanel.getBoundingClientRect().width;
+                    drag.pointerId = (typeof e.pointerId === 'number') ? e.pointerId : null;
+                    splitter.classList.add('dragging');
+                    if (drag.pointerId !== null && splitter.setPointerCapture) {
+                        try { splitter.setPointerCapture(drag.pointerId); } catch (err) {}
+                    }
+                    window.addEventListener('pointermove', onPointerMove);
+                    window.addEventListener('pointerup', stopDrag);
+                    window.addEventListener('pointercancel', stopDrag);
+                    e.preventDefault();
+                });
+
+                window.addEventListener('resize', function() {
+                    applyWidth(leftPanel.getBoundingClientRect().width, false);
+                });
+
+                if (window.ResizeObserver) {
+                    var observer = new window.ResizeObserver(function() {
+                        scheduleResize();
+                    });
+                    observer.observe(workspace);
+                    observer.observe(leftPanel);
+                    window.__malcaExplorerResizeObserver = observer;
+                }
+
+                window.__malcaExplorerSplitterAttached = true;
+            }
+
+            var saved = null;
+            try { saved = window.localStorage.getItem(storageKey); } catch (e) { saved = null; }
+            var initialWidth = defaultWidth;
+            if (saved !== null && saved !== '') {
+                var parsed = parseInt(saved, 10);
+                if (!isNaN(parsed)) {
+                    initialWidth = parsed;
+                }
+            }
+            applyWidth(initialWidth, false);
+            return window.dash_clientside.no_update;
+        }
+        """,
+        Output("explorer-split-init", "data"),
+        Input("explorer-init", "n_intervals"),
+        prevent_initial_call=False,
+    )
+
+    @app.callback(
+        Output("explorer-sidebar", "className"),
+        Output("explorer-shell", "className"),
+        Output("explorer-sidebar-open", "data"),
+        Output("explorer-sidebar-toggle", "children"),
+        Input("explorer-sidebar-toggle", "n_clicks"),
+        State("explorer-sidebar-open", "data"),
+        prevent_initial_call=False,
+    )
+    def toggle_sidebar(n_clicks, is_open):
+        sidebar_open = bool(is_open) if is_open is not None else True
+        if dash.callback_context.triggered_id == "explorer-sidebar-toggle" and n_clicks:
+            sidebar_open = not sidebar_open
+
+        sidebar_class = "explorer-sidebar" if sidebar_open else "explorer-sidebar is-hidden"
+        shell_class = "explorer-shell" if sidebar_open else "explorer-shell sidebar-collapsed"
+        button_label = "Hide Sidebar" if sidebar_open else "Show Sidebar"
+        return sidebar_class, shell_class, sidebar_open, button_label
+
+    @app.callback(
+        Output("plot-reset-store", "data"),
+        [
+            Input("custom-reset-btn", "n_clicks"),
+            Input("lightcurve-reset-btn", "n_clicks"),
+        ],
+        State("plot-reset-store", "data"),
+        prevent_initial_call=True,
+    )
+    def update_plot_resets(_custom, _lightcurve, current):
+        triggered = dash.callback_context.triggered_id
+        key_map = {
+            "custom-reset-btn": "custom",
+            "lightcurve-reset-btn": "lightcurve",
+        }
+        key = key_map.get(str(triggered or ""))
+        if key is None:
+            return dash.no_update
+        updated = _default_plot_reset_data()
+        updated.update(dict(current or {}))
+        updated[key] = int(updated.get(key, 0) or 0) + 1
+        return updated
+
     @app.callback(
         Output("selected-key-store", "data"),
         [
-            Input("main-graph", "clickData"),
-            Input("catalog-graph", "clickData"),
-            Input("regularity-graph", "clickData"),
-            Input("repeatability-graph", "clickData"),
-            Input("score-variability-graph", "clickData"),
-            Input("stetson-graph", "clickData"),
-            Input("shape-graph", "clickData"),
-            Input("native-graph", "clickData"),
+            Input("custom-graph", "clickData"),
             Input("candidate-table", "selected_rows"),
             Input("candidate-search", "value"),
             Input("source-filter", "value"),
@@ -821,14 +1300,7 @@ def build_explorer_app(combined: CombinedCandidateData, *, host: str, port: int)
     )
     def update_selected_key(*args):
         (
-            main_click,
-            catalog_click,
-            regularity_click,
-            repeatability_click,
-            score_var_click,
-            stetson_click,
-            shape_click,
-            native_click,
+            custom_click,
             table_rows,
             search_value,
             source_filter,
@@ -877,20 +1349,9 @@ def build_explorer_app(combined: CombinedCandidateData, *, host: str, port: int)
                 return custom
             return None
 
-        click_map = {
-            "main-graph": main_click,
-            "catalog-graph": catalog_click,
-            "regularity-graph": regularity_click,
-            "repeatability-graph": repeatability_click,
-            "score-variability-graph": score_var_click,
-            "stetson-graph": stetson_click,
-            "shape-graph": shape_click,
-            "native-graph": native_click,
-        }
-
         new_key = None
-        if triggered in click_map:
-            new_key = _key_from_click(click_map.get(triggered))
+        if triggered == "custom-graph":
+            new_key = _key_from_click(custom_click)
         elif triggered == "candidate-table" and table_rows and table_data:
             row_idx = int(table_rows[0])
             if 0 <= row_idx < len(table_data):
@@ -917,16 +1378,8 @@ def build_explorer_app(combined: CombinedCandidateData, *, host: str, port: int)
     @app.callback(
         [
             Output("explorer-status", "children"),
-            Output("main-graph", "figure"),
-            Output("catalog-graph", "figure"),
-            Output("regularity-graph", "figure"),
-            Output("repeatability-graph", "figure"),
-            Output("score-variability-graph", "figure"),
-            Output("stetson-graph", "figure"),
-            Output("shape-graph", "figure"),
-            Output("native-graph", "figure"),
-            Output("hist-graph", "figure"),
-            Output("cut-summary", "children"),
+            Output("custom-graph", "figure"),
+            Output("plot-summary", "children"),
             Output("candidate-table", "data"),
         ],
         [
@@ -936,15 +1389,15 @@ def build_explorer_app(combined: CombinedCandidateData, *, host: str, port: int)
             Input("y-metric", "value"),
             Input("color-metric", "value"),
             Input("symbol-metric", "value"),
-            Input("sample-size", "value"),
             Input("log-flags", "value"),
             Input("x-min", "value"),
             Input("x-max", "value"),
             Input("y-min", "value"),
             Input("y-max", "value"),
-            Input("hist-metric", "value"),
             Input("table-sort", "value"),
             Input("selected-key-store", "data"),
+            Input("theme-mode-store", "data"),
+            Input("plot-reset-store", "data"),
             *ADV_FILTER_INPUTS,
         ],
         ADV_FILTER_STATES,
@@ -957,15 +1410,15 @@ def build_explorer_app(combined: CombinedCandidateData, *, host: str, port: int)
             y_metric,
             color_metric,
             symbol_metric,
-            sample_size,
             log_flags,
             x_min,
             x_max,
             y_min,
             y_max,
-            hist_metric,
             table_sort,
             selected_key,
+            theme_mode,
+            plot_reset_data,
             bool_values,
             num_min_values,
             num_max_values,
@@ -995,103 +1448,38 @@ def build_explorer_app(combined: CombinedCandidateData, *, host: str, port: int)
             select_ids,
         )
         filtered, query_error, active_filters = _filter_frame(combined.df, source_filter, query_value, advanced_state)
-        sample_n = max(int(sample_size or 4000), 200)
+        theme_name = str(theme_mode or DEFAULT_THEME)
 
-        main_fig = _scatter_figure(
-            filtered,
-            x=x_metric or DEFAULT_MAIN_X,
-            y=y_metric or DEFAULT_MAIN_Y,
-            color=color_metric,
-            symbol=symbol_metric,
-            title="Main metric scatter",
-            selected_key=selected_key,
-            max_points=sample_n,
-            log_x="logx" in (log_flags or []),
-            log_y="logy" in (log_flags or []),
-            x_min=x_min,
-            x_max=x_max,
-            y_min=y_min,
-            y_max=y_max,
-            height=460,
-        )
-        catalog_fig = _scatter_figure(
-            filtered,
-            x="period_n_sources",
-            y="dip_run_count",
-            color="known_periodic_catalog",
-            symbol="oneoff_like",
-            title="Catalog support vs dip recurrence",
-            selected_key=selected_key,
-            max_points=min(sample_n, 3000),
-        )
-        regularity_fig = _scatter_figure(
-            filtered,
-            x="dip_inter_event_spacing_median",
-            y="dip_inter_event_spacing_std",
-            color="periodic_evidence_bucket",
-            symbol=None,
-            title="Recurrence regularity",
-            selected_key=selected_key,
-            max_points=min(sample_n, 3000),
-            log_x=True,
-            log_y=True,
-        )
-        repeatability_fig = _metric_pair_figure(
-            filtered,
-            x_candidates=["dip_amplitude_consistency"],
-            y_candidates=["dip_duration_consistency"],
-            title="Dip repeatability: amplitude vs duration consistency",
-            color="oneoff_like",
-            symbol=None,
-            selected_key=selected_key,
-            max_points=min(sample_n, 3000),
-        )
-        score_variability_fig = _metric_pair_figure(
-            filtered,
-            x_candidates=["stats_photometry_robust_sigma_mag", "stats_amplitude", "stats_photometry_IQR_mag"],
-            y_candidates=["dipper_score"],
-            title="Dipper score vs variability strength",
-            color="oneoff_like",
-            symbol=None,
-            selected_key=selected_key,
-            max_points=min(sample_n, 3000),
-        )
-        stetson_fig = _metric_pair_figure(
-            filtered,
-            x_candidates=["stats_photometry_robust_sigma_mag", "stats_amplitude", "stats_percent_amplitude"],
-            y_candidates=["stats_variability_stetson_J", "stats_variability_stetson_K"],
-            title="Scatter vs Stetson variability",
-            color="periodic_evidence_bucket",
-            symbol=None,
-            selected_key=selected_key,
-            max_points=min(sample_n, 3000),
-        )
-        shape_fig = _metric_pair_figure(
-            filtered,
-            x_candidates=["stats_skew", "stats_gskew"],
-            y_candidates=["stats_max_slope", "stats_percent_amplitude", "stats_amplitude"],
-            title="Shape and impulsiveness diagnostics",
-            color="oneoff_like",
-            symbol=None,
-            selected_key=selected_key,
-            max_points=min(sample_n, 3000),
-        )
-        native_x, native_y, native_title, native_log_x, native_log_y = _default_native_plot(filtered)
-        native_fig = _scatter_figure(
-            filtered,
-            x=native_x,
-            y=native_y,
-            color="periodic_evidence_bucket",
-            symbol=None,
-            title=native_title,
-            selected_key=selected_key,
-            max_points=min(sample_n, 3000),
-            log_x=native_log_x,
-            log_y=native_log_y,
-        )
-        hist_fig = _hist_figure(filtered, hist_metric or "dipper_score", color_metric or "periodic_evidence_bucket")
+        custom_fig: go.Figure
+        plot_summary = ""
+        if not x_metric or not y_metric:
+            custom_fig = _status_figure(
+                "Choose X and Y metrics in the sidebar to build a plot.",
+                height=None,
+                theme=theme_name,
+                uirevision=_plot_uirevision(plot_reset_data, "custom"),
+            )
+        else:
+            custom_fig = _scatter_figure(
+                filtered,
+                x=str(x_metric),
+                y=str(y_metric),
+                color=str(color_metric) if color_metric else None,
+                symbol=str(symbol_metric) if symbol_metric else None,
+                title=f"{y_metric} vs {x_metric}",
+                selected_key=selected_key,
+                max_points=0,
+                log_x="logx" in (log_flags or []),
+                log_y="logy" in (log_flags or []),
+                x_min=x_min,
+                x_max=x_max,
+                y_min=y_min,
+                y_max=y_max,
+                height=None,
+                theme=theme_name,
+                uirevision=_plot_uirevision(plot_reset_data, "custom"),
+            )
 
-        cut_text = ""
         if any(v is not None for v in (x_min, x_max, y_min, y_max)) and x_metric in filtered.columns and y_metric in filtered.columns:
             mask = pd.Series(True, index=filtered.index, dtype="bool")
             if x_min is not None:
@@ -1108,30 +1496,22 @@ def build_explorer_app(combined: CombinedCandidateData, *, host: str, port: int)
             purity = summary.get("purity")
             recall = summary.get("target_recall")
             leak = summary.get("reject_leakage")
-            cut_text = (
+            plot_summary = (
                 f"Box cut selected {int(summary['selected']):,}/{int(summary['eligible']):,} rows"
                 f" | purity={float(purity):.3f}" if pd.notna(purity) else f"Box cut selected {int(summary['selected']):,}/{int(summary['eligible']):,} rows"
             )
             if pd.notna(recall):
-                cut_text += f" | recall={float(recall):.3f}"
+                plot_summary += f" | recall={float(recall):.3f}"
             if pd.notna(leak):
-                cut_text += f" | reject leakage={float(leak):.3f}"
+                plot_summary += f" | reject leakage={float(leak):.3f}"
 
         selected_record = get_candidate_record_by_key(combined, selected_key)
         status = _selection_status(selected_record, len(filtered), query_error, active_filters)
         table_data = _table_rows(filtered, table_sort or "dipper_score")
         return (
             status,
-            main_fig,
-            catalog_fig,
-            regularity_fig,
-            repeatability_fig,
-            score_variability_fig,
-            stetson_fig,
-            shape_fig,
-            native_fig,
-            hist_fig,
-            cut_text,
+            custom_fig,
+            plot_summary,
             table_data,
         )
 
@@ -1198,27 +1578,61 @@ def build_explorer_app(combined: CombinedCandidateData, *, host: str, port: int)
         return result, label, cache_map
 
     @app.callback(
+        Output("camera-checklist", "value", allow_duplicate=True),
+        Input("cams-all-btn", "n_clicks"),
+        Input("cams-clear-btn", "n_clicks"),
+        Input("cams-invert-btn", "n_clicks"),
+        State("camera-checklist", "options"),
+        State("camera-checklist", "value"),
+        prevent_initial_call=True,
+    )
+    def update_camera_selection(_all_clicks, _clear_clicks, _invert_clicks, camera_options, current_values):
+        triggered = dash.callback_context.triggered_id
+        all_values = [str(opt.get("value")) for opt in (camera_options or []) if str(opt.get("value") or "").strip()]
+        selected = [str(v) for v in (current_values or []) if str(v) in all_values]
+        if triggered == "cams-all-btn":
+            return all_values
+        if triggered == "cams-clear-btn":
+            return []
+        if triggered == "cams-invert-btn":
+            selected_set = set(selected)
+            return [value for value in all_values if value not in selected_set]
+        return dash.no_update
+
+    @app.callback(
         Output("lightcurve-graph", "figure"),
-        Output("camera-dropdown", "options"),
-        Output("camera-dropdown", "value"),
+        Output("camera-checklist", "options"),
+        Output("camera-checklist", "value"),
         Output("selected-status", "children"),
         Output("viewer-summary", "children"),
         Output("viewer-stats", "children"),
         Input("selected-key-store", "data"),
-        Input("camera-dropdown", "value"),
+        Input("camera-checklist", "value"),
+        Input("band-checklist", "value"),
         Input("panel-options", "value"),
         Input("period-input", "value"),
         Input("yaxis-mode", "value"),
         Input("period-search-store", "data"),
+        Input("theme-mode-store", "data"),
+        Input("plot-reset-store", "data"),
     )
-    def render_candidate(selected_key, selected_cameras, panel_options, period_value, yaxis_mode, period_search_result):
+    def render_candidate(selected_key, selected_cameras, selected_bands, panel_options, period_value, yaxis_mode, period_search_result, theme_mode, plot_reset_data):
         record = get_candidate_record_by_key(combined, selected_key)
         if record is None:
-            return _status_figure("No candidate selected", height=560), [], [], "No candidate selected", html.Div(), html.Div()
+            theme_name = str(theme_mode or DEFAULT_THEME)
+            return (
+                _status_figure("No candidate selected", height=560, theme=theme_name, uirevision=_plot_uirevision(plot_reset_data, "lightcurve")),
+                [],
+                [],
+                "No candidate selected",
+                html.Div(),
+                html.Div(),
+            )
 
         plot_dir = infer_plot_dir_for_record(record, Path(str(record.get("plot_dir"))).expanduser().resolve() if record.get("plot_dir") else None)
         run_params = load_run_params(plot_dir)
         options = set(panel_options or [])
+        theme_name = str(theme_mode or DEFAULT_THEME)
 
         override_period = None
         if period_value not in (None, ""):
@@ -1251,10 +1665,17 @@ def build_explorer_app(combined: CombinedCandidateData, *, host: str, port: int)
             show_diagnostics="diagnostics" in options,
             confidence_colors=True,
             run_params=run_params,
-            uirevision_key=f"explore:{selected_key}",
-            theme="black",
+            uirevision_key=_plot_uirevision(plot_reset_data, "lightcurve"),
+            theme=theme_name,
             yaxis_mode=yaxis_literal,
+            selected_bands=selected_bands or ["g", "V"],
         )
+        native["figure"] = _style_native_explorer_figure(native["figure"])
+
+        camera_options = list(native.get("camera_options", []))
+        available_cameras = {str(opt.get("value")) for opt in camera_options if str(opt.get("value") or "").strip()}
+        preserved = [str(value) for value in (selected_cameras or []) if str(value) in available_cameras]
+        camera_values = preserved or list(native.get("camera_values", []))
 
         status_bits = []
         if native.get("status_message"):
@@ -1266,8 +1687,8 @@ def build_explorer_app(combined: CombinedCandidateData, *, host: str, port: int)
         status = " | ".join(status_bits)
         return (
             native["figure"],
-            native.get("camera_options", []),
-            native.get("camera_values", []),
+            camera_options,
+            camera_values,
             status,
             _render_summary(record),
             _render_stats(native.get("stat_rows", [])),
@@ -1295,12 +1716,15 @@ def main() -> None:
     combined = load_combined_source_data(sources=source_paths, source_kind=args.source_kind, plot_dir=args.plot_dir)
     combined.df = add_eda_columns(combined.df)
     app = build_explorer_app(combined, host=str(args.host), port=int(args.port))
-    print(f"Starting MALCA Explorer on http://{args.host}:{args.port}")
+    url = f"http://{args.host}:{args.port}"
+    print(f"Starting MALCA Explorer on {url}")
     print(f"  Sources: {len(combined.sources)}")
     for source in combined.sources[:10]:
         print(f"   - {source.source_label}: {source.source_path}")
     if len(combined.sources) > 10:
         print(f"   ... and {len(combined.sources) - 10} more")
+
+    Timer(0.1, lambda: webbrowser.open(url)).start()
     app.run(host=str(args.host), port=int(args.port), debug=bool(args.debug))
 
 

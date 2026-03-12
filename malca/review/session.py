@@ -80,7 +80,7 @@ def create_queue_data_dict(conn, filter_params):
 
 
     # Query queue with filters (pass the whole dict through)
-    df = query_queue(conn, filters=filter_params)
+    df = query_queue(conn, filters=filter_params, ids_only=True)
 
     # Extract candidate IDs
     candidate_ids = df['candidate_id'].tolist() if not df.empty else []

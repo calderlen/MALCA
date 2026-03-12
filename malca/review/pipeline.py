@@ -15,17 +15,13 @@ import sqlite3
 import numpy as np
 import pandas as pd
 
-from malca.characterize import characterize_candidates_df
 from malca.config.config_pipeline import (
     TRIGGER_MODE, LOGBF_THRESHOLD_DIP, LOGBF_THRESHOLD_JUMP,
     SIGNIFICANCE_THRESHOLD, P_POINTS, MAG_POINTS,
     RUN_MIN_POINTS, RUN_MAX_GAP_POINTS, BASELINE_FUNC,
 )
-from malca.events import process_lightcurve
 from malca.review.stats_merge import merge_stats_summary_into_payload as _merge_stats_summary_into_payload
 from malca.review.store import _CANDIDATE_COLUMNS, _as_bool, _to_float
-from malca.stats import compute_stats
-from malca.vetting import vet_candidates, fetch_external_lcs
 
 
 P_MIN_DIP = None
@@ -293,6 +289,8 @@ def update_candidate_payload(
 def _run_stats_stage(payload: dict, lc_path: str, p: Callable | None = None) -> None:
     """Run compute_stats and merge results into payload."""
     try:
+        from malca.stats import compute_stats
+
         candidate_id = Path(lc_path).stem
         parent = str(Path(lc_path).parent)
         _df, summary = compute_stats(candidate_id, parent, compute_ls=True)
@@ -305,6 +303,8 @@ def _run_stats_stage(payload: dict, lc_path: str, p: Callable | None = None) -> 
 def _run_events_stage(payload: dict, lc_path: str, p: Callable | None = None) -> None:
     """Run process_lightcurve and merge results into payload."""
     try:
+        from malca.events import process_lightcurve
+
         result = process_lightcurve(
             str(lc_path),
             trigger_mode=TRIGGER_MODE,
@@ -334,6 +334,8 @@ def _run_events_stage(payload: dict, lc_path: str, p: Callable | None = None) ->
 def _run_characterize_stage(payload: dict, p: Callable | None = None) -> None:
     """Run characterize_candidates_df on a 1-row DataFrame."""
     try:
+        from malca.characterize import characterize_candidates_df
+
         df = pd.DataFrame([payload])
         df_out = _run_with_progress_capture(lambda: characterize_candidates_df(df), p)
         if isinstance(df_out, pd.DataFrame) and not df_out.empty:
@@ -349,6 +351,8 @@ def _run_characterize_stage(payload: dict, p: Callable | None = None) -> None:
 def _run_vetting_stage(payload: dict, p: Callable | None = None) -> None:
     """Run vet_candidates on a 1-row DataFrame."""
     try:
+        from malca.vetting import vet_candidates
+
         df = pd.DataFrame([payload])
         df_out = _run_with_progress_capture(
             lambda: vet_candidates(
@@ -390,6 +394,8 @@ def _resolve_output_dir(conn: sqlite3.Connection, candidate_id: str) -> Path:
 def _run_external_lcs_stage(payload: dict, output_dir: Path, p: Callable | None = None) -> None:
     """Run fetch_external_lcs on a 1-row DataFrame."""
     try:
+        from malca.vetting import fetch_external_lcs
+
         df = pd.DataFrame([payload])
         df_out = _run_with_progress_capture(
             lambda: fetch_external_lcs(

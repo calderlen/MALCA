@@ -6,9 +6,10 @@ Combines all LTV modules into a complete slowly varying source detection pipelin
 CRITICAL OPTIMIZATION: Pipeline stages run in optimal order:
 1. Vectorized filters FIRST (instant, reduce 17M → ~36K)
 2. Gaia TAP filters (batch queries on reduced set)
-3. Catalog crossmatches (parallel on filtered candidates only)
-4. NEOWISE extraction (parallel on filtered candidates only)
-5. Extinction correction (vectorized)
+3. Optional stochastic post-filter features (parallel on filtered candidates only)
+4. Catalog crossmatches (parallel on filtered candidates only)
+5. NEOWISE extraction (parallel on filtered candidates only)
+6. Extinction correction (vectorized)
 
 This ordering is crucial for performance:
 - Running crossmatch before filtering = weeks
@@ -52,6 +53,7 @@ from malca.ltv.neowise import extract_neowise_trends
 from malca.ltv.dust import apply_dust_flags
 from malca.ltv.cmd import compute_cmd_features, assign_cmd_groups, load_mist_grid, fetch_bailer_jones_distances
 from malca.ltv.gaia_epoch import query_gaia_epoch_photometry_batch, apply_gaia_epoch_flags
+from malca.ltv.stochastic import add_stochastic_postfilter_features
 from malca.characterize import get_dust_extinction
 
 
@@ -69,6 +71,8 @@ def run_full_pipeline(
     max_pm: float = LTV_MAX_PM,
     # Pipeline stages
     run_filters: bool = True,
+    run_stochastic_postfilter: bool = False,
+    stochastic_include_drw: bool = False,
     run_crossmatch: bool = True,
     run_neowise: bool = True,
     run_extinction: bool = True,
@@ -107,9 +111,10 @@ def run_full_pipeline(
     CRITICAL: Pipeline runs in optimal order to minimize API calls:
     1. Vectorized filters (instant on 17M sources)
     2. Gaia TAP filters (batch on reduced set)
-    3. Catalog crossmatches (parallel on filtered candidates)
-    4. NEOWISE extraction (parallel on filtered candidates)
-    5. Extinction correction (vectorized)
+    3. Optional stochastic post-filter features (parallel on filtered candidates)
+    4. Catalog crossmatches (parallel on filtered candidates)
+    5. NEOWISE extraction (parallel on filtered candidates)
+    6. Extinction correction (vectorized)
     
     For 17M sources with paper thresholds (~0.4% pass rate):
     - Filtering: ~36K candidates remain
@@ -156,7 +161,25 @@ def run_full_pipeline(
         if verbose:
             print("No sources remaining after filtering")
         return df
-    
+
+    # =========================================================================
+    # Stage 1b: Optional stochastic post-filter features
+    # =========================================================================
+    if run_stochastic_postfilter:
+        if verbose:
+            print("-" * 60)
+            print("STAGE 1b: STOCHASTIC POST-FILTER FEATURES")
+            print("-" * 60)
+
+        df = add_stochastic_postfilter_features(
+            df,
+            include_drw=stochastic_include_drw,
+            n_workers=n_workers,
+            verbose=verbose,
+        )
+        if verbose:
+            print()
+
     # =========================================================================
     # Stage 2: Catalog crossmatch (only on filtered candidates)
     # =========================================================================
@@ -314,6 +337,11 @@ def run_full_pipeline(
             n_dust = df["dust_candidate"].sum()
             pct = n_dust/len(df)*100 if len(df) > 0 else 0
             print(f"Dust candidates: {n_dust:,} ({pct:.1f}%)")
+
+        if "stoch_sf_ml_amplitude" in df.columns:
+            n_stoch = df["stoch_sf_ml_amplitude"].notna().sum()
+            pct = n_stoch/len(df)*100 if len(df) > 0 else 0
+            print(f"With stochastic post-filter features: {n_stoch:,} ({pct:.1f}%)")
         
         print("=" * 60)
     
@@ -373,6 +401,16 @@ def add_pipeline_args(parser):
         "--skip-filters",
         action="store_true",
         help="Skip filtering stage",
+    )
+    parser.add_argument(
+        "--run-stochastic-postfilter",
+        action="store_true",
+        help="Compute optional stochastic post-filter features (SF, IAR, MHPS) on surviving candidates",
+    )
+    parser.add_argument(
+        "--stochastic-include-drw",
+        action="store_true",
+        help="Also fit optional GP-DRW features during the stochastic post-filter stage",
     )
     parser.add_argument(
         "--skip-crossmatch",
@@ -479,6 +517,8 @@ def run_pipeline_cli(args):
         min_slope=args.min_slope,
         min_diff=args.min_diff,
         run_filters=not args.skip_filters,
+        run_stochastic_postfilter=args.run_stochastic_postfilter,
+        stochastic_include_drw=args.stochastic_include_drw,
         run_crossmatch=not args.skip_crossmatch,
         run_neowise=not args.skip_neowise,
         run_extinction=not args.skip_extinction,

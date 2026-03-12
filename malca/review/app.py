@@ -19,7 +19,7 @@ import traceback
 import warnings
 import webbrowser
 
-from dash import dcc, html, Input, Output, State, callback_context, no_update, ALL
+from dash import dcc, html, Input, Output, State, callback_context, no_update, ALL, MATCH
 from dash import DiskcacheManager
 from flask import abort, send_from_directory
 import dash
@@ -41,7 +41,6 @@ from malca.config.config_pipeline import (
     JD_OFFSET, MJD_TO_JD, GAIA_TCB_EPOCH_JD, TESS_BTJD_OFFSET, KEPLER_BKJD_OFFSET,
     REVIEW_RESIDUAL_FRACTION,
 )
-from malca.periodogram import ce_find_period, lsp_find_period, pdm_find_period
 from malca.review.diagnostic_plots import (
     build_atlas_range_figure,
     build_autocorr_memory_figure,
@@ -67,10 +66,8 @@ from malca.review.diagnostic_plots import (
     build_variability_strength_figure,
     build_ztf_range_figure,
 )
-from malca.review.fetch import fetch_and_analyze_by_gaia_id
-from malca.review.fetch import fetch_and_analyze_by_id
-from malca.review.fetch import fetch_cone_search
 from malca.review.interactive_plot import (
+    _baseline_config_from_run_params,
     build_interactive_lightcurve_figure,
     resolve_lightcurve_path,
     _load_cleaned_df,
@@ -112,9 +109,7 @@ from malca.review.store import (
     get_diagnostic_background,
     get_numeric_bounds,
 )
-from malca.review.store import get_candidate_payload
 from malca.review.store import import_lightcurve_files
-from malca.vetting import fetch_external_lcs
 
 
 
@@ -1719,6 +1714,7 @@ DEFAULT_FETCH_BACKEND = str(os.environ.get("MALCA_FETCH_BACKEND", "skypatrol2"))
 if DEFAULT_FETCH_BACKEND not in {"skypatrol2", "skypatrol1"}:
     DEFAULT_FETCH_BACKEND = "skypatrol2"
 DEFAULT_RESIDUAL_FRACTION = REVIEW_RESIDUAL_FRACTION
+DEFAULT_EXTERNAL_SOURCE_VIEW = "asassn"
 EXTERNAL_SOURCE_VIEW_OPTIONS = [
     {"label": "All", "value": "all"},
     {"label": "ASAS-SN Only", "value": "asassn"},
@@ -2096,6 +2092,11 @@ def _run_config_rows(run_params: dict) -> list[tuple[str, str]]:
     for label, key in (
         ('Stage', 'stage'),
         ('Baseline', 'baseline_func'),
+        ('Baseline S0', 'baseline_s0'),
+        ('Baseline w0', 'baseline_w0'),
+        ('Baseline q', 'baseline_q'),
+        ('Baseline jitter', 'baseline_jitter'),
+        ('Baseline sigma floor', 'baseline_sigma_floor'),
         ('Trigger mode', 'trigger_mode'),
         ('Workers', 'workers'),
         ('Batch size', 'batch_size'),
@@ -2131,6 +2132,65 @@ def _run_config_mismatch_warnings(run_params: dict | None, overlays: set[str]) -
     if run_params.get('clean_max_error_absolute') is None or run_params.get('clean_max_error_sigma') is None:
         warns.append("cleaning thresholds missing in run_params; fallback cleaning defaults are active.")
     return warns
+
+
+def _path_is_under(path: Path | None, root: Path | None) -> bool:
+    """Return True when *path* is located under *root*."""
+    if path is None or root is None:
+        return False
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except Exception:
+        return False
+
+
+def _baseline_provenance_warning(
+    payload: dict,
+    *,
+    plot_dir: Path | None,
+    run_params: dict | None,
+    stored_lc_path: object = None,
+    source_path: object = None,
+) -> str | None:
+    """Describe when the displayed baseline is not provenance-matched to a pipeline run."""
+    lc_path = resolve_lightcurve_path(payload, plot_dir)
+    if lc_path is None:
+        return None
+
+    if not run_params:
+        return "Baseline is recomputed live in review with fallback defaults; no run_params.json is loaded."
+
+    source_text = str(source_path or '').strip()
+    if source_text.startswith('fetch://'):
+        return "Baseline is recomputed from the imported SkyPatrol light curve using the current run settings; it is not a saved pipeline baseline."
+
+    plot_run_dir = plot_dir.parent.resolve() if plot_dir is not None else None
+    source_run_dir = _run_dir_from_source_path(source_path)
+
+    if _path_is_under(lc_path, plot_run_dir) or _path_is_under(lc_path, source_run_dir):
+        return None
+
+    cluster_path = str(payload.get('path') or '').strip()
+    if cluster_path:
+        try:
+            if Path(cluster_path).expanduser().resolve() == lc_path.resolve():
+                return None
+        except Exception:
+            pass
+
+    stored_lc_text = str(stored_lc_path or '').strip()
+    if stored_lc_text:
+        try:
+            if Path(stored_lc_text).expanduser().resolve() == lc_path.resolve():
+                return "Baseline is recomputed from the local review copy of this light curve; it may differ from the original pipeline baseline source."
+        except Exception:
+            pass
+
+    if lc_path.suffix.lower() == '.csv':
+        return "Baseline is recomputed from a local CSV light curve in review; it may not match the original pipeline baseline source."
+
+    return "Baseline is recomputed from the currently resolved local light curve; it may differ from the original pipeline baseline source."
 
 
 def _render_run_config_panel(run_params: dict | None, run_params_path: Path | None, warnings: list[str]) -> list:
@@ -2580,6 +2640,39 @@ def _configured_plot_dir() -> Path | None:
     return Path(str(PLOT_DIR)).expanduser().resolve()
 
 
+def _diagnostic_background_signature(db_path: str | Path | None = None) -> str:
+    """Return a stable cache signature for diagnostic background data."""
+    try:
+        resolved = Path(db_path or DB_PATH).expanduser().resolve()
+        stat = resolved.stat()
+        return f"{resolved}:{int(stat.st_mtime_ns)}:{int(stat.st_size)}"
+    except Exception:
+        return str(Path(db_path or DB_PATH).expanduser())
+
+
+def _diagnostic_background_cache_key(signature: str) -> str:
+    """Return diskcache key used for diagnostic background blobs."""
+    return f"diagnostic-background:{signature}"
+
+
+def _get_cached_diagnostic_background(signature: str | None) -> dict | None:
+    """Load cached diagnostic background data from diskcache."""
+    if not signature:
+        return None
+    try:
+        cached = _bc_cache.get(_diagnostic_background_cache_key(signature))
+    except Exception:
+        return None
+    return cached if isinstance(cached, dict) else None
+
+
+def _store_cached_diagnostic_background(signature: str, background: dict) -> None:
+    """Persist diagnostic background data to diskcache."""
+    if not signature:
+        return
+    _bc_cache.set(_diagnostic_background_cache_key(signature), background)
+
+
 def _run_dir_from_source_path(source_path: object = None) -> Path | None:
     """Infer a run directory from a candidate source path when possible."""
     text = str(source_path or "").strip()
@@ -2795,6 +2888,13 @@ def _split_import_sources(path_text: str | None) -> list[str]:
 
 def _candidate_files_for_run_dir(run_dir: Path) -> list[Path]:
     """Return candidate files for a run/results directory, including multi-bin outputs."""
+    def _sort_key(path: Path) -> tuple[float, float, str]:
+        stem = path.stem
+        match = re.search(r"_([0-9]+(?:\.[0-9]+)?)_([0-9]+(?:\.[0-9]+)?)$", stem)
+        if match:
+            return (float(match.group(1)), float(match.group(2)), stem)
+        return (float('inf'), float('inf'), stem)
+
     root = run_dir / "results"
     if run_dir.name == "results":
         root = run_dir
@@ -2805,7 +2905,7 @@ def _candidate_files_for_run_dir(run_dir: Path) -> list[Path]:
     if exact_vetted.exists():
         return [exact_vetted.resolve()]
 
-    tagged_vetted = sorted(root.glob("lc_events_vetted_*.parquet"), key=lambda p: str(p))
+    tagged_vetted = sorted(root.glob("lc_events_vetted_*.parquet"), key=_sort_key)
     if tagged_vetted:
         return [p.resolve() for p in tagged_vetted]
 
@@ -3640,7 +3740,7 @@ def _col_id(col: str) -> str:
 
 
 def _num_range_filter(col: str):
-    """Numeric filter with end inputs and a shared range slider."""
+    """Numeric filter with min/max inputs and a slider."""
     return html.Div([
         html.Label(f'{col}:'),
         html.Div([
@@ -3649,7 +3749,9 @@ def _num_range_filter(col: str):
                 type='number',
                 placeholder='min',
                 debounce=True,
-                style={'width': '68px', 'font-size': '11px', 'flex': '0 0 68px'},
+                persistence=True,
+                persistence_type='local',
+                style={'width': '72px', 'font-size': '11px', 'flex': '0 0 72px'},
             ),
             dcc.RangeSlider(
                 id={'type': 'num-filter-range', 'col': col},
@@ -3662,35 +3764,33 @@ def _num_range_filter(col: str):
                 tooltip={'placement': 'bottom', 'always_visible': False},
                 updatemode='mouseup',
                 disabled=True,
+                persistence=True,
+                persistence_type='local',
             ),
             dcc.Input(
                 id={'type': 'num-filter-max-input', 'col': col},
                 type='number',
                 placeholder='max',
                 debounce=True,
-                style={'width': '68px', 'font-size': '11px', 'flex': '0 0 68px'},
+                persistence=True,
+                persistence_type='local',
+                style={'width': '72px', 'font-size': '11px', 'flex': '0 0 72px'},
             ),
         ], style={'display': 'flex', 'alignItems': 'center', 'gap': '8px', 'margin-bottom': '4px'}),
     ])
 
 
 def _text_filter(col: str):
-    """Dropdown for exact-match string filter (options loaded from DB)."""
+    """Dropdown for exact-match string filter (options hydrated lazily)."""
     cid = _col_id(col)
-    try:
-        with closing(db_connect(Path(DB_PATH))) as conn:
-            values = get_distinct_values(conn, col)
-        options = [{'label': 'Any', 'value': 'Any'}] + [{'label': str(v), 'value': str(v)} for v in values if v is not None and str(v).strip() != ""]
-    except Exception:
-        options = [{'label': 'Any', 'value': 'Any'}]
-        
     return html.Div([
         html.Label(f'{col}:'),
         dcc.Dropdown(
             id=f'filter-{cid}',
-            options=options,
+            options=[{'label': 'Any', 'value': 'Any'}],
             value='Any',
             clearable=False,
+            placeholder='Open sidebar to load options',
             style={'margin-bottom': '4px', 'font-size': '11px'},
             persistence=True, persistence_type='local'
         ),
@@ -3698,18 +3798,12 @@ def _text_filter(col: str):
 
 
 def _select_filter(col: str):
-    """Multi-select dropdown for exclude filtering (options loaded from DB)."""
+    """Multi-select dropdown for exclude filtering (options hydrated lazily)."""
     cid = _col_id(col)
-    try:
-        with closing(db_connect(Path(DB_PATH))) as conn:
-            values = get_distinct_values(conn, col)
-        options = [{'label': str(v), 'value': str(v)} for v in values if v is not None and str(v).strip() != ""]
-    except Exception:
-        options = []
     return html.Div([
         html.Label(f'{col} (exclude):'),
         dcc.Dropdown(
-            id=f'exclude-{cid}', options=options, multi=True,
+            id=f'exclude-{cid}', options=[], multi=True,
             placeholder='None excluded',
             style={'margin-bottom': '4px', 'font-size': '11px'},
             maxHeight=400,
@@ -3774,6 +3868,18 @@ _SIDEBAR_GROUPS = [
         ('bool', 'ltv_vsx_match'),
         ('bool', 'ltv_milliquas_match'),
         ('bool', 'ltv_gaia_alert_match'),
+    ]),
+    ('LTV Stochastic', [
+        ('num', 'ltv_stoch_sf_ml_amplitude'),
+        ('num', 'ltv_stoch_sf_ml_gamma'),
+        ('num', 'ltv_stoch_iar_phi'),
+        ('num', 'ltv_stoch_mhps_high'),
+        ('num', 'ltv_stoch_mhps_low'),
+        ('num', 'ltv_stoch_mhps_non_zero'),
+        ('bool', 'ltv_stoch_mhps_pn_flag'),
+        ('num', 'ltv_stoch_mhps_ratio'),
+        ('num', 'ltv_stoch_gp_drw_sigma'),
+        ('num', 'ltv_stoch_gp_drw_tau'),
     ]),
     ('External Coverage', [
         ('num', 'neowise_n_epochs'),
@@ -4071,8 +4177,6 @@ def create_layout():
 
         # Data stores
         dcc.Store(id='queue-data'),
-        dcc.Store(id='numeric-filter-bounds', data={}),
-        dcc.Store(id='numeric-filter-state', data={}, storage_type='local'),
         dcc.Store(id='current-index', data=0),
         dcc.Store(id='current-candidate-id', data=None),
         dcc.Store(id='queue-size-store', data=0),
@@ -4090,8 +4194,10 @@ def create_layout():
         dcc.Store(id='pipeline-progress-trigger', data=0),
         dcc.Store(id='pipeline-module-log', data={'lines': []}),
         dcc.Store(id='cone-results-data', data=None),  # cone search catalog rows
+        dcc.Store(id='numeric-filter-bounds', data={}),
+        dcc.Store(id='diagnostic-background-state', data={'signature': '', 'ready': False, 'cached': False, 'token': 0}),
         dcc.Store(id='auto-period-cache', data={}, storage_type='session'),
-        dcc.Store(id='plot-render-request', data={'nonce': 1, 'ts': 0.0, 'state': {'idx': 0, 'candidate_id': None, 'plot_mode': 'native', 'overlay_values': list(PLOT_PRESETS['Diagnostics']['overlays']), 'selected_cameras': [], 'selected_bands': ['g', 'V'], 'preset': 'Diagnostics', 'theme': DEFAULT_THEME, 'residual_height': DEFAULT_RESIDUAL_FRACTION, 'baseline_opacity': 0.5, 'external_source_view': 'all'}}),
+        dcc.Store(id='plot-render-request', data={'nonce': 1, 'ts': 0.0, 'state': {'idx': 0, 'candidate_id': None, 'plot_mode': 'native', 'overlay_values': list(PLOT_PRESETS['Diagnostics']['overlays']), 'selected_cameras': [], 'selected_bands': ['g', 'V'], 'preset': 'Diagnostics', 'theme': DEFAULT_THEME, 'residual_height': DEFAULT_RESIDUAL_FRACTION, 'baseline_opacity': 0.5, 'external_source_view': DEFAULT_EXTERNAL_SOURCE_VIEW}}),
         dcc.Store(id='plot-render-applied', data=0),
         dcc.Store(id='plot-defaults-initialized', data=False),
         dcc.Store(id='queue-source-path', data=''),
@@ -4113,6 +4219,11 @@ def create_layout():
         # Collapsible sidebar
         html.Div([
             html.Div('Filters', className='section-title'),
+            html.Div([
+                html.Button('Refresh Slider Bounds', id='refresh-filter-bounds-btn', n_clicks=0, className='compact-btn'),
+                html.Span('Sliders load on startup; use refresh to rebuild bounds.', id='numeric-bounds-status', style={'fontSize': '10px', 'color': '#7d91a6'}),
+            ], style={'display': 'flex', 'alignItems': 'center', 'gap': '8px', 'marginBottom': '6px'}),
+            html.Div('Dropdown options load when the sidebar opens.', id='filter-load-status', style={'fontSize': '10px', 'color': '#7d91a6', 'marginBottom': '6px'}),
 
             dcc.Checklist(
                 id='filter-unreviewed',
@@ -4457,17 +4568,18 @@ def create_layout():
                                         updatemode='drag',
                                     ),
                                 ], className='toolbar-slider-control'),
-                                html.Button('Reset', id='plot-reset-btn', n_clicks=0, className='compact-btn'),
-                                html.Button('Export', id='export-plot', n_clicks=0, className='compact-btn'),
-                                html.Span(id='repro-badge', className='label-chip', style={'margin-left': '6px'}),
+                                 html.Button('Reset', id='plot-reset-btn', n_clicks=0, className='compact-btn'),
+                                 html.Button('Export', id='export-plot', n_clicks=0, className='compact-btn'),
+                                 html.Span(id='plot-render-indicator', style={'color': '#7da8c4', 'font-size': '10px', 'margin-left': '6px'}),
+                                 html.Span(id='repro-badge', className='label-chip', style={'margin-left': '6px'}),
                                 html.Div([
                                     html.Span('LC Source', style={'color': '#9fb6cb', 'font-size': '10px',
                                                                   'white-space': 'nowrap', 'margin-right': '4px'}),
                                     dbc.Select(
                                         id='external-source-view',
-                                        options=EXTERNAL_SOURCE_VIEW_OPTIONS,
-                                        value='all',
-                                        size='sm',
+                                         options=EXTERNAL_SOURCE_VIEW_OPTIONS,
+                                         value=DEFAULT_EXTERNAL_SOURCE_VIEW,
+                                         size='sm',
                                         style={'width': '140px', 'font-size': '10px', 'minWidth': '140px'},
                                     ),
                                 ], style={'display': 'flex', 'alignItems': 'center', 'gap': '2px',
@@ -4495,15 +4607,17 @@ def create_layout():
                                               step='any', debounce=True, placeholder='Max P',
                                               style={'width': '72px', 'font-size': '10px'}),
                                     html.Span('d', style={'color': '#9fb6cb', 'font-size': '10px', 'margin-right': '4px'}),
-                                    html.Button('Find Period', id='pdm-run-btn', n_clicks=0, className='compact-btn'),
-                                    dcc.Input(id='pdm-manual-period', type='number', min=0.001,
-                                              step=0.001, placeholder='Manual P (d)',
-                                              style={'width': '90px', 'font-size': '10px', 'margin-left': '4px'}),
-                                    html.Span(id='pdm-result-label', style={'color': '#7da8c4', 'font-size': '10px',
-                                                                             'margin-left': '4px'}),
-                                ], style={'display': 'flex', 'alignItems': 'center', 'gap': '2px',
-                                          'margin-left': '10px', 'border-left': '1px solid #444',
-                                          'padding-left': '10px'}),
+                                     html.Button('Find Period', id='pdm-run-btn', n_clicks=0, className='compact-btn'),
+                                     dcc.Input(id='pdm-manual-period', type='number', min=0.001,
+                                               step=0.001, placeholder='Manual P (d)',
+                                               style={'width': '90px', 'font-size': '10px', 'margin-left': '4px'}),
+                                     html.Span(id='pdm-result-label', style={'color': '#7da8c4', 'font-size': '10px',
+                                                                              'margin-left': '4px'}),
+                                     html.Span(id='period-search-indicator', style={'color': '#9fb6cb', 'font-size': '10px',
+                                                                                    'margin-left': '4px'}),
+                                 ], style={'display': 'flex', 'alignItems': 'center', 'gap': '2px',
+                                           'margin-left': '10px', 'border-left': '1px solid #444',
+                                           'padding-left': '10px'}),
                                 dcc.Store(id='pdm-result-store', data=None),
                             ], className='plot-toolbar'),
                         ], open=True),
@@ -4594,6 +4708,10 @@ def create_layout():
                         ], id='external-followup-details', open=False, className='metadata-sections', style={'margin-top': '0'}),
                         html.Details([
                             html.Summary('Diagnostic Plots', style={'cursor': 'pointer'}),
+                            html.Div(
+                                id='diagnostic-plots-status',
+                                style={'fontSize': '10px', 'color': '#7d91a6', 'padding': '4px 10px 0 10px'},
+                            ),
                             dcc.Loading(
                                 html.Div(
                                     id='diagnostic-plots-panel',
@@ -5287,6 +5405,7 @@ def keyboard_refresh_queue(key_value, current_clicks):
 # Auto-generated from _SIDEBAR_GROUPS so the UI and callback always stay in sync.
 _BOOL_MODE_STATES: list[tuple[str, str]] = []
 _NUM_COLUMNS: list[str] = []
+_NUM_INPUT_STATES: list[tuple[dict[str, str], str]] = []
 _TEXT_STATES: list[tuple[str, str]] = []
 _SELECT_STATES: list[tuple[str, str]] = []
 
@@ -5297,6 +5416,8 @@ for _grp_name, _grp_items in _SIDEBAR_GROUPS:
             _BOOL_MODE_STATES.append((f'{_cid}-mode', f'{_col}_mode'))
         elif _ftype == 'num':
             _NUM_COLUMNS.append(_col)
+            _NUM_INPUT_STATES.append(({'type': 'num-filter-min-input', 'col': _col}, f'min_{_col}'))
+            _NUM_INPUT_STATES.append(({'type': 'num-filter-max-input', 'col': _col}, f'max_{_col}'))
         elif _ftype == 'text':
             _TEXT_STATES.append((f'filter-{_cid}', _col))
         elif _ftype == 'select':
@@ -5307,7 +5428,7 @@ _queue_states = (
     [State('filter-unreviewed', 'value'),
      State('filter-failed', 'value')]
     + [State(cid, 'value') for cid, _ in _BOOL_MODE_STATES]
-    + [State('numeric-filter-state', 'data')]
+    + [State(cid, 'value') for cid, _ in _NUM_INPUT_STATES]
     + [State(cid, 'value') for cid, _ in _TEXT_STATES]
     + [State(cid, 'value') for cid, _ in _SELECT_STATES]
     + [State('sort-col', 'value'),
@@ -5315,33 +5436,108 @@ _queue_states = (
 )
 
 
-@app.callback(
-    Output('numeric-filter-bounds', 'data'),
-    [Input('import-trigger', 'data'),
-     Input('queue-source-path', 'data')],
-    prevent_initial_call=False,
+_SIDEBAR_FILTER_OUTPUTS = (
+    [Output(cid, 'options') for cid, _ in _TEXT_STATES]
+    + [Output(cid, 'options') for cid, _ in _SELECT_STATES]
 )
-def load_numeric_filter_bounds(_import_trigger, queue_source_scope):
-    """Load numeric slider bounds from the largest available queue."""
+
+
+def _load_numeric_filter_bounds(queue_source_scope):
+    """Build numeric slider bounds for the current queue scope."""
     with closing(db_connect(Path(DB_PATH))) as conn:
         kwargs = {'columns': _NUM_COLUMNS}
         kwargs.update(_queue_scope_filter_kwargs(queue_source_scope))
         return get_numeric_bounds(conn, **kwargs)
 
 
+if _background_callback_manager is not None:
+    @app.callback(
+        Output('numeric-filter-bounds', 'data'),
+        Input('refresh-filter-bounds-btn', 'n_clicks'),
+        State('queue-source-path', 'data'),
+        background=True,
+        running=[
+            (Output('refresh-filter-bounds-btn', 'disabled'), True, False),
+            (Output('numeric-bounds-status', 'children'), 'Loading slider bounds...', 'Sliders load on startup; use refresh to rebuild bounds.'),
+        ],
+        prevent_initial_call=False,
+    )
+    def load_numeric_filter_bounds_callback(_refresh_clicks, queue_source_scope):
+        return _load_numeric_filter_bounds(queue_source_scope)
+else:
+    @app.callback(
+        Output('numeric-filter-bounds', 'data'),
+        Input('refresh-filter-bounds-btn', 'n_clicks'),
+        State('queue-source-path', 'data'),
+        prevent_initial_call=False,
+    )
+    def load_numeric_filter_bounds_callback(_refresh_clicks, queue_source_scope):
+        return _load_numeric_filter_bounds(queue_source_scope)
+
+
+def _load_sidebar_filter_payload(sidebar_open, queue_source_scope):
+    """Hydrate expensive sidebar filter controls only when the sidebar is opened."""
+    if not sidebar_open:
+        return tuple([no_update] * len(_SIDEBAR_FILTER_OUTPUTS))
+
+    scope_kwargs = _queue_scope_filter_kwargs(queue_source_scope)
+    with closing(db_connect(Path(DB_PATH))) as conn:
+        text_options = []
+        for _cid, col in _TEXT_STATES:
+            values = get_distinct_values(conn, col, **scope_kwargs)
+            text_options.append(
+                [{'label': 'Any', 'value': 'Any'}]
+                + [
+                    {'label': str(v), 'value': str(v)}
+                    for v in values
+                    if v is not None and str(v).strip() != ''
+                ]
+            )
+
+        select_options = []
+        for _cid, filter_key in _SELECT_STATES:
+            col = filter_key.replace('exclude_', '', 1)
+            values = get_distinct_values(conn, col, **scope_kwargs)
+            select_options.append(
+                [
+                    {'label': str(v), 'value': str(v)}
+                    for v in values
+                    if v is not None and str(v).strip() != ''
+                ]
+            )
+
+    return (*text_options, *select_options)
+
+
+if _background_callback_manager is not None:
+    @app.callback(
+        _SIDEBAR_FILTER_OUTPUTS,
+        [Input('sidebar-state', 'data'),
+         Input('import-trigger', 'data'),
+         Input('queue-source-path', 'data')],
+        background=True,
+        running=[
+            (Output('filter-load-status', 'children'), 'Loading filter options...', 'Dropdown options load when the sidebar opens.'),
+        ],
+        prevent_initial_call=False,
+    )
+    def hydrate_sidebar_filters_callback(sidebar_open, _import_trigger, queue_source_scope):
+        return _load_sidebar_filter_payload(sidebar_open, queue_source_scope)
+else:
+    @app.callback(
+        _SIDEBAR_FILTER_OUTPUTS,
+        [Input('sidebar-state', 'data'),
+         Input('import-trigger', 'data'),
+         Input('queue-source-path', 'data')],
+        prevent_initial_call=False,
+    )
+    def hydrate_sidebar_filters_callback(sidebar_open, _import_trigger, queue_source_scope):
+        return _load_sidebar_filter_payload(sidebar_open, queue_source_scope)
+
+
 app.clientside_callback(
     """
-    function(boundsData, minValues, maxValues, rangeValues, rangeIds, currentState) {
-        const ids = Array.isArray(rangeIds) ? rangeIds : [];
-        const mins = Array.isArray(minValues) ? minValues : [];
-        const maxs = Array.isArray(maxValues) ? maxValues : [];
-        const ranges = Array.isArray(rangeValues) ? rangeValues : [];
-        const state = (currentState && typeof currentState === 'object')
-            ? JSON.parse(JSON.stringify(currentState))
-            : {};
-        const ctx = dash_clientside.callback_context;
-        const triggered = ctx ? ctx.triggered_id : null;
-
+    function(boundsData, minValue, maxValue, rangeValue, rangeId) {
         function toNumber(value) {
             if (value === null || value === undefined || value === '') {
                 return null;
@@ -5356,201 +5552,102 @@ app.clientside_callback(
             return Math.min(Math.max(base, lo), hi);
         }
 
-        function boundsFor(col) {
-            const info = boundsData && typeof boundsData === 'object' ? boundsData[col] : null;
-            let dataLo = info ? toNumber(info.min) : null;
-            let dataHi = info ? toNumber(info.max) : null;
-            if (dataLo === null || dataHi === null) {
-                return {
-                    hasData: false,
-                    dataLo: null,
-                    dataHi: null,
-                    sliderLo: 0,
-                    sliderHi: 1,
-                    step: 1,
-                    disabled: true,
-                };
-            }
-            if (dataHi < dataLo) {
-                const temp = dataLo;
-                dataLo = dataHi;
-                dataHi = temp;
-            }
-            let sliderLo = dataLo;
-            let sliderHi = dataHi;
-            let disabled = false;
-            if (sliderHi === sliderLo) {
-                const pad = Math.max(Math.abs(sliderLo) * 0.01, 1.0);
-                sliderLo -= pad;
-                sliderHi += pad;
-                disabled = true;
-            }
-            const span = sliderHi - sliderLo;
-            return {
-                hasData: true,
-                dataLo: dataLo,
-                dataHi: dataHi,
-                sliderLo: sliderLo,
-                sliderHi: sliderHi,
-                step: span > 0 ? span / 200.0 : 1,
-                disabled: disabled,
-            };
+        const col = rangeId && rangeId.col ? rangeId.col : null;
+        if (!col) {
+            return [minValue, maxValue, 0, 1, [0, 1], 1, true];
         }
 
-        function effectiveBounds(col, info) {
-            const saved = state && state[col] && typeof state[col] === 'object' ? state[col] : {};
-            let lower = clamp(saved.min, info.sliderLo, info.sliderHi, info.dataLo);
-            let upper = clamp(saved.max, info.sliderLo, info.sliderHi, info.dataHi);
+        const info = boundsData && typeof boundsData === 'object' ? boundsData[col] : null;
+        let dataLo = info ? toNumber(info.min) : null;
+        let dataHi = info ? toNumber(info.max) : null;
+        if (dataLo === null || dataHi === null) {
+            return [minValue, maxValue, 0, 1, [0, 1], 1, true];
+        }
+        if (dataHi < dataLo) {
+            const temp = dataLo;
+            dataLo = dataHi;
+            dataHi = temp;
+        }
+
+        let sliderLo = dataLo;
+        let sliderHi = dataHi;
+        let disabled = false;
+        if (sliderHi === sliderLo) {
+            const pad = Math.max(Math.abs(sliderLo) * 0.01, 1.0);
+            sliderLo -= pad;
+            sliderHi += pad;
+            disabled = true;
+        }
+        const step = sliderHi > sliderLo ? (sliderHi - sliderLo) / 200.0 : 1;
+
+        const currentMin = toNumber(minValue);
+        const currentMax = toNumber(maxValue);
+        const currentRange = Array.isArray(rangeValue) ? rangeValue : [];
+        const currentRangeMin = toNumber(currentRange[0]);
+        const currentRangeMax = toNumber(currentRange[1]);
+
+        const ctx = dash_clientside.callback_context;
+        const triggered = ctx ? ctx.triggered_id : null;
+        const triggeredType = triggered && typeof triggered === 'object' ? triggered.type : null;
+
+        let lower = dataLo;
+        let upper = dataHi;
+
+        if (triggeredType === 'num-filter-range') {
+            lower = clamp(currentRangeMin, sliderLo, sliderHi, currentMin !== null ? currentMin : dataLo);
+            upper = clamp(currentRangeMax, sliderLo, sliderHi, currentMax !== null ? currentMax : dataHi);
             if (lower > upper) {
                 const temp = lower;
                 lower = upper;
                 upper = temp;
             }
-            return {lower: lower, upper: upper};
+        } else if (triggeredType === 'num-filter-min-input') {
+            lower = currentMin === null ? dataLo : clamp(currentMin, sliderLo, sliderHi, dataLo);
+            upper = currentMax !== null
+                ? clamp(currentMax, sliderLo, sliderHi, dataHi)
+                : (currentRangeMax !== null ? clamp(currentRangeMax, sliderLo, sliderHi, dataHi) : dataHi);
+            if (lower > upper) {
+                upper = lower;
+            }
+        } else if (triggeredType === 'num-filter-max-input') {
+            lower = currentMin !== null
+                ? clamp(currentMin, sliderLo, sliderHi, dataLo)
+                : (currentRangeMin !== null ? clamp(currentRangeMin, sliderLo, sliderHi, dataLo) : dataLo);
+            upper = currentMax === null ? dataHi : clamp(currentMax, sliderLo, sliderHi, dataHi);
+            if (lower > upper) {
+                lower = upper;
+            }
+        } else {
+            lower = currentMin !== null
+                ? clamp(currentMin, sliderLo, sliderHi, dataLo)
+                : (currentRangeMin !== null ? clamp(currentRangeMin, sliderLo, sliderHi, dataLo) : dataLo);
+            upper = currentMax !== null
+                ? clamp(currentMax, sliderLo, sliderHi, dataHi)
+                : (currentRangeMax !== null ? clamp(currentRangeMax, sliderLo, sliderHi, dataHi) : dataHi);
+            if (lower > upper) {
+                const temp = lower;
+                lower = upper;
+                upper = temp;
+            }
         }
 
-        function normalizeEntry(lower, upper, info) {
-            if (!info.hasData) {
-                return null;
-            }
-            const entry = {};
-            if (Math.abs(lower - info.dataLo) > 1e-12) {
-                entry.min = lower;
-            }
-            if (Math.abs(upper - info.dataHi) > 1e-12) {
-                entry.max = upper;
-            }
-            return Object.keys(entry).length ? entry : null;
-        }
-
-        function saveState(col, entry) {
-            if (entry && Object.keys(entry).length) {
-                state[col] = entry;
-            } else {
-                delete state[col];
-            }
-        }
-
-        function applyTriggeredChange() {
-            if (!triggered || typeof triggered !== 'object' || !triggered.col) {
-                return false;
-            }
-            const idx = ids.findIndex(function(item) {
-                return item && item.col === triggered.col;
-            });
-            if (idx === -1) {
-                return false;
-            }
-            const info = boundsFor(triggered.col);
-            if (!info.hasData) {
-                delete state[triggered.col];
-                return true;
-            }
-            const current = effectiveBounds(triggered.col, info);
-            let lower = current.lower;
-            let upper = current.upper;
-
-            if (triggered.type === 'num-filter-range') {
-                const sliderValue = Array.isArray(ranges[idx]) ? ranges[idx] : [];
-                lower = clamp(sliderValue[0], info.sliderLo, info.sliderHi, info.dataLo);
-                upper = clamp(sliderValue[1], info.sliderLo, info.sliderHi, info.dataHi);
-                if (lower > upper) {
-                    const temp = lower;
-                    lower = upper;
-                    upper = temp;
-                }
-            } else if (triggered.type === 'num-filter-min-input') {
-                const nextMin = toNumber(mins[idx]);
-                lower = nextMin === null ? info.dataLo : clamp(nextMin, info.sliderLo, info.sliderHi, info.dataLo);
-                if (lower > upper) {
-                    upper = lower;
-                }
-            } else if (triggered.type === 'num-filter-max-input') {
-                const nextMax = toNumber(maxs[idx]);
-                upper = nextMax === null ? info.dataHi : clamp(nextMax, info.sliderLo, info.sliderHi, info.dataHi);
-                if (lower > upper) {
-                    lower = upper;
-                }
-            } else {
-                return false;
-            }
-
-            saveState(triggered.col, normalizeEntry(lower, upper, info));
-            return true;
-        }
-
-        if (!applyTriggeredChange()) {
-            ids.forEach(function(item) {
-                const col = item && item.col ? item.col : null;
-                if (!col) {
-                    return;
-                }
-                const info = boundsFor(col);
-                if (!info.hasData) {
-                    delete state[col];
-                    return;
-                }
-                const current = effectiveBounds(col, info);
-                saveState(col, normalizeEntry(current.lower, current.upper, info));
-            });
-        }
-
-        const minOut = [];
-        const maxOut = [];
-        const rangeMinOut = [];
-        const rangeMaxOut = [];
-        const rangeValueOut = [];
-        const stepOut = [];
-        const disabledOut = [];
-
-        ids.forEach(function(item) {
-            const col = item && item.col ? item.col : null;
-            const info = col ? boundsFor(col) : boundsFor('');
-            rangeMinOut.push(info.sliderLo);
-            rangeMaxOut.push(info.sliderHi);
-            stepOut.push(info.step);
-            disabledOut.push(info.disabled);
-            if (!col || !info.hasData) {
-                minOut.push(null);
-                maxOut.push(null);
-                rangeValueOut.push([info.sliderLo, info.sliderHi]);
-                return;
-            }
-            const current = effectiveBounds(col, info);
-            minOut.push(current.lower);
-            maxOut.push(current.upper);
-            rangeValueOut.push([current.lower, current.upper]);
-        });
-
-        return [
-            state,
-            minOut,
-            maxOut,
-            rangeMinOut,
-            rangeMaxOut,
-            rangeValueOut,
-            stepOut,
-            disabledOut,
-        ];
+        return [lower, upper, sliderLo, sliderHi, [lower, upper], step, disabled];
     }
     """,
-    [Output('numeric-filter-state', 'data'),
-     Output({'type': 'num-filter-min-input', 'col': ALL}, 'value'),
-     Output({'type': 'num-filter-max-input', 'col': ALL}, 'value'),
-     Output({'type': 'num-filter-range', 'col': ALL}, 'min'),
-     Output({'type': 'num-filter-range', 'col': ALL}, 'max'),
-     Output({'type': 'num-filter-range', 'col': ALL}, 'value'),
-     Output({'type': 'num-filter-range', 'col': ALL}, 'step'),
-     Output({'type': 'num-filter-range', 'col': ALL}, 'disabled')],
+    [Output({'type': 'num-filter-min-input', 'col': MATCH}, 'value'),
+     Output({'type': 'num-filter-max-input', 'col': MATCH}, 'value'),
+     Output({'type': 'num-filter-range', 'col': MATCH}, 'min'),
+     Output({'type': 'num-filter-range', 'col': MATCH}, 'max'),
+     Output({'type': 'num-filter-range', 'col': MATCH}, 'value'),
+     Output({'type': 'num-filter-range', 'col': MATCH}, 'step'),
+     Output({'type': 'num-filter-range', 'col': MATCH}, 'disabled')],
     [Input('numeric-filter-bounds', 'data'),
-     Input({'type': 'num-filter-min-input', 'col': ALL}, 'value'),
-     Input({'type': 'num-filter-max-input', 'col': ALL}, 'value'),
-     Input({'type': 'num-filter-range', 'col': ALL}, 'value')],
-    [State({'type': 'num-filter-range', 'col': ALL}, 'id'),
-     State('numeric-filter-state', 'data')],
+     Input({'type': 'num-filter-min-input', 'col': MATCH}, 'value'),
+     Input({'type': 'num-filter-max-input', 'col': MATCH}, 'value'),
+     Input({'type': 'num-filter-range', 'col': MATCH}, 'value')],
+    State({'type': 'num-filter-range', 'col': MATCH}, 'id'),
     prevent_initial_call=False,
 )
-
 
 # Initialize queue
 @app.callback(
@@ -5575,17 +5672,9 @@ def load_queue(refresh_clicks, import_trigger, queue_source_scope, *state_values
         }
         for _, fkey in _BOOL_MODE_STATES:
             filter_params[fkey] = next(it) or 'Any'
-        numeric_filter_state = next(it) or {}
-        if not isinstance(numeric_filter_state, dict):
-            numeric_filter_state = {}
-        for col in _NUM_COLUMNS:
-            entry = numeric_filter_state.get(col)
-            if not isinstance(entry, dict):
-                entry = {}
-            min_val = entry.get('min')
-            max_val = entry.get('max')
-            filter_params[f'min_{col}'] = min_val if min_val is not None else None
-            filter_params[f'max_{col}'] = max_val if max_val is not None else None
+        for _, fkey in _NUM_INPUT_STATES:
+            val = next(it)
+            filter_params[fkey] = val if val not in ('', None) else None
         for _, fkey in _TEXT_STATES:
             val = next(it)
             filter_params[fkey] = val.strip() if val else None
@@ -5729,7 +5818,7 @@ def _score_period_harmonic_candidate(
     period: float,
     *,
     n_bins: int = 48,
-    lag_weight: float = 2.5,
+    lag_weight: float = 0.1,
 ) -> dict[str, float]:
     if not np.isfinite(period) or period <= 0:
         return {"objective": np.inf, "scatter_ratio": np.inf, "lag_phase": np.nan}
@@ -5843,19 +5932,28 @@ def _run_period_search_for_payload(
     method: str,
 ) -> tuple[dict | None, str]:
     """Run a period search against the current candidate payload."""
+    from malca.periodogram import ce_find_period, lsp_find_period, pdm_find_period
+
     plot_dir_path = _configured_plot_dir()
     lc_path = resolve_lightcurve_path(payload, plot_dir_path)
     if lc_path is None:
         return None, 'No LC file'
 
+    run_params = _load_run_params_for_plot_dir(str(plot_dir_path) if plot_dir_path else None)
+    filter_bad_cameras = not bool(run_params.get('skip_camera_median', False))
+    scatter_ratio = float(run_params.get('bad_camera_scatter_ratio', BAD_CAMERA_SCATTER_RATIO_THRESHOLD)) if run_params else BAD_CAMERA_SCATTER_RATIO_THRESHOLD
+    clean_abs = float(run_params.get('clean_max_error_absolute', CLEAN_LC_MAX_ERROR_ABSOLUTE)) if run_params else CLEAN_LC_MAX_ERROR_ABSOLUTE
+    clean_sig = float(run_params.get('clean_max_error_sigma', CLEAN_LC_MAX_ERROR_SIGMA)) if run_params else CLEAN_LC_MAX_ERROR_SIGMA
+    baseline_name, baseline_kwargs, _baseline_warnings = _baseline_config_from_run_params(run_params)
+
 
 
     df, _, _ = _load_cleaned_df(
         lc_path,
-        filter_bad_cameras=True,
-        scatter_ratio=BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
-        clean_max_error_absolute=CLEAN_LC_MAX_ERROR_ABSOLUTE,
-        clean_max_error_sigma=CLEAN_LC_MAX_ERROR_SIGMA,
+        filter_bad_cameras=filter_bad_cameras,
+        scatter_ratio=scatter_ratio,
+        clean_max_error_absolute=clean_abs,
+        clean_max_error_sigma=clean_sig,
     )
     if df is None or df.empty:
         return None, 'Empty LC'
@@ -5863,12 +5961,17 @@ def _run_period_search_for_payload(
     baseline_cache_key = (
         str(lc_path.resolve()),
         (),
-        True,
-        BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
-        CLEAN_LC_MAX_ERROR_ABSOLUTE,
-        CLEAN_LC_MAX_ERROR_SIGMA,
+        filter_bad_cameras,
+        scatter_ratio,
+        clean_abs,
+        clean_sig,
     )
-    band_dfs = _compute_baseline_bands(df, "per_camera_gp", baseline_cache_key)
+    band_dfs = _compute_baseline_bands(
+        df,
+        baseline_name,
+        baseline_cache_key,
+        baseline_kwargs=baseline_kwargs,
+    )
 
     resid_parts = []
     for bdf in band_dfs.values():
@@ -6193,23 +6296,11 @@ def queue_plot_render_request(idx, current_candidate_id, plot_mode, overlay_valu
             'link_radius': float(link_radius) if link_radius is not None else 10.0,
             'override_period': override_period,
             'yaxis_mode': str(yaxis_mode or 'mag'),
-            'external_source_view': str(external_source_view or 'all'),
+            'external_source_view': str(external_source_view or DEFAULT_EXTERNAL_SOURCE_VIEW),
         },
     }
 
 
-@app.callback(
-    [Output('pdm-result-store', 'data'),
-     Output('pdm-result-label', 'children'),
-     Output('auto-period-cache', 'data', allow_duplicate=True)],
-    Input('pdm-run-btn', 'n_clicks'),
-    [State('current-candidate-id', 'data'),
-     State('pdm-min-period', 'value'),
-     State('pdm-max-period', 'value'),
-     State('period-method', 'value'),
-     State('auto-period-cache', 'data')],
-    prevent_initial_call=True,
-)
 def run_period_search(n_clicks, candidate_id, min_period, max_period, method, auto_period_cache):
     """Run period search (LSP/PDM/CE) on current candidate's light curve."""
     if not n_clicks or not candidate_id:
@@ -6235,6 +6326,47 @@ def run_period_search(n_clicks, candidate_id, min_period, max_period, method, au
     return result, label, auto_period_cache
 
 
+_PERIOD_SEARCH_OUTPUTS = [
+    Output('pdm-result-store', 'data'),
+    Output('pdm-result-label', 'children'),
+    Output('auto-period-cache', 'data', allow_duplicate=True),
+]
+
+
+if _background_callback_manager is not None:
+    @app.callback(
+        _PERIOD_SEARCH_OUTPUTS,
+        Input('pdm-run-btn', 'n_clicks'),
+        [State('current-candidate-id', 'data'),
+         State('pdm-min-period', 'value'),
+         State('pdm-max-period', 'value'),
+         State('period-method', 'value'),
+         State('auto-period-cache', 'data')],
+        background=True,
+        running=[
+            (Output('pdm-run-btn', 'disabled'), True, False),
+            (Output('period-search-indicator', 'children'), 'Searching period...', ''),
+        ],
+        cancel=[Input('current-candidate-id', 'data')],
+        prevent_initial_call=True,
+    )
+    def run_period_search_callback(n_clicks, candidate_id, min_period, max_period, method, auto_period_cache):
+        return run_period_search(n_clicks, candidate_id, min_period, max_period, method, auto_period_cache)
+else:
+    @app.callback(
+        _PERIOD_SEARCH_OUTPUTS,
+        Input('pdm-run-btn', 'n_clicks'),
+        [State('current-candidate-id', 'data'),
+         State('pdm-min-period', 'value'),
+         State('pdm-max-period', 'value'),
+         State('period-method', 'value'),
+         State('auto-period-cache', 'data')],
+        prevent_initial_call=True,
+    )
+    def run_period_search_callback(n_clicks, candidate_id, min_period, max_period, method, auto_period_cache):
+        return run_period_search(n_clicks, candidate_id, min_period, max_period, method, auto_period_cache)
+
+
 @app.callback(
     [Output('pdm-result-store', 'data', allow_duplicate=True),
      Output('pdm-result-label', 'children', allow_duplicate=True),
@@ -6247,7 +6379,7 @@ def run_period_search(n_clicks, candidate_id, min_period, max_period, method, au
     prevent_initial_call=True,
 )
 def auto_period_on_navigate(candidate_id, min_period, max_period, auto_period_cache):
-    """Auto-run a first-pass PDM search for the currently viewed candidate."""
+    """Populate period status without auto-running an expensive search."""
     if candidate_id is None:
         return None, '', None, no_update
     candidate_id = str(candidate_id)
@@ -6278,19 +6410,8 @@ def auto_period_on_navigate(candidate_id, min_period, max_period, auto_period_ca
     if _has_external_period(payload):
         return None, 'Catalog/pipeline period', None, no_update
 
-    result, label = _run_period_search_for_payload(
-        payload,
-        min_period=min_p,
-        max_period=max_p,
-        method='pdm',
-    )
-    display_label = f'Auto {label}' if result is not None else f'Auto search: {label}'
-    if result is None:
-        auto_period_cache[candidate_id] = {'result': None, 'label': display_label}
-        return None, display_label, None, auto_period_cache
-    result['auto'] = True
-    auto_period_cache[candidate_id] = {'result': result, 'label': display_label}
-    return result, display_label, None, auto_period_cache
+    display_label = 'Ready - click Find Period'
+    return None, display_label, None, no_update
 
 
 @app.callback(
@@ -6340,7 +6461,7 @@ def update_plot_controls(preset, n_reset, n_all, n_clear, n_invert, camera_optio
         cfg = PLOT_PRESETS.get(preset or 'Diagnostics', PLOT_PRESETS['Diagnostics'])
         new_overlays = list(cfg['overlays'])
         new_cams = list(cams)
-        return new_overlays, new_cams, ['g', 'V'], 'all'
+        return new_overlays, new_cams, ['g', 'V'], DEFAULT_EXTERNAL_SOURCE_VIEW
     if trig == 'cams-all-btn':
         return overlays, list(cams), no_update, no_update
     if trig == 'cams-clear-btn':
@@ -6351,29 +6472,6 @@ def update_plot_controls(preset, n_reset, n_all, n_clear, n_invert, camera_optio
     return no_update, no_update, no_update, no_update
 
 
-@app.callback(
-    [Output('plot-image', 'src'),
-     Output('candidate-info-grid', 'children'),
-     Output('metadata-health-indicator', 'children'),
-     Output('vetting-banner', 'children'),
-     Output('progress-text', 'children'),
-     Output('interactive-plot', 'figure'),
-     Output('interactive-plot', 'style'),
-     Output('plot-image', 'style'),
-     Output('camera-checklist', 'options'),
-     Output('plot-stats-cards', 'children'),
-     Output('plot-status-panel', 'children'),
-     Output('camera-filter-panel', 'children'),
-     Output('run-config-panel', 'children'),
-     Output('repro-badge', 'children'),
-     Output('run-config-json-store', 'data'),
-     Output('plot-render-applied', 'data')],
-    Input('plot-render-request', 'data'),
-    [State('plot-render-applied', 'data'),
-     State('current-candidate-id', 'data'),
-     State('queue-size-store', 'data')],
-    prevent_initial_call=False,
-)
 def update_display(render_request, applied_nonce, current_candidate_id, queue_size_data):
     """Render candidate display with debounce and stable uirevision behavior."""
     req = render_request or {'nonce': 0, 'ts': 0.0, 'state': {}}
@@ -6394,7 +6492,7 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
     round_sigfigs = bool(state.get('round_sigfigs', True))
     link_radius = float(state.get('link_radius', 10.0))
     yaxis_mode = str(state.get('yaxis_mode', 'mag') or 'mag')
-    external_source_view = str(state.get('external_source_view', 'all') or 'all')
+    external_source_view = str(state.get('external_source_view', DEFAULT_EXTERNAL_SOURCE_VIEW) or DEFAULT_EXTERNAL_SOURCE_VIEW)
     override_period = state.get('override_period')
     if override_period is not None:
         try:
@@ -6428,6 +6526,10 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
 
     with closing(db_connect(Path(DB_PATH))) as conn:
         payload = get_candidate_payload(conn, candidate_id)
+        candidate_row = conn.execute(
+            "SELECT lc_path, source_path FROM candidates WHERE candidate_id = ?",
+            (str(candidate_id),),
+        ).fetchone()
 
     plot_dir_path = _configured_plot_dir()
     plot_search_root = _plot_search_root_for_payload(payload)
@@ -6513,29 +6615,31 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
         mismatch_warnings.append(run_params_msg)
     uirevision_key = f"{candidate_id}|{','.join(sorted(str(c) for c in selected_cameras))}|{','.join(sorted(str(b) for b in selected_bands))}|{theme_mode}|{residual_height:.3f}|{baseline_opacity:.2f}|{yaxis_mode}|{external_source_view}"
 
-    # Discover external LC parquets for this candidate
+    # Discover external LC parquets only when the user explicitly asks for them.
     ext_lcs: dict[str, Path] | None = None
-    run_dir = _resolve_run_dir_from_plot_dir(PLOT_DIR)
-    lk = _candidate_lookup_keys(candidate_id, payload)
-    found: dict[str, Path] = {}
-    search_roots: list[Path] = []
-    if run_dir is not None:
-        search_roots.append(run_dir / "results")
-    default_results_root = Path(__file__).resolve().parents[2] / "output" / "results"
-    if default_results_root not in search_roots:
-        search_roots.append(default_results_root)
-    for prefix in ("atlas", "ztf", "gaia_epoch", "ps1", "crts"):
-        for root in search_roots:
-            idx_map = _index_external_lc_paths_from_root(str(root.resolve()), prefix)
-            for key in lk:
-                p = idx_map.get(str(key))
-                if p:
-                    found[prefix] = Path(p)
+    requested_external_source = str(external_source_view or DEFAULT_EXTERNAL_SOURCE_VIEW).strip().lower()
+    if requested_external_source not in {'', 'asassn'}:
+        run_dir = _resolve_run_dir_from_plot_dir(PLOT_DIR)
+        lk = _candidate_lookup_keys(candidate_id, payload)
+        found: dict[str, Path] = {}
+        search_roots: list[Path] = []
+        if run_dir is not None:
+            search_roots.append(run_dir / "results")
+        default_results_root = Path(__file__).resolve().parents[2] / "output" / "results"
+        if default_results_root not in search_roots:
+            search_roots.append(default_results_root)
+        for prefix in ("atlas", "ztf", "gaia_epoch", "ps1", "crts"):
+            for root in search_roots:
+                idx_map = _index_external_lc_paths_from_root(str(root.resolve()), prefix)
+                for key in lk:
+                    p = idx_map.get(str(key))
+                    if p:
+                        found[prefix] = Path(p)
+                        break
+                if prefix in found:
                     break
-            if prefix in found:
-                break
-    if found:
-        ext_lcs = found
+        if found:
+            ext_lcs = found
 
     try:
         native = build_interactive_lightcurve_figure(
@@ -6593,6 +6697,18 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
     native_status = str(native.get('status', 'ok'))
     native_message = str(native.get('status_message', '') or '')
     native_warnings = list(native.get('warnings', []) or [])
+    baseline_warning = _baseline_provenance_warning(
+        payload,
+        plot_dir=plot_dir_path,
+        run_params=run_params if run_params else None,
+        stored_lc_path=candidate_row[0] if candidate_row else None,
+        source_path=candidate_row[1] if candidate_row else None,
+    )
+    if baseline_warning:
+        native_warnings.append(baseline_warning)
+    run_config_warnings = list(mismatch_warnings)
+    if baseline_warning:
+        run_config_warnings.append(baseline_warning)
 
     plot_src = ''
     if native_status in {"missing-file", "missing-columns", "empty-after-filter", "empty-camera-selection", "empty-band-selection"}:
@@ -6614,8 +6730,8 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
             [],
             _render_plot_status_panel('warn', f"{fallback_msg} Showing PNG fallback.", fallback_warnings),
             _render_camera_diag_panel(native.get('camera_diagnostics', {}), []),
-            _render_run_config_panel(run_params if run_params else None, run_params_path, fallback_warnings),
-            _render_repro_badge(run_params if run_params else None, fallback_warnings),
+            _render_run_config_panel(run_params if run_params else None, run_params_path, run_config_warnings),
+            _render_repro_badge(run_params if run_params else None, run_config_warnings),
             json.dumps(run_params, indent=2, sort_keys=True) if run_params else '',
             nonce,
         )
@@ -6641,13 +6757,60 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
         {'display': 'none'},
         native['camera_options'],
         [],  # stats merged into candidate-info-grid
-        _render_plot_status_panel(native.get('status', 'ok'), native.get('status_message', ''), (native.get('warnings', []) + mismatch_warnings)),
+        _render_plot_status_panel(native.get('status', 'ok'), native.get('status_message', ''), (native_warnings + mismatch_warnings)),
         _render_camera_diag_panel(native.get('camera_diagnostics', {}), filtered),
-        _render_run_config_panel(run_params if run_params else None, run_params_path, mismatch_warnings),
-        _render_repro_badge(run_params if run_params else None, mismatch_warnings),
+        _render_run_config_panel(run_params if run_params else None, run_params_path, run_config_warnings),
+        _render_repro_badge(run_params if run_params else None, run_config_warnings),
         json.dumps(run_params, indent=2, sort_keys=True) if run_params else '',
         nonce,
     )
+
+
+_DISPLAY_OUTPUTS = [Output('plot-image', 'src'),
+    Output('candidate-info-grid', 'children'),
+    Output('metadata-health-indicator', 'children'),
+    Output('vetting-banner', 'children'),
+    Output('progress-text', 'children'),
+    Output('interactive-plot', 'figure'),
+    Output('interactive-plot', 'style'),
+    Output('plot-image', 'style'),
+    Output('camera-checklist', 'options'),
+    Output('plot-stats-cards', 'children'),
+    Output('plot-status-panel', 'children'),
+    Output('camera-filter-panel', 'children'),
+    Output('run-config-panel', 'children'),
+    Output('repro-badge', 'children'),
+    Output('run-config-json-store', 'data'),
+    Output('plot-render-applied', 'data')]
+
+
+if _background_callback_manager is not None:
+    @app.callback(
+        _DISPLAY_OUTPUTS,
+        Input('plot-render-request', 'data'),
+        [State('plot-render-applied', 'data'),
+         State('current-candidate-id', 'data'),
+         State('queue-size-store', 'data')],
+        background=True,
+        running=[
+            (Output('plot-render-indicator', 'children'), 'Rendering plot...', ''),
+        ],
+        cancel=[Input('plot-render-request', 'modified_timestamp')],
+        prevent_initial_call=False,
+    )
+    def update_display_callback(render_request, applied_nonce, current_candidate_id, queue_size_data):
+        return update_display(render_request, applied_nonce, current_candidate_id, queue_size_data)
+else:
+    @app.callback(
+        _DISPLAY_OUTPUTS,
+        Input('plot-render-request', 'data'),
+        [State('plot-render-applied', 'data'),
+         State('current-candidate-id', 'data'),
+         State('queue-size-store', 'data')],
+        prevent_initial_call=False,
+    )
+    def update_display_callback(render_request, applied_nonce, current_candidate_id, queue_size_data):
+        return update_display(render_request, applied_nonce, current_candidate_id, queue_size_data)
 
 
 @app.callback(
@@ -6709,23 +6872,95 @@ def _render_diagnostic_plots(payload: dict, theme: str, background: dict | None 
     return cards
 
 
+def _prepare_diagnostic_background(_open_flag, _import_trigger, _pipeline_progress, existing_state):
+    """Load and cache diagnostic plot background data for the current review DB."""
+    signature = _diagnostic_background_signature(DB_PATH)
+    cached = _get_cached_diagnostic_background(signature)
+    if cached is None:
+        with closing(db_connect(Path(DB_PATH))) as conn:
+            cached = get_diagnostic_background(conn)
+        _store_cached_diagnostic_background(signature, cached)
+        used_cache = False
+    else:
+        used_cache = True
+
+    next_token = 1
+    if isinstance(existing_state, dict):
+        try:
+            next_token = int(existing_state.get('token', 0) or 0) + 1
+        except Exception:
+            next_token = 1
+
+    return {
+        'signature': signature,
+        'ready': True,
+        'cached': used_cache,
+        'token': next_token,
+    }
+
+
+if _background_callback_manager is not None:
+    @app.callback(
+        Output('diagnostic-background-state', 'data'),
+        [Input('diagnostic-plots-details', 'open'),
+         Input('import-trigger', 'data'),
+         Input('pipeline-progress-trigger', 'data')],
+        State('diagnostic-background-state', 'data'),
+        background=True,
+        running=[
+            (Output('diagnostic-plots-status', 'children'), 'Loading population background...', ''),
+        ],
+        prevent_initial_call=False,
+    )
+    def prepare_diagnostic_background(is_open, import_trigger, pipeline_progress, existing_state):
+        if not is_open:
+            return existing_state or {'signature': '', 'ready': False, 'cached': False, 'token': 0}
+        return _prepare_diagnostic_background(is_open, import_trigger, pipeline_progress, existing_state)
+else:
+    @app.callback(
+        Output('diagnostic-background-state', 'data'),
+        [Input('diagnostic-plots-details', 'open'),
+         Input('import-trigger', 'data'),
+         Input('pipeline-progress-trigger', 'data')],
+        State('diagnostic-background-state', 'data'),
+        prevent_initial_call=False,
+    )
+    def prepare_diagnostic_background(is_open, import_trigger, pipeline_progress, existing_state):
+        if not is_open:
+            return existing_state or {'signature': '', 'ready': False, 'cached': False, 'token': 0}
+        return _prepare_diagnostic_background(is_open, import_trigger, pipeline_progress, existing_state)
+
+
 @app.callback(
-    Output('diagnostic-plots-panel', 'children'),
+    [Output('diagnostic-plots-panel', 'children'),
+     Output('diagnostic-plots-status', 'children')],
     [Input('diagnostic-plots-details', 'open'),
      Input('current-candidate-id', 'data'),
-     Input('theme-mode-store', 'data')],
+     Input('theme-mode-store', 'data'),
+     Input('diagnostic-background-state', 'data')],
     prevent_initial_call=False,
 )
-def update_diagnostic_plots(is_open, candidate_id, theme_mode):
-    """Render diagnostic plots for the current candidate."""
+def update_diagnostic_plots(is_open, candidate_id, theme_mode, background_state):
+    """Render diagnostic plots for the current candidate, then backfill population context."""
     if not is_open:
-        return []
+        return [], ''
     if not candidate_id:
-        return []
+        return [], 'No candidate selected.'
+
     with closing(db_connect(Path(DB_PATH))) as conn:
         payload = get_candidate_payload(conn, str(candidate_id)) or {}
-        background = get_diagnostic_background(conn)
-    return _render_diagnostic_plots(payload, str(theme_mode or DEFAULT_THEME), background=background)
+
+    signature = _diagnostic_background_signature(DB_PATH)
+    cached_background = None
+    if isinstance(background_state, dict) and background_state.get('ready') and background_state.get('signature') == signature:
+        cached_background = _get_cached_diagnostic_background(signature)
+
+    panels = _render_diagnostic_plots(payload, str(theme_mode or DEFAULT_THEME), background=cached_background)
+    if cached_background is None:
+        status = 'Showing candidate diagnostics first; population background will appear when ready.'
+    else:
+        status = 'Population background loaded.'
+    return panels, status
 
 
 @app.callback(
@@ -7564,6 +7799,12 @@ def _nearest_catalog_match_by_coords(catalog_df: pd.DataFrame, ra_deg: float, de
 
 def _fetch_candidate_impl(set_progress, n_clicks, fetch_type, fetch_query, fetch_mode, fetch_backend, current_trigger):
     """Core fetch logic; set_progress is optional for streaming status to GUI."""
+    from malca.review.fetch import (
+        fetch_and_analyze_by_gaia_id,
+        fetch_and_analyze_by_id,
+        fetch_cone_search,
+    )
+
     def progress(msg):
         if set_progress and msg:
             try:
@@ -7961,6 +8202,7 @@ def _run_pipeline_impl(set_progress, run_clicks, rerun_clicks, rerun_stats_click
             # If triggered by a full_ext fetch, ensure we run external LCs
             if fetch_mode == 'full_ext' and 'external_lcs' not in stages:
                 p("Running external LCs...")
+                from malca.vetting import fetch_external_lcs
 
 
 

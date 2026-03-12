@@ -84,6 +84,40 @@ def test_add_eda_columns_builds_proxy_fields(tmp_path: Path) -> None:
     assert frame.attrs["default_target_col"] == "proxy_oneoff_dipper"
 
 
+def test_add_eda_columns_fills_catalog_type_aliases(tmp_path: Path) -> None:
+    db = tmp_path / "output" / "runs" / "run_alias" / "review" / "review.db"
+    _write_review_db(
+        db,
+        [
+            {
+                "candidate_id": "A1",
+                "period_asassn_var_class": "EA",
+                "period_ztf_periodic_class": "EW",
+                "asassn_var_type": "",
+                "ztf_var_type": "",
+            },
+            {
+                "candidate_id": "A2",
+                "period_asassn_var_class": "",
+                "period_ztf_periodic_class": "",
+                "asassn_var_type": "DSCT",
+                "ztf_var_type": "RR",
+            },
+        ],
+    )
+
+    combined = load_combined_source_data(sources=[db])
+    frame = add_eda_columns(combined.df)
+
+    row1 = frame.loc[frame["candidate_id"] == "A1"].iloc[0]
+    row2 = frame.loc[frame["candidate_id"] == "A2"].iloc[0]
+
+    assert row1["asassn_var_type"] == "EA"
+    assert row1["ztf_var_type"] == "EW"
+    assert row2["asassn_var_type"] == "DSCT"
+    assert row2["ztf_var_type"] == "RR"
+
+
 def test_get_candidate_record_by_key_round_trips(tmp_path: Path) -> None:
     db = tmp_path / "output" / "runs" / "run_a" / "review" / "review.db"
     _write_review_db(db, [{"candidate_id": "C3", "asas_sn_id": "C3", "dipper_score": 4.0}])

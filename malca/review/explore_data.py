@@ -426,6 +426,18 @@ def text_series(frame: pd.DataFrame, col: str) -> pd.Series:
     return frame[col].fillna("").astype(str)
 
 
+def _coalesce_text_column(frame: pd.DataFrame, target: str, aliases: list[str]) -> None:
+    values = text_series(frame, target).str.strip() if target in frame.columns else pd.Series("", index=frame.index, dtype="object")
+    for alias in aliases:
+        if alias not in frame.columns:
+            continue
+        alias_values = text_series(frame, alias).str.strip()
+        mask = (values == "") & (alias_values != "")
+        if bool(mask.any()):
+            values.loc[mask] = alias_values.loc[mask]
+    frame[target] = values
+
+
 def contains_periodic_label(series: pd.Series) -> pd.Series:
     patterns = [
         r"\bEA\b",
@@ -467,6 +479,9 @@ def normalize_review_label(series: pd.Series) -> pd.Series:
 def add_eda_columns(frame: pd.DataFrame) -> pd.DataFrame:
     out = frame.copy()
 
+    _coalesce_text_column(out, "asassn_var_type", ["period_asassn_var_class"])
+    _coalesce_text_column(out, "ztf_var_type", ["period_ztf_periodic_class"])
+
     numeric_cols = [
         "period_n_sources",
         "period_consensus_days",
@@ -494,6 +509,7 @@ def add_eda_columns(frame: pd.DataFrame) -> pd.DataFrame:
     periodic_text_match = (
         contains_periodic_label(text_series(out, "vsx_class"))
         | contains_periodic_label(text_series(out, "asassn_var_type"))
+        | contains_periodic_label(text_series(out, "ztf_var_type"))
         | contains_periodic_label(text_series(out, "gaia_var_class"))
         | contains_periodic_label(text_series(out, "simbad_otype"))
         | contains_periodic_label(text_series(out, "alerce_lc_class"))

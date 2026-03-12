@@ -15,19 +15,13 @@ import traceback
 
 import pandas as pd
 
-from malca.config.config_pipeline import (
-    TRIGGER_MODE, LOGBF_THRESHOLD_DIP, LOGBF_THRESHOLD_JUMP,
-    SIGNIFICANCE_THRESHOLD, P_POINTS, MAG_POINTS,
-    RUN_MIN_POINTS, RUN_MAX_GAP_POINTS, BASELINE_FUNC,
-)
-from malca.events import process_lightcurve
+from malca.config.config_pipeline import RUN_MAX_GAP_POINTS, BASELINE_FUNC
 from malca.fetch import (
     cone_search,
     download_lightcurve_by_id,
     download_lightcurve_by_gaia_id,
 )
 from malca.review.stats_merge import merge_stats_summary_into_payload
-from malca.stats import compute_stats
 
 
 P_MIN_DIP = None
@@ -145,6 +139,8 @@ def _build_candidate_row(
 def _compute_stats_from_skypatrol_csv(lc_path: Path) -> dict:
     """Compute full compute_stats() suite from a SkyPatrol-format CSV."""
     try:
+        from malca.stats import compute_stats
+
         candidate_id = Path(lc_path).stem
         parent = str(Path(lc_path).parent)
         _df, summary = compute_stats(candidate_id, parent, compute_ls=True)
@@ -160,6 +156,13 @@ def _compute_stats_from_skypatrol_csv(lc_path: Path) -> dict:
 def _compute_events_for_csv(lc_path: Path) -> dict:
     """Run process_lightcurve on a SkyPatrol CSV file and return key columns."""
     try:
+        from malca.config.config_pipeline import (
+            TRIGGER_MODE, LOGBF_THRESHOLD_DIP, LOGBF_THRESHOLD_JUMP,
+            SIGNIFICANCE_THRESHOLD, P_POINTS, MAG_POINTS,
+            RUN_MIN_POINTS, RUN_MAX_GAP_POINTS, BASELINE_FUNC,
+        )
+        from malca.events import process_lightcurve
+
         result = process_lightcurve(
             str(lc_path),
             trigger_mode=TRIGGER_MODE,

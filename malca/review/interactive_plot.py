@@ -11,7 +11,12 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from malca.baseline import global_median_baseline, per_camera_gp_baseline, per_camera_median_baseline
+from malca.baseline import (
+    global_median_baseline,
+    per_camera_gp_baseline,
+    per_camera_gp_baseline_masked,
+    per_camera_median_baseline,
+)
 from malca.lightcurve_io import load_lightcurve_df, stable_camera_color
 from malca.utils import (
     clean_lc,
@@ -35,9 +40,67 @@ BASELINE_FUNCTIONS = {
     "global_median": global_median_baseline,
     "per_camera_median": per_camera_median_baseline,
     "per_camera_gp": per_camera_gp_baseline,
+    "gp": per_camera_gp_baseline,
+    "gp_masked": per_camera_gp_baseline_masked,
+    "per_camera_gp_masked": per_camera_gp_baseline_masked,
 }
 
 REQUIRED_COLUMNS = {"JD", "mag", "v_g_band"}
+
+
+def _coerce_finite_float(value: object) -> float | None:
+    """Return a finite float from a run-param value, or None."""
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if np.isfinite(number) else None
+
+
+def _baseline_config_from_run_params(run_params: dict | None) -> tuple[str, dict[str, float], list[str]]:
+    """Resolve review baseline mode and GP kwargs from run parameters."""
+    params = dict(run_params or {})
+    requested_name = str(params.get("baseline_func") or "per_camera_gp").strip()
+    baseline_name = requested_name or "per_camera_gp"
+    warnings: list[str] = []
+
+    if baseline_name not in BASELINE_FUNCTIONS:
+        warnings.append(
+            f"Unknown baseline_func '{baseline_name}' in run_params; falling back to per_camera_gp."
+        )
+        baseline_name = "per_camera_gp"
+
+    baseline_kwargs: dict[str, float] = {}
+    if baseline_name in {"gp", "per_camera_gp", "gp_masked", "per_camera_gp_masked"}:
+        for run_key, arg_key in (
+            ("baseline_s0", "S0"),
+            ("baseline_w0", "w0"),
+            ("baseline_q", "q"),
+            ("baseline_jitter", "jitter"),
+            ("baseline_sigma_floor", "sigma_floor"),
+        ):
+            value = _coerce_finite_float(params.get(run_key))
+            if value is not None:
+                baseline_kwargs[arg_key] = float(value)
+
+    return baseline_name, baseline_kwargs, warnings
+
+
+def _freeze_baseline_kwargs(baseline_kwargs: dict[str, object] | None) -> tuple[tuple[str, object], ...]:
+    """Convert baseline kwargs into a stable cache key fragment."""
+    frozen: list[tuple[str, object]] = []
+    for key, value in sorted((baseline_kwargs or {}).items()):
+        if isinstance(value, (float, np.floating)):
+            frozen.append((str(key), float(value)))
+        elif isinstance(value, (int, np.integer, bool, np.bool_)):
+            frozen.append((str(key), int(value)))
+        elif value is None:
+            frozen.append((str(key), None))
+        else:
+            frozen.append((str(key), str(value)))
+    return tuple(frozen)
 
 
 def _mag_to_flux(mag: np.ndarray) -> np.ndarray:
@@ -202,16 +265,22 @@ def _load_cleaned_df(
     return df, set(filtered_cameras), diagnostics
 
 
-def _compute_baseline_bands(df: pd.DataFrame, baseline_name: str, cache_key: tuple) -> dict[int, pd.DataFrame]:
-    key = (cache_key, baseline_name)
+def _compute_baseline_bands(
+    df: pd.DataFrame,
+    baseline_name: str,
+    cache_key: tuple,
+    *,
+    baseline_kwargs: dict[str, object] | None = None,
+) -> dict[int, pd.DataFrame]:
+    key = (cache_key, baseline_name, _freeze_baseline_kwargs(baseline_kwargs))
     cached = _cache_get(_BASELINE_CACHE, key)
     if cached is not None:
         return {k: v.copy() for k, v in cached.items()}
 
     baseline_func = BASELINE_FUNCTIONS.get(baseline_name, per_camera_gp_baseline)
-    baseline_kwargs = {}
-    if baseline_func is per_camera_gp_baseline:
-        baseline_kwargs["add_sigma_eff_col"] = True
+    call_kwargs = dict(baseline_kwargs or {})
+    if baseline_name in {"gp", "per_camera_gp", "gp_masked", "per_camera_gp_masked"}:
+        call_kwargs.setdefault("add_sigma_eff_col", True)
 
     band_dfs: dict[int, pd.DataFrame] = {}
     for band in (0, 1):
@@ -219,7 +288,7 @@ def _compute_baseline_bands(df: pd.DataFrame, baseline_name: str, cache_key: tup
         if bdf.empty:
             continue
         try:
-            out = baseline_func(bdf, **baseline_kwargs)
+            out = baseline_func(bdf, **call_kwargs)
             if "baseline" in out.columns:
                 bdf["baseline"] = out["baseline"].to_numpy()
                 bdf["resid"] = bdf["mag"] - bdf["baseline"]
@@ -1075,7 +1144,7 @@ def build_interactive_lightcurve_figure(
             "warnings": ["No points for selected bands"],
         }
 
-    baseline_name = str(run_params.get("baseline_func", "per_camera_gp")) if run_params else "per_camera_gp"
+    baseline_name, baseline_kwargs, baseline_warnings = _baseline_config_from_run_params(run_params)
     baseline_cache_key = (
         str(lc_path.resolve()),
         tuple(sorted(str(c) for c in selected)),
@@ -1084,9 +1153,14 @@ def build_interactive_lightcurve_figure(
         float(clean_abs),
         float(clean_sig),
     )
-    band_dfs = _compute_baseline_bands(df, baseline_name, baseline_cache_key)
+    band_dfs = _compute_baseline_bands(
+        df,
+        baseline_name,
+        baseline_cache_key,
+        baseline_kwargs=baseline_kwargs,
+    )
 
-    warnings: list[str] = []
+    warnings: list[str] = list(baseline_warnings)
     phase_source = ""
     if show_phase_fold:
         if override_period is not None and override_period > 0:

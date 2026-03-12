@@ -5,6 +5,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+import malca.review.interactive_plot as interactive_plot_module
 from malca.review.interactive_plot import (
     build_interactive_lightcurve_figure,
     normalize_external_lc_dataframe,
@@ -208,6 +209,65 @@ def test_interactive_plot_missing_file_has_actionable_status(tmp_path: Path) -> 
     )
     assert out["status"] == "missing-file"
     assert "Missing light-curve file" in out["status_message"]
+
+
+@pytest.mark.parametrize("baseline_func", ["gp", "gp_masked"])
+def test_interactive_plot_uses_run_param_gp_settings(tmp_path: Path, monkeypatch, baseline_func: str) -> None:
+    plot_dir = tmp_path / "plots"
+    plot_dir.mkdir(parents=True)
+    lc_file = tmp_path / f"ASASSN-TEST-{baseline_func}.csv"
+    _write_skypatrol_csv(lc_file)
+
+    payload = {
+        "path": str(lc_file),
+        "asas_sn_id": f"ASASSN-TEST-{baseline_func}",
+    }
+
+    captured: dict[str, object] = {}
+
+    def fake_baseline(df: pd.DataFrame, **kwargs) -> pd.DataFrame:
+        captured["kwargs"] = dict(kwargs)
+        out = df.copy()
+        out["baseline"] = out["mag"].to_numpy(dtype=float)
+        out["resid"] = 0.0
+        out["sigma_eff"] = out["error"].to_numpy(dtype=float)
+        out["baseline_source"] = baseline_func
+        return out
+
+    interactive_plot_module._BASELINE_CACHE.clear()
+    monkeypatch.setitem(interactive_plot_module.BASELINE_FUNCTIONS, baseline_func, fake_baseline)
+
+    out = build_interactive_lightcurve_figure(
+        payload,
+        plot_dir=plot_dir,
+        selected_cameras=None,
+        filter_bad_cameras=False,
+        show_baseline=True,
+        show_event_markers=False,
+        show_residuals=True,
+        show_phase_fold=False,
+        show_diagnostics=False,
+        confidence_colors=False,
+        run_params={
+            "baseline_func": baseline_func,
+            "baseline_s0": 0.11,
+            "baseline_w0": 0.22,
+            "baseline_q": 0.33,
+            "baseline_jitter": 0.44,
+            "baseline_sigma_floor": 0.55,
+        },
+        uirevision_key=f"baseline-{baseline_func}",
+    )
+
+    assert out["status"] == "ok"
+    kwargs = captured["kwargs"]
+    assert isinstance(kwargs, dict)
+    assert kwargs["S0"] == pytest.approx(0.11)
+    assert kwargs["w0"] == pytest.approx(0.22)
+    assert kwargs["q"] == pytest.approx(0.33)
+    assert kwargs["jitter"] == pytest.approx(0.44)
+    assert kwargs["sigma_floor"] == pytest.approx(0.55)
+    assert kwargs["add_sigma_eff_col"] is True
 
 
 def test_phase_fold_uses_shared_epoch_across_bands(tmp_path: Path) -> None:

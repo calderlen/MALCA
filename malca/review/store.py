@@ -11,11 +11,9 @@ import sqlite3
 import numpy as np
 import pandas as pd
 
-from malca.characterize import characterize_candidates_df
 from malca.config.config_characterize import GAIA_CHUNK_SIZE
 from malca.config.config_paths import VSX_CROSSMATCH_PATH, GAIA_CACHE_FILE
 from malca.review.metadata import normalize_vsx_record
-from malca.vetting import vet_candidates
 
 
 
@@ -614,6 +612,17 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("ltv_neowise_w1_slope",         "REAL",    "float"),  # NEOWISE W1 trend slope (mag/yr)
     ("ltv_neowise_w1_w2_slope",      "REAL",    "float"),  # NEOWISE W1-W2 color trend slope
     ("ltv_neowise_n_epochs",         "INTEGER", "float"),  # number of NEOWISE epochs
+    # -- LTV: stochastic post-filter features --
+    ("ltv_stoch_sf_ml_amplitude",    "REAL",    "float"),
+    ("ltv_stoch_sf_ml_gamma",        "REAL",    "float"),
+    ("ltv_stoch_iar_phi",            "REAL",    "float"),
+    ("ltv_stoch_mhps_high",          "REAL",    "float"),
+    ("ltv_stoch_mhps_low",           "REAL",    "float"),
+    ("ltv_stoch_mhps_non_zero",      "REAL",    "float"),
+    ("ltv_stoch_mhps_pn_flag",       "INTEGER", "bool"),
+    ("ltv_stoch_mhps_ratio",         "REAL",    "float"),
+    ("ltv_stoch_gp_drw_sigma",       "REAL",    "float"),
+    ("ltv_stoch_gp_drw_tau",         "REAL",    "float"),
 ]
 
 # Derived helpers
@@ -625,14 +634,44 @@ _SELECT_COLS = {c[0] for c in _CANDIDATE_COLUMNS if c[2] == "select"}
 _COL_TYPE_MAP = {c[0]: c[2] for c in _CANDIDATE_COLUMNS}
 
 
-def get_distinct_values(conn: sqlite3.Connection, column: str) -> list[str]:
+def get_distinct_values(
+    conn: sqlite3.Connection,
+    column: str,
+    *,
+    source_path: str | None = None,
+    source_paths: list[str] | None = None,
+    source_path_like: str | None = None,
+    source_path_like_any: list[str] | None = None,
+) -> list[str]:
     """Return sorted distinct non-empty values for a select-filter column."""
     if column not in _SELECT_COLS and column not in _TEXT_COLS:
         return []
+
+    where = [f"{column} IS NOT NULL", f"{column} != ''"]
+    params: list[str] = []
+    if source_path:
+        where.append("source_path = ?")
+        params.append(str(source_path))
+    if source_paths:
+        source_paths = [str(p) for p in source_paths if str(p)]
+        if source_paths:
+            placeholders = ",".join(["?"] * len(source_paths))
+            where.append(f"source_path IN ({placeholders})")
+            params.extend(source_paths)
+    if source_path_like:
+        where.append("source_path LIKE ?")
+        params.append(f"%{str(source_path_like)}%")
+    if source_path_like_any:
+        source_path_like_any = [str(v) for v in source_path_like_any if str(v)]
+        if source_path_like_any:
+            where.append("(" + " OR ".join(["source_path LIKE ?"] * len(source_path_like_any)) + ")")
+            params.extend([f"%{value}%" for value in source_path_like_any])
+
     rows = conn.execute(
         f"SELECT DISTINCT {column} FROM candidates "
-        f"WHERE {column} IS NOT NULL AND {column} != '' "
-        f"ORDER BY {column}"
+        f"WHERE {' AND '.join(where)} "
+        f"ORDER BY {column}",
+        params,
     ).fetchall()
     cleaned = set()
     for r in rows:
@@ -820,6 +859,8 @@ def import_candidates(
     df_use = df
     if characterize_before_import:
         try:
+            from malca.characterize import characterize_candidates_df
+
             df_use = characterize_candidates_df(
                 df,
                 crossmatch=characterize_crossmatch,
@@ -847,6 +888,8 @@ def import_candidates(
 
     if vet_before_import:
         try:
+            from malca.vetting import vet_candidates
+
             # --- vetting cache: skip candidates already vetted ----
             # Use file-based cache for real paths or fetch:// sources
             if source_path and source_path.startswith("fetch://"):
@@ -987,7 +1030,12 @@ def import_candidates(
     return len(rows), int(after - before)
 
 
-def query_queue(conn: sqlite3.Connection, *, filters: dict | None = None) -> pd.DataFrame:
+def query_queue(
+    conn: sqlite3.Connection,
+    *,
+    filters: dict | None = None,
+    ids_only: bool = False,
+) -> pd.DataFrame:
     """Query the candidate queue using filter parameters."""
     if filters is None:
         filters = {}
@@ -1084,30 +1132,37 @@ def query_queue(conn: sqlite3.Connection, *, filters: dict | None = None) -> pd.
     if not order_parts:
         order_parts.append(f"c.candidate_id {direction}")
 
-    query = f"""
-        SELECT
-            c.candidate_id,
-            c.asas_sn_id,
-            c.lc_path,
-            c.failed_any,
-            c.periodic_flag,
-            c.catalog_match,
-            c.high_ruwe_flag,
-            c.periodicity_score,
-            c.lsp_bootstrap_sig,
-            c.lsp_power,
-            c.lsp_period,
-            c.dip_best_log_bf,
-            c.jump_best_log_bf,
-            r.interest_score,
-            r.review_pass,
-            r.status,
-            r.notes,
-            r.reviewer,
-            r.updated_at
-        FROM candidates c
-        LEFT JOIN reviews r ON r.candidate_id = c.candidate_id
-    """
+    if ids_only:
+        query = """
+            SELECT c.candidate_id
+            FROM candidates c
+            LEFT JOIN reviews r ON r.candidate_id = c.candidate_id
+        """
+    else:
+        query = f"""
+            SELECT
+                c.candidate_id,
+                c.asas_sn_id,
+                c.lc_path,
+                c.failed_any,
+                c.periodic_flag,
+                c.catalog_match,
+                c.high_ruwe_flag,
+                c.periodicity_score,
+                c.lsp_bootstrap_sig,
+                c.lsp_power,
+                c.lsp_period,
+                c.dip_best_log_bf,
+                c.jump_best_log_bf,
+                r.interest_score,
+                r.review_pass,
+                r.status,
+                r.notes,
+                r.reviewer,
+                r.updated_at
+            FROM candidates c
+            LEFT JOIN reviews r ON r.candidate_id = c.candidate_id
+        """
     if where:
         query += " WHERE " + " AND ".join(where)
     order_clause = ", ".join(order_parts)

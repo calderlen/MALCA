@@ -11,6 +11,8 @@ SIDEBAR_GROUPS = [
     ("Vetting", [
         ("bool", "vetting_likely_known"),
         ("num", "pm_cluster_offset_sigma"),
+        ("num", "pm_total"),
+        ("bool", "high_pm_flag"),
         ("select", "vsx_class"),
         ("select", "asassn_var_type"),
         ("select", "gaia_var_class"),
@@ -36,6 +38,18 @@ SIDEBAR_GROUPS = [
         ("bool", "ltv_vsx_match"),
         ("bool", "ltv_milliquas_match"),
         ("bool", "ltv_gaia_alert_match"),
+    ]),
+    ("LTV Stochastic", [
+        ("num", "ltv_stoch_sf_ml_amplitude"),
+        ("num", "ltv_stoch_sf_ml_gamma"),
+        ("num", "ltv_stoch_iar_phi"),
+        ("num", "ltv_stoch_mhps_high"),
+        ("num", "ltv_stoch_mhps_low"),
+        ("num", "ltv_stoch_mhps_non_zero"),
+        ("bool", "ltv_stoch_mhps_pn_flag"),
+        ("num", "ltv_stoch_mhps_ratio"),
+        ("num", "ltv_stoch_gp_drw_sigma"),
+        ("num", "ltv_stoch_gp_drw_tau"),
     ]),
     ("External Coverage", [
         ("num", "neowise_n_epochs"),
@@ -300,6 +314,8 @@ SIDEBAR_GROUPS = [
         ("num", "hill_radius_rsun"),
     ]),
     ("Fail Flags", [
+        ("bool", "failed_any"),
+        ("bool", "period_conflict_flag"),
         ("bool", "failed_posterior_strength"),
         ("bool", "failed_run_robustness"),
         ("bool", "failed_morphology"),

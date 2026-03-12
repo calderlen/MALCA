@@ -1,118 +1,576 @@
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#react-entry-point,
+#_dash-app-content {
+  height: 100%;
+}
+
+body[data-explorer-theme="black"] {
+  --explorer-app-bg: #000000;
+  --explorer-panel-bg: #0a0a0a;
+  --explorer-sidebar-bg: #0a0a0a;
+  --explorer-border: #2f4658;
+  --explorer-text: #dce8f2;
+  --explorer-muted: #9db4c7;
+  --explorer-accent: #0aa7ff;
+  --explorer-button-bg: #0f1418;
+  --explorer-button-hover: #1d2d3a;
+  --explorer-primary-bg: #173246;
+  --explorer-primary-hover: #1d455f;
+  --explorer-dropdown-bg: #0f1418;
+  --explorer-dropdown-option-bg: #10171d;
+  --explorer-dropdown-text: #dce8f2;
+  --explorer-dropdown-hover: #1d2d3a;
+  --explorer-chip-bg: #173246;
+  --explorer-chip-border: #2f4658;
+  --explorer-focus: rgba(10, 167, 255, 0.28);
+}
+
+body[data-explorer-theme="white"] {
+  color-scheme: light;
+  --explorer-app-bg: #f3f5f7;
+  --explorer-panel-bg: #ffffff;
+  --explorer-sidebar-bg: #ffffff;
+  --explorer-border: #c4ccd5;
+  --explorer-text: #18242f;
+  --explorer-muted: #5f6f7f;
+  --explorer-accent: #245f8f;
+  --explorer-button-bg: #eef2f6;
+  --explorer-button-hover: #e2e8ee;
+  --explorer-primary-bg: #245f8f;
+  --explorer-primary-hover: #1d5078;
+  --explorer-dropdown-bg: #ffffff;
+  --explorer-dropdown-option-bg: #ffffff;
+  --explorer-dropdown-text: #18242f;
+  --explorer-dropdown-hover: #e8eef4;
+  --explorer-chip-bg: #eef2f6;
+  --explorer-chip-border: #c4ccd5;
+  --explorer-focus: rgba(36, 95, 143, 0.22);
+}
+
+body {
+  margin: 0;
+  background: var(--explorer-app-bg);
+  color: var(--explorer-text);
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
 .review-explorer-app,
 .review-explorer-app * {
-  color: #f4f8fb;
   box-sizing: border-box;
+}
+
+.review-explorer-app {
+  height: 100%;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 12px;
+  color: var(--explorer-text);
 }
 
 .review-explorer-app input,
 .review-explorer-app textarea,
 .review-explorer-app button {
-  font-family: Monaco, "Courier New", monospace;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 }
 
+.explorer-topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.explorer-main-header {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.explorer-main-title {
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.explorer-main-subtitle,
+.explorer-status-line,
+.explorer-cut-summary {
+  font-size: 12px;
+  color: var(--explorer-muted);
+}
+
+.explorer-shell {
+  display: grid;
+  grid-template-columns: 420px minmax(0, 1fr);
+  gap: 12px;
+  min-height: 0;
+}
+
+.explorer-shell.sidebar-collapsed {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.explorer-sidebar,
+.explorer-card,
+.explorer-graph-card {
+  background: var(--explorer-panel-bg);
+  border: 1px solid var(--explorer-border);
+  border-radius: 6px;
+}
+
+.explorer-sidebar {
+  overflow-y: auto;
+  overflow-x: visible;
+  padding: 12px;
+}
+
+.explorer-plotmaker-dropdown,
+.explorer-plotmaker-dropdown .Select,
+.explorer-plotmaker-dropdown .Select-control {
+  width: 100% !important;
+}
+
+.explorer-sidebar.is-hidden {
+  display: none;
+}
+
+.explorer-section-title {
+  margin: 0 0 8px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--explorer-accent);
+}
+
+.explorer-field-label {
+  margin: 10px 0 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--explorer-muted);
+}
+
+.explorer-rule {
+  border: 0;
+  border-top: 1px solid var(--explorer-border);
+  margin: 12px 0;
+}
+
+.explorer-two-up {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.explorer-button-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.explorer-inline-checklist,
+.explorer-inline-radio {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.explorer-inline-checklist label,
+.explorer-inline-radio label,
+.explorer-stack-checklist label,
+.explorer-camera-checklist label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 10px;
+  margin-bottom: 6px;
+  color: var(--explorer-text) !important;
+  font-size: 12px;
+}
+
+.explorer-camera-checklist label {
+  display: flex;
+  width: 100%;
+  margin-right: 0;
+}
+
+.explorer-workspace {
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+}
+
+.explorer-left-panel,
+.explorer-right-panel {
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.explorer-left-panel {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+  min-width: 620px;
+  padding-right: 12px;
+}
+
+.explorer-right-panel {
+  flex: 1 1 auto;
+  min-width: 420px;
+  display: grid;
+  gap: 12px;
+  align-content: start;
+  padding-left: 12px;
+}
+
+.explorer-panel-splitter {
+  position: relative;
+  flex: 0 0 18px;
+  background: var(--explorer-border);
+  cursor: col-resize;
+  border-radius: 4px;
+}
+
+.explorer-panel-splitter.dragging {
+  background: var(--explorer-accent);
+}
+
+.explorer-panel-splitter::before {
+  content: "< >";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  padding: 2px 4px;
+  border: 1px solid var(--explorer-border);
+  border-radius: 4px;
+  background: var(--explorer-panel-bg);
+  color: var(--explorer-muted);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.08em;
+}
+
+.explorer-card,
+.explorer-graph-card {
+  padding: 12px;
+}
+
+.explorer-card-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--explorer-text);
+}
+
+.explorer-summary {
+  display: grid;
+  gap: 8px;
+}
+
+.explorer-graph-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.explorer-action-btn,
+.explorer-reset-btn,
 .review-explorer-app button,
 .review-explorer-app .dash-table-container button,
-.review-explorer-app .previous-next-container button,
-.review-explorer-app .page-number input {
-  background: #16222c !important;
-  color: #f4f8fb !important;
-  border: 1px solid #243645 !important;
+.review-explorer-app .previous-next-container button {
+  background: var(--explorer-button-bg) !important;
+  color: var(--explorer-text) !important;
+  border: 1px solid var(--explorer-border) !important;
+  border-radius: 4px !important;
+  padding: 7px 10px !important;
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  cursor: pointer;
 }
 
+.explorer-primary-btn {
+  background: var(--explorer-primary-bg) !important;
+  border-color: var(--explorer-primary-bg) !important;
+}
+
+.explorer-action-btn:hover,
+.explorer-reset-btn:hover,
 .review-explorer-app button:hover,
 .review-explorer-app .dash-table-container button:hover,
 .review-explorer-app .previous-next-container button:hover {
-  background: #1d2d39 !important;
-  color: #f4f8fb !important;
+  background: var(--explorer-button-hover) !important;
 }
 
-.review-explorer-app button:focus,
-.review-explorer-app input:focus,
-.review-explorer-app textarea:focus,
-.review-explorer-app .Select.is-focused > .Select-control {
-  outline: none;
-  box-shadow: 0 0 0 1px rgba(111, 212, 255, 0.35) !important;
-}
-
-.review-explorer-app label,
-.review-explorer-app summary,
-.review-explorer-app .dash-table-container,
-.review-explorer-app .dash-table-container * {
-  color: #f4f8fb;
+.explorer-primary-btn:hover {
+  background: var(--explorer-primary-hover) !important;
 }
 
 .review-explorer-app input,
-.review-explorer-app textarea {
-  background: #101923;
-  color: #f4f8fb;
-  border: 1px solid #243645;
+.review-explorer-app textarea,
+.review-explorer-app .page-number input {
+  background: var(--explorer-panel-bg) !important;
+  color: var(--explorer-text) !important;
+  border: 1px solid var(--explorer-border) !important;
+  border-radius: 4px !important;
 }
 
 .review-explorer-app input::placeholder,
 .review-explorer-app textarea::placeholder {
-  color: #8da4b5;
+  color: var(--explorer-muted) !important;
 }
 
-.review-explorer-app .Select-control,
-.review-explorer-app .Select-menu-outer,
-.review-explorer-app .Select-menu,
-.review-explorer-app .Select-value,
-.review-explorer-app .Select--multi .Select-value,
-.review-explorer-app .Select-option,
-.review-explorer-app .VirtualizedSelectOption,
-.review-explorer-app .VirtualizedSelectFocusedOption {
-  background-color: #101923 !important;
-  color: #f4f8fb !important;
-  border-color: #243645 !important;
+.review-explorer-app input:focus,
+.review-explorer-app textarea:focus,
+.review-explorer-app button:focus,
+body[data-explorer-theme] .Select.is-focused > .Select-control,
+body[data-explorer-theme] .Select-control:focus {
+  outline: none !important;
+  box-shadow: 0 0 0 2px var(--explorer-focus) !important;
 }
 
-.review-explorer-app .Select-menu-outer,
-.review-explorer-app .Select-menu,
-.review-explorer-app .Select-option,
-.review-explorer-app .VirtualizedSelectGrid,
-.review-explorer-app .VirtualizedSelectOption {
-  background: #101923 !important;
+body[data-explorer-theme] .Select-control,
+body[data-explorer-theme] .Select-menu-outer,
+body[data-explorer-theme] .Select-menu,
+body[data-explorer-theme] .Select-option,
+body[data-explorer-theme] .VirtualizedSelectOption,
+body[data-explorer-theme] .VirtualizedSelectFocusedOption,
+body[data-explorer-theme] .Select-value,
+body[data-explorer-theme] .Select-placeholder,
+body[data-explorer-theme] .Select-input > input,
+body[data-explorer-theme] .Select-arrow-zone,
+body[data-explorer-theme] .Select-clear-zone,
+body[data-explorer-theme] .Select-value-label,
+body[data-explorer-theme] .Select-option.is-focused,
+body[data-explorer-theme] .Select-option.is-selected {
+  color: var(--explorer-dropdown-text) !important;
 }
 
-.review-explorer-app .Select-menu-outer {
-  border: 1px solid #243645 !important;
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45) !important;
+body[data-explorer-theme] .Select-control,
+body[data-explorer-theme] .Select-menu-outer,
+body[data-explorer-theme] .Select-menu,
+body[data-explorer-theme] .VirtualizedSelectGrid {
+  background: var(--explorer-dropdown-bg) !important;
+  border-color: var(--explorer-border) !important;
 }
 
-.review-explorer-app .Select-control {
+body[data-explorer-theme] .Select-control {
+  min-height: 28px;
+  height: 28px !important;
+  border-radius: 4px !important;
+  box-shadow: none !important;
+}
+
+body[data-explorer-theme] .Select-menu-outer {
+  border: 1px solid var(--explorer-border) !important;
+  background: var(--explorer-dropdown-bg) !important;
+  min-width: 560px !important;
+  width: max-content !important;
+  max-width: min(720px, calc(100vw - 24px)) !important;
+  z-index: 1200 !important;
+}
+
+body[data-explorer-theme] .explorer-plotmaker-dropdown .Select-menu-outer,
+body[data-explorer-theme] .explorer-plotmaker-dropdown .Select-menu,
+body[data-explorer-theme] .explorer-plotmaker-dropdown .VirtualizedSelectGrid {
+  min-width: 640px !important;
+  max-width: min(920px, calc(100vw - 24px)) !important;
+}
+
+body[data-explorer-theme] .Select-option,
+body[data-explorer-theme] .VirtualizedSelectOption,
+body[data-explorer-theme] .dash-dropdown-option,
+body[data-explorer-theme] div[role="option"] {
+  background: var(--explorer-dropdown-option-bg) !important;
+  color: var(--explorer-dropdown-text) !important;
+  border-bottom: 1px solid var(--explorer-border) !important;
+  opacity: 1 !important;
+  font-size: 11px !important;
+  padding: 6px 8px !important;
+}
+
+body[data-explorer-theme] .Select-menu-outer,
+body[data-explorer-theme] .Select-menu-outer *,
+body[data-explorer-theme] .Select-menu-outer div,
+body[data-explorer-theme] .Select-menu-outer span,
+body[data-explorer-theme] .Select-menu-outer label,
+body[data-explorer-theme] .Select-menu-outer a,
+body[data-explorer-theme] .Select-menu-outer button,
+body[data-explorer-theme] .Select-menu-outer strong,
+body[data-explorer-theme] .Select-menu-outer b,
+body[data-explorer-theme] .Select-menu-outer i,
+body[data-explorer-theme] .Select-menu-outer em,
+body[data-explorer-theme] .Select-option,
+body[data-explorer-theme] .VirtualizedSelectOption,
+body[data-explorer-theme] .Select * {
+  color: var(--explorer-dropdown-text) !important;
+}
+
+body[data-explorer-theme] .Select-option.is-focused,
+body[data-explorer-theme] .Select-option.is-selected,
+body[data-explorer-theme] .VirtualizedSelectFocusedOption,
+body[data-explorer-theme] .dash-dropdown-option:hover,
+body[data-explorer-theme] .dash-dropdown-option.selected,
+body[data-explorer-theme] div[role="option"]:hover {
+  background: var(--explorer-dropdown-hover) !important;
+  color: var(--explorer-dropdown-text) !important;
+}
+
+body[data-explorer-theme] .Select-option.is-focused *,
+body[data-explorer-theme] .Select-option.is-selected *,
+body[data-explorer-theme] .VirtualizedSelectFocusedOption * {
+  background: var(--explorer-dropdown-hover) !important;
+  color: var(--explorer-dropdown-text) !important;
+}
+
+body[data-explorer-theme] .Select-placeholder,
+body[data-explorer-theme] .Select-value-label {
+  color: var(--explorer-muted) !important;
+  font-size: 11px !important;
+  line-height: 26px !important;
+}
+
+body[data-explorer-theme] .Select-input {
+  height: 26px !important;
+}
+
+body[data-explorer-theme] .Select-arrow-zone {
+  padding-right: 5px !important;
+}
+
+body[data-explorer-theme] .Select-arrow {
+  border-top-color: var(--explorer-dropdown-text) !important;
+}
+
+body[data-explorer-theme] .Select--multi .Select-value {
+  background: var(--explorer-chip-bg) !important;
+  border: 1px solid var(--explorer-chip-border) !important;
+  border-radius: 4px !important;
+}
+
+body[data-explorer-theme] .Select--multi .Select-value-icon {
+  border-right: 1px solid var(--explorer-chip-border) !important;
+  color: var(--explorer-dropdown-text) !important;
+}
+
+.explorer-review-stats .metadata-sections {
+  background: var(--explorer-panel-bg);
+  border: 1px solid var(--explorer-border);
   border-radius: 6px;
+  padding: 0 10px;
 }
 
-.review-explorer-app .Select-placeholder,
-.review-explorer-app .Select-value-label,
-.review-explorer-app .Select-input > input,
-.review-explorer-app .Select-arrow-zone,
-.review-explorer-app .Select-clear-zone,
-.review-explorer-app .VirtualizedSelectOption,
-.review-explorer-app .Select-option,
-.review-explorer-app .Select-option.is-focused,
-.review-explorer-app .Select-option.is-selected {
-  color: #f4f8fb !important;
+.explorer-review-stats .metadata-sections details {
+  border-bottom: 1px solid var(--explorer-border);
 }
 
-.review-explorer-app .VirtualizedSelectFocusedOption,
-.review-explorer-app .Select-option.is-focused,
-.review-explorer-app .Select-option.is-selected {
-  background-color: #1c2a36 !important;
+.explorer-review-stats .metadata-sections details:last-child {
+  border-bottom: 0;
 }
 
-.review-explorer-app .Select-control .Select-value,
-.review-explorer-app .Select-control .Select-placeholder {
-  background: transparent !important;
+.explorer-review-stats .metadata-sections summary {
+  cursor: pointer;
+  padding: 6px 4px;
+  color: var(--explorer-accent);
+  font-size: 11px;
+  font-weight: 700;
+  user-select: none;
+}
+
+.explorer-review-stats .metadata-sections summary:hover {
+  color: var(--explorer-text);
+}
+
+.explorer-review-stats .metadata-sections .meta-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 2px 4px 8px;
+  font-size: 11px;
+}
+
+.explorer-review-stats .meta-field-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 0;
+  border-bottom: 1px solid var(--explorer-border);
+}
+
+.explorer-review-stats .meta-field-row:last-child {
+  border-bottom: 0;
+}
+
+.explorer-review-stats .meta-field-label {
+  color: var(--explorer-muted);
+  flex-shrink: 0;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.explorer-review-stats .stat-field-label {
+  text-transform: none;
+  letter-spacing: 0.2px;
+}
+
+.explorer-review-stats .meta-field-value {
+  color: var(--explorer-text);
+  text-align: right;
+  font-weight: 600;
+  word-break: break-word;
+  white-space: normal;
+}
+
+.explorer-review-stats .meta-field-label p,
+.explorer-review-stats .meta-field-value p {
+  margin: 0;
+}
+
+.review-explorer-app .dash-table-container,
+.review-explorer-app .dash-table-container * {
+  color: var(--explorer-text) !important;
 }
 
 .review-explorer-app .dash-table-container .dash-spreadsheet-container .dash-spreadsheet-inner td,
 .review-explorer-app .dash-table-container .dash-spreadsheet-container .dash-spreadsheet-inner th {
-  color: #f4f8fb !important;
+  background: var(--explorer-panel-bg) !important;
+  border-color: var(--explorer-border) !important;
 }
 
 .review-explorer-app .dash-table-tooltip {
-  background: #101923 !important;
-  color: #f4f8fb !important;
-  border: 1px solid #243645 !important;
+  background: var(--explorer-panel-bg) !important;
+  color: var(--explorer-text) !important;
+  border: 1px solid var(--explorer-border) !important;
+}
+
+@media (max-width: 1080px) {
+  .explorer-shell,
+  .explorer-shell.sidebar-collapsed {
+    grid-template-columns: 1fr;
+  }
+
+  .explorer-workspace {
+    flex-direction: column;
+  }
+
+  .explorer-left-panel,
+  .explorer-right-panel {
+    min-width: 0;
+    padding: 0;
+  }
+
+  .explorer-panel-splitter {
+    display: none;
+  }
 }

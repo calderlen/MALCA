@@ -263,6 +263,91 @@ def test_update_header_key_info_shows_cluster_and_local_lc_paths(tmp_path: Path,
     assert bottom_items["DB"] == str(db_path)
 
 
+def test_baseline_provenance_warning_flags_imported_skypatrol(tmp_path: Path) -> None:
+    lc_path = tmp_path / "FETCH-BASELINE.csv"
+    _write_skypatrol_csv(lc_path)
+
+    warning = review_app._baseline_provenance_warning(
+        {"path": str(lc_path), "lc_path": str(lc_path)},
+        plot_dir=None,
+        run_params={"baseline_func": "gp"},
+        stored_lc_path=str(lc_path),
+        source_path="fetch://skypatrol2/asassn/FETCH-BASELINE",
+    )
+
+    assert warning is not None
+    assert "imported SkyPatrol" in warning
+
+
+def test_update_diagnostic_plots_renders_candidate_first_without_background(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "review.db"
+    with db_connect(db_path) as conn:
+        import_candidates(
+            conn,
+            pd.DataFrame([{"candidate_id": "DIAG-1", "asas_sn_id": "DIAG-1"}]),
+            source_path="fetch://skypatrol2/asassn/DIAG-1",
+            characterize_before_import=False,
+            vet_before_import=False,
+        )
+
+    captured: dict[str, object] = {}
+
+    def fake_render(payload: dict, theme: str, background=None):
+        captured["payload"] = dict(payload)
+        captured["background"] = background
+        return ["candidate-only"]
+
+    monkeypatch.setattr(review_app, "DB_PATH", str(db_path))
+    monkeypatch.setattr(review_app, "_render_diagnostic_plots", fake_render)
+
+    panels, status = review_app.update_diagnostic_plots(
+        True,
+        "DIAG-1",
+        review_app.DEFAULT_THEME,
+        {"signature": "", "ready": False, "cached": False, "token": 0},
+    )
+
+    assert panels == ["candidate-only"]
+    assert captured["background"] is None
+    assert status.startswith("Showing candidate diagnostics first")
+
+
+def test_update_diagnostic_plots_uses_cached_background_when_ready(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "review.db"
+    with db_connect(db_path) as conn:
+        import_candidates(
+            conn,
+            pd.DataFrame([{"candidate_id": "DIAG-2", "asas_sn_id": "DIAG-2"}]),
+            source_path="fetch://skypatrol2/asassn/DIAG-2",
+            characterize_before_import=False,
+            vet_before_import=False,
+        )
+
+    captured: dict[str, object] = {}
+    cached_background = {"plane_periodicity": [1.0, 2.0]}
+
+    def fake_render(payload: dict, theme: str, background=None):
+        captured["background"] = background
+        return ["with-background"]
+
+    monkeypatch.setattr(review_app, "DB_PATH", str(db_path))
+    monkeypatch.setattr(review_app, "_render_diagnostic_plots", fake_render)
+
+    signature = review_app._diagnostic_background_signature(str(db_path))
+    review_app._store_cached_diagnostic_background(signature, cached_background)
+
+    panels, status = review_app.update_diagnostic_plots(
+        True,
+        "DIAG-2",
+        review_app.DEFAULT_THEME,
+        {"signature": signature, "ready": True, "cached": True, "token": 1},
+    )
+
+    assert panels == ["with-background"]
+    assert captured["background"] == cached_background
+    assert status == "Population background loaded."
+
+
 def test_open_existing_candidate_matches_local_lc_stem(tmp_path: Path, monkeypatch) -> None:
     db_path = tmp_path / "review.db"
     local_lc_path = tmp_path / "lightcurves" / "LC-SEARCH-1.csv"

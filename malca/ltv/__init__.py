@@ -77,6 +77,9 @@ from malca.ltv.gaia_epoch import (
     query_gaia_epoch_photometry_batch,
     apply_gaia_epoch_flags,
 )
+from malca.ltv.stochastic import (
+    add_stochastic_postfilter_features,
+)
 from malca.ltv.pipeline import (
     run_full_pipeline,
 )
@@ -135,6 +138,8 @@ __all__ = [
     # Gaia epoch photometry
     "query_gaia_epoch_photometry_batch",
     "apply_gaia_epoch_flags",
+    # Stochastic post-filter features
+    "add_stochastic_postfilter_features",
     # Pipeline
     "run_full_pipeline",
     # Optimization

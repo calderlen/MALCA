@@ -11,6 +11,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 
+from malca.review.app import _render_stat_cards
 from malca.review.explore_data import (
     CandidateSourceData,
     _normalized_id,
@@ -124,13 +125,13 @@ def _summary_items(record: dict[str, object]) -> list[tuple[str, str]]:
 def _render_summary(record: dict[str, object]) -> html.Div:
     items = _summary_items(record)
     if not items:
-        return html.Div("No candidate summary available.", style={"color": "#c9d5df", "fontSize": "12px"})
+        return html.Div("No candidate summary available.", style={"color": "var(--explorer-text-muted, #c9d5df)", "fontSize": "12px"})
     return html.Div(
         [
             html.Div(
                 [
-                    html.Span(f"{label}: ", style={"fontSize": "11px", "color": "#88a5bb"}),
-                    html.Span(value, style={"fontSize": "11px", "color": "#f5f9fc"}),
+                    html.Span(f"{label}: ", style={"fontSize": "11px", "color": "var(--explorer-text-faint, #88a5bb)", "fontWeight": "600"}),
+                    html.Span(value, style={"fontSize": "11px", "color": "var(--explorer-text, #f5f9fc)"}),
                 ],
                 style={"padding": "2px 0", "display": "flex", "gap": "4px", "flexWrap": "wrap"},
             )
@@ -142,20 +143,8 @@ def _render_summary(record: dict[str, object]) -> html.Div:
 
 def _render_stats(stat_rows: list[tuple[str, str]]) -> html.Div:
     if not stat_rows:
-        return html.Div("No precomputed light-curve stats available.", style={"color": "#c9d5df", "fontSize": "12px"})
-    return html.Div(
-        [
-            html.Div(
-                [
-                    html.Span(key, style={"color": "#86a7bd", "fontSize": "10px", "textTransform": "uppercase"}),
-                    html.Span(value, style={"color": "#eef3f7", "fontSize": "11px", "textAlign": "right", "wordBreak": "break-word"}),
-                ],
-                style={"display": "grid", "gridTemplateColumns": "1fr auto", "gap": "12px", "padding": "5px 0", "borderBottom": "1px solid rgba(60, 86, 104, 0.4)"},
-            )
-            for key, value in stat_rows
-        ],
-        style={"maxHeight": "360px", "overflowY": "auto", "padding": "4px 0"},
-    )
+        return html.Div("No precomputed light-curve stats available.", style={"color": "var(--explorer-text-muted, #c9d5df)", "fontSize": "12px"})
+    return html.Div(_render_stat_cards(stat_rows), className="explorer-review-stats")
 
 
 def build_mini_viewer_app(source_data: CandidateSourceData, *, host: str, port: int) -> dash.Dash:
