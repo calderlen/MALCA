@@ -9,6 +9,7 @@ import glob as globlib
 import importlib
 import json
 import logging
+import math
 import multiprocessing
 import os
 import re
@@ -5426,7 +5427,8 @@ for _grp_name, _grp_items in _SIDEBAR_GROUPS:
 # Build the State list for the callback decorator dynamically.
 _queue_states = (
     [State('filter-unreviewed', 'value'),
-     State('filter-failed', 'value')]
+     State('filter-failed', 'value'),
+     State('numeric-filter-bounds', 'data')]
     + [State(cid, 'value') for cid, _ in _BOOL_MODE_STATES]
     + [State(cid, 'value') for cid, _ in _NUM_INPUT_STATES]
     + [State(cid, 'value') for cid, _ in _TEXT_STATES]
@@ -5440,6 +5442,63 @@ _SIDEBAR_FILTER_OUTPUTS = (
     [Output(cid, 'options') for cid, _ in _TEXT_STATES]
     + [Output(cid, 'options') for cid, _ in _SELECT_STATES]
 )
+
+
+def _normalize_numeric_filter_value(
+    fkey: str,
+    raw_value: object,
+    bounds_data: dict[str, dict[str, float | None]] | None,
+) -> float | None:
+    """Treat full-range numeric inputs as unset queue filters."""
+    if raw_value in ("", None):
+        return None
+
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        return None
+
+    if not np.isfinite(value):
+        return None
+
+    if fkey.startswith("min_"):
+        col = fkey[4:]
+        bound_key = "min"
+    elif fkey.startswith("max_"):
+        col = fkey[4:]
+        bound_key = "max"
+    else:
+        return value
+
+    info = (bounds_data or {}).get(col) or {}
+    bound = info.get(bound_key)
+    if bound is None:
+        return None
+
+    try:
+        bound_value = float(bound)
+    except (TypeError, ValueError):
+        return None
+
+    if not np.isfinite(bound_value):
+        return None
+
+    abs_tol = 1e-9 * max(1.0, abs(bound_value))
+    if math.isclose(value, bound_value, rel_tol=1e-9, abs_tol=abs_tol):
+        return None
+
+    return value
+
+
+def _normalize_numeric_filter_inputs(
+    bounds_data: dict[str, dict[str, float | None]] | None,
+    raw_values: dict[str, object],
+) -> dict[str, float | None]:
+    """Normalize numeric queue filters against the current slider bounds."""
+    return {
+        fkey: _normalize_numeric_filter_value(fkey, raw_value, bounds_data)
+        for fkey, raw_value in raw_values.items()
+    }
 
 
 def _load_numeric_filter_bounds(queue_source_scope):
@@ -5620,10 +5679,10 @@ app.clientside_callback(
         } else {
             lower = currentMin !== null
                 ? clamp(currentMin, sliderLo, sliderHi, dataLo)
-                : (currentRangeMin !== null ? clamp(currentRangeMin, sliderLo, sliderHi, dataLo) : dataLo);
+                : dataLo;
             upper = currentMax !== null
                 ? clamp(currentMax, sliderLo, sliderHi, dataHi)
-                : (currentRangeMax !== null ? clamp(currentRangeMax, sliderLo, sliderHi, dataHi) : dataHi);
+                : dataHi;
             if (lower > upper) {
                 const temp = lower;
                 lower = upper;
@@ -5665,6 +5724,7 @@ def load_queue(refresh_clicks, import_trigger, queue_source_scope, *state_values
         it = iter(state_values)
         filter_unreviewed = next(it)
         filter_failed = next(it)
+        numeric_bounds = next(it) or {}
 
         filter_params: dict = {
             'only_unreviewed': 'yes' in (filter_unreviewed or []),
@@ -5672,9 +5732,10 @@ def load_queue(refresh_clicks, import_trigger, queue_source_scope, *state_values
         }
         for _, fkey in _BOOL_MODE_STATES:
             filter_params[fkey] = next(it) or 'Any'
+        raw_numeric_filters: dict[str, object] = {}
         for _, fkey in _NUM_INPUT_STATES:
-            val = next(it)
-            filter_params[fkey] = val if val not in ('', None) else None
+            raw_numeric_filters[fkey] = next(it)
+        filter_params.update(_normalize_numeric_filter_inputs(numeric_bounds, raw_numeric_filters))
         for _, fkey in _TEXT_STATES:
             val = next(it)
             filter_params[fkey] = val.strip() if val else None
@@ -5692,7 +5753,10 @@ def load_queue(refresh_clicks, import_trigger, queue_source_scope, *state_values
         filter_params.update(_queue_scope_filter_kwargs(queue_source_scope))
 
         queue_data = create_queue_data_dict(conn, filter_params)
-        active_filters = {k: v for k, v in filter_params.items() if v and v != 'Any'}
+        active_filters = {
+            k: v for k, v in filter_params.items()
+            if v not in (None, 'Any', [])
+        }
         print(f"[queue] size={queue_data['queue_size']} active_filters={active_filters}")
         return queue_data
 

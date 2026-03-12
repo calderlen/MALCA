@@ -434,6 +434,80 @@ def test_query_queue_supports_multiple_source_paths(tmp_path: Path) -> None:
     assert set(out["candidate_id"].tolist()) == {"A-1", "B-1"}
 
 
+def test_default_numeric_bounds_are_treated_as_unset_filters(tmp_path: Path) -> None:
+    db_path = tmp_path / "review.db"
+    bounds = {
+        "ltv_slope": {"min": 0.2, "max": 0.2},
+        "ltv_dispersion": {"min": 0.4, "max": 0.4},
+    }
+    raw_numeric = {
+        "min_ltv_slope": 0.2,
+        "max_ltv_slope": 0.2,
+        "min_ltv_dispersion": 0.4,
+        "max_ltv_dispersion": 0.4,
+    }
+
+    with db_connect(db_path) as conn:
+        import_candidates(
+            conn,
+            pd.DataFrame([{"candidate_id": "NUM-1", "ltv_slope": 0.2}]),
+            source_path="test://num-1",
+            characterize_before_import=False,
+            vet_before_import=False,
+        )
+        import_candidates(
+            conn,
+            pd.DataFrame([{"candidate_id": "NUM-2", "ltv_dispersion": 0.4}]),
+            source_path="test://num-2",
+            characterize_before_import=False,
+            vet_before_import=False,
+        )
+
+        raw_queue = query_queue(
+            conn,
+            filters={
+                "only_unreviewed": True,
+                "require_failed_any_false": True,
+                **raw_numeric,
+            },
+        )
+        normalized_numeric = review_app._normalize_numeric_filter_inputs(bounds, raw_numeric)
+        normalized_queue = query_queue(
+            conn,
+            filters={
+                "only_unreviewed": True,
+                "require_failed_any_false": True,
+                **normalized_numeric,
+            },
+        )
+
+    assert raw_queue.empty
+    assert normalized_numeric == {
+        "min_ltv_slope": None,
+        "max_ltv_slope": None,
+        "min_ltv_dispersion": None,
+        "max_ltv_dispersion": None,
+    }
+    assert set(normalized_queue["candidate_id"].tolist()) == {"NUM-1", "NUM-2"}
+
+
+def test_normalize_numeric_filter_inputs_preserves_narrowed_ranges() -> None:
+    bounds = {"ltv_slope": {"min": -0.5, "max": 0.5}}
+
+    normalized = review_app._normalize_numeric_filter_inputs(
+        bounds,
+        {
+            "min_ltv_slope": -0.1,
+            "max_ltv_slope": 0.4,
+        },
+    )
+
+    assert normalized == {
+        "min_ltv_slope": -0.1,
+        "max_ltv_slope": 0.4,
+    }
+
+
 def test_import_candidates_callback_accepts_multiple_files(tmp_path: Path, monkeypatch) -> None:
     db_path = tmp_path / "review.db"
     src_a = tmp_path / "first.csv"
