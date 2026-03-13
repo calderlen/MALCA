@@ -807,12 +807,11 @@ def apply_all_filters(
     3. South pole (vectorized)
     4. REFCAT magnitude offset (vectorized) — paper Fig. 1
     5. Photometric scatter (vectorized)
-    6. V/g overlap (vectorized)
-    7. Eclipsing binary signature (vectorized)
-    8. Bright star artifacts (batch Gaia TAP)
-    9. High proper motion (batch Gaia TAP)
-    10. Neighbor high-PM contamination (batch Gaia TAP) — paper §2
-    11. Crowding (batch Gaia TAP)
+    6. Eclipsing binary signature (vectorized)
+    7. Bright star artifacts (batch Gaia TAP)
+    8. High proper motion (batch Gaia TAP)
+    9. Neighbor high-PM contamination (batch Gaia TAP) — paper §2
+    10. Crowding (batch Gaia TAP)
     """
     n0 = len(df)
 
@@ -842,11 +841,12 @@ def apply_all_filters(
             verbose=verbose,
             log_csv=log_csv,
         )
-        df = filter_vg_overlap(
-            df,
-            verbose=verbose,
-            log_csv=log_csv,
-        )
+        # Disabled as LTV trends are analyzed only in g-band
+        # df = filter_vg_overlap(
+        #     df,
+        #     verbose=verbose,
+        #     log_csv=log_csv,
+        # )
         df = filter_eclipsing_binary_signature(
             df,
             max_eb_period_days=max_eb_period_days,

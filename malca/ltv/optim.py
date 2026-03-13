@@ -26,7 +26,7 @@ from malca.config.config_stats import MAD_SCALE
 from numba import jit, prange
 
 
-@jit(nopython=True, cache=True)
+@jit(nopython=True)
 def _detrend_fast(JD: np.ndarray, mag: np.ndarray, slope: float, intercept: float) -> np.ndarray:
     """Numba-accelerated detrending. 10-100x faster than numpy."""
     n = len(JD)
@@ -38,7 +38,7 @@ def _detrend_fast(JD: np.ndarray, mag: np.ndarray, slope: float, intercept: floa
     return result
 
 
-@jit(nopython=True, cache=True)
+@jit(nopython=True)
 def _polyfit_linear_fast(x: np.ndarray, y: np.ndarray) -> tuple:
     """Numba-accelerated linear polyfit. Returns (slope, intercept)."""
     n = len(x)
@@ -63,7 +63,7 @@ def _polyfit_linear_fast(x: np.ndarray, y: np.ndarray) -> tuple:
     return slope, intercept
 
 
-@jit(nopython=True, cache=True)
+@jit(nopython=True)
 def _median_fast(arr: np.ndarray) -> float:
     """Numba-accelerated median."""
     n = len(arr)
@@ -76,7 +76,7 @@ def _median_fast(arr: np.ndarray) -> float:
         return sorted_arr[n//2]
 
 
-@jit(nopython=True, cache=True)
+@jit(nopython=True)
 def _mad_fast(arr: np.ndarray) -> float:
     """Numba-accelerated median absolute deviation."""
     n = len(arr)
@@ -89,7 +89,7 @@ def _mad_fast(arr: np.ndarray) -> float:
     return _median_fast(deviations) * MAD_SCALE
 
 
-@jit(nopython=True, cache=True)
+@jit(nopython=True)
 def _season_medians_fast(
     mags: np.ndarray,
     season_idx: np.ndarray,

@@ -43,6 +43,9 @@ import pyarrow.parquet as pq
 from astropy.stats import mad_std
 from astropy.table import Table
 from astropy.timeseries import LombScargle
+import celerite2
+from celerite2 import terms
+from scipy.optimize import minimize
 from tqdm import tqdm
 
 from malca.config.config_ltv import (
@@ -236,6 +239,126 @@ def compute_vg_overlap_stats(df_g: pd.DataFrame, df_v: pd.DataFrame) -> tuple[bo
     frac = overlap / union if union > 0 else 0.0
 
     return True, float(overlap), float(frac)
+
+
+def _fit_joint_band_offset(df_g: pd.DataFrame, df_v: pd.DataFrame, overlap_buffer_days: float = 100.0) -> float:
+    """
+    Fits a joint Gaussian Process to V and g band data to robustly determine the 
+    V-g magnitude offset during their overlap period.
+    
+    Uses a standard SHO kernel for stellar variability and a custom mean model
+    where m(t) = mu + (delta * is_v_band). By optimizing the joint likelihood,
+    the GP solves for the offset `delta` that seamlessly aligns the light curves.
+    """
+
+    # Determine overlap region with buffer to avoid boundary artifacts
+    g_min, g_max = df_g["JD"].min(), df_g["JD"].max()
+    v_min, v_max = df_v["JD"].min(), df_v["JD"].max()
+    
+    overlap_start = max(g_min, v_min) - overlap_buffer_days
+    overlap_end = min(g_max, v_max) + overlap_buffer_days
+    
+    # Filter data to overlap region
+    g_mask = (df_g["JD"] >= overlap_start) & (df_g["JD"] <= overlap_end)
+    v_mask = (df_v["JD"] >= overlap_start) & (df_v["JD"] <= overlap_end)
+    
+    g_sub = df_g[g_mask].copy()
+    v_sub = df_v[v_mask].copy()
+    
+    # Combine data for joint fit
+    g_sub["is_v"] = 0.0
+    v_sub["is_v"] = 1.0
+    
+    df_joint = pd.concat([g_sub, v_sub], ignore_index=True).sort_values("JD").reset_index(drop=True)
+    
+    if len(df_joint) < 10:
+        # Fallback to simple median matching if not enough points for GP
+        return float(np.median(v_sub["mag"]) - np.median(g_sub["mag"]))
+
+    t = df_joint["JD"].values
+    y = df_joint["mag"].values
+    yerr = df_joint["error"].values if "error" in df_joint.columns else np.full_like(y, 0.02)
+    is_v_flag = df_joint["is_v"].values
+
+    # Center timestamps for numerical stability
+    t_center = np.median(t)
+    t_obj = t - t_center
+
+    # Custom celerite2 mean model: mu + (is_v * delta)
+    class BandOffsetMeanModel(celerite2.MeanModel):
+        def __init__(self, mu, delta, is_v_flag):
+            self.mu = mu
+            self.delta = delta
+            self.is_v_flag = is_v_flag
+            self.parameter_names = ("mu", "delta")
+            
+        def get_value(self, x):
+            return self.mu + self.is_v_flag * self.delta
+            
+        def compute_gradient(self, x):
+            return np.array([np.ones_like(x), self.is_v_flag])
+            
+    # Initial guesses
+    mu_guess = np.median(g_sub["mag"]) if len(g_sub) > 0 else np.median(y)
+    v_med = np.median(v_sub["mag"]) if len(v_sub) > 0 else mu_guess
+    delta_guess = v_med - mu_guess
+
+    mean_model = BandOffsetMeanModel(mu=mu_guess, delta=delta_guess, is_v_flag=is_v_flag)
+    
+    # Kernel: SHOTerm (damped random walk/stellar variability) + Jitter
+    sigma_guess = np.var(y)
+    rho_guess = 100.0 # days
+    kernel = terms.SHOTerm(sigma=sigma_guess, rho=rho_guess, Q=1.0) + terms.JitterTerm(log_sigma=np.log(np.median(yerr)))
+
+    gp = celerite2.GaussianProcess(kernel, mean=mean_model)
+    gp.compute(t_obj, yerr=yerr)
+
+    def neg_log_like(params):
+        gp.set_parameter_vector(params)
+        try:
+            return -gp.log_likelihood(y)
+        except Exception:
+            return 1e10
+
+    initial_params = gp.get_parameter_vector()
+    
+    # Bounds to prevent unphysical regimes
+    bounds = gp.get_parameter_bounds()
+    # Relax bounds slightly for the mean model parameters
+    bounds[-2] = (None, None) # mu
+    bounds[-1] = (None, None) # delta
+
+    try:
+        soln = minimize(neg_log_like, initial_params, method="L-BFGS-B", bounds=bounds)
+        gp.set_parameter_vector(soln.x)
+        final_delta = float(gp.mean.delta)
+    except Exception:
+        # Fallback if optimization fails
+        final_delta = float(delta_guess)
+
+    return final_delta
+
+
+def stitch_bands_celerite(df_g: pd.DataFrame, df_v: pd.DataFrame) -> tuple[pd.DataFrame, float]:
+    """
+    Computes V-g offset via joint GP in overlap region, subtracts it from V-band,
+    and returns a seamlessly integrated light curve.
+    
+    Returns:
+        df_combined (pd.DataFrame): Sorted, stitched combined light curve.
+        vg_offset_applied (float): The actual Delta-mag offset subtracted from V.
+    """
+    offset = _fit_joint_band_offset(df_g, df_v)
+    
+    # Apply global magnitude shift to ALL V-band data
+    df_v_shifted = df_v.copy()
+    df_v_shifted["mag"] -= offset
+    
+    # Combine and sort by time
+    df_combined = pd.concat([df_g, df_v_shifted], ignore_index=True)
+    df_combined = df_combined.sort_values("JD").reset_index(drop=True)
+    
+    return df_combined, offset
 
 
 def seasonal_midpoints_from_ra(
@@ -672,10 +795,17 @@ def process_one_lc(
     if df.empty:
         return None
 
-    # V/g overlap statistics retained as diagnostic metadata only; the
-    # g-band trend pipeline does not filter on them.
+    # V/g overlap statistics retained as diagnostic metadata
     df_v_clean = clean_lc(df_v) if not df_v.empty else df_v
     vg_has_v, vg_overlap_days, vg_overlap_frac = compute_vg_overlap_stats(df, df_v_clean)
+    
+    vg_offset_applied = np.nan
+    # Perform Joint GP Stitching if we have usable V-band overlap (e.g. at least 10 days)
+    if vg_has_v and vg_overlap_days > 10.0:
+        try:
+            df, vg_offset_applied = stitch_bands_celerite(df, df_v_clean)
+        except Exception:
+            pass # Fallback to using just g-band if stitching catastrophically fails
 
     JD = df["JD"].to_numpy(dtype=float)
     mag = df["mag"].to_numpy(dtype=float)
@@ -767,6 +897,7 @@ def process_one_lc(
         "vg_has_v": vg_has_v,
         "vg_overlap_days": vg_overlap_days,
         "vg_overlap_fraction": vg_overlap_frac,
+        "vg_offset_applied": vg_offset_applied,
         "ls_period": ls_result["ls_period"],
         "ls_power": ls_result["ls_power"],
         "ls_fap": ls_result["ls_fap"],
