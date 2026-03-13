@@ -1,9 +1,49 @@
 from __future__ import annotations
 
 import math
+import sys
+import types
 
 import numpy as np
 
+if "celerite2" not in sys.modules:
+    fake_celerite2 = types.ModuleType("celerite2")
+
+    class _DummyGP:
+        def __init__(self, *args, **kwargs):
+            _ = args, kwargs
+
+    class _DummyTerm:
+        def __init__(self, *args, **kwargs):
+            _ = args, kwargs
+
+        def __add__(self, other):
+            return self
+
+    fake_celerite2.GaussianProcess = _DummyGP
+    fake_celerite2.terms = types.SimpleNamespace(SHOTerm=_DummyTerm, RealTerm=_DummyTerm)
+    sys.modules["celerite2"] = fake_celerite2
+
+if "iar.IARModel" not in sys.modules:
+    fake_iar_pkg = types.ModuleType("iar")
+    fake_iar_model = types.ModuleType("iar.IARModel")
+
+    def _dummy_iar(*args, **kwargs):
+        _ = args, kwargs
+        return float("nan")
+
+    fake_iar_model.IARphikalman = _dummy_iar
+    fake_iar_pkg.IARModel = fake_iar_model
+    sys.modules["iar"] = fake_iar_pkg
+    sys.modules["iar.IARModel"] = fake_iar_model
+
+from malca.config.config_stats import (
+    STETSON_REWEIGHT_A,
+    STETSON_REWEIGHT_B,
+    STETSON_REWEIGHT_MAX_ITERS,
+    STETSON_REWEIGHT_MIN_ITERS,
+    STETSON_REWEIGHT_RTOL,
+)
 from malca.review.stats_merge import merge_stats_summary_into_payload
 from malca.stats import (
     inverse_von_neumann_ratio,
@@ -12,6 +52,29 @@ from malca.stats import (
     roms_statistic,
     weighted_std,
 )
+
+
+def _reference_stetson_robust_mean(mag: np.ndarray, err: np.ndarray) -> float:
+    weights = 1.0 / np.square(err)
+    mu = float(np.sum(weights * mag) / np.sum(weights))
+    scale = math.sqrt(mag.size / (mag.size - 1.0))
+
+    for idx in range(STETSON_REWEIGHT_MAX_ITERS):
+        resid = np.abs(scale * (mag - mu) / err)
+        factors = 1.0 / (1.0 + np.power(resid / STETSON_REWEIGHT_A, STETSON_REWEIGHT_B))
+        weights = np.maximum(weights * factors, np.finfo(float).tiny)
+        new_mu = float(np.sum(weights * mag) / np.sum(weights))
+        if idx + 1 >= STETSON_REWEIGHT_MIN_ITERS and math.isclose(
+            new_mu,
+            mu,
+            rel_tol=STETSON_REWEIGHT_RTOL,
+            abs_tol=STETSON_REWEIGHT_RTOL,
+        ):
+            mu = new_mu
+            break
+        mu = new_mu
+
+    return mu
 
 
 def test_paper_iqr_uses_median_of_halves_definition() -> None:
@@ -47,13 +110,13 @@ def test_roms_matches_paper_definition() -> None:
 
 def test_paper_stetson_indices_match_manual_single_band_formulae() -> None:
     time = np.array([0.0, 1.0, 2.0, 3.0])
-    mag = np.array([10.0, 10.4, 9.8, 10.3])
+    mag = np.array([10.0, 10.2, 10.1, 11.6])
     err = np.full_like(mag, 0.1)
 
     result = paper_stetson_indices(time, mag, err, dtmax_days=2.0)
 
     n = mag.size
-    mean_mag = np.mean(mag)
+    mean_mag = _reference_stetson_robust_mean(mag, err)
     delta = np.sqrt(n / (n - 1.0)) * (mag - mean_mag) / err
     pair_terms = [((mag[0] - mean_mag) / err[0]) * ((mag[1] - mean_mag) / err[1]), ((mag[2] - mean_mag) / err[2]) * ((mag[3] - mean_mag) / err[3])]
     expected_i = math.sqrt(1.0 / (2.0 * 1.0)) * sum(pair_terms)

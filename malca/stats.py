@@ -24,6 +24,11 @@ from malca.baseline import per_camera_gp_baseline
 from malca.config.config_stats import (
     MAD_SCALE,
     STETSON_PAIR_MAX_DT_DAYS,
+    STETSON_REWEIGHT_A,
+    STETSON_REWEIGHT_B,
+    STETSON_REWEIGHT_MIN_ITERS,
+    STETSON_REWEIGHT_MAX_ITERS,
+    STETSON_REWEIGHT_RTOL,
     SNR_CONVERSION_FACTOR,
     LS_MIN_FREQUENCY,
     LS_MAX_FREQUENCY,
@@ -57,6 +62,56 @@ def robust_sigma(x):
     if x.size == 0:
         return np.nan
     return MAD_SCALE * np.median(np.abs(x - np.median(x)))
+
+
+def _stetson_robust_mean(
+    mag,
+    err,
+    *,
+    a=STETSON_REWEIGHT_A,
+    b=STETSON_REWEIGHT_B,
+    min_iters=STETSON_REWEIGHT_MIN_ITERS,
+    max_iters=STETSON_REWEIGHT_MAX_ITERS,
+    rtol=STETSON_REWEIGHT_RTOL,
+):
+    """Iteratively reweighted mean used by the paper-style Stetson indices."""
+    mag = np.asarray(mag, float)
+    err = np.asarray(err, float)
+    mask = np.isfinite(mag) & np.isfinite(err) & (err > 0)
+    if mask.sum() == 0:
+        return np.nan
+
+    mag = mag[mask]
+    err = err[mask]
+    weights = 1.0 / np.square(err)
+    mu, _ = weighted_mean(mag, weights)
+    if not np.isfinite(mu) or mag.size < 2:
+        return float(mu)
+
+    scale = math.sqrt(mag.size / (mag.size - 1.0))
+    tiny = np.finfo(float).tiny
+    a = float(a)
+    b = float(b)
+
+    for idx in range(max(0, int(max_iters))):
+        resid = np.abs(scale * (mag - mu) / err)
+        if a > 0 and b > 0:
+            factors = 1.0 / (1.0 + np.power(resid / a, b))
+        else:
+            factors = np.ones_like(resid, dtype=float)
+
+        weights = np.maximum(weights * factors, tiny)
+        new_mu, _ = weighted_mean(mag, weights)
+        if not np.isfinite(new_mu):
+            break
+
+        if idx + 1 >= max(1, int(min_iters)) and math.isclose(new_mu, mu, rel_tol=rtol, abs_tol=rtol):
+            mu = new_mu
+            break
+
+        mu = new_mu
+
+    return float(mu)
 
 
 def weighted_std(x, err):
@@ -323,8 +378,7 @@ def _stetson_prepare(time, mag, err):
     mag = mag[order]
     err = err[order]
 
-    w = 1.0 / np.square(err)
-    mu, _ = weighted_mean(mag, w)
+    mu = _stetson_robust_mean(mag, err)
     if not np.isfinite(mu):
         mu = float(np.median(mag))
 
