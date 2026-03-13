@@ -246,6 +246,7 @@ SIDEBAR_GROUPS = [
     ]),
     ("LC Photometric Scatter", [
         ("num", "stats_photometry_std_mag"),
+        ("num", "stats_photometry_weighted_std_mag"),
         ("num", "stats_photometry_robust_sigma_mag"),
         ("num", "stats_photometry_IQR_mag"),
         ("num", "stats_photometry_mean_mag"),
@@ -263,10 +264,14 @@ SIDEBAR_GROUPS = [
     ("LC Variability", [
         ("num", "stats_variability_reduced_chi2_vs_constant"),
         ("num", "stats_variability_von_neumann_ratio"),
+        ("num", "stats_variability_roms"),
         ("num", "stats_variability_lag1_autocorr"),
         ("num", "stats_variability_stetson_I"),
         ("num", "stats_variability_stetson_J"),
         ("num", "stats_variability_stetson_K"),
+        ("num", "stats_variability_stetson_L"),
+        ("num", "stats_variability_stetson_J_time"),
+        ("num", "stats_variability_stetson_L_time"),
         ("num", "stats_variability_string_length_resid_total"),
         ("num", "stats_variability_string_length_resid_mean_step"),
         ("num", "stats_variability_string_length_resid_n_steps"),

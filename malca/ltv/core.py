@@ -672,7 +672,8 @@ def process_one_lc(
     if df.empty:
         return None
 
-    # V/g overlap statistics (for intercalibration failure filter)
+    # V/g overlap statistics retained as diagnostic metadata only; the
+    # g-band trend pipeline does not filter on them.
     df_v_clean = clean_lc(df_v) if not df_v.empty else df_v
     vg_has_v, vg_overlap_days, vg_overlap_frac = compute_vg_overlap_stats(df, df_v_clean)
 

@@ -31,7 +31,6 @@ from malca.config.config_ltv import (
     LTV_MIN_DEC,
     LTV_MAX_PM,
     LTV_MAX_REDUCED_CHI2,
-    LTV_MAX_SINGLE_JUMP_FRACTION,
     LTV_MAX_EB_PERIOD_DAYS,
     LTV_MIN_LS_POWER,
     LTV_MAX_LS_FAP,
@@ -52,6 +51,9 @@ from malca.config.config_ltv import (
     LTV_NEIGHBOR_SEARCH_RADIUS_ARCSEC,
 )
 from malca.utils import log_rejections, batch_gaia_cone_query
+
+
+_SELF_MATCH_FALLBACK_SEP_ARCSEC = 1.0
 
 
 # =============================================================================
@@ -201,57 +203,6 @@ def filter_photometric_scatter(
     return df_out
 
 
-def filter_transient_contamination(
-    df: pd.DataFrame,
-    *,
-    max_single_jump_fraction: float = LTV_MAX_SINGLE_JUMP_FRACTION,
-    min_seasons: int = 3,
-    coeff1_column: str = "coeff1",
-    coeff2_column: str = "coeff2",
-    max_diff_column: str = "max diff",
-    slope_column: str = "Slope",
-    verbose: bool = False,
-    log_csv: str | Path | None = None,
-) -> pd.DataFrame:
-    """
-    Remove sources where variability is driven by a single outlier jump.
-    
-    A real LTV source should show gradual change across multiple seasons.
-    If >60% of total Δg comes from one season transition, it's likely
-    a transient contamination (nova, flare, bad epoch).
-    
-    Vectorized — runs instantly on any size.
-    """
-    n0 = len(df)
-    
-    if max_diff_column not in df.columns or slope_column not in df.columns:
-        if verbose:
-            print("Warning: Required columns not found, skipping transient filter")
-        return df
-    
-    max_diff = np.abs(df[max_diff_column].values)
-    slope = np.abs(df[slope_column].values)
-    
-    # Approximate total change over baseline (assume ~5 year baseline)
-    total_change = slope * 5.0
-    
-    # Fraction of total change in single jump
-    with np.errstate(divide='ignore', invalid='ignore'):
-        single_jump_fraction = max_diff / np.maximum(total_change, 0.01)
-    
-    # Keep sources where max single jump is < threshold of total change
-    # OR where the total change is large enough to be robust
-    mask = (single_jump_fraction < max_single_jump_fraction) | (total_change > 0.5)
-    
-    df_out = df[mask].reset_index(drop=True)
-    
-    if verbose:
-        print(f"[filter_transient_contamination] {n0} → {len(df_out)} (removed {n0 - len(df_out)})")
-    
-    log_rejections(df, df_out, "filter_transient_contamination", log_csv)
-    return df_out
-
-
 def filter_eclipsing_binary_signature(
     df: pd.DataFrame,
     *,
@@ -311,7 +262,8 @@ def query_gaia_proper_motions_batch(
     Batch query Gaia DR3 for proper motions.
     
     Uses TAP upload for efficient server-side crossmatch.
-    Returns df with added columns: gaia_pmra, gaia_pmdec, gaia_pm_total
+    Returns df with added columns: gaia_pmra, gaia_pmdec, gaia_pm_total,
+    gaia_source_id, gaia_sep_arcsec.
     """
     if ra_column not in df.columns or dec_column not in df.columns:
         if verbose:
@@ -319,6 +271,8 @@ def query_gaia_proper_motions_batch(
         return df
     
     df = df.copy()
+    df["gaia_source_id"] = pd.Series(index=df.index, dtype="Int64")
+    df["gaia_sep_arcsec"] = np.nan
     df["gaia_pmra"] = np.nan
     df["gaia_pmdec"] = np.nan
     df["gaia_pm_total"] = np.nan
@@ -357,6 +311,10 @@ def query_gaia_proper_motions_batch(
     for _, row in result.iterrows():
         idx = int(row["_idx"])
         if idx in df.index:
+            if pd.notna(row.get("source_id", np.nan)):
+                df.loc[idx, "gaia_source_id"] = int(row["source_id"])
+            if pd.notna(row.get("sep_arcsec", np.nan)):
+                df.loc[idx, "gaia_sep_arcsec"] = float(row["sep_arcsec"])
             df.loc[idx, "gaia_pmra"] = row["pmra"] if pd.notna(row["pmra"]) else np.nan
             df.loc[idx, "gaia_pmdec"] = row["pmdec"] if pd.notna(row["pmdec"]) else np.nan
             if pd.notna(row["pmra"]) and pd.notna(row["pmdec"]):
@@ -453,8 +411,6 @@ def filter_vg_overlap(
     return df_out
 
 
-
-
 # =============================================================================
 # CROWDING FILTER (batch Gaia TAP)
 # =============================================================================
@@ -548,7 +504,8 @@ def filter_crowding(
     """
     Remove sources in crowded fields where blending may cause artifacts.
     
-    Uses batch Gaia TAP queries to count sources within 30 arcsec.
+    Uses batch Gaia TAP queries to count sources within the configured
+    crowding radius.
     """
     n0 = len(df)
     
@@ -704,8 +661,18 @@ def query_neighbor_high_pm_batch(
         target_dec = float(df.loc[idx, dec_column])
         target_mag = float(df.loc[idx, mag_col]) if mag_col else 14.0
         cos_dec = np.cos(np.radians(target_dec))
+        target_gaia_source_id = df.loc[idx, "gaia_source_id"] if "gaia_source_id" in df.columns else pd.NA
 
         for _, nb in neighbors.iterrows():
+            nb_source_id = nb.get("source_id", np.nan)
+            nb_sep_arcsec = nb.get("sep_arcsec", np.nan)
+
+            if pd.notna(target_gaia_source_id) and pd.notna(nb_source_id):
+                if int(nb_source_id) == int(target_gaia_source_id):
+                    continue
+            elif pd.notna(nb_sep_arcsec) and float(nb_sep_arcsec) <= _SELF_MATCH_FALLBACK_SEP_ARCSEC:
+                continue
+
             nb_pmra = nb.get("pmra", np.nan)
             nb_pmdec = nb.get("pmdec", np.nan)
             nb_mag = nb.get("phot_g_mean_mag", np.nan)
@@ -813,7 +780,6 @@ def apply_all_filters(
     max_refcat_offset: float = LTV_MAX_REFCAT_OFFSET,
     # Enhanced filter thresholds
     max_reduced_chi2: float = LTV_MAX_REDUCED_CHI2,
-    max_single_jump_fraction: float = LTV_MAX_SINGLE_JUMP_FRACTION,
     max_eb_period_days: float = LTV_MAX_EB_PERIOD_DAYS,
     max_crowding_count: int = LTV_MAX_CROWDING_COUNT,
     # Neighbor PM filter
@@ -841,7 +807,7 @@ def apply_all_filters(
     3. South pole (vectorized)
     4. REFCAT magnitude offset (vectorized) — paper Fig. 1
     5. Photometric scatter (vectorized)
-    6. Transient contamination (vectorized)
+    6. V/g overlap (vectorized)
     7. Eclipsing binary signature (vectorized)
     8. Bright star artifacts (batch Gaia TAP)
     9. High proper motion (batch Gaia TAP)
@@ -878,12 +844,6 @@ def apply_all_filters(
         )
         df = filter_vg_overlap(
             df,
-            verbose=verbose,
-            log_csv=log_csv,
-        )
-        df = filter_transient_contamination(
-            df,
-            max_single_jump_fraction=max_single_jump_fraction,
             verbose=verbose,
             log_csv=log_csv,
         )

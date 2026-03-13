@@ -46,8 +46,8 @@ SEASON_GAP_DAYS = 30.0
 EXPOSURE_BIN_DAYS = 3.0
 SNR_CONVERSION_FACTOR = 1.0857
 
-# Stetson K normalization
-STETSON_K_NORM = 1.0 / 0.798
+# Single-band Stetson pairing window used for paper-style I/J/L.
+STETSON_PAIR_MAX_DT_DAYS = 2.0
 
 # FWHM conversion
 FWHM_SIGMA_FACTOR = 2.3548

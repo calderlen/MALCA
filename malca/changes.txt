@@ -1,0 +1,420 @@
+a. validate_metadata.py
+- explicitly list allowed values in function def'n for dip/jump so I know when coding up new functions internally—error checking is unnecessary
+- remove inline if check in default_mag_grid
+- in compute_symmetry_score and all similar functions in the codebase that have these style docstrings that restate variables and stuff, instead just add a short comment after each variable in function def'n w/ short description to avoid duplication
+
+
+events.py
+- remove all inline if checks in the entire codebase and make them discrete lines instead: if:
+     - elif:, etc..
+- why is there a baseline_flux variable in compute_symmetry_score if
+- variable names t_sc, f_sc, t_ce, f_ce are unnecessarily abstruse (?)
+- is the len(t_sc) > 2 etc. check really necessary? When would this happen? can it?
+- maybe add more kernels to classify_run_morphology? Why is there no freq I thought it was added?
+- replace all blow if checks in the entire codebase w/ instead parser.get_allowed_lives etc.
+- remove optional imports for py files, just depend on the library here and elsewhere—the codebase, parquet is no longer optional in the code
+- is non-default baseline_flag arg in compute_symmetry_score the only in this code? if so, where does curvature method here?
+- is trapezoidal integration the best method here?
+- why does classify_run_morphology not refer to the fred profile in the docstring, is it not in there?
+-  [build_runs]
+	- get rid of l_prev = l_vsture [–] for readability
+	- Filter-runs
+     	- maybe be robust—median of days is more in the scope of filter or malca stats, so maybe while it seems like it should be here, events.py makes more sense?
+     	- can r_size ever be 0? I think my max_gap precluded a run size of zero
+	- is defining max_gap_days and allow_gap_points separately sensible?
+	- do some testing of typical 3 sigma max gap days for runs to see if that's too large and risks working across observing seasons, etc.
+	- "cur" is abstruse
+	- I think the minimum of max_gap_days being 1.0 is an unnecessary minimum
+	- is max-gap-days ever specified other than None in this codebase?
+	- why would np.diff(jd) ever be < 0, I don't think that's realistic as long as JDs are sorted right?
+- [classify_run_morphology]
+	- Is having symmetry and skewness as separate quantities useful?
+	- Or should it just be like or called linear morphology?
+     	- Is symmetry score a proxy for slope? If std deviation is used instead of just stats has been used for score?
+	- again t_seg, y_seg, e_seg are a little too abstruse
+	- again how could t_seq ever end up being < 4
+	- should the baseline_guess not be the GP baseline or whatever function is being used in the baseline module? why does it default to nanmedian? is this internally consistent?
+	- should the curve fitting be improved somehow so that fitting doesn't fail and thus fit failing warnings don't throw constantly and just end up ignored?
+	- is having gaussian and skewgaussian as separate functions sensical? or should it just be a skewgaussian parameterized w/ like alpha allowed to roam freely?
+	- is symmetry score a proxy for skew? should skew be used instead of defining this new (a)symmetry score?
+	- consider more morphologies
+- [filter_runs]
+	- why would robust_median_dt days be the stats module and not events or utils? is there a better place to put it than stats? events seems the most sensible but if utils makes more sense im open to moving it there
+	- can min_points ever be less than 2 days based on how runs are constructed? yes or no?
+	- what is score_vec? i dont really understand how the run scoring works and would like an explainer
+- [compute_global_loglik_numba]
+	- log_1mp is a bad name and i dont want to use it because it's not readable or quickly understandable by others
+	-  why are the P_b and P_m's that are using mag grids called grids themselves? is this accurate?	
+	- why is log1p used again?	walk me through the math
+	- why are you using i for range(N) when it could just be n to match the convention of M and P.  if it wouldnt cause issues i just want to use n
+	- can you suggest some better function names for this function?
+	- should nogil, parallel, fastmath, boundscheck be enabled in this function? would it change any behavior? would it result in speedups?
+- [fast_loo_event_prob_numba]
+	- why are you using i for range(N) when it could just be n to match the convention of M and P. if it doesnt cause issues i just want to use n
+	- should parallel be enabled?
+	- should nogil, parallel, fastmath, boundscheck, be enabled in this function? would it change any behavior? would it result in speedups?
+	- can you suggest some better function names for this function?
+	- is run_allow_gap_points per-camera? or just across the whole light curve
+- better names for bayesian_event_significance, run_bayesian_significance, process_one? maybe ones that are more readalbe
+- [run_bayesian_significance]
+	- is writing the huge block of dip = bayesian_event_significance then jump=bayesian_event_significance necessary? can that duplicated code be compressed at all without huge loss in readability?
+- [process_one]
+	-     import os
+    try:
+        # script mode: sys.path[0] points to the malca/ directory with plot/plot.py
+        from malca.plot import read_skypatrol_csv  # type: ignore
+    except ImportError:
+        try:
+            # package-style
+            from malca.plot import read_skypatrol_csv  # type: ignore
+        except ImportError:
+            # fallback if a flat plot.py is on the path
+            from plot import read_skypatrol_csv  # type: ignore
+    path = str(path)
+    
+    this is really dumb get rid of it. what is the reason for having it. also i want all imports at the top of the module.
+    
+    - if os.path.isfile(path) and (path.endswith('.csv') or path.endswith('-light-curves.csv')): ; this is dumb i also dont want this, just make skypatrol2 be the asassn id's only no -light-curves appended. also updated any other code that expects -light-curves.csv
+	- what is the reason for having the read_skypatrol_length non-tuple return, could this ever happen? also could the ValueError really conceivable raise? like i dont think there should be a path reading error and if there is it should just break
+	- all of the try/excepts for error reading csv file are not necessary and i think they can be removed unless you disagree for a good reason.
+	- all of the -light-curves checks are not necessary, assume that these are no longer files
+	- is the n_points < 10 check for insufficient data points unnecessary because there is already a pre_filter check for this? if so, can you remove it?
+	- why is auto_filter_bad_cameras used? is this accessed and cameras injected into by some other module? if not, remove it. there is a check of raw2's elsewhere in the post_filters i believe that removes bad camreas by their scatter and difference in median from other cameras using raw2's. if auto_filter_bad_cameras is not used by anything else completely remove all implementations of it in this module and elsewhere
+	- and then remove the check for n_points after auto filtering bad cameras as well if the above is true
+	- "res" is unnecessarily terse
+	- this seems unnecessarily inline. can it be made a little more readable?         best = sorted(run_list, key=lambda x: x['run_max'], reverse=True)[0]; and efficiency can be increased using max() instead of sorted, reverse=True[0] right?
+	-     cams = df["camera#"].dropna() if "camera#" in df.columns else pd.Series([], dtype=str); is this necessary? is it for the skypatrol light curves that have headers like this: JD,Flux,Flux Error,Mag,Mag Error,Limit,FWHM,Filter,Quality,Camera? 
+	-        # Use GP baseline for scoring (compute residuals) i dont think this comment is correct because it just uses whatever baseline is being used for the restr of the module right? not necessarily GP? if so, remove.
+	- why does process_one only compute a dipper score? can scores for jumps not be computed as well? if this is not easily implementable and requires a significant refactor, explain why
+	- if df_base is not None and "baseline" in df_base.columns:; is this check for both necessary?
+	-     parser.add_argument("inputs", nargs="*", help="Legacy positional light-curve paths or globs (optional if using --input/--mag-bin).") --- is there any reason for having this? why is this "legacy"?
+	-     parser.add_argument("--p-points", type=int, default=12, help="Number of points in the logit-spaced p grid"); also doesnt need to be logit but this should have been changed earlier i think if you are reading through these changes sequentially
+	- what is sigma_eff and is it enabled or disabled by default?
+	-  if "path" not in meta_df.columns:
+            raise SystemExit("metadata-csv must include a 'path' column")'; is there any failure mode where this can reasonable occur? if so how?
+    - def log(message: str) -> None:
+        if not quiet:
+            print(message, flush=True)
+            
+            this should be moved to utils and imported wherever there is a log and a verbosity option, no? not defined in events.py? also is there not some built in behavior that does this already? if there is, just tell me about it dont necessarfily change the code
+	-                     raise ImportError("pyarrow is required for parquet outputs"); remove these checks from collect_processed_from_output -- making parquet install mandatory in the codebase
+	-         except Exception as e:
+            log(f"Warning: Could not remove existing output {path} ({e}). Will append."); remove this exception bc i think its unnecssary? why would this operation throw an exception?
+    -          except Exception as e:
+            log(f"Warning: Could not overwrite checkpoint file ({e}). Continuing without resume."); any reason this would fail either? i dont see it failing idk seems unnecessary guardrail
+    -         except Exception as e:
+            log(f"Warning: Could not read checkpoint file ({e}). Starting fresh."); same here shouldnt it just throw an error? is there even infrastructure to restart?
+    - 	   class ParquetChunkWriter:
+        def __init__(self, path: Path):
+            if pa is None or pq is None:
+                raise ImportError("pyarrow is required for parquet outputs"); this check is not necessary because makign pyarrow req'd by default
+    -    class ParquetDatasetWriter:
+        def __init__(self, path: Path):
+            if pa is None or pq is None:
+                raise ImportError("pyarrow is required for parquet outputs")
+            self.path = Path(path)
+            
+            same for this
+            
+   - 
+            
+
+
+
+e. detect.py
+- NOTE TO SELF: is the camera_median prefilter duplicating the other two-pronged "raw2" filter you recently implemented? check git commit history
+- are the modules ordered sequentially w/ clean sequential dependencies? or are the inter-module dependencies scattered / in this codebase at large?
+- shouldn't gaia-cache have a well-reasoned default?
+- enable run-dust by default
+- enable run-enrich by default
+- should I be building events.py args from detect.py args? is this clumsy—are there better ways of doing this? or is this standard?
+- any run parameters missing from the output JSON?
+- should detect.py be named something less confusing since it's essentially a big orchestrator end-to-end of the pipeline and not actually code that does detection?
+- things that may be bad w/ the code:
+     - why are there steps 7, 8, 9 in the workflow these are similarly named and scoped and somewhat confusing
+     - why aren't the steps commented in the code itself not just top docstring
+     - is safe_write_parquet necessary? why or why not?
+     - is parse_output_format necessary?
+     - remove quiet checks in clear-existing-output—verbose by default
+     - any post-filter args/options retiring from anypower?
+     - make run post filter, run post process, run characterize only by default
+
+f. baseline.py
+- remove all baselines except
+     - global median
+     - per-camera median
+     - per-camera_gp
+- and thus corresponding functionality from the rest of the codebase
+
+
+
+
+
+
+
+
+
+
+
+ ---
+ A. events.py — Answers to Questions
+
+ compute_symmetry_score
+
+ - baseline_flux: Needed. The symmetry score is defined as the difference in integrated deviation from baseline on ingress
+ vs egress. Without a baseline level you can't compute the deviation integrals. It's an optional override; if None it
+ estimates via biweight_location.
+ - t_sc / f_sc / t_ce / f_ce: Agreed, rename to e.g. t_ingress, mag_ingress, t_egress, mag_egress.
+ - len(t_sc) < 2 check: Redundant. The guard on line 149 already enforces start_idx < center_idx < end_idx, so the slices
+ [start_idx:center_idx+1] and [center_idx:end_idx+1] each have ≥ 2 elements by construction. Remove it.
+ - Trapezoidal integration: Correct choice. Light curves are irregularly sampled. Simpson's requires equal spacing.
+ Trapezoidal is the standard and appropriate method here.
+ - Symmetry score vs skewness: Not the same thing. Symmetry score compares integrated ingress vs egress areas (physically
+ motivated for disk-occultation profiles). Skewness is a statistical moment of the flux distribution. Both are informative
+ but measure different things. Keep both.
+
+ classify_run_morphology
+
+ - Docstring is wrong: Says "gaussian vs paczynski vs noise" but the code also fits skew_gaussian (dips) and fred (jumps).
+ Fix the docstring.
+ - "freq" kernel: There is no frequency/periodic kernel in this function. If you meant to add one, it isn't here. FRED is
+ present (lines 292–317). Clarify what you meant by "freq."
+ - Gaussian vs skew_gaussian as separate fits: Keep them separate. BIC penalizes the extra alpha parameter in skew_gaussian.
+  Fitting both and comparing BIC is the right approach—it avoids penalizing the simpler model.
+ - baseline_guess = nanmedian: Correct as an initial guess for curve_fit. Using the GP baseline here would be expensive
+ (computed per-run) and unnecessary—it's just a starting point for the optimizer.
+ - t_seg / y_seg / e_seg: Rename to t_padded, mag_padded, err_padded.
+ - len(t_seg) < 4: Can it happen? Technically yes if the LC has < 4 total points, but pre_filter should prevent that in
+ production. It's a safety check for direct invocation. Keep it but it's low-priority.
+ - More morphologies: Candidates to consider: flat-bottom dip (disk occultation), V-shaped dip (EB). Worth adding
+ eventually.
+
+ build_runs
+
+ - "cur" is abstruse: Rename to current_run.
+ - max_gap_days minimum of 1.0: Defensible. ASAS-SN cadence is ~1 day. A max_gap < 1 day would fragment every observation
+ gap into separate runs. The 1.0 floor only applies to the auto-calculated value; explicit --run-max-gap-days overrides it
+ entirely. Keep it, but note the user can override.
+ - max_gap_days ever specified other than None: No. It's always None in both detect.py and events.py defaults. The
+ auto-calculation (99.73th percentile of gaps) always runs.
+ - **np.diff(jd) < 0**: The dt > 0 filter is a safety measure. Data should be sorted, but it isn't explicitly sorted before
+ build_runs is called in bayesian_event_significance. Either sort jd before calling build_runs, or keep the filter. Sorting
+ is the cleaner fix.
+ - max_gap_days and allow_gap_points separately: Both are needed. max_gap_days is temporal (breaks across observing seasons
+ ~180-day gaps). allow_gap_points is index-based (allows 1-2 missing observations within a run). They're orthogonal
+ constraints.
+
+ filter_runs
+
+ - robust_median_dt_days in stats.py: stats.py is the right home. It's a pure statistical utility. events.py and utils.py
+ are not better fits.
+ - min_points ever < 2: Yes. build_runs can produce single-point runs (one triggered index with no neighbors within gap
+ tolerance). The min_points=2 filter removes them. Needed.
+ - score_vec explainer: score_vec is the per-point significance array—either log Bayes factor or event probability, one
+ value per data point in the LC. filter_runs uses it to compute run_max (the peak significance within a run) and run_sum
+ (total significance). These are used downstream to rank which runs are the most significant detections.
+
+ compute_global_loglik_numba
+
+ - log_1mp: Rename to log_1_minus_p or log_complement_p.
+ - "grids" naming for Pb/Pf: log_Pb_grid shape is (M_mag_grid, N_points). The "grid" refers to the M axis (magnitude grid).
+ The naming is defensible but mildly confusing since N is the point axis. Could rename to log_Pb and log_Pf (drop "grid")
+ since the grid dimension is just the first axis.
+ - log1p math walkthrough: The inner loop computes log(Pb[m,i]p + Pf[m,i](1-p)) for each data point i. In log-space this is
+ log(exp(log_Pb + log_p) + exp(log_Pf + log_1mp)). The log-sum-exp trick: log(exp(a) + exp(b)) = max(a,b) + log(1 +
+ exp(min-max)). log1p(x) = log(1+x) is numerically stable when x is small (which it is when one term dominates). This avoids
+  overflow/underflow.
+ - i vs n for loop variable: i is standard for point index. n typically denotes a count (N points). Using n as a loop
+ variable would shadow that convention. Recommend keeping i for point index, but if you insist on consistency with m/p, use
+ j instead.
+ - Better function names: compute_global_loglik_numba → marginal_loglikelihood_grid. fast_loo_event_prob_numba →
+ loo_event_probabilities.
+ - nogil/parallel/fastmath/boundscheck: nogil is implicit with njit. boundscheck=False is the njit default. fastmath=True is
+  already set. parallel=True would give speedups on compute_global_loglik_numba—the outer m loop is embarrassingly parallel.
+  Requires changing range(M) to prange(M) and importing prange from numba. For fast_loo_event_prob_numba, the outer i loop
+ over N points is also parallelizable. Worth doing for both.
+
+ fast_loo_event_prob_numba
+
+ - run_allow_gap_points scope: It's across the whole light curve (all cameras merged). build_runs operates on the merged JD
+ array.
+ - parallel: Yes, the outer loop over i (N points) is embarrassingly parallel. Use prange.
+
+ run_bayesian_significance
+
+ - Duplicated dip/jump blocks: The two calls differ only in kind, p_min/p_max, mag_grid, and logbf_threshold. You could loop
+  over a config dict: for kind, cfg in configs.items(): results[kind] = bayesian_event_significance(...). Saves ~20 lines.
+ Readability is fine with a well-named config dict.
+
+ process_one
+
+ - The import try/except block (lines 1158–1168): The first two branches are IDENTICAL (from malca.plot import
+ read_skypatrol_csv). This is a bug/leftover. Should be a single top-level import. Move from malca.plot import
+ read_skypatrol_csv to the module-level imports at the top.
+ - -light-curves.csv: Remove. Update any glob patterns or filename expectations that look for this suffix.
+ - read_skypatrol_csv tuple return check: The tuple check + ValueError is overly defensive. If read_skypatrol_csv's contract
+  is to return a DataFrame, just call it and let it fail naturally if the contract is broken.
+ - try/except around read_lc_dat2 / read_lc_csv: These catch generic Exception and re-raise as ValueError. They add no
+ value—just let the original exception propagate. Remove the try/except wrappers.
+ - n_points < 10 check: pre_filter checks time span and cadence, not raw point count. A 10-point floor is a different (and
+ quick) sanity check. Keep it—it's cheap and guards against pathological files.
+ - auto_filter_bad_cameras: DO NOT REMOVE. It is NOT a duplicate of post_filter's raw2 usage or pre_filter's camera_median
+ filter. Three distinct things:
+   - pre_filter camera_median: static check—is this camera's median outside the mag bin? (uses .raw2 medians)
+   - auto_filter_bad_cameras (utils.filter_bad_cameras): dynamic check—does this camera have anomalous scatter/offset
+ relative to peers in the actual LC? (uses the LC data itself + .raw2 for expected scatter)
+   - post_filter raw2 usage: validation/diagnostics only, not filtering
+ - sorted(...)[0] → max(...): Yes. max(run_list, key=lambda x: x['run_max']) is correct and more efficient.
+ - camera# column check: Needed. SkyPatrol CSVs have different column names than .dat2 files. The check guards against
+ missing camera column.
+ - "Use GP baseline for scoring" comment: Misleading. The code uses res["df_base"] which is whatever baseline was configured
+  (gp, trend, etc.). Fix the comment.
+ - Jump scores: process_one only computes dipper_score, not jump scores. compute_event_score in score.py does support
+ event_type parameter. Adding jump scoring here is straightforward—mirror the dip block for jumps. Worth doing.
+ - metadata-csv 'path' column check: Appropriate. This is a user-facing input boundary—validation here is correct.
+ - log() function: Should be in utils.py and imported. Or just use Python's logging module which already does this. The
+ current per-module pattern leads to duplication (detect.py also defines its own log()).
+ - pyarrow ImportError checks: Remove. pyarrow is required in pyproject.toml.
+ - Checkpoint exception handling: The "Continuing without resume" on checkpoint-write failure IS dangerous—you'd silently
+ lose resume state. These should be hard errors (raise), not warnings. Filesystem I/O failures on HPC are real but the
+ correct response is to fail loudly, not silently continue.
+ - "inputs" positional arg: Legacy. Remove it. The --input flag handles everything.
+ - --p-points help text says "logit-spaced": The grid function used depends on trigger_mode. Help text is slightly
+ misleading. Fix it.
+ - sigma_eff: Enabled by default (use_sigma_eff=True). It adds GP predictive variance + sigma_floor in quadrature to the
+ photometric error. This is the correct thing to do—it accounts for baseline model uncertainty.
+ - "path" not in meta_df.columns check: Yes, this can reasonably occur if the user passes a wrong file. Keep it.
+
+ ---
+ E. detect.py — Answers
+
+ - camera_median prefilter vs raw2 bad-camera filter: NOT duplicating. See process_one notes above. Three distinct filters,
+ three distinct criteria.
+ - Module ordering: Sequential and correct: manifest → pre_filter → events → post_filter → postprocess → characterize →
+ classify → enrich.
+ - gaia-cache default: Should default to <out_dir>/gaia_cache/ instead of None.
+ - run-dust / run-enrich / run-post-filter / run-postprocess / run-classify defaults: Change all to on-by-default with
+ --no-* flags to disable.
+ - Building events.py args from detect.py args via subprocess: Standard pattern for pipeline wrappers with
+ checkpoint/resume. An alternative is importing process_one directly, but subprocess keeps modules independent and resume
+ works naturally. The current approach is fine. The arg-forwarding boilerplate (lines 198–248) is verbose but mechanical.
+ - Missing run_params from JSON: Missing: skip_camera_median, camera_median_tolerance, run_post_filter, min_bayes_factor,
+ post_filter_min_run_cameras, post_filter_min_run_points, run_postprocess, max_plots, plot_format, run_characterize,
+ run_dust, run_classify, run_enrich, enrich_compute_ls. Add all of these.
+ - detect.py naming: "detect" is the CLI subcommand. The file could be renamed to pipeline.py internally if that's less
+ confusing, but the CLI name stays detect.
+ - Steps 7/8/9 confusion: They should be commented in the code body (Steps 5–9 lack inline comments, only the docstring
+ lists them). Add # Step N: comments.
+ - safe_write_parquet: Keep. Atomic writes protect against corruption on kill/crash. Critical for HPC.
+ - parse_output_format: Unnecessary. args.output_format is already parsed. Use it directly.
+ - quiet checks in clear_existing_output: Remove quiet parameter, always print. User wants verbose by default.
+
+ ---
+ F. baseline.py — Removal Plan
+
+ User wants to keep only: global_median, per_camera_median, per_camera_gp.
+
+ Currently events.py imports: per_camera_gp_baseline, per_camera_gp_baseline_masked, per_camera_trend_baseline.
+
+ Conflict: Removing per_camera_trend and per_camera_gp_masked means:
+ - events.py --baseline-func choices drop "trend" and "gp_masked"
+ - detect.py same
+ - plot.py imports ALL baselines for visualization—needs updating
+
+ To remove:
+ - global_mean_baseline
+ - global_rolling_median_baseline
+ - global_rolling_mean_baseline
+ - per_camera_mean_baseline
+ - per_camera_trend_baseline
+ - per_camera_gp_baseline_masked
+
+ To keep:
+ - global_median_baseline
+ - per_camera_median_baseline (rolling 300-day median per camera)
+ - per_camera_gp_baseline
+ - Helper functions: rolling_time_median, rolling_time_mad (used by per_camera_median and per_camera_trend—but if trend is
+ removed, rolling_time_mad is only used by trend. Check if anything else uses it.)
+
+ Files to update after baseline removal:
+ - events.py: remove "trend" and "gp_masked" from baseline_func_map and choices
+ - detect.py: same
+ - plot.py: remove imports and entries from BASELINE_FUNCS dict
+ - old/*.py: these use the removed baselines but old/ is legacy—leave as-is or let them break
+
+ ---
+ Actionable Changes (Priority Order)
+
+ HIGH — correctness / bugs
+
+ 1. events.py process_one: Fix the duplicate import try/except block. Move read_skypatrol_csv to top-level imports.
+ 2. events.py process_one: Remove -light-curves.csv checks and glob patterns.
+ 3. events.py process_one: Remove try/except wrappers around read_lc_dat2/read_lc_csv (let errors propagate).
+ 4. events.py: Remove optional pyarrow import; make it a direct import (it's required).
+ 5. events.py: Remove pyarrow ImportError checks in ParquetChunkWriter, ParquetDatasetWriter, collect_processed_from_output.
+ 6. events.py classify_run_morphology: Fix docstring to list all kernels (gaussian, skew_gaussian, paczynski, fred).
+ 7. events.py process_one: Fix "Use GP baseline" comment → "Use computed baseline".
+ 8. events.py: Change checkpoint failure handling from warning+continue to hard error.
+
+ MEDIUM — naming / readability
+
+ 9. events.py compute_symmetry_score: Rename t_sc/f_sc/t_ce/f_ce → t_ingress/mag_ingress/t_egress/mag_egress.
+ 10. events.py compute_symmetry_score: Remove redundant len < 2 check.
+ 11. events.py compute_symmetry_score: Replace verbose docstring with inline param comments.
+ 12. events.py build_runs: Rename cur → current_run.
+ 13. events.py classify_run_morphology: Rename t_seg/y_seg/e_seg → t_padded/mag_padded/err_padded.
+ 14. events.py compute_global_loglik_numba: Rename log_1mp → log_1_minus_p.
+ 15. events.py: Rename functions: compute_global_loglik_numba → marginal_loglikelihood_grid, fast_loo_event_prob_numba →
+ loo_event_probabilities, bayesian_event_significance → score_events_bayesian, run_bayesian_significance → score_lightcurve,
+  process_one → process_lightcurve.
+ 16. events.py process_one: sorted()[0] → max().
+ 17. events.py main: Remove legacy "inputs" positional arg.
+ 18. events.py main: Fix --p-points help text.
+ 19. events.py: Move log() to utils.py, import everywhere.
+
+ MEDIUM — features / completeness
+
+ 20. events.py process_one: Add jump score computation (mirror dip block).
+ 21. events.py run_bayesian_significance: Compress duplicated dip/jump blocks into a loop.
+ 22. events.py compute_global_loglik_numba + fast_loo_event_prob_numba: Enable parallel=True, use prange for outer loops.
+ 23. detect.py: Add missing parameters to run_params.json.
+ 24. detect.py: Add Step 5–9 inline comments.
+ 25. detect.py: Remove parse_output_format, use args.output_format directly.
+ 26. detect.py: Set run-post-filter, run-postprocess, run-characterize, run-classify, run-enrich to on-by-default with
+ --no-* flags.
+ 27. detect.py: Set gaia-cache default to <out_dir>/gaia_cache/.
+ 28. detect.py: Remove quiet param from clear_existing_output.
+ 29. default_mag_grid: Expand inline if to discrete lines.
+
+ LOW — baseline cleanup
+
+ 30. baseline.py: Remove global_mean, global_rolling_median, global_rolling_mean, per_camera_mean, per_camera_trend,
+ per_camera_gp_masked.
+ 31. events.py + detect.py: Drop "trend" and "gp_masked" from baseline choices.
+ 32. plot.py: Update baseline imports and BASELINE_FUNCS dict.
+
+ ---
+ Resolved clarifications
+
+ - "blow if checks": Skipped per user. Not actionable.
+ - "freq" kernel: User confirmed FRED is what they meant. Already present. No change.
+ - run-dust default: User confirmed enable by default is fine. Change to --no-run-dust to opt out.
+ - "curvature method": No curvature method exists in this codebase. baseline_flux is the only non-standard baseline param in
+  compute_symmetry_score. No action taken.
+
+ Files to modify
+
+ - malca/events.py — majority of changes
+ - malca/detect.py — defaults, missing JSON params, comments, parse_output_format removal
+ - malca/baseline.py — remove 6 unused baselines
+ - malca/plot.py — update baseline imports after baseline.py cleanup
+ - malca/utils.py — add centralized log() helper
+
+
+
+
+
+
+
+
+

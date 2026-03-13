@@ -1,9 +1,9 @@
 """
 Outputs:
 - Core timing/cadence stats (including 3-day exposure metrics and largest gaps)
-- Photometric stats (weighted/unweighted/clipped/MAD/IQR/percentiles)
+- Photometric stats (weighted/unweighted/clipped/MAD/IQR/weighted std/percentiles)
 - Quality & error stats (SNR dist, fractions by good/saturated)
-- Variability diagnostics (reduced chisq, von Neumann ratio, lag-1 autocorr, trend slope, Stetson I/J/K)
+- Variability diagnostics (reduced chisq, inverse von Neumann ratio, RoMS, lag-1 autocorr, trend slope, Stetson I/J/K/L + J(time)/L(time))
 - Optional Lomb-Scargle periodogram summary stats
 - Nightly/seasonal coverage & duty cycle
 - Per-camera / per-field / per-band usage + offsets and scatter
@@ -23,7 +23,7 @@ import pandas as pd
 from malca.baseline import per_camera_gp_baseline
 from malca.config.config_stats import (
     MAD_SCALE,
-    STETSON_K_NORM,
+    STETSON_PAIR_MAX_DT_DAYS,
     SNR_CONVERSION_FACTOR,
     LS_MIN_FREQUENCY,
     LS_MAX_FREQUENCY,
@@ -57,6 +57,43 @@ def robust_sigma(x):
     if x.size == 0:
         return np.nan
     return MAD_SCALE * np.median(np.abs(x - np.median(x)))
+
+
+def weighted_std(x, err):
+    """Inverse-variance weighted standard deviation (Sokolovsky et al. 2017)."""
+    x = np.asarray(x, float)
+    err = np.asarray(err, float)
+    mask = np.isfinite(x) & np.isfinite(err) & (err > 0)
+    if mask.sum() < 2:
+        return np.nan
+
+    x = x[mask]
+    err = err[mask]
+    w = 1.0 / np.square(err)
+    sum_w = float(np.sum(w))
+    sum_w2 = float(np.sum(np.square(w)))
+    denom = sum_w * sum_w - sum_w2
+    if sum_w <= 0 or denom <= 0:
+        return np.nan
+
+    mu = float(np.sum(w * x) / sum_w)
+    return float(np.sqrt((sum_w / denom) * np.sum(w * np.square(x - mu))))
+
+
+def paper_iqr(x):
+    """Interquartile range using the paper's median-of-halves definition."""
+    x = np.asarray(x, float)
+    x = x[np.isfinite(x)]
+    if x.size < 2:
+        return np.nan
+
+    xs = np.sort(x)
+    n = xs.size
+    lower = xs[: n // 2]
+    upper = xs[(n + 1) // 2 :]
+    if lower.size == 0 or upper.size == 0:
+        return np.nan
+    return float(np.median(upper) - np.median(lower))
 
 def log_gaussian(x, mu, sigma):
     """
@@ -154,6 +191,17 @@ def von_neumann_ratio(x):
     den = np.var(x, ddof=1)
     return num/den if den > 0 else np.nan
 
+
+def inverse_von_neumann_ratio(x):
+    x = np.asarray(x, float)
+    x = x[np.isfinite(x)]
+    if x.size < 3:
+        return np.nan
+    diffs = np.diff(x)
+    mean_sq_succ_diff = np.mean(np.square(diffs))
+    variance = np.var(x, ddof=1)
+    return float(variance / mean_sq_succ_diff) if mean_sq_succ_diff > 0 else np.nan
+
 def lag1_autocorr(x):
     x = np.asarray(x, float)
     x = x[np.isfinite(x)]
@@ -162,6 +210,20 @@ def lag1_autocorr(x):
     x1 = x[1:]  - x[1:].mean()
     den = np.sqrt(np.sum(x0**2) * np.sum(x1**2))
     return float(np.sum(x0 * x1) / den) if den > 0 else np.nan
+
+
+def roms_statistic(mag, err):
+    """Robust median statistic (RoMS) from Sokolovsky et al. 2017."""
+    mag = np.asarray(mag, float)
+    err = np.asarray(err, float)
+    mask = np.isfinite(mag) & np.isfinite(err) & (err > 0)
+    if mask.sum() < 2:
+        return np.nan
+
+    mag = mag[mask]
+    err = err[mask]
+    med = float(np.median(mag))
+    return float(np.sum(np.abs(mag - med) / err) / (mag.size - 1.0))
 
 
 def baseline_subtracted_string_length(
@@ -245,37 +307,157 @@ def baseline_subtracted_string_length(
     out["string_length_n_steps"] = float(step_lengths.size)
     return out
 
-def stetson_indices(mag, err):
+def _stetson_prepare(time, mag, err):
+    time = np.asarray(time, float)
     mag = np.asarray(mag, float)
     err = np.asarray(err, float)
-    mask = np.isfinite(mag) & np.isfinite(err) & (err > 0)
+    mask = np.isfinite(time) & np.isfinite(mag) & np.isfinite(err) & (err > 0)
     if mask.sum() < 2:
-        return {"stetson_I": np.nan, "stetson_J": np.nan, "stetson_K": np.nan}
+        return np.array([], dtype=float), np.array([], dtype=float), np.array([], dtype=float), np.array([], dtype=float), np.nan
 
-    m = mag[mask]
-    e = err[mask]
-    n = len(m)
+    time = time[mask]
+    mag = mag[mask]
+    err = err[mask]
+    order = np.argsort(time, kind="mergesort")
+    time = time[order]
+    mag = mag[order]
+    err = err[order]
 
-    w = 1.0 / np.square(e)
-    mu, _ = weighted_mean(m, w)
+    w = 1.0 / np.square(err)
+    mu, _ = weighted_mean(mag, w)
     if not np.isfinite(mu):
-        mu = float(np.nanmedian(m))
+        mu = float(np.median(mag))
 
-    d = np.sqrt(n / (n - 1.0)) * (m - mu) / e
-    if d.size < 2:
-        return {"stetson_I": np.nan, "stetson_J": np.nan, "stetson_K": np.nan}
+    n = mag.size
+    if n < 2:
+        return np.array([], dtype=float), np.array([], dtype=float), np.array([], dtype=float), np.array([], dtype=float), np.nan
+    delta = np.sqrt(n / (n - 1.0)) * (mag - mu) / err
+    return time, mag, err, delta, float(mu)
 
-    P = d[:-1] * d[1:]
-    stetson_I = float(np.sum(P))
-    stetson_J = float(np.mean(np.sign(P) * np.sqrt(np.abs(P)))) if P.size else np.nan
 
-    denom = np.sqrt(np.mean(d**2)) if d.size else np.nan
-    if not np.isfinite(denom) or denom <= 0:
-        stetson_K = np.nan
+def _stetson_groups(time, *, dtmax_days, direction, keep_singletons):
+    n = len(time)
+    if n == 0:
+        return []
+
+    order = list(range(n)) if direction == "forward" else list(range(n - 1, -1, -1))
+    groups: list[tuple[int, ...]] = []
+    pos = 0
+    while pos < n:
+        idx = order[pos]
+        if pos + 1 < n:
+            nxt = order[pos + 1]
+            if abs(time[nxt] - time[idx]) <= dtmax_days:
+                groups.append(tuple(sorted((idx, nxt))))
+                pos += 2
+                continue
+        if keep_singletons:
+            groups.append((idx,))
+        pos += 1
+
+    groups.sort(key=lambda group: group[0])
+    return groups
+
+
+def _stetson_i_from_pairs(mag, err, mu, pairs):
+    n_pairs = len(pairs)
+    if n_pairs < 2:
+        return np.nan
+
+    terms = [((mag[i] - mu) / err[i]) * ((mag[j] - mu) / err[j]) for i, j in pairs]
+    return float(np.sqrt(1.0 / (n_pairs * (n_pairs - 1.0))) * np.sum(terms))
+
+
+def _stetson_j_from_groups(delta, groups, weights=None):
+    p_vals: list[float] = []
+    group_weights: list[float] = []
+
+    for group in groups:
+        if len(group) == 2:
+            i, j = group
+            p_val = float(delta[i] * delta[j])
+        elif len(group) == 1:
+            (i,) = group
+            p_val = float(delta[i] ** 2 - 1.0)
+        else:
+            continue
+
+        weight = 1.0 if weights is None else float(weights(group))
+        if not np.isfinite(weight) or weight <= 0:
+            continue
+        p_vals.append(p_val)
+        group_weights.append(weight)
+
+    if not p_vals:
+        return np.nan
+
+    p = np.asarray(p_vals, dtype=float)
+    w = np.asarray(group_weights, dtype=float)
+    return float(np.sum(w * np.sign(p) * np.sqrt(np.abs(p))) / np.sum(w))
+
+
+def paper_stetson_indices(time, mag, err, *, dtmax_days=STETSON_PAIR_MAX_DT_DAYS):
+    time, mag, err, delta, mu = _stetson_prepare(time, mag, err)
+    if time.size < 2:
+        return {
+            "stetson_I": np.nan,
+            "stetson_J": np.nan,
+            "stetson_K": np.nan,
+            "stetson_L": np.nan,
+            "stetson_J_time": np.nan,
+            "stetson_L_time": np.nan,
+        }
+
+    i_vals = []
+    j_vals = []
+    for direction in ("forward", "reverse"):
+        pair_groups = [
+            group
+            for group in _stetson_groups(time, dtmax_days=dtmax_days, direction=direction, keep_singletons=False)
+            if len(group) == 2
+        ]
+        i_val = _stetson_i_from_pairs(mag, err, mu, pair_groups)
+        if np.isfinite(i_val):
+            i_vals.append(i_val)
+
+        groups = _stetson_groups(time, dtmax_days=dtmax_days, direction=direction, keep_singletons=True)
+        j_val = _stetson_j_from_groups(delta, groups)
+        if np.isfinite(j_val):
+            j_vals.append(j_val)
+
+    stetson_i = float(np.mean(i_vals)) if i_vals else np.nan
+    stetson_j = float(np.mean(j_vals)) if j_vals else np.nan
+
+    denom = np.sqrt(np.mean(np.square(delta))) if delta.size else np.nan
+    stetson_k = float(np.mean(np.abs(delta)) / denom) if np.isfinite(denom) and denom > 0 else np.nan
+    stetson_l = float(np.sqrt(np.pi / 2.0) * stetson_j * stetson_k) if np.isfinite(stetson_j) and np.isfinite(stetson_k) else np.nan
+
+    dt = np.diff(time)
+    if delta.size < 2 or dt.size == 0:
+        stetson_j_time = np.nan
     else:
-        stetson_K = float(STETSON_K_NORM * np.mean(np.abs(d)) / denom)
+        positive_dt = dt[np.isfinite(dt) & (dt > 0)]
+        median_pair_dt = float(np.median(positive_dt)) if positive_dt.size else np.nan
+        if not np.isfinite(median_pair_dt) or median_pair_dt <= 0:
+            weights = np.ones_like(dt, dtype=float)
+        else:
+            weights = np.exp(-dt / median_pair_dt)
+        time_groups = [(idx, idx + 1) for idx in range(delta.size - 1)]
+        stetson_j_time = _stetson_j_from_groups(
+            delta,
+            time_groups,
+            weights=lambda group: weights[group[0]],
+        )
+    stetson_l_time = float(np.sqrt(np.pi / 2.0) * stetson_j_time * stetson_k) if np.isfinite(stetson_j_time) and np.isfinite(stetson_k) else np.nan
 
-    return {"stetson_I": stetson_I, "stetson_J": stetson_J, "stetson_K": stetson_K}
+    return {
+        "stetson_I": stetson_i,
+        "stetson_J": stetson_j,
+        "stetson_K": stetson_k,
+        "stetson_L": stetson_l,
+        "stetson_J_time": stetson_j_time,
+        "stetson_L_time": stetson_l_time,
+    }
 
 def lomb_scargle_summary(jd, mag, err):
     if LombScargle is None:
@@ -1460,9 +1642,10 @@ def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=Tr
     mean_mag = float(np.nanmean(mag))
     median_mag = float(np.nanmedian(mag))
     wmean_mag, wsem_mag = weighted_mean(mag, w)
+    wstd_mag = float(weighted_std(mag, merr))
     std_mag = float(np.nanstd(mag, ddof=1))
     rsig_mag = float(robust_sigma(mag))
-    iqr_mag = float(np.nanpercentile(mag, 75) - np.nanpercentile(mag, 25))
+    iqr_mag = float(paper_iqr(mag))
     p05, p16, p84, p95 = [pct(mag, q) for q in [5,16,84,95]]
 
     # clipped stats)
@@ -1491,11 +1674,12 @@ def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=Tr
     # variability diagnostics vs constant model
     model = wmean_mag if np.isfinite(wmean_mag) else median_mag
     rchisq = float(reduced_chisq(mag, merr, model))
-    vnr    = float(von_neumann_ratio(mag))
+    vnr    = float(inverse_von_neumann_ratio(mag))
     ac1    = float(lag1_autocorr(mag))
     slope_d_per_day, intercept, r2 = linear_trend(df["t_days"].values, mag)
     slope_d_per_year = slope_d_per_day * 365.25 if np.isfinite(slope_d_per_day) else np.nan
-    stetson = stetson_indices(mag, merr)
+    roms = float(roms_statistic(mag, merr))
+    stetson = paper_stetson_indices(df["JD"].values, mag, merr)
     string_length_stats = baseline_subtracted_string_length(df)
     ls_stats = lomb_scargle_summary(df["JD"].values, mag, merr) if compute_ls else {
         "ls_best_period_days": np.nan,
@@ -1596,6 +1780,7 @@ def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=Tr
         ("photometry_median_mag", median_mag),
         ("photometry_weighted_mean_mag", float(wmean_mag)),
         ("photometry_weighted_mean_sem", float(wsem_mag)),
+        ("photometry_weighted_std_mag", wstd_mag),
         ("photometry_std_mag", std_mag),
         ("photometry_robust_sigma_mag", rsig_mag),
         ("photometry_IQR_mag", iqr_mag),
@@ -1609,10 +1794,14 @@ def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=Tr
         ("error_and_snr_stats", err_stats),
         ("variability_reduced_chi2_vs_constant", rchisq),
         ("variability_von_neumann_ratio", vnr),
+        ("variability_roms", roms),
         ("variability_lag1_autocorr", ac1),
         ("variability_stetson_I", stetson["stetson_I"]),
         ("variability_stetson_J", stetson["stetson_J"]),
         ("variability_stetson_K", stetson["stetson_K"]),
+        ("variability_stetson_L", stetson["stetson_L"]),
+        ("variability_stetson_J_time", stetson["stetson_J_time"]),
+        ("variability_stetson_L_time", stetson["stetson_L_time"]),
         ("variability_string_length_resid_total", string_length_stats["string_length_total"]),
         ("variability_string_length_resid_mean_step", string_length_stats["string_length_mean_step"]),
         ("variability_string_length_resid_n_steps", string_length_stats["string_length_n_steps"]),
@@ -1717,7 +1906,7 @@ def print_summary(summary, max_rows=10):
 
     print("\n=== PHOTOMETRY ===")
     print(f"mean={summary['photometry_mean_mag']:.6f}  median={summary['photometry_median_mag']:.6f}  wmean={summary['photometry_weighted_mean_mag']:.6f}±{summary['photometry_weighted_mean_sem']:.6f}")
-    print(f"std={summary['photometry_std_mag']:.6f}  robust_sigma={summary['photometry_robust_sigma_mag']:.6f}  IQR={summary['photometry_IQR_mag']:.6f}")
+    print(f"std={summary['photometry_std_mag']:.6f}  wstd={summary['photometry_weighted_std_mag']:.6f}  robust_sigma={summary['photometry_robust_sigma_mag']:.6f}  IQR={summary['photometry_IQR_mag']:.6f}")
     print(f"p05={summary['photometry_p05_mag']:.6f}  p16={summary['photometry_p16_mag']:.6f}  p84={summary['photometry_p84_mag']:.6f}  p95={summary['photometry_p95_mag']:.6f}")
     print(f"clipped mean={summary['clipped_mean_mag_3sigma_about_median']:.6f}  clipped std={summary['clipped_std_mag_3sigma_about_median']:.6f}  outliers={summary['n_outliers_removed_robust_3sigma']}")
 
@@ -1727,8 +1916,12 @@ def print_summary(summary, max_rows=10):
     print(f"SNR: median={es['snr_median']:.2f}  p05={es['snr_p05']:.2f}  p95={es['snr_p95']:.2f}")
 
     print("\n=== VARIABILITY / TREND ===")
-    print(f"reduced χ² vs constant={summary['variability_reduced_chi2_vs_constant']:.3f}  | von Neumann={summary['variability_von_neumann_ratio']:.3f}  | lag-1 ρ={summary['variability_lag1_autocorr']:.3f}")
-    print(f"Stetson I/J/K={summary['variability_stetson_I']:.3f} / {summary['variability_stetson_J']:.3f} / {summary['variability_stetson_K']:.3f}")
+    print(f"reduced χ² vs constant={summary['variability_reduced_chi2_vs_constant']:.3f}  | 1/η={summary['variability_von_neumann_ratio']:.3f}  | RoMS={summary['variability_roms']:.3f}  | lag-1 ρ={summary['variability_lag1_autocorr']:.3f}")
+    print(
+        f"Stetson I/J/K/L={summary['variability_stetson_I']:.3f} / {summary['variability_stetson_J']:.3f} / "
+        f"{summary['variability_stetson_K']:.3f} / {summary['variability_stetson_L']:.3f}"
+    )
+    print(f"Stetson J(time)/L(time)={summary['variability_stetson_J_time']:.3f} / {summary['variability_stetson_L_time']:.3f}")
     sl_steps = summary.get("variability_string_length_resid_n_steps", np.nan)
     sl_steps_text = str(int(sl_steps)) if np.isfinite(sl_steps) else "NaN"
     print(
