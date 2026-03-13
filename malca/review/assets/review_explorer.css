@@ -202,6 +202,7 @@ body {
   display: flex;
   min-height: 0;
   min-width: 0;
+  gap: 12px;
 }
 
 .explorer-left-panel,
@@ -212,52 +213,18 @@ body {
 
 .explorer-left-panel {
   display: grid;
+  flex: 2 1 0;
   gap: 12px;
   align-content: start;
-  min-width: 620px;
-  padding-right: 12px;
+  min-width: 0;
 }
 
 .explorer-right-panel {
-  flex: 1 1 auto;
-  min-width: 420px;
+  flex: 1 1 0;
+  min-width: 0;
   display: grid;
   gap: 12px;
   align-content: start;
-  padding-left: 12px;
-}
-
-.explorer-panel-splitter {
-  position: relative;
-  flex: 0 0 18px;
-  background: var(--explorer-border);
-  cursor: col-resize;
-  border-radius: 4px;
-}
-
-.explorer-panel-splitter.dragging {
-  background: var(--explorer-accent);
-}
-
-.explorer-panel-splitter::before {
-  content: "< >";
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 28px;
-  padding: 2px 4px;
-  border: 1px solid var(--explorer-border);
-  border-radius: 4px;
-  background: var(--explorer-panel-bg);
-  color: var(--explorer-muted);
-  font-size: 10px;
-  font-weight: 700;
-  line-height: 1;
-  letter-spacing: 0.08em;
 }
 
 .explorer-card,
@@ -280,8 +247,29 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 8px;
+}
+
+.explorer-graph {
+  min-width: 0;
+}
+
+.explorer-graph .js-plotly-plot,
+.explorer-graph .plot-container,
+.explorer-graph .svg-container {
+  width: 100% !important;
+}
+
+.explorer-graph-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  margin-top: 8px;
+  margin-bottom: 6px;
 }
 
 .explorer-action-btn,

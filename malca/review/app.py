@@ -85,6 +85,8 @@ from malca.review.metadata import (
     is_group_default_open,
     build_external_lookup_links,
 )
+from malca.review.filter_schema import SIDEBAR_GROUPS as REVIEW_FILTER_SIDEBAR_GROUPS
+from malca.review.handoff import build_explorer_command, launch_detached
 from malca.review.pipeline import detect_pipeline_status
 from malca.review.pipeline import run_missing_stages
 from malca.review.pipeline import update_candidate_payload
@@ -105,6 +107,7 @@ from malca.review.store import (
     load_candidates_file,
     export_reviews,
     detect_run_directory_files,
+    merge_review_databases,
     merge_vetting_results,
     get_distinct_values,
     get_diagnostic_background,
@@ -1705,6 +1708,7 @@ def _env_path_or_none(name: str) -> str | None:
 # Global variables
 DB_PATH = _env_path_or_none(_REVIEW_DB_ENV) or str(DEFAULT_DB_PATH)
 PLOT_DIR = _env_path_or_none(_REVIEW_PLOT_ENV)
+INITIAL_CANDIDATE_QUERY: str | None = None
 _PLOT_STATIC_EXTENSIONS = {".png", ".jpg", ".jpeg", ".pdf", ".svg", ".webp"}
 DEFAULT_THEME = "black"
 FETCH_BACKEND_OPTIONS = [
@@ -1725,6 +1729,14 @@ EXTERNAL_SOURCE_VIEW_OPTIONS = [
     {"label": "PS1", "value": "ps1"},
     {"label": "CRTS", "value": "crts"},
 ]
+
+
+def _review_persistence_token() -> str:
+    """Return a persistence scope tied to the active review DB."""
+    try:
+        return str(Path(DB_PATH).expanduser().resolve())
+    except Exception:
+        return str(DB_PATH)
 
 PLOT_PRESETS = {
     'Clean': {
@@ -1858,6 +1870,13 @@ def _render_stat_cards(stat_rows: list[tuple[str, str]]) -> list:
         "stats_harmonics_reduced_chi2": r"Reduced $\chi^2$",
         "stats_mhps_pn_flag": "MHPS PN flag",
         "stats_mhps_non_zero": "MHPS non-zero count",
+        "ltv_median": "Median (mag)",
+        "ltv_median_err": "Median err proxy (mag)",
+        "ltv_time_span_days": "Time span (days)",
+        "ltv_n_unique_nights": "Unique nights",
+        "ltv_vg_has_v": "Has V band",
+        "ltv_vg_overlap_days": "V/g overlap (days)",
+        "ltv_vg_overlap_fraction": "V/g overlap fraction",
         "filtered_cams": "Filtered cameras",
     }
 
@@ -1887,6 +1906,10 @@ def _render_stat_cards(stat_rows: list[tuple[str, str]]) -> list:
     }
 
     group_order = [
+        "LTV Summary",
+        "LTV Trend",
+        "LTV Seasons",
+        "LTV Stochastic",
         "Coverage & Cadence",
         "Photometry & SNR",
         "Periodicity",
@@ -1903,6 +1926,16 @@ def _render_stat_cards(stat_rows: list[tuple[str, str]]) -> list:
     def _stat_group(key: str) -> str:
         if key == "filtered_cams":
             return "Camera Diagnostics"
+        if key.startswith("ltv_stoch_"):
+            return "LTV Stochastic"
+        if key.startswith("ltv_season_") or key.startswith("ltv_leave1out_"):
+            return "LTV Seasons"
+        if key.startswith("ltv_trend_") or key in {
+            "ltv_slope", "ltv_slope_quad", "ltv_max_diff", "ltv_coeff1", "ltv_coeff2"
+        }:
+            return "LTV Trend"
+        if key.startswith("ltv_"):
+            return "LTV Summary"
         if key.startswith("stats_file_points_") or key in {
             "stats_jd_start", "stats_jd_end", "stats_time_span_days",
             "stats_n_unique_nights", "stats_duty_cycle_fraction",
@@ -1927,7 +1960,12 @@ def _render_stat_cards(stat_rows: list[tuple[str, str]]) -> list:
         return "Other"
 
     def _fallback_label(key: str) -> str:
-        raw = key[6:] if key.startswith("stats_") else key
+        if key.startswith("stats_"):
+            raw = key[6:]
+        elif key.startswith("ltv_"):
+            raw = key[4:]
+        else:
+            raw = key
         token_map = {
             "jd": "JD",
             "snr": "SNR",
@@ -1939,7 +1977,9 @@ def _render_stat_cards(stat_rows: list[tuple[str, str]]) -> list:
             "mhps": "MHPS",
             "rcs": "RCS",
             "fap": "FAP",
+            "bic": "BIC",
             "ls": "LS",
+            "vg": "V/g",
             "ml": "ML",
             "chi2": r"$\chi^2$",
             "r2": r"$R^2$",
@@ -2223,6 +2263,37 @@ def _render_repro_badge(run_params: dict | None, warnings: list[str]) -> html.Sp
         text = 'Repro: exact run params'
         cls = 'repro-badge'
     return html.Span(text, className=cls)
+
+
+def _render_explorer_selection_panel(selection_meta: dict | None) -> list:
+    """Render compact provenance for queues exported from explorer."""
+    meta = dict(selection_meta or {})
+    if not meta:
+        return [html.Div('This review DB was not exported from explorer.', style={'color': '#7d91a6'})]
+
+    plot_meta = dict(meta.get('plot') or {})
+    filter_meta = dict(meta.get('filters') or {})
+    rows: list[tuple[str, object]] = [
+        ('Created', meta.get('created_at')),
+        ('Candidates', meta.get('candidate_count')),
+        ('Filtered rows', meta.get('filtered_count')),
+        ('Sources', ', '.join(str(v) for v in (meta.get('source_labels') or [])) or '-'),
+        ('Query', filter_meta.get('query') or '-'),
+        ('X metric', plot_meta.get('x_metric') or '-'),
+        ('Y metric', plot_meta.get('y_metric') or '-'),
+    ]
+    source_files = [str(v) for v in (meta.get('source_files') or []) if str(v).strip()]
+    if source_files:
+        rows.append(('Source DBs', '; '.join(source_files[:3]) + (' ...' if len(source_files) > 3 else '')))
+
+    return [
+        html.Div([
+            html.Span(f'{label}: ', className='meta-field-label'),
+            html.Span(str(value), className='meta-field-value'),
+        ], className='meta-field-row')
+        for label, value in rows
+        if value not in (None, '')
+    ]
 
 
 _METADATA_EXTRA_GROUPS = (
@@ -3729,7 +3800,7 @@ def _bool_mode_filter(label: str, component_id: str):
             value='Any',
             clearable=False,
             style={'margin-bottom': '4px', 'font-size': '11px'},
-            persistence=True,
+            persistence=_review_persistence_token(),
             persistence_type='local',
         ),
     ]
@@ -3750,7 +3821,7 @@ def _num_range_filter(col: str):
                 type='number',
                 placeholder='min',
                 debounce=True,
-                persistence=True,
+                persistence=_review_persistence_token(),
                 persistence_type='local',
                 style={'width': '72px', 'font-size': '11px', 'flex': '0 0 72px'},
             ),
@@ -3765,7 +3836,7 @@ def _num_range_filter(col: str):
                 tooltip={'placement': 'bottom', 'always_visible': False},
                 updatemode='mouseup',
                 disabled=True,
-                persistence=True,
+                persistence=_review_persistence_token(),
                 persistence_type='local',
             ),
             dcc.Input(
@@ -3773,7 +3844,7 @@ def _num_range_filter(col: str):
                 type='number',
                 placeholder='max',
                 debounce=True,
-                persistence=True,
+                persistence=_review_persistence_token(),
                 persistence_type='local',
                 style={'width': '72px', 'font-size': '11px', 'flex': '0 0 72px'},
             ),
@@ -3793,7 +3864,7 @@ def _text_filter(col: str):
             clearable=False,
             placeholder='Open sidebar to load options',
             style={'margin-bottom': '4px', 'font-size': '11px'},
-            persistence=True, persistence_type='local'
+            persistence=_review_persistence_token(), persistence_type='local'
         ),
     ])
 
@@ -3809,7 +3880,7 @@ def _select_filter(col: str):
             style={'margin-bottom': '4px', 'font-size': '11px'},
             maxHeight=400,
             optionHeight=28,
-            persistence=True,
+            persistence=_review_persistence_token(),
             persistence_type='local',
         ),
     ])
@@ -3840,320 +3911,7 @@ def _make_filter_group(name: str, items: list, *, default_open: bool = False):
 # Sidebar filter groups — single source of truth for filter UI + state lists
 # Each item: ('bool', col_name) | ('num', col_name) | ('text', col_name)
 # ---------------------------------------------------------------------------
-_SIDEBAR_GROUPS = [
-    ('Vetting', [
-        ('bool', 'vetting_likely_known'),
-        ('num', 'pm_cluster_offset_sigma'),
-        ('select', 'vsx_class'),
-        ('select', 'asassn_var_type'),
-        ('select', 'gaia_var_class'),
-        ('select', 'simbad_otype'),
-        ('select', 'ztf_var_type'),
-        ('select', 'tns_type'),
-        ('select', 'alerce_lc_class'),
-        ('select', 'yso_class'),
-    ]),
-    ('LTV', [
-        ('num', 'ltv_slope'),
-        ('num', 'ltv_slope_quad'),
-        ('num', 'ltv_dispersion'),
-        ('num', 'ltv_max_diff'),
-        ('num', 'ltv_ls_period'),
-        ('num', 'ltv_ls_fap'),
-        ('num', 'ltv_neowise_w1_slope'),
-        ('num', 'ltv_neowise_w1_w2_slope'),
-        ('num', 'ltv_neowise_n_epochs'),
-        ('bool', 'ltv_passed_filters'),
-        ('bool', 'ltv_dust_candidate'),
-        ('bool', 'ltv_dust_excess'),
-        ('bool', 'ltv_vsx_match'),
-        ('bool', 'ltv_milliquas_match'),
-        ('bool', 'ltv_gaia_alert_match'),
-    ]),
-    ('LTV Stochastic', [
-        ('num', 'ltv_stoch_sf_ml_amplitude'),
-        ('num', 'ltv_stoch_sf_ml_gamma'),
-        ('num', 'ltv_stoch_iar_phi'),
-        ('num', 'ltv_stoch_mhps_high'),
-        ('num', 'ltv_stoch_mhps_low'),
-        ('num', 'ltv_stoch_mhps_non_zero'),
-        ('bool', 'ltv_stoch_mhps_pn_flag'),
-        ('num', 'ltv_stoch_mhps_ratio'),
-        ('num', 'ltv_stoch_gp_drw_sigma'),
-        ('num', 'ltv_stoch_gp_drw_tau'),
-    ]),
-    ('External Coverage', [
-        ('num', 'neowise_n_epochs'),
-        ('num', 'atlas_n_det_cyan'),
-        ('num', 'atlas_n_det_orange'),
-        ('num', 'gaia_epoch_n_obs'),
-        ('num', 'xray_flux'),
-    ]),
-    ('General Flags', [
-        ('bool', 'catalog_match'),
-        ('bool', 'high_ruwe_flag'),
-    ]),
-    ('Periodicity', [
-        ('bool', 'lsp_is_alias'),
-        ('bool', 'lsp_is_significant'),
-        ('num', 'periodicity_score'),
-        ('num', 'phase_quality_score'),
-        ('num', 'lsp_bootstrap_sig'),
-        ('num', 'lsp_power'),
-        ('num', 'lsp_period'),
-    ]),
-    ('Dip Detection', [
-        ('bool', 'dip_significant'),
-        ('text', 'dip_best_morph'),
-        ('num', 'dip_best_log_bf'),
-        ('num', 'dip_best_delta_bic'),
-        ('num', 'dip_best_width_param'),
-        ('num', 'dip_symmetry_score'),
-        ('num', 'dip_best_amp'),
-        ('num', 'dip_best_t0'),
-        ('num', 'dip_best_alpha'),
-        ('num', 'dip_best_tau'),
-        ('num', 'dip_bayes_factor'),
-        ('num', 'dip_best_p'),
-        ('num', 'dip_best_mag_event'),
-        ('num', 'dip_trigger_max'),
-        ('num', 'dip_max_event_prob'),
-        ('num', 'dip_trigger_threshold'),
-    ]),
-    ('Dip Runs', [
-        ('num', 'dip_count'),
-        ('num', 'dip_run_count'),
-        ('num', 'dip_max_run_points'),
-        ('num', 'dip_max_run_duration'),
-        ('num', 'dip_max_run_sum'),
-        ('num', 'dip_max_run_max'),
-        ('num', 'dip_max_run_cameras'),
-        ('num', 'dip_max_log_bf_local'),
-    ]),
-    ('Jump Detection', [
-        ('bool', 'jump_significant'),
-        ('text', 'jump_best_morph'),
-        ('num', 'jump_best_log_bf'),
-        ('num', 'jump_best_delta_bic'),
-        ('num', 'jump_best_width_param'),
-        ('num', 'jump_best_amp'),
-        ('num', 'jump_best_t0'),
-        ('num', 'jump_best_alpha'),
-        ('num', 'jump_best_tau'),
-        ('num', 'jump_bayes_factor'),
-        ('num', 'jump_best_p'),
-        ('num', 'jump_best_mag_event'),
-        ('num', 'jump_trigger_max'),
-        ('num', 'jump_max_event_prob'),
-        ('num', 'jump_trigger_threshold'),
-    ]),
-    ('Jump Runs', [
-        ('num', 'jump_count'),
-        ('num', 'jump_run_count'),
-        ('num', 'jump_max_run_points'),
-        ('num', 'jump_max_run_duration'),
-        ('num', 'jump_max_run_sum'),
-        ('num', 'jump_max_run_max'),
-        ('num', 'jump_max_run_cameras'),
-        ('num', 'jump_max_log_bf_local'),
-    ]),
-    ('Dip Recurrence', [
-        ('bool', 'dip_is_single_event'),
-        ('num', 'dip_inter_event_spacing_median'),
-        ('num', 'dip_inter_event_spacing_std'),
-        ('num', 'dip_amplitude_consistency'),
-        ('num', 'dip_duration_consistency'),
-    ]),
-    ('Jump Recurrence', [
-        ('bool', 'jump_is_single_event'),
-        ('num', 'jump_inter_event_spacing_median'),
-        ('num', 'jump_inter_event_spacing_std'),
-        ('num', 'jump_amplitude_consistency'),
-        ('num', 'jump_duration_consistency'),
-    ]),
-    ('Event Scoring', [
-        ('num', 'dipper_score'),
-        ('num', 'dipper_n_dips'),
-        ('num', 'dipper_n_valid_dips'),
-        ('num', 'jumper_score'),
-        ('num', 'jumper_n_jumps'),
-        ('num', 'jumper_n_valid_jumps'),
-    ]),
-    ('Stellar Parameters', [
-        ('num', 'ruwe'),
-        ('num', 'teff_gspphot'),
-        ('num', 'logg_gspphot'),
-        ('num', 'mh_gspphot'),
-        ('num', 'distance_gspphot'),
-        ('num', 'parallax'),
-        ('num', 'pmra'),
-        ('num', 'pmdec'),
-    ]),
-    ('Photometry', [
-        ('num', 'tmass_j'),
-        ('num', 'tmass_h'),
-        ('num', 'tmass_k'),
-        ('num', 'unwise_w1'),
-        ('num', 'unwise_w2'),
-        ('num', 'H_K'),
-        ('num', 'W1_W2'),
-        ('num', 'iphas_ha_mag'),
-        ('num', 'unwise_w1_zscore'),
-        ('num', 'unwise_w2_zscore'),
-    ]),
-    ('Galactic Coordinates', [
-        ('num', 'gal_l'),
-        ('num', 'gal_b'),
-    ]),
-    ('Extinction & Environment', [
-        ('text', 'population'),
-        ('text', 'banyan_best_assoc'),
-        ('num', 'A_v_3d'),
-        ('num', 'ebv_3d'),
-        ('num', 'age50'),
-        ('num', 'mass50'),
-        ('num', 'banyan_field_prob'),
-    ]),
-    ('Associations', [
-        ('text', 'sfr_name'),
-        ('num', 'sfr_sep_arcmin'),
-        ('text', 'cluster_name'),
-        ('num', 'cluster_membership_prob'),
-    ]),
-    ('Period Consensus', [
-        ('num', 'period_n_sources'),
-        ('num', 'period_consensus_days'),
-        ('num', 'period_consensus_support'),
-        ('bool', 'period_consensus_agree'),
-    ]),
-    ('LC Cadence & Coverage', [
-        ('num', 'stats_time_span_days'),
-        ('num', 'stats_n_unique_nights'),
-        ('num', 'stats_duty_cycle_fraction'),
-        ('num', 'stats_cadence_mean_dt_days'),
-        ('num', 'stats_cadence_median_dt_days'),
-        ('num', 'stats_cadence_p05_dt_days'),
-        ('num', 'stats_cadence_p95_dt_days'),
-        ('num', 'stats_file_points_total'),
-        ('num', 'stats_file_points_kept_after_filter'),
-    ]),
-    ('LC Photometric Scatter', [
-        ('num', 'stats_photometry_std_mag'),
-        ('num', 'stats_photometry_robust_sigma_mag'),
-        ('num', 'stats_photometry_IQR_mag'),
-        ('num', 'stats_photometry_mean_mag'),
-        ('num', 'stats_photometry_median_mag'),
-        ('num', 'stats_photometry_weighted_mean_mag'),
-        ('num', 'stats_clipped_std_mag_3sigma_about_median'),
-        ('num', 'stats_n_outliers_removed_robust_3sigma'),
-    ]),
-    ('LC Variability', [
-        ('num', 'stats_variability_reduced_chi2_vs_constant'),
-        ('num', 'stats_variability_von_neumann_ratio'),
-        ('num', 'stats_variability_lag1_autocorr'),
-        ('num', 'stats_variability_stetson_I'),
-        ('num', 'stats_variability_stetson_J'),
-        ('num', 'stats_variability_stetson_K'),
-        ('num', 'stats_amplitude'),
-        ('num', 'stats_beyond_1_std'),
-        ('num', 'stats_con'),
-        ('num', 'stats_delta_mag_fid'),
-        ('num', 'stats_intrinsic_sigma_mag'),
-        ('num', 'stats_first_mag'),
-        ('num', 'stats_gskew'),
-        ('num', 'stats_max_slope'),
-        ('num', 'stats_meanvariance'),
-        ('num', 'stats_median_abs_dev'),
-        ('num', 'stats_median_brp'),
-        ('num', 'stats_percent_amplitude'),
-        ('num', 'stats_q31'),
-        ('num', 'stats_skew'),
-        ('num', 'stats_small_kurtosis'),
-        ('num', 'stats_constancy_p_value'),
-        ('num', 'stats_anderson_darling'),
-        ('num', 'stats_pair_slope_trend'),
-        ('num', 'stats_rcs'),
-        ('num', 'stats_autocor_length'),
-    ]),
-    ('LC Structure Function', [
-        ('num', 'stats_sf_ml_amplitude'),
-        ('num', 'stats_sf_ml_gamma'),
-    ]),
-    ('LC Harmonics (folded)', [
-        ('num', 'stats_harmonics_order'),
-        ('num', 'stats_harmonics_period'),
-        ('num', 'stats_harmonics_a0'),
-        ('num', 'stats_harmonics_model_amplitude'),
-        ('num', 'stats_harmonics_reduced_chi2'),
-        ('num', 'stats_harmonics_mag_1'),
-        ('num', 'stats_harmonics_mag_2'),
-        ('num', 'stats_harmonics_mag_3'),
-        ('num', 'stats_harmonics_mag_4'),
-        ('num', 'stats_harmonics_mag_5'),
-        ('num', 'stats_harmonics_mag_6'),
-        ('num', 'stats_harmonics_mag_7'),
-        ('num', 'stats_harmonics_r21'),
-        ('num', 'stats_harmonics_r31'),
-        ('num', 'stats_harmonics_r41'),
-        ('num', 'stats_harmonics_r51'),
-        ('num', 'stats_harmonics_r61'),
-        ('num', 'stats_harmonics_r71'),
-        ('num', 'stats_harmonics_phase_2'),
-        ('num', 'stats_harmonics_phase_3'),
-        ('num', 'stats_harmonics_phase_4'),
-        ('num', 'stats_harmonics_phase_5'),
-        ('num', 'stats_harmonics_phase_6'),
-        ('num', 'stats_harmonics_phase_7'),
-        ('num', 'stats_harmonics_mse'),
-        ('num', 'stats_psi_cs'),
-        ('num', 'stats_psi_eta'),
-    ]),
-    ('LC Stochastic Models', [
-        ('num', 'stats_gp_drw_sigma'),
-        ('num', 'stats_gp_drw_tau'),
-        ('num', 'stats_iar_phi'),
-        ('num', 'stats_mhps_high'),
-        ('num', 'stats_mhps_low'),
-        ('num', 'stats_mhps_non_zero'),
-        ('bool', 'stats_mhps_pn_flag'),
-        ('num', 'stats_mhps_ratio'),
-    ]),
-    ('LC Error / SNR / Trend', [
-        ('num', 'stats_error_and_snr_stats_snr_median'),
-        ('num', 'stats_error_and_snr_stats_error_median'),
-        ('num', 'stats_trend_slope_mag_per_year'),
-        ('num', 'stats_trend_r2'),
-    ]),
-    ('Light Curve Basics', [
-        ('text', 'baseline_source'),
-        ('text', 'trigger_mode'),
-        ('num', 'n_points'),
-        ('num', 'n_cameras'),
-        ('num', 'baseline_mag'),
-        ('num', 'cadence_median_days'),
-    ]),
-    ('Classification', [
-        ('text', 'trigger_type'),
-        ('text', 'yso_class'),
-        ('text', 'final_class'),
-        ('num', 'P_eb'),
-        ('num', 'P_cv'),
-        ('num', 'P_starspot'),
-        ('num', 'P_disk'),
-        ('num', 'a_circ_au'),
-        ('num', 'transit_prob'),
-        ('num', 'hill_radius_rsun'),
-    ]),
-    ('Fail Flags', [
-        ('bool', 'failed_posterior_strength'),
-        ('bool', 'failed_run_robustness'),
-        ('bool', 'failed_morphology'),
-        ('bool', 'failed_score'),
-        ('bool', 'failed_periodicity'),
-        ('bool', 'failed_signal_amplitude'),
-        ('bool', 'bad_cameras_filtered'),
-    ]),
-]
+_SIDEBAR_GROUPS = list(REVIEW_FILTER_SIDEBAR_GROUPS)
 
 
 def create_layout():
@@ -4178,6 +3936,7 @@ def create_layout():
 
         # Data stores
         dcc.Store(id='queue-data'),
+        dcc.Store(id='review-db-scope', data=_review_persistence_token()),
         dcc.Store(id='current-index', data=0),
         dcc.Store(id='current-candidate-id', data=None),
         dcc.Store(id='queue-size-store', data=0),
@@ -4209,6 +3968,8 @@ def create_layout():
         dcc.Store(id='status-resize-init', data=0),
         dcc.Store(id='sidebar-plot-saved', data=0),  # dummy sink for plot prefs save callback
         dcc.Store(id='candidate-start-time', data=0),
+        dcc.Store(id='startup-selection-applied', data=False),
+        dcc.Store(id='last-candidate-saved', data=0),
         dcc.Download(id='plot-export-download'),
         dcc.Download(id='run-config-download'),
         dcc.Interval(id='keyboard-init', interval=200, n_intervals=0, max_intervals=1),
@@ -4231,7 +3992,7 @@ def create_layout():
                 options=[{'label': ' Only unreviewed', 'value': 'yes'}],
                 value=[],
                 style={'margin-bottom': '3px'},
-                persistence=True,
+                persistence=_review_persistence_token(),
                 persistence_type='local',
             ),
             dcc.Checklist(
@@ -4239,7 +4000,7 @@ def create_layout():
                 options=[{'label': ' Require failed_any=False', 'value': 'yes'}],
                 value=[],
                 style={'margin-bottom': '6px'},
-                persistence=True,
+                persistence=_review_persistence_token(),
                 persistence_type='local',
             ),
 
@@ -4264,7 +4025,7 @@ def create_layout():
                 multi=True,
                 clearable=False,
                 style={'margin-bottom': '4px', 'font-size': '11px'},
-                persistence=True,
+                persistence=_review_persistence_token(),
                 persistence_type='local',
             ),
             dcc.Checklist(
@@ -4272,7 +4033,7 @@ def create_layout():
                 options=[{'label': ' Descending', 'value': 'yes'}],
                 value=[],
                 style={'margin-bottom': '6px'},
-                persistence=True,
+                persistence=_review_persistence_token(),
                 persistence_type='local',
             ),
 
@@ -4294,6 +4055,19 @@ def create_layout():
                 style={'width': '100%'},
             ),
 
+            html.Div('Explore', className='section-title', style={'margin-top': '8px'}),
+            html.Div([
+                html.Button('Open Candidate In Explorer', id='open-candidate-in-explorer-btn', n_clicks=0,
+                            className='action-btn', style={'flex': '1 1 0'}),
+                html.Button('Open DB In Explorer', id='open-db-in-explorer-btn', n_clicks=0,
+                            className='action-btn', style={'flex': '1 1 0'}),
+            ], style={'display': 'flex', 'gap': '6px', 'marginBottom': '6px'}),
+            html.Div(id='explorer-launch-status', style={'fontSize': '10px', 'color': '#7da8c4', 'marginBottom': '6px'}),
+            html.Details([
+                html.Summary('Explorer Selection'),
+                html.Div(id='explorer-selection-panel', style={'fontSize': '10px', 'marginTop': '4px'}),
+            ], open=False),
+
             html.Hr(),
 
             html.Div('Native Cameras', className='section-title'),
@@ -4308,7 +4082,7 @@ def create_layout():
                 value=[],
                 className='sidebar-camera-checklist',
                 style={'margin-bottom': '6px'},
-                persistence=True,
+                persistence=_review_persistence_token(),
                 persistence_type='local',
             ),
 
@@ -4319,7 +4093,7 @@ def create_layout():
                 value=['g', 'V'],
                 className='sidebar-camera-checklist',
                 style={'margin-bottom': '6px'},
-                persistence=True,
+                persistence=_review_persistence_token(),
                 persistence_type='local',
             ),
 
@@ -4333,7 +4107,7 @@ def create_layout():
                 value=DEFAULT_FETCH_BACKEND,
                 clearable=False,
                 style={'margin-bottom': '4px', 'font-size': '11px'},
-                persistence=True,
+                persistence=_review_persistence_token(),
                 persistence_type='local',
             ),
             dcc.Dropdown(
@@ -4346,9 +4120,12 @@ def create_layout():
                 value='asassn',
                 clearable=False,
                 style={'margin-bottom': '4px', 'font-size': '11px'},
+                persistence=_review_persistence_token(),
+                persistence_type='local',
             ),
             dcc.Input(id='fetch-query', placeholder='ID or RA Dec [radius_arcsec]', type='text',
-                      style={**_inp_style, 'marginBottom': '4px'}),
+                      style={**_inp_style, 'marginBottom': '4px'},
+                      persistence=_review_persistence_token(), persistence_type='local'),
             dcc.Dropdown(
                 id='fetch-mode',
                 options=[
@@ -4359,6 +4136,8 @@ def create_layout():
                 value='quick',
                 clearable=False,
                 style={'margin-bottom': '4px', 'font-size': '11px'},
+                persistence=_review_persistence_token(),
+                persistence_type='local',
             ),
             html.Button('Fetch', id='fetch-btn', n_clicks=0,
                         className='action-btn',
@@ -4376,7 +4155,7 @@ def create_layout():
             html.Div('Import', className='section-title'),
             dcc.Input(id='import-path', placeholder='Candidates file path', type='text',
                      style=_inp_style,
-                     persistence=True, persistence_type='local'),
+                     persistence=_review_persistence_token(), persistence_type='local'),
             html.Div('Tip: use one path, a run directory, a glob, or multiple newline-separated files.',
                      style={'fontSize': '10px', 'color': '#7d91a6', 'margin': '4px 0 6px'}),
 
@@ -4385,7 +4164,7 @@ def create_layout():
                 options=[{'label': ' Raw light curve file (CSV/parquet with JD, mag columns)', 'value': 'yes'}],
                 value=[],
                 style={'margin-bottom': '4px', 'fontSize': '10px'},
-                persistence=True, persistence_type='local',
+                persistence=_review_persistence_token(), persistence_type='local',
             ),
 
             html.Label('Characterize on import:'),
@@ -4394,28 +4173,28 @@ def create_layout():
                 options=[{'label': ' Enable', 'value': 'yes'}],
                 value=['yes'],
                 style={'margin-bottom': '4px'},
-                persistence=True, persistence_type='local',
+                persistence=_review_persistence_token(), persistence_type='local',
             ),
 
             dcc.Input(id='characterize-crossmatch', placeholder='Crossmatch CSV', type='text',
                      value=str(VSX_CROSSMATCH_PATH), style=_inp_style,
-                     persistence=True, persistence_type='local'),
+                     persistence=_review_persistence_token(), persistence_type='local'),
             dcc.Input(id='characterize-gaia-cache', placeholder='Gaia cache', type='text',
                      value=str(GAIA_CACHE_FILE), style=_inp_style,
-                     persistence=True, persistence_type='local'),
+                     persistence=_review_persistence_token(), persistence_type='local'),
             dcc.Input(id='characterize-chunk-size', placeholder='Chunk size', type='number',
                      value=GAIA_CHUNK_SIZE, style=_inp_style,
-                     persistence=True, persistence_type='local'),
+                     persistence=_review_persistence_token(), persistence_type='local'),
             dcc.Checklist(
                 id='characterize-dust',
                 options=[{'label': ' Enable dustmaps3d', 'value': 'yes'}],
                 value=['yes'],
                 style={'margin-bottom': '4px'},
-                persistence=True, persistence_type='local',
+                persistence=_review_persistence_token(), persistence_type='local',
             ),
             dcc.Input(id='characterize-starhorse', placeholder='StarHorse (tap or path)', type='text',
                      value='tap', style=_inp_style,
-                     persistence=True, persistence_type='local'),
+                     persistence=_review_persistence_token(), persistence_type='local'),
 
             html.Label('Vet on import:'),
             dcc.Checklist(
@@ -4423,7 +4202,7 @@ def create_layout():
                 options=[{'label': ' Enable', 'value': 'yes'}],
                 value=['yes'],
                 style={'margin-bottom': '4px'},
-                persistence=True, persistence_type='local',
+                persistence=_review_persistence_token(), persistence_type='local',
             ),
 
             html.Button('Import', id='import-btn', n_clicks=0, className='action-btn',
@@ -4433,14 +4212,36 @@ def create_layout():
 
             html.Div('Export', className='section-title'),
             dcc.Input(id='export-path', placeholder='Export file path', type='text',
-                     value='output/review/reviewed_candidates.parquet', style=_inp_style),
+                     value='output/review/reviewed_candidates.parquet', style=_inp_style,
+                     persistence=_review_persistence_token(), persistence_type='local'),
             dcc.Checklist(
                 id='export-only-reviewed',
                 options=[{'label': ' Only reviewed', 'value': 'yes'}],
                 value=['yes'],
-                style={'margin-bottom': '4px'}
+                style={'margin-bottom': '4px'},
+                persistence=_review_persistence_token(),
+                persistence_type='local',
             ),
             html.Button('Export Reviews', id='export-btn', n_clicks=0, className='action-btn',
+                       style={'width': '100%'}),
+
+            html.Hr(),
+
+            html.Div('Merge Reviews', className='section-title'),
+            dcc.Input(
+                id='merge-target-db-path',
+                placeholder='Target review DB path',
+                type='text',
+                value='output/review/review.db',
+                style=_inp_style,
+                persistence=_review_persistence_token(),
+                persistence_type='local',
+            ),
+            html.Div(
+                'Merge this DB into the target DB. If both DBs reviewed the same candidate, the newer updated_at wins.',
+                style={'fontSize': '10px', 'color': '#7d91a6', 'margin': '4px 0 6px'},
+            ),
+            html.Button('Merge Into Target DB', id='merge-review-db-btn', n_clicks=0, className='action-btn',
                        style={'width': '100%'}),
 
             html.Hr(),
@@ -4449,7 +4250,7 @@ def create_layout():
             html.Label('Search Radius (arcsec):'),
             dcc.Input(id='link-radius-arcsec', placeholder='Radius (arcsec)', type='number',
                      value=10.0, min=0.1, step=1.0, style=_inp_style,
-                     persistence=True, persistence_type='local'),
+                     persistence=_review_persistence_token(), persistence_type='local'),
                      
             html.Hr(),
 
@@ -4458,7 +4259,9 @@ def create_layout():
                 id='pace-timer-toggle',
                 options=[{'label': ' Show Timer', 'value': 'yes'}],
                 value=[],
-                style={'margin-bottom': '4px'}
+                style={'margin-bottom': '4px'},
+                persistence=_review_persistence_token(),
+                persistence_type='local',
             ),
 
             html.Div('Theme', className='section-title'),
@@ -4471,6 +4274,8 @@ def create_layout():
                 ],
                 value=DEFAULT_THEME,
                 style={'margin-bottom': '4px'},
+                persistence=_review_persistence_token(),
+                persistence_type='local',
             ),
 
             html.Div(id='sidebar-status', style={'margin-top': '10px', 'color': '#0f0', 'font-size': '11px'}),
@@ -4505,6 +4310,8 @@ def create_layout():
                                     value='Diagnostics',
                                     clearable=False,
                                     style={'minWidth': '140px', 'font-size': '10px'},
+                                    persistence=_review_persistence_token(),
+                                    persistence_type='local',
                                 ),
                                 dcc.RadioItems(
                                     id='plot-mode',
@@ -4514,6 +4321,8 @@ def create_layout():
                                     ],
                                     value='native',
                                     inline=True,
+                                    persistence=_review_persistence_token(),
+                                    persistence_type='local',
                                 ),
                                 dcc.Checklist(
                                     id='plot-overlays',
@@ -4528,6 +4337,8 @@ def create_layout():
                                     ],
                                     value=list(PLOT_PRESETS['Diagnostics']['overlays']),
                                     inline=True,
+                                    persistence=_review_persistence_token(),
+                                    persistence_type='local',
                                 ),
                                 dcc.RadioItems(
                                     id='yaxis-mode',
@@ -4538,7 +4349,7 @@ def create_layout():
                                     value='mag',
                                     inline=True,
                                     style={'font-size': '10px', 'margin-left': '8px'},
-                                    persistence=True,
+                                    persistence=_review_persistence_token(),
                                     persistence_type='local',
                                 ),
                                 html.Div([
@@ -4553,6 +4364,8 @@ def create_layout():
                                         marks=None,
                                         tooltip={'placement': 'bottom', 'always_visible': False},
                                         updatemode='drag',
+                                        persistence=_review_persistence_token(),
+                                        persistence_type='local',
                                     ),
                                 ], className='toolbar-slider-control'),
                                 html.Div([
@@ -4567,6 +4380,8 @@ def create_layout():
                                         marks=None,
                                         tooltip={'placement': 'bottom', 'always_visible': False},
                                         updatemode='drag',
+                                        persistence=_review_persistence_token(),
+                                        persistence_type='local',
                                     ),
                                 ], className='toolbar-slider-control'),
                                  html.Button('Reset', id='plot-reset-btn', n_clicks=0, className='compact-btn'),
@@ -4581,8 +4396,10 @@ def create_layout():
                                          options=EXTERNAL_SOURCE_VIEW_OPTIONS,
                                          value=DEFAULT_EXTERNAL_SOURCE_VIEW,
                                          size='sm',
-                                        style={'width': '140px', 'font-size': '10px', 'minWidth': '140px'},
-                                    ),
+                                         style={'width': '140px', 'font-size': '10px', 'minWidth': '140px'},
+                                         persistence=_review_persistence_token(),
+                                         persistence_type='local',
+                                     ),
                                 ], style={'display': 'flex', 'alignItems': 'center', 'gap': '2px',
                                           'margin-left': '10px', 'border-left': '1px solid #444',
                                           'padding-left': '10px'}),
@@ -4599,19 +4416,27 @@ def create_layout():
                                         value='pdm',
                                         clearable=False,
                                         style={'width': '85px', 'font-size': '10px'},
+                                        persistence=_review_persistence_token(),
+                                        persistence_type='local',
                                     ),
                                     dcc.Input(id='pdm-min-period', type='number', value=0.1, min=0.001,
                                               step='any', debounce=True, placeholder='Min P',
-                                              style={'width': '72px', 'font-size': '10px'}),
+                                              style={'width': '72px', 'font-size': '10px'},
+                                              persistence=_review_persistence_token(),
+                                              persistence_type='local'),
                                     html.Span('–', style={'color': '#9fb6cb', 'margin': '0 2px', 'font-size': '10px'}),
                                     dcc.Input(id='pdm-max-period', type='number', value=10, min=0.001,
                                               step='any', debounce=True, placeholder='Max P',
-                                              style={'width': '72px', 'font-size': '10px'}),
+                                              style={'width': '72px', 'font-size': '10px'},
+                                              persistence=_review_persistence_token(),
+                                              persistence_type='local'),
                                     html.Span('d', style={'color': '#9fb6cb', 'font-size': '10px', 'margin-right': '4px'}),
                                      html.Button('Find Period', id='pdm-run-btn', n_clicks=0, className='compact-btn'),
                                      dcc.Input(id='pdm-manual-period', type='number', min=0.001,
                                                step=0.001, placeholder='Manual P (d)',
-                                               style={'width': '90px', 'font-size': '10px', 'margin-left': '4px'}),
+                                               style={'width': '90px', 'font-size': '10px', 'margin-left': '4px'},
+                                               persistence=_review_persistence_token(),
+                                               persistence_type='local'),
                                      html.Span(id='pdm-result-label', style={'color': '#7da8c4', 'font-size': '10px',
                                                                               'margin-left': '4px'}),
                                      html.Span(id='period-search-indicator', style={'color': '#9fb6cb', 'font-size': '10px',
@@ -4689,6 +4514,8 @@ def create_layout():
                                     options=[{'label': ' Round', 'value': 'yes'}],
                                     value=['yes'],
                                     style={'display': 'inline-block', 'font-size': '11px', 'margin-right': '6px'},
+                                    persistence=_review_persistence_token(),
+                                    persistence_type='local',
                                 ),
                                 html.Button('Collapse all', id='toggle-meta-all', n_clicks=0, className='compact-btn'),
                             ], className='meta-toolbar'),
@@ -5005,9 +4832,11 @@ app.clientside_callback(
 
 app.clientside_callback(
     """
-    function(_tick, currentTheme) {
+    function(_tick, currentTheme, reviewScope) {
+        var scope = String(reviewScope || 'default');
+        var storageKey = 'malca.review.theme::' + scope;
         try {
-            var saved = window.localStorage.getItem('malca.review.theme');
+            var saved = window.localStorage.getItem(storageKey);
             if (saved && ['black', 'gray', 'white'].includes(saved)) {
                 return saved;
             }
@@ -5019,18 +4848,21 @@ app.clientside_callback(
     """,
     Output('theme-mode', 'value'),
     Input('keyboard-init', 'n_intervals'),
-    State('theme-mode', 'value'),
+    [State('theme-mode', 'value'),
+     State('review-db-scope', 'data')],
     prevent_initial_call=False,
 )
 
 
 app.clientside_callback(
     """
-    function(theme) {
+    function(theme, reviewScope) {
         var t = ['black', 'gray', 'white'].includes(theme) ? theme : 'black';
+        var scope = String(reviewScope || 'default');
+        var storageKey = 'malca.review.theme::' + scope;
         try {
             document.body.setAttribute('data-theme', t);
-            window.localStorage.setItem('malca.review.theme', t);
+            window.localStorage.setItem(storageKey, t);
         } catch (e) {
             // ignore storage/document failures
         }
@@ -5039,6 +4871,7 @@ app.clientside_callback(
     """,
     Output('theme-mode-store', 'data'),
     Input('theme-mode', 'value'),
+    State('review-db-scope', 'data'),
     prevent_initial_call=False,
 )
 
@@ -5046,7 +4879,9 @@ app.clientside_callback(
 # --- Sidebar plot prefs: save to localStorage on change ---
 app.clientside_callback(
     """
-    function(preset, overlays, mode, opacity, resHeight, externalSource) {
+    function(preset, overlays, mode, opacity, resHeight, externalSource, reviewScope) {
+        var scope = String(reviewScope || 'default');
+        var storageKey = 'malca.review.sidebar.plot.v2::' + scope;
         try {
             var obj = {
                 preset: preset,
@@ -5056,7 +4891,7 @@ app.clientside_callback(
                 resHeight: resHeight,
                 externalSource: externalSource
             };
-            window.localStorage.setItem('malca.review.sidebar.plot.v2', JSON.stringify(obj));
+            window.localStorage.setItem(storageKey, JSON.stringify(obj));
         } catch (e) {}
         return window.dash_clientside.no_update;
     }
@@ -5068,6 +4903,7 @@ app.clientside_callback(
      Input('baseline-opacity-slider', 'value'),
      Input('residual-height-slider', 'value'),
      Input('external-source-view', 'value')],
+    State('review-db-scope', 'data'),
     prevent_initial_call=True,
 )
 
@@ -5075,10 +4911,12 @@ app.clientside_callback(
 # --- Sidebar plot prefs: load from localStorage on init ---
 app.clientside_callback(
     """
-    function(_tick, curPreset, curOverlays, curMode, curOpacity, curResHeight, curExternalSource) {
+    function(_tick, curPreset, curOverlays, curMode, curOpacity, curResHeight, curExternalSource, reviewScope) {
         var nu = window.dash_clientside.no_update;
+        var scope = String(reviewScope || 'default');
+        var storageKey = 'malca.review.sidebar.plot.v2::' + scope;
         try {
-            var raw = window.localStorage.getItem('malca.review.sidebar.plot.v2');
+            var raw = window.localStorage.getItem(storageKey);
             if (!raw) return [nu, nu, nu, nu, nu, nu, false];
             var obj = JSON.parse(raw);
             var preset = (obj.preset && ['Clean', 'Diagnostics', 'Full'].includes(obj.preset))
@@ -5109,7 +4947,8 @@ app.clientside_callback(
      State('plot-mode', 'value'),
      State('baseline-opacity-slider', 'value'),
      State('residual-height-slider', 'value'),
-     State('external-source-view', 'value')],
+     State('external-source-view', 'value'),
+     State('review-db-scope', 'data')],
     prevent_initial_call='initial_duplicate',
 )
 
@@ -6197,6 +6036,101 @@ def open_existing_candidate(n_clicks, n_submit, query, queue_data):
         0,
         f"Viewing {candidate_id} via {match_label or 'search'}. Refresh Queue to restore the filtered queue.",
     )
+
+
+@app.callback(
+    Output('last-candidate-saved', 'data'),
+    Input('current-candidate-id', 'data'),
+    prevent_initial_call=True,
+)
+def persist_last_candidate(current_candidate_id):
+    """Persist the most recently viewed candidate for this review DB."""
+    candidate_id = str(current_candidate_id or '').strip()
+    if not candidate_id:
+        raise dash.exceptions.PreventUpdate
+    with closing(db_connect(Path(DB_PATH))) as conn:
+        save_app_state(conn, 'review_last_candidate', candidate_id)
+    return int(time.time())
+
+
+@app.callback(
+    [Output('queue-data', 'data', allow_duplicate=True),
+     Output('current-index', 'data', allow_duplicate=True),
+     Output('notification', 'children', allow_duplicate=True),
+     Output('startup-selection-applied', 'data')],
+    Input('queue-data', 'data'),
+    State('startup-selection-applied', 'data'),
+    prevent_initial_call='initial_duplicate',
+)
+def restore_startup_candidate(queue_data, already_applied):
+    """Open CLI-requested candidate or last viewed candidate when the queue is ready."""
+    if already_applied:
+        raise dash.exceptions.PreventUpdate
+    if queue_data is None:
+        raise dash.exceptions.PreventUpdate
+
+    explicit_query = str(INITIAL_CANDIDATE_QUERY or '').strip()
+    candidate_ids = list((queue_data or {}).get('candidate_ids') or []) if isinstance(queue_data, dict) else []
+
+    with closing(db_connect(Path(DB_PATH))) as conn:
+        saved_candidate = str(load_app_state(conn, 'review_last_candidate', '') or '').strip()
+        if explicit_query:
+            candidate_id, match_label = _lookup_candidate_id_for_query(conn, explicit_query)
+            if candidate_id is None:
+                return no_update, no_update, f"Candidate not found in DB: {explicit_query}", True
+            if candidate_id in candidate_ids:
+                return no_update, candidate_ids.index(candidate_id), f"Opened {candidate_id} via {match_label or 'startup selection'}.", True
+            return (
+                {'candidate_ids': [candidate_id], 'queue_size': 1, 'filter_hash': f'view:{candidate_id}'},
+                0,
+                f"Opened {candidate_id} via {match_label or 'startup selection'}. Refresh Queue to restore the filtered queue.",
+                True,
+            )
+
+    if saved_candidate and saved_candidate in candidate_ids:
+        return no_update, candidate_ids.index(saved_candidate), f"Restored last candidate {saved_candidate}.", True
+    return no_update, no_update, no_update, True
+
+
+@app.callback(
+    Output('explorer-launch-status', 'children'),
+    [Input('open-candidate-in-explorer-btn', 'n_clicks'),
+     Input('open-db-in-explorer-btn', 'n_clicks')],
+    State('current-candidate-id', 'data'),
+    prevent_initial_call=True,
+)
+def open_in_explorer(_open_candidate_clicks, _open_db_clicks, current_candidate_id):
+    """Launch explorer on this DB, optionally focused on the current candidate."""
+    triggered = callback_context.triggered[0]['prop_id'].split('.')[0] if callback_context.triggered else ''
+    candidate_id = str(current_candidate_id or '').strip()
+    if triggered == 'open-candidate-in-explorer-btn' and not candidate_id:
+        return 'No candidate selected to open in explorer.'
+
+    command, url = build_explorer_command(
+        sources=[DB_PATH],
+        candidate=(candidate_id if triggered == 'open-candidate-in-explorer-btn' else None),
+        plot_dir=PLOT_DIR,
+    )
+    launch_detached(command)
+    return f"Opened explorer at {url}."
+
+
+@app.callback(
+    Output('explorer-selection-panel', 'children'),
+    Input('keyboard-init', 'n_intervals'),
+    prevent_initial_call=False,
+)
+def load_explorer_selection_panel(_tick):
+    """Display selection provenance when this review DB came from explorer."""
+    with closing(db_connect(Path(DB_PATH))) as conn:
+        raw = str(load_app_state(conn, 'explorer_selection_meta', '') or '').strip()
+    if not raw:
+        return _render_explorer_selection_panel(None)
+    try:
+        selection_meta = json.loads(raw)
+    except Exception:
+        selection_meta = None
+    return _render_explorer_selection_panel(selection_meta)
 
 
 def _do_save(candidate_id, score, event_class, needs_followup, notes, event_type, *, increment_pass=False):
@@ -8390,6 +8324,32 @@ def export_reviews_callback(n_clicks, export_path, only_reviewed):
         return f"✗ Export failed: {str(e)}"
 
 
+@app.callback(
+    Output('sidebar-status', 'children', allow_duplicate=True),
+    Input('merge-review-db-btn', 'n_clicks'),
+    State('merge-target-db-path', 'value'),
+    prevent_initial_call=True,
+)
+def merge_review_db_callback(n_clicks, target_db_path):
+    """Merge the current review DB into another review DB."""
+    if not n_clicks or not target_db_path:
+        return no_update
+
+    try:
+        source_db = Path(DB_PATH).expanduser().resolve()
+        target_db = Path(str(target_db_path)).expanduser().resolve()
+        result = merge_review_databases(source_db, target_db, only_reviewed=True)
+        with closing(db_connect(Path(DB_PATH))) as conn:
+            save_app_state(conn, 'last_merge_target_db', str(target_db))
+        return (
+            f"✓ Merged into {target_db.name} | "
+            f"reviews inserted={result['reviews_inserted']}, updated={result['reviews_updated']}, "
+            f"skipped={result['reviews_skipped']}"
+        )
+    except Exception as e:
+        return f"✗ Merge failed: {str(e)}"
+
+
 # Help modal
 @app.callback(
     Output("help-modal", "is_open"),
@@ -8429,19 +8389,21 @@ def serve_plot(filename):
 
 def main():
     """Main entry point."""
-    global DB_PATH, PLOT_DIR
+    global DB_PATH, PLOT_DIR, INITIAL_CANDIDATE_QUERY
 
     parser = argparse.ArgumentParser(description="MALCA Dash Review App")
     parser.add_argument('--db', default=None, help="SQLite database path (default: standalone.db without --plot-dir, review.db with --plot-dir)")
     parser.add_argument('--plot-dir', help="Plot directory path (auto-detects ./plots if not specified)")
     parser.add_argument('--host', default='127.0.0.1', help="Host")
     parser.add_argument('--port', default=8050, type=int, help="Port")
+    parser.add_argument('--candidate', default=None, help="Candidate ID / ASAS-SN ID / Gaia ID / LC stem to open on startup")
     parser.add_argument('--debug', action='store_true', help="Debug mode")
     parser.add_argument('--verbose-http', action='store_true',
                         help="Show Flask/Werkzeug per-request access logs")
     parser.add_argument('--merge-vetting', metavar='PATH',
                         help="Merge vetting results from a parquet file into the review DB and exit")
     args = parser.parse_args()
+    INITIAL_CANDIDATE_QUERY = str(args.candidate).strip() if args.candidate not in (None, '') else None
 
     # Auto-detect plot directory if not specified
     if args.plot_dir:

@@ -339,6 +339,17 @@ def _build_title(payload: dict, df: pd.DataFrame) -> str:
 def _build_stat_rows(payload: dict, df: pd.DataFrame, filtered_cameras: set[int]) -> list[tuple[str, str]]:
     _ = df
 
+    def _include_key(key: str, value: object) -> bool:
+        if key.startswith("stats_"):
+            return True
+        if not key.startswith("ltv_"):
+            return False
+        if key.endswith("_name"):
+            return False
+        if isinstance(value, str):
+            return False
+        return True
+
     def _format_value(value: object) -> str:
         if isinstance(value, (bool, np.bool_)):
             return "True" if bool(value) else "False"
@@ -357,7 +368,10 @@ def _build_stat_rows(payload: dict, df: pd.DataFrame, filtered_cameras: set[int]
         return str(value)
 
     rows: list[tuple[str, str]] = []
-    for key in sorted(k for k in payload.keys() if isinstance(k, str) and k.startswith("stats_")):
+    for key in sorted(
+        k for k in payload.keys()
+        if isinstance(k, str) and _include_key(k, payload.get(k))
+    ):
         value = payload.get(key)
         if value is None:
             continue

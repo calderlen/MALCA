@@ -8,9 +8,13 @@ from malca.review.explore_data import (
     add_eda_columns,
     find_candidate_key,
     get_candidate_record_by_key,
+    infer_plot_dir_from_source,
+    infer_source_kind,
     load_review_db,
     load_combined_source_data,
+    load_source_data,
 )
+from malca.review.explorer import _resolve_initial_candidate_key
 
 
 def _write_review_db(path: Path, rows: list[dict[str, object]]) -> None:
@@ -152,3 +156,66 @@ def test_load_review_db_merges_review_columns(tmp_path: Path) -> None:
     assert df.loc[0, "interest_score"] == 3
     assert df.loc[0, "event_class"] == "dipper"
     assert df.loc[0, "status"] == "reviewed"
+
+
+def test_infer_source_kind() -> None:
+    assert infer_source_kind("/tmp/review.db") == "db"
+    assert infer_source_kind("/tmp/candidates.parquet") == "parquet"
+    assert infer_source_kind("/tmp/candidates.csv") == "csv"
+
+
+def test_infer_plot_dir_from_source_for_run_local_files(tmp_path: Path) -> None:
+    run_dir = tmp_path / "output" / "runs" / "demo"
+    plot_dir = run_dir / "plots"
+    review_dir = run_dir / "review"
+    results_dir = run_dir / "results"
+    plot_dir.mkdir(parents=True)
+    review_dir.mkdir(parents=True)
+    results_dir.mkdir(parents=True)
+    db_path = review_dir / "review.db"
+    db_path.touch()
+    parquet_path = results_dir / "lc_events_vetted.parquet"
+    parquet_path.touch()
+
+    assert infer_plot_dir_from_source(db_path) == plot_dir.resolve()
+    assert infer_plot_dir_from_source(parquet_path) == plot_dir.resolve()
+
+
+def test_load_source_data_builds_id_lookup(tmp_path: Path) -> None:
+    db_path = tmp_path / "review.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE candidates (candidate_id TEXT, source_path TEXT, payload_json TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO candidates VALUES (?, ?, ?)",
+            (
+                "CAND-2",
+                "/tmp/run",
+                json.dumps({"candidate_id": "CAND-2", "asas_sn_id": "ASAS-2", "gaia_id": "1234"}),
+            ),
+        )
+        conn.commit()
+
+    source = load_source_data(db_path)
+
+    assert source.lookup["CAND-2"] == 0
+    assert source.lookup["ASAS-2"] == 0
+    assert source.lookup["1234"] == 0
+    assert source.default_candidate_id == "CAND-2"
+
+
+def test_resolve_initial_candidate_key_prefers_cli_candidate(tmp_path: Path) -> None:
+    db = tmp_path / "output" / "runs" / "run_init" / "review" / "review.db"
+    _write_review_db(
+        db,
+        [
+            {"candidate_id": "C1", "asas_sn_id": "ASAS-1", "dipper_score": 1.0},
+            {"candidate_id": "C2", "asas_sn_id": "ASAS-2", "dipper_score": 2.0},
+        ],
+    )
+    combined = load_combined_source_data(sources=[db])
+
+    resolved = _resolve_initial_candidate_key(combined, candidate="ASAS-2")
+
+    assert resolved == str(combined.df.loc[combined.df["candidate_id"] == "C2", "candidate_key"].iloc[0])

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from malca.ltv.review import map_ltv_columns
+from malca.ltv.review import _CORE_COL_MAP, map_ltv_columns
 from malca.review.filter_schema import SIDEBAR_GROUPS
 from malca.review.metadata import REVIEW_METADATA_GROUPS
 from malca.review.store import _COL_NAMES
@@ -36,6 +36,24 @@ def test_map_ltv_columns_renames_stochastic_outputs() -> None:
     assert out.loc[0, "ltv_stoch_mhps_pn_flag"] == 1
     assert "stoch_sf_ml_amplitude" not in out.columns
     assert "stoch_mhps_pn_flag" not in out.columns
+
+
+def test_map_ltv_columns_renames_extended_core_outputs() -> None:
+    numeric_payload = {
+        src: [float(idx + 1)]
+        for idx, src in enumerate(_CORE_COL_MAP)
+        if src not in {"vg_has_v"}
+    }
+    numeric_payload["vg_has_v"] = [1]
+    df = pd.DataFrame({"ASAS-SN ID": [456], **numeric_payload})
+
+    out = map_ltv_columns(df)
+
+    assert out.loc[0, "candidate_id"] == "ltv_456"
+    for src, dst in _CORE_COL_MAP.items():
+        assert dst in out.columns
+        assert src not in out.columns
+    assert out.loc[0, "ltv_vg_has_v"] == 1
 
 
 def test_review_schema_and_ui_include_ltv_stochastic_columns() -> None:

@@ -7,6 +7,7 @@ import json
 import math
 import shutil
 import sqlite3
+from typing import Any, Iterable
 
 import numpy as np
 import pandas as pd
@@ -86,6 +87,106 @@ def _normalize_large_integer_like_id(v) -> str | None:
         except Exception:
             return s
     return s
+
+
+def _opt_str(d: dict[str, Any], key: str) -> str | None:
+    v = d.get(key)
+    return str(v) if v is not None else None
+
+
+def _opt_bool(d: dict[str, Any], key: str) -> int | None:
+    v = d.get(key)
+    return int(_as_bool(v)) if v is not None else None
+
+
+def _candidate_insert_tuple_from_row_dict(
+    row_dict: dict[str, Any],
+    *,
+    source_path: str | None = None,
+    imported_at: str | None = None,
+) -> tuple[Any, ...]:
+    normalized = {k: (None if pd.isna(v) else v) for k, v in row_dict.items()}
+    normalized = normalize_vsx_record(normalized)
+
+    candidate_id = _normalize_large_integer_like_id(normalized.get("candidate_id"))
+    if not candidate_id:
+        raise ValueError("Candidate rows must include a non-empty candidate_id")
+    normalized["candidate_id"] = candidate_id
+
+    if "gaia_id" in normalized:
+        normalized["gaia_id"] = _normalize_large_integer_like_id(normalized.get("gaia_id"))
+    if "source_id" in normalized and normalized.get("source_id") is not None:
+        normalized["source_id"] = _normalize_large_integer_like_id(normalized.get("source_id"))
+
+    row_source_path = str(source_path if source_path is not None else normalized.get("source_path") or "")
+    row_imported_at = str(imported_at or normalized.get("imported_at") or _utc_now())
+
+    vals: list[Any] = [candidate_id, row_source_path]
+    for col, _dtype, etype in _CANDIDATE_COLUMNS:
+        raw = normalized.get(col)
+        if etype == "bool":
+            vals.append(_opt_bool(normalized, col))
+        elif etype == "float":
+            vals.append(_to_float(raw))
+        else:
+            vals.append(_opt_str(normalized, col))
+    vals.append(json.dumps(normalized, default=str))
+    vals.append(row_imported_at)
+    return tuple(vals)
+
+
+def upsert_candidates_frame(
+    conn: sqlite3.Connection,
+    df: pd.DataFrame,
+    *,
+    default_source_path: str | None = None,
+) -> tuple[int, int]:
+    """Upsert candidate rows from a DataFrame while preserving payload metadata."""
+    if df.empty:
+        return 0, 0
+
+    df_use = df.copy()
+    df_use["candidate_id"] = infer_candidate_id(df_use)
+
+    rows = [
+        _candidate_insert_tuple_from_row_dict(
+            {k: (None if pd.isna(v) else v) for k, v in row.to_dict().items()},
+            source_path=default_source_path,
+        )
+        for _, row in df_use.iterrows()
+    ]
+
+    all_col_names = ["candidate_id", "source_path"] + _COL_NAMES + ["payload_json", "imported_at"]
+    candidate_cols = ", ".join(all_col_names)
+    placeholders = ", ".join(["?"] * len(all_col_names))
+    update_cols = [c for c in all_col_names if c != "candidate_id"]
+    conflict_set = ", ".join(f"{c}=excluded.{c}" for c in update_cols)
+
+    before = conn.execute("SELECT COUNT(*) FROM candidates").fetchone()[0]
+    conn.executemany(
+        f"""
+        INSERT INTO candidates ({candidate_cols})
+        VALUES ({placeholders})
+        ON CONFLICT(candidate_id) DO UPDATE SET {conflict_set}
+        """,
+        rows,
+    )
+    conn.commit()
+    after = conn.execute("SELECT COUNT(*) FROM candidates").fetchone()[0]
+    return len(rows), int(after - before)
+
+
+def _parse_updated_at(value: object) -> datetime:
+    if value in (None, "", b""):
+        return datetime.min.replace(tzinfo=timezone.utc)
+    text = str(value)
+    try:
+        parsed = datetime.fromisoformat(text)
+    except Exception:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def infer_candidate_id(df: pd.DataFrame) -> pd.Series:
@@ -587,7 +688,7 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("stats_mhps_high",                            "REAL", "float"),
     ("stats_mhps_low",                             "REAL", "float"),
     ("stats_mhps_non_zero",                        "REAL", "float"),
-    ("stats_mhps_pn_flag",                         "REAL", "float"),
+    ("stats_mhps_pn_flag",                         "INTEGER", "bool"),
     ("stats_mhps_ratio",                           "REAL", "float"),
     # -- LTV: long-term variability core metrics --
     ("ltv_slope",                    "REAL",    "float"),  # mag/year linear slope
@@ -595,10 +696,39 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("ltv_max_diff",                 "REAL",    "float"),  # max seasonal difference (mag)
     ("ltv_dispersion",               "REAL",    "float"),  # peak-to-peak dispersion (mag)
     ("ltv_median",                   "REAL",    "float"),  # median magnitude
+    ("ltv_median_err",               "REAL",    "float"),  # robust LC scatter proxy from core output
     ("ltv_n_seasons",                "INTEGER", "float"),  # number of non-empty seasons
+    ("ltv_time_span_days",           "REAL",    "float"),
+    ("ltv_n_unique_nights",          "INTEGER", "float"),
     ("ltv_ls_period",                "REAL",    "float"),  # best LS period (days)
     ("ltv_ls_power",                 "REAL",    "float"),  # LS power at best period
     ("ltv_ls_fap",                   "REAL",    "float"),  # LS false alarm probability
+    ("ltv_coeff1",                   "REAL",    "float"),
+    ("ltv_coeff2",                   "REAL",    "float"),
+    ("ltv_vg_has_v",                 "INTEGER", "bool"),
+    ("ltv_vg_overlap_days",          "REAL",    "float"),
+    ("ltv_vg_overlap_fraction",      "REAL",    "float"),
+    ("ltv_season_points_min",        "INTEGER", "float"),
+    ("ltv_season_points_median",     "REAL",    "float"),
+    ("ltv_season_points_max",        "INTEGER", "float"),
+    ("ltv_season_span_days_mean",    "REAL",    "float"),
+    ("ltv_season_span_days_median",  "REAL",    "float"),
+    ("ltv_season_span_days_max",     "REAL",    "float"),
+    ("ltv_season_step_max_mag",      "REAL",    "float"),
+    ("ltv_season_step_mean_abs_mag", "REAL",    "float"),
+    ("ltv_season_step_max_fraction", "REAL",    "float"),
+    ("ltv_season_monotonicity_fraction", "REAL", "float"),
+    ("ltv_season_spearman_rho",      "REAL",    "float"),
+    ("ltv_season_kendall_tau",       "REAL",    "float"),
+    ("ltv_leave1out_slope_std",      "REAL",    "float"),
+    ("ltv_leave1out_slope_range",    "REAL",    "float"),
+    ("ltv_trend_slope_mag_per_year", "REAL",    "float"),
+    ("ltv_trend_quad_mag_per_year2", "REAL",    "float"),
+    ("ltv_trend_slope_err_mag_per_year", "REAL", "float"),
+    ("ltv_trend_slope_snr",          "REAL",    "float"),
+    ("ltv_trend_r2",                 "REAL",    "float"),
+    ("ltv_trend_delta_bic_linear",   "REAL",    "float"),
+    ("ltv_trend_delta_bic_quadratic", "REAL",   "float"),
     # -- LTV: filter flags --
     ("ltv_passed_filters",           "INTEGER", "bool"),   # passed all false positive filters
     ("ltv_dust_candidate",           "INTEGER", "bool"),   # dust-driven variability flag
@@ -973,61 +1103,7 @@ def import_candidates(
         except Exception as e:
             print(f"Warning: vetting before import failed: {e}")
 
-    df_use = df_use.copy()
-    df_use["candidate_id"] = infer_candidate_id(df_use)
-    imported_at = _utc_now()
-
-    def _opt_str(d, key):
-        v = d.get(key)
-        return str(v) if v is not None else None
-
-    def _opt_bool(d, key):
-        v = d.get(key)
-        return int(_as_bool(v)) if v is not None else None
-
-    rows = []
-    for _, row in df_use.iterrows():
-        row_dict = {k: (None if pd.isna(v) else v) for k, v in row.to_dict().items()}
-        row_dict = normalize_vsx_record(row_dict)
-
-        # Preserve large integer identifiers as non-scientific strings.
-        if "gaia_id" in row_dict:
-            row_dict["gaia_id"] = _normalize_large_integer_like_id(row_dict.get("gaia_id"))
-        if "source_id" in row_dict and row_dict.get("source_id") is not None:
-            row_dict["source_id"] = _normalize_large_integer_like_id(row_dict.get("source_id"))
-
-        vals: list = [str(row_dict.get("candidate_id")), source_path]
-        for col, _dtype, etype in _CANDIDATE_COLUMNS:
-            payload_key = col
-            raw = row_dict.get(payload_key)
-            if etype == "bool":
-                vals.append(_opt_bool(row_dict, payload_key))
-            elif etype == "float":
-                vals.append(_to_float(raw))
-            else:
-                vals.append(_opt_str(row_dict, payload_key))
-        vals.append(json.dumps(row_dict, default=str))
-        vals.append(imported_at)
-        rows.append(tuple(vals))
-
-    _all_col_names = ["candidate_id", "source_path"] + _COL_NAMES + ["payload_json", "imported_at"]
-    _candidate_cols = ", ".join(_all_col_names)
-    _placeholders = ", ".join(["?"] * len(_all_col_names))
-    _update_cols = [c for c in _all_col_names if c != "candidate_id"]
-    _conflict_set = ", ".join(f"{c}=excluded.{c}" for c in _update_cols)
-
-    before = conn.execute("SELECT COUNT(*) FROM candidates").fetchone()[0]
-    conn.executemany(
-        f"""
-        INSERT INTO candidates ({_candidate_cols})
-        VALUES ({_placeholders})
-        ON CONFLICT(candidate_id) DO UPDATE SET {_conflict_set}
-        """,
-        rows,
-    )
-    conn.commit()
-    after = conn.execute("SELECT COUNT(*) FROM candidates").fetchone()[0]
-    return len(rows), int(after - before)
+    return upsert_candidates_frame(conn, df_use, default_source_path=str(source_path))
 
 
 def query_queue(
@@ -1709,6 +1785,240 @@ def export_reviews(conn: sqlite3.Connection, out_path: Path, only_reviewed: bool
         df.to_parquet(out_path, index=False, compression="zstd")
     else:
         df.to_csv(out_path, index=False)
+
+
+def merge_review_databases(
+    source_db: Path,
+    target_db: Path,
+    *,
+    candidate_ids: Iterable[str] | None = None,
+    only_reviewed: bool = True,
+) -> dict[str, int]:
+    """Merge review content from one DB into another.
+
+    Reviews are matched by ``candidate_id``. When both source and target contain
+    a review row, the row with the newer ``updated_at`` wins.
+    """
+    source_path = Path(source_db).expanduser().resolve()
+    target_path = Path(target_db).expanduser().resolve()
+    if source_path == target_path:
+        raise ValueError("Source and target review DB paths must differ.")
+    if not source_path.exists():
+        raise FileNotFoundError(f"Source DB not found: {source_path}")
+
+    candidate_scope = {str(cid).strip() for cid in (candidate_ids or []) if str(cid).strip()}
+
+    with sqlite3.connect(source_path) as src_conn:
+        candidate_query = "SELECT * FROM candidates"
+        review_query = "SELECT * FROM reviews"
+        history_query = "SELECT candidate_id, event_type, payload_json, reviewer, created_at FROM review_history"
+
+        src_candidates = pd.read_sql_query(candidate_query, src_conn)
+        src_reviews = pd.read_sql_query(review_query, src_conn)
+        src_history = pd.read_sql_query(history_query, src_conn)
+
+    if candidate_scope:
+        src_candidates = src_candidates[src_candidates["candidate_id"].astype(str).isin(sorted(candidate_scope))].copy()
+        src_reviews = src_reviews[src_reviews["candidate_id"].astype(str).isin(sorted(candidate_scope))].copy()
+        src_history = src_history[src_history["candidate_id"].astype(str).isin(sorted(candidate_scope))].copy()
+
+    if only_reviewed and not src_reviews.empty:
+        status_series = src_reviews["status"].fillna("").astype(str)
+        src_reviews = src_reviews[status_series.ne("") & status_series.ne("unreviewed")].copy()
+
+    review_candidate_ids = {str(cid).strip() for cid in src_reviews.get("candidate_id", pd.Series(dtype="object")).tolist() if str(cid).strip()}
+    if candidate_scope:
+        scoped_candidate_ids = candidate_scope | review_candidate_ids
+    else:
+        scoped_candidate_ids = {str(cid).strip() for cid in src_candidates.get("candidate_id", pd.Series(dtype="object")).tolist() if str(cid).strip()}
+        if only_reviewed:
+            scoped_candidate_ids = scoped_candidate_ids | review_candidate_ids
+
+    if scoped_candidate_ids and not src_candidates.empty:
+        src_candidates = src_candidates[src_candidates["candidate_id"].astype(str).isin(sorted(scoped_candidate_ids))].copy()
+
+    with db_connect(target_path) as dst_conn:
+        existing_candidate_ids = {
+            str(row[0]).strip()
+            for row in dst_conn.execute("SELECT candidate_id FROM candidates").fetchall()
+        }
+        missing_candidates = src_candidates[~src_candidates["candidate_id"].astype(str).isin(sorted(existing_candidate_ids))].copy() if not src_candidates.empty else pd.DataFrame()
+        inserted_candidate_rows = 0
+        inserted_candidates = 0
+        if not missing_candidates.empty:
+            inserted_candidate_rows, inserted_candidates = upsert_candidates_frame(dst_conn, missing_candidates)
+
+        target_reviews = pd.read_sql_query(
+            "SELECT candidate_id, interest_score, event_class, review_pass, notes, status, reviewer, updated_at FROM reviews",
+            dst_conn,
+        )
+        target_review_map = {
+            str(row["candidate_id"]).strip(): row
+            for _, row in target_reviews.iterrows()
+        }
+
+        inserted_reviews = 0
+        updated_reviews = 0
+        skipped_reviews = 0
+        for _, row in src_reviews.iterrows():
+            candidate_id = str(row.get("candidate_id") or "").strip()
+            if not candidate_id:
+                continue
+            target_row = target_review_map.get(candidate_id)
+            source_updated = _parse_updated_at(row.get("updated_at"))
+            target_updated = _parse_updated_at(target_row.get("updated_at")) if target_row is not None else datetime.min.replace(tzinfo=timezone.utc)
+            if target_row is not None and source_updated <= target_updated:
+                skipped_reviews += 1
+                continue
+
+            interest_score = row.get("interest_score")
+            if interest_score is not None and not pd.isna(interest_score):
+                interest_score = int(interest_score)
+            else:
+                interest_score = None
+            review_pass = row.get("review_pass")
+            if review_pass is not None and not pd.isna(review_pass):
+                review_pass = int(review_pass)
+            else:
+                review_pass = 1
+            event_class = row.get("event_class")
+            if event_class is None or pd.isna(event_class) or str(event_class).strip() == "":
+                event_class = "unclassified"
+            status = row.get("status")
+            if status is None or pd.isna(status) or str(status).strip() == "":
+                status = "unreviewed"
+            reviewer = row.get("reviewer")
+            if reviewer is None or pd.isna(reviewer):
+                reviewer = ""
+            notes = row.get("notes")
+            if notes is None or pd.isna(notes):
+                notes = ""
+            updated_at = row.get("updated_at")
+            if updated_at is None or pd.isna(updated_at) or str(updated_at).strip() == "":
+                updated_at = _utc_now()
+
+            dst_conn.execute(
+                """
+                INSERT INTO reviews (candidate_id, interest_score, event_class, review_pass, notes, status, reviewer, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(candidate_id) DO UPDATE SET
+                    interest_score=excluded.interest_score,
+                    event_class=excluded.event_class,
+                    review_pass=excluded.review_pass,
+                    notes=excluded.notes,
+                    status=excluded.status,
+                    reviewer=excluded.reviewer,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    candidate_id,
+                    interest_score,
+                    str(event_class),
+                    review_pass,
+                    str(notes),
+                    str(status),
+                    str(reviewer),
+                    str(updated_at),
+                ),
+            )
+            if target_row is None:
+                inserted_reviews += 1
+            else:
+                updated_reviews += 1
+
+        existing_history = {
+            tuple(row)
+            for row in dst_conn.execute(
+                "SELECT candidate_id, event_type, payload_json, reviewer, created_at FROM review_history"
+            ).fetchall()
+        }
+        inserted_history = 0
+        for _, row in src_history.iterrows():
+            entry = (
+                str(row.get("candidate_id") or "").strip(),
+                str(row.get("event_type") or ""),
+                str(row.get("payload_json") or "{}"),
+                None if row.get("reviewer") in (None, "") else str(row.get("reviewer")),
+                str(row.get("created_at") or _utc_now()),
+            )
+            if not entry[0] or entry in existing_history:
+                continue
+            dst_conn.execute(
+                "INSERT INTO review_history (candidate_id, event_type, payload_json, reviewer, created_at) VALUES (?, ?, ?, ?, ?)",
+                entry,
+            )
+            existing_history.add(entry)
+            inserted_history += 1
+
+        dst_conn.commit()
+
+    return {
+        "candidate_scope": len(scoped_candidate_ids),
+        "candidate_rows_written": inserted_candidate_rows,
+        "candidates_inserted": inserted_candidates,
+        "reviews_inserted": inserted_reviews,
+        "reviews_updated": updated_reviews,
+        "reviews_skipped": skipped_reviews,
+        "history_inserted": inserted_history,
+    }
+
+
+def export_review_subset_bundle(
+    bundle_dir: Path,
+    candidate_df: pd.DataFrame,
+    *,
+    selection_meta: dict[str, Any],
+    write_parquet: bool = True,
+) -> dict[str, Any]:
+    """Write a self-contained review bundle for an explorer subset."""
+    bundle_path = Path(bundle_dir).expanduser().resolve()
+    bundle_path.mkdir(parents=True, exist_ok=True)
+    review_db_path = bundle_path / "review.db"
+    if review_db_path.exists():
+        review_db_path.unlink()
+
+    export_df = candidate_df.copy()
+    if export_df.empty:
+        raise ValueError("Cannot export an empty candidate subset.")
+
+    review_like_cols = [
+        col
+        for col in ("interest_score", "event_class", "review_pass", "notes", "status", "reviewer", "updated_at")
+        if col in export_df.columns
+    ]
+    if review_like_cols:
+        export_df = export_df.drop(columns=review_like_cols)
+
+    if write_parquet:
+        export_df.to_parquet(bundle_path / "selection_candidates.parquet", index=False)
+
+    meta_path = bundle_path / "selection_meta.json"
+    meta_path.write_text(json.dumps(selection_meta, indent=2, sort_keys=True, default=str), encoding="utf-8")
+
+    with db_connect(review_db_path) as conn:
+        upsert_candidates_frame(conn, export_df)
+        save_app_state(conn, "explorer_selection_meta", json.dumps(selection_meta, default=str))
+
+    merged_sources: list[dict[str, Any]] = []
+    if "source_file" in export_df.columns:
+        for source_file, source_group in export_df.groupby(export_df["source_file"].fillna("")):
+            source_text = str(source_file or "").strip()
+            if not source_text or Path(source_text).suffix.lower() != ".db":
+                continue
+            merge_stats = merge_review_databases(
+                Path(source_text),
+                review_db_path,
+                candidate_ids=source_group["candidate_id"].astype(str).tolist(),
+                only_reviewed=False,
+            )
+            merged_sources.append({"source_db": source_text, **merge_stats})
+
+    return {
+        "bundle_dir": bundle_path,
+        "review_db": review_db_path,
+        "candidate_count": int(len(export_df)),
+        "merged_sources": merged_sources,
+    }
 
 
 # ---------------------------------------------------------------------------

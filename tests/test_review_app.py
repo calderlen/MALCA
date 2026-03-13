@@ -5,8 +5,20 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from malca.review.filter_schema import SIDEBAR_GROUPS
+from malca.review.interactive_plot import _build_stat_rows
 from malca.review import app as review_app
-from malca.review.store import SQLITE_BUSY_TIMEOUT_MS, db_connect, import_candidates, query_queue
+from malca.review.store import (
+    SQLITE_BUSY_TIMEOUT_MS,
+    _BOOL_COLS,
+    _COL_NAMES,
+    _FLOAT_COLS,
+    db_connect,
+    import_candidates,
+    query_queue,
+    save_app_state,
+    save_review,
+)
 
 
 def _write_skypatrol_csv(path: Path) -> None:
@@ -380,6 +392,60 @@ def test_open_existing_candidate_matches_local_lc_stem(tmp_path: Path, monkeypat
     assert "local LC stem" in notice
 
 
+def test_restore_startup_candidate_reopens_last_candidate_in_queue(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "review.db"
+    with db_connect(db_path) as conn:
+        import_candidates(
+            conn,
+            pd.DataFrame([
+                {"candidate_id": "CAND-1", "asas_sn_id": "CAND-1"},
+                {"candidate_id": "CAND-2", "asas_sn_id": "CAND-2"},
+            ]),
+            source_path=str(tmp_path),
+            characterize_before_import=False,
+            vet_before_import=False,
+        )
+        save_app_state(conn, "review_last_candidate", "CAND-2")
+
+    monkeypatch.setattr(review_app, "DB_PATH", str(db_path))
+    monkeypatch.setattr(review_app, "INITIAL_CANDIDATE_QUERY", None)
+
+    queue_data, current_index, notice, applied = review_app.restore_startup_candidate(
+        {"candidate_ids": ["CAND-1", "CAND-2"], "queue_size": 2, "filter_hash": "demo"},
+        False,
+    )
+
+    assert queue_data is review_app.no_update
+    assert current_index == 1
+    assert "Restored last candidate CAND-2" in notice
+    assert applied is True
+
+
+def test_restore_startup_candidate_views_explicit_candidate_when_filtered_out(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "review.db"
+    with db_connect(db_path) as conn:
+        import_candidates(
+            conn,
+            pd.DataFrame([{"candidate_id": "CAND-9", "asas_sn_id": "CAND-9"}]),
+            source_path=str(tmp_path),
+            characterize_before_import=False,
+            vet_before_import=False,
+        )
+
+    monkeypatch.setattr(review_app, "DB_PATH", str(db_path))
+    monkeypatch.setattr(review_app, "INITIAL_CANDIDATE_QUERY", "CAND-9")
+
+    queue_data, current_index, notice, applied = review_app.restore_startup_candidate(
+        {"candidate_ids": [], "queue_size": 0, "filter_hash": "demo"},
+        False,
+    )
+
+    assert queue_data["candidate_ids"] == ["CAND-9"]
+    assert current_index == 0
+    assert "Opened CAND-9" in notice
+    assert applied is True
+
+
 def test_resolve_import_sources_accepts_multi_mag_bin_run_dir(tmp_path: Path) -> None:
     run_dir = tmp_path / "output" / "runs" / "demo"
     results_dir = run_dir / "results"
@@ -508,6 +574,40 @@ def test_normalize_numeric_filter_inputs_preserves_narrowed_ranges() -> None:
     }
 
 
+def test_review_app_sidebar_groups_match_filter_schema() -> None:
+    assert review_app._SIDEBAR_GROUPS == list(SIDEBAR_GROUPS)
+
+
+def test_all_scalar_stats_and_ltv_columns_are_filterable() -> None:
+    covered = {col for _group, items in SIDEBAR_GROUPS for _kind, col in items}
+    stats_cols = {col for col in _COL_NAMES if col.startswith("stats_") and col in (_FLOAT_COLS | _BOOL_COLS)}
+    ltv_cols = {col for col in _COL_NAMES if col.startswith("ltv_") and col in (_FLOAT_COLS | _BOOL_COLS)}
+
+    assert sorted(stats_cols - covered) == []
+    assert sorted(ltv_cols - covered) == []
+    assert "stats_mhps_pn_flag" in _BOOL_COLS
+
+
+def test_build_stat_rows_includes_ltv_scalars() -> None:
+    rows = dict(
+        _build_stat_rows(
+            {
+                "stats_amplitude": 0.12,
+                "ltv_trend_slope_snr": 4.5,
+                "ltv_season_spearman_rho": 0.81,
+                "ltv_vsx_name": "VSX J123",
+            },
+            pd.DataFrame(),
+            set(),
+        )
+    )
+
+    assert rows["stats_amplitude"] == "0.12"
+    assert rows["ltv_trend_slope_snr"] == "4.5"
+    assert rows["ltv_season_spearman_rho"] == "0.81"
+    assert "ltv_vsx_name" not in rows
+
+
 def test_import_candidates_callback_accepts_multiple_files(tmp_path: Path, monkeypatch) -> None:
     db_path = tmp_path / "review.db"
     src_a = tmp_path / "first.csv"
@@ -537,6 +637,61 @@ def test_import_candidates_callback_accepts_multiple_files(tmp_path: Path, monke
     assert trigger == 1
     assert count == 2
     assert "from 2 file(s)" in status
+
+
+def test_merge_review_db_callback_updates_target_with_newer_review(tmp_path: Path, monkeypatch) -> None:
+    source_db = tmp_path / "source.db"
+    target_db = tmp_path / "target.db"
+
+    with db_connect(source_db) as conn:
+        import_candidates(
+            conn,
+            pd.DataFrame([{"candidate_id": "C1", "asas_sn_id": "C1"}]),
+            source_path="subset://demo",
+            characterize_before_import=False,
+            vet_before_import=False,
+        )
+        save_review(
+            conn,
+            candidate_id="C1",
+            interest_score=4,
+            event_class="dipper",
+            review_pass=2,
+            notes="subset newer",
+            status="reviewed",
+            reviewer="subset",
+        )
+
+    with db_connect(target_db) as conn:
+        import_candidates(
+            conn,
+            pd.DataFrame([{"candidate_id": "C1", "asas_sn_id": "C1"}]),
+            source_path="master://demo",
+            characterize_before_import=False,
+            vet_before_import=False,
+        )
+        conn.execute(
+            """
+            INSERT INTO reviews (candidate_id, interest_score, event_class, review_pass, notes, status, reviewer, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("C1", 1, "other", 1, "older", "reviewed", "master", "2026-03-11T00:00:00+00:00"),
+        )
+        conn.commit()
+
+    monkeypatch.setattr(review_app, "DB_PATH", str(source_db))
+
+    status = review_app.merge_review_db_callback(1, str(target_db))
+
+    with db_connect(target_db) as conn:
+        row = conn.execute(
+            "SELECT interest_score, event_class, review_pass, notes, reviewer FROM reviews WHERE candidate_id=?",
+            ("C1",),
+        ).fetchone()
+
+    assert "Merged into" in status
+    assert "updated=1" in status
+    assert row == (4, "dipper", 2, "subset newer", "subset")
 
 
 def test_arbitrate_harmonic_period_prefers_double_when_base_is_half() -> None:

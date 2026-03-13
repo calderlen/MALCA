@@ -48,6 +48,65 @@ def test_style_native_explorer_figure_reserves_title_space() -> None:
     assert fig.layout.margin.r == 14
 
 
+def test_journal_export_figure_uses_fixed_white_layout() -> None:
+    fig = go.Figure()
+    fig.update_layout(title="Export me")
+
+    export_fig = review_explorer._journal_export_figure(fig)
+
+    assert export_fig.layout.paper_bgcolor == "white"
+    assert export_fig.layout.plot_bgcolor == "white"
+    assert export_fig.layout.width == 1400
+    assert export_fig.layout.height == 900
+    assert export_fig.layout.font.family.startswith("Helvetica")
+
+
+def test_candidate_scope_from_plot_uses_current_ranges() -> None:
+    scope = review_explorer._candidate_scope_from_plot(
+        {
+            "xaxis.range[0]": 1.0,
+            "xaxis.range[1]": 2.5,
+            "yaxis.range[0]": 10.0,
+            "yaxis.range[1]": 15.0,
+        },
+        x_metric="period_n_sources",
+        y_metric="dipper_score",
+        log_flags=[],
+    )
+
+    assert scope["mode"] == "view"
+    assert scope["x_range"] == [1.0, 2.5]
+    assert scope["y_range"] == [10.0, 15.0]
+
+
+def test_apply_candidate_scope_filters_to_captured_view() -> None:
+    frame = pd.DataFrame(
+        {
+            "candidate_key": ["A", "B", "C"],
+            "period_n_sources": [1.0, 2.0, 3.0],
+            "dipper_score": [8.0, 12.0, 16.0],
+        }
+    )
+
+    scoped = review_explorer._apply_candidate_scope(
+        frame,
+        scope_state={
+            "mode": "view",
+            "x_metric": "period_n_sources",
+            "y_metric": "dipper_score",
+            "log_x": False,
+            "log_y": False,
+            "x_range": [1.5, 3.1],
+            "y_range": [10.0, 20.0],
+        },
+        x_metric="period_n_sources",
+        y_metric="dipper_score",
+        log_flags=[],
+    )
+
+    assert scoped["candidate_key"].tolist() == ["B", "C"]
+
+
 def test_main_schedules_browser_open(monkeypatch) -> None:
     opened: list[str] = []
     timer_calls: list[tuple[float, object]] = []
@@ -114,12 +173,14 @@ def test_build_explorer_app_uses_custom_plot_sidebar_layout() -> None:
     assert "explorer-sidebar" in ids
     assert "explorer-sidebar-toggle" in ids
     assert "custom-graph" in ids
+    assert "export-native-pdf-btn" in ids
     assert "camera-checklist" in ids
     assert "band-checklist" in ids
     assert "theme-mode" in ids
     assert "sample-size" not in ids
     assert "main-graph" not in ids
     assert "catalog-graph" not in ids
+    assert "explorer-main-splitter" not in ids
 
 
 def test_table_rows_returns_all_filtered_candidates() -> None:

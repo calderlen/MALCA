@@ -16,7 +16,7 @@ Usage:
     malca detection_rate [options] # Measure detection rate
     malca review [options]         # Launch Dash review GUI (keyboard-driven)
     malca review-refresh [options] # Refresh review DB stats from a run/bundle
-    malca review-mini [options]    # Launch lightweight click-through LC viewer
+    malca review-merge [options]   # Merge reviewed subset DB back into a master DB
     malca review-explore [options] # Unified EDA + light-curve explorer
     malca stats [options]          # Light-curve statistics
     malca attrition [options]      # Pre/filter attrition summary
@@ -57,7 +57,7 @@ def main():
         "manifest", "pipeline", "reproduce", "injection",
         "detection_rate", "validate", "plot",
         "events", "gaia-fetch", "characterize", "classify", "filter", "tag", "score",
-        "stats", "attrition", "review", "review-refresh", "review-mini", "review-explore",
+        "stats", "attrition", "review", "review-refresh", "review-merge", "review-explore",
         "neighbors", "spectra", "false_positive", "ml_train", "ml_predict", "vsx-filter", "vsx-crossmatch",
         "vetting",
         "ltv-core", "ltv-pipeline", "ltv-ingest",
@@ -108,8 +108,8 @@ def main():
             _run_module_main("malca.review.app", remaining)
         elif command == "review-refresh":
             _run_module_main("malca.review.refresh", remaining)
-        elif command == "review-mini":
-            _run_module_main("malca.review.mini_viewer", remaining)
+        elif command == "review-merge":
+            _run_module_main("malca.review.merge", remaining)
         elif command == "review-explore":
             _run_module_main("malca.review.explorer", remaining)
         elif command == "validate":
@@ -178,7 +178,7 @@ def main():
     subparsers.add_parser("attrition", help="Summarize pre/filter attrition")
     subparsers.add_parser("review", help="Launch Dash review GUI (keyboard-driven, fast)")
     subparsers.add_parser("review-refresh", help="Refresh review DB stats from a run or bundle")
-    subparsers.add_parser("review-mini", help="Launch lightweight click-through light-curve viewer")
+    subparsers.add_parser("review-merge", help="Merge reviewed subset DB content into a master review DB")
     subparsers.add_parser("review-explore", help="Launch unified EDA and light-curve explorer")
     subparsers.add_parser("false_positive", help="Run false-positive contaminant benchmark")
     subparsers.add_parser("ml_train", help="Train baseline ML classifier on reviewed labels")

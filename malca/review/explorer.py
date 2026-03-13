@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import glob
 from pathlib import Path
+import re
 from threading import Timer
 from typing import Any
 import webbrowser
@@ -13,7 +15,9 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import plotly.io as pio
 
+from malca.review.app import _render_stat_cards
 from malca.review.explore_data import (
     BEST_FIELDS,
     DEFAULT_COLOR,
@@ -22,6 +26,7 @@ from malca.review.explore_data import (
     DEFAULT_SYMBOL,
     CombinedCandidateData,
     add_eda_columns,
+    _normalized_id,
     available_metric_columns,
     bool_series,
     cut_summary,
@@ -29,15 +34,17 @@ from malca.review.explore_data import (
     find_candidate_key,
     get_candidate_record_by_key,
     infer_plot_dir_for_record,
+    infer_plot_dir_from_source,
     load_combined_source_data,
     load_run_params,
     numeric_series,
     text_series,
 )
 from malca.review.filter_schema import SIDEBAR_GROUPS
-from malca.review.interactive_plot import build_interactive_lightcurve_figure
-from malca.review.mini_viewer import _render_stats, _render_summary, _summary_items
+from malca.review.handoff import build_review_command, launch_detached
+from malca.review.interactive_plot import build_interactive_lightcurve_figure, resolve_lightcurve_path as review_resolve_lightcurve_path
 from malca.review.period_search import has_external_period, run_period_search_for_payload
+from malca.review.store import export_review_subset_bundle
 
 
 DEFAULT_THEME = "black"
@@ -115,6 +122,50 @@ ADV_FILTER_STATES = [
 ]
 
 
+def _summary_items(record: dict[str, object]) -> list[tuple[str, str]]:
+    fields = [
+        ("Candidate", record.get("candidate_id")),
+        ("ASAS-SN", record.get("asas_sn_id")),
+        ("Gaia", record.get("gaia_id")),
+        ("Final class", record.get("final_class")),
+        ("Known?", record.get("vetting_likely_known")),
+        ("Period (d)", record.get("period_consensus_days")),
+        ("N sources", record.get("period_n_sources")),
+        ("Dipper score", record.get("dipper_score")),
+    ]
+    items: list[tuple[str, str]] = []
+    for label, value in fields:
+        text = _normalized_id(value)
+        if text:
+            items.append((label, text))
+    return items
+
+
+def _render_summary(record: dict[str, object]) -> html.Div:
+    items = _summary_items(record)
+    if not items:
+        return html.Div("No candidate summary available.", style={"color": TEXT_MUTED, "fontSize": "12px"})
+    return html.Div(
+        [
+            html.Div(
+                [
+                    html.Span(f"{label}: ", style={"fontSize": "11px", "color": TEXT_FAINT, "fontWeight": "600"}),
+                    html.Span(value, style={"fontSize": "11px", "color": TEXT}),
+                ],
+                style={"padding": "2px 0", "display": "flex", "gap": "4px", "flexWrap": "wrap"},
+            )
+            for label, value in items
+        ],
+        style={"display": "grid", "gridTemplateColumns": "repeat(2, minmax(180px, 1fr))", "columnGap": "14px", "rowGap": "2px"},
+    )
+
+
+def _render_stats(stat_rows: list[tuple[str, str]]) -> html.Div:
+    if not stat_rows:
+        return html.Div("No precomputed light-curve stats available.", style={"color": TEXT_MUTED, "fontSize": "12px"})
+    return html.Div(_render_stat_cards(stat_rows), className="explorer-review-stats")
+
+
 def _resolve_sources(args) -> list[Path]:
     if args.source:
         return [Path(s).expanduser().resolve() for s in args.source]
@@ -165,6 +216,263 @@ def _plot_uirevision(reset_data: dict[str, object] | None, key: str) -> str:
     except Exception:
         token = 0
     return f"explorer:{key}:{token}"
+
+
+def _slugify_token(value: object, *, fallback: str = "selection") -> str:
+    text = re.sub(r"[^A-Za-z0-9._-]+", "-", str(value or "").strip()).strip("-._")
+    return text[:80] or fallback
+
+
+def _journal_export_figure(figure: go.Figure | dict[str, object]) -> go.Figure:
+    export_fig = go.Figure(figure)
+    export_fig.update_layout(
+        template="plotly_white",
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        font={"color": "#111111", "family": "Helvetica, Arial, sans-serif", "size": 12},
+        title_font={"color": "#111111", "family": "Helvetica, Arial, sans-serif", "size": 16},
+        margin={"t": 82, "l": 84, "r": 30, "b": 72},
+        legend={
+            "bgcolor": "rgba(255,255,255,0.96)",
+            "bordercolor": "rgba(40,40,40,0.20)",
+            "borderwidth": 1,
+            "font": {"color": "#111111", "family": "Helvetica, Arial, sans-serif", "size": 10},
+        },
+        autosize=False,
+        width=1400,
+        height=900,
+    )
+    export_fig.update_xaxes(
+        color="#111111",
+        title_font_color="#111111",
+        tickfont_color="#111111",
+        showgrid=True,
+        gridcolor="rgba(0,0,0,0.12)",
+        zeroline=False,
+    )
+    export_fig.update_yaxes(
+        color="#111111",
+        title_font_color="#111111",
+        tickfont_color="#111111",
+        showgrid=True,
+        gridcolor="rgba(0,0,0,0.12)",
+        zeroline=False,
+    )
+    return export_fig
+
+
+def _axis_window_from_relayout(relayout_data: dict[str, object] | None, axis: str, *, log_axis: bool) -> tuple[float, float] | None:
+    if not isinstance(relayout_data, dict):
+        return None
+    if relayout_data.get(f"{axis}.autorange"):
+        return None
+
+    lo = relayout_data.get(f"{axis}.range[0]")
+    hi = relayout_data.get(f"{axis}.range[1]")
+    if lo is None or hi is None:
+        window = relayout_data.get(f"{axis}.range")
+        if isinstance(window, (list, tuple)) and len(window) == 2:
+            lo, hi = window[0], window[1]
+    try:
+        lo_f = float(lo)
+        hi_f = float(hi)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(lo_f) or not np.isfinite(hi_f):
+        return None
+    if log_axis:
+        lo_f = float(pow(10.0, lo_f))
+        hi_f = float(pow(10.0, hi_f))
+    if hi_f < lo_f:
+        lo_f, hi_f = hi_f, lo_f
+    return (lo_f, hi_f)
+
+
+def _candidate_scope_from_plot(
+    relayout_data: dict[str, object] | None,
+    *,
+    x_metric: object,
+    y_metric: object,
+    log_flags: list[str] | None,
+) -> dict[str, object]:
+    x_name = str(x_metric or "").strip()
+    y_name = str(y_metric or "").strip()
+    log_values = set(str(v) for v in (log_flags or []))
+    scope: dict[str, object] = {
+        "mode": "filtered",
+        "x_metric": x_name,
+        "y_metric": y_name,
+        "log_x": "logx" in log_values,
+        "log_y": "logy" in log_values,
+        "x_range": None,
+        "y_range": None,
+        "captured_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if not x_name or not y_name:
+        return scope
+
+    x_window = _axis_window_from_relayout(relayout_data, "xaxis", log_axis=bool(scope["log_x"]))
+    y_window = _axis_window_from_relayout(relayout_data, "yaxis", log_axis=bool(scope["log_y"]))
+    if x_window is None and y_window is None:
+        return scope
+    scope["mode"] = "view"
+    scope["x_range"] = list(x_window) if x_window is not None else None
+    scope["y_range"] = list(y_window) if y_window is not None else None
+    return scope
+
+
+def _apply_candidate_scope(
+    frame: pd.DataFrame,
+    *,
+    scope_state: dict[str, object] | None,
+    x_metric: object,
+    y_metric: object,
+    log_flags: list[str] | None,
+) -> pd.DataFrame:
+    if frame.empty:
+        return frame
+    state = dict(scope_state or {})
+    if state.get("mode") != "view":
+        return frame
+
+    x_name = str(x_metric or "").strip()
+    y_name = str(y_metric or "").strip()
+    if state.get("x_metric") != x_name or state.get("y_metric") != y_name:
+        return frame
+
+    log_values = set(str(v) for v in (log_flags or []))
+    if bool(state.get("log_x")) != ("logx" in log_values):
+        return frame
+    if bool(state.get("log_y")) != ("logy" in log_values):
+        return frame
+
+    if x_name not in frame.columns or y_name not in frame.columns:
+        return frame
+
+    mask = frame[x_name].notna() & frame[y_name].notna()
+    x_window = state.get("x_range")
+    if isinstance(x_window, (list, tuple)) and len(x_window) == 2:
+        x_series = numeric_series(frame, x_name)
+        mask &= x_series >= float(x_window[0])
+        mask &= x_series <= float(x_window[1])
+    y_window = state.get("y_range")
+    if isinstance(y_window, (list, tuple)) and len(y_window) == 2:
+        y_series = numeric_series(frame, y_name)
+        mask &= y_series >= float(y_window[0])
+        mask &= y_series <= float(y_window[1])
+    return frame.loc[mask].copy()
+
+
+def _candidate_scope_status(
+    filtered_count: int,
+    working_count: int,
+    scope_state: dict[str, object] | None,
+) -> str:
+    state = dict(scope_state or {})
+    if state.get("mode") == "view" and working_count < filtered_count:
+        return f"Candidates list follows captured plot view: {working_count:,} / {filtered_count:,} filtered"
+    return f"Candidates list uses all filtered rows: {working_count:,}"
+
+
+def _prepare_export_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    export_df = frame.copy()
+    if export_df.empty:
+        return export_df
+    if "lc_path" not in export_df.columns:
+        export_df["lc_path"] = None
+    for idx, row in export_df.iterrows():
+        current_lc = str(row.get("lc_path") or "").strip()
+        if current_lc:
+            continue
+        plot_dir_value = row.get("plot_dir")
+        plot_dir = None
+        if plot_dir_value not in (None, ""):
+            try:
+                plot_dir = Path(str(plot_dir_value)).expanduser().resolve()
+            except Exception:
+                plot_dir = None
+        payload = {k: (None if pd.isna(v) else v) for k, v in row.to_dict().items()}
+        resolved = review_resolve_lightcurve_path(payload, plot_dir)
+        if resolved is not None:
+            export_df.at[idx, "lc_path"] = str(resolved)
+    return export_df
+
+
+def _selection_meta(
+    *,
+    source_filter: list[str] | None,
+    query_value: object,
+    advanced_state: dict[str, object],
+    x_metric: object,
+    y_metric: object,
+    color_metric: object,
+    symbol_metric: object,
+    log_flags: list[str] | None,
+    x_min: object,
+    x_max: object,
+    y_min: object,
+    y_max: object,
+    table_sort: object,
+    selected_key: object,
+    scope_state: dict[str, object] | None,
+    filtered_count: int,
+    working_count: int,
+    working_frame: pd.DataFrame,
+) -> dict[str, object]:
+    return {
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "candidate_count": int(working_count),
+        "filtered_count": int(filtered_count),
+        "source_labels": sorted(str(v) for v in (source_filter or [])),
+        "source_files": sorted(str(v) for v in working_frame["source_file"].dropna().astype(str).unique().tolist()) if "source_file" in working_frame.columns else [],
+        "source_paths": sorted(str(v) for v in working_frame["source_path"].dropna().astype(str).unique().tolist()) if "source_path" in working_frame.columns else [],
+        "plot": {
+            "x_metric": str(x_metric or ""),
+            "y_metric": str(y_metric or ""),
+            "color_metric": str(color_metric or ""),
+            "symbol_metric": str(symbol_metric or ""),
+            "log_flags": [str(v) for v in (log_flags or [])],
+            "x_min": x_min,
+            "x_max": x_max,
+            "y_min": y_min,
+            "y_max": y_max,
+            "candidate_scope": dict(scope_state or {}),
+        },
+        "filters": {
+            "query": str(query_value or ""),
+            "advanced": advanced_state,
+            "table_sort": str(table_sort or ""),
+        },
+        "selected_candidate_key": str(selected_key or ""),
+    }
+
+
+def _resolve_initial_candidate_key(
+    combined: CombinedCandidateData,
+    *,
+    candidate_key: str | None = None,
+    candidate: str | None = None,
+) -> str:
+    """Resolve the initial explorer selection from CLI inputs."""
+    key_text = str(candidate_key or "").strip()
+    if key_text and key_text in combined.key_lookup:
+        return key_text
+    candidate_text = str(candidate or "").strip()
+    resolved = find_candidate_key(combined, candidate_text) if candidate_text else None
+    if resolved:
+        return resolved
+    return str(getattr(combined, "default_candidate_key", "") or "")
+
+
+def _record_review_target(record: dict[str, object]) -> tuple[Path | None, Path | None]:
+    """Return an existing review DB target for a selected record when possible."""
+    source_file = str(record.get("source_file") or "").strip()
+    if not source_file:
+        return None, None
+    source_path = Path(source_file).expanduser().resolve()
+    if source_path.suffix.lower() != ".db" or not source_path.exists():
+        return None, None
+    return source_path, infer_plot_dir_from_source(source_path)
 
 
 def _graph_layout(height: int | None, *, theme: str = DEFAULT_THEME, uirevision: str | None = None) -> dict[str, object]:
@@ -784,7 +1092,13 @@ def _selection_status(selected_record: dict | None, filtered_count: int, query_e
     return " | ".join(bits)
 
 
-def build_explorer_app(combined: CombinedCandidateData, *, host: str, port: int) -> dash.Dash:
+def build_explorer_app(
+    combined: CombinedCandidateData,
+    *,
+    host: str,
+    port: int,
+    initial_candidate_key: str | None = None,
+) -> dash.Dash:
     all_source_labels = sorted({src.source_label for src in combined.sources})
     metric_options = available_metric_columns(combined.df) if not combined.df.empty else BEST_FIELDS
     default_hist_metric = "dipper_score" if "dipper_score" in metric_options else (metric_options[0] if metric_options else DEFAULT_MAIN_X)
@@ -816,14 +1130,17 @@ def build_explorer_app(combined: CombinedCandidateData, *, host: str, port: int)
 """
     app.layout = html.Div(
         [
-            dcc.Store(id="selected-key-store", data=combined.default_candidate_key, storage_type="local"),
+            dcc.Store(id="selected-key-store", data=(initial_candidate_key or combined.default_candidate_key), storage_type="local"),
             dcc.Store(id="period-search-store", data=None),
             dcc.Store(id="period-cache-store", data={}, storage_type="session"),
             dcc.Store(id="theme-mode-store", data=DEFAULT_THEME),
             dcc.Store(id="plot-reset-store", data=_default_plot_reset_data()),
-            dcc.Store(id="explorer-split-init", data=0),
+            dcc.Store(id="candidate-scope-store", data={"mode": "filtered"}),
+            dcc.Store(id="explorer-resize-init", data=0),
             dcc.Store(id="explorer-sidebar-open", data=True, storage_type="local"),
             dcc.Interval(id="explorer-init", interval=200, n_intervals=0, max_intervals=1),
+            dcc.Download(id="explorer-plot-download"),
+            dcc.Download(id="explorer-native-plot-download"),
             html.Div(
                 [
                     html.Button("Hide Sidebar", id="explorer-sidebar-toggle", n_clicks=0, className="explorer-action-btn explorer-sidebar-toggle"),
@@ -949,22 +1266,28 @@ def build_explorer_app(combined: CombinedCandidateData, *, host: str, port: int)
                                 [
                                     html.Div(
                                         [
-                                            html.Div(
-                                                [
-                                                    html.Div("Custom plot", className="explorer-card-title"),
-                                                    _reset_button("custom-reset-btn"),
-                                                ],
-                                                className="explorer-graph-toolbar",
-                                            ),
+                                            html.Div("Custom plot", className="explorer-card-title"),
                                             dcc.Graph(
                                                 id="custom-graph",
                                                 mathjax=True,
                                                 config={"displaylogo": False, "scrollZoom": True, "doubleClick": False, "responsive": True},
                                                 responsive=True,
-                                                style={"height": "clamp(360px, 56vh, 760px)", "width": "100%"},
+                                                style={"height": "clamp(360px, 56vh, 760px)", "width": "100%", "minWidth": "0"},
                                                 className="explorer-graph",
                                             ),
+                                            html.Div(
+                                                [
+                                                    html.Button("Refresh Candidates From View", id="refresh-candidates-view-btn", n_clicks=0, className="explorer-action-btn"),
+                                                    html.Button("Export Review Bundle", id="export-review-bundle-btn", n_clicks=0, className="explorer-action-btn"),
+                                                    html.Button("Open Selection In Review", id="open-selection-in-review-btn", n_clicks=0, className="explorer-action-btn"),
+                                                    html.Button("Export PDF", id="export-custom-pdf-btn", n_clicks=0, className="explorer-action-btn explorer-primary-btn"),
+                                                    _reset_button("custom-reset-btn"),
+                                                ],
+                                                className="explorer-graph-actions",
+                                            ),
                                             html.Div(id="plot-summary", className="explorer-status-line"),
+                                            html.Div(id="candidate-scope-status", className="explorer-status-line"),
+                                            html.Div(id="bundle-status", className="explorer-status-line"),
                                         ],
                                         className="explorer-graph-card",
                                     ),
@@ -1003,13 +1326,19 @@ def build_explorer_app(combined: CombinedCandidateData, *, host: str, port: int)
                                 id="explorer-left-panel",
                                 className="explorer-left-panel",
                             ),
-                            html.Div(id="explorer-main-splitter", className="explorer-panel-splitter", title="Drag to resize panels"),
                             html.Div(
                                 [
                                     html.Div(
                                         [
-                                            html.Div("Selected candidate", className="explorer-card-title"),
+                                            html.Div(
+                                                [
+                                                    html.Div("Selected candidate", className="explorer-card-title"),
+                                                    html.Button("Open in Review", id="open-current-in-review-btn", n_clicks=0, className="explorer-action-btn"),
+                                                ],
+                                                className="explorer-graph-toolbar",
+                                            ),
                                             html.Div(id="selected-status", className="explorer-status-line"),
+                                            html.Div(id="review-launch-status", className="explorer-status-line"),
                                             html.Div(id="viewer-summary", className="explorer-summary"),
                                         ],
                                         className="explorer-card",
@@ -1019,6 +1348,7 @@ def build_explorer_app(combined: CombinedCandidateData, *, host: str, port: int)
                                             html.Div(
                                                 [
                                                     html.Div("Native light curve", className="explorer-card-title"),
+                                                    html.Button("Export PDF", id="export-native-pdf-btn", n_clicks=0, className="explorer-action-btn explorer-primary-btn"),
                                                     _reset_button("lightcurve-reset-btn"),
                                                 ],
                                                 className="explorer-graph-toolbar",
@@ -1028,7 +1358,7 @@ def build_explorer_app(combined: CombinedCandidateData, *, host: str, port: int)
                                                 mathjax=True,
                                                 config={"displaylogo": False, "scrollZoom": True, "doubleClick": False, "responsive": True},
                                                 responsive=True,
-                                                style={"height": "clamp(420px, 72vh, 1100px)", "width": "100%"},
+                                                style={"height": "clamp(420px, 72vh, 1100px)", "width": "100%", "minWidth": "0"},
                                                 className="explorer-graph",
                                             ),
                                         ],
@@ -1061,6 +1391,16 @@ def build_explorer_app(combined: CombinedCandidateData, *, host: str, port: int)
             "overflow": "hidden",
         },
     )
+
+    @app.callback(
+        Output("selected-key-store", "data", allow_duplicate=True),
+        Input("explorer-init", "n_intervals"),
+        prevent_initial_call="initial_duplicate",
+    )
+    def apply_initial_candidate_selection(_tick):
+        if not initial_candidate_key:
+            return dash.no_update
+        return initial_candidate_key
 
     app.clientside_callback(
         """
@@ -1103,13 +1443,7 @@ def build_explorer_app(combined: CombinedCandidateData, *, host: str, port: int)
     app.clientside_callback(
         """
         function(_tick) {
-            var splitter = document.getElementById('explorer-main-splitter');
-            var leftPanel = document.getElementById('explorer-left-panel');
-            if (!splitter || !leftPanel) {
-                return window.dash_clientside.no_update;
-            }
-
-            var workspace = splitter.parentElement;
+            var workspace = document.querySelector('.explorer-workspace');
             if (!workspace) {
                 return window.dash_clientside.no_update;
             }
@@ -1124,121 +1458,48 @@ def build_explorer_app(combined: CombinedCandidateData, *, host: str, port: int)
                 });
             };
 
-            var storageKey = 'malca.explorer.left_panel.width.v1';
-            var defaultWidth = Math.min(Math.max(window.innerWidth * 0.46, 760), 1080);
-            var minWidth = 620;
-
-            var computeMaxWidth = function() {
-                var workspaceWidth = workspace.getBoundingClientRect().width;
-                return Math.max(minWidth, Math.floor(workspaceWidth - 480));
-            };
-
-            var clampWidth = function(value) {
-                var maxWidth = computeMaxWidth();
-                var numeric = Number(value);
-                if (!isFinite(numeric)) {
-                    numeric = defaultWidth;
-                }
-                if (numeric < minWidth) {
-                    numeric = minWidth;
-                }
-                if (numeric > maxWidth) {
-                    numeric = maxWidth;
-                }
-                return Math.round(numeric);
-            };
-
-            var applyWidth = function(value, persist) {
-                var w = clampWidth(value);
-                leftPanel.style.width = String(w) + 'px';
-                leftPanel.style.flex = '0 0 auto';
-                leftPanel.style.minWidth = String(minWidth) + 'px';
-                if (persist) {
-                    try {
-                        window.localStorage.setItem(storageKey, String(w));
-                    } catch (e) {
-                        // ignore storage failures
-                    }
-                }
+            var resizePlots = function() {
                 scheduleResize();
-                return w;
+                if (window.Plotly && window.Plotly.Plots && window.Plotly.Plots.resize) {
+                    ['custom-graph', 'lightcurve-graph'].forEach(function(graphId) {
+                        var container = document.getElementById(graphId);
+                        if (!container) {
+                            return;
+                        }
+                        var plotNode = container.querySelector('.js-plotly-plot');
+                        if (plotNode) {
+                            try { window.Plotly.Plots.resize(plotNode); } catch (err) {}
+                        }
+                    });
+                }
             };
 
-            if (!window.__malcaExplorerSplitterAttached) {
-                var drag = {active: false, startX: 0, startWidth: 0, pointerId: null};
-
-                var onPointerMove = function(e) {
-                    if (!drag.active) {
-                        return;
-                    }
-                    applyWidth(drag.startWidth + (e.clientX - drag.startX), false);
-                    e.preventDefault();
-                };
-
-                var stopDrag = function(e) {
-                    if (!drag.active) {
-                        return;
-                    }
-                    drag.active = false;
-                    splitter.classList.remove('dragging');
-                    window.removeEventListener('pointermove', onPointerMove);
-                    window.removeEventListener('pointerup', stopDrag);
-                    window.removeEventListener('pointercancel', stopDrag);
-                    if (drag.pointerId !== null && splitter.releasePointerCapture) {
-                        try { splitter.releasePointerCapture(drag.pointerId); } catch (err) {}
-                    }
-                    drag.pointerId = null;
-                    applyWidth(leftPanel.getBoundingClientRect().width, true);
-                    if (e) {
-                        e.preventDefault();
-                    }
-                };
-
-                splitter.addEventListener('pointerdown', function(e) {
-                    drag.active = true;
-                    drag.startX = e.clientX;
-                    drag.startWidth = leftPanel.getBoundingClientRect().width;
-                    drag.pointerId = (typeof e.pointerId === 'number') ? e.pointerId : null;
-                    splitter.classList.add('dragging');
-                    if (drag.pointerId !== null && splitter.setPointerCapture) {
-                        try { splitter.setPointerCapture(drag.pointerId); } catch (err) {}
-                    }
-                    window.addEventListener('pointermove', onPointerMove);
-                    window.addEventListener('pointerup', stopDrag);
-                    window.addEventListener('pointercancel', stopDrag);
-                    e.preventDefault();
-                });
-
-                window.addEventListener('resize', function() {
-                    applyWidth(leftPanel.getBoundingClientRect().width, false);
-                });
-
+            if (!window.__malcaExplorerResizeObserver) {
+                window.addEventListener('resize', resizePlots);
                 if (window.ResizeObserver) {
                     var observer = new window.ResizeObserver(function() {
-                        scheduleResize();
+                        resizePlots();
                     });
                     observer.observe(workspace);
-                    observer.observe(leftPanel);
+                    var leftPanel = document.getElementById('explorer-left-panel');
+                    var rightPanel = workspace.querySelector('.explorer-right-panel');
+                    if (leftPanel) {
+                        observer.observe(leftPanel);
+                    }
+                    if (rightPanel) {
+                        observer.observe(rightPanel);
+                    }
                     window.__malcaExplorerResizeObserver = observer;
-                }
-
-                window.__malcaExplorerSplitterAttached = true;
-            }
-
-            var saved = null;
-            try { saved = window.localStorage.getItem(storageKey); } catch (e) { saved = null; }
-            var initialWidth = defaultWidth;
-            if (saved !== null && saved !== '') {
-                var parsed = parseInt(saved, 10);
-                if (!isNaN(parsed)) {
-                    initialWidth = parsed;
+                } else {
+                    window.__malcaExplorerResizeObserver = true;
                 }
             }
-            applyWidth(initialWidth, false);
+
+            resizePlots();
             return window.dash_clientside.no_update;
         }
         """,
-        Output("explorer-split-init", "data"),
+        Output("explorer-resize-init", "data"),
         Input("explorer-init", "n_intervals"),
         prevent_initial_call=False,
     )
@@ -1286,6 +1547,247 @@ def build_explorer_app(combined: CombinedCandidateData, *, host: str, port: int)
         return updated
 
     @app.callback(
+        Output("candidate-scope-store", "data"),
+        Input("refresh-candidates-view-btn", "n_clicks"),
+        State("custom-graph", "relayoutData"),
+        State("x-metric", "value"),
+        State("y-metric", "value"),
+        State("log-flags", "value"),
+        prevent_initial_call=True,
+    )
+    def refresh_candidate_scope(_n_clicks, relayout_data, x_metric, y_metric, log_flags):
+        return _candidate_scope_from_plot(
+            relayout_data,
+            x_metric=x_metric,
+            y_metric=y_metric,
+            log_flags=log_flags,
+        )
+
+    @app.callback(
+        Output("explorer-plot-download", "data"),
+        Output("bundle-status", "children", allow_duplicate=True),
+        Input("export-custom-pdf-btn", "n_clicks"),
+        State("custom-graph", "figure"),
+        State("x-metric", "value"),
+        State("y-metric", "value"),
+        prevent_initial_call=True,
+    )
+    def export_custom_plot_pdf(n_clicks, figure, x_metric, y_metric):
+        if not n_clicks:
+            return dash.no_update, dash.no_update
+        if not figure:
+            return dash.no_update, "No custom plot is available to export."
+        try:
+            image_bytes = pio.to_image(_journal_export_figure(figure), format="pdf", width=1400, height=900)
+        except Exception as exc:
+            return dash.no_update, f"PDF export failed: {exc}"
+        slug_x = _slugify_token(x_metric or "x")
+        slug_y = _slugify_token(y_metric or "y")
+        fname = f"explorer_{slug_y}_vs_{slug_x}.pdf"
+        return dcc.send_bytes(image_bytes, fname), f"Exported {fname}"
+
+    @app.callback(
+        Output("explorer-native-plot-download", "data"),
+        Output("bundle-status", "children", allow_duplicate=True),
+        Input("export-native-pdf-btn", "n_clicks"),
+        State("lightcurve-graph", "figure"),
+        State("selected-key-store", "data"),
+        prevent_initial_call=True,
+    )
+    def export_native_plot_pdf(n_clicks, figure, selected_key):
+        if not n_clicks:
+            return dash.no_update, dash.no_update
+        if not figure:
+            return dash.no_update, "No native light curve plot is available to export."
+        try:
+            image_bytes = pio.to_image(_journal_export_figure(figure), format="pdf", width=1400, height=900)
+        except Exception as exc:
+            return dash.no_update, f"Native PDF export failed: {exc}"
+        fname = f"explorer_native_lightcurve_{_slugify_token(selected_key or 'candidate')}.pdf"
+        return dcc.send_bytes(image_bytes, fname), f"Exported {fname}"
+
+    @app.callback(
+        Output("bundle-status", "children"),
+        Input("export-review-bundle-btn", "n_clicks"),
+        Input("open-selection-in-review-btn", "n_clicks"),
+        [
+            State("custom-graph", "figure"),
+            State("source-filter", "value"),
+            State("query-input", "value"),
+            State("x-metric", "value"),
+            State("y-metric", "value"),
+            State("color-metric", "value"),
+            State("symbol-metric", "value"),
+            State("log-flags", "value"),
+            State("x-min", "value"),
+            State("x-max", "value"),
+            State("y-min", "value"),
+            State("y-max", "value"),
+            State("table-sort", "value"),
+            State("selected-key-store", "data"),
+            State("candidate-scope-store", "data"),
+            *ADV_FILTER_STATES,
+        ],
+        prevent_initial_call=True,
+    )
+    def export_review_bundle(*args):
+        (
+            n_clicks,
+            open_review_clicks,
+            figure,
+            source_filter,
+            query_value,
+            x_metric,
+            y_metric,
+            color_metric,
+            symbol_metric,
+            log_flags,
+            x_min,
+            x_max,
+            y_min,
+            y_max,
+            table_sort,
+            selected_key,
+            candidate_scope_state,
+            bool_values,
+            num_min_values,
+            num_max_values,
+            text_values,
+            select_values,
+            only_unreviewed_value,
+            require_failed_value,
+            bool_ids,
+            num_min_ids,
+            num_max_ids,
+            text_ids,
+            select_ids,
+        ) = args
+        if not n_clicks and not open_review_clicks:
+            return dash.no_update
+        triggered = dash.callback_context.triggered_id
+
+        advanced_state = _build_advanced_filter_state(
+            bool_values,
+            num_min_values,
+            num_max_values,
+            text_values,
+            select_values,
+            only_unreviewed_value,
+            require_failed_value,
+            bool_ids,
+            num_min_ids,
+            num_max_ids,
+            text_ids,
+            select_ids,
+        )
+        filtered, query_error, _active_filters = _filter_frame(combined.df, source_filter, query_value, advanced_state)
+        working = _apply_candidate_scope(
+            filtered,
+            scope_state=candidate_scope_state,
+            x_metric=x_metric,
+            y_metric=y_metric,
+            log_flags=log_flags,
+        )
+        if query_error:
+            return f"Bundle export blocked by invalid query: {query_error}"
+        if working.empty:
+            return "No candidates are available in the current filtered/view selection."
+
+        export_df = _prepare_export_frame(working)
+        slug_x = _slugify_token(x_metric or "x")
+        slug_y = _slugify_token(y_metric or "y")
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        bundle_dir = Path("output") / "explorer_exports" / f"{ts}_{slug_y}_vs_{slug_x}"
+        selection_meta = _selection_meta(
+            source_filter=source_filter,
+            query_value=query_value,
+            advanced_state=advanced_state,
+            x_metric=x_metric,
+            y_metric=y_metric,
+            color_metric=color_metric,
+            symbol_metric=symbol_metric,
+            log_flags=log_flags,
+            x_min=x_min,
+            x_max=x_max,
+            y_min=y_min,
+            y_max=y_max,
+            table_sort=table_sort,
+            selected_key=selected_key,
+            scope_state=candidate_scope_state,
+            filtered_count=len(filtered),
+            working_count=len(export_df),
+            working_frame=export_df,
+        )
+        try:
+            result = export_review_subset_bundle(bundle_dir, export_df, selection_meta=selection_meta)
+            if figure:
+                pdf_path = Path(result["bundle_dir"]) / "selection_plot.pdf"
+                pdf_path.write_bytes(pio.to_image(_journal_export_figure(figure), format="pdf", width=1400, height=900))
+            review_db = Path(result["review_db"])
+            if triggered == "open-selection-in-review-btn":
+                selected_record = get_candidate_record_by_key(combined, selected_key)
+                candidate_hint = None
+                if selected_record is not None:
+                    candidate_hint = str(
+                        selected_record.get("candidate_id")
+                        or selected_record.get("asas_sn_id")
+                        or selected_record.get("gaia_id")
+                        or ""
+                    ).strip() or None
+                command, url = build_review_command(db_path=review_db, candidate=candidate_hint)
+                launch_detached(command)
+                return f"Wrote review bundle to {bundle_dir} ({len(export_df):,} candidates) and opened review at {url}."
+            return f"Wrote review bundle to {bundle_dir} ({len(export_df):,} candidates). Open with `malca review --db {review_db}`."
+        except Exception as exc:
+            return f"Review bundle export failed: {exc}"
+
+    @app.callback(
+        Output("review-launch-status", "children"),
+        Input("open-current-in-review-btn", "n_clicks"),
+        State("selected-key-store", "data"),
+        prevent_initial_call=True,
+    )
+    def open_current_in_review(n_clicks, selected_key):
+        if not n_clicks:
+            raise dash.exceptions.PreventUpdate
+        record = get_candidate_record_by_key(combined, selected_key)
+        if record is None:
+            return "No candidate selected for review."
+
+        review_db, plot_dir = _record_review_target(record)
+        candidate_hint = str(
+            record.get("candidate_id")
+            or record.get("asas_sn_id")
+            or record.get("gaia_id")
+            or selected_key
+            or ""
+        ).strip() or None
+
+        if review_db is None:
+            export_df = _prepare_export_frame(pd.DataFrame([record]))
+            slug = _slugify_token(candidate_hint or "candidate")
+            ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            bundle_dir = Path("output") / "explorer_exports" / f"{ts}_{slug}"
+            selection_meta = {
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "candidate_count": 1,
+                "filtered_count": 1,
+                "source_labels": [str(record.get("source_label") or "")],
+                "source_files": [str(record.get("source_file") or "")],
+                "source_paths": [str(record.get("source_path") or "")],
+                "plot": {},
+                "filters": {"query": "", "advanced": {}, "table_sort": ""},
+                "selected_candidate_key": str(selected_key or ""),
+            }
+            result = export_review_subset_bundle(bundle_dir, export_df, selection_meta=selection_meta)
+            review_db = Path(result["review_db"])
+            plot_dir = None
+
+        command, url = build_review_command(db_path=review_db, candidate=candidate_hint, plot_dir=plot_dir)
+        launch_detached(command)
+        return f"Opened review at {url}."
+
+    @app.callback(
         Output("selected-key-store", "data"),
         [
             Input("custom-graph", "clickData"),
@@ -1293,6 +1795,10 @@ def build_explorer_app(combined: CombinedCandidateData, *, host: str, port: int)
             Input("candidate-search", "value"),
             Input("source-filter", "value"),
             Input("query-input", "value"),
+            Input("x-metric", "value"),
+            Input("y-metric", "value"),
+            Input("log-flags", "value"),
+            Input("candidate-scope-store", "data"),
             *ADV_FILTER_INPUTS,
         ],
         [State("candidate-table", "data"), State("selected-key-store", "data"), *ADV_FILTER_STATES],
@@ -1305,6 +1811,10 @@ def build_explorer_app(combined: CombinedCandidateData, *, host: str, port: int)
             search_value,
             source_filter,
             query_value,
+            x_metric,
+            y_metric,
+            log_flags,
+            candidate_scope_state,
             bool_values,
             num_min_values,
             num_max_values,
@@ -1336,6 +1846,13 @@ def build_explorer_app(combined: CombinedCandidateData, *, host: str, port: int)
             select_ids,
         )
         filtered, _, _ = _filter_frame(combined.df, source_filter, query_value, advanced_state)
+        working = _apply_candidate_scope(
+            filtered,
+            scope_state=candidate_scope_state,
+            x_metric=x_metric,
+            y_metric=y_metric,
+            log_flags=log_flags,
+        )
         ctx = dash.callback_context
         triggered = ctx.triggered_id
 
@@ -1357,13 +1874,14 @@ def build_explorer_app(combined: CombinedCandidateData, *, host: str, port: int)
             if 0 <= row_idx < len(table_data):
                 new_key = str(table_data[row_idx].get("candidate_key") or "")
         elif triggered == "candidate-search":
-            new_key = find_candidate_key(combined, search_value, subset=filtered)
+            new_key = find_candidate_key(combined, search_value, subset=working)
 
         if not new_key:
-            if current_key and current_key in set(filtered.get("candidate_key", [])):
+            active_frame = working if not working.empty else filtered
+            if current_key and current_key in set(active_frame.get("candidate_key", [])):
                 new_key = current_key
-            elif not filtered.empty:
-                new_key = str(filtered.iloc[0].get("candidate_key") or "")
+            elif not active_frame.empty:
+                new_key = str(active_frame.iloc[0].get("candidate_key") or "")
             else:
                 new_key = ""
         return new_key
@@ -1380,6 +1898,7 @@ def build_explorer_app(combined: CombinedCandidateData, *, host: str, port: int)
             Output("explorer-status", "children"),
             Output("custom-graph", "figure"),
             Output("plot-summary", "children"),
+            Output("candidate-scope-status", "children"),
             Output("candidate-table", "data"),
         ],
         [
@@ -1398,6 +1917,7 @@ def build_explorer_app(combined: CombinedCandidateData, *, host: str, port: int)
             Input("selected-key-store", "data"),
             Input("theme-mode-store", "data"),
             Input("plot-reset-store", "data"),
+            Input("candidate-scope-store", "data"),
             *ADV_FILTER_INPUTS,
         ],
         ADV_FILTER_STATES,
@@ -1419,6 +1939,7 @@ def build_explorer_app(combined: CombinedCandidateData, *, host: str, port: int)
             selected_key,
             theme_mode,
             plot_reset_data,
+            candidate_scope_state,
             bool_values,
             num_min_values,
             num_max_values,
@@ -1448,6 +1969,13 @@ def build_explorer_app(combined: CombinedCandidateData, *, host: str, port: int)
             select_ids,
         )
         filtered, query_error, active_filters = _filter_frame(combined.df, source_filter, query_value, advanced_state)
+        working = _apply_candidate_scope(
+            filtered,
+            scope_state=candidate_scope_state,
+            x_metric=x_metric,
+            y_metric=y_metric,
+            log_flags=log_flags,
+        )
         theme_name = str(theme_mode or DEFAULT_THEME)
 
         custom_fig: go.Figure
@@ -1507,11 +2035,13 @@ def build_explorer_app(combined: CombinedCandidateData, *, host: str, port: int)
 
         selected_record = get_candidate_record_by_key(combined, selected_key)
         status = _selection_status(selected_record, len(filtered), query_error, active_filters)
-        table_data = _table_rows(filtered, table_sort or "dipper_score")
+        scope_status = _candidate_scope_status(len(filtered), len(working), candidate_scope_state)
+        table_data = _table_rows(working, table_sort or "dipper_score")
         return (
             status,
             custom_fig,
             plot_summary,
+            scope_status,
             table_data,
         )
 
@@ -1703,6 +2233,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-glob", default=None, help="Glob pattern for multiple sources, e.g. 'output/runs/*/review/review.db'")
     parser.add_argument("--source-kind", default=None, choices=["db", "parquet", "csv"], help="Optional explicit source kind")
     parser.add_argument("--plot-dir", default=None, help="Optional plot-dir override for all sources")
+    parser.add_argument("--candidate", default=None, help="Candidate ID / ASAS-SN ID / Gaia ID / LC stem to select on startup")
+    parser.add_argument("--candidate-key", default=None, help="Explicit candidate_key to select on startup")
     parser.add_argument("--host", default="127.0.0.1", help="Dash host")
     parser.add_argument("--port", type=int, default=8062, help="Dash port")
     parser.add_argument("--debug", action="store_true", help="Run Dash with debug enabled")
@@ -1715,7 +2247,17 @@ def main() -> None:
     source_paths = _resolve_sources(args)
     combined = load_combined_source_data(sources=source_paths, source_kind=args.source_kind, plot_dir=args.plot_dir)
     combined.df = add_eda_columns(combined.df)
-    app = build_explorer_app(combined, host=str(args.host), port=int(args.port))
+    initial_candidate_key = _resolve_initial_candidate_key(
+        combined,
+        candidate_key=getattr(args, "candidate_key", None),
+        candidate=getattr(args, "candidate", None),
+    )
+    app = build_explorer_app(
+        combined,
+        host=str(args.host),
+        port=int(args.port),
+        initial_candidate_key=initial_candidate_key,
+    )
     url = f"http://{args.host}:{args.port}"
     print(f"Starting MALCA Explorer on {url}")
     print(f"  Sources: {len(combined.sources)}")
