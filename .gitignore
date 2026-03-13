@@ -19,3 +19,9 @@ input/vsx/vsxcat.090525
 input/vsx/vsxcat.090525.save
 
 lc_plots/
+
+# Ignore mistakenly committed files
+input/mist/
+malca/changes.txt
+results_test/
+skypatrol
