@@ -18,14 +18,10 @@ NOTE: These should run AFTER filtering to reduce the dataset from 17M to ~36K.
 """
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from astropy import units as u
 from astropy.coordinates import SkyCoord, match_coordinates_sky
-from astropy.table import Table
-from astroquery.utils.tap.core import TapPlus
-from tqdm.auto import tqdm
 import numpy as np
 import pandas as pd
 
@@ -37,6 +33,7 @@ from malca.config.config_ltv import (
     SIMBAD_TAP_URL,
 )
 from malca.config.config_paths import VSX_CROSSMATCH_PATH
+from malca.utils import batch_tap_crossmatch as shared_batch_tap_crossmatch
 
 
 
@@ -237,60 +234,23 @@ def _batch_tap_crossmatch(
 ) -> pd.DataFrame:
     """
     Generic batch TAP crossmatch using coordinate upload.
-    
-    For catalogs that support TAP uploads, this is much faster than row-by-row.
-    """
 
-    
-    if coords_df.empty:
-        return pd.DataFrame()
-    
-    results = []
-    chunks = [coords_df.iloc[i:i+chunk_size] for i in range(0, len(coords_df), chunk_size)]
-    
-    def process_chunk(chunk_df):
-        try:
-            tap = TapPlus(url=tap_service)
-            upload_table = Table.from_pandas(chunk_df[["_idx", "ra", "dec"]])
-            
-            query = f"""
-            SELECT 
-                u._idx as _idx,
-                {select_cols},
-                DISTANCE(POINT('ICRS', c.{ra_col}, c.{dec_col}), POINT('ICRS', u.ra, u.dec)) * 3600.0 as sep_arcsec
-            FROM TAP_UPLOAD.upload_table AS u
-            JOIN {catalog_table} AS c
-            ON 1=CONTAINS(
-                POINT('ICRS', c.{ra_col}, c.{dec_col}),
-                CIRCLE('ICRS', u.ra, u.dec, {match_radius_arcsec / 3600.0})
-            )
-            """
-            
-            job = tap.launch_job_async(
-                query,
-                upload_resource=upload_table,
-                upload_table_name="upload_table",
-                verbose=False,
-            )
-            result = job.get_results()
-            return result.to_pandas() if result else pd.DataFrame()
-        except Exception as e:
-            if verbose:
-                print(f"TAP query error: {e}")
-            return pd.DataFrame()
-    
-    with ThreadPoolExecutor(max_workers=n_workers) as executor:
-        futures = {executor.submit(process_chunk, chunk): i for i, chunk in enumerate(chunks)}
-        
-        for future in tqdm(as_completed(futures), total=len(futures), desc=desc, disable=not verbose):
-            result = future.result()
-            if not result.empty:
-                results.append(result)
-    
-    if not results:
-        return pd.DataFrame()
-    
-    return pd.concat(results, ignore_index=True)
+    Delegates to the shared TAP helper so async result retries and
+    sync-subchunk fallback stay consistent across the codebase.
+    """
+    return shared_batch_tap_crossmatch(
+        coords_df,
+        tap_url=tap_service,
+        catalog_table=catalog_table,
+        select_cols=select_cols,
+        ra_col=ra_col,
+        dec_col=dec_col,
+        match_radius_arcsec=match_radius_arcsec,
+        chunk_size=chunk_size,
+        n_workers=n_workers,
+        verbose=verbose,
+        desc=desc,
+    )
 
 
 def crossmatch_tap_catalog(
