@@ -13,6 +13,10 @@ from astroquery.utils.tap.core import TapPlus
 from scipy.special import erf
 from tqdm import tqdm
 import numpy as np
+try:
+    np.set_printoptions(legacy='1.25')
+except TypeError:
+    pass  # For older numpy versions that don't support legacy='1.25'
 import pandas as pd
 import pyvo
 
@@ -1131,8 +1135,14 @@ def batch_gaia_cone_query(
     chunks = [coords_df.iloc[i:i + chunk_size] for i in range(0, len(coords_df), chunk_size)]
 
     def process_chunk(chunk_df):
+        import numpy as np
+        try:
+            np.set_printoptions(legacy="1.25")
+        except TypeError:
+            pass
         try:
             upload_table = Table.from_pandas(chunk_df[["_idx", "ra", "dec"]])
+
             query = f"""
             SELECT
                 u._idx as _idx,
@@ -1152,6 +1162,8 @@ def batch_gaia_cone_query(
         except Exception as e:
             if verbose:
                 print(f"Gaia batch query error: {e}")
+                import traceback
+                traceback.print_exc()
             return pd.DataFrame()
 
     with ThreadPoolExecutor(max_workers=n_workers) as executor:
@@ -1280,6 +1292,11 @@ def batch_tap_crossmatch(
         return combined, None
 
     def process_chunk(chunk_df):
+        import numpy as np
+        try:
+            np.set_printoptions(legacy="1.25")
+        except TypeError:
+            pass
         error_message: str | None = None
         try:
             tap = TapPlus(url=tap_url)

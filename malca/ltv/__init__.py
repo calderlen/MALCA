@@ -36,7 +36,6 @@ from malca.ltv.filter import (
     filter_refcat_offset,
     filter_photometric_scatter,
     filter_vg_overlap,
-    filter_eclipsing_binary_signature,
     filter_crowding,
     filter_high_proper_motion,
     filter_neighbor_high_pm,
@@ -79,8 +78,24 @@ from malca.ltv.gaia_epoch import (
 from malca.ltv.stochastic import (
     add_stochastic_postfilter_features,
 )
+from malca.ltv.pca import (
+    LtvPCAModel,
+    LTV_PCA_FEATURE_CANDIDATES,
+    resolve_feature_columns as resolve_pca_feature_columns,
+    fit_ltv_pca,
+    apply_ltv_pca,
+    fit_apply_ltv_pca,
+    save_ltv_pca_model,
+    load_ltv_pca_model,
+)
 from malca.ltv.pipeline import (
     run_full_pipeline,
+)
+from malca.ltv.injection import (
+    inject_trend,
+    run_injection_recovery as run_ltv_injection_recovery,
+    compute_rejection_summary,
+    generate_plots as generate_ltv_injection_plots,
 )
 
 from malca.ltv.optim import (
@@ -111,7 +126,6 @@ __all__ = [
     "filter_refcat_offset",
     "filter_photometric_scatter",
     "filter_vg_overlap",
-    "filter_eclipsing_binary_signature",
     "filter_crowding",
     "filter_high_proper_motion",
     "filter_neighbor_high_pm",
@@ -138,8 +152,21 @@ __all__ = [
     "apply_gaia_epoch_flags",
     # Stochastic post-filter features
     "add_stochastic_postfilter_features",
+    # PCA
+    "LtvPCAModel",
+    "LTV_PCA_FEATURE_CANDIDATES",
+    "resolve_pca_feature_columns",
+    "fit_ltv_pca",
+    "apply_ltv_pca",
+    "fit_apply_ltv_pca",
+    "save_ltv_pca_model",
+    "load_ltv_pca_model",
     # Pipeline
     "run_full_pipeline",
+    "inject_trend",
+    "run_ltv_injection_recovery",
+    "compute_rejection_summary",
+    "generate_ltv_injection_plots",
     # Optimization
     "check_optimizations",
     # Local catalog

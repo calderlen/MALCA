@@ -31,9 +31,6 @@ from malca.config.config_ltv import (
     LTV_MIN_DEC,
     LTV_MAX_PM,
     LTV_MAX_REDUCED_CHI2,
-    LTV_MAX_EB_PERIOD_DAYS,
-    LTV_MIN_LS_POWER,
-    LTV_MAX_LS_FAP,
     LTV_MAX_CROWDING_COUNT,
     LTV_MATCH_RADIUS_ARCSEC,
     LTV_CHUNK_SIZE,
@@ -49,6 +46,7 @@ from malca.config.config_ltv import (
     LTV_ASASSN_BASELINE_YEARS,
     LTV_NEIGHBOR_FLUX_RATIO_LIMIT,
     LTV_NEIGHBOR_SEARCH_RADIUS_ARCSEC,
+    LTV_NEIGHBOR_MIN_PM_MAS_YR,
 )
 from malca.utils import log_rejections, batch_gaia_cone_query
 
@@ -200,51 +198,6 @@ def filter_photometric_scatter(
         print(f"[filter_photometric_scatter] {n0} → {len(df_out)} (removed {n0 - len(df_out)})")
     
     log_rejections(df, df_out, "filter_photometric_scatter", log_csv)
-    return df_out
-
-
-def filter_eclipsing_binary_signature(
-    df: pd.DataFrame,
-    *,
-    max_eb_period_days: float = LTV_MAX_EB_PERIOD_DAYS,
-    min_ls_power: float = LTV_MIN_LS_POWER,
-    max_ls_fap: float = LTV_MAX_LS_FAP,
-    ls_period_column: str = "ls_period",
-    ls_power_column: str = "ls_power",
-    ls_fap_column: str = "ls_fap",
-    verbose: bool = False,
-    log_csv: str | Path | None = None,
-) -> pd.DataFrame:
-    """
-    Remove likely eclipsing binaries misclassified as LTV.
-    
-    EBs with periods <100 days can create artificial long-term trends
-    when seasonal medians sample different eclipse phases.
-    
-    Uses Lomb-Scargle periodogram results (already computed in core.py).
-    Vectorized — runs instantly on any size.
-    """
-    n0 = len(df)
-    
-    if ls_period_column not in df.columns:
-        if verbose:
-            print(f"Warning: '{ls_period_column}' not found, skipping EB filter")
-        return df
-    
-    period = df[ls_period_column].values
-    power = df[ls_power_column].values if ls_power_column in df.columns else np.zeros(len(df))
-    fap = df[ls_fap_column].values if ls_fap_column in df.columns else np.ones(len(df))
-    
-    # EB signature: short period + high power + low FAP
-    is_eb = (period < max_eb_period_days) & (power > min_ls_power) & (fap < max_ls_fap)
-    
-    mask = ~is_eb
-    df_out = df[mask].reset_index(drop=True)
-    
-    if verbose:
-        print(f"[filter_eclipsing_binary_signature] {n0} → {len(df_out)} (removed {n0 - len(df_out)})")
-    
-    log_rejections(df, df_out, "filter_eclipsing_binary_signature", log_csv)
     return df_out
 
 
@@ -593,6 +546,7 @@ def query_neighbor_high_pm_batch(
     search_radius_arcsec: float = LTV_NEIGHBOR_SEARCH_RADIUS_ARCSEC,
     aperture_radius_arcsec: float = LTV_APERTURE_RADIUS_ARCSEC,
     flux_ratio_limit: float = LTV_NEIGHBOR_FLUX_RATIO_LIMIT,
+    min_pm_mas_yr: float = LTV_NEIGHBOR_MIN_PM_MAS_YR,
     t_start_year: float = -4.0,
     t_end_year: float = 6.0,
     chunk_size: int = LTV_GAIA_CHUNK_SIZE,
@@ -680,6 +634,11 @@ def query_neighbor_high_pm_batch(
             if pd.isna(nb_pmra) or pd.isna(nb_pmdec):
                 continue
 
+            # Skip neighbors with total PM below threshold (Gaia pmra/pmdec in mas/yr)
+            pm_total_mas_yr = np.sqrt(float(nb_pmra) ** 2 + float(nb_pmdec) ** 2)
+            if pm_total_mas_yr < min_pm_mas_yr:
+                continue
+
             # Skip neighbors too faint to matter
             if not (pd.isna(nb_mag) or pd.isna(target_mag)):
                 flux_ratio = 10.0 ** (-0.4 * (float(nb_mag) - float(target_mag)))
@@ -724,6 +683,7 @@ def filter_neighbor_high_pm(
     search_radius_arcsec: float = LTV_NEIGHBOR_SEARCH_RADIUS_ARCSEC,
     aperture_radius_arcsec: float = LTV_APERTURE_RADIUS_ARCSEC,
     flux_ratio_limit: float = LTV_NEIGHBOR_FLUX_RATIO_LIMIT,
+    min_pm_mas_yr: float = LTV_NEIGHBOR_MIN_PM_MAS_YR,
     query_gaia: bool = True,
     chunk_size: int = LTV_GAIA_CHUNK_SIZE,
     n_workers: int = LTV_WORKERS,
@@ -744,6 +704,7 @@ def filter_neighbor_high_pm(
             search_radius_arcsec=search_radius_arcsec,
             aperture_radius_arcsec=aperture_radius_arcsec,
             flux_ratio_limit=flux_ratio_limit,
+            min_pm_mas_yr=min_pm_mas_yr,
             chunk_size=chunk_size,
             n_workers=n_workers,
             verbose=verbose,
@@ -780,12 +741,12 @@ def apply_all_filters(
     max_refcat_offset: float = LTV_MAX_REFCAT_OFFSET,
     # Enhanced filter thresholds
     max_reduced_chi2: float = LTV_MAX_REDUCED_CHI2,
-    max_eb_period_days: float = LTV_MAX_EB_PERIOD_DAYS,
     max_crowding_count: int = LTV_MAX_CROWDING_COUNT,
     # Neighbor PM filter
     aperture_radius_arcsec: float = LTV_APERTURE_RADIUS_ARCSEC,
     neighbor_flux_ratio_limit: float = LTV_NEIGHBOR_FLUX_RATIO_LIMIT,
     neighbor_search_radius_arcsec: float = LTV_NEIGHBOR_SEARCH_RADIUS_ARCSEC,
+    neighbor_min_pm_mas_yr: float = LTV_NEIGHBOR_MIN_PM_MAS_YR,
     # Options
     run_enhanced_filters: bool = True,
     run_neighbor_pm_filter: bool = True,
@@ -794,7 +755,8 @@ def apply_all_filters(
     n_workers: int = LTV_WORKERS,
     verbose: bool = False,
     log_csv: str | Path | None = None,
-) -> pd.DataFrame:
+    return_rejected: bool = False,
+) -> pd.DataFrame | tuple[pd.DataFrame, pd.DataFrame]:
     """
     Apply all paper filters in sequence.
 
@@ -807,11 +769,10 @@ def apply_all_filters(
     3. South pole (vectorized)
     4. REFCAT magnitude offset (vectorized) — paper Fig. 1
     5. Photometric scatter (vectorized)
-    6. Eclipsing binary signature (vectorized)
-    7. Bright star artifacts (batch Gaia TAP)
-    8. High proper motion (batch Gaia TAP)
-    9. Neighbor high-PM contamination (batch Gaia TAP) — paper §2
-    10. Crowding (batch Gaia TAP)
+    6. Bright star artifacts (batch Gaia TAP)
+    7. High proper motion (batch Gaia TAP)
+    8. Neighbor high-PM contamination (batch Gaia TAP) — paper §2
+    9. Crowding (batch Gaia TAP)
     """
     n0 = len(df)
 
@@ -822,80 +783,65 @@ def apply_all_filters(
     # Vectorized filters first — instant, reduces data size
     df = filter_slope_threshold(df, min_slope=min_slope, verbose=verbose, log_csv=log_csv)
     df = filter_max_diff_threshold(df, min_diff=min_diff, verbose=verbose, log_csv=log_csv)
-    df = filter_south_pole(df, min_dec=min_dec, verbose=verbose, log_csv=log_csv)
-    df = filter_refcat_offset(
-        df,
-        max_refcat_offset=max_refcat_offset,
-        verbose=verbose,
-        log_csv=log_csv,
-    )
+
+    rejected_list = []
+
+    def run_filter(func, df_in, name, **kwargs):
+        df_out = func(df_in, **kwargs)
+        if return_rejected:
+            id_col = None
+            for candidate in ["ASAS-SN ID", "path", "asas_sn_id", "id", "source_id"]:
+                if candidate in df_in.columns:
+                    id_col = candidate
+                    break
+            if id_col is None:
+                id_col = df_in.columns[0]
+            
+            before_ids = set(df_in[id_col].astype(str))
+            after_ids = set(df_out[id_col].astype(str))
+            rejected_ids = before_ids - after_ids
+            
+            if rejected_ids:
+                rejected = df_in[df_in[id_col].astype(str).isin(rejected_ids)].copy()
+                rejected["filter_reason"] = name
+                rejected_list.append(rejected)
+        return df_out
+
+    df = run_filter(filter_south_pole, df, "south_pole", min_dec=min_dec, verbose=verbose, log_csv=log_csv)
+    df = run_filter(filter_refcat_offset, df, "refcat_offset", max_refcat_offset=max_refcat_offset, verbose=verbose, log_csv=log_csv)
 
     # Enhanced vectorized filters
     if run_enhanced_filters:
         if verbose:
             print("\nPhase 1b: Enhanced vectorized filters...")
 
-        df = filter_photometric_scatter(
-            df,
-            max_reduced_chi2=max_reduced_chi2,
-            verbose=verbose,
-            log_csv=log_csv,
-        )
+        df = run_filter(filter_photometric_scatter, df, "photometric_scatter", max_reduced_chi2=max_reduced_chi2, verbose=verbose, log_csv=log_csv)
         # Disabled as LTV trends are analyzed only in g-band
-        # df = filter_vg_overlap(
-        #     df,
-        #     verbose=verbose,
-        #     log_csv=log_csv,
-        # )
-        df = filter_eclipsing_binary_signature(
-            df,
-            max_eb_period_days=max_eb_period_days,
-            verbose=verbose,
-            log_csv=log_csv,
-        )
+        # df = run_filter(filter_vg_overlap, df, "vg_overlap", verbose=verbose, log_csv=log_csv)
 
     if verbose:
         print(f"\nAfter vectorized filters: {len(df)} sources ({len(df)/n0*100:.2f}% remaining)")
         print("Phase 2: Gaia TAP queries (batch)...")
 
     # Gaia queries only on reduced dataset
-    df = filter_high_proper_motion(
-        df,
-        max_pm=max_pm,
-        query_gaia=query_gaia,
-        chunk_size=chunk_size,
-        n_workers=n_workers,
-        verbose=verbose,
-        log_csv=log_csv,
-    )
+    df = run_filter(filter_high_proper_motion, df, "high_proper_motion", max_pm=max_pm, query_gaia=query_gaia, chunk_size=chunk_size, n_workers=n_workers, verbose=verbose, log_csv=log_csv)
 
     # Neighbor high-PM contamination filter (paper §2)
     if run_neighbor_pm_filter:
-        df = filter_neighbor_high_pm(
-            df,
-            search_radius_arcsec=neighbor_search_radius_arcsec,
-            aperture_radius_arcsec=aperture_radius_arcsec,
-            flux_ratio_limit=neighbor_flux_ratio_limit,
-            query_gaia=query_gaia,
-            chunk_size=chunk_size,
-            n_workers=n_workers,
-            verbose=verbose,
-            log_csv=log_csv,
-        )
+        df = run_filter(filter_neighbor_high_pm, df, "neighbor_high_pm", search_radius_arcsec=neighbor_search_radius_arcsec, aperture_radius_arcsec=aperture_radius_arcsec, flux_ratio_limit=neighbor_flux_ratio_limit, min_pm_mas_yr=neighbor_min_pm_mas_yr, query_gaia=query_gaia, chunk_size=chunk_size, n_workers=n_workers, verbose=verbose, log_csv=log_csv)
 
     # Enhanced crowding filter
     if run_enhanced_filters:
-        df = filter_crowding(
-            df,
-            max_crowding_count=max_crowding_count,
-            query_gaia=query_gaia,
-            chunk_size=chunk_size,
-            n_workers=n_workers,
-            verbose=verbose,
-            log_csv=log_csv,
-        )
+        df = run_filter(filter_crowding, df, "crowding", max_crowding_count=max_crowding_count, query_gaia=query_gaia, chunk_size=chunk_size, n_workers=n_workers, verbose=verbose, log_csv=log_csv)
 
     if verbose:
         print(f"\n[apply_all_filters] TOTAL: {n0} → {len(df)} ({len(df)/n0*100:.2f}% remaining)")
+
+    if return_rejected:
+        if rejected_list:
+            df_rejected = pd.concat(rejected_list, ignore_index=True)
+        else:
+            df_rejected = pd.DataFrame(columns=df.columns.tolist() + ["filter_reason"])
+        return df, df_rejected
 
     return df

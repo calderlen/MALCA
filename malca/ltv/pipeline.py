@@ -24,7 +24,7 @@ import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 
-from malca.config.config_paths import LTV_OUTPUT_DIR
+from malca.config.config_paths import LTV_OUTPUT_DIR, SYDNEY_LTV_CSV_PATH
 from malca.config.config_ltv import (
     LTV_MIN_SLOPE,
     LTV_MIN_DIFF,
@@ -54,6 +54,12 @@ from malca.ltv.dust import apply_dust_flags
 from malca.ltv.cmd import compute_cmd_features, assign_cmd_groups, load_mist_grid, fetch_bailer_jones_distances
 from malca.ltv.gaia_epoch import query_gaia_epoch_photometry_batch, apply_gaia_epoch_flags
 from malca.ltv.stochastic import add_stochastic_postfilter_features
+from malca.ltv.pca import (
+    fit_apply_ltv_pca,
+    save_ltv_pca_model,
+    resolve_feature_columns as _resolve_pca_features,
+    coerce_n_components as _coerce_pca_nc,
+)
 from malca.characterize import get_dust_extinction
 
 
@@ -101,6 +107,10 @@ def run_full_pipeline(
     # Parallel processing
     n_workers: int = LTV_WORKERS,
     chunk_size: int = LTV_CHUNK_SIZE,
+    # PCA (optional)
+    run_pca: bool = False,
+    pca_n_components: int | float = 10,
+    pca_model_path: str | Path | None = None,
     # Output
     log_csv: str | Path | None = None,
     verbose: bool = True,
@@ -133,13 +143,14 @@ def run_full_pipeline(
     # =========================================================================
     # Stage 1: Filtering (MUST run first)
     # =========================================================================
+    df_rejected = None  # Rows that passed slope+diff but were later filtered out
     if run_filters:
         if verbose:
             print("-" * 60)
             print("STAGE 1: FILTERING")
             print("-" * 60)
         
-        df = apply_all_filters(
+        df, df_rejected = apply_all_filters(
             df,
             min_slope=min_slope,
             min_diff=min_diff,
@@ -150,6 +161,7 @@ def run_full_pipeline(
             n_workers=n_workers,
             verbose=verbose,
             log_csv=log_csv,
+            return_rejected=True,
         )
         
         if verbose:
@@ -157,9 +169,12 @@ def run_full_pipeline(
             print(f"\n→ After filtering: {len(df):,} candidates ({reduction:.1f}% reduction)")
             print()
     
-    if df.empty:
+    if df.empty and (df_rejected is None or df_rejected.empty):
         if verbose:
             print("No sources remaining after filtering")
+        df = df.copy()
+        if "filter_reason" not in df.columns:
+            df["filter_reason"] = pd.NA
         return df
 
     # =========================================================================
@@ -198,6 +213,7 @@ def run_full_pipeline(
             include_vsx=include_vsx,
             include_milliquas=include_milliquas,
             include_simbad=include_simbad,
+            sydney_csv_path=SYDNEY_LTV_CSV_PATH,
             match_radius_arcsec=match_radius_arcsec,
             n_workers=n_workers,
             verbose=verbose,
@@ -344,7 +360,35 @@ def run_full_pipeline(
             print(f"With stochastic post-filter features: {n_stoch:,} ({pct:.1f}%)")
         
         print("=" * 60)
-    
+
+    # =========================================================================
+    # Stage 6: LTV PCA (optional)
+    # =========================================================================
+    if run_pca and len(df) >= 2:
+        feature_cols = _resolve_pca_features(df)
+        if len(feature_cols) >= 2:
+            safe_nc = _coerce_pca_nc(pca_n_components, n_samples=len(df), n_features=len(feature_cols))
+            df, pca_model = fit_apply_ltv_pca(df, n_components=safe_nc)
+            if pca_model_path is not None:
+                save_ltv_pca_model(pca_model, pca_model_path)
+                if verbose:
+                    print(f"[PCA] Saved model to {pca_model_path}")
+            if verbose:
+                n_comp = len(pca_model.pca_columns)
+                cumvar = sum(pca_model.explained_variance_ratio_)
+                print(f"[PCA] Added {n_comp} components (cumulative variance: {cumvar:.3f})")
+        elif verbose:
+            print("[PCA] Skipped: fewer than 2 numeric LTV feature columns present")
+    elif run_pca and verbose and len(df) < 2:
+        print("[PCA] Skipped: fewer than 2 rows")
+
+    # Output parquet: every light curve that survived filter_max_diff_threshold,
+    # with filter_reason = "passed" or the filter that removed it (e.g. south_pole, crowding).
+    df = df.copy()
+    if "filter_reason" not in df.columns:
+        df["filter_reason"] = "passed"
+    if df_rejected is not None and not df_rejected.empty:
+        df = pd.concat([df, df_rejected], ignore_index=True)
     return df
 
 
@@ -483,6 +527,18 @@ def add_pipeline_args(parser):
         help="Log rejected sources to this CSV",
     )
     parser.add_argument(
+        "--run-pca",
+        action="store_true",
+        help="Run LTV PCA and add ltv_pc1, ltv_pc2, ... to the output table",
+    )
+    parser.add_argument(
+        "--pca-n-components",
+        type=float,
+        default=10,
+        metavar="N",
+        help="Number of PCA components (int) or variance fraction (float, e.g. 0.95). Default: 10",
+    )
+    parser.add_argument(
         "-v", "--verbose",
         action="store_true",
         help="Print progress",
@@ -511,6 +567,11 @@ def run_pipeline_cli(args):
     
     print(f"Loaded {len(df):,} sources from {input_path}")
     
+    # Optional PCA model path (e.g. output/ltv/ltv_pca_model_<mag_bin>.joblib)
+    pca_model_path = None
+    if args.run_pca and args.mag_bin:
+        pca_model_path = LTV_OUTPUT_DIR / f"ltv_pca_model_{args.mag_bin}.joblib"
+
     # Run pipeline
     df = run_full_pipeline(
         df,
@@ -531,12 +592,26 @@ def run_pipeline_cli(args):
         gaia_epoch_data_structure=args.gaia_epoch_data_structure,
         gaia_epoch_valid_data=not args.gaia_epoch_include_invalid,
         gaia_epoch_band=args.gaia_epoch_band,
+        run_pca=args.run_pca,
+        pca_n_components=args.pca_n_components,
+        pca_model_path=pca_model_path,
         n_workers=args.n_workers,
         chunk_size=args.chunk_size,
         log_csv=args.log_rejections,
         verbose=args.verbose,
     )
     
+    # Normalize ID columns for Parquet (avoids ArrowTypeError on mixed int/str).
+    # By position so every column with these names (including duplicates) is converted.
+    id_col_names = ("ASAS-SN ID", "asas_sn_id")
+    for i, name in enumerate(df.columns):
+        if name in id_col_names:
+            df.iloc[:, i] = df.iloc[:, i].astype(object).map(
+                lambda x: str(x) if pd.notna(x) else ""
+            )
+    if "_idx" in df.columns:
+        df = df.drop(columns=["_idx"])
+
     # Save output
     output_path = Path(args.output)
     if output_path.suffix == ".parquet":

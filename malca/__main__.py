@@ -31,6 +31,9 @@ Usage:
     malca ml_predict [options]     # Score candidates with a trained ML model
     malca ltv-core [options]       # Compute seasonal trends for LTV (long-term variability)
     malca ltv-pipeline [options]   # Run full LTV pipeline (filters + crossmatch + NEOWISE)
+    malca ltv-injection [options]  # Run LTV rejection-recovery injections
+    malca ltv-pca fit-apply [options]  # Fit LTV PCA and add ltv_pc1, ltv_pc2, ... to table
+    malca ltv-pca apply [options]      # Apply saved LTV PCA model to a table
     malca ltv-ingest [options]     # Ingest LTV pipeline results into a review DB
 """
 import argparse
@@ -60,7 +63,7 @@ def main():
         "stats", "attrition", "review", "review-refresh", "review-merge", "review-explore",
         "neighbors", "spectra", "false_positive", "ml_train", "ml_predict", "vsx-filter", "vsx-crossmatch",
         "vetting",
-        "ltv-core", "ltv-pipeline", "ltv-ingest",
+        "ltv-core", "ltv-pipeline", "ltv-injection", "ltv-pca", "ltv-ingest",
     ]:
         command = sys.argv[1]
         remaining = sys.argv[2:]
@@ -146,6 +149,10 @@ def main():
             ltv_pipeline.run_pipeline_cli(
                 ltv_pipeline.add_pipeline_args(argparse.ArgumentParser()).parse_args()
             )
+        elif command == "ltv-injection":
+            _run_module_main("malca.ltv.injection", remaining)
+        elif command == "ltv-pca":
+            _run_module_main("malca.ltv.pca", remaining)
         elif command == "ltv-ingest":
             _run_module_main("malca.ltv.review", remaining)
         return 0
@@ -190,6 +197,8 @@ def main():
     subparsers.add_parser("vetting", help="Run post-review vetting (SIMBAD, Gaia, ASAS-SN, ZTF, TNS, eROSITA, ...)")
     subparsers.add_parser("ltv-core", help="Compute seasonal trends for long-term variability detection")
     subparsers.add_parser("ltv-pipeline", help="Run full LTV pipeline (filters + crossmatch + NEOWISE + extinction)")
+    subparsers.add_parser("ltv-injection", help="Run LTV rejection-recovery injections and plots")
+    subparsers.add_parser("ltv-pca", help="Fit/apply LTV PCA (fit-apply | apply)")
     subparsers.add_parser("ltv-ingest", help="Ingest LTV pipeline results into a review DB")
 
     parser.print_help()

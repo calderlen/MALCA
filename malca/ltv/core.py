@@ -22,8 +22,6 @@ Notes:
 from __future__ import annotations
 
 import argparse
-import csv
-import multiprocessing as mp
 import os
 
 # Put this before importing malca.ltv.optim (which uses numba) to prevent 
@@ -31,7 +29,6 @@ import os
 os.environ.setdefault("NUMBA_NUM_THREADS", "1")
 
 import re
-import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,7 +38,6 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 from astropy.stats import mad_std
-from astropy.table import Table
 from astropy.timeseries import LombScargle
 import celerite2
 from celerite2 import terms
@@ -63,12 +59,11 @@ from malca.config.config_ltv import (
 from malca.config.config_paths import LCV2_ROOT, LTV_OUTPUT_DIR
 from malca.config.config_pipeline import MAG_BINS, SKYPATROL_JD_OFFSET
 from malca.config.config_io import PARQUET_OUTPUT_COMPRESSION
-from malca.utils import read_lc_dat2, clean_lc
+from malca.utils import clean_lc
+from malca.stats import inverse_von_neumann_ratio, reduced_chisq, roms_statistic
 
 from malca.ltv.optim import (
-    _detrend_fast,
     _season_medians_fast,
-    _polyfit_linear_fast,
 )
 
 
@@ -88,12 +83,21 @@ class Config:
     min_points_per_season: int
     min_seasons_for_quadratic: int
     write_per_dir: bool
+    # Band mode: "pipeline" = use V when available + GP stitch; "g_only" = g-band only, no V, no GP
+    band_mode: str
     # Parallel processing options
     workers: int
     chunk_size: int
-    output_format: str
     resume: bool
     overwrite: bool
+
+
+@dataclass(frozen=True)
+class SourceMeta:
+    asas_sn_id: int
+    ra_deg: float
+    dec_deg: float
+    pstarrs_g_mag: float
 
 
 def _build_config(a, mag_bin: str) -> Config:
@@ -117,9 +121,9 @@ def _build_config(a, mag_bin: str) -> Config:
         min_points_per_season=int(a.min_points_per_season),
         min_seasons_for_quadratic=int(a.min_seasons_for_quadratic),
         write_per_dir=bool(a.write_per_dir),
+        band_mode=str(a.band_mode),
         workers=int(a.workers),
         chunk_size=int(a.chunk_size),
-        output_format=str(a.output_format),
         resume=resume,
         overwrite=bool(a.overwrite),
     )
@@ -144,7 +148,7 @@ def parse_args() -> tuple[list[Config], bool]:
     p.add_argument("--output",
                    default=None,
                    type=str,
-                   help="Combined output Parquet/CSV (default: LTvar<MAG>.parquet)")
+                   help="Chunked parquet dataset directory (default: LTvar<MAG>.parquet)")
     p.add_argument("--dspring",
                    type=float,
                    default=LTV_DSPRING)
@@ -169,6 +173,12 @@ def parse_args() -> tuple[list[Config], bool]:
                    action="store_true",
                    help="Write per-directory CSVs to <MAG_BIN>/new/<x>.csv.",
     )
+    p.add_argument("--band-mode",
+                   type=str,
+                   default="pipeline",
+                   choices=["pipeline", "g_only"],
+                   help="pipeline: use V-band when available and GP stitch; g_only: g-band only, no V-band, no GP correction.",
+    )
     p.add_argument("--workers",
                    type=int,
                    default=LTV_WORKERS,
@@ -177,11 +187,6 @@ def parse_args() -> tuple[list[Config], bool]:
                    type=int,
                    default=LTV_CORE_CHUNK_SIZE,
                    help="Number of results to accumulate before writing (default: 10000)")
-    p.add_argument("--output-format",
-                   type=str,
-                   default="parquet",
-                   choices=["csv", "parquet", "parquet_chunk"],
-                   help="Output format (default: parquet)")
     p.add_argument("--resume",
                    action="store_true",
                    help="Enable checkpointing to resume interrupted runs")
@@ -203,8 +208,58 @@ def parse_args() -> tuple[list[Config], bool]:
     return configs, run_all
 
 
-def read_index_csv(path: Path) -> pd.DataFrame:
-    return pd.read_csv(path, low_memory=False)
+def read_index_map(path: Path) -> dict[int, SourceMeta]:
+    header = pd.read_csv(path, nrows=0)
+    usecols = [c for c in ("asas_sn_id", "ra_deg", "dec_deg", "pstarrs_g_mag") if c in header.columns]
+    if "asas_sn_id" not in usecols or "ra_deg" not in usecols or "pstarrs_g_mag" not in usecols:
+        raise ValueError(f"Index file missing required columns: {path}")
+
+    df = pd.read_csv(path, usecols=usecols, low_memory=False)
+    if "dec_deg" not in df.columns:
+        df["dec_deg"] = np.nan
+
+    meta_by_id: dict[int, SourceMeta] = {}
+    for row in df.itertuples(index=False):
+        target = int(row.asas_sn_id)
+        meta_by_id[target] = SourceMeta(
+            asas_sn_id=target,
+            ra_deg=float(row.ra_deg),
+            dec_deg=float(row.dec_deg),
+            pstarrs_g_mag=float(row.pstarrs_g_mag),
+        )
+    return meta_by_id
+
+
+def read_lc_dat2_fast(asassn_id: str, path: str, *, include_v: bool) -> tuple[pd.DataFrame, pd.DataFrame]:
+    dat2_path = os.path.join(path, f"{asassn_id}.dat2")
+    if not os.path.exists(dat2_path):
+        raise FileNotFoundError(f"Light curve file not found: {dat2_path}")
+
+    columns = ["JD", "mag", "error", "v_g_band", "saturated"]
+    df = pd.read_csv(
+        dat2_path,
+        header=None,
+        names=["JD", "mag", "error", "good_bad", "camera#", "v_g_band", "saturated", "cam_field"],
+        usecols=columns,
+        sep=r"\s+",
+        dtype={
+            "JD": "float64",
+            "mag": "float64",
+            "error": "float64",
+            "v_g_band": "int8",
+            "saturated": "int8",
+        },
+    )
+    df["JD"] = df["JD"] + SKYPATROL_JD_OFFSET
+
+    g_mask = df["v_g_band"] == 0
+    df_g = df.loc[g_mask, ["JD", "mag", "error", "saturated"]].reset_index(drop=True)
+
+    if not include_v:
+        return df_g, pd.DataFrame(columns=df_g.columns)
+
+    df_v = df.loc[~g_mask, ["JD", "mag", "error", "saturated"]].reset_index(drop=True)
+    return df_g, df_v
 
 
 def filter_lc_for_ltv(df_g: pd.DataFrame, target_id: int) -> pd.DataFrame:
@@ -765,30 +820,20 @@ def compute_lomb_scargle(
 
 def process_one_lc(
     path: str,
-    id_df: pd.DataFrame,
+    meta: SourceMeta,
     cfg: Config,
 ) -> dict | None:
     basename = os.path.basename(path)
     asassn_id = basename.replace('.dat2', '')
-    target = int(asassn_id)
-
-    rows = id_df.loc[id_df["asas_sn_id"] == target]
-    if rows.empty:
-        return None
-    row = rows.iloc[0]
-
-    ra_val = float(row["ra_deg"])
-    p_mag = float(row["pstarrs_g_mag"])
+    target = meta.asas_sn_id
+    ra_val = meta.ra_deg
+    p_mag = meta.pstarrs_g_mag
 
     dir_path = os.path.dirname(path)
-    df_g, df_v = read_lc_dat2(asassn_id, dir_path)
+    df_g, df_v = read_lc_dat2_fast(asassn_id, dir_path, include_v=(cfg.band_mode != "g_only"))
 
     if df_g.empty:
         return None
-    
-    df_g["JD"] += SKYPATROL_JD_OFFSET
-    if not df_v.empty:
-        df_v["JD"] += SKYPATROL_JD_OFFSET
 
     df = filter_lc_for_ltv(df_g, target)
 
@@ -809,9 +854,13 @@ def process_one_lc(
 
     JD = df["JD"].to_numpy(dtype=float)
     mag = df["mag"].to_numpy(dtype=float)
+    err = df["error"].to_numpy(dtype=float) if "error" in df.columns else np.full(mag.shape[0], np.nan)
     lc_median = float(np.median(mag))
     lc_mad = float(mad_std(mag))
     lc_dispersion = float(np.ptp(mag))
+    vnr = float(inverse_von_neumann_ratio(mag))
+    rchisq = float(reduced_chisq(mag, err, lc_median))
+    roms = float(roms_statistic(mag, err))
     basic_stats = compute_basic_lc_stats(JD)
 
     mid_all = seasonal_midpoints_from_ra(
@@ -864,11 +913,11 @@ def process_one_lc(
     avg_season_span_days = float(np.mean(season_spans)) if season_spans.size > 0 else None
 
     # Compute Lomb-Scargle on detrended light curve (paper: periods > 10 days)
-    err = df["error"].to_numpy(dtype=float) if "error" in df.columns else None
+    err_ls = err if np.any(np.isfinite(err) & (err > 0)) else None
     detrend_mode = "quadratic" if quad_coeff is not None else "linear"
     max_period_days = avg_season_span_days if avg_season_span_days is not None else LTV_LS_MAX_PERIOD_DAYS
     ls_result = compute_lomb_scargle(
-        JD, mag, err,
+        JD, mag, err_ls,
         lin_coeff=lin_coeff,
         quad_coeff=quad_coeff,
         detrend_mode=detrend_mode,
@@ -881,7 +930,7 @@ def process_one_lc(
     return {
         "ASAS-SN ID": target,
         "ra_deg": ra_val,
-        "dec_deg": float(row["dec_deg"]) if "dec_deg" in row.index else np.nan,
+        "dec_deg": meta.dec_deg,
         "Pstarss gmag": p_mag,
         **basic_stats,
         "Median": lc_median,
@@ -901,68 +950,13 @@ def process_one_lc(
         "ls_period": ls_result["ls_period"],
         "ls_power": ls_result["ls_power"],
         "ls_fap": ls_result["ls_fap"],
+        "inverse_von_neumann_ratio": vnr,
+        "reduced_chi2_vs_constant": rchisq,
+        "roms": roms,
         "lc_path": path,
     }
 
-
-def write_csv_rows(path: Path, rows: list[dict]) -> None:
-    if not rows:
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = list(rows[0].keys())
-    with path.open("w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=fieldnames)
-        w.writeheader()
-        w.writerows(rows)
-
-
-class CsvWriter:
-    def __init__(self, path: Path):
-        self.path = Path(path)
-        self.columns = None
-        if self.path.exists() and self.path.stat().st_size > 0:
-            try:
-                self.columns = pd.read_csv(self.path, nrows=0).columns.tolist()
-            except Exception:
-                self.columns = None
-
-    def write_chunk(self, chunk_results):
-        if not chunk_results:
-            return
-        df_chunk = pd.DataFrame(chunk_results)
-        if self.columns is None:
-            self.columns = list(df_chunk.columns)
-        df_chunk = df_chunk.reindex(columns=self.columns)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        header = not self.path.exists() or self.path.stat().st_size == 0
-        df_chunk.to_csv(self.path, mode="a", header=header, index=False)
-
-    def close(self):
-        return
-
-
-class ParquetChunkWriter:
-    def __init__(self, path: Path):
-        self.path = Path(path)
-        self.append = self.path.exists() and self.path.stat().st_size > 0
-
-    def write_chunk(self, chunk_results):
-        if not chunk_results:
-            return
-        df_chunk = pd.DataFrame(chunk_results)
-        table = pa.Table.from_pandas(df_chunk, preserve_index=False)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        if self.append:
-            existing = pq.read_table(self.path)
-            table = pa.concat_tables([existing, table])
-        pq.write_table(table, self.path, compression=PARQUET_OUTPUT_COMPRESSION)
-        self.append = True
-
-    def close(self):
-        return
-
-
-class ParquetDatasetWriter:
+class ChunkedParquetWriter:
     def __init__(self, path: Path):
         self.path = Path(path)
         self.path.mkdir(parents=True, exist_ok=True)
@@ -991,17 +985,10 @@ class ParquetDatasetWriter:
         return
 
 
-def make_writer(path: Path | None, fmt: str):
+def make_writer(path: Path | None):
     if path is None:
         return None
-    if fmt == "csv":
-        return CsvWriter(path)
-    elif fmt == "parquet":
-        return ParquetChunkWriter(path)
-    elif fmt == "parquet_chunk":
-        return ParquetDatasetWriter(path)
-    else:
-        raise ValueError(f"Unknown output format: {fmt}")
+    return ChunkedParquetWriter(path)
 
 
 def run_mag_bin(cfg: Config) -> None:
@@ -1011,7 +998,7 @@ def run_mag_bin(cfg: Config) -> None:
     lc_dirs = [d for d in lc_dirs if d.is_dir() and IDX_PATTERN.search(d.name)]
 
     print(f"Processing mag_bin={cfg.mag_bin}: found {len(lc_dirs)} lc_cal directories")
-    print(f"Workers: {cfg.workers}, Chunk size: {cfg.chunk_size}, Format: {cfg.output_format}")
+    print(f"Workers: {cfg.workers}, Chunk size: {cfg.chunk_size}, Output: chunked parquet dataset")
 
     output_path = Path(cfg.output)
     checkpoint_log = output_path.with_name(f"{output_path.stem}_PROCESSED.txt") if cfg.resume else None
@@ -1032,7 +1019,7 @@ def run_mag_bin(cfg: Config) -> None:
         print(f"Found {len(processed_files)} previously processed files")
 
     all_files = []
-    id_map = {}
+    id_map: dict[str, dict[int, SourceMeta]] = {}
 
     for lc_dir in lc_dirs:
         match = IDX_PATTERN.search(lc_dir.name)
@@ -1045,14 +1032,23 @@ def run_mag_bin(cfg: Config) -> None:
             print(f"Skipping lc{x}_cal: missing index{x}.csv")
             continue
 
-        id_df = read_index_csv(index_path)
-        id_map[str(lc_dir)] = id_df
+        meta_by_id = read_index_map(index_path)
+        id_map[str(lc_dir)] = meta_by_id
 
         csv_files = sorted(lc_dir.glob("*.dat2"))
 
         for file_path in csv_files:
-            if str(file_path) not in processed_files:
-                all_files.append((str(file_path), str(lc_dir)))
+            file_path_str = str(file_path)
+            if file_path_str in processed_files:
+                continue
+            try:
+                target = int(file_path.stem)
+            except ValueError:
+                continue
+            meta = meta_by_id.get(target)
+            if meta is None:
+                continue
+            all_files.append((file_path_str, meta))
 
     if not all_files:
         print("No files to process (all may be completed)")
@@ -1060,7 +1056,7 @@ def run_mag_bin(cfg: Config) -> None:
 
     print(f"Processing {len(all_files)} light curve files")
 
-    writer = make_writer(output_path, cfg.output_format)
+    writer = make_writer(output_path)
     if writer is None:
         raise ValueError(f"Could not create writer for output path: {output_path}")
     results = []
@@ -1083,9 +1079,8 @@ def run_mag_bin(cfg: Config) -> None:
 
     with ProcessPoolExecutor(max_workers=cfg.workers) as executor:
         futures = {}
-        for file_path, lc_dir in all_files:
-            id_df = id_map[lc_dir]
-            future = executor.submit(process_one_lc, file_path, id_df, cfg)
+        for file_path, meta in all_files:
+            future = executor.submit(process_one_lc, file_path, meta, cfg)
             futures[future] = file_path
 
         for future in tqdm(as_completed(futures), total=len(futures), desc="Processing LCs", unit="lc"):

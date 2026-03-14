@@ -19,11 +19,14 @@ For ~36K filtered candidates, parallel queries complete in ~1-2 hours.
 from __future__ import annotations
 
 import time
+import io
+import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from astropy.table import Table
 from tqdm.auto import tqdm
 from astroquery.ipac.irsa import Irsa
 
@@ -46,9 +49,111 @@ MIN_SNR = NEOWISE_MIN_SNR
 RATE_LIMIT_SECONDS = NEOWISE_RATE_LIMIT_SECONDS
 
 
+
 # =============================================================================
-# IRSA TAP QUERY (single source)
+# IRSA TAP QUERY (bulk)
 # =============================================================================
+
+def query_neowise_lc_bulk(
+    df: pd.DataFrame,
+    ra_col: str,
+    dec_col: str,
+    id_col: str,
+    *,
+    match_radius_arcsec: float = NEOWISE_MATCH_RADIUS_ARCSEC,
+    verbose: bool = False,
+) -> pd.DataFrame:
+    """
+    Query IRSA TAP for NEOWISE single-exposure photometry using bulk table upload.
+    
+    Uploads a table of coordinates and performs a spatial join on the server.
+    Returns DataFrame with columns: mjd, w1mpro, w1sigmpro, w2mpro, w2sigmpro, and the input id_col.
+    """
+    if df.empty:
+        return pd.DataFrame()
+
+    # Create astropy table for upload
+    t = Table(
+        [df[id_col].values, df[ra_col].values, df[dec_col].values], 
+        names=('target_id', 'ra', 'dec'), 
+        dtype=(int, float, float)
+    )
+    
+    # Write to memory buffer in IPAC format
+    f_str = io.StringIO()
+    t.write(f_str, format='ipac')
+    f_bytes = io.BytesIO(f_str.getvalue().encode('utf-8'))
+    
+    query = f"""
+    SELECT 
+        db.mjd AS mjd, db.w1mpro AS w1mpro, db.w1sigmpro AS w1sigmpro, db.w1snr AS w1snr, 
+        db.w2mpro AS w2mpro, db.w2sigmpro AS w2sigmpro, db.w2snr AS w2snr, 
+        db.qual_frame AS qual_frame, db.cc_flags AS cc_flags, 
+        my_table.target_id AS target_id
+    FROM neowiser_p1bs_psd AS db, TAP_UPLOAD.my_table AS my_table
+    WHERE CONTAINS(POINT(db.ra, db.dec), CIRCLE(my_table.ra, my_table.dec, {match_radius_arcsec / 3600.0})) = 1
+    """
+
+    files = {'table.tbl': f_bytes}
+    data = {
+        'UPLOAD': 'my_table,param:table.tbl',
+        'FORMAT': 'VOTABLE',
+        'QUERY': query
+    }
+
+    try:
+        if verbose:
+            print(f"  Sending TAP query for {len(df)} targets...")
+        
+        response = requests.post('https://irsa.ipac.caltech.edu/TAP/sync', files=files, data=data, timeout=600)
+        
+        if response.status_code == 200:
+            if b"ERROR" in response.content:
+                 if verbose:
+                     print(f"NEOWISE query error: {response.content.decode('utf-8')[:200]}")
+                 return pd.DataFrame()
+            else:
+                 try:
+                     result_table = Table.read(io.BytesIO(response.content), format='votable')
+                     res_df = result_table.to_pandas()
+                     if len(res_df.columns) == 10:
+                         res_df.columns = [
+                             'mjd', 'w1mpro', 'w1sigmpro', 'w1snr',
+                             'w2mpro', 'w2sigmpro', 'w2snr',
+                             'qual_frame', 'cc_flags', 'target_id'
+                         ]
+                     
+                     # Filter bad data (same logic as before)
+                     if "qual_frame" in res_df.columns:
+                         res_df = res_df[res_df["qual_frame"].isin([0, 1])]
+                     if "cc_flags" in res_df.columns:
+                         # Need to handle bytes in astropy votable pandas conversion
+                         if len(res_df) > 0 and res_df["cc_flags"].dtype == object and isinstance(res_df["cc_flags"].iloc[0], bytes):
+                             res_df["cc_flags"] = res_df["cc_flags"].str.decode("utf-8")
+                         res_df = res_df[~res_df["cc_flags"].str.contains("[^0]", regex=True, na=False)]
+                     if "w1snr" in res_df.columns:
+                         res_df = res_df[res_df["w1snr"] >= MIN_SNR]
+                     if "w2snr" in res_df.columns:
+                         res_df = res_df[res_df["w2snr"] >= MIN_SNR]
+                         
+                     # Rename target_id back to original id_col
+                     res_df = res_df.rename(columns={"target_id": id_col})
+                     return res_df.reset_index(drop=True)
+                     
+                 except Exception as e:
+                     if verbose:
+                         print(f"NEOWISE table parse error: {e}")
+                     return pd.DataFrame()
+        else:
+            if verbose:
+                print(f"NEOWISE query HTTP {response.status_code}: {response.content.decode('utf-8')[:200]}")
+            return pd.DataFrame()
+            
+    except Exception as e:
+        if verbose:
+            print(f"NEOWISE request error: {e}")
+        return pd.DataFrame()
+
 
 def query_neowise_lc(
     ra: float,
@@ -59,51 +164,13 @@ def query_neowise_lc(
 ) -> pd.DataFrame:
     """
     Query IRSA TAP for NEOWISE single-exposure photometry.
-    
-    Uses the neowiser_p1bs_psd table (NEOWISE Reactivation Single Exposure Source Table).
-    
     Returns DataFrame with columns: mjd, w1mpro, w1sigmpro, w2mpro, w2sigmpro
     """
-    try:
-        query = f"""
-        SELECT 
-            mjd,
-            w1mpro, w1sigmpro, w1snr,
-            w2mpro, w2sigmpro, w2snr,
-            qual_frame,
-            cc_flags
-        FROM neowiser_p1bs_psd
-        WHERE CONTAINS(
-            POINT('ICRS', ra, dec),
-            CIRCLE('ICRS', {ra:.6f}, {dec:.6f}, {match_radius_arcsec / 3600.0})
-        ) = 1
-        ORDER BY mjd ASC
-        """
-
-        result = Irsa.query_tap(query)
-
-        if result is None or len(result) == 0:
-            return pd.DataFrame()
-
-        df = result.to_pandas()
-
-        if "qual_frame" in df.columns:
-            df = df[df["qual_frame"].isin([0, 1])]
-
-        if "cc_flags" in df.columns:
-            df = df[~df["cc_flags"].str.contains("[^0]", regex=True, na=False)]
-
-        if "w1snr" in df.columns:
-            df = df[df["w1snr"] >= MIN_SNR]
-        if "w2snr" in df.columns:
-            df = df[df["w2snr"] >= MIN_SNR]
-
-        return df.reset_index(drop=True)
-
-    except Exception as e:
-        if verbose:
-            print(f"NEOWISE query error for ({ra}, {dec}): {e}")
-        return pd.DataFrame()
+    df = pd.DataFrame({"ra": [ra], "dec": [dec], "id": [0]})
+    res = query_neowise_lc_bulk(df, "ra", "dec", "id", match_radius_arcsec=match_radius_arcsec, verbose=verbose)
+    if not res.empty and "id" in res.columns:
+        res = res.drop(columns=["id"])
+    return res
 
 
 # =============================================================================
@@ -269,13 +336,13 @@ def extract_neowise_trends(
     dec_column: str = "dec_deg",
     match_radius_arcsec: float = NEOWISE_MATCH_RADIUS_ARCSEC,
     epoch_days: float = EPOCH_COMBINE_DAYS,
-    n_workers: int = LTV_WORKERS,
+    n_workers: int = 1,  # Kept for compatibility but not used in bulk mode
     verbose: bool = False,
 ) -> pd.DataFrame:
     """
     Extract NEOWISE light curves and fit trends for all sources.
     
-    Uses parallel processing for efficiency.
+    Uses bulk table upload queries for efficiency.
     
     Adds columns:
     - w1_slope: Linear slope of W1 (mag/yr)
@@ -306,45 +373,41 @@ def extract_neowise_trends(
     
     if not valid_mask.any():
         return df
+        
+    df_valid = df[valid_mask].copy()
+    df_valid["_temp_id"] = df_valid.index.values
     
-    # Prepare tasks
-    tasks = [
-        (df.loc[idx, ra_column], df.loc[idx, dec_column], idx)
-        for idx in df.index[valid_mask]
-    ]
+    chunk_size = 500
+    chunks = [df_valid.iloc[i:i + chunk_size] for i in range(0, len(df_valid), chunk_size)]
     
     if verbose:
-        print(f"[extract_neowise_trends] Querying {len(tasks)} sources...")
-        print(f"  Workers: {n_workers}, Rate limit: {RATE_LIMIT_SECONDS}s/request")
-        estimated_time = len(tasks) * RATE_LIMIT_SECONDS / n_workers
-        print(f"  Estimated time: {estimated_time/60:.1f} minutes")
-    
-    # Process in parallel
-    results = []
-    with ThreadPoolExecutor(max_workers=n_workers) as executor:
-        futures = {
-            executor.submit(
-                _extract_one_source,
-                ra, dec, idx,
-                match_radius_arcsec=match_radius_arcsec,
-                epoch_days=epoch_days,
-            ): idx
-            for ra, dec, idx in tasks
-        }
+        print(f"[extract_neowise_trends] Querying {len(df_valid)} sources in {len(chunks)} bulk chunks of {chunk_size}...")
         
-        for future in tqdm(as_completed(futures), total=len(futures), desc="NEOWISE", disable=not verbose):
-            result = future.result()
-            if result is not None:
-                results.append(result)
-    
-    # Merge results back
-    for r in results:
-        idx = r["_idx"]
-        if idx in df.index:
+    for i, chunk in enumerate(tqdm(chunks, desc="NEOWISE Bulk", disable=not verbose)):
+        if verbose:
+            print(f"Processing chunk {i+1}/{len(chunks)}...")
+            
+        # Bulk query
+        raw_lcs = query_neowise_lc_bulk(
+            chunk, ra_column, dec_column, "_temp_id",
+            match_radius_arcsec=match_radius_arcsec,
+            verbose=verbose
+        )
+        
+        if raw_lcs.empty:
+            continue
+            
+        # Group by target and process
+        for target_id, lc_raw in raw_lcs.groupby("_temp_id"):
+            lc = combine_epochs(lc_raw, epoch_days=epoch_days)
+            if lc.empty:
+                continue
+                
+            trends = fit_neowise_trends(lc)
             for col in new_cols:
-                if col in r:
-                    df.loc[idx, col] = r[col]
-    
+                if col in trends:
+                    df.loc[target_id, col] = trends[col]
+                    
     if verbose:
         n_with_data = (df["neowise_n_epochs"] > 0).sum()
         print(f"[extract_neowise_trends] {n_with_data}/{len(df)} sources have NEOWISE data")

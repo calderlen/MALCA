@@ -24,6 +24,10 @@ from astropy import units as u
 from astropy.coordinates import SkyCoord, match_coordinates_sky
 import numpy as np
 import pandas as pd
+import pyvo
+from astroquery.simbad import Simbad
+from astroquery.xmatch import XMatch
+from astropy.table import Table
 
 from malca.config.config_ltv import (
     LTV_MATCH_RADIUS_ARCSEC,
@@ -148,6 +152,14 @@ def merge_local_catalog(
     n_before = len(df)
     df = df.merge(catalog_subset, on=id_column, how="left", suffixes=("", "_local"))
     
+    for col in catalog_subset.columns:
+        if col == id_column:
+            continue
+        local_col = f"{col}_local"
+        if local_col in df.columns:
+            df[col] = df[col].fillna(df[local_col])
+            df = df.drop(columns=[local_col])
+    
     if verbose:
         n_matched = df["gaia_source_id"].notna().sum() if "gaia_source_id" in df.columns else 0
         print(f"[merge_local_catalog] Matched {n_matched}/{n_before} from local catalog")
@@ -188,18 +200,23 @@ def crossmatch_from_local(
     
     df = df.copy()
     for col in GAIA_COLUMN_MAP.values():
-        if col in catalog.columns:
+        if col in catalog.columns and col not in df.columns:
             df[col] = np.nan
     for col in VSX_COLUMN_MAP.values():
-        if col in catalog.columns:
+        if col in catalog.columns and col not in df.columns:
             df[col] = None if col in ["vsx_name", "vsx_type", "vsx_spectral_type"] else np.nan
-    df["local_catalog_sep_arcsec"] = np.nan
+    
+    if "local_catalog_sep_arcsec" not in df.columns:
+        df["local_catalog_sep_arcsec"] = np.nan
     
     for i, (cat_idx, is_matched) in enumerate(zip(idx, matched)):
         if is_matched:
             for col in list(GAIA_COLUMN_MAP.values()) + list(VSX_COLUMN_MAP.values()):
                 if col in catalog.columns:
-                    df.iloc[i, df.columns.get_loc(col)] = catalog.iloc[cat_idx][col]
+                    # Only overwrite if current value is null/nan to avoid destroying API data
+                    current_val = df.iloc[i, df.columns.get_loc(col)]
+                    if pd.isna(current_val):
+                        df.iloc[i, df.columns.get_loc(col)] = catalog.iloc[cat_idx][col]
             df.iloc[i, df.columns.get_loc("local_catalog_sep_arcsec")] = sep[i].arcsec
     
     if verbose:
@@ -251,6 +268,48 @@ def _batch_tap_crossmatch(
         verbose=verbose,
         desc=desc,
     )
+
+
+def _batch_xmatch(
+    coords_df: pd.DataFrame,
+    *,
+    cat2: str,
+    match_radius_arcsec: float = LTV_MATCH_RADIUS_ARCSEC,
+    verbose: bool = False,
+    desc: str = "XMatch",
+) -> pd.DataFrame:
+    """
+    Highly optimized batch crossmatch via CDS XMatch (supports VizieR and SIMBAD).
+    Replaces slow TAP batches while preventing query hangs.
+    """
+    if coords_df.empty:
+        return pd.DataFrame()
+
+    table1 = Table.from_pandas(coords_df[["_idx", "ra", "dec"]])
+    
+    if verbose:
+        print(f"  {desc} running via CDS XMatch for {len(coords_df)} sources...")
+
+    try:
+        result_table = XMatch.query(
+            cat1=table1,
+            cat2=cat2,
+            max_distance=match_radius_arcsec * u.arcsec,
+            colRA1="ra",
+            colDec1="dec",
+            timeout=300,
+        )
+        if result_table is None or len(result_table) == 0:
+            return pd.DataFrame()
+            
+        df_res = result_table.to_pandas()
+        if "angDist" in df_res.columns:
+            df_res["sep_arcsec"] = df_res["angDist"]
+        return df_res
+    except Exception as e:
+        if verbose:
+            print(f"  {desc} failed: {e}")
+        return pd.DataFrame()
 
 
 def crossmatch_tap_catalog(
@@ -363,20 +422,14 @@ def crossmatch_milliquas(
     })
 
     if verbose:
-        print(f"[crossmatch_milliquas] Querying {len(df)} sources via TAP...")
+        print(f"[crossmatch_milliquas] Querying {len(df)} sources via XMatch...")
 
-    result = _batch_tap_crossmatch(
+    result = _batch_xmatch(
         coords_df,
-        tap_service=VIZIER_TAP_URL,
-        catalog_table='"VII/294/milliqua"',
-        select_cols='c."Name", c."Type", c.z',
-        ra_col="RAJ2000",
-        dec_col="DEJ2000",
+        cat2="vizier:VII/294/catalog",
         match_radius_arcsec=match_radius_arcsec,
-        chunk_size=chunk_size,
-        n_workers=n_workers,
         verbose=verbose,
-        desc="MILLIQUAS TAP",
+        desc="MILLIQUAS XMatch",
     )
 
     if not result.empty:
@@ -432,20 +485,14 @@ def crossmatch_gaia_alerts(
     })
 
     if verbose:
-        print(f"[crossmatch_gaia_alerts] Querying {len(df)} sources via TAP...")
+        print(f"[crossmatch_gaia_alerts] Querying {len(df)} sources via XMatch...")
 
-    result = _batch_tap_crossmatch(
+    result = _batch_xmatch(
         coords_df,
-        tap_service=VIZIER_TAP_URL,
-        catalog_table='"I/358/vari"',
-        select_cols='c."Name", c."Class"',
-        ra_col="RA_ICRS",
-        dec_col="DE_ICRS",
+        cat2="vizier:I/358/vclassre",
         match_radius_arcsec=match_radius_arcsec,
-        chunk_size=chunk_size,
-        n_workers=n_workers,
         verbose=verbose,
-        desc="Gaia Alerts TAP",
+        desc="Gaia Alerts XMatch",
     )
 
     if not result.empty:
@@ -453,7 +500,8 @@ def crossmatch_gaia_alerts(
         for _, row in result.iterrows():
             idx = int(row["_idx"])
             if idx in df.index:
-                df.loc[idx, "gaia_alert_name"] = row.get("Name")
+                # In I/358/vclassre the target key is Source
+                df.loc[idx, "gaia_alert_name"] = str(row.get("Source"))
                 df.loc[idx, "gaia_alert_class"] = row.get("Class")
                 df.loc[idx, "gaia_alert_sep_arcsec"] = row["sep_arcsec"]
 
@@ -501,20 +549,14 @@ def query_simbad_classification(
     })
 
     if verbose:
-        print(f"[query_simbad_classification] Querying {len(df)} sources via TAP...")
+        print(f"[query_simbad_classification] Querying {len(df)} sources via XMatch...")
 
-    result = _batch_tap_crossmatch(
+    result = _batch_xmatch(
         coords_df,
-        tap_service=SIMBAD_TAP_URL,
-        catalog_table="basic",
-        select_cols="c.main_id, c.otype, c.sp_type",
-        ra_col="ra",
-        dec_col="dec",
+        cat2="simbad",
         match_radius_arcsec=match_radius_arcsec,
-        chunk_size=chunk_size,
-        n_workers=n_workers,
         verbose=verbose,
-        desc="SIMBAD TAP",
+        desc="SIMBAD XMatch",
     )
 
     if not result.empty:
@@ -535,6 +577,205 @@ def query_simbad_classification(
 
 
 # =============================================================================
+# 2MASS & SYDNEY LTV CROSSMATCH
+# =============================================================================
+
+
+def _sydney_2mass_to_ra_dec(clean_2mass: str) -> tuple[float | None, float | None]:
+    """
+    Parse a cleaned Sydney-style 2MASS ID (e.g. 06400303+1800009) to (ra_deg, dec_deg).
+    Format JHHMMSSs±DDMMSSs: RA 8 chars (hh mm ss.ss), Dec sign + 7 chars (dd mm ss.s).
+    Returns (None, None) if unparseable (e.g. \\ldots, RW Aur, ASASSN-V J...).
+    """
+    s = (clean_2mass or "").strip()
+    if len(s) < 15 or s[8] not in ("+", "-"):
+        return None, None
+    try:
+        ra_str = s[:8]
+        dec_str = s[8:]
+        ra_h = int(ra_str[0:2]) + int(ra_str[2:4]) / 60.0 + (int(ra_str[4:6]) + int(ra_str[6:8]) / 100.0) / 3600.0
+        ra_deg = 15.0 * ra_h
+        sign = 1 if dec_str[0] == "+" else -1
+        dec_d = int(dec_str[1:3]) + int(dec_str[3:5]) / 60.0 + (int(dec_str[5:7]) + int(dec_str[7:8]) / 10.0) / 3600.0
+        dec_deg = sign * dec_d
+        return ra_deg, dec_deg
+    except (ValueError, IndexError):
+        return None, None
+
+
+def crossmatch_2mass(
+    df: pd.DataFrame,
+    *,
+    ra_column: str = "ra_deg",
+    dec_column: str = "dec_deg",
+    match_radius_arcsec: float = LTV_MATCH_RADIUS_ARCSEC,
+    chunk_size: int = LTV_CROSSMATCH_CHUNK_SIZE,
+    n_workers: int = LTV_WORKERS,
+    verbose: bool = False,
+) -> pd.DataFrame:
+    """
+    Crossmatch to 2MASS Point Source Catalog via batch VizieR TAP upload.
+
+    Adds columns: 2MASS_ID, 2MASS_sep_arcsec
+    """
+    if ra_column not in df.columns or dec_column not in df.columns:
+        if verbose:
+            print("Warning: RA/Dec columns not found for 2MASS crossmatch")
+        return df
+
+    df = df.copy()
+    df["2MASS_ID"] = None
+    df["2MASS_sep_arcsec"] = np.nan
+
+    coords_df = pd.DataFrame({
+        "_idx": df.index,
+        "ra": df[ra_column].values,
+        "dec": df[dec_column].values,
+    })
+
+    if verbose:
+        print(f"[crossmatch_2mass] Querying {len(df)} sources via XMatch...")
+
+    result = _batch_xmatch(
+        coords_df,
+        cat2="vizier:II/246/out",
+        match_radius_arcsec=match_radius_arcsec,
+        verbose=verbose,
+        desc="2MASS XMatch",
+    )
+
+    if not result.empty:
+        result = result.sort_values("sep_arcsec").drop_duplicates(subset="_idx", keep="first")
+        for _, row in result.iterrows():
+            idx = int(row["_idx"])
+            if idx in df.index:
+                df.loc[idx, "2MASS_ID"] = row.get("2MASS")
+                df.loc[idx, "2MASS_sep_arcsec"] = row["sep_arcsec"]
+
+    if verbose:
+        n_matched = df["2MASS_ID"].notna().sum()
+        print(f"[crossmatch_2mass] Matched {n_matched}/{len(df)}")
+
+    return df
+
+
+def crossmatch_sydney_ltv(
+    df: pd.DataFrame,
+    sydney_csv_path: str | Path,
+    *,
+    sydney_coord_fallback_arcsec: float = 3.0,
+    verbose: bool = False,
+) -> pd.DataFrame:
+    """
+    Merge with SydneyLTVs.csv using the 2MASS_ID column, then fill remaining
+    matches by coordinate fallback for sources without a 2MASS_ID (or whose
+    2MASS_ID did not match the Sydney list).
+
+    Must be run AFTER crossmatch_2mass.
+    Prefixes all added columns with 'sydney_'.
+    """
+    if "2MASS_ID" not in df.columns:
+        if verbose:
+            print("Warning: '2MASS_ID' column not found. Run crossmatch_2mass first.")
+        return df
+
+    sydney_csv_path = Path(sydney_csv_path)
+    if not sydney_csv_path.exists():
+        if verbose:
+            print(f"Warning: SydneyLTVs.csv not found at {sydney_csv_path}")
+        return df
+
+    if verbose:
+        print(f"[crossmatch_sydney_ltv] Merging with {sydney_csv_path.name}...")
+
+    sydney_df = pd.read_csv(sydney_csv_path)
+
+    # Prefix columns to avoid collision, except the join key 2MASS
+    rename_map = {col: f"sydney_{col}" for col in sydney_df.columns if col != "2MASS"}
+    sydney_df = sydney_df.rename(columns=rename_map)
+
+    # Strip off the "2MJ", "$+$", "$-$", etc from the Sydney file so it matches vizier pure coordinate strings
+    sydney_df["2MASS_clean"] = sydney_df["2MASS"].astype(str).str.replace(r'2MJ', '', regex=False)
+    sydney_df["2MASS_clean"] = sydney_df["2MASS_clean"].str.replace(r'\$\+\$', '+', regex=True)
+    sydney_df["2MASS_clean"] = sydney_df["2MASS_clean"].str.replace(r'\$-\$', '-', regex=True)
+    sydney_df["2MASS_clean"] = sydney_df["2MASS_clean"].str.strip()
+
+    # Build Sydney coordinate catalog (parseable 2MASS IDs -> ra_deg, dec_deg) for fallback
+    ra_dec = [_sydney_2mass_to_ra_dec(s) for s in sydney_df["2MASS_clean"]]
+    sydney_df["_ra_deg"] = [r[0] for r in ra_dec]
+    sydney_df["_dec_deg"] = [r[1] for r in ra_dec]
+    sydney_coord_mask = sydney_df["_ra_deg"].notna()
+    sydney_coord_catalog = sydney_df.loc[sydney_coord_mask].copy()
+    sydney_coord_catalog = sydney_coord_catalog.drop(columns=["2MASS_clean"], errors="ignore")
+
+    # Strip whitespace from 2MASS_ID for safe joining, handling NaNs
+    df = df.copy()
+    merge_mask = df["2MASS_ID"].notna()
+    df.loc[merge_mask, "2MASS_ID_clean"] = df.loc[merge_mask, "2MASS_ID"].astype(str).str.strip()
+
+    # Merge on 2MASS ID
+    n_before = len(df)
+    df = df.merge(
+        sydney_df,
+        left_on="2MASS_ID_clean",
+        right_on="2MASS_clean",
+        how="left"
+    )
+
+    # Clean up merge keys
+    df = df.drop(columns=["2MASS_ID_clean", "2MASS_clean"], errors="ignore")
+    df = df.drop(columns=["sydney_2MASS"], errors="ignore")
+    n_matched_by_id = df["sydney_Class"].notna().sum() if "sydney_Class" in df.columns else 0
+
+    # Coordinate fallback: rows still missing Sydney data
+    if (
+        sydney_coord_catalog is not None
+        and not sydney_coord_catalog.empty
+        and "ra_deg" in df.columns
+        and "dec_deg" in df.columns
+    ):
+        miss_mask = (
+            (df["sydney_Class"].isna() if "sydney_Class" in df.columns else pd.Series(True, index=df.index))
+            & df["ra_deg"].notna()
+            & df["dec_deg"].notna()
+        )
+        if miss_mask.any():
+            cand_coords = SkyCoord(
+                ra=df.loc[miss_mask, "ra_deg"].values * u.deg,
+                dec=df.loc[miss_mask, "dec_deg"].values * u.deg,
+            )
+            cat_coords = SkyCoord(
+                ra=sydney_coord_catalog["_ra_deg"].values * u.deg,
+                dec=sydney_coord_catalog["_dec_deg"].values * u.deg,
+            )
+            idx_cat, sep, _ = cand_coords.match_to_catalog_sky(cat_coords)
+            sep_arcsec = sep.arcsec
+            df_miss_indices = df.index[miss_mask].tolist()
+            coord_fill_cols = [c for c in sydney_coord_catalog.columns if c.startswith("sydney_")]
+            for i, df_idx in enumerate(df_miss_indices):
+                if sep_arcsec[i] < sydney_coord_fallback_arcsec:
+                    cat_row = sydney_coord_catalog.iloc[int(idx_cat[i])]
+                    for col in coord_fill_cols:
+                        if col in df.columns:
+                            df.loc[df_idx, col] = cat_row[col]
+                    if "sydney_match_by_coord" not in df.columns:
+                        df["sydney_match_by_coord"] = False
+                    df.loc[df_idx, "sydney_match_by_coord"] = True
+
+    n_matched_total = df["sydney_Class"].notna().sum() if "sydney_Class" in df.columns else 0
+    n_matched_coord = n_matched_total - n_matched_by_id
+
+    if verbose:
+        print(f"[crossmatch_sydney_ltv] Merged {n_matched_total}/{n_before} from Sydney list", end="")
+        if n_matched_coord > 0:
+            print(f" ({n_matched_by_id} from 2MASS ID, {n_matched_coord} from coordinate fallback)")
+        else:
+            print()
+
+    return df
+
+
+# =============================================================================
 # COMBINED CROSSMATCH
 # =============================================================================
 
@@ -550,6 +791,8 @@ def crossmatch_all_catalogs(
     include_vsx: bool = True,
     include_milliquas: bool = True,
     include_simbad: bool = True,
+    include_sydney_ltv: bool = True,
+    sydney_csv_path: str | Path | None = None,
     match_radius_arcsec: float = LTV_MATCH_RADIUS_ARCSEC,
     n_workers: int = LTV_WORKERS,
     verbose: bool = False,
@@ -615,19 +858,26 @@ def crossmatch_all_catalogs(
         api_queries_needed.append("MILLIQUAS")
     if include_simbad:
         api_queries_needed.append("SIMBAD")
+    if include_sydney_ltv:
+        api_queries_needed.append("2MASS (for Sydney LTV)")
     
     if verbose and api_queries_needed:
         print(f"  API queries needed: {', '.join(api_queries_needed)}")
     
     # Process API queries on the full (already-filtered) dataset
     if include_gaia_alerts:
-        df = crossmatch_gaia_alerts(df, match_radius_arcsec=match_radius_arcsec, n_workers=n_workers, verbose=False)
+        df = crossmatch_gaia_alerts(df, match_radius_arcsec=match_radius_arcsec, n_workers=n_workers, verbose=verbose)
 
     if include_milliquas:
-        df = crossmatch_milliquas(df, match_radius_arcsec=match_radius_arcsec, n_workers=n_workers, verbose=False)
+        df = crossmatch_milliquas(df, match_radius_arcsec=match_radius_arcsec, n_workers=n_workers, verbose=verbose)
 
     if include_simbad:
-        df = query_simbad_classification(df, match_radius_arcsec=match_radius_arcsec, n_workers=n_workers, verbose=False)
+        df = query_simbad_classification(df, match_radius_arcsec=match_radius_arcsec, n_workers=n_workers, verbose=verbose)
+
+    if include_sydney_ltv:
+        df = crossmatch_2mass(df, match_radius_arcsec=match_radius_arcsec, n_workers=n_workers, verbose=verbose)
+        if sydney_csv_path:
+            df = crossmatch_sydney_ltv(df, sydney_csv_path=sydney_csv_path, verbose=verbose)
     
     if verbose:
         print(f"[crossmatch_all_catalogs] Complete")
@@ -639,5 +889,9 @@ def crossmatch_all_catalogs(
             print(f"  MILLIQUAS: {df['milliquas_name'].notna().sum()}/{len(df)} matched")
         if "simbad_main_id" in df.columns:
             print(f"  SIMBAD: {df['simbad_main_id'].notna().sum()}/{len(df)} matched")
+        if "2MASS_ID" in df.columns:
+            print(f"  2MASS: {df['2MASS_ID'].notna().sum()}/{len(df)} matched")
+        if "sydney_Class" in df.columns:
+            print(f"  Sydney LTV: {df['sydney_Class'].notna().sum()}/{len(df)} matched")
     
     return df
