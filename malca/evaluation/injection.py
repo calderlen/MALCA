@@ -1603,99 +1603,103 @@ Output structure (default --out-dir output/injection):
 Each run gets a unique timestamped directory. Use --run-tag to append a custom label.
 """,
     )
-    parser.add_argument("--manifest", type=Path, default=Path("output/lc_manifest_all.parquet"),
+    g_io = parser.add_argument_group("Input / output")
+    g_injection = parser.add_argument_group("Injection parameters")
+    g_workers = parser.add_argument_group("Workers & chunks")
+    g_detection = parser.add_argument_group("Detection & events")
+    g_baseline = parser.add_argument_group("Baseline")
+    g_mag = parser.add_argument_group("Magnitude grid")
+    g_filter = parser.add_argument_group("Filter & measurement")
+    g_postprocess = parser.add_argument_group("Postprocess")
+
+    g_io.add_argument("--manifest", type=Path, default=Path("output/lc_manifest_all.parquet"),
                         help="Manifest parquet path (default: output/lc_manifest_all.parquet)")
-    parser.add_argument("--out-dir", type=Path, default=Path("output/injection"),
+    g_io.add_argument("--out-dir", type=Path, default=Path("output/injection"),
                         help="Base output directory (default: output/injection)")
-    parser.add_argument("--run-tag", type=str, default=None,
+    g_io.add_argument("--run-tag", type=str, default=None,
                         help="Optional tag to append to run directory name (e.g., 'deep_dips_mag18')")
-    parser.add_argument("--out", type=Path, default=None,
+    g_io.add_argument("--out", type=Path, default=None,
                         help="Override CSV output path (default: <out-dir>/<timestamp>/results/injection_results.csv)")
-    parser.add_argument(
+    g_injection.add_argument(
         "--control-sample-size",
         dest="control_sample_size",
         type=int,
         default=INJECTION_N_SAMPLE,
         help="Number of control LCs to sample.",
     )
-    parser.add_argument("--min-points", type=int, default=INJECTION_MIN_POINTS, help="Minimum points in control sample if available.")
-    parser.add_argument("--seed", type=int, default=INJECTION_SEED)
+    g_injection.add_argument("--min-points", type=int, default=INJECTION_MIN_POINTS, help="Minimum points in control sample if available.")
+    g_injection.add_argument("--seed", type=int, default=INJECTION_SEED)
+    g_injection.add_argument("--amp-min", type=float, default=0.05)
+    g_injection.add_argument("--amp-max", type=float, default=3.0)
+    g_injection.add_argument("--amp-steps", type=int, default=100)
+    g_injection.add_argument("--dur-min", type=float, default=1.0)
+    g_injection.add_argument("--dur-max", type=float, default=300.0)
+    g_injection.add_argument("--dur-steps", type=int, default=100)
+    g_injection.add_argument("--n-injections-per-grid", type=int, default=100)
+    g_injection.add_argument("--skew-min", type=float, default=-0.5)
+    g_injection.add_argument("--skew-max", type=float, default=0.5)
+    g_injection.add_argument("--mag-err-order", type=int, default=5)
+    g_injection.add_argument("--mag-err-sample", type=int, default=100)
 
-    parser.add_argument("--amp-min", type=float, default=0.05)
-    parser.add_argument("--amp-max", type=float, default=3.0)
-    parser.add_argument("--amp-steps", type=int, default=100)
-    parser.add_argument("--dur-min", type=float, default=1.0)
-    parser.add_argument("--dur-max", type=float, default=300.0)
-    parser.add_argument("--dur-steps", type=int, default=100)
-    parser.add_argument("--n-injections-per-grid", type=int, default=100)
-    parser.add_argument("--skew-min", type=float, default=-0.5)
-    parser.add_argument("--skew-max", type=float, default=0.5)
-    parser.add_argument("--mag-err-order", type=int, default=5)
-    parser.add_argument("--mag-err-sample", type=int, default=100)
+    g_workers.add_argument("--workers", type=int, default=WORKERS, help="Parallel workers.")
+    g_workers.add_argument("--task-size", type=int, default=50, help="Trials per worker task.")
+    g_workers.add_argument("--checkpoint-interval", type=int, default=1000, help="Trials per checkpoint update.")
+    g_workers.add_argument("--chunk-size", type=int, default=INJECTION_CHUNK_SIZE, help="Rows per output flush.")
+    g_workers.add_argument("--max-trials", type=int, default=None, help="Limit total trials (debug).")
+    g_workers.add_argument("--no-resume", action="store_true", help="Disable resume even if checkpoint exists.")
+    g_workers.add_argument("--overwrite", action="store_true", help="Overwrite output/checkpoint.")
 
-    parser.add_argument("--workers", type=int, default=WORKERS, help="Parallel workers.")
-    parser.add_argument("--task-size", type=int, default=50, help="Trials per worker task.")
-    parser.add_argument("--checkpoint-interval", type=int, default=1000, help="Trials per checkpoint update.")
-    parser.add_argument("--chunk-size", type=int, default=INJECTION_CHUNK_SIZE, help="Rows per output flush.")
-    parser.add_argument("--max-trials", type=int, default=None, help="Limit total trials (debug).")
-    parser.add_argument("--no-resume", action="store_true", help="Disable resume even if checkpoint exists.")
-    parser.add_argument("--overwrite", action="store_true", help="Overwrite output/checkpoint.")
-
-    parser.add_argument("--trigger-mode", type=str, default=TRIGGER_MODE, choices=["logbf", "posterior_prob"],
+    g_detection.add_argument("--trigger-mode", type=str, default=TRIGGER_MODE, choices=["logbf", "posterior_prob"],
                         help="Trigger mode for injection testing")
-    parser.add_argument("--logbf-threshold-dip", type=float, default=LOGBF_THRESHOLD_DIP)
-    parser.add_argument("--logbf-threshold-jump", type=float, default=LOGBF_THRESHOLD_JUMP)
-    parser.add_argument("--significance-threshold", type=float, default=SIGNIFICANCE_THRESHOLD)
-    parser.add_argument("--p-points", type=int, default=P_POINTS)
-    parser.add_argument("--mag-points", type=int, default=MAG_POINTS, help="Number of points in the magnitude grid")
-    parser.add_argument("--p-min-dip", type=float, default=None)
-    parser.add_argument("--p-max-dip", type=float, default=None)
-    parser.add_argument("--p-min-jump", type=float, default=None)
-    parser.add_argument("--p-max-jump", type=float, default=None)
-    parser.add_argument("--run-min-points", type=int, default=RUN_MIN_POINTS)
-    parser.add_argument("--run-max-gap-points", type=int, default=RUN_MAX_GAP_POINTS)
-    parser.add_argument("--run-max-gap-days", type=float, default=None)
-    parser.add_argument("--run-min-duration-days", type=float, default=0.0)
-    parser.add_argument(
+    g_detection.add_argument("--logbf-threshold-dip", type=float, default=LOGBF_THRESHOLD_DIP)
+    g_detection.add_argument("--logbf-threshold-jump", type=float, default=LOGBF_THRESHOLD_JUMP)
+    g_detection.add_argument("--significance-threshold", type=float, default=SIGNIFICANCE_THRESHOLD)
+    g_detection.add_argument("--p-points", type=int, default=P_POINTS)
+    g_detection.add_argument("--mag-points", type=int, default=MAG_POINTS, help="Number of points in the magnitude grid")
+    g_detection.add_argument("--p-min-dip", type=float, default=None)
+    g_detection.add_argument("--p-max-dip", type=float, default=None)
+    g_detection.add_argument("--p-min-jump", type=float, default=None)
+    g_detection.add_argument("--p-max-jump", type=float, default=None)
+    g_detection.add_argument("--run-min-points", type=int, default=RUN_MIN_POINTS)
+    g_detection.add_argument("--run-max-gap-points", type=int, default=RUN_MAX_GAP_POINTS)
+    g_detection.add_argument("--run-max-gap-days", type=float, default=None)
+    g_detection.add_argument("--run-min-duration-days", type=float, default=0.0)
+    g_baseline.add_argument(
         "--baseline-func",
         type=str,
         default=BASELINE_FUNC,
         choices=["gp", "global_median", "per_camera_median"],
         help="Baseline function",
     )
-    # Baseline kwargs (GP kernel parameters)
-    parser.add_argument("--baseline-s0", type=float, default=BASELINE_S0, help="GP kernel S0 parameter (default: 0.0005)")
-    parser.add_argument("--baseline-w0", type=float, default=BASELINE_W0, help="GP kernel w0 parameter (default: pi/1000)")
-    parser.add_argument("--baseline-q", type=float, default=BASELINE_Q, help="GP kernel Q parameter (default: 0.7)")
-    parser.add_argument("--baseline-jitter", type=float, default=BASELINE_JITTER, help="GP jitter term (default: 0.006)")
-    parser.add_argument("--baseline-sigma-floor", type=float, default=None, help="Minimum sigma floor (default: None)")
-    # Magnitude grid bounds (override auto-detection)
-    parser.add_argument("--mag-min-dip", type=float, default=None, help="Min magnitude for dip grid (overrides auto)")
-    parser.add_argument("--mag-max-dip", type=float, default=None, help="Max magnitude for dip grid (overrides auto)")
-    parser.add_argument("--mag-min-jump", type=float, default=None, help="Min magnitude for jump grid (overrides auto)")
-    parser.add_argument("--mag-max-jump", type=float, default=None, help="Max magnitude for jump grid (overrides auto)")
-    parser.add_argument("--no-event-prob", action="store_true", default=False,
+    g_baseline.add_argument("--baseline-s0", type=float, default=BASELINE_S0, help="GP kernel S0 parameter (default: 0.0005)")
+    g_baseline.add_argument("--baseline-w0", type=float, default=BASELINE_W0, help="GP kernel w0 parameter (default: pi/1000)")
+    g_baseline.add_argument("--baseline-q", type=float, default=BASELINE_Q, help="GP kernel Q parameter (default: 0.7)")
+    g_baseline.add_argument("--baseline-jitter", type=float, default=BASELINE_JITTER, help="GP jitter term (default: 0.006)")
+    g_baseline.add_argument("--baseline-sigma-floor", type=float, default=None, help="Minimum sigma floor (default: None)")
+    g_mag.add_argument("--mag-min-dip", type=float, default=None, help="Min magnitude for dip grid (overrides auto)")
+    g_mag.add_argument("--mag-max-dip", type=float, default=None, help="Max magnitude for dip grid (overrides auto)")
+    g_mag.add_argument("--mag-min-jump", type=float, default=None, help="Min magnitude for jump grid (overrides auto)")
+    g_mag.add_argument("--mag-max-jump", type=float, default=None, help="Max magnitude for jump grid (overrides auto)")
+    g_filter.add_argument("--no-event-prob", action="store_true", default=False,
                         help="Disable event probability computation for faster runs")
-    parser.add_argument("--compute-event-prob", dest="no_event_prob", action="store_false",
+    g_filter.add_argument("--compute-event-prob", dest="no_event_prob", action="store_false",
                         help="Enable event probability computation (default)")
-    parser.add_argument("--min-mag-offset", type=float, default=MIN_MAG_OFFSET,
+    g_filter.add_argument("--min-mag-offset", type=float, default=MIN_MAG_OFFSET,
                         help="Min magnitude offset for signal amplitude filter (0 to disable, default: 0.2)")
-    parser.add_argument("--measure-pre-injection", action="store_true", default=True,
+    g_filter.add_argument("--measure-pre-injection", action="store_true", default=True,
                         help="Measure detection rate on pre-injection light curves (default: enabled)")
-    parser.add_argument("--no-measure-pre-injection", dest="measure_pre_injection", action="store_false",
+    g_filter.add_argument("--no-measure-pre-injection", dest="measure_pre_injection", action="store_false",
                         help="Disable pre-injection detection rate measurement")
 
-
-    # Post-processing options
-    parser.add_argument("--skip-cube", action="store_true", help="Skip computing efficiency cube.")
-    parser.add_argument("--skip-plots", action="store_true", help="Skip generating plots.")
-    parser.add_argument("--cube-out", type=Path, default=None,
+    g_postprocess.add_argument("--skip-cube", action="store_true", help="Skip computing efficiency cube.")
+    g_postprocess.add_argument("--skip-plots", action="store_true", help="Skip generating plots.")
+    g_postprocess.add_argument("--cube-out", type=Path, default=None,
                         help="Override cube output path (default: <out-dir>/cubes/efficiency_cube.npz)")
-    parser.add_argument("--plot-dir", type=Path, default=None,
+    g_postprocess.add_argument("--plot-dir", type=Path, default=None,
                         help="Override plot directory (default: <out-dir>/plots)")
-    parser.add_argument("--depth-bins", type=int, default=20, help="Number of depth bins for cube.")
-    parser.add_argument("--duration-bins", type=int, default=20, help="Number of duration bins for cube.")
-    parser.add_argument("--mag-bins", type=int, default=10, help="Number of magnitude bins for cube.")
+    g_postprocess.add_argument("--depth-bins", type=int, default=20, help="Number of depth bins for cube.")
+    g_postprocess.add_argument("--duration-bins", type=int, default=20, help="Number of duration bins for cube.")
+    g_postprocess.add_argument("--mag-bins", type=int, default=10, help="Number of magnitude bins for cube.")
 
     args = parser.parse_args()
 

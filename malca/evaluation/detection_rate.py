@@ -446,65 +446,71 @@ Output structure (default --out-dir output/detection_rate):
 Each run gets a unique timestamped directory. Use --run-tag to append a custom label.
 """,
     )
-    parser.add_argument("--manifest", type=Path, default=Path("output/lc_manifest_all.parquet"),
+    g_io = parser.add_argument_group("Input / output")
+    g_sample = parser.add_argument_group("Sample")
+    g_workers = parser.add_argument_group("Workers")
+    g_detection = parser.add_argument_group("Detection & events")
+    g_baseline = parser.add_argument_group("Baseline")
+    g_filter = parser.add_argument_group("Filter")
+
+    g_io.add_argument("--manifest", type=Path, default=Path("output/lc_manifest_all.parquet"),
                         help="Manifest parquet path (default: output/lc_manifest_all.parquet)")
-    parser.add_argument("--out-dir", type=Path, default=Path("output/detection_rate"),
+    g_io.add_argument("--out-dir", type=Path, default=Path("output/detection_rate"),
                         help="Base output directory (default: output/detection_rate)")
-    parser.add_argument("--run-tag", type=str, default=None,
+    g_io.add_argument("--run-tag", type=str, default=None,
                         help="Optional tag to append to run directory name (e.g., 'mag12-13')")
-    parser.add_argument("--out", type=Path, default=None,
+    g_io.add_argument("--out", type=Path, default=None,
                         help="Override output path (default: <out-dir>/<timestamp>/results/detection_rate_results.parquet)")
-    parser.add_argument(
+    g_sample.add_argument(
         "--control-sample-size",
         dest="control_sample_size",
         type=int,
         default=INJECTION_N_SAMPLE,
         help="Number of light curves to sample.",
     )
-    parser.add_argument("--min-points", type=int, default=INJECTION_MIN_POINTS, help="Minimum points in control sample if available.")
-    parser.add_argument("--seed", type=int, default=INJECTION_SEED)
+    g_sample.add_argument("--min-points", type=int, default=INJECTION_MIN_POINTS, help="Minimum points in control sample if available.")
+    g_sample.add_argument("--seed", type=int, default=INJECTION_SEED)
 
-    parser.add_argument("--workers", type=int, default=WORKERS, help="Parallel workers.")
-    parser.add_argument("--checkpoint-interval", type=int, default=1000, help="Trials per checkpoint update.")
-    parser.add_argument("--max-trials", type=int, default=None, help="Limit total trials (debug).")
-    parser.add_argument("--no-resume", action="store_true", help="Disable resume even if checkpoint exists.")
-    parser.add_argument("--overwrite", action="store_true", help="Overwrite existing output if present.")
+    g_workers.add_argument("--workers", type=int, default=WORKERS, help="Parallel workers.")
+    g_workers.add_argument("--checkpoint-interval", type=int, default=1000, help="Trials per checkpoint update.")
+    g_workers.add_argument("--max-trials", type=int, default=None, help="Limit total trials (debug).")
+    g_workers.add_argument("--no-resume", action="store_true", help="Disable resume even if checkpoint exists.")
+    g_workers.add_argument("--overwrite", action="store_true", help="Overwrite existing output if present.")
 
-    # Detection parameters
-    parser.add_argument("--trigger-mode", type=str, default=TRIGGER_MODE, choices=["logbf", "posterior_prob"])
-    parser.add_argument("--logbf-threshold-dip", type=float, default=LOGBF_THRESHOLD_DIP)
-    parser.add_argument("--logbf-threshold-jump", type=float, default=LOGBF_THRESHOLD_JUMP)
-    parser.add_argument("--significance-threshold", type=float, default=SIGNIFICANCE_THRESHOLD)
-    parser.add_argument("--p-points", type=int, default=P_POINTS)
-    parser.add_argument("--p-min-dip", type=float, default=None)
-    parser.add_argument("--p-max-dip", type=float, default=None)
-    parser.add_argument("--p-min-jump", type=float, default=None)
-    parser.add_argument("--p-max-jump", type=float, default=None)
-    parser.add_argument("--mag-points", type=int, default=MAG_POINTS)
-    parser.add_argument("--mag-min-dip", type=float, default=None)
-    parser.add_argument("--mag-max-dip", type=float, default=None)
-    parser.add_argument("--mag-min-jump", type=float, default=None)
-    parser.add_argument("--mag-max-jump", type=float, default=None)
-    parser.add_argument("--run-min-points", type=int, default=RUN_MIN_POINTS)
-    parser.add_argument("--run-max-gap-points", type=int, default=RUN_MAX_GAP_POINTS)
-    parser.add_argument("--run-max-gap-days", type=float, default=None)
-    parser.add_argument("--run-min-duration-days", type=float, default=0.0)
-    parser.add_argument(
+    g_detection.add_argument("--trigger-mode", type=str, default=TRIGGER_MODE, choices=["logbf", "posterior_prob"])
+    g_detection.add_argument("--logbf-threshold-dip", type=float, default=LOGBF_THRESHOLD_DIP)
+    g_detection.add_argument("--logbf-threshold-jump", type=float, default=LOGBF_THRESHOLD_JUMP)
+    g_detection.add_argument("--significance-threshold", type=float, default=SIGNIFICANCE_THRESHOLD)
+    g_detection.add_argument("--p-points", type=int, default=P_POINTS)
+    g_detection.add_argument("--p-min-dip", type=float, default=None)
+    g_detection.add_argument("--p-max-dip", type=float, default=None)
+    g_detection.add_argument("--p-min-jump", type=float, default=None)
+    g_detection.add_argument("--p-max-jump", type=float, default=None)
+    g_detection.add_argument("--mag-points", type=int, default=MAG_POINTS)
+    g_detection.add_argument("--mag-min-dip", type=float, default=None)
+    g_detection.add_argument("--mag-max-dip", type=float, default=None)
+    g_detection.add_argument("--mag-min-jump", type=float, default=None)
+    g_detection.add_argument("--mag-max-jump", type=float, default=None)
+    g_detection.add_argument("--run-min-points", type=int, default=RUN_MIN_POINTS)
+    g_detection.add_argument("--run-max-gap-points", type=int, default=RUN_MAX_GAP_POINTS)
+    g_detection.add_argument("--run-max-gap-days", type=float, default=None)
+    g_detection.add_argument("--run-min-duration-days", type=float, default=0.0)
+    g_baseline.add_argument(
         "--baseline-func",
         type=str,
         default=BASELINE_FUNC,
         choices=["gp", "global_median", "per_camera_median"],
     )
-    parser.add_argument("--baseline-s0", type=float, default=BASELINE_S0)
-    parser.add_argument("--baseline-w0", type=float, default=BASELINE_W0)
-    parser.add_argument("--baseline-q", type=float, default=BASELINE_Q)
-    parser.add_argument("--baseline-jitter", type=float, default=BASELINE_JITTER)
-    parser.add_argument("--baseline-sigma-floor", type=float, default=None)
-    parser.add_argument("--no-event-prob", action="store_true", default=False,
+    g_baseline.add_argument("--baseline-s0", type=float, default=BASELINE_S0)
+    g_baseline.add_argument("--baseline-w0", type=float, default=BASELINE_W0)
+    g_baseline.add_argument("--baseline-q", type=float, default=BASELINE_Q)
+    g_baseline.add_argument("--baseline-jitter", type=float, default=BASELINE_JITTER)
+    g_baseline.add_argument("--baseline-sigma-floor", type=float, default=None)
+    g_filter.add_argument("--no-event-prob", action="store_true", default=False,
                         help="Disable event probability computation for faster runs")
-    parser.add_argument("--compute-event-prob", dest="no_event_prob", action="store_false",
+    g_filter.add_argument("--compute-event-prob", dest="no_event_prob", action="store_false",
                         help="Enable event probability computation (default, required for trigger_mode='posterior_prob')")
-    parser.add_argument("--min-mag-offset", type=float, default=MIN_MAG_OFFSET)
+    g_filter.add_argument("--min-mag-offset", type=float, default=MIN_MAG_OFFSET)
 
     args = parser.parse_args()
 

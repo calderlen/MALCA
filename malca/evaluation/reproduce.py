@@ -1992,323 +1992,319 @@ Examples:
   malca reproduce --candidates candidates.csv --skypatrol-dir input/skypatrol2
 """,
     )
+    g_input = parser.add_argument_group("Input")
+    g_manifest_tag = parser.add_argument_group("Manifest & tag")
+    g_events = parser.add_argument_group("Events & trigger")
+    g_baseline = parser.add_argument_group("Baseline")
+    g_mag = parser.add_argument_group("Magnitude grid")
+    g_run = parser.add_argument_group("Run confirmation")
+    g_filter = parser.add_argument_group("Filter")
+    g_postprocess = parser.add_argument_group("Postprocess")
+    g_output = parser.add_argument_group("Output")
+    g_general = parser.add_argument_group("General")
 
-    # Output options
-    parser.add_argument(
+    g_output.add_argument(
         "--out-dir",
         default="./output/plots/reproduction",
         help="Directory for peak_results output",
     )
-    parser.add_argument(
+    g_output.add_argument(
         "--out-format",
         choices=("csv", "parquet"),
         default="csv",
         help="Output format (default: csv)",
     )
-    parser.add_argument(
+    g_output.add_argument(
         "--plot-format",
         choices=("png", "pdf"),
         default="pdf",
         help="Plot output format (default: png)",
     )
-    parser.add_argument(
+    g_output.add_argument(
         "--log-format",
         choices=("text", "csv"),
         default="csv",
         help="Log output format: text (human-readable) or csv (structured data). Default: text",
     )
-    parser.add_argument(
+    g_general.add_argument(
         "--workers",
         type=int,
         default=WORKERS,
         help="ProcessPool worker count.",
     )
-    parser.add_argument(
+    g_general.add_argument(
         "--chunk-size",
         type=int,
         default=REPRODUCE_CHUNK_SIZE,
         help="Rows per chunk flush for CSV output",
     )
-    parser.add_argument(
+    g_general.add_argument(
         "--metrics-dip-threshold",
         type=float,
         default=0.2,
         help="Dip threshold for run_metrics",
     )
-    parser.add_argument(
+    g_general.add_argument(
         "--verbose",
         "-v",
         action="store_true",
         help="Print debug info",
     )
 
-    # Bayesian detection settings
-    parser.add_argument(
+    g_events.add_argument(
         "--trigger-mode",
         choices=("logbf", "posterior_prob"),
         default=TRIGGER_MODE,
         help="Triggering mode used by score_lightcurve (default: pipeline config)",
     )
-    parser.add_argument(
+    g_events.add_argument(
         "--significance-threshold",
         type=float,
         default=SIGNIFICANCE_THRESHOLD,
         help="Posterior-probability threshold (percent if >1) when --trigger-mode posterior_prob",
     )
-    parser.add_argument(
+    g_events.add_argument(
         "--logbf-threshold-dip",
         type=float,
         default=LOGBF_THRESHOLD_DIP,
         help="Dip triggers when max per-point log BF >= this.",
     )
-    parser.add_argument(
+    g_events.add_argument(
         "--logbf-threshold-jump",
         type=float,
         default=LOGBF_THRESHOLD_JUMP,
         help="Jump triggers when max per-point log BF >= this.",
     )
-    parser.add_argument(
+    g_events.add_argument(
         "--p-points",
         type=int,
         default=P_POINTS,
         help="Number of logit-spaced probability grid points",
     )
-
-    # Probability grid bounds (matching events.py)
-    parser.add_argument(
+    g_events.add_argument(
         "--p-min-dip",
         type=float,
         default=None,
         help="Minimum dip fraction for p-grid (overrides default).",
     )
-    parser.add_argument(
+    g_events.add_argument(
         "--p-max-dip",
         type=float,
         default=None,
         help="Maximum dip fraction for p-grid (overrides default).",
     )
-    parser.add_argument(
+    g_events.add_argument(
         "--p-min-jump",
         type=float,
         default=None,
         help="Minimum jump fraction for p-grid (overrides default).",
     )
-    parser.add_argument(
+    g_events.add_argument(
         "--p-max-jump",
         type=float,
         default=None,
         help="Maximum jump fraction for p-grid (overrides default).",
     )
-
-    # Magnitude grid
-    parser.add_argument(
+    g_events.add_argument(
         "--mag-points",
         type=int,
         default=MAG_POINTS,
         help="Number of points in the magnitude grid.",
     )
 
-    # Baseline function
-    parser.add_argument(
+    g_baseline.add_argument(
         "--baseline-func",
         type=str,
         choices=["gp", "global_median", "per_camera_median"],
         default=BASELINE_FUNC,
         help="Baseline function to use: gp (default), global_median, or per_camera_median.",
     )
-    # Baseline kwargs (GP kernel parameters)
-    parser.add_argument("--baseline-s0", type=float, default=BASELINE_S0, help="GP kernel S0 parameter (default: 0.0005)")
-    parser.add_argument("--baseline-w0", type=float, default=BASELINE_W0, help="GP kernel w0 parameter (default: pi/1000)")
-    parser.add_argument("--baseline-q", type=float, default=BASELINE_Q, help="GP kernel Q parameter (default: 0.7)")
-    parser.add_argument("--baseline-jitter", type=float, default=BASELINE_JITTER, help="GP jitter term (default: 0.006)")
-    parser.add_argument("--baseline-sigma-floor", type=float, default=None, help="Minimum sigma floor (default: None)")
-    # Magnitude grid bounds (override auto-detection)
-    parser.add_argument("--mag-min-dip", type=float, default=None, help="Min magnitude for dip grid (overrides auto)")
-    parser.add_argument("--mag-max-dip", type=float, default=None, help="Max magnitude for dip grid (overrides auto)")
-    parser.add_argument("--mag-min-jump", type=float, default=None, help="Min magnitude for jump grid (overrides auto)")
-    parser.add_argument("--mag-max-jump", type=float, default=None, help="Max magnitude for jump grid (overrides auto)")
+    g_baseline.add_argument("--baseline-s0", type=float, default=BASELINE_S0, help="GP kernel S0 parameter (default: 0.0005)")
+    g_baseline.add_argument("--baseline-w0", type=float, default=BASELINE_W0, help="GP kernel w0 parameter (default: pi/1000)")
+    g_baseline.add_argument("--baseline-q", type=float, default=BASELINE_Q, help="GP kernel Q parameter (default: 0.7)")
+    g_baseline.add_argument("--baseline-jitter", type=float, default=BASELINE_JITTER, help="GP jitter term (default: 0.006)")
+    g_baseline.add_argument("--baseline-sigma-floor", type=float, default=None, help="Minimum sigma floor (default: None)")
 
-    # Run confirmation filters
-    parser.add_argument(
+    g_mag.add_argument("--mag-min-dip", type=float, default=None, help="Min magnitude for dip grid (overrides auto)")
+    g_mag.add_argument("--mag-max-dip", type=float, default=None, help="Max magnitude for dip grid (overrides auto)")
+    g_mag.add_argument("--mag-min-jump", type=float, default=None, help="Min magnitude for jump grid (overrides auto)")
+    g_mag.add_argument("--mag-max-jump", type=float, default=None, help="Max magnitude for jump grid (overrides auto)")
+
+    g_run.add_argument(
         "--run-min-points",
         type=int,
         default=RUN_MIN_POINTS,
         help="Minimum triggered points required to confirm a run (default: 2).",
     )
-    parser.add_argument(
+    g_run.add_argument(
         "--run-max-gap-points",
         type=int,
         default=RUN_MAX_GAP_POINTS,
         help="Allow this many non-triggered points between triggered points in a run.",
     )
-    parser.add_argument(
+    g_run.add_argument(
         "--run-max-gap-days",
         type=float,
         default=None,
         help="Maximum gap in days between points in a run (default: 5x cadence).",
     )
-    parser.add_argument(
+    g_run.add_argument(
         "--run-min-duration-days",
         type=float,
         default=0.0,
         help="Minimum duration in days for a confirmed run (default: 0.0 = disabled).",
     )
 
-    # Tag options
-    parser.add_argument(
+    g_manifest_tag.add_argument(
         "--skip-tags",
         action="store_true",
         help="Skip tagging step (sparse LC, multi-camera, VSX)",
     )
-    parser.add_argument(
+    g_manifest_tag.add_argument(
         "--min-time-span",
         type=float,
         default=MIN_TIME_SPAN,
         help="Min time span in days for sparse LC filter (default: 100)",
     )
-    parser.add_argument(
+    g_manifest_tag.add_argument(
         "--min-points-per-day",
         type=float,
         default=MIN_POINTS_PER_DAY,
         help="Min cadence for sparse LC filter (default: 0.05)",
     )
-    parser.add_argument(
+    g_manifest_tag.add_argument(
         "--min-cameras",
         type=int,
         default=MIN_CAMERAS,
         help="Min cameras required for multi-camera filter (default: 2)",
     )
-    parser.add_argument(
+    g_manifest_tag.add_argument(
         "--skip-vsx",
         action="store_true",
         help="Skip VSX known variable filter",
     )
-    parser.add_argument(
+    g_manifest_tag.add_argument(
         "--vsx-catalog",
         type=Path,
         default=VSX_RAW_CATALOG_PATH,
         help="Path to VSX catalog CSV",
     )
-    parser.add_argument(
+    g_manifest_tag.add_argument(
         "--vsx-max-sep",
         type=float,
         default=VSX_MAX_SEP_ARCSEC,
         help="Max separation for VSX match in arcsec (default: 3.0)",
     )
 
-    # Signal amplitude filter
-    parser.add_argument(
+    g_filter.add_argument(
         "--min-mag-offset",
         type=float,
         default=MIN_MAG_OFFSET,
         help="Min magnitude offset for signal amplitude filter (0 to disable)",
     )
 
-    # Post-processing options
-    parser.add_argument(
+    g_postprocess.add_argument(
         "--run-classify",
         action="store_true",
         help="Run classification (EB/CV/starspot rejection, YSO classification)",
     )
-    parser.add_argument(
+    g_postprocess.add_argument(
         "--run-characterize",
         action="store_true",
         help="Run characterization (Gaia DR3 query for RUWE, stellar params, 2MASS/WISE photometry)",
     )
-    parser.add_argument(
+    g_postprocess.add_argument(
         "--gaia-cache",
         type=Path,
         default=None,
         help="Path to Gaia query cache file (parquet) for faster repeated runs",
     )
-    parser.add_argument(
+    g_postprocess.add_argument(
         "--index-file",
         type=Path,
         default=Path("output/asassn_index_masked_concat_cleaned_20250919_154524_brotli.parquet"),
         help="Path to ASAS-SN index file with gaia_id, ra_deg, dec_deg columns",
     )
-    parser.add_argument(
+    g_postprocess.add_argument(
         "--run-dust",
         action="store_true",
         help="Run 3D dust extinction correction (requires dustmaps3d)",
     )
-    parser.add_argument(
+    g_filter.add_argument(
         "--run-filter",
         dest="run_filter",
         action="store_true",
         help="Apply candidate filters (Bayes factor, run robustness, morphology)",
     )
-    parser.add_argument(
+    g_filter.add_argument(
         "--min-bayes-factor",
         type=float,
         default=MIN_BAYES_FACTOR,
         help="Min Bayes factor for filter stage (default: 10.0)",
     )
-    parser.add_argument(
+    g_filter.add_argument(
         "--filter-min-run-cameras",
         dest="filter_min_run_cameras",
         type=int,
         default=POST_FILTER_MIN_RUN_CAMERAS,
         help="Min cameras for run robustness filter (default: 2)",
     )
-    parser.add_argument(
+    g_filter.add_argument(
         "--filter-min-run-points",
         dest="filter_min_run_points",
         type=int,
         default=POST_FILTER_MIN_RUN_POINTS,
         help="Min points per run for robustness filter (default: 2)",
     )
-    parser.add_argument(
+    g_postprocess.add_argument(
         "--run-postprocess",
         action="store_true",
         help="Generate diagnostic plots for candidates",
     )
-    parser.add_argument(
+    g_postprocess.add_argument(
         "--max-plots",
         type=int,
         default=None,
         help="Limit number of plots generated (default: no limit)",
     )
-    parser.add_argument(
+    g_postprocess.add_argument(
         "--run-enrich",
         action="store_true",
         help="Enrich candidates with comprehensive light curve stats",
     )
-    parser.add_argument(
+    g_postprocess.add_argument(
         "--enrich-compute-ls",
         action="store_true",
         help="Include Lomb-Scargle periodogram in enrichment (expensive)",
     )
-    # Morphology filter options
-    parser.add_argument(
+    g_filter.add_argument(
         "--accepted-morphologies",
         type=str,
         default="gaussian,paczynski,fred",
         help="Comma-separated list of accepted morphologies (default: gaussian,paczynski). Use 'all' to accept all morphologies including noise.",
     )
 
-    # Input Data Sources
-    parser.add_argument(
+    g_input.add_argument(
         "--skypatrol-dir",
         default="input/skypatrol2",
         help="Directory with SkyPatrol CSV files (<source_id>.csv)",
     )
-    parser.add_argument(
+    g_input.add_argument(
         "--manifest",
         default=None,
         help="Path to lc_manifest CSV/Parquet for targeted reproduction",
     )
-    parser.add_argument(
+    g_input.add_argument(
         "--candidates",
         default=None,
         help="Candidate spec (built-in list name or path to CSV/Parquet file from events.py).",
     )
-    parser.add_argument(
+    g_input.add_argument(
         "--path-prefix",
         default=None,
         help="Path prefix to rewrite for candidates with a 'path' column (e.g. /data/poohbah/1/assassin/rowan.90/lcsv2).",
     )
-    parser.add_argument(
+    g_input.add_argument(
         "--path-root",
         default=None,
         help="Local root that replaces --path-prefix for candidates with a 'path' column.",

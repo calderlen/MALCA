@@ -12,7 +12,7 @@ CLASS_KEY_MAP = {
     'd': 'dipper',
     'm': 'microlensing',
     'f': 'flare',
-    'y': 'yso',
+    'l': 'ltv',
     'u': 'unknown_interesting',
     'i': 'instrumental',
     'o': 'other',
@@ -43,7 +43,7 @@ KEYBOARD_SHORTCUTS = {
 HELP_TEXT = """
 Classes (single key, toggle):
   [D] dipper         [M] microlensing
-  [F] flare          [Y] yso
+  [F] flare          [L] ltv
   [U] unknown interesting
   [I] instrumental   [O] other
 

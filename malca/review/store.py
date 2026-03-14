@@ -29,7 +29,7 @@ STATUS_OPTIONS = ["unreviewed", "reviewed", "needs_followup"]
 EVENT_CLASS_OPTIONS = [
     "unclassified",
     "dipper",
-    "yso",
+    "ltv",
     "microlensing",
     "flare",
     "instrumental",
@@ -936,9 +936,9 @@ def init_db(conn: sqlite3.Connection) -> None:
         """
     )
     # Migrate: add any columns missing from older DBs.
-    existing = {row[1] for row in conn.execute("PRAGMA table_info(candidates)").fetchall()}
+    existing_lower = {row[1].lower() for row in conn.execute("PRAGMA table_info(candidates)").fetchall()}
     for col, dtype, _ in _CANDIDATE_COLUMNS:
-        if col not in existing:
+        if col.lower() not in existing_lower:
             conn.execute(f"ALTER TABLE candidates ADD COLUMN {col} {dtype}")
     conn.commit()
 

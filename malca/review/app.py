@@ -8091,12 +8091,11 @@ def _run_pipeline_impl(set_progress, run_clicks, rerun_clicks, rerun_stats_click
 
     ctx = dash.callback_context
     triggered_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else None
-    queue_size = int((queue_data or {}).get('queue_size') or 0) if isinstance(queue_data, dict) else 0
-    
-    print(f"[run_pipeline_callback] Triggered by: {triggered_id}, auto_trigger: {auto_trigger}, queue_size: {queue_size}, idx: {idx}")
-
     if triggered_id == 'auto-run-pipeline-trigger' and not auto_trigger:
         raise dash.exceptions.PreventUpdate
+
+    queue_size = int((queue_data or {}).get('queue_size') or 0) if isinstance(queue_data, dict) else 0
+    print(f"[run_pipeline_callback] Triggered by: {triggered_id}, auto_trigger: {auto_trigger}, queue_size: {queue_size}, idx: {idx}")
 
     if (
         not run_clicks

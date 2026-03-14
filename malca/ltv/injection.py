@@ -836,60 +836,68 @@ Output structure (default --out-dir output/ltv/injection):
     latest -> 20260314_101500/
 """,
     )
-    parser.add_argument("--manifest", type=Path, required=True, help="Manifest CSV/Parquet with dat_path metadata.")
-    parser.add_argument("--out-dir", type=Path, default=LTV_INJECTION_OUTPUT_DIR, help="Base output directory.")
-    parser.add_argument("--run-tag", type=str, default=None, help="Optional suffix for the run directory.")
-    parser.add_argument("--out", type=Path, default=None, help="Override trial CSV output path.")
-    parser.add_argument(
+    g_io = parser.add_argument_group("Input / output")
+    g_sample = parser.add_argument_group("Sample")
+    g_injection = parser.add_argument_group("Injection parameters")
+    g_workers = parser.add_argument_group("Workers & chunks")
+    g_ltv = parser.add_argument_group("LTV core")
+    g_filter = parser.add_argument_group("Filter")
+    g_plots = parser.add_argument_group("Plots")
+
+    g_io.add_argument("--manifest", type=Path, required=True, help="Manifest CSV/Parquet with dat_path metadata.")
+    g_io.add_argument("--out-dir", type=Path, default=LTV_INJECTION_OUTPUT_DIR, help="Base output directory.")
+    g_io.add_argument("--run-tag", type=str, default=None, help="Optional suffix for the run directory.")
+    g_io.add_argument("--out", type=Path, default=None, help="Override trial CSV output path.")
+    g_sample.add_argument(
         "--control-sample-size",
         type=int,
         default=LTV_INJECTION_CONTROL_SAMPLE_SIZE,
         help="Number of control light curves to sample from the manifest.",
     )
-    parser.add_argument("--min-points", type=int, default=0, help="Optional n_points floor if present in the manifest.")
-    parser.add_argument("--seed", type=int, default=0, help="Random seed for source selection and direction draws.")
+    g_sample.add_argument("--min-points", type=int, default=0, help="Optional n_points floor if present in the manifest.")
+    g_sample.add_argument("--seed", type=int, default=0, help="Random seed for source selection and direction draws.")
 
-    parser.add_argument("--profile", type=str, default=LTV_INJECTION_PROFILE, choices=["tanh", "linear"])
-    parser.add_argument("--direction-mode", type=str, default="both", choices=["both", "positive", "negative"])
-    parser.add_argument("--amp-min", type=float, default=LTV_INJECTION_AMP_MIN)
-    parser.add_argument("--amp-max", type=float, default=LTV_INJECTION_AMP_MAX)
-    parser.add_argument("--amp-steps", type=int, default=LTV_INJECTION_AMP_STEPS)
-    parser.add_argument("--timescale-min", type=float, default=LTV_INJECTION_TIMESCALE_MIN_DAYS)
-    parser.add_argument("--timescale-max", type=float, default=LTV_INJECTION_TIMESCALE_MAX_DAYS)
-    parser.add_argument("--timescale-steps", type=int, default=LTV_INJECTION_TIMESCALE_STEPS)
-    parser.add_argument("--repeats-per-grid", type=int, default=LTV_INJECTION_REPEATS_PER_GRID)
+    g_injection.add_argument("--profile", type=str, default=LTV_INJECTION_PROFILE, choices=["tanh", "linear"])
+    g_injection.add_argument("--direction-mode", type=str, default="both", choices=["both", "positive", "negative"])
+    g_injection.add_argument("--amp-min", type=float, default=LTV_INJECTION_AMP_MIN)
+    g_injection.add_argument("--amp-max", type=float, default=LTV_INJECTION_AMP_MAX)
+    g_injection.add_argument("--amp-steps", type=int, default=LTV_INJECTION_AMP_STEPS)
+    g_injection.add_argument("--timescale-min", type=float, default=LTV_INJECTION_TIMESCALE_MIN_DAYS)
+    g_injection.add_argument("--timescale-max", type=float, default=LTV_INJECTION_TIMESCALE_MAX_DAYS)
+    g_injection.add_argument("--timescale-steps", type=int, default=LTV_INJECTION_TIMESCALE_STEPS)
+    g_injection.add_argument("--repeats-per-grid", type=int, default=LTV_INJECTION_REPEATS_PER_GRID)
 
-    parser.add_argument("--workers", type=int, default=1, help="Parallel workers.")
-    parser.add_argument("--task-size", type=int, default=25, help="Trials per worker task.")
-    parser.add_argument("--checkpoint-interval", type=int, default=LTV_INJECTION_CHECKPOINT_INTERVAL)
-    parser.add_argument("--chunk-size", type=int, default=LTV_INJECTION_CHUNK_SIZE)
-    parser.add_argument("--max-trials", type=int, default=None, help="Optional debug cap on total trials.")
-    parser.add_argument("--no-resume", action="store_true", help="Disable resume mode.")
-    parser.add_argument("--overwrite", action="store_true", help="Overwrite output/checkpoint when not resuming.")
+    g_workers.add_argument("--workers", type=int, default=1, help="Parallel workers.")
+    g_workers.add_argument("--task-size", type=int, default=25, help="Trials per worker task.")
+    g_workers.add_argument("--checkpoint-interval", type=int, default=LTV_INJECTION_CHECKPOINT_INTERVAL)
+    g_workers.add_argument("--chunk-size", type=int, default=LTV_INJECTION_CHUNK_SIZE)
+    g_workers.add_argument("--max-trials", type=int, default=None, help="Optional debug cap on total trials.")
+    g_workers.add_argument("--no-resume", action="store_true", help="Disable resume mode.")
+    g_workers.add_argument("--overwrite", action="store_true", help="Overwrite output/checkpoint when not resuming.")
 
-    parser.add_argument("--band-mode", type=str, default="pipeline", choices=["pipeline", "g_only"])
-    parser.add_argument("--dspring", type=float, default=LTV_DSPRING)
-    parser.add_argument(
+    g_ltv.add_argument("--band-mode", type=str, default="pipeline", choices=["pipeline", "g_only"])
+    g_ltv.add_argument("--dspring", type=float, default=LTV_DSPRING)
+    g_ltv.add_argument(
         "--ra-is-deg",
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Interpret manifest RA as degrees when computing seasonal midpoints.",
     )
-    parser.add_argument("--max-seasons", type=int, default=LTV_MAX_SEASONS)
-    parser.add_argument("--min-points-per-season", type=int, default=LTV_MIN_POINTS_PER_SEASON)
-    parser.add_argument("--min-seasons-for-quadratic", type=int, default=LTV_MIN_SEASONS_FOR_QUADRATIC)
+    g_ltv.add_argument("--max-seasons", type=int, default=LTV_MAX_SEASONS)
+    g_ltv.add_argument("--min-points-per-season", type=int, default=LTV_MIN_POINTS_PER_SEASON)
+    g_ltv.add_argument("--min-seasons-for-quadratic", type=int, default=LTV_MIN_SEASONS_FOR_QUADRATIC)
 
-    parser.add_argument("--min-slope", type=float, default=LTV_MIN_SLOPE)
-    parser.add_argument("--min-diff", type=float, default=LTV_MIN_DIFF)
-    parser.add_argument("--query-gaia", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--run-enhanced-filters", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--run-neighbor-pm-filter", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--filter-chunk-size", type=int, default=LTV_CHUNK_SIZE)
-    parser.add_argument("--filter-workers", type=int, default=LTV_WORKERS)
+    g_filter.add_argument("--min-slope", type=float, default=LTV_MIN_SLOPE)
+    g_filter.add_argument("--min-diff", type=float, default=LTV_MIN_DIFF)
+    g_filter.add_argument("--query-gaia", action=argparse.BooleanOptionalAction, default=True)
+    g_filter.add_argument("--run-enhanced-filters", action=argparse.BooleanOptionalAction, default=True)
+    g_filter.add_argument("--run-neighbor-pm-filter", action=argparse.BooleanOptionalAction, default=True)
+    g_filter.add_argument("--filter-chunk-size", type=int, default=LTV_CHUNK_SIZE)
+    g_filter.add_argument("--filter-workers", type=int, default=LTV_WORKERS)
 
-    parser.add_argument("--top-reasons", type=int, default=4, help="Number of rejection reasons to plot as heatmaps.")
-    parser.add_argument("--mag-slices", type=int, default=4, help="Number of magnitude slices for sliced heatmaps.")
-    parser.add_argument("--skip-plots", action="store_true", help="Skip figure generation.")
+    g_plots.add_argument("--top-reasons", type=int, default=4, help="Number of rejection reasons to plot as heatmaps.")
+    g_plots.add_argument("--mag-slices", type=int, default=4, help="Number of magnitude slices for sliced heatmaps.")
+    g_plots.add_argument("--skip-plots", action="store_true", help="Skip figure generation.")
 
     args = parser.parse_args()
 

@@ -1107,164 +1107,171 @@ def main():
     parser = argparse.ArgumentParser(
         description="Plot light curves with Bayesian event detection results"
     )
-    parser.add_argument(
+    g_input = parser.add_argument_group("Input")
+    g_selection = parser.add_argument_group("Selection")
+    g_output = parser.add_argument_group("Output")
+    g_baseline = parser.add_argument_group("Baseline & detection")
+    g_gp = parser.add_argument_group("GP parameters")
+    g_general = parser.add_argument_group("General")
+
+    g_input.add_argument(
         "--detect-run",
         type=Path,
         default=None,
         help="Detect run directory (e.g., output/runs/20250121_143052). If specified, reads events from <detect-run>/results/ and writes plots to <detect-run>/plots/",
     )
-    parser.add_argument(
+    g_input.add_argument(
         "--input",
         nargs="+",
         help="Path(s) to light curve file(s) (glob patterns supported)",
     )
-    parser.add_argument(
+    g_input.add_argument(
         "--events",
         type=Path,
         help="Events/post-filter output (CSV/Parquet) with a path column (overrides --detect-run).",
     )
-    parser.add_argument(
+    g_input.add_argument(
         "--path-col",
         default="path",
         help="Column in events/post-filter output that contains LC paths.",
     )
-    parser.add_argument(
+    g_selection.add_argument(
         "--only-significant",
         action="store_true",
         help="If events output has dip_significant/jump_significant, plot only those.",
     )
-    parser.add_argument(
+    g_selection.add_argument(
         "--max-plots",
         type=int,
         default=None,
         help="Maximum number of light curves to plot.",
     )
-    parser.add_argument(
+    g_selection.add_argument(
         "--ignore-failed-any",
         action="store_true",
         help="Do not require failed_any == False when plotting from --events.",
     )
-    parser.add_argument(
+    g_selection.add_argument(
         "--require-flag",
         action="append",
         default=[],
         help="Require this boolean flag column to be True (repeatable, --events mode).",
     )
-    parser.add_argument(
+    g_selection.add_argument(
         "--exclude-flag",
         action="append",
         default=[],
         help="Exclude rows where this boolean flag column is True (repeatable, --events mode).",
     )
-    parser.add_argument(
+    g_selection.add_argument(
         "--min-lsp-power",
         type=float,
         default=None,
         help="Require lsp_power >= this value (--events mode).",
     )
-    parser.add_argument(
+    g_selection.add_argument(
         "--max-lsp-bootstrap-sig",
         type=float,
         default=None,
         help="Require lsp_bootstrap_sig <= this value (--events mode).",
     )
-    parser.add_argument(
+    g_selection.add_argument(
         "--min-periodicity-score",
         type=float,
         default=None,
         help="Require periodicity_score >= this value (--events mode).",
     )
-    parser.add_argument(
+    g_selection.add_argument(
         "--results-csv",
         type=Path,
         help="Path to results CSV (optional, for filtering which to plot)",
     )
-    parser.add_argument(
+    g_output.add_argument(
         "--out-dir",
         type=Path,
         default=None,
         help="Output directory for plots (defaults to <detect-run>/plots/ if --detect-run is used)",
     )
-    parser.add_argument(
+    g_baseline.add_argument(
         "--baseline",
         type=str,
         choices=list(BASELINE_FUNCTIONS.keys()),
         default="per_camera_gp",
         help="Baseline function to use",
     )
-    parser.add_argument(
+    g_baseline.add_argument(
         "--logbf-threshold-dip",
         type=float,
         default=5.0,
         help="Log BF threshold for dips",
     )
-    parser.add_argument(
+    g_baseline.add_argument(
         "--logbf-threshold-jump",
         type=float,
         default=5.0,
         help="Log BF threshold for jumps",
     )
-    parser.add_argument(
+    g_baseline.add_argument(
         "--skip-events",
         action="store_true",
         help="Skip Bayesian event detection; plot baseline/residuals only",
     )
-    parser.add_argument(
+    g_baseline.add_argument(
         "--plot-fits",
         action="store_true",
         help="Plot Gaussian/Paczynski fit curves in addition to peak markers.",
     )
-    parser.add_argument(
+    g_baseline.add_argument(
         "--format",
         choices=("png", "pdf"),
         default="png",
         help="Output format for plots (default: png).",
     )
-    parser.add_argument(
+    g_baseline.add_argument(
         "--jd-offset",
         type=float,
         default=JD_OFFSET,
         help="JD offset for plotting (default: 2458000.0)",
     )
-    parser.add_argument(
+    g_baseline.add_argument(
         "--clean-max-error-absolute",
         type=float,
         default=CLEAN_LC_MAX_ERROR_ABSOLUTE,
         help="Absolute error cutoff for clean_lc (default: 1.0)",
     )
-    parser.add_argument(
+    g_baseline.add_argument(
         "--clean-max-error-sigma",
         type=float,
         default=CLEAN_LC_MAX_ERROR_SIGMA,
         help="Sigma cutoff for clean_lc MAD filter (default: 5.0)",
     )
-    parser.add_argument("--gp-sigma", type=float, default=None, help="GP sigma parameter.")
-    parser.add_argument("--gp-rho", type=float, default=None, help="GP rho parameter.")
-    parser.add_argument("--gp-q", type=float, default=None, help="GP Q parameter (default: 0.7).")
-    parser.add_argument("--gp-s0", type=float, default=None, help="GP S0 parameter (alt parameterization).")
-    parser.add_argument("--gp-w0", type=float, default=None, help="GP w0 parameter (alt parameterization).")
-    parser.add_argument("--gp-jitter", type=float, default=None, help="GP jitter term (default: 0.006).")
-    parser.add_argument("--gp-sigma-floor", type=float, default=None, help="Extra GP sigma floor.")
-    parser.add_argument("--gp-floor-clip", type=float, default=None, help="Sigma floor clipping threshold.")
-    parser.add_argument("--gp-floor-iters", type=int, default=None, help="Sigma floor clipping iterations.")
-    parser.add_argument("--gp-min-floor-points", type=int, default=None, help="Minimum points for sigma floor.")
-    parser.add_argument(
+    g_gp.add_argument("--gp-sigma", type=float, default=None, help="GP sigma parameter.")
+    g_gp.add_argument("--gp-rho", type=float, default=None, help="GP rho parameter.")
+    g_gp.add_argument("--gp-q", type=float, default=None, help="GP Q parameter (default: 0.7).")
+    g_gp.add_argument("--gp-s0", type=float, default=None, help="GP S0 parameter (alt parameterization).")
+    g_gp.add_argument("--gp-w0", type=float, default=None, help="GP w0 parameter (alt parameterization).")
+    g_gp.add_argument("--gp-jitter", type=float, default=None, help="GP jitter term (default: 0.006).")
+    g_gp.add_argument("--gp-sigma-floor", type=float, default=None, help="Extra GP sigma floor.")
+    g_gp.add_argument("--gp-floor-clip", type=float, default=None, help="Sigma floor clipping threshold.")
+    g_gp.add_argument("--gp-floor-iters", type=int, default=None, help="Sigma floor clipping iterations.")
+    g_gp.add_argument("--gp-min-floor-points", type=int, default=None, help="Minimum points for sigma floor.")
+    g_general.add_argument(
         "--detection-results",
         type=Path,
         default=None,
         help="Optional detection results CSV for metadata lookup",
     )
-    parser.add_argument("--show", action="store_true", help="Show plots interactively")
-    parser.add_argument("--workers", type=int, default=WORKERS, help="Parallel workers for candidate plotting")
-    parser.add_argument("--no-tqdm", action="store_true", help="Disable progress bars")
-    parser.add_argument("-v", "--verbose", action="store_true", help="Verbose logging")
-    parser.add_argument(
+    g_general.add_argument("--show", action="store_true", help="Show plots interactively")
+    g_general.add_argument("--workers", type=int, default=WORKERS, help="Parallel workers for candidate plotting")
+    g_general.add_argument("--no-tqdm", action="store_true", help="Disable progress bars")
+    g_general.add_argument("-v", "--verbose", action="store_true", help="Verbose logging")
+    g_general.add_argument(
         "--filter-bad-cameras",
         action="store_true",
         default=True,
         help="Filter bad cameras before plotting (default: enabled)",
     )
-    parser.add_argument(
+    g_general.add_argument(
         "--bad-camera-scatter-ratio",
         type=float,
         default=2.5,

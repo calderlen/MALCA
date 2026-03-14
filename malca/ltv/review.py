@@ -6,7 +6,7 @@ candidates into a standalone LTV review DB (separate from STV candidates).
 
 Usage:
     # CLI
-    malca ltv-ingest --input ltv_pipeline_output.csv --db ltv_candidates.db -v
+    malca ltv-ingest --input ltv_build_output.csv --db ltv_candidates.db -v
 
     # Python API
     from malca.ltv.review import ingest_ltv_results
@@ -107,7 +107,7 @@ def map_ltv_columns(df: pd.DataFrame) -> pd.DataFrame:
     Rename LTV pipeline output columns to review DB schema names.
 
     Handles both core-only output (from ltv-core) and full pipeline output
-    (from ltv-pipeline, which adds crossmatch, NEOWISE, dust, extinction).
+    (from ltv-build, which adds crossmatch, NEOWISE, dust, extinction).
 
     Returns a new DataFrame with:
     - candidate_id = "ltv_{asas_sn_id}"
@@ -281,7 +281,7 @@ def ingest_ltv_results(
 
     Args:
         db_path: Path to the LTV review SQLite DB (created if it doesn't exist).
-        ltv_df: DataFrame from ltv-core or ltv-pipeline.
+        ltv_df: DataFrame from ltv-core or ltv-build.
         run_characterize: Run Gaia/dust characterization at ingest time.
             Disable if the pipeline already ran extinction correction and
             Gaia crossmatching.
@@ -339,7 +339,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--input", "-i",
         required=True,
         type=str,
-        help="Path to ltv-pipeline output (CSV or Parquet)",
+        help="Path to LTV build output (CSV or Parquet)",
     )
     p.add_argument(
         "--db",

@@ -402,157 +402,169 @@ def run_full_pipeline(
 
 def add_pipeline_args(parser):
     """Add pipeline arguments to argparse."""
-    parser.add_argument(
+    g_io = parser.add_argument_group("Input / output")
+    g_filters = parser.add_argument_group("Filters")
+    g_crossmatch = parser.add_argument_group("Crossmatch")
+    g_neowise = parser.add_argument_group("NEOWISE")
+    g_extinction = parser.add_argument_group("Extinction & dust")
+    g_gaia_epoch = parser.add_argument_group("Gaia epoch photometry")
+    g_bailer_jones = parser.add_argument_group("Bailer-Jones")
+    g_cmd = parser.add_argument_group("CMD")
+    g_pca = parser.add_argument_group("PCA")
+    g_logging = parser.add_argument_group("Logging")
+    g_general = parser.add_argument_group("General")
+
+    g_io.add_argument(
         "--mag-bin",
         type=str,
         default=None,
         choices=["12_12.5", "12.5_13", "13_13.5", "13.5_14", "14_14.5", "14.5_15"],
         help="Magnitude bin (auto-resolves input/output in output/ltv/)",
     )
-    parser.add_argument(
+    g_io.add_argument(
         "--input",
         type=str,
         default=None,
         help="Input CSV/Parquet from ltv.core (default: output/ltv/LTvar<MAG>.csv)",
     )
-    parser.add_argument(
+    g_io.add_argument(
         "--output",
         type=str,
         default=None,
         help="Output CSV/Parquet for pipeline results (default: output/ltv/LTvar<MAG>_pipeline.csv)",
     )
-    parser.add_argument(
+    g_filters.add_argument(
         "--min-slope",
         type=float,
         default=LTV_MIN_SLOPE,
         help="Minimum |Slope| threshold (mag/yr)",
     )
-    parser.add_argument(
+    g_filters.add_argument(
         "--min-diff",
         type=float,
         default=LTV_MIN_DIFF,
         help="Minimum |max diff| threshold (mag)",
     )
-    parser.add_argument(
+    g_general.add_argument(
         "--n-workers",
         type=int,
         default=LTV_WORKERS,
         help="Number of parallel workers",
     )
-    parser.add_argument(
+    g_general.add_argument(
         "--chunk-size",
         type=int,
         default=LTV_CHUNK_SIZE,
         help="Chunk size for batch queries",
     )
-    parser.add_argument(
+    g_filters.add_argument(
         "--skip-filters",
         action="store_true",
         help="Skip filtering stage",
     )
-    parser.add_argument(
+    g_filters.add_argument(
         "--run-stochastic-postfilter",
         action="store_true",
         help="Compute optional stochastic post-filter features (SF, IAR, MHPS) on surviving candidates",
     )
-    parser.add_argument(
+    g_filters.add_argument(
         "--stochastic-include-drw",
         action="store_true",
         help="Also fit optional GP-DRW features during the stochastic post-filter stage",
     )
-    parser.add_argument(
+    g_crossmatch.add_argument(
         "--skip-crossmatch",
         action="store_true",
         help="Skip catalog crossmatch stage",
     )
-    parser.add_argument(
+    g_crossmatch.add_argument(
         "--no-ztf-periodic",
         action="store_true",
         help="Skip ZTF periodic variables crossmatch (Chen+2020)",
     )
-    parser.add_argument(
+    g_crossmatch.add_argument(
         "--no-ogle-periodic",
         action="store_true",
         help="Skip OGLE periodic variables crossmatch (II/213)",
     )
-    parser.add_argument(
+    g_neowise.add_argument(
         "--skip-neowise",
         action="store_true",
         help="Skip NEOWISE extraction stage",
     )
-    parser.add_argument(
+    g_extinction.add_argument(
         "--skip-extinction",
         action="store_true",
         help="Skip extinction correction stage",
     )
-    parser.add_argument(
+    g_extinction.add_argument(
         "--skip-dust-flags",
         action="store_true",
         help="Skip dust-driven variability flags",
     )
-    parser.add_argument(
+    g_gaia_epoch.add_argument(
         "--skip-gaia-epoch",
         action="store_true",
         help="Skip Gaia epoch photometry stage",
     )
-    parser.add_argument(
+    g_gaia_epoch.add_argument(
         "--gaia-epoch-table",
         type=str,
         default=None,
         help="Gaia TAP epoch photometry table (optional; if omitted, DataLink is used)",
     )
-    parser.add_argument(
+    g_gaia_epoch.add_argument(
         "--gaia-epoch-data-release",
         type=str,
         default=GAIA_EPOCH_DATA_RELEASE,
         help="Gaia data release for DataLink (default: Gaia DR3)",
     )
-    parser.add_argument(
+    g_gaia_epoch.add_argument(
         "--gaia-epoch-data-structure",
         type=str,
         default=GAIA_EPOCH_DATA_STRUCTURE,
         help="DataLink structure: RAW or INDIVIDUAL (default: RAW)",
     )
-    parser.add_argument(
+    g_gaia_epoch.add_argument(
         "--gaia-epoch-band",
         type=str,
         default=None,
         help="Optional band restriction for DataLink (e.g., G, BP, RP)",
     )
-    parser.add_argument(
+    g_gaia_epoch.add_argument(
         "--gaia-epoch-include-invalid",
         action="store_true",
         help="Include invalid epoch photometry (valid_data=False)",
     )
-    parser.add_argument(
+    g_bailer_jones.add_argument(
         "--skip-bailer-jones",
         action="store_true",
         help="Skip Bailer-Jones distance fetch stage",
     )
-    parser.add_argument(
+    g_cmd.add_argument(
         "--skip-cmd",
         action="store_true",
         help="Skip CMD features stage",
     )
-    parser.add_argument(
+    g_logging.add_argument(
         "--log-rejections",
         type=str,
         default=None,
         help="Log rejected sources to this CSV",
     )
-    parser.add_argument(
+    g_pca.add_argument(
         "--run-pca",
         action="store_true",
         help="Run LTV PCA and add ltv_pc1, ltv_pc2, ... to the output table",
     )
-    parser.add_argument(
+    g_pca.add_argument(
         "--pca-n-components",
         type=float,
         default=10,
         metavar="N",
         help="Number of PCA components (int) or variance fraction (float, e.g. 0.95). Default: 10",
     )
-    parser.add_argument(
+    g_general.add_argument(
         "-v", "--verbose",
         action="store_true",
         help="Print progress",

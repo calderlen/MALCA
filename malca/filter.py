@@ -2649,134 +2649,128 @@ Example usage:
   malca filter --input results.csv --output results_filtered.csv --skip-gaia-ruwe-validation --skip-periodic-catalog-validation
 """
     )
+    g_io = parser.add_argument_group("Input / output")
+    g_evidence = parser.add_argument_group("Evidence & significance")
+    g_run = parser.add_argument_group("Run robustness")
+    g_morph = parser.add_argument_group("Morphology")
+    g_score = parser.add_argument_group("Score")
+    g_periodicity = parser.add_argument_group("Periodicity validation")
+    g_gaia_ruwe = parser.add_argument_group("Gaia RUWE")
+    g_gaia_pm = parser.add_argument_group("Gaia proper motion")
+    g_periodic_catalog = parser.add_argument_group("Periodic catalog")
+    g_general = parser.add_argument_group("General")
 
-    # I/O
-    parser.add_argument("--detect-run", type=Path, default=None,
+    g_io.add_argument("--detect-run", type=Path, default=None,
                         help="Detect run directory (e.g., output/runs/20250121_143052). If specified, reads from <detect-run>/results/ and writes filtered results there.")
-    parser.add_argument("--input", type=Path, default=None, help="Input CSV/Parquet from events.py (overrides --detect-run)")
-    parser.add_argument("--output", type=Path, default=None, help="Output CSV/Parquet path (overrides default location)")
-
-    parser.add_argument("--index-file", type=Path, default=ASASSN_INDEX_PATH,
+    g_io.add_argument("--input", type=Path, default=None, help="Input CSV/Parquet from events.py (overrides --detect-run)")
+    g_io.add_argument("--output", type=Path, default=None, help="Output CSV/Parquet path (overrides default location)")
+    g_io.add_argument("--index-file", type=Path, default=ASASSN_INDEX_PATH,
                         help="ASAS-SN index file to join ra_deg/dec_deg coordinates")
 
-    # Filter toggles (all enabled by default except morphology)
-    parser.add_argument("--skip-evidence-strength", action="store_true", help="Skip evidence strength filter (Bayes factor threshold)")
-    parser.add_argument("--skip-significant-detection", action="store_true", help="Skip explicit significant run/peak gate")
-    parser.add_argument("--skip-run-robustness", action="store_true", help="Skip run robustness filter")
-    parser.add_argument("--apply-morphology", action="store_true", help="Apply morphology filter (off by default)")
-
-    # Posterior strength parameters
-    parser.add_argument("--min-bayes-factor", type=float, default=MIN_BAYES_FACTOR,
+    g_evidence.add_argument("--skip-evidence-strength", action="store_true", help="Skip evidence strength filter (Bayes factor threshold)")
+    g_evidence.add_argument("--skip-significant-detection", action="store_true", help="Skip explicit significant run/peak gate")
+    g_evidence.add_argument("--skip-run-robustness", action="store_true", help="Skip run robustness filter")
+    g_evidence.add_argument("--apply-morphology", action="store_true", help="Apply morphology filter (off by default)")
+    g_evidence.add_argument("--min-bayes-factor", type=float, default=MIN_BAYES_FACTOR,
                         help="Minimum Bayes factor for posterior strength filter (default: 10)")
-    parser.add_argument("--allow-infinite-local-bf", action="store_true",
+    g_evidence.add_argument("--allow-infinite-local-bf", action="store_true",
                         help="Allow infinite local BF (default: require finite)")
-
-    # Significant detection gate parameters
-    parser.add_argument("--significant-no-require-flag", action="store_true",
+    g_evidence.add_argument("--significant-no-require-flag", action="store_true",
                         help="Do not require dip_significant/jump_significant for significant detection gate")
-    parser.add_argument("--significant-min-peak-count", type=int, default=1,
+    g_evidence.add_argument("--significant-min-peak-count", type=int, default=1,
                         help="Minimum dip_count/jump_count for significant detection gate (default: 1)")
-    parser.add_argument("--significant-min-run-count", type=int, default=1,
+    g_evidence.add_argument("--significant-min-run-count", type=int, default=1,
                         help="Minimum dip_run_count/jump_run_count for significant detection gate (default: 1)")
 
-    # Run robustness parameters
-    parser.add_argument("--min-run-count", type=int, default=1,
+    g_run.add_argument("--min-run-count", type=int, default=1,
                         help="Minimum number of runs (default: 1)")
-    parser.add_argument("--max-run-count", type=int, default=None,
+    g_run.add_argument("--max-run-count", type=int, default=None,
                         help="Maximum number of runs (default: disabled)")
-    parser.add_argument("--min-run-points", type=int, default=POST_FILTER_MIN_RUN_POINTS,
+    g_run.add_argument("--min-run-points", type=int, default=POST_FILTER_MIN_RUN_POINTS,
                         help="Minimum points per run (default: 2)")
-    parser.add_argument("--min-run-cameras", type=int, default=POST_FILTER_MIN_RUN_CAMERAS,
+    g_run.add_argument("--min-run-cameras", type=int, default=POST_FILTER_MIN_RUN_CAMERAS,
                         help="Minimum cameras per run (default: 2)")
 
-    # Morphology parameters
-    parser.add_argument("--dip-morphology", type=str, default="gaussian",
+    g_morph.add_argument("--dip-morphology", type=str, default="gaussian",
                         choices=["gaussian", "paczynski"],
                         help="Required morphology for dips (default: gaussian)")
-    parser.add_argument("--jump-morphology", type=str, default="paczynski",
+    g_morph.add_argument("--jump-morphology", type=str, default="paczynski",
                         choices=["gaussian", "paczynski"],
                         help="Required morphology for jumps (default: paczynski)")
-    parser.add_argument("--min-delta-bic", type=float, default=POST_FILTER_MIN_DELTA_BIC,
+    g_morph.add_argument("--min-delta-bic", type=float, default=POST_FILTER_MIN_DELTA_BIC,
                         help="Minimum delta BIC for morphology filter (default: 10)")
 
-    # Score filter parameters
-    parser.add_argument("--apply-score-filter", action="store_true",
+    g_score.add_argument("--apply-score-filter", action="store_true",
                         help="Apply event score filter (off by default)")
-    parser.add_argument("--min-score", type=float, default=POST_FILTER_MIN_DIP_SCORE,
+    g_score.add_argument("--min-score", type=float, default=POST_FILTER_MIN_DIP_SCORE,
                         help="Legacy minimum log10 event score applied to dip and jump branches (default: -3.0)")
-    parser.add_argument("--min-dip-score", type=float, default=None,
+    g_score.add_argument("--min-dip-score", type=float, default=None,
                         help="Minimum dipper_score threshold (overrides --min-score for dips)")
-    parser.add_argument("--min-jump-score", type=float, default=None,
+    g_score.add_argument("--min-jump-score", type=float, default=None,
                         help="Minimum jumper_score threshold (overrides --min-score for jumps)")
 
-    # Periodicity validation parameters
-    parser.add_argument("--apply-periodicity-validation", action="store_true",
+    g_periodicity.add_argument("--apply-periodicity-validation", action="store_true",
                         help="Apply bootstrap PDM/CE periodicity validation (off by default)")
-    parser.add_argument("--periodicity-n-bootstrap", type=int, default=1000,
+    g_periodicity.add_argument("--periodicity-n-bootstrap", type=int, default=1000,
                         help="Number of bootstrap iterations (default: 1000)")
-    parser.add_argument("--periodicity-significance", type=float, default=0.01,
+    g_periodicity.add_argument("--periodicity-significance", type=float, default=0.01,
                         help="Significance threshold (default: 0.01)")
-    parser.add_argument("--periodicity-no-exclude-aliases", action="store_true",
+    g_periodicity.add_argument("--periodicity-no-exclude-aliases", action="store_true",
                         help="Do not exclude alias periods (1d, 29.53d, etc.)")
-    parser.add_argument("--periodicity-reject", action="store_true",
+    g_periodicity.add_argument("--periodicity-reject", action="store_true",
                         help="Reject periodic candidates (default: flag only)")
-    parser.add_argument("--periodicity-force-bootstrap", action="store_true",
+    g_periodicity.add_argument("--periodicity-force-bootstrap", action="store_true",
                         help="Force bootstrap periodicity checks even if consensus period is found")
-    parser.add_argument("--workers", type=int, default=WORKERS,
+    g_periodicity.add_argument("--workers", type=int, default=WORKERS,
                         help="Number of parallel workers for periodicity validation (default: 10)")
-    parser.add_argument("--checkpoint-dir", type=Path, default=None,
+    g_periodicity.add_argument("--checkpoint-dir", type=Path, default=None,
                         help="Directory for checkpoints (enables resume on restart)")
-    parser.add_argument("--phase-plot-max-sig", type=float, default=0.01,
+    g_periodicity.add_argument("--phase-plot-max-sig", type=float, default=0.01,
                         help="Require lsp_bootstrap_sig <= this for phase plots (default: 0.01)")
-    parser.add_argument("--phase-plot-min-power", type=float, default=0.3,
+    g_periodicity.add_argument("--phase-plot-min-power", type=float, default=0.3,
                         help="Require lsp_power >= this for phase plots (default: 0.3)")
-    parser.add_argument("--phase-plot-allow-alias", action="store_true",
+    g_periodicity.add_argument("--phase-plot-allow-alias", action="store_true",
                         help="Allow alias periods for phase plots (default: disabled)")
 
-
-    # Gaia RUWE validation parameters
-    parser.add_argument("--skip-gaia-ruwe-validation", action="store_true",
+    g_gaia_ruwe.add_argument("--skip-gaia-ruwe-validation", action="store_true",
                         help="Skip Gaia RUWE validation (on by default, queries Gaia TAP)")
-    parser.add_argument("--gaia-max-ruwe", type=float, default=POST_FILTER_MAX_RUWE,
+    g_gaia_ruwe.add_argument("--gaia-max-ruwe", type=float, default=POST_FILTER_MAX_RUWE,
                         help="Maximum RUWE to keep (default: 1.4)")
-    parser.add_argument("--gaia-reject", action="store_true",
+    g_gaia_ruwe.add_argument("--gaia-reject", action="store_true",
                         help="Reject high RUWE sources (default: flag only)")
 
-    # Gaia proper-motion validation parameters
-    parser.add_argument("--skip-gaia-pm-validation", action="store_true",
+    g_gaia_pm.add_argument("--skip-gaia-pm-validation", action="store_true",
                         help="Skip Gaia proper-motion validation (on by default, uses local Gaia cache)")
-    parser.add_argument("--gaia-max-pm", type=float, default=POST_FILTER_MAX_PM,
+    g_gaia_pm.add_argument("--gaia-max-pm", type=float, default=POST_FILTER_MAX_PM,
                         help="Maximum total proper motion to keep in mas/yr (default: 100.0)")
-    parser.add_argument("--gaia-pm-reject", action="store_true",
+    g_gaia_pm.add_argument("--gaia-pm-reject", action="store_true",
                         help="Reject high proper-motion sources (default: flag only)")
 
-    # Periodic catalog validation parameters
-    parser.add_argument("--skip-periodic-catalog-validation", action="store_true",
+    g_periodic_catalog.add_argument("--skip-periodic-catalog-validation", action="store_true",
                         help="Skip periodic-catalog consensus validation (on by default)")
-    parser.add_argument("--periodic-catalog-max-sep", type=float, default=POST_FILTER_MAX_SEP_ARCSEC,
+    g_periodic_catalog.add_argument("--periodic-catalog-max-sep", type=float, default=POST_FILTER_MAX_SEP_ARCSEC,
                         help="Maximum separation in arcsec for coordinate fallback matches (default: 3.0)")
-    parser.add_argument("--periodic-catalog-consensus-rel-tol", type=float, default=POST_FILTER_REL_TOL,
+    g_periodic_catalog.add_argument("--periodic-catalog-consensus-rel-tol", type=float, default=POST_FILTER_REL_TOL,
                         help="Relative tolerance for period-consensus agreement (default: 0.10)")
-    parser.add_argument("--periodic-catalog-vsx-crossmatch", type=Path, default=VSX_CROSSMATCH_PATH,
+    g_periodic_catalog.add_argument("--periodic-catalog-vsx-crossmatch", type=Path, default=VSX_CROSSMATCH_PATH,
                         help="ASAS-SN x VSX crossmatch CSV used for VSX period lookup")
-    parser.add_argument("--periodic-catalog-no-gaia-eb", action="store_true",
+    g_periodic_catalog.add_argument("--periodic-catalog-no-gaia-eb", action="store_true",
                         help="Disable Gaia EB period evidence in periodic-catalog validation")
-    parser.add_argument("--periodic-catalog-no-asassn-var", action="store_true",
+    g_periodic_catalog.add_argument("--periodic-catalog-no-asassn-var", action="store_true",
                         help="Disable ASAS-SN variable catalog evidence in periodic-catalog validation")
-    parser.add_argument("--periodic-catalog-no-ztf", action="store_true",
+    g_periodic_catalog.add_argument("--periodic-catalog-no-ztf", action="store_true",
                         help="Disable ZTF periodic catalog evidence in periodic-catalog validation")
-    parser.add_argument("--periodic-catalog-no-vsx", action="store_true",
+    g_periodic_catalog.add_argument("--periodic-catalog-no-vsx", action="store_true",
                         help="Disable VSX period evidence in periodic-catalog validation")
-    parser.add_argument("--periodic-catalog-no-ogle", action="store_true",
+    g_periodic_catalog.add_argument("--periodic-catalog-no-ogle", action="store_true",
                         help="Disable OGLE period evidence in periodic-catalog validation")
-    parser.add_argument("--periodic-catalog-reject", action="store_true",
+    g_periodic_catalog.add_argument("--periodic-catalog-reject", action="store_true",
                         help="Reject catalog matches (default: flag only)")
-    parser.add_argument("--home-passers-only", action="store_true",
+    g_periodic_catalog.add_argument("--home-passers-only", action="store_true",
                         help="Run home-only validations only on rows that already pass upstream filters")
 
-    # General options
-    parser.add_argument("--no-tqdm", action="store_true", help="Disable progress bars")
-    parser.add_argument("-v", "--verbose", action="store_true", help="Print per-filter summaries (default: off)")
+    g_general.add_argument("--no-tqdm", action="store_true", help="Disable progress bars")
+    g_general.add_argument("-v", "--verbose", action="store_true", help="Print per-filter summaries (default: off)")
 
     args = parser.parse_args()
 
