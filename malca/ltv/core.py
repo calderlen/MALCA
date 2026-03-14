@@ -89,7 +89,6 @@ class Config:
     # Parallel processing options
     workers: int
     chunk_size: int
-    resume: bool
     overwrite: bool
 
 
@@ -110,8 +109,6 @@ def _build_config(a, mag_bin: str) -> Config:
         out = str(LTV_OUTPUT_DIR / f"LTvar{mag_bin.replace('_','-')}.parquet")
     output = Path(out)
 
-    resume = bool(a.resume or a.overwrite)
-
     return Config(
         root=root,
         mag_bin=mag_bin,
@@ -125,7 +122,6 @@ def _build_config(a, mag_bin: str) -> Config:
         band_mode=str(a.band_mode),
         workers=int(a.workers),
         chunk_size=int(a.chunk_size),
-        resume=resume,
         overwrite=bool(a.overwrite),
     )
 
@@ -188,12 +184,9 @@ def parse_args() -> tuple[list[Config], bool]:
                    type=int,
                    default=LTV_CORE_CHUNK_SIZE,
                    help="Number of results to accumulate before writing (default: 10000)")
-    p.add_argument("--resume",
-                   action="store_true",
-                   help="Enable checkpointing to resume interrupted runs")
     p.add_argument("-o", "--overwrite",
                    action="store_true",
-                   help="Overwrite existing checkpoint log when resuming (implies --resume)")
+                   help="Start fresh by clearing the checkpoint log instead of resuming prior progress")
 
     a = p.parse_args()
 
@@ -1035,10 +1028,10 @@ def run_mag_bin(cfg: Config) -> None:
     print(f"Workers: {cfg.workers}, Chunk size: {cfg.chunk_size}, Output: chunked parquet dataset")
 
     output_path = Path(cfg.output)
-    checkpoint_log = output_path.with_name(f"{output_path.stem}_PROCESSED.txt") if cfg.resume else None
+    checkpoint_log = output_path.with_name(f"{output_path.stem}_PROCESSED.txt")
 
     processed_files = set()
-    if checkpoint_log is not None and checkpoint_log.exists() and cfg.overwrite:
+    if checkpoint_log.exists() and cfg.overwrite:
         try:
             with open(checkpoint_log, "w"):
                 pass
@@ -1046,7 +1039,7 @@ def run_mag_bin(cfg: Config) -> None:
         except Exception as e:
             print(f"Warning: could not overwrite checkpoint log {checkpoint_log}: {e}")
 
-    if checkpoint_log is not None and checkpoint_log.exists() and not cfg.overwrite:
+    if checkpoint_log.exists() and not cfg.overwrite:
         print(f"Resume mode: loading checkpoint from {checkpoint_log}")
         with open(checkpoint_log, "r") as f:
             processed_files = set(line.strip() for line in f)
@@ -1094,10 +1087,9 @@ def run_mag_bin(cfg: Config) -> None:
 
             writer.write_chunk(chunk_results)
 
-            if checkpoint_log:
-                with open(checkpoint_log, "a") as f:
-                    for row in chunk_results:
-                        f.write(row.get('_path', '') + "\n")
+            with open(checkpoint_log, "a") as f:
+                for row in chunk_results:
+                    f.write(row.get('_path', '') + "\n")
 
             total_written += len(chunk_results)
             print(f"Wrote chunk: {len(chunk_results)} rows (total: {total_written})")
