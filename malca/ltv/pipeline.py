@@ -103,6 +103,8 @@ def run_full_pipeline(
     include_vsx: bool = True,
     include_milliquas: bool = True,
     include_simbad: bool = True,
+    include_ztf_periodic: bool = True,
+    include_ogle_periodic: bool = True,
     match_radius_arcsec: float = LTV_MATCH_RADIUS_ARCSEC,
     # Parallel processing
     n_workers: int = LTV_WORKERS,
@@ -213,6 +215,8 @@ def run_full_pipeline(
             include_vsx=include_vsx,
             include_milliquas=include_milliquas,
             include_simbad=include_simbad,
+            include_ztf_periodic=include_ztf_periodic,
+            include_ogle_periodic=include_ogle_periodic,
             sydney_csv_path=SYDNEY_LTV_CSV_PATH,
             match_radius_arcsec=match_radius_arcsec,
             n_workers=n_workers,
@@ -462,6 +466,16 @@ def add_pipeline_args(parser):
         help="Skip catalog crossmatch stage",
     )
     parser.add_argument(
+        "--no-ztf-periodic",
+        action="store_true",
+        help="Skip ZTF periodic variables crossmatch (Chen+2020)",
+    )
+    parser.add_argument(
+        "--no-ogle-periodic",
+        action="store_true",
+        help="Skip OGLE periodic variables crossmatch (II/213)",
+    )
+    parser.add_argument(
         "--skip-neowise",
         action="store_true",
         help="Skip NEOWISE extraction stage",
@@ -581,6 +595,8 @@ def run_pipeline_cli(args):
         run_stochastic_postfilter=args.run_stochastic_postfilter,
         stochastic_include_drw=args.stochastic_include_drw,
         run_crossmatch=not args.skip_crossmatch,
+        include_ztf_periodic=not args.no_ztf_periodic,
+        include_ogle_periodic=not args.no_ogle_periodic,
         run_neowise=not args.skip_neowise,
         run_extinction=not args.skip_extinction,
         run_dust_flags=not args.skip_dust_flags,

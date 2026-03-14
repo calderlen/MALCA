@@ -275,7 +275,6 @@ def build_ltv_config(args: argparse.Namespace) -> Config:
         band_mode=str(args.band_mode),
         workers=1,
         chunk_size=1,
-        resume=False,
         overwrite=False,
     )
 
@@ -463,6 +462,46 @@ def compute_plot_tables(
     return tables
 
 
+def _format_mag_slice_label(interval: pd.Interval) -> str:
+    left = f"{float(interval.left):.2f}".replace(".", "p")
+    right = f"{float(interval.right):.2f}".replace(".", "p")
+    return f"gmag_{left}_{right}"
+
+
+def compute_magnitude_slices(
+    results_df: pd.DataFrame,
+    *,
+    mag_column: str = "pstarrs_g_mag",
+    n_slices: int = 4,
+) -> list[tuple[str, str, pd.DataFrame]]:
+    if mag_column not in results_df.columns or n_slices <= 0:
+        return []
+
+    df = results_df.copy()
+    valid = df[mag_column].notna()
+    if valid.sum() < max(2, n_slices):
+        return []
+
+    try:
+        bins = pd.qcut(df.loc[valid, mag_column], q=n_slices, duplicates="drop")
+    except ValueError:
+        return []
+
+    if bins.empty:
+        return []
+
+    df.loc[valid, "_mag_slice"] = bins.astype(str)
+    slices: list[tuple[str, str, pd.DataFrame]] = []
+    for interval in bins.cat.categories:
+        slice_index = bins[bins == interval].index
+        if len(slice_index) == 0:
+            continue
+        label = _format_mag_slice_label(interval)
+        display = f"{float(interval.left):.2f} <= g < {float(interval.right):.2f}"
+        slices.append((label, display, df.loc[slice_index].copy()))
+    return slices
+
+
 def save_plot_tables(plot_tables: dict[str, pd.DataFrame], output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     for name, table in plot_tables.items():
@@ -546,6 +585,7 @@ def generate_plots(
     timescale_values: np.ndarray,
     output_dir: Path,
     top_n_reasons: int = 4,
+    n_mag_slices: int = 4,
 ) -> dict[str, pd.DataFrame]:
     output_dir.mkdir(parents=True, exist_ok=True)
     summary = compute_rejection_summary(results_df)
@@ -582,6 +622,41 @@ def generate_plots(
             cmap="magma",
         )
         plt.close(fig)
+
+    mag_slices = compute_magnitude_slices(results_df, n_slices=n_mag_slices)
+    if mag_slices:
+        mag_slice_dir = output_dir / "magnitude_slices"
+        mag_slice_tables_dir = output_dir / "plot_tables" / "magnitude_slices"
+        for label, display, slice_df in mag_slices:
+            slice_plot_tables = compute_plot_tables(
+                slice_df,
+                amplitude_values=amplitude_values,
+                timescale_values=timescale_values,
+                top_n_reasons=top_n_reasons,
+            )
+            save_plot_tables(slice_plot_tables, mag_slice_tables_dir / label)
+
+            fig = plot_heatmap(
+                slice_plot_tables["pass_fraction"],
+                title=f"LTV Pass Fraction ({display})",
+                output_path=mag_slice_dir / f"{label}_pass_fraction_heatmap.png",
+                colorbar_label="Pass Fraction",
+                cmap="viridis",
+            )
+            plt.close(fig)
+
+            for name, table in slice_plot_tables.items():
+                if name == "pass_fraction":
+                    continue
+                reason = name.replace("rejection_", "")
+                fig = plot_heatmap(
+                    table,
+                    title=f"Fraction Rejected by {reason} ({display})",
+                    output_path=mag_slice_dir / f"{label}_{name}_heatmap.png",
+                    colorbar_label="Rejection Fraction",
+                    cmap="magma",
+                )
+                plt.close(fig)
 
     return plot_tables
 
@@ -757,6 +832,7 @@ Output structure (default --out-dir output/ltv/injection):
         pass_fraction_heatmap.png
         rejection_<reason>_heatmap.png
         plot_tables/
+        magnitude_slices/
     latest -> 20260314_101500/
 """,
     )
@@ -812,6 +888,7 @@ Output structure (default --out-dir output/ltv/injection):
     parser.add_argument("--filter-workers", type=int, default=LTV_WORKERS)
 
     parser.add_argument("--top-reasons", type=int, default=4, help="Number of rejection reasons to plot as heatmaps.")
+    parser.add_argument("--mag-slices", type=int, default=4, help="Number of magnitude slices for sliced heatmaps.")
     parser.add_argument("--skip-plots", action="store_true", help="Skip figure generation.")
 
     args = parser.parse_args()
@@ -895,6 +972,7 @@ Output structure (default --out-dir output/ltv/injection):
             timescale_values=timescale_values,
             output_dir=plots_dir,
             top_n_reasons=int(args.top_reasons),
+            n_mag_slices=int(args.mag_slices),
         )
     save_results_artifacts(results_df, results_dir=results_dir, plot_tables=plot_tables)
 

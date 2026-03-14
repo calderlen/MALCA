@@ -1551,9 +1551,10 @@ def validate_periodicity(
     if workers > 1 and len(paths_to_process) > 0:
         # Parallel execution
         actual_workers = min(workers, cpu_count(), len(paths_to_process))
-        
-        with Pool(processes=actual_workers) as pool:
-            iterator = pool.imap_unordered(_lsp_worker, worker_args)
+        chunksize = max(1, len(worker_args) // (actual_workers * 4))
+
+        with Pool(processes=actual_workers, maxtasksperchild=50) as pool:
+            iterator = pool.imap_unordered(_lsp_worker, worker_args, chunksize=chunksize)
             if show_tqdm:
                 iterator = tqdm(iterator, total=len(paths_to_process), desc="Periodicity validation")
             

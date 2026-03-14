@@ -38,6 +38,11 @@ from malca.config.config_ltv import (
 )
 from malca.config.config_paths import VSX_CROSSMATCH_PATH
 from malca.utils import batch_tap_crossmatch as shared_batch_tap_crossmatch
+from malca.filter import (
+    fetch_chen2020_ztf_periodic,
+    fetch_ogle_periodic_catalog,
+    _match_period_catalog,
+)
 
 
 
@@ -776,6 +781,85 @@ def crossmatch_sydney_ltv(
 
 
 # =============================================================================
+# ZTF AND OGLE PERIODIC (reuse filter.py fetch + match)
+# =============================================================================
+
+def crossmatch_ztf_periodic(
+    df: pd.DataFrame,
+    *,
+    match_radius_arcsec: float = LTV_MATCH_RADIUS_ARCSEC,
+    verbose: bool = False,
+) -> pd.DataFrame:
+    """Crossmatch to ZTF periodic variables (Chen+2020). Adds period_ztf_periodic_* columns."""
+    if "ra_deg" not in df.columns or "dec_deg" not in df.columns:
+        if verbose:
+            print("  [ZTF periodic] Skipping: ra_deg/dec_deg not found")
+        return df
+
+    added_gaia_id = False
+    if "gaia_source_id" in df.columns and "gaia_id" not in df.columns:
+        df = df.assign(gaia_id=df["gaia_source_id"])
+        added_gaia_id = True
+
+    try:
+        ztf_cat = fetch_chen2020_ztf_periodic(show_tqdm=verbose)
+    except Exception as e:
+        if verbose:
+            print(f"  [ZTF periodic] Fetch failed: {e}")
+        if added_gaia_id:
+            df = df.drop(columns=["gaia_id"])
+        return df
+
+    ztf_match = _match_period_catalog(
+        df,
+        ztf_cat,
+        source_label="ztf_periodic",
+        max_sep_arcsec=match_radius_arcsec,
+        period_col="period",
+        class_col="var_type",
+        gaia_col="gaia_id",
+        show_tqdm=verbose,
+    )
+    df = pd.concat([df, ztf_match], axis=1)
+    if added_gaia_id:
+        df = df.drop(columns=["gaia_id"])
+    return df
+
+
+def crossmatch_ogle_periodic(
+    df: pd.DataFrame,
+    *,
+    match_radius_arcsec: float = LTV_MATCH_RADIUS_ARCSEC,
+    verbose: bool = False,
+) -> pd.DataFrame:
+    """Crossmatch to OGLE periodic variables (II/213). Adds period_ogle_* columns."""
+    if "ra_deg" not in df.columns or "dec_deg" not in df.columns:
+        if verbose:
+            print("  [OGLE periodic] Skipping: ra_deg/dec_deg not found")
+        return df
+
+    try:
+        ogle_cat = fetch_ogle_periodic_catalog(show_tqdm=verbose)
+    except Exception as e:
+        if verbose:
+            print(f"  [OGLE periodic] Fetch failed: {e}")
+        return df
+
+    ogle_match = _match_period_catalog(
+        df,
+        ogle_cat,
+        source_label="ogle",
+        max_sep_arcsec=match_radius_arcsec,
+        period_col="period",
+        class_col="var_type",
+        gaia_col="gaia_id",
+        show_tqdm=verbose,
+    )
+    df = pd.concat([df, ogle_match], axis=1)
+    return df
+
+
+# =============================================================================
 # COMBINED CROSSMATCH
 # =============================================================================
 
@@ -792,6 +876,8 @@ def crossmatch_all_catalogs(
     include_milliquas: bool = True,
     include_simbad: bool = True,
     include_sydney_ltv: bool = True,
+    include_ztf_periodic: bool = True,
+    include_ogle_periodic: bool = True,
     sydney_csv_path: str | Path | None = None,
     match_radius_arcsec: float = LTV_MATCH_RADIUS_ARCSEC,
     n_workers: int = LTV_WORKERS,
@@ -860,7 +946,11 @@ def crossmatch_all_catalogs(
         api_queries_needed.append("SIMBAD")
     if include_sydney_ltv:
         api_queries_needed.append("2MASS (for Sydney LTV)")
-    
+    if include_ztf_periodic:
+        api_queries_needed.append("ZTF periodic")
+    if include_ogle_periodic:
+        api_queries_needed.append("OGLE periodic")
+
     if verbose and api_queries_needed:
         print(f"  API queries needed: {', '.join(api_queries_needed)}")
     
@@ -878,7 +968,20 @@ def crossmatch_all_catalogs(
         df = crossmatch_2mass(df, match_radius_arcsec=match_radius_arcsec, n_workers=n_workers, verbose=verbose)
         if sydney_csv_path:
             df = crossmatch_sydney_ltv(df, sydney_csv_path=sydney_csv_path, verbose=verbose)
-    
+
+    if include_ztf_periodic:
+        df = crossmatch_ztf_periodic(
+            df,
+            match_radius_arcsec=match_radius_arcsec,
+            verbose=verbose,
+        )
+    if include_ogle_periodic:
+        df = crossmatch_ogle_periodic(
+            df,
+            match_radius_arcsec=match_radius_arcsec,
+            verbose=verbose,
+        )
+
     if verbose:
         print(f"[crossmatch_all_catalogs] Complete")
         if "gaia_source_id" in df.columns:
@@ -893,5 +996,11 @@ def crossmatch_all_catalogs(
             print(f"  2MASS: {df['2MASS_ID'].notna().sum()}/{len(df)} matched")
         if "sydney_Class" in df.columns:
             print(f"  Sydney LTV: {df['sydney_Class'].notna().sum()}/{len(df)} matched")
-    
+        if "period_ztf_periodic_match" in df.columns:
+            n_ztf = df["period_ztf_periodic_match"].sum()
+            print(f"  ZTF periodic: {int(n_ztf)}/{len(df)} matched")
+        if "period_ogle_match" in df.columns:
+            n_ogle = df["period_ogle_match"].sum()
+            print(f"  OGLE periodic: {int(n_ogle)}/{len(df)} matched")
+
     return df

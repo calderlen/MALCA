@@ -1253,7 +1253,8 @@ def main():
                 args.lc_root,
                 mag_bins=args.mag_bin,
                 id_column="asas_sn_id",
-                show_progress=args.verbose
+                show_progress=args.verbose,
+                n_workers=args.workers,
             )
 
             # Only keep sources where .dat2 or .csv files exist
@@ -1434,11 +1435,17 @@ def main():
 
         log(f"\nRunning batch {batch_idx + 1}/{total_batches} ({len(batch_paths)} LCs)...")
 
+        # Use --input-file to avoid long argv (ARG_MAX) for large batches
+        batch_paths_file = paths_dir / f"batch_paths_{mag_bin_tag}_{batch_idx}.txt"
+        with open(batch_paths_file, "w") as f:
+            for p in batch_paths:
+                f.write(f"{p}\n")
+
         events_cmd = [
             sys.executable, "-m", "malca.events",
             *events_args,
-            "--input",
-            *batch_paths,
+            "--input-file",
+            str(batch_paths_file),
         ]
 
         # Execute

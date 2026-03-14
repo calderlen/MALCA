@@ -35,6 +35,7 @@ Usage:
     malca ltv-pca fit-apply [options]  # Fit LTV PCA and add ltv_pc1, ltv_pc2, ... to table
     malca ltv-pca apply [options]      # Apply saved LTV PCA model to a table
     malca ltv-ingest [options]     # Ingest LTV pipeline results into a review DB
+    malca ltv-bundle [options]     # Bundle .dat2 files for LTV candidates
 """
 import argparse
 import importlib
@@ -63,7 +64,7 @@ def main():
         "stats", "attrition", "review", "review-refresh", "review-merge", "review-explore",
         "neighbors", "spectra", "false_positive", "ml_train", "ml_predict", "vsx-filter", "vsx-crossmatch",
         "vetting",
-        "ltv-core", "ltv-pipeline", "ltv-injection", "ltv-pca", "ltv-ingest",
+        "ltv-core", "ltv-pipeline", "ltv-injection", "ltv-pca", "ltv-ingest", "ltv-bundle",
     ]:
         command = sys.argv[1]
         remaining = sys.argv[2:]
@@ -155,6 +156,8 @@ def main():
             _run_module_main("malca.ltv.pca", remaining)
         elif command == "ltv-ingest":
             _run_module_main("malca.ltv.review", remaining)
+        elif command == "ltv-bundle":
+            _run_module_main("malca.ltv.bundle", remaining)
         return 0
     
     # If no subcommand or just --help for main, show main help
@@ -200,6 +203,7 @@ def main():
     subparsers.add_parser("ltv-injection", help="Run LTV rejection-recovery injections and plots")
     subparsers.add_parser("ltv-pca", help="Fit/apply LTV PCA (fit-apply | apply)")
     subparsers.add_parser("ltv-ingest", help="Ingest LTV pipeline results into a review DB")
+    subparsers.add_parser("ltv-bundle", help="Bundle .dat2 files for LTV candidates passing slope/diff filters")
 
     parser.print_help()
     return 0

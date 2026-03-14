@@ -32,7 +32,6 @@ def _test_cfg() -> Config:
         band_mode="g_only",
         workers=1,
         chunk_size=1,
-        resume=False,
         overwrite=False,
     )
 
@@ -69,6 +68,7 @@ def test_compute_rejection_summary_and_plot_tables() -> None:
         {
             "amplitude_mag": [0.1, 0.1, 0.5, 0.5],
             "timescale_days": [10.0, 100.0, 10.0, 100.0],
+            "pstarrs_g_mag": [13.0, 14.0, 15.0, 16.0],
             "passed": [True, False, True, False],
             "filter_reason": ["passed", "mock_filter", "passed", "core_no_metrics"],
         }
@@ -85,6 +85,8 @@ def test_compute_rejection_summary_and_plot_tables() -> None:
     )
     assert "pass_fraction" in plot_tables
     assert plot_tables["pass_fraction"].shape == (2, 2)
+    mag_slices = ltv_injection.compute_magnitude_slices(df, n_slices=2)
+    assert len(mag_slices) == 2
 
 
 def test_generate_plots_writes_expected_files(tmp_path: Path) -> None:
@@ -92,6 +94,7 @@ def test_generate_plots_writes_expected_files(tmp_path: Path) -> None:
         {
             "amplitude_mag": [0.1, 0.1, 0.5, 0.5],
             "timescale_days": [10.0, 100.0, 10.0, 100.0],
+            "pstarrs_g_mag": [13.0, 14.0, 15.0, 16.0],
             "passed": [True, False, True, False],
             "filter_reason": ["passed", "mock_filter", "passed", "core_no_metrics"],
         }
@@ -103,11 +106,16 @@ def test_generate_plots_writes_expected_files(tmp_path: Path) -> None:
         timescale_values=np.array([10.0, 100.0]),
         output_dir=tmp_path,
         top_n_reasons=2,
+        n_mag_slices=2,
     )
 
     assert (tmp_path / "rejection_reason_counts.png").exists()
     assert (tmp_path / "pass_fraction_heatmap.png").exists()
     assert (tmp_path / "plot_tables" / "pass_fraction.csv").exists()
+    slice_files = list((tmp_path / "magnitude_slices").glob("*_pass_fraction_heatmap.png"))
+    assert len(slice_files) == 2
+    slice_table_dirs = list((tmp_path / "plot_tables" / "magnitude_slices").glob("gmag_*"))
+    assert len(slice_table_dirs) == 2
 
 
 def test_run_injection_recovery_writes_trial_outputs(
@@ -184,6 +192,7 @@ def test_run_injection_recovery_writes_trial_outputs(
         amplitude_values=np.array([0.1, 0.5]),
         timescale_values=np.array([10.0, 100.0]),
         output_dir=tmp_path / "plots",
+        n_mag_slices=1,
     )
     ltv_injection.save_results_artifacts(results_df, results_dir=tmp_path / "artifacts", plot_tables=plot_tables)
 

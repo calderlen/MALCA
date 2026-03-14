@@ -1434,9 +1434,26 @@ def process_lightcurve(
     )
 
 
+# Shared config for ProcessPoolExecutor workers (set once per worker via initializer)
+_worker_config: dict = {}
+
+
+def _init_worker(config: dict) -> None:
+    """Store config in this worker process so _process_one can read it (avoids re-serializing for every path)."""
+    global _worker_config
+    _worker_config.clear()
+    _worker_config.update(config)
+
+
+def _process_one(path: str, excluded_cameras: str | None) -> dict:
+    """Process a single light curve using config from _worker_config. Called by executor with minimal per-task args."""
+    return process_lightcurve(path, excluded_cameras=excluded_cameras, **_worker_config)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run Bayesian event scoring on light curves in parallel.")
     parser.add_argument("--input", dest="input_patterns", nargs="*", default=None, help="Paths or globs to light-curve files (repeatable).")
+    parser.add_argument("--input-file", type=str, default=None, help="Read paths from file (one path per line); avoids long argv for large batches.")
     parser.add_argument("--mag-bin", dest="mag_bins", action="append", choices=MAG_BINS, help="Process all light curves in this magnitude bin (choices: 12_12.5, 12.5_13, 13_13.5, 13.5_14, 14_14.5, 14.5_15).")
     parser.add_argument("--lc-path", type=str, default=str(LCV2_ROOT), help="Base path to light curve directories")
     parser.add_argument("--workers", type=int, default=WORKERS, help="Number of worker processes")
@@ -1603,6 +1620,12 @@ def main():
     input_patterns: list[str] = []
     if args.input_patterns:
         input_patterns.extend(args.input_patterns)
+    if args.input_file:
+        with open(args.input_file) as f:
+            for line in f:
+                p = line.strip()
+                if p:
+                    input_patterns.append(p)
 
     expanded_inputs = []
     if args.mag_bins:
@@ -1821,7 +1844,7 @@ def main():
                 f"(dip_sig={total_dip_sig}, jump_sig={total_jump_sig}, any_sig={total_any_sig})"
             , quiet)
 
-    # Build baseline_kwargs from CLI args
+    # Build shared config once (serialized once per worker via initializer, not per path)
     baseline_kwargs = dict(
         S0=args.baseline_s0,
         w0=args.baseline_w0,
@@ -1830,11 +1853,39 @@ def main():
         sigma_floor=args.baseline_sigma_floor,
         add_sigma_eff_col=True,
     )
+    worker_config = {
+        "trigger_mode": args.trigger_mode,
+        "logbf_threshold_dip": args.logbf_threshold_dip,
+        "logbf_threshold_jump": args.logbf_threshold_jump,
+        "significance_threshold": args.significance_threshold,
+        "p_points": args.p_points,
+        "p_min_dip": args.p_min_dip,
+        "p_max_dip": args.p_max_dip,
+        "p_min_jump": args.p_min_jump,
+        "p_max_jump": args.p_max_jump,
+        "mag_points": args.mag_points,
+        "mag_min_dip": args.mag_min_dip,
+        "mag_max_dip": args.mag_max_dip,
+        "mag_min_jump": args.mag_min_jump,
+        "mag_max_jump": args.mag_max_jump,
+        "run_min_points": args.run_min_points,
+        "max_gap_points": args.run_max_gap_points,
+        "run_max_gap_days": args.run_max_gap_days,
+        "run_min_duration_days": args.run_min_duration_days,
+        "baseline_tag": baseline_tag,
+        "baseline_kwargs": baseline_kwargs,
+        "compute_event_prob": compute_event_prob,
+        "auto_filter_bad_cameras": args.filter_bad_cameras,
+        "bad_camera_scatter_ratio": args.bad_camera_scatter_ratio,
+    }
 
-    with ProcessPoolExecutor(max_workers=args.workers) as ex:
+    with ProcessPoolExecutor(
+        max_workers=args.workers,
+        initializer=_init_worker,
+        initargs=(worker_config,),
+    ) as ex:
         futs = {}
         for path in expanded_inputs:
-            # Extract excluded_cameras from metadata if available
             path_excluded = None
             if metadata_by_path:
                 meta = metadata_by_path.get(str(path))
@@ -1843,21 +1894,7 @@ def main():
                     if pd.isna(path_excluded) or path_excluded == "":
                         path_excluded = None
 
-            fut = ex.submit(
-                process_lightcurve, path, trigger_mode=args.trigger_mode, logbf_threshold_dip=args.logbf_threshold_dip,
-                logbf_threshold_jump=args.logbf_threshold_jump, significance_threshold=args.significance_threshold,
-                p_points=args.p_points, p_min_dip=args.p_min_dip, p_max_dip=args.p_max_dip,
-                p_min_jump=args.p_min_jump, p_max_jump=args.p_max_jump, mag_points=args.mag_points,
-                mag_min_dip=args.mag_min_dip, mag_max_dip=args.mag_max_dip,
-                mag_min_jump=args.mag_min_jump, mag_max_jump=args.mag_max_jump,
-                run_min_points=args.run_min_points, max_gap_points=args.run_max_gap_points,
-                run_max_gap_days=args.run_max_gap_days, run_min_duration_days=args.run_min_duration_days,
-                baseline_tag=baseline_tag, baseline_kwargs=baseline_kwargs,
-                compute_event_prob=compute_event_prob,
-                excluded_cameras=path_excluded,
-                auto_filter_bad_cameras=args.filter_bad_cameras,
-                bad_camera_scatter_ratio=args.bad_camera_scatter_ratio,
-            )
+            fut = ex.submit(_process_one, path, path_excluded)
             futs[fut] = path
 
 
