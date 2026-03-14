@@ -201,7 +201,7 @@ def parse_args() -> tuple[list[Config], bool]:
     if run_all:
         if a.output is not None:
             p.error("--output cannot be used with --all (each mag bin auto-resolves its own output path)")
-        configs = [_build_config(a, mb) for mb in MAG_BINS]
+        configs = [_build_config(a, mb) for mb in reversed(MAG_BINS)]
     else:
         configs = [_build_config(a, a.mag_bin)]
 
