@@ -29,7 +29,8 @@ import os
 os.environ.setdefault("NUMBA_NUM_THREADS", "1")
 
 import re
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from collections.abc import Iterator
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -228,6 +229,39 @@ def read_index_map(path: Path) -> dict[int, SourceMeta]:
             pstarrs_g_mag=float(row.pstarrs_g_mag),
         )
     return meta_by_id
+
+
+def iter_light_curve_jobs(
+    mag_bin_dir: Path,
+    lc_dirs: list[Path],
+    processed_files: set[str],
+) -> Iterator[tuple[str, SourceMeta]]:
+    """Yield light-curve jobs lazily to avoid materializing a whole mag bin."""
+    for lc_dir in lc_dirs:
+        match = IDX_PATTERN.search(lc_dir.name)
+        if match is None:
+            continue
+        x = int(match.group(1))
+        index_path = mag_bin_dir / f"index{x}.csv"
+
+        if not index_path.exists():
+            print(f"Skipping lc{x}_cal: missing index{x}.csv")
+            continue
+
+        meta_by_id = read_index_map(index_path)
+
+        for file_path in sorted(lc_dir.glob("*.dat2")):
+            file_path_str = str(file_path)
+            if file_path_str in processed_files:
+                continue
+            try:
+                target = int(file_path.stem)
+            except ValueError:
+                continue
+            meta = meta_by_id.get(target)
+            if meta is None:
+                continue
+            yield file_path_str, meta
 
 
 def read_lc_dat2_fast(asassn_id: str, path: str, *, include_v: bool) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -1018,84 +1052,79 @@ def run_mag_bin(cfg: Config) -> None:
             processed_files = set(line.strip() for line in f)
         print(f"Found {len(processed_files)} previously processed files")
 
-    all_files = []
-    id_map: dict[str, dict[int, SourceMeta]] = {}
-
-    for lc_dir in lc_dirs:
-        match = IDX_PATTERN.search(lc_dir.name)
-        if match is None:
-            continue
-        x = int(match.group(1))
-        index_path = mag_bin_dir / f"index{x}.csv"
-
-        if not index_path.exists():
-            print(f"Skipping lc{x}_cal: missing index{x}.csv")
-            continue
-
-        meta_by_id = read_index_map(index_path)
-        id_map[str(lc_dir)] = meta_by_id
-
-        csv_files = sorted(lc_dir.glob("*.dat2"))
-
-        for file_path in csv_files:
-            file_path_str = str(file_path)
-            if file_path_str in processed_files:
-                continue
-            try:
-                target = int(file_path.stem)
-            except ValueError:
-                continue
-            meta = meta_by_id.get(target)
-            if meta is None:
-                continue
-            all_files.append((file_path_str, meta))
-
-    if not all_files:
-        print("No files to process (all may be completed)")
-        return
-
-    print(f"Processing {len(all_files)} light curve files")
-
-    writer = make_writer(output_path)
-    if writer is None:
-        raise ValueError(f"Could not create writer for output path: {output_path}")
-    results = []
-    total_written = 0
-
-    def write_chunk(chunk_results):
-        nonlocal total_written
-        if not chunk_results:
-            return
-
-        writer.write_chunk(chunk_results)
-
-        if checkpoint_log:
-            with open(checkpoint_log, "a") as f:
-                for row in chunk_results:
-                    f.write(row.get('_path', '') + "\n")
-
-        total_written += len(chunk_results)
-        print(f"Wrote chunk: {len(chunk_results)} rows (total: {total_written})")
+    max_in_flight = max(1, cfg.workers * 2)
+    job_iter = iter_light_curve_jobs(mag_bin_dir, lc_dirs, processed_files)
 
     with ProcessPoolExecutor(max_workers=cfg.workers) as executor:
-        futures = {}
-        for file_path, meta in all_files:
-            future = executor.submit(process_one_lc, file_path, meta, cfg)
-            futures[future] = file_path
+        pending = {}
+        exhausted = False
+        submitted = 0
 
-        for future in tqdm(as_completed(futures), total=len(futures), desc="Processing LCs", unit="lc"):
-            file_path = futures[future]
+        def submit_next_job() -> bool:
+            nonlocal exhausted, submitted
+            if exhausted:
+                return False
             try:
-                result = future.result()
-                if result is not None:
-                    result['_path'] = file_path
-                    results.append(result)
+                file_path, meta = next(job_iter)
+            except StopIteration:
+                exhausted = True
+                return False
+            future = executor.submit(process_one_lc, file_path, meta, cfg)
+            pending[future] = file_path
+            submitted += 1
+            return True
 
-                    if len(results) >= cfg.chunk_size:
-                        write_chunk(results)
-                        results = []
-            except Exception as e:
-                print(f"ERROR processing {file_path}: {e}")
+        while len(pending) < max_in_flight and submit_next_job():
+            pass
+
+        if submitted == 0:
+            print("No files to process (all may be completed)")
+            return
+
+        writer = make_writer(output_path)
+        if writer is None:
+            raise ValueError(f"Could not create writer for output path: {output_path}")
+        results = []
+        total_written = 0
+
+        def write_chunk(chunk_results):
+            nonlocal total_written, results
+            if not chunk_results:
+                return
+
+            writer.write_chunk(chunk_results)
+
+            if checkpoint_log:
+                with open(checkpoint_log, "a") as f:
+                    for row in chunk_results:
+                        f.write(row.get('_path', '') + "\n")
+
+            total_written += len(chunk_results)
+            print(f"Wrote chunk: {len(chunk_results)} rows (total: {total_written})")
+
+        print(f"Processing light curve files with at most {max_in_flight} in flight")
+
+        with tqdm(total=submitted, desc="Processing LCs", unit="lc") as pbar:
+            while pending:
+                done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                for future in done:
+                    file_path = pending.pop(future)
+                    pbar.update(1)
+                    try:
+                        result = future.result()
+                        if result is not None:
+                            result['_path'] = file_path
+                            results.append(result)
+
+                            if len(results) >= cfg.chunk_size:
+                                write_chunk(results)
+                                results = []
+                    except Exception as e:
+                        print(f"ERROR processing {file_path}: {e}")
+
+                    while len(pending) < max_in_flight and submit_next_job():
+                        pbar.total = submitted
+                        pbar.refresh()
 
     if results:
         write_chunk(results)
