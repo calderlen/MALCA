@@ -35,6 +35,7 @@ COMMAND_GROUPS = {
     "review-refresh": "Review",
     "review-merge": "Review",
     "review-explore": "Review",
+    "review-qt": "Review",
     "ltv-core": "LTV",
     "ltv-build": "LTV",
     "ltv-pipeline": "LTV",
@@ -109,7 +110,7 @@ def main():
         "manifest", "pipeline", "reproduce", "injection",
         "detection_rate", "validate", "plot",
         "events", "gaia-fetch", "characterize", "classify", "filter", "tag", "score",
-        "stats", "attrition", "review", "review-refresh", "review-merge", "review-explore",
+        "stats", "attrition", "review", "review-qt", "review-refresh", "review-merge", "review-explore",
         "neighbors", "spectra", "false_positive", "ml_train", "ml_predict", "vsx-filter", "vsx-crossmatch",
         "vetting",
         "ltv-core", "ltv-build", "ltv-pipeline", "ltv-injection", "ltv-pca", "ltv-ingest", "ltv-bundle",
@@ -158,6 +159,10 @@ def main():
             _run_module_main("malca.score", remaining)
         elif command == "review":
             _run_module_main("malca.review.app", remaining)
+        elif command == "review-qt":
+            review_qt = importlib.import_module("malca.review_qt.main")
+            sys.argv = [sys.argv[0]] + remaining
+            return review_qt.main()
         elif command == "review-refresh":
             _run_module_main("malca.review.refresh", remaining)
         elif command == "review-merge":
@@ -256,6 +261,7 @@ def main():
     subparsers.add_parser("classify", description="Classify candidates by variability type")
     # Review
     subparsers.add_parser("review", description="Launch Dash review GUI (keyboard-driven, fast)")
+    subparsers.add_parser("review-qt", description="Launch Qt review GUI (test desktop module; requires PySide6)")
     subparsers.add_parser("review-refresh", description="Refresh review DB stats from a run or bundle")
     subparsers.add_parser("review-merge", description="Merge reviewed subset DB content into a master review DB")
     subparsers.add_parser("review-explore", description="Launch unified EDA and light-curve explorer")

@@ -304,6 +304,47 @@ def _compute_baseline_bands(
     return band_dfs
 
 
+def warm_caches_for_candidate(
+    payload: dict,
+    plot_dir: Path | None,
+    *,
+    run_params: dict | None = None,
+) -> None:
+    """Preload LC and baseline into caches so the next time this candidate is shown it loads instantly."""
+    plot_dir = Path(plot_dir) if plot_dir else None
+    lc_path = resolve_lightcurve_path(payload, plot_dir)
+    if lc_path is None or not lc_path.exists():
+        return
+    scatter_ratio = (
+        float(run_params.get("bad_camera_scatter_ratio", BAD_CAMERA_SCATTER_RATIO_THRESHOLD))
+        if run_params else BAD_CAMERA_SCATTER_RATIO_THRESHOLD
+    )
+    clean_abs = (
+        float(run_params.get("clean_max_error_absolute", CLEAN_LC_MAX_ERROR_ABSOLUTE))
+        if run_params else CLEAN_LC_MAX_ERROR_ABSOLUTE
+    )
+    clean_sig = (
+        float(run_params.get("clean_max_error_sigma", CLEAN_LC_MAX_ERROR_SIGMA))
+        if run_params else CLEAN_LC_MAX_ERROR_SIGMA
+    )
+    try:
+        df, _, _ = _load_cleaned_df(
+            lc_path,
+            filter_bad_cameras=True,
+            scatter_ratio=scatter_ratio,
+            clean_max_error_absolute=clean_abs,
+            clean_max_error_sigma=clean_sig,
+        )
+    except Exception:
+        return
+    cache_key = (str(lc_path.resolve()), True, scatter_ratio, clean_abs, clean_sig)
+    baseline_name, baseline_kwargs, _ = _baseline_config_from_run_params(run_params)
+    try:
+        _compute_baseline_bands(df, baseline_name, cache_key, baseline_kwargs=baseline_kwargs)
+    except Exception:
+        pass
+
+
 def _build_title(payload: dict, df: pd.DataFrame) -> str:
     asas_sn_id = str(payload.get("asas_sn_id") or "").strip()
     source_name = str(payload.get("source") or "").strip()

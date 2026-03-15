@@ -3,7 +3,7 @@ from contextlib import closing
 from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 from pathlib import Path
-from threading import Timer
+from threading import Thread, Timer
 import argparse
 import glob as globlib
 import importlib
@@ -71,6 +71,7 @@ from malca.review.interactive_plot import (
     _baseline_config_from_run_params,
     build_interactive_lightcurve_figure,
     resolve_lightcurve_path,
+    warm_caches_for_candidate,
     _load_cleaned_df,
     _compute_baseline_bands,
     _build_stat_rows,
@@ -3072,11 +3073,24 @@ def _queue_scope_from_import_text(path_text: str | None) -> object:
     return ''
 
 
+def _source_path_for_queue_filter(path_str: str) -> str:
+    """Convert an import path (e.g. run dir or results file) to the value stored in candidates.source_path (run dir)."""
+    path_str = str(path_str).strip()
+    if not path_str:
+        return path_str
+    # DB stores run directory; import path may be a file under run_dir/results/
+    if "/results/" in path_str:
+        return path_str.split("/results/")[0]
+    return path_str
+
+
 def _queue_scope_filter_kwargs(scope_value: object) -> dict[str, object]:
     """Translate queue-source store payload into DB filter kwargs."""
     if isinstance(scope_value, dict):
         if scope_value.get('source_paths'):
-            return {'source_paths': list(scope_value['source_paths'])}
+            # Normalize so file paths (e.g. .../results/foo.parquet) become run dirs to match candidates.source_path
+            normalized = [_source_path_for_queue_filter(p) for p in scope_value['source_paths']]
+            return {'source_paths': normalized}
         if scope_value.get('source_path_like_any'):
             return {'source_path_like_any': list(scope_value['source_path_like_any'])}
         return {}
@@ -3943,6 +3957,7 @@ def create_layout():
         dcc.Store(id='queue-data'),
         dcc.Store(id='review-db-scope', data=_review_persistence_token()),
         dcc.Store(id='current-index', data=0),
+        dcc.Store(id='preload-trigger', data=0),
         dcc.Store(id='current-candidate-id', data=None),
         dcc.Store(id='queue-size-store', data=0),
         dcc.Store(id='queue-filter-hash-store', data=''),
@@ -5605,6 +5620,61 @@ def load_queue(refresh_clicks, import_trigger, queue_source_scope, *state_values
         return queue_data
 
 
+@app.callback(
+    Output('preload-trigger', 'data'),
+    Input('current-index', 'data'),
+    Input('queue-data', 'data'),
+    prevent_initial_call=False,
+)
+def preload_next_candidates(idx, queue_data):
+    """Start a background thread to warm LC/baseline caches for the next 2 candidates in the queue."""
+    if queue_data is None or not isinstance(queue_data, dict):
+        return no_update
+    candidate_ids = queue_data.get('candidate_ids')
+    if not candidate_ids:
+        return no_update
+    idx = int(idx or 0)
+    db_path = DB_PATH
+
+    def do_preload():
+        try:
+            with closing(db_connect(Path(db_path))) as conn:
+                for i in (1, 2):
+                    if idx + i >= len(candidate_ids):
+                        break
+                    cid = candidate_ids[idx + i]
+                    row = conn.execute(
+                        "SELECT payload_json, source_path FROM candidates WHERE candidate_id = ?",
+                        (str(cid),),
+                    ).fetchone()
+                    if not row:
+                        continue
+                    try:
+                        payload = json.loads(row[0]) if row[0] else {}
+                    except Exception:
+                        continue
+                    source_path = (row[1] or "").strip()
+                    run_dir = _run_dir_from_source_path(source_path) if source_path else None
+                    plot_dir = (run_dir / "plots") if run_dir and (run_dir / "plots").exists() else None
+                    run_params = None
+                    if run_dir and (run_dir / "run_params.json").exists():
+                        try:
+                            with open(run_dir / "run_params.json") as f:
+                                run_params = json.load(f)
+                        except Exception:
+                            pass
+                    try:
+                        warm_caches_for_candidate(payload, plot_dir, run_params=run_params)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    t = Thread(target=do_preload, daemon=True)
+    t.start()
+    return no_update
+
+
 def _queue_candidate_id(queue_data, idx) -> str | None:
     """Return the active candidate ID from queue-data dict storage."""
     if not isinstance(queue_data, dict):
@@ -6865,7 +6935,10 @@ def _render_diagnostic_plots(payload: dict, theme: str, background: dict | None 
         build_ltv_trend_figure,
         build_neowise_trend_figure,
     ):
-        fig = builder(payload, theme, background=background)
+        try:
+            fig = builder(payload, theme, background=background)
+        except Exception:
+            fig = None
         if fig is not None:
             cards.append(html.Div(
                 dcc.Graph(figure=fig, mathjax=True, config={'displayModeBar': False},
@@ -6905,8 +6978,7 @@ def _prepare_diagnostic_background(_open_flag, _import_trigger, _pipeline_progre
 if _background_callback_manager is not None:
     @app.callback(
         Output('diagnostic-background-state', 'data'),
-        [Input('diagnostic-plots-details', 'open'),
-         Input('import-trigger', 'data'),
+        [Input('import-trigger', 'data'),
          Input('pipeline-progress-trigger', 'data')],
         State('diagnostic-background-state', 'data'),
         background=True,
@@ -6915,40 +6987,32 @@ if _background_callback_manager is not None:
         ],
         prevent_initial_call=False,
     )
-    def prepare_diagnostic_background(is_open, import_trigger, pipeline_progress, existing_state):
-        if not is_open:
-            return existing_state or {'signature': '', 'ready': False, 'cached': False, 'token': 0}
-        return _prepare_diagnostic_background(is_open, import_trigger, pipeline_progress, existing_state)
+    def prepare_diagnostic_background(import_trigger, pipeline_progress, existing_state):
+        return _prepare_diagnostic_background(True, import_trigger, pipeline_progress, existing_state)
 else:
     @app.callback(
         Output('diagnostic-background-state', 'data'),
-        [Input('diagnostic-plots-details', 'open'),
-         Input('import-trigger', 'data'),
+        [Input('import-trigger', 'data'),
          Input('pipeline-progress-trigger', 'data')],
         State('diagnostic-background-state', 'data'),
         prevent_initial_call=False,
     )
-    def prepare_diagnostic_background(is_open, import_trigger, pipeline_progress, existing_state):
-        if not is_open:
-            return existing_state or {'signature': '', 'ready': False, 'cached': False, 'token': 0}
-        return _prepare_diagnostic_background(is_open, import_trigger, pipeline_progress, existing_state)
+    def prepare_diagnostic_background(import_trigger, pipeline_progress, existing_state):
+        return _prepare_diagnostic_background(True, import_trigger, pipeline_progress, existing_state)
 
 
 @app.callback(
     [Output('diagnostic-plots-panel', 'children'),
-     Output('diagnostic-plots-status', 'children')],
-    [Input('diagnostic-plots-details', 'open'),
-     Input('current-candidate-id', 'data'),
+     Output('diagnostic-plots-status', 'children', allow_duplicate=True)],
+    [Input('current-candidate-id', 'data'),
      Input('theme-mode-store', 'data'),
      Input('diagnostic-background-state', 'data')],
-    prevent_initial_call=False,
+    prevent_initial_call=True,
 )
-def update_diagnostic_plots(is_open, candidate_id, theme_mode, background_state):
-    """Render diagnostic plots for the current candidate, then backfill population context."""
-    if not is_open:
-        return [], ''
+def update_diagnostic_plots(candidate_id, theme_mode, background_state):
+    """Render diagnostic plots for the current candidate."""
     if not candidate_id:
-        return [], 'No candidate selected.'
+        return [], ''
 
     with closing(db_connect(Path(DB_PATH))) as conn:
         payload = get_candidate_payload(conn, str(candidate_id)) or {}
@@ -6959,10 +7023,7 @@ def update_diagnostic_plots(is_open, candidate_id, theme_mode, background_state)
         cached_background = _get_cached_diagnostic_background(signature)
 
     panels = _render_diagnostic_plots(payload, str(theme_mode or DEFAULT_THEME), background=cached_background)
-    if cached_background is None:
-        status = 'Showing candidate diagnostics first; population background will appear when ready.'
-    else:
-        status = 'Population background loaded.'
+    status = '' if cached_background is not None else 'Population background loading...'
     return panels, status
 
 
@@ -7598,14 +7659,16 @@ def update_queue_source_scope(_n_intervals, import_path):
     """Scope queue to the active run bundle token when possible."""
     if _resolve_run_dir_from_db_path(DB_PATH) is not None:
         return ''
-    scope = _queue_scope_from_import_text(import_path)
-    if scope:
-        return scope
-
+    # Prefer run-dir scope when --plot-dir is set so the queue loads (diagnostic/external panels need current-candidate-id).
     run_dir = _resolve_run_dir_from_plot_dir(PLOT_DIR)
     if run_dir is not None:
         return {'source_path_like_any': [run_dir.name], 'label': run_dir.name}
-
+    # Standalone mode (no --plot-dir): don't scope queue to a restored import path, so merged DBs show full queue.
+    if PLOT_DIR is None:
+        return ''
+    scope = _queue_scope_from_import_text(import_path)
+    if scope:
+        return scope
     return ''
 
 

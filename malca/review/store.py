@@ -939,7 +939,12 @@ def init_db(conn: sqlite3.Connection) -> None:
     existing_lower = {row[1].lower() for row in conn.execute("PRAGMA table_info(candidates)").fetchall()}
     for col, dtype, _ in _CANDIDATE_COLUMNS:
         if col.lower() not in existing_lower:
-            conn.execute(f"ALTER TABLE candidates ADD COLUMN {col} {dtype}")
+            try:
+                conn.execute(f"ALTER TABLE candidates ADD COLUMN {col} {dtype}")
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" not in str(e).lower():
+                    raise
+                # Column already exists (e.g. race or schema drift); skip
     conn.commit()
 
 
@@ -1254,13 +1259,35 @@ def query_queue(
 
 
 def get_candidate_payload(conn: sqlite3.Connection, candidate_id: str) -> dict:
-    row = conn.execute("SELECT payload_json FROM candidates WHERE candidate_id=?", (candidate_id,)).fetchone()
+    """Return merged payload for display: payload_json plus SQL columns (so vetting etc. show in GUI)."""
+    col_list = ", ".join(["payload_json"] + _COL_NAMES)
+    row = conn.execute(
+        f"SELECT {col_list} FROM candidates WHERE candidate_id=?",
+        (candidate_id,),
+    ).fetchone()
     if row is None:
         return {}
     try:
-        return json.loads(row[0])
+        payload = json.loads(row[0]) if row[0] else {}
     except Exception:
-        return {}
+        payload = {}
+    # Merge SQL columns into payload so asassn_var_type, ztf_var_type, tns_type etc. show when only in SQL
+    for i, col in enumerate(_COL_NAMES):
+        if i + 1 >= len(row):
+            break
+        raw = row[i + 1]
+        if raw is None or (isinstance(raw, str) and raw.strip() == ""):
+            continue
+        etype = _COL_TYPE_MAP.get(col)
+        if etype == "bool":
+            payload[col] = bool(_as_bool(raw))
+        elif etype == "float":
+            f = _to_float(raw)
+            if f is not None:
+                payload[col] = f
+        else:
+            payload[col] = str(raw).strip() if raw is not None else ""
+    return payload
 
 
 def replace_candidate_payload_fields(
