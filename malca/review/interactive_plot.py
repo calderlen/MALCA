@@ -1668,8 +1668,6 @@ def build_interactive_lightcurve_figure(
             "bordercolor": colors["legend_border"],
             "borderwidth": 1,
             "font": {"size": 10},
-            "itemclick": False,
-            "itemdoubleclick": False,
         },
         height=None,
         uirevision=uirevision_key,
