@@ -120,7 +120,7 @@ def fetch_bailer_jones_distances(
 
     def _query_chunk(chunk: pd.Series) -> pd.DataFrame:
         upload = Table({"source_id": chunk.values.astype(np.int64)})
-        job = tap.run_async(adql, uploads={"t": upload})
+        job = tap.run_sync(adql, uploads={"t": upload})
         return job.to_table().to_pandas()
 
     results = []

@@ -1082,7 +1082,7 @@ def anderson_darling(mag):
     """Anderson-Darling test statistic for normality."""
     mag = np.asarray(mag, float)
     mag = mag[np.isfinite(mag)]
-    if mag.size < 8:
+    if mag.size < 8 or np.std(mag) == 0:
         return np.nan
     result = sp_stats.anderson(mag, dist='norm')
     return float(result.statistic)
@@ -1187,7 +1187,7 @@ def structure_function(mag, time):
         return np.nan, np.nan
 
     log_tau = np.array(bin_centers)
-    log_sf = np.log10(np.array(bin_sf))
+    log_sf = np.log10(np.maximum(np.array(bin_sf), 1e-10))
     valid_sf = np.isfinite(log_sf)
     if valid_sf.sum() < 3:
         return np.nan, np.nan
@@ -1805,7 +1805,7 @@ def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=Tr
             "dt_p05":    pct(dt,5) if dt.size else np.nan,
             "dt_p95":    pct(dt,95) if dt.size else np.nan,
         })
-    cadence_by_camera = df.groupby("camera_name").apply(per_cam_cadence).reset_index()
+    cadence_by_camera = df.groupby("camera_name").apply(per_cam_cadence, include_groups=False).reset_index()
 
     # nightly stats table (exposures and median mag per night)
     nightly = df.groupby("night").agg(

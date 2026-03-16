@@ -79,7 +79,7 @@ def _batch_gaia_epoch_tap_query(
             JOIN {tap_table} AS e
             ON e.source_id = u.source_id
             """
-            result = tap.run_async(query, uploads={"upload_table": upload_table})
+            result = tap.run_sync(query, uploads={"upload_table": upload_table})
             return result.to_table().to_pandas() if result is not None else pd.DataFrame()
         except Exception as e:
             if verbose:
@@ -309,7 +309,7 @@ def _batch_gaia_epoch_datalink(
     """
 
     try:
-        result = tap.run_async(query)
+        result = tap.run_sync(query)
         epoch_table = result.to_table()
     except Exception as e:
         if verbose:
