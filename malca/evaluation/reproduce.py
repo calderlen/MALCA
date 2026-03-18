@@ -55,7 +55,8 @@ from malca.filter import apply_filters, filter_signal_amplitude
 from malca.plot import plot_passing_candidates
 from malca.plot import read_skypatrol_csv
 from malca.score import compute_event_score
-from malca.stats import median_dt, compute_stats
+from concurrent.futures import ProcessPoolExecutor
+from malca.stats import median_dt, compute_stats, _enrich_row_worker
 from malca.tag import apply_tags
 from malca.triggering import normalize_trigger_block
 from malca.utils import read_lc_dat2
@@ -1519,46 +1520,41 @@ def build_reproduction_report(
                 else:
                     df_passed = rows_df.copy()
 
-                enriched_rows = []
-                for _, row in df_passed.iterrows():
+                # Separate pass-through rows from rows needing compute_stats,
+                # tracking original position so we can reconstruct order afterwards.
+                ordered_results: list[dict | None] = [None] * len(df_passed)
+                pending_tasks: list[tuple] = []
+                pending_indices: list[int] = []
+                for pos, (_, row) in enumerate(df_passed.iterrows()):
+                    row_dict = row.to_dict()
                     path_val = row.get("path") or row.get("dat_path")
                     if not path_val:
-                        enriched_rows.append(row.to_dict())
+                        ordered_results[pos] = row_dict
                         continue
-
                     lc_path = Path(str(path_val))
                     if lc_path.suffix.lower() == ".csv":
                         if verbose:
                             print(f"[ENRICH] Skipping CSV light curve: {lc_path}")
-                        enriched_rows.append(row.to_dict())
+                        ordered_results[pos] = row_dict
                         continue
+                    asassn_id = str(row.get("asas_sn_id") or row.get("source_id") or lc_path.stem)
+                    pending_tasks.append((row_dict, asassn_id, str(lc_path.parent), enrich_compute_ls))
+                    pending_indices.append(pos)
 
-                    asassn_id = row.get("asas_sn_id") or row.get("source_id") or lc_path.stem
-                    try:
-                        _, stats_dict = compute_stats(
-                            str(asassn_id),
-                            str(lc_path.parent),
-                            use_only_good=True,
-                            compute_ls=enrich_compute_ls,
-                        )
-                        merged = row.to_dict()
-                        for k, v in stats_dict.items():
-                            if isinstance(v, dict):
-                                for sub_k, sub_v in v.items():
-                                    col = f"stats_{k}_{sub_k}"
-                                    if col not in merged:
-                                        merged[col] = sub_v
-                            elif isinstance(v, (pd.DataFrame, pd.Series)):
-                                continue
-                            elif f"stats_{k}" not in merged:
-                                merged[f"stats_{k}"] = v
-                        enriched_rows.append(merged)
-                    except Exception as e:
-                        if verbose:
-                            print(f"[ENRICH] Warning: compute_stats failed for {lc_path}: {e}")
-                        enriched_rows.append(row.to_dict())
+                n_enrich_workers = max(1, n_workers or WORKERS)
+                if verbose:
+                    print(f"[ENRICH] {len(pending_tasks)} candidates → compute_stats ({n_enrich_workers} workers)...")
 
-                rows_df = pd.DataFrame(enriched_rows)
+                with ProcessPoolExecutor(max_workers=n_enrich_workers) as executor:
+                    for pos, result in zip(pending_indices, tqdm(
+                        executor.map(_enrich_row_worker, pending_tasks),
+                        total=len(pending_tasks),
+                        desc="compute_stats",
+                        disable=not verbose,
+                    )):
+                        ordered_results[pos] = result
+
+                rows_df = pd.DataFrame(ordered_results)
             except Exception as e:
                 if verbose:
                     print(f"[ENRICH] Warning: enrichment failed: {e}")

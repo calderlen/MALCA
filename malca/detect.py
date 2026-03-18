@@ -71,7 +71,8 @@ from malca.manifest import build_manifest
 from malca.plot import plot_passing_candidates
 from malca.filter import apply_filters
 from malca.review.store import db_connect, import_candidates
-from malca.stats import compute_stats
+from concurrent.futures import ProcessPoolExecutor
+from malca.stats import compute_stats, _enrich_row_worker
 from malca.tag import apply_tags, filter_camera_medians
 from malca.utils import log as _log
 from malca.vetting import vet_candidates
@@ -1733,55 +1734,37 @@ def main():
                                 log(f"Warning: could not load enrichment checkpoint: {e}")
 
                         ENRICH_SAVE_INTERVAL = 10000
-                        new_count = 0
-                        for idx, row in tqdm(df_passed.iterrows(), total=len(df_passed),
-                                            desc="compute_stats", disable=not args.verbose):
+                        n_enrich_workers = max(1, args.workers)
+                        log(f"Using {n_enrich_workers} workers for compute_stats enrichment")
+
+                        # Build task list, handling already-enriched and missing paths serially
+                        pending_tasks: list[tuple] = []
+                        for idx, row in df_passed.iterrows():
                             lc_path = Path(row["path"])
                             if str(lc_path) in already_enriched:
                                 continue
                             if not lc_path.exists():
                                 enriched_rows.append(row.to_dict())
-                                new_count += 1
                                 continue
+                            asassn_id = lc_path.stem.split("-")[0]
+                            dir_path = str(lc_path.parent)
+                            pending_tasks.append((row.to_dict(), asassn_id, dir_path, args.enrich_compute_ls))
 
-                            try:
-                                # Extract asassn_id from path
-                                asassn_id = lc_path.stem.split("-")[0]
-                                dir_path = str(lc_path.parent)
-
-                                # Run compute_stats
-                                _, stats_dict = compute_stats(
-                                    asassn_id,
-                                    dir_path,
-                                    use_only_good=True,
-                                    compute_ls=args.enrich_compute_ls,
-                                )
-
-                                # Merge stats into row
-                                merged = row.to_dict()
-                                for k, v in stats_dict.items():
-                                    if isinstance(v, dict):
-                                        for sub_k, sub_v in v.items():
-                                            col = f"stats_{k}_{sub_k}"
-                                            if col not in merged:
-                                                merged[col] = sub_v
-                                    elif isinstance(v, (pd.DataFrame, pd.Series)):
-                                        continue
-                                    elif f"stats_{k}" not in merged:
-                                        merged[f"stats_{k}"] = v
-                                enriched_rows.append(merged)
-
-                            except Exception as e:
-                                if args.verbose:
-                                    print(f"Warning: compute_stats failed for {lc_path}: {e}")
-                                enriched_rows.append(row.to_dict())
-
-                            new_count += 1
-                            if new_count % ENRICH_SAVE_INTERVAL == 0:
-                                pd.DataFrame(enriched_rows).to_parquet(
-                                    enrich_checkpoint, index=False,
-                                    compression=PARQUET_CACHE_COMPRESSION,
-                                )
+                        new_count = 0
+                        with ProcessPoolExecutor(max_workers=n_enrich_workers) as executor:
+                            for result in tqdm(
+                                executor.map(_enrich_row_worker, pending_tasks),
+                                total=len(pending_tasks),
+                                desc="compute_stats",
+                                disable=not args.verbose,
+                            ):
+                                enriched_rows.append(result)
+                                new_count += 1
+                                if new_count % ENRICH_SAVE_INTERVAL == 0:
+                                    pd.DataFrame(enriched_rows).to_parquet(
+                                        enrich_checkpoint, index=False,
+                                        compression=PARQUET_CACHE_COMPRESSION,
+                                    )
 
                         df_enriched = pd.DataFrame(enriched_rows)
                         if not df_enriched.empty:

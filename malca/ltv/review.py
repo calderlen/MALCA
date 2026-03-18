@@ -22,8 +22,9 @@ from tqdm.auto import tqdm
 import numpy as np
 import pandas as pd
 
+from concurrent.futures import ProcessPoolExecutor
 from malca.review.store import db_connect, import_candidates
-from malca.stats import compute_stats
+from malca.stats import compute_stats, _enrich_row_worker
 
 
 
@@ -190,6 +191,7 @@ def enrich_with_stats(
     df: pd.DataFrame,
     *,
     compute_ls: bool = False,
+    n_workers: int = 1,
     verbose: bool = True,
 ) -> pd.DataFrame:
     """
@@ -202,8 +204,6 @@ def enrich_with_stats(
     The flattening logic mirrors detect.py's --run-enrich step, producing
     the same stats_* column names that live in _CANDIDATE_COLUMNS.
     """
-
-
     if "lc_path" not in df.columns:
         if verbose:
             print("[ltv-ingest] No lc_path column — skipping compute_stats enrichment")
@@ -217,50 +217,35 @@ def enrich_with_stats(
         return df
 
     if verbose:
-        print(f"[ltv-ingest] Running compute_stats on {n_valid:,} candidates...")
+        print(f"[ltv-ingest] Running compute_stats on {n_valid:,} candidates ({n_workers} workers)...")
 
     rows = df.to_dict("records")
-    enriched = []
+    # Build parallel tasks; rows with no valid path pass through unchanged.
+    tasks: list[tuple] = []
+    task_indices: list[int] = []
+    results: list[dict] = list(rows)  # default: unchanged
 
-    for row in tqdm(rows, desc="compute_stats", disable=not verbose):
+    for i, row in enumerate(rows):
         lc_path_str = row.get("lc_path", "")
         if not lc_path_str or pd.isna(lc_path_str):
-            enriched.append(row)
             continue
-
         lc_path = Path(str(lc_path_str))
         if not lc_path.exists():
-            enriched.append(row)
             continue
-
         asassn_id = lc_path.stem.split("-")[0]
-        dir_path = str(lc_path.parent)
+        tasks.append((row, asassn_id, str(lc_path.parent), compute_ls))
+        task_indices.append(i)
 
-        try:
-            _, stats_dict = compute_stats(
-                asassn_id,
-                dir_path,
-                use_only_good=True,
-                compute_ls=compute_ls,
-            )
-            merged = dict(row)
-            for k, v in stats_dict.items():
-                if isinstance(v, dict):
-                    for sub_k, sub_v in v.items():
-                        col = f"stats_{k}_{sub_k}"
-                        if col not in merged:
-                            merged[col] = sub_v
-                elif isinstance(v, (pd.DataFrame, pd.Series)):
-                    continue
-                elif f"stats_{k}" not in merged:
-                    merged[f"stats_{k}"] = v
-            enriched.append(merged)
-        except Exception as e:
-            if verbose:
-                print(f"  Warning: compute_stats failed for {lc_path}: {e}")
-            enriched.append(row)
+    with ProcessPoolExecutor(max_workers=max(1, n_workers)) as executor:
+        for idx, result in zip(task_indices, tqdm(
+            executor.map(_enrich_row_worker, tasks),
+            total=len(tasks),
+            desc="compute_stats",
+            disable=not verbose,
+        )):
+            results[idx] = result
 
-    return pd.DataFrame(enriched)
+    return pd.DataFrame(results)
 
 
 def ingest_ltv_results(
@@ -271,6 +256,7 @@ def ingest_ltv_results(
     run_vetting: bool = False,
     run_stats: bool = True,
     stats_compute_ls: bool = False,
+    n_workers: int = 1,
     verbose: bool = True,
 ) -> tuple[int, int]:
     """
@@ -292,6 +278,7 @@ def ingest_ltv_results(
             stats_variability_* columns (von Neumann, Stetson, etc.).
             Requires a valid lc_path column in ltv_df (added by ltv-core).
         stats_compute_ls: Also compute Lomb-Scargle in compute_stats (slower).
+        n_workers: Number of parallel workers for compute_stats enrichment.
         verbose: Print progress.
 
     Returns:
@@ -309,7 +296,7 @@ def ingest_ltv_results(
         print(f"[ltv-ingest] Mapped columns. candidate_id sample: {df['candidate_id'].iloc[0]!r}")
 
     if run_stats:
-        df = enrich_with_stats(df, compute_ls=stats_compute_ls, verbose=verbose)
+        df = enrich_with_stats(df, compute_ls=stats_compute_ls, n_workers=n_workers, verbose=verbose)
 
     conn = db_connect(db_path)
     total, new = import_candidates(
@@ -368,6 +355,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Also compute Lomb-Scargle in compute_stats (slower)",
     )
     p.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Parallel workers for compute_stats enrichment (default: 1)",
+    )
+    p.add_argument(
         "-v", "--verbose",
         action="store_true",
         help="Print progress",
@@ -396,6 +389,7 @@ def main() -> None:
         run_vetting=args.run_vetting,
         run_stats=not args.skip_stats,
         stats_compute_ls=args.stats_compute_ls,
+        n_workers=args.workers,
         verbose=args.verbose,
     )
 

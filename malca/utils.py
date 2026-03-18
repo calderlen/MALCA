@@ -14,9 +14,9 @@ from scipy.special import erf
 from tqdm import tqdm
 import numpy as np
 try:
-    np.set_printoptions(legacy='1.25')
+    np.set_printoptions(legacy='1.21')
 except TypeError:
-    pass  # For older numpy versions that don't support legacy='1.25'
+    pass  # For older numpy versions that don't support legacy='1.21'
 import pandas as pd
 import pyvo
 
@@ -1145,7 +1145,7 @@ def batch_gaia_cone_query(
     def process_chunk(chunk_df):
         import numpy as np
         try:
-            np.set_printoptions(legacy="1.25")
+            np.set_printoptions(legacy="1.21")
         except TypeError:
             pass
         try:
@@ -1302,7 +1302,7 @@ def batch_tap_crossmatch(
     def process_chunk(chunk_df):
         import numpy as np
         try:
-            np.set_printoptions(legacy="1.25")
+            np.set_printoptions(legacy="1.21")
         except TypeError:
             pass
         error_message: str | None = None

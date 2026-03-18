@@ -2057,6 +2057,35 @@ def load_dat(path, has_header=False):
 
     return df
 
+def _enrich_row_worker(args: tuple) -> dict:
+    """Top-level picklable worker for parallel compute_stats enrichment.
+
+    Args:
+        args: (row_dict, asassn_id, dir_path, compute_ls)
+
+    Returns:
+        Row dict with flattened stats_* columns merged in, or the original
+        row dict unchanged if compute_stats raises.
+    """
+    row_dict, asassn_id, dir_path, compute_ls = args
+    try:
+        _, stats_dict = compute_stats(asassn_id, dir_path, use_only_good=True, compute_ls=compute_ls)
+        merged = dict(row_dict)
+        for k, v in stats_dict.items():
+            if isinstance(v, dict):
+                for sub_k, sub_v in v.items():
+                    col = f"stats_{k}_{sub_k}"
+                    if col not in merged:
+                        merged[col] = sub_v
+            elif isinstance(v, (pd.DataFrame, pd.Series)):
+                continue
+            elif f"stats_{k}" not in merged:
+                merged[f"stats_{k}"] = v
+        return merged
+    except Exception:
+        return row_dict
+
+
 def main():
     ap = argparse.ArgumentParser(description="Compute rich stats for a photometry .dat file.")
     ap.add_argument("path", help="path to .dat file")

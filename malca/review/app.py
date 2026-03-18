@@ -4060,6 +4060,9 @@ def create_layout():
             html.Button('Refresh Queue [Shift+R]', id='refresh-btn', n_clicks=0,
                        style={'width': '100%', 'font-size': '11px'}, className='action-btn'),
 
+            html.Button('↻ Reset to Beginning', id='reset-queue-btn', n_clicks=0,
+                       style={'width': '100%', 'font-size': '11px', 'marginTop': '4px'}, className='action-btn'),
+
             html.Div('Open Existing', className='section-title', style={'margin-top': '8px'}),
             dcc.Input(
                 id='candidate-search-query',
@@ -8452,6 +8455,20 @@ def serve_plot(filename):
     if suffix not in _PLOT_STATIC_EXTENSIONS:
         abort(404)
     return send_from_directory(str(_plot_asset_root()), filename)
+
+
+# Reset queue to beginning
+@app.callback(
+    [Output('current-index', 'data'),
+     Output('notification', 'children', allow_duplicate=True)],
+    Input('reset-queue-btn', 'n_clicks'),
+    prevent_initial_call=True
+)
+def reset_queue_position(n_clicks):
+    """Reset queue position to the beginning (index 0)."""
+    if not n_clicks:
+        return no_update, no_update
+    return 0, "Queue position reset to beginning."
 
 
 def main():
