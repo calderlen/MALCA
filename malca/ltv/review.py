@@ -286,6 +286,11 @@ def _add_gaia_ids_from_index_ltv(df: pd.DataFrame, index_path: Path, verbose: bo
         df_idx["asas_sn_id"] = pd.to_numeric(df_idx["asas_sn_id"], errors="coerce")
         df_idx = df_idx.dropna(subset=["asas_sn_id"])
         df_idx["asas_sn_id"] = df_idx["asas_sn_id"].astype("int64").astype(str)
+        # Store gaia_id as clean integer string so it survives pandas dtype coercion
+        # and passes _normalize_gaia_ids's str.isdigit() check (float "123.0" would fail).
+        df_idx["gaia_id"] = pd.to_numeric(df_idx["gaia_id"], errors="coerce")
+        df_idx = df_idx.dropna(subset=["gaia_id"])
+        df_idx["gaia_id"] = df_idx["gaia_id"].astype("int64").astype(str)
         df_idx = df_idx.drop_duplicates(subset=["asas_sn_id"])
 
         out = df.copy()
