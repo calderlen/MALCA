@@ -1,4 +1,4 @@
-"""Bundle .dat2 light curve files for LTV candidates passing slope/diff filters."""
+"""Bundle light curve files for LTV candidates passing slope/diff filters."""
 from __future__ import annotations
 
 import argparse
@@ -19,7 +19,7 @@ def export_ltv_bundle(
     min_diff: float = LTV_MIN_DIFF,
     verbose: bool = False,
 ) -> Path:
-    """Load LTV core parquet, apply slope+diff filters, zip passing .dat2 files."""
+    """Load LTV core parquet, apply slope+diff filters, zip passing light curve files."""
     input_path = Path(input_path).expanduser()
     output_zip = Path(output_zip).expanduser()
 
@@ -59,7 +59,7 @@ def export_ltv_bundle(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Bundle .dat2 light curve files for LTV candidates passing slope/diff filters.",
+        description="Bundle light curve files for LTV candidates passing slope/diff filters.",
     )
     parser.add_argument(
         "--input", required=True,
@@ -71,6 +71,7 @@ def main() -> None:
     )
     parser.add_argument("--min-slope", type=float, default=LTV_MIN_SLOPE, help="Minimum |Slope| threshold (mag/yr)")
     parser.add_argument("--min-diff", type=float, default=LTV_MIN_DIFF, help="Minimum |max diff| threshold (mag)")
+    parser.add_argument("--extension", "-e", type=str, default=None, help="Light curve file extension (e.g., dat, dat2, dat3). Default: dat3 (from config)")
     parser.add_argument("-v", "--verbose", action="store_true")
 
     args = parser.parse_args()

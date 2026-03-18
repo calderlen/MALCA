@@ -272,7 +272,7 @@ def main():
     subparsers.add_parser("ltv-ingest", description="Ingest LTV build output into a review DB")
     subparsers.add_parser("ltv-pca", description="Fit/apply LTV PCA (fit-apply | apply)")
     subparsers.add_parser("ltv-injection", description="Run LTV rejection-recovery injections and plots")
-    subparsers.add_parser("ltv-bundle", description="Bundle .dat2 files for LTV candidates passing slope/diff filters")
+    subparsers.add_parser("ltv-bundle", description="Bundle light curve files for LTV candidates passing slope/diff filters")
     # Evaluation
     subparsers.add_parser("injection", description="Run injection-recovery tests")
     subparsers.add_parser("detection_rate", description="Measure detection rate")

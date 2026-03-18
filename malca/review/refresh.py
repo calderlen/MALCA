@@ -59,10 +59,11 @@ def _resolve_lightcurve_path(payload: dict, run_dir: Path) -> Path | None:
             continue
         candidate = Path(str(raw_path)).expanduser()
         candidate_names.append(candidate.name)
-        if candidate.suffix == ".dat2":
+        if candidate.suffix in (".dat", ".dat2", ".dat3"):
             candidate_names.append(candidate.with_suffix(".raw2").name)
         elif candidate.suffix == ".raw2":
-            candidate_names.append(candidate.with_suffix(".dat2").name)
+            for ext in (".dat3", ".dat2", ".dat"):
+                candidate_names.append(candidate.with_suffix(ext).name)
         if candidate.exists():
             return candidate
 
@@ -73,7 +74,7 @@ def _resolve_lightcurve_path(payload: dict, run_dir: Path) -> Path | None:
         text = str(raw).strip()
         if not text:
             continue
-        candidate_names.extend([f"{text}.dat2", f"{text}.raw2", f"{text}.csv"])
+        candidate_names.extend([f"{text}.dat3", f"{text}.raw2", f"{text}.dat2", f"{text}.dat", f"{text}.csv"])
 
     if bundle_dir.exists():
         seen: set[str] = set()

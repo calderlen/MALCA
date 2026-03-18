@@ -6,3 +6,6 @@ OUTPUT_FORMAT = "parquet"
 EVENTS_OUTPUT_CHUNK_SIZE = 10000
 INJECTION_CHUNK_SIZE = 1000
 REPRODUCE_CHUNK_SIZE = 10000
+
+# Default file extension for light curve files (can be overridden via --extension/-e flag)
+LIGHT_CURVE_FILE_EXTENSION = "dat3"

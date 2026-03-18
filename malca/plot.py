@@ -141,15 +141,13 @@ def load_lightcurve_df(
     """
     path = Path(path)
     suffix = path.suffix.lower()
-    if suffix == ".dat2":
-        dfg, dfv = read_lc_dat2(path.stem, str(path.parent))
+    if suffix in (".dat", ".dat2", ".dat3"):
+        dfg, dfv = read_lc_dat2(path.stem, str(path.parent), file_ext=suffix[1:])
         if dfg.empty and dfv.empty:
             return (pd.DataFrame(), set()) if return_filtered_info else pd.DataFrame()
         df = pd.concat([dfg, dfv], ignore_index=True)
     elif suffix == ".csv":
         df = _read_skypatrol_csv(path)
-    elif suffix == ".dat":
-        df = read_asassn_dat(path)
     else:
         df = read_asassn_dat(path)
     

@@ -152,7 +152,7 @@ def resolve_lightcurve_path(payload: dict, plot_dir: Path | None) -> Path | None
             continue
         candidate = Path(str(raw_path)).expanduser()
         candidate_names.append(candidate.name)
-        if candidate.suffix == ".dat2":
+        if candidate.suffix in (".dat", ".dat2", ".dat3"):
             candidate_names.append(candidate.with_suffix(".raw2").name)
         if candidate.exists():
             return candidate
@@ -161,13 +161,13 @@ def resolve_lightcurve_path(payload: dict, plot_dir: Path | None) -> Path | None
     if candidate_id is not None:
         cid = str(candidate_id).strip()
         if cid:
-            candidate_names.extend([f"{cid}.dat2", f"{cid}.raw2"])
+            candidate_names.extend([f"{cid}.dat3", f"{cid}.raw2", f"{cid}.dat2", f"{cid}.dat"])
 
     asas_sn_id = payload.get("asas_sn_id")
     if asas_sn_id is not None:
         sid = str(asas_sn_id).strip()
         if sid:
-            candidate_names.extend([f"{sid}.dat2", f"{sid}.raw2"])
+            candidate_names.extend([f"{sid}.dat3", f"{sid}.raw2", f"{sid}.dat2", f"{sid}.dat"])
 
     if bundle_dir is not None:
         seen: set[str] = set()

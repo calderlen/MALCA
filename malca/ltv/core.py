@@ -90,6 +90,8 @@ class Config:
     workers: int
     chunk_size: int
     overwrite: bool
+    # File extension for light curve files
+    file_ext: str
 
 
 @dataclass(frozen=True)
@@ -102,12 +104,16 @@ class SourceMeta:
 
 def _build_config(a, mag_bin: str) -> Config:
     """Build a Config for a single mag bin from parsed args."""
+    from malca.config.config_io import LIGHT_CURVE_FILE_EXTENSION
+    
     root = Path(a.root)
     out = a.output
     if out is None:
         LTV_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         out = str(LTV_OUTPUT_DIR / f"LTvar{mag_bin.replace('_','-')}.parquet")
     output = Path(out)
+
+    file_ext = a.extension if a.extension is not None else LIGHT_CURVE_FILE_EXTENSION
 
     return Config(
         root=root,
@@ -123,6 +129,7 @@ def _build_config(a, mag_bin: str) -> Config:
         workers=int(a.workers),
         chunk_size=int(a.chunk_size),
         overwrite=bool(a.overwrite),
+        file_ext=file_ext,
     )
 
 
@@ -176,6 +183,11 @@ def parse_args() -> tuple[list[Config], bool]:
                    choices=["pipeline", "g_only"],
                    help="pipeline: use V-band when available and GP stitch; g_only: g-band only, no V-band, no GP correction.",
     )
+    p.add_argument("--extension",
+                   "-e",
+                   type=str,
+                   default=None,
+                   help="Light curve file extension (e.g., dat, dat2, dat3). Default: dat3 (from config)")
     p.add_argument("--workers",
                    type=int,
                    default=LTV_WORKERS,
@@ -228,6 +240,7 @@ def iter_light_curve_jobs(
     mag_bin_dir: Path,
     lc_dirs: list[Path],
     processed_files: set[str],
+    file_ext: str,
 ) -> Iterator[tuple[str, SourceMeta]]:
     """Yield light-curve jobs lazily to avoid materializing a whole mag bin."""
     for lc_dir in lc_dirs:
@@ -243,7 +256,7 @@ def iter_light_curve_jobs(
 
         meta_by_id = read_index_map(index_path)
 
-        for file_path in sorted(lc_dir.glob("*.dat2")):
+        for file_path in sorted(lc_dir.glob(f"*.{file_ext}")):
             file_path_str = str(file_path)
             if file_path_str in processed_files:
                 continue
@@ -257,14 +270,14 @@ def iter_light_curve_jobs(
             yield file_path_str, meta
 
 
-def read_lc_dat2_fast(asassn_id: str, path: str, *, include_v: bool) -> tuple[pd.DataFrame, pd.DataFrame]:
-    dat2_path = os.path.join(path, f"{asassn_id}.dat2")
-    if not os.path.exists(dat2_path):
-        raise FileNotFoundError(f"Light curve file not found: {dat2_path}")
+def read_lc_dat2_fast(asassn_id: str, path: str, *, include_v: bool, file_ext: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    lc_path = os.path.join(path, f"{asassn_id}.{file_ext}")
+    if not os.path.exists(lc_path):
+        raise FileNotFoundError(f"Light curve file not found: {lc_path}")
 
     columns = ["JD", "mag", "error", "v_g_band", "saturated"]
     df = pd.read_csv(
-        dat2_path,
+        lc_path,
         header=None,
         names=["JD", "mag", "error", "good_bad", "camera#", "v_g_band", "saturated", "cam_field"],
         usecols=columns,
@@ -851,13 +864,14 @@ def process_one_lc(
     cfg: Config,
 ) -> dict | None:
     basename = os.path.basename(path)
-    asassn_id = basename.replace('.dat2', '')
+    # Remove file extension dynamically based on config
+    asassn_id = os.path.splitext(basename)[0]
     target = meta.asas_sn_id
     ra_val = meta.ra_deg
     p_mag = meta.pstarrs_g_mag
 
     dir_path = os.path.dirname(path)
-    df_g, df_v = read_lc_dat2_fast(asassn_id, dir_path, include_v=(cfg.band_mode != "g_only"))
+    df_g, df_v = read_lc_dat2_fast(asassn_id, dir_path, include_v=(cfg.band_mode != "g_only"), file_ext=cfg.file_ext)
 
     if df_g.empty:
         return None
@@ -1046,7 +1060,7 @@ def run_mag_bin(cfg: Config) -> None:
         print(f"Found {len(processed_files)} previously processed files")
 
     max_in_flight = max(1, cfg.workers * 2)
-    job_iter = iter_light_curve_jobs(mag_bin_dir, lc_dirs, processed_files)
+    job_iter = iter_light_curve_jobs(mag_bin_dir, lc_dirs, processed_files, cfg.file_ext)
 
     with ProcessPoolExecutor(max_workers=cfg.workers) as executor:
         pending = {}

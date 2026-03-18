@@ -228,36 +228,44 @@ def jd_to_year(jd):
     return year_epoch + ((jd + SKYPATROL_JD_OFFSET) - jd_epoch) / days_in_year
 
 
-def read_lc_dat2(asassn_id, path, excluded_cameras: set[int] | str | None = None):
+def read_lc_dat2(asassn_id, path, excluded_cameras: set[int] | str | None = None, file_ext: str | None = None):
     """
-    Read light curve data from .dat2 file.
+    Read light curve data from light curve file.
 
     Parameters
     ----------
     asassn_id : str
         ASAS-SN source ID
     path : str
-        Path to directory containing the .dat2 file
+        Path to directory containing the light curve file
     excluded_cameras : set[int] | str | None
         Camera IDs to exclude from the output. Can be:
         - None: no filtering
         - set of ints: camera IDs to exclude
         - comma-separated string: "1,6,7" -> exclude cameras 1, 6, 7
+    file_ext : str | None
+        File extension (e.g., "dat2", "dat3"). If None, uses LIGHT_CURVE_FILE_EXTENSION from config.
 
     Returns
     -------
     df_g, df_v : pd.DataFrame
         g-band and V-band DataFrames with excluded cameras removed
     """
+    from malca.config.config_io import LIGHT_CURVE_FILE_EXTENSION
+    
     # Parse excluded_cameras if string
     if isinstance(excluded_cameras, str) and excluded_cameras:
         excluded_cameras = {int(c.strip()) for c in excluded_cameras.split(",") if c.strip()}
     elif excluded_cameras is None:
         excluded_cameras = set()
 
-    dat2_path = os.path.join(path, f"{asassn_id}.dat2")
-    if os.path.exists(dat2_path):
-        file = dat2_path
+    # Use config default if not specified
+    if file_ext is None:
+        file_ext = LIGHT_CURVE_FILE_EXTENSION
+    
+    lc_path = os.path.join(path, f"{asassn_id}.{file_ext}")
+    if os.path.exists(lc_path):
+        file = lc_path
                       
         columns = ["JD",
                    "mag",
@@ -308,7 +316,7 @@ def read_lc_dat2(asassn_id, path, excluded_cameras: set[int] | str | None = None
         return df_g, df_v
 
     raise FileNotFoundError(
-        f"Light curve file not found: {dat2_path}"
+        f"Light curve file not found: {lc_path}"
     )
 
 

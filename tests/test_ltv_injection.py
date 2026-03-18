@@ -19,6 +19,8 @@ def _write_dat2(path: Path, mags: list[float]) -> None:
 
 
 def _test_cfg() -> Config:
+    from malca.config.config_io import LIGHT_CURVE_FILE_EXTENSION
+    
     return Config(
         root=Path("."),
         mag_bin="test",
@@ -33,6 +35,7 @@ def _test_cfg() -> Config:
         workers=1,
         chunk_size=1,
         overwrite=False,
+        file_ext=LIGHT_CURVE_FILE_EXTENSION,
     )
 
 

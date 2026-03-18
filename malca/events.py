@@ -1161,10 +1161,13 @@ def process_lightcurve(
 
     if os.path.isfile(path) and path.endswith('.csv'):
         df = read_skypatrol_csv(path)
-    elif os.path.isfile(path) and path.endswith('.dat2'):
+    elif os.path.isfile(path):
+        # Handle any dat file extension (.dat, .dat2, .dat3, etc.)
         dir_path = os.path.dirname(path) or '.'
-        asassn_id = os.path.basename(path).replace('.dat2', '')
-        dfg, dfv = read_lc_dat2(asassn_id, dir_path, excluded_cameras=excluded_cameras)
+        basename = os.path.basename(path)
+        asassn_id = os.path.splitext(basename)[0]
+        ext = os.path.splitext(basename)[1][1:] if '.' in basename else None
+        dfg, dfv = read_lc_dat2(asassn_id, dir_path, excluded_cameras=excluded_cameras, file_ext=ext)
         df = pd.concat([dfg, dfv], ignore_index=True) if not (dfg.empty and dfv.empty) else pd.DataFrame()
     else:
         raise ValueError(f"Cannot read light curve from path: {path}")
@@ -1639,9 +1642,9 @@ def main():
             lc_dirs = sorted(glob.glob(os.path.join(mag_bin_dir, "lc*_cal")))
             for lc_dir in lc_dirs:
                 csv_files = sorted(glob.glob(os.path.join(lc_dir, "*.csv")))
-                dat2_files = sorted(glob.glob(os.path.join(lc_dir, "*.dat2")))
+                dat_files = sorted(glob.glob(os.path.join(lc_dir, "*.dat*")))
                 if csv_files: expanded_inputs.extend(csv_files)
-                elif dat2_files: expanded_inputs.extend(dat2_files)
+                elif dat_files: expanded_inputs.extend(dat_files)
     
     for pattern in input_patterns:
         if '*' in pattern or '?' in pattern or '[' in pattern:

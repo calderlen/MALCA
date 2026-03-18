@@ -388,7 +388,8 @@ def _collect_bundle_lightcurve_files(out_dir: Path, mag_bin_tag: str | None = No
     path_series = pd.Series(df_candidates["path"])
     for raw_path in path_series.dropna().astype(str).unique().tolist():
         dat_path = Path(raw_path).expanduser()
-        if dat_path.suffix.lower() != ".dat2":
+        # Accept any dat extension (.dat, .dat2, .dat3, etc.)
+        if not dat_path.suffix.lower().startswith(".dat"):
             continue
 
         for source_file in (dat_path, dat_path.with_suffix(".raw2")):
@@ -572,6 +573,8 @@ def main():
                         help="Force rebuild manifest even if exists")
     g_manifest.add_argument("--force-tag", action="store_true",
                         help="Force re-run tagging even if tagged file exists")
+    g_manifest.add_argument("--extension", "-e", type=str, default=None,
+                        help="Light curve file extension (e.g., dat, dat2, dat3). Default: dat3 (from config)")
 
     g_tag.add_argument("--min-time-span", type=float, default=MIN_TIME_SPAN, help="Min time span (days)")
     g_tag.add_argument("--min-points-per-day", type=float, default=MIN_POINTS_PER_DAY, help="Min cadence")
@@ -1253,11 +1256,12 @@ def main():
                 args.lc_root,
                 mag_bins=args.mag_bin,
                 id_column="asas_sn_id",
+                file_ext=args.extension,
                 show_progress=args.verbose,
                 n_workers=args.workers,
             )
 
-            # Only keep sources where .dat2 or .csv files exist
+            # Only keep sources where light curve files exist
             df_manifest = df_manifest[df_manifest["dat_exists"]].reset_index(drop=True)
 
             log(f"Saving manifest to {manifest_file} ({len(df_manifest)} sources)")

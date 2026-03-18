@@ -17,7 +17,7 @@ from malca.config.config_pipeline import WORKERS, MAG_BINS
 IDX_PATTERN = re.compile(r"index(\d+)\.csv$", re.IGNORECASE)
 
 
-def _process_index_file(csv_path: Path, mag_bin: str, lc_root: Path, id_column: str) -> list[dict[str, object]]:
+def _process_index_file(csv_path: Path, mag_bin: str, lc_root: Path, id_column: str, file_ext: str) -> list[dict[str, object]]:
     """Read one index CSV and return records for all IDs."""
     records: list[dict[str, object]] = []
     match = IDX_PATTERN.search(csv_path.name)
@@ -40,8 +40,8 @@ def _process_index_file(csv_path: Path, mag_bin: str, lc_root: Path, id_column: 
         return records
 
     for source_id in ids:
-        dat2_path = lc_dir / f"{source_id}.dat2"
-        file_exists = dat2_path.exists()
+        lc_path = lc_dir / f"{source_id}.{file_ext}"
+        file_exists = lc_path.exists()
         records.append({
             "source_id": source_id,
             "mag_bin": mag_bin,
@@ -49,7 +49,7 @@ def _process_index_file(csv_path: Path, mag_bin: str, lc_root: Path, id_column: 
             "index_csv": str(csv_path),
             "lc_dir": str(lc_dir),
             "lc_dir_exists": lc_dir.exists(),
-            "dat_path": str(dat2_path),
+            "dat_path": str(lc_path),
             "dat_exists": file_exists,
         })
     return records
@@ -61,12 +61,18 @@ def iter_light_curve_entries(
     mag_bins: Sequence[str],
     *,
     id_column: str = "asas_sn_id",
+    file_ext: str | None = None,
     show_progress: bool = True,
     n_workers: int = 1,
 ) -> Iterable[dict[str, object]]:
     """
     Yield dictionaries that describe each light-curve entry in index files.
     """
+    from malca.config.config_io import LIGHT_CURVE_FILE_EXTENSION
+    
+    if file_ext is None:
+        file_ext = LIGHT_CURVE_FILE_EXTENSION
+    
     for mag_bin in tqdm(mag_bins, desc="mag bins", disable=not show_progress):
         idx_dir = index_root / mag_bin
         if not idx_dir.exists():
@@ -80,7 +86,7 @@ def iter_light_curve_entries(
         if n_workers > 1:
             with ProcessPoolExecutor(max_workers=n_workers) as ex:
                 futures = {
-                    ex.submit(_process_index_file, csv_path, mag_bin, lc_root, id_column): csv_path
+                    ex.submit(_process_index_file, csv_path, mag_bin, lc_root, id_column, file_ext): csv_path
                     for csv_path in csv_paths
                 }
                 pbar = tqdm(total=len(futures), desc=f"{mag_bin} index CSVs", leave=False, disable=not show_progress)
@@ -98,7 +104,7 @@ def iter_light_curve_entries(
                 leave=False,
                 disable=not show_progress,
             ):
-                for rec in _process_index_file(csv_path, mag_bin, lc_root, id_column):
+                for rec in _process_index_file(csv_path, mag_bin, lc_root, id_column, file_ext):
                     yield rec
 
 
@@ -108,6 +114,7 @@ def build_manifest(
     *,
     mag_bins: Sequence[str],
     id_column: str,
+    file_ext: str | None = None,
     show_progress: bool = True,
     n_workers: int = 1,
 ) -> pd.DataFrame:
@@ -118,6 +125,7 @@ def build_manifest(
         lc_root,
         mag_bins,
         id_column=id_column,
+        file_ext=file_ext,
         show_progress=show_progress,
         n_workers=n_workers,
     ):
@@ -155,6 +163,7 @@ def iter_source_records(
     mag_bins: Sequence[str],
     *,
     id_column: str = "asas_sn_id",
+    file_ext: str | None = None,
     show_progress: bool = True,
     n_workers: int = 1,
 ) -> Iterable[dict[str, object]]:
@@ -164,6 +173,7 @@ def iter_source_records(
         lc_root,
         mag_bins,
         id_column=id_column,
+        file_ext=file_ext,
         show_progress=show_progress,
         n_workers=n_workers,
     )
@@ -175,6 +185,7 @@ def build_manifest_dataframe(
     *,
     mag_bins: Sequence[str],
     id_column: str,
+    file_ext: str | None = None,
     show_progress: bool = True,
     n_workers: int = 1,
 ) -> pd.DataFrame:
@@ -184,6 +195,7 @@ def build_manifest_dataframe(
         lc_root,
         mag_bins=mag_bins,
         id_column=id_column,
+        file_ext=file_ext,
         show_progress=show_progress,
         n_workers=n_workers,
     )
@@ -225,6 +237,13 @@ def parse_args() -> argparse.Namespace:
         help="Column name to read from index CSVs. Default: %(default)s",
     )
     parser.add_argument(
+        "--extension",
+        "-e",
+        type=str,
+        default=None,
+        help="Light curve file extension (e.g., dat, dat2, dat3). Default: dat3 (from config)",
+    )
+    parser.add_argument(
         "--no-progress",
         action="store_true",
         help="Disable tqdm progress bars.",
@@ -251,6 +270,7 @@ def main() -> None:
         lc_root=args.lc_root.expanduser(),
         mag_bins=mag_bins,
         id_column=args.id_column,
+        file_ext=args.extension,
         show_progress=not args.no_progress,
         n_workers=max(1, args.workers),
     )

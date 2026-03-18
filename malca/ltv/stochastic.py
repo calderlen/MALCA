@@ -86,11 +86,12 @@ def _compute_feature_bundle(
 
 def _load_clean_g_band(lc_path_str: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     lc_path = Path(lc_path_str)
-    if not lc_path.exists() or lc_path.suffix != ".dat2":
+    if not lc_path.exists() or not lc_path.suffix.startswith(".dat"):
         raise FileNotFoundError(f"Light curve path not found or unsupported: {lc_path}")
 
     asassn_id = lc_path.stem
-    df_g, _df_v = read_lc_dat2(asassn_id, str(lc_path.parent))
+    ext = lc_path.suffix[1:] if lc_path.suffix.startswith('.') else None
+    df_g, _df_v = read_lc_dat2(asassn_id, str(lc_path.parent), file_ext=ext)
     if df_g.empty:
         raise ValueError(f"No g-band data found for {lc_path}")
 
