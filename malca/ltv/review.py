@@ -326,7 +326,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--input", "-i",
         required=True,
         type=str,
-        help="Path to LTV build output (CSV or Parquet)",
+        help="Path to LTV build output file (CSV or Parquet) or directory containing such files",
+    )
+    p.add_argument(
+        "--pattern",
+        type=str,
+        default=None,
+        help="Glob pattern (relative to --input directory) when --input is a directory "
+             "(default: '*_pipeline.parquet')",
     )
     p.add_argument(
         "--db",
@@ -373,25 +380,78 @@ def main() -> None:
 
     input_path = Path(args.input)
     if not input_path.exists():
-        raise FileNotFoundError(f"Input file not found: {input_path}")
+        raise FileNotFoundError(f"Input path not found: {input_path}")
 
-    if input_path.suffix == ".parquet":
-        df = pd.read_parquet(input_path)
-    else:
-        df = pd.read_csv(input_path)
+    # Single-file mode: preserve existing behaviour
+    if input_path.is_file():
+        if input_path.suffix == ".parquet":
+            df = pd.read_parquet(input_path)
+        else:
+            df = pd.read_csv(input_path)
 
-    print(f"Loaded {len(df):,} rows from {input_path}")
+        print(f"Loaded {len(df):,} rows from {input_path}")
 
-    ingest_ltv_results(
-        args.db,
-        df,
-        run_characterize=not args.skip_characterize,
-        run_vetting=args.run_vetting,
-        run_stats=not args.skip_stats,
-        stats_compute_ls=args.stats_compute_ls,
-        n_workers=args.workers,
-        verbose=args.verbose,
-    )
+        ingest_ltv_results(
+            args.db,
+            df,
+            run_characterize=not args.skip_characterize,
+            run_vetting=args.run_vetting,
+            run_stats=not args.skip_stats,
+            stats_compute_ls=args.stats_compute_ls,
+            n_workers=args.workers,
+            verbose=args.verbose,
+        )
+        return
+
+    # Directory mode: ingest multiple files deterministically
+    if input_path.is_dir():
+        pattern = args.pattern or "*_pipeline.parquet"
+        files = sorted(input_path.glob(pattern))
+
+        if not files:
+            raise SystemExit(
+                f"No files matching '{pattern}' found in directory {input_path}"
+            )
+
+        total_files = 0
+        last_total_rows = 0
+        sum_new_rows = 0
+
+        for fp in files:
+            if args.verbose:
+                print(f"[ltv-ingest] Loading {fp} ...")
+
+            if fp.suffix == ".parquet":
+                df = pd.read_parquet(fp)
+            else:
+                df = pd.read_csv(fp)
+
+            if args.verbose:
+                print(f"[ltv-ingest] Loaded {len(df):,} rows from {fp}")
+
+            total_rows, new_rows = ingest_ltv_results(
+                args.db,
+                df,
+                run_characterize=not args.skip_characterize,
+                run_vetting=args.run_vetting,
+                run_stats=not args.skip_stats,
+                stats_compute_ls=args.stats_compute_ls,
+                n_workers=args.workers,
+                verbose=args.verbose,
+            )
+
+            total_files += 1
+            last_total_rows = total_rows
+            sum_new_rows += new_rows
+
+        if args.verbose:
+            print(
+                f"[ltv-ingest] Ingested {total_files} file(s) from {input_path}. "
+                f"{sum_new_rows} new / {last_total_rows} total rows in DB."
+            )
+        return
+
+    raise SystemExit(f"Input path is neither a file nor a directory: {input_path}")
 
 
 if __name__ == "__main__":
