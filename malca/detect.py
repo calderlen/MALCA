@@ -15,6 +15,8 @@ Workflow:
 
 Usage:
     malca detect --mag-bin 13_13.5 [options...]
+    malca detect --mag-bin 13_13.5 14_14.5 [options...]  # Process multiple bins together
+    malca detect --mag-bin all [options...]  # Process all 6 magnitude bins together
     malca detect --mag-bin 13_13.5 --run-filter --run-classify --run-enrich
 """
 from __future__ import annotations
@@ -60,7 +62,7 @@ from malca.config.config_pipeline import (
     LOGBF_THRESHOLD_DIP, LOGBF_THRESHOLD_JUMP, SIGNIFICANCE_THRESHOLD,
     MIN_MAG_OFFSET, RUN_MIN_POINTS, RUN_MAX_GAP_POINTS,
     BASELINE_FUNC, BASELINE_S0, BASELINE_W0, BASELINE_Q, BASELINE_JITTER,
-    JD_OFFSET,
+    JD_OFFSET, MAG_BINS,
 )
 from malca.enrich.neighbor import run_neighbor_enrichment
 from malca.enrich.spectra import run_spectra_availability
@@ -147,6 +149,7 @@ def _unique_paths(paths: list[Path]) -> list[Path]:
         seen.add(key)
         unique.append(path)
     return unique
+
 
 
 def _candidate_asassn_index_paths(out_dir: Path, index_override: Path | None = None) -> list[Path]:
@@ -558,7 +561,7 @@ def main():
     g_vetting = parser.add_argument_group("Vetting")
     g_general = parser.add_argument_group("General")
 
-    g_manifest.add_argument("--mag-bin", nargs="+", help="Magnitude bin(s) to process")
+    g_manifest.add_argument("--mag-bin", nargs="+", help="Magnitude bin(s) to process. Use 'all' to process all bins automatically.")
     g_manifest.add_argument("--index-root", type=Path, default=LCV2_ROOT,
                         help="Index root directory (contains mag_bin/index*.csv)")
     g_manifest.add_argument("--lc-root", type=Path, default=LCV2_ROOT,
@@ -775,6 +778,16 @@ def main():
 
     args = parser.parse_args()
 
+    # Handle --mag-bin all: expand to all bins in reverse order
+    is_auto_all_mode = False
+    if args.mag_bin and "all" in args.mag_bin:
+        if len(args.mag_bin) > 1:
+            parser.error("Cannot mix 'all' with specific magnitude bins. Use '--mag-bin all' alone or specify individual bins.")
+        
+        # Expand "all" to full list of magnitude bins in reverse order
+        is_auto_all_mode = True
+        args.mag_bin = list(reversed(MAG_BINS))
+
     stage = str(args.stage)
     run_upstream = stage in {"full", "cluster"}
     run_downstream = stage in {"full", "home"}
@@ -877,7 +890,7 @@ def main():
         _log(message, quiet=quiet)
 
     # Determine file names
-    mag_bin_tag = args.mag_bin[0] if len(args.mag_bin) == 1 else "multi"
+    mag_bin_tag = "all" if is_auto_all_mode else (args.mag_bin[0] if len(args.mag_bin) == 1 else "multi")
 
     # IMPORTANT: never write to filesystem root (/output). Default to a writable directory.
     events_format = str(args.output_format).lower()
