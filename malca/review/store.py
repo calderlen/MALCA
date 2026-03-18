@@ -118,6 +118,12 @@ def _candidate_insert_tuple_from_row_dict(
     if "source_id" in normalized and normalized.get("source_id") is not None:
         normalized["source_id"] = _normalize_large_integer_like_id(normalized.get("source_id"))
 
+    if not normalized.get("asassn_var_type") and normalized.get("period_asassn_var_class"):
+        normalized["asassn_var_type"] = normalized.get("period_asassn_var_class")
+
+    if not normalized.get("ztf_var_type") and normalized.get("period_ztf_periodic_class"):
+        normalized["ztf_var_type"] = normalized.get("period_ztf_periodic_class")
+
     row_source_path = str(source_path if source_path is not None else normalized.get("source_path") or "")
     row_imported_at = str(imported_at or normalized.get("imported_at") or _utc_now())
 
@@ -1612,7 +1618,8 @@ def merge_vetting_results(
         )
         # Also update real columns for SQL-filterable vetting fields
         _REAL_VETTING_COLS = {"vetting_likely_known", "asassn_var_type",
-                              "gaia_var_class", "simbad_otype", "ztf_var_type"}
+                              "gaia_var_class", "simbad_otype", "ztf_var_type",
+                              "tns_type", "yso_class"}
         for col in _REAL_VETTING_COLS:
             if col in vetting_data:
                 val = vetting_data[col]

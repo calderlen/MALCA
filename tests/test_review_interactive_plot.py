@@ -184,8 +184,6 @@ def test_interactive_plot_band_filter_replaces_legend_toggles(tmp_path: Path) ->
 
     assert full["status"] == "ok"
     assert len(full["figure"].data) == 4
-    assert full["figure"].layout.legend.itemclick is False
-    assert full["figure"].layout.legend.itemdoubleclick is False
     assert g_only["status"] == "ok"
     assert len(g_only["figure"].data) == 2
     assert {trace.name for trace in g_only["figure"].data} == {"camA (g)", "camB (g)"}

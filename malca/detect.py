@@ -490,6 +490,75 @@ def export_bundle_zip(bundle_zip: Path, out_dir: Path, include_all: bool = False
     return bundled_paths
 
 
+def _add_gaia_ids_from_crossmatch(df_events: pd.DataFrame, vsx_crossmatch_path) -> pd.DataFrame:
+    """
+    Merge gaia_id column from VSX crossmatch into events DataFrame.
+    
+    Extracts ASAS-SN IDs from light curve file paths and merges with
+    VSX crossmatch file to add gaia_id column for Gaia validation filters.
+    
+    Parameters
+    ----------
+    df_events : pd.DataFrame
+        Events DataFrame from events.py (must have 'path' column)
+    vsx_crossmatch_path : Path or str
+        Path to VSX crossmatch CSV file
+        
+    Returns
+    -------
+    pd.DataFrame
+        Events DataFrame with gaia_id column added (NaN for unmatched sources)
+    """
+    if "path" not in df_events.columns:
+        _log("Warning: Cannot add gaia_id - 'path' column not found")
+        return df_events
+    
+    if not Path(vsx_crossmatch_path).exists():
+        _log(f"Warning: VSX crossmatch file not found at {vsx_crossmatch_path}")
+        return df_events
+    
+    try:
+        # Extract ASAS-SN ID from file path
+        def extract_asas_sn_id(path_str):
+            if pd.isna(path_str):
+                return None
+            try:
+                match = re.search(r'/(\d+)\.dat\d+$', str(path_str))
+                if match:
+                    return int(match.group(1))
+                return None
+            except:
+                return None
+        
+        df = df_events.copy()
+        df["asas_sn_id"] = df["path"].apply(extract_asas_sn_id)
+        
+        # Load VSX crossmatch
+        _log(f"Loading VSX crossmatch from {vsx_crossmatch_path}...")
+        df_vsx = pd.read_csv(vsx_crossmatch_path, low_memory=False)
+        
+        # Merge on asas_sn_id to get gaia_id
+        df_merged = df.merge(
+            df_vsx[["asas_sn_id", "gaia_id"]],
+            on="asas_sn_id",
+            how="left"
+        )
+        
+        # Clean up temporary column
+        df_merged = df_merged.drop(columns=["asas_sn_id"], errors="ignore")
+        
+        # Report results
+        n_with_gaia = df_merged["gaia_id"].notna().sum()
+        n_total = len(df_merged)
+        pct = 100.0 * n_with_gaia / n_total if n_total > 0 else 0.0
+        _log(f"[gaia_id merge] Added gaia_id for {n_with_gaia}/{n_total} events ({pct:.2f}%)")
+        
+        return df_merged
+    except Exception as e:
+        _log(f"Warning: Failed to merge gaia_id: {e}")
+        return df_events
+
+
 def _build_filter_kwargs(args: argparse.Namespace) -> dict[str, Any]:
     """Build apply_filters kwargs from detect CLI arguments."""
     return {
@@ -1586,6 +1655,11 @@ def main():
                 filter_kwargs["apply_gaia_ruwe_validation"] = False
                 filter_kwargs["apply_gaia_pm_validation"] = False
                 filter_kwargs["apply_periodic_catalog_validation"] = False
+
+            # Add gaia_id from VSX crossmatch (needed for validate_gaia_ruwe filter)
+            if filter_kwargs.get("apply_gaia_ruwe_validation", True) or filter_kwargs.get("apply_gaia_pm_validation", True):
+                df_events = _add_gaia_ids_from_crossmatch(df_events, args.vsx_crossmatch)
+
             df_post_filtered = apply_filters(df_events, **filter_kwargs)
 
             # Save filtered results

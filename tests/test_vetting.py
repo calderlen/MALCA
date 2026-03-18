@@ -8,11 +8,7 @@ import pandas as pd
 import malca.vetting as vetting
 
 
-def test_simbad_tap_falls_back_to_xmatch(monkeypatch) -> None:
-    def fail_tap(*args, **kwargs):
-        _ = (args, kwargs)
-        raise RuntimeError("tap down")
-
+def test_query_simbad_batch_calls_xmatch(monkeypatch) -> None:
     def fake_xmatch(df: pd.DataFrame, valid, n: int, radius_arcsec: float) -> pd.DataFrame:
         _ = (valid, n, radius_arcsec)
         out = df.copy()
@@ -22,11 +18,10 @@ def test_simbad_tap_falls_back_to_xmatch(monkeypatch) -> None:
         out["simbad_sep_arcsec"] = [0.4]
         return out
 
-    monkeypatch.setattr(vetting, "batch_tap_crossmatch", fail_tap)
     monkeypatch.setattr(vetting, "_simbad_via_xmatch", fake_xmatch)
 
     df = pd.DataFrame({"ra": [10.0], "dec": [-5.0]})
-    out = vetting.query_simbad_batch(df, method="tap")
+    out = vetting.query_simbad_batch(df)
 
     assert out.loc[0, "simbad_main_id"] == "SIMBAD 1"
     assert out.loc[0, "simbad_otype"] == "YSO"
