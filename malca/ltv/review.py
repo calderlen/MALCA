@@ -23,6 +23,7 @@ import numpy as np
 import pandas as pd
 
 from concurrent.futures import ProcessPoolExecutor
+from malca.config.config_paths import ASASSN_INDEX_PATH
 from malca.review.store import db_connect, import_candidates
 from malca.stats import compute_stats, _enrich_row_worker
 
@@ -248,6 +249,62 @@ def enrich_with_stats(
     return pd.DataFrame(results)
 
 
+def _resolve_ltv_index_path(index_override: Path | None = None) -> Path | None:
+    """Resolve the ASASSN index parquet path, trying common locations."""
+    default = ASASSN_INDEX_PATH.expanduser()
+    candidates = []
+    if index_override is not None:
+        candidates.append(Path(index_override).expanduser())
+    candidates.append(default)
+    # also search input/ relative to cwd
+    for pattern in ("asassn_index*.parquet", "asassn_index*.pq"):
+        candidates.extend(sorted(Path("input").glob(pattern)))
+    for p in candidates:
+        if p.exists() and p.is_file():
+            return p
+    return None
+
+
+def _add_gaia_ids_from_index_ltv(df: pd.DataFrame, index_path: Path, verbose: bool = True) -> pd.DataFrame:
+    """
+    Merge gaia_id from the ASASSN index into an LTV DataFrame.
+    Only fills rows where gaia_id is currently missing.
+    """
+    if "asas_sn_id" not in df.columns:
+        return df
+    needs_fill = "gaia_id" not in df.columns or df["gaia_id"].isna().all()
+    already_filled = "gaia_id" in df.columns and not df["gaia_id"].isna().any()
+    if already_filled:
+        return df
+    try:
+        if verbose:
+            print(f"[ltv-ingest] Loading ASASSN index for gaia_id lookup: {index_path.name}")
+        if index_path.suffix in (".parquet", ".pq"):
+            df_idx = pd.read_parquet(index_path, columns=["asas_sn_id", "gaia_id"])
+        else:
+            df_idx = pd.read_csv(index_path, usecols=["asas_sn_id", "gaia_id"], low_memory=False)
+        df_idx["asas_sn_id"] = pd.to_numeric(df_idx["asas_sn_id"], errors="coerce")
+        df_idx = df_idx.dropna(subset=["asas_sn_id"])
+        df_idx["asas_sn_id"] = df_idx["asas_sn_id"].astype("int64").astype(str)
+        df_idx = df_idx.drop_duplicates(subset=["asas_sn_id"])
+
+        out = df.copy()
+        if "gaia_id" not in out.columns:
+            out["gaia_id"] = pd.NA
+        # merge index gaia_id, then fill only missing values
+        merged = out.merge(df_idx.rename(columns={"gaia_id": "_gaia_id_idx"}), on="asas_sn_id", how="left")
+        missing = out["gaia_id"].isna()
+        out.loc[missing, "gaia_id"] = merged.loc[missing, "_gaia_id_idx"]
+        n_filled = int(missing.sum()) - int(out["gaia_id"].isna().sum())
+        if verbose:
+            print(f"[ltv-ingest] Filled gaia_id for {n_filled}/{len(out)} candidates from ASASSN index")
+        return out
+    except Exception as e:
+        if verbose:
+            print(f"[ltv-ingest] Warning: gaia_id index lookup failed: {e}")
+        return df
+
+
 def ingest_ltv_results(
     db_path: str | Path,
     ltv_df: pd.DataFrame,
@@ -257,6 +314,7 @@ def ingest_ltv_results(
     run_stats: bool = True,
     stats_compute_ls: bool = False,
     n_workers: int = 1,
+    index_path: Path | str | None = None,
     verbose: bool = True,
 ) -> tuple[int, int]:
     """
@@ -279,6 +337,8 @@ def ingest_ltv_results(
             Requires a valid lc_path column in ltv_df (added by ltv-core).
         stats_compute_ls: Also compute Lomb-Scargle in compute_stats (slower).
         n_workers: Number of parallel workers for compute_stats enrichment.
+        index_path: Path to the ASASSN index parquet for gaia_id lookup.
+            Auto-resolved from ASASSN_INDEX_PATH if not provided.
         verbose: Print progress.
 
     Returns:
@@ -291,6 +351,15 @@ def ingest_ltv_results(
         print(f"[ltv-ingest] Ingesting {len(ltv_df):,} LTV candidates → {db_path}")
 
     df = map_ltv_columns(ltv_df)
+
+    # Pre-populate gaia_id from the ASASSN index so characterize_candidates_df
+    # has real Gaia IDs for all sources (not just the ~99K in the VSX crossmatch).
+    if run_characterize:
+        _idx_path = _resolve_ltv_index_path(Path(index_path) if index_path else None)
+        if _idx_path:
+            df = _add_gaia_ids_from_index_ltv(df, _idx_path, verbose=verbose)
+        elif verbose:
+            print("[ltv-ingest] Warning: ASASSN index not found; Gaia characterization will have limited coverage")
 
     # The DB upsert requires candidate_id values to be unique within the
     # ingested frame. Some pipeline outputs may contain duplicates (e.g. if
@@ -384,6 +453,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Parallel workers for compute_stats enrichment (default: 1)",
     )
     p.add_argument(
+        "--index",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Path to ASASSN index parquet for gaia_id lookup (auto-resolved if not given)",
+    )
+    p.add_argument(
         "-v", "--verbose",
         action="store_true",
         help="Print progress",
@@ -415,6 +491,7 @@ def main() -> None:
             run_stats=not args.skip_stats,
             stats_compute_ls=args.stats_compute_ls,
             n_workers=args.workers,
+            index_path=args.index,
             verbose=args.verbose,
         )
         return
@@ -453,6 +530,7 @@ def main() -> None:
                 run_stats=not args.skip_stats,
                 stats_compute_ls=args.stats_compute_ls,
                 n_workers=args.workers,
+                index_path=args.index,
                 verbose=args.verbose,
             )
 

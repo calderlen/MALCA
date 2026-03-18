@@ -491,72 +491,75 @@ def export_bundle_zip(bundle_zip: Path, out_dir: Path, include_all: bool = False
     return bundled_paths
 
 
-def _add_gaia_ids_from_crossmatch(df_events: pd.DataFrame, vsx_crossmatch_path) -> pd.DataFrame:
+def _add_gaia_ids_from_index(df_events: pd.DataFrame, index_path) -> pd.DataFrame:
     """
-    Merge gaia_id column from VSX crossmatch into events DataFrame.
-    
-    Extracts ASAS-SN IDs from light curve file paths and merges with
-    VSX crossmatch file to add gaia_id column for Gaia validation filters.
-    
+    Merge gaia_id and asas_sn_id from the ASASSN index into the events DataFrame.
+
+    The ASASSN index covers all ~17M ASAS-SN sources and carries a Gaia ID for
+    each one, so almost every candidate should receive a gaia_id after this merge.
+    The VSX crossmatch only covers ~99K known variables and must not be used here.
+
     Parameters
     ----------
     df_events : pd.DataFrame
-        Events DataFrame from events.py (must have 'path' column)
-    vsx_crossmatch_path : Path or str
-        Path to VSX crossmatch CSV file
-        
+        Events DataFrame from events.py (must have 'path' column).
+    index_path : Path or str
+        Path to the ASASSN index parquet (or CSV) file.
+
     Returns
     -------
     pd.DataFrame
-        Events DataFrame with gaia_id column added (NaN for unmatched sources)
+        Events DataFrame with gaia_id and asas_sn_id columns added
+        (NaN for the rare unmatched sources).
     """
     if "path" not in df_events.columns:
         _log("Warning: Cannot add gaia_id - 'path' column not found")
         return df_events
-    
-    if not Path(vsx_crossmatch_path).exists():
-        _log(f"Warning: VSX crossmatch file not found at {vsx_crossmatch_path}")
+
+    if not Path(index_path).exists():
+        _log(f"Warning: ASASSN index not found at {index_path}")
         return df_events
-    
+
     try:
-        # Extract ASAS-SN ID from file path
-        def extract_asas_sn_id(path_str):
+        df = df_events.copy()
+
+        # Derive asas_sn_id from the LC filename stem (e.g. "498216332934.dat3" → 498216332934)
+        def _extract_id(path_str):
             if pd.isna(path_str):
                 return None
             try:
-                match = re.search(r'/(\d+)\.dat\d+$', str(path_str))
-                if match:
-                    return int(match.group(1))
+                return int(Path(str(path_str)).stem.split(".")[0])
+            except Exception:
                 return None
-            except:
-                return None
-        
-        df = df_events.copy()
-        df["asas_sn_id"] = df["path"].apply(extract_asas_sn_id)
-        
-        # Load VSX crossmatch
-        _log(f"Loading VSX crossmatch from {vsx_crossmatch_path}...")
-        df_vsx = pd.read_csv(vsx_crossmatch_path, low_memory=False)
-        
-        # Merge on asas_sn_id to get gaia_id
+
+        df["asas_sn_id"] = df["path"].apply(_extract_id)
+
+        # Load only the columns we need from the index
+        index_path = Path(index_path)
+        _log(f"Loading ASASSN index from {index_path.name}...")
+        if index_path.suffix in (".parquet", ".pq"):
+            df_index = pd.read_parquet(index_path, columns=["asas_sn_id", "gaia_id"])
+        else:
+            df_index = pd.read_csv(index_path, usecols=["asas_sn_id", "gaia_id"], low_memory=False)
+
+        df_index["asas_sn_id"] = pd.to_numeric(df_index["asas_sn_id"], errors="coerce")
+        df_index = df_index.dropna(subset=["asas_sn_id"])
+        df_index["asas_sn_id"] = df_index["asas_sn_id"].astype("int64")
+
         df_merged = df.merge(
-            df_vsx[["asas_sn_id", "gaia_id"]],
+            df_index[["asas_sn_id", "gaia_id"]].drop_duplicates(subset=["asas_sn_id"]),
             on="asas_sn_id",
-            how="left"
+            how="left",
         )
-        
-        # Clean up temporary column
-        df_merged = df_merged.drop(columns=["asas_sn_id"], errors="ignore")
-        
-        # Report results
+
         n_with_gaia = df_merged["gaia_id"].notna().sum()
         n_total = len(df_merged)
         pct = 100.0 * n_with_gaia / n_total if n_total > 0 else 0.0
         _log(f"[gaia_id merge] Added gaia_id for {n_with_gaia}/{n_total} events ({pct:.2f}%)")
-        
+
         return df_merged
     except Exception as e:
-        _log(f"Warning: Failed to merge gaia_id: {e}")
+        _log(f"Warning: Failed to merge gaia_id from index: {e}")
         return df_events
 
 
@@ -1657,9 +1660,13 @@ def main():
                 filter_kwargs["apply_gaia_pm_validation"] = False
                 filter_kwargs["apply_periodic_catalog_validation"] = False
 
-            # Add gaia_id from VSX crossmatch (needed for validate_gaia_ruwe filter)
+            # Add gaia_id from ASASSN index (needed for validate_gaia_ruwe/pm filters)
             if filter_kwargs.get("apply_gaia_ruwe_validation", True) or filter_kwargs.get("apply_gaia_pm_validation", True):
-                df_events = _add_gaia_ids_from_crossmatch(df_events, args.vsx_crossmatch)
+                _gaia_index_path, _ = _resolve_asassn_index_path(out_dir, index_override=getattr(args, "index_file", None))
+                if _gaia_index_path:
+                    df_events = _add_gaia_ids_from_index(df_events, _gaia_index_path)
+                else:
+                    _log("Warning: ASASSN index not found; gaia_id will be missing — RUWE/PM filters will have no matches")
 
             df_post_filtered = apply_filters(df_events, **filter_kwargs)
 
@@ -2346,6 +2353,15 @@ def main():
                     conn.close()
                     log(f"No passing candidates to import into {review_db_path}")
                 else:
+                    if "candidate_id" not in df_import.columns:
+                        if "asas_sn_id" in df_import.columns:
+                            df_import = df_import.copy()
+                            df_import["candidate_id"] = df_import["asas_sn_id"].astype(str)
+                        elif "path" in df_import.columns:
+                            df_import = df_import.copy()
+                            df_import["candidate_id"] = df_import["path"].apply(
+                                lambda p: Path(str(p)).stem.split(".")[0]
+                            )
                     n_total, n_new = import_candidates(
                         conn,
                         df_import,
