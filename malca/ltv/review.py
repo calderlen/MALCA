@@ -292,6 +292,22 @@ def ingest_ltv_results(
 
     df = map_ltv_columns(ltv_df)
 
+    # The DB upsert requires candidate_id values to be unique within the
+    # ingested frame. Some pipeline outputs may contain duplicates (e.g. if
+    # a source appears multiple times in a bin). Keep the first occurrence
+    # deterministically (input order) and warn.
+    if "candidate_id" in df.columns:
+        dup_mask = df["candidate_id"].duplicated(keep="first")
+        n_dups = int(dup_mask.sum())
+        if n_dups > 0:
+            if verbose:
+                n_unique = int(df["candidate_id"].nunique())
+                print(
+                    f"[ltv-ingest] Warning: dropping {n_dups} duplicate candidate_id row(s) "
+                    f"({n_unique:,} unique / {len(df):,} total) before DB upsert."
+                )
+            df = df.loc[~dup_mask].copy()
+
     if verbose:
         print(f"[ltv-ingest] Mapped columns. candidate_id sample: {df['candidate_id'].iloc[0]!r}")
 
