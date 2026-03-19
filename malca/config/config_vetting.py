@@ -1,5 +1,7 @@
 """Vetting settings: SIMBAD, ALeRCE, ATLAS, ZTF, TNS, eROSITA, NEOWISE query params."""
 
+from datetime import datetime, timezone
+
 # SIMBAD
 VETTING_SIMBAD_BATCH_SIZE = 500
 VETTING_SIMBAD_RETRY_DELAY = 5
@@ -11,11 +13,18 @@ ALERCE_API_BASE = "https://api.alerce.online"
 ATLAS_API_BASE = "https://fallingstar-data.com/forcedphot"
 TNS_API_BASE = "https://www.wis-tns.org/api"
 IRSA_TAP_URL = "https://irsa.ipac.caltech.edu/TAP"
+OGLE_EWS_CURRENT_URL = "https://ogle.astrouw.edu.pl/ogle4/ews/ews.html"
+OGLE_EWS_ARCHIVE_URL_TEMPLATE = "https://ogle.astrouw.edu.pl/ogle4/ews/{year}/ews.html"
+KMTNET_EVENT_LIST_URL_TEMPLATE = "https://kmtnet.kasi.re.kr/ulens/event/{year}/listpage.dat"
+KMTNET_EVENT_PAGE_URL_TEMPLATE = "https://kmtnet.kasi.re.kr/ulens/event/{year}/"
+MOA_EVENTS_URL = "https://gcn.gsfc.nasa.gov/moa_events.html"
+MOA_ARCHIVE_URL = "https://gcn.nasa.gov/missions/archive/moa"
 
 # Catalog identifiers
 ASASSN_VAR_CATALOG_ID = "II/366/catv2021"
 ZTF_VAR_CATALOG_ID = "J/ApJS/249/18/table2"
 EROSITA_CATALOG_ID = "J/A+A/682/A34/erass1-m"
+OGLE_MICROLENS_CATALOG_ID = "J/ApJS/244/29/table3"
 
 # Crossmatch radii
 ALERCE_RADIUS_ARCSEC = 3.0
@@ -23,6 +32,7 @@ ATLAS_MJD_MIN = 57000
 ZTF_VAR_RADIUS_ARCSEC = 3.0
 TNS_RADIUS_ARCSEC = 5.0
 EROSITA_RADIUS_ARCSEC = 10.0
+OGLE_MICROLENS_RADIUS_ARCSEC = 2.0
 NEOWISE_VET_MAX_SEP_ARCSEC = 3.0
 ZTF_LC_RADIUS_ARCSEC = 2.0
 CRTS_MATCH_RADIUS_ARCSEC = 3.0
@@ -42,6 +52,9 @@ ATLAS_MAX_POLL = 120
 # HTTP
 VETTING_HTTP_TIMEOUT = 60
 VETTING_BACKOFF_CAP = 8
+MICROLENS_OGLE_EWS_START_YEAR = 2011
+MICROLENS_KMTNET_START_YEAR = 2016
+MICROLENS_DEFAULT_END_YEAR = datetime.now(timezone.utc).year
 
 # Misc
 PANSTARRS_DEC_LIMIT = -30.5

@@ -1584,13 +1584,13 @@ def mhps(jd, mag, err):
         return nan_result
 
 
-def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=True, compute_ls=False):
+def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=True, compute_ls=False, file_ext: str | None = None):
 
     df_g, df_v = read_lc_csv(asassn_id, path)
     if df_g.empty and df_v.empty:
         df_g, df_v = read_skypatrol_lc_csv(asassn_id, path)
     if df_g.empty and df_v.empty:
-        df_g, df_v = read_lc_dat2(asassn_id, path)
+        df_g, df_v = read_lc_dat2(asassn_id, path, file_ext=file_ext)
 
     if use_g:
         if df_g.empty and not df_v.empty:

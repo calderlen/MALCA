@@ -78,7 +78,7 @@ from malca.review.interactive_plot import (
     normalize_external_lc_dataframe,
 )
 from malca.review.keyboard import (
-    handle_key_action, HELP_TEXT,
+    HELP_TEXT,
     CLASS_KEY_MAP,
 )
 from malca.review.metadata import (
@@ -86,11 +86,19 @@ from malca.review.metadata import (
     is_group_default_open,
     build_external_lookup_links,
 )
-from malca.review.filter_schema import SIDEBAR_GROUPS as REVIEW_FILTER_SIDEBAR_GROUPS
+from malca.review.filter_schema import (
+    SIDEBAR_GROUPS as REVIEW_FILTER_SIDEBAR_GROUPS,
+    VETTING_KNOWN_BOOL_FILTERS,
+    VETTING_KNOWN_SELECT_FILTERS,
+)
 from malca.review.handoff import build_explorer_command, launch_detached
 from malca.review.pipeline import detect_pipeline_status
 from malca.review.pipeline import run_missing_stages
 from malca.review.pipeline import update_candidate_payload
+from malca.review.period_search import (
+    has_external_period as shared_has_external_period,
+    run_period_search_for_payload as shared_run_period_search_for_payload,
+)
 from malca.review.session import create_queue_data_dict
 from malca.review.store import (
     DEFAULT_DB_PATH,
@@ -2448,6 +2456,17 @@ def _render_vetting_banner(payload: dict | None, radius_arcsec: float = 10.0) ->
         p_str = f" P={period:.4f}d" if period and not pd.isna(period) else ""
         cards.append(_cell("ASAS-SN", f"{asassn_type}{p_str}", hit=True))
 
+    # Microlensing catalog cell
+    if _coerce_bool(payload.get('microlens_match')):
+        ml_catalog = payload.get('microlens_catalog')
+        ml_name = payload.get('microlens_name')
+        ml_te = payload.get('microlens_te_days')
+        ml_sep = payload.get('microlens_sep_arcsec')
+        display = ml_name if _ok(ml_name) else (ml_catalog if _ok(ml_catalog) else "Match")
+        te_str = f" tE={ml_te:.1f}d" if ml_te and not pd.isna(ml_te) else ""
+        sep_str = f" ({ml_sep:.1f}\")" if ml_sep and not pd.isna(ml_sep) else ""
+        cards.append(_cell("Microlens", f"{display}{te_str}{sep_str}", hit=True))
+
     # ZTF cell
     ztf_type = payload.get('ztf_var_type')
     if _ok(ztf_type):
@@ -2718,6 +2737,25 @@ def _configured_plot_dir() -> Path | None:
     return Path(str(PLOT_DIR)).expanduser().resolve()
 
 
+def _review_db_state_signature(db_path: str | Path | None = None) -> str:
+    """Return a cache signature that tracks review DB state, including WAL writes."""
+    base = Path(db_path or DB_PATH).expanduser()
+    try:
+        resolved = base.resolve()
+    except Exception:
+        resolved = base
+
+    parts = [str(resolved)]
+    for suffix, label in (("", "db"), ("-wal", "wal")):
+        path = resolved if not suffix else Path(f"{resolved}{suffix}")
+        try:
+            stat = path.stat()
+            parts.append(f"{label}:{int(stat.st_mtime_ns)}:{int(stat.st_size)}")
+        except Exception:
+            parts.append(f"{label}:missing")
+    return "|".join(parts)
+
+
 def _diagnostic_background_signature(db_path: str | Path | None = None) -> str:
     """Return a stable cache signature for diagnostic background data."""
     try:
@@ -2749,6 +2787,79 @@ def _store_cached_diagnostic_background(signature: str, background: dict) -> Non
     if not signature:
         return
     _bc_cache.set(_diagnostic_background_cache_key(signature), background)
+
+
+@lru_cache(maxsize=512)
+def _candidate_context_cached(
+    db_path_text: str,
+    db_signature: str,
+    candidate_id: str,
+) -> tuple[str, str | None, str | None]:
+    """Load one candidate payload + local path context from SQLite, cached by DB state."""
+    _ = db_signature
+    with closing(db_connect(Path(db_path_text))) as conn:
+        payload = get_candidate_payload(conn, candidate_id) or {}
+        row = conn.execute(
+            "SELECT lc_path, source_path FROM candidates WHERE candidate_id = ?",
+            (candidate_id,),
+        ).fetchone()
+
+    if not isinstance(payload, dict):
+        payload = {}
+    if not payload.get("candidate_id"):
+        payload["candidate_id"] = str(candidate_id)
+
+    payload_json = json.dumps(payload, sort_keys=True, default=str)
+    stored_lc_path = None
+    source_path = None
+    if row:
+        stored_lc_path = str(row[0]).strip() if row[0] not in (None, "") else None
+        source_path = str(row[1]).strip() if row[1] not in (None, "") else None
+    return payload_json, stored_lc_path, source_path
+
+
+def _candidate_context(candidate_id: str | None) -> tuple[dict, str | None, str | None]:
+    """Return payload plus stored lc/source paths for the active DB."""
+    cid = str(candidate_id or "").strip()
+    if not cid:
+        return {}, None, None
+
+    payload_json, stored_lc_path, source_path = _candidate_context_cached(
+        str(Path(DB_PATH).expanduser()),
+        _review_db_state_signature(DB_PATH),
+        cid,
+    )
+    try:
+        payload = json.loads(payload_json) if payload_json else {}
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    if not payload.get("candidate_id"):
+        payload["candidate_id"] = cid
+    return payload, stored_lc_path, source_path
+
+
+@lru_cache(maxsize=16)
+def _progress_counts_cached(db_path_text: str, db_signature: str) -> tuple[int, int]:
+    """Load reviewed/total progress counts, cached by DB state."""
+    _ = db_signature
+    with closing(db_connect(Path(db_path_text))) as conn:
+        return count_progress(conn)
+
+
+def _progress_counts() -> tuple[int, int]:
+    """Return reviewed/total counts for the active review DB."""
+    return _progress_counts_cached(
+        str(Path(DB_PATH).expanduser()),
+        _review_db_state_signature(DB_PATH),
+    )
+
+
+def _clear_review_state_caches() -> None:
+    """Clear in-process caches derived from the review DB."""
+    _candidate_context_cached.cache_clear()
+    _progress_counts_cached.cache_clear()
 
 
 def _run_dir_from_source_path(source_path: object = None) -> Path | None:
@@ -3830,6 +3941,36 @@ def _col_id(col: str) -> str:
     return col.replace('_', '-')
 
 
+def _select_all_dropdown_values(options: list[dict[str, object]] | None) -> list[str]:
+    """Return all distinct option values for a multi-select dropdown."""
+    values: list[str] = []
+    seen: set[str] = set()
+    for option in options or []:
+        if not isinstance(option, dict):
+            continue
+        raw_value = option.get('value')
+        if raw_value is None:
+            continue
+        value = str(raw_value)
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        values.append(value)
+    return values
+
+
+def _vetting_known_filter_preset(
+    select_options: dict[str, list[dict[str, object]] | None],
+) -> tuple[list[str], list[list[str]]]:
+    """Exclude definite known-type vetting matches while leaving uncertainty flags untouched."""
+    bool_values = ['False'] * len(VETTING_KNOWN_BOOL_FILTERS)
+    select_values = [
+        _select_all_dropdown_values(select_options.get(col))
+        for col in VETTING_KNOWN_SELECT_FILTERS
+    ]
+    return bool_values, select_values
+
+
 def _num_range_filter(col: str):
     """Numeric filter with min/max inputs and a slider."""
     return html.Div([
@@ -3908,6 +4049,18 @@ def _select_filter(col: str):
 def _make_filter_group(name: str, items: list, *, default_open: bool = False):
     """Build a collapsible html.Details for a group of filters."""
     children = []
+    if name == 'Vetting':
+        children.append(
+            html.Div([
+                html.Button(
+                    'Exclude Known Types',
+                    id='vetting-known-types-btn',
+                    n_clicks=0,
+                    className='compact-btn',
+                    title='Turn on definite known-type vetting filters and leave uncertainty-style flags untouched.',
+                ),
+            ], style={'display': 'flex', 'margin-bottom': '6px'})
+        )
     for ftype, col in items:
         if ftype == 'bool':
             children.extend(_bool_mode_filter(col, f'{_col_id(col)}-mode'))
@@ -3958,6 +4111,7 @@ def create_layout():
         dcc.Store(id='review-db-scope', data=_review_persistence_token()),
         dcc.Store(id='current-index', data=0),
         dcc.Store(id='preload-trigger', data=0),
+        dcc.Store(id='review-save-request', data={'nonce': 0}),
         dcc.Store(id='current-candidate-id', data=None),
         dcc.Store(id='queue-size-store', data=0),
         dcc.Store(id='queue-filter-hash-store', data=''),
@@ -3968,6 +4122,7 @@ def create_layout():
         dcc.Store(id='review-pass-store', data=1),
         dcc.Store(id='sidebar-state', data=False),  # collapsed by default
         dcc.Store(id='filter-params', data={}),
+        dcc.Store(id='restored-filter-applied', data=0),
         dcc.Store(id='import-trigger', data=0),  # triggers queue refresh after import
         dcc.Store(id='auto-run-pipeline-trigger', data=None),
         dcc.Store(id='pending-auto-run', data=None),
@@ -3977,6 +4132,7 @@ def create_layout():
         dcc.Store(id='numeric-filter-bounds', data={}),
         dcc.Store(id='diagnostic-background-state', data={'signature': '', 'ready': False, 'cached': False, 'token': 0}),
         dcc.Store(id='auto-period-cache', data={}, storage_type='session'),
+        dcc.Store(id='auto-period-request', data={'nonce': 0}),
         dcc.Store(id='plot-render-request', data={'nonce': 1, 'ts': 0.0, 'state': {'idx': 0, 'candidate_id': None, 'plot_mode': 'native', 'overlay_values': list(PLOT_PRESETS['Diagnostics']['overlays']), 'selected_cameras': [], 'selected_bands': ['g', 'V'], 'preset': 'Diagnostics', 'theme': DEFAULT_THEME, 'residual_height': DEFAULT_RESIDUAL_FRACTION, 'baseline_opacity': 0.5, 'external_source_view': DEFAULT_EXTERNAL_SOURCE_VIEW}}),
         dcc.Store(id='plot-render-applied', data=0),
         dcc.Store(id='plot-defaults-initialized', data=False),
@@ -3988,6 +4144,7 @@ def create_layout():
         dcc.Store(id='status-resize-init', data=0),
         dcc.Store(id='sidebar-plot-saved', data=0),  # dummy sink for plot prefs save callback
         dcc.Store(id='candidate-start-time', data=0),
+        dcc.Store(id='review-progress-state', data={'reviewed': 0, 'total': 0}),
         dcc.Store(id='startup-selection-applied', data=False),
         dcc.Store(id='last-candidate-saved', data=0),
         dcc.Download(id='plot-export-download'),
@@ -4740,7 +4897,18 @@ app.clientside_callback(
 
 app.clientside_callback(
     """
-    function(n_intervals, startTime, toggle) {
+    function(n_intervals, progressState, queueSize, sessionStart, toggle) {
+        function formatHms(totalSeconds) {
+            var seconds = Math.max(0, Math.floor(Number(totalSeconds) || 0));
+            var hours = Math.floor(seconds / 3600);
+            var minutes = Math.floor((seconds % 3600) / 60);
+            var secs = seconds % 60;
+            var pad = function(value) {
+                return String(value).padStart(2, '0');
+            };
+            return pad(hours) + ':' + pad(minutes) + ':' + pad(secs);
+        }
+
         // Toggle the review-progress-indicator visibility
         var el = document.getElementById('review-progress-indicator');
         if (el) {
@@ -4750,12 +4918,61 @@ app.clientside_callback(
                 el.style.display = 'none';
             }
         }
-        return '';
+
+        var reviewed = 0;
+        var total = 0;
+        if (progressState && typeof progressState === 'object') {
+            reviewed = parseInt(progressState.reviewed == null ? 0 : progressState.reviewed, 10);
+            total = parseInt(progressState.total == null ? 0 : progressState.total, 10);
+        }
+        if (!Number.isFinite(reviewed) || reviewed < 0) {
+            reviewed = 0;
+        }
+        if (!Number.isFinite(total) || total < 0) {
+            total = 0;
+        }
+
+        var queueTotal = parseInt(queueSize == null ? 0 : queueSize, 10);
+        if ((!Number.isFinite(total) || total <= 0) && Number.isFinite(queueTotal) && queueTotal > 0) {
+            total = queueTotal;
+        }
+
+        var pct = total > 0 ? (100.0 * reviewed / total) : 0.0;
+
+        var startTs = null;
+        if (sessionStart && typeof sessionStart === 'object' && sessionStart.ts != null) {
+            startTs = Number(sessionStart.ts);
+        }
+        if (!Number.isFinite(startTs)) {
+            startTs = Date.now() / 1000.0;
+        }
+
+        var elapsedS = Math.max(0.0, (Date.now() / 1000.0) - startTs);
+        var elapsedTxt = formatHms(elapsedS);
+
+        var pacePerMin = 0.0;
+        if (elapsedS > 0 && reviewed > 0) {
+            pacePerMin = reviewed / (elapsedS / 60.0);
+        }
+
+        var etaTxt = '--:--:--';
+        if (pacePerMin > 0 && total > reviewed) {
+            etaTxt = formatHms(((total - reviewed) / pacePerMin) * 60.0);
+        }
+
+        var paceTxt = pacePerMin > 0 ? pacePerMin.toFixed(2) + '/min' : '--/min';
+        return [
+            'Reviewed: ' + reviewed + '/' + total + ' (' + pct.toFixed(1) + '%) | Elapsed: ' + elapsedTxt + ' | Pace: ' + paceTxt + ' | ETA: ' + etaTxt,
+            ''
+        ];
     }
     """,
-    Output('pace-timer-display', 'children'),
+    [Output('review-progress-indicator', 'children'),
+     Output('pace-timer-display', 'children')],
     Input('review-metrics-interval', 'n_intervals'),
-    [State('candidate-start-time', 'data'),
+    [State('review-progress-state', 'data'),
+     State('queue-size-store', 'data'),
+     State('review-session-start', 'data'),
      State('pace-timer-toggle', 'value')]
 )
 
@@ -5271,6 +5488,7 @@ _NUM_COLUMNS: list[str] = []
 _NUM_INPUT_STATES: list[tuple[dict[str, str], str]] = []
 _TEXT_STATES: list[tuple[str, str]] = []
 _SELECT_STATES: list[tuple[str, str]] = []
+_QUEUE_FILTER_APP_STATE_KEY = "dash_queue_filter_ui_state_v1"
 
 for _grp_name, _grp_items in _SIDEBAR_GROUPS:
     for _ftype, _col in _grp_items:
@@ -5286,11 +5504,10 @@ for _grp_name, _grp_items in _SIDEBAR_GROUPS:
         elif _ftype == 'select':
             _SELECT_STATES.append((f'exclude-{_cid}', f'exclude_{_col}'))
 
-# Build the State list for the callback decorator dynamically.
-_queue_states = (
+# Build the callback I/O lists dynamically.
+_FILTER_VALUE_STATES = (
     [State('filter-unreviewed', 'value'),
-     State('filter-failed', 'value'),
-     State('numeric-filter-bounds', 'data')]
+     State('filter-failed', 'value')]
     + [State(cid, 'value') for cid, _ in _BOOL_MODE_STATES]
     + [State(cid, 'value') for cid, _ in _NUM_INPUT_STATES]
     + [State(cid, 'value') for cid, _ in _TEXT_STATES]
@@ -5299,10 +5516,165 @@ _queue_states = (
        State('sort-desc', 'value')]
 )
 
+_FILTER_VALUE_INPUTS = (
+    [Input('filter-unreviewed', 'value'),
+     Input('filter-failed', 'value')]
+    + [Input(cid, 'value') for cid, _ in _BOOL_MODE_STATES]
+    + [Input(cid, 'value') for cid, _ in _NUM_INPUT_STATES]
+    + [Input(cid, 'value') for cid, _ in _TEXT_STATES]
+    + [Input(cid, 'value') for cid, _ in _SELECT_STATES]
+    + [Input('sort-col', 'value'),
+       Input('sort-desc', 'value')]
+)
+
+_FILTER_VALUE_OUTPUTS = (
+    [Output('filter-unreviewed', 'value', allow_duplicate=True),
+     Output('filter-failed', 'value', allow_duplicate=True)]
+    + [Output(cid, 'value', allow_duplicate=True) for cid, _ in _BOOL_MODE_STATES]
+    + [Output(cid, 'value', allow_duplicate=True) for cid, _ in _NUM_INPUT_STATES]
+    + [Output(cid, 'value', allow_duplicate=True) for cid, _ in _TEXT_STATES]
+    + [Output(cid, 'value', allow_duplicate=True) for cid, _ in _SELECT_STATES]
+    + [Output('sort-col', 'value', allow_duplicate=True),
+       Output('sort-desc', 'value', allow_duplicate=True)]
+)
+
+_queue_states = _FILTER_VALUE_STATES
+
+
+def _coerce_string_list(raw_value: object) -> list[str]:
+    if raw_value is None:
+        return []
+    if isinstance(raw_value, str):
+        values = [raw_value]
+    elif isinstance(raw_value, (list, tuple, set, np.ndarray, pd.Series)):
+        values = list(raw_value)
+    else:
+        values = [raw_value]
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value).strip()
+        if text and text not in seen:
+            out.append(text)
+            seen.add(text)
+    return out
+
+
+def _coerce_yes_checklist_value(raw_value: object) -> list[str]:
+    return ['yes'] if 'yes' in _coerce_string_list(raw_value) else []
+
+
+def _coerce_bool_mode_value(raw_value: object) -> str:
+    valid = {'Any', 'True', 'False', 'Unset'}
+    text = str(raw_value).strip() if raw_value is not None else ''
+    return text if text in valid else 'Any'
+
+
+def _coerce_numeric_input_value(raw_value: object) -> float | None:
+    if raw_value in ('', None):
+        return None
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(value):
+        return None
+    return value
+
+
+def _coerce_text_filter_value(raw_value: object) -> str:
+    text = str(raw_value).strip() if raw_value is not None else ''
+    return text or 'Any'
+
+
+def _coerce_sort_cols(raw_value: object) -> list[str]:
+    cols = _coerce_string_list(raw_value)
+    return cols or ['candidate_id']
+
+
+def _queue_filter_ui_state_from_values(*state_values: object) -> dict[str, object]:
+    it = iter(state_values)
+    state: dict[str, object] = {
+        'filter_unreviewed': _coerce_yes_checklist_value(next(it)),
+        'filter_failed': _coerce_yes_checklist_value(next(it)),
+    }
+    for _, fkey in _BOOL_MODE_STATES:
+        state[fkey] = _coerce_bool_mode_value(next(it))
+    for _, fkey in _NUM_INPUT_STATES:
+        state[fkey] = _coerce_numeric_input_value(next(it))
+    for _, fkey in _TEXT_STATES:
+        state[fkey] = _coerce_text_filter_value(next(it))
+    for _, fkey in _SELECT_STATES:
+        state[fkey] = _coerce_string_list(next(it))
+    state['sort_cols'] = _coerce_sort_cols(next(it))
+    state['sort_desc'] = _coerce_yes_checklist_value(next(it))
+    return state
+
+
+def _normalize_saved_queue_filter_ui_state(raw_state: object) -> dict[str, object] | None:
+    if not isinstance(raw_state, dict) or not raw_state:
+        return None
+
+    state: dict[str, object] = {
+        'filter_unreviewed': _coerce_yes_checklist_value(
+            raw_state.get('filter_unreviewed', ['yes'] if _coerce_bool(raw_state.get('only_unreviewed')) else [])
+        ),
+        'filter_failed': _coerce_yes_checklist_value(
+            raw_state.get('filter_failed', ['yes'] if _coerce_bool(raw_state.get('require_failed_any_false')) else [])
+        ),
+    }
+    for _, fkey in _BOOL_MODE_STATES:
+        state[fkey] = _coerce_bool_mode_value(raw_state.get(fkey))
+    for _, fkey in _NUM_INPUT_STATES:
+        state[fkey] = _coerce_numeric_input_value(raw_state.get(fkey))
+    for _, fkey in _TEXT_STATES:
+        state[fkey] = _coerce_text_filter_value(raw_state.get(fkey))
+    for _, fkey in _SELECT_STATES:
+        state[fkey] = _coerce_string_list(raw_state.get(fkey))
+    state['sort_cols'] = _coerce_sort_cols(raw_state.get('sort_cols', raw_state.get('sort_col')))
+    sort_desc_value = raw_state.get('sort_desc')
+    if isinstance(sort_desc_value, bool):
+        sort_desc_value = ['yes'] if sort_desc_value else []
+    state['sort_desc'] = _coerce_yes_checklist_value(sort_desc_value)
+    return state
+
+
+def _queue_filter_ui_values_from_state(raw_state: object) -> tuple[object, ...] | None:
+    state = _normalize_saved_queue_filter_ui_state(raw_state)
+    if state is None:
+        return None
+
+    values: list[object] = [
+        state['filter_unreviewed'],
+        state['filter_failed'],
+    ]
+    for _, fkey in _BOOL_MODE_STATES:
+        values.append(state[fkey])
+    for _, fkey in _NUM_INPUT_STATES:
+        values.append(state[fkey])
+    for _, fkey in _TEXT_STATES:
+        values.append(state[fkey])
+    for _, fkey in _SELECT_STATES:
+        values.append(state[fkey])
+    values.append(state['sort_cols'])
+    values.append(state['sort_desc'])
+    return tuple(values)
+
 
 _SIDEBAR_FILTER_OUTPUTS = (
     [Output(cid, 'options') for cid, _ in _TEXT_STATES]
     + [Output(cid, 'options') for cid, _ in _SELECT_STATES]
+)
+
+_VETTING_KNOWN_FILTER_OUTPUTS = (
+    [Output(f'{_col_id(col)}-mode', 'value') for col in VETTING_KNOWN_BOOL_FILTERS]
+    + [Output(f'exclude-{_col_id(col)}', 'value') for col in VETTING_KNOWN_SELECT_FILTERS]
+)
+
+_VETTING_KNOWN_FILTER_OPTION_STATES = (
+    [State('queue-source-path', 'data')]
+    + [State(f'exclude-{_col_id(col)}', 'options') for col in VETTING_KNOWN_SELECT_FILTERS]
 )
 
 
@@ -5361,6 +5733,34 @@ def _normalize_numeric_filter_inputs(
         fkey: _normalize_numeric_filter_value(fkey, raw_value, bounds_data)
         for fkey, raw_value in raw_values.items()
     }
+
+
+def _queue_filter_params_from_ui_state(
+    ui_state: dict[str, object],
+    numeric_bounds: dict[str, dict[str, float | None]] | None,
+    queue_source_scope: object,
+) -> dict[str, object]:
+    filter_params: dict[str, object] = {
+        'only_unreviewed': 'yes' in _coerce_yes_checklist_value(ui_state.get('filter_unreviewed')),
+        'require_failed_any_false': 'yes' in _coerce_yes_checklist_value(ui_state.get('filter_failed')),
+    }
+    for _, fkey in _BOOL_MODE_STATES:
+        filter_params[fkey] = _coerce_bool_mode_value(ui_state.get(fkey))
+    raw_numeric_filters = {
+        fkey: ui_state.get(fkey)
+        for _, fkey in _NUM_INPUT_STATES
+    }
+    filter_params.update(_normalize_numeric_filter_inputs(numeric_bounds, raw_numeric_filters))
+    for _, fkey in _TEXT_STATES:
+        value = _coerce_text_filter_value(ui_state.get(fkey))
+        filter_params[fkey] = value if value != 'Any' else None
+    for _, fkey in _SELECT_STATES:
+        values = _coerce_string_list(ui_state.get(fkey))
+        filter_params[fkey] = values if values else None
+    filter_params['sort_cols'] = _coerce_sort_cols(ui_state.get('sort_cols'))
+    filter_params['sort_desc'] = 'yes' in _coerce_yes_checklist_value(ui_state.get('sort_desc'))
+    filter_params.update(_queue_scope_filter_kwargs(queue_source_scope))
+    return filter_params
 
 
 def _load_numeric_filter_bounds(queue_source_scope):
@@ -5430,6 +5830,20 @@ def _load_sidebar_filter_payload(sidebar_open, queue_source_scope):
     return (*text_options, *select_options)
 
 
+def _load_vetting_known_select_options(queue_source_scope) -> dict[str, list[dict[str, str]]]:
+    """Load distinct option sets for the definite known-type vetting filters."""
+    scope_kwargs = _queue_scope_filter_kwargs(queue_source_scope)
+    with closing(db_connect(Path(DB_PATH))) as conn:
+        return {
+            col: [
+                {'label': str(v), 'value': str(v)}
+                for v in get_distinct_values(conn, col, **scope_kwargs)
+                if v is not None and str(v).strip() != ''
+            ]
+            for col in VETTING_KNOWN_SELECT_FILTERS
+        }
+
+
 if _background_callback_manager is not None:
     @app.callback(
         _SIDEBAR_FILTER_OUTPUTS,
@@ -5454,6 +5868,68 @@ else:
     )
     def hydrate_sidebar_filters_callback(sidebar_open, _import_trigger, queue_source_scope):
         return _load_sidebar_filter_payload(sidebar_open, queue_source_scope)
+
+
+@app.callback(
+    _VETTING_KNOWN_FILTER_OUTPUTS,
+    Input('vetting-known-types-btn', 'n_clicks'),
+    _VETTING_KNOWN_FILTER_OPTION_STATES,
+    prevent_initial_call=True,
+)
+def apply_vetting_known_type_filters(n_clicks, *select_options):
+    """Apply the definite known-type vetting preset."""
+    if not n_clicks:
+        raise dash.exceptions.PreventUpdate
+    queue_source_scope, *option_lists = select_options
+    select_options_by_col = dict(zip(VETTING_KNOWN_SELECT_FILTERS, option_lists))
+    if any(not select_options_by_col.get(col) for col in VETTING_KNOWN_SELECT_FILTERS):
+        hydrated_options = _load_vetting_known_select_options(queue_source_scope)
+        for col, options in hydrated_options.items():
+            if not select_options_by_col.get(col):
+                select_options_by_col[col] = options
+    bool_values, select_values = _vetting_known_filter_preset(select_options_by_col)
+    return (*bool_values, *select_values)
+
+
+@app.callback(
+    [*_FILTER_VALUE_OUTPUTS, Output('restored-filter-applied', 'data', allow_duplicate=True)],
+    Input('review-db-scope', 'data'),
+    prevent_initial_call='initial_duplicate',
+)
+def restore_saved_queue_filters(_db_scope):
+    """Restore sidebar queue filters from DB-backed app_state when available."""
+    with closing(db_connect(Path(DB_PATH))) as conn:
+        raw = str(load_app_state(conn, _QUEUE_FILTER_APP_STATE_KEY, '') or '').strip()
+
+    if not raw:
+        return tuple([no_update] * (len(_FILTER_VALUE_OUTPUTS) + 1))
+
+    try:
+        saved_state = json.loads(raw)
+    except Exception:
+        return tuple([no_update] * (len(_FILTER_VALUE_OUTPUTS) + 1))
+
+    values = _queue_filter_ui_values_from_state(saved_state)
+    if values is None:
+        return tuple([no_update] * (len(_FILTER_VALUE_OUTPUTS) + 1))
+
+    return (*values, {'ts': time.time()})
+
+
+@app.callback(
+    Output('filter-params', 'data'),
+    _FILTER_VALUE_INPUTS,
+    prevent_initial_call=True,
+)
+def persist_queue_filters(*value_states):
+    """Persist sidebar queue filters to app_state without touching candidate/review data."""
+    ui_state = _queue_filter_ui_state_from_values(*value_states)
+    try:
+        with closing(db_connect(Path(DB_PATH))) as conn:
+            save_app_state(conn, _QUEUE_FILTER_APP_STATE_KEY, json.dumps(ui_state, default=str))
+    except Exception as exc:
+        print(f"[filters] Warning: could not persist queue filters: {exc}")
+    return ui_state
 
 
 app.clientside_callback(
@@ -5575,44 +6051,22 @@ app.clientside_callback(
     Output('queue-data', 'data'),
     [Input('refresh-btn', 'n_clicks'),
      Input('import-trigger', 'data'),
-     Input('queue-source-path', 'data')],
+     Input('queue-source-path', 'data'),
+     Input('restored-filter-applied', 'data'),
+     Input('numeric-filter-bounds', 'data')],
     _queue_states,
     prevent_initial_call=False
 )
-def load_queue(refresh_clicks, import_trigger, queue_source_scope, *state_values):
+def load_queue(refresh_clicks, import_trigger, queue_source_scope, _restored_filters, numeric_bounds, *state_values):
     """Load queue data from all sidebar filter states."""
     with closing(db_connect(Path(DB_PATH))) as conn:
-        # Unpack state values in the same order as _queue_states
-        it = iter(state_values)
-        filter_unreviewed = next(it)
-        filter_failed = next(it)
-        numeric_bounds = next(it) or {}
-
-        filter_params: dict = {
-            'only_unreviewed': 'yes' in (filter_unreviewed or []),
-            'require_failed_any_false': 'yes' in (filter_failed or []),
-        }
-        for _, fkey in _BOOL_MODE_STATES:
-            filter_params[fkey] = next(it) or 'Any'
-        raw_numeric_filters: dict[str, object] = {}
-        for _, fkey in _NUM_INPUT_STATES:
-            raw_numeric_filters[fkey] = next(it)
-        filter_params.update(_normalize_numeric_filter_inputs(numeric_bounds, raw_numeric_filters))
-        for _, fkey in _TEXT_STATES:
-            val = next(it)
-            filter_params[fkey] = val.strip() if val else None
-        for _, fkey in _SELECT_STATES:
-            val = next(it)
-            filter_params[fkey] = val if val else None
-
-        sort_val = next(it)
-        if isinstance(sort_val, list):
-            filter_params['sort_cols'] = sort_val or ['candidate_id']
-        else:
-            filter_params['sort_cols'] = [sort_val] if sort_val else ['candidate_id']
-        filter_params['sort_desc'] = 'yes' in (next(it) or [])
-
-        filter_params.update(_queue_scope_filter_kwargs(queue_source_scope))
+        ui_state = _queue_filter_ui_state_from_values(*state_values)
+        numeric_bounds = numeric_bounds or {}
+        filter_params = _queue_filter_params_from_ui_state(
+            ui_state,
+            numeric_bounds,
+            queue_source_scope,
+        )
 
         queue_data = create_queue_data_dict(conn, filter_params)
         active_filters = {
@@ -5696,24 +6150,7 @@ def _queue_candidate_id(queue_data, idx) -> str | None:
 
 def _has_external_period(payload: dict | None) -> bool:
     """Whether a payload already has a catalog or validated pipeline period."""
-    payload = payload or {}
-    for keys in (
-        ("phase_period_days",),
-        ("period_consensus_days",),
-        ("vsx_period", "period_vsx_days"),
-        ("asassn_var_period", "period_asassn_var_days"),
-        ("gaia_eb_period", "period_gaia_eb_days"),
-        ("ztf_var_period", "period_ztf_periodic_days"),
-        ("catalog_period",),
-    ):
-        for key in keys:
-            try:
-                value = float(payload.get(key))
-            except (TypeError, ValueError):
-                continue
-            if np.isfinite(value) and value > 0:
-                return True
-    return False
+    return shared_has_external_period(payload)
 
 
 def _robust_sigma(values: np.ndarray) -> float:
@@ -5913,112 +6350,26 @@ def _run_period_search_for_payload(
     method: str,
 ) -> tuple[dict | None, str]:
     """Run a period search against the current candidate payload."""
-    from malca.periodogram import ce_find_period, lsp_find_period, pdm_find_period
-
     plot_dir_path = _configured_plot_dir()
-    lc_path = resolve_lightcurve_path(payload, plot_dir_path)
-    if lc_path is None:
-        return None, 'No LC file'
-
     run_params = _load_run_params_for_plot_dir(str(plot_dir_path) if plot_dir_path else None)
     filter_bad_cameras = not bool(run_params.get('skip_camera_median', False))
     scatter_ratio = float(run_params.get('bad_camera_scatter_ratio', BAD_CAMERA_SCATTER_RATIO_THRESHOLD)) if run_params else BAD_CAMERA_SCATTER_RATIO_THRESHOLD
     clean_abs = float(run_params.get('clean_max_error_absolute', CLEAN_LC_MAX_ERROR_ABSOLUTE)) if run_params else CLEAN_LC_MAX_ERROR_ABSOLUTE
     clean_sig = float(run_params.get('clean_max_error_sigma', CLEAN_LC_MAX_ERROR_SIGMA)) if run_params else CLEAN_LC_MAX_ERROR_SIGMA
     baseline_name, baseline_kwargs, _baseline_warnings = _baseline_config_from_run_params(run_params)
-
-
-
-    df, _, _ = _load_cleaned_df(
-        lc_path,
+    return shared_run_period_search_for_payload(
+        payload,
+        plot_dir=plot_dir_path,
+        min_period=min_period,
+        max_period=max_period,
+        method=method,
         filter_bad_cameras=filter_bad_cameras,
         scatter_ratio=scatter_ratio,
         clean_max_error_absolute=clean_abs,
         clean_max_error_sigma=clean_sig,
-    )
-    if df is None or df.empty:
-        return None, 'Empty LC'
-
-    baseline_cache_key = (
-        str(lc_path.resolve()),
-        (),
-        filter_bad_cameras,
-        scatter_ratio,
-        clean_abs,
-        clean_sig,
-    )
-    band_dfs = _compute_baseline_bands(
-        df,
-        baseline_name,
-        baseline_cache_key,
+        baseline_name=baseline_name,
         baseline_kwargs=baseline_kwargs,
     )
-
-    resid_parts = []
-    for bdf in band_dfs.values():
-        if "resid" not in bdf.columns:
-            continue
-        mask = np.isfinite(bdf["JD"].to_numpy()) & np.isfinite(bdf["resid"].to_numpy())
-        resid_parts.append(bdf[mask][["JD", "resid"]])
-    if not resid_parts:
-        return None, 'No residuals'
-
-    resid_df = pd.concat(resid_parts, ignore_index=True)
-    times = resid_df['JD'].to_numpy()
-    values = resid_df['resid'].to_numpy()
-    if len(times) < 10:
-        return None, 'Too few points'
-
-    method = str(method or 'pdm').lower()
-    if method == 'pdm':
-        best_period, _, _ = pdm_find_period(
-            times,
-            values,
-            min_period=min_period,
-            max_period=max_period,
-            refine=True,
-        )
-        label = 'PDM'
-    elif method == 'ce':
-        best_period, _, _ = ce_find_period(
-            times,
-            values,
-            min_period=min_period,
-            max_period=max_period,
-            refine=True,
-        )
-        label = 'CE'
-    else:
-        best_period, _, _ = lsp_find_period(
-            times,
-            values,
-            min_period=min_period,
-            max_period=max_period,
-            refine=True,
-        )
-        label = 'LSP'
-
-    raw_best_period = float(best_period)
-    best_period, harmonic_factor, harmonic_diag = _arbitrate_harmonic_period(
-        band_dfs,
-        raw_best_period,
-        min_period=min_period,
-        max_period=max_period,
-    )
-
-    summary = f'{label}: P={best_period:.5f} d'
-    if abs(harmonic_factor - 1.0) > 1e-12:
-        summary += f' (harmonic ×{harmonic_factor:g}; base={raw_best_period:.5f} d)'
-
-    return {
-        'best_period': float(best_period),
-        'method': label,
-        'harmonic_factor': float(harmonic_factor),
-        'base_period': raw_best_period,
-        'harmonic_objective': float(harmonic_diag.get('objective', np.nan)),
-        'harmonic_lag_phase': float(harmonic_diag.get('lag_phase', np.nan)),
-        'harmonic_scatter_ratio': float(harmonic_diag.get('scatter_ratio', np.nan)),
-    }, summary
 
 
 
@@ -6229,18 +6580,134 @@ def _do_save(candidate_id, score, event_class, needs_followup, notes, event_type
             reviewer='calder',
             event_type=event_type,
         )
+        _clear_review_state_caches()
         return new_pass, status
 
 
-# Keyboard handler (single-key class shortcuts)
-@app.callback(
-    [Output('current-index', 'data'),
-     Output('notification', 'children'),
+app.clientside_callback(
+    """
+    function(keyValue, currentIdx, queueSize, currentCandidateId, currentScore,
+             eventClass, pendingPrefix, needsFollowup, notes, saveRequest) {
+        var no = window.dash_clientside.no_update;
+        var key = '';
+        if (keyValue) {
+            key = String(keyValue).split('\\t', 1)[0].trim();
+        }
+        if (!key || key === '?' || key === 'Escape' || key === 'Shift+R') {
+            return [no, no, no, no, no, no, no];
+        }
+
+        var size = parseInt(queueSize == null ? 0 : queueSize, 10);
+        if (!Number.isFinite(size) || size <= 0) {
+            return [no, 'Queue is empty', no, no, no, no, no];
+        }
+
+        var idx = parseInt(currentIdx == null ? 0 : currentIdx, 10);
+        if (!Number.isFinite(idx)) {
+            idx = 0;
+        }
+        var candidateId = currentCandidateId == null ? '' : String(currentCandidateId);
+        var currentClass = eventClass ? String(eventClass) : 'unclassified';
+        var nextClass = currentClass;
+        var nextScore = currentScore;
+        var nextFollowup = !!needsFollowup;
+        var nextIdx = idx;
+        var notice = no;
+        var saveReq = no;
+        var prefixOut = no;
+
+        var nextNonce = 1;
+        if (saveRequest && typeof saveRequest === 'object' && typeof saveRequest.nonce === 'number') {
+            nextNonce = saveRequest.nonce + 1;
+        }
+
+        var buildSaveRequest = function(scoreValue, incrementPass) {
+            return {
+                nonce: nextNonce,
+                candidate_id: candidateId,
+                score: scoreValue,
+                event_class: nextClass,
+                needs_followup: nextFollowup,
+                notes: notes || '',
+                increment_pass: !!incrementPass,
+                event_type: 'keyboard',
+            };
+        };
+
+        var lower = key.toLowerCase();
+        var classMap = {
+            d: 'dipper',
+            m: 'microlensing',
+            f: 'flare',
+            l: 'ltv',
+            u: 'unknown_interesting',
+            i: 'instrumental',
+            o: 'other'
+        };
+        if (Object.prototype.hasOwnProperty.call(classMap, lower)) {
+            var classTag = classMap[lower];
+            nextClass = (currentClass === classTag) ? 'unclassified' : classTag;
+            notice = 'Class: ' + nextClass;
+            return [no, notice, no, no, nextClass, prefixOut, no];
+        }
+
+        if (key === ',') {
+            nextFollowup = !nextFollowup;
+            notice = 'Followup: ' + (nextFollowup ? 'ON' : 'OFF');
+            return [no, notice, no, nextFollowup, no, prefixOut, no];
+        }
+
+        if (key === 'Backspace') {
+            nextIdx = Math.max(0, idx - 1);
+            notice = '← Previous';
+            return [nextIdx !== idx ? nextIdx : no, notice, no, no, no, prefixOut, no];
+        }
+
+        if (key === 'Tab') {
+            nextIdx = Math.min(idx + 1, size - 1);
+            notice = '→ Next';
+            return [nextIdx !== idx ? nextIdx : no, notice, no, no, no, prefixOut, no];
+        }
+
+        if (key === '.') {
+            if (!candidateId) {
+                return [no, 'Queue is empty', no, no, no, prefixOut, no];
+            }
+            notice = '✓ Saved';
+            saveReq = buildSaveRequest(currentScore, false);
+            return [no, notice, no, no, no, prefixOut, saveReq];
+        }
+
+        if (key === 'Enter') {
+            if (currentScore == null || currentScore === '') {
+                return [no, '⚠ Confidence required', no, no, no, prefixOut, no];
+            }
+            if (!currentClass || currentClass === 'unclassified') {
+                return [no, '⚠ Class required', no, no, no, prefixOut, no];
+            }
+            nextIdx = Math.min(idx + 1, size - 1);
+            notice = '✓ Saved + Next →';
+            saveReq = buildSaveRequest(currentScore, true);
+            return [nextIdx !== idx ? nextIdx : no, notice, no, no, no, prefixOut, saveReq];
+        }
+
+        if (key === '1' || key === '2' || key === '3' || key === '4') {
+            nextScore = parseInt(key, 10);
+            notice = '✓ Confidence: ' + String(nextScore);
+            saveReq = buildSaveRequest(nextScore, false);
+            return [no, notice, nextScore, no, no, prefixOut, saveReq];
+        }
+
+        return [no, no, no, no, no, prefixOut, no];
+    }
+    """,
+    [Output('current-index', 'data', allow_duplicate=True),
+     Output('notification', 'children', allow_duplicate=True),
      Output('current-score', 'data', allow_duplicate=True),
      Output('needs-followup-store', 'data', allow_duplicate=True),
-     Output('review-pass-store', 'data', allow_duplicate=True),
      Output('event-class-store', 'data', allow_duplicate=True),
-     Output('pending-prefix', 'data', allow_duplicate=True)],
+     Output('pending-prefix', 'data', allow_duplicate=True),
+     Output('review-save-request', 'data', allow_duplicate=True)],
     Input('keyboard-input', 'value'),
     [State('current-index', 'data'),
      State('queue-size-store', 'data'),
@@ -6249,72 +6716,59 @@ def _do_save(candidate_id, score, event_class, needs_followup, notes, event_type
      State('event-class-store', 'data'),
      State('pending-prefix', 'data'),
      State('needs-followup-store', 'data'),
-     State('notes', 'value')],
-    prevent_initial_call=True
+     State('notes', 'value'),
+     State('review-save-request', 'data')],
+    prevent_initial_call=True,
 )
-def handle_keyboard(key_value, current_idx, queue_size, current_candidate_id, current_score,
-                    event_class, pending_prefix, needs_followup, notes):
-    """Handle keyboard input."""
-    NO = (no_update,) * 7  # shorthand for all-no_update
 
-    key = _keyboard_key(key_value)
-    if not key:
-        return NO
 
-    # Skip keys handled by other callbacks / keydown listener
-    if key in ['?', 'Escape', 'Shift+R']:
-        return NO
+@app.callback(
+    [Output('notification', 'children', allow_duplicate=True),
+     Output('review-pass-store', 'data', allow_duplicate=True)],
+    Input('review-save-request', 'data'),
+    State('current-candidate-id', 'data'),
+    prevent_initial_call=True,
+)
+def persist_review_save_request(save_request, current_candidate_id):
+    """Persist clientside-queued review saves without blocking UI feedback."""
+    if not isinstance(save_request, dict):
+        raise dash.exceptions.PreventUpdate
 
-    queue_size = int(queue_size or 0)
-    if queue_size == 0:
-        return no_update, "Queue is empty", *([no_update] * 5)
+    try:
+        nonce = int(save_request.get('nonce', 0) or 0)
+    except Exception:
+        nonce = 0
+    if nonce <= 0:
+        raise dash.exceptions.PreventUpdate
 
-    candidate_id = str(current_candidate_id) if current_candidate_id else None
+    candidate_id = str(save_request.get('candidate_id') or '').strip()
+    if not candidate_id:
+        raise dash.exceptions.PreventUpdate
 
-    # --- Direct class key shortcuts (single key toggles class) ---
-    kl = key.lower()
-    class_tag = CLASS_KEY_MAP.get(kl)
-    if class_tag is not None:
-        cur = event_class or 'unclassified'
-        if cur == class_tag:
-            return no_update, "Class: unclassified", no_update, no_update, no_update, 'unclassified', no_update
-        return no_update, f"Class: {class_tag}", no_update, no_update, no_update, class_tag, no_update
+    raw_score = save_request.get('score')
+    try:
+        score = int(raw_score) if raw_score not in (None, '') else None
+    except Exception:
+        score = None
 
-    # --- Followup toggle (,) ---
-    if key == ',':
-        new_state = not bool(needs_followup)
-        label = "ON" if new_state else "OFF"
-        return no_update, f"Followup: {label}", no_update, new_state, no_update, no_update, no_update
-
-    if key == 'Enter':
-        if current_score is None:
-            return no_update, "⚠ Confidence required", no_update, no_update, no_update, no_update, no_update
-        if not event_class or event_class == 'unclassified':
-            return no_update, "⚠ Class required", no_update, no_update, no_update, no_update, no_update
-
-    # --- Navigation / scoring / save via handle_key_action ---
-    with closing(db_connect(Path(DB_PATH))) as conn:
-        new_idx, notification, should_save = handle_key_action(
-            key, current_idx, queue_size, conn, candidate_id
+    try:
+        new_pass, _status = _do_save(
+            candidate_id,
+            score,
+            save_request.get('event_class'),
+            bool(save_request.get('needs_followup')),
+            save_request.get('notes'),
+            str(save_request.get('event_type') or 'keyboard'),
+            increment_pass=bool(save_request.get('increment_pass')),
         )
+    except Exception as exc:
+        traceback.print_exc()
+        return f"✗ Save failed: {exc}", no_update
 
-    new_score = no_update
-    new_pass = no_update
-    if should_save and candidate_id:
-        score = int(key) if key in '1234' else current_score
-        is_done = (key == 'Enter')
-        pass_val, _ = _do_save(
-            candidate_id, score, event_class, needs_followup, notes, 'keyboard',
-            increment_pass=is_done,
-        )
-        new_score = score
-        new_pass = pass_val
-
-    # Only update current-index when it actually changes (navigation).
-    # Returning the same value would re-trigger load_review_form needlessly.
-    idx_out = new_idx if new_idx != current_idx else no_update
-
-    return idx_out, notification, new_score, no_update, new_pass, no_update, no_update
+    pass_out = no_update
+    if str(current_candidate_id or '') == candidate_id:
+        pass_out = new_pass
+    return no_update, pass_out
 
 
 @app.callback(
@@ -6383,19 +6837,10 @@ def run_period_search(n_clicks, candidate_id, min_period, max_period, method, au
         raise dash.exceptions.PreventUpdate
     candidate_id = str(candidate_id)
     auto_period_cache = dict(auto_period_cache or {})
-    try:
-        min_p = float(min_period) if min_period else 0.1
-        max_p = float(max_period) if max_period else 100.0
-    except (TypeError, ValueError):
-        min_p, max_p = 0.1, 100.0
-    if min_p <= 0:
-        min_p = 0.01
-    if max_p <= min_p:
-        max_p = min_p + 1.0
+    min_p, max_p = _normalize_period_search_bounds(min_period, max_period)
     method = str(method or 'pdm').lower()
 
-    with closing(db_connect(Path(DB_PATH))) as conn:
-        payload = get_candidate_payload(conn, candidate_id)
+    payload, _stored_lc_path, _source_path = _candidate_context(candidate_id)
 
     result, label = _run_period_search_for_payload(payload, min_period=min_p, max_period=max_p, method=method)
     auto_period_cache[candidate_id] = {'result': result, 'label': label}
@@ -6443,33 +6888,8 @@ else:
         return run_period_search(n_clicks, candidate_id, min_period, max_period, method, auto_period_cache)
 
 
-@app.callback(
-    [Output('pdm-result-store', 'data', allow_duplicate=True),
-     Output('pdm-result-label', 'children', allow_duplicate=True),
-     Output('pdm-manual-period', 'value', allow_duplicate=True),
-     Output('auto-period-cache', 'data', allow_duplicate=True)],
-    Input('current-candidate-id', 'data'),
-    [State('pdm-min-period', 'value'),
-     State('pdm-max-period', 'value'),
-     State('auto-period-cache', 'data')],
-    prevent_initial_call=True,
-)
-def auto_period_on_navigate(candidate_id, min_period, max_period, auto_period_cache):
-    """Populate period status without auto-running an expensive search."""
-    if candidate_id is None:
-        return None, '', None, no_update
-    candidate_id = str(candidate_id)
-    auto_period_cache = dict(auto_period_cache or {})
-
-    cached_entry = auto_period_cache.get(candidate_id)
-    if isinstance(cached_entry, dict):
-        return (
-            cached_entry.get('result'),
-            str(cached_entry.get('label', '')),
-            None,
-            no_update,
-        )
-
+def _normalize_period_search_bounds(min_period, max_period) -> tuple[float, float]:
+    """Normalize period-search bounds from UI inputs."""
     try:
         min_p = float(min_period) if min_period else 0.1
         max_p = float(max_period) if max_period else 100.0
@@ -6479,15 +6899,128 @@ def auto_period_on_navigate(candidate_id, min_period, max_period, auto_period_ca
         min_p = 0.01
     if max_p <= min_p:
         max_p = min_p + 1.0
+    return min_p, max_p
 
-    with closing(db_connect(Path(DB_PATH))) as conn:
-        payload = get_candidate_payload(conn, candidate_id)
+
+@app.callback(
+    [Output('pdm-result-store', 'data', allow_duplicate=True),
+     Output('pdm-result-label', 'children', allow_duplicate=True),
+     Output('pdm-manual-period', 'value', allow_duplicate=True),
+     Output('auto-period-cache', 'data', allow_duplicate=True),
+     Output('auto-period-request', 'data', allow_duplicate=True)],
+    Input('current-candidate-id', 'data'),
+    [State('pdm-min-period', 'value'),
+     State('pdm-max-period', 'value'),
+     State('auto-period-cache', 'data'),
+     State('auto-period-request', 'data')],
+    prevent_initial_call=True,
+)
+def auto_period_on_navigate(candidate_id, min_period, max_period, auto_period_cache, auto_period_request):
+    """Populate cached period status or queue an automatic search on navigation."""
+    if candidate_id is None:
+        return None, '', None, no_update, {'nonce': 0}
+    candidate_id = str(candidate_id)
+    auto_period_cache = dict(auto_period_cache or {})
+    auto_period_request = dict(auto_period_request or {})
+
+    cached_entry = auto_period_cache.get(candidate_id)
+    if isinstance(cached_entry, dict):
+        return (
+            cached_entry.get('result'),
+            str(cached_entry.get('label', '')),
+            None,
+            no_update,
+            no_update,
+        )
+
+    min_p, max_p = _normalize_period_search_bounds(min_period, max_period)
+
+    payload, _stored_lc_path, _source_path = _candidate_context(candidate_id)
 
     if _has_external_period(payload):
-        return None, 'Catalog/pipeline period', None, no_update
+        return None, 'Catalog/pipeline period', None, no_update, {'nonce': 0}
 
-    display_label = 'Ready - click Find Period'
-    return None, display_label, None, no_update
+    request = {
+        'nonce': int(auto_period_request.get('nonce', 0) or 0) + 1,
+        'candidate_id': candidate_id,
+        'min_period': min_p,
+        'max_period': max_p,
+        'method': 'auto',
+    }
+    return None, 'Auto-searching period...', None, no_update, request
+
+
+def run_auto_period_search(auto_period_request, auto_period_cache):
+    """Run automatic CE/PDM search for the active candidate request."""
+    if not isinstance(auto_period_request, dict):
+        raise dash.exceptions.PreventUpdate
+
+    try:
+        nonce = int(auto_period_request.get('nonce', 0) or 0)
+    except Exception:
+        nonce = 0
+    if nonce <= 0:
+        raise dash.exceptions.PreventUpdate
+
+    candidate_id = str(auto_period_request.get('candidate_id') or '').strip()
+    if not candidate_id:
+        raise dash.exceptions.PreventUpdate
+
+    auto_period_cache = dict(auto_period_cache or {})
+    min_p, max_p = _normalize_period_search_bounds(
+        auto_period_request.get('min_period'),
+        auto_period_request.get('max_period'),
+    )
+    method = str(auto_period_request.get('method') or 'auto').strip().lower()
+
+    payload, _stored_lc_path, _source_path = _candidate_context(candidate_id)
+    result, label = _run_period_search_for_payload(
+        payload,
+        min_period=min_p,
+        max_period=max_p,
+        method=method,
+    )
+    if method == 'auto' and result is None and not str(label or '').lower().startswith('auto'):
+        label = f'Auto search: {label}'
+    if isinstance(result, dict):
+        result = dict(result)
+        result.setdefault('auto', method == 'auto')
+
+    auto_period_cache[candidate_id] = {
+        'result': result,
+        'label': label,
+    }
+    return result, label, auto_period_cache
+
+
+_AUTO_PERIOD_OUTPUTS = [
+    Output('pdm-result-store', 'data', allow_duplicate=True),
+    Output('pdm-result-label', 'children', allow_duplicate=True),
+    Output('auto-period-cache', 'data', allow_duplicate=True),
+]
+
+
+if _background_callback_manager is not None:
+    @app.callback(
+        _AUTO_PERIOD_OUTPUTS,
+        Input('auto-period-request', 'data'),
+        State('auto-period-cache', 'data'),
+        background=True,
+        cancel=[Input('current-candidate-id', 'data'),
+                Input('pdm-run-btn', 'n_clicks')],
+        prevent_initial_call=True,
+    )
+    def run_auto_period_search_callback(auto_period_request, auto_period_cache):
+        return run_auto_period_search(auto_period_request, auto_period_cache)
+else:
+    @app.callback(
+        _AUTO_PERIOD_OUTPUTS,
+        Input('auto-period-request', 'data'),
+        State('auto-period-cache', 'data'),
+        prevent_initial_call=True,
+    )
+    def run_auto_period_search_callback(auto_period_request, auto_period_cache):
+        return run_auto_period_search(auto_period_request, auto_period_cache)
 
 
 @app.callback(
@@ -6600,12 +7133,7 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
     if idx < 0 or idx >= queue_size:
         return '', 'Invalid index', _render_metadata_health(None, context_msg='Invalid queue index.'), _render_vetting_banner(None, radius_arcsec=link_radius), f'[{idx}/{queue_size}]', empty_fig, {'display': 'block', 'width': '100%', 'height': '100%'}, {'display': 'none'}, [], [], _render_plot_status_panel('error', 'Invalid queue index.', []), _render_camera_diag_panel({}, []), _render_run_config_panel(None, None, ['Invalid queue index']), _render_repro_badge(None, ['Invalid queue index']), '', nonce
 
-    with closing(db_connect(Path(DB_PATH))) as conn:
-        payload = get_candidate_payload(conn, candidate_id)
-        candidate_row = conn.execute(
-            "SELECT lc_path, source_path FROM candidates WHERE candidate_id = ?",
-            (str(candidate_id),),
-        ).fetchone()
+    payload, stored_lc_path, source_path = _candidate_context(candidate_id)
 
     plot_dir_path = _configured_plot_dir()
     plot_search_root = _plot_search_root_for_payload(payload)
@@ -6777,8 +7305,8 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
         payload,
         plot_dir=plot_dir_path,
         run_params=run_params if run_params else None,
-        stored_lc_path=candidate_row[0] if candidate_row else None,
-        source_path=candidate_row[1] if candidate_row else None,
+        stored_lc_path=stored_lc_path,
+        source_path=source_path,
     )
     if baseline_warning:
         native_warnings.append(baseline_warning)
@@ -6902,8 +7430,7 @@ def update_external_followup_panel(is_open, candidate_id, theme_mode):
         return []
     if not candidate_id:
         return html.Div("No candidates loaded.", style={'font-size': '11px', 'color': '#c77'})
-    with closing(db_connect(Path(DB_PATH))) as conn:
-        payload = get_candidate_payload(conn, str(candidate_id)) or {}
+    payload, _stored_lc_path, _source_path = _candidate_context(candidate_id)
 
     return _render_external_followup(payload, str(candidate_id), str(theme_mode or DEFAULT_THEME))
 
@@ -6951,8 +7478,16 @@ def _render_diagnostic_plots(payload: dict, theme: str, background: dict | None 
     return cards
 
 
-def _prepare_diagnostic_background(_open_flag, _import_trigger, _pipeline_progress, existing_state):
+def _prepare_diagnostic_background(is_open, _import_trigger, _pipeline_progress, existing_state):
     """Load and cache diagnostic plot background data for the current review DB."""
+    if not is_open:
+        return existing_state if isinstance(existing_state, dict) else {
+            'signature': '',
+            'ready': False,
+            'cached': False,
+            'token': 0,
+        }
+
     signature = _diagnostic_background_signature(DB_PATH)
     cached = _get_cached_diagnostic_background(signature)
     if cached is None:
@@ -6981,7 +7516,8 @@ def _prepare_diagnostic_background(_open_flag, _import_trigger, _pipeline_progre
 if _background_callback_manager is not None:
     @app.callback(
         Output('diagnostic-background-state', 'data'),
-        [Input('import-trigger', 'data'),
+        [Input('diagnostic-plots-details', 'open'),
+         Input('import-trigger', 'data'),
          Input('pipeline-progress-trigger', 'data')],
         State('diagnostic-background-state', 'data'),
         background=True,
@@ -6990,35 +7526,38 @@ if _background_callback_manager is not None:
         ],
         prevent_initial_call=False,
     )
-    def prepare_diagnostic_background(import_trigger, pipeline_progress, existing_state):
-        return _prepare_diagnostic_background(True, import_trigger, pipeline_progress, existing_state)
+    def prepare_diagnostic_background(is_open, import_trigger, pipeline_progress, existing_state):
+        return _prepare_diagnostic_background(is_open, import_trigger, pipeline_progress, existing_state)
 else:
     @app.callback(
         Output('diagnostic-background-state', 'data'),
-        [Input('import-trigger', 'data'),
+        [Input('diagnostic-plots-details', 'open'),
+         Input('import-trigger', 'data'),
          Input('pipeline-progress-trigger', 'data')],
         State('diagnostic-background-state', 'data'),
         prevent_initial_call=False,
     )
-    def prepare_diagnostic_background(import_trigger, pipeline_progress, existing_state):
-        return _prepare_diagnostic_background(True, import_trigger, pipeline_progress, existing_state)
+    def prepare_diagnostic_background(is_open, import_trigger, pipeline_progress, existing_state):
+        return _prepare_diagnostic_background(is_open, import_trigger, pipeline_progress, existing_state)
 
 
 @app.callback(
     [Output('diagnostic-plots-panel', 'children'),
      Output('diagnostic-plots-status', 'children', allow_duplicate=True)],
-    [Input('current-candidate-id', 'data'),
+    [Input('diagnostic-plots-details', 'open'),
+     Input('current-candidate-id', 'data'),
      Input('theme-mode-store', 'data'),
      Input('diagnostic-background-state', 'data')],
     prevent_initial_call=True,
 )
-def update_diagnostic_plots(candidate_id, theme_mode, background_state):
+def update_diagnostic_plots(is_open, candidate_id, theme_mode, background_state):
     """Render diagnostic plots for the current candidate."""
+    if not is_open:
+        return no_update, ''
     if not candidate_id:
         return [], ''
 
-    with closing(db_connect(Path(DB_PATH))) as conn:
-        payload = get_candidate_payload(conn, str(candidate_id)) or {}
+    payload, _stored_lc_path, _source_path = _candidate_context(candidate_id)
 
     signature = _diagnostic_background_signature(DB_PATH)
     cached_background = None
@@ -7064,23 +7603,14 @@ def update_header_key_info(candidate_id, queue_size, queue_filter_hash, import_p
     if int(queue_size or 0) <= 0 or not candidate_id:
         return 'ASAS-SN ID: -', 'Gaia ID: -', _bottom_bar("-", "-")
 
-    with closing(db_connect(Path(DB_PATH))) as conn:
-        payload = get_candidate_payload(conn, str(candidate_id)) or {}
-        if not isinstance(payload, dict):
-            payload = {}
-        if not payload.get('candidate_id'):
-            payload['candidate_id'] = str(candidate_id)
-        row = conn.execute(
-            "SELECT lc_path, source_path FROM candidates WHERE candidate_id=?",
-            (str(candidate_id),),
-        ).fetchone()
+    payload, stored_lc_path, source_path = _candidate_context(candidate_id)
     asas_sn_id = payload.get('asas_sn_id')
     gaia_id = payload.get('gaia_id')
     cluster_lc_path = payload.get('path')
     local_lc_path = _effective_local_lc_path(
         payload,
-        stored_lc_path=row[0] if row else None,
-        source_path=row[1] if row else None,
+        stored_lc_path=stored_lc_path,
+        source_path=source_path,
     )
 
     asas_text = f"ASAS-SN ID: {asas_sn_id}" if asas_sn_id else f"ASAS-SN ID: {candidate_id}"
@@ -7119,8 +7649,7 @@ def export_active_plot(n_clicks, figure, plot_mode, plot_src, idx, candidate_id)
         asas_sn_id = 'unknown'
         try:
             if candidate_id:
-                with closing(db_connect(Path(DB_PATH))) as conn:
-                    payload = get_candidate_payload(conn, str(candidate_id))
+                payload, _stored_lc_path, _source_path = _candidate_context(candidate_id)
                 asas_sn_id = str(payload.get('asas_sn_id') or payload.get('candidate_id') or 'unknown')
         except Exception:
             pass
@@ -7257,38 +7786,65 @@ def load_review_form(candidate_id, queue_size):
     )
 
 
-# Score button clicks
-@app.callback(
-     [Output('current-score', 'data', allow_duplicate=True),
-      Output('notification', 'children', allow_duplicate=True),
-      Output('review-pass-store', 'data', allow_duplicate=True)],
-     [Input(f'score-{i}', 'n_clicks') for i in range(1, 5)],
-     [State('queue-size-store', 'data'),
-      State('current-candidate-id', 'data'),
-      State('event-class-store', 'data'),
-      State('needs-followup-store', 'data'),
-      State('notes', 'value')],
-     prevent_initial_call=True
+app.clientside_callback(
+    """
+    function(n1, n2, n3, n4, queueSize, candidateId, eventClass, needsFollowup, notes, saveRequest) {
+        var no = window.dash_clientside.no_update;
+        if (!candidateId || parseInt(queueSize == null ? 0 : queueSize, 10) <= 0) {
+            var triggered = window.dash_clientside.callback_context.triggered || [];
+            if (!triggered.length) {
+                return [no, no, no];
+            }
+            return [no, 'Queue is empty', no];
+        }
+
+        var triggered = window.dash_clientside.callback_context.triggered || [];
+        if (!triggered.length) {
+            return [no, no, no];
+        }
+        var triggerId = String(triggered[0].prop_id || '').split('.')[0];
+        if (!triggerId.startsWith('score-')) {
+            return [no, no, no];
+        }
+
+        var score = parseInt(triggerId.split('-')[1], 10);
+        if (!Number.isFinite(score)) {
+            return [no, no, no];
+        }
+
+        var nextNonce = 1;
+        if (saveRequest && typeof saveRequest === 'object' && typeof saveRequest.nonce === 'number') {
+            nextNonce = saveRequest.nonce + 1;
+        }
+
+        return [
+            score,
+            '✓ Confidence: ' + String(score),
+            {
+                nonce: nextNonce,
+                candidate_id: String(candidateId),
+                score: score,
+                event_class: eventClass || 'unclassified',
+                needs_followup: !!needsFollowup,
+                notes: notes || '',
+                increment_pass: false,
+                event_type: 'button',
+            }
+        ];
+    }
+    """,
+    [Output('current-score', 'data', allow_duplicate=True),
+     Output('notification', 'children', allow_duplicate=True),
+     Output('review-save-request', 'data', allow_duplicate=True)],
+    [Input(f'score-{i}', 'n_clicks') for i in range(1, 5)],
+    [State('queue-size-store', 'data'),
+     State('current-candidate-id', 'data'),
+     State('event-class-store', 'data'),
+     State('needs-followup-store', 'data'),
+     State('notes', 'value'),
+     State('review-save-request', 'data')],
+    prevent_initial_call=True,
 )
-def handle_score_clicks(*args):
-    """Handle score button clicks."""
-    queue_size, candidate_id, event_class, needs_followup, notes = args[-5:]
-
-    if int(queue_size or 0) <= 0 or not candidate_id:
-        return no_update, "Queue is empty", no_update
-
-    ctx = callback_context
-    if not ctx.triggered:
-        return no_update, no_update, no_update
-
-    button_id = ctx.triggered[0]['prop_id'].split('.')[0]
-    score = int(button_id.split('-')[1])
-
-    new_pass, _ = _do_save(
-        str(candidate_id), score, event_class, needs_followup, notes, 'button',
-    )
-
-    return score, f"✓ Confidence: {score}", new_pass
 
 
 # Save button
@@ -7375,69 +7931,81 @@ def done_callback(n_clicks, idx, queue_size, candidate_id, score,
 
 # --- Display callbacks for stores → visible indicators ---
 
-# Update score button highlighting
-@app.callback(
+app.clientside_callback(
+    """
+    function(currentScore) {
+        var score = parseInt(currentScore, 10);
+        if (!Number.isFinite(score) || [1, 2, 3, 4].indexOf(score) === -1) {
+            score = null;
+        }
+        var out = [];
+        for (var i = 1; i <= 4; i += 1) {
+            out.push(i === score ? 'score-btn active' : 'score-btn');
+        }
+        return out;
+    }
+    """,
     [Output(f'score-{i}', 'className') for i in range(1, 5)],
     Input('current-score', 'data'),
-    prevent_initial_call=False
+    prevent_initial_call=False,
 )
-def update_score_buttons(current_score):
-    """Highlight the active score button."""
-    try:
-        score = int(current_score)
-    except Exception:
-        score = None
-    if score not in (1, 2, 3, 4):
-        score = None
-    return ['score-btn active' if i == score else 'score-btn' for i in range(1, 5)]
 
 
-# Update event class badge styling
-@app.callback(
+app.clientside_callback(
+    """
+    function(activeClass) {
+        var active = activeClass || 'unclassified';
+        return ['dipper', 'microlensing', 'flare', 'ltv', 'unknown_interesting', 'instrumental', 'other']
+            .map(function(tag) { return tag === active ? 'badge-btn active' : 'badge-btn'; });
+    }
+    """,
     [Output(f'class-badge-{tag}', 'className') for tag in CLASS_BADGE_TAGS],
     Input('event-class-store', 'data'),
-    prevent_initial_call=False
+    prevent_initial_call=False,
 )
-def update_class_badges(active_class):
-    """Highlight the active event class badge."""
-    active = active_class or 'unclassified'
-    return ['badge-btn active' if tag == active else 'badge-btn'
-            for tag in CLASS_BADGE_TAGS]
 
 
-# Class badge click handler
-@app.callback(
+app.clientside_callback(
+    """
+    function() {
+        var no = window.dash_clientside.no_update;
+        var triggered = window.dash_clientside.callback_context.triggered || [];
+        if (!triggered.length) {
+            return [no, no];
+        }
+        var triggerId = String(triggered[0].prop_id || '').split('.')[0];
+        if (!triggerId.startsWith('class-badge-')) {
+            return [no, no];
+        }
+        var tag = triggerId.replace('class-badge-', '');
+        var active = arguments[arguments.length - 1] || 'unclassified';
+        if (active === tag) {
+            return ['unclassified', 'Class: unclassified'];
+        }
+        return [tag, 'Class: ' + tag];
+    }
+    """,
     [Output('event-class-store', 'data', allow_duplicate=True),
      Output('notification', 'children', allow_duplicate=True)],
     [Input(f'class-badge-{tag}', 'n_clicks') for tag in CLASS_BADGE_TAGS],
     State('event-class-store', 'data'),
-    prevent_initial_call=True
+    prevent_initial_call=True,
 )
-def handle_class_clicks(*args):
-    """Set event class when its badge is clicked (click again to clear)."""
-    current_class = args[-1]
-    ctx = callback_context
-    if not ctx.triggered:
-        return no_update, no_update
-    trigger = ctx.triggered[0]['prop_id'].split('.')[0]
-    tag = trigger.replace('class-badge-', '')
-    cur = current_class or 'unclassified'
-    if cur == tag:
-        return 'unclassified', "Class: unclassified"
-    return tag, f"Class: {tag}"
 
 
-# Prefix indicator
-@app.callback(
+app.clientside_callback(
+    """
+    function(prefix) {
+        if (!prefix) {
+            return '';
+        }
+        return '[' + String(prefix).toUpperCase() + '] ...';
+    }
+    """,
     Output('prefix-indicator', 'children'),
     Input('pending-prefix', 'data'),
-    prevent_initial_call=False
+    prevent_initial_call=False,
 )
-def update_prefix_indicator(prefix):
-    """Show pending prefix key."""
-    if prefix:
-        return html.Span(f'[{prefix.upper()}] ...', style={'color': '#f80', 'font-weight': 'bold'})
-    return ''
 
 
 # Expand/collapse all candidate metadata panels
@@ -7459,17 +8027,16 @@ def toggle_all_metadata_panels(n_clicks, open_states):
     return [new_open for _ in open_states], label
 
 
-# Followup indicator
-@app.callback(
+app.clientside_callback(
+    """
+    function(needsFollowup) {
+        return needsFollowup ? '[,] Followup: ON' : '[,] Followup: off';
+    }
+    """,
     Output('followup-indicator', 'children'),
     Input('needs-followup-store', 'data'),
-    prevent_initial_call=False
+    prevent_initial_call=False,
 )
-def update_followup_indicator(needs_followup):
-    """Show followup flag status."""
-    if needs_followup:
-        return html.Span('[,] Followup: ON', style={'color': '#f80'})
-    return html.Span('[,] Followup: off', style={'color': '#666'})
 
 
 def _format_hms(total_seconds: float) -> str:
@@ -7502,90 +8069,53 @@ def sync_review_session_start(queue_hash, session_start):
 
 
 @app.callback(
-    Output('review-progress-indicator', 'children'),
-    Input('review-metrics-interval', 'n_intervals'),
-    Input('queue-size-store', 'data'),
-    Input('current-index', 'data'),
+    Output('review-progress-state', 'data'),
+    Input('review-db-scope', 'data'),
+    Input('queue-data', 'modified_timestamp'),
     Input('review-pass-store', 'data'),
-    State('review-session-start', 'data'),
+    Input('import-trigger', 'data'),
     prevent_initial_call=False,
 )
-def update_review_progress_indicator(_tick, queue_size, _idx, _review_pass, session_start):
-    """Render reviewed/total progress with session pace + elapsed timer."""
-    _ = _tick, _idx, _review_pass
-
-    with closing(db_connect(Path(DB_PATH))) as conn:
-        reviewed, total = count_progress(conn)
-
-    queue_size = int(queue_size or 0)
-
-    if total <= 0:
-        total = queue_size
-
-    pct = (100.0 * reviewed / total) if total > 0 else 0.0
-
-    start_ts = None
-    if isinstance(session_start, dict):
-        start_ts = session_start.get('ts')
-    try:
-        start_ts = float(start_ts) if start_ts is not None else None
-    except Exception:
-        start_ts = None
-    if start_ts is None or (not np.isfinite(start_ts)):
-        start_ts = time.time()
-
-    elapsed_s = max(0.0, time.time() - start_ts)
-    elapsed_txt = _format_hms(elapsed_s)
-
-    pace_per_min = 0.0
-    if elapsed_s > 0 and reviewed > 0:
-        pace_per_min = float(reviewed) / (elapsed_s / 60.0)
-
-    if pace_per_min > 0 and total > reviewed:
-        remaining = total - reviewed
-        eta_s = (remaining / pace_per_min) * 60.0
-        eta_txt = _format_hms(eta_s)
-    else:
-        eta_txt = "--:--:--"
-
-    pace_txt = f"{pace_per_min:.2f}/min" if pace_per_min > 0 else "--/min"
-    return (
-        f"Reviewed: {reviewed}/{total} ({pct:.1f}%) "
-        f"| Elapsed: {elapsed_txt} "
-        f"| Pace: {pace_txt} "
-        f"| ETA: {eta_txt}"
-    )
+def load_review_progress_state(_db_scope, _queue_data_ts, _review_pass, _import_trigger):
+    """Load reviewed/total counts for the progress indicator without interval polling."""
+    reviewed, total = _progress_counts()
+    return {'reviewed': int(reviewed), 'total': int(total)}
 
 
-# Pass indicator
-@app.callback(
+app.clientside_callback(
+    """
+    function(reviewPass) {
+        return 'Pass: ' + String(reviewPass || 1);
+    }
+    """,
     Output('pass-indicator', 'children'),
     Input('review-pass-store', 'data'),
-    prevent_initial_call=False
+    prevent_initial_call=False,
 )
-def update_pass_indicator(review_pass):
-    """Show current review pass number."""
-    return f"Pass: {review_pass or 1}"
 
 
-# Status indicator
-@app.callback(
+app.clientside_callback(
+    """
+    function(needsFollowup, score, candidateId, queueSize) {
+        if (!candidateId || parseInt(queueSize == null ? 0 : queueSize, 10) <= 0) {
+            return 'Status: —';
+        }
+        if (needsFollowup) {
+            return 'Status: needs_followup';
+        }
+        if (score !== null && score !== undefined && score !== '') {
+            return 'Status: reviewed';
+        }
+        return 'Status: unreviewed';
+    }
+    """,
     Output('status-indicator', 'children'),
     Input('needs-followup-store', 'data'),
     Input('current-score', 'data'),
     [State('current-candidate-id', 'data'),
      State('queue-size-store', 'data')],
-    prevent_initial_call=False
+    prevent_initial_call=False,
 )
-def update_status_indicator(needs_followup, score, candidate_id, queue_size):
-    """Show current effective status."""
-    if not candidate_id or int(queue_size or 0) == 0:
-        return "Status: —"
-    with closing(db_connect(Path(DB_PATH))) as conn:
-        review = get_review(conn, str(candidate_id))
-    status = review.get('status', 'unreviewed')
-    color = '#0f0' if status == 'reviewed' else '#f80' if status == 'needs_followup' else '#888'
-    return html.Span(f"Status: {status}", style={'color': color})
 
 # Auto-populate import candidates from run directory inferred via plot directory
 @app.callback(
@@ -8049,8 +8579,7 @@ def _pipeline_status_chip_elements(candidate_id) -> list:
     if candidate_id is None:
         return chips
     try:
-        with closing(db_connect(Path(DB_PATH))) as conn:
-            payload = get_candidate_payload(conn, str(candidate_id)) or {}
+        payload, _stored_lc_path, _source_path = _candidate_context(candidate_id)
         status = detect_pipeline_status(payload)
 
         periodicity_sig_cols = (
@@ -8126,8 +8655,7 @@ def maybe_cascade_auto_run(_queue_data_ts, candidate_id, pending_auto_run):
         return no_update
 
     try:
-        with closing(db_connect(Path(DB_PATH))) as conn:
-            payload = get_candidate_payload(conn, str(candidate_id)) or {}
+        payload, _stored_lc_path, _source_path = _candidate_context(candidate_id)
         status = detect_pipeline_status(payload)
         if any(state in {'missing', 'partial'} for state in status.values()):
             return pending_auto_run
@@ -8459,7 +8987,7 @@ def serve_plot(filename):
 
 # Reset queue to beginning
 @app.callback(
-    [Output('current-index', 'data'),
+    [Output('current-index', 'data', allow_duplicate=True),
      Output('notification', 'children', allow_duplicate=True)],
     Input('reset-queue-btn', 'n_clicks'),
     prevent_initial_call=True

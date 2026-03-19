@@ -125,7 +125,7 @@ def merge_local_catalog(
     df: pd.DataFrame,
     *,
     catalog_path: str | Path | None = None,
-    id_column: str = "ASAS-SN ID",
+    id_column: str = "asas_sn_id",
     catalog_id_column: str = "asas_sn_id",
     verbose: bool = False,
 ) -> pd.DataFrame:
@@ -908,7 +908,7 @@ def crossmatch_all_catalogs(
     # =========================================================================
     if use_local_catalog and (include_gaia_dr3 or include_vsx):
         # Try ID-based merge first (faster)
-        if "ASAS-SN ID" in df.columns:
+        if "asas_sn_id" in df.columns:
             df = merge_local_catalog(df, catalog_path=local_catalog_path, verbose=verbose)
         else:
             # Fall back to coordinate crossmatch

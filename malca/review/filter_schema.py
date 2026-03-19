@@ -6,14 +6,35 @@ SPECIAL_FILTERS = {
     "require_failed_any_false": "Require failed_any=False",
 }
 
+# Definite catalog/type hits that indicate an already-known object.
+# Keep uncertainty-style vetting flags (PM diagnostics, broad YSO heuristics, etc.)
+# out of this preset so the UI can apply only the hard known-type exclusions.
+VETTING_KNOWN_BOOL_FILTERS = (
+    "vetting_likely_known",
+    "microlens_match",
+)
+
+VETTING_KNOWN_SELECT_FILTERS = (
+    "vsx_class",
+    "microlens_catalog",
+    "asassn_var_type",
+    "gaia_var_class",
+    "simbad_otype",
+    "ztf_var_type",
+    "tns_type",
+    "alerce_lc_class",
+)
+
 
 SIDEBAR_GROUPS = [
     ("Vetting", [
         ("bool", "vetting_likely_known"),
+        ("bool", "microlens_match"),
         ("num", "pm_cluster_offset_sigma"),
         ("num", "pm_total"),
         ("bool", "high_pm_flag"),
         ("select", "vsx_class"),
+        ("select", "microlens_catalog"),
         ("select", "asassn_var_type"),
         ("select", "gaia_var_class"),
         ("select", "simbad_otype"),

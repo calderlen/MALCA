@@ -483,6 +483,8 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("cluster_membership_prob",  "REAL",    "float"),
     # -- vetting classification --
     ("vetting_likely_known",     "INTEGER", "bool"),
+    ("microlens_match",          "INTEGER", "bool"),
+    ("microlens_catalog",        "TEXT",    "select"),
     ("asassn_var_type",          "TEXT",    "select"),
     ("gaia_var_class",           "TEXT",    "select"),
     ("simbad_otype",             "TEXT",    "select"),
@@ -505,6 +507,11 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     # -- vetting details: ASAS-SN --
     ("asassn_var_name",          "TEXT",    "text"),
     ("asassn_var_period",        "REAL",    "float"),
+    # -- vetting details: microlensing catalogs --
+    ("microlens_name",           "TEXT",    "text"),
+    ("microlens_alt_name",       "TEXT",    "text"),
+    ("microlens_te_days",        "REAL",    "float"),
+    ("microlens_sep_arcsec",     "REAL",    "float"),
     # -- vetting details: ZTF --
     ("ztf_var_period",           "REAL",    "float"),
     ("ztf_var_amp",              "REAL",    "float"),
@@ -1526,6 +1533,8 @@ def get_diagnostic_background(conn: sqlite3.Connection) -> dict:
 
 VETTING_COLUMNS = [
     "vetting_likely_known",
+    "microlens_match", "microlens_catalog", "microlens_name",
+    "microlens_alt_name", "microlens_te_days", "microlens_sep_arcsec",
     "simbad_main_id", "simbad_otype", "simbad_nbref", "simbad_sep_arcsec",
     "gaia_var_flag", "gaia_var_class", "gaia_var_score",
     "gaia_eb_period", "gaia_eb_morph", "gaia_eb_global_ranking",
@@ -1617,13 +1626,14 @@ def merge_vetting_results(
             (json.dumps(payload, default=str), cid),
         )
         # Also update real columns for SQL-filterable vetting fields
-        _REAL_VETTING_COLS = {"vetting_likely_known", "asassn_var_type",
+        _REAL_VETTING_COLS = {"vetting_likely_known", "microlens_match",
+                              "microlens_catalog", "asassn_var_type",
                               "gaia_var_class", "simbad_otype", "ztf_var_type",
                               "tns_type", "yso_class"}
         for col in _REAL_VETTING_COLS:
             if col in vetting_data:
                 val = vetting_data[col]
-                if col == "vetting_likely_known":
+                if col in {"vetting_likely_known", "microlens_match"}:
                     val = int(bool(val))
                 conn.execute(
                     f"UPDATE candidates SET {col}=? WHERE candidate_id=?",

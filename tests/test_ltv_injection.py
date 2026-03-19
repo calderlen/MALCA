@@ -142,7 +142,7 @@ def test_run_injection_recovery_writes_trial_outputs(
         df = pd.read_csv(path, header=None, sep=r"\s+")
         delta = float(df.iloc[-1, 1] - df.iloc[0, 1])
         return {
-            "ASAS-SN ID": meta.asas_sn_id,
+            "asas_sn_id": meta.asas_sn_id,
             "ra_deg": meta.ra_deg,
             "dec_deg": meta.dec_deg,
             "Pstarss gmag": meta.pstarrs_g_mag,

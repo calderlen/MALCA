@@ -44,8 +44,9 @@ def test_refresh_review_stats_from_run_replaces_stats_only(tmp_path: Path, monke
             vet_before_import=False,
         )
 
-    def fake_compute_stats(_candidate_id: str, _parent: str, *, compute_ls: bool = True):
+    def fake_compute_stats(_candidate_id: str, _parent: str, *, compute_ls: bool = True, file_ext: str | None = None):
         assert compute_ls is True
+        assert file_ext == "dat2"
         return pd.DataFrame(), {
             "file_points_total": 12.0,
             "file_points_kept_after_filter": 11.0,
@@ -123,3 +124,62 @@ def test_rebuild_review_db_drops_obsolete_candidate_columns(tmp_path: Path) -> N
 
     assert "stats_obsolete" not in candidate_cols
     assert review_row == (3, "reviewed", "tester")
+
+
+def test_refresh_review_stats_from_ltv_scope_matches_db_by_asas_sn_id(tmp_path: Path, monkeypatch) -> None:
+    run_dir = tmp_path / "ltv_run"
+    bundle_dir = run_dir / "bundle_assets" / "lightcurves"
+    bundle_dir.mkdir(parents=True)
+
+    candidate_source = run_dir / "LTvar12-12.5_pipeline.parquet"
+    pd.DataFrame([{"asas_sn_id": "123"}]).to_parquet(candidate_source, index=False)
+
+    lc_path = bundle_dir / "123.dat2"
+    lc_path.write_text("dummy", encoding="ascii")
+
+    db_path = tmp_path / "ltv_review.db"
+    with db_connect(db_path) as conn:
+        import_candidates(
+            conn,
+            pd.DataFrame(
+                [
+                    {
+                        "candidate_id": "ltv_123",
+                        "asas_sn_id": "123",
+                        "path": "/missing/original/123.dat2",
+                        "lc_path": "/missing/original/123.dat2",
+                    }
+                ]
+            ),
+            source_path=str(candidate_source),
+            characterize_before_import=False,
+            vet_before_import=False,
+        )
+
+    def fake_compute_stats(_candidate_id: str, _parent: str, *, compute_ls: bool = True, file_ext: str | None = None):
+        assert file_ext == "dat2"
+        return pd.DataFrame(), {
+            "file_points_total": 10.0,
+            "file_points_kept_after_filter": 9.0,
+            "cadence_median_dt_days": 1.5,
+            "photometry_mean_mag": 13.7,
+            "photometry_median_mag": 13.6,
+        }
+
+    monkeypatch.setattr(review_refresh, "compute_stats", fake_compute_stats)
+
+    result = review_refresh.refresh_review_stats_from_run(
+        run_dir,
+        db_path,
+        candidate_source=candidate_source,
+    )
+
+    assert result["scoped_candidates"] == 1
+    assert result["matched_db_rows"] == 1
+    assert result["refreshed"] == 1
+    assert result["missing_from_db"] == []
+
+    with db_connect(db_path) as conn:
+        payload = get_candidate_payload(conn, "ltv_123")
+
+    assert payload["lc_path"] == str(lc_path)

@@ -5,15 +5,16 @@ Queries:
  1. SIMBAD — object type, identifiers, bibliography count
  2. Gaia DR3 variability tables — variability flag + classification
  3. ASAS-SN Variable Stars Database (VizieR II/366) — known ASAS-SN variables
- 4. ZTF periodic variables (Chen+ 2020, VizieR J/ApJS/249/18) — recent ZTF discoveries
- 5. TNS (Transient Name Server) — supernovae, novae, CVs, transients
- 6. Gaia DR3 eclipsing binary parameters — periods for dominant contaminant class
- 7. ALeRCE ZTF broker — ZTF ML classification
- 8. ATLAS forced photometry — independent cyan/orange confirmation
- 9. Gaia DR3 epoch photometry — space-based variability confirmation
-10. eROSITA X-ray catalog — youth indicator
-11. Proper motion consistency — cluster membership validation
-12. NEOWISE light curves — IR time-series for dipper confirmation
+ 4. OGLE EWS + KMTNet + MOA microlensing events — known microlensing surveys
+ 5. ZTF periodic variables (Chen+ 2020, VizieR J/ApJS/249/18) — recent ZTF discoveries
+ 6. TNS (Transient Name Server) — supernovae, novae, CVs, transients
+ 7. Gaia DR3 eclipsing binary parameters — periods for dominant contaminant class
+ 8. ALeRCE ZTF broker — ZTF ML classification
+ 9. ATLAS forced photometry — independent cyan/orange confirmation
+10. Gaia DR3 epoch photometry — space-based variability confirmation
+11. eROSITA X-ray catalog — youth indicator
+12. Proper motion consistency — cluster membership validation
+13. NEOWISE light curves — IR time-series for dipper confirmation
 
 Usage:
     from malca.vetting import vet_candidates
@@ -27,7 +28,10 @@ from typing import Callable, Literal
 import argparse
 import io
 import os
+import re
 import time
+from html.parser import HTMLParser
+from urllib.parse import urljoin
 
 from astropy.coordinates import SkyCoord
 from astropy.io import fits as pyfits
@@ -43,8 +47,10 @@ import pyvo
 import requests
 
 from malca.config.config_characterize import GAIA_CHUNK_SIZE
+from malca.config.config_io import PARQUET_CACHE_COMPRESSION
 from malca.config.config_ltv import VIZIER_TAP_URL
 from malca.config.config_paths import GAIA_AIP_TAP_URL
+from malca.config.config_paths import DEFAULT_CACHE_DIR
 from malca.config.config_vetting import (
     VETTING_SIMBAD_BATCH_SIZE,
     VETTING_SIMBAD_RETRY_DELAY,
@@ -54,14 +60,22 @@ from malca.config.config_vetting import (
     ATLAS_API_BASE,
     TNS_API_BASE,
     IRSA_TAP_URL,
+    OGLE_EWS_CURRENT_URL,
+    OGLE_EWS_ARCHIVE_URL_TEMPLATE,
+    KMTNET_EVENT_LIST_URL_TEMPLATE,
+    KMTNET_EVENT_PAGE_URL_TEMPLATE,
+    MOA_EVENTS_URL,
+    MOA_ARCHIVE_URL,
     ASASSN_VAR_CATALOG_ID,
     ZTF_VAR_CATALOG_ID,
     EROSITA_CATALOG_ID,
+    OGLE_MICROLENS_CATALOG_ID,
     ALERCE_RADIUS_ARCSEC as CFG_ALERCE_RADIUS_ARCSEC,
     ATLAS_MJD_MIN as CFG_ATLAS_MJD_MIN,
     ZTF_VAR_RADIUS_ARCSEC as CFG_ZTF_VAR_RADIUS_ARCSEC,
     TNS_RADIUS_ARCSEC as CFG_TNS_RADIUS_ARCSEC,
     EROSITA_RADIUS_ARCSEC as CFG_EROSITA_RADIUS_ARCSEC,
+    OGLE_MICROLENS_RADIUS_ARCSEC as CFG_OGLE_MICROLENS_RADIUS_ARCSEC,
     NEOWISE_VET_MAX_SEP_ARCSEC,
     ZTF_LC_RADIUS_ARCSEC,
     CRTS_MATCH_RADIUS_ARCSEC,
@@ -75,6 +89,9 @@ from malca.config.config_vetting import (
     ATLAS_MAX_POLL as CFG_ATLAS_MAX_POLL,
     VETTING_HTTP_TIMEOUT,
     VETTING_BACKOFF_CAP,
+    MICROLENS_OGLE_EWS_START_YEAR,
+    MICROLENS_KMTNET_START_YEAR,
+    MICROLENS_DEFAULT_END_YEAR,
     PANSTARRS_DEC_LIMIT,
     TESS_SEARCH_RADIUS_ARCSEC,
     AAVSO_MAX_PAGES,
@@ -117,6 +134,10 @@ ZTF_VAR_CATALOG = ZTF_VAR_CATALOG_ID
 ZTF_VAR_RADIUS_ARCSEC = CFG_ZTF_VAR_RADIUS_ARCSEC
 TNS_RADIUS_ARCSEC = CFG_TNS_RADIUS_ARCSEC
 TNS_BATCH_SIZE = CFG_TNS_BATCH_SIZE
+OGLE_MICROLENS_CATALOG = OGLE_MICROLENS_CATALOG_ID
+OGLE_MICROLENS_RADIUS_ARCSEC = CFG_OGLE_MICROLENS_RADIUS_ARCSEC
+MICROLENS_CACHE_DIR = DEFAULT_CACHE_DIR.expanduser()
+MICROLENS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 TNS_LOCAL_INPUT_DIR = Path(__file__).resolve().parent.parent / "input"
 TNS_LOCAL_CSVS = [
     TNS_LOCAL_INPUT_DIR / "tns_public_objects.csv",
@@ -558,6 +579,754 @@ def _asassn_via_tap(
                 matched += 1
 
     print(f"ASAS-SN variables: {matched} matches")
+    return df
+
+
+# =============================================================================
+# MICROLENSING EVENT CATALOGS
+# =============================================================================
+
+
+MICROLENS_SOURCE_PRIORITY = {
+    "OGLE-EWS": 0,
+    "KMTNet": 1,
+    "MOA": 2,
+    "OGLE-IV": 3,
+}
+
+
+def _microlens_cache_path(name: str, cache_dir: Path | None = None) -> Path:
+    root = Path(cache_dir) if cache_dir else MICROLENS_CACHE_DIR
+    root.mkdir(parents=True, exist_ok=True)
+    return root / name
+
+
+def _load_cached_microlens_catalog(cache_path: Path) -> pd.DataFrame | None:
+    try:
+        if cache_path.exists():
+            return pd.read_parquet(cache_path)
+    except Exception:
+        pass
+    return None
+
+
+def _save_cached_microlens_catalog(df: pd.DataFrame, cache_path: Path) -> None:
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(cache_path, index=False, compression=PARQUET_CACHE_COMPRESSION)
+
+
+def _fetch_text_with_retry(url: str, *, max_retries: int = VETTING_SIMBAD_MAX_RETRIES) -> str:
+    last_error: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            resp = requests.get(url, timeout=VETTING_HTTP_TIMEOUT)
+            resp.raise_for_status()
+            resp.encoding = resp.encoding or "utf-8"
+            return resp.text
+        except Exception as exc:
+            last_error = exc
+            if attempt < max_retries - 1:
+                time.sleep(min(2 ** attempt, VETTING_BACKOFF_CAP))
+    raise RuntimeError(f"failed to fetch {url}: {last_error}")
+
+
+def _flatten_html_columns(columns) -> list[str]:
+    out: list[str] = []
+    for col in columns:
+        if isinstance(col, tuple):
+            parts = [str(p).strip() for p in col if str(p).strip() and "unnamed" not in str(p).lower()]
+            out.append(" ".join(parts))
+        else:
+            out.append(str(col).strip())
+    return out
+
+
+def _normalize_column_name(name: object) -> str:
+    text = str(name).strip().lower()
+    text = re.sub(r"\([^)]*\)", "", text)
+    text = text.replace("#", "num")
+    text = re.sub(r"[^a-z0-9]+", "_", text)
+    return text.strip("_")
+
+
+class _SimpleHTMLTableParser(HTMLParser):
+    """Minimal HTML table parser for environments without lxml/bs4."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.tables: list[list[list[tuple[str, str]]]] = []
+        self._in_table = False
+        self._current_table: list[list[tuple[str, str]]] = []
+        self._in_row = False
+        self._current_row: list[tuple[str, str]] = []
+        self._current_cell_kind: str | None = None
+        self._cell_parts: list[str] = []
+
+    def _close_cell(self) -> None:
+        if self._current_cell_kind is None:
+            return
+        text = re.sub(r"\s+", " ", "".join(self._cell_parts)).strip()
+        self._current_row.append((self._current_cell_kind, text))
+        self._current_cell_kind = None
+        self._cell_parts = []
+
+    def _close_row(self) -> None:
+        self._close_cell()
+        if self._current_row:
+            self._current_table.append(self._current_row)
+        self._current_row = []
+        self._in_row = False
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if tag == "table":
+            if self._in_row:
+                self._close_row()
+            self._in_table = True
+            self._current_table = []
+        elif self._in_table and tag == "tr":
+            if self._in_row:
+                self._close_row()
+            self._in_row = True
+            self._current_row = []
+        elif self._in_row and tag in {"th", "td"}:
+            self._close_cell()
+            self._current_cell_kind = tag
+            self._cell_parts = []
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._in_row and tag in {"th", "td"}:
+            self._close_cell()
+        elif self._in_table and tag == "tr":
+            self._close_row()
+        elif tag == "table" and self._in_table:
+            if self._in_row:
+                self._close_row()
+            if self._current_table:
+                self.tables.append(self._current_table)
+            self._current_table = []
+            self._in_table = False
+
+    def handle_data(self, data: str) -> None:
+        if self._current_cell_kind is not None:
+            self._cell_parts.append(data)
+
+
+def _extract_html_tables(html: str) -> list[pd.DataFrame]:
+    parser = _SimpleHTMLTableParser()
+    parser.feed(html)
+    tables: list[pd.DataFrame] = []
+    for raw_table in parser.tables:
+        if not raw_table:
+            continue
+        header_idx = None
+        header_len = -1
+        for i, row in enumerate(raw_table):
+            th_count = sum(kind == "th" for kind, _ in row)
+            if th_count > 0 and len(row) > header_len:
+                header_idx = i
+                header_len = len(row)
+        if header_idx is None:
+            header_idx = 0
+        headers = [text for _kind, text in raw_table[header_idx]]
+        if not headers:
+            continue
+        rows = []
+        for row in raw_table[header_idx + 1:]:
+            values = [text for _kind, text in row]
+            if not any(values):
+                continue
+            if len(values) < len(headers):
+                values.extend([""] * (len(headers) - len(values)))
+            rows.append(values[: len(headers)])
+        if rows:
+            tables.append(pd.DataFrame(rows, columns=headers))
+    return tables
+
+
+def _find_table_with_columns(html: str, required_tokens: tuple[str, ...]) -> pd.DataFrame:
+    tables = _extract_html_tables(html)
+    for table in tables:
+        table = table.copy()
+        table.columns = _flatten_html_columns(table.columns)
+        normalized = [_normalize_column_name(c) for c in table.columns]
+        if all(any(token in col for col in normalized) for token in required_tokens):
+            return table
+    return pd.DataFrame()
+
+
+def _pick_column(columns: list[str], *tokens: str) -> str | None:
+    normalized = {_normalize_column_name(col): col for col in columns}
+    for token in tokens:
+        token_norm = _normalize_column_name(token)
+        token_compact = token_norm.replace("_", "")
+        for norm, raw in normalized.items():
+            norm_compact = norm.replace("_", "")
+            if token_norm == norm or token_compact == norm_compact:
+                return raw
+        for norm, raw in normalized.items():
+            norm_compact = norm.replace("_", "")
+            if norm.startswith(token_norm) or norm_compact.startswith(token_compact):
+                return raw
+        for norm, raw in normalized.items():
+            norm_compact = norm.replace("_", "")
+            if token_norm in norm or token_compact in norm_compact:
+                return raw
+    return None
+
+
+def _safe_text(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float) and pd.isna(value):
+        return ""
+    return str(value).strip()
+
+
+def _safe_float(value: object) -> float:
+    try:
+        val = float(value)
+    except (TypeError, ValueError):
+        return np.nan
+    return val if np.isfinite(val) else np.nan
+
+
+def _coerce_ra_dec_pair(ra_value: object, dec_value: object) -> tuple[float, float]:
+    ra_text = _safe_text(ra_value)
+    dec_text = _safe_text(dec_value)
+    if not ra_text or not dec_text:
+        return np.nan, np.nan
+    try:
+        ra_f = float(ra_text)
+        dec_f = float(dec_text)
+        if np.isfinite(ra_f) and np.isfinite(dec_f):
+            return ra_f, dec_f
+    except (TypeError, ValueError):
+        pass
+    try:
+        coord = SkyCoord(ra=ra_text, dec=dec_text, unit=(u.hourangle, u.deg))
+        return float(coord.ra.deg), float(coord.dec.deg)
+    except Exception:
+        return np.nan, np.nan
+
+
+def _event_year_from_name(name: str, default: int | None = None) -> int | None:
+    match = re.search(r"(19|20)\d{2}", str(name))
+    if match:
+        try:
+            return int(match.group(0))
+        except Exception:
+            return default
+    return default
+
+
+def _dedupe_join(values: list[str]) -> str:
+    seen: list[str] = []
+    for value in values:
+        text = _safe_text(value)
+        if text and text not in seen:
+            seen.append(text)
+    return "; ".join(seen)
+
+
+def _parse_ogle_ews_html(html: str, *, page_url: str, default_year: int | None = None) -> pd.DataFrame:
+    table = _find_table_with_columns(html, ("event", "ra", "dec"))
+    if table.empty:
+        return pd.DataFrame()
+
+    event_col = _pick_column(list(table.columns), "event")
+    ra_col = _pick_column(list(table.columns), "ra")
+    dec_col = _pick_column(list(table.columns), "dec")
+    tau_col = _pick_column(list(table.columns), "tau")
+    if event_col is None or ra_col is None or dec_col is None:
+        return pd.DataFrame()
+
+    link_map: dict[str, str] = {}
+    for href, label in re.findall(r'<a[^>]+href="([^"]+)"[^>]*>\s*([^<]+?)\s*</a>', html, flags=re.I):
+        clean_label = _safe_text(label)
+        if re.search(r"\d{4}-[A-Z]{3}-\d+", clean_label, flags=re.I):
+            link_map[clean_label] = urljoin(page_url, href)
+            if not clean_label.upper().startswith("OGLE-"):
+                link_map[f"OGLE-{clean_label}"] = urljoin(page_url, href)
+
+    rows: list[dict[str, object]] = []
+    for _, row in table.iterrows():
+        event_raw = _safe_text(row.get(event_col))
+        if not event_raw or not re.search(r"\d{4}-[A-Z]{3}-\d+", event_raw, flags=re.I):
+            continue
+        event_id = event_raw if event_raw.upper().startswith("OGLE-") else f"OGLE-{event_raw}"
+        ra_deg, dec_deg = _coerce_ra_dec_pair(row.get(ra_col), row.get(dec_col))
+        rows.append(
+            {
+                "source": "OGLE-EWS",
+                "event_id": event_id,
+                "alias": event_raw if event_raw != event_id else "",
+                "ra": ra_deg,
+                "dec": dec_deg,
+                "timescale_days": _safe_float(row.get(tau_col)) if tau_col else np.nan,
+                "timescale_kind": "tau" if tau_col else "",
+                "status": "",
+                "source_url": link_map.get(event_id) or link_map.get(event_raw) or page_url,
+                "event_year": _event_year_from_name(event_id, default=default_year),
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def _parse_kmtnet_listpage_text(text: str, *, year: int) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    has_header = bool(lines and lines[0].lower().startswith("event"))
+    if has_header:
+        try:
+            table = pd.read_csv(io.StringIO(text), sep=r"\s{2,}|\t", engine="python")
+        except Exception:
+            table = pd.DataFrame()
+        if not table.empty:
+            event_col = _pick_column(list(table.columns), "event")
+            ra_col = _pick_column(list(table.columns), "ra")
+            dec_col = _pick_column(list(table.columns), "dec")
+            te_col = _pick_column(list(table.columns), "t_e", "te")
+            related_col = _pick_column(list(table.columns), "related_event", "related")
+            status_col = _pick_column(list(table.columns), "clear_probable_possible", "probable", "possible")
+            if event_col is not None and ra_col is not None and dec_col is not None:
+                for _, row in table.iterrows():
+                    event_id = _safe_text(row.get(event_col))
+                    if not event_id:
+                        continue
+                    ra_deg, dec_deg = _coerce_ra_dec_pair(row.get(ra_col), row.get(dec_col))
+                    rows.append(
+                        {
+                            "source": "KMTNet",
+                            "event_id": event_id,
+                            "alias": _safe_text(row.get(related_col)) if related_col else "",
+                            "ra": ra_deg,
+                            "dec": dec_deg,
+                            "timescale_days": _safe_float(row.get(te_col)) if te_col else np.nan,
+                            "timescale_kind": "te" if te_col else "",
+                            "status": _safe_text(row.get(status_col)) if status_col else "",
+                            "source_url": KMTNET_EVENT_PAGE_URL_TEMPLATE.format(year=year),
+                            "event_year": _event_year_from_name(event_id, default=year),
+                        }
+                    )
+                return pd.DataFrame(rows)
+
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 14:
+            continue
+        event_id = parts[0]
+        ra_value = parts[4]
+        dec_value = parts[5]
+        ra_deg, dec_deg = _coerce_ra_dec_pair(ra_value, dec_value)
+        alias = parts[14] if len(parts) >= 15 and re.search(r"[A-Za-z]", parts[14]) else ""
+        status = ""
+        if len(parts) >= 4:
+            if parts[2] == "1" and parts[3] == "1":
+                status = "clear"
+            elif parts[2] == "1":
+                status = "candidate"
+        rows.append(
+            {
+                "source": "KMTNet",
+                "event_id": event_id,
+                "alias": alias,
+                "ra": ra_deg,
+                "dec": dec_deg,
+                "timescale_days": _safe_float(parts[7]),
+                "timescale_kind": "te",
+                "status": status,
+                "source_url": KMTNET_EVENT_PAGE_URL_TEMPLATE.format(year=year),
+                "event_year": _event_year_from_name(event_id, default=year),
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def _parse_moa_events_html(html: str) -> pd.DataFrame:
+    table = _find_table_with_columns(html, ("ra", "dec"))
+    if table.empty:
+        return pd.DataFrame()
+
+    event_col = _pick_column(list(table.columns), "eventnum", "event_number", "event")
+    ra_col = _pick_column(list(table.columns), "ra")
+    dec_col = _pick_column(list(table.columns), "dec")
+    cusp_col = _pick_column(list(table.columns), "cuspwidth", "cusp_width")
+    url_col = _pick_column(list(table.columns), "lc_url", "url")
+    if event_col is None or ra_col is None or dec_col is None:
+        return pd.DataFrame()
+
+    rows: list[dict[str, object]] = []
+    for _, row in table.iterrows():
+        raw_event = _safe_text(row.get(event_col))
+        if not raw_event:
+            continue
+        event_id = raw_event if raw_event.upper().startswith("MOA-") else f"MOA-{raw_event}"
+        ra_deg, dec_deg = _coerce_ra_dec_pair(row.get(ra_col), row.get(dec_col))
+        rows.append(
+            {
+                "source": "MOA",
+                "event_id": event_id,
+                "alias": "",
+                "ra": ra_deg,
+                "dec": dec_deg,
+                "timescale_days": _safe_float(row.get(cusp_col)) if cusp_col else np.nan,
+                "timescale_kind": "cuspwidth" if cusp_col else "",
+                "status": "",
+                "source_url": _safe_text(row.get(url_col)) or MOA_EVENTS_URL,
+                "event_year": _event_year_from_name(event_id),
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def fetch_ogle_ews_microlensing_events(
+    cache_dir: Path | None = None,
+    *,
+    force_download: bool = False,
+    show_tqdm: bool = True,
+    years: list[int] | None = None,
+) -> pd.DataFrame:
+    cache_path = _microlens_cache_path("microlens_ogle_ews.parquet", cache_dir)
+    cached = _load_cached_microlens_catalog(cache_path)
+    if cached is not None and not force_download:
+        if show_tqdm:
+            print(f"Microlensing catalogs: loading cached OGLE EWS archive from {cache_path}")
+        return cached
+
+    ogle_years = list(years) if years is not None else list(range(MICROLENS_OGLE_EWS_START_YEAR, MICROLENS_DEFAULT_END_YEAR))
+    pages = [(MICROLENS_DEFAULT_END_YEAR, OGLE_EWS_CURRENT_URL)] + [
+        (year, OGLE_EWS_ARCHIVE_URL_TEMPLATE.format(year=year))
+        for year in ogle_years
+    ]
+    frames: list[pd.DataFrame] = []
+    errors: list[str] = []
+    for year, url in pages:
+        try:
+            html = _fetch_text_with_retry(url)
+            frame = _parse_ogle_ews_html(html, page_url=url, default_year=year)
+            if not frame.empty:
+                frames.append(frame)
+        except Exception as exc:
+            errors.append(f"{url}: {exc}")
+
+    if not frames:
+        if cached is not None:
+            print(f"Microlensing catalogs: OGLE EWS refresh failed; using stale cache from {cache_path}")
+            return cached
+        raise RuntimeError("OGLE EWS fetch failed: " + ("; ".join(errors[:3]) if errors else "no data"))
+
+    df = pd.concat(frames, ignore_index=True).drop_duplicates(subset=["source", "event_id"], keep="first")
+    _save_cached_microlens_catalog(df, cache_path)
+    if show_tqdm:
+        print(f"Microlensing catalogs: cached {len(df)} OGLE EWS events to {cache_path}")
+    return df
+
+
+def fetch_kmtnet_microlensing_events(
+    cache_dir: Path | None = None,
+    *,
+    force_download: bool = False,
+    show_tqdm: bool = True,
+    years: list[int] | None = None,
+) -> pd.DataFrame:
+    cache_path = _microlens_cache_path("microlens_kmtnet.parquet", cache_dir)
+    cached = _load_cached_microlens_catalog(cache_path)
+    if cached is not None and not force_download:
+        if show_tqdm:
+            print(f"Microlensing catalogs: loading cached KMTNet archive from {cache_path}")
+        return cached
+
+    kmtnet_years = list(years) if years is not None else list(range(MICROLENS_KMTNET_START_YEAR, MICROLENS_DEFAULT_END_YEAR + 1))
+    frames: list[pd.DataFrame] = []
+    errors: list[str] = []
+    for year in kmtnet_years:
+        url = KMTNET_EVENT_LIST_URL_TEMPLATE.format(year=year)
+        try:
+            text = _fetch_text_with_retry(url)
+            frame = _parse_kmtnet_listpage_text(text, year=year)
+            if not frame.empty:
+                frames.append(frame)
+        except Exception as exc:
+            errors.append(f"{url}: {exc}")
+
+    if not frames:
+        if cached is not None:
+            print(f"Microlensing catalogs: KMTNet refresh failed; using stale cache from {cache_path}")
+            return cached
+        raise RuntimeError("KMTNet fetch failed: " + ("; ".join(errors[:3]) if errors else "no data"))
+
+    df = pd.concat(frames, ignore_index=True).drop_duplicates(subset=["source", "event_id"], keep="first")
+    _save_cached_microlens_catalog(df, cache_path)
+    if show_tqdm:
+        print(f"Microlensing catalogs: cached {len(df)} KMTNet events to {cache_path}")
+    return df
+
+
+def fetch_moa_microlensing_events(
+    cache_dir: Path | None = None,
+    *,
+    force_download: bool = False,
+    show_tqdm: bool = True,
+) -> pd.DataFrame:
+    cache_path = _microlens_cache_path("microlens_moa.parquet", cache_dir)
+    cached = _load_cached_microlens_catalog(cache_path)
+    if cached is not None and not force_download:
+        if show_tqdm:
+            print(f"Microlensing catalogs: loading cached MOA archive from {cache_path}")
+        return cached
+
+    try:
+        html = _fetch_text_with_retry(MOA_EVENTS_URL)
+        df = _parse_moa_events_html(html)
+        if df.empty:
+            raise RuntimeError("parsed zero MOA events")
+    except Exception as exc:
+        if cached is not None:
+            print(f"Microlensing catalogs: MOA refresh failed; using stale cache from {cache_path}")
+            return cached
+        raise RuntimeError(f"MOA fetch failed: {exc}") from exc
+
+    _save_cached_microlens_catalog(df, cache_path)
+    if show_tqdm:
+        print(f"Microlensing catalogs: cached {len(df)} MOA events to {cache_path}")
+    return df
+
+
+def fetch_microlensing_event_catalog(
+    cache_dir: Path | None = None,
+    *,
+    force_download: bool = False,
+    show_tqdm: bool = True,
+) -> pd.DataFrame:
+    cache_path = _microlens_cache_path("microlens_union.parquet", cache_dir)
+    cached = _load_cached_microlens_catalog(cache_path)
+    if cached is not None and not force_download:
+        if show_tqdm:
+            print(f"Microlensing catalogs: loading cached union catalog from {cache_path}")
+        return cached
+
+    frames: list[pd.DataFrame] = []
+    errors: list[str] = []
+    for label, fetcher in (
+        ("OGLE EWS", fetch_ogle_ews_microlensing_events),
+        ("KMTNet", fetch_kmtnet_microlensing_events),
+        ("MOA", fetch_moa_microlensing_events),
+    ):
+        try:
+            frames.append(fetcher(cache_dir=cache_dir, force_download=force_download, show_tqdm=show_tqdm))
+        except Exception as exc:
+            errors.append(f"{label}: {exc}")
+            print(f"Microlensing catalogs: warning: {label} unavailable ({exc})")
+
+    if not frames:
+        if cached is not None:
+            print(f"Microlensing catalogs: union refresh failed; using stale cache from {cache_path}")
+            return cached
+        raise RuntimeError("all microlensing catalog fetchers failed: " + "; ".join(errors[:3]))
+
+    union = pd.concat(frames, ignore_index=True)
+    union = union.dropna(subset=["ra", "dec"])
+    union = union[np.isfinite(union["ra"]) & np.isfinite(union["dec"])].copy()
+    union = union.drop_duplicates(subset=["source", "event_id"], keep="first")
+    union["source_rank"] = union["source"].map(MICROLENS_SOURCE_PRIORITY).fillna(999).astype(int)
+    union = union.sort_values(["source_rank", "event_year", "event_id"], na_position="last").reset_index(drop=True)
+    _save_cached_microlens_catalog(union, cache_path)
+    if show_tqdm:
+        print(f"Microlensing catalogs: cached {len(union)} union rows to {cache_path}")
+    return union
+
+
+def _crossmatch_published_ogle_microlensing(
+    df: pd.DataFrame,
+    *,
+    radius_arcsec: float,
+    chunk_size: int,
+    method: Literal["tap", "xmatch"],
+) -> pd.DataFrame:
+    """Fallback to the published OGLE-IV VizieR catalog if union ingestion fails."""
+    df = df.copy()
+    valid = df["ra"].notna() & df["dec"].notna()
+    if not valid.any():
+        return df
+
+    n_valid = int(valid.sum())
+
+    def _apply_matches(result: pd.DataFrame) -> pd.DataFrame:
+        nonlocal df
+        if result.empty:
+            print("Microlensing catalogs: 0 matches")
+            return df
+
+        sep_col = "sep_arcsec" if "sep_arcsec" in result.columns else "angDist"
+        result = result.sort_values(sep_col).drop_duplicates(subset="_idx", keep="first")
+        matched = 0
+        for _, row in result.iterrows():
+            idx = int(row["_idx"])
+            if idx not in df.index:
+                continue
+            name = _safe_text(row.get("Name"))
+            alt_name = _safe_text(row.get("EWS"))
+            te_val = pd.to_numeric(row.get("tE-best"), errors="coerce")
+            sep_val = pd.to_numeric(row.get(sep_col), errors="coerce")
+            df.loc[idx, "microlens_match"] = True
+            df.loc[idx, "microlens_catalog"] = "OGLE-IV"
+            df.loc[idx, "microlens_name"] = name or alt_name
+            df.loc[idx, "microlens_alt_name"] = alt_name if alt_name and alt_name != name else ""
+            df.loc[idx, "microlens_te_days"] = float(te_val) if pd.notna(te_val) else np.nan
+            df.loc[idx, "microlens_sep_arcsec"] = float(sep_val) if pd.notna(sep_val) else np.nan
+            matched += 1
+
+        print(f"Microlensing catalogs: {matched} matches")
+        return df
+
+    if method == "xmatch":
+        print(f"Microlensing catalogs: falling back to published OGLE-IV via CDS XMatch for {n_valid} candidates")
+        source_table = Table()
+        source_table["_idx"] = np.array(df.index[valid])
+        source_table["ra"] = df.loc[valid, "ra"].values
+        source_table["dec"] = df.loc[valid, "dec"].values
+        try:
+            result_tab = XMatch.query(
+                cat1=source_table,
+                cat2=f"vizier:{OGLE_MICROLENS_CATALOG}",
+                max_distance=radius_arcsec * u.arcsec,
+                colRA1="ra",
+                colDec1="dec",
+            )
+            result = result_tab.to_pandas() if result_tab is not None and len(result_tab) > 0 else pd.DataFrame()
+        except Exception as exc:
+            print(f"Microlensing catalogs: published OGLE-IV XMatch failed: {exc}")
+            result = pd.DataFrame()
+        return _apply_matches(result)
+
+    print(f"Microlensing catalogs: falling back to published OGLE-IV via TAP for {n_valid} candidates")
+    coords_df = pd.DataFrame({
+        "_idx": df.index[valid],
+        "ra": df.loc[valid, "ra"].values,
+        "dec": df.loc[valid, "dec"].values,
+    })
+    result = pd.DataFrame()
+    for ra_col, dec_col in (("RAJ2000", "DEJ2000"), ("RAdeg", "DEdeg")):
+        try:
+            result = batch_tap_crossmatch(
+                coords_df,
+                tap_url=VIZIER_TAP_URL,
+                catalog_table=f'"{OGLE_MICROLENS_CATALOG}"',
+                select_cols='c."Name", c."EWS", c."tE-best"',
+                ra_col=ra_col,
+                dec_col=dec_col,
+                match_radius_arcsec=radius_arcsec,
+                chunk_size=chunk_size,
+                n_workers=4,
+                verbose=True,
+                desc="Microlens TAP",
+                raise_on_all_failed=True,
+            )
+            break
+        except RuntimeError as exc:
+            if "Unknown column" not in str(exc) and "unresolved identifiers" not in str(exc):
+                print(f"Microlensing catalogs: published OGLE-IV TAP failed: {exc}")
+                break
+    return _apply_matches(result)
+
+
+def crossmatch_microlensing_catalogs(
+    df: pd.DataFrame,
+    radius_arcsec: float = OGLE_MICROLENS_RADIUS_ARCSEC,
+    chunk_size: int = 1000,
+    method: Literal["tap", "xmatch"] = "tap",
+) -> pd.DataFrame:
+    """
+    Crossmatch against known microlensing event catalogs.
+
+    Current coverage:
+      - OGLE EWS archive/history
+      - KMTNet yearly event lists
+      - MOA alert/archive history
+
+    The survey tables are fetched once, cached locally, and then crossmatched
+    in-memory via SkyCoord. If all three survey adapters fail, this falls back
+    to the older published OGLE-IV VizieR catalog path.
+
+    Adds columns: microlens_match, microlens_catalog, microlens_name,
+    microlens_alt_name, microlens_te_days, microlens_sep_arcsec.
+    """
+    df = df.copy()
+    df["microlens_match"] = False
+    df["microlens_catalog"] = ""
+    df["microlens_name"] = ""
+    df["microlens_alt_name"] = ""
+    df["microlens_te_days"] = np.nan
+    df["microlens_sep_arcsec"] = np.nan
+
+    valid = df["ra"].notna() & df["dec"].notna()
+    if not valid.any():
+        return df
+
+    n_valid = int(valid.sum())
+    print(f"Microlensing catalogs: crossmatching {n_valid} candidates via cached survey union (radius={radius_arcsec}\")")
+    try:
+        catalog = fetch_microlensing_event_catalog(show_tqdm=True)
+    except Exception as exc:
+        print(f"Microlensing catalogs: union fetch failed ({exc}); using published OGLE-IV fallback")
+        return _crossmatch_published_ogle_microlensing(
+            df,
+            radius_arcsec=radius_arcsec,
+            chunk_size=chunk_size,
+            method=method,
+        )
+
+    if catalog.empty:
+        print("Microlensing catalogs: 0 matches")
+        return df
+
+    src_index = df.index[valid]
+    src_coords = SkyCoord(
+        ra=df.loc[valid, "ra"].values,
+        dec=df.loc[valid, "dec"].values,
+        unit="deg",
+    )
+    cat_coords = SkyCoord(
+        ra=catalog["ra"].to_numpy(dtype=float),
+        dec=catalog["dec"].to_numpy(dtype=float),
+        unit="deg",
+    )
+
+    idx_cat, idx_src, sep2d, _ = src_coords.search_around_sky(cat_coords, radius_arcsec * u.arcsec)
+    if len(idx_src) == 0:
+        print("Microlensing catalogs: 0 matches")
+        return df
+
+    matched_rows = catalog.iloc[np.asarray(idx_cat, dtype=int)].copy().reset_index(drop=True)
+    matched_rows["candidate_idx"] = src_index.to_numpy()[np.asarray(idx_src, dtype=int)]
+    matched_rows["sep_arcsec"] = np.asarray(sep2d.arcsec, dtype=float)
+    matched_rows["source_rank"] = matched_rows["source"].map(MICROLENS_SOURCE_PRIORITY).fillna(999).astype(int)
+
+    matched = 0
+    for candidate_idx, group in matched_rows.groupby("candidate_idx", sort=False):
+        ordered = group.sort_values(["sep_arcsec", "source_rank", "event_id"], na_position="last")
+        primary = ordered.iloc[0]
+        alt_bits = []
+        primary_alias = _safe_text(primary.get("alias"))
+        if primary_alias:
+            alt_bits.append(primary_alias)
+        for _, extra in ordered.iloc[1:].head(3).iterrows():
+            alt_bits.append(f"{_safe_text(extra.get('source'))}:{_safe_text(extra.get('event_id'))}")
+
+        timescale = pd.to_numeric(primary.get("timescale_days"), errors="coerce")
+        kind = _safe_text(primary.get("timescale_kind")).lower()
+        df.loc[candidate_idx, "microlens_match"] = True
+        df.loc[candidate_idx, "microlens_catalog"] = _safe_text(primary.get("source"))
+        df.loc[candidate_idx, "microlens_name"] = _safe_text(primary.get("event_id"))
+        df.loc[candidate_idx, "microlens_alt_name"] = _dedupe_join(alt_bits)
+        df.loc[candidate_idx, "microlens_te_days"] = float(timescale) if pd.notna(timescale) and kind in {"te", "tau"} else np.nan
+        df.loc[candidate_idx, "microlens_sep_arcsec"] = float(primary["sep_arcsec"])
+        matched += 1
+
+    print(f"Microlensing catalogs: {matched} matches")
     return df
 
 
@@ -2573,6 +3342,7 @@ def vet_candidates(
     run_simbad: bool = True,
     run_gaia_var: bool = True,
     run_asassn_var: bool = True,
+    run_microlens: bool = True,
     run_ztf_var: bool = True,
     run_tns: bool = True,
     run_gaia_eb: bool = True,
@@ -2584,6 +3354,7 @@ def vet_candidates(
     run_neowise_lc: bool = False,
     simbad_radius_arcsec: float = SIMBAD_RADIUS_ARCSEC,
     asassn_radius_arcsec: float = ASASSN_VAR_RADIUS_ARCSEC,
+    microlens_radius_arcsec: float = OGLE_MICROLENS_RADIUS_ARCSEC,
     ztf_var_radius_arcsec: float = ZTF_VAR_RADIUS_ARCSEC,
     tns_radius_arcsec: float = TNS_RADIUS_ARCSEC,
     alerce_radius_arcsec: float = ALERCE_RADIUS_ARCSEC,
@@ -2608,6 +3379,7 @@ def vet_candidates(
     run_simbad : query SIMBAD for object type, bibliography
     run_gaia_var : query Gaia DR3 variability tables
     run_asassn_var : crossmatch ASAS-SN variable star catalog
+    run_microlens : crossmatch known microlensing event catalogs
     run_ztf_var : crossmatch ZTF periodic variables (Chen+ 2020)
     run_tns : crossmatch Transient Name Server
     run_gaia_eb : query Gaia DR3 eclipsing binary parameters (ECL sources only)
@@ -2652,6 +3424,7 @@ def vet_candidates(
         "Gaia variability": "gaia_var_flag",
         "Gaia epoch photometry": "gaia_epoch_available",
         "ASAS-SN variables": "asassn_var_name",
+        "Microlensing catalogs": "microlens_match",
         "ZTF variables": "ztf_var_type",
         "TNS": "tns_name",
         "Gaia EB params": "gaia_eb_period",
@@ -2699,6 +3472,10 @@ def vet_candidates(
         _asassn_method = "local" if method == "xmatch" else "tap"
         _run_module("ASAS-SN variables", crossmatch_asassn_variables,
                     radius_arcsec=asassn_radius_arcsec, method=_asassn_method)
+
+    if run_microlens:
+        _run_module("Microlensing catalogs", crossmatch_microlensing_catalogs,
+                    radius_arcsec=microlens_radius_arcsec, method=method)
 
     if run_ztf_var:
         _run_module("ZTF variables", crossmatch_ztf_variables, radius_arcsec=ztf_var_radius_arcsec, method=method)
@@ -2760,6 +3537,13 @@ def _print_vetting_summary(df: pd.DataFrame, total_start: float) -> None:
         n = (df["asassn_var_type"] != "").sum()
         print(f"  ASAS-SN var matches:    {n}/{len(df)}")
 
+    if "microlens_match" in df.columns:
+        n = df["microlens_match"].fillna(False).astype(bool).sum()
+        print(f"  Microlens matches:      {n}/{len(df)}")
+        if n > 0 and "microlens_catalog" in df.columns:
+            for cls, cnt in df.loc[df["microlens_match"].fillna(False).astype(bool), "microlens_catalog"].value_counts().head(5).items():
+                print(f"    {cls}: {cnt}")
+
     if "ztf_var_type" in df.columns:
         n = (df["ztf_var_type"] != "").sum()
         print(f"  ZTF var matches:        {n}/{len(df)}")
@@ -2814,6 +3598,8 @@ def _print_vetting_summary(df: pd.DataFrame, total_start: float) -> None:
         known_mask |= df["gaia_var_class"] != ""
     if "asassn_var_type" in df.columns:
         known_mask |= df["asassn_var_type"] != ""
+    if "microlens_match" in df.columns:
+        known_mask |= df["microlens_match"].fillna(False).astype(bool)
     if "ztf_var_type" in df.columns:
         known_mask |= df["ztf_var_type"] != ""
     if "tns_name" in df.columns:
@@ -2862,6 +3648,7 @@ def main():
     g_io.add_argument("--min-score", type=float, default=None, help="Only vet candidates with interest_score >= this value")
     g_radii.add_argument("--simbad-radius", type=float, default=SIMBAD_RADIUS_ARCSEC, help=f"SIMBAD search radius in arcsec (default: {SIMBAD_RADIUS_ARCSEC})")
     g_radii.add_argument("--asassn-radius", type=float, default=ASASSN_VAR_RADIUS_ARCSEC, help=f"ASAS-SN crossmatch radius in arcsec (default: {ASASSN_VAR_RADIUS_ARCSEC})")
+    g_radii.add_argument("--microlens-radius", type=float, default=OGLE_MICROLENS_RADIUS_ARCSEC, help=f"Microlensing catalog crossmatch radius in arcsec (default: {OGLE_MICROLENS_RADIUS_ARCSEC})")
     g_radii.add_argument("--alerce-radius", type=float, default=ALERCE_RADIUS_ARCSEC, help=f"ALeRCE search radius in arcsec (default: {ALERCE_RADIUS_ARCSEC})")
     g_radii.add_argument("--erosita-radius", type=float, default=EROSITA_RADIUS_ARCSEC, help=f"eROSITA search radius in arcsec (default: {EROSITA_RADIUS_ARCSEC})")
     g_radii.add_argument("--ztf-var-radius", type=float, default=ZTF_VAR_RADIUS_ARCSEC, help=f"ZTF variable crossmatch radius in arcsec (default: {ZTF_VAR_RADIUS_ARCSEC})")
@@ -2870,6 +3657,7 @@ def main():
     g_skip.add_argument("--no-gaia-var", action="store_true", help="Skip Gaia DR3 variability query")
     g_skip.add_argument("--no-gaia-epoch", action="store_true", help="Skip Gaia DR3 epoch photometry check")
     g_skip.add_argument("--no-asassn-var", action="store_true", help="Skip ASAS-SN variable catalog crossmatch")
+    g_skip.add_argument("--no-microlens", action="store_true", help="Skip microlensing event catalog crossmatch")
     g_skip.add_argument("--no-ztf-var", action="store_true", help="Skip ZTF periodic variables crossmatch")
     g_skip.add_argument("--no-tns", action="store_true", help="Skip TNS transient crossmatch")
     g_skip.add_argument("--no-gaia-eb", action="store_true", help="Skip Gaia DR3 eclipsing binary parameters")
@@ -2923,6 +3711,7 @@ def main():
         run_gaia_var=not args.no_gaia_var,
         run_gaia_epoch=not args.no_gaia_epoch,
         run_asassn_var=not args.no_asassn_var,
+        run_microlens=not args.no_microlens,
         run_ztf_var=not args.no_ztf_var,
         run_tns=not args.no_tns,
         run_gaia_eb=not args.no_gaia_eb,
@@ -2933,6 +3722,7 @@ def main():
         run_neowise_lc=args.neowise_lc,
         simbad_radius_arcsec=args.simbad_radius,
         asassn_radius_arcsec=args.asassn_radius,
+        microlens_radius_arcsec=args.microlens_radius,
         ztf_var_radius_arcsec=args.ztf_var_radius,
         tns_radius_arcsec=args.tns_radius,
         alerce_radius_arcsec=args.alerce_radius,

@@ -2085,7 +2085,7 @@ def build_explorer_app(
         if trigger == "period-search-btn":
             chosen_method = str(method or "pdm").lower()
         else:
-            chosen_method = "pdm"
+            chosen_method = "auto"
             if has_external_period(record):
                 label = "Catalog/pipeline period"
                 cache_map[cache_key] = {"result": None, "label": label}
@@ -2100,7 +2100,8 @@ def build_explorer_app(
             method=chosen_method,
         )
         if trigger != "period-search-btn":
-            label = f"Auto {label}" if result is not None else f"Auto search: {label}"
+            if not str(label or "").lower().startswith("auto"):
+                label = f"Auto {label}" if result is not None else f"Auto search: {label}"
             if isinstance(result, dict):
                 result = dict(result)
                 result["auto"] = True

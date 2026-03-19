@@ -5,7 +5,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from malca.review.filter_schema import SIDEBAR_GROUPS
+from malca.review.filter_schema import (
+    SIDEBAR_GROUPS,
+    VETTING_KNOWN_BOOL_FILTERS,
+    VETTING_KNOWN_SELECT_FILTERS,
+)
 from malca.review.interactive_plot import _build_stat_rows
 from malca.review import app as review_app
 from malca.review.store import (
@@ -155,6 +159,147 @@ def test_queue_plot_render_request_tracks_candidate_id() -> None:
 
     assert request["nonce"] == 5
     assert request["state"]["candidate_id"] == "FETCH-TEST-1"
+
+
+def test_auto_period_on_navigate_queues_search_when_no_known_period(monkeypatch) -> None:
+    monkeypatch.setattr(review_app, "_candidate_context", lambda candidate_id: ({"candidate_id": candidate_id}, None, None))
+    monkeypatch.setattr(review_app, "_has_external_period", lambda payload: False)
+
+    result, label, manual_period, cache_update, request = review_app.auto_period_on_navigate(
+        "FETCH-TEST-1",
+        0.1,
+        10.0,
+        {},
+        {"nonce": 0},
+    )
+
+    assert result is None
+    assert label == "Auto-searching period..."
+    assert manual_period is None
+    assert cache_update is review_app.no_update
+    assert request["candidate_id"] == "FETCH-TEST-1"
+    assert request["method"] == "auto"
+    assert request["nonce"] == 1
+
+
+def test_run_auto_period_search_caches_result(monkeypatch) -> None:
+    monkeypatch.setattr(review_app, "_candidate_context", lambda candidate_id: ({"candidate_id": candidate_id}, None, None))
+    monkeypatch.setattr(
+        review_app,
+        "_run_period_search_for_payload",
+        lambda payload, min_period, max_period, method: (
+            {"best_period": 2.5, "method": "CE"},
+            "Auto CE/PDM: P=2.50000 d via CE",
+        ),
+    )
+
+    result, label, cache = review_app.run_auto_period_search(
+        {"nonce": 1, "candidate_id": "FETCH-TEST-1", "min_period": 0.1, "max_period": 10.0, "method": "auto"},
+        {},
+    )
+
+    assert result["best_period"] == 2.5
+    assert result["auto"] is True
+    assert label == "Auto CE/PDM: P=2.50000 d via CE"
+    assert cache["FETCH-TEST-1"]["result"]["best_period"] == 2.5
+
+
+def test_vetting_known_filter_preset_targets_only_definite_known_types() -> None:
+    select_options = {
+        "vsx_class": [{"label": "EA", "value": "EA"}, {"label": "RR", "value": "RR"}],
+        "microlens_catalog": [{"label": "OGLE", "value": "OGLE"}],
+        "asassn_var_type": [{"label": "Mira", "value": "Mira"}],
+        "gaia_var_class": [{"label": "RRAB", "value": "RRAB"}],
+        "simbad_otype": [{"label": "V*", "value": "V*"}],
+        "ztf_var_type": [{"label": "CEP", "value": "CEP"}],
+        "tns_type": [{"label": "SN Ia", "value": "SN Ia"}],
+        "alerce_lc_class": [{"label": "LPV", "value": "LPV"}],
+        "yso_class": [{"label": "Class II", "value": "Class II"}],
+    }
+
+    bool_values, select_values = review_app._vetting_known_filter_preset(select_options)
+    select_map = dict(zip(VETTING_KNOWN_SELECT_FILTERS, select_values))
+    targeted = set(VETTING_KNOWN_BOOL_FILTERS) | set(VETTING_KNOWN_SELECT_FILTERS)
+
+    assert bool_values == ["False", "False"]
+    assert select_map["vsx_class"] == ["EA", "RR"]
+    assert select_map["alerce_lc_class"] == ["LPV"]
+    assert "yso_class" not in select_map
+    assert {"pm_cluster_offset_sigma", "pm_total", "high_pm_flag", "yso_class"}.isdisjoint(targeted)
+
+
+def test_layout_includes_vetting_known_type_button() -> None:
+    def collect_ids(component) -> set[str]:
+        if component is None:
+            return set()
+        ids: set[str] = set()
+        comp_id = getattr(component, "id", None)
+        if isinstance(comp_id, str):
+            ids.add(comp_id)
+        children = getattr(component, "children", None)
+        if isinstance(children, (list, tuple)):
+            for child in children:
+                ids |= collect_ids(child)
+        elif children is not None:
+            ids |= collect_ids(children)
+        return ids
+
+    layout = review_app.create_layout()
+
+    assert "vetting-known-types-btn" in collect_ids(layout)
+
+
+def test_load_review_progress_state_reads_db_counts(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "review.db"
+    with db_connect(db_path) as conn:
+        import_candidates(
+            conn,
+            pd.DataFrame(
+                [
+                    {"candidate_id": "CAND-1", "asas_sn_id": "ASASSN-1"},
+                    {"candidate_id": "CAND-2", "asas_sn_id": "ASASSN-2"},
+                ]
+            ),
+            source_path=str(tmp_path),
+            characterize_before_import=False,
+            vet_before_import=False,
+        )
+        save_review(
+            conn,
+            candidate_id="CAND-1",
+            interest_score=3,
+            event_class="other",
+            review_pass=1,
+            notes="",
+            status="reviewed",
+            reviewer="tester",
+        )
+
+    monkeypatch.setattr(review_app, "DB_PATH", str(db_path))
+    review_app._clear_review_state_caches()
+
+    state = review_app.load_review_progress_state(None, None, None, None)
+
+    assert state == {"reviewed": 1, "total": 2}
+
+
+def test_review_callbacks_have_no_duplicate_outputs_without_allow_duplicate() -> None:
+    plain_counts: dict[str, int] = {}
+
+    for callback in review_app.app._callback_list:
+        output_key = str(callback["output"])
+        if output_key.startswith("..") and output_key.endswith(".."):
+            parts = output_key[2:-2].split("...")
+        else:
+            parts = [output_key]
+        for part in parts:
+            base, _, duplicate_hash = part.partition("@")
+            if duplicate_hash:
+                continue
+            plain_counts[base] = plain_counts.get(base, 0) + 1
+
+    offenders = {key: count for key, count in plain_counts.items() if count > 1}
+    assert offenders == {}, f"Duplicate non-allow_duplicate callback outputs: {offenders}"
 
 
 def test_update_display_uses_render_request_candidate_and_skips_static_lookup(tmp_path: Path, monkeypatch) -> None:
@@ -313,6 +458,7 @@ def test_update_diagnostic_plots_renders_candidate_first_without_background(tmp_
     monkeypatch.setattr(review_app, "_render_diagnostic_plots", fake_render)
 
     panels, status = review_app.update_diagnostic_plots(
+        True,
         "DIAG-1",
         review_app.DEFAULT_THEME,
         {"signature": "", "ready": False, "cached": False, "token": 0},
@@ -348,6 +494,7 @@ def test_update_diagnostic_plots_uses_cached_background_when_ready(tmp_path: Pat
     review_app._store_cached_diagnostic_background(signature, cached_background)
 
     panels, status = review_app.update_diagnostic_plots(
+        True,
         "DIAG-2",
         review_app.DEFAULT_THEME,
         {"signature": signature, "ready": True, "cached": True, "token": 1},
@@ -355,6 +502,34 @@ def test_update_diagnostic_plots_uses_cached_background_when_ready(tmp_path: Pat
 
     assert panels == ["with-background"]
     assert captured["background"] == cached_background
+    assert status == ""
+
+
+def test_update_diagnostic_plots_skips_work_when_panel_closed(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "review.db"
+    with db_connect(db_path) as conn:
+        import_candidates(
+            conn,
+            pd.DataFrame([{"candidate_id": "DIAG-3", "asas_sn_id": "DIAG-3"}]),
+            source_path="fetch://skypatrol2/asassn/DIAG-3",
+            characterize_before_import=False,
+            vet_before_import=False,
+        )
+
+    def fail_render(*_args, **_kwargs):
+        raise AssertionError("diagnostic plots should not render while the panel is closed")
+
+    monkeypatch.setattr(review_app, "DB_PATH", str(db_path))
+    monkeypatch.setattr(review_app, "_render_diagnostic_plots", fail_render)
+
+    panels, status = review_app.update_diagnostic_plots(
+        False,
+        "DIAG-3",
+        review_app.DEFAULT_THEME,
+        {"signature": "", "ready": False, "cached": False, "token": 0},
+    )
+
+    assert panels is review_app.no_update
     assert status == ""
 
 

@@ -11,7 +11,7 @@ from malca.review.store import _COL_NAMES
 def test_map_ltv_columns_renames_stochastic_outputs() -> None:
     df = pd.DataFrame(
         {
-            "ASAS-SN ID": [123],
+            "asas_sn_id": [123],
             "stoch_sf_ml_amplitude": [0.21],
             "stoch_sf_ml_gamma": [0.54],
             "stoch_iar_phi": [0.87],
@@ -45,7 +45,7 @@ def test_map_ltv_columns_renames_extended_core_outputs() -> None:
         if src not in {"vg_has_v"}
     }
     numeric_payload["vg_has_v"] = [1]
-    df = pd.DataFrame({"ASAS-SN ID": [456], **numeric_payload})
+    df = pd.DataFrame({"asas_sn_id": [456], **numeric_payload})
 
     out = map_ltv_columns(df)
 

@@ -631,7 +631,7 @@ def run_pipeline_cli(args):
     
     # Normalize ID columns for Parquet (avoids ArrowTypeError on mixed int/str).
     # By position so every column with these names (including duplicates) is converted.
-    id_col_names = ("ASAS-SN ID", "asas_sn_id")
+    id_col_names = ("asas_sn_id",)
     for i, name in enumerate(df.columns):
         if name in id_col_names:
             df.iloc[:, i] = df.iloc[:, i].astype(object).map(

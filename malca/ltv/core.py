@@ -12,7 +12,7 @@ Key behavior preserved from the brute-force version:
 - Compute per-season medians for *non-empty* seasons, keep their original season numbers as x-values
   (this is what the giant if/elif ladder was trying to do with e.g. indexes=[1,5,6,...])
 - Fit linear and quadratic polynomials to (season_index, season_median)
-- Compute “max diff” using the same (buggy but preserved) algebra as in the snippet.
+- Compute "max diff" from the correctly evaluated fitted trend over the observed season range.
 
 Notes:
 - The original uses ID['ra_deg'] but treats it like hours in the formula.
@@ -560,14 +560,16 @@ def compute_trend_metrics(indexes: np.ndarray, meds: np.ndarray) -> tuple[float,
     Return:
       (lin_slope, quad_slope, coeff1, coeff2, max_diff)
 
-    Preserves the snippet's naming/buggy algebra:
-      coeffs = polyfit(x, y, 2) gives [a,b,c]
+    Here ``coeff1`` and ``coeff2`` retain their legacy column names, but they now
+    store the true quadratic-fit coefficients:
+      coeffs = polyfit(x, y, 2) gives [a, b, c]
       quadratic_slope = a
-      c1 = b
-      c2 = c
-      te = -c2/(2*a)   (bug preserved)
-      me = c1-(c2^2)/(4*a) (bug preserved)
-      m(x) = c1 + c2*x + a*x^2 (bug preserved)
+      coeff1 = b
+      coeff2 = c
+
+    ``max_diff`` is the maximum fitted magnitude difference across the observed
+    season-index range, including the quadratic vertex when it falls inside the
+    sampled interval.
     """
     # Linear slope
     lin = np.polyfit(indexes, meds, 1)
@@ -576,33 +578,36 @@ def compute_trend_metrics(indexes: np.ndarray, meds: np.ndarray) -> tuple[float,
     # Quadratic
     quad = np.polyfit(indexes, meds, 2)
     a = float(quad[0])
-    c1 = float(quad[1])
-    c2 = float(quad[2])
+    b = float(quad[1])
+    c = float(quad[2])
 
-    # Fitted endpoints (preserved)
+    # Evaluate the fitted quadratic over the observed season-index span.
     x0 = float(indexes[0])
     x1 = float(indexes[-1])
 
-    m0 = c1 + c2 * x0 + a * x0 * x0
-    m1 = c1 + c2 * x1 + a * x1 * x1
+    def _quad(x: float) -> float:
+        return a * x * x + b * x + c
+
+    m0 = _quad(x0)
+    m1 = _quad(x1)
 
     # Handle near-linear case safely
     if np.isclose(a, 0.0):
         diff = abs(m1 - m0)
-        return lin_slope, a, c1, c2, float(diff)
+        return lin_slope, a, b, c, float(diff)
 
-    te = -c2 / (2.0 * a)
-    me = c1 - (c2 * c2) / (4.0 * a)
+    vertex_x = -b / (2.0 * a)
+    vertex_y = _quad(vertex_x)
 
-    if (te > x0) and (te < x1):
+    if (vertex_x > x0) and (vertex_x < x1):
         m1m0 = abs(m1 - m0)
-        m1me = abs(m1 - me)
-        m0me = abs(m0 - me)
+        m1me = abs(m1 - vertex_y)
+        m0me = abs(m0 - vertex_y)
         diff = max(m1m0, m1me, m0me)
     else:
         diff = abs(m1 - m0)
 
-    return lin_slope, a, c1, c2, float(diff)
+    return lin_slope, a, b, c, float(diff)
 
 
 def compute_basic_lc_stats(JD: np.ndarray) -> dict[str, float | int]:
@@ -969,7 +974,7 @@ def process_one_lc(
     )
 
     return {
-        "ASAS-SN ID": target,
+        "asas_sn_id": target,
         "ra_deg": ra_val,
         "dec_deg": meta.dec_deg,
         "Pstarss gmag": p_mag,

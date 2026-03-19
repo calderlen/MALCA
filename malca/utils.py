@@ -1,4 +1,4 @@
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 from glob import glob
 from pathlib import Path
 import os
@@ -1362,7 +1362,7 @@ def batch_tap_crossmatch(
                     failure_messages.append(error)
                 if not result.empty:
                     results.append(result)
-        except TimeoutError:
+        except FuturesTimeoutError:
             timed_out = True
             n_pending = sum(1 for f in futures if not f.done())
             if verbose or n_pending:

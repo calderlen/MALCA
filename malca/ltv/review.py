@@ -37,7 +37,7 @@ from malca.stats import compute_stats, _enrich_row_worker
 # Column mapping: LTV pipeline output → review DB schema
 # ---------------------------------------------------------------------------
 
-# Core output columns from core.py (legacy names → ltv_* names)
+# Core output columns from core.py → ltv_* names
 _CORE_COL_MAP = {
     "Slope":       "ltv_slope",
     "Quad Slope":  "ltv_slope_quad",
@@ -113,30 +113,16 @@ def map_ltv_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     Returns a new DataFrame with:
     - candidate_id = "ltv_{asas_sn_id}"
-    - asas_sn_id from "ASAS-SN ID"
+    - asas_sn_id preserved as the standard LTV source ID column
     - ltv_* columns from pipeline output
     - ra_deg, dec_deg preserved for characterization
     """
     df = df.copy()
 
-    # --- Identify the source ID column ---
-    id_col = None
-    for candidate in ("ASAS-SN ID", "asas_sn_id", "asassn_id"):
-        if candidate in df.columns:
-            id_col = candidate
-            break
-    if id_col is None:
-        raise ValueError(
-            "LTV DataFrame must have an 'ASAS-SN ID' or 'asas_sn_id' column"
-        )
+    if "asas_sn_id" not in df.columns:
+        raise ValueError("LTV DataFrame must have an 'asas_sn_id' column")
 
-    # Normalise to asas_sn_id (string) + candidate_id
-    if id_col != "asas_sn_id":
-        df["asas_sn_id"] = df[id_col].astype(str)
-        if id_col != "asas_sn_id":
-            df = df.drop(columns=[id_col])
-    else:
-        df["asas_sn_id"] = df["asas_sn_id"].astype(str)
+    df["asas_sn_id"] = df["asas_sn_id"].astype(str)
 
     df["candidate_id"] = "ltv_" + df["asas_sn_id"]
 

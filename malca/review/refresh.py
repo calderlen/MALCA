@@ -49,6 +49,56 @@ def _load_scope_candidate_ids(candidate_source: Path) -> list[str]:
     )
 
 
+def _resolve_scope_ids_to_candidate_ids(
+    scope_ids: list[str],
+    db_rows: list[tuple[object, object, object]],
+) -> tuple[list[str], list[str]]:
+    candidate_ids: set[str] = set()
+    asas_to_candidate: dict[str, str] = {}
+    ambiguous_asas_ids: set[str] = set()
+
+    for raw_candidate_id, raw_asas_sn_id, _payload_json in db_rows:
+        candidate_id = str(raw_candidate_id).strip()
+        if candidate_id:
+            candidate_ids.add(candidate_id)
+
+        asas_sn_id = "" if raw_asas_sn_id is None else str(raw_asas_sn_id).strip()
+        if not asas_sn_id:
+            continue
+        existing = asas_to_candidate.get(asas_sn_id)
+        if existing is None:
+            asas_to_candidate[asas_sn_id] = candidate_id
+        elif existing != candidate_id:
+            ambiguous_asas_ids.add(asas_sn_id)
+
+    for asas_sn_id in ambiguous_asas_ids:
+        asas_to_candidate.pop(asas_sn_id, None)
+
+    matched_ids: list[str] = []
+    missing_from_db: list[str] = []
+    seen: set[str] = set()
+
+    for scope_id in scope_ids:
+        text = str(scope_id).strip()
+        if not text:
+            continue
+        candidate_id = None
+        if text in candidate_ids:
+            candidate_id = text
+        else:
+            candidate_id = asas_to_candidate.get(text)
+
+        if candidate_id is None:
+            missing_from_db.append(text)
+            continue
+        if candidate_id in seen:
+            continue
+        seen.add(candidate_id)
+        matched_ids.append(candidate_id)
+
+    return matched_ids, missing_from_db
+
+
 def _resolve_lightcurve_path(payload: dict, run_dir: Path) -> Path | None:
     bundle_dir = run_dir / "bundle_assets" / "lightcurves"
     candidate_names: list[str] = []
@@ -90,7 +140,13 @@ def _resolve_lightcurve_path(payload: dict, run_dir: Path) -> Path | None:
 
 
 def _build_stats_updates(lc_path: Path, *, compute_ls: bool) -> dict[str, object]:
-    _df, summary = compute_stats(lc_path.stem, str(lc_path.parent), compute_ls=compute_ls)
+    file_ext = lc_path.suffix[1:] if lc_path.suffix.startswith(".") else None
+    _df, summary = compute_stats(
+        lc_path.stem,
+        str(lc_path.parent),
+        compute_ls=compute_ls,
+        file_ext=file_ext,
+    )
     updates: dict[str, object] = {"lc_path": str(lc_path)}
     merge_stats_summary_into_payload(updates, summary)
     return updates
@@ -135,9 +191,9 @@ def refresh_review_stats_from_run(
         }
 
     with db_connect(db_path) as conn:
-        rows = conn.execute("SELECT candidate_id, payload_json FROM candidates").fetchall()
+        rows = conn.execute("SELECT candidate_id, asas_sn_id, payload_json FROM candidates").fetchall()
         payload_by_id: dict[str, dict] = {}
-        for candidate_id, payload_json in rows:
+        for candidate_id, _asas_sn_id, payload_json in rows:
             cid = str(candidate_id)
             try:
                 payload = json.loads(payload_json) if payload_json else {}
@@ -152,8 +208,7 @@ def refresh_review_stats_from_run(
         clear_base = {col for col in table_cols if col.startswith("stats_")}
         clear_base.update(CORE_STATS_KEYS)
 
-        missing_from_db = [cid for cid in scope_ids if cid not in payload_by_id]
-        matched_ids = [cid for cid in scope_ids if cid in payload_by_id]
+        matched_ids, missing_from_db = _resolve_scope_ids_to_candidate_ids(scope_ids, rows)
 
         refreshed = 0
         unresolved: list[str] = []
