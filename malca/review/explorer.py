@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
 from datetime import datetime, timezone
 import glob
+import json
+import os
 from pathlib import Path
 import re
 from threading import Timer
@@ -37,14 +40,16 @@ from malca.review.explore_data import (
     infer_plot_dir_from_source,
     load_combined_source_data,
     load_run_params,
+    normalize_review_label,
     numeric_series,
     text_series,
 )
 from malca.review.filter_schema import SIDEBAR_GROUPS
 from malca.review.handoff import build_review_command, launch_detached
 from malca.review.interactive_plot import build_interactive_lightcurve_figure, resolve_lightcurve_path as review_resolve_lightcurve_path
+from malca.review.keyboard import CLASS_KEY_MAP
 from malca.review.period_search import has_external_period, run_period_search_for_payload
-from malca.review.store import export_review_subset_bundle
+from malca.review.store import db_connect, export_review_subset_bundle, get_review, load_app_state, save_app_state, save_review
 
 
 DEFAULT_THEME = "black"
@@ -102,6 +107,7 @@ AUTO_FILTER_EXCLUDE_COLUMNS = {
 }
 
 AUTO_FILTER_TEXT_ONLY_MAX_UNIQUES = 200
+_EXPLORER_GUI_STATE_APP_STATE_KEY = "dash_explorer_gui_state_v1"
 
 ADV_FILTER_INPUTS = [
     Input({"type": "adv-bool-mode", "col": ALL}, "value"),
@@ -121,6 +127,226 @@ ADV_FILTER_STATES = [
     State({"type": "adv-select-exclude", "col": ALL}, "id"),
 ]
 
+REVIEW_EVENT_CLASSES = list(dict.fromkeys(["unclassified", *CLASS_KEY_MAP.values(), "yso"]))
+REVIEWED_CLASSES = {
+    "dipper",
+    "yso",
+    "microlensing",
+    "flare",
+    "instrumental",
+    "unknown_interesting",
+    "other",
+    "ltv",
+}
+REVIEW_CLASS_OPTIONS = [
+    {"label": "Unclassified", "value": "unclassified"},
+    {"label": "Dipper", "value": "dipper"},
+    {"label": "Microlensing", "value": "microlensing"},
+    {"label": "Flare", "value": "flare"},
+    {"label": "YSO", "value": "yso"},
+    {"label": "LTV", "value": "ltv"},
+    {"label": "Unknown interesting", "value": "unknown_interesting"},
+    {"label": "Instrumental", "value": "instrumental"},
+    {"label": "Other", "value": "other"},
+]
+REVIEW_SCORE_OPTIONS = [
+    {"label": "1", "value": 1},
+    {"label": "2", "value": 2},
+    {"label": "3", "value": 3},
+    {"label": "4", "value": 4},
+]
+
+
+def _coerce_optional_float(value: object) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        numeric = float(value)
+    except Exception:
+        return None
+    return numeric if np.isfinite(numeric) else None
+
+
+def _coerce_string_list(raw_value: object) -> list[str]:
+    if raw_value is None:
+        return []
+    if isinstance(raw_value, str):
+        values = [raw_value]
+    elif isinstance(raw_value, (list, tuple, set, np.ndarray, pd.Series)):
+        values = list(raw_value)
+    else:
+        values = [raw_value]
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value).strip()
+        if text and text not in seen:
+            out.append(text)
+            seen.add(text)
+    return out
+
+
+def _coerce_explorer_bool_mode_value(value: object) -> str:
+    text = str(value).strip() if value is not None else ""
+    return text if text in {"Any", "True", "False", "Unset"} else "Any"
+
+
+def _coerce_explorer_text_value(value: object) -> str:
+    text = str(value).strip() if value is not None else ""
+    return text or "Any"
+
+
+def _explorer_state_db_path(combined: CombinedCandidateData) -> Path | None:
+    db_paths: list[Path] = []
+    seen: set[str] = set()
+    for source in combined.sources:
+        if str(getattr(source, "source_kind", "")).lower() != "db":
+            continue
+        try:
+            path = Path(str(source.source_path)).expanduser().resolve()
+        except Exception:
+            continue
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        db_paths.append(path)
+    return db_paths[0] if len(db_paths) == 1 else None
+
+
+def _explorer_gui_state_from_values(
+    *,
+    source_filter: object,
+    query_value: object,
+    advanced_state: dict[str, object],
+    x_metric: object,
+    y_metric: object,
+    color_metric: object,
+    symbol_metric: object,
+    log_flags: object,
+    x_min: object,
+    x_max: object,
+    y_min: object,
+    y_max: object,
+    table_sort: object,
+    selected_key: object,
+    theme_mode: object,
+    candidate_scope_state: dict[str, object] | None,
+    panel_options: object,
+    period_value: object,
+    yaxis_mode: object,
+    period_method: object,
+    period_min: object,
+    period_max: object,
+    selected_cameras: object,
+    selected_bands: object,
+) -> dict[str, object]:
+    return {
+        "source_filter": _coerce_string_list(source_filter),
+        "query_value": "" if query_value is None else str(query_value),
+        "advanced": dict(advanced_state or {}),
+        "x_metric": str(x_metric).strip() if x_metric not in (None, "") else None,
+        "y_metric": str(y_metric).strip() if y_metric not in (None, "") else None,
+        "color_metric": str(color_metric).strip() if color_metric not in (None, "") else None,
+        "symbol_metric": str(symbol_metric).strip() if symbol_metric not in (None, "") else None,
+        "log_flags": _coerce_string_list(log_flags),
+        "x_min": _coerce_optional_float(x_min),
+        "x_max": _coerce_optional_float(x_max),
+        "y_min": _coerce_optional_float(y_min),
+        "y_max": _coerce_optional_float(y_max),
+        "table_sort": str(table_sort).strip() if table_sort not in (None, "") else None,
+        "selected_key": str(selected_key).strip() if selected_key not in (None, "") else "",
+        "theme_mode": "white" if str(theme_mode or "").strip() == "white" else "black",
+        "candidate_scope_state": dict(candidate_scope_state or {"mode": "filtered"}),
+        "panel_options": _coerce_string_list(panel_options),
+        "period_value": _coerce_optional_float(period_value),
+        "yaxis_mode": "flux" if str(yaxis_mode or "").strip() == "flux" else "mag",
+        "period_method": str(period_method).strip().lower() if period_method not in (None, "") else "pdm",
+        "period_min": _coerce_optional_float(period_min),
+        "period_max": _coerce_optional_float(period_max),
+        "camera_values": _coerce_string_list(selected_cameras),
+        "band_values": _coerce_string_list(selected_bands),
+    }
+
+
+def _normalize_explorer_gui_state(raw_state: object) -> dict[str, object] | None:
+    if not isinstance(raw_state, dict) or not raw_state:
+        return None
+    return _explorer_gui_state_from_values(
+        source_filter=raw_state.get("source_filter"),
+        query_value=raw_state.get("query_value"),
+        advanced_state=dict(raw_state.get("advanced") or {}),
+        x_metric=raw_state.get("x_metric"),
+        y_metric=raw_state.get("y_metric"),
+        color_metric=raw_state.get("color_metric"),
+        symbol_metric=raw_state.get("symbol_metric"),
+        log_flags=raw_state.get("log_flags"),
+        x_min=raw_state.get("x_min"),
+        x_max=raw_state.get("x_max"),
+        y_min=raw_state.get("y_min"),
+        y_max=raw_state.get("y_max"),
+        table_sort=raw_state.get("table_sort"),
+        selected_key=raw_state.get("selected_key"),
+        theme_mode=raw_state.get("theme_mode"),
+        candidate_scope_state=dict(raw_state.get("candidate_scope_state") or {"mode": "filtered"}),
+        panel_options=raw_state.get("panel_options"),
+        period_value=raw_state.get("period_value"),
+        yaxis_mode=raw_state.get("yaxis_mode"),
+        period_method=raw_state.get("period_method"),
+        period_min=raw_state.get("period_min"),
+        period_max=raw_state.get("period_max"),
+        selected_cameras=raw_state.get("camera_values"),
+        selected_bands=raw_state.get("band_values"),
+    )
+
+
+def _explorer_advanced_ui_values_from_state(
+    saved_state: dict[str, object] | None,
+    *,
+    bool_ids: list[dict[str, object]] | None,
+    num_min_ids: list[dict[str, object]] | None,
+    num_max_ids: list[dict[str, object]] | None,
+    text_ids: list[dict[str, object]] | None,
+    select_ids: list[dict[str, object]] | None,
+) -> tuple[list[object], list[object], list[object], list[object], list[object], list[str], list[str]]:
+    adv = dict((saved_state or {}).get("advanced") or {})
+    bool_map = dict(adv.get("bool") or {})
+    num_map = dict(adv.get("num") or {})
+    text_map = dict(adv.get("text") or {})
+    select_map = dict(adv.get("select") or {})
+
+    bool_values = [
+        _coerce_explorer_bool_mode_value(bool_map.get(str((meta or {}).get("col") or "")))
+        for meta in (bool_ids or [])
+    ]
+    num_min_values = [
+        _coerce_optional_float(dict(num_map.get(str((meta or {}).get("col") or "")) or {}).get("min"))
+        for meta in (num_min_ids or [])
+    ]
+    num_max_values = [
+        _coerce_optional_float(dict(num_map.get(str((meta or {}).get("col") or "")) or {}).get("max"))
+        for meta in (num_max_ids or [])
+    ]
+    text_values = [
+        _coerce_explorer_text_value(text_map.get(str((meta or {}).get("col") or "")))
+        for meta in (text_ids or [])
+    ]
+    select_values = [
+        _coerce_string_list(select_map.get(str((meta or {}).get("col") or "")))
+        for meta in (select_ids or [])
+    ]
+    only_unreviewed = ["yes"] if bool(adv.get("only_unreviewed")) else []
+    require_failed = ["yes"] if bool(adv.get("require_failed_any_false")) else []
+    return (
+        bool_values,
+        num_min_values,
+        num_max_values,
+        text_values,
+        select_values,
+        only_unreviewed,
+        require_failed,
+    )
+
 
 def _summary_items(record: dict[str, object]) -> list[tuple[str, str]]:
     fields = [
@@ -139,6 +365,128 @@ def _summary_items(record: dict[str, object]) -> list[tuple[str, str]]:
         if text:
             items.append((label, text))
     return items
+
+
+def _normalize_review_state(review: dict[str, object] | None) -> dict[str, object]:
+    raw = dict(review or {})
+    score = raw.get("interest_score")
+    try:
+        score_val = None if score in (None, "") else int(np.clip(int(score), 1, 4))
+    except Exception:
+        score_val = None
+
+    event_class = str(raw.get("event_class") or "unclassified").strip() or "unclassified"
+    if event_class not in REVIEW_EVENT_CLASSES:
+        event_class = "other"
+
+    try:
+        review_pass = max(1, int(raw.get("review_pass") or 1))
+    except Exception:
+        review_pass = 1
+
+    status = str(raw.get("status") or "unreviewed").strip() or "unreviewed"
+    if status not in {"reviewed", "needs_followup", "unreviewed"}:
+        status = "reviewed"
+
+    return {
+        "interest_score": score_val,
+        "event_class": event_class,
+        "review_pass": review_pass,
+        "notes": "" if raw.get("notes") is None else str(raw.get("notes")),
+        "status": status,
+        "reviewer": "" if raw.get("reviewer") is None else str(raw.get("reviewer")),
+        "updated_at": raw.get("updated_at"),
+    }
+
+
+def _record_review_state(record: dict[str, object] | None) -> dict[str, object]:
+    if not isinstance(record, dict):
+        return _normalize_review_state(None)
+    return _normalize_review_state({
+        "interest_score": record.get("interest_score"),
+        "event_class": record.get("event_class"),
+        "review_pass": record.get("review_pass"),
+        "notes": record.get("notes"),
+        "status": record.get("status"),
+        "reviewer": record.get("reviewer"),
+        "updated_at": record.get("updated_at"),
+    })
+
+
+def _apply_review_override_to_record(
+    record: dict[str, object] | None,
+    review_overrides: dict[str, object] | None,
+) -> dict[str, object] | None:
+    if not isinstance(record, dict):
+        return record
+    key = str(record.get("candidate_key") or "").strip()
+    if not key:
+        return dict(record)
+    override = dict((review_overrides or {}).get(key) or {})
+    if not override:
+        return dict(record)
+    merged = dict(record)
+    merged.update(_normalize_review_state(override))
+    return merged
+
+
+def _apply_review_overrides(
+    frame: pd.DataFrame,
+    review_overrides: dict[str, object] | None,
+) -> pd.DataFrame:
+    if frame.empty or "candidate_key" not in frame.columns or not review_overrides:
+        return frame
+
+    out = frame.copy()
+    override_map = {
+        str(key): _normalize_review_state(value)
+        for key, value in dict(review_overrides or {}).items()
+        if str(key).strip()
+    }
+    if not override_map:
+        return out
+
+    key_series = out["candidate_key"].astype(str)
+    for field in ("interest_score", "event_class", "review_pass", "notes", "status", "reviewer", "updated_at"):
+        if field not in out.columns:
+            out[field] = pd.NA
+
+    for key, review in override_map.items():
+        mask = key_series.eq(key)
+        if not bool(mask.any()):
+            continue
+        for field, value in review.items():
+            out.loc[mask, field] = value
+
+    review_label = normalize_review_label(text_series(out, "event_class"))
+    if "review_event_class" in out.columns:
+        review_label = review_label.where(
+            review_label.ne(""),
+            normalize_review_label(text_series(out, "review_event_class")),
+        )
+    out["review_label"] = review_label
+    out["is_reviewed"] = review_label.isin(REVIEWED_CLASSES)
+    out["is_reviewed_dipper"] = review_label.eq("dipper")
+    out["is_reviewed_non_dipper"] = out["is_reviewed"] & (~out["is_reviewed_dipper"])
+    return out
+
+
+def _get_candidate_record_from_frame(frame: pd.DataFrame, candidate_key: str | None) -> dict[str, object] | None:
+    if frame.empty or "candidate_key" not in frame.columns:
+        return None
+    key = str(candidate_key or "").strip()
+    if not key:
+        try:
+            key = str(frame.iloc[0].get("candidate_key") or "")
+        except Exception:
+            key = ""
+    if not key:
+        return None
+    matches = frame.loc[frame["candidate_key"].astype(str).eq(key)]
+    if matches.empty:
+        return None
+    row = matches.iloc[0]
+    return row.to_dict() if isinstance(row, pd.Series) else None
 
 
 def _render_summary(record: dict[str, object]) -> html.Div:
@@ -1065,6 +1413,7 @@ def _table_rows(frame: pd.DataFrame, sort_by: str) -> list[dict[str, object]]:
         "final_class",
         "status",
         "event_class",
+        "interest_score",
         "dipper_score",
         "period_n_sources",
         "period_consensus_days",
@@ -1136,6 +1485,8 @@ def build_explorer_app(
             dcc.Store(id="theme-mode-store", data=DEFAULT_THEME),
             dcc.Store(id="plot-reset-store", data=_default_plot_reset_data()),
             dcc.Store(id="candidate-scope-store", data={"mode": "filtered"}),
+            dcc.Store(id="saved-explorer-gui-state", data=None),
+            dcc.Store(id="explorer-review-overrides", data={}, storage_type="session"),
             dcc.Store(id="explorer-resize-init", data=0),
             dcc.Store(id="explorer-sidebar-open", data=True, storage_type="local"),
             dcc.Interval(id="explorer-init", interval=200, n_intervals=0, max_intervals=1),
@@ -1165,6 +1516,13 @@ def build_explorer_app(
                             dcc.Input(id="query-input", debounce=True, placeholder="pandas query, e.g. dipper_score >= 5 and period_n_sources <= 1", style=BASE_INPUT_STYLE, persistence=True, persistence_type="local"),
                             dcc.Checklist(id="only-unreviewed", options=[{"label": " Only unreviewed", "value": "yes"}], value=[], className="explorer-stack-checklist", persistence=True, persistence_type="local"),
                             dcc.Checklist(id="require-failed-any-false", options=[{"label": " Require failed_any=False", "value": "yes"}], value=[], className="explorer-stack-checklist", persistence=True, persistence_type="local"),
+                            html.Div(
+                                [
+                                    html.Button("Save GUI State", id="save-explorer-gui-state-btn", n_clicks=0, className="explorer-action-btn"),
+                                    html.Div(id="save-explorer-gui-state-status", className="explorer-status-line"),
+                                ],
+                                style={"marginBottom": "8px"},
+                            ),
                             html.Div(advanced_sections, className="explorer-advanced-sections"),
                             html.Hr(className="explorer-rule"),
                             _section_title("Plot Maker"),
@@ -1302,6 +1660,7 @@ def build_explorer_app(
                                                     {"name": "final_class", "id": "final_class"},
                                                     {"name": "status", "id": "status"},
                                                     {"name": "event_class", "id": "event_class"},
+                                                    {"name": "interest_score", "id": "interest_score"},
                                                     {"name": "dipper_score", "id": "dipper_score"},
                                                     {"name": "period_n_sources", "id": "period_n_sources"},
                                                     {"name": "period_consensus_days", "id": "period_consensus_days"},
@@ -1340,6 +1699,48 @@ def build_explorer_app(
                                             html.Div(id="selected-status", className="explorer-status-line"),
                                             html.Div(id="review-launch-status", className="explorer-status-line"),
                                             html.Div(id="viewer-summary", className="explorer-summary"),
+                                            html.Hr(className="explorer-rule"),
+                                            html.Div("Explorer grading", className="explorer-card-title"),
+                                            html.Div(id="explorer-review-target-status", className="explorer-status-line"),
+                                            html.Div(id="explorer-review-save-status", className="explorer-status-line"),
+                                            _label("Class"),
+                                            dcc.Dropdown(
+                                                id="explorer-review-class",
+                                                options=REVIEW_CLASS_OPTIONS,
+                                                value="unclassified",
+                                                clearable=False,
+                                            ),
+                                            _label("Confidence"),
+                                            dcc.RadioItems(
+                                                id="explorer-review-confidence",
+                                                options=REVIEW_SCORE_OPTIONS,
+                                                value=None,
+                                                className="explorer-inline-radio",
+                                            ),
+                                            dcc.Checklist(
+                                                id="explorer-review-followup",
+                                                options=[{"label": " Needs follow-up", "value": "followup"}],
+                                                value=[],
+                                                className="explorer-inline-checklist",
+                                            ),
+                                            _label("Notes"),
+                                            dcc.Textarea(
+                                                id="explorer-review-notes",
+                                                value="",
+                                                placeholder="Review notes",
+                                                style={"width": "100%", "minHeight": "88px", "resize": "vertical"},
+                                            ),
+                                            html.Div(
+                                                [
+                                                    html.Button(
+                                                        "Save Grade",
+                                                        id="explorer-review-save-btn",
+                                                        n_clicks=0,
+                                                        className="explorer-action-btn explorer-primary-btn",
+                                                    ),
+                                                ],
+                                                className="explorer-button-row",
+                                            ),
                                         ],
                                         className="explorer-card",
                                     ),
@@ -1439,6 +1840,248 @@ def build_explorer_app(
         Input("theme-mode", "value"),
         prevent_initial_call=False,
     )
+
+    @app.callback(
+        Output("saved-explorer-gui-state", "data"),
+        Input("explorer-init", "n_intervals"),
+        prevent_initial_call=False,
+    )
+    def load_saved_explorer_gui_state(_tick):
+        state_db_path = _explorer_state_db_path(combined)
+        if state_db_path is None:
+            return None
+        try:
+            with closing(db_connect(state_db_path)) as conn:
+                raw = str(load_app_state(conn, _EXPLORER_GUI_STATE_APP_STATE_KEY, "") or "").strip()
+        except Exception:
+            return None
+        if not raw:
+            return None
+        try:
+            return _normalize_explorer_gui_state(json.loads(raw))
+        except Exception:
+            return None
+
+    @app.callback(
+        Output("save-explorer-gui-state-status", "children"),
+        Output("saved-explorer-gui-state", "data", allow_duplicate=True),
+        Input("save-explorer-gui-state-btn", "n_clicks"),
+        [
+            State("source-filter", "value"),
+            State("query-input", "value"),
+            State("x-metric", "value"),
+            State("y-metric", "value"),
+            State("color-metric", "value"),
+            State("symbol-metric", "value"),
+            State("log-flags", "value"),
+            State("x-min", "value"),
+            State("x-max", "value"),
+            State("y-min", "value"),
+            State("y-max", "value"),
+            State("table-sort", "value"),
+            State("selected-key-store", "data"),
+            State("theme-mode", "value"),
+            State("candidate-scope-store", "data"),
+            State("panel-options", "value"),
+            State("period-input", "value"),
+            State("yaxis-mode", "value"),
+            State("period-method", "value"),
+            State("period-min", "value"),
+            State("period-max", "value"),
+            State("camera-checklist", "value"),
+            State("band-checklist", "value"),
+            *ADV_FILTER_STATES,
+        ],
+        prevent_initial_call=True,
+    )
+    def save_explorer_gui_state(
+        n_clicks,
+        source_filter,
+        query_value,
+        x_metric,
+        y_metric,
+        color_metric,
+        symbol_metric,
+        log_flags,
+        x_min,
+        x_max,
+        y_min,
+        y_max,
+        table_sort,
+        selected_key,
+        theme_mode,
+        candidate_scope_state,
+        panel_options,
+        period_value,
+        yaxis_mode,
+        period_method,
+        period_min,
+        period_max,
+        camera_values,
+        band_values,
+        bool_values,
+        num_min_values,
+        num_max_values,
+        text_values,
+        select_values,
+        only_unreviewed_value,
+        require_failed_value,
+        bool_ids,
+        num_min_ids,
+        num_max_ids,
+        text_ids,
+        select_ids,
+    ):
+        if not n_clicks:
+            raise dash.exceptions.PreventUpdate
+        state_db_path = _explorer_state_db_path(combined)
+        if state_db_path is None:
+            return "GUI state save is available only when explorer is opened on a single review DB.", dash.no_update
+        advanced_state = _build_advanced_filter_state(
+            bool_values,
+            num_min_values,
+            num_max_values,
+            text_values,
+            select_values,
+            only_unreviewed_value,
+            require_failed_value,
+            bool_ids,
+            num_min_ids,
+            num_max_ids,
+            text_ids,
+            select_ids,
+        )
+        gui_state = _explorer_gui_state_from_values(
+            source_filter=source_filter,
+            query_value=query_value,
+            advanced_state=advanced_state,
+            x_metric=x_metric,
+            y_metric=y_metric,
+            color_metric=color_metric,
+            symbol_metric=symbol_metric,
+            log_flags=log_flags,
+            x_min=x_min,
+            x_max=x_max,
+            y_min=y_min,
+            y_max=y_max,
+            table_sort=table_sort,
+            selected_key=selected_key,
+            theme_mode=theme_mode,
+            candidate_scope_state=dict(candidate_scope_state or {"mode": "filtered"}),
+            panel_options=panel_options,
+            period_value=period_value,
+            yaxis_mode=yaxis_mode,
+            period_method=period_method,
+            period_min=period_min,
+            period_max=period_max,
+            selected_cameras=camera_values,
+            selected_bands=band_values,
+        )
+        try:
+            with closing(db_connect(state_db_path)) as conn:
+                save_app_state(conn, _EXPLORER_GUI_STATE_APP_STATE_KEY, json.dumps(gui_state, default=str))
+        except Exception as exc:
+            return f"Failed to save GUI state: {exc}", dash.no_update
+        return f"Saved explorer GUI state to {state_db_path}.", gui_state
+
+    @app.callback(
+        [
+            Output("source-filter", "value", allow_duplicate=True),
+            Output("query-input", "value", allow_duplicate=True),
+            Output("only-unreviewed", "value", allow_duplicate=True),
+            Output("require-failed-any-false", "value", allow_duplicate=True),
+            Output("x-metric", "value", allow_duplicate=True),
+            Output("y-metric", "value", allow_duplicate=True),
+            Output("color-metric", "value", allow_duplicate=True),
+            Output("symbol-metric", "value", allow_duplicate=True),
+            Output("log-flags", "value", allow_duplicate=True),
+            Output("x-min", "value", allow_duplicate=True),
+            Output("x-max", "value", allow_duplicate=True),
+            Output("y-min", "value", allow_duplicate=True),
+            Output("y-max", "value", allow_duplicate=True),
+            Output("table-sort", "value", allow_duplicate=True),
+            Output("selected-key-store", "data", allow_duplicate=True),
+            Output("theme-mode", "value", allow_duplicate=True),
+            Output("candidate-scope-store", "data", allow_duplicate=True),
+            Output("panel-options", "value", allow_duplicate=True),
+            Output("period-input", "value", allow_duplicate=True),
+            Output("yaxis-mode", "value", allow_duplicate=True),
+            Output("period-method", "value", allow_duplicate=True),
+            Output("period-min", "value", allow_duplicate=True),
+            Output("period-max", "value", allow_duplicate=True),
+            Output("camera-checklist", "value", allow_duplicate=True),
+            Output("band-checklist", "value", allow_duplicate=True),
+            Output({"type": "adv-bool-mode", "col": ALL}, "value", allow_duplicate=True),
+            Output({"type": "adv-num-min", "col": ALL}, "value", allow_duplicate=True),
+            Output({"type": "adv-num-max", "col": ALL}, "value", allow_duplicate=True),
+            Output({"type": "adv-text-value", "col": ALL}, "value", allow_duplicate=True),
+            Output({"type": "adv-select-exclude", "col": ALL}, "value", allow_duplicate=True),
+        ],
+        Input("saved-explorer-gui-state", "data"),
+        [
+            State({"type": "adv-bool-mode", "col": ALL}, "id"),
+            State({"type": "adv-num-min", "col": ALL}, "id"),
+            State({"type": "adv-num-max", "col": ALL}, "id"),
+            State({"type": "adv-text-value", "col": ALL}, "id"),
+            State({"type": "adv-select-exclude", "col": ALL}, "id"),
+        ],
+        prevent_initial_call="initial_duplicate",
+    )
+    def restore_saved_explorer_gui_state(saved_state, bool_ids, num_min_ids, num_max_ids, text_ids, select_ids):
+        state = _normalize_explorer_gui_state(saved_state)
+        if state is None:
+            return tuple([dash.no_update] * 30)
+
+        valid_sources = [label for label in _coerce_string_list(state.get("source_filter")) if label in all_source_labels]
+        source_filter = valid_sources or list(all_source_labels)
+        valid_metrics = set(metric_options)
+        x_metric = state.get("x_metric") if state.get("x_metric") in valid_metrics else None
+        y_metric = state.get("y_metric") if state.get("y_metric") in valid_metrics else None
+        color_metric = state.get("color_metric") if state.get("color_metric") in valid_metrics else None
+        symbol_metric = state.get("symbol_metric") if state.get("symbol_metric") in valid_metrics else None
+        table_sort = state.get("table_sort") if state.get("table_sort") in valid_metrics else (
+            "dipper_score" if "dipper_score" in valid_metrics else (metric_options[0] if metric_options else None)
+        )
+        bool_values, num_min_values, num_max_values, text_values, select_values, only_unreviewed, require_failed = _explorer_advanced_ui_values_from_state(
+            state,
+            bool_ids=bool_ids,
+            num_min_ids=num_min_ids,
+            num_max_ids=num_max_ids,
+            text_ids=text_ids,
+            select_ids=select_ids,
+        )
+        return (
+            source_filter,
+            str(state.get("query_value") or ""),
+            only_unreviewed,
+            require_failed,
+            x_metric,
+            y_metric,
+            color_metric,
+            symbol_metric,
+            _coerce_string_list(state.get("log_flags")),
+            _coerce_optional_float(state.get("x_min")),
+            _coerce_optional_float(state.get("x_max")),
+            _coerce_optional_float(state.get("y_min")),
+            _coerce_optional_float(state.get("y_max")),
+            table_sort,
+            str(state.get("selected_key") or ""),
+            "white" if state.get("theme_mode") == "white" else "black",
+            dict(state.get("candidate_scope_state") or {"mode": "filtered"}),
+            _coerce_string_list(state.get("panel_options")),
+            _coerce_optional_float(state.get("period_value")),
+            "flux" if state.get("yaxis_mode") == "flux" else "mag",
+            state.get("period_method") if state.get("period_method") in {"pdm", "ce", "lsp", "auto"} else "pdm",
+            _coerce_optional_float(state.get("period_min")),
+            _coerce_optional_float(state.get("period_max")),
+            _coerce_string_list(state.get("camera_values")),
+            _coerce_string_list(state.get("band_values")),
+            bool_values,
+            num_min_values,
+            num_max_values,
+            text_values,
+            select_values,
+        )
 
     app.clientside_callback(
         """
@@ -1626,6 +2269,7 @@ def build_explorer_app(
             State("table-sort", "value"),
             State("selected-key-store", "data"),
             State("candidate-scope-store", "data"),
+            State("explorer-review-overrides", "data"),
             *ADV_FILTER_STATES,
         ],
         prevent_initial_call=True,
@@ -1649,6 +2293,7 @@ def build_explorer_app(
             table_sort,
             selected_key,
             candidate_scope_state,
+            review_overrides,
             bool_values,
             num_min_values,
             num_max_values,
@@ -1666,6 +2311,7 @@ def build_explorer_app(
             return dash.no_update
         triggered = dash.callback_context.triggered_id
 
+        source_frame = _apply_review_overrides(combined.df, review_overrides)
         advanced_state = _build_advanced_filter_state(
             bool_values,
             num_min_values,
@@ -1680,7 +2326,7 @@ def build_explorer_app(
             text_ids,
             select_ids,
         )
-        filtered, query_error, _active_filters = _filter_frame(combined.df, source_filter, query_value, advanced_state)
+        filtered, query_error, _active_filters = _filter_frame(source_frame, source_filter, query_value, advanced_state)
         working = _apply_candidate_scope(
             filtered,
             scope_state=candidate_scope_state,
@@ -1725,7 +2371,7 @@ def build_explorer_app(
                 pdf_path.write_bytes(pio.to_image(_journal_export_figure(figure), format="pdf", width=1400, height=900))
             review_db = Path(result["review_db"])
             if triggered == "open-selection-in-review-btn":
-                selected_record = get_candidate_record_by_key(combined, selected_key)
+                selected_record = _get_candidate_record_from_frame(source_frame, selected_key) or get_candidate_record_by_key(combined, selected_key)
                 candidate_hint = None
                 if selected_record is not None:
                     candidate_hint = str(
@@ -1745,12 +2391,14 @@ def build_explorer_app(
         Output("review-launch-status", "children"),
         Input("open-current-in-review-btn", "n_clicks"),
         State("selected-key-store", "data"),
+        State("explorer-review-overrides", "data"),
         prevent_initial_call=True,
     )
-    def open_current_in_review(n_clicks, selected_key):
+    def open_current_in_review(n_clicks, selected_key, review_overrides):
         if not n_clicks:
             raise dash.exceptions.PreventUpdate
-        record = get_candidate_record_by_key(combined, selected_key)
+        source_frame = _apply_review_overrides(combined.df, review_overrides)
+        record = _get_candidate_record_from_frame(source_frame, selected_key) or get_candidate_record_by_key(combined, selected_key)
         if record is None:
             return "No candidate selected for review."
 
@@ -1788,6 +2436,128 @@ def build_explorer_app(
         return f"Opened review at {url}."
 
     @app.callback(
+        Output("explorer-review-class", "value"),
+        Output("explorer-review-confidence", "value"),
+        Output("explorer-review-followup", "value"),
+        Output("explorer-review-notes", "value"),
+        Output("explorer-review-target-status", "children"),
+        Output("explorer-review-save-btn", "disabled"),
+        Input("selected-key-store", "data"),
+        Input("explorer-review-overrides", "data"),
+        prevent_initial_call=False,
+    )
+    def load_explorer_review_form(selected_key, review_overrides):
+        source_frame = _apply_review_overrides(combined.df, review_overrides)
+        record = _get_candidate_record_from_frame(source_frame, selected_key) or get_candidate_record_by_key(combined, selected_key)
+        if record is None:
+            return "unclassified", None, [], "", "No candidate selected.", True
+
+        review_state = _record_review_state(record)
+        review_db, _plot_dir = _record_review_target(record)
+        candidate_id = str(record.get("candidate_id") or "").strip()
+        if review_db is not None and candidate_id:
+            try:
+                with closing(db_connect(review_db)) as conn:
+                    review_state = _normalize_review_state(get_review(conn, candidate_id))
+            except Exception as exc:
+                return (
+                    review_state.get("event_class", "unclassified"),
+                    review_state.get("interest_score"),
+                    ["followup"] if review_state.get("status") == "needs_followup" else [],
+                    str(review_state.get("notes") or ""),
+                    f"Inline grading unavailable: {exc}",
+                    True,
+                )
+            target_status = f"Inline grading saves to {review_db}"
+            save_disabled = False
+        else:
+            target_status = "Inline grading is available only for DB-backed candidates."
+            save_disabled = True
+
+        return (
+            str(review_state.get("event_class") or "unclassified"),
+            review_state.get("interest_score"),
+            ["followup"] if review_state.get("status") == "needs_followup" else [],
+            str(review_state.get("notes") or ""),
+            target_status,
+            save_disabled,
+        )
+
+    @app.callback(
+        Output("explorer-review-save-status", "children"),
+        Input("selected-key-store", "data"),
+        prevent_initial_call=False,
+    )
+    def clear_explorer_review_save_status(_selected_key):
+        return ""
+
+    @app.callback(
+        Output("explorer-review-save-status", "children", allow_duplicate=True),
+        Output("explorer-review-overrides", "data"),
+        Input("explorer-review-save-btn", "n_clicks"),
+        State("selected-key-store", "data"),
+        State("explorer-review-class", "value"),
+        State("explorer-review-confidence", "value"),
+        State("explorer-review-followup", "value"),
+        State("explorer-review-notes", "value"),
+        State("explorer-review-overrides", "data"),
+        prevent_initial_call=True,
+    )
+    def save_explorer_grade(
+        n_clicks,
+        selected_key,
+        event_class,
+        interest_score,
+        followup_value,
+        notes,
+        review_overrides,
+    ):
+        if not n_clicks:
+            raise dash.exceptions.PreventUpdate
+
+        source_frame = _apply_review_overrides(combined.df, review_overrides)
+        record = _get_candidate_record_from_frame(source_frame, selected_key) or get_candidate_record_by_key(combined, selected_key)
+        if record is None:
+            return "No candidate selected to save.", dash.no_update
+
+        review_db, _plot_dir = _record_review_target(record)
+        candidate_id = str(record.get("candidate_id") or "").strip()
+        if review_db is None or not candidate_id:
+            return "Inline grading is available only for DB-backed candidates.", dash.no_update
+
+        try:
+            score = None if interest_score in (None, "") else int(interest_score)
+        except Exception:
+            score = None
+        event_class_value = str(event_class or "unclassified").strip() or "unclassified"
+        if event_class_value not in REVIEW_EVENT_CLASSES:
+            event_class_value = "other"
+        status = "needs_followup" if followup_value and "followup" in followup_value else "reviewed"
+        reviewer = str(os.environ.get("USER") or "explorer")
+
+        try:
+            with closing(db_connect(review_db)) as conn:
+                current_review = get_review(conn, candidate_id)
+                save_review(
+                    conn,
+                    candidate_id=candidate_id,
+                    interest_score=score,
+                    event_class=event_class_value,
+                    review_pass=max(1, int(current_review.get("review_pass", 1) or 1)),
+                    notes=str(notes or ""),
+                    status=status,
+                    reviewer=reviewer,
+                    event_type="explorer_save",
+                )
+                saved_review = _normalize_review_state(get_review(conn, candidate_id))
+        except Exception as exc:
+            return f"Save failed: {exc}", dash.no_update
+
+        updated_overrides = dict(review_overrides or {})
+        updated_overrides[str(record.get("candidate_key") or candidate_id)] = saved_review
+        return f"Saved {candidate_id} to {review_db}.", updated_overrides
+
+    @app.callback(
         Output("selected-key-store", "data"),
         [
             Input("custom-graph", "clickData"),
@@ -1799,6 +2569,7 @@ def build_explorer_app(
             Input("y-metric", "value"),
             Input("log-flags", "value"),
             Input("candidate-scope-store", "data"),
+            Input("explorer-review-overrides", "data"),
             *ADV_FILTER_INPUTS,
         ],
         [State("candidate-table", "data"), State("selected-key-store", "data"), *ADV_FILTER_STATES],
@@ -1815,6 +2586,7 @@ def build_explorer_app(
             y_metric,
             log_flags,
             candidate_scope_state,
+            review_overrides,
             bool_values,
             num_min_values,
             num_max_values,
@@ -1831,6 +2603,7 @@ def build_explorer_app(
             select_ids,
         ) = args
 
+        source_frame = _apply_review_overrides(combined.df, review_overrides)
         advanced_state = _build_advanced_filter_state(
             bool_values,
             num_min_values,
@@ -1845,7 +2618,7 @@ def build_explorer_app(
             text_ids,
             select_ids,
         )
-        filtered, _, _ = _filter_frame(combined.df, source_filter, query_value, advanced_state)
+        filtered, _, _ = _filter_frame(source_frame, source_filter, query_value, advanced_state)
         working = _apply_candidate_scope(
             filtered,
             scope_state=candidate_scope_state,
@@ -1918,6 +2691,7 @@ def build_explorer_app(
             Input("theme-mode-store", "data"),
             Input("plot-reset-store", "data"),
             Input("candidate-scope-store", "data"),
+            Input("explorer-review-overrides", "data"),
             *ADV_FILTER_INPUTS,
         ],
         ADV_FILTER_STATES,
@@ -1940,6 +2714,7 @@ def build_explorer_app(
             theme_mode,
             plot_reset_data,
             candidate_scope_state,
+            review_overrides,
             bool_values,
             num_min_values,
             num_max_values,
@@ -1954,6 +2729,7 @@ def build_explorer_app(
             select_ids,
         ) = args
 
+        source_frame = _apply_review_overrides(combined.df, review_overrides)
         advanced_state = _build_advanced_filter_state(
             bool_values,
             num_min_values,
@@ -1968,7 +2744,7 @@ def build_explorer_app(
             text_ids,
             select_ids,
         )
-        filtered, query_error, active_filters = _filter_frame(combined.df, source_filter, query_value, advanced_state)
+        filtered, query_error, active_filters = _filter_frame(source_frame, source_filter, query_value, advanced_state)
         working = _apply_candidate_scope(
             filtered,
             scope_state=candidate_scope_state,
@@ -2033,7 +2809,7 @@ def build_explorer_app(
             if pd.notna(leak):
                 plot_summary += f" | reject leakage={float(leak):.3f}"
 
-        selected_record = get_candidate_record_by_key(combined, selected_key)
+        selected_record = _get_candidate_record_from_frame(source_frame, selected_key) or get_candidate_record_by_key(combined, selected_key)
         status = _selection_status(selected_record, len(filtered), query_error, active_filters)
         scope_status = _candidate_scope_status(len(filtered), len(working), candidate_scope_state)
         table_data = _table_rows(working, table_sort or "dipper_score")
@@ -2146,9 +2922,11 @@ def build_explorer_app(
         Input("period-search-store", "data"),
         Input("theme-mode-store", "data"),
         Input("plot-reset-store", "data"),
+        Input("explorer-review-overrides", "data"),
     )
-    def render_candidate(selected_key, selected_cameras, selected_bands, panel_options, period_value, yaxis_mode, period_search_result, theme_mode, plot_reset_data):
-        record = get_candidate_record_by_key(combined, selected_key)
+    def render_candidate(selected_key, selected_cameras, selected_bands, panel_options, period_value, yaxis_mode, period_search_result, theme_mode, plot_reset_data, review_overrides):
+        source_frame = _apply_review_overrides(combined.df, review_overrides)
+        record = _get_candidate_record_from_frame(source_frame, selected_key) or get_candidate_record_by_key(combined, selected_key)
         if record is None:
             theme_name = str(theme_mode or DEFAULT_THEME)
             return (

@@ -1309,6 +1309,123 @@ def _is_periodic_by_snr(pdm_snr: float, ce_snr: float) -> bool:
     )
 
 
+def _finite_float(value: object) -> float | None:
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return f if np.isfinite(f) else None
+
+
+def _candidate_lc_filenames(row: pd.Series | dict[str, object]) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+
+    for key in ("path", "lc_path"):
+        raw = row.get(key) if isinstance(row, dict) else row.get(key)
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        candidate = WorkerPath(text).expanduser()
+        for name in (candidate.name, candidate.with_suffix(".raw2").name if candidate.suffix in (".dat", ".dat2", ".dat3") else None):
+            if name and name not in seen:
+                seen.add(name)
+                names.append(name)
+
+    for key in ("candidate_id", "asas_sn_id"):
+        raw = row.get(key) if isinstance(row, dict) else row.get(key)
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        for ext in (".dat3", ".raw2", ".dat2", ".dat"):
+            name = f"{text}{ext}"
+            if name not in seen:
+                seen.add(name)
+                names.append(name)
+
+    return names
+
+
+def _resolve_periodicity_lightcurve_path(
+    row: pd.Series | dict[str, object],
+    lightcurve_bundle_dir: Path | None,
+) -> Path | None:
+    for key in ("lc_path", "path"):
+        raw = row.get(key) if isinstance(row, dict) else row.get(key)
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        try:
+            candidate = WorkerPath(text).expanduser()
+            if candidate.exists():
+                return candidate
+        except Exception:
+            continue
+
+    if lightcurve_bundle_dir is None or not lightcurve_bundle_dir.exists():
+        return None
+
+    for name in _candidate_lc_filenames(row):
+        candidate = lightcurve_bundle_dir / name
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _checkpoint_result_is_usable(
+    result: dict[str, object],
+    row: pd.Series,
+    *,
+    skip_if_consensus: bool,
+) -> bool:
+    if not isinstance(result, dict) or not result:
+        return False
+
+    if str(result.get("error") or "").strip():
+        return False
+
+    catalog_match = False
+    if skip_if_consensus and "catalog_match" in row.index:
+        catalog_match = _to_bool_mask(pd.Series([row.get("catalog_match")]))[0]
+    catalog_period = _finite_float(row.get("catalog_period"))
+    if catalog_match and catalog_period is not None and catalog_period > 0:
+        return _finite_float(result.get("lsp_period")) is not None
+
+    required_cols = (
+        "pdm_period",
+        "pdm_min_theta",
+        "pdm_snr",
+        "ce_period",
+        "ce_min_entropy",
+        "ce_snr",
+        "periodicity_is_rejected",
+    )
+    if any(col not in result for col in required_cols):
+        return False
+
+    metric_cols = (
+        "pdm_period",
+        "pdm_min_theta",
+        "pdm_snr",
+        "pdm_bootstrap_sig",
+        "ce_period",
+        "ce_min_entropy",
+        "ce_snr",
+        "ce_bootstrap_sig",
+        "periodicity_bootstrap_sig",
+        "lsp_period",
+        "lsp_bootstrap_sig",
+    )
+    if any(_finite_float(result.get(col)) is not None for col in metric_cols):
+        return True
+
+    n_points = _finite_float(row.get("n_points"))
+    if n_points is not None and n_points < 50:
+        return True
+
+    return False
+
+
 def _lsp_worker(args: tuple) -> dict:
     """
     Worker function for parallel periodicity computation (PDM + CE).
@@ -1320,7 +1437,11 @@ def _lsp_worker(args: tuple) -> dict:
         Dict with path and periodicity results
     """
 
-    path_str, n_bootstrap, significance_level, exclude_alias_periods = args
+    if len(args) == 5:
+        original_path, path_str, n_bootstrap, significance_level, exclude_alias_periods = args
+    else:
+        path_str, n_bootstrap, significance_level, exclude_alias_periods = args
+        original_path = path_str
     _ = exclude_alias_periods
 
     try:
@@ -1375,7 +1496,8 @@ def _lsp_worker(args: tuple) -> dict:
             best_period = ce_result.get("ce_period", np.nan)
 
         return {
-            "path": path_str,
+            "path": original_path,
+            "resolved_path": path_str,
             "lsp_power": np.nan,
             "lsp_period": best_period,
             "lsp_bootstrap_sig": periodicity_bootstrap_sig,
@@ -1398,7 +1520,8 @@ def _lsp_worker(args: tuple) -> dict:
         }
     except Exception as e:
         return {
-            "path": path_str,
+            "path": original_path,
+            "resolved_path": path_str,
             "pdm_period": np.nan,
             "pdm_min_theta": np.nan,
             "pdm_snr": np.nan,
@@ -1429,6 +1552,7 @@ def validate_periodicity(
     workers: int = 1,
     checkpoint_dir: str | Path | None = None,
     skip_if_consensus: bool = True,
+    lightcurve_bundle_dir: str | Path | None = None,
 ) -> pd.DataFrame:
     """
     Detailed periodicity validation on candidates using PDM + CE.
@@ -1460,6 +1584,9 @@ def validate_periodicity(
         Directory for checkpoint files (enables resume on restart)
     skip_if_consensus : bool
         Skip if a consensus period is already found in external catalogs (default True)
+    lightcurve_bundle_dir : str | Path | None
+        Optional local bundle directory used to resolve light curves when the
+        parquet still points at cluster paths that are unavailable locally.
 
     Returns
     -------
@@ -1470,11 +1597,19 @@ def validate_periodicity(
 
 
     n0 = len(df)
-    paths = df["path"].tolist()
-    
+    paths = [str(p) for p in df["path"].astype(str).tolist()]
+    bundle_dir = None
+    if lightcurve_bundle_dir is not None:
+        try:
+            candidate = Path(lightcurve_bundle_dir).expanduser().resolve()
+        except Exception:
+            candidate = Path(lightcurve_bundle_dir).expanduser()
+        if candidate.exists():
+            bundle_dir = candidate
+
     # Checkpoint handling
     checkpoint_file = None
-    completed_results = {}
+    completed_results: dict[str, dict[str, object]] = {}
     
     if checkpoint_dir is not None:
         checkpoint_path = Path(checkpoint_dir)
@@ -1486,8 +1621,9 @@ def validate_periodicity(
             try:
                 checkpoint_df = pd.read_parquet(checkpoint_file)
                 completed_results = {
-                    row["path"]: row.to_dict() 
+                    str(row["path"]): row.to_dict()
                     for _, row in checkpoint_df.iterrows()
+                    if str(row.get("path", "")).strip()
                 }
                 if show_tqdm:
                     tqdm.write(f"[validate_periodicity] Loaded {len(completed_results)} cached results from checkpoint")
@@ -1495,9 +1631,10 @@ def validate_periodicity(
                 if show_tqdm:
                     tqdm.write(f"[validate_periodicity] Warning: Could not load checkpoint: {e}")
     
-    # Filter to paths not already processed
-    paths_to_process = []
-    skipped_consensus = {}
+    # Filter to rows not already processed
+    worker_args: list[tuple[str, str, int, float, bool]] = []
+    skipped_consensus: dict[str, dict[str, object]] = {}
+    prefilled_errors: list[dict[str, object]] = []
 
     has_consensus = False
     if skip_if_consensus and "catalog_match" in df.columns:
@@ -1508,17 +1645,16 @@ def validate_periodicity(
     if has_consensus:
         # Pre-fill results for consensus matches
         for _, row in df.iterrows():
-            p = row["path"]
-            if p in completed_results:
-                continue
-            
+            p = str(row["path"])
+
             # Use loose consensus check: any catalog match is treated as valid period evidence
             # to skip the expensive bootstrap check.
             if _to_bool_mask(pd.Series([row["catalog_match"]]))[0]:
-                period = float(row.get("catalog_period", np.nan))
-                if np.isfinite(period) and period > 0:
+                period = _finite_float(row.get("catalog_period"))
+                if period is not None and period > 0:
                     skipped_consensus[p] = {
                         "path": p,
+                        "resolved_path": None,
                         "lsp_power": np.nan,  # Not computed
                         "lsp_period": period, # Trust catalog period
                         "lsp_bootstrap_sig": 0.0, # Treat as highly significant
@@ -1528,38 +1664,101 @@ def validate_periodicity(
                         "error": None,
                     }
                     continue
-            
-            paths_to_process.append(p)
+
+            cached = completed_results.get(p)
+            if cached is not None and _checkpoint_result_is_usable(
+                cached,
+                row,
+                skip_if_consensus=skip_if_consensus,
+            ):
+                continue
+            completed_results.pop(p, None)
+
+            resolved = _resolve_periodicity_lightcurve_path(row, bundle_dir)
+            if resolved is None:
+                prefilled_errors.append({
+                    "path": p,
+                    "resolved_path": None,
+                    "pdm_period": np.nan,
+                    "pdm_min_theta": np.nan,
+                    "pdm_snr": np.nan,
+                    "pdm_bootstrap_sig": np.nan,
+                    "pdm_is_significant": False,
+                    "ce_period": np.nan,
+                    "ce_min_entropy": np.nan,
+                    "ce_snr": np.nan,
+                    "ce_bootstrap_sig": np.nan,
+                    "ce_is_significant": False,
+                    "periodicity_bootstrap_sig": np.nan,
+                    "periodicity_is_significant": False,
+                    "periodicity_is_rejected": False,
+                    "error": f"Light curve file not found for periodicity validation: {p}",
+                })
+                continue
+
+            worker_args.append((p, str(resolved), n_bootstrap, significance_level, exclude_alias_periods))
     else:
-        paths_to_process = [p for p in paths if p not in completed_results]
-    
+        for _, row in df.iterrows():
+            p = str(row["path"])
+            cached = completed_results.get(p)
+            if cached is not None and _checkpoint_result_is_usable(
+                cached,
+                row,
+                skip_if_consensus=skip_if_consensus,
+            ):
+                continue
+            completed_results.pop(p, None)
+
+            resolved = _resolve_periodicity_lightcurve_path(row, bundle_dir)
+            if resolved is None:
+                prefilled_errors.append({
+                    "path": p,
+                    "resolved_path": None,
+                    "pdm_period": np.nan,
+                    "pdm_min_theta": np.nan,
+                    "pdm_snr": np.nan,
+                    "pdm_bootstrap_sig": np.nan,
+                    "pdm_is_significant": False,
+                    "ce_period": np.nan,
+                    "ce_min_entropy": np.nan,
+                    "ce_snr": np.nan,
+                    "ce_bootstrap_sig": np.nan,
+                    "ce_is_significant": False,
+                    "periodicity_bootstrap_sig": np.nan,
+                    "periodicity_is_significant": False,
+                    "periodicity_is_rejected": False,
+                    "error": f"Light curve file not found for periodicity validation: {p}",
+                })
+                continue
+
+            worker_args.append((p, str(resolved), n_bootstrap, significance_level, exclude_alias_periods))
+
     if show_tqdm:
-        n_cached = len(paths) - len(paths_to_process) - len(skipped_consensus)
+        n_cached = len(paths) - len(worker_args) - len(skipped_consensus) - len(prefilled_errors)
         msg = f"[validate_periodicity] {n_cached} cached"
         if skipped_consensus:
             msg += f", {len(skipped_consensus)} skipped (consensus)"
-        msg += f", processing {len(paths_to_process)}"
+        if prefilled_errors:
+            msg += f", {len(prefilled_errors)} unresolved"
+        msg += f", processing {len(worker_args)}"
         tqdm.write(msg)
-    
-    # Prepare worker arguments
-    worker_args = [(p, n_bootstrap, significance_level, exclude_alias_periods) for p in paths_to_process]
-    
+
     # Process with multiprocessing or sequential based on workers
-    new_results = []
-    n_errors = 0
-    
-    if workers > 1 and len(paths_to_process) > 0:
+    new_results = list(prefilled_errors)
+    n_errors = len(prefilled_errors)
+
+    if workers > 1 and len(worker_args) > 0:
         # Parallel execution
-        actual_workers = min(workers, cpu_count(), len(paths_to_process))
+        actual_workers = min(workers, cpu_count(), len(worker_args))
         chunksize = max(1, len(worker_args) // (actual_workers * 4))
 
         with Pool(processes=actual_workers, maxtasksperchild=50) as pool:
             iterator = pool.imap_unordered(_lsp_worker, worker_args, chunksize=chunksize)
             if show_tqdm:
-                iterator = tqdm(iterator, total=len(paths_to_process), desc="Periodicity validation")
+                iterator = tqdm(iterator, total=len(worker_args), desc="Periodicity validation")
             
             checkpoint_batch = []
-            checkpoint_interval = max(100, len(paths_to_process) // 20)  # Save every 5%
+            checkpoint_interval = max(100, len(worker_args) // 20)  # Save every 5%
             
             for result in iterator:
                 new_results.append(result)
@@ -1575,7 +1774,7 @@ def validate_periodicity(
     else:
         # Sequential execution (workers=1 or no paths to process)
         iterator = worker_args
-        if show_tqdm and len(paths_to_process) > 0:
+        if show_tqdm and len(worker_args) > 0:
             iterator = tqdm(worker_args, desc="Periodicity validation")
         
         for args in iterator:
@@ -1708,11 +1907,11 @@ def validate_periodicity(
 def _save_checkpoint(checkpoint_file: Path, completed: dict, new_results: list) -> None:
     """Save checkpoint to parquet file."""
     all_data = list(completed.values()) + new_results
-    # Remove error column for storage
     clean_data = []
     for r in all_data:
         clean_data.append({
             "path": r["path"],
+            "resolved_path": r.get("resolved_path"),
             "lsp_power": r.get("lsp_power", np.nan),
             "lsp_period": r.get("lsp_period", np.nan),
             "lsp_bootstrap_sig": r.get("lsp_bootstrap_sig", np.nan),
@@ -1731,8 +1930,34 @@ def _save_checkpoint(checkpoint_file: Path, completed: dict, new_results: list) 
             "periodicity_bootstrap_sig": r.get("periodicity_bootstrap_sig", np.nan),
             "periodicity_is_significant": r.get("periodicity_is_significant", False),
             "periodicity_is_rejected": r.get("periodicity_is_rejected", False),
+            "error": r.get("error"),
         })
     pd.DataFrame(clean_data).to_parquet(checkpoint_file, index=False, compression=PARQUET_CACHE_COMPRESSION)
+
+
+def _infer_run_dir_for_periodicity(path_like: str | Path | None) -> Path | None:
+    if path_like is None:
+        return None
+    try:
+        path = Path(path_like).expanduser().resolve()
+    except Exception:
+        path = Path(path_like).expanduser()
+
+    candidates = [path]
+    if path.is_file():
+        candidates.extend([path.parent, path.parent.parent, path.parent.parent.parent])
+    else:
+        candidates.extend([path.parent, path.parent.parent])
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        if (candidate / "bundle_assets" / "lightcurves").is_dir():
+            return candidate
+    return None
 
 
 def validate_gaia_ruwe(
@@ -2281,7 +2506,9 @@ def apply_filters(
     periodicity_flag_only: bool = True,
     periodicity_workers: int = 1,
     periodicity_checkpoint_dir: Path | None = None,
+    periodicity_lightcurve_dir: Path | None = None,
     periodicity_skip_if_consensus: bool = True,
+    periodicity_all_candidates: bool = False,
     phase_plot_max_sig: float = 0.01,
     phase_plot_min_power: float | None = 0.3,
     phase_plot_allow_alias: bool = False,
@@ -2320,6 +2547,9 @@ def apply_filters(
         Whether to apply each filter
     apply_periodicity_validation : bool
         Apply bootstrap PDM/CE validation (expensive, off by default)
+    periodicity_all_candidates : bool
+        Run periodicity validation on every row in the current table instead of
+        only rows that pass the prerequisite failed_* filters.
     apply_gaia_ruwe_validation : bool
         Apply Gaia RUWE validation (queries Gaia TAP)
     apply_gaia_pm_validation : bool
@@ -2474,6 +2704,7 @@ def apply_filters(
             "flag_only": periodicity_flag_only,
             "workers": periodicity_workers,
             "checkpoint_dir": periodicity_checkpoint_dir,
+            "lightcurve_bundle_dir": periodicity_lightcurve_dir,
             "skip_if_consensus": periodicity_skip_if_consensus,
             "show_tqdm": show_tqdm,
             "verbose": verbose,
@@ -2507,9 +2738,13 @@ def apply_filters(
         "periodicity": {
             "failure_indicator_col": "periodic_flag",
             "clear_defaults": None,
-            "eligible_mask_fn": lambda frame: _passing_mask_from_failures(
-                frame,
-                include_labels=tuple(periodicity_prereq_labels),
+            "eligible_mask_fn": (
+                (lambda frame: pd.Series(True, index=frame.index, dtype=bool))
+                if periodicity_all_candidates else
+                (lambda frame: _passing_mask_from_failures(
+                    frame,
+                    include_labels=tuple(periodicity_prereq_labels),
+                ))
             ),
         },
     }
@@ -2721,6 +2956,8 @@ Example usage:
                         help="Reject periodic candidates (default: flag only)")
     g_periodicity.add_argument("--periodicity-force-bootstrap", action="store_true",
                         help="Force bootstrap periodicity checks even if consensus period is found")
+    g_periodicity.add_argument("--periodicity-all-candidates", action="store_true",
+                        help="Run periodicity validation on all rows in the current input, not just prerequisite passers")
     g_periodicity.add_argument("--workers", type=int, default=WORKERS,
                         help="Number of parallel workers for periodicity validation (default: 10)")
     g_periodicity.add_argument("--checkpoint-dir", type=Path, default=None,
@@ -2865,6 +3102,25 @@ Example usage:
         # Fallback: same directory as input
         output_path = input_path.parent / f"{input_path.stem}_filtered{input_path.suffix}"
 
+    periodicity_lightcurve_dir = None
+    if args.apply_periodicity_validation:
+        run_dir_candidates = [
+            detect_run if args.detect_run else None,
+            input_path,
+            output_path,
+            args.checkpoint_dir.expanduser() if args.checkpoint_dir else None,
+        ]
+        for candidate in run_dir_candidates:
+            run_dir = _infer_run_dir_for_periodicity(candidate)
+            if run_dir is None:
+                continue
+            lc_dir = run_dir / "bundle_assets" / "lightcurves"
+            if lc_dir.is_dir():
+                periodicity_lightcurve_dir = lc_dir
+                break
+        if verbose and periodicity_lightcurve_dir is not None:
+            print(f"Using local bundled light curves for periodicity validation: {periodicity_lightcurve_dir}")
+
     # Apply filters
     df_filtered = apply_filters(
         df,
@@ -2902,7 +3158,9 @@ Example usage:
         periodicity_flag_only=not args.periodicity_reject,
         periodicity_workers=args.workers,
         periodicity_checkpoint_dir=args.checkpoint_dir.expanduser() if args.checkpoint_dir else (detect_run / "checkpoints" if args.detect_run and args.apply_periodicity_validation else None),
+        periodicity_lightcurve_dir=periodicity_lightcurve_dir,
         periodicity_skip_if_consensus=not args.periodicity_force_bootstrap,
+        periodicity_all_candidates=args.periodicity_all_candidates,
         phase_plot_max_sig=args.phase_plot_max_sig,
         phase_plot_min_power=args.phase_plot_min_power,
         phase_plot_allow_alias=args.phase_plot_allow_alias,
@@ -2958,6 +3216,7 @@ Example usage:
                     "apply_score": args.apply_score_filter,
                     "apply_periodicity_validation": args.apply_periodicity_validation,
                     "periodicity_reject": args.periodicity_reject if args.apply_periodicity_validation else None,
+                    "periodicity_all_candidates": args.periodicity_all_candidates if args.apply_periodicity_validation else None,
                     "phase_plot_max_sig": args.phase_plot_max_sig,
                     "phase_plot_min_power": args.phase_plot_min_power,
                     "phase_plot_allow_alias": args.phase_plot_allow_alias,

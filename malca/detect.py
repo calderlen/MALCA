@@ -596,6 +596,7 @@ def _build_filter_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "periodicity_flag_only": not args.periodicity_reject,
         "periodicity_workers": args.periodicity_workers,
         "periodicity_checkpoint_dir": args.periodicity_checkpoint_dir,
+        "periodicity_all_candidates": args.periodicity_all_candidates,
         "phase_plot_max_sig": args.phase_plot_max_sig,
         "phase_plot_min_power": args.phase_plot_min_power,
         "phase_plot_allow_alias": args.phase_plot_allow_alias,
@@ -612,6 +613,81 @@ def _build_filter_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "show_tqdm": args.verbose,
         "verbose": args.verbose,
     }
+
+
+def _build_home_external_validation_cmd(
+    args: argparse.Namespace,
+    *,
+    post_filter_output: Path,
+    index_file: Path,
+) -> list[str]:
+    """Build the home-stage external validation subprocess command."""
+    cmd = [
+        sys.executable,
+        "-m",
+        "malca.filter",
+        "--input",
+        str(post_filter_output),
+        "--output",
+        str(post_filter_output),
+        "--index-file",
+        str(index_file),
+        "--home-passers-only",
+        "--skip-evidence-strength",
+        "--skip-significant-detection",
+        "--skip-run-robustness",
+        "--gaia-max-ruwe",
+        str(args.gaia_max_ruwe),
+        "--gaia-max-pm",
+        str(args.gaia_max_pm),
+        "--periodic-catalog-max-sep",
+        str(args.periodic_catalog_max_sep),
+    ]
+
+    if args.apply_periodicity_validation:
+        cmd.extend(
+            [
+                "--apply-periodicity-validation",
+                "--periodicity-n-bootstrap",
+                str(args.periodicity_n_bootstrap),
+                "--periodicity-significance",
+                str(args.periodicity_significance),
+                "--workers",
+                str(args.periodicity_workers),
+                "--phase-plot-max-sig",
+                str(args.phase_plot_max_sig),
+                "--phase-plot-min-power",
+                str(args.phase_plot_min_power),
+            ]
+        )
+        if args.periodicity_no_exclude_aliases:
+            cmd.append("--periodicity-no-exclude-aliases")
+        if args.periodicity_reject:
+            cmd.append("--periodicity-reject")
+        if args.periodicity_all_candidates:
+            cmd.append("--periodicity-all-candidates")
+        if args.phase_plot_allow_alias:
+            cmd.append("--phase-plot-allow-alias")
+        if args.periodicity_checkpoint_dir:
+            cmd.extend(["--checkpoint-dir", str(args.periodicity_checkpoint_dir)])
+
+    if args.gaia_reject:
+        cmd.append("--gaia-reject")
+    if args.gaia_pm_reject:
+        cmd.append("--gaia-pm-reject")
+    if args.periodic_catalog_reject:
+        cmd.append("--periodic-catalog-reject")
+    if args.skip_gaia_ruwe_validation:
+        cmd.append("--skip-gaia-ruwe-validation")
+    if args.skip_gaia_pm_validation:
+        cmd.append("--skip-gaia-pm-validation")
+    if args.skip_periodic_catalog_validation:
+        cmd.append("--skip-periodic-catalog-validation")
+    if not args.verbose:
+        cmd.append("--no-tqdm")
+    if args.verbose:
+        cmd.append("--verbose")
+    return cmd
 
 
 def main():
@@ -748,6 +824,7 @@ def main():
     g_filter.add_argument("--periodicity-significance", type=float, default=0.01, help="Significance threshold for periodicity validation (default: 0.01)")
     g_filter.add_argument("--periodicity-no-exclude-aliases", action="store_true", help="Do not exclude alias periods during periodicity validation")
     g_filter.add_argument("--periodicity-reject", action="store_true", help="Reject periodicity matches instead of flagging only")
+    g_filter.add_argument("--periodicity-all-candidates", action="store_true", help="Run periodicity validation on all queued candidates instead of only prerequisite passers")
     g_filter.add_argument("--periodicity-workers", type=int, default=WORKERS, help="Workers for periodicity validation (default: WORKERS)")
     g_filter.add_argument("--periodicity-checkpoint-dir", type=Path, default=None, help="Checkpoint directory for periodicity validation")
     g_filter.add_argument("--phase-plot-max-sig", type=float, default=0.01, help="Require lsp_bootstrap_sig <= this for phase plotting (default: 0.01)")
@@ -1090,6 +1167,7 @@ def main():
             "periodicity_flag_only": not args.periodicity_reject,
             "periodicity_workers": args.periodicity_workers,
             "periodicity_checkpoint_dir": str(args.periodicity_checkpoint_dir) if args.periodicity_checkpoint_dir else None,
+            "periodicity_all_candidates": args.periodicity_all_candidates,
             "phase_plot_max_sig": args.phase_plot_max_sig,
             "phase_plot_min_power": args.phase_plot_min_power,
             "phase_plot_allow_alias": args.phase_plot_allow_alias,
@@ -1897,7 +1975,10 @@ def main():
 
     # Home-only external catalog validations (Gaia RUWE + periodic catalog)
     if stage == "home" and args.run_filter and has_post_filter_output:
-        log("\n=== Home External Validation: Gaia RUWE + periodic catalog ===")
+        home_validation_steps = ["Gaia RUWE", "periodic catalog"]
+        if args.apply_periodicity_validation:
+            home_validation_steps.append("periodicity")
+        log(f"\n=== Home External Validation: {' + '.join(home_validation_steps)} ===")
         validation_started = time.perf_counter()
         try:
             index_file, index_candidates = _resolve_asassn_index_path(out_dir, index_override=args.index_file)
@@ -1915,43 +1996,11 @@ def main():
                 )
             log(f"Using index file for home external validation: {index_file}")
 
-            external_validation_cmd = [
-                sys.executable,
-                "-m",
-                "malca.filter",
-                "--input",
-                str(post_filter_output),
-                "--output",
-                str(post_filter_output),
-                "--index-file",
-                str(index_file),
-                "--home-passers-only",
-                "--skip-evidence-strength",
-                "--skip-significant-detection",
-                "--skip-run-robustness",
-                "--gaia-max-ruwe",
-                str(args.gaia_max_ruwe),
-                "--gaia-max-pm",
-                str(args.gaia_max_pm),
-                "--periodic-catalog-max-sep",
-                str(args.periodic_catalog_max_sep),
-            ]
-            if args.gaia_reject:
-                external_validation_cmd.append("--gaia-reject")
-            if args.gaia_pm_reject:
-                external_validation_cmd.append("--gaia-pm-reject")
-            if args.periodic_catalog_reject:
-                external_validation_cmd.append("--periodic-catalog-reject")
-            if args.skip_gaia_ruwe_validation:
-                external_validation_cmd.append("--skip-gaia-ruwe-validation")
-            if args.skip_gaia_pm_validation:
-                external_validation_cmd.append("--skip-gaia-pm-validation")
-            if args.skip_periodic_catalog_validation:
-                external_validation_cmd.append("--skip-periodic-catalog-validation")
-            if not args.verbose:
-                external_validation_cmd.append("--no-tqdm")
-            if args.verbose:
-                external_validation_cmd.append("--verbose")
+            external_validation_cmd = _build_home_external_validation_cmd(
+                args,
+                post_filter_output=post_filter_output,
+                index_file=index_file,
+            )
 
             result = subprocess.run(external_validation_cmd, check=False)
             if result.returncode != 0:

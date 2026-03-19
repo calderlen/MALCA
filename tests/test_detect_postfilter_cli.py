@@ -9,7 +9,11 @@ import pytest
 pytest.importorskip("astroquery")
 pytest.importorskip("celerite2")
 
-from malca.detect import _build_filter_kwargs, _select_passing_candidates
+from malca.detect import (
+    _build_filter_kwargs,
+    _build_home_external_validation_cmd,
+    _select_passing_candidates,
+)
 
 
 def _base_args() -> argparse.Namespace:
@@ -39,6 +43,7 @@ def _base_args() -> argparse.Namespace:
         periodicity_significance=0.01,
         periodicity_no_exclude_aliases=False,
         periodicity_reject=False,
+        periodicity_all_candidates=False,
         periodicity_workers=4,
         periodicity_checkpoint_dir=None,
         skip_gaia_ruwe_validation=False,
@@ -82,6 +87,7 @@ def test_build_filter_kwargs_defaults_match_pipeline_behavior() -> None:
     assert kwargs["gaia_pm_flag_only"] is True
     assert kwargs["periodic_catalog_flag_only"] is True
     assert kwargs["periodicity_flag_only"] is True
+    assert kwargs["periodicity_all_candidates"] is False
 
     assert kwargs["phase_plot_max_sig"] == 0.01
     assert kwargs["phase_plot_min_power"] == 0.3
@@ -107,6 +113,7 @@ def test_build_filter_kwargs_respects_cli_overrides() -> None:
     args.periodicity_significance = 0.02
     args.periodicity_no_exclude_aliases = True
     args.periodicity_reject = True
+    args.periodicity_all_candidates = True
     args.periodicity_workers = 2
     args.periodicity_checkpoint_dir = Path("output/checkpoints")
     args.phase_plot_max_sig = 0.05
@@ -140,6 +147,7 @@ def test_build_filter_kwargs_respects_cli_overrides() -> None:
     assert kwargs["periodicity_significance"] == 0.02
     assert kwargs["periodicity_exclude_aliases"] is False
     assert kwargs["periodicity_flag_only"] is False
+    assert kwargs["periodicity_all_candidates"] is True
     assert kwargs["periodicity_workers"] == 2
     assert kwargs["periodicity_checkpoint_dir"] == Path("output/checkpoints")
 
@@ -168,3 +176,44 @@ def test_select_passing_candidates_filters_truthy_failed_any_values() -> None:
     out = _select_passing_candidates(df)
 
     assert out["path"].tolist() == ["a", "d"]
+
+
+def test_build_home_external_validation_cmd_forwards_periodicity_options() -> None:
+    args = _base_args()
+    args.apply_periodicity_validation = True
+    args.periodicity_n_bootstrap = 250
+    args.periodicity_significance = 0.02
+    args.periodicity_no_exclude_aliases = True
+    args.periodicity_reject = True
+    args.periodicity_all_candidates = True
+    args.periodicity_workers = 2
+    args.periodicity_checkpoint_dir = Path("output/checkpoints")
+    args.phase_plot_max_sig = 0.05
+    args.phase_plot_min_power = 0.5
+    args.phase_plot_allow_alias = True
+    args.verbose = True
+
+    cmd = _build_home_external_validation_cmd(
+        args,
+        post_filter_output=Path("results/lc_events_filtered.parquet"),
+        index_file=Path("input/index.parquet"),
+    )
+
+    assert "--apply-periodicity-validation" in cmd
+    assert "--periodicity-n-bootstrap" in cmd
+    assert "250" in cmd
+    assert "--periodicity-significance" in cmd
+    assert "0.02" in cmd
+    assert "--periodicity-no-exclude-aliases" in cmd
+    assert "--periodicity-reject" in cmd
+    assert "--periodicity-all-candidates" in cmd
+    assert "--workers" in cmd
+    assert "2" in cmd
+    assert "--checkpoint-dir" in cmd
+    assert "output/checkpoints" in cmd
+    assert "--phase-plot-max-sig" in cmd
+    assert "0.05" in cmd
+    assert "--phase-plot-min-power" in cmd
+    assert "0.5" in cmd
+    assert "--phase-plot-allow-alias" in cmd
+    assert "--verbose" in cmd

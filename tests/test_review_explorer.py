@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from argparse import Namespace
+from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
 
 from malca.review import explorer as review_explorer
-from malca.review.explore_data import CombinedCandidateData, add_eda_columns
+from malca.review.explore_data import CandidateSourceData, CombinedCandidateData, add_eda_columns
 from malca.review.filter_schema import SIDEBAR_GROUPS
 
 
@@ -177,6 +178,14 @@ def test_build_explorer_app_uses_custom_plot_sidebar_layout() -> None:
     assert "camera-checklist" in ids
     assert "band-checklist" in ids
     assert "theme-mode" in ids
+    assert "saved-explorer-gui-state" in ids
+    assert "save-explorer-gui-state-btn" in ids
+    assert "explorer-review-overrides" in ids
+    assert "explorer-review-class" in ids
+    assert "explorer-review-confidence" in ids
+    assert "explorer-review-followup" in ids
+    assert "explorer-review-notes" in ids
+    assert "explorer-review-save-btn" in ids
     assert "sample-size" not in ids
     assert "main-graph" not in ids
     assert "catalog-graph" not in ids
@@ -303,3 +312,132 @@ def test_build_auto_filter_groups_exposes_unlisted_columns() -> None:
     assert ("bool", "custom_bad_flag") in groups["Additional Flags"]
     assert ("num", "custom_score") in groups["Additional Numeric"]
     assert ("select", "custom_label") in groups["Additional Categorical"]
+
+
+def test_explorer_state_db_path_requires_single_db_source() -> None:
+    empty = pd.DataFrame()
+    db_source = CandidateSourceData(
+        source_path=Path("/tmp/demo/review.db"),
+        source_kind="db",
+        source_label="demo",
+        df=empty,
+        lookup={},
+        default_plot_dir=None,
+    )
+    csv_source = CandidateSourceData(
+        source_path=Path("/tmp/demo.csv"),
+        source_kind="csv",
+        source_label="csv",
+        df=empty,
+        lookup={},
+        default_plot_dir=None,
+    )
+    second_db = CandidateSourceData(
+        source_path=Path("/tmp/other/review.db"),
+        source_kind="db",
+        source_label="other",
+        df=empty,
+        lookup={},
+        default_plot_dir=None,
+    )
+
+    combined = CombinedCandidateData(df=empty, sources=[db_source, csv_source], key_lookup={}, id_lookup={})
+    assert review_explorer._explorer_state_db_path(combined) == Path("/tmp/demo/review.db")
+
+    mixed = CombinedCandidateData(df=empty, sources=[db_source, second_db], key_lookup={}, id_lookup={})
+    assert review_explorer._explorer_state_db_path(mixed) is None
+
+
+def test_explorer_advanced_ui_values_roundtrip() -> None:
+    saved = {
+        "advanced": {
+            "bool": {"failed_any": "False"},
+            "num": {"dipper_score": {"min": 3.0, "max": 9.0}},
+            "text": {"final_class": "dipper"},
+            "select": {"source_label": ["run-a"]},
+            "only_unreviewed": True,
+            "require_failed_any_false": False,
+        }
+    }
+    bool_ids = [{"col": "failed_any"}]
+    num_min_ids = [{"col": "dipper_score"}]
+    num_max_ids = [{"col": "dipper_score"}]
+    text_ids = [{"col": "final_class"}]
+    select_ids = [{"col": "source_label"}]
+
+    (
+        bool_values,
+        num_min_values,
+        num_max_values,
+        text_values,
+        select_values,
+        only_unreviewed,
+        require_failed,
+    ) = review_explorer._explorer_advanced_ui_values_from_state(
+        saved,
+        bool_ids=bool_ids,
+        num_min_ids=num_min_ids,
+        num_max_ids=num_max_ids,
+        text_ids=text_ids,
+        select_ids=select_ids,
+    )
+
+    assert bool_values == ["False"]
+    assert num_min_values == [3.0]
+    assert num_max_values == [9.0]
+    assert text_values == ["dipper"]
+    assert select_values == [["run-a"]]
+    assert only_unreviewed == ["yes"]
+    assert require_failed == []
+
+
+def test_apply_review_overrides_updates_review_state_columns() -> None:
+    frame = pd.DataFrame(
+        {
+            "candidate_key": ["cand-1", "cand-2"],
+            "candidate_id": ["A1", "A2"],
+            "event_class": ["", ""],
+            "review_event_class": ["", ""],
+            "status": ["unreviewed", "unreviewed"],
+            "interest_score": [None, None],
+        }
+    )
+
+    updated = review_explorer._apply_review_overrides(
+        frame,
+        {
+            "cand-2": {
+                "event_class": "dipper",
+                "status": "reviewed",
+                "interest_score": 4,
+                "notes": "looks real",
+                "review_pass": 2,
+            }
+        },
+    )
+
+    row = updated.loc[updated["candidate_key"] == "cand-2"].iloc[0]
+    assert row["event_class"] == "dipper"
+    assert row["status"] == "reviewed"
+    assert row["interest_score"] == 4
+    assert row["review_label"] == "dipper"
+    assert bool(row["is_reviewed"]) is True
+    assert bool(row["is_reviewed_dipper"]) is True
+
+
+def test_record_review_state_normalizes_unknown_class_and_score() -> None:
+    state = review_explorer._record_review_state(
+        {
+            "interest_score": 9,
+            "event_class": "mystery",
+            "review_pass": 0,
+            "status": "odd",
+            "notes": None,
+        }
+    )
+
+    assert state["interest_score"] == 4
+    assert state["event_class"] == "other"
+    assert state["review_pass"] == 1
+    assert state["status"] == "reviewed"
+    assert state["notes"] == ""

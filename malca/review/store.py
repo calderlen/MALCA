@@ -339,6 +339,18 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("lsp_period",               "REAL",    "float"),
     ("lsp_is_alias",             "INTEGER", "bool"),
     ("lsp_is_significant",       "INTEGER", "bool"),
+    ("pdm_period",               "REAL",    "float"),
+    ("pdm_theta",                "REAL",    "float"),
+    ("pdm_snr",                  "REAL",    "float"),
+    ("pdm_bootstrap_sig",        "REAL",    "float"),
+    ("pdm_is_significant",       "INTEGER", "bool"),
+    ("ce_period",                "REAL",    "float"),
+    ("ce_entropy",               "REAL",    "float"),
+    ("ce_snr",                   "REAL",    "float"),
+    ("ce_bootstrap_sig",         "REAL",    "float"),
+    ("ce_is_significant",        "INTEGER", "bool"),
+    ("periodicity_bootstrap_sig","REAL",    "float"),
+    ("periodicity_is_significant","INTEGER","bool"),
     ("phase_plot_ready",         "INTEGER", "bool"),
     ("phase_period_days",        "REAL",    "float"),
     ("phase_source",             "TEXT",    "text"),
@@ -1643,6 +1655,96 @@ def merge_vetting_results(
 
     conn.commit()
     print(f"Merged vetting data for {updated}/{len(rows)} candidates ({len(vetting_cols)} columns)")
+    return updated
+
+
+def merge_candidate_results(
+    conn: sqlite3.Connection,
+    candidate_df: pd.DataFrame,
+    id_column: str | None = None,
+) -> int:
+    """Merge candidate-table columns into existing review candidates.
+
+    Matches by ``candidate_id`` or ``asas_sn_id``. Only candidate payload/SQL
+    columns are updated; review tables are untouched.
+
+    Columns present in ``candidate_df`` are treated as authoritative for the
+    matched rows: null values clear previously stored values for those keys,
+    while columns absent from ``candidate_df`` are left untouched.
+    """
+    if candidate_df.empty:
+        return 0
+
+    if id_column is None:
+        for col in ("candidate_id", "asas_sn_id"):
+            if col in candidate_df.columns:
+                id_column = col
+                break
+    if id_column is None:
+        raise ValueError("Candidate DataFrame must have 'candidate_id' or 'asas_sn_id' column")
+
+    ignored_cols = {"candidate_id", "source_path", "payload_json", "imported_at"}
+    merge_cols = [c for c in candidate_df.columns if c not in ignored_cols]
+    if not merge_cols:
+        print("Warning: no candidate columns found in DataFrame")
+        return 0
+
+    candidate_df = candidate_df.copy()
+    candidate_df[id_column] = candidate_df[id_column].astype(str).str.strip()
+
+    rows = conn.execute("SELECT candidate_id, asas_sn_id FROM candidates").fetchall()
+    candidate_ids: set[str] = set()
+    asas_to_candidate: dict[str, str] = {}
+    ambiguous_asas: set[str] = set()
+    for raw_candidate_id, raw_asas_sn_id in rows:
+        candidate_id = str(raw_candidate_id).strip()
+        if candidate_id:
+            candidate_ids.add(candidate_id)
+
+        asas_sn_id = "" if raw_asas_sn_id is None else str(raw_asas_sn_id).strip()
+        if not asas_sn_id:
+            continue
+        existing = asas_to_candidate.get(asas_sn_id)
+        if existing is None:
+            asas_to_candidate[asas_sn_id] = candidate_id
+        elif existing != candidate_id:
+            ambiguous_asas.add(asas_sn_id)
+    for asas_sn_id in ambiguous_asas:
+        asas_to_candidate.pop(asas_sn_id, None)
+
+    updated = 0
+    for _, row in candidate_df.iterrows():
+        raw_match = str(row[id_column]).strip()
+        if not raw_match:
+            continue
+        matched_candidate_id = raw_match if raw_match in candidate_ids else asas_to_candidate.get(raw_match)
+        if not matched_candidate_id:
+            continue
+
+        clear_keys = set(merge_cols)
+        updates: dict[str, object] = {}
+        for col in merge_cols:
+            value = row[col]
+            if value is None:
+                continue
+            try:
+                if pd.isna(value):
+                    continue
+            except Exception:
+                pass
+            updates[col] = value
+
+        replace_candidate_payload_fields(
+            conn,
+            matched_candidate_id,
+            updates,
+            clear_keys=clear_keys,
+            commit=False,
+        )
+        updated += 1
+
+    conn.commit()
+    print(f"Merged candidate data for {updated}/{len(rows)} candidates ({len(merge_cols)} columns)")
     return updated
 
 

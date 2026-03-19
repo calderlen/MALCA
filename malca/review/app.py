@@ -1,4 +1,5 @@
 """Dash-based keyboard-driven review app for MALCA candidates."""
+import atexit
 from contextlib import closing
 from decimal import Decimal, InvalidOperation
 from functools import lru_cache
@@ -117,6 +118,7 @@ from malca.review.store import (
     export_reviews,
     detect_run_directory_files,
     merge_review_databases,
+    merge_candidate_results,
     merge_vetting_results,
     get_distinct_values,
     get_diagnostic_background,
@@ -134,25 +136,99 @@ warnings.filterwarnings(
     module="multiprocessing.resource_tracker",
 )
 
-try:
-    multiprocessing.set_start_method("spawn", force=True)
-except RuntimeError:
-    pass
+def _configure_background_start_methods() -> None:
+    """Prefer spawn so background workers do not inherit the dev-server socket."""
+    try:
+        multiprocessing.set_start_method("spawn", force=True)
+    except RuntimeError:
+        pass
 
-if sys.platform == "darwin":
     try:
         multiprocess = importlib.import_module("multiprocess")
+    except ModuleNotFoundError:
+        return
+
+    try:
+        methods = set(multiprocess.get_all_start_methods())
+    except Exception:
+        methods = set()
+
+    if "spawn" not in methods:
+        return
+
+    try:
         multiprocess.set_start_method("spawn", force=True)
-    except (ModuleNotFoundError, RuntimeError):
+    except RuntimeError:
         pass
+
+
+_configure_background_start_methods()
 
 
 
 CLASS_BADGE_TAGS = list(CLASS_KEY_MAP.values())
 
+class TrackingDiskcacheManager(DiskcacheManager):
+    """Diskcache manager that can clean up outstanding worker processes on exit."""
+
+    def __init__(self, cache=None, cache_by=None, expire=None):
+        super().__init__(cache=cache, cache_by=cache_by, expire=expire)
+        self._active_jobs: set[int] = set()
+
+    def call_job_fn(self, key, job_fn, args, context):
+        job = super().call_job_fn(key, job_fn, args, context)
+        if job is not None:
+            try:
+                self._active_jobs.add(int(job))
+            except Exception:
+                pass
+        return job
+
+    def terminate_job(self, job):
+        try:
+            return super().terminate_job(job)
+        finally:
+            try:
+                if job is not None:
+                    self._active_jobs.discard(int(job))
+            except Exception:
+                pass
+
+    def get_result(self, key, job):
+        try:
+            return super().get_result(key, job)
+        finally:
+            try:
+                if job is not None:
+                    self._active_jobs.discard(int(job))
+            except Exception:
+                pass
+
+    def terminate_all_jobs(self) -> None:
+        for job in tuple(sorted(self._active_jobs)):
+            self.terminate_job(job)
+
+
 # Background callback manager for long-running fetch/import (DiskCache for local dev)
 _bc_cache = diskcache.Cache(Path(__file__).resolve().parents[2] / "output" / "review" / ".dash_cache")
-_background_callback_manager = DiskcacheManager(_bc_cache)
+_background_callback_manager = TrackingDiskcacheManager(_bc_cache)
+
+
+def _cleanup_background_resources(*_args) -> None:
+    """Terminate outstanding background jobs so Ctrl-C fully releases the port."""
+    try:
+        if _background_callback_manager is not None:
+            _background_callback_manager.terminate_all_jobs()
+    except Exception:
+        pass
+
+    try:
+        _bc_cache.close()
+    except Exception:
+        pass
+
+
+atexit.register(_cleanup_background_resources)
 
 # Initialize Dash app
 app = dash.Dash(
@@ -4123,6 +4199,7 @@ def create_layout():
         dcc.Store(id='sidebar-state', data=False),  # collapsed by default
         dcc.Store(id='filter-params', data={}),
         dcc.Store(id='restored-filter-applied', data=0),
+        dcc.Store(id='saved-review-gui-state', data=None),
         dcc.Store(id='import-trigger', data=0),  # triggers queue refresh after import
         dcc.Store(id='auto-run-pipeline-trigger', data=None),
         dcc.Store(id='pending-auto-run', data=None),
@@ -4219,6 +4296,9 @@ def create_layout():
 
             html.Button('↻ Reset to Beginning', id='reset-queue-btn', n_clicks=0,
                        style={'width': '100%', 'font-size': '11px', 'marginTop': '4px'}, className='action-btn'),
+            html.Button('Save GUI State', id='save-review-gui-state-btn', n_clicks=0,
+                       style={'width': '100%', 'font-size': '11px', 'marginTop': '4px'}, className='action-btn'),
+            html.Div(id='save-review-gui-state-status', style={'fontSize': '10px', 'color': '#7da8c4', 'marginTop': '4px'}),
 
             html.Div('Open Existing', className='section-title', style={'margin-top': '8px'}),
             dcc.Input(
@@ -5489,6 +5569,7 @@ _NUM_INPUT_STATES: list[tuple[dict[str, str], str]] = []
 _TEXT_STATES: list[tuple[str, str]] = []
 _SELECT_STATES: list[tuple[str, str]] = []
 _QUEUE_FILTER_APP_STATE_KEY = "dash_queue_filter_ui_state_v1"
+_REVIEW_GUI_STATE_APP_STATE_KEY = "dash_review_gui_state_v1"
 
 for _grp_name, _grp_items in _SIDEBAR_GROUPS:
     for _ftype, _col in _grp_items:
@@ -5591,6 +5672,66 @@ def _coerce_text_filter_value(raw_value: object) -> str:
 def _coerce_sort_cols(raw_value: object) -> list[str]:
     cols = _coerce_string_list(raw_value)
     return cols or ['candidate_id']
+
+
+def _coerce_choice(raw_value: object, allowed: set[str], default: str) -> str:
+    text = str(raw_value).strip() if raw_value is not None else ''
+    return text if text in allowed else default
+
+
+def _review_gui_state_from_values(
+    *,
+    theme_mode: object,
+    plot_mode: object,
+    plot_overlays: object,
+    baseline_opacity: object,
+    residual_height: object,
+    external_source_view: object,
+    camera_values: object,
+    band_values: object,
+    yaxis_mode: object,
+    period_method: object,
+    pdm_min_period: object,
+    pdm_max_period: object,
+    pdm_manual_period: object,
+) -> dict[str, object]:
+    overlay_allowed = {'raw', 'markers', 'residuals', 'phase', 'filter_bad_cameras', 'diagnostics', 'confidence'}
+    external_allowed = {str(opt.get('value')) for opt in EXTERNAL_SOURCE_VIEW_OPTIONS}
+    return {
+        'theme_mode': _coerce_choice(theme_mode, {'black', 'gray', 'white'}, DEFAULT_THEME),
+        'plot_mode': _coerce_choice(plot_mode, {'native', 'png'}, 'native'),
+        'plot_overlays': [value for value in _coerce_string_list(plot_overlays) if value in overlay_allowed],
+        'baseline_opacity': _coerce_numeric_input_value(baseline_opacity),
+        'residual_height': _coerce_numeric_input_value(residual_height),
+        'external_source_view': _coerce_choice(external_source_view, external_allowed, DEFAULT_EXTERNAL_SOURCE_VIEW),
+        'camera_values': _coerce_string_list(camera_values),
+        'band_values': _coerce_string_list(band_values) or ['g', 'V'],
+        'yaxis_mode': _coerce_choice(yaxis_mode, {'mag', 'flux'}, 'mag'),
+        'period_method': _coerce_choice(period_method, {'lsp', 'pdm', 'ce'}, 'pdm'),
+        'pdm_min_period': _coerce_numeric_input_value(pdm_min_period),
+        'pdm_max_period': _coerce_numeric_input_value(pdm_max_period),
+        'pdm_manual_period': _coerce_numeric_input_value(pdm_manual_period),
+    }
+
+
+def _normalize_review_gui_state(raw_state: object) -> dict[str, object] | None:
+    if not isinstance(raw_state, dict) or not raw_state:
+        return None
+    return _review_gui_state_from_values(
+        theme_mode=raw_state.get('theme_mode'),
+        plot_mode=raw_state.get('plot_mode'),
+        plot_overlays=raw_state.get('plot_overlays'),
+        baseline_opacity=raw_state.get('baseline_opacity'),
+        residual_height=raw_state.get('residual_height'),
+        external_source_view=raw_state.get('external_source_view'),
+        camera_values=raw_state.get('camera_values'),
+        band_values=raw_state.get('band_values'),
+        yaxis_mode=raw_state.get('yaxis_mode'),
+        period_method=raw_state.get('period_method'),
+        pdm_min_period=raw_state.get('pdm_min_period'),
+        pdm_max_period=raw_state.get('pdm_max_period'),
+        pdm_manual_period=raw_state.get('pdm_manual_period'),
+    )
 
 
 def _queue_filter_ui_state_from_values(*state_values: object) -> dict[str, object]:
@@ -5930,6 +6071,116 @@ def persist_queue_filters(*value_states):
     except Exception as exc:
         print(f"[filters] Warning: could not persist queue filters: {exc}")
     return ui_state
+
+
+@app.callback(
+    Output('saved-review-gui-state', 'data'),
+    Input('keyboard-init', 'n_intervals'),
+    prevent_initial_call=False,
+)
+def load_saved_review_gui_state(_tick):
+    try:
+        with closing(db_connect(Path(DB_PATH))) as conn:
+            raw = str(load_app_state(conn, _REVIEW_GUI_STATE_APP_STATE_KEY, '') or '').strip()
+    except Exception:
+        return None
+    if not raw:
+        return None
+    try:
+        return _normalize_review_gui_state(json.loads(raw))
+    except Exception:
+        return None
+
+
+@app.callback(
+    [Output('plot-mode', 'value', allow_duplicate=True),
+     Output('plot-overlays', 'value', allow_duplicate=True),
+     Output('baseline-opacity-slider', 'value', allow_duplicate=True),
+     Output('residual-height-slider', 'value', allow_duplicate=True),
+     Output('external-source-view', 'value', allow_duplicate=True),
+     Output('camera-checklist', 'value', allow_duplicate=True),
+     Output('band-checklist', 'value', allow_duplicate=True),
+     Output('yaxis-mode', 'value', allow_duplicate=True),
+     Output('period-method', 'value', allow_duplicate=True),
+     Output('pdm-min-period', 'value', allow_duplicate=True),
+     Output('pdm-max-period', 'value', allow_duplicate=True),
+     Output('pdm-manual-period', 'value', allow_duplicate=True),
+     Output('theme-mode', 'value', allow_duplicate=True),
+     Output('plot-defaults-initialized', 'data', allow_duplicate=True)],
+    Input('saved-review-gui-state', 'data'),
+    prevent_initial_call='initial_duplicate',
+)
+def restore_saved_review_gui_state(saved_state):
+    state = _normalize_review_gui_state(saved_state)
+    if state is None:
+        return tuple([no_update] * 14)
+    return (
+        state['plot_mode'],
+        state['plot_overlays'],
+        state['baseline_opacity'],
+        state['residual_height'],
+        state['external_source_view'],
+        state['camera_values'],
+        state['band_values'],
+        state['yaxis_mode'],
+        state['period_method'],
+        state['pdm_min_period'],
+        state['pdm_max_period'],
+        state['pdm_manual_period'],
+        state['theme_mode'],
+        True,
+    )
+
+
+@app.callback(
+    [Output('save-review-gui-state-status', 'children'),
+     Output('saved-review-gui-state', 'data', allow_duplicate=True)],
+    Input('save-review-gui-state-btn', 'n_clicks'),
+    _FILTER_VALUE_STATES + [
+        State('theme-mode', 'value'),
+        State('plot-mode', 'value'),
+        State('plot-overlays', 'value'),
+        State('baseline-opacity-slider', 'value'),
+        State('residual-height-slider', 'value'),
+        State('external-source-view', 'value'),
+        State('camera-checklist', 'value'),
+        State('band-checklist', 'value'),
+        State('yaxis-mode', 'value'),
+        State('period-method', 'value'),
+        State('pdm-min-period', 'value'),
+        State('pdm-max-period', 'value'),
+        State('pdm-manual-period', 'value'),
+    ],
+    prevent_initial_call=True,
+)
+def save_review_gui_state(n_clicks, *state_values):
+    if not n_clicks:
+        raise dash.exceptions.PreventUpdate
+    queue_values = state_values[:len(_FILTER_VALUE_STATES)]
+    extra_values = state_values[len(_FILTER_VALUE_STATES):]
+    queue_state = _queue_filter_ui_state_from_values(*queue_values)
+    gui_state = _review_gui_state_from_values(
+        theme_mode=extra_values[0],
+        plot_mode=extra_values[1],
+        plot_overlays=extra_values[2],
+        baseline_opacity=extra_values[3],
+        residual_height=extra_values[4],
+        external_source_view=extra_values[5],
+        camera_values=extra_values[6],
+        band_values=extra_values[7],
+        yaxis_mode=extra_values[8],
+        period_method=extra_values[9],
+        pdm_min_period=extra_values[10],
+        pdm_max_period=extra_values[11],
+        pdm_manual_period=extra_values[12],
+    )
+    try:
+        with closing(db_connect(Path(DB_PATH))) as conn:
+            save_app_state(conn, _QUEUE_FILTER_APP_STATE_KEY, json.dumps(queue_state, default=str))
+            save_app_state(conn, _REVIEW_GUI_STATE_APP_STATE_KEY, json.dumps(gui_state, default=str))
+    except Exception as exc:
+        return f'Failed to save GUI state: {exc}', no_update
+    return f'Saved GUI state to {Path(DB_PATH).expanduser().resolve()}.', gui_state
 
 
 app.clientside_callback(
@@ -9014,7 +9265,11 @@ def main():
                         help="Show Flask/Werkzeug per-request access logs")
     parser.add_argument('--merge-vetting', metavar='PATH',
                         help="Merge vetting results from a parquet file into the review DB and exit")
+    parser.add_argument('--merge-candidates', metavar='PATH',
+                        help="Merge candidate columns from a CSV/parquet file into the review DB and exit")
     args = parser.parse_args()
+    if args.merge_vetting and args.merge_candidates:
+        parser.error("--merge-vetting and --merge-candidates are mutually exclusive")
     INITIAL_CANDIDATE_QUERY = str(args.candidate).strip() if args.candidate not in (None, '') else None
 
     # Auto-detect plot directory if not specified
@@ -9072,6 +9327,19 @@ def main():
         print(f"Updated {updated} candidates with vetting data.")
         sys.exit(0)
 
+    if args.merge_candidates:
+        candidate_path = Path(args.merge_candidates).expanduser().resolve()
+        if not candidate_path.exists():
+            print(f"Error: candidate file not found: {candidate_path}")
+            sys.exit(1)
+        candidate_df = load_candidates_file(candidate_path)
+        print(f"Merging {len(candidate_df)} candidate rows from {candidate_path}")
+        print(f"  into review DB: {DB_PATH}")
+        with closing(db_connect(Path(DB_PATH))) as conn:
+            updated = merge_candidate_results(conn, candidate_df)
+        print(f"Updated {updated} candidates with candidate data.")
+        sys.exit(0)
+
     print(f"Starting MALCA Review App...")
     print(f"  Database:  {DB_PATH}")
     print(f"  Plot dir:  {PLOT_DIR}")
@@ -9090,7 +9358,12 @@ def main():
         logging.getLogger("werkzeug").setLevel(logging.ERROR)
         app.server.logger.setLevel(logging.ERROR)
 
-    app.run(debug=args.debug, host=args.host, port=args.port)
+    try:
+        app.run(debug=args.debug, host=args.host, port=args.port)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        _cleanup_background_resources()
 
 
 if __name__ == '__main__':

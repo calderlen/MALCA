@@ -83,6 +83,41 @@ def test_db_connect_configures_busy_timeout_and_wal(tmp_path: Path) -> None:
     assert journal_mode == "wal"
 
 
+def test_review_gui_state_normalization_roundtrip() -> None:
+    state = review_app._normalize_review_gui_state(
+        {
+            "theme_mode": "white",
+            "plot_mode": "png",
+            "plot_overlays": ["raw", "markers", "invalid"],
+            "baseline_opacity": 0.4,
+            "residual_height": 0.33,
+            "external_source_view": "atlas",
+            "camera_values": ["ba", "bc"],
+            "band_values": ["V"],
+            "yaxis_mode": "flux",
+            "period_method": "ce",
+            "pdm_min_period": 0.25,
+            "pdm_max_period": 50.0,
+            "pdm_manual_period": 12.5,
+        }
+    )
+
+    assert state is not None
+    assert state["theme_mode"] == "white"
+    assert state["plot_mode"] == "png"
+    assert state["plot_overlays"] == ["raw", "markers"]
+    assert state["baseline_opacity"] == 0.4
+    assert state["residual_height"] == 0.33
+    assert state["external_source_view"] == "atlas"
+    assert state["camera_values"] == ["ba", "bc"]
+    assert state["band_values"] == ["V"]
+    assert state["yaxis_mode"] == "flux"
+    assert state["period_method"] == "ce"
+    assert state["pdm_min_period"] == 0.25
+    assert state["pdm_max_period"] == 50.0
+    assert state["pdm_manual_period"] == 12.5
+
+
 def test_review_db_for_plot_dir_prefers_run_local_db(tmp_path: Path) -> None:
     run_dir = tmp_path / "output" / "runs" / "demo"
     plot_dir = run_dir / "plots"
