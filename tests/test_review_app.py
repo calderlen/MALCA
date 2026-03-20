@@ -905,11 +905,12 @@ def test_persist_queue_filters_waits_for_restore_ready(tmp_path: Path, monkeypat
         }
     )
     assert values is not None
+    numeric_bounds = {}
     text_option_values = tuple([{"label": "Any", "value": "Any"}] for _ in review_app._TEXT_STATES)
     select_option_values = tuple([] for _ in review_app._SELECT_STATES)
 
     with pytest.raises(review_app.dash.exceptions.PreventUpdate):
-        review_app.persist_queue_filters(*values, {"ready": False}, *text_option_values, *select_option_values)
+        review_app.persist_queue_filters(*values, {"ready": False}, numeric_bounds, *text_option_values, *select_option_values)
 
     review_app.persist_queue_filters(
         *values,
@@ -924,6 +925,7 @@ def test_persist_queue_filters_waits_for_restore_ready(tmp_path: Path, monkeypat
                 "exclude_asassn_var_type": ["EA"],
             },
         },
+        numeric_bounds,
         *text_option_values,
         *select_option_values,
     )
@@ -939,6 +941,47 @@ def test_persist_queue_filters_waits_for_restore_ready(tmp_path: Path, monkeypat
     assert payload["sort_cols"] == ["dipper_score"]
     assert payload["sort_desc"] == ["yes"]
     assert payload["exclude_asassn_var_type"] == ["EA"]
+
+
+def test_persist_queue_filters_normalizes_numeric_bounds_before_saving(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "review.db"
+    with db_connect(db_path):
+        pass
+
+    monkeypatch.setattr(review_app, "DB_PATH", str(db_path))
+    values = review_app._queue_filter_ui_values_from_state(
+        {
+            "filter_unreviewed": ["yes"],
+            "min_baseline_mag": 9.0,
+            "max_baseline_mag": 16.0,
+            "sort_cols": ["dipper_score"],
+            "sort_desc": ["yes"],
+        }
+    )
+    assert values is not None
+
+    numeric_bounds = {
+        "baseline_mag": {"min": 9.0, "max": 16.0},
+    }
+    text_option_values = tuple([{"label": "Any", "value": "Any"}] for _ in review_app._TEXT_STATES)
+    select_option_values = tuple([] for _ in review_app._SELECT_STATES)
+
+    review_app.persist_queue_filters(
+        *values,
+        {"ready": True, "restored": False, "saved_ui_state": None},
+        numeric_bounds,
+        *text_option_values,
+        *select_option_values,
+    )
+
+    with db_connect(db_path) as conn:
+        saved = conn.execute(
+            "select value from app_state where key='dash_queue_filter_ui_state_v1'"
+        ).fetchone()[0]
+
+    payload = json.loads(saved)
+    assert payload["min_baseline_mag"] is None
+    assert payload["max_baseline_mag"] is None
 
 
 def test_restore_startup_candidate_views_explicit_candidate_when_filtered_out(tmp_path: Path, monkeypatch) -> None:

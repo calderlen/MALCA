@@ -4145,8 +4145,6 @@ def _bool_mode_filter(label: str, component_id: str):
             value='Any',
             clearable=False,
             style={'margin-bottom': '4px', 'font-size': '11px'},
-            persistence=_review_persistence_token(),
-            persistence_type='local',
         ),
     ]
 
@@ -4196,8 +4194,6 @@ def _num_range_filter(col: str):
                 type='number',
                 placeholder='min',
                 debounce=True,
-                persistence=_review_persistence_token(),
-                persistence_type='local',
                 style={'width': '72px', 'font-size': '11px', 'flex': '0 0 72px'},
             ),
             dcc.RangeSlider(
@@ -4211,16 +4207,12 @@ def _num_range_filter(col: str):
                 tooltip={'placement': 'bottom', 'always_visible': False},
                 updatemode='mouseup',
                 disabled=True,
-                persistence=_review_persistence_token(),
-                persistence_type='local',
             ),
             dcc.Input(
                 id={'type': 'num-filter-max-input', 'col': col},
                 type='number',
                 placeholder='max',
                 debounce=True,
-                persistence=_review_persistence_token(),
-                persistence_type='local',
                 style={'width': '72px', 'font-size': '11px', 'flex': '0 0 72px'},
             ),
         ], style={'display': 'flex', 'alignItems': 'center', 'gap': '8px', 'margin-bottom': '4px'}),
@@ -4239,7 +4231,6 @@ def _text_filter(col: str):
             clearable=False,
             placeholder='Open sidebar to load options',
             style={'margin-bottom': '4px', 'font-size': '11px'},
-            persistence=_review_persistence_token(), persistence_type='local'
         ),
     ])
 
@@ -4255,8 +4246,6 @@ def _select_filter(col: str):
             style={'margin-bottom': '4px', 'font-size': '11px'},
             maxHeight=400,
             optionHeight=28,
-            persistence=_review_persistence_token(),
-            persistence_type='local',
         ),
     ])
 
@@ -4386,16 +4375,12 @@ def create_layout():
                 options=[{'label': ' Only unreviewed', 'value': 'yes'}],
                 value=[],
                 style={'margin-bottom': '3px'},
-                persistence=_review_persistence_token(),
-                persistence_type='local',
             ),
             dcc.Checklist(
                 id='filter-failed',
                 options=[{'label': ' Require failed_any=False', 'value': 'yes'}],
                 value=[],
                 style={'margin-bottom': '6px'},
-                persistence=_review_persistence_token(),
-                persistence_type='local',
             ),
 
             # -- All filter groups (auto-generated from _SIDEBAR_GROUPS) --
@@ -4419,16 +4404,12 @@ def create_layout():
                 multi=True,
                 clearable=False,
                 style={'margin-bottom': '4px', 'font-size': '11px'},
-                persistence=_review_persistence_token(),
-                persistence_type='local',
             ),
             dcc.Checklist(
                 id='sort-desc',
                 options=[{'label': ' Descending', 'value': 'yes'}],
                 value=[],
                 style={'margin-bottom': '6px'},
-                persistence=_review_persistence_token(),
-                persistence_type='local',
             ),
 
             html.Button('Refresh Queue [R]', id='refresh-btn', n_clicks=0,
@@ -6079,6 +6060,20 @@ def _normalize_numeric_filter_inputs(
     }
 
 
+def _normalized_queue_filter_ui_state(
+    ui_state: dict[str, object],
+    bounds_data: dict[str, dict[str, float | None]] | None,
+) -> dict[str, object]:
+    """Normalize raw queue-filter UI state before persisting it."""
+    normalized = dict(ui_state)
+    raw_numeric_filters = {
+        fkey: normalized.get(fkey)
+        for _, fkey in _NUM_INPUT_STATES
+    }
+    normalized.update(_normalize_numeric_filter_inputs(bounds_data, raw_numeric_filters))
+    return normalized
+
+
 def _queue_filter_params_from_ui_state(
     ui_state: dict[str, object],
     numeric_bounds: dict[str, dict[str, float | None]] | None,
@@ -6331,6 +6326,7 @@ def rehydrate_saved_text_select_filter_values(restore_state, *callback_values):
     Output('filter-params', 'data'),
     _FILTER_VALUE_INPUTS,
     State('restored-filter-applied', 'data'),
+    State('numeric-filter-bounds', 'data'),
     _TEXT_OPTION_STATES,
     _SELECT_OPTION_STATES,
     prevent_initial_call=True,
@@ -6341,8 +6337,9 @@ def persist_queue_filters(*callback_values):
     n_text_opts = len(_TEXT_OPTION_STATES)
     value_states = callback_values[:n_values]
     restore_state = callback_values[n_values]
-    text_option_values = callback_values[n_values + 1:n_values + 1 + n_text_opts]
-    select_option_values = callback_values[n_values + 1 + n_text_opts:]
+    numeric_bounds = callback_values[n_values + 1]
+    text_option_values = callback_values[n_values + 2:n_values + 2 + n_text_opts]
+    select_option_values = callback_values[n_values + 2 + n_text_opts:]
     if not isinstance(restore_state, dict) or not restore_state.get('ready'):
         raise dash.exceptions.PreventUpdate
     ui_state = _queue_filter_ui_state_from_values(*value_states)
@@ -6352,6 +6349,7 @@ def persist_queue_filters(*callback_values):
         text_option_values,
         select_option_values,
     )
+    ui_state = _normalized_queue_filter_ui_state(ui_state, numeric_bounds)
     try:
         with closing(db_connect(Path(DB_PATH))) as conn:
             save_app_state(conn, _QUEUE_FILTER_APP_STATE_KEY, json.dumps(ui_state, default=str))
@@ -6424,6 +6422,7 @@ def restore_saved_review_gui_state(saved_state):
      Output('saved-review-gui-state', 'data', allow_duplicate=True)],
     Input('save-review-gui-state-btn', 'n_clicks'),
     _FILTER_VALUE_STATES + [
+        State('numeric-filter-bounds', 'data'),
         State('theme-mode', 'value'),
         State('plot-mode', 'value'),
         State('plot-overlays', 'value'),
@@ -6444,8 +6443,10 @@ def save_review_gui_state(n_clicks, *state_values):
     if not n_clicks:
         raise dash.exceptions.PreventUpdate
     queue_values = state_values[:len(_FILTER_VALUE_STATES)]
-    extra_values = state_values[len(_FILTER_VALUE_STATES):]
+    numeric_bounds = state_values[len(_FILTER_VALUE_STATES)]
+    extra_values = state_values[len(_FILTER_VALUE_STATES) + 1:]
     queue_state = _queue_filter_ui_state_from_values(*queue_values)
+    queue_state = _normalized_queue_filter_ui_state(queue_state, numeric_bounds)
     gui_state = _review_gui_state_from_values(
         theme_mode=extra_values[0],
         plot_mode=extra_values[1],
@@ -6520,13 +6521,20 @@ app.clientside_callback(
         const currentRange = Array.isArray(rangeValue) ? rangeValue : [];
         let currentRangeMin = toNumber(currentRange[0]);
         let currentRangeMax = toNumber(currentRange[1]);
+        const placeholderRange = (
+            currentMin === null &&
+            currentMax === null &&
+            currentRangeMin === 0 &&
+            currentRangeMax === 1 &&
+            !(Math.abs(dataLo) <= 1e-12 && Math.abs(dataHi - 1) <= 1e-12)
+        );
         const rangeLooksInitialized = (
             currentRangeMin !== null &&
             currentRangeMax !== null &&
             currentRangeMin >= sliderLo &&
             currentRangeMax <= sliderHi
         );
-        if (!rangeLooksInitialized) {
+        if (!rangeLooksInitialized || placeholderRange) {
             currentRangeMin = null;
             currentRangeMax = null;
         }
