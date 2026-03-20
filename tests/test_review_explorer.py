@@ -9,6 +9,7 @@ import plotly.graph_objects as go
 from malca.review import explorer as review_explorer
 from malca.review.explore_data import CandidateSourceData, CombinedCandidateData, add_eda_columns
 from malca.review.filter_schema import SIDEBAR_GROUPS
+from malca.review.handoff import build_review_command
 
 
 def test_style_plot_separates_title_from_horizontal_legend() -> None:
@@ -173,6 +174,10 @@ def test_build_explorer_app_uses_custom_plot_sidebar_layout() -> None:
     assert "explorer-shell" in ids
     assert "explorer-sidebar" in ids
     assert "explorer-sidebar-toggle" in ids
+    assert "explorer-keyboard-input" in ids
+    assert "explorer-keyboard-init" in ids
+    assert "explorer-help-open" in ids
+    assert "explorer-help-modal" in ids
     assert "custom-graph" in ids
     assert "export-native-pdf-btn" in ids
     assert "camera-checklist" in ids
@@ -181,6 +186,10 @@ def test_build_explorer_app_uses_custom_plot_sidebar_layout() -> None:
     assert "saved-explorer-gui-state" in ids
     assert "save-explorer-gui-state-btn" in ids
     assert "explorer-review-overrides" in ids
+    assert "explorer-review-save-request" in ids
+    assert "explorer-review-launch-url" in ids
+    assert "explorer-review-launch-pending" in ids
+    assert "explorer-review-launch-opened" in ids
     assert "explorer-review-class" in ids
     assert "explorer-review-confidence" in ids
     assert "explorer-review-followup" in ids
@@ -206,6 +215,75 @@ def test_table_rows_returns_all_filtered_candidates() -> None:
     assert len(rows) == 55
     assert rows[0]["candidate_key"] == "cand-54"
     assert rows[-1]["candidate_key"] == "cand-0"
+
+
+def test_explorer_shortcut_action_toggles_class() -> None:
+    action = review_explorer._explorer_shortcut_action(
+        key="d",
+        selected_key="cand-1",
+        table_data=[{"candidate_key": "cand-1"}],
+        event_class="unclassified",
+        interest_score=None,
+        followup_value=[],
+        notes="",
+        save_request={"nonce": 0},
+    )
+
+    assert action["event_class"] == "dipper"
+    assert action["status"] == "Class: dipper"
+
+
+def test_explorer_shortcut_action_sets_confidence_and_saves() -> None:
+    action = review_explorer._explorer_shortcut_action(
+        key="3",
+        selected_key="cand-2",
+        table_data=[{"candidate_key": "cand-2"}],
+        event_class="flare",
+        interest_score=None,
+        followup_value=["followup"],
+        notes="check phase fold",
+        save_request={"nonce": 2},
+    )
+
+    assert action["interest_score"] == 3
+    assert action["status"] == "✓ Confidence: 3"
+    assert action["save_request"] == {
+        "nonce": 3,
+        "candidate_key": "cand-2",
+        "interest_score": 3,
+        "event_class": "flare",
+        "needs_followup": True,
+        "notes": "check phase fold",
+        "increment_pass": False,
+        "event_type": "keyboard",
+    }
+
+
+def test_explorer_shortcut_action_enter_saves_and_advances() -> None:
+    action = review_explorer._explorer_shortcut_action(
+        key="Enter",
+        selected_key="cand-2",
+        table_data=[{"candidate_key": "cand-1"}, {"candidate_key": "cand-2"}, {"candidate_key": "cand-3"}],
+        event_class="ltv",
+        interest_score=4,
+        followup_value=[],
+        notes="strong trend",
+        save_request={"nonce": 5},
+    )
+
+    assert action["selected_key"] == "cand-3"
+    assert action["status"] == "✓ Saved + Next →"
+    assert action["save_request"]["candidate_key"] == "cand-2"
+    assert action["save_request"]["increment_pass"] is True
+
+
+def test_build_review_command_disables_child_browser_auto_open(monkeypatch) -> None:
+    monkeypatch.setattr("malca.review.handoff._find_open_port", lambda preferred_port, host="127.0.0.1": 8123)
+    command, url = build_review_command(db_path="/tmp/review.db", candidate="cand-1")
+
+    assert "--no-browser" in command
+    assert "--candidate" in command
+    assert url == "http://127.0.0.1:8123"
 
 
 def test_filter_controls_and_selected_candidate_are_persistent() -> None:

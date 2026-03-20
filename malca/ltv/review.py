@@ -24,6 +24,7 @@ import pandas as pd
 
 from concurrent.futures import ProcessPoolExecutor
 from malca.config.config_paths import ASASSN_INDEX_PATH
+from malca.config.config_ltv import LTV_MAX_PM
 from malca.review.store import db_connect, import_candidates
 from malca.stats import compute_stats, _enrich_row_worker
 
@@ -157,6 +158,21 @@ def map_ltv_columns(df: pd.DataFrame) -> pd.DataFrame:
         df["baseline_mag"] = df["Pstarss gmag"]
         df = df.drop(columns=["Pstarss gmag"])
 
+    # --- Normalize Gaia proper motion outputs to review-standard names ---
+    if "gaia_pmra" in df.columns and "pmra" not in df.columns:
+        df["pmra"] = df["gaia_pmra"]
+    if "gaia_pmdec" in df.columns and "pmdec" not in df.columns:
+        df["pmdec"] = df["gaia_pmdec"]
+    if "gaia_pm_total" in df.columns and "pm_total" not in df.columns:
+        df["pm_total"] = df["gaia_pm_total"]
+    if "pm_total" not in df.columns and {"pmra", "pmdec"}.issubset(df.columns):
+        pmra = pd.to_numeric(df["pmra"], errors="coerce")
+        pmdec = pd.to_numeric(df["pmdec"], errors="coerce")
+        df["pm_total"] = np.sqrt(pmra * pmra + pmdec * pmdec)
+    if "pm_total" in df.columns and "high_pm_flag" not in df.columns:
+        pm_total = pd.to_numeric(df["pm_total"], errors="coerce")
+        df["high_pm_flag"] = (pm_total > float(LTV_MAX_PM)).fillna(False).astype(int)
+
     # --- Cast int bool columns ---
     for col in (
         "ltv_passed_filters",
@@ -167,6 +183,7 @@ def map_ltv_columns(df: pd.DataFrame) -> pd.DataFrame:
         "ltv_gaia_alert_match",
         "ltv_vg_has_v",
         "ltv_stoch_mhps_pn_flag",
+        "high_pm_flag",
     ):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)

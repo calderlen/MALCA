@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 
 from malca.config.config_characterize import GAIA_CHUNK_SIZE
+from malca.config.config_ltv import LTV_MAX_PM
 from malca.config.config_paths import VSX_CROSSMATCH_PATH, GAIA_CACHE_FILE
 from malca.review.metadata import normalize_vsx_record
 
@@ -437,6 +438,8 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("parallax_error",           "REAL",    "float"),
     ("pmra",                     "REAL",    "float"),
     ("pmdec",                    "REAL",    "float"),
+    ("pm_total",                 "REAL",    "float"),
+    ("high_pm_flag",             "INTEGER", "bool"),
     # -- photometry --
     ("tmass_j",                  "REAL",    "float"),
     ("tmass_j_err",              "REAL",    "float"),
@@ -970,6 +973,36 @@ def init_db(conn: sqlite3.Connection) -> None:
                 if "duplicate column name" not in str(e).lower():
                     raise
                 # Column already exists (e.g. race or schema drift); skip
+
+    # Backfill legacy LTV proper-motion fields that were previously stored only
+    # in payload_json under gaia_pm* keys.
+    try:
+        conn.execute(
+            """
+            UPDATE candidates
+            SET
+                pmra = COALESCE(pmra, CAST(json_extract(payload_json, '$.gaia_pmra') AS REAL)),
+                pmdec = COALESCE(pmdec, CAST(json_extract(payload_json, '$.gaia_pmdec') AS REAL)),
+                pm_total = COALESCE(pm_total, CAST(json_extract(payload_json, '$.gaia_pm_total') AS REAL))
+            WHERE
+                pmra IS NULL OR pmdec IS NULL OR pm_total IS NULL
+            """
+        )
+        conn.execute(
+            """
+            UPDATE candidates
+            SET high_pm_flag = CASE
+                WHEN pm_total > ? THEN 1
+                WHEN pm_total IS NOT NULL THEN 0
+                ELSE high_pm_flag
+            END
+            WHERE high_pm_flag IS NULL AND pm_total IS NOT NULL
+            """,
+            (float(LTV_MAX_PM),),
+        )
+    except sqlite3.OperationalError:
+        # Older SQLite builds or schema edge cases should not block opening the DB.
+        pass
     conn.commit()
 
 
@@ -1141,18 +1174,13 @@ def import_candidates(
     return upsert_candidates_frame(conn, df_use, default_source_path=str(source_path))
 
 
-def query_queue(
-    conn: sqlite3.Connection,
-    *,
-    filters: dict | None = None,
-    ids_only: bool = False,
-) -> pd.DataFrame:
-    """Query the candidate queue using filter parameters."""
+def _queue_where_params(filters: dict | None = None) -> tuple[list[str], list[object]]:
+    """Build queue WHERE clauses and bound params from filter parameters."""
     if filters is None:
         filters = {}
 
     where: list[str] = []
-    params: list = []
+    params: list[object] = []
 
     # --- review status ---
     if filters.get('only_unreviewed'):
@@ -1228,6 +1256,14 @@ def query_queue(
             where.append(f"(c.{col} IS NULL OR c.{col} NOT IN ({placeholders}))")
             params.extend(exc)
 
+    return where, params
+
+
+def _queue_order_clause(filters: dict | None = None) -> str:
+    """Build the SQL ORDER BY clause for queue queries."""
+    if filters is None:
+        filters = {}
+
     # --- sorting (any float column + review columns, multi-column) ---
     _sortable = {c: f"c.{c}" for c in _FLOAT_COLS}
     _sortable["candidate_id"] = "c.candidate_id"
@@ -1242,6 +1278,41 @@ def query_queue(
             order_parts.append(f"{col_expr} {direction}")
     if not order_parts:
         order_parts.append(f"c.candidate_id {direction}")
+    order_clause = ", ".join(order_parts)
+    if "c.candidate_id" not in order_clause:
+        order_clause += ", c.candidate_id ASC"
+    return order_clause
+
+
+def count_queue(
+    conn: sqlite3.Connection,
+    *,
+    filters: dict | None = None,
+) -> int:
+    """Count queue rows matching the supplied filter parameters."""
+    where, params = _queue_where_params(filters)
+
+    query = """
+        SELECT COUNT(*)
+        FROM candidates c
+        LEFT JOIN reviews r ON r.candidate_id = c.candidate_id
+    """
+    if where:
+        query += " WHERE " + " AND ".join(where)
+
+    row = conn.execute(query, params).fetchone()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
+def query_queue(
+    conn: sqlite3.Connection,
+    *,
+    filters: dict | None = None,
+    ids_only: bool = False,
+) -> pd.DataFrame:
+    """Query the candidate queue using filter parameters."""
+    where, params = _queue_where_params(filters)
+    order_clause = _queue_order_clause(filters)
 
     if ids_only:
         query = """
@@ -1276,9 +1347,6 @@ def query_queue(
         """
     if where:
         query += " WHERE " + " AND ".join(where)
-    order_clause = ", ".join(order_parts)
-    if "c.candidate_id" not in order_clause:
-        order_clause += ", c.candidate_id ASC"
     query += f" ORDER BY {order_clause}"
     return pd.read_sql_query(query, conn, params=params)
 
@@ -1312,6 +1380,19 @@ def get_candidate_payload(conn: sqlite3.Connection, candidate_id: str) -> dict:
                 payload[col] = f
         else:
             payload[col] = str(raw).strip() if raw is not None else ""
+
+    # Back-compat for older LTV ingests that stored Gaia PM under gaia_pm* names
+    # instead of the review-standard pm* fields.
+    if payload.get("pmra") in (None, "") and payload.get("gaia_pmra") not in (None, ""):
+        payload["pmra"] = payload.get("gaia_pmra")
+    if payload.get("pmdec") in (None, "") and payload.get("gaia_pmdec") not in (None, ""):
+        payload["pmdec"] = payload.get("gaia_pmdec")
+    if payload.get("pm_total") in (None, "") and payload.get("gaia_pm_total") not in (None, ""):
+        payload["pm_total"] = payload.get("gaia_pm_total")
+    if payload.get("high_pm_flag") in (None, "") and payload.get("pm_total") not in (None, ""):
+        pm_total = _to_float(payload.get("pm_total"))
+        if pm_total is not None:
+            payload["high_pm_flag"] = bool(pm_total > LTV_MAX_PM)
     return payload
 
 

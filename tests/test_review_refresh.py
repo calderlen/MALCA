@@ -183,3 +183,39 @@ def test_refresh_review_stats_from_ltv_scope_matches_db_by_asas_sn_id(tmp_path: 
         payload = get_candidate_payload(conn, "ltv_123")
 
     assert payload["lc_path"] == str(lc_path)
+
+
+def test_get_candidate_payload_aliases_legacy_ltv_pm_fields(tmp_path: Path) -> None:
+    db_path = tmp_path / "ltv_review.db"
+    with db_connect(db_path) as conn:
+        import_candidates(
+            conn,
+            pd.DataFrame(
+                [
+                    {
+                        "candidate_id": "ltv_pm",
+                        "asas_sn_id": "999",
+                        "gaia_pmra": 6.0,
+                        "gaia_pmdec": 8.0,
+                        "gaia_pm_total": 10.0,
+                    }
+                ]
+            ),
+            source_path="test://ltv",
+            characterize_before_import=False,
+            vet_before_import=False,
+        )
+        payload = get_candidate_payload(conn, "ltv_pm")
+
+    assert payload["pmra"] == 6.0
+    assert payload["pmdec"] == 8.0
+    assert payload["pm_total"] == 10.0
+    assert payload["high_pm_flag"] is False
+
+    with db_connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT pmra, pmdec, pm_total, high_pm_flag FROM candidates WHERE candidate_id = ?",
+            ("ltv_pm",),
+        ).fetchone()
+
+    assert row == (6.0, 8.0, 10.0, 0)

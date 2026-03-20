@@ -155,6 +155,28 @@ REVIEW_SCORE_OPTIONS = [
     {"label": "3", "value": 3},
     {"label": "4", "value": 4},
 ]
+EXPLORER_HELP_TEXT = """
+Classes (single key, toggle):
+  [D] dipper         [M] microlensing
+  [F] flare          [L] ltv
+  [U] unknown interesting
+  [I] instrumental   [O] other
+
+Confidence (instant save):
+  [1]-[4] Set confidence level
+
+Navigation:
+  [Backspace] Previous  [Tab] Next (no save)
+  [Enter] Save + Next
+
+Actions:
+  [.] Save  [,] Toggle follow-up
+
+Explorer:
+  [Esc] Toggle sidebar
+  [Shift+R] Refresh candidates from current view
+  [?] Toggle this help
+"""
 
 
 def _coerce_optional_float(value: object) -> float | None:
@@ -194,6 +216,142 @@ def _coerce_explorer_bool_mode_value(value: object) -> str:
 def _coerce_explorer_text_value(value: object) -> str:
     text = str(value).strip() if value is not None else ""
     return text or "Any"
+
+
+def _keyboard_key(key_value: object) -> str:
+    """Extract the raw key token from the encoded hidden keyboard input."""
+    if key_value in (None, ""):
+        return ""
+    return str(key_value).split("\t", 1)[0].strip()
+
+
+def _candidate_keys_from_table_data(table_data: object) -> list[str]:
+    keys: list[str] = []
+    seen: set[str] = set()
+    for row in table_data or []:
+        if not isinstance(row, dict):
+            continue
+        key = str(row.get("candidate_key") or "").strip()
+        if key and key not in seen:
+            keys.append(key)
+            seen.add(key)
+    return keys
+
+
+def _explorer_shortcut_action(
+    *,
+    key: str,
+    selected_key: object,
+    table_data: object,
+    event_class: object,
+    interest_score: object,
+    followup_value: object,
+    notes: object,
+    save_request: object,
+) -> dict[str, object]:
+    """Translate a keyboard keypress into explorer inline-review state updates."""
+    current_key = str(selected_key or "").strip()
+    candidate_keys = _candidate_keys_from_table_data(table_data)
+    if current_key in candidate_keys:
+        current_idx = candidate_keys.index(current_key)
+    else:
+        current_idx = 0
+        current_key = candidate_keys[0] if candidate_keys else ""
+
+    current_class = str(event_class or "unclassified").strip() or "unclassified"
+    next_class = current_class
+    next_score = None if interest_score in (None, "") else int(interest_score)
+    next_followup = bool(followup_value and "followup" in followup_value)
+    current_notes = str(notes or "")
+
+    next_nonce = 1
+    if isinstance(save_request, dict):
+        try:
+            next_nonce = int(save_request.get("nonce", 0)) + 1
+        except Exception:
+            next_nonce = 1
+
+    def _build_save_request(*, score: int | None, increment_pass: bool) -> dict[str, object]:
+        return {
+            "nonce": next_nonce,
+            "candidate_key": current_key,
+            "interest_score": score,
+            "event_class": next_class,
+            "needs_followup": next_followup,
+            "notes": current_notes,
+            "increment_pass": bool(increment_pass),
+            "event_type": "keyboard",
+        }
+
+    if not key:
+        return {}
+
+    if key in {"?", "Escape", "Shift+R"}:
+        return {}
+
+    lower = key.lower()
+    class_tag = CLASS_KEY_MAP.get(lower)
+    if class_tag is not None:
+        next_class = "unclassified" if current_class == class_tag else class_tag
+        return {
+            "event_class": next_class,
+            "status": f"Class: {next_class}",
+        }
+
+    if key == ",":
+        next_followup = not next_followup
+        return {
+            "followup_value": ["followup"] if next_followup else [],
+            "status": f"Follow-up: {'ON' if next_followup else 'OFF'}",
+        }
+
+    if key == "Backspace":
+        target_idx = max(0, current_idx - 1)
+        action: dict[str, object] = {"status": "← Previous"}
+        if candidate_keys and target_idx != current_idx:
+            action["selected_key"] = candidate_keys[target_idx]
+        return action
+
+    if key == "Tab":
+        target_idx = min(current_idx + 1, max(len(candidate_keys) - 1, 0))
+        action = {"status": "→ Next"}
+        if candidate_keys and target_idx != current_idx:
+            action["selected_key"] = candidate_keys[target_idx]
+        return action
+
+    if key == ".":
+        if not current_key:
+            return {"status": "No candidate selected for save."}
+        return {
+            "status": "✓ Saved",
+            "save_request": _build_save_request(score=next_score, increment_pass=False),
+        }
+
+    if key == "Enter":
+        if next_score is None:
+            return {"status": "Confidence required"}
+        if not next_class or next_class == "unclassified":
+            return {"status": "Class required"}
+        target_idx = min(current_idx + 1, max(len(candidate_keys) - 1, 0))
+        action = {
+            "status": "✓ Saved + Next →",
+            "save_request": _build_save_request(score=next_score, increment_pass=True),
+        }
+        if candidate_keys and target_idx != current_idx:
+            action["selected_key"] = candidate_keys[target_idx]
+        return action
+
+    if key in {"1", "2", "3", "4"}:
+        next_score = int(key)
+        if not current_key:
+            return {"status": "No candidate selected for save.", "interest_score": next_score}
+        return {
+            "interest_score": next_score,
+            "status": f"✓ Confidence: {next_score}",
+            "save_request": _build_save_request(score=next_score, increment_pass=False),
+        }
+
+    return {}
 
 
 def _explorer_state_db_path(combined: CombinedCandidateData) -> Path | None:
@@ -1479,6 +1637,21 @@ def build_explorer_app(
 """
     app.layout = html.Div(
         [
+            dcc.Input(
+                id="explorer-keyboard-input",
+                type="text",
+                autoFocus=True,
+                autoComplete="off",
+                style={
+                    "position": "absolute",
+                    "left": "-9999px",
+                    "width": "1px",
+                    "height": "1px",
+                    "opacity": 0,
+                    "zIndex": -1,
+                    "pointerEvents": "none",
+                },
+            ),
             dcc.Store(id="selected-key-store", data=(initial_candidate_key or combined.default_candidate_key), storage_type="local"),
             dcc.Store(id="period-search-store", data=None),
             dcc.Store(id="period-cache-store", data={}, storage_type="session"),
@@ -1487,9 +1660,15 @@ def build_explorer_app(
             dcc.Store(id="candidate-scope-store", data={"mode": "filtered"}),
             dcc.Store(id="saved-explorer-gui-state", data=None),
             dcc.Store(id="explorer-review-overrides", data={}, storage_type="session"),
+            dcc.Store(id="explorer-review-save-request", data={"nonce": 0}),
+            dcc.Store(id="explorer-review-launch-url", data=""),
+            dcc.Store(id="explorer-review-launch-pending", data=0),
+            dcc.Store(id="explorer-review-launch-opened", data=0),
             dcc.Store(id="explorer-resize-init", data=0),
             dcc.Store(id="explorer-sidebar-open", data=True, storage_type="local"),
+            dcc.Store(id="explorer-help-open", data=False),
             dcc.Interval(id="explorer-init", interval=200, n_intervals=0, max_intervals=1),
+            dcc.Interval(id="explorer-keyboard-init", interval=200, n_intervals=0, max_intervals=1),
             dcc.Download(id="explorer-plot-download"),
             dcc.Download(id="explorer-native-plot-download"),
             html.Div(
@@ -1504,6 +1683,53 @@ def build_explorer_app(
                     ),
                 ],
                 className="explorer-topbar",
+            ),
+            html.Div(
+                [
+                    html.Div(
+                        [
+                            html.Div("Explorer Shortcuts", style={"fontSize": "15px", "fontWeight": "600", "marginBottom": "8px"}),
+                            html.Pre(
+                                EXPLORER_HELP_TEXT.strip(),
+                                style={
+                                    "margin": 0,
+                                    "whiteSpace": "pre-wrap",
+                                    "fontFamily": UI_FONT_FAMILY,
+                                    "fontSize": "12px",
+                                    "lineHeight": 1.5,
+                                },
+                            ),
+                            html.Div(
+                                [
+                                    html.Button("Close", id="explorer-help-close-btn", n_clicks=0, className="explorer-action-btn explorer-primary-btn"),
+                                ],
+                                style={"display": "flex", "justifyContent": "flex-end", "marginTop": "12px"},
+                            ),
+                        ],
+                        style={
+                            "width": "min(520px, calc(100vw - 40px))",
+                            "maxHeight": "80vh",
+                            "overflowY": "auto",
+                            "padding": "18px",
+                            "background": PANEL_BG_ALT,
+                            "border": f"1px solid {PANEL_BORDER}",
+                            "borderRadius": "16px",
+                            "boxShadow": "0 22px 64px rgba(0, 0, 0, 0.35)",
+                            "color": TEXT,
+                        },
+                    ),
+                ],
+                id="explorer-help-modal",
+                style={
+                    "display": "none",
+                    "position": "fixed",
+                    "inset": "0",
+                    "zIndex": 2000,
+                    "background": "rgba(4, 10, 15, 0.52)",
+                    "alignItems": "center",
+                    "justifyContent": "center",
+                    "padding": "20px",
+                },
             ),
             html.Div(
                 [
@@ -1805,6 +2031,88 @@ def build_explorer_app(
 
     app.clientside_callback(
         """
+        function() {
+            var keyboardInput = document.getElementById('explorer-keyboard-input');
+            if (!keyboardInput) {
+                return window.dash_clientside.no_update;
+            }
+
+            var valueDescriptor = Object.getOwnPropertyDescriptor(
+                window.HTMLInputElement.prototype, 'value'
+            );
+            var nativeInputValueSetter = valueDescriptor && valueDescriptor.set
+                ? valueDescriptor.set
+                : null;
+
+            var dispatchKeyToDash = function(key) {
+                if (!key) {
+                    return;
+                }
+                if (nativeInputValueSetter) {
+                    nativeInputValueSetter.call(
+                        keyboardInput, key + '\\t' + String(Date.now())
+                    );
+                } else {
+                    keyboardInput.value = key + '\\t' + String(Date.now());
+                }
+                keyboardInput.dispatchEvent(new Event('input', {bubbles: true}));
+            };
+
+            if (!window.__malcaExplorerKeyboardListenerAttached) {
+                document.addEventListener('keydown', function(e) {
+                    var target = e.target;
+                    var tag = target && target.tagName ? target.tagName : '';
+                    var targetId = target && target.id ? target.id : '';
+                    var inFormField = (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') && targetId !== 'explorer-keyboard-input';
+
+                    if (inFormField) {
+                        if (e.key === 'Escape') {
+                            target.blur();
+                            return;
+                        }
+                        var allowWithFormModifier = e.altKey && !e.ctrlKey && !e.metaKey;
+                        if (!allowWithFormModifier) {
+                            return;
+                        }
+                        e.preventDefault();
+                        dispatchKeyToDash(e.key);
+                        return;
+                    }
+
+                    if (e.ctrlKey || e.metaKey || e.altKey) {
+                        return;
+                    }
+
+                    var key = e.key;
+                    if (!key || key === 'Shift' || key === 'Control' || key === 'Alt' || key === 'Meta') {
+                        return;
+                    }
+
+                    if (e.shiftKey && (key === 'R' || key === 'r')) {
+                        e.preventDefault();
+                        dispatchKeyToDash('Shift+R');
+                        return;
+                    }
+
+                    if (key === 'Backspace' || key === 'Tab' || key === 'Enter') {
+                        e.preventDefault();
+                    }
+
+                    dispatchKeyToDash(key);
+                });
+                window.__malcaExplorerKeyboardListenerAttached = true;
+            }
+
+            return window.dash_clientside.no_update;
+        }
+        """,
+        Output("explorer-keyboard-input", "value", allow_duplicate=True),
+        Input("explorer-keyboard-init", "n_intervals"),
+        prevent_initial_call="initial_duplicate",
+    )
+
+    app.clientside_callback(
+        """
         function(_tick, currentTheme) {
             try {
                 var saved = window.localStorage.getItem('malca.explorer.theme');
@@ -1839,6 +2147,62 @@ def build_explorer_app(
         Output("theme-mode-store", "data"),
         Input("theme-mode", "value"),
         prevent_initial_call=False,
+    )
+
+    app.clientside_callback(
+        """
+        function(openSelectionClicks, openCurrentClicks) {
+            var total = Number(openSelectionClicks || 0) + Number(openCurrentClicks || 0);
+            if (!total) {
+                return window.dash_clientside.no_update;
+            }
+
+            try {
+                var reviewWindow = window.open('', '_blank', 'noopener');
+                if (reviewWindow && reviewWindow.document) {
+                    reviewWindow.document.title = 'Launching MALCA Review';
+                    reviewWindow.document.body.innerHTML = '<div style="font-family: sans-serif; padding: 24px;">Launching MALCA Review...</div>';
+                }
+                window.__malcaExplorerPendingReviewWindow = reviewWindow;
+            } catch (err) {
+                window.__malcaExplorerPendingReviewWindow = null;
+            }
+
+            return Date.now();
+        }
+        """,
+        Output("explorer-review-launch-pending", "data"),
+        Input("open-selection-in-review-btn", "n_clicks"),
+        Input("open-current-in-review-btn", "n_clicks"),
+        prevent_initial_call=True,
+    )
+
+    app.clientside_callback(
+        """
+        function(url) {
+            if (!url) {
+                return window.dash_clientside.no_update;
+            }
+
+            try {
+                var reviewWindow = window.__malcaExplorerPendingReviewWindow;
+                if (reviewWindow && !reviewWindow.closed) {
+                    reviewWindow.location.href = url;
+                    reviewWindow.focus();
+                } else {
+                    window.open(url, '_blank', 'noopener');
+                }
+            } catch (err) {
+                window.open(url, '_blank', 'noopener');
+            }
+
+            window.__malcaExplorerPendingReviewWindow = null;
+            return Date.now();
+        }
+        """,
+        Output("explorer-review-launch-opened", "data"),
+        Input("explorer-review-launch-url", "data"),
+        prevent_initial_call=True,
     )
 
     @app.callback(
@@ -2148,17 +2512,58 @@ def build_explorer_app(
     )
 
     @app.callback(
+        Output("explorer-help-open", "data"),
+        Input("explorer-help-close-btn", "n_clicks"),
+        Input("explorer-keyboard-input", "value"),
+        State("explorer-help-open", "data"),
+        prevent_initial_call=True,
+    )
+    def toggle_explorer_help(_close_clicks, key_value, is_open):
+        key = _keyboard_key(key_value)
+        if dash.callback_context.triggered_id == "explorer-keyboard-input":
+            if key == "?":
+                return not bool(is_open)
+            raise dash.exceptions.PreventUpdate
+        return False
+
+    @app.callback(
+        Output("explorer-help-modal", "style"),
+        Input("explorer-help-open", "data"),
+        prevent_initial_call=False,
+    )
+    def render_explorer_help_modal(is_open):
+        base_style = {
+            "position": "fixed",
+            "inset": "0",
+            "zIndex": 2000,
+            "background": "rgba(4, 10, 15, 0.52)",
+            "alignItems": "center",
+            "justifyContent": "center",
+            "padding": "20px",
+        }
+        if is_open:
+            return {"display": "flex", **base_style}
+        return {"display": "none", **base_style}
+
+    @app.callback(
         Output("explorer-sidebar", "className"),
         Output("explorer-shell", "className"),
         Output("explorer-sidebar-open", "data"),
         Output("explorer-sidebar-toggle", "children"),
         Input("explorer-sidebar-toggle", "n_clicks"),
+        Input("explorer-keyboard-input", "value"),
         State("explorer-sidebar-open", "data"),
         prevent_initial_call=False,
     )
-    def toggle_sidebar(n_clicks, is_open):
+    def toggle_sidebar(n_clicks, key_value, is_open):
         sidebar_open = bool(is_open) if is_open is not None else True
-        if dash.callback_context.triggered_id == "explorer-sidebar-toggle" and n_clicks:
+        trigger = dash.callback_context.triggered_id
+        if trigger == "explorer-keyboard-input":
+            if _keyboard_key(key_value) == "Escape":
+                sidebar_open = not sidebar_open
+            else:
+                raise dash.exceptions.PreventUpdate
+        elif trigger == "explorer-sidebar-toggle" and n_clicks:
             sidebar_open = not sidebar_open
 
         sidebar_class = "explorer-sidebar" if sidebar_open else "explorer-sidebar is-hidden"
@@ -2192,19 +2597,40 @@ def build_explorer_app(
     @app.callback(
         Output("candidate-scope-store", "data"),
         Input("refresh-candidates-view-btn", "n_clicks"),
+        Input("explorer-keyboard-input", "value"),
         State("custom-graph", "relayoutData"),
         State("x-metric", "value"),
         State("y-metric", "value"),
         State("log-flags", "value"),
         prevent_initial_call=True,
     )
-    def refresh_candidate_scope(_n_clicks, relayout_data, x_metric, y_metric, log_flags):
+    def refresh_candidate_scope(_n_clicks, key_value, relayout_data, x_metric, y_metric, log_flags):
+        trigger = dash.callback_context.triggered_id
+        if trigger == "explorer-keyboard-input" and _keyboard_key(key_value) != "Shift+R":
+            raise dash.exceptions.PreventUpdate
         return _candidate_scope_from_plot(
             relayout_data,
             x_metric=x_metric,
             y_metric=y_metric,
             log_flags=log_flags,
         )
+
+    @app.callback(
+        Output("candidate-table", "selected_rows"),
+        Output("candidate-table", "page_current"),
+        Input("candidate-table", "data"),
+        Input("selected-key-store", "data"),
+        prevent_initial_call=False,
+    )
+    def sync_candidate_table_selection(table_data, selected_key):
+        candidate_keys = _candidate_keys_from_table_data(table_data)
+        key = str(selected_key or "").strip()
+        if not candidate_keys or not key:
+            return [], 0
+        if key not in candidate_keys:
+            return [], 0
+        row_idx = candidate_keys.index(key)
+        return [row_idx], row_idx // 12
 
     @app.callback(
         Output("explorer-plot-download", "data"),
@@ -2251,6 +2677,7 @@ def build_explorer_app(
 
     @app.callback(
         Output("bundle-status", "children"),
+        Output("explorer-review-launch-url", "data", allow_duplicate=True),
         Input("export-review-bundle-btn", "n_clicks"),
         Input("open-selection-in-review-btn", "n_clicks"),
         [
@@ -2308,7 +2735,7 @@ def build_explorer_app(
             select_ids,
         ) = args
         if not n_clicks and not open_review_clicks:
-            return dash.no_update
+            return dash.no_update, dash.no_update
         triggered = dash.callback_context.triggered_id
 
         source_frame = _apply_review_overrides(combined.df, review_overrides)
@@ -2335,9 +2762,9 @@ def build_explorer_app(
             log_flags=log_flags,
         )
         if query_error:
-            return f"Bundle export blocked by invalid query: {query_error}"
+            return f"Bundle export blocked by invalid query: {query_error}", dash.no_update
         if working.empty:
-            return "No candidates are available in the current filtered/view selection."
+            return "No candidates are available in the current filtered/view selection.", dash.no_update
 
         export_df = _prepare_export_frame(working)
         slug_x = _slugify_token(x_metric or "x")
@@ -2382,13 +2809,20 @@ def build_explorer_app(
                     ).strip() or None
                 command, url = build_review_command(db_path=review_db, candidate=candidate_hint)
                 launch_detached(command)
-                return f"Wrote review bundle to {bundle_dir} ({len(export_df):,} candidates) and opened review at {url}."
-            return f"Wrote review bundle to {bundle_dir} ({len(export_df):,} candidates). Open with `malca review --db {review_db}`."
+                return (
+                    f"Wrote review bundle to {bundle_dir} ({len(export_df):,} candidates) and opened review at {url}.",
+                    url,
+                )
+            return (
+                f"Wrote review bundle to {bundle_dir} ({len(export_df):,} candidates). Open with `malca review --db {review_db}`.",
+                dash.no_update,
+            )
         except Exception as exc:
-            return f"Review bundle export failed: {exc}"
+            return f"Review bundle export failed: {exc}", dash.no_update
 
     @app.callback(
         Output("review-launch-status", "children"),
+        Output("explorer-review-launch-url", "data", allow_duplicate=True),
         Input("open-current-in-review-btn", "n_clicks"),
         State("selected-key-store", "data"),
         State("explorer-review-overrides", "data"),
@@ -2400,7 +2834,7 @@ def build_explorer_app(
         source_frame = _apply_review_overrides(combined.df, review_overrides)
         record = _get_candidate_record_from_frame(source_frame, selected_key) or get_candidate_record_by_key(combined, selected_key)
         if record is None:
-            return "No candidate selected for review."
+            return "No candidate selected for review.", dash.no_update
 
         review_db, plot_dir = _record_review_target(record)
         candidate_hint = str(
@@ -2433,7 +2867,7 @@ def build_explorer_app(
 
         command, url = build_review_command(db_path=review_db, candidate=candidate_hint, plot_dir=plot_dir)
         launch_detached(command)
-        return f"Opened review at {url}."
+        return f"Opened review at {url}.", url
 
     @app.callback(
         Output("explorer-review-class", "value"),
@@ -2492,9 +2926,59 @@ def build_explorer_app(
         return ""
 
     @app.callback(
+        Output("selected-key-store", "data", allow_duplicate=True),
+        Output("explorer-review-save-status", "children", allow_duplicate=True),
+        Output("explorer-review-confidence", "value", allow_duplicate=True),
+        Output("explorer-review-followup", "value", allow_duplicate=True),
+        Output("explorer-review-class", "value", allow_duplicate=True),
+        Output("explorer-review-save-request", "data", allow_duplicate=True),
+        Input("explorer-keyboard-input", "value"),
+        State("selected-key-store", "data"),
+        State("candidate-table", "data"),
+        State("explorer-review-class", "value"),
+        State("explorer-review-confidence", "value"),
+        State("explorer-review-followup", "value"),
+        State("explorer-review-notes", "value"),
+        State("explorer-review-save-request", "data"),
+        prevent_initial_call=True,
+    )
+    def handle_explorer_review_keyboard(
+        key_value,
+        selected_key,
+        table_data,
+        event_class,
+        interest_score,
+        followup_value,
+        notes,
+        save_request,
+    ):
+        key = _keyboard_key(key_value)
+        action = _explorer_shortcut_action(
+            key=key,
+            selected_key=selected_key,
+            table_data=table_data,
+            event_class=event_class,
+            interest_score=interest_score,
+            followup_value=followup_value,
+            notes=notes,
+            save_request=save_request,
+        )
+        if not action:
+            raise dash.exceptions.PreventUpdate
+        return (
+            action.get("selected_key", dash.no_update),
+            action.get("status", dash.no_update),
+            action.get("interest_score", dash.no_update),
+            action.get("followup_value", dash.no_update),
+            action.get("event_class", dash.no_update),
+            action.get("save_request", dash.no_update),
+        )
+
+    @app.callback(
         Output("explorer-review-save-status", "children", allow_duplicate=True),
         Output("explorer-review-overrides", "data"),
         Input("explorer-review-save-btn", "n_clicks"),
+        Input("explorer-review-save-request", "data"),
         State("selected-key-store", "data"),
         State("explorer-review-class", "value"),
         State("explorer-review-confidence", "value"),
@@ -2505,6 +2989,7 @@ def build_explorer_app(
     )
     def save_explorer_grade(
         n_clicks,
+        save_request,
         selected_key,
         event_class,
         interest_score,
@@ -2512,11 +2997,31 @@ def build_explorer_app(
         notes,
         review_overrides,
     ):
-        if not n_clicks:
+        trigger = dash.callback_context.triggered_id
+        selected_key_value = selected_key
+        event_class_value = event_class
+        interest_score_value = interest_score
+        followup_state = followup_value
+        notes_value = notes
+
+        if trigger == "explorer-review-save-request":
+            request = dict(save_request or {})
+            try:
+                nonce = int(request.get("nonce", 0))
+            except Exception:
+                nonce = 0
+            if nonce <= 0:
+                raise dash.exceptions.PreventUpdate
+            selected_key_value = request.get("candidate_key") or selected_key_value
+            event_class_value = request.get("event_class", event_class_value)
+            interest_score_value = request.get("interest_score", interest_score_value)
+            followup_state = ["followup"] if request.get("needs_followup") else []
+            notes_value = request.get("notes", notes_value)
+        elif not n_clicks:
             raise dash.exceptions.PreventUpdate
 
         source_frame = _apply_review_overrides(combined.df, review_overrides)
-        record = _get_candidate_record_from_frame(source_frame, selected_key) or get_candidate_record_by_key(combined, selected_key)
+        record = _get_candidate_record_from_frame(source_frame, selected_key_value) or get_candidate_record_by_key(combined, selected_key_value)
         if record is None:
             return "No candidate selected to save.", dash.no_update
 
@@ -2526,28 +3031,36 @@ def build_explorer_app(
             return "Inline grading is available only for DB-backed candidates.", dash.no_update
 
         try:
-            score = None if interest_score in (None, "") else int(interest_score)
+            score = None if interest_score_value in (None, "") else int(interest_score_value)
         except Exception:
             score = None
-        event_class_value = str(event_class or "unclassified").strip() or "unclassified"
-        if event_class_value not in REVIEW_EVENT_CLASSES:
-            event_class_value = "other"
-        status = "needs_followup" if followup_value and "followup" in followup_value else "reviewed"
+        event_class_literal = str(event_class_value or "unclassified").strip() or "unclassified"
+        if event_class_literal not in REVIEW_EVENT_CLASSES:
+            event_class_literal = "other"
+        status = "needs_followup" if followup_state and "followup" in followup_state else "reviewed"
         reviewer = str(os.environ.get("USER") or "explorer")
+        event_type = "explorer_save"
+        increment_pass = False
+        if trigger == "explorer-review-save-request":
+            request = dict(save_request or {})
+            event_type = str(request.get("event_type") or "keyboard").strip() or "keyboard"
+            increment_pass = bool(request.get("increment_pass"))
 
         try:
             with closing(db_connect(review_db)) as conn:
                 current_review = get_review(conn, candidate_id)
+                current_pass = max(1, int(current_review.get("review_pass", 1) or 1))
+                review_pass = current_pass + 1 if increment_pass else current_pass
                 save_review(
                     conn,
                     candidate_id=candidate_id,
                     interest_score=score,
-                    event_class=event_class_value,
-                    review_pass=max(1, int(current_review.get("review_pass", 1) or 1)),
-                    notes=str(notes or ""),
+                    event_class=event_class_literal,
+                    review_pass=review_pass,
+                    notes=str(notes_value or ""),
                     status=status,
                     reviewer=reviewer,
-                    event_type="explorer_save",
+                    event_type=event_type,
                 )
                 saved_review = _normalize_review_state(get_review(conn, candidate_id))
         except Exception as exc:

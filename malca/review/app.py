@@ -4,7 +4,7 @@ from contextlib import closing
 from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 from pathlib import Path
-from threading import Thread, Timer
+from threading import Lock, Thread, Timer
 import argparse
 import glob as globlib
 import importlib
@@ -212,6 +212,24 @@ class TrackingDiskcacheManager(DiskcacheManager):
 # Background callback manager for long-running fetch/import (DiskCache for local dev)
 _bc_cache = diskcache.Cache(Path(__file__).resolve().parents[2] / "output" / "review" / ".dash_cache")
 _background_callback_manager = TrackingDiskcacheManager(_bc_cache)
+_PRELOAD_DELAY_SEC = 0.4
+_PRELOAD_LOOKAHEAD = 1
+_preload_generation_lock = Lock()
+_preload_generation = 0
+
+
+def _next_preload_generation() -> int:
+    """Return a new monotonic preload generation token."""
+    global _preload_generation
+    with _preload_generation_lock:
+        _preload_generation += 1
+        return _preload_generation
+
+
+def _is_current_preload_generation(generation: int) -> bool:
+    """Check whether a queued preload request is still current."""
+    with _preload_generation_lock:
+        return generation == _preload_generation
 
 
 def _cleanup_background_resources(*_args) -> None:
@@ -812,6 +830,31 @@ app.index_string = '''
             padding: 2px 8px;
             background: rgba(11, 23, 31, 0.7);
         }
+        .queue-provenance-panel {
+            border: 1px solid rgba(77, 106, 127, 0.5);
+            border-radius: 8px;
+            padding: 6px 8px;
+            background: rgba(9, 18, 25, 0.82);
+            margin-top: 6px;
+        }
+        .queue-provenance-list {
+            margin: 6px 0 0 16px;
+            padding: 0;
+            color: #cad9e5;
+            font-size: 10px;
+            line-height: 1.35;
+        }
+        .queue-provenance-list li {
+            margin: 3px 0;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+        }
+        .queue-provenance-note {
+            margin-top: 6px;
+            color: #7d91a6;
+            font-size: 10px;
+            line-height: 1.3;
+        }
         .sidebar-camera-actions {
             display: flex;
             gap: 5px;
@@ -984,6 +1027,12 @@ app.index_string = '''
         }
         .action-btn.primary {
             background-color: #003366;
+        }
+        .queue-refresh-btn {
+            font-size: 12px !important;
+            font-weight: 600;
+            min-height: 34px;
+            padding: 6px 10px;
         }
         .notification {
             color: #7fd6a8;
@@ -2386,6 +2435,63 @@ def _render_explorer_selection_panel(selection_meta: dict | None) -> list:
     ]
 
 
+def _format_queue_count(value: object) -> str:
+    try:
+        return f"{int(value):,}"
+    except Exception:
+        return "0"
+
+
+def _render_queue_filter_provenance_panel(queue_data: dict | None) -> list:
+    """Render queue attrition summary for active sidebar filters."""
+    data = dict(queue_data or {})
+    scope_size = int(data.get("scope_size") or 0)
+    visible_size = int(data.get("queue_size") or 0)
+    filtered_out = int(data.get("filtered_out_count") or max(scope_size - visible_size, 0))
+    active_filters = list(data.get("filter_provenance") or [])
+
+    summary_rows = [
+        ("Scoped queue", _format_queue_count(scope_size)),
+        ("Visible now", _format_queue_count(visible_size)),
+        ("Filtered out", _format_queue_count(filtered_out)),
+        ("Active sidebar filters", _format_queue_count(len(active_filters))),
+    ]
+
+    summary = html.Div([
+        html.Div([
+            html.Span(label, className='meta-field-label'),
+            html.Span(str(value), className='meta-field-value'),
+        ], className='meta-field-row')
+        for label, value in summary_rows
+    ], className='meta-grid')
+
+    if active_filters:
+        details = html.Ul([
+            html.Li(
+                f"{item.get('label', 'filter')}: "
+                f"{_format_queue_count(item.get('filtered_count', 0))} filtered out "
+                f"({_format_queue_count(item.get('remaining_count', 0))} remain)"
+            )
+            for item in active_filters
+        ], className='queue-provenance-list')
+        note = html.Div(
+            "Per-filter counts are relative to the full scoped queue. "
+            "Filters can overlap, so these counts do not sum to the total filtered-out rows.",
+            className='queue-provenance-note',
+        )
+    else:
+        details = html.Div(
+            "No sidebar filters are active. The visible queue matches the full scoped queue.",
+            className='queue-provenance-note',
+        )
+        note = None
+
+    children: list = [summary, details]
+    if note is not None:
+        children.append(note)
+    return [html.Div(children, className='queue-provenance-panel')]
+
+
 _METADATA_EXTRA_GROUPS = (
     "Triage Summary",
     "Vetting",
@@ -2751,16 +2857,18 @@ def _resolve_run_dir_from_plot_dir(plot_dir: str | None) -> Path | None:
 
 
 def _resolve_run_dir_from_db_path(db_path: str | Path | None) -> Path | None:
-    """Infer run directory from a run-local review DB path."""
+    """Infer run directory from a review DB path or standalone bundled DB path."""
     if not db_path:
         return None
     p = Path(str(db_path)).expanduser().resolve()
     if p.suffix.lower() != ".db":
         return None
+    if (p.parent / "results").is_dir() or (p.parent / "plots").is_dir() or (p.parent / "bundle_assets" / "lightcurves").is_dir():
+        return p.parent
     if p.parent.name != "review":
         return None
     run_dir = p.parent.parent
-    if (run_dir / "results").is_dir() or (run_dir / "plots").is_dir():
+    if (run_dir / "results").is_dir() or (run_dir / "plots").is_dir() or (run_dir / "bundle_assets" / "lightcurves").is_dir():
         return run_dir
     return None
 
@@ -2995,7 +3103,38 @@ def _effective_local_lc_path(
         if resolved_text and resolved_text != cluster_lc_path:
             return resolved_text
 
-    return explicit_local_paths[0] if explicit_local_paths else None
+    if explicit_local_paths and cluster_lc_path:
+        return explicit_local_paths[0]
+
+    return None
+
+
+def _display_lc_paths(
+    payload: dict | None,
+    *,
+    stored_lc_path: object = None,
+    source_path: object = None,
+) -> tuple[str | None, str | None]:
+    """Return display-friendly (cluster_path, local_path) values for the footer/search UI."""
+    payload_dict = dict(payload) if isinstance(payload, dict) else {}
+    cluster_lc_path = str(payload_dict.get("path") or "").strip() or None
+    local_lc_path = _effective_local_lc_path(
+        payload_dict,
+        stored_lc_path=stored_lc_path,
+        source_path=source_path,
+    )
+
+    stored_lc_text = str(stored_lc_path or "").strip() or None
+    if cluster_lc_path:
+        return cluster_lc_path, local_lc_path
+
+    # LTV standalone imports may only have the original raw-lc path in lc_path.
+    # If it cannot be resolved locally, show it as the source/cluster path rather
+    # than mislabeling it as a usable local review copy.
+    if local_lc_path is None and stored_lc_text:
+        return stored_lc_text, None
+
+    return None, local_lc_path
 
 
 def _plot_asset_root() -> Path:
@@ -4237,6 +4376,7 @@ def create_layout():
             html.Div('Filters', className='section-title'),
             html.Div([
                 html.Button('Refresh Slider Bounds', id='refresh-filter-bounds-btn', n_clicks=0, className='compact-btn'),
+                html.Button('Reset Numeric Filters', id='reset-numeric-filters-btn', n_clicks=0, className='compact-btn'),
                 html.Span('Sliders load on startup; use refresh to rebuild bounds.', id='numeric-bounds-status', style={'fontSize': '10px', 'color': '#7d91a6'}),
             ], style={'display': 'flex', 'alignItems': 'center', 'gap': '8px', 'marginBottom': '6px'}),
             html.Div('Dropdown options load when the sidebar opens.', id='filter-load-status', style={'fontSize': '10px', 'color': '#7d91a6', 'marginBottom': '6px'}),
@@ -4291,8 +4431,8 @@ def create_layout():
                 persistence_type='local',
             ),
 
-            html.Button('Refresh Queue [Shift+R]', id='refresh-btn', n_clicks=0,
-                       style={'width': '100%', 'font-size': '11px'}, className='action-btn'),
+            html.Button('Refresh Queue [R]', id='refresh-btn', n_clicks=0,
+                       style={'width': '100%'}, className='action-btn queue-refresh-btn'),
 
             html.Button('↻ Reset to Beginning', id='reset-queue-btn', n_clicks=0,
                        style={'width': '100%', 'font-size': '11px', 'marginTop': '4px'}, className='action-btn'),
@@ -4539,6 +4679,8 @@ def create_layout():
             ),
 
             html.Div(id='sidebar-status', style={'margin-top': '10px', 'color': '#0f0', 'font-size': '11px'}),
+            html.Div('Queue Filter Provenance', className='section-title', style={'margin-top': '10px'}),
+            html.Div(id='queue-filter-provenance-panel'),
 
         ], id='sidebar', className='sidebar'),
 
@@ -5124,9 +5266,9 @@ app.clientside_callback(
                     return;
                 }
 
-                if (e.shiftKey && (key === 'R' || key === 'r')) {
+                if (!e.shiftKey && (key === 'R' || key === 'r')) {
                     e.preventDefault();
-                    dispatchKeyToDash('Shift+R');
+                    dispatchKeyToDash('r');
                     return;
                 }
 
@@ -5152,7 +5294,11 @@ app.clientside_callback(
 
 app.clientside_callback(
     """
-    function(_tick, currentTheme, reviewScope) {
+    function(_savedStateTs, savedState, currentTheme, reviewScope) {
+        var nu = window.dash_clientside.no_update;
+        if (savedState && typeof savedState === 'object') {
+            return nu;
+        }
         var scope = String(reviewScope || 'default');
         var storageKey = 'malca.review.theme::' + scope;
         try {
@@ -5167,8 +5313,9 @@ app.clientside_callback(
     }
     """,
     Output('theme-mode', 'value'),
-    Input('keyboard-init', 'n_intervals'),
-    [State('theme-mode', 'value'),
+    Input('saved-review-gui-state', 'modified_timestamp'),
+    [State('saved-review-gui-state', 'data'),
+     State('theme-mode', 'value'),
      State('review-db-scope', 'data')],
     prevent_initial_call=False,
 )
@@ -5231,8 +5378,11 @@ app.clientside_callback(
 # --- Sidebar plot prefs: load from localStorage on init ---
 app.clientside_callback(
     """
-    function(_tick, curPreset, curOverlays, curMode, curOpacity, curResHeight, curExternalSource, reviewScope) {
+    function(_savedStateTs, savedState, curPreset, curOverlays, curMode, curOpacity, curResHeight, curExternalSource, reviewScope) {
         var nu = window.dash_clientside.no_update;
+        if (savedState && typeof savedState === 'object') {
+            return [nu, nu, nu, nu, nu, nu, true];
+        }
         var scope = String(reviewScope || 'default');
         var storageKey = 'malca.review.sidebar.plot.v2::' + scope;
         try {
@@ -5261,8 +5411,9 @@ app.clientside_callback(
      Output('residual-height-slider', 'value', allow_duplicate=True),
      Output('external-source-view', 'value', allow_duplicate=True),
      Output('plot-defaults-initialized', 'data', allow_duplicate=True)],
-    Input('keyboard-init', 'n_intervals'),
-    [State('plot-preset', 'value'),
+    Input('saved-review-gui-state', 'modified_timestamp'),
+    [State('saved-review-gui-state', 'data'),
+     State('plot-preset', 'value'),
      State('plot-overlays', 'value'),
      State('plot-mode', 'value'),
      State('baseline-opacity-slider', 'value'),
@@ -5555,8 +5706,8 @@ def toggle_sidebar(n_clicks, key_value, is_expanded):
     prevent_initial_call=True,
 )
 def keyboard_refresh_queue(key_value, current_clicks):
-    """Trigger Refresh Queue from Shift+R."""
-    if _keyboard_key(key_value) != 'Shift+R':
+    """Trigger Refresh Queue from plain R."""
+    if _keyboard_key(key_value).lower() != 'r':
         raise dash.exceptions.PreventUpdate
     return int(current_clicks or 0) + 1
 
@@ -5620,6 +5771,8 @@ _FILTER_VALUE_OUTPUTS = (
 )
 
 _queue_states = _FILTER_VALUE_STATES
+_TEXT_OPTION_STATES = [State(cid, 'options') for cid, _ in _TEXT_STATES]
+_SELECT_OPTION_STATES = [State(cid, 'options') for cid, _ in _SELECT_STATES]
 
 
 def _coerce_string_list(raw_value: object) -> list[str]:
@@ -5801,6 +5954,52 @@ def _queue_filter_ui_values_from_state(raw_state: object) -> tuple[object, ...] 
     values.append(state['sort_cols'])
     values.append(state['sort_desc'])
     return tuple(values)
+
+
+def _merge_unhydrated_saved_queue_filter_ui_state(
+    ui_state: dict[str, object],
+    restore_state: object,
+    text_option_values: list[object] | tuple[object, ...],
+    select_option_values: list[object] | tuple[object, ...],
+) -> dict[str, object]:
+    """Use DB-restored text/select filters while those dropdown options are still unhydrated."""
+    if not isinstance(restore_state, dict) or not restore_state.get('restored'):
+        return ui_state
+
+    saved_ui_state = _normalize_saved_queue_filter_ui_state(restore_state.get('saved_ui_state'))
+    if saved_ui_state is None:
+        return ui_state
+
+    merged = dict(ui_state)
+
+    for ((_, fkey), options) in zip(_TEXT_STATES, text_option_values):
+        current = _coerce_text_filter_value(merged.get(fkey))
+        saved = _coerce_text_filter_value(saved_ui_state.get(fkey))
+        option_count = len(options or []) if isinstance(options, (list, tuple)) else 0
+        if option_count <= 1 and current == 'Any' and saved != 'Any':
+            merged[fkey] = saved
+
+    for ((_, fkey), options) in zip(_SELECT_STATES, select_option_values):
+        current = _coerce_string_list(merged.get(fkey))
+        saved = _coerce_string_list(saved_ui_state.get(fkey))
+        option_count = len(options or []) if isinstance(options, (list, tuple)) else 0
+        if option_count == 0 and not current and saved:
+            merged[fkey] = saved
+
+    return merged
+
+
+@app.callback(
+    [*[Output(cid, 'value', allow_duplicate=True) for cid, _ in _NUM_INPUT_STATES],
+     Output('sidebar-status', 'children', allow_duplicate=True)],
+    Input('reset-numeric-filters-btn', 'n_clicks'),
+    prevent_initial_call=True,
+)
+def reset_numeric_filters(n_clicks):
+    """Clear numeric filter inputs so sliders reset to current queue bounds."""
+    if not n_clicks:
+        raise dash.exceptions.PreventUpdate
+    return (*([None] * len(_NUM_INPUT_STATES)), "Reset numeric filters to the current queue bounds.")
 
 
 _SIDEBAR_FILTER_OUTPUTS = (
@@ -6043,28 +6242,46 @@ def restore_saved_queue_filters(_db_scope):
         raw = str(load_app_state(conn, _QUEUE_FILTER_APP_STATE_KEY, '') or '').strip()
 
     if not raw:
-        return tuple([no_update] * (len(_FILTER_VALUE_OUTPUTS) + 1))
+        return (*([no_update] * len(_FILTER_VALUE_OUTPUTS)), {'ts': time.time(), 'ready': True, 'restored': False, 'saved_ui_state': None})
 
     try:
         saved_state = json.loads(raw)
     except Exception:
-        return tuple([no_update] * (len(_FILTER_VALUE_OUTPUTS) + 1))
+        return (*([no_update] * len(_FILTER_VALUE_OUTPUTS)), {'ts': time.time(), 'ready': True, 'restored': False, 'saved_ui_state': None})
 
     values = _queue_filter_ui_values_from_state(saved_state)
+    normalized_state = _normalize_saved_queue_filter_ui_state(saved_state)
     if values is None:
-        return tuple([no_update] * (len(_FILTER_VALUE_OUTPUTS) + 1))
+        return (*([no_update] * len(_FILTER_VALUE_OUTPUTS)), {'ts': time.time(), 'ready': True, 'restored': False, 'saved_ui_state': normalized_state})
 
-    return (*values, {'ts': time.time()})
+    return (*values, {'ts': time.time(), 'ready': True, 'restored': True, 'saved_ui_state': normalized_state})
 
 
 @app.callback(
     Output('filter-params', 'data'),
     _FILTER_VALUE_INPUTS,
+    State('restored-filter-applied', 'data'),
+    _TEXT_OPTION_STATES,
+    _SELECT_OPTION_STATES,
     prevent_initial_call=True,
 )
-def persist_queue_filters(*value_states):
+def persist_queue_filters(*callback_values):
     """Persist sidebar queue filters to app_state without touching candidate/review data."""
+    n_values = len(_FILTER_VALUE_INPUTS)
+    n_text_opts = len(_TEXT_OPTION_STATES)
+    value_states = callback_values[:n_values]
+    restore_state = callback_values[n_values]
+    text_option_values = callback_values[n_values + 1:n_values + 1 + n_text_opts]
+    select_option_values = callback_values[n_values + 1 + n_text_opts:]
+    if not isinstance(restore_state, dict) or not restore_state.get('ready'):
+        raise dash.exceptions.PreventUpdate
     ui_state = _queue_filter_ui_state_from_values(*value_states)
+    ui_state = _merge_unhydrated_saved_queue_filter_ui_state(
+        ui_state,
+        restore_state,
+        text_option_values,
+        select_option_values,
+    )
     try:
         with closing(db_connect(Path(DB_PATH))) as conn:
             save_app_state(conn, _QUEUE_FILTER_APP_STATE_KEY, json.dumps(ui_state, default=str))
@@ -6231,8 +6448,18 @@ app.clientside_callback(
         const currentMin = toNumber(minValue);
         const currentMax = toNumber(maxValue);
         const currentRange = Array.isArray(rangeValue) ? rangeValue : [];
-        const currentRangeMin = toNumber(currentRange[0]);
-        const currentRangeMax = toNumber(currentRange[1]);
+        let currentRangeMin = toNumber(currentRange[0]);
+        let currentRangeMax = toNumber(currentRange[1]);
+        const rangeLooksInitialized = (
+            currentRangeMin !== null &&
+            currentRangeMax !== null &&
+            currentRangeMin >= sliderLo &&
+            currentRangeMax <= sliderHi
+        );
+        if (!rangeLooksInitialized) {
+            currentRangeMin = null;
+            currentRangeMax = null;
+        }
 
         const ctx = dash_clientside.callback_context;
         const triggered = ctx ? ctx.triggered_id : null;
@@ -6305,13 +6532,25 @@ app.clientside_callback(
      Input('queue-source-path', 'data'),
      Input('restored-filter-applied', 'data'),
      Input('numeric-filter-bounds', 'data')],
-    _queue_states,
+    _queue_states + _TEXT_OPTION_STATES + _SELECT_OPTION_STATES,
     prevent_initial_call=False
 )
-def load_queue(refresh_clicks, import_trigger, queue_source_scope, _restored_filters, numeric_bounds, *state_values):
+def load_queue(refresh_clicks, import_trigger, queue_source_scope, restored_filters, numeric_bounds, *callback_states):
     """Load queue data from all sidebar filter states."""
+    n_values = len(_queue_states)
+    n_text_opts = len(_TEXT_OPTION_STATES)
+    state_values = callback_states[:n_values]
+    text_option_values = callback_states[n_values:n_values + n_text_opts]
+    select_option_values = callback_states[n_values + n_text_opts:]
+
     with closing(db_connect(Path(DB_PATH))) as conn:
         ui_state = _queue_filter_ui_state_from_values(*state_values)
+        ui_state = _merge_unhydrated_saved_queue_filter_ui_state(
+            ui_state,
+            restored_filters,
+            text_option_values,
+            select_option_values,
+        )
         numeric_bounds = numeric_bounds or {}
         filter_params = _queue_filter_params_from_ui_state(
             ui_state,
@@ -6329,13 +6568,27 @@ def load_queue(refresh_clicks, import_trigger, queue_source_scope, _restored_fil
 
 
 @app.callback(
-    Output('preload-trigger', 'data'),
-    Input('current-index', 'data'),
+    Output('queue-filter-provenance-panel', 'children'),
     Input('queue-data', 'data'),
     prevent_initial_call=False,
 )
-def preload_next_candidates(idx, queue_data):
-    """Start a background thread to warm LC/baseline caches for the next 2 candidates in the queue."""
+def render_queue_filter_provenance(queue_data):
+    """Render queue-filter attrition details in the sidebar."""
+    return _render_queue_filter_provenance_panel(queue_data)
+
+
+@app.callback(
+    Output('preload-trigger', 'data'),
+    Input('current-index', 'data'),
+    Input('queue-data', 'data'),
+    State('plot-mode', 'value'),
+    prevent_initial_call=False,
+)
+def preload_next_candidates(idx, queue_data, plot_mode):
+    """Warm the next candidate's LC/baseline caches after a short navigation debounce."""
+    generation = _next_preload_generation()
+    if str(plot_mode or 'native').strip().lower() != 'native':
+        return no_update
     if queue_data is None or not isinstance(queue_data, dict):
         return no_update
     candidate_ids = queue_data.get('candidate_ids')
@@ -6345,9 +6598,14 @@ def preload_next_candidates(idx, queue_data):
     db_path = DB_PATH
 
     def do_preload():
+        time.sleep(_PRELOAD_DELAY_SEC)
+        if not _is_current_preload_generation(generation):
+            return
         try:
             with closing(db_connect(Path(db_path))) as conn:
-                for i in (1, 2):
+                for i in range(1, _PRELOAD_LOOKAHEAD + 1):
+                    if not _is_current_preload_generation(generation):
+                        return
                     if idx + i >= len(candidate_ids):
                         break
                     cid = candidate_ids[idx + i]
@@ -6397,6 +6655,40 @@ def _queue_candidate_id(queue_data, idx) -> str | None:
     if idx < 0 or idx >= len(candidate_ids):
         return None
     return str(candidate_ids[idx])
+
+
+def _normalized_queue_index(queue_data, idx) -> int | None:
+    """Clamp a queue index to the currently visible queue, if needed."""
+    if not isinstance(queue_data, dict):
+        return None
+
+    candidate_ids = queue_data.get('candidate_ids') or []
+    try:
+        current_idx = int(idx or 0)
+    except (TypeError, ValueError):
+        current_idx = 0
+
+    if not candidate_ids:
+        return 0 if current_idx != 0 else None
+
+    clamped_idx = min(max(current_idx, 0), len(candidate_ids) - 1)
+    if clamped_idx == current_idx:
+        return None
+    return clamped_idx
+
+
+@app.callback(
+    Output('current-index', 'data', allow_duplicate=True),
+    [Input('queue-data', 'data'),
+     Input('current-index', 'data')],
+    prevent_initial_call='initial_duplicate',
+)
+def clamp_current_index_to_queue(queue_data, idx):
+    """Keep the active index valid when filters change the visible queue."""
+    normalized_idx = _normalized_queue_index(queue_data, idx)
+    if normalized_idx is None:
+        raise dash.exceptions.PreventUpdate
+    return normalized_idx
 
 
 def _has_external_period(payload: dict | None) -> bool:
@@ -6668,14 +6960,14 @@ def _lookup_candidate_id_for_query(conn: sqlite3.Connection, query_text: str) ->
             payload["candidate_id"] = str(candidate_id)
         if cluster_lc_path and not payload.get("path"):
             payload["path"] = cluster_lc_path
-        effective_local_lc_path = _effective_local_lc_path(
+        display_cluster_lc_path, effective_local_lc_path = _display_lc_paths(
             payload,
             stored_lc_path=local_lc_path,
             source_path=source_path,
         )
         for label, raw in (
             ("local LC stem", effective_local_lc_path),
-            ("cluster LC stem", cluster_lc_path),
+            ("cluster LC stem", display_cluster_lc_path),
             ("Gaia ID", gaia_id),
         ):
             if not raw:
@@ -6721,10 +7013,13 @@ def open_existing_candidate(n_clicks, n_submit, query, queue_data):
 @app.callback(
     Output('last-candidate-saved', 'data'),
     Input('current-candidate-id', 'data'),
+    State('startup-selection-applied', 'data'),
     prevent_initial_call=True,
 )
-def persist_last_candidate(current_candidate_id):
+def persist_last_candidate(current_candidate_id, startup_selection_applied):
     """Persist the most recently viewed candidate for this review DB."""
+    if not startup_selection_applied:
+        raise dash.exceptions.PreventUpdate
     candidate_id = str(current_candidate_id or '').strip()
     if not candidate_id:
         raise dash.exceptions.PreventUpdate
@@ -6751,6 +7046,14 @@ def restore_startup_candidate(queue_data, already_applied):
 
     explicit_query = str(INITIAL_CANDIDATE_QUERY or '').strip()
     candidate_ids = list((queue_data or {}).get('candidate_ids') or []) if isinstance(queue_data, dict) else []
+    queue_size = int((queue_data or {}).get('queue_size') or 0) if isinstance(queue_data, dict) else 0
+
+    # Wait for the real queue to materialize before consuming startup restore.
+    # Queue initialization can briefly emit an empty queue before persisted filters
+    # are restored, and marking startup selection as applied here would prevent
+    # the saved candidate from reopening once the populated queue arrives.
+    if not explicit_query and queue_size <= 0 and not candidate_ids:
+        return no_update, no_update, no_update, no_update
 
     with closing(db_connect(Path(DB_PATH))) as conn:
         saved_candidate = str(load_app_state(conn, 'review_last_candidate', '') or '').strip()
@@ -6844,7 +7147,7 @@ app.clientside_callback(
         if (keyValue) {
             key = String(keyValue).split('\\t', 1)[0].trim();
         }
-        if (!key || key === '?' || key === 'Escape' || key === 'Shift+R') {
+        if (!key || key === '?' || key === 'Escape' || key.toLowerCase() === 'r') {
             return [no, no, no, no, no, no, no];
         }
 
@@ -7857,8 +8160,7 @@ def update_header_key_info(candidate_id, queue_size, queue_filter_hash, import_p
     payload, stored_lc_path, source_path = _candidate_context(candidate_id)
     asas_sn_id = payload.get('asas_sn_id')
     gaia_id = payload.get('gaia_id')
-    cluster_lc_path = payload.get('path')
-    local_lc_path = _effective_local_lc_path(
+    cluster_lc_path, local_lc_path = _display_lc_paths(
         payload,
         stored_lc_path=stored_lc_path,
         source_path=source_path,
@@ -9260,6 +9562,7 @@ def main():
     parser.add_argument('--host', default='127.0.0.1', help="Host")
     parser.add_argument('--port', default=8050, type=int, help="Port")
     parser.add_argument('--candidate', default=None, help="Candidate ID / ASAS-SN ID / Gaia ID / LC stem to open on startup")
+    parser.add_argument('--no-browser', action='store_true', help="Do not auto-open a browser tab/window on startup")
     parser.add_argument('--debug', action='store_true', help="Debug mode")
     parser.add_argument('--verbose-http', action='store_true',
                         help="Show Flask/Werkzeug per-request access logs")
@@ -9345,12 +9648,13 @@ def main():
     print(f"  Plot dir:  {PLOT_DIR}")
     print(f"  Server:    http://{args.host}:{args.port}")
     print(f"\nKeyboard shortcuts:")
-    print("  [D]ipper [M]icrolensing [F]lare [Y]so [U]nknown [I]nstrumental [O]ther | [1-4] Confidence | [.] Save | [Enter] Done | [Backspace] Back | [Esc] Sidebar | [Shift+R] Refresh | [?] Help")
+    print("  [D]ipper [M]icrolensing [F]lare [Y]so [U]nknown [I]nstrumental [O]ther | [1-4] Confidence | [.] Save | [Enter] Done | [Backspace] Back | [Esc] Sidebar | [R] Refresh | [?] Help")
     print("")
 
     # Auto-open browser
     url = f"http://{args.host}:{args.port}"
-    Timer(0.1, lambda: webbrowser.open(url)).start()
+    if not args.no_browser:
+        Timer(0.1, lambda: webbrowser.open(url)).start()
 
     if not args.verbose_http:
         # Keep explicit pipeline/status prints, but hide the noisy per-request

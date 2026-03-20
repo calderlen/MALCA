@@ -42,6 +42,7 @@ def build_review_command(
     plot_dir: str | Path | None = None,
     host: str = "127.0.0.1",
     preferred_port: int = 8050,
+    open_browser: bool = False,
 ) -> tuple[list[str], str]:
     """Build a detached `malca review` launch command and target URL."""
     port = _find_open_port(preferred_port, host=host)
@@ -57,6 +58,8 @@ def build_review_command(
         "--port",
         str(port),
     ]
+    if not open_browser:
+        command.append("--no-browser")
     if plot_dir:
         command.extend(["--plot-dir", str(Path(plot_dir).expanduser().resolve())])
     if candidate:

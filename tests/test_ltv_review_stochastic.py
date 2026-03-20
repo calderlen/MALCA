@@ -56,6 +56,24 @@ def test_map_ltv_columns_renames_extended_core_outputs() -> None:
     assert out.loc[0, "ltv_vg_has_v"] == 1
 
 
+def test_map_ltv_columns_normalizes_gaia_pm_fields() -> None:
+    df = pd.DataFrame(
+        {
+            "asas_sn_id": [789],
+            "gaia_pmra": [3.0],
+            "gaia_pmdec": [4.0],
+            "gaia_pm_total": [5.0],
+        }
+    )
+
+    out = map_ltv_columns(df)
+
+    assert out.loc[0, "pmra"] == 3.0
+    assert out.loc[0, "pmdec"] == 4.0
+    assert out.loc[0, "pm_total"] == 5.0
+    assert out.loc[0, "high_pm_flag"] == 0
+
+
 def test_review_schema_and_ui_include_ltv_stochastic_columns() -> None:
     expected = {
         "ltv_stoch_sf_ml_amplitude",

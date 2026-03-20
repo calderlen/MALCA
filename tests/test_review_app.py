@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from malca.review.filter_schema import (
     SIDEBAR_GROUPS,
@@ -11,6 +13,7 @@ from malca.review.filter_schema import (
     VETTING_KNOWN_SELECT_FILTERS,
 )
 from malca.review.interactive_plot import _build_stat_rows
+from malca.review.session import create_queue_data_dict
 from malca.review import app as review_app
 from malca.review.store import (
     SQLITE_BUSY_TIMEOUT_MS,
@@ -130,6 +133,35 @@ def test_review_db_for_plot_dir_prefers_run_local_db(tmp_path: Path) -> None:
     assert review_app._resolve_run_dir_from_db_path(db_path) == run_dir.resolve()
 
 
+def test_resolve_run_dir_from_standalone_bundled_db(tmp_path: Path) -> None:
+    run_dir = tmp_path / "output" / "ltv" / "ltv"
+    db_path = run_dir / "ltv_candidates.db"
+    (run_dir / "bundle_assets" / "lightcurves").mkdir(parents=True)
+    with db_connect(db_path):
+        pass
+
+    assert review_app._resolve_run_dir_from_db_path(db_path) == run_dir.resolve()
+
+
+def test_effective_local_lc_path_uses_bundle_next_to_standalone_db(tmp_path: Path, monkeypatch) -> None:
+    run_dir = tmp_path / "output" / "ltv" / "ltv"
+    db_path = run_dir / "ltv_candidates.db"
+    bundle_dir = run_dir / "bundle_assets" / "lightcurves"
+    bundle_dir.mkdir(parents=True)
+    bundled_lc = bundle_dir / "123.dat2"
+    bundled_lc.write_text("2450000.0 14.0 0.1 1 cam 0 0 cf\n")
+
+    monkeypatch.setattr(review_app, "DB_PATH", str(db_path))
+    monkeypatch.setattr(review_app, "PLOT_DIR", None)
+
+    resolved = review_app._effective_local_lc_path(
+        {"candidate_id": "123", "asas_sn_id": "123"},
+        stored_lc_path="/data/cluster/lightcurves/123.dat2",
+    )
+
+    assert resolved == str(bundled_lc)
+
+
 def test_db_plot_mismatch_warning_points_to_populated_run_db(tmp_path: Path) -> None:
     run_dir = tmp_path / "output" / "runs" / "demo"
     plot_dir = run_dir / "plots"
@@ -194,6 +226,36 @@ def test_queue_plot_render_request_tracks_candidate_id() -> None:
 
     assert request["nonce"] == 5
     assert request["state"]["candidate_id"] == "FETCH-TEST-1"
+
+
+def test_keyboard_refresh_queue_handles_r() -> None:
+    assert review_app.keyboard_refresh_queue("r\t1234567890", 2) == 3
+    assert review_app.keyboard_refresh_queue("R\t1234567890", 2) == 3
+
+    with pytest.raises(review_app.dash.exceptions.PreventUpdate):
+        review_app.keyboard_refresh_queue("Shift+R\t1234567890", 2)
+
+
+def test_reset_numeric_filters_clears_all_numeric_inputs() -> None:
+    result = review_app.reset_numeric_filters(1)
+
+    assert result[-1] == "Reset numeric filters to the current queue bounds."
+    assert all(value is None for value in result[:-1])
+    assert len(result) == len(review_app._NUM_INPUT_STATES) + 1
+
+
+def test_normalized_queue_index_clamps_to_visible_queue() -> None:
+    queue_data = {"candidate_ids": ["Q-1", "Q-2", "Q-3"], "queue_size": 3}
+
+    assert review_app._normalized_queue_index(queue_data, 99) == 2
+    assert review_app._normalized_queue_index(queue_data, -5) == 0
+    assert review_app._normalized_queue_index(queue_data, 1) is None
+
+
+def test_preload_next_candidates_skips_non_native_mode() -> None:
+    queue_data = {"candidate_ids": ["Q-1", "Q-2"], "queue_size": 2}
+
+    assert review_app.preload_next_candidates(0, queue_data, "png") is review_app.no_update
 
 
 def test_auto_period_on_navigate_queues_search_when_no_known_period(monkeypatch) -> None:
@@ -455,6 +517,44 @@ def test_update_header_key_info_shows_cluster_and_local_lc_paths(tmp_path: Path,
     assert bottom_items["DB"] == str(db_path)
 
 
+def test_update_header_key_info_treats_unresolved_ltv_lc_path_as_cluster_path(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "review.db"
+    raw_lc_path = "/data/cluster/lightcurves/LTV-1.dat2"
+
+    with db_connect(db_path) as conn:
+        import_candidates(
+            conn,
+            pd.DataFrame(
+                [
+                    {
+                        "candidate_id": "LTV-1",
+                        "asas_sn_id": "LTV-1",
+                        "lc_path": raw_lc_path,
+                    }
+                ]
+            ),
+            source_path="ltv_candidates.db",
+            characterize_before_import=False,
+            vet_before_import=False,
+        )
+
+    monkeypatch.setattr(review_app, "DB_PATH", str(db_path))
+
+    asas_text, gaia_text, bottom_bar = review_app.update_header_key_info(
+        "LTV-1", 1, "", None, ""
+    )
+
+    bottom_items = {
+        str(item.children[0].children).rstrip(":"): str(item.children[1].title)
+        for item in bottom_bar.children
+    }
+
+    assert asas_text == "ASAS-SN ID: LTV-1"
+    assert gaia_text == "Gaia ID: -"
+    assert bottom_items["Cluster LC"] == raw_lc_path
+    assert bottom_items["Local LC"] == "-"
+
+
 def test_baseline_provenance_warning_flags_imported_skypatrol(tmp_path: Path) -> None:
     lc_path = tmp_path / "FETCH-BASELINE.csv"
     _write_skypatrol_csv(lc_path)
@@ -629,6 +729,172 @@ def test_restore_startup_candidate_reopens_last_candidate_in_queue(tmp_path: Pat
     assert applied is True
 
 
+def test_restore_startup_candidate_waits_for_nonempty_queue(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "review.db"
+    with db_connect(db_path) as conn:
+        import_candidates(
+            conn,
+            pd.DataFrame([
+                {"candidate_id": "CAND-1", "asas_sn_id": "CAND-1"},
+                {"candidate_id": "CAND-2", "asas_sn_id": "CAND-2"},
+            ]),
+            source_path=str(tmp_path),
+            characterize_before_import=False,
+            vet_before_import=False,
+        )
+        save_app_state(conn, "review_last_candidate", "CAND-2")
+
+    monkeypatch.setattr(review_app, "DB_PATH", str(db_path))
+    monkeypatch.setattr(review_app, "INITIAL_CANDIDATE_QUERY", None)
+
+    queue_data, current_index, notice, applied = review_app.restore_startup_candidate(
+        {"candidate_ids": [], "queue_size": 0, "filter_hash": "transient-empty"},
+        False,
+    )
+
+    assert queue_data is review_app.no_update
+    assert current_index is review_app.no_update
+    assert notice is review_app.no_update
+    assert applied is review_app.no_update
+
+    queue_data, current_index, notice, applied = review_app.restore_startup_candidate(
+        {"candidate_ids": ["CAND-1", "CAND-2"], "queue_size": 2, "filter_hash": "ready"},
+        False,
+    )
+
+    assert queue_data is review_app.no_update
+    assert current_index == 1
+    assert "Restored last candidate CAND-2" in notice
+    assert applied is True
+
+
+def test_persist_last_candidate_waits_for_startup_restore(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "review.db"
+    with db_connect(db_path) as conn:
+        import_candidates(
+            conn,
+            pd.DataFrame([
+                {"candidate_id": "CAND-1", "asas_sn_id": "CAND-1"},
+                {"candidate_id": "CAND-2", "asas_sn_id": "CAND-2"},
+            ]),
+            source_path=str(tmp_path),
+            characterize_before_import=False,
+            vet_before_import=False,
+        )
+        save_app_state(conn, "review_last_candidate", "CAND-2")
+
+    monkeypatch.setattr(review_app, "DB_PATH", str(db_path))
+
+    with pytest.raises(review_app.dash.exceptions.PreventUpdate):
+        review_app.persist_last_candidate("CAND-1", False)
+
+    with db_connect(db_path) as conn:
+        saved = conn.execute(
+            "select value from app_state where key='review_last_candidate'"
+        ).fetchone()[0]
+    assert saved == "CAND-2"
+
+    review_app.persist_last_candidate("CAND-1", True)
+    with db_connect(db_path) as conn:
+        saved = conn.execute(
+            "select value from app_state where key='review_last_candidate'"
+        ).fetchone()[0]
+    assert saved == "CAND-1"
+
+
+def test_restore_saved_queue_filters_marks_startup_ready_without_saved_state(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "review.db"
+    with db_connect(db_path):
+        pass
+
+    monkeypatch.setattr(review_app, "DB_PATH", str(db_path))
+
+    result = review_app.restore_saved_queue_filters(str(db_path))
+
+    assert result[-1]["ready"] is True
+    assert result[-1]["restored"] is False
+
+
+def test_merge_unhydrated_saved_queue_filter_ui_state_restores_select_filters() -> None:
+    ui_state = review_app._normalize_saved_queue_filter_ui_state(
+        {
+            "filter_unreviewed": ["yes"],
+        }
+    )
+    assert ui_state is not None
+
+    restore_state = {
+        "ready": True,
+        "restored": True,
+        "saved_ui_state": {
+            "filter_unreviewed": ["yes"],
+            "exclude_asassn_var_type": ["EA"],
+        },
+    }
+    text_option_values = tuple([{"label": "Any", "value": "Any"}] for _ in review_app._TEXT_STATES)
+    select_option_values = tuple([] for _ in review_app._SELECT_STATES)
+
+    merged = review_app._merge_unhydrated_saved_queue_filter_ui_state(
+        ui_state,
+        restore_state,
+        text_option_values,
+        select_option_values,
+    )
+
+    assert merged["exclude_asassn_var_type"] == ["EA"]
+
+
+def test_persist_queue_filters_waits_for_restore_ready(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "review.db"
+    with db_connect(db_path):
+        pass
+
+    monkeypatch.setattr(review_app, "DB_PATH", str(db_path))
+    values = review_app._queue_filter_ui_values_from_state(
+        {
+            "filter_unreviewed": ["yes"],
+            "failed_periodicity_mode": "False",
+            "sort_cols": ["dipper_score"],
+            "sort_desc": ["yes"],
+        }
+    )
+    assert values is not None
+    text_option_values = tuple([{"label": "Any", "value": "Any"}] for _ in review_app._TEXT_STATES)
+    select_option_values = tuple([] for _ in review_app._SELECT_STATES)
+
+    with pytest.raises(review_app.dash.exceptions.PreventUpdate):
+        review_app.persist_queue_filters(*values, {"ready": False}, *text_option_values, *select_option_values)
+
+    review_app.persist_queue_filters(
+        *values,
+        {
+            "ready": True,
+            "restored": True,
+            "saved_ui_state": {
+                "filter_unreviewed": ["yes"],
+                "failed_periodicity_mode": "False",
+                "sort_cols": ["dipper_score"],
+                "sort_desc": ["yes"],
+                "exclude_asassn_var_type": ["EA"],
+            },
+        },
+        *text_option_values,
+        *select_option_values,
+    )
+
+    with db_connect(db_path) as conn:
+        saved = conn.execute(
+            "select value from app_state where key='dash_queue_filter_ui_state_v1'"
+        ).fetchone()[0]
+
+    payload = json.loads(saved)
+    assert payload["filter_unreviewed"] == ["yes"]
+    assert payload["failed_periodicity_mode"] == "False"
+    assert payload["sort_cols"] == ["dipper_score"]
+    assert payload["sort_desc"] == ["yes"]
+    assert payload["exclude_asassn_var_type"] == ["EA"]
+
+
 def test_restore_startup_candidate_views_explicit_candidate_when_filtered_out(tmp_path: Path, monkeypatch) -> None:
     db_path = tmp_path / "review.db"
     with db_connect(db_path) as conn:
@@ -718,6 +984,49 @@ def test_query_queue_supports_multiple_source_paths(tmp_path: Path) -> None:
         out = query_queue(conn, filters={"source_paths": [source_a, source_b]})
 
     assert set(out["candidate_id"].tolist()) == {"A-1", "B-1"}
+
+
+def test_create_queue_data_dict_includes_filter_provenance(tmp_path: Path) -> None:
+    db_path = tmp_path / "review.db"
+    source_path = str((tmp_path / "queue_scope.parquet").resolve())
+
+    with db_connect(db_path) as conn:
+        import_candidates(
+            conn,
+            pd.DataFrame(
+                [
+                    {"candidate_id": "Q-1", "ltv_slope": 0.1, "failed_any": False},
+                    {"candidate_id": "Q-2", "ltv_slope": 0.4, "failed_any": False},
+                    {"candidate_id": "Q-3", "ltv_slope": 0.6, "failed_any": True},
+                    {"candidate_id": "Q-4", "ltv_slope": 0.8, "failed_any": False},
+                ]
+            ),
+            source_path=source_path,
+            characterize_before_import=False,
+            vet_before_import=False,
+        )
+
+        queue_data = create_queue_data_dict(
+            conn,
+            {
+                "source_path": source_path,
+                "require_failed_any_false": True,
+                "min_ltv_slope": 0.5,
+                "sort_cols": ["candidate_id"],
+                "sort_desc": False,
+            },
+        )
+
+    assert queue_data["candidate_ids"] == ["Q-4"]
+    assert queue_data["queue_size"] == 1
+    assert queue_data["scope_size"] == 4
+    assert queue_data["filtered_out_count"] == 3
+
+    provenance = {item["label"]: item for item in queue_data["filter_provenance"]}
+    assert provenance["Require failed_any=False"]["filtered_count"] == 1
+    assert provenance["Require failed_any=False"]["remaining_count"] == 3
+    assert provenance["ltv_slope >= 0.5"]["filtered_count"] == 2
+    assert provenance["ltv_slope >= 0.5"]["remaining_count"] == 2
 
 
 def test_default_numeric_bounds_are_treated_as_unset_filters(tmp_path: Path) -> None:
