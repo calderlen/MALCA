@@ -844,6 +844,52 @@ def test_merge_unhydrated_saved_queue_filter_ui_state_restores_select_filters() 
     assert merged["exclude_asassn_var_type"] == ["EA"]
 
 
+def test_rehydrate_saved_text_select_filter_values_restores_sidebar_dropdowns() -> None:
+    restore_state = {
+        "ready": True,
+        "restored": True,
+        "saved_ui_state": {
+            "filter_unreviewed": ["yes"],
+            "exclude_asassn_var_type": ["EA", "EB"],
+        },
+    }
+    text_option_values = tuple([{"label": "Any", "value": "Any"}] for _ in review_app._TEXT_STATES)
+    select_option_values = []
+    for _, fkey in review_app._SELECT_STATES:
+        if fkey == "exclude_asassn_var_type":
+            select_option_values.append(
+                [
+                    {"label": "EA", "value": "EA"},
+                    {"label": "EB", "value": "EB"},
+                    {"label": "DSCT", "value": "DSCT"},
+                ]
+            )
+        else:
+            select_option_values.append([])
+    text_current_values = tuple("Any" for _ in review_app._TEXT_STATES)
+    select_current_values = tuple([] for _ in review_app._SELECT_STATES)
+
+    result = review_app.rehydrate_saved_text_select_filter_values(
+        restore_state,
+        *text_option_values,
+        *select_option_values,
+        *text_current_values,
+        *select_current_values,
+    )
+
+    select_offset = len(review_app._TEXT_STATES)
+    asassn_idx = next(
+        idx for idx, (_, fkey) in enumerate(review_app._SELECT_STATES)
+        if fkey == "exclude_asassn_var_type"
+    )
+
+    assert result[select_offset + asassn_idx] == ["EA", "EB"]
+    for idx, value in enumerate(result):
+        if idx == select_offset + asassn_idx:
+            continue
+        assert value is review_app.no_update
+
+
 def test_persist_queue_filters_waits_for_restore_ready(tmp_path: Path, monkeypatch) -> None:
     db_path = tmp_path / "review.db"
     with db_connect(db_path):

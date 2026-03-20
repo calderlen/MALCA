@@ -5773,6 +5773,10 @@ _FILTER_VALUE_OUTPUTS = (
 _queue_states = _FILTER_VALUE_STATES
 _TEXT_OPTION_STATES = [State(cid, 'options') for cid, _ in _TEXT_STATES]
 _SELECT_OPTION_STATES = [State(cid, 'options') for cid, _ in _SELECT_STATES]
+_TEXT_OPTION_INPUTS = [Input(cid, 'options') for cid, _ in _TEXT_STATES]
+_SELECT_OPTION_INPUTS = [Input(cid, 'options') for cid, _ in _SELECT_STATES]
+_TEXT_VALUE_STATES = [State(cid, 'value') for cid, _ in _TEXT_STATES]
+_SELECT_VALUE_STATES = [State(cid, 'value') for cid, _ in _SELECT_STATES]
 
 
 def _coerce_string_list(raw_value: object) -> list[str]:
@@ -6255,6 +6259,72 @@ def restore_saved_queue_filters(_db_scope):
         return (*([no_update] * len(_FILTER_VALUE_OUTPUTS)), {'ts': time.time(), 'ready': True, 'restored': False, 'saved_ui_state': normalized_state})
 
     return (*values, {'ts': time.time(), 'ready': True, 'restored': True, 'saved_ui_state': normalized_state})
+
+
+@app.callback(
+    [*[Output(cid, 'value', allow_duplicate=True) for cid, _ in _TEXT_STATES],
+     *[Output(cid, 'value', allow_duplicate=True) for cid, _ in _SELECT_STATES]],
+    Input('restored-filter-applied', 'data'),
+    _TEXT_OPTION_INPUTS,
+    _SELECT_OPTION_INPUTS,
+    _TEXT_VALUE_STATES,
+    _SELECT_VALUE_STATES,
+    prevent_initial_call='initial_duplicate',
+)
+def rehydrate_saved_text_select_filter_values(restore_state, *callback_values):
+    """Reapply saved dropdown selections once their option lists finish hydrating."""
+    if not isinstance(restore_state, dict) or not restore_state.get('restored'):
+        raise dash.exceptions.PreventUpdate
+
+    saved_ui_state = _normalize_saved_queue_filter_ui_state(restore_state.get('saved_ui_state'))
+    if saved_ui_state is None:
+        raise dash.exceptions.PreventUpdate
+
+    n_text_opts = len(_TEXT_OPTION_INPUTS)
+    n_select_opts = len(_SELECT_OPTION_INPUTS)
+    n_text_values = len(_TEXT_VALUE_STATES)
+
+    text_option_values = callback_values[:n_text_opts]
+    select_option_values = callback_values[n_text_opts:n_text_opts + n_select_opts]
+    text_current_values = callback_values[n_text_opts + n_select_opts:n_text_opts + n_select_opts + n_text_values]
+    select_current_values = callback_values[n_text_opts + n_select_opts + n_text_values:]
+
+    outputs: list[object] = []
+    changed = False
+
+    for ((_, fkey), options, current) in zip(_TEXT_STATES, text_option_values, text_current_values):
+        current_value = _coerce_text_filter_value(current)
+        saved_value = _coerce_text_filter_value(saved_ui_state.get(fkey))
+        option_values = {
+            str(option.get('value'))
+            for option in (options or [])
+            if isinstance(option, dict) and option.get('value') is not None
+        }
+        if saved_value != 'Any' and current_value == 'Any' and saved_value in option_values:
+            outputs.append(saved_value)
+            changed = True
+        else:
+            outputs.append(no_update)
+
+    for ((_, fkey), options, current) in zip(_SELECT_STATES, select_option_values, select_current_values):
+        current_value = _coerce_string_list(current)
+        saved_value = _coerce_string_list(saved_ui_state.get(fkey))
+        option_values = {
+            str(option.get('value'))
+            for option in (options or [])
+            if isinstance(option, dict) and option.get('value') is not None
+        }
+        restored_values = [value for value in saved_value if value in option_values]
+        if restored_values and not current_value:
+            outputs.append(restored_values)
+            changed = True
+        else:
+            outputs.append(no_update)
+
+    if not changed:
+        raise dash.exceptions.PreventUpdate
+
+    return tuple(outputs)
 
 
 @app.callback(
