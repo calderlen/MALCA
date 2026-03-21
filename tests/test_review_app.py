@@ -86,6 +86,10 @@ def test_db_connect_configures_busy_timeout_and_wal(tmp_path: Path) -> None:
     assert journal_mode == "wal"
 
 
+def test_review_ui_background_callbacks_disabled_for_stability() -> None:
+    assert review_app._UI_BACKGROUND_CALLBACKS is False
+
+
 def test_review_gui_state_normalization_roundtrip() -> None:
     state = review_app._normalize_review_gui_state(
         {

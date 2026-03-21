@@ -212,6 +212,9 @@ class TrackingDiskcacheManager(DiskcacheManager):
 # Background callback manager for long-running fetch/import (DiskCache for local dev)
 _bc_cache = diskcache.Cache(Path(__file__).resolve().parents[2] / "output" / "review" / ".dash_cache")
 _background_callback_manager = TrackingDiskcacheManager(_bc_cache)
+# High-frequency review UI callbacks (plot render, auto period, sidebar hydration)
+# are intentionally synchronous to avoid long-session file-descriptor exhaustion.
+_UI_BACKGROUND_CALLBACKS = False
 _PRELOAD_DELAY_SEC = 0.4
 _PRELOAD_LOOKAHEAD = 1
 _preload_generation_lock = Lock()
@@ -239,7 +242,6 @@ def _cleanup_background_resources(*_args) -> None:
             _background_callback_manager.terminate_all_jobs()
     except Exception:
         pass
-
     try:
         _bc_cache.close()
     except Exception:
@@ -6110,7 +6112,7 @@ def _load_numeric_filter_bounds(queue_source_scope):
         return get_numeric_bounds(conn, **kwargs)
 
 
-if _background_callback_manager is not None:
+if _background_callback_manager is not None and _UI_BACKGROUND_CALLBACKS:
     @app.callback(
         Output('numeric-filter-bounds', 'data'),
         Input('refresh-filter-bounds-btn', 'n_clicks'),
@@ -6183,7 +6185,7 @@ def _load_vetting_known_select_options(queue_source_scope) -> dict[str, list[dic
         }
 
 
-if _background_callback_manager is not None:
+if _background_callback_manager is not None and _UI_BACKGROUND_CALLBACKS:
     @app.callback(
         _SIDEBAR_FILTER_OUTPUTS,
         [Input('sidebar-state', 'data'),
@@ -7486,7 +7488,7 @@ _PERIOD_SEARCH_OUTPUTS = [
 ]
 
 
-if _background_callback_manager is not None:
+if _background_callback_manager is not None and _UI_BACKGROUND_CALLBACKS:
     @app.callback(
         _PERIOD_SEARCH_OUTPUTS,
         Input('pdm-run-btn', 'n_clicks'),
@@ -7632,7 +7634,7 @@ _AUTO_PERIOD_OUTPUTS = [
 ]
 
 
-if _background_callback_manager is not None:
+if _background_callback_manager is not None and _UI_BACKGROUND_CALLBACKS:
     @app.callback(
         _AUTO_PERIOD_OUTPUTS,
         Input('auto-period-request', 'data'),
@@ -8020,7 +8022,7 @@ _DISPLAY_OUTPUTS = [Output('plot-image', 'src'),
     Output('plot-render-applied', 'data')]
 
 
-if _background_callback_manager is not None:
+if _background_callback_manager is not None and _UI_BACKGROUND_CALLBACKS:
     @app.callback(
         _DISPLAY_OUTPUTS,
         Input('plot-render-request', 'data'),
@@ -8145,7 +8147,7 @@ def _prepare_diagnostic_background(is_open, _import_trigger, _pipeline_progress,
     }
 
 
-if _background_callback_manager is not None:
+if _background_callback_manager is not None and _UI_BACKGROUND_CALLBACKS:
     @app.callback(
         Output('diagnostic-background-state', 'data'),
         [Input('diagnostic-plots-details', 'open'),
@@ -9741,7 +9743,9 @@ def main():
         app.server.logger.setLevel(logging.ERROR)
 
     try:
-        app.run(debug=args.debug, host=args.host, port=args.port)
+        # Single-threaded local serving keeps concurrent request/socket churn bounded
+        # during long review sessions.
+        app.run(debug=args.debug, host=args.host, port=args.port, threaded=False)
     except KeyboardInterrupt:
         pass
     finally:
