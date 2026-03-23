@@ -1181,6 +1181,9 @@ def _queue_where_params(filters: dict | None = None) -> tuple[list[str], list[ob
 
     where: list[str] = []
     params: list[object] = []
+    select_filter_mode = str(filters.get("select_filter_mode") or "exclude").strip().lower()
+    if select_filter_mode not in {"include", "exclude"}:
+        select_filter_mode = "exclude"
 
     # --- review status ---
     if filters.get('only_unreviewed'):
@@ -1253,7 +1256,10 @@ def _queue_where_params(filters: dict | None = None) -> tuple[list[str], list[ob
         exc = filters.get(f"exclude_{col}")
         if exc:
             placeholders = ",".join(["?"] * len(exc))
-            where.append(f"(c.{col} IS NULL OR c.{col} NOT IN ({placeholders}))")
+            if select_filter_mode == "include":
+                where.append(f"(c.{col} IS NOT NULL AND c.{col} IN ({placeholders}))")
+            else:
+                where.append(f"(c.{col} IS NULL OR c.{col} NOT IN ({placeholders}))")
             params.extend(exc)
 
     return where, params

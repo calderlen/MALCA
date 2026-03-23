@@ -4136,6 +4136,107 @@ _ATF_OPTS = [
 ]
 _inp_style = {'width': '100%', 'margin-bottom': '4px', 'font-size': '11px'}
 
+_REVIEW_FILTER_SEARCH_JS = """
+function(query, nextClicks, prevClicks, submitCount) {
+    var ctx = (window.dash_clientside && window.dash_clientside.callback_context) || null;
+    var triggered = ctx && ctx.triggered && ctx.triggered.length ? ctx.triggered[0].prop_id : '';
+    var stateKey = '__malcaReviewFilterSearchState';
+    var flashKey = '__malcaReviewFilterSearchFlashState';
+
+    function normalize(text) {
+        return String(text || '')
+            .toLowerCase()
+            .replace(/[_/\\-]+/g, ' ')
+            .replace(/\\s+/g, ' ')
+            .trim();
+    }
+
+    function resetHighlight(entry) {
+        if (!entry || !entry.el) {
+            return;
+        }
+        entry.el.style.outline = '';
+        entry.el.style.outlineOffset = '';
+        entry.el.style.borderRadius = '';
+        entry.el.style.background = '';
+    }
+
+    function highlight(el) {
+        var existing = window[flashKey];
+        if (existing && existing.timerId) {
+            window.clearTimeout(existing.timerId);
+        }
+        resetHighlight(existing);
+        if (!el) {
+            window[flashKey] = null;
+            return;
+        }
+        el.style.outline = '2px solid rgba(114, 196, 255, 0.95)';
+        el.style.outlineOffset = '3px';
+        el.style.borderRadius = '8px';
+        el.style.background = 'rgba(50, 89, 123, 0.16)';
+        var timerId = window.setTimeout(function() {
+            resetHighlight(window[flashKey]);
+            window[flashKey] = null;
+        }, 1400);
+        window[flashKey] = {el: el, timerId: timerId};
+    }
+
+    var rawQuery = String(query || '');
+    var normalizedQuery = normalize(rawQuery);
+    if (!normalizedQuery) {
+        window[stateKey] = {query: '', matches: [], index: -1};
+        highlight(null);
+        return 'Type to find a filter';
+    }
+
+    var anchors = Array.from(document.querySelectorAll('.review-filter-anchor'));
+    var matches = anchors.filter(function(el) {
+        return normalize(el.textContent || '').indexOf(normalizedQuery) !== -1;
+    }).map(function(el) {
+        return el.id;
+    }).filter(Boolean);
+
+    if (!matches.length) {
+        window[stateKey] = {query: normalizedQuery, matches: [], index: -1};
+        highlight(null);
+        return 'No matching filters';
+    }
+
+    var state = window[stateKey] || {};
+    var sameQuery = state.query === normalizedQuery
+        && Array.isArray(state.matches)
+        && state.matches.join('|') === matches.join('|');
+    var index = sameQuery && Number.isFinite(state.index) ? state.index : 0;
+
+    if (sameQuery) {
+        if (triggered === 'review-filter-search-next-btn.n_clicks' || triggered === 'review-filter-search-query.n_submit') {
+            index = (index + 1) % matches.length;
+        } else if (triggered === 'review-filter-search-prev-btn.n_clicks') {
+            index = (index - 1 + matches.length) % matches.length;
+        } else if (index >= matches.length) {
+            index = matches.length - 1;
+        }
+    }
+
+    var target = document.getElementById(matches[index]);
+    if (target) {
+        var group = target.closest('details');
+        if (group) {
+            group.open = true;
+        }
+        target.scrollIntoView({behavior: 'smooth', block: 'center', inline: 'nearest'});
+        highlight(target);
+    } else {
+        highlight(null);
+    }
+
+    window[stateKey] = {query: normalizedQuery, matches: matches, index: index};
+    var label = target && target.getAttribute('title') ? target.getAttribute('title') : 'match';
+    return String(index + 1) + ' / ' + String(matches.length) + '  ' + label;
+}
+"""
+
 
 def _bool_mode_filter(label: str, component_id: str):
     """Return a (Label, Dropdown) pair for Any/True/False/Unset bool filter."""
@@ -4154,6 +4255,36 @@ def _bool_mode_filter(label: str, component_id: str):
 def _col_id(col: str) -> str:
     """snake_case → dash-case for Dash component IDs."""
     return col.replace('_', '-')
+
+
+def _filter_group_slug(name: str) -> str:
+    return re.sub(r'[^a-z0-9]+', '-', str(name).strip().lower()).strip('-') or 'group'
+
+
+def _review_filter_group_id(name: str) -> str:
+    return f'review-filter-group-{_filter_group_slug(name)}'
+
+
+def _review_filter_anchor_id(group_name: str, col: str) -> str:
+    return f'review-filter-anchor-{_filter_group_slug(group_name)}-{_col_id(col)}'
+
+
+def _review_filter_search_text(group_name: str, col: str) -> str:
+    humanized = col.replace('_', ' ')
+    return f'{group_name} {col} {humanized}'
+
+
+def _review_filter_anchor(group_name: str, col: str, child):
+    return html.Div(
+        [
+            html.Span(_review_filter_search_text(group_name, col), style={'display': 'none'}),
+            child,
+        ],
+        id=_review_filter_anchor_id(group_name, col),
+        className='review-filter-anchor',
+        title=f'{group_name} / {col}',
+        style={'scrollMarginTop': '72px'},
+    )
 
 
 def _select_all_dropdown_values(options: list[dict[str, object]] | None) -> list[str]:
@@ -4238,13 +4369,13 @@ def _text_filter(col: str):
 
 
 def _select_filter(col: str):
-    """Multi-select dropdown for exclude filtering (options hydrated lazily)."""
+    """Multi-select dropdown for categorical filtering (options hydrated lazily)."""
     cid = _col_id(col)
     return html.Div([
-        html.Label(f'{col} (exclude):'),
+        html.Label(f'{col}:'),
         dcc.Dropdown(
             id=f'exclude-{cid}', options=[], multi=True,
-            placeholder='None excluded',
+            placeholder='Select values',
             style={'margin-bottom': '4px', 'font-size': '11px'},
             maxHeight=400,
             optionHeight=28,
@@ -4269,20 +4400,24 @@ def _make_filter_group(name: str, items: list, *, default_open: bool = False):
         )
     for ftype, col in items:
         if ftype == 'bool':
-            children.extend(_bool_mode_filter(col, f'{_col_id(col)}-mode'))
+            children.append(_review_filter_anchor(name, col, _bool_mode_filter(col, f'{_col_id(col)}-mode')))
         elif ftype == 'num':
-            children.append(_num_range_filter(col))
+            children.append(_review_filter_anchor(name, col, _num_range_filter(col)))
         elif ftype == 'text':
-            children.append(_text_filter(col))
+            children.append(_review_filter_anchor(name, col, _text_filter(col)))
         elif ftype == 'select':
-            children.append(_select_filter(col))
+            children.append(_review_filter_anchor(name, col, _select_filter(col)))
     block = [
         html.Summary(name),
         html.Div(children, style={'padding-left': '6px'}),
     ]
+    details_kwargs = {
+        'id': _review_filter_group_id(name),
+        'className': 'review-filter-group',
+    }
     if default_open:
-        return html.Details(block, open='open')
-    return html.Details(block)
+        return html.Details(block, open='open', **details_kwargs)
+    return html.Details(block, **details_kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -4384,6 +4519,29 @@ def create_layout():
                 value=[],
                 style={'margin-bottom': '6px'},
             ),
+            dcc.Checklist(
+                id='select-filter-mode',
+                options=[{'label': ' Include selected categorical values', 'value': 'include'}],
+                value=[],
+                style={'margin-bottom': '6px'},
+            ),
+            html.Div([
+                dcc.Input(
+                    id='review-filter-search-query',
+                    placeholder='Find filter...',
+                    type='text',
+                    style={**_inp_style, 'marginBottom': '0'},
+                ),
+                html.Div([
+                    html.Button('Prev', id='review-filter-search-prev-btn', n_clicks=0, className='compact-btn'),
+                    html.Button('Next', id='review-filter-search-next-btn', n_clicks=0, className='compact-btn'),
+                ], style={'display': 'flex', 'gap': '6px'}),
+                html.Div(
+                    'Type to find a filter',
+                    id='review-filter-search-status',
+                    style={'fontSize': '10px', 'color': '#7d91a6', 'marginTop': '4px'},
+                ),
+            ], style={'marginBottom': '8px'}),
 
             # -- All filter groups (auto-generated from _SIDEBAR_GROUPS) --
             *[_make_filter_group(name, items, default_open=(name == 'General Flags'))
@@ -5101,6 +5259,16 @@ app.clientside_callback(
 )
 
 app.clientside_callback(
+    _REVIEW_FILTER_SEARCH_JS,
+    Output('review-filter-search-status', 'children'),
+    Input('review-filter-search-query', 'value'),
+    Input('review-filter-search-next-btn', 'n_clicks'),
+    Input('review-filter-search-prev-btn', 'n_clicks'),
+    Input('review-filter-search-query', 'n_submit'),
+    prevent_initial_call=False,
+)
+
+app.clientside_callback(
     """
     function(n_intervals, progressState, queueSize, sessionStart, toggle) {
         function formatHms(totalSeconds) {
@@ -5722,7 +5890,8 @@ for _grp_name, _grp_items in _SIDEBAR_GROUPS:
 # Build the callback I/O lists dynamically.
 _FILTER_VALUE_STATES = (
     [State('filter-unreviewed', 'value'),
-     State('filter-failed', 'value')]
+     State('filter-failed', 'value'),
+     State('select-filter-mode', 'value')]
     + [State(cid, 'value') for cid, _ in _BOOL_MODE_STATES]
     + [State(cid, 'value') for cid, _ in _NUM_INPUT_STATES]
     + [State(cid, 'value') for cid, _ in _TEXT_STATES]
@@ -5733,7 +5902,8 @@ _FILTER_VALUE_STATES = (
 
 _FILTER_VALUE_INPUTS = (
     [Input('filter-unreviewed', 'value'),
-     Input('filter-failed', 'value')]
+     Input('filter-failed', 'value'),
+     Input('select-filter-mode', 'value')]
     + [Input(cid, 'value') for cid, _ in _BOOL_MODE_STATES]
     + [Input(cid, 'value') for cid, _ in _NUM_INPUT_STATES]
     + [Input(cid, 'value') for cid, _ in _TEXT_STATES]
@@ -5744,7 +5914,8 @@ _FILTER_VALUE_INPUTS = (
 
 _FILTER_VALUE_OUTPUTS = (
     [Output('filter-unreviewed', 'value', allow_duplicate=True),
-     Output('filter-failed', 'value', allow_duplicate=True)]
+     Output('filter-failed', 'value', allow_duplicate=True),
+     Output('select-filter-mode', 'value', allow_duplicate=True)]
     + [Output(cid, 'value', allow_duplicate=True) for cid, _ in _BOOL_MODE_STATES]
     + [Output(cid, 'value', allow_duplicate=True) for cid, _ in _NUM_INPUT_STATES]
     + [Output(cid, 'value', allow_duplicate=True) for cid, _ in _TEXT_STATES]
@@ -5784,6 +5955,14 @@ def _coerce_string_list(raw_value: object) -> list[str]:
 
 def _coerce_yes_checklist_value(raw_value: object) -> list[str]:
     return ['yes'] if 'yes' in _coerce_string_list(raw_value) else []
+
+
+def _coerce_select_filter_mode_value(raw_value: object) -> str:
+    return 'include' if 'include' in _coerce_string_list(raw_value) else 'exclude'
+
+
+def _select_filter_mode_checklist_value(raw_value: object) -> list[str]:
+    return ['include'] if _coerce_select_filter_mode_value(raw_value) == 'include' else []
 
 
 def _coerce_bool_mode_value(raw_value: object) -> str:
@@ -5879,6 +6058,7 @@ def _queue_filter_ui_state_from_values(*state_values: object) -> dict[str, objec
     state: dict[str, object] = {
         'filter_unreviewed': _coerce_yes_checklist_value(next(it)),
         'filter_failed': _coerce_yes_checklist_value(next(it)),
+        'select_filter_mode': _coerce_select_filter_mode_value(next(it)),
     }
     for _, fkey in _BOOL_MODE_STATES:
         state[fkey] = _coerce_bool_mode_value(next(it))
@@ -5904,6 +6084,7 @@ def _normalize_saved_queue_filter_ui_state(raw_state: object) -> dict[str, objec
         'filter_failed': _coerce_yes_checklist_value(
             raw_state.get('filter_failed', ['yes'] if _coerce_bool(raw_state.get('require_failed_any_false')) else [])
         ),
+        'select_filter_mode': _coerce_select_filter_mode_value(raw_state.get('select_filter_mode')),
     }
     for _, fkey in _BOOL_MODE_STATES:
         state[fkey] = _coerce_bool_mode_value(raw_state.get(fkey))
@@ -5929,6 +6110,7 @@ def _queue_filter_ui_values_from_state(raw_state: object) -> tuple[object, ...] 
     values: list[object] = [
         state['filter_unreviewed'],
         state['filter_failed'],
+        _select_filter_mode_checklist_value(state['select_filter_mode']),
     ]
     for _, fkey in _BOOL_MODE_STATES:
         values.append(state[fkey])
@@ -5995,7 +6177,8 @@ _SIDEBAR_FILTER_OUTPUTS = (
 )
 
 _VETTING_KNOWN_FILTER_OUTPUTS = (
-    [Output(f'{_col_id(col)}-mode', 'value') for col in VETTING_KNOWN_BOOL_FILTERS]
+    [Output('select-filter-mode', 'value', allow_duplicate=True)]
+    + [Output(f'{_col_id(col)}-mode', 'value') for col in VETTING_KNOWN_BOOL_FILTERS]
     + [Output(f'exclude-{_col_id(col)}', 'value') for col in VETTING_KNOWN_SELECT_FILTERS]
 )
 
@@ -6084,6 +6267,7 @@ def _queue_filter_params_from_ui_state(
     filter_params: dict[str, object] = {
         'only_unreviewed': 'yes' in _coerce_yes_checklist_value(ui_state.get('filter_unreviewed')),
         'require_failed_any_false': 'yes' in _coerce_yes_checklist_value(ui_state.get('filter_failed')),
+        'select_filter_mode': _coerce_select_filter_mode_value(ui_state.get('select_filter_mode')),
     }
     for _, fkey in _BOOL_MODE_STATES:
         filter_params[fkey] = _coerce_bool_mode_value(ui_state.get(fkey))
@@ -6229,7 +6413,7 @@ def apply_vetting_known_type_filters(n_clicks, *select_options):
             if not select_options_by_col.get(col):
                 select_options_by_col[col] = options
     bool_values, select_values = _vetting_known_filter_preset(select_options_by_col)
-    return (*bool_values, *select_values)
+    return ([], *bool_values, *select_values)
 
 
 @app.callback(

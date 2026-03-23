@@ -28,6 +28,20 @@ from malca.review.store import (
 )
 
 
+def _collect_component_ids(node) -> set[str]:
+    found: set[str] = set()
+    node_id = getattr(node, "id", None)
+    if isinstance(node_id, str):
+        found.add(node_id)
+    children = getattr(node, "children", None)
+    if isinstance(children, (list, tuple)):
+        for child in children:
+            found.update(_collect_component_ids(child))
+    elif children is not None:
+        found.update(_collect_component_ids(children))
+    return found
+
+
 def _write_skypatrol_csv(path: Path) -> None:
     df = pd.DataFrame(
         {
@@ -88,6 +102,34 @@ def test_db_connect_configures_busy_timeout_and_wal(tmp_path: Path) -> None:
 
 def test_review_ui_background_callbacks_disabled_for_stability() -> None:
     assert review_app._UI_BACKGROUND_CALLBACKS is False
+
+
+def test_review_layout_contains_filter_search_controls() -> None:
+    ids = _collect_component_ids(review_app.create_layout())
+
+    assert "review-filter-search-query" in ids
+    assert "review-filter-search-prev-btn" in ids
+    assert "review-filter-search-next-btn" in ids
+    assert "review-filter-search-status" in ids
+
+
+def test_review_filter_group_uses_stable_anchor_ids() -> None:
+    group = review_app._make_filter_group("Periodicity", [("num", "lsp_period")])
+
+    assert group.id == review_app._review_filter_group_id("Periodicity")
+    assert "review-filter-group" in (group.className or "")
+
+    content = group.children[1]
+    anchor = content.children[0]
+    assert anchor.id == review_app._review_filter_anchor_id("Periodicity", "lsp_period")
+    assert "review-filter-anchor" in (anchor.className or "")
+    assert anchor.title == "Periodicity / lsp_period"
+
+
+def test_review_filter_search_clientside_callback_opens_details_and_scrolls() -> None:
+    assert "scrollIntoView" in review_app._REVIEW_FILTER_SEARCH_JS
+    assert "closest('details')" in review_app._REVIEW_FILTER_SEARCH_JS
+    assert ".review-filter-anchor" in review_app._REVIEW_FILTER_SEARCH_JS
 
 
 def test_review_gui_state_normalization_roundtrip() -> None:
@@ -1120,6 +1162,62 @@ def test_create_queue_data_dict_includes_filter_provenance(tmp_path: Path) -> No
     assert provenance["Require failed_any=False"]["remaining_count"] == 3
     assert provenance["ltv_slope >= 0.5"]["filtered_count"] == 2
     assert provenance["ltv_slope >= 0.5"]["remaining_count"] == 2
+
+
+def test_query_queue_select_filters_support_include_mode(tmp_path: Path) -> None:
+    db_path = tmp_path / "review.db"
+    source_path = str((tmp_path / "categorical_scope.parquet").resolve())
+
+    with db_connect(db_path) as conn:
+        import_candidates(
+            conn,
+            pd.DataFrame(
+                [
+                    {"candidate_id": "C-1", "ztf_var_type": "SR"},
+                    {"candidate_id": "C-2", "ztf_var_type": "EA"},
+                    {"candidate_id": "C-3", "ztf_var_type": "RR"},
+                ]
+            ),
+            source_path=source_path,
+            characterize_before_import=False,
+            vet_before_import=False,
+        )
+
+        excluded = query_queue(
+            conn,
+            filters={
+                "exclude_ztf_var_type": ["SR", "EA"],
+                "sort_cols": ["candidate_id"],
+                "sort_desc": False,
+            },
+        )
+        included = query_queue(
+            conn,
+            filters={
+                "exclude_ztf_var_type": ["SR", "EA"],
+                "select_filter_mode": "include",
+                "sort_cols": ["candidate_id"],
+                "sort_desc": False,
+            },
+        )
+
+        queue_data = create_queue_data_dict(
+            conn,
+            {
+                "source_path": source_path,
+                "exclude_ztf_var_type": ["SR", "EA"],
+                "select_filter_mode": "include",
+                "sort_cols": ["candidate_id"],
+                "sort_desc": False,
+            },
+        )
+
+    assert excluded["candidate_id"].tolist() == ["C-3"]
+    assert included["candidate_id"].tolist() == ["C-1", "C-2"]
+
+    provenance = {item["label"]: item for item in queue_data["filter_provenance"]}
+    assert provenance["include ztf_var_type: SR, EA"]["remaining_count"] == 2
+    assert provenance["include ztf_var_type: SR, EA"]["filtered_count"] == 1
 
 
 def test_default_numeric_bounds_are_treated_as_unset_filters(tmp_path: Path) -> None:

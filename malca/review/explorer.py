@@ -109,12 +109,114 @@ AUTO_FILTER_EXCLUDE_COLUMNS = {
 AUTO_FILTER_TEXT_ONLY_MAX_UNIQUES = 200
 _EXPLORER_GUI_STATE_APP_STATE_KEY = "dash_explorer_gui_state_v1"
 
+_EXPLORER_FILTER_SEARCH_JS = """
+function(query, nextClicks, prevClicks, submitCount) {
+    var ctx = (window.dash_clientside && window.dash_clientside.callback_context) || null;
+    var triggered = ctx && ctx.triggered && ctx.triggered.length ? ctx.triggered[0].prop_id : '';
+    var stateKey = '__malcaExplorerFilterSearchState';
+    var flashKey = '__malcaExplorerFilterSearchFlashState';
+
+    function normalize(text) {
+        return String(text || '')
+            .toLowerCase()
+            .replace(/[_/\\-]+/g, ' ')
+            .replace(/\\s+/g, ' ')
+            .trim();
+    }
+
+    function resetHighlight(entry) {
+        if (!entry || !entry.el) {
+            return;
+        }
+        entry.el.style.outline = '';
+        entry.el.style.outlineOffset = '';
+        entry.el.style.borderRadius = '';
+        entry.el.style.background = '';
+    }
+
+    function highlight(el) {
+        var existing = window[flashKey];
+        if (existing && existing.timerId) {
+            window.clearTimeout(existing.timerId);
+        }
+        resetHighlight(existing);
+        if (!el) {
+            window[flashKey] = null;
+            return;
+        }
+        el.style.outline = '2px solid rgba(114, 196, 255, 0.95)';
+        el.style.outlineOffset = '3px';
+        el.style.borderRadius = '8px';
+        el.style.background = 'rgba(50, 89, 123, 0.16)';
+        var timerId = window.setTimeout(function() {
+            resetHighlight(window[flashKey]);
+            window[flashKey] = null;
+        }, 1400);
+        window[flashKey] = {el: el, timerId: timerId};
+    }
+
+    var rawQuery = String(query || '');
+    var normalizedQuery = normalize(rawQuery);
+    if (!normalizedQuery) {
+        window[stateKey] = {query: '', matches: [], index: -1};
+        highlight(null);
+        return 'Type to find a filter';
+    }
+
+    var anchors = Array.from(document.querySelectorAll('.explorer-filter-anchor'));
+    var matches = anchors.filter(function(el) {
+        return normalize(el.textContent || '').indexOf(normalizedQuery) !== -1;
+    }).map(function(el) {
+        return el.id;
+    }).filter(Boolean);
+
+    if (!matches.length) {
+        window[stateKey] = {query: normalizedQuery, matches: [], index: -1};
+        highlight(null);
+        return 'No matching filters';
+    }
+
+    var state = window[stateKey] || {};
+    var sameQuery = state.query === normalizedQuery
+        && Array.isArray(state.matches)
+        && state.matches.join('|') === matches.join('|');
+    var index = sameQuery && Number.isFinite(state.index) ? state.index : 0;
+
+    if (sameQuery) {
+        if (triggered === 'explorer-filter-search-next-btn.n_clicks' || triggered === 'explorer-filter-search-query.n_submit') {
+            index = (index + 1) % matches.length;
+        } else if (triggered === 'explorer-filter-search-prev-btn.n_clicks') {
+            index = (index - 1 + matches.length) % matches.length;
+        } else if (index >= matches.length) {
+            index = matches.length - 1;
+        }
+    }
+
+    var target = document.getElementById(matches[index]);
+    if (target) {
+        var group = target.closest('details');
+        if (group) {
+            group.open = true;
+        }
+        target.scrollIntoView({behavior: 'smooth', block: 'center', inline: 'nearest'});
+        highlight(target);
+    } else {
+        highlight(null);
+    }
+
+    window[stateKey] = {query: normalizedQuery, matches: matches, index: index};
+    var label = target && target.getAttribute('title') ? target.getAttribute('title') : 'match';
+    return String(index + 1) + ' / ' + String(matches.length) + '  ' + label;
+}
+"""
+
 ADV_FILTER_INPUTS = [
     Input({"type": "adv-bool-mode", "col": ALL}, "value"),
     Input({"type": "adv-num-min", "col": ALL}, "value"),
     Input({"type": "adv-num-max", "col": ALL}, "value"),
     Input({"type": "adv-text-value", "col": ALL}, "value"),
     Input({"type": "adv-select-exclude", "col": ALL}, "value"),
+    Input("select-filter-mode", "value"),
     Input("only-unreviewed", "value"),
     Input("require-failed-any-false", "value"),
 ]
@@ -125,6 +227,7 @@ ADV_FILTER_STATES = [
     State({"type": "adv-num-max", "col": ALL}, "id"),
     State({"type": "adv-text-value", "col": ALL}, "id"),
     State({"type": "adv-select-exclude", "col": ALL}, "id"),
+    State("select-filter-mode", "value"),
 ]
 
 REVIEW_EVENT_CLASSES = list(dict.fromkeys(["unclassified", *CLASS_KEY_MAP.values(), "yso"]))
@@ -178,6 +281,51 @@ Explorer:
   [?] Toggle this help
 """
 
+_REVIEW_LAUNCH_PENDING_WINDOW_JS = """
+function(nSelectionClicks, nCurrentClicks) {
+    var total = Number(nSelectionClicks || 0) + Number(nCurrentClicks || 0);
+    if (!total) {
+        return window.dash_clientside.no_update;
+    }
+
+    try {
+        var reviewWindow = window.open('', '_blank');
+        if (reviewWindow && reviewWindow.document) {
+            reviewWindow.document.title = 'Launching MALCA Review';
+            reviewWindow.document.body.innerHTML = '<div style="font-family: sans-serif; padding: 24px;">Launching MALCA Review...</div>';
+        }
+        window.__malcaExplorerPendingReviewWindow = reviewWindow || null;
+    } catch (err) {
+        window.__malcaExplorerPendingReviewWindow = null;
+    }
+
+    return Date.now();
+}
+"""
+
+_REVIEW_LAUNCH_OPEN_URL_JS = """
+function(url) {
+    if (!url) {
+        return window.dash_clientside.no_update;
+    }
+
+    try {
+        var reviewWindow = window.__malcaExplorerPendingReviewWindow;
+        if (reviewWindow && !reviewWindow.closed) {
+            reviewWindow.location.href = url;
+            reviewWindow.focus();
+        } else {
+            window.open(url, '_blank');
+        }
+    } catch (err) {
+        window.open(url, '_blank');
+    }
+
+    window.__malcaExplorerPendingReviewWindow = null;
+    return Date.now();
+}
+"""
+
 
 def _coerce_optional_float(value: object) -> float | None:
     if value in (None, ""):
@@ -216,6 +364,14 @@ def _coerce_explorer_bool_mode_value(value: object) -> str:
 def _coerce_explorer_text_value(value: object) -> str:
     text = str(value).strip() if value is not None else ""
     return text or "Any"
+
+
+def _coerce_explorer_select_mode_value(value: object) -> str:
+    return "include" if "include" in _coerce_string_list(value) else "exclude"
+
+
+def _explorer_select_mode_checklist_value(value: object) -> list[str]:
+    return ["include"] if _coerce_explorer_select_mode_value(value) == "include" else []
 
 
 def _keyboard_key(key_value: object) -> str:
@@ -466,7 +622,7 @@ def _explorer_advanced_ui_values_from_state(
     num_max_ids: list[dict[str, object]] | None,
     text_ids: list[dict[str, object]] | None,
     select_ids: list[dict[str, object]] | None,
-) -> tuple[list[object], list[object], list[object], list[object], list[object], list[str], list[str]]:
+) -> tuple[list[object], list[object], list[object], list[object], list[object], list[str], list[str], list[str]]:
     adv = dict((saved_state or {}).get("advanced") or {})
     bool_map = dict(adv.get("bool") or {})
     num_map = dict(adv.get("num") or {})
@@ -493,6 +649,7 @@ def _explorer_advanced_ui_values_from_state(
         _coerce_string_list(select_map.get(str((meta or {}).get("col") or "")))
         for meta in (select_ids or [])
     ]
+    select_mode = _explorer_select_mode_checklist_value(adv.get("select_mode"))
     only_unreviewed = ["yes"] if bool(adv.get("only_unreviewed")) else []
     require_failed = ["yes"] if bool(adv.get("require_failed_any_false")) else []
     return (
@@ -501,6 +658,7 @@ def _explorer_advanced_ui_values_from_state(
         num_max_values,
         text_values,
         select_values,
+        select_mode,
         only_unreviewed,
         require_failed,
     )
@@ -1076,6 +1234,37 @@ def _reset_button(button_id: str) -> html.Button:
     return html.Button("Reset view", id=button_id, n_clicks=0, className="explorer-reset-btn")
 
 
+def _filter_group_slug(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", str(name).strip().lower()).strip("-") or "group"
+
+
+def _explorer_filter_group_id(name: str) -> str:
+    return f"explorer-filter-group-{_filter_group_slug(name)}"
+
+
+def _explorer_filter_anchor_id(group_name: str, col: str) -> str:
+    safe_col = re.sub(r"[^a-z0-9]+", "-", str(col).strip().lower()).strip("-") or "col"
+    return f"explorer-filter-anchor-{_filter_group_slug(group_name)}-{safe_col}"
+
+
+def _explorer_filter_search_text(group_name: str, col: str) -> str:
+    humanized = str(col).replace("_", " ")
+    return f"{group_name} {col} {humanized}"
+
+
+def _explorer_filter_anchor(group_name: str, col: str, child) -> html.Div:
+    return html.Div(
+        [
+            html.Span(_explorer_filter_search_text(group_name, col), style={"display": "none"}),
+            child,
+        ],
+        id=_explorer_filter_anchor_id(group_name, col),
+        className="explorer-filter-anchor",
+        title=f"{group_name} / {col}",
+        style={"scrollMarginTop": "72px"},
+    )
+
+
 def _graph_card(graph_id: str, reset_button_id: str, *, height: str, class_name: str = "") -> html.Div:
     card_class = f"explorer-graph-card {class_name}".strip()
     return html.Div(
@@ -1143,8 +1332,8 @@ def _select_filter_control(frame: pd.DataFrame, col: str) -> html.Div:
     options = [{"label": v, "value": v} for v in values]
     return html.Div(
         [
-            _label(f"{col} (exclude)"),
-            dcc.Dropdown(id={"type": "adv-select-exclude", "col": col}, options=options, value=[], multi=True, placeholder="None excluded", persistence=True, persistence_type="local"),
+            _label(col),
+            dcc.Dropdown(id={"type": "adv-select-exclude", "col": col}, options=options, value=[], multi=True, placeholder="Select values", persistence=True, persistence_type="local"),
         ],
         style={"marginBottom": "8px"},
     )
@@ -1154,18 +1343,20 @@ def _make_filter_group(frame: pd.DataFrame, name: str, items: list[tuple[str, st
     children: list[html.Div] = []
     for ftype, col in items:
         if ftype == "bool":
-            children.append(_bool_filter_control(col))
+            children.append(_explorer_filter_anchor(name, col, _bool_filter_control(col)))
         elif ftype == "num":
-            children.append(_num_filter_control(col))
+            children.append(_explorer_filter_anchor(name, col, _num_filter_control(col)))
         elif ftype == "text":
-            children.append(_text_filter_control(frame, col))
+            children.append(_explorer_filter_anchor(name, col, _text_filter_control(frame, col)))
         elif ftype == "select":
-            children.append(_select_filter_control(frame, col))
+            children.append(_explorer_filter_anchor(name, col, _select_filter_control(frame, col)))
     return html.Details(
         [
             html.Summary(name, style={"color": TEXT, "cursor": "pointer", "fontSize": "12px", "fontWeight": "600"}),
             html.Div(children, style={"padding": "8px 2px 2px 2px"}),
         ],
+        id=_explorer_filter_group_id(name),
+        className="explorer-filter-group",
         style={"border": f"1px solid {PANEL_BORDER}", "borderRadius": "8px", "padding": "6px 8px", "background": PANEL_BG, "marginBottom": "8px"},
     )
 
@@ -1240,6 +1431,7 @@ def _build_advanced_filter_state(
     num_max_values,
     text_values,
     select_values,
+    select_mode_value,
     only_unreviewed_value,
     require_failed_value,
     bool_ids,
@@ -1253,6 +1445,7 @@ def _build_advanced_filter_state(
         "num": {},
         "text": {},
         "select": {},
+        "select_mode": _coerce_explorer_select_mode_value(select_mode_value),
         "only_unreviewed": bool(only_unreviewed_value and "yes" in only_unreviewed_value),
         "require_failed_any_false": bool(require_failed_value and "yes" in require_failed_value),
     }
@@ -1345,7 +1538,11 @@ def _apply_advanced_filters(frame: pd.DataFrame, state: dict[str, object]) -> pd
     for col, values in dict(state.get("select") or {}).items():
         if col not in out.columns:
             continue
-        out = out[~text_series(out, col).isin([str(v) for v in values])].copy()
+        selected_values = [str(v) for v in values]
+        if str(state.get("select_mode") or "exclude") == "include":
+            out = out[text_series(out, col).isin(selected_values)].copy()
+        else:
+            out = out[~text_series(out, col).isin(selected_values)].copy()
 
     return out
 
@@ -1742,6 +1939,16 @@ def build_explorer_app(
                             dcc.Input(id="query-input", debounce=True, placeholder="pandas query, e.g. dipper_score >= 5 and period_n_sources <= 1", style=BASE_INPUT_STYLE, persistence=True, persistence_type="local"),
                             dcc.Checklist(id="only-unreviewed", options=[{"label": " Only unreviewed", "value": "yes"}], value=[], className="explorer-stack-checklist", persistence=True, persistence_type="local"),
                             dcc.Checklist(id="require-failed-any-false", options=[{"label": " Require failed_any=False", "value": "yes"}], value=[], className="explorer-stack-checklist", persistence=True, persistence_type="local"),
+                            dcc.Checklist(id="select-filter-mode", options=[{"label": " Include selected categorical values", "value": "include"}], value=[], className="explorer-stack-checklist", persistence=True, persistence_type="local"),
+                            dcc.Input(id="explorer-filter-search-query", placeholder="Find filter...", type="text", style=BASE_INPUT_STYLE),
+                            html.Div(
+                                [
+                                    html.Button("Prev", id="explorer-filter-search-prev-btn", n_clicks=0, className="explorer-action-btn"),
+                                    html.Button("Next", id="explorer-filter-search-next-btn", n_clicks=0, className="explorer-action-btn"),
+                                ],
+                                className="explorer-button-row",
+                            ),
+                            html.Div("Type to find a filter", id="explorer-filter-search-status", className="explorer-status-line"),
                             html.Div(
                                 [
                                     html.Button("Save GUI State", id="save-explorer-gui-state-btn", n_clicks=0, className="explorer-action-btn"),
@@ -2150,27 +2357,7 @@ def build_explorer_app(
     )
 
     app.clientside_callback(
-        """
-        function(openSelectionClicks, openCurrentClicks) {
-            var total = Number(openSelectionClicks || 0) + Number(openCurrentClicks || 0);
-            if (!total) {
-                return window.dash_clientside.no_update;
-            }
-
-            try {
-                var reviewWindow = window.open('', '_blank', 'noopener');
-                if (reviewWindow && reviewWindow.document) {
-                    reviewWindow.document.title = 'Launching MALCA Review';
-                    reviewWindow.document.body.innerHTML = '<div style="font-family: sans-serif; padding: 24px;">Launching MALCA Review...</div>';
-                }
-                window.__malcaExplorerPendingReviewWindow = reviewWindow;
-            } catch (err) {
-                window.__malcaExplorerPendingReviewWindow = null;
-            }
-
-            return Date.now();
-        }
-        """,
+        _REVIEW_LAUNCH_PENDING_WINDOW_JS,
         Output("explorer-review-launch-pending", "data"),
         Input("open-selection-in-review-btn", "n_clicks"),
         Input("open-current-in-review-btn", "n_clicks"),
@@ -2178,31 +2365,20 @@ def build_explorer_app(
     )
 
     app.clientside_callback(
-        """
-        function(url) {
-            if (!url) {
-                return window.dash_clientside.no_update;
-            }
-
-            try {
-                var reviewWindow = window.__malcaExplorerPendingReviewWindow;
-                if (reviewWindow && !reviewWindow.closed) {
-                    reviewWindow.location.href = url;
-                    reviewWindow.focus();
-                } else {
-                    window.open(url, '_blank', 'noopener');
-                }
-            } catch (err) {
-                window.open(url, '_blank', 'noopener');
-            }
-
-            window.__malcaExplorerPendingReviewWindow = null;
-            return Date.now();
-        }
-        """,
+        _REVIEW_LAUNCH_OPEN_URL_JS,
         Output("explorer-review-launch-opened", "data"),
         Input("explorer-review-launch-url", "data"),
         prevent_initial_call=True,
+    )
+
+    app.clientside_callback(
+        _EXPLORER_FILTER_SEARCH_JS,
+        Output("explorer-filter-search-status", "children"),
+        Input("explorer-filter-search-query", "value"),
+        Input("explorer-filter-search-next-btn", "n_clicks"),
+        Input("explorer-filter-search-prev-btn", "n_clicks"),
+        Input("explorer-filter-search-query", "n_submit"),
+        prevent_initial_call=False,
     )
 
     @app.callback(
@@ -2288,6 +2464,7 @@ def build_explorer_app(
         num_max_values,
         text_values,
         select_values,
+        select_mode_value,
         only_unreviewed_value,
         require_failed_value,
         bool_ids,
@@ -2295,6 +2472,7 @@ def build_explorer_app(
         num_max_ids,
         text_ids,
         select_ids,
+        _select_mode_state,
     ):
         if not n_clicks:
             raise dash.exceptions.PreventUpdate
@@ -2307,6 +2485,7 @@ def build_explorer_app(
             num_max_values,
             text_values,
             select_values,
+            select_mode_value,
             only_unreviewed_value,
             require_failed_value,
             bool_ids,
@@ -2354,6 +2533,7 @@ def build_explorer_app(
             Output("query-input", "value", allow_duplicate=True),
             Output("only-unreviewed", "value", allow_duplicate=True),
             Output("require-failed-any-false", "value", allow_duplicate=True),
+            Output("select-filter-mode", "value", allow_duplicate=True),
             Output("x-metric", "value", allow_duplicate=True),
             Output("y-metric", "value", allow_duplicate=True),
             Output("color-metric", "value", allow_duplicate=True),
@@ -2394,7 +2574,7 @@ def build_explorer_app(
     def restore_saved_explorer_gui_state(saved_state, bool_ids, num_min_ids, num_max_ids, text_ids, select_ids):
         state = _normalize_explorer_gui_state(saved_state)
         if state is None:
-            return tuple([dash.no_update] * 30)
+            return tuple([dash.no_update] * 31)
 
         valid_sources = [label for label in _coerce_string_list(state.get("source_filter")) if label in all_source_labels]
         source_filter = valid_sources or list(all_source_labels)
@@ -2406,7 +2586,7 @@ def build_explorer_app(
         table_sort = state.get("table_sort") if state.get("table_sort") in valid_metrics else (
             "dipper_score" if "dipper_score" in valid_metrics else (metric_options[0] if metric_options else None)
         )
-        bool_values, num_min_values, num_max_values, text_values, select_values, only_unreviewed, require_failed = _explorer_advanced_ui_values_from_state(
+        bool_values, num_min_values, num_max_values, text_values, select_values, select_mode, only_unreviewed, require_failed = _explorer_advanced_ui_values_from_state(
             state,
             bool_ids=bool_ids,
             num_min_ids=num_min_ids,
@@ -2419,6 +2599,7 @@ def build_explorer_app(
             str(state.get("query_value") or ""),
             only_unreviewed,
             require_failed,
+            select_mode,
             x_metric,
             y_metric,
             color_metric,
@@ -2726,6 +2907,7 @@ def build_explorer_app(
             num_max_values,
             text_values,
             select_values,
+            select_mode_value,
             only_unreviewed_value,
             require_failed_value,
             bool_ids,
@@ -2733,6 +2915,7 @@ def build_explorer_app(
             num_max_ids,
             text_ids,
             select_ids,
+            _select_mode_state,
         ) = args
         if not n_clicks and not open_review_clicks:
             return dash.no_update, dash.no_update
@@ -2745,6 +2928,7 @@ def build_explorer_app(
             num_max_values,
             text_values,
             select_values,
+            select_mode_value,
             only_unreviewed_value,
             require_failed_value,
             bool_ids,
@@ -3105,6 +3289,7 @@ def build_explorer_app(
             num_max_values,
             text_values,
             select_values,
+            select_mode_value,
             only_unreviewed_value,
             require_failed_value,
             table_data,
@@ -3114,6 +3299,7 @@ def build_explorer_app(
             num_max_ids,
             text_ids,
             select_ids,
+            _select_mode_state,
         ) = args
 
         source_frame = _apply_review_overrides(combined.df, review_overrides)
@@ -3123,6 +3309,7 @@ def build_explorer_app(
             num_max_values,
             text_values,
             select_values,
+            select_mode_value,
             only_unreviewed_value,
             require_failed_value,
             bool_ids,
@@ -3233,6 +3420,7 @@ def build_explorer_app(
             num_max_values,
             text_values,
             select_values,
+            select_mode_value,
             only_unreviewed_value,
             require_failed_value,
             bool_ids,
@@ -3240,6 +3428,7 @@ def build_explorer_app(
             num_max_ids,
             text_ids,
             select_ids,
+            _select_mode_state,
         ) = args
 
         source_frame = _apply_review_overrides(combined.df, review_overrides)
@@ -3249,6 +3438,7 @@ def build_explorer_app(
             num_max_values,
             text_values,
             select_values,
+            select_mode_value,
             only_unreviewed_value,
             require_failed_value,
             bool_ids,

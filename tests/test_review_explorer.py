@@ -178,6 +178,10 @@ def test_build_explorer_app_uses_custom_plot_sidebar_layout() -> None:
     assert "explorer-keyboard-init" in ids
     assert "explorer-help-open" in ids
     assert "explorer-help-modal" in ids
+    assert "explorer-filter-search-query" in ids
+    assert "explorer-filter-search-prev-btn" in ids
+    assert "explorer-filter-search-next-btn" in ids
+    assert "explorer-filter-search-status" in ids
     assert "custom-graph" in ids
     assert "export-native-pdf-btn" in ids
     assert "camera-checklist" in ids
@@ -199,6 +203,26 @@ def test_build_explorer_app_uses_custom_plot_sidebar_layout() -> None:
     assert "main-graph" not in ids
     assert "catalog-graph" not in ids
     assert "explorer-main-splitter" not in ids
+
+
+def test_explorer_filter_group_uses_stable_anchor_ids() -> None:
+    frame = pd.DataFrame({"lsp_period": [1.0, 2.0]})
+    group = review_explorer._make_filter_group(frame, "Periodicity", [("num", "lsp_period")])
+
+    assert group.id == review_explorer._explorer_filter_group_id("Periodicity")
+    assert "explorer-filter-group" in (group.className or "")
+
+    content = group.children[1]
+    anchor = content.children[0]
+    assert anchor.id == review_explorer._explorer_filter_anchor_id("Periodicity", "lsp_period")
+    assert "explorer-filter-anchor" in (anchor.className or "")
+    assert anchor.title == "Periodicity / lsp_period"
+
+
+def test_explorer_filter_search_clientside_callback_opens_details_and_scrolls() -> None:
+    assert "scrollIntoView" in review_explorer._EXPLORER_FILTER_SEARCH_JS
+    assert "closest('details')" in review_explorer._EXPLORER_FILTER_SEARCH_JS
+    assert ".explorer-filter-anchor" in review_explorer._EXPLORER_FILTER_SEARCH_JS
 
 
 def test_table_rows_returns_all_filtered_candidates() -> None:
@@ -286,6 +310,13 @@ def test_build_review_command_disables_child_browser_auto_open(monkeypatch) -> N
     assert url == "http://127.0.0.1:8123"
 
 
+def test_explorer_review_launch_uses_reusable_placeholder_window() -> None:
+    assert "window.open('', '_blank')" in review_explorer._REVIEW_LAUNCH_PENDING_WINDOW_JS
+    assert "noopener" not in review_explorer._REVIEW_LAUNCH_PENDING_WINDOW_JS
+    assert "window.open(url, '_blank')" in review_explorer._REVIEW_LAUNCH_OPEN_URL_JS
+    assert "noopener" not in review_explorer._REVIEW_LAUNCH_OPEN_URL_JS
+
+
 def test_filter_controls_and_selected_candidate_are_persistent() -> None:
     bool_control = review_explorer._bool_filter_control("failed_any")
     bool_dropdown = bool_control.children[1]
@@ -331,6 +362,7 @@ def test_filter_controls_and_selected_candidate_are_persistent() -> None:
     query_input = _find_by_id(app.layout, "query-input")
     only_unreviewed = _find_by_id(app.layout, "only-unreviewed")
     require_failed = _find_by_id(app.layout, "require-failed-any-false")
+    select_filter_mode = _find_by_id(app.layout, "select-filter-mode")
 
     assert selected_store.storage_type == "local"
     assert source_filter.persistence is True
@@ -341,6 +373,8 @@ def test_filter_controls_and_selected_candidate_are_persistent() -> None:
     assert only_unreviewed.persistence_type == "local"
     assert require_failed.persistence is True
     assert require_failed.persistence_type == "local"
+    assert select_filter_mode.persistence is True
+    assert select_filter_mode.persistence_type == "local"
 
 
 def test_explorer_select_filters_pick_up_catalog_type_aliases() -> None:
@@ -364,6 +398,27 @@ def test_explorer_select_filters_pick_up_catalog_type_aliases() -> None:
 
     assert asassn_options == ["DSCT", "EA"]
     assert ztf_options == ["EW", "RR"]
+
+
+def test_explorer_apply_advanced_filters_respects_select_mode() -> None:
+    frame = pd.DataFrame(
+        {
+            "candidate_id": ["A1", "A2", "A3"],
+            "ztf_var_type": ["SR", "EA", "RR"],
+        }
+    )
+
+    excluded = review_explorer._apply_advanced_filters(
+        frame,
+        {"select": {"ztf_var_type": ["SR", "EA"]}, "select_mode": "exclude"},
+    )
+    included = review_explorer._apply_advanced_filters(
+        frame,
+        {"select": {"ztf_var_type": ["SR", "EA"]}, "select_mode": "include"},
+    )
+
+    assert excluded["candidate_id"].tolist() == ["A3"]
+    assert included["candidate_id"].tolist() == ["A1", "A2"]
 
 
 def test_filter_schema_exposes_pm_and_fail_flags() -> None:
@@ -449,6 +504,7 @@ def test_explorer_advanced_ui_values_roundtrip() -> None:
         num_max_values,
         text_values,
         select_values,
+        select_mode,
         only_unreviewed,
         require_failed,
     ) = review_explorer._explorer_advanced_ui_values_from_state(
@@ -465,6 +521,7 @@ def test_explorer_advanced_ui_values_roundtrip() -> None:
     assert num_max_values == [9.0]
     assert text_values == ["dipper"]
     assert select_values == [["run-a"]]
+    assert select_mode == []
     assert only_unreviewed == ["yes"]
     assert require_failed == []
 

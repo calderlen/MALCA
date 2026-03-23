@@ -99,9 +99,14 @@ def _scope_filters(filter_params: dict[str, object]) -> dict[str, object]:
 def _active_filter_specs(filter_params: dict[str, object]) -> list[dict[str, object]]:
     specs: list[dict[str, object]] = []
     seen_numeric: set[str] = set()
+    select_filter_mode = str(filter_params.get("select_filter_mode") or "exclude").strip().lower()
+    if select_filter_mode not in {"include", "exclude"}:
+        select_filter_mode = "exclude"
 
     for key, value in filter_params.items():
         if key in _QUEUE_SCOPE_KEYS or key in _QUEUE_SORT_KEYS:
+            continue
+        if key == "select_filter_mode":
             continue
 
         if key in SPECIAL_FILTERS:
@@ -169,8 +174,8 @@ def _active_filter_specs(filter_params: dict[str, object]) -> list[dict[str, obj
             col = key.replace("exclude_", "", 1)
             specs.append({
                 "key": key,
-                "label": f"exclude {col}: {_preview_filter_values(values)}",
-                "params": {key: values},
+                "label": f"{select_filter_mode} {col}: {_preview_filter_values(values)}",
+                "params": {key: values, "select_filter_mode": select_filter_mode},
             })
             continue
 
