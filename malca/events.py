@@ -650,7 +650,7 @@ def score_events_bayesian(
     mag_col: str = "mag",
     err_col: str = "error",
 
-    baseline_func=per_camera_gp_baseline,
+    baseline_func=per_camera_gp_baseline_masked,
     baseline_kwargs: dict | None = None,
     df_base: pd.DataFrame | None = None,
 

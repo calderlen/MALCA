@@ -9,6 +9,8 @@ import io
 import re
 import sys
 
+from tqdm import tqdm
+
 import matplotlib.pyplot as pl
 import numpy as np
 import pandas as pd
@@ -254,8 +256,12 @@ def records_from_skypatrol_dir(df_targets: pd.DataFrame, skypatrol_dir: Path) ->
     for _, row in df_targets.iterrows():
         source_id = str(row.get("source_id"))
         mag_bin = str(row.get("mag_bin"))
-        csv_path = base / f"{source_id}.csv"
-        if not csv_path.exists():
+        csv_candidates = [
+            base / f"{source_id}.csv",
+            base / f"{source_id}-light-curves.csv",
+        ]
+        csv_path = next((path for path in csv_candidates if path.exists()), None)
+        if csv_path is None:
             continue
         rec = {
             "mag_bin": mag_bin,
@@ -314,6 +320,79 @@ def records_from_candidates_with_paths(
         }
         records.setdefault(mag_bin, []).append(rec)
     return records
+
+
+def _ordered_reproduction_columns(frame: pd.DataFrame, extra_cols: Iterable[str] | None = None) -> list[str]:
+    if extra_cols:
+        base_extra_cols = [c for c in extra_cols if c in frame.columns]
+    else:
+        base_extra_cols = []
+
+    ordered = [
+        col for col in [
+            "source",
+            "source_id",
+            "category",
+            "mag_bin",
+            "detected",
+            "rejection_reason",
+            "detection_details",
+        ]
+        if col in frame.columns
+    ]
+    for col in [
+        "g_rejection_reason",
+        "v_rejection_reason",
+        "g_n_peaks",
+        "v_n_peaks",
+        "g_bayes_dip_significant",
+        "v_bayes_dip_significant",
+        "g_bayes_dip_max_prob",
+        "v_bayes_dip_max_prob",
+        "g_bayes_dip_max_logbf",
+        "v_bayes_dip_max_logbf",
+        "g_bayes_jump_significant",
+        "v_bayes_jump_significant",
+        "g_bayes_dip_bayes_factor",
+        "v_bayes_dip_bayes_factor",
+        "g_bayes_jump_bayes_factor",
+        "v_bayes_jump_bayes_factor",
+        "g_bayes_n_dips",
+        "v_bayes_n_dips",
+        "g_bayes_n_jumps",
+        "v_bayes_n_jumps",
+        "g_max_depth",
+        "v_max_depth",
+        "jd_first",
+        "jd_last",
+        "g_n_points",
+        "v_n_points",
+        "g_time_span",
+        "v_time_span",
+        "g_n_runs",
+        "g_n_triggered",
+        "g_best_morphology",
+        "g_best_t0",
+        "g_best_amplitude",
+        "g_best_duration",
+        "g_best_run_n_points",
+        "g_best_run_start_jd",
+        "g_best_run_end_jd",
+        "v_n_runs",
+        "v_n_triggered",
+        "v_best_morphology",
+        "v_best_t0",
+        "v_best_amplitude",
+        "v_best_duration",
+        "v_best_run_n_points",
+        "v_best_run_start_jd",
+        "v_best_run_end_jd",
+    ]:
+        if col in frame.columns:
+            ordered.append(col)
+    ordered.extend([c for c in base_extra_cols if c not in ordered])
+    ordered.extend([c for c in frame.columns if c not in ordered])
+    return ordered
 
 
 def coerce_candidate_records(data) -> list[dict[str, object]]:
@@ -765,8 +844,9 @@ def build_reproduction_report(
             n_found = sum(len(v) for v in records_map.values())
             print(f"[DEBUG] Built records_map from manifest: {n_found} light curves found")
 
+    tags_applied = manifest_subset is not None and not skip_tags and bool(records_map)
     # Apply tag filters if manifest is provided and not skipped
-    if manifest_subset is not None and not skip_tags and records_map:
+    if tags_applied:
         if verbose:
             total_before = sum(len(v) for v in records_map.values())
             print(f"\n[TAG] Applying tag filters to {total_before} candidates...")
@@ -1337,9 +1417,6 @@ def build_reproduction_report(
                     "v_jump_trigger_threshold": float(res_v["jump"].get("trigger_threshold", np.nan)),
                 }
             )
-    else:
-        rows = None
-
     if rows is None:
         rows_df = pd.DataFrame(columns=["source_id", "mag_bin"])
     elif isinstance(rows, list):
@@ -1405,6 +1482,58 @@ def build_reproduction_report(
             if verbose:
                 print(f"[SIGNAL-FILTER] Warning: signal amplitude filter failed: {e}")
                 print(f"[SIGNAL-FILTER] Continuing without signal amplitude filtering...")
+
+    # ==========================================================================
+    # Post-processing: Load index to get Gaia IDs and coordinates
+    # ==========================================================================
+    if (run_filter or run_characterize or run_dust) and not rows_df.empty and index_file:
+        index_path = Path(index_file) if index_file else None
+        if index_path and index_path.exists():
+            if verbose:
+                print(f"\n[INDEX] Loading ASAS-SN index from {index_path}...")
+
+            try:
+                # Load only needed columns from index
+                index_cols = ["asas_sn_id", "gaia_id", "ra_deg", "dec_deg"]
+                if str(index_path).endswith('.parquet'):
+                    index_df = pd.read_parquet(index_path, columns=index_cols)
+                else:
+                    index_df = pd.read_csv(index_path, usecols=index_cols)
+
+                # Ensure asas_sn_id is string for matching
+                index_df["asas_sn_id"] = index_df["asas_sn_id"].astype(str)
+
+                # The source_id in rows_df is actually asas_sn_id
+                if "asas_sn_id" in rows_df.columns:
+                    merge_col = "asas_sn_id"
+                    rows_df[merge_col] = rows_df[merge_col].astype(str)
+                elif "source_id" in rows_df.columns:
+                    merge_col = "source_id"
+                    rows_df["_merge_id"] = rows_df[merge_col].astype(str)
+                    merge_col = "_merge_id"
+                else:
+                    merge_col = None
+
+                if merge_col:
+                    rows_df = rows_df.merge(
+                        index_df,
+                        left_on=merge_col,
+                        right_on="asas_sn_id",
+                        how="left",
+                        suffixes=("", "_idx")
+                    )
+                    # Clean up merge columns
+                    rows_df = rows_df.drop(columns=["_merge_id", "asas_sn_id_idx"], errors="ignore")
+
+                    if verbose:
+                        n_with_gaia = rows_df["gaia_id"].notna().sum() if "gaia_id" in rows_df.columns else 0
+                        print(f"[INDEX] Matched {n_with_gaia}/{len(rows_df)} sources to index (got gaia_id, ra_deg, dec_deg)")
+
+            except Exception as e:
+                if verbose:
+                    print(f"[INDEX] Warning: Failed to load index: {e}")
+        elif verbose:
+            print(f"[INDEX] Warning: Index file not found: {index_path}")
 
     # ==========================================================================
     # Post-processing: Filters (apply_filters)
@@ -1532,11 +1661,6 @@ def build_reproduction_report(
                         ordered_results[pos] = row_dict
                         continue
                     lc_path = Path(str(path_val))
-                    if lc_path.suffix.lower() == ".csv":
-                        if verbose:
-                            print(f"[ENRICH] Skipping CSV light curve: {lc_path}")
-                        ordered_results[pos] = row_dict
-                        continue
                     asassn_id = str(row.get("asas_sn_id") or row.get("source_id") or lc_path.stem)
                     pending_tasks.append((row_dict, asassn_id, str(lc_path.parent), enrich_compute_ls))
                     pending_indices.append(pos)
@@ -1560,57 +1684,7 @@ def build_reproduction_report(
                     print(f"[ENRICH] Warning: enrichment failed: {e}")
                     print("[ENRICH] Continuing without enrichment...")
 
-    # ==========================================================================
-    # Post-processing: Load index to get Gaia IDs and coordinates
-    # ==========================================================================
-    if (run_characterize or run_dust) and not rows_df.empty and index_file:
-        index_path = Path(index_file) if index_file else None
-        if index_path and index_path.exists():
-            if verbose:
-                print(f"\n[INDEX] Loading ASAS-SN index from {index_path}...")
-
-            try:
-                # Load only needed columns from index
-                index_cols = ["asas_sn_id", "gaia_id", "ra_deg", "dec_deg"]
-                if str(index_path).endswith('.parquet'):
-                    index_df = pd.read_parquet(index_path, columns=index_cols)
-                else:
-                    index_df = pd.read_csv(index_path, usecols=index_cols)
-
-                # Ensure asas_sn_id is string for matching
-                index_df["asas_sn_id"] = index_df["asas_sn_id"].astype(str)
-
-                # The source_id in rows_df is actually asas_sn_id
-                if "asas_sn_id" in rows_df.columns:
-                    merge_col = "asas_sn_id"
-                    rows_df[merge_col] = rows_df[merge_col].astype(str)
-                elif "source_id" in rows_df.columns:
-                    merge_col = "source_id"
-                    rows_df["_merge_id"] = rows_df[merge_col].astype(str)
-                    merge_col = "_merge_id"
-                else:
-                    merge_col = None
-
-                if merge_col:
-                    rows_df = rows_df.merge(
-                        index_df,
-                        left_on=merge_col,
-                        right_on="asas_sn_id",
-                        how="left",
-                        suffixes=("", "_idx")
-                    )
-                    # Clean up merge columns
-                    rows_df = rows_df.drop(columns=["_merge_id", "asas_sn_id_idx"], errors="ignore")
-
-                    if verbose:
-                        n_with_gaia = rows_df["gaia_id"].notna().sum() if "gaia_id" in rows_df.columns else 0
-                        print(f"[INDEX] Matched {n_with_gaia}/{len(rows_df)} sources to index (got gaia_id, ra_deg, dec_deg)")
-
-            except Exception as e:
-                if verbose:
-                    print(f"[INDEX] Warning: Failed to load index: {e}")
-        elif verbose:
-            print(f"[INDEX] Warning: Index file not found: {index_path}")
+    # Load index logic has been moved before apply_filters.
 
     # ==========================================================================
     # Post-processing: Characterization (Gaia DR3, stellar params, photometry)
@@ -1787,73 +1861,7 @@ def build_reproduction_report(
     else:
         cols = []
 
-    ordered_cols = [
-        "source",
-        "source_id",
-        "category",
-        "mag_bin",
-        "detected",
-        "rejection_reason",
-        "detection_details",
-    ]
-    for col in [
-        "g_rejection_reason",
-        "v_rejection_reason",
-        "g_n_peaks",
-        "v_n_peaks",
-        "g_bayes_dip_significant",
-        "v_bayes_dip_significant",
-        "g_bayes_dip_max_prob",
-        "v_bayes_dip_max_prob",
-        "g_bayes_dip_max_logbf",
-        "v_bayes_dip_max_logbf",
-        "g_bayes_jump_significant",
-        "v_bayes_jump_significant",
-        "g_bayes_dip_bayes_factor",
-        "v_bayes_dip_bayes_factor",
-        "g_bayes_jump_bayes_factor",
-        "v_bayes_jump_bayes_factor",
-        "g_bayes_n_dips",
-        "v_bayes_n_dips",
-        "g_bayes_n_jumps",
-        "v_bayes_n_jumps",
-        "g_max_depth",
-        "v_max_depth",
-        "jd_first",
-        "jd_last",
-        # Light curve statistics
-        "g_n_points",
-        "v_n_points",
-        "g_time_span",
-        "v_time_span",
-        # Run details - g band
-        "g_n_runs",
-        "g_n_triggered",
-        "g_best_morphology",
-        "g_best_t0",
-        "g_best_amplitude",
-        "g_best_duration",
-        "g_best_run_n_points",
-        "g_best_run_start_jd",
-        "g_best_run_end_jd",
-        # Run details - V band
-        "v_n_runs",
-        "v_n_triggered",
-        "v_best_morphology",
-        "v_best_t0",
-        "v_best_amplitude",
-        "v_best_duration",
-        "v_best_run_n_points",
-        "v_best_run_start_jd",
-        "v_best_run_end_jd",
-    ]:
-        if col in merged.columns:
-            ordered_cols.append(col)
-    ordered_cols.extend([c for c in cols if c not in ordered_cols])
-
-    remaining = [c for c in merged.columns if c not in ordered_cols]
-    ordered_cols.extend(remaining)
-
+    ordered_cols = _ordered_reproduction_columns(merged, cols)
     return merged[ordered_cols]
 
 
@@ -2493,7 +2501,11 @@ def _main_impl(args: argparse.Namespace, plot_out_dir: Path | None = None) -> pd
         print(f"P-grid (dip):         min={args.p_min_dip}, max={args.p_max_dip}")
     if args.p_min_jump is not None or args.p_max_jump is not None:
         print(f"P-grid (jump):        min={args.p_min_jump}, max={args.p_max_jump}")
-    print(f"Tags:          {'APPLIED' if not args.skip_tags else 'SKIPPED'}")
+    tags_applied = bool(args.manifest) and not args.skip_tags
+    if tags_applied:
+        print("Tags:                 APPLIED")
+    else:
+        print("Tags:                 SKIPPED (no manifest)")
     if not args.skip_tags:
         print(f"  - Sparse LC filter:   min_time_span={args.min_time_span}d, min_cadence={args.min_points_per_day}/d")
         print(f"  - Multi-camera:       min_cameras={args.min_cameras}")

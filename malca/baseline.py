@@ -526,7 +526,7 @@ def per_camera_gp_baseline_masked(
         s0 = max(s0, 1e-6)
 
         sig0 = r0 / s0
-        dip_flag = finite & np.isfinite(sig0) & (sig0 < float(dip_sigma_thresh))
+        dip_flag = finite & np.isfinite(sig0) & (sig0 > float(dip_sigma_thresh))
 
         keep = finite.copy()
         if dip_flag.any():
