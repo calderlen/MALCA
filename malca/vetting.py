@@ -159,6 +159,77 @@ GAIA_EPOCH_VET_CHUNK_SIZE = CFG_GAIA_EPOCH_VET_CHUNK_SIZE
 # =============================================================================
 
 
+def _xmatch_row_scalar(row: pd.Series, key: str, default=None):
+    """Return a scalar from an XMatch ``to_pandas()`` row (handles duplicate column names)."""
+    if key not in row.index:
+        return default
+    value = row[key]
+    if isinstance(value, pd.Series):
+        if value.empty:
+            return default
+        value = value.iloc[0]
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value
+    if pd.isna(value):
+        return default
+    return value
+
+
+def _simbad_designation_tail(s: str) -> bool:
+    """True if *s* looks like the numeric tail of a catalog id (e.g. UCAC4 667-019722, TYC 3159-1869-1)."""
+    t = str(s).strip()
+    if not t:
+        return False
+    return bool(re.match(r"^\d+-\d+(-\d+)?$", t))
+
+
+def _normalize_simbad_xmatch_fields(
+    row: pd.Series, main_id, otype, ang_dist,
+) -> tuple[str, str, float]:
+    """
+    Repair occasional CDS XMatch / pandas quirks: split ``main_id`` with the numeric
+    tail in the ``otype`` column, and coerce separation from ``angDist``.
+    """
+    if main_id is None or (isinstance(main_id, float) and pd.isna(main_id)):
+        mid = ""
+    else:
+        mid = str(main_id).strip()
+
+    if otype is None or (isinstance(otype, float) and pd.isna(otype)):
+        ot = ""
+    else:
+        ot = str(otype).strip()
+
+    if mid and " " not in mid and _simbad_designation_tail(ot):
+        mid = f"{mid} {ot}"
+        ot_fix = _xmatch_row_scalar(row, "main_type", "")
+        if ot_fix is None or (isinstance(ot_fix, float) and pd.isna(ot_fix)) or (
+            isinstance(ot_fix, str) and not ot_fix.strip()
+        ):
+            ot_raw = _xmatch_row_scalar(row, "otype", "")
+            tail = str(ot_raw).strip() if ot_raw is not None and not pd.isna(ot_raw) else ""
+            if tail and not _simbad_designation_tail(tail):
+                ot_fix = ot_raw
+            else:
+                ot_fix = ""
+        if ot_fix is None or (isinstance(ot_fix, float) and pd.isna(ot_fix)):
+            ot = ""
+        else:
+            ot = str(ot_fix).strip()
+
+    sep_out = np.nan
+    try:
+        v = float(ang_dist)
+        if np.isfinite(v) and 0.0 <= v <= 3600.0:
+            sep_out = v
+    except (TypeError, ValueError):
+        pass
+
+    return mid, ot, sep_out
+
+
 def query_simbad_batch(
     df: pd.DataFrame,
     radius_arcsec: float = SIMBAD_RADIUS_ARCSEC,
@@ -185,23 +256,6 @@ def _simbad_via_xmatch(
 ) -> pd.DataFrame:
     """SIMBAD lookup via CDS XMatch (reliable for small batches)."""
     print(f"SIMBAD: querying {n} candidates via CDS XMatch (radius={radius_arcsec}\")")
-
-    def _row_value(row: pd.Series, key: str, default=None):
-        """Return scalar value even if duplicate column names exist."""
-        if key not in row.index:
-            return default
-        value = row[key]
-        if isinstance(value, pd.Series):
-            if value.empty:
-                return default
-            value = value.iloc[0]
-        if value is None:
-            return default
-        if isinstance(value, str):
-            return value
-        if pd.isna(value):
-            return default
-        return value
 
     source_table = Table()
     source_table["_idx"] = np.array(df.index[valid])
@@ -244,10 +298,13 @@ def _simbad_via_xmatch(
             for _, row in result_df.iterrows():
                 idx = int(row["_idx"])
                 if idx in df.index:
-                    main_id = _row_value(row, "main_id", "")
-                    otype = _row_value(row, "otype", "")
-                    nbref_val = _row_value(row, "nbref", 0)
-                    sep = _row_value(row, "angDist", np.nan)
+                    main_id = _xmatch_row_scalar(row, "main_id", "")
+                    otype = _xmatch_row_scalar(row, "otype", "")
+                    nbref_val = _xmatch_row_scalar(row, "nbref", 0)
+                    ang_dist = _xmatch_row_scalar(row, "angDist", np.nan)
+                    main_id, otype, sep = _normalize_simbad_xmatch_fields(
+                        row, main_id, otype, ang_dist,
+                    )
 
                     df.loc[idx, "simbad_main_id"] = str(main_id) if main_id is not None else ""
                     df.loc[idx, "simbad_otype"] = str(otype) if otype is not None else ""
@@ -442,6 +499,146 @@ def query_gaia_variability(
 # =============================================================================
 
 
+def _load_asassn_local_catalog(path: Path) -> pd.DataFrame:
+    key = str(path.resolve())
+    if key in _asassn_cache:
+        return _asassn_cache[key]
+    if not path.is_file():
+        print(f"ASAS-SN variables: local CSV not found at {path}, skipping")
+        return pd.DataFrame()
+    print(f"ASAS-SN variables: loading local catalog {path.name}...")
+    cat = pd.read_csv(path, low_memory=False)
+    need = {"RAJ2000", "DEJ2000", "ID"}
+    if not need.issubset(cat.columns):
+        print(f"ASAS-SN variables: CSV missing columns {need}, got {list(cat.columns)[:12]}...")
+        return pd.DataFrame()
+    _asassn_cache[key] = cat
+    return cat
+
+
+def _asassn_via_local(
+    df: pd.DataFrame,
+    valid: pd.Series,
+    n_valid: int,
+    radius_arcsec: float,
+    local_csv: Path | str | None,
+) -> pd.DataFrame:
+    path = Path(local_csv) if local_csv is not None else ASASSN_VAR_LOCAL_CSV
+    cat = _load_asassn_local_catalog(path)
+    if cat.empty:
+        return df
+
+    print(f"ASAS-SN variables: crossmatching {n_valid} candidates to local catalog (radius={radius_arcsec}\")")
+    src_index = df.index[valid]
+    src_coords = SkyCoord(
+        ra=df.loc[valid, "ra"].values,
+        dec=df.loc[valid, "dec"].values,
+        unit="deg",
+    )
+    cat_coords = SkyCoord(
+        ra=cat["RAJ2000"].to_numpy(dtype=float),
+        dec=cat["DEJ2000"].to_numpy(dtype=float),
+        unit="deg",
+    )
+    idx_cat, idx_src, sep2d, _ = src_coords.search_around_sky(cat_coords, radius_arcsec * u.arcsec)
+    if len(idx_src) == 0:
+        print("ASAS-SN variables: 0 matches")
+        return df
+
+    matched = cat.iloc[np.asarray(idx_cat, dtype=int)].copy().reset_index(drop=True)
+    matched["candidate_idx"] = src_index.to_numpy()[np.asarray(idx_src, dtype=int)]
+    matched["sep_arcsec"] = np.asarray(sep2d.arcsec, dtype=float)
+    type_col = "ML_classification" if "ML_classification" in matched.columns else None
+    per_col = "Period" if "Period" in matched.columns else None
+
+    n_matched = 0
+    for cand_idx, group in matched.groupby("candidate_idx", sort=False):
+        best = group.sort_values("sep_arcsec", na_position="last").iloc[0]
+        df.loc[cand_idx, "asassn_var_name"] = _safe_text(best.get("ID"))
+        if type_col:
+            df.loc[cand_idx, "asassn_var_type"] = _safe_text(best.get(type_col))
+        if per_col:
+            try:
+                df.loc[cand_idx, "asassn_var_period"] = float(best.get(per_col))
+            except (TypeError, ValueError):
+                pass
+        n_matched += 1
+
+    print(f"ASAS-SN variables: {n_matched} matches")
+    return df
+
+
+def _asassn_via_tap(
+    df: pd.DataFrame,
+    valid: pd.Series,
+    n_valid: int,
+    radius_arcsec: float,
+    chunk_size: int,
+) -> pd.DataFrame:
+    print(f"ASAS-SN variables: crossmatching {n_valid} candidates via TAP (radius={radius_arcsec}\")")
+    coords_df = pd.DataFrame({
+        "_idx": df.index[valid],
+        "ra": df.loc[valid, "ra"].values,
+        "dec": df.loc[valid, "dec"].values,
+    })
+    try:
+        result = batch_tap_crossmatch(
+            coords_df,
+            tap_url=VIZIER_TAP_URL,
+            catalog_table=f'"{ASASSN_VAR_CATALOG}"',
+            select_cols='c."ASASSN-V", c."Per", c."Type"',
+            ra_col="RAJ2000",
+            dec_col="DEJ2000",
+            match_radius_arcsec=radius_arcsec,
+            chunk_size=chunk_size,
+            n_workers=4,
+            verbose=True,
+            desc="ASAS-SN II/366 TAP",
+        )
+    except Exception as e:
+        print(f"ASAS-SN variables: TAP crossmatch failed: {e}")
+        return df
+
+    if result.empty:
+        print("ASAS-SN variables: 0 matches")
+        return df
+    sep_col = "sep_arcsec" if "sep_arcsec" in result.columns else "angDist"
+    if sep_col in result.columns:
+        result = result.sort_values(sep_col).drop_duplicates(subset="_idx", keep="first")
+
+    name_keys = ("ASASSN-V", "ASASSN_V", "ASASSNV")
+    per_keys = ("Per", "PER")
+    type_keys = ("Type", "TYPE")
+
+    def _pick(row: pd.Series, keys: tuple[str, ...]) -> object:
+        for k in keys:
+            if k in row.index and pd.notna(row.get(k)):
+                return row.get(k)
+        return None
+
+    matched = 0
+    for _, row in result.iterrows():
+        try:
+            idx = int(row["_idx"])
+        except (TypeError, ValueError):
+            continue
+        if idx not in df.index:
+            continue
+        name = _pick(row, name_keys)
+        per = _pick(row, per_keys)
+        vtype = _pick(row, type_keys)
+        df.loc[idx, "asassn_var_name"] = _safe_text(name)
+        df.loc[idx, "asassn_var_type"] = _safe_text(vtype)
+        try:
+            df.loc[idx, "asassn_var_period"] = float(per) if per is not None and pd.notna(per) else np.nan
+        except (TypeError, ValueError):
+            pass
+        matched += 1
+
+    print(f"ASAS-SN variables: {matched} matches")
+    return df
+
+
 def crossmatch_asassn_variables(
     df: pd.DataFrame,
     radius_arcsec: float = ASASSN_VAR_RADIUS_ARCSEC,
@@ -450,8 +647,11 @@ def crossmatch_asassn_variables(
     local_csv: Path | str | None = None,
 ) -> pd.DataFrame:
     """
-    Crossmatch against the ASAS-SN Variable Stars Database using local CSV.
+    Crossmatch against the ASAS-SN Variable Stars Database (VizieR II/366).
     Adds columns: asassn_var_name, asassn_var_type, asassn_var_period.
+
+    method='local' — ``input/asassn_variables_*.csv`` (or *local_csv*) + SkyCoord.
+    method='tap'    — VizieR TAP upload to ``II/366/catv2021``.
     """
     df = df.copy()
     df["asassn_var_name"] = ""
@@ -463,6 +663,8 @@ def crossmatch_asassn_variables(
         return df
 
     n_valid = int(valid.sum())
+    if method == "tap":
+        return _asassn_via_tap(df, valid, n_valid, radius_arcsec, chunk_size)
     return _asassn_via_local(df, valid, n_valid, radius_arcsec, local_csv)
 
 # =============================================================================

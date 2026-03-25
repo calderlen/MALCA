@@ -182,14 +182,30 @@ def resolve_lightcurve_path(payload: dict, plot_dir: Path | None) -> Path | None
     return None
 
 
-def _camera_labels(df: pd.DataFrame) -> pd.Series:
+def _camera_labels(df: pd.DataFrame, payload: dict | None = None) -> pd.Series:
     if "camera_name" in df.columns:
-        return pd.Series(df["camera_name"].astype(str), index=df.index)
-    if "camera#" in df.columns:
-        return pd.Series(df["camera#"].astype(str), index=df.index)
-    if "camera" in df.columns:
-        return pd.Series(df["camera"].astype(str), index=df.index)
-    return pd.Series(["unknown"] * len(df), index=df.index)
+        base_labels = pd.Series(df["camera_name"].astype(str), index=df.index)
+    elif "camera#" in df.columns:
+        base_labels = pd.Series(df["camera#"].astype(str), index=df.index)
+    elif "camera" in df.columns:
+        base_labels = pd.Series(df["camera"].astype(str), index=df.index)
+    else:
+        base_labels = pd.Series(["unknown"] * len(df), index=df.index)
+
+    if payload and "by_camera" in payload:
+        by_cam = payload["by_camera"]
+        if isinstance(by_cam, pd.DataFrame) and "camera" in by_cam.columns and "loo_corr" in by_cam.columns:
+            loo_map = dict(zip(by_cam["camera"].astype(str), by_cam["loo_corr"]))
+            
+            def _format_label(name):
+                corr = loo_map.get(str(name))
+                if corr is not None and np.isfinite(corr):
+                    return f"{name} (LOO Corr: {corr:.2f})"
+                return str(name)
+                
+            return base_labels.map(_format_label)
+            
+    return base_labels
 
 
 def _parse_num(payload: dict, key: str) -> float | None:
@@ -1151,7 +1167,7 @@ def build_interactive_lightcurve_figure(
     jd_offset = JD_OFFSET if median_jd > 2000000 else 8000.0
     df = df[np.isfinite(df["JD"]) & np.isfinite(df["mag"])].copy()
     df["JD_plot"] = df["JD"] - jd_offset
-    df["camera_label"] = _camera_labels(df)
+    df["camera_label"] = _camera_labels(df, payload)
 
     camera_ids = sorted(df["camera_label"].dropna().unique().tolist())
     selected = [str(c) for c in (selected_cameras or []) if str(c) in camera_ids]

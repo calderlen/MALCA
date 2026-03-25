@@ -109,29 +109,28 @@ def uniform_p_grid(p_min=0.9, p_max=1.0 - 1e-6, n=36):
 
 
 def default_mag_grid(
-    baseline_mag: float,
-    mags: np.ndarray,
+    resid: np.ndarray,
     kind: EventKind,  # "dip" or "jump"
     n: int = 12,
 ):
     """
     
     """
-    mags_finite = mags[np.isfinite(mags)]
-    if len(mags_finite) == 0:
-        raise ValueError("No finite magnitude values for grid construction")
-    lo, hi = np.nanpercentile(mags, [5, 95])
+    resid_finite = resid[np.isfinite(resid)]
+    if len(resid_finite) == 0:
+        raise ValueError("No finite residual values for grid construction")
+    lo, hi = np.nanpercentile(resid, [5, 95])
     if not (np.isfinite(lo) and np.isfinite(hi)):
-        med = np.nanmedian(mags)
+        med = np.nanmedian(resid)
         lo, hi = med - 0.5, med + 0.5
     spread = max(hi - lo, 0.05)
 
     if kind == "dip":
-        start = baseline_mag + 0.02
-        stop = max(baseline_mag + 0.02, hi + 0.5 * spread)
+        start = 0.02
+        stop = max(0.02, hi + 0.5 * spread)
     elif kind == "jump":
-        start = min(baseline_mag - 0.02, lo - 0.5 * spread)
-        stop = baseline_mag - 0.02
+        start = min(-0.02, lo - 0.5 * spread)
+        stop = -0.02
     else:
         raise ValueError("kind must be 'dip' or 'jump'")
 
@@ -803,6 +802,7 @@ def score_events_bayesian(
         if cam_vec is not None:
             cam_vec = cam_vec[valid_mask]
 
+    resid = mags - baseline_mags
     baseline_mag = float(np.nanmedian(baseline_mags))
 
     if kind == "dip":
@@ -820,7 +820,7 @@ def score_events_bayesian(
     p_grid = uniform_p_grid(p_min=p_min, p_max=p_max, n=p_points)
 
     if mag_grid is None:
-        mag_grid = default_mag_grid(baseline_mag, mags, kind, n=mag_points)
+        mag_grid = default_mag_grid(resid, kind, n=mag_points)
     else:
         mag_grid = np.asarray(mag_grid, float)
 
@@ -828,14 +828,14 @@ def score_events_bayesian(
     N = int(len(mags))
 
     if kind == "dip":
-        log_Pb_vec = log_gaussian(mags, baseline_mags, errs)
+        log_Pb_vec = log_gaussian(resid, 0.0, errs)
         log_Pb_grid = np.broadcast_to(log_Pb_vec, (M, N))
-        log_Pf_grid = log_gaussian(mags[None, :], mag_grid[:, None], errs)
+        log_Pf_grid = log_gaussian(resid[None, :], mag_grid[:, None], errs)
         event_component = "faint"
 
     elif kind == "jump":
-        log_Pb_grid = log_gaussian(mags[None, :], mag_grid[:, None], errs)
-        log_Pf_vec = log_gaussian(mags, baseline_mags, errs)
+        log_Pb_grid = log_gaussian(resid[None, :], mag_grid[:, None], errs)
+        log_Pf_vec = log_gaussian(resid, 0.0, errs)
         log_Pf_grid = np.broadcast_to(log_Pf_vec, (M, N))
         event_component = "bright"
         

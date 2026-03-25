@@ -723,6 +723,9 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("stats_mhps_non_zero",                        "REAL", "float"),
     ("stats_mhps_pn_flag",                         "INTEGER", "bool"),
     ("stats_mhps_ratio",                           "REAL", "float"),
+    ("stats_camera_loo_corr_min",                    "REAL", "float"),
+    ("stats_camera_loo_corr_median",                 "REAL", "float"),
+    ("stats_camera_loo_rms_max",                     "REAL", "float"),
     # -- LTV: long-term variability core metrics --
     ("ltv_slope",                    "REAL",    "float"),  # mag/year linear slope
     ("ltv_slope_quad",               "REAL",    "float"),  # quadratic term (mag/yr^2)
@@ -1359,7 +1362,11 @@ def query_queue(
 
 def get_candidate_payload(conn: sqlite3.Connection, candidate_id: str) -> dict:
     """Return merged payload for display: payload_json plus SQL columns (so vetting etc. show in GUI)."""
-    col_list = ", ".join(["payload_json"] + _COL_NAMES)
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA table_info(candidates)")
+    actual_cols = set([c[1] for c in cursor.fetchall()])
+    cols_to_fetch = [c for c in _COL_NAMES if c in actual_cols]
+    col_list = ", ".join(["payload_json"] + cols_to_fetch)
     row = conn.execute(
         f"SELECT {col_list} FROM candidates WHERE candidate_id=?",
         (candidate_id,),
@@ -1367,11 +1374,12 @@ def get_candidate_payload(conn: sqlite3.Connection, candidate_id: str) -> dict:
     if row is None:
         return {}
     try:
+        import json
         payload = json.loads(row[0]) if row[0] else {}
     except Exception:
         payload = {}
     # Merge SQL columns into payload so asassn_var_type, ztf_var_type, tns_type etc. show when only in SQL
-    for i, col in enumerate(_COL_NAMES):
+    for i, col in enumerate(cols_to_fetch):
         if i + 1 >= len(row):
             break
         raw = row[i + 1]

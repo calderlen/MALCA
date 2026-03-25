@@ -36,7 +36,7 @@ from malca.config.config_stats import (
     LS_ALIAS_PERIODS,
 )
 from malca.periodogram import pdm_find_period, ce_find_period
-from malca.utils import read_lc_dat2, read_lc_csv, read_skypatrol_lc_csv
+from malca.utils import read_lc_dat2, read_lc_csv, read_skypatrol_lc_csv, compute_camera_loo_metrics
 
 
 
@@ -1588,7 +1588,7 @@ def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=Tr
 
     df_g, df_v = read_lc_csv(asassn_id, path)
     if df_g.empty and df_v.empty:
-        df_g, df_v = read_skypatrol_lc_csv(asassn_id, path)
+        df_g, df_v = read_skypatrol_lc_csv, compute_camera_loo_metrics(asassn_id, path)
     if df_g.empty and df_v.empty:
         df_g, df_v = read_lc_dat2(asassn_id, path, file_ext=file_ext)
 
@@ -1790,7 +1790,39 @@ def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=Tr
         out.attrs["group_name"] = name
         return out
 
+
     by_camera  = per_group_stats(df.groupby("camera_name"), "camera")
+
+    # Add LOO metrics to by_camera
+    try:
+        loo_res = compute_camera_loo_metrics(df, cam_col="camera_name")
+        if loo_res:
+            by_camera["loo_corr"] = by_camera["camera_name"].map(lambda c: loo_res.get(c, {}).get("corr", np.nan))
+            by_camera["loo_offset"] = by_camera["camera_name"].map(lambda c: loo_res.get(c, {}).get("offset", np.nan))
+            by_camera["loo_rms"] = by_camera["camera_name"].map(lambda c: loo_res.get(c, {}).get("rms", np.nan))
+            
+            # Aggregate to top-level stats
+            loo_corr_valid = by_camera["loo_corr"].dropna()
+            loo_rms_valid = by_camera["loo_rms"].dropna()
+            camera_loo_corr_min = loo_corr_valid.min() if not loo_corr_valid.empty else np.nan
+            camera_loo_corr_median = loo_corr_valid.median() if not loo_corr_valid.empty else np.nan
+            camera_loo_rms_max = loo_rms_valid.max() if not loo_rms_valid.empty else np.nan
+        else:
+            by_camera["loo_corr"] = np.nan
+            by_camera["loo_offset"] = np.nan
+            by_camera["loo_rms"] = np.nan
+            camera_loo_corr_min = np.nan
+            camera_loo_corr_median = np.nan
+            camera_loo_rms_max = np.nan
+    except Exception as e:
+        by_camera["loo_corr"] = np.nan
+        by_camera["loo_offset"] = np.nan
+        by_camera["loo_rms"] = np.nan
+        camera_loo_corr_min = np.nan
+        camera_loo_corr_median = np.nan
+        camera_loo_rms_max = np.nan
+        print(f"[warn] LOO metrics failed: {e}")
+
     by_field   = per_group_stats(df.groupby("field"), "field")
     by_band    = per_group_stats(df.groupby("v_g_band"), "v_g_band")
     by_camfld  = per_group_stats(df.groupby(["camera_name","field"]), "camera_field")
@@ -1925,6 +1957,9 @@ def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=Tr
         ("mhps_non_zero", _mhps["mhps_non_zero"]),
         ("mhps_pn_flag", _mhps["mhps_pn_flag"]),
         ("mhps_ratio", _mhps["mhps_ratio"]),
+        ("camera_loo_corr_min", camera_loo_corr_min),
+        ("camera_loo_corr_median", camera_loo_corr_median),
+        ("camera_loo_rms_max", camera_loo_rms_max),
         ("by_camera", by_camera),
         ("by_field", by_field),
         ("by_band", by_band),

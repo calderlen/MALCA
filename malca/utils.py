@@ -13,6 +13,7 @@ from astroquery.utils.tap.core import TapPlus
 from scipy.special import erf
 from tqdm import tqdm
 import numpy as np
+from numba import njit
 try:
     np.set_printoptions(legacy='1.21')
 except TypeError:
@@ -1383,3 +1384,117 @@ def batch_tap_crossmatch(
         return pd.DataFrame()
 
     return pd.concat(results, ignore_index=True)
+
+
+
+@njit(fastmath=True, cache=True)
+def _compute_loo_metrics_numba(t: np.ndarray, mag: np.ndarray, cam: np.ndarray, window_days: float):
+    n = len(t)
+    cameras = np.unique(cam)
+    n_cams = len(cameras)
+    
+    results_corr = np.full(n_cams, np.nan)
+    results_offset = np.full(n_cams, np.nan)
+    results_rms = np.full(n_cams, np.nan)
+    
+    for c_idx in range(n_cams):
+        c = cameras[c_idx]
+        
+        nc = 0
+        no = 0
+        for i in range(n):
+            if cam[i] == c:
+                nc += 1
+            else:
+                no += 1
+                
+        if nc == 0 or no == 0:
+            continue
+            
+        tc = np.empty(nc, dtype=np.float64)
+        mc = np.empty(nc, dtype=np.float64)
+        to = np.empty(no, dtype=np.float64)
+        mo = np.empty(no, dtype=np.float64)
+        
+        ic = 0
+        io = 0
+        for i in range(n):
+            if cam[i] == c:
+                tc[ic] = t[i]
+                mc[ic] = mag[i]
+                ic += 1
+            else:
+                to[io] = t[i]
+                mo[io] = mag[i]
+                io += 1
+                
+        cc = np.full(nc, np.nan, dtype=np.float64)
+        
+        left = np.searchsorted(to, tc - window_days/2.0, side='left')
+        right = np.searchsorted(to, tc + window_days/2.0, side='right')
+        
+        for i in range(nc):
+            l = left[i]
+            r = right[i]
+            if r > l:
+                cc[i] = np.median(mo[l:r])
+                
+        valid = np.isfinite(cc) & np.isfinite(mc)
+        n_valid = np.sum(valid)
+        if n_valid > 2:
+            mc_v = mc[valid]
+            cc_v = cc[valid]
+            
+            diff = mc_v - cc_v
+            results_offset[c_idx] = np.median(diff)
+            results_rms[c_idx] = np.std(diff)
+            
+            mc_mean = np.mean(mc_v)
+            cc_mean = np.mean(cc_v)
+            mc_std = np.std(mc_v)
+            cc_std = np.std(cc_v)
+            
+            if mc_std > 0 and cc_std > 0:
+                cov = np.mean((mc_v - mc_mean) * (cc_v - cc_mean))
+                corr = cov / (mc_std * cc_std)
+                results_corr[c_idx] = corr
+            
+    return cameras, results_corr, results_offset, results_rms
+
+
+def compute_camera_loo_metrics(df: pd.DataFrame, window_days: float = 10.0, t_col: str = "JD", mag_col: str = "mag", cam_col: str = "camera#") -> dict:
+    """
+    Compute Leave-One-Out cross-correlation metrics for each camera compared to
+    the consensus of all other cameras within a sliding window.
+    """
+    if df.empty or cam_col not in df.columns or t_col not in df.columns or mag_col not in df.columns:
+        return {}
+        
+    finite = np.isfinite(df[t_col].to_numpy(dtype=float)) & np.isfinite(df[mag_col].to_numpy(dtype=float))
+    df_f = df.loc[finite].sort_values(t_col)
+    
+    if df_f.empty:
+        return {}
+        
+    t = df_f[t_col].to_numpy(dtype=np.float64)
+    mag = df_f[mag_col].to_numpy(dtype=np.float64)
+    
+    cam_vals = df_f[cam_col].values
+    unique_cams = pd.unique(cam_vals)
+    if len(unique_cams) < 2:
+        return {}  # Need at least 2 cameras for LOO
+        
+    cam_map = {c: i for i, c in enumerate(unique_cams)}
+    cam_int = np.array([cam_map[c] for c in cam_vals], dtype=np.int64)
+    
+    cam_ids, corr, offset, rms = _compute_loo_metrics_numba(t, mag, cam_int, float(window_days))
+    
+    results = {}
+    for i in range(len(cam_ids)):
+        c_name = str(unique_cams[cam_ids[i]])
+        results[c_name] = {
+            "corr": float(corr[i]),
+            "offset": float(offset[i]),
+            "rms": float(rms[i])
+        }
+    return results

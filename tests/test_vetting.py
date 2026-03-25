@@ -9,6 +9,34 @@ import pandas as pd
 import malca.vetting as vetting
 
 
+def test_normalize_simbad_xmatch_repairs_split_ucac4_designation() -> None:
+    row = pd.Series({
+        "main_id": "UCAC4",
+        "otype": "667-019722",
+        "main_type": "SB*",
+        "angDist": 0.026,
+    })
+    mid, ot, sep = vetting._normalize_simbad_xmatch_fields(row, "UCAC4", "667-019722", 0.026)
+    assert mid == "UCAC4 667-019722"
+    assert ot == "SB*"
+    assert np.isclose(sep, 0.026)
+
+
+def test_normalize_simbad_xmatch_keeps_full_main_id() -> None:
+    row = pd.Series({
+        "main_id": "UCAC4 667-019722",
+        "otype": "SB*",
+        "main_type": "SB*",
+        "angDist": 0.025649,
+    })
+    mid, ot, sep = vetting._normalize_simbad_xmatch_fields(
+        row, "UCAC4 667-019722", "SB*", 0.025649,
+    )
+    assert mid == "UCAC4 667-019722"
+    assert ot == "SB*"
+    assert np.isclose(sep, 0.025649)
+
+
 def test_query_simbad_batch_calls_xmatch(monkeypatch) -> None:
     def fake_xmatch(df: pd.DataFrame, valid, n: int, radius_arcsec: float) -> pd.DataFrame:
         _ = (valid, n, radius_arcsec)

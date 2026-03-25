@@ -7,8 +7,9 @@ import pandas as pd
 from malca.config.config_pipeline import (
     BASELINE_S0, BASELINE_W0, BASELINE_Q, BASELINE_JITTER,
     GP_FLOOR_CLIP, GP_FLOOR_ITERS, GP_MIN_FLOOR_POINTS,
-    GP_AUTO_SCALE_FRACTION, GP_MIN_GP_POINTS,
-    GP_DIP_SIGMA_THRESH, GP_PAD_DAYS,
+    GP_STIFF_SCALE_FRACTION, GP_STIFF_MIN_DAYS,
+    GP_LOOSE_SCALE_FRACTION, GP_LOOSE_MIN_DAYS, GP_MIN_GP_POINTS,
+    GP_DIP_SIGMA_THRESH, GP_BRIGHT_SIGMA_THRESH, GP_PAD_DAYS,
     ROLLING_WINDOW_DAYS, ROLLING_MIN_POINTS, ROLLING_MIN_DAYS,
 )
 from malca.config.config_stats import MAD_SCALE
@@ -71,7 +72,7 @@ def global_median_baseline(
     return df_out
 
 
-def rolling_time_median(jd, mag, days=ROLLING_WINDOW_DAYS, min_points=ROLLING_MIN_POINTS, min_days=ROLLING_MIN_DAYS, past_only=True):
+def rolling_time_median(jd, mag, days=ROLLING_WINDOW_DAYS, min_points=ROLLING_MIN_POINTS, min_days=ROLLING_MIN_DAYS, past_only=False):
     """Rolling time-window median using searchsorted (past-only by default)."""
     n = len(jd)
     out = np.full(n, np.nan, dtype=float)
@@ -233,7 +234,8 @@ def per_camera_gp_baseline(
     min_floor_points=GP_MIN_FLOOR_POINTS,
     add_sigma_eff_col=True,
     auto_scale_gp=True,
-    auto_scale_fraction=GP_AUTO_SCALE_FRACTION,
+    loose_scale_fraction=GP_LOOSE_SCALE_FRACTION,
+    loose_min_days=GP_LOOSE_MIN_DAYS,
 ):
     """Per-camera GP baseline (fixed SHO kernel) with sigma_eff output."""
     if not _HAS_CELERITE2:
@@ -355,7 +357,7 @@ def per_camera_gp_baseline(
             if auto_scale_gp:
                 time_span = float(t_fit.max() - t_fit.min())
                 if time_span > 0:
-                    target_timescale = max(time_span * float(auto_scale_fraction), 50.0)
+                    target_timescale = max(time_span * float(loose_scale_fraction), float(loose_min_days))
                     w0_scaled = 2.0 * np.pi / target_timescale
                     w0_use = max(w0_scaled, float(w0))
             k = terms.SHOTerm(S0=float(S0), w0=w0_use, Q=float(q))
@@ -413,6 +415,7 @@ def per_camera_gp_baseline_masked(
     df,
     *,
     dip_sigma_thresh=GP_DIP_SIGMA_THRESH,
+    bright_sigma_thresh=GP_BRIGHT_SIGMA_THRESH,
     pad_days=GP_PAD_DAYS,
     S0=BASELINE_S0,
     w0=BASELINE_W0,
@@ -434,7 +437,10 @@ def per_camera_gp_baseline_masked(
     floor_iters=GP_FLOOR_ITERS,
     min_floor_points=GP_MIN_FLOOR_POINTS,
     auto_scale_gp=True,
-    auto_scale_fraction=GP_AUTO_SCALE_FRACTION,
+    stiff_scale_fraction=GP_STIFF_SCALE_FRACTION,
+    stiff_min_days=GP_STIFF_MIN_DAYS,
+    loose_scale_fraction=GP_LOOSE_SCALE_FRACTION,
+    loose_min_days=GP_LOOSE_MIN_DAYS,
     **kwargs,
 ):
     """Per-camera GP baseline with dip masking (excludes significant dips from fit)."""
@@ -494,7 +500,7 @@ def per_camera_gp_baseline_masked(
         return float(np.sqrt(floor2))
 
     df_out = df.copy()
-    out_cols = ("baseline", "resid", "sigma_resid") + (("sigma_eff",) if add_sigma_eff_col else ())
+    out_cols = ("baseline", "base_rough", "resid", "sigma_resid") + (("sigma_eff",) if add_sigma_eff_col else ())
     for col in out_cols:
         if col not in df_out.columns:
             df_out[col] = np.nan
@@ -511,7 +517,55 @@ def per_camera_gp_baseline_masked(
 
         finite = np.isfinite(t) & np.isfinite(y)
         y_med = float(np.nanmedian(y[finite]))
-        r0 = y - y_med
+        
+        # Step 1: Two-Pass Trend-Aware Masking (Stiff GP)
+        base_rough = None
+        if auto_scale_gp and _HAS_CELERITE2 and finite.sum() >= min_gp_points:
+            try:
+                t_stiff = t[finite]
+                y_stiff = y[finite]
+                y_stiff_mean = float(np.mean(y_stiff))
+                y_stiff0 = y_stiff - y_stiff_mean
+                
+                if use_yerr:
+                    yerr_stiff = yerr[finite]
+                    if not np.isfinite(yerr_stiff).any():
+                        yerr_stiff = np.full_like(y_stiff, float(jitter), dtype=float)
+                    else:
+                        med_yerr_stiff = float(np.nanmedian(yerr_stiff[np.isfinite(yerr_stiff)]))
+                        med_yerr_stiff = float(med_yerr_stiff) if np.isfinite(med_yerr_stiff) else float(jitter)
+                        yerr_stiff = np.where(np.isfinite(yerr_stiff), yerr_stiff, med_yerr_stiff)
+                        yerr_stiff = np.nan_to_num(yerr_stiff, nan=float(jitter), posinf=float(jitter), neginf=float(jitter))
+                else:
+                    yerr_stiff = np.full_like(y_stiff, float(jitter), dtype=float)
+                
+                time_span_stiff = float(t_stiff.max() - t_stiff.min())
+                target_timescale_stiff = max(time_span_stiff * float(stiff_scale_fraction), float(stiff_min_days))
+                w0_stiff = 2.0 * np.pi / target_timescale_stiff
+                # Do not bound by w0 here; we want it to be as stiff as possible
+                k_stiff = terms.SHOTerm(S0=float(S0), w0=w0_stiff, Q=float(q))
+                
+                gp_stiff = GaussianProcess(k_stiff)
+                gp_stiff.compute(t_stiff, diag=yerr_stiff**2)
+                mu_stiff = gp_stiff.predict(y_stiff0, t, return_var=False)
+                
+                base_rough = np.full_like(y, np.nan, dtype=float)
+                base_rough[finite] = np.asarray(mu_stiff, dtype=float) + y_stiff_mean
+                
+                # Interpolate for non-finite points to ensure base_rough is dense
+                if not finite.all():
+                     base_rough = np.interp(t, t[finite], base_rough[finite])
+
+            except Exception as exc:
+                base_rough = None
+
+        if base_rough is None:
+            base_rough = rolling_time_median(t, y, past_only=False)
+            
+        # Fallback if base_rough has NaNs
+        base_rough = np.where(np.isfinite(base_rough), base_rough, y_med)
+        df_out.loc[idx, "base_rough"] = base_rough
+        r0 = y - base_rough
 
         r0_f = r0[finite]
         med_r = float(np.nanmedian(r0_f))
@@ -526,13 +580,52 @@ def per_camera_gp_baseline_masked(
         s0 = max(s0, 1e-6)
 
         sig0 = r0 / s0
-        dip_flag = finite & np.isfinite(sig0) & (sig0 > float(dip_sigma_thresh))
+        
+        # Step 2: Stateful Bidirectional Outlier Rejection
+        flags = np.zeros(len(t), dtype=bool)
+        in_dip = False
+        in_flare = False
+        
+        valid_base_idx = np.where(np.isfinite(base_rough) & finite)[0]
+        ref_baseline = base_rough[valid_base_idx[0]] if len(valid_base_idx) > 0 else y_med
+        
+        thresh_dip = float(dip_sigma_thresh)
+        thresh_bright = float(bright_sigma_thresh)
+        
+        for i in range(len(t)):
+            if not finite[i]:
+                continue
+                
+            if not (in_dip or in_flare):
+                ref_baseline = base_rough[i]
+                
+            sig = (y[i] - ref_baseline) / s0
+            
+            if sig > thresh_dip:
+                in_dip = True
+                in_flare = False
+                flags[i] = True
+            elif in_dip and sig > 1.0:
+                flags[i] = True
+            else:
+                in_dip = False
+                
+            if not in_dip:
+                if sig < thresh_bright:
+                    in_flare = True
+                    flags[i] = True
+                elif in_flare and sig < -1.0:
+                    flags[i] = True
+                else:
+                    in_flare = False
+
+        event_flag = finite & flags
 
         keep = finite.copy()
-        if dip_flag.any():
-            t_dip = t[dip_flag]
+        if event_flag.any():
+            t_event = t[event_flag]
             bad = np.zeros_like(keep, dtype=bool)
-            for td in t_dip:
+            for td in t_event:
                 bad |= np.abs(t - td) <= float(pad_days)
             keep &= ~bad
 
@@ -577,7 +670,7 @@ def per_camera_gp_baseline_masked(
             if auto_scale_gp:
                 time_span = float(t_fit.max() - t_fit.min())
                 if time_span > 0:
-                    target_timescale = max(time_span * float(auto_scale_fraction), 50.0)
+                    target_timescale = max(time_span * float(loose_scale_fraction), float(loose_min_days))
                     w0_scaled = 2.0 * np.pi / target_timescale
                     w0_use = max(w0_scaled, float(w0))
             k = terms.SHOTerm(S0=float(S0), w0=w0_use, Q=float(q))

@@ -131,6 +131,9 @@ def merge_stats_summary_into_payload(payload: dict, summary: dict) -> None:
         "mhps_non_zero": "stats_mhps_non_zero",
         "mhps_pn_flag": "stats_mhps_pn_flag",
         "mhps_ratio": "stats_mhps_ratio",
+        "camera_loo_corr_min": "stats_camera_loo_corr_min",
+        "camera_loo_corr_median": "stats_camera_loo_corr_median",
+        "camera_loo_rms_max": "stats_camera_loo_rms_max",
     }
 
     for source_key, target_key in scalar_map.items():
