@@ -10,3 +10,4 @@ from malca.config.config_ltv import *  # noqa: F401,F403
 from malca.config.config_vetting import *  # noqa: F401,F403
 from malca.config.config_stats import *  # noqa: F401,F403
 from malca.config.config_ml import *  # noqa: F401,F403
+from malca.config.config_microlensing import *  # noqa: F401,F403

@@ -12,7 +12,8 @@ Writes one results table ``output/microlensing/microlensing_results_<timestamp>.
 (``visual_inspection_subjective_flag``, ``visual_inspection_subjective_note``; see
 ``VISUAL_INSPECTION_PROBABLY_BAD_IDS`` / ``VISUAL_INSPECTION_BAD_IDS`` below). IDs in ``VISUAL_INSPECTION_BAD_IDS``
 are **excluded from fits and from the results table entirely** (not merged, not crossmatched here). A full-sky Mollweide map ``microlensing_sky_<timestamp>.pdf`` (Paczynski reduced
-$\chi^2$ by color, best model by marker), and optionally—with ``--plot-lc``—per-candidate LC PDFs under
+$\chi^2$ by color, best model by marker), candidate grid ``microlensing_grid_<timestamp>.pdf``, Gaia CMD summary
+``microlensing_cmd_<timestamp>.pdf``, and optionally—with ``--plot-lc``—per-candidate LC PDFs under
 ``output/microlensing/fit_pdfs/`` (named ``{chi2nu_paczynski}_{t_E_days}_{asas_sn_id}.pdf``).
 With ``--crossmatch``, enrichment is delegated to ``malca.characterize.characterize_candidates_df`` and
 ``malca.vetting.vet_candidates`` (Gaia/2MASS/WISE context, SIMBAD, ZTF, ASAS-SN, TNS, ALeRCE, eROSITA, …; ATLAS forced photometry disabled here).
@@ -22,6 +23,9 @@ Progress: phase lines always; tqdm bars when stderr is a TTY.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures as cf
+import hashlib
+import json
 import os
 import sqlite3
 import sys
@@ -68,7 +72,7 @@ from malca.lightcurve_io import load_lightcurve_df
 from malca.review.explore_data import infer_plot_dir_from_source
 from malca.review.interactive_plot import resolve_lightcurve_path
 from malca.review.store import get_candidate_payload, init_db
-from malca.utils import clean_lc
+from malca.utils import batch_gaia_cone_query, clean_lc
 from tqdm import tqdm
 
 
@@ -362,16 +366,169 @@ def _add_visual_inspection_columns(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _truncate_plot_label(text: str, max_len: int = 40) -> str:
+    t = str(text).strip()
+    if len(t) <= max_len:
+        return t
+    return t[: max_len - 1] + '…'
+
+
+def _plot_crossmatch_context_caption(summary: dict[str, object]) -> str:
+    """
+    Compact plain-text line of crossmatch / characterization context for figure titles.
+
+    Uses fields produced by external catalog matching, Gaia context (characterize), and
+    vetting when present in *summary* (after final table merge).
+    """
+    parts: list[str] = []
+
+    def _txt(key: str) -> str:
+        v = summary.get(key)
+        if v is None:
+            return ''
+        if isinstance(v, (float, np.floating)) and not np.isfinite(float(v)):
+            return ''
+        s = str(v).strip()
+        if not s or s.lower() in {'nan', 'none', 'false', '<na>'}:
+            return ''
+        return s.replace('_', ' ')
+
+    los = _txt('mw_line_of_sight_region')
+    if los:
+        parts.append(f'LOS {los}')
+
+    if summary.get('microlens_match'):
+        cat = _txt('microlens_catalog')
+        name = _truncate_plot_label(_txt('microlens_name'), 34)
+        if cat or name:
+            parts.append(f'u-lens {cat} {name}'.strip())
+    elif summary.get('external_known_microlens'):
+        parts.append('u-lens cat/alert')
+
+    sim = _truncate_plot_label(_txt('nearest_simbad_object'), 26)
+    ot = _truncate_plot_label(_txt('simbad_otype'), 14)
+    if sim or ot:
+        sep = summary.get('simbad_sep_arcsec')
+        sep_bit = ''
+        try:
+            if sep is not None and np.isfinite(float(sep)):
+                sep_bit = f' {float(sep):.2f}"'
+        except (TypeError, ValueError):
+            pass
+        if sim and ot:
+            core = f'SIMBAD {sim} [{ot}]'
+        elif sim:
+            core = f'SIMBAD {sim}'
+        else:
+            core = f'SIMBAD [{ot}]'
+        parts.append((core + sep_bit).strip())
+
+    ruwe = summary.get('ruwe')
+    try:
+        if ruwe is not None and np.isfinite(float(ruwe)):
+            parts.append(f'RUWE {float(ruwe):.2f}')
+    except (TypeError, ValueError):
+        pass
+
+    gmag = _txt('phot_g_mean_mag')
+    if gmag:
+        parts.append(f'G={gmag}')
+
+    gvc = _truncate_plot_label(_txt('gaia_var_class'), 26)
+    if gvc:
+        parts.append(f'GaiaVar {gvc}')
+
+    ztf = _truncate_plot_label(_txt('ztf_var_type'), 22)
+    if ztf:
+        parts.append(f'ZTF {ztf}')
+
+    asn = _truncate_plot_label(_txt('asassn_var_type'), 22)
+    if asn:
+        parts.append(f'ASAS-SN {asn}')
+
+    vsx = _truncate_plot_label(_txt('vsx_class'), 18)
+    if vsx:
+        parts.append(f'VSX {vsx}')
+
+    if summary.get('vetting_likely_known'):
+        parts.append('vet: likely known')
+
+    alerce = _truncate_plot_label(_txt('alerce_lc_class'), 20)
+    if alerce:
+        parts.append(f'ALeRCE {alerce}')
+
+    tns = _truncate_plot_label(_txt('tns_name'), 18)
+    if tns:
+        parts.append(f'TNS {tns}')
+
+    galn = _truncate_plot_label(_txt('gaia_alert_name'), 18)
+    galc = _truncate_plot_label(_txt('gaia_alert_class'), 14)
+    if galn or galc:
+        parts.append(f'GaiaAlert {galn or galc}')
+
+    pop = _txt('population')
+    if pop and pop != 'unknown':
+        parts.append(f'pop {pop}')
+
+    vf = _txt('visual_inspection_subjective_flag')
+    if vf in {'bad', 'probably_bad'}:
+        parts.append(f'visual {vf}')
+
+    if not parts:
+        return ''
+    out = ' · '.join(parts)
+    return out if len(out) <= 220 else out[:217] + '…'
+
+
+def _inject_microlensing_table_into_summaries(
+    table_df: pd.DataFrame,
+    results: list[dict[str, object]],
+) -> None:
+    """Copy final table columns into each fit ``summary`` so plots can show crossmatch context."""
+    if table_df.empty or not results or 'candidate_id' not in table_df.columns:
+        return
+    work = table_df.copy()
+    work['_plot_cid'] = work['candidate_id'].map(_candidate_id_match_str)
+    work = work.drop_duplicates('_plot_cid', keep='first').set_index('_plot_cid')
+    for res in results:
+        summ = res.get('summary')
+        if not isinstance(summ, dict):
+            continue
+        cid = _candidate_id_match_str(summ.get('candidate_id'))
+        if not cid or cid not in work.index:
+            continue
+        row = work.loc[cid]
+        if isinstance(row, pd.DataFrame):
+            row = row.iloc[0]
+        for col in table_df.columns:
+            if col in {'candidate_id', '_plot_cid'}:
+                continue
+            val = row[col]
+            if pd.api.types.is_scalar(val) and pd.isna(val):
+                summ[col] = np.nan
+            else:
+                summ[col] = val
+
+
 _BEST_MODEL_MARKERS: dict[str, str] = {
-    'paczynski': 'o',
+    'paczynski': '*',
     'gaussian': 's',
-    'fred': '^',
+    'fred': 'o',
     'flat': 'D',
 }
 
 
 def _best_fit_marker(model_key: str) -> str:
     return _BEST_MODEL_MARKERS.get(model_key.lower(), 'X')
+
+
+def _best_fit_marker_size(model_key: str) -> float:
+    mk = str(model_key).strip().lower()
+    if mk == 'fred':
+        return 30.0
+    if mk == 'paczynski':
+        return 70.0
+    return 52.0
 
 
 def _mw_lb_rad_mollweide(l_deg: np.ndarray, b_deg: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -456,13 +613,14 @@ def _save_microlensing_full_sky_plot(df: pd.DataFrame, out_path: Path, *, dpi: i
         sub = (mk_ok == m) & finite_chi
         if not np.any(sub):
             continue
+        marker_size = _best_fit_marker_size(m)
         ax.scatter(
             lx[sub],
             bx[sub],
             c=chi_ok[sub],
             cmap=cmap,
             norm=norm,
-            s=52.0,
+            s=marker_size,
             marker=_best_fit_marker(m),
             edgecolors='0.15',
             linewidths=0.35,
@@ -473,11 +631,12 @@ def _save_microlensing_full_sky_plot(df: pd.DataFrame, out_path: Path, *, dpi: i
         sub = (mk_ok == m) & ~finite_chi
         if not np.any(sub):
             continue
+        marker_size = _best_fit_marker_size(m)
         ax.scatter(
             lx[sub],
             bx[sub],
             c='0.55',
-            s=52.0,
+            s=marker_size,
             marker=_best_fit_marker(m),
             edgecolors='0.15',
             linewidths=0.35,
@@ -488,7 +647,7 @@ def _save_microlensing_full_sky_plot(df: pd.DataFrame, out_path: Path, *, dpi: i
         sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
         sm.set_array([])
         cbar = fig.colorbar(sm, ax=ax, orientation='horizontal', pad=0.10, shrink=0.78, aspect=34)
-        cbar.set_label(r'Paczynski reduced $\chi^2_\nu$ (yellow: lower / better)')
+        cbar.set_label(r'Paczynski reduced $\chi^2_\nu$')
 
     legend_handles = [
         Line2D(
@@ -536,6 +695,579 @@ def _save_microlensing_full_sky_plot(df: pd.DataFrame, out_path: Path, *, dpi: i
     plt.close(fig)
 
 
+_QUALITY_TIER_ORDER: dict[str, int] = {
+    "gold": 3,
+    "silver": 2,
+    "bronze": 1,
+    "suspect": 0,
+}
+_QUALITY_TIER_COLORS: dict[str, str] = {
+    "gold": "#d89a00",
+    "silver": "#7a7a7a",
+    "bronze": "#8a4a26",
+    "suspect": "#5f73a1",
+}
+
+
+def _quality_tier_rank(series: pd.Series) -> pd.Series:
+    vals = series.fillna("").astype(str).str.strip().str.lower()
+    return vals.map(_QUALITY_TIER_ORDER).fillna(-1).astype(int)
+
+
+def _coerce_bool_series(s: pd.Series, *, default: bool = False) -> pd.Series:
+    """Convert mixed bool/string columns into a clean boolean Series."""
+    if s.dtype == bool:
+        return s.fillna(default)
+    # Common CSV encodings: True/False, 1/0, yes/no, etc.
+    return s.fillna(default).astype(str).str.strip().str.lower().isin({"true", "1", "t", "yes", "y"})
+
+
+def _compute_microlensing_quality_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Compute microlensing quality metrics (quality_score, quality_tier, quality_breakdown_*).
+
+    Some output runs (notably LC-only candidates) may not carry precomputed quality columns.
+    """
+    if df.empty:
+        return df
+    work = df.copy()
+
+    n = len(work)
+
+    # --- Coverage component ---
+    if "paczynski_tau_coverage_score" in work.columns:
+        cov = pd.to_numeric(work["paczynski_tau_coverage_score"], errors="coerce")
+        if cov.notna().any():
+            cov_np = cov.to_numpy(dtype=float)
+            coverage_breakdown = np.where(
+                np.isfinite(cov_np) & (cov_np >= PAC_COVERAGE_WARN_THRESHOLD),
+                1.0,
+                np.where(
+                    np.isfinite(cov_np) & (cov_np >= PAC_COVERAGE_FAIL_THRESHOLD),
+                    0.6,
+                    0.4,
+                ),
+            )
+        else:
+            coverage_breakdown = np.full(n, 1.0, dtype=float)
+    else:
+        coverage_breakdown = np.full(n, 1.0, dtype=float)
+
+    # --- Parallax component (historical discrete mapping) ---
+    attempted_s = (
+        work["parallax_attempted"]
+        if "parallax_attempted" in work.columns
+        else pd.Series([False] * n, index=work.index, dtype=object)
+    )
+    fit_ok_s = (
+        work["parallax_fit_ok"]
+        if "parallax_fit_ok" in work.columns
+        else pd.Series([False] * n, index=work.index, dtype=object)
+    )
+    preferred_s = (
+        work["parallax_preferred"]
+        if "parallax_preferred" in work.columns
+        else pd.Series([False] * n, index=work.index, dtype=object)
+    )
+    attempted_b = _coerce_bool_series(attempted_s, default=False).to_numpy(dtype=bool)
+    fit_ok_b = _coerce_bool_series(fit_ok_s, default=False).to_numpy(dtype=bool)
+    preferred_b = _coerce_bool_series(preferred_s, default=False).to_numpy(dtype=bool)
+
+    parallax_breakdown = np.full(n, 0.4, dtype=float)
+    ok_mask = attempted_b & fit_ok_b
+    ok_pref_mask = ok_mask & preferred_b
+    parallax_breakdown[ok_pref_mask] = 1.0
+    ok_not_pref_mask = ok_mask & ~preferred_b
+    parallax_breakdown[ok_not_pref_mask] = 0.8
+    attempted_not_ok_pref = attempted_b & preferred_b & ~fit_ok_b
+    parallax_breakdown[attempted_not_ok_pref] = 0.5
+
+    # --- Astrophysical component ---
+    # Driven by log10(Delta BIC) vs the flat baseline.
+    if "log10_delta_bic_vs_flat" in work.columns:
+        x = pd.to_numeric(work["log10_delta_bic_vs_flat"], errors="coerce")
+    elif "delta_bic_vs_flat" in work.columns:
+        x = signed_log10_series(pd.to_numeric(work["delta_bic_vs_flat"], errors="coerce"))
+    else:
+        x = pd.Series([np.nan] * n, index=work.index, dtype=float)
+    x_np = x.to_numpy(dtype=float)
+    astrophysical_breakdown = np.full(n, 0.4, dtype=float)
+    good_mask = np.isfinite(x_np)
+    astrophysical_breakdown[good_mask & (x_np >= 4.2)] = 1.0
+    astrophysical_breakdown[good_mask & (x_np >= 3.65) & (x_np < 4.2)] = 0.8
+    astrophysical_breakdown[good_mask & (x_np >= 3.5) & (x_np < 3.65)] = 0.6
+
+    # --- Fit component ---
+    if "fit_reduced_chi2" in work.columns:
+        chi2 = pd.to_numeric(work["fit_reduced_chi2"], errors="coerce")
+    elif "paczynski_reduced_chi2" in work.columns:
+        chi2 = pd.to_numeric(work["paczynski_reduced_chi2"], errors="coerce")
+    else:
+        chi2 = pd.Series([np.nan] * n, index=work.index, dtype=float)
+    chi2_np = chi2.to_numpy(dtype=float)
+    chi2_score = 1.0 / (1.0 + (chi2_np / 5.0))
+    fit_breakdown = 0.6 + 0.4 * np.clip(chi2_score, 0.0, 1.0)
+    fit_breakdown[~np.isfinite(chi2_np)] = 0.6
+    if "fit_ok" in work.columns:
+        fit_ok_b = _coerce_bool_series(work["fit_ok"], default=False).to_numpy(dtype=bool)
+        fit_breakdown[fit_ok_b] = np.maximum(fit_breakdown[fit_ok_b], 0.8)
+
+    # --- Morphology component ---
+    if "n_points_fit" in work.columns:
+        n_fit = pd.to_numeric(work["n_points_fit"], errors="coerce").to_numpy(dtype=float)
+    else:
+        n_fit = pd.Series([np.nan] * n, index=work.index, dtype=float).to_numpy(dtype=float)
+    if "n_strong_points" in work.columns:
+        n_strong = pd.to_numeric(work["n_strong_points"], errors="coerce").to_numpy(dtype=float)
+    else:
+        n_strong = pd.Series([np.nan] * n, index=work.index, dtype=float).to_numpy(dtype=float)
+    if "shoulder_left" in work.columns:
+        sl = pd.to_numeric(work["shoulder_left"], errors="coerce").to_numpy(dtype=float)
+    else:
+        sl = pd.Series([np.nan] * n, index=work.index, dtype=float).to_numpy(dtype=float)
+    if "shoulder_right" in work.columns:
+        sr = pd.to_numeric(work["shoulder_right"], errors="coerce").to_numpy(dtype=float)
+    else:
+        sr = pd.Series([np.nan] * n, index=work.index, dtype=float).to_numpy(dtype=float)
+    n_fit_safe = np.maximum(n_fit, 1.0)
+    strong_ratio = np.where(np.isfinite(n_strong), n_strong / n_fit_safe, 0.0)
+    shoulder_balance = np.where(
+        np.isfinite(sl) & np.isfinite(sr),
+        np.minimum(sl, sr) / np.maximum(sl + sr, 1e-6),
+        0.0,
+    )
+    morph_raw = 0.65 * strong_ratio + 0.35 * shoulder_balance
+    morphology_breakdown = np.clip(morph_raw / 0.8, 0.0, 1.0)
+
+    # --- Contamination component ---
+    fit_warning = work.get("fit_warning", pd.Series([""] * n, index=work.index))
+    if not isinstance(fit_warning, pd.Series):
+        fit_warning = pd.Series([fit_warning] * n, index=work.index)
+    fw = fit_warning.fillna("").astype(str).str.lower()
+
+    penalty = np.zeros(n, dtype=float)
+    penalty += fw.str.contains("high_reduced_chi2", regex=False, na=False).to_numpy(dtype=float) * 0.25
+    penalty += fw.str.contains("t0_near_bound", regex=False, na=False).to_numpy(dtype=float) * 0.15
+    penalty += fw.str.contains("tE_near_bound", regex=False, na=False).to_numpy(dtype=float) * 0.15
+    penalty += fw.str.contains("sampler_low_acceptance", regex=False, na=False).to_numpy(dtype=float) * 0.10
+    penalty += fw.str.contains("correlated_residuals", regex=False, na=False).to_numpy(dtype=float) * 0.12
+    penalty += fw.str.contains("high_blending", regex=False, na=False).to_numpy(dtype=float) * 0.10
+    penalty += fw.str.contains("insufficient_shoulders", regex=False, na=False).to_numpy(dtype=float) * 0.10
+    penalty += fw.str.contains("single_point_peak", regex=False, na=False).to_numpy(dtype=float) * 0.08
+    penalty += fw.str.contains("weak_vs_flat", regex=False, na=False).to_numpy(dtype=float) * 0.12
+
+    contamination_breakdown = np.clip(1.0 - penalty, 0.2, 1.0)
+
+    # --- Combine into quality_score ---
+    quality_score = (
+        0.05
+        + 0.25 * fit_breakdown
+        + 0.2 * morphology_breakdown
+        + 0.15 * astrophysical_breakdown
+        + 0.2 * contamination_breakdown
+        + 0.1 * parallax_breakdown
+        + 0.05 * coverage_breakdown
+    )
+
+    work["quality_score"] = pd.to_numeric(quality_score, errors="coerce")
+    work["quality_tier"] = np.where(
+        work["quality_score"] >= 0.8,
+        "Gold",
+        np.where(work["quality_score"] >= 0.6, "Silver", np.where(work["quality_score"] >= 0.55, "Bronze", "Suspect")),
+    )
+    work["quality_flags"] = ""
+
+    # Store breakdown components for debugging / plots.
+    work["quality_breakdown_fit"] = fit_breakdown
+    work["quality_breakdown_morphology"] = morphology_breakdown
+    work["quality_breakdown_astrophysical"] = astrophysical_breakdown
+    work["quality_breakdown_contamination"] = contamination_breakdown
+    work["quality_breakdown_parallax"] = parallax_breakdown
+    work["quality_breakdown_coverage"] = coverage_breakdown
+
+    return work
+
+
+def _ensure_microlensing_quality_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Compute quality_* columns only if they are missing (or fully null)."""
+    if df.empty:
+        return df
+    has_score = "quality_score" in df.columns and df["quality_score"].notna().any()
+    has_tier = "quality_tier" in df.columns and df["quality_tier"].notna().any()
+    if has_score and has_tier:
+        return df
+    return _compute_microlensing_quality_columns(df)
+
+
+def _save_microlensing_candidate_grid_plot(
+    df: pd.DataFrame,
+    out_path: Path,
+    *,
+    min_tier: str = "Silver",
+    max_candidates: int | None = None,
+    fit_results: list[dict[str, object]] | None = None,
+    jumps14_fit_results: list[dict[str, object]] | None = None,
+    dpi: int = 300,
+) -> None:
+    """Top-candidate LC grid (tier + quality score + reported tE)."""
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if df.empty:
+        fig, ax = plt.subplots(figsize=(6.0, 2.0))
+        ax.text(0.5, 0.5, "No candidates for microlensing grid", ha="center", va="center")
+        ax.axis("off")
+        fig.savefig(out_path, dpi=dpi, bbox_inches="tight", format="pdf")
+        plt.close(fig)
+        return
+
+    work = df.copy()
+    if "quality_tier" not in work.columns:
+        work["quality_tier"] = ""
+    if "quality_score" not in work.columns:
+        work["quality_score"] = np.nan
+    work["quality_score"] = pd.to_numeric(work["quality_score"], errors="coerce")
+    work["_tier_rank"] = _quality_tier_rank(work["quality_tier"])
+    min_rank = _QUALITY_TIER_ORDER.get(str(min_tier).strip().lower(), 0)
+    work = work.loc[work["_tier_rank"] >= int(min_rank)].copy()
+    if work.empty:
+        fig, ax = plt.subplots(figsize=(6.0, 2.0))
+        ax.text(0.5, 0.5, f"No candidates at or above tier {min_tier}", ha="center", va="center")
+        ax.axis("off")
+        fig.savefig(out_path, dpi=dpi, bbox_inches="tight", format="pdf")
+        plt.close(fig)
+        return
+
+    work = work.sort_values(["_tier_rank", "quality_score"], ascending=[False, False])
+    if max_candidates is not None:
+        work = work.head(int(max_candidates))
+    n = len(work)
+    ncols = 5
+    nrows = int(np.ceil(n / ncols))
+
+    # Keep approx the same subplot height as the previous default (25 candidates → nrows=5).
+    fig_width = 14.43
+    row_height = 18.46 / 5.0
+    fig_height = max(row_height * nrows, row_height)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(fig_width, fig_height), squeeze=False)
+    flat_axes = axes.ravel()
+
+    # Build Paczynski model params from fit_results for overlay curves.
+    pac_by_cid: dict[str, tuple[np.ndarray, float]] = {}
+    for _res in (list(fit_results or []) + list(jumps14_fit_results or [])):
+        try:
+            summ = _res.get("summary", {}) if isinstance(_res, dict) else {}
+            cid = _candidate_id_match_str(summ.get("candidate_id"))
+            if not cid:
+                continue
+            best_seed = _res.get("best_seed_result", {}) or {}
+            pac = (best_seed.get("fits", {}) or {}).get("paczynski", {}) or {}
+            if not pac.get("success"):
+                continue
+            params = pac.get("params")
+            t_ref = pac.get("t_ref")
+            if params is None or t_ref is None:
+                continue
+            pac_by_cid[cid] = (np.asarray(params, dtype=float), float(t_ref))
+        except Exception:
+            continue
+
+    dpi_save = int(max(dpi, 600))
+
+    for i, (_, row) in enumerate(work.iterrows()):
+        ax = flat_axes[i]
+        cid_raw = row.get("candidate_id", "")
+        cid = str(cid_raw)
+        cid_match = _candidate_id_match_str(cid_raw)
+        tier = str(row.get("quality_tier", "")).strip()
+        tier_key = tier.lower()
+        tier_color = _QUALITY_TIER_COLORS.get(tier_key, "0.2")
+        qscore = _finite_float(row.get("quality_score"))
+        tE = _finite_float(row.get("reported_tE_days"))
+        if tE is None:
+            tE = _finite_float(row.get("raw_paczynski_tE_days"))
+
+        lc_path = row.get("lc_path")
+        lc_df = None
+        try:
+            if lc_path is not None and str(lc_path).strip():
+                lc_df = load_lightcurve_df(Path(str(lc_path)))
+        except Exception:
+            lc_df = None
+        if lc_df is None or lc_df.empty:
+            ax.text(0.5, 0.5, "LC unavailable", ha="center", va="center", fontsize=7)
+            ax.set_axis_off()
+            continue
+
+        # Make column detection resilient to case differences (e.g. loader returns `JD`, not `jd`).
+        lc_cols_lower_to_actual = {}
+        for c in lc_df.columns:
+            lc_cols_lower_to_actual.setdefault(str(c).strip().lower(), c)
+
+        mag_col = None
+        if "mag" in lc_cols_lower_to_actual:
+            mag_col = lc_cols_lower_to_actual["mag"]
+        else:
+            for candidate_mag_col in ("magnitude", "flux"):
+                key = candidate_mag_col.lower()
+                if key in lc_cols_lower_to_actual:
+                    mag_col = lc_cols_lower_to_actual[key]
+                    break
+
+        x_col = None
+        for candidate_x_col in ("jd", "hjd", "mjd", "time"):
+            key = candidate_x_col.lower()
+            if key in lc_cols_lower_to_actual:
+                x_col = lc_cols_lower_to_actual[key]
+                break
+        if mag_col is None or x_col is None:
+            ax.text(0.5, 0.5, "LC columns missing", ha="center", va="center", fontsize=7)
+            ax.set_axis_off()
+            continue
+
+        band = str(row.get("band_used", "")).strip().lower()
+        if "phot_filter" in lc_df.columns and band:
+            _mask_band = lc_df["phot_filter"].astype(str).str.strip().str.lower() == band
+            if _mask_band.any():
+                lc_df = lc_df.loc[_mask_band].copy()
+
+        x = pd.to_numeric(lc_df[x_col], errors="coerce").to_numpy(dtype=float)
+        y = pd.to_numeric(lc_df[mag_col], errors="coerce").to_numpy(dtype=float)
+        ok = np.isfinite(x) & np.isfinite(y)
+        x = x[ok]
+        y = y[ok]
+        if x.size == 0:
+            ax.text(0.5, 0.5, "No finite LC points", ha="center", va="center", fontsize=7)
+            ax.set_axis_off()
+            continue
+        x_raw = x
+        shift = 2458000.0 if np.nanmedian(x_raw) > 2.0e6 else 0.0
+        x_plot = x_raw - shift
+
+        ax.scatter(x_plot, y, s=4.0, alpha=0.75, c="k", linewidths=0)
+        if str(mag_col).strip().lower() != "flux":
+            ax.invert_yaxis()
+
+        # Paczynski model overlay (when we have fit params and we are plotting magnitudes).
+        if str(mag_col).strip().lower() in {"mag", "magnitude"} and cid_match in pac_by_cid:
+            pac_params, t_ref = pac_by_cid[cid_match]
+            jd_dense = np.linspace(float(np.nanmin(x_raw)), float(np.nanmax(x_raw)), 350)
+            mag_dense = _evaluate_model("paczynski", pac_params, jd_dense, t_ref)
+            if np.any(np.isfinite(mag_dense)):
+                ax.plot(jd_dense - shift, mag_dense, color="red", linewidth=1.8, alpha=0.95, zorder=3)
+
+        # Square tier badge in the top-left.
+        from matplotlib.patches import Rectangle
+        badge_w = 0.12
+        badge_h = 0.12
+        badge_x = 0.02
+        badge_y = 1.0 - badge_h - 0.02
+        ax.add_patch(
+            Rectangle(
+                (badge_x, badge_y),
+                badge_w,
+                badge_h,
+                transform=ax.transAxes,
+                facecolor=tier_color,
+                edgecolor="0.2",
+                linewidth=0.6,
+                zorder=10,
+            )
+        )
+        badge_text = tier or "Unknown"
+        ax.text(
+            badge_x + badge_w / 2.0,
+            badge_y + badge_h / 2.0,
+            badge_text,
+            transform=ax.transAxes,
+            ha="center",
+            va="center",
+            fontsize=7,
+            color="white",
+            zorder=11,
+        )
+
+        ax.grid(alpha=0.2, linestyle="--", linewidth=0.5)
+        ax.tick_params(labelsize=7)
+        if i % ncols == 0:
+            ax.set_ylabel(f"{band or 'g'} [mag]", fontsize=8)
+        else:
+            ax.set_ylabel("")
+        if i >= (nrows - 1) * ncols:
+            ax.set_xlabel("JD - 2458000", fontsize=8)
+        else:
+            ax.set_xlabel("")
+        title_top = f"{cid}\n({qscore:.2f})" if qscore is not None else f"{cid}"
+        ax.set_title(title_top, fontsize=9, color=tier_color, pad=2)
+        if tE is not None:
+            ax.text(
+                0.98,
+                0.04,
+                f"tE={tE:.0f}d",
+                transform=ax.transAxes,
+                ha="right",
+                va="bottom",
+                fontsize=8,
+            )
+
+    for j in range(n, len(flat_axes)):
+        flat_axes[j].set_axis_off()
+
+    fig.suptitle("Microlensing Candidates Grid", fontsize=15, y=0.997)
+    fig.text(0.5, 0.982, "Quality Tier", ha="center", va="top", fontsize=10)
+    fig.legend(
+        handles=[
+            Line2D([0], [0], marker="o", linestyle="None", color=_QUALITY_TIER_COLORS["gold"], label="Gold"),
+            Line2D([0], [0], marker="o", linestyle="None", color=_QUALITY_TIER_COLORS["silver"], label="Silver"),
+            Line2D([0], [0], marker="o", linestyle="None", color=_QUALITY_TIER_COLORS["bronze"], label="Bronze"),
+            Line2D([0], [0], marker="o", linestyle="None", color=_QUALITY_TIER_COLORS["suspect"], label="Suspect"),
+        ],
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.968),
+        ncol=4,
+        frameon=False,
+        fontsize=8,
+    )
+    fig.subplots_adjust(left=0.055, right=0.99, bottom=0.055, top=0.955, wspace=0.22, hspace=0.36)
+    fig.savefig(out_path, dpi=dpi_save, bbox_inches="tight", format="pdf")
+    plt.close(fig)
+
+
+def _save_microlensing_cmd_plot(df: pd.DataFrame, out_path: Path, *, dpi: int = 300) -> None:
+    """Gaia CMD summary (BP-RP vs M_G)."""
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fig, ax = plt.subplots(figsize=(4.85, 4.82))
+
+    def _compute_mg_from_phot_g_and_parallax(frame: pd.DataFrame) -> pd.Series | None:
+        if "phot_g_mean_mag" not in frame.columns or "parallax" not in frame.columns:
+            return None
+        gmag = pd.to_numeric(frame.get("phot_g_mean_mag"), errors="coerce")
+        plx = pd.to_numeric(frame.get("parallax"), errors="coerce")
+        plx_arr = plx.to_numpy(dtype=float)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            dist_pc = np.where(np.isfinite(plx_arr) & (plx_arr > 0.0), 1000.0 / plx_arr, np.nan)
+        mg = gmag.to_numpy(dtype=float) - 5.0 * np.log10(dist_pc) + 5.0
+        return pd.Series(mg, index=frame.index, dtype=float)
+
+    if "bp_rp" not in df.columns:
+        ax.text(0.5, 0.5, "Missing BP-RP or M_G columns", ha="center", va="center")
+        ax.axis("off")
+        fig.savefig(out_path, dpi=dpi, bbox_inches="tight", format="pdf")
+        plt.close(fig)
+        return
+
+    bp_rp = pd.to_numeric(df["bp_rp"], errors="coerce")
+    mg = None
+    if "M_G" in df.columns:
+        mg = pd.to_numeric(df["M_G"], errors="coerce")
+    elif "mg0" in df.columns:
+        mg = pd.to_numeric(df["mg0"], errors="coerce")
+    elif "phot_g_mean_mag" in df.columns and "parallax" in df.columns:
+        mg = _compute_mg_from_phot_g_and_parallax(df)
+    if mg is None:
+        ax.text(0.5, 0.5, "Missing BP-RP or M_G columns", ha="center", va="center")
+        ax.axis("off")
+        fig.savefig(out_path, dpi=dpi, bbox_inches="tight", format="pdf")
+        plt.close(fig)
+        return
+
+    mg_num = pd.to_numeric(mg, errors="coerce")
+    # Optionally filter by quality tier so the CMD matches the grid tier selection.
+    min_tier = "Bronze"
+    tier_mask = np.ones(len(df), dtype=bool)
+    if "quality_tier" in df.columns:
+        min_rank = _QUALITY_TIER_ORDER.get(min_tier.strip().lower(), 0)
+        tier_rank = _quality_tier_rank(df["quality_tier"])
+        tier_mask = tier_rank.to_numpy(dtype=int) >= int(min_rank)
+
+    cand_mask = (
+        np.isfinite(bp_rp.to_numpy(dtype=float))
+        & np.isfinite(mg_num.to_numpy(dtype=float))
+        & tier_mask
+    )
+    if not np.any(cand_mask):
+        ax.text(0.5, 0.5, "Missing BP-RP or M_G columns", ha="center", va="center")
+        ax.axis("off")
+        fig.savefig(out_path, dpi=dpi, bbox_inches="tight", format="pdf")
+        plt.close(fig)
+        return
+
+    # Background Gaia sample (dereddening not handled here; just a reference CMD cloud).
+    # This is intentionally lightweight so microlensing.py does not require plotly.
+    bg_path = REPO_ROOT / "input" / "gaia" / "gaia_dr3_crossmatched.parquet"
+    try:
+        if bg_path.is_file():
+            bg = pd.read_parquet(bg_path, columns=["bp_rp", "phot_g_mean_mag", "parallax"])
+            bg_bp_rp = pd.to_numeric(bg["bp_rp"], errors="coerce")
+            bg_mg = _compute_mg_from_phot_g_and_parallax(bg)
+            if bg_mg is not None:
+                bg_mg_num = pd.to_numeric(bg_mg, errors="coerce")
+                bg_mask = np.isfinite(bg_bp_rp.to_numpy(dtype=float)) & np.isfinite(bg_mg_num.to_numpy(dtype=float))
+                if np.any(bg_mask):
+                    bg_bp_rp_np = bg_bp_rp.to_numpy(dtype=float)[bg_mask]
+                    bg_mg_np = bg_mg_num.to_numpy(dtype=float)[bg_mask]
+                    # Keep background plotting bounded.
+                    if bg_bp_rp_np.size > 20000:
+                        rng = np.random.default_rng(42)
+                        idx = rng.choice(bg_bp_rp_np.size, size=20000, replace=False)
+                        bg_bp_rp_np = bg_bp_rp_np[idx]
+                        bg_mg_np = bg_mg_np[idx]
+                    ax.scatter(bg_bp_rp_np, bg_mg_np, s=2.0, c="0.6", alpha=0.16, edgecolors="none", zorder=1)
+    except Exception:
+        # Background is optional; keep plotting candidates even if Gaia parquet fails.
+        pass
+
+    # Candidate color metric: prefer quality_score, fall back to paczynski_tau_coverage_score.
+    if "quality_score" in df.columns:
+        score = pd.to_numeric(df["quality_score"], errors="coerce")
+    elif "paczynski_tau_coverage_score" in df.columns:
+        score = pd.to_numeric(df["paczynski_tau_coverage_score"], errors="coerce")
+    else:
+        score = pd.Series([np.nan] * len(df), index=df.index, dtype=float)
+
+    cand_bp = bp_rp.to_numpy(dtype=float)[cand_mask]
+    cand_mg = mg_num.to_numpy(dtype=float)[cand_mask]
+    cand_score = pd.to_numeric(score, errors="coerce").to_numpy(dtype=float)[cand_mask]
+
+    finite_score = np.isfinite(cand_score)
+    if np.any(finite_score):
+        vmin = float(np.nanpercentile(cand_score[finite_score], 5.0))
+        vmax = float(np.nanpercentile(cand_score[finite_score], 95.0))
+        if not np.isfinite(vmin) or not np.isfinite(vmax) or vmax <= vmin:
+            vmin, vmax = float(np.nanmin(cand_score[finite_score])), float(np.nanmax(cand_score[finite_score]))
+        norm = plt.Normalize(vmin=vmin, vmax=vmax)
+        cmap = plt.cm.viridis
+        ax.scatter(
+            cand_bp[finite_score],
+            cand_mg[finite_score],
+            s=55.0,
+            c=cand_score[finite_score],
+            cmap=cmap,
+            norm=norm,
+            marker="*",
+            alpha=0.95,
+            edgecolors="none",
+            zorder=3,
+        )
+        # Minimal colorbar for the candidate score coloring.
+        sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
+        sm.set_array([])
+        cb = fig.colorbar(sm, ax=ax, fraction=0.045, pad=0.02)
+        cb.ax.tick_params(labelsize=7)
+        cb.set_label("Quality score", fontsize=8)
+    else:
+        ax.scatter(cand_bp, cand_mg, s=55.0, c="tab:red", marker="*", alpha=0.95, edgecolors="none", zorder=3)
+
+    ax.set_xlabel("BP-RP")
+    ax.set_ylabel("M_G")
+    ax.grid(alpha=0.25, linestyle="--", linewidth=0.5)
+    ax.invert_yaxis()
+    fig.savefig(out_path, dpi=dpi, bbox_inches="tight", format="pdf")
+    plt.close(fig)
+
+
 def _crossmatch_col_missing_mask(series: pd.Series) -> pd.Series:
     if pd.api.types.is_float_dtype(series) or pd.api.types.is_integer_dtype(series):
         return series.isna()
@@ -572,7 +1304,11 @@ def _prepare_vetting_style_coords(df: pd.DataFrame) -> pd.DataFrame:
     work['dec'] = pd.to_numeric(work['dec_deg'], errors='coerce')
     if 'gaia_dr3_source_id' in work.columns:
         gid = pd.to_numeric(work['gaia_dr3_source_id'], errors='coerce')
-        sid = np.where(np.isfinite(gid), gid.astype(np.int64).astype(str), np.nan)
+        # Avoid casting the whole Series to int64 because `NaN` would raise IntCastingNaNError.
+        sid = pd.Series(np.nan, index=work.index, dtype=object)
+        mask = np.isfinite(gid.to_numpy(dtype=float))
+        if mask.any():
+            sid.loc[mask] = gid.loc[mask].astype(np.int64).astype(str)
         work['source_id'] = sid
         work['gaia_id'] = sid
     else:
@@ -597,6 +1333,8 @@ def _run_microlensing_crossmatch_enrichment(
     gaia_catalog: Path | None = None,
     vsx_crossmatch: Path | None = None,
     vet_method: str = 'tap',
+    characterize_checkpoint_path: Path | None = None,
+    vetting_checkpoint_path: Path | None = None,
 ) -> pd.DataFrame:
     """
     Gaia multi-wavelength context via ``characterize_candidates_df`` and archival vetting via
@@ -636,7 +1374,7 @@ def _run_microlensing_crossmatch_enrichment(
                 dust=dust,
                 starhorse=starhorse,
                 run_unwise=unwise,
-                checkpoint_path=None,
+                checkpoint_path=characterize_checkpoint_path,
             )
         except Exception as exc:
             print(f'  characterize_candidates_df failed ({type(exc).__name__}): {exc}', flush=True)
@@ -655,7 +1393,7 @@ def _run_microlensing_crossmatch_enrichment(
             run_microlens=False,
             run_atlas=False,
             run_neowise_lc=neowise_lc,
-            checkpoint_path=None,
+            checkpoint_path=vetting_checkpoint_path,
             method=vet_method,
         )
     except Exception as exc:
@@ -749,6 +1487,14 @@ PAC_WEAK_VS_FLAT_MIN_DELTA_BIC = 6.0
 # BIC_flat - BIC_pac <= -PLOT_ALT_WHEN_PAC_VS_FLAT_DELTA_BIC.
 PLOT_ALT_WHEN_PAC_VS_FLAT_DELTA_BIC = 10.0
 
+# Weighted τ-coverage of ASAS-SN samples vs fitted Paczynski (|τ|≤PAC_COVERAGE_TAU_MAX).
+PAC_COVERAGE_TAU_MAX = 6.0
+PAC_COVERAGE_N_BINS = 120
+PAC_COVERAGE_GAUSS_SIGMA_TAU = 1.5
+# Hybrid kernel: 0.5 × normalized (A(u(τ))−1) at bin centers + 0.5 × Gaussian in τ (σ = PAC_COVERAGE_GAUSS_SIGMA_TAU).
+PAC_COVERAGE_WARN_THRESHOLD = 0.55
+PAC_COVERAGE_FAIL_THRESHOLD = 0.35
+
 PARALLAX_MIN_TE_DAYS = 80.0
 PARALLAX_MIN_FIT_POINTS = 80
 PARALLAX_MIN_SPAN_DAYS = 240.0
@@ -776,6 +1522,90 @@ def _raw_delta_bic(value: object) -> float:
     if numeric is None:
         return np.nan
     return float(numeric)
+
+
+def _paczynski_weighted_coverage(
+    jd_obs: np.ndarray,
+    pac: dict[str, object],
+    *,
+    tau_max: float | None = None,
+    n_bins: int | None = None,
+    gauss_sigma: float | None = None,
+) -> dict[str, float | int]:
+    """
+    Fraction of importance-weighted Paczynski τ-bins (τ = (t−t0)/tE) that contain ≥1 observation.
+
+    Weights emphasize the core of the light curve (magnification above baseline + Gaussian in τ).
+    """
+    tau_max = float(PAC_COVERAGE_TAU_MAX if tau_max is None else tau_max)
+    n_bins = int(PAC_COVERAGE_N_BINS if n_bins is None else n_bins)
+    gauss_sigma = float(PAC_COVERAGE_GAUSS_SIGMA_TAU if gauss_sigma is None else gauss_sigma)
+
+    empty: dict[str, float | int] = {
+        'paczynski_tau_coverage_score': np.nan,
+        'paczynski_coverage_n_bins_hit': 0,
+        'paczynski_coverage_n_bins': n_bins,
+        'paczynski_coverage_max_weighted_gap': np.nan,
+        'paczynski_coverage_frac_points_in_tau_window': np.nan,
+    }
+    if not pac.get('success') or n_bins < 4:
+        return empty
+
+    params = pac.get('params')
+    if params is None or len(params) < 4:
+        return empty
+    A0, t0, tE = float(params[0]), float(params[1]), float(abs(params[2]))
+    if not np.isfinite(A0) or not np.isfinite(t0) or not np.isfinite(tE) or tE <= 0.0:
+        return empty
+
+    jd_obs = np.asarray(jd_obs, dtype=float)
+    jd_obs = jd_obs[np.isfinite(jd_obs)]
+    if len(jd_obs) == 0:
+        return empty
+
+    tau_obs = (jd_obs - t0) / tE
+    in_win = np.abs(tau_obs) <= tau_max
+    frac_in_win = float(np.mean(in_win))
+
+    edges = np.linspace(-tau_max, tau_max, n_bins + 1)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+
+    u0 = _solve_u0_from_A0(float(A0))
+    u_c = np.sqrt(u0 * u0 + np.square(centers))
+    A_c = (u_c * u_c + 2.0) / (u_c * np.sqrt(u_c * u_c + 4.0))
+    w_amp = np.clip(A_c - 1.0, 0.0, None)
+    sum_amp = float(np.sum(w_amp))
+    w_amp_norm = (w_amp / sum_amp) if sum_amp > 1e-12 else np.full(n_bins, 1.0 / n_bins, dtype=float)
+
+    sig = max(gauss_sigma, 1e-6)
+    w_g = np.exp(-0.5 * np.square(centers / sig))
+    sum_g = float(np.sum(w_g))
+    w_g_norm = (w_g / sum_g) if sum_g > 1e-12 else np.full(n_bins, 1.0 / n_bins, dtype=float)
+
+    w = 0.5 * w_amp_norm + 0.5 * w_g_norm
+
+    counts, _ = np.histogram(tau_obs[in_win], bins=edges)
+    s = (counts > 0).astype(float)
+    score = float(np.dot(w, s))
+    n_hit = int(np.sum(s))
+
+    max_wgap = 0.0
+    run_sum = 0.0
+    for i in range(n_bins):
+        if s[i] < 0.5:
+            run_sum += float(w[i])
+        else:
+            max_wgap = max(max_wgap, run_sum)
+            run_sum = 0.0
+    max_wgap = max(max_wgap, run_sum)
+
+    return {
+        'paczynski_tau_coverage_score': score,
+        'paczynski_coverage_n_bins_hit': n_hit,
+        'paczynski_coverage_n_bins': n_bins,
+        'paczynski_coverage_max_weighted_gap': float(max_wgap),
+        'paczynski_coverage_frac_points_in_tau_window': frac_in_win,
+    }
 
 
 
@@ -2079,6 +2909,11 @@ def _pacz_quality_metrics(seed_result: dict[str, object]) -> dict[str, object]:
             'shoulder_left': 0,
             'shoulder_right': 0,
             'n_strong_points': 0,
+            'paczynski_tau_coverage_score': np.nan,
+            'paczynski_coverage_n_bins_hit': 0,
+            'paczynski_coverage_n_bins': int(PAC_COVERAGE_N_BINS),
+            'paczynski_coverage_max_weighted_gap': np.nan,
+            'paczynski_coverage_frac_points_in_tau_window': np.nan,
         }
 
     jd_fit = seed_result['jd_fit']
@@ -2141,6 +2976,15 @@ def _pacz_quality_metrics(seed_result: dict[str, object]) -> dict[str, object]:
         warnings.append('single_point_peak')
         fit_ok = False
 
+    cov = _paczynski_weighted_coverage(jd_fit, pac)
+    cov_score = cov.get('paczynski_tau_coverage_score')
+    if np.isfinite(cov_score):
+        if float(cov_score) < PAC_COVERAGE_FAIL_THRESHOLD:
+            warnings.append('low_event_coverage')
+            fit_ok = False
+        elif float(cov_score) < PAC_COVERAGE_WARN_THRESHOLD:
+            warnings.append('event_coverage_below_recommended')
+
     return {
         'fit_ok': fit_ok,
         'warnings': warnings,
@@ -2148,6 +2992,7 @@ def _pacz_quality_metrics(seed_result: dict[str, object]) -> dict[str, object]:
         'shoulder_right': shoulder_right,
         'n_strong_points': n_strong_points,
         'max_model_depth': max_depth_model,
+        **cov,
     }
 
 
@@ -2338,6 +3183,11 @@ def fit_candidate_context(context: dict[str, object]) -> dict[str, object]:
         'shoulder_left': int(quality.get('shoulder_left', 0)),
         'shoulder_right': int(quality.get('shoulder_right', 0)),
         'n_strong_points': int(quality.get('n_strong_points', 0)),
+        'paczynski_tau_coverage_score': _finite_float(quality.get('paczynski_tau_coverage_score')),
+        'paczynski_coverage_n_bins_hit': int(quality.get('paczynski_coverage_n_bins_hit', 0)),
+        'paczynski_coverage_n_bins': int(quality.get('paczynski_coverage_n_bins', PAC_COVERAGE_N_BINS)),
+        'paczynski_coverage_max_weighted_gap': _finite_float(quality.get('paczynski_coverage_max_weighted_gap')),
+        'paczynski_coverage_frac_points_in_tau_window': _finite_float(quality.get('paczynski_coverage_frac_points_in_tau_window')),
         'fit_warning': ','.join(quality.get('warnings', [])),
         'ra_deg': ra_deg,
         'dec_deg': dec_deg,
@@ -2372,10 +3222,311 @@ def fit_candidate_context(context: dict[str, object]) -> dict[str, object]:
         'summary': summary,
     }
 
+
+def _load_candidate_metadata_from_candidates_csv(
+    candidate_ids: list[str] | set[str] | tuple[str, ...],
+) -> dict[str, dict[str, object]]:
+    """
+    Load minimal metadata keyed by candidate/asassn ID from ``output/candidates.csv``.
+
+    Returns a mapping ``candidate_id -> {'ra_deg': float, 'dec_deg': float}`` for IDs present
+    in the local candidates catalog.
+    """
+    path = REPO_ROOT / 'output' / 'candidates.csv'
+    if not path.exists():
+        return {}
+    try:
+        df = pd.read_csv(path, usecols=['asas_sn_id', 'ra_deg', 'dec_deg'])
+    except Exception:
+        return {}
+    if df.empty:
+        return {}
+
+    df = df.copy()
+    df['asas_sn_id'] = df['asas_sn_id'].map(_candidate_id_match_str)
+    df['ra_deg'] = pd.to_numeric(df['ra_deg'], errors='coerce')
+    df['dec_deg'] = pd.to_numeric(df['dec_deg'], errors='coerce')
+    df = df.dropna(subset=['asas_sn_id', 'ra_deg', 'dec_deg'])
+    if df.empty:
+        return {}
+
+    wanted = {_candidate_id_match_str(x) for x in candidate_ids}
+    if not wanted:
+        return {}
+    df = df.loc[df['asas_sn_id'].isin(wanted), ['asas_sn_id', 'ra_deg', 'dec_deg']]
+    if df.empty:
+        return {}
+
+    out: dict[str, dict[str, object]] = {}
+    for _, row in df.drop_duplicates('asas_sn_id', keep='first').iterrows():
+        cid = str(row['asas_sn_id'])
+        out[cid] = {
+            'ra_deg': float(row['ra_deg']),
+            'dec_deg': float(row['dec_deg']),
+        }
+    return out
+
+
+def _fetch_candidate_metadata_from_skypatrol2(
+    candidate_ids: list[str] | set[str] | tuple[str, ...],
+) -> dict[str, dict[str, object]]:
+    """
+    Best-effort SkyPatrol2 fallback (pyasassn) for ``ra_deg``/``dec_deg`` by ``asas_sn_id``.
+
+    This is intentionally defensive because pyasassn query APIs may differ across versions.
+    """
+    try:
+        from pyasassn.client import SkyPatrolClient  # type: ignore
+    except Exception:
+        return {}
+
+    candidate_ids_norm = [_candidate_id_match_str(x) for x in candidate_ids]
+    candidate_ids_norm = [x for x in candidate_ids_norm if x]
+    if not candidate_ids_norm:
+        return {}
+
+    # Query the *client* for rows; `client.catalogs.master_list` is just a schema table.
+    # Use `query_list` which actually returns catalog rows including ra/dec.
+    out: dict[str, dict[str, object]] = {}
+    try:
+        client = SkyPatrolClient()
+    except Exception:
+        return {}
+
+    # Chunk to be defensive against server limits.
+    chunk_size = 200
+    for i in range(0, len(candidate_ids_norm), chunk_size):
+        chunk = candidate_ids_norm[i : i + chunk_size]
+        try:
+            ids_int = [int(x) for x in chunk]
+        except Exception:
+            ids_int = []
+        if not ids_int:
+            continue
+
+        try:
+            df = client.query_list(
+                ids_int,
+                id_col='asas_sn_id',
+                catalog='master_list',
+                cols=['asas_sn_id', 'ra_deg', 'dec_deg'],
+                download=False,
+                threads=1,
+            )
+        except Exception:
+            continue
+
+        if df is None or getattr(df, 'empty', True):
+            continue
+
+        df = df.copy()
+        if 'asas_sn_id' in df.columns:
+            df['asas_sn_id'] = df['asas_sn_id'].map(_candidate_id_match_str)
+        df['ra_deg'] = pd.to_numeric(df.get('ra_deg'), errors='coerce')
+        df['dec_deg'] = pd.to_numeric(df.get('dec_deg'), errors='coerce')
+        df = df.dropna(subset=['asas_sn_id', 'ra_deg', 'dec_deg'])
+        for _, row in df.iterrows():
+            cid = str(row['asas_sn_id'])
+            ra = float(row['ra_deg'])
+            dec = float(row['dec_deg'])
+            if np.isfinite(ra) and np.isfinite(dec):
+                out[cid] = {'ra_deg': ra, 'dec_deg': dec}
+
+    return out
+
+
+def _enrich_candidate_metadata_with_gaia_ids(
+    candidate_metadata_by_id: dict[str, dict[str, object]],
+    *,
+    max_sep_arcsec: float = 1.0,
+) -> dict[str, dict[str, object]]:
+    """
+    Add Gaia DR3 ``gaia_id`` (``source_id``) via conservative coordinate cone-match.
+    """
+    if not candidate_metadata_by_id:
+        return candidate_metadata_by_id
+
+    rows: list[dict[str, object]] = []
+    cids: list[str] = []
+    for cid, meta in candidate_metadata_by_id.items():
+        if meta.get('gaia_id'):
+            continue
+        ra = _finite_float(meta.get('ra_deg'))
+        dec = _finite_float(meta.get('dec_deg'))
+        if ra is None or dec is None:
+            continue
+        cids.append(str(cid))
+        rows.append({'_idx': len(cids) - 1, 'ra': float(ra), 'dec': float(dec)})
+
+    if not rows:
+        return candidate_metadata_by_id
+
+    coords_df = pd.DataFrame(rows)
+    try:
+        gaia_hits = batch_gaia_cone_query(
+            coords_df,
+            select_cols="g.ra, g.dec",
+            extra_where="",
+            match_radius_arcsec=float(max_sep_arcsec),
+            chunk_size=500,
+            n_workers=2,
+            verbose=False,
+        )
+    except Exception:
+        return candidate_metadata_by_id
+
+    if gaia_hits.empty:
+        return candidate_metadata_by_id
+
+    hits = gaia_hits.copy()
+    hits['_idx'] = pd.to_numeric(hits.get('_idx'), errors='coerce')
+    hits['sep_arcsec'] = pd.to_numeric(hits.get('sep_arcsec'), errors='coerce')
+    hits = hits.dropna(subset=['_idx', 'source_id', 'sep_arcsec'])
+    if hits.empty:
+        return candidate_metadata_by_id
+    hits = hits.sort_values(['_idx', 'sep_arcsec'], kind='mergesort').drop_duplicates('_idx', keep='first')
+
+    for _, row in hits.iterrows():
+        idx = int(row['_idx'])
+        if idx < 0 or idx >= len(cids):
+            continue
+        cid = cids[idx]
+        sid = _candidate_id_match_str(row.get('source_id'))
+        if not sid:
+            continue
+        candidate_metadata_by_id.setdefault(cid, {})
+        candidate_metadata_by_id[cid]['gaia_id'] = sid
+
+    return candidate_metadata_by_id
+
+
+def _fit_candidate_context_from_db_task(
+    db_path: str,
+    candidate_id: str,
+    *,
+    prefer_g_band: bool = True,
+) -> dict[str, object]:
+    """Worker-safe single-candidate fit from review DB."""
+    db = Path(db_path).expanduser().resolve()
+    plot_dir = infer_plot_dir_from_source(db)
+    with sqlite3.connect(db) as conn:
+        init_db(conn)
+        context = _load_candidate_context(
+            conn,
+            str(candidate_id),
+            plot_dir=plot_dir,
+            prefer_g_band=prefer_g_band,
+        )
+    return fit_candidate_context(context)
+
+
+def _fit_candidate_context_from_lightcurve_task(
+    candidate_id: str,
+    lc_paths: list[str],
+    metadata: dict[str, object] | None = None,
+    *,
+    prefer_g_band: bool = True,
+) -> dict[str, object] | None:
+    """Worker-safe single-candidate fit from direct light-curve paths."""
+    df: pd.DataFrame | None = None
+    band_label: str = 'all'
+    used_lc_path: Path | None = None
+    for lc_path_s in lc_paths:
+        lc_path = Path(lc_path_s)
+        try:
+            _df, _band_label = _prepare_lightcurve_df(lc_path, prefer_g_band=prefer_g_band)
+        except Exception:
+            continue
+        if _df.empty:
+            continue
+        df = _df
+        band_label = _band_label
+        used_lc_path = lc_path
+        break
+
+    if df is None or used_lc_path is None:
+        return None
+
+    payload = {'candidate_id': str(candidate_id)}
+    meta = metadata or {}
+    if _finite_float(meta.get('ra_deg')) is not None:
+        payload['ra_deg'] = float(meta['ra_deg'])
+    if _finite_float(meta.get('dec_deg')) is not None:
+        payload['dec_deg'] = float(meta['dec_deg'])
+    gid = _candidate_id_match_str(meta.get('gaia_id'))
+    if gid:
+        payload['gaia_id'] = gid
+
+    context = {
+        'candidate_id': str(candidate_id),
+        'asas_sn_id': str(candidate_id),
+        'row': {},
+        'payload': payload,
+        'lc_path': used_lc_path,
+        'df': df,
+        'band_label': band_label,
+    }
+    return fit_candidate_context(context)
+
+
+def _fit_lightcurve_only_candidates(
+    candidate_id_to_lc_paths: dict[str, list[Path]],
+    *,
+    candidate_metadata_by_id: dict[str, dict[str, object]] | None = None,
+    fit_workers: int = 1,
+    prefer_g_band: bool = True,
+    show_progress: bool = False,
+) -> tuple[pd.DataFrame, list[dict[str, object]]]:
+    """
+    Fit candidates when we have a native light-curve path but no `review.db` row.
+
+    We construct a minimal `context` (empty row/payload) and let the fitter fall back to
+    data-driven seeds. Parallax diagnostics will be skipped because coordinates are missing.
+    """
+    items = sorted(candidate_id_to_lc_paths.items(), key=lambda kv: kv[0])
+    if show_progress and sys.stderr.isatty():
+        items = tqdm(items, desc="Fitting lightcurves (no review.db)", unit="cid")
+
+    results: list[dict[str, object]] = []
+    if int(fit_workers) <= 1:
+        for candidate_id, lc_paths in items:
+            result = _fit_candidate_context_from_lightcurve_task(
+                str(candidate_id),
+                [str(p) for p in lc_paths],
+                (candidate_metadata_by_id or {}).get(str(candidate_id), {}),
+                prefer_g_band=prefer_g_band,
+            )
+            if result is not None:
+                results.append(result)
+    else:
+        with cf.ProcessPoolExecutor(max_workers=int(fit_workers)) as ex:
+            futures = [
+                ex.submit(
+                    _fit_candidate_context_from_lightcurve_task,
+                    str(candidate_id),
+                    [str(p) for p in lc_paths],
+                    (candidate_metadata_by_id or {}).get(str(candidate_id), {}),
+                    prefer_g_band=prefer_g_band,
+                )
+                for candidate_id, lc_paths in items
+            ]
+            iterator = cf.as_completed(futures)
+            if show_progress and sys.stderr.isatty():
+                iterator = tqdm(iterator, total=len(futures), desc="LC-only fits", unit="cid")
+            for fut in iterator:
+                result = fut.result()
+                if result is not None:
+                    results.append(result)
+
+    results_df = pd.DataFrame([result['summary'] for result in results]).sort_values('candidate_id').reset_index(drop=True)
+    return results_df, results
+
+
 def fit_microlensing_candidates(
     db_path: str | Path,
     *,
     candidate_ids: list[str],
+    fit_workers: int = 1,
     prefer_g_band: bool = True,
     show_progress: bool = True,
     progress_desc: str = "Fitting candidates",
@@ -2392,20 +3543,37 @@ def fit_microlensing_candidates(
         )
     if not candidate_ids:
         return pd.DataFrame(), []
-    results = []
+    results: list[dict[str, object]] = []
     ids_loop = list(candidate_ids)
-    if show_progress and sys.stderr.isatty():
+    if show_progress and sys.stderr.isatty() and int(fit_workers) <= 1:
         ids_loop = tqdm(ids_loop, desc=progress_desc, unit="cid")
-    with sqlite3.connect(db_path) as conn:
-        init_db(conn)
-        for candidate_id in ids_loop:
-            context = _load_candidate_context(
-                conn,
-                str(candidate_id),
-                plot_dir=plot_dir,
-                prefer_g_band=prefer_g_band,
-            )
-            results.append(fit_candidate_context(context))
+    if int(fit_workers) <= 1:
+        with sqlite3.connect(db_path) as conn:
+            init_db(conn)
+            for candidate_id in ids_loop:
+                context = _load_candidate_context(
+                    conn,
+                    str(candidate_id),
+                    plot_dir=plot_dir,
+                    prefer_g_band=prefer_g_band,
+                )
+                results.append(fit_candidate_context(context))
+    else:
+        with cf.ProcessPoolExecutor(max_workers=int(fit_workers)) as ex:
+            futures = [
+                ex.submit(
+                    _fit_candidate_context_from_db_task,
+                    str(db_path),
+                    str(candidate_id),
+                    prefer_g_band=prefer_g_band,
+                )
+                for candidate_id in ids_loop
+            ]
+            iterator = cf.as_completed(futures)
+            if show_progress and sys.stderr.isatty():
+                iterator = tqdm(iterator, total=len(futures), desc=progress_desc, unit="cid")
+            for fut in iterator:
+                results.append(fut.result())
 
     results_df = pd.DataFrame([result['summary'] for result in results]).sort_values('candidate_id').reset_index(drop=True)
     return results_df, results
@@ -2444,7 +3612,9 @@ def plot_candidate_fit(result: dict[str, object], *, figsize: tuple[float, float
     ax = fig.add_subplot(gs[0])
     ax_zoom = fig.add_subplot(gs[1])
     ax_res = fig.add_subplot(gs[2], sharex=ax_zoom)
-    fig.subplots_adjust(left=0.08, right=0.95, top=0.93, bottom=0.10)
+    _ctx_caption = _plot_crossmatch_context_caption(summary)
+    _top_margin = 0.88 if _ctx_caption else 0.93
+    fig.subplots_adjust(left=0.08, right=0.84, top=_top_margin, bottom=0.10)
 
     fit_mask = np.asarray(best_seed['fit_mask'], dtype=bool)
     fit_df = df.loc[fit_mask]
@@ -2525,18 +3695,28 @@ def plot_candidate_fit(result: dict[str, object], *, figsize: tuple[float, float
         'gaussian': r'$\mathrm{Gaussian}$',
     }
     colors = {'paczynski': 'red', 'fred': 'blue', 'gaussian': 'orange'}
+    # Figure-level info panel uses a white bbox; keep model/data artists above it where they overlap.
+    _z_lc_points = 4
+    _z_vline = 4.5
+    _z_model_curves = 6
 
     for axis in (ax, ax_zoom):
         axis.errorbar(
             _plot_jd(df['JD']), df['mag'], yerr=df[err_col],
             fmt='k.', alpha=0.25 if axis is ax_zoom else 0.7, markersize=3, elinewidth=0.8, capsize=0,
+            zorder=_z_lc_points,
         )
         axis.errorbar(
             _plot_jd(fit_df['JD']), fit_df['mag'], yerr=fit_df[err_col],
             fmt='k.', alpha=0.9, markersize=4, elinewidth=1.0, capsize=0,
+            zorder=_z_lc_points + 0.1,
         )
         for m_name, m_dense in dense_models.items():
-            kw = {'color': colors.get(m_name, 'k'), 'linewidth': 2.0 if m_name == 'paczynski' else 1.6}
+            kw = {
+                'color': colors.get(m_name, 'k'),
+                'linewidth': 2.0 if m_name == 'paczynski' else 1.6,
+                'zorder': _z_model_curves,
+            }
             if m_name != 'paczynski':
                 kw['linestyle'] = '--'
             if axis is ax:
@@ -2546,34 +3726,59 @@ def plot_candidate_fit(result: dict[str, object], *, figsize: tuple[float, float
             axis.axvline(
                 _plot_jd_scalar(float(pac['params'][1])),
                 color='tab:orange', linestyle=':', linewidth=1.2,
+                zorder=_z_vline,
                 label=r'$t_0\,\mathrm{(Paczynski)}$' if axis is ax else None,
             )
         if parallax_dense is not None:
-            kw_par = {'color': 'tab:cyan', 'linewidth': 2.0, 'linestyle': '-.'}
+            kw_par = {'color': 'tab:cyan', 'linewidth': 2.0, 'linestyle': '-.', 'zorder': _z_model_curves}
             if axis is ax:
                 kw_par['label'] = r'$\mathrm{Parallax}$'
             axis.plot(_plot_jd(jd_dense), parallax_dense, **kw_par)
-        axis.axvline(_plot_jd_scalar(float(summary['seed_t0_guess'])), color='tab:brown', linestyle='--', linewidth=1.0, alpha=0.8)
+        axis.axvline(
+            _plot_jd_scalar(float(summary['seed_t0_guess'])),
+            color='tab:brown', linestyle='--', linewidth=1.0, alpha=0.8, zorder=_z_vline,
+        )
         axis.grid(alpha=0.2)
         axis.invert_yaxis()
 
     for artist in [*list(ax_zoom.collections), *list(ax_zoom.lines)]:
         artist.remove()
-    ax_zoom.errorbar(_plot_jd(zoom_df['JD']), zoom_df['mag'], yerr=zoom_df[err_col], fmt='k.', alpha=0.8, markersize=4, elinewidth=1.0, capsize=0)
-    ax_zoom.errorbar(_plot_jd(zoom_fit_df['JD']), zoom_fit_df['mag'], yerr=zoom_fit_df[err_col], fmt='k.', alpha=0.95, markersize=5, elinewidth=1.2, capsize=0)
+    ax_zoom.errorbar(
+        _plot_jd(zoom_df['JD']), zoom_df['mag'], yerr=zoom_df[err_col],
+        fmt='k.', alpha=0.8, markersize=4, elinewidth=1.0, capsize=0, zorder=_z_lc_points,
+    )
+    ax_zoom.errorbar(
+        _plot_jd(zoom_fit_df['JD']), zoom_fit_df['mag'], yerr=zoom_fit_df[err_col],
+        fmt='k.', alpha=0.95, markersize=5, elinewidth=1.2, capsize=0, zorder=_z_lc_points + 0.1,
+    )
     zoom_dense_mask = np.abs(jd_dense - zoom_center) <= zoom_half_window
     for m_name, m_dense in dense_models.items():
-        kw = {'color': colors.get(m_name, 'k'), 'linewidth': 2.0 if m_name == 'paczynski' else 1.6}
+        kw = {
+            'color': colors.get(m_name, 'k'),
+            'linewidth': 2.0 if m_name == 'paczynski' else 1.6,
+            'zorder': _z_model_curves,
+        }
         if m_name != 'paczynski':
             kw['linestyle'] = '--'
         ax_zoom.plot(_plot_jd(jd_dense[zoom_dense_mask]), m_dense[zoom_dense_mask], **kw)
     if parallax_dense is not None:
-        ax_zoom.plot(_plot_jd(jd_dense[zoom_dense_mask]), parallax_dense[zoom_dense_mask], color='tab:cyan', linewidth=2.0, linestyle='-.')
-    ax_zoom.axvline(_plot_jd_scalar(float(summary['seed_t0_guess'])), color='tab:brown', linestyle='--', linewidth=1.0, alpha=0.8)
+        ax_zoom.plot(
+            _plot_jd(jd_dense[zoom_dense_mask]), parallax_dense[zoom_dense_mask],
+            color='tab:cyan', linewidth=2.0, linestyle='-.', zorder=_z_model_curves,
+        )
+    ax_zoom.axvline(
+        _plot_jd_scalar(float(summary['seed_t0_guess'])),
+        color='tab:brown', linestyle='--', linewidth=1.0, alpha=0.8, zorder=_z_vline,
+    )
     if pac_success:
-        ax_zoom.axvline(_plot_jd_scalar(float(pac['params'][1])), color='tab:orange', linestyle=':', linewidth=1.2)
+        ax_zoom.axvline(
+            _plot_jd_scalar(float(pac['params'][1])), color='tab:orange', linestyle=':', linewidth=1.2, zorder=_z_vline,
+        )
     if show_parallax and np.isfinite(summary.get('parallax_best_t0_jd_minus_2450000', np.nan)):
-        ax_zoom.axvline(_plot_jd_scalar(float(summary['parallax_best_t0_jd_minus_2450000'])), color='tab:cyan', linestyle=':', linewidth=1.2)
+        ax_zoom.axvline(
+            _plot_jd_scalar(float(summary['parallax_best_t0_jd_minus_2450000'])),
+            color='tab:cyan', linestyle=':', linewidth=1.2, zorder=_z_vline,
+        )
     ax_zoom.set_xlim(_plot_jd_scalar(zoom_center - zoom_half_window), _plot_jd_scalar(zoom_center + zoom_half_window))
     ax_zoom.set_ylabel(mag_label)
     ax_zoom.tick_params(axis='x', which='both', labelbottom=False, labeltop=True, top=True)
@@ -2609,10 +3814,13 @@ def plot_candidate_fit(result: dict[str, object], *, figsize: tuple[float, float
         _chi2nu_title = rf'$\chi^2_\nu={pac_rchi:.2f}$'
     else:
         _chi2nu_title = r'$\chi^2_\nu=\mathrm{nan}$'
-    ax.set_title(
-        f'{_chi2nu_title} | {summary["candidate_id"]} | ' + rf"$t_\mathrm{{E}}={_tE_title:.3f}\,\mathrm{{d}}$",
-        fontsize=10,
+    _title_line1 = (
+        f'{_chi2nu_title} | {summary["candidate_id"]} | ' + rf"$t_\mathrm{{E}}={_tE_title:.3f}\,\mathrm{{d}}$"
     )
+    if _ctx_caption:
+        ax.set_title(f'{_title_line1}\n{_ctx_caption}', fontsize=9)
+    else:
+        ax.set_title(_title_line1, fontsize=10)
     ax.set_ylabel(mag_label)
     ax.tick_params(axis='x', labelbottom=False)
 
@@ -2654,22 +3862,22 @@ def plot_candidate_fit(result: dict[str, object], *, figsize: tuple[float, float
         *chi2nu_lines,
         *dbic_lines,
     ]
-    # Stats / diagnostics box: lower-left (full LC) to avoid the brightened peak near the top.
+    # Stats / diagnostics box: figure-level panel outside the axes.
     _info_fs = 7.0
-    ax.text(
-        0.02,
-        0.02,
+    fig.text(
+        0.855,
+        0.54,
         '\n'.join(info_lines),
-        transform=ax.transAxes,
+        transform=fig.transFigure,
         fontsize=_info_fs,
         ha='left',
-        va='bottom',
-        clip_on=True,
+        va='center',
+        zorder=1,
         bbox={'facecolor': 'white', 'alpha': 0.92, 'edgecolor': '0.8', 'boxstyle': 'round,pad=0.25'},
     )
     handles, labels = ax.get_legend_handles_labels()
     if handles:
-        ax.legend(
+        leg = ax.legend(
             handles,
             labels,
             loc='lower right',
@@ -2682,6 +3890,7 @@ def plot_candidate_fit(result: dict[str, object], *, figsize: tuple[float, float
             handletextpad=0.5,
             borderaxespad=0.35,
         )
+        leg.set_zorder(_z_model_curves + 1)
     return fig, (ax, ax_zoom, ax_res)
 
 
@@ -2978,13 +4187,17 @@ def run_microlensing_pipeline(
     db_path: Path | None = None,
     plot_lc: bool = False,
     crossmatch: bool = False,
-    crossmatch_dust: bool = False,
-    crossmatch_unwise: bool = False,
-    crossmatch_neowise: bool = False,
-    crossmatch_starhorse: str | None = None,
+    crossmatch_dust: bool = True,
+    crossmatch_unwise: bool = True,
+    crossmatch_neowise: bool = True,
+    crossmatch_starhorse: str | None = "tap",
     crossmatch_gaia_catalog: Path | None = None,
     crossmatch_vsx_csv: Path | None = None,
     crossmatch_method: str = 'tap',
+    crossmatch_cache_dir: Path | None = None,
+    crossmatch_no_cache: bool = False,
+    crossmatch_refresh_cache: bool = False,
+    fit_workers: int = 1,
 ) -> None:
     """Run March 18 fits, CSV + sky map, jumps-14 cohort; optional LC PDFs and characterize/vet crossmatch.
 
@@ -3007,11 +4220,18 @@ def run_microlensing_pipeline(
     MICROLENSING_FIT_PDF_DIR = (MICROLENSING_OUTPUT_ROOT / "fit_pdfs").resolve()
     MICROLENSING_OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
 
+    cache_root = (
+        Path(crossmatch_cache_dir).expanduser().resolve()
+        if crossmatch_cache_dir is not None
+        else (MICROLENSING_OUTPUT_ROOT / "cache").resolve()
+    )
+
     if show_progress:
         print("[1/6] Fitting March 18 review candidates …", flush=True)
     results_df, fit_results = fit_microlensing_candidates(
         DB_PATH,
         candidate_ids=MARCH18_CANDIDATE_IDS,
+        fit_workers=fit_workers,
         prefer_g_band=True,
         show_progress=show_progress,
         progress_desc="March 18 cohort",
@@ -3202,6 +4422,11 @@ def run_microlensing_pipeline(
         'nearest_vsx_object',
         'vsx_class',
         'vsx_sep_arcsec',
+        'paczynski_tau_coverage_score',
+        'paczynski_coverage_n_bins_hit',
+        'paczynski_coverage_n_bins',
+        'paczynski_coverage_max_weighted_gap',
+        'paczynski_coverage_frac_points_in_tau_window',
         'fit_warning',
     ]
     raw_delta_bic_cols = {'delta_bic_vs_flat', 'delta_bic_vs_gaussian', 'delta_bic_vs_fred', 'delta_bic_vs_best_alt'}
@@ -3226,27 +4451,12 @@ def run_microlensing_pipeline(
 
     if show_progress:
         if plot_lc:
-            print("[5/6] Writing March 18 fit PDFs …", flush=True)
+            print(
+                "[5/6] LC fit PDFs (March 18 + jumps-14) written at end after crossmatch table (use --plot-lc) …",
+                flush=True,
+            )
         else:
             print("[5/6] Skipping LC fit PDFs (pass --plot-lc to write) …", flush=True)
-    if plot_lc:
-        MICROLENSING_FIT_PDF_DIR.mkdir(parents=True, exist_ok=True)
-        pdf_iter = fit_results
-        if show_progress and sys.stderr.isatty():
-            pdf_iter = tqdm(fit_results, desc="March 18 PDFs", unit="pdf")
-        for result in pdf_iter:
-            summary = result['summary']
-            fig, _axes = plot_candidate_fit(result)
-            out_pdf = MICROLENSING_FIT_PDF_DIR / f'{_microlensing_fit_pdf_stem(summary)}.pdf'
-            fig.savefig(
-                out_pdf,
-                bbox_inches='tight',
-                format='pdf',
-                dpi=MICROLENSING_FIT_PDF_DPI,
-                facecolor=fig.get_facecolor(),
-                edgecolor='none',
-            )
-            plt.close(fig)
 
 
 
@@ -3307,6 +4517,111 @@ def run_microlensing_pipeline(
         sample = sorted(missing)[:20]
         print(f'Warning: {len(missing)} target IDs not in any review.db (first 20): {sample}')
 
+    # Fallback: if a candidate has a light-curve in some run bundle but is absent from all `review.db`,
+    # fit using the light-curve directly.
+    lc_only_single_results_df_list: list[pd.DataFrame] = []
+    lc_only_fit_results: list[dict[str, object]] = []
+    if missing:
+        if show_progress:
+            print(f"Attempting light-curve-only fits for {len(missing)} missing candidate(s) …", flush=True)
+
+        lightcurve_bundle_dirs = [
+            p for p in runs_root.rglob('bundle_assets/lightcurves')
+            if p.is_dir()
+        ]
+
+        # Prefer representations that are known to be loadable by `load_lightcurve_df`.
+        ext_order = ('dat3', 'dat2', 'dat', 'raw2')
+        candidate_id_to_lc_paths: dict[str, list[Path]] = {}
+
+        for cid in sorted(missing):
+            lc_paths: list[Path] = []
+            # First, check for expected filenames directly in each lightcurve bundle directory
+            # (mirrors `resolve_lightcurve_path` which also doesn't recurse).
+            for lc_dir in lightcurve_bundle_dirs:
+                dir_paths: list[Path] = []
+                for ext in ext_order:
+                    p = lc_dir / f"{cid}.{ext}"
+                    if p.exists():
+                        dir_paths.append(p)
+                if dir_paths:
+                    lc_paths = dir_paths
+                    break
+
+            # If direct lookup failed, do a last-resort recursive lookup for this candidate+extension.
+            if not lc_paths:
+                for lc_dir in lightcurve_bundle_dirs:
+                    for ext in ext_order:
+                        p = next(lc_dir.rglob(f"{cid}.{ext}"), None)
+                        if p is not None:
+                            lc_paths = [p]
+                            break
+                    if lc_paths:
+                        break
+
+            if lc_paths:
+                candidate_id_to_lc_paths[cid] = lc_paths
+
+        if candidate_id_to_lc_paths:
+            # Step 1: recover coordinates from local output/candidates.csv keyed by asas_sn_id.
+            candidate_metadata_by_id = _load_candidate_metadata_from_candidates_csv(
+                list(candidate_id_to_lc_paths.keys()),
+            )
+            # Step 2 (fallback): for IDs still missing coordinates, try SkyPatrol2 (pyasassn).
+            missing_meta_ids = sorted(
+                cid for cid in candidate_id_to_lc_paths
+                if cid not in candidate_metadata_by_id
+            )
+            if missing_meta_ids:
+                sp_meta = _fetch_candidate_metadata_from_skypatrol2(missing_meta_ids)
+                if sp_meta:
+                    candidate_metadata_by_id.update(sp_meta)
+
+            # Step 3: conservative Gaia cone-match (1 arcsec) to recover Gaia source_id.
+            candidate_metadata_by_id = _enrich_candidate_metadata_with_gaia_ids(
+                candidate_metadata_by_id,
+                max_sep_arcsec=1.0,
+            )
+
+            if show_progress:
+                n_with_gaia = sum(
+                    1
+                    for m in candidate_metadata_by_id.values()
+                    if _candidate_id_match_str(m.get('gaia_id'))
+                )
+                print(
+                    f"  Metadata recovered for {len(candidate_metadata_by_id)} / "
+                    f"{len(candidate_id_to_lc_paths)} lightcurve-only candidate(s) "
+                    f"(local candidates.csv first, SkyPatrol2 fallback); "
+                    f"Gaia IDs recovered for {n_with_gaia}.",
+                    flush=True,
+                )
+
+            res_df, res_fits = _fit_lightcurve_only_candidates(
+                candidate_id_to_lc_paths,
+                candidate_metadata_by_id=candidate_metadata_by_id,
+                fit_workers=fit_workers,
+                prefer_g_band=True,
+                show_progress=False,
+            )
+            if not res_df.empty:
+                lc_only_single_results_df_list.append(res_df)
+                lc_only_fit_results.extend(res_fits)
+
+        if show_progress:
+            still_missing = sorted(set(missing) - set(candidate_id_to_lc_paths))
+            if still_missing:
+                print(
+                    f"  Lightcurve fallback found {len(candidate_id_to_lc_paths)} / {len(missing)} missing; "
+                    f"still missing {len(still_missing)} (no light-curve file found).",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"  Lightcurve fallback found {len(candidate_id_to_lc_paths)} / {len(missing)} missing.",
+                    flush=True,
+                )
+
     db_to_ids: dict[Path, list[str]] = {}
     for cid, db_path in id_to_db.items():
         db_to_ids.setdefault(db_path, []).append(cid)
@@ -3325,11 +4640,16 @@ def run_microlensing_pipeline(
         res_df, res_fits = fit_microlensing_candidates(
             db_path,
             candidate_ids=cids,
+            fit_workers=fit_workers,
             prefer_g_band=True,
             show_progress=False,
         )
         jumps14_single_results_df_list.append(res_df)
         jumps14_fit_results.extend(res_fits)
+
+    if lc_only_single_results_df_list:
+        jumps14_single_results_df_list.extend(lc_only_single_results_df_list)
+        jumps14_fit_results.extend(lc_only_fit_results)
 
     if jumps14_single_results_df_list:
         jumps14_single_results_df = pd.concat(
@@ -3373,6 +4693,45 @@ def run_microlensing_pipeline(
                 "[4c] Crossmatch suite: malca.characterize + malca.vetting (not reimplemented here) …",
                 flush=True,
             )
+        characterize_checkpoint_path: Path | None = None
+        vetting_checkpoint_path: Path | None = None
+        if not crossmatch_no_cache:
+            _cache_ids = sorted({str(cid) for cid in microlensing_table_df['candidate_id'].dropna().astype(str).tolist()})
+            _cache_payload = {
+                "candidate_ids": _cache_ids,
+                "crossmatch_dust": bool(crossmatch_dust),
+                "crossmatch_unwise": bool(crossmatch_unwise),
+                "crossmatch_neowise": bool(crossmatch_neowise),
+                "crossmatch_starhorse": str(crossmatch_starhorse or ""),
+                "crossmatch_method": str(crossmatch_method),
+                "crossmatch_gaia_catalog": (
+                    str(Path(crossmatch_gaia_catalog).expanduser().resolve())
+                    if crossmatch_gaia_catalog is not None
+                    else ""
+                ),
+                "crossmatch_vsx_csv": (
+                    str(Path(crossmatch_vsx_csv).expanduser().resolve())
+                    if crossmatch_vsx_csv is not None
+                    else ""
+                ),
+            }
+            _cache_key = hashlib.sha256(
+                json.dumps(_cache_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()[:16]
+            cache_root.mkdir(parents=True, exist_ok=True)
+            characterize_checkpoint_path = cache_root / f"crossmatch_char_{_cache_key}.parquet"
+            vetting_checkpoint_path = cache_root / f"crossmatch_vet_{_cache_key}.parquet"
+            if crossmatch_refresh_cache:
+                for _ckpt in (characterize_checkpoint_path, vetting_checkpoint_path):
+                    if _ckpt.exists():
+                        _ckpt.unlink()
+                if show_progress:
+                    print(f"  Refreshed crossmatch cache key={_cache_key}", flush=True)
+            elif show_progress:
+                print(f"  Crossmatch cache key={_cache_key}", flush=True)
+        elif show_progress:
+            print("  Crossmatch cache disabled (--crossmatch-no-cache).", flush=True)
+
         microlensing_table_df = _run_microlensing_crossmatch_enrichment(
             microlensing_table_df,
             repo_root=REPO_ROOT,
@@ -3384,9 +4743,16 @@ def run_microlensing_pipeline(
             gaia_catalog=crossmatch_gaia_catalog,
             vsx_crossmatch=crossmatch_vsx_csv,
             vet_method=crossmatch_method,
+            characterize_checkpoint_path=characterize_checkpoint_path,
+            vetting_checkpoint_path=vetting_checkpoint_path,
         )
 
     microlensing_table_df = _add_visual_inspection_columns(microlensing_table_df)
+    microlensing_table_df = _ensure_microlensing_quality_columns(microlensing_table_df)
+
+    if plot_lc and not microlensing_table_df.empty:
+        _inject_microlensing_table_into_summaries(microlensing_table_df, fit_results)
+        _inject_microlensing_table_into_summaries(microlensing_table_df, jumps14_fit_results)
 
     _ts = datetime.now().strftime('%Y%m%d_%H%M%S')
     microlensing_results_path = MICROLENSING_OUTPUT_ROOT / f'microlensing_results_{_ts}.csv'
@@ -3399,11 +4765,30 @@ def run_microlensing_pipeline(
     if show_progress:
         print(f"Full-sky map written to {microlensing_sky_path}", flush=True)
 
+    microlensing_grid_path = MICROLENSING_OUTPUT_ROOT / f'microlensing_grid_{_ts}.pdf'
+    _save_microlensing_candidate_grid_plot(
+        microlensing_table_df,
+        microlensing_grid_path,
+        min_tier='Bronze',
+        max_candidates=None,
+        dpi=MICROLENSING_FIT_PDF_DPI,
+        fit_results=fit_results,
+        jumps14_fit_results=jumps14_fit_results,
+    )
+    if show_progress:
+        print(f"Candidate grid written to {microlensing_grid_path}", flush=True)
+
+    microlensing_cmd_path = MICROLENSING_OUTPUT_ROOT / f'microlensing_cmd_{_ts}.pdf'
+    _save_microlensing_cmd_plot(microlensing_table_df, microlensing_cmd_path, dpi=MICROLENSING_FIT_PDF_DPI)
+    if show_progress:
+        print(f"CMD summary written to {microlensing_cmd_path}", flush=True)
+
     if plot_lc:
         MICROLENSING_FIT_PDF_DIR.mkdir(parents=True, exist_ok=True)
-        jpdf_iter = jumps14_fit_results
+        _all_fit_pdf_results = list(fit_results) + list(jumps14_fit_results)
+        jpdf_iter = _all_fit_pdf_results
         if show_progress and sys.stderr.isatty():
-            jpdf_iter = tqdm(jumps14_fit_results, desc="Jumps-14 PDFs", unit="pdf")
+            jpdf_iter = tqdm(_all_fit_pdf_results, desc="LC fit PDFs", unit="pdf")
         for result in jpdf_iter:
             summary = result['summary']
             fig, _axes = plot_candidate_fit(result)
@@ -3419,18 +4804,19 @@ def run_microlensing_pipeline(
             plt.close(fig)
         if show_progress:
             print(
-                f'Saved {len(jumps14_fit_results)} jumps-14 PDFs under {MICROLENSING_FIT_PDF_DIR}',
+                f'Saved {len(fit_results)} March 18 + {len(jumps14_fit_results)} jumps-14 '
+                f'LC fit PDFs under {MICROLENSING_FIT_PDF_DIR}',
                 flush=True,
             )
-    elif show_progress and len(jumps14_fit_results):
-        print('Skipping jumps-14 LC PDFs (--plot-lc not set).', flush=True)
+    elif show_progress and (len(fit_results) or len(jumps14_fit_results)):
+        print('Skipping LC fit PDFs (--plot-lc not set).', flush=True)
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=(
             "Microlensing analysis: March 18 cohort fits, catalog cross-matches, "
-            "one CSV and full-sky map PDF under output/microlensing/. "
+            "one CSV plus sky/grid/CMD PDFs under output/microlensing/. "
             "Per-candidate LC PDFs are written only with --plot-lc."
         ),
     )
@@ -3448,29 +4834,49 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Requires local Gaia parquet for full characterize (see --crossmatch-gaia-catalog)."
         ),
     )
+    p.add_argument(
+        "--crossmatch-off",
+        action="store_true",
+        help="Disable crossmatch enrichment (overrides --crossmatch and all --crossmatch-* toggles).",
+    )
     g_x = p.add_argument_group("Crossmatch (only if --crossmatch)")
     g_x.add_argument(
         "--crossmatch-dust",
         action="store_true",
-        help="Enable dustmaps3d in characterize.",
+        default=True,
+        help="Enable dustmaps3d in characterize (default: on).",
     )
     g_x.add_argument(
         "--crossmatch-unwise",
         action="store_true",
-        help="Enable unWISE/unTimely variability in characterize.",
+        default=True,
+        help="Enable unWISE/unTimely variability in characterize (default: on).",
+    )
+    g_x.add_argument(
+        "--crossmatch-no-unwise",
+        action="store_true",
+        default=False,
+        help="Disable unWISE/unTimely variability even when --crossmatch is enabled.",
     )
     g_x.add_argument(
         "--crossmatch-neowise",
         action="store_true",
-        help="Enable NEOWISE LC fetch in vetting (slow).",
+        default=True,
+        help="Enable NEOWISE LC fetch in vetting (slow) (default: on).",
+    )
+    g_x.add_argument(
+        "--crossmatch-no-neowise",
+        action="store_true",
+        default=False,
+        help="Disable NEOWISE LC fetch even when --crossmatch is enabled.",
     )
     g_x.add_argument(
         "--crossmatch-starhorse",
         nargs="?",
         const="tap",
-        default=None,
+        default="tap",
         metavar="MODE",
-        help="StarHorse in characterize: use flag alone or pass tap (default: skip StarHorse).",
+        help="StarHorse in characterize: use flag alone or pass tap (default: tap).",
     )
     g_x.add_argument(
         "--crossmatch-gaia-catalog",
@@ -3490,6 +4896,22 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="tap",
         help="Vetting backend for TAP-based catalog steps (default: tap).",
     )
+    g_x.add_argument(
+        "--crossmatch-cache-dir",
+        type=Path,
+        default=None,
+        help="Crossmatch checkpoint cache dir (default: <repo>/output/microlensing/cache).",
+    )
+    g_x.add_argument(
+        "--crossmatch-no-cache",
+        action="store_true",
+        help="Disable crossmatch checkpoint cache read/write.",
+    )
+    g_x.add_argument(
+        "--crossmatch-refresh-cache",
+        action="store_true",
+        help="Ignore existing crossmatch checkpoint cache for this run key and recompute.",
+    )
     p.add_argument(
         "--repo-root",
         type=Path,
@@ -3502,11 +4924,30 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Override path to review.db (default: runs_march18_bundle_all/review/review.db).",
     )
+    p.add_argument(
+        "--fit-workers",
+        type=int,
+        default=1,
+        help="Number of process workers for per-candidate fitting (default: 1, i.e. serial).",
+    )
     return p.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
+    if getattr(args, "crossmatch_off", False):
+        # Explicit override requested by user.
+        args.crossmatch = False
+        args.crossmatch_dust = False
+        args.crossmatch_unwise = False
+        args.crossmatch_neowise = False
+        args.crossmatch_starhorse = None
+    else:
+        # Allow stacking of individual "disable X" flags.
+        if getattr(args, "crossmatch_no_unwise", False):
+            args.crossmatch_unwise = False
+        if getattr(args, "crossmatch_no_neowise", False):
+            args.crossmatch_neowise = False
     run_microlensing_pipeline(
         repo_root=args.repo_root,
         db_path=args.db_path,
@@ -3519,6 +4960,10 @@ def main(argv: list[str] | None = None) -> None:
         crossmatch_gaia_catalog=args.crossmatch_gaia_catalog,
         crossmatch_vsx_csv=args.crossmatch_vsx_csv,
         crossmatch_method=args.crossmatch_method,
+        crossmatch_cache_dir=args.crossmatch_cache_dir,
+        crossmatch_no_cache=args.crossmatch_no_cache,
+        crossmatch_refresh_cache=args.crossmatch_refresh_cache,
+        fit_workers=max(1, int(args.fit_workers)),
     )
 
 
