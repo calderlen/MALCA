@@ -2816,6 +2816,203 @@ def _fit_model(
     }
 
 
+# =============================================================================
+# FLUX-SPACE MODEL FITTING
+# =============================================================================
+
+def _pspl_magnification(t: np.ndarray, u0: float, t0: float, tE: float) -> np.ndarray:
+    """Point-source point-lens magnification A(t) = (u^2 + 2) / (u * sqrt(u^2 + 4))."""
+    u_t = np.sqrt(u0**2 + ((t - t0) / tE)**2)
+    return (u_t**2 + 2.0) / (u_t * np.sqrt(u_t**2 + 4.0))
+
+
+def _solve_linear_flux_params(
+    magnification: np.ndarray,
+    flux: np.ndarray,
+    flux_err: np.ndarray,
+) -> tuple[float, float, np.ndarray]:
+    """Solve for source flux Fs and blend flux Fb given magnification profile.
+    
+    Model: F(t) = Fs * A(t) + Fb
+    Uses bounded linear least squares to ensure Fs >= 0, Fb >= 0.
+    """
+    n = len(flux)
+    if n < 2:
+        return 1.0, 0.0, magnification.copy()
+    
+    # Weight by inverse variance
+    w = 1.0 / np.maximum(flux_err**2, 1e-20)
+    
+    # Design matrix: [A(t), 1]
+    A_matrix = np.column_stack([magnification, np.ones(n)])
+    
+    # Weighted least squares: minimize ||W^{1/2} (A @ x - flux)||^2
+    W_sqrt = np.sqrt(w)
+    A_weighted = A_matrix * W_sqrt[:, np.newaxis]
+    b_weighted = flux * W_sqrt
+    
+    try:
+        result = lsq_linear(
+            A_weighted, b_weighted,
+            bounds=([0.0, 0.0], [np.inf, np.inf]),
+            method='bvls',
+        )
+        Fs, Fb = result.x
+    except Exception:
+        # Fallback: simple least squares
+        try:
+            x, _, _, _ = np.linalg.lstsq(A_weighted, b_weighted, rcond=None)
+            Fs, Fb = max(0.0, x[0]), max(0.0, x[1])
+        except Exception:
+            Fs, Fb = 1.0, 0.0
+    
+    model_flux = Fs * magnification + Fb
+    return float(Fs), float(Fb), model_flux
+
+
+def _fit_model_flux_space(
+    jd: np.ndarray,
+    mag: np.ndarray,
+    err: np.ndarray,
+    *,
+    center_guess: float,
+    width_seed: float,
+    ref_mag: float | None = None,
+) -> dict[str, object]:
+    """Fit PSPL model in flux space with explicit Fs/Fb blending.
+    
+    Converts mag -> flux, fits u0/t0/tE via nonlinear optimization,
+    solves Fs/Fb linearly at each iteration.
+    
+    Returns dict with success, u0, t0, tE, Fs, Fb, blend_fraction, model_flux, etc.
+    """
+    from malca.config.config_microlensing import (
+        PACZYNSKI_U0_MIN, PACZYNSKI_U0_MAX,
+        PACZYNSKI_TE_MIN_DAYS, PACZYNSKI_TE_MAX_FACTOR,
+        FIT_MULTISTART_U0, FIT_MULTISTART_TE_FRACTIONS,
+        FLUX_MIN_RELATIVE,
+    )
+    
+    n = len(jd)
+    if n < 10:
+        return {'success': False, 'error': 'insufficient_points', 'model_name': 'paczynski_flux'}
+    
+    # Convert mag -> relative flux
+    if ref_mag is None:
+        ref_mag = float(np.median(mag))
+    
+    flux = 10.0 ** (-0.4 * (mag - ref_mag))
+    flux = np.maximum(flux, FLUX_MIN_RELATIVE)
+    flux_err = (np.log(10.0) / 2.5) * flux * np.maximum(err, 0.001)
+    
+    # Bounds
+    window_span = max(float(jd.max() - jd.min()), 1.0)
+    tE_max = PACZYNSKI_TE_MAX_FACTOR * window_span
+    
+    lower_opt = np.array([np.log(PACZYNSKI_U0_MIN), float(jd.min()), np.log(PACZYNSKI_TE_MIN_DAYS)], dtype=float)
+    upper_opt = np.array([np.log(PACZYNSKI_U0_MAX), float(jd.max()), np.log(tE_max)], dtype=float)
+    
+    # Multi-start optimization
+    best_result = None
+    last_error = None
+    
+    # Starting points
+    brightest_idx = np.argsort(mag)[:min(10, n)]
+    t0_starts = [center_guess]
+    if len(brightest_idx):
+        t0_starts.append(float(np.median(jd[brightest_idx])))
+    t0_starts = list(dict.fromkeys(float(np.clip(val, jd.min(), jd.max())) for val in t0_starts))
+    
+    tE_starts = [max(5.0, frac * window_span) for frac in FIT_MULTISTART_TE_FRACTIONS]
+    tE_starts = [float(np.clip(val, PACZYNSKI_TE_MIN_DAYS, tE_max)) for val in tE_starts]
+    
+    def residuals_flux(opt_params: np.ndarray) -> np.ndarray:
+        log_u0, t0, log_tE = opt_params
+        u0 = np.exp(log_u0)
+        tE = np.exp(log_tE)
+        A_t = _pspl_magnification(jd, u0, t0, tE)
+        _, _, model_flux = _solve_linear_flux_params(A_t, flux, flux_err)
+        return (flux - model_flux) / flux_err
+    
+    for t0_start in t0_starts:
+        for u0_start in FIT_MULTISTART_U0:
+            for tE_start in tE_starts:
+                x0 = np.array([np.log(u0_start), t0_start, np.log(tE_start)], dtype=float)
+                x0 = np.clip(x0, lower_opt + 1e-8, upper_opt - 1e-8)
+                
+                try:
+                    result = least_squares(
+                        residuals_flux,
+                        x0=x0,
+                        bounds=(lower_opt, upper_opt),
+                        loss='soft_l1',
+                        f_scale=1.5,
+                        max_nfev=3000,
+                    )
+                except Exception as exc:
+                    last_error = repr(exc)
+                    continue
+                
+                if not result.success or not np.all(np.isfinite(result.x)):
+                    last_error = result.message
+                    continue
+                
+                trial_resid = residuals_flux(result.x)
+                trial_chi2 = float(np.nansum(trial_resid**2))
+                if best_result is None or trial_chi2 < best_result['chi2']:
+                    best_result = {'result': result, 'chi2': trial_chi2}
+    
+    if best_result is None:
+        return {'success': False, 'error': last_error or 'flux_multistart_failed', 'model_name': 'paczynski_flux'}
+    
+    result = best_result['result']
+    log_u0, t0, log_tE = result.x.astype(float)
+    u0 = float(np.exp(log_u0))
+    tE = float(np.exp(log_tE))
+    
+    # Final linear solve for Fs, Fb
+    A_t = _pspl_magnification(jd, u0, t0, tE)
+    Fs, Fb, model_flux = _solve_linear_flux_params(A_t, flux, flux_err)
+    
+    # Convert model flux back to mag
+    model_flux_safe = np.maximum(model_flux, FLUX_MIN_RELATIVE)
+    model_mag = ref_mag - 2.5 * np.log10(model_flux_safe)
+    
+    # Compute chi2, BIC
+    resid = (flux - model_flux) / flux_err
+    chi2 = float(np.nansum(resid**2))
+    k = 5  # u0, t0, tE, Fs, Fb
+    dof = max(n - k, 1)
+    reduced_chi2 = chi2 / dof
+    bic = chi2 + k * np.log(max(n, 2))
+    
+    # Blend fraction
+    total_flux = Fs + Fb
+    blend_fraction = Fb / total_flux if total_flux > 0 else 0.0
+    
+    return {
+        'model_name': 'paczynski_flux',
+        'success': True,
+        'u0': u0,
+        't0': t0,
+        'tE': tE,
+        'Fs': Fs,
+        'Fb': Fb,
+        'ref_mag': ref_mag,
+        'blend_fraction': blend_fraction,
+        'model_flux': model_flux,
+        'model_mag': model_mag,
+        'flux': flux,
+        'flux_err': flux_err,
+        'residuals': resid,
+        'chi2': chi2,
+        'reduced_chi2': reduced_chi2,
+        'bic': bic,
+        'n_points': n,
+        'params': np.array([u0, t0, tE, Fs, Fb], dtype=float),
+    }
+
+
 def _fit_model_suite(df: pd.DataFrame, *, center_guess: float, width_seed: float) -> dict[str, object]:
     jd = df['JD'].to_numpy(dtype=float)
     mag = df['mag'].to_numpy(dtype=float)
@@ -3003,6 +3200,650 @@ def _best_selected_fit(seed_result: dict[str, object]) -> dict[str, object]:
     return seed_result['fits'].get(best_model, {})
 
 
+# =============================================================================
+# MORPHOLOGY METRICS
+# =============================================================================
+
+def _compute_morphology_metrics(
+    jd: np.ndarray,
+    mag: np.ndarray,
+    err: np.ndarray,
+    pac_fit: dict[str, object],
+) -> dict[str, object]:
+    """Compute morphology metrics: rise/decay time, skewness, autocorr, symmetry, excursions.
+    
+    Args:
+        jd: Time array (JD - 2450000)
+        mag: Magnitude array
+        err: Error array
+        pac_fit: Paczynski fit result dict
+    
+    Returns:
+        Dict with rise_time_days, decay_time_days, rise_decay_ratio, event_skewness,
+        residual_autocorr, symmetry_score, excursion_fraction, vonneumann_ratio.
+    """
+    from scipy.stats import skew as scipy_skew
+    from malca.config.config_microlensing import (
+        MORPH_EVENT_WINDOW_TE_FACTOR, MORPH_OUTSIDE_WINDOW_TE_FACTOR,
+        MORPH_EXCURSION_SIGMA_THRESHOLD, MORPH_SYMMETRY_MIN_POINTS,
+    )
+    
+    results = {
+        'rise_time_days': np.nan,
+        'decay_time_days': np.nan,
+        'rise_decay_ratio': np.nan,
+        'event_skewness': np.nan,
+        'residual_autocorr': np.nan,
+        'symmetry_score': np.nan,
+        'excursion_fraction': np.nan,
+        'vonneumann_ratio': np.nan,
+    }
+    
+    if not pac_fit.get('success'):
+        return results
+    
+    # Extract parameters
+    params = pac_fit.get('params')
+    if params is None or len(params) < 3:
+        return results
+    
+    t0 = float(params[1])
+    tE = float(abs(params[2]))
+    
+    if not np.isfinite(t0) or not np.isfinite(tE) or tE <= 0:
+        return results
+    
+    # Get model if available
+    model_mag = pac_fit.get('model')
+    if model_mag is None:
+        return results
+    
+    # Rise and decay time from model
+    # Find times when model reaches 10% and 90% of peak depth
+    baseline = float(params[3]) if len(params) > 3 else np.median(mag)
+    peak_mag = np.min(model_mag)
+    depth = baseline - peak_mag
+    
+    if depth > 0.01:
+        thresh_10 = baseline - 0.1 * depth
+        thresh_90 = baseline - 0.9 * depth
+        
+        # Before peak
+        before_peak = jd < t0
+        after_peak = jd >= t0
+        
+        if np.sum(before_peak) > 2 and np.sum(after_peak) > 2:
+            model_before = model_mag[before_peak]
+            model_after = model_mag[after_peak]
+            jd_before = jd[before_peak]
+            jd_after = jd[after_peak]
+            
+            # Rise: time from 10% to 90% depth (before peak)
+            try:
+                idx_10_rise = np.where(model_before <= thresh_10)[0]
+                idx_90_rise = np.where(model_before <= thresh_90)[0]
+                if len(idx_10_rise) > 0 and len(idx_90_rise) > 0:
+                    t_10_rise = jd_before[idx_10_rise[0]]
+                    t_90_rise = jd_before[idx_90_rise[-1]]
+                    results['rise_time_days'] = abs(t_90_rise - t_10_rise)
+            except Exception:
+                pass
+            
+            # Decay: time from 90% to 10% depth (after peak)
+            try:
+                idx_90_decay = np.where(model_after <= thresh_90)[0]
+                idx_10_decay = np.where(model_after <= thresh_10)[0]
+                if len(idx_90_decay) > 0 and len(idx_10_decay) > 0:
+                    t_90_decay = jd_after[idx_90_decay[0]]
+                    t_10_decay = jd_after[idx_10_decay[-1]]
+                    results['decay_time_days'] = abs(t_10_decay - t_90_decay)
+            except Exception:
+                pass
+    
+    # Rise/decay ratio
+    if np.isfinite(results['rise_time_days']) and np.isfinite(results['decay_time_days']):
+        if results['decay_time_days'] > 0:
+            results['rise_decay_ratio'] = results['rise_time_days'] / results['decay_time_days']
+    
+    # Event window mask
+    event_mask = np.abs(jd - t0) <= MORPH_EVENT_WINDOW_TE_FACTOR * tE
+    outside_mask = np.abs(jd - t0) > MORPH_OUTSIDE_WINDOW_TE_FACTOR * tE
+    
+    # Event skewness
+    if np.sum(event_mask) >= 5:
+        try:
+            results['event_skewness'] = float(scipy_skew(mag[event_mask], nan_policy='omit'))
+        except Exception:
+            pass
+    
+    # Residual autocorrelation (lag-1)
+    residuals = pac_fit.get('residuals')
+    if residuals is not None and len(residuals) > 5:
+        try:
+            resid_sorted_idx = np.argsort(jd)
+            resid_sorted = np.asarray(residuals)[resid_sorted_idx]
+            valid = np.isfinite(resid_sorted)
+            if np.sum(valid) > 5:
+                r = resid_sorted[valid]
+                r_mean = np.mean(r)
+                r_centered = r - r_mean
+                var = np.sum(r_centered**2)
+                if var > 0:
+                    autocorr = np.sum(r_centered[:-1] * r_centered[1:]) / var
+                    results['residual_autocorr'] = float(autocorr)
+        except Exception:
+            pass
+    
+    # Symmetry score: compare left vs right of peak
+    left_mask = (jd < t0) & event_mask
+    right_mask = (jd >= t0) & event_mask
+    
+    if np.sum(left_mask) >= MORPH_SYMMETRY_MIN_POINTS and np.sum(right_mask) >= MORPH_SYMMETRY_MIN_POINTS:
+        try:
+            # Reflect right side around t0 and compare
+            jd_left = jd[left_mask]
+            mag_left = mag[left_mask]
+            jd_right = jd[right_mask]
+            mag_right = mag[right_mask]
+            
+            # Interpolate right side at mirrored left times
+            jd_right_mirrored = 2 * t0 - jd_right
+            
+            # Compare areas
+            left_area = np.trapz(baseline - mag_left, jd_left) if len(jd_left) > 1 else 0
+            right_area = np.trapz(baseline - mag_right, jd_right) if len(jd_right) > 1 else 0
+            
+            total_area = abs(left_area) + abs(right_area)
+            if total_area > 0:
+                results['symmetry_score'] = abs(left_area - right_area) / total_area
+        except Exception:
+            pass
+    
+    # Excursion fraction outside event window
+    if np.sum(outside_mask) >= 3:
+        try:
+            outside_resid = (mag[outside_mask] - baseline) / err[outside_mask]
+            n_excursions = np.sum(np.abs(outside_resid) > MORPH_EXCURSION_SIGMA_THRESHOLD)
+            results['excursion_fraction'] = float(n_excursions) / float(np.sum(outside_mask))
+        except Exception:
+            pass
+    
+    # Von Neumann ratio of residuals
+    if residuals is not None and len(residuals) > 5:
+        try:
+            resid_sorted_idx = np.argsort(jd)
+            r = np.asarray(residuals)[resid_sorted_idx]
+            valid = np.isfinite(r)
+            if np.sum(valid) > 5:
+                r_valid = r[valid]
+                delta_sq = np.sum(np.diff(r_valid)**2)
+                var = np.sum((r_valid - np.mean(r_valid))**2)
+                if var > 0:
+                    results['vonneumann_ratio'] = float(delta_sq / var)
+        except Exception:
+            pass
+    
+    return results
+
+
+# =============================================================================
+# CV/NOVA SCORING
+# =============================================================================
+
+def _compute_cv_nova_score(
+    jd: np.ndarray,
+    mag: np.ndarray,
+    err: np.ndarray,
+    pac_fit: dict[str, object],
+    fred_fit: dict[str, object],
+) -> dict[str, object]:
+    """Compute CV/nova contamination score.
+    
+    Indicators that suggest CV/nova rather than microlensing:
+    - FRED model preferred over Paczynski (ΔBIC)
+    - Asymmetric rise/decay (fast rise, slow decay)
+    - Secondary peaks/outbursts
+    - High amplitude with poor Paczynski fit
+    
+    Returns dict with cv_nova_score (0-1), fred_preferred, rise_decay_asymmetry, etc.
+    """
+    from malca.config.config_microlensing import (
+        SECONDARY_PEAK_MIN_SEPARATION_DAYS,
+        SECONDARY_PEAK_MIN_AMPLITUDE_FRAC,
+    )
+    
+    results = {
+        'cv_nova_score': 0.0,
+        'fred_preferred': False,
+        'delta_bic_fred_vs_pac': np.nan,
+        'rise_decay_asymmetry': np.nan,
+        'secondary_peak_detected': False,
+        'amplitude_mag': np.nan,
+    }
+    
+    pac_success = pac_fit.get('success', False)
+    fred_success = fred_fit.get('success', False)
+    
+    # Amplitude
+    amplitude = float(np.nanmax(mag) - np.nanmin(mag)) if len(mag) > 0 else 0.0
+    results['amplitude_mag'] = amplitude
+    
+    # ΔBIC FRED vs Paczynski
+    if pac_success and fred_success:
+        pac_bic = float(pac_fit.get('bic', np.inf))
+        fred_bic = float(fred_fit.get('bic', np.inf))
+        delta = pac_bic - fred_bic  # Positive = FRED preferred
+        results['delta_bic_fred_vs_pac'] = delta
+        results['fred_preferred'] = delta > 2.0
+    
+    # Rise/decay asymmetry from FRED params
+    if fred_success:
+        fred_params = fred_fit.get('params')
+        if fred_params is not None and len(fred_params) >= 4:
+            tau_rise = float(fred_params[2])
+            tau_decay = float(fred_params[3])
+            if tau_rise > 0:
+                results['rise_decay_asymmetry'] = tau_decay / tau_rise
+    
+    # Secondary peak detection via residuals
+    if pac_success and pac_fit.get('residuals') is not None:
+        residuals = np.asarray(pac_fit['residuals'])
+        err_safe = np.maximum(err, 0.01)
+        normalized_resid = residuals
+        
+        # Look for consecutive negative residuals (secondary brightening)
+        significant_neg = normalized_resid < -3.0
+        
+        if np.sum(significant_neg) >= 3:
+            # Check for clustering (consecutive negative residuals)
+            sort_idx = np.argsort(jd)
+            sig_sorted = significant_neg[sort_idx]
+            
+            # Count consecutive runs
+            max_run = 0
+            current_run = 0
+            for val in sig_sorted:
+                if val:
+                    current_run += 1
+                    max_run = max(max_run, current_run)
+                else:
+                    current_run = 0
+            
+            if max_run >= 3:
+                results['secondary_peak_detected'] = True
+    
+    # Compute composite score (0-1)
+    score = 0.0
+    
+    # FRED preference (0-30 points)
+    if results['fred_preferred']:
+        delta = results['delta_bic_fred_vs_pac']
+        if np.isfinite(delta):
+            score += min(30.0, 5.0 * np.log10(1.0 + max(delta, 0.0)))
+    
+    # Asymmetry (0-25 points) - CV/novae have fast rise, slow decay
+    asym = results['rise_decay_asymmetry']
+    if np.isfinite(asym) and asym > 1.0:
+        score += min(25.0, 10.0 * np.log10(asym))
+    
+    # Secondary peak (0-20 points)
+    if results['secondary_peak_detected']:
+        score += 20.0
+    
+    # High amplitude (0-15 points)
+    if amplitude > 0.5:
+        score += min(15.0, 10.0 * np.log10(1.0 + amplitude))
+    
+    # Poor Paczynski fit (0-10 points)
+    if pac_success:
+        pac_chi2 = float(pac_fit.get('reduced_chi2', 1.0))
+        if pac_chi2 > 3.0:
+            score += min(10.0, 2.0 * np.log10(pac_chi2))
+    
+    results['cv_nova_score'] = min(1.0, score / 100.0)
+    
+    return results
+
+
+# =============================================================================
+# PERIODICITY SCANNING
+# =============================================================================
+
+def _scan_periodicity(
+    jd: np.ndarray,
+    mag: np.ndarray,
+    err: np.ndarray,
+    *,
+    scan_residuals: bool = True,
+    model_mag: np.ndarray | None = None,
+) -> dict[str, object]:
+    """Scan for periodicity using LSP and PDM.
+    
+    Runs period search on raw lightcurve and optionally on model residuals.
+    Uses malca.periodogram functions.
+    
+    Returns dict with lsp_best_period, lsp_best_power, pdm_best_period, pdm_best_theta,
+    resid_* versions, and periodicity_detected flag.
+    """
+    from malca.config.config_microlensing import (
+        PERIOD_MIN_DAYS, PERIOD_MAX_DAYS,
+        RESIDUAL_PERIOD_POWER_THRESHOLD,
+    )
+    
+    results = {
+        'lsp_best_period': np.nan,
+        'lsp_best_power': np.nan,
+        'pdm_best_period': np.nan,
+        'pdm_best_theta': np.nan,
+        'resid_lsp_best_period': np.nan,
+        'resid_lsp_best_power': np.nan,
+        'resid_pdm_best_period': np.nan,
+        'resid_pdm_best_theta': np.nan,
+        'periodicity_detected': False,
+    }
+    
+    # Import periodogram functions
+    try:
+        from malca.periodogram import lsp_find_period, pdm_find_period
+    except ImportError:
+        return results
+    
+    valid = np.isfinite(jd) & np.isfinite(mag) & np.isfinite(err)
+    if np.sum(valid) < 20:
+        return results
+    
+    jd_v = jd[valid]
+    mag_v = mag[valid]
+    err_v = err[valid]
+    
+    # LSP on raw LC
+    try:
+        lsp_result = lsp_find_period(
+            jd_v, mag_v, err_v,
+            min_period=PERIOD_MIN_DAYS,
+            max_period=min(PERIOD_MAX_DAYS, 0.5 * (jd_v.max() - jd_v.min())),
+        )
+        if lsp_result is not None:
+            results['lsp_best_period'] = float(lsp_result.get('best_period', np.nan))
+            results['lsp_best_power'] = float(lsp_result.get('best_power', np.nan))
+    except Exception:
+        pass
+    
+    # PDM on raw LC
+    try:
+        pdm_result = pdm_find_period(
+            jd_v, mag_v, err_v,
+            min_period=PERIOD_MIN_DAYS,
+            max_period=min(PERIOD_MAX_DAYS, 0.5 * (jd_v.max() - jd_v.min())),
+        )
+        if pdm_result is not None:
+            results['pdm_best_period'] = float(pdm_result.get('best_period', np.nan))
+            results['pdm_best_theta'] = float(pdm_result.get('best_theta', np.nan))
+    except Exception:
+        pass
+    
+    # Scan residuals if model provided
+    if scan_residuals and model_mag is not None:
+        model_v = model_mag[valid] if len(model_mag) == len(jd) else None
+        if model_v is not None and len(model_v) == len(jd_v):
+            resid = mag_v - model_v
+            
+            try:
+                lsp_resid = lsp_find_period(
+                    jd_v, resid, err_v,
+                    min_period=PERIOD_MIN_DAYS,
+                    max_period=min(PERIOD_MAX_DAYS, 0.5 * (jd_v.max() - jd_v.min())),
+                )
+                if lsp_resid is not None:
+                    results['resid_lsp_best_period'] = float(lsp_resid.get('best_period', np.nan))
+                    results['resid_lsp_best_power'] = float(lsp_resid.get('best_power', np.nan))
+            except Exception:
+                pass
+            
+            try:
+                pdm_resid = pdm_find_period(
+                    jd_v, resid, err_v,
+                    min_period=PERIOD_MIN_DAYS,
+                    max_period=min(PERIOD_MAX_DAYS, 0.5 * (jd_v.max() - jd_v.min())),
+                )
+                if pdm_resid is not None:
+                    results['resid_pdm_best_period'] = float(pdm_resid.get('best_period', np.nan))
+                    results['resid_pdm_best_theta'] = float(pdm_resid.get('best_theta', np.nan))
+            except Exception:
+                pass
+    
+    # Periodicity detection flag
+    lsp_power = results['lsp_best_power']
+    pdm_theta = results['pdm_best_theta']
+    resid_lsp_power = results['resid_lsp_best_power']
+    
+    if (np.isfinite(lsp_power) and lsp_power > 0.3) or \
+       (np.isfinite(pdm_theta) and pdm_theta < 0.5) or \
+       (np.isfinite(resid_lsp_power) and resid_lsp_power > RESIDUAL_PERIOD_POWER_THRESHOLD):
+        results['periodicity_detected'] = True
+    
+    return results
+
+
+# =============================================================================
+# PER-CANDIDATE QUALITY SCORE
+# =============================================================================
+
+def _compute_candidate_quality_score(
+    summary: dict[str, object],
+    morphology: dict[str, object],
+    periodicity: dict[str, object],
+    cv_nova: dict[str, object],
+    quality_metrics: dict[str, object],
+) -> dict[str, object]:
+    """Compute composite quality score for a single candidate.
+    
+    Components (weights):
+      - Fit quality (30%): reduced χ², shoulders, BIC vs flat
+      - Morphology (20%): symmetry, rise/decay ratio, autocorr
+      - Contamination (25%): CV score, periodicity, excursions
+      - Coverage (15%): LC span, n_points, tau coverage
+      - Parallax (10%): convergence status
+    
+    Returns dict with quality_score (0-1), quality_tier, quality_flags.
+    """
+    results = {
+        'quality_score': 0.0,
+        'quality_tier': 'Suspect',
+        'quality_flags': [],
+    }
+    
+    flags = []
+    
+    # -------------------------------------------------------------------------
+    # FIT QUALITY (30%)
+    # -------------------------------------------------------------------------
+    fit_score = 0.0
+    
+    # Reduced chi-squared (0-40 pts)
+    chi2 = float(summary.get('paczynski_reduced_chi2', np.nan))
+    if np.isfinite(chi2):
+        if chi2 <= 2.0:
+            fit_score += 40.0
+        elif chi2 >= 10.0:
+            fit_score += 0.0
+            flags.append('high_chi2')
+        else:
+            fit_score += 40.0 * (10.0 - chi2) / 8.0
+    
+    # Shoulders (0-30 pts)
+    shoulder_left = int(quality_metrics.get('shoulder_left', 0))
+    shoulder_right = int(quality_metrics.get('shoulder_right', 0))
+    shoulder_points = min(30.0, 5.0 * (shoulder_left + shoulder_right))
+    fit_score += shoulder_points
+    if shoulder_left < 3:
+        flags.append('weak_left_shoulder')
+    if shoulder_right < 3:
+        flags.append('weak_right_shoulder')
+    
+    # BIC vs flat (0-20 pts)
+    delta_bic = float(summary.get('delta_bic_vs_flat', np.nan))
+    if np.isfinite(delta_bic):
+        if delta_bic >= 10.0:
+            fit_score += 20.0
+        elif delta_bic >= 2.0:
+            fit_score += 10.0 + 10.0 * (delta_bic - 2.0) / 8.0
+        elif delta_bic < 0:
+            flags.append('flat_preferred')
+    
+    # Strong points (0-10 pts)
+    n_strong = int(quality_metrics.get('n_strong_points', 0))
+    fit_score += min(10.0, 5.0 * n_strong)
+    if n_strong < 2:
+        flags.append('few_strong_points')
+    
+    fit_component = min(1.0, fit_score / 100.0)
+    
+    # -------------------------------------------------------------------------
+    # MORPHOLOGY (20%)
+    # -------------------------------------------------------------------------
+    morph_score = 0.0
+    morph_count = 0
+    
+    # Rise/decay ratio (should be ~1 for microlensing)
+    rd_ratio = float(morphology.get('rise_decay_ratio', np.nan))
+    if np.isfinite(rd_ratio) and rd_ratio > 0:
+        ratio_dev = max(rd_ratio, 1.0 / rd_ratio)
+        if ratio_dev <= 3.0:
+            morph_score += 25.0 * (3.0 - ratio_dev) / 2.0
+        else:
+            flags.append('asymmetric_event')
+        morph_count += 1
+    
+    # Symmetry score (low = good)
+    symmetry = float(morphology.get('symmetry_score', np.nan))
+    if np.isfinite(symmetry):
+        if symmetry <= 0.5:
+            morph_score += 25.0 * (0.5 - symmetry) / 0.5
+        else:
+            flags.append('low_symmetry')
+        morph_count += 1
+    
+    # Residual autocorrelation (low = good)
+    autocorr = float(morphology.get('residual_autocorr', np.nan))
+    if np.isfinite(autocorr):
+        autocorr_abs = abs(autocorr)
+        if autocorr_abs <= 0.5:
+            morph_score += 25.0 * (0.5 - autocorr_abs) / 0.5
+        else:
+            flags.append('correlated_residuals')
+        morph_count += 1
+    
+    # Excursion fraction (low = good)
+    excursion = float(morphology.get('excursion_fraction', np.nan))
+    if np.isfinite(excursion):
+        if excursion <= 0.1:
+            morph_score += 25.0
+        elif excursion <= 0.3:
+            morph_score += 25.0 * (0.3 - excursion) / 0.2
+        else:
+            flags.append('baseline_excursions')
+        morph_count += 1
+    
+    morph_component = min(1.0, morph_score / 100.0) if morph_count > 0 else 0.5
+    
+    # -------------------------------------------------------------------------
+    # CONTAMINATION (25%)
+    # -------------------------------------------------------------------------
+    contam_score = 100.0  # Start at max, subtract for contamination
+    
+    # CV/Nova score (high = bad)
+    cv_score = float(cv_nova.get('cv_nova_score', 0.0))
+    if np.isfinite(cv_score):
+        contam_score -= cv_score * 40.0
+        if cv_score > 0.3:
+            flags.append('cv_nova_like')
+    
+    # Periodicity (detected = bad)
+    if periodicity.get('periodicity_detected'):
+        contam_score -= 30.0
+        flags.append('periodic_signal')
+    
+    # Secondary peak (bad)
+    if cv_nova.get('secondary_peak_detected'):
+        contam_score -= 20.0
+        flags.append('secondary_peak')
+    
+    # FRED strongly preferred
+    if cv_nova.get('fred_preferred'):
+        delta_fred = float(cv_nova.get('delta_bic_fred_vs_pac', 0.0))
+        if np.isfinite(delta_fred) and delta_fred > 6.0:
+            contam_score -= 10.0
+            flags.append('fred_preferred')
+    
+    contam_component = max(0.0, min(1.0, contam_score / 100.0))
+    
+    # -------------------------------------------------------------------------
+    # COVERAGE (15%)
+    # -------------------------------------------------------------------------
+    coverage_score = 0.0
+    
+    n_points = int(summary.get('n_points_fit', 0))
+    if n_points >= 50:
+        coverage_score += 50.0
+    else:
+        coverage_score += 50.0 * n_points / 50.0
+        if n_points < 30:
+            flags.append('few_points')
+    
+    # Tau coverage score
+    tau_cov = float(quality_metrics.get('paczynski_tau_coverage_score', np.nan))
+    if np.isfinite(tau_cov):
+        coverage_score += 50.0 * min(1.0, tau_cov)
+    else:
+        coverage_score += 25.0
+    
+    coverage_component = min(1.0, coverage_score / 100.0)
+    
+    # -------------------------------------------------------------------------
+    # PARALLAX (10%)
+    # -------------------------------------------------------------------------
+    parallax_score = 50.0  # Neutral default
+    
+    parallax_attempted = bool(summary.get('parallax_attempted', False))
+    parallax_preferred = bool(summary.get('parallax_preferred', False))
+    
+    if parallax_attempted:
+        if parallax_preferred:
+            parallax_score = 90.0
+        else:
+            parallax_score = 60.0
+    
+    parallax_component = parallax_score / 100.0
+    
+    # -------------------------------------------------------------------------
+    # COMBINE
+    # -------------------------------------------------------------------------
+    total = (
+        0.30 * fit_component +
+        0.20 * morph_component +
+        0.25 * contam_component +
+        0.15 * coverage_component +
+        0.10 * parallax_component
+    )
+    
+    # Determine tier
+    if total >= 0.8:
+        tier = 'Gold'
+    elif total >= 0.6:
+        tier = 'Silver'
+    elif total >= 0.5:
+        tier = 'Bronze'
+    else:
+        tier = 'Suspect'
+    
+    results['quality_score'] = float(total)
+    results['quality_tier'] = tier
+    results['quality_flags'] = flags
+    
+    return results
+
+
 def _accepted_seed_rank(seed_result: dict[str, object]) -> tuple:
     pac = seed_result['fits'].get('paczynski', {})
     quality = seed_result.get('quality', {})
@@ -3143,6 +3984,43 @@ def fit_candidate_context(context: dict[str, object]) -> dict[str, object]:
     else:
         parallax_result = _empty_parallax_result('not_attempted:selected_model_not_paczynski')
 
+    # Compute flux-space fit for additional metrics
+    flux_fit = _fit_model_flux_space(
+        best_seed_result['jd_fit'],
+        best_seed_result['mag_fit'],
+        best_seed_result['err_fit'],
+        center_guess=raw_pacz_t0 if np.isfinite(raw_pacz_t0) else float(best_seed_result['seed_t0_guess']),
+        width_seed=_pick_width_seed(row),
+    )
+
+    # Compute morphology metrics
+    morphology = _compute_morphology_metrics(
+        best_seed_result['jd_fit'],
+        best_seed_result['mag_fit'],
+        best_seed_result['err_fit'],
+        pac,
+    )
+
+    # CV/Nova scoring
+    fred_fit = best_seed_result['fits'].get('fred', {})
+    cv_nova = _compute_cv_nova_score(
+        best_seed_result['jd_fit'],
+        best_seed_result['mag_fit'],
+        best_seed_result['err_fit'],
+        pac,
+        fred_fit,
+    )
+
+    # Periodicity scanning
+    model_mag = pac.get('model') if pac.get('success') else None
+    periodicity = _scan_periodicity(
+        df['JD'].to_numpy(),
+        df['mag'].to_numpy(),
+        df['error'].to_numpy() if 'error' in df.columns else df.get('mag_err', np.full(len(df), 0.01)).to_numpy(),
+        scan_residuals=True,
+        model_mag=np.interp(df['JD'].to_numpy(), best_seed_result['jd_fit'], model_mag) if model_mag is not None else None,
+    )
+
     brightest = df.nsmallest(min(10, len(df)), 'mag')
     summary = {
         'candidate_id': context['candidate_id'],
@@ -3211,14 +4089,59 @@ def fit_candidate_context(context: dict[str, object]) -> dict[str, object]:
         'catalog_source': _text_value(row.get('catalog_source')),
         'gaia_var_class': _text_value(payload.get('gaia_var_class')) or _text_value(row.get('gaia_var_class')),
         'ztf_var_type': _text_value(payload.get('ztf_var_type')) or _text_value(row.get('ztf_var_type')),
+        # Flux-space fit parameters
+        'flux_u0': float(flux_fit.get('u0', np.nan)) if flux_fit.get('success') else np.nan,
+        'flux_Fs': float(flux_fit.get('Fs', np.nan)) if flux_fit.get('success') else np.nan,
+        'flux_Fb': float(flux_fit.get('Fb', np.nan)) if flux_fit.get('success') else np.nan,
+        'flux_blend_fraction': float(flux_fit.get('blend_fraction', np.nan)) if flux_fit.get('success') else np.nan,
+        # Morphology metrics
+        'morph_rise_time_days': morphology.get('rise_time_days', np.nan),
+        'morph_decay_time_days': morphology.get('decay_time_days', np.nan),
+        'morph_rise_decay_ratio': morphology.get('rise_decay_ratio', np.nan),
+        'morph_event_skewness': morphology.get('event_skewness', np.nan),
+        'morph_residual_autocorr': morphology.get('residual_autocorr', np.nan),
+        'morph_symmetry_score': morphology.get('symmetry_score', np.nan),
+        'morph_excursion_fraction': morphology.get('excursion_fraction', np.nan),
+        'morph_vonneumann_ratio': morphology.get('vonneumann_ratio', np.nan),
+        # CV/Nova metrics
+        'cv_nova_score': cv_nova.get('cv_nova_score', np.nan),
+        'cv_nova_fred_preferred': cv_nova.get('fred_preferred', False),
+        'cv_nova_rise_decay_asymmetry': cv_nova.get('rise_decay_asymmetry', np.nan),
+        'cv_nova_secondary_peak': cv_nova.get('secondary_peak_detected', False),
+        'cv_nova_amplitude_mag': cv_nova.get('amplitude_mag', np.nan),
+        # Periodicity metrics
+        'period_lsp_best': periodicity.get('lsp_best_period', np.nan),
+        'period_lsp_power': periodicity.get('lsp_best_power', np.nan),
+        'period_pdm_best': periodicity.get('pdm_best_period', np.nan),
+        'period_pdm_theta': periodicity.get('pdm_best_theta', np.nan),
+        'period_resid_lsp_best': periodicity.get('resid_lsp_best_period', np.nan),
+        'period_resid_lsp_power': periodicity.get('resid_lsp_best_power', np.nan),
+        'periodicity_detected': periodicity.get('periodicity_detected', False),
     }
     summary.update(_flatten_parallax_summary(parallax_result))
+
+    # Compute per-candidate quality score
+    candidate_quality = _compute_candidate_quality_score(
+        summary=summary,
+        morphology=morphology,
+        periodicity=periodicity,
+        cv_nova=cv_nova,
+        quality_metrics=quality,
+    )
+    summary['quality_score'] = candidate_quality['quality_score']
+    summary['quality_tier'] = candidate_quality['quality_tier']
+    summary['quality_flags'] = ','.join(candidate_quality['quality_flags'])
 
     return {
         'context': context,
         'seed_results': seed_results,
         'best_seed_result': best_seed_result,
         'parallax': parallax_result,
+        'flux_fit': flux_fit,
+        'morphology': morphology,
+        'cv_nova': cv_nova,
+        'periodicity': periodicity,
+        'candidate_quality': candidate_quality,
         'summary': summary,
     }
 
@@ -3583,7 +4506,7 @@ def fit_microlensing_candidates(
 fit_march18_candidates = fit_microlensing_candidates
 
 
-def plot_candidate_fit(result: dict[str, object], *, figsize: tuple[float, float] = (13.0, 8.5)):
+def plot_candidate_fit(result: dict[str, object], *, figsize: tuple[float, float] = (13.0, 10.0)):
     context = result['context']
     summary = result['summary']
     best_seed = result['best_seed_result']
@@ -3596,10 +4519,15 @@ def plot_candidate_fit(result: dict[str, object], *, figsize: tuple[float, float
     parallax = result.get('parallax', {}) or {}
     parallax_best = parallax.get('branches', {}).get(parallax.get('best_branch', ''), {}) if parallax.get('best_branch') else {}
     show_parallax = False  # bool(parallax_best.get('success')) and summary.get('parallax_attempted', False)
+    
+    # Flux-space fit data
+    flux_fit = result.get('flux_fit', {}) or {}
+    flux_fit_success = bool(flux_fit.get('success'))
 
     plot_jd_offset = 8000.0
     jd_axis_label = 'JD - 2458000 [d]'
     mag_label = r'$g$ [mag]'
+    flux_label = r'Relative Flux'
 
     def _plot_jd(values):
         return np.asarray(values, dtype=float) - plot_jd_offset
@@ -3608,10 +4536,12 @@ def plot_candidate_fit(result: dict[str, object], *, figsize: tuple[float, float
         return float(value) - plot_jd_offset
 
     fig = plt.figure(figsize=figsize, dpi=MICROLENSING_FIT_PDF_DPI)
-    gs = fig.add_gridspec(3, 1, height_ratios=[3.2, 2.1, 1.0], hspace=0.34)
+    # 4 panels: full LC (mag), zoomed LC (mag), flux panel, residuals
+    gs = fig.add_gridspec(4, 1, height_ratios=[2.8, 1.8, 1.5, 0.9], hspace=0.30)
     ax = fig.add_subplot(gs[0])
     ax_zoom = fig.add_subplot(gs[1])
-    ax_res = fig.add_subplot(gs[2], sharex=ax_zoom)
+    ax_flux = fig.add_subplot(gs[2], sharex=ax_zoom)
+    ax_res = fig.add_subplot(gs[3], sharex=ax_zoom)
     _ctx_caption = _plot_crossmatch_context_caption(summary)
     _top_margin = 0.88 if _ctx_caption else 0.93
     fig.subplots_adjust(left=0.08, right=0.84, top=_top_margin, bottom=0.10)
@@ -3783,6 +4713,55 @@ def plot_candidate_fit(result: dict[str, object], *, figsize: tuple[float, float
     ax_zoom.set_ylabel(mag_label)
     ax_zoom.tick_params(axis='x', which='both', labelbottom=False, labeltop=True, top=True)
 
+    # Flux panel: show data and model in relative flux space
+    if flux_fit_success:
+        flux_data = np.asarray(flux_fit.get('flux', []), dtype=float)
+        flux_err_data = np.asarray(flux_fit.get('flux_err', []), dtype=float)
+        flux_model = np.asarray(flux_fit.get('model_flux', []), dtype=float)
+        flux_jd = best_seed['jd_fit']
+        
+        # Plot flux data points
+        flux_zoom_mask = np.abs(flux_jd - zoom_center) <= zoom_half_window
+        if int(np.sum(flux_zoom_mask)) < 4:
+            flux_zoom_mask = np.ones_like(flux_jd, dtype=bool)
+        
+        ax_flux.errorbar(
+            _plot_jd(flux_jd[flux_zoom_mask]),
+            flux_data[flux_zoom_mask],
+            yerr=flux_err_data[flux_zoom_mask],
+            fmt='k.', alpha=0.85, markersize=4, elinewidth=1.0, capsize=0,
+            label='Data',
+        )
+        
+        # Sort for smooth model curve
+        sort_idx = np.argsort(flux_jd[flux_zoom_mask])
+        ax_flux.plot(
+            _plot_jd(flux_jd[flux_zoom_mask][sort_idx]),
+            flux_model[flux_zoom_mask][sort_idx],
+            color='tab:red', linewidth=1.8, alpha=0.9,
+            label='PSPL (flux)',
+        )
+        
+        # Baseline flux (Fb) reference line
+        Fb = float(flux_fit.get('Fb', 0.0))
+        Fs = float(flux_fit.get('Fs', 1.0))
+        if Fb > 0 and np.isfinite(Fb):
+            ax_flux.axhline(Fb, color='tab:orange', linestyle='--', linewidth=1.0, alpha=0.7, label=f'Blend (Fb)')
+        if Fs > 0 and Fb >= 0 and np.isfinite(Fs) and np.isfinite(Fb):
+            ax_flux.axhline(Fs + Fb, color='tab:green', linestyle=':', linewidth=1.0, alpha=0.7, label=f'Baseline (Fs+Fb)')
+        
+        ax_flux.set_ylabel(flux_label)
+        ax_flux.tick_params(axis='x', which='both', labelbottom=False)
+        ax_flux.grid(alpha=0.2)
+        ax_flux.legend(loc='upper right', fontsize=6, framealpha=0.85, ncol=2)
+    else:
+        # No flux fit available - show placeholder
+        ax_flux.text(0.5, 0.5, 'Flux-space fit not available', 
+                     ha='center', va='center', transform=ax_flux.transAxes,
+                     fontsize=10, color='0.5')
+        ax_flux.set_ylabel(flux_label)
+        ax_flux.tick_params(axis='x', which='both', labelbottom=False)
+
     # Bottom panel: always residuals vs Paczynski model (when available).
     if pac_success:
         residual_model = np.asarray(pac['model'], dtype=float)
@@ -3855,12 +4834,24 @@ def plot_candidate_fit(result: dict[str, object], *, figsize: tuple[float, float
         _chi2_nu_s = f'{_chi2_nu:.2f}' if np.isfinite(_chi2_nu) else r'\mathrm{nan}'
         chi2nu_lines.append(rf'$\chi^2_\nu(\mathrm{{best}})={_chi2_nu_s}$')
 
+    # Flux-space blending info
+    blend_lines = []
+    if flux_fit_success:
+        Fs_val = float(flux_fit.get('Fs', np.nan))
+        Fb_val = float(flux_fit.get('Fb', np.nan))
+        blend_frac = float(flux_fit.get('blend_fraction', np.nan))
+        if np.isfinite(blend_frac):
+            blend_lines.append(rf'$f_\mathrm{{blend}}={blend_frac:.2f}$')
+        if np.isfinite(Fs_val) and np.isfinite(Fb_val):
+            blend_lines.append(rf'$F_s/F_b={Fs_val:.2f}/{Fb_val:.2f}$')
+
     info_lines = [
         rf'$\mathrm{{best}}=\mathrm{{{_mtxt(summary.get("best_model"))}}}$',
         rf'$\mathrm{{ok}}=\mathrm{{{_mtxt(summary.get("fit_ok"))}}}$',
         rf'$\mathrm{{mode}}=\mathrm{{{_mtxt(summary.get("selection_mode"))}}}$',
         *chi2nu_lines,
         *dbic_lines,
+        *blend_lines,
     ]
     # Stats / diagnostics box: figure-level panel outside the axes.
     _info_fs = 7.0
@@ -3891,7 +4882,7 @@ def plot_candidate_fit(result: dict[str, object], *, figsize: tuple[float, float
             borderaxespad=0.35,
         )
         leg.set_zorder(_z_model_curves + 1)
-    return fig, (ax, ax_zoom, ax_res)
+    return fig, (ax, ax_zoom, ax_flux, ax_res)
 
 
 
