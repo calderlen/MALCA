@@ -402,8 +402,6 @@ def _plot_crossmatch_context_caption(summary: dict[str, object]) -> str:
         name = _truncate_plot_label(_txt('microlens_name'), 34)
         if cat or name:
             parts.append(f'u-lens {cat} {name}'.strip())
-    elif summary.get('external_known_microlens'):
-        parts.append('u-lens cat/alert')
 
     sim = _truncate_plot_label(_txt('nearest_simbad_object'), 26)
     ot = _truncate_plot_label(_txt('simbad_otype'), 14)
@@ -476,7 +474,7 @@ def _plot_crossmatch_context_caption(summary: dict[str, object]) -> str:
 
     if not parts:
         return ''
-    out = ' · '.join(parts)
+    out = ' | '.join(parts)
     return out if len(out) <= 220 else out[:217] + '…'
 
 
@@ -2205,7 +2203,13 @@ def _fit_parallax_diagnostics(
                 upper=upper,
             )
             proposal_scale = _parallax_seed_from_jacobian(branch_fit, float(branch_fit['tE_days']))
-            chain_seed = PARALLAX_RANDOM_SEED + int(context['candidate_id']) % 100000 + (0 if branch_sign > 0 else 500000)
+            # Use hash for non-numeric candidate IDs
+            cid = context['candidate_id']
+            try:
+                cid_int = int(cid)
+            except (ValueError, TypeError):
+                cid_int = hash(str(cid)) % 100000
+            chain_seed = PARALLAX_RANDOM_SEED + cid_int % 100000 + (0 if branch_sign > 0 else 500000)
             mcmc = _run_metropolis_sampler(
                 start=np.asarray(branch_fit['opt_params'], dtype=float),
                 lower=np.asarray(lower, dtype=float),
@@ -4536,12 +4540,11 @@ def plot_candidate_fit(result: dict[str, object], *, figsize: tuple[float, float
         return float(value) - plot_jd_offset
 
     fig = plt.figure(figsize=figsize, dpi=MICROLENSING_FIT_PDF_DPI)
-    # 4 panels: full LC (mag), zoomed LC (mag), flux panel, residuals
-    gs = fig.add_gridspec(4, 1, height_ratios=[2.8, 1.8, 1.5, 0.9], hspace=0.30)
+    # 3 panels: full LC (mag), zoomed LC (mag), residuals
+    gs = fig.add_gridspec(3, 1, height_ratios=[2.8, 1.8, 0.9], hspace=0.30)
     ax = fig.add_subplot(gs[0])
     ax_zoom = fig.add_subplot(gs[1])
-    ax_flux = fig.add_subplot(gs[2], sharex=ax_zoom)
-    ax_res = fig.add_subplot(gs[3], sharex=ax_zoom)
+    ax_res = fig.add_subplot(gs[2], sharex=ax_zoom)
     _ctx_caption = _plot_crossmatch_context_caption(summary)
     _top_margin = 0.88 if _ctx_caption else 0.93
     fig.subplots_adjust(left=0.08, right=0.84, top=_top_margin, bottom=0.10)
@@ -4711,56 +4714,7 @@ def plot_candidate_fit(result: dict[str, object], *, figsize: tuple[float, float
         )
     ax_zoom.set_xlim(_plot_jd_scalar(zoom_center - zoom_half_window), _plot_jd_scalar(zoom_center + zoom_half_window))
     ax_zoom.set_ylabel(mag_label)
-    ax_zoom.tick_params(axis='x', which='both', labelbottom=False, labeltop=True, top=True)
-
-    # Flux panel: show data and model in relative flux space
-    if flux_fit_success:
-        flux_data = np.asarray(flux_fit.get('flux', []), dtype=float)
-        flux_err_data = np.asarray(flux_fit.get('flux_err', []), dtype=float)
-        flux_model = np.asarray(flux_fit.get('model_flux', []), dtype=float)
-        flux_jd = best_seed['jd_fit']
-        
-        # Plot flux data points
-        flux_zoom_mask = np.abs(flux_jd - zoom_center) <= zoom_half_window
-        if int(np.sum(flux_zoom_mask)) < 4:
-            flux_zoom_mask = np.ones_like(flux_jd, dtype=bool)
-        
-        ax_flux.errorbar(
-            _plot_jd(flux_jd[flux_zoom_mask]),
-            flux_data[flux_zoom_mask],
-            yerr=flux_err_data[flux_zoom_mask],
-            fmt='k.', alpha=0.85, markersize=4, elinewidth=1.0, capsize=0,
-            label='Data',
-        )
-        
-        # Sort for smooth model curve
-        sort_idx = np.argsort(flux_jd[flux_zoom_mask])
-        ax_flux.plot(
-            _plot_jd(flux_jd[flux_zoom_mask][sort_idx]),
-            flux_model[flux_zoom_mask][sort_idx],
-            color='tab:red', linewidth=1.8, alpha=0.9,
-            label='PSPL (flux)',
-        )
-        
-        # Baseline flux (Fb) reference line
-        Fb = float(flux_fit.get('Fb', 0.0))
-        Fs = float(flux_fit.get('Fs', 1.0))
-        if Fb > 0 and np.isfinite(Fb):
-            ax_flux.axhline(Fb, color='tab:orange', linestyle='--', linewidth=1.0, alpha=0.7, label=f'Blend (Fb)')
-        if Fs > 0 and Fb >= 0 and np.isfinite(Fs) and np.isfinite(Fb):
-            ax_flux.axhline(Fs + Fb, color='tab:green', linestyle=':', linewidth=1.0, alpha=0.7, label=f'Baseline (Fs+Fb)')
-        
-        ax_flux.set_ylabel(flux_label)
-        ax_flux.tick_params(axis='x', which='both', labelbottom=False)
-        ax_flux.grid(alpha=0.2)
-        ax_flux.legend(loc='upper right', fontsize=6, framealpha=0.85, ncol=2)
-    else:
-        # No flux fit available - show placeholder
-        ax_flux.text(0.5, 0.5, 'Flux-space fit not available', 
-                     ha='center', va='center', transform=ax_flux.transAxes,
-                     fontsize=10, color='0.5')
-        ax_flux.set_ylabel(flux_label)
-        ax_flux.tick_params(axis='x', which='both', labelbottom=False)
+    ax_zoom.tick_params(axis='x', which='both', labelbottom=False, labeltop=False, top=True)
 
     # Bottom panel: always residuals vs Paczynski model (when available).
     if pac_success:
@@ -4801,7 +4755,8 @@ def plot_candidate_fit(result: dict[str, object], *, figsize: tuple[float, float
     else:
         ax.set_title(_title_line1, fontsize=10)
     ax.set_ylabel(mag_label)
-    ax.tick_params(axis='x', labelbottom=False)
+    ax.set_xlabel(jd_axis_label)
+    ax.tick_params(axis='x', labelbottom=True, labeltop=False)
 
     def _mtxt(val: object) -> str:
         return str(val).replace('_', r'\_').replace('%', r'\%')
@@ -4882,7 +4837,7 @@ def plot_candidate_fit(result: dict[str, object], *, figsize: tuple[float, float
             borderaxespad=0.35,
         )
         leg.set_zorder(_z_model_curves + 1)
-    return fig, (ax, ax_zoom, ax_flux, ax_res)
+    return fig, (ax, ax_zoom, ax_res)
 
 
 
