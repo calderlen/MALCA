@@ -53,6 +53,14 @@ from malca.config.config_filters import (
     MIN_BAYES_FACTOR, POST_FILTER_MIN_RUN_CAMERAS, POST_FILTER_MIN_RUN_POINTS,
     CLEAN_LC_MAX_ERROR_ABSOLUTE, CLEAN_LC_MAX_ERROR_SIGMA,
     BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
+    PRE_PERIODICITY_AGREEMENT_REL_TOL, PRE_PERIODICITY_CE_MIN_ENTROPY,
+    PRE_PERIODICITY_CE_SNR_THRESHOLD, PRE_PERIODICITY_LAG_PHASE_MAX,
+    PRE_PERIODICITY_MAX_PERIOD, PRE_PERIODICITY_MIN_POINTS,
+    PRE_PERIODICITY_MIN_PERIOD, PRE_PERIODICITY_N_BOOTSTRAP,
+    PRE_PERIODICITY_N_PERIODS, PRE_PERIODICITY_PDM_MIN_THETA,
+    PRE_PERIODICITY_PDM_SNR_THRESHOLD, PRE_PERIODICITY_SCATTER_RATIO_MAX,
+    PRE_PERIODICITY_SIGNIFICANCE, PRE_PERIODICITY_STRONG_SINGLE_SCATTER_RATIO_MAX,
+    PRE_PERIODICITY_STRONG_SINGLE_SIG,
 )
 from malca.config.config_io import OUTPUT_FORMAT, EVENTS_OUTPUT_CHUNK_SIZE
 from malca.config.config_io import PARQUET_OUTPUT_COMPRESSION, PARQUET_CACHE_COMPRESSION
@@ -68,6 +76,8 @@ from malca.enrich.neighbor import run_neighbor_enrichment
 from malca.enrich.spectra import run_spectra_availability
 from malca.gaia_fetch import _extract_gaia_ids, fetch_gaia_catalog
 from malca.manifest import build_manifest
+from malca.periodic_events import run_periodic_events
+from malca.periodicity_gate import apply_pre_periodicity_gate
 from malca.plot import plot_passing_candidates
 from malca.filter import apply_filters
 from malca.review.store import db_connect, import_candidates
@@ -698,6 +708,7 @@ def main():
     )
     g_manifest = parser.add_argument_group("Manifest & index")
     g_tag = parser.add_argument_group("Tag")
+    g_pregate = parser.add_argument_group("Pre-periodicity gate")
     g_events = parser.add_argument_group("Event detection")
     g_output = parser.add_argument_group("Output & bundle")
     g_filter = parser.add_argument_group("Filter")
@@ -715,8 +726,10 @@ def main():
                         help="Index root directory (contains mag_bin/index*.csv)")
     g_manifest.add_argument("--lc-root", type=Path, default=LCV2_ROOT,
                         help="Light curve root directory (contains mag_bin/lc*_cal/)")
+    g_manifest.add_argument("--flat-lc-dir", type=Path, default=None,
+                        help="Flat directory of <source_id>.<extension> light curves, such as bundle_assets/lightcurves")
     g_manifest.add_argument("--index-file", type=Path, default=None,
-                        help="Override ASAS-SN index file used by home external validation and --full-bundle export")
+                        help="Optional ASAS-SN index/metadata file. Used by home external validation, --full-bundle export, and flat light-curve manifests")
     g_manifest.add_argument("--manifest-file", type=Path, default=None,
                         help="Manifest file (default: lc_manifest_{mag_bin}.parquet)")
     g_manifest.add_argument("--filtered-file", type=Path, default=None,
@@ -740,13 +753,38 @@ def main():
     g_tag.add_argument("--skip-camera-median", action="store_true", help="Skip camera median filter (identifies cameras to exclude from .raw2 files)")
     g_tag.add_argument("--camera-median-tolerance", type=float, default=CAMERA_MEDIAN_TOLERANCE, help="Tolerance beyond mag bin for camera median filter (default: 0.2 mag)")
     g_tag.add_argument("--vsx-max-sep", type=float, default=VSX_MAX_SEP_ARCSEC, help="Max separation for VSX match (arcsec)")
-    g_tag.add_argument("--vsx-mode", type=str, default=VSX_MODE, choices=["tag", "filter"], help="VSX handling: tag adds vsx_sep_arcsec/vsx_class columns, filter removes matches (default: tag)")
+    g_tag.add_argument(
+        "--vsx-mode",
+        type=str,
+        default=VSX_MODE,
+        choices=["tag"],
+        help="VSX handling mode. Only 'tag' is supported.",
+    )
     g_tag.add_argument("--vsx-crossmatch", type=Path, default=VSX_CROSSMATCH_PATH, help="Path to pre-crossmatched VSX CSV (with asas_sn_id, vsx_sep_arcsec, vsx_class)")
     g_tag.add_argument("--pass-all-tags", action="store_true", help="Pass all light curves to events.py regardless of tag results (failure tags are still added)")
     g_tag.add_argument("--enforce-tags", type=str, default=None, help="Comma-separated list of tag checks to enforce (e.g., 'sparse,multi_camera'). " "Only rows failing these checks are excluded. Default: enforce all enabled checks.")
     g_tag.add_argument("--workers", type=int, default=WORKERS, help="Workers for parallel processing")
     g_tag.add_argument("--stats-chunk-size", type=int, default=STATS_CHUNK_SIZE, help="Rows per checkpoint save during stats computation")
     g_tag.add_argument("--batch-size", type=int, default=BATCH_SIZE, help="Max light curves per events.py call")
+
+    g_pregate.add_argument("--apply-pre-periodicity-gate", action="store_true", help="Run CE/PDM periodicity gate before events.py and split confident periodic candidates out of the stochastic branch")
+    g_pregate.add_argument("--pre-periodicity-min-period", type=float, default=PRE_PERIODICITY_MIN_PERIOD, help="Minimum trial period in days for the pre-events gate")
+    g_pregate.add_argument("--pre-periodicity-max-period", type=float, default=PRE_PERIODICITY_MAX_PERIOD, help="Maximum trial period in days for the pre-events gate")
+    g_pregate.add_argument("--pre-periodicity-n-periods", type=int, default=PRE_PERIODICITY_N_PERIODS, help="Number of trial periods for CE/PDM in the pre-events gate")
+    g_pregate.add_argument("--pre-periodicity-n-bootstrap", type=int, default=PRE_PERIODICITY_N_BOOTSTRAP, help="Bootstrap iterations for the pre-events periodicity gate")
+    g_pregate.add_argument("--pre-periodicity-significance", type=float, default=PRE_PERIODICITY_SIGNIFICANCE, help="Bootstrap significance threshold for confident periodic routing")
+    g_pregate.add_argument("--pre-periodicity-pdm-snr-threshold", type=float, default=PRE_PERIODICITY_PDM_SNR_THRESHOLD, help="Minimum PDM SNR for periodic gate support")
+    g_pregate.add_argument("--pre-periodicity-pdm-theta-threshold", type=float, default=PRE_PERIODICITY_PDM_MIN_THETA, help="Maximum PDM theta for periodic gate support")
+    g_pregate.add_argument("--pre-periodicity-ce-snr-threshold", type=float, default=PRE_PERIODICITY_CE_SNR_THRESHOLD, help="Minimum CE SNR for periodic gate support")
+    g_pregate.add_argument("--pre-periodicity-ce-entropy-threshold", type=float, default=PRE_PERIODICITY_CE_MIN_ENTROPY, help="Maximum CE entropy for periodic gate support")
+    g_pregate.add_argument("--pre-periodicity-min-points", type=int, default=PRE_PERIODICITY_MIN_POINTS, help="Minimum cleaned LC points required for the pre-events gate")
+    g_pregate.add_argument("--pre-periodicity-agreement-rel-tol", type=float, default=PRE_PERIODICITY_AGREEMENT_REL_TOL, help="Relative tolerance for CE/PDM harmonic period agreement")
+    g_pregate.add_argument("--pre-periodicity-scatter-ratio-max", type=float, default=PRE_PERIODICITY_SCATTER_RATIO_MAX, help="Maximum folded/raw scatter ratio for confident periodic routing")
+    g_pregate.add_argument("--pre-periodicity-strong-single-scatter-ratio-max", type=float, default=PRE_PERIODICITY_STRONG_SINGLE_SCATTER_RATIO_MAX, help="Stricter scatter-ratio cap when only one of CE/PDM strongly supports periodicity")
+    g_pregate.add_argument("--pre-periodicity-lag-phase-max", type=float, default=PRE_PERIODICITY_LAG_PHASE_MAX, help="Maximum inter-band phase lag tolerated for confident periodic routing")
+    g_pregate.add_argument("--pre-periodicity-strong-single-sig", type=float, default=PRE_PERIODICITY_STRONG_SINGLE_SIG, help="Bootstrap significance threshold for routing a single-method periodic detection")
+    g_pregate.add_argument("--pre-periodicity-checkpoint", type=Path, default=None, help="Checkpoint parquet path for the pre-events periodicity gate")
+    g_pregate.add_argument("--pre-periodicity-workers", type=int, default=WORKERS, help="Workers for the pre-events periodicity gate")
 
     g_events.add_argument("--trigger-mode", type=str, default=TRIGGER_MODE, choices=["logbf", "posterior_prob"], help="Triggering mode")
     g_events.add_argument("--logbf-threshold-dip", type=float, default=LOGBF_THRESHOLD_DIP, help="Per-point dip trigger threshold")
@@ -1078,6 +1116,10 @@ def main():
         log(f"Importing bundle from {Path(args.import_bundle).expanduser()} to {out_dir}...")
         import_bundle_zip(args.import_bundle, out_dir, show_progress=args.verbose)
         log(f"Bundle import completed in {time.perf_counter() - import_started:.1f}s")
+        imported_flat_lc_dir = out_dir / "bundle_assets" / "lightcurves"
+        if args.flat_lc_dir is None and imported_flat_lc_dir.is_dir():
+            args.flat_lc_dir = imported_flat_lc_dir
+            log(f"Using imported flat light-curve directory: {args.flat_lc_dir}")
 
     if args.gaia_cache is None:
         gaia_cache_dir = out_dir / "gaia_cache"
@@ -1114,6 +1156,16 @@ def main():
     manifest_file = Path(args.manifest_file).expanduser() if args.manifest_file else (manifests_dir / f"lc_manifest_{mag_bin_tag}.parquet")
     filtered_file = Path(args.filtered_file).expanduser() if args.filtered_file else (tags_dir / f"lc_filtered_{mag_bin_tag}.parquet")
     stats_checkpoint_file = tags_dir / f"lc_stats_checkpoint_{mag_bin_tag}.parquet"
+    pre_periodicity_file = tags_dir / f"pre_periodicity_{mag_bin_tag}.parquet"
+    periodic_branch_file = manifests_dir / f"lc_periodic_branch_{mag_bin_tag}.parquet"
+    stochastic_branch_file = manifests_dir / f"lc_stochastic_branch_{mag_bin_tag}.parquet"
+    periodic_paths_file = paths_dir / f"periodic_paths_{mag_bin_tag}.txt"
+    periodic_events_output = results_dir / f"lc_periodic_events_results_{mag_bin_tag}.parquet"
+    if args.pre_periodicity_checkpoint is None:
+        pre_periodicity_checkpoint = tags_dir / f"pre_periodicity_checkpoint_{mag_bin_tag}.parquet"
+    else:
+        pre_periodicity_checkpoint = Path(args.pre_periodicity_checkpoint).expanduser()
+    periodic_events_checkpoint = results_dir / f"lc_periodic_events_results_{mag_bin_tag}_CHECKPOINT.parquet"
 
     # Save run parameters to JSON for full reproducibility
     run_start_time = datetime.now()
@@ -1131,14 +1183,38 @@ def main():
             enforced_tags.append("multi_camera")
         if not args.skip_mag_range:
             enforced_tags.append("mag_range")
-        if (not args.skip_vsx) and args.vsx_mode == "filter":
-            enforced_tags.append("vsx")
 
     config_fingerprint = {
         "vsx_mode": args.vsx_mode,
         "skip_vsx": args.skip_vsx,
         "pass_all_tags": args.pass_all_tags,
         "enforced_tags": enforced_tags,
+        "pre_periodicity_gate": {
+            "enabled": args.apply_pre_periodicity_gate,
+            "min_period": args.pre_periodicity_min_period,
+            "max_period": args.pre_periodicity_max_period,
+            "n_periods": args.pre_periodicity_n_periods,
+            "n_bootstrap": args.pre_periodicity_n_bootstrap,
+            "significance": args.pre_periodicity_significance,
+            "pdm_snr_threshold": args.pre_periodicity_pdm_snr_threshold,
+            "pdm_theta_threshold": args.pre_periodicity_pdm_theta_threshold,
+            "ce_snr_threshold": args.pre_periodicity_ce_snr_threshold,
+            "ce_entropy_threshold": args.pre_periodicity_ce_entropy_threshold,
+            "min_points": args.pre_periodicity_min_points,
+            "agreement_rel_tol": args.pre_periodicity_agreement_rel_tol,
+            "scatter_ratio_max": args.pre_periodicity_scatter_ratio_max,
+            "strong_single_scatter_ratio_max": args.pre_periodicity_strong_single_scatter_ratio_max,
+            "lag_phase_max": args.pre_periodicity_lag_phase_max,
+            "strong_single_sig": args.pre_periodicity_strong_single_sig,
+            "workers": args.pre_periodicity_workers,
+            "checkpoint": str(pre_periodicity_checkpoint),
+        },
+        "periodic_events": {
+            "enabled": args.apply_pre_periodicity_gate,
+            "workers": args.workers,
+            "checkpoint": str(periodic_events_checkpoint),
+            "output": str(periodic_events_output),
+        },
         "filter": {
             "apply_evidence_strength": not args.skip_evidence_strength,
             "min_bayes_factor": args.min_bayes_factor,
@@ -1279,6 +1355,27 @@ def main():
             # Tag stage (camera median)
             "skip_camera_median": args.skip_camera_median,
             "camera_median_tolerance": args.camera_median_tolerance,
+            # Pre-events periodicity gate
+            "apply_pre_periodicity_gate": args.apply_pre_periodicity_gate,
+            "pre_periodicity_min_period": args.pre_periodicity_min_period,
+            "pre_periodicity_max_period": args.pre_periodicity_max_period,
+            "pre_periodicity_n_periods": args.pre_periodicity_n_periods,
+            "pre_periodicity_n_bootstrap": args.pre_periodicity_n_bootstrap,
+            "pre_periodicity_significance": args.pre_periodicity_significance,
+            "pre_periodicity_pdm_snr_threshold": args.pre_periodicity_pdm_snr_threshold,
+            "pre_periodicity_pdm_theta_threshold": args.pre_periodicity_pdm_theta_threshold,
+            "pre_periodicity_ce_snr_threshold": args.pre_periodicity_ce_snr_threshold,
+            "pre_periodicity_ce_entropy_threshold": args.pre_periodicity_ce_entropy_threshold,
+            "pre_periodicity_min_points": args.pre_periodicity_min_points,
+            "pre_periodicity_agreement_rel_tol": args.pre_periodicity_agreement_rel_tol,
+            "pre_periodicity_scatter_ratio_max": args.pre_periodicity_scatter_ratio_max,
+            "pre_periodicity_strong_single_scatter_ratio_max": args.pre_periodicity_strong_single_scatter_ratio_max,
+            "pre_periodicity_lag_phase_max": args.pre_periodicity_lag_phase_max,
+            "pre_periodicity_strong_single_sig": args.pre_periodicity_strong_single_sig,
+            "pre_periodicity_workers": args.pre_periodicity_workers,
+            "pre_periodicity_checkpoint": str(pre_periodicity_checkpoint),
+            "periodic_events_output": str(periodic_events_output),
+            "periodic_events_checkpoint": str(periodic_events_checkpoint),
             # Step 5: Filter
             "run_filter": args.run_filter,
             "skip_evidence_strength": args.skip_evidence_strength,
@@ -1362,10 +1459,16 @@ def main():
             # File paths
             "index_root": str(args.index_root),
             "lc_root": str(args.lc_root),
+            "flat_lc_dir": str(args.flat_lc_dir.expanduser()) if args.flat_lc_dir else None,
             "index_file": str(args.index_file.expanduser()) if args.index_file else None,
             "out_dir": str(out_dir),
             "manifest_file": str(manifest_file),
             "filtered_file": str(filtered_file),
+            "pre_periodicity_file": str(pre_periodicity_file),
+            "periodic_branch_file": str(periodic_branch_file),
+            "stochastic_branch_file": str(stochastic_branch_file),
+            "periodic_paths_file": str(periodic_paths_file),
+            "periodic_events_output": str(periodic_events_output),
             "events_output": str(events_output),
         }
 
@@ -1397,6 +1500,7 @@ def main():
                 f"paths_dir: {paths_dir}",
                 f"results_dir: {results_dir}",
                 f"results_output: {events_output}",
+                f"periodic_events_output: {periodic_events_output}",
                 f"manifest_file: {manifest_file}",
                 f"filtered_file: {filtered_file}",
                 f"stats_checkpoint: {stats_checkpoint_file}",
@@ -1410,11 +1514,17 @@ def main():
 
     df_manifest = pd.DataFrame()
     df_filtered = pd.DataFrame()
+    df_periodic_candidates = pd.DataFrame()
+    pre_periodicity_stats: dict[str, object] | None = None
+    periodic_events_stats: dict[str, object] | None = None
 
     # Step 1: Build or load manifest
     if run_upstream:
         if args.force_manifest or not manifest_file.exists():
-            log(f"Building manifest for mag_bin={args.mag_bin}...")
+            if args.flat_lc_dir:
+                log(f"Building flat-directory manifest for mag_bin={args.mag_bin} from {Path(args.flat_lc_dir).expanduser()}...")
+            else:
+                log(f"Building manifest for mag_bin={args.mag_bin}...")
             df_manifest = build_manifest(
                 args.index_root,
                 args.lc_root,
@@ -1423,6 +1533,8 @@ def main():
                 file_ext=args.extension,
                 show_progress=args.verbose,
                 n_workers=args.workers,
+                flat_lc_dir=args.flat_lc_dir.expanduser() if args.flat_lc_dir else None,
+                index_file=args.index_file.expanduser() if args.index_file else None,
             )
 
             # Only keep sources where light curve files exist
@@ -1461,6 +1573,7 @@ def main():
                 rejected_log_csv=str(tags_dir / f"rejected_tag_{mag_bin_tag}.csv"),
                 stats_checkpoint=str(stats_checkpoint_file),
                 stats_chunk_size=args.stats_chunk_size,
+                file_ext=args.extension,
             )
 
             # Exclude rows based on tag results
@@ -1518,6 +1631,135 @@ def main():
         n_with_exclusions = (df_filtered["excluded_cameras"].fillna("") != "").sum()
         log(f"Found {n_with_exclusions}/{len(df_filtered)} sources with excluded cameras")
 
+    # Step 2.75: Pre-events periodicity gate and branch split
+    if run_upstream and args.apply_pre_periodicity_gate and not df_filtered.empty:
+        if args.force_tag or not pre_periodicity_file.exists():
+            log(
+                "\nRunning pre-events periodicity gate "
+                f"(CE/PDM, bootstrap={args.pre_periodicity_n_bootstrap}, workers={args.pre_periodicity_workers})..."
+            )
+            df_gate = apply_pre_periodicity_gate(
+                df_filtered,
+                path_col="dat_path" if "dat_path" in df_filtered.columns else "path",
+                excluded_cameras_col="excluded_cameras" if "excluded_cameras" in df_filtered.columns else None,
+                bad_camera_scatter_ratio=BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
+                clean_max_error_absolute=CLEAN_LC_MAX_ERROR_ABSOLUTE,
+                clean_max_error_sigma=CLEAN_LC_MAX_ERROR_SIGMA,
+                min_period=args.pre_periodicity_min_period,
+                max_period=args.pre_periodicity_max_period,
+                n_periods=args.pre_periodicity_n_periods,
+                n_bootstrap=args.pre_periodicity_n_bootstrap,
+                significance_level=args.pre_periodicity_significance,
+                pdm_snr_threshold=args.pre_periodicity_pdm_snr_threshold,
+                ce_snr_threshold=args.pre_periodicity_ce_snr_threshold,
+                pdm_theta_threshold=args.pre_periodicity_pdm_theta_threshold,
+                ce_entropy_threshold=args.pre_periodicity_ce_entropy_threshold,
+                min_points=args.pre_periodicity_min_points,
+                agreement_rel_tol=args.pre_periodicity_agreement_rel_tol,
+                scatter_ratio_max=args.pre_periodicity_scatter_ratio_max,
+                strong_single_scatter_ratio_max=args.pre_periodicity_strong_single_scatter_ratio_max,
+                lag_phase_max=args.pre_periodicity_lag_phase_max,
+                strong_single_sig=args.pre_periodicity_strong_single_sig,
+                workers=args.pre_periodicity_workers,
+                checkpoint_path=pre_periodicity_checkpoint,
+                show_tqdm=args.verbose,
+            )
+            safe_write_parquet(df_gate, pre_periodicity_file)
+        else:
+            log(f"\nLoading cached pre-periodicity gate results from {pre_periodicity_file}")
+            df_gate = pd.read_parquet(pre_periodicity_file)
+
+        if "pre_periodic_flag" not in df_gate.columns:
+            raise ValueError(
+                f"Pre-periodicity gate output at {pre_periodicity_file} is missing 'pre_periodic_flag'"
+            )
+
+        df_periodic_candidates = df_gate[df_gate["pre_periodic_flag"].fillna(False)].reset_index(drop=True)
+        df_filtered = df_gate[~df_gate["pre_periodic_flag"].fillna(False)].reset_index(drop=True)
+
+        safe_write_parquet(df_periodic_candidates, periodic_branch_file)
+        safe_write_parquet(df_filtered, stochastic_branch_file)
+
+        periodic_paths: list[str] = []
+        if not df_periodic_candidates.empty:
+            periodic_path_col = "dat_path" if "dat_path" in df_periodic_candidates.columns else "path"
+            periodic_paths = [str(value) for value in df_periodic_candidates[periodic_path_col].tolist()]
+        with open(periodic_paths_file, "w") as handle:
+            for item in periodic_paths:
+                handle.write(f"{item}\n")
+
+        label_counts = (
+            df_gate["pre_periodicity_label"].value_counts(dropna=False).to_dict()
+            if "pre_periodicity_label" in df_gate.columns else {}
+        )
+        pre_periodicity_stats = {
+            "total_input": int(len(df_gate)),
+            "periodic_branch": int(len(df_periodic_candidates)),
+            "stochastic_branch": int(len(df_filtered)),
+            "label_counts": {str(key): int(value) for key, value in label_counts.items()},
+            "pre_periodicity_file": str(pre_periodicity_file),
+            "periodic_branch_file": str(periodic_branch_file),
+            "stochastic_branch_file": str(stochastic_branch_file),
+            "periodic_paths_file": str(periodic_paths_file),
+        }
+        log(
+            f"Pre-periodicity gate routed {len(df_periodic_candidates)}/{len(df_gate)} "
+            "candidates to the periodic branch"
+        )
+
+    if run_upstream and args.apply_pre_periodicity_gate:
+        if not df_periodic_candidates.empty:
+            if args.overwrite and periodic_events_checkpoint.exists():
+                periodic_events_checkpoint.unlink()
+            if args.overwrite and periodic_events_output.exists():
+                periodic_events_output.unlink()
+
+            if args.force_tag or not periodic_events_output.exists():
+                log(
+                    "\nRunning periodic branch phase-folded dip finder "
+                    f"({len(df_periodic_candidates)} candidates, workers={args.workers})..."
+                )
+                df_periodic_events = run_periodic_events(
+                    df_periodic_candidates,
+                    path_col="dat_path" if "dat_path" in df_periodic_candidates.columns else "path",
+                    period_col="pre_periodicity_selected_period",
+                    excluded_cameras_col="excluded_cameras" if "excluded_cameras" in df_periodic_candidates.columns else None,
+                    bad_camera_scatter_ratio=BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
+                    clean_max_error_absolute=CLEAN_LC_MAX_ERROR_ABSOLUTE,
+                    clean_max_error_sigma=CLEAN_LC_MAX_ERROR_SIGMA,
+                    workers=args.workers,
+                    checkpoint_path=periodic_events_checkpoint,
+                    show_tqdm=args.verbose,
+                )
+                safe_write_parquet(df_periodic_events, periodic_events_output)
+            else:
+                log(f"\nLoading cached periodic branch results from {periodic_events_output}")
+                df_periodic_events = pd.read_parquet(periodic_events_output)
+
+            n_periodic_significant = (
+                int(df_periodic_events["dip_significant"].fillna(False).sum())
+                if "dip_significant" in df_periodic_events.columns else 0
+            )
+            periodic_events_stats = {
+                "total_input": int(len(df_periodic_candidates)),
+                "total_results": int(len(df_periodic_events)),
+                "significant_dips": n_periodic_significant,
+                "output_file": str(periodic_events_output),
+                "checkpoint_file": str(periodic_events_checkpoint),
+            }
+            log(
+                f"Periodic branch found {n_periodic_significant}/{len(df_periodic_events)} "
+                "significant phase-folded dip candidates"
+            )
+        else:
+            periodic_events_stats = {
+                "total_input": 0,
+                "total_results": 0,
+                "significant_dips": 0,
+                "output_file": str(periodic_events_output),
+                "checkpoint_file": str(periodic_events_checkpoint),
+            }
+
     # Step 3: Construct file paths (use full dat_path for events.py input)
     file_col = "dat_path" if "dat_path" in df_filtered.columns else "path"
 
@@ -1540,13 +1782,11 @@ def main():
 
     file_paths = df_filtered[file_col].tolist() if run_upstream else []
 
-    if run_upstream and (not file_paths):
-        log("\nNo sources to process after filtering!")
-        return
-
     # Step 4: Call events.py with the filtered paths in batches, with resume support
-    if run_upstream:
+    if run_upstream and file_paths:
         log(f"\nPreparing to run events.py on {len(file_paths)} light curves...")
+    elif run_upstream:
+        log("\nNo stochastic-branch sources to process after filtering.")
 
     # Write paths to temp file for events.py to consume
     paths_file = paths_dir / f"filtered_paths_{mag_bin_tag}.txt"
@@ -1590,7 +1830,7 @@ def main():
             log(f"Warning: could not read checkpoint log {checkpoint_log}: {e}")
 
     remaining = [p for p in file_paths if str(p) not in processed_paths]
-    if run_upstream and (not remaining):
+    if run_upstream and file_paths and (not remaining):
         log("All paths already processed according to checkpoint.")
 
     # Batch and run
@@ -1634,7 +1874,7 @@ def main():
             for p in batch_paths:
                 f.write(f"{p}\n")
 
-    if run_upstream:
+    if run_upstream and file_paths:
         log("\nAll batches completed.")
 
     # Generate run summary with results statistics
@@ -1654,6 +1894,10 @@ def main():
                 "kept_fraction": len(df_filtered) / len(df_manifest) if len(df_manifest) > 0 else 0.0,
             },
         }
+        if pre_periodicity_stats is not None:
+            summary["pre_periodicity_gate"] = pre_periodicity_stats
+        if periodic_events_stats is not None:
+            summary["periodic_events"] = periodic_events_stats
 
         # Tag rejection breakdown
         rejected_log = tags_dir / f"rejected_tag_{mag_bin_tag}.csv"
@@ -1709,6 +1953,18 @@ def main():
             except Exception as e:
                 if args.verbose:
                     print(f"Warning: could not parse detection results: {e}")
+
+        if periodic_events_output.exists():
+            try:
+                df_periodic_results = pd.read_parquet(periodic_events_output)
+                summary["periodic_detection_stats"] = {
+                    "total_results": int(len(df_periodic_results)),
+                    "significant_dips": int(df_periodic_results["dip_significant"].fillna(False).sum()) if "dip_significant" in df_periodic_results.columns else 0,
+                    "unique_sources": df_periodic_results["path"].nunique() if "path" in df_periodic_results.columns else None,
+                }
+            except Exception as e:
+                if args.verbose:
+                    print(f"Warning: could not parse periodic branch results: {e}")
 
         # Write summary (will be updated again if filter/postprocess run)
         with open(run_summary_file, "w") as f:
@@ -1950,7 +2206,7 @@ def main():
     if run_downstream:
         log("\n=== Merging per-mag-bin outputs ===")
         merge_started = time.perf_counter()
-        for merge_prefix in ("lc_events_results", "lc_events_filtered", "lc_events_enriched"):
+        for merge_prefix in ("lc_events_results", "lc_events_filtered", "lc_events_enriched", "lc_periodic_events_results"):
             tagged_files = sorted(results_dir.glob(f"{merge_prefix}_*.parquet"))
             # Exclude checkpoint and temp files from merging
             tagged_files = [

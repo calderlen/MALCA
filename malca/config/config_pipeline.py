@@ -3,7 +3,7 @@
 import math
 
 # Parallelism
-WORKERS = 10
+WORKERS = 12
 BATCH_SIZE = 10000
 
 # Bayesian detection

@@ -6,7 +6,7 @@ so downstream steps can decide how strictly to enforce exclusion.
 Filters (ordered by execution speed for efficiency):
 1. filter_sparse_lightcurves - remove LCs with insufficient time span or cadence
 2. filter_multi_camera - remove single-camera detections
-3. filter_vsx_match - optionally remove known variable stars from VSX
+3. attach_vsx_info - annotate known variable stars from VSX
 
 Input format:
     DataFrame with columns: asas_sn_id (or id/source_id), path (to directory containing dat2 files)
@@ -54,7 +54,13 @@ from malca.utils import (
 
 
 
-def _compute_stats_for_row(asas_sn_id: str, dir_path: str, compute_time: bool, compute_cameras: bool) -> dict:
+def _compute_stats_for_row(
+    asas_sn_id: str,
+    dir_path: str,
+    compute_time: bool,
+    compute_cameras: bool,
+    file_ext: str | None = None,
+) -> dict:
     """
     Helper function for parallel processing. Computes requested stats for a single light curve.
     Returns a dict with requested stats.
@@ -62,7 +68,7 @@ def _compute_stats_for_row(asas_sn_id: str, dir_path: str, compute_time: bool, c
     result = {"asas_sn_id": asas_sn_id}
 
     try:
-        df_g, df_v = read_lc_dat2(asas_sn_id, dir_path)
+        df_g, df_v = read_lc_dat2(asas_sn_id, dir_path, file_ext=file_ext)
         df_lc = pd.concat([df_g, df_v], ignore_index=True) if not df_g.empty or not df_v.empty else pd.DataFrame()
 
         if compute_time:
@@ -89,6 +95,7 @@ def _compute_stats_parallel(
     path_col: str,
     compute_time: bool = False,
     compute_cameras: bool = False,
+    file_ext: str | None = None,
     n_workers: int = 4,
     show_tqdm: bool = False,
     checkpoint_path: str | Path | None = None,
@@ -204,7 +211,14 @@ def _compute_stats_parallel(
             chunk_tasks = tasks[chunk_start:chunk_end]
 
             futures = {
-                executor.submit(_compute_stats_for_row, asas_sn_id, dir_path, compute_time, compute_cameras): idx
+                executor.submit(
+                    _compute_stats_for_row,
+                    asas_sn_id,
+                    dir_path,
+                    compute_time,
+                    compute_cameras,
+                    file_ext,
+                ): idx
                 for idx, asas_sn_id, dir_path in chunk_tasks
             }
 
@@ -243,6 +257,7 @@ def filter_sparse_lightcurves(
     *,
     min_time_span: float = 100.0,
     min_points_per_day: float = 0.05,
+    file_ext: str | None = None,
     show_tqdm: bool = False,
     compute_stats: bool = True,
     rejected_log_csv: str | Path | None = None,
@@ -273,7 +288,7 @@ def filter_sparse_lightcurves(
             asas_sn_id = str(row[id_col])
             dir_path = str(row[path_col])
 
-            df_g, df_v = read_lc_dat2(asas_sn_id, dir_path)
+            df_g, df_v = read_lc_dat2(asas_sn_id, dir_path, file_ext=file_ext)
             df_lc = pd.concat([df_g, df_v], ignore_index=True) if not df_g.empty or not df_v.empty else pd.DataFrame()
 
             stats = compute_time_stats(df_lc)
@@ -396,6 +411,7 @@ def filter_multi_camera(
     df: pd.DataFrame,
     *,
     min_cameras: int = 2,
+    file_ext: str | None = None,
     show_tqdm: bool = False,
     compute_stats: bool = True,
     rejected_log_csv: str | Path | None = None,
@@ -423,7 +439,7 @@ def filter_multi_camera(
             asas_sn_id = str(row[id_col])
             dir_path = str(row[path_col])
 
-            df_g, df_v = read_lc_dat2(asas_sn_id, dir_path)
+            df_g, df_v = read_lc_dat2(asas_sn_id, dir_path, file_ext=file_ext)
             df_lc = pd.concat([df_g, df_v], ignore_index=True) if not df_g.empty or not df_v.empty else pd.DataFrame()
 
             n_cams = compute_n_cameras(df_lc)
@@ -737,7 +753,7 @@ def apply_tags(
     vsx_max_sep_arcsec: float = 3.0,
     vsx_exclude_classes: list[str] | None = None,
     vsx_crossmatch_csv: str | Path = VSX_CROSSMATCH_PATH,
-    vsx_mode: str = "filter",
+    vsx_mode: str = "tag",
     # Filter 2: sparse lightcurves
     apply_sparse: bool = True,
     min_time_span: float = 100.0,
@@ -749,6 +765,7 @@ def apply_tags(
     apply_mag_range: bool = True,
     mag_lo: float = 10.0,
     mag_hi: float = 18.0,
+    file_ext: str | None = None,
     # General
     n_workers: int = 1,
     show_tqdm: bool = True,
@@ -770,7 +787,7 @@ def apply_tags(
     apply_* : bool
         Whether to apply each filter
     vsx_mode : str
-        "tag" to attach VSX metadata only, "filter" to remove VSX matches (default)
+        VSX handling mode. Only ``"tag"`` is supported.
     n_workers : int
         Number of parallel workers for computing stats (default 1 = sequential).
         Filters 2 and 3 (sparse, multi_camera) can benefit from parallelization.
@@ -811,6 +828,7 @@ def apply_tags(
                 df_filtered, id_col, "path",
                 compute_time=compute_time,
                 compute_cameras=compute_cameras,
+                file_ext=file_ext,
                 n_workers=n_workers,
                 show_tqdm=show_tqdm,
                 checkpoint_path=stats_checkpoint,
@@ -819,8 +837,8 @@ def apply_tags(
             precomputed_time = compute_time
             precomputed_cameras = compute_cameras
 
-    if vsx_mode not in {"tag", "filter"}:
-        raise ValueError(f"vsx_mode must be 'tag' or 'filter', got {vsx_mode!r}")
+    if vsx_mode != "tag":
+        raise ValueError(f"vsx_mode must be 'tag', got {vsx_mode!r}")
 
     if apply_vsx:
         df_filtered = attach_vsx_info(
@@ -835,6 +853,7 @@ def apply_tags(
         filters.append(("sparse", filter_sparse_lightcurves, {
             "min_time_span": min_time_span,
             "min_points_per_day": min_points_per_day,
+            "file_ext": file_ext,
             "show_tqdm": show_tqdm,
             "compute_stats": not precomputed_time,
             "rejected_log_csv": rejected_log_csv,
@@ -844,6 +863,7 @@ def apply_tags(
     if apply_multi_camera:
         filters.append(("multi_camera", filter_multi_camera, {
             "min_cameras": min_cameras,
+            "file_ext": file_ext,
             "show_tqdm": show_tqdm,
             "compute_stats": not precomputed_cameras,
             "rejected_log_csv": rejected_log_csv,
@@ -854,16 +874,6 @@ def apply_tags(
         filters.append(("mag_range", filter_mag_range, {
             "mag_lo": mag_lo,
             "mag_hi": mag_hi,
-            "show_tqdm": show_tqdm,
-            "rejected_log_csv": rejected_log_csv,
-        }))
-
-    # Filter 4: VSX crossmatch
-    if apply_vsx and vsx_mode == "filter":
-        filters.append(("vsx_match", filter_vsx_match, {
-            "max_sep_arcsec": vsx_max_sep_arcsec,
-            "exclude_classes": vsx_exclude_classes,
-            "vsx_crossmatch_csv": None,
             "show_tqdm": show_tqdm,
             "rejected_log_csv": rejected_log_csv,
         }))
@@ -911,7 +921,12 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True, help="Output CSV/Parquet")
 
     parser.add_argument("--apply-vsx", action="store_true", help="Enable VSX-based filtering/tagging")
-    parser.add_argument("--vsx-mode", choices=["filter", "tag"], default=VSX_MODE)
+    parser.add_argument(
+        "--vsx-mode",
+        choices=["tag"],
+        default=VSX_MODE,
+        help="VSX handling mode. Only 'tag' is supported.",
+    )
     parser.add_argument("--vsx-max-sep-arcsec", type=float, default=VSX_MAX_SEP_ARCSEC)
     parser.add_argument("--vsx-crossmatch-csv", type=Path, default=VSX_CROSSMATCH_PATH)
 
@@ -923,6 +938,8 @@ def main() -> None:
     parser.add_argument("--min-cameras", type=int, default=MIN_CAMERAS)
 
     parser.add_argument("--workers", type=int, default=WORKERS)
+    parser.add_argument("--extension", "-e", type=str, default=None,
+                        help="Light curve file extension (e.g., dat, dat2, dat3). Default comes from config.")
     parser.add_argument("--stats-checkpoint", type=Path, default=None)
     parser.add_argument("--stats-chunk-size", type=int, default=STATS_CHUNK_SIZE)
     parser.add_argument("--rejected-log-csv", type=Path, default=None)
@@ -949,6 +966,7 @@ def main() -> None:
         min_points_per_day=args.min_points_per_day,
         apply_multi_camera=args.apply_multi_camera,
         min_cameras=args.min_cameras,
+        file_ext=args.extension,
         n_workers=args.workers,
         show_tqdm=not args.no_tqdm,
         rejected_log_csv=args.rejected_log_csv,

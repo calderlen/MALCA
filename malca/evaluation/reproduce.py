@@ -863,7 +863,7 @@ def build_reproduction_report(
                 apply_vsx=not skip_vsx,
                 vsx_max_sep_arcsec=vsx_max_sep,
                 vsx_crossmatch_csv=vsx_catalog,
-                vsx_mode="filter",
+                vsx_mode="tag",
                 apply_multi_camera=True,
                 min_cameras=min_cameras,
                 n_workers=n_workers or WORKERS,
