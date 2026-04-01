@@ -114,6 +114,7 @@ def test_apply_pre_periodicity_gate_aligns_simple_v_minus_g_median_offset(monkey
         return df.reset_index(drop=True)
 
     def fake_pdm_stats(_jd: np.ndarray, mag: np.ndarray, _err: np.ndarray, **_kwargs: object) -> dict[str, float]:
+        assert _kwargs.get("refine") is True
         captured["pdm_mag"] = np.asarray(mag, dtype=float).copy()
         return {
             "pdm_period": 4.0,
@@ -123,6 +124,7 @@ def test_apply_pre_periodicity_gate_aligns_simple_v_minus_g_median_offset(monkey
         }
 
     def fake_ce_stats(_jd: np.ndarray, mag: np.ndarray, _err: np.ndarray, **_kwargs: object) -> dict[str, float]:
+        assert _kwargs.get("refine") is True
         captured["ce_mag"] = np.asarray(mag, dtype=float).copy()
         return {
             "ce_period": 4.0,
@@ -171,6 +173,95 @@ def test_apply_pre_periodicity_gate_aligns_simple_v_minus_g_median_offset(monkey
         mag = captured[key]
         assert np.isclose(np.median(mag[:g_count]), np.median(mag[g_count:]), atol=1e-10)
     assert np.isclose(out.loc[0, "pre_periodicity_v_minus_g_median_offset"], expected_offset, atol=1e-10)
+
+
+def test_apply_pre_periodicity_gate_uses_corrected_periods_for_agreement(monkeypatch) -> None:
+    df_lc = _two_band_offset_frame()
+
+    def fake_load_lightcurve_df(*_args: object, **_kwargs: object) -> pd.DataFrame:
+        return df_lc.copy()
+
+    def fake_clean_lc(df: pd.DataFrame, **_kwargs: object) -> pd.DataFrame:
+        return df.reset_index(drop=True)
+
+    def fake_pdm_stats(_jd: np.ndarray, _mag: np.ndarray, _err: np.ndarray, **_kwargs: object) -> dict[str, float]:
+        assert _kwargs.get("refine") is True
+        return {
+            "pdm_period": 2.0,
+            "pdm_min_theta": 0.3,
+            "pdm_snr": 12.0,
+            "pdm_bootstrap_sig": 1e-4,
+        }
+
+    def fake_ce_stats(_jd: np.ndarray, _mag: np.ndarray, _err: np.ndarray, **_kwargs: object) -> dict[str, float]:
+        assert _kwargs.get("refine") is True
+        return {
+            "ce_period": 8.0,
+            "ce_min_entropy": 0.3,
+            "ce_snr": 11.0,
+            "ce_bootstrap_sig": 2e-4,
+        }
+
+    def fake_arbitrate(
+        _band_resid: dict[int, tuple[np.ndarray, np.ndarray]],
+        base_period: float,
+        *,
+        min_period: float,
+        max_period: float,
+        **_kwargs: object,
+    ) -> tuple[float, float, dict[str, object]]:
+        assert min_period == 0.5
+        assert max_period == 10.0
+        if np.isclose(base_period, 2.0):
+            return 4.0, 2.0, {
+                "objective": 0.2,
+                "selection_objective": 0.2,
+                "scatter_ratio": 0.4,
+                "lag_phase": np.nan,
+                "alias_flag": False,
+            }
+        if np.isclose(base_period, 8.0):
+            return 4.0, 0.5, {
+                "objective": 0.3,
+                "selection_objective": 0.3,
+                "scatter_ratio": 0.5,
+                "lag_phase": np.nan,
+                "alias_flag": False,
+            }
+        raise AssertionError(f"unexpected base period {base_period}")
+
+    monkeypatch.setattr(periodicity_gate, "load_lightcurve_df", fake_load_lightcurve_df)
+    monkeypatch.setattr(periodicity_gate, "clean_lc", fake_clean_lc)
+    monkeypatch.setattr(periodicity_gate, "compute_pdm_stats", fake_pdm_stats)
+    monkeypatch.setattr(periodicity_gate, "compute_ce_stats", fake_ce_stats)
+    monkeypatch.setattr(periodicity_gate, "_arbitrate_harmonic_period", fake_arbitrate)
+
+    df = pd.DataFrame({"source_id": ["harmonic_pair"], "dat_path": ["dummy.dat3"]})
+    out = apply_pre_periodicity_gate(
+        df,
+        n_periods=800,
+        n_bootstrap=24,
+        significance_level=0.01,
+        strong_single_sig=1e-3,
+        min_period=0.5,
+        max_period=10.0,
+        workers=1,
+        show_tqdm=False,
+    )
+
+    assert bool(out.loc[0, "pre_periodic_flag"]) is True
+    assert out.loc[0, "pre_periodicity_label"] == "periodic"
+    assert bool(out.loc[0, "pre_periodicity_methods_agree"]) is True
+    assert np.isclose(out.loc[0, "pre_pdm_period"], 2.0)
+    assert np.isclose(out.loc[0, "pre_pdm_corrected_period"], 4.0)
+    assert np.isclose(out.loc[0, "pre_pdm_harmonic_factor"], 2.0)
+    assert np.isclose(out.loc[0, "pre_ce_period"], 8.0)
+    assert np.isclose(out.loc[0, "pre_ce_corrected_period"], 4.0)
+    assert np.isclose(out.loc[0, "pre_ce_harmonic_factor"], 0.5)
+    assert out.loc[0, "pre_periodicity_method"] == "pdm"
+    assert np.isclose(out.loc[0, "pre_periodicity_base_period"], 2.0)
+    assert np.isclose(out.loc[0, "pre_periodicity_selected_period"], 4.0)
+    assert np.isclose(out.loc[0, "pre_periodicity_harmonic_factor"], 2.0)
 
 
 def test_arbitrate_harmonic_period_considers_extended_long_multiple(monkeypatch) -> None:

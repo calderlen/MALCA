@@ -57,11 +57,15 @@ PREGATE_RESULT_COLUMNS: list[str] = [
     "pre_n_points",
     "pre_n_cameras",
     "pre_pdm_period",
+    "pre_pdm_corrected_period",
+    "pre_pdm_harmonic_factor",
     "pre_pdm_theta",
     "pre_pdm_snr",
     "pre_pdm_bootstrap_sig",
     "pre_pdm_support",
     "pre_ce_period",
+    "pre_ce_corrected_period",
+    "pre_ce_harmonic_factor",
     "pre_ce_entropy",
     "pre_ce_snr",
     "pre_ce_bootstrap_sig",
@@ -71,6 +75,7 @@ PREGATE_RESULT_COLUMNS: list[str] = [
     "pre_periodicity_base_period",
     "pre_periodicity_selected_period",
     "pre_periodicity_harmonic_factor",
+    "pre_periodicity_selection_objective",
     "pre_periodicity_methods_agree",
     "pre_periodicity_agreement_factor",
     "pre_periodicity_agreement_rel_err",
@@ -95,11 +100,15 @@ def _empty_result(path: str, checkpoint_key: str, *, label: str = "non_periodic"
         "pre_n_points": 0,
         "pre_n_cameras": 0,
         "pre_pdm_period": np.nan,
+        "pre_pdm_corrected_period": np.nan,
+        "pre_pdm_harmonic_factor": np.nan,
         "pre_pdm_theta": np.nan,
         "pre_pdm_snr": np.nan,
         "pre_pdm_bootstrap_sig": np.nan,
         "pre_pdm_support": False,
         "pre_ce_period": np.nan,
+        "pre_ce_corrected_period": np.nan,
+        "pre_ce_harmonic_factor": np.nan,
         "pre_ce_entropy": np.nan,
         "pre_ce_snr": np.nan,
         "pre_ce_bootstrap_sig": np.nan,
@@ -109,6 +118,7 @@ def _empty_result(path: str, checkpoint_key: str, *, label: str = "non_periodic"
         "pre_periodicity_base_period": np.nan,
         "pre_periodicity_selected_period": np.nan,
         "pre_periodicity_harmonic_factor": np.nan,
+        "pre_periodicity_selection_objective": np.nan,
         "pre_periodicity_methods_agree": False,
         "pre_periodicity_agreement_factor": np.nan,
         "pre_periodicity_agreement_rel_err": np.nan,
@@ -426,29 +436,109 @@ def _apply_simple_band_median_offset(
     return df_aligned, offset_v_minus_g
 
 
-def _choose_period_method(
-    pdm_result: dict[str, object],
-    ce_result: dict[str, object],
-) -> tuple[str | None, float]:
-    candidates: list[tuple[float, float, str, float]] = []
+def _period_relative_agreement(
+    period_a: float,
+    period_b: float,
+    *,
+    rel_tol: float,
+) -> tuple[bool, float, float]:
+    if not np.isfinite(period_a) or not np.isfinite(period_b) or period_a <= 0 or period_b <= 0:
+        return False, np.nan, np.nan
 
-    pdm_period = float(pdm_result.get("pdm_period", np.nan))
-    if np.isfinite(pdm_period) and pdm_period > 0:
-        pdm_sig = float(pdm_result.get("pdm_bootstrap_sig", np.nan))
-        pdm_snr = float(pdm_result.get("pdm_snr", np.nan))
-        candidates.append((pdm_sig if np.isfinite(pdm_sig) else np.inf, -pdm_snr if np.isfinite(pdm_snr) else np.inf, "pdm", pdm_period))
+    rel_err = abs(float(period_a) - float(period_b)) / max(abs(float(period_a)), abs(float(period_b)), 1e-12)
+    period_ratio = float(period_b) / float(period_a)
+    return bool(rel_err <= float(rel_tol)), period_ratio, float(rel_err)
 
-    ce_period = float(ce_result.get("ce_period", np.nan))
-    if np.isfinite(ce_period) and ce_period > 0:
-        ce_sig = float(ce_result.get("ce_bootstrap_sig", np.nan))
-        ce_snr = float(ce_result.get("ce_snr", np.nan))
-        candidates.append((ce_sig if np.isfinite(ce_sig) else np.inf, -ce_snr if np.isfinite(ce_snr) else np.inf, "ce", ce_period))
 
-    if not candidates:
-        return None, np.nan
+def _harmonically_correct_period_candidate(
+    method_name: str,
+    raw_period: float,
+    *,
+    bootstrap_sig: float,
+    snr: float,
+    supported: bool,
+    band_resid: dict[int, tuple[np.ndarray, np.ndarray]],
+    min_period: float,
+    max_period: float,
+) -> dict[str, object]:
+    if not np.isfinite(raw_period) or raw_period <= 0:
+        return {
+            "method": method_name,
+            "raw_period": np.nan,
+            "corrected_period": np.nan,
+            "harmonic_factor": np.nan,
+            "bootstrap_sig": float(bootstrap_sig),
+            "snr": float(snr),
+            "supported": bool(supported),
+            "objective": np.nan,
+            "selection_objective": np.nan,
+            "scatter_ratio": np.nan,
+            "lag_phase": np.nan,
+            "alias_flag": False,
+        }
 
-    _, _, method_name, period = min(candidates)
-    return str(method_name), float(period)
+    corrected_period, harmonic_factor, diag = _arbitrate_harmonic_period(
+        band_resid,
+        float(raw_period),
+        min_period=float(min_period),
+        max_period=float(max_period),
+    )
+    objective = float(diag.get("objective", np.nan))
+    selection_objective = float(diag.get("selection_objective", np.nan))
+    return {
+        "method": method_name,
+        "raw_period": float(raw_period),
+        "corrected_period": float(corrected_period),
+        "harmonic_factor": float(harmonic_factor),
+        "bootstrap_sig": float(bootstrap_sig),
+        "snr": float(snr),
+        "supported": bool(supported),
+        "objective": objective,
+        "selection_objective": selection_objective,
+        "scatter_ratio": float(diag.get("scatter_ratio", np.nan)),
+        "lag_phase": float(diag.get("lag_phase", np.nan)),
+        "alias_flag": bool(diag.get("alias_flag", False)),
+    }
+
+
+def _period_candidate_sort_key(candidate: dict[str, object]) -> tuple[float, float, bool, float]:
+    selection_objective = float(candidate.get("selection_objective", np.nan))
+    objective = float(candidate.get("objective", np.nan))
+    rank_objective = selection_objective
+    if not np.isfinite(rank_objective):
+        rank_objective = objective
+    if not np.isfinite(rank_objective):
+        rank_objective = np.inf
+
+    bootstrap_sig = float(candidate.get("bootstrap_sig", np.nan))
+    if not np.isfinite(bootstrap_sig):
+        bootstrap_sig = np.inf
+
+    snr = float(candidate.get("snr", np.nan))
+    if not np.isfinite(snr):
+        snr = -np.inf
+
+    return (
+        float(rank_objective),
+        float(bootstrap_sig),
+        bool(candidate.get("alias_flag", False)),
+        -float(snr),
+    )
+
+
+def _select_period_candidate(candidates: list[dict[str, object]]) -> dict[str, object] | None:
+    usable = [
+        candidate
+        for candidate in candidates
+        if np.isfinite(candidate.get("corrected_period", np.nan))
+        and float(candidate.get("corrected_period", np.nan)) > 0
+    ]
+    if not usable:
+        return None
+
+    supported_candidates = [candidate for candidate in usable if bool(candidate.get("supported", False))]
+    pool = supported_candidates or usable
+    return min(pool, key=_period_candidate_sort_key)
 
 
 def _evaluate_periodicity_worker(args: tuple[object, ...]) -> dict[str, object]:
@@ -520,6 +610,7 @@ def _evaluate_periodicity_worker(args: tuple[object, ...]) -> dict[str, object]:
             n_periods=int(n_periods),
             n_bootstrap=int(n_bootstrap),
             significance_level=float(significance_level),
+            refine=True,
         )
         ce_result = compute_ce_stats(
             jd,
@@ -530,6 +621,7 @@ def _evaluate_periodicity_worker(args: tuple[object, ...]) -> dict[str, object]:
             n_periods=int(n_periods),
             n_bootstrap=int(n_bootstrap),
             significance_level=float(significance_level),
+            refine=True,
         )
 
         pdm_support = bool(
@@ -546,38 +638,74 @@ def _evaluate_periodicity_worker(args: tuple[object, ...]) -> dict[str, object]:
         )
         support_count = int(pdm_support) + int(ce_support)
 
-        methods_agree, agreement_factor, agreement_rel_err = _harmonic_period_agreement(
-            float(pdm_result.get("pdm_period", np.nan)),
-            float(ce_result.get("ce_period", np.nan)),
-            rel_tol=float(agreement_rel_tol),
-        )
-
-        method_name, base_period = _choose_period_method(pdm_result, ce_result)
         band_resid = _build_band_residuals(df_lc_aligned)
-        selected_period, harmonic_factor, harmonic_diag = _arbitrate_harmonic_period(
-            band_resid,
-            float(base_period),
+        pdm_candidate = _harmonically_correct_period_candidate(
+            "pdm",
+            float(pdm_result.get("pdm_period", np.nan)),
+            bootstrap_sig=float(pdm_result.get("pdm_bootstrap_sig", np.nan)),
+            snr=float(pdm_result.get("pdm_snr", np.nan)),
+            supported=pdm_support,
+            band_resid=band_resid,
+            min_period=float(min_period),
+            max_period=float(max_period),
+        )
+        ce_candidate = _harmonically_correct_period_candidate(
+            "ce",
+            float(ce_result.get("ce_period", np.nan)),
+            bootstrap_sig=float(ce_result.get("ce_bootstrap_sig", np.nan)),
+            snr=float(ce_result.get("ce_snr", np.nan)),
+            supported=ce_support,
+            band_resid=band_resid,
             min_period=float(min_period),
             max_period=float(max_period),
         )
 
-        pdm_sig = float(pdm_result.get("pdm_bootstrap_sig", np.nan))
-        ce_sig = float(ce_result.get("ce_bootstrap_sig", np.nan))
-        finite_sigs = np.array([pdm_sig, ce_sig], dtype=float)
-        finite_sigs = finite_sigs[np.isfinite(finite_sigs)]
-        selected_sig = float(np.min(finite_sigs)) if finite_sigs.size > 0 else np.nan
+        methods_agree, agreement_factor, agreement_rel_err = _period_relative_agreement(
+            float(pdm_candidate.get("corrected_period", np.nan)),
+            float(ce_candidate.get("corrected_period", np.nan)),
+            rel_tol=float(agreement_rel_tol),
+        )
+        selected_candidate = _select_period_candidate([pdm_candidate, ce_candidate])
+        method_name = str(selected_candidate.get("method")) if selected_candidate is not None else None
+        base_period = float(selected_candidate.get("raw_period", np.nan)) if selected_candidate is not None else np.nan
+        selected_period = float(selected_candidate.get("corrected_period", np.nan)) if selected_candidate is not None else np.nan
+        harmonic_factor = float(selected_candidate.get("harmonic_factor", np.nan)) if selected_candidate is not None else np.nan
+        selection_objective = (
+            float(selected_candidate.get("selection_objective", np.nan))
+            if selected_candidate is not None
+            else np.nan
+        )
+
+        pdm_sig = float(pdm_candidate.get("bootstrap_sig", np.nan))
+        ce_sig = float(ce_candidate.get("bootstrap_sig", np.nan))
+        supported_sigs = np.array(
+            [
+                float(candidate.get("bootstrap_sig", np.nan))
+                for candidate in (pdm_candidate, ce_candidate)
+                if bool(candidate.get("supported", False))
+            ],
+            dtype=float,
+        )
+        supported_sigs = supported_sigs[np.isfinite(supported_sigs)]
+        if supported_sigs.size > 0:
+            selected_sig = float(np.min(supported_sigs))
+        else:
+            selected_sig = float(selected_candidate.get("bootstrap_sig", np.nan)) if selected_candidate is not None else np.nan
         is_significant = bool(np.isfinite(selected_sig) and selected_sig <= float(significance_level))
         strong_single = bool(np.isfinite(selected_sig) and selected_sig <= float(strong_single_sig))
 
-        scatter_ratio = float(harmonic_diag.get("scatter_ratio", np.nan))
-        lag_phase = float(harmonic_diag.get("lag_phase", np.nan))
-        alias_flag = bool(harmonic_diag.get("alias_flag", False))
+        scatter_ratio = float(selected_candidate.get("scatter_ratio", np.nan)) if selected_candidate is not None else np.nan
+        lag_phase = float(selected_candidate.get("lag_phase", np.nan)) if selected_candidate is not None else np.nan
+        alias_flag = bool(selected_candidate.get("alias_flag", False)) if selected_candidate is not None else False
         scatter_ok = bool(np.isfinite(scatter_ratio) and scatter_ratio <= float(scatter_ratio_max))
         strong_single_scatter_ok = bool(
             np.isfinite(scatter_ratio) and scatter_ratio <= float(strong_single_scatter_ratio_max)
         )
         lag_ok = bool((not np.isfinite(lag_phase)) or lag_phase <= float(lag_phase_max))
-        single_support_periodic_ok = bool(strong_single and strong_single_scatter_ok and not alias_flag)
+        selected_supported = bool(selected_candidate is not None and selected_candidate.get("supported", False))
+        single_support_periodic_ok = bool(
+            selected_supported and strong_single and strong_single_scatter_ok and not alias_flag
+        )
 
         label = "non_periodic"
         if is_significant and lag_ok and (
@@ -620,11 +748,15 @@ def _evaluate_periodicity_worker(args: tuple[object, ...]) -> dict[str, object]:
             "pre_n_points": n_points,
             "pre_n_cameras": n_cameras,
             "pre_pdm_period": float(pdm_result.get("pdm_period", np.nan)),
+            "pre_pdm_corrected_period": float(pdm_candidate.get("corrected_period", np.nan)),
+            "pre_pdm_harmonic_factor": float(pdm_candidate.get("harmonic_factor", np.nan)),
             "pre_pdm_theta": float(pdm_result.get("pdm_min_theta", np.nan)),
             "pre_pdm_snr": float(pdm_result.get("pdm_snr", np.nan)),
             "pre_pdm_bootstrap_sig": pdm_sig,
             "pre_pdm_support": pdm_support,
             "pre_ce_period": float(ce_result.get("ce_period", np.nan)),
+            "pre_ce_corrected_period": float(ce_candidate.get("corrected_period", np.nan)),
+            "pre_ce_harmonic_factor": float(ce_candidate.get("harmonic_factor", np.nan)),
             "pre_ce_entropy": float(ce_result.get("ce_min_entropy", np.nan)),
             "pre_ce_snr": float(ce_result.get("ce_snr", np.nan)),
             "pre_ce_bootstrap_sig": ce_sig,
@@ -634,6 +766,7 @@ def _evaluate_periodicity_worker(args: tuple[object, ...]) -> dict[str, object]:
             "pre_periodicity_base_period": float(base_period),
             "pre_periodicity_selected_period": float(selected_period),
             "pre_periodicity_harmonic_factor": float(harmonic_factor),
+            "pre_periodicity_selection_objective": float(selection_objective),
             "pre_periodicity_methods_agree": methods_agree,
             "pre_periodicity_agreement_factor": float(agreement_factor),
             "pre_periodicity_agreement_rel_err": float(agreement_rel_err),
@@ -658,7 +791,13 @@ def _result_is_usable(result: dict[str, object] | None) -> bool:
         return False
     if str(result.get("pre_periodicity_error") or "").strip():
         return False
-    return "pre_periodicity_label" in result
+    required_columns = {
+        "pre_periodicity_label",
+        "pre_pdm_corrected_period",
+        "pre_ce_corrected_period",
+        "pre_periodicity_selection_objective",
+    }
+    return required_columns.issubset(result)
 
 
 def _save_checkpoint(checkpoint_path: Path, results: dict[str, dict[str, object]]) -> None:

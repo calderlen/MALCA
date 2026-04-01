@@ -34,6 +34,9 @@ from malca.config.config_stats import (
     LS_MAX_FREQUENCY,
     LS_ALIAS_TOLERANCE,
     LS_ALIAS_PERIODS,
+    PERIODOGRAM_REFINE_TOP_K,
+    PERIODOGRAM_REFINE_WINDOW_STEPS,
+    PERIODOGRAM_REFINE_N_GRID,
 )
 from malca.periodogram import pdm_find_period, ce_find_period
 from malca.utils import read_lc_dat2, read_lc_csv, read_skypatrol_lc_csv, compute_camera_loo_metrics
@@ -678,6 +681,10 @@ def compute_pdm_stats(
     n_periods: int = 10000,
     n_bootstrap: int = 0,
     significance_level: float = 0.01,
+    refine: bool = False,
+    refine_top_k: int = PERIODOGRAM_REFINE_TOP_K,
+    refine_window_steps: float = PERIODOGRAM_REFINE_WINDOW_STEPS,
+    refine_n_grid: int = PERIODOGRAM_REFINE_N_GRID,
 ) -> dict:
     """
     Run Phase Dispersion Minimization and compute significance metrics.
@@ -711,6 +718,10 @@ def compute_pdm_stats(
             min_period=min_period,
             max_period=max_period,
             n_periods=n_periods,
+            refine=bool(refine),
+            refine_top_k=int(refine_top_k),
+            refine_window_steps=float(refine_window_steps),
+            refine_n_grid=int(refine_n_grid),
         )
 
         min_theta = float(np.min(thetas))
@@ -755,6 +766,10 @@ def compute_ce_stats(
     n_periods: int = 10000,
     n_bootstrap: int = 0,
     significance_level: float = 0.01,
+    refine: bool = False,
+    refine_top_k: int = PERIODOGRAM_REFINE_TOP_K,
+    refine_window_steps: float = PERIODOGRAM_REFINE_WINDOW_STEPS,
+    refine_n_grid: int = PERIODOGRAM_REFINE_N_GRID,
 ) -> dict:
     """
     Run Conditional Entropy and compute significance metrics.
@@ -788,6 +803,10 @@ def compute_ce_stats(
             min_period=min_period,
             max_period=max_period,
             n_periods=n_periods,
+            refine=bool(refine),
+            refine_top_k=int(refine_top_k),
+            refine_window_steps=float(refine_window_steps),
+            refine_n_grid=int(refine_n_grid),
         )
         min_entropy = float(np.min(entropies))
         entropy_std = float(np.std(entropies))
