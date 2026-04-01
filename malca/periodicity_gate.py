@@ -42,6 +42,14 @@ PREGATE_HARMONIC_FACTORS: tuple[float, ...] = (
     1.0 / 3.0,
     4.0,
     0.25,
+    5.0,
+    1.0 / 5.0,
+    6.0,
+    1.0 / 6.0,
+    7.0,
+    1.0 / 7.0,
+    8.0,
+    1.0 / 8.0,
 )
 PREGATE_RESULT_COLUMNS: list[str] = [
     "pre_periodicity_checkpoint_key",
@@ -58,6 +66,7 @@ PREGATE_RESULT_COLUMNS: list[str] = [
     "pre_ce_snr",
     "pre_ce_bootstrap_sig",
     "pre_ce_support",
+    "pre_periodicity_v_minus_g_median_offset",
     "pre_periodicity_method",
     "pre_periodicity_base_period",
     "pre_periodicity_selected_period",
@@ -95,6 +104,7 @@ def _empty_result(path: str, checkpoint_key: str, *, label: str = "non_periodic"
         "pre_ce_snr": np.nan,
         "pre_ce_bootstrap_sig": np.nan,
         "pre_ce_support": False,
+        "pre_periodicity_v_minus_g_median_offset": np.nan,
         "pre_periodicity_method": None,
         "pre_periodicity_base_period": np.nan,
         "pre_periodicity_selected_period": np.nan,
@@ -285,6 +295,21 @@ def _score_period_harmonic_candidate(
     }
 
 
+def _harmonic_factor_penalty(
+    factor: float,
+    *,
+    harmonic_penalty_scale: float = 0.02,
+) -> float:
+    if not np.isfinite(factor) or factor <= 0:
+        return np.inf
+
+    log_distance = abs(np.log2(float(factor)))
+    penalty = float(harmonic_penalty_scale) * (log_distance**2)
+    if factor > 1.0:
+        penalty += float(harmonic_penalty_scale) * log_distance
+    return float(penalty)
+
+
 def _arbitrate_harmonic_period(
     band_resid: dict[int, tuple[np.ndarray, np.ndarray]],
     base_period: float,
@@ -305,8 +330,12 @@ def _arbitrate_harmonic_period(
         if any(abs(period - prev_period) <= 1e-10 * max(1.0, abs(period), abs(prev_period)) for _, prev_period, _ in candidates):
             continue
         score = dict(_score_period_harmonic_candidate(band_resid, period))
-        harmonic_penalty = float(harmonic_penalty_scale * abs(np.log2(float(factor)))) if factor > 0 else np.inf
+        harmonic_penalty = _harmonic_factor_penalty(
+            float(factor),
+            harmonic_penalty_scale=float(harmonic_penalty_scale),
+        )
         base_objective = float(score.get("objective", np.inf))
+        score["harmonic_penalty"] = harmonic_penalty
         score["selection_objective"] = float(base_objective + harmonic_penalty) if np.isfinite(base_objective) else np.inf
         candidates.append((float(factor), period, score))
 
@@ -365,6 +394,36 @@ def _build_band_residuals(df: pd.DataFrame) -> dict[int, tuple[np.ndarray, np.nd
         resid = mag_valid - float(np.median(mag_valid))
         band_resid[band] = (jd[valid], resid)
     return band_resid
+
+
+def _apply_simple_band_median_offset(
+    df: pd.DataFrame,
+    *,
+    min_points_per_band: int = 5,
+) -> tuple[pd.DataFrame, float]:
+    if df.empty or "v_g_band" not in df.columns or "mag" not in df.columns:
+        return df, np.nan
+
+    band = pd.to_numeric(df["v_g_band"], errors="coerce").to_numpy()
+    mag = pd.to_numeric(df["mag"], errors="coerce").to_numpy(dtype=float)
+    finite = np.isfinite(mag)
+    g_mask = finite & (band == 0)
+    v_mask = finite & (band == 1)
+
+    if np.count_nonzero(g_mask) < int(min_points_per_band) or np.count_nonzero(v_mask) < int(min_points_per_band):
+        return df, np.nan
+
+    g_med = float(np.median(mag[g_mask]))
+    v_med = float(np.median(mag[v_mask]))
+    offset_v_minus_g = float(v_med - g_med)
+    if not np.isfinite(offset_v_minus_g):
+        return df, np.nan
+
+    df_aligned = df.copy()
+    mag_aligned = mag.copy()
+    mag_aligned[v_mask] = mag_aligned[v_mask] - offset_v_minus_g
+    df_aligned["mag"] = mag_aligned
+    return df_aligned, offset_v_minus_g
 
 
 def _choose_period_method(
@@ -446,9 +505,11 @@ def _evaluate_periodicity_worker(args: tuple[object, ...]) -> dict[str, object]:
             result["pre_n_cameras"] = n_cameras
             return result
 
-        jd = df_lc["JD"].to_numpy(dtype=float)
-        mag = df_lc["mag"].to_numpy(dtype=float)
-        err = df_lc["error"].to_numpy(dtype=float)
+        df_lc_aligned, v_minus_g_median_offset = _apply_simple_band_median_offset(df_lc)
+
+        jd = df_lc_aligned["JD"].to_numpy(dtype=float)
+        mag = df_lc_aligned["mag"].to_numpy(dtype=float)
+        err = df_lc_aligned["error"].to_numpy(dtype=float)
 
         pdm_result = compute_pdm_stats(
             jd,
@@ -492,7 +553,7 @@ def _evaluate_periodicity_worker(args: tuple[object, ...]) -> dict[str, object]:
         )
 
         method_name, base_period = _choose_period_method(pdm_result, ce_result)
-        band_resid = _build_band_residuals(df_lc)
+        band_resid = _build_band_residuals(df_lc_aligned)
         selected_period, harmonic_factor, harmonic_diag = _arbitrate_harmonic_period(
             band_resid,
             float(base_period),
@@ -516,11 +577,12 @@ def _evaluate_periodicity_worker(args: tuple[object, ...]) -> dict[str, object]:
             np.isfinite(scatter_ratio) and scatter_ratio <= float(strong_single_scatter_ratio_max)
         )
         lag_ok = bool((not np.isfinite(lag_phase)) or lag_phase <= float(lag_phase_max))
+        single_support_periodic_ok = bool(strong_single and strong_single_scatter_ok and not alias_flag)
 
         label = "non_periodic"
         if is_significant and lag_ok and (
             (support_count >= 2 and methods_agree and scatter_ok)
-            or (support_count == 1 and strong_single and strong_single_scatter_ok)
+            or (support_count == 1 and single_support_periodic_ok)
         ):
             label = "periodic"
         elif (
@@ -567,6 +629,7 @@ def _evaluate_periodicity_worker(args: tuple[object, ...]) -> dict[str, object]:
             "pre_ce_snr": float(ce_result.get("ce_snr", np.nan)),
             "pre_ce_bootstrap_sig": ce_sig,
             "pre_ce_support": ce_support,
+            "pre_periodicity_v_minus_g_median_offset": float(v_minus_g_median_offset),
             "pre_periodicity_method": method_name,
             "pre_periodicity_base_period": float(base_period),
             "pre_periodicity_selected_period": float(selected_period),
