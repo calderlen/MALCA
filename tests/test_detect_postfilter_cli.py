@@ -8,6 +8,8 @@ import pytest
 
 pytest.importorskip("astroquery")
 pytest.importorskip("celerite2")
+pytest.importorskip("dustmaps3d")
+pytest.importorskip("banyan_sigma")
 
 from malca.detect import (
     _build_filter_kwargs,
@@ -41,6 +43,7 @@ def _base_args() -> argparse.Namespace:
         apply_periodicity_validation=False,
         periodicity_n_bootstrap=1000,
         periodicity_significance=0.01,
+        periodicity_pdm_method="plavchan",
         periodicity_no_exclude_aliases=False,
         periodicity_reject=False,
         periodicity_all_candidates=False,
@@ -81,6 +84,7 @@ def test_build_filter_kwargs_defaults_match_pipeline_behavior() -> None:
 
     assert kwargs["apply_morphology"] is False
     assert kwargs["apply_periodicity_validation"] is False
+    assert kwargs["periodicity_pdm_method"] == "plavchan"
 
     assert kwargs["gaia_flag_only"] is True
     assert kwargs["gaia_max_pm"] == 100.0
@@ -111,6 +115,7 @@ def test_build_filter_kwargs_respects_cli_overrides() -> None:
     args.apply_periodicity_validation = True
     args.periodicity_n_bootstrap = 250
     args.periodicity_significance = 0.02
+    args.periodicity_pdm_method = "classic"
     args.periodicity_no_exclude_aliases = True
     args.periodicity_reject = True
     args.periodicity_all_candidates = True
@@ -145,6 +150,7 @@ def test_build_filter_kwargs_respects_cli_overrides() -> None:
     assert kwargs["apply_periodicity_validation"] is True
     assert kwargs["periodicity_n_bootstrap"] == 250
     assert kwargs["periodicity_significance"] == 0.02
+    assert kwargs["periodicity_pdm_method"] == "classic"
     assert kwargs["periodicity_exclude_aliases"] is False
     assert kwargs["periodicity_flag_only"] is False
     assert kwargs["periodicity_all_candidates"] is True
@@ -183,6 +189,7 @@ def test_build_home_external_validation_cmd_forwards_periodicity_options() -> No
     args.apply_periodicity_validation = True
     args.periodicity_n_bootstrap = 250
     args.periodicity_significance = 0.02
+    args.periodicity_pdm_method = "classic"
     args.periodicity_no_exclude_aliases = True
     args.periodicity_reject = True
     args.periodicity_all_candidates = True
@@ -204,6 +211,8 @@ def test_build_home_external_validation_cmd_forwards_periodicity_options() -> No
     assert "250" in cmd
     assert "--periodicity-significance" in cmd
     assert "0.02" in cmd
+    assert "--periodicity-pdm-method" in cmd
+    assert "classic" in cmd
     assert "--periodicity-no-exclude-aliases" in cmd
     assert "--periodicity-reject" in cmd
     assert "--periodicity-all-candidates" in cmd

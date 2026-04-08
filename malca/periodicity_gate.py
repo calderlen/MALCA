@@ -20,6 +20,7 @@ from malca.config.config_filters import (
     PRE_PERIODICITY_MIN_PERIOD,
     PRE_PERIODICITY_N_BOOTSTRAP,
     PRE_PERIODICITY_N_PERIODS,
+    PRE_PERIODICITY_PDM_METHOD,
     PRE_PERIODICITY_PDM_MIN_THETA,
     PRE_PERIODICITY_PDM_SNR_THRESHOLD,
     PRE_PERIODICITY_SCATTER_RATIO_MAX,
@@ -31,7 +32,7 @@ from malca.config.config_pipeline import WORKERS
 from malca.config.config_stats import LS_ALIAS_PERIODS, LS_ALIAS_TOLERANCE
 from malca.lightcurve_io import load_lightcurve_df
 from malca.stats import compute_ce_stats, compute_pdm_stats
-from malca.utils import clean_lc, compute_n_cameras
+from malca.utils import apply_simple_band_median_offset, clean_lc, compute_n_cameras
 
 
 PREGATE_HARMONIC_FACTORS: tuple[float, ...] = (
@@ -71,6 +72,7 @@ PREGATE_RESULT_COLUMNS: list[str] = [
     "pre_ce_bootstrap_sig",
     "pre_ce_support",
     "pre_periodicity_v_minus_g_median_offset",
+    "pre_periodicity_pdm_method",
     "pre_periodicity_method",
     "pre_periodicity_base_period",
     "pre_periodicity_selected_period",
@@ -93,7 +95,15 @@ PREGATE_RESULT_COLUMNS: list[str] = [
 ]
 
 
-def _empty_result(path: str, checkpoint_key: str, *, label: str = "non_periodic", reason: str = "", error: str | None = None) -> dict[str, object]:
+def _empty_result(
+    path: str,
+    checkpoint_key: str,
+    *,
+    pdm_method: str | None = None,
+    label: str = "non_periodic",
+    reason: str = "",
+    error: str | None = None,
+) -> dict[str, object]:
     return {
         "pre_periodicity_checkpoint_key": checkpoint_key,
         "pre_periodicity_path": path,
@@ -114,6 +124,7 @@ def _empty_result(path: str, checkpoint_key: str, *, label: str = "non_periodic"
         "pre_ce_bootstrap_sig": np.nan,
         "pre_ce_support": False,
         "pre_periodicity_v_minus_g_median_offset": np.nan,
+        "pre_periodicity_pdm_method": str(pdm_method) if pdm_method is not None else None,
         "pre_periodicity_method": None,
         "pre_periodicity_base_period": np.nan,
         "pre_periodicity_selected_period": np.nan,
@@ -144,9 +155,10 @@ def _excluded_camera_set(value: object) -> set[int]:
     return set()
 
 
-def _checkpoint_key(path: str, excluded_cameras: object) -> str:
+def _checkpoint_key(path: str, excluded_cameras: object, *, pdm_method: str | None = None) -> str:
     token = ",".join(str(item) for item in sorted(_excluded_camera_set(excluded_cameras)))
-    return f"{path}::{token}"
+    method_token = str(pdm_method or "").strip().lower()
+    return f"{path}::{token}::{method_token}"
 
 
 def _robust_sigma(values: np.ndarray) -> float:
@@ -406,36 +418,6 @@ def _build_band_residuals(df: pd.DataFrame) -> dict[int, tuple[np.ndarray, np.nd
     return band_resid
 
 
-def _apply_simple_band_median_offset(
-    df: pd.DataFrame,
-    *,
-    min_points_per_band: int = 5,
-) -> tuple[pd.DataFrame, float]:
-    if df.empty or "v_g_band" not in df.columns or "mag" not in df.columns:
-        return df, np.nan
-
-    band = pd.to_numeric(df["v_g_band"], errors="coerce").to_numpy()
-    mag = pd.to_numeric(df["mag"], errors="coerce").to_numpy(dtype=float)
-    finite = np.isfinite(mag)
-    g_mask = finite & (band == 0)
-    v_mask = finite & (band == 1)
-
-    if np.count_nonzero(g_mask) < int(min_points_per_band) or np.count_nonzero(v_mask) < int(min_points_per_band):
-        return df, np.nan
-
-    g_med = float(np.median(mag[g_mask]))
-    v_med = float(np.median(mag[v_mask]))
-    offset_v_minus_g = float(v_med - g_med)
-    if not np.isfinite(offset_v_minus_g):
-        return df, np.nan
-
-    df_aligned = df.copy()
-    mag_aligned = mag.copy()
-    mag_aligned[v_mask] = mag_aligned[v_mask] - offset_v_minus_g
-    df_aligned["mag"] = mag_aligned
-    return df_aligned, offset_v_minus_g
-
-
 def _period_relative_agreement(
     period_a: float,
     period_b: float,
@@ -564,6 +546,7 @@ def _evaluate_periodicity_worker(args: tuple[object, ...]) -> dict[str, object]:
         strong_single_scatter_ratio_max,
         lag_phase_max,
         strong_single_sig,
+        pdm_method,
     ) = args
 
     try:
@@ -573,7 +556,7 @@ def _evaluate_periodicity_worker(args: tuple[object, ...]) -> dict[str, object]:
             bad_camera_scatter_ratio=float(bad_camera_scatter_ratio),
         )
         if df_lc.empty:
-            return _empty_result(path_str, checkpoint_key, reason="empty_lc")
+            return _empty_result(path_str, checkpoint_key, pdm_method=pdm_method, reason="empty_lc")
 
         excluded = _excluded_camera_set(excluded_cameras)
         if excluded and "camera#" in df_lc.columns:
@@ -585,17 +568,17 @@ def _evaluate_periodicity_worker(args: tuple[object, ...]) -> dict[str, object]:
             max_error_sigma=float(clean_max_error_sigma),
         )
         if df_lc.empty:
-            return _empty_result(path_str, checkpoint_key, reason="empty_after_clean")
+            return _empty_result(path_str, checkpoint_key, pdm_method=pdm_method, reason="empty_after_clean")
 
         n_points = int(len(df_lc))
         n_cameras = int(compute_n_cameras(df_lc))
         if n_points < int(min_points):
-            result = _empty_result(path_str, checkpoint_key, reason="too_few_points")
+            result = _empty_result(path_str, checkpoint_key, pdm_method=pdm_method, reason="too_few_points")
             result["pre_n_points"] = n_points
             result["pre_n_cameras"] = n_cameras
             return result
 
-        df_lc_aligned, v_minus_g_median_offset = _apply_simple_band_median_offset(df_lc)
+        df_lc_aligned, v_minus_g_median_offset = apply_simple_band_median_offset(df_lc)
 
         jd = df_lc_aligned["JD"].to_numpy(dtype=float)
         mag = df_lc_aligned["mag"].to_numpy(dtype=float)
@@ -608,6 +591,7 @@ def _evaluate_periodicity_worker(args: tuple[object, ...]) -> dict[str, object]:
             min_period=float(min_period),
             max_period=float(max_period),
             n_periods=int(n_periods),
+            pdm_method=str(pdm_method),
             n_bootstrap=int(n_bootstrap),
             significance_level=float(significance_level),
             refine=True,
@@ -762,6 +746,7 @@ def _evaluate_periodicity_worker(args: tuple[object, ...]) -> dict[str, object]:
             "pre_ce_bootstrap_sig": ce_sig,
             "pre_ce_support": ce_support,
             "pre_periodicity_v_minus_g_median_offset": float(v_minus_g_median_offset),
+            "pre_periodicity_pdm_method": str(pdm_method),
             "pre_periodicity_method": method_name,
             "pre_periodicity_base_period": float(base_period),
             "pre_periodicity_selected_period": float(selected_period),
@@ -783,7 +768,7 @@ def _evaluate_periodicity_worker(args: tuple[object, ...]) -> dict[str, object]:
             "pre_periodicity_error": None,
         }
     except Exception as exc:
-        return _empty_result(path_str, checkpoint_key, reason="error", error=str(exc))
+        return _empty_result(path_str, checkpoint_key, pdm_method=pdm_method, reason="error", error=str(exc))
 
 
 def _result_is_usable(result: dict[str, object] | None) -> bool:
@@ -820,6 +805,7 @@ def apply_pre_periodicity_gate(
     min_period: float = PRE_PERIODICITY_MIN_PERIOD,
     max_period: float = PRE_PERIODICITY_MAX_PERIOD,
     n_periods: int = PRE_PERIODICITY_N_PERIODS,
+    pdm_method: str = PRE_PERIODICITY_PDM_METHOD,
     n_bootstrap: int = PRE_PERIODICITY_N_BOOTSTRAP,
     significance_level: float = PRE_PERIODICITY_SIGNIFICANCE,
     pdm_snr_threshold: float = PRE_PERIODICITY_PDM_SNR_THRESHOLD,
@@ -856,7 +842,11 @@ def apply_pre_periodicity_gate(
 
     df_out[path_col] = df_out[path_col].astype(str)
     checkpoint_keys = [
-        _checkpoint_key(path_value, row.get(excluded_cameras_col) if excluded_cameras_col else None)
+        _checkpoint_key(
+            path_value,
+            row.get(excluded_cameras_col) if excluded_cameras_col else None,
+            pdm_method=pdm_method,
+        )
         for path_value, (_, row) in zip(df_out[path_col].tolist(), df_out.iterrows())
     ]
     df_out["_pre_periodicity_checkpoint_key"] = checkpoint_keys
@@ -906,6 +896,7 @@ def apply_pre_periodicity_gate(
                 float(strong_single_scatter_ratio_max),
                 float(lag_phase_max),
                 float(strong_single_sig),
+                str(pdm_method),
             )
         )
 

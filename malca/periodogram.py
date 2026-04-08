@@ -10,6 +10,11 @@ from malca.config.config_stats import (
     PDM_MAX_PERIOD,
     PDM_N_PERIODS,
     PDM_N_BINS,
+    PDM_PLAVCHAN_PHASE_WIDTH,
+    PDM_PLAVCHAN_MIN_NEIGHBORS,
+    PDM_PLAVCHAN_WORST_FRAC,
+    PDM_PLAVCHAN_WORST_MIN,
+    PDM_PLAVCHAN_GRID_FACTOR,
     CE_N_PHASE_BINS,
     CE_N_MAG_BINS,
     LS_SAMPLES_PER_PEAK,
@@ -17,6 +22,16 @@ from malca.config.config_stats import (
     PERIODOGRAM_REFINE_WINDOW_STEPS,
     PERIODOGRAM_REFINE_N_GRID,
 )
+
+
+def normalize_pdm_method(method: str | None) -> str:
+    """Normalize user-facing PDM method names to internal labels."""
+    name = str(method or "classic").strip().lower()
+    if name in {"classic", "binned", "theta"}:
+        return "classic"
+    if name in {"plavchan", "binless", "boxcar", "plavchan_binless"}:
+        return "plavchan"
+    raise ValueError(f"Unknown PDM method: {method!r}")
 
 
 def _top_indices(
@@ -75,11 +90,6 @@ def _refine_best_period_from_min_metric(
     if refine_n_grid < 3:
         return best_period
 
-    step = float(abs(period_arr[1] - period_arr[0]))
-    if not np.isfinite(step) or step <= 0:
-        return best_period
-
-    half_window = max(step, float(abs(window_steps)) * step)
     separation = max(1, int(round(abs(window_steps))))
     candidates = _top_indices(
         metric_arr,
@@ -91,6 +101,23 @@ def _refine_best_period_from_min_metric(
         return best_period
 
     for idx in candidates:
+        if period_arr.size < 2:
+            continue
+        if int(idx) <= 0:
+            step = float(abs(period_arr[1] - period_arr[0]))
+        elif int(idx) >= period_arr.size - 1:
+            step = float(abs(period_arr[-1] - period_arr[-2]))
+        else:
+            left_step = float(abs(period_arr[int(idx)] - period_arr[int(idx) - 1]))
+            right_step = float(abs(period_arr[int(idx) + 1] - period_arr[int(idx)]))
+            finite_steps = [val for val in (left_step, right_step) if np.isfinite(val) and val > 0]
+            if not finite_steps:
+                continue
+            step = max(finite_steps)
+        if not np.isfinite(step) or step <= 0:
+            continue
+
+        half_window = max(step, float(abs(window_steps)) * step)
         center = float(period_arr[int(idx)])
         lo = max(float(min_period), center - half_window)
         hi = min(float(max_period), center + half_window)
@@ -106,6 +133,53 @@ def _refine_best_period_from_min_metric(
             best_period = float(local_grid[local_idx])
 
     return best_period
+
+
+def _build_plavchan_period_grid(
+    times: np.ndarray,
+    min_period: float,
+    max_period: float,
+    *,
+    grid_factor: float = PDM_PLAVCHAN_GRID_FACTOR,
+) -> np.ndarray:
+    """Build a Plavchan-style adaptive period grid with dP ~ P^2 / baseline."""
+    min_period = float(min_period)
+    max_period = float(max_period)
+    if not np.isfinite(min_period) or not np.isfinite(max_period):
+        return np.asarray([np.nan], dtype=np.float64)
+    if max_period < min_period:
+        min_period, max_period = max_period, min_period
+    if np.isclose(min_period, max_period):
+        return np.asarray([min_period], dtype=np.float64)
+
+    times = np.asarray(times, dtype=np.float64)
+    finite_times = times[np.isfinite(times)]
+    if finite_times.size < 2:
+        return np.asarray([min_period, max_period], dtype=np.float64)
+
+    baseline = float(np.max(finite_times) - np.min(finite_times))
+    if not np.isfinite(baseline) or baseline <= 0:
+        return np.asarray([min_period, max_period], dtype=np.float64)
+
+    factor = float(grid_factor)
+    if not np.isfinite(factor) or factor <= 0:
+        factor = float(PDM_PLAVCHAN_GRID_FACTOR)
+
+    periods = [min_period]
+    current = min_period
+    while current < max_period:
+        step = factor * current * current / baseline
+        if not np.isfinite(step) or step <= 0:
+            break
+        nxt = current + step
+        if nxt >= max_period:
+            break
+        periods.append(float(nxt))
+        current = float(nxt)
+
+    if periods[-1] < max_period:
+        periods.append(max_period)
+    return np.asarray(periods, dtype=np.float64)
 
 
 def _refine_lsp_period(
@@ -224,6 +298,138 @@ def _pdm_theta(times: np.ndarray, yvals: np.ndarray, period: float, n_bins: int 
 
 
 @numba.jit(nopython=True, cache=True)
+def _plavchan_boxcar_smooth_sorted(
+    phase_sorted: np.ndarray,
+    y_sorted: np.ndarray,
+    phase_width: float,
+    min_neighbors: int,
+) -> np.ndarray:
+    """Boxcar-smooth a phase-sorted series with circular wrap."""
+    n = len(y_sorted)
+    smooth = np.empty(n, dtype=np.float64)
+    if n == 0:
+        return smooth
+
+    width = phase_width
+    if not np.isfinite(width) or width <= 0.0:
+        width = 0.0
+    if width > 1.0:
+        width = 1.0
+    half_width = 0.5 * width
+
+    min_neighbors_eff = min_neighbors
+    if min_neighbors_eff < 1:
+        min_neighbors_eff = 1
+    if min_neighbors_eff > n:
+        min_neighbors_eff = n
+
+    phase_ext = np.empty(3 * n, dtype=np.float64)
+    y_ext = np.empty(3 * n, dtype=np.float64)
+    for i in range(n):
+        phase_val = phase_sorted[i]
+        y_val = y_sorted[i]
+        phase_ext[i] = phase_val - 1.0
+        phase_ext[n + i] = phase_val
+        phase_ext[2 * n + i] = phase_val + 1.0
+        y_ext[i] = y_val
+        y_ext[n + i] = y_val
+        y_ext[2 * n + i] = y_val
+
+    prefix = np.zeros(3 * n + 1, dtype=np.float64)
+    for i in range(3 * n):
+        prefix[i + 1] = prefix[i] + y_ext[i]
+
+    left = 0
+    right = 0
+    for i in range(n):
+        center_idx = n + i
+        center = phase_ext[center_idx]
+        left_boundary = center - half_width
+        while left < 3 * n and phase_ext[left] < left_boundary:
+            left += 1
+        if right < left:
+            right = left
+        right_boundary = center + half_width
+        while right < 3 * n and phase_ext[right] <= right_boundary:
+            right += 1
+
+        window_left = left
+        window_right = right
+        count = window_right - window_left
+        if count < min_neighbors_eff:
+            left_need = (min_neighbors_eff - 1) // 2
+            right_need = min_neighbors_eff - 1 - left_need
+            window_left = center_idx - left_need
+            window_right = center_idx + right_need + 1
+            count = window_right - window_left
+
+        smooth[i] = (prefix[window_right] - prefix[window_left]) / float(count)
+    return smooth
+
+
+@numba.jit(nopython=True, cache=True)
+def _pdm_theta_plavchan(
+    times: np.ndarray,
+    yvals: np.ndarray,
+    period: float,
+    phase_width: float = PDM_PLAVCHAN_PHASE_WIDTH,
+    min_neighbors: int = PDM_PLAVCHAN_MIN_NEIGHBORS,
+    worst_frac: float = PDM_PLAVCHAN_WORST_FRAC,
+    worst_min: int = PDM_PLAVCHAN_WORST_MIN,
+) -> float:
+    """Compute a Plavchan-style binless PDM statistic for one trial period."""
+    n = len(yvals)
+    if n < 3:
+        return 1.0
+
+    mean_all = 0.0
+    for i in range(n):
+        mean_all += yvals[i]
+    mean_all /= n
+
+    total_ss = 0.0
+    for i in range(n):
+        diff = yvals[i] - mean_all
+        total_ss += diff * diff
+    if total_ss <= 0.0 or n < 2:
+        return 1.0
+    var_total = total_ss / float(n - 1)
+    if not np.isfinite(var_total) or var_total <= 0.0:
+        return 1.0
+
+    phase = np.mod(times, period) / period
+    order = np.argsort(phase)
+    phase_sorted = phase[order]
+    y_sorted = yvals[order]
+    smooth = _plavchan_boxcar_smooth_sorted(
+        phase_sorted,
+        y_sorted,
+        phase_width,
+        min_neighbors,
+    )
+
+    resid2 = np.empty(n, dtype=np.float64)
+    for i in range(n):
+        diff = y_sorted[i] - smooth[i]
+        resid2[i] = diff * diff
+
+    worst_count = int(np.ceil(float(worst_frac) * n))
+    if worst_count < int(worst_min):
+        worst_count = int(worst_min)
+    if worst_count < 1:
+        worst_count = 1
+    if worst_count > n:
+        worst_count = n
+
+    resid2_sorted = np.sort(resid2)
+    worst_sum = 0.0
+    for i in range(n - worst_count, n):
+        worst_sum += resid2_sorted[i]
+    worst_mean = worst_sum / float(worst_count)
+    return worst_mean / var_total
+
+
+@numba.jit(nopython=True, cache=True)
 def _pdm_scan_grid(
     times: np.ndarray,
     yvals: np.ndarray,
@@ -246,6 +452,40 @@ def _pdm_scan_grid(
     return best_idx, theta
 
 
+@numba.jit(nopython=True, cache=True)
+def _pdm_scan_grid_plavchan(
+    times: np.ndarray,
+    yvals: np.ndarray,
+    period_arr: np.ndarray,
+    phase_width: float = PDM_PLAVCHAN_PHASE_WIDTH,
+    min_neighbors: int = PDM_PLAVCHAN_MIN_NEIGHBORS,
+    worst_frac: float = PDM_PLAVCHAN_WORST_FRAC,
+    worst_min: int = PDM_PLAVCHAN_WORST_MIN,
+) -> tuple[int, np.ndarray]:
+    """Evaluate Plavchan-style PDM across a period grid in numba."""
+    n_periods = len(period_arr)
+    theta = np.empty(n_periods)
+
+    best_idx = 0
+    best_theta = np.inf
+    for i in range(n_periods):
+        theta_i = _pdm_theta_plavchan(
+            times,
+            yvals,
+            period_arr[i],
+            phase_width,
+            min_neighbors,
+            worst_frac,
+            worst_min,
+        )
+        theta[i] = theta_i
+        if theta_i < best_theta:
+            best_theta = theta_i
+            best_idx = i
+
+    return best_idx, theta
+
+
 def pdm_find_period(
     times: np.ndarray,
     yvals: np.ndarray,
@@ -253,6 +493,9 @@ def pdm_find_period(
     max_period: float = PDM_MAX_PERIOD,
     n_periods: int = PDM_N_PERIODS,
     n_bins: int = PDM_N_BINS,
+    method: str = "classic",
+    phase_width: float = PDM_PLAVCHAN_PHASE_WIDTH,
+    min_neighbors: int = PDM_PLAVCHAN_MIN_NEIGHBORS,
     refine: bool = False,
     refine_top_k: int = PERIODOGRAM_REFINE_TOP_K,
     refine_window_steps: float = PERIODOGRAM_REFINE_WINDOW_STEPS,
@@ -267,8 +510,35 @@ def pdm_find_period(
     yvals = np.asarray(yvals, dtype=np.float64)
     t0 = np.min(times)
     t_shifted = times - t0
-    period_arr = np.linspace(min_period, max_period, n_periods)
-    best_idx, theta = _pdm_scan_grid(t_shifted, yvals, period_arr, n_bins)
+    method_name = normalize_pdm_method(method)
+    if method_name == "plavchan":
+        period_arr = _build_plavchan_period_grid(
+            t_shifted,
+            min_period,
+            max_period,
+            grid_factor=PDM_PLAVCHAN_GRID_FACTOR,
+        )
+        best_idx, theta = _pdm_scan_grid_plavchan(
+            t_shifted,
+            yvals,
+            period_arr,
+            float(phase_width),
+            int(min_neighbors),
+            float(PDM_PLAVCHAN_WORST_FRAC),
+            int(PDM_PLAVCHAN_WORST_MIN),
+        )
+        scan_fn = _pdm_scan_grid_plavchan
+        scan_args = (
+            float(phase_width),
+            int(min_neighbors),
+            float(PDM_PLAVCHAN_WORST_FRAC),
+            int(PDM_PLAVCHAN_WORST_MIN),
+        )
+    else:
+        period_arr = np.linspace(min_period, max_period, n_periods)
+        best_idx, theta = _pdm_scan_grid(t_shifted, yvals, period_arr, n_bins)
+        scan_fn = _pdm_scan_grid
+        scan_args = (n_bins,)
     best_idx = int(best_idx)
     best_period = float(period_arr[best_idx])
     if bool(refine):
@@ -282,8 +552,8 @@ def pdm_find_period(
             n_top=refine_top_k,
             window_steps=refine_window_steps,
             refine_n_grid=refine_n_grid,
-            scan_fn=_pdm_scan_grid,
-            scan_args=(n_bins,),
+            scan_fn=scan_fn,
+            scan_args=scan_args,
         )
     return best_period, period_arr, theta
 

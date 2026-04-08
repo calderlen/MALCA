@@ -1,9 +1,42 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
+import types
 
 import numpy as np
 import pandas as pd
+
+if "celerite2" not in sys.modules:
+    fake_celerite2 = types.ModuleType("celerite2")
+
+    class _DummyGP:
+        def __init__(self, *args, **kwargs):
+            _ = args, kwargs
+
+    class _DummyTerm:
+        def __init__(self, *args, **kwargs):
+            _ = args, kwargs
+
+        def __add__(self, other):
+            return self
+
+    fake_celerite2.GaussianProcess = _DummyGP
+    fake_celerite2.terms = types.SimpleNamespace(SHOTerm=_DummyTerm, RealTerm=_DummyTerm)
+    sys.modules["celerite2"] = fake_celerite2
+
+if "iar.IARModel" not in sys.modules:
+    fake_iar_pkg = types.ModuleType("iar")
+    fake_iar_model = types.ModuleType("iar.IARModel")
+
+    def _dummy_iar(*args, **kwargs):
+        _ = args, kwargs
+        return float("nan")
+
+    fake_iar_model.IARphikalman = _dummy_iar
+    fake_iar_pkg.IARModel = fake_iar_model
+    sys.modules["iar"] = fake_iar_pkg
+    sys.modules["iar.IARModel"] = fake_iar_model
 
 import malca.periodicity_gate as periodicity_gate
 from malca.periodicity_gate import apply_pre_periodicity_gate
@@ -115,6 +148,7 @@ def test_apply_pre_periodicity_gate_aligns_simple_v_minus_g_median_offset(monkey
 
     def fake_pdm_stats(_jd: np.ndarray, mag: np.ndarray, _err: np.ndarray, **_kwargs: object) -> dict[str, float]:
         assert _kwargs.get("refine") is True
+        assert _kwargs.get("pdm_method") == "plavchan"
         captured["pdm_mag"] = np.asarray(mag, dtype=float).copy()
         return {
             "pdm_period": 4.0,
@@ -172,6 +206,7 @@ def test_apply_pre_periodicity_gate_aligns_simple_v_minus_g_median_offset(monkey
     for key in ("pdm_mag", "ce_mag"):
         mag = captured[key]
         assert np.isclose(np.median(mag[:g_count]), np.median(mag[g_count:]), atol=1e-10)
+    assert out.loc[0, "pre_periodicity_pdm_method"] == "plavchan"
     assert np.isclose(out.loc[0, "pre_periodicity_v_minus_g_median_offset"], expected_offset, atol=1e-10)
 
 
@@ -186,6 +221,7 @@ def test_apply_pre_periodicity_gate_uses_corrected_periods_for_agreement(monkeyp
 
     def fake_pdm_stats(_jd: np.ndarray, _mag: np.ndarray, _err: np.ndarray, **_kwargs: object) -> dict[str, float]:
         assert _kwargs.get("refine") is True
+        assert _kwargs.get("pdm_method") == "plavchan"
         return {
             "pdm_period": 2.0,
             "pdm_min_theta": 0.3,
@@ -258,6 +294,7 @@ def test_apply_pre_periodicity_gate_uses_corrected_periods_for_agreement(monkeyp
     assert np.isclose(out.loc[0, "pre_ce_period"], 8.0)
     assert np.isclose(out.loc[0, "pre_ce_corrected_period"], 4.0)
     assert np.isclose(out.loc[0, "pre_ce_harmonic_factor"], 0.5)
+    assert out.loc[0, "pre_periodicity_pdm_method"] == "plavchan"
     assert out.loc[0, "pre_periodicity_method"] == "pdm"
     assert np.isclose(out.loc[0, "pre_periodicity_base_period"], 2.0)
     assert np.isclose(out.loc[0, "pre_periodicity_selected_period"], 4.0)

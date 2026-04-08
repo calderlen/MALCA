@@ -57,10 +57,11 @@ from malca.config.config_filters import (
     PRE_PERIODICITY_CE_SNR_THRESHOLD, PRE_PERIODICITY_LAG_PHASE_MAX,
     PRE_PERIODICITY_MAX_PERIOD, PRE_PERIODICITY_MIN_POINTS,
     PRE_PERIODICITY_MIN_PERIOD, PRE_PERIODICITY_N_BOOTSTRAP,
+    PRE_PERIODICITY_PDM_METHOD,
     PRE_PERIODICITY_N_PERIODS, PRE_PERIODICITY_PDM_MIN_THETA,
     PRE_PERIODICITY_PDM_SNR_THRESHOLD, PRE_PERIODICITY_SCATTER_RATIO_MAX,
     PRE_PERIODICITY_SIGNIFICANCE, PRE_PERIODICITY_STRONG_SINGLE_SCATTER_RATIO_MAX,
-    PRE_PERIODICITY_STRONG_SINGLE_SIG,
+    PRE_PERIODICITY_STRONG_SINGLE_SIG, POST_FILTER_PDM_METHOD,
 )
 from malca.config.config_io import OUTPUT_FORMAT, EVENTS_OUTPUT_CHUNK_SIZE
 from malca.config.config_io import PARQUET_OUTPUT_COMPRESSION, PARQUET_CACHE_COMPRESSION
@@ -72,6 +73,7 @@ from malca.config.config_pipeline import (
     BASELINE_FUNC, BASELINE_S0, BASELINE_W0, BASELINE_Q, BASELINE_JITTER,
     JD_OFFSET, MAG_BINS,
 )
+from malca.config.config_stats import PDM_METHOD_CHOICES
 from malca.enrich.neighbor import run_neighbor_enrichment
 from malca.enrich.spectra import run_spectra_availability
 from malca.gaia_fetch import _extract_gaia_ids, fetch_gaia_catalog
@@ -602,6 +604,7 @@ def _build_filter_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "apply_periodicity_validation": args.apply_periodicity_validation,
         "periodicity_n_bootstrap": args.periodicity_n_bootstrap,
         "periodicity_significance": args.periodicity_significance,
+        "periodicity_pdm_method": args.periodicity_pdm_method,
         "periodicity_exclude_aliases": not args.periodicity_no_exclude_aliases,
         "periodicity_flag_only": not args.periodicity_reject,
         "periodicity_workers": args.periodicity_workers,
@@ -662,6 +665,8 @@ def _build_home_external_validation_cmd(
                 str(args.periodicity_n_bootstrap),
                 "--periodicity-significance",
                 str(args.periodicity_significance),
+                "--periodicity-pdm-method",
+                str(args.periodicity_pdm_method),
                 "--workers",
                 str(args.periodicity_workers),
                 "--phase-plot-max-sig",
@@ -773,6 +778,7 @@ def main():
     g_pregate.add_argument("--pre-periodicity-n-periods", type=int, default=PRE_PERIODICITY_N_PERIODS, help="Number of trial periods for CE/PDM in the pre-events gate")
     g_pregate.add_argument("--pre-periodicity-n-bootstrap", type=int, default=PRE_PERIODICITY_N_BOOTSTRAP, help="Bootstrap iterations for the pre-events periodicity gate")
     g_pregate.add_argument("--pre-periodicity-significance", type=float, default=PRE_PERIODICITY_SIGNIFICANCE, help="Bootstrap significance threshold for confident periodic routing")
+    g_pregate.add_argument("--pre-periodicity-pdm-method", type=str, default=PRE_PERIODICITY_PDM_METHOD, choices=list(PDM_METHOD_CHOICES), help="PDM implementation for the pre-events gate")
     g_pregate.add_argument("--pre-periodicity-pdm-snr-threshold", type=float, default=PRE_PERIODICITY_PDM_SNR_THRESHOLD, help="Minimum PDM SNR for periodic gate support")
     g_pregate.add_argument("--pre-periodicity-pdm-theta-threshold", type=float, default=PRE_PERIODICITY_PDM_MIN_THETA, help="Maximum PDM theta for periodic gate support")
     g_pregate.add_argument("--pre-periodicity-ce-snr-threshold", type=float, default=PRE_PERIODICITY_CE_SNR_THRESHOLD, help="Minimum CE SNR for periodic gate support")
@@ -860,6 +866,7 @@ def main():
     g_filter.add_argument("--apply-periodicity-validation", action="store_true", help="Enable bootstrap periodicity validation")
     g_filter.add_argument("--periodicity-n-bootstrap", type=int, default=1000, help="Bootstrap iterations for periodicity validation (default: 1000)")
     g_filter.add_argument("--periodicity-significance", type=float, default=0.01, help="Significance threshold for periodicity validation (default: 0.01)")
+    g_filter.add_argument("--periodicity-pdm-method", type=str, default=POST_FILTER_PDM_METHOD, choices=list(PDM_METHOD_CHOICES), help="PDM implementation for periodicity validation")
     g_filter.add_argument("--periodicity-no-exclude-aliases", action="store_true", help="Do not exclude alias periods during periodicity validation")
     g_filter.add_argument("--periodicity-reject", action="store_true", help="Reject periodicity matches instead of flagging only")
     g_filter.add_argument("--periodicity-all-candidates", action="store_true", help="Run periodicity validation on all queued candidates instead of only prerequisite passers")
@@ -1196,6 +1203,7 @@ def main():
             "n_periods": args.pre_periodicity_n_periods,
             "n_bootstrap": args.pre_periodicity_n_bootstrap,
             "significance": args.pre_periodicity_significance,
+            "pdm_method": args.pre_periodicity_pdm_method,
             "pdm_snr_threshold": args.pre_periodicity_pdm_snr_threshold,
             "pdm_theta_threshold": args.pre_periodicity_pdm_theta_threshold,
             "ce_snr_threshold": args.pre_periodicity_ce_snr_threshold,
@@ -1239,6 +1247,7 @@ def main():
             "apply_periodicity_validation": args.apply_periodicity_validation,
             "periodicity_n_bootstrap": args.periodicity_n_bootstrap,
             "periodicity_significance": args.periodicity_significance,
+            "periodicity_pdm_method": args.periodicity_pdm_method,
             "periodicity_exclude_aliases": not args.periodicity_no_exclude_aliases,
             "periodicity_flag_only": not args.periodicity_reject,
             "periodicity_workers": args.periodicity_workers,
@@ -1633,7 +1642,30 @@ def main():
 
     # Step 2.75: Pre-events periodicity gate and branch split
     if run_upstream and args.apply_pre_periodicity_gate and not df_filtered.empty:
-        if args.force_tag or not pre_periodicity_file.exists():
+        rerun_pre_periodicity = bool(args.force_tag or not pre_periodicity_file.exists())
+        if not rerun_pre_periodicity:
+            log(f"\nLoading cached pre-periodicity gate results from {pre_periodicity_file}")
+            df_gate = pd.read_parquet(pre_periodicity_file)
+            cached_method_ok = False
+            if "pre_periodicity_pdm_method" in df_gate.columns:
+                cached_methods = (
+                    df_gate["pre_periodicity_pdm_method"]
+                    .dropna()
+                    .astype(str)
+                    .str.strip()
+                    .str.lower()
+                    .unique()
+                    .tolist()
+                )
+                cached_method_ok = cached_methods == [str(args.pre_periodicity_pdm_method).strip().lower()]
+            if "pre_periodic_flag" not in df_gate.columns or not cached_method_ok:
+                rerun_pre_periodicity = True
+                log(
+                    "Cached pre-periodicity gate output is incompatible with the requested "
+                    f"PDM method '{args.pre_periodicity_pdm_method}'; recomputing."
+                )
+
+        if rerun_pre_periodicity:
             log(
                 "\nRunning pre-events periodicity gate "
                 f"(CE/PDM, bootstrap={args.pre_periodicity_n_bootstrap}, workers={args.pre_periodicity_workers})..."
@@ -1648,6 +1680,7 @@ def main():
                 min_period=args.pre_periodicity_min_period,
                 max_period=args.pre_periodicity_max_period,
                 n_periods=args.pre_periodicity_n_periods,
+                pdm_method=args.pre_periodicity_pdm_method,
                 n_bootstrap=args.pre_periodicity_n_bootstrap,
                 significance_level=args.pre_periodicity_significance,
                 pdm_snr_threshold=args.pre_periodicity_pdm_snr_threshold,
@@ -1665,9 +1698,6 @@ def main():
                 show_tqdm=args.verbose,
             )
             safe_write_parquet(df_gate, pre_periodicity_file)
-        else:
-            log(f"\nLoading cached pre-periodicity gate results from {pre_periodicity_file}")
-            df_gate = pd.read_parquet(pre_periodicity_file)
 
         if "pre_periodic_flag" not in df_gate.columns:
             raise ValueError(

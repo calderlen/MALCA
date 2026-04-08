@@ -124,10 +124,11 @@ def test_apply_filters_tags_significant_detection_failures() -> None:
 
 
 def test_apply_filters_periodicity_checks_only_prereq_passers(monkeypatch: pytest.MonkeyPatch) -> None:
-    seen: dict[str, list[str]] = {}
+    seen: dict[str, object] = {}
 
     def _fake_validate_periodicity(df: pd.DataFrame, **_kwargs) -> pd.DataFrame:
         seen["paths"] = list(df["path"].astype(str))
+        seen["kwargs"] = dict(_kwargs)
         out = df.copy()
         out["lsp_power"] = 0.42
         out["lsp_period"] = 2.5
@@ -168,6 +169,7 @@ def test_apply_filters_periodicity_checks_only_prereq_passers(monkeypatch: pytes
     )
 
     assert seen["paths"] == ["pass.csv"]
+    assert seen["kwargs"]["pdm_method"] == "plavchan"
     out_by_path = out.set_index("path")
     assert float(out_by_path.loc["pass.csv", "lsp_period"]) == 2.5
     assert pd.isna(out_by_path.loc["prefail.csv", "lsp_period"])
@@ -339,10 +341,76 @@ def test_validate_periodicity_uses_local_bundle_lightcurves(
 
     assert seen["args"][0] == "/data/poohbah/cluster/123.dat3"
     assert seen["args"][1] == str(local_lc)
+    assert seen["args"][5] == "plavchan"
     row = out.iloc[0]
     assert float(row["pdm_snr"]) == 7.0
     assert float(row["ce_snr"]) == 6.0
     assert float(row["lsp_period"]) == 2.5
+
+
+def test_lsp_worker_aligns_simple_v_minus_g_median_offset(monkeypatch: pytest.MonkeyPatch) -> None:
+    jd_g = np.linspace(0.0, 120.0, 80)
+    jd_v = jd_g + 0.15
+    signal_g = 14.0 + 0.10 * np.sin(2.0 * np.pi * jd_g / 4.0)
+    signal_v = 14.0 + 0.10 * np.sin(2.0 * np.pi * jd_v / 4.0) + 0.8
+
+    df_g = pd.DataFrame(
+        {
+            "JD": jd_g,
+            "mag": signal_g,
+            "error": np.full(jd_g.size, 0.03, dtype=float),
+            "v_g_band": np.zeros(jd_g.size, dtype=int),
+        }
+    )
+    df_v = pd.DataFrame(
+        {
+            "JD": jd_v,
+            "mag": signal_v,
+            "error": np.full(jd_v.size, 0.03, dtype=float),
+            "v_g_band": np.ones(jd_v.size, dtype=int),
+        }
+    )
+
+    captured: dict[str, np.ndarray] = {}
+
+    def _fake_read_lc_dat2(*_args: object, **_kwargs: object) -> tuple[pd.DataFrame, pd.DataFrame]:
+        return df_g.copy(), df_v.copy()
+
+    def _fake_pdm_stats(_jd: np.ndarray, mag: np.ndarray, _err: np.ndarray, **_kwargs: object) -> dict[str, float]:
+        captured["pdm_mag"] = np.asarray(mag, dtype=float).copy()
+        return {
+            "pdm_period": 4.0,
+            "pdm_min_theta": 0.2,
+            "pdm_snr": 7.0,
+            "pdm_bootstrap_sig": 1e-3,
+            "pdm_is_significant": True,
+        }
+
+    def _fake_ce_stats(_jd: np.ndarray, mag: np.ndarray, _err: np.ndarray, **_kwargs: object) -> dict[str, float]:
+        captured["ce_mag"] = np.asarray(mag, dtype=float).copy()
+        return {
+            "ce_period": 4.0,
+            "ce_min_entropy": 0.25,
+            "ce_snr": 6.0,
+            "ce_bootstrap_sig": 2e-3,
+            "ce_is_significant": True,
+        }
+
+    monkeypatch.setattr(post_filter, "read_lc_dat2", _fake_read_lc_dat2)
+    monkeypatch.setattr(post_filter, "compute_pdm_stats", _fake_pdm_stats)
+    monkeypatch.setattr(post_filter, "compute_ce_stats", _fake_ce_stats)
+
+    out = post_filter._lsp_worker(
+        ("/data/poohbah/cluster/123.dat3", "/tmp/123.dat3", 8, 0.01, True, "plavchan")
+    )
+
+    g_count = len(df_g)
+    expected_offset = float(np.median(signal_v) - np.median(signal_g))
+    for key in ("pdm_mag", "ce_mag"):
+        mag = captured[key]
+        assert np.isclose(np.median(mag[:g_count]), np.median(mag[g_count:]), atol=1e-10)
+    assert out["pdm_method"] == "plavchan"
+    assert np.isclose(expected_offset, 0.8, atol=5e-3)
 
 
 def test_validate_periodicity_recomputes_stale_checkpoint_rows(
@@ -440,3 +508,4 @@ def test_validate_periodicity_recomputes_stale_checkpoint_rows(
     assert bool(row["periodic_flag"]) is True
     saved = pd.read_parquet(checkpoint_path)
     assert int(saved["error"].notna().sum()) == 0
+    assert saved.loc[0, "pdm_method"] == "plavchan"

@@ -65,6 +65,7 @@ from malca.config.config_filters import (
     POST_FILTER_MIN_JUMP_SCORE,
     POST_FILTER_PDM_SNR_THRESHOLD,
     POST_FILTER_CE_SNR_THRESHOLD,
+    POST_FILTER_PDM_METHOD,
     POST_FILTER_PDM_MIN_THETA,
     POST_FILTER_CE_MIN_ENTROPY,
     POST_FILTER_PERIODICITY_SCORE,
@@ -79,9 +80,10 @@ from malca.config.config_paths import (
 )
 from malca.config.config_paths import ASASSN_INDEX_PATH
 from malca.config.config_pipeline import WORKERS, MIN_MAG_OFFSET
+from malca.config.config_stats import PDM_METHOD_CHOICES
 from malca.stats import compute_pdm_stats, compute_ce_stats
 from malca.utils import log_rejections
-from malca.utils import read_lc_dat2
+from malca.utils import apply_simple_band_median_offset, read_lc_dat2
 
 
 
@@ -163,6 +165,7 @@ PERIODICITY_MERGE_COLS = (
     "lsp_bootstrap_sig",
     "lsp_is_alias",
     "lsp_is_significant",
+    "pdm_method",
     "pdm_period",
     "pdm_theta",
     "pdm_snr",
@@ -1377,6 +1380,7 @@ def _checkpoint_result_is_usable(
     row: pd.Series,
     *,
     skip_if_consensus: bool,
+    expected_pdm_method: str,
 ) -> bool:
     if not isinstance(result, dict) or not result:
         return False
@@ -1390,6 +1394,10 @@ def _checkpoint_result_is_usable(
     catalog_period = _finite_float(row.get("catalog_period"))
     if catalog_match and catalog_period is not None and catalog_period > 0:
         return _finite_float(result.get("lsp_period")) is not None
+
+    cached_pdm_method = str(result.get("pdm_method") or "").strip().lower()
+    if cached_pdm_method != str(expected_pdm_method).strip().lower():
+        return False
 
     required_cols = (
         "pdm_period",
@@ -1437,11 +1445,15 @@ def _lsp_worker(args: tuple) -> dict:
         Dict with path and periodicity results
     """
 
-    if len(args) == 5:
+    if len(args) == 6:
+        original_path, path_str, n_bootstrap, significance_level, exclude_alias_periods, pdm_method = args
+    elif len(args) == 5:
         original_path, path_str, n_bootstrap, significance_level, exclude_alias_periods = args
+        pdm_method = POST_FILTER_PDM_METHOD
     else:
         path_str, n_bootstrap, significance_level, exclude_alias_periods = args
         original_path = path_str
+        pdm_method = POST_FILTER_PDM_METHOD
     _ = exclude_alias_periods
 
     try:
@@ -1451,16 +1463,18 @@ def _lsp_worker(args: tuple) -> dict:
 
         dfg, dfv = read_lc_dat2(asassn_id, dir_path)
         df_lc = pd.concat([dfg, dfv], ignore_index=True)
+        df_lc_aligned, _ = apply_simple_band_median_offset(df_lc)
 
-        jd = df_lc["JD"].values
-        mag = df_lc["mag"].values
-        err = df_lc["error"].values
+        jd = df_lc_aligned["JD"].values
+        mag = df_lc_aligned["mag"].values
+        err = df_lc_aligned["error"].values
 
         # PDM
         pdm_result = compute_pdm_stats(
             jd,
             mag,
             err,
+            pdm_method=str(pdm_method),
             n_bootstrap=n_bootstrap,
             significance_level=significance_level,
         )
@@ -1503,6 +1517,7 @@ def _lsp_worker(args: tuple) -> dict:
             "lsp_bootstrap_sig": periodicity_bootstrap_sig,
             "lsp_is_alias": False,
             "lsp_is_significant": periodicity_is_significant,
+            "pdm_method": str(pdm_method),
             "pdm_period": pdm_result["pdm_period"],
             "pdm_min_theta": pdm_result["pdm_min_theta"],
             "pdm_snr": pdm_result["pdm_snr"],
@@ -1522,6 +1537,7 @@ def _lsp_worker(args: tuple) -> dict:
         return {
             "path": original_path,
             "resolved_path": path_str,
+            "pdm_method": str(pdm_method),
             "pdm_period": np.nan,
             "pdm_min_theta": np.nan,
             "pdm_snr": np.nan,
@@ -1544,6 +1560,7 @@ def validate_periodicity(
     *,
     n_bootstrap: int = 1000,
     significance_level: float = 0.01,
+    pdm_method: str = POST_FILTER_PDM_METHOD,
     exclude_alias_periods: bool = True,
     flag_only: bool = True,
     show_tqdm: bool = False,
@@ -1632,7 +1649,7 @@ def validate_periodicity(
                     tqdm.write(f"[validate_periodicity] Warning: Could not load checkpoint: {e}")
     
     # Filter to rows not already processed
-    worker_args: list[tuple[str, str, int, float, bool]] = []
+    worker_args: list[tuple[str, str, int, float, bool, str]] = []
     skipped_consensus: dict[str, dict[str, object]] = {}
     prefilled_errors: list[dict[str, object]] = []
 
@@ -1660,6 +1677,7 @@ def validate_periodicity(
                         "lsp_bootstrap_sig": 0.0, # Treat as highly significant
                         "lsp_is_alias": False,
                         "lsp_is_significant": True,
+                        "pdm_method": str(pdm_method),
                         "periodicity_score": POST_FILTER_PERIODICITY_SCORE,
                         "error": None,
                     }
@@ -1670,6 +1688,7 @@ def validate_periodicity(
                 cached,
                 row,
                 skip_if_consensus=skip_if_consensus,
+                expected_pdm_method=str(pdm_method),
             ):
                 continue
             completed_results.pop(p, None)
@@ -1679,6 +1698,7 @@ def validate_periodicity(
                 prefilled_errors.append({
                     "path": p,
                     "resolved_path": None,
+                    "pdm_method": str(pdm_method),
                     "pdm_period": np.nan,
                     "pdm_min_theta": np.nan,
                     "pdm_snr": np.nan,
@@ -1696,7 +1716,7 @@ def validate_periodicity(
                 })
                 continue
 
-            worker_args.append((p, str(resolved), n_bootstrap, significance_level, exclude_alias_periods))
+            worker_args.append((p, str(resolved), n_bootstrap, significance_level, exclude_alias_periods, str(pdm_method)))
     else:
         for _, row in df.iterrows():
             p = str(row["path"])
@@ -1705,6 +1725,7 @@ def validate_periodicity(
                 cached,
                 row,
                 skip_if_consensus=skip_if_consensus,
+                expected_pdm_method=str(pdm_method),
             ):
                 continue
             completed_results.pop(p, None)
@@ -1714,6 +1735,7 @@ def validate_periodicity(
                 prefilled_errors.append({
                     "path": p,
                     "resolved_path": None,
+                    "pdm_method": str(pdm_method),
                     "pdm_period": np.nan,
                     "pdm_min_theta": np.nan,
                     "pdm_snr": np.nan,
@@ -1731,7 +1753,7 @@ def validate_periodicity(
                 })
                 continue
 
-            worker_args.append((p, str(resolved), n_bootstrap, significance_level, exclude_alias_periods))
+            worker_args.append((p, str(resolved), n_bootstrap, significance_level, exclude_alias_periods, str(pdm_method)))
 
     if show_tqdm:
         n_cached = len(paths) - len(worker_args) - len(skipped_consensus) - len(prefilled_errors)
@@ -1803,6 +1825,7 @@ def validate_periodicity(
     is_alias = []
     is_significant = []
     
+    pdm_methods = []
     pdm_periods = []
     pdm_thetas = []
     pdm_snrs = []
@@ -1834,6 +1857,7 @@ def validate_periodicity(
         periodicity_significant_flags.append(bool(result.get("periodicity_is_significant", result.get("lsp_is_significant", False))))
 
         # New PDM/CE columns
+        pdm_methods.append(result.get("pdm_method", str(pdm_method)))
         pdm_periods.append(result.get("pdm_period", np.nan))
         pdm_thetas.append(result.get("pdm_min_theta", np.nan))
         pdm_snrs.append(result.get("pdm_snr", np.nan))
@@ -1864,6 +1888,7 @@ def validate_periodicity(
     df_out["lsp_is_alias"] = is_alias
     df_out["lsp_is_significant"] = is_significant
     
+    df_out["pdm_method"] = pdm_methods
     df_out["pdm_period"] = pdm_periods
     df_out["pdm_theta"] = pdm_thetas
     df_out["pdm_snr"] = pdm_snrs
@@ -1917,6 +1942,7 @@ def _save_checkpoint(checkpoint_file: Path, completed: dict, new_results: list) 
             "lsp_bootstrap_sig": r.get("lsp_bootstrap_sig", np.nan),
             "lsp_is_alias": r.get("lsp_is_alias", False),
             "lsp_is_significant": r.get("lsp_is_significant", False),
+            "pdm_method": r.get("pdm_method", str(POST_FILTER_PDM_METHOD)),
             "pdm_period": r.get("pdm_period", np.nan),
             "pdm_min_theta": r.get("pdm_min_theta", np.nan),
             "pdm_snr": r.get("pdm_snr", np.nan),
@@ -2502,6 +2528,7 @@ def apply_filters(
     apply_periodicity_validation: bool = False,
     periodicity_n_bootstrap: int = 1000,
     periodicity_significance: float = 0.01,
+    periodicity_pdm_method: str = POST_FILTER_PDM_METHOD,
     periodicity_exclude_aliases: bool = True,
     periodicity_flag_only: bool = True,
     periodicity_workers: int = 1,
@@ -2700,6 +2727,7 @@ def apply_filters(
         filters.append(("periodicity", validate_periodicity, {
             "n_bootstrap": periodicity_n_bootstrap,
             "significance_level": periodicity_significance,
+            "pdm_method": periodicity_pdm_method,
             "exclude_alias_periods": periodicity_exclude_aliases,
             "flag_only": periodicity_flag_only,
             "workers": periodicity_workers,
@@ -2950,6 +2978,9 @@ Example usage:
                         help="Number of bootstrap iterations (default: 1000)")
     g_periodicity.add_argument("--periodicity-significance", type=float, default=0.01,
                         help="Significance threshold (default: 0.01)")
+    g_periodicity.add_argument("--periodicity-pdm-method", type=str, default=POST_FILTER_PDM_METHOD,
+                        choices=list(PDM_METHOD_CHOICES),
+                        help="PDM implementation for periodicity validation (default: plavchan)")
     g_periodicity.add_argument("--periodicity-no-exclude-aliases", action="store_true",
                         help="Do not exclude alias periods (1d, 29.53d, etc.)")
     g_periodicity.add_argument("--periodicity-reject", action="store_true",
@@ -3154,6 +3185,7 @@ Example usage:
         apply_periodicity_validation=args.apply_periodicity_validation,
         periodicity_n_bootstrap=args.periodicity_n_bootstrap,
         periodicity_significance=args.periodicity_significance,
+        periodicity_pdm_method=args.periodicity_pdm_method,
         periodicity_exclude_aliases=not args.periodicity_no_exclude_aliases,
         periodicity_flag_only=not args.periodicity_reject,
         periodicity_workers=args.workers,

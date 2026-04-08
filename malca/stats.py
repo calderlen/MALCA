@@ -34,6 +34,8 @@ from malca.config.config_stats import (
     LS_MAX_FREQUENCY,
     LS_ALIAS_TOLERANCE,
     LS_ALIAS_PERIODS,
+    PDM_PLAVCHAN_PHASE_WIDTH,
+    PDM_PLAVCHAN_MIN_NEIGHBORS,
     PERIODOGRAM_REFINE_TOP_K,
     PERIODOGRAM_REFINE_WINDOW_STEPS,
     PERIODOGRAM_REFINE_N_GRID,
@@ -646,12 +648,14 @@ def _bootstrap_min_metric(
     min_period: float,
     max_period: float,
     n_periods: int,
+    period_finder_kwargs: dict | None = None,
 ) -> np.ndarray:
     """Return bootstrap distribution of minimum periodogram statistic."""
     n_bootstrap = int(max(n_bootstrap, 0))
     if n_bootstrap == 0:
         return np.empty(0, dtype=float)
 
+    period_finder_kwargs = dict(period_finder_kwargs or {})
     mins = np.full(n_bootstrap, np.nan, dtype=float)
     rng = np.random.default_rng()
     for i in range(n_bootstrap):
@@ -663,6 +667,7 @@ def _bootstrap_min_metric(
                 min_period=min_period,
                 max_period=max_period,
                 n_periods=n_periods,
+                **period_finder_kwargs,
             )
             if metric.size > 0:
                 mins[i] = float(np.min(metric))
@@ -679,6 +684,9 @@ def compute_pdm_stats(
     min_period: float = 1.0,
     max_period: float = 100.0,
     n_periods: int = 10000,
+    pdm_method: str = "classic",
+    pdm_phase_width: float = PDM_PLAVCHAN_PHASE_WIDTH,
+    pdm_min_neighbors: int = PDM_PLAVCHAN_MIN_NEIGHBORS,
     n_bootstrap: int = 0,
     significance_level: float = 0.01,
     refine: bool = False,
@@ -691,7 +699,8 @@ def compute_pdm_stats(
 
     Returns:
         pdm_period: float, best period
-        pdm_min_theta: float, lowest theta value (0-1, lower is better)
+        pdm_min_theta: float, lowest PDM score (classical theta for classic PDM;
+            worst-k normalized residual score for the Plavchan variant)
         pdm_snr: float, SNR of the theta dip relative to background
         pdm_bootstrap_sig: float, bootstrap significance (fraction of shuffles with lower/equal theta)
         pdm_is_significant: bool, True if bootstrap significance is below threshold
@@ -718,6 +727,9 @@ def compute_pdm_stats(
             min_period=min_period,
             max_period=max_period,
             n_periods=n_periods,
+            method=pdm_method,
+            phase_width=pdm_phase_width,
+            min_neighbors=pdm_min_neighbors,
             refine=bool(refine),
             refine_top_k=int(refine_top_k),
             refine_window_steps=float(refine_window_steps),
@@ -746,6 +758,11 @@ def compute_pdm_stats(
                 min_period=min_period,
                 max_period=max_period,
                 n_periods=n_periods,
+                period_finder_kwargs={
+                    "method": pdm_method,
+                    "phase_width": pdm_phase_width,
+                    "min_neighbors": pdm_min_neighbors,
+                },
             )
             finite = null_min_theta[np.isfinite(null_min_theta)]
             if finite.size > 0:
