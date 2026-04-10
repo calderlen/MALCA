@@ -10,8 +10,12 @@ from malca.config.config_stats import (
     PDM_MAX_PERIOD,
     PDM_N_PERIODS,
     PDM_N_BINS,
+    PDM_PLAVCHAN_COARSE_N_PERIODS,
+    PDM_PLAVCHAN_FULL_SCAN_MAX_PERIODS,
     PDM_PLAVCHAN_PHASE_WIDTH,
     PDM_PLAVCHAN_MIN_NEIGHBORS,
+    PDM_PLAVCHAN_SHORTLIST_TOP_K,
+    PDM_PLAVCHAN_SHORTLIST_WINDOW_STEPS,
     PDM_PLAVCHAN_WORST_FRAC,
     PDM_PLAVCHAN_WORST_MIN,
     PDM_PLAVCHAN_GRID_FACTOR,
@@ -180,6 +184,84 @@ def _build_plavchan_period_grid(
     if periods[-1] < max_period:
         periods.append(max_period)
     return np.asarray(periods, dtype=np.float64)
+
+
+def _downsample_sorted_indices(size: int, *, max_points: int) -> np.ndarray:
+    """Return monotonic unique indices spanning a sorted array."""
+    size = int(size)
+    if size <= 0:
+        return np.empty(0, dtype=np.int64)
+
+    max_points = max(1, int(max_points))
+    if size <= max_points:
+        return np.arange(size, dtype=np.int64)
+
+    idx = np.rint(np.linspace(0, size - 1, num=max_points)).astype(np.int64)
+    idx = np.unique(np.clip(idx, 0, size - 1))
+    if idx[0] != 0:
+        idx = np.concatenate((np.asarray([0], dtype=np.int64), idx))
+    if idx[-1] != size - 1:
+        idx = np.concatenate((idx, np.asarray([size - 1], dtype=np.int64)))
+    return idx
+
+
+def _plavchan_shortlist_period_grid(
+    times: np.ndarray,
+    yvals: np.ndarray,
+    full_period_arr: np.ndarray,
+    *,
+    n_bins: int,
+    coarse_n_periods: int,
+    shortlist_top_k: int,
+    shortlist_window_steps: float,
+) -> np.ndarray:
+    """Use classic PDM and CE on a coarse grid to shortlist Plavchan windows."""
+    full_period_arr = np.asarray(full_period_arr, dtype=np.float64)
+    if full_period_arr.size <= 1:
+        return full_period_arr
+
+    coarse_idx = _downsample_sorted_indices(full_period_arr.size, max_points=coarse_n_periods)
+    if coarse_idx.size <= 1:
+        return full_period_arr
+
+    coarse_period_arr = full_period_arr[coarse_idx]
+    _, classic_metric = _pdm_scan_grid(times, yvals, coarse_period_arr, n_bins)
+    _, ce_metric = _ce_scan_grid(times, yvals, coarse_period_arr, CE_N_PHASE_BINS, CE_N_MAG_BINS)
+
+    n_top = max(1, int(shortlist_top_k))
+    min_separation = max(1, int(np.ceil(coarse_idx.size / float(max(6 * n_top, 1)))))
+    candidate_positions = set(_top_indices(classic_metric, n_top=n_top, maximize=False, min_separation=min_separation))
+    candidate_positions.update(_top_indices(ce_metric, n_top=n_top, maximize=False, min_separation=min_separation))
+    if not candidate_positions:
+        candidate_positions.add(int(np.nanargmin(classic_metric)))
+        candidate_positions.add(int(np.nanargmin(ce_metric)))
+
+    shortlist_mask = np.zeros(full_period_arr.size, dtype=bool)
+    window_steps = max(0.0, float(shortlist_window_steps))
+    for coarse_pos in sorted(candidate_positions):
+        coarse_pos = int(np.clip(coarse_pos, 0, coarse_idx.size - 1))
+        center_idx = int(coarse_idx[coarse_pos])
+        if coarse_pos == 0:
+            local_stride = int(coarse_idx[min(1, coarse_idx.size - 1)] - coarse_idx[0])
+        elif coarse_pos == coarse_idx.size - 1:
+            local_stride = int(coarse_idx[-1] - coarse_idx[-2])
+        else:
+            local_stride = int(
+                max(
+                    coarse_idx[coarse_pos] - coarse_idx[coarse_pos - 1],
+                    coarse_idx[coarse_pos + 1] - coarse_idx[coarse_pos],
+                )
+            )
+        local_stride = max(local_stride, 1)
+        half_window = max(1, int(np.ceil(window_steps * local_stride)))
+        lo = max(0, center_idx - half_window)
+        hi = min(full_period_arr.size, center_idx + half_window + 1)
+        shortlist_mask[lo:hi] = True
+
+    shortlist_mask[0] = True
+    shortlist_mask[-1] = True
+    shortlist_period_arr = full_period_arr[shortlist_mask]
+    return shortlist_period_arr if shortlist_period_arr.size > 0 else full_period_arr
 
 
 def _refine_lsp_period(
@@ -512,12 +594,25 @@ def pdm_find_period(
     t_shifted = times - t0
     method_name = normalize_pdm_method(method)
     if method_name == "plavchan":
-        period_arr = _build_plavchan_period_grid(
+        full_period_arr = _build_plavchan_period_grid(
             t_shifted,
             min_period,
             max_period,
             grid_factor=PDM_PLAVCHAN_GRID_FACTOR,
         )
+        period_arr = full_period_arr
+        if full_period_arr.size > int(PDM_PLAVCHAN_FULL_SCAN_MAX_PERIODS):
+            # Use cheap proxy metrics to focus the expensive Plavchan scan on a
+            # small set of promising windows for long-baseline searches.
+            period_arr = _plavchan_shortlist_period_grid(
+                t_shifted,
+                yvals,
+                full_period_arr,
+                n_bins=int(n_bins),
+                coarse_n_periods=int(PDM_PLAVCHAN_COARSE_N_PERIODS),
+                shortlist_top_k=int(PDM_PLAVCHAN_SHORTLIST_TOP_K),
+                shortlist_window_steps=float(PDM_PLAVCHAN_SHORTLIST_WINDOW_STEPS),
+            )
         best_idx, theta = _pdm_scan_grid_plavchan(
             t_shifted,
             yvals,
