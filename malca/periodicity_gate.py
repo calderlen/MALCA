@@ -52,6 +52,7 @@ PREGATE_HARMONIC_FACTORS: tuple[float, ...] = (
     8.0,
     1.0 / 8.0,
 )
+PREGATE_CHECKPOINT_VERSION = "v2_deterministic_no_bootstrap"
 PREGATE_RESULT_COLUMNS: list[str] = [
     "pre_periodicity_checkpoint_key",
     "pre_periodicity_path",
@@ -158,7 +159,7 @@ def _excluded_camera_set(value: object) -> set[int]:
 def _checkpoint_key(path: str, excluded_cameras: object, *, pdm_method: str | None = None) -> str:
     token = ",".join(str(item) for item in sorted(_excluded_camera_set(excluded_cameras)))
     method_token = str(pdm_method or "").strip().lower()
-    return f"{path}::{token}::{method_token}"
+    return f"{PREGATE_CHECKPOINT_VERSION}::{path}::{token}::{method_token}"
 
 
 def _robust_sigma(values: np.ndarray) -> float:
@@ -483,7 +484,7 @@ def _harmonically_correct_period_candidate(
     }
 
 
-def _period_candidate_sort_key(candidate: dict[str, object]) -> tuple[float, float, bool, float]:
+def _period_candidate_sort_key(candidate: dict[str, object]) -> tuple[float, bool, float]:
     selection_objective = float(candidate.get("selection_objective", np.nan))
     objective = float(candidate.get("objective", np.nan))
     rank_objective = selection_objective
@@ -492,17 +493,12 @@ def _period_candidate_sort_key(candidate: dict[str, object]) -> tuple[float, flo
     if not np.isfinite(rank_objective):
         rank_objective = np.inf
 
-    bootstrap_sig = float(candidate.get("bootstrap_sig", np.nan))
-    if not np.isfinite(bootstrap_sig):
-        bootstrap_sig = np.inf
-
     snr = float(candidate.get("snr", np.nan))
     if not np.isfinite(snr):
         snr = -np.inf
 
     return (
         float(rank_objective),
-        float(bootstrap_sig),
         bool(candidate.get("alias_flag", False)),
         -float(snr),
     )
@@ -534,8 +530,6 @@ def _evaluate_periodicity_worker(args: tuple[object, ...]) -> dict[str, object]:
         min_period,
         max_period,
         n_periods,
-        n_bootstrap,
-        significance_level,
         pdm_snr_threshold,
         ce_snr_threshold,
         pdm_theta_threshold,
@@ -545,7 +539,6 @@ def _evaluate_periodicity_worker(args: tuple[object, ...]) -> dict[str, object]:
         scatter_ratio_max,
         strong_single_scatter_ratio_max,
         lag_phase_max,
-        strong_single_sig,
         pdm_method,
     ) = args
 
@@ -592,8 +585,7 @@ def _evaluate_periodicity_worker(args: tuple[object, ...]) -> dict[str, object]:
             max_period=float(max_period),
             n_periods=int(n_periods),
             pdm_method=str(pdm_method),
-            n_bootstrap=int(n_bootstrap),
-            significance_level=float(significance_level),
+            n_bootstrap=0,
             refine=True,
         )
         ce_result = compute_ce_stats(
@@ -603,8 +595,7 @@ def _evaluate_periodicity_worker(args: tuple[object, ...]) -> dict[str, object]:
             min_period=float(min_period),
             max_period=float(max_period),
             n_periods=int(n_periods),
-            n_bootstrap=int(n_bootstrap),
-            significance_level=float(significance_level),
+            n_bootstrap=0,
             refine=True,
         )
 
@@ -659,24 +650,7 @@ def _evaluate_periodicity_worker(args: tuple[object, ...]) -> dict[str, object]:
             if selected_candidate is not None
             else np.nan
         )
-
-        pdm_sig = float(pdm_candidate.get("bootstrap_sig", np.nan))
-        ce_sig = float(ce_candidate.get("bootstrap_sig", np.nan))
-        supported_sigs = np.array(
-            [
-                float(candidate.get("bootstrap_sig", np.nan))
-                for candidate in (pdm_candidate, ce_candidate)
-                if bool(candidate.get("supported", False))
-            ],
-            dtype=float,
-        )
-        supported_sigs = supported_sigs[np.isfinite(supported_sigs)]
-        if supported_sigs.size > 0:
-            selected_sig = float(np.min(supported_sigs))
-        else:
-            selected_sig = float(selected_candidate.get("bootstrap_sig", np.nan)) if selected_candidate is not None else np.nan
-        is_significant = bool(np.isfinite(selected_sig) and selected_sig <= float(significance_level))
-        strong_single = bool(np.isfinite(selected_sig) and selected_sig <= float(strong_single_sig))
+        selected_snr = float(selected_candidate.get("snr", np.nan)) if selected_candidate is not None else np.nan
 
         scatter_ratio = float(selected_candidate.get("scatter_ratio", np.nan)) if selected_candidate is not None else np.nan
         lag_phase = float(selected_candidate.get("lag_phase", np.nan)) if selected_candidate is not None else np.nan
@@ -687,27 +661,20 @@ def _evaluate_periodicity_worker(args: tuple[object, ...]) -> dict[str, object]:
         )
         lag_ok = bool((not np.isfinite(lag_phase)) or lag_phase <= float(lag_phase_max))
         selected_supported = bool(selected_candidate is not None and selected_candidate.get("supported", False))
-        single_support_periodic_ok = bool(
-            selected_supported and strong_single and strong_single_scatter_ok and not alias_flag
-        )
+        dual_support_periodic_ok = bool(support_count >= 2 and methods_agree and scatter_ok)
+        single_support_periodic_ok = bool(selected_supported and strong_single_scatter_ok and not alias_flag)
 
         label = "non_periodic"
-        if is_significant and lag_ok and (
-            (support_count >= 2 and methods_agree and scatter_ok)
-            or (support_count == 1 and single_support_periodic_ok)
-        ):
+        if lag_ok and (dual_support_periodic_ok or (support_count == 1 and single_support_periodic_ok)):
             label = "periodic"
         elif (
-            (support_count >= 1 and np.isfinite(selected_sig) and selected_sig <= max(0.01, float(significance_level) * 10.0))
-            or (support_count >= 2 and methods_agree)
+            (support_count >= 2 and methods_agree)
             or (support_count >= 1 and scatter_ok)
+            or (support_count >= 1 and lag_ok)
         ):
             label = "ambiguous"
 
-        score = np.nan
-        if np.isfinite(selected_sig):
-            min_sig = max(1.0 / float(max(int(n_bootstrap), 1)), 1e-12)
-            score = float(-np.log10(np.clip(selected_sig, min_sig, 1.0)))
+        score = float(selected_snr) if np.isfinite(selected_snr) else np.nan
 
         reasons: list[str] = []
         if pdm_support:
@@ -721,7 +688,7 @@ def _evaluate_periodicity_worker(args: tuple[object, ...]) -> dict[str, object]:
         if alias_flag:
             reasons.append("alias")
         if label == "periodic" and support_count == 1:
-            reasons.append("strong_single")
+            reasons.append("single_support")
         if not lag_ok:
             reasons.append("lag_mismatch")
         reason = ",".join(reasons) if reasons else "no_strong_periodicity"
@@ -736,14 +703,14 @@ def _evaluate_periodicity_worker(args: tuple[object, ...]) -> dict[str, object]:
             "pre_pdm_harmonic_factor": float(pdm_candidate.get("harmonic_factor", np.nan)),
             "pre_pdm_theta": float(pdm_result.get("pdm_min_theta", np.nan)),
             "pre_pdm_snr": float(pdm_result.get("pdm_snr", np.nan)),
-            "pre_pdm_bootstrap_sig": pdm_sig,
+            "pre_pdm_bootstrap_sig": np.nan,
             "pre_pdm_support": pdm_support,
             "pre_ce_period": float(ce_result.get("ce_period", np.nan)),
             "pre_ce_corrected_period": float(ce_candidate.get("corrected_period", np.nan)),
             "pre_ce_harmonic_factor": float(ce_candidate.get("harmonic_factor", np.nan)),
             "pre_ce_entropy": float(ce_result.get("ce_min_entropy", np.nan)),
             "pre_ce_snr": float(ce_result.get("ce_snr", np.nan)),
-            "pre_ce_bootstrap_sig": ce_sig,
+            "pre_ce_bootstrap_sig": np.nan,
             "pre_ce_support": ce_support,
             "pre_periodicity_v_minus_g_median_offset": float(v_minus_g_median_offset),
             "pre_periodicity_pdm_method": str(pdm_method),
@@ -756,8 +723,8 @@ def _evaluate_periodicity_worker(args: tuple[object, ...]) -> dict[str, object]:
             "pre_periodicity_agreement_factor": float(agreement_factor),
             "pre_periodicity_agreement_rel_err": float(agreement_rel_err),
             "pre_periodicity_support_count": support_count,
-            "pre_periodicity_bootstrap_sig": selected_sig,
-            "pre_periodicity_is_significant": is_significant,
+            "pre_periodicity_bootstrap_sig": np.nan,
+            "pre_periodicity_is_significant": False,
             "pre_periodicity_score": score,
             "pre_periodicity_scatter_ratio": scatter_ratio,
             "pre_periodicity_lag_phase": lag_phase,
@@ -822,6 +789,7 @@ def apply_pre_periodicity_gate(
     checkpoint_path: str | Path | None = None,
     show_tqdm: bool = False,
 ) -> pd.DataFrame:
+    _ = n_bootstrap, significance_level, strong_single_sig
     df_out = df.copy()
     existing_gate_cols = [column for column in PREGATE_RESULT_COLUMNS if column in df_out.columns]
     if existing_gate_cols:
@@ -884,8 +852,6 @@ def apply_pre_periodicity_gate(
                 float(min_period),
                 float(max_period),
                 int(n_periods),
-                int(n_bootstrap),
-                float(significance_level),
                 float(pdm_snr_threshold),
                 float(ce_snr_threshold),
                 float(pdm_theta_threshold),
@@ -895,7 +861,6 @@ def apply_pre_periodicity_gate(
                 float(scatter_ratio_max),
                 float(strong_single_scatter_ratio_max),
                 float(lag_phase_max),
-                float(strong_single_sig),
                 str(pdm_method),
             )
         )

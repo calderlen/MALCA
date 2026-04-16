@@ -775,8 +775,8 @@ def main():
     g_pregate.add_argument("--pre-periodicity-min-period", type=float, default=PRE_PERIODICITY_MIN_PERIOD, help="Minimum trial period in days for the pre-events gate")
     g_pregate.add_argument("--pre-periodicity-max-period", type=float, default=PRE_PERIODICITY_MAX_PERIOD, help="Maximum trial period in days for the pre-events gate")
     g_pregate.add_argument("--pre-periodicity-n-periods", type=int, default=PRE_PERIODICITY_N_PERIODS, help="Number of trial periods for CE/PDM in the pre-events gate")
-    g_pregate.add_argument("--pre-periodicity-n-bootstrap", type=int, default=PRE_PERIODICITY_N_BOOTSTRAP, help="Bootstrap iterations for the pre-events periodicity gate")
-    g_pregate.add_argument("--pre-periodicity-significance", type=float, default=PRE_PERIODICITY_SIGNIFICANCE, help="Bootstrap significance threshold for confident periodic routing")
+    g_pregate.add_argument("--pre-periodicity-n-bootstrap", type=int, default=PRE_PERIODICITY_N_BOOTSTRAP, help="Deprecated no-op retained for compatibility; the pre-events gate no longer runs bootstrap rescans")
+    g_pregate.add_argument("--pre-periodicity-significance", type=float, default=PRE_PERIODICITY_SIGNIFICANCE, help="Deprecated no-op retained for compatibility; the pre-events gate now routes deterministically")
     g_pregate.add_argument("--pre-periodicity-pdm-method", type=str, default=PRE_PERIODICITY_PDM_METHOD, choices=list(PDM_METHOD_CHOICES), help="PDM implementation for the pre-events gate")
     g_pregate.add_argument("--pre-periodicity-pdm-snr-threshold", type=float, default=PRE_PERIODICITY_PDM_SNR_THRESHOLD, help="Minimum PDM SNR for periodic gate support")
     g_pregate.add_argument("--pre-periodicity-pdm-theta-threshold", type=float, default=PRE_PERIODICITY_PDM_MIN_THETA, help="Maximum PDM theta for periodic gate support")
@@ -787,7 +787,7 @@ def main():
     g_pregate.add_argument("--pre-periodicity-scatter-ratio-max", type=float, default=PRE_PERIODICITY_SCATTER_RATIO_MAX, help="Maximum folded/raw scatter ratio for confident periodic routing")
     g_pregate.add_argument("--pre-periodicity-strong-single-scatter-ratio-max", type=float, default=PRE_PERIODICITY_STRONG_SINGLE_SCATTER_RATIO_MAX, help="Stricter scatter-ratio cap when only one of CE/PDM strongly supports periodicity")
     g_pregate.add_argument("--pre-periodicity-lag-phase-max", type=float, default=PRE_PERIODICITY_LAG_PHASE_MAX, help="Maximum inter-band phase lag tolerated for confident periodic routing")
-    g_pregate.add_argument("--pre-periodicity-strong-single-sig", type=float, default=PRE_PERIODICITY_STRONG_SINGLE_SIG, help="Bootstrap significance threshold for routing a single-method periodic detection")
+    g_pregate.add_argument("--pre-periodicity-strong-single-sig", type=float, default=PRE_PERIODICITY_STRONG_SINGLE_SIG, help="Deprecated no-op retained for compatibility; single-method routing is now deterministic")
     g_pregate.add_argument("--pre-periodicity-checkpoint", type=Path, default=None, help="Checkpoint parquet path for the pre-events periodicity gate")
     g_pregate.add_argument("--pre-periodicity-workers", type=int, default=WORKERS, help="Workers for the pre-events periodicity gate")
 
@@ -1197,11 +1197,10 @@ def main():
         "enforced_tags": enforced_tags,
         "pre_periodicity_gate": {
             "enabled": args.apply_pre_periodicity_gate,
+            "router_mode": "deterministic_no_bootstrap",
             "min_period": args.pre_periodicity_min_period,
             "max_period": args.pre_periodicity_max_period,
             "n_periods": args.pre_periodicity_n_periods,
-            "n_bootstrap": args.pre_periodicity_n_bootstrap,
-            "significance": args.pre_periodicity_significance,
             "pdm_method": args.pre_periodicity_pdm_method,
             "pdm_snr_threshold": args.pre_periodicity_pdm_snr_threshold,
             "pdm_theta_threshold": args.pre_periodicity_pdm_theta_threshold,
@@ -1212,7 +1211,6 @@ def main():
             "scatter_ratio_max": args.pre_periodicity_scatter_ratio_max,
             "strong_single_scatter_ratio_max": args.pre_periodicity_strong_single_scatter_ratio_max,
             "lag_phase_max": args.pre_periodicity_lag_phase_max,
-            "strong_single_sig": args.pre_periodicity_strong_single_sig,
             "workers": args.pre_periodicity_workers,
             "checkpoint": str(pre_periodicity_checkpoint),
         },
@@ -1369,8 +1367,7 @@ def main():
             "pre_periodicity_min_period": args.pre_periodicity_min_period,
             "pre_periodicity_max_period": args.pre_periodicity_max_period,
             "pre_periodicity_n_periods": args.pre_periodicity_n_periods,
-            "pre_periodicity_n_bootstrap": args.pre_periodicity_n_bootstrap,
-            "pre_periodicity_significance": args.pre_periodicity_significance,
+            "pre_periodicity_router_mode": "deterministic_no_bootstrap",
             "pre_periodicity_pdm_snr_threshold": args.pre_periodicity_pdm_snr_threshold,
             "pre_periodicity_pdm_theta_threshold": args.pre_periodicity_pdm_theta_threshold,
             "pre_periodicity_ce_snr_threshold": args.pre_periodicity_ce_snr_threshold,
@@ -1380,7 +1377,6 @@ def main():
             "pre_periodicity_scatter_ratio_max": args.pre_periodicity_scatter_ratio_max,
             "pre_periodicity_strong_single_scatter_ratio_max": args.pre_periodicity_strong_single_scatter_ratio_max,
             "pre_periodicity_lag_phase_max": args.pre_periodicity_lag_phase_max,
-            "pre_periodicity_strong_single_sig": args.pre_periodicity_strong_single_sig,
             "pre_periodicity_workers": args.pre_periodicity_workers,
             "pre_periodicity_checkpoint": str(pre_periodicity_checkpoint),
             "periodic_branch_events_output": str(periodic_branch_events_output),
@@ -1816,7 +1812,7 @@ def main():
         if rerun_pre_periodicity:
             log(
                 "\nRunning pre-events periodicity gate "
-                f"(CE/PDM, bootstrap={args.pre_periodicity_n_bootstrap}, workers={args.pre_periodicity_workers})..."
+                f"(CE/PDM deterministic, workers={args.pre_periodicity_workers})..."
             )
             df_gate = apply_pre_periodicity_gate(
                 df_filtered,
@@ -1829,8 +1825,6 @@ def main():
                 max_period=args.pre_periodicity_max_period,
                 n_periods=args.pre_periodicity_n_periods,
                 pdm_method=args.pre_periodicity_pdm_method,
-                n_bootstrap=args.pre_periodicity_n_bootstrap,
-                significance_level=args.pre_periodicity_significance,
                 pdm_snr_threshold=args.pre_periodicity_pdm_snr_threshold,
                 ce_snr_threshold=args.pre_periodicity_ce_snr_threshold,
                 pdm_theta_threshold=args.pre_periodicity_pdm_theta_threshold,
@@ -1840,7 +1834,6 @@ def main():
                 scatter_ratio_max=args.pre_periodicity_scatter_ratio_max,
                 strong_single_scatter_ratio_max=args.pre_periodicity_strong_single_scatter_ratio_max,
                 lag_phase_max=args.pre_periodicity_lag_phase_max,
-                strong_single_sig=args.pre_periodicity_strong_single_sig,
                 workers=args.pre_periodicity_workers,
                 checkpoint_path=pre_periodicity_checkpoint,
                 show_tqdm=args.verbose,
