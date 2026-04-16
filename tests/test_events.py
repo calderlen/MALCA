@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import sys
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -10,6 +14,7 @@ from malca.events import (
     build_runs,
     classify_run_morphology,
     filter_runs,
+    main as events_main,
     score_lightcurve,
 )
 from malca.baseline import per_camera_gp_baseline
@@ -59,6 +64,26 @@ def inject_dip(
     gaussian = amplitude * np.exp(-0.5 * ((df["JD"] - t0) / sigma) ** 2)
     df["mag"] = df["mag"] + gaussian
     return df
+
+
+def _write_dat3(path: Path, times: np.ndarray, mags: np.ndarray, *, error: float = 0.03) -> None:
+    lines: list[str] = []
+    for idx, (time_value, mag_value) in enumerate(zip(times, mags, strict=True)):
+        camera = 1 + (idx % 2)
+        band = idx % 2
+        lines.append(
+            f"{float(time_value):.6f} {float(mag_value):.6f} {error:.6f} 1 {camera:d} {band:d} 0 cam{camera}/field1"
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="ascii")
+
+
+def _periodic_dip_lightcurve() -> tuple[np.ndarray, np.ndarray]:
+    times = np.linspace(0.0, 120.0, 240)
+    phase = np.mod(times, 6.0) / 6.0
+    periodic = 14.0 + 0.20 * np.sin(2.0 * np.pi * phase) + 0.05 * np.cos(4.0 * np.pi * phase)
+    stochastic_dip = 0.45 * np.exp(-0.5 * ((times - 60.0) / 0.8) ** 2)
+    return times, periodic + stochastic_dip
 
 
 class TestBuildRuns:
@@ -297,3 +322,62 @@ class TestMorphology:
 
         out = classify_run_morphology(jd, mag, err, run_idx, baseline=baseline, kind="jump")
         assert out["morphology"] != "gaussian"
+
+
+def test_events_main_phase_template_uses_metadata_period_and_keeps_audit_fields(tmp_path: Path, monkeypatch) -> None:
+    lc_path = tmp_path / "periodic_with_dip.dat3"
+    times, mags = _periodic_dip_lightcurve()
+    _write_dat3(lc_path, times, mags)
+
+    input_file = tmp_path / "paths.txt"
+    input_file.write_text(f"{lc_path}\n", encoding="ascii")
+
+    metadata_file = tmp_path / "metadata.csv"
+    pd.DataFrame(
+        {
+            "path": [str(lc_path)],
+            "excluded_cameras": [""],
+            "pre_periodicity_label": ["periodic"],
+            "pre_periodic_flag": [True],
+            "pre_periodicity_selected_period": [6.0],
+            "pre_periodicity_method": ["pdm"],
+        }
+    ).to_csv(metadata_file, index=False)
+
+    output_path = tmp_path / "lc_events_results.parquet"
+    monkeypatch.setattr("malca.events.ProcessPoolExecutor", ThreadPoolExecutor)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "malca.events",
+            "--input-file",
+            str(input_file),
+            "--metadata-csv",
+            str(metadata_file),
+            "--output",
+            str(output_path),
+            "--output-format",
+            "parquet",
+            "--baseline-func",
+            "phase_template",
+            "--workers",
+            "1",
+            "--logbf-threshold-dip",
+            "2.0",
+            "--logbf-threshold-jump",
+            "2.0",
+            "--run-min-points",
+            "2",
+        ],
+    )
+
+    events_main()
+
+    out = pd.read_parquet(output_path)
+    assert len(out) == 1
+    assert out.loc[0, "baseline_source"] == "phase_template"
+    assert out.loc[0, "pre_periodicity_label"] == "periodic"
+    assert bool(out.loc[0, "pre_periodic_flag"]) is True
+    assert np.isclose(out.loc[0, "pre_periodicity_selected_period"], 6.0)
+    assert out.loc[0, "pre_periodicity_method"] == "pdm"

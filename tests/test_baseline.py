@@ -6,7 +6,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from malca.baseline import global_median_baseline, per_camera_median_baseline, per_camera_gp_baseline
+from malca.baseline import (
+    global_median_baseline,
+    per_camera_gp_baseline,
+    per_camera_median_baseline,
+    phase_template_baseline,
+)
 
 
 def make_synthetic_lc(
@@ -53,6 +58,51 @@ def inject_dip(
     gaussian = amplitude * np.exp(-0.5 * ((df["JD"] - t0) / sigma) ** 2)
     df["mag"] = df["mag"] + gaussian  # Positive = fainter = dip
     return df
+
+
+def inject_jump(
+    df: pd.DataFrame,
+    t0: float,
+    amplitude: float = 0.5,
+    sigma: float = 10.0,
+) -> pd.DataFrame:
+    """Inject a Gaussian brightening into the light curve."""
+    df = df.copy()
+    gaussian = amplitude * np.exp(-0.5 * ((df["JD"] - t0) / sigma) ** 2)
+    df["mag"] = df["mag"] - gaussian  # Negative = brighter = jump
+    return df
+
+
+def make_periodic_template_lc(
+    n_points: int = 320,
+    period_days: float = 7.0,
+    base_mag: float = 14.0,
+    scatter: float = 0.015,
+    seed: int = 123,
+) -> tuple[pd.DataFrame, np.ndarray]:
+    """Synthetic multi-camera, multi-band periodic source for phase-template tests."""
+    rng = np.random.default_rng(seed)
+    jd = 2458000.0 + np.sort(rng.uniform(0.0, 180.0, n_points))
+    phase = np.mod((jd - jd.min()) / period_days, 1.0)
+    waveform = 0.18 * np.sin(2.0 * np.pi * phase) + 0.06 * np.cos(4.0 * np.pi * phase)
+
+    camera = np.where(np.arange(n_points) % 2 == 0, 1, 2)
+    band = np.where(np.arange(n_points) % 3 == 0, 1, 0)
+    camera_offset = np.where(camera == 2, 0.05, 0.0)
+    band_offset = np.where(band == 1, 0.45, 0.0)
+    noise = rng.normal(0.0, scatter, n_points)
+
+    df = pd.DataFrame(
+        {
+            "JD": jd,
+            "mag": base_mag + waveform + camera_offset + band_offset + noise,
+            "error": np.full(n_points, 0.02, dtype=float),
+            "camera#": camera,
+            "v_g_band": band,
+            "saturated": 0,
+        }
+    )
+    return df, waveform
 
 
 class TestSigmaFloorConsistency:
@@ -160,3 +210,32 @@ class TestEdgeCases:
         result = per_camera_gp_baseline(df, add_sigma_eff_col=True)
         
         assert len(result) == 0
+
+
+class TestPhaseTemplateBaseline:
+    def test_phase_template_removes_periodic_waveform_and_keeps_stochastic_dip(self):
+        period_days = 7.0
+        df, waveform = make_periodic_template_lc(period_days=period_days, seed=1001)
+        t0 = float(df["JD"].median())
+        df = inject_dip(df, t0=t0, amplitude=0.45, sigma=0.8)
+
+        result = phase_template_baseline(df, period_days=period_days)
+        event_mask = np.abs(result["JD"] - t0) <= 1.5
+
+        assert set(result["baseline_source"].astype(str)) == {"phase_template"}
+        assert np.nanstd(result.loc[~event_mask, "resid"]) < 0.08
+        assert float(result.loc[event_mask, "resid"].max()) > 0.20
+        assert np.nanstd(waveform) > np.nanstd(result.loc[~event_mask, "resid"])
+
+    def test_phase_template_keeps_brightening_residual(self):
+        period_days = 5.5
+        df, _waveform = make_periodic_template_lc(period_days=period_days, seed=1002)
+        t0 = float(df["JD"].median())
+        df = inject_jump(df, t0=t0, amplitude=0.40, sigma=0.8)
+
+        result = phase_template_baseline(df, period_days=period_days)
+        event_mask = np.abs(result["JD"] - t0) <= 1.5
+
+        assert set(result["baseline_source"].astype(str)) == {"phase_template"}
+        assert np.nanstd(result.loc[~event_mask, "resid"]) < 0.08
+        assert float(result.loc[event_mask, "resid"].min()) < -0.18

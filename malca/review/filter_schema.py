@@ -392,6 +392,10 @@ SIDEBAR_GROUPS = [
     ]),
     ("Light Curve Basics", [
         ("text", "baseline_source"),
+        ("select", "pre_periodicity_label"),
+        ("bool", "pre_periodic_flag"),
+        ("num", "pre_periodicity_selected_period"),
+        ("select", "pre_periodicity_method"),
         ("text", "trigger_mode"),
         ("num", "n_points"),
         ("num", "n_cameras"),

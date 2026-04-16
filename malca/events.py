@@ -23,6 +23,7 @@ import pyarrow.parquet as pq
 
 from malca.baseline import (
     global_median_baseline,
+    phase_template_baseline,
     per_camera_median_baseline,
     per_camera_gp_baseline,
     per_camera_gp_baseline_masked,
@@ -1153,11 +1154,17 @@ def process_lightcurve(
     baseline_kwargs: dict | None = None,
 
     compute_event_prob: bool,
+    path_metadata: dict | None = None,
     excluded_cameras: str | None = None,
     auto_filter_bad_cameras: bool = False,
     bad_camera_scatter_ratio: float = 2.5,
 ):
     path = str(path)
+    path_metadata = dict(path_metadata or {})
+    if excluded_cameras is None and "excluded_cameras" in path_metadata:
+        excluded_cameras = path_metadata.get("excluded_cameras")
+        if pd.isna(excluded_cameras) or excluded_cameras == "":
+            excluded_cameras = None
 
     if os.path.isfile(path) and path.endswith('.csv'):
         df = read_skypatrol_csv(path)
@@ -1197,8 +1204,17 @@ def process_lightcurve(
         "gp_masked": per_camera_gp_baseline_masked,
         "global_median": global_median_baseline,
         "per_camera_median": per_camera_median_baseline,
+        "phase_template": phase_template_baseline,
     }
     baseline_func = baseline_func_map.get(baseline_tag, per_camera_gp_baseline)
+
+    baseline_kwargs_local = dict(DEFAULT_BASELINE_KWARGS if baseline_kwargs is None else baseline_kwargs)
+    if baseline_tag == "phase_template":
+        period_value = path_metadata.get("pre_periodicity_selected_period")
+        try:
+            baseline_kwargs_local["period_days"] = float(period_value)
+        except (TypeError, ValueError):
+            baseline_kwargs_local["period_days"] = np.nan
 
     # Build mag grids from min/max/points if bounds are provided
     mag_grid_dip = None
@@ -1230,7 +1246,7 @@ def process_lightcurve(
 
         compute_event_prob=compute_event_prob,
         baseline_func=baseline_func,
-        baseline_kwargs=baseline_kwargs,
+        baseline_kwargs=baseline_kwargs_local,
     )
 
     dip = res["dip"]
@@ -1448,9 +1464,9 @@ def _init_worker(config: dict) -> None:
     _worker_config.update(config)
 
 
-def _process_one(path: str, excluded_cameras: str | None) -> dict:
+def _process_one(path: str, path_metadata: dict | None) -> dict:
     """Process a single light curve using config from _worker_config. Called by executor with minimal per-task args."""
-    return process_lightcurve(path, excluded_cameras=excluded_cameras, **_worker_config)
+    return process_lightcurve(path, path_metadata=path_metadata, **_worker_config)
 
 
 def main():
@@ -1486,7 +1502,7 @@ def main():
         "--baseline-func",
         type=str,
         default=BASELINE_FUNC,
-        choices=["gp", "gp_masked", "global_median", "per_camera_median"],
+        choices=["gp", "gp_masked", "global_median", "per_camera_median", "phase_template"],
         help="Baseline function to use",
     )
     g_baseline.add_argument("--baseline-s0", type=float, default=BASELINE_S0, help="GP kernel S0 parameter (default: 0.0005)")
@@ -1893,15 +1909,13 @@ def main():
     ) as ex:
         futs = {}
         for path in expanded_inputs:
-            path_excluded = None
+            path_meta = None
             if metadata_by_path:
                 meta = metadata_by_path.get(str(path))
-                if meta and "excluded_cameras" in meta:
-                    path_excluded = meta.get("excluded_cameras")
-                    if pd.isna(path_excluded) or path_excluded == "":
-                        path_excluded = None
+                if meta:
+                    path_meta = dict(meta)
 
-            fut = ex.submit(_process_one, path, path_excluded)
+            fut = ex.submit(_process_one, path, path_meta)
             futs[fut] = path
 
 

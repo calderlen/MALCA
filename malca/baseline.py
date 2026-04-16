@@ -4,6 +4,11 @@ from celerite2 import GaussianProcess, terms
 import numpy as np
 import pandas as pd
 
+from malca.config.config_filters import (
+    PHASE_TEMPLATE_MIN_POINTS,
+    PHASE_TEMPLATE_PHASE_BINS,
+    PHASE_TEMPLATE_PROFILE_SMOOTH_WINDOW,
+)
 from malca.config.config_pipeline import (
     BASELINE_S0, BASELINE_W0, BASELINE_Q, BASELINE_JITTER,
     GP_FLOOR_CLIP, GP_FLOOR_ITERS, GP_MIN_FLOOR_POINTS,
@@ -69,6 +74,7 @@ def global_median_baseline(
     df_out.loc[:, "resid"] = resid
     df_out.loc[:, "sigma_resid"] = sigma_resid
     df_out.loc[:, "sigma_eff"] = sigma_eff
+    df_out.loc[:, "baseline_source"] = "global_median"
     return df_out
 
 
@@ -154,6 +160,262 @@ def per_camera_median_baseline(
         df_out.loc[idx, "resid"] = resid
         df_out.loc[idx, "sigma_resid"] = sigma_resid
         df_out.loc[idx, "sigma_eff"] = sigma_eff
+        df_out.loc[idx, "baseline_source"] = "per_camera_median"
+
+    return df_out
+
+
+def _robust_sigma(values: np.ndarray) -> float:
+    vals = np.asarray(values, dtype=float)
+    vals = vals[np.isfinite(vals)]
+    if vals.size < 3:
+        return np.nan
+
+    med = float(np.median(vals))
+    mad = float(MAD_SCALE * np.median(np.abs(vals - med)))
+    if np.isfinite(mad) and mad > 0:
+        return mad
+
+    sigma = float(np.nanstd(vals))
+    return sigma if np.isfinite(sigma) and sigma > 0 else np.nan
+
+
+def _circular_fill_and_smooth_template(
+    template: np.ndarray,
+    *,
+    smooth_window: int,
+) -> np.ndarray | None:
+    values = np.asarray(template, dtype=float)
+    n_bins = int(values.size)
+    finite = np.isfinite(values)
+    if n_bins == 0 or not finite.any():
+        return None
+
+    if finite.sum() == 1:
+        filled = np.full(n_bins, float(values[finite][0]), dtype=float)
+    else:
+        centers = (np.arange(n_bins, dtype=float) + 0.5) / float(n_bins)
+        xp = np.concatenate([centers[finite] - 1.0, centers[finite], centers[finite] + 1.0])
+        fp = np.concatenate([values[finite], values[finite], values[finite]])
+        filled = np.interp(centers, xp, fp)
+
+    window = max(int(smooth_window), 1)
+    if window % 2 == 0:
+        window += 1
+    if window <= 1:
+        smoothed = filled
+    else:
+        pad = window // 2
+        kernel = np.ones(window, dtype=float) / float(window)
+        ext = np.concatenate([filled[-pad:], filled, filled[:pad]])
+        smoothed = np.convolve(ext, kernel, mode="valid")
+
+    finite_smooth = np.isfinite(smoothed)
+    if finite_smooth.any():
+        smoothed = smoothed - float(np.median(smoothed[finite_smooth]))
+    return smoothed
+
+
+def _build_phase_template_model(
+    jd: np.ndarray,
+    centered_mag: np.ndarray,
+    *,
+    period_days: float,
+    phase_bins: int,
+    smooth_window: int,
+    min_bin_points: int,
+) -> np.ndarray | None:
+    valid = np.isfinite(jd) & np.isfinite(centered_mag)
+    if np.count_nonzero(valid) == 0:
+        return None
+
+    jd_valid = np.asarray(jd[valid], dtype=float)
+    centered_valid = np.asarray(centered_mag[valid], dtype=float)
+    jd0 = float(np.nanmin(jd_valid))
+    phase_valid = np.mod((jd_valid - jd0) / float(period_days), 1.0)
+
+    n_bins = max(int(phase_bins), 4)
+    template = np.full(n_bins, np.nan, dtype=float)
+    bin_idx = np.floor(phase_valid * n_bins).astype(int)
+    bin_idx = np.clip(bin_idx, 0, n_bins - 1)
+    for b in range(n_bins):
+        vals = centered_valid[bin_idx == b]
+        if vals.size >= int(min_bin_points):
+            template[b] = float(np.median(vals))
+
+    if np.count_nonzero(np.isfinite(template)) < max(6, n_bins // 4):
+        return None
+
+    smoothed = _circular_fill_and_smooth_template(template, smooth_window=smooth_window)
+    if smoothed is None:
+        return None
+
+    centers = (np.arange(n_bins, dtype=float) + 0.5) / float(n_bins)
+    xp = np.concatenate([centers - 1.0, centers, centers + 1.0])
+    fp = np.concatenate([smoothed, smoothed, smoothed])
+    phase_all = np.mod((np.asarray(jd, dtype=float) - jd0) / float(period_days), 1.0)
+    return np.interp(phase_all, xp, fp)
+
+
+def _phase_template_offsets(
+    df: pd.DataFrame,
+    *,
+    mag_col: str,
+    cam_col: str,
+    band_col: str,
+    min_camera_band_points: int,
+) -> np.ndarray:
+    mag = pd.to_numeric(df[mag_col], errors="coerce")
+    finite_mag = mag[np.isfinite(mag)]
+    global_median = float(np.median(finite_mag)) if not finite_mag.empty else 0.0
+
+    offsets = np.full(len(df), global_median, dtype=float)
+    work = pd.DataFrame(index=df.index)
+    work["_mag"] = mag
+
+    if cam_col in df.columns:
+        work["_camera"] = df[cam_col]
+        camera_median = work.groupby("_camera")["_mag"].median()
+        work = work.join(camera_median.rename("_camera_median"), on="_camera")
+        camera_vals = work["_camera_median"].to_numpy(dtype=float)
+        camera_mask = np.isfinite(camera_vals)
+        offsets[camera_mask] = camera_vals[camera_mask]
+
+    if band_col in df.columns:
+        work["_band"] = pd.to_numeric(df[band_col], errors="coerce")
+        band_median = work.groupby("_band")["_mag"].median()
+        work = work.join(band_median.rename("_band_median"), on="_band")
+        band_vals = work["_band_median"].to_numpy(dtype=float)
+        band_mask = np.isfinite(band_vals)
+        offsets[band_mask] = band_vals[band_mask]
+
+        if "_camera" in work.columns:
+            camera_band = (
+                work.groupby(["_band", "_camera"], dropna=False)["_mag"]
+                .agg(["median", "size"])
+                .rename(columns={"median": "_camera_band_median", "size": "_camera_band_size"})
+            )
+            work = work.join(camera_band, on=["_band", "_camera"])
+            camera_band_size = pd.to_numeric(work["_camera_band_size"], errors="coerce").to_numpy(dtype=float)
+            camera_band_median = pd.to_numeric(work["_camera_band_median"], errors="coerce").to_numpy(dtype=float)
+            use_camera_band = (
+                np.isfinite(camera_band_size)
+                & (camera_band_size >= int(min_camera_band_points))
+                & np.isfinite(camera_band_median)
+            )
+            offsets[use_camera_band] = camera_band_median[use_camera_band]
+
+    return offsets
+
+
+def phase_template_baseline(
+    df,
+    *,
+    period_days=None,
+    phase_bins=PHASE_TEMPLATE_PHASE_BINS,
+    profile_smooth_window=PHASE_TEMPLATE_PROFILE_SMOOTH_WINDOW,
+    min_points=PHASE_TEMPLATE_MIN_POINTS,
+    min_bin_points=3,
+    min_camera_band_points=8,
+    t_col="JD",
+    mag_col="mag",
+    err_col="error",
+    cam_col="camera#",
+    band_col="v_g_band",
+    **kwargs,
+):
+    try:
+        period_value = float(period_days)
+    except (TypeError, ValueError):
+        period_value = np.nan
+
+    def _fallback() -> pd.DataFrame:
+        if cam_col in df.columns:
+            out = per_camera_median_baseline(
+                df,
+                t_col=t_col,
+                mag_col=mag_col,
+                err_col=err_col,
+                cam_col=cam_col,
+            )
+        else:
+            out = global_median_baseline(
+                df,
+                t_col=t_col,
+                mag_col=mag_col,
+                err_col=err_col,
+            )
+        out.loc[:, "baseline_source"] = "phase_template_fallback"
+        return out
+
+    if not np.isfinite(period_value) or period_value <= 0:
+        return _fallback()
+
+    df_out = df.copy()
+    for col in ("baseline", "resid", "sigma_resid", "sigma_eff", "baseline_source"):
+        if col not in df_out.columns:
+            df_out[col] = np.nan if col != "baseline_source" else "unknown"
+
+    jd = pd.to_numeric(df_out[t_col], errors="coerce").to_numpy(dtype=float)
+    mag = pd.to_numeric(df_out[mag_col], errors="coerce").to_numpy(dtype=float)
+    err = pd.to_numeric(df_out[err_col], errors="coerce").to_numpy(dtype=float)
+    finite = np.isfinite(jd) & np.isfinite(mag)
+    if np.count_nonzero(finite) < int(min_points):
+        return _fallback()
+
+    offsets = _phase_template_offsets(
+        df_out,
+        mag_col=mag_col,
+        cam_col=cam_col,
+        band_col=band_col,
+        min_camera_band_points=min_camera_band_points,
+    )
+    centered_mag = mag - offsets
+    template_model = _build_phase_template_model(
+        jd,
+        centered_mag,
+        period_days=period_value,
+        phase_bins=int(phase_bins),
+        smooth_window=int(profile_smooth_window),
+        min_bin_points=int(min_bin_points),
+    )
+    if template_model is None or not np.isfinite(template_model).any():
+        return _fallback()
+
+    baseline = template_model + offsets
+    resid = mag - baseline
+    df_out.loc[:, "baseline"] = baseline
+    df_out.loc[:, "resid"] = resid
+    df_out.loc[:, "baseline_source"] = "phase_template"
+
+    if cam_col in df_out.columns:
+        grouped = df_out.groupby(cam_col, group_keys=False)
+    else:
+        grouped = [(None, df_out)]
+
+    for _, sub in grouped:
+        idx = sub.index
+        resid_here = df_out.loc[idx, "resid"].to_numpy(dtype=float)
+        err_here = pd.to_numeric(df_out.loc[idx, err_col], errors="coerce").to_numpy(dtype=float)
+        scatter = _robust_sigma(resid_here)
+        err_finite = err_here[np.isfinite(err_here) & (err_here > 0)]
+        err_med = float(np.median(err_finite)) if err_finite.size else np.nan
+
+        scatter_num = scatter if np.isfinite(scatter) else 0.0
+        err_med_num = err_med if np.isfinite(err_med) else 0.0
+        robust_std = float(np.sqrt(scatter_num**2 + err_med_num**2))
+        robust_std = max(robust_std, 1e-6)
+
+        sigma_resid = resid_here / robust_std
+        err_safe = np.where(np.isfinite(err_here) & (err_here > 0), err_here, err_med_num)
+        sigma_eff = np.sqrt(err_safe**2 + scatter_num**2)
+        sigma_eff = np.maximum(sigma_eff, 1e-6)
+
+        df_out.loc[idx, "sigma_resid"] = sigma_resid
+        df_out.loc[idx, "sigma_eff"] = sigma_eff
+
+    if not np.isfinite(pd.to_numeric(df_out["sigma_eff"], errors="coerce")).any():
+        return _fallback()
 
     return df_out
 

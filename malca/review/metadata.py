@@ -108,6 +108,10 @@ REVIEW_METADATA_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("Camera max points", "camera_max_points"),
         ("Baseline mag", "baseline_mag"),
         ("Baseline source", "baseline_source"),
+        ("Pre-periodicity label", "pre_periodicity_label"),
+        ("Pre-periodic flag", "pre_periodic_flag"),
+        ("Selected period (d)", "pre_periodicity_selected_period"),
+        ("Selected method", "pre_periodicity_method"),
     ]),
     ("Event Scoring", [
         ("Dipper N dips", "dipper_n_dips"),

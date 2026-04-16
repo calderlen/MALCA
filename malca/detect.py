@@ -78,7 +78,6 @@ from malca.enrich.neighbor import run_neighbor_enrichment
 from malca.enrich.spectra import run_spectra_availability
 from malca.gaia_fetch import _extract_gaia_ids, fetch_gaia_catalog
 from malca.manifest import build_manifest
-from malca.periodic_events import run_periodic_events
 from malca.periodicity_gate import apply_pre_periodicity_gate
 from malca.plot import plot_passing_candidates
 from malca.filter import apply_filters
@@ -811,7 +810,7 @@ def main():
         "--baseline-func",
         type=str,
         default=BASELINE_FUNC,
-        choices=["gp", "gp_masked", "global_median", "per_camera_median"],
+        choices=["gp", "gp_masked", "global_median", "per_camera_median", "phase_template"],
         help="Baseline function",
     )
     g_events.add_argument("--baseline-s0", type=float, default=BASELINE_S0, help="GP kernel S0 parameter (default: 0.0005)")
@@ -1158,8 +1157,6 @@ def main():
         elif args.out_dir is None and not events_output.is_absolute():
             events_output = out_dir / events_output
 
-    events_args.extend(["--output", str(events_output)])
-
     manifest_file = Path(args.manifest_file).expanduser() if args.manifest_file else (manifests_dir / f"lc_manifest_{mag_bin_tag}.parquet")
     filtered_file = Path(args.filtered_file).expanduser() if args.filtered_file else (tags_dir / f"lc_filtered_{mag_bin_tag}.parquet")
     stats_checkpoint_file = tags_dir / f"lc_stats_checkpoint_{mag_bin_tag}.parquet"
@@ -1167,12 +1164,14 @@ def main():
     periodic_branch_file = manifests_dir / f"lc_periodic_branch_{mag_bin_tag}.parquet"
     stochastic_branch_file = manifests_dir / f"lc_stochastic_branch_{mag_bin_tag}.parquet"
     periodic_paths_file = paths_dir / f"periodic_paths_{mag_bin_tag}.txt"
-    periodic_events_output = results_dir / f"lc_periodic_events_results_{mag_bin_tag}.parquet"
+    branch_cache_dir = results_dir / "_branch_events"
+    branch_cache_dir.mkdir(parents=True, exist_ok=True)
+    periodic_branch_events_output = branch_cache_dir / f"lc_events_periodic_branch_{mag_bin_tag}.parquet"
+    stochastic_branch_events_output = branch_cache_dir / f"lc_events_stochastic_branch_{mag_bin_tag}.parquet"
     if args.pre_periodicity_checkpoint is None:
         pre_periodicity_checkpoint = tags_dir / f"pre_periodicity_checkpoint_{mag_bin_tag}.parquet"
     else:
         pre_periodicity_checkpoint = Path(args.pre_periodicity_checkpoint).expanduser()
-    periodic_events_checkpoint = results_dir / f"lc_periodic_events_results_{mag_bin_tag}_CHECKPOINT.parquet"
 
     # Save run parameters to JSON for full reproducibility
     run_start_time = datetime.now()
@@ -1217,11 +1216,12 @@ def main():
             "workers": args.pre_periodicity_workers,
             "checkpoint": str(pre_periodicity_checkpoint),
         },
-        "periodic_events": {
+        "periodic_branch": {
             "enabled": args.apply_pre_periodicity_gate,
+            "mode": "events_phase_template_residual",
+            "baseline_func": "phase_template",
             "workers": args.workers,
-            "checkpoint": str(periodic_events_checkpoint),
-            "output": str(periodic_events_output),
+            "cache_dir": str(branch_cache_dir),
         },
         "filter": {
             "apply_evidence_strength": not args.skip_evidence_strength,
@@ -1383,8 +1383,8 @@ def main():
             "pre_periodicity_strong_single_sig": args.pre_periodicity_strong_single_sig,
             "pre_periodicity_workers": args.pre_periodicity_workers,
             "pre_periodicity_checkpoint": str(pre_periodicity_checkpoint),
-            "periodic_events_output": str(periodic_events_output),
-            "periodic_events_checkpoint": str(periodic_events_checkpoint),
+            "periodic_branch_events_output": str(periodic_branch_events_output),
+            "stochastic_branch_events_output": str(stochastic_branch_events_output),
             # Step 5: Filter
             "run_filter": args.run_filter,
             "skip_evidence_strength": args.skip_evidence_strength,
@@ -1477,7 +1477,7 @@ def main():
             "periodic_branch_file": str(periodic_branch_file),
             "stochastic_branch_file": str(stochastic_branch_file),
             "periodic_paths_file": str(periodic_paths_file),
-            "periodic_events_output": str(periodic_events_output),
+            "branch_cache_dir": str(branch_cache_dir),
             "events_output": str(events_output),
         }
 
@@ -1509,7 +1509,7 @@ def main():
                 f"paths_dir: {paths_dir}",
                 f"results_dir: {results_dir}",
                 f"results_output: {events_output}",
-                f"periodic_events_output: {periodic_events_output}",
+                f"branch_cache_dir: {branch_cache_dir}",
                 f"manifest_file: {manifest_file}",
                 f"filtered_file: {filtered_file}",
                 f"stats_checkpoint: {stats_checkpoint_file}",
@@ -1525,7 +1525,155 @@ def main():
     df_filtered = pd.DataFrame()
     df_periodic_candidates = pd.DataFrame()
     pre_periodicity_stats: dict[str, object] | None = None
-    periodic_events_stats: dict[str, object] | None = None
+    branch_detection_stats: dict[str, object] | None = None
+
+    def _normalized_output_path(path: Path, fmt: str) -> Path:
+        if fmt == "parquet_chunk":
+            return path if not path.suffix else path.with_suffix("")
+        expected_suffix = ".csv" if fmt == "csv" else ".parquet"
+        return path if path.suffix.lower() == expected_suffix else path.with_suffix(expected_suffix)
+
+    def _output_files_for_path(path: Path, fmt: str) -> list[Path]:
+        path = _normalized_output_path(path, fmt)
+        if fmt == "parquet_chunk":
+            return sorted(path.glob("chunk_*.parquet")) if path.exists() and path.is_dir() else []
+        return [path] if path.exists() and path.is_file() else []
+
+    def _load_events_output(path: Path, fmt: str) -> pd.DataFrame:
+        path = _normalized_output_path(path, fmt)
+        files = _output_files_for_path(path, fmt)
+        if not files:
+            return pd.DataFrame()
+        if fmt == "csv":
+            return pd.read_csv(files[0])
+        return pd.concat([pd.read_parquet(f) for f in files], ignore_index=True)
+
+    def _write_events_output(df: pd.DataFrame, path: Path, fmt: str) -> list[Path]:
+        path = _normalized_output_path(path, fmt)
+        if fmt == "parquet_chunk":
+            if path.exists():
+                clear_existing_output(path, fmt)
+            path.mkdir(parents=True, exist_ok=True)
+            chunk_path = path / "chunk_000000.parquet"
+            df.to_parquet(chunk_path, index=False, compression=PARQUET_OUTPUT_COMPRESSION)
+            return [chunk_path]
+        if fmt == "csv":
+            path.parent.mkdir(parents=True, exist_ok=True)
+            df.to_csv(path, index=False)
+        else:
+            safe_write_parquet(df, path)
+        return [path]
+
+    def _run_events_branch(
+        file_paths: list[str],
+        *,
+        branch_name: str,
+        branch_output: Path,
+        baseline_func_override: str | None = None,
+        metadata_df: pd.DataFrame | None = None,
+        branch_paths_file: Path | None = None,
+    ) -> tuple[pd.DataFrame, dict[str, object]]:
+        branch_output = Path(branch_output)
+        checkpoint_log = branch_output.with_name(f"{branch_output.stem}_PROCESSED.txt")
+        metadata_path: Path | None = None
+
+        if args.overwrite:
+            clear_existing_output(branch_output, "parquet")
+            checkpoint_log.unlink(missing_ok=True)
+
+        if metadata_df is not None and not metadata_df.empty:
+            metadata_dir = tags_dir / "metadata"
+            metadata_dir.mkdir(parents=True, exist_ok=True)
+            metadata_path = metadata_dir / f"metadata_{branch_name}_{mag_bin_tag}.csv"
+            metadata_df.to_csv(metadata_path, index=False)
+            log(
+                f"Wrote {branch_name} metadata CSV with columns: "
+                f"{', '.join(col for col in metadata_df.columns if col != 'path')}"
+            )
+
+        if branch_paths_file is not None:
+            branch_paths_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(branch_paths_file, "w") as f:
+                for path_value in file_paths:
+                    f.write(f"{path_value}\n")
+
+        processed_paths: set[str] = set()
+        if checkpoint_log.exists() and not args.overwrite:
+            try:
+                with open(checkpoint_log, "r") as f:
+                    processed_paths = {line.strip() for line in f if line.strip()}
+                log(
+                    f"{branch_name.title()} branch checkpoint detected, "
+                    f"skipping {len(processed_paths)} already-processed paths"
+                )
+            except Exception as e:
+                log(f"Warning: could not read checkpoint log {checkpoint_log}: {e}")
+
+        remaining = [path_value for path_value in file_paths if str(path_value) not in processed_paths]
+        if file_paths and (not remaining):
+            log(f"All {branch_name} branch paths already processed according to checkpoint.")
+
+        batch_size = max(1, args.batch_size)
+        total_batches = (len(remaining) + batch_size - 1) // batch_size
+        for batch_idx in range(total_batches):
+            start = batch_idx * batch_size
+            end = min(len(remaining), start + batch_size)
+            batch_paths = remaining[start:end]
+            log(
+                f"\nRunning {branch_name} branch batch {batch_idx + 1}/{total_batches} "
+                f"({len(batch_paths)} LCs)..."
+            )
+
+            batch_paths_file = paths_dir / f"batch_paths_{branch_name}_{mag_bin_tag}_{batch_idx}.txt"
+            with open(batch_paths_file, "w") as f:
+                for path_value in batch_paths:
+                    f.write(f"{path_value}\n")
+
+            branch_events_args = list(events_args)
+            if baseline_func_override is not None:
+                branch_events_args.extend(["--baseline-func", baseline_func_override])
+            branch_events_args.extend(["--output-format", "parquet", "--output", str(branch_output)])
+            if metadata_path is not None:
+                branch_events_args.extend(["--metadata-csv", str(metadata_path)])
+
+            events_cmd = [
+                sys.executable,
+                "-m",
+                "malca.events",
+                *branch_events_args,
+                "--input-file",
+                str(batch_paths_file),
+            ]
+
+            try:
+                result = subprocess.run(events_cmd, check=False)
+                if result.returncode != 0:
+                    print(f"events.py returned non-zero exit ({result.returncode}); stopping.")
+                    sys.exit(result.returncode)
+            except Exception as e:
+                print(f"\nError running events.py for {branch_name} branch: {e}")
+                if branch_paths_file is not None:
+                    print(f"\nBranch paths saved to: {branch_paths_file}")
+                sys.exit(1)
+
+            checkpoint_log.parent.mkdir(parents=True, exist_ok=True)
+            with open(checkpoint_log, "a") as f:
+                for path_value in batch_paths:
+                    f.write(f"{path_value}\n")
+
+        df_branch = pd.read_parquet(branch_output) if branch_output.exists() else pd.DataFrame()
+        stats = {
+            "branch": branch_name,
+            "baseline_func": baseline_func_override or args.baseline_func,
+            "total_input": int(len(file_paths)),
+            "total_results": int(len(df_branch)),
+            "dip_significant": int(df_branch["dip_significant"].fillna(False).sum()) if "dip_significant" in df_branch.columns else 0,
+            "jump_significant": int(df_branch["jump_significant"].fillna(False).sum()) if "jump_significant" in df_branch.columns else 0,
+            "output_file": str(branch_output),
+            "metadata_file": str(metadata_path) if metadata_path is not None else None,
+            "paths_file": str(branch_paths_file) if branch_paths_file is not None else None,
+        }
+        return df_branch, stats
 
     # Step 1: Build or load manifest
     if run_upstream:
@@ -1737,180 +1885,112 @@ def main():
             "candidates to the periodic branch"
         )
 
-    if run_upstream and args.apply_pre_periodicity_gate:
-        if not df_periodic_candidates.empty:
-            if args.overwrite and periodic_events_checkpoint.exists():
-                periodic_events_checkpoint.unlink()
-            if args.overwrite and periodic_events_output.exists():
-                periodic_events_output.unlink()
+    periodic_audit_cols = [
+        "pre_periodicity_label",
+        "pre_periodic_flag",
+        "pre_periodicity_selected_period",
+        "pre_periodicity_method",
+    ]
 
-            if args.force_tag or not periodic_events_output.exists():
-                log(
-                    "\nRunning periodic branch phase-folded dip finder "
-                    f"({len(df_periodic_candidates)} candidates, workers={args.workers})..."
-                )
-                df_periodic_events = run_periodic_events(
-                    df_periodic_candidates,
-                    path_col="dat_path" if "dat_path" in df_periodic_candidates.columns else "path",
-                    period_col="pre_periodicity_selected_period",
-                    excluded_cameras_col="excluded_cameras" if "excluded_cameras" in df_periodic_candidates.columns else None,
-                    bad_camera_scatter_ratio=BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
-                    clean_max_error_absolute=CLEAN_LC_MAX_ERROR_ABSOLUTE,
-                    clean_max_error_sigma=CLEAN_LC_MAX_ERROR_SIGMA,
-                    workers=args.workers,
-                    checkpoint_path=periodic_events_checkpoint,
-                    show_tqdm=args.verbose,
-                )
-                safe_write_parquet(df_periodic_events, periodic_events_output)
-            else:
-                log(f"\nLoading cached periodic branch results from {periodic_events_output}")
-                df_periodic_events = pd.read_parquet(periodic_events_output)
+    def _build_branch_metadata_df(df_branch: pd.DataFrame, path_col: str) -> pd.DataFrame | None:
+        meta_cols = [path_col]
+        if not args.skip_vsx and "vsx_sep_arcsec" in df_branch.columns and "vsx_class" in df_branch.columns:
+            meta_cols.extend(["vsx_sep_arcsec", "vsx_class"])
+        if "excluded_cameras" in df_branch.columns:
+            meta_cols.append("excluded_cameras")
+        for col in periodic_audit_cols:
+            if col in df_branch.columns and col not in meta_cols:
+                meta_cols.append(col)
+        if len(meta_cols) == 1:
+            return None
+        return df_branch[meta_cols].rename(columns={path_col: "path"}).copy()
 
-            n_periodic_significant = (
-                int(df_periodic_events["dip_significant"].fillna(False).sum())
-                if "dip_significant" in df_periodic_events.columns else 0
-            )
-            periodic_events_stats = {
-                "total_input": int(len(df_periodic_candidates)),
-                "total_results": int(len(df_periodic_events)),
-                "significant_dips": n_periodic_significant,
-                "output_file": str(periodic_events_output),
-                "checkpoint_file": str(periodic_events_checkpoint),
-            }
-            log(
-                f"Periodic branch found {n_periodic_significant}/{len(df_periodic_events)} "
-                "significant phase-folded dip candidates"
-            )
-        else:
-            periodic_events_stats = {
-                "total_input": 0,
-                "total_results": 0,
-                "significant_dips": 0,
-                "output_file": str(periodic_events_output),
-                "checkpoint_file": str(periodic_events_checkpoint),
-            }
-
-    # Step 3: Construct file paths (use full dat_path for events.py input)
-    file_col = "dat_path" if "dat_path" in df_filtered.columns else "path"
-
-    # Build metadata CSV with VSX tags and excluded_cameras
-    metadata_file = None
-    meta_cols = [file_col]
-    if not args.skip_vsx and "vsx_sep_arcsec" in df_filtered.columns and "vsx_class" in df_filtered.columns:
-        meta_cols.extend(["vsx_sep_arcsec", "vsx_class"])
-    if "excluded_cameras" in df_filtered.columns:
-        meta_cols.append("excluded_cameras")
-
-    if run_upstream and len(meta_cols) > 1:  # More than just file_col
-        metadata_dir = tags_dir / "metadata"
-        metadata_dir.mkdir(parents=True, exist_ok=True)
-        metadata_file = metadata_dir / f"metadata_{mag_bin_tag}.csv"
-        meta_df = df_filtered[meta_cols].rename(columns={file_col: "path"})
-        meta_df.to_csv(metadata_file, index=False)
-        events_args.extend(["--metadata-csv", str(metadata_file)])
-        log(f"Wrote metadata CSV with columns: {', '.join(meta_cols[1:])}")
-
-    file_paths = df_filtered[file_col].tolist() if run_upstream else []
-
-    # Step 4: Call events.py with the filtered paths in batches, with resume support
-    if run_upstream and file_paths:
-        log(f"\nPreparing to run events.py on {len(file_paths)} light curves...")
-    elif run_upstream:
-        log("\nNo stochastic-branch sources to process after filtering.")
-
-    # Write paths to temp file for events.py to consume
     paths_file = paths_dir / f"filtered_paths_{mag_bin_tag}.txt"
     if run_upstream:
-        with open(paths_file, "w") as f:
-            for path in file_paths:
-                f.write(f"{path}\n")
         if run_log.exists():
             try:
                 with run_log.open("a") as f:
                     f.write(f"paths_file: {paths_file}\n")
+                    f.write(f"periodic_paths_file: {periodic_paths_file}\n")
             except Exception as e:
                 if args.verbose:
-                    print(f"Warning: could not update run log with paths_file: {e}")
+                    print(f"Warning: could not update run log with branch paths files: {e}")
 
-    # Resume logic: skip paths already recorded in events checkpoint log if present
-    base_output = events_output or (results_dir / "lc_events_results.parquet")
-    suffix_map = {"csv": ".csv", "parquet": ".parquet", "parquet_chunk": None}
-    ext = suffix_map.get(events_format)
-    if ext and base_output.suffix.lower() != ext:
-        base_output = base_output.with_suffix(ext)
-    checkpoint_log = base_output.with_name(f"{base_output.stem}_PROCESSED.txt")
-    processed_paths: set[str] = set()
-    if run_upstream and checkpoint_log.exists() and args.overwrite:
-        try:
-            with open(checkpoint_log, "w"):
-                pass
-            log(f"Overwriting checkpoint log: {checkpoint_log}")
-        except Exception as e:
-            log(f"Warning: could not overwrite checkpoint log {checkpoint_log}: {e}")
+        stochastic_file_col = "dat_path" if "dat_path" in df_filtered.columns else "path"
+        stochastic_paths = [str(value) for value in df_filtered[stochastic_file_col].tolist()] if not df_filtered.empty else []
+        stochastic_metadata_df = _build_branch_metadata_df(df_filtered, stochastic_file_col) if not df_filtered.empty else None
 
-    if run_upstream and args.overwrite:
-        clear_existing_output(base_output, events_format)
+        periodic_file_col = "dat_path" if "dat_path" in df_periodic_candidates.columns else "path"
+        periodic_paths = [str(value) for value in df_periodic_candidates[periodic_file_col].tolist()] if not df_periodic_candidates.empty else []
+        periodic_metadata_df = _build_branch_metadata_df(df_periodic_candidates, periodic_file_col) if not df_periodic_candidates.empty else None
 
-    if run_upstream and checkpoint_log.exists() and not args.overwrite:
-        try:
-            with open(checkpoint_log, "r") as f:
-                processed_paths = {line.strip() for line in f if line.strip()}
-            log(f"Checkpoint detected, skipping {len(processed_paths)} already-processed paths")
-        except Exception as e:
-            log(f"Warning: could not read checkpoint log {checkpoint_log}: {e}")
+        if stochastic_paths:
+            log(f"\nPreparing to run stochastic branch events on {len(stochastic_paths)} light curves...")
+        else:
+            log("\nNo stochastic-branch sources to process after filtering.")
 
-    remaining = [p for p in file_paths if str(p) not in processed_paths]
-    if run_upstream and file_paths and (not remaining):
-        log("All paths already processed according to checkpoint.")
+        if periodic_paths:
+            log(
+                "\nPreparing to run periodic-branch residual events on "
+                f"{len(periodic_paths)} light curves..."
+            )
+        elif args.apply_pre_periodicity_gate:
+            log("\nNo periodic-branch sources to process after the pre-periodicity gate.")
 
-    # Batch and run
-    batch_size = max(1, args.batch_size)
-    total_batches = (len(remaining) + batch_size - 1) // batch_size if run_upstream else 0
-    for batch_idx in range(total_batches):
-        start = batch_idx * batch_size
-        end = min(len(remaining), start + batch_size)
-        batch_paths = remaining[start:end]
+        df_stochastic_events, stochastic_stats = _run_events_branch(
+            stochastic_paths,
+            branch_name="stochastic",
+            branch_output=stochastic_branch_events_output,
+            metadata_df=stochastic_metadata_df,
+            branch_paths_file=paths_file,
+        )
 
-        log(f"\nRunning batch {batch_idx + 1}/{total_batches} ({len(batch_paths)} LCs)...")
+        df_periodic_events = pd.DataFrame()
+        periodic_stats = {
+            "branch": "periodic",
+            "baseline_func": "phase_template",
+            "total_input": 0,
+            "total_results": 0,
+            "dip_significant": 0,
+            "jump_significant": 0,
+            "output_file": str(periodic_branch_events_output),
+            "metadata_file": None,
+            "paths_file": str(periodic_paths_file),
+        }
+        if args.apply_pre_periodicity_gate:
+            df_periodic_events, periodic_stats = _run_events_branch(
+                periodic_paths,
+                branch_name="periodic",
+                branch_output=periodic_branch_events_output,
+                baseline_func_override="phase_template",
+                metadata_df=periodic_metadata_df,
+                branch_paths_file=periodic_paths_file,
+            )
 
-        # Use --input-file to avoid long argv (ARG_MAX) for large batches
-        batch_paths_file = paths_dir / f"batch_paths_{mag_bin_tag}_{batch_idx}.txt"
-        with open(batch_paths_file, "w") as f:
-            for p in batch_paths:
-                f.write(f"{p}\n")
-
-        events_cmd = [
-            sys.executable, "-m", "malca.events",
-            *events_args,
-            "--input-file",
-            str(batch_paths_file),
-        ]
-
-        # Execute
-        try:
-            result = subprocess.run(events_cmd, check=False)
-            if result.returncode != 0:
-                print(f"events.py returned non-zero exit ({result.returncode}); stopping.")
-                sys.exit(result.returncode)
-        except Exception as e:
-            print(f"\nError running events.py: {e}")
-            print(f"\nFiltered paths saved to: {paths_file}")
-            print(f"You can manually run events.py with these paths")
-            sys.exit(1)
-
-        # Append processed paths to checkpoint log safely
-        checkpoint_log.parent.mkdir(parents=True, exist_ok=True)
-        with open(checkpoint_log, "a") as f:
-            for p in batch_paths:
-                f.write(f"{p}\n")
-
-    if run_upstream and file_paths:
-        log("\nAll batches completed.")
+        branch_frames = [df for df in (df_stochastic_events, df_periodic_events) if not df.empty]
+        if branch_frames:
+            df_events_merged = pd.concat(branch_frames, ignore_index=True)
+            if "path" in df_events_merged.columns:
+                df_events_merged = df_events_merged.drop_duplicates(subset=["path"], keep="last")
+            results_files = _write_events_output(df_events_merged, events_output, events_format)
+            log(f"\nMerged branch outputs into canonical events product at {events_output}")
+        else:
+            if args.overwrite:
+                clear_existing_output(_normalized_output_path(events_output, events_format), events_format)
+            results_files = []
+            log("\nNo event-branch results were produced.")
+        branch_detection_stats = {
+            "stochastic": stochastic_stats,
+            "periodic": periodic_stats if args.apply_pre_periodicity_gate else None,
+        }
+    else:
+        results_files = _output_files_for_path(events_output, events_format)
 
     # Generate run summary with results statistics
     run_end_time = datetime.now()
     run_summary_file = out_dir / "run_summary.json"
     try:
+        manifest_kept_total = len(df_filtered) + len(df_periodic_candidates)
         summary = {
             "run_info": {
                 "start_time": run_start_time.isoformat(),
@@ -1920,14 +2000,14 @@ def main():
             "config_fingerprint": config_fingerprint,
             "manifest_stats": {
                 "total_sources": len(df_manifest),
-                "filtered_sources": len(df_filtered),
-                "kept_fraction": len(df_filtered) / len(df_manifest) if len(df_manifest) > 0 else 0.0,
+                "filtered_sources": manifest_kept_total,
+                "kept_fraction": manifest_kept_total / len(df_manifest) if len(df_manifest) > 0 else 0.0,
             },
         }
         if pre_periodicity_stats is not None:
             summary["pre_periodicity_gate"] = pre_periodicity_stats
-        if periodic_events_stats is not None:
-            summary["periodic_events"] = periodic_events_stats
+        if branch_detection_stats is not None:
+            summary["events_branches"] = branch_detection_stats
 
         # Tag rejection breakdown
         rejected_log = tags_dir / f"rejected_tag_{mag_bin_tag}.csv"
@@ -1944,24 +2024,9 @@ def main():
                 if args.verbose:
                     print(f"Warning: could not parse rejection log: {e}")
 
-        # Detection results statistics
-        results_files = []
-        if events_format == "csv":
-            if base_output.exists():
-                results_files = [base_output]
-        elif events_format == "parquet":
-            if base_output.exists():
-                results_files = [base_output]
-        elif events_format == "parquet_chunk":
-            chunk_dir = base_output.parent if base_output.suffix else base_output
-            results_files = sorted(chunk_dir.glob("chunk_*.parquet"))
-
         if results_files:
             try:
-                if events_format == "csv":
-                    df_results = pd.read_csv(results_files[0])
-                else:  # parquet or parquet_chunk
-                    df_results = pd.concat([pd.read_parquet(f) for f in results_files], ignore_index=True)
+                df_results = _load_events_output(events_output, events_format)
 
                 detection_stats = {
                     "total_detections": len(df_results),
@@ -1983,18 +2048,6 @@ def main():
             except Exception as e:
                 if args.verbose:
                     print(f"Warning: could not parse detection results: {e}")
-
-        if periodic_events_output.exists():
-            try:
-                df_periodic_results = pd.read_parquet(periodic_events_output)
-                summary["periodic_detection_stats"] = {
-                    "total_results": int(len(df_periodic_results)),
-                    "significant_dips": int(df_periodic_results["dip_significant"].fillna(False).sum()) if "dip_significant" in df_periodic_results.columns else 0,
-                    "unique_sources": df_periodic_results["path"].nunique() if "path" in df_periodic_results.columns else None,
-                }
-            except Exception as e:
-                if args.verbose:
-                    print(f"Warning: could not parse periodic branch results: {e}")
 
         # Write summary (will be updated again if filter/postprocess run)
         with open(run_summary_file, "w") as f:
@@ -2236,7 +2289,7 @@ def main():
     if run_downstream:
         log("\n=== Merging per-mag-bin outputs ===")
         merge_started = time.perf_counter()
-        for merge_prefix in ("lc_events_results", "lc_events_filtered", "lc_events_enriched", "lc_periodic_events_results"):
+        for merge_prefix in ("lc_events_results", "lc_events_filtered", "lc_events_enriched"):
             tagged_files = sorted(results_dir.glob(f"{merge_prefix}_*.parquet"))
             # Exclude checkpoint and temp files from merging
             tagged_files = [

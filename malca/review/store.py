@@ -587,6 +587,10 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("n_cameras",                "REAL",    "float"),
     ("baseline_mag",             "REAL",    "float"),
     ("baseline_source",          "TEXT",    "text"),
+    ("pre_periodicity_label",    "TEXT",    "select"),
+    ("pre_periodic_flag",        "INTEGER", "bool"),
+    ("pre_periodicity_selected_period", "REAL", "float"),
+    ("pre_periodicity_method",   "TEXT",    "select"),
     ("cadence_median_days",      "REAL",    "float"),
     ("trigger_mode",             "TEXT",    "text"),
     # -- YSO / classification --
