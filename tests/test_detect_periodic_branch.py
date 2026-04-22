@@ -1,9 +1,49 @@
 from __future__ import annotations
 
 import sys
+import types
 from pathlib import Path
 
 import pandas as pd
+
+if "dustmaps3d" not in sys.modules:
+    fake_dustmaps3d = types.ModuleType("dustmaps3d")
+    fake_dustmaps3d.dustmaps3d = object()
+    sys.modules["dustmaps3d"] = fake_dustmaps3d
+
+if "banyan_sigma" not in sys.modules:
+    sys.modules["banyan_sigma"] = types.ModuleType("banyan_sigma")
+
+if "celerite2" not in sys.modules:
+    fake_celerite2 = types.ModuleType("celerite2")
+
+    class _DummyGP:
+        def __init__(self, *args, **kwargs):
+            _ = args, kwargs
+
+    class _DummyTerm:
+        def __init__(self, *args, **kwargs):
+            _ = args, kwargs
+
+        def __add__(self, other):
+            return self
+
+    fake_celerite2.GaussianProcess = _DummyGP
+    fake_celerite2.terms = types.SimpleNamespace(SHOTerm=_DummyTerm, RealTerm=_DummyTerm)
+    sys.modules["celerite2"] = fake_celerite2
+
+if "iar.IARModel" not in sys.modules:
+    fake_iar_pkg = types.ModuleType("iar")
+    fake_iar_model = types.ModuleType("iar.IARModel")
+
+    def _dummy_iar(*args, **kwargs):
+        _ = args, kwargs
+        return float("nan")
+
+    fake_iar_model.IARphikalman = _dummy_iar
+    fake_iar_pkg.IARModel = fake_iar_model
+    sys.modules["iar"] = fake_iar_pkg
+    sys.modules["iar.IARModel"] = fake_iar_model
 
 import malca.detect as detect_module
 
@@ -38,8 +78,7 @@ def test_detect_periodic_only_pregate_writes_canonical_outputs(tmp_path: Path, m
         out["pre_periodicity_label"] = "periodic"
         out["pre_periodic_flag"] = True
         out["pre_periodicity_selected_period"] = 6.0
-        out["pre_periodicity_method"] = "pdm"
-        out["pre_periodicity_pdm_method"] = "plavchan"
+        out["pre_periodicity_method"] = "ce"
         return out
 
     seen: dict[str, object] = {}
@@ -124,7 +163,7 @@ def test_detect_periodic_only_pregate_writes_canonical_outputs(tmp_path: Path, m
     assert out.loc[0, "pre_periodicity_label"] == "periodic"
     assert bool(out.loc[0, "pre_periodic_flag"]) is True
     assert float(out.loc[0, "pre_periodicity_selected_period"]) == 6.0
-    assert out.loc[0, "pre_periodicity_method"] == "pdm"
+    assert out.loc[0, "pre_periodicity_method"] == "ce"
 
     assert seen["baseline_func"] == "phase_template"
     assert seen["metadata_cols"] == [

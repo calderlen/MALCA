@@ -53,15 +53,10 @@ from malca.config.config_filters import (
     MIN_BAYES_FACTOR, POST_FILTER_MIN_RUN_CAMERAS, POST_FILTER_MIN_RUN_POINTS,
     CLEAN_LC_MAX_ERROR_ABSOLUTE, CLEAN_LC_MAX_ERROR_SIGMA,
     BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
-    PRE_PERIODICITY_AGREEMENT_REL_TOL, PRE_PERIODICITY_CE_MIN_ENTROPY,
-    PRE_PERIODICITY_CE_SNR_THRESHOLD, PRE_PERIODICITY_LAG_PHASE_MAX,
-    PRE_PERIODICITY_MAX_PERIOD, PRE_PERIODICITY_MIN_POINTS,
-    PRE_PERIODICITY_MIN_PERIOD, PRE_PERIODICITY_N_BOOTSTRAP,
-    PRE_PERIODICITY_PDM_METHOD,
-    PRE_PERIODICITY_N_PERIODS, PRE_PERIODICITY_PDM_MIN_THETA,
-    PRE_PERIODICITY_PDM_SNR_THRESHOLD, PRE_PERIODICITY_SCATTER_RATIO_MAX,
-    PRE_PERIODICITY_SIGNIFICANCE, PRE_PERIODICITY_STRONG_SINGLE_SCATTER_RATIO_MAX,
-    PRE_PERIODICITY_STRONG_SINGLE_SIG, POST_FILTER_PDM_METHOD,
+    PRE_PERIODICITY_CE_SNR_THRESHOLD, PRE_PERIODICITY_MAX_PERIOD,
+    PRE_PERIODICITY_MIN_POINTS, PRE_PERIODICITY_MIN_PERIOD,
+    PRE_PERIODICITY_N_PERIODS, PRE_PERIODICITY_SCATTER_RATIO_MAX,
+    POST_FILTER_PDM_METHOD,
 )
 from malca.config.config_io import OUTPUT_FORMAT, EVENTS_OUTPUT_CHUNK_SIZE
 from malca.config.config_io import PARQUET_OUTPUT_COMPRESSION, PARQUET_CACHE_COMPRESSION
@@ -78,9 +73,10 @@ from malca.enrich.neighbor import run_neighbor_enrichment
 from malca.enrich.spectra import run_spectra_availability
 from malca.gaia_fetch import _extract_gaia_ids, fetch_gaia_catalog
 from malca.manifest import build_manifest
-from malca.periodicity_gate import apply_pre_periodicity_gate
+from malca.periodicity_gate import apply_pre_periodicity_gate, PREGATE_ROUTER_MODE
 from malca.plot import plot_passing_candidates
 from malca.filter import apply_filters
+from malca.run_metadata import build_run_summary, load_summary_state, preserve_imported_run_snapshots
 from malca.review.store import db_connect, import_candidates
 from concurrent.futures import ProcessPoolExecutor
 from malca.stats import compute_stats, _enrich_row_worker
@@ -771,23 +767,13 @@ def main():
     g_tag.add_argument("--stats-chunk-size", type=int, default=STATS_CHUNK_SIZE, help="Rows per checkpoint save during stats computation")
     g_tag.add_argument("--batch-size", type=int, default=BATCH_SIZE, help="Max light curves per events.py call")
 
-    g_pregate.add_argument("--apply-pre-periodicity-gate", action="store_true", help="Run CE/PDM periodicity gate before events.py and split confident periodic candidates out of the stochastic branch")
+    g_pregate.add_argument("--apply-pre-periodicity-gate", action="store_true", help="Run the CE-only periodicity gate before events.py and split confident periodic candidates out of the stochastic branch")
     g_pregate.add_argument("--pre-periodicity-min-period", type=float, default=PRE_PERIODICITY_MIN_PERIOD, help="Minimum trial period in days for the pre-events gate")
     g_pregate.add_argument("--pre-periodicity-max-period", type=float, default=PRE_PERIODICITY_MAX_PERIOD, help="Maximum trial period in days for the pre-events gate")
-    g_pregate.add_argument("--pre-periodicity-n-periods", type=int, default=PRE_PERIODICITY_N_PERIODS, help="Number of trial periods for CE/PDM in the pre-events gate")
-    g_pregate.add_argument("--pre-periodicity-n-bootstrap", type=int, default=PRE_PERIODICITY_N_BOOTSTRAP, help="Deprecated no-op retained for compatibility; the pre-events gate no longer runs bootstrap rescans")
-    g_pregate.add_argument("--pre-periodicity-significance", type=float, default=PRE_PERIODICITY_SIGNIFICANCE, help="Deprecated no-op retained for compatibility; the pre-events gate now routes deterministically")
-    g_pregate.add_argument("--pre-periodicity-pdm-method", type=str, default=PRE_PERIODICITY_PDM_METHOD, choices=list(PDM_METHOD_CHOICES), help="PDM implementation for the pre-events gate")
-    g_pregate.add_argument("--pre-periodicity-pdm-snr-threshold", type=float, default=PRE_PERIODICITY_PDM_SNR_THRESHOLD, help="Minimum PDM SNR for periodic gate support")
-    g_pregate.add_argument("--pre-periodicity-pdm-theta-threshold", type=float, default=PRE_PERIODICITY_PDM_MIN_THETA, help="Maximum PDM theta for periodic gate support")
-    g_pregate.add_argument("--pre-periodicity-ce-snr-threshold", type=float, default=PRE_PERIODICITY_CE_SNR_THRESHOLD, help="Minimum CE SNR for periodic gate support")
-    g_pregate.add_argument("--pre-periodicity-ce-entropy-threshold", type=float, default=PRE_PERIODICITY_CE_MIN_ENTROPY, help="Maximum CE entropy for periodic gate support")
+    g_pregate.add_argument("--pre-periodicity-n-periods", type=int, default=PRE_PERIODICITY_N_PERIODS, help="Number of CE trial periods for the pre-events gate")
+    g_pregate.add_argument("--pre-periodicity-ce-snr-threshold", type=float, default=PRE_PERIODICITY_CE_SNR_THRESHOLD, help="Minimum CE SNR for periodic routing")
     g_pregate.add_argument("--pre-periodicity-min-points", type=int, default=PRE_PERIODICITY_MIN_POINTS, help="Minimum cleaned LC points required for the pre-events gate")
-    g_pregate.add_argument("--pre-periodicity-agreement-rel-tol", type=float, default=PRE_PERIODICITY_AGREEMENT_REL_TOL, help="Relative tolerance for CE/PDM harmonic period agreement")
     g_pregate.add_argument("--pre-periodicity-scatter-ratio-max", type=float, default=PRE_PERIODICITY_SCATTER_RATIO_MAX, help="Maximum folded/raw scatter ratio for confident periodic routing")
-    g_pregate.add_argument("--pre-periodicity-strong-single-scatter-ratio-max", type=float, default=PRE_PERIODICITY_STRONG_SINGLE_SCATTER_RATIO_MAX, help="Stricter scatter-ratio cap when only one of CE/PDM strongly supports periodicity")
-    g_pregate.add_argument("--pre-periodicity-lag-phase-max", type=float, default=PRE_PERIODICITY_LAG_PHASE_MAX, help="Maximum inter-band phase lag tolerated for confident periodic routing")
-    g_pregate.add_argument("--pre-periodicity-strong-single-sig", type=float, default=PRE_PERIODICITY_STRONG_SINGLE_SIG, help="Deprecated no-op retained for compatibility; single-method routing is now deterministic")
     g_pregate.add_argument("--pre-periodicity-checkpoint", type=Path, default=None, help="Checkpoint parquet path for the pre-events periodicity gate")
     g_pregate.add_argument("--pre-periodicity-workers", type=int, default=WORKERS, help="Workers for the pre-events periodicity gate")
 
@@ -1197,20 +1183,13 @@ def main():
         "enforced_tags": enforced_tags,
         "pre_periodicity_gate": {
             "enabled": args.apply_pre_periodicity_gate,
-            "router_mode": "deterministic_no_bootstrap",
+            "router_mode": PREGATE_ROUTER_MODE,
             "min_period": args.pre_periodicity_min_period,
             "max_period": args.pre_periodicity_max_period,
             "n_periods": args.pre_periodicity_n_periods,
-            "pdm_method": args.pre_periodicity_pdm_method,
-            "pdm_snr_threshold": args.pre_periodicity_pdm_snr_threshold,
-            "pdm_theta_threshold": args.pre_periodicity_pdm_theta_threshold,
             "ce_snr_threshold": args.pre_periodicity_ce_snr_threshold,
-            "ce_entropy_threshold": args.pre_periodicity_ce_entropy_threshold,
             "min_points": args.pre_periodicity_min_points,
-            "agreement_rel_tol": args.pre_periodicity_agreement_rel_tol,
             "scatter_ratio_max": args.pre_periodicity_scatter_ratio_max,
-            "strong_single_scatter_ratio_max": args.pre_periodicity_strong_single_scatter_ratio_max,
-            "lag_phase_max": args.pre_periodicity_lag_phase_max,
             "workers": args.pre_periodicity_workers,
             "checkpoint": str(pre_periodicity_checkpoint),
         },
@@ -1282,21 +1261,29 @@ def main():
     run_params_file = out_dir / "run_params.json"
     run_params_tagged_file = out_dir / f"run_params_{mag_bin_tag}.json"
     run_summary_file = out_dir / "run_summary.json"
-    summary: dict[str, object] = {
-        "run_info": {
-            "start_time": run_start_time.isoformat(),
-            "stage": stage,
-        }
-    }
-    if run_summary_file.exists():
-        try:
-            with open(run_summary_file) as f:
-                existing_summary = json.load(f)
-            # Preserve existing stats, update run_info
-            existing_summary.update(summary)
-            summary = existing_summary
-        except Exception:
-            pass
+    imported_run_params_snapshot, imported_run_summary_snapshot = preserve_imported_run_snapshots(
+        stage=stage,
+        import_bundle=args.import_bundle,
+        out_dir=out_dir,
+        run_params_file=run_params_file,
+        run_summary_file=run_summary_file,
+    )
+
+    bundle_lightcurve_dir = out_dir / "bundle_assets" / "lightcurves"
+    bundle_lightcurve_count = (
+        sum(1 for p in bundle_lightcurve_dir.iterdir() if p.is_file())
+        if bundle_lightcurve_dir.is_dir()
+        else 0
+    )
+    manifests_file_count = sum(1 for p in manifests_dir.rglob("*") if p.is_file()) if manifests_dir.exists() else 0
+    tags_file_count = sum(1 for p in tags_dir.rglob("*") if p.is_file()) if tags_dir.exists() else 0
+    paths_file_count = sum(1 for p in paths_dir.rglob("*") if p.is_file()) if paths_dir.exists() else 0
+
+    summary_state = load_summary_state(
+        run_summary_file=run_summary_file,
+        run_start_time=run_start_time,
+        stage=stage,
+    )
 
     results_files: list[Path] = []
     cmd = shlex.join(getattr(sys, "orig_argv", None) or ([sys.executable] + sys.argv))
@@ -1308,6 +1295,8 @@ def main():
             "import_bundle": str(args.import_bundle) if args.import_bundle else None,
             "export_bundle": str(args.export_bundle) if args.export_bundle else None,
             "export_bundle_enabled": args.export_bundle_enabled,
+            "imported_run_params_snapshot": str(imported_run_params_snapshot) if imported_run_params_snapshot else None,
+            "imported_run_summary_snapshot": str(imported_run_summary_snapshot) if imported_run_summary_snapshot else None,
             "mag_bin": args.mag_bin,
             # Tag parameters
             "min_time_span": args.min_time_span,
@@ -1367,16 +1356,10 @@ def main():
             "pre_periodicity_min_period": args.pre_periodicity_min_period,
             "pre_periodicity_max_period": args.pre_periodicity_max_period,
             "pre_periodicity_n_periods": args.pre_periodicity_n_periods,
-            "pre_periodicity_router_mode": "deterministic_no_bootstrap",
-            "pre_periodicity_pdm_snr_threshold": args.pre_periodicity_pdm_snr_threshold,
-            "pre_periodicity_pdm_theta_threshold": args.pre_periodicity_pdm_theta_threshold,
+            "pre_periodicity_router_mode": PREGATE_ROUTER_MODE,
             "pre_periodicity_ce_snr_threshold": args.pre_periodicity_ce_snr_threshold,
-            "pre_periodicity_ce_entropy_threshold": args.pre_periodicity_ce_entropy_threshold,
             "pre_periodicity_min_points": args.pre_periodicity_min_points,
-            "pre_periodicity_agreement_rel_tol": args.pre_periodicity_agreement_rel_tol,
             "pre_periodicity_scatter_ratio_max": args.pre_periodicity_scatter_ratio_max,
-            "pre_periodicity_strong_single_scatter_ratio_max": args.pre_periodicity_strong_single_scatter_ratio_max,
-            "pre_periodicity_lag_phase_max": args.pre_periodicity_lag_phase_max,
             "pre_periodicity_workers": args.pre_periodicity_workers,
             "pre_periodicity_checkpoint": str(pre_periodicity_checkpoint),
             "periodic_branch_events_output": str(periodic_branch_events_output),
@@ -1475,6 +1458,10 @@ def main():
             "periodic_paths_file": str(periodic_paths_file),
             "branch_cache_dir": str(branch_cache_dir),
             "events_output": str(events_output),
+            "bundle_lightcurve_count": bundle_lightcurve_count,
+            "manifests_file_count": manifests_file_count,
+            "tags_file_count": tags_file_count,
+            "paths_file_count": paths_file_count,
         }
 
         for p in (run_params_file, run_params_tagged_file):
@@ -1790,10 +1777,10 @@ def main():
         if not rerun_pre_periodicity:
             log(f"\nLoading cached pre-periodicity gate results from {pre_periodicity_file}")
             df_gate = pd.read_parquet(pre_periodicity_file)
-            cached_method_ok = False
-            if "pre_periodicity_pdm_method" in df_gate.columns:
-                cached_methods = (
-                    df_gate["pre_periodicity_pdm_method"]
+            cached_router_ok = False
+            if "pre_periodicity_router_mode" in df_gate.columns:
+                cached_router_modes = (
+                    df_gate["pre_periodicity_router_mode"]
                     .dropna()
                     .astype(str)
                     .str.strip()
@@ -1801,18 +1788,18 @@ def main():
                     .unique()
                     .tolist()
                 )
-                cached_method_ok = cached_methods == [str(args.pre_periodicity_pdm_method).strip().lower()]
-            if "pre_periodic_flag" not in df_gate.columns or not cached_method_ok:
+                cached_router_ok = cached_router_modes == [PREGATE_ROUTER_MODE.lower()]
+            if "pre_periodic_flag" not in df_gate.columns or not cached_router_ok:
                 rerun_pre_periodicity = True
                 log(
                     "Cached pre-periodicity gate output is incompatible with the requested "
-                    f"PDM method '{args.pre_periodicity_pdm_method}'; recomputing."
+                    f"router mode '{PREGATE_ROUTER_MODE}'; recomputing."
                 )
 
         if rerun_pre_periodicity:
             log(
                 "\nRunning pre-events periodicity gate "
-                f"(CE/PDM deterministic, workers={args.pre_periodicity_workers})..."
+                f"({PREGATE_ROUTER_MODE}, workers={args.pre_periodicity_workers})..."
             )
             df_gate = apply_pre_periodicity_gate(
                 df_filtered,
@@ -1824,16 +1811,9 @@ def main():
                 min_period=args.pre_periodicity_min_period,
                 max_period=args.pre_periodicity_max_period,
                 n_periods=args.pre_periodicity_n_periods,
-                pdm_method=args.pre_periodicity_pdm_method,
-                pdm_snr_threshold=args.pre_periodicity_pdm_snr_threshold,
                 ce_snr_threshold=args.pre_periodicity_ce_snr_threshold,
-                pdm_theta_threshold=args.pre_periodicity_pdm_theta_threshold,
-                ce_entropy_threshold=args.pre_periodicity_ce_entropy_threshold,
                 min_points=args.pre_periodicity_min_points,
-                agreement_rel_tol=args.pre_periodicity_agreement_rel_tol,
                 scatter_ratio_max=args.pre_periodicity_scatter_ratio_max,
-                strong_single_scatter_ratio_max=args.pre_periodicity_strong_single_scatter_ratio_max,
-                lag_phase_max=args.pre_periodicity_lag_phase_max,
                 workers=args.pre_periodicity_workers,
                 checkpoint_path=pre_periodicity_checkpoint,
                 show_tqdm=args.verbose,
@@ -1983,20 +1963,24 @@ def main():
     run_end_time = datetime.now()
     run_summary_file = out_dir / "run_summary.json"
     try:
-        manifest_kept_total = len(df_filtered) + len(df_periodic_candidates)
-        summary = {
-            "run_info": {
-                "start_time": run_start_time.isoformat(),
-                "end_time": run_end_time.isoformat(),
-                "duration_seconds": (run_end_time - run_start_time).total_seconds(),
+        summary = build_run_summary(
+            previous_summary=summary_state if isinstance(summary_state, dict) else {},
+            run_start_time=run_start_time,
+            run_end_time=run_end_time,
+            config_fingerprint=config_fingerprint,
+            run_upstream=run_upstream,
+            manifest_total_sources=(int(len(df_manifest)) if run_upstream else None),
+            manifest_filtered_sources=(int(len(df_filtered) + len(df_periodic_candidates)) if run_upstream else None),
+            artifact_context={
+                "stage": stage,
+                "bundle_lightcurve_count": int(bundle_lightcurve_count),
+                "manifests_file_count": int(manifests_file_count),
+                "tags_file_count": int(tags_file_count),
+                "paths_file_count": int(paths_file_count),
+                "imported_run_params_snapshot": str(imported_run_params_snapshot) if imported_run_params_snapshot else None,
+                "imported_run_summary_snapshot": str(imported_run_summary_snapshot) if imported_run_summary_snapshot else None,
             },
-            "config_fingerprint": config_fingerprint,
-            "manifest_stats": {
-                "total_sources": len(df_manifest),
-                "filtered_sources": manifest_kept_total,
-                "kept_fraction": manifest_kept_total / len(df_manifest) if len(df_manifest) > 0 else 0.0,
-            },
-        }
+        )
         if pre_periodicity_stats is not None:
             summary["pre_periodicity_gate"] = pre_periodicity_stats
         if branch_detection_stats is not None:
