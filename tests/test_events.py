@@ -15,6 +15,7 @@ from malca.events import (
     classify_run_morphology,
     filter_runs,
     main as events_main,
+    score_events_bayesian,
     score_lightcurve,
 )
 from malca.baseline import per_camera_gp_baseline
@@ -269,6 +270,59 @@ class TestRunBayesianSignificance:
         has_triggers = len(result["dip"].get("event_indices", [])) > 0
         is_significant = result["dip"]["significant"]
         assert has_triggers or is_significant
+
+    def test_kept_run_summaries_stay_aligned_after_rejections(self, monkeypatch):
+        """Rejected early runs must not shift diagnostics onto later kept runs."""
+        jd = np.arange(60.0)
+        df = pd.DataFrame(
+            {
+                "JD": jd,
+                "mag": np.full_like(jd, 14.0, dtype=float),
+                "error": np.full_like(jd, 0.02, dtype=float),
+                "camera#": ["b0"] * len(jd),
+            }
+        )
+        df_base = df.copy()
+        df_base["baseline"] = 14.0
+        df_base["sigma_eff"] = 0.02
+        df_base["baseline_source"] = "test"
+
+        point_significance = np.zeros(len(jd), dtype=float)
+        point_significance[[5, 6]] = 10.0
+        point_significance[20:31] = 10.0
+
+        def fake_resolve_trigger_indices(**kwargs):
+            return {
+                "point_significance": point_significance,
+                "event_indices": np.array([5, 6, *range(20, 31)], dtype=int),
+                "trigger_threshold": 5.0,
+                "trigger_max": 10.0,
+            }
+
+        monkeypatch.setattr("malca.events.resolve_trigger_indices", fake_resolve_trigger_indices)
+        monkeypatch.setattr(
+            "malca.events.classify_run_morphology",
+            lambda *args, **kwargs: {"morphology": "test", "bic": 0.0, "delta_bic_null": 0.0, "params": {}},
+        )
+        monkeypatch.setattr("malca.events.compute_symmetry_score", lambda *args, **kwargs: 0.0)
+
+        result = score_events_bayesian(
+            df,
+            kind="dip",
+            baseline_func=None,
+            df_base=df_base,
+            trigger_mode="logbf",
+            logbf_threshold=5.0,
+            p_points=2,
+            mag_grid=np.array([0.2]),
+            run_min_points=3,
+            run_min_duration_days=5.0,
+            compute_event_prob=False,
+        )
+
+        assert len(result["run_summaries"]) == 1
+        assert result["run_summaries"][0]["start_idx"] == 20
+        assert result["run_summaries"][0]["duration_days"] == 10.0
 
 
 class TestEdgeCases:

@@ -995,9 +995,11 @@ def score_events_bayesian(
             cam_vec=cam_vec,
         )
 
+        kept_summaries = [s for s in initial_summaries if s.get("kept")]
+
         final_summaries = []
-        for i, r in enumerate(kept_runs):
-            summary = initial_summaries[i]
+        for r, summary in zip(kept_runs, kept_summaries):
+            summary = dict(summary)
             morph_res = classify_run_morphology(
                 jd,
                 mags,
