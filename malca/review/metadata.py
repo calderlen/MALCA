@@ -112,6 +112,10 @@ REVIEW_METADATA_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("Pre-periodic flag", "pre_periodic_flag"),
         ("Selected period (d)", "pre_periodicity_selected_period"),
         ("Selected method", "pre_periodicity_method"),
+        ("Phase-peak SNR", "pre_periodicity_phase_peak_snr"),
+        ("Phase-peak width", "pre_periodicity_phase_peak_width"),
+        ("Phase-peak regions", "pre_periodicity_phase_peak_regions"),
+        ("Phase-peak flag", "pre_periodicity_phase_peak_flag"),
     ]),
     ("Event Scoring", [
         ("Dipper N dips", "dipper_n_dips"),

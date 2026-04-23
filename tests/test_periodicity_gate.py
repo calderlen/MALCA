@@ -300,6 +300,7 @@ def test_apply_pre_periodicity_gate_uses_ce_snr_and_folded_scatter_only(monkeypa
             "selection_objective": 0.45,
             "scatter_ratio": 0.45,
             "lag_phase": np.nan,
+            "phase_peak_regions": 1.0,
             "alias_flag": False,
         }
 
@@ -322,6 +323,242 @@ def test_apply_pre_periodicity_gate_uses_ce_snr_and_folded_scatter_only(monkeypa
     assert out.loc[0, "pre_periodicity_label"] == "periodic"
     assert int(out.loc[0, "pre_periodicity_support_count"]) == 1
     assert out.loc[0, "pre_periodicity_reason"] == "ce,folded_scatter"
+
+
+def test_apply_pre_periodicity_gate_rescues_phase_concentrated_scatter_near_miss(monkeypatch) -> None:
+    df_lc = _two_band_offset_frame()
+
+    def fake_load_lightcurve_df(*_args: object, **_kwargs: object) -> pd.DataFrame:
+        return df_lc.copy()
+
+    def fake_clean_lc(df: pd.DataFrame, **_kwargs: object) -> pd.DataFrame:
+        return df.reset_index(drop=True)
+
+    def fake_ce_stats(_jd: np.ndarray, _mag: np.ndarray, _err: np.ndarray, **_kwargs: object) -> dict[str, float]:
+        return {
+            "ce_period": 4.0,
+            "ce_min_entropy": 0.5,
+            "ce_snr": 11.0,
+            "ce_bootstrap_sig": 0.1,
+        }
+
+    def fake_arbitrate(
+        _band_resid: dict[int, tuple[np.ndarray, np.ndarray]],
+        base_period: float,
+        *,
+        min_period: float,
+        max_period: float,
+        **_kwargs: object,
+    ) -> tuple[float, float, dict[str, object]]:
+        assert min_period == 0.5
+        assert max_period == 10.0
+        assert np.isclose(base_period, 4.0)
+        return 4.0, 1.0, {
+            "objective": 0.95,
+            "selection_objective": 0.95,
+            "scatter_ratio": 0.95,
+            "phase_peak_snr": 3.8,
+            "phase_peak_width": 0.18,
+            "phase_peak_regions": 1.0,
+            "alias_flag": False,
+        }
+
+    monkeypatch.setattr(periodicity_gate, "load_lightcurve_df", fake_load_lightcurve_df)
+    monkeypatch.setattr(periodicity_gate, "clean_lc", fake_clean_lc)
+    monkeypatch.setattr(periodicity_gate, "compute_ce_stats", fake_ce_stats)
+    monkeypatch.setattr(periodicity_gate, "_arbitrate_harmonic_period", fake_arbitrate)
+
+    df = pd.DataFrame({"source_id": ["scatter_near_miss"], "dat_path": ["dummy.dat3"]})
+    out = apply_pre_periodicity_gate(
+        df,
+        n_periods=800,
+        min_period=0.5,
+        max_period=10.0,
+        workers=1,
+        show_tqdm=False,
+    )
+
+    assert bool(out.loc[0, "pre_periodic_flag"]) is True
+    assert out.loc[0, "pre_periodicity_label"] == "periodic"
+    assert bool(out.loc[0, "pre_periodicity_phase_peak_flag"]) is True
+    assert out.loc[0, "pre_periodicity_reason"] == "ce,phase_peak,scatter_rescue"
+
+
+def test_apply_pre_periodicity_gate_rescues_phase_concentrated_ce_near_threshold(monkeypatch) -> None:
+    df_lc = _two_band_offset_frame()
+
+    def fake_load_lightcurve_df(*_args: object, **_kwargs: object) -> pd.DataFrame:
+        return df_lc.copy()
+
+    def fake_clean_lc(df: pd.DataFrame, **_kwargs: object) -> pd.DataFrame:
+        return df.reset_index(drop=True)
+
+    def fake_ce_stats(_jd: np.ndarray, _mag: np.ndarray, _err: np.ndarray, **_kwargs: object) -> dict[str, float]:
+        return {
+            "ce_period": 4.0,
+            "ce_min_entropy": 0.6,
+            "ce_snr": 8.7,
+            "ce_bootstrap_sig": 0.1,
+        }
+
+    def fake_arbitrate(
+        _band_resid: dict[int, tuple[np.ndarray, np.ndarray]],
+        base_period: float,
+        *,
+        min_period: float,
+        max_period: float,
+        **_kwargs: object,
+    ) -> tuple[float, float, dict[str, object]]:
+        assert min_period == 0.5
+        assert max_period == 10.0
+        assert np.isclose(base_period, 4.0)
+        return 4.0, 1.0, {
+            "objective": 0.72,
+            "selection_objective": 0.72,
+            "scatter_ratio": 0.72,
+            "phase_peak_snr": 3.4,
+            "phase_peak_width": 0.16,
+            "phase_peak_regions": 1.0,
+            "alias_flag": False,
+        }
+
+    monkeypatch.setattr(periodicity_gate, "load_lightcurve_df", fake_load_lightcurve_df)
+    monkeypatch.setattr(periodicity_gate, "clean_lc", fake_clean_lc)
+    monkeypatch.setattr(periodicity_gate, "compute_ce_stats", fake_ce_stats)
+    monkeypatch.setattr(periodicity_gate, "_arbitrate_harmonic_period", fake_arbitrate)
+
+    df = pd.DataFrame({"source_id": ["ce_near_threshold"], "dat_path": ["dummy.dat3"]})
+    out = apply_pre_periodicity_gate(
+        df,
+        n_periods=800,
+        min_period=0.5,
+        max_period=10.0,
+        workers=1,
+        show_tqdm=False,
+    )
+
+    assert bool(out.loc[0, "pre_periodic_flag"]) is True
+    assert out.loc[0, "pre_periodicity_label"] == "periodic"
+    assert int(out.loc[0, "pre_periodicity_support_count"]) == 0
+    assert bool(out.loc[0, "pre_periodicity_phase_peak_flag"]) is True
+    assert out.loc[0, "pre_periodicity_reason"] == "ce_near_threshold,folded_scatter,phase_peak"
+
+
+def test_apply_pre_periodicity_gate_rejects_complex_multi_peak_fold(monkeypatch) -> None:
+    df_lc = _two_band_offset_frame()
+
+    def fake_load_lightcurve_df(*_args: object, **_kwargs: object) -> pd.DataFrame:
+        return df_lc.copy()
+
+    def fake_clean_lc(df: pd.DataFrame, **_kwargs: object) -> pd.DataFrame:
+        return df.reset_index(drop=True)
+
+    def fake_ce_stats(_jd: np.ndarray, _mag: np.ndarray, _err: np.ndarray, **_kwargs: object) -> dict[str, float]:
+        return {
+            "ce_period": 4.0,
+            "ce_min_entropy": 0.5,
+            "ce_snr": 15.0,
+            "ce_bootstrap_sig": 0.1,
+        }
+
+    def fake_arbitrate(
+        _band_resid: dict[int, tuple[np.ndarray, np.ndarray]],
+        base_period: float,
+        *,
+        min_period: float,
+        max_period: float,
+        **_kwargs: object,
+    ) -> tuple[float, float, dict[str, object]]:
+        assert min_period == 0.5
+        assert max_period == 10.0
+        assert np.isclose(base_period, 4.0)
+        return 4.0, 1.0, {
+            "objective": 0.55,
+            "selection_objective": 0.55,
+            "scatter_ratio": 0.55,
+            "phase_peak_snr": 4.1,
+            "phase_peak_width": 0.14,
+            "phase_peak_regions": 4.0,
+            "alias_flag": False,
+        }
+
+    monkeypatch.setattr(periodicity_gate, "load_lightcurve_df", fake_load_lightcurve_df)
+    monkeypatch.setattr(periodicity_gate, "clean_lc", fake_clean_lc)
+    monkeypatch.setattr(periodicity_gate, "compute_ce_stats", fake_ce_stats)
+    monkeypatch.setattr(periodicity_gate, "_arbitrate_harmonic_period", fake_arbitrate)
+
+    df = pd.DataFrame({"source_id": ["complex_fold"], "dat_path": ["dummy.dat3"]})
+    out = apply_pre_periodicity_gate(
+        df,
+        n_periods=800,
+        min_period=0.5,
+        max_period=10.0,
+        workers=1,
+        show_tqdm=False,
+    )
+
+    assert bool(out.loc[0, "pre_periodic_flag"]) is False
+    assert out.loc[0, "pre_periodicity_label"] == "non_periodic"
+    assert np.isclose(out.loc[0, "pre_periodicity_phase_peak_regions"], 4.0)
+    assert "phase_complexity" in str(out.loc[0, "pre_periodicity_reason"])
+
+
+def test_apply_pre_periodicity_gate_rejects_alias_periodic_branch(monkeypatch) -> None:
+    df_lc = _two_band_offset_frame()
+
+    def fake_load_lightcurve_df(*_args: object, **_kwargs: object) -> pd.DataFrame:
+        return df_lc.copy()
+
+    def fake_clean_lc(df: pd.DataFrame, **_kwargs: object) -> pd.DataFrame:
+        return df.reset_index(drop=True)
+
+    def fake_ce_stats(_jd: np.ndarray, _mag: np.ndarray, _err: np.ndarray, **_kwargs: object) -> dict[str, float]:
+        return {
+            "ce_period": 1.0,
+            "ce_min_entropy": 0.4,
+            "ce_snr": 15.0,
+            "ce_bootstrap_sig": 0.1,
+        }
+
+    def fake_arbitrate(
+        _band_resid: dict[int, tuple[np.ndarray, np.ndarray]],
+        base_period: float,
+        *,
+        min_period: float,
+        max_period: float,
+        **_kwargs: object,
+    ) -> tuple[float, float, dict[str, object]]:
+        assert min_period == 0.5
+        assert max_period == 10.0
+        assert np.isclose(base_period, 1.0)
+        return 1.0, 1.0, {
+            "objective": 0.45,
+            "selection_objective": 0.45,
+            "scatter_ratio": 0.45,
+            "phase_peak_snr": 4.0,
+            "phase_peak_width": 0.18,
+            "phase_peak_regions": 1.0,
+            "alias_flag": True,
+        }
+
+    monkeypatch.setattr(periodicity_gate, "load_lightcurve_df", fake_load_lightcurve_df)
+    monkeypatch.setattr(periodicity_gate, "clean_lc", fake_clean_lc)
+    monkeypatch.setattr(periodicity_gate, "compute_ce_stats", fake_ce_stats)
+    monkeypatch.setattr(periodicity_gate, "_arbitrate_harmonic_period", fake_arbitrate)
+
+    df = pd.DataFrame({"source_id": ["alias_fold"], "dat_path": ["dummy.dat3"]})
+    out = apply_pre_periodicity_gate(
+        df,
+        n_periods=800,
+        min_period=0.5,
+        max_period=10.0,
+        workers=1,
+        show_tqdm=False,
+    )
+
+    assert bool(out.loc[0, "pre_periodic_flag"]) is False
+    assert out.loc[0, "pre_periodicity_label"] == "non_periodic"
+    assert "alias" in str(out.loc[0, "pre_periodicity_reason"])
 
 
 def test_arbitrate_harmonic_period_uses_shortlist_double_when_best(monkeypatch) -> None:
@@ -385,3 +622,37 @@ def test_arbitrate_harmonic_period_uses_shortlist_half_when_best(monkeypatch) ->
 
     assert np.isclose(factor, 0.5)
     assert np.isclose(selected_period, 10.0)
+
+
+def test_arbitrate_harmonic_period_keeps_base_when_harmonic_gain_is_too_small(monkeypatch) -> None:
+    raw_scores = {
+        5.0: 0.50,
+        2.5: 0.495,
+        10.0: 0.60,
+    }
+
+    def fake_score(_band_resid: dict[int, tuple[np.ndarray, np.ndarray]], period: float, **_kwargs: object) -> dict[str, object]:
+        objective = float(raw_scores.get(round(float(period), 10), np.inf))
+        return {
+            "objective": objective,
+            "raw_objective": objective,
+            "scatter_ratio": objective,
+            "phase_peak_snr": 3.0,
+            "phase_peak_width": 0.2,
+            "phase_peak_regions": 1.0,
+            "lag_phase": 0.0,
+            "alias_flag": False,
+            "alias_matches": [],
+        }
+
+    monkeypatch.setattr(periodicity_gate, "_score_period_harmonic_candidate", fake_score)
+
+    selected_period, factor, _ = periodicity_gate._arbitrate_harmonic_period(
+        _dummy_band_residuals(),
+        5.0,
+        min_period=0.2,
+        max_period=20.0,
+    )
+
+    assert factor == 1.0
+    assert selected_period == 5.0
