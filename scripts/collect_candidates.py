@@ -39,7 +39,11 @@ def parse_mag_bin(run_dir_name: str) -> str | None:
     """
     prefix = "output_bundle_"
     if run_dir_name.startswith(prefix):
-        return run_dir_name[len(prefix):]
+        suffix = run_dir_name[len(prefix):]
+        for marker in ("_home_bundle_", "_bundle_"):
+            if marker in suffix:
+                return suffix.split(marker, 1)[0]
+        return suffix
     return None
 
 
