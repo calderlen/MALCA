@@ -107,6 +107,12 @@ BIN_ORDER = (
     "maybe_periodic_not_eb",
     "unlikely_eb",
 )
+EB_TRIAGE_COLOR_MAP = {
+    "strong_eb_candidate": "#d62728",
+    "possible_eb": "#ff7f0e",
+    "maybe_periodic_not_eb": "#1f77b4",
+    "unlikely_eb": "#7f7f7f",
+}
 LIKELY_EB_BINS = (
     "strong_eb_candidate",
     "possible_eb",
@@ -638,6 +644,85 @@ def top_candidate_export_frame(df: pd.DataFrame) -> pd.DataFrame:
     return df.loc[keep_mask, export_cols].copy().reset_index(drop=True)
 
 
+def build_eb_triage_summary_figure(df: pd.DataFrame) -> plt.Figure:
+    """Build the standard March 18 EB-triage summary figure."""
+    plot_df = df.copy()
+    colors = (
+        _text_series(plot_df, "eb_bin")
+        .map(EB_TRIAGE_COLOR_MAP)
+        .fillna(EB_TRIAGE_COLOR_MAP["unlikely_eb"])
+    )
+    plot_specs = (
+        (
+            "ls_fap_score",
+            "dip_run_count",
+            "ls_fap_score = -log10(FAP)",
+            "dip_run_count",
+            "Period significance vs repeat runs",
+        ),
+        (
+            "spacing_cv",
+            "dip_amplitude_consistency",
+            "spacing_cv",
+            "dip_amplitude_consistency",
+            "Recurrence regularity vs amplitude repeatability",
+        ),
+        (
+            "symmetry_abs",
+            "dip_duration_consistency",
+            "symmetry_abs",
+            "dip_duration_consistency",
+            "Symmetry vs duration repeatability",
+        ),
+    )
+
+    fig, axes = plt.subplots(1, len(plot_specs), figsize=(20, 5), constrained_layout=True)
+    if not isinstance(axes, np.ndarray):
+        axes = np.asarray([axes])
+
+    for ax, (x_col, y_col, x_label, y_label, title) in zip(axes, plot_specs):
+        x = _numeric_series(plot_df, x_col)
+        y = _numeric_series(plot_df, y_col)
+        valid = x.notna() & y.notna()
+        if bool(valid.any()):
+            ax.scatter(
+                x.loc[valid],
+                y.loc[valid],
+                c=colors.loc[valid],
+                s=16,
+                alpha=0.75,
+            )
+        else:
+            ax.text(
+                0.5,
+                0.5,
+                "No finite data",
+                transform=ax.transAxes,
+                ha="center",
+                va="center",
+                color="#6e6e6e",
+            )
+        ax.set_xlabel(x_label)
+        ax.set_ylabel(y_label)
+        ax.set_title(title)
+        ax.grid(alpha=0.2)
+
+    legend_handles = [
+        plt.Line2D(
+            [0],
+            [0],
+            marker="o",
+            color="w",
+            label=label,
+            markerfacecolor=color,
+            markersize=8,
+        )
+        for label, color in EB_TRIAGE_COLOR_MAP.items()
+    ]
+    axes[0].legend(handles=legend_handles, title="eb_bin", loc="best")
+    return fig
+
+
 def export_eb_triage_products(
     subset_df: pd.DataFrame,
     triage_df: pd.DataFrame,
@@ -651,15 +736,20 @@ def export_eb_triage_products(
     subset_path = out_dir / "other_subset.parquet"
     triage_path = out_dir / "other_eb_triage.parquet"
     top_path = out_dir / "other_eb_top_candidates.csv"
+    summary_plot_path = out_dir / "other_eb_triage_summary.png"
 
     subset_df.to_parquet(subset_path, index=False)
     triage_df.to_parquet(triage_path, index=False)
     top_candidate_export_frame(triage_df).to_csv(top_path, index=False)
+    fig = build_eb_triage_summary_figure(triage_df)
+    fig.savefig(summary_plot_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
 
     return {
         "subset_path": subset_path,
         "triage_path": triage_path,
         "top_candidates_path": top_path,
+        "summary_plot_path": summary_plot_path,
     }
 
 
@@ -718,10 +808,61 @@ def _plot_lightcurve_axes(
     return fig
 
 
+def _pretty_bin_label(value: object) -> str:
+    text = str(value).strip()
+    if not text:
+        return "unlabeled"
+    return text.replace("_", " ")
+
+
+def _safe_filename_token(value: object) -> str:
+    text = _normalize_id(value) or str(value).strip()
+    token = re.sub(r"[^A-Za-z0-9._-]+", "_", text).strip("_")
+    return token or "candidate"
+
+
+def select_example_candidates(
+    df: pd.DataFrame,
+    *,
+    examples_per_bin: int = 2,
+    bins: Sequence[str] = BIN_ORDER,
+    require_local_lightcurve: bool = True,
+    run_dir: str | Path | None = None,
+) -> pd.DataFrame:
+    """Select representative candidates for individual light-curve examples."""
+    if examples_per_bin <= 0:
+        return df.iloc[0:0].copy()
+
+    candidates = df.copy()
+    if run_dir is not None or "local_lightcurve_exists" not in candidates.columns:
+        candidates = resolve_local_paths(candidates, run_dir=run_dir)
+
+    frames: list[pd.DataFrame] = []
+    bin_text = _text_series(candidates, "eb_bin")
+    for eb_bin in bins:
+        subset = candidates.loc[bin_text.eq(str(eb_bin))].copy()
+        if require_local_lightcurve:
+            if "local_lightcurve_exists" in subset.columns:
+                subset = subset.loc[_bool_series(subset, "local_lightcurve_exists")].copy()
+            else:
+                local_paths = _text_series(subset, "local_lightcurve_path")
+                subset = subset.loc[local_paths.ne("")].copy()
+        if subset.empty:
+            continue
+        frames.append(subset.head(int(examples_per_bin)))
+
+    if not frames:
+        return candidates.iloc[0:0].copy()
+    return pd.concat(frames, ignore_index=True)
+
+
 def inspect_candidate(
     df: pd.DataFrame,
     candidate_id: object,
     run_dir: str | Path | None = None,
+    *,
+    display_metadata: bool = True,
+    show_figure: bool = True,
 ) -> dict[str, Any]:
     """Display metadata and, when possible, raw + phase-folded light curves."""
     row = _find_candidate_row(df, candidate_id)
@@ -747,7 +888,7 @@ def inspect_candidate(
     except Exception:
         display = None
 
-    if display is not None:
+    if display is not None and display_metadata:
         display(metadata.T.rename(columns={metadata.index[0]: "value"}))
 
     lightcurve_path = row_local.get("local_lightcurve_path")
@@ -789,8 +930,95 @@ def inspect_candidate(
         candidate_id=str(result["candidate_id"]),
         period_days=period_days,
     )
-    if display is None:
+    if show_figure:
         plt.show()
     result["figure"] = fig
     result["status"] = "plotted"
     return result
+
+
+def plot_example_lightcurves(
+    df: pd.DataFrame,
+    *,
+    run_dir: str | Path | None = None,
+    examples_per_bin: int = 2,
+    bins: Sequence[str] = BIN_ORDER,
+    require_local_lightcurve: bool = True,
+    export_dir: str | Path | None = None,
+    display_metadata: bool = False,
+    show: bool = True,
+) -> dict[str, Any]:
+    """Plot a small set of representative individual light curves by EB-triage bin."""
+    selected = select_example_candidates(
+        df,
+        examples_per_bin=examples_per_bin,
+        bins=bins,
+        require_local_lightcurve=require_local_lightcurve,
+        run_dir=run_dir,
+    )
+    results: list[dict[str, Any]] = []
+    exported_paths: list[Path] = []
+    out_dir = Path(export_dir).expanduser() if export_dir is not None else None
+    if out_dir is not None:
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        from IPython.display import Markdown, display
+    except Exception:
+        Markdown = None
+        display = None
+
+    current_bin: str | None = None
+    bin_ranks: dict[str, int] = {}
+    for _, row in selected.iterrows():
+        candidate_id = row.get("candidate_id")
+        eb_bin = str(row.get("eb_bin")).strip()
+        bin_ranks[eb_bin] = bin_ranks.get(eb_bin, 0) + 1
+        bin_rank = bin_ranks[eb_bin]
+        if show:
+            heading = f"`{_normalize_id(candidate_id)}`"
+            score = pd.to_numeric(pd.Series([row.get("eb_score")]), errors="coerce").iloc[0]
+            if pd.notna(score):
+                heading += f" · eb_score={int(score)}"
+            period = pd.to_numeric(
+                pd.Series([row.get("stats_variability_lomb_scargle_best_period_days")]),
+                errors="coerce",
+            ).iloc[0]
+            if pd.notna(period) and np.isfinite(period) and period > 0:
+                heading += f" · P={float(period):.4f} d"
+            if display is not None and Markdown is not None:
+                if eb_bin != current_bin:
+                    display(Markdown(f"### {_pretty_bin_label(eb_bin)}"))
+                display(Markdown(heading))
+            else:
+                if eb_bin != current_bin:
+                    print(f"\n{_pretty_bin_label(eb_bin)}")
+                print(heading)
+
+        result = inspect_candidate(
+            selected,
+            candidate_id,
+            run_dir=run_dir,
+            display_metadata=display_metadata,
+            show_figure=show,
+        )
+        result["eb_bin"] = eb_bin
+        result["example_rank"] = bin_rank
+        result["export_path"] = None
+
+        if out_dir is not None and result.get("figure") is not None:
+            export_path = out_dir / f"{_safe_filename_token(eb_bin)}_{bin_rank:02d}_{_safe_filename_token(candidate_id)}.png"
+            result["figure"].savefig(export_path, dpi=150, bbox_inches="tight")
+            result["export_path"] = export_path
+            exported_paths.append(export_path)
+
+        results.append(result)
+        current_bin = eb_bin
+
+    return {
+        "selected": selected,
+        "results": results,
+        "exported_paths": exported_paths,
+        "n_selected": int(len(selected)),
+        "n_plotted": int(sum(result.get("status") == "plotted" for result in results)),
+    }

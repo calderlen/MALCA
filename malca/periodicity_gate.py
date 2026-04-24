@@ -32,12 +32,24 @@ from malca.utils import apply_simple_band_median_offset, clean_lc, compute_n_cam
 
 PREGATE_HARMONIC_FACTORS: tuple[float, ...] = (
     1.0,
-    0.5,
     2.0,
+    0.5,
+    3.0,
+    1.0 / 3.0,
+    4.0,
+    0.25,
+    5.0,
+    1.0 / 5.0,
+    6.0,
+    1.0 / 6.0,
+    7.0,
+    1.0 / 7.0,
+    8.0,
+    1.0 / 8.0,
 )
 PREGATE_HARMONIC_MIN_REL_IMPROVEMENT = 0.02
-PREGATE_ROUTER_MODE = "ce_folded_scatter_phase_shape_v4"
-PREGATE_CHECKPOINT_VERSION = "v6_ce_folded_scatter_phase_shape"
+PREGATE_ROUTER_MODE = "ce_folded_scatter_phase_shape_v5"
+PREGATE_CHECKPOINT_VERSION = "v7_ce_folded_scatter_phase_shape"
 PREGATE_RESULT_COLUMNS: list[str] = [
     "pre_periodicity_checkpoint_key",
     "pre_periodicity_path",
@@ -276,6 +288,35 @@ def _score_period_harmonic_candidate(
     }
 
 
+def _passes_phase_complexity(phase_peak_regions: object) -> bool:
+    try:
+        regions = float(phase_peak_regions)
+    except (TypeError, ValueError):
+        return True
+    return (not np.isfinite(regions)) or regions <= float(PRE_PERIODICITY_PHASE_PEAK_REGION_MAX)
+
+
+def _harmonic_candidate_sort_key(score: dict[str, object]) -> tuple[float, float, float, float]:
+    scatter_ratio = float(score.get("scatter_ratio", np.nan))
+    if not np.isfinite(scatter_ratio):
+        scatter_ratio = np.inf
+
+    phase_peak_regions = float(score.get("phase_peak_regions", np.nan))
+    if not np.isfinite(phase_peak_regions):
+        phase_peak_regions = np.inf
+
+    phase_peak_snr = float(score.get("phase_peak_snr", np.nan))
+    if not np.isfinite(phase_peak_snr):
+        phase_peak_snr = -np.inf
+
+    return (
+        0.0 if _passes_phase_complexity(score.get("phase_peak_regions", np.nan)) else 1.0,
+        float(scatter_ratio),
+        float(phase_peak_regions),
+        -float(phase_peak_snr),
+    )
+
+
 def _arbitrate_harmonic_period(
     band_resid: dict[int, tuple[np.ndarray, np.ndarray]],
     base_period: float,
@@ -313,15 +354,13 @@ def _arbitrate_harmonic_period(
             "phase_peak_regions": np.nan,
         }
 
-    factor, period, score = min(
-        candidates,
-        key=lambda item: (
-            float(item[2].get("selection_objective", item[2].get("objective", np.inf))),
-            bool(item[2].get("alias_flag", False)),
-        ),
-    )
+    factor, period, score = min(candidates, key=lambda item: _harmonic_candidate_sort_key(item[2]))
     base_entry = next((item for item in candidates if abs(float(item[0]) - 1.0) < 1e-12), None)
     if base_entry is not None and abs(float(factor) - 1.0) > 1e-12:
+        base_passes_complexity = _passes_phase_complexity(base_entry[2].get("phase_peak_regions", np.nan))
+        best_passes_complexity = _passes_phase_complexity(score.get("phase_peak_regions", np.nan))
+        if base_passes_complexity != best_passes_complexity:
+            return float(period), float(factor), score
         base_selection_objective = float(
             base_entry[2].get("selection_objective", base_entry[2].get("objective", np.nan))
         )
@@ -405,7 +444,7 @@ def _harmonically_correct_period_candidate(
     }
 
 
-def _period_candidate_sort_key(candidate: dict[str, object]) -> tuple[float, bool, float]:
+def _period_candidate_sort_key(candidate: dict[str, object]) -> tuple[float, float]:
     selection_objective = float(candidate.get("selection_objective", np.nan))
     objective = float(candidate.get("objective", np.nan))
     rank_objective = selection_objective
@@ -418,11 +457,7 @@ def _period_candidate_sort_key(candidate: dict[str, object]) -> tuple[float, boo
     if not np.isfinite(snr):
         snr = -np.inf
 
-    return (
-        float(rank_objective),
-        bool(candidate.get("alias_flag", False)),
-        -float(snr),
-    )
+    return (float(rank_objective), -float(snr))
 
 
 def _select_period_candidate(candidates: list[dict[str, object]]) -> dict[str, object] | None:
@@ -551,10 +586,7 @@ def _evaluate_periodicity_worker(args: tuple[object, ...]) -> dict[str, object]:
             and np.isfinite(phase_peak_width)
             and phase_peak_width <= float(PRE_PERIODICITY_PHASE_PEAK_WIDTH_MAX)
         )
-        phase_complexity_ok = bool(
-            (not np.isfinite(phase_peak_regions))
-            or phase_peak_regions <= float(PRE_PERIODICITY_PHASE_PEAK_REGION_MAX)
-        )
+        phase_complexity_ok = _passes_phase_complexity(phase_peak_regions)
         scatter_rescue_ok = bool(
             np.isfinite(scatter_ratio)
             and scatter_ratio <= (float(scatter_ratio_max) + float(PRE_PERIODICITY_SCATTER_RATIO_RESCUE_MARGIN))
@@ -564,14 +596,13 @@ def _evaluate_periodicity_worker(args: tuple[object, ...]) -> dict[str, object]:
             and selected_snr >= (float(ce_snr_threshold) - float(PRE_PERIODICITY_CE_SNR_RESCUE_MARGIN))
         )
 
-        periodic_by_base = bool(ce_support and scatter_ok and phase_complexity_ok and (not alias_flag))
+        periodic_by_base = bool(ce_support and scatter_ok and phase_complexity_ok)
         periodic_by_scatter_rescue = bool(
             ce_support
             and (not scatter_ok)
             and phase_peak_ok
             and phase_complexity_ok
             and scatter_rescue_ok
-            and (not alias_flag)
         )
         periodic_by_ce_rescue = bool(
             (not ce_support)
@@ -579,7 +610,6 @@ def _evaluate_periodicity_worker(args: tuple[object, ...]) -> dict[str, object]:
             and phase_peak_ok
             and phase_complexity_ok
             and scatter_rescue_ok
-            and (not alias_flag)
         )
         label = "periodic" if (periodic_by_base or periodic_by_scatter_rescue or periodic_by_ce_rescue) else "non_periodic"
 

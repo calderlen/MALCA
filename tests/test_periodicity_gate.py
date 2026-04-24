@@ -503,7 +503,7 @@ def test_apply_pre_periodicity_gate_rejects_complex_multi_peak_fold(monkeypatch)
     assert "phase_complexity" in str(out.loc[0, "pre_periodicity_reason"])
 
 
-def test_apply_pre_periodicity_gate_rejects_alias_periodic_branch(monkeypatch) -> None:
+def test_apply_pre_periodicity_gate_allows_alias_periodic_branch(monkeypatch) -> None:
     df_lc = _two_band_offset_frame()
 
     def fake_load_lightcurve_df(*_args: object, **_kwargs: object) -> pd.DataFrame:
@@ -556,9 +556,10 @@ def test_apply_pre_periodicity_gate_rejects_alias_periodic_branch(monkeypatch) -
         show_tqdm=False,
     )
 
-    assert bool(out.loc[0, "pre_periodic_flag"]) is False
-    assert out.loc[0, "pre_periodicity_label"] == "non_periodic"
-    assert "alias" in str(out.loc[0, "pre_periodicity_reason"])
+    assert bool(out.loc[0, "pre_periodic_flag"]) is True
+    assert out.loc[0, "pre_periodicity_label"] == "periodic"
+    assert bool(out.loc[0, "pre_periodicity_alias_flag"]) is True
+    assert out.loc[0, "pre_periodicity_reason"] == "ce,folded_scatter"
 
 
 def test_arbitrate_harmonic_period_uses_shortlist_double_when_best(monkeypatch) -> None:
@@ -588,7 +589,23 @@ def test_arbitrate_harmonic_period_uses_shortlist_double_when_best(monkeypatch) 
         max_period=20.0,
     )
 
-    assert periodicity_gate.PREGATE_HARMONIC_FACTORS == (1.0, 0.5, 2.0)
+    assert periodicity_gate.PREGATE_HARMONIC_FACTORS == (
+        1.0,
+        2.0,
+        0.5,
+        3.0,
+        1.0 / 3.0,
+        4.0,
+        0.25,
+        5.0,
+        1.0 / 5.0,
+        6.0,
+        1.0 / 6.0,
+        7.0,
+        1.0 / 7.0,
+        8.0,
+        1.0 / 8.0,
+    )
     assert factor == 2.0
     assert selected_period == 4.0
 
@@ -656,3 +673,249 @@ def test_arbitrate_harmonic_period_keeps_base_when_harmonic_gain_is_too_small(mo
 
     assert factor == 1.0
     assert selected_period == 5.0
+
+
+def test_arbitrate_harmonic_period_prefers_passing_subharmonic_over_complex_lower_scatter_fold(monkeypatch) -> None:
+    raw_scores = {
+        4.0: {"scatter_ratio": 0.24, "phase_peak_regions": 8.0, "phase_peak_snr": 1.2},
+        2.0: {"scatter_ratio": 0.18, "phase_peak_regions": 4.0, "phase_peak_snr": 1.3},
+        1.0: {"scatter_ratio": 0.19, "phase_peak_regions": 1.0, "phase_peak_snr": 1.4},
+    }
+
+    def fake_score(_band_resid: dict[int, tuple[np.ndarray, np.ndarray]], period: float, **_kwargs: object) -> dict[str, object]:
+        diag = raw_scores.get(round(float(period), 10))
+        if diag is None:
+            return {
+                "objective": np.inf,
+                "raw_objective": np.inf,
+                "scatter_ratio": np.inf,
+                "phase_peak_snr": np.nan,
+                "phase_peak_width": np.nan,
+                "phase_peak_regions": np.nan,
+                "alias_flag": False,
+                "alias_matches": [],
+            }
+        return {
+            "objective": float(diag["scatter_ratio"]),
+            "raw_objective": float(diag["scatter_ratio"]),
+            "scatter_ratio": float(diag["scatter_ratio"]),
+            "phase_peak_snr": float(diag["phase_peak_snr"]),
+            "phase_peak_width": 0.2,
+            "phase_peak_regions": float(diag["phase_peak_regions"]),
+            "alias_flag": False,
+            "alias_matches": [],
+        }
+
+    monkeypatch.setattr(periodicity_gate, "_score_period_harmonic_candidate", fake_score)
+
+    selected_period, factor, _ = periodicity_gate._arbitrate_harmonic_period(
+        _dummy_band_residuals(),
+        4.0,
+        min_period=0.2,
+        max_period=20.0,
+    )
+
+    assert np.isclose(factor, 0.25)
+    assert np.isclose(selected_period, 1.0)
+
+
+def test_arbitrate_harmonic_period_ignores_alias_status_when_ranking(monkeypatch) -> None:
+    raw_scores = {
+        4.0: {"scatter_ratio": 0.30, "phase_peak_regions": 3.0, "phase_peak_snr": 1.0, "alias_flag": False},
+        2.0: {"scatter_ratio": 0.15, "phase_peak_regions": 1.0, "phase_peak_snr": 1.2, "alias_flag": False},
+        1.0: {"scatter_ratio": 0.10, "phase_peak_regions": 1.0, "phase_peak_snr": 1.1, "alias_flag": True},
+    }
+
+    def fake_score(_band_resid: dict[int, tuple[np.ndarray, np.ndarray]], period: float, **_kwargs: object) -> dict[str, object]:
+        diag = raw_scores.get(round(float(period), 10))
+        if diag is None:
+            return {
+                "objective": np.inf,
+                "raw_objective": np.inf,
+                "scatter_ratio": np.inf,
+                "phase_peak_snr": np.nan,
+                "phase_peak_width": np.nan,
+                "phase_peak_regions": np.nan,
+                "alias_flag": False,
+                "alias_matches": [],
+            }
+        return {
+            "objective": float(diag["scatter_ratio"]),
+            "raw_objective": float(diag["scatter_ratio"]),
+            "scatter_ratio": float(diag["scatter_ratio"]),
+            "phase_peak_snr": float(diag["phase_peak_snr"]),
+            "phase_peak_width": 0.2,
+            "phase_peak_regions": float(diag["phase_peak_regions"]),
+            "alias_flag": bool(diag["alias_flag"]),
+            "alias_matches": [0.5] if bool(diag["alias_flag"]) else [],
+        }
+
+    monkeypatch.setattr(periodicity_gate, "_score_period_harmonic_candidate", fake_score)
+
+    selected_period, factor, diag = periodicity_gate._arbitrate_harmonic_period(
+        _dummy_band_residuals(),
+        4.0,
+        min_period=0.2,
+        max_period=20.0,
+    )
+
+    assert np.isclose(factor, 0.25)
+    assert np.isclose(selected_period, 1.0)
+    assert bool(diag["alias_flag"]) is True
+
+
+def test_arbitrate_harmonic_period_keeps_simpler_harmonic_even_when_gain_is_small(monkeypatch) -> None:
+    raw_scores = {
+        5.0: {"scatter_ratio": 0.50, "phase_peak_regions": 4.0, "phase_peak_snr": 1.2},
+        2.5: {"scatter_ratio": 0.495, "phase_peak_regions": 1.0, "phase_peak_snr": 1.3},
+        10.0: {"scatter_ratio": 0.60, "phase_peak_regions": 5.0, "phase_peak_snr": 1.0},
+    }
+
+    def fake_score(_band_resid: dict[int, tuple[np.ndarray, np.ndarray]], period: float, **_kwargs: object) -> dict[str, object]:
+        diag = raw_scores.get(round(float(period), 10))
+        if diag is None:
+            return {
+                "objective": np.inf,
+                "raw_objective": np.inf,
+                "scatter_ratio": np.inf,
+                "phase_peak_snr": np.nan,
+                "phase_peak_width": np.nan,
+                "phase_peak_regions": np.nan,
+                "alias_flag": False,
+                "alias_matches": [],
+            }
+        return {
+            "objective": float(diag["scatter_ratio"]),
+            "raw_objective": float(diag["scatter_ratio"]),
+            "scatter_ratio": float(diag["scatter_ratio"]),
+            "phase_peak_snr": float(diag["phase_peak_snr"]),
+            "phase_peak_width": 0.2,
+            "phase_peak_regions": float(diag["phase_peak_regions"]),
+            "alias_flag": False,
+            "alias_matches": [],
+        }
+
+    monkeypatch.setattr(periodicity_gate, "_score_period_harmonic_candidate", fake_score)
+
+    selected_period, factor, _ = periodicity_gate._arbitrate_harmonic_period(
+        _dummy_band_residuals(),
+        5.0,
+        min_period=0.2,
+        max_period=20.0,
+    )
+
+    assert np.isclose(factor, 0.5)
+    assert np.isclose(selected_period, 2.5)
+
+
+def test_arbitrate_harmonic_period_breaks_passing_ties_by_scatter_then_regions(monkeypatch) -> None:
+    raw_scores = {
+        4.0: {"scatter_ratio": 0.20, "phase_peak_regions": 2.0, "phase_peak_snr": 1.0},
+        2.0: {"scatter_ratio": 0.15, "phase_peak_regions": 2.0, "phase_peak_snr": 1.2},
+        1.0: {"scatter_ratio": 0.15, "phase_peak_regions": 1.0, "phase_peak_snr": 1.1},
+    }
+
+    def fake_score(_band_resid: dict[int, tuple[np.ndarray, np.ndarray]], period: float, **_kwargs: object) -> dict[str, object]:
+        diag = raw_scores.get(round(float(period), 10))
+        if diag is None:
+            return {
+                "objective": np.inf,
+                "raw_objective": np.inf,
+                "scatter_ratio": np.inf,
+                "phase_peak_snr": np.nan,
+                "phase_peak_width": np.nan,
+                "phase_peak_regions": np.nan,
+                "alias_flag": False,
+                "alias_matches": [],
+            }
+        return {
+            "objective": float(diag["scatter_ratio"]),
+            "raw_objective": float(diag["scatter_ratio"]),
+            "scatter_ratio": float(diag["scatter_ratio"]),
+            "phase_peak_snr": float(diag["phase_peak_snr"]),
+            "phase_peak_width": 0.2,
+            "phase_peak_regions": float(diag["phase_peak_regions"]),
+            "alias_flag": False,
+            "alias_matches": [],
+        }
+
+    monkeypatch.setattr(periodicity_gate, "_score_period_harmonic_candidate", fake_score)
+
+    selected_period, factor, _ = periodicity_gate._arbitrate_harmonic_period(
+        _dummy_band_residuals(),
+        4.0,
+        min_period=0.2,
+        max_period=20.0,
+    )
+
+    assert np.isclose(factor, 0.25)
+    assert np.isclose(selected_period, 1.0)
+
+
+def test_apply_pre_periodicity_gate_selects_passing_subharmonic_regression(monkeypatch) -> None:
+    df_lc = _two_band_offset_frame()
+
+    def fake_load_lightcurve_df(*_args: object, **_kwargs: object) -> pd.DataFrame:
+        return df_lc.copy()
+
+    def fake_clean_lc(df: pd.DataFrame, **_kwargs: object) -> pd.DataFrame:
+        return df.reset_index(drop=True)
+
+    def fake_ce_stats(_jd: np.ndarray, _mag: np.ndarray, _err: np.ndarray, **_kwargs: object) -> dict[str, float]:
+        return {
+            "ce_period": 4.0,
+            "ce_min_entropy": 0.5,
+            "ce_snr": 15.0,
+            "ce_bootstrap_sig": 0.1,
+        }
+
+    raw_scores = {
+        4.0: {"scatter_ratio": 0.24, "phase_peak_regions": 8.0, "phase_peak_snr": 1.2, "alias_flag": False},
+        2.0: {"scatter_ratio": 0.18, "phase_peak_regions": 4.0, "phase_peak_snr": 1.3, "alias_flag": False},
+        1.0: {"scatter_ratio": 0.19, "phase_peak_regions": 1.0, "phase_peak_snr": 1.4, "alias_flag": False},
+    }
+
+    def fake_score(_band_resid: dict[int, tuple[np.ndarray, np.ndarray]], period: float, **_kwargs: object) -> dict[str, object]:
+        diag = raw_scores.get(round(float(period), 10))
+        if diag is None:
+            return {
+                "objective": np.inf,
+                "raw_objective": np.inf,
+                "scatter_ratio": np.inf,
+                "phase_peak_snr": np.nan,
+                "phase_peak_width": np.nan,
+                "phase_peak_regions": np.nan,
+                "alias_flag": False,
+                "alias_matches": [],
+            }
+        return {
+            "objective": float(diag["scatter_ratio"]),
+            "raw_objective": float(diag["scatter_ratio"]),
+            "scatter_ratio": float(diag["scatter_ratio"]),
+            "phase_peak_snr": float(diag["phase_peak_snr"]),
+            "phase_peak_width": 0.2,
+            "phase_peak_regions": float(diag["phase_peak_regions"]),
+            "alias_flag": bool(diag["alias_flag"]),
+            "alias_matches": [],
+        }
+
+    monkeypatch.setattr(periodicity_gate, "load_lightcurve_df", fake_load_lightcurve_df)
+    monkeypatch.setattr(periodicity_gate, "clean_lc", fake_clean_lc)
+    monkeypatch.setattr(periodicity_gate, "compute_ce_stats", fake_ce_stats)
+    monkeypatch.setattr(periodicity_gate, "_score_period_harmonic_candidate", fake_score)
+
+    df = pd.DataFrame({"source_id": ["subharmonic_regression"], "dat_path": ["dummy.dat3"]})
+    out = apply_pre_periodicity_gate(
+        df,
+        n_periods=800,
+        min_period=0.5,
+        max_period=10.0,
+        workers=1,
+        show_tqdm=False,
+    )
+
+    assert bool(out.loc[0, "pre_periodic_flag"]) is True
+    assert out.loc[0, "pre_periodicity_label"] == "periodic"
+    assert np.isclose(out.loc[0, "pre_periodicity_harmonic_factor"], 0.25)
+    assert np.isclose(out.loc[0, "pre_periodicity_selected_period"], 1.0)
+    assert out.loc[0, "pre_periodicity_reason"] == "ce,folded_scatter"

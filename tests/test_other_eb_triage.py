@@ -3,15 +3,19 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
 from malca.review.other_eb_triage import (
+    build_eb_triage_summary_figure,
     compute_eb_triage,
     export_eb_triage_products,
     inspect_candidate,
     load_reviewed_other_subset,
+    plot_example_lightcurves,
     resolve_local_paths,
+    select_example_candidates,
 )
 
 
@@ -351,6 +355,53 @@ def test_export_eb_triage_products_handles_categorical_bins(tmp_path: Path) -> N
     assert paths["subset_path"].exists()
     assert paths["triage_path"].exists()
     assert paths["top_candidates_path"].exists()
+    assert paths["summary_plot_path"].exists()
+    assert paths["summary_plot_path"].stat().st_size > 0
+
+
+def test_build_eb_triage_summary_figure_handles_missing_metrics() -> None:
+    fig = build_eb_triage_summary_figure(pd.DataFrame([{"candidate_id": "missing"}]))
+
+    try:
+        assert len(fig.axes) == 3
+        assert fig.axes[0].get_title() == "Period significance vs repeat runs"
+        assert fig.axes[1].get_title() == "Recurrence regularity vs amplitude repeatability"
+        assert fig.axes[2].get_title() == "Symmetry vs duration repeatability"
+    finally:
+        plt.close(fig)
+
+
+def test_select_example_candidates_uses_top_rows_per_bin_with_local_lightcurves() -> None:
+    selected = select_example_candidates(
+        pd.DataFrame(
+            [
+                {
+                    "candidate_id": "strong_top",
+                    "eb_bin": "strong_eb_candidate",
+                    "local_lightcurve_exists": True,
+                },
+                {
+                    "candidate_id": "strong_second",
+                    "eb_bin": "strong_eb_candidate",
+                    "local_lightcurve_exists": True,
+                },
+                {
+                    "candidate_id": "strong_missing",
+                    "eb_bin": "strong_eb_candidate",
+                    "local_lightcurve_exists": False,
+                },
+                {
+                    "candidate_id": "possible_top",
+                    "eb_bin": "possible_eb",
+                    "local_lightcurve_exists": True,
+                },
+            ]
+        ),
+        examples_per_bin=1,
+        bins=("strong_eb_candidate", "possible_eb"),
+    )
+
+    assert selected["candidate_id"].tolist() == ["strong_top", "possible_top"]
 
 
 def test_resolve_local_paths_and_inspect_candidate_metadata_fallback(tmp_path: Path) -> None:
@@ -387,3 +438,105 @@ def test_resolve_local_paths_and_inspect_candidate_metadata_fallback(tmp_path: P
     assert inspected["status"] == "metadata_only"
     assert inspected["figure"] is None
     assert inspected["lightcurve_df"] is None
+
+
+def test_inspect_candidate_returns_plot_when_lightcurve_available(monkeypatch, tmp_path: Path) -> None:
+    lightcurve_path = tmp_path / "123.dat2"
+    lightcurve_path.write_text("", encoding="ascii")
+
+    def _fake_load_lightcurve_df(path: Path) -> pd.DataFrame:
+        assert Path(path) == lightcurve_path
+        return pd.DataFrame(
+            {
+                "JD": [2450000.0, 2450001.0, 2450002.0, 2450003.0],
+                "mag": [14.1, 14.3, 14.0, 14.2],
+            }
+        )
+
+    monkeypatch.setattr("malca.review.other_eb_triage.load_lightcurve_df", _fake_load_lightcurve_df)
+
+    inspected = inspect_candidate(
+        pd.DataFrame(
+            [
+                {
+                    "candidate_id": "123",
+                    "local_lightcurve_path": str(lightcurve_path),
+                    "stats_variability_lomb_scargle_best_period_days": 2.0,
+                }
+            ]
+        ),
+        "123",
+        show_figure=False,
+    )
+
+    try:
+        assert inspected["status"] == "plotted"
+        assert inspected["figure"] is not None
+        assert inspected["lightcurve_df"] is not None
+        assert len(inspected["figure"].axes) == 2
+    finally:
+        if inspected["figure"] is not None:
+            plt.close(inspected["figure"])
+
+
+def test_plot_example_lightcurves_exports_example_plots(monkeypatch, tmp_path: Path) -> None:
+    lightcurve_path_1 = tmp_path / "strong.dat2"
+    lightcurve_path_2 = tmp_path / "possible.dat2"
+    lightcurve_path_1.write_text("", encoding="ascii")
+    lightcurve_path_2.write_text("", encoding="ascii")
+
+    def _fake_load_lightcurve_df(path: Path) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "JD": [2450000.0, 2450001.0, 2450002.0, 2450003.0],
+                "mag": [14.1, 14.3, 14.0, 14.2],
+            }
+        )
+
+    monkeypatch.setattr("malca.review.other_eb_triage.load_lightcurve_df", _fake_load_lightcurve_df)
+
+    example_df = pd.DataFrame(
+        [
+            {
+                "candidate_id": "strong_top",
+                "eb_bin": "strong_eb_candidate",
+                "eb_score": 9,
+                "stats_variability_lomb_scargle_best_period_days": 2.0,
+                "local_lightcurve_path": str(lightcurve_path_1),
+                "local_lightcurve_exists": True,
+            },
+            {
+                "candidate_id": "strong_second",
+                "eb_bin": "strong_eb_candidate",
+                "eb_score": 8,
+                "stats_variability_lomb_scargle_best_period_days": 2.2,
+                "local_lightcurve_path": str(lightcurve_path_1),
+                "local_lightcurve_exists": True,
+            },
+            {
+                "candidate_id": "possible_top",
+                "eb_bin": "possible_eb",
+                "eb_score": 6,
+                "stats_variability_lomb_scargle_best_period_days": 5.0,
+                "local_lightcurve_path": str(lightcurve_path_2),
+                "local_lightcurve_exists": True,
+            },
+        ]
+    )
+
+    result = plot_example_lightcurves(
+        example_df,
+        examples_per_bin=1,
+        bins=("strong_eb_candidate", "possible_eb"),
+        export_dir=tmp_path / "examples",
+        show=False,
+    )
+
+    assert result["selected"]["candidate_id"].tolist() == ["strong_top", "possible_top"]
+    assert result["n_selected"] == 2
+    assert result["n_plotted"] == 2
+    assert len(result["exported_paths"]) == 2
+    assert all(path.exists() for path in result["exported_paths"])
+    for plotted in result["results"]:
+        if plotted["figure"] is not None:
+            plt.close(plotted["figure"])
