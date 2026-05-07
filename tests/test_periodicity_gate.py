@@ -7,24 +7,6 @@ import types
 import numpy as np
 import pandas as pd
 
-if "celerite2" not in sys.modules:
-    fake_celerite2 = types.ModuleType("celerite2")
-
-    class _DummyGP:
-        def __init__(self, *args, **kwargs):
-            _ = args, kwargs
-
-    class _DummyTerm:
-        def __init__(self, *args, **kwargs):
-            _ = args, kwargs
-
-        def __add__(self, other):
-            return self
-
-    fake_celerite2.GaussianProcess = _DummyGP
-    fake_celerite2.terms = types.SimpleNamespace(SHOTerm=_DummyTerm, RealTerm=_DummyTerm)
-    sys.modules["celerite2"] = fake_celerite2
-
 if "iar.IARModel" not in sys.modules:
     fake_iar_pkg = types.ModuleType("iar")
     fake_iar_model = types.ModuleType("iar.IARModel")

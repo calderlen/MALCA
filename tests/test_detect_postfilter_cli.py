@@ -7,7 +7,6 @@ import pandas as pd
 import pytest
 
 pytest.importorskip("astroquery")
-pytest.importorskip("celerite2")
 pytest.importorskip("dustmaps3d")
 pytest.importorskip("banyan_sigma")
 

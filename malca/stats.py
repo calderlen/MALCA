@@ -1448,12 +1448,6 @@ def psi_eta(mag, time, period):
     return von_neumann_ratio(mag_sorted)
 
 
-# ---------------------------------------------------------------------------
-# GP_DRW: Damped Random Walk via celerite2
-# ---------------------------------------------------------------------------
-_HAS_CELERITE2 = True
-
-
 def fit_drw(jd, mag, err):
     """Fit a Damped Random Walk GP model and return (sigma, tau).
 
@@ -1464,7 +1458,7 @@ def fit_drw(jd, mag, err):
     mag = np.asarray(mag, float)
     err = np.asarray(err, float)
     mask = np.isfinite(jd) & np.isfinite(mag) & np.isfinite(err) & (err > 0)
-    if mask.sum() < 20 or not _HAS_CELERITE2:
+    if mask.sum() < 20:
         return np.nan, np.nan
 
     t = jd[mask]
