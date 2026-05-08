@@ -340,7 +340,7 @@ def baseline_subtracted_string_length(
             work,
             t_col=t_col,
             mag_col=mag_col,
-            err_col=err_col,
+            mag_err_col=err_col,
             cam_col="_stringlen_cam",
         )
     except Exception:
@@ -1448,7 +1448,7 @@ def psi_eta(mag, time, period):
     return von_neumann_ratio(mag_sorted)
 
 
-def fit_drw(jd, mag, err):
+def fit_drw(jd, mag, mag_err):
     """Fit a Damped Random Walk GP model and return (sigma, tau).
 
     Uses celerite2 SHOTerm with Q = 1/sqrt(2) (the DRW limit).
@@ -1456,21 +1456,21 @@ def fit_drw(jd, mag, err):
     """
     jd = np.asarray(jd, float)
     mag = np.asarray(mag, float)
-    err = np.asarray(err, float)
-    mask = np.isfinite(jd) & np.isfinite(mag) & np.isfinite(err) & (err > 0)
+    mag_err = np.asarray(mag_err, float)
+    mask = np.isfinite(jd) & np.isfinite(mag) & np.isfinite(mag_err) & (mag_err > 0)
     if mask.sum() < 20:
         return np.nan, np.nan
 
     t = jd[mask]
-    y = mag[mask]
-    yerr = err[mask]
+    mag_fit = mag[mask]
+    mag_err_fit = mag_err[mask]
 
     # Subtract mean for numerical stability
-    y_mean = np.mean(y)
-    y = y - y_mean
+    mean_mag = np.mean(mag_fit)
+    mag_fit = mag_fit - mean_mag
 
     # Initial guesses
-    var = np.var(y)
+    var = np.var(mag_fit)
     tau0 = (t[-1] - t[0]) / 10.0
     if tau0 <= 0 or var <= 0:
         return np.nan, np.nan
@@ -1487,8 +1487,8 @@ def fit_drw(jd, mag, err):
         w0 = np.exp(log_w0)
         kernel = _cterms.SHOTerm(S0=S0, w0=w0, Q=Q)
         gp = _GP(kernel)
-        gp.compute(t, diag=yerr**2)
-        return -gp.log_likelihood(y)
+        gp.compute(t, diag=mag_err_fit**2)
+        return -gp.log_likelihood(mag_fit)
 
     try:
         x0 = np.array([np.log(S0_init), np.log(w0_init)])

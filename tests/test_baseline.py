@@ -127,7 +127,7 @@ class TestSigmaFloorConsistency:
         assert (res_cam["sigma_eff"] > 0).all()
 
     def test_sigma_eff_includes_sigma_floor(self):
-        """sigma_eff should be larger than just yerr due to sigma_floor."""
+        """sigma_eff should be larger than just mag_err due to sigma_floor."""
         df = make_synthetic_lc()
         result = per_camera_gp_baseline(df, add_sigma_eff_col=True)
         
@@ -146,7 +146,7 @@ class TestRobustSigmaFloor:
         df = make_synthetic_lc()
         result = per_camera_gp_baseline(df, add_sigma_eff_col=True)
         
-        # sigma_eff² = yerr² + floor² + var, so sigma_eff >= yerr
+        # sigma_eff² = mag_err² + floor² + var, so sigma_eff >= mag_err
         # This indirectly tests floor >= 0
         assert (result["sigma_eff"] >= 0).all()
 
@@ -187,6 +187,14 @@ class TestBaselineFallbacks:
 class TestEdgeCases:
     """Test edge cases in baseline computation."""
 
+    def test_gp_baseline_accepts_mag_err_col_keyword(self):
+        df = make_synthetic_lc().rename(columns={"error": "mag_err"})
+        result = per_camera_gp_baseline(df, add_sigma_eff_col=True, mag_err_col="mag_err")
+
+        assert len(result) == len(df)
+        assert result["baseline"].notna().all()
+        assert result["sigma_eff"].notna().all()
+
     def test_single_camera(self):
         """Handle single-camera light curves."""
         df = make_synthetic_lc(n_cameras=1)
@@ -202,7 +210,8 @@ class TestEdgeCases:
         
         result = per_camera_gp_baseline(df, add_sigma_eff_col=True)
         assert result["baseline"].notna().all()
-        assert result["sigma_eff"].notna().all()
+        assert result.loc[df["error"].notna(), "sigma_eff"].notna().all()
+        assert result.loc[df["error"].isna(), "sigma_eff"].isna().all()
 
     def test_empty_dataframe(self):
         """Handle empty dataframe gracefully."""

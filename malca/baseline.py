@@ -428,7 +428,7 @@ def per_camera_gp_baseline(
     jitter=BASELINE_JITTER,
     t_col="JD",
     mag_col="mag",
-    err_col="error",
+    mag_err_col="error",
     cam_col="camera#",
     sigma_floor=None,
     floor_clip=GP_FLOOR_CLIP,
@@ -446,8 +446,8 @@ def per_camera_gp_baseline(
         if col not in df_out.columns:
             df_out[col] = np.nan if col != "baseline_source" else "unknown"
 
-    def robust_sigma_floor(resid, yerr_here, var_here):
-        finite0 = np.isfinite(resid) & np.isfinite(yerr_here) & np.isfinite(var_here)
+    def robust_sigma_floor(resid, mag_err_here, var_here):
+        finite0 = np.isfinite(resid) & np.isfinite(mag_err_here) & np.isfinite(var_here)
         if finite0.sum() < max(10, min_floor_points):
             return 0.0
 
@@ -469,40 +469,32 @@ def per_camera_gp_baseline(
         s_quiet = MAD_SCALE * float(np.median(np.abs(rr - float(np.median(rr)))))
         s_quiet = max(s_quiet, 1e-12)
 
-        yerr2_med = float(
+        mag_err2_med = float(
             np.median(
-                (yerr_here[finite0][keep] if keep.size == yerr_here[finite0].size else yerr_here[finite0]) ** 2
+                (mag_err_here[finite0][keep] if keep.size == mag_err_here[finite0].size else mag_err_here[finite0]) ** 2
             )
         )
         var_med = float(
             np.median((var_here[finite0][keep] if keep.size == var_here[finite0].size else var_here[finite0]))
         )
 
-        floor2 = max(s_quiet**2 - yerr2_med - var_med, 0.0)
+        floor2 = max(s_quiet**2 - mag_err2_med - var_med, 0.0)
         return float(np.sqrt(floor2))
 
     for _, sub in df_out.groupby(cam_col, group_keys=False):
         idx = sub.sort_values(t_col).index
         t = df_out.loc[idx, t_col].to_numpy(dtype=float)
-        y = df_out.loc[idx, mag_col].to_numpy(dtype=float)
-        yerr = df_out.loc[idx, err_col].to_numpy(dtype=float)
+        mag = df_out.loc[idx, mag_col].to_numpy(dtype=float)
+        mag_err = df_out.loc[idx, mag_err_col].to_numpy(dtype=float)
 
-        finite = np.isfinite(t) & np.isfinite(y)
+        finite = np.isfinite(t) & np.isfinite(mag)
         if finite.sum() < 5:
-            if np.isfinite(y).any():
-                baseline_val = float(np.nanmedian(y[np.isfinite(y)]))
-                baseline = np.full_like(y, baseline_val, dtype=float)
-                resid = y - baseline
+            if np.isfinite(mag).any():
+                baseline_val = float(np.nanmedian(mag[np.isfinite(mag)]))
+                baseline = np.full_like(mag, baseline_val, dtype=float)
+                resid = mag - baseline
 
-                if np.isfinite(yerr).any():
-                    med_yerr_all = float(np.nanmedian(yerr[np.isfinite(yerr)]))
-                else:
-                    med_yerr_all = float(jitter)
-                yerr_full = np.where(np.isfinite(yerr), yerr, med_yerr_all)
-                yerr_full = np.nan_to_num(yerr_full, nan=float(jitter), posinf=float(jitter), neginf=float(jitter))
-                yerr_full = np.maximum(yerr_full, 0.0)
-
-                sigma_eff = np.sqrt(yerr_full**2 + float(jitter) ** 2)
+                sigma_eff = np.sqrt(mag_err**2 + float(jitter) ** 2)
                 sigma_resid = resid / sigma_eff
 
                 df_out.loc[idx, "baseline"] = baseline
@@ -513,20 +505,29 @@ def per_camera_gp_baseline(
                 df_out.loc[idx, "baseline_source"] = "median_fallback"
             continue
 
-        finite_idx = np.flatnonzero(finite)
-        t_fit = t[finite_idx]
-        y_fit = y[finite_idx]
-        y_mean = float(np.mean(y_fit))
-        y_centered = y_fit - y_mean
+        fit_finite = finite & np.isfinite(mag_err) & (mag_err > 0)
+        finite_idx = np.flatnonzero(fit_finite)
+        if finite_idx.size < 5:
+            baseline_val = float(np.nanmedian(mag[finite]))
+            baseline = np.full_like(mag, baseline_val, dtype=float)
+            resid = mag - baseline
+            sigma_eff = np.sqrt(mag_err**2 + float(jitter) ** 2)
+            sigma_resid = resid / sigma_eff
 
-        yerr_fit = yerr[finite_idx]
-        if not np.isfinite(yerr_fit).any():
-            yerr_fit = np.full_like(y_fit, float(jitter), dtype=float)
-        else:
-            med_yerr = float(np.nanmedian(yerr_fit[np.isfinite(yerr_fit)]))
-            med_yerr = float(med_yerr) if np.isfinite(med_yerr) else float(jitter)
-            yerr_fit = np.where(np.isfinite(yerr_fit), yerr_fit, med_yerr)
-            yerr_fit = np.nan_to_num(yerr_fit, nan=float(jitter), posinf=float(jitter), neginf=float(jitter))
+            df_out.loc[idx, "baseline"] = baseline
+            df_out.loc[idx, "resid"] = resid
+            df_out.loc[idx, "sigma_resid"] = sigma_resid
+            if add_sigma_eff_col:
+                df_out.loc[idx, "sigma_eff"] = sigma_eff
+            df_out.loc[idx, "baseline_source"] = "median_fallback"
+            continue
+
+        t_fit = t[finite_idx]
+        mag_fit = mag[finite_idx]
+        mean_mag = float(np.mean(mag_fit))
+        mag_centered = mag_fit - mean_mag
+
+        mag_err_fit = mag_err[finite_idx]
 
         if sigma is not None and rho is not None:
             k = terms.SHOTerm(sigma=float(sigma), rho=float(rho), Q=float(q))
@@ -540,42 +541,35 @@ def per_camera_gp_baseline(
                     w0_use = max(w0_scaled, float(w0))
             k = terms.SHOTerm(S0=float(S0), w0=w0_use, Q=float(q))
 
-        baseline = np.full_like(y, np.nan, dtype=float)
-        var = np.zeros_like(y, dtype=float)
+        baseline = np.full_like(mag, np.nan, dtype=float)
+        var = np.zeros_like(mag, dtype=float)
         baseline_flag = "median_fallback"
 
         try:
             gp = GaussianProcess(k)
-            gp.compute(t_fit, diag=yerr_fit**2)
-            mu, var_pred = gp.predict(y_centered, t, return_var=True)
-            baseline = np.asarray(mu, dtype=float) + y_mean
+            gp.compute(t_fit, diag=mag_err_fit**2)
+            mean_prediction, var_pred = gp.predict(mag_centered, t, return_var=True)
+            baseline = np.asarray(mean_prediction, dtype=float) + mean_mag
             var = np.asarray(var_pred, dtype=float)
             var = np.where(np.isfinite(var) & (var >= 0.0), var, 0.0)
             baseline_flag = "gp_sho"
         except Exception as exc:
             warnings.warn(f"GP fit failed for camera group; falling back to median baseline. Error: {exc}")
-            y_med = float(np.nanmedian(y[finite]))
-            baseline = np.full_like(y, y_med, dtype=float)
-            var = np.zeros_like(y, dtype=float)
+            median_mag = float(np.nanmedian(mag[finite]))
+            baseline = np.full_like(mag, median_mag, dtype=float)
+            var = np.zeros_like(mag, dtype=float)
             baseline_flag = "median_fallback"
 
-        resid = y - baseline
+        resid = mag - baseline
 
-        if np.isfinite(yerr).any():
-            med_yerr_all = float(np.nanmedian(yerr[np.isfinite(yerr)]))
-            med_yerr_all = med_yerr_all if np.isfinite(med_yerr_all) else float(jitter)
-        else:
-            med_yerr_all = float(jitter)
-        yerr_full = np.where(np.isfinite(yerr), yerr, med_yerr_all)
-        yerr_full = np.nan_to_num(yerr_full, nan=float(jitter), posinf=float(jitter), neginf=float(jitter))
-        yerr_full = np.maximum(yerr_full, 0.0)
+        mag_err_full = mag_err
 
         if sigma_floor is None:
-            floor_here = robust_sigma_floor(resid, yerr_full, var)
+            floor_here = robust_sigma_floor(resid, mag_err_full, var)
         else:
             floor_here = float(max(sigma_floor, 0.0))
 
-        sigma_eff2 = yerr_full**2 + floor_here**2 + var
+        sigma_eff2 = mag_err_full**2 + floor_here**2 + var
         sigma_eff = np.sqrt(np.maximum(sigma_eff2, 1e-12))
         sigma_resid = resid / sigma_eff
 
@@ -603,10 +597,9 @@ def per_camera_gp_baseline_masked(
     a2=None,
     rho2=None,
     jitter=BASELINE_JITTER,
-    use_yerr=True,
     t_col="JD",
     mag_col="mag",
-    err_col="error",
+    mag_err_col="error",
     cam_col="camera#",
     min_gp_points=GP_MIN_GP_POINTS,
     add_sigma_eff_col=True,
@@ -623,8 +616,9 @@ def per_camera_gp_baseline_masked(
 ):
     """Per-camera GP baseline with dip masking (excludes significant dips from fit)."""
 
-    def robust_sigma_floor(resid, yerr_here, var_here):
-        finite0 = np.isfinite(resid) & np.isfinite(yerr_here) & np.isfinite(var_here)
+    
+    def robust_sigma_floor(resid, mag_err_here, var_here):
+        finite0 = np.isfinite(resid) & np.isfinite(mag_err_here) & np.isfinite(var_here)
         if finite0.sum() < max(10, min_floor_points):
             return 0.0
 
@@ -646,15 +640,15 @@ def per_camera_gp_baseline_masked(
         s_quiet = MAD_SCALE * float(np.median(np.abs(rr - float(np.median(rr)))))
         s_quiet = max(s_quiet, 1e-12)
 
-        yerr2_med = float(
+        mag_err2_med = float(
             np.median(
-                (yerr_here[finite0][keep] if keep.size == yerr_here[finite0].size else yerr_here[finite0]) ** 2
+                (mag_err_here[finite0][keep] if keep.size == mag_err_here[finite0].size else mag_err_here[finite0]) ** 2
             )
         )
         var_med = float(
             np.median((var_here[finite0][keep] if keep.size == var_here[finite0].size else var_here[finite0]))
         )
-        floor2 = max(s_quiet**2 - yerr2_med - var_med, 0.0)
+        floor2 = max(s_quiet**2 - mag_err2_med - var_med, 0.0)
         return float(np.sqrt(floor2))
 
     df_out = df.copy()
@@ -666,36 +660,25 @@ def per_camera_gp_baseline_masked(
     for _, sub in df_out.groupby(cam_col, group_keys=False):
         idx = sub.sort_values(t_col).index
         t = df_out.loc[idx, t_col].to_numpy(float)
-        y = df_out.loc[idx, mag_col].to_numpy(float)
+        mag = df_out.loc[idx, mag_col].to_numpy(float)
+        mag_err = df_out.loc[idx, mag_err_col].to_numpy(float)
 
-        if use_yerr:
-            yerr = df_out.loc[idx, err_col].to_numpy(float)
-        else:
-            yerr = np.full_like(y, np.nan, dtype=float)
-
-        finite = np.isfinite(t) & np.isfinite(y)
-        y_med = float(np.nanmedian(y[finite]))
+        finite = np.isfinite(t) & np.isfinite(mag)
+        median_mag = float(np.nanmedian(mag[finite]))
         
         # Step 1: Two-Pass Trend-Aware Masking (Stiff GP)
         base_rough = None
         if auto_scale_gp and finite.sum() >= min_gp_points:
             try:
-                t_stiff = t[finite]
-                y_stiff = y[finite]
-                y_stiff_mean = float(np.mean(y_stiff))
-                y_stiff0 = y_stiff - y_stiff_mean
-                
-                if use_yerr:
-                    yerr_stiff = yerr[finite]
-                    if not np.isfinite(yerr_stiff).any():
-                        yerr_stiff = np.full_like(y_stiff, float(jitter), dtype=float)
-                    else:
-                        med_yerr_stiff = float(np.nanmedian(yerr_stiff[np.isfinite(yerr_stiff)]))
-                        med_yerr_stiff = float(med_yerr_stiff) if np.isfinite(med_yerr_stiff) else float(jitter)
-                        yerr_stiff = np.where(np.isfinite(yerr_stiff), yerr_stiff, med_yerr_stiff)
-                        yerr_stiff = np.nan_to_num(yerr_stiff, nan=float(jitter), posinf=float(jitter), neginf=float(jitter))
-                else:
-                    yerr_stiff = np.full_like(y_stiff, float(jitter), dtype=float)
+                fit_finite = finite & np.isfinite(mag_err) & (mag_err > 0)
+                if np.count_nonzero(fit_finite) < min_gp_points:
+                    raise ValueError("insufficient finite mag_err points for stiff GP")
+
+                t_stiff = t[fit_finite]
+                mag_stiff = mag[fit_finite]
+                mean_mag_stiff = float(np.mean(mag_stiff))
+                mag_stiff_centered = mag_stiff - mean_mag_stiff
+                mag_err_stiff = mag_err[fit_finite]
                 
                 time_span_stiff = float(t_stiff.max() - t_stiff.min())
                 target_timescale_stiff = max(time_span_stiff * float(stiff_scale_fraction), float(stiff_min_days))
@@ -704,48 +687,39 @@ def per_camera_gp_baseline_masked(
                 k_stiff = terms.SHOTerm(S0=float(S0), w0=w0_stiff, Q=float(q))
                 
                 gp_stiff = GaussianProcess(k_stiff)
-                gp_stiff.compute(t_stiff, diag=yerr_stiff**2)
-                mu_stiff = gp_stiff.predict(y_stiff0, t, return_var=False)
+                gp_stiff.compute(t_stiff, diag=mag_err_stiff**2)
+                mean_prediction_stiff = gp_stiff.predict(mag_stiff_centered, t, return_var=False)
                 
-                base_rough = np.full_like(y, np.nan, dtype=float)
-                base_rough[finite] = np.asarray(mu_stiff, dtype=float) + y_stiff_mean
+                base_rough = np.full_like(mag, np.nan, dtype=float)
+                base_rough[:] = np.asarray(mean_prediction_stiff, dtype=float) + mean_mag_stiff
                 
-                # Interpolate for non-finite points to ensure base_rough is dense
-                if not finite.all():
-                     base_rough = np.interp(t, t[finite], base_rough[finite])
-
-            except Exception as exc:
+            except Exception:
                 base_rough = None
 
         if base_rough is None:
-            base_rough = rolling_time_median(t, y, past_only=False)
+            base_rough = rolling_time_median(t, mag, past_only=False)
             
         # Fallback if base_rough has NaNs
-        base_rough = np.where(np.isfinite(base_rough), base_rough, y_med)
+        base_rough = np.where(np.isfinite(base_rough), base_rough, median_mag)
         df_out.loc[idx, "base_rough"] = base_rough
-        r0 = y - base_rough
+        rough_resid = mag - base_rough
 
-        r0_f = r0[finite]
-        med_r = float(np.nanmedian(r0_f))
-        mad_r = MAD_SCALE * float(np.nanmedian(np.abs(r0_f - med_r)))
+        rough_resid_finite = rough_resid[finite]
+        median_rough_resid = float(np.nanmedian(rough_resid_finite))
+        mad_rough_resid = MAD_SCALE * float(np.nanmedian(np.abs(rough_resid_finite - median_rough_resid)))
 
-        if use_yerr and np.isfinite(yerr).any():
-            e_med = float(np.nanmedian(yerr[finite & np.isfinite(yerr)]))
-        else:
-            e_med = float(jitter)
+        median_mag_err = float(np.nanmedian(mag_err[finite & np.isfinite(mag_err)]))
 
-        s0 = float(np.sqrt(max(mad_r, 0.0) ** 2 + max(e_med, 0.0) ** 2))
+        s0 = float(np.sqrt(max(mad_rough_resid, 0.0) ** 2 + max(median_mag_err, 0.0) ** 2))
         s0 = max(s0, 1e-6)
 
-        sig0 = r0 / s0
-        
         # Step 2: Stateful Bidirectional Outlier Rejection
         flags = np.zeros(len(t), dtype=bool)
         in_dip = False
         in_flare = False
         
         valid_base_idx = np.where(np.isfinite(base_rough) & finite)[0]
-        ref_baseline = base_rough[valid_base_idx[0]] if len(valid_base_idx) > 0 else y_med
+        ref_baseline = base_rough[valid_base_idx[0]] if len(valid_base_idx) > 0 else median_mag
         
         thresh_dip = float(dip_sigma_thresh)
         thresh_bright = float(bright_sigma_thresh)
@@ -757,7 +731,7 @@ def per_camera_gp_baseline_masked(
             if not (in_dip or in_flare):
                 ref_baseline = base_rough[i]
                 
-            sig = (y[i] - ref_baseline) / s0
+            sig = (mag[i] - ref_baseline) / s0
             
             if sig > thresh_dip:
                 in_dip = True
@@ -788,16 +762,12 @@ def per_camera_gp_baseline_masked(
             keep &= ~bad
 
         if keep.sum() < min_gp_points:
-            baseline = np.full_like(y, y_med, dtype=float)
-            resid = y - baseline
+            baseline = np.full_like(mag, median_mag, dtype=float)
+            resid = mag - baseline
 
-            if use_yerr and np.isfinite(yerr).any():
-                yerr_full = np.where(np.isfinite(yerr), yerr, e_med)
-            else:
-                yerr_full = np.full_like(y, e_med, dtype=float)
-
+            mag_err_full = mag_err
             floor_here = float(max(sigma_floor, 0.0)) if sigma_floor is not None else float(jitter)
-            sigma_eff = np.sqrt(yerr_full**2 + floor_here**2)
+            sigma_eff = np.sqrt(mag_err_full**2 + floor_here**2)
             sigma_resid = resid / sigma_eff
 
             df_out.loc[idx, "baseline"] = baseline
@@ -808,18 +778,29 @@ def per_camera_gp_baseline_masked(
             continue
 
         t_fit = t[keep]
-        y_fit = y[keep]
+        mag_fit = mag[keep]
+        fit_keep = keep & np.isfinite(mag_err) & (mag_err > 0)
+        if np.count_nonzero(fit_keep) < min_gp_points:
+            baseline = np.full_like(mag, median_mag, dtype=float)
+            resid = mag - baseline
+            mag_err_full = mag_err
+            floor_here = float(max(sigma_floor, 0.0)) if sigma_floor is not None else float(jitter)
+            sigma_eff = np.sqrt(mag_err_full**2 + floor_here**2)
+            sigma_resid = resid / sigma_eff
 
-        if use_yerr and np.isfinite(yerr[keep]).any():
-            yerr_fit = yerr[keep]
-            med = float(np.nanmedian(yerr_fit[np.isfinite(yerr_fit)]))
-            yerr_fit = np.where(np.isfinite(yerr_fit), yerr_fit, med)
-            yerr_fit = np.nan_to_num(yerr_fit, nan=jitter, posinf=jitter, neginf=jitter)
-        else:
-            yerr_fit = np.full_like(y_fit, float(jitter), dtype=float)
+            df_out.loc[idx, "baseline"] = baseline
+            df_out.loc[idx, "resid"] = resid
+            df_out.loc[idx, "sigma_resid"] = sigma_resid
+            if add_sigma_eff_col:
+                df_out.loc[idx, "sigma_eff"] = sigma_eff
+            continue
 
-        y_mean = float(np.mean(y_fit))
-        y_fit0 = y_fit - y_mean
+        t_fit = t[fit_keep]
+        mag_fit = mag[fit_keep]
+        mag_err_fit = mag_err[fit_keep]
+
+        mean_mag = float(np.mean(mag_fit))
+        mag_fit_centered = mag_fit - mean_mag
 
         if a1 is not None and rho1 is not None and a2 is not None and rho2 is not None:
             k = terms.RealTerm(a=float(a1), c=1.0 / float(rho1)) + terms.RealTerm(a=float(a2), c=1.0 / float(rho2))
@@ -835,19 +816,15 @@ def per_camera_gp_baseline_masked(
 
         try:
             gp = GaussianProcess(k)
-            gp.compute(t_fit, diag=yerr_fit**2)
-            mu, var = gp.predict(y_fit0, t, return_var=True)
+            gp.compute(t_fit, diag=mag_err_fit**2)
+            mean_prediction, var = gp.predict(mag_fit_centered, t, return_var=True)
         except Exception:
-            baseline = np.full_like(y, y_med, dtype=float)
-            resid = y - baseline
+            baseline = np.full_like(mag, median_mag, dtype=float)
+            resid = mag - baseline
 
-            if use_yerr and np.isfinite(yerr).any():
-                yerr_full = np.where(np.isfinite(yerr), yerr, e_med)
-            else:
-                yerr_full = np.full_like(y, e_med, dtype=float)
-
+            mag_err_full = mag_err
             floor_here = float(max(sigma_floor, 0.0)) if sigma_floor is not None else float(jitter)
-            sigma_eff = np.sqrt(yerr_full**2 + floor_here**2)
+            sigma_eff = np.sqrt(mag_err_full**2 + floor_here**2)
             sigma_resid = resid / sigma_eff
 
             df_out.loc[idx, "baseline"] = baseline
@@ -857,23 +834,20 @@ def per_camera_gp_baseline_masked(
                 df_out.loc[idx, "sigma_eff"] = sigma_eff
             continue
 
-        baseline = np.asarray(mu, float) + y_mean
-        resid = y - baseline
+        baseline = np.asarray(mean_prediction, float) + mean_mag
+        resid = mag - baseline
 
         var = np.asarray(var, float)
         var = np.maximum(var, 0.0)
 
-        if use_yerr and np.isfinite(yerr).any():
-            yerr_full = np.where(np.isfinite(yerr), yerr, e_med)
-        else:
-            yerr_full = np.full_like(y, e_med, dtype=float)
+        mag_err_full = mag_err
 
         if sigma_floor is None:
-            floor_here = robust_sigma_floor(resid, yerr_full, var)
+            floor_here = robust_sigma_floor(resid, mag_err_full, var)
         else:
             floor_here = float(max(sigma_floor, 0.0))
 
-        sigma_eff2 = yerr_full**2 + floor_here**2 + var
+        sigma_eff2 = mag_err_full**2 + floor_here**2 + var
         sigma_eff = np.sqrt(np.maximum(sigma_eff2, 1e-12))
         sigma_resid = resid / sigma_eff
 
