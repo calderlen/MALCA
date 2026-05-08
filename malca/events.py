@@ -147,6 +147,7 @@ def default_mag_grid(
 def compute_symmetry_score(
     jd: np.ndarray,  # times (JD)
     resid: np.ndarray,  # mag - baseline (positive in dips)
+    sigma_eff: np.ndarray, # mag uncertainties
     center_idx: int,  # run center index
     start_idx: int,  # run start index
     end_idx: int,  # run end index
@@ -154,6 +155,7 @@ def compute_symmetry_score(
     """Tzanidakis+2025 Eq. 5 symmetry score (ingress vs egress area)."""
     jd = np.asarray(jd, float)
     resid = np.asarray(resid, float)
+    sigma_eff = np.asarray(sigma_eff, float)
 
     if not (0 <= start_idx < center_idx < end_idx < len(jd)):
         return np.nan
@@ -161,14 +163,29 @@ def compute_symmetry_score(
     # ingress segment [start..center], egress segment [center..end]
     t_ingress = jd[start_idx:center_idx + 1]
     resid_ingress = resid[start_idx:center_idx + 1]
+    err_ingress = sigma_eff[start_idx:center_idx + 1]
 
     t_egress = jd[center_idx:end_idx + 1]
     resid_egress = resid[center_idx:end_idx + 1]
+    err_egress = sigma_eff[center_idx:end_idx + 1]
 
     I_ingress = np.trapz(resid_ingress, t_ingress)
     I_egress = np.trapz(resid_egress, t_egress)
 
-    denominator = np.sqrt(I_ingress**2 + I_egress**2)
+    # trapezoidal rule weights for variance calculation
+    def trapz_weights(t):
+        w = np.zeros_like(t)
+        if len(t) > 1:
+            w[0] = (t[1] - t[0]) / 2.0
+            w[-1] = (t[-1] - t[-2]) / 2.0
+            if len(t) > 2:
+                w[1:-1] = (t[2:] - t[:-2]) / 2.0
+        return w
+
+    var_ingress = np.sum((trapz_weights(t_ingress) * err_ingress)**2)
+    var_egress = np.sum((trapz_weights(t_egress) * err_egress)**2)
+
+    denominator = np.sqrt(var_ingress + var_egress)
     if denominator < 1e-10:
         return 0.0
 
