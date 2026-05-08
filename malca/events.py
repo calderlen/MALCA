@@ -178,7 +178,7 @@ def compute_symmetry_score(
 def classify_run_morphology(
     jd: np.ndarray,
     mag: np.ndarray,
-    err: np.ndarray,
+    sigma_eff: np.ndarray,
     run_idx: np.ndarray,
     *,
     baseline: np.ndarray | None = None,
@@ -194,7 +194,7 @@ def classify_run_morphology(
 
     t_padded = jd[start_i:end_i]
     mag_padded = mag[start_i:end_i]
-    err_padded = err[start_i:end_i]
+    sigma_eff_padded = sigma_eff[start_i:end_i]
 
     # Use sliced GP baseline as guess when available; fall back to nanmedian
     if baseline is not None:
@@ -212,7 +212,7 @@ def classify_run_morphology(
     delta_bic_threshold = 10.0
 
     resid_null = mag_padded - baseline_guess
-    bic_null = bic(resid_null, err_padded, 1)
+    bic_null = bic(resid_null, sigma_eff_padded, 1)
 
     best_bic = bic_null
     best_model = "noise"
@@ -223,10 +223,10 @@ def classify_run_morphology(
             popt_g, _ = curve_fit(
                 gaussian, t_padded, mag_padded,
                 p0=[amp_guess_dip, t0_guess, sigma_guess, baseline_guess],
-                sigma=err_padded, maxfev=2000
+                sigma=sigma_eff_padded, maxfev=2000
             )
             resid_g = mag_padded - gaussian(t_padded, *popt_g)
-            bic_g = bic(resid_g, err_padded, 4)
+            bic_g = bic(resid_g, sigma_eff_padded, 4)
 
             if (popt_g[0] > 0) and bic_g < (best_bic - delta_bic_threshold):
                 best_bic = bic_g
@@ -244,14 +244,14 @@ def classify_run_morphology(
             popt_sg, _ = curve_fit(
                 skew_gaussian, t_padded, mag_padded,
                 p0=[amp_guess_dip, t0_guess, sigma_guess, baseline_guess, 0.0],
-                sigma=err_padded, maxfev=3000,
+                sigma=sigma_eff_padded, maxfev=3000,
                 bounds=(
                     [-np.inf, t_padded[0], 1e-5, -np.inf, -10],
                     [np.inf, t_padded[-1], np.inf, np.inf, 10]
                 )
             )
             resid_sg = mag_padded - skew_gaussian(t_padded, *popt_sg)
-            bic_sg = bic(resid_sg, err_padded, 5)
+            bic_sg = bic(resid_sg, sigma_eff_padded, 5)
 
             if (popt_sg[0] > 0) and bic_sg < (best_bic - delta_bic_threshold):
                 best_bic = bic_sg
@@ -269,10 +269,10 @@ def classify_run_morphology(
             popt_p, _ = curve_fit(
                 paczynski_kernel, t_padded, mag_padded,
                 p0=[amp_guess_jump, t0_guess, sigma_guess, baseline_guess],
-                sigma=err_padded, maxfev=2000
+                sigma=sigma_eff_padded, maxfev=2000
             )
             resid_p = mag_padded - paczynski_kernel(t_padded, *popt_p)
-            bic_p = bic(resid_p, err_padded, 4)
+            bic_p = bic(resid_p, sigma_eff_padded, 4)
 
             if (popt_p[0] < 0) and bic_p < (best_bic - delta_bic_threshold):
                 best_bic = bic_p
@@ -288,11 +288,11 @@ def classify_run_morphology(
             popt_f, _ = curve_fit(
                 fred, t_padded, mag_padded,
                 p0=[amp_guess_jump, t0_guess, 0.05, baseline_guess],
-                sigma=err_padded, maxfev=2000
+                sigma=sigma_eff_padded, maxfev=2000
             )
             if popt_f[0] < 0:
                 resid_f = mag_padded - fred(t_padded, *popt_f)
-                bic_f = bic(resid_f, err_padded, 4)
+                bic_f = bic(resid_f, sigma_eff_padded, 4)
 
                 if bic_f < (best_bic - delta_bic_threshold):
                     best_bic = bic_f
@@ -697,22 +697,24 @@ def score_events_bayesian(
             f"NaN={np.isnan(mags).sum()}, inf={np.isinf(mags).sum()}"
         )
 
-    errs = np.asarray(df[err_col], float)
+    raw_mag_err = np.asarray(df[err_col], float)
 
-    errs_finite = np.isfinite(errs).sum()
-    errs_positive = (errs > 0).sum() if errs_finite > 0 else 0
-    if errs_finite == 0:
+    raw_mag_err_finite = np.isfinite(raw_mag_err).sum()
+    raw_mag_err_positive = (raw_mag_err > 0).sum() if raw_mag_err_finite > 0 else 0
+    if raw_mag_err_finite == 0:
         raise ValueError(
             f"All errors are NaN/inf: "
-            f"total={len(errs)}, finite={errs_finite}, "
-            f"NaN={np.isnan(errs).sum()}, inf={np.isinf(errs).sum()}"
+            f"total={len(raw_mag_err)}, finite={raw_mag_err_finite}, "
+            f"NaN={np.isnan(raw_mag_err).sum()}, inf={np.isinf(raw_mag_err).sum()}"
         )
-    if errs_positive == 0:
+    if raw_mag_err_positive == 0:
         raise ValueError(
             f"All errors are non-positive: "
-            f"total={len(errs)}, finite={errs_finite}, positive={errs_positive}, "
-            f"min={np.nanmin(errs) if errs_finite > 0 else 'N/A'}"
+            f"total={len(raw_mag_err)}, finite={raw_mag_err_finite}, positive={raw_mag_err_positive}, "
+            f"min={np.nanmin(raw_mag_err) if raw_mag_err_finite > 0 else 'N/A'}"
         )
+
+    sigma_eff = raw_mag_err.copy()
 
     if baseline_kwargs is None:
         baseline_kwargs = dict(DEFAULT_BASELINE_KWARGS)
@@ -738,22 +740,21 @@ def score_events_bayesian(
         # sigma_eff is mandatory — every baseline must produce it
         if "sigma_eff" not in df_base.columns:
             raise RuntimeError("Baseline did not return 'sigma_eff'. All baselines must produce sigma_eff.")
-        errs_new = np.asarray(df_base["sigma_eff"], float)
-        errs_new_finite = np.isfinite(errs_new).sum()
-        errs_new_positive = (errs_new > 0).sum() if errs_new_finite > 0 else 0
-        if errs_new_finite == 0:
+        sigma_eff = np.asarray(df_base["sigma_eff"], float)
+        sigma_eff_finite = np.isfinite(sigma_eff).sum()
+        sigma_eff_positive = (sigma_eff > 0).sum() if sigma_eff_finite > 0 else 0
+        if sigma_eff_finite == 0:
             raise ValueError(
                 f"Baseline returned all NaN/inf sigma_eff: "
-                f"total={len(errs_new)}, finite={errs_new_finite}, "
-                f"NaN={np.isnan(errs_new).sum()}, inf={np.isinf(errs_new).sum()}"
+                f"total={len(sigma_eff)}, finite={sigma_eff_finite}, "
+                f"NaN={np.isnan(sigma_eff).sum()}, inf={np.isinf(sigma_eff).sum()}"
             )
-        if errs_new_positive == 0:
+        if sigma_eff_positive == 0:
             raise ValueError(
                 f"Baseline returned all non-positive sigma_eff: "
-                f"total={len(errs_new)}, finite={errs_new_finite}, positive={errs_new_positive}, "
-                f"min={np.nanmin(errs_new) if errs_new_finite > 0 else 'N/A'}"
+                f"total={len(sigma_eff)}, finite={sigma_eff_finite}, positive={sigma_eff_positive}, "
+                f"min={np.nanmin(sigma_eff) if sigma_eff_finite > 0 else 'N/A'}"
             )
-        errs = errs_new
 
     baseline_finite = np.isfinite(baseline_mags).sum()
     if baseline_finite == 0:
@@ -764,26 +765,26 @@ def score_events_bayesian(
             f"baseline_func={baseline_func.__name__ if baseline_func else 'None'}"
         )
     
-    errs_finite_final = np.isfinite(errs).sum()
-    errs_positive_final = (errs > 0).sum() if errs_finite_final > 0 else 0
-    if errs_finite_final == 0:
+    sigma_eff_finite_final = np.isfinite(sigma_eff).sum()
+    sigma_eff_positive_final = (sigma_eff > 0).sum() if sigma_eff_finite_final > 0 else 0
+    if sigma_eff_finite_final == 0:
         raise ValueError(
             f"All errors are NaN/inf after baseline: "
-            f"total={len(errs)}, finite={errs_finite_final}, "
-            f"NaN={np.isnan(errs).sum()}, inf={np.isinf(errs).sum()}"
+            f"total={len(sigma_eff)}, finite={sigma_eff_finite_final}, "
+            f"NaN={np.isnan(sigma_eff).sum()}, inf={np.isinf(sigma_eff).sum()}"
         )
-    if errs_positive_final == 0:
+    if sigma_eff_positive_final == 0:
         raise ValueError(
             f"All errors are non-positive after baseline: "
-            f"total={len(errs)}, finite={errs_finite_final}, positive={errs_positive_final}, "
-            f"min={np.nanmin(errs) if errs_finite_final > 0 else 'N/A'}"
+            f"total={len(sigma_eff)}, finite={sigma_eff_finite_final}, positive={sigma_eff_positive_final}, "
+            f"min={np.nanmin(sigma_eff) if sigma_eff_finite_final > 0 else 'N/A'}"
         )
     
     total_points = len(mags)
     valid_mask = (
         np.isfinite(mags)
-        & np.isfinite(errs)
-        & (errs > 0)
+        & np.isfinite(sigma_eff)
+        & (sigma_eff > 0)
         & np.isfinite(baseline_mags)
     )
     n_valid = int(valid_mask.sum())
@@ -791,12 +792,12 @@ def score_events_bayesian(
         raise ValueError(
             "No valid points after baseline/error filtering: "
             f"total={total_points}, finite_mags={np.isfinite(mags).sum()}, "
-            f"finite_errs={np.isfinite(errs).sum()}, positive_errs={(errs > 0).sum()}, "
+            f"finite_errs={np.isfinite(sigma_eff).sum()}, positive_errs={(sigma_eff > 0).sum()}, "
             f"finite_baseline={np.isfinite(baseline_mags).sum()}"
         )
     if n_valid < total_points:
         mags = mags[valid_mask]
-        errs = errs[valid_mask]
+        sigma_eff = sigma_eff[valid_mask]
         baseline_mags = baseline_mags[valid_mask]
         baseline_sources = baseline_sources[valid_mask]
         jd = jd[valid_mask]
@@ -829,14 +830,14 @@ def score_events_bayesian(
     N = int(len(mags))
 
     if kind == "dip":
-        log_Pb_vec = log_gaussian(resid, 0.0, errs)
+        log_Pb_vec = log_gaussian(resid, 0.0, sigma_eff)
         log_Pb_grid = np.broadcast_to(log_Pb_vec, (M, N))
-        log_Pf_grid = log_gaussian(resid[None, :], mag_grid[:, None], errs)
+        log_Pf_grid = log_gaussian(resid[None, :], mag_grid[:, None], sigma_eff)
         event_component = "faint"
 
     elif kind == "jump":
-        log_Pb_grid = log_gaussian(resid[None, :], mag_grid[:, None], errs)
-        log_Pf_vec = log_gaussian(resid, 0.0, errs)
+        log_Pb_grid = log_gaussian(resid[None, :], mag_grid[:, None], sigma_eff)
+        log_Pf_vec = log_gaussian(resid, 0.0, sigma_eff)
         log_Pf_grid = np.broadcast_to(log_Pf_vec, (M, N))
         event_component = "bright"
         
@@ -859,7 +860,7 @@ def score_events_bayesian(
         )
     if n_valid_points < total_points:
         mags = mags[valid_points]
-        errs = errs[valid_points]
+        sigma_eff = sigma_eff[valid_points]
         baseline_mags = baseline_mags[valid_points]
         baseline_sources = baseline_sources[valid_points]
         jd = jd[valid_points]
@@ -1003,7 +1004,7 @@ def score_events_bayesian(
             morph_res = classify_run_morphology(
                 jd,
                 mags,
-                errs,
+                sigma_eff,
                 r,
                 baseline=baseline_arr,
                 kind=kind,

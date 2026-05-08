@@ -324,6 +324,62 @@ class TestRunBayesianSignificance:
         assert result["run_summaries"][0]["start_idx"] == 20
         assert result["run_summaries"][0]["duration_days"] == 10.0
 
+    def test_morphology_receives_sigma_eff_from_baseline(self, monkeypatch):
+        """Morphology fitting should see baseline-derived sigma_eff, not raw errors."""
+        jd = np.arange(40.0)
+        raw_error = np.full_like(jd, 0.2, dtype=float)
+        sigma_eff = np.full_like(jd, 0.05, dtype=float)
+        df = pd.DataFrame(
+            {
+                "JD": jd,
+                "mag": np.full_like(jd, 14.0, dtype=float),
+                "error": raw_error,
+                "camera#": ["b0"] * len(jd),
+            }
+        )
+        df_base = df.copy()
+        df_base["baseline"] = 14.0
+        df_base["sigma_eff"] = sigma_eff
+        df_base["baseline_source"] = "test"
+
+        point_significance = np.zeros(len(jd), dtype=float)
+        point_significance[10:16] = 10.0
+        seen_sigma_eff: list[np.ndarray] = []
+
+        def fake_resolve_trigger_indices(**kwargs):
+            return {
+                "point_significance": point_significance,
+                "event_indices": np.arange(10, 16, dtype=int),
+                "trigger_threshold": 5.0,
+                "trigger_max": 10.0,
+            }
+
+        def fake_classify_run_morphology(jd_arr, mag_arr, sigma_eff_arr, run_idx, **kwargs):
+            seen_sigma_eff.append(np.asarray(sigma_eff_arr, dtype=float).copy())
+            return {"morphology": "test", "bic": 0.0, "delta_bic_null": 0.0, "params": {}}
+
+        monkeypatch.setattr("malca.events.resolve_trigger_indices", fake_resolve_trigger_indices)
+        monkeypatch.setattr("malca.events.classify_run_morphology", fake_classify_run_morphology)
+        monkeypatch.setattr("malca.events.compute_symmetry_score", lambda *args, **kwargs: 0.0)
+
+        result = score_events_bayesian(
+            df,
+            kind="dip",
+            baseline_func=None,
+            df_base=df_base,
+            trigger_mode="logbf",
+            logbf_threshold=5.0,
+            p_points=2,
+            mag_grid=np.array([0.2]),
+            run_min_points=3,
+            run_min_duration_days=5.0,
+            compute_event_prob=False,
+        )
+
+        assert result["run_summaries"]
+        assert len(seen_sigma_eff) == 1
+        np.testing.assert_allclose(seen_sigma_eff[0], sigma_eff)
+
 
 class TestEdgeCases:
     """Test edge cases in event detection."""

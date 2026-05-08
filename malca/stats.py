@@ -223,9 +223,12 @@ def bic(resid, err, n_params):
     resid = resid[mask]
     err = err[mask]
     n = len(resid)
-    chi2 = np.sum((resid / err) ** 2)
-    sigma2 = chi2 / n
-    return float(n * np.log(sigma2) + n_params * np.log(n))
+    # Use the full Gaussian log-likelihood so BIC follows the standard form:
+    # BIC = k * ln(n) - 2 * ln(L_max)
+    # where ln(L_max) = sum log Gaussian(resid; 0, err)
+    logp = log_gaussian(resid, 0.0, err)
+    logL = float(np.nansum(logp))
+    return float(n_params * np.log(n) - 2.0 * logL)
 
 def pct(x, q):
     return float(np.nanpercentile(x, q)) if len(x) else np.nan
