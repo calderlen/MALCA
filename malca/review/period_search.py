@@ -11,6 +11,7 @@ from malca.config import (
     CLEAN_LC_MAX_ERROR_SIGMA,
 )
 from malca.config import LS_ALIAS_PERIODS, LS_ALIAS_TOLERANCE
+from malca.phase import phase_template, resolve_phase_period, template_phase_lag
 from malca.periodogram import ce_find_period, lsp_find_period, pdm_find_period
 from malca.review.interactive_plot import (
     _compute_baseline_bands,
@@ -42,24 +43,8 @@ _METHOD_PRIORITY: dict[str, int] = {
 
 
 def has_external_period(payload: dict | None) -> bool:
-    payload = payload or {}
-    for keys in (
-        ("phase_period_days",),
-        ("period_consensus_days",),
-        ("vsx_period", "period_vsx_days"),
-        ("asassn_var_period", "period_asassn_var_days"),
-        ("gaia_eb_period", "period_gaia_eb_days"),
-        ("ztf_var_period", "period_ztf_periodic_days"),
-        ("catalog_period",),
-    ):
-        for key in keys:
-            try:
-                value = float(payload.get(key))
-            except (TypeError, ValueError):
-                continue
-            if np.isfinite(value) and value > 0:
-                return True
-    return False
+    period, _ = resolve_phase_period(payload, include_lsp=False)
+    return bool(period is not None and np.isfinite(period) and period > 0)
 
 
 def _robust_sigma(values: np.ndarray) -> float:
@@ -73,68 +58,6 @@ def _robust_sigma(values: np.ndarray) -> float:
     if not np.isfinite(sigma) or sigma <= 0:
         sigma = float(np.nanstd(vals))
     return sigma if np.isfinite(sigma) and sigma > 0 else np.nan
-
-
-def _phase_template(
-    phase: np.ndarray,
-    resid: np.ndarray,
-    *,
-    n_bins: int = 48,
-    min_bin_points: int = 3,
-) -> tuple[np.ndarray, np.ndarray]:
-    template = np.full(n_bins, np.nan, dtype=float)
-    counts = np.zeros(n_bins, dtype=int)
-
-    phase = np.asarray(phase, dtype=float)
-    resid = np.asarray(resid, dtype=float)
-    valid = np.isfinite(phase) & np.isfinite(resid)
-    if np.count_nonzero(valid) == 0:
-        return template, counts
-
-    phase_valid = np.mod(phase[valid], 1.0)
-    resid_valid = resid[valid]
-    idx = np.floor(phase_valid * n_bins).astype(int)
-    idx = np.clip(idx, 0, n_bins - 1)
-
-    for b in range(n_bins):
-        vals = resid_valid[idx == b]
-        if vals.size >= min_bin_points:
-            template[b] = float(np.median(vals))
-            counts[b] = int(vals.size)
-    return template, counts
-
-
-def _template_phase_lag(template_a: np.ndarray, template_b: np.ndarray) -> float:
-    template_a = np.asarray(template_a, dtype=float)
-    template_b = np.asarray(template_b, dtype=float)
-    if template_a.size == 0 or template_a.size != template_b.size:
-        return np.nan
-
-    n = int(template_a.size)
-    best_corr = -np.inf
-    best_shift = 0
-    min_overlap = max(6, n // 4)
-
-    for shift in range(n):
-        shifted = np.roll(template_b, shift)
-        mask = np.isfinite(template_a) & np.isfinite(shifted)
-        if np.count_nonzero(mask) < min_overlap:
-            continue
-        a = template_a[mask] - np.mean(template_a[mask])
-        b = shifted[mask] - np.mean(shifted[mask])
-        sa = float(np.std(a))
-        sb = float(np.std(b))
-        if sa <= 0 or sb <= 0:
-            continue
-        corr = float(np.mean((a / sa) * (b / sb)))
-        if corr > best_corr:
-            best_corr = corr
-            best_shift = shift
-
-    if not np.isfinite(best_corr):
-        return np.nan
-    lag_bins = min(best_shift, n - best_shift)
-    return float(lag_bins / n)
 
 
 def _score_period_harmonic_candidate(
@@ -171,7 +94,7 @@ def _score_period_harmonic_candidate(
     scatter_ratios: list[float] = []
     for band, (jd, resid) in band_resid.items():
         phase = np.mod((jd - jd0) / float(period), 1.0)
-        template, _ = _phase_template(phase, resid, n_bins=n_bins)
+        template, _ = phase_template(phase, resid, n_bins=n_bins)
         templates[band] = template
 
         bin_idx = np.floor(phase * n_bins).astype(int)
@@ -199,7 +122,7 @@ def _score_period_harmonic_candidate(
     scatter_ratio = float(np.mean(scatter_ratios))
     lag_phase = np.nan
     if 0 in templates and 1 in templates:
-        lag_phase = _template_phase_lag(templates[0], templates[1])
+        lag_phase = template_phase_lag(templates[0], templates[1])
     lag_term = 0.0 if not np.isfinite(lag_phase) else float(lag_phase)
     raw_objective = float(scatter_ratio + lag_weight * lag_term)
     alias_matches = [

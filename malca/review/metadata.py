@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import math
 import numbers
+import re
 from decimal import Decimal, InvalidOperation
 from typing import Any
 from urllib.parse import quote, quote_plus
@@ -116,6 +117,8 @@ REVIEW_METADATA_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("Phase-peak width", "pre_periodicity_phase_peak_width"),
         ("Phase-peak regions", "pre_periodicity_phase_peak_regions"),
         ("Phase-peak flag", "pre_periodicity_phase_peak_flag"),
+        ("Phase lag g-V", "pre_periodicity_phase_lag_g_v_cycles"),
+        ("Phase lag g-V abs", "pre_periodicity_phase_lag_g_v_abs_cycles"),
     ]),
     ("Event Scoring", [
         ("Dipper N dips", "dipper_n_dips"),
@@ -388,6 +391,47 @@ REVIEW_METADATA_FIELDS: list[tuple[str, str]] = [
     for label, key in fields
 ]
 
+_DISPLAY_UNIT_LABELS = {
+    '"': "arcsec",
+    "AU": "AU",
+    "Gyr": "Gyr",
+    "K": "K",
+    "Myr": "Myr",
+    "Rsun": "Rsun",
+    r"$\mathrm{mag}^2$": r"$\mathrm{mag}^2$",
+    "arcmin": "arcmin",
+    "arcsec": "arcsec",
+    "cgs": "cgs",
+    "d": "d",
+    "day": "day",
+    "days": "days",
+    "kpc": "kpc",
+    "km/s": "km/s",
+    "mag": "mag",
+    "mag/day": "mag/day",
+    "mag/year": "mag/year",
+    "mag/yr": "mag/yr",
+    "mag/yr^2": "mag/yr^2",
+    "mas": "mas",
+    "mas/yr": "mas/yr",
+    "pc": "pc",
+    "rad": "rad",
+}
+
+
+def bracket_unit_label(label: str) -> str:
+    """Use square brackets for unit parentheticals in display labels."""
+    text = str(label)
+
+    def _replace(match: re.Match[str]) -> str:
+        unit = match.group(1).strip()
+        display = _DISPLAY_UNIT_LABELS.get(unit)
+        if display is None:
+            return match.group(0)
+        return f"[{display}]"
+
+    return re.sub(r"\(([^()]*)\)", _replace, text)
+
 # Groups that start expanded in the Dash GUI.
 _DEFAULT_OPEN_GROUPS: set[str] = {
     group_name
@@ -641,7 +685,7 @@ def extract_review_metadata(
         val = p.get(key)
         if not _is_present(val):
             continue
-        rows.append((label, _format_with_uncertainty(key, val, p, round_sf=round_sigfigs)))
+        rows.append((bracket_unit_label(label), _format_with_uncertainty(key, val, p, round_sf=round_sigfigs)))
     return rows
 
 
@@ -665,7 +709,7 @@ def extract_review_metadata_grouped(
             if not _is_present(val):
                 continue
             items.append((
-                _display_label_for_group(group_name, label),
+                bracket_unit_label(_display_label_for_group(group_name, label)),
                 _format_with_uncertainty(key, val, p, round_sf=round_sigfigs),
             ))
         if items:

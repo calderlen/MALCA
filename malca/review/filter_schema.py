@@ -400,6 +400,8 @@ SIDEBAR_GROUPS = [
         ("num", "pre_periodicity_phase_peak_width"),
         ("num", "pre_periodicity_phase_peak_regions"),
         ("bool", "pre_periodicity_phase_peak_flag"),
+        ("num", "pre_periodicity_phase_lag_g_v_cycles"),
+        ("num", "pre_periodicity_phase_lag_g_v_abs_cycles"),
         ("text", "trigger_mode"),
         ("num", "n_points"),
         ("num", "n_cameras"),

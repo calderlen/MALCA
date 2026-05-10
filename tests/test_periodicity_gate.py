@@ -901,3 +901,14 @@ def test_apply_pre_periodicity_gate_selects_passing_subharmonic_regression(monke
     assert np.isclose(out.loc[0, "pre_periodicity_harmonic_factor"], 0.25)
     assert np.isclose(out.loc[0, "pre_periodicity_selected_period"], 1.0)
     assert out.loc[0, "pre_periodicity_reason"] == "ce,folded_scatter"
+
+
+def test_pre_periodicity_empty_result_includes_phase_lag_columns() -> None:
+    result = periodicity_gate._empty_result("dummy.dat3", "dummy")
+
+    assert "pre_periodicity_phase_lag_g_v_cycles" in result
+    assert "pre_periodicity_phase_lag_g_v_abs_cycles" in result
+    assert np.isnan(result["pre_periodicity_phase_lag_g_v_cycles"])
+    assert np.isnan(result["pre_periodicity_phase_lag_g_v_abs_cycles"])
+    assert "pre_periodicity_phase_lag_g_v_cycles" in periodicity_gate.PREGATE_RESULT_COLUMNS
+    assert "pre_periodicity_phase_lag_g_v_abs_cycles" in periodicity_gate.PREGATE_RESULT_COLUMNS

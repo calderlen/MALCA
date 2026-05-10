@@ -202,7 +202,7 @@ body {
   display: flex;
   min-height: 0;
   min-width: 0;
-  gap: 12px;
+  gap: 0;
 }
 
 .explorer-left-panel,
@@ -213,10 +213,12 @@ body {
 
 .explorer-left-panel {
   display: grid;
-  flex: 2 1 0;
+  flex: 0 0 64%;
+  width: 64%;
   gap: 12px;
   align-content: start;
   min-width: 0;
+  padding-right: 8px;
 }
 
 .explorer-right-panel {
@@ -225,6 +227,52 @@ body {
   display: grid;
   gap: 12px;
   align-content: start;
+  padding-left: 8px;
+}
+
+.explorer-panel-splitter {
+  position: relative;
+  width: 12px;
+  flex: 0 0 12px;
+  min-height: 100%;
+  cursor: col-resize;
+  user-select: none;
+  touch-action: none;
+}
+
+.explorer-panel-splitter::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  transform: translateX(-50%);
+  background: var(--explorer-border);
+}
+
+.explorer-panel-splitter::after {
+  content: '::';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  letter-spacing: 1px;
+  padding: 6px 3px;
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  border-radius: 999px;
+  color: var(--explorer-muted);
+  font-size: 10px;
+  background: var(--explorer-panel-bg);
+  border: 1px solid var(--explorer-border);
+  line-height: 1;
+}
+
+.explorer-panel-splitter:hover::after,
+.explorer-panel-splitter.dragging::after {
+  color: var(--explorer-accent);
+  border-color: var(--explorer-accent);
 }
 
 .explorer-card,
@@ -554,6 +602,8 @@ body[data-explorer-theme] .Select--multi .Select-value-icon {
 
   .explorer-left-panel,
   .explorer-right-panel {
+    width: auto !important;
+    flex: 0 0 auto !important;
     min-width: 0;
     padding: 0;
   }

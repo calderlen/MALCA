@@ -48,8 +48,10 @@ from malca.review.filter_schema import SIDEBAR_GROUPS
 from malca.review.handoff import build_review_command, launch_detached
 from malca.review.interactive_plot import build_interactive_lightcurve_figure, resolve_lightcurve_path as review_resolve_lightcurve_path
 from malca.review.keyboard import CLASS_KEY_MAP
+from malca.review.metadata import bracket_unit_label
 from malca.review.period_search import has_external_period, run_period_search_for_payload
 from malca.review.store import db_connect, export_review_subset_bundle, get_review, load_app_state, save_app_state, save_review
+from malca.review.sync import auto_export_review_bundle
 
 
 DEFAULT_THEME = "black"
@@ -528,6 +530,29 @@ def _explorer_state_db_path(combined: CombinedCandidateData) -> Path | None:
     return db_paths[0] if len(db_paths) == 1 else None
 
 
+def _review_db_paths_from_frame(frame: pd.DataFrame) -> list[Path]:
+    if frame.empty or "source_file" not in frame.columns:
+        return []
+    db_paths: list[Path] = []
+    seen: set[str] = set()
+    for raw in frame["source_file"].dropna().astype(str).unique().tolist():
+        text = raw.strip()
+        if not text:
+            continue
+        try:
+            path = Path(text).expanduser().resolve()
+        except Exception:
+            continue
+        if path.suffix.lower() != ".db" or not path.exists():
+            continue
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        db_paths.append(path)
+    return db_paths
+
+
 def _explorer_gui_state_from_values(
     *,
     source_filter: object,
@@ -671,7 +696,7 @@ def _summary_items(record: dict[str, object]) -> list[tuple[str, str]]:
         ("Gaia", record.get("gaia_id")),
         ("Final class", record.get("final_class")),
         ("Known?", record.get("vetting_likely_known")),
-        ("Period (d)", record.get("period_consensus_days")),
+        ("Period [d]", record.get("period_consensus_days")),
         ("N sources", record.get("period_n_sources")),
         ("Dipper score", record.get("dipper_score")),
     ]
@@ -1223,7 +1248,7 @@ def _distinct_values(frame: pd.DataFrame, col: str, *, max_values: int = 250) ->
 
 
 def _label(text: str) -> html.Div:
-    return html.Div(text, className="explorer-field-label")
+    return html.Div(bracket_unit_label(text), className="explorer-field-label")
 
 
 def _section_title(text: str) -> html.Div:
@@ -1956,6 +1981,19 @@ def build_explorer_app(
                                 ],
                                 style={"marginBottom": "8px"},
                             ),
+                            html.Hr(className="explorer-rule"),
+                            _section_title("Review Sync"),
+                            _label("Bundle dir"),
+                            dcc.Input(id="review-sync-dir", value="reviews", placeholder="reviews", style=BASE_INPUT_STYLE, persistence=True, persistence_type="local"),
+                            dcc.Checklist(
+                                id="review-sync-hash-assets",
+                                options=[{"label": " Hash resolved assets", "value": "yes"}],
+                                value=[],
+                                className="explorer-stack-checklist",
+                                persistence=True,
+                                persistence_type="local",
+                            ),
+                            html.Button("Export Git Bundle", id="export-git-review-bundle-btn", n_clicks=0, className="explorer-action-btn"),
                             html.Div(advanced_sections, className="explorer-advanced-sections"),
                             html.Hr(className="explorer-rule"),
                             _section_title("Plot Maker"),
@@ -2021,7 +2059,7 @@ def build_explorer_app(
                             ),
                             html.Div(
                                 [
-                                    html.Div([_label("Manual period"), dcc.Input(id="period-input", type="number", debounce=True, placeholder="days", style=BASE_INPUT_STYLE)], className="explorer-two-up-item"),
+                                    html.Div([_label("Manual period"), dcc.Input(id="period-input", type="number", debounce=True, placeholder="period [d]", style=BASE_INPUT_STYLE)], className="explorer-two-up-item"),
                                     html.Div([_label("Y-axis"), dcc.RadioItems(id="yaxis-mode", options=[{"label": " mag", "value": "mag"}, {"label": " flux", "value": "flux"}], value="mag", className="explorer-inline-radio")], className="explorer-two-up-item"),
                                 ],
                                 className="explorer-two-up",
@@ -2031,8 +2069,8 @@ def build_explorer_app(
                             dcc.Dropdown(id="period-method", options=[{"label": "PDM", "value": "pdm"}, {"label": "CE", "value": "ce"}, {"label": "LSP", "value": "lsp"}], value="pdm", clearable=False),
                             html.Div(
                                 [
-                                    html.Div([_label("Min period"), dcc.Input(id="period-min", type="number", debounce=True, placeholder="min d", value=0.1, style=BASE_INPUT_STYLE)], className="explorer-two-up-item"),
-                                    html.Div([_label("Max period"), dcc.Input(id="period-max", type="number", debounce=True, placeholder="max d", value=100.0, style=BASE_INPUT_STYLE)], className="explorer-two-up-item"),
+                                    html.Div([_label("Min period"), dcc.Input(id="period-min", type="number", debounce=True, placeholder="min [d]", value=0.1, style=BASE_INPUT_STYLE)], className="explorer-two-up-item"),
+                                    html.Div([_label("Max period"), dcc.Input(id="period-max", type="number", debounce=True, placeholder="max [d]", value=100.0, style=BASE_INPUT_STYLE)], className="explorer-two-up-item"),
                                 ],
                                 className="explorer-two-up",
                             ),
@@ -2117,6 +2155,11 @@ def build_explorer_app(
                                 ],
                                 id="explorer-left-panel",
                                 className="explorer-left-panel",
+                            ),
+                            html.Div(
+                                id="explorer-panel-splitter",
+                                className="explorer-panel-splitter",
+                                title="Drag to resize plot columns",
                             ),
                             html.Div(
                                 [
@@ -2636,18 +2679,7 @@ def build_explorer_app(
                 return window.dash_clientside.no_update;
             }
 
-            var scheduleResize = function() {
-                if (window.__malcaExplorerResizeFrame) {
-                    window.cancelAnimationFrame(window.__malcaExplorerResizeFrame);
-                }
-                window.__malcaExplorerResizeFrame = window.requestAnimationFrame(function() {
-                    window.dispatchEvent(new Event('resize'));
-                    window.__malcaExplorerResizeFrame = null;
-                });
-            };
-
             var resizePlots = function() {
-                scheduleResize();
                 if (window.Plotly && window.Plotly.Plots && window.Plotly.Plots.resize) {
                     ['custom-graph', 'lightcurve-graph'].forEach(function(graphId) {
                         var container = document.getElementById(graphId);
@@ -2662,14 +2694,139 @@ def build_explorer_app(
                 }
             };
 
+            var scheduleResize = function() {
+                if (window.__malcaExplorerResizeFrame) {
+                    window.cancelAnimationFrame(window.__malcaExplorerResizeFrame);
+                }
+                window.__malcaExplorerResizeFrame = window.requestAnimationFrame(function() {
+                    resizePlots();
+                    window.__malcaExplorerResizeFrame = null;
+                });
+            };
+
+            var splitter = document.getElementById('explorer-panel-splitter');
+            var leftPanel = document.getElementById('explorer-left-panel');
+            var storageKey = 'malca.explorer.left_panel.width.v1';
+            var minWidth = 320;
+            var minRightWidth = 360;
+
+            var isStacked = function() {
+                return window.matchMedia && window.matchMedia('(max-width: 1080px)').matches;
+            };
+
+            var computeDefaultWidth = function() {
+                return Math.round((workspace.clientWidth || window.innerWidth || 1200) * 0.64);
+            };
+
+            var computeMaxWidth = function() {
+                var total = workspace.clientWidth || window.innerWidth || 1200;
+                var splitterWidth = splitter ? (splitter.getBoundingClientRect().width || 12) : 12;
+                return Math.max(minWidth, Math.floor(total - minRightWidth - splitterWidth));
+            };
+
+            var clampWidth = function(value) {
+                var numeric = Number(value);
+                if (!isFinite(numeric)) {
+                    numeric = computeDefaultWidth();
+                }
+                var maxWidth = computeMaxWidth();
+                if (numeric < minWidth) {
+                    numeric = minWidth;
+                }
+                if (numeric > maxWidth) {
+                    numeric = maxWidth;
+                }
+                return Math.round(numeric);
+            };
+
+            var applyWidth = function(value, persist) {
+                if (!leftPanel) {
+                    return null;
+                }
+                if (isStacked()) {
+                    leftPanel.style.width = '';
+                    leftPanel.style.flex = '';
+                    scheduleResize();
+                    return null;
+                }
+                var width = clampWidth(value);
+                leftPanel.style.width = String(width) + 'px';
+                leftPanel.style.flex = '0 0 ' + String(width) + 'px';
+                if (persist) {
+                    try { window.localStorage.setItem(storageKey, String(width)); } catch (e) {}
+                }
+                scheduleResize();
+                return width;
+            };
+
+            if (splitter && leftPanel && !window.__malcaExplorerPanelSplitterAttached) {
+                var drag = {active: false, startX: 0, startWidth: 0, pointerId: null};
+
+                var onPointerMove = function(e) {
+                    if (!drag.active) {
+                        return;
+                    }
+                    applyWidth(drag.startWidth + (e.clientX - drag.startX), false);
+                    e.preventDefault();
+                };
+
+                var stopDrag = function(e) {
+                    if (!drag.active) {
+                        return;
+                    }
+                    drag.active = false;
+                    splitter.classList.remove('dragging');
+                    window.removeEventListener('pointermove', onPointerMove);
+                    window.removeEventListener('pointerup', stopDrag);
+                    window.removeEventListener('pointercancel', stopDrag);
+                    if (drag.pointerId !== null && splitter.releasePointerCapture) {
+                        try { splitter.releasePointerCapture(drag.pointerId); } catch (err) {}
+                    }
+                    drag.pointerId = null;
+                    applyWidth(leftPanel.getBoundingClientRect().width, true);
+                    if (e) {
+                        e.preventDefault();
+                    }
+                };
+
+                splitter.addEventListener('pointerdown', function(e) {
+                    if (isStacked()) {
+                        return;
+                    }
+                    drag.active = true;
+                    drag.startX = e.clientX;
+                    drag.startWidth = leftPanel.getBoundingClientRect().width;
+                    drag.pointerId = (typeof e.pointerId === 'number') ? e.pointerId : null;
+                    splitter.classList.add('dragging');
+                    if (drag.pointerId !== null && splitter.setPointerCapture) {
+                        try { splitter.setPointerCapture(drag.pointerId); } catch (err) {}
+                    }
+                    window.addEventListener('pointermove', onPointerMove);
+                    window.addEventListener('pointerup', stopDrag);
+                    window.addEventListener('pointercancel', stopDrag);
+                    e.preventDefault();
+                });
+
+                window.__malcaExplorerPanelSplitterAttached = true;
+            }
+
+            if (leftPanel) {
+                var saved = null;
+                try { saved = window.localStorage.getItem(storageKey); } catch (e) { saved = null; }
+                var initialWidth = saved ? parseInt(saved, 10) : computeDefaultWidth();
+                if (isNaN(initialWidth)) {
+                    initialWidth = computeDefaultWidth();
+                }
+                applyWidth(initialWidth, false);
+            }
+
             if (!window.__malcaExplorerResizeObserver) {
-                window.addEventListener('resize', resizePlots);
+                window.addEventListener('resize', scheduleResize);
                 if (window.ResizeObserver) {
                     var observer = new window.ResizeObserver(function() {
-                        resizePlots();
+                        scheduleResize();
                     });
                     observer.observe(workspace);
-                    var leftPanel = document.getElementById('explorer-left-panel');
                     var rightPanel = workspace.querySelector('.explorer-right-panel');
                     if (leftPanel) {
                         observer.observe(leftPanel);
@@ -2683,7 +2840,7 @@ def build_explorer_app(
                 }
             }
 
-            resizePlots();
+            scheduleResize();
             return window.dash_clientside.no_update;
         }
         """,
@@ -2861,6 +3018,7 @@ def build_explorer_app(
         Output("explorer-review-launch-url", "data", allow_duplicate=True),
         Input("export-review-bundle-btn", "n_clicks"),
         Input("open-selection-in-review-btn", "n_clicks"),
+        Input("export-git-review-bundle-btn", "n_clicks"),
         [
             State("custom-graph", "figure"),
             State("source-filter", "value"),
@@ -2878,6 +3036,8 @@ def build_explorer_app(
             State("selected-key-store", "data"),
             State("candidate-scope-store", "data"),
             State("explorer-review-overrides", "data"),
+            State("review-sync-dir", "value"),
+            State("review-sync-hash-assets", "value"),
             *ADV_FILTER_STATES,
         ],
         prevent_initial_call=True,
@@ -2886,6 +3046,7 @@ def build_explorer_app(
         (
             n_clicks,
             open_review_clicks,
+            git_sync_clicks,
             figure,
             source_filter,
             query_value,
@@ -2902,6 +3063,8 @@ def build_explorer_app(
             selected_key,
             candidate_scope_state,
             review_overrides,
+            review_sync_dir,
+            review_sync_hash_assets,
             bool_values,
             num_min_values,
             num_max_values,
@@ -2917,7 +3080,7 @@ def build_explorer_app(
             select_ids,
             _select_mode_state,
         ) = args
-        if not n_clicks and not open_review_clicks:
+        if not n_clicks and not open_review_clicks and not git_sync_clicks:
             return dash.no_update, dash.no_update
         triggered = dash.callback_context.triggered_id
 
@@ -2949,6 +3112,30 @@ def build_explorer_app(
             return f"Bundle export blocked by invalid query: {query_error}", dash.no_update
         if working.empty:
             return "No candidates are available in the current filtered/view selection.", dash.no_update
+
+        if triggered == "export-git-review-bundle-btn":
+            db_paths = _review_db_paths_from_frame(working)
+            if not db_paths:
+                return "Git bundle export requires a current view backed by one review DB.", dash.no_update
+            if len(db_paths) > 1:
+                return (
+                    f"Git bundle export blocked: current view spans {len(db_paths)} review DBs. "
+                    "Narrow the source filter to one DB.",
+                    dash.no_update,
+                )
+            result = auto_export_review_bundle(
+                db_paths[0],
+                review_sync_dir or "reviews",
+                hash_assets="yes" in (review_sync_hash_assets or []),
+                logger=lambda _message: None,
+            )
+            if not result.get("ok"):
+                return f"Git bundle export failed: {result.get('error', 'unknown error')}", dash.no_update
+            return (
+                f"Exported Git bundle to {result['out_dir']} "
+                f"({result['candidates_exported']:,} candidates, {result['reviews_exported']:,} reviews).",
+                dash.no_update,
+            )
 
         export_df = _prepare_export_frame(working)
         slug_x = _slugify_token(x_metric or "x")

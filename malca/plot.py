@@ -36,6 +36,7 @@ from malca.config import (
 )
 from malca.config import MAD_SCALE
 from malca.events import score_lightcurve
+from malca.phase import BAND_LABELS, camera_labels, phase_fold_dataframe
 from malca.review.metadata import REVIEW_METADATA_FIELDS, normalize_vsx_record
 from malca.utils import clean_lc, read_lc_dat2, filter_bad_cameras
 from malca.utils import gaussian, paczynski_kernel, read_skypatrol_csv as _read_skypatrol_csv
@@ -194,29 +195,13 @@ def load_events_paths(
     return [Path(p) for p in paths]
 
 
-def _phase_fold_dataframe(df: pd.DataFrame, period_days: float) -> pd.DataFrame:
-    """Return a 0-2 cycle phase-folded dataframe."""
-    if period_days <= 0 or (not np.isfinite(period_days)):
-        raise ValueError("period_days must be positive and finite")
-
-    out = df.copy()
-    out = out[np.isfinite(out["JD"]) & np.isfinite(out["mag"])].copy()
-    if out.empty:
-        return out
-
-    jd0 = float(out["JD"].min())
-    phase = ((out["JD"].to_numpy(dtype=float) - jd0) / float(period_days)) % 1.0
-    out["phase"] = phase
-
-    wrap = out.copy()
-    wrap["phase"] = wrap["phase"] + 1.0
-    return pd.concat([out, wrap], ignore_index=True)
-
-
 def plot_phase_folded_lightcurve(
     csv_path: Path,
     *,
     period_days: float,
+    phase_epoch_jd: float | None = None,
+    value_mode: str = "mag",
+    align_v_to_g: bool = False,
     out_path: Path | None = None,
     show: bool = False,
     figsize: tuple[float, float] = (10, 6),
@@ -244,22 +229,22 @@ def plot_phase_folded_lightcurve(
     if df.empty:
         raise ValueError(f"Light curve file is empty after cleaning: {csv_path}")
 
-    if "camera_name" in df.columns:
-        df["camera_label"] = df["camera_name"].astype(str)
-    elif "camera#" in df.columns:
-        df["camera_label"] = df["camera#"].astype(str)
-    elif "camera" in df.columns:
-        df["camera_label"] = df["camera"].astype(str)
-    else:
-        df["camera_label"] = "unknown"
+    df["camera_label"] = camera_labels(df)
 
-    phase_df = _phase_fold_dataframe(df, float(period_days))
+    phase_df, phase_diag = phase_fold_dataframe(
+        df,
+        float(period_days),
+        epoch_jd=phase_epoch_jd,
+        value_mode=value_mode,
+        align_v_to_g=align_v_to_g,
+        duplicate_cycles=True,
+    )
     if phase_df.empty:
         raise ValueError(f"No finite points for phase folding: {csv_path}")
 
     fig, ax = plt.subplots(1, 1, figsize=figsize, constrained_layout=True)
     bands = [0, 1]
-    band_labels = {0: "g", 1: "V"}
+    band_labels = BAND_LABELS
     band_markers = {0: "o", 1: "s"}
 
     for band in bands:
@@ -274,7 +259,7 @@ def plot_phase_folded_lightcurve(
             label = f"{cam} ({band_labels[band]})"
             ax.errorbar(
                 cdf["phase"],
-                cdf["mag"],
+                cdf["phase_value"],
                 yerr=cdf["error"] if "error" in cdf.columns else None,
                 fmt=band_markers[band],
                 ms=4.0,
@@ -291,13 +276,29 @@ def plot_phase_folded_lightcurve(
     asas_sn_id = csv_path.stem.split("-")[0]
     ax.set_title(f"{asas_sn_id} phase-folded (P={float(period_days):.5f} d)")
     ax.set_xlabel("Phase")
-    ax.set_ylabel("Magnitude [mag]")
+    ax.set_ylabel("Residual magnitude [mag]" if value_mode == "resid" else "Magnitude [mag]")
     ax.set_xlim(-0.02, 2.02)
     ax.invert_yaxis()
     ax.grid(True, alpha=0.25)
     ax.axvline(0.0, color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
     ax.axvline(1.0, color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
     ax.axvline(2.0, color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
+    lag = float(phase_diag.get("phase_lag_g_v_cycles", np.nan))
+    lag_abs = float(phase_diag.get("phase_lag_g_v_abs_cycles", np.nan))
+    if np.isfinite(lag):
+        lag_label = f"g-V lag {lag:+.3f} cyc"
+        if np.isfinite(lag_abs):
+            lag_label += f" (|lag| {lag_abs:.3f})"
+        ax.text(
+            0.99,
+            0.98,
+            lag_label,
+            transform=ax.transAxes,
+            ha="right",
+            va="top",
+            fontsize=9,
+            bbox={"facecolor": "white", "edgecolor": "0.8", "alpha": 0.85, "pad": 3},
+        )
 
     handles, labels = ax.get_legend_handles_labels()
     if handles:

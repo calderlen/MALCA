@@ -35,6 +35,7 @@ COMMAND_GROUPS = {
     "review-refresh": "Review",
     "review-merge": "Review",
     "review-explore": "Review",
+    "review-sync": "Review",
     "review-qt": "Review",
     "ltv-core": "LTV",
     "ltv-build": "LTV",
@@ -110,7 +111,7 @@ def main():
         "manifest", "pipeline", "reproduce", "injection",
         "detection_rate", "validate", "plot",
         "events", "gaia-fetch", "characterize", "classify", "filter", "tag", "score",
-        "stats", "attrition", "review", "review-qt", "review-refresh", "review-merge", "review-explore",
+        "stats", "attrition", "review", "review-qt", "review-refresh", "review-merge", "review-explore", "review-sync",
         "neighbors", "spectra", "false_positive", "ml_train", "ml_predict", "vsx-filter", "vsx-crossmatch",
         "vetting",
         "ltv-core", "ltv-build", "ltv-pipeline", "ltv-injection", "ltv-pca", "ltv-ingest", "ltv-bundle",
@@ -169,6 +170,8 @@ def main():
             _run_module_main("malca.review.merge", remaining)
         elif command == "review-explore":
             _run_module_main("malca.review.explorer", remaining)
+        elif command == "review-sync":
+            _run_module_main("malca.review.sync", remaining)
         elif command == "validate":
             validation = importlib.import_module("malca.evaluation.validation")
             sys.argv = [sys.argv[0]] + remaining
@@ -265,6 +268,7 @@ def main():
     subparsers.add_parser("review-refresh", description="Refresh review DB stats from a run or bundle")
     subparsers.add_parser("review-merge", description="Merge reviewed subset DB content into a master review DB")
     subparsers.add_parser("review-explore", description="Launch unified EDA and light-curve explorer")
+    subparsers.add_parser("review-sync", description="Import/export Git-trackable review bundle files")
     # LTV
     subparsers.add_parser("ltv-core", description="Compute seasonal trends for long-term variability detection")
     subparsers.add_parser("ltv-build", description="Build LTV candidate table (filters + crossmatch + NEOWISE + extinction)")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -219,3 +220,68 @@ def test_get_candidate_payload_aliases_legacy_ltv_pm_fields(tmp_path: Path) -> N
         ).fetchone()
 
     assert row == (6.0, 8.0, 10.0, 0)
+
+
+def test_review_refresh_main_auto_sync_flags(tmp_path: Path, monkeypatch) -> None:
+    run_dir = tmp_path / "run"
+    db_path = tmp_path / "review.db"
+    sync_dir = tmp_path / "reviews"
+    run_dir.mkdir()
+
+    def fake_refresh(run_dir_arg, db_path_arg, **kwargs):
+        assert run_dir_arg == run_dir.resolve()
+        assert db_path_arg == db_path.resolve()
+        assert kwargs["compute_ls"] is True
+        return {
+            "refreshed": 1,
+            "matched_db_rows": 1,
+            "scoped_candidates": 1,
+            "missing_from_db": [],
+            "unresolved": [],
+            "failed": [],
+        }
+
+    calls: list[tuple[Path, Path, bool]] = []
+
+    def fake_auto_export(db_path_arg, out_dir_arg, *, hash_assets=False):
+        calls.append((Path(db_path_arg), Path(out_dir_arg), bool(hash_assets)))
+        return {"ok": True}
+
+    monkeypatch.setattr(review_refresh, "refresh_review_stats_from_run", fake_refresh)
+    monkeypatch.setattr(review_refresh, "auto_export_review_bundle", fake_auto_export)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "malca review-refresh",
+            "--run-dir",
+            str(run_dir),
+            "--db",
+            str(db_path),
+            "--review-sync-dir",
+            str(sync_dir),
+            "--review-sync-hash-assets",
+        ],
+    )
+
+    review_refresh.main()
+
+    assert calls == [(db_path.resolve(), sync_dir, True)]
+
+    calls.clear()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "malca review-refresh",
+            "--run-dir",
+            str(run_dir),
+            "--db",
+            str(db_path),
+            "--no-review-sync",
+        ],
+    )
+
+    review_refresh.main()
+
+    assert calls == []

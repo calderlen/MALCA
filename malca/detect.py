@@ -76,6 +76,7 @@ from malca.manifest import build_manifest
 from malca.periodicity_gate import apply_pre_periodicity_gate, PREGATE_ROUTER_MODE
 from malca.plot import plot_passing_candidates
 from malca.filter import apply_filters
+from malca.review.sync import auto_export_review_bundle
 from malca.run_metadata import build_run_summary, load_summary_state, preserve_imported_run_snapshots
 from malca.review.store import db_connect, import_candidates
 from concurrent.futures import ProcessPoolExecutor
@@ -825,6 +826,12 @@ def main():
     g_output.add_argument("--no-export-bundle", dest="export_bundle_enabled", action="store_false",
                         help="Skip export bundle creation at end of run")
     g_output.add_argument("--full-bundle", action="store_true", default=False, help="Include all large assets in export bundle (index, gaia cache, manifests, tags, paths)")
+    g_output.add_argument("--no-review-sync", dest="review_sync_enabled", action="store_false",
+                        help="Skip automatic reviews/*.jsonl export after review DB import")
+    g_output.add_argument("--review-sync-dir", type=Path, default=Path("reviews"),
+                        help="Directory for automatic Git-trackable review export (default: reviews)")
+    g_output.add_argument("--review-sync-hash-assets", action="store_true",
+                        help="Include SHA-256 hashes for resolved assets in automatic review export")
 
     g_filter.add_argument("--run-filter", dest="run_filter", action="store_true", help="Run filter after events.py completes (default: enabled)")
     g_filter.add_argument("--no-run-filter", dest="run_filter", action="store_false", help="Skip filter step")
@@ -954,6 +961,7 @@ def main():
         vetting_atlas=False,
         vetting_neowise_lc=False,
         export_bundle_enabled=True,
+        review_sync_enabled=True,
     )
 
     args = parser.parse_args()
@@ -1295,6 +1303,9 @@ def main():
             "import_bundle": str(args.import_bundle) if args.import_bundle else None,
             "export_bundle": str(args.export_bundle) if args.export_bundle else None,
             "export_bundle_enabled": args.export_bundle_enabled,
+            "review_sync_enabled": args.review_sync_enabled,
+            "review_sync_dir": str(args.review_sync_dir),
+            "review_sync_hash_assets": bool(args.review_sync_hash_assets),
             "imported_run_params_snapshot": str(imported_run_params_snapshot) if imported_run_params_snapshot else None,
             "imported_run_summary_snapshot": str(imported_run_summary_snapshot) if imported_run_summary_snapshot else None,
             "mag_bin": args.mag_bin,
@@ -2696,6 +2707,8 @@ def main():
     # Step 13: Auto-import into review DB
     if run_downstream and has_post_filter_output:
         log("\n=== Step 13: Importing candidates into review DB ===")
+        review_db_path = out_dir / "review" / "review.db"
+        review_db_updated = False
         try:
 
 
@@ -2714,7 +2727,6 @@ def main():
                     break
 
             if _import_file is not None:
-                review_db_path = out_dir / "review" / "review.db"
                 conn = db_connect(review_db_path)
                 df_import = load_table(_import_file)
                 df_import = _select_passing_candidates(df_import)
@@ -2739,6 +2751,7 @@ def main():
                         vet_before_import=False,
                     )
                     conn.close()
+                    review_db_updated = True
                     log(f"Imported {n_new} new candidates ({n_total} total) into {review_db_path}")
             else:
                 log("No results file found for review DB import, skipping")
@@ -2748,6 +2761,16 @@ def main():
             if args.verbose:
 
                 traceback.print_exc()
+        if review_db_updated:
+            if args.review_sync_enabled:
+                auto_export_review_bundle(
+                    review_db_path,
+                    args.review_sync_dir,
+                    hash_assets=bool(args.review_sync_hash_assets),
+                    logger=log,
+                )
+            else:
+                log("Review Git bundle auto-sync disabled by --no-review-sync")
 
     if args.export_bundle_enabled:
         export_bundle_path = args.export_bundle if args.export_bundle is not None else out_dir / f"{out_dir.name}_bundle_{mag_bin_tag}.zip"

@@ -33,6 +33,7 @@ import plotly.graph_objects as go
 import plotly.io as pio
 
 from malca.config import GAIA_CHUNK_SIZE
+from malca.phase import phase_template, template_phase_lag
 from malca.config import (
     BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
     CLEAN_LC_MAX_ERROR_ABSOLUTE,
@@ -83,6 +84,7 @@ from malca.review.keyboard import (
     CLASS_KEY_MAP,
 )
 from malca.review.metadata import (
+    bracket_unit_label,
     extract_review_metadata_grouped,
     is_group_default_open,
     build_external_lookup_links,
@@ -101,6 +103,7 @@ from malca.review.period_search import (
     run_period_search_for_payload as shared_run_period_search_for_payload,
 )
 from malca.review.session import create_queue_data_dict
+from malca.review.sync import auto_export_review_bundle
 from malca.review.store import (
     DEFAULT_DB_PATH,
     DEFAULT_STANDALONE_DB_PATH,
@@ -2166,7 +2169,7 @@ def _render_stat_cards(stat_rows: list[tuple[str, str]]) -> list:
     grouped: dict[str, list[tuple[str, str]]] = {name: [] for name in group_order}
     for key_raw, value in stat_rows:
         key = str(key_raw)
-        grouped.setdefault(_stat_group(key), []).append((_stat_label(key), str(value)))
+        grouped.setdefault(_stat_group(key), []).append((bracket_unit_label(_stat_label(key)), str(value)))
 
     sections = []
     for group_name in group_order:
@@ -3646,7 +3649,7 @@ def _build_neowise_figure_with_theme(df_neowise: pd.DataFrame, theme: str) -> go
             fig,
             title="NEOWISE",
             theme=theme,
-            yaxis_label="mag",
+            yaxis_label="m [mag]",
             reverse_y=True,
             height=220,
         )
@@ -3657,7 +3660,7 @@ def _build_neowise_figure_with_theme(df_neowise: pd.DataFrame, theme: str) -> go
             fig,
             title="NEOWISE (missing MJD column)",
             theme=theme,
-            yaxis_label="mag",
+            yaxis_label="m [mag]",
             reverse_y=True,
             height=220,
         )
@@ -3696,7 +3699,7 @@ def _build_neowise_figure_with_theme(df_neowise: pd.DataFrame, theme: str) -> go
         fig,
         title="NEOWISE Light Curve",
         theme=theme,
-        yaxis_label="mag",
+        yaxis_label="m [mag]",
         reverse_y=True,
     )
     if added == 0:
@@ -3730,7 +3733,7 @@ def _build_external_lc_figure(
     title: str,
     band_specs: list[tuple[str, str, str, str]],
     time_col: str = "mjd",
-    yaxis_label: str = "mag",
+    yaxis_label: str = "m [mag]",
     reverse_y: bool = True,
     filter_col: str | None = None,
     source_name: str | None = None,
@@ -4042,7 +4045,7 @@ def _render_external_followup(payload: dict, candidate_id: str, theme: str | Non
                             gaia_lc, "Gaia Epoch",
                             [("G", "mag", "mag_err", "#e8c547")],
                             time_col="time",
-                            yaxis_label="G mag",
+                            yaxis_label="G [mag]",
                             source_name="gaia_epoch",
                             theme=theme,
                             jd_system="bjd_gaia",
@@ -4765,6 +4768,19 @@ def create_layout():
             ),
             html.Button('Export Reviews', id='export-btn', n_clicks=0, className='action-btn',
                        style={'width': '100%'}),
+            dcc.Input(id='review-sync-dir', placeholder='Review Git bundle directory', type='text',
+                     value='reviews', style=_inp_style,
+                     persistence=_review_persistence_token(), persistence_type='local'),
+            dcc.Checklist(
+                id='review-sync-hash-assets',
+                options=[{'label': ' Hash resolved assets', 'value': 'yes'}],
+                value=[],
+                style={'margin-bottom': '4px'},
+                persistence=_review_persistence_token(),
+                persistence_type='local',
+            ),
+            html.Button('Export Git Bundle', id='export-review-sync-btn', n_clicks=0, className='action-btn',
+                       style={'width': '100%'}),
 
             html.Hr(),
 
@@ -4788,8 +4804,8 @@ def create_layout():
             html.Hr(),
             
             html.Div('External Links', className='section-title'),
-            html.Label('Search Radius (arcsec):'),
-            dcc.Input(id='link-radius-arcsec', placeholder='Radius (arcsec)', type='number',
+            html.Label('Search Radius [arcsec]:'),
+            dcc.Input(id='link-radius-arcsec', placeholder='Radius [arcsec]', type='number',
                      value=10.0, min=0.1, step=1.0, style=_inp_style,
                      persistence=_review_persistence_token(), persistence_type='local'),
                      
@@ -4973,10 +4989,10 @@ def create_layout():
                                               style={'width': '72px', 'font-size': '10px'},
                                               persistence=_review_persistence_token(),
                                               persistence_type='local'),
-                                    html.Span('d', style={'color': '#9fb6cb', 'font-size': '10px', 'margin-right': '4px'}),
+                                    html.Span('[d]', style={'color': '#9fb6cb', 'font-size': '10px', 'margin-right': '4px'}),
                                      html.Button('Find Period', id='pdm-run-btn', n_clicks=0, className='compact-btn'),
                                      dcc.Input(id='pdm-manual-period', type='number', min=0.001,
-                                               step=0.001, placeholder='Manual P (d)',
+                                               step=0.001, placeholder='Manual P [d]',
                                                style={'width': '90px', 'font-size': '10px', 'margin-left': '4px'},
                                                persistence=_review_persistence_token(),
                                                persistence_type='local'),
@@ -6973,71 +6989,6 @@ def _robust_sigma(values: np.ndarray) -> float:
     return sigma if np.isfinite(sigma) and sigma > 0 else np.nan
 
 
-def _phase_template(
-    phase: np.ndarray,
-    resid: np.ndarray,
-    *,
-    n_bins: int = 48,
-    min_bin_points: int = 3,
-) -> tuple[np.ndarray, np.ndarray]:
-    template = np.full(n_bins, np.nan, dtype=float)
-    counts = np.zeros(n_bins, dtype=int)
-
-    phase = np.asarray(phase, dtype=float)
-    resid = np.asarray(resid, dtype=float)
-    valid = np.isfinite(phase) & np.isfinite(resid)
-    if np.count_nonzero(valid) == 0:
-        return template, counts
-
-    phase_valid = np.mod(phase[valid], 1.0)
-    resid_valid = resid[valid]
-    idx = np.floor(phase_valid * n_bins).astype(int)
-    idx = np.clip(idx, 0, n_bins - 1)
-
-    for b in range(n_bins):
-        vals = resid_valid[idx == b]
-        if vals.size >= min_bin_points:
-            template[b] = float(np.median(vals))
-            counts[b] = int(vals.size)
-
-    return template, counts
-
-
-def _template_phase_lag(template_a: np.ndarray, template_b: np.ndarray) -> float:
-    template_a = np.asarray(template_a, dtype=float)
-    template_b = np.asarray(template_b, dtype=float)
-    if template_a.size == 0 or template_a.size != template_b.size:
-        return np.nan
-
-    n = int(template_a.size)
-    best_corr = -np.inf
-    best_shift = 0
-    min_overlap = max(6, n // 4)
-
-    for shift in range(n):
-        shifted = np.roll(template_b, shift)
-        mask = np.isfinite(template_a) & np.isfinite(shifted)
-        if np.count_nonzero(mask) < min_overlap:
-            continue
-        a = template_a[mask]
-        b = shifted[mask]
-        a = a - np.mean(a)
-        b = b - np.mean(b)
-        sa = float(np.std(a))
-        sb = float(np.std(b))
-        if sa <= 0 or sb <= 0:
-            continue
-        corr = float(np.mean((a / sa) * (b / sb)))
-        if corr > best_corr:
-            best_corr = corr
-            best_shift = shift
-
-    if not np.isfinite(best_corr):
-        return np.nan
-    lag_bins = min(best_shift, n - best_shift)
-    return float(lag_bins / n)
-
-
 def _score_period_harmonic_candidate(
     band_resid: dict[int, tuple[np.ndarray, np.ndarray]],
     period: float,
@@ -7058,7 +7009,7 @@ def _score_period_harmonic_candidate(
 
     for band, (jd, resid) in band_resid.items():
         phase = np.mod((jd - jd0) / float(period), 1.0)
-        template, _ = _phase_template(phase, resid, n_bins=n_bins)
+        template, _ = phase_template(phase, resid, n_bins=n_bins)
         templates[band] = template
 
         bin_idx = np.floor(phase * n_bins).astype(int)
@@ -7079,7 +7030,7 @@ def _score_period_harmonic_candidate(
     scatter_ratio = float(np.mean(scatter_ratios))
     lag_phase = np.nan
     if 0 in templates and 1 in templates:
-        lag_phase = _template_phase_lag(templates[0], templates[1])
+        lag_phase = template_phase_lag(templates[0], templates[1])
     lag_term = 0.0 if not np.isfinite(lag_phase) else float(lag_phase)
 
     objective = float(scatter_ratio + lag_weight * lag_term)
@@ -9262,7 +9213,7 @@ def _fetch_candidate_impl(set_progress, n_clicks, fetch_type, fetch_query, fetch
             if len(parts) > 2:
                 radius = _try_float(parts[2])
                 if radius is None or radius <= 0.0:
-                    return '✗ Radius must be a positive number (arcsec)', no_update, no_update, '', None, no_update, no_update
+                    return '✗ Radius must be a positive number [arcsec]', no_update, no_update, '', None, no_update, no_update
 
             ra = ra % 360.0
             catalog_df = fetch_cone_search(ra, dec, radius_arcsec=radius, backend=effective_backend)
@@ -9737,6 +9688,33 @@ def export_reviews_callback(n_clicks, export_path, only_reviewed):
             return f"✓ Exported to {out_path.name}{reviewed_text}"
     except Exception as e:
         return f"✗ Export failed: {str(e)}"
+
+
+@app.callback(
+    Output('sidebar-status', 'children', allow_duplicate=True),
+    Input('export-review-sync-btn', 'n_clicks'),
+    [State('review-sync-dir', 'value'),
+     State('review-sync-hash-assets', 'value')],
+    prevent_initial_call=True
+)
+def export_review_sync_callback(n_clicks, out_dir, hash_assets):
+    """Export the Git-trackable review bundle."""
+    if not n_clicks:
+        return no_update
+
+    target_dir = Path(str(out_dir or "reviews")).expanduser()
+    result = auto_export_review_bundle(
+        Path(DB_PATH),
+        target_dir,
+        hash_assets='yes' in (hash_assets or []),
+        logger=lambda _message: None,
+    )
+    if not result.get("ok"):
+        return f"✗ Git bundle export failed: {result.get('error', 'unknown error')}"
+    return (
+        f"✓ Exported Git bundle to {result['out_dir']} "
+        f"({result['candidates_exported']} candidates, {result['reviews_exported']} reviews)"
+    )
 
 
 @app.callback(

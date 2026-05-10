@@ -7,6 +7,7 @@ from pathlib import Path
 import pandas as pd
 
 from malca.review.stats_merge import merge_stats_summary_into_payload
+from malca.review.sync import auto_export_review_bundle
 from malca.review.store import (
     _CANDIDATE_COLUMNS,
     _COL_NAMES,
@@ -367,7 +368,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Allow overwriting an existing --rebuild-db-to target",
     )
+    parser.add_argument(
+        "--no-review-sync",
+        dest="review_sync_enabled",
+        action="store_false",
+        help="Skip automatic reviews/*.jsonl export after refresh",
+    )
+    parser.add_argument(
+        "--review-sync-dir",
+        type=Path,
+        default=Path("reviews"),
+        help="Directory for automatic Git-trackable review export (default: reviews)",
+    )
+    parser.add_argument(
+        "--review-sync-hash-assets",
+        action="store_true",
+        help="Include SHA-256 hashes for resolved assets in automatic review export",
+    )
     parser.add_argument("--verbose", action="store_true", help="Print per-batch progress")
+    parser.set_defaults(review_sync_enabled=True)
     return parser
 
 
@@ -404,6 +423,15 @@ def main() -> None:
         print(f"  Unresolved light curves: {len(result['unresolved'])}")
     if result["failed"]:
         print(f"  Failed recomputes: {len(result['failed'])}")
+
+    if args.review_sync_enabled:
+        auto_export_review_bundle(
+            db_path,
+            args.review_sync_dir,
+            hash_assets=bool(args.review_sync_hash_assets),
+        )
+    else:
+        print("Review Git bundle auto-sync disabled by --no-review-sync")
 
     if args.rebuild_db_to:
         rebuilt_path = Path(args.rebuild_db_to).expanduser().resolve()

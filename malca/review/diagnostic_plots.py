@@ -592,8 +592,8 @@ def build_kiel_figure(
         )
 
     _apply_layout(fig, title="Kiel Diagram", spec=spec)
-    fig.update_xaxes(title="T<sub>eff</sub> (K)", range=[40000, 2500])
-    fig.update_yaxes(title="log g (cgs)", range=[6, -1])
+    fig.update_xaxes(title="T<sub>eff</sub> [K]", range=[40000, 2500])
+    fig.update_yaxes(title="log g [cgs]", range=[6, -1])
 
     return fig
 
@@ -889,8 +889,8 @@ def build_recurrence_regularity_figure(
         y_keys=("dip_inter_event_spacing_std",),
         background_x_key="plane_recurrence_regularity_x",
         background_y_key="plane_recurrence_regularity_y",
-        x_title="Dip spacing median (d)",
-        y_title="Dip spacing std (d)",
+        x_title="Dip spacing median [d]",
+        y_title="Dip spacing std [d]",
         x_log=True,
         y_log=True,
         diagonal=True,
@@ -932,7 +932,7 @@ def build_variability_strength_figure(
         y_keys=("dipper_score",),
         background_x_key="plane_var_strength_x",
         background_y_key="plane_var_strength_y",
-        x_title="Robust sigma (mag)",
+        x_title="Robust sigma [mag]",
         y_title="Dipper score",
         x_log=True,
         hlines=(5.0,),
@@ -952,7 +952,7 @@ def build_stetson_scatter_figure(
         y_keys=("stats_variability_stetson_J",),
         background_x_key="plane_stetson_x",
         background_y_key="plane_stetson_y",
-        x_title="Robust sigma (mag)",
+        x_title="Robust sigma [mag]",
         y_title="Stetson J",
         x_log=True,
     )
@@ -1157,8 +1157,8 @@ def build_ltv_trend_figure(
         y_keys=("ltv_dispersion",),
         background_x_key="plane_ltv_x",
         background_y_key="plane_ltv_y",
-        x_title="LTV slope (mag/yr)",
-        y_title="LTV dispersion (mag)",
+        x_title="LTV slope [mag/yr]",
+        y_title="LTV dispersion [mag]",
         y_log=True,
     )
 
@@ -1176,6 +1176,6 @@ def build_neowise_trend_figure(
         y_keys=("ltv_neowise_w1_w2_slope",),
         background_x_key="plane_neowise_trend_x",
         background_y_key="plane_neowise_trend_y",
-        x_title="W1 slope (mag/yr)",
-        y_title="W1-W2 slope (mag/yr)",
+        x_title="W1 slope [mag/yr]",
+        y_title="W1-W2 slope [mag/yr]",
     )

@@ -50,37 +50,6 @@ def log(message: str, quiet: bool = False) -> None:
         print(message, flush=True)
 
 
-def apply_simple_band_median_offset(
-    df: pd.DataFrame,
-    *,
-    min_points_per_band: int = 5,
-) -> tuple[pd.DataFrame, float]:
-    """Align V-band magnitudes to g-band using a single global median offset."""
-    if df.empty or "v_g_band" not in df.columns or "mag" not in df.columns:
-        return df, np.nan
-
-    band = pd.to_numeric(df["v_g_band"], errors="coerce").to_numpy()
-    mag = pd.to_numeric(df["mag"], errors="coerce").to_numpy(dtype=float)
-    finite = np.isfinite(mag)
-    g_mask = finite & (band == 0)
-    v_mask = finite & (band == 1)
-
-    if np.count_nonzero(g_mask) < int(min_points_per_band) or np.count_nonzero(v_mask) < int(min_points_per_band):
-        return df, np.nan
-
-    g_med = float(np.median(mag[g_mask]))
-    v_med = float(np.median(mag[v_mask]))
-    offset_v_minus_g = float(v_med - g_med)
-    if not np.isfinite(offset_v_minus_g):
-        return df, np.nan
-
-    df_aligned = df.copy()
-    mag_aligned = mag.copy()
-    mag_aligned[v_mask] = mag_aligned[v_mask] - offset_v_minus_g
-    df_aligned["mag"] = mag_aligned
-    return df_aligned, offset_v_minus_g
-
-
 def gaussian(t, amp, t0, sigma, baseline):
     """
     Gaussian kernel + baseline term (shared between events and dipper scoring).

@@ -4,6 +4,8 @@ import json
 import sqlite3
 from pathlib import Path
 
+import pandas as pd
+
 from malca.review.explore_data import (
     add_eda_columns,
     find_candidate_key,
@@ -14,7 +16,7 @@ from malca.review.explore_data import (
     load_combined_source_data,
     load_source_data,
 )
-from malca.review.explorer import _resolve_initial_candidate_key
+from malca.review.explorer import _resolve_initial_candidate_key, _review_db_paths_from_frame
 
 
 def _write_review_db(path: Path, rows: list[dict[str, object]]) -> None:
@@ -44,6 +46,29 @@ def test_load_combined_source_data_adds_candidate_keys(tmp_path: Path) -> None:
     assert len(combined.df) == 2
     assert combined.df["candidate_key"].nunique() == 2
     assert find_candidate_key(combined, "A1") is not None
+
+
+def test_review_db_paths_from_frame_requires_existing_db_sources(tmp_path: Path) -> None:
+    db1 = tmp_path / "run_a" / "review" / "review.db"
+    db2 = tmp_path / "run_b" / "review" / "review.db"
+    _write_review_db(db1, [{"candidate_id": "A1"}])
+    _write_review_db(db2, [{"candidate_id": "B1"}])
+    missing = tmp_path / "missing.db"
+
+    frame = pd.DataFrame(
+        {
+            "source_file": [
+                str(db1),
+                str(db1),
+                str(db2),
+                str(missing),
+                str(tmp_path / "candidates.parquet"),
+                "",
+            ]
+        }
+    )
+
+    assert _review_db_paths_from_frame(frame) == [db1.resolve(), db2.resolve()]
 
 
 def test_add_eda_columns_builds_proxy_fields(tmp_path: Path) -> None:

@@ -81,9 +81,10 @@ from malca.config import (
 from malca.config import ASASSN_INDEX_PATH
 from malca.config import WORKERS, MIN_MAG_OFFSET
 from malca.config import PDM_METHOD_CHOICES
+from malca.phase import align_v_to_g_magnitude
 from malca.stats import compute_pdm_stats, compute_ce_stats
 from malca.utils import log_rejections
-from malca.utils import apply_simple_band_median_offset, read_lc_dat2
+from malca.utils import read_lc_dat2
 
 
 
@@ -1463,7 +1464,7 @@ def _lsp_worker(args: tuple) -> dict:
 
         dfg, dfv = read_lc_dat2(asassn_id, dir_path)
         df_lc = pd.concat([dfg, dfv], ignore_index=True)
-        df_lc_aligned, _ = apply_simple_band_median_offset(df_lc)
+        df_lc_aligned, _ = align_v_to_g_magnitude(df_lc)
 
         jd = df_lc_aligned["JD"].values
         mag = df_lc_aligned["mag"].values

@@ -18,6 +18,7 @@ from malca.baseline import (
     per_camera_median_baseline,
 )
 from malca.lightcurve_io import load_lightcurve_df, stable_camera_color
+from malca.phase import BAND_LABELS, phase_fold_dataframe, resolve_phase_epoch, resolve_phase_period
 from malca.utils import (
     clean_lc,
     identify_bad_cameras,
@@ -515,70 +516,6 @@ def _event_entries(payload: dict, jd_offset: float, run_params: dict | None) -> 
 
     _cache_put(_EVENT_CACHE, key, [dict(x) for x in entries])
     return entries
-
-
-def _phase_period_days(payload: dict) -> float | None:
-    """Return preferred phase-fold period from payload metadata.
-
-    Checks in order of reliability:
-    1. Validated phase period (consensus or significant LSP)
-    2. Period consensus from post-filter catalog validation
-    3. Specific catalog periods — checks both vetting names and post-filter names
-    4. Generic catalog period
-    5. Raw LSP period
-    """
-    # 1. Validated pipeline period
-    p = _parse_num(payload, "phase_period_days")
-    if p is not None and p > 0:
-        return float(p)
-
-    # 2. Post-filter consensus period
-    p = _parse_num(payload, "period_consensus_days")
-    if p is not None and p > 0:
-        return float(p)
-
-    # 3. Known catalog periods (check both naming conventions)
-    # Each tuple: (vetting column name, post_filter column name)
-    for keys in (
-        ("vsx_period", "period_vsx_days"),
-        ("asassn_var_period", "period_asassn_var_days"),
-        ("gaia_eb_period", "period_gaia_eb_days"),
-        ("ztf_var_period", "period_ztf_periodic_days"),
-    ):
-        for key in keys:
-            p = _parse_num(payload, key)
-            if p is not None and p > 0:
-                return float(p)
-
-    # 4. Generic catalog period match
-    p = _parse_num(payload, "catalog_period")
-    if p is not None and p > 0:
-        return float(p)
-
-    # 5. Raw LSP period (least reliable, often alias)
-    p = _parse_num(payload, "lsp_period")
-    if p is not None and p > 0:
-        return float(p)
-
-    return None
-
-
-def _phase_fold_df(
-    df: pd.DataFrame,
-    period_days: float,
-    *,
-    phase_zero_jd: float | None = None,
-) -> pd.DataFrame:
-    """Phase-fold dataframe to 0-2 cycles with an optional shared phase epoch."""
-    out = df.copy()
-    out = out[np.isfinite(out["JD"]) & np.isfinite(out["mag"])].copy()
-    if out.empty:
-        return out
-    jd0 = float(phase_zero_jd) if phase_zero_jd is not None else float(out["JD"].min())
-    out["phase"] = ((out["JD"].to_numpy(dtype=float) - jd0) / float(period_days)) % 1.0
-    wrap = out.copy()
-    wrap["phase"] = wrap["phase"] + 1.0
-    return pd.concat([out, wrap], ignore_index=True)
 
 
 def _theme_palette(theme: str) -> dict[str, str]:
@@ -1187,7 +1124,7 @@ def build_interactive_lightcurve_figure(
             "warnings": ["No points for selected cameras"],
         }
 
-    band_labels = {0: "g", 1: "V"}
+    band_labels = BAND_LABELS
     available_band_labels = [
         label
         for band, label in band_labels.items()
@@ -1232,16 +1169,11 @@ def build_interactive_lightcurve_figure(
     )
 
     warnings: list[str] = list(baseline_warnings)
-    phase_source = ""
     if show_phase_fold:
-        if override_period is not None and override_period > 0:
-            phase_period = override_period
-            phase_source = "manual/search"
-        else:
-            phase_period = _phase_period_days(payload)
-            phase_source = "catalog/pipeline"
+        phase_period, phase_source = resolve_phase_period(payload, override_period=override_period)
     else:
         phase_period = None
+        phase_source = ""
     phase_enabled = bool(show_phase_fold and phase_period is not None)
     if show_phase_fold and not phase_enabled:
         warnings.append("Phase panel requested, but no valid period was found. Use Find Period to search manually.")
@@ -1326,6 +1258,7 @@ def build_interactive_lightcurve_figure(
             cdf = bdf[bdf["camera_label"] == cam]
             if cdf.empty:
                 continue
+            trace_name = f"{cam} ({band_labels[band]})"
             color = stable_camera_color(cam)
             err = cdf["error"].to_numpy() if "error" in cdf.columns else np.full(len(cdf), np.nan)
             resid = cdf["resid"].to_numpy() if "resid" in cdf.columns else np.full(len(cdf), np.nan)
@@ -1364,7 +1297,7 @@ def build_interactive_lightcurve_figure(
                         x=cdf["JD_plot"],
                         y=y_raw,
                         mode="markers",
-                        name=f"{cam} ({band_labels[band]})",
+                        name=trace_name,
                         marker={
                             "size": 7,
                             "symbol": band_markers[band],
@@ -1405,6 +1338,7 @@ def build_interactive_lightcurve_figure(
                         x=cdf["JD_plot"],
                         y=y_resid,
                         mode="markers",
+                        name=trace_name,
                         showlegend=False,
                         marker={
                             "size": 6,
@@ -1502,7 +1436,7 @@ def build_interactive_lightcurve_figure(
                     showlegend=False,
                     hovertemplate=(
                         f"<b>{str(entry['kind']).title()} event</b><br>"
-                        f"t<sub>0</sub> (JD): {float(entry['t0']):.5f}<br>"
+                        f"t<sub>0</sub> [JD]: {float(entry['t0']):.5f}<br>"
                         f"w: {float(entry['half_width']) / 2.0:.3f}<br>"
                         f"log BF: {bf_text}<br>"
                         f"log BF<sub>thr</sub>: {logbf_thr_text}<br>"
@@ -1515,29 +1449,45 @@ def build_interactive_lightcurve_figure(
                 col=1,
             )
 
+    phase_diag: dict[str, object] = {}
     if phase_enabled and 'phase' in row_map and phase_period is not None:
-        # Phase-fold uses residuals (mag - baseline) from band_dfs
-        phase_zero_jd = float(df["JD"].min()) if not df.empty else None
-        for band in (0, 1):
-            src_bdf = band_dfs.get(band)
-            if src_bdf is None or src_bdf.empty:
+        # Phase-fold uses residuals (mag - baseline) from band_dfs.
+        phase_zero_jd = resolve_phase_epoch(df)
+        phase_inputs = [
+            band_dfs[band]
+            for band in active_bands
+            if band in band_dfs and band_dfs[band] is not None and not band_dfs[band].empty
+        ]
+        phase_bdf = pd.DataFrame()
+        if phase_inputs:
+            phase_source_df = pd.concat(phase_inputs, ignore_index=True)
+            phase_bdf, phase_diag = phase_fold_dataframe(
+                phase_source_df,
+                float(phase_period),
+                epoch_jd=phase_zero_jd,
+                value_mode="resid",
+                duplicate_cycles=True,
+            )
+
+        for band in active_bands:
+            if phase_bdf.empty or "v_g_band" not in phase_bdf.columns:
                 continue
-            phase_bdf = _phase_fold_df(src_bdf, phase_period, phase_zero_jd=phase_zero_jd)
-            if phase_bdf.empty:
+            band_phase_df = phase_bdf[pd.to_numeric(phase_bdf["v_g_band"], errors="coerce") == band]
+            if band_phase_df.empty:
                 continue
             for cam in selected:
-                cdf = phase_bdf[phase_bdf["camera_label"] == cam]
+                cdf = band_phase_df[band_phase_df["camera_label"] == cam]
                 if cdf.empty:
                     continue
                 color = stable_camera_color(cam)
                 err = cdf["error"].to_numpy() if "error" in cdf.columns else np.full(len(cdf), np.nan)
-                resid = cdf["resid"].to_numpy() if "resid" in cdf.columns else cdf["mag"].to_numpy()
+                resid = cdf["phase_value"].to_numpy()
                 y_phase = (_mag_to_flux(resid) - 1.0) if is_flux else resid
                 err_phase = _flux_err_from_mag_err(_mag_to_flux(resid), err) if is_flux else err
                 jd_full_phase = cdf["JD_plot"].to_numpy() + JD_OFFSET
                 hover_phase = np.column_stack([jd_full_phase, err, cdf["mag"].to_numpy(), resid, err_phase])
                 phase_hovertemplate = (
-                    "<b>Phase-folded residual</b><br>"
+                    "<b>%{fullData.name}</b><br>"
                     "φ: %{x:.4f}<br>"
                     "JD: %{customdata[0]:.5f}<br>"
                 )
@@ -1561,6 +1511,7 @@ def build_interactive_lightcurve_figure(
                         x=cdf["phase"],
                         y=y_phase,
                         mode="markers",
+                        name=f"{cam} ({band_labels[band]})",
                         showlegend=False,
                         marker={
                             "size": 6,
@@ -1575,6 +1526,28 @@ def build_interactive_lightcurve_figure(
                     row=row_map['phase'],
                     col=1,
                 )
+
+        phase_lag = float(phase_diag.get("phase_lag_g_v_cycles", np.nan))
+        phase_lag_abs = float(phase_diag.get("phase_lag_g_v_abs_cycles", np.nan))
+        if np.isfinite(phase_lag):
+            lag_text = f"g-V lag {phase_lag:+.3f} cyc"
+            if np.isfinite(phase_lag_abs):
+                lag_text += f" (|lag| {phase_lag_abs:.3f})"
+            fig.add_annotation(
+                text=lag_text,
+                x=0.99,
+                y=0.98,
+                xref="paper",
+                yref="paper",
+                xanchor="right",
+                yanchor="top",
+                showarrow=False,
+                font={"size": 11, "color": colors["text"]},
+                bgcolor=colors["paper_bg"],
+                bordercolor=colors["grid"],
+                borderwidth=1,
+                opacity=0.9,
+            )
 
         fig.add_vline(x=0.0, line_color=colors["guide_line"], line_dash="dot", line_width=1.0, row=row_map['phase'], col=1)
         fig.add_vline(x=1.0, line_color=colors["guide_line"], line_dash="dot", line_width=1.0, row=row_map['phase'], col=1)
@@ -1717,6 +1690,19 @@ def build_interactive_lightcurve_figure(
     fig.update_xaxes(showgrid=True, gridcolor=colors["grid"], zeroline=False)
     fig.update_yaxes(showgrid=True, gridcolor=colors["grid"], zeroline=False)
 
+    status_message = ""
+    if phase_enabled and phase_period is not None:
+        phase_bits = [f"Phase-fold P={float(phase_period):.5f} d"]
+        if phase_source:
+            phase_bits.append(f"source={phase_source}")
+        phase_lag = float(phase_diag.get("phase_lag_g_v_cycles", np.nan))
+        phase_lag_abs = float(phase_diag.get("phase_lag_g_v_abs_cycles", np.nan))
+        if np.isfinite(phase_lag):
+            phase_bits.append(f"g-V lag={phase_lag:+.3f} cycles")
+            if np.isfinite(phase_lag_abs):
+                phase_bits.append(f"|lag|={phase_lag_abs:.3f}")
+        status_message = "; ".join(phase_bits)
+
     camera_options = [{"label": f"{cam}", "value": str(cam)} for cam in camera_ids]
     return {
         "figure": fig,
@@ -1724,7 +1710,7 @@ def build_interactive_lightcurve_figure(
         "camera_values": selected,
         "stat_rows": _build_stat_rows(payload, df, filtered_cameras),
         "status": "ok",
-        "status_message": "",
+        "status_message": status_message,
         "camera_diagnostics": camera_diagnostics,
         "warnings": warnings,
     }

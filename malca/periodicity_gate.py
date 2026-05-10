@@ -26,8 +26,9 @@ from malca.config import (
 from malca.config import WORKERS
 from malca.config import LS_ALIAS_PERIODS, LS_ALIAS_TOLERANCE
 from malca.lightcurve_io import load_lightcurve_df
+from malca.phase import align_v_to_g_magnitude, phase_template, template_phase_lag
 from malca.stats import compute_ce_stats
-from malca.utils import apply_simple_band_median_offset, clean_lc, compute_n_cameras
+from malca.utils import clean_lc, compute_n_cameras
 
 
 PREGATE_HARMONIC_FACTORS: tuple[float, ...] = (
@@ -49,7 +50,7 @@ PREGATE_HARMONIC_FACTORS: tuple[float, ...] = (
 )
 PREGATE_HARMONIC_MIN_REL_IMPROVEMENT = 0.02
 PREGATE_ROUTER_MODE = "ce_folded_scatter_phase_shape_v5"
-PREGATE_CHECKPOINT_VERSION = "v7_ce_folded_scatter_phase_shape"
+PREGATE_CHECKPOINT_VERSION = "v8_ce_folded_scatter_phase_shape_lag"
 PREGATE_RESULT_COLUMNS: list[str] = [
     "pre_periodicity_checkpoint_key",
     "pre_periodicity_path",
@@ -75,6 +76,8 @@ PREGATE_RESULT_COLUMNS: list[str] = [
     "pre_periodicity_phase_peak_width",
     "pre_periodicity_phase_peak_regions",
     "pre_periodicity_phase_peak_flag",
+    "pre_periodicity_phase_lag_g_v_cycles",
+    "pre_periodicity_phase_lag_g_v_abs_cycles",
     "pre_periodicity_alias_flag",
     "pre_periodicity_label",
     "pre_periodic_flag",
@@ -116,6 +119,8 @@ def _empty_result(
         "pre_periodicity_phase_peak_width": np.nan,
         "pre_periodicity_phase_peak_regions": np.nan,
         "pre_periodicity_phase_peak_flag": False,
+        "pre_periodicity_phase_lag_g_v_cycles": np.nan,
+        "pre_periodicity_phase_lag_g_v_abs_cycles": np.nan,
         "pre_periodicity_alias_flag": False,
         "pre_periodicity_label": label,
         "pre_periodic_flag": bool(label == "periodic"),
@@ -150,35 +155,6 @@ def _robust_sigma(values: np.ndarray) -> float:
     return sigma if np.isfinite(sigma) and sigma > 0 else np.nan
 
 
-def _phase_template(
-    phase: np.ndarray,
-    resid: np.ndarray,
-    *,
-    n_bins: int = 48,
-    min_bin_points: int = 3,
-) -> tuple[np.ndarray, np.ndarray]:
-    template = np.full(n_bins, np.nan, dtype=float)
-    counts = np.zeros(n_bins, dtype=int)
-
-    phase = np.asarray(phase, dtype=float)
-    resid = np.asarray(resid, dtype=float)
-    valid = np.isfinite(phase) & np.isfinite(resid)
-    if np.count_nonzero(valid) == 0:
-        return template, counts
-
-    phase_valid = np.mod(phase[valid], 1.0)
-    resid_valid = resid[valid]
-    idx = np.floor(phase_valid * n_bins).astype(int)
-    idx = np.clip(idx, 0, n_bins - 1)
-
-    for bin_idx in range(n_bins):
-        vals = resid_valid[idx == bin_idx]
-        if vals.size >= min_bin_points:
-            template[bin_idx] = float(np.median(vals))
-            counts[bin_idx] = int(vals.size)
-    return template, counts
-
-
 def _score_period_harmonic_candidate(
     band_resid: dict[int, tuple[np.ndarray, np.ndarray]],
     period: float,
@@ -193,6 +169,8 @@ def _score_period_harmonic_candidate(
             "phase_peak_snr": np.nan,
             "phase_peak_width": np.nan,
             "phase_peak_regions": np.nan,
+            "phase_lag_g_v_cycles": np.nan,
+            "phase_lag_g_v_abs_cycles": np.nan,
             "alias_flag": False,
             "alias_matches": [],
         }
@@ -206,16 +184,20 @@ def _score_period_harmonic_candidate(
             "phase_peak_snr": np.nan,
             "phase_peak_width": np.nan,
             "phase_peak_regions": np.nan,
+            "phase_lag_g_v_cycles": np.nan,
+            "phase_lag_g_v_abs_cycles": np.nan,
             "alias_flag": False,
             "alias_matches": [],
         }
     jd0 = float(min(np.min(jd) for jd in all_jd))
 
+    templates: dict[int, np.ndarray] = {}
     scatter_ratios: list[float] = []
     phase_peak_candidates: list[tuple[float, float, float]] = []
-    for jd, resid in band_resid.values():
+    for band, (jd, resid) in band_resid.items():
         phase = np.mod((jd - jd0) / float(period), 1.0)
-        template, _ = _phase_template(phase, resid, n_bins=n_bins)
+        template, _ = phase_template(phase, resid, n_bins=n_bins)
+        templates[int(band)] = template
 
         bin_idx = np.floor(phase * n_bins).astype(int)
         bin_idx = np.clip(bin_idx, 0, n_bins - 1)
@@ -257,6 +239,8 @@ def _score_period_harmonic_candidate(
             "phase_peak_snr": np.nan,
             "phase_peak_width": np.nan,
             "phase_peak_regions": np.nan,
+            "phase_lag_g_v_cycles": np.nan,
+            "phase_lag_g_v_abs_cycles": np.nan,
             "alias_flag": False,
             "alias_matches": [],
         }
@@ -270,6 +254,10 @@ def _score_period_harmonic_candidate(
             phase_peak_candidates,
             key=lambda item: (float(item[0]), -float(item[1]), -float(item[2])),
         )
+    phase_lag = np.nan
+    if 0 in templates and 1 in templates:
+        phase_lag = template_phase_lag(templates[0], templates[1], signed=True)
+    phase_lag_abs = abs(float(phase_lag)) if np.isfinite(phase_lag) else np.nan
     alias_matches = [
         float(alias_period)
         for alias_period in LS_ALIAS_PERIODS
@@ -283,6 +271,8 @@ def _score_period_harmonic_candidate(
         "phase_peak_snr": float(phase_peak_snr),
         "phase_peak_width": float(phase_peak_width),
         "phase_peak_regions": float(phase_peak_regions),
+        "phase_lag_g_v_cycles": float(phase_lag),
+        "phase_lag_g_v_abs_cycles": float(phase_lag_abs),
         "alias_flag": alias_flag,
         "alias_matches": alias_matches,
     }
@@ -332,6 +322,8 @@ def _arbitrate_harmonic_period(
             "phase_peak_snr": np.nan,
             "phase_peak_width": np.nan,
             "phase_peak_regions": np.nan,
+            "phase_lag_g_v_cycles": np.nan,
+            "phase_lag_g_v_abs_cycles": np.nan,
         }
 
     candidates: list[tuple[float, float, dict[str, object]]] = []
@@ -352,6 +344,8 @@ def _arbitrate_harmonic_period(
             "phase_peak_snr": np.nan,
             "phase_peak_width": np.nan,
             "phase_peak_regions": np.nan,
+            "phase_lag_g_v_cycles": np.nan,
+            "phase_lag_g_v_abs_cycles": np.nan,
         }
 
     factor, period, score = min(candidates, key=lambda item: _harmonic_candidate_sort_key(item[2]))
@@ -416,6 +410,8 @@ def _harmonically_correct_period_candidate(
             "phase_peak_snr": np.nan,
             "phase_peak_width": np.nan,
             "phase_peak_regions": np.nan,
+            "phase_lag_g_v_cycles": np.nan,
+            "phase_lag_g_v_abs_cycles": np.nan,
             "alias_flag": False,
         }
 
@@ -440,6 +436,8 @@ def _harmonically_correct_period_candidate(
         "phase_peak_snr": float(diag.get("phase_peak_snr", np.nan)),
         "phase_peak_width": float(diag.get("phase_peak_width", np.nan)),
         "phase_peak_regions": float(diag.get("phase_peak_regions", np.nan)),
+        "phase_lag_g_v_cycles": float(diag.get("phase_lag_g_v_cycles", np.nan)),
+        "phase_lag_g_v_abs_cycles": float(diag.get("phase_lag_g_v_abs_cycles", np.nan)),
         "alias_flag": bool(diag.get("alias_flag", False)),
     }
 
@@ -520,7 +518,7 @@ def _evaluate_periodicity_worker(args: tuple[object, ...]) -> dict[str, object]:
             result["pre_n_cameras"] = n_cameras
             return result
 
-        df_lc_aligned, v_minus_g_median_offset = apply_simple_band_median_offset(df_lc)
+        df_lc_aligned, v_minus_g_median_offset = align_v_to_g_magnitude(df_lc)
 
         jd = df_lc_aligned["JD"].to_numpy(dtype=float)
         mag = df_lc_aligned["mag"].to_numpy(dtype=float)
@@ -575,6 +573,16 @@ def _evaluate_periodicity_worker(args: tuple[object, ...]) -> dict[str, object]:
         )
         phase_peak_regions = (
             float(selected_candidate.get("phase_peak_regions", np.nan))
+            if selected_candidate is not None
+            else np.nan
+        )
+        phase_lag = (
+            float(selected_candidate.get("phase_lag_g_v_cycles", np.nan))
+            if selected_candidate is not None
+            else np.nan
+        )
+        phase_lag_abs = (
+            float(selected_candidate.get("phase_lag_g_v_abs_cycles", np.nan))
             if selected_candidate is not None
             else np.nan
         )
@@ -673,6 +681,8 @@ def _evaluate_periodicity_worker(args: tuple[object, ...]) -> dict[str, object]:
             "pre_periodicity_phase_peak_width": phase_peak_width,
             "pre_periodicity_phase_peak_regions": phase_peak_regions,
             "pre_periodicity_phase_peak_flag": phase_peak_ok,
+            "pre_periodicity_phase_lag_g_v_cycles": phase_lag,
+            "pre_periodicity_phase_lag_g_v_abs_cycles": phase_lag_abs,
             "pre_periodicity_alias_flag": alias_flag,
             "pre_periodicity_label": label,
             "pre_periodic_flag": bool(label == "periodic"),
