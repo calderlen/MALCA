@@ -5,7 +5,7 @@ from astropy.timeseries import LombScargle
 import numba
 import numpy as np
 
-from malca.config.config_stats import (
+from malca.config import (
     PDM_MIN_PERIOD,
     PDM_MAX_PERIOD,
     PDM_N_PERIODS,

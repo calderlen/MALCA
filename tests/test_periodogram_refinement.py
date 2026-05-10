@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 import malca.periodogram as periodogram
-from malca.config.config_stats import PDM_PLAVCHAN_GRID_FACTOR, PDM_PLAVCHAN_WORST_FRAC, PDM_PLAVCHAN_WORST_MIN
+from malca.config import PDM_PLAVCHAN_GRID_FACTOR, PDM_PLAVCHAN_WORST_FRAC, PDM_PLAVCHAN_WORST_MIN
 from malca.periodogram import _build_plavchan_period_grid, ce_find_period, lsp_find_period, pdm_find_period
 
 

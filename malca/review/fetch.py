@@ -15,7 +15,7 @@ import traceback
 
 import pandas as pd
 
-from malca.config.config_pipeline import RUN_MAX_GAP_POINTS, BASELINE_FUNC
+from malca.config import RUN_MAX_GAP_POINTS, BASELINE_FUNC
 from malca.fetch import (
     cone_search,
     download_lightcurve_by_id,
@@ -156,7 +156,7 @@ def _compute_stats_from_skypatrol_csv(lc_path: Path) -> dict:
 def _compute_events_for_csv(lc_path: Path) -> dict:
     """Run process_lightcurve on a SkyPatrol CSV file and return key columns."""
     try:
-        from malca.config.config_pipeline import (
+        from malca.config import (
             TRIGGER_MODE, LOGBF_THRESHOLD_DIP, LOGBF_THRESHOLD_JUMP,
             SIGNIFICANCE_THRESHOLD, P_POINTS, MAG_POINTS,
             RUN_MIN_POINTS, RUN_MAX_GAP_POINTS, BASELINE_FUNC,

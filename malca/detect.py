@@ -42,12 +42,12 @@ import pandas as pd
 
 from malca.characterize import characterize_candidates_df
 from malca.classify import compute_all_classifications
-from malca.config.config_characterize import (
+from malca.config import (
     GAIA_CHUNK_SIZE, NEIGHBOR_RADIUS_ARCSEC, NEIGHBOR_CHUNK_SIZE,
     SPECTRA_RADIUS_ARCSEC, SPECTRA_CHUNK_SIZE,
     UNWISE_CHECKPOINT_EVERY,
 )
-from malca.config.config_filters import (
+from malca.config import (
     MIN_TIME_SPAN, MIN_POINTS_PER_DAY, MIN_CAMERAS,
     VSX_MAX_SEP_ARCSEC, VSX_MODE, CAMERA_MEDIAN_TOLERANCE, STATS_CHUNK_SIZE,
     MIN_BAYES_FACTOR, POST_FILTER_MIN_RUN_CAMERAS, POST_FILTER_MIN_RUN_POINTS,
@@ -58,17 +58,17 @@ from malca.config.config_filters import (
     PRE_PERIODICITY_N_PERIODS, PRE_PERIODICITY_SCATTER_RATIO_MAX,
     POST_FILTER_PDM_METHOD,
 )
-from malca.config.config_io import OUTPUT_FORMAT, EVENTS_OUTPUT_CHUNK_SIZE
-from malca.config.config_io import PARQUET_OUTPUT_COMPRESSION, PARQUET_CACHE_COMPRESSION
-from malca.config.config_paths import ASASSN_INDEX_PATH, LCV2_ROOT, VSX_CROSSMATCH_PATH, GAIA_LOCAL_CATALOG
-from malca.config.config_pipeline import (
+from malca.config import OUTPUT_FORMAT, EVENTS_OUTPUT_CHUNK_SIZE
+from malca.config import PARQUET_OUTPUT_COMPRESSION, PARQUET_CACHE_COMPRESSION
+from malca.config import ASASSN_INDEX_PATH, LCV2_ROOT, VSX_CROSSMATCH_PATH, GAIA_LOCAL_CATALOG
+from malca.config import (
     WORKERS, BATCH_SIZE, TRIGGER_MODE, P_POINTS, MAG_POINTS,
     LOGBF_THRESHOLD_DIP, LOGBF_THRESHOLD_JUMP, SIGNIFICANCE_THRESHOLD,
     MIN_MAG_OFFSET, RUN_MIN_POINTS, RUN_MAX_GAP_POINTS,
     BASELINE_FUNC, BASELINE_S0, BASELINE_W0, BASELINE_Q, BASELINE_JITTER,
     JD_OFFSET, MAG_BINS,
 )
-from malca.config.config_stats import PDM_METHOD_CHOICES
+from malca.config import PDM_METHOD_CHOICES
 from malca.enrich.neighbor import run_neighbor_enrichment
 from malca.enrich.spectra import run_spectra_availability
 from malca.gaia_fetch import _extract_gaia_ids, fetch_gaia_catalog

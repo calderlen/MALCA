@@ -18,14 +18,14 @@ import numpy as np
 import pandas as pd
 import pyvo
 
-from malca.config.config_ltv import (
+from malca.config import (
     CMD_R_V,
     CMD_A_G_PER_AV,
     CMD_E_BP_RP_PER_AV,
     LTV_GAIA_CHUNK_SIZE,
     LTV_WORKERS,
 )
-from malca.config.config_paths import GAIA_AIP_TAP_URL, MIST_GRID_PATH
+from malca.config import GAIA_AIP_TAP_URL, MIST_GRID_PATH
 
 
 

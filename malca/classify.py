@@ -24,7 +24,7 @@ import astropy.units as u
 import numpy as np
 import pandas as pd
 
-from malca.config.config_classify import (
+from malca.config import (
     SOLAR_MASS_KG, SOLAR_RADIUS_M, AU_M, DAY_S,
     GRAVITATIONAL_CONSTANT_SI, EARTH_MASS_KG,
     EB_SHORT_DIP_DAYS, EB_LONG_DIP_DAYS, EB_SHORT_P, EB_LONG_P, EB_VERY_LONG_P,
@@ -42,8 +42,8 @@ from malca.config.config_classify import (
     CLASSIFY_DISK_THRESHOLD, CLASSIFY_MS_EB_REJECTION, CLASSIFY_MS_CV_REJECTION,
     CLASSIFY_IPHAS_RADIUS_ARCSEC, CLASSIFY_PS1_RADIUS_ARCSEC,
 )
-from malca.config.config_io import PARQUET_OUTPUT_COMPRESSION
-from malca.config.config_ltv import VIZIER_TAP_URL
+from malca.config import PARQUET_OUTPUT_COMPRESSION
+from malca.config import VIZIER_TAP_URL
 from malca.utils import batch_tap_crossmatch
 
 

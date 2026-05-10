@@ -21,7 +21,7 @@ import numpy as np
 import pandas as pd
 
 from malca.baseline import per_camera_gp_baseline
-from malca.config.config_stats import (
+from malca.config import (
     MAD_SCALE,
     STETSON_PAIR_MAX_DT_DAYS,
     STETSON_REWEIGHT_A,

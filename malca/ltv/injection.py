@@ -22,7 +22,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from malca.config.config_ltv import (
+from malca.config import (
     LTV_CHUNK_SIZE,
     LTV_DSPRING,
     LTV_INJECTION_AMP_MAX,
@@ -43,7 +43,7 @@ from malca.config.config_ltv import (
     LTV_MIN_SLOPE,
     LTV_WORKERS,
 )
-from malca.config.config_paths import LTV_INJECTION_OUTPUT_DIR
+from malca.config import LTV_INJECTION_OUTPUT_DIR
 from malca.ltv.core import Config, SourceMeta, process_one_lc
 from malca.ltv.filter import apply_all_filters
 

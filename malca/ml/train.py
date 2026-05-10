@@ -12,7 +12,7 @@ import lightgbm as lgb
 import numpy as np
 import pandas as pd
 
-from malca.config.config_ml import (
+from malca.config import (
     ML_N_ESTIMATORS,
     ML_LEARNING_RATE,
     ML_NUM_LEAVES,

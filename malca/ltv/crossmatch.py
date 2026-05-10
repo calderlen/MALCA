@@ -29,14 +29,14 @@ from astroquery.simbad import Simbad
 from astroquery.xmatch import XMatch
 from astropy.table import Table
 
-from malca.config.config_ltv import (
+from malca.config import (
     LTV_MATCH_RADIUS_ARCSEC,
     LTV_WORKERS,
     LTV_CROSSMATCH_CHUNK_SIZE,
     VIZIER_TAP_URL,
     SIMBAD_TAP_URL,
 )
-from malca.config.config_paths import VSX_CROSSMATCH_PATH
+from malca.config import VSX_CROSSMATCH_PATH
 from malca.utils import batch_tap_crossmatch as shared_batch_tap_crossmatch
 from malca.filter import (
     fetch_chen2020_ztf_periodic,

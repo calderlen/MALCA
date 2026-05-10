@@ -45,7 +45,7 @@ from celerite2 import terms
 from scipy.optimize import minimize
 from tqdm import tqdm
 
-from malca.config.config_ltv import (
+from malca.config import (
     LTV_DSPRING,
     LTV_MAX_SEASONS,
     LTV_MIN_POINTS_PER_SEASON,
@@ -57,9 +57,9 @@ from malca.config.config_ltv import (
     LTV_LS_FAP_THRESHOLD,
     LTV_LS_SAMPLES_PER_PEAK,
 )
-from malca.config.config_paths import LCV2_ROOT, LTV_OUTPUT_DIR
-from malca.config.config_pipeline import MAG_BINS, SKYPATROL_JD_OFFSET
-from malca.config.config_io import PARQUET_OUTPUT_COMPRESSION
+from malca.config import LCV2_ROOT, LTV_OUTPUT_DIR
+from malca.config import MAG_BINS, SKYPATROL_JD_OFFSET
+from malca.config import PARQUET_OUTPUT_COMPRESSION
 from malca.utils import clean_lc
 from malca.stats import inverse_von_neumann_ratio, reduced_chisq, roms_statistic
 
@@ -104,7 +104,7 @@ class SourceMeta:
 
 def _build_config(a, mag_bin: str) -> Config:
     """Build a Config for a single mag bin from parsed args."""
-    from malca.config.config_io import LIGHT_CURVE_FILE_EXTENSION
+    from malca.config import LIGHT_CURVE_FILE_EXTENSION
     
     root = Path(a.root)
     out = a.output

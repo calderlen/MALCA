@@ -24,11 +24,11 @@ from malca.utils import (
     identify_catastrophic_outlier_cameras,
     identify_offset_cameras,
 )
-from malca.config.config_pipeline import (
+from malca.config import (
     JD_OFFSET, MJD_TO_JD, GAIA_TCB_EPOCH_JD, TESS_BTJD_OFFSET, KEPLER_BKJD_OFFSET,
     REVIEW_CACHE_LIMIT, REVIEW_MAX_EXTERNAL_POINTS, REVIEW_RESIDUAL_FRACTION,
 )
-from malca.config.config_filters import (
+from malca.config import (
     BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
     CLEAN_LC_MAX_ERROR_ABSOLUTE,
     CLEAN_LC_MAX_ERROR_SIGMA,

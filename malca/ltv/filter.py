@@ -25,7 +25,7 @@ from astropy import units as u
 from astropy.coordinates import SkyCoord
 from tqdm.auto import tqdm
 
-from malca.config.config_ltv import (
+from malca.config import (
     LTV_MIN_SLOPE,
     LTV_MIN_DIFF,
     LTV_MIN_DEC,

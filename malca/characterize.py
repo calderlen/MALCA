@@ -32,7 +32,7 @@ import numpy as np
 import pandas as pd
 import pyvo
 
-from malca.config.config_characterize import (
+from malca.config import (
     GAIA_CHUNK_SIZE, STARHORSE_TAP_CHUNK_SIZE,
     IPHAS_MAX_SEP_ARCSEC, CLUSTER_MAX_SEP_ARCSEC, UNWISE_MAX_SEP_ARCSEC,
     UNWISE_QF_MIN,
@@ -44,16 +44,16 @@ from malca.config.config_characterize import (
     GALEX_MAX_SEP_ARCSEC, APASS_MAX_SEP_ARCSEC, ALLWISE_MAX_SEP_ARCSEC,
     TMASS_MAX_SEP_ARCSEC,
 )
-from malca.config.config_classify import (
+from malca.config import (
     YSO_CLASS_I_W1W2,
     YSO_CLASS_II_W1W2_MIN,
     YSO_CLASS_II_HK,
     YSO_DUST_CORRECTION_HK,
     YSO_DUST_CORRECTION_W1W2,
 )
-from malca.config.config_io import PARQUET_CACHE_COMPRESSION
-from malca.config.config_io import PARQUET_OUTPUT_COMPRESSION
-from malca.config.config_paths import (
+from malca.config import PARQUET_CACHE_COMPRESSION
+from malca.config import PARQUET_OUTPUT_COMPRESSION
+from malca.config import (
     VSX_CROSSMATCH_PATH, STARHORSE_DEFAULT_PATH, STARHORSE_TAP_URL,
     DEFAULT_CACHE_DIR, GAIA_CACHE_FILE,
     GAIA_LOCAL_CATALOG,

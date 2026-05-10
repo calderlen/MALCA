@@ -46,12 +46,12 @@ import pandas as pd
 import pyvo
 import requests
 
-from malca.config.config_characterize import GAIA_CHUNK_SIZE
-from malca.config.config_io import PARQUET_CACHE_COMPRESSION
-from malca.config.config_ltv import VIZIER_TAP_URL
-from malca.config.config_paths import GAIA_AIP_TAP_URL
-from malca.config.config_paths import DEFAULT_CACHE_DIR
-from malca.config.config_vetting import (
+from malca.config import GAIA_CHUNK_SIZE
+from malca.config import PARQUET_CACHE_COMPRESSION
+from malca.config import VIZIER_TAP_URL
+from malca.config import GAIA_AIP_TAP_URL
+from malca.config import DEFAULT_CACHE_DIR
+from malca.config import (
     VETTING_SIMBAD_BATCH_SIZE,
     VETTING_SIMBAD_RETRY_DELAY,
     VETTING_SIMBAD_MAX_RETRIES,

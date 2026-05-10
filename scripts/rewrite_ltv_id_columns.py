@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from malca.config.config_io import PARQUET_OUTPUT_COMPRESSION
+from malca.config import PARQUET_OUTPUT_COMPRESSION
 
 
 LEGACY_ID_COLUMN = "ASAS-SN ID"

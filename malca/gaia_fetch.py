@@ -21,8 +21,8 @@ import numpy as np
 import pandas as pd
 import pyvo
 
-from malca.config.config_characterize import GAIA_CHUNK_SIZE
-from malca.config.config_paths import (
+from malca.config import GAIA_CHUNK_SIZE
+from malca.config import (
     GAIA_AIP_TAP_URL,
     GAIA_LOCAL_CATALOG,
     VSX_CROSSMATCH_PATH,

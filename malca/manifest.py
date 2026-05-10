@@ -10,9 +10,9 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import pandas as pd
 from tqdm import tqdm
 
-from malca.config.config_io import PARQUET_OUTPUT_COMPRESSION
-from malca.config.config_paths import LCV2_ROOT, DEFAULT_OUTPUT_DIR
-from malca.config.config_pipeline import WORKERS, MAG_BINS
+from malca.config import PARQUET_OUTPUT_COMPRESSION
+from malca.config import LCV2_ROOT, DEFAULT_OUTPUT_DIR
+from malca.config import WORKERS, MAG_BINS
 
 IDX_PATTERN = re.compile(r"index(\d+)\.csv$", re.IGNORECASE)
 MANIFEST_COLUMNS = [
@@ -28,7 +28,7 @@ MANIFEST_COLUMNS = [
 
 
 def _normalize_file_ext(file_ext: str | None) -> str:
-    from malca.config.config_io import LIGHT_CURVE_FILE_EXTENSION
+    from malca.config import LIGHT_CURVE_FILE_EXTENSION
 
     ext = file_ext or LIGHT_CURVE_FILE_EXTENSION
     return str(ext).lstrip(".")

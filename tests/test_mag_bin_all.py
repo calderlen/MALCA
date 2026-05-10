@@ -4,7 +4,7 @@ Tests for --mag-bin all functionality in malca pipeline.
 """
 import pytest
 import argparse
-from malca.config.config_pipeline import MAG_BINS
+from malca.config import MAG_BINS
 
 
 def test_mag_bin_all_expansion():

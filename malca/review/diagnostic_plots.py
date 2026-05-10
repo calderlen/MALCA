@@ -11,8 +11,8 @@ import math
 import numpy as np
 import plotly.graph_objects as go
 
-from malca.config.config_ltv import CMD_A_G_PER_AV, CMD_E_BP_RP_PER_AV
-from malca.config.config_classify import (
+from malca.config import CMD_A_G_PER_AV, CMD_E_BP_RP_PER_AV
+from malca.config import (
     YSO_CLASS_I_W1W2,
     YSO_CLASS_II_W1W2_MIN,
     YSO_CLASS_II_HK,

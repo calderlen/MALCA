@@ -18,7 +18,7 @@ from typing import Literal
 import pandas as pd
 import numpy as np
 
-from malca.config.config_filters import VSX_MAX_SEP_ARCSEC
+from malca.config import VSX_MAX_SEP_ARCSEC
 
 
 # Default validation candidates (Brayden's list)

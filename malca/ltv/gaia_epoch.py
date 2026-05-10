@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 import pyvo
 
-from malca.config.config_ltv import (
+from malca.config import (
     LTV_GAIA_CHUNK_SIZE,
     LTV_WORKERS,
     GAIA_EPOCH_DATA_RELEASE,
@@ -27,7 +27,7 @@ from malca.config.config_ltv import (
     GAIA_EPOCH_DELTA_MAG_THRESH,
     GAIA_EPOCH_DELTA_COLOR_THRESH,
 )
-from malca.config.config_paths import GAIA_AIP_TAP_URL
+from malca.config import GAIA_AIP_TAP_URL
 
 
 

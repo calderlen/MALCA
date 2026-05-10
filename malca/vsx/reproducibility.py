@@ -8,7 +8,7 @@ import pandas as pd
 import astropy.units as u
 from astropy.coordinates import SkyCoord
 
-from malca.config.config_paths import (
+from malca.config import (
     VSX_CROSSMATCH_PATH,
     ASASSN_INDEX_PATH,
     VSX_RAW_CATALOG_PATH,

@@ -29,7 +29,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from malca.fetch import cone_search, download_lightcurve_by_id
-from malca.config.config_paths import SKYPATROL_CACHE_DIR
+from malca.config import SKYPATROL_CACHE_DIR
 
 
 def parse_asassn_microlens_csv(csv_path: Path) -> pd.DataFrame:

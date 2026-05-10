@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from malca.config.config_ltv import LTV_MIN_SLOPE, LTV_MIN_DIFF
+from malca.config import LTV_MIN_SLOPE, LTV_MIN_DIFF
 from malca.ltv.filter import filter_slope_threshold, filter_max_diff_threshold
 
 

@@ -1343,7 +1343,7 @@ def _run_microlensing_crossmatch_enrichment(
     """
     try:
         from malca.characterize import characterize_candidates_df
-        from malca.config.config_paths import GAIA_LOCAL_CATALOG as _GAIA_LOCAL, VSX_CROSSMATCH_PATH as _VSX_DEF
+        from malca.config import GAIA_LOCAL_CATALOG as _GAIA_LOCAL, VSX_CROSSMATCH_PATH as _VSX_DEF
         from malca.vetting import vet_candidates
     except ImportError as exc:
         print(f'Crossmatch suite skipped (import failed): {exc}', flush=True)
@@ -2890,7 +2890,7 @@ def _fit_model_flux_space(
     
     Returns dict with success, u0, t0, tE, Fs, Fb, blend_fraction, model_flux, etc.
     """
-    from malca.config.config_microlensing import (
+    from malca.config import (
         PACZYNSKI_U0_MIN, PACZYNSKI_U0_MAX,
         PACZYNSKI_TE_MIN_DAYS, PACZYNSKI_TE_MAX_FACTOR,
         FIT_MULTISTART_U0, FIT_MULTISTART_TE_FRACTIONS,
@@ -3227,7 +3227,7 @@ def _compute_morphology_metrics(
         residual_autocorr, symmetry_score, excursion_fraction, vonneumann_ratio.
     """
     from scipy.stats import skew as scipy_skew
-    from malca.config.config_microlensing import (
+    from malca.config import (
         MORPH_EVENT_WINDOW_TE_FACTOR, MORPH_OUTSIDE_WINDOW_TE_FACTOR,
         MORPH_EXCURSION_SIGMA_THRESHOLD, MORPH_SYMMETRY_MIN_POINTS,
     )
@@ -3411,7 +3411,7 @@ def _compute_cv_nova_score(
     
     Returns dict with cv_nova_score (0-1), fred_preferred, rise_decay_asymmetry, etc.
     """
-    from malca.config.config_microlensing import (
+    from malca.config import (
         SECONDARY_PEAK_MIN_SEPARATION_DAYS,
         SECONDARY_PEAK_MIN_AMPLITUDE_FRAC,
     )
@@ -3529,7 +3529,7 @@ def _scan_periodicity(
     Returns dict with lsp_best_period, lsp_best_power, pdm_best_period, pdm_best_theta,
     resid_* versions, and periodicity_detected flag.
     """
-    from malca.config.config_microlensing import (
+    from malca.config import (
         PERIOD_MIN_DAYS, PERIOD_MAX_DAYS,
         RESIDUAL_PERIOD_POWER_THRESHOLD,
     )

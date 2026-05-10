@@ -26,7 +26,7 @@ import numpy as np
 import pandas as pd
 import requests
 
-from malca.config.config_paths import SKYPATROL_CACHE_DIR
+from malca.config import SKYPATROL_CACHE_DIR
 
 
 SUPPORTED_FETCH_BACKENDS = ("skypatrol2", "skypatrol1")

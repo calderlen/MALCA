@@ -19,7 +19,7 @@ if "iar.IARModel" not in sys.modules:
     sys.modules["iar"] = fake_iar_pkg
     sys.modules["iar.IARModel"] = fake_iar_model
 
-from malca.config.config_stats import (
+from malca.config import (
     STETSON_REWEIGHT_A,
     STETSON_REWEIGHT_B,
     STETSON_REWEIGHT_MAX_ITERS,

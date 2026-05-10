@@ -5,12 +5,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from malca.config.config_filters import (
+from malca.config import (
     BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
     CLEAN_LC_MAX_ERROR_ABSOLUTE,
     CLEAN_LC_MAX_ERROR_SIGMA,
 )
-from malca.config.config_stats import LS_ALIAS_PERIODS, LS_ALIAS_TOLERANCE
+from malca.config import LS_ALIAS_PERIODS, LS_ALIAS_TOLERANCE
 from malca.periodogram import ce_find_period, lsp_find_period, pdm_find_period
 from malca.review.interactive_plot import (
     _compute_baseline_bands,

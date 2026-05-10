@@ -30,8 +30,8 @@ from malca.baseline import (
     per_camera_median_baseline,
     per_camera_gp_baseline,
 )
-from malca.config.config_io import INJECTION_CHUNK_SIZE
-from malca.config.config_pipeline import (
+from malca.config import INJECTION_CHUNK_SIZE
+from malca.config import (
     WORKERS,
     LOGBF_THRESHOLD_DIP,
     LOGBF_THRESHOLD_JUMP,

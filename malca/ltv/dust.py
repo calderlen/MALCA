@@ -14,7 +14,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from malca.config.config_ltv import (
+from malca.config import (
     LTV_DUST_OPTICAL_SLOPE_THRESH,
     LTV_DUST_COLOR_SLOPE_THRESH,
     LTV_DUST_COLOR_EXCESS_THRESH,

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from malca.config.config_filters import BAD_CAMERA_SCATTER_RATIO_THRESHOLD
+from malca.config import BAD_CAMERA_SCATTER_RATIO_THRESHOLD
 from malca.utils import filter_bad_cameras, read_lc_dat2
 from malca.utils import read_skypatrol_csv as _read_skypatrol_csv
 
@@ -69,7 +69,7 @@ def load_lightcurve_df(
     return_filtered_info: bool = False,
 ):
     """Load a native MALCA light curve, optionally filtering bad cameras."""
-    from malca.config.config_io import LIGHT_CURVE_FILE_EXTENSION
+    from malca.config import LIGHT_CURVE_FILE_EXTENSION
     
     lc_path = Path(path)
     suffix = lc_path.suffix.lower()

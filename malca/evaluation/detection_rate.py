@@ -28,7 +28,7 @@ from malca.baseline import (
     per_camera_median_baseline,
     per_camera_gp_baseline,
 )
-from malca.config.config_pipeline import (
+from malca.config import (
     WORKERS,
     TRIGGER_MODE,
     LOGBF_THRESHOLD_DIP,

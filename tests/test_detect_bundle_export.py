@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from malca.config.config_paths import ASASSN_INDEX_PATH
+from malca.config import ASASSN_INDEX_PATH
 from malca.detect import _resolve_asassn_index_path, export_bundle_zip
 
 

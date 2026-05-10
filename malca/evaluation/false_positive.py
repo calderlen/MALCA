@@ -9,7 +9,7 @@ import pandas as pd
 from malca.events import score_lightcurve
 from malca.baseline import per_camera_gp_baseline
 from malca.utils import read_lc_dat2
-from malca.config.config_pipeline import (
+from malca.config import (
     LOGBF_THRESHOLD_DIP,
     LOGBF_THRESHOLD_JUMP,
     SIGNIFICANCE_THRESHOLD,

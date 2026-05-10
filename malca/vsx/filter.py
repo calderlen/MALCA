@@ -9,8 +9,8 @@ import re
 from tqdm.auto import tqdm
 import pandas as pd
 
-from malca.config.config_paths import LCV2_ROOT, LCV2_MASKED_ROOT, VSX_RAW_CATALOG_PATH
-from malca.config.config_pipeline import MAG_BINS
+from malca.config import LCV2_ROOT, LCV2_MASKED_ROOT, VSX_RAW_CATALOG_PATH
+from malca.config import MAG_BINS
 
 
 

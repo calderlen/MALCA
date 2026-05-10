@@ -9,8 +9,8 @@ import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 
-from malca.config.config_ltv import LTV_WORKERS
-from malca.config.config_pipeline import SKYPATROL_JD_OFFSET
+from malca.config import LTV_WORKERS
+from malca.config import SKYPATROL_JD_OFFSET
 from malca.utils import clean_lc, read_lc_dat2
 
 

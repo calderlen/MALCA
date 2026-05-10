@@ -23,8 +23,8 @@ import numpy as np
 import pandas as pd
 
 from concurrent.futures import ProcessPoolExecutor
-from malca.config.config_paths import ASASSN_INDEX_PATH
-from malca.config.config_ltv import LTV_MAX_PM
+from malca.config import ASASSN_INDEX_PATH
+from malca.config import LTV_MAX_PM
 from malca.review.store import db_connect, import_candidates
 from malca.stats import compute_stats, _enrich_row_worker
 

@@ -4,12 +4,12 @@ from celerite2 import GaussianProcess, terms
 import numpy as np
 import pandas as pd
 
-from malca.config.config_filters import (
+from malca.config import (
     PHASE_TEMPLATE_MIN_POINTS,
     PHASE_TEMPLATE_PHASE_BINS,
     PHASE_TEMPLATE_PROFILE_SMOOTH_WINDOW,
 )
-from malca.config.config_pipeline import (
+from malca.config import (
     BASELINE_S0, BASELINE_W0, BASELINE_Q, BASELINE_JITTER,
     GP_FLOOR_CLIP, GP_FLOOR_ITERS, GP_MIN_FLOOR_POINTS,
     GP_STIFF_SCALE_FRACTION, GP_STIFF_MIN_DAYS,
@@ -17,7 +17,7 @@ from malca.config.config_pipeline import (
     GP_DIP_SIGMA_THRESH, GP_BRIGHT_SIGMA_THRESH, GP_PAD_DAYS,
     ROLLING_WINDOW_DAYS, ROLLING_MIN_POINTS, ROLLING_MIN_DAYS,
 )
-from malca.config.config_stats import MAD_SCALE
+from malca.config import MAD_SCALE
 
 
 

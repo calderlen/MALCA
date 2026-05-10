@@ -52,7 +52,7 @@ import numpy as np
 import pandas as pd
 import pyvo
 
-from malca.config.config_filters import (
+from malca.config import (
     MIN_BAYES_FACTOR,
     POST_FILTER_MIN_RUN_CAMERAS,
     POST_FILTER_MIN_RUN_POINTS,
@@ -71,16 +71,16 @@ from malca.config.config_filters import (
     POST_FILTER_PERIODICITY_SCORE,
     POST_FILTER_COORD_CHUNK_SIZE,
 )
-from malca.config.config_io import PARQUET_CACHE_COMPRESSION, PARQUET_OUTPUT_COMPRESSION
-from malca.config.config_paths import (
+from malca.config import PARQUET_CACHE_COMPRESSION, PARQUET_OUTPUT_COMPRESSION
+from malca.config import (
     DEFAULT_CACHE_DIR,
     GAIA_AIP_TAP_URL,
     GAIA_LOCAL_CATALOG,
     VSX_CROSSMATCH_PATH,
 )
-from malca.config.config_paths import ASASSN_INDEX_PATH
-from malca.config.config_pipeline import WORKERS, MIN_MAG_OFFSET
-from malca.config.config_stats import PDM_METHOD_CHOICES
+from malca.config import ASASSN_INDEX_PATH
+from malca.config import WORKERS, MIN_MAG_OFFSET
+from malca.config import PDM_METHOD_CHOICES
 from malca.stats import compute_pdm_stats, compute_ce_stats
 from malca.utils import log_rejections
 from malca.utils import apply_simple_band_median_offset, read_lc_dat2

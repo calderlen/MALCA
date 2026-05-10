@@ -34,13 +34,13 @@ from tqdm.auto import tqdm
 import numpy as np
 import pandas as pd
 
-from malca.config.config_filters import (
+from malca.config import (
     MIN_TIME_SPAN, MIN_POINTS_PER_DAY, MIN_CAMERAS,
     VSX_MAX_SEP_ARCSEC, VSX_MODE, STATS_CHUNK_SIZE,
 )
-from malca.config.config_io import PARQUET_CACHE_COMPRESSION, PARQUET_OUTPUT_COMPRESSION
-from malca.config.config_paths import VSX_CROSSMATCH_PATH
-from malca.config.config_pipeline import WORKERS
+from malca.config import PARQUET_CACHE_COMPRESSION, PARQUET_OUTPUT_COMPRESSION
+from malca.config import VSX_CROSSMATCH_PATH
+from malca.config import WORKERS
 from malca.utils import (
     read_lc_dat2,
     get_id_col,

@@ -10,7 +10,7 @@ from astropy.table import Table
 from astroquery.xmatch import XMatch
 from tqdm.auto import tqdm
 
-from malca.config.config_characterize import NEIGHBOR_RADIUS_ARCSEC, NEIGHBOR_CHUNK_SIZE
+from malca.config import NEIGHBOR_RADIUS_ARCSEC, NEIGHBOR_CHUNK_SIZE
 
 
 DEFAULT_NEIGHBOR_CATALOGS: dict[str, str] = {

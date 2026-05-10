@@ -30,7 +30,7 @@ from astropy.table import Table
 from tqdm.auto import tqdm
 from astroquery.ipac.irsa import Irsa
 
-from malca.config.config_ltv import (
+from malca.config import (
     NEOWISE_EPOCH_COMBINE_DAYS,
     NEOWISE_MIN_SNR,
     NEOWISE_RATE_LIMIT_SECONDS,

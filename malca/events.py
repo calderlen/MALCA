@@ -28,10 +28,10 @@ from malca.baseline import (
     per_camera_gp_baseline,
     per_camera_gp_baseline_masked,
 )
-from malca.config.config_filters import BAD_CAMERA_SCATTER_RATIO_THRESHOLD
-from malca.config.config_io import PARQUET_OUTPUT_COMPRESSION, OUTPUT_FORMAT, EVENTS_OUTPUT_CHUNK_SIZE
-from malca.config.config_paths import LCV2_ROOT, DEFAULT_OUTPUT_DIR
-from malca.config.config_pipeline import (
+from malca.config import BAD_CAMERA_SCATTER_RATIO_THRESHOLD
+from malca.config import PARQUET_OUTPUT_COMPRESSION, OUTPUT_FORMAT, EVENTS_OUTPUT_CHUNK_SIZE
+from malca.config import LCV2_ROOT, DEFAULT_OUTPUT_DIR
+from malca.config import (
     WORKERS, TRIGGER_MODE, P_POINTS, MAG_POINTS,
     LOGBF_THRESHOLD_DIP, LOGBF_THRESHOLD_JUMP, SIGNIFICANCE_THRESHOLD,
     MIN_MAG_OFFSET, RUN_MIN_POINTS, RUN_MAX_GAP_POINTS, MAG_BINS,

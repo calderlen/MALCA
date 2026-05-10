@@ -17,12 +17,12 @@ from tqdm.auto import tqdm
 import numpy as np
 import pandas as pd
 
-from malca.config.config_filters import (
+from malca.config import (
     CLEAN_LC_MAX_ERROR_ABSOLUTE,
     CLEAN_LC_MAX_ERROR_SIGMA,
     BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
 )
-from malca.config.config_pipeline import (
+from malca.config import (
     JD_OFFSET, LOGBF_THRESHOLD_DIP, LOGBF_THRESHOLD_JUMP,
 )
 from malca.plot import plot_bayes_results, plot_phase_folded_lightcurve, BASELINE_FUNCTIONS

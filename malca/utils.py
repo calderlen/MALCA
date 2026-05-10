@@ -21,7 +21,7 @@ except TypeError:
 import pandas as pd
 import pyvo
 
-from malca.config.config_filters import (
+from malca.config import (
     CLEAN_LC_MAX_ERROR_ABSOLUTE, CLEAN_LC_MAX_ERROR_SIGMA,
     BAD_CAMERA_WINDOW_DAYS, BAD_CAMERA_MIN_OVERLAP_POINTS,
     BAD_CAMERA_SCATTER_RATIO_THRESHOLD, BAD_CAMERA_MIN_CAMERAS,
@@ -30,10 +30,10 @@ from malca.config.config_filters import (
     CATASTROPHIC_SUPPORT_WINDOW_DAYS, CATASTROPHIC_SUPPORT_EXCURSION,
     CATASTROPHIC_MAX_FRACTION,
 )
-from malca.config.config_paths import GAIA_AIP_TAP_URL
-from malca.config.config_paths import LCV2_MASKED_ROOT, LCV2_ROOT
-from malca.config.config_pipeline import MAG_BINS
-from malca.config.config_pipeline import SKYPATROL_JD_OFFSET
+from malca.config import GAIA_AIP_TAP_URL
+from malca.config import LCV2_MASKED_ROOT, LCV2_ROOT
+from malca.config import MAG_BINS
+from malca.config import SKYPATROL_JD_OFFSET
 
 
 
@@ -283,7 +283,7 @@ def read_lc_dat2(asassn_id, path, excluded_cameras: set[int] | str | None = None
     df_g, df_v : pd.DataFrame
         g-band and V-band DataFrames with excluded cameras removed
     """
-    from malca.config.config_io import LIGHT_CURVE_FILE_EXTENSION
+    from malca.config import LIGHT_CURVE_FILE_EXTENSION
     
     # Parse excluded_cameras if string
     if isinstance(excluded_cameras, str) and excluded_cameras:

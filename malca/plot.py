@@ -25,16 +25,16 @@ from malca.baseline import (
     per_camera_median_baseline,
     per_camera_gp_baseline,
 )
-from malca.config.config_filters import (
+from malca.config import (
     CLEAN_LC_MAX_ERROR_ABSOLUTE,
     CLEAN_LC_MAX_ERROR_SIGMA,
     BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
 )
-from malca.config.config_pipeline import (
+from malca.config import (
     WORKERS, JD_OFFSET, PLOT_FIGSIZE,
     LOGBF_THRESHOLD_DIP, LOGBF_THRESHOLD_JUMP,
 )
-from malca.config.config_stats import MAD_SCALE
+from malca.config import MAD_SCALE
 from malca.events import score_lightcurve
 from malca.review.metadata import REVIEW_METADATA_FIELDS, normalize_vsx_record
 from malca.utils import clean_lc, read_lc_dat2, filter_bad_cameras

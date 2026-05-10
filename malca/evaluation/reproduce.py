@@ -23,7 +23,7 @@ from malca.baseline import (
 )
 from malca.characterize import query_gaia_by_ids, get_dust_extinction
 from malca.classify import compute_all_classifications
-from malca.config.config_filters import (
+from malca.config import (
     MIN_TIME_SPAN,
     MIN_POINTS_PER_DAY,
     MIN_CAMERAS,
@@ -32,9 +32,9 @@ from malca.config.config_filters import (
     POST_FILTER_MIN_RUN_CAMERAS,
     POST_FILTER_MIN_RUN_POINTS,
 )
-from malca.config.config_io import REPRODUCE_CHUNK_SIZE
-from malca.config.config_paths import VSX_RAW_CATALOG_PATH
-from malca.config.config_pipeline import (
+from malca.config import REPRODUCE_CHUNK_SIZE
+from malca.config import VSX_RAW_CATALOG_PATH
+from malca.config import (
     WORKERS,
     TRIGGER_MODE,
     LOGBF_THRESHOLD_DIP,

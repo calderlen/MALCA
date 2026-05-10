@@ -15,7 +15,7 @@ import sqlite3
 import numpy as np
 import pandas as pd
 
-from malca.config.config_pipeline import (
+from malca.config import (
     TRIGGER_MODE, LOGBF_THRESHOLD_DIP, LOGBF_THRESHOLD_JUMP,
     SIGNIFICANCE_THRESHOLD, P_POINTS, MAG_POINTS,
     RUN_MIN_POINTS, RUN_MAX_GAP_POINTS, BASELINE_FUNC,

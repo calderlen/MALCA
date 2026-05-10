@@ -12,9 +12,9 @@ from typing import Any, Iterable
 import numpy as np
 import pandas as pd
 
-from malca.config.config_characterize import GAIA_CHUNK_SIZE
-from malca.config.config_ltv import LTV_MAX_PM
-from malca.config.config_paths import VSX_CROSSMATCH_PATH, GAIA_CACHE_FILE
+from malca.config import GAIA_CHUNK_SIZE
+from malca.config import LTV_MAX_PM
+from malca.config import VSX_CROSSMATCH_PATH, GAIA_CACHE_FILE
 from malca.review.metadata import normalize_vsx_record
 
 

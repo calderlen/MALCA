@@ -16,8 +16,8 @@ from pathlib import Path
 from typing import Callable
 
 import numpy as np
-from malca.config.config_paths import LTV_CACHE_DIR
-from malca.config.config_stats import MAD_SCALE
+from malca.config import LTV_CACHE_DIR
+from malca.config import MAD_SCALE
 
 # =============================================================================
 # NUMBA JIT FUNCTIONS

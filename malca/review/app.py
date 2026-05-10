@@ -32,14 +32,14 @@ import pandas as pd
 import plotly.graph_objects as go
 import plotly.io as pio
 
-from malca.config.config_characterize import GAIA_CHUNK_SIZE
-from malca.config.config_filters import (
+from malca.config import GAIA_CHUNK_SIZE
+from malca.config import (
     BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
     CLEAN_LC_MAX_ERROR_ABSOLUTE,
     CLEAN_LC_MAX_ERROR_SIGMA,
 )
-from malca.config.config_paths import VSX_CROSSMATCH_PATH, GAIA_CACHE_FILE
-from malca.config.config_pipeline import (
+from malca.config import VSX_CROSSMATCH_PATH, GAIA_CACHE_FILE
+from malca.config import (
     JD_OFFSET, MJD_TO_JD, GAIA_TCB_EPOCH_JD, TESS_BTJD_OFFSET, KEPLER_BKJD_OFFSET,
     REVIEW_RESIDUAL_FRACTION,
 )

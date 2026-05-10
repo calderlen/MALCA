@@ -24,8 +24,8 @@ import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 
-from malca.config.config_paths import LTV_OUTPUT_DIR, SYDNEY_LTV_CSV_PATH
-from malca.config.config_ltv import (
+from malca.config import LTV_OUTPUT_DIR, SYDNEY_LTV_CSV_PATH
+from malca.config import (
     LTV_MIN_SLOPE,
     LTV_MIN_DIFF,
     LTV_MIN_DEC,
@@ -36,7 +36,7 @@ from malca.config.config_ltv import (
     GAIA_EPOCH_DATA_RELEASE,
     GAIA_EPOCH_DATA_STRUCTURE,
 )
-from malca.config.config_io import PARQUET_OUTPUT_COMPRESSION
+from malca.config import PARQUET_OUTPUT_COMPRESSION
 from malca.ltv.filter import (
     apply_all_filters,
     filter_slope_threshold,

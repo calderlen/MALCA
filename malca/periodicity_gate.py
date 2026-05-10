@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 
-from malca.config.config_filters import (
+from malca.config import (
     BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
     CLEAN_LC_MAX_ERROR_ABSOLUTE,
     CLEAN_LC_MAX_ERROR_SIGMA,
@@ -23,8 +23,8 @@ from malca.config.config_filters import (
     PRE_PERIODICITY_SCATTER_RATIO_MAX,
     PRE_PERIODICITY_SCATTER_RATIO_RESCUE_MARGIN,
 )
-from malca.config.config_pipeline import WORKERS
-from malca.config.config_stats import LS_ALIAS_PERIODS, LS_ALIAS_TOLERANCE
+from malca.config import WORKERS
+from malca.config import LS_ALIAS_PERIODS, LS_ALIAS_TOLERANCE
 from malca.lightcurve_io import load_lightcurve_df
 from malca.stats import compute_ce_stats
 from malca.utils import apply_simple_band_median_offset, clean_lc, compute_n_cameras

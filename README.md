@@ -252,9 +252,9 @@ flowchart TB
     BASE -.-> REPRO
 
     %% ── Configuration ────────────────────────────────────────
-    subgraph configgrp["Configuration (config/)"]
+    subgraph configgrp["Configuration"]
         direction LR
-        CONF["config_paths, config_pipeline, config_filters,<br/>config_io, config_characterize, config_classify,<br/>config_ltv, config_stats, config_ml, config_vetting"]
+        CONF["config.py<br/>centralized constants, paths, thresholds, and service strings"]
     end
 
     %% ── CLI Entry Point ──────────────────────────────────────
@@ -276,7 +276,7 @@ flowchart TB
 - **ML**: `ml/features.py` (107 curated features) &rarr; `ml/train.py` (LightGBM classifier) &rarr; `ml/predict.py` (score candidates)
 - **Evaluation**: `injection.py` (synthetic dips), `detection_rate.py`, `validation.py`, `reproduce.py`, `attrition.py`, `false_positive.py`
 - **Core libraries**: `utils.py`, `lightcurve_io.py`, `baseline.py`, `triggering.py`, `score.py`, `stats.py`, `periodogram.py`, `pca.py`, `fetch.py`, `gaia_fetch.py`
-- **Configuration**: 10 modules in `config/` centralizing all pipeline parameters
+- **Configuration**: `config.py` centralizes all pipeline parameters
 - **CLI**: Unified interface via `malca [command]` (`__main__.py`)
 
 See [docs/architecture.md](docs/architecture.md) for detailed documentation.

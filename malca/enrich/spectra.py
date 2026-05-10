@@ -7,7 +7,7 @@ import pandas as pd
 from tqdm.auto import tqdm
 
 from malca.enrich.neighbor import _ensure_candidate_id, _query_catalog_bulk
-from malca.config.config_characterize import SPECTRA_RADIUS_ARCSEC, SPECTRA_CHUNK_SIZE
+from malca.config import SPECTRA_RADIUS_ARCSEC, SPECTRA_CHUNK_SIZE
 
 
 DEFAULT_SPECTRA_CATALOGS: dict[str, str] = {
