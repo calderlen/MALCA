@@ -1096,7 +1096,7 @@ def plot_efficiency_mag_slices(
     figs = []
     n_depth = len(cube["depth_centers"])
     n_dur = len(cube["duration_centers"])
-    grid_info = f"Grid: {n_depth}×{n_dur}"
+    grid_info = f"Grid: {n_depth}x{n_dur}"
     
     for k, mag in enumerate(cube["mag_centers"]):
         eff_slice = cube["efficiency"][:, :, k]
@@ -1152,7 +1152,7 @@ def plot_efficiency_marginalized(
         ylabel = "Fractional Depth"
         title = "Detection Efficiency (averaged over magnitude)"
         xlog = True
-        grid_info = f"Grid: {len(y_centers)}×{len(x_centers)}"
+        grid_info = f"Grid: {len(y_centers)}x{len(x_centers)}"
     elif axis == "duration":
         eff_2d = np.nanmean(cube["efficiency"], axis=1)
         x_centers = cube["mag_centers"]
@@ -1161,7 +1161,7 @@ def plot_efficiency_marginalized(
         ylabel = "Fractional Depth"
         title = "Detection Efficiency (averaged over duration)"
         xlog = False
-        grid_info = f"Grid: {len(y_centers)}×{len(x_centers)}"
+        grid_info = f"Grid: {len(y_centers)}x{len(x_centers)}"
     elif axis == "depth":
         eff_2d = np.nanmean(cube["efficiency"], axis=0).T  # Transpose: (dur, mag) -> (mag, dur)
         x_centers = cube["duration_centers"]
@@ -1170,7 +1170,7 @@ def plot_efficiency_marginalized(
         ylabel = "Median Magnitude"
         title = "Detection Efficiency (averaged over depth)"
         xlog = True
-        grid_info = f"Grid: {len(y_centers)}×{len(x_centers)}"
+        grid_info = f"Grid: {len(y_centers)}x{len(x_centers)}"
     else:
         raise ValueError(f"Unknown axis: {axis}. Use 'mag', 'duration', or 'depth'.")
 
@@ -1289,7 +1289,7 @@ def plot_efficiency_3d(
     M_valid = M_flat[valid_mask]
     eff_valid = efficiency_flat[valid_mask]
 
-    grid_info = f"Grid: {len(depth)}×{len(duration)}×{len(mag)}"
+    grid_info = f"Grid: {len(depth)}x{len(duration)}x{len(mag)}"
     
     fig = go.Figure(data=go.Scatter3d(
         x=D_valid,
@@ -1374,7 +1374,7 @@ def plot_efficiency_isosurface(
     M_valid = M_flat[valid_mask]
     eff_valid = efficiency_flat[valid_mask]
     
-    grid_info = f"Grid: {len(depth)}×{len(duration)}×{len(mag)}"
+    grid_info = f"Grid: {len(depth)}x{len(duration)}x{len(mag)}"
 
     fig = go.Figure(data=go.Isosurface(
         x=D_valid,

@@ -685,7 +685,7 @@ output/injection/                     # Default output directory
 │   └── injection_results_PROCESSED.txt  # Checkpoint for resume
 │
 ├── cubes/
-│   └── efficiency_cube.npz           # 3D efficiency cube (depth × duration × mag)
+│   └── efficiency_cube.npz           # 3D efficiency cube (depth x duration x mag)
 │
 └── plots/
     ├── mag_slices/                   # Per-magnitude 2D heatmaps

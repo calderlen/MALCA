@@ -1489,7 +1489,7 @@ PLOT_ALT_WHEN_PAC_VS_FLAT_DELTA_BIC = 10.0
 PAC_COVERAGE_TAU_MAX = 6.0
 PAC_COVERAGE_N_BINS = 120
 PAC_COVERAGE_GAUSS_SIGMA_TAU = 1.5
-# Hybrid kernel: 0.5 × normalized (A(u(τ))−1) at bin centers + 0.5 × Gaussian in τ (σ = PAC_COVERAGE_GAUSS_SIGMA_TAU).
+# Hybrid kernel: 0.5 x normalized (A(u(τ))−1) at bin centers + 0.5 x Gaussian in τ (σ = PAC_COVERAGE_GAUSS_SIGMA_TAU).
 PAC_COVERAGE_WARN_THRESHOLD = 0.55
 PAC_COVERAGE_FAIL_THRESHOLD = 0.35
 
@@ -5834,7 +5834,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--crossmatch-vsx-csv",
         type=Path,
         default=None,
-        help="ASAS-SN × VSX crossmatch CSV for characterize (default: malca.config VSX_CROSSMATCH_PATH under repo).",
+        help="ASAS-SN x VSX crossmatch CSV for characterize (default: malca.config VSX_CROSSMATCH_PATH under repo).",
     )
     g_x.add_argument(
         "--crossmatch-method",

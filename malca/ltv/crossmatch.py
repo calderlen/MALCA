@@ -2,7 +2,7 @@
 LTV Catalog Crossmatches — Optimized for Scale.
 
 Implements catalog crossmatches from the paper:
-- LOCAL CATALOG: Pre-matched ASAS-SN × VSX file (Gaia DR3 + VSX, no API)
+- LOCAL CATALOG: Pre-matched ASAS-SN x VSX file (Gaia DR3 + VSX, no API)
 - Gaia Alerts (transient alerts) — API
 - MILLIQUAS (AGN catalog) — API
 - SIMBAD (classifications) — API
@@ -87,7 +87,7 @@ def load_local_catalog(
     cache: bool = True,
     verbose: bool = False,
 ) -> pd.DataFrame:
-    """Load pre-matched ASAS-SN × VSX catalog (~99K sources with Gaia/VSX data)."""
+    """Load pre-matched ASAS-SN x VSX catalog (~99K sources with Gaia/VSX data)."""
     global _cached_catalog
     
     if cache and _cached_catalog is not None:
@@ -887,7 +887,7 @@ def crossmatch_all_catalogs(
     Run all catalog crossmatches with optimized processing.
     
     Optimizations:
-    - LOCAL CATALOG: Uses pre-matched ASAS-SN × VSX file for Gaia DR3 & VSX
+    - LOCAL CATALOG: Uses pre-matched ASAS-SN x VSX file for Gaia DR3 & VSX
       data, ELIMINATING those API queries entirely (~99K sources available)
     - Parallel processing via ThreadPoolExecutor
     

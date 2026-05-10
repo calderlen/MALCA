@@ -48,7 +48,7 @@ Results saved to `diagnostics/results/`
 For each configuration, we measure:
 
 1. **Completeness (Injection)**: What % of injected dips are recovered?
-   - Output: Efficiency cube (depth × duration × magnitude)
+   - Output: Efficiency cube (depth x duration x magnitude)
    
 2. **Contamination (Detection Rate)**: What % of clean light curves trigger false positives?
    - Output: Detection rate percentage on 10,000 clean samples

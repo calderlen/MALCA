@@ -301,7 +301,7 @@ def main() -> None:
     out, model = fit_apply_ltv_pca(df, n_components=nc)
     _write_table(out, args.output)
     print(
-        f"Wrote {len(out):,} rows × {len(model.pca_columns)} PC columns "
+        f"Wrote {len(out):,} rows x {len(model.pca_columns)} PC columns "
         f"(cumulative variance: {sum(model.explained_variance_ratio_):.3f})"
     )
     if args.model_out is not None:

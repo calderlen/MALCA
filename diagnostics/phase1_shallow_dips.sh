@@ -13,7 +13,7 @@ echo "==================================================================="
 # Test 1A-1: Baseline (current configuration)
 echo ""
 echo "[1/3] Running baseline (current config)..."
-echo "  - Injection test (100×100 grid, 100 inj/cell = 1M trials)..."
+echo "  - Injection test (100x100 grid, 100 inj/cell = 1M trials)..."
 python -m malca.injection --run-tag "1a_baseline" \
   --amp-min 0.05 --amp-max 5.0 --amp-steps 100 \
   --dur-min 1 --dur-max 300 --dur-steps 100 \
@@ -31,7 +31,7 @@ python -m malca.detection_rate --run-tag "1a_baseline" \
 # Test 1A-2: Remove min-mag-offset filter
 echo ""
 echo "[2/3] Running with min-mag-offset=0.0 (remove filter)..."
-echo "  - Injection test (100×100 grid, 100 inj/cell = 1M trials)..."
+echo "  - Injection test (100x100 grid, 100 inj/cell = 1M trials)..."
 python -m malca.injection --run-tag "1a_no_mag_offset" \
   --amp-min 0.05 --amp-max 5.0 --amp-steps 100 \
   --dur-min 1 --dur-max 300 --dur-steps 100 \
@@ -51,7 +51,7 @@ python -m malca.detection_rate --run-tag "1a_no_mag_offset" \
 # Test 1A-3: Lower logbf threshold
 echo ""
 echo "[3/3] Running with lower LogBF threshold (3.0)..."
-echo "  - Injection test (100×100 grid, 100 inj/cell = 1M trials)..."
+echo "  - Injection test (100x100 grid, 100 inj/cell = 1M trials)..."
 python -m malca.injection --run-tag "1a_low_logbf" \
   --amp-min 0.05 --amp-max 5.0 --amp-steps 100 \
   --dur-min 1 --dur-max 300 --dur-steps 100 \
