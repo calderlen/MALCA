@@ -1,0 +1,728 @@
+"""Configuration constants for MALCA."""
+
+from datetime import datetime, timezone
+import math
+from pathlib import Path
+
+
+# =============================================================================
+# I/O
+# =============================================================================
+
+PARQUET_OUTPUT_COMPRESSION = "zstd"
+PARQUET_CACHE_COMPRESSION = "snappy"
+OUTPUT_FORMAT = "parquet"
+EVENTS_OUTPUT_CHUNK_SIZE = 10000
+INJECTION_CHUNK_SIZE = 1000
+REPRODUCE_CHUNK_SIZE = 10000
+
+# Default file extension for light curve files (can be overridden via --extension/-e flag).
+LIGHT_CURVE_FILE_EXTENSION = "dat3"
+
+
+# =============================================================================
+# Paths, API Endpoints, and Cache Directories
+# =============================================================================
+
+VSX_CROSSMATCH_PATH = Path("input/vsx/asassn_x_vsx_matches_20250919_2252.csv")
+VSX_RAW_CATALOG_PATH = Path("input/vsx/vsxcat.090525.csv")
+ASASSN_INDEX_PATH = Path("input/asassn_index_masked_concat_cleaned_20250919_154524_brotli.parquet")
+STARHORSE_DEFAULT_PATH = "input/starhorse/starhorse2021.parquet"
+MIST_GRID_PATH = Path("input/mist/mist_cmd_minimal.csv")
+DEFAULT_CACHE_DIR = Path("~/.cache/malca/catalogs")
+GAIA_CACHE_FILE = Path("output/gaia_cache.parquet")
+LTV_OUTPUT_DIR = Path("output/ltv")
+LTV_INJECTION_OUTPUT_DIR = LTV_OUTPUT_DIR / "injection"
+SYDNEY_LTV_CSV_PATH = Path("input/SydneyLTVs.csv")
+LCV2_ROOT = Path("/data/poohbah/1/assassin/rowan.90/lcsv2")
+UNTIMELY_API_URL = "https://irsa.ipac.caltech.edu/cgi-bin/Gator/nph-query"
+STARHORSE_TAP_URL = "https://gaia.aip.de/tap"
+GAIA_AIP_TAP_URL = "https://gaia.aip.de/tap"
+GAIA_LOCAL_CATALOG = Path("input/gaia/gaia_dr3_crossmatched.parquet")
+DEFAULT_OUTPUT_DIR = Path("output")
+LCV2_MASKED_ROOT = Path("/data/poohbah/1/assassin/lenhart/malca-older/calder/lcsv2_masked")
+SKYPATROL_CACHE_DIR = Path("output/cache/skypatrol")
+LTV_CACHE_DIR = Path("/tmp/ltv_cache")
+
+
+# =============================================================================
+# Pipeline Settings
+# =============================================================================
+
+# Parallelism
+WORKERS = 12
+BATCH_SIZE = 10000
+
+# Bayesian detection
+TRIGGER_MODE = "posterior_prob"
+P_POINTS = 12
+MAG_POINTS = 12
+LOGBF_THRESHOLD_DIP = 5.0
+LOGBF_THRESHOLD_JUMP = 5.0
+SIGNIFICANCE_THRESHOLD = 99.99997
+MIN_MAG_OFFSET = 0.1
+
+# Run grouping
+RUN_MIN_POINTS = 2
+RUN_MAX_GAP_POINTS = 5
+
+# Baseline GP kernel (SHOTerm)
+BASELINE_FUNC = "gp_masked"
+BASELINE_S0 = 0.0005
+BASELINE_W0 = math.pi / 1000
+BASELINE_Q = 0.7
+BASELINE_JITTER = 0.006
+
+# GP fitting
+GP_FLOOR_CLIP = 3.0
+GP_FLOOR_ITERS = 3
+GP_MIN_FLOOR_POINTS = 30
+GP_STIFF_SCALE_FRACTION = 2.0
+GP_STIFF_MIN_DAYS = 1000.0
+GP_LOOSE_SCALE_FRACTION = 0.5
+GP_LOOSE_MIN_DAYS = 250.0
+GP_MIN_GP_POINTS = 10
+GP_DIP_SIGMA_THRESH = 3.0
+GP_BRIGHT_SIGMA_THRESH = -3.0
+GP_PAD_DAYS = 5.0
+
+# Rolling baseline
+ROLLING_WINDOW_DAYS = 300.0
+ROLLING_MIN_POINTS = 10
+ROLLING_MIN_DAYS = 30.0
+
+# Magnitude bins
+MAG_BINS = ["12_12.5", "12.5_13", "13_13.5", "13.5_14", "14_14.5", "14.5_15"]
+
+# JD offsets
+JD_OFFSET = 2458000.0
+MJD_TO_JD = 2400000.5
+GAIA_TCB_EPOCH_JD = 2455197.5
+TESS_BTJD_OFFSET = 2457000.0
+KEPLER_BKJD_OFFSET = 2454833.0
+SKYPATROL_JD_OFFSET = 2450000.0
+
+# UI / plotting
+PLOT_DPI = 150
+PLOT_FIGSIZE = (14, 8)
+REVIEW_CACHE_LIMIT = 256
+REVIEW_MAX_EXTERNAL_POINTS = 20000
+REVIEW_RESIDUAL_FRACTION = 0.33
+
+# Evaluation
+INJECTION_MAG_LO = 12.0
+INJECTION_MAG_HI = 15.0
+INJECTION_N_SAMPLE = 10000
+INJECTION_MIN_POINTS = 50
+INJECTION_SEED = 42
+INJECTION_MAX_ATTEMPTS = 10
+FP_TRIALS_PER_FAMILY = 200
+
+
+# =============================================================================
+# Event Detection Compatibility Aliases
+# =============================================================================
+
+# Optional Bayesian p-grid bounds; None defers to score_lightcurve defaults.
+P_MIN_DIP = None
+P_MAX_DIP = None
+P_MIN_JUMP = None
+P_MAX_JUMP = None
+
+# Legacy naming used in review modules.
+MAX_GAP_POINTS = RUN_MAX_GAP_POINTS
+RUN_MAX_GAP_DAYS = None
+RUN_MIN_DURATION_DAYS = None
+BASELINE_TAG = BASELINE_FUNC
+
+
+# =============================================================================
+# Filters, Tagging, and Light Curve Cleaning
+# =============================================================================
+
+# Tagging
+MIN_TIME_SPAN = 100.0
+MIN_POINTS_PER_DAY = 0.05
+MIN_CAMERAS = 2
+VSX_MAX_SEP_ARCSEC = 3.0
+VSX_MODE = "tag"
+CAMERA_MEDIAN_TOLERANCE = 0.2
+STATS_CHUNK_SIZE = 10000
+
+# Pre-events periodicity gate
+PRE_PERIODICITY_MIN_PERIOD = 0.2
+PRE_PERIODICITY_MAX_PERIOD = 100.0
+PRE_PERIODICITY_N_PERIODS = 5000
+PRE_PERIODICITY_CE_SNR_THRESHOLD = 10.0
+PRE_PERIODICITY_MIN_POINTS = 50
+PRE_PERIODICITY_SCATTER_RATIO_MAX = 0.8
+PRE_PERIODICITY_CE_SNR_RESCUE_MARGIN = 2.0
+PRE_PERIODICITY_SCATTER_RATIO_RESCUE_MARGIN = 0.35
+PRE_PERIODICITY_PHASE_PEAK_SNR_MIN = 2.5
+PRE_PERIODICITY_PHASE_PEAK_WIDTH_MAX = 0.35
+PRE_PERIODICITY_PHASE_PEAK_REGION_MAX = 2
+
+# Periodic-baseline residual search
+PHASE_TEMPLATE_PHASE_BINS = 64
+PHASE_TEMPLATE_PROFILE_SMOOTH_WINDOW = 5
+PHASE_TEMPLATE_MIN_POINTS = 50
+
+# Legacy periodic folded-profile branch settings kept for compatibility with
+# older tooling; the main pipeline now uses the phase-template baseline.
+PERIODIC_EVENTS_PHASE_BINS = PHASE_TEMPLATE_PHASE_BINS
+PERIODIC_EVENTS_PROFILE_SMOOTH_WINDOW = PHASE_TEMPLATE_PROFILE_SMOOTH_WINDOW
+PERIODIC_EVENTS_MIN_POINTS = PHASE_TEMPLATE_MIN_POINTS
+PERIODIC_EVENTS_MIN_SUPPORT_POINTS = 12
+PERIODIC_EVENTS_MIN_CYCLE_SUPPORT = 3
+PERIODIC_EVENTS_MIN_CAMERA_SUPPORT = 2
+PERIODIC_EVENTS_DEPTH_SNR_THRESHOLD = 4.0
+PERIODIC_EVENTS_MAX_DIP_WIDTH_PHASE = 0.6
+
+# Post-filter
+MIN_BAYES_FACTOR = 10.0
+POST_FILTER_MIN_RUN_CAMERAS = 2
+POST_FILTER_MIN_RUN_POINTS = 2
+
+# LC cleaning (utils.py)
+CLEAN_LC_MAX_ERROR_ABSOLUTE = 1.0
+CLEAN_LC_MAX_ERROR_SIGMA = 5.0
+
+# Bad camera detection (utils.py)
+BAD_CAMERA_WINDOW_DAYS = 100.0
+BAD_CAMERA_MIN_OVERLAP_POINTS = 10
+BAD_CAMERA_SCATTER_RATIO_THRESHOLD = 2.5
+BAD_CAMERA_MIN_CAMERAS = 2
+OFFSET_CAMERA_SIGMA_THRESHOLD = 15.0
+CATASTROPHIC_MIN_POINTS_PER_CAMERA = 30
+CATASTROPHIC_MAG_EXCURSION = 3.0
+CATASTROPHIC_SUPPORT_WINDOW_DAYS = 2.0
+CATASTROPHIC_SUPPORT_EXCURSION = 0.75
+CATASTROPHIC_MAX_FRACTION = 0.03
+
+# Post-filter validation defaults
+POST_FILTER_MAX_RUWE = 1.4
+POST_FILTER_MAX_PM = 100.0
+POST_FILTER_MAX_SEP_ARCSEC = 3.0
+POST_FILTER_REL_TOL = 0.10
+POST_FILTER_MIN_DELTA_BIC = 10.0
+POST_FILTER_MIN_DIP_SCORE = -3.0
+POST_FILTER_MIN_JUMP_SCORE = -3.0
+POST_FILTER_PDM_SNR_THRESHOLD = 5.0
+POST_FILTER_CE_SNR_THRESHOLD = 5.0
+POST_FILTER_PDM_METHOD = "plavchan"
+POST_FILTER_PDM_MIN_THETA = 0.6
+POST_FILTER_CE_MIN_ENTROPY = 0.6
+POST_FILTER_PERIODICITY_SCORE = 99.0
+POST_FILTER_CONSENSUS_MAD_FLOOR = 0.001
+POST_FILTER_COORD_CHUNK_SIZE = 200000
+
+
+# =============================================================================
+# Characterization
+# =============================================================================
+
+# Gaia query
+GAIA_CHUNK_SIZE = 500
+STARHORSE_TAP_CHUNK_SIZE = 1000
+
+# Crossmatch radii
+IPHAS_MAX_SEP_ARCSEC = 1.0
+CLUSTER_MAX_SEP_ARCSEC = 1.0
+UNWISE_MAX_SEP_ARCSEC = 3.0
+GALEX_MAX_SEP_ARCSEC = 3.0
+APASS_MAX_SEP_ARCSEC = 1.0
+ALLWISE_MAX_SEP_ARCSEC = 2.0
+TMASS_MAX_SEP_ARCSEC = 2.0
+NEIGHBOR_RADIUS_ARCSEC = 15.0
+NEIGHBOR_CHUNK_SIZE = 1000
+SPECTRA_RADIUS_ARCSEC = 3.0
+SPECTRA_CHUNK_SIZE = 1000
+
+# unWISE quality thresholds
+UNWISE_TIMEOUT_SECONDS = 30
+UNWISE_FRACFLUX_MIN = 0.5
+UNWISE_QF_MIN = 0.9
+UNWISE_VARIABILITY_ZSCORE = 3.0
+UNWISE_EXPECTED_SCATTER_BASE = 0.02
+UNWISE_EXPECTED_SCATTER_SLOPE = 0.01
+UNWISE_EXPECTED_SCATTER_MAG_REF = 14
+UNWISE_WORKERS = 8
+UNWISE_CHECKPOINT_EVERY = 200
+UNWISE_MAX_RETRIES = 3
+
+# SFR proximity
+SFR_MAX_DIST_KPC = 1.5
+SFR_DIST_TOLERANCE_FRACTION = 0.5
+
+# SFR catalog (Prisinzano+2022)
+SFR_CATALOG = [
+    {"name": "Orion Nebula Cluster", "ra": 83.82, "dec": -5.39, "dist_pc": 400, "radius_deg": 1.0},
+    {"name": "Cygnus X", "ra": 307.0, "dec": 40.5, "dist_pc": 1400, "radius_deg": 3.0},
+    {"name": "Taurus", "ra": 68.0, "dec": 26.0, "dist_pc": 140, "radius_deg": 5.0},
+    {"name": "Ophiuchus", "ra": 246.8, "dec": -24.5, "dist_pc": 140, "radius_deg": 3.0},
+    {"name": "Scorpius-Centaurus", "ra": 240.0, "dec": -25.0, "dist_pc": 145, "radius_deg": 10.0},
+    {"name": "Perseus", "ra": 55.0, "dec": 32.0, "dist_pc": 300, "radius_deg": 3.0},
+    {"name": "Serpens", "ra": 277.5, "dec": 1.2, "dist_pc": 415, "radius_deg": 1.0},
+    {"name": "Lupus", "ra": 240.0, "dec": -38.0, "dist_pc": 160, "radius_deg": 3.0},
+]
+
+# BANYAN Sigma
+BANYAN_MIN_ASSOC_PROB = 0.1
+
+# IPHAS H-alpha
+IPHAS_HA_EXCESS_THRESHOLD = 0.25
+
+# Post-review vetting
+VETTING_SIMBAD_RADIUS_ARCSEC = 5.0
+VETTING_ASASSN_RADIUS_ARCSEC = 5.0
+
+
+# =============================================================================
+# Classification
+# =============================================================================
+
+# Physical constants
+SOLAR_MASS_KG = 1.989e30
+SOLAR_RADIUS_M = 6.957e8
+AU_M = 1.496e11
+DAY_S = 86400
+GRAVITATIONAL_CONSTANT_SI = 6.674e-11
+EARTH_MASS_KG = 5.972e24
+
+# EB classification
+EB_SHORT_DIP_DAYS = 10
+EB_LONG_DIP_DAYS = 30
+EB_SHORT_P = 0.3
+EB_LONG_P = 0.05
+EB_VERY_LONG_P = 0.01
+EB_PERIODIC_BONUS = 0.4
+EB_SYMMETRIC_BONUS = 0.2
+EB_BINARY_BONUS = 0.3
+EB_ASYMMETRY_THRESHOLD = 0.1
+
+# CV classification
+CV_BP_RP_THRESHOLD = 0.5
+CV_G_ABS_THRESHOLD = 8
+CV_BASE_P = 0.3
+CV_HA_EW_THRESHOLD = 10
+CV_HA_BONUS = 0.4
+CV_KNOWN_P = 0.95
+
+# Starspot classification
+STARSPOT_SMALL_AMP = 0.05
+STARSPOT_MEDIUM_AMP = 0.15
+STARSPOT_SMALL_P = 0.4
+STARSPOT_MEDIUM_P = 0.1
+STARSPOT_LARGE_P = 0.01
+STARSPOT_ROTATION_PERIOD_DAYS = 30
+
+# YSO color cuts (Koenig & Leisawitz 2014)
+YSO_CLASS_I_W1W2 = 0.8
+YSO_CLASS_II_W1W2_MIN = 0.25
+YSO_CLASS_II_HK = 0.3
+YSO_DUST_CORRECTION_HK = 0.18
+YSO_DUST_CORRECTION_W1W2 = 0.05
+
+# Disk probability
+DISK_BASE_P = 0.1
+DISK_LARGE_A_AU = 2
+DISK_VERY_LARGE_A_AU = 10
+DISK_LARGE_A_P = 0.3
+DISK_VERY_LARGE_A_P = 0.5
+DISK_LARGE_HILL_BONUS = 0.1
+DISK_NO_IR_EXCESS_BONUS = 0.1
+DISK_P_CAP = 0.8
+
+# Final classification thresholds
+CLASSIFY_EB_THRESHOLD = 0.5
+CLASSIFY_CV_THRESHOLD = 0.5
+CLASSIFY_STARSPOT_THRESHOLD = 0.5
+CLASSIFY_DISK_THRESHOLD = 0.4
+CLASSIFY_MS_EB_REJECTION = 0.3
+CLASSIFY_MS_CV_REJECTION = 0.3
+
+# Query radii (classify-specific)
+CLASSIFY_IPHAS_RADIUS_ARCSEC = 2.0
+CLASSIFY_PS1_RADIUS_ARCSEC = 2.0
+
+
+# =============================================================================
+# Long-Term Variability
+# =============================================================================
+
+# LTV filter thresholds
+LTV_MIN_SLOPE = 0.03
+LTV_MIN_DIFF = 0.3
+LTV_MIN_DEC = -88.0
+LTV_MAX_PM = 100.0
+LTV_MAX_REDUCED_CHI2 = 5.0
+LTV_MAX_EB_PERIOD_DAYS = 100.0
+LTV_MIN_LS_POWER = 0.3
+LTV_MAX_LS_FAP = 0.01
+LTV_MAX_CROWDING_COUNT = 20
+
+# LTV crossmatch
+LTV_MATCH_RADIUS_ARCSEC = 3.0
+VIZIER_TAP_URL = "https://tapvizier.cds.unistra.fr/TAPVizieR/tap"
+SIMBAD_TAP_URL = "https://simbad.cds.unistra.fr/simbad/sim-tap"
+
+# LTV workers / chunking
+LTV_WORKERS = 10
+LTV_CHUNK_SIZE = 10000
+LTV_GAIA_CHUNK_SIZE = 1000
+LTV_CROSSMATCH_CHUNK_SIZE = 1000
+
+# LTV injection benchmark
+LTV_INJECTION_PROFILE = "tanh"
+LTV_INJECTION_AMP_MIN = 0.05
+LTV_INJECTION_AMP_MAX = 1.0
+LTV_INJECTION_AMP_STEPS = 8
+LTV_INJECTION_TIMESCALE_MIN_DAYS = 30.0
+LTV_INJECTION_TIMESCALE_MAX_DAYS = 3000.0
+LTV_INJECTION_TIMESCALE_STEPS = 8
+LTV_INJECTION_REPEATS_PER_GRID = 8
+LTV_INJECTION_CONTROL_SAMPLE_SIZE = 256
+LTV_INJECTION_CHECKPOINT_INTERVAL = 100
+LTV_INJECTION_CHUNK_SIZE = 100
+
+# LTV core
+LTV_DSPRING = 2460023.5
+LTV_MAX_SEASONS = 12
+LTV_MIN_POINTS_PER_SEASON = 1
+LTV_MIN_SEASONS_FOR_QUADRATIC = 3
+LTV_CORE_CHUNK_SIZE = 10000
+
+# LTV Lomb-Scargle
+LTV_LS_MIN_PERIOD_DAYS = 10.0
+LTV_LS_MAX_PERIOD_DAYS = 1000.0
+LTV_LS_FAP_THRESHOLD = 0.1
+LTV_LS_SAMPLES_PER_PEAK = 5
+
+# LTV V/g overlap
+LTV_MIN_OVERLAP_DAYS = 30.0
+LTV_MIN_OVERLAP_FRACTION = 0.1
+
+# LTV crowding
+LTV_CROWDING_SEARCH_RADIUS_ARCSEC = 16.0
+
+# REFCAT magnitude offset filter
+LTV_MAX_REFCAT_OFFSET = 1.5
+
+# Neighbor high-PM star filter
+LTV_APERTURE_RADIUS_ARCSEC = 16.0
+LTV_ASASSN_BASELINE_YEARS = 10.0
+LTV_NEIGHBOR_FLUX_RATIO_LIMIT = 0.01
+LTV_NEIGHBOR_SEARCH_RADIUS_ARCSEC = 120.0
+LTV_NEIGHBOR_MIN_PM_MAS_YR = 100.0
+
+# LTV dust flags
+LTV_DUST_OPTICAL_SLOPE_THRESH = 0.03
+LTV_DUST_COLOR_SLOPE_THRESH = 0.004
+LTV_DUST_COLOR_EXCESS_THRESH = 0.3
+
+# NEOWISE (1 day = combine points from same day, matching paper)
+NEOWISE_EPOCH_COMBINE_DAYS = 1.0
+NEOWISE_MIN_SNR = 3.0
+NEOWISE_RATE_LIMIT_SECONDS = 0.1
+NEOWISE_MATCH_RADIUS_ARCSEC = 3.0
+
+# Gaia epoch photometry
+GAIA_EPOCH_DATA_RELEASE = "Gaia DR3"
+GAIA_EPOCH_DATA_STRUCTURE = "RAW"
+GAIA_EPOCH_RETRIEVAL_TYPE = "EPOCH_PHOTOMETRY"
+GAIA_EPOCH_DELTA_MAG_THRESH = 0.5
+GAIA_EPOCH_DELTA_COLOR_THRESH = 0.5
+
+# CMD features. These are shared by LTV CMD and review diagnostics.
+CMD_R_V = 3.1
+CMD_A_G_PER_AV = 0.789
+CMD_E_BP_RP_PER_AV = 1.002 - 0.589
+
+
+# =============================================================================
+# Vetting
+# =============================================================================
+
+# SIMBAD
+VETTING_SIMBAD_BATCH_SIZE = 500
+VETTING_SIMBAD_RETRY_DELAY = 5
+VETTING_SIMBAD_MAX_RETRIES = 3
+
+# API URLs
+GAIA_ESA_TAP_URL = "https://gea.esac.esa.int/tap-server/tap"
+ALERCE_API_BASE = "https://api.alerce.online"
+ATLAS_API_BASE = "https://fallingstar-data.com/forcedphot"
+TNS_API_BASE = "https://www.wis-tns.org/api"
+IRSA_TAP_URL = "https://irsa.ipac.caltech.edu/TAP"
+
+# Catalog identifiers
+ASASSN_VAR_CATALOG_ID = "II/366/catv2021"
+ZTF_VAR_CATALOG_ID = "J/ApJS/249/18/table2"
+EROSITA_CATALOG_ID = "J/A+A/682/A34/erass1-m"
+OGLE_MICROLENS_CATALOG_ID = "J/ApJS/244/29/table3"
+
+# Crossmatch radii
+ALERCE_RADIUS_ARCSEC = 3.0
+ATLAS_MJD_MIN = 57000
+ZTF_VAR_RADIUS_ARCSEC = 3.0
+TNS_RADIUS_ARCSEC = 5.0
+EROSITA_RADIUS_ARCSEC = 10.0
+OGLE_MICROLENS_RADIUS_ARCSEC = 2.0
+NEOWISE_VET_MAX_SEP_ARCSEC = 3.0
+ZTF_LC_RADIUS_ARCSEC = 2.0
+CRTS_MATCH_RADIUS_ARCSEC = 3.0
+
+# Batch/worker sizes
+ALERCE_BATCH_SIZE = 50
+TNS_BATCH_SIZE = 50
+ALERCE_WORKERS = 8
+NEOWISE_VET_WORKERS = 4
+CRTS_CHUNK_SIZE = 100
+GAIA_EPOCH_VET_CHUNK_SIZE = 50
+
+# ATLAS polling
+ATLAS_POLL_INTERVAL = 10
+ATLAS_MAX_POLL = 120
+
+# HTTP
+VETTING_HTTP_TIMEOUT = 60
+VETTING_BACKOFF_CAP = 8
+MICROLENS_OGLE_EWS_START_YEAR = 2011
+MICROLENS_KMTNET_START_YEAR = 2016
+MICROLENS_DEFAULT_END_YEAR = datetime.now(timezone.utc).year
+
+# Misc
+PANSTARRS_DEC_LIMIT = -30.5
+TESS_SEARCH_RADIUS_ARCSEC = 21
+AAVSO_MAX_PAGES = 50
+AAVSO_RESULTS_PER_PAGE = 200
+
+
+# =============================================================================
+# Statistics and Periodograms
+# =============================================================================
+
+# MAD scale factor (normal distribution)
+MAD_SCALE = 1.4826
+
+# Lomb-Scargle defaults
+LS_MIN_FREQUENCY = 1.0 / 365.25
+LS_MAX_FREQUENCY = 10.0
+LS_ALIAS_TOLERANCE = 0.1
+LS_ALIAS_PERIODS = [1.0, 0.5, 29.53, 365.25, 182.625]
+
+# PDM defaults
+PDM_MIN_PERIOD = 0.1
+PDM_MAX_PERIOD = 100.0
+PDM_N_PERIODS = 10000
+PDM_N_BINS = 20
+PDM_METHOD_CHOICES = ("classic", "plavchan")
+PDM_PLAVCHAN_PHASE_WIDTH = 1.0 / PDM_N_BINS
+PDM_PLAVCHAN_MIN_NEIGHBORS = 3
+PDM_PLAVCHAN_WORST_FRAC = 0.05
+PDM_PLAVCHAN_WORST_MIN = 25
+PDM_PLAVCHAN_GRID_FACTOR = 0.5
+PDM_PLAVCHAN_FULL_SCAN_MAX_PERIODS = 4096
+PDM_PLAVCHAN_COARSE_N_PERIODS = 1536
+PDM_PLAVCHAN_SHORTLIST_TOP_K = 8
+PDM_PLAVCHAN_SHORTLIST_WINDOW_STEPS = 8.0
+
+# CE defaults
+CE_N_PHASE_BINS = 20
+CE_N_MAG_BINS = 10
+
+# LS oversampling
+LS_SAMPLES_PER_PEAK = 10
+
+# Period-search local refinement (coarse global scan + local rescan)
+PERIODOGRAM_REFINE_TOP_K = 5
+PERIODOGRAM_REFINE_WINDOW_STEPS = 3.0
+PERIODOGRAM_REFINE_N_GRID = 2001
+
+# Bootstrap
+BOOTSTRAP_MIN_POINTS = 50
+BOOTSTRAP_SIGNIFICANCE = 0.01
+
+# Misc analysis
+CON_THRESHOLD = 2.0
+PAIR_SLOPE_N_TAIL = 30
+AUTOCORR_MAX_LAG = 100
+STRUCTURE_FUNCTION_N_BINS = 20
+FOURIER_N_HARMONICS = 7
+DRW_MIN_POINTS = 20
+IAR_MIN_POINTS = 10
+MHPS_MIN_POINTS = 20
+MHPS_SCALE_SHORT = 10.0
+MHPS_SCALE_LONG = 100.0
+SEASON_GAP_DAYS = 30.0
+EXPOSURE_BIN_DAYS = 3.0
+SNR_CONVERSION_FACTOR = 1.0857
+
+# Single-band Stetson pairing window used for paper-style I/J/L.
+STETSON_PAIR_MAX_DT_DAYS = 2.0
+STETSON_REWEIGHT_A = 2.0
+STETSON_REWEIGHT_B = 2.0
+STETSON_REWEIGHT_MIN_ITERS = 5
+STETSON_REWEIGHT_MAX_ITERS = 50
+STETSON_REWEIGHT_RTOL = 1e-8
+
+# FWHM conversion
+FWHM_SIGMA_FACTOR = 2.3548
+
+
+# =============================================================================
+# Machine Learning
+# =============================================================================
+
+ML_N_ESTIMATORS = 500
+ML_LEARNING_RATE = 0.05
+ML_NUM_LEAVES = 63
+ML_SUBSAMPLE = 0.8
+ML_COLSAMPLE_BYTREE = 0.8
+ML_MIN_SAMPLES = 30
+ML_CV_FOLDS = 5
+ML_TOP_FEATURES = 20
+
+
+# =============================================================================
+# Microlensing Analysis
+# =============================================================================
+
+# Flux-space fitting
+FLUX_REF_MAG_DEFAULT = None
+FLUX_MIN_RELATIVE = 1e-12
+BLEND_FS_MIN = 0.0
+BLEND_FB_MIN = 0.0
+
+# Model fitting parameters
+PACZYNSKI_U0_MIN = 1e-3
+PACZYNSKI_U0_MAX = 2.0
+PACZYNSKI_TE_MIN_DAYS = 0.5
+PACZYNSKI_TE_MAX_FACTOR = 4.0
+FRED_TAU_MIN_DAYS = 0.2
+FRED_TAU_MAX_FACTOR = 1.0
+GAUSSIAN_SIGMA_MIN_DAYS = 0.2
+GAUSSIAN_SIGMA_MAX_FACTOR = 1.0
+FIT_MAX_NFEV = 5000
+FIT_SOFT_L1_SCALE = 1.5
+FIT_MULTISTART_U0 = [0.02, 0.2, 1.0]
+FIT_MULTISTART_TE_FRACTIONS = [0.08, 0.18, 0.35]
+
+# Model selection (BIC-based)
+DELTA_BIC_POSITIVE = 2.0
+DELTA_BIC_STRONG = 6.0
+DELTA_BIC_VERY_STRONG = 10.0
+NON_PACZYNSKI_SELECTION_THRESHOLD = -6.0
+PAC_WEAK_VS_FLAT_MIN_DELTA_BIC = 6.0
+PLOT_ALT_WHEN_PAC_STRUGGLES = -10.0
+
+# Morphology metrics
+MORPH_HALF_MAX_THRESHOLD = 0.5
+MORPH_QUARTER_MAX_THRESHOLD = 0.25
+MORPH_EVENT_WINDOW_TE_FACTOR = 2.0
+MORPH_OUTSIDE_WINDOW_TE_FACTOR = 3.0
+MORPH_EXCURSION_SIGMA_THRESHOLD = 3.0
+MORPH_SYMMETRY_MIN_POINTS = 5
+MORPH_RESIDUAL_AUTOCORR_MAX_LAG = 10
+
+# CV/nova template fitting
+NOVA_TAU_RISE_MAX_DAYS = 10.0
+NOVA_TAU_DECAY_MIN_DAYS = 5.0
+NOVA_AMPLITUDE_MIN_MAG = 0.5
+CV_BP_RP_BLUE_THRESHOLD = 0.5
+CV_G_ABS_FAINT_THRESHOLD = 8.0
+CV_CONTAMINATION_BASE_PROB = 0.3
+SECONDARY_PEAK_MIN_SEPARATION_DAYS = 30.0
+SECONDARY_PEAK_MIN_AMPLITUDE_FRAC = 0.3
+SECONDARY_PEAK_MAX_COUNT = 5
+
+# Periodicity scanning
+PERIOD_MIN_DAYS = 0.1
+PERIOD_MAX_DAYS = 500.0
+PERIOD_N_GRID = 10000
+PERIOD_LSP_FAP_THRESHOLD = 0.01
+PERIOD_PDM_THETA_THRESHOLD = 0.5
+PERIOD_CE_ENTROPY_THRESHOLD = 2.0
+PERIOD_ALIAS_PERIODS_DAYS = [1.0, 0.5, 29.53, 365.25, 182.625]
+PERIOD_ALIAS_TOLERANCE_FRAC = 0.05
+RESIDUAL_PERIOD_POWER_THRESHOLD = 0.3
+
+# Crowding / blending
+CROWDING_SEARCH_RADIUS_ARCSEC = 5.0
+CROWDING_BRIGHT_DELTA_MAG = 3.0
+CROWDING_MAX_COUNT = 10
+CROWDING_MAX_BRIGHT_COUNT = 3
+BLEND_PSF_FWHM_ARCSEC = 2.5
+BLEND_CONTAMINATION_THRESHOLD = 0.1
+
+# Gaia CMD
+CMD_BP_RP_MIN = -0.5
+CMD_BP_RP_MAX = 4.0
+CMD_MG_MIN = -5.0
+CMD_MG_MAX = 15.0
+MICROLENSING_CMD_E_BP_RP_PER_AV = 0.415
+CMD_BACKGROUND_SAMPLE_SIZE = 10000
+CMD_BACKGROUND_ALPHA = 0.1
+
+# Parallax fitting
+PARALLAX_MIN_TE_DAYS = 80.0
+PARALLAX_MIN_FIT_POINTS = 80
+PARALLAX_MIN_SPAN_DAYS = 240.0
+PARALLAX_MAX_ABS_PIE = 1.5
+PARALLAX_MAX_U0_ABS = 2.0
+PARALLAX_U0_FACTOR_MIN = 1.0 / 3.0
+PARALLAX_U0_FACTOR_MAX = 3.0
+PARALLAX_TE_FACTOR_MIN = 0.35
+PARALLAX_TE_FACTOR_MAX = 3.0
+PARALLAX_REQUIRED_DELTA_BIC = 6.0
+PARALLAX_MAX_REDUCED_CHI2 = 10.0
+PARALLAX_ENABLE_MCMC = True
+PARALLAX_MCMC_CHAINS = 6
+PARALLAX_MCMC_BURN = 200
+PARALLAX_MCMC_STEPS = 400
+PARALLAX_MCMC_THIN = 2
+PARALLAX_MCMC_MIN_ACCEPTANCE = 0.002
+PARALLAX_RANDOM_SEED = 20260322
+
+# Quality scoring
+QUALITY_WEIGHT_FIT = 0.25
+QUALITY_WEIGHT_MORPHOLOGY = 0.20
+QUALITY_WEIGHT_ASTROPHYSICAL = 0.15
+QUALITY_WEIGHT_CONTAMINATION = 0.20
+QUALITY_WEIGHT_PARALLAX = 0.10
+QUALITY_WEIGHT_COVERAGE = 0.10
+QUALITY_FIT_CHI2_GOOD = 2.0
+QUALITY_FIT_CHI2_BAD = 10.0
+QUALITY_FIT_MIN_SHOULDERS = 3
+QUALITY_FIT_MIN_STRONG_POINTS = 2
+QUALITY_MORPH_RISE_DECAY_MAX_RATIO = 3.0
+QUALITY_MORPH_SKEWNESS_MAX = 1.5
+QUALITY_MORPH_AUTOCORR_MAX = 0.5
+QUALITY_MORPH_SYMMETRY_MAX = 0.5
+QUALITY_COVERAGE_MIN_POINTS = 50
+QUALITY_COVERAGE_MIN_SPAN_DAYS = 365.0
+QUALITY_COVERAGE_MIN_CAMERAS = 2
+QUALITY_TIER_GOLD = 0.8
+QUALITY_TIER_SILVER = 0.6
+QUALITY_TIER_BRONZE = 0.4
+
+# Candidate grid plot
+GRID_MAX_COLS = 4
+GRID_PANEL_WIDTH = 3.5
+GRID_PANEL_HEIGHT = 2.5
+GRID_DPI = 300
+GRID_ZOOM_TE_FACTOR = 3.5
+GRID_MIN_ZOOM_DAYS = 35.0
+GRID_MIN_QUALITY_TIER = "Silver"
+GRID_MAX_CANDIDATES = 25
+
+# Microlensing output settings
+MICROLENSING_PLOT_DPI = 300
+PLOT_FORMAT = "pdf"
+OUTPUT_PREFIX_MORPHOLOGY = "morph_"
+OUTPUT_PREFIX_PERIODICITY = "period_"
+OUTPUT_PREFIX_CROWDING = "crowd_"
+OUTPUT_PREFIX_QUALITY = "quality_"
+
+
+__all__ = [name for name in globals() if name.isupper()]
