@@ -1034,7 +1034,7 @@ def score_events_bayesian(
                 center_idx = int(r[np.argmax(resid[r])])
                 start_idx = int(r[0])
                 end_idx = int(r[-1])
-                summary["symmetry_score"] = compute_symmetry_score(jd, resid, center_idx, start_idx, end_idx)
+                summary["symmetry_score"] = compute_symmetry_score(jd, resid, sigma_eff, center_idx, start_idx, end_idx)
             else:
                 summary["symmetry_score"] = np.nan
             
@@ -1538,17 +1538,26 @@ def main():
     g_filter.add_argument("--bad-camera-scatter-ratio", type=float, default=BAD_CAMERA_SCATTER_RATIO_THRESHOLD, help="Scatter ratio threshold for bad camera filtering (default: 2.5)")
     g_filter.add_argument("--min-mag-offset", type=float, default=MIN_MAG_OFFSET, help="Apply signal amplitude filter: require |event_mag - baseline_mag| > threshold (e.g., 0.05)")
     g_output.add_argument("--output", type=str, default=None, help="Output path for results (suffix adjusted per format).")
+    g_output.add_argument("--error-output", type=str, default=None, help="Optional CSV path for per-light-curve processing errors.")
     g_output.add_argument("--metadata-csv", type=str, default=None, help="Optional CSV with 'path' and extra metadata columns to attach to results.")
     g_output.add_argument("--output-format", type=str, default=OUTPUT_FORMAT, choices=["csv", "parquet", "parquet_chunk"], help="Output format for results.")
     g_output.add_argument("--chunk-size", type=int, default=EVENTS_OUTPUT_CHUNK_SIZE, help="Write results in chunks of this many rows.")
     g_general.add_argument("-o", "--overwrite", action="store_true", help="Overwrite checkpoint log and existing output if present (start fresh).")
     g_general.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output (default: quiet).")
     g_general.add_argument("--quiet", action="store_true", help=argparse.SUPPRESS)
+    g_general.add_argument(
+        "--max-error-fraction",
+        type=float,
+        default=0.01,
+        help="Exit non-zero if more than this fraction of attempted light curves fail (default: 0.01).",
+    )
     parser.set_defaults(filter_bad_cameras=True)
 
     args = parser.parse_args()
     if args.trigger_mode == "posterior_prob" and args.no_event_prob:
         raise SystemExit("posterior_prob triggering requires event_prob; remove --no-event-prob")
+    if not (0.0 <= args.max_error_fraction <= 1.0):
+        raise SystemExit("--max-error-fraction must be between 0 and 1")
 
     compute_event_prob = (not args.no_event_prob)
     baseline_tag = args.baseline_func
@@ -1634,6 +1643,19 @@ def main():
     else:
         checkpoint_log = None
 
+    def default_error_output_path(path: Path | None) -> Path | None:
+        if path is None:
+            return None
+        if output_format == "parquet_chunk":
+            return path.parent / f"{path.name}_ERRORS.csv"
+        return path.with_name(f"{path.stem}_ERRORS.csv")
+
+    error_output_path = (
+        Path(args.error_output).expanduser()
+        if args.error_output
+        else default_error_output_path(base_output_path)
+    )
+
     processed_files = set()
     if checkpoint_log and checkpoint_log.exists() and args.overwrite:
         try:
@@ -1645,6 +1667,11 @@ def main():
 
     if args.overwrite:
         clear_existing_output(base_output_path, output_format)
+        if error_output_path and error_output_path.exists():
+            try:
+                error_output_path.unlink()
+            except Exception as e:
+                _log(f"Warning: Could not remove existing error output {error_output_path} ({e}). Will append.", quiet)
 
     if checkpoint_log and checkpoint_log.exists() and not args.overwrite:
         _log("--- RESUME DETECTED ---", quiet)
@@ -1705,6 +1732,8 @@ def main():
         _log("All files have been processed according to checkpoint! Exiting.", quiet)
         return
 
+    attempted_count = len(expanded_inputs)
+
     results = []
     errors = []
     
@@ -1749,7 +1778,6 @@ def main():
         def __init__(self, path: Path):
             self.path = Path(path)
             self.append = self.path.exists() and self.path.stat().st_size > 0
-            self.schema_invalidated = False
 
         def write_chunk(self, chunk_results):
             if not chunk_results:
@@ -1764,11 +1792,23 @@ def main():
                     _log(f"Warning: could not read existing {self.path}, starting fresh: {e}", False)
                     existing = None
                 if existing is not None:
-                    if existing.schema.equals(table.schema):
-                        table = pa.concat_tables([existing, table])
-                    else:
-                        _log(f"Schema mismatch in {self.path}; discarding old checkpoint data.", False)
-                        self.schema_invalidated = True
+                    try:
+                        unified_schema = pa.unify_schemas(
+                            [existing.schema, table.schema],
+                            promote_options="permissive",
+                        )
+                        existing = existing.cast(unified_schema)
+                        table = table.cast(unified_schema)
+                        table = pa.concat_tables([existing, table], promote_options="permissive")
+                    except Exception as e:
+                        _log(
+                            f"Warning: could not unify parquet schema for {self.path}; "
+                            f"falling back to pandas concat: {e}",
+                            False,
+                        )
+                        existing_df = existing.to_pandas()
+                        combined = pd.concat([existing_df, df_chunk], ignore_index=True, sort=False)
+                        table = pa.Table.from_pandas(combined, preserve_index=False)
             tmp_path = self.path.with_suffix('.parquet.tmp')
             pq.write_table(table, tmp_path, compression=PARQUET_OUTPUT_COMPRESSION)
             os.replace(tmp_path, self.path)
@@ -1837,6 +1877,18 @@ def main():
                 any_sig += 1
         return dip, jump, any_sig
 
+    def write_errors(error_rows: list[dict]) -> None:
+        if not error_rows or error_output_path is None:
+            return
+        try:
+            df_errors = pd.DataFrame(error_rows)
+            error_output_path.parent.mkdir(parents=True, exist_ok=True)
+            append = error_output_path.exists() and (not args.overwrite)
+            df_errors.to_csv(error_output_path, mode="a" if append else "w", header=not append, index=False)
+            _log(f"Wrote {len(df_errors)} processing errors to {error_output_path}", quiet)
+        except Exception as e:
+            print(f"Warning: could not write processing errors to {error_output_path}: {e}", flush=True)
+
     def write_chunk(chunk_results, is_final=False):
         if not chunk_results: 
             return
@@ -1859,11 +1911,7 @@ def main():
 
         if checkpoint_log:
             checkpoint_log.parent.mkdir(parents=True, exist_ok=True)
-            if hasattr(writer, 'schema_invalidated') and writer.schema_invalidated:
-                mode = "w"
-                writer.schema_invalidated = False
-            else:
-                mode = "a"
+            mode = "a"
             with open(checkpoint_log, mode) as f:
                 for row in chunk_results:
                     f.write(str(row['path']) + "\n")
@@ -1968,7 +2016,20 @@ def main():
                 print(f"{row['path']}\tmode={row['trigger_mode']}\tdip_sig={row['dip_significant']} jump_sig={row['jump_significant']}")
 
     if errors:
-        print(f"Completed with {len(errors)} failures.", flush=True)
+        write_errors(errors)
+        error_fraction = len(errors) / attempted_count if attempted_count else 0.0
+        print(
+            f"Completed with {len(errors)}/{attempted_count} failures "
+            f"({error_fraction:.2%}); wrote {total_written} result rows.",
+            flush=True,
+        )
+        if error_fraction > args.max_error_fraction:
+            print(
+                "Failure fraction exceeded "
+                f"--max-error-fraction={args.max_error_fraction:.2%}; aborting.",
+                flush=True,
+            )
+            raise SystemExit(2)
 
 
 if __name__ == "__main__":

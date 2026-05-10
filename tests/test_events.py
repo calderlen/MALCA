@@ -491,3 +491,111 @@ def test_events_main_phase_template_uses_metadata_period_and_keeps_audit_fields(
     assert bool(out.loc[0, "pre_periodic_flag"]) is True
     assert np.isclose(out.loc[0, "pre_periodicity_selected_period"], 6.0)
     assert out.loc[0, "pre_periodicity_method"] == "pdm"
+
+
+def test_events_main_fails_on_high_error_fraction_and_only_checkpoints_successes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    paths = ["ok.dat2", "bad1.dat2", "bad2.dat2"]
+    input_file = tmp_path / "paths.txt"
+    input_file.write_text("\n".join(paths) + "\n", encoding="ascii")
+
+    output_path = tmp_path / "lc_events_results.parquet"
+
+    def fake_process_one(path: str, path_metadata: dict | None) -> dict:
+        if path.startswith("bad"):
+            raise RuntimeError(f"synthetic failure for {path}")
+        return {
+            "path": path,
+            "dip_significant": False,
+            "jump_significant": False,
+        }
+
+    monkeypatch.setattr("malca.events.ProcessPoolExecutor", ThreadPoolExecutor)
+    monkeypatch.setattr("malca.events._process_one", fake_process_one)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "malca.events",
+            "--input-file",
+            str(input_file),
+            "--output",
+            str(output_path),
+            "--output-format",
+            "parquet",
+            "--workers",
+            "2",
+            "--min-mag-offset",
+            "0",
+            "--max-error-fraction",
+            "0.1",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        events_main()
+
+    assert exc_info.value.code == 2
+
+    out = pd.read_parquet(output_path)
+    assert out["path"].tolist() == ["ok.dat2"]
+
+    checkpoint = output_path.with_name(f"{output_path.stem}_PROCESSED.txt")
+    assert checkpoint.read_text(encoding="ascii").splitlines() == ["ok.dat2"]
+
+    error_log = output_path.with_name(f"{output_path.stem}_ERRORS.csv")
+    errors = pd.read_csv(error_log)
+    assert set(errors["path"]) == {"bad1.dat2", "bad2.dat2"}
+
+
+def test_events_main_preserves_existing_rows_when_parquet_schema_promotes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    output_path = tmp_path / "lc_events_results.parquet"
+
+    def run_once(path_value: str, metadata_value: str | None) -> None:
+        input_file = tmp_path / f"{path_value}.txt"
+        input_file.write_text(f"{path_value}\n", encoding="ascii")
+
+        def fake_process_one(path: str, path_metadata: dict | None) -> dict:
+            return {
+                "path": path,
+                "dip_significant": False,
+                "jump_significant": False,
+                "schema_drift_column": metadata_value,
+            }
+
+        monkeypatch.setattr("malca.events.ProcessPoolExecutor", ThreadPoolExecutor)
+        monkeypatch.setattr("malca.events._process_one", fake_process_one)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "malca.events",
+                "--input-file",
+                str(input_file),
+                "--output",
+                str(output_path),
+                "--output-format",
+                "parquet",
+                "--workers",
+                "1",
+                "--min-mag-offset",
+                "0",
+            ],
+        )
+
+        events_main()
+
+    run_once("first.dat2", None)
+    run_once("second.dat2", "present")
+
+    out = pd.read_parquet(output_path)
+    assert out["path"].tolist() == ["first.dat2", "second.dat2"]
+    assert out["schema_drift_column"].tolist() == [None, "present"]
+
+    checkpoint = output_path.with_name(f"{output_path.stem}_PROCESSED.txt")
+    assert checkpoint.read_text(encoding="ascii").splitlines() == ["first.dat2", "second.dat2"]

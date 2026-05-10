@@ -1558,11 +1558,13 @@ def main():
     ) -> tuple[pd.DataFrame, dict[str, object]]:
         branch_output = Path(branch_output)
         checkpoint_log = branch_output.with_name(f"{branch_output.stem}_PROCESSED.txt")
+        error_log = branch_output.with_name(f"{branch_output.stem}_ERRORS.csv")
         metadata_path: Path | None = None
 
         if args.overwrite:
             clear_existing_output(branch_output, "parquet")
             checkpoint_log.unlink(missing_ok=True)
+            error_log.unlink(missing_ok=True)
 
         if metadata_df is not None and not metadata_df.empty:
             metadata_dir = tags_dir / "metadata"
@@ -1615,7 +1617,14 @@ def main():
             branch_events_args = list(events_args)
             if baseline_func_override is not None:
                 branch_events_args.extend(["--baseline-func", baseline_func_override])
-            branch_events_args.extend(["--output-format", "parquet", "--output", str(branch_output)])
+            branch_events_args.extend([
+                "--output-format",
+                "parquet",
+                "--output",
+                str(branch_output),
+                "--error-output",
+                str(error_log),
+            ])
             if metadata_path is not None:
                 branch_events_args.extend(["--metadata-csv", str(metadata_path)])
 
@@ -1638,11 +1647,6 @@ def main():
                 if branch_paths_file is not None:
                     print(f"\nBranch paths saved to: {branch_paths_file}")
                 sys.exit(1)
-
-            checkpoint_log.parent.mkdir(parents=True, exist_ok=True)
-            with open(checkpoint_log, "a") as f:
-                for path_value in batch_paths:
-                    f.write(f"{path_value}\n")
 
         df_branch = pd.read_parquet(branch_output) if branch_output.exists() else pd.DataFrame()
         stats = {
