@@ -120,23 +120,6 @@ FP_TRIALS_PER_FAMILY = 200
 
 
 # =============================================================================
-# Event Detection Compatibility Aliases
-# =============================================================================
-
-# Optional Bayesian p-grid bounds; None defers to score_lightcurve defaults.
-P_MIN_DIP = None
-P_MAX_DIP = None
-P_MIN_JUMP = None
-P_MAX_JUMP = None
-
-# Legacy naming used in review modules.
-MAX_GAP_POINTS = RUN_MAX_GAP_POINTS
-RUN_MAX_GAP_DAYS = None
-RUN_MIN_DURATION_DAYS = None
-BASELINE_TAG = BASELINE_FUNC
-
-
-# =============================================================================
 # Filters, Tagging, and Light Curve Cleaning
 # =============================================================================
 
@@ -166,17 +149,6 @@ PRE_PERIODICITY_PHASE_PEAK_REGION_MAX = 2
 PHASE_TEMPLATE_PHASE_BINS = 64
 PHASE_TEMPLATE_PROFILE_SMOOTH_WINDOW = 5
 PHASE_TEMPLATE_MIN_POINTS = 50
-
-# Legacy periodic folded-profile branch settings kept for compatibility with
-# older tooling; the main pipeline now uses the phase-template baseline.
-PERIODIC_EVENTS_PHASE_BINS = PHASE_TEMPLATE_PHASE_BINS
-PERIODIC_EVENTS_PROFILE_SMOOTH_WINDOW = PHASE_TEMPLATE_PROFILE_SMOOTH_WINDOW
-PERIODIC_EVENTS_MIN_POINTS = PHASE_TEMPLATE_MIN_POINTS
-PERIODIC_EVENTS_MIN_SUPPORT_POINTS = 12
-PERIODIC_EVENTS_MIN_CYCLE_SUPPORT = 3
-PERIODIC_EVENTS_MIN_CAMERA_SUPPORT = 2
-PERIODIC_EVENTS_DEPTH_SNR_THRESHOLD = 4.0
-PERIODIC_EVENTS_MAX_DIP_WIDTH_PHASE = 0.6
 
 # Post-filter
 MIN_BAYES_FACTOR = 10.0
@@ -397,10 +369,6 @@ LTV_LS_MIN_PERIOD_DAYS = 10.0
 LTV_LS_MAX_PERIOD_DAYS = 1000.0
 LTV_LS_FAP_THRESHOLD = 0.1
 LTV_LS_SAMPLES_PER_PEAK = 5
-
-# LTV V/g overlap
-LTV_MIN_OVERLAP_DAYS = 30.0
-LTV_MIN_OVERLAP_FRACTION = 0.1
 
 # LTV crowding
 LTV_CROWDING_SEARCH_RADIUS_ARCSEC = 16.0

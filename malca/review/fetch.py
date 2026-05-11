@@ -24,20 +24,6 @@ from malca.fetch import (
 from malca.review.stats_merge import merge_stats_summary_into_payload
 
 
-P_MIN_DIP = None
-P_MAX_DIP = None
-P_MIN_JUMP = None
-P_MAX_JUMP = None
-MAX_GAP_POINTS = RUN_MAX_GAP_POINTS
-RUN_MAX_GAP_DAYS = None
-RUN_MIN_DURATION_DAYS = 0.0
-BASELINE_TAG = BASELINE_FUNC
-
-
-
-
-
-
 
 
 def fetch_and_analyze_by_id(
@@ -170,16 +156,16 @@ def _compute_events_for_csv(lc_path: Path) -> dict:
             logbf_threshold_jump=LOGBF_THRESHOLD_JUMP,
             significance_threshold=SIGNIFICANCE_THRESHOLD,
             p_points=P_POINTS,
-            p_min_dip=P_MIN_DIP,
-            p_max_dip=P_MAX_DIP,
-            p_min_jump=P_MIN_JUMP,
-            p_max_jump=P_MAX_JUMP,
+            p_min_dip=None,
+            p_max_dip=None,
+            p_min_jump=None,
+            p_max_jump=None,
             mag_points=MAG_POINTS,
             run_min_points=RUN_MIN_POINTS,
-            max_gap_points=MAX_GAP_POINTS,
-            run_max_gap_days=RUN_MAX_GAP_DAYS,
-            run_min_duration_days=RUN_MIN_DURATION_DAYS,
-            baseline_tag=BASELINE_TAG,
+            max_gap_points=RUN_MAX_GAP_POINTS,
+            run_max_gap_days=None,
+            run_min_duration_days=0.0,
+            baseline_tag=BASELINE_FUNC,
             compute_event_prob=True,
         )
         return result if isinstance(result, dict) else {}

@@ -21,8 +21,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from astropy import units as u
-from astropy.coordinates import SkyCoord
 from tqdm.auto import tqdm
 
 from malca.config import (
@@ -37,9 +35,6 @@ from malca.config import (
     LTV_GAIA_CHUNK_SIZE,
     LTV_CROSSMATCH_CHUNK_SIZE,
     LTV_WORKERS,
-
-    LTV_MIN_OVERLAP_DAYS,
-    LTV_MIN_OVERLAP_FRACTION,
     LTV_CROWDING_SEARCH_RADIUS_ARCSEC,
     LTV_MAX_REFCAT_OFFSET,
     LTV_APERTURE_RADIUS_ARCSEC,
@@ -320,47 +315,6 @@ def filter_high_proper_motion(
         print(f"[filter_high_proper_motion] {n0} → {len(df_out)} (removed {n0 - len(df_out)})")
     
     log_rejections(df, df_out, "filter_high_proper_motion", log_csv)
-    return df_out
-
-
-def filter_vg_overlap(
-    df: pd.DataFrame,
-    *,
-    min_overlap_days: float = LTV_MIN_OVERLAP_DAYS,
-    min_overlap_fraction: float = LTV_MIN_OVERLAP_FRACTION,
-    has_v_col: str = "vg_has_v",
-    overlap_days_col: str = "vg_overlap_days",
-    overlap_frac_col: str = "vg_overlap_fraction",
-    verbose: bool = False,
-    log_csv: str | Path | None = None,
-) -> pd.DataFrame:
-    """
-    Remove candidates with insufficient V/g temporal overlap.
-
-    Keeps sources with:
-      - no V-band data (no overlap requirement), OR
-      - overlap_days >= min_overlap_days AND overlap_fraction >= min_overlap_fraction
-    """
-    n0 = len(df)
-
-    if has_v_col not in df.columns or overlap_days_col not in df.columns or overlap_frac_col not in df.columns:
-        if verbose:
-            print("Warning: V/g overlap columns not found, skipping filter")
-        return df
-
-    has_v = df[has_v_col].fillna(False).astype(bool).values
-    overlap_days = df[overlap_days_col].astype(float).values
-    overlap_frac = df[overlap_frac_col].astype(float).values
-
-    ok_overlap = (overlap_days >= min_overlap_days) & (overlap_frac >= min_overlap_fraction)
-    mask = (~has_v) | ok_overlap
-
-    df_out = df[mask].reset_index(drop=True)
-
-    if verbose:
-        print(f"[filter_vg_overlap] {n0} → {len(df_out)} (removed {n0 - len(df_out)})")
-
-    log_rejections(df, df_out, "filter_vg_overlap", log_csv)
     return df_out
 
 
@@ -816,8 +770,6 @@ def apply_all_filters(
             print("\nPhase 1b: Enhanced vectorized filters...")
 
         df = run_filter(filter_photometric_scatter, df, "photometric_scatter", max_reduced_chi2=max_reduced_chi2, verbose=verbose, log_csv=log_csv)
-        # Disabled as LTV trends are analyzed only in g-band
-        # df = run_filter(filter_vg_overlap, df, "vg_overlap", verbose=verbose, log_csv=log_csv)
 
     if verbose:
         print(f"\nAfter vectorized filters: {len(df)} sources ({len(df)/n0*100:.2f}% remaining)")

@@ -278,54 +278,6 @@ def build_manifest(
     return _sort_manifest(df)
 
 
-def iter_source_records(
-    index_root: Path,
-    lc_root: Path,
-    mag_bins: Sequence[str],
-    *,
-    id_column: str = "asas_sn_id",
-    file_ext: str | None = None,
-    show_progress: bool = True,
-    n_workers: int = 1,
-) -> Iterable[dict[str, object]]:
-    """Compatibility wrapper for older name; use iter_light_curve_entries."""
-    yield from iter_light_curve_entries(
-        index_root,
-        lc_root,
-        mag_bins,
-        id_column=id_column,
-        file_ext=file_ext,
-        show_progress=show_progress,
-        n_workers=n_workers,
-    )
-
-
-def build_manifest_dataframe(
-    index_root: Path | None,
-    lc_root: Path | None,
-    *,
-    mag_bins: Sequence[str],
-    id_column: str,
-    file_ext: str | None = None,
-    show_progress: bool = True,
-    n_workers: int = 1,
-    flat_lc_dir: Path | None = None,
-    index_file: Path | None = None,
-) -> pd.DataFrame:
-    """Compatibility wrapper for older name; use build_manifest."""
-    return build_manifest(
-        index_root,
-        lc_root,
-        mag_bins=mag_bins,
-        id_column=id_column,
-        file_ext=file_ext,
-        show_progress=show_progress,
-        n_workers=n_workers,
-        flat_lc_dir=flat_lc_dir,
-        index_file=index_file,
-    )
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(

@@ -384,51 +384,6 @@ def attach_vsx_info(
     return df
 
 
-def filter_vsx_match(
-    df: pd.DataFrame,
-    *,
-    max_sep_arcsec: float = 3.0,
-    exclude_classes: list[str] | None = None,
-    vsx_crossmatch_csv: str | Path | None = VSX_CROSSMATCH_PATH,
-    show_tqdm: bool = False,
-    rejected_log_csv: str | Path | None = None,
-) -> pd.DataFrame:
-    """
-    Filter candidates based on pre-crossmatched VSX results.
-
-    Either:
-    - Provide vsx_crossmatch_csv: merges on asas_sn_id to get vsx_sep_arcsec/vsx_class
-    - Or have vsx_sep_arcsec/vsx_class columns already in df
-
-    Removes candidates within max_sep_arcsec of a VSX source.
-    """
-    n0 = len(df)
-    df = attach_vsx_info(df, vsx_crossmatch_csv=vsx_crossmatch_csv)
-
-    # Check required columns exist
-    if "vsx_sep_arcsec" not in df.columns or "vsx_class" not in df.columns:
-        raise ValueError(
-            f"Missing required columns for VSX filter: need 'vsx_sep_arcsec' and 'vsx_class'. Got: {list(df.columns)}"
-        )
-
-    # Apply filter
-    has_match = df["vsx_sep_arcsec"].fillna(999) <= max_sep_arcsec
-
-    if exclude_classes is not None:
-        is_excluded_type = df["vsx_class"].fillna("").isin(exclude_classes)
-        mask = ~(has_match & is_excluded_type)
-    else:
-        mask = ~has_match
-
-    out = df.loc[mask].reset_index(drop=True)
-
-    if show_tqdm:
-        tqdm.write(f"[filter_vsx_match] kept {len(out)}/{n0}")
-    log_rejections(df, out, "filter_vsx_match", rejected_log_csv)
-
-    return out
-
-
 def filter_multi_camera(
     df: pd.DataFrame,
     *,

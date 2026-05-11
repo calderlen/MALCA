@@ -1408,17 +1408,6 @@ def fit_fourier_decomposition(mag, time, period, err=None, max_harmonics=7):
     return result
 
 
-def fit_harmonics(mag, time, period, n_harmonics=7, err=None):
-    """Backward-compatible wrapper around the full Fourier decomposition."""
-    return fit_fourier_decomposition(
-        mag,
-        time,
-        period,
-        err=err,
-        max_harmonics=n_harmonics,
-    )
-
-
 def psi_cs(mag, time, period):
     """Range of cumulative sum on the phase-folded light curve."""
     mag = np.asarray(mag, float)

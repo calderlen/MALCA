@@ -5,8 +5,6 @@ import os
 import re
 import time
 
-from astropy import units as u
-from astropy.coordinates import SkyCoord
 from astropy.stats import mad_std, sigma_clip
 from astropy.table import Table
 from astroquery.utils.tap.core import TapPlus
@@ -1169,46 +1167,6 @@ def match_index_to_lc(
                     "dat_path":     dat_path if found else None,
                     "found":        found,
                 }
-
-
-def custom_id(ra_val,dec_val):
-    """
-    ADOPTED FROM BRAYDEN JOHANTGEN'S CODE: https://github.com/johantgen13/Dippers_Project.git
-    """
-    c = SkyCoord(ra=ra_val*u.degree, dec=dec_val*u.degree, frame='icrs')
-    ra_num = c.ra.hms
-    dec_num = c.dec.dms
-
-    if int(dec_num[0]) < 0:
-        cust_id = 'J'+str(int(c.ra.hms[0])).rjust(2,'0')+str(int(c.ra.hms[1])).rjust(2,'0')+str(int(round(c.ra.hms[2]))).rjust(2,'0')+'$-$'+str(int(c.dec.dms[0])*(-1)).rjust(2,'0')+str(int(c.dec.dms[1])*(-1)).rjust(2,'0')+str(int(round(c.dec.dms[2])*(-1))).rjust(2,'0')
-    else:
-        cust_id = 'J'+str(int(c.ra.hms[0])).rjust(2,'0')+str(int(c.ra.hms[1])).rjust(2,'0')+str(int(round(c.ra.hms[2]))).rjust(2,'0')+'$+$'+str(int(c.dec.dms[0])).rjust(2,'0')+str(int(c.dec.dms[1])).rjust(2,'0')+str(int(round(c.dec.dms[2]))).rjust(2,'0')
-
-    return cust_id
-
-
-def plotparams(ax, labelsize=15):
-    """
-    ADAPTED FROM BRAYDEN JOHANTGEN'S CODE: https://github.com/johantgen13/Dippers_Project.git
-    """
-
-    ax.minorticks_on()
-    ax.yaxis.set_ticks_position('both')
-    ax.xaxis.set_ticks_position('both')
-    ax.tick_params(direction='in', which='both', labelsize=labelsize)
-    ax.tick_params('both', length=8, width=1.8, which='major')
-    ax.tick_params('both', length=4, width=1, which='minor')
-    for axis in ['top', 'bottom', 'left', 'right']:
-        ax.spines[axis].set_linewidth(1.5)
-    return ax
-
-
-
-def divide_cameras():
-    """
-    ADAPTED FROM BRAYDEN JOHANTGEN'S CODE: https://github.com/johantgen13/Dippers_Project.git
-    """
-    pass
 
 
 # =============================================================================
