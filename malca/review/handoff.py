@@ -51,7 +51,7 @@ def build_review_command(
         "-m",
         "malca",
         "review",
-        "--db",
+        "--review-db",
         str(Path(db_path).expanduser().resolve()),
         "--host",
         str(host),

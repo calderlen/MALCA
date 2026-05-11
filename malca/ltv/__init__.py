@@ -78,7 +78,7 @@ from malca.ltv.gaia_epoch import (
 from malca.ltv.stochastic import (
     add_stochastic_postfilter_features,
 )
-from malca.ltv.pca import (
+from malca.meta_analysis.ltv_pca import (
     LtvPCAModel,
     LTV_PCA_FEATURE_CANDIDATES,
     resolve_feature_columns as resolve_pca_feature_columns,

@@ -54,22 +54,22 @@ conda activate malca
 ## Quick Start
 ```bash
 # Build manifest (source_id → path index)
-malca manifest --index-root /path/to/lcsv2 --lc-root /path/to/lcsv2 --mag-bin 13_13.5 --out output/manifest.parquet --workers 10
+malca manifest --index-root /path/to/lcsv2 --lc-root /path/to/lcsv2 --mag-bin 13_13.5 --output output/manifest.parquet --workers 10
 
 # Run event detection pipeline
-malca pipeline --mag-bin 13_13.5 --workers 10 --lc-root /path/to/lcsv2 --index-root /path/to/lcsv2 --output output/results.parquet --min-mag-offset 0.1
+malca pipeline --mag-bin 13_13.5 --workers 10 --lc-root /path/to/lcsv2 --index-root /path/to/lcsv2 --output-dir output/run_001
 
 # Validate results against known candidates (no raw data needed)
 malca validate --results output/results.parquet
 
 # Plot light curves
-malca plot --input /path/to/lc123.dat2 --out-dir output/plots
+malca plot --input /path/to/lc123.dat2 --output-dir output/plots
 
 # Apply quality filters
 malca filter --input output/results.parquet --output output/filtered.parquet
 
 # Multi-wavelength characterization (post-detection)
-malca characterize --input output/filtered.parquet --output output/characterized.parquet --dust --starhorse input/starhorse/starhorse2021.parquet
+malca characterize --input output/filtered.parquet --output output/characterized.parquet --enable-dust --starhorse input/starhorse/starhorse2021.parquet
 
 # Get help for any command
 malca --help
@@ -80,10 +80,10 @@ Minimal split workflow (cluster -> home):
 
 ```bash
 # On cluster: run upstream/raw-dependent steps and export transfer bundle
-malca pipeline --stage cluster --mag-bin 13_13.5 --out-dir output/run_001 --export-bundle output/run_001_bundle.zip
+malca pipeline --stage cluster --mag-bin 13_13.5 --output-dir output/run_001 --config cluster.toml
 
 # On home machine: import bundle and run downstream/catalog steps only
-malca pipeline --stage home --out-dir output/run_001 --import-bundle ~/Downloads/run_001_bundle.zip
+malca pipeline --stage home --output-dir output/run_001 --config home.toml
 ```
 
 ## Pipeline Architecture
@@ -177,7 +177,10 @@ flowchart TB
     APP --> LABELS[("Labeled Reviews<br/>score + event_class")]
 
     %% ── Machine Learning ─────────────────────────────────────
-    subgraph mlgrp["Machine Learning (ml/)"]
+    subgraph mlgrp["Meta Analysis (meta_analysis/)"]
+        PCA_META["pca.py<br/>Variability PCA"]
+        LTV_PCA_META["ltv_pca.py<br/>LTV PCA summaries"]
+        COTREND["cotrending.py<br/>Field-group cotrending scaffolding"]
         FEAT["features.py<br/>107 curated features"]
         TRAIN["train.py<br/>LightGBM classifier"]
         PRED["predict.py<br/>Score new candidates"]
@@ -237,7 +240,6 @@ flowchart TB
         SCORE_LIB["score.py<br/>Dip/jump/microlensing scoring"]
         STATS_LIB["stats.py<br/>Stetson, von Neumann, RoMS, LS"]
         PERIOD_LIB["periodogram.py<br/>Lomb-Scargle, PDM,<br/>Conditional Entropy"]
-        PCA_LIB["pca.py<br/>Variability PCA"]
         FETCH_LIB["fetch.py<br/>SkyPatrol V1/V2 download"]
         GAIA_FETCH["gaia_fetch.py<br/>Bulk Gaia DR3 via AIP TAP"]
     end
@@ -258,7 +260,7 @@ flowchart TB
     end
 
     %% ── CLI Entry Point ──────────────────────────────────────
-    CLI["__main__.py — malca CLI<br/>manifest, pipeline, filter, tag, events, plot, characterize, classify,<br/>vetting, review, ml_train, ml_predict, injection, validate, reproduce,<br/>ltv-pipeline, ltv-core, ltv-build, ltv-ingest, attrition, stats, ..."]
+    CLI["__main__.py — malca CLI<br/>manifest, pipeline, filter, tag, events, plot, characterize, classify,<br/>vetting, review, ml-train, ml-predict, injection, validate, reproduce,<br/>ltv-pipeline, ltv-core, ltv-build, ltv-ingest, attrition, dev, ..."]
     CLI -.-> discovery
     CLI -.-> postdet
     CLI -.-> reviewgrp
@@ -273,9 +275,9 @@ flowchart TB
 - **Post-detection**: `characterize.py` (Gaia, dust, YSO, galactic coords, auxiliary catalogs) &rarr; `vetting.py` (SIMBAD, ZTF, TNS, eROSITA, ALeRCE, ATLAS, NEOWISE, ...) &rarr; `classify.py` (EB/CV/starspot/disk/YSO) &rarr; `enrich/` (neighbor catalogs, spectra availability)
 - **LTV pipeline**: `ltv/pipeline.py` &rarr; `core.py` &rarr; `filter.py` &rarr; `crossmatch.py` &rarr; `stochastic.py` &rarr; `neowise.py` &rarr; `dust.py` &rarr; `cmd.py` &rarr; `bundle.py` &rarr; `review.py` (ingest to review DB)
 - **Review**: `review/app.py` (Dash GUI with scoring, event classes, diagnostic plots, vetting cards) &rarr; labeled training set
-- **ML**: `ml/features.py` (107 curated features) &rarr; `ml/train.py` (LightGBM classifier) &rarr; `ml/predict.py` (score candidates)
+- **Meta-analysis**: `meta_analysis/pca.py` (variability PCA), `meta_analysis/cotrending.py` (field-group cotrending scaffolding), `meta_analysis/ml/features.py` (107 curated features) &rarr; `meta_analysis/ml/train.py` (LightGBM classifier) &rarr; `meta_analysis/ml/predict.py` (score candidates)
 - **Evaluation**: `injection.py` (synthetic dips), `detection_rate.py`, `validation.py`, `reproduce.py`, `attrition.py`, `false_positive.py`
-- **Core libraries**: `utils.py`, `lightcurve_io.py`, `baseline.py`, `triggering.py`, `score.py`, `stats.py`, `periodogram.py`, `pca.py`, `fetch.py`, `gaia_fetch.py`
+- **Core libraries**: `utils.py`, `lightcurve_io.py`, `baseline.py`, `triggering.py`, `score.py`, `stats.py`, `periodogram.py`, `fetch.py`, `gaia_fetch.py`
 - **Configuration**: `config.py` centralizes all pipeline parameters
 - **CLI**: Unified interface via `malca [command]` (`__main__.py`)
 
@@ -289,16 +291,16 @@ The full detection workflow has three steps: build a manifest, run detection wit
 
 1) Build a manifest (map IDs -> light-curve directories):
    ```bash
-   malca manifest --index-root /path/to/lcsv2 --lc-root /path/to/lcsv2 --mag-bin 13_13.5 --out output/lc_manifest_13_13.5.parquet --workers 10
+   malca manifest --index-root /path/to/lcsv2 --lc-root /path/to/lcsv2 --mag-bin 13_13.5 --output output/lc_manifest_13_13.5.parquet --workers 10
    ```
 2) Tag and run events in batches with resume support:
    ```bash
-   malca pipeline --mag-bin 13_13.5 --workers 10 --min-time-span 100 --min-points-per-day 0.05 --min-cameras 2 --vsx-crossmatch input/vsx/asassn_x_vsx_matches_20250919_2252.csv --batch-size 2000 --lc-root /path/to/lcsv2 --index-root /path/to/lcsv2 --output output/lc_events_results_13_13.5.parquet --trigger-mode posterior_prob --baseline-func gp --min-mag-offset 0.1
+   malca pipeline --mag-bin 13_13.5 --workers 10 --lc-root /path/to/lcsv2 --index-root /path/to/lcsv2 --output-dir output/run_13_13.5 --config pipeline.toml
    ```
    - The pipeline command builds/loads the manifest, runs tag checks, then calls `events.py` in batches.
    - Resume: if interrupted, skips already-processed paths using the checkpoint file.
    - VSX tags are saved to `tags/vsx_tags/` and merged into results.
-   - To disable VSX handling: `--skip-vsx`. To tag instead of filter: `--vsx-mode tag`.
+   - Advanced tag, detection, filter, and catalog settings live in `--config` / `--profile`.
 
 3) Filter events:
    ```bash
@@ -311,25 +313,18 @@ The full detection workflow has three steps: build a manifest, run detection wit
 
 4) Optional: tune filter behavior directly from `malca pipeline` / `malca detect`.
    ```bash
-   # Keep pipeline defaults but disable score-based rejection
-   malca pipeline --mag-bin 13_13.5 --skip-score-filter
-
-   # Enable stricter optional validators
-   malca pipeline --mag-bin 13_13.5 --apply-morphology --min-delta-bic 12 --apply-periodicity-validation --periodicity-n-bootstrap 2000 --gaia-reject --periodic-catalog-reject
+   malca pipeline --mag-bin 13_13.5 --config pipeline.toml --profile strict
    ```
    - **Defaults in pipeline**: evidence strength, run robustness, score, Gaia RUWE, Gaia PM, and periodic-catalog consensus validation are on; morphology and periodicity-validation are off.
-   - **Control flags now available in pipeline**:
-     - Evidence/run: `--skip-evidence-strength`, `--allow-infinite-local-bf`, `--skip-run-robustness`, `--min-run-count`, `--filter-min-run-points`, `--filter-min-run-cameras`
-     - Morphology/score: `--apply-morphology`, `--dip-morphology`, `--jump-morphology`, `--min-delta-bic`, `--skip-score-filter`, `--min-score`
-     - Validators: `--apply-periodicity-validation` (+ periodicity knobs), `--skip-gaia-ruwe-validation|--gaia-reject`, `--skip-gaia-pm-validation|--gaia-pm-reject`, `--skip-periodic-catalog-validation|--periodic-catalog-reject`
+   - Advanced controls are config/profile keys rather than public `malca pipeline` flags.
 
 **Detect options:**
 ```bash
 # logBF triggering (faster)
-malca pipeline --mag-bin 13_13.5 --workers 8 --lc-root /path/to/lcsv2 --index-root /path/to/lcsv2 --output output/events_logbf.parquet --trigger-mode logbf --baseline-func gp_masked --min-mag-offset 0.1
+malca pipeline --mag-bin 13_13.5 --workers 8 --lc-root /path/to/lcsv2 --index-root /path/to/lcsv2 --output-dir output/events_logbf --config logbf.toml
 
 # Multiple mag bins (writes one output per bin)
-malca pipeline --mag-bin 12_12.5 12.5_13 13_13.5 --lc-root /path/to/lcsv2 --index-root /path/to/lcsv2 --output output/lc_events_results.parquet --trigger-mode logbf
+malca pipeline --mag-bin 12_12.5 12.5_13 13_13.5 --lc-root /path/to/lcsv2 --index-root /path/to/lcsv2 --output-dir output/multi_bin --config logbf.toml
 ```
 
 ### Individual Commands
@@ -337,7 +332,7 @@ malca pipeline --mag-bin 12_12.5 12.5_13 13_13.5 --lc-root /path/to/lcsv2 --inde
 #### malca manifest
 
 ```bash
-malca manifest --index-root <index_dir> --lc-root <lc_dir> --mag-bin 12_12.5 --out output/lc_manifest.parquet
+malca manifest --index-root <index_dir> --lc-root <lc_dir> --mag-bin 12_12.5 --output output/lc_manifest.parquet
 ```
 
 #### malca events
@@ -346,10 +341,10 @@ Run event detection directly (without the pipeline orchestrator):
 ```bash
 malca events --input /path/to/lc*_cal/*.dat2 --output output/results.parquet --workers 10
 
-# With signal amplitude filtering (requires |event_mag - baseline_mag| > 0.1)
-malca events --input /path/to/lc*_cal/*.dat2 --output output/results.parquet --workers 10 --min-mag-offset 0.1
+# Advanced detection settings are supplied through --config / --profile
+malca events --input /path/to/lc*_cal/*.dat2 --output output/results.parquet --workers 10 --config events.toml
 ```
-- Default Bayesian grid is 12x12. Change p-grid with `--p-points`.
+- Default Bayesian grid is 12x12. Change advanced detection settings through config/profile keys.
 - Output includes per-event morphology fit parameters (`best_amp`, `best_t0`, `best_alpha`, `best_tau`, `best_morph`, `delta_bic`, `width_param`, `symmetry_score`) and recurrence statistics (`is_single_event`, `inter_event_spacing_median/std`, `amplitude_consistency`, `duration_consistency`) for both dips and jumps.
 
 #### malca tag
@@ -358,7 +353,7 @@ malca events --input /path/to/lc*_cal/*.dat2 --output output/results.parquet --w
 malca tag --help
 ```
 - Expects columns `asas_sn_id` and `path` pointing to lc_dir.
-- VSX handling: default is `tag` (keeps all rows and attaches `vsx_sep_arcsec`/`vsx_class`). Use `--vsx-mode filter` only when you explicitly want VSX-based rejection.
+- VSX handling tags rows with `vsx_sep_arcsec` / `vsx_class` when enabled.
 
 #### malca filter
 
@@ -370,18 +365,16 @@ malca filter --input output/results.parquet --output output/results_filtered.par
 
 ```bash
 # Single file
-malca plot --input /path/to/lc123.dat2 --out-dir output/plots --format png
+malca plot --input /path/to/lc123.dat2 --output-dir output/plots --format png
 
 # Multiple files (glob patterns supported)
-malca plot --input input/skypatrol2/*.csv --out-dir output/plots --skip-events
+malca plot --input input/skypatrol2/*.csv --output-dir output/plots --skip-events
 
 # All files from events.py results
-malca plot --events output/lc_events_results_13_13.5_filtered.parquet --out-dir output/plots
+malca plot --results output/lc_events_results_13_13.5_filtered.parquet --output-dir output/plots
 ```
 
 **Note:** Event scores are computed automatically during detection and included in the results table (dipper_score, dipper_n_dips, dipper_n_valid_dips columns).
-
-Legacy batch plotting: `malca old.plot_results_bayes /path/to/*.csv --results-csv output/lc_events_results_13_13.5.csv --out-dir output/plots`
 
 #### malca injection
 
@@ -393,7 +386,7 @@ malca injection --workers 10
 malca injection --max-trials 1000 --workers 10
 
 # Custom manifest and output directory
-malca injection --manifest /path/to/manifest.parquet --out-dir output/injection
+malca injection --manifest /path/to/manifest.parquet --output-dir output/injection
 ```
 
 See [Injection Testing output](#injection-testing) for the directory layout.
@@ -422,7 +415,7 @@ plot_efficiency_threshold_contour(cube, threshold=0.5, output_path="depth_at_50p
 
 ```bash
 # Re-run detection on raw data (requires manifest and .dat2 files)
-malca reproduce --manifest output/lc_manifest.parquet --candidates my_targets.csv --out-dir output/results_repro --workers 10
+malca reproduce --manifest output/lc_manifest.parquet --candidates my_targets.csv --output-dir output/results_repro --workers 10
 ```
 **Note**: Reproduction uses Bayesian detection.
 
@@ -462,7 +455,7 @@ malca validate --results output/events_logbf.parquet
 After detecting dipper candidates, characterize them using multi-wavelength data:
 
 ```bash
-malca characterize --input output/filtered.parquet --output output/characterized.parquet --dust --starhorse input/starhorse/starhorse2021.parquet
+malca characterize --input output/filtered.parquet --output output/characterized.parquet --enable-dust --starhorse input/starhorse/starhorse2021.parquet
 ```
 
 **Features:**
@@ -544,10 +537,10 @@ malca vetting output/characterized.parquet --checkpoint output/vetting_checkpoin
 malca classify --input output/characterized.parquet --output output/classified.parquet
 ```
 
-#### malca stats
+#### malca dev stats
 
 ```bash
-malca stats /path/to/lc123.dat2
+malca dev stats /path/to/lc123.dat2
 ```
 
 #### malca attrition
@@ -575,22 +568,22 @@ malca review
 - Import/fetch workflows: import tables or raw LC files (optional characterize + vet on import), or fetch by ASAS-SN ID, Gaia DR3 ID, or coordinates
 - Per-candidate pipeline stage chips with "Run All Missing" / "Re-run Current", plus notes/followup/review-pass tracking and CSV/Parquet export
 
-#### malca ml_train
+#### malca ml-train
 
 Train a baseline classifier on reviewed labels:
 ```bash
-malca ml_train --input output/review/reviewed.parquet --out-dir output/ml --cv-folds 5
+malca ml-train --input output/review/reviewed.parquet --output-dir output/ml --cv-folds 5
 ```
-- Uses curated physics/context features from `malca/ml/features.py`
+- Uses curated physics/context features from `malca/meta_analysis/ml/features.py`
 - Trains a LightGBM classifier on labeled `event_class` values (dropping `unclassified` by default)
 - Saves model artifacts to `output/ml/` (`candidate_classifier.joblib`, `feature_schema.json`, `metrics.json`)
 
-#### malca ml_predict
+#### malca ml-predict
 
 Score candidates with a trained classifier:
 
 ```bash
-malca ml_predict --model-dir output/ml --input output/review/reviewed.parquet --output output/review/scored.parquet
+malca ml-predict --model-dir output/ml --input output/review/reviewed.parquet --output output/review/scored.parquet
 ```
 
 - Loads `candidate_classifier.joblib` + `feature_schema.json`

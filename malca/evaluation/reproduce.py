@@ -21,6 +21,7 @@ from malca.baseline import (
     per_camera_median_baseline,
     per_camera_gp_baseline,
 )
+from malca.cli_config import add_config_args, apply_config, namespace_keys
 from malca.characterize import query_gaia_by_ids, get_dust_extinction
 from malca.classify import compute_all_classifications
 from malca.config import (
@@ -74,6 +75,35 @@ CANDIDATE_USECOLS = {
     "path",
     "source_id",
     "mag_bin",
+}
+
+
+REPRODUCE_CONFIG_DEFAULTS = {
+    "trigger_mode": TRIGGER_MODE,
+    "significance_threshold": SIGNIFICANCE_THRESHOLD,
+    "logbf_threshold_dip": LOGBF_THRESHOLD_DIP,
+    "logbf_threshold_jump": LOGBF_THRESHOLD_JUMP,
+    "p_points": P_POINTS,
+    "p_min_dip": None,
+    "p_max_dip": None,
+    "p_min_jump": None,
+    "p_max_jump": None,
+    "mag_points": MAG_POINTS,
+    "baseline_func": BASELINE_FUNC,
+    "baseline_s0": BASELINE_S0,
+    "baseline_w0": BASELINE_W0,
+    "baseline_q": BASELINE_Q,
+    "baseline_jitter": BASELINE_JITTER,
+    "baseline_sigma_floor": None,
+    "mag_min_dip": None,
+    "mag_max_dip": None,
+    "mag_min_jump": None,
+    "mag_max_jump": None,
+    "run_min_points": RUN_MIN_POINTS,
+    "run_max_gap_points": RUN_MAX_GAP_POINTS,
+    "run_max_gap_days": None,
+    "run_min_duration_days": 0.0,
+    "min_mag_offset": MIN_MAG_OFFSET,
 }
 
 
@@ -863,7 +893,6 @@ def build_reproduction_report(
                 apply_vsx=not skip_vsx,
                 vsx_max_sep_arcsec=vsx_max_sep,
                 vsx_crossmatch_csv=vsx_catalog,
-                vsx_mode="tag",
                 apply_multi_camera=True,
                 min_cameras=min_cameras,
                 n_workers=n_workers or WORKERS,
@@ -1998,22 +2027,20 @@ Examples:
     )
     g_input = parser.add_argument_group("Input")
     g_manifest_tag = parser.add_argument_group("Manifest & tag")
-    g_events = parser.add_argument_group("Events & trigger")
-    g_baseline = parser.add_argument_group("Baseline")
-    g_mag = parser.add_argument_group("Magnitude grid")
-    g_run = parser.add_argument_group("Run confirmation")
     g_filter = parser.add_argument_group("Filter")
     g_postprocess = parser.add_argument_group("Postprocess")
     g_output = parser.add_argument_group("Output")
     g_general = parser.add_argument_group("General")
 
     g_output.add_argument(
-        "--out-dir",
+        "--output-dir",
+        dest="out_dir",
         default="./output/plots/reproduction",
         help="Directory for peak_results output",
     )
     g_output.add_argument(
-        "--out-format",
+        "--output-format",
+        dest="out_format",
         choices=("csv", "parquet"),
         default="csv",
         help="Output format (default: csv)",
@@ -2054,110 +2081,7 @@ Examples:
         action="store_true",
         help="Print debug info",
     )
-
-    g_events.add_argument(
-        "--trigger-mode",
-        choices=("logbf", "posterior_prob"),
-        default=TRIGGER_MODE,
-        help="Triggering mode used by score_lightcurve (default: pipeline config)",
-    )
-    g_events.add_argument(
-        "--significance-threshold",
-        type=float,
-        default=SIGNIFICANCE_THRESHOLD,
-        help="Posterior-probability threshold (percent if >1) when --trigger-mode posterior_prob",
-    )
-    g_events.add_argument(
-        "--logbf-threshold-dip",
-        type=float,
-        default=LOGBF_THRESHOLD_DIP,
-        help="Dip triggers when max per-point log BF >= this.",
-    )
-    g_events.add_argument(
-        "--logbf-threshold-jump",
-        type=float,
-        default=LOGBF_THRESHOLD_JUMP,
-        help="Jump triggers when max per-point log BF >= this.",
-    )
-    g_events.add_argument(
-        "--p-points",
-        type=int,
-        default=P_POINTS,
-        help="Number of logit-spaced probability grid points",
-    )
-    g_events.add_argument(
-        "--p-min-dip",
-        type=float,
-        default=None,
-        help="Minimum dip fraction for p-grid (overrides default).",
-    )
-    g_events.add_argument(
-        "--p-max-dip",
-        type=float,
-        default=None,
-        help="Maximum dip fraction for p-grid (overrides default).",
-    )
-    g_events.add_argument(
-        "--p-min-jump",
-        type=float,
-        default=None,
-        help="Minimum jump fraction for p-grid (overrides default).",
-    )
-    g_events.add_argument(
-        "--p-max-jump",
-        type=float,
-        default=None,
-        help="Maximum jump fraction for p-grid (overrides default).",
-    )
-    g_events.add_argument(
-        "--mag-points",
-        type=int,
-        default=MAG_POINTS,
-        help="Number of points in the magnitude grid.",
-    )
-
-    g_baseline.add_argument(
-        "--baseline-func",
-        type=str,
-        choices=["gp", "global_median", "per_camera_median"],
-        default=BASELINE_FUNC,
-        help="Baseline function to use: gp (default), global_median, or per_camera_median.",
-    )
-    g_baseline.add_argument("--baseline-s0", type=float, default=BASELINE_S0, help="GP kernel S0 parameter (default: 0.0005)")
-    g_baseline.add_argument("--baseline-w0", type=float, default=BASELINE_W0, help="GP kernel w0 parameter (default: pi/1000)")
-    g_baseline.add_argument("--baseline-q", type=float, default=BASELINE_Q, help="GP kernel Q parameter (default: 0.7)")
-    g_baseline.add_argument("--baseline-jitter", type=float, default=BASELINE_JITTER, help="GP jitter term (default: 0.006)")
-    g_baseline.add_argument("--baseline-sigma-floor", type=float, default=None, help="Minimum sigma floor (default: None)")
-
-    g_mag.add_argument("--mag-min-dip", type=float, default=None, help="Min magnitude for dip grid (overrides auto)")
-    g_mag.add_argument("--mag-max-dip", type=float, default=None, help="Max magnitude for dip grid (overrides auto)")
-    g_mag.add_argument("--mag-min-jump", type=float, default=None, help="Min magnitude for jump grid (overrides auto)")
-    g_mag.add_argument("--mag-max-jump", type=float, default=None, help="Max magnitude for jump grid (overrides auto)")
-
-    g_run.add_argument(
-        "--run-min-points",
-        type=int,
-        default=RUN_MIN_POINTS,
-        help="Minimum triggered points required to confirm a run (default: 2).",
-    )
-    g_run.add_argument(
-        "--run-max-gap-points",
-        type=int,
-        default=RUN_MAX_GAP_POINTS,
-        help="Allow this many non-triggered points between triggered points in a run.",
-    )
-    g_run.add_argument(
-        "--run-max-gap-days",
-        type=float,
-        default=None,
-        help="Maximum gap in days between points in a run (default: 5x cadence).",
-    )
-    g_run.add_argument(
-        "--run-min-duration-days",
-        type=float,
-        default=0.0,
-        help="Minimum duration in days for a confirmed run (default: 0.0 = disabled).",
-    )
+    add_config_args(g_general)
 
     g_manifest_tag.add_argument(
         "--skip-tags",
@@ -2198,13 +2122,6 @@ Examples:
         type=float,
         default=VSX_MAX_SEP_ARCSEC,
         help="Max separation for VSX match in arcsec (default: 3.0)",
-    )
-
-    g_filter.add_argument(
-        "--min-mag-offset",
-        type=float,
-        default=MIN_MAG_OFFSET,
-        help="Min magnitude offset for signal amplitude filter (0 to disable)",
     )
 
     g_postprocess.add_argument(
@@ -2314,12 +2231,27 @@ Examples:
         help="Local root that replaces --path-prefix for candidates with a 'path' column.",
     )
 
+    parser.set_defaults(**REPRODUCE_CONFIG_DEFAULTS)
     return parser
 
 
 def main(argv: Iterable[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
+    apply_config(
+        args,
+        command="reproduce",
+        valid_keys=namespace_keys(parser, REPRODUCE_CONFIG_DEFAULTS),
+        path_keys={
+            "out_dir",
+            "gaia_cache",
+            "index_file",
+            "manifest",
+            "candidates",
+            "path_root",
+            "vsx_catalog",
+        },
+    )
 
     # Set up logging
     log_dir = Path("output/logs/reproduction")

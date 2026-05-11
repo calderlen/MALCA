@@ -26,8 +26,6 @@ COMMAND_GROUPS = {
     "tag": "Discovery",
     "events": "Discovery",
     "plot": "Discovery",
-    "score": "Discovery",
-    "stats": "Discovery",
     "gaia-fetch": "Discovery",
     "characterize": "Discovery",
     "classify": "Discovery",
@@ -36,6 +34,8 @@ COMMAND_GROUPS = {
     "review-merge": "Review",
     "review-explore": "Review",
     "review-sync": "Review",
+    "review-taxonomy": "Review",
+    "review-maint": "Review",
     "review-qt": "Review",
     "ltv-core": "LTV",
     "ltv-build": "LTV",
@@ -45,18 +45,19 @@ COMMAND_GROUPS = {
     "ltv-injection": "LTV",
     "ltv-bundle": "LTV",
     "injection": "Evaluation",
-    "detection_rate": "Evaluation",
+    "detection-rate": "Evaluation",
     "validate": "Evaluation",
     "attrition": "Evaluation",
     "reproduce": "Evaluation",
-    "false_positive": "Evaluation",
+    "false-positive": "Evaluation",
     "neighbors": "Enrichment",
     "spectra": "Enrichment",
     "vsx-filter": "Enrichment",
     "vsx-crossmatch": "Enrichment",
-    "ml_train": "ML",
-    "ml_predict": "ML",
+    "ml-train": "ML",
+    "ml-predict": "ML",
     "vetting": "Other",
+    "dev": "Other",
 }
 
 MALCA_EPILOG = """
@@ -64,7 +65,7 @@ Run 'malca <command> --help' for per-command options.
 
 Common workflows:
   Discovery   malca pipeline  then  malca review --plot-dir <run>/plots
-  LTV         malca ltv-pipeline  then  malca review --db ltv_candidates.db
+  LTV         malca ltv-pipeline  then  malca review --review-db ltv_candidates.db
 """
 
 
@@ -109,12 +110,13 @@ def main():
     # If so, forward directly to the submodule
     if len(sys.argv) >= 2 and sys.argv[1] in [
         "manifest", "pipeline", "reproduce", "injection",
-        "detection_rate", "validate", "plot",
-        "events", "gaia-fetch", "characterize", "classify", "filter", "tag", "score",
-        "stats", "attrition", "review", "review-qt", "review-refresh", "review-merge", "review-explore", "review-sync",
-        "neighbors", "spectra", "false_positive", "ml_train", "ml_predict", "vsx-filter", "vsx-crossmatch",
+        "detection-rate", "validate", "plot",
+        "events", "gaia-fetch", "characterize", "classify", "filter", "tag",
+        "attrition", "review", "review-qt", "review-refresh", "review-merge", "review-explore", "review-sync", "review-taxonomy", "review-maint",
+        "neighbors", "spectra", "false-positive", "ml-train", "ml-predict", "vsx-filter", "vsx-crossmatch",
         "vetting",
         "ltv-core", "ltv-build", "ltv-pipeline", "ltv-injection", "ltv-pca", "ltv-ingest", "ltv-bundle",
+        "dev",
     ]:
         command = sys.argv[1]
         remaining = sys.argv[2:]
@@ -132,7 +134,7 @@ def main():
             injection = importlib.import_module("malca.evaluation.injection")
             sys.argv = [sys.argv[0]] + remaining
             injection.main()
-        elif command == "detection_rate":
+        elif command == "detection-rate":
             detection_rate_mod = importlib.import_module("malca.evaluation.detection_rate")
             sys.argv = [sys.argv[0]] + remaining
             detection_rate_mod.main()
@@ -150,14 +152,10 @@ def main():
             _run_module_main("malca.characterize", remaining)
         elif command == "classify":
             _run_module_main("malca.classify", remaining)
-        elif command == "stats":
-            _run_module_main("malca.stats", remaining)
         elif command == "filter":
             _run_module_main("malca.filter", remaining)
         elif command == "tag":
             _run_module_main("malca.tag", remaining)
-        elif command == "score":
-            _run_module_main("malca.score", remaining)
         elif command == "review":
             _run_module_main("malca.review.app", remaining)
         elif command == "review-qt":
@@ -172,6 +170,10 @@ def main():
             _run_module_main("malca.review.explorer", remaining)
         elif command == "review-sync":
             _run_module_main("malca.review.sync", remaining)
+        elif command == "review-taxonomy":
+            _run_module_main("malca.review.taxonomy", remaining)
+        elif command == "review-maint":
+            _run_module_main("malca.review.maintenance", remaining)
         elif command == "validate":
             validation = importlib.import_module("malca.evaluation.validation")
             sys.argv = [sys.argv[0]] + remaining
@@ -180,14 +182,14 @@ def main():
             _run_module_main("malca.enrich.neighbor", remaining)
         elif command == "spectra":
             _run_module_main("malca.enrich.spectra", remaining)
-        elif command == "false_positive":
+        elif command == "false-positive":
             fp = importlib.import_module("malca.evaluation.false_positive")
             sys.argv = [sys.argv[0]] + remaining
             fp.main()
-        elif command == "ml_train":
-            _run_module_main("malca.ml.train", remaining)
-        elif command == "ml_predict":
-            _run_module_main("malca.ml.predict", remaining)
+        elif command == "ml-train":
+            _run_module_main("malca.meta_analysis.ml.train", remaining)
+        elif command == "ml-predict":
+            _run_module_main("malca.meta_analysis.ml.predict", remaining)
         elif command == "vsx-filter":
             sys.argv = [sys.argv[0]] + remaining
             vsx_filter = importlib.import_module("malca.vsx.filter")
@@ -214,26 +216,64 @@ def main():
                 description="Full LTV workflow: build then ingest into review DB (run malca review separately to open GUI).",
             ))
             parser.add_argument(
-                "--db",
+                "--review-db",
                 type=str,
                 default="ltv_candidates.db",
                 help="Path to LTV review SQLite DB for ingest (default: ltv_candidates.db)",
             )
+            parser.add_argument(
+                "--skip-characterize",
+                action="store_true",
+                help="Skip Gaia/dust characterization during ingest",
+            )
+            parser.add_argument(
+                "--run-vetting",
+                action="store_true",
+                help="Run STV vetting during ingest",
+            )
+            parser.add_argument(
+                "--skip-stats",
+                action="store_true",
+                help="Skip compute_stats enrichment during ingest",
+            )
+            parser.add_argument(
+                "--stats-compute-ls",
+                action="store_true",
+                help="Also compute Lomb-Scargle during compute_stats ingest enrichment",
+            )
+            parser.add_argument(
+                "--index-file",
+                type=str,
+                default=None,
+                help="Path to ASASSN index parquet for Gaia ID lookup during ingest",
+            )
             args = parser.parse_args(remaining)
             df = ltv_pipeline.run_pipeline_cli(args)
             ltv_review.ingest_ltv_results(
-                args.db,
+                args.review_db,
                 df,
-                run_characterize=True,
-                run_vetting=False,
-                run_stats=True,
-                stats_compute_ls=False,
+                run_characterize=not args.skip_characterize,
+                run_vetting=args.run_vetting,
+                run_stats=not args.skip_stats,
+                stats_compute_ls=args.stats_compute_ls,
+                n_workers=args.workers,
+                index_path=args.index_file,
                 verbose=args.verbose,
             )
+        elif command == "dev":
+            if not remaining:
+                raise SystemExit("usage: malca dev {score,stats} ...")
+            dev_command, dev_args = remaining[0], remaining[1:]
+            if dev_command == "score":
+                _run_module_main("malca.score", dev_args)
+            elif dev_command == "stats":
+                _run_module_main("malca.stats", dev_args)
+            else:
+                raise SystemExit(f"unknown dev command: {dev_command}")
         elif command == "ltv-injection":
             _run_module_main("malca.ltv.injection", remaining)
         elif command == "ltv-pca":
-            _run_module_main("malca.ltv.pca", remaining)
+            _run_module_main("malca.meta_analysis.ltv_pca", remaining)
         elif command == "ltv-ingest":
             _run_module_main("malca.ltv.review", remaining)
         elif command == "ltv-bundle":
@@ -257,18 +297,17 @@ def main():
     subparsers.add_parser("tag", description="Apply tagging filters to candidate tables")
     subparsers.add_parser("events", description="Run event detection directly")
     subparsers.add_parser("plot", description="Plot light curves with events")
-    subparsers.add_parser("score", description="Compute event score for one light curve table")
-    subparsers.add_parser("stats", description="Compute light-curve statistics")
     subparsers.add_parser("gaia-fetch", description="Download Gaia DR3 data for candidates (AIP TAP mirror)")
     subparsers.add_parser("characterize", description="Characterize candidates with external catalogs")
     subparsers.add_parser("classify", description="Classify candidates by variability type")
     # Review
     subparsers.add_parser("review", description="Launch Dash review GUI (keyboard-driven, fast)")
-    subparsers.add_parser("review-qt", description="Launch Qt review GUI (test desktop module; requires PySide6)")
     subparsers.add_parser("review-refresh", description="Refresh review DB stats from a run or bundle")
     subparsers.add_parser("review-merge", description="Merge reviewed subset DB content into a master review DB")
     subparsers.add_parser("review-explore", description="Launch unified EDA and light-curve explorer")
     subparsers.add_parser("review-sync", description="Import/export Git-trackable review bundle files")
+    subparsers.add_parser("review-taxonomy", description="Migrate legacy review DBs to taxonomy schema")
+    subparsers.add_parser("review-maint", description="Review DB maintenance commands")
     # LTV
     subparsers.add_parser("ltv-core", description="Compute seasonal trends for long-term variability detection")
     subparsers.add_parser("ltv-build", description="Build LTV candidate table (filters + crossmatch + NEOWISE + extinction)")
@@ -279,21 +318,22 @@ def main():
     subparsers.add_parser("ltv-bundle", description="Bundle light curve files for LTV candidates passing slope/diff filters")
     # Evaluation
     subparsers.add_parser("injection", description="Run injection-recovery tests")
-    subparsers.add_parser("detection_rate", description="Measure detection rate")
+    subparsers.add_parser("detection-rate", description="Measure detection rate")
     subparsers.add_parser("validate", description="Validate results against known candidates")
     subparsers.add_parser("attrition", description="Summarize pre/filter attrition")
     subparsers.add_parser("reproduce", description="Re-run detection on known objects (needs raw data)")
-    subparsers.add_parser("false_positive", description="Run false-positive contaminant benchmark")
+    subparsers.add_parser("false-positive", description="Run false-positive contaminant benchmark")
     # Enrichment
     subparsers.add_parser("neighbors", description="Run bulk nearest-neighbor enrichment")
     subparsers.add_parser("spectra", description="Run bulk spectra-availability enrichment")
     subparsers.add_parser("vsx-filter", description="Build cleaned ASAS-SN index and filtered VSX catalog")
     subparsers.add_parser("vsx-crossmatch", description="Crossmatch ASAS-SN catalog with VSX catalog")
     # ML
-    subparsers.add_parser("ml_train", description="Train baseline ML classifier on reviewed labels")
-    subparsers.add_parser("ml_predict", description="Score candidates with a trained ML model")
+    subparsers.add_parser("ml-train", description="Train baseline ML classifier on reviewed labels")
+    subparsers.add_parser("ml-predict", description="Score candidates with a trained ML model")
     # Other
     subparsers.add_parser("vetting", description="Run post-review vetting (SIMBAD, Gaia, ASAS-SN, ZTF, TNS, eROSITA, ...)")
+    subparsers.add_parser("dev", description="Developer diagnostics (score, stats)")
 
     parser.print_help()
     return 0

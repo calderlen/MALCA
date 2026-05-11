@@ -127,7 +127,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="False-positive reduction summary (tag vs post filter).")
     parser.add_argument("--pre", nargs="+", required=True, help="Tag-stage CSV(s) or directory.")
     parser.add_argument("--post", nargs="+", required=True, help="Post-filter CSV(s) or directory.")
-    parser.add_argument("--id-col", default="asas_sn_id", help="ID column for retention match.")
+    parser.add_argument("--id-column", default="asas_sn_id", help="ID column for retention match.")
     args = parser.parse_args(argv)
 
     pre_df = load_many(args.pre)
@@ -135,7 +135,7 @@ def main(argv: Iterable[str] | None = None) -> int:
 
     pre_summary = summarize(pre_df, "pre")
     post_summary = summarize(post_df, "post")
-    retain = retention(pre_df, post_df, id_col=args.id_col)
+    retain = retention(pre_df, post_df, id_col=args.id_column)
 
     print("=== Summary ===")
     print(pre_summary)

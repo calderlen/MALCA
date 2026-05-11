@@ -69,7 +69,7 @@ from malca.review.interactive_plot import build_interactive_lightcurve_figure
 from malca.review import diagnostic_plots
 
 
-# Default DB path when --db not set
+# Default DB path when --review-db not set
 def _default_db_path() -> Path:
     from malca.review.store import DEFAULT_DB_PATH
     return Path(os.environ.get("MALCA_REVIEW_DB", str(DEFAULT_DB_PATH)))

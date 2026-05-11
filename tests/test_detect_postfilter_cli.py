@@ -35,7 +35,7 @@ def _base_args() -> argparse.Namespace:
         dip_morphology="gaussian",
         jump_morphology="paczynski",
         min_delta_bic=10.0,
-        skip_score_filter=False,
+        apply_score_filter=True,
         min_score=0.0,
         min_dip_score=None,
         min_jump_score=None,
@@ -99,7 +99,7 @@ def test_build_filter_kwargs_defaults_match_pipeline_behavior() -> None:
 
 def test_build_filter_kwargs_respects_cli_overrides() -> None:
     args = _base_args()
-    args.skip_score_filter = True
+    args.apply_score_filter = False
     args.skip_significant_detection = True
     args.significant_no_require_flag = True
     args.significant_min_peak_count = 3

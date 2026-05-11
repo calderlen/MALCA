@@ -36,7 +36,7 @@ import pandas as pd
 
 from malca.config import (
     MIN_TIME_SPAN, MIN_POINTS_PER_DAY, MIN_CAMERAS,
-    VSX_MAX_SEP_ARCSEC, VSX_MODE, STATS_CHUNK_SIZE,
+    VSX_MAX_SEP_ARCSEC, STATS_CHUNK_SIZE,
 )
 from malca.config import PARQUET_CACHE_COMPRESSION, PARQUET_OUTPUT_COMPRESSION
 from malca.config import VSX_CROSSMATCH_PATH
@@ -46,6 +46,8 @@ from malca.utils import (
     get_id_col,
     compute_time_stats,
     compute_n_cameras,
+    compute_field_summary,
+    FIELD_SUMMARY_COLUMNS,
     log_rejections,
 )
 
@@ -59,6 +61,7 @@ def _compute_stats_for_row(
     dir_path: str,
     compute_time: bool,
     compute_cameras: bool,
+    compute_fields: bool = False,
     file_ext: str | None = None,
 ) -> dict:
     """
@@ -78,6 +81,9 @@ def _compute_stats_for_row(
         if compute_cameras:
             result["n_cameras"] = compute_n_cameras(df_lc)
 
+        if compute_fields:
+            result.update(compute_field_summary(df_lc))
+
     except Exception as e:
         # If there's an error, return default values
         if compute_time:
@@ -85,6 +91,8 @@ def _compute_stats_for_row(
             result["points_per_day"] = 0.0
         if compute_cameras:
             result["n_cameras"] = 0
+        if compute_fields:
+            result.update(compute_field_summary(pd.DataFrame()))
 
     return result
 
@@ -95,6 +103,7 @@ def _compute_stats_parallel(
     path_col: str,
     compute_time: bool = False,
     compute_cameras: bool = False,
+    compute_fields: bool = False,
     file_ext: str | None = None,
     n_workers: int = 4,
     show_tqdm: bool = False,
@@ -121,6 +130,9 @@ def _compute_stats_parallel(
         df_with_stats["points_per_day"] = np.nan
     if compute_cameras:
         df_with_stats["n_cameras"] = np.nan
+    if compute_fields:
+        for col in FIELD_SUMMARY_COLUMNS:
+            df_with_stats[col] = "" if col.endswith("_key") or col.endswith("_fields") else np.nan
 
     # Load checkpoint if exists
     checkpoint_df = None
@@ -148,6 +160,8 @@ def _compute_stats_parallel(
             update_cols.extend(["time_span_days", "points_per_day"])
         if compute_cameras and "n_cameras" in checkpoint_df.columns:
             update_cols.append("n_cameras")
+        if compute_fields:
+            update_cols.extend([col for col in FIELD_SUMMARY_COLUMNS if col in checkpoint_df.columns])
 
         if update_cols:
             # Merge checkpoint values into df_with_stats
@@ -196,6 +210,8 @@ def _compute_stats_parallel(
             checkpoint_cols.extend(["time_span_days", "points_per_day"])
         if compute_cameras:
             checkpoint_cols.append("n_cameras")
+        if compute_fields:
+            checkpoint_cols.extend([col for col in FIELD_SUMMARY_COLUMNS if col in df_with_stats.columns])
 
         df_checkpoint = df_with_stats.loc[mask, checkpoint_cols].drop_duplicates(subset=[id_col])
 
@@ -217,6 +233,7 @@ def _compute_stats_parallel(
                     dir_path,
                     compute_time,
                     compute_cameras,
+                    compute_fields,
                     file_ext,
                 ): idx
                 for idx, asas_sn_id, dir_path in chunk_tasks
@@ -231,6 +248,9 @@ def _compute_stats_parallel(
                     df_with_stats.loc[idx, "points_per_day"] = result["points_per_day"]
                 if compute_cameras:
                     df_with_stats.loc[idx, "n_cameras"] = result["n_cameras"]
+                if compute_fields:
+                    for col in FIELD_SUMMARY_COLUMNS:
+                        df_with_stats.loc[idx, col] = result.get(col)
 
                 pbar.update(1)
                 processed_since_save += 1
@@ -294,6 +314,8 @@ def filter_sparse_lightcurves(
             stats = compute_time_stats(df_lc)
             df_with_stats.loc[idx, "time_span_days"] = stats["time_span_days"]
             df_with_stats.loc[idx, "points_per_day"] = stats["points_per_day"]
+            for col, value in compute_field_summary(df_lc).items():
+                df_with_stats.loc[idx, col] = value
 
             if pbar:
                 pbar.update(1)
@@ -444,6 +466,8 @@ def filter_multi_camera(
 
             n_cams = compute_n_cameras(df_lc)
             df_with_cameras.loc[idx, "n_cameras"] = n_cams
+            for col, value in compute_field_summary(df_lc).items():
+                df_with_cameras.loc[idx, col] = value
 
             if pbar:
                 pbar.update(1)
@@ -508,6 +532,7 @@ def filter_mag_range(
 # =============================================================================
 
 RAW2_COLUMNS = ["camera", "median", "sig1_low", "sig1_high", "pct90_low", "pct90_high"]
+RAW_MEDIAN_SUSPECT_COL = "raw_median_suspect_cameras"
 
 
 def _parse_mag_bin_range(mag_bin: str | None) -> tuple[float, float] | None:
@@ -577,12 +602,12 @@ def _process_camera_median_row(
         mag_min = mag_range[0] - mag_tolerance
         mag_max = mag_range[1] + mag_tolerance
 
-        bad_cameras = stats[
+        suspect_cameras = stats[
             (stats["median"] < mag_min) | (stats["median"] > mag_max)
         ]["camera"].astype(int).tolist()
 
-        if bad_cameras:
-            return asas_sn_id, ",".join(map(str, bad_cameras))
+        if suspect_cameras:
+            return asas_sn_id, ",".join(map(str, suspect_cameras))
         
         return asas_sn_id, ""
     except Exception:
@@ -600,10 +625,11 @@ def filter_camera_medians(
     chunk_size: int = 10000,
 ) -> pd.DataFrame:
     """
-    Identify cameras with median magnitudes outside the expected mag bin range.
+    Identify cameras with raw median magnitudes outside the expected mag bin range.
     Supports parallel execution and checkpointing.
-    
-    Adds 'excluded_cameras' column (comma-separated camera IDs to exclude).
+
+    Adds a raw-space suspect-camera column. These cameras are not excluded here;
+    event detection makes final camera removal decisions in residual space.
     """
     if "path" not in df.columns:
         raise ValueError("Need 'path' column to find .raw2 files")
@@ -624,11 +650,15 @@ def filter_camera_medians(
         if checkpoint_path.exists():
             try:
                 checkpoint_df = pd.read_parquet(checkpoint_path)
-                if id_col in checkpoint_df.columns:
+                if id_col in checkpoint_df.columns and RAW_MEDIAN_SUSPECT_COL in checkpoint_df.columns:
                     checkpoint_df[id_col] = checkpoint_df[id_col].astype(str)
                     already_processed = set(checkpoint_df[id_col])
                     if show_tqdm:
                         tqdm.write(f"[filter_camera_medians] Loaded checkpoint with {len(checkpoint_df)} rows")
+                else:
+                    checkpoint_df = None
+                    if show_tqdm:
+                        tqdm.write("[filter_camera_medians] Ignoring incompatible checkpoint without raw suspect cameras")
             except Exception as e:
                 if show_tqdm:
                     tqdm.write(f"[filter_camera_medians] Warning: Could not load checkpoint: {e}")
@@ -652,14 +682,14 @@ def filter_camera_medians(
             tqdm.write("[filter_camera_medians] All rows found in checkpoint.")
         
         # Merge checkpoint results
-        checkpoint_subset = checkpoint_df[[id_col, "excluded_cameras"]].drop_duplicates(subset=[id_col])
+        checkpoint_subset = checkpoint_df[[id_col, RAW_MEDIAN_SUSPECT_COL]].drop_duplicates(subset=[id_col])
         df_out = df_out.merge(checkpoint_subset, on=id_col, how="left")
         
         # Fill NaN with empty string
-        if "excluded_cameras" in df_out.columns:
-            df_out["excluded_cameras"] = df_out["excluded_cameras"].fillna("")
+        if RAW_MEDIAN_SUSPECT_COL in df_out.columns:
+            df_out[RAW_MEDIAN_SUSPECT_COL] = df_out[RAW_MEDIAN_SUSPECT_COL].fillna("")
         else:
-             df_out["excluded_cameras"] = ""
+            df_out[RAW_MEDIAN_SUSPECT_COL] = ""
              
         return df_out
 
@@ -674,7 +704,7 @@ def filter_camera_medians(
         if checkpoint_path is None:
             return
             
-        new_df = pd.DataFrame(current_results, columns=[id_col, "excluded_cameras"])
+        new_df = pd.DataFrame(current_results, columns=[id_col, RAW_MEDIAN_SUSPECT_COL])
         
         if checkpoint_df is not None:
             combined = pd.concat([checkpoint_df, new_df], ignore_index=True)
@@ -724,7 +754,7 @@ def filter_camera_medians(
     save_checkpoint(new_results)
     
     # Final merge
-    new_results_df = pd.DataFrame(new_results, columns=[id_col, "excluded_cameras"])
+    new_results_df = pd.DataFrame(new_results, columns=[id_col, RAW_MEDIAN_SUSPECT_COL])
     
     if checkpoint_df is not None:
         final_results_df = pd.concat([checkpoint_df, new_results_df], ignore_index=True)
@@ -733,13 +763,13 @@ def filter_camera_medians(
         
     final_results_df = final_results_df.drop_duplicates(subset=[id_col], keep="last")
     
-    df_out = df_out.drop(columns=["excluded_cameras"], errors="ignore")
+    df_out = df_out.drop(columns=[RAW_MEDIAN_SUSPECT_COL], errors="ignore")
     df_out = df_out.merge(final_results_df, on=id_col, how="left")
-    df_out["excluded_cameras"] = df_out["excluded_cameras"].fillna("")
+    df_out[RAW_MEDIAN_SUSPECT_COL] = df_out[RAW_MEDIAN_SUSPECT_COL].fillna("")
     
     if show_tqdm:
-        n_excluded = sum(1 for x in df_out["excluded_cameras"] if x)
-        tqdm.write(f"[filter_camera_medians] {n_excluded}/{len(df_out)} sources have excluded cameras")
+        n_suspect = sum(1 for x in df_out[RAW_MEDIAN_SUSPECT_COL] if x)
+        tqdm.write(f"[filter_camera_medians] {n_suspect}/{len(df_out)} sources have raw median suspect cameras")
         
     return df_out
 
@@ -753,7 +783,6 @@ def apply_tags(
     vsx_max_sep_arcsec: float = 3.0,
     vsx_exclude_classes: list[str] | None = None,
     vsx_crossmatch_csv: str | Path = VSX_CROSSMATCH_PATH,
-    vsx_mode: str = "tag",
     # Filter 2: sparse lightcurves
     apply_sparse: bool = True,
     min_time_span: float = 100.0,
@@ -786,8 +815,6 @@ def apply_tags(
         Input dataframe with ID, path, and astrometry columns (ra_deg, dec_deg, pm_ra, pm_dec)
     apply_* : bool
         Whether to apply each filter
-    vsx_mode : str
-        VSX handling mode. Only ``"tag"`` is supported.
     n_workers : int
         Number of parallel workers for computing stats (default 1 = sequential).
         Filters 2 and 3 (sparse, multi_camera) can benefit from parallelization.
@@ -815,19 +842,21 @@ def apply_tags(
     precomputed_cameras = False
 
     # Pre-compute stats in parallel if requested and needed
-    if n_workers > 1 and "path" in df_filtered.columns:
+    if "path" in df_filtered.columns:
         id_col = get_id_col(df_filtered)
 
         compute_time = apply_sparse
         compute_cameras = apply_multi_camera
+        compute_fields = compute_time or compute_cameras
 
-        if compute_time or compute_cameras:
+        if compute_time or compute_cameras or compute_fields:
             if show_tqdm:
                 tqdm.write(f"[apply_tags] Pre-computing stats with {n_workers} workers")
             df_filtered = _compute_stats_parallel(
                 df_filtered, id_col, "path",
                 compute_time=compute_time,
                 compute_cameras=compute_cameras,
+                compute_fields=compute_fields,
                 file_ext=file_ext,
                 n_workers=n_workers,
                 show_tqdm=show_tqdm,
@@ -836,9 +865,6 @@ def apply_tags(
             )
             precomputed_time = compute_time
             precomputed_cameras = compute_cameras
-
-    if vsx_mode != "tag":
-        raise ValueError(f"vsx_mode must be 'tag', got {vsx_mode!r}")
 
     if apply_vsx:
         df_filtered = attach_vsx_info(
@@ -921,20 +947,14 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True, help="Output CSV/Parquet")
 
     parser.add_argument("--apply-vsx", action="store_true", help="Enable VSX-based filtering/tagging")
-    parser.add_argument(
-        "--vsx-mode",
-        choices=["tag"],
-        default=VSX_MODE,
-        help="VSX handling mode. Only 'tag' is supported.",
-    )
     parser.add_argument("--vsx-max-sep-arcsec", type=float, default=VSX_MAX_SEP_ARCSEC)
-    parser.add_argument("--vsx-crossmatch-csv", type=Path, default=VSX_CROSSMATCH_PATH)
+    parser.add_argument("--vsx-crossmatch", type=Path, default=VSX_CROSSMATCH_PATH)
 
-    parser.add_argument("--no-sparse", dest="apply_sparse", action="store_false", help="Disable sparse-LC filter")
+    parser.add_argument("--skip-sparse", dest="apply_sparse", action="store_false", help="Disable sparse-LC filter")
     parser.add_argument("--min-time-span", type=float, default=MIN_TIME_SPAN)
     parser.add_argument("--min-points-per-day", type=float, default=MIN_POINTS_PER_DAY)
 
-    parser.add_argument("--no-multi-camera", dest="apply_multi_camera", action="store_false", help="Disable multi-camera filter")
+    parser.add_argument("--skip-multi-camera", dest="apply_multi_camera", action="store_false", help="Disable multi-camera filter")
     parser.add_argument("--min-cameras", type=int, default=MIN_CAMERAS)
 
     parser.add_argument("--workers", type=int, default=WORKERS)
@@ -943,7 +963,7 @@ def main() -> None:
     parser.add_argument("--stats-checkpoint", type=Path, default=None)
     parser.add_argument("--stats-chunk-size", type=int, default=STATS_CHUNK_SIZE)
     parser.add_argument("--rejected-log-csv", type=Path, default=None)
-    parser.add_argument("--no-tqdm", action="store_true")
+    parser.add_argument("--no-progress", action="store_true")
     parser.set_defaults(apply_sparse=True, apply_multi_camera=True)
 
     args = parser.parse_args()
@@ -958,9 +978,8 @@ def main() -> None:
     out = apply_tags(
         df,
         apply_vsx=args.apply_vsx,
-        vsx_mode=args.vsx_mode,
         vsx_max_sep_arcsec=args.vsx_max_sep_arcsec,
-        vsx_crossmatch_csv=args.vsx_crossmatch_csv,
+        vsx_crossmatch_csv=args.vsx_crossmatch,
         apply_sparse=args.apply_sparse,
         min_time_span=args.min_time_span,
         min_points_per_day=args.min_points_per_day,
@@ -968,7 +987,7 @@ def main() -> None:
         min_cameras=args.min_cameras,
         file_ext=args.extension,
         n_workers=args.workers,
-        show_tqdm=not args.no_tqdm,
+        show_tqdm=not args.no_progress,
         rejected_log_csv=args.rejected_log_csv,
         stats_checkpoint=args.stats_checkpoint,
         stats_chunk_size=args.stats_chunk_size,

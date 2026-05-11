@@ -630,8 +630,8 @@ def main():
     parser.add_argument("--skip-eb", action="store_true", help="Skip EB check")
     parser.add_argument("--skip-cv", action="store_true", help="Skip CV check")
     parser.add_argument("--skip-starspot", action="store_true", help="Skip starspot check")
-    parser.add_argument("--iphas", action="store_true", help="Query IPHAS for Hα photometry (slow)")
-    parser.add_argument("--ps1", action="store_true", help="Query PS1 for grizy photometry (slow)")
+    parser.add_argument("--enable-iphas", dest="iphas", action="store_true", help="Query IPHAS for H-alpha photometry (slow)")
+    parser.add_argument("--enable-ps1", dest="ps1", action="store_true", help="Query PS1 for grizy photometry (slow)")
     
     args = parser.parse_args()
     

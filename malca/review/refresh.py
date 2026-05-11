@@ -346,7 +346,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         description="Refresh review DB stats from local or bundled light curves."
     )
     parser.add_argument("--run-dir", required=True, help="Run directory or imported bundle directory")
-    parser.add_argument("--db", required=True, help="Review SQLite DB to refresh in place")
+    parser.add_argument("--review-db", required=True, help="Review SQLite DB to refresh in place")
     parser.add_argument(
         "--candidate-source",
         default=None,
@@ -359,14 +359,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--limit", type=int, default=None, help="Refresh only the first N scoped candidates")
     parser.add_argument(
-        "--rebuild-db-to",
+        "--output-review-db",
         default=None,
         help="Optional path for a rebuilt DB with only the current candidate schema",
     )
     parser.add_argument(
         "--overwrite-rebuild-db",
         action="store_true",
-        help="Allow overwriting an existing --rebuild-db-to target",
+        help="Allow overwriting an existing --output-review-db target",
     )
     parser.add_argument(
         "--no-review-sync",
@@ -395,7 +395,7 @@ def main() -> None:
     args = parser.parse_args()
 
     run_dir = Path(args.run_dir).expanduser().resolve()
-    db_path = Path(args.db).expanduser().resolve()
+    db_path = Path(args.review_db).expanduser().resolve()
     candidate_source = None
     if args.candidate_source:
         candidate_source = Path(args.candidate_source).expanduser().resolve()
@@ -433,8 +433,8 @@ def main() -> None:
     else:
         print("Review Git bundle auto-sync disabled by --no-review-sync")
 
-    if args.rebuild_db_to:
-        rebuilt_path = Path(args.rebuild_db_to).expanduser().resolve()
+    if args.output_review_db:
+        rebuilt_path = Path(args.output_review_db).expanduser().resolve()
         rebuilt = rebuild_review_db(
             db_path,
             rebuilt_path,

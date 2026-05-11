@@ -22,7 +22,7 @@ from malca.config import (
     ML_CV_FOLDS,
     ML_TOP_FEATURES,
 )
-from malca.ml.features import (
+from malca.meta_analysis.ml.features import (
     ML_LABEL_COLUMN,
     build_ml_feature_schema,
     transform_ml_features,
@@ -245,7 +245,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Train baseline candidate classifier model")
     parser.add_argument("--input", type=Path, required=True, help="Input CSV/Parquet with reviewer labels")
     parser.add_argument("--label-col", type=str, default=ML_LABEL_COLUMN, help="Supervised label column (default: event_class)")
-    parser.add_argument("--out-dir", type=Path, default=Path("output/ml"), help="Output directory for model artifacts")
+    parser.add_argument("--output-dir", dest="out_dir", type=Path, default=Path("output/ml"), help="Output directory for model artifacts")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--cv-folds", type=int, default=ML_CV_FOLDS, help="Requested stratified CV folds")
     parser.add_argument("--min-samples", type=int, default=ML_MIN_SAMPLES, help="Minimum labeled sample count required to train")

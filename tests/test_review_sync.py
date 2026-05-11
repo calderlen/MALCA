@@ -50,8 +50,12 @@ def _seed_candidate_and_review(
         if review is not None:
             conn.execute(
                 """
-                INSERT INTO reviews (candidate_id, interest_score, event_class, review_pass, notes, status, reviewer, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO reviews (
+                    candidate_id, interest_score, event_class, review_pass, notes, status, workflow_status,
+                    morphology_primary, morphology_secondary, physical_family, priority_tags_json,
+                    taxonomy_version, legacy_review_json, reviewer, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     review["candidate_id"],
@@ -60,6 +64,13 @@ def _seed_candidate_and_review(
                     review.get("review_pass", 1),
                     review.get("notes", ""),
                     review.get("status", "unreviewed"),
+                    review.get("workflow_status", review.get("status", "unreviewed")),
+                    review.get("morphology_primary"),
+                    review.get("morphology_secondary"),
+                    review.get("physical_family"),
+                    json.dumps(review.get("priority_tags", []), sort_keys=True),
+                    review.get("taxonomy_version", 1),
+                    json.dumps(review.get("legacy_review_json", {}), sort_keys=True),
                     review.get("reviewer", ""),
                     review["updated_at"],
                 ),
@@ -98,6 +109,8 @@ def test_review_sync_export_import_roundtrip_and_manifest_hashes(tmp_path: Path)
             "review_pass": 2,
             "notes": "line one,\nline two",
             "status": "reviewed",
+            "morphology_primary": "dimming_event",
+            "priority_tags": ["priority_dipper"],
             "reviewer": "tester",
             "updated_at": "2026-03-12T09:00:00+00:00",
         },
@@ -283,10 +296,10 @@ def test_review_sync_cli_export_import_smoke(tmp_path: Path) -> None:
     )
 
     out_dir = tmp_path / "reviews"
-    assert sync.main(["export", "--db", str(db_path), "--out-dir", str(out_dir)]) == 0
+    assert sync.main(["export", "--review-db", str(db_path), "--output-dir", str(out_dir)]) == 0
 
     imported_db = tmp_path / "imported.db"
-    assert sync.main(["import", "--db", str(imported_db), "--in-dir", str(out_dir), "--replace"]) == 0
+    assert sync.main(["import", "--review-db", str(imported_db), "--input-dir", str(out_dir), "--replace"]) == 0
     with db_connect(imported_db) as conn:
         assert get_review(conn, "CLI1")["notes"] == "cli"
 

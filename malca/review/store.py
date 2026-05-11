@@ -16,6 +16,16 @@ from malca.config import GAIA_CHUNK_SIZE
 from malca.config import LTV_MAX_PM
 from malca.config import VSX_CROSSMATCH_PATH, GAIA_CACHE_FILE
 from malca.review.metadata import normalize_vsx_record
+from malca.review.taxonomy import (
+    REVIEW_TAXONOMY_FIELDS,
+    REVIEW_TAXONOMY_SQL_COLUMNS,
+    TAXONOMY_VERSION,
+    derive_event_class,
+    empty_taxonomy_selection,
+    json_list,
+    normalize_selection,
+    selection_from_review,
+)
 
 
 
@@ -315,6 +325,14 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     # -- identification --
     ("asas_sn_id",               "TEXT",    "text"),
     ("lc_path",                  "TEXT",    "text"),
+    ("asassn_field_key",         "TEXT",    "text"),
+    ("asassn_fields",            "TEXT",    "text"),
+    ("asassn_field_count",       "REAL",    "float"),
+    ("asassn_field_key_fraction","REAL",    "float"),
+    ("camera_field_key",         "TEXT",    "text"),
+    ("camera_fields",            "TEXT",    "text"),
+    ("camera_field_count",       "REAL",    "float"),
+    ("camera_field_key_fraction","REAL",    "float"),
     # -- top-level filter flags --
     ("failed_any",               "INTEGER", "bool"),
     ("periodic_flag",            "INTEGER", "bool"),
@@ -922,6 +940,9 @@ def init_db(conn: sqlite3.Connection) -> None:
     col_defs = ",\n            ".join(
         f"{col} {dtype}" for col, dtype, _ in _CANDIDATE_COLUMNS
     )
+    review_taxonomy_defs = ",\n            ".join(
+        f"{col} {dtype}" for col, dtype in REVIEW_TAXONOMY_SQL_COLUMNS
+    )
     conn.execute(
         f"""
         CREATE TABLE IF NOT EXISTS candidates (
@@ -934,7 +955,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         """
     )
     conn.execute(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS reviews (
             candidate_id TEXT PRIMARY KEY,
             interest_score INTEGER,
@@ -943,6 +964,7 @@ def init_db(conn: sqlite3.Connection) -> None:
             notes TEXT,
             status TEXT,
             reviewer TEXT,
+            {review_taxonomy_defs},
             updated_at TEXT NOT NULL,
             FOREIGN KEY(candidate_id) REFERENCES candidates(candidate_id)
         )
@@ -980,6 +1002,15 @@ def init_db(conn: sqlite3.Connection) -> None:
                 if "duplicate column name" not in str(e).lower():
                     raise
                 # Column already exists (e.g. race or schema drift); skip
+
+    existing_review_lower = {row[1].lower() for row in conn.execute("PRAGMA table_info(reviews)").fetchall()}
+    for col, dtype in REVIEW_TAXONOMY_SQL_COLUMNS:
+        if col.lower() not in existing_review_lower:
+            try:
+                conn.execute(f"ALTER TABLE reviews ADD COLUMN {col} {dtype}")
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" not in str(e).lower():
+                    raise
 
     # Backfill legacy LTV proper-motion fields that were previously stored only
     # in payload_json under gaia_pm* keys.
@@ -1081,11 +1112,74 @@ def import_candidates(
             df_use = df
 
     if vet_before_import:
-        # Auto-detect: skip if vetting columns already populated (e.g. from malca vetting).
-        _VET_DETECT_COLS = {"simbad_main_id", "gaia_var_flag", "alerce_oid"}
-        _has_vetting = any(
-            col in df_use.columns and df_use[col].notna().any()
-            for col in _VET_DETECT_COLS
+        # Auto-detect completed vetting from positive evidence only. A populated
+        # False/empty marker such as gaia_var_flag=False is not enough to prove
+        # the lookup completed successfully.
+        def _positive_vetting_mask(frame: pd.DataFrame) -> pd.Series:
+            mask = pd.Series(False, index=frame.index, dtype=bool)
+            completed_col = "_vetting_completed"
+            if completed_col in frame.columns:
+                completed = frame[completed_col].fillna(False).astype(str).str.strip().str.lower()
+                mask |= completed.isin({"1", "true", "yes", "y", "t"})
+            for col in _VET_STRING_EVIDENCE_COLS:
+                if col not in frame.columns:
+                    continue
+                values = frame[col].fillna("").astype(str).str.strip()
+                mask |= values != ""
+            truthy = {"1", "true", "yes", "y", "t"}
+            for col in _VET_BOOL_EVIDENCE_COLS:
+                if col not in frame.columns:
+                    continue
+                values = frame[col].fillna(False)
+                if values.dtype == bool:
+                    mask |= values
+                else:
+                    mask |= values.astype(str).str.strip().str.lower().isin(truthy)
+            return mask
+
+        def _has_nonempty_value(cols: set[str]) -> bool:
+            for col in cols:
+                if col not in df_use.columns:
+                    continue
+                values = df_use[col].fillna("").astype(str).str.strip()
+                if (values != "").any():
+                    return True
+            return False
+
+        def _has_truthy_value(cols: set[str]) -> bool:
+            truthy = {"1", "true", "yes", "y", "t"}
+            for col in cols:
+                if col not in df_use.columns:
+                    continue
+                values = df_use[col].fillna(False)
+                if values.dtype == bool and values.any():
+                    return True
+                text_values = values.astype(str).str.strip().str.lower()
+                if text_values.isin(truthy).any():
+                    return True
+            return False
+
+        _VET_STRING_EVIDENCE_COLS = {
+            "simbad_main_id",
+            "gaia_var_class",
+            "asassn_var_name",
+            "asassn_var_type",
+            "microlens_name",
+            "ztf_var_type",
+            "tns_name",
+            "alerce_oid",
+            "alerce_lc_class",
+        }
+        _VET_BOOL_EVIDENCE_COLS = {
+            "vetting_likely_known",
+            "gaia_var_flag",
+            "microlens_match",
+            "xray_det",
+            "atlas_has_phot",
+        }
+        _has_vetting = (
+            _has_nonempty_value(_VET_STRING_EVIDENCE_COLS)
+            or _has_truthy_value(_VET_BOOL_EVIDENCE_COLS)
         )
         if _has_vetting:
             print("Vetting: columns already present in input, skipping re-vetting")
@@ -1116,6 +1210,11 @@ def import_candidates(
             if _id_col and _vetting_cache_path is not None and _vetting_cache_path.exists():
                 try:
                     _cache_df = pd.read_parquet(_vetting_cache_path)
+                    valid_cache_mask = _positive_vetting_mask(_cache_df)
+                    if not valid_cache_mask.all():
+                        n_ignored = int((~valid_cache_mask).sum())
+                        _cache_df = _cache_df.loc[valid_cache_mask].copy()
+                        print(f"Vetting cache: ignoring {n_ignored} legacy entries without completion evidence")
                     cached_ids = set(_cache_df[_id_col])
                     mask_new = ~df_use[_id_col].isin(cached_ids)
                     n_cached = (~mask_new).sum()
@@ -1166,6 +1265,7 @@ def import_candidates(
                     try:
                         vet_cols = [c for c in VETTING_COLUMNS if c in df_use.columns]
                         new_cache = df_use[[_id_col] + vet_cols].copy()
+                        new_cache["_vetting_completed"] = True
                         if _cache_df is not None:
                             new_cache = pd.concat([
                                 _cache_df[~_cache_df[_id_col].isin(new_cache[_id_col])],
@@ -1176,7 +1276,7 @@ def import_candidates(
                     except Exception as e:
                         print(f"Warning: failed to save vetting cache: {e}")
         except Exception as e:
-            print(f"Warning: vetting before import failed: {e}")
+            raise RuntimeError(f"Vetting before import failed: {e}") from e
 
     return upsert_candidates_frame(conn, df_use, default_source_path=str(source_path))
 
@@ -1194,7 +1294,7 @@ def _queue_where_params(filters: dict | None = None) -> tuple[list[str], list[ob
 
     # --- review status ---
     if filters.get('only_unreviewed'):
-        where.append("(r.status IS NULL OR r.status='unreviewed')")
+        where.append("(r.workflow_status IS NULL OR r.workflow_status='unreviewed')")
 
     # --- failed_any shortcut ---
     if filters.get('require_failed_any_false'):
@@ -1351,7 +1451,7 @@ def query_queue(
                 c.jump_best_log_bf,
                 r.interest_score,
                 r.review_pass,
-                r.status,
+                r.workflow_status AS status,
                 r.notes,
                 r.reviewer,
                 r.updated_at
@@ -1848,35 +1948,59 @@ def merge_candidate_results(
 
 
 def get_review(conn: sqlite3.Connection, candidate_id: str) -> dict:
+    taxonomy_cols = ", ".join(REVIEW_TAXONOMY_FIELDS)
     row = conn.execute(
-        """
-        SELECT interest_score, review_pass, notes, status, reviewer, updated_at, event_class
+        f"""
+        SELECT interest_score, review_pass, notes, status, reviewer, updated_at, event_class,
+               {taxonomy_cols}
         FROM reviews WHERE candidate_id=?
         """,
         (candidate_id,),
     ).fetchone()
     if row is None:
-        return {
+        base = {
             "interest_score": None,
             "event_class": "unclassified",
             "review_pass": 1,
             "notes": "",
             "status": "unreviewed",
+            "workflow_status": "unreviewed",
+            "disposition": None,
             "reviewer": "",
             "updated_at": None,
         }
+        base.update(empty_taxonomy_selection())
+        base["workflow_status"] = "unreviewed"
+        base["priority_tags_json"] = "[]"
+        base["evidence_flags_json"] = "[]"
+        base["model_tags_json"] = "[]"
+        base["legacy_review_json"] = "{}"
+        return base
     score = None if row[0] is None else int(row[0])
     if score is not None:
         score = int(np.clip(score, 1, 4))
-    return {
+    taxonomy_values = dict(zip(REVIEW_TAXONOMY_FIELDS, row[7:]))
+    workflow_status = str(taxonomy_values.get("workflow_status") or "unreviewed")
+    selection = selection_from_review(taxonomy_values)
+    event_class = str(row[6]) if row[6] else derive_event_class(selection)
+    out = {
         "interest_score": score,
-        "event_class": str(row[6]) if row[6] else "unclassified",
+        "event_class": event_class,
         "review_pass": 1 if row[1] is None else max(1, int(row[1])),
         "notes": "" if row[2] is None else str(row[2]),
-        "status": "unreviewed" if row[3] is None else str(row[3]),
+        "status": workflow_status,
+        "workflow_status": workflow_status,
         "reviewer": "" if row[4] is None else str(row[4]),
         "updated_at": row[5],
     }
+    out.update(taxonomy_values)
+    out.update(selection)
+    out["priority_tags_json"] = json_list(out.get("priority_tags"))
+    out["evidence_flags_json"] = json_list(out.get("evidence_flags"))
+    out["model_tags_json"] = json_list(out.get("model_tags"))
+    out["taxonomy_version"] = int(out.get("taxonomy_version") or TAXONOMY_VERSION)
+    out["legacy_review_json"] = str(out.get("legacy_review_json") or "{}")
+    return out
 
 
 def save_review(
@@ -1887,8 +2011,25 @@ def save_review(
     event_class: str = "unclassified",
     review_pass: int,
     notes: str,
-    status: str,
-    reviewer: str,
+    status: str | None = None,
+    workflow_status: str | None = None,
+    disposition: str | None = None,
+    morphology_primary: str | None = None,
+    morphology_secondary: str | None = None,
+    morphology_polarity: str | None = None,
+    morphology_recurrence: str | None = None,
+    baseline_behavior: str | None = None,
+    physical_family: str | None = None,
+    physical_subclass: str | None = None,
+    classification_confidence: str | None = None,
+    priority_tags: Any = None,
+    evidence_flags: Any = None,
+    model_tags: Any = None,
+    duplicate_of: str | None = None,
+    known_object_id: str | None = None,
+    known_object_source: str | None = None,
+    legacy_review_json: str | None = None,
+    reviewer: str = "",
     event_type: str = "save",
 ) -> None:
     ts = _utc_now()
@@ -1897,28 +2038,90 @@ def save_review(
     else:
         score_int = int(np.clip(int(interest_score), 1, 4))
     pass_int = max(1, int(review_pass))
-    ec = str(event_class) if event_class else "unclassified"
+    workflow = str(workflow_status or status or "reviewed")
+    selection = normalize_selection(
+        {
+            "morphology_primary": morphology_primary,
+            "morphology_secondary": morphology_secondary,
+            "morphology_polarity": morphology_polarity,
+            "morphology_recurrence": morphology_recurrence,
+            "baseline_behavior": baseline_behavior,
+            "physical_family": physical_family,
+            "physical_subclass": physical_subclass,
+            "classification_confidence": classification_confidence,
+            "priority_tags": priority_tags,
+            "evidence_flags": evidence_flags,
+            "model_tags": model_tags,
+            "disposition": disposition,
+            "duplicate_of": duplicate_of,
+            "known_object_id": known_object_id,
+            "known_object_source": known_object_source,
+        }
+    )
+    ec = derive_event_class(selection)
+    if ec == "unclassified" and event_class:
+        ec = str(event_class)
+    taxonomy_values = {
+        "workflow_status": workflow,
+        "disposition": selection.get("disposition"),
+        "morphology_primary": selection.get("morphology_primary"),
+        "morphology_secondary": selection.get("morphology_secondary"),
+        "morphology_polarity": selection.get("morphology_polarity"),
+        "morphology_recurrence": selection.get("morphology_recurrence"),
+        "baseline_behavior": selection.get("baseline_behavior"),
+        "physical_family": selection.get("physical_family"),
+        "physical_subclass": selection.get("physical_subclass"),
+        "classification_confidence": selection.get("classification_confidence"),
+        "priority_tags_json": json_list(selection.get("priority_tags")),
+        "evidence_flags_json": json_list(selection.get("evidence_flags")),
+        "model_tags_json": json_list(selection.get("model_tags")),
+        "duplicate_of": selection.get("duplicate_of"),
+        "known_object_id": selection.get("known_object_id"),
+        "known_object_source": selection.get("known_object_source"),
+        "taxonomy_version": TAXONOMY_VERSION,
+        "legacy_review_json": legacy_review_json or "{}",
+    }
+    taxonomy_cols = list(REVIEW_TAXONOMY_FIELDS)
+    insert_cols = [
+        "candidate_id",
+        "interest_score",
+        "event_class",
+        "review_pass",
+        "notes",
+        "status",
+        "reviewer",
+        *taxonomy_cols,
+        "updated_at",
+    ]
+    placeholders = ", ".join(["?"] * len(insert_cols))
+    conflict_cols = [col for col in insert_cols if col != "candidate_id"]
+    conflict_set = ",\n            ".join(f"{col}=excluded.{col}" for col in conflict_cols)
     conn.execute(
-        """
-        INSERT INTO reviews (candidate_id, interest_score, event_class, review_pass, notes, status, reviewer, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        f"""
+        INSERT INTO reviews ({', '.join(insert_cols)})
+        VALUES ({placeholders})
         ON CONFLICT(candidate_id) DO UPDATE SET
-            interest_score=excluded.interest_score,
-            event_class=excluded.event_class,
-            review_pass=excluded.review_pass,
-            notes=excluded.notes,
-            status=excluded.status,
-            reviewer=excluded.reviewer,
-            updated_at=excluded.updated_at
+            {conflict_set}
         """,
-        (candidate_id, score_int, ec, pass_int, notes, status, reviewer, ts),
+        (
+            candidate_id,
+            score_int,
+            ec,
+            pass_int,
+            notes,
+            workflow,
+            reviewer,
+            *(taxonomy_values[col] for col in taxonomy_cols),
+            ts,
+        ),
     )
     payload = {
         "interest_score": score_int,
         "event_class": ec,
         "review_pass": pass_int,
         "notes": notes,
-        "status": status,
+        "status": workflow,
+        **taxonomy_values,
         "reviewer": reviewer,
         "updated_at": ts,
     }
@@ -1947,7 +2150,7 @@ def recent_history(conn: sqlite3.Connection, limit: int = 5) -> pd.DataFrame:
 
 def count_progress(conn: sqlite3.Connection) -> tuple[int, int]:
     total = conn.execute("SELECT COUNT(*) FROM candidates").fetchone()[0]
-    reviewed = conn.execute("SELECT COUNT(*) FROM reviews WHERE status IS NOT NULL AND status != 'unreviewed'").fetchone()[0]
+    reviewed = conn.execute("SELECT COUNT(*) FROM reviews WHERE workflow_status IS NOT NULL AND workflow_status != 'unreviewed'").fetchone()[0]
     return int(reviewed), int(total)
 
 
@@ -2009,10 +2212,26 @@ def export_reviews(conn: sqlite3.Connection, out_path: Path, only_reviewed: bool
     candidate_cols = ["candidate_id", "source_path"] + _COL_NAMES
     review_cols = [
         "interest_score",
-        "event_class",
         "review_pass",
         "notes",
-        "status",
+        "workflow_status",
+        "disposition",
+        "morphology_primary",
+        "morphology_secondary",
+        "morphology_polarity",
+        "morphology_recurrence",
+        "baseline_behavior",
+        "physical_family",
+        "physical_subclass",
+        "classification_confidence",
+        "priority_tags_json",
+        "evidence_flags_json",
+        "model_tags_json",
+        "duplicate_of",
+        "known_object_id",
+        "known_object_source",
+        "taxonomy_version",
+        "legacy_review_json",
         "reviewer",
         "updated_at",
     ]
@@ -2028,7 +2247,7 @@ def export_reviews(conn: sqlite3.Connection, out_path: Path, only_reviewed: bool
         LEFT JOIN reviews r ON r.candidate_id = c.candidate_id
     """
     if only_reviewed:
-        query += " WHERE r.status IS NOT NULL AND r.status != 'unreviewed'"
+        query += " WHERE r.workflow_status IS NOT NULL AND r.workflow_status != 'unreviewed'"
     df = pd.read_sql_query(query, conn)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if out_path.suffix.lower() in {".parquet", ".pq"}:
@@ -2073,7 +2292,14 @@ def merge_review_databases(
         src_history = src_history[src_history["candidate_id"].astype(str).isin(sorted(candidate_scope))].copy()
 
     if only_reviewed and not src_reviews.empty:
-        status_series = src_reviews["status"].fillna("").astype(str)
+        if "workflow_status" in src_reviews.columns and "status" in src_reviews.columns:
+            status_series = src_reviews["workflow_status"].where(
+                src_reviews["workflow_status"].notna() & (src_reviews["workflow_status"].astype(str) != ""),
+                src_reviews["status"],
+            ).fillna("").astype(str)
+        else:
+            status_col = "workflow_status" if "workflow_status" in src_reviews.columns else "status"
+            status_series = src_reviews[status_col].fillna("").astype(str)
         src_reviews = src_reviews[status_series.ne("") & status_series.ne("unreviewed")].copy()
 
     review_candidate_ids = {str(cid).strip() for cid in src_reviews.get("candidate_id", pd.Series(dtype="object")).tolist() if str(cid).strip()}
@@ -2098,14 +2324,20 @@ def merge_review_databases(
         if not missing_candidates.empty:
             inserted_candidate_rows, inserted_candidates = upsert_candidates_frame(dst_conn, missing_candidates)
 
-        target_reviews = pd.read_sql_query(
-            "SELECT candidate_id, interest_score, event_class, review_pass, notes, status, reviewer, updated_at FROM reviews",
-            dst_conn,
-        )
+        target_reviews = pd.read_sql_query("SELECT * FROM reviews", dst_conn)
         target_review_map = {
             str(row["candidate_id"]).strip(): row
             for _, row in target_reviews.iterrows()
         }
+        dst_review_cols = [str(row[1]) for row in dst_conn.execute("PRAGMA table_info(reviews)").fetchall()]
+        common_review_cols = [
+            col for col in src_reviews.columns
+            if col in dst_review_cols and col != "candidate_id"
+        ]
+        if "workflow_status" not in common_review_cols and "workflow_status" in dst_review_cols:
+            common_review_cols.append("workflow_status")
+        if "taxonomy_version" not in common_review_cols and "taxonomy_version" in dst_review_cols:
+            common_review_cols.append("taxonomy_version")
 
         inserted_reviews = 0
         updated_reviews = 0
@@ -2121,55 +2353,38 @@ def merge_review_databases(
                 skipped_reviews += 1
                 continue
 
-            interest_score = row.get("interest_score")
-            if interest_score is not None and not pd.isna(interest_score):
-                interest_score = int(interest_score)
-            else:
-                interest_score = None
-            review_pass = row.get("review_pass")
-            if review_pass is not None and not pd.isna(review_pass):
-                review_pass = int(review_pass)
-            else:
-                review_pass = 1
-            event_class = row.get("event_class")
-            if event_class is None or pd.isna(event_class) or str(event_class).strip() == "":
-                event_class = "unclassified"
-            status = row.get("status")
-            if status is None or pd.isna(status) or str(status).strip() == "":
-                status = "unreviewed"
-            reviewer = row.get("reviewer")
-            if reviewer is None or pd.isna(reviewer):
-                reviewer = ""
-            notes = row.get("notes")
-            if notes is None or pd.isna(notes):
-                notes = ""
-            updated_at = row.get("updated_at")
-            if updated_at is None or pd.isna(updated_at) or str(updated_at).strip() == "":
-                updated_at = _utc_now()
+            row_values: dict[str, object] = {}
+            for col in common_review_cols:
+                value = row.get(col)
+                if value is None or (isinstance(value, float) and pd.isna(value)):
+                    value = None
+                row_values[col] = value
+            if "workflow_status" in common_review_cols and not row_values.get("workflow_status"):
+                row_values["workflow_status"] = row.get("status") or "unreviewed"
+            if "taxonomy_version" in common_review_cols and not row_values.get("taxonomy_version"):
+                row_values["taxonomy_version"] = TAXONOMY_VERSION
+            if "updated_at" in common_review_cols and not row_values.get("updated_at"):
+                row_values["updated_at"] = _utc_now()
+            if "event_class" in common_review_cols and not row_values.get("event_class"):
+                row_values["event_class"] = "unclassified"
+            if "status" in common_review_cols and not row_values.get("status"):
+                row_values["status"] = row_values.get("workflow_status") or "unreviewed"
+            if "review_pass" in common_review_cols and not row_values.get("review_pass"):
+                row_values["review_pass"] = 1
+
+            insert_cols = ["candidate_id", *common_review_cols]
+            placeholders = ", ".join(["?"] * len(insert_cols))
+            update_cols = [col for col in insert_cols if col != "candidate_id"]
+            conflict_set = ",\n                    ".join(f"{col}=excluded.{col}" for col in update_cols)
 
             dst_conn.execute(
-                """
-                INSERT INTO reviews (candidate_id, interest_score, event_class, review_pass, notes, status, reviewer, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                f"""
+                INSERT INTO reviews ({', '.join(insert_cols)})
+                VALUES ({placeholders})
                 ON CONFLICT(candidate_id) DO UPDATE SET
-                    interest_score=excluded.interest_score,
-                    event_class=excluded.event_class,
-                    review_pass=excluded.review_pass,
-                    notes=excluded.notes,
-                    status=excluded.status,
-                    reviewer=excluded.reviewer,
-                    updated_at=excluded.updated_at
+                    {conflict_set}
                 """,
-                (
-                    candidate_id,
-                    interest_score,
-                    str(event_class),
-                    review_pass,
-                    str(notes),
-                    str(status),
-                    str(reviewer),
-                    str(updated_at),
-                ),
+                (candidate_id, *(row_values[col] for col in common_review_cols)),
             )
             if target_row is None:
                 inserted_reviews += 1

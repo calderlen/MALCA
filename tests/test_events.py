@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 import pytest
 
 from malca.events import (
+    build_events_writer_columns,
     build_runs,
     classify_run_morphology,
     filter_runs,
@@ -19,6 +22,25 @@ from malca.events import (
     score_lightcurve,
 )
 from malca.baseline import per_camera_gp_baseline
+
+
+def _global_constant_baseline(df: pd.DataFrame, **kwargs) -> pd.DataFrame:
+    out = df.copy()
+    baseline = np.full(len(out), float(np.nanmedian(out["mag"].to_numpy(dtype=float))))
+    resid = out["mag"].to_numpy(dtype=float) - baseline
+    sigma_eff = np.full(len(out), 0.02)
+    out["baseline"] = baseline
+    out["resid"] = resid
+    out["sigma_eff"] = sigma_eff
+    out["sigma_resid"] = resid / sigma_eff
+    out["baseline_source"] = "test_global_constant"
+    return out
+
+
+def _write_events_config(tmp_path: Path, **options: object) -> Path:
+    config_path = tmp_path / "events_config.json"
+    config_path.write_text(json.dumps({"events": options}), encoding="ascii")
+    return config_path
 
 
 def make_synthetic_lc(
@@ -271,6 +293,35 @@ class TestRunBayesianSignificance:
         is_significant = result["dip"]["significant"]
         assert has_triggers or is_significant
 
+    def test_residual_bad_camera_filter_refits_before_scoring(self):
+        rows = []
+        for cam, offset in ((1, 0.0), (2, 0.0), (3, 1.0)):
+            jd = 2458000.0 + np.arange(140, dtype=float)
+            mag = np.full_like(jd, 14.0 + offset, dtype=float)
+            for t, m in zip(jd, mag):
+                rows.append(
+                    {
+                        "JD": t,
+                        "mag": m,
+                        "error": 0.02,
+                        "camera#": cam,
+                        "saturated": 0,
+                    }
+                )
+        df = pd.DataFrame(rows)
+
+        result = score_lightcurve(
+            df,
+            baseline_func=_global_constant_baseline,
+            baseline_kwargs={},
+            filter_residual_bad_cameras_enabled=True,
+            trigger_mode="logbf",
+        )
+
+        assert result["bad_cameras_filtered"] == {3}
+        assert 3 not in set(result["df"]["camera#"])
+        assert len(result["df_base"]) == len(result["df"])
+
     def test_kept_run_summaries_stay_aligned_after_rejections(self, monkeypatch):
         """Rejected early runs must not shift diagnostics onto later kept runs."""
         jd = np.arange(60.0)
@@ -447,6 +498,7 @@ def test_events_main_phase_template_uses_metadata_period_and_keeps_audit_fields(
         {
             "path": [str(lc_path)],
             "excluded_cameras": [""],
+            "raw_median_suspect_cameras": ["5"],
             "pre_periodicity_label": ["periodic"],
             "pre_periodic_flag": [True],
             "pre_periodicity_selected_period": [6.0],
@@ -455,6 +507,14 @@ def test_events_main_phase_template_uses_metadata_period_and_keeps_audit_fields(
     ).to_csv(metadata_file, index=False)
 
     output_path = tmp_path / "lc_events_results.parquet"
+    config_path = _write_events_config(
+        tmp_path,
+        output_format="parquet",
+        baseline_func="phase_template",
+        logbf_threshold_dip=2.0,
+        logbf_threshold_jump=2.0,
+        run_min_points=2,
+    )
     monkeypatch.setattr("malca.events.ProcessPoolExecutor", ThreadPoolExecutor)
     monkeypatch.setattr(
         sys,
@@ -467,18 +527,10 @@ def test_events_main_phase_template_uses_metadata_period_and_keeps_audit_fields(
             str(metadata_file),
             "--output",
             str(output_path),
-            "--output-format",
-            "parquet",
-            "--baseline-func",
-            "phase_template",
+            "--config",
+            str(config_path),
             "--workers",
             "1",
-            "--logbf-threshold-dip",
-            "2.0",
-            "--logbf-threshold-jump",
-            "2.0",
-            "--run-min-points",
-            "2",
         ],
     )
 
@@ -491,6 +543,11 @@ def test_events_main_phase_template_uses_metadata_period_and_keeps_audit_fields(
     assert bool(out.loc[0, "pre_periodic_flag"]) is True
     assert np.isclose(out.loc[0, "pre_periodicity_selected_period"], 6.0)
     assert out.loc[0, "pre_periodicity_method"] == "pdm"
+    assert out.loc[0, "asassn_field_key"] == "field1"
+    assert out.loc[0, "asassn_fields"] == "field1"
+    assert int(out.loc[0, "asassn_field_count"]) == 1
+    assert out.loc[0, "camera_field_key"] == "cam1/field1"
+    assert out.loc[0, "raw_median_suspect_cameras"] == "5"
 
 
 def test_events_main_fails_on_high_error_fraction_and_only_checkpoints_successes(
@@ -502,6 +559,12 @@ def test_events_main_fails_on_high_error_fraction_and_only_checkpoints_successes
     input_file.write_text("\n".join(paths) + "\n", encoding="ascii")
 
     output_path = tmp_path / "lc_events_results.parquet"
+    config_path = _write_events_config(
+        tmp_path,
+        output_format="parquet",
+        min_mag_offset=0,
+        max_error_fraction=0.1,
+    )
 
     def fake_process_one(path: str, path_metadata: dict | None) -> dict:
         if path.startswith("bad"):
@@ -523,14 +586,10 @@ def test_events_main_fails_on_high_error_fraction_and_only_checkpoints_successes
             str(input_file),
             "--output",
             str(output_path),
-            "--output-format",
-            "parquet",
+            "--config",
+            str(config_path),
             "--workers",
             "2",
-            "--min-mag-offset",
-            "0",
-            "--max-error-fraction",
-            "0.1",
         ],
     )
 
@@ -550,22 +609,30 @@ def test_events_main_fails_on_high_error_fraction_and_only_checkpoints_successes
     assert set(errors["path"]) == {"bad1.dat2", "bad2.dat2"}
 
 
-def test_events_main_preserves_existing_rows_when_parquet_schema_promotes(
+def test_events_main_preserves_existing_rows_when_parquet_metadata_type_changes(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     output_path = tmp_path / "lc_events_results.parquet"
 
-    def run_once(path_value: str, metadata_value: str | None) -> None:
+    def run_once(path_value: str, observer_note: str | None, priority_rank: int) -> None:
         input_file = tmp_path / f"{path_value}.txt"
         input_file.write_text(f"{path_value}\n", encoding="ascii")
+        config_path = _write_events_config(tmp_path, output_format="parquet", min_mag_offset=0)
+        metadata_file = tmp_path / f"{path_value}.metadata.csv"
+        pd.DataFrame(
+            {
+                "path": [path_value],
+                "observer_note": [observer_note],
+                "priority_rank": [priority_rank],
+            }
+        ).to_csv(metadata_file, index=False)
 
         def fake_process_one(path: str, path_metadata: dict | None) -> dict:
             return {
                 "path": path,
                 "dip_significant": False,
                 "jump_significant": False,
-                "schema_drift_column": metadata_value,
             }
 
         monkeypatch.setattr("malca.events.ProcessPoolExecutor", ThreadPoolExecutor)
@@ -577,25 +644,226 @@ def test_events_main_preserves_existing_rows_when_parquet_schema_promotes(
                 "malca.events",
                 "--input-file",
                 str(input_file),
+                "--metadata-csv",
+                str(metadata_file),
                 "--output",
                 str(output_path),
-                "--output-format",
-                "parquet",
+                "--config",
+                str(config_path),
                 "--workers",
                 "1",
-                "--min-mag-offset",
-                "0",
             ],
         )
 
         events_main()
 
-    run_once("first.dat2", None)
-    run_once("second.dat2", "present")
+    run_once("first.dat2", None, 1)
+    run_once("second.dat2", "present", 2)
 
     out = pd.read_parquet(output_path)
     assert out["path"].tolist() == ["first.dat2", "second.dat2"]
-    assert out["schema_drift_column"].tolist() == [None, "present"]
+    assert "observer_note" in out.columns
+    assert "priority_rank" in out.columns
+    assert pd.isna(out.loc[0, "observer_note"])
+    assert out.loc[1, "observer_note"] == "present"
+    assert out["priority_rank"].tolist() == [1, 2]
 
     checkpoint = output_path.with_name(f"{output_path.stem}_PROCESSED.txt")
     assert checkpoint.read_text(encoding="ascii").splitlines() == ["first.dat2", "second.dat2"]
+
+
+def test_events_main_unexpected_worker_keys_go_to_extra_json(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    paths = ["first.dat2", "second.dat2"]
+    input_file = tmp_path / "paths.txt"
+    input_file.write_text("\n".join(paths) + "\n", encoding="ascii")
+    output_path = tmp_path / "lc_events_results.parquet"
+    config_path = _write_events_config(
+        tmp_path,
+        output_format="parquet",
+        chunk_size=1,
+        min_mag_offset=0,
+    )
+
+    def fake_process_one(path: str, path_metadata: dict | None) -> dict:
+        row = {
+            "path": path,
+            "dip_significant": False,
+            "jump_significant": False,
+        }
+        if path == "second.dat2":
+            row["worker_debug_note"] = "late"
+        return row
+
+    monkeypatch.setattr("malca.events.ProcessPoolExecutor", ThreadPoolExecutor)
+    monkeypatch.setattr("malca.events._process_one", fake_process_one)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "malca.events",
+            "--input-file",
+            str(input_file),
+            "--output",
+            str(output_path),
+            "--config",
+            str(config_path),
+            "--workers",
+            "1",
+        ],
+    )
+
+    events_main()
+
+    out = pd.read_parquet(output_path)
+    assert "worker_debug_note" not in out.columns
+    payloads = [json.loads(value) for value in out["extra_json"]]
+    assert payloads == [{}, {"worker_debug_note": "late"}]
+
+
+def test_events_main_parquet_chunk_files_share_schema(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    paths = ["first.dat2", "second.dat2"]
+    input_file = tmp_path / "paths.txt"
+    input_file.write_text("\n".join(paths) + "\n", encoding="ascii")
+    output_dir = tmp_path / "events_dataset"
+    config_path = _write_events_config(
+        tmp_path,
+        output_format="parquet_chunk",
+        chunk_size=1,
+        min_mag_offset=0,
+    )
+
+    def fake_process_one(path: str, path_metadata: dict | None) -> dict:
+        row = {
+            "path": path,
+            "dip_significant": False,
+            "jump_significant": False,
+        }
+        if path == "second.dat2":
+            row["late_metric"] = 3.5
+        return row
+
+    monkeypatch.setattr("malca.events.ProcessPoolExecutor", ThreadPoolExecutor)
+    monkeypatch.setattr("malca.events._process_one", fake_process_one)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "malca.events",
+            "--input-file",
+            str(input_file),
+            "--output",
+            str(output_dir),
+            "--config",
+            str(config_path),
+            "--workers",
+            "1",
+        ],
+    )
+
+    events_main()
+
+    chunk_files = sorted(output_dir.glob("chunk_*.parquet"))
+    assert len(chunk_files) == 2
+    schemas = [pq.read_schema(path) for path in chunk_files]
+    assert schemas[0].names == schemas[1].names
+    assert schemas[0].types == schemas[1].types
+    assert "late_metric" not in schemas[0].names
+    assert "extra_json" in schemas[0].names
+
+
+def test_events_main_normalizes_older_parquet_before_append(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    output_path = tmp_path / "lc_events_results.parquet"
+    pd.DataFrame(
+        {
+            "path": ["old.dat2"],
+            "dip_significant": [False],
+            "jump_significant": [False],
+            "legacy_metric": ["old-value"],
+        }
+    ).to_parquet(output_path, index=False)
+
+    input_file = tmp_path / "paths.txt"
+    input_file.write_text("new.dat2\n", encoding="ascii")
+    config_path = _write_events_config(tmp_path, output_format="parquet", min_mag_offset=0)
+
+    def fake_process_one(path: str, path_metadata: dict | None) -> dict:
+        return {
+            "path": path,
+            "dip_significant": False,
+            "jump_significant": False,
+        }
+
+    monkeypatch.setattr("malca.events.ProcessPoolExecutor", ThreadPoolExecutor)
+    monkeypatch.setattr("malca.events._process_one", fake_process_one)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "malca.events",
+            "--input-file",
+            str(input_file),
+            "--output",
+            str(output_path),
+            "--config",
+            str(config_path),
+            "--workers",
+            "1",
+        ],
+    )
+
+    events_main()
+
+    out = pd.read_parquet(output_path)
+    assert out["path"].tolist() == ["old.dat2", "new.dat2"]
+    assert "legacy_metric" not in out.columns
+    assert json.loads(out.loc[0, "extra_json"]) == {"legacy_metric": "old-value"}
+    assert json.loads(out.loc[1, "extra_json"]) == {}
+
+
+def test_events_main_csv_header_uses_canonical_order(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    input_file = tmp_path / "paths.txt"
+    input_file.write_text("first.dat2\n", encoding="ascii")
+    output_path = tmp_path / "lc_events_results.csv"
+    config_path = _write_events_config(tmp_path, output_format="csv", min_mag_offset=0)
+
+    def fake_process_one(path: str, path_metadata: dict | None) -> dict:
+        return {
+            "path": path,
+            "dip_significant": False,
+            "jump_significant": False,
+        }
+
+    monkeypatch.setattr("malca.events.ProcessPoolExecutor", ThreadPoolExecutor)
+    monkeypatch.setattr("malca.events._process_one", fake_process_one)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "malca.events",
+            "--input-file",
+            str(input_file),
+            "--output",
+            str(output_path),
+            "--config",
+            str(config_path),
+            "--workers",
+            "1",
+        ],
+    )
+
+    events_main()
+
+    columns = pd.read_csv(output_path, nrows=0).columns.tolist()
+    assert columns == build_events_writer_columns()

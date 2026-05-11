@@ -28,6 +28,7 @@ from malca.baseline import (
     per_camera_median_baseline,
     per_camera_gp_baseline,
 )
+from malca.cli_config import add_config_args, apply_config, namespace_keys
 from malca.config import (
     WORKERS,
     TRIGGER_MODE,
@@ -50,8 +51,38 @@ from malca.config import (
     INJECTION_MIN_POINTS,
     INJECTION_SEED,
 )
-from malca.events import run_bayesian_significance
+from malca.events import score_lightcurve
 from malca.utils import read_lc_dat2
+
+
+DETECTION_RATE_CONFIG_DEFAULTS = {
+    "trigger_mode": TRIGGER_MODE,
+    "logbf_threshold_dip": LOGBF_THRESHOLD_DIP,
+    "logbf_threshold_jump": LOGBF_THRESHOLD_JUMP,
+    "significance_threshold": SIGNIFICANCE_THRESHOLD,
+    "p_points": P_POINTS,
+    "p_min_dip": None,
+    "p_max_dip": None,
+    "p_min_jump": None,
+    "p_max_jump": None,
+    "mag_points": MAG_POINTS,
+    "mag_min_dip": None,
+    "mag_max_dip": None,
+    "mag_min_jump": None,
+    "mag_max_jump": None,
+    "run_min_points": RUN_MIN_POINTS,
+    "run_max_gap_points": RUN_MAX_GAP_POINTS,
+    "run_max_gap_days": None,
+    "run_min_duration_days": 0.0,
+    "baseline_func": BASELINE_FUNC,
+    "baseline_s0": BASELINE_S0,
+    "baseline_w0": BASELINE_W0,
+    "baseline_q": BASELINE_Q,
+    "baseline_jitter": BASELINE_JITTER,
+    "baseline_sigma_floor": None,
+    "no_event_prob": False,
+    "min_mag_offset": MIN_MAG_OFFSET,
+}
 
 
 
@@ -105,7 +136,7 @@ def select_control_sample(
 
 
 def _build_detection_kwargs(args: argparse.Namespace) -> dict:
-    """Build kwargs for run_bayesian_significance from args."""
+    """Build kwargs for score_lightcurve from args."""
     baseline_kwargs = {
         "S0": args.baseline_s0,
         "w0": args.baseline_w0,
@@ -159,7 +190,7 @@ def _extract_detection_result(
     jump: dict,
     min_mag_offset: float = 0.0,
 ) -> dict:
-    """Extract detection results from run_bayesian_significance output."""
+    """Extract detection results from score_lightcurve output."""
     dip_significant = bool(dip["significant"])
     jump_significant = bool(jump["significant"])
 
@@ -248,7 +279,8 @@ def run_detection_rate_trial(
 
     try:
         # Run detection on original LC (no injection)
-        result = run_bayesian_significance(df, **detection_kwargs)
+        score_kwargs = {k: v for k, v in detection_kwargs.items() if k != "min_mag_offset"}
+        result = score_lightcurve(df, **score_kwargs)
         detection_result = _extract_detection_result(
             result["dip"],
             result["jump"],
@@ -427,7 +459,7 @@ def main() -> None:
         description="Run detection rate measurement (no injection).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Output structure (default --out-dir output/detection_rate):
+Output structure (default --output-dir output/detection_rate):
   output/detection_rate/
     20250121_143052/             # Timestamped run directory
       run_params.json            # Full parameter dump
@@ -449,17 +481,15 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
     g_io = parser.add_argument_group("Input / output")
     g_sample = parser.add_argument_group("Sample")
     g_workers = parser.add_argument_group("Workers")
-    g_detection = parser.add_argument_group("Detection & events")
-    g_baseline = parser.add_argument_group("Baseline")
-    g_filter = parser.add_argument_group("Filter")
+    g_config = parser.add_argument_group("Config")
 
     g_io.add_argument("--manifest", type=Path, default=Path("output/lc_manifest_all.parquet"),
                         help="Manifest parquet path (default: output/lc_manifest_all.parquet)")
-    g_io.add_argument("--out-dir", type=Path, default=Path("output/detection_rate"),
+    g_io.add_argument("--output-dir", dest="out_dir", type=Path, default=Path("output/detection_rate"),
                         help="Base output directory (default: output/detection_rate)")
     g_io.add_argument("--run-tag", type=str, default=None,
                         help="Optional tag to append to run directory name (e.g., 'mag12-13')")
-    g_io.add_argument("--out", type=Path, default=None,
+    g_io.add_argument("--output", type=Path, default=None,
                         help="Override output path (default: <out-dir>/<timestamp>/results/detection_rate_results.parquet)")
     g_sample.add_argument(
         "--control-sample-size",
@@ -477,42 +507,16 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
     g_workers.add_argument("--no-resume", action="store_true", help="Disable resume even if checkpoint exists.")
     g_workers.add_argument("--overwrite", action="store_true", help="Overwrite existing output if present.")
 
-    g_detection.add_argument("--trigger-mode", type=str, default=TRIGGER_MODE, choices=["logbf", "posterior_prob"])
-    g_detection.add_argument("--logbf-threshold-dip", type=float, default=LOGBF_THRESHOLD_DIP)
-    g_detection.add_argument("--logbf-threshold-jump", type=float, default=LOGBF_THRESHOLD_JUMP)
-    g_detection.add_argument("--significance-threshold", type=float, default=SIGNIFICANCE_THRESHOLD)
-    g_detection.add_argument("--p-points", type=int, default=P_POINTS)
-    g_detection.add_argument("--p-min-dip", type=float, default=None)
-    g_detection.add_argument("--p-max-dip", type=float, default=None)
-    g_detection.add_argument("--p-min-jump", type=float, default=None)
-    g_detection.add_argument("--p-max-jump", type=float, default=None)
-    g_detection.add_argument("--mag-points", type=int, default=MAG_POINTS)
-    g_detection.add_argument("--mag-min-dip", type=float, default=None)
-    g_detection.add_argument("--mag-max-dip", type=float, default=None)
-    g_detection.add_argument("--mag-min-jump", type=float, default=None)
-    g_detection.add_argument("--mag-max-jump", type=float, default=None)
-    g_detection.add_argument("--run-min-points", type=int, default=RUN_MIN_POINTS)
-    g_detection.add_argument("--run-max-gap-points", type=int, default=RUN_MAX_GAP_POINTS)
-    g_detection.add_argument("--run-max-gap-days", type=float, default=None)
-    g_detection.add_argument("--run-min-duration-days", type=float, default=0.0)
-    g_baseline.add_argument(
-        "--baseline-func",
-        type=str,
-        default=BASELINE_FUNC,
-        choices=["gp", "global_median", "per_camera_median"],
-    )
-    g_baseline.add_argument("--baseline-s0", type=float, default=BASELINE_S0)
-    g_baseline.add_argument("--baseline-w0", type=float, default=BASELINE_W0)
-    g_baseline.add_argument("--baseline-q", type=float, default=BASELINE_Q)
-    g_baseline.add_argument("--baseline-jitter", type=float, default=BASELINE_JITTER)
-    g_baseline.add_argument("--baseline-sigma-floor", type=float, default=None)
-    g_filter.add_argument("--no-event-prob", action="store_true", default=False,
-                        help="Disable event probability computation for faster runs")
-    g_filter.add_argument("--compute-event-prob", dest="no_event_prob", action="store_false",
-                        help="Enable event probability computation (default, required for trigger_mode='posterior_prob')")
-    g_filter.add_argument("--min-mag-offset", type=float, default=MIN_MAG_OFFSET)
+    add_config_args(g_config)
+    parser.set_defaults(**DETECTION_RATE_CONFIG_DEFAULTS)
 
     args = parser.parse_args()
+    apply_config(
+        args,
+        command="detection-rate",
+        valid_keys=namespace_keys(parser, DETECTION_RATE_CONFIG_DEFAULTS),
+        path_keys={"manifest", "out_dir", "output"},
+    )
 
     # Set up output paths with timestamped run directory
     base_out_dir = Path(args.out_dir)
@@ -526,7 +530,7 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
 
     results_dir.mkdir(parents=True, exist_ok=True)
 
-    output_out = args.out if args.out else (results_dir / "detection_rate_results.parquet")
+    output_out = args.output if args.output else (results_dir / "detection_rate_results.parquet")
     summary_out = results_dir / "detection_summary.json"
 
     # Save run parameters to JSON

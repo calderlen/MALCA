@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from malca.ml.features import ML_FEATURE_COLUMNS, infer_ml_feature_columns, select_ml_features
+from malca.meta_analysis.ml.features import ML_FEATURE_COLUMNS, infer_ml_feature_columns, select_ml_features
 
 
 def test_ml_feature_columns_include_new_fourier_fields() -> None:

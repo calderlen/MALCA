@@ -37,6 +37,7 @@ from malca.config import (
     GAIA_EPOCH_DATA_STRUCTURE,
 )
 from malca.config import PARQUET_OUTPUT_COMPRESSION
+from malca.cli_config import add_config_args, apply_config
 from malca.ltv.filter import (
     apply_all_filters,
     filter_slope_threshold,
@@ -54,13 +55,39 @@ from malca.ltv.dust import apply_dust_flags
 from malca.ltv.cmd import compute_cmd_features, assign_cmd_groups, load_mist_grid, fetch_bailer_jones_distances
 from malca.ltv.gaia_epoch import query_gaia_epoch_photometry_batch, apply_gaia_epoch_flags
 from malca.ltv.stochastic import add_stochastic_postfilter_features
-from malca.ltv.pca import (
+from malca.meta_analysis.ltv_pca import (
     fit_apply_ltv_pca,
     save_ltv_pca_model,
     resolve_feature_columns as _resolve_pca_features,
     coerce_n_components as _coerce_pca_nc,
 )
 from malca.characterize import get_dust_extinction
+
+
+LTV_BUILD_CONFIG_DEFAULTS = {
+    "skip_filters": False,
+    "run_stochastic_postfilter": False,
+    "stochastic_include_drw": False,
+    "skip_crossmatch": False,
+    "no_ztf_periodic": False,
+    "no_ogle_periodic": False,
+    "skip_neowise": False,
+    "skip_extinction": False,
+    "skip_dust_flags": False,
+    "skip_gaia_epoch": False,
+    "gaia_epoch_table": None,
+    "gaia_epoch_data_release": GAIA_EPOCH_DATA_RELEASE,
+    "gaia_epoch_data_structure": GAIA_EPOCH_DATA_STRUCTURE,
+    "gaia_epoch_band": None,
+    "gaia_epoch_include_invalid": False,
+    "skip_bailer_jones": False,
+    "skip_cmd": False,
+    "log_rejections": None,
+    "run_pca": False,
+    "pca_n_components": 10,
+}
+
+LTV_BUILD_CONFIG_PATH_KEYS = {"log_rejections"}
 
 
 # =============================================================================
@@ -446,7 +473,7 @@ def add_pipeline_args(parser):
         help="Minimum |max diff| threshold (mag)",
     )
     g_general.add_argument(
-        "--n-workers",
+        "--workers",
         type=int,
         default=LTV_WORKERS,
         help="Number of parallel workers",
@@ -456,101 +483,6 @@ def add_pipeline_args(parser):
         type=int,
         default=LTV_CHUNK_SIZE,
         help="Chunk size for batch queries",
-    )
-    g_filters.add_argument(
-        "--skip-filters",
-        action="store_true",
-        help="Skip filtering stage",
-    )
-    g_filters.add_argument(
-        "--run-stochastic-postfilter",
-        action="store_true",
-        help="Compute optional stochastic post-filter features (SF, IAR, MHPS) on surviving candidates",
-    )
-    g_filters.add_argument(
-        "--stochastic-include-drw",
-        action="store_true",
-        help="Also fit optional GP-DRW features during the stochastic post-filter stage",
-    )
-    g_crossmatch.add_argument(
-        "--skip-crossmatch",
-        action="store_true",
-        help="Skip catalog crossmatch stage",
-    )
-    g_crossmatch.add_argument(
-        "--no-ztf-periodic",
-        action="store_true",
-        help="Skip ZTF periodic variables crossmatch (Chen+2020)",
-    )
-    g_crossmatch.add_argument(
-        "--no-ogle-periodic",
-        action="store_true",
-        help="Skip OGLE periodic variables crossmatch (II/213)",
-    )
-    g_neowise.add_argument(
-        "--skip-neowise",
-        action="store_true",
-        help="Skip NEOWISE extraction stage",
-    )
-    g_extinction.add_argument(
-        "--skip-extinction",
-        action="store_true",
-        help="Skip extinction correction stage",
-    )
-    g_extinction.add_argument(
-        "--skip-dust-flags",
-        action="store_true",
-        help="Skip dust-driven variability flags",
-    )
-    g_gaia_epoch.add_argument(
-        "--skip-gaia-epoch",
-        action="store_true",
-        help="Skip Gaia epoch photometry stage",
-    )
-    g_gaia_epoch.add_argument(
-        "--gaia-epoch-table",
-        type=str,
-        default=None,
-        help="Gaia TAP epoch photometry table (optional; if omitted, DataLink is used)",
-    )
-    g_gaia_epoch.add_argument(
-        "--gaia-epoch-data-release",
-        type=str,
-        default=GAIA_EPOCH_DATA_RELEASE,
-        help="Gaia data release for DataLink (default: Gaia DR3)",
-    )
-    g_gaia_epoch.add_argument(
-        "--gaia-epoch-data-structure",
-        type=str,
-        default=GAIA_EPOCH_DATA_STRUCTURE,
-        help="DataLink structure: RAW or INDIVIDUAL (default: RAW)",
-    )
-    g_gaia_epoch.add_argument(
-        "--gaia-epoch-band",
-        type=str,
-        default=None,
-        help="Optional band restriction for DataLink (e.g., G, BP, RP)",
-    )
-    g_gaia_epoch.add_argument(
-        "--gaia-epoch-include-invalid",
-        action="store_true",
-        help="Include invalid epoch photometry (valid_data=False)",
-    )
-    g_bailer_jones.add_argument(
-        "--skip-bailer-jones",
-        action="store_true",
-        help="Skip Bailer-Jones distance fetch stage",
-    )
-    g_cmd.add_argument(
-        "--skip-cmd",
-        action="store_true",
-        help="Skip CMD features stage",
-    )
-    g_logging.add_argument(
-        "--log-rejections",
-        type=str,
-        default=None,
-        help="Log rejected sources to this CSV",
     )
     g_pca.add_argument(
         "--run-pca",
@@ -564,16 +496,24 @@ def add_pipeline_args(parser):
         metavar="N",
         help="Number of PCA components (int) or variance fraction (float, e.g. 0.95). Default: 10",
     )
+    add_config_args(g_general)
     g_general.add_argument(
         "-v", "--verbose",
         action="store_true",
         help="Print progress",
     )
+    parser.set_defaults(**LTV_BUILD_CONFIG_DEFAULTS)
     return parser
 
 
 def run_pipeline_cli(args):
     """Run pipeline from CLI arguments."""
+    apply_config(
+        args,
+        command="ltv-build",
+        valid_keys=set(vars(args)) | set(LTV_BUILD_CONFIG_DEFAULTS),
+        path_keys=LTV_BUILD_CONFIG_PATH_KEYS,
+    )
     # Resolve input/output from --mag-bin if not given explicitly
     if args.input is None:
         if args.mag_bin is None:
@@ -623,7 +563,7 @@ def run_pipeline_cli(args):
         run_pca=args.run_pca,
         pca_n_components=args.pca_n_components,
         pca_model_path=pca_model_path,
-        n_workers=args.n_workers,
+        n_workers=args.workers,
         chunk_size=args.chunk_size,
         log_csv=args.log_rejections,
         verbose=args.verbose,

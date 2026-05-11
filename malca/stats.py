@@ -41,7 +41,7 @@ from malca.config import (
     PERIODOGRAM_REFINE_N_GRID,
 )
 from malca.periodogram import pdm_find_period, ce_find_period
-from malca.utils import read_lc_dat2, read_lc_csv, read_skypatrol_lc_csv, compute_camera_loo_metrics
+from malca.utils import read_lc_dat2, read_lc_csv, read_skypatrol_lc_csv, compute_camera_loo_metrics, compute_field_summary
 
 
 
@@ -1664,6 +1664,7 @@ def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=Tr
     if use_only_good:
         df = df[(df["good_bad"] == 1) & (df["saturated"] == 0)].reset_index(drop=True)
     kept_n = len(df)
+    field_summary = compute_field_summary(df)
 
     # time axis in days since first exposure (JD is in days already)
     jd0 = df["JD"].iloc[0]
@@ -1993,6 +1994,14 @@ def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=Tr
         ("camera_loo_corr_min", camera_loo_corr_min),
         ("camera_loo_corr_median", camera_loo_corr_median),
         ("camera_loo_rms_max", camera_loo_rms_max),
+        ("asassn_field_key", field_summary["asassn_field_key"]),
+        ("asassn_fields", field_summary["asassn_fields"]),
+        ("asassn_field_count", field_summary["asassn_field_count"]),
+        ("asassn_field_key_fraction", field_summary["asassn_field_key_fraction"]),
+        ("camera_field_key", field_summary["camera_field_key"]),
+        ("camera_fields", field_summary["camera_fields"]),
+        ("camera_field_count", field_summary["camera_field_count"]),
+        ("camera_field_key_fraction", field_summary["camera_field_key_fraction"]),
         ("by_camera", by_camera),
         ("by_field", by_field),
         ("by_band", by_band),

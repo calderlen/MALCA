@@ -357,16 +357,16 @@ def parse_args() -> argparse.Namespace:
         help="Optional CSV/Parquet metadata file for flat directories. Used to recover per-source mag_bin/index metadata.",
     )
     parser.add_argument(
-        "--out",
+        "--output",
         type=Path,
         default=DEFAULT_OUTPUT_DIR / "lc_manifest.parquet",
         help="Output Parquet file path. Default: %(default)s",
     )
     parser.add_argument(
         "--mag-bin",
-        action="append",
+        nargs="+",
         dest="mag_bins",
-        help="Limit processing to specific mag bins. Repeat for multiple bins.",
+        help="Limit processing to specific mag bins.",
     )
     parser.add_argument(
         "--id-column",
@@ -383,7 +383,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-progress",
         action="store_true",
-        help="Disable tqdm progress bars.",
+        help="Disable progress bars.",
     )
     parser.add_argument(
         "--workers",
@@ -414,7 +414,7 @@ def main() -> None:
         index_file=args.index_file.expanduser() if args.index_file else None,
     )
 
-    out_path = args.out.expanduser()
+    out_path = args.output.expanduser()
     if out_path.exists() and not args.overwrite:
         raise SystemExit(f"Refusing to overwrite existing file: {out_path} (use --overwrite)")
 

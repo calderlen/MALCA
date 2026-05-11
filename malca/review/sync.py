@@ -10,6 +10,13 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
+from malca.review.taxonomy import (
+    REVIEW_TAXONOMY_FIELDS,
+    TAXONOMY_VERSION,
+    derive_event_class,
+    json_list,
+    normalize_selection,
+)
 from malca.review.store import (
     _CANDIDATE_COLUMNS,
     _COL_NAMES,
@@ -25,7 +32,7 @@ from malca.review.store import (
 )
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 CANDIDATES_JSONL = "candidates.jsonl"
 REVIEWS_JSONL = "reviews.jsonl"
 ASSETS_MANIFEST_JSON = "assets_manifest.json"
@@ -33,10 +40,9 @@ ASSETS_MANIFEST_JSON = "assets_manifest.json"
 REVIEW_FIELDS: tuple[str, ...] = (
     "candidate_id",
     "interest_score",
-    "event_class",
     "review_pass",
     "notes",
-    "status",
+    *REVIEW_TAXONOMY_FIELDS,
     "reviewer",
     "updated_at",
 )
@@ -136,7 +142,7 @@ def _candidate_records(conn: sqlite3.Connection, *, only_reviewed: bool = False)
     query = f"SELECT {select_cols} FROM candidates c"
     if only_reviewed:
         query += " INNER JOIN reviews r ON r.candidate_id = c.candidate_id"
-        query += " WHERE r.status IS NOT NULL AND r.status != 'unreviewed'"
+        query += " WHERE r.workflow_status IS NOT NULL AND r.workflow_status != 'unreviewed'"
     query += " ORDER BY c.candidate_id"
     cur = conn.execute(query)
     names = [desc[0] for desc in cur.description or []]
@@ -170,7 +176,7 @@ def _candidate_records(conn: sqlite3.Connection, *, only_reviewed: bool = False)
 def _review_records(conn: sqlite3.Connection, *, only_reviewed: bool = False) -> list[dict[str, object]]:
     query = f"SELECT {', '.join(REVIEW_FIELDS)} FROM reviews"
     if only_reviewed:
-        query += " WHERE status IS NOT NULL AND status != 'unreviewed'"
+        query += " WHERE workflow_status IS NOT NULL AND workflow_status != 'unreviewed'"
     query += " ORDER BY candidate_id"
     cur = conn.execute(query)
     names = [desc[0] for desc in cur.description or []]
@@ -180,8 +186,15 @@ def _review_records(conn: sqlite3.Connection, *, only_reviewed: bool = False) ->
         record: dict[str, object] = {"schema_version": SCHEMA_VERSION}
         for field in REVIEW_FIELDS:
             value = row.get(field)
-            if field in {"interest_score", "review_pass"} and not _is_missing(value):
+            if field in {"interest_score", "review_pass", "taxonomy_version"} and not _is_missing(value):
                 record[field] = int(value)
+            elif field in {"priority_tags_json", "evidence_flags_json", "model_tags_json"}:
+                key = field.removesuffix("_json")
+                try:
+                    parsed = json.loads(str(value or "[]"))
+                except Exception:
+                    parsed = []
+                record[key] = parsed if isinstance(parsed, list) else []
             elif _is_missing(value):
                 record[field] = None
             else:
@@ -636,23 +649,72 @@ def _import_review_records(
             interest_score = max(1, min(4, interest_score))
         review_pass = _coerce_review_int(record.get("review_pass"), default=1) or 1
         review_pass = max(1, review_pass)
-        event_class = str(record.get("event_class") or "unclassified")
         notes = "" if record.get("notes") is None else str(record.get("notes"))
-        status = str(record.get("status") or "unreviewed")
+        selection = normalize_selection(
+            {
+                "morphology_primary": record.get("morphology_primary"),
+                "morphology_secondary": record.get("morphology_secondary"),
+                "morphology_polarity": record.get("morphology_polarity"),
+                "morphology_recurrence": record.get("morphology_recurrence"),
+                "baseline_behavior": record.get("baseline_behavior"),
+                "physical_family": record.get("physical_family"),
+                "physical_subclass": record.get("physical_subclass"),
+                "classification_confidence": record.get("classification_confidence"),
+                "priority_tags": record.get("priority_tags") or record.get("priority_tags_json"),
+                "evidence_flags": record.get("evidence_flags") or record.get("evidence_flags_json"),
+                "model_tags": record.get("model_tags") or record.get("model_tags_json"),
+                "disposition": record.get("disposition"),
+                "duplicate_of": record.get("duplicate_of"),
+                "known_object_id": record.get("known_object_id"),
+                "known_object_source": record.get("known_object_source"),
+            }
+        )
+        workflow_status = str(record.get("workflow_status") or "unreviewed")
+        status = workflow_status
+        event_class = derive_event_class(selection)
         reviewer = "" if record.get("reviewer") is None else str(record.get("reviewer"))
+        taxonomy_values = {
+            "workflow_status": workflow_status,
+            "disposition": selection.get("disposition"),
+            "morphology_primary": selection.get("morphology_primary"),
+            "morphology_secondary": selection.get("morphology_secondary"),
+            "morphology_polarity": selection.get("morphology_polarity"),
+            "morphology_recurrence": selection.get("morphology_recurrence"),
+            "baseline_behavior": selection.get("baseline_behavior"),
+            "physical_family": selection.get("physical_family"),
+            "physical_subclass": selection.get("physical_subclass"),
+            "classification_confidence": selection.get("classification_confidence"),
+            "priority_tags_json": json_list(selection.get("priority_tags")),
+            "evidence_flags_json": json_list(selection.get("evidence_flags")),
+            "model_tags_json": json_list(selection.get("model_tags")),
+            "duplicate_of": selection.get("duplicate_of"),
+            "known_object_id": selection.get("known_object_id"),
+            "known_object_source": selection.get("known_object_source"),
+            "taxonomy_version": _coerce_review_int(record.get("taxonomy_version"), default=TAXONOMY_VERSION) or TAXONOMY_VERSION,
+            "legacy_review_json": "{}" if record.get("legacy_review_json") is None else str(record.get("legacy_review_json")),
+        }
+        taxonomy_cols = list(REVIEW_TAXONOMY_FIELDS)
+        insert_cols = [
+            "candidate_id",
+            "interest_score",
+            "event_class",
+            "review_pass",
+            "notes",
+            "status",
+            "reviewer",
+            *taxonomy_cols,
+            "updated_at",
+        ]
+        placeholders = ", ".join(["?"] * len(insert_cols))
+        update_cols = [col for col in insert_cols if col != "candidate_id"]
+        conflict_set = ",\n                ".join(f"{col}=excluded.{col}" for col in update_cols)
 
         conn.execute(
-            """
-            INSERT INTO reviews (candidate_id, interest_score, event_class, review_pass, notes, status, reviewer, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            f"""
+            INSERT INTO reviews ({', '.join(insert_cols)})
+            VALUES ({placeholders})
             ON CONFLICT(candidate_id) DO UPDATE SET
-                interest_score=excluded.interest_score,
-                event_class=excluded.event_class,
-                review_pass=excluded.review_pass,
-                notes=excluded.notes,
-                status=excluded.status,
-                reviewer=excluded.reviewer,
-                updated_at=excluded.updated_at
+                {conflict_set}
             """,
             (
                 candidate_id,
@@ -662,6 +724,7 @@ def _import_review_records(
                 notes,
                 status,
                 reviewer,
+                *(taxonomy_values[col] for col in taxonomy_cols),
                 updated_at,
             ),
         )
@@ -746,26 +809,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     export_parser = subparsers.add_parser("export", help="Export review DB to reviews/*.jsonl and manifest")
-    export_parser.add_argument("--db", type=Path, default=Path("output/review/review.db"), help="Review SQLite DB path")
-    export_parser.add_argument("--out-dir", type=Path, default=Path("reviews"), help="Output review bundle directory")
+    export_parser.add_argument("--review-db", type=Path, default=Path("output/review/review.db"), help="Review SQLite DB path")
+    export_parser.add_argument("--output-dir", type=Path, default=Path("reviews"), help="Output review bundle directory")
     export_parser.add_argument("--hash-assets", action="store_true", help="Include SHA-256 hashes for resolved assets")
     export_parser.add_argument("--only-reviewed", action="store_true", help="Export only reviewed/non-unreviewed rows")
 
     import_parser = subparsers.add_parser("import", help="Import reviews/*.jsonl into a review DB")
-    import_parser.add_argument("--db", type=Path, default=Path("output/review/review.db"), help="Review SQLite DB path")
-    import_parser.add_argument("--in-dir", type=Path, default=Path("reviews"), help="Input review bundle directory")
+    import_parser.add_argument("--review-db", type=Path, default=Path("output/review/review.db"), help="Review SQLite DB path")
+    import_parser.add_argument("--input-dir", type=Path, default=Path("reviews"), help="Input review bundle directory")
     import_parser.add_argument("--replace", action="store_true", help="Replace the target DB before import")
 
     args = parser.parse_args(argv)
     if args.command == "export":
         result = export_review_bundle(
-            args.db,
-            args.out_dir,
+            args.review_db,
+            args.output_dir,
             hash_assets=bool(args.hash_assets),
             only_reviewed=bool(args.only_reviewed),
         )
     else:
-        result = import_review_bundle(args.in_dir, db_path=args.db, replace=bool(args.replace))
+        result = import_review_bundle(args.input_dir, db_path=args.review_db, replace=bool(args.replace))
     print(json.dumps(_json_value(result), sort_keys=True))
     return 0
 

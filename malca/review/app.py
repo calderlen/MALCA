@@ -104,6 +104,13 @@ from malca.review.period_search import (
 )
 from malca.review.session import create_queue_data_dict
 from malca.review.sync import auto_export_review_bundle
+from malca.review.taxonomy import (
+    MORPHOLOGY_PRIMARY,
+    PHYSICAL_FAMILIES,
+    keyboard_payload,
+    label_for,
+    selection_from_review,
+)
 from malca.review.store import (
     DEFAULT_DB_PATH,
     DEFAULT_STANDALONE_DB_PATH,
@@ -121,8 +128,6 @@ from malca.review.store import (
     export_reviews,
     detect_run_directory_files,
     merge_review_databases,
-    merge_candidate_results,
-    merge_vetting_results,
     get_distinct_values,
     get_diagnostic_background,
     get_numeric_bounds,
@@ -170,6 +175,8 @@ _configure_background_start_methods()
 
 
 CLASS_BADGE_TAGS = list(CLASS_KEY_MAP.values())
+TAXONOMY_KEYBOARD_PAYLOAD = keyboard_payload()
+MORPHOLOGY_PRIMARY_TAGS = [str(item["value"]) for item in MORPHOLOGY_PRIMARY]
 
 class TrackingDiskcacheManager(DiskcacheManager):
     """Diskcache manager that can clean up outstanding worker processes on exit."""
@@ -2014,6 +2021,14 @@ def _render_stat_cards(stat_rows: list[tuple[str, str]]) -> list:
         "stats_harmonics_reduced_chi2": r"Reduced $\chi^2$",
         "stats_mhps_pn_flag": "MHPS PN flag",
         "stats_mhps_non_zero": "MHPS non-zero count",
+        "stats_asassn_field_key": "ASAS-SN field",
+        "stats_asassn_fields": "ASAS-SN fields",
+        "stats_asassn_field_count": "ASAS-SN field count",
+        "stats_asassn_field_key_fraction": "ASAS-SN field fraction",
+        "stats_camera_field_key": "Camera-field",
+        "stats_camera_fields": "Camera-fields",
+        "stats_camera_field_count": "Camera-field count",
+        "stats_camera_field_key_fraction": "Camera-field fraction",
         "ltv_median": "Median (mag)",
         "ltv_median_err": "Median err proxy (mag)",
         "ltv_time_span_days": "Time span (days)",
@@ -2069,6 +2084,8 @@ def _render_stat_cards(stat_rows: list[tuple[str, str]]) -> list:
 
     def _stat_group(key: str) -> str:
         if key == "filtered_cams":
+            return "Camera Diagnostics"
+        if key.startswith("stats_asassn_field_") or key.startswith("stats_camera_field_"):
             return "Camera Diagnostics"
         if key.startswith("ltv_stoch_"):
             return "LTV Stochastic"
@@ -2908,7 +2925,7 @@ def _db_plot_mismatch_warning(db_path: str | Path | None, plot_dir: str | None) 
         return (
             f"Selected DB {selected} has 0 candidates, but the run-local DB for "
             f"{Path(str(plot_dir)).expanduser().resolve()} is {sibling} with {sibling_count} candidates. "
-            f"Use --db {sibling} or omit --db to use the run-local DB automatically."
+            f"Use --review-db {sibling} or omit --review-db to use the run-local DB automatically."
         )
 
     return ""
@@ -3236,7 +3253,7 @@ def _count_candidates_in_db(path: Path) -> int:
 
 
 def _resolve_db_cli_path(raw_path: str) -> Path:
-    """Resolve --db robustly for both cwd-relative and repo-relative usage."""
+    """Resolve --review-db robustly for both cwd-relative and repo-relative usage."""
     p = Path(raw_path).expanduser()
     if p.is_absolute():
         return p.resolve()
@@ -4462,6 +4479,9 @@ def create_layout():
         dcc.Store(id='current-score', data=None),
         dcc.Store(id='event-class-store', data='unclassified'),
         dcc.Store(id='pending-prefix', data=''),  # kept for callback compatibility
+        dcc.Store(id='active-taxonomy-menu', data=''),
+        dcc.Store(id='taxonomy-selection-store', data={}),
+        dcc.Store(id='taxonomy-submenu-store', data=''),
         dcc.Store(id='needs-followup-store', data=False),
         dcc.Store(id='review-pass-store', data=1),
         dcc.Store(id='sidebar-state', data=False),  # collapsed by default
@@ -5160,19 +5180,35 @@ def create_layout():
                     for i in range(1, 5)
                 ], style={'display': 'flex', 'align-items': 'center', 'margin-bottom': '6px'}),
 
-                # Event class row (clickable buttons, single-key shortcuts)
+                # Taxonomy row (clickable buttons, single-key shortcuts)
                 html.Div([
-                    html.Span('Class: ', style={'color': '#aaa', 'margin-right': '8px', 'font-size': '11px'}),
-                    html.Span(id='prefix-indicator', style={'margin-right': '6px', 'font-size': '11px'}),
+                    html.Span('Morphology: ', style={'color': '#aaa', 'margin-right': '8px', 'font-size': '11px'}),
                 ] + [
                     html.Button(
-                        f'[{key.upper()}] {tag.replace("_", " ")}',
-                        id=f'class-badge-{tag}',
+                        f'[{item["key"].upper()}] {item["label"]}',
+                        id={'type': 'taxonomy-primary-btn', 'value': item['value']},
                         n_clicks=0,
                         className='badge-btn',
                     )
-                    for key, tag in CLASS_KEY_MAP.items()
+                    for item in MORPHOLOGY_PRIMARY
+                ] + [
+                    html.Button('[H] hypothesis', id='taxonomy-hypothesis-btn', n_clicks=0, className='badge-btn'),
+                    html.Span(id='prefix-indicator', style={'margin-right': '6px', 'font-size': '11px'}),
                 ], style={'display': 'flex', 'align-items': 'center', 'flex-wrap': 'wrap', 'margin-bottom': '6px'}),
+
+                html.Div(id='taxonomy-submenu-panel', style={'display': 'flex', 'align-items': 'center', 'flex-wrap': 'wrap', 'gap': '4px', 'margin-bottom': '6px'}),
+                html.Div(id='taxonomy-summary', style={'color': '#9fb6cb', 'font-size': '11px', 'margin-bottom': '6px'}),
+
+                html.Div([
+                    html.Button(
+                        f'legacy {tag.replace("_", " ")}',
+                        id=f'class-badge-{tag}',
+                        n_clicks=0,
+                        className='badge-btn',
+                        style={'display': 'none'},
+                    )
+                    for tag in CLASS_BADGE_TAGS
+                ], style={'display': 'none'}),
 
                 # Action row: Save, Done, Followup, Pass, Status, Notification
                 html.Div([
@@ -5839,10 +5875,11 @@ app.clientside_callback(
      Output('sidebar-state', 'data')],
     [Input('sidebar-toggle', 'n_clicks'),
      Input('keyboard-input', 'value')],
-    State('sidebar-state', 'data'),
+    [State('sidebar-state', 'data'),
+     State('active-taxonomy-menu', 'data')],
     prevent_initial_call=True
 )
-def toggle_sidebar(n_clicks, key_value, is_expanded):
+def toggle_sidebar(n_clicks, key_value, is_expanded, active_taxonomy_menu):
     """Toggle sidebar visibility."""
     ctx = callback_context
     if not ctx.triggered:
@@ -5853,6 +5890,8 @@ def toggle_sidebar(n_clicks, key_value, is_expanded):
     # Check if Escape was pressed
     key = _keyboard_key(key_value)
     if 'keyboard-input' in trigger and key == 'Escape':
+        if active_taxonomy_menu:
+            return no_update, no_update, no_update
         is_expanded = not is_expanded
 
     # Check if toggle button was clicked
@@ -7331,44 +7370,85 @@ def load_explorer_selection_panel(_tick):
     return _render_explorer_selection_panel(selection_meta)
 
 
-def _do_save(candidate_id, score, event_class, needs_followup, notes, event_type, *, increment_pass=False):
+def _do_save(candidate_id, score, taxonomy_selection, needs_followup, notes, event_type, *, increment_pass=False):
     """Shared save helper.  Auto-sets status; only increments review_pass on Done."""
     with closing(db_connect(Path(DB_PATH))) as conn:
         review = get_review(conn, candidate_id)
         current_pass = max(1, review.get('review_pass', 0))
         new_pass = current_pass + 1 if increment_pass else current_pass
-        status = 'needs_followup' if needs_followup else 'reviewed'
+        workflow_status = 'needs_followup' if needs_followup else 'reviewed'
+        selection = selection_from_review(taxonomy_selection if isinstance(taxonomy_selection, dict) else {})
         save_review(
             conn,
             candidate_id=candidate_id,
             interest_score=score,
-            event_class=event_class or 'unclassified',
             review_pass=new_pass,
             notes=notes or '',
-            status=status,
+            workflow_status=workflow_status,
+            disposition=selection.get('disposition') or 'keep',
+            morphology_primary=selection.get('morphology_primary'),
+            morphology_secondary=selection.get('morphology_secondary'),
+            morphology_polarity=selection.get('morphology_polarity'),
+            morphology_recurrence=selection.get('morphology_recurrence'),
+            baseline_behavior=selection.get('baseline_behavior'),
+            physical_family=selection.get('physical_family'),
+            physical_subclass=selection.get('physical_subclass'),
+            classification_confidence=selection.get('classification_confidence'),
+            priority_tags=selection.get('priority_tags'),
+            evidence_flags=selection.get('evidence_flags'),
+            model_tags=selection.get('model_tags'),
+            duplicate_of=selection.get('duplicate_of'),
+            known_object_id=selection.get('known_object_id'),
+            known_object_source=selection.get('known_object_source'),
+            legacy_review_json=review.get('legacy_review_json') or '{}',
             reviewer='calder',
             event_type=event_type,
         )
         _clear_review_state_caches()
-        return new_pass, status
+        return new_pass, workflow_status
 
 
 app.clientside_callback(
     """
     function(keyValue, currentIdx, queueSize, currentCandidateId, currentScore,
-             eventClass, pendingPrefix, needsFollowup, notes, saveRequest) {
+             taxonomySelection, activeMenu, taxonomySubmenu, needsFollowup, notes, saveRequest) {
         var no = window.dash_clientside.no_update;
+        var taxonomy = TAXONOMY_PAYLOAD_PLACEHOLDER;
+        var primaryByKey = {};
+        var primaryByValue = {};
+        taxonomy.morphology_primary.forEach(function(item) {
+            primaryByKey[String(item.key).toLowerCase()] = item;
+            primaryByValue[String(item.value)] = item;
+        });
+        var familyByKey = {};
+        taxonomy.physical_families.forEach(function(item) {
+            familyByKey[String(item.key).toLowerCase()] = item;
+        });
+        var secondaryByKey = function(primary) {
+            var out = {};
+            (taxonomy.morphology_secondary[primary] || []).forEach(function(item) {
+                out[String(item.key).toLowerCase()] = item;
+            });
+            return out;
+        };
+        var subclassByKey = function(family) {
+            var out = {};
+            (taxonomy.physical_subclasses[family] || []).forEach(function(item) {
+                out[String(item.key).toLowerCase()] = item;
+            });
+            return out;
+        };
         var key = '';
         if (keyValue) {
             key = String(keyValue).split('\\t', 1)[0].trim();
         }
-        if (!key || key === '?' || key === 'Escape' || key.toLowerCase() === 'r') {
-            return [no, no, no, no, no, no, no];
+        if (!key || key === '?' || key.toLowerCase() === 'r') {
+            return [no, no, no, no, no, no, no, no, no, no];
         }
 
         var size = parseInt(queueSize == null ? 0 : queueSize, 10);
         if (!Number.isFinite(size) || size <= 0) {
-            return [no, 'Queue is empty', no, no, no, no, no];
+            return [no, 'Queue is empty', no, no, no, no, no, no, no, no];
         }
 
         var idx = parseInt(currentIdx == null ? 0 : currentIdx, 10);
@@ -7376,14 +7456,23 @@ app.clientside_callback(
             idx = 0;
         }
         var candidateId = currentCandidateId == null ? '' : String(currentCandidateId);
-        var currentClass = eventClass ? String(eventClass) : 'unclassified';
-        var nextClass = currentClass;
+        var selection = taxonomySelection && typeof taxonomySelection === 'object'
+            ? Object.assign({}, taxonomySelection)
+            : {};
+        if (!selection.priority_tags) { selection.priority_tags = []; }
+        if (!selection.evidence_flags) { selection.evidence_flags = []; }
+        if (!selection.model_tags) { selection.model_tags = []; }
         var nextScore = currentScore;
         var nextFollowup = !!needsFollowup;
         var nextIdx = idx;
         var notice = no;
         var saveReq = no;
+        var nextActiveMenu = activeMenu || '';
+        var nextSubmenu = taxonomySubmenu || '';
         var prefixOut = no;
+        var selectionOut = no;
+        var activeOut = no;
+        var submenuOut = no;
 
         var nextNonce = 1;
         if (saveRequest && typeof saveRequest === 'object' && typeof saveRequest.nonce === 'number') {
@@ -7395,7 +7484,7 @@ app.clientside_callback(
                 nonce: nextNonce,
                 candidate_id: candidateId,
                 score: scoreValue,
-                event_class: nextClass,
+                taxonomy: selection,
                 needs_followup: nextFollowup,
                 notes: notes || '',
                 increment_pass: !!incrementPass,
@@ -7404,86 +7493,174 @@ app.clientside_callback(
         };
 
         var lower = key.toLowerCase();
-        var classMap = {
-            d: 'dipper',
-            m: 'microlensing',
-            f: 'flare',
-            l: 'ltv',
-            u: 'unknown_interesting',
-            i: 'instrumental',
-            o: 'other'
+        var emitTaxonomy = function(message) {
+            selectionOut = selection;
+            activeOut = nextActiveMenu;
+            submenuOut = nextSubmenu;
+            return [no, message, no, no, no, prefixOut, no, selectionOut, activeOut, submenuOut];
         };
-        if (Object.prototype.hasOwnProperty.call(classMap, lower)) {
-            var classTag = classMap[lower];
-            nextClass = (currentClass === classTag) ? 'unclassified' : classTag;
-            notice = 'Class: ' + nextClass;
-            return [no, notice, no, no, nextClass, prefixOut, no];
+
+        if (key === 'Escape') {
+            if (nextActiveMenu) {
+                nextActiveMenu = '';
+                nextSubmenu = '';
+                return emitTaxonomy('Taxonomy menu closed');
+            }
+            return [no, no, no, no, no, no, no, no, no, no];
+        }
+
+        if (primaryByKey[lower]) {
+            var primary = primaryByKey[lower];
+            if (selection.morphology_primary === primary.value) {
+                selection.morphology_primary = null;
+                selection.morphology_secondary = null;
+                nextActiveMenu = '';
+                nextSubmenu = '';
+                return emitTaxonomy('Morphology cleared');
+            }
+            selection.morphology_primary = primary.value;
+            selection.morphology_secondary = null;
+            nextActiveMenu = 'morphology_secondary';
+            nextSubmenu = primary.value;
+            return emitTaxonomy('Morphology: ' + primary.label);
+        }
+
+        if (lower === 'h') {
+            if (nextActiveMenu === 'physical_family') {
+                nextActiveMenu = '';
+                nextSubmenu = '';
+                return emitTaxonomy('Hypothesis menu closed');
+            }
+            nextActiveMenu = 'physical_family';
+            nextSubmenu = '';
+            return emitTaxonomy('Hypothesis menu');
+        }
+
+        if (nextActiveMenu === 'morphology_secondary') {
+            if (key === 'Backspace') {
+                selection.morphology_secondary = null;
+                nextActiveMenu = '';
+                nextSubmenu = '';
+                return emitTaxonomy('Secondary morphology cleared');
+            }
+            var secondary = secondaryByKey(selection.morphology_primary || nextSubmenu)[lower];
+            if (secondary) {
+                selection.morphology_secondary = (selection.morphology_secondary === secondary.value) ? null : secondary.value;
+                nextActiveMenu = '';
+                nextSubmenu = '';
+                return emitTaxonomy('Detail: ' + (selection.morphology_secondary || 'cleared'));
+            }
+        }
+
+        if (nextActiveMenu === 'physical_family') {
+            if (key === 'Backspace') {
+                selection.physical_family = null;
+                selection.physical_subclass = null;
+                nextActiveMenu = '';
+                nextSubmenu = '';
+                return emitTaxonomy('Hypothesis cleared');
+            }
+            var family = familyByKey[lower];
+            if (family) {
+                if (selection.physical_family === family.value) {
+                    selection.physical_family = null;
+                    selection.physical_subclass = null;
+                    nextActiveMenu = '';
+                    nextSubmenu = '';
+                    return emitTaxonomy('Hypothesis cleared');
+                }
+                selection.physical_family = family.value;
+                selection.physical_subclass = null;
+                nextActiveMenu = (taxonomy.physical_subclasses[family.value] || []).length ? 'physical_subclass' : '';
+                nextSubmenu = nextActiveMenu ? family.value : '';
+                return emitTaxonomy('Hypothesis: ' + family.label);
+            }
+        }
+
+        if (nextActiveMenu === 'physical_subclass') {
+            if (key === 'Backspace') {
+                selection.physical_subclass = null;
+                nextActiveMenu = '';
+                nextSubmenu = '';
+                return emitTaxonomy('Physical subclass cleared');
+            }
+            var subclass = subclassByKey(selection.physical_family || nextSubmenu)[lower];
+            if (subclass) {
+                selection.physical_subclass = (selection.physical_subclass === subclass.value) ? null : subclass.value;
+                nextActiveMenu = '';
+                nextSubmenu = '';
+                return emitTaxonomy('Subclass: ' + (selection.physical_subclass || 'cleared'));
+            }
         }
 
         if (key === ',') {
             nextFollowup = !nextFollowup;
             notice = 'Followup: ' + (nextFollowup ? 'ON' : 'OFF');
-            return [no, notice, no, nextFollowup, no, prefixOut, no];
+            return [no, notice, no, nextFollowup, no, prefixOut, no, no, no, no];
         }
 
         if (key === 'Backspace') {
             nextIdx = Math.max(0, idx - 1);
             notice = '← Previous';
-            return [nextIdx !== idx ? nextIdx : no, notice, no, no, no, prefixOut, no];
+            return [nextIdx !== idx ? nextIdx : no, notice, no, no, no, prefixOut, no, no, no, no];
         }
 
         if (key === 'Tab') {
             nextIdx = Math.min(idx + 1, size - 1);
             notice = '→ Next';
-            return [nextIdx !== idx ? nextIdx : no, notice, no, no, no, prefixOut, no];
+            return [nextIdx !== idx ? nextIdx : no, notice, no, no, no, prefixOut, no, no, no, no];
         }
 
         if (key === '.') {
             if (!candidateId) {
-                return [no, 'Queue is empty', no, no, no, prefixOut, no];
+                return [no, 'Queue is empty', no, no, no, prefixOut, no, no, no, no];
             }
             notice = '✓ Saved';
             saveReq = buildSaveRequest(currentScore, false);
-            return [no, notice, no, no, no, prefixOut, saveReq];
+            return [no, notice, no, no, no, prefixOut, saveReq, no, no, no];
         }
 
         if (key === 'Enter') {
             if (currentScore == null || currentScore === '') {
-                return [no, '⚠ Confidence required', no, no, no, prefixOut, no];
+                return [no, '⚠ Confidence required', no, no, no, prefixOut, no, no, no, no];
             }
-            if (!currentClass || currentClass === 'unclassified') {
-                return [no, '⚠ Class required', no, no, no, prefixOut, no];
+            if (!selection.morphology_primary) {
+                return [no, '⚠ Morphology required', no, no, no, prefixOut, no, no, no, no];
             }
             nextIdx = Math.min(idx + 1, size - 1);
             notice = '✓ Saved + Next →';
             saveReq = buildSaveRequest(currentScore, true);
-            return [nextIdx !== idx ? nextIdx : no, notice, no, no, no, prefixOut, saveReq];
+            return [nextIdx !== idx ? nextIdx : no, notice, no, no, no, prefixOut, saveReq, no, no, no];
         }
 
         if (key === '1' || key === '2' || key === '3' || key === '4') {
             nextScore = parseInt(key, 10);
             notice = '✓ Confidence: ' + String(nextScore);
             saveReq = buildSaveRequest(nextScore, false);
-            return [no, notice, nextScore, no, no, prefixOut, saveReq];
+            return [no, notice, nextScore, no, no, prefixOut, saveReq, no, no, no];
         }
 
-        return [no, no, no, no, no, prefixOut, no];
+        return [no, no, no, no, no, prefixOut, no, no, no, no];
     }
-    """,
+    """.replace("TAXONOMY_PAYLOAD_PLACEHOLDER", json.dumps(TAXONOMY_KEYBOARD_PAYLOAD, sort_keys=True)),
     [Output('current-index', 'data', allow_duplicate=True),
      Output('notification', 'children', allow_duplicate=True),
      Output('current-score', 'data', allow_duplicate=True),
      Output('needs-followup-store', 'data', allow_duplicate=True),
      Output('event-class-store', 'data', allow_duplicate=True),
      Output('pending-prefix', 'data', allow_duplicate=True),
-     Output('review-save-request', 'data', allow_duplicate=True)],
+     Output('review-save-request', 'data', allow_duplicate=True),
+     Output('taxonomy-selection-store', 'data', allow_duplicate=True),
+     Output('active-taxonomy-menu', 'data', allow_duplicate=True),
+     Output('taxonomy-submenu-store', 'data', allow_duplicate=True)],
     Input('keyboard-input', 'value'),
     [State('current-index', 'data'),
      State('queue-size-store', 'data'),
      State('current-candidate-id', 'data'),
      State('current-score', 'data'),
-     State('event-class-store', 'data'),
-     State('pending-prefix', 'data'),
+     State('taxonomy-selection-store', 'data'),
+     State('active-taxonomy-menu', 'data'),
+     State('taxonomy-submenu-store', 'data'),
      State('needs-followup-store', 'data'),
      State('notes', 'value'),
      State('review-save-request', 'data')],
@@ -7524,7 +7701,7 @@ def persist_review_save_request(save_request, current_candidate_id):
         new_pass, _status = _do_save(
             candidate_id,
             score,
-            save_request.get('event_class'),
+            save_request.get('taxonomy'),
             bool(save_request.get('needs_followup')),
             save_request.get('notes'),
             str(save_request.get('event_type') or 'keyboard'),
@@ -8526,7 +8703,10 @@ app.clientside_callback(
      Output('needs-followup-store', 'data'),
      Output('review-pass-store', 'data'),
      Output('notes', 'value'),
-     Output('current-score', 'data')],
+     Output('current-score', 'data'),
+     Output('taxonomy-selection-store', 'data'),
+     Output('active-taxonomy-menu', 'data'),
+     Output('taxonomy-submenu-store', 'data')],
     Input('current-candidate-id', 'data'),
     State('queue-size-store', 'data'),
     prevent_initial_call=False
@@ -8534,7 +8714,7 @@ app.clientside_callback(
 def load_review_form(candidate_id, queue_size):
     """Load existing review for current candidate into stores."""
     if not candidate_id or int(queue_size or 0) == 0:
-        return 'unclassified', False, 1, '', None
+        return 'unclassified', False, 1, '', None, {}, '', ''
 
     with closing(db_connect(Path(DB_PATH))) as conn:
         review = get_review(conn, str(candidate_id))
@@ -8545,18 +8725,23 @@ def load_review_form(candidate_id, queue_size):
     if event_class not in allowed_classes:
         event_class = 'other'
 
+    selection = selection_from_review(review)
+
     return (
         event_class,
-        review.get('status', 'unreviewed') == 'needs_followup',
+        review.get('workflow_status', 'unreviewed') == 'needs_followup',
         review.get('review_pass', 1),
         review.get('notes', ''),
         review.get('interest_score'),
+        selection,
+        '',
+        '',
     )
 
 
 app.clientside_callback(
     """
-    function(n1, n2, n3, n4, queueSize, candidateId, eventClass, needsFollowup, notes, saveRequest) {
+    function(n1, n2, n3, n4, queueSize, candidateId, taxonomySelection, needsFollowup, notes, saveRequest) {
         var no = window.dash_clientside.no_update;
         if (!candidateId || parseInt(queueSize == null ? 0 : queueSize, 10) <= 0) {
             var triggered = window.dash_clientside.callback_context.triggered || [];
@@ -8592,7 +8777,7 @@ app.clientside_callback(
                 nonce: nextNonce,
                 candidate_id: String(candidateId),
                 score: score,
-                event_class: eventClass || 'unclassified',
+                taxonomy: taxonomySelection || {},
                 needs_followup: !!needsFollowup,
                 notes: notes || '',
                 increment_pass: false,
@@ -8607,7 +8792,7 @@ app.clientside_callback(
     [Input(f'score-{i}', 'n_clicks') for i in range(1, 5)],
     [State('queue-size-store', 'data'),
      State('current-candidate-id', 'data'),
-     State('event-class-store', 'data'),
+     State('taxonomy-selection-store', 'data'),
      State('needs-followup-store', 'data'),
      State('notes', 'value'),
      State('review-save-request', 'data')],
@@ -8623,19 +8808,19 @@ app.clientside_callback(
     [State('queue-size-store', 'data'),
      State('current-candidate-id', 'data'),
      State('current-score', 'data'),
-     State('event-class-store', 'data'),
+     State('taxonomy-selection-store', 'data'),
      State('needs-followup-store', 'data'),
      State('notes', 'value')],
     prevent_initial_call=True
 )
 def save_review_callback(n_clicks, queue_size, candidate_id, score,
-                         event_class, needs_followup, notes):
+                         taxonomy_selection, needs_followup, notes):
     """Save review."""
     if not n_clicks or int(queue_size or 0) <= 0 or not candidate_id:
         return no_update, no_update
 
     new_pass, _ = _do_save(
-        str(candidate_id), score, event_class, needs_followup, notes, 'save_button',
+        str(candidate_id), score, taxonomy_selection, needs_followup, notes, 'save_button',
     )
 
     return "✓ Saved", new_pass
@@ -8669,13 +8854,13 @@ def back_callback(n_clicks, idx):
      State('queue-size-store', 'data'),
      State('current-candidate-id', 'data'),
      State('current-score', 'data'),
-     State('event-class-store', 'data'),
+     State('taxonomy-selection-store', 'data'),
      State('needs-followup-store', 'data'),
      State('notes', 'value')],
     prevent_initial_call=True
 )
 def done_callback(n_clicks, idx, queue_size, candidate_id, score,
-                  event_class, needs_followup, notes):
+                  taxonomy_selection, needs_followup, notes):
     """Save and go to next."""
     if not n_clicks or int(queue_size or 0) <= 0 or not candidate_id:
         return no_update, no_update, no_update
@@ -8683,11 +8868,12 @@ def done_callback(n_clicks, idx, queue_size, candidate_id, score,
     if score is None:
         return no_update, "⚠ Confidence required", no_update
 
-    if not event_class or event_class == 'unclassified':
-        return no_update, "⚠ Class required", no_update
+    taxonomy_selection = taxonomy_selection if isinstance(taxonomy_selection, dict) else {}
+    if not taxonomy_selection.get('morphology_primary'):
+        return no_update, "⚠ Morphology required", no_update
 
     new_pass, _ = _do_save(
-        str(candidate_id), score, event_class, needs_followup, notes, 'done_button',
+        str(candidate_id), score, taxonomy_selection, needs_followup, notes, 'done_button',
         increment_pass=True,
     )
 
@@ -8717,6 +8903,142 @@ app.clientside_callback(
     Input('current-score', 'data'),
     prevent_initial_call=False,
 )
+
+
+@app.callback(
+    [Output('taxonomy-selection-store', 'data', allow_duplicate=True),
+     Output('active-taxonomy-menu', 'data', allow_duplicate=True),
+     Output('taxonomy-submenu-store', 'data', allow_duplicate=True),
+     Output('notification', 'children', allow_duplicate=True)],
+    [Input({'type': 'taxonomy-primary-btn', 'value': ALL}, 'n_clicks'),
+     Input('taxonomy-hypothesis-btn', 'n_clicks')],
+    [State('taxonomy-selection-store', 'data'),
+     State('active-taxonomy-menu', 'data')],
+    prevent_initial_call=True,
+)
+def click_taxonomy_primary(_primary_clicks, _hypothesis_clicks, selection, active_menu):
+    triggered = callback_context.triggered_id
+    if not triggered:
+        return no_update, no_update, no_update, no_update
+    selection = selection_from_review(selection if isinstance(selection, dict) else {})
+    if triggered == 'taxonomy-hypothesis-btn':
+        if active_menu == 'physical_family':
+            return selection, '', '', 'Hypothesis menu closed'
+        return selection, 'physical_family', '', 'Hypothesis menu'
+    if not isinstance(triggered, dict) or triggered.get('type') != 'taxonomy-primary-btn':
+        return no_update, no_update, no_update, no_update
+    value = str(triggered.get('value') or '')
+    if selection.get('morphology_primary') == value:
+        selection['morphology_primary'] = None
+        selection['morphology_secondary'] = None
+        return selection, '', '', 'Morphology cleared'
+    selection['morphology_primary'] = value
+    selection['morphology_secondary'] = None
+    return selection, 'morphology_secondary', value, f"Morphology: {label_for(value)}"
+
+
+@app.callback(
+    [Output('taxonomy-selection-store', 'data', allow_duplicate=True),
+     Output('active-taxonomy-menu', 'data', allow_duplicate=True),
+     Output('taxonomy-submenu-store', 'data', allow_duplicate=True),
+     Output('notification', 'children', allow_duplicate=True)],
+    Input({'type': 'taxonomy-option-btn', 'menu': ALL, 'value': ALL}, 'n_clicks'),
+    [State('taxonomy-selection-store', 'data'),
+     State('active-taxonomy-menu', 'data')],
+    prevent_initial_call=True,
+)
+def click_taxonomy_option(_option_clicks, selection, active_menu):
+    triggered = callback_context.triggered_id
+    if not isinstance(triggered, dict) or triggered.get('type') != 'taxonomy-option-btn':
+        return no_update, no_update, no_update, no_update
+    menu = str(triggered.get('menu') or active_menu or '')
+    value = str(triggered.get('value') or '')
+    selection = selection_from_review(selection if isinstance(selection, dict) else {})
+    if menu == 'morphology_secondary':
+        selection['morphology_secondary'] = None if selection.get('morphology_secondary') == value else value
+        return selection, '', '', f"Detail: {label_for(selection.get('morphology_secondary') or 'cleared')}"
+    if menu == 'physical_family':
+        if selection.get('physical_family') == value:
+            selection['physical_family'] = None
+            selection['physical_subclass'] = None
+            return selection, '', '', 'Hypothesis cleared'
+        selection['physical_family'] = value
+        selection['physical_subclass'] = None
+        subclasses = TAXONOMY_KEYBOARD_PAYLOAD['physical_subclasses'].get(value, [])
+        if subclasses:
+            return selection, 'physical_subclass', value, f"Hypothesis: {label_for(value)}"
+        return selection, '', '', f"Hypothesis: {label_for(value)}"
+    if menu == 'physical_subclass':
+        selection['physical_subclass'] = None if selection.get('physical_subclass') == value else value
+        return selection, '', '', f"Subclass: {label_for(selection.get('physical_subclass') or 'cleared')}"
+    return no_update, no_update, no_update, no_update
+
+
+@app.callback(
+    [Output({'type': 'taxonomy-primary-btn', 'value': ALL}, 'className'),
+     Output('taxonomy-hypothesis-btn', 'className'),
+     Output('taxonomy-summary', 'children')],
+    [Input('taxonomy-selection-store', 'data'),
+     Input('active-taxonomy-menu', 'data')],
+    prevent_initial_call=False,
+)
+def render_taxonomy_state(selection, active_menu):
+    selection = selection_from_review(selection if isinstance(selection, dict) else {})
+    primary = selection.get('morphology_primary')
+    primary_classes = [
+        'badge-btn active' if item['value'] == primary else 'badge-btn'
+        for item in MORPHOLOGY_PRIMARY
+    ]
+    hypothesis_class = 'badge-btn active' if active_menu in {'physical_family', 'physical_subclass'} or selection.get('physical_family') else 'badge-btn'
+    parts = []
+    if primary:
+        detail = selection.get('morphology_secondary')
+        parts.append(f"Morphology: {label_for(primary)}" + (f" / {label_for(detail)}" if detail else ""))
+    if selection.get('physical_family'):
+        family = selection.get('physical_family')
+        subclass = selection.get('physical_subclass')
+        parts.append(f"Hypothesis: {label_for(family)}" + (f" / {label_for(subclass)}" if subclass else ""))
+    return primary_classes, hypothesis_class, ' | '.join(parts) if parts else 'No taxonomy selection'
+
+
+@app.callback(
+    Output('taxonomy-submenu-panel', 'children'),
+    [Input('active-taxonomy-menu', 'data'),
+     Input('taxonomy-submenu-store', 'data'),
+     Input('taxonomy-selection-store', 'data')],
+    prevent_initial_call=False,
+)
+def render_taxonomy_submenu(active_menu, submenu, selection):
+    selection = selection_from_review(selection if isinstance(selection, dict) else {})
+    active_menu = str(active_menu or '')
+    if active_menu == 'morphology_secondary':
+        options = TAXONOMY_KEYBOARD_PAYLOAD['morphology_secondary'].get(str(submenu or selection.get('morphology_primary') or ''), [])
+        active_value = selection.get('morphology_secondary')
+        title = 'Detail'
+    elif active_menu == 'physical_family':
+        options = TAXONOMY_KEYBOARD_PAYLOAD['physical_families']
+        active_value = selection.get('physical_family')
+        title = 'Hypothesis'
+    elif active_menu == 'physical_subclass':
+        options = TAXONOMY_KEYBOARD_PAYLOAD['physical_subclasses'].get(str(submenu or selection.get('physical_family') or ''), [])
+        active_value = selection.get('physical_subclass')
+        title = 'Subclass'
+    else:
+        return []
+    if not options:
+        return []
+    return [
+        html.Span(f"{title}: ", style={'color': '#aaa', 'margin-right': '4px', 'font-size': '11px'}),
+        *[
+            html.Button(
+                f'[{item["key"].upper()}] {item["label"]}',
+                id={'type': 'taxonomy-option-btn', 'menu': active_menu, 'value': item['value']},
+                n_clicks=0,
+                className='badge-btn active' if item['value'] == active_value else 'badge-btn',
+            )
+            for item in options
+        ],
+    ]
 
 
 app.clientside_callback(
@@ -9799,7 +10121,7 @@ def main():
     global DB_PATH, PLOT_DIR, INITIAL_CANDIDATE_QUERY
 
     parser = argparse.ArgumentParser(description="MALCA Dash Review App")
-    parser.add_argument('--db', default=None, help="SQLite database path (default: standalone.db without --plot-dir, review.db with --plot-dir)")
+    parser.add_argument('--review-db', default=None, help="Review SQLite database path (default: standalone.db without --plot-dir, review.db with --plot-dir)")
     parser.add_argument('--plot-dir', help="Plot directory path (auto-detects ./plots if not specified)")
     parser.add_argument('--host', default='127.0.0.1', help="Host")
     parser.add_argument('--port', default=8050, type=int, help="Port")
@@ -9808,13 +10130,7 @@ def main():
     parser.add_argument('--debug', action='store_true', help="Debug mode")
     parser.add_argument('--verbose-http', action='store_true',
                         help="Show Flask/Werkzeug per-request access logs")
-    parser.add_argument('--merge-vetting', metavar='PATH',
-                        help="Merge vetting results from a parquet file into the review DB and exit")
-    parser.add_argument('--merge-candidates', metavar='PATH',
-                        help="Merge candidate columns from a CSV/parquet file into the review DB and exit")
     args = parser.parse_args()
-    if args.merge_vetting and args.merge_candidates:
-        parser.error("--merge-vetting and --merge-candidates are mutually exclusive")
     INITIAL_CANDIDATE_QUERY = str(args.candidate).strip() if args.candidate not in (None, '') else None
 
     # Auto-detect plot directory if not specified
@@ -9837,9 +10153,9 @@ def main():
 
     inferred_plot_db = _review_db_for_plot_dir(PLOT_DIR)
 
-    # Choose DB: explicit --db overrides; otherwise standalone gets its own DB
-    if args.db is not None:
-        DB_PATH = str(_resolve_db_cli_path(args.db))
+    # Choose DB: explicit --review-db overrides; otherwise standalone gets its own DB
+    if args.review_db is not None:
+        DB_PATH = str(_resolve_db_cli_path(args.review_db))
     elif PLOT_DIR is None:
         # Standalone mode: use a separate DB so pipeline candidates don't bleed in
         DB_PATH = str(_resolve_db_cli_path(str(DEFAULT_STANDALONE_DB_PATH)))
@@ -9858,32 +10174,6 @@ def main():
     mismatch_warning = _db_plot_mismatch_warning(DB_PATH, PLOT_DIR)
     if mismatch_warning:
         print(f"Warning: {mismatch_warning}")
-
-    if args.merge_vetting:
-        vetting_path = Path(args.merge_vetting).expanduser().resolve()
-        if not vetting_path.exists():
-            print(f"Error: vetting file not found: {vetting_path}")
-            sys.exit(1)
-        vetting_df = pd.read_parquet(vetting_path)
-        print(f"Merging {len(vetting_df)} vetting results from {vetting_path}")
-        print(f"  into review DB: {DB_PATH}")
-        with closing(db_connect(Path(DB_PATH))) as conn:
-            updated = merge_vetting_results(conn, vetting_df)
-        print(f"Updated {updated} candidates with vetting data.")
-        sys.exit(0)
-
-    if args.merge_candidates:
-        candidate_path = Path(args.merge_candidates).expanduser().resolve()
-        if not candidate_path.exists():
-            print(f"Error: candidate file not found: {candidate_path}")
-            sys.exit(1)
-        candidate_df = load_candidates_file(candidate_path)
-        print(f"Merging {len(candidate_df)} candidate rows from {candidate_path}")
-        print(f"  into review DB: {DB_PATH}")
-        with closing(db_connect(Path(DB_PATH))) as conn:
-            updated = merge_candidate_results(conn, candidate_df)
-        print(f"Updated {updated} candidates with candidate data.")
-        sys.exit(0)
 
     print(f"Starting MALCA Review App...")
     print(f"  Database:  {DB_PATH}")

@@ -1955,12 +1955,12 @@ def main():
     parser = argparse.ArgumentParser(description="Multi-wavelength characterization for dipper candidates")
     parser.add_argument("--input", type=Path, required=True, help="Input events CSV/Parquet (must have asas_sn_id)")
     parser.add_argument("--output", type=Path, required=True, help="Output CSV/Parquet")
-    parser.add_argument("--crossmatch", type=Path,
+    parser.add_argument("--vsx-crossmatch", type=Path,
                         default=VSX_CROSSMATCH_PATH,
                         help="Path to ASAS-SN x VSX crossmatch CSV (must contain asas_sn_id and gaia_id)")
     parser.add_argument("--chunk-size", type=int, default=GAIA_CHUNK_SIZE, help="Gaia query chunk size")
     parser.add_argument("--cache", type=Path, default=GAIA_CACHE_FILE, help="Cache file for Gaia queries")
-    parser.add_argument("--dust", action="store_true", help="Enable dustmaps3d 3D extinction query")
+    parser.add_argument("--enable-dust", dest="dust", action="store_true", help="Enable dustmaps3d 3D extinction query")
     parser.add_argument("--starhorse", type=str, default=None, help="StarHorse stellar ages/masses: 'tap' for remote TAP query (recommended), or path to local catalog file")
     parser.add_argument("--starhorse-cache", type=Path, default=STARHORSE_TAP_CACHE_FILE, help="StarHorse TAP cache parquet path (default: ~/.cache/malca/catalogs/starhorse_tap_cache.parquet)")
     parser.add_argument("--unwise-workers", type=int, default=UNWISE_WORKERS, help="Parallel workers for unWISE variability queries")
@@ -1990,7 +1990,7 @@ def main():
         
     df_char = characterize_candidates_df(
         df,
-        crossmatch=args.crossmatch,
+        crossmatch=args.vsx_crossmatch,
         chunk_size=args.chunk_size,
         cache=args.cache,
         dust=args.dust,

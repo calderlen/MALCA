@@ -1125,7 +1125,7 @@ def main():
         help="Path(s) to light curve file(s) (glob patterns supported)",
     )
     g_input.add_argument(
-        "--events",
+        "--results",
         type=Path,
         help="Events/post-filter output (CSV/Parquet) with a path column (overrides --detect-run).",
     )
@@ -1148,45 +1148,41 @@ def main():
     g_selection.add_argument(
         "--ignore-failed-any",
         action="store_true",
-        help="Do not require failed_any == False when plotting from --events.",
+        help="Do not require failed_any == False when plotting from --results.",
     )
     g_selection.add_argument(
         "--require-flag",
         action="append",
         default=[],
-        help="Require this boolean flag column to be True (repeatable, --events mode).",
+        help="Require this boolean flag column to be True (repeatable, --results mode).",
     )
     g_selection.add_argument(
         "--exclude-flag",
         action="append",
         default=[],
-        help="Exclude rows where this boolean flag column is True (repeatable, --events mode).",
+        help="Exclude rows where this boolean flag column is True (repeatable, --results mode).",
     )
     g_selection.add_argument(
         "--min-lsp-power",
         type=float,
         default=None,
-        help="Require lsp_power >= this value (--events mode).",
+        help="Require lsp_power >= this value (--results mode).",
     )
     g_selection.add_argument(
         "--max-lsp-bootstrap-sig",
         type=float,
         default=None,
-        help="Require lsp_bootstrap_sig <= this value (--events mode).",
+        help="Require lsp_bootstrap_sig <= this value (--results mode).",
     )
     g_selection.add_argument(
         "--min-periodicity-score",
         type=float,
         default=None,
-        help="Require periodicity_score >= this value (--events mode).",
-    )
-    g_selection.add_argument(
-        "--results-csv",
-        type=Path,
-        help="Path to results CSV (optional, for filtering which to plot)",
+        help="Require periodicity_score >= this value (--results mode).",
     )
     g_output.add_argument(
-        "--out-dir",
+        "--output-dir",
+        dest="out_dir",
         type=Path,
         default=None,
         help="Output directory for plots (defaults to <detect-run>/plots/ if --detect-run is used)",
@@ -1254,21 +1250,16 @@ def main():
     g_gp.add_argument("--gp-floor-clip", type=float, default=None, help="Sigma floor clipping threshold.")
     g_gp.add_argument("--gp-floor-iters", type=int, default=None, help="Sigma floor clipping iterations.")
     g_gp.add_argument("--gp-min-floor-points", type=int, default=None, help="Minimum points for sigma floor.")
-    g_general.add_argument(
-        "--detection-results",
-        type=Path,
-        default=None,
-        help="Optional detection results CSV for metadata lookup",
-    )
     g_general.add_argument("--show", action="store_true", help="Show plots interactively")
     g_general.add_argument("--workers", type=int, default=WORKERS, help="Parallel workers for candidate plotting")
-    g_general.add_argument("--no-tqdm", action="store_true", help="Disable progress bars")
+    g_general.add_argument("--no-progress", action="store_true", help="Disable progress bars")
     g_general.add_argument("-v", "--verbose", action="store_true", help="Verbose logging")
     g_general.add_argument(
-        "--filter-bad-cameras",
-        action="store_true",
+        "--no-filter-bad-cameras",
+        dest="filter_bad_cameras",
+        action="store_false",
         default=True,
-        help="Filter bad cameras before plotting (default: enabled)",
+        help="Disable bad-camera filtering before plotting",
     )
     g_general.add_argument(
         "--bad-camera-scatter-ratio",
@@ -1284,7 +1275,7 @@ def main():
         detect_run = args.detect_run.expanduser()
 
         # Set events path if not explicitly provided
-        if not args.events:
+        if not args.results:
             results_dir = detect_run / "results"
             # Look for filtered results first, then raw results
             candidates = (list(results_dir.glob("*filtered.csv")) +
@@ -1292,8 +1283,8 @@ def main():
                          list(results_dir.glob("*events_results.csv")) +
                          list(results_dir.glob("*events_results.parquet")))
             if candidates:
-                args.events = candidates[0]
-                print(f"Using events from: {args.events}")
+                args.results = candidates[0]
+                print(f"Using results from: {args.results}")
 
         # Set out_dir if not explicitly provided
         if not args.out_dir:
@@ -1301,7 +1292,7 @@ def main():
 
     # Validate that we have an output directory
     if not args.out_dir:
-        raise ValueError("Must specify either --out-dir or --detect-run")
+        raise ValueError("Must specify either --output-dir or --detect-run")
 
     baseline_func = BASELINE_FUNCTIONS[args.baseline]
     baseline_kwargs = {}
@@ -1328,9 +1319,9 @@ def main():
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
 
-    if args.events:
+    if args.results:
         summary = plot_passing_candidates(
-            args.events,
+            args.results,
             args.out_dir,
             require_failed_any_false=not args.ignore_failed_any,
             require_flags=args.require_flag,
@@ -1352,10 +1343,10 @@ def main():
             jd_offset=args.jd_offset,
             clean_max_error_absolute=args.clean_max_error_absolute,
             clean_max_error_sigma=args.clean_max_error_sigma,
-            detection_results_csv=args.detection_results,
+            detection_results_csv=args.results,
             filter_bad_cameras=args.filter_bad_cameras,
             bad_camera_scatter_ratio=args.bad_camera_scatter_ratio,
-            show_tqdm=not args.no_tqdm,
+            show_tqdm=not args.no_progress,
         )
         print(f"Generated {summary.get('plotted', 0)} candidate plots in {args.out_dir}")
         return
@@ -1364,8 +1355,11 @@ def main():
     else:
         csv_paths = []
 
-    if args.results_csv and args.results_csv.exists():
-        results_df = pd.read_csv(args.results_csv)
+    if args.results and args.results.exists():
+        if args.results.suffix.lower() in {".parquet", ".pq"}:
+            results_df = pd.read_parquet(args.results)
+        else:
+            results_df = pd.read_csv(args.results)
 
         results_ids: set[str] = set()
         for p in results_df["path"].dropna().astype(str):
@@ -1375,7 +1369,7 @@ def main():
         print(f"Filtered to {len(csv_paths)} light curves from results CSV")
 
     if not csv_paths:
-        raise SystemExit("No light curve paths provided (use --input or --events).")
+        raise SystemExit("No light curve paths provided (use --input or --results).")
 
     if args.max_plots is not None:
         csv_paths = csv_paths[: args.max_plots]
@@ -1400,7 +1394,7 @@ def main():
             skip_events=args.skip_events,
             plot_fits=args.plot_fits,
             jd_offset=args.jd_offset,
-            detection_results_csv=args.detection_results,
+            detection_results_csv=args.results,
             clean_max_error_absolute=args.clean_max_error_absolute,
             clean_max_error_sigma=args.clean_max_error_sigma,
         )
@@ -1422,7 +1416,7 @@ def main():
             plot_log = {
                 "timestamp": datetime.now().isoformat(),
                 "command": cmd,
-                "events_file": str(args.events) if args.events else None,
+                "results_file": str(args.results) if args.results else None,
                 "output_dir": str(args.out_dir),
                 "plot_params": {
                     "baseline": args.baseline,

@@ -8,7 +8,7 @@ from typing import Any, Protocol, cast
 import joblib
 import pandas as pd
 
-from malca.ml.features import transform_ml_features
+from malca.meta_analysis.ml.features import transform_ml_features
 
 
 class _PredictModel(Protocol):

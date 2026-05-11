@@ -8,7 +8,7 @@ Saves results as a local Parquet catalog for offline use by characterize.py.
 Usage:
     malca gaia-fetch --input output/runs/20260101/results/lc_events_filtered.parquet
     malca gaia-fetch --input candidates.parquet --output my_gaia_catalog.parquet
-    malca gaia-fetch --input candidates.parquet --crossmatch input/vsx/my_crossmatch.csv
+    malca gaia-fetch --input candidates.parquet --vsx-crossmatch input/vsx/my_crossmatch.csv
 """
 from pathlib import Path
 import argparse
@@ -175,7 +175,7 @@ def _extract_gaia_ids(
     if not xmatch_path.exists():
         raise FileNotFoundError(
             f"VSX crossmatch file not found: {xmatch_path}. "
-            "Provide --crossmatch or ensure the default path exists."
+            "Provide --vsx-crossmatch or ensure the default path exists."
         )
 
     print(f"Loading crossmatch file {xmatch_path}...")
@@ -423,7 +423,7 @@ def main():
         help=f"Output Parquet path for local Gaia catalog (default: {GAIA_LOCAL_CATALOG})",
     )
     parser.add_argument(
-        "--crossmatch",
+        "--vsx-crossmatch",
         type=Path,
         default=VSX_CROSSMATCH_PATH,
         help="Path to ASAS-SN x VSX crossmatch CSV (must contain asas_sn_id and gaia_id)",
@@ -438,7 +438,7 @@ def main():
     args = parser.parse_args()
 
     # Extract Gaia IDs from input + crossmatch
-    gaia_ids = _extract_gaia_ids(args.input, args.crossmatch)
+    gaia_ids = _extract_gaia_ids(args.input, args.vsx_crossmatch)
 
     if not gaia_ids:
         print("No Gaia IDs found. Nothing to fetch.")

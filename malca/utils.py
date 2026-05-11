@@ -213,6 +213,103 @@ def compute_n_cameras(df_lc: pd.DataFrame) -> int:
     return int(len(cameras))
 
 
+FIELD_SUMMARY_COLUMNS: tuple[str, ...] = (
+    "asassn_field_key",
+    "asassn_fields",
+    "asassn_field_count",
+    "asassn_field_key_fraction",
+    "camera_field_key",
+    "camera_fields",
+    "camera_field_count",
+    "camera_field_key_fraction",
+)
+
+
+def _empty_field_summary() -> dict[str, object]:
+    return {
+        "asassn_field_key": "",
+        "asassn_fields": "",
+        "asassn_field_count": 0,
+        "asassn_field_key_fraction": np.nan,
+        "camera_field_key": "",
+        "camera_fields": "",
+        "camera_field_count": 0,
+        "camera_field_key_fraction": np.nan,
+    }
+
+
+def _summarize_label_series(values: pd.Series) -> tuple[str, str, int, float]:
+    cleaned = (
+        values.astype("string")
+        .fillna("")
+        .str.strip()
+    )
+    cleaned = cleaned[cleaned != ""]
+    if cleaned.empty:
+        return "", "", 0, np.nan
+
+    counts = cleaned.value_counts(sort=False)
+    ordered_counts = sorted(
+        ((str(label), int(count)) for label, count in counts.items()),
+        key=lambda item: (-item[1], item[0]),
+    )
+    key, key_count = ordered_counts[0]
+    labels = sorted(str(label) for label in counts.index)
+    return key, ",".join(labels), len(labels), float(key_count / len(cleaned))
+
+
+def compute_field_summary(df_lc: pd.DataFrame) -> dict[str, object]:
+    """Summarize observation-level ASAS-SN fields into source-level keys.
+
+    The canonical source field is the most frequent raw ASAS-SN ``field`` value.
+    Ties are resolved lexicographically for deterministic output.  Full unique
+    field sets are preserved in comma-separated columns for mixed-field sources.
+    """
+    if df_lc is None or df_lc.empty:
+        return _empty_field_summary()
+
+    df = df_lc.copy()
+    if ("field" not in df.columns or "camera_name" not in df.columns) and "cam_field" in df.columns:
+        split = df["cam_field"].astype("string").str.split("/", n=1, expand=True)
+        if "camera_name" not in df.columns and split.shape[1] >= 1:
+            df["camera_name"] = split[0]
+        if "field" not in df.columns and split.shape[1] >= 2:
+            df["field"] = split[1]
+
+    out = _empty_field_summary()
+    if "field" in df.columns:
+        key, labels, count, fraction = _summarize_label_series(df["field"])
+        out.update(
+            {
+                "asassn_field_key": key,
+                "asassn_fields": labels,
+                "asassn_field_count": count,
+                "asassn_field_key_fraction": fraction,
+            }
+        )
+
+    camera_field_values = pd.Series([], dtype="string")
+    if "camera_name" in df.columns and "field" in df.columns:
+        camera = df["camera_name"].astype("string").fillna("").str.strip()
+        field = df["field"].astype("string").fillna("").str.strip()
+        mask = (camera != "") & (field != "")
+        camera_field_values = (camera[mask] + "/" + field[mask]).astype("string")
+    elif "cam_field" in df.columns:
+        raw = df["cam_field"].astype("string").fillna("").str.strip()
+        camera_field_values = raw[raw.str.contains("/", regex=False)]
+
+    key, labels, count, fraction = _summarize_label_series(camera_field_values)
+    out.update(
+        {
+            "camera_field_key": key,
+            "camera_fields": labels,
+            "camera_field_count": count,
+            "camera_field_key_fraction": fraction,
+        }
+    )
+    return out
+
+
 def year_to_jd(year):
     jd_epoch = 2449718.5
     year_epoch = 1995
@@ -560,7 +657,8 @@ def identify_bad_cameras(
     df_lc : pd.DataFrame
         Light curve data with JD, mag, camera# columns
     raw2_df : pd.DataFrame | None
-        Optional raw2 data with expected scatter per camera
+        Deprecated and ignored. Raw-space .raw2 statistics are not used as
+        hard removal thresholds.
     window_days : float
         Size of sliding window for overlap comparison (days)
     min_overlap_points : int
@@ -646,26 +744,6 @@ def identify_bad_cameras(
             # Use median ratio to be robust to outliers
             median_ratio = np.median(ratios)
             if median_ratio > scatter_ratio_threshold:
-                bad_cameras.add(cam)
-
-    # Optional: also check against raw2 expected scatter
-    if raw2_df is not None and not raw2_df.empty:
-        for cam in cameras:
-            if cam in bad_cameras:
-                continue
-            cam_df = df_lc[df_lc[cam_col] == cam]
-            m = cam_df[mag_col].dropna().values
-            if len(m) < 10:
-                continue
-            actual_scatter = 1.4826 * np.median(np.abs(m - np.median(m)))
-
-            # Get expected scatter from raw2
-            raw2_row = raw2_df[raw2_df["camera#"] == cam]
-            if raw2_row.empty:
-                continue
-            expected = raw2_row["expected_scatter"].values[0]
-            if expected > 0 and actual_scatter > 3 * expected:
-                # Actual scatter is way higher than expected from raw data
                 bad_cameras.add(cam)
 
     return bad_cameras
@@ -876,35 +954,33 @@ def filter_bad_cameras(
     raw2_df: pd.DataFrame | None = None,
     lc_path: str | None = None,
     *,
-    filter_scatter: bool = True,
-    filter_offset: bool = True,
+    filter_scatter: bool = False,
+    filter_offset: bool = False,
     filter_catastrophic: bool = True,
     offset_sigma_threshold: float = 15.0,
     remove_full_camera: bool = True,
     **kwargs
 ) -> tuple[pd.DataFrame, set]:
     """
-    Filter out cameras with anomalously high scatter or systematic offsets.
+    Filter out cameras with camera-level quality failures.
 
-    Combines three filters:
-    1. Scatter filter (identify_bad_cameras): flags cameras with high MAD scatter
-    2. Offset filter (identify_offset_cameras): flags cameras with systematic median offsets
-    3. Catastrophic outlier filter (identify_catastrophic_outlier_cameras):
-       flags cameras with isolated 3+ mag excursions unsupported by other cameras
+    By default this only removes catastrophic unsupported camera excursions
+    before baseline fitting. Scatter and offset checks are available for
+    diagnostics or residual-space filtering, but should not be used as raw-space
+    hard cuts in the event pipeline.
 
     Parameters
     ----------
     df_lc : pd.DataFrame
         Light curve data
     raw2_df : pd.DataFrame | None
-        Optional raw2 data (if provided, takes precedence over lc_path)
+        Deprecated and ignored by default. Raw .raw2 stats are not hard cuts.
     lc_path : str | None
-        Path to the light curve file (e.g., .dat2). If provided and raw2_df is
-        None, will attempt to load the corresponding .raw2 file automatically.
+        Deprecated for filtering. Retained for call-site compatibility.
     filter_scatter : bool
-        Apply scatter-based filtering (default: True)
+        Apply scatter-based filtering (default: False)
     filter_offset : bool
-        Apply median-offset filtering (default: True)
+        Apply median-offset filtering (default: False)
     filter_catastrophic : bool
         Apply isolated catastrophic-outlier filtering (default: True)
     offset_sigma_threshold : float
@@ -922,17 +998,9 @@ def filter_bad_cameras(
     bad_cameras : set
         Set of camera IDs that were fully removed
     """
-    # Auto-load raw2 if lc_path provided and raw2_df not explicitly given
-    if raw2_df is None and lc_path is not None:
-
-        lc_path_obj = Path(lc_path)
-        if lc_path_obj.suffix.lower() == ".dat2":
-            raw2_path = lc_path_obj.with_suffix(".raw2")
-            if raw2_path.exists():
-                raw2_df = read_lc_raw2(lc_path_obj.stem, str(lc_path_obj.parent))
-    
     cam_col = kwargs.get("cam_col", "camera#")
     t_col = kwargs.get("t_col", "JD")
+    mag_col = kwargs.get("mag_col", "mag")
     bad_cameras: set = set()
     df_filtered = df_lc
     
@@ -949,6 +1017,7 @@ def filter_bad_cameras(
             remove_full_camera=remove_full_camera,
             cam_col=cam_col,
             t_col=t_col,
+            mag_col=mag_col,
         )
         bad_cameras.update(offset_bad)
         
@@ -971,7 +1040,7 @@ def filter_bad_cameras(
             df_lc if df_filtered is df_lc else df_filtered,
             cam_col=cam_col,
             t_col=t_col,
-            mag_col=kwargs.get("mag_col", "mag"),
+            mag_col=mag_col,
             min_points_per_camera=kwargs.get("catastrophic_min_points", 30),
             mag_excursion_threshold=kwargs.get("catastrophic_mag_excursion", 3.0),
             support_window_days=kwargs.get("catastrophic_support_window_days", 2.0),
@@ -985,6 +1054,78 @@ def filter_bad_cameras(
     if bad_cameras and cam_col in df_filtered.columns:
         df_filtered = df_filtered[~df_filtered[cam_col].isin(bad_cameras)].reset_index(drop=True)
     
+    return df_filtered, bad_cameras
+
+
+def identify_residual_bad_cameras(
+    df_base: pd.DataFrame,
+    *,
+    scatter_ratio_threshold: float = BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
+    offset_sigma_threshold: float = OFFSET_CAMERA_SIGMA_THRESHOLD,
+    filter_scatter: bool = True,
+    filter_offset: bool = True,
+    cam_col: str = "camera#",
+    t_col: str = "JD",
+    resid_col: str = "resid",
+    min_remaining_cameras: int = 1,
+    **kwargs,
+) -> set:
+    """
+    Identify cameras that remain bad after baseline correction.
+
+    This operates in residual space only. It intentionally does not consult
+    raw .raw2 camera statistics because those live in raw-magnitude space.
+    """
+    required = {cam_col, t_col, resid_col}
+    if df_base.empty or not required.issubset(df_base.columns):
+        return set()
+
+    cameras = set(df_base[cam_col].dropna().unique())
+    if len(cameras) <= int(min_remaining_cameras):
+        return set()
+
+    bad_cameras: set = set()
+    if filter_scatter:
+        bad_cameras.update(
+            identify_bad_cameras(
+                df_base,
+                raw2_df=None,
+                scatter_ratio_threshold=scatter_ratio_threshold,
+                cam_col=cam_col,
+                t_col=t_col,
+                mag_col=resid_col,
+                **kwargs,
+            )
+        )
+
+    if filter_offset:
+        offset_bad, _ = identify_offset_cameras(
+            df_base,
+            offset_sigma_threshold=offset_sigma_threshold,
+            remove_full_camera=True,
+            cam_col=cam_col,
+            t_col=t_col,
+            mag_col=resid_col,
+        )
+        bad_cameras.update(offset_bad)
+
+    if len(cameras - bad_cameras) < int(min_remaining_cameras):
+        return set()
+    return bad_cameras
+
+
+def filter_residual_bad_cameras(
+    df_lc: pd.DataFrame,
+    df_base: pd.DataFrame,
+    *,
+    cam_col: str = "camera#",
+    **kwargs,
+) -> tuple[pd.DataFrame, set]:
+    """Remove cameras identified by residual-space camera checks."""
+    bad_cameras = identify_residual_bad_cameras(df_base, cam_col=cam_col, **kwargs)
+    if not bad_cameras or cam_col not in df_lc.columns:
+        return df_lc, bad_cameras
+    df_filtered = df_lc[~df_lc[cam_col].isin(bad_cameras)].reset_index(drop=True)
     return df_filtered, bad_cameras
 
 
@@ -1206,6 +1347,7 @@ def batch_tap_crossmatch(
     desc: str = "TAP crossmatch",
     timeout: float = 120,
     raise_on_all_failed: bool = False,
+    raise_on_failed_chunk: bool = False,
 
 ) -> pd.DataFrame:
     """Batch TAP crossmatch using coordinate upload.
@@ -1215,6 +1357,8 @@ def batch_tap_crossmatch(
 
     Returns a DataFrame with ``_idx``, the selected columns, and
     ``sep_arcsec``.  Callers should de-duplicate by ``_idx`` as needed.
+    Set ``raise_on_failed_chunk`` for validation/vetting paths where partial
+    lookup results must not be treated as complete non-matches.
     """
     if coords_df.empty:
         return pd.DataFrame()
@@ -1374,8 +1518,12 @@ def batch_tap_crossmatch(
             for f in futures:
                 f.cancel()
 
-    if n_failed_chunks and (verbose or raise_on_all_failed):
+    if n_failed_chunks and (verbose or raise_on_all_failed or raise_on_failed_chunk):
         print(f"  {desc}: {n_failed_chunks}/{len(chunks)} chunk(s) failed; results may be incomplete")
+    if n_failed_chunks and raise_on_failed_chunk:
+        detail = "; ".join(failure_messages[:3]) if failure_messages else "unknown TAP failure"
+        more = f" (+{len(failure_messages) - 3} more)" if len(failure_messages) > 3 else ""
+        raise RuntimeError(f"{desc}: {n_failed_chunks}/{len(chunks)} chunk(s) failed ({detail}{more})")
 
     if not results:
         if raise_on_all_failed and (n_failed_chunks or timed_out):

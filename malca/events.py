@@ -1,15 +1,23 @@
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
-from typing import Literal, TypeAlias
+from typing import Iterable, Literal, Mapping, TypeAlias
 import argparse
 import glob
+import json
 import multiprocessing as mp
 import os
 import os as _os
 import sys
 import traceback
 import warnings
+
+_os.environ.setdefault("OMP_NUM_THREADS", "1")
+_os.environ.setdefault("MKL_NUM_THREADS", "1")
+_os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+_os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+# Prevent numba from spawning a thread pool in each worker process.
+_os.environ.setdefault("NUMBA_NUM_THREADS", "1")
 
 from numba import njit, prange
 from scipy.optimize import curve_fit
@@ -37,6 +45,7 @@ from malca.config import (
     MIN_MAG_OFFSET, RUN_MIN_POINTS, RUN_MAX_GAP_POINTS, MAG_BINS,
     BASELINE_FUNC, BASELINE_S0, BASELINE_W0, BASELINE_Q, BASELINE_JITTER,
 )
+from malca.cli_config import add_config_args, apply_config, namespace_keys
 from malca.score import compute_event_score
 from malca.stats import log_gaussian, median_dt, bic
 from malca.triggering import resolve_trigger_indices
@@ -45,23 +54,15 @@ from malca.utils import (
     read_lc_csv,
     read_skypatrol_csv,
     clean_lc,
+    compute_field_summary,
     gaussian,
     paczynski_kernel,
     fred,
     skew_gaussian,
     filter_bad_cameras,
+    filter_residual_bad_cameras,
     log as _log,
 )
-
-
-_os.environ.setdefault("OMP_NUM_THREADS", "1")
-_os.environ.setdefault("MKL_NUM_THREADS", "1")
-_os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-_os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
-# Prevent numba from spawning a thread pool in each worker process
-_os.environ.setdefault("NUMBA_NUM_THREADS", "1")
-
-
 
 warnings.filterwarnings("ignore", message=".*Covariance of the parameters could not be estimated.*")
 warnings.filterwarnings("ignore", message=".*overflow encountered in.*")
@@ -80,6 +81,435 @@ DEFAULT_BASELINE_KWARGS = dict(
     sigma_floor=None,
     add_sigma_eff_col=True,
 )
+
+EVENTS_CONFIG_DEFAULTS = {
+    "trigger_mode": TRIGGER_MODE,
+    "logbf_threshold_dip": LOGBF_THRESHOLD_DIP,
+    "logbf_threshold_jump": LOGBF_THRESHOLD_JUMP,
+    "significance_threshold": SIGNIFICANCE_THRESHOLD,
+    "p_points": P_POINTS,
+    "mag_points": MAG_POINTS,
+    "run_min_points": RUN_MIN_POINTS,
+    "run_max_gap_points": RUN_MAX_GAP_POINTS,
+    "run_max_gap_days": None,
+    "run_min_duration_days": 0.0,
+    "no_event_prob": False,
+    "p_min_dip": None,
+    "p_max_dip": None,
+    "p_min_jump": None,
+    "p_max_jump": None,
+    "baseline_func": BASELINE_FUNC,
+    "baseline_s0": BASELINE_S0,
+    "baseline_w0": BASELINE_W0,
+    "baseline_q": BASELINE_Q,
+    "baseline_jitter": BASELINE_JITTER,
+    "baseline_sigma_floor": None,
+    "mag_min_dip": None,
+    "mag_max_dip": None,
+    "mag_min_jump": None,
+    "mag_max_jump": None,
+    "filter_bad_cameras": True,
+    "bad_camera_scatter_ratio": BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
+    "min_mag_offset": MIN_MAG_OFFSET,
+    "output_format": OUTPUT_FORMAT,
+    "chunk_size": EVENTS_OUTPUT_CHUNK_SIZE,
+    "max_error_fraction": 0.01,
+}
+
+EVENTS_CONFIG_PATH_KEYS = {"output", "error_output", "metadata_csv", "input_file"}
+
+
+EVENTS_CORE_COLUMNS: tuple[str, ...] = (
+    "path",
+    "dip_significant",
+    "jump_significant",
+    "n_points",
+    "jd_first",
+    "jd_last",
+    "cadence_median_days",
+    "dip_best_morph",
+    "dip_best_delta_bic",
+    "dip_best_width_param",
+    "dip_symmetry_score",
+    "dip_best_amp",
+    "dip_best_t0",
+    "dip_best_alpha",
+    "dip_best_tau",
+    "jump_best_morph",
+    "jump_best_delta_bic",
+    "jump_best_width_param",
+    "jump_best_amp",
+    "jump_best_t0",
+    "jump_best_alpha",
+    "jump_best_tau",
+    "dip_count",
+    "jump_count",
+    "dip_run_count",
+    "jump_run_count",
+    "dip_max_run_points",
+    "jump_max_run_points",
+    "dip_max_run_duration",
+    "jump_max_run_duration",
+    "dip_max_run_sum",
+    "jump_max_run_sum",
+    "dip_max_run_max",
+    "jump_max_run_max",
+    "dip_max_run_cameras",
+    "jump_max_run_cameras",
+    "dip_max_log_bf_local",
+    "jump_max_log_bf_local",
+    "dip_bayes_factor",
+    "jump_bayes_factor",
+    "baseline_mag",
+    "dip_best_p",
+    "jump_best_p",
+    "dip_best_mag_event",
+    "jump_best_mag_event",
+    "dip_trigger_max",
+    "jump_trigger_max",
+    "dip_max_event_prob",
+    "jump_max_event_prob",
+    "n_cameras",
+    "camera_ids",
+    "camera_min_points",
+    "camera_max_points",
+    "asassn_field_key",
+    "asassn_fields",
+    "asassn_field_count",
+    "asassn_field_key_fraction",
+    "camera_field_key",
+    "camera_fields",
+    "camera_field_count",
+    "camera_field_key_fraction",
+    "dipper_score",
+    "dipper_n_dips",
+    "dipper_n_valid_dips",
+    "jumper_score",
+    "jumper_n_jumps",
+    "jumper_n_valid_jumps",
+    "baseline_source",
+    "trigger_mode",
+    "dip_trigger_threshold",
+    "jump_trigger_threshold",
+    "bad_cameras_filtered",
+    "dip_is_single_event",
+    "dip_inter_event_spacing_median",
+    "dip_inter_event_spacing_std",
+    "dip_amplitude_consistency",
+    "dip_duration_consistency",
+    "jump_is_single_event",
+    "jump_inter_event_spacing_median",
+    "jump_inter_event_spacing_std",
+    "jump_amplitude_consistency",
+    "jump_duration_consistency",
+)
+
+EVENTS_KNOWN_METADATA_COLUMNS: tuple[str, ...] = (
+    "vsx_sep_arcsec",
+    "vsx_class",
+    "excluded_cameras",
+    "raw_median_suspect_cameras",
+    "pre_periodicity_label",
+    "pre_periodic_flag",
+    "pre_periodicity_selected_period",
+    "pre_periodicity_method",
+)
+
+EVENTS_EXTRA_COLUMNS: tuple[str, ...] = ("failed_signal_amplitude", "extra_json")
+
+EVENTS_BOOL_COLUMNS: frozenset[str] = frozenset(
+    {
+        "dip_significant",
+        "jump_significant",
+        "dip_is_single_event",
+        "jump_is_single_event",
+        "failed_signal_amplitude",
+        "pre_periodic_flag",
+    }
+)
+
+EVENTS_INT_COLUMNS: frozenset[str] = frozenset(
+    {
+        "n_points",
+        "dip_count",
+        "jump_count",
+        "dip_run_count",
+        "jump_run_count",
+        "dip_max_run_points",
+        "jump_max_run_points",
+        "dip_max_run_cameras",
+        "jump_max_run_cameras",
+        "n_cameras",
+        "camera_min_points",
+        "camera_max_points",
+        "asassn_field_count",
+        "camera_field_count",
+        "dipper_n_dips",
+        "dipper_n_valid_dips",
+        "jumper_n_jumps",
+        "jumper_n_valid_jumps",
+    }
+)
+
+EVENTS_STRING_COLUMNS: frozenset[str] = frozenset(
+    {
+        "path",
+        "dip_best_morph",
+        "jump_best_morph",
+        "camera_ids",
+        "asassn_field_key",
+        "asassn_fields",
+        "camera_field_key",
+        "camera_fields",
+        "baseline_source",
+        "trigger_mode",
+        "bad_cameras_filtered",
+        "vsx_class",
+        "excluded_cameras",
+        "raw_median_suspect_cameras",
+        "pre_periodicity_label",
+        "pre_periodicity_method",
+        "extra_json",
+    }
+)
+
+EVENTS_FLOAT_COLUMNS: frozenset[str] = frozenset(
+    (
+        set(EVENTS_CORE_COLUMNS)
+        | set(EVENTS_KNOWN_METADATA_COLUMNS)
+        | set(EVENTS_EXTRA_COLUMNS)
+    )
+    - set(EVENTS_BOOL_COLUMNS)
+    - set(EVENTS_INT_COLUMNS)
+    - set(EVENTS_STRING_COLUMNS)
+)
+
+
+def _unique_preserve_order(values: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        text = str(value)
+        if text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return out
+
+
+def build_events_writer_columns(metadata_columns: Iterable[str] | None = None) -> list[str]:
+    metadata_source = [] if metadata_columns is None else metadata_columns
+    metadata = [
+        str(col)
+        for col in metadata_source
+        if str(col) not in {"", "path", "extra_json"}
+    ]
+    return _unique_preserve_order(
+        (
+            *EVENTS_CORE_COLUMNS,
+            "failed_signal_amplitude",
+            *EVENTS_KNOWN_METADATA_COLUMNS,
+            *metadata,
+            "extra_json",
+        )
+    )
+
+
+def _is_missing_value(value: object) -> bool:
+    if value is None or value is pd.NA:
+        return True
+    try:
+        missing = pd.isna(value)
+    except (TypeError, ValueError):
+        return False
+    if isinstance(missing, (bool, np.bool_)):
+        return bool(missing)
+    return False
+
+
+def _json_safe_value(value: object) -> object:
+    if _is_missing_value(value):
+        return None
+    if isinstance(value, np.generic):
+        return _json_safe_value(value.item())
+    if isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    return str(value)
+
+
+def _parse_extra_json(value: object) -> dict[str, object]:
+    if _is_missing_value(value) or str(value).strip() == "":
+        return {}
+    try:
+        parsed = json.loads(str(value))
+    except Exception:
+        return {"value": _json_safe_value(value)}
+    return parsed if isinstance(parsed, dict) else {"value": _json_safe_value(value)}
+
+
+def _extra_json_series(df: pd.DataFrame, extra_columns: list[str]) -> pd.Series:
+    if "extra_json" in df.columns:
+        base_values = df["extra_json"].tolist()
+    else:
+        base_values = [None] * len(df)
+
+    encoded: list[str] = []
+    for row_idx, base_value in enumerate(base_values):
+        payload = _parse_extra_json(base_value)
+        for column in extra_columns:
+            value = df.iloc[row_idx][column]
+            if _is_missing_value(value):
+                continue
+            payload[str(column)] = _json_safe_value(value)
+        encoded.append(json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False))
+    return pd.Series(encoded, index=df.index, dtype="string")
+
+
+def _coerce_bool_series(series: pd.Series) -> pd.Series:
+    true_values = {"1", "true", "t", "yes", "y"}
+    false_values = {"0", "false", "f", "no", "n"}
+    values: list[object] = []
+    for value in series.tolist():
+        if _is_missing_value(value):
+            values.append(pd.NA)
+        elif isinstance(value, (bool, np.bool_)):
+            values.append(bool(value))
+        elif isinstance(value, (int, np.integer, float, np.floating)) and np.isfinite(value):
+            values.append(bool(value))
+        elif isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in true_values:
+                values.append(True)
+            elif lowered in false_values:
+                values.append(False)
+            else:
+                values.append(pd.NA)
+        else:
+            values.append(pd.NA)
+    return pd.Series(values, index=series.index, dtype="boolean")
+
+
+def _coerce_int_series(series: pd.Series) -> pd.Series:
+    numeric = pd.to_numeric(series, errors="coerce")
+    try:
+        return numeric.astype("Int64")
+    except (TypeError, ValueError):
+        return numeric.round().astype("Int64")
+
+
+def _coerce_string_series(series: pd.Series) -> pd.Series:
+    out = series.astype("string")
+    out = out.mask(series.map(_is_missing_value), pd.NA)
+    return out
+
+
+def _column_kind(column: str, column_kinds: Mapping[str, str] | None = None) -> str:
+    if column_kinds and column in column_kinds:
+        return str(column_kinds[column])
+    if column in EVENTS_BOOL_COLUMNS:
+        return "bool"
+    if column in EVENTS_INT_COLUMNS:
+        return "int"
+    if column in EVENTS_FLOAT_COLUMNS:
+        return "float"
+    return "string"
+
+
+def infer_events_metadata_column_kinds(meta_df: pd.DataFrame | None) -> dict[str, str]:
+    if meta_df is None:
+        return {}
+    kinds: dict[str, str] = {}
+    for column in meta_df.columns:
+        if column == "path":
+            continue
+        if column in EVENTS_BOOL_COLUMNS:
+            kinds[column] = "bool"
+        elif column in EVENTS_INT_COLUMNS:
+            kinds[column] = "int"
+        elif column in EVENTS_FLOAT_COLUMNS:
+            kinds[column] = "float"
+        elif column in EVENTS_STRING_COLUMNS:
+            kinds[column] = "string"
+        elif pd.api.types.is_bool_dtype(meta_df[column]):
+            kinds[column] = "bool"
+        elif pd.api.types.is_integer_dtype(meta_df[column]):
+            kinds[column] = "int"
+        elif pd.api.types.is_float_dtype(meta_df[column]):
+            kinds[column] = "float"
+        else:
+            kinds[column] = "string"
+    return kinds
+
+
+def normalize_events_frame(
+    df: pd.DataFrame,
+    schema_columns: Iterable[str],
+    *,
+    column_kinds: Mapping[str, str] | None = None,
+) -> pd.DataFrame:
+    schema = _unique_preserve_order(schema_columns)
+    if "extra_json" not in schema:
+        schema.append("extra_json")
+    out = df.copy()
+
+    extra_columns = [col for col in out.columns if col not in schema]
+    out["extra_json"] = _extra_json_series(out, extra_columns)
+    if extra_columns:
+        out = out.drop(columns=extra_columns)
+
+    for column in schema:
+        if column not in out.columns:
+            out[column] = pd.NA
+        kind = _column_kind(column, column_kinds)
+        if kind == "bool":
+            out[column] = _coerce_bool_series(out[column])
+        elif kind == "int":
+            out[column] = _coerce_int_series(out[column])
+        elif kind == "float":
+            out[column] = pd.to_numeric(out[column], errors="coerce").astype("float64")
+        else:
+            out[column] = _coerce_string_series(out[column])
+    return out.loc[:, schema]
+
+
+def events_arrow_schema(
+    schema_columns: Iterable[str],
+    *,
+    column_kinds: Mapping[str, str] | None = None,
+) -> pa.Schema:
+    fields: list[pa.Field] = []
+    schema = _unique_preserve_order(schema_columns)
+    if "extra_json" not in schema:
+        schema.append("extra_json")
+    for column in schema:
+        kind = _column_kind(column, column_kinds)
+        if kind == "bool":
+            arrow_type = pa.bool_()
+        elif kind == "int":
+            arrow_type = pa.int64()
+        elif kind == "float":
+            arrow_type = pa.float64()
+        else:
+            arrow_type = pa.string()
+        fields.append(pa.field(column, arrow_type))
+    return pa.schema(fields)
+
+
+def events_table_from_frame(
+    df: pd.DataFrame,
+    schema_columns: Iterable[str],
+    *,
+    column_kinds: Mapping[str, str] | None = None,
+) -> pa.Table:
+    normalized = normalize_events_frame(df, schema_columns, column_kinds=column_kinds)
+    return pa.Table.from_pandas(
+        normalized,
+        schema=events_arrow_schema(normalized.columns, column_kinds=column_kinds),
+        preserve_index=False,
+    )
+
 
 def sigmoid_spaced_p_grid(p_min=1e-4, p_max=1.0 - 1e-4, n=12):
     """
@@ -572,7 +1002,7 @@ def compute_recurrence_stats(run_summaries: list[dict]) -> dict:
 
 @njit(fastmath=True, cache=True, parallel=True)
 def marginal_loglikelihood_grid(log_Pb, log_Pf, log_p, log_1_minus_p):
-    """Marginal log-likelihood over the (mag_grid × p_grid) posterior grid."""
+    """Marginal log-likelihood over the (mag_grid x p_grid) posterior grid."""
     M, N = log_Pb.shape  # shape: M x N
     P = log_p.shape[0]
     loglik = np.zeros((M, P), dtype=log_Pb.dtype)
@@ -1087,6 +1517,8 @@ def score_lightcurve(
     *,
     baseline_func=per_camera_gp_baseline,
     baseline_kwargs: dict | None = None,
+    filter_residual_bad_cameras_enabled: bool = False,
+    bad_camera_scatter_ratio: float = BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
 
     p_points: int = 12,
     mag_points: int = 12,
@@ -1116,6 +1548,16 @@ def score_lightcurve(
         baseline_kwargs = dict(DEFAULT_BASELINE_KWARGS)
 
     df_base = baseline_func(df, **baseline_kwargs) if baseline_func is not None else None
+    residual_bad_cameras: set = set()
+    if filter_residual_bad_cameras_enabled and df_base is not None and "camera#" in df.columns:
+        df_filtered, residual_bad_cameras = filter_residual_bad_cameras(
+            df,
+            df_base,
+            scatter_ratio_threshold=bad_camera_scatter_ratio,
+        )
+        if residual_bad_cameras:
+            df = df_filtered
+            df_base = baseline_func(df, **baseline_kwargs) if baseline_func is not None else None
 
     kind_configs = {
         "dip": dict(
@@ -1143,7 +1585,13 @@ def score_lightcurve(
             compute_event_prob=compute_event_prob,
         )
 
-    return dict(dip=results["dip"], jump=results["jump"], df_base=df_base)
+    return dict(
+        dip=results["dip"],
+        jump=results["jump"],
+        df_base=df_base,
+        df=df,
+        bad_cameras_filtered=residual_bad_cameras,
+    )
 
 
 
@@ -1181,10 +1629,6 @@ def process_lightcurve(
 ):
     path = str(path)
     path_metadata = dict(path_metadata or {})
-    if excluded_cameras is None and "excluded_cameras" in path_metadata:
-        excluded_cameras = path_metadata.get("excluded_cameras")
-        if pd.isna(excluded_cameras) or excluded_cameras == "":
-            excluded_cameras = None
 
     if os.path.isfile(path) and path.endswith('.csv'):
         df = read_skypatrol_csv(path)
@@ -1199,6 +1643,8 @@ def process_lightcurve(
     else:
         raise ValueError(f"Cannot read light curve from path: {path}")
 
+    field_summary = compute_field_summary(df)
+
     valid_mask = (
         np.isfinite(df["JD"]) &
         np.isfinite(df["mag"]) &
@@ -1208,16 +1654,18 @@ def process_lightcurve(
     )
     df = df[valid_mask].copy()
 
-    # Auto-filter bad cameras if enabled
-    bad_cameras_filtered = set()
+    # Only catastrophic unsupported excursions are removed before baseline
+    # fitting. Scatter/offset camera decisions happen below in residual space.
+    pre_baseline_bad_cameras = set()
     if auto_filter_bad_cameras and "camera#" in df.columns:
-        df, bad_cameras_filtered = filter_bad_cameras(
+        df, pre_baseline_bad_cameras = filter_bad_cameras(
             df,
             lc_path=path,
+            filter_scatter=False,
+            filter_offset=False,
+            filter_catastrophic=True,
             scatter_ratio_threshold=bad_camera_scatter_ratio,
         )
-
-    n_points = len(df)
 
     baseline_func_map = {
         "gp": per_camera_gp_baseline,
@@ -1267,7 +1715,14 @@ def process_lightcurve(
         compute_event_prob=compute_event_prob,
         baseline_func=baseline_func,
         baseline_kwargs=baseline_kwargs_local,
+        filter_residual_bad_cameras_enabled=auto_filter_bad_cameras,
+        bad_camera_scatter_ratio=bad_camera_scatter_ratio,
     )
+
+    residual_bad_cameras = set(res.get("bad_cameras_filtered", set()) or set())
+    bad_cameras_filtered = set(pre_baseline_bad_cameras) | residual_bad_cameras
+    df = res.get("df", df)
+    n_points = len(df)
 
     dip = res["dip"]
     jump = res["jump"]
@@ -1443,6 +1898,14 @@ def process_lightcurve(
         camera_ids=str(camera_ids),
         camera_min_points=int(camera_min_points),
         camera_max_points=int(camera_max_points),
+        asassn_field_key=str(field_summary.get("asassn_field_key", "")),
+        asassn_fields=str(field_summary.get("asassn_fields", "")),
+        asassn_field_count=int(field_summary.get("asassn_field_count") or 0),
+        asassn_field_key_fraction=float(field_summary.get("asassn_field_key_fraction", np.nan)),
+        camera_field_key=str(field_summary.get("camera_field_key", "")),
+        camera_fields=str(field_summary.get("camera_fields", "")),
+        camera_field_count=int(field_summary.get("camera_field_count") or 0),
+        camera_field_key_fraction=float(field_summary.get("camera_field_key_fraction", np.nan)),
 
         dipper_score=float(dipper_score),
         dipper_n_dips=int(dipper_n_dips),
@@ -1456,7 +1919,7 @@ def process_lightcurve(
         trigger_mode=str(trigger_mode),
         dip_trigger_threshold=float(dip.get("trigger_threshold", np.nan)),
         jump_trigger_threshold=float(jump.get("trigger_threshold", np.nan)),
-        bad_cameras_filtered=",".join(str(c) for c in sorted(bad_cameras_filtered)) if bad_cameras_filtered else "",
+        bad_cameras_filtered=",".join(str(c) for c in sorted(bad_cameras_filtered, key=str)) if bad_cameras_filtered else "",
 
         # Recurrence statistics
         dip_is_single_event=bool(dip_recurrence["is_single_event"]),
@@ -1492,68 +1955,31 @@ def _process_one(path: str, path_metadata: dict | None) -> dict:
 def main():
     parser = argparse.ArgumentParser(description="Run Bayesian event scoring on light curves in parallel.")
     g_input = parser.add_argument_group("Input")
-    g_trigger = parser.add_argument_group("Trigger & runs")
-    g_baseline = parser.add_argument_group("Baseline (GP)")
-    g_mag = parser.add_argument_group("Magnitude grid")
-    g_filter = parser.add_argument_group("Bad camera & signal")
     g_output = parser.add_argument_group("Output")
     g_general = parser.add_argument_group("General")
-    g_input.add_argument("--input", dest="input_patterns", nargs="*", default=None, help="Paths or globs to light-curve files (repeatable).")
-    g_input.add_argument("--input-file", type=str, default=None, help="Read paths from file (one path per line); avoids long argv for large batches.")
-    g_input.add_argument("--mag-bin", dest="mag_bins", action="append", choices=MAG_BINS, help="Process all light curves in this magnitude bin (choices: 12_12.5, 12.5_13, 13_13.5, 13.5_14, 14_14.5, 14.5_15).")
+    g_input.add_argument("--input", dest="input_patterns", action="append", default=None, help="Path or glob to a light-curve file. Repeat for multiple inputs.")
+    g_input.add_argument("--input-file", type=Path, default=None, help="Read paths from file (one path per line); avoids long argv for large batches.")
+    g_input.add_argument("--mag-bin", dest="mag_bins", action="append", choices=MAG_BINS, help="Process all light curves in this magnitude bin.")
     g_input.add_argument("--lc-path", type=str, default=str(LCV2_ROOT), help="Base path to light curve directories")
     g_input.add_argument("--workers", type=int, default=WORKERS, help="Number of worker processes")
-    g_trigger.add_argument("--trigger-mode", type=str, default=TRIGGER_MODE, choices=["logbf", "posterior_prob"], help="Triggering mode: logbf = per-point log Bayes factor threshold; posterior_prob = posterior probability threshold (requires event probs).")
-    g_trigger.add_argument("--logbf-threshold-dip", type=float, default=LOGBF_THRESHOLD_DIP, help="Per-point dip trigger")
-    g_trigger.add_argument("--logbf-threshold-jump", type=float, default=LOGBF_THRESHOLD_JUMP, help="Per-point jump trigger")
-    g_trigger.add_argument("--significance-threshold", type=float, default=SIGNIFICANCE_THRESHOLD, help="Only used if --trigger-mode posterior_prob")
-    g_trigger.add_argument("--p-points", type=int, default=P_POINTS, help="Number of points in the p grid")
-    g_trigger.add_argument("--mag-points", type=int, default=MAG_POINTS, help="Number of points in the magnitude grid")
-    g_trigger.add_argument("--run-min-points", type=int, default=RUN_MIN_POINTS, help="Min triggered points in a run")
-    g_trigger.add_argument("--run-max-gap-points", type=int, default=RUN_MAX_GAP_POINTS, help="Allow up to this many missing indices inside a run")
-    g_trigger.add_argument("--run-max-gap-days", type=float, default=None, help="Break runs if JD gap exceeds this")
-    g_trigger.add_argument("--run-min-duration-days", type=float, default=0.0, help="Require run duration >= this (default: 0.0 = disabled)")
-    g_trigger.add_argument("--no-event-prob", action="store_true", help="Skip LOO event responsibilities")
-    g_trigger.add_argument("--p-min-dip", type=float, default=None, help="Minimum dip fraction for p-grid (overrides default)")
-    g_trigger.add_argument("--p-max-dip", type=float, default=None, help="Maximum dip fraction for p-grid (overrides default)")
-    g_trigger.add_argument("--p-min-jump", type=float, default=None, help="Minimum jump fraction for p-grid (overrides default)")
-    g_trigger.add_argument("--p-max-jump", type=float, default=None, help="Maximum jump fraction for p-grid (overrides default)")
-    g_baseline.add_argument(
-        "--baseline-func",
-        type=str,
-        default=BASELINE_FUNC,
-        choices=["gp", "gp_masked", "global_median", "per_camera_median", "phase_template"],
-        help="Baseline function to use",
-    )
-    g_baseline.add_argument("--baseline-s0", type=float, default=BASELINE_S0, help="GP kernel S0 parameter (default: 0.0005)")
-    g_baseline.add_argument("--baseline-w0", type=float, default=BASELINE_W0, help="GP kernel w0 parameter (default: pi/1000)")
-    g_baseline.add_argument("--baseline-q", type=float, default=BASELINE_Q, help="GP kernel Q parameter (default: 0.7)")
-    g_baseline.add_argument("--baseline-jitter", type=float, default=BASELINE_JITTER, help="GP jitter term (default: 0.006)")
-    g_baseline.add_argument("--baseline-sigma-floor", type=float, default=None, help="Minimum sigma floor (default: None)")
-    g_mag.add_argument("--mag-min-dip", type=float, default=None, help="Min magnitude for dip grid (overrides auto)")
-    g_mag.add_argument("--mag-max-dip", type=float, default=None, help="Max magnitude for dip grid (overrides auto)")
-    g_mag.add_argument("--mag-min-jump", type=float, default=None, help="Min magnitude for jump grid (overrides auto)")
-    g_mag.add_argument("--mag-max-jump", type=float, default=None, help="Max magnitude for jump grid (overrides auto)")
-    g_filter.add_argument("--no-filter-bad-cameras", dest="filter_bad_cameras", action="store_false", help="Disable auto-filtering of cameras with anomalously high scatter (enabled by default)")
-    g_filter.add_argument("--bad-camera-scatter-ratio", type=float, default=BAD_CAMERA_SCATTER_RATIO_THRESHOLD, help="Scatter ratio threshold for bad camera filtering (default: 2.5)")
-    g_filter.add_argument("--min-mag-offset", type=float, default=MIN_MAG_OFFSET, help="Apply signal amplitude filter: require |event_mag - baseline_mag| > threshold (e.g., 0.05)")
-    g_output.add_argument("--output", type=str, default=None, help="Output path for results (suffix adjusted per format).")
-    g_output.add_argument("--error-output", type=str, default=None, help="Optional CSV path for per-light-curve processing errors.")
-    g_output.add_argument("--metadata-csv", type=str, default=None, help="Optional CSV with 'path' and extra metadata columns to attach to results.")
-    g_output.add_argument("--output-format", type=str, default=OUTPUT_FORMAT, choices=["csv", "parquet", "parquet_chunk"], help="Output format for results.")
-    g_output.add_argument("--chunk-size", type=int, default=EVENTS_OUTPUT_CHUNK_SIZE, help="Write results in chunks of this many rows.")
+
+    g_output.add_argument("--output", type=Path, default=None, help="Output path for results (suffix adjusted per format).")
+    g_output.add_argument("--error-output", type=Path, default=None, help="Optional CSV path for per-light-curve processing errors.")
+    g_output.add_argument("--metadata-csv", type=Path, default=None, help="Optional CSV with 'path' and extra metadata columns to attach to results.")
+
+    add_config_args(g_general)
     g_general.add_argument("-o", "--overwrite", action="store_true", help="Overwrite checkpoint log and existing output if present (start fresh).")
     g_general.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output (default: quiet).")
     g_general.add_argument("--quiet", action="store_true", help=argparse.SUPPRESS)
-    g_general.add_argument(
-        "--max-error-fraction",
-        type=float,
-        default=0.01,
-        help="Exit non-zero if more than this fraction of attempted light curves fail (default: 0.01).",
-    )
-    parser.set_defaults(filter_bad_cameras=True)
+    parser.set_defaults(**EVENTS_CONFIG_DEFAULTS)
 
     args = parser.parse_args()
+    apply_config(
+        args,
+        command="events",
+        valid_keys=namespace_keys(parser, EVENTS_CONFIG_DEFAULTS),
+        path_keys=EVENTS_CONFIG_PATH_KEYS,
+    )
     if args.trigger_mode == "posterior_prob" and args.no_event_prob:
         raise SystemExit("posterior_prob triggering requires event_prob; remove --no-event-prob")
     if not (0.0 <= args.max_error_fraction <= 1.0):
@@ -1575,6 +2001,7 @@ def main():
         out_dir.mkdir(parents=True, exist_ok=True)
         args.output = str(out_dir / "lc_events_results.parquet")
 
+    meta_df: pd.DataFrame | None = None
     metadata_by_path = None
     if args.metadata_csv:
         meta_df = pd.read_csv(args.metadata_csv)
@@ -1582,6 +2009,9 @@ def main():
             raise SystemExit("metadata-csv must include a 'path' column")
         meta_df["path"] = meta_df["path"].astype(str)
         metadata_by_path = meta_df.set_index("path").to_dict(orient="index")
+
+    events_writer_columns = build_events_writer_columns(meta_df.columns if meta_df is not None else None)
+    events_column_kinds = infer_events_metadata_column_kinds(meta_df)
 
     def ensure_suffix(path: Path | None, fmt: str) -> Path | None:
         if path is None:
@@ -1751,22 +2181,24 @@ def main():
     total_any_sig = 0
 
     class CsvWriter:
-        def __init__(self, path: Path):
+        def __init__(
+            self,
+            path: Path,
+            schema_columns: Iterable[str],
+            column_kinds: Mapping[str, str] | None = None,
+        ):
             self.path = Path(path)
-            self.columns = None
-            if self.path.exists() and self.path.stat().st_size > 0:
-                try:
-                    self.columns = pd.read_csv(self.path, nrows=0).columns.tolist()
-                except Exception:
-                    self.columns = None
+            self.schema_columns = list(schema_columns)
+            self.column_kinds = dict(column_kinds or {})
 
         def write_chunk(self, chunk_results):
             if not chunk_results:
                 return
-            df_chunk = pd.DataFrame(chunk_results)
-            if self.columns is None:
-                self.columns = list(df_chunk.columns)
-            df_chunk = df_chunk.reindex(columns=self.columns)
+            df_chunk = normalize_events_frame(
+                pd.DataFrame(chunk_results),
+                self.schema_columns,
+                column_kinds=self.column_kinds,
+            )
             self.path.parent.mkdir(parents=True, exist_ok=True)
             header = not self.path.exists() or self.path.stat().st_size == 0
             df_chunk.to_csv(self.path, mode="a", header=header, index=False)
@@ -1775,40 +2207,44 @@ def main():
             return
 
     class ParquetChunkWriter:
-        def __init__(self, path: Path):
+        def __init__(
+            self,
+            path: Path,
+            schema_columns: Iterable[str],
+            column_kinds: Mapping[str, str] | None = None,
+        ):
             self.path = Path(path)
+            self.schema_columns = list(schema_columns)
+            self.column_kinds = dict(column_kinds or {})
             self.append = self.path.exists() and self.path.stat().st_size > 0
 
         def write_chunk(self, chunk_results):
             if not chunk_results:
                 return
-            df_chunk = pd.DataFrame(chunk_results)
-            table = pa.Table.from_pandas(df_chunk, preserve_index=False)
+            df_chunk = normalize_events_frame(
+                pd.DataFrame(chunk_results),
+                self.schema_columns,
+                column_kinds=self.column_kinds,
+            )
             self.path.parent.mkdir(parents=True, exist_ok=True)
             if self.append:
                 try:
-                    existing = pq.read_table(self.path)
+                    existing_df = pq.read_table(self.path).to_pandas()
                 except Exception as e:
                     _log(f"Warning: could not read existing {self.path}, starting fresh: {e}", False)
-                    existing = None
-                if existing is not None:
-                    try:
-                        unified_schema = pa.unify_schemas(
-                            [existing.schema, table.schema],
-                            promote_options="permissive",
-                        )
-                        existing = existing.cast(unified_schema)
-                        table = table.cast(unified_schema)
-                        table = pa.concat_tables([existing, table], promote_options="permissive")
-                    except Exception as e:
-                        _log(
-                            f"Warning: could not unify parquet schema for {self.path}; "
-                            f"falling back to pandas concat: {e}",
-                            False,
-                        )
-                        existing_df = existing.to_pandas()
-                        combined = pd.concat([existing_df, df_chunk], ignore_index=True, sort=False)
-                        table = pa.Table.from_pandas(combined, preserve_index=False)
+                    existing_df = None
+                if existing_df is not None:
+                    existing_df = normalize_events_frame(
+                        existing_df,
+                        self.schema_columns,
+                        column_kinds=self.column_kinds,
+                    )
+                    df_chunk = pd.concat([existing_df, df_chunk], ignore_index=True, sort=False)
+            table = events_table_from_frame(
+                df_chunk,
+                self.schema_columns,
+                column_kinds=self.column_kinds,
+            )
             tmp_path = self.path.with_suffix('.parquet.tmp')
             pq.write_table(table, tmp_path, compression=PARQUET_OUTPUT_COMPRESSION)
             os.replace(tmp_path, self.path)
@@ -1818,8 +2254,15 @@ def main():
             return
 
     class ParquetDatasetWriter:
-        def __init__(self, path: Path):
+        def __init__(
+            self,
+            path: Path,
+            schema_columns: Iterable[str],
+            column_kinds: Mapping[str, str] | None = None,
+        ):
             self.path = Path(path)
+            self.schema_columns = list(schema_columns)
+            self.column_kinds = dict(column_kinds or {})
             self.path.mkdir(parents=True, exist_ok=True)
             existing = sorted(self.path.glob("chunk_*.parquet"))
             if existing:
@@ -1834,8 +2277,11 @@ def main():
         def write_chunk(self, chunk_results):
             if not chunk_results:
                 return
-            df_chunk = pd.DataFrame(chunk_results)
-            table = pa.Table.from_pandas(df_chunk, preserve_index=False)
+            table = events_table_from_frame(
+                pd.DataFrame(chunk_results),
+                self.schema_columns,
+                column_kinds=self.column_kinds,
+            )
             tmp_path = self.path / f"chunk_{self.counter:06d}.parquet.tmp"
             final_path = self.path / f"chunk_{self.counter:06d}.parquet"
             pq.write_table(table, tmp_path, compression=PARQUET_OUTPUT_COMPRESSION)
@@ -1849,11 +2295,11 @@ def main():
         if path is None:
             return None
         if fmt == "csv":
-            return CsvWriter(path)
+            return CsvWriter(path, events_writer_columns, events_column_kinds)
         elif fmt == "parquet":
-            return ParquetChunkWriter(path)
+            return ParquetChunkWriter(path, events_writer_columns, events_column_kinds)
         elif fmt == "parquet_chunk":
-            return ParquetDatasetWriter(path)
+            return ParquetDatasetWriter(path, events_writer_columns, events_column_kinds)
         else:
             raise ValueError(f"Unknown output format: {fmt}")
 

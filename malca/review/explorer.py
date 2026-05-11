@@ -3185,7 +3185,7 @@ def build_explorer_app(
                     url,
                 )
             return (
-                f"Wrote review bundle to {bundle_dir} ({len(export_df):,} candidates). Open with `malca review --db {review_db}`.",
+                f"Wrote review bundle to {bundle_dir} ({len(export_df):,} candidates). Open with `malca review --review-db {review_db}`.",
                 dash.no_update,
             )
         except Exception as exc:

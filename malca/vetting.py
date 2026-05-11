@@ -111,6 +111,8 @@ GAIA_TAP_URLS = [GAIA_ESA_TAP_URL, GAIA_AIP_TAP_URL]
 ASASSN_VAR_CATALOG = ASASSN_VAR_CATALOG_ID
 ASASSN_VAR_LOCAL_CSV = Path(__file__).resolve().parent.parent / "input" / "asassn_variables_220326.csv"
 ASASSN_VAR_RADIUS_ARCSEC = 5.0
+GAIA_TAP_RETRY_BASE_DELAY = 5.0
+GAIA_TAP_RETRY_MAX_DELAY = 60.0
 
 # Module-level cache for the local ASAS-SN catalog
 _asassn_cache: dict = {}
@@ -122,6 +124,98 @@ ALERCE_WORKERS = CFG_ALERCE_WORKERS
 ATLAS_MJD_MIN = CFG_ATLAS_MJD_MIN
 ATLAS_POLL_INTERVAL = CFG_ATLAS_POLL_INTERVAL
 ATLAS_MAX_POLL = CFG_ATLAS_MAX_POLL
+
+
+def _short_error(exc: Exception, max_len: int = 240) -> str:
+    msg = str(exc).splitlines()[0].strip()
+    return msg if len(msg) <= max_len else msg[:max_len - 3] + "..."
+
+
+def _raise_lookup_failures(label: str, failures: list[str], n_total: int) -> None:
+    if not failures:
+        return
+    detail = "; ".join(failures[:3])
+    more = f" (+{len(failures) - 3} more)" if len(failures) > 3 else ""
+    raise RuntimeError(
+        f"{label}: lookup failed for {len(failures)}/{n_total} candidates: {detail}{more}"
+    )
+
+
+def _gaia_retry_delay(attempt: int) -> float:
+    return min(GAIA_TAP_RETRY_BASE_DELAY * max(1, attempt), GAIA_TAP_RETRY_MAX_DELAY)
+
+
+def _connect_gaia_taps_until_available(
+    test_query: str,
+    *,
+    label: str,
+    urls: list[str] | None = None,
+    maxrec: int | None = None,
+) -> list[tuple[str, pyvo.dal.TAPService]]:
+    """Return working Gaia TAP services, retrying until interrupted."""
+    tap_urls = list(urls or GAIA_TAP_URLS)
+    attempt = 0
+    while True:
+        attempt += 1
+        taps: list[tuple[str, pyvo.dal.TAPService]] = []
+        errors: list[str] = []
+        for tap_url in tap_urls:
+            try:
+                tap = pyvo.dal.TAPService(tap_url)
+                if maxrec is None:
+                    tap.run_sync(test_query)
+                else:
+                    tap.run_sync(test_query, maxrec=maxrec)
+                taps.append((tap_url, tap))
+            except KeyboardInterrupt:
+                raise
+            except Exception as exc:
+                errors.append(f"{tap_url}: {_short_error(exc)}")
+        if taps:
+            return taps
+
+        delay = _gaia_retry_delay(attempt)
+        detail = " | ".join(errors) if errors else "no TAP services configured"
+        print(
+            f"  {label}: all Gaia TAP servers unavailable "
+            f"(attempt {attempt}); retrying in {delay:.0f}s. Last errors: {detail}"
+        )
+        time.sleep(delay)
+
+
+def _run_gaia_tap_query_until_success(
+    taps: list[tuple[str, pyvo.dal.TAPService]],
+    query: str,
+    *,
+    label: str,
+    maxrec: int | None = None,
+):
+    """Run a Gaia TAP query on available mirrors, retrying until interrupted."""
+    attempt = 0
+    while True:
+        attempt += 1
+        errors: list[str] = []
+        for i, (tap_url, tap) in enumerate(list(taps)):
+            try:
+                if maxrec is None:
+                    result = tap.run_sync(query)
+                else:
+                    result = tap.run_sync(query, maxrec=maxrec)
+                if i != 0:
+                    taps.insert(0, taps.pop(i))
+                return result
+            except KeyboardInterrupt:
+                raise
+            except Exception as exc:
+                errors.append(f"{tap_url}: {_short_error(exc)}")
+
+        delay = _gaia_retry_delay(attempt)
+        detail = " | ".join(errors) if errors else "no TAP services available"
+        print(
+            f"  {label}: Gaia TAP query failed on all mirrors "
+            f"(attempt {attempt}); retrying in {delay:.0f}s. Last errors: {detail}"
+        )
+        time.sleep(delay)
 
 ZTF_VAR_CATALOG = ZTF_VAR_CATALOG_ID
 
@@ -314,7 +408,7 @@ def _simbad_via_xmatch(
                     df.loc[idx, "simbad_sep_arcsec"] = round(float(sep), 3) if pd.notna(sep) else np.nan
                     matched += 1
     except Exception as e:
-        print(f"SIMBAD: XMatch query failed: {e}")
+        raise RuntimeError(f"SIMBAD XMatch lookup failed: {e}") from e
 
     print(f"SIMBAD: {matched}/{n} candidates matched")
     return df
@@ -371,67 +465,16 @@ def query_gaia_variability(
     # Build an ordered list of working TAP services.
     preferred_tap_urls = [GAIA_AIP_TAP_URL] + [u for u in GAIA_TAP_URLS if u != GAIA_AIP_TAP_URL]
     test_query = f"SELECT source_id FROM gaiadr3.vari_summary WHERE source_id = {gaia_ids[0]}"
-    taps: list[tuple[str, pyvo.dal.TAPService]] = []
-    for tap_url in preferred_tap_urls:
-        try:
-            tap = pyvo.dal.TAPService(tap_url)
-            tap.run_sync(test_query)
-            taps.append((tap_url, tap))
-        except Exception:
-            print(f"  Gaia TAP {tap_url} unavailable, trying next...")
-            continue
+    taps = _connect_gaia_taps_until_available(
+        test_query,
+        label="Gaia variability",
+        urls=preferred_tap_urls,
+    )
 
-    if not taps:
-        print("  Warning: all Gaia TAP servers unreachable, skipping variability query")
-        return df
-
-    def _short_error(exc: Exception, max_len: int = 240) -> str:
-        msg = str(exc).splitlines()[0].strip()
-        return msg if len(msg) <= max_len else msg[:max_len - 3] + "..."
-
-    def _run_with_tap_fallback(query: str):
-        """Run query, trying TAP mirrors in order and promoting last success."""
-        errors: list[str] = []
-        for i, (tap_url, tap) in enumerate(list(taps)):
-            try:
-                result = tap.run_sync(query)
-                if i != 0:
-                    taps.insert(0, taps.pop(i))
-                return result
-            except Exception as exc:
-                errors.append(f"{tap_url}: {exc}")
-        raise RuntimeError(" | ".join(errors))
-
-    def _query_chunk_rows(ids_chunk: list[str], query_builder: Callable[[list[str]], str], retries: int = 3):
-        """Execute one chunk with retries; split chunk recursively on persistent failures."""
+    def _query_chunk_rows(ids_chunk: list[str], query_builder: Callable[[list[str]], str], *, label: str):
+        """Execute one chunk, retrying until TAP succeeds or the run is interrupted."""
         query = query_builder(ids_chunk)
-        last_exc: Exception | None = None
-
-        for attempt in range(retries):
-            try:
-                return list(_run_with_tap_fallback(query))
-            except Exception as exc:
-                last_exc = exc
-                if attempt < retries - 1:
-                    time.sleep(5 * (attempt + 1))
-
-        if len(ids_chunk) > 20:
-            mid = len(ids_chunk) // 2
-            rows = []
-            split_errors: list[Exception] = []
-            for subchunk in (ids_chunk[:mid], ids_chunk[mid:]):
-                try:
-                    rows.extend(_query_chunk_rows(subchunk, query_builder, retries=2))
-                except Exception as exc:
-                    split_errors.append(exc)
-            if rows:
-                return rows
-            if split_errors:
-                raise split_errors[0]
-
-        if last_exc is not None:
-            raise last_exc
-        raise RuntimeError("Gaia TAP query failed")
+        return list(_run_gaia_tap_query_until_success(taps, query, label=label))
 
     def _summary_query(ids_chunk: list[str]) -> str:
         ids_str = ",".join(ids_chunk)
@@ -454,28 +497,22 @@ def query_gaia_variability(
     summary_results = {}
     for i in tqdm(range(0, len(gaia_ids), effective_chunk_size), desc="Gaia vari_summary"):
         chunk = gaia_ids[i : i + effective_chunk_size]
-        try:
-            rows = _query_chunk_rows(chunk, _summary_query)
-            for row in rows:
-                sid = str(row["source_id"])
-                summary_results[sid] = bool(row["in_vari_classification_result"])
-        except Exception as e:
-            print(f"  Gaia vari_summary chunk {i} failed: {_short_error(e)}")
+        rows = _query_chunk_rows(chunk, _summary_query, label=f"Gaia vari_summary chunk {i}")
+        for row in rows:
+            sid = str(row["source_id"])
+            summary_results[sid] = bool(row["in_vari_classification_result"])
 
     # Query vari_classifier_result (what class?)
     classifier_results = {}
     for i in tqdm(range(0, len(gaia_ids), effective_chunk_size), desc="Gaia vari_classifier"):
         chunk = gaia_ids[i : i + effective_chunk_size]
-        try:
-            rows = _query_chunk_rows(chunk, _classifier_query)
-            for row in rows:
-                sid = str(row["source_id"])
-                classifier_results[sid] = (
-                    str(row["best_class_name"]),
-                    float(row["best_class_score"]) if row["best_class_score"] is not None else np.nan,
-                )
-        except Exception as e:
-            print(f"  Gaia vari_classifier chunk {i} failed: {_short_error(e)}")
+        rows = _query_chunk_rows(chunk, _classifier_query, label=f"Gaia vari_classifier chunk {i}")
+        for row in rows:
+            sid = str(row["source_id"])
+            classifier_results[sid] = (
+                str(row["best_class_name"]),
+                float(row["best_class_score"]) if row["best_class_score"] is not None else np.nan,
+            )
 
     # Apply results
     matched = 0
@@ -504,14 +541,12 @@ def _load_asassn_local_catalog(path: Path) -> pd.DataFrame:
     if key in _asassn_cache:
         return _asassn_cache[key]
     if not path.is_file():
-        print(f"ASAS-SN variables: local CSV not found at {path}, skipping")
-        return pd.DataFrame()
+        raise FileNotFoundError(f"ASAS-SN variables local CSV not found: {path}")
     print(f"ASAS-SN variables: loading local catalog {path.name}...")
     cat = pd.read_csv(path, low_memory=False)
     need = {"RAJ2000", "DEJ2000", "ID"}
     if not need.issubset(cat.columns):
-        print(f"ASAS-SN variables: CSV missing columns {need}, got {list(cat.columns)[:12]}...")
-        return pd.DataFrame()
+        raise ValueError(f"ASAS-SN variables CSV missing columns {need}, got {list(cat.columns)[:12]}...")
     _asassn_cache[key] = cat
     return cat
 
@@ -581,23 +616,21 @@ def _asassn_via_tap(
         "ra": df.loc[valid, "ra"].values,
         "dec": df.loc[valid, "dec"].values,
     })
-    try:
-        result = batch_tap_crossmatch(
-            coords_df,
-            tap_url=VIZIER_TAP_URL,
-            catalog_table=f'"{ASASSN_VAR_CATALOG}"',
-            select_cols='c."ASASSN-V", c."Per", c."Type"',
-            ra_col="RAJ2000",
-            dec_col="DEJ2000",
-            match_radius_arcsec=radius_arcsec,
-            chunk_size=chunk_size,
-            n_workers=4,
-            verbose=True,
-            desc="ASAS-SN II/366 TAP",
-        )
-    except Exception as e:
-        print(f"ASAS-SN variables: TAP crossmatch failed: {e}")
-        return df
+    result = batch_tap_crossmatch(
+        coords_df,
+        tap_url=VIZIER_TAP_URL,
+        catalog_table=f'"{ASASSN_VAR_CATALOG}"',
+        select_cols='c."ASASSN-V", c."Per", c."Type"',
+        ra_col="RAJ2000",
+        dec_col="DEJ2000",
+        match_radius_arcsec=radius_arcsec,
+        chunk_size=chunk_size,
+        n_workers=4,
+        verbose=True,
+        desc="ASAS-SN II/366 TAP",
+        raise_on_all_failed=True,
+        raise_on_failed_chunk=True,
+    )
 
     if result.empty:
         print("ASAS-SN variables: 0 matches")
@@ -881,8 +914,7 @@ def crossmatch_ztf_variables(
             )
             result = result_tab.to_pandas() if result_tab is not None and len(result_tab) > 0 else pd.DataFrame()
         except Exception as e:
-            print(f"ZTF variables: XMatch query failed: {e}")
-            result = pd.DataFrame()
+            raise RuntimeError(f"ZTF variables XMatch lookup failed: {e}") from e
 
         if not result.empty and "angDist" in result.columns:
             result = result.sort_values("angDist").drop_duplicates(subset="_idx", keep="first")
@@ -905,6 +937,8 @@ def crossmatch_ztf_variables(
             n_workers=4,
             verbose=True,
             desc="ZTF vars TAP",
+            raise_on_all_failed=True,
+            raise_on_failed_chunk=True,
         )
         if not result.empty:
             result = result.sort_values("sep_arcsec").drop_duplicates(subset="_idx", keep="first")
@@ -1129,17 +1163,8 @@ def query_gaia_eb_params(
 
     n_ecl = len(gaia_ids)
     print(f"Gaia EB params: querying {n_ecl} ECL-classified sources")
-    tap = None
-    for tap_url in GAIA_TAP_URLS:
-        try:
-            tap = pyvo.dal.TAPService(tap_url)
-            break
-        except Exception:
-            continue
-
-    if tap is None:
-        print("  Warning: all Gaia TAP servers unreachable, skipping EB params")
-        return df
+    test_query = f"SELECT source_id FROM gaiadr3.vari_eclipsing_binary WHERE source_id = {gaia_ids[0]}"
+    taps = _connect_gaia_taps_until_available(test_query, label="Gaia EB params")
 
     eb_results = {}
     for i in tqdm(range(0, len(gaia_ids), chunk_size), desc="Gaia EB params"):
@@ -1150,22 +1175,14 @@ def query_gaia_eb_params(
             FROM gaiadr3.vari_eclipsing_binary
             WHERE source_id IN ({ids_str})
         """
-        for attempt in range(3):
-            try:
-                result = tap.run_sync(query)
-                for row in result:
-                    sid = str(row["source_id"])
-                    freq = row["frequency"]
-                    period = 1.0 / float(freq) if freq and float(freq) > 0 else np.nan
-                    morph = str(row["model_type"]) if row["model_type"] else ""
-                    ranking = float(row["global_ranking"]) if row["global_ranking"] is not None else np.nan
-                    eb_results[sid] = (period, morph, ranking)
-                break
-            except Exception as e:
-                if attempt < 2:
-                    time.sleep(5 * (attempt + 1))
-                else:
-                    print(f"  Gaia EB chunk {i} failed: {e}")
+        result = _run_gaia_tap_query_until_success(taps, query, label=f"Gaia EB chunk {i}")
+        for row in result:
+            sid = str(row["source_id"])
+            freq = row["frequency"]
+            period = 1.0 / float(freq) if freq and float(freq) > 0 else np.nan
+            morph = str(row["model_type"]) if row["model_type"] else ""
+            ranking = float(row["global_ranking"]) if row["global_ranking"] is not None else np.nan
+            eb_results[sid] = (period, morph, ranking)
 
     matched = 0
     for sid, indices in idx_map.items():
@@ -1496,7 +1513,7 @@ def fetch_ztf_lightcurves(
     def _fetch_one(idx: int) -> tuple:
         ra, dec = float(df.loc[idx, "ra"]), float(df.loc[idx, "dec"])
         if not (np.isfinite(ra) and np.isfinite(dec)):
-            return (idx, 0, np.nan, np.nan)
+            return (idx, 0, np.nan, np.nan, None)
 
         try:
             # Find matching ZTF objects
@@ -1511,7 +1528,7 @@ def fetch_ztf_lightcurves(
             obj_result = tap.run_sync(obj_query)
             obj_table = obj_result.to_table()
             if obj_table is None or len(obj_table) == 0:
-                return (idx, 0, np.nan, np.nan)
+                return (idx, 0, np.nan, np.nan, None)
 
             oids = [str(row["oid"]) for row in obj_table]
             oid_list = ",".join(oids)
@@ -1527,7 +1544,7 @@ def fetch_ztf_lightcurves(
             lc_result = tap.run_sync(lc_query)
             lc_table = lc_result.to_table()
             if lc_table is None or len(lc_table) == 0:
-                return (idx, 0, np.nan, np.nan)
+                return (idx, 0, np.nan, np.nan, None)
 
             lc = lc_table.to_pandas()
 
@@ -1567,23 +1584,28 @@ def fetch_ztf_lightcurves(
                 cand_id = str(df.loc[idx, "candidate_id"]) if "candidate_id" in df.columns else str(idx)
                 lc.to_parquet(Path(output_dir) / f"ztf_lc_{cand_id}.parquet", index=False)
 
-            return (idx, n_det, g_range, r_range)
-        except Exception:
-            return (idx, 0, np.nan, np.nan)
+            return (idx, n_det, g_range, r_range, None)
+        except Exception as exc:
+            return (idx, 0, np.nan, np.nan, f"{idx}: {_short_error(exc)}")
 
     matched = 0
+    failures: list[str] = []
     valid_idx = df.index[valid].tolist()
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(_fetch_one, idx): idx for idx in valid_idx}
         for fut in tqdm(as_completed(futures), total=len(futures), desc="ZTF LCs"):
-            idx, n_det, g_range, r_range = fut.result()
+            idx, n_det, g_range, r_range, error = fut.result()
+            if error is not None:
+                failures.append(error)
+                continue
             df.loc[idx, "ztf_lc_n_det"] = n_det
             df.loc[idx, "ztf_lc_g_range"] = g_range
             df.loc[idx, "ztf_lc_r_range"] = r_range
             if n_det > 0:
                 matched += 1
 
+    _raise_lookup_failures("ZTF LCs", failures, n_valid)
     print(f"ZTF LCs: {matched}/{n_valid} with data")
     return df
 
@@ -1630,20 +1652,8 @@ def query_gaia_epoch_photometry(
         return df
 
     print(f"Gaia epoch photometry: checking {len(gaia_ids)} source_ids")
-    tap = None
-    for tap_url in GAIA_TAP_URLS:
-        try:
-            _tap = pyvo.dal.TAPService(tap_url)
-            test_query = f"SELECT source_id FROM gaiadr3.vari_summary WHERE source_id = {gaia_ids[0]}"
-            _tap.run_sync(test_query)
-            tap = _tap
-            break
-        except Exception:
-            continue
-
-    if tap is None:
-        print("  Warning: all Gaia TAP servers unreachable, skipping epoch photometry")
-        return df
+    test_query = f"SELECT source_id FROM gaiadr3.vari_summary WHERE source_id = {gaia_ids[0]}"
+    taps = _connect_gaia_taps_until_available(test_query, label="Gaia epoch photometry")
 
     # Query vari_summary for observation counts and magnitude ranges
     # (epoch photometry itself is huge — we use vari_summary stats instead)
@@ -1658,20 +1668,12 @@ def query_gaia_epoch_photometry(
             FROM gaiadr3.vari_summary
             WHERE source_id IN ({ids_str})
         """
-        for attempt in range(3):
-            try:
-                result = tap.run_sync(query)
-                for row in result:
-                    sid = str(row["source_id"])
-                    n_obs = int(row["num_selected_g_fov"]) if row["num_selected_g_fov"] is not None else 0
-                    g_range = float(row["range_mag_g_fov"]) if row["range_mag_g_fov"] is not None else np.nan
-                    epoch_results[sid] = (n_obs, g_range)
-                break
-            except Exception as e:
-                if attempt < 2:
-                    time.sleep(5 * (attempt + 1))
-                else:
-                    print(f"  Gaia epoch stats chunk {i} failed: {e}")
+        result = _run_gaia_tap_query_until_success(taps, query, label=f"Gaia epoch stats chunk {i}")
+        for row in result:
+            sid = str(row["source_id"])
+            n_obs = int(row["num_selected_g_fov"]) if row["num_selected_g_fov"] is not None else 0
+            g_range = float(row["range_mag_g_fov"]) if row["range_mag_g_fov"] is not None else np.nan
+            epoch_results[sid] = (n_obs, g_range)
 
     # Apply
     matched = 0
@@ -1741,20 +1743,8 @@ def fetch_gaia_epoch_lcs(
     print(f"Gaia epoch LCs: downloading time series for {n_total} sources")
 
     # Find working TAP server
-    tap = None
-    for tap_url in GAIA_TAP_URLS:
-        try:
-            _tap = pyvo.dal.TAPService(tap_url)
-            test = f"SELECT source_id FROM gaiadr3.epoch_photometry WHERE source_id = {gaia_ids[0]} AND transit_id IS NOT NULL"
-            _tap.run_sync(test, maxrec=1)
-            tap = _tap
-            break
-        except Exception:
-            continue
-
-    if tap is None:
-        print("  Warning: all Gaia TAP servers unreachable, skipping epoch LC download")
-        return df
+    test = f"SELECT source_id FROM gaiadr3.epoch_photometry WHERE source_id = {gaia_ids[0]} AND transit_id IS NOT NULL"
+    taps = _connect_gaia_taps_until_available(test, label="Gaia epoch LC download", maxrec=1)
 
     matched = 0
     for i in tqdm(range(0, len(gaia_ids), chunk_size), desc="Gaia epoch LCs"):
@@ -1771,47 +1761,39 @@ def fetch_gaia_epoch_lcs(
             WHERE source_id IN ({ids_str})
             ORDER BY source_id, g_transit_time
         """
-        for attempt in range(3):
-            try:
-                result = tap.run_sync(query)
-                table = result.to_table()
-                if table is None or len(table) == 0:
-                    break
-                lc_all = table.to_pandas()
+        result = _run_gaia_tap_query_until_success(taps, query, label=f"Gaia epoch LC chunk {i}")
+        table = result.to_table()
+        if table is None or len(table) == 0:
+            continue
+        lc_all = table.to_pandas()
 
-                # Process per source
-                for sid in chunk:
-                    sid_int = int(sid)
-                    src_lc = lc_all[lc_all["source_id"] == sid_int].copy()
-                    if src_lc.empty:
-                        continue
+        # Process per source
+        for sid in chunk:
+            sid_int = int(sid)
+            src_lc = lc_all[lc_all["source_id"] == sid_int].copy()
+            if src_lc.empty:
+                continue
 
-                    src_lc["time"] = pd.to_numeric(src_lc["time"], errors="coerce")
-                    src_lc["mag"] = pd.to_numeric(src_lc["mag"], errors="coerce")
-                    src_lc["mag_error"] = pd.to_numeric(src_lc["mag_error"], errors="coerce")
-                    src_lc = src_lc.dropna(subset=["time", "mag"])
+            src_lc["time"] = pd.to_numeric(src_lc["time"], errors="coerce")
+            src_lc["mag"] = pd.to_numeric(src_lc["mag"], errors="coerce")
+            src_lc["mag_error"] = pd.to_numeric(src_lc["mag_error"], errors="coerce")
+            src_lc = src_lc.dropna(subset=["time", "mag"])
 
-                    n_g = len(src_lc)
-                    g_mags = src_lc["mag"].dropna()
-                    g_range = float(g_mags.max() - g_mags.min()) if len(g_mags) >= 2 else np.nan
+            n_g = len(src_lc)
+            g_mags = src_lc["mag"].dropna()
+            g_range = float(g_mags.max() - g_mags.min()) if len(g_mags) >= 2 else np.nan
 
-                    for df_idx in idx_map.get(sid, []):
-                        df.loc[df_idx, "gaia_epoch_lc_n_g"] = n_g
-                        df.loc[df_idx, "gaia_epoch_lc_g_range"] = g_range
+            for df_idx in idx_map.get(sid, []):
+                df.loc[df_idx, "gaia_epoch_lc_n_g"] = n_g
+                df.loc[df_idx, "gaia_epoch_lc_g_range"] = g_range
 
-                    if output_dir and not src_lc.empty:
-                        for df_idx in idx_map.get(sid, []):
-                            cand_id = str(df.loc[df_idx, "candidate_id"]) if "candidate_id" in df.columns else str(df_idx)
-                            src_lc.to_parquet(Path(output_dir) / f"gaia_epoch_lc_{cand_id}.parquet", index=False)
-                            break  # one file per gaia source
+            if output_dir and not src_lc.empty:
+                for df_idx in idx_map.get(sid, []):
+                    cand_id = str(df.loc[df_idx, "candidate_id"]) if "candidate_id" in df.columns else str(df_idx)
+                    src_lc.to_parquet(Path(output_dir) / f"gaia_epoch_lc_{cand_id}.parquet", index=False)
+                    break  # one file per gaia source
 
-                    matched += 1
-                break
-            except Exception as e:
-                if attempt < 2:
-                    time.sleep(5 * (attempt + 1))
-                else:
-                    print(f"  Gaia epoch LC chunk {i} failed: {e}")
+            matched += 1
 
     print(f"Gaia epoch LCs: {matched}/{n_total} with time-series data")
     return df
@@ -1868,8 +1850,7 @@ def crossmatch_erosita(
             )
             result = result_tab.to_pandas() if result_tab is not None and len(result_tab) > 0 else pd.DataFrame()
         except Exception as e:
-            print(f"eROSITA: XMatch query failed: {e}")
-            result = pd.DataFrame()
+            raise RuntimeError(f"eROSITA XMatch lookup failed: {e}") from e
 
         sep_col = "angDist" if "angDist" in result.columns else "sep_arcsec"
         if not result.empty and sep_col in result.columns:
@@ -1893,6 +1874,8 @@ def crossmatch_erosita(
             n_workers=4,
             verbose=True,
             desc="eROSITA TAP",
+            raise_on_all_failed=True,
+            raise_on_failed_chunk=True,
         )
         sep_col = "sep_arcsec"
         if not result.empty:
@@ -1925,8 +1908,7 @@ def _erosita_via_local(
 
     fits_path = Path(local_fits) if local_fits else EROSITA_LOCAL_FITS
     if not fits_path.exists():
-        print(f"eROSITA: local FITS not found at {fits_path}, skipping")
-        return df
+        raise FileNotFoundError(f"eROSITA local FITS not found: {fits_path}")
 
     # Load and cache the catalog (only RA, DEC, ML_FLUX_1)
     cache_key = str(fits_path)
@@ -2080,7 +2062,7 @@ def query_neowise_lightcurves(
     def _fetch_one(idx: int) -> tuple:
         ra, dec = float(df.loc[idx, "ra"]), float(df.loc[idx, "dec"])
         if not (np.isfinite(ra) and np.isfinite(dec)):
-            return (idx, 0, np.nan, np.nan)
+            return (idx, 0, np.nan, np.nan, None)
 
         query = f"""
         SELECT mjd, w1mpro, w1sigmpro, w2mpro, w2sigmpro, w1snr, w2snr,
@@ -2096,7 +2078,7 @@ def query_neowise_lightcurves(
             result = Irsa.query_tap(query)
             table = result.to_table()
             if table is None or len(table) == 0:
-                return (idx, 0, np.nan, np.nan)
+                return (idx, 0, np.nan, np.nan, None)
 
             lc = table.to_pandas()
 
@@ -2114,7 +2096,7 @@ def query_neowise_lightcurves(
                 lc = lc[pd.to_numeric(lc["w1snr"], errors="coerce") >= 3.0]
 
             if lc.empty:
-                return (idx, 0, np.nan, np.nan)
+                return (idx, 0, np.nan, np.nan, None)
 
             w1 = pd.to_numeric(lc.get("w1mpro"), errors="coerce").dropna()
             w2 = pd.to_numeric(lc.get("w2mpro"), errors="coerce").dropna()
@@ -2127,23 +2109,28 @@ def query_neowise_lightcurves(
                 cand_id = str(df.loc[idx, "candidate_id"]) if "candidate_id" in df.columns else str(idx)
                 lc.to_parquet(Path(output_dir) / f"neowise_lc_{cand_id}.parquet", index=False)
 
-            return (idx, n_epochs, w1_range, w2_range)
-        except Exception:
-            return (idx, 0, np.nan, np.nan)
+            return (idx, n_epochs, w1_range, w2_range, None)
+        except Exception as exc:
+            return (idx, 0, np.nan, np.nan, f"{idx}: {_short_error(exc)}")
 
     matched = 0
+    failures: list[str] = []
     valid_idx = df.index[valid].tolist()
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(_fetch_one, idx): idx for idx in valid_idx}
         for fut in tqdm(as_completed(futures), total=len(futures), desc="NEOWISE LCs"):
-            idx, n_epochs, w1_range, w2_range = fut.result()
+            idx, n_epochs, w1_range, w2_range, error = fut.result()
+            if error is not None:
+                failures.append(error)
+                continue
             df.loc[idx, "neowise_n_epochs"] = n_epochs
             df.loc[idx, "neowise_w1_range"] = w1_range
             df.loc[idx, "neowise_w2_range"] = w2_range
             if n_epochs > 0:
                 matched += 1
 
+    _raise_lookup_failures("NEOWISE LCs", failures, n_valid)
     print(f"NEOWISE LCs: {matched}/{n_valid} with data")
     return df
 
@@ -2188,13 +2175,13 @@ def fetch_tess_lightcurves(
     def _fetch_one(idx: int) -> tuple:
         ra, dec = float(df.loc[idx, "ra"]), float(df.loc[idx, "dec"])
         if not (np.isfinite(ra) and np.isfinite(dec)):
-            return (idx, 0, 0, np.nan)
+            return (idx, 0, 0, np.nan, None)
 
         try:
             coord = SkyCoord(ra=ra, dec=dec, unit="deg")
             search = lk.search_lightcurve(coord, radius=21, mission="TESS")
             if search is None or len(search) == 0:
-                return (idx, 0, 0, np.nan)
+                return (idx, 0, 0, np.nan, None)
 
             # Prefer SPOC 2-min, then QLP, then any
             spoc = search[search.author == "SPOC"]
@@ -2208,7 +2195,7 @@ def fetch_tess_lightcurves(
                     lc_collection = search.download_all(quality_bitmask="default")
 
             if lc_collection is None or len(lc_collection) == 0:
-                return (idx, 0, 0, np.nan)
+                return (idx, 0, 0, np.nan, None)
 
             rows = []
             sectors = set()
@@ -2231,7 +2218,7 @@ def fetch_tess_lightcurves(
                     })
 
             if not rows:
-                return (idx, 0, 0, np.nan)
+                return (idx, 0, 0, np.nan, None)
 
             lc_df = pd.DataFrame(rows)
             lc_df = lc_df[np.isfinite(lc_df["flux"])].copy()
@@ -2245,24 +2232,29 @@ def fetch_tess_lightcurves(
                 cand_id = str(df.loc[idx, "candidate_id"]) if "candidate_id" in df.columns else str(idx)
                 lc_df.to_parquet(Path(output_dir) / f"tess_lc_{cand_id}.parquet", index=False)
 
-            return (idx, n_sectors, total_points, flux_range)
-        except Exception:
-            return (idx, 0, 0, np.nan)
+            return (idx, n_sectors, total_points, flux_range, None)
+        except Exception as exc:
+            return (idx, 0, 0, np.nan, f"{idx}: {_short_error(exc)}")
 
     matched = 0
+    failures: list[str] = []
     valid_idx = df.index[valid].tolist()
 
     # lightkurve queries MAST — use low parallelism
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(_fetch_one, idx): idx for idx in valid_idx}
         for fut in tqdm(as_completed(futures), total=len(futures), desc="TESS LCs"):
-            idx, n_sectors, total_points, flux_range = fut.result()
+            idx, n_sectors, total_points, flux_range, error = fut.result()
+            if error is not None:
+                failures.append(error)
+                continue
             df.loc[idx, "tess_n_sectors"] = n_sectors
             df.loc[idx, "tess_total_points"] = total_points
             df.loc[idx, "tess_flux_range"] = flux_range
             if n_sectors > 0:
                 matched += 1
 
+    _raise_lookup_failures("TESS LCs", failures, n_valid)
     print(f"TESS LCs: {matched}/{n_valid} with data")
     return df
 
@@ -2302,17 +2294,17 @@ def fetch_kepler_k2_lightcurves(
     def _fetch_one(idx: int) -> tuple:
         ra, dec = float(df.loc[idx, "ra"]), float(df.loc[idx, "dec"])
         if not (np.isfinite(ra) and np.isfinite(dec)):
-            return (idx, 0, 0, np.nan)
+            return (idx, 0, 0, np.nan, None)
 
         try:
             coord = SkyCoord(ra=ra, dec=dec, unit="deg")
             search = lk.search_lightcurve(coord, radius=21, mission=("Kepler", "K2"))
             if search is None or len(search) == 0:
-                return (idx, 0, 0, np.nan)
+                return (idx, 0, 0, np.nan, None)
 
             lc_collection = search.download_all()
             if lc_collection is None or len(lc_collection) == 0:
-                return (idx, 0, 0, np.nan)
+                return (idx, 0, 0, np.nan, None)
 
             rows = []
             quarters = set()
@@ -2335,7 +2327,7 @@ def fetch_kepler_k2_lightcurves(
                     })
 
             if not rows:
-                return (idx, 0, 0, np.nan)
+                return (idx, 0, 0, np.nan, None)
 
             lc_df = pd.DataFrame(rows)
             lc_df = lc_df[np.isfinite(lc_df["flux"])].copy()
@@ -2349,23 +2341,28 @@ def fetch_kepler_k2_lightcurves(
                 cand_id = str(df.loc[idx, "candidate_id"]) if "candidate_id" in df.columns else str(idx)
                 lc_df.to_parquet(Path(output_dir) / f"kepler_lc_{cand_id}.parquet", index=False)
 
-            return (idx, n_quarters, total_points, flux_range)
-        except Exception:
-            return (idx, 0, 0, np.nan)
+            return (idx, n_quarters, total_points, flux_range, None)
+        except Exception as exc:
+            return (idx, 0, 0, np.nan, f"{idx}: {_short_error(exc)}")
 
     matched = 0
+    failures: list[str] = []
     valid_idx = df.index[valid].tolist()
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(_fetch_one, idx): idx for idx in valid_idx}
         for fut in tqdm(as_completed(futures), total=len(futures), desc="Kepler LCs"):
-            idx, n_quarters, total_points, flux_range = fut.result()
+            idx, n_quarters, total_points, flux_range, error = fut.result()
+            if error is not None:
+                failures.append(error)
+                continue
             df.loc[idx, "kepler_n_quarters"] = n_quarters
             df.loc[idx, "kepler_total_points"] = total_points
             df.loc[idx, "kepler_flux_range"] = flux_range
             if n_quarters > 0:
                 matched += 1
 
+    _raise_lookup_failures("Kepler/K2 LCs", failures, n_valid)
     print(f"Kepler/K2 LCs: {matched}/{n_valid} with data")
     return df
 
@@ -2426,6 +2423,8 @@ def fetch_aavso_lightcurves(
             for page in range(1, num_pages + 1):
                 url = f"https://app.aavso.org/webobs/results/?star={obj_url}&num_results=200&obs_types=ccd&page={page}"
                 res = requests.get(url, timeout=10)
+                if res.status_code != 200:
+                    raise RuntimeError(f"AAVSO HTTP {res.status_code}")
                 if "No observations found" in res.text or "Error" in res.text:
                     break
                 
@@ -2447,7 +2446,7 @@ def fetch_aavso_lightcurves(
                     break
             
             if not dfs:
-                return (idx, 0)
+                return (idx, 0, None)
                 
             lc_df = pd.concat(dfs, ignore_index=True)
             # Clean up types and limit rows with values
@@ -2466,21 +2465,26 @@ def fetch_aavso_lightcurves(
                 cand_id = str(df.loc[idx, "candidate_id"]) if "candidate_id" in df.columns else str(idx)
                 lc_df.to_parquet(Path(output_dir) / f"aavso_lc_{cand_id}.parquet", index=False)
 
-            return (idx, n_points)
-        except Exception:
-            return (idx, 0)
+            return (idx, n_points, None)
+        except Exception as exc:
+            return (idx, 0, f"{idx}: {_short_error(exc)}")
 
     matched = 0
+    failures: list[str] = []
     valid_idx = df.index[valid].tolist()
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(_fetch_one, idx): idx for idx in valid_idx}
         for fut in tqdm(as_completed(futures), total=len(futures), desc="AAVSO LCs"):
-            idx, n_points = fut.result()
+            idx, n_points, error = fut.result()
+            if error is not None:
+                failures.append(error)
+                continue
             df.loc[idx, "aavso_lc_n_points"] = n_points
             if n_points > 0:
                 matched += 1
 
+    _raise_lookup_failures("AAVSO LCs", failures, n_valid)
     print(f"AAVSO LCs: {matched}/{n_valid} with data")
     return df
 
@@ -2518,22 +2522,24 @@ def fetch_panstarrs_lightcurves(
     def _fetch_one(idx: int) -> tuple:
         ra, dec = float(df.loc[idx, "ra"]), float(df.loc[idx, "dec"])
         if not (np.isfinite(ra) and np.isfinite(dec)):
-            return (idx, 0)
+            return (idx, 0, None)
 
         # Skip southern hemisphere queries (-30 limit for PS1)
         if dec < -30.5:
-            return (idx, 0)
+            return (idx, 0, None)
 
         try:
             url = f"https://catalogs.mast.stsci.edu/api/v0.1/panstarrs/dr2/detection.csv?ra={ra}&dec={dec}&radius=0.0015&pagesize=10000&format=csv"
             res = requests.get(url, timeout=20)
-            if res.status_code != 200 or "obsTime" not in res.text:
-                return (idx, 0)
+            if res.status_code != 200:
+                raise RuntimeError(f"Pan-STARRS HTTP {res.status_code}")
+            if "obsTime" not in res.text:
+                return (idx, 0, None)
 
             lc_df = pd.read_csv(io.StringIO(res.text))
             
             if lc_df.empty or "obsTime" not in lc_df.columns:
-                return (idx, 0)
+                return (idx, 0, None)
 
             # Filter by infoFlag if present
             if "infoFlag" in lc_df.columns:
@@ -2546,7 +2552,7 @@ def fetch_panstarrs_lightcurves(
                 lc_df = lc_df[~bad_mask].copy()
 
             if lc_df.empty:
-                return (idx, 0)
+                return (idx, 0, None)
                 
             # Rename for consistency mapping
             lc_df = lc_df.rename(columns={
@@ -2582,21 +2588,26 @@ def fetch_panstarrs_lightcurves(
                 cand_id = str(df.loc[idx, "candidate_id"]) if "candidate_id" in df.columns else str(idx)
                 lc_df.to_parquet(Path(output_dir) / f"ps1_lc_{cand_id}.parquet", index=False)
 
-            return (idx, n_points)
-        except Exception:
-            return (idx, 0)
+            return (idx, n_points, None)
+        except Exception as exc:
+            return (idx, 0, f"{idx}: {_short_error(exc)}")
 
     matched = 0
+    failures: list[str] = []
     valid_idx = df.index[valid].tolist()
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(_fetch_one, idx): idx for idx in valid_idx}
         for fut in tqdm(as_completed(futures), total=len(futures), desc="Pan-STARRS LCs"):
-            idx, n_points = fut.result()
+            idx, n_points, error = fut.result()
+            if error is not None:
+                failures.append(error)
+                continue
             df.loc[idx, "ps1_lc_n_points"] = n_points
             if n_points > 0:
                 matched += 1
 
+    _raise_lookup_failures("Pan-STARRS LCs", failures, n_valid)
     print(f"Pan-STARRS LCs: {matched}/{n_valid} with data")
     return df
 
@@ -2653,6 +2664,8 @@ def fetch_crts_lightcurves(
         chunk_size=1000,
         n_workers=2,
         desc="CRTS crossmatch",
+        raise_on_all_failed=True,
+        raise_on_failed_chunk=True,
     )
     
     if prss_result.empty:
@@ -2690,8 +2703,7 @@ def fetch_crts_lightcurves(
             if not res_df.empty:
                 all_lcs.append(res_df)
         except Exception as e:
-            print(f"CRTS fetch error: {e}")
-            continue
+            raise RuntimeError(f"CRTS epoch lookup failed for chunk starting at {i}: {e}") from e
 
     if not all_lcs:
         print("CRTS LCs: no epoch data retrieved")

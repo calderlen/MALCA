@@ -25,6 +25,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -49,7 +50,7 @@ from malca.config import (
 )
 from malca.config import (
     MIN_TIME_SPAN, MIN_POINTS_PER_DAY, MIN_CAMERAS,
-    VSX_MAX_SEP_ARCSEC, VSX_MODE, CAMERA_MEDIAN_TOLERANCE, STATS_CHUNK_SIZE,
+    VSX_MAX_SEP_ARCSEC, CAMERA_MEDIAN_TOLERANCE, STATS_CHUNK_SIZE,
     MIN_BAYES_FACTOR, POST_FILTER_MIN_RUN_CAMERAS, POST_FILTER_MIN_RUN_POINTS,
     CLEAN_LC_MAX_ERROR_ABSOLUTE, CLEAN_LC_MAX_ERROR_SIGMA,
     BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
@@ -58,6 +59,7 @@ from malca.config import (
     PRE_PERIODICITY_N_PERIODS, PRE_PERIODICITY_SCATTER_RATIO_MAX,
     POST_FILTER_PDM_METHOD,
 )
+from malca.cli_config import add_config_args, apply_config, namespace_keys
 from malca.config import OUTPUT_FORMAT, EVENTS_OUTPUT_CHUNK_SIZE
 from malca.config import PARQUET_OUTPUT_COMPRESSION, PARQUET_CACHE_COMPRESSION
 from malca.config import ASASSN_INDEX_PATH, LCV2_ROOT, VSX_CROSSMATCH_PATH, GAIA_LOCAL_CATALOG
@@ -81,10 +83,181 @@ from malca.run_metadata import build_run_summary, load_summary_state, preserve_i
 from malca.review.store import db_connect, import_candidates
 from concurrent.futures import ProcessPoolExecutor
 from malca.stats import compute_stats, _enrich_row_worker
-from malca.tag import apply_tags, filter_camera_medians
+from malca.tag import RAW_MEDIAN_SUSPECT_COL, apply_tags, filter_camera_medians
 from malca.utils import log as _log
 from malca.vetting import vet_candidates
 
+
+RUN_REUSE_FINGERPRINT_VERSION = 1
+RUN_REUSE_PARAM_ATTRS = (
+    # Input selection
+    "mag_bin",
+    "index_root",
+    "lc_root",
+    "flat_lc_dir",
+    "index_file",
+    "manifest_file",
+    "filtered_file",
+    "output",
+    "import_bundle",
+    "extension",
+    "test_run",
+    "test_run_n",
+    # Tag parameters
+    "min_time_span",
+    "min_points_per_day",
+    "min_cameras",
+    "mag_lo",
+    "mag_hi",
+    "skip_sparse",
+    "skip_multi_camera",
+    "skip_mag_range",
+    "skip_vsx",
+    "vsx_max_sep",
+    "vsx_crossmatch",
+    "pass_all_tags",
+    "enforce_tags",
+    "skip_camera_median",
+    "camera_median_tolerance",
+    # Pre-events periodicity gate
+    "apply_pre_periodicity_gate",
+    "pre_periodicity_min_period",
+    "pre_periodicity_max_period",
+    "pre_periodicity_n_periods",
+    "pre_periodicity_ce_snr_threshold",
+    "pre_periodicity_min_points",
+    "pre_periodicity_scatter_ratio_max",
+    "pre_periodicity_checkpoint",
+    # Event detection
+    "trigger_mode",
+    "logbf_threshold_dip",
+    "logbf_threshold_jump",
+    "significance_threshold",
+    "p_points",
+    "p_min_dip",
+    "p_max_dip",
+    "p_min_jump",
+    "p_max_jump",
+    "mag_points",
+    "mag_min_dip",
+    "mag_max_dip",
+    "mag_min_jump",
+    "mag_max_jump",
+    "baseline_func",
+    "baseline_s0",
+    "baseline_w0",
+    "baseline_q",
+    "baseline_jitter",
+    "baseline_sigma_floor",
+    "run_min_points",
+    "run_max_gap_points",
+    "run_max_gap_days",
+    "run_min_duration_days",
+    "no_event_prob",
+    "min_mag_offset",
+    # Filter and validation
+    "run_filter",
+    "skip_evidence_strength",
+    "min_bayes_factor",
+    "allow_infinite_local_bf",
+    "skip_significant_detection",
+    "significant_no_require_flag",
+    "significant_min_peak_count",
+    "significant_min_run_count",
+    "skip_run_robustness",
+    "min_run_count",
+    "max_run_count",
+    "filter_min_run_cameras",
+    "filter_min_run_points",
+    "apply_morphology",
+    "dip_morphology",
+    "jump_morphology",
+    "min_delta_bic",
+    "apply_score_filter",
+    "min_dip_score",
+    "min_jump_score",
+    "min_score",
+    "apply_periodicity_validation",
+    "periodicity_n_bootstrap",
+    "periodicity_significance",
+    "periodicity_pdm_method",
+    "periodicity_no_exclude_aliases",
+    "periodicity_reject",
+    "periodicity_checkpoint_dir",
+    "periodicity_all_candidates",
+    "phase_plot_max_sig",
+    "phase_plot_min_power",
+    "phase_plot_allow_alias",
+    "skip_gaia_ruwe_validation",
+    "gaia_max_ruwe",
+    "gaia_reject",
+    "skip_gaia_pm_validation",
+    "gaia_max_pm",
+    "gaia_pm_reject",
+    "skip_periodic_catalog_validation",
+    "periodic_catalog_max_sep",
+    "periodic_catalog_reject",
+    # Downstream science products
+    "run_characterize",
+    "run_dust",
+    "gaia_cache",
+    "gaia_fetch_chunk_size",
+    "characterize_crossmatch",
+    "characterize_chunk_size",
+    "characterize_starhorse",
+    "characterize_starhorse_cache",
+    "characterize_unwise_checkpoint_every",
+    "characterize_banyan",
+    "characterize_iphas",
+    "characterize_sfr",
+    "characterize_clusters",
+    "characterize_unwise",
+    "run_classify",
+    "run_enrich",
+    "enrich_compute_ls",
+    "run_neighbor_enrich",
+    "neighbor_radius_arcsec",
+    "neighbor_cache",
+    "run_spectra_enrich",
+    "spectra_radius_arcsec",
+    "spectra_cache",
+    "run_vetting",
+    "vetting_min_score",
+    "vetting_simbad_radius",
+    "vetting_asassn_radius",
+    "no_vetting_simbad",
+    "no_vetting_gaia_var",
+    "no_vetting_gaia_epoch",
+    "no_vetting_asassn_var",
+    "no_vetting_alerce",
+    "no_vetting_erosita",
+    "no_vetting_pm_check",
+    "vetting_atlas",
+    "vetting_atlas_token",
+    "vetting_neowise_lc",
+    "vetting_input",
+)
+
+RUN_REUSE_CODE_FILES = (
+    "config.py",
+    "cli_config.py",
+    "detect.py",
+    "manifest.py",
+    "tag.py",
+    "events.py",
+    "baseline.py",
+    "triggering.py",
+    "score.py",
+    "filter.py",
+    "periodicity_gate.py",
+    "utils.py",
+    "characterize.py",
+    "classify.py",
+    "stats.py",
+    "enrich/neighbor.py",
+    "enrich/spectra.py",
+    "vetting.py",
+)
 
 
 # Set threading environment variables before importing numpy/pandas/numba
@@ -94,6 +267,183 @@ os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 os.environ.setdefault("NUMBA_NUM_THREADS", "1")
 
+
+PIPELINE_CONFIG_DEFAULTS: dict[str, Any] = {
+    "manifest_file": None,
+    "filtered_file": None,
+    "force_manifest": False,
+    "force_tag": False,
+    "extension": None,
+    "min_time_span": MIN_TIME_SPAN,
+    "min_points_per_day": MIN_POINTS_PER_DAY,
+    "min_cameras": MIN_CAMERAS,
+    "mag_lo": 10.0,
+    "mag_hi": 18.0,
+    "skip_sparse": False,
+    "skip_multi_camera": False,
+    "skip_mag_range": False,
+    "skip_vsx": False,
+    "skip_camera_median": False,
+    "camera_median_tolerance": CAMERA_MEDIAN_TOLERANCE,
+    "vsx_max_sep": VSX_MAX_SEP_ARCSEC,
+    "vsx_crossmatch": VSX_CROSSMATCH_PATH,
+    "pass_all_tags": False,
+    "enforce_tags": None,
+    "stats_chunk_size": STATS_CHUNK_SIZE,
+    "batch_size": BATCH_SIZE,
+    "apply_pre_periodicity_gate": False,
+    "pre_periodicity_min_period": PRE_PERIODICITY_MIN_PERIOD,
+    "pre_periodicity_max_period": PRE_PERIODICITY_MAX_PERIOD,
+    "pre_periodicity_n_periods": PRE_PERIODICITY_N_PERIODS,
+    "pre_periodicity_ce_snr_threshold": PRE_PERIODICITY_CE_SNR_THRESHOLD,
+    "pre_periodicity_min_points": PRE_PERIODICITY_MIN_POINTS,
+    "pre_periodicity_scatter_ratio_max": PRE_PERIODICITY_SCATTER_RATIO_MAX,
+    "pre_periodicity_checkpoint": None,
+    "pre_periodicity_workers": WORKERS,
+    "trigger_mode": TRIGGER_MODE,
+    "logbf_threshold_dip": LOGBF_THRESHOLD_DIP,
+    "logbf_threshold_jump": LOGBF_THRESHOLD_JUMP,
+    "significance_threshold": SIGNIFICANCE_THRESHOLD,
+    "p_points": P_POINTS,
+    "mag_points": MAG_POINTS,
+    "run_min_points": RUN_MIN_POINTS,
+    "run_max_gap_points": RUN_MAX_GAP_POINTS,
+    "run_max_gap_days": None,
+    "run_min_duration_days": 0.0,
+    "no_event_prob": False,
+    "p_min_dip": None,
+    "p_max_dip": None,
+    "p_min_jump": None,
+    "p_max_jump": None,
+    "baseline_func": BASELINE_FUNC,
+    "baseline_s0": BASELINE_S0,
+    "baseline_w0": BASELINE_W0,
+    "baseline_q": BASELINE_Q,
+    "baseline_jitter": BASELINE_JITTER,
+    "baseline_sigma_floor": None,
+    "mag_min_dip": None,
+    "mag_max_dip": None,
+    "mag_min_jump": None,
+    "mag_max_jump": None,
+    "min_mag_offset": MIN_MAG_OFFSET,
+    "output": None,
+    "output_format": OUTPUT_FORMAT,
+    "chunk_size": EVENTS_OUTPUT_CHUNK_SIZE,
+    "import_bundle": None,
+    "export_bundle": None,
+    "export_bundle_enabled": True,
+    "full_bundle": False,
+    "review_sync_enabled": True,
+    "review_sync_dir": Path("reviews"),
+    "review_sync_hash_assets": False,
+    "run_filter": True,
+    "skip_evidence_strength": False,
+    "min_bayes_factor": MIN_BAYES_FACTOR,
+    "allow_infinite_local_bf": False,
+    "skip_significant_detection": False,
+    "significant_no_require_flag": False,
+    "significant_min_peak_count": 1,
+    "significant_min_run_count": 1,
+    "skip_run_robustness": False,
+    "min_run_count": 1,
+    "max_run_count": None,
+    "filter_min_run_cameras": POST_FILTER_MIN_RUN_CAMERAS,
+    "filter_min_run_points": POST_FILTER_MIN_RUN_POINTS,
+    "apply_morphology": False,
+    "dip_morphology": "gaussian",
+    "jump_morphology": "paczynski",
+    "min_delta_bic": 10.0,
+    "apply_score_filter": True,
+    "min_score": 0.0,
+    "min_dip_score": None,
+    "min_jump_score": None,
+    "apply_periodicity_validation": False,
+    "periodicity_n_bootstrap": 1000,
+    "periodicity_significance": 0.01,
+    "periodicity_pdm_method": POST_FILTER_PDM_METHOD,
+    "periodicity_no_exclude_aliases": False,
+    "periodicity_reject": False,
+    "periodicity_all_candidates": False,
+    "periodicity_workers": WORKERS,
+    "periodicity_checkpoint_dir": None,
+    "phase_plot_max_sig": 0.01,
+    "phase_plot_min_power": 0.3,
+    "phase_plot_allow_alias": False,
+    "skip_gaia_ruwe_validation": False,
+    "gaia_max_ruwe": 1.4,
+    "gaia_reject": False,
+    "skip_gaia_pm_validation": False,
+    "gaia_max_pm": 100.0,
+    "gaia_pm_reject": False,
+    "skip_periodic_catalog_validation": False,
+    "periodic_catalog_max_sep": 3.0,
+    "periodic_catalog_reject": False,
+    "run_postprocess": False,
+    "max_plots": None,
+    "plot_format": "png",
+    "run_characterize": True,
+    "gaia_cache": None,
+    "gaia_fetch_chunk_size": GAIA_CHUNK_SIZE,
+    "characterize_crossmatch": VSX_CROSSMATCH_PATH,
+    "characterize_chunk_size": GAIA_CHUNK_SIZE,
+    "characterize_starhorse": "tap",
+    "characterize_starhorse_cache": None,
+    "characterize_unwise_checkpoint_every": UNWISE_CHECKPOINT_EVERY,
+    "characterize_banyan": True,
+    "characterize_iphas": True,
+    "characterize_sfr": True,
+    "characterize_clusters": True,
+    "characterize_unwise": False,
+    "run_dust": True,
+    "run_classify": True,
+    "run_enrich": True,
+    "enrich_compute_ls": False,
+    "run_neighbor_enrich": True,
+    "neighbor_radius_arcsec": NEIGHBOR_RADIUS_ARCSEC,
+    "neighbor_chunk_size": NEIGHBOR_CHUNK_SIZE,
+    "neighbor_cache": None,
+    "run_spectra_enrich": True,
+    "spectra_radius_arcsec": SPECTRA_RADIUS_ARCSEC,
+    "spectra_chunk_size": SPECTRA_CHUNK_SIZE,
+    "spectra_cache": None,
+    "run_vetting": True,
+    "vetting_min_score": None,
+    "vetting_simbad_radius": 5.0,
+    "vetting_asassn_radius": 5.0,
+    "no_vetting_simbad": False,
+    "no_vetting_gaia_var": False,
+    "no_vetting_gaia_epoch": False,
+    "no_vetting_asassn_var": False,
+    "no_vetting_alerce": False,
+    "no_vetting_erosita": False,
+    "no_vetting_pm_check": False,
+    "vetting_atlas": False,
+    "vetting_atlas_token": None,
+    "vetting_neowise_lc": False,
+    "vetting_input": None,
+    "test_run": False,
+    "test_run_n": 10000,
+}
+
+PIPELINE_CONFIG_PATH_KEYS = {
+    "flat_lc_dir",
+    "index_file",
+    "manifest_file",
+    "filtered_file",
+    "vsx_crossmatch",
+    "pre_periodicity_checkpoint",
+    "output",
+    "import_bundle",
+    "export_bundle",
+    "review_sync_dir",
+    "periodicity_checkpoint_dir",
+    "gaia_cache",
+    "characterize_crossmatch",
+    "characterize_starhorse_cache",
+    "neighbor_cache",
+    "spectra_cache",
+    "vetting_input",
+}
 
 
 
@@ -116,6 +466,79 @@ def load_table(path: Path) -> pd.DataFrame:
     if path.suffix.lower() in {".parquet", ".pq"}:
         return pd.read_parquet(path)
     return pd.read_csv(path)
+
+
+def _json_stable(value: Any) -> Any:
+    """Normalize values so run fingerprints compare exactly after JSON round trips."""
+    if isinstance(value, Path):
+        return str(value.expanduser())
+    if isinstance(value, dict):
+        return {str(k): _json_stable(v) for k, v in sorted(value.items(), key=lambda item: str(item[0]))}
+    if isinstance(value, (list, tuple)):
+        return [_json_stable(v) for v in value]
+    return value
+
+
+def _sha256_file(path: Path) -> str | None:
+    try:
+        digest = hashlib.sha256()
+        with path.open("rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return None
+
+
+def _pipeline_code_fingerprint() -> dict[str, str | None]:
+    module_dir = Path(__file__).resolve().parent
+    return {
+        rel_path: _sha256_file(module_dir / rel_path)
+        for rel_path in RUN_REUSE_CODE_FILES
+        if (module_dir / rel_path).exists()
+    }
+
+
+def build_run_reuse_fingerprint(
+    args: argparse.Namespace,
+    *,
+    stage: str,
+    is_auto_all_mode: bool,
+) -> dict[str, Any]:
+    """Build the science-product fingerprint required for implicit run reuse."""
+    params = {
+        name: _json_stable(getattr(args, name, None))
+        for name in RUN_REUSE_PARAM_ATTRS
+    }
+    params.update({
+        "stage": stage,
+        "is_auto_all_mode": bool(is_auto_all_mode),
+        "pre_periodicity_router_mode": PREGATE_ROUTER_MODE,
+        "clean_max_error_absolute": CLEAN_LC_MAX_ERROR_ABSOLUTE,
+        "clean_max_error_sigma": CLEAN_LC_MAX_ERROR_SIGMA,
+        "bad_camera_scatter_ratio": BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
+    })
+    return {
+        "version": RUN_REUSE_FINGERPRINT_VERSION,
+        "params": _json_stable(params),
+        "code": _pipeline_code_fingerprint(),
+    }
+
+
+def run_reuse_fingerprint_digest(fingerprint: dict[str, Any]) -> str:
+    payload = json.dumps(_json_stable(fingerprint), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _stored_run_reuse_fingerprint_matches(params: dict[str, Any], current_fingerprint: dict[str, Any]) -> bool:
+    stored_fingerprint = params.get("run_reuse_fingerprint")
+    if not isinstance(stored_fingerprint, dict):
+        return False
+    return _json_stable(stored_fingerprint) == _json_stable(current_fingerprint)
+
+
+def _score_filter_enabled(args: argparse.Namespace) -> bool:
+    return bool(args.apply_score_filter)
 
 
 def save_table(df: pd.DataFrame, path: Path) -> None:
@@ -209,8 +632,12 @@ def default_run_dir(base_root: Path) -> Path:
     return base_root / "runs" / timestamp
 
 
-def find_latest_run_dir(base_root: Path, mag_bin: list[str]) -> Path | None:
-    """Find the most recent run directory matching the given mag bin(s)."""
+def find_latest_run_dir(
+    base_root: Path,
+    mag_bin: list[str],
+    reuse_fingerprint: dict[str, Any] | None = None,
+) -> Path | None:
+    """Find the newest run directory safe to reuse for the current configuration."""
     runs_dir = base_root / "runs"
     if not runs_dir.is_dir():
         return None
@@ -220,9 +647,14 @@ def find_latest_run_dir(base_root: Path, mag_bin: list[str]) -> Path | None:
         params_file = d / "run_params.json"
         if not params_file.exists():
             continue
-        with open(params_file) as f:
-            params = json.load(f)
+        try:
+            with open(params_file) as f:
+                params = json.load(f)
+        except Exception:
+            continue
         if params.get("mag_bin") == mag_bin:
+            if reuse_fingerprint is not None and not _stored_run_reuse_fingerprint_matches(params, reuse_fingerprint):
+                continue
             return d  # sorted reverse by timestamp, first match is latest
     return None
 
@@ -592,7 +1024,7 @@ def _build_filter_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "dip_morphology": args.dip_morphology,
         "jump_morphology": args.jump_morphology,
         "min_delta_bic": args.min_delta_bic,
-        "apply_score": not args.skip_score_filter,
+        "apply_score": _score_filter_enabled(args),
         "min_dip_score": args.min_dip_score,
         "min_jump_score": args.min_jump_score,
         "min_score": args.min_score,
@@ -695,7 +1127,7 @@ def _build_home_external_validation_cmd(
     if args.skip_periodic_catalog_validation:
         cmd.append("--skip-periodic-catalog-validation")
     if not args.verbose:
-        cmd.append("--no-tqdm")
+        cmd.append("--no-progress")
     if args.verbose:
         cmd.append("--verbose")
     return cmd
@@ -705,7 +1137,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Run events.py on tagged light curves",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="All other arguments are passed directly to events.py",
+        epilog="Use --config/--profile for advanced detection, filtering, and catalog settings.",
     )
     g_manifest = parser.add_argument_group("Manifest & index")
     g_tag = parser.add_argument_group("Tag")
@@ -730,90 +1162,10 @@ def main():
     g_manifest.add_argument("--flat-lc-dir", type=Path, default=None,
                         help="Flat directory of <source_id>.<extension> light curves, such as bundle_assets/lightcurves")
     g_manifest.add_argument("--index-file", type=Path, default=None,
-                        help="Optional ASAS-SN index/metadata file. Used by home external validation, --full-bundle export, and flat light-curve manifests")
-    g_manifest.add_argument("--manifest-file", type=Path, default=None,
-                        help="Manifest file (default: lc_manifest_{mag_bin}.parquet)")
-    g_manifest.add_argument("--filtered-file", type=Path, default=None,
-                        help="Filtered manifest file (default: lc_filtered_{mag_bin}.parquet)")
-    g_manifest.add_argument("--force-manifest", action="store_true",
-                        help="Force rebuild manifest even if exists")
-    g_manifest.add_argument("--force-tag", action="store_true",
-                        help="Force re-run tagging even if tagged file exists")
-    g_manifest.add_argument("--extension", "-e", type=str, default=None,
-                        help="Light curve file extension (e.g., dat, dat2, dat3). Default: dat3 (from config)")
+                        help="Optional ASAS-SN index/metadata file")
 
-    g_tag.add_argument("--min-time-span", type=float, default=MIN_TIME_SPAN, help="Min time span (days)")
-    g_tag.add_argument("--min-points-per-day", type=float, default=MIN_POINTS_PER_DAY, help="Min cadence")
-    g_tag.add_argument("--min-cameras", type=int, default=MIN_CAMERAS, help="Min cameras required")
-    g_tag.add_argument("--mag-lo", type=float, default=10.0, help="Min baseline magnitude for mag range filter (default: 10)")
-    g_tag.add_argument("--mag-hi", type=float, default=18.0, help="Max baseline magnitude for mag range filter (default: 18)")
-    g_tag.add_argument("--skip-sparse", action="store_true", help="Skip sparse LC filter")
-    g_tag.add_argument("--skip-multi-camera", action="store_true", help="Skip multi-camera filter")
-    g_tag.add_argument("--skip-mag-range", action="store_true", help="Skip magnitude range filter")
-    g_tag.add_argument("--skip-vsx", action="store_true", help="Skip VSX crossmatch/tagging")
-    g_tag.add_argument("--skip-camera-median", action="store_true", help="Skip camera median filter (identifies cameras to exclude from .raw2 files)")
-    g_tag.add_argument("--camera-median-tolerance", type=float, default=CAMERA_MEDIAN_TOLERANCE, help="Tolerance beyond mag bin for camera median filter (default: 0.2 mag)")
-    g_tag.add_argument("--vsx-max-sep", type=float, default=VSX_MAX_SEP_ARCSEC, help="Max separation for VSX match (arcsec)")
-    g_tag.add_argument(
-        "--vsx-mode",
-        type=str,
-        default=VSX_MODE,
-        choices=["tag"],
-        help="VSX handling mode. Only 'tag' is supported.",
-    )
-    g_tag.add_argument("--vsx-crossmatch", type=Path, default=VSX_CROSSMATCH_PATH, help="Path to pre-crossmatched VSX CSV (with asas_sn_id, vsx_sep_arcsec, vsx_class)")
-    g_tag.add_argument("--pass-all-tags", action="store_true", help="Pass all light curves to events.py regardless of tag results (failure tags are still added)")
-    g_tag.add_argument("--enforce-tags", type=str, default=None, help="Comma-separated list of tag checks to enforce (e.g., 'sparse,multi_camera'). " "Only rows failing these checks are excluded. Default: enforce all enabled checks.")
-    g_tag.add_argument("--workers", type=int, default=WORKERS, help="Workers for parallel processing")
-    g_tag.add_argument("--stats-chunk-size", type=int, default=STATS_CHUNK_SIZE, help="Rows per checkpoint save during stats computation")
-    g_tag.add_argument("--batch-size", type=int, default=BATCH_SIZE, help="Max light curves per events.py call")
-
-    g_pregate.add_argument("--apply-pre-periodicity-gate", action="store_true", help="Run the CE-only periodicity gate before events.py and split confident periodic candidates out of the stochastic branch")
-    g_pregate.add_argument("--pre-periodicity-min-period", type=float, default=PRE_PERIODICITY_MIN_PERIOD, help="Minimum trial period in days for the pre-events gate")
-    g_pregate.add_argument("--pre-periodicity-max-period", type=float, default=PRE_PERIODICITY_MAX_PERIOD, help="Maximum trial period in days for the pre-events gate")
-    g_pregate.add_argument("--pre-periodicity-n-periods", type=int, default=PRE_PERIODICITY_N_PERIODS, help="Number of CE trial periods for the pre-events gate")
-    g_pregate.add_argument("--pre-periodicity-ce-snr-threshold", type=float, default=PRE_PERIODICITY_CE_SNR_THRESHOLD, help="Minimum CE SNR for periodic routing")
-    g_pregate.add_argument("--pre-periodicity-min-points", type=int, default=PRE_PERIODICITY_MIN_POINTS, help="Minimum cleaned LC points required for the pre-events gate")
-    g_pregate.add_argument("--pre-periodicity-scatter-ratio-max", type=float, default=PRE_PERIODICITY_SCATTER_RATIO_MAX, help="Maximum folded/raw scatter ratio for confident periodic routing")
-    g_pregate.add_argument("--pre-periodicity-checkpoint", type=Path, default=None, help="Checkpoint parquet path for the pre-events periodicity gate")
-    g_pregate.add_argument("--pre-periodicity-workers", type=int, default=WORKERS, help="Workers for the pre-events periodicity gate")
-
-    g_events.add_argument("--trigger-mode", type=str, default=TRIGGER_MODE, choices=["logbf", "posterior_prob"], help="Triggering mode")
-    g_events.add_argument("--logbf-threshold-dip", type=float, default=LOGBF_THRESHOLD_DIP, help="Per-point dip trigger threshold")
-    g_events.add_argument("--logbf-threshold-jump", type=float, default=LOGBF_THRESHOLD_JUMP, help="Per-point jump trigger threshold")
-    g_events.add_argument("--significance-threshold", type=float, default=SIGNIFICANCE_THRESHOLD, help="Posterior probability threshold (if trigger-mode=posterior_prob)")
-    g_events.add_argument("--p-points", type=int, default=P_POINTS, help="Number of points in the p grid")
-    g_events.add_argument("--mag-points", type=int, default=MAG_POINTS, help="Number of points in the magnitude grid")
-    g_events.add_argument("--run-min-points", type=int, default=RUN_MIN_POINTS, help="Min triggered points in a run")
-    g_events.add_argument("--run-max-gap-points", type=int, default=RUN_MAX_GAP_POINTS, help="Allow up to this many missing indices inside a run")
-    g_events.add_argument("--run-max-gap-days", type=float, default=None, help="Break runs if JD gap exceeds this")
-    g_events.add_argument("--run-min-duration-days", type=float, default=0.0, help="Require run duration >= this (default: 0.0 = disabled)")
-    g_events.add_argument("--no-event-prob", action="store_true", help="Skip LOO event responsibilities")
-    g_events.add_argument("--p-min-dip", type=float, default=None, help="Minimum dip fraction for p-grid")
-    g_events.add_argument("--p-max-dip", type=float, default=None, help="Maximum dip fraction for p-grid")
-    g_events.add_argument("--p-min-jump", type=float, default=None, help="Minimum jump fraction for p-grid")
-    g_events.add_argument("--p-max-jump", type=float, default=None, help="Maximum jump fraction for p-grid")
-    g_events.add_argument(
-        "--baseline-func",
-        type=str,
-        default=BASELINE_FUNC,
-        choices=["gp", "gp_masked", "global_median", "per_camera_median", "phase_template"],
-        help="Baseline function",
-    )
-    g_events.add_argument("--baseline-s0", type=float, default=BASELINE_S0, help="GP kernel S0 parameter (default: 0.0005)")
-    g_events.add_argument("--baseline-w0", type=float, default=BASELINE_W0, help="GP kernel w0 parameter (default: pi/1000)")
-    g_events.add_argument("--baseline-q", type=float, default=BASELINE_Q, help="GP kernel Q parameter (default: 0.7)")
-    g_events.add_argument("--baseline-jitter", type=float, default=BASELINE_JITTER, help="GP jitter term (default: 0.006)")
-    g_events.add_argument("--baseline-sigma-floor", type=float, default=None, help="Minimum sigma floor (default: None)")
-    g_events.add_argument("--mag-min-dip", type=float, default=None, help="Min magnitude for dip grid (overrides auto)")
-    g_events.add_argument("--mag-max-dip", type=float, default=None, help="Max magnitude for dip grid (overrides auto)")
-    g_events.add_argument("--mag-min-jump", type=float, default=None, help="Min magnitude for jump grid (overrides auto)")
-    g_events.add_argument("--mag-max-jump", type=float, default=None, help="Max magnitude for jump grid (overrides auto)")
-    g_events.add_argument("--min-mag-offset", type=float, default=MIN_MAG_OFFSET, help="Require |event_mag - baseline_mag| > threshold")
-    g_output.add_argument("--output", type=str, default=None, help="Output path for results (default: <out_dir>/lc_events_results.parquet)")
-    g_output.add_argument("--out-dir", type=str, default=None, help="Directory for all outputs (default: output/runs/<timestamp>)")
-    g_output.add_argument("--output-format", type=str, default=OUTPUT_FORMAT, choices=["csv", "parquet", "parquet_chunk"], help="Output format")
-    g_output.add_argument("--chunk-size", type=int, default=EVENTS_OUTPUT_CHUNK_SIZE, help="Write results in chunks of this many rows")
+    g_output.add_argument("--output-dir", dest="out_dir", type=str, default=None,
+                        help="Directory for all outputs (default: output/runs/<timestamp>)")
     g_output.add_argument(
         "--stage",
         type=str,
@@ -821,150 +1173,21 @@ def main():
         choices=["full", "cluster", "home"],
         help="Pipeline stage: full=all steps, cluster=raw-dependent upstream, home=downstream only",
     )
-    g_output.add_argument("--import-bundle", type=Path, default=None, help="Zip bundle produced by --export-bundle (for home stage)")
-    g_output.add_argument("--export-bundle", type=Path, default=None, help="Write transferable zip bundle at end of run")
-    g_output.add_argument("--no-export-bundle", dest="export_bundle_enabled", action="store_false",
-                        help="Skip export bundle creation at end of run")
-    g_output.add_argument("--full-bundle", action="store_true", default=False, help="Include all large assets in export bundle (index, gaia cache, manifests, tags, paths)")
-    g_output.add_argument("--no-review-sync", dest="review_sync_enabled", action="store_false",
-                        help="Skip automatic reviews/*.jsonl export after review DB import")
-    g_output.add_argument("--review-sync-dir", type=Path, default=Path("reviews"),
-                        help="Directory for automatic Git-trackable review export (default: reviews)")
-    g_output.add_argument("--review-sync-hash-assets", action="store_true",
-                        help="Include SHA-256 hashes for resolved assets in automatic review export")
 
-    g_filter.add_argument("--run-filter", dest="run_filter", action="store_true", help="Run filter after events.py completes (default: enabled)")
-    g_filter.add_argument("--no-run-filter", dest="run_filter", action="store_false", help="Skip filter step")
-    g_filter.add_argument("--skip-evidence-strength", action="store_true", help="Skip evidence-strength filter")
-    g_filter.add_argument("--min-bayes-factor", type=float, default=MIN_BAYES_FACTOR, help="Min Bayes factor for filter stage (default: 10.0)")
-    g_filter.add_argument("--allow-infinite-local-bf", action="store_true", help="Allow infinite local Bayes factors (default: require finite)")
-    g_filter.add_argument("--skip-significant-detection", action="store_true", help="Skip explicit significant run/peak gate")
-    g_filter.add_argument("--significant-no-require-flag", action="store_true", help="Do not require dip/jump significant flags in significant detection gate")
-    g_filter.add_argument("--significant-min-peak-count", type=int, default=1, help="Minimum dip_count/jump_count for significant detection gate (default: 1)")
-    g_filter.add_argument("--significant-min-run-count", type=int, default=1, help="Minimum dip_run_count/jump_run_count for significant detection gate (default: 1)")
-    g_filter.add_argument("--skip-run-robustness", action="store_true", help="Skip run-robustness filter")
-    g_filter.add_argument("--min-run-count", type=int, default=1, help="Minimum run count for run-robustness filter (default: 1)")
-    g_filter.add_argument("--max-run-count", type=int, default=None, help="Maximum run count for run-robustness filter (default: disabled)")
-    g_filter.add_argument("--filter-min-run-cameras", dest="filter_min_run_cameras", type=int, default=POST_FILTER_MIN_RUN_CAMERAS, help="Min cameras for run robustness filter (default: 2)")
-    g_filter.add_argument("--filter-min-run-points", dest="filter_min_run_points", type=int, default=POST_FILTER_MIN_RUN_POINTS, help="Min points per run for robustness filter (default: 2)")
-    g_filter.add_argument("--apply-morphology", action="store_true", help="Apply morphology filter in filter stage")
-    g_filter.add_argument("--dip-morphology", type=str, default="gaussian", choices=["gaussian", "paczynski"], help="Required morphology for dip events (default: gaussian)")
-    g_filter.add_argument("--jump-morphology", type=str, default="paczynski", choices=["gaussian", "paczynski"], help="Required morphology for jump events (default: paczynski)")
-    g_filter.add_argument("--min-delta-bic", type=float, default=10.0, help="Minimum delta BIC for morphology filter (default: 10.0)")
-    g_filter.add_argument("--skip-score-filter", action="store_true", help="Skip score filter (enabled by default)")
-    g_filter.add_argument("--min-score", type=float, default=0.0, help="Legacy minimum score threshold applied to dipper/jumper score filters (default: 0.0)")
-    g_filter.add_argument("--min-dip-score", type=float, default=None, help="Minimum dipper_score threshold (overrides --min-score for dips)")
-    g_filter.add_argument("--min-jump-score", type=float, default=None, help="Minimum jumper_score threshold (overrides --min-score for jumps)")
-    g_filter.add_argument("--apply-periodicity-validation", action="store_true", help="Enable bootstrap periodicity validation")
-    g_filter.add_argument("--periodicity-n-bootstrap", type=int, default=1000, help="Bootstrap iterations for periodicity validation (default: 1000)")
-    g_filter.add_argument("--periodicity-significance", type=float, default=0.01, help="Significance threshold for periodicity validation (default: 0.01)")
-    g_filter.add_argument("--periodicity-pdm-method", type=str, default=POST_FILTER_PDM_METHOD, choices=list(PDM_METHOD_CHOICES), help="PDM implementation for periodicity validation")
-    g_filter.add_argument("--periodicity-no-exclude-aliases", action="store_true", help="Do not exclude alias periods during periodicity validation")
-    g_filter.add_argument("--periodicity-reject", action="store_true", help="Reject periodicity matches instead of flagging only")
-    g_filter.add_argument("--periodicity-all-candidates", action="store_true", help="Run periodicity validation on all queued candidates instead of only prerequisite passers")
-    g_filter.add_argument("--periodicity-workers", type=int, default=WORKERS, help="Workers for periodicity validation (default: WORKERS)")
-    g_filter.add_argument("--periodicity-checkpoint-dir", type=Path, default=None, help="Checkpoint directory for periodicity validation")
-    g_filter.add_argument("--phase-plot-max-sig", type=float, default=0.01, help="Require lsp_bootstrap_sig <= this for phase plotting (default: 0.01)")
-    g_filter.add_argument("--phase-plot-min-power", type=float, default=0.3, help="Require lsp_power >= this for phase plotting (default: 0.3)")
-    g_filter.add_argument("--phase-plot-allow-alias", action="store_true", help="Allow alias periods for phase plotting")
-    g_filter.add_argument("--skip-gaia-ruwe-validation", action="store_true", help="Skip Gaia RUWE validation")
-    g_filter.add_argument("--gaia-max-ruwe", type=float, default=1.4, help="Maximum RUWE threshold (default: 1.4)")
-    g_filter.add_argument("--gaia-reject", action="store_true", help="Reject high-RUWE sources instead of flagging only")
-    g_filter.add_argument("--skip-gaia-pm-validation", action="store_true", help="Skip Gaia proper-motion validation")
-    g_filter.add_argument("--gaia-max-pm", type=float, default=100.0, help="Maximum proper-motion threshold in mas/yr (default: 100.0)")
-    g_filter.add_argument("--gaia-pm-reject", action="store_true", help="Reject high proper-motion sources instead of flagging only")
-    g_filter.add_argument("--skip-periodic-catalog-validation", action="store_true", help="Skip periodic-catalog crossmatch validation")
-    g_filter.add_argument("--periodic-catalog-max-sep", type=float, default=3.0, help="Maximum separation for periodic-catalog matching in arcsec (default: 3.0)")
-    g_filter.add_argument("--periodic-catalog-reject", action="store_true", help="Reject periodic-catalog matches instead of flagging only")
-
-    g_postprocess.add_argument("--run-postprocess", dest="run_postprocess", action="store_true", help="Run postprocess (generate plots) after filtering")
-    g_postprocess.add_argument("--no-run-postprocess", dest="run_postprocess", action="store_false", help="Skip postprocess step (default)")
-    g_postprocess.add_argument("--max-plots", type=int, default=None, help="Limit number of plots generated (default: no limit)")
-    g_postprocess.add_argument("--plot-format", type=str, default="png", choices=["png", "pdf"], help="Output format for plots (default: png)")
-
-    g_characterize.add_argument("--run-characterize", dest="run_characterize", action="store_true", help="Run Gaia DR3 characterization after filtering (default: enabled)")
-    g_characterize.add_argument("--no-run-characterize", dest="run_characterize", action="store_false", help="Skip characterization step")
-    g_characterize.add_argument("--gaia-cache", type=Path, default=None, help="Path to Gaia query cache file (parquet). Default: <out_dir>/gaia_cache/gaia_cache.parquet")
-    g_characterize.add_argument("--gaia-fetch-chunk-size", type=int, default=GAIA_CHUNK_SIZE, help="Gaia fetch chunk size for pre-characterization local catalog sync (default: 1000)")
-    g_characterize.add_argument("--characterize-crossmatch", type=Path, default=VSX_CROSSMATCH_PATH, help="ASAS-SN x VSX crossmatch file for characterize step")
-    g_characterize.add_argument("--characterize-chunk-size", type=int, default=GAIA_CHUNK_SIZE, help="Gaia query chunk size for characterize step")
-    g_characterize.add_argument("--characterize-starhorse", type=str, default="tap", help="StarHorse mode/path for characterize step (default: tap)")
-    g_characterize.add_argument("--characterize-starhorse-cache", type=Path, default=None, help="Optional StarHorse TAP cache parquet path (default: output/cache/catalogs/starhorse_tap_cache.parquet)")
-    g_characterize.add_argument("--characterize-unwise-checkpoint-every", type=int, default=UNWISE_CHECKPOINT_EVERY, help="Persist unWISE checkpoint every N completed candidates")
-    g_characterize.add_argument("--no-characterize-banyan", dest="characterize_banyan", action="store_false", help="Disable BANYAN Sigma enrichment in characterize step")
-    g_characterize.add_argument("--no-characterize-iphas", dest="characterize_iphas", action="store_false", help="Disable IPHAS enrichment in characterize step")
-    g_characterize.add_argument("--no-characterize-sfr", dest="characterize_sfr", action="store_false", help="Disable star-forming-region enrichment in characterize step")
-    g_characterize.add_argument("--no-characterize-clusters", dest="characterize_clusters", action="store_false", help="Disable open-cluster enrichment in characterize step")
-    g_characterize.add_argument("--characterize-unwise", dest="characterize_unwise", action="store_true", help="Enable unWISE/unTimely variability enrichment in characterize step (default: disabled)")
-    g_characterize.add_argument("--no-characterize-unwise", dest="characterize_unwise", action="store_false", help="Disable unWISE enrichment in characterize step")
-    g_characterize.add_argument("--run-dust", dest="run_dust", action="store_true", help="Run 3D dust extinction correction (default: enabled)")
-    g_characterize.add_argument("--no-run-dust", dest="run_dust", action="store_false", help="Skip dust extinction step")
-
-    g_classify.add_argument("--run-classify", dest="run_classify", action="store_true", help="Run classification (EB/CV/starspot rejection, YSO) (default: enabled)")
-    g_classify.add_argument("--no-run-classify", dest="run_classify", action="store_false", help="Skip classification step")
-
-    g_enrich.add_argument("--run-enrich", dest="run_enrich", action="store_true", help="Enrich passing candidates with comprehensive light curve stats (default: enabled)")
-    g_enrich.add_argument("--no-run-enrich", dest="run_enrich", action="store_false", help="Skip enrichment step")
-    g_enrich.add_argument("--enrich-compute-ls", action="store_true", help="Include Lomb-Scargle periodogram in enrichment (expensive)")
-
-    g_neighbor.add_argument("--run-neighbor-enrich", dest="run_neighbor_enrich", action="store_true", help="Bulk neighbor enrichment for passing candidates (default: enabled)")
-    g_neighbor.add_argument("--no-run-neighbor-enrich", dest="run_neighbor_enrich", action="store_false", help="Skip neighbor enrichment step")
-    g_neighbor.add_argument("--neighbor-radius-arcsec", type=float, default=NEIGHBOR_RADIUS_ARCSEC, help="Neighbor search radius in arcsec (default: 15)")
-    g_neighbor.add_argument("--neighbor-chunk-size", type=int, default=NEIGHBOR_CHUNK_SIZE, help="Bulk chunk size for neighbor lookups")
-    g_neighbor.add_argument("--neighbor-cache", type=Path, default=None, help="Optional cache parquet path for neighbor lookups")
-
-    g_spectra.add_argument("--run-spectra-enrich", dest="run_spectra_enrich", action="store_true", help="Bulk spectra-availability enrichment for passing candidates (default: enabled)")
-    g_spectra.add_argument("--no-run-spectra-enrich", dest="run_spectra_enrich", action="store_false", help="Skip spectra enrichment step")
-    g_spectra.add_argument("--spectra-radius-arcsec", type=float, default=SPECTRA_RADIUS_ARCSEC, help="Spectra crossmatch radius in arcsec (default: 3)")
-    g_spectra.add_argument("--spectra-chunk-size", type=int, default=SPECTRA_CHUNK_SIZE, help="Bulk chunk size for spectra lookups")
-    g_spectra.add_argument("--spectra-cache", type=Path, default=None, help="Optional cache parquet path for spectra lookups")
-
-    g_vetting.add_argument("--run-vetting", dest="run_vetting", action="store_true", help="Run post-review vetting (SIMBAD, Gaia variability, ASAS-SN variables) (default: enabled)")
-    g_vetting.add_argument("--no-run-vetting", dest="run_vetting", action="store_false", help="Skip vetting step")
-    g_vetting.add_argument("--vetting-min-score", type=float, default=None, help="Only vet candidates with interest_score >= this value")
-    g_vetting.add_argument("--vetting-simbad-radius", type=float, default=5.0, help="SIMBAD search radius in arcsec (default: 5)")
-    g_vetting.add_argument("--vetting-asassn-radius", type=float, default=5.0, help="ASAS-SN crossmatch radius in arcsec (default: 5)")
-    g_vetting.add_argument("--no-vetting-simbad", action="store_true", help="Skip SIMBAD query in vetting")
-    g_vetting.add_argument("--no-vetting-gaia-var", action="store_true", help="Skip Gaia DR3 variability query in vetting")
-    g_vetting.add_argument("--no-vetting-gaia-epoch", action="store_true", help="Skip Gaia epoch photometry check in vetting")
-    g_vetting.add_argument("--no-vetting-asassn-var", action="store_true", help="Skip ASAS-SN variable catalog crossmatch in vetting")
-    g_vetting.add_argument("--no-vetting-alerce", action="store_true", help="Skip ALeRCE ZTF query in vetting")
-    g_vetting.add_argument("--no-vetting-erosita", action="store_true", help="Skip eROSITA X-ray crossmatch in vetting")
-    g_vetting.add_argument("--no-vetting-pm-check", action="store_true", help="Skip proper motion consistency check in vetting")
-    g_vetting.add_argument("--vetting-atlas", dest="vetting_atlas", action="store_true", help="Run ATLAS forced photometry in vetting (default: disabled)")
-    g_vetting.add_argument("--no-vetting-atlas", dest="vetting_atlas", action="store_false", help="Skip ATLAS forced photometry in vetting")
-    g_vetting.add_argument("--vetting-atlas-token", type=str, default=None, help="ATLAS forced photometry API token")
-    g_vetting.add_argument("--vetting-neowise-lc", dest="vetting_neowise_lc", action="store_true", help="Fetch full NEOWISE light curves in vetting (default: disabled)")
-    g_vetting.add_argument("--no-vetting-neowise-lc", dest="vetting_neowise_lc", action="store_false", help="Skip full NEOWISE light curves in vetting")
-    g_vetting.add_argument("--vetting-input", type=Path, default=None, help="Explicit input file for vetting (default: latest enriched/characterized output)")
-
-    g_general.add_argument("--test-run", action="store_true", help="Limit the number of light curves processed (for quick end-to-end validation)")
-    g_general.add_argument("--test-run-n", type=int, default=10000, help="Number of light curves to sample in test-run mode (default: 10000)")
+    add_config_args(g_general)
+    g_general.add_argument("--workers", type=int, default=WORKERS, help="Workers for parallel processing")
     g_general.add_argument("-o", "--overwrite", action="store_true", help="Overwrite checkpoint log and existing output if present (start fresh).")
     g_general.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output")
 
-    parser.set_defaults(
-        run_filter=True,
-        run_postprocess=False,
-        run_characterize=True,
-        run_dust=True,
-        characterize_banyan=True,
-        characterize_iphas=True,
-        characterize_sfr=True,
-        characterize_clusters=True,
-        characterize_unwise=False,
-        run_classify=True,
-        run_enrich=True,
-        run_neighbor_enrich=True,
-        run_spectra_enrich=True,
-        run_vetting=True,
-        vetting_atlas=False,
-        vetting_neowise_lc=False,
-        export_bundle_enabled=True,
-        review_sync_enabled=True,
-    )
+    parser.set_defaults(**PIPELINE_CONFIG_DEFAULTS)
 
     args = parser.parse_args()
+    apply_config(
+        args,
+        command="pipeline",
+        valid_keys=namespace_keys(parser, PIPELINE_CONFIG_DEFAULTS),
+        path_keys=PIPELINE_CONFIG_PATH_KEYS,
+    )
 
     # Handle --mag-bin all: expand to all bins in reverse order
     is_auto_all_mode = False
@@ -996,7 +1219,7 @@ def main():
                     _assert_mag_bin_match(out_dir_mag_bins, args.mag_bin, str(out_dir_params))
         else:
             if args.import_bundle is None and args.out_dir is None:
-                parser.error("--stage home without --mag-bin requires --import-bundle or --out-dir.")
+                parser.error("--stage home without --mag-bin requires import_bundle in config or --output-dir.")
 
             detected_mag_bins = None
             detected_source = None
@@ -1013,7 +1236,7 @@ def main():
             if not detected_mag_bins:
                 parser.error(
                     "Could not auto-detect --mag-bin for --stage home. "
-                    "Expected mag_bin in run_params.json from --import-bundle or --out-dir."
+                    "Expected mag_bin in run_params.json from import_bundle config or --output-dir."
                 )
 
             args.mag_bin = detected_mag_bins
@@ -1023,6 +1246,13 @@ def main():
         print("Info: --stage cluster runs upstream only (steps 1-6 plus enrich). Downstream steps are skipped.")
     if stage == "home" and (args.force_manifest or args.force_tag):
         print("Info: --stage home skips manifest/tag/events regardless of force flags.")
+
+    run_reuse_fingerprint = build_run_reuse_fingerprint(
+        args,
+        stage=stage,
+        is_auto_all_mode=is_auto_all_mode,
+    )
+    run_reuse_fingerprint_hash = run_reuse_fingerprint_digest(run_reuse_fingerprint)
 
     # Build events.py args from parsed arguments
     events_args = []
@@ -1097,11 +1327,15 @@ def main():
     elif args.output is not None:
         out_dir = Path(args.output).expanduser().parent
     else:
-        out_dir = find_latest_run_dir(base_output_root, args.mag_bin)
+        out_dir = find_latest_run_dir(base_output_root, args.mag_bin, run_reuse_fingerprint)
         if out_dir is not None:
-            log(f"Reusing existing run directory: {out_dir}")
+            log(f"Reusing existing run directory with matching run parameters: {out_dir}")
         else:
             out_dir = default_run_dir(base_output_root)
+            log(
+                "No existing run directory has matching run parameters; "
+                f"starting a fresh run directory: {out_dir}"
+            )
     if args.import_bundle is not None and args.overwrite and out_dir.exists():
         log(f"Overwriting existing imported run directory: {out_dir}")
         if out_dir.is_dir():
@@ -1185,7 +1419,6 @@ def main():
             enforced_tags.append("mag_range")
 
     config_fingerprint = {
-        "vsx_mode": args.vsx_mode,
         "skip_vsx": args.skip_vsx,
         "pass_all_tags": args.pass_all_tags,
         "enforced_tags": enforced_tags,
@@ -1225,7 +1458,7 @@ def main():
             "dip_morphology": args.dip_morphology,
             "jump_morphology": args.jump_morphology,
             "min_delta_bic": args.min_delta_bic,
-            "apply_score": not args.skip_score_filter,
+            "apply_score": _score_filter_enabled(args),
             "min_dip_score": args.min_dip_score,
             "min_jump_score": args.min_jump_score,
             "min_score": args.min_score,
@@ -1300,6 +1533,8 @@ def main():
             "timestamp": run_start_time.isoformat(),
             "command": cmd,
             "stage": stage,
+            "run_reuse_fingerprint": run_reuse_fingerprint,
+            "run_reuse_fingerprint_hash": run_reuse_fingerprint_hash,
             "import_bundle": str(args.import_bundle) if args.import_bundle else None,
             "export_bundle": str(args.export_bundle) if args.export_bundle else None,
             "export_bundle_enabled": args.export_bundle_enabled,
@@ -1309,6 +1544,9 @@ def main():
             "imported_run_params_snapshot": str(imported_run_params_snapshot) if imported_run_params_snapshot else None,
             "imported_run_summary_snapshot": str(imported_run_summary_snapshot) if imported_run_summary_snapshot else None,
             "mag_bin": args.mag_bin,
+            "extension": args.extension,
+            "test_run": args.test_run,
+            "test_run_n": args.test_run_n,
             # Tag parameters
             "min_time_span": args.min_time_span,
             "min_points_per_day": args.min_points_per_day,
@@ -1320,7 +1558,6 @@ def main():
             "skip_mag_range": args.skip_mag_range,
             "skip_vsx": args.skip_vsx,
             "vsx_max_sep": args.vsx_max_sep,
-            "vsx_mode": args.vsx_mode,
             "vsx_crossmatch": str(args.vsx_crossmatch),
             # Detection parameters
             "trigger_mode": args.trigger_mode,
@@ -1356,9 +1593,9 @@ def main():
             "batch_size": args.batch_size,
             "output_format": args.output_format,
             # Cleaning thresholds (hardcoded, not CLI args)
-            "clean_max_error_absolute": 1.0,
-            "clean_max_error_sigma": 5.0,
-            "bad_camera_scatter_ratio": 2.5,
+            "clean_max_error_absolute": CLEAN_LC_MAX_ERROR_ABSOLUTE,
+            "clean_max_error_sigma": CLEAN_LC_MAX_ERROR_SIGMA,
+            "bad_camera_scatter_ratio": BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
             # Tag stage (camera median)
             "skip_camera_median": args.skip_camera_median,
             "camera_median_tolerance": args.camera_median_tolerance,
@@ -1393,7 +1630,7 @@ def main():
             "dip_morphology": args.dip_morphology,
             "jump_morphology": args.jump_morphology,
             "min_delta_bic": args.min_delta_bic,
-            "skip_score_filter": args.skip_score_filter,
+            "apply_score_filter": _score_filter_enabled(args),
             "min_dip_score": args.min_dip_score,
             "min_jump_score": args.min_jump_score,
             "min_score": args.min_score,
@@ -1716,7 +1953,6 @@ def main():
                 min_points_per_day=args.min_points_per_day,
                 apply_vsx=not args.skip_vsx,
                 vsx_max_sep_arcsec=args.vsx_max_sep,
-                vsx_mode=args.vsx_mode,
                 vsx_crossmatch_csv=args.vsx_crossmatch,
                 apply_multi_camera=not args.skip_multi_camera,
                 min_cameras=args.min_cameras,
@@ -1759,10 +1995,21 @@ def main():
         log(f"\n[TEST RUN] Sampling {args.test_run_n}/{len(df_filtered)} sources")
         df_filtered = df_filtered.sample(n=args.test_run_n, random_state=42).reset_index(drop=True)
 
-    # Step 2.5: Apply camera median filter to identify cameras to exclude
+    # Step 2.5: Flag raw-space camera medians for audit. These are not hard
+    # exclusions; event detection rechecks cameras in residual space.
     camera_median_file = tags_dir / f"camera_medians_{mag_bin_tag}.parquet"
     if run_upstream and (not args.skip_camera_median) and ("mag_bin" in df_filtered.columns):
-        if args.force_tag or not camera_median_file.exists():
+        rerun_camera_median = bool(args.force_tag or not camera_median_file.exists())
+        cam_cache = None
+        if not rerun_camera_median:
+            log(f"\nLoading cached camera median results from {camera_median_file}")
+            cam_cache = pd.read_parquet(camera_median_file)
+            if RAW_MEDIAN_SUSPECT_COL not in cam_cache.columns:
+                rerun_camera_median = True
+                cam_cache = None
+                log("Cached camera median results use old hard-exclusion schema; recomputing.")
+
+        if rerun_camera_median:
             log(f"\nApplying camera median filter (tolerance={args.camera_median_tolerance} mag)...")
             # Camera median validation needs per-source file paths (.dat2 -> .raw2).
             # Keep the original path column unchanged for downstream code.
@@ -1777,14 +2024,14 @@ def main():
                 n_workers=args.workers,
                 checkpoint_path=str(camera_median_checkpoint),
             )
-            df_filtered["excluded_cameras"] = df_camera["excluded_cameras"]
-            safe_write_parquet(df_filtered[["source_id", "excluded_cameras"]], camera_median_file)
+            df_filtered[RAW_MEDIAN_SUSPECT_COL] = df_camera[RAW_MEDIAN_SUSPECT_COL]
+            safe_write_parquet(df_filtered[["source_id", RAW_MEDIAN_SUSPECT_COL]], camera_median_file)
         else:
-            log(f"\nLoading cached camera median results from {camera_median_file}")
-            cam_cache = pd.read_parquet(camera_median_file)
             df_filtered = df_filtered.merge(cam_cache, on="source_id", how="left")
-        n_with_exclusions = (df_filtered["excluded_cameras"].fillna("") != "").sum()
-        log(f"Found {n_with_exclusions}/{len(df_filtered)} sources with excluded cameras")
+        if RAW_MEDIAN_SUSPECT_COL not in df_filtered.columns:
+            df_filtered[RAW_MEDIAN_SUSPECT_COL] = ""
+        n_with_suspects = (df_filtered[RAW_MEDIAN_SUSPECT_COL].fillna("") != "").sum()
+        log(f"Found {n_with_suspects}/{len(df_filtered)} sources with raw median suspect cameras")
 
     # Step 2.75: Pre-events periodicity gate and branch split
     if run_upstream and args.apply_pre_periodicity_gate and not df_filtered.empty:
@@ -1819,7 +2066,7 @@ def main():
             df_gate = apply_pre_periodicity_gate(
                 df_filtered,
                 path_col="dat_path" if "dat_path" in df_filtered.columns else "path",
-                excluded_cameras_col="excluded_cameras" if "excluded_cameras" in df_filtered.columns else None,
+                excluded_cameras_col=None,
                 bad_camera_scatter_ratio=BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
                 clean_max_error_absolute=CLEAN_LC_MAX_ERROR_ABSOLUTE,
                 clean_max_error_sigma=CLEAN_LC_MAX_ERROR_SIGMA,
@@ -1884,8 +2131,8 @@ def main():
         meta_cols = [path_col]
         if not args.skip_vsx and "vsx_sep_arcsec" in df_branch.columns and "vsx_class" in df_branch.columns:
             meta_cols.extend(["vsx_sep_arcsec", "vsx_class"])
-        if "excluded_cameras" in df_branch.columns:
-            meta_cols.append("excluded_cameras")
+        if RAW_MEDIAN_SUSPECT_COL in df_branch.columns:
+            meta_cols.append(RAW_MEDIAN_SUSPECT_COL)
         for col in periodic_audit_cols:
             if col in df_branch.columns and col not in meta_cols:
                 meta_cols.append(col)

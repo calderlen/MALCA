@@ -539,7 +539,7 @@ def main():
         epilog="""
 Example usage:
   malca plot --detect-run output/runs/20260128_163911
-  malca plot --events results_filtered.csv --out-dir plots/
+  malca plot --results results_filtered.csv --output-dir plots/
   malca plot --detect-run output/runs/20260128_163911 --max-plots 10
 """
     )
@@ -557,7 +557,8 @@ Example usage:
         help="Path to filtered events results (CSV/Parquet). Overrides --detect-run.",
     )
     parser.add_argument(
-        "--out-dir",
+        "--output-dir",
+        dest="out_dir",
         type=Path,
         default=None,
         help="Output directory for plots. Overrides default from --detect-run.",
@@ -657,7 +658,8 @@ Example usage:
         help="Sigma cutoff for clean_lc MAD filter (default: 5.0)",
     )
     parser.add_argument(
-        "--detection-results",
+        "--results",
+        dest="results",
         type=Path,
         default=None,
         help="Optional detection results CSV for metadata lookup",
@@ -694,7 +696,7 @@ Example usage:
         action="store_true",
         help="Print detailed progress",
     )
-    parser.add_argument("--no-tqdm", action="store_true", help="Disable progress bars")
+    parser.add_argument("--no-progress", action="store_true", help="Disable progress bars")
     # Bad camera filtering
     parser.add_argument(
         "--no-filter-bad-cameras",
@@ -798,11 +800,11 @@ Example usage:
         jd_offset=args.jd_offset,
         clean_max_error_absolute=args.clean_max_error_absolute,
         clean_max_error_sigma=args.clean_max_error_sigma,
-        detection_results_csv=args.detection_results,
+        detection_results_csv=args.results,
         run_params=run_params,
         filter_bad_cameras=args.filter_bad_cameras,
         bad_camera_scatter_ratio=args.bad_camera_scatter_ratio,
-        show_tqdm=not args.no_tqdm,
+        show_tqdm=not args.no_progress,
     )
 
     # Write run config next to generated plots
@@ -834,10 +836,10 @@ Example usage:
             "jd_offset": args.jd_offset,
             "clean_max_error_absolute": args.clean_max_error_absolute,
             "clean_max_error_sigma": args.clean_max_error_sigma,
-            "detection_results": str(args.detection_results) if args.detection_results else None,
+            "detection_results": str(args.results) if args.results else None,
             "filter_bad_cameras": args.filter_bad_cameras,
             "bad_camera_scatter_ratio": args.bad_camera_scatter_ratio,
-            "show_tqdm": not args.no_tqdm,
+            "show_tqdm": not args.no_progress,
         },
         "summary": summary,
     }

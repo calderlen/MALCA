@@ -28,7 +28,7 @@ def main() -> int:
         description="MALCA Review (Qt) — test desktop GUI; use 'malca review' for the Dash app.",
     )
     parser.add_argument(
-        "--db",
+        "--review-db",
         type=Path,
         default=None,
         help="SQLite review DB path (default: from env or output/review/review.db)",
@@ -54,7 +54,7 @@ def main() -> int:
 
     signal.signal(signal.SIGINT, lambda *a: _quit_on_sigint())
 
-    window = ReviewMainWindow(db_path=args.db, plot_dir=args.plot_dir)
+    window = ReviewMainWindow(db_path=args.review_db, plot_dir=args.plot_dir)
     window.show()
     return app.exec()
 

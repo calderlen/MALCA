@@ -79,3 +79,29 @@ def test_string_length_handles_missing_camera_columns(monkeypatch: pytest.Monkey
     out = stats.baseline_subtracted_string_length(df)
     assert out["string_length_total"] == pytest.approx(1.0)
     assert out["string_length_n_steps"] == pytest.approx(2.0)
+
+
+def test_enrich_row_worker_flattens_field_summary(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_compute_stats(*args, **kwargs):
+        _ = args, kwargs
+        return pd.DataFrame(), {
+            "asassn_field_key": "field1",
+            "asassn_fields": "field1,field2",
+            "asassn_field_count": 2,
+            "asassn_field_key_fraction": 0.75,
+            "camera_field_key": "cam1/field1",
+            "camera_fields": "cam1/field1,cam2/field2",
+            "camera_field_count": 2,
+            "camera_field_key_fraction": 0.5,
+            "by_field": pd.DataFrame({"field": ["field1"]}),
+        }
+
+    monkeypatch.setattr(stats, "compute_stats", fake_compute_stats)
+
+    row = stats._enrich_row_worker(({"path": "lc/1001.dat2"}, "1001", "lc", False))
+
+    assert row["stats_asassn_field_key"] == "field1"
+    assert row["stats_asassn_fields"] == "field1,field2"
+    assert row["stats_asassn_field_count"] == 2
+    assert row["stats_camera_field_key"] == "cam1/field1"
+    assert "stats_by_field" not in row

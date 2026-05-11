@@ -30,9 +30,11 @@ from malca.baseline import (
     per_camera_median_baseline,
     per_camera_gp_baseline,
 )
+from malca.cli_config import add_config_args, apply_config, namespace_keys
 from malca.config import INJECTION_CHUNK_SIZE
 from malca.config import (
     WORKERS,
+    TRIGGER_MODE,
     LOGBF_THRESHOLD_DIP,
     LOGBF_THRESHOLD_JUMP,
     SIGNIFICANCE_THRESHOLD,
@@ -53,8 +55,39 @@ from malca.config import (
     INJECTION_SEED,
     INJECTION_MAX_ATTEMPTS,
 )
-from malca.events import run_bayesian_significance
+from malca.events import score_lightcurve
 from malca.utils import read_lc_dat2
+
+
+INJECTION_CONFIG_DEFAULTS = {
+    "trigger_mode": TRIGGER_MODE,
+    "logbf_threshold_dip": LOGBF_THRESHOLD_DIP,
+    "logbf_threshold_jump": LOGBF_THRESHOLD_JUMP,
+    "significance_threshold": SIGNIFICANCE_THRESHOLD,
+    "p_points": P_POINTS,
+    "mag_points": MAG_POINTS,
+    "p_min_dip": None,
+    "p_max_dip": None,
+    "p_min_jump": None,
+    "p_max_jump": None,
+    "run_min_points": RUN_MIN_POINTS,
+    "run_max_gap_points": RUN_MAX_GAP_POINTS,
+    "run_max_gap_days": None,
+    "run_min_duration_days": 0.0,
+    "baseline_func": BASELINE_FUNC,
+    "baseline_s0": BASELINE_S0,
+    "baseline_w0": BASELINE_W0,
+    "baseline_q": BASELINE_Q,
+    "baseline_jitter": BASELINE_JITTER,
+    "baseline_sigma_floor": None,
+    "mag_min_dip": None,
+    "mag_max_dip": None,
+    "mag_min_jump": None,
+    "mag_max_jump": None,
+    "no_event_prob": False,
+    "min_mag_offset": MIN_MAG_OFFSET,
+    "measure_pre_injection": True,
+}
 
 
 
@@ -278,7 +311,7 @@ def _build_detection_kwargs(args: argparse.Namespace) -> dict:
 
 
 def _default_detection_func(df: pd.DataFrame, detection_kwargs: dict, min_mag_offset: float = 0.0) -> dict:
-    res = run_bayesian_significance(df, **detection_kwargs)
+    res = score_lightcurve(df, **detection_kwargs)
     dip = res["dip"]
     jump = res["jump"]
 
@@ -1582,7 +1615,7 @@ def main() -> None:
         description="Run injection-recovery tests for dip detection.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Output structure (default --out-dir output/injection):
+Output structure (default --output-dir output/injection):
   output/injection/
     20250121_143052/             # Timestamped run directory
       run_params.json            # Full parameter dump
@@ -1606,19 +1639,15 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
     g_io = parser.add_argument_group("Input / output")
     g_injection = parser.add_argument_group("Injection parameters")
     g_workers = parser.add_argument_group("Workers & chunks")
-    g_detection = parser.add_argument_group("Detection & events")
-    g_baseline = parser.add_argument_group("Baseline")
-    g_mag = parser.add_argument_group("Magnitude grid")
-    g_filter = parser.add_argument_group("Filter & measurement")
     g_postprocess = parser.add_argument_group("Postprocess")
 
     g_io.add_argument("--manifest", type=Path, default=Path("output/lc_manifest_all.parquet"),
                         help="Manifest parquet path (default: output/lc_manifest_all.parquet)")
-    g_io.add_argument("--out-dir", type=Path, default=Path("output/injection"),
+    g_io.add_argument("--output-dir", dest="out_dir", type=Path, default=Path("output/injection"),
                         help="Base output directory (default: output/injection)")
     g_io.add_argument("--run-tag", type=str, default=None,
                         help="Optional tag to append to run directory name (e.g., 'deep_dips_mag18')")
-    g_io.add_argument("--out", type=Path, default=None,
+    g_io.add_argument("--output", type=Path, default=None,
                         help="Override CSV output path (default: <out-dir>/<timestamp>/results/injection_results.csv)")
     g_injection.add_argument(
         "--control-sample-size",
@@ -1649,48 +1678,6 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
     g_workers.add_argument("--no-resume", action="store_true", help="Disable resume even if checkpoint exists.")
     g_workers.add_argument("--overwrite", action="store_true", help="Overwrite output/checkpoint.")
 
-    g_detection.add_argument("--trigger-mode", type=str, default=TRIGGER_MODE, choices=["logbf", "posterior_prob"],
-                        help="Trigger mode for injection testing")
-    g_detection.add_argument("--logbf-threshold-dip", type=float, default=LOGBF_THRESHOLD_DIP)
-    g_detection.add_argument("--logbf-threshold-jump", type=float, default=LOGBF_THRESHOLD_JUMP)
-    g_detection.add_argument("--significance-threshold", type=float, default=SIGNIFICANCE_THRESHOLD)
-    g_detection.add_argument("--p-points", type=int, default=P_POINTS)
-    g_detection.add_argument("--mag-points", type=int, default=MAG_POINTS, help="Number of points in the magnitude grid")
-    g_detection.add_argument("--p-min-dip", type=float, default=None)
-    g_detection.add_argument("--p-max-dip", type=float, default=None)
-    g_detection.add_argument("--p-min-jump", type=float, default=None)
-    g_detection.add_argument("--p-max-jump", type=float, default=None)
-    g_detection.add_argument("--run-min-points", type=int, default=RUN_MIN_POINTS)
-    g_detection.add_argument("--run-max-gap-points", type=int, default=RUN_MAX_GAP_POINTS)
-    g_detection.add_argument("--run-max-gap-days", type=float, default=None)
-    g_detection.add_argument("--run-min-duration-days", type=float, default=0.0)
-    g_baseline.add_argument(
-        "--baseline-func",
-        type=str,
-        default=BASELINE_FUNC,
-        choices=["gp", "global_median", "per_camera_median"],
-        help="Baseline function",
-    )
-    g_baseline.add_argument("--baseline-s0", type=float, default=BASELINE_S0, help="GP kernel S0 parameter (default: 0.0005)")
-    g_baseline.add_argument("--baseline-w0", type=float, default=BASELINE_W0, help="GP kernel w0 parameter (default: pi/1000)")
-    g_baseline.add_argument("--baseline-q", type=float, default=BASELINE_Q, help="GP kernel Q parameter (default: 0.7)")
-    g_baseline.add_argument("--baseline-jitter", type=float, default=BASELINE_JITTER, help="GP jitter term (default: 0.006)")
-    g_baseline.add_argument("--baseline-sigma-floor", type=float, default=None, help="Minimum sigma floor (default: None)")
-    g_mag.add_argument("--mag-min-dip", type=float, default=None, help="Min magnitude for dip grid (overrides auto)")
-    g_mag.add_argument("--mag-max-dip", type=float, default=None, help="Max magnitude for dip grid (overrides auto)")
-    g_mag.add_argument("--mag-min-jump", type=float, default=None, help="Min magnitude for jump grid (overrides auto)")
-    g_mag.add_argument("--mag-max-jump", type=float, default=None, help="Max magnitude for jump grid (overrides auto)")
-    g_filter.add_argument("--no-event-prob", action="store_true", default=False,
-                        help="Disable event probability computation for faster runs")
-    g_filter.add_argument("--compute-event-prob", dest="no_event_prob", action="store_false",
-                        help="Enable event probability computation (default)")
-    g_filter.add_argument("--min-mag-offset", type=float, default=MIN_MAG_OFFSET,
-                        help="Min magnitude offset for signal amplitude filter (0 to disable, default: 0.2)")
-    g_filter.add_argument("--measure-pre-injection", action="store_true", default=True,
-                        help="Measure detection rate on pre-injection light curves (default: enabled)")
-    g_filter.add_argument("--no-measure-pre-injection", dest="measure_pre_injection", action="store_false",
-                        help="Disable pre-injection detection rate measurement")
-
     g_postprocess.add_argument("--skip-cube", action="store_true", help="Skip computing efficiency cube.")
     g_postprocess.add_argument("--skip-plots", action="store_true", help="Skip generating plots.")
     g_postprocess.add_argument("--cube-out", type=Path, default=None,
@@ -1700,8 +1687,16 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
     g_postprocess.add_argument("--depth-bins", type=int, default=20, help="Number of depth bins for cube.")
     g_postprocess.add_argument("--duration-bins", type=int, default=20, help="Number of duration bins for cube.")
     g_postprocess.add_argument("--mag-bins", type=int, default=10, help="Number of magnitude bins for cube.")
+    add_config_args(g_postprocess)
+    parser.set_defaults(**INJECTION_CONFIG_DEFAULTS)
 
     args = parser.parse_args()
+    apply_config(
+        args,
+        command="injection",
+        valid_keys=namespace_keys(parser, INJECTION_CONFIG_DEFAULTS),
+        path_keys={"manifest", "out_dir", "output", "cube_out", "plot_dir"},
+    )
 
     # Set up output paths with timestamped run directory
     base_out_dir = Path(args.out_dir)
@@ -1716,7 +1711,7 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
 
     results_dir.mkdir(parents=True, exist_ok=True)
 
-    csv_out = args.out if args.out else (results_dir / "injection_results.csv")
+    csv_out = args.output if args.output else (results_dir / "injection_results.csv")
     cube_out = args.cube_out if args.cube_out else (cubes_dir / "efficiency_cube.npz")
     plot_dir = args.plot_dir if args.plot_dir else plots_dir
 

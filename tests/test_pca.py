@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from malca.pca import (
+from malca.meta_analysis.pca import (
     DEFAULT_VARIABILITY_PCA_COLUMNS,
     apply_variability_pca,
     build_standardized_feature_matrix,

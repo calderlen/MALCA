@@ -818,7 +818,7 @@ def main() -> None:
         description="Run LTV rejection-recovery injections and generate diagnostic plots.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Output structure (default --out-dir output/ltv/injection):
+Output structure (default --output-dir output/ltv/injection):
   output/ltv/injection/
     20260314_101500/
       run_params.json
@@ -845,9 +845,9 @@ Output structure (default --out-dir output/ltv/injection):
     g_plots = parser.add_argument_group("Plots")
 
     g_io.add_argument("--manifest", type=Path, required=True, help="Manifest CSV/Parquet with dat_path metadata.")
-    g_io.add_argument("--out-dir", type=Path, default=LTV_INJECTION_OUTPUT_DIR, help="Base output directory.")
+    g_io.add_argument("--output-dir", dest="out_dir", type=Path, default=LTV_INJECTION_OUTPUT_DIR, help="Base output directory.")
     g_io.add_argument("--run-tag", type=str, default=None, help="Optional suffix for the run directory.")
-    g_io.add_argument("--out", type=Path, default=None, help="Override trial CSV output path.")
+    g_io.add_argument("--output", type=Path, default=None, help="Override trial CSV output path.")
     g_sample.add_argument(
         "--control-sample-size",
         type=int,
@@ -913,7 +913,7 @@ Output structure (default --out-dir output/ltv/injection):
     results_dir.mkdir(parents=True, exist_ok=True)
     plots_dir.mkdir(parents=True, exist_ok=True)
 
-    csv_out = args.out if args.out is not None else (results_dir / "ltv_injection_trials.csv")
+    csv_out = args.output if args.output is not None else (results_dir / "ltv_injection_trials.csv")
     checkpoint_path = csv_out.with_name(f"{csv_out.stem}_PROCESSED.txt")
 
     manifest_df = load_manifest(Path(args.manifest))

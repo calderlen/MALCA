@@ -173,7 +173,7 @@ def run_spectra_availability(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Bulk spectra-availability enrichment")
     parser.add_argument("--input", type=Path, required=True, help="Input CSV/Parquet with candidate coordinates")
-    parser.add_argument("--out-dir", type=Path, required=True, help="Output directory")
+    parser.add_argument("--output-dir", dest="out_dir", type=Path, required=True, help="Output directory")
     parser.add_argument("--radius-arcsec", type=float, default=SPECTRA_RADIUS_ARCSEC)
     parser.add_argument("--chunk-size", type=int, default=SPECTRA_CHUNK_SIZE)
     parser.add_argument("--cache", type=Path, default=None)

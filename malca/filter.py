@@ -43,6 +43,7 @@ import math
 import re
 import shlex
 import sys
+import time
 
 from astropy import units as u
 from astropy.coordinates import SkyCoord
@@ -598,31 +599,44 @@ def fetch_gaia_dr3_eb_periods(
                 FROM gaiadr3.vari_eclipsing_binary
                 WHERE source_id IN ({ids_str})
             """
-            try:
-                result = tap.run_sync(query)
-                for row in result:
-                    sid = row["source_id"]
-                    freq = row["frequency"]
-                    period = np.nan
-                    if freq is not None:
-                        try:
-                            fv = float(freq)
-                            if np.isfinite(fv) and fv > 0:
-                                period = 1.0 / fv
-                        except Exception:
-                            period = np.nan
+            attempt = 0
+            while True:
+                attempt += 1
+                try:
+                    result = tap.run_sync(query)
+                    break
+                except KeyboardInterrupt:
+                    raise
+                except Exception as e:
+                    delay = min(5.0 * attempt, 60.0)
+                    if show_tqdm:
+                        msg = str(e).splitlines()[0].strip()
+                        tqdm.write(
+                            f"[fetch_gaia_eb] chunk query failed on attempt {attempt}; "
+                            f"retrying in {delay:.0f}s: {msg}"
+                        )
+                    time.sleep(delay)
 
-                    new_rows.append(
-                        {
-                            "source_id": int(sid),
-                            "period": period,
-                            "var_type": str(row["model_type"]) if row["model_type"] is not None else "",
-                            "global_ranking": float(row["global_ranking"]) if row["global_ranking"] is not None else np.nan,
-                        }
-                    )
-            except Exception as e:
-                if show_tqdm:
-                    tqdm.write(f"[fetch_gaia_eb] chunk query failed: {e}")
+            for row in result:
+                sid = row["source_id"]
+                freq = row["frequency"]
+                period = np.nan
+                if freq is not None:
+                    try:
+                        fv = float(freq)
+                        if np.isfinite(fv) and fv > 0:
+                            period = 1.0 / fv
+                    except Exception:
+                        period = np.nan
+
+                new_rows.append(
+                    {
+                        "source_id": int(sid),
+                        "period": period,
+                        "var_type": str(row["model_type"]) if row["model_type"] is not None else "",
+                        "global_ranking": float(row["global_ranking"]) if row["global_ranking"] is not None else np.nan,
+                    }
+                )
 
     if new_rows:
         new_df = pd.DataFrame(new_rows)
@@ -2055,20 +2069,17 @@ def validate_gaia_ruwe(
             source_ids=unique_ids,
             show_tqdm=show_tqdm,
         )
-        if gaia_df.empty:
-            if show_tqdm:
-                tqdm.write("[validate_gaia_ruwe] No Gaia matches found - returning unchanged")
-            df_out = df.copy()
-            df_out["ruwe"] = np.nan
-            df_out["high_ruwe_flag"] = False
-            return df_out
     except Exception as e:
-        if show_tqdm:
-            tqdm.write(f"[validate_gaia_ruwe] Gaia TAP query failed: {e} - returning unchanged")
-        df_out = df.copy()
-        df_out["ruwe"] = np.nan
-        df_out["high_ruwe_flag"] = False
-        return df_out
+        raise RuntimeError(f"[validate_gaia_ruwe] Gaia RUWE lookup failed: {e}") from e
+
+    found_ids = set(pd.to_numeric(gaia_df.get("source_id", pd.Series(dtype=float)), errors="coerce").dropna().astype(int))
+    missing_ids = sorted(set(unique_ids) - found_ids)
+    if missing_ids:
+        preview = ", ".join(str(v) for v in missing_ids[:5])
+        more = f" (+{len(missing_ids) - 5} more)" if len(missing_ids) > 5 else ""
+        raise RuntimeError(
+            f"[validate_gaia_ruwe] Local Gaia catalog is missing RUWE rows for source_id(s): {preview}{more}"
+        )
 
     # Create lookup dict from Gaia results
     ruwe_lookup = dict(zip(gaia_df["source_id"].astype(int), gaia_df["ruwe"]))
@@ -2139,9 +2150,7 @@ def validate_gaia_proper_motion(
         try:
             gaia_df = fetch_gaia_dr3_ruwe(source_ids=unique_ids, show_tqdm=show_tqdm)
         except Exception as e:
-            gaia_df = pd.DataFrame()
-            if show_tqdm:
-                tqdm.write(f"[validate_gaia_proper_motion] Gaia lookup failed: {e} - using existing PM columns only")
+            raise RuntimeError(f"[validate_gaia_proper_motion] Gaia PM lookup failed: {e}") from e
 
         if not gaia_df.empty:
             if "pmra" in gaia_df.columns and "pmdec" in gaia_df.columns:
@@ -2169,6 +2178,8 @@ def validate_gaia_proper_motion(
                         pmdec.iat[i] = float(vals[1])
             elif show_tqdm:
                 tqdm.write("[validate_gaia_proper_motion] Local Gaia cache has no pmra/pmdec columns - using existing PM columns only")
+        elif pmra.isna().all() or pmdec.isna().all():
+            raise RuntimeError("[validate_gaia_proper_motion] Local Gaia catalog returned no PM rows")
     elif show_tqdm:
         tqdm.write("[validate_gaia_proper_motion] No valid Gaia IDs - using existing PM columns only")
 
@@ -2263,7 +2274,7 @@ def validate_periodic_catalog(
         except Exception as e:
             if show_tqdm:
                 tqdm.write(f"[validate_periodic_catalog] {source_label} lookup failed: {e}")
-            source_frames[source_label] = pd.DataFrame()
+            raise RuntimeError(f"[validate_periodic_catalog] {source_label} lookup failed: {e}") from e
 
     # Gaia EB periods
     if use_gaia_eb and "gaia_id" in df_out.columns:
@@ -2964,8 +2975,8 @@ Example usage:
     g_morph.add_argument("--min-delta-bic", type=float, default=POST_FILTER_MIN_DELTA_BIC,
                         help="Minimum delta BIC for morphology filter (default: 10)")
 
-    g_score.add_argument("--apply-score-filter", action="store_true",
-                        help="Apply event score filter (off by default)")
+    g_score.add_argument("--apply-score-filter", action=argparse.BooleanOptionalAction, default=True,
+                        help="Apply event score filter (default: enabled)")
     g_score.add_argument("--min-score", type=float, default=POST_FILTER_MIN_DIP_SCORE,
                         help="Legacy minimum log10 event score applied to dip and jump branches (default: -3.0)")
     g_score.add_argument("--min-dip-score", type=float, default=None,
@@ -3038,7 +3049,7 @@ Example usage:
     g_periodic_catalog.add_argument("--home-passers-only", action="store_true",
                         help="Run home-only validations only on rows that already pass upstream filters")
 
-    g_general.add_argument("--no-tqdm", action="store_true", help="Disable progress bars")
+    g_general.add_argument("--no-progress", action="store_true", help="Disable progress bars")
     g_general.add_argument("-v", "--verbose", action="store_true", help="Print per-filter summaries (default: off)")
 
     args = parser.parse_args()
@@ -3218,7 +3229,7 @@ Example usage:
         periodic_catalog_vsx_crossmatch_csv=args.periodic_catalog_vsx_crossmatch,
         home_passers_only=args.home_passers_only,
         # General
-        show_tqdm=not args.no_tqdm,
+        show_tqdm=not args.no_progress,
         verbose=args.verbose,
     )
 

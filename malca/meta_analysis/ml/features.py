@@ -6,12 +6,12 @@ when building feature matrices for event-class classification
 
 Usage
 -----
->>> from malca.ml.features import ML_FEATURE_COLUMNS, ML_DROP_COLUMNS
+>>> from malca.meta_analysis.ml.features import ML_FEATURE_COLUMNS, ML_DROP_COLUMNS
 >>> X = df[ML_FEATURE_COLUMNS].copy()  # only curated features
 
 Or, for a safer approach that handles missing columns::
 
-    >>> from malca.ml.features import select_ml_features
+    >>> from malca.meta_analysis.ml.features import select_ml_features
     >>> X = select_ml_features(df)
 """
 

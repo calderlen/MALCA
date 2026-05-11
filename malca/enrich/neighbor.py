@@ -226,7 +226,7 @@ def run_neighbor_enrichment(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Bulk neighbor enrichment for candidate tables")
     parser.add_argument("--input", type=Path, required=True, help="Input CSV/Parquet with candidate coordinates")
-    parser.add_argument("--out-dir", type=Path, required=True, help="Output directory")
+    parser.add_argument("--output-dir", dest="out_dir", type=Path, required=True, help="Output directory")
     parser.add_argument("--radius-arcsec", type=float, default=NEIGHBOR_RADIUS_ARCSEC)
     parser.add_argument("--chunk-size", type=int, default=NEIGHBOR_CHUNK_SIZE)
     parser.add_argument("--cache", type=Path, default=None)

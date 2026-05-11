@@ -6,7 +6,7 @@ candidates into a standalone LTV review DB (separate from STV candidates).
 
 Usage:
     # CLI
-    malca ltv-ingest --input ltv_build_output.csv --db ltv_candidates.db -v
+    malca ltv-ingest --input ltv_build_output.csv --review-db ltv_candidates.db -v
 
     # Python API
     from malca.ltv.review import ingest_ltv_results
@@ -429,7 +429,7 @@ def _build_parser() -> argparse.ArgumentParser:
              "(default: '*_pipeline.parquet')",
     )
     p.add_argument(
-        "--db",
+        "--review-db",
         default="ltv_candidates.db",
         type=str,
         help="Path to LTV review SQLite DB (default: ltv_candidates.db)",
@@ -461,7 +461,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Parallel workers for compute_stats enrichment (default: 1)",
     )
     p.add_argument(
-        "--index",
+        "--index-file",
         type=str,
         default=None,
         metavar="PATH",
@@ -492,14 +492,14 @@ def main() -> None:
         print(f"Loaded {len(df):,} rows from {input_path}")
 
         ingest_ltv_results(
-            args.db,
+            args.review_db,
             df,
             run_characterize=not args.skip_characterize,
             run_vetting=args.run_vetting,
             run_stats=not args.skip_stats,
             stats_compute_ls=args.stats_compute_ls,
             n_workers=args.workers,
-            index_path=args.index,
+            index_path=args.index_file,
             verbose=args.verbose,
         )
         return
@@ -531,14 +531,14 @@ def main() -> None:
                 print(f"[ltv-ingest] Loaded {len(df):,} rows from {fp}")
 
             total_rows, new_rows = ingest_ltv_results(
-                args.db,
+                args.review_db,
                 df,
                 run_characterize=not args.skip_characterize,
                 run_vetting=args.run_vetting,
                 run_stats=not args.skip_stats,
                 stats_compute_ls=args.stats_compute_ls,
                 n_workers=args.workers,
-                index_path=args.index,
+                index_path=args.index_file,
                 verbose=args.verbose,
             )
 
