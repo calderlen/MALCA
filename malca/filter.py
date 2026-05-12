@@ -84,6 +84,7 @@ from malca.config import WORKERS, MIN_MAG_OFFSET
 from malca.config import PDM_METHOD_CHOICES
 from malca.phase import align_v_to_g_magnitude
 from malca.stats import compute_pdm_stats, compute_ce_stats
+from malca.table_io import read_parquet_table, write_parquet_table
 from malca.utils import log_rejections
 from malca.utils import read_lc_dat2
 
@@ -518,7 +519,7 @@ def fetch_vsx_period_catalog(
     if show_tqdm:
         tqdm.write(f"[fetch_vsx_period] Loading VSX crossmatch from {path}")
 
-    xmatch = pd.read_csv(path, low_memory=False)
+    xmatch = read_parquet_table(path)
     rename_map: dict[str, str] = {}
     if "sep_arcsec" in xmatch.columns and "vsx_sep_arcsec" not in xmatch.columns:
         rename_map["sep_arcsec"] = "vsx_sep_arcsec"
@@ -2918,10 +2919,10 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Example usage:
-  malca filter --input results.csv --output results_filtered.csv
-  malca filter --input results.csv --output results_filtered.csv --min-bayes-factor 20
-  malca filter --input results.csv --output results_filtered.csv --apply-periodicity-validation
-  malca filter --input results.csv --output results_filtered.csv --skip-gaia-ruwe-validation --skip-periodic-catalog-validation
+  malca filter --input results.parquet --output results_filtered.parquet
+  malca filter --input results.parquet --output results_filtered.parquet --min-bayes-factor 20
+  malca filter --input results.parquet --output results_filtered.parquet --apply-periodicity-validation
+  malca filter --input results.parquet --output results_filtered.parquet --skip-gaia-ruwe-validation --skip-periodic-catalog-validation
 """
     )
     g_io = parser.add_argument_group("Input / output")
@@ -2937,8 +2938,8 @@ Example usage:
 
     g_io.add_argument("--detect-run", type=Path, default=None,
                         help="Detect run directory (e.g., output/runs/20250121_143052). If specified, reads from <detect-run>/results/ and writes filtered results there.")
-    g_io.add_argument("--input", type=Path, default=None, help="Input CSV/Parquet from events.py (overrides --detect-run)")
-    g_io.add_argument("--output", type=Path, default=None, help="Output CSV/Parquet path (overrides default location)")
+    g_io.add_argument("--input", type=Path, default=None, help="Input Parquet from events.py (overrides --detect-run)")
+    g_io.add_argument("--output", type=Path, default=None, help="Output Parquet path (overrides default location)")
     g_io.add_argument("--index-file", type=Path, default=ASASSN_INDEX_PATH,
                         help="ASAS-SN index file to join ra_deg/dec_deg coordinates")
 
@@ -3033,7 +3034,7 @@ Example usage:
     g_periodic_catalog.add_argument("--periodic-catalog-consensus-rel-tol", type=float, default=POST_FILTER_REL_TOL,
                         help="Relative tolerance for period-consensus agreement (default: 0.10)")
     g_periodic_catalog.add_argument("--periodic-catalog-vsx-crossmatch", type=Path, default=VSX_CROSSMATCH_PATH,
-                        help="ASAS-SN x VSX crossmatch CSV used for VSX period lookup")
+                        help="ASAS-SN x VSX crossmatch Parquet used for VSX period lookup")
     g_periodic_catalog.add_argument("--periodic-catalog-no-gaia-eb", action="store_true",
                         help="Disable Gaia EB period evidence in periodic-catalog validation")
     g_periodic_catalog.add_argument("--periodic-catalog-no-asassn-var", action="store_true",
@@ -3061,7 +3062,7 @@ Example usage:
         detect_run = args.detect_run.expanduser()
         results_dir = detect_run / "results"
         # Look for events results file in the detect run directory
-        candidates = list(results_dir.glob("*events_results.csv")) + list(results_dir.glob("*events_results.parquet"))
+        candidates = list(results_dir.glob("*events_results.parquet"))
         if not candidates:
             raise FileNotFoundError(f"No events results file found in {results_dir}")
         if len(candidates) > 1:
@@ -3071,10 +3072,7 @@ Example usage:
         raise ValueError("Must specify either --input or --detect-run")
 
     # Load input
-    if input_path.suffix.lower() in (".parquet", ".pq"):
-        df = pd.read_parquet(input_path)
-    else:
-        df = pd.read_csv(input_path)
+    df = read_parquet_table(input_path)
 
     print(f"Loaded {len(df)} rows from {input_path}")
 
@@ -3083,10 +3081,7 @@ Example usage:
     if not index_path.exists():
         raise FileNotFoundError(f"Index file not found: {index_path}")
 
-    if index_path.suffix.lower() in (".parquet", ".pq"):
-        index_df = pd.read_parquet(index_path)
-    else:
-        index_df = pd.read_csv(index_path)
+    index_df = read_parquet_table(index_path)
 
     # Determine join column (asas_sn_id or path stem)
     if "asas_sn_id" in df.columns and "asas_sn_id" in index_df.columns:
@@ -3320,12 +3315,7 @@ Example usage:
                 print(f"Warning: could not write filter log: {e}")
 
     # Save output
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    if output_path.suffix.lower() in (".parquet", ".pq"):
-        df_filtered.to_parquet(output_path, index=False, compression=PARQUET_OUTPUT_COMPRESSION)
-    else:
-        df_filtered.to_csv(output_path, index=False)
+    write_parquet_table(df_filtered, output_path)
 
     n_failed = int(df_filtered["failed_any"].sum()) if "failed_any" in df_filtered.columns else 0
     n_passed = len(df_filtered) - n_failed

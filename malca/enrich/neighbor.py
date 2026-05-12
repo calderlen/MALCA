@@ -11,6 +11,7 @@ from astroquery.xmatch import XMatch
 from tqdm.auto import tqdm
 
 from malca.config import NEIGHBOR_RADIUS_ARCSEC, NEIGHBOR_CHUNK_SIZE
+from malca.table_io import read_parquet_table
 
 
 DEFAULT_NEIGHBOR_CATALOGS: dict[str, str] = {
@@ -225,17 +226,14 @@ def run_neighbor_enrichment(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Bulk neighbor enrichment for candidate tables")
-    parser.add_argument("--input", type=Path, required=True, help="Input CSV/Parquet with candidate coordinates")
+    parser.add_argument("--input", type=Path, required=True, help="Input Parquet with candidate coordinates")
     parser.add_argument("--output-dir", dest="out_dir", type=Path, required=True, help="Output directory")
     parser.add_argument("--radius-arcsec", type=float, default=NEIGHBOR_RADIUS_ARCSEC)
     parser.add_argument("--chunk-size", type=int, default=NEIGHBOR_CHUNK_SIZE)
     parser.add_argument("--cache", type=Path, default=None)
     args = parser.parse_args()
 
-    if args.input.suffix.lower() in {".parquet", ".pq"}:
-        df = pd.read_parquet(args.input)
-    else:
-        df = pd.read_csv(args.input)
+    df = read_parquet_table(args.input)
     run_neighbor_enrichment(
         df,
         out_dir=args.out_dir,

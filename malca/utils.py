@@ -31,7 +31,7 @@ from malca.config import (
 from malca.config import GAIA_AIP_TAP_URL
 from malca.config import LCV2_MASKED_ROOT, LCV2_ROOT
 from malca.config import MAG_BINS
-from malca.config import SKYPATROL_JD_OFFSET
+from malca.config import PARQUET_OUTPUT_COMPRESSION, SKYPATROL_JD_OFFSET
 
 
 
@@ -1177,15 +1177,15 @@ def log_rejections(
     df_before: pd.DataFrame,
     df_after: pd.DataFrame,
     filter_name: str,
-    log_csv: "str | Path | None",
+    log_path: "str | Path | None",
 ) -> None:
-    """Log rejected candidates to a CSV file.
+    """Log rejected candidates to a Parquet file.
 
     Searches for an ID column in order: "ASAS-SN ID", "path", "asas_sn_id",
     "id", "source_id", then falls back to the first column.  Appends the full
     rows of rejected candidates plus a ``rejection_reason`` column.
     """
-    if log_csv is None:
+    if log_path is None:
         return
 
     id_col = None
@@ -1206,10 +1206,14 @@ def log_rejections(
     rejected = df_before[df_before[id_col].astype(str).isin(rejected_ids)].copy()
     rejected["rejection_reason"] = filter_name
 
-    log_path = Path(log_csv)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    header = not log_path.exists() or log_path.stat().st_size == 0
-    rejected.to_csv(log_path, mode="a", header=header, index=False)
+    path = Path(log_path)
+    if path.suffix.lower() != ".parquet":
+        raise ValueError(f"Rejection logs must be Parquet files: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() and path.stat().st_size > 0:
+        existing = pd.read_parquet(path)
+        rejected = pd.concat([existing, rejected], ignore_index=True, sort=False)
+    rejected.to_parquet(path, index=False, compression=PARQUET_OUTPUT_COMPRESSION)
 
 
 # =============================================================================

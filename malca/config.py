@@ -24,7 +24,7 @@ LIGHT_CURVE_FILE_EXTENSION = "dat3"
 # Paths, API Endpoints, and Cache Directories
 # =============================================================================
 
-VSX_CROSSMATCH_PATH = Path("input/vsx/asassn_x_vsx_matches_20250919_2252.csv")
+VSX_CROSSMATCH_PATH = Path("input/vsx/asassn_x_vsx_matches_20250919_2252.parquet")
 VSX_RAW_CATALOG_PATH = Path("input/vsx/vsxcat.090525.csv")
 ASASSN_INDEX_PATH = Path("input/asassn_index_masked_concat_cleaned_20250919_154524_brotli.parquet")
 STARHORSE_DEFAULT_PATH = "input/starhorse/starhorse2021.parquet"

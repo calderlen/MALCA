@@ -14,10 +14,10 @@ def load_many(paths: Sequence[str | Path]) -> pd.DataFrame:
         if not p.exists():
             continue
         if p.is_dir():
-            for f in sorted(p.glob("*.csv")):
-                frames.append(pd.read_csv(f))
+            for f in sorted(p.glob("*.parquet")):
+                frames.append(pd.read_parquet(f))
         else:
-            frames.append(pd.read_csv(p))
+            frames.append(pd.read_parquet(p))
     if not frames:
         return pd.DataFrame()
     return pd.concat(frames, ignore_index=True)
@@ -79,8 +79,8 @@ def retention(pre: pd.DataFrame, post: pd.DataFrame, id_col: str = "asas_sn_id")
 
 def main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="False-positive reduction summary (tag vs post filter).")
-    parser.add_argument("--pre", nargs="+", required=True, help="Tag-stage CSV(s) or directory.")
-    parser.add_argument("--post", nargs="+", required=True, help="Post-filter CSV(s) or directory.")
+    parser.add_argument("--pre", nargs="+", required=True, help="Tag-stage Parquet(s) or directory.")
+    parser.add_argument("--post", nargs="+", required=True, help="Post-filter Parquet(s) or directory.")
     parser.add_argument("--id-col", default="asas_sn_id", help="ID column for retention match.")
     args = parser.parse_args(argv)
 

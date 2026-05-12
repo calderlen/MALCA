@@ -4,7 +4,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 import argparse
-import csv
 import io
 import re
 import sys
@@ -14,7 +13,6 @@ from tqdm import tqdm
 import matplotlib.pyplot as pl
 import numpy as np
 import pandas as pd
-import pyarrow.parquet as pq
 
 from malca.baseline import (
     global_median_baseline,
@@ -61,6 +59,7 @@ from malca.score import compute_event_score
 from concurrent.futures import ProcessPoolExecutor
 from malca.stats import median_dt, compute_stats, _enrich_row_worker
 from malca.tag import apply_tags
+from malca.table_io import read_parquet_table, write_parquet_table
 from malca.triggering import normalize_trigger_block
 from malca.utils import read_lc_dat2
 
@@ -193,53 +192,17 @@ tzanidakis_candidates: list[dict[str, object]] = _parse_tzanidakis_candidates()
 
 def load_manifest_df(manifest_path: Path | str) -> pd.DataFrame:
     path = Path(manifest_path).expanduser()
-    suffix = path.suffix.lower()
-    if suffix in {".parquet", ".pq"}:
-        df = pd.read_parquet(path)
-    else:
-        df = pd.read_csv(path)
+    df = read_parquet_table(path)
     if "source_id" not in df.columns:
         raise ValueError("Manifest must include a 'source_id' column.")
     df["source_id"] = df["source_id"].astype(str)
     return df
 
 
-def _candidate_usecols_from_header(path: Path, sep: str) -> list[str]:
-    try:
-        with path.open("r", newline="") as handle:
-            reader = csv.reader(handle, delimiter=sep)
-            header = next(reader, [])
-    except Exception:
-        return []
-
-    return [col for col in header if col in CANDIDATE_USECOLS]
-
-
 def load_candidates_df(cand_path: Path) -> pd.DataFrame:
-    suffix = cand_path.suffix.lower()
-    if suffix in {".csv", ".tsv"}:
-        sep = "\t" if suffix == ".tsv" else ","
-        usecols = _candidate_usecols_from_header(cand_path, sep)
-        if usecols:
-            return pd.read_csv(cand_path, usecols=usecols)
-        return pd.read_csv(cand_path)
-
-    if suffix in {".parquet", ".pq"}:
-        usecols: list[str] | None = None
-        try:
-            schema_cols = pq.ParquetFile(cand_path).schema.names
-            usecols = [col for col in schema_cols if col in CANDIDATE_USECOLS]
-        except Exception:
-            usecols = None
-
-        if usecols:
-            return pd.read_parquet(cand_path, columns=usecols)
-        try:
-            return pd.read_parquet(cand_path, columns=list(CANDIDATE_USECOLS))
-        except Exception:
-            return pd.read_parquet(cand_path)
-
-    raise SystemExit(f"Unsupported candidates file format: {cand_path}")
+    df = read_parquet_table(cand_path)
+    usecols = [col for col in df.columns if col in CANDIDATE_USECOLS]
+    return df[usecols].copy() if usecols else df
 
 
 def dataframe_from_candidates(data: Sequence[Mapping[str, object]] | None = None) -> pd.DataFrame:
@@ -751,7 +714,7 @@ def build_reproduction_report(
     candidates: Sequence[Mapping[str, object]] | None = None,
     *,
     out_dir: Path | str = "./peak_results_repro",
-    out_format: str = "csv",
+    out_format: str = "parquet",
     plot_format: str = "png",
     n_workers: int | None = None,
     chunk_size: int = REPRODUCE_CHUNK_SIZE,
@@ -1524,10 +1487,8 @@ def build_reproduction_report(
             try:
                 # Load only needed columns from index
                 index_cols = ["asas_sn_id", "gaia_id", "ra_deg", "dec_deg"]
-                if str(index_path).endswith('.parquet'):
-                    index_df = pd.read_parquet(index_path, columns=index_cols)
-                else:
-                    index_df = pd.read_csv(index_path, usecols=index_cols)
+                index_df = read_parquet_table(index_path)
+                index_df = index_df[[col for col in index_cols if col in index_df.columns]].copy()
 
                 # Ensure asas_sn_id is string for matching
                 index_df["asas_sn_id"] = index_df["asas_sn_id"].astype(str)
@@ -2015,14 +1976,14 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Run on events.py output CSV (uses 'path' column directly)
-  malca reproduce --candidates output/strong_candidates_12_12.5.csv
+  # Run on events.py output Parquet (uses 'path' column directly)
+  malca reproduce --candidates output/strong_candidates_12_12.5.parquet
 
   # With manifest data
-  malca reproduce --candidates candidates.csv --manifest manifest.csv
+  malca reproduce --candidates candidates.parquet --manifest manifest.parquet
 
   # With SkyPatrol CSV files
-  malca reproduce --candidates candidates.csv --skypatrol-dir input/skypatrol2
+  malca reproduce --candidates candidates.parquet --skypatrol-dir input/skypatrol2
 """,
     )
     g_input = parser.add_argument_group("Input")
@@ -2041,9 +2002,9 @@ Examples:
     g_output.add_argument(
         "--output-format",
         dest="out_format",
-        choices=("csv", "parquet"),
-        default="csv",
-        help="Output format (default: csv)",
+        choices=("parquet",),
+        default="parquet",
+        help="Structured output format (Parquet)",
     )
     g_output.add_argument(
         "--plot-format",
@@ -2053,9 +2014,9 @@ Examples:
     )
     g_output.add_argument(
         "--log-format",
-        choices=("text", "csv"),
-        default="csv",
-        help="Log output format: text (human-readable) or csv (structured data). Default: text",
+        choices=("text", "parquet"),
+        default="text",
+        help="Log output format: text (human-readable) or parquet (structured data).",
     )
     g_general.add_argument(
         "--workers",
@@ -2067,7 +2028,7 @@ Examples:
         "--chunk-size",
         type=int,
         default=REPRODUCE_CHUNK_SIZE,
-        help="Rows per chunk flush for CSV output",
+        help="Rows per worker chunk",
     )
     g_general.add_argument(
         "--metrics-dip-threshold",
@@ -2213,12 +2174,12 @@ Examples:
     g_input.add_argument(
         "--manifest",
         default=None,
-        help="Path to lc_manifest CSV/Parquet for targeted reproduction",
+        help="Path to lc_manifest Parquet for targeted reproduction",
     )
     g_input.add_argument(
         "--candidates",
         default=None,
-        help="Candidate spec (built-in list name or path to CSV/Parquet file from events.py).",
+        help="Candidate spec (built-in list name or path to Parquet file from events.py).",
     )
     g_input.add_argument(
         "--path-prefix",
@@ -2262,7 +2223,7 @@ def main(argv: Iterable[str] | None = None) -> None:
     log_filename = f"reproduction_{subdir_name}.log"
 
     # Determine log file extension based on format
-    log_ext = ".csv" if args.log_format == "csv" else ".log"
+    log_ext = ".parquet" if args.log_format == "parquet" else ".log"
     log_filename_base = log_filename.rsplit(".", 1)[0] if "." in log_filename else log_filename
     log_path = log_dir / f"{log_filename_base}{log_ext}"
 
@@ -2300,10 +2261,9 @@ def main(argv: Iterable[str] | None = None) -> None:
         sys.stderr = original_stderr
 
         # Write log file based on format
-        if args.log_format == "csv" and report is not None:
-            # CSV format: save the full report DataFrame
-            report.to_csv(log_path, index=False)
-            print(f"\nCSV log saved to: {log_path}")
+        if args.log_format == "parquet" and report is not None:
+            write_parquet_table(report, log_path)
+            print(f"\nParquet log saved to: {log_path}")
         else:
             # Text format: save captured stdout/stderr
             log_content = tee_stdout.getvalue()

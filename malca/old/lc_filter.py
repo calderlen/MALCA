@@ -99,7 +99,9 @@ def log_rejections(
     log_path = Path(log_csv)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     df_log = pd.DataFrame({"asas_sn_id": rejected, "filter": filter_name})
-    df_log.to_csv(log_path, mode="a", header=not log_path.exists(), index=False)
+    if log_path.exists():
+        df_log = pd.concat([pd.read_parquet(log_path), df_log], ignore_index=True)
+    df_log.to_parquet(log_path, index=False)
 
 
 def candidates_with_peaks_naive(
@@ -116,7 +118,7 @@ def candidates_with_peaks_naive(
     """
     file = Path(csv_path)
 
-    df = pd.read_csv(file).copy()
+    df = pd.read_parquet(file).copy()
     df["g_n_peaks"] = pd.to_numeric(df["g_n_peaks"], errors="coerce").fillna(0)
     df["v_n_peaks"] = pd.to_numeric(df["v_n_peaks"], errors="coerce").fillna(0)
 
@@ -163,9 +165,9 @@ def candidates_with_peaks_naive(
         dest = (
             Path(out_csv_path)
             if out_csv_path is not None
-            else file.parent / f"{file.stem}_selected_dippers.csv"
+            else file.parent / f"{file.stem}_selected_dippers.parquet"
         )
-        out.to_csv(dest, index=index)
+        out.to_parquet(dest, index=index)
 
     return out
 
@@ -195,14 +197,14 @@ def candidates_with_peaks_biweight(
 
 def filter_bns(
     df: pd.DataFrame,
-    asassn_csv: str | Path = "results_crossmatch/asassn_index_masked_concat_cleaned_20250926_1557.csv",
+    asassn_csv: str | Path = "results_crossmatch/asassn_index_masked_concat_cleaned_20250926_1557.parquet",
     rejected_log_csv: str | Path | None = None,
 ):
     """
     
     """
     with tqdm(total=2, desc="filter_bns", leave=False) as pbar:
-        catalog = pd.read_csv(asassn_csv)
+        catalog = pd.read_parquet(asassn_csv)
         catalog["asas_sn_id"] = catalog["asas_sn_id"].astype(str)
         pbar.update(1)
 
@@ -226,14 +228,14 @@ def filter_bns(
 
 def vsx_class_extract(
     df: pd.DataFrame,
-    vsx_csv: str | Path = "results_crossmatch/vsx_cleaned_20250926_1557.csv",
+    vsx_csv: str | Path = "results_crossmatch/vsx_cleaned_20250926_1557.parquet",
     match_radius_arcsec: float = 3.0,
 ):
     """
     
     """
     with tqdm(total=3, desc="vsx_class_extract", leave=False) as pbar:
-        vsx = pd.read_csv(vsx_csv)
+        vsx = pd.read_parquet(vsx_csv)
         vsx = vsx.dropna(subset=["ra", "dec"]).reset_index(drop=True)
         pbar.update(1)
 
@@ -587,8 +589,8 @@ def filter_csv(
     out_csv_path: str | Path | None = None,
     band: str = "either",
     peak_mode: str = "naive",
-    asassn_csv: str | Path = "results_crossmatch/asassn_index_masked_concat_cleaned_20250926_1557.csv",
-    vsx_csv: str | Path = "results_crossmatch/vsx_cleaned_20250926_1557.csv",
+    asassn_csv: str | Path = "results_crossmatch/asassn_index_masked_concat_cleaned_20250926_1557.parquet",
+    vsx_csv: str | Path = "results_crossmatch/vsx_cleaned_20250926_1557.parquet",
     min_dip_fraction: float = 0.0,
     min_cameras: int = 2,
     max_power: float = 0.5,
@@ -713,14 +715,14 @@ def filter_csv(
 
     if out_csv_path is not None:
         Path(out_csv_path).parent.mkdir(parents=True, exist_ok=True)
-        df_filtered.to_csv(out_csv_path, index=False)
+        df_filtered.to_parquet(out_csv_path, index=False)
 
     return df_filtered
 
 
 
 BIN_RE = re.compile(
-    r"^peaks_(?P<low>\d+(?:_\d)?)_(?P<high>\d+(?:_\d)?)_(?P<ts>\d{8}_\d{6}[+-]\d{4})\.csv$"
+    r"^peaks_(?P<low>\d+(?:_\d)?)_(?P<high>\d+(?:_\d)?)_(?P<ts>\d{8}_\d{6}[+-]\d{4})\.parquet$"
 )
 
 
@@ -757,7 +759,7 @@ def gather_files(
     includes: list[str] | None,
     excludes: list[str] | None,
     keep_latest: bool,
-    pattern: str = "peaks_*.csv",
+    pattern: str = "peaks_*.parquet",
 ) -> list[Path]:
     """
     
@@ -803,7 +805,7 @@ def run_one_file(
         out_csv_path = out_path_override
     else:
         target_dir = out_dir if out_dir is not None else file_path.parent
-        out_csv_path = target_dir / f"{file_path.stem}_filtered_{ts}.csv"
+        out_csv_path = target_dir / f"{file_path.stem}_filtered_{ts}.parquet"
 
     df = filter_csv(
         csv_path=file_path,
@@ -840,21 +842,21 @@ def build_cli_parser() -> argparse.ArgumentParser:
     """
     
     """
-    parser = argparse.ArgumentParser(description="Run filter_csv on one peaks CSV or a directory of peaks_*.csv files.")
-    parser.add_argument("csv_path", type=Path, help="Input peaks CSV path OR a directory containing peaks_*.csv files.")
-    parser.add_argument("--files", nargs="+", default=None, help="Specific file globs within the directory (e.g., 'peaks_12_5_13_*.csv').")
+    parser = argparse.ArgumentParser(description="Run filter_csv on one peaks Parquet or a directory of peaks_*.parquet files.")
+    parser.add_argument("csv_path", type=Path, help="Input peaks Parquet path OR a directory containing peaks_*.parquet files.")
+    parser.add_argument("--files", nargs="+", default=None, help="Specific file globs within the directory (e.g., 'peaks_12_5_13_*.parquet').")
     parser.add_argument("--include", action="append", default=None, help="Additional basename globs to include; can be given multiple times.")
     parser.add_argument("--exclude", action="append", default=None, help="Basename globs to exclude; can be given multiple times.")
     parser.add_argument("--latest-per-bin", action="store_true", help="If multiple files exist per mag bin, keep only the latest timestamp per bin.")
     parser.add_argument("--dry-run", action="store_true", help="List the files that would be processed and exit.")
-    parser.add_argument("--output", type=Path, default=None, help="Destination CSV path when processing a single file.")
-    parser.add_argument("--output-dir", type=Path, default=None, help="Directory to place output CSVs (per-file and combined).")
-    parser.add_argument("--no-combined", action="store_true", help="Do not write a combined CSV when processing a directory.")
-    parser.add_argument("--biweight", action="store_true", help="Use biweight peak CSVs (peaks_biweight_*) and biweight filtering.")
+    parser.add_argument("--output", type=Path, default=None, help="Destination Parquet path when processing a single file.")
+    parser.add_argument("--output-dir", type=Path, default=None, help="Directory to place output Parquets (per-file and combined).")
+    parser.add_argument("--no-combined", action="store_true", help="Do not write a combined Parquet when processing a directory.")
+    parser.add_argument("--biweight", action="store_true", help="Use biweight peak Parquets (peaks_biweight_*) and biweight filtering.")
     parser.add_argument("--band", default="either", choices=["g", "v", "both", "either"])
     parser.add_argument("--seed-workers", type=int, default=1, help="Worker processes for the initial candidates_with_peaks_naive stage.")
-    parser.add_argument("--asassn-csv", default="results_crossmatch/asassn_index_masked_concat_cleaned_20250926_1557.csv")
-    parser.add_argument("--vsx-csv", default="results_crossmatch/vsx_cleaned_20250926_1557.csv")
+    parser.add_argument("--asassn-csv", default="results_crossmatch/asassn_index_masked_concat_cleaned_20250926_1557.parquet")
+    parser.add_argument("--vsx-csv", default="results_crossmatch/vsx_cleaned_20250926_1557.parquet")
     parser.add_argument("--min-dip-fraction", type=float, default=0.66)
     parser.add_argument("--min-cameras", type=int, default=2)
     parser.add_argument("--max-power", type=float, default=0.5)
@@ -895,7 +897,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             includes=args.include,
             excludes=args.exclude,
             keep_latest=args.latest_per_bin,
-            pattern="peaks_biweight_*.csv" if args.biweight else "peaks_*.csv",
+            pattern="peaks_biweight_*.parquet" if args.biweight else "peaks_*.parquet",
         )
         if not files:
             parser.error(f"No matching files in {in_path}")
@@ -913,9 +915,9 @@ def main(argv: Iterable[str] | None = None) -> int:
         if not args.no_combined:
             combined = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
             combined_dir = output_dir if output_dir is not None else in_path
-            combined_csv = combined_dir / f"peaks_all_filtered_{ts}.csv"
+            combined_csv = combined_dir / f"peaks_all_filtered_{ts}.parquet"
             combined_dir.mkdir(parents=True, exist_ok=True)
-            combined.to_csv(combined_csv, index=False)
+            combined.to_parquet(combined_csv, index=False)
             print(f"[COMBINED] {combined_csv} ({len(combined)} rows)")
         return 0
 

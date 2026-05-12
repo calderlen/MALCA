@@ -14,13 +14,13 @@ import pandas as pd
 
 
 
-DEFAULT_ASASSN_PATH = Path(__file__).parent.parent.parent / "input" / "vsx" / "asassn_catalog.csv"
-DEFAULT_VSX_PATH = Path(__file__).parent.parent.parent / "input" / "vsx" / "vsx_cleaned.csv"
+DEFAULT_ASASSN_PATH = Path(__file__).parent.parent.parent / "input" / "vsx" / "asassn_catalog.parquet"
+DEFAULT_VSX_PATH = Path(__file__).parent.parent.parent / "input" / "vsx" / "vsx_cleaned.parquet"
 DEFAULT_OUTPUT_DIR = Path(__file__).parent.parent.parent / "input" / "vsx"
 
 
 def load_asassn_catalog(path: Path) -> pd.DataFrame:
-    df = pd.read_csv(path, low_memory=False)
+    df = pd.read_parquet(path)
     for col in ["ra_deg", "dec_deg", "pm_ra", "pm_dec"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     pm_ok = np.isfinite(df["pm_ra"].to_numpy()) & np.isfinite(df["pm_dec"].to_numpy())
@@ -34,7 +34,7 @@ def load_asassn_catalog(path: Path) -> pd.DataFrame:
 
 
 def load_vsx_catalog(path: Path) -> pd.DataFrame:
-    df = pd.read_csv(path, low_memory=False)
+    df = pd.read_parquet(path)
     for col in ["ra", "dec"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
@@ -61,8 +61,8 @@ def vsx_coords(df: pd.DataFrame) -> SkyCoord:
 
 
 def crossmatch_asassn_vsx(
-    asassn_csv: Path = DEFAULT_ASASSN_PATH,
-    vsx_csv: Path = DEFAULT_VSX_PATH,
+    asassn_table: Path = DEFAULT_ASASSN_PATH,
+    vsx_table: Path = DEFAULT_VSX_PATH,
     match_radius: u.Quantity = 3 * u.arcsec,
 ) -> pd.DataFrame:
     
@@ -70,8 +70,8 @@ def crossmatch_asassn_vsx(
     Return a df of ASAS-SN and VSX matches within match_radius
     """
 
-    df_asassn = load_asassn_catalog(Path(asassn_csv))
-    df_vsx = load_vsx_catalog(Path(vsx_csv))
+    df_asassn = load_asassn_catalog(Path(asassn_table))
+    df_vsx = load_vsx_catalog(Path(vsx_table))
 
     coords_asassn = propagate_asassn_coords(df_asassn)
     coords_vsx = vsx_coords(df_vsx)
@@ -109,23 +109,23 @@ def write_crossmatch(
     stamp: str | None = None,
 ) -> Path:
     """
-    Write matches to a timestamped CSV and return the path
+    Write matches to a timestamped Parquet and return the path
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     stamp = stamp or datetime.now().strftime("%Y%m%d_%H%M")
-    path = output_dir / f"asassn_x_vsx_matches_{stamp}.csv"
-    matches.to_csv(path, index=False)
+    path = output_dir / f"asassn_x_vsx_matches_{stamp}.parquet"
+    matches.to_parquet(path, index=False)
     return path
 
 
 def main(
-    asassn_csv: Path = DEFAULT_ASASSN_PATH,
-    vsx_csv: Path = DEFAULT_VSX_PATH,
+    asassn_table: Path = DEFAULT_ASASSN_PATH,
+    vsx_table: Path = DEFAULT_VSX_PATH,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
     match_radius: u.Quantity = 3 * u.arcsec,
 ) -> Path:
-    matches = crossmatch_asassn_vsx(asassn_csv, vsx_csv, match_radius=match_radius)
+    matches = crossmatch_asassn_vsx(asassn_table, vsx_table, match_radius=match_radius)
     return write_crossmatch(matches, output_dir=output_dir)
 
 
@@ -136,10 +136,10 @@ def cli():
     parser = argparse.ArgumentParser(
         description="Crossmatch ASAS-SN catalog with VSX catalog."
     )
-    parser.add_argument("--asassn-csv", type=Path, default=DEFAULT_ASASSN_PATH,
-                        help=f"Cleaned ASAS-SN index CSV (default: {DEFAULT_ASASSN_PATH})")
-    parser.add_argument("--vsx-csv", type=Path, default=DEFAULT_VSX_PATH,
-                        help=f"Cleaned VSX catalog CSV (default: {DEFAULT_VSX_PATH})")
+    parser.add_argument("--asassn-table", type=Path, default=DEFAULT_ASASSN_PATH,
+                        help=f"Cleaned ASAS-SN index Parquet (default: {DEFAULT_ASASSN_PATH})")
+    parser.add_argument("--vsx-table", type=Path, default=DEFAULT_VSX_PATH,
+                        help=f"Cleaned VSX catalog Parquet (default: {DEFAULT_VSX_PATH})")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR,
                         help=f"Output directory (default: {DEFAULT_OUTPUT_DIR})")
     parser.add_argument("--radius", type=float, default=3.0,
@@ -148,7 +148,7 @@ def cli():
                         help="Timestamp suffix for output filename (default: current time)")
     args = parser.parse_args()
 
-    matches = crossmatch_asassn_vsx(args.asassn_csv, args.vsx_csv,
+    matches = crossmatch_asassn_vsx(args.asassn_table, args.vsx_table,
                                      match_radius=args.radius * u.arcsec)
     path = write_crossmatch(matches, output_dir=args.output_dir, stamp=args.stamp)
     print(f"Wrote crossmatch catalog to {path}")

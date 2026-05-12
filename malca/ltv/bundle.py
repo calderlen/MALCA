@@ -9,12 +9,11 @@ import pandas as pd
 
 from malca.config import LTV_MIN_SLOPE, LTV_MIN_DIFF
 from malca.ltv.filter import filter_slope_threshold, filter_max_diff_threshold
+from malca.table_io import read_parquet_table
 
 
 def _load_ltv_table(path: Path) -> pd.DataFrame:
-    if path.suffix.lower() in {".parquet", ".pq"}:
-        return pd.read_parquet(path)
-    return pd.read_csv(path)
+    return read_parquet_table(path)
 
 
 def _discover_input_files(input_path: Path, pattern: str | None = None) -> list[Path]:
@@ -135,7 +134,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--input", required=True,
-        help="Path to an LTV output parquet/CSV or a directory containing multiple such files",
+        help="Path to an LTV output Parquet or a directory containing multiple such files",
     )
     parser.add_argument(
         "--pattern",

@@ -14,19 +14,20 @@ from malca.config import (
     VSX_RAW_CATALOG_PATH,
     DEFAULT_OUTPUT_DIR,
 )
+from malca.table_io import read_parquet_table, write_parquet_table
 
 
 DEFAULT_VSX_CROSSMATCH = VSX_CROSSMATCH_PATH
 DEFAULT_EXISTING = DEFAULT_OUTPUT_DIR / "bj_objects.csv"
 DEFAULT_ASASSN_CATALOG = ASASSN_INDEX_PATH
-DEFAULT_VSX_CLEAN = DEFAULT_OUTPUT_DIR / "vsx_cleaned_20250920_1351.csv"
+DEFAULT_VSX_CLEAN = DEFAULT_OUTPUT_DIR / "vsx_cleaned_20250920_1351.parquet"
 DEFAULT_VSX_RAW = VSX_RAW_CATALOG_PATH
 
-DEFAULT_OUT_MATCH_VSX = DEFAULT_OUTPUT_DIR / "bj_objects_matched.csv"
-DEFAULT_OUT_UNMATCH_VSX = DEFAULT_OUTPUT_DIR / "bj_objects_unmatched.csv"
-DEFAULT_OUT_MATCH_ASASSN = DEFAULT_OUTPUT_DIR / "bj_objects_matched_asassn.csv"
-DEFAULT_OUT_MATCH_VSXCLEAN = DEFAULT_OUTPUT_DIR / "bj_objects_x_vsxclean.csv"
-DEFAULT_OUT_MATCH_VSXRAW = DEFAULT_OUTPUT_DIR / "bj_objects_x_vsxraw.csv"
+DEFAULT_OUT_MATCH_VSX = DEFAULT_OUTPUT_DIR / "bj_objects_matched.parquet"
+DEFAULT_OUT_UNMATCH_VSX = DEFAULT_OUTPUT_DIR / "bj_objects_unmatched.parquet"
+DEFAULT_OUT_MATCH_ASASSN = DEFAULT_OUTPUT_DIR / "bj_objects_matched_asassn.parquet"
+DEFAULT_OUT_MATCH_VSXCLEAN = DEFAULT_OUTPUT_DIR / "bj_objects_x_vsxclean.parquet"
+DEFAULT_OUT_MATCH_VSXRAW = DEFAULT_OUTPUT_DIR / "bj_objects_x_vsxraw.parquet"
 
 DEFAULT_TOL_ARCSEC = 2.0
 
@@ -112,9 +113,9 @@ def run_matches(
     verbose: bool = True,
 ) -> dict[str, Path]:
     existing = pd.read_csv(existing_csv)
-    vsx_cm = pd.read_csv(vsx_crossmatch_csv)
-    asassn_df = pd.read_csv(asassn_csv)
-    vsx_clean = pd.read_csv(vsx_clean_csv)
+    vsx_cm = read_parquet_table(vsx_crossmatch_csv)
+    asassn_df = read_parquet_table(asassn_csv)
+    vsx_clean = read_parquet_table(vsx_clean_csv)
     vsx_raw = pd.read_csv(vsx_raw_csv)
 
     validate_columns(existing, {"ra_deg", "dec_deg"}, "existing")
@@ -253,11 +254,11 @@ def run_matches(
     )
 
     outputs["match_vsx"].parent.mkdir(parents=True, exist_ok=True)
-    matched_vsx.to_csv(outputs["match_vsx"], index=False)
-    unmatched_vsx.to_csv(outputs["unmatch_vsx"], index=False)
-    matched_asassn.to_csv(outputs["match_asassn"], index=False)
-    matched_vsxclean.to_csv(outputs["match_vsxclean"], index=False)
-    matched_vsxraw.to_csv(outputs["match_vsxraw"], index=False)
+    write_parquet_table(matched_vsx, outputs["match_vsx"])
+    write_parquet_table(unmatched_vsx, outputs["unmatch_vsx"])
+    write_parquet_table(matched_asassn, outputs["match_asassn"])
+    write_parquet_table(matched_vsxclean, outputs["match_vsxclean"])
+    write_parquet_table(matched_vsxraw, outputs["match_vsxraw"])
 
     if verbose:
         total = len(existing)

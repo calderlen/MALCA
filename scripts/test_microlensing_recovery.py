@@ -8,7 +8,7 @@ Usage:
     python scripts/test_microlensing_recovery.py [--max-events N] [--workers N] [--output DIR]
 
 Output:
-    - recovery_results.csv: Per-event results with fit parameters
+    - recovery_results.parquet: Per-event results with fit parameters
     - recovery_summary.txt: Aggregate statistics
 """
 from __future__ import annotations
@@ -462,8 +462,8 @@ def main():
     )
     
     # Save results
-    results_path = output_dir / 'recovery_results.csv'
-    results_df.to_csv(results_path, index=False)
+    results_path = output_dir / 'recovery_results.parquet'
+    results_df.to_parquet(results_path, index=False)
     print(f"\nResults saved to {results_path}")
     
     # Generate and save summary

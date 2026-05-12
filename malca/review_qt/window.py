@@ -67,6 +67,7 @@ from malca.review.keyboard import (
 )
 from malca.review.interactive_plot import build_interactive_lightcurve_figure
 from malca.review import diagnostic_plots
+from malca.table_io import read_parquet_table
 
 
 # Default DB path when --review-db not set
@@ -1028,15 +1029,12 @@ class ReviewMainWindow(QMainWindow):
     # ---------- Phase 4: Import / Export / Merge / Pipeline ----------
     def _on_import_candidates(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Import candidates", "", "CSV (*.csv);;Parquet (*.parquet *.pq);;All (*)"
+            self, "Import candidates", "", "Parquet (*.parquet);;All (*)"
         )
         if not path:
             return
         try:
-            if path.lower().endswith(".parquet") or path.lower().endswith(".pq"):
-                df = pd.read_parquet(path)
-            else:
-                df = pd.read_csv(path)
+            df = read_parquet_table(path)
         except Exception as e:
             QMessageBox.warning(self, "Import failed", f"Could not read file: {e}")
             return
@@ -1068,7 +1066,7 @@ class ReviewMainWindow(QMainWindow):
 
     def _on_export_reviews(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
-            self, "Export reviews", "", "CSV (*.csv);;Parquet (*.parquet);;All (*)"
+            self, "Export reviews", "", "Parquet (*.parquet);;All (*)"
         )
         if not path:
             return
@@ -1076,7 +1074,10 @@ class ReviewMainWindow(QMainWindow):
             QMessageBox.warning(self, "Export failed", "Database not connected.")
             return
         try:
-            export_reviews(self._conn, Path(path), only_reviewed=True)
+            out_path = Path(path)
+            if not out_path.suffix:
+                out_path = out_path.with_suffix(".parquet")
+            export_reviews(self._conn, out_path, only_reviewed=True)
         except Exception as e:
             QMessageBox.warning(self, "Export failed", str(e))
             return
@@ -1084,15 +1085,12 @@ class ReviewMainWindow(QMainWindow):
 
     def _on_merge_vetting(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Merge vetting results", "", "CSV (*.csv);;Parquet (*.parquet *.pq);;All (*)"
+            self, "Merge vetting results", "", "Parquet (*.parquet);;All (*)"
         )
         if not path:
             return
         try:
-            if path.lower().endswith(".parquet") or path.lower().endswith(".pq"):
-                df = pd.read_parquet(path)
-            else:
-                df = pd.read_csv(path)
+            df = read_parquet_table(path)
         except Exception as e:
             QMessageBox.warning(self, "Merge failed", f"Could not read file: {e}")
             return

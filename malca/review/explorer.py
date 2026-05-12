@@ -3898,9 +3898,9 @@ def build_explorer_app(
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Unified Dash explorer for MALCA EDA and click-through light-curve viewing.")
-    parser.add_argument("--source", action="append", default=None, help="Review DB, parquet, or CSV source. May be passed multiple times.")
+    parser.add_argument("--source", action="append", default=None, help="Review DB or Parquet source. May be passed multiple times.")
     parser.add_argument("--source-glob", default=None, help="Glob pattern for multiple sources, e.g. 'output/runs/*/review/review.db'")
-    parser.add_argument("--source-kind", default=None, choices=["db", "parquet", "csv"], help="Optional explicit source kind")
+    parser.add_argument("--source-kind", default=None, choices=["db", "parquet"], help="Optional explicit source kind")
     parser.add_argument("--plot-dir", default=None, help="Optional plot-dir override for all sources")
     parser.add_argument("--candidate", default=None, help="Candidate ID / ASAS-SN ID / Gaia ID / LC stem to select on startup")
     parser.add_argument("--candidate-key", default=None, help="Explicit candidate_key to select on startup")

@@ -6,6 +6,8 @@ from typing import Iterable, Sequence
 
 import pandas as pd
 
+from malca.table_io import read_parquet_table
+
 
 def load_many(paths: Sequence[str | Path]) -> pd.DataFrame:
     frames: list[pd.DataFrame] = []
@@ -14,10 +16,10 @@ def load_many(paths: Sequence[str | Path]) -> pd.DataFrame:
         if not p.exists():
             continue
         if p.is_dir():
-            for f in sorted(p.glob("*.csv")):
-                frames.append(pd.read_csv(f))
+            for f in sorted(p.glob("*.parquet")):
+                frames.append(read_parquet_table(f))
         else:
-            frames.append(pd.read_csv(p))
+            frames.append(read_parquet_table(p))
     if not frames:
         return pd.DataFrame()
     return pd.concat(frames, ignore_index=True)

@@ -590,7 +590,7 @@ def event_finder(
     mag_bins=MAG_BINS,
     id_column="asas_sn_id",
     out_dir=None,
-    out_format="csv",
+    out_format="parquet",
     n_workers=None,
     chunk_size=250000,
     max_inflight=None,
@@ -681,12 +681,10 @@ def event_finder(
         if len(rows_buffer) < chunk_size and not force:
             return
         try:
-            if out_format == "parquet":
-                pd.DataFrame(rows_buffer).to_parquet(out_path, index=False, compression="zstd")
-            else:
-                mode = "a" if os.path.exists(out_path) else "w"
-                header = not os.path.exists(out_path)
-                pd.DataFrame(rows_buffer).to_csv(out_path, index=False, mode=mode, header=header)
+            chunk = pd.DataFrame(rows_buffer)
+            if os.path.exists(out_path):
+                chunk = pd.concat([pd.read_parquet(out_path), chunk], ignore_index=True)
+            chunk.to_parquet(out_path, index=False, compression="zstd")
             rows_buffer.clear()
         except Exception as e:
             print(f"ERROR: Failed to flush rows to {out_path}: {e}", flush=True)
@@ -807,14 +805,14 @@ if __name__ == "__main__":
     parser.add_argument("--mode", choices=("dips", "peaks"), default="dips", help="Select dips (biweight delta + Gaussian fits) or peaks (microlensing Paczynski fits).")
     parser.add_argument("--mag-bin", dest="mag_bins", action="append", choices=MAG_BINS, help="Specify bins to run; omit to process all.",)
     parser.add_argument("--out-dir", default=None)
-    parser.add_argument("--format", choices=("parquet", "csv"), default="csv")
+    parser.add_argument("--format", choices=("parquet",), default="parquet")
     parser.add_argument(
         "--workers",
         type=int,
         default=10,
         help="Parallel processes.",
     )
-    parser.add_argument("--chunk-size", type=int, default=250000, help="Rows per CSV flush",)
+    parser.add_argument("--chunk-size", type=int, default=250000, help="Rows per Parquet flush",)
     args = parser.parse_args()
     bins = args.mag_bins or MAG_BINS
 

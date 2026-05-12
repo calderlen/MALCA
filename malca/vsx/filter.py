@@ -293,20 +293,20 @@ def write_clean_outputs(
     output_dir: Path | str = DEFAULT_OUTPUT_DIR,
     stamp: str | None = None,
 ) -> tuple[Path, Path]:
-    """Write cleaned ASAS-SN index and VSX CSVs, returning their paths."""
+    """Write cleaned ASAS-SN index and VSX Parquets, returning their paths."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if stamp:
-        asas_out = output_dir / f"asassn_index_masked_concat_cleaned_{stamp}.csv"
-        vsx_out = output_dir / f"vsx_cleaned_{stamp}.csv"
+        asas_out = output_dir / f"asassn_index_masked_concat_cleaned_{stamp}.parquet"
+        vsx_out = output_dir / f"vsx_cleaned_{stamp}.parquet"
     else:
         # Use simple default names matching tag.py expectations
-        asas_out = output_dir / "asassn_catalog.csv"
-        vsx_out = output_dir / "vsx_cleaned.csv"
+        asas_out = output_dir / "asassn_catalog.parquet"
+        vsx_out = output_dir / "vsx_cleaned.parquet"
 
-    df_asassn.to_csv(asas_out, index=False)
-    df_vsx.to_csv(vsx_out, index=False)
+    df_asassn.to_parquet(asas_out, index=False)
+    df_vsx.to_parquet(vsx_out, index=False)
     return asas_out, vsx_out
 
 
@@ -316,7 +316,7 @@ def main(
     output_dir: Path | str = DEFAULT_OUTPUT_DIR,
     stamp: str | None = None,
 ) -> tuple[Path, Path]:
-    """Run VSX filtering and ASAS-SN index cleaning and write cleaned CSVs."""
+    """Run VSX filtering and ASAS-SN index cleaning and write cleaned Parquets."""
     df_vsx_raw = load_vsx_catalog(vsx_file)
     df_vsx_clean = filter_vsx(df_vsx_raw)
     df_asassn_clean = load_masked_indexes(masked_dir)

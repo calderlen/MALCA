@@ -6,7 +6,7 @@ candidates into a standalone LTV review DB (separate from STV candidates).
 
 Usage:
     # CLI
-    malca ltv-ingest --input ltv_build_output.csv --review-db ltv_candidates.db -v
+    malca ltv-ingest --input ltv_build_output.parquet --review-db ltv_candidates.db -v
 
     # Python API
     from malca.ltv.review import ingest_ltv_results
@@ -27,6 +27,7 @@ from malca.config import ASASSN_INDEX_PATH
 from malca.config import LTV_MAX_PM
 from malca.review.store import db_connect, import_candidates
 from malca.stats import compute_stats, _enrich_row_worker
+from malca.table_io import read_parquet_table, require_parquet_path
 
 
 
@@ -260,7 +261,7 @@ def _resolve_ltv_index_path(index_override: Path | None = None) -> Path | None:
         candidates.append(Path(index_override).expanduser())
     candidates.append(default)
     # also search input/ relative to cwd
-    for pattern in ("asassn_index*.parquet", "asassn_index*.pq"):
+    for pattern in ("asassn_index*.parquet",):
         candidates.extend(sorted(Path("input").glob(pattern)))
     for p in candidates:
         if p.exists() and p.is_file():
@@ -282,10 +283,7 @@ def _add_gaia_ids_from_index_ltv(df: pd.DataFrame, index_path: Path, verbose: bo
     try:
         if verbose:
             print(f"[ltv-ingest] Loading ASASSN index for gaia_id lookup: {index_path.name}")
-        if index_path.suffix in (".parquet", ".pq"):
-            df_idx = pd.read_parquet(index_path, columns=["asas_sn_id", "gaia_id"])
-        else:
-            df_idx = pd.read_csv(index_path, usecols=["asas_sn_id", "gaia_id"], low_memory=False)
+        df_idx = pd.read_parquet(require_parquet_path(index_path), columns=["asas_sn_id", "gaia_id"])
         df_idx["asas_sn_id"] = pd.to_numeric(df_idx["asas_sn_id"], errors="coerce")
         df_idx = df_idx.dropna(subset=["asas_sn_id"])
         df_idx["asas_sn_id"] = df_idx["asas_sn_id"].astype("int64").astype(str)
@@ -419,7 +417,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--input", "-i",
         required=True,
         type=str,
-        help="Path to LTV build output file (CSV or Parquet) or directory containing such files",
+        help="Path to LTV build output Parquet or directory containing such files",
     )
     p.add_argument(
         "--pattern",
@@ -484,10 +482,7 @@ def main() -> None:
 
     # Single-file mode: preserve existing behaviour
     if input_path.is_file():
-        if input_path.suffix == ".parquet":
-            df = pd.read_parquet(input_path)
-        else:
-            df = pd.read_csv(input_path)
+        df = read_parquet_table(input_path)
 
         print(f"Loaded {len(df):,} rows from {input_path}")
 
@@ -522,10 +517,7 @@ def main() -> None:
             if args.verbose:
                 print(f"[ltv-ingest] Loading {fp} ...")
 
-            if fp.suffix == ".parquet":
-                df = pd.read_parquet(fp)
-            else:
-                df = pd.read_csv(fp)
+            df = read_parquet_table(fp)
 
             if args.verbose:
                 print(f"[ltv-ingest] Loaded {len(df):,} rows from {fp}")

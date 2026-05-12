@@ -46,11 +46,9 @@ def _sort_manifest(df: pd.DataFrame) -> pd.DataFrame:
 
 def _load_index_metadata(index_file: Path, id_column: str) -> pd.DataFrame:
     index_file = Path(index_file).expanduser()
-    suffix = index_file.suffix.lower()
-    if suffix in {".parquet", ".pq"}:
-        df = pd.read_parquet(index_file)
-    else:
-        df = pd.read_csv(index_file)
+    if index_file.suffix.lower() != ".parquet":
+        raise ValueError(f"Flat-directory metadata must be a Parquet file: {index_file}")
+    df = pd.read_parquet(index_file)
 
     if id_column not in df.columns:
         raise ValueError(f"Index file {index_file} is missing required column {id_column!r}")
@@ -306,7 +304,7 @@ def parse_args() -> argparse.Namespace:
         "--index-file",
         type=Path,
         default=None,
-        help="Optional CSV/Parquet metadata file for flat directories. Used to recover per-source mag_bin/index metadata.",
+        help="Optional Parquet metadata file for flat directories. Used to recover per-source mag_bin/index metadata.",
     )
     parser.add_argument(
         "--output",

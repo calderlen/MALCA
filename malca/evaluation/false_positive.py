@@ -20,6 +20,7 @@ from malca.config import (
     FP_TRIALS_PER_FAMILY,
     INJECTION_SEED,
 )
+from malca.table_io import read_parquet_table, write_parquet_table
 
 
 def _build_detection_kwargs(trigger_mode: str) -> dict:
@@ -149,8 +150,8 @@ def run_false_positive_benchmark(
 
     df = pd.DataFrame(rows)
     if df.empty:
-        df.to_csv(out_dir / "false_positive_trials.csv", index=False)
-        pd.DataFrame().to_csv(out_dir / "false_positive_summary.csv", index=False)
+        write_parquet_table(df, out_dir / "false_positive_trials.parquet")
+        write_parquet_table(pd.DataFrame(), out_dir / "false_positive_summary.parquet")
         return df
 
     summary = (
@@ -161,14 +162,14 @@ def run_false_positive_benchmark(
     )
     summary["false_positive_rate"] = summary["n_false_positive"] / summary["count"].replace(0, np.nan)
 
-    df.to_csv(out_dir / "false_positive_trials.csv", index=False)
-    summary.to_csv(out_dir / "false_positive_summary.csv", index=False)
+    write_parquet_table(df, out_dir / "false_positive_trials.parquet")
+    write_parquet_table(summary, out_dir / "false_positive_summary.parquet")
     return df
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="False-positive contaminant benchmark for MALCA")
-    parser.add_argument("--manifest", type=Path, required=True, help="Manifest CSV/Parquet with asas_sn_id and path")
+    parser.add_argument("--manifest", type=Path, required=True, help="Manifest Parquet with asas_sn_id and path")
     parser.add_argument("--output-dir", dest="out_dir", type=Path, default=Path("output/false_positive"))
     parser.add_argument("--families", type=str, default="camera_offset,camera_cluster,semiregular,rcb_like")
     parser.add_argument("--n-trials-per-family", type=int, default=FP_TRIALS_PER_FAMILY)
@@ -176,10 +177,7 @@ def main() -> None:
     parser.add_argument("--trigger-mode", type=str, default="posterior_prob", choices=["logbf", "posterior_prob"])
     args = parser.parse_args()
 
-    if args.manifest.suffix.lower() in {".parquet", ".pq"}:
-        df_manifest = pd.read_parquet(args.manifest)
-    else:
-        df_manifest = pd.read_csv(args.manifest)
+    df_manifest = read_parquet_table(args.manifest)
 
     detection_kwargs = _build_detection_kwargs(args.trigger_mode)
 

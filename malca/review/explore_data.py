@@ -9,6 +9,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from malca.table_io import read_parquet_table
+
 
 BEST_FIELDS = [
     "vetting_likely_known",
@@ -75,10 +77,8 @@ def infer_source_kind(source_path: str | Path) -> str:
     suffix = path.suffix.lower()
     if suffix == ".db":
         return "db"
-    if suffix in {".parquet", ".pq"}:
+    if suffix == ".parquet":
         return "parquet"
-    if suffix == ".csv":
-        return "csv"
     raise ValueError(f"Could not infer source kind from {path}")
 
 
@@ -167,9 +167,7 @@ def load_candidate_source(source_path: str | Path, source_kind: str | None = Non
     if kind == "db":
         return load_review_db(path)
     if kind == "parquet":
-        return pd.read_parquet(path)
-    if kind == "csv":
-        return pd.read_csv(path)
+        return read_parquet_table(path)
     raise ValueError(f"Unsupported source kind: {kind}")
 
 

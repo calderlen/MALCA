@@ -23,7 +23,7 @@ for run_dir in "$RUNS_DIR"/*/; do
     fi
 
     # Check if there's an events results file
-    if ! ls "$run_dir/results/"*events_results*.csv "$run_dir/results/"*events_results*.parquet 2>/dev/null | head -1 > /dev/null; then
+    if ! ls "$run_dir/results/"*events_results*.parquet 2>/dev/null | head -1 > /dev/null; then
         echo "[$run_name] Skipping - no events results file"
         continue
     fi

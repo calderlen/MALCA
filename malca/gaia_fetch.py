@@ -8,7 +8,7 @@ Saves results as a local Parquet catalog for offline use by characterize.py.
 Usage:
     malca gaia-fetch --input output/runs/20260101/results/lc_events_filtered.parquet
     malca gaia-fetch --input candidates.parquet --output my_gaia_catalog.parquet
-    malca gaia-fetch --input candidates.parquet --vsx-crossmatch input/vsx/my_crossmatch.csv
+    malca gaia-fetch --input candidates.parquet --vsx-crossmatch input/vsx/my_crossmatch.parquet
 """
 from pathlib import Path
 import argparse
@@ -27,6 +27,7 @@ from malca.config import (
     GAIA_LOCAL_CATALOG,
     VSX_CROSSMATCH_PATH,
 )
+from malca.table_io import read_parquet_table
 
 
 
@@ -148,10 +149,7 @@ def _extract_gaia_ids(
 ) -> list[str]:
     """Read candidates and merge with VSX crossmatch to get Gaia source IDs."""
     print(f"Loading candidates from {input_path}...")
-    if str(input_path).endswith(".parquet"):
-        df = pd.read_parquet(input_path)
-    else:
-        df = pd.read_csv(input_path)
+    df = read_parquet_table(input_path)
 
     if only_passers and ("failed_any" in df.columns):
         before = len(df)
@@ -180,12 +178,12 @@ def _extract_gaia_ids(
 
     print(f"Loading crossmatch file {xmatch_path}...")
     xmatch_cols = ["asas_sn_id", "gaia_id", "tmass_id", "allwise_id"]
-    header = pd.read_csv(xmatch_path, nrows=0).columns
+    xmatch = read_parquet_table(xmatch_path)
+    header = xmatch.columns
     use_cols = ["asas_sn_id"] + [
         c for c in xmatch_cols if c in header and c != "asas_sn_id"
     ]
-    use_cols_set = set(use_cols)
-    df_xmatch = pd.read_csv(xmatch_path, usecols=lambda c: c in use_cols_set, dtype=str)
+    df_xmatch = xmatch[use_cols].astype(str)
 
     df["asas_sn_id"] = df["asas_sn_id"].astype(str)
     df_xmatch["asas_sn_id"] = df_xmatch["asas_sn_id"].astype(str)
@@ -414,7 +412,7 @@ def main():
         "--input",
         type=Path,
         required=True,
-        help="Candidate Parquet/CSV file (filter output with asas_sn_id or gaia_id column)",
+        help="Candidate Parquet file (filter output with asas_sn_id or gaia_id column)",
     )
     parser.add_argument(
         "--output",
@@ -426,7 +424,7 @@ def main():
         "--vsx-crossmatch",
         type=Path,
         default=VSX_CROSSMATCH_PATH,
-        help="Path to ASAS-SN x VSX crossmatch CSV (must contain asas_sn_id and gaia_id)",
+        help="Path to ASAS-SN x VSX crossmatch Parquet (must contain asas_sn_id and gaia_id)",
     )
     parser.add_argument(
         "--chunk-size",

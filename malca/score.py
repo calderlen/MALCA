@@ -27,6 +27,7 @@ import numpy as np
 import pandas as pd
 
 from malca.stats import robust_sigma
+from malca.table_io import read_parquet_table
 from malca.utils import gaussian
 
 
@@ -472,7 +473,7 @@ def main() -> None:
 
 
     parser = argparse.ArgumentParser(description="Compute event score for a light curve table")
-    parser.add_argument("--input", type=Path, required=True, help="Input CSV/Parquet with JD, mag, error")
+    parser.add_argument("--input", type=Path, required=True, help="Input Parquet with JD, mag, error")
     parser.add_argument("--event-type", choices=["dip", "jump", "microlensing"], default="dip")
     parser.add_argument("--sigma-threshold", type=float, default=1.0)
     parser.add_argument("--edge-sigma", type=float, default=0.5)
@@ -481,10 +482,7 @@ def main() -> None:
     args = parser.parse_args()
 
     input_path = args.input.expanduser()
-    if input_path.suffix.lower() in (".parquet", ".pq"):
-        df = pd.read_parquet(input_path)
-    else:
-        df = pd.read_csv(input_path)
+    df = read_parquet_table(input_path)
 
     score, events = compute_event_score(
         df,
@@ -504,4 +502,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

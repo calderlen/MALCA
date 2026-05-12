@@ -27,6 +27,7 @@ from malca.config import (
 )
 from malca.plot import plot_bayes_results, plot_phase_folded_lightcurve, BASELINE_FUNCTIONS
 from malca.review.metadata import REVIEW_METADATA_FIELDS, normalize_vsx_df, normalize_vsx_record
+from malca.table_io import read_parquet_table, write_parquet_table
 
 
 
@@ -50,7 +51,7 @@ def load_passing_candidates(
     Parameters
     ----------
     filtered_path : Path
-        Path to filtered events results (CSV/Parquet)
+        Path to filtered events results Parquet
     max_plots : int | None
         Maximum number of candidates to return
 
@@ -63,10 +64,7 @@ def load_passing_candidates(
         df = filtered_path.copy()
     else:
         filtered_path = Path(filtered_path)
-        if filtered_path.suffix.lower() in (".parquet", ".pq"):
-            df = pd.read_parquet(filtered_path)
-        else:
-            df = pd.read_csv(filtered_path)
+        df = read_parquet_table(filtered_path)
 
     df = normalize_vsx_df(df)
 
@@ -280,7 +278,7 @@ def plot_passing_candidates(
     clean_max_error_sigma : float
         Sigma cutoff for MAD filter
     detection_results_csv : Path | None
-        Optional detection results CSV for metadata lookup
+        Optional detection results Parquet for metadata lookup
 
     Returns
     -------
@@ -506,7 +504,7 @@ def plot_passing_candidates(
         manifest_df["phase_plot_error"] = manifest_df["path"].map(lambda p: phase_by_path.get(str(p), (False, ""))[1])
         for bucket in ("dip", "jump", "both"):
             bucket_manifest = manifest_df[manifest_df["plot_bucket"] == bucket].copy()
-            bucket_manifest.to_csv(out_dir / f"manifest_{bucket}.csv", index=False)
+            write_parquet_table(bucket_manifest, out_dir / f"manifest_{bucket}.parquet")
 
     plotted_by_bucket: dict[str, int] = {"dip": 0, "jump": 0, "both": 0}
     if not manifest_df.empty:
@@ -525,9 +523,9 @@ def plot_passing_candidates(
         "filtered_cameras_by_path": all_filtered_cameras,
         "plotted_by_bucket": plotted_by_bucket,
         "manifest_files": {
-            "dip": str(out_dir / "manifest_dip.csv"),
-            "jump": str(out_dir / "manifest_jump.csv"),
-            "both": str(out_dir / "manifest_both.csv"),
+            "dip": str(out_dir / "manifest_dip.parquet"),
+            "jump": str(out_dir / "manifest_jump.parquet"),
+            "both": str(out_dir / "manifest_both.parquet"),
         },
     }
 
@@ -539,7 +537,7 @@ def main():
         epilog="""
 Example usage:
   malca plot --detect-run output/runs/20260128_163911
-  malca plot --results results_filtered.csv --output-dir plots/
+  malca plot --results results_filtered.parquet --output-dir plots/
   malca plot --detect-run output/runs/20260128_163911 --max-plots 10
 """
     )
@@ -554,7 +552,7 @@ Example usage:
         "--input",
         type=Path,
         default=None,
-        help="Path to filtered events results (CSV/Parquet). Overrides --detect-run.",
+        help="Path to filtered events results Parquet. Overrides --detect-run.",
     )
     parser.add_argument(
         "--output-dir",
@@ -662,7 +660,7 @@ Example usage:
         dest="results",
         type=Path,
         default=None,
-        help="Optional detection results CSV for metadata lookup",
+        help="Optional detection results Parquet for metadata lookup",
     )
     parser.add_argument(
         "--gp-sigma", type=float, default=None, help="GP sigma parameter"
@@ -723,9 +721,7 @@ Example usage:
 
         # Look for filtered results
         candidates = (
-            list(results_dir.glob("*_filtered.csv")) +
             list(results_dir.glob("*_filtered.parquet")) +
-            list(results_dir.glob("*filtered*.csv")) +
             list(results_dir.glob("*filtered*.parquet"))
         )
 

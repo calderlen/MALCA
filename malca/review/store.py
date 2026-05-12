@@ -16,6 +16,7 @@ from malca.config import GAIA_CHUNK_SIZE
 from malca.config import LTV_MAX_PM
 from malca.config import VSX_CROSSMATCH_PATH, GAIA_CACHE_FILE
 from malca.review.metadata import normalize_vsx_record
+from malca.table_io import read_parquet_table, write_parquet_table
 from malca.review.taxonomy import (
     REVIEW_TAXONOMY_FIELDS,
     REVIEW_TAXONOMY_SQL_COLUMNS,
@@ -219,11 +220,7 @@ def infer_candidate_id(df: pd.DataFrame) -> pd.Series:
 def load_candidates_file(path: Path) -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(f"File not found: {path}")
-    if path.suffix.lower() in {".parquet", ".pq"}:
-        return pd.read_parquet(path)
-    if path.suffix.lower() == ".csv":
-        return pd.read_csv(path)
-    raise ValueError("Unsupported file type. Use CSV or Parquet.")
+    return read_parquet_table(path)
 
 
 def detect_run_directory_files(run_dir: Path) -> dict[str, Path | None]:
@@ -2249,11 +2246,7 @@ def export_reviews(conn: sqlite3.Connection, out_path: Path, only_reviewed: bool
     if only_reviewed:
         query += " WHERE r.workflow_status IS NOT NULL AND r.workflow_status != 'unreviewed'"
     df = pd.read_sql_query(query, conn)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    if out_path.suffix.lower() in {".parquet", ".pq"}:
-        df.to_parquet(out_path, index=False, compression="zstd")
-    else:
-        df.to_csv(out_path, index=False)
+    write_parquet_table(df, out_path)
 
 
 def merge_review_databases(
@@ -2499,7 +2492,7 @@ def import_lightcurve_files(
     characterize: bool = False,
     vet: bool = False,
 ) -> tuple[int, int]:
-    """Import raw light-curve CSV/parquet files into the review DB.
+    """Import raw light-curve CSV or Parquet files into the review DB.
 
     If the file has an ``asas_sn_id`` column with multiple unique values,
     each source is split into its own cached CSV.  Otherwise the file is
@@ -2511,7 +2504,10 @@ def import_lightcurve_files(
     if not file_path.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
 
-    df = load_candidates_file(file_path)
+    if file_path.suffix.lower() == ".csv":
+        df = pd.read_csv(file_path)
+    else:
+        df = read_parquet_table(file_path)
     if df.empty:
         return 0, 0
 

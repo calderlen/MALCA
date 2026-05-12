@@ -46,6 +46,7 @@ from malca.config import (
 from malca.config import LTV_INJECTION_OUTPUT_DIR
 from malca.ltv.core import Config, SourceMeta, process_one_lc
 from malca.ltv.filter import apply_all_filters
+from malca.table_io import read_parquet_table, write_parquet_table
 
 
 DAT2_COLUMNS = [
@@ -70,13 +71,13 @@ class TrialSpec:
     direction: int
 
 
-class CsvWriter:
+class ParquetAppendWriter:
     def __init__(self, path: Path):
         self.path = Path(path)
         self.columns = None
         if self.path.exists() and self.path.stat().st_size > 0:
             try:
-                self.columns = pd.read_csv(self.path, nrows=0).columns.tolist()
+                self.columns = read_parquet_table(self.path).columns.tolist()
             except Exception:
                 self.columns = None
 
@@ -88,8 +89,10 @@ class CsvWriter:
             self.columns = list(df_chunk.columns)
         df_chunk = df_chunk.reindex(columns=self.columns)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        header = not self.path.exists() or self.path.stat().st_size == 0
-        df_chunk.to_csv(self.path, mode="a", header=header, index=False)
+        if self.path.exists() and self.path.stat().st_size > 0:
+            existing = read_parquet_table(self.path)
+            df_chunk = pd.concat([existing, df_chunk], ignore_index=True)
+        write_parquet_table(df_chunk, self.path)
 
     def close(self) -> None:
         return
@@ -112,12 +115,7 @@ def _read_checkpoint(path: Path) -> int | None:
 
 
 def _load_table(path: Path) -> pd.DataFrame:
-    suffix = path.suffix.lower()
-    if suffix == ".csv":
-        return pd.read_csv(path)
-    if suffix in {".parquet", ".pq"}:
-        return pd.read_parquet(path)
-    raise ValueError(f"Unsupported table format: {path}")
+    return read_parquet_table(path)
 
 
 def _get_id_col(df: pd.DataFrame) -> str:
@@ -505,7 +503,7 @@ def compute_magnitude_slices(
 def save_plot_tables(plot_tables: dict[str, pd.DataFrame], output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     for name, table in plot_tables.items():
-        table.reset_index().to_csv(output_dir / f"{name}.csv", index=False)
+        write_parquet_table(table.reset_index(), output_dir / f"{name}.parquet")
 
 
 def _heatmap_edges(values: np.ndarray, *, log_scale: bool) -> np.ndarray:
@@ -668,20 +666,16 @@ def save_results_artifacts(
     plot_tables: dict[str, pd.DataFrame] | None = None,
 ) -> None:
     results_dir.mkdir(parents=True, exist_ok=True)
-    results_df.to_csv(results_dir / "ltv_injection_trials.csv", index=False)
-    try:
-        results_df.to_parquet(results_dir / "ltv_injection_trials.parquet", index=False)
-    except Exception:
-        pass
+    write_parquet_table(results_df, results_dir / "ltv_injection_trials.parquet")
 
     summary = compute_rejection_summary(results_df)
-    summary.to_csv(results_dir / "ltv_rejection_summary.csv", index=False)
+    write_parquet_table(summary, results_dir / "ltv_rejection_summary.parquet")
 
     if plot_tables is not None:
         aggregate_dir = results_dir / "aggregates"
         aggregate_dir.mkdir(parents=True, exist_ok=True)
         for name, table in plot_tables.items():
-            table.reset_index().to_csv(aggregate_dir / f"{name}.csv", index=False)
+            write_parquet_table(table.reset_index(), aggregate_dir / f"{name}.parquet")
 
 
 def run_injection_recovery(
@@ -741,10 +735,10 @@ def run_injection_recovery(
 
     if start_index >= total_trials:
         if output_path is not None and output_path.exists():
-            return pd.read_csv(output_path)
+            return read_parquet_table(output_path)
         return pd.DataFrame()
 
-    writer = CsvWriter(output_path) if output_path is not None else None
+    writer = ParquetAppendWriter(output_path) if output_path is not None else None
     results: list[dict] = []
 
     def flush_results() -> None:
@@ -768,7 +762,7 @@ def run_injection_recovery(
         if checkpoint_path is not None:
             _write_checkpoint(checkpoint_path, total_trials - 1)
         if output_path is not None:
-            return pd.read_csv(output_path)
+            return read_parquet_table(output_path)
         return pd.DataFrame(results)
 
     with ProcessPoolExecutor(
@@ -790,7 +784,7 @@ def run_injection_recovery(
                 _write_checkpoint(checkpoint_path, batch_end - 1)
 
     if output_path is not None:
-        return pd.read_csv(output_path)
+        return read_parquet_table(output_path)
     return pd.DataFrame(results)
 
 
@@ -823,9 +817,8 @@ Output structure (default --output-dir output/ltv/injection):
     20260314_101500/
       run_params.json
       results/
-        ltv_injection_trials.csv
         ltv_injection_trials.parquet
-        ltv_rejection_summary.csv
+        ltv_rejection_summary.parquet
         aggregates/
       plots/
         rejection_reason_counts.png
@@ -844,10 +837,10 @@ Output structure (default --output-dir output/ltv/injection):
     g_filter = parser.add_argument_group("Filter")
     g_plots = parser.add_argument_group("Plots")
 
-    g_io.add_argument("--manifest", type=Path, required=True, help="Manifest CSV/Parquet with dat_path metadata.")
+    g_io.add_argument("--manifest", type=Path, required=True, help="Manifest Parquet with dat_path metadata.")
     g_io.add_argument("--output-dir", dest="out_dir", type=Path, default=LTV_INJECTION_OUTPUT_DIR, help="Base output directory.")
     g_io.add_argument("--run-tag", type=str, default=None, help="Optional suffix for the run directory.")
-    g_io.add_argument("--output", type=Path, default=None, help="Override trial CSV output path.")
+    g_io.add_argument("--output", type=Path, default=None, help="Override trial Parquet output path.")
     g_sample.add_argument(
         "--control-sample-size",
         type=int,
@@ -913,8 +906,8 @@ Output structure (default --output-dir output/ltv/injection):
     results_dir.mkdir(parents=True, exist_ok=True)
     plots_dir.mkdir(parents=True, exist_ok=True)
 
-    csv_out = args.output if args.output is not None else (results_dir / "ltv_injection_trials.csv")
-    checkpoint_path = csv_out.with_name(f"{csv_out.stem}_PROCESSED.txt")
+    results_out = args.output if args.output is not None else (results_dir / "ltv_injection_trials.parquet")
+    checkpoint_path = results_out.with_name(f"{results_out.stem}_PROCESSED.txt")
 
     manifest_df = load_manifest(Path(args.manifest))
     control_sample = select_control_sample(
@@ -962,7 +955,7 @@ Output structure (default --output-dir output/ltv/injection):
         task_size=int(args.task_size),
         checkpoint_interval=int(args.checkpoint_interval),
         chunk_size=int(args.chunk_size),
-        output_path=csv_out,
+        output_path=results_out,
         checkpoint_path=checkpoint_path,
         resume=not args.no_resume,
         overwrite=bool(args.overwrite),
@@ -970,7 +963,7 @@ Output structure (default --output-dir output/ltv/injection):
         show_progress=True,
     )
     if results_df is None:
-        results_df = pd.read_csv(csv_out)
+        results_df = read_parquet_table(results_out)
 
     plot_tables = None
     if not args.skip_plots:

@@ -41,6 +41,7 @@ from malca.config import (
 from malca.config import PARQUET_CACHE_COMPRESSION, PARQUET_OUTPUT_COMPRESSION
 from malca.config import VSX_CROSSMATCH_PATH
 from malca.config import WORKERS
+from malca.table_io import read_parquet_table, write_parquet_table
 from malca.utils import (
     read_lc_dat2,
     get_id_col,
@@ -349,7 +350,7 @@ def attach_vsx_info(
     """
     Attach VSX crossmatch info (vsx_sep_arcsec/vsx_class) to the dataframe.
 
-    Uses the provided crossmatch CSV, or requires vsx_sep_arcsec/vsx_class columns.
+    Uses the provided crossmatch Parquet, or requires vsx_sep_arcsec/vsx_class columns.
     """
     if "vsx_sep_arcsec" in df.columns and "vsx_class" in df.columns:
         return df
@@ -357,7 +358,7 @@ def attach_vsx_info(
         raise ValueError("vsx_crossmatch_csv is required to attach VSX info.")
 
     vsx_crossmatch_csv = Path(vsx_crossmatch_csv)
-    xmatch = pd.read_csv(vsx_crossmatch_csv)
+    xmatch = read_parquet_table(vsx_crossmatch_csv)
     rename_map = {}
     if "vsx_sep_arcsec" not in xmatch.columns and "sep_arcsec" in xmatch.columns:
         rename_map["sep_arcsec"] = "vsx_sep_arcsec"
@@ -753,7 +754,7 @@ def apply_tags(
     # General
     n_workers: int = 1,
     show_tqdm: bool = True,
-    rejected_log_csv: str | Path | None = "rejected_tag.csv",
+    rejected_log_csv: str | Path | None = "rejected_tag.parquet",
     # Checkpoint for stats computation
     stats_checkpoint: str | Path | None = None,
     stats_chunk_size: int = 10000,
@@ -898,8 +899,8 @@ def main() -> None:
 
 
     parser = argparse.ArgumentParser(description="Apply tagging filters to candidate/source table")
-    parser.add_argument("--input", type=Path, required=True, help="Input CSV/Parquet")
-    parser.add_argument("--output", type=Path, required=True, help="Output CSV/Parquet")
+    parser.add_argument("--input", type=Path, required=True, help="Input Parquet")
+    parser.add_argument("--output", type=Path, required=True, help="Output Parquet")
 
     parser.add_argument("--apply-vsx", action="store_true", help="Enable VSX-based filtering/tagging")
     parser.add_argument("--vsx-max-sep-arcsec", type=float, default=VSX_MAX_SEP_ARCSEC)
@@ -917,7 +918,7 @@ def main() -> None:
                         help="Light curve file extension (e.g., dat, dat2, dat3). Default comes from config.")
     parser.add_argument("--stats-checkpoint", type=Path, default=None)
     parser.add_argument("--stats-chunk-size", type=int, default=STATS_CHUNK_SIZE)
-    parser.add_argument("--rejected-log-csv", type=Path, default=None)
+    parser.add_argument("--rejected-log", type=Path, default=None)
     parser.add_argument("--no-progress", action="store_true")
     parser.set_defaults(apply_sparse=True, apply_multi_camera=True)
 
@@ -925,10 +926,7 @@ def main() -> None:
 
     input_path = args.input.expanduser()
     output_path = args.output.expanduser()
-    if input_path.suffix.lower() in (".parquet", ".pq"):
-        df = pd.read_parquet(input_path)
-    else:
-        df = pd.read_csv(input_path)
+    df = read_parquet_table(input_path)
 
     out = apply_tags(
         df,
@@ -943,16 +941,12 @@ def main() -> None:
         file_ext=args.extension,
         n_workers=args.workers,
         show_tqdm=not args.no_progress,
-        rejected_log_csv=args.rejected_log_csv,
+        rejected_log_csv=args.rejected_log,
         stats_checkpoint=args.stats_checkpoint,
         stats_chunk_size=args.stats_chunk_size,
     )
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    if output_path.suffix.lower() in (".parquet", ".pq"):
-        out.to_parquet(output_path, index=False, compression=PARQUET_OUTPUT_COMPRESSION)
-    else:
-        out.to_csv(output_path, index=False)
+    write_parquet_table(out, output_path)
 
     print(f"Saved tag output: {output_path} ({len(out)} rows)")
 

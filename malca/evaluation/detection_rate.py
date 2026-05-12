@@ -21,7 +21,7 @@ from tqdm.auto import tqdm
 import numpy as np
 import pandas as pd
 import pyarrow as pa
-import pyarrow.parquet as pq
+import pyarrow.parquet as pa_parquet
 
 from malca.baseline import (
     global_median_baseline,
@@ -344,9 +344,10 @@ def run_detection_rate(
     class _Writer:
         def __init__(self, path: Path):
             self.path = Path(path)
-            self.is_parquet = self.path.suffix.lower() in {".parquet", ".pq"}
+            if self.path.suffix.lower() != ".parquet":
+                raise ValueError(f"Detection-rate output must be Parquet: {self.path}")
             self.columns = None
-            self.pq_writer = None
+            self.parquet_writer = None
 
         def write_chunk(self, rows: list[dict]) -> None:
             if not rows:
@@ -356,18 +357,14 @@ def run_detection_rate(
                 self.columns = list(df_chunk.columns)
             df_chunk = df_chunk.reindex(columns=self.columns)
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            if self.is_parquet:
-                table = pa.Table.from_pandas(df_chunk, preserve_index=False)
-                if self.pq_writer is None:
-                    self.pq_writer = pq.ParquetWriter(self.path, table.schema, compression="zstd")
-                self.pq_writer.write_table(table)
-            else:
-                header = not self.path.exists() or self.path.stat().st_size == 0
-                df_chunk.to_csv(self.path, mode="a", header=header, index=False)
+            table = pa.Table.from_pandas(df_chunk, preserve_index=False)
+            if self.parquet_writer is None:
+                self.parquet_writer = pa_parquet.ParquetWriter(self.path, table.schema, compression="zstd")
+            self.parquet_writer.write_table(table)
 
         def close(self) -> None:
-            if self.pq_writer is not None:
-                self.pq_writer.close()
+            if self.parquet_writer is not None:
+                self.parquet_writer.close()
 
     id_col = get_id_column(manifest)
     control_ids = manifest[id_col].values
@@ -415,9 +412,7 @@ def run_detection_rate(
 
     writer.close()
 
-    if output_path.suffix.lower() in {".parquet", ".pq"}:
-        return pd.read_parquet(output_path)
-    return pd.read_csv(output_path)
+    return pd.read_parquet(output_path)
 
 
 def compute_detection_summary(results_df: pd.DataFrame) -> dict:

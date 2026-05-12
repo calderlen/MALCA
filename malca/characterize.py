@@ -9,7 +9,7 @@ This module consolidates:
 - Galactic population classification
 
 Usage:
-    malca characterize --input output/events.csv --output output/characterized.csv --dust
+    malca characterize --input output/events.parquet --output output/characterized.parquet --dust
 """
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -58,6 +58,7 @@ from malca.config import (
     DEFAULT_CACHE_DIR, GAIA_CACHE_FILE,
     GAIA_LOCAL_CATALOG,
 )
+from malca.table_io import read_parquet_table, write_parquet_table
 
 
 
@@ -346,12 +347,10 @@ def query_starhorse_by_ids(
         print(f"Loading StarHorse catalog from {starhorse_path}...")
         
         try:
-            if str(starhorse_path).endswith('.parquet'):
-                sh_df = pd.read_parquet(starhorse_path)
-            elif str(starhorse_path).endswith('.fits') or str(starhorse_path).endswith('.fits.gz'):
+            if str(starhorse_path).endswith('.fits') or str(starhorse_path).endswith('.fits.gz'):
                 sh_df = Table.read(starhorse_path).to_pandas()
             else:
-                sh_df = pd.read_csv(starhorse_path)
+                sh_df = pd.read_parquet(starhorse_path)
         except Exception as e:
             print(f"Error loading StarHorse: {e}")
             return pd.DataFrame()
@@ -1670,7 +1669,8 @@ def characterize_candidates_df(
         else:
             print(f"Loading crossmatch file {xmatch_path}...")
             try:
-                header = list(pd.read_csv(xmatch_path, nrows=0).columns)
+                df_xmatch = read_parquet_table(xmatch_path).astype(str)
+                header = list(df_xmatch.columns)
                 id_col = next((c for c in ("asas_sn_id", "ASAS-SN ID", "asassn_id") if c in header), None)
                 if id_col is None:
                     raise ValueError(f"crossmatch missing ASAS-SN ID column; found columns: {header[:15]}")
@@ -1685,7 +1685,7 @@ def characterize_candidates_df(
                     "class",
                     "sep_arcsec",
                 }
-                df_xmatch = pd.read_csv(xmatch_path, usecols=lambda c: c in requested, dtype=str)
+                df_xmatch = df_xmatch[[c for c in df_xmatch.columns if c in requested]]
 
                 rename_map: dict[str, str] = {}
                 if id_col != "asas_sn_id":
@@ -1953,11 +1953,11 @@ def characterize_candidates_df(
 
 def main():
     parser = argparse.ArgumentParser(description="Multi-wavelength characterization for dipper candidates")
-    parser.add_argument("--input", type=Path, required=True, help="Input events CSV/Parquet (must have asas_sn_id)")
-    parser.add_argument("--output", type=Path, required=True, help="Output CSV/Parquet")
+    parser.add_argument("--input", type=Path, required=True, help="Input events Parquet (must have asas_sn_id)")
+    parser.add_argument("--output", type=Path, required=True, help="Output Parquet")
     parser.add_argument("--vsx-crossmatch", type=Path,
                         default=VSX_CROSSMATCH_PATH,
-                        help="Path to ASAS-SN x VSX crossmatch CSV (must contain asas_sn_id and gaia_id)")
+                        help="Path to ASAS-SN x VSX crossmatch Parquet (must contain asas_sn_id and gaia_id)")
     parser.add_argument("--chunk-size", type=int, default=GAIA_CHUNK_SIZE, help="Gaia query chunk size")
     parser.add_argument("--cache", type=Path, default=GAIA_CACHE_FILE, help="Cache file for Gaia queries")
     parser.add_argument("--enable-dust", dest="dust", action="store_true", help="Enable dustmaps3d 3D extinction query")
@@ -1983,10 +1983,7 @@ def main():
     
     # Load input
     print(f"Loading {args.input}...")
-    if str(args.input).endswith(".parquet"):
-        df = pd.read_parquet(args.input)
-    else:
-        df = pd.read_csv(args.input)
+    df = read_parquet_table(args.input)
         
     df_char = characterize_candidates_df(
         df,
@@ -2008,12 +2005,7 @@ def main():
     # Save results
     print("Saving results...")
     output_path = args.output.expanduser()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    
-    if str(output_path).endswith(".parquet"):
-        df_char.to_parquet(output_path, index=False, compression=PARQUET_OUTPUT_COMPRESSION)
-    else:
-        df_char.to_csv(output_path, index=False)
+    write_parquet_table(df_char, output_path)
         
     print(f"Saved to {output_path}")
 

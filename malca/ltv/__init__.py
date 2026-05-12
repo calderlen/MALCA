@@ -13,7 +13,7 @@ Modules:
 
 Usage:
     # Core processing (compute seasonal trends)
-    malca ltv.core --mag-bin 13_13.5 --output ltv_output.csv
+    malca ltv.core --mag-bin 13_13.5 --output ltv_output.parquet
     
     # Full pipeline (filtering + crossmatch + NEOWISE + extinction)
     from malca.ltv import run_full_pipeline
@@ -76,16 +76,6 @@ from malca.ltv.gaia_epoch import (
 )
 from malca.ltv.stochastic import (
     add_stochastic_postfilter_features,
-)
-from malca.meta_analysis.ltv_pca import (
-    LtvPCAModel,
-    LTV_PCA_FEATURE_CANDIDATES,
-    resolve_feature_columns as resolve_pca_feature_columns,
-    fit_ltv_pca,
-    apply_ltv_pca,
-    fit_apply_ltv_pca,
-    save_ltv_pca_model,
-    load_ltv_pca_model,
 )
 from malca.ltv.pipeline import (
     run_full_pipeline,
@@ -150,15 +140,6 @@ __all__ = [
     "apply_gaia_epoch_flags",
     # Stochastic post-filter features
     "add_stochastic_postfilter_features",
-    # PCA
-    "LtvPCAModel",
-    "LTV_PCA_FEATURE_CANDIDATES",
-    "resolve_pca_feature_columns",
-    "fit_ltv_pca",
-    "apply_ltv_pca",
-    "fit_apply_ltv_pca",
-    "save_ltv_pca_model",
-    "load_ltv_pca_model",
     # Pipeline
     "run_full_pipeline",
     "inject_trend",

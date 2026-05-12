@@ -540,13 +540,13 @@ def _process_trial_batch(trial_indices: list[int]) -> list[dict]:
 
 
 
-class CsvWriter:
+class ParquetAppendWriter:
     def __init__(self, path: Path):
         self.path = Path(path)
         self.columns = None
         if self.path.exists() and self.path.stat().st_size > 0:
             try:
-                self.columns = pd.read_csv(self.path, nrows=0).columns.tolist()
+                self.columns = pd.read_parquet(self.path).columns.tolist()
             except Exception:
                 self.columns = None
 
@@ -558,8 +558,10 @@ class CsvWriter:
             self.columns = list(df_chunk.columns)
         df_chunk = df_chunk.reindex(columns=self.columns)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        header = not self.path.exists() or self.path.stat().st_size == 0
-        df_chunk.to_csv(self.path, mode="a", header=header, index=False)
+        if self.path.exists() and self.path.stat().st_size > 0:
+            df_chunk = pd.concat([pd.read_parquet(self.path), df_chunk], ignore_index=True, sort=False)
+            df_chunk = df_chunk.reindex(columns=self.columns)
+        df_chunk.to_parquet(self.path, index=False, compression="zstd")
 
     def close(self) -> None:
         return
@@ -671,7 +673,7 @@ def run_injection_recovery(
     print(f"Fitting {mag_err_order}th-order polynomial to magnitude errors...")
     mag_err_poly = estimate_magnitude_error_polynomial(lc_sample, order=mag_err_order)
 
-    writer = CsvWriter(output_path) if output_path else None
+    writer = ParquetAppendWriter(output_path) if output_path else None
     results: list[dict] = []
 
     pbar = tqdm(total=total_trials, initial=start_index, disable=not show_progress)
@@ -1620,7 +1622,7 @@ Output structure (default --output-dir output/injection):
     20250121_143052/             # Timestamped run directory
       run_params.json            # Full parameter dump
       results/
-        injection_results.csv      # Trial-by-trial results
+        injection_results.parquet  # Trial-by-trial results
         injection_results_PROCESSED.txt  # Checkpoint
       cubes/
         efficiency_cube.npz        # 3D efficiency cube
@@ -1648,7 +1650,7 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
     g_io.add_argument("--run-tag", type=str, default=None,
                         help="Optional tag to append to run directory name (e.g., 'deep_dips_mag18')")
     g_io.add_argument("--output", type=Path, default=None,
-                        help="Override CSV output path (default: <out-dir>/<timestamp>/results/injection_results.csv)")
+                        help="Override Parquet output path (default: <out-dir>/<timestamp>/results/injection_results.parquet)")
     g_injection.add_argument(
         "--control-sample-size",
         dest="control_sample_size",
@@ -1711,7 +1713,7 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
 
     results_dir.mkdir(parents=True, exist_ok=True)
 
-    csv_out = args.output if args.output else (results_dir / "injection_results.csv")
+    results_out = args.output if args.output else (results_dir / "injection_results.parquet")
     cube_out = args.cube_out if args.cube_out else (cubes_dir / "efficiency_cube.npz")
     plot_dir = args.plot_dir if args.plot_dir else plots_dir
 
@@ -1748,7 +1750,7 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
 
     print(f"\nRun directory: {run_dir}")
     print(f"  Run params: {run_params_file}")
-    print(f"  Results CSV: {csv_out}")
+    print(f"  Results Parquet: {results_out}")
     if not args.skip_cube:
         print(f"  Efficiency cube: {cube_out}")
     if not args.skip_plots:
@@ -1776,7 +1778,7 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
         task_size=max(1, args.task_size),
         checkpoint_interval=max(1, args.checkpoint_interval),
         chunk_size=max(1, args.chunk_size),
-        output_path=csv_out,
+        output_path=results_out,
         checkpoint_path=None,
         resume=not args.no_resume,
         overwrite=args.overwrite,
@@ -1786,8 +1788,8 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
 
 
     # Post-processing: load results and compute metrics
-    print(f"\nLoading results from {csv_out}...")
-    results_df = pd.read_csv(csv_out)
+    print(f"\nLoading results from {results_out}...")
+    results_df = pd.read_parquet(results_out)
 
     # Compute and display quality metrics
     metrics = compute_quality_metrics(results_df)

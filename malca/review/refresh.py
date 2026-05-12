@@ -350,7 +350,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--candidate-source",
         default=None,
-        help="Optional CSV/parquet used to scope candidate IDs; defaults to best run results file",
+        help="Optional Parquet used to scope candidate IDs; defaults to best run results file",
     )
     parser.add_argument(
         "--no-compute-ls",

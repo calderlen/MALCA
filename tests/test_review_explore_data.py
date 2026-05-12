@@ -5,6 +5,7 @@ import sqlite3
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from malca.review.explore_data import (
     add_eda_columns,
@@ -186,7 +187,8 @@ def test_load_review_db_merges_review_columns(tmp_path: Path) -> None:
 def test_infer_source_kind() -> None:
     assert infer_source_kind("/tmp/review.db") == "db"
     assert infer_source_kind("/tmp/candidates.parquet") == "parquet"
-    assert infer_source_kind("/tmp/candidates.csv") == "csv"
+    with pytest.raises(ValueError):
+        infer_source_kind("/tmp/candidates.csv")
 
 
 def test_infer_plot_dir_from_source_for_run_local_files(tmp_path: Path) -> None:

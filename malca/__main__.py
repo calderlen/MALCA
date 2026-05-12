@@ -16,7 +16,6 @@ GROUP_ORDER = [
     "LTV",
     "Evaluation",
     "Enrichment",
-    "ML",
     "Other",
 ]
 COMMAND_GROUPS = {
@@ -41,7 +40,6 @@ COMMAND_GROUPS = {
     "ltv-build": "LTV",
     "ltv-pipeline": "LTV",
     "ltv-ingest": "LTV",
-    "ltv-pca": "LTV",
     "ltv-injection": "LTV",
     "ltv-bundle": "LTV",
     "injection": "Evaluation",
@@ -54,8 +52,6 @@ COMMAND_GROUPS = {
     "spectra": "Enrichment",
     "vsx-filter": "Enrichment",
     "vsx-crossmatch": "Enrichment",
-    "ml-train": "ML",
-    "ml-predict": "ML",
     "vetting": "Other",
     "dev": "Other",
 }
@@ -113,9 +109,9 @@ def main():
         "detection-rate", "validate", "plot",
         "events", "gaia-fetch", "characterize", "classify", "filter", "tag",
         "attrition", "review", "review-qt", "review-refresh", "review-merge", "review-explore", "review-sync", "review-taxonomy", "review-maint",
-        "neighbors", "spectra", "false-positive", "ml-train", "ml-predict", "vsx-filter", "vsx-crossmatch",
+        "neighbors", "spectra", "false-positive", "vsx-filter", "vsx-crossmatch",
         "vetting",
-        "ltv-core", "ltv-build", "ltv-pipeline", "ltv-injection", "ltv-pca", "ltv-ingest", "ltv-bundle",
+        "ltv-core", "ltv-build", "ltv-pipeline", "ltv-injection", "ltv-ingest", "ltv-bundle",
         "dev",
     ]:
         command = sys.argv[1]
@@ -186,10 +182,6 @@ def main():
             fp = importlib.import_module("malca.evaluation.false_positive")
             sys.argv = [sys.argv[0]] + remaining
             fp.main()
-        elif command == "ml-train":
-            _run_module_main("malca.meta_analysis.ml.train", remaining)
-        elif command == "ml-predict":
-            _run_module_main("malca.meta_analysis.ml.predict", remaining)
         elif command == "vsx-filter":
             sys.argv = [sys.argv[0]] + remaining
             vsx_filter = importlib.import_module("malca.vsx.filter")
@@ -272,8 +264,6 @@ def main():
                 raise SystemExit(f"unknown dev command: {dev_command}")
         elif command == "ltv-injection":
             _run_module_main("malca.ltv.injection", remaining)
-        elif command == "ltv-pca":
-            _run_module_main("malca.meta_analysis.ltv_pca", remaining)
         elif command == "ltv-ingest":
             _run_module_main("malca.ltv.review", remaining)
         elif command == "ltv-bundle":
@@ -289,7 +279,7 @@ def main():
     )
     subparsers = parser.add_subparsers(dest="command", metavar="<command>")
 
-    # Register in group order (Discovery, Review, LTV, Evaluation, Enrichment, ML, Other)
+    # Register in group order (Discovery, Review, LTV, Evaluation, Enrichment, Other)
     # Discovery
     subparsers.add_parser("manifest", description="Build manifest (source_id → path index)")
     subparsers.add_parser("pipeline", description="Run full discovery pipeline")
@@ -313,7 +303,6 @@ def main():
     subparsers.add_parser("ltv-build", description="Build LTV candidate table (filters + crossmatch + NEOWISE + extinction)")
     subparsers.add_parser("ltv-pipeline", description="Full LTV workflow up to review: build then ingest into review DB (run malca review separately to open GUI)")
     subparsers.add_parser("ltv-ingest", description="Ingest LTV build output into a review DB")
-    subparsers.add_parser("ltv-pca", description="Fit/apply LTV PCA (fit-apply | apply)")
     subparsers.add_parser("ltv-injection", description="Run LTV rejection-recovery injections and plots")
     subparsers.add_parser("ltv-bundle", description="Bundle light curve files for LTV candidates passing slope/diff filters")
     # Evaluation
@@ -328,9 +317,6 @@ def main():
     subparsers.add_parser("spectra", description="Run bulk spectra-availability enrichment")
     subparsers.add_parser("vsx-filter", description="Build cleaned ASAS-SN index and filtered VSX catalog")
     subparsers.add_parser("vsx-crossmatch", description="Crossmatch ASAS-SN catalog with VSX catalog")
-    # ML
-    subparsers.add_parser("ml-train", description="Train baseline ML classifier on reviewed labels")
-    subparsers.add_parser("ml-predict", description="Score candidates with a trained ML model")
     # Other
     subparsers.add_parser("vetting", description="Run post-review vetting (SIMBAD, Gaia, ASAS-SN, ZTF, TNS, eROSITA, ...)")
     subparsers.add_parser("dev", description="Developer diagnostics (score, stats)")

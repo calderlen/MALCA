@@ -391,9 +391,10 @@ def main():
     )
     parser.add_argument("csv_paths", nargs="+", help="Path(s) to light curve CSV file(s)")
     parser.add_argument(
-        "--results-csv",
+        "--results",
+        dest="results_csv",
         type=Path,
-        help="Path to results CSV (optional, for filtering which to plot)",
+        help="Path to results Parquet (optional, for filtering which to plot)",
     )
     parser.add_argument(
         "--out-dir",
@@ -432,7 +433,7 @@ def main():
                                               
     csv_paths = [Path(p) for p in args.csv_paths]
     if args.results_csv and args.results_csv.exists():
-        results_df = pd.read_csv(args.results_csv)
+        results_df = pd.read_parquet(args.results_csv)
                                   
         results_ids = set()
         for path in results_df["path"]:
@@ -446,7 +447,7 @@ def main():
             p for p in csv_paths
             if p.stem.split("-")[0] in results_ids
         ]
-        print(f"Filtered to {len(csv_paths)} light curves from results CSV")
+        print(f"Filtered to {len(csv_paths)} light curves from results Parquet")
     
                            
     for csv_path in csv_paths:

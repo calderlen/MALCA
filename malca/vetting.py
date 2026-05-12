@@ -92,6 +92,7 @@ from malca.config import (
     AAVSO_RESULTS_PER_PAGE,
 )
 from malca.utils import batch_tap_crossmatch
+from malca.table_io import read_parquet_table, write_parquet_table
 
 
 
@@ -3160,8 +3161,8 @@ def main():
     g_workers = parser.add_argument_group("Workers & options")
     g_general = parser.add_argument_group("General")
 
-    g_io.add_argument("input", type=Path, help="Input parquet/CSV with candidates (needs ra, dec columns)")
-    g_io.add_argument("-o", "--output", type=Path, default=None, help="Output parquet path (default: <input>_vetted.parquet)")
+    g_io.add_argument("input", type=Path, help="Input Parquet with candidates (needs ra, dec columns)")
+    g_io.add_argument("-o", "--output", type=Path, default=None, help="Output Parquet path (default: <input>_vetted.parquet)")
     g_io.add_argument("--min-score", type=float, default=None, help="Only vet candidates with interest_score >= this value")
     g_radii.add_argument("--simbad-radius", type=float, default=SIMBAD_RADIUS_ARCSEC, help=f"SIMBAD search radius in arcsec (default: {SIMBAD_RADIUS_ARCSEC})")
     g_radii.add_argument("--asassn-radius", type=float, default=ASASSN_VAR_RADIUS_ARCSEC, help=f"ASAS-SN crossmatch radius in arcsec (default: {ASASSN_VAR_RADIUS_ARCSEC})")
@@ -3198,12 +3199,7 @@ def main():
 
     # Load input
     path = args.input.expanduser()
-    if path.suffix.lower() in (".parquet", ".pq"):
-        df = pd.read_parquet(path)
-    elif path.suffix.lower() == ".csv":
-        df = pd.read_csv(path)
-    else:
-        raise ValueError(f"Unsupported file type: {path.suffix}")
+    df = read_parquet_table(path)
 
     print(f"Loaded {len(df)} candidates from {path}")
 
@@ -3254,7 +3250,7 @@ def main():
 
     # Save output
     out_path = args.output or path.with_name(path.stem + "_vetted.parquet")
-    df.to_parquet(out_path, index=False)
+    write_parquet_table(df, out_path)
     print(f"\nSaved vetted results to {out_path}")
 
     # Clean up checkpoint on successful completion.

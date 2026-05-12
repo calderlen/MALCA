@@ -155,7 +155,7 @@ def dip_finder_naive(
     mag_bins=('12_12.5','12.5_13','13_13.5','13.5_14','14_14.5','14.5_15'),
     id_column="asas_sn_id",
     out_dir="./peak_results",
-    out_format="csv",
+    out_format="parquet",
     n_workers=None,
     chunk_size=250000,
     max_inflight=None,
@@ -231,10 +231,7 @@ def dip_finder_naive(
             continue
 
         rows_buffer = []
-        if out_format == "csv":
-            header_written = False
-        else:
-            header_written = None                      
+        header_written = None
 
         with ProcessPoolExecutor(max_workers=n_workers) as ex:
             pending = set()
@@ -246,10 +243,11 @@ def dip_finder_naive(
                 """
                 
                 """
-                if out_format == "csv" and len(rows_buffer) >= chunk_size:
-                    mode = "a" if os.path.exists(out_path) else "w"
-                    header = not os.path.exists(out_path)
-                    pd.DataFrame(rows_buffer).to_csv(out_path, index=False, mode=mode, header=header)
+                if len(rows_buffer) >= chunk_size:
+                    chunk = pd.DataFrame(rows_buffer)
+                    if os.path.exists(out_path):
+                        chunk = pd.concat([pd.read_parquet(out_path), chunk], ignore_index=True)
+                    chunk.to_parquet(out_path, index=False, compression="zstd")
                     rows_buffer.clear()
 
 
@@ -313,13 +311,11 @@ def dip_finder_naive(
 
                      
         if rows_buffer:
-            if out_format == "parquet":
-                pd.DataFrame(rows_buffer).to_parquet(out_path, index=False, compression="zstd")
-            else:
-                mode = "a" if os.path.exists(out_path) else "w"
-                header = not os.path.exists(out_path)
-                pd.DataFrame(rows_buffer).to_csv(out_path, index=False, mode=mode, header=header)
-                rows_buffer.clear()
+            chunk = pd.DataFrame(rows_buffer)
+            if os.path.exists(out_path):
+                chunk = pd.concat([pd.read_parquet(out_path), chunk], ignore_index=True)
+            chunk.to_parquet(out_path, index=False, compression="zstd")
+            rows_buffer.clear()
 
     if collected_rows is not None:
         return pd.DataFrame(collected_rows)

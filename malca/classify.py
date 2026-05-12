@@ -10,7 +10,7 @@ Implements classification scenarios from Tzanidakis et al. (2025):
 - Disk occultation probability
 
 Usage:
-    malca classify --input output/events.csv --output output/classified.csv
+    malca classify --input output/events.parquet --output output/classified.parquet
 """
 from pathlib import Path
 import argparse
@@ -42,7 +42,7 @@ from malca.config import (
     CLASSIFY_DISK_THRESHOLD, CLASSIFY_MS_EB_REJECTION, CLASSIFY_MS_CV_REJECTION,
     CLASSIFY_IPHAS_RADIUS_ARCSEC, CLASSIFY_PS1_RADIUS_ARCSEC,
 )
-from malca.config import PARQUET_OUTPUT_COMPRESSION
+from malca.table_io import read_parquet_table, write_parquet_table
 from malca.config import VIZIER_TAP_URL
 from malca.utils import batch_tap_crossmatch
 
@@ -625,8 +625,8 @@ def compute_all_classifications(df: pd.DataFrame) -> pd.DataFrame:
 
 def main():
     parser = argparse.ArgumentParser(description="Classify dipper candidates (Tzanidakis+ 2025)")
-    parser.add_argument("--input", type=Path, required=True, help="Input events CSV/Parquet")
-    parser.add_argument("--output", type=Path, required=True, help="Output classified CSV/Parquet")
+    parser.add_argument("--input", type=Path, required=True, help="Input events Parquet")
+    parser.add_argument("--output", type=Path, required=True, help="Output classified Parquet")
     parser.add_argument("--skip-eb", action="store_true", help="Skip EB check")
     parser.add_argument("--skip-cv", action="store_true", help="Skip CV check")
     parser.add_argument("--skip-starspot", action="store_true", help="Skip starspot check")
@@ -637,10 +637,7 @@ def main():
     
     # Load
     print(f"Loading {args.input}...")
-    if str(args.input).endswith('.parquet'):
-        df = pd.read_parquet(args.input)
-    else:
-        df = pd.read_csv(args.input)
+    df = read_parquet_table(args.input)
     
     print(f"Loaded {len(df)} events")
     
@@ -663,12 +660,7 @@ def main():
     
     # Save
     print(f"\nSaving to {args.output}...")
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    
-    if str(args.output).endswith('.parquet'):
-        df.to_parquet(args.output, index=False, compression=PARQUET_OUTPUT_COMPRESSION)
-    else:
-        df.to_csv(args.output, index=False)
+    write_parquet_table(df, args.output)
     
     print("Done!")
 

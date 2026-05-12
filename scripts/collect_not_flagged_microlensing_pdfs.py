@@ -2,7 +2,7 @@
 """Copy microlensing fit PDFs for rows not visually flagged bad/probably_bad.
 
 Defaults:
-  - results CSV: latest output/microlensing/microlensing_results_*.csv
+  - results Parquet: latest output/microlensing/microlensing_results_*.parquet
   - source PDFs: output/microlensing/fit_pdfs
   - destination: output/microlensing/fit_pdfs_not_flagged
 """
@@ -24,10 +24,10 @@ def _find_repo_root(start: Path) -> Path:
     raise FileNotFoundError("Could not find repo root (missing pyproject.toml).")
 
 
-def _default_results_csv(output_root: Path) -> Path:
-    files = sorted(output_root.glob("microlensing_results_*.csv"), key=lambda p: p.stat().st_mtime)
+def _default_results_parquet(output_root: Path) -> Path:
+    files = sorted(output_root.glob("microlensing_results_*.parquet"), key=lambda p: p.stat().st_mtime)
     if not files:
-        raise FileNotFoundError(f"No microlensing_results_*.csv under {output_root}")
+        raise FileNotFoundError(f"No microlensing_results_*.parquet under {output_root}")
     return files[-1]
 
 
@@ -62,10 +62,10 @@ def main(argv: list[str] | None = None) -> int:
         description="Copy fit PDFs for candidates not flagged bad/probably_bad by visual inspection.",
     )
     ap.add_argument(
-        "--results-csv",
+        "--results-parquet",
         type=Path,
         default=None,
-        help="Path to microlensing results CSV (default: newest output/microlensing/microlensing_results_*.csv).",
+        help="Path to microlensing results Parquet (default: newest output/microlensing/microlensing_results_*.parquet).",
     )
     ap.add_argument(
         "--source-dir",
@@ -82,22 +82,22 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dry-run", action="store_true", help="Print actions without copying files.")
     args = ap.parse_args(argv)
 
-    results_csv = (
-        args.results_csv.expanduser().resolve()
-        if args.results_csv is not None
-        else _default_results_csv(out_root)
+    results_parquet = (
+        args.results_parquet.expanduser().resolve()
+        if args.results_parquet is not None
+        else _default_results_parquet(out_root)
     )
     source_dir = args.source_dir.expanduser().resolve()
     dest_dir = args.dest_dir.expanduser().resolve()
 
-    if not results_csv.is_file():
-        raise FileNotFoundError(f"Results CSV not found: {results_csv}")
+    if not results_parquet.is_file():
+        raise FileNotFoundError(f"Results Parquet not found: {results_parquet}")
     if not source_dir.is_dir():
         raise FileNotFoundError(f"Source PDF directory not found: {source_dir}")
 
-    df = pd.read_csv(results_csv)
+    df = pd.read_parquet(results_parquet)
     if df.empty:
-        print(f"No rows in {results_csv}")
+        print(f"No rows in {results_parquet}")
         return 0
 
     if "visual_inspection_subjective_flag" not in df.columns:
@@ -143,7 +143,7 @@ def main(argv: list[str] | None = None) -> int:
         for src in to_copy:
             shutil.copy2(src, dest_dir / src.name)
 
-    print(f"Results CSV: {results_csv}")
+    print(f"Results Parquet: {results_parquet}")
     print(f"Source PDFs: {source_dir}")
     print(f"Destination: {dest_dir}")
     print(f"Rows total: {len(df)}")

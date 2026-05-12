@@ -495,7 +495,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=f"Available baseline functions: {', '.join(BASELINE_FUNCTIONS.keys())}"
     )
-    parser.add_argument("results_csv", type=Path, help="CSV file with detection results (from test_skypatrol.py)")
+    parser.add_argument("results_csv", type=Path, help="Parquet file with detection results")
     parser.add_argument("--csv-dir", default="data/skypatrol2", help="Directory with SkyPatrol CSV files")
     parser.add_argument("--out-dir", default="plots", help="Output directory for plots")
     parser.add_argument("--format", choices=("pdf", "png", "jpg"), default="png", help="Output format")
@@ -560,8 +560,8 @@ def main():
     
                   
     if not args.results_csv.exists():
-        parser.error(f"Results CSV file not found: {args.results_csv}")
-    results_df = pd.read_csv(args.results_csv)
+        parser.error(f"Results Parquet file not found: {args.results_csv}")
+    results_df = pd.read_parquet(args.results_csv)
     
                                                             
     id_column = None

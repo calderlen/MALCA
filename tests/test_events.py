@@ -493,7 +493,7 @@ def test_events_main_phase_template_uses_metadata_period_and_keeps_audit_fields(
     input_file = tmp_path / "paths.txt"
     input_file.write_text(f"{lc_path}\n", encoding="ascii")
 
-    metadata_file = tmp_path / "metadata.csv"
+    metadata_file = tmp_path / "metadata.parquet"
     pd.DataFrame(
         {
             "path": [str(lc_path)],
@@ -504,7 +504,7 @@ def test_events_main_phase_template_uses_metadata_period_and_keeps_audit_fields(
             "pre_periodicity_selected_period": [6.0],
             "pre_periodicity_method": ["pdm"],
         }
-    ).to_csv(metadata_file, index=False)
+    ).to_parquet(metadata_file, index=False)
 
     output_path = tmp_path / "lc_events_results.parquet"
     config_path = _write_events_config(
@@ -523,7 +523,7 @@ def test_events_main_phase_template_uses_metadata_period_and_keeps_audit_fields(
             "malca.events",
             "--input-file",
             str(input_file),
-            "--metadata-csv",
+            "--metadata",
             str(metadata_file),
             "--output",
             str(output_path),
@@ -604,8 +604,8 @@ def test_events_main_fails_on_high_error_fraction_and_only_checkpoints_successes
     checkpoint = output_path.with_name(f"{output_path.stem}_PROCESSED.txt")
     assert checkpoint.read_text(encoding="ascii").splitlines() == ["ok.dat2"]
 
-    error_log = output_path.with_name(f"{output_path.stem}_ERRORS.csv")
-    errors = pd.read_csv(error_log)
+    error_log = output_path.with_name(f"{output_path.stem}_ERRORS.parquet")
+    errors = pd.read_parquet(error_log)
     assert set(errors["path"]) == {"bad1.dat2", "bad2.dat2"}
 
 
@@ -619,14 +619,14 @@ def test_events_main_preserves_existing_rows_when_parquet_metadata_type_changes(
         input_file = tmp_path / f"{path_value}.txt"
         input_file.write_text(f"{path_value}\n", encoding="ascii")
         config_path = _write_events_config(tmp_path, output_format="parquet", min_mag_offset=0)
-        metadata_file = tmp_path / f"{path_value}.metadata.csv"
+        metadata_file = tmp_path / f"{path_value}.metadata.parquet"
         pd.DataFrame(
             {
                 "path": [path_value],
                 "observer_note": [observer_note],
                 "priority_rank": [priority_rank],
             }
-        ).to_csv(metadata_file, index=False)
+        ).to_parquet(metadata_file, index=False)
 
         def fake_process_one(path: str, path_metadata: dict | None) -> dict:
             return {
@@ -644,7 +644,7 @@ def test_events_main_preserves_existing_rows_when_parquet_metadata_type_changes(
                 "malca.events",
                 "--input-file",
                 str(input_file),
-                "--metadata-csv",
+                "--metadata",
                 str(metadata_file),
                 "--output",
                 str(output_path),
@@ -829,14 +829,14 @@ def test_events_main_normalizes_older_parquet_before_append(
     assert json.loads(out.loc[1, "extra_json"]) == {}
 
 
-def test_events_main_csv_header_uses_canonical_order(
+def test_events_main_parquet_schema_uses_canonical_order(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     input_file = tmp_path / "paths.txt"
     input_file.write_text("first.dat2\n", encoding="ascii")
-    output_path = tmp_path / "lc_events_results.csv"
-    config_path = _write_events_config(tmp_path, output_format="csv", min_mag_offset=0)
+    output_path = tmp_path / "lc_events_results.parquet"
+    config_path = _write_events_config(tmp_path, output_format="parquet", min_mag_offset=0)
 
     def fake_process_one(path: str, path_metadata: dict | None) -> dict:
         return {
@@ -865,5 +865,5 @@ def test_events_main_csv_header_uses_canonical_order(
 
     events_main()
 
-    columns = pd.read_csv(output_path, nrows=0).columns.tolist()
+    columns = pd.read_parquet(output_path).columns.tolist()
     assert columns == build_events_writer_columns()

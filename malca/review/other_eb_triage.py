@@ -735,12 +735,12 @@ def export_eb_triage_products(
 
     subset_path = out_dir / "other_subset.parquet"
     triage_path = out_dir / "other_eb_triage.parquet"
-    top_path = out_dir / "other_eb_top_candidates.csv"
+    top_path = out_dir / "other_eb_top_candidates.parquet"
     summary_plot_path = out_dir / "other_eb_triage_summary.png"
 
     subset_df.to_parquet(subset_path, index=False)
     triage_df.to_parquet(triage_path, index=False)
-    top_candidate_export_frame(triage_df).to_csv(top_path, index=False)
+    top_candidate_export_frame(triage_df).to_parquet(top_path, index=False)
     fig = build_eb_triage_summary_figure(triage_df)
     fig.savefig(summary_plot_path, dpi=150, bbox_inches="tight")
     plt.close(fig)

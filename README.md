@@ -41,7 +41,7 @@ conda activate malca
   - Index CSVs: `index*.csv` with columns like `asas_sn_id, ra_deg, dec_deg, pm_ra, pm_dec, ...`
 - Light curves: `lc<num>_cal/` folders containing `<asas_sn_id>.dat2`
 - Optional catalogs:
-  - VSX crossmatch: `input/vsx/asassn_x_vsx_matches_20250919_2252.csv` (pre-crossmatched with columns: asas_sn_id, sep_arcsec, class)
+  - VSX crossmatch: `input/vsx/asassn_x_vsx_matches_20250919_2252.parquet` (pre-crossmatched with columns: asas_sn_id, sep_arcsec, class)
   - Raw VSX: `input/vsx/vsxcat.090525.csv` (used by `vsx/filter.py` to generate crossmatch)
   - Note: Bright nearby star (BNS) filtering is handled upstream by ASAS-SN during LC generation
 
@@ -49,7 +49,7 @@ conda activate malca
 - Core + runtime modules: numpy, pandas, scipy, numba, astropy, celerite2, matplotlib, tqdm, pyarrow
 - Review + plotting: dash, dash-bootstrap-components, plotly
 - Characterization + catalog access: astroquery, dustmaps3d, pyvo, banyan-sigma, requests
-- ML utilities: lightgbm, joblib
+- ML utilities: lightgbm
 
 ## Quick Start
 ```bash
@@ -177,10 +177,7 @@ flowchart TB
     APP --> LABELS[("Labeled Reviews<br/>score + event_class")]
 
     %% ── Machine Learning ─────────────────────────────────────
-    subgraph mlgrp["Meta Analysis (meta_analysis/)"]
-        PCA_META["pca.py<br/>Variability PCA"]
-        LTV_PCA_META["ltv_pca.py<br/>LTV PCA summaries"]
-        COTREND["cotrending.py<br/>Field-group cotrending scaffolding"]
+    subgraph mlgrp["Machine Learning (meta_analysis/ml/)"]
         FEAT["features.py<br/>107 curated features"]
         TRAIN["train.py<br/>LightGBM classifier"]
         PRED["predict.py<br/>Score new candidates"]
@@ -260,11 +257,10 @@ flowchart TB
     end
 
     %% ── CLI Entry Point ──────────────────────────────────────
-    CLI["__main__.py — malca CLI<br/>manifest, pipeline, filter, tag, events, plot, characterize, classify,<br/>vetting, review, ml-train, ml-predict, injection, validate, reproduce,<br/>ltv-pipeline, ltv-core, ltv-build, ltv-ingest, attrition, dev, ..."]
+    CLI["__main__.py — malca CLI<br/>manifest, pipeline, filter, tag, events, plot, characterize, classify,<br/>vetting, review, injection, validate, reproduce,<br/>ltv-pipeline, ltv-core, ltv-build, ltv-ingest, attrition, dev, ..."]
     CLI -.-> discovery
     CLI -.-> postdet
     CLI -.-> reviewgrp
-    CLI -.-> mlgrp
     CLI -.-> ltvpipe
     CLI -.-> evalgrp
     CLI -.-> PLOT
@@ -275,7 +271,7 @@ flowchart TB
 - **Post-detection**: `characterize.py` (Gaia, dust, YSO, galactic coords, auxiliary catalogs) &rarr; `vetting.py` (SIMBAD, ZTF, TNS, eROSITA, ALeRCE, ATLAS, NEOWISE, ...) &rarr; `classify.py` (EB/CV/starspot/disk/YSO) &rarr; `enrich/` (neighbor catalogs, spectra availability)
 - **LTV pipeline**: `ltv/pipeline.py` &rarr; `core.py` &rarr; `filter.py` &rarr; `crossmatch.py` &rarr; `stochastic.py` &rarr; `neowise.py` &rarr; `dust.py` &rarr; `cmd.py` &rarr; `bundle.py` &rarr; `review.py` (ingest to review DB)
 - **Review**: `review/app.py` (Dash GUI with scoring, event classes, diagnostic plots, vetting cards) &rarr; labeled training set
-- **Meta-analysis**: `meta_analysis/pca.py` (variability PCA), `meta_analysis/cotrending.py` (field-group cotrending scaffolding), `meta_analysis/ml/features.py` (107 curated features) &rarr; `meta_analysis/ml/train.py` (LightGBM classifier) &rarr; `meta_analysis/ml/predict.py` (score candidates)
+- **Machine learning**: `meta_analysis/ml/lightgbm_classifier_prototype.ipynb` (draft LightGBM classifier workflow)
 - **Evaluation**: `injection.py` (synthetic dips), `detection_rate.py`, `validation.py`, `reproduce.py`, `attrition.py`, `false_positive.py`
 - **Core libraries**: `utils.py`, `lightcurve_io.py`, `baseline.py`, `triggering.py`, `score.py`, `stats.py`, `periodogram.py`, `fetch.py`, `gaia_fetch.py`
 - **Configuration**: `config.py` centralizes all pipeline parameters
@@ -415,7 +411,7 @@ plot_efficiency_threshold_contour(cube, threshold=0.5, output_path="depth_at_50p
 
 ```bash
 # Re-run detection on raw data (requires manifest and .dat2 files)
-malca reproduce --manifest output/lc_manifest.parquet --candidates my_targets.csv --output-dir output/results_repro --workers 10
+malca reproduce --manifest output/lc_manifest.parquet --candidates my_targets.parquet --output-dir output/results_repro --workers 10
 ```
 **Note**: Reproduction uses Bayesian detection.
 
@@ -441,7 +437,7 @@ malca validate --latest-run
 malca validate --run-dir output/runs/20250119_1349
 
 # With custom candidates
-malca validate --method loo --candidates my_targets.csv -v
+malca validate --method loo --candidates my_targets.parquet -v
 
 # Reproduce on built-in candidates using local SkyPatrol CSVs
 malca validate --candidates brayden_candidates --skypatrol-dir input/skypatrol2 --method bf --workers 4
@@ -566,29 +562,7 @@ malca review
 - Collapsible candidate panels with metadata health, vetting banner, external follow-up cards, diagnostic plots, and run-config provenance
 - Sidebar queue controls: unreviewed/failed filters, grouped numeric/text/select filters, multi-column sort, open-existing jump, and native camera selection
 - Import/fetch workflows: import tables or raw LC files (optional characterize + vet on import), or fetch by ASAS-SN ID, Gaia DR3 ID, or coordinates
-- Per-candidate pipeline stage chips with "Run All Missing" / "Re-run Current", plus notes/followup/review-pass tracking and CSV/Parquet export
-
-#### malca ml-train
-
-Train a baseline classifier on reviewed labels:
-```bash
-malca ml-train --input output/review/reviewed.parquet --output-dir output/ml --cv-folds 5
-```
-- Uses curated physics/context features from `malca/meta_analysis/ml/features.py`
-- Trains a LightGBM classifier on labeled `event_class` values (dropping `unclassified` by default)
-- Saves model artifacts to `output/ml/` (`candidate_classifier.joblib`, `feature_schema.json`, `metrics.json`)
-
-#### malca ml-predict
-
-Score candidates with a trained classifier:
-
-```bash
-malca ml-predict --model-dir output/ml --input output/review/reviewed.parquet --output output/review/scored.parquet
-```
-
-- Loads `candidate_classifier.joblib` + `feature_schema.json`
-- Applies the same feature transforms used during training
-- Appends `ml_predicted_class` and `ml_prob_<class>` columns to the output table
+- Per-candidate pipeline stage chips with "Run All Missing" / "Re-run Current", plus notes/followup/review-pass tracking and Parquet export
 
 #### malca vsx-filter
 
@@ -600,19 +574,19 @@ malca vsx-filter --stamp 20260213_120000   # timestamped output filenames
 ```
 - Reads the raw fixed-width VSX catalog and filters out unwanted variability classes (eclipsing binaries, supernovae, AGN, etc.)
 - Concatenates masked ASAS-SN index CSVs from all magnitude bins
-- Outputs `asassn_catalog.csv` and `vsx_cleaned.csv` (or timestamped variants with `--stamp`)
+- Outputs `asassn_catalog.parquet` and `vsx_cleaned.parquet` (or timestamped variants with `--stamp`)
 
 #### malca vsx-crossmatch
 
 Crossmatch ASAS-SN sources with VSX by position (with proper-motion correction):
 ```bash
 malca vsx-crossmatch --help
-malca vsx-crossmatch --asassn-csv input/vsx/asassn_catalog.csv --vsx-csv input/vsx/vsx_cleaned.csv
+malca vsx-crossmatch --asassn-table input/vsx/asassn_catalog.parquet --vsx-table input/vsx/vsx_cleaned.parquet
 malca vsx-crossmatch --radius 5.0 --stamp 20260213_120000
 ```
 - Propagates ASAS-SN coordinates from epoch 2016.0 to 2000.0 using proper motions
 - Default match radius is 3 arcseconds
-- Outputs `asassn_x_vsx_matches_{stamp}.csv` to `input/vsx/`
+- Outputs `asassn_x_vsx_matches_{stamp}.parquet` to `input/vsx/`
 
 ## Output Directory Structure
 
@@ -634,9 +608,7 @@ output/runs/20250121_143052/          # Timestamp-based run directory
 ├── tags/                             # Tagging results
 │   ├── lc_filtered_{mag_bin}.parquet
 │   ├── lc_stats_checkpoint_{mag_bin}.parquet
-│   ├── rejected_tag_{mag_bin}.csv
-│   └── vsx_tags/
-│       └── vsx_tags_{mag_bin}.csv
+│   └── rejected_tag_{mag_bin}.parquet
 │
 ├── paths/                            # Input paths
 │   └── filtered_paths_{mag_bin}.txt
@@ -645,7 +617,7 @@ output/runs/20250121_143052/          # Timestamp-based run directory
 │   ├── lc_events_results.parquet     # Raw detection output (includes dipper_score)
 │   ├── lc_events_results_PROCESSED.txt  # Checkpoint log
 │   ├── lc_events_results_filtered.parquet   # After filter.py
-│   └── rejected_filter.csv           # Filter rejections
+│   └── rejected_filter.parquet       # Filter rejections
 │
 └── plots/                            # Visualizations (plot.py)
     ├── {source_id}_dips.png

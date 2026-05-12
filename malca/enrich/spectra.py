@@ -8,6 +8,7 @@ from tqdm.auto import tqdm
 
 from malca.enrich.neighbor import _ensure_candidate_id, _query_catalog_bulk
 from malca.config import SPECTRA_RADIUS_ARCSEC, SPECTRA_CHUNK_SIZE
+from malca.table_io import read_parquet_table
 
 
 DEFAULT_SPECTRA_CATALOGS: dict[str, str] = {
@@ -172,17 +173,14 @@ def run_spectra_availability(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Bulk spectra-availability enrichment")
-    parser.add_argument("--input", type=Path, required=True, help="Input CSV/Parquet with candidate coordinates")
+    parser.add_argument("--input", type=Path, required=True, help="Input Parquet with candidate coordinates")
     parser.add_argument("--output-dir", dest="out_dir", type=Path, required=True, help="Output directory")
     parser.add_argument("--radius-arcsec", type=float, default=SPECTRA_RADIUS_ARCSEC)
     parser.add_argument("--chunk-size", type=int, default=SPECTRA_CHUNK_SIZE)
     parser.add_argument("--cache", type=Path, default=None)
     args = parser.parse_args()
 
-    if args.input.suffix.lower() in {".parquet", ".pq"}:
-        df = pd.read_parquet(args.input)
-    else:
-        df = pd.read_csv(args.input)
+    df = read_parquet_table(args.input)
     run_spectra_availability(
         df,
         out_dir=args.out_dir,

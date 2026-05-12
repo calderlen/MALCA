@@ -6,7 +6,7 @@ Run from the repository root::
 
     python scripts/microlensing.py --help
 
-Writes one results table ``output/microlensing/microlensing_results_<timestamp>.csv`` (including
+Writes one results table ``output/microlensing/microlensing_results_<timestamp>.parquet`` (including
 ``gal_l_deg``, ``gal_b_deg``, ``mw_line_of_sight_region`` (bulge / disk / LMC / SMC / halo), and
 ``vizier_url`` per row), subjective visual-review columns for **probably_bad** LCs only
 (``visual_inspection_subjective_flag``, ``visual_inspection_subjective_note``; see
@@ -109,9 +109,9 @@ MARCH18_CANDIDATE_IDS = [
     "77310050643",
 ]
 
-# Subjective human visual review of light curves / fits (not automated). Merged into the results CSV as
+# Subjective human visual review of light curves / fits (not automated). Merged into the results Parquet as
 # ``visual_inspection_subjective_flag`` / ``visual_inspection_subjective_note``. IDs are ASAS-SN ``candidate_id``
-# strings. **Bad** IDs are excluded from all microlensing processing below (no fit, no CSV row).
+# strings. **Bad** IDs are excluded from all microlensing processing below (no fit, no result row).
 # ``probably_bad`` IDs remain in the pipeline and are flagged in the output.
 VISUAL_INSPECTION_BAD_IDS: tuple[str, ...] = (
     "481037066830",
@@ -4150,20 +4150,20 @@ def fit_candidate_context(context: dict[str, object]) -> dict[str, object]:
     }
 
 
-def _load_candidate_metadata_from_candidates_csv(
+def _load_candidate_metadata_from_candidates_parquet(
     candidate_ids: list[str] | set[str] | tuple[str, ...],
 ) -> dict[str, dict[str, object]]:
     """
-    Load minimal metadata keyed by candidate/asassn ID from ``output/candidates.csv``.
+    Load minimal metadata keyed by candidate/asassn ID from ``output/candidates.parquet``.
 
     Returns a mapping ``candidate_id -> {'ra_deg': float, 'dec_deg': float}`` for IDs present
     in the local candidates catalog.
     """
-    path = REPO_ROOT / 'output' / 'candidates.csv'
+    path = REPO_ROOT / 'output' / 'candidates.parquet'
     if not path.exists():
         return {}
     try:
-        df = pd.read_csv(path, usecols=['asas_sn_id', 'ra_deg', 'dec_deg'])
+        df = pd.read_parquet(path, columns=['asas_sn_id', 'ra_deg', 'dec_deg'])
     except Exception:
         return {}
     if df.empty:
@@ -5509,8 +5509,8 @@ def run_microlensing_pipeline(
                 candidate_id_to_lc_paths[cid] = lc_paths
 
         if candidate_id_to_lc_paths:
-            # Step 1: recover coordinates from local output/candidates.csv keyed by asas_sn_id.
-            candidate_metadata_by_id = _load_candidate_metadata_from_candidates_csv(
+            # Step 1: recover coordinates from local output/candidates.parquet keyed by asas_sn_id.
+            candidate_metadata_by_id = _load_candidate_metadata_from_candidates_parquet(
                 list(candidate_id_to_lc_paths.keys()),
             )
             # Step 2 (fallback): for IDs still missing coordinates, try SkyPatrol2 (pyasassn).
@@ -5538,7 +5538,7 @@ def run_microlensing_pipeline(
                 print(
                     f"  Metadata recovered for {len(candidate_metadata_by_id)} / "
                     f"{len(candidate_id_to_lc_paths)} lightcurve-only candidate(s) "
-                    f"(local candidates.csv first, SkyPatrol2 fallback); "
+                    f"(local candidates.parquet first, SkyPatrol2 fallback); "
                     f"Gaia IDs recovered for {n_with_gaia}.",
                     flush=True,
                 )
@@ -5701,8 +5701,8 @@ def run_microlensing_pipeline(
         _inject_microlensing_table_into_summaries(microlensing_table_df, jumps14_fit_results)
 
     _ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-    microlensing_results_path = MICROLENSING_OUTPUT_ROOT / f'microlensing_results_{_ts}.csv'
-    microlensing_table_df.to_csv(microlensing_results_path, index=False)
+    microlensing_results_path = MICROLENSING_OUTPUT_ROOT / f'microlensing_results_{_ts}.parquet'
+    microlensing_table_df.to_parquet(microlensing_results_path, index=False)
     if show_progress:
         print(f"Results table written to {microlensing_results_path}", flush=True)
 
@@ -5776,7 +5776,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help=(
             "After fits, run malca.characterize_candidates_df + malca.vet_candidates (Gaia context, SIMBAD, "
-            "ZTF/ASAS-SN vars, TNS, ALeRCE, eROSITA, …; ATLAS forced photometry is not used); merges into the results CSV. "
+            "ZTF/ASAS-SN vars, TNS, ALeRCE, eROSITA, …; ATLAS forced photometry is not used); merges into the results Parquet. "
             "Requires local Gaia parquet for full characterize (see --crossmatch-gaia-catalog)."
         ),
     )
@@ -5831,10 +5831,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Gaia DR3 parquet for characterize (default: <repo>/input/gaia/gaia_dr3_crossmatched.parquet).",
     )
     g_x.add_argument(
-        "--crossmatch-vsx-csv",
+        "--crossmatch-vsx",
+        dest="crossmatch_vsx_csv",
         type=Path,
         default=None,
-        help="ASAS-SN x VSX crossmatch CSV for characterize (default: malca.config VSX_CROSSMATCH_PATH under repo).",
+        help="ASAS-SN x VSX crossmatch Parquet for characterize (default: malca.config VSX_CROSSMATCH_PATH under repo).",
     )
     g_x.add_argument(
         "--crossmatch-method",

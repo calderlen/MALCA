@@ -25,8 +25,7 @@ def main():
             continue
 
         # Check for events results file
-        events_files = list(results_dir.glob("*events_results*.csv")) + \
-                       list(results_dir.glob("*events_results*.parquet"))
+        events_files = list(results_dir.glob("*events_results*.parquet"))
         if not events_files:
             print(f"[{run_dir.name}] Skipping - no events results file")
             continue

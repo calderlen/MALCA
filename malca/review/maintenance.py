@@ -4,14 +4,13 @@ import argparse
 from contextlib import closing
 from pathlib import Path
 
-import pandas as pd
-
 from malca.review.store import (
     db_connect,
     load_candidates_file,
     merge_candidate_results,
     merge_vetting_results,
 )
+from malca.table_io import read_parquet_table
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -33,7 +32,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Merge candidate columns into a review DB",
     )
     merge_candidates.add_argument("--review-db", required=True, type=Path, help="Review SQLite DB")
-    merge_candidates.add_argument("--input", required=True, type=Path, help="Candidate CSV/parquet file")
+    merge_candidates.add_argument("--input", required=True, type=Path, help="Candidate Parquet file")
     return parser
 
 
@@ -46,7 +45,7 @@ def main() -> None:
 
     with closing(db_connect(review_db)) as conn:
         if args.command == "merge-vetting":
-            df = pd.read_parquet(input_path)
+            df = read_parquet_table(input_path)
             updated = merge_vetting_results(conn, df)
         elif args.command == "merge-candidates":
             df = load_candidates_file(input_path)

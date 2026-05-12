@@ -38,6 +38,7 @@ from malca.config import MAD_SCALE
 from malca.events import score_lightcurve
 from malca.phase import BAND_LABELS, camera_labels, phase_fold_dataframe
 from malca.review.metadata import REVIEW_METADATA_FIELDS, normalize_vsx_record
+from malca.table_io import read_parquet_table
 from malca.utils import clean_lc, read_lc_dat2, filter_bad_cameras
 from malca.utils import gaussian, paczynski_kernel, read_skypatrol_csv as _read_skypatrol_csv
 
@@ -171,15 +172,10 @@ def load_events_paths(
 ) -> list[Path]:
     """
     Load events/post-filter output and return unique LC paths.
-    Supports CSV/Parquet.
+    Supports Parquet.
     """
     events_path = Path(events_path)
-    suffix = events_path.suffix.lower()
-
-    if suffix == ".parquet":
-        df = pd.read_parquet(events_path)
-    else:
-        df = pd.read_csv(events_path)
+    df = read_parquet_table(events_path)
 
     if path_col not in df.columns:
         raise KeyError(f"Missing '{path_col}' column in {events_path}")
@@ -329,20 +325,23 @@ def plot_phase_folded_lightcurve(
     return None
 
 
-def load_detection_results(csv_path):
+def load_detection_results(table_path):
     """
-    Load detection_results.csv with trimmed strings; used for metadata lookup.
+    Load detection results Parquet with trimmed strings; used for metadata lookup.
     """
-    if csv_path is None:
+    if table_path is None:
         return None
 
-    csv_path = Path(csv_path)
-    if not csv_path.exists():
-        raise FileNotFoundError(f"detection_results file not found: {csv_path}")
+    table_path = Path(table_path)
+    if not table_path.exists():
+        raise FileNotFoundError(f"detection_results file not found: {table_path}")
 
-    df = pd.read_csv(csv_path, dtype=str, keep_default_na=False)
-    df = df.apply(lambda x: x.str.strip() if x.dtype == "object" else x)
-    df["Match_ID"] = df["DAT_Path"].apply(lambda p: Path(p).stem if p else "")
+    df = read_parquet_table(table_path)
+    df = df.fillna("")
+    df = df.apply(lambda x: x.astype(str).str.strip() if x.dtype == "object" else x)
+    path_col = "DAT_Path" if "DAT_Path" in df.columns else "path" if "path" in df.columns else None
+    if path_col is not None:
+        df["Match_ID"] = df[path_col].apply(lambda p: Path(str(p)).stem if p else "")
     return df
 
 
@@ -381,7 +380,7 @@ def lookup_source_metadata(asassn_id=None, *, source_name=None, dat_path=None, c
 def lookup_metadata_for_path(path: Path, detection_results_csv=None):
     """
     Infer metadata for a given light-curve path.
-    Falls back to brayden_candidates if no detection_results CSV is provided.
+    Falls back to brayden_candidates if no detection results table is provided.
     """
     path = Path(path)
     stem = path.stem
@@ -392,7 +391,7 @@ def lookup_metadata_for_path(path: Path, detection_results_csv=None):
     if not meta and "-" in stem:
         meta = lookup_source_metadata(asassn_id=stem.split("-")[0], csv_path=detection_results_csv)
 
-    # Fallback to reproduction candidate metadata if no CSV metadata found.
+    # Fallback to reproduction candidate metadata if no table metadata found.
     if not meta:
         from malca.evaluation.reproduce import brayden_candidates
         source_id = stem.split("-")[0]
@@ -1127,7 +1126,7 @@ def main():
     g_input.add_argument(
         "--results",
         type=Path,
-        help="Events/post-filter output (CSV/Parquet) with a path column (overrides --detect-run).",
+        help="Events/post-filter output Parquet with a path column (overrides --detect-run).",
     )
     g_input.add_argument(
         "--path-col",
@@ -1278,10 +1277,10 @@ def main():
         if not args.results:
             results_dir = detect_run / "results"
             # Look for filtered results first, then raw results
-            candidates = (list(results_dir.glob("*filtered.csv")) +
-                         list(results_dir.glob("*filtered.parquet")) +
-                         list(results_dir.glob("*events_results.csv")) +
-                         list(results_dir.glob("*events_results.parquet")))
+            candidates = (
+                list(results_dir.glob("*filtered.parquet")) +
+                list(results_dir.glob("*events_results.parquet"))
+            )
             if candidates:
                 args.results = candidates[0]
                 print(f"Using results from: {args.results}")
@@ -1356,17 +1355,14 @@ def main():
         csv_paths = []
 
     if args.results and args.results.exists():
-        if args.results.suffix.lower() in {".parquet", ".pq"}:
-            results_df = pd.read_parquet(args.results)
-        else:
-            results_df = pd.read_csv(args.results)
+        results_df = read_parquet_table(args.results)
 
         results_ids: set[str] = set()
         for p in results_df["path"].dropna().astype(str):
             results_ids.add(Path(p).stem.split("-")[0])
 
         csv_paths = [p for p in csv_paths if p.stem.split("-")[0] in results_ids]
-        print(f"Filtered to {len(csv_paths)} light curves from results CSV")
+        print(f"Filtered to {len(csv_paths)} light curves from results Parquet")
 
     if not csv_paths:
         raise SystemExit("No light curve paths provided (use --input or --results).")

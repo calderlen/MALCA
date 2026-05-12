@@ -6,12 +6,12 @@ from pathlib import Path
 
 import pandas as pd
 
-from malca.config import PARQUET_OUTPUT_COMPRESSION
+from malca.table_io import read_parquet_table, write_parquet_table
 
 
 LEGACY_ID_COLUMN = "ASAS-SN ID"
 STANDARD_ID_COLUMN = "asas_sn_id"
-SUPPORTED_SUFFIXES = {".csv", ".parquet", ".pq"}
+SUPPORTED_SUFFIXES = {".parquet"}
 
 
 def _candidate_files(root: Path) -> list[Path]:
@@ -49,22 +49,14 @@ def _normalize_id_column(df: pd.DataFrame) -> tuple[pd.DataFrame, bool]:
 
 
 def _rewrite_file(path: Path, *, write: bool) -> bool:
-    suffix = path.suffix.lower()
-    if suffix == ".csv":
-        df = pd.read_csv(path)
-    else:
-        df = pd.read_parquet(path)
+    df = read_parquet_table(path)
 
     out, changed = _normalize_id_column(df)
     if not changed or (not write):
         return changed
 
-    if suffix == ".csv":
-        tmp_path = path.with_name(f"{path.name}.tmp.csv")
-        out.to_csv(tmp_path, index=False)
-    else:
-        tmp_path = path.with_name(f"{path.name}.tmp.parquet")
-        out.to_parquet(tmp_path, index=False, compression=PARQUET_OUTPUT_COMPRESSION)
+    tmp_path = path.with_name(f"{path.name}.tmp.parquet")
+    write_parquet_table(out, tmp_path)
     tmp_path.replace(path)
     return True
 

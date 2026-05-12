@@ -84,6 +84,7 @@ from malca.review.store import db_connect, import_candidates
 from concurrent.futures import ProcessPoolExecutor
 from malca.stats import compute_stats, _enrich_row_worker
 from malca.tag import RAW_MEDIAN_SUSPECT_COL, apply_tags, filter_camera_medians
+from malca.table_io import read_parquet_table, require_parquet_path
 from malca.utils import log as _log
 from malca.vetting import vet_candidates
 
@@ -462,10 +463,7 @@ def safe_write_parquet(df: pd.DataFrame, path: Path) -> None:
 
 
 def load_table(path: Path) -> pd.DataFrame:
-    path = Path(path)
-    if path.suffix.lower() in {".parquet", ".pq"}:
-        return pd.read_parquet(path)
-    return pd.read_csv(path)
+    return read_parquet_table(path)
 
 
 def _json_stable(value: Any) -> Any:
@@ -542,12 +540,7 @@ def _score_filter_enabled(args: argparse.Namespace) -> bool:
 
 
 def save_table(df: pd.DataFrame, path: Path) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.suffix.lower() in {".parquet", ".pq"}:
-        safe_write_parquet(df, path)
-    else:
-        df.to_csv(path, index=False)
+    safe_write_parquet(df, require_parquet_path(path))
 
 
 def _select_passing_candidates(df: pd.DataFrame) -> pd.DataFrame:
@@ -613,7 +606,7 @@ def _candidate_asassn_index_paths(out_dir: Path, index_override: Path | None = N
     for search_dir in _unique_paths(search_dirs):
         if not search_dir.exists() or (not search_dir.is_dir()):
             continue
-        for pattern in ("asassn_index*.parquet", "asassn_index*.pq", "asassn_index*.csv"):
+        for pattern in ("asassn_index*.parquet",):
             candidates.extend(sorted(search_dir.glob(pattern)))
 
     return _unique_paths(candidates)
@@ -977,10 +970,7 @@ def _add_gaia_ids_from_index(df_events: pd.DataFrame, index_path) -> pd.DataFram
         # Load only the columns we need from the index
         index_path = Path(index_path)
         _log(f"Loading ASASSN index from {index_path.name}...")
-        if index_path.suffix in (".parquet", ".pq"):
-            df_index = pd.read_parquet(index_path, columns=["asas_sn_id", "gaia_id"])
-        else:
-            df_index = pd.read_csv(index_path, usecols=["asas_sn_id", "gaia_id"], low_memory=False)
+        df_index = pd.read_parquet(require_parquet_path(index_path), columns=["asas_sn_id", "gaia_id"])
 
         df_index["asas_sn_id"] = pd.to_numeric(df_index["asas_sn_id"], errors="coerce")
         df_index = df_index.dropna(subset=["asas_sn_id"])
@@ -1312,6 +1302,8 @@ def main():
 
     # IMPORTANT: never write to filesystem root (/output). Default to a writable directory.
     events_format = str(args.output_format).lower()
+    if events_format not in {"parquet", "parquet_chunk"}:
+        raise SystemExit("--output-format must be parquet or parquet_chunk.")
     base_output_root = Path("output").resolve()
     if args.out_dir is not None:
         out_dir = Path(args.out_dir).expanduser()
@@ -1744,7 +1736,7 @@ def main():
                 f"manifest_file: {manifest_file}",
                 f"filtered_file: {filtered_file}",
                 f"stats_checkpoint: {stats_checkpoint_file}",
-                f"rejected_tag: {tags_dir / f'rejected_tag_{mag_bin_tag}.csv'}",
+                f"rejected_tag: {tags_dir / f'rejected_tag_{mag_bin_tag}.parquet'}",
             ]) + "\n"
         for p in (run_log, run_log_tagged):
             p.write_text(run_log_text)
@@ -1761,8 +1753,7 @@ def main():
     def _normalized_output_path(path: Path, fmt: str) -> Path:
         if fmt == "parquet_chunk":
             return path if not path.suffix else path.with_suffix("")
-        expected_suffix = ".csv" if fmt == "csv" else ".parquet"
-        return path if path.suffix.lower() == expected_suffix else path.with_suffix(expected_suffix)
+        return path if path.suffix.lower() == ".parquet" else path.with_suffix(".parquet")
 
     def _output_files_for_path(path: Path, fmt: str) -> list[Path]:
         path = _normalized_output_path(path, fmt)
@@ -1775,8 +1766,6 @@ def main():
         files = _output_files_for_path(path, fmt)
         if not files:
             return pd.DataFrame()
-        if fmt == "csv":
-            return pd.read_csv(files[0])
         return pd.concat([pd.read_parquet(f) for f in files], ignore_index=True)
 
     def _write_events_output(df: pd.DataFrame, path: Path, fmt: str) -> list[Path]:
@@ -1788,11 +1777,7 @@ def main():
             chunk_path = path / "chunk_000000.parquet"
             df.to_parquet(chunk_path, index=False, compression=PARQUET_OUTPUT_COMPRESSION)
             return [chunk_path]
-        if fmt == "csv":
-            path.parent.mkdir(parents=True, exist_ok=True)
-            df.to_csv(path, index=False)
-        else:
-            safe_write_parquet(df, path)
+        safe_write_parquet(df, path)
         return [path]
 
     def _run_events_branch(
@@ -1806,7 +1791,7 @@ def main():
     ) -> tuple[pd.DataFrame, dict[str, object]]:
         branch_output = Path(branch_output)
         checkpoint_log = branch_output.with_name(f"{branch_output.stem}_PROCESSED.txt")
-        error_log = branch_output.with_name(f"{branch_output.stem}_ERRORS.csv")
+        error_log = branch_output.with_name(f"{branch_output.stem}_ERRORS.parquet")
         metadata_path: Path | None = None
 
         if args.overwrite:
@@ -1817,10 +1802,10 @@ def main():
         if metadata_df is not None and not metadata_df.empty:
             metadata_dir = tags_dir / "metadata"
             metadata_dir.mkdir(parents=True, exist_ok=True)
-            metadata_path = metadata_dir / f"metadata_{branch_name}_{mag_bin_tag}.csv"
-            metadata_df.to_csv(metadata_path, index=False)
+            metadata_path = metadata_dir / f"metadata_{branch_name}_{mag_bin_tag}.parquet"
+            metadata_df.to_parquet(metadata_path, index=False, compression=PARQUET_OUTPUT_COMPRESSION)
             log(
-                f"Wrote {branch_name} metadata CSV with columns: "
+                f"Wrote {branch_name} metadata Parquet with columns: "
                 f"{', '.join(col for col in metadata_df.columns if col != 'path')}"
             )
 
@@ -1874,7 +1859,7 @@ def main():
                 str(error_log),
             ])
             if metadata_path is not None:
-                branch_events_args.extend(["--metadata-csv", str(metadata_path)])
+                branch_events_args.extend(["--metadata", str(metadata_path)])
 
             events_cmd = [
                 sys.executable,
@@ -1961,7 +1946,7 @@ def main():
                 mag_hi=args.mag_hi,
                 n_workers=args.workers,
                 show_tqdm=args.verbose,
-                rejected_log_csv=str(tags_dir / f"rejected_tag_{mag_bin_tag}.csv"),
+                rejected_log_csv=str(tags_dir / f"rejected_tag_{mag_bin_tag}.parquet"),
                 stats_checkpoint=str(stats_checkpoint_file),
                 stats_chunk_size=args.stats_chunk_size,
                 file_ext=args.extension,
@@ -2249,10 +2234,10 @@ def main():
             summary["events_branches"] = branch_detection_stats
 
         # Tag rejection breakdown
-        rejected_log = tags_dir / f"rejected_tag_{mag_bin_tag}.csv"
+        rejected_log = tags_dir / f"rejected_tag_{mag_bin_tag}.parquet"
         if rejected_log.exists():
             try:
-                df_rejected = pd.read_csv(rejected_log)
+                df_rejected = pd.read_parquet(rejected_log)
                 if "reason" in df_rejected.columns:
                     rejection_counts = df_rejected["reason"].value_counts().to_dict()
                     summary["tag_rejections"] = {
@@ -3037,7 +3022,7 @@ def main():
                         "Pass --index-file or place the index at input/asassn_index_*.parquet."
                     )
 
-                if source_index_file.suffix.lower() not in {".parquet", ".pq"}:
+                if source_index_file.suffix.lower() != ".parquet":
                     raise ValueError(
                         f"--full-bundle requires a parquet ASAS-SN index file, got: {source_index_file}"
                     )

@@ -116,7 +116,7 @@ EVENTS_CONFIG_DEFAULTS = {
     "max_error_fraction": 0.01,
 }
 
-EVENTS_CONFIG_PATH_KEYS = {"output", "error_output", "metadata_csv", "input_file"}
+EVENTS_CONFIG_PATH_KEYS = {"output", "error_output", "metadata", "input_file"}
 
 
 EVENTS_CORE_COLUMNS: tuple[str, ...] = (
@@ -1964,8 +1964,9 @@ def main():
     g_input.add_argument("--workers", type=int, default=WORKERS, help="Number of worker processes")
 
     g_output.add_argument("--output", type=Path, default=None, help="Output path for results (suffix adjusted per format).")
-    g_output.add_argument("--error-output", type=Path, default=None, help="Optional CSV path for per-light-curve processing errors.")
-    g_output.add_argument("--metadata-csv", type=Path, default=None, help="Optional CSV with 'path' and extra metadata columns to attach to results.")
+    g_output.add_argument("--output-format", choices=("parquet", "parquet_chunk"), default=OUTPUT_FORMAT, help="Output format for results.")
+    g_output.add_argument("--error-output", type=Path, default=None, help="Optional Parquet path for per-light-curve processing errors.")
+    g_output.add_argument("--metadata", type=Path, default=None, help="Optional Parquet with 'path' and extra metadata columns to attach to results.")
 
     add_config_args(g_general)
     g_general.add_argument("-o", "--overwrite", action="store_true", help="Overwrite checkpoint log and existing output if present (start fresh).")
@@ -2003,10 +2004,10 @@ def main():
 
     meta_df: pd.DataFrame | None = None
     metadata_by_path = None
-    if args.metadata_csv:
-        meta_df = pd.read_csv(args.metadata_csv)
+    if args.metadata:
+        meta_df = pd.read_parquet(args.metadata)
         if "path" not in meta_df.columns:
-            raise SystemExit("metadata-csv must include a 'path' column")
+            raise SystemExit("metadata parquet must include a 'path' column")
         meta_df["path"] = meta_df["path"].astype(str)
         metadata_by_path = meta_df.set_index("path").to_dict(orient="index")
 
@@ -2016,7 +2017,7 @@ def main():
     def ensure_suffix(path: Path | None, fmt: str) -> Path | None:
         if path is None:
             return None
-        suffix_map = {"csv": ".csv", "parquet": ".parquet", "parquet_chunk": None}
+        suffix_map = {"parquet": ".parquet", "parquet_chunk": None}
         ext = suffix_map.get(fmt)
         if ext and path.suffix.lower() != ext:
             return path.with_suffix(ext)
@@ -2026,9 +2027,7 @@ def main():
         if path is None or (not path.exists()):
             return set()
         try:
-            if fmt == "csv":
-                df_existing = pd.read_csv(path, usecols=["path"])
-            elif fmt == "parquet":
+            if fmt == "parquet":
                 table = pq.read_table(path, columns=["path"])
                 df_existing = table.to_pandas()
             elif fmt == "parquet_chunk":
@@ -2077,8 +2076,8 @@ def main():
         if path is None:
             return None
         if output_format == "parquet_chunk":
-            return path.parent / f"{path.name}_ERRORS.csv"
-        return path.with_name(f"{path.stem}_ERRORS.csv")
+            return path.parent / f"{path.name}_ERRORS.parquet"
+        return path.with_name(f"{path.stem}_ERRORS.parquet")
 
     error_output_path = (
         Path(args.error_output).expanduser()
@@ -2180,32 +2179,6 @@ def main():
     total_jump_sig = 0
     total_any_sig = 0
 
-    class CsvWriter:
-        def __init__(
-            self,
-            path: Path,
-            schema_columns: Iterable[str],
-            column_kinds: Mapping[str, str] | None = None,
-        ):
-            self.path = Path(path)
-            self.schema_columns = list(schema_columns)
-            self.column_kinds = dict(column_kinds or {})
-
-        def write_chunk(self, chunk_results):
-            if not chunk_results:
-                return
-            df_chunk = normalize_events_frame(
-                pd.DataFrame(chunk_results),
-                self.schema_columns,
-                column_kinds=self.column_kinds,
-            )
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            header = not self.path.exists() or self.path.stat().st_size == 0
-            df_chunk.to_csv(self.path, mode="a", header=header, index=False)
-
-        def close(self):
-            return
-
     class ParquetChunkWriter:
         def __init__(
             self,
@@ -2294,9 +2267,7 @@ def main():
     def make_writer(path: Path | None, fmt: str):
         if path is None:
             return None
-        if fmt == "csv":
-            return CsvWriter(path, events_writer_columns, events_column_kinds)
-        elif fmt == "parquet":
+        if fmt == "parquet":
             return ParquetChunkWriter(path, events_writer_columns, events_column_kinds)
         elif fmt == "parquet_chunk":
             return ParquetDatasetWriter(path, events_writer_columns, events_column_kinds)
@@ -2330,7 +2301,10 @@ def main():
             df_errors = pd.DataFrame(error_rows)
             error_output_path.parent.mkdir(parents=True, exist_ok=True)
             append = error_output_path.exists() and (not args.overwrite)
-            df_errors.to_csv(error_output_path, mode="a" if append else "w", header=not append, index=False)
+            if append:
+                df_existing = pd.read_parquet(error_output_path)
+                df_errors = pd.concat([df_existing, df_errors], ignore_index=True, sort=False)
+            df_errors.to_parquet(error_output_path, index=False, compression=PARQUET_OUTPUT_COMPRESSION)
             _log(f"Wrote {len(df_errors)} processing errors to {error_output_path}", quiet)
         except Exception as e:
             print(f"Warning: could not write processing errors to {error_output_path}: {e}", flush=True)

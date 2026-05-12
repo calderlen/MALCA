@@ -6,7 +6,7 @@ candidates to compute validation metrics (precision, recall, etc.) WITHOUT
 requiring access to the original light curve data.
 
 Usage:
-    malca validate --results events_output.csv --candidates known_targets.csv
+    malca validate --results events_output.parquet --candidates known_targets.parquet
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ import pandas as pd
 import numpy as np
 
 from malca.config import VSX_MAX_SEP_ARCSEC
+from malca.table_io import read_parquet_table, write_parquet_table
 
 
 # Default validation candidates (Brayden's list)
@@ -210,8 +211,7 @@ def discover_results_files(
     if not subdir.exists():
         raise FileNotFoundError(f"Results directory not found: {subdir}")
     
-    # Find all CSV/Parquet files
-    files = list(subdir.glob("*.csv")) + list(subdir.glob("*.parquet"))
+    files = list(subdir.glob("*.parquet"))
     
     if not files:
         raise FileNotFoundError(f"No results files found in: {subdir}")
@@ -249,7 +249,7 @@ def resolve_run_results_dir(run_dir: Path) -> Path:
 def discover_run_results_files(run_dir: Path, mag_bin: str | None = None) -> list[Path]:
     """Discover results files within a run directory."""
     results_dir = resolve_run_results_dir(run_dir)
-    files = list(results_dir.glob("*.csv")) + list(results_dir.glob("*.parquet"))
+    files = list(results_dir.glob("*.parquet"))
     if not files:
         raise FileNotFoundError(f"No results files found in: {results_dir}")
     if mag_bin is not None:
@@ -263,10 +263,7 @@ def load_and_aggregate_results(files: list[Path]) -> pd.DataFrame:
     """Load multiple results files and aggregate into single DataFrame."""
     dfs = []
     for f in files:
-        if f.suffix == ".parquet":
-            df = pd.read_parquet(f)
-        else:
-            df = pd.read_csv(f)
+        df = read_parquet_table(f)
         df["_source_file"] = f.name
         dfs.append(df)
     
@@ -329,7 +326,7 @@ def main():
         "--candidates",
         type=str,
         default=None,
-        help="Path to known candidates CSV (optional, uses default Brayden list if not provided)",
+        help="Path to known candidates Parquet (optional, uses default Brayden list if not provided)",
     )
     
     # Validation options
@@ -350,7 +347,7 @@ def main():
         "--output",
         type=str,
         default=None,
-        help="Optional output CSV for detailed validation results",
+        help="Optional output Parquet for detailed validation results",
     )
     parser.add_argument(
         "-v", "--verbose",
@@ -367,10 +364,7 @@ def main():
     if args.results:
         # Direct file specification
         print(f"Loading results from: {args.results}")
-        if args.results.endswith(".parquet"):
-            results_df = pd.read_parquet(args.results)
-        else:
-            results_df = pd.read_csv(args.results)
+        results_df = read_parquet_table(args.results)
     elif args.run_dir or args.latest_run or (args.method is None and args.results is None):
         base_dir = Path(args.output_dir)
         run_dir = Path(args.run_dir).expanduser() if args.run_dir else None
@@ -421,7 +415,7 @@ def main():
     # Load or use default candidates
     if args.candidates:
         print(f"Loading candidates from: {args.candidates}")
-        candidates_df = pd.read_csv(args.candidates)
+        candidates_df = read_parquet_table(args.candidates)
     else:
         print("Using default Brayden candidate list")
         candidates_df = pd.DataFrame(DEFAULT_CANDIDATES)
@@ -461,7 +455,7 @@ def main():
                 metrics["f1_score"],
             ],
         })
-        output_df.to_csv(args.output, index=False)
+        write_parquet_table(output_df, args.output)
         print(f"Saved validation metrics to: {args.output}")
 
 

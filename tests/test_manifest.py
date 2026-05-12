@@ -43,14 +43,14 @@ def test_build_manifest_supports_flat_lightcurve_directory_with_index_metadata(t
     _write_mock_lc(flat_dir / "1001.dat3")
     _write_mock_lc(flat_dir / "1002.dat3")
 
-    index_file = tmp_path / "concatenated_index.csv"
+    index_file = tmp_path / "concatenated_index.parquet"
     pd.DataFrame(
         {
             "asas_sn_id": ["1001", "1002"],
             "mag_bin": ["13_13.5", "14_14.5"],
             "index_num": [1, 2],
         }
-    ).to_csv(index_file, index=False)
+    ).to_parquet(index_file, index=False)
 
     manifest = build_manifest(
         None,

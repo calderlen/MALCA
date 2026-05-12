@@ -175,7 +175,7 @@ def parse_args() -> tuple[list[Config], bool]:
     )
     p.add_argument("--write-per-dir",
                    action="store_true",
-                   help="Write per-directory CSVs to <MAG_BIN>/new/<x>.csv.",
+                   help="Deprecated no-op; outputs are written as Parquet.",
     )
     p.add_argument("--band-mode",
                    type=str,
