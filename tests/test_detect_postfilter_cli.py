@@ -290,7 +290,7 @@ def test_pipeline_event_subprocesses_always_use_parquet_chunk(tmp_path: Path, mo
     index_dir.mkdir(parents=True)
     lc_dir.mkdir(parents=True)
     (index_dir / "index1.csv").write_text(f"asas_sn_id\n{source_id}\n", encoding="ascii")
-    (lc_dir / f"{source_id}.dat3").write_text(
+    (lc_dir / f"{source_id}.dat2").write_text(
         "1 13.0 0.01 0 1 0 0 cam/field\n",
         encoding="ascii",
     )
@@ -301,6 +301,9 @@ def test_pipeline_event_subprocesses_always_use_parquet_chunk(tmp_path: Path, mo
         json.dumps(
             {
                 "pipeline": {
+                    "extension": "dat3",
+                    "trigger_mode": "posterior_prob",
+                    "baseline_func": "gp",
                     "skip_sparse": True,
                     "skip_multi_camera": True,
                     "skip_mag_range": True,
@@ -316,12 +319,15 @@ def test_pipeline_event_subprocesses_always_use_parquet_chunk(tmp_path: Path, mo
     )
 
     captured_cmds: list[list[str]] = []
+    captured_paths: list[str] = []
+    export_path = tmp_path / "custom_bundle.zip"
 
     def fake_run(cmd: list[str], check: bool = False):
         captured_cmds.append(list(cmd))
         input_file = Path(cmd[cmd.index("--input-file") + 1])
         output_dir = Path(cmd[cmd.index("--output") + 1])
         paths = [line.strip() for line in input_file.read_text(encoding="ascii").splitlines() if line.strip()]
+        captured_paths.extend(paths)
         output_dir.mkdir(parents=True, exist_ok=True)
         pd.DataFrame(
             {
@@ -348,6 +354,14 @@ def test_pipeline_event_subprocesses_always_use_parquet_chunk(tmp_path: Path, mo
             str(out_dir),
             "--stage",
             "cluster",
+            "--extension",
+            "dat2",
+            "--trigger-mode",
+            "logbf",
+            "--baseline-func",
+            "per_camera_median",
+            "--export-bundle",
+            str(export_path),
             "--config",
             str(config_path),
             "--workers",
@@ -361,6 +375,11 @@ def test_pipeline_event_subprocesses_always_use_parquet_chunk(tmp_path: Path, mo
     assert captured_cmds
     for cmd in captured_cmds:
         assert cmd[cmd.index("--output-format") + 1] == "parquet_chunk"
+        assert cmd[cmd.index("--trigger-mode") + 1] == "logbf"
+        assert cmd[cmd.index("--baseline-func") + 1] == "per_camera_median"
+    assert captured_paths
+    assert all(Path(path).suffix == ".dat2" for path in captured_paths)
+    assert export_path.exists()
 
     branch_chunk = (
         out_dir

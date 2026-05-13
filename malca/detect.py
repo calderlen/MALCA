@@ -1187,9 +1187,34 @@ def main():
                         help="Flat directory of <source_id>.<extension> light curves, such as bundle_assets/lightcurves")
     g_manifest.add_argument("--index-file", type=Path, default=None,
                         help="Optional ASAS-SN index/metadata file")
+    g_manifest.add_argument("--extension", "-e", type=str, default=None,
+                        help="Light curve file extension to process, e.g. dat2 or dat3. Default: dat3 from config.")
+    g_events.add_argument(
+        "--trigger-mode",
+        choices=["posterior_prob", "logbf"],
+        help="Event trigger mode. Default: posterior_prob from config.",
+    )
+    g_events.add_argument(
+        "--baseline-func",
+        choices=["gp", "gp_masked", "global_median", "per_camera_median", "phase_template"],
+        help="Baseline model for event detection. Default: gp_masked from config.",
+    )
 
     g_output.add_argument("--output-dir", dest="out_dir", type=str, default=None,
                         help="Directory for all outputs (default: output/runs/<timestamp>)")
+    bundle_group = g_output.add_mutually_exclusive_group()
+    bundle_group.add_argument(
+        "--export-bundle",
+        type=Path,
+        default=None,
+        help="Write a transfer bundle ZIP to this path and enable bundle export.",
+    )
+    bundle_group.add_argument(
+        "--no-export-bundle",
+        dest="export_bundle_enabled",
+        action="store_false",
+        help="Disable transfer bundle export.",
+    )
     g_output.add_argument(
         "--stage",
         type=str,
@@ -1206,12 +1231,36 @@ def main():
     parser.set_defaults(**PIPELINE_CONFIG_DEFAULTS)
 
     args = parser.parse_args()
+
+    def cli_has_option(*option_names: str) -> bool:
+        argv = sys.argv[1:]
+        return any(
+            token == name or token.startswith(f"{name}=")
+            for token in argv
+            for name in option_names
+        )
+
+    cli_overrides = {}
+    if cli_has_option("--extension", "-e"):
+        cli_overrides["extension"] = args.extension
+    if cli_has_option("--trigger-mode"):
+        cli_overrides["trigger_mode"] = args.trigger_mode
+    if cli_has_option("--baseline-func"):
+        cli_overrides["baseline_func"] = args.baseline_func
+    if cli_has_option("--export-bundle"):
+        cli_overrides["export_bundle"] = args.export_bundle
+        cli_overrides["export_bundle_enabled"] = True
+    if cli_has_option("--no-export-bundle"):
+        cli_overrides["export_bundle_enabled"] = False
+
     apply_config(
         args,
         command="pipeline",
         valid_keys=namespace_keys(parser, PIPELINE_CONFIG_DEFAULTS),
         path_keys=PIPELINE_CONFIG_PATH_KEYS,
     )
+    for key, value in cli_overrides.items():
+        setattr(args, key, value)
 
     # Handle --mag-bin all: expand to all bins in reverse order
     is_auto_all_mode = False

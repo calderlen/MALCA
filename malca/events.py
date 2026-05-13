@@ -70,7 +70,6 @@ warnings.filterwarnings("ignore", message=".*invalid value encountered in.*", ca
 
 
 
-
 EventKind: TypeAlias = Literal["dip", "jump"]
 
 DEFAULT_BASELINE_KWARGS = dict(
@@ -599,11 +598,11 @@ def compute_symmetry_score(
     resid_egress = resid[center_idx:end_idx + 1]
     err_egress = sigma_eff[center_idx:end_idx + 1]
 
-    I_ingress = np.trapz(resid_ingress, t_ingress)
-    I_egress = np.trapz(resid_egress, t_egress)
+    I_ingress = np.trapezoid(resid_ingress, t_ingress)
+    I_egress = np.trapezoid(resid_egress, t_egress)
 
     # trapezoidal rule weights for variance calculation
-    def trapz_weights(t):
+    def trapezoid_weights(t):
         w = np.zeros_like(t)
         if len(t) > 1:
             w[0] = (t[1] - t[0]) / 2.0
@@ -612,8 +611,8 @@ def compute_symmetry_score(
                 w[1:-1] = (t[2:] - t[:-2]) / 2.0
         return w
 
-    var_ingress = np.sum((trapz_weights(t_ingress) * err_ingress)**2)
-    var_egress = np.sum((trapz_weights(t_egress) * err_egress)**2)
+    var_ingress = np.sum((trapezoid_weights(t_ingress) * err_ingress)**2)
+    var_egress = np.sum((trapezoid_weights(t_egress) * err_egress)**2)
 
     denominator = np.sqrt(var_ingress + var_egress)
     if denominator < 1e-10:
