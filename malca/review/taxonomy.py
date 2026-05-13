@@ -38,8 +38,8 @@ REVIEW_TAXONOMY_SQL_COLUMNS: tuple[tuple[str, str], ...] = (
     ("morphology_polarity", "TEXT"),
     ("morphology_recurrence", "TEXT"),
     ("baseline_behavior", "TEXT"),
-    ("physical_family", "TEXT"),
-    ("physical_subclass", "TEXT"),
+    ("physical_primary", "TEXT"),
+    ("physical_secondary", "TEXT"),
     ("classification_confidence", "TEXT"),
     ("priority_tags_json", "TEXT"),
     ("evidence_flags_json", "TEXT"),
@@ -218,7 +218,7 @@ MORPHOLOGY_SECONDARY: dict[str, tuple[str, ...]] = {
     "unclear": ("unclear", "ambiguous_morphology", "insufficient_context"),
 }
 
-PHYSICAL_FAMILIES: tuple[dict[str, str], ...] = (
+PHYSICAL_PRIMARY: tuple[dict[str, str], ...] = (
     _entry("young_stellar_object_or_pms", "y", "YSO / PMS"),
     _entry("massive_star_emission_line_or_mass_loss", "m", "massive / emission-line"),
     _entry("dust_obscuration_or_fading_variable", "d", "dust obscuration"),
@@ -235,7 +235,7 @@ PHYSICAL_FAMILIES: tuple[dict[str, str], ...] = (
     _entry("unknown", "u", "unknown"),
 )
 
-PHYSICAL_SUBCLASSES: dict[str, tuple[str, ...]] = {
+PHYSICAL_SECONDARY: dict[str, tuple[str, ...]] = {
     "young_stellar_object_or_pms": (
         "generic_yso_candidate",
         "pre_main_sequence_variable",
@@ -362,14 +362,14 @@ def keyboard_payload() -> dict[str, Any]:
             ]
             for primary, values in MORPHOLOGY_SECONDARY.items()
         },
-        "physical_families": list(PHYSICAL_FAMILIES),
-        "physical_subclasses": {
+        "physical_primary": list(PHYSICAL_PRIMARY),
+        "physical_secondary": {
             family: [
                 {"value": value, "key": SECONDARY_KEY_SEQUENCE[idx], "label": label_for(value)}
                 for idx, value in enumerate(values)
                 if idx < len(SECONDARY_KEY_SEQUENCE)
             ]
-            for family, values in PHYSICAL_SUBCLASSES.items()
+            for family, values in PHYSICAL_SECONDARY.items()
         },
     }
 
@@ -381,8 +381,8 @@ def empty_taxonomy_selection() -> dict[str, Any]:
         "morphology_polarity": None,
         "morphology_recurrence": None,
         "baseline_behavior": None,
-        "physical_family": None,
-        "physical_subclass": None,
+        "physical_primary": None,
+        "physical_secondary": None,
         "classification_confidence": None,
         "priority_tags": [],
         "evidence_flags": [],
@@ -438,8 +438,8 @@ def normalize_selection(selection: dict[str, Any] | None) -> dict[str, Any]:
         "morphology_polarity",
         "morphology_recurrence",
         "baseline_behavior",
-        "physical_family",
-        "physical_subclass",
+        "physical_primary",
+        "physical_secondary",
         "classification_confidence",
         "disposition",
         "duplicate_of",
@@ -461,8 +461,8 @@ def selection_from_review(review: dict[str, Any]) -> dict[str, Any]:
             "morphology_polarity": review.get("morphology_polarity"),
             "morphology_recurrence": review.get("morphology_recurrence"),
             "baseline_behavior": review.get("baseline_behavior"),
-            "physical_family": review.get("physical_family"),
-            "physical_subclass": review.get("physical_subclass"),
+            "physical_primary": review.get("physical_primary"),
+            "physical_secondary": review.get("physical_secondary"),
             "classification_confidence": review.get("classification_confidence"),
             "priority_tags": review.get("priority_tags_json") or review.get("priority_tags"),
             "evidence_flags": review.get("evidence_flags_json") or review.get("evidence_flags"),
@@ -477,7 +477,7 @@ def selection_from_review(review: dict[str, Any]) -> dict[str, Any]:
 
 def derive_event_class(selection: dict[str, Any] | None) -> str:
     sel = normalize_selection(selection)
-    physical = sel.get("physical_family")
+    physical = sel.get("physical_primary")
     primary = sel.get("morphology_primary")
     if physical == "microlensing":
         return "microlensing"
@@ -509,15 +509,15 @@ def legacy_review_to_taxonomy(row: dict[str, Any]) -> dict[str, Any]:
         selection["priority_tags"] = ["priority_dipper"]
     elif event_class == "microlensing":
         selection["morphology_primary"] = "brightening_event"
-        selection["physical_family"] = "microlensing"
+        selection["physical_primary"] = "microlensing"
     elif event_class == "flare":
         selection["morphology_primary"] = "brightening_event"
-        selection["physical_family"] = "flare_star_or_magnetically_active_star"
+        selection["physical_primary"] = "flare_star_or_magnetically_active_star"
     elif event_class == "ltv":
         selection["morphology_primary"] = "long_term_trend"
     elif event_class == "instrumental":
         selection["morphology_primary"] = "artifact_or_bad_photometry"
-        selection["physical_family"] = "false_positive_or_contaminant"
+        selection["physical_primary"] = "false_positive_or_contaminant"
 
     normalized = normalize_selection(selection)
     normalized["workflow_status"] = workflow_status
@@ -616,8 +616,8 @@ def migrate_legacy_review_db(
                 "morphology_polarity": mapped.get("morphology_polarity"),
                 "morphology_recurrence": mapped.get("morphology_recurrence"),
                 "baseline_behavior": mapped.get("baseline_behavior"),
-                "physical_family": mapped.get("physical_family"),
-                "physical_subclass": mapped.get("physical_subclass"),
+                "physical_primary": mapped.get("physical_primary"),
+                "physical_secondary": mapped.get("physical_secondary"),
                 "classification_confidence": mapped.get("classification_confidence"),
                 "priority_tags_json": json_list(mapped.get("priority_tags")),
                 "evidence_flags_json": json_list(mapped.get("evidence_flags")),

@@ -24,8 +24,8 @@ def test_save_review_round_trips_taxonomy_fields(tmp_path: Path) -> None:
             disposition="keep",
             morphology_primary="dimming_event",
             morphology_secondary="big_dipper",
-            physical_family="young_stellar_object_or_pms",
-            physical_subclass="yso_dipper",
+            physical_primary="young_stellar_object_or_pms",
+            physical_secondary="yso_dipper",
             classification_confidence="likely",
             priority_tags=["priority_dipper", "priority_followup"],
             evidence_flags=["stable_baseline"],
@@ -38,11 +38,88 @@ def test_save_review_round_trips_taxonomy_fields(tmp_path: Path) -> None:
     assert review["event_class"] == "dipper"
     assert review["morphology_primary"] == "dimming_event"
     assert review["morphology_secondary"] == "big_dipper"
-    assert review["physical_family"] == "young_stellar_object_or_pms"
-    assert review["physical_subclass"] == "yso_dipper"
+    assert review["physical_primary"] == "young_stellar_object_or_pms"
+    assert review["physical_secondary"] == "yso_dipper"
     assert review["priority_tags"] == ["priority_dipper", "priority_followup"]
     assert review["evidence_flags"] == ["stable_baseline"]
     assert review["model_tags"] == ["bic_prefers_dip"]
+
+
+def test_init_db_renames_legacy_physical_taxonomy_columns(tmp_path: Path) -> None:
+    db_path = tmp_path / "legacy_physical.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE reviews (
+                candidate_id TEXT PRIMARY KEY,
+                interest_score INTEGER,
+                event_class TEXT DEFAULT 'unclassified',
+                review_pass INTEGER,
+                notes TEXT,
+                status TEXT,
+                reviewer TEXT,
+                workflow_status TEXT,
+                disposition TEXT,
+                morphology_primary TEXT,
+                morphology_secondary TEXT,
+                morphology_polarity TEXT,
+                morphology_recurrence TEXT,
+                baseline_behavior TEXT,
+                physical_family TEXT,
+                physical_subclass TEXT,
+                classification_confidence TEXT,
+                priority_tags_json TEXT,
+                evidence_flags_json TEXT,
+                model_tags_json TEXT,
+                duplicate_of TEXT,
+                known_object_id TEXT,
+                known_object_source TEXT,
+                taxonomy_version INTEGER,
+                legacy_review_json TEXT,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO reviews (
+                candidate_id, interest_score, event_class, review_pass, notes, status,
+                reviewer, workflow_status, morphology_primary, physical_family,
+                physical_subclass, priority_tags_json, taxonomy_version,
+                legacy_review_json, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "C1",
+                4,
+                "dipper",
+                1,
+                "",
+                "reviewed",
+                "tester",
+                "reviewed",
+                "dimming_event",
+                "young_stellar_object_or_pms",
+                "yso_dipper",
+                "[]",
+                1,
+                "{}",
+                "2026-03-12T00:00:00+00:00",
+            ),
+        )
+        conn.commit()
+
+    with db_connect(db_path) as conn:
+        review = get_review(conn, "C1")
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(reviews)").fetchall()}
+
+    assert review["physical_primary"] == "young_stellar_object_or_pms"
+    assert review["physical_secondary"] == "yso_dipper"
+    assert "physical_primary" in columns
+    assert "physical_secondary" in columns
+    assert "physical_family" not in columns
+    assert "physical_subclass" not in columns
 
 
 def test_migrate_legacy_review_db_preserves_old_review_payload(tmp_path: Path) -> None:

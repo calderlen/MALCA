@@ -30,6 +30,7 @@ import io
 import os
 import re
 import time
+from decimal import Decimal, InvalidOperation
 from html.parser import HTMLParser
 from urllib.parse import urljoin
 
@@ -144,6 +145,30 @@ def _raise_lookup_failures(label: str, failures: list[str], n_total: int) -> Non
 
 def _gaia_retry_delay(attempt: int) -> float:
     return min(GAIA_TAP_RETRY_BASE_DELAY * max(1, attempt), GAIA_TAP_RETRY_MAX_DELAY)
+
+
+def _parse_gaia_source_id_str(value: object) -> str | None:
+    """Parse Gaia source ID-like values to a plain integer string."""
+    try:
+        if value is None or pd.isna(value):
+            return None
+    except Exception:
+        if value is None:
+            return None
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    try:
+        source_id = Decimal(text)
+    except (InvalidOperation, ValueError):
+        return None
+
+    if source_id != source_id.to_integral_value():
+        return None
+
+    return format(source_id.to_integral_value(), "f")
 
 
 def _connect_gaia_taps_until_available(
@@ -445,10 +470,11 @@ def query_gaia_variability(
     gaia_ids = []
     idx_map = {}  # gaia_id_str -> list of df indices
     for idx, val in df.loc[valid, "gaia_id"].items():
-        sid = str(val).strip()
-        if sid.isdigit():
-            gaia_ids.append(sid)
-            idx_map.setdefault(sid, []).append(idx)
+        sid = _parse_gaia_source_id_str(val)
+        if sid is None:
+            continue
+        gaia_ids.append(sid)
+        idx_map.setdefault(sid, []).append(idx)
     gaia_ids = list(set(gaia_ids))
 
     if not gaia_ids:
@@ -518,8 +544,8 @@ def query_gaia_variability(
     # Apply results
     matched = 0
     for sid, indices in idx_map.items():
-        is_var = summary_results.get(sid, False)
         cls_info = classifier_results.get(sid)
+        is_var = summary_results.get(sid, False) or cls_info is not None
         for idx in indices:
             df.loc[idx, "gaia_var_flag"] = is_var
             if cls_info is not None:
@@ -527,7 +553,11 @@ def query_gaia_variability(
                 df.loc[idx, "gaia_var_score"] = cls_info[1]
                 matched += 1
 
-    flagged = sum(1 for v in summary_results.values() if v)
+    flagged = sum(
+        1
+        for sid in gaia_ids
+        if summary_results.get(sid, False) or sid in classifier_results
+    )
     print(f"Gaia variability: {flagged} flagged as variable, {matched} with classification")
     return df
 
@@ -1153,10 +1183,11 @@ def query_gaia_eb_params(
     gaia_ids = []
     idx_map = {}
     for idx, val in df.loc[ecl_mask, "gaia_id"].items():
-        sid = str(val).strip()
-        if sid.isdigit():
-            gaia_ids.append(sid)
-            idx_map.setdefault(sid, []).append(idx)
+        sid = _parse_gaia_source_id_str(val)
+        if sid is None:
+            continue
+        gaia_ids.append(sid)
+        idx_map.setdefault(sid, []).append(idx)
     gaia_ids = list(set(gaia_ids))
 
     if not gaia_ids:
@@ -1643,10 +1674,11 @@ def query_gaia_epoch_photometry(
     gaia_ids = []
     idx_map = {}
     for idx, val in df.loc[valid, "gaia_id"].items():
-        sid = str(val).strip()
-        if sid.isdigit():
-            gaia_ids.append(sid)
-            idx_map.setdefault(sid, []).append(idx)
+        sid = _parse_gaia_source_id_str(val)
+        if sid is None:
+            continue
+        gaia_ids.append(sid)
+        idx_map.setdefault(sid, []).append(idx)
     gaia_ids = list(set(gaia_ids))
 
     if not gaia_ids:
@@ -1731,10 +1763,11 @@ def fetch_gaia_epoch_lcs(
     gaia_ids = []
     idx_map: dict[str, list] = {}
     for idx, val in df.loc[valid, "gaia_id"].items():
-        sid = str(val).strip()
-        if sid.isdigit():
-            gaia_ids.append(sid)
-            idx_map.setdefault(sid, []).append(idx)
+        sid = _parse_gaia_source_id_str(val)
+        if sid is None:
+            continue
+        gaia_ids.append(sid)
+        idx_map.setdefault(sid, []).append(idx)
     gaia_ids = list(set(gaia_ids))
 
     if not gaia_ids:
@@ -3033,6 +3066,15 @@ def _print_vetting_summary(df: pd.DataFrame, total_start: float) -> None:
     print("VETTING SUMMARY")
     print(f"{'='*60}")
 
+    def _truthy_series(series: pd.Series) -> pd.Series:
+        truthy = {"1", "true", "t", "yes", "y", "variable"}
+        values = series.fillna(False)
+        if values.dtype == bool:
+            return values
+        if pd.api.types.is_numeric_dtype(values):
+            return values.astype(float) != 0.0
+        return values.astype(str).str.strip().str.lower().isin(truthy)
+
     if "simbad_main_id" in df.columns:
         n = (df["simbad_main_id"] != "").sum()
         print(f"  SIMBAD matches:         {n}/{len(df)}")
@@ -3040,7 +3082,7 @@ def _print_vetting_summary(df: pd.DataFrame, total_start: float) -> None:
             print(f"  Median SIMBAD refs:     {df.loc[df['simbad_main_id'] != '', 'simbad_nbref'].median():.0f}")
 
     if "gaia_var_flag" in df.columns:
-        print(f"  Gaia variable flag:     {df['gaia_var_flag'].sum()}/{len(df)}")
+        print(f"  Gaia variable flag:     {_truthy_series(df['gaia_var_flag']).sum()}/{len(df)}")
     if "gaia_var_class" in df.columns:
         n = (df["gaia_var_class"] != "").sum()
         print(f"  Gaia classified:        {n}/{len(df)}")
@@ -3111,7 +3153,8 @@ def _print_vetting_summary(df: pd.DataFrame, total_start: float) -> None:
     # Flag "likely known" vs "potentially new"
     known_mask = pd.Series(False, index=df.index)
     
-    # We only want to flag true for variables, not just generic objects.
+    # We only want to flag true for variables with a catalog type/class, not
+    # generic variable-flag evidence.
     if "gaia_var_class" in df.columns:
         known_mask |= df["gaia_var_class"] != ""
     if "asassn_var_type" in df.columns:

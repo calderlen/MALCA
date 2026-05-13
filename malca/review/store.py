@@ -136,6 +136,10 @@ def _candidate_insert_tuple_from_row_dict(
     if not normalized.get("ztf_var_type") and normalized.get("period_ztf_periodic_class"):
         normalized["ztf_var_type"] = normalized.get("period_ztf_periodic_class")
 
+    gaia_var_class = str(normalized.get("gaia_var_class") or "").strip()
+    if gaia_var_class and gaia_var_class.lower() not in {"nan", "<na>"}:
+        normalized["vetting_likely_known"] = True
+
     row_source_path = str(source_path if source_path is not None else normalized.get("source_path") or "")
     row_imported_at = str(imported_at or normalized.get("imported_at") or _utc_now())
 
@@ -524,7 +528,7 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("simbad_nbref",             "REAL",    "float"),
     ("simbad_sep_arcsec",        "REAL",    "float"),
     # -- vetting details: Gaia variability --
-    ("gaia_var_flag",            "TEXT",    "text"),
+    ("gaia_var_flag",            "INTEGER", "bool"),
     ("gaia_var_score",           "REAL",    "float"),
     # -- vetting details: Gaia EB --
     ("gaia_eb_period",           "REAL",    "float"),
@@ -1000,11 +1004,28 @@ def init_db(conn: sqlite3.Connection) -> None:
                     raise
                 # Column already exists (e.g. race or schema drift); skip
 
-    existing_review_lower = {row[1].lower() for row in conn.execute("PRAGMA table_info(reviews)").fetchall()}
+    existing_review_columns = {
+        str(row[1]).lower(): str(row[1])
+        for row in conn.execute("PRAGMA table_info(reviews)").fetchall()
+    }
+    legacy_review_column_renames = {
+        "physical_family": "physical_primary",
+        "physical_subclass": "physical_secondary",
+    }
+    for old_col, new_col in legacy_review_column_renames.items():
+        old_actual = existing_review_columns.get(old_col)
+        new_actual = existing_review_columns.get(new_col)
+        if old_actual and not new_actual:
+            conn.execute(f"ALTER TABLE reviews RENAME COLUMN {old_actual} TO {new_col}")
+            existing_review_columns.pop(old_col, None)
+            existing_review_columns[new_col] = new_col
+
+    existing_review_lower = set(existing_review_columns)
     for col, dtype in REVIEW_TAXONOMY_SQL_COLUMNS:
         if col.lower() not in existing_review_lower:
             try:
                 conn.execute(f"ALTER TABLE reviews ADD COLUMN {col} {dtype}")
+                existing_review_lower.add(col.lower())
             except sqlite3.OperationalError as e:
                 if "duplicate column name" not in str(e).lower():
                     raise
@@ -1806,6 +1827,9 @@ def merge_vetting_results(
             val = row[col]
             if val is not None and not (isinstance(val, float) and np.isnan(val)):
                 d[col] = val
+        gaia_var_class = str(d.get("gaia_var_class") or "").strip()
+        if gaia_var_class and gaia_var_class.lower() not in {"nan", "<na>"}:
+            d["vetting_likely_known"] = True
         if d:
             lookup[cid] = d
 
@@ -1835,14 +1859,15 @@ def merge_vetting_results(
         )
         # Also update real columns for SQL-filterable vetting fields
         _REAL_VETTING_COLS = {"vetting_likely_known", "microlens_match",
+                              "gaia_var_flag",
                               "microlens_catalog", "asassn_var_type",
                               "gaia_var_class", "simbad_otype", "ztf_var_type",
                               "tns_type", "yso_class"}
         for col in _REAL_VETTING_COLS:
             if col in vetting_data:
                 val = vetting_data[col]
-                if col in {"vetting_likely_known", "microlens_match"}:
-                    val = int(bool(val))
+                if col in {"vetting_likely_known", "microlens_match", "gaia_var_flag"}:
+                    val = int(_as_bool(val))
                 conn.execute(
                     f"UPDATE candidates SET {col}=? WHERE candidate_id=?",
                     (val, cid),
@@ -2016,8 +2041,8 @@ def save_review(
     morphology_polarity: str | None = None,
     morphology_recurrence: str | None = None,
     baseline_behavior: str | None = None,
-    physical_family: str | None = None,
-    physical_subclass: str | None = None,
+    physical_primary: str | None = None,
+    physical_secondary: str | None = None,
     classification_confidence: str | None = None,
     priority_tags: Any = None,
     evidence_flags: Any = None,
@@ -2043,8 +2068,8 @@ def save_review(
             "morphology_polarity": morphology_polarity,
             "morphology_recurrence": morphology_recurrence,
             "baseline_behavior": baseline_behavior,
-            "physical_family": physical_family,
-            "physical_subclass": physical_subclass,
+            "physical_primary": physical_primary,
+            "physical_secondary": physical_secondary,
             "classification_confidence": classification_confidence,
             "priority_tags": priority_tags,
             "evidence_flags": evidence_flags,
@@ -2066,8 +2091,8 @@ def save_review(
         "morphology_polarity": selection.get("morphology_polarity"),
         "morphology_recurrence": selection.get("morphology_recurrence"),
         "baseline_behavior": selection.get("baseline_behavior"),
-        "physical_family": selection.get("physical_family"),
-        "physical_subclass": selection.get("physical_subclass"),
+        "physical_primary": selection.get("physical_primary"),
+        "physical_secondary": selection.get("physical_secondary"),
         "classification_confidence": selection.get("classification_confidence"),
         "priority_tags_json": json_list(selection.get("priority_tags")),
         "evidence_flags_json": json_list(selection.get("evidence_flags")),
@@ -2218,8 +2243,8 @@ def export_reviews(conn: sqlite3.Connection, out_path: Path, only_reviewed: bool
         "morphology_polarity",
         "morphology_recurrence",
         "baseline_behavior",
-        "physical_family",
-        "physical_subclass",
+        "physical_primary",
+        "physical_secondary",
         "classification_confidence",
         "priority_tags_json",
         "evidence_flags_json",
@@ -2270,7 +2295,7 @@ def merge_review_databases(
 
     candidate_scope = {str(cid).strip() for cid in (candidate_ids or []) if str(cid).strip()}
 
-    with sqlite3.connect(source_path) as src_conn:
+    with db_connect(source_path) as src_conn:
         candidate_query = "SELECT * FROM candidates"
         review_query = "SELECT * FROM reviews"
         history_query = "SELECT candidate_id, event_type, payload_json, reviewer, created_at FROM review_history"

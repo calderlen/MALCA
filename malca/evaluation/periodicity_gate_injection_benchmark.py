@@ -1,0 +1,1449 @@
+from __future__ import annotations
+
+from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass
+from datetime import datetime
+from itertools import product
+import os
+from pathlib import Path
+from typing import Any
+
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/malca-matplotlib")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+os.environ.setdefault("NUMBA_NUM_THREADS", "1")
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from tqdm.auto import tqdm
+
+import malca.periodicity_gate as pregate
+from malca.baseline import (
+    global_median_baseline,
+    per_camera_gp_baseline,
+    per_camera_gp_baseline_masked,
+    per_camera_median_baseline,
+    phase_template_baseline,
+)
+from malca.config import (
+    BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
+    BASELINE_FUNC,
+    BASELINE_JITTER,
+    BASELINE_Q,
+    BASELINE_S0,
+    BASELINE_W0,
+    CLEAN_LC_MAX_ERROR_ABSOLUTE,
+    CLEAN_LC_MAX_ERROR_SIGMA,
+    LOGBF_THRESHOLD_DIP,
+    LOGBF_THRESHOLD_JUMP,
+    MAG_POINTS,
+    MIN_MAG_OFFSET,
+    PARQUET_OUTPUT_COMPRESSION,
+    P_POINTS,
+    PRE_PERIODICITY_CE_SNR_RESCUE_MARGIN,
+    PRE_PERIODICITY_CE_SNR_THRESHOLD,
+    PRE_PERIODICITY_MAX_PERIOD,
+    PRE_PERIODICITY_MIN_POINTS,
+    PRE_PERIODICITY_MIN_PERIOD,
+    PRE_PERIODICITY_N_PERIODS,
+    PRE_PERIODICITY_PHASE_PEAK_REGION_MAX,
+    PRE_PERIODICITY_PHASE_PEAK_SNR_MIN,
+    PRE_PERIODICITY_PHASE_PEAK_WIDTH_MAX,
+    PRE_PERIODICITY_SCATTER_RATIO_MAX,
+    PRE_PERIODICITY_SCATTER_RATIO_RESCUE_MARGIN,
+    RUN_MAX_GAP_POINTS,
+    RUN_MIN_POINTS,
+    SIGNIFICANCE_THRESHOLD,
+    TRIGGER_MODE,
+)
+from malca.events import score_lightcurve
+from malca.lightcurve_io import load_lightcurve_df
+from malca.phase import phase_fold_dataframe
+from malca.stats import compute_ce_stats
+from malca.utils import clean_lc, compute_n_cameras, filter_bad_cameras
+
+
+BENCHMARK_CLASS_ORDER: tuple[str, ...] = (
+    "no_injection_control",
+    "single_non_recurrent_dip",
+    "non_periodic_recurrent_dips",
+    "semi_periodic_dips",
+    "periodic_fixed_depth_dips",
+    "periodic_varying_depth_dips",
+    "broad_long_dips",
+    "smooth_periodic_contaminant",
+)
+
+TARGET_DIP_BY_CLASS: dict[str, bool] = {
+    "no_injection_control": False,
+    "single_non_recurrent_dip": True,
+    "non_periodic_recurrent_dips": True,
+    "semi_periodic_dips": True,
+    "periodic_fixed_depth_dips": True,
+    "periodic_varying_depth_dips": True,
+    "broad_long_dips": True,
+    "smooth_periodic_contaminant": False,
+}
+
+TARGET_GATE_LABEL_BY_CLASS: dict[str, str] = {
+    "no_injection_control": "non_periodic",
+    "single_non_recurrent_dip": "non_periodic",
+    "non_periodic_recurrent_dips": "non_periodic",
+    "semi_periodic_dips": "ambiguous",
+    "periodic_fixed_depth_dips": "periodic",
+    "periodic_varying_depth_dips": "periodic",
+    "broad_long_dips": "non_periodic",
+    "smooth_periodic_contaminant": "periodic",
+}
+
+THRESHOLD_CE_SNR_VALUES: tuple[float, ...] = (6.0, 8.0, 10.0, 12.0, 14.0)
+THRESHOLD_SCATTER_RATIO_VALUES: tuple[float, ...] = (0.65, 0.75, 0.8, 0.9, 1.0)
+THRESHOLD_PHASE_PEAK_SNR_VALUES: tuple[float, ...] = (2.0, 2.5, 3.0)
+
+PERIOD_SEARCH_N_PERIODS_VALUES: tuple[int, ...] = (2000, 5000)
+PERIOD_SEARCH_MIN_PERIOD_VALUES: tuple[float, ...] = (0.2, 0.5)
+PERIOD_SEARCH_MAX_PERIOD_VALUES: tuple[float, ...] = (50.0, 100.0, 200.0)
+
+PERIOD_MATCH_HARMONIC_FACTORS: tuple[float, ...] = (
+    1.0,
+    0.5,
+    2.0,
+    1.0 / 3.0,
+    3.0,
+    0.25,
+    4.0,
+)
+
+
+@dataclass
+class BenchmarkConfig:
+    bundle_lc_dir: Path = Path("output/runs/runs_march18_bundle_all/bundle_assets/lightcurves")
+    output_base_dir: Path = Path("output/diagnostics/periodicity_gate_injection_benchmark")
+    run_tag: str | None = None
+    smoke_mode: bool = False
+    total_trials: int = 60000
+    smoke_total_trials: int = 512
+    control_sample_size: int = 2048
+    smoke_control_sample_size: int = 96
+    seed: int = 20260513
+    cache_generated_lightcurves: bool = True
+    baseline_func: str = BASELINE_FUNC
+    min_mag_offset: float = MIN_MAG_OFFSET
+    p_points: int = P_POINTS
+    mag_points: int = MAG_POINTS
+    trigger_mode: str = TRIGGER_MODE
+    logbf_threshold_dip: float = LOGBF_THRESHOLD_DIP
+    logbf_threshold_jump: float = LOGBF_THRESHOLD_JUMP
+    significance_threshold: float = SIGNIFICANCE_THRESHOLD
+    run_min_points: int = RUN_MIN_POINTS
+    run_max_gap_points: int = RUN_MAX_GAP_POINTS
+    run_max_gap_days: float | None = None
+    run_min_duration_days: float = 0.0
+    compute_event_prob: bool = True
+    gate_min_period: float = PRE_PERIODICITY_MIN_PERIOD
+    gate_max_period: float = PRE_PERIODICITY_MAX_PERIOD
+    # The production pregate default is PRE_PERIODICITY_N_PERIODS=5000. That is
+    # too expensive for a 60k injection grid, so the benchmark defaults to a
+    # coarse scan and reserves 5000-period comparisons for the subset sweep.
+    gate_n_periods: int = 500
+    smoke_gate_n_periods: int = 800
+    gate_ce_snr_threshold: float = PRE_PERIODICITY_CE_SNR_THRESHOLD
+    gate_min_points: int = PRE_PERIODICITY_MIN_POINTS
+    gate_scatter_ratio_max: float = PRE_PERIODICITY_SCATTER_RATIO_MAX
+    period_search_subset_size: int = 1000
+    smoke_period_search_subset_size: int = 64
+    checkpoint_every: int = 1000
+    workers: int = 10
+    trial_task_size: int = 1
+    show_progress: bool = True
+
+    @property
+    def effective_total_trials(self) -> int:
+        return int(self.smoke_total_trials if self.smoke_mode else self.total_trials)
+
+    @property
+    def effective_control_sample_size(self) -> int:
+        return int(self.smoke_control_sample_size if self.smoke_mode else self.control_sample_size)
+
+    @property
+    def effective_gate_n_periods(self) -> int:
+        return int(self.smoke_gate_n_periods if self.smoke_mode else self.gate_n_periods)
+
+    @property
+    def effective_period_search_subset_size(self) -> int:
+        return int(self.smoke_period_search_subset_size if self.smoke_mode else self.period_search_subset_size)
+
+
+@dataclass
+class BenchmarkRun:
+    config: BenchmarkConfig
+    run_dir: Path
+    control_table: pd.DataFrame
+    trial_design: pd.DataFrame
+    trial_results: pd.DataFrame
+    gate_threshold_sweep: pd.DataFrame
+    period_search_subset_sweep: pd.DataFrame
+    summary_metrics: pd.DataFrame
+    generated_lightcurves: dict[int, pd.DataFrame]
+
+
+def make_run_dir(config: BenchmarkConfig) -> Path:
+    tag = config.run_tag
+    if not tag:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        tag = f"{timestamp}_smoke" if config.smoke_mode else timestamp
+    run_dir = Path(config.output_base_dir).expanduser() / str(tag)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir
+
+
+def discover_control_paths(bundle_lc_dir: Path | str, *, limit: int | None = None) -> list[Path]:
+    root = Path(bundle_lc_dir).expanduser()
+    paths = sorted(root.glob("*.dat3"))
+    if limit is not None:
+        paths = paths[: int(limit)]
+    return paths
+
+
+def load_control_lightcurves(
+    bundle_lc_dir: Path | str,
+    *,
+    sample_size: int,
+    seed: int,
+    min_points: int = PRE_PERIODICITY_MIN_POINTS,
+    mag_lo: float = 12.0,
+    mag_hi: float = 15.0,
+    show_progress: bool = True,
+) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
+    paths = discover_control_paths(bundle_lc_dir)
+    if not paths:
+        raise FileNotFoundError(f"No .dat3 light curves found in {bundle_lc_dir}")
+
+    rng = np.random.default_rng(seed)
+    order = rng.permutation(len(paths))
+    rows: list[dict[str, Any]] = []
+    controls: dict[str, pd.DataFrame] = {}
+    iterator = tqdm(order, desc="Loading controls", disable=not show_progress)
+    for idx in iterator:
+        path = paths[int(idx)]
+        try:
+            df = load_lightcurve_df(path)
+        except Exception:
+            continue
+        if df.empty or len(df) < int(min_points):
+            continue
+        mag = pd.to_numeric(df["mag"], errors="coerce").to_numpy(dtype=float)
+        finite_mag = mag[np.isfinite(mag)]
+        if finite_mag.size < int(min_points):
+            continue
+        median_mag = float(np.median(finite_mag))
+        if median_mag < float(mag_lo) or median_mag > float(mag_hi):
+            continue
+        jd = pd.to_numeric(df["JD"], errors="coerce").to_numpy(dtype=float)
+        jd = jd[np.isfinite(jd)]
+        if jd.size < 2:
+            continue
+        source_id = path.stem
+        path_text = str(path)
+        controls[path_text] = df.reset_index(drop=True)
+        rows.append(
+            {
+                "source_id": source_id,
+                "source_path": path_text,
+                "n_points": int(len(df)),
+                "median_mag": median_mag,
+                "jd_min": float(np.min(jd)),
+                "jd_max": float(np.max(jd)),
+                "jd_span": float(np.max(jd) - np.min(jd)),
+                "n_cameras": int(compute_n_cameras(df)) if "camera#" in df.columns else np.nan,
+            }
+        )
+        if len(rows) >= int(sample_size):
+            break
+
+    if not rows:
+        raise RuntimeError("Could not load any usable control light curves")
+    return pd.DataFrame(rows), controls
+
+
+def _log_uniform(rng: np.random.Generator, lo: float, hi: float) -> float:
+    return float(10.0 ** rng.uniform(np.log10(float(lo)), np.log10(float(hi))))
+
+
+def _balanced_classes(total_trials: int) -> list[str]:
+    total = int(total_trials)
+    if total < len(BENCHMARK_CLASS_ORDER):
+        raise ValueError(f"Need at least {len(BENCHMARK_CLASS_ORDER)} trials for balanced classes")
+    base = total // len(BENCHMARK_CLASS_ORDER)
+    rem = total % len(BENCHMARK_CLASS_ORDER)
+    classes: list[str] = []
+    for idx, class_name in enumerate(BENCHMARK_CLASS_ORDER):
+        classes.extend([class_name] * (base + (1 if idx < rem else 0)))
+    return classes
+
+
+def build_trial_design(control_table: pd.DataFrame, config: BenchmarkConfig) -> pd.DataFrame:
+    rng = np.random.default_rng(config.seed)
+    classes = _balanced_classes(config.effective_total_trials)
+    rng.shuffle(classes)
+    control_idx = rng.integers(0, len(control_table), size=len(classes))
+
+    rows: list[dict[str, Any]] = []
+    for trial_id, (class_name, cidx) in enumerate(zip(classes, control_idx, strict=True)):
+        control = control_table.iloc[int(cidx)]
+        jd_min = float(control["jd_min"])
+        jd_max = float(control["jd_max"])
+        span = max(float(control["jd_span"]), 1.0)
+        trial_seed = int(config.seed + 1009 * (trial_id + 1))
+        trng = np.random.default_rng(trial_seed)
+
+        amplitude = 0.0
+        duration = 0.0
+        period_days = np.nan
+        period_jitter_frac = 0.0
+        depth_scatter = 0.0
+        event_count = 0
+        phase0 = float(trng.uniform(0.0, 1.0))
+        t0 = float(trng.uniform(jd_min + 0.1 * span, jd_max - 0.1 * span))
+
+        if class_name == "single_non_recurrent_dip":
+            amplitude = float(trng.uniform(0.08, 0.9))
+            duration = min(_log_uniform(trng, 1.5, 30.0), 0.25 * span)
+            event_count = 1
+        elif class_name == "non_periodic_recurrent_dips":
+            amplitude = float(trng.uniform(0.06, 0.8))
+            duration = min(_log_uniform(trng, 1.5, 25.0), 0.20 * span)
+            event_count = int(trng.integers(2, 7))
+        elif class_name == "semi_periodic_dips":
+            period_days = min(_log_uniform(trng, 3.0, 80.0), 0.45 * span)
+            amplitude = float(trng.uniform(0.06, 0.8))
+            duration = min(_log_uniform(trng, 1.5, 20.0), 0.25 * period_days)
+            period_jitter_frac = float(trng.uniform(0.08, 0.25))
+            depth_scatter = float(trng.uniform(0.10, 0.45))
+            event_count = -1
+        elif class_name == "periodic_fixed_depth_dips":
+            period_days = min(_log_uniform(trng, 2.0, 80.0), 0.45 * span)
+            amplitude = float(trng.uniform(0.05, 0.7))
+            duration = min(_log_uniform(trng, 1.0, 18.0), 0.25 * period_days)
+            event_count = -1
+        elif class_name == "periodic_varying_depth_dips":
+            period_days = min(_log_uniform(trng, 2.0, 80.0), 0.45 * span)
+            amplitude = float(trng.uniform(0.05, 0.75))
+            duration = min(_log_uniform(trng, 1.0, 18.0), 0.25 * period_days)
+            depth_scatter = float(trng.uniform(0.20, 0.70))
+            event_count = -1
+        elif class_name == "broad_long_dips":
+            amplitude = float(trng.uniform(0.08, 1.2))
+            duration = min(_log_uniform(trng, 40.0, 220.0), 0.35 * span)
+            event_count = 1
+        elif class_name == "smooth_periodic_contaminant":
+            period_days = min(_log_uniform(trng, 2.0, 80.0), 0.45 * span)
+            amplitude = float(trng.uniform(0.03, 0.35))
+            event_count = 0
+
+        rows.append(
+            {
+                "trial_id": int(trial_id),
+                "class_name": class_name,
+                "source_id": str(control["source_id"]),
+                "source_path": str(control["source_path"]),
+                "trial_seed": trial_seed,
+                "target_dip": bool(TARGET_DIP_BY_CLASS[class_name]),
+                "target_gate_label": TARGET_GATE_LABEL_BY_CLASS[class_name],
+                "amplitude": float(amplitude),
+                "duration": float(duration),
+                "period_days": float(period_days),
+                "period_jitter_frac": float(period_jitter_frac),
+                "depth_scatter": float(depth_scatter),
+                "requested_event_count": int(event_count),
+                "phase0": float(phase0),
+                "t0": float(t0),
+                "control_median_mag": float(control["median_mag"]),
+                "control_n_points": int(control["n_points"]),
+                "control_jd_span": float(control["jd_span"]),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _gaussian_dip_profile(t: np.ndarray, center: float, duration: float, depth: float) -> np.ndarray:
+    sigma = max(float(duration) / 2.355, 0.05)
+    return float(depth) * np.exp(-0.5 * ((t - float(center)) / sigma) ** 2)
+
+
+def _periodic_centers(
+    jd: np.ndarray,
+    *,
+    period_days: float,
+    phase0: float,
+    duration: float,
+    jitter_frac: float,
+    rng: np.random.Generator,
+) -> list[float]:
+    finite_jd = jd[np.isfinite(jd)]
+    if finite_jd.size == 0 or not np.isfinite(period_days) or period_days <= 0:
+        return []
+    jd_min = float(np.min(finite_jd))
+    jd_max = float(np.max(finite_jd))
+    period = float(period_days)
+    center = jd_min + float(phase0) * period
+    while center > jd_min - period:
+        center -= period
+    centers: list[float] = []
+    while center <= jd_max + period:
+        jitter = float(rng.normal(0.0, float(jitter_frac) * period)) if jitter_frac else 0.0
+        value = center + jitter
+        if jd_min - duration <= value <= jd_max + duration:
+            centers.append(float(value))
+        center += period
+    return centers
+
+
+def generate_trial_lightcurve(base_df: pd.DataFrame, trial: pd.Series | dict[str, Any]) -> tuple[pd.DataFrame, dict[str, Any]]:
+    row = dict(trial)
+    df = base_df.copy()
+    if df.empty:
+        return df, {"injected_event_count": 0, "injected_max_delta_mag": np.nan}
+
+    rng = np.random.default_rng(int(row["trial_seed"]))
+    t = pd.to_numeric(df["JD"], errors="coerce").to_numpy(dtype=float)
+    signal = np.zeros(len(df), dtype=float)
+    class_name = str(row["class_name"])
+    amplitude = float(row.get("amplitude", 0.0) or 0.0)
+    duration = float(row.get("duration", 0.0) or 0.0)
+    injected_event_count = 0
+
+    if class_name == "smooth_periodic_contaminant":
+        period = float(row.get("period_days", np.nan))
+        if np.isfinite(period) and period > 0:
+            signal = amplitude * np.sin(2.0 * np.pi * (t - float(row.get("t0", 0.0))) / period)
+    elif class_name != "no_injection_control" and amplitude > 0 and duration > 0:
+        if class_name in {"periodic_fixed_depth_dips", "periodic_varying_depth_dips", "semi_periodic_dips"}:
+            centers = _periodic_centers(
+                t,
+                period_days=float(row.get("period_days", np.nan)),
+                phase0=float(row.get("phase0", 0.0)),
+                duration=duration,
+                jitter_frac=float(row.get("period_jitter_frac", 0.0)),
+                rng=rng,
+            )
+        elif class_name == "non_periodic_recurrent_dips":
+            finite = t[np.isfinite(t)]
+            if finite.size:
+                lo = float(np.min(finite) + duration)
+                hi = float(np.max(finite) - duration)
+                n_events = max(1, int(row.get("requested_event_count", 3)))
+                centers = sorted(float(x) for x in rng.uniform(lo, hi, size=n_events)) if hi > lo else []
+            else:
+                centers = []
+        else:
+            centers = [float(row.get("t0", np.nan))]
+
+        for center in centers:
+            if not np.isfinite(center):
+                continue
+            scatter = float(row.get("depth_scatter", 0.0) or 0.0)
+            depth = amplitude
+            if scatter > 0:
+                depth *= float(np.clip(rng.lognormal(mean=-0.5 * scatter**2, sigma=scatter), 0.2, 2.5))
+            signal += _gaussian_dip_profile(t, center, duration, depth)
+            injected_event_count += 1
+
+    out = df.copy()
+    out["mag"] = pd.to_numeric(out["mag"], errors="coerce").to_numpy(dtype=float) + signal
+    out["benchmark_trial_id"] = int(row["trial_id"])
+    out["benchmark_class"] = class_name
+    return out, {
+        "injected_event_count": int(injected_event_count),
+        "injected_max_delta_mag": float(np.nanmax(signal)) if signal.size else np.nan,
+    }
+
+
+def _phase_complexity_ok(phase_peak_regions: Any, *, max_regions: float = PRE_PERIODICITY_PHASE_PEAK_REGION_MAX) -> bool:
+    try:
+        regions = float(phase_peak_regions)
+    except (TypeError, ValueError):
+        return True
+    return (not np.isfinite(regions)) or regions <= float(max_regions)
+
+
+def label_gate_from_features(
+    features: pd.Series | dict[str, Any],
+    *,
+    ce_snr_threshold: float,
+    scatter_ratio_max: float,
+    phase_peak_snr_min: float = PRE_PERIODICITY_PHASE_PEAK_SNR_MIN,
+    phase_peak_width_max: float = PRE_PERIODICITY_PHASE_PEAK_WIDTH_MAX,
+    phase_peak_region_max: float = PRE_PERIODICITY_PHASE_PEAK_REGION_MAX,
+    ce_snr_rescue_margin: float = PRE_PERIODICITY_CE_SNR_RESCUE_MARGIN,
+    scatter_ratio_rescue_margin: float = PRE_PERIODICITY_SCATTER_RATIO_RESCUE_MARGIN,
+) -> tuple[str, bool, str, bool]:
+    row = dict(features)
+    selected_snr = float(row.get("pre_periodicity_score", row.get("pre_ce_snr", np.nan)))
+    scatter_ratio = float(row.get("pre_periodicity_scatter_ratio", np.nan))
+    phase_peak_snr = float(row.get("pre_periodicity_phase_peak_snr", np.nan))
+    phase_peak_width = float(row.get("pre_periodicity_phase_peak_width", np.nan))
+    phase_peak_regions = float(row.get("pre_periodicity_phase_peak_regions", np.nan))
+    alias_flag = bool(row.get("pre_periodicity_alias_flag", False))
+
+    ce_support = bool(np.isfinite(selected_snr) and selected_snr >= float(ce_snr_threshold))
+    scatter_ok = bool(np.isfinite(scatter_ratio) and scatter_ratio <= float(scatter_ratio_max))
+    phase_peak_ok = bool(
+        np.isfinite(phase_peak_snr)
+        and phase_peak_snr >= float(phase_peak_snr_min)
+        and np.isfinite(phase_peak_width)
+        and phase_peak_width <= float(phase_peak_width_max)
+    )
+    phase_complexity_ok = _phase_complexity_ok(phase_peak_regions, max_regions=phase_peak_region_max)
+    scatter_rescue_ok = bool(
+        np.isfinite(scatter_ratio)
+        and scatter_ratio <= (float(scatter_ratio_max) + float(scatter_ratio_rescue_margin))
+    )
+    ce_near_support = bool(
+        np.isfinite(selected_snr)
+        and selected_snr >= (float(ce_snr_threshold) - float(ce_snr_rescue_margin))
+    )
+
+    periodic_by_base = bool(ce_support and scatter_ok and phase_complexity_ok)
+    periodic_by_scatter_rescue = bool(
+        ce_support
+        and (not scatter_ok)
+        and phase_peak_ok
+        and phase_complexity_ok
+        and scatter_rescue_ok
+    )
+    periodic_by_ce_rescue = bool(
+        (not ce_support)
+        and ce_near_support
+        and phase_peak_ok
+        and phase_complexity_ok
+        and scatter_rescue_ok
+    )
+    periodic = bool(periodic_by_base or periodic_by_scatter_rescue or periodic_by_ce_rescue)
+    label = "periodic" if periodic else "non_periodic"
+
+    if periodic_by_base:
+        reasons = ["ce", "folded_scatter"]
+    elif periodic_by_scatter_rescue:
+        reasons = ["ce", "phase_peak", "scatter_rescue"]
+    elif periodic_by_ce_rescue:
+        reasons = ["ce_near_threshold"]
+        if scatter_ok:
+            reasons.extend(["folded_scatter", "phase_peak"])
+        else:
+            reasons.extend(["phase_peak", "scatter_rescue"])
+    else:
+        reasons = []
+        if ce_support:
+            reasons.append("ce")
+        elif ce_near_support and phase_peak_ok:
+            reasons.append("ce_near_threshold")
+        else:
+            reasons.append("ce_below_threshold")
+        if scatter_ok:
+            reasons.append("folded_scatter")
+        elif np.isfinite(scatter_ratio):
+            reasons.append("scatter_too_high")
+        else:
+            reasons.append("no_folded_scatter")
+        if phase_peak_ok:
+            reasons.append("phase_peak")
+        if np.isfinite(phase_peak_regions) and not phase_complexity_ok:
+            reasons.append("phase_complexity")
+        if alias_flag:
+            reasons.append("alias")
+    return label, periodic, ",".join(reasons), phase_peak_ok
+
+
+def evaluate_gate_on_dataframe(
+    df_lc: pd.DataFrame,
+    *,
+    min_period: float,
+    max_period: float,
+    n_periods: int,
+    ce_snr_threshold: float,
+    min_points: int,
+    scatter_ratio_max: float,
+    bad_camera_scatter_ratio: float = BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
+    clean_max_error_absolute: float = CLEAN_LC_MAX_ERROR_ABSOLUTE,
+    clean_max_error_sigma: float = CLEAN_LC_MAX_ERROR_SIGMA,
+) -> dict[str, Any]:
+    try:
+        df = df_lc.copy()
+        if df.empty:
+            return _empty_gate_result("empty_lc")
+        if "camera#" in df.columns:
+            df, _ = filter_bad_cameras(
+                df,
+                filter_scatter=False,
+                filter_offset=False,
+                filter_catastrophic=True,
+                scatter_ratio_threshold=float(bad_camera_scatter_ratio),
+            )
+        df = clean_lc(
+            df,
+            max_error_absolute=float(clean_max_error_absolute),
+            max_error_sigma=float(clean_max_error_sigma),
+        )
+        if df.empty:
+            return _empty_gate_result("empty_after_clean")
+
+        n_points = int(len(df))
+        n_cameras = int(compute_n_cameras(df)) if "camera#" in df.columns else 0
+        if n_points < int(min_points):
+            result = _empty_gate_result("too_few_points")
+            result["pre_n_points"] = n_points
+            result["pre_n_cameras"] = n_cameras
+            return result
+
+        df_aligned, v_minus_g_median_offset = pregate.align_v_to_g_magnitude(df)
+        jd = df_aligned["JD"].to_numpy(dtype=float)
+        mag = df_aligned["mag"].to_numpy(dtype=float)
+        err = df_aligned["error"].to_numpy(dtype=float)
+        ce_result = compute_ce_stats(
+            jd,
+            mag,
+            err,
+            min_period=float(min_period),
+            max_period=float(max_period),
+            n_periods=int(n_periods),
+            n_bootstrap=0,
+            refine=True,
+        )
+        ce_support = bool(
+            np.isfinite(ce_result.get("ce_snr", np.nan))
+            and float(ce_result["ce_snr"]) >= float(ce_snr_threshold)
+        )
+        band_resid = pregate._build_band_residuals(df_aligned)
+        ce_candidate = pregate._harmonically_correct_period_candidate(
+            "ce",
+            float(ce_result.get("ce_period", np.nan)),
+            snr=float(ce_result.get("ce_snr", np.nan)),
+            supported=ce_support,
+            band_resid=band_resid,
+            min_period=float(min_period),
+            max_period=float(max_period),
+        )
+        selected_candidate = pregate._select_period_candidate([ce_candidate])
+        if selected_candidate is None:
+            selected_candidate = {}
+
+        features = {
+            "pre_n_points": n_points,
+            "pre_n_cameras": n_cameras,
+            "pre_ce_period": float(ce_result.get("ce_period", np.nan)),
+            "pre_ce_corrected_period": float(ce_candidate.get("corrected_period", np.nan)),
+            "pre_ce_harmonic_factor": float(ce_candidate.get("harmonic_factor", np.nan)),
+            "pre_ce_entropy": float(ce_result.get("ce_min_entropy", np.nan)),
+            "pre_ce_snr": float(ce_result.get("ce_snr", np.nan)),
+            "pre_ce_support": ce_support,
+            "pre_periodicity_router_mode": pregate.PREGATE_ROUTER_MODE,
+            "pre_periodicity_v_minus_g_median_offset": float(v_minus_g_median_offset),
+            "pre_periodicity_method": selected_candidate.get("method"),
+            "pre_periodicity_base_period": float(selected_candidate.get("raw_period", np.nan)),
+            "pre_periodicity_selected_period": float(selected_candidate.get("corrected_period", np.nan)),
+            "pre_periodicity_harmonic_factor": float(selected_candidate.get("harmonic_factor", np.nan)),
+            "pre_periodicity_selection_objective": float(selected_candidate.get("selection_objective", np.nan)),
+            "pre_periodicity_support_count": int(bool(selected_candidate.get("supported", False))),
+            "pre_periodicity_score": float(selected_candidate.get("snr", np.nan)),
+            "pre_periodicity_scatter_ratio": float(selected_candidate.get("scatter_ratio", np.nan)),
+            "pre_periodicity_phase_peak_snr": float(selected_candidate.get("phase_peak_snr", np.nan)),
+            "pre_periodicity_phase_peak_width": float(selected_candidate.get("phase_peak_width", np.nan)),
+            "pre_periodicity_phase_peak_regions": float(selected_candidate.get("phase_peak_regions", np.nan)),
+            "pre_periodicity_phase_lag_g_v_cycles": float(selected_candidate.get("phase_lag_g_v_cycles", np.nan)),
+            "pre_periodicity_phase_lag_g_v_abs_cycles": float(selected_candidate.get("phase_lag_g_v_abs_cycles", np.nan)),
+            "pre_periodicity_alias_flag": bool(selected_candidate.get("alias_flag", False)),
+            "pre_periodicity_error": None,
+        }
+        label, periodic, reason, phase_peak_ok = label_gate_from_features(
+            features,
+            ce_snr_threshold=ce_snr_threshold,
+            scatter_ratio_max=scatter_ratio_max,
+        )
+        features.update(
+            {
+                "pre_periodicity_phase_peak_flag": bool(phase_peak_ok),
+                "pre_periodicity_label": label,
+                "pre_periodic_flag": bool(periodic),
+                "pre_periodicity_reason": reason,
+            }
+        )
+        return features
+    except Exception as exc:
+        result = _empty_gate_result("error")
+        result["pre_periodicity_error"] = str(exc)
+        return result
+
+
+def _empty_gate_result(reason: str) -> dict[str, Any]:
+    return {
+        "pre_n_points": 0,
+        "pre_n_cameras": 0,
+        "pre_ce_period": np.nan,
+        "pre_ce_corrected_period": np.nan,
+        "pre_ce_harmonic_factor": np.nan,
+        "pre_ce_entropy": np.nan,
+        "pre_ce_snr": np.nan,
+        "pre_ce_support": False,
+        "pre_periodicity_router_mode": pregate.PREGATE_ROUTER_MODE,
+        "pre_periodicity_v_minus_g_median_offset": np.nan,
+        "pre_periodicity_method": None,
+        "pre_periodicity_base_period": np.nan,
+        "pre_periodicity_selected_period": np.nan,
+        "pre_periodicity_harmonic_factor": np.nan,
+        "pre_periodicity_selection_objective": np.nan,
+        "pre_periodicity_support_count": 0,
+        "pre_periodicity_score": np.nan,
+        "pre_periodicity_scatter_ratio": np.nan,
+        "pre_periodicity_phase_peak_snr": np.nan,
+        "pre_periodicity_phase_peak_width": np.nan,
+        "pre_periodicity_phase_peak_regions": np.nan,
+        "pre_periodicity_phase_peak_flag": False,
+        "pre_periodicity_phase_lag_g_v_cycles": np.nan,
+        "pre_periodicity_phase_lag_g_v_abs_cycles": np.nan,
+        "pre_periodicity_alias_flag": False,
+        "pre_periodicity_label": "non_periodic",
+        "pre_periodic_flag": False,
+        "pre_periodicity_reason": reason,
+        "pre_periodicity_error": None,
+    }
+
+
+def baseline_func_from_name(name: str):
+    return {
+        "gp": per_camera_gp_baseline,
+        "gp_masked": per_camera_gp_baseline_masked,
+        "global_median": global_median_baseline,
+        "per_camera_median": per_camera_median_baseline,
+        "phase_template": phase_template_baseline,
+    }.get(str(name), per_camera_gp_baseline_masked)
+
+
+def _detection_options(config: BenchmarkConfig) -> dict[str, Any]:
+    return {
+        "trigger_mode": config.trigger_mode,
+        "logbf_threshold_dip": config.logbf_threshold_dip,
+        "logbf_threshold_jump": config.logbf_threshold_jump,
+        "significance_threshold": config.significance_threshold,
+        "p_points": int(config.p_points),
+        "mag_points": int(config.mag_points),
+        "run_min_points": int(config.run_min_points),
+        "max_gap_points": int(config.run_max_gap_points),
+        "run_max_gap_days": config.run_max_gap_days,
+        "run_min_duration_days": config.run_min_duration_days,
+        "compute_event_prob": bool(config.compute_event_prob),
+    }
+
+
+def _baseline_kwargs(config: BenchmarkConfig, *, period_days: float | None = None) -> dict[str, Any]:
+    out = {
+        "S0": BASELINE_S0,
+        "w0": BASELINE_W0,
+        "q": BASELINE_Q,
+        "jitter": BASELINE_JITTER,
+        "sigma_floor": None,
+        "add_sigma_eff_col": True,
+    }
+    if period_days is not None:
+        out["period_days"] = period_days
+    return out
+
+
+def score_detection(
+    df_lc: pd.DataFrame,
+    config: BenchmarkConfig,
+    *,
+    baseline_name: str,
+    period_days: float | None = None,
+) -> dict[str, Any]:
+    baseline_func = baseline_func_from_name(baseline_name)
+    try:
+        res = score_lightcurve(
+            df_lc,
+            baseline_func=baseline_func,
+            baseline_kwargs=_baseline_kwargs(config, period_days=period_days),
+            filter_residual_bad_cameras_enabled=False,
+            bad_camera_scatter_ratio=BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
+            **_detection_options(config),
+        )
+        dip = res["dip"]
+        jump = res["jump"]
+        baseline_mag = float(dip.get("baseline_mag", jump.get("baseline_mag", np.nan)))
+        dip_best_mag_event = float(dip.get("best_mag_event", np.nan))
+        jump_best_mag_event = float(jump.get("best_mag_event", np.nan))
+        dip_significant = bool(dip.get("significant", False))
+        jump_significant = bool(jump.get("significant", False))
+
+        if config.min_mag_offset > 0 and np.isfinite(baseline_mag):
+            dip_diff = abs(dip_best_mag_event - baseline_mag) if np.isfinite(dip_best_mag_event) else 0.0
+            jump_diff = abs(jump_best_mag_event - baseline_mag) if np.isfinite(jump_best_mag_event) else 0.0
+            if dip_diff <= float(config.min_mag_offset):
+                dip_significant = False
+            if jump_diff <= float(config.min_mag_offset):
+                jump_significant = False
+
+        df_base = res.get("df_base")
+        if isinstance(df_base, pd.DataFrame) and "baseline_source" in df_base.columns:
+            baseline_source = ",".join(sorted(set(df_base["baseline_source"].dropna().astype(str)))) or str(baseline_name)
+        else:
+            baseline_source = str(baseline_name)
+
+        return {
+            "detected": bool(dip_significant),
+            "dip_significant": bool(dip_significant),
+            "jump_significant": bool(jump_significant),
+            "dip_bayes_factor": float(dip.get("bayes_factor", np.nan)),
+            "jump_bayes_factor": float(jump.get("bayes_factor", np.nan)),
+            "dip_best_p": float(dip.get("best_p", np.nan)),
+            "jump_best_p": float(jump.get("best_p", np.nan)),
+            "baseline_mag": baseline_mag,
+            "dip_best_mag_event": dip_best_mag_event,
+            "jump_best_mag_event": jump_best_mag_event,
+            "baseline_source": baseline_source,
+            "error": None,
+        }
+    except Exception as exc:
+        return {
+            "detected": False,
+            "dip_significant": False,
+            "jump_significant": False,
+            "dip_bayes_factor": np.nan,
+            "jump_bayes_factor": np.nan,
+            "dip_best_p": np.nan,
+            "jump_best_p": np.nan,
+            "baseline_mag": np.nan,
+            "dip_best_mag_event": np.nan,
+            "jump_best_mag_event": np.nan,
+            "baseline_source": str(baseline_name),
+            "error": str(exc),
+        }
+
+
+def _prefix_dict(prefix: str, values: dict[str, Any]) -> dict[str, Any]:
+    return {f"{prefix}_{key}": value for key, value in values.items()}
+
+
+def period_match_quality(selected_period: float, true_period: float, *, rel_tol: float = 0.05) -> tuple[bool, float, float]:
+    if not np.isfinite(selected_period) or not np.isfinite(true_period) or selected_period <= 0 or true_period <= 0:
+        return False, np.nan, np.nan
+    errors = [
+        abs(float(selected_period) - float(true_period) * factor) / max(abs(float(true_period) * factor), 1e-9)
+        for factor in PERIOD_MATCH_HARMONIC_FACTORS
+    ]
+    best_idx = int(np.argmin(errors))
+    return bool(errors[best_idx] <= float(rel_tol)), float(errors[best_idx]), float(PERIOD_MATCH_HARMONIC_FACTORS[best_idx])
+
+
+def _save_parquet(df: pd.DataFrame, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(path, index=False, compression=PARQUET_OUTPUT_COMPRESSION)
+
+
+_TRIAL_WORKER_CONTEXT: dict[str, Any] = {}
+
+
+def _init_trial_worker(controls: dict[str, pd.DataFrame], config: BenchmarkConfig) -> None:
+    _TRIAL_WORKER_CONTEXT["controls"] = controls
+    _TRIAL_WORKER_CONTEXT["config"] = config
+
+
+def _process_trial_record_worker(trial_dict: dict[str, Any]) -> dict[str, Any]:
+    controls = _TRIAL_WORKER_CONTEXT["controls"]
+    config = _TRIAL_WORKER_CONTEXT["config"]
+    row, _ = _evaluate_trial_record(trial_dict, controls, config, return_lightcurve=False)
+    return row
+
+
+def _evaluate_trial_record(
+    trial_dict: dict[str, Any],
+    controls: dict[str, pd.DataFrame],
+    config: BenchmarkConfig,
+    *,
+    return_lightcurve: bool,
+) -> tuple[dict[str, Any], pd.DataFrame | None]:
+    base = controls[str(trial_dict["source_path"])]
+    df_trial, injection_meta = generate_trial_lightcurve(base, trial_dict)
+
+    gate = evaluate_gate_on_dataframe(
+        df_trial,
+        min_period=config.gate_min_period,
+        max_period=config.gate_max_period,
+        n_periods=config.effective_gate_n_periods,
+        ce_snr_threshold=config.gate_ce_snr_threshold,
+        min_points=config.gate_min_points,
+        scatter_ratio_max=config.gate_scatter_ratio_max,
+    )
+    selected_period = float(gate.get("pre_periodicity_selected_period", np.nan))
+    standard = score_detection(df_trial, config, baseline_name=config.baseline_func)
+    phase = score_detection(df_trial, config, baseline_name="phase_template", period_days=selected_period)
+    bifurcated_detected = bool(phase["detected"] if bool(gate.get("pre_periodic_flag", False)) else standard["detected"])
+
+    period_usable, period_rel_error, period_harmonic_factor = period_match_quality(
+        selected_period,
+        float(trial_dict.get("period_days", np.nan)),
+    )
+    row = {
+        **trial_dict,
+        **injection_meta,
+        **gate,
+        **_prefix_dict("standard", standard),
+        **_prefix_dict("phase_folded", phase),
+        "bifurcated_detected": bifurcated_detected,
+        "period_usable": bool(period_usable),
+        "period_rel_error": period_rel_error,
+        "period_match_harmonic_factor": period_harmonic_factor,
+    }
+    return row, df_trial if return_lightcurve else None
+
+
+def _build_representative_lightcurve_cache(
+    results: pd.DataFrame,
+    controls: dict[str, pd.DataFrame],
+    *,
+    max_examples: int = 6,
+) -> dict[int, pd.DataFrame]:
+    examples = _select_representative_rows(results, n=max_examples)
+    out: dict[int, pd.DataFrame] = {}
+    for _, row in examples.iterrows():
+        trial_id = int(row["trial_id"])
+        try:
+            df_trial, _ = generate_trial_lightcurve(controls[str(row["source_path"])], row)
+        except Exception:
+            continue
+        out[trial_id] = df_trial
+    return out
+
+
+def run_benchmark(config: BenchmarkConfig) -> BenchmarkRun:
+    run_dir = make_run_dir(config)
+    plots_dir = run_dir / "plots"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+
+    control_table, controls = load_control_lightcurves(
+        config.bundle_lc_dir,
+        sample_size=config.effective_control_sample_size,
+        seed=config.seed,
+        show_progress=config.show_progress,
+    )
+    trial_design = build_trial_design(control_table, config)
+    _save_parquet(trial_design, run_dir / "trial_design.parquet")
+
+    rows: list[dict[str, Any]] = []
+    generated_lightcurves: dict[int, pd.DataFrame] = {}
+    trial_records = trial_design.to_dict(orient="records")
+    workers = max(1, int(config.workers))
+    if workers > 1 and len(trial_records) > 1:
+        max_workers = min(workers, len(trial_records))
+        with ProcessPoolExecutor(
+            max_workers=max_workers,
+            initializer=_init_trial_worker,
+            initargs=(controls, config),
+        ) as executor:
+            iterator = executor.map(
+                _process_trial_record_worker,
+                trial_records,
+                chunksize=max(1, int(config.trial_task_size)),
+            )
+            rows = list(
+                tqdm(
+                    iterator,
+                    total=len(trial_records),
+                    desc=f"Benchmark trials ({max_workers} workers)",
+                    disable=not config.show_progress,
+                )
+            )
+    else:
+        iterator = tqdm(
+            trial_records,
+            total=len(trial_records),
+            desc="Benchmark trials",
+            disable=not config.show_progress,
+        )
+        for trial_dict in iterator:
+            row, df_trial = _evaluate_trial_record(
+                trial_dict,
+                controls,
+                config,
+                return_lightcurve=bool(config.cache_generated_lightcurves),
+            )
+            rows.append(row)
+            if df_trial is not None:
+                generated_lightcurves[int(trial_dict["trial_id"])] = df_trial
+
+    trial_results = pd.DataFrame(rows)
+    _save_parquet(trial_results, run_dir / "trial_results.parquet")
+
+    if not generated_lightcurves and bool(config.cache_generated_lightcurves):
+        generated_lightcurves = _build_representative_lightcurve_cache(trial_results, controls)
+
+    gate_threshold_sweep = run_gate_threshold_sweep(trial_results)
+    _save_parquet(gate_threshold_sweep, run_dir / "gate_threshold_sweep.parquet")
+
+    period_search_subset_sweep = run_period_search_subset_sweep(
+        trial_design,
+        controls,
+        config,
+        generated_lightcurves=generated_lightcurves,
+    )
+    _save_parquet(period_search_subset_sweep, run_dir / "period_search_subset_sweep.parquet")
+
+    summary_metrics = summarize_results(trial_results)
+    _save_parquet(summary_metrics, run_dir / "summary_metrics.parquet")
+
+    save_benchmark_plots(
+        trial_results,
+        gate_threshold_sweep,
+        run_dir=run_dir,
+        generated_lightcurves=generated_lightcurves,
+    )
+    return BenchmarkRun(
+        config=config,
+        run_dir=run_dir,
+        control_table=control_table,
+        trial_design=trial_design,
+        trial_results=trial_results,
+        gate_threshold_sweep=gate_threshold_sweep,
+        period_search_subset_sweep=period_search_subset_sweep,
+        summary_metrics=summary_metrics,
+        generated_lightcurves=generated_lightcurves,
+    )
+
+
+def _mean_bool(series: pd.Series) -> float:
+    if series.empty:
+        return np.nan
+    return float(series.fillna(False).astype(bool).mean())
+
+
+def _route_confusion_metrics(df: pd.DataFrame, route_periodic: pd.Series) -> dict[str, Any]:
+    hard = df["target_gate_label"].isin(["periodic", "non_periodic"])
+    if not hard.any():
+        return {
+            "gate_hard_n": 0,
+            "gate_periodic_recall": np.nan,
+            "gate_non_periodic_specificity": np.nan,
+            "gate_false_periodic_route_rate": np.nan,
+            "gate_accuracy": np.nan,
+        }
+    truth_periodic = df.loc[hard, "target_gate_label"].eq("periodic")
+    pred_periodic = route_periodic.loc[hard].fillna(False).astype(bool)
+    tp = int((truth_periodic & pred_periodic).sum())
+    fn = int((truth_periodic & ~pred_periodic).sum())
+    tn = int((~truth_periodic & ~pred_periodic).sum())
+    fp = int((~truth_periodic & pred_periodic).sum())
+    return {
+        "gate_hard_n": int(hard.sum()),
+        "gate_periodic_recall": float(tp / (tp + fn)) if (tp + fn) else np.nan,
+        "gate_non_periodic_specificity": float(tn / (tn + fp)) if (tn + fp) else np.nan,
+        "gate_false_periodic_route_rate": float(fp / (fp + tn)) if (fp + tn) else np.nan,
+        "gate_accuracy": float((tp + tn) / max(tp + tn + fp + fn, 1)),
+    }
+
+
+def summarize_results(results: pd.DataFrame) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    pipelines = {
+        "standard_only": results["standard_detected"].fillna(False).astype(bool),
+        "phase_folded_only": results["phase_folded_detected"].fillna(False).astype(bool),
+        "bifurcated_gate": results["bifurcated_detected"].fillna(False).astype(bool),
+    }
+    for pipeline, detected in pipelines.items():
+        target = results["target_dip"].fillna(False).astype(bool)
+        rows.append(
+            {
+                "scope": "all",
+                "class_name": "ALL",
+                "pipeline": pipeline,
+                "n": int(len(results)),
+                "target_recovery": _mean_bool(detected[target]),
+                "false_positive_rate": _mean_bool(detected[~target]),
+                "detection_rate": _mean_bool(detected),
+                "gate_periodic_fraction": _mean_bool(results["pre_periodic_flag"]),
+                "period_usable_rate": _mean_bool(results.loc[results["target_gate_label"].isin(["periodic", "ambiguous"]), "period_usable"]),
+                **_route_confusion_metrics(results, results["pre_periodic_flag"].fillna(False).astype(bool)),
+            }
+        )
+        for class_name, group in results.groupby("class_name", sort=False):
+            gdet = detected.loc[group.index]
+            gtarget = group["target_dip"].fillna(False).astype(bool)
+            rows.append(
+                {
+                    "scope": "class",
+                    "class_name": str(class_name),
+                    "pipeline": pipeline,
+                    "n": int(len(group)),
+                    "target_recovery": _mean_bool(gdet[gtarget]) if bool(gtarget.any()) else np.nan,
+                    "false_positive_rate": _mean_bool(gdet[~gtarget]) if bool((~gtarget).any()) else np.nan,
+                    "detection_rate": _mean_bool(gdet),
+                    "gate_periodic_fraction": _mean_bool(group["pre_periodic_flag"]),
+                    "period_usable_rate": _mean_bool(group.loc[group["target_gate_label"].isin(["periodic", "ambiguous"]), "period_usable"]),
+                    **_route_confusion_metrics(group, group["pre_periodic_flag"].fillna(False).astype(bool)),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def run_gate_threshold_sweep(results: pd.DataFrame) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    for ce_snr_threshold, scatter_ratio_max, phase_peak_snr_min in product(
+        THRESHOLD_CE_SNR_VALUES,
+        THRESHOLD_SCATTER_RATIO_VALUES,
+        THRESHOLD_PHASE_PEAK_SNR_VALUES,
+    ):
+        labels: list[str] = []
+        flags: list[bool] = []
+        reasons: list[str] = []
+        for _, row in results.iterrows():
+            label, flag, reason, _ = label_gate_from_features(
+                row,
+                ce_snr_threshold=float(ce_snr_threshold),
+                scatter_ratio_max=float(scatter_ratio_max),
+                phase_peak_snr_min=float(phase_peak_snr_min),
+            )
+            labels.append(label)
+            flags.append(flag)
+            reasons.append(reason)
+        route_periodic = pd.Series(flags, index=results.index, dtype=bool)
+        bifurcated_detected = pd.Series(
+            np.where(
+                route_periodic,
+                results["phase_folded_detected"].fillna(False).astype(bool),
+                results["standard_detected"].fillna(False).astype(bool),
+            ),
+            index=results.index,
+        )
+        target = results["target_dip"].fillna(False).astype(bool)
+        common = {
+            "ce_snr_threshold": float(ce_snr_threshold),
+            "scatter_ratio_max": float(scatter_ratio_max),
+            "phase_peak_snr_min": float(phase_peak_snr_min),
+            "periodic_branch_load": _mean_bool(route_periodic),
+            "target_recovery": _mean_bool(bifurcated_detected[target]),
+            "false_positive_rate": _mean_bool(bifurcated_detected[~target]),
+            "detection_rate": _mean_bool(bifurcated_detected),
+            **_route_confusion_metrics(results, route_periodic),
+        }
+        rows.append({"scope": "all", "class_name": "ALL", **common})
+        for class_name, group in results.groupby("class_name", sort=False):
+            idx = group.index
+            gtarget = group["target_dip"].fillna(False).astype(bool)
+            rows.append(
+                {
+                    "scope": "class",
+                    "class_name": str(class_name),
+                    "ce_snr_threshold": float(ce_snr_threshold),
+                    "scatter_ratio_max": float(scatter_ratio_max),
+                    "phase_peak_snr_min": float(phase_peak_snr_min),
+                    "periodic_branch_load": _mean_bool(route_periodic.loc[idx]),
+                    "target_recovery": _mean_bool(bifurcated_detected.loc[idx][gtarget]) if bool(gtarget.any()) else np.nan,
+                    "false_positive_rate": _mean_bool(bifurcated_detected.loc[idx][~gtarget]) if bool((~gtarget).any()) else np.nan,
+                    "detection_rate": _mean_bool(bifurcated_detected.loc[idx]),
+                    **_route_confusion_metrics(group, route_periodic.loc[idx]),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def run_period_search_subset_sweep(
+    trial_design: pd.DataFrame,
+    controls: dict[str, pd.DataFrame],
+    config: BenchmarkConfig,
+    *,
+    generated_lightcurves: dict[int, pd.DataFrame] | None = None,
+) -> pd.DataFrame:
+    subset = trial_design.head(min(config.effective_period_search_subset_size, len(trial_design))).copy()
+    rows: list[dict[str, Any]] = []
+    generated_lightcurves = generated_lightcurves or {}
+    for n_periods, min_period, max_period in product(
+        PERIOD_SEARCH_N_PERIODS_VALUES,
+        PERIOD_SEARCH_MIN_PERIOD_VALUES,
+        PERIOD_SEARCH_MAX_PERIOD_VALUES,
+    ):
+        gate_rows: list[dict[str, Any]] = []
+        iterator = tqdm(
+            subset.iterrows(),
+            total=len(subset),
+            desc=f"Period sweep n={n_periods} min={min_period} max={max_period}",
+            disable=not config.show_progress,
+            leave=False,
+        )
+        for _, trial in iterator:
+            trial_id = int(trial["trial_id"])
+            df_trial = generated_lightcurves.get(trial_id)
+            if df_trial is None:
+                df_trial, _ = generate_trial_lightcurve(controls[str(trial["source_path"])], trial)
+            gate = evaluate_gate_on_dataframe(
+                df_trial,
+                min_period=float(min_period),
+                max_period=float(max_period),
+                n_periods=int(n_periods),
+                ce_snr_threshold=config.gate_ce_snr_threshold,
+                min_points=config.gate_min_points,
+                scatter_ratio_max=config.gate_scatter_ratio_max,
+            )
+            usable, rel_error, harmonic = period_match_quality(
+                float(gate.get("pre_periodicity_selected_period", np.nan)),
+                float(trial.get("period_days", np.nan)),
+            )
+            gate_rows.append(
+                {
+                    "trial_id": trial_id,
+                    "pre_periodic_flag": bool(gate.get("pre_periodic_flag", False)),
+                    "pre_periodicity_label": gate.get("pre_periodicity_label"),
+                    "period_usable": bool(usable),
+                    "period_rel_error": rel_error,
+                    "period_match_harmonic_factor": harmonic,
+                }
+            )
+        gate_df = pd.DataFrame(gate_rows).merge(
+            subset[["trial_id", "class_name", "target_gate_label"]],
+            on="trial_id",
+            how="left",
+        )
+        route = gate_df["pre_periodic_flag"].fillna(False).astype(bool)
+        rows.append(
+            {
+                "n_periods": int(n_periods),
+                "min_period": float(min_period),
+                "max_period": float(max_period),
+                "n": int(len(gate_df)),
+                "periodic_branch_load": _mean_bool(route),
+                "period_usable_rate": _mean_bool(gate_df.loc[gate_df["target_gate_label"].isin(["periodic", "ambiguous"]), "period_usable"]),
+                **_route_confusion_metrics(gate_df, route),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def save_benchmark_plots(
+    results: pd.DataFrame,
+    threshold_sweep: pd.DataFrame,
+    *,
+    run_dir: Path,
+    generated_lightcurves: dict[int, pd.DataFrame] | None = None,
+) -> None:
+    plots_dir = Path(run_dir) / "plots"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    _plot_recovery_by_class(results, plots_dir / "recovery_by_class_pipeline.png")
+    _plot_gate_confusion(results, plots_dir / "gate_routing_confusion.png")
+    _plot_recovery_vs_parameters(results, plots_dir / "recovery_vs_injection_parameters.png")
+    _plot_threshold_heatmaps(threshold_sweep, plots_dir)
+    _plot_pareto(threshold_sweep, plots_dir / "gate_sweep_pareto.png")
+    if generated_lightcurves:
+        _plot_representative_examples(results, generated_lightcurves, plots_dir / "representative_gate_examples.png")
+
+
+def _plot_recovery_by_class(results: pd.DataFrame, output_path: Path) -> None:
+    pipelines = ["standard_detected", "phase_folded_detected", "bifurcated_detected"]
+    plot_rows = []
+    for class_name, group in results.groupby("class_name", sort=False):
+        for pipeline in pipelines:
+            plot_rows.append(
+                {
+                    "class_name": class_name,
+                    "pipeline": pipeline.replace("_detected", ""),
+                    "rate": _mean_bool(group[pipeline]),
+                }
+            )
+    df = pd.DataFrame(plot_rows)
+    pivot = df.pivot(index="class_name", columns="pipeline", values="rate").reindex(BENCHMARK_CLASS_ORDER)
+    fig, ax = plt.subplots(figsize=(13, 6))
+    pivot.plot.bar(ax=ax)
+    ax.set_ylabel("Detection fraction")
+    ax.set_ylim(0, 1)
+    ax.set_title("Detection by Injected Class and Pipeline Configuration")
+    ax.grid(axis="y", alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=180)
+    plt.close(fig)
+
+
+def _plot_gate_confusion(results: pd.DataFrame, output_path: Path) -> None:
+    hard = results[results["target_gate_label"].isin(["periodic", "non_periodic"])].copy()
+    fig, ax = plt.subplots(figsize=(6, 5))
+    if hard.empty:
+        ax.text(0.5, 0.5, "No hard-labeled gate rows", ha="center", va="center")
+    else:
+        tab = pd.crosstab(hard["target_gate_label"], hard["pre_periodicity_label"])
+        im = ax.imshow(tab.to_numpy(dtype=float), cmap="Blues")
+        ax.set_xticks(range(len(tab.columns)), labels=tab.columns, rotation=30, ha="right")
+        ax.set_yticks(range(len(tab.index)), labels=tab.index)
+        for i in range(tab.shape[0]):
+            for j in range(tab.shape[1]):
+                ax.text(j, i, str(int(tab.iloc[i, j])), ha="center", va="center")
+        fig.colorbar(im, ax=ax, label="count")
+    ax.set_title("Pre-periodicity Gate Routing Confusion")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=180)
+    plt.close(fig)
+
+
+def _bin_rate(df: pd.DataFrame, column: str, detected_col: str, bins: int = 8, log: bool = False) -> pd.DataFrame:
+    values = pd.to_numeric(df[column], errors="coerce")
+    mask = np.isfinite(values)
+    if log:
+        mask &= values > 0
+    work = df.loc[mask, [column, detected_col]].copy()
+    if work.empty:
+        return pd.DataFrame(columns=["center", "rate"])
+    vals = pd.to_numeric(work[column], errors="coerce")
+    if log:
+        edges = np.logspace(np.log10(vals.min()), np.log10(vals.max()), bins + 1)
+        centers = np.sqrt(edges[:-1] * edges[1:])
+    else:
+        edges = np.linspace(vals.min(), vals.max(), bins + 1)
+        centers = 0.5 * (edges[:-1] + edges[1:])
+    rates = []
+    for lo, hi in zip(edges[:-1], edges[1:], strict=True):
+        bin_mask = (vals >= lo) & (vals < hi)
+        rates.append(_mean_bool(work.loc[bin_mask, detected_col]))
+    return pd.DataFrame({"center": centers, "rate": rates})
+
+
+def _plot_recovery_vs_parameters(results: pd.DataFrame, output_path: Path) -> None:
+    target = results[results["target_dip"].fillna(False)].copy()
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+    specs = [
+        ("amplitude", False, "Amplitude (mag)"),
+        ("duration", True, "Duration (days)"),
+        ("period_days", True, "Injected period (days)"),
+        ("control_median_mag", False, "Median magnitude"),
+    ]
+    for ax, (column, log, xlabel) in zip(axes.flat, specs, strict=True):
+        binned = _bin_rate(target, column, "bifurcated_detected", bins=8, log=log)
+        if not binned.empty:
+            ax.plot(binned["center"], binned["rate"], marker="o")
+        if log:
+            ax.set_xscale("log")
+        ax.set_ylim(0, 1)
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel("Bifurcated recovery")
+        ax.grid(alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=180)
+    plt.close(fig)
+
+
+def _plot_threshold_heatmaps(threshold_sweep: pd.DataFrame, plots_dir: Path) -> None:
+    all_rows = threshold_sweep[
+        (threshold_sweep["scope"] == "all")
+        & np.isclose(threshold_sweep["phase_peak_snr_min"], PRE_PERIODICITY_PHASE_PEAK_SNR_MIN)
+    ].copy()
+    for metric, label in [
+        ("target_recovery", "Target recovery"),
+        ("gate_false_periodic_route_rate", "False periodic route rate"),
+        ("periodic_branch_load", "Periodic branch load"),
+    ]:
+        fig, ax = plt.subplots(figsize=(7, 5))
+        if all_rows.empty:
+            ax.text(0.5, 0.5, "No threshold rows", ha="center", va="center")
+        else:
+            pivot = all_rows.pivot(index="ce_snr_threshold", columns="scatter_ratio_max", values=metric)
+            im = ax.imshow(pivot.to_numpy(dtype=float), origin="lower", aspect="auto", vmin=0, vmax=1, cmap="viridis")
+            ax.set_xticks(range(len(pivot.columns)), labels=[f"{x:g}" for x in pivot.columns])
+            ax.set_yticks(range(len(pivot.index)), labels=[f"{x:g}" for x in pivot.index])
+            fig.colorbar(im, ax=ax, label=label)
+        ax.set_xlabel("scatter_ratio_max")
+        ax.set_ylabel("ce_snr_threshold")
+        ax.set_title(f"Gate Threshold Sweep: {label}")
+        fig.tight_layout()
+        fig.savefig(plots_dir / f"threshold_heatmap_{metric}.png", dpi=180)
+        plt.close(fig)
+
+
+def _plot_pareto(threshold_sweep: pd.DataFrame, output_path: Path) -> None:
+    all_rows = threshold_sweep[threshold_sweep["scope"] == "all"].copy()
+    fig, ax = plt.subplots(figsize=(7, 5))
+    if all_rows.empty:
+        ax.text(0.5, 0.5, "No threshold rows", ha="center", va="center")
+    else:
+        scatter = ax.scatter(
+            all_rows["periodic_branch_load"],
+            all_rows["target_recovery"],
+            c=all_rows["false_positive_rate"],
+            s=40,
+            cmap="magma",
+            alpha=0.85,
+        )
+        fig.colorbar(scatter, ax=ax, label="False positive rate")
+    ax.set_xlabel("Periodic branch load")
+    ax.set_ylabel("Target recovery")
+    ax.set_ylim(0, 1)
+    ax.set_xlim(0, 1)
+    ax.grid(alpha=0.25)
+    ax.set_title("Gate Sweep Pareto: Recovery vs Branch Load")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=180)
+    plt.close(fig)
+
+
+def _select_representative_rows(results: pd.DataFrame, n: int = 6) -> pd.DataFrame:
+    frames: list[pd.DataFrame] = []
+    periodic_miss = results[
+        results["target_gate_label"].eq("periodic")
+        & ~results["pre_periodic_flag"].fillna(False).astype(bool)
+    ].head(2)
+    if not periodic_miss.empty:
+        frames.append(periodic_miss.assign(example_kind="periodic routed stochastic"))
+    nonperiodic_false = results[
+        results["target_gate_label"].eq("non_periodic")
+        & results["pre_periodic_flag"].fillna(False).astype(bool)
+    ].head(2)
+    if not nonperiodic_false.empty:
+        frames.append(nonperiodic_false.assign(example_kind="non-periodic routed periodic"))
+    target_miss = results[
+        results["target_dip"].fillna(False).astype(bool)
+        & ~results["bifurcated_detected"].fillna(False).astype(bool)
+    ].head(2)
+    if not target_miss.empty:
+        frames.append(target_miss.assign(example_kind="target not recovered"))
+    if not frames:
+        frames.append(results.head(n).assign(example_kind="representative"))
+    return pd.concat(frames, ignore_index=True).head(n)
+
+
+def _plot_representative_examples(
+    results: pd.DataFrame,
+    generated_lightcurves: dict[int, pd.DataFrame],
+    output_path: Path,
+) -> None:
+    examples = _select_representative_rows(results, n=6)
+    fig, axes = plt.subplots(len(examples), 2, figsize=(13, 3.2 * len(examples)), squeeze=False)
+    for row_idx, (_, row) in enumerate(examples.iterrows()):
+        trial_id = int(row["trial_id"])
+        df = generated_lightcurves.get(trial_id)
+        if df is None or df.empty:
+            continue
+        ax_raw, ax_phase = axes[row_idx]
+        ax_raw.scatter(df["JD"], df["mag"], s=8, alpha=0.65)
+        ax_raw.invert_yaxis()
+        ax_raw.set_title(
+            f"{row.get('example_kind', '')}: {row['class_name']} | gate={row['pre_periodicity_label']}",
+            loc="left",
+            fontsize=10,
+        )
+        ax_raw.set_xlabel("JD")
+        ax_raw.set_ylabel("mag")
+        ax_raw.grid(alpha=0.25)
+        period = float(row.get("pre_periodicity_selected_period", np.nan))
+        if np.isfinite(period) and period > 0:
+            try:
+                folded, _ = phase_fold_dataframe(df, period, align_v_to_g=True)
+                ax_phase.scatter(folded["phase"], folded["phase_value"], s=8, alpha=0.55)
+                ax_phase.invert_yaxis()
+                ax_phase.set_xlim(0, 2)
+                ax_phase.set_xlabel("phase")
+                ax_phase.set_ylabel("aligned mag")
+                ax_phase.set_title(f"Selected period = {period:.4g} d", fontsize=10)
+                ax_phase.grid(alpha=0.25)
+            except Exception as exc:
+                ax_phase.text(0.5, 0.5, f"phase plot failed: {exc}", ha="center", va="center")
+        else:
+            ax_phase.text(0.5, 0.5, "No selected period", ha="center", va="center")
+            ax_phase.set_axis_off()
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=180)
+    plt.close(fig)

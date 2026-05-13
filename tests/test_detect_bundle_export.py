@@ -43,6 +43,21 @@ def test_export_bundle_includes_candidate_dat2_and_raw2(tmp_path: Path) -> None:
         assert expected_raw2 in names
 
 
+def test_export_bundle_includes_chunked_mag_bin_event_results(tmp_path: Path) -> None:
+    out_dir = tmp_path / "run"
+    result_dir = out_dir / "results" / "lc_events_results_13_13.5"
+    result_dir.mkdir(parents=True, exist_ok=True)
+    (result_dir / "chunk_000000.parquet").write_bytes(b"chunk bytes\n")
+
+    bundle_zip = tmp_path / "bundle.zip"
+    bundled = export_bundle_zip(bundle_zip, out_dir, mag_bin_tag="13_13.5")
+
+    expected = "results/lc_events_results_13_13.5/chunk_000000.parquet"
+    assert expected in bundled
+    with zipfile.ZipFile(bundle_zip, "r") as zf:
+        assert expected in set(zf.namelist())
+
+
 def test_resolve_index_prefers_bundle_assets_file(tmp_path: Path) -> None:
     out_dir = tmp_path / "output" / "runs" / "run_a"
     bundled_index = out_dir / "bundle_assets" / "asassn_index_full.parquet"

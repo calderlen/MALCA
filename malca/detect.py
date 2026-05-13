@@ -60,7 +60,7 @@ from malca.config import (
     POST_FILTER_PDM_METHOD,
 )
 from malca.cli_config import add_config_args, apply_config, namespace_keys
-from malca.config import OUTPUT_FORMAT, EVENTS_OUTPUT_CHUNK_SIZE
+from malca.config import EVENTS_OUTPUT_CHUNK_SIZE
 from malca.config import PARQUET_OUTPUT_COMPRESSION, PARQUET_CACHE_COMPRESSION
 from malca.config import ASASSN_INDEX_PATH, LCV2_ROOT, VSX_CROSSMATCH_PATH, GAIA_LOCAL_CATALOG
 from malca.config import (
@@ -328,7 +328,6 @@ PIPELINE_CONFIG_DEFAULTS: dict[str, Any] = {
     "mag_max_jump": None,
     "min_mag_offset": MIN_MAG_OFFSET,
     "output": None,
-    "output_format": OUTPUT_FORMAT,
     "chunk_size": EVENTS_OUTPUT_CHUNK_SIZE,
     "import_bundle": None,
     "export_bundle": None,
@@ -558,6 +557,38 @@ def _select_passing_candidates(df: pd.DataFrame) -> pd.DataFrame:
         keep = ~lowered.isin({"1", "true", "t", "yes", "y"})
 
     return df.loc[keep].copy()
+
+
+def _branch_events_attempted_this_run(branch_detection_stats: dict[str, object] | None) -> int | None:
+    """Return how many event inputs were attempted in this wrapper invocation."""
+    if not isinstance(branch_detection_stats, dict):
+        return None
+
+    total = 0
+    found = False
+    for branch_stats in branch_detection_stats.values():
+        if not isinstance(branch_stats, dict) or "attempted_this_run" not in branch_stats:
+            continue
+        try:
+            total += int(branch_stats.get("attempted_this_run") or 0)
+            found = True
+        except (TypeError, ValueError):
+            return None
+    return total if found else None
+
+
+def _should_skip_filter_stage(
+    *,
+    output_path: Path,
+    overwrite: bool,
+    branch_detection_stats: dict[str, object] | None,
+) -> bool:
+    """Skip filtering only when the existing filtered product is still current."""
+    if overwrite or not output_path.exists():
+        return False
+
+    attempted_this_run = _branch_events_attempted_this_run(branch_detection_stats)
+    return attempted_this_run == 0
 
 
 def _unique_paths(paths: list[Path]) -> list[Path]:
@@ -864,7 +895,6 @@ def export_bundle_zip(bundle_zip: Path, out_dir: Path, include_all: bool = False
         include_rel_paths.extend([
             f"run_params_{mag_bin_tag}.json",
             f"run_{mag_bin_tag}.log",
-            f"results/lc_events_results_{mag_bin_tag}.parquet",
             f"results/lc_events_filtered_{mag_bin_tag}.parquet",
             f"results/lc_events_enriched_{mag_bin_tag}.parquet",
         ])
@@ -884,11 +914,15 @@ def export_bundle_zip(bundle_zip: Path, out_dir: Path, include_all: bool = False
         p = out_dir / rel
         if p.exists() and p.is_file():
             files_to_add.add(p)
+        elif p.exists() and p.is_dir():
+            files_to_add.update(child for child in p.rglob("*") if child.is_file())
 
     for pattern in include_globs:
         for p in out_dir.glob(pattern):
             if p.exists() and p.is_file():
                 files_to_add.add(p)
+            elif p.exists() and p.is_dir():
+                files_to_add.update(child for child in p.rglob("*") if child.is_file())
 
     for rel_dir in include_dirs:
         d = out_dir / rel_dir
@@ -1288,8 +1322,10 @@ def main():
         events_args.extend(["--mag-min-jump", str(args.mag_min_jump)])
     if args.mag_max_jump is not None:
         events_args.extend(["--mag-max-jump", str(args.mag_max_jump)])
+    events_format = "parquet_chunk"
+
     events_args.extend(["--min-mag-offset", str(args.min_mag_offset)])
-    events_args.extend(["--output-format", args.output_format])
+    events_args.extend(["--output-format", events_format])
     events_args.extend(["--chunk-size", str(args.chunk_size)])
 
     quiet = not bool(args.verbose)
@@ -1301,9 +1337,6 @@ def main():
     mag_bin_tag = "all" if is_auto_all_mode else (args.mag_bin[0] if len(args.mag_bin) == 1 else "multi")
 
     # IMPORTANT: never write to filesystem root (/output). Default to a writable directory.
-    events_format = str(args.output_format).lower()
-    if events_format not in {"parquet", "parquet_chunk"}:
-        raise SystemExit("--output-format must be parquet or parquet_chunk.")
     base_output_root = Path("output").resolve()
     if args.out_dir is not None:
         out_dir = Path(args.out_dir).expanduser()
@@ -1369,13 +1402,15 @@ def main():
             )
 
     if args.output is None:
-        events_output = results_dir / f"lc_events_results_{mag_bin_tag}.parquet"
+        events_output = results_dir / f"lc_events_results_{mag_bin_tag}"
     else:
         events_output = Path(args.output).expanduser()
         if args.out_dir is not None and not events_output.is_absolute():
             events_output = out_dir / events_output
         elif args.out_dir is None and not events_output.is_absolute():
             events_output = out_dir / events_output
+        if events_output.suffix.lower() == ".parquet":
+            events_output = events_output.with_suffix("")
 
     manifest_file = Path(args.manifest_file).expanduser() if args.manifest_file else (manifests_dir / f"lc_manifest_{mag_bin_tag}.parquet")
     filtered_file = Path(args.filtered_file).expanduser() if args.filtered_file else (tags_dir / f"lc_filtered_{mag_bin_tag}.parquet")
@@ -1386,8 +1421,8 @@ def main():
     periodic_paths_file = paths_dir / f"periodic_paths_{mag_bin_tag}.txt"
     branch_cache_dir = results_dir / "_branch_events"
     branch_cache_dir.mkdir(parents=True, exist_ok=True)
-    periodic_branch_events_output = branch_cache_dir / f"lc_events_periodic_branch_{mag_bin_tag}.parquet"
-    stochastic_branch_events_output = branch_cache_dir / f"lc_events_stochastic_branch_{mag_bin_tag}.parquet"
+    periodic_branch_events_output = branch_cache_dir / f"lc_events_periodic_branch_{mag_bin_tag}"
+    stochastic_branch_events_output = branch_cache_dir / f"lc_events_stochastic_branch_{mag_bin_tag}"
     if args.pre_periodicity_checkpoint is None:
         pre_periodicity_checkpoint = tags_dir / f"pre_periodicity_checkpoint_{mag_bin_tag}.parquet"
     else:
@@ -1583,7 +1618,6 @@ def main():
             # System parameters
             "workers": args.workers,
             "batch_size": args.batch_size,
-            "output_format": args.output_format,
             # Cleaning thresholds (hardcoded, not CLI args)
             "clean_max_error_absolute": CLEAN_LC_MAX_ERROR_ABSOLUTE,
             "clean_max_error_sigma": CLEAN_LC_MAX_ERROR_SIGMA,
@@ -1752,7 +1786,7 @@ def main():
 
     def _normalized_output_path(path: Path, fmt: str) -> Path:
         if fmt == "parquet_chunk":
-            return path if not path.suffix else path.with_suffix("")
+            return path.with_suffix("") if path.suffix.lower() == ".parquet" else path
         return path if path.suffix.lower() == ".parquet" else path.with_suffix(".parquet")
 
     def _output_files_for_path(path: Path, fmt: str) -> list[Path]:
@@ -1774,9 +1808,17 @@ def main():
             if path.exists():
                 clear_existing_output(path, fmt)
             path.mkdir(parents=True, exist_ok=True)
-            chunk_path = path / "chunk_000000.parquet"
-            df.to_parquet(chunk_path, index=False, compression=PARQUET_OUTPUT_COMPRESSION)
-            return [chunk_path]
+            chunk_rows = max(1, int(args.chunk_size or len(df) or 1))
+            files: list[Path] = []
+            for idx, start in enumerate(range(0, len(df), chunk_rows)):
+                chunk_path = path / f"chunk_{idx:06d}.parquet"
+                df.iloc[start : start + chunk_rows].to_parquet(
+                    chunk_path,
+                    index=False,
+                    compression=PARQUET_OUTPUT_COMPRESSION,
+                )
+                files.append(chunk_path)
+            return files
         safe_write_parquet(df, path)
         return [path]
 
@@ -1789,13 +1831,13 @@ def main():
         metadata_df: pd.DataFrame | None = None,
         branch_paths_file: Path | None = None,
     ) -> tuple[pd.DataFrame, dict[str, object]]:
-        branch_output = Path(branch_output)
+        branch_output = _normalized_output_path(Path(branch_output), events_format)
         checkpoint_log = branch_output.with_name(f"{branch_output.stem}_PROCESSED.txt")
         error_log = branch_output.with_name(f"{branch_output.stem}_ERRORS.parquet")
         metadata_path: Path | None = None
 
         if args.overwrite:
-            clear_existing_output(branch_output, "parquet")
+            clear_existing_output(branch_output, events_format)
             checkpoint_log.unlink(missing_ok=True)
             error_log.unlink(missing_ok=True)
 
@@ -1827,9 +1869,24 @@ def main():
             except Exception as e:
                 log(f"Warning: could not read checkpoint log {checkpoint_log}: {e}")
 
+        if not args.overwrite:
+            try:
+                df_existing_branch = _load_events_output(branch_output, events_format)
+                if "path" in df_existing_branch.columns:
+                    output_paths = set(df_existing_branch["path"].dropna().astype(str))
+                    new_output_paths = output_paths - processed_paths
+                    if new_output_paths:
+                        processed_paths |= new_output_paths
+                        log(
+                            f"{branch_name.title()} branch output contains "
+                            f"{len(new_output_paths)} additional processed paths"
+                        )
+            except Exception as e:
+                log(f"Warning: could not inspect existing {branch_name} branch output: {e}")
+
         remaining = [path_value for path_value in file_paths if str(path_value) not in processed_paths]
         if file_paths and (not remaining):
-            log(f"All {branch_name} branch paths already processed according to checkpoint.")
+            log(f"All {branch_name} branch paths already processed according to checkpoint/output.")
 
         batch_size = max(1, args.batch_size)
         total_batches = (len(remaining) + batch_size - 1) // batch_size
@@ -1851,8 +1908,6 @@ def main():
             if baseline_func_override is not None:
                 branch_events_args.extend(["--baseline-func", baseline_func_override])
             branch_events_args.extend([
-                "--output-format",
-                "parquet",
                 "--output",
                 str(branch_output),
                 "--error-output",
@@ -1881,11 +1936,13 @@ def main():
                     print(f"\nBranch paths saved to: {branch_paths_file}")
                 sys.exit(1)
 
-        df_branch = pd.read_parquet(branch_output) if branch_output.exists() else pd.DataFrame()
+        df_branch = _load_events_output(branch_output, events_format)
         stats = {
             "branch": branch_name,
             "baseline_func": baseline_func_override or args.baseline_func,
             "total_input": int(len(file_paths)),
+            "attempted_this_run": int(len(remaining)),
+            "skipped_by_checkpoint": int(len(file_paths) - len(remaining)),
             "total_results": int(len(df_branch)),
             "dip_significant": int(df_branch["dip_significant"].fillna(False).sum()) if "dip_significant" in df_branch.columns else 0,
             "jump_significant": int(df_branch["jump_significant"].fillna(False).sum()) if "jump_significant" in df_branch.columns else 0,
@@ -2170,6 +2227,8 @@ def main():
             "branch": "periodic",
             "baseline_func": "phase_template",
             "total_input": 0,
+            "attempted_this_run": 0,
+            "skipped_by_checkpoint": 0,
             "total_results": 0,
             "dip_significant": 0,
             "jump_significant": 0,
@@ -2285,59 +2344,69 @@ def main():
 
     # Step 5: Apply filters (optional)
     if run_upstream and args.run_filter and results_files:
-        log("\n=== Step 5: Applying filters ===")
-        try:
-            # Load events results
-            if events_format == "parquet_chunk":
-                df_events = pd.concat([pd.read_parquet(f) for f in results_files], ignore_index=True)
-            else:
-                df_events = load_table(results_files[0])
-
-            # Apply filters
-            filter_kwargs = _build_filter_kwargs(args)
-            if stage == "cluster":
-                # Cluster stage must avoid internet catalog lookups.
-                filter_kwargs["apply_gaia_ruwe_validation"] = False
-                filter_kwargs["apply_gaia_pm_validation"] = False
-                filter_kwargs["apply_periodic_catalog_validation"] = False
-
-            # Add gaia_id from ASASSN index (needed for validate_gaia_ruwe/pm filters)
-            if filter_kwargs.get("apply_gaia_ruwe_validation", True) or filter_kwargs.get("apply_gaia_pm_validation", True):
-                _gaia_index_path, _ = _resolve_asassn_index_path(out_dir, index_override=getattr(args, "index_file", None))
-                if _gaia_index_path:
-                    df_events = _add_gaia_ids_from_index(df_events, _gaia_index_path)
+        post_filter_output = results_dir / f"lc_events_filtered_{mag_bin_tag}.parquet"
+        if _should_skip_filter_stage(
+            output_path=post_filter_output,
+            overwrite=bool(args.overwrite),
+            branch_detection_stats=branch_detection_stats,
+        ):
+            log(
+                "\n=== Step 5: Filtered output exists and no new events were "
+                f"processed, skipping: {post_filter_output} ==="
+            )
+        else:
+            log("\n=== Step 5: Applying filters ===")
+            try:
+                # Load events results
+                if events_format == "parquet_chunk":
+                    df_events = pd.concat([pd.read_parquet(f) for f in results_files], ignore_index=True)
                 else:
-                    _log("Warning: ASASSN index not found; gaia_id will be missing — RUWE/PM filters will have no matches")
+                    df_events = load_table(results_files[0])
 
-            df_post_filtered = apply_filters(df_events, **filter_kwargs)
+                # Apply filters
+                filter_kwargs = _build_filter_kwargs(args)
+                if stage == "cluster":
+                    # Cluster stage must avoid internet catalog lookups.
+                    filter_kwargs["apply_gaia_ruwe_validation"] = False
+                    filter_kwargs["apply_gaia_pm_validation"] = False
+                    filter_kwargs["apply_periodic_catalog_validation"] = False
 
-            # Save filtered results
-            post_filter_output = results_dir / f"lc_events_filtered_{mag_bin_tag}.parquet"
-            save_table(df_post_filtered, post_filter_output)
-            log(f"Filtered results saved to {post_filter_output}")
+                # Add gaia_id from ASASSN index (needed for validate_gaia_ruwe/pm filters)
+                if filter_kwargs.get("apply_gaia_ruwe_validation", True) or filter_kwargs.get("apply_gaia_pm_validation", True):
+                    _gaia_index_path, _ = _resolve_asassn_index_path(out_dir, index_override=getattr(args, "index_file", None))
+                    if _gaia_index_path:
+                        df_events = _add_gaia_ids_from_index(df_events, _gaia_index_path)
+                    else:
+                        _log("Warning: ASASSN index not found; gaia_id will be missing — RUWE/PM filters will have no matches")
 
-            # Update summary with filter stats
-            n_passed = int((~df_post_filtered["failed_any"]).sum()) if "failed_any" in df_post_filtered.columns else len(df_post_filtered)
-            n_failed = int(df_post_filtered["failed_any"].sum()) if "failed_any" in df_post_filtered.columns else 0
-            summary["filter_stats"] = {
-                "total_input": len(df_events),
-                "passed": n_passed,
-                "failed": n_failed,
-                "pass_rate": n_passed / len(df_events) if len(df_events) > 0 else 0.0,
-            }
-            summary["post_filter_stats"] = summary["filter_stats"]
+                df_post_filtered = apply_filters(df_events, **filter_kwargs)
 
-            # Overwrite summary with updated stats
-            with open(run_summary_file, "w") as f:
-                json.dump(summary, f, indent=2, default=str)
+                # Save filtered results
+                save_table(df_post_filtered, post_filter_output)
+                log(f"Filtered results saved to {post_filter_output}")
 
-            log(f"Filter: {n_passed}/{len(df_events)} passed")
+                # Update summary with filter stats
+                n_passed = int((~df_post_filtered["failed_any"]).sum()) if "failed_any" in df_post_filtered.columns else len(df_post_filtered)
+                n_failed = int(df_post_filtered["failed_any"].sum()) if "failed_any" in df_post_filtered.columns else 0
+                summary["filter_stats"] = {
+                    "total_input": len(df_events),
+                    "passed": n_passed,
+                    "failed": n_failed,
+                    "pass_rate": n_passed / len(df_events) if len(df_events) > 0 else 0.0,
+                }
+                summary["post_filter_stats"] = summary["filter_stats"]
 
-        except Exception as e:
-            print(f"Error in filter step: {e}")
-            if args.verbose:
+                # Overwrite summary with updated stats
+                with open(run_summary_file, "w") as f:
+                    json.dump(summary, f, indent=2, default=str)
 
-                traceback.print_exc()
+                log(f"Filter: {n_passed}/{len(df_events)} passed")
+
+            except Exception as e:
+                print(f"Error in filter step: {e}")
+                if args.verbose:
+
+                    traceback.print_exc()
 
     # Step 6: Enrich with compute_stats (optional, runs immediately after filter)
     if run_upstream and args.run_enrich:
@@ -2514,21 +2583,31 @@ def main():
         log("\n=== Merging per-mag-bin outputs ===")
         merge_started = time.perf_counter()
         for merge_prefix in ("lc_events_results", "lc_events_filtered", "lc_events_enriched"):
-            tagged_files = sorted(results_dir.glob(f"{merge_prefix}_*.parquet"))
+            pattern = f"{merge_prefix}_*" if merge_prefix == "lc_events_results" else f"{merge_prefix}_*.parquet"
+            tagged_outputs = sorted(results_dir.glob(pattern))
             # Exclude checkpoint and temp files from merging
-            tagged_files = [
-                f for f in tagged_files
+            tagged_outputs = [
+                f for f in tagged_outputs
                 if "_CHECKPOINT" not in f.name and "_PROCESSED" not in f.name and not f.name.endswith(".tmp")
             ]
-            merged_path = results_dir / f"{merge_prefix}.parquet"
-            if tagged_files:
+            merged_path = results_dir / merge_prefix if merge_prefix == "lc_events_results" else results_dir / f"{merge_prefix}.parquet"
+            if tagged_outputs:
                 try:
-                    dfs = [pd.read_parquet(f) for f in tagged_files]
+                    if merge_prefix == "lc_events_results":
+                        dfs = [
+                            _load_events_output(path, events_format) if path.is_dir() else pd.read_parquet(path)
+                            for path in tagged_outputs
+                        ]
+                    else:
+                        dfs = [pd.read_parquet(f) for f in tagged_outputs]
                     merged = pd.concat(dfs, ignore_index=True)
                     if "path" in merged.columns:
                         merged = merged.drop_duplicates(subset=["path"], keep="last")
-                    save_table(merged, merged_path)
-                    log(f"Merged {len(tagged_files)} files into {merged_path} ({len(merged)} rows)")
+                    if merge_prefix == "lc_events_results":
+                        _write_events_output(merged, merged_path, events_format)
+                    else:
+                        save_table(merged, merged_path)
+                    log(f"Merged {len(tagged_outputs)} outputs into {merged_path} ({len(merged)} rows)")
                 except Exception as e:
                     log(f"Warning: could not merge {merge_prefix} files: {e}")
         log(f"Merge step completed in {time.perf_counter() - merge_started:.1f}s")

@@ -10,8 +10,10 @@ from malca.review.explore_data import load_review_db
 from malca.review.store import (
     db_connect,
     export_review_subset_bundle,
+    get_candidate_payload,
     merge_candidate_results,
     merge_review_databases,
+    merge_vetting_results,
     upsert_candidates_frame,
 )
 
@@ -113,6 +115,64 @@ def test_export_review_subset_bundle_writes_review_ready_bundle(tmp_path: Path) 
     assert row is not None
     assert json.loads(row[0])["candidate_count"] == 1
     assert Path(result["review_db"]) == bundle_dir / "review.db"
+
+
+def test_merge_vetting_results_updates_gaia_variable_sql_column(tmp_path: Path) -> None:
+    review_db = tmp_path / "review.db"
+
+    with db_connect(review_db) as conn:
+        upsert_candidates_frame(
+            conn,
+            pd.DataFrame(
+                [
+                    {
+                        "candidate_id": "GAIA-VAR",
+                        "asas_sn_id": "GAIA-VAR",
+                        "gaia_var_flag": False,
+                    }
+                ]
+            ),
+        )
+        updated = merge_vetting_results(
+            conn,
+            pd.DataFrame(
+                [
+                    {
+                        "candidate_id": "GAIA-VAR",
+                        "gaia_var_flag": True,
+                        "gaia_var_class": "",
+                    }
+                ]
+            ),
+        )
+        payload = get_candidate_payload(conn, "GAIA-VAR")
+
+    assert updated == 1
+    assert payload["gaia_var_flag"] is True
+
+
+def test_upsert_candidates_frame_derives_known_from_gaia_class(tmp_path: Path) -> None:
+    review_db = tmp_path / "review.db"
+
+    with db_connect(review_db) as conn:
+        upsert_candidates_frame(
+            conn,
+            pd.DataFrame(
+                [
+                    {
+                        "candidate_id": "GAIA-CLASSIFIED",
+                        "asas_sn_id": "GAIA-CLASSIFIED",
+                        "gaia_var_flag": True,
+                        "gaia_var_class": "LPV",
+                        "vetting_likely_known": False,
+                    }
+                ]
+            ),
+        )
+        payload = get_candidate_payload(conn, "GAIA-CLASSIFIED")
+
+    assert payload["vetting_likely_known"] is True
+    assert payload["gaia_var_class"] == "LPV"
 
 
 def test_merge_candidate_results_updates_candidate_fields_without_touching_reviews(tmp_path: Path) -> None:

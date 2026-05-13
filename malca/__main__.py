@@ -25,6 +25,7 @@ COMMAND_GROUPS = {
     "tag": "Discovery",
     "events": "Discovery",
     "plot": "Discovery",
+    "lc-plot": "Discovery",
     "gaia-fetch": "Discovery",
     "characterize": "Discovery",
     "classify": "Discovery",
@@ -107,7 +108,7 @@ def main():
     if len(sys.argv) >= 2 and sys.argv[1] in [
         "manifest", "pipeline", "reproduce", "injection",
         "detection-rate", "validate", "plot",
-        "events", "gaia-fetch", "characterize", "classify", "filter", "tag",
+        "events", "lc-plot", "gaia-fetch", "characterize", "classify", "filter", "tag",
         "attrition", "review", "review-qt", "review-refresh", "review-merge", "review-explore", "review-sync", "review-taxonomy", "review-maint",
         "neighbors", "spectra", "false-positive", "vsx-filter", "vsx-crossmatch",
         "vetting",
@@ -140,6 +141,8 @@ def main():
             attrition.main()
         elif command == "plot":
             _run_module_main("malca.plot", remaining)
+        elif command == "lc-plot":
+            _run_module_main("malca.lightcurve_publication", remaining)
         elif command == "events":
             _run_module_main("malca.events", remaining)
         elif command == "gaia-fetch":
@@ -287,6 +290,7 @@ def main():
     subparsers.add_parser("tag", description="Apply tagging filters to candidate tables")
     subparsers.add_parser("events", description="Run event detection directly")
     subparsers.add_parser("plot", description="Plot light curves with events")
+    subparsers.add_parser("lc-plot", description="Create a publication-quality light-curve figure")
     subparsers.add_parser("gaia-fetch", description="Download Gaia DR3 data for candidates (AIP TAP mirror)")
     subparsers.add_parser("characterize", description="Characterize candidates with external catalogs")
     subparsers.add_parser("classify", description="Classify candidates by variability type")

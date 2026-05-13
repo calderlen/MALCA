@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import json
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -11,9 +14,12 @@ pytest.importorskip("dustmaps3d")
 pytest.importorskip("banyan_sigma")
 
 from malca.detect import (
+    _branch_events_attempted_this_run,
     _build_filter_kwargs,
     _build_home_external_validation_cmd,
     _select_passing_candidates,
+    _should_skip_filter_stage,
+    main as detect_main,
 )
 
 
@@ -183,6 +189,54 @@ def test_select_passing_candidates_filters_truthy_failed_any_values() -> None:
     assert out["path"].tolist() == ["a", "d"]
 
 
+def test_filter_stage_skip_requires_existing_output_and_no_new_event_attempts(tmp_path: Path) -> None:
+    output = tmp_path / "lc_events_filtered_13_13.5.parquet"
+    output.write_bytes(b"exists")
+    stats = {
+        "stochastic": {"attempted_this_run": 0},
+        "periodic": {"attempted_this_run": 0},
+    }
+
+    assert _branch_events_attempted_this_run(stats) == 0
+    assert _should_skip_filter_stage(
+        output_path=output,
+        overwrite=False,
+        branch_detection_stats=stats,
+    )
+
+
+def test_filter_stage_does_not_skip_when_events_attempted(tmp_path: Path) -> None:
+    output = tmp_path / "lc_events_filtered_13_13.5.parquet"
+    output.write_bytes(b"exists")
+    stats = {
+        "stochastic": {"attempted_this_run": 0},
+        "periodic": {"attempted_this_run": 3},
+    }
+
+    assert _branch_events_attempted_this_run(stats) == 3
+    assert not _should_skip_filter_stage(
+        output_path=output,
+        overwrite=False,
+        branch_detection_stats=stats,
+    )
+
+
+def test_filter_stage_does_not_skip_without_stats_or_when_overwriting(tmp_path: Path) -> None:
+    output = tmp_path / "lc_events_filtered_13_13.5.parquet"
+    output.write_bytes(b"exists")
+
+    assert not _should_skip_filter_stage(
+        output_path=output,
+        overwrite=False,
+        branch_detection_stats=None,
+    )
+    assert not _should_skip_filter_stage(
+        output_path=output,
+        overwrite=True,
+        branch_detection_stats={"stochastic": {"attempted_this_run": 0}},
+    )
+
+
 def test_build_home_external_validation_cmd_forwards_periodicity_options() -> None:
     args = _base_args()
     args.apply_periodicity_validation = True
@@ -225,3 +279,101 @@ def test_build_home_external_validation_cmd_forwards_periodicity_options() -> No
     assert "0.5" in cmd
     assert "--phase-plot-allow-alias" in cmd
     assert "--verbose" in cmd
+
+
+def test_pipeline_event_subprocesses_always_use_parquet_chunk(tmp_path: Path, monkeypatch) -> None:
+    mag_bin = "13_13.5"
+    source_id = "ASASSN-TEST-001"
+    lcsv2 = tmp_path / "lcsv2"
+    index_dir = lcsv2 / mag_bin
+    lc_dir = lcsv2 / mag_bin / "lc1_cal"
+    index_dir.mkdir(parents=True)
+    lc_dir.mkdir(parents=True)
+    (index_dir / "index1.csv").write_text(f"asas_sn_id\n{source_id}\n", encoding="ascii")
+    (lc_dir / f"{source_id}.dat3").write_text(
+        "1 13.0 0.01 0 1 0 0 cam/field\n",
+        encoding="ascii",
+    )
+
+    out_dir = tmp_path / "run"
+    config_path = tmp_path / "pipeline_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "pipeline": {
+                    "skip_sparse": True,
+                    "skip_multi_camera": True,
+                    "skip_mag_range": True,
+                    "skip_vsx": True,
+                    "skip_camera_median": True,
+                    "run_filter": False,
+                    "export_bundle_enabled": False,
+                    "review_sync_enabled": False,
+                }
+            }
+        ),
+        encoding="ascii",
+    )
+
+    captured_cmds: list[list[str]] = []
+
+    def fake_run(cmd: list[str], check: bool = False):
+        captured_cmds.append(list(cmd))
+        input_file = Path(cmd[cmd.index("--input-file") + 1])
+        output_dir = Path(cmd[cmd.index("--output") + 1])
+        paths = [line.strip() for line in input_file.read_text(encoding="ascii").splitlines() if line.strip()]
+        output_dir.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(
+            {
+                "path": paths,
+                "dip_significant": [False] * len(paths),
+                "jump_significant": [False] * len(paths),
+            }
+        ).to_parquet(output_dir / "chunk_000000.parquet", index=False)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("malca.detect.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "malca",
+            "--mag-bin",
+            mag_bin,
+            "--index-root",
+            str(lcsv2),
+            "--lc-root",
+            str(lcsv2),
+            "--output-dir",
+            str(out_dir),
+            "--stage",
+            "cluster",
+            "--config",
+            str(config_path),
+            "--workers",
+            "1",
+            "--overwrite",
+        ],
+    )
+
+    detect_main()
+
+    assert captured_cmds
+    for cmd in captured_cmds:
+        assert cmd[cmd.index("--output-format") + 1] == "parquet_chunk"
+
+    branch_chunk = (
+        out_dir
+        / "results"
+        / "_branch_events"
+        / f"lc_events_stochastic_branch_{mag_bin}"
+        / "chunk_000000.parquet"
+    )
+    canonical_chunk = (
+        out_dir
+        / "results"
+        / f"lc_events_results_{mag_bin}"
+        / "chunk_000000.parquet"
+    )
+    assert branch_chunk.exists()
+    assert canonical_chunk.exists()

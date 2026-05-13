@@ -106,7 +106,6 @@ from malca.review.session import create_queue_data_dict
 from malca.review.sync import auto_export_review_bundle
 from malca.review.taxonomy import (
     MORPHOLOGY_PRIMARY,
-    PHYSICAL_FAMILIES,
     keyboard_payload,
     label_for,
     selection_from_review,
@@ -2588,20 +2587,25 @@ def _render_metadata_health(grouped: list[tuple[str, list[tuple[str, object]]]] 
 
 def _render_vetting_banner(payload: dict | None, radius_arcsec: float = 10.0) -> html.Div:
     """Render a vetting status panel with source cards above the metadata grid."""
-    if not payload or 'vetting_likely_known' not in payload:
+    if not payload:
         return html.Div("Not vetted", className='vetting-banner-empty')
 
-    known = payload.get('vetting_likely_known')
+    def _ok(v) -> bool:
+        """True if v is a non-empty, non-NaN string."""
+        return bool(v) and str(v).strip().lower() not in ('nan', '<na>')
+
+    gaia_cls = payload.get('gaia_var_class')
+    gaia_has_class = _ok(gaia_cls)
+    if 'vetting_likely_known' not in payload and not gaia_has_class:
+        return html.Div("Not vetted", className='vetting-banner-empty')
+
+    known = _coerce_bool(payload.get('vetting_likely_known')) or gaia_has_class
     banner_state = 'known' if known else 'new'
 
     # Status header
     header_text = "KNOWN VARIABLE" if known else "POTENTIALLY NEW"
 
     cards = []
-
-    def _ok(v) -> bool:
-        """True if v is a non-empty, non-NaN string."""
-        return bool(v) and str(v).strip().lower() not in ('nan', '<na>')
 
     def _label(text: str) -> html.Span:
         return html.Span(text, className='vetting-banner-label')
@@ -2642,7 +2646,6 @@ def _render_vetting_banner(payload: dict | None, radius_arcsec: float = 10.0) ->
         cards.append(_cell("VSX", f"{vsx_cls}{p_str}{sep_str}", hit=True))
 
     # Gaia variability cell
-    gaia_cls = payload.get('gaia_var_class')
     if _ok(gaia_cls):
         score = payload.get('gaia_var_score')
         score_str = f" ({score:.2f})" if score and not pd.isna(score) else ""
@@ -7391,8 +7394,8 @@ def _do_save(candidate_id, score, taxonomy_selection, needs_followup, notes, eve
             morphology_polarity=selection.get('morphology_polarity'),
             morphology_recurrence=selection.get('morphology_recurrence'),
             baseline_behavior=selection.get('baseline_behavior'),
-            physical_family=selection.get('physical_family'),
-            physical_subclass=selection.get('physical_subclass'),
+            physical_primary=selection.get('physical_primary'),
+            physical_secondary=selection.get('physical_secondary'),
             classification_confidence=selection.get('classification_confidence'),
             priority_tags=selection.get('priority_tags'),
             evidence_flags=selection.get('evidence_flags'),
@@ -7421,7 +7424,7 @@ app.clientside_callback(
             primaryByValue[String(item.value)] = item;
         });
         var familyByKey = {};
-        taxonomy.physical_families.forEach(function(item) {
+        taxonomy.physical_primary.forEach(function(item) {
             familyByKey[String(item.key).toLowerCase()] = item;
         });
         var secondaryByKey = function(primary) {
@@ -7433,7 +7436,7 @@ app.clientside_callback(
         };
         var subclassByKey = function(family) {
             var out = {};
-            (taxonomy.physical_subclasses[family] || []).forEach(function(item) {
+            (taxonomy.physical_secondary[family] || []).forEach(function(item) {
                 out[String(item.key).toLowerCase()] = item;
             });
             return out;
@@ -7526,12 +7529,12 @@ app.clientside_callback(
         }
 
         if (lower === 'h') {
-            if (nextActiveMenu === 'physical_family') {
+            if (nextActiveMenu === 'physical_primary') {
                 nextActiveMenu = '';
                 nextSubmenu = '';
                 return emitTaxonomy('Hypothesis menu closed');
             }
-            nextActiveMenu = 'physical_family';
+            nextActiveMenu = 'physical_primary';
             nextSubmenu = '';
             return emitTaxonomy('Hypothesis menu');
         }
@@ -7552,44 +7555,44 @@ app.clientside_callback(
             }
         }
 
-        if (nextActiveMenu === 'physical_family') {
+        if (nextActiveMenu === 'physical_primary') {
             if (key === 'Backspace') {
-                selection.physical_family = null;
-                selection.physical_subclass = null;
+                selection.physical_primary = null;
+                selection.physical_secondary = null;
                 nextActiveMenu = '';
                 nextSubmenu = '';
                 return emitTaxonomy('Hypothesis cleared');
             }
             var family = familyByKey[lower];
             if (family) {
-                if (selection.physical_family === family.value) {
-                    selection.physical_family = null;
-                    selection.physical_subclass = null;
+                if (selection.physical_primary === family.value) {
+                    selection.physical_primary = null;
+                    selection.physical_secondary = null;
                     nextActiveMenu = '';
                     nextSubmenu = '';
                     return emitTaxonomy('Hypothesis cleared');
                 }
-                selection.physical_family = family.value;
-                selection.physical_subclass = null;
-                nextActiveMenu = (taxonomy.physical_subclasses[family.value] || []).length ? 'physical_subclass' : '';
+                selection.physical_primary = family.value;
+                selection.physical_secondary = null;
+                nextActiveMenu = (taxonomy.physical_secondary[family.value] || []).length ? 'physical_secondary' : '';
                 nextSubmenu = nextActiveMenu ? family.value : '';
                 return emitTaxonomy('Hypothesis: ' + family.label);
             }
         }
 
-        if (nextActiveMenu === 'physical_subclass') {
+        if (nextActiveMenu === 'physical_secondary') {
             if (key === 'Backspace') {
-                selection.physical_subclass = null;
+                selection.physical_secondary = null;
                 nextActiveMenu = '';
                 nextSubmenu = '';
                 return emitTaxonomy('Physical subclass cleared');
             }
-            var subclass = subclassByKey(selection.physical_family || nextSubmenu)[lower];
+            var subclass = subclassByKey(selection.physical_primary || nextSubmenu)[lower];
             if (subclass) {
-                selection.physical_subclass = (selection.physical_subclass === subclass.value) ? null : subclass.value;
+                selection.physical_secondary = (selection.physical_secondary === subclass.value) ? null : subclass.value;
                 nextActiveMenu = '';
                 nextSubmenu = '';
-                return emitTaxonomy('Subclass: ' + (selection.physical_subclass || 'cleared'));
+                return emitTaxonomy('Subclass: ' + (selection.physical_secondary || 'cleared'));
             }
         }
 
@@ -8922,9 +8925,9 @@ def click_taxonomy_primary(_primary_clicks, _hypothesis_clicks, selection, activ
         return no_update, no_update, no_update, no_update
     selection = selection_from_review(selection if isinstance(selection, dict) else {})
     if triggered == 'taxonomy-hypothesis-btn':
-        if active_menu == 'physical_family':
+        if active_menu == 'physical_primary':
             return selection, '', '', 'Hypothesis menu closed'
-        return selection, 'physical_family', '', 'Hypothesis menu'
+        return selection, 'physical_primary', '', 'Hypothesis menu'
     if not isinstance(triggered, dict) or triggered.get('type') != 'taxonomy-primary-btn':
         return no_update, no_update, no_update, no_update
     value = str(triggered.get('value') or '')
@@ -8957,20 +8960,20 @@ def click_taxonomy_option(_option_clicks, selection, active_menu):
     if menu == 'morphology_secondary':
         selection['morphology_secondary'] = None if selection.get('morphology_secondary') == value else value
         return selection, '', '', f"Detail: {label_for(selection.get('morphology_secondary') or 'cleared')}"
-    if menu == 'physical_family':
-        if selection.get('physical_family') == value:
-            selection['physical_family'] = None
-            selection['physical_subclass'] = None
+    if menu == 'physical_primary':
+        if selection.get('physical_primary') == value:
+            selection['physical_primary'] = None
+            selection['physical_secondary'] = None
             return selection, '', '', 'Hypothesis cleared'
-        selection['physical_family'] = value
-        selection['physical_subclass'] = None
-        subclasses = TAXONOMY_KEYBOARD_PAYLOAD['physical_subclasses'].get(value, [])
+        selection['physical_primary'] = value
+        selection['physical_secondary'] = None
+        subclasses = TAXONOMY_KEYBOARD_PAYLOAD['physical_secondary'].get(value, [])
         if subclasses:
-            return selection, 'physical_subclass', value, f"Hypothesis: {label_for(value)}"
+            return selection, 'physical_secondary', value, f"Hypothesis: {label_for(value)}"
         return selection, '', '', f"Hypothesis: {label_for(value)}"
-    if menu == 'physical_subclass':
-        selection['physical_subclass'] = None if selection.get('physical_subclass') == value else value
-        return selection, '', '', f"Subclass: {label_for(selection.get('physical_subclass') or 'cleared')}"
+    if menu == 'physical_secondary':
+        selection['physical_secondary'] = None if selection.get('physical_secondary') == value else value
+        return selection, '', '', f"Subclass: {label_for(selection.get('physical_secondary') or 'cleared')}"
     return no_update, no_update, no_update, no_update
 
 
@@ -8989,14 +8992,14 @@ def render_taxonomy_state(selection, active_menu):
         'badge-btn active' if item['value'] == primary else 'badge-btn'
         for item in MORPHOLOGY_PRIMARY
     ]
-    hypothesis_class = 'badge-btn active' if active_menu in {'physical_family', 'physical_subclass'} or selection.get('physical_family') else 'badge-btn'
+    hypothesis_class = 'badge-btn active' if active_menu in {'physical_primary', 'physical_secondary'} or selection.get('physical_primary') else 'badge-btn'
     parts = []
     if primary:
         detail = selection.get('morphology_secondary')
         parts.append(f"Morphology: {label_for(primary)}" + (f" / {label_for(detail)}" if detail else ""))
-    if selection.get('physical_family'):
-        family = selection.get('physical_family')
-        subclass = selection.get('physical_subclass')
+    if selection.get('physical_primary'):
+        family = selection.get('physical_primary')
+        subclass = selection.get('physical_secondary')
         parts.append(f"Hypothesis: {label_for(family)}" + (f" / {label_for(subclass)}" if subclass else ""))
     return primary_classes, hypothesis_class, ' | '.join(parts) if parts else 'No taxonomy selection'
 
@@ -9015,13 +9018,13 @@ def render_taxonomy_submenu(active_menu, submenu, selection):
         options = TAXONOMY_KEYBOARD_PAYLOAD['morphology_secondary'].get(str(submenu or selection.get('morphology_primary') or ''), [])
         active_value = selection.get('morphology_secondary')
         title = 'Detail'
-    elif active_menu == 'physical_family':
-        options = TAXONOMY_KEYBOARD_PAYLOAD['physical_families']
-        active_value = selection.get('physical_family')
+    elif active_menu == 'physical_primary':
+        options = TAXONOMY_KEYBOARD_PAYLOAD['physical_primary']
+        active_value = selection.get('physical_primary')
         title = 'Hypothesis'
-    elif active_menu == 'physical_subclass':
-        options = TAXONOMY_KEYBOARD_PAYLOAD['physical_subclasses'].get(str(submenu or selection.get('physical_family') or ''), [])
-        active_value = selection.get('physical_subclass')
+    elif active_menu == 'physical_secondary':
+        options = TAXONOMY_KEYBOARD_PAYLOAD['physical_secondary'].get(str(submenu or selection.get('physical_primary') or ''), [])
+        active_value = selection.get('physical_secondary')
         title = 'Subclass'
     else:
         return []

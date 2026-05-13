@@ -1956,6 +1956,10 @@ def main():
     parser = argparse.ArgumentParser(description="Run Bayesian event scoring on light curves in parallel.")
     g_input = parser.add_argument_group("Input")
     g_output = parser.add_argument_group("Output")
+    g_detection = parser.add_argument_group("Detection")
+    g_runs = parser.add_argument_group("Run grouping")
+    g_baseline = parser.add_argument_group("Baseline")
+    g_cleaning = parser.add_argument_group("Cleaning")
     g_general = parser.add_argument_group("General")
     g_input.add_argument("--input", dest="input_patterns", action="append", default=None, help="Path or glob to a light-curve file. Repeat for multiple inputs.")
     g_input.add_argument("--input-file", type=Path, default=None, help="Read paths from file (one path per line); avoids long argv for large batches.")
@@ -1967,6 +1971,45 @@ def main():
     g_output.add_argument("--output-format", choices=("parquet", "parquet_chunk"), default=OUTPUT_FORMAT, help="Output format for results.")
     g_output.add_argument("--error-output", type=Path, default=None, help="Optional Parquet path for per-light-curve processing errors.")
     g_output.add_argument("--metadata", type=Path, default=None, help="Optional Parquet with 'path' and extra metadata columns to attach to results.")
+    g_output.add_argument("--chunk-size", type=int, help="Number of result rows per output chunk; <=0 buffers until the end.")
+
+    g_detection.add_argument("--trigger-mode", choices=("posterior_prob", "logbf"), help="Triggering criterion to use.")
+    g_detection.add_argument("--logbf-threshold-dip", type=float, help="Minimum local log Bayes factor for dip triggers.")
+    g_detection.add_argument("--logbf-threshold-jump", type=float, help="Minimum local log Bayes factor for jump triggers.")
+    g_detection.add_argument("--significance-threshold", type=float, help="Posterior probability significance threshold.")
+    g_detection.add_argument("--p-points", type=int, help="Number of posterior-probability grid points.")
+    g_detection.add_argument("--p-min-dip", type=float, help="Minimum dip posterior-probability grid value.")
+    g_detection.add_argument("--p-max-dip", type=float, help="Maximum dip posterior-probability grid value.")
+    g_detection.add_argument("--p-min-jump", type=float, help="Minimum jump posterior-probability grid value.")
+    g_detection.add_argument("--p-max-jump", type=float, help="Maximum jump posterior-probability grid value.")
+    g_detection.add_argument("--mag-points", type=int, help="Number of magnitude-offset grid points.")
+    g_detection.add_argument("--mag-min-dip", type=float, help="Minimum dip magnitude-offset grid value.")
+    g_detection.add_argument("--mag-max-dip", type=float, help="Maximum dip magnitude-offset grid value.")
+    g_detection.add_argument("--mag-min-jump", type=float, help="Minimum jump magnitude-offset grid value.")
+    g_detection.add_argument("--mag-max-jump", type=float, help="Maximum jump magnitude-offset grid value.")
+    g_detection.add_argument("--min-mag-offset", type=float, help="Minimum absolute magnitude offset considered for events.")
+    g_detection.add_argument("--no-event-prob", action="store_true", help="Skip event-probability columns; incompatible with posterior_prob triggering.")
+
+    g_runs.add_argument("--run-min-points", type=int, help="Minimum points required in an event run.")
+    g_runs.add_argument("--run-max-gap-points", type=int, help="Maximum missing/non-trigger points allowed inside a run.")
+    g_runs.add_argument("--run-max-gap-days", type=float, help="Maximum time gap allowed inside a run.")
+    g_runs.add_argument("--run-min-duration-days", type=float, help="Minimum event-run duration in days.")
+
+    g_baseline.add_argument(
+        "--baseline-func",
+        choices=("gp", "gp_masked", "global_median", "per_camera_median", "phase_template"),
+        help="Baseline model used before event scoring.",
+    )
+    g_baseline.add_argument("--baseline-s0", type=float, help="SHOTerm S0 for GP baselines.")
+    g_baseline.add_argument("--baseline-w0", type=float, help="SHOTerm w0 for GP baselines.")
+    g_baseline.add_argument("--baseline-q", type=float, help="SHOTerm Q for GP baselines.")
+    g_baseline.add_argument("--baseline-jitter", type=float, help="Additional jitter for GP baselines.")
+    g_baseline.add_argument("--baseline-sigma-floor", type=float, help="Optional fixed sigma floor for GP baselines.")
+
+    g_cleaning.add_argument("--filter-bad-cameras", dest="filter_bad_cameras", action="store_true", help="Enable automatic bad-camera filtering.")
+    g_cleaning.add_argument("--no-filter-bad-cameras", dest="filter_bad_cameras", action="store_false", help="Disable automatic bad-camera filtering.")
+    g_cleaning.add_argument("--bad-camera-scatter-ratio", type=float, help="Scatter ratio threshold for automatic bad-camera filtering.")
+    g_cleaning.add_argument("--max-error-fraction", type=float, help="Abort when processing failures exceed this fraction.")
 
     add_config_args(g_general)
     g_general.add_argument("-o", "--overwrite", action="store_true", help="Overwrite checkpoint log and existing output if present (start fresh).")
