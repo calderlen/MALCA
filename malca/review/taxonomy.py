@@ -341,6 +341,35 @@ CANONICAL_ALIASES = {
     "secular_brightening": "secular_brightening",
 }
 
+LEGACY_EVENT_CLASS_TAXONOMY_MAP: dict[str, dict[str, Any]] = {
+    "dipper": {
+        "morphology_primary": "dimming_event",
+        "priority_tags": ["priority_dipper"],
+    },
+    "microlensing": {
+        "morphology_primary": "brightening_event",
+        "morphology_secondary": "possible_microlensing_event",
+        "physical_primary": "microlensing",
+        "physical_secondary": "generic_microlensing_candidate",
+    },
+    "flare": {
+        "morphology_primary": "brightening_event",
+        "morphology_secondary": "possible_flare",
+        "physical_primary": "flare_star_or_magnetically_active_star",
+    },
+    "ltv": {
+        "morphology_primary": "long_term_trend",
+    },
+    "instrumental": {
+        "morphology_primary": "artifact_or_bad_photometry",
+        "physical_primary": "false_positive_or_contaminant",
+    },
+    "unknown_interesting": {
+        "morphology_primary": "unclear",
+        "physical_primary": "unknown",
+    },
+}
+
 SECONDARY_KEY_SEQUENCE = "123456789abcdefghijklmnopqrstuvwxyz"
 
 
@@ -494,8 +523,13 @@ def derive_event_class(selection: dict[str, Any] | None) -> str:
     return "unclassified"
 
 
+def _legacy_event_class_label(value: Any) -> str:
+    label = str(value or "").strip().lower()
+    return label or "unclassified"
+
+
 def legacy_review_to_taxonomy(row: dict[str, Any]) -> dict[str, Any]:
-    event_class = str(row.get("event_class") or "").strip()
+    event_class = _legacy_event_class_label(row.get("event_class"))
     old_status = str(row.get("status") or "").strip()
     workflow_status = "needs_followup" if old_status == "needs_followup" else (
         "reviewed" if old_status and old_status != "unreviewed" else "unreviewed"
@@ -503,21 +537,7 @@ def legacy_review_to_taxonomy(row: dict[str, Any]) -> dict[str, Any]:
     disposition = "keep" if workflow_status in {"reviewed", "needs_followup"} else None
     selection = empty_taxonomy_selection()
     selection["disposition"] = disposition
-
-    if event_class == "dipper":
-        selection["morphology_primary"] = "dimming_event"
-        selection["priority_tags"] = ["priority_dipper"]
-    elif event_class == "microlensing":
-        selection["morphology_primary"] = "brightening_event"
-        selection["physical_primary"] = "microlensing"
-    elif event_class == "flare":
-        selection["morphology_primary"] = "brightening_event"
-        selection["physical_primary"] = "flare_star_or_magnetically_active_star"
-    elif event_class == "ltv":
-        selection["morphology_primary"] = "long_term_trend"
-    elif event_class == "instrumental":
-        selection["morphology_primary"] = "artifact_or_bad_photometry"
-        selection["physical_primary"] = "false_positive_or_contaminant"
+    selection.update(LEGACY_EVENT_CLASS_TAXONOMY_MAP.get(event_class, {}))
 
     normalized = normalize_selection(selection)
     normalized["workflow_status"] = workflow_status
@@ -570,6 +590,8 @@ def migrate_legacy_review_db(
             app_state = pd.DataFrame()
 
     migrated_reviews = 0
+    mapped_review_label_counts: dict[str, int] = {}
+    unmapped_review_label_counts: dict[str, int] = {}
     with db_connect(new_path) as dst_conn:
         if not candidates.empty:
             upsert_candidates_frame(dst_conn, candidates)
@@ -579,6 +601,13 @@ def migrate_legacy_review_db(
             candidate_id = str(data.get("candidate_id") or "").strip()
             if not candidate_id:
                 continue
+            legacy_label = _legacy_event_class_label(data.get("event_class"))
+            label_counts = (
+                mapped_review_label_counts
+                if legacy_label in LEGACY_EVENT_CLASS_TAXONOMY_MAP
+                else unmapped_review_label_counts
+            )
+            label_counts[legacy_label] = label_counts.get(legacy_label, 0) + 1
             mapped = legacy_review_to_taxonomy(data)
             interest_score = data.get("interest_score")
             try:
@@ -658,6 +687,10 @@ def migrate_legacy_review_db(
         "reviews": migrated_reviews,
         "review_history": int(len(review_history)),
         "app_state": int(len(app_state)),
+        "reviews_mapped": int(sum(mapped_review_label_counts.values())),
+        "reviews_unmapped": int(sum(unmapped_review_label_counts.values())),
+        "mapped_review_label_counts": dict(sorted(mapped_review_label_counts.items())),
+        "unmapped_review_label_counts": dict(sorted(unmapped_review_label_counts.items())),
     }
     if out_dir is not None:
         result["export"] = export_review_bundle(new_path, out_dir)
