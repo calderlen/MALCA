@@ -5,7 +5,7 @@ import pandas as pd
 import malca.vetting as vetting
 
 
-def test_gaia_variability_surfaces_classifier_for_numeric_like_gaia_ids(monkeypatch) -> None:
+def test_gaia_variability_surfaces_classifier_for_numeric_like_gaia_ids(monkeypatch, tmp_path) -> None:
     df = pd.DataFrame(
         {
             "candidate_id": ["GAIA-CLASSIFIED", "GAIA-UNCLASSIFIED"],
@@ -33,7 +33,7 @@ def test_gaia_variability_surfaces_classifier_for_numeric_like_gaia_ids(monkeypa
 
     monkeypatch.setattr(vetting, "_run_gaia_tap_query_until_success", fake_run_query)
 
-    out = vetting.query_gaia_variability(df, chunk_size=100)
+    out = vetting.query_gaia_variability(df, chunk_size=100, cache_dir=tmp_path)
 
     assert bool(out.loc[0, "gaia_var_flag"]) is True
     assert out.loc[0, "gaia_var_class"] == "LPV"

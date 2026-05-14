@@ -115,6 +115,13 @@ ASASSN_VAR_LOCAL_CSV = Path(__file__).resolve().parent.parent / "input" / "asass
 ASASSN_VAR_RADIUS_ARCSEC = 5.0
 GAIA_TAP_RETRY_BASE_DELAY = 5.0
 GAIA_TAP_RETRY_MAX_DELAY = 60.0
+VETTING_CACHE_FILES = {
+    "simbad": "vetting_simbad.parquet",
+    "gaia_variability": "vetting_gaia_variability.parquet",
+    "gaia_epoch": "vetting_gaia_epoch.parquet",
+    "gaia_eb": "vetting_gaia_eb.parquet",
+    "alerce": "vetting_alerce.parquet",
+}
 
 # Module-level cache for the local ASAS-SN catalog
 _asassn_cache: dict = {}
@@ -256,6 +263,7 @@ TNS_LOCAL_INPUT_DIR = Path(__file__).resolve().parent.parent / "input"
 TNS_LOCAL_CSVS = [
     TNS_LOCAL_INPUT_DIR / "tns_public_objects.csv",
     TNS_LOCAL_INPUT_DIR / "tns_sne.csv",
+    TNS_LOCAL_INPUT_DIR / "asassn_transients.csv",
 ]
 
 # Module-level cache for the local TNS catalog
@@ -272,6 +280,66 @@ NEOWISE_MAX_SEP_ARCSEC = NEOWISE_VET_MAX_SEP_ARCSEC
 NEOWISE_VET_WORKERS = CFG_NEOWISE_VET_WORKERS
 CRTS_CHUNK_SIZE = CFG_CRTS_CHUNK_SIZE
 GAIA_EPOCH_VET_CHUNK_SIZE = CFG_GAIA_EPOCH_VET_CHUNK_SIZE
+
+
+def _vetting_cache_path(cache_dir: Path | str | None, cache_name: str) -> Path:
+    base = Path(cache_dir).expanduser() if cache_dir is not None else DEFAULT_CACHE_DIR.expanduser()
+    return base / VETTING_CACHE_FILES[cache_name]
+
+
+def _read_vetting_cache(cache_dir: Path | str | None, cache_name: str) -> pd.DataFrame:
+    path = _vetting_cache_path(cache_dir, cache_name)
+    if not path.exists():
+        return pd.DataFrame()
+    try:
+        return pd.read_parquet(path)
+    except Exception as exc:
+        print(f"  Cache warning: could not read {path}: {_short_error(exc)}")
+        return pd.DataFrame()
+
+
+def _write_vetting_cache(
+    cache_dir: Path | str | None,
+    cache_name: str,
+    rows: pd.DataFrame,
+    *,
+    key_cols: list[str],
+) -> None:
+    if rows.empty:
+        return
+    path = _vetting_cache_path(cache_dir, cache_name)
+    try:
+        existing = pd.read_parquet(path) if path.exists() else pd.DataFrame()
+        combined = pd.concat([existing, rows], ignore_index=True) if not existing.empty else rows.copy()
+        combined = combined.drop_duplicates(subset=key_cols, keep="last")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        combined.to_parquet(path, index=False, compression=PARQUET_CACHE_COMPRESSION)
+    except Exception as exc:
+        print(f"  Cache warning: could not write {path}: {_short_error(exc)}")
+
+
+def _coord_cache_key(ra: object, dec: object, radius_arcsec: float) -> str | None:
+    try:
+        ra_f = float(ra)
+        dec_f = float(dec)
+        rad_f = float(radius_arcsec)
+    except (TypeError, ValueError):
+        return None
+    if not (np.isfinite(ra_f) and np.isfinite(dec_f) and np.isfinite(rad_f)):
+        return None
+    return f"{ra_f:.7f}:{dec_f:.7f}:{rad_f:.3f}"
+
+
+def _cached_rows_by_key(cache: pd.DataFrame, key_col: str, keys: set[str]) -> dict[str, pd.Series]:
+    if cache.empty or key_col not in cache.columns:
+        return {}
+    cache = cache.copy()
+    cache[key_col] = cache[key_col].astype(str)
+    cache = cache[cache[key_col].isin(keys)]
+    if cache.empty:
+        return {}
+    cache = cache.drop_duplicates(subset=key_col, keep="last")
+    return {str(row[key_col]): row for _, row in cache.iterrows()}
 
 
 # =============================================================================
@@ -353,6 +421,8 @@ def _normalize_simbad_xmatch_fields(
 def query_simbad_batch(
     df: pd.DataFrame,
     radius_arcsec: float = SIMBAD_RADIUS_ARCSEC,
+    cache_dir: Path | str | None = None,
+    refresh_cache: bool = False,
 ) -> pd.DataFrame:
     """
     Query SIMBAD by coordinates via CDS XMatch.
@@ -367,8 +437,54 @@ def query_simbad_batch(
     if not valid.any():
         return df
 
-    n = int(valid.sum())
-    return _simbad_via_xmatch(df, valid, n, radius_arcsec)
+    cache_keys = pd.Series(index=df.index, dtype=object)
+    for idx in df.index[valid]:
+        cache_keys.loc[idx] = _coord_cache_key(df.loc[idx, "ra"], df.loc[idx, "dec"], radius_arcsec)
+
+    valid = valid & cache_keys.notna()
+    if not valid.any():
+        return df
+
+    all_keys = set(cache_keys.loc[valid].astype(str))
+    cached_by_key: dict[str, pd.Series] = {}
+    if not refresh_cache:
+        cached_by_key = _cached_rows_by_key(_read_vetting_cache(cache_dir, "simbad"), "coord_key", all_keys)
+
+    simbad_cols = ("simbad_main_id", "simbad_otype", "simbad_nbref", "simbad_sep_arcsec")
+    cached_idx = []
+    for idx in df.index[valid]:
+        key = str(cache_keys.loc[idx])
+        cached = cached_by_key.get(key)
+        if cached is None:
+            continue
+        for col in simbad_cols:
+            if col in cached.index:
+                df.loc[idx, col] = cached[col]
+        cached_idx.append(idx)
+
+    missing = valid & ~df.index.isin(cached_idx)
+    if not missing.any():
+        print(f"SIMBAD: served {len(cached_idx)} candidates from cache")
+        return df
+
+    if cached_idx:
+        print(f"SIMBAD: served {len(cached_idx)} candidates from cache; querying {int(missing.sum())} misses")
+
+    n = int(missing.sum())
+    queried = _simbad_via_xmatch(df.loc[missing].copy(), pd.Series(True, index=df.index[missing]), n, radius_arcsec)
+    for col in simbad_cols:
+        df.loc[queried.index, col] = queried[col]
+
+    cache_rows = pd.DataFrame({
+        "coord_key": cache_keys.loc[missing].astype(str).values,
+        "radius_arcsec": float(radius_arcsec),
+        "simbad_main_id": df.loc[missing, "simbad_main_id"].fillna("").astype(str).values,
+        "simbad_otype": df.loc[missing, "simbad_otype"].fillna("").astype(str).values,
+        "simbad_nbref": pd.to_numeric(df.loc[missing, "simbad_nbref"], errors="coerce").fillna(0).astype(int).values,
+        "simbad_sep_arcsec": pd.to_numeric(df.loc[missing, "simbad_sep_arcsec"], errors="coerce").values,
+    })
+    _write_vetting_cache(cache_dir, "simbad", cache_rows, key_cols=["coord_key"])
+    return df
 
 
 def _simbad_via_xmatch(
@@ -446,6 +562,8 @@ def _simbad_via_xmatch(
 def query_gaia_variability(
     df: pd.DataFrame,
     chunk_size: int = GAIA_VAR_CHUNK_SIZE,
+    cache_dir: Path | str | None = None,
+    refresh_cache: bool = False,
 ) -> pd.DataFrame:
     """
     Query Gaia DR3 vari_summary + vari_classifier_result.
@@ -480,7 +598,49 @@ def query_gaia_variability(
     if not gaia_ids:
         return df
 
-    print(f"Gaia variability: querying {len(gaia_ids)} source_ids")
+    gaia_ids = sorted(gaia_ids)
+    all_ids = set(gaia_ids)
+    cached_by_id: dict[str, pd.Series] = {}
+    if not refresh_cache:
+        cached_by_id = _cached_rows_by_key(
+            _read_vetting_cache(cache_dir, "gaia_variability"),
+            "source_id",
+            all_ids,
+        )
+
+    def _apply_gaia_var(sid: str, flag: object, class_name: object, score: object) -> int:
+        applied = 0
+        is_var = bool(flag) or bool(_safe_text(class_name))
+        for idx in idx_map.get(sid, []):
+            df.loc[idx, "gaia_var_flag"] = is_var
+            df.loc[idx, "gaia_var_class"] = _safe_text(class_name)
+            try:
+                df.loc[idx, "gaia_var_score"] = float(score) if pd.notna(score) else np.nan
+            except (TypeError, ValueError):
+                df.loc[idx, "gaia_var_score"] = np.nan
+            applied += 1
+        return applied
+
+    cached_ids = set(cached_by_id)
+    for sid, cached in cached_by_id.items():
+        _apply_gaia_var(
+            sid,
+            cached.get("gaia_var_flag", False),
+            cached.get("gaia_var_class", ""),
+            cached.get("gaia_var_score", np.nan),
+        )
+
+    missing_ids = [sid for sid in gaia_ids if refresh_cache or sid not in cached_ids]
+    if not missing_ids:
+        flagged = int(pd.Series([df.loc[idxs[0], "gaia_var_flag"] for idxs in idx_map.values()]).fillna(False).astype(bool).sum())
+        classified = int((df["gaia_var_class"].fillna("").astype(str).str.strip() != "").sum())
+        print(f"Gaia variability: served {len(gaia_ids)} source_ids from cache; {flagged} flagged, {classified} classified")
+        return df
+
+    if cached_ids and not refresh_cache:
+        print(f"Gaia variability: served {len(cached_ids)} source_ids from cache; querying {len(missing_ids)} misses")
+    else:
+        print(f"Gaia variability: querying {len(missing_ids)} source_ids")
 
     try:
         effective_chunk_size = max(1, min(int(chunk_size), 100))
@@ -491,7 +651,7 @@ def query_gaia_variability(
 
     # Build an ordered list of working TAP services.
     preferred_tap_urls = [GAIA_AIP_TAP_URL] + [u for u in GAIA_TAP_URLS if u != GAIA_AIP_TAP_URL]
-    test_query = f"SELECT source_id FROM gaiadr3.vari_summary WHERE source_id = {gaia_ids[0]}"
+    test_query = f"SELECT source_id FROM gaiadr3.vari_summary WHERE source_id = {missing_ids[0]}"
     taps = _connect_gaia_taps_until_available(
         test_query,
         label="Gaia variability",
@@ -522,8 +682,8 @@ def query_gaia_variability(
 
     # Query vari_summary (is it flagged as variable?)
     summary_results = {}
-    for i in tqdm(range(0, len(gaia_ids), effective_chunk_size), desc="Gaia vari_summary"):
-        chunk = gaia_ids[i : i + effective_chunk_size]
+    for i in tqdm(range(0, len(missing_ids), effective_chunk_size), desc="Gaia vari_summary"):
+        chunk = missing_ids[i : i + effective_chunk_size]
         rows = _query_chunk_rows(chunk, _summary_query, label=f"Gaia vari_summary chunk {i}")
         for row in rows:
             sid = str(row["source_id"])
@@ -531,8 +691,8 @@ def query_gaia_variability(
 
     # Query vari_classifier_result (what class?)
     classifier_results = {}
-    for i in tqdm(range(0, len(gaia_ids), effective_chunk_size), desc="Gaia vari_classifier"):
-        chunk = gaia_ids[i : i + effective_chunk_size]
+    for i in tqdm(range(0, len(missing_ids), effective_chunk_size), desc="Gaia vari_classifier"):
+        chunk = missing_ids[i : i + effective_chunk_size]
         rows = _query_chunk_rows(chunk, _classifier_query, label=f"Gaia vari_classifier chunk {i}")
         for row in rows:
             sid = str(row["source_id"])
@@ -541,9 +701,11 @@ def query_gaia_variability(
                 float(row["best_class_score"]) if row["best_class_score"] is not None else np.nan,
             )
 
-    # Apply results
+    # Apply queried results and cache both hits and misses.
     matched = 0
-    for sid, indices in idx_map.items():
+    cache_rows = []
+    for sid in missing_ids:
+        indices = idx_map.get(sid, [])
         cls_info = classifier_results.get(sid)
         is_var = summary_results.get(sid, False) or cls_info is not None
         for idx in indices:
@@ -552,13 +714,27 @@ def query_gaia_variability(
                 df.loc[idx, "gaia_var_class"] = cls_info[0]
                 df.loc[idx, "gaia_var_score"] = cls_info[1]
                 matched += 1
+        cache_rows.append({
+            "source_id": sid,
+            "gaia_var_flag": bool(is_var),
+            "gaia_var_class": cls_info[0] if cls_info is not None else "",
+            "gaia_var_score": cls_info[1] if cls_info is not None else np.nan,
+        })
+
+    _write_vetting_cache(
+        cache_dir,
+        "gaia_variability",
+        pd.DataFrame(cache_rows),
+        key_cols=["source_id"],
+    )
 
     flagged = sum(
         1
         for sid in gaia_ids
-        if summary_results.get(sid, False) or sid in classifier_results
+        if bool(df.loc[idx_map[sid][0], "gaia_var_flag"])
     )
-    print(f"Gaia variability: {flagged} flagged as variable, {matched} with classification")
+    classified = int((df["gaia_var_class"].fillna("").astype(str).str.strip() != "").sum())
+    print(f"Gaia variability: {flagged} flagged as variable, {classified} with classification")
     return df
 
 
@@ -785,6 +961,53 @@ def fetch_microlensing_event_catalog(
         ogle_mapped["event_year"] = ogle_mapped["event_id"].str.extract(r"-(199\d|20\d{2})-")[0].astype(float)
         frames.append(ogle_mapped)
 
+    asassn_ml_path = Path(__file__).resolve().parent.parent / "input" / "asas_sn_microlens.csv"
+    if asassn_ml_path.exists():
+        df_asassn_ml = pd.read_csv(asassn_ml_path, low_memory=False)
+        if {"ra_deg", "dec_deg"}.issubset(df_asassn_ml.columns):
+            ra_vals = pd.to_numeric(df_asassn_ml["ra_deg"], errors="coerce")
+            dec_vals = pd.to_numeric(df_asassn_ml["dec_deg"], errors="coerce")
+        elif {"raj2000", "dej2000"}.issubset(df_asassn_ml.columns):
+            coords = []
+            for ra_str, dec_str in zip(df_asassn_ml["raj2000"], df_asassn_ml["dej2000"]):
+                try:
+                    c = SkyCoord(ra=str(ra_str), dec=str(dec_str), unit=(u.hourangle, u.deg))
+                    coords.append((c.ra.deg, c.dec.deg))
+                except Exception:
+                    coords.append((np.nan, np.nan))
+            ra_vals = pd.Series([x[0] for x in coords], index=df_asassn_ml.index)
+            dec_vals = pd.Series([x[1] for x in coords], index=df_asassn_ml.index)
+        else:
+            ra_vals = pd.Series(np.nan, index=df_asassn_ml.index)
+            dec_vals = pd.Series(np.nan, index=df_asassn_ml.index)
+
+        valid_asassn_ml = (
+            ra_vals.notna()
+            & dec_vals.notna()
+            & np.isfinite(ra_vals)
+            & np.isfinite(dec_vals)
+            & ra_vals.between(0.0, 360.0)
+            & dec_vals.between(-90.0, 90.0)
+        )
+        if valid_asassn_ml.any():
+            asas_mapped = pd.DataFrame()
+            asas_mapped["event_id"] = df_asassn_ml.get("id", df_asassn_ml.index).astype(str)
+            asas_mapped["source"] = "ASAS-SN microlens"
+            asas_mapped["alias"] = df_asassn_ml.get("other_names", "").astype(str) if "other_names" in df_asassn_ml.columns else ""
+            asas_mapped["ra"] = ra_vals
+            asas_mapped["dec"] = dec_vals
+            asas_mapped["timescale_days"] = np.nan
+            asas_mapped["timescale_kind"] = ""
+            asas_mapped["status"] = df_asassn_ml.get("variable_type", "").astype(str) if "variable_type" in df_asassn_ml.columns else ""
+            asas_mapped["source_url"] = ""
+            asas_mapped["event_year"] = asas_mapped["event_id"].str.extract(r"(20\d{2})")[0].astype(float)
+            frames.append(asas_mapped.loc[valid_asassn_ml].copy())
+        else:
+            print(
+                "Microlensing catalogs: found input/asas_sn_microlens.csv but "
+                "coordinates did not validate under the expected schema; skipping it"
+            )
+
     if not frames:
         print("Microlensing catalogs: no local CSVs found in input/")
         return pd.DataFrame()
@@ -810,6 +1033,72 @@ def _safe_text(value: object) -> str:
     if isinstance(value, float) and pd.isna(value):
         return ""
     return str(value).strip()
+
+
+def _is_missing_catalog_text(value: object) -> bool:
+    text = _safe_text(value).strip()
+    return not text or text.lower() in {"-", "nan", "none", "null", "unknown"}
+
+
+def _normalise_asassn_transient_name(row: pd.Series) -> str:
+    for col in ("asassn_id", "other_ids", "atel_tns"):
+        value = _safe_text(row.get(col))
+        if _is_missing_catalog_text(value):
+            continue
+        return f"ASAS-SN:{value}"
+    return "ASAS-SN:transient"
+
+
+def _infer_asassn_transient_type(row: pd.Series) -> str:
+    cls = _safe_text(row.get("spectroscopic_class"))
+    if not _is_missing_catalog_text(cls):
+        return cls
+
+    comments = _safe_text(row.get("comments"))
+    if not comments:
+        return ""
+
+    type_match = re.search(r"\bType\s+([A-Za-z0-9.+/-]+)", comments, flags=re.IGNORECASE)
+    if type_match:
+        return f"Type {type_match.group(1)}"
+
+    lowered = comments.lower()
+    if "cv candidate" in lowered or "cataclysmic" in lowered:
+        return "CV candidate"
+    if "microlensing" in lowered or "ulens" in lowered:
+        return "Microlensing candidate"
+    if "nova" in lowered:
+        return "Nova candidate"
+    if "sn candidate" in lowered or "supernova" in lowered:
+        return "SN candidate"
+    if "transient" in lowered:
+        return "Transient"
+
+    first_clause = comments.split(",", 1)[0].strip()
+    return first_clause[:80]
+
+
+def _parse_asassn_transient_redshift(row: pd.Series) -> float:
+    for text in (_safe_text(row.get("comments")), _safe_text(row.get("spectroscopic_class"))):
+        match = re.search(r"\bz\s*=\s*([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)", text)
+        if not match:
+            continue
+        try:
+            return float(match.group(1))
+        except ValueError:
+            return np.nan
+    return np.nan
+
+
+def _normalise_asassn_discovery_date(value: object) -> str:
+    text = _safe_text(value)
+    if not text:
+        return ""
+    match = re.search(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})", text)
+    if not match:
+        return text[:10]
+    year, month, day = match.groups()
+    return f"{int(year):04d}-{int(month):02d}-{int(day):02d}"
 
 def crossmatch_microlensing_catalogs(
     df: pd.DataFrame,
@@ -1072,6 +1361,37 @@ def _load_tns_catalog(csv_paths: list[Path]) -> tuple[pd.DataFrame, SkyCoord] | 
                         "redshift": r.get("Redshift"),
                         "discovery_date": disc_date,
                     })
+            elif csv_path.name == "asassn_transients.csv":
+                cat = pd.read_csv(csv_path, low_memory=False)
+                if cat.empty:
+                    continue
+                for _, r in cat.iterrows():
+                    ra_f = pd.to_numeric(r.get("ra_deg"), errors="coerce")
+                    dec_f = pd.to_numeric(r.get("dec_deg"), errors="coerce")
+                    if pd.isna(ra_f) or pd.isna(dec_f):
+                        ra_str = r.get("ra")
+                        dec_str = r.get("dec")
+                        if pd.isna(ra_str) or pd.isna(dec_str):
+                            continue
+                        try:
+                            c = SkyCoord(ra=str(ra_str), dec=str(dec_str), unit=(u.hourangle, u.deg))
+                            ra_f = c.ra.deg
+                            dec_f = c.dec.deg
+                        except Exception:
+                            continue
+                    try:
+                        ra_f = float(ra_f)
+                        dec_f = float(dec_f)
+                    except (ValueError, TypeError):
+                        continue
+                    rows.append({
+                        "ra": ra_f,
+                        "dec": dec_f,
+                        "name": _normalise_asassn_transient_name(r),
+                        "type": _infer_asassn_transient_type(r),
+                        "redshift": _parse_asassn_transient_redshift(r),
+                        "discovery_date": _normalise_asassn_discovery_date(r.get("discovery_ut")),
+                    })
         except Exception as e:
             print(f"TNS: warning loading {csv_path.name}: {e}")
             continue
@@ -1119,7 +1439,7 @@ def crossmatch_tns(
     loaded = _load_tns_catalog(paths)
 
     if loaded is None:
-        print("TNS: no catalog data loaded (check input/tns_public_objects.csv, input/tns_sne.csv), skipping")
+        print("TNS: no catalog data loaded (check input/tns_public_objects.csv, input/tns_sne.csv, input/asassn_transients.csv), skipping")
         return df
 
     cat, cat_coord = loaded
@@ -1159,6 +1479,8 @@ def crossmatch_tns(
 def query_gaia_eb_params(
     df: pd.DataFrame,
     chunk_size: int = GAIA_VAR_CHUNK_SIZE,
+    cache_dir: Path | str | None = None,
+    refresh_cache: bool = False,
 ) -> pd.DataFrame:
     """
     Query Gaia DR3 vari_eclipsing_binary for detailed EB parameters.
@@ -1188,19 +1510,45 @@ def query_gaia_eb_params(
             continue
         gaia_ids.append(sid)
         idx_map.setdefault(sid, []).append(idx)
-    gaia_ids = list(set(gaia_ids))
+    gaia_ids = sorted(set(gaia_ids))
 
     if not gaia_ids:
         return df
 
-    n_ecl = len(gaia_ids)
-    print(f"Gaia EB params: querying {n_ecl} ECL-classified sources")
-    test_query = f"SELECT source_id FROM gaiadr3.vari_eclipsing_binary WHERE source_id = {gaia_ids[0]}"
+    all_ids = set(gaia_ids)
+    cached_by_id: dict[str, pd.Series] = {}
+    if not refresh_cache:
+        cached_by_id = _cached_rows_by_key(_read_vetting_cache(cache_dir, "gaia_eb"), "source_id", all_ids)
+
+    matched = 0
+    for sid, cached in cached_by_id.items():
+        period = pd.to_numeric(cached.get("gaia_eb_period"), errors="coerce")
+        morph = _safe_text(cached.get("gaia_eb_morph"))
+        ranking = pd.to_numeric(cached.get("gaia_eb_global_ranking"), errors="coerce")
+        for idx in idx_map.get(sid, []):
+            df.loc[idx, "gaia_eb_period"] = float(period) if pd.notna(period) else np.nan
+            df.loc[idx, "gaia_eb_morph"] = morph
+            df.loc[idx, "gaia_eb_global_ranking"] = float(ranking) if pd.notna(ranking) else np.nan
+            if pd.notna(period):
+                matched += 1
+
+    missing_ids = [sid for sid in gaia_ids if refresh_cache or sid not in cached_by_id]
+    if not missing_ids:
+        print(f"Gaia EB params: served {len(gaia_ids)} ECL-classified sources from cache")
+        print(f"Gaia EB params: {matched} sources with orbital parameters")
+        return df
+
+    n_ecl = len(missing_ids)
+    if cached_by_id and not refresh_cache:
+        print(f"Gaia EB params: served {len(cached_by_id)} sources from cache; querying {n_ecl} misses")
+    else:
+        print(f"Gaia EB params: querying {n_ecl} ECL-classified sources")
+    test_query = f"SELECT source_id FROM gaiadr3.vari_eclipsing_binary WHERE source_id = {missing_ids[0]}"
     taps = _connect_gaia_taps_until_available(test_query, label="Gaia EB params")
 
     eb_results = {}
-    for i in tqdm(range(0, len(gaia_ids), chunk_size), desc="Gaia EB params"):
-        chunk = gaia_ids[i : i + chunk_size]
+    for i in tqdm(range(0, len(missing_ids), chunk_size), desc="Gaia EB params"):
+        chunk = missing_ids[i : i + chunk_size]
         ids_str = ",".join(chunk)
         query = f"""
             SELECT source_id, frequency, model_type, global_ranking
@@ -1216,10 +1564,17 @@ def query_gaia_eb_params(
             ranking = float(row["global_ranking"]) if row["global_ranking"] is not None else np.nan
             eb_results[sid] = (period, morph, ranking)
 
-    matched = 0
-    for sid, indices in idx_map.items():
+    cache_rows = []
+    for sid in missing_ids:
+        indices = idx_map.get(sid, [])
         info = eb_results.get(sid)
         if info is None:
+            cache_rows.append({
+                "source_id": sid,
+                "gaia_eb_period": np.nan,
+                "gaia_eb_morph": "",
+                "gaia_eb_global_ranking": np.nan,
+            })
             continue
         period, morph, ranking = info
         for idx in indices:
@@ -1227,6 +1582,14 @@ def query_gaia_eb_params(
             df.loc[idx, "gaia_eb_morph"] = morph
             df.loc[idx, "gaia_eb_global_ranking"] = ranking
             matched += 1
+        cache_rows.append({
+            "source_id": sid,
+            "gaia_eb_period": period,
+            "gaia_eb_morph": morph,
+            "gaia_eb_global_ranking": ranking,
+        })
+
+    _write_vetting_cache(cache_dir, "gaia_eb", pd.DataFrame(cache_rows), key_cols=["source_id"])
 
     print(f"Gaia EB params: {matched} sources with orbital parameters")
     return df
@@ -1312,6 +1675,8 @@ def query_alerce(
     df: pd.DataFrame,
     radius_arcsec: float = ALERCE_RADIUS_ARCSEC,
     workers: int = 8,
+    cache_dir: Path | str | None = None,
+    refresh_cache: bool = False,
 ) -> pd.DataFrame:
     """
     Query ALeRCE ZTF broker for classification.
@@ -1331,29 +1696,90 @@ def query_alerce(
     if not valid.any():
         return df
 
-    n_valid = int(valid.sum())
-    print(f"ALeRCE: querying {n_valid} candidates (radius={radius_arcsec}\", workers={workers})")
-    matched = 0
+    cache_keys = pd.Series(index=df.index, dtype=object)
+    for idx in df.index[valid]:
+        cache_keys.loc[idx] = _coord_cache_key(df.loc[idx, "ra"], df.loc[idx, "dec"], radius_arcsec)
+    valid = valid & cache_keys.notna()
+    if not valid.any():
+        return df
+
+    alerce_cols = (
+        "alerce_oid",
+        "alerce_ndet",
+        "alerce_lc_class",
+        "alerce_lc_prob",
+        "alerce_stamp_class",
+        "alerce_stamp_prob",
+    )
+    all_keys = set(cache_keys.loc[valid].astype(str))
+    cached_by_key: dict[str, pd.Series] = {}
+    if not refresh_cache:
+        cached_by_key = _cached_rows_by_key(_read_vetting_cache(cache_dir, "alerce"), "coord_key", all_keys)
+
+    cached_idx = []
+    for idx in df.index[valid]:
+        key = str(cache_keys.loc[idx])
+        cached = cached_by_key.get(key)
+        if cached is None:
+            continue
+        for col in alerce_cols:
+            if col in cached.index:
+                df.loc[idx, col] = cached[col]
+        cached_idx.append(idx)
+
+    missing = valid & ~df.index.isin(cached_idx)
+    if not missing.any():
+        matched = int((df.loc[valid, "alerce_oid"].fillna("").astype(str).str.strip() != "").sum())
+        print(f"ALeRCE: served {len(cached_idx)} candidates from cache; {matched}/{int(valid.sum())} matched")
+        return df
+
+    n_valid = int(missing.sum())
+    if cached_idx and not refresh_cache:
+        print(f"ALeRCE: served {len(cached_idx)} candidates from cache; querying {n_valid} misses (radius={radius_arcsec}\", workers={workers})")
+    else:
+        print(f"ALeRCE: querying {n_valid} candidates (radius={radius_arcsec}\", workers={workers})")
+    matched = int((df.loc[cached_idx, "alerce_oid"].fillna("").astype(str).str.strip() != "").sum()) if cached_idx else 0
+    cache_payload: dict[int, dict] = {}
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {
             executor.submit(_alerce_query_single, float(df.loc[idx, "ra"]),
                             float(df.loc[idx, "dec"]), radius_arcsec): idx
-            for idx in df.index[valid]
+            for idx in df.index[missing]
         }
         for fut in tqdm(as_completed(futures), total=len(futures), desc="ALeRCE"):
             idx = futures[fut]
             try:
                 result = fut.result()
             except Exception:
-                continue
+                result = None
             if result is None:
+                result = {
+                    "alerce_oid": "", "alerce_ndet": 0,
+                    "alerce_lc_class": "", "alerce_lc_prob": np.nan,
+                    "alerce_stamp_class": "", "alerce_stamp_prob": np.nan,
+                }
+                cache_payload[idx] = result
                 continue
             for k, v in result.items():
                 df.loc[idx, k] = v
-            matched += 1
+            if _safe_text(result.get("alerce_oid")):
+                matched += 1
+            cache_payload[idx] = result
 
-    print(f"ALeRCE: {matched}/{n_valid} candidates matched")
+    cache_rows = []
+    for idx in df.index[missing]:
+        result = cache_payload.get(idx, {
+            "alerce_oid": "", "alerce_ndet": 0,
+            "alerce_lc_class": "", "alerce_lc_prob": np.nan,
+            "alerce_stamp_class": "", "alerce_stamp_prob": np.nan,
+        })
+        row = {"coord_key": str(cache_keys.loc[idx]), "radius_arcsec": float(radius_arcsec)}
+        row.update(result)
+        cache_rows.append(row)
+    _write_vetting_cache(cache_dir, "alerce", pd.DataFrame(cache_rows), key_cols=["coord_key"])
+
+    print(f"ALeRCE: {matched}/{int(valid.sum())} candidates matched")
     return df
 
 
@@ -1650,6 +2076,8 @@ def fetch_ztf_lightcurves(
 def query_gaia_epoch_photometry(
     df: pd.DataFrame,
     chunk_size: int = GAIA_VAR_CHUNK_SIZE,
+    cache_dir: Path | str | None = None,
+    refresh_cache: bool = False,
 ) -> pd.DataFrame:
     """
     Check Gaia DR3 epoch photometry availability and basic stats.
@@ -1679,20 +2107,46 @@ def query_gaia_epoch_photometry(
             continue
         gaia_ids.append(sid)
         idx_map.setdefault(sid, []).append(idx)
-    gaia_ids = list(set(gaia_ids))
+    gaia_ids = sorted(set(gaia_ids))
 
     if not gaia_ids:
         return df
 
-    print(f"Gaia epoch photometry: checking {len(gaia_ids)} source_ids")
-    test_query = f"SELECT source_id FROM gaiadr3.vari_summary WHERE source_id = {gaia_ids[0]}"
+    all_ids = set(gaia_ids)
+    cached_by_id: dict[str, pd.Series] = {}
+    if not refresh_cache:
+        cached_by_id = _cached_rows_by_key(_read_vetting_cache(cache_dir, "gaia_epoch"), "source_id", all_ids)
+
+    matched = 0
+    for sid, cached in cached_by_id.items():
+        n_obs = pd.to_numeric(cached.get("gaia_epoch_n_obs"), errors="coerce")
+        g_range = pd.to_numeric(cached.get("gaia_epoch_g_range"), errors="coerce")
+        n_obs_int = int(n_obs) if pd.notna(n_obs) else 0
+        for idx in idx_map.get(sid, []):
+            df.loc[idx, "gaia_epoch_available"] = bool(n_obs_int > 0)
+            df.loc[idx, "gaia_epoch_n_obs"] = n_obs_int
+            df.loc[idx, "gaia_epoch_g_range"] = float(g_range) if pd.notna(g_range) else np.nan
+            if n_obs_int > 0:
+                matched += 1
+
+    missing_ids = [sid for sid in gaia_ids if refresh_cache or sid not in cached_by_id]
+    if not missing_ids:
+        print(f"Gaia epoch photometry: served {len(gaia_ids)} source_ids from cache")
+        print(f"Gaia epoch photometry: {matched} sources with time-series data")
+        return df
+
+    if cached_by_id and not refresh_cache:
+        print(f"Gaia epoch photometry: served {len(cached_by_id)} source_ids from cache; checking {len(missing_ids)} misses")
+    else:
+        print(f"Gaia epoch photometry: checking {len(missing_ids)} source_ids")
+    test_query = f"SELECT source_id FROM gaiadr3.vari_summary WHERE source_id = {missing_ids[0]}"
     taps = _connect_gaia_taps_until_available(test_query, label="Gaia epoch photometry")
 
     # Query vari_summary for observation counts and magnitude ranges
     # (epoch photometry itself is huge — we use vari_summary stats instead)
     epoch_results = {}
-    for i in tqdm(range(0, len(gaia_ids), chunk_size), desc="Gaia epoch stats"):
-        chunk = gaia_ids[i : i + chunk_size]
+    for i in tqdm(range(0, len(missing_ids), chunk_size), desc="Gaia epoch stats"):
+        chunk = missing_ids[i : i + chunk_size]
         ids_str = ",".join(chunk)
         query = f"""
             SELECT source_id,
@@ -1709,10 +2163,17 @@ def query_gaia_epoch_photometry(
             epoch_results[sid] = (n_obs, g_range)
 
     # Apply
-    matched = 0
-    for sid, indices in idx_map.items():
+    cache_rows = []
+    for sid in missing_ids:
+        indices = idx_map.get(sid, [])
         info = epoch_results.get(sid)
         if info is None:
+            cache_rows.append({
+                "source_id": sid,
+                "gaia_epoch_available": False,
+                "gaia_epoch_n_obs": 0,
+                "gaia_epoch_g_range": np.nan,
+            })
             continue
         n_obs, g_range = info
         for idx in indices:
@@ -1720,6 +2181,14 @@ def query_gaia_epoch_photometry(
             df.loc[idx, "gaia_epoch_n_obs"] = n_obs
             df.loc[idx, "gaia_epoch_g_range"] = g_range
             matched += 1
+        cache_rows.append({
+            "source_id": sid,
+            "gaia_epoch_available": bool(n_obs > 0),
+            "gaia_epoch_n_obs": int(n_obs),
+            "gaia_epoch_g_range": g_range,
+        })
+
+    _write_vetting_cache(cache_dir, "gaia_epoch", pd.DataFrame(cache_rows), key_cols=["source_id"])
 
     print(f"Gaia epoch photometry: {matched} sources with time-series data")
     return df
@@ -2918,8 +3387,10 @@ def vet_candidates(
     neowise_output_dir: Path | None = None,
     neowise_workers: int = 4,
     checkpoint_path: Path | None = None,
-    method: Literal["tap", "xmatch"] = "tap",
+    method: Literal["tap", "xmatch"] = "xmatch",
     skip_existing: bool = False,
+    cache_dir: Path | str | None = None,
+    refresh_cache: bool = False,
 ) -> pd.DataFrame:
     """
     Run all vetting queries on a candidate DataFrame.
@@ -2947,6 +3418,8 @@ def vet_candidates(
         variables, ``xmatch`` uses the bundled local CSV.
     skip_existing : Skip modules whose marker columns already contain data in
         the input table. Checkpoints are always skipped this way.
+    cache_dir : Directory for persistent vetting caches.
+    refresh_cache : Force cache-backed modules to requery remote services.
 
     Returns
     -------
@@ -3014,13 +3487,31 @@ def vet_candidates(
             df.to_parquet(checkpoint_path, index=False)
 
     if run_simbad:
-        _run_module("SIMBAD", query_simbad_batch, radius_arcsec=simbad_radius_arcsec)
+        _run_module(
+            "SIMBAD",
+            query_simbad_batch,
+            radius_arcsec=simbad_radius_arcsec,
+            cache_dir=cache_dir,
+            refresh_cache=refresh_cache,
+        )
 
     if run_gaia_var:
-        _run_module("Gaia variability", query_gaia_variability, chunk_size=gaia_var_chunk_size)
+        _run_module(
+            "Gaia variability",
+            query_gaia_variability,
+            chunk_size=gaia_var_chunk_size,
+            cache_dir=cache_dir,
+            refresh_cache=refresh_cache,
+        )
 
     if run_gaia_epoch:
-        _run_module("Gaia epoch photometry", query_gaia_epoch_photometry, chunk_size=gaia_var_chunk_size)
+        _run_module(
+            "Gaia epoch photometry",
+            query_gaia_epoch_photometry,
+            chunk_size=gaia_var_chunk_size,
+            cache_dir=cache_dir,
+            refresh_cache=refresh_cache,
+        )
 
     if run_asassn_var:
         # ASAS-SN II/366 is not on CDS XMatch; use local CSV when method='xmatch'
@@ -3039,14 +3530,33 @@ def vet_candidates(
         _run_module("TNS", crossmatch_tns, radius_arcsec=tns_radius_arcsec, tns_api_key=tns_api_key)
 
     if run_gaia_eb:
-        _run_module("Gaia EB params", query_gaia_eb_params, chunk_size=gaia_var_chunk_size)
+        _run_module(
+            "Gaia EB params",
+            query_gaia_eb_params,
+            chunk_size=gaia_var_chunk_size,
+            cache_dir=cache_dir,
+            refresh_cache=refresh_cache,
+        )
 
     if run_alerce:
-        _run_module("ALeRCE", query_alerce, radius_arcsec=alerce_radius_arcsec, workers=alerce_workers)
+        _run_module(
+            "ALeRCE",
+            query_alerce,
+            radius_arcsec=alerce_radius_arcsec,
+            workers=alerce_workers,
+            cache_dir=cache_dir,
+            refresh_cache=refresh_cache,
+        )
 
     if run_erosita:
         # eROSITA: prefer local FITS when method='xmatch' (if file exists)
-        _erosita_method = "local" if method == "xmatch" and EROSITA_LOCAL_FITS.exists() else method
+        if method == "xmatch" and EROSITA_LOCAL_FITS.exists():
+            _erosita_method = "local"
+        elif method == "xmatch":
+            print(f"eROSITA: local FITS not found at {EROSITA_LOCAL_FITS}; falling back to CDS XMatch")
+            _erosita_method = method
+        else:
+            _erosita_method = method
         _run_module("eROSITA", crossmatch_erosita, radius_arcsec=erosita_radius_arcsec, method=_erosita_method)
 
     if run_atlas:
@@ -3197,6 +3707,34 @@ def _print_vetting_summary(df: pd.DataFrame, total_start: float) -> None:
 # =============================================================================
 
 
+VETTING_ONLY_MODULES = {
+    "simbad": "run_simbad",
+    "gaia-var": "run_gaia_var",
+    "gaia-epoch": "run_gaia_epoch",
+    "asassn-var": "run_asassn_var",
+    "microlens": "run_microlens",
+    "ztf-var": "run_ztf_var",
+    "tns": "run_tns",
+    "gaia-eb": "run_gaia_eb",
+    "alerce": "run_alerce",
+    "erosita": "run_erosita",
+    "pm-check": "run_pm_check",
+    "atlas": "run_atlas",
+    "neowise-lc": "run_neowise_lc",
+}
+
+
+def _parse_only_modules(value: str | None) -> set[str] | None:
+    if value is None:
+        return None
+    selected = {part.strip().lower() for part in value.replace(",", " ").split() if part.strip()}
+    unknown = selected - set(VETTING_ONLY_MODULES)
+    if unknown:
+        choices = ", ".join(sorted(VETTING_ONLY_MODULES))
+        raise ValueError(f"unknown --only module(s): {', '.join(sorted(unknown))}. Choices: {choices}")
+    return selected
+
+
 def main():
     """CLI for standalone vetting."""
 
@@ -3243,6 +3781,23 @@ def main():
         default="xmatch",
         help="Catalog crossmatch mode for supported modules; xmatch uses local ASAS-SN variables CSV (default: xmatch)",
     )
+    g_general.add_argument(
+        "--only",
+        type=str,
+        default=None,
+        help="Run only selected modules, comma-separated. Choices: " + ", ".join(sorted(VETTING_ONLY_MODULES)),
+    )
+    g_general.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=None,
+        help=f"Persistent cache directory for slow vetting modules (default: {DEFAULT_CACHE_DIR})",
+    )
+    g_general.add_argument(
+        "--refresh-cache",
+        action="store_true",
+        help="Force cache-backed modules to requery remote services and update cache",
+    )
     g_general.add_argument("--checkpoint", type=Path, default=None, help="Checkpoint path (default: <input>_vetting_CHECKPOINT.parquet)")
     g_general.add_argument("--no-checkpoint", action="store_true", help="Disable checkpoint saving/resume")
     g_general.add_argument(
@@ -3254,6 +3809,10 @@ def main():
     parser.set_defaults(neowise_lc=False)
 
     args = parser.parse_args()
+    try:
+        only_modules = _parse_only_modules(args.only)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     # Load input
     path = args.input.expanduser()
@@ -3275,22 +3834,30 @@ def main():
         df = df[df["interest_score"] >= args.min_score].copy()
         print(f"Filtered to {len(df)} candidates with score >= {args.min_score} (from {before})")
 
+    if only_modules is not None:
+        print("Running only vetting modules: " + ", ".join(sorted(only_modules)))
+
+    def _enabled(module_name: str, no_flag: bool) -> bool:
+        if only_modules is not None:
+            return module_name in only_modules
+        return not no_flag
+
     # Run vetting
     df = vet_candidates(
         df,
-        run_simbad=not args.no_simbad,
-        run_gaia_var=not args.no_gaia_var,
-        run_gaia_epoch=not args.no_gaia_epoch,
-        run_asassn_var=not args.no_asassn_var,
-        run_microlens=not args.no_microlens,
-        run_ztf_var=not args.no_ztf_var,
-        run_tns=not args.no_tns,
-        run_gaia_eb=not args.no_gaia_eb,
-        run_alerce=not args.no_alerce,
-        run_erosita=not args.no_erosita,
-        run_atlas=not args.no_atlas,
-        run_pm_check=not args.no_pm_check,
-        run_neowise_lc=args.neowise_lc,
+        run_simbad=_enabled("simbad", args.no_simbad),
+        run_gaia_var=_enabled("gaia-var", args.no_gaia_var),
+        run_gaia_epoch=_enabled("gaia-epoch", args.no_gaia_epoch),
+        run_asassn_var=_enabled("asassn-var", args.no_asassn_var),
+        run_microlens=_enabled("microlens", args.no_microlens),
+        run_ztf_var=_enabled("ztf-var", args.no_ztf_var),
+        run_tns=_enabled("tns", args.no_tns),
+        run_gaia_eb=_enabled("gaia-eb", args.no_gaia_eb),
+        run_alerce=_enabled("alerce", args.no_alerce),
+        run_erosita=_enabled("erosita", args.no_erosita),
+        run_atlas=_enabled("atlas", args.no_atlas),
+        run_pm_check=_enabled("pm-check", args.no_pm_check),
+        run_neowise_lc=("neowise-lc" in only_modules) if only_modules is not None else args.neowise_lc,
         simbad_radius_arcsec=args.simbad_radius,
         asassn_radius_arcsec=args.asassn_radius,
         microlens_radius_arcsec=args.microlens_radius,
@@ -3306,6 +3873,8 @@ def main():
         checkpoint_path=_ckpt_path,
         method=args.method,
         skip_existing=args.skip_existing,
+        cache_dir=args.cache_dir,
+        refresh_cache=args.refresh_cache,
     )
 
     # Save output
