@@ -17,7 +17,12 @@ from malca.review.explore_data import (
     load_combined_source_data,
     load_source_data,
 )
-from malca.review.explorer import _resolve_initial_candidate_key, _review_db_paths_from_frame
+from malca.review.explorer import (
+    _resolve_initial_candidate_key,
+    _resolve_sources,
+    _review_db_paths_from_frame,
+    build_arg_parser,
+)
 
 
 def _write_review_db(path: Path, rows: list[dict[str, object]]) -> None:
@@ -47,6 +52,18 @@ def test_load_combined_source_data_adds_candidate_keys(tmp_path: Path) -> None:
     assert len(combined.df) == 2
     assert combined.df["candidate_key"].nunique() == 2
     assert find_candidate_key(combined, "A1") is not None
+
+
+def test_review_explore_parser_uses_review_db_cli(tmp_path: Path) -> None:
+    db_path = tmp_path / "review.db"
+    _write_review_db(db_path, [{"candidate_id": "A1"}])
+
+    args = build_arg_parser().parse_args(["--review-db", str(db_path), "--no-browser"])
+
+    assert _resolve_sources(args) == [db_path.resolve()]
+    assert args.no_browser is True
+    with pytest.raises(SystemExit):
+        build_arg_parser().parse_args(["--source", str(db_path)])
 
 
 def test_review_db_paths_from_frame_requires_existing_db_sources(tmp_path: Path) -> None:

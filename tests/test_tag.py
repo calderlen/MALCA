@@ -17,6 +17,12 @@ def _write_mock_dat(path: Path) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="ascii")
 
 
+def _write_mock_raw2(lc_path: Path, lines: list[str]) -> None:
+    lc_path.parent.mkdir(parents=True, exist_ok=True)
+    lc_path.write_text("", encoding="ascii")
+    lc_path.with_suffix(".raw2").write_text("\n".join(lines) + "\n", encoding="ascii")
+
+
 def test_apply_tags_vsx_tag_mode_keeps_rows() -> None:
     df = pd.DataFrame(
         {
@@ -137,11 +143,14 @@ def test_compute_stats_parallel_writes_incremental_checkpoint_parts(tmp_path: Pa
 
 def test_filter_camera_medians_marks_raw_suspects_without_exclusions(tmp_path: Path) -> None:
     lc_path = tmp_path / "C1.dat2"
-    lc_path.write_text("", encoding="ascii")
-    lc_path.with_suffix(".raw2").write_text(
-        "1 14.5 14.4 14.6 14.3 14.7\n"
-        "2 13.2 13.1 13.3 13.0 13.4\n",
-        encoding="ascii",
+    _write_mock_raw2(
+        lc_path,
+        [
+            "# camera median 1siglow 1sighigh p90low p90high",
+            "1 14.5 14.4 14.6 14.3 14.7",
+            "bad line",
+            "2 13.2 13.1 13.3 13.0 13.4",
+        ],
     )
     df = pd.DataFrame(
         {
@@ -155,3 +164,109 @@ def test_filter_camera_medians_marks_raw_suspects_without_exclusions(tmp_path: P
 
     assert out.loc[0, tag.RAW_MEDIAN_SUSPECT_COL] == "1"
     assert "excluded_cameras" not in out.columns
+
+
+def test_filter_camera_medians_parallel_batches_match_sequential(tmp_path: Path) -> None:
+    rows = [
+        ("C1", "13_13.5", ["1 13.2 0 0 0 0", "2 14.0 0 0 0 0"]),
+        ("C2", "12_12.5", ["1 12.1 0 0 0 0", "2 12.6 0 0 0 0"]),
+        ("C3", "13.5_14", ["1 15.0 0 0 0 0", "2 13.8 0 0 0 0"]),
+        ("C4", "not_a_bin", ["1 99.0 0 0 0 0"]),
+    ]
+    records = []
+    for source_id, mag_bin, raw_lines in rows:
+        lc_path = tmp_path / f"{source_id}.dat2"
+        _write_mock_raw2(lc_path, raw_lines)
+        records.append({"source_id": source_id, "path": str(lc_path), "mag_bin": mag_bin})
+    df = pd.DataFrame.from_records(records)
+
+    sequential = tag.filter_camera_medians(df, mag_tolerance=0.2, n_workers=1, chunk_size=2)
+    parallel = tag.filter_camera_medians(df, mag_tolerance=0.2, n_workers=2, chunk_size=2)
+
+    seq_values = sequential.sort_values("source_id")[tag.RAW_MEDIAN_SUSPECT_COL].tolist()
+    par_values = parallel.sort_values("source_id")[tag.RAW_MEDIAN_SUSPECT_COL].tolist()
+    assert par_values == seq_values
+    assert seq_values == ["2", "", "1", ""]
+
+
+def test_filter_camera_medians_reads_part_checkpoints_and_skips_completed(tmp_path: Path) -> None:
+    c1_path = tmp_path / "C1.dat2"
+    c2_path = tmp_path / "C2.dat2"
+    _write_mock_raw2(c1_path, ["1 14.5 0 0 0 0"])
+    _write_mock_raw2(c2_path, ["2 14.5 0 0 0 0"])
+    df = pd.DataFrame(
+        {
+            "source_id": ["C1", "C2"],
+            "path": [str(c1_path), str(c2_path)],
+            "mag_bin": ["13_13.5", "13_13.5"],
+        }
+    )
+    checkpoint = tmp_path / "camera.parquet"
+    parts_dir = checkpoint.with_name(f"{checkpoint.name}.parts")
+    parts_dir.mkdir()
+    pd.DataFrame(
+        {
+            "source_id": ["C1"],
+            tag.RAW_MEDIAN_SUSPECT_COL: ["7"],
+        }
+    ).to_parquet(parts_dir / "part-000.parquet", index=False)
+
+    out = tag.filter_camera_medians(
+        df,
+        mag_tolerance=0.2,
+        n_workers=1,
+        checkpoint_path=checkpoint,
+        chunk_size=1,
+    )
+
+    assert out[tag.RAW_MEDIAN_SUSPECT_COL].tolist() == ["7", "2"]
+    parts = sorted(parts_dir.glob("part-*.parquet"))
+    assert len(parts) == 2
+    assert pd.read_parquet(parts[-1])["source_id"].astype(str).tolist() == ["C2"]
+
+    out_resume = tag.filter_camera_medians(
+        df,
+        mag_tolerance=0.2,
+        n_workers=1,
+        checkpoint_path=checkpoint,
+        chunk_size=1,
+    )
+
+    assert out_resume[tag.RAW_MEDIAN_SUSPECT_COL].tolist() == ["7", "2"]
+    assert sorted(parts_dir.glob("part-*.parquet")) == parts
+
+
+def test_filter_camera_medians_reads_legacy_checkpoint_and_writes_parts(tmp_path: Path) -> None:
+    c1_path = tmp_path / "C1.dat2"
+    c2_path = tmp_path / "C2.dat2"
+    _write_mock_raw2(c1_path, ["1 14.5 0 0 0 0"])
+    _write_mock_raw2(c2_path, ["2 14.5 0 0 0 0"])
+    checkpoint = tmp_path / "camera.parquet"
+    pd.DataFrame(
+        {
+            "source_id": ["C1"],
+            tag.RAW_MEDIAN_SUSPECT_COL: ["9"],
+        }
+    ).to_parquet(checkpoint, index=False)
+    df = pd.DataFrame(
+        {
+            "source_id": ["C1", "C2"],
+            "path": [str(c1_path), str(c2_path)],
+            "mag_bin": ["13_13.5", "13_13.5"],
+        }
+    )
+
+    out = tag.filter_camera_medians(
+        df,
+        mag_tolerance=0.2,
+        n_workers=1,
+        checkpoint_path=checkpoint,
+        chunk_size=1,
+    )
+
+    assert out[tag.RAW_MEDIAN_SUSPECT_COL].tolist() == ["9", "2"]
+    assert pd.read_parquet(checkpoint)["source_id"].astype(str).tolist() == ["C1"]
+    parts_dir = checkpoint.with_name(f"{checkpoint.name}.parts")
+    parts = sorted(parts_dir.glob("part-*.parquet"))
+    assert len(parts) == 1
+    assert pd.read_parquet(parts[0])["source_id"].astype(str).tolist() == ["C2"]

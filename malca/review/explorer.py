@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 from contextlib import closing
 from datetime import datetime, timezone
-import glob
 import json
 import os
 from pathlib import Path
@@ -856,10 +855,9 @@ def _render_stats(stat_rows: list[tuple[str, str]]) -> html.Div:
 
 
 def _resolve_sources(args) -> list[Path]:
-    if args.source:
-        return [Path(s).expanduser().resolve() for s in args.source]
-    if args.source_glob:
-        return [Path(p).expanduser().resolve() for p in sorted(glob.glob(args.source_glob))]
+    review_dbs = getattr(args, "review_db", None) or []
+    if review_dbs:
+        return [Path(s).expanduser().resolve() for s in review_dbs]
     return discover_default_sources()
 
 
@@ -3898,14 +3896,13 @@ def build_explorer_app(
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Unified Dash explorer for MALCA EDA and click-through light-curve viewing.")
-    parser.add_argument("--source", action="append", default=None, help="Review DB or Parquet source. May be passed multiple times.")
-    parser.add_argument("--source-glob", default=None, help="Glob pattern for multiple sources, e.g. 'output/runs/*/review/review.db'")
-    parser.add_argument("--source-kind", default=None, choices=["db", "parquet"], help="Optional explicit source kind")
+    parser.add_argument("--review-db", action="append", default=None, help="Review SQLite database path. May be passed multiple times.")
     parser.add_argument("--plot-dir", default=None, help="Optional plot-dir override for all sources")
     parser.add_argument("--candidate", default=None, help="Candidate ID / ASAS-SN ID / Gaia ID / LC stem to select on startup")
     parser.add_argument("--candidate-key", default=None, help="Explicit candidate_key to select on startup")
     parser.add_argument("--host", default="127.0.0.1", help="Dash host")
     parser.add_argument("--port", type=int, default=8062, help="Dash port")
+    parser.add_argument("--no-browser", action="store_true", help="Do not auto-open a browser tab/window on startup")
     parser.add_argument("--debug", action="store_true", help="Run Dash with debug enabled")
     return parser
 
@@ -3914,7 +3911,7 @@ def main() -> None:
     parser = build_arg_parser()
     args = parser.parse_args()
     source_paths = _resolve_sources(args)
-    combined = load_combined_source_data(sources=source_paths, source_kind=args.source_kind, plot_dir=args.plot_dir)
+    combined = load_combined_source_data(sources=source_paths, source_kind="db", plot_dir=args.plot_dir)
     combined.df = add_eda_columns(combined.df)
     initial_candidate_key = _resolve_initial_candidate_key(
         combined,
@@ -3935,7 +3932,8 @@ def main() -> None:
     if len(combined.sources) > 10:
         print(f"   ... and {len(combined.sources) - 10} more")
 
-    Timer(0.1, lambda: webbrowser.open(url)).start()
+    if not bool(getattr(args, "no_browser", False)):
+        Timer(0.1, lambda: webbrowser.open(url)).start()
     app.run(host=str(args.host), port=int(args.port), debug=bool(args.debug))
 
 

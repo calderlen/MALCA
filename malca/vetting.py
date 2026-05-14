@@ -2919,6 +2919,7 @@ def vet_candidates(
     neowise_workers: int = 4,
     checkpoint_path: Path | None = None,
     method: Literal["tap", "xmatch"] = "tap",
+    skip_existing: bool = False,
 ) -> pd.DataFrame:
     """
     Run all vetting queries on a candidate DataFrame.
@@ -2942,7 +2943,10 @@ def vet_candidates(
     run_neowise_lc : fetch full NEOWISE light curves (opt-in)
     checkpoint_path : if set, save intermediate results after each module
     method : Propagated to non-SIMBAD crossmatch functions such as ZTF vars,
-        TNS, and eROSITA. SIMBAD always uses CDS XMatch.
+        TNS, and eROSITA. SIMBAD always uses CDS XMatch. For ASAS-SN
+        variables, ``xmatch`` uses the bundled local CSV.
+    skip_existing : Skip modules whose marker columns already contain data in
+        the input table. Checkpoints are always skipped this way.
 
     Returns
     -------
@@ -2988,7 +2992,7 @@ def vet_candidates(
 
     def _module_done(name):
         """Check if a module's marker column already has data (from checkpoint)."""
-        if not _resumed:
+        if not (_resumed or skip_existing):
             return False
         col = _MODULE_MARKERS.get(name)
         if col is None or col not in df.columns:
@@ -3233,8 +3237,19 @@ def main():
     g_workers.add_argument("--no-neowise-lc", dest="neowise_lc", action="store_false", help="Skip full NEOWISE light curves")
     g_workers.add_argument("--neowise-output-dir", type=Path, default=None, help="Directory to save individual NEOWISE LCs")
     g_workers.add_argument("--neowise-workers", type=int, default=4, help="Parallel workers for NEOWISE queries")
+    g_workers.add_argument(
+        "--method",
+        choices=["tap", "xmatch"],
+        default="xmatch",
+        help="Catalog crossmatch mode for supported modules; xmatch uses local ASAS-SN variables CSV (default: xmatch)",
+    )
     g_general.add_argument("--checkpoint", type=Path, default=None, help="Checkpoint path (default: <input>_vetting_CHECKPOINT.parquet)")
     g_general.add_argument("--no-checkpoint", action="store_true", help="Disable checkpoint saving/resume")
+    g_general.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="Skip modules whose marker columns already contain data in the input table",
+    )
 
     parser.set_defaults(neowise_lc=False)
 
@@ -3289,6 +3304,8 @@ def main():
         neowise_output_dir=args.neowise_output_dir,
         neowise_workers=args.neowise_workers,
         checkpoint_path=_ckpt_path,
+        method=args.method,
+        skip_existing=args.skip_existing,
     )
 
     # Save output

@@ -53,6 +53,7 @@ COMMAND_GROUPS = {
     "spectra": "Enrichment",
     "vsx-filter": "Enrichment",
     "vsx-crossmatch": "Enrichment",
+    "external-lcs": "Enrichment",
     "vetting": "Other",
     "dev": "Other",
 }
@@ -110,7 +111,7 @@ def main():
         "detection-rate", "validate", "plot",
         "events", "lc-plot", "gaia-fetch", "characterize", "classify", "filter", "tag",
         "attrition", "review", "review-qt", "review-refresh", "review-merge", "review-explore", "review-sync", "review-taxonomy", "review-maint",
-        "neighbors", "spectra", "false-positive", "vsx-filter", "vsx-crossmatch",
+        "neighbors", "spectra", "false-positive", "vsx-filter", "vsx-crossmatch", "external-lcs",
         "vetting",
         "ltv-core", "ltv-build", "ltv-pipeline", "ltv-injection", "ltv-ingest", "ltv-bundle",
         "dev",
@@ -193,6 +194,8 @@ def main():
             sys.argv = [sys.argv[0]] + remaining
             vsx_crossmatch = importlib.import_module("malca.vsx.crossmatch")
             vsx_crossmatch.cli()
+        elif command == "external-lcs":
+            _run_module_main("malca.external_lcs", remaining)
         elif command == "vetting":
             _run_module_main("malca.vetting", remaining)
         elif command == "ltv-core":
@@ -321,6 +324,7 @@ def main():
     subparsers.add_parser("spectra", description="Run bulk spectra-availability enrichment")
     subparsers.add_parser("vsx-filter", description="Build cleaned ASAS-SN index and filtered VSX catalog")
     subparsers.add_parser("vsx-crossmatch", description="Crossmatch ASAS-SN catalog with VSX catalog")
+    subparsers.add_parser("external-lcs", description="Fetch external light curves for candidate tables")
     # Other
     subparsers.add_parser("vetting", description="Run post-review vetting (SIMBAD, Gaia, ASAS-SN, ZTF, TNS, eROSITA, ...)")
     subparsers.add_parser("dev", description="Developer diagnostics (score, stats)")

@@ -647,30 +647,58 @@ def _read_raw2_camera_stats(raw2_path: Path) -> pd.DataFrame:
     Format (space-separated):
         camera_id median 1sig_low 1sig_high 90pct_low 90pct_high
     """
-    if not raw2_path.exists():
+    medians = _read_raw2_camera_medians(raw2_path)
+    if not medians:
         return pd.DataFrame(columns=RAW2_COLUMNS)
 
+    records = [
+        {
+            "camera": camera,
+            "median": median,
+            "sig1_low": np.nan,
+            "sig1_high": np.nan,
+            "pct90_low": np.nan,
+            "pct90_high": np.nan,
+        }
+        for camera, median in medians
+    ]
+    return pd.DataFrame.from_records(records, columns=RAW2_COLUMNS)
+
+
+def _read_raw2_camera_medians(raw2_path: Path) -> list[tuple[int, float]]:
+    """Read only camera ids and medians from a small whitespace-delimited .raw2 file."""
+    if not raw2_path.exists():
+        return []
+
+    medians: list[tuple[int, float]] = []
     try:
-        df = pd.read_csv(
-            raw2_path,
-            sep=r"\s+",
-            header=None,
-            names=RAW2_COLUMNS,
-            comment="#",
-        )
-        for col in ("median", "sig1_low", "sig1_high", "pct90_low", "pct90_high"):
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-        df = df[df["median"].notna()].reset_index(drop=True)
-        return df
+        with raw2_path.open("r", encoding="ascii", errors="ignore") as handle:
+            for line in handle:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                parts = stripped.split()
+                if len(parts) < 2:
+                    continue
+                try:
+                    camera = int(float(parts[0]))
+                    median = float(parts[1])
+                except ValueError:
+                    continue
+                if np.isfinite(median):
+                    medians.append((camera, median))
     except Exception:
-        return pd.DataFrame(columns=RAW2_COLUMNS)
+        return []
+
+    return medians
 
 
 def _process_camera_median_row(
     asas_sn_id: str,
     path_str: str,
     mag_bin: str,
-    mag_tolerance: float
+    mag_tolerance: float,
+    mag_range_cache: dict[str, tuple[float, float] | None] | None = None,
 ) -> tuple[str, str]:
     """
     Helper for parallel camera median filtering.
@@ -680,22 +708,28 @@ def _process_camera_median_row(
         if path.is_dir():
             return asas_sn_id, ""
 
-        raw2_path = path.with_suffix(".raw2")
-        stats = _read_raw2_camera_stats(raw2_path)
-
-        if stats.empty:
+        if mag_range_cache is not None and mag_bin in mag_range_cache:
+            mag_range = mag_range_cache[mag_bin]
+        else:
+            mag_range = _parse_mag_bin_range(mag_bin)
+            if mag_range_cache is not None:
+                mag_range_cache[mag_bin] = mag_range
+        if mag_range is None:
             return asas_sn_id, ""
 
-        mag_range = _parse_mag_bin_range(mag_bin)
-        if mag_range is None:
+        raw2_path = path.with_suffix(".raw2")
+        medians = _read_raw2_camera_medians(raw2_path)
+        if not medians:
             return asas_sn_id, ""
 
         mag_min = mag_range[0] - mag_tolerance
         mag_max = mag_range[1] + mag_tolerance
 
-        suspect_cameras = stats[
-            (stats["median"] < mag_min) | (stats["median"] > mag_max)
-        ]["camera"].astype(int).tolist()
+        suspect_cameras = [
+            camera
+            for camera, median in medians
+            if median < mag_min or median > mag_max
+        ]
 
         if suspect_cameras:
             return asas_sn_id, ",".join(map(str, suspect_cameras))
@@ -703,6 +737,92 @@ def _process_camera_median_row(
         return asas_sn_id, ""
     except Exception:
         return asas_sn_id, ""
+
+
+def _process_camera_median_batch(
+    batch: list[tuple[str, str, str]],
+    mag_tolerance: float,
+) -> list[tuple[str, str]]:
+    """Process a batch of camera median tasks in one worker call."""
+    mag_range_cache: dict[str, tuple[float, float] | None] = {}
+    return [
+        _process_camera_median_row(asas_sn_id, path_str, mag_bin, mag_tolerance, mag_range_cache)
+        for asas_sn_id, path_str, mag_bin in batch
+    ]
+
+
+def _camera_median_checkpoint_parts_dir(checkpoint_path: Path) -> Path:
+    """Directory for incremental camera median checkpoint shards."""
+    return checkpoint_path.with_name(f"{checkpoint_path.name}.parts")
+
+
+def _read_camera_median_checkpoint_frame(path: Path, id_col: str) -> pd.DataFrame | None:
+    columns = [id_col, RAW_MEDIAN_SUSPECT_COL]
+    try:
+        frame = pd.read_parquet(path, columns=columns)
+    except Exception:
+        try:
+            frame = pd.read_parquet(path)
+        except Exception:
+            raise
+
+    if id_col not in frame.columns or RAW_MEDIAN_SUSPECT_COL not in frame.columns:
+        return None
+
+    frame = frame.loc[:, columns].copy()
+    frame[id_col] = frame[id_col].astype(str)
+    frame[RAW_MEDIAN_SUSPECT_COL] = frame[RAW_MEDIAN_SUSPECT_COL].fillna("").astype(str)
+    return frame
+
+
+def _load_camera_median_checkpoint(
+    checkpoint_path: Path,
+    id_col: str,
+    *,
+    show_tqdm: bool = False,
+) -> pd.DataFrame | None:
+    frames: list[pd.DataFrame] = []
+    source_messages: list[str] = []
+
+    if checkpoint_path.exists():
+        try:
+            frame = _read_camera_median_checkpoint_frame(checkpoint_path, id_col)
+            if frame is not None:
+                frames.append(frame)
+                source_messages.append(str(checkpoint_path))
+            elif show_tqdm:
+                tqdm.write("[filter_camera_medians] Ignoring incompatible checkpoint without raw suspect cameras")
+        except Exception as e:
+            if show_tqdm:
+                tqdm.write(f"[filter_camera_medians] Warning: Could not load checkpoint {checkpoint_path}: {e}")
+
+    parts_dir = _camera_median_checkpoint_parts_dir(checkpoint_path)
+    if parts_dir.exists():
+        part_paths = sorted(parts_dir.glob("part-*.parquet"))
+        part_frames: list[pd.DataFrame] = []
+        for part_path in part_paths:
+            try:
+                frame = _read_camera_median_checkpoint_frame(part_path, id_col)
+                if frame is not None:
+                    part_frames.append(frame)
+            except Exception as e:
+                if show_tqdm:
+                    tqdm.write(f"[filter_camera_medians] Warning: Could not load checkpoint part {part_path}: {e}")
+        if part_frames:
+            frames.extend(part_frames)
+            source_messages.append(f"{len(part_frames)} part file(s) in {parts_dir}")
+
+    if not frames:
+        return None
+
+    checkpoint_df = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
+    checkpoint_df = checkpoint_df.drop_duplicates(subset=[id_col], keep="last")
+    if show_tqdm:
+        tqdm.write(
+            f"[filter_camera_medians] Loaded checkpoint with {len(checkpoint_df)} rows from "
+            f"{', '.join(source_messages)}"
+        )
+    return checkpoint_df
 
 
 def filter_camera_medians(
@@ -738,42 +858,32 @@ def filter_camera_medians(
     
     if checkpoint_path is not None:
         checkpoint_path = Path(checkpoint_path)
-        if checkpoint_path.exists():
-            try:
-                checkpoint_df = pd.read_parquet(checkpoint_path)
-                if id_col in checkpoint_df.columns and RAW_MEDIAN_SUSPECT_COL in checkpoint_df.columns:
-                    checkpoint_df[id_col] = checkpoint_df[id_col].astype(str)
-                    already_processed = set(checkpoint_df[id_col])
-                    if show_tqdm:
-                        tqdm.write(f"[filter_camera_medians] Loaded checkpoint with {len(checkpoint_df)} rows")
-                else:
-                    checkpoint_df = None
-                    if show_tqdm:
-                        tqdm.write("[filter_camera_medians] Ignoring incompatible checkpoint without raw suspect cameras")
-            except Exception as e:
-                if show_tqdm:
-                    tqdm.write(f"[filter_camera_medians] Warning: Could not load checkpoint: {e}")
+        checkpoint_df = _load_camera_median_checkpoint(
+            checkpoint_path,
+            id_col,
+            show_tqdm=show_tqdm,
+        )
+        if checkpoint_df is not None:
+            already_processed = set(checkpoint_df[id_col])
 
-    # Prepare tasks
-    tasks = []
+    # Prepare pending rows without materializing one Python task per full input row.
     df_out[id_col] = df_out[id_col].astype(str)
-    
-    for idx, row in df_out.iterrows():
-        asas_sn_id = str(row[id_col])
-        if asas_sn_id in already_processed:
-            continue
-            
-        path_str = str(row["path"])
-        mag_bin = str(row["mag_bin"])
-        tasks.append((asas_sn_id, path_str, mag_bin))
+    pending_mask = (
+        ~df_out[id_col].isin(already_processed)
+        if already_processed
+        else pd.Series(True, index=df_out.index)
+    )
+    pending = df_out.loc[pending_mask, [id_col, "path", "mag_bin"]]
+    n_tasks = len(pending)
 
     # If everything is checkpointed, just merge and return
-    if not tasks and checkpoint_df is not None:
+    if n_tasks == 0 and checkpoint_df is not None:
         if show_tqdm:
             tqdm.write("[filter_camera_medians] All rows found in checkpoint.")
         
         # Merge checkpoint results
-        checkpoint_subset = checkpoint_df[[id_col, RAW_MEDIAN_SUSPECT_COL]].drop_duplicates(subset=[id_col])
+        checkpoint_subset = checkpoint_df[[id_col, RAW_MEDIAN_SUSPECT_COL]]
+        df_out = df_out.drop(columns=[RAW_MEDIAN_SUSPECT_COL], errors="ignore")
         df_out = df_out.merge(checkpoint_subset, on=id_col, how="left")
         
         # Fill NaN with empty string
@@ -788,69 +898,102 @@ def filter_camera_medians(
     new_results = []
     
     if show_tqdm:
-        tqdm.write(f"[filter_camera_medians] Processing {len(tasks)} rows with {n_workers} workers")
+        tqdm.write(f"[filter_camera_medians] Processing {n_tasks} rows with {n_workers} workers")
 
     # Function to save checkpoint
-    def save_checkpoint(current_results):
-        if checkpoint_path is None:
+    def save_checkpoint_part(result_rows: list[tuple[str, str]]) -> None:
+        if checkpoint_path is None or not result_rows:
             return
-            
-        new_df = pd.DataFrame(current_results, columns=[id_col, RAW_MEDIAN_SUSPECT_COL])
-        
-        if checkpoint_df is not None:
-            combined = pd.concat([checkpoint_df, new_df], ignore_index=True)
-        else:
-            combined = new_df
-            
-        combined = combined.drop_duplicates(subset=[id_col], keep="last")
-        
-        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-        combined.to_parquet(checkpoint_path, index=False, compression=PARQUET_CACHE_COMPRESSION)
+
+        df_checkpoint = pd.DataFrame.from_records(
+            result_rows,
+            columns=[id_col, RAW_MEDIAN_SUSPECT_COL],
+        )
+        df_checkpoint = df_checkpoint.drop_duplicates(subset=[id_col], keep="last")
+
+        parts_dir = _camera_median_checkpoint_parts_dir(checkpoint_path)
+        parts_dir.mkdir(parents=True, exist_ok=True)
+        part_id = f"{time_ns()}-{uuid.uuid4().hex}"
+        tmp_path = parts_dir / f".part-{part_id}.tmp"
+        final_path = parts_dir / f"part-{part_id}.parquet"
+        try:
+            df_checkpoint.to_parquet(tmp_path, index=False, compression=PARQUET_CACHE_COMPRESSION)
+            tmp_path.replace(final_path)
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
+
+    chunk_size = max(1, int(chunk_size))
+    task_batch_size = max(1, min(chunk_size, max(32, min(1000, chunk_size // max(1, n_workers)))))
+
+    def make_tasks(chunk: pd.DataFrame) -> list[tuple[str, str, str]]:
+        return list(
+            zip(
+                chunk[id_col].astype(str).tolist(),
+                chunk["path"].astype(str).tolist(),
+                chunk["mag_bin"].astype(str).tolist(),
+            )
+        )
+
+    def process_chunk(
+        chunk_tasks: list[tuple[str, str, str]],
+        executor: ProcessPoolExecutor | None = None,
+    ) -> list[tuple[str, str]]:
+        chunk_results: list[tuple[str, str]] = []
+        task_batches = _iter_batches(chunk_tasks, task_batch_size)
+
+        if executor is None:
+            for batch in task_batches:
+                batch_results = _process_camera_median_batch(batch, mag_tolerance)
+                chunk_results.extend(batch_results)
+                pbar.update(len(batch_results))
+            return chunk_results
+
+        futures = [
+            executor.submit(_process_camera_median_batch, batch, mag_tolerance)
+            for batch in task_batches
+        ]
+        for future in as_completed(futures):
+            batch_results = future.result()
+            chunk_results.extend(batch_results)
+            pbar.update(len(batch_results))
+        return chunk_results
 
     # Run in parallel
-    pbar = tqdm(total=len(tasks), desc="filter_camera_medians", leave=False, disable=not show_tqdm)
+    pbar = tqdm(total=n_tasks, desc="filter_camera_medians", leave=False, disable=not show_tqdm)
     
-    # If n_workers is 1, run sequentially to avoid overhead
-    if n_workers <= 1:
-        for item in tasks:
-            tid, tpath, tbin = item
-            res_id, res_str = _process_camera_median_row(tid, tpath, tbin, mag_tolerance)
-            new_results.append((res_id, res_str))
-            pbar.update(1)
-            
-            if len(new_results) % chunk_size == 0:
-                save_checkpoint(new_results)
-    else:
-        with ProcessPoolExecutor(max_workers=n_workers) as executor:
-            # Submit in chunks
-            for i in range(0, len(tasks), chunk_size):
-                chunk = tasks[i : i + chunk_size]
-                futures = [
-                    executor.submit(_process_camera_median_row, tid, tpath, tbin, mag_tolerance)
-                    for tid, tpath, tbin in chunk
-                ]
-                
-                chunk_results = []
-                for future in as_completed(futures):
-                    res_id, res_str = future.result()
-                    chunk_results.append((res_id, res_str))
-                    pbar.update(1)
-                
-                new_results.extend(chunk_results)
-                save_checkpoint(new_results)
+    try:
+        if n_workers <= 1:
+            for chunk_start in range(0, n_tasks, chunk_size):
+                chunk_end = min(chunk_start + chunk_size, n_tasks)
+                chunk_results = process_chunk(make_tasks(pending.iloc[chunk_start:chunk_end]))
+                if checkpoint_path is None:
+                    new_results.extend(chunk_results)
+                else:
+                    save_checkpoint_part(chunk_results)
+        else:
+            with ProcessPoolExecutor(max_workers=n_workers) as executor:
+                for chunk_start in range(0, n_tasks, chunk_size):
+                    chunk_end = min(chunk_start + chunk_size, n_tasks)
+                    chunk_results = process_chunk(make_tasks(pending.iloc[chunk_start:chunk_end]), executor)
+                    if checkpoint_path is None:
+                        new_results.extend(chunk_results)
+                    else:
+                        save_checkpoint_part(chunk_results)
+    finally:
+        pbar.close()
 
-    pbar.close()
-    
-    # Final save
-    save_checkpoint(new_results)
-    
     # Final merge
-    new_results_df = pd.DataFrame(new_results, columns=[id_col, RAW_MEDIAN_SUSPECT_COL])
-    
-    if checkpoint_df is not None:
-        final_results_df = pd.concat([checkpoint_df, new_results_df], ignore_index=True)
+    if checkpoint_path is not None:
+        final_results_df = _load_camera_median_checkpoint(
+            checkpoint_path,
+            id_col,
+            show_tqdm=False,
+        )
+        if final_results_df is None:
+            final_results_df = pd.DataFrame(columns=[id_col, RAW_MEDIAN_SUSPECT_COL])
     else:
-        final_results_df = new_results_df
+        final_results_df = pd.DataFrame(new_results, columns=[id_col, RAW_MEDIAN_SUSPECT_COL])
         
     final_results_df = final_results_df.drop_duplicates(subset=[id_col], keep="last")
     

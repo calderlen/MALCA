@@ -84,10 +84,10 @@ from malca.review.keyboard import (
     CLASS_KEY_MAP,
 )
 from malca.review.metadata import (
-    bracket_unit_label,
     extract_review_metadata_grouped,
     is_group_default_open,
     build_external_lookup_links,
+    markdown_literal_unit_label,
 )
 from malca.review.filter_schema import (
     SIDEBAR_GROUPS as REVIEW_FILTER_SIDEBAR_GROUPS,
@@ -2185,7 +2185,7 @@ def _render_stat_cards(stat_rows: list[tuple[str, str]]) -> list:
     grouped: dict[str, list[tuple[str, str]]] = {name: [] for name in group_order}
     for key_raw, value in stat_rows:
         key = str(key_raw)
-        grouped.setdefault(_stat_group(key), []).append((bracket_unit_label(_stat_label(key)), str(value)))
+        grouped.setdefault(_stat_group(key), []).append((markdown_literal_unit_label(_stat_label(key)), str(value)))
 
     sections = []
     for group_name in group_order:
@@ -5087,25 +5087,6 @@ def create_layout():
                                 ], open=True, style={'marginTop': '4px'}),
                             ], style={'marginTop': '6px'}),
                         ], id='diagnostics-section'),
-                        # Grouped candidate metadata sections (collapsible, includes stats)
-                        html.Div([
-                            html.Div([
-                                html.Span('Candidate Panels', className='title'),
-                                dcc.Checklist(
-                                    id='round-sigfigs',
-                                    options=[{'label': ' Round', 'value': 'yes'}],
-                                    value=['yes'],
-                                    style={'display': 'inline-block', 'font-size': '11px', 'margin-right': '6px'},
-                                    persistence=_review_persistence_token(),
-                                    persistence_type='local',
-                                ),
-                                html.Button('Collapse all', id='toggle-meta-all', n_clicks=0, className='compact-btn'),
-                            ], className='meta-toolbar'),
-                            html.Div([
-                                html.Div(id='vetting-banner'),
-                                html.Div(id='candidate-info-grid', className='candidate-metadata'),
-                            ], className='metadata-sections'),
-                        ]),
                         html.Details([
                             html.Summary('External Data', style={'cursor': 'pointer'}),
                             dcc.Loading(
@@ -5130,6 +5111,25 @@ def create_layout():
                                 type='default',
                             ),
                         ], id='diagnostic-plots-details', open=False, className='metadata-sections', style={'margin-top': '0'}),
+                        # Grouped candidate metadata sections (collapsible, includes stats)
+                        html.Div([
+                            html.Div([
+                                html.Span('Candidate Panels', className='title'),
+                                dcc.Checklist(
+                                    id='round-sigfigs',
+                                    options=[{'label': ' Round', 'value': 'yes'}],
+                                    value=['yes'],
+                                    style={'display': 'inline-block', 'font-size': '11px', 'margin-right': '6px'},
+                                    persistence=_review_persistence_token(),
+                                    persistence_type='local',
+                                ),
+                                html.Button('Collapse all', id='toggle-meta-all', n_clicks=0, className='compact-btn'),
+                            ], className='meta-toolbar'),
+                            html.Div([
+                                html.Div(id='vetting-banner'),
+                                html.Div(id='candidate-info-grid', className='candidate-metadata'),
+                            ], className='metadata-sections'),
+                        ]),
                         # Run config / reproducibility
                         html.Details([
                             html.Summary('Run Config', style={'cursor': 'pointer'}),

@@ -445,6 +445,12 @@ def bracket_unit_label(label: str) -> str:
 
     return re.sub(r"\(([^()]*)\)", _replace, text)
 
+
+def markdown_literal_unit_label(label: str) -> str:
+    """Return a unit-bracketed label safe for Dash Markdown rendering."""
+    text = bracket_unit_label(label)
+    return text.replace("[", r"\[").replace("]", r"\]")
+
 # Groups that start expanded in the Dash GUI.
 _DEFAULT_OPEN_GROUPS: set[str] = {
     group_name
