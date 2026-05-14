@@ -296,6 +296,24 @@ def test_pipeline_event_subprocesses_always_use_parquet_chunk(tmp_path: Path, mo
     )
 
     out_dir = tmp_path / "run"
+    stale_manifest = out_dir / "manifests" / f"lc_manifest_{mag_bin}.parquet"
+    stale_filtered = out_dir / "tags" / f"lc_filtered_{mag_bin}.parquet"
+    stale_manifest.parent.mkdir(parents=True)
+    stale_filtered.parent.mkdir(parents=True)
+    pd.DataFrame(
+        columns=[
+            "source_id",
+            "mag_bin",
+            "index_num",
+            "index_csv",
+            "lc_dir",
+            "lc_dir_exists",
+            "dat_path",
+            "dat_exists",
+        ]
+    ).to_parquet(stale_manifest, index=False)
+    pd.DataFrame(columns=["source_id", "path", "mag_bin"]).to_parquet(stale_filtered, index=False)
+
     config_path = tmp_path / "pipeline_config.json"
     config_path.write_text(
         json.dumps(

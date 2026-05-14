@@ -2003,7 +2003,7 @@ def main():
 
     # Step 1: Build or load manifest
     if run_upstream:
-        if args.force_manifest or not manifest_file.exists():
+        if args.overwrite or args.force_manifest or not manifest_file.exists():
             if args.flat_lc_dir:
                 log(f"Building flat-directory manifest for mag_bin={args.mag_bin} from {Path(args.flat_lc_dir).expanduser()}...")
             else:
@@ -2031,7 +2031,7 @@ def main():
             log(f"Loaded {len(df_manifest)} sources")
 
         # Step 2: Apply tags
-        if args.force_tag or not filtered_file.exists():
+        if args.overwrite or args.force_tag or not filtered_file.exists():
             log(f"\nApplying tags with {args.workers} workers...")
 
             # Use lc_dir as the directory path for tag input (path/<id>.dat2)
@@ -2090,7 +2090,7 @@ def main():
     # exclusions; event detection rechecks cameras in residual space.
     camera_median_file = tags_dir / f"camera_medians_{mag_bin_tag}.parquet"
     if run_upstream and (not args.skip_camera_median) and ("mag_bin" in df_filtered.columns):
-        rerun_camera_median = bool(args.force_tag or not camera_median_file.exists())
+        rerun_camera_median = bool(args.overwrite or args.force_tag or not camera_median_file.exists())
         cam_cache = None
         if not rerun_camera_median:
             log(f"\nLoading cached camera median results from {camera_median_file}")
@@ -2126,7 +2126,7 @@ def main():
 
     # Step 2.75: Pre-events periodicity gate and branch split
     if run_upstream and args.apply_pre_periodicity_gate and not df_filtered.empty:
-        rerun_pre_periodicity = bool(args.force_tag or not pre_periodicity_file.exists())
+        rerun_pre_periodicity = bool(args.overwrite or args.force_tag or not pre_periodicity_file.exists())
         if not rerun_pre_periodicity:
             log(f"\nLoading cached pre-periodicity gate results from {pre_periodicity_file}")
             df_gate = pd.read_parquet(pre_periodicity_file)
