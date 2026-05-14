@@ -1202,6 +1202,12 @@ def main():
 
     g_output.add_argument("--output-dir", dest="out_dir", type=str, default=None,
                         help="Directory for all outputs (default: output/runs/<timestamp>)")
+    g_output.add_argument(
+        "--import-bundle",
+        type=Path,
+        default=None,
+        help="Import a transfer bundle ZIP before running the selected stage.",
+    )
     bundle_group = g_output.add_mutually_exclusive_group()
     bundle_group.add_argument(
         "--export-bundle",

@@ -36,7 +36,11 @@ from malca.config import (
 )
 from malca.config import MAD_SCALE
 from malca.events import score_lightcurve
-from malca.phase import BAND_LABELS, camera_labels, phase_fold_dataframe
+from malca.lightcurve_publication import (
+    PUBLICATION_STYLE,
+    plot_phase_panel,
+)
+from malca.phase import camera_labels
 from malca.review.metadata import REVIEW_METADATA_FIELDS, normalize_vsx_record
 from malca.table_io import read_parquet_table
 from malca.utils import clean_lc, read_lc_dat2, filter_bad_cameras
@@ -227,58 +231,23 @@ def plot_phase_folded_lightcurve(
 
     df["camera_label"] = camera_labels(df)
 
-    phase_df, phase_diag = phase_fold_dataframe(
-        df,
-        float(period_days),
-        epoch_jd=phase_epoch_jd,
-        value_mode=value_mode,
-        align_v_to_g=align_v_to_g,
-        duplicate_cycles=True,
-    )
-    if phase_df.empty:
-        raise ValueError(f"No finite points for phase folding: {csv_path}")
-
-    fig, ax = plt.subplots(1, 1, figsize=figsize, constrained_layout=True)
-    bands = [0, 1]
-    band_labels = BAND_LABELS
-    band_markers = {0: "o", 1: "s"}
-
-    for band in bands:
-        bdf = phase_df[phase_df["v_g_band"] == band].copy()
-        if bdf.empty:
-            continue
-        for cam in sorted(bdf["camera_label"].dropna().unique()):
-            cdf = bdf[bdf["camera_label"] == cam]
-            if cdf.empty:
-                continue
-            color = _stable_camera_color(cam)
-            label = f"{cam} ({band_labels[band]})"
-            ax.errorbar(
-                cdf["phase"],
-                cdf["phase_value"],
-                yerr=cdf["error"] if "error" in cdf.columns else None,
-                fmt=band_markers[band],
-                ms=4.0,
-                color=color,
-                alpha=0.75,
-                ecolor=color,
-                elinewidth=0.7,
-                capsize=1.2,
-                markeredgecolor="black",
-                markeredgewidth=0.6,
-                label=label,
-            )
-
     asas_sn_id = csv_path.stem.split("-")[0]
-    ax.set_title(f"{asas_sn_id} phase-folded (P={float(period_days):.5f} d)")
-    ax.set_xlabel("Phase")
-    ax.set_ylabel("Residual magnitude [mag]" if value_mode == "resid" else "Magnitude [mag]")
-    ax.set_xlim(-0.02, 2.02)
-    ax.invert_yaxis()
-    ax.grid(True, alpha=0.25)
-    ax.axvline(0.0, color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
-    ax.axvline(1.0, color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
-    ax.axvline(2.0, color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
+    with plt.rc_context(PUBLICATION_STYLE):
+        fig, ax = plt.subplots(1, 1, figsize=figsize, constrained_layout=True)
+        phase_plot = plot_phase_panel(
+            ax,
+            df,
+            period_days=float(period_days),
+            epoch_jd=phase_epoch_jd,
+            value_mode=value_mode,
+            align_v_to_g=align_v_to_g,
+            group_by="band-camera",
+            camera_col="camera_label",
+            marker_size=4.0,
+            title=f"{asas_sn_id} phase-folded (P={float(period_days):.5f} d)",
+        )
+        phase_diag = phase_plot.diagnostics or {}
+
     lag = float(phase_diag.get("phase_lag_g_v_cycles", np.nan))
     lag_abs = float(phase_diag.get("phase_lag_g_v_abs_cycles", np.nan))
     if np.isfinite(lag):

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -414,3 +415,62 @@ def test_pipeline_event_subprocesses_always_use_parquet_chunk(tmp_path: Path, mo
     )
     assert branch_chunk.exists()
     assert canonical_chunk.exists()
+
+
+def test_pipeline_home_accepts_import_bundle_cli(tmp_path: Path, monkeypatch) -> None:
+    bundle_zip = tmp_path / "cluster_bundle.zip"
+    bundle_src = tmp_path / "bundle_src"
+    filtered = bundle_src / "results" / "lc_events_filtered.parquet"
+    filtered.parent.mkdir(parents=True)
+    pd.DataFrame(columns=["path", "failed_any"]).to_parquet(filtered, index=False)
+    (bundle_src / "run_params.json").write_text(
+        json.dumps({"mag_bin": ["13_13.5"]}),
+        encoding="ascii",
+    )
+
+    with zipfile.ZipFile(bundle_zip, "w") as zf:
+        zf.write(bundle_src / "run_params.json", "run_params.json")
+        zf.write(filtered, "results/lc_events_filtered.parquet")
+
+    config_path = tmp_path / "home_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "pipeline": {
+                    "run_filter": False,
+                    "run_characterize": False,
+                    "run_dust": False,
+                    "run_classify": False,
+                    "run_neighbor_enrich": False,
+                    "run_spectra_enrich": False,
+                    "run_vetting": False,
+                    "export_bundle_enabled": False,
+                    "review_sync_enabled": False,
+                }
+            }
+        ),
+        encoding="ascii",
+    )
+
+    out_dir = tmp_path / "home_run"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "malca",
+            "--stage",
+            "home",
+            "--import-bundle",
+            str(bundle_zip),
+            "--output-dir",
+            str(out_dir),
+            "--config",
+            str(config_path),
+            "--overwrite",
+        ],
+    )
+
+    detect_main()
+
+    assert (out_dir / "run_params.json").exists()
+    assert (out_dir / "results" / "lc_events_filtered.parquet").exists()

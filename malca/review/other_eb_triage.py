@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from malca.lightcurve_publication import PUBLICATION_STYLE, plot_lightcurve_panel, plot_phase_panel
 from malca.lightcurve_io import load_lightcurve_df
 from malca.notebook_paths import find_repo_root, localize_lightcurve_frame_paths
 from malca.review.explore_data import infer_source_kind, load_candidate_source
@@ -779,31 +780,39 @@ def _plot_lightcurve_axes(
 ) -> plt.Figure:
     has_period = period_days is not None and np.isfinite(period_days) and period_days > 0
     ncols = 2 if has_period else 1
-    fig, axes = plt.subplots(1, ncols, figsize=(7 * ncols, 4), constrained_layout=True)
-    if not isinstance(axes, np.ndarray):
-        axes = np.asarray([axes])
+    with plt.rc_context(PUBLICATION_STYLE):
+        fig, axes = plt.subplots(1, ncols, figsize=(7 * ncols, 4), constrained_layout=True)
+        if not isinstance(axes, np.ndarray):
+            axes = np.asarray([axes])
 
-    jd = pd.to_numeric(lc_df.get("JD"), errors="coerce")
-    mag = pd.to_numeric(lc_df.get("mag"), errors="coerce")
-    valid = jd.notna() & mag.notna()
-    jd = jd.loc[valid].to_numpy(dtype=float)
-    mag = mag.loc[valid].to_numpy(dtype=float)
+        plot_lightcurve_panel(
+            axes[0],
+            lc_df,
+            title=f"{candidate_id} raw light curve",
+            group_by="none",
+            show_errorbars=False,
+            marker_size=2.8,
+            legend="none",
+            time_offset="none",
+            xlabel="JD",
+            ylabel="mag",
+        )
 
-    axes[0].scatter(jd, mag, s=8, alpha=0.8, color="#1f77b4")
-    axes[0].set_title(f"{candidate_id} raw light curve")
-    axes[0].set_xlabel("JD")
-    axes[0].set_ylabel("mag")
-    axes[0].invert_yaxis()
-
-    if has_period:
-        phase = np.mod((jd - np.nanmin(jd)) / float(period_days), 1.0)
-        phase_twice = np.concatenate([phase, phase + 1.0])
-        mag_twice = np.concatenate([mag, mag])
-        axes[1].scatter(phase_twice, mag_twice, s=8, alpha=0.8, color="#d62728")
-        axes[1].set_title(f"Phase folded (P={float(period_days):.4f} d)")
-        axes[1].set_xlabel("phase")
-        axes[1].set_ylabel("mag")
-        axes[1].invert_yaxis()
+        if has_period:
+            try:
+                plot_phase_panel(
+                    axes[1],
+                    lc_df,
+                    period_days=float(period_days),
+                    title=f"Phase folded (P={float(period_days):.4f} d)",
+                    group_by="none",
+                    show_errorbars=False,
+                    marker_size=2.8,
+                    legend="none",
+                )
+            except ValueError as exc:
+                axes[1].text(0.5, 0.5, str(exc), ha="center", va="center", transform=axes[1].transAxes)
+                axes[1].set_axis_off()
 
     return fig
 

@@ -41,6 +41,11 @@ from malca.config import (
     TRIGGER_MODE,
 )
 from malca.events import score_lightcurve
+from malca.lightcurve_publication import (
+    plot_lightcurve_panel,
+    plot_phase_panel,
+    plot_residual_panel,
+)
 
 
 PERIODIC_BRANCH_MODE_SPECS: dict[str, dict[str, object]] = {
@@ -1029,36 +1034,64 @@ def plot_trial_diagnostic(
     event_idx = event_idx[(event_idx >= 0) & (event_idx < len(df))]
     phase = np.mod((jd - np.nanmin(jd)) / float(df["period_days"].iloc[0]), 1.0)
 
-    ax[0].invert_yaxis()
-    for camera, sub in df.groupby("camera#"):
-        ax[0].scatter(sub["JD"], sub["mag"], s=12, alpha=0.55, label=f"cam {camera}")
+    baseline_overlay = pd.DataFrame({"JD": jd, "baseline": df_base["baseline"].to_numpy(dtype=float)})
+    plot_lightcurve_panel(
+        ax[0],
+        df,
+        group_by="camera",
+        camera_col="camera#",
+        show_errorbars=False,
+        marker_size=3.4,
+        legend="none",
+        time_offset="none",
+        xlabel="JD",
+        ylabel="mag",
+        baseline=baseline_overlay,
+        baseline_col="baseline",
+        baseline_time_col="JD",
+        baseline_label=str(info["mode_label"]),
+        baseline_style={"color": "crimson", "linewidth": 1.1},
+    )
     ax[0].plot(jd, df["true_baseline_mag"], color="black", lw=1.0, label="true baseline")
-    ax[0].plot(jd, df_base["baseline"], color="crimson", lw=1.1, label=str(info["mode_label"]))
     if truth_mask.any():
         ax[0].scatter(jd[truth_mask], df.loc[truth_mask, "mag"], s=28, facecolors="none", edgecolors="limegreen", label="truth dip support")
     if event_idx.size:
         ax[0].scatter(jd[event_idx], df.loc[event_idx, "mag"], marker="x", s=42, color="gold", label="detected event points")
-    ax[0].set_ylabel("mag")
     ax[0].set_title(f"Trial {trial_id}: observed light curve and baseline")
     ax[0].legend(ncol=4, fontsize=8)
 
-    ax[1].axhline(0.0, color="black", lw=0.8)
-    ax[1].scatter(jd, df_base["resid"], s=12, alpha=0.55)
+    residual_plot = pd.DataFrame({"JD": jd, "resid": df_base["resid"].to_numpy(dtype=float)})
+    plot_residual_panel(
+        ax[1],
+        residual_plot,
+        group_by="none",
+        show_errorbars=False,
+        marker_size=3.4,
+        legend="none",
+        time_offset="none",
+        xlabel="JD",
+        ylabel="mag - baseline",
+        invert_y=False,
+    )
     if truth_mask.any():
         ax[1].scatter(jd[truth_mask], df_base.loc[truth_mask, "resid"], s=28, facecolors="none", edgecolors="limegreen")
     if event_idx.size:
         ax[1].scatter(jd[event_idx], df_base.loc[event_idx, "resid"], marker="x", s=42, color="gold")
-    ax[1].set_ylabel("mag - baseline")
     ax[1].set_title("Residuals used by Bayesian event scoring")
 
-    ax[2].invert_yaxis()
-    ax[2].scatter(phase, df["mag"], s=12, alpha=0.45)
-    ax[2].scatter(phase + 1.0, df["mag"], s=12, alpha=0.25)
+    plot_phase_panel(
+        ax[2],
+        df,
+        period_days=float(df["period_days"].iloc[0]),
+        epoch_jd=float(np.nanmin(jd)),
+        group_by="none",
+        show_errorbars=False,
+        marker_size=3.4,
+        legend="none",
+    )
     order = np.argsort(phase)
     ax[2].plot(phase[order], df_base["baseline"].to_numpy(dtype=float)[order], color="crimson", lw=1.0)
     ax[2].plot(phase[order] + 1.0, df_base["baseline"].to_numpy(dtype=float)[order], color="crimson", lw=1.0, alpha=0.7)
-    ax[2].set_xlabel("phase")
-    ax[2].set_ylabel("mag")
     ax[2].set_title("Folded view")
     return ax
 

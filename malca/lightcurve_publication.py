@@ -7,7 +7,7 @@ import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 import numpy as np
 import pandas as pd
@@ -146,6 +146,21 @@ class PublicationLightCurve:
     source_path: Path
     time_column: str
     y_kind: str
+    y_label: str
+    default_invert_y: bool
+
+
+@dataclass(frozen=True)
+class PanelPlotResult:
+    ax: Any
+    frame: pd.DataFrame
+    diagnostics: dict[str, object] | None = None
+
+
+@dataclass(frozen=True)
+class _PreparedPanelFrame:
+    df: pd.DataFrame
+    source_column: str
     y_label: str
     default_invert_y: bool
 
@@ -450,6 +465,8 @@ def resolve_time_axis(
 def _group_label(row: pd.Series, group_by: str) -> str:
     if group_by == "none":
         return "all"
+    if group_by in {"group", "column"}:
+        return str(row["group"]) if "group" in row.index else "all"
     if group_by == "band":
         return str(row["band"])
     if group_by == "camera":
@@ -468,12 +485,688 @@ def _group_color(label: str, group_by: str) -> str:
     return BAND_COLORS.get(label, _stable_color(label))
 
 
+def publication_style_context():
+    """Return a matplotlib rc_context for MALCA publication-style figures."""
+    plt, _ = _load_matplotlib()
+    return plt.rc_context(PUBLICATION_STYLE)
+
+
+def style_publication_axis(
+    ax,
+    *,
+    grid: bool = True,
+    minor_ticks: bool = True,
+    top: bool = True,
+    right: bool = True,
+) -> Any:
+    """Apply publication tick/grid styling to an existing matplotlib axis."""
+    _, auto_minor_locator = _load_matplotlib()
+    if grid:
+        ax.grid(True, which="major", linewidth=0.4, alpha=0.28)
+    if minor_ticks:
+        ax.xaxis.set_minor_locator(auto_minor_locator())
+        ax.yaxis.set_minor_locator(auto_minor_locator())
+    ax.tick_params(which="both", direction="in", top=top, right=right)
+    ax.tick_params(which="major", length=4.0, width=0.8)
+    ax.tick_params(which="minor", length=2.0, width=0.6)
+    return ax
+
+
+def _specified_or_found(df: pd.DataFrame, specified: str | None, aliases: Sequence[str]) -> str | None:
+    if specified is not None:
+        if specified not in df.columns:
+            raise KeyError(f"Column {specified!r} not found")
+        return specified
+    return _find_column(df, aliases)
+
+
+def _first_present_column(df: pd.DataFrame, columns: Sequence[str]) -> str | None:
+    lookup = _column_lookup(df)
+    for column in columns:
+        match = lookup.get(_normalize_column_name(column))
+        if match is not None:
+            return match
+    return None
+
+
+def _ensure_panel_columns(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    if "value_error" not in out.columns:
+        out["value_error"] = np.nan
+    if "band" not in out.columns:
+        out["band"] = "all"
+    else:
+        out["band"] = out["band"].map(_format_band)
+    if "camera" not in out.columns:
+        out["camera"] = "all"
+    else:
+        camera = out["camera"].astype("string").fillna("").str.strip()
+        out["camera"] = camera.where(camera != "", "unknown")
+    if "good_quality" not in out.columns:
+        out["good_quality"] = True
+    if "saturated" not in out.columns:
+        out["saturated"] = False
+    return out
+
+
+def _prepare_panel_frame(
+    data: PublicationLightCurve | pd.DataFrame,
+    df: pd.DataFrame | None = None,
+    *,
+    source_path: str | Path = "<dataframe>",
+    time_col: str | None = None,
+    value_col: str | None = None,
+    error_col: str | None = None,
+    band_col: str | None = None,
+    camera_col: str | None = None,
+    group_col: str | None = None,
+    y_label: str | None = None,
+    default_invert_y: bool | None = None,
+    extra_numeric_cols: Sequence[str] = (),
+) -> _PreparedPanelFrame:
+    if isinstance(data, PublicationLightCurve):
+        frame = data.df if df is None else df
+        out = _ensure_panel_columns(frame)
+        out["time"] = pd.to_numeric(out["time"], errors="coerce")
+        out["value"] = pd.to_numeric(out["value"], errors="coerce")
+        out["value_error"] = pd.to_numeric(out["value_error"], errors="coerce")
+        if group_col is not None:
+            if group_col not in frame.columns:
+                raise KeyError(f"Column {group_col!r} not found")
+            group = frame[group_col].astype("string").fillna("").str.strip()
+            out["group"] = group.where(group != "", "unknown")
+        for column in extra_numeric_cols:
+            if column in frame.columns:
+                out[column] = pd.to_numeric(frame[column], errors="coerce")
+        return _PreparedPanelFrame(
+            df=out.reset_index(drop=True),
+            source_column=data.time_column,
+            y_label=y_label or data.y_label,
+            default_invert_y=data.default_invert_y if default_invert_y is None else bool(default_invert_y),
+        )
+
+    if df is not None:
+        raise TypeError("Pass either a PublicationLightCurve plus optional df, or a raw DataFrame")
+
+    raw = pd.DataFrame(data).copy()
+    if raw.empty:
+        raise ValueError(f"Light curve table is empty: {source_path}")
+
+    if {"time", "value"}.issubset(raw.columns) and time_col is None and value_col is None:
+        out = _ensure_panel_columns(raw)
+        out["time"] = pd.to_numeric(out["time"], errors="coerce")
+        out["value"] = pd.to_numeric(out["value"], errors="coerce")
+        out["value_error"] = pd.to_numeric(out["value_error"], errors="coerce")
+        source_column = "time"
+        label = y_label or "Magnitude [mag]"
+        invert = True if default_invert_y is None else bool(default_invert_y)
+    else:
+        source_column = _specified_or_found(raw, time_col, COLUMN_ALIASES["time"])
+        if source_column is None:
+            raise ValueError(
+                "Could not infer a time column. Expected one of: "
+                f"{', '.join(COLUMN_ALIASES['time'])}"
+            )
+
+        mag_col = _specified_or_found(raw, value_col, COLUMN_ALIASES["mag"])
+        flux_col = None if value_col is not None else _find_column(raw, COLUMN_ALIASES["flux"])
+        if mag_col is not None:
+            y_col = mag_col
+            y_err_col = _specified_or_found(raw, error_col, COLUMN_ALIASES["mag_error"])
+            label = y_label or ("Residual [mag]" if _normalize_column_name(y_col) in {"resid", "residual"} else "Magnitude [mag]")
+            invert = True if default_invert_y is None else bool(default_invert_y)
+        elif flux_col is not None:
+            y_col = flux_col
+            y_err_col = _specified_or_found(raw, error_col, COLUMN_ALIASES["flux_error"])
+            label = y_label or "Flux"
+            invert = False if default_invert_y is None else bool(default_invert_y)
+        else:
+            raise ValueError(
+                "Could not infer a magnitude or flux column. Expected one of: "
+                f"{', '.join(COLUMN_ALIASES['mag'] + COLUMN_ALIASES['flux'])}"
+            )
+
+        band_name = _specified_or_found(raw, band_col, COLUMN_ALIASES["band"])
+        camera_name = _specified_or_found(raw, camera_col, COLUMN_ALIASES["camera"])
+        quality_name = _find_column(raw, COLUMN_ALIASES["quality"])
+        saturated_name = _find_column(raw, COLUMN_ALIASES["saturated"])
+
+        out = pd.DataFrame(index=raw.index)
+        out["time"] = pd.to_numeric(raw[source_column], errors="coerce")
+        out["value"] = pd.to_numeric(raw[y_col], errors="coerce")
+        out["value_error"] = pd.to_numeric(raw[y_err_col], errors="coerce") if y_err_col is not None else np.nan
+        out["band"] = raw[band_name].map(_format_band) if band_name is not None else "all"
+        if camera_name is not None:
+            camera = raw[camera_name].astype("string").fillna("").str.strip()
+            out["camera"] = camera.where(camera != "", "unknown")
+        else:
+            out["camera"] = "all"
+        out["good_quality"] = _quality_good_series(raw[quality_name] if quality_name is not None else None, raw.index)
+        out["saturated"] = _saturated_series(raw[saturated_name] if saturated_name is not None else None, raw.index)
+
+    resolved_group_col = group_col
+    if resolved_group_col is not None:
+        if resolved_group_col not in raw.columns:
+            raise KeyError(f"Column {resolved_group_col!r} not found")
+        group = raw[resolved_group_col].astype("string").fillna("").str.strip()
+        out["group"] = group.where(group != "", "unknown")
+
+    for column in extra_numeric_cols:
+        actual = _first_present_column(raw, (column,))
+        if actual is not None:
+            out[column] = pd.to_numeric(raw[actual], errors="coerce")
+
+    return _PreparedPanelFrame(
+        df=out.reset_index(drop=True),
+        source_column=source_column,
+        y_label=label,
+        default_invert_y=invert,
+    )
+
+
+def _plot_vertical_lines(
+    ax,
+    values: Sequence[object] | None,
+    *,
+    source_column: str,
+    time_offset: str,
+    default_style: dict[str, object] | None = None,
+) -> None:
+    if values is None:
+        return
+    base_style = {"color": "0.35", "linestyle": "--", "linewidth": 0.9, "alpha": 0.7}
+    if default_style:
+        base_style.update(default_style)
+    for item in values:
+        if isinstance(item, dict):
+            x_raw = item.get("x", item.get("time", item.get("jd")))
+            style = {k: v for k, v in item.items() if k not in {"x", "time", "jd"}}
+        else:
+            x_raw = item
+            style = {}
+        if x_raw is None:
+            continue
+        x_plot, _ = resolve_time_axis(pd.Series([x_raw]), source_column=source_column, offset=time_offset)
+        x_val = pd.to_numeric(x_plot, errors="coerce").iloc[0]
+        if pd.notna(x_val) and np.isfinite(float(x_val)):
+            kwargs = dict(base_style)
+            kwargs.update(style)
+            ax.axvline(float(x_val), **kwargs)
+
+
+def _plot_vertical_spans(
+    ax,
+    spans: Sequence[object] | None,
+    *,
+    source_column: str,
+    time_offset: str,
+    default_style: dict[str, object] | None = None,
+) -> None:
+    if spans is None:
+        return
+    base_style = {"color": "0.5", "alpha": 0.12, "linewidth": 0}
+    if default_style:
+        base_style.update(default_style)
+    for item in spans:
+        if isinstance(item, dict):
+            x0_raw = item.get("x0", item.get("start", item.get("start_jd")))
+            x1_raw = item.get("x1", item.get("end", item.get("end_jd")))
+            style = {k: v for k, v in item.items() if k not in {"x0", "x1", "start", "end", "start_jd", "end_jd"}}
+        else:
+            try:
+                x0_raw, x1_raw = item
+            except Exception:
+                continue
+            style = {}
+        x_plot, _ = resolve_time_axis(pd.Series([x0_raw, x1_raw]), source_column=source_column, offset=time_offset)
+        vals = pd.to_numeric(x_plot, errors="coerce")
+        if vals.notna().all() and np.isfinite(vals.to_numpy(dtype=float)).all():
+            kwargs = dict(base_style)
+            kwargs.update(style)
+            ax.axvspan(float(vals.iloc[0]), float(vals.iloc[1]), **kwargs)
+
+
+def _event_overlay_specs(event_runs: Sequence[dict[str, object]], event_kind: str) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    color = "crimson" if event_kind == "dip" else "seagreen" if event_kind == "jump" else "0.35"
+    lines: list[dict[str, object]] = []
+    spans: list[dict[str, object]] = []
+    for run in event_runs:
+        start = run.get("start_jd", run.get("start", run.get("jd_start")))
+        end = run.get("end_jd", run.get("end", run.get("jd_end")))
+        if start is not None and end is not None:
+            spans.append({"start_jd": start, "end_jd": end, "color": color, "alpha": 0.08})
+            lines.append({"x": start, "color": color, "linestyle": "--", "linewidth": 1.0, "alpha": 0.7})
+            if end != start:
+                lines.append({"x": end, "color": color, "linestyle": "--", "linewidth": 1.0, "alpha": 0.7})
+        params = run.get("params")
+        if isinstance(params, dict):
+            t0 = params.get("t0")
+            if t0 is not None:
+                lines.append({"x": t0, "color": color, "linestyle": "--", "linewidth": 1.0, "alpha": 0.9})
+    return lines, spans
+
+
+def _plot_baseline_overlay(
+    ax,
+    baseline: pd.DataFrame,
+    *,
+    source_column: str,
+    time_offset: str,
+    time_col: str | None,
+    value_col: str,
+    group_col: str | None,
+    color_map: dict[str, str] | None = None,
+    label: str | None = "Baseline",
+    style: dict[str, object] | None = None,
+) -> None:
+    if baseline.empty:
+        return
+    t_col = time_col or _first_present_column(baseline, ("time", "JD", "jd", source_column))
+    if t_col is None or value_col not in baseline.columns:
+        return
+    plot = baseline.copy()
+    plot["_baseline_time"], _ = resolve_time_axis(plot[t_col], source_column=source_column, offset=time_offset)
+    plot["_baseline_value"] = pd.to_numeric(plot[value_col], errors="coerce")
+    plot = plot[np.isfinite(plot["_baseline_time"]) & np.isfinite(plot["_baseline_value"])]
+    if plot.empty:
+        return
+
+    line_style = {"linestyle": "-", "linewidth": 1.5, "alpha": 0.85, "zorder": 5}
+    if style:
+        line_style.update(style)
+
+    if group_col is not None and group_col in plot.columns:
+        first_label = True
+        for group_value, group_df in plot.groupby(group_col, dropna=False):
+            part = group_df.sort_values("_baseline_time")
+            kwargs = dict(line_style)
+            if color_map is not None:
+                kwargs.setdefault("color", color_map.get(str(group_value), _stable_color(str(group_value))))
+            ax.plot(
+                part["_baseline_time"],
+                part["_baseline_value"],
+                label=label if first_label else None,
+                **kwargs,
+            )
+            first_label = False
+    else:
+        plot = plot.sort_values("_baseline_time")
+        kwargs = {"color": "0.1", **line_style}
+        ax.plot(plot["_baseline_time"], plot["_baseline_value"], label=label, **kwargs)
+
+
+def _legend_ncol(labels: Sequence[str]) -> int:
+    return 1 if len(labels) <= 5 else 2
+
+
+def plot_lightcurve_panel(
+    ax,
+    data: PublicationLightCurve | pd.DataFrame,
+    df: pd.DataFrame | None = None,
+    *,
+    title: str | None = None,
+    group_by: str = "band",
+    group_col: str | None = None,
+    show_errorbars: bool = True,
+    invert_y: bool | None = None,
+    time_offset: str = "auto",
+    legend: str = "auto",
+    marker_size: float = 3.5,
+    xlim: Sequence[float] | None = None,
+    ylim: Sequence[float] | None = None,
+    xlabel: str | None = None,
+    ylabel: str | None = None,
+    time_col: str | None = None,
+    value_col: str | None = None,
+    error_col: str | None = None,
+    band_col: str | None = None,
+    camera_col: str | None = None,
+    y_label: str | None = None,
+    default_invert_y: bool | None = None,
+    baseline: pd.DataFrame | None = None,
+    baseline_col: str = "baseline",
+    baseline_time_col: str | None = None,
+    baseline_group_col: str | None = None,
+    baseline_label: str | None = "Baseline",
+    baseline_style: dict[str, object] | None = None,
+    vertical_lines: Sequence[object] | None = None,
+    vertical_spans: Sequence[object] | None = None,
+    event_runs: Sequence[dict[str, object]] | None = None,
+    event_kind: str = "dip",
+    highlight_mask: Sequence[bool] | pd.Series | np.ndarray | None = None,
+    highlight_label: str | None = None,
+    highlight_style: dict[str, object] | None = None,
+) -> PanelPlotResult:
+    prepared = _prepare_panel_frame(
+        data,
+        df,
+        time_col=time_col,
+        value_col=value_col,
+        error_col=error_col,
+        band_col=band_col,
+        camera_col=camera_col,
+        group_col=group_col,
+        y_label=y_label,
+        default_invert_y=default_invert_y,
+        extra_numeric_cols=(baseline_col,),
+    )
+
+    plot_df = prepared.df.copy()
+    if plot_df.empty:
+        raise ValueError("No light-curve points remain after filtering")
+
+    plot_df["time_plot"], x_label = resolve_time_axis(
+        plot_df["time"],
+        source_column=prepared.source_column,
+        offset=time_offset,
+    )
+    plot_df["plot_group"] = plot_df.apply(_group_label, axis=1, group_by=group_by)
+    mask = np.isfinite(plot_df["time_plot"]) & np.isfinite(plot_df["value"])
+    plot_df = plot_df.loc[mask].reset_index(drop=True)
+    if plot_df.empty:
+        raise ValueError("No finite light-curve points remain after filtering")
+
+    err = pd.to_numeric(plot_df["value_error"], errors="coerce")
+    err_valid = np.isfinite(err) & (err > 0)
+    plot_df.loc[~err_valid, "value_error"] = np.nan
+
+    groups = sorted(plot_df["plot_group"].dropna().unique(), key=_band_sort_key)
+    color_map: dict[str, str] = {}
+    for label in groups:
+        part = plot_df[plot_df["plot_group"] == label]
+        if part.empty:
+            continue
+        color = _group_color(str(label), group_by)
+        color_map[str(label)] = color
+        marker = (
+            _stable_marker(str(label))
+            if group_by != "band"
+            else _stable_marker(str(part["band"].iloc[0]))
+        )
+        plot_label = None if str(label) == "all" else str(label)
+        yerr = part["value_error"].to_numpy()
+        has_yerr = show_errorbars and np.isfinite(yerr).any()
+
+        if has_yerr:
+            ax.errorbar(
+                part["time_plot"],
+                part["value"],
+                yerr=yerr,
+                fmt=marker,
+                linestyle="none",
+                markersize=marker_size,
+                markeredgecolor="0.15",
+                markeredgewidth=0.35,
+                color=color,
+                ecolor=color,
+                elinewidth=0.55,
+                capsize=1.2,
+                alpha=0.82,
+                label=plot_label,
+            )
+        else:
+            ax.scatter(
+                part["time_plot"],
+                part["value"],
+                s=marker_size**2,
+                marker=marker,
+                linewidths=0.35,
+                edgecolors="0.15",
+                color=color,
+                alpha=0.82,
+                label=plot_label,
+            )
+
+    if highlight_mask is not None:
+        highlight = np.asarray(highlight_mask, dtype=bool)
+        if highlight.size == len(plot_df) and highlight.any():
+            style = {
+                "s": max(marker_size**2 * 2.4, 18.0),
+                "facecolors": "none",
+                "edgecolors": "crimson",
+                "linewidths": 0.9,
+                "alpha": 0.9,
+                "label": highlight_label,
+                "zorder": 6,
+            }
+            if highlight_style:
+                style.update(highlight_style)
+            ax.scatter(plot_df.loc[highlight, "time_plot"], plot_df.loc[highlight, "value"], **style)
+
+    baseline_frame = baseline
+    if baseline_frame is None and baseline_col in plot_df.columns:
+        baseline_frame = plot_df.rename(columns={"time_plot": "_time_plot"})
+    if baseline_frame is not None:
+        resolved_group_col = baseline_group_col
+        if resolved_group_col is None:
+            if group_by == "camera" and "camera" in baseline_frame.columns:
+                resolved_group_col = "camera"
+            elif group_by == "group" and "group" in baseline_frame.columns:
+                resolved_group_col = "group"
+        _plot_baseline_overlay(
+            ax,
+            baseline_frame,
+            source_column=prepared.source_column,
+            time_offset=time_offset,
+            time_col=baseline_time_col,
+            value_col=baseline_col,
+            group_col=resolved_group_col,
+            color_map=color_map,
+            label=baseline_label,
+            style=baseline_style,
+        )
+
+    event_lines: list[dict[str, object]] = []
+    event_spans: list[dict[str, object]] = []
+    if event_runs:
+        event_lines, event_spans = _event_overlay_specs(event_runs, event_kind)
+    span_items = list(vertical_spans) if vertical_spans is not None else []
+    line_items = list(vertical_lines) if vertical_lines is not None else []
+    _plot_vertical_spans(
+        ax,
+        [*span_items, *event_spans],
+        source_column=prepared.source_column,
+        time_offset=time_offset,
+    )
+    _plot_vertical_lines(
+        ax,
+        [*line_items, *event_lines],
+        source_column=prepared.source_column,
+        time_offset=time_offset,
+    )
+
+    if title:
+        ax.set_title(title, pad=8)
+
+    ax.set_xlabel(xlabel or x_label)
+    ax.set_ylabel(ylabel or prepared.y_label)
+    should_invert_y = invert_y if invert_y is not None else prepared.default_invert_y
+    if should_invert_y:
+        ax.invert_yaxis()
+
+    if xlim is not None:
+        ax.set_xlim(float(xlim[0]), float(xlim[1]))
+    if ylim is not None:
+        ax.set_ylim(float(ylim[0]), float(ylim[1]))
+
+    style_publication_axis(ax)
+
+    handles, labels = ax.get_legend_handles_labels()
+    if legend != "none" and handles:
+        if legend == "outside":
+            ax.legend(
+                handles,
+                labels,
+                loc="center left",
+                bbox_to_anchor=(1.02, 0.5),
+                frameon=False,
+            )
+        else:
+            ax.legend(handles, labels, loc="best", frameon=False, ncol=_legend_ncol(labels))
+
+    return PanelPlotResult(ax=ax, frame=plot_df)
+
+
+def _add_residual_thresholds(ax, threshold: float | None, *, shade: bool = True) -> None:
+    if threshold is None or not np.isfinite(float(threshold)):
+        return
+    thr = abs(float(threshold))
+    x0, x1 = ax.get_xlim()
+    y0, y1 = ax.get_ylim()
+    y_min = min(y0, y1)
+    y_max = max(y0, y1)
+    if shade:
+        ax.fill_between([x0, x1], thr, y_max, color="0.85", alpha=0.45, zorder=0)
+        ax.fill_between([x0, x1], y_min, -thr, color="0.85", alpha=0.38, zorder=0)
+    ax.axhline(0.0, color="0.1", linestyle="--", alpha=0.45, linewidth=0.8, zorder=1)
+    ax.axhline(thr, color="0.1", linestyle="-", alpha=0.75, linewidth=0.8, zorder=1)
+    ax.axhline(-thr, color="0.1", linestyle="-", alpha=0.75, linewidth=0.8, zorder=1)
+    ax.set_xlim(x0, x1)
+    ax.set_ylim(y0, y1)
+
+
+def plot_residual_panel(
+    ax,
+    data: PublicationLightCurve | pd.DataFrame,
+    *,
+    residual_col: str = "resid",
+    error_col: str | None = None,
+    threshold: float | None = None,
+    shade_threshold: bool = True,
+    ylabel: str = "Residual [mag]",
+    invert_y: bool = True,
+    **kwargs,
+) -> PanelPlotResult:
+    result = plot_lightcurve_panel(
+        ax,
+        data,
+        value_col=residual_col,
+        error_col=error_col,
+        y_label=ylabel,
+        default_invert_y=invert_y,
+        **kwargs,
+    )
+    _add_residual_thresholds(ax, threshold, shade=shade_threshold)
+    return result
+
+
+def _phase_input_frame(
+    data: PublicationLightCurve | pd.DataFrame,
+    *,
+    time_col: str | None,
+    value_col: str | None,
+    error_col: str | None,
+    band_col: str | None,
+    camera_col: str | None,
+    residual_col: str,
+) -> pd.DataFrame:
+    prepared = _prepare_panel_frame(
+        data,
+        time_col=time_col,
+        value_col=value_col,
+        error_col=error_col,
+        band_col=band_col,
+        camera_col=camera_col,
+        extra_numeric_cols=(residual_col,),
+    )
+    raw = pd.DataFrame(
+        {
+            "JD": prepared.df["time"],
+            "mag": prepared.df["value"],
+            "error": prepared.df["value_error"],
+            "camera#": prepared.df["camera"],
+        }
+    )
+    band_map = {"g": 0, "V": 1}
+    raw["v_g_band"] = prepared.df["band"].map(lambda value: band_map.get(str(value), np.nan))
+    if residual_col in prepared.df.columns:
+        raw[residual_col] = prepared.df[residual_col]
+    return raw
+
+
+def plot_phase_panel(
+    ax,
+    data: PublicationLightCurve | pd.DataFrame,
+    *,
+    period_days: float,
+    epoch_jd: float | None = None,
+    value_mode: str = "mag",
+    align_v_to_g: bool = False,
+    duplicate_cycles: bool = True,
+    time_col: str | None = None,
+    value_col: str | None = None,
+    error_col: str | None = None,
+    band_col: str | None = None,
+    camera_col: str | None = None,
+    residual_col: str = "resid",
+    group_by: str = "band",
+    title: str | None = None,
+    show_errorbars: bool = True,
+    legend: str = "auto",
+    marker_size: float = 3.5,
+    xlim: Sequence[float] | None = (0.0, 2.0),
+    ylabel: str | None = None,
+) -> PanelPlotResult:
+    if period_days <= 0 or not np.isfinite(float(period_days)):
+        raise ValueError("period_days must be positive and finite")
+
+    from malca.phase import phase_fold_dataframe
+
+    raw = _phase_input_frame(
+        data,
+        time_col=time_col,
+        value_col=value_col,
+        error_col=error_col,
+        band_col=band_col,
+        camera_col=camera_col,
+        residual_col=residual_col,
+    )
+    phase_df, diagnostics = phase_fold_dataframe(
+        raw,
+        float(period_days),
+        epoch_jd=epoch_jd,
+        value_mode=value_mode,
+        align_v_to_g=align_v_to_g,
+        duplicate_cycles=duplicate_cycles,
+        resid_col=residual_col,
+    )
+    if phase_df.empty:
+        raise ValueError("No finite points for phase folding")
+
+    phase_df = phase_df.copy()
+    if "camera_label" not in phase_df.columns:
+        phase_df["camera_label"] = phase_df["camera#"].astype(str) if "camera#" in phase_df.columns else "unknown"
+
+    result = plot_lightcurve_panel(
+        ax,
+        phase_df,
+        time_col="phase",
+        value_col="phase_value",
+        error_col="error" if "error" in phase_df.columns else None,
+        band_col="v_g_band",
+        camera_col="camera_label",
+        group_by=group_by,
+        show_errorbars=show_errorbars,
+        legend=legend,
+        marker_size=marker_size,
+        time_offset="none",
+        xlabel="Phase",
+        ylabel=ylabel or ("Residual magnitude [mag]" if value_mode == "resid" else "Magnitude [mag]"),
+        title=title,
+        xlim=xlim,
+    )
+    for x in (0.0, 1.0, 2.0):
+        ax.axvline(x, color="0.45", linestyle="--", linewidth=0.8, alpha=0.55)
+    return PanelPlotResult(ax=ax, frame=result.frame, diagnostics=diagnostics)
+
+
 def plot_lightcurve(
     lc: PublicationLightCurve,
     df: pd.DataFrame,
     *,
     output: str | Path | None = None,
     show: bool = False,
+    close: bool = False,
     title: str | None = None,
     figsize: tuple[float, float] = (7.0, 4.2),
     dpi: int = 300,
@@ -485,104 +1178,31 @@ def plot_lightcurve(
     marker_size: float = 3.5,
     xlim: Sequence[float] | None = None,
     ylim: Sequence[float] | None = None,
-) -> None:
+) -> tuple[Any, Any]:
     if df.empty:
         raise ValueError("No light-curve points remain after filtering")
 
-    plt, auto_minor_locator = _load_matplotlib()
-
-    plot_df = df.copy()
-    plot_df["time_plot"], x_label = resolve_time_axis(
-        plot_df["time"],
-        source_column=lc.time_column,
-        offset=time_offset,
-    )
-    plot_df["plot_group"] = plot_df.apply(_group_label, axis=1, group_by=group_by)
+    plt, _ = _load_matplotlib()
 
     with plt.rc_context(PUBLICATION_STYLE):
         fig, ax = plt.subplots(figsize=figsize, constrained_layout=True)
 
-        groups = sorted(plot_df["plot_group"].dropna().unique(), key=_band_sort_key)
-        for label in groups:
-            part = plot_df[plot_df["plot_group"] == label]
-            if part.empty:
-                continue
-            color = _group_color(str(label), group_by)
-            marker = (
-                _stable_marker(str(label))
-                if group_by != "band"
-                else _stable_marker(str(part["band"].iloc[0]))
-            )
-            plot_label = None if str(label) == "all" else str(label)
-            yerr = part["value_error"].to_numpy()
-            has_yerr = show_errorbars and np.isfinite(yerr).any()
-
-            if has_yerr:
-                ax.errorbar(
-                    part["time_plot"],
-                    part["value"],
-                    yerr=yerr,
-                    fmt=marker,
-                    linestyle="none",
-                    markersize=marker_size,
-                    markeredgecolor="0.15",
-                    markeredgewidth=0.35,
-                    color=color,
-                    ecolor=color,
-                    elinewidth=0.55,
-                    capsize=1.2,
-                    alpha=0.82,
-                    label=plot_label,
-                )
-            else:
-                ax.scatter(
-                    part["time_plot"],
-                    part["value"],
-                    s=marker_size**2,
-                    marker=marker,
-                    linewidths=0.35,
-                    edgecolors="0.15",
-                    color=color,
-                    alpha=0.82,
-                    label=plot_label,
-                )
-
         if title is None:
             title = _default_title(lc.source_path)
-        if title:
-            ax.set_title(title, pad=8)
-
-        ax.set_xlabel(x_label)
-        ax.set_ylabel(lc.y_label)
-        should_invert_y = invert_y if invert_y is not None else lc.default_invert_y
-        if should_invert_y:
-            ax.invert_yaxis()
-
-        if xlim is not None:
-            ax.set_xlim(float(xlim[0]), float(xlim[1]))
-        if ylim is not None:
-            ax.set_ylim(float(ylim[0]), float(ylim[1]))
-
-        ax.grid(True, which="major", linewidth=0.4, alpha=0.28)
-        ax.xaxis.set_minor_locator(auto_minor_locator())
-        ax.yaxis.set_minor_locator(auto_minor_locator())
-        ax.tick_params(which="both", direction="in", top=True, right=True)
-        ax.tick_params(which="major", length=4.0, width=0.8)
-        ax.tick_params(which="minor", length=2.0, width=0.6)
-
-        handles, labels = ax.get_legend_handles_labels()
-        if legend != "none" and handles:
-            if legend == "outside":
-                ax.legend(
-                    handles,
-                    labels,
-                    loc="center left",
-                    bbox_to_anchor=(1.02, 0.5),
-                    frameon=False,
-                )
-            else:
-                ncol = 1 if len(labels) <= 5 else 2
-                ax.legend(handles, labels, loc="best", frameon=False, ncol=ncol)
+        plot_lightcurve_panel(
+            ax,
+            lc,
+            df,
+            title=title,
+            group_by=group_by,
+            show_errorbars=show_errorbars,
+            invert_y=invert_y,
+            time_offset=time_offset,
+            legend=legend,
+            marker_size=marker_size,
+            xlim=xlim,
+            ylim=ylim,
+        )
 
         if output is not None:
             out_path = Path(output)
@@ -591,8 +1211,9 @@ def plot_lightcurve(
 
         if show:
             plt.show()
-        else:
+        if close:
             plt.close(fig)
+        return fig, ax
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -648,6 +1269,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         plot_df,
         output=output,
         show=args.show,
+        close=not args.show,
         title=args.title,
         figsize=(float(args.figsize[0]), float(args.figsize[1])),
         dpi=args.dpi,

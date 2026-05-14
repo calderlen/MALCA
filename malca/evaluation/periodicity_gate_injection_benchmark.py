@@ -62,6 +62,7 @@ from malca.config import (
 from malca.events import score_lightcurve
 from malca.filter import apply_filters
 from malca.lightcurve_io import load_lightcurve_df
+from malca.lightcurve_publication import plot_lightcurve_panel, plot_phase_panel
 from malca.phase import phase_fold_dataframe
 from malca.score import compute_event_score
 from malca.stats import compute_ce_stats
@@ -1774,27 +1775,37 @@ def _plot_representative_examples(
         if df is None or df.empty:
             continue
         ax_raw, ax_phase = axes[row_idx]
-        ax_raw.scatter(df["JD"], df["mag"], s=8, alpha=0.65)
-        ax_raw.invert_yaxis()
+        plot_lightcurve_panel(
+            ax_raw,
+            df,
+            group_by="band" if "v_g_band" in df.columns else "none",
+            show_errorbars=False,
+            marker_size=2.8,
+            legend="none",
+            time_offset="none",
+            xlabel="JD",
+            ylabel="mag",
+        )
         ax_raw.set_title(
             f"{row.get('example_kind', '')}: {row['class_name']} | gate={row['pre_periodicity_label']}",
             loc="left",
             fontsize=10,
         )
-        ax_raw.set_xlabel("JD")
-        ax_raw.set_ylabel("mag")
-        ax_raw.grid(alpha=0.25)
         period = float(row.get("pre_periodicity_selected_period", np.nan))
         if np.isfinite(period) and period > 0:
             try:
-                folded, _ = phase_fold_dataframe(df, period, align_v_to_g=True)
-                ax_phase.scatter(folded["phase"], folded["phase_value"], s=8, alpha=0.55)
-                ax_phase.invert_yaxis()
-                ax_phase.set_xlim(0, 2)
-                ax_phase.set_xlabel("phase")
-                ax_phase.set_ylabel("aligned mag")
+                plot_phase_panel(
+                    ax_phase,
+                    df,
+                    period_days=period,
+                    align_v_to_g=True,
+                    group_by="band" if "v_g_band" in df.columns else "none",
+                    show_errorbars=False,
+                    marker_size=2.8,
+                    legend="none",
+                    ylabel="aligned mag",
+                )
                 ax_phase.set_title(f"Selected period = {period:.4g} d", fontsize=10)
-                ax_phase.grid(alpha=0.25)
             except Exception as exc:
                 ax_phase.text(0.5, 0.5, f"phase plot failed: {exc}", ha="center", va="center")
         else:
@@ -1851,17 +1862,23 @@ def _plot_standard_no_injection_false_positives(
             ax.set_axis_off()
             continue
         df, _ = generate_trial_lightcurve(base, row)
-        ax.scatter(df["JD"], df["mag"], s=7, alpha=0.62)
-        ax.invert_yaxis()
+        plot_lightcurve_panel(
+            ax,
+            df,
+            group_by="band" if "v_g_band" in df.columns else "none",
+            show_errorbars=False,
+            marker_size=2.6,
+            legend="none",
+            time_offset="none",
+            xlabel="JD",
+            ylabel="mag",
+        )
         post_text = "post-pass" if bool(post_lookup.get(trial_id, False)) else "post-reject"
         ax.set_title(
             f"trial {trial_id} | BF={row.get('standard_dip_bayes_factor', np.nan):.3g} | {post_text}",
             fontsize=9,
             loc="left",
         )
-        ax.set_xlabel("JD")
-        ax.set_ylabel("mag")
-        ax.grid(alpha=0.25)
 
     for ax in axes.flat[n:]:
         ax.set_axis_off()

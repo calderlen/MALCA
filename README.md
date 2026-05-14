@@ -271,7 +271,8 @@ flowchart TB
 - **Post-detection**: `characterize.py` (Gaia, dust, YSO, galactic coords, auxiliary catalogs) &rarr; `vetting.py` (SIMBAD, ZTF, TNS, eROSITA, ALeRCE, ATLAS, NEOWISE, ...) &rarr; `classify.py` (EB/CV/starspot/disk/YSO) &rarr; `enrich/` (neighbor catalogs, spectra availability)
 - **LTV pipeline**: `ltv/pipeline.py` &rarr; `core.py` &rarr; `filter.py` &rarr; `crossmatch.py` &rarr; `stochastic.py` &rarr; `neowise.py` &rarr; `dust.py` &rarr; `cmd.py` &rarr; `bundle.py` &rarr; `review.py` (ingest to review DB)
 - **Review**: `review/app.py` (Dash GUI with scoring, event classes, diagnostic plots, vetting cards) &rarr; labeled training set
-- **Machine learning**: `meta_analysis/ml/lightgbm_classifier_prototype.ipynb` (draft LightGBM classifier workflow)
+- **Machine learning**: `malca/meta_analysis/ml/lightgbm_classifier_prototype.ipynb` (draft LightGBM classifier workflow)
+- **Notebooks**: `malca/notebooks/README.md` documents the purpose-based notebook folders.
 - **Evaluation**: `injection.py` (synthetic dips), `detection_rate.py`, `validation.py`, `reproduce.py`, `attrition.py`, `false_positive.py`
 - **Core libraries**: `utils.py`, `lightcurve_io.py`, `baseline.py`, `triggering.py`, `score.py`, `stats.py`, `periodogram.py`, `fetch.py`, `gaia_fetch.py`
 - **Configuration**: `config.py` centralizes all pipeline parameters
