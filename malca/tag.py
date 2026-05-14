@@ -27,8 +27,9 @@ from __future__ import annotations
 
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from time import perf_counter
+from time import perf_counter, time_ns
 import argparse
+import uuid
 
 from tqdm.auto import tqdm
 import numpy as np
@@ -98,6 +99,96 @@ def _compute_stats_for_row(
     return result
 
 
+def _compute_stats_for_batch(
+    batch: list[tuple[int, str, str]],
+    compute_time: bool,
+    compute_cameras: bool,
+    compute_fields: bool = False,
+    file_ext: str | None = None,
+) -> list[tuple[int, dict]]:
+    """Compute stats for a small batch of rows in one worker call."""
+    return [
+        (
+            idx,
+            _compute_stats_for_row(
+                asas_sn_id,
+                dir_path,
+                compute_time,
+                compute_cameras,
+                compute_fields,
+                file_ext,
+            ),
+        )
+        for idx, asas_sn_id, dir_path in batch
+    ]
+
+
+def _stats_checkpoint_parts_dir(checkpoint_path: Path) -> Path:
+    """Directory for incremental stats checkpoint shards."""
+    return checkpoint_path.with_name(f"{checkpoint_path.name}.parts")
+
+
+def _read_stats_checkpoint_frame(path: Path, columns: list[str]) -> pd.DataFrame:
+    try:
+        return pd.read_parquet(path, columns=columns)
+    except Exception:
+        return pd.read_parquet(path)
+
+
+def _load_stats_checkpoint(
+    checkpoint_path: Path,
+    columns: list[str],
+    *,
+    show_tqdm: bool = False,
+) -> pd.DataFrame | None:
+    frames: list[pd.DataFrame] = []
+    source_messages: list[str] = []
+
+    if checkpoint_path.exists():
+        try:
+            frame = _read_stats_checkpoint_frame(checkpoint_path, columns)
+            frames.append(frame)
+            source_messages.append(str(checkpoint_path))
+        except Exception as e:
+            if show_tqdm:
+                tqdm.write(f"[stats] Warning: Could not load checkpoint {checkpoint_path}: {e}")
+
+    parts_dir = _stats_checkpoint_parts_dir(checkpoint_path)
+    if parts_dir.exists():
+        part_paths = sorted(parts_dir.glob("part-*.parquet"))
+        part_frames = []
+        for part_path in part_paths:
+            try:
+                part_frames.append(_read_stats_checkpoint_frame(part_path, columns))
+            except Exception as e:
+                if show_tqdm:
+                    tqdm.write(f"[stats] Warning: Could not load checkpoint part {part_path}: {e}")
+        if part_frames:
+            frames.extend(part_frames)
+            source_messages.append(f"{len(part_frames)} part file(s) in {parts_dir}")
+
+    if not frames:
+        return None
+
+    checkpoint_df = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
+    if show_tqdm:
+        tqdm.write(
+            f"[stats] Loaded checkpoint with {len(checkpoint_df)} rows from "
+            f"{', '.join(source_messages)}"
+        )
+    return checkpoint_df
+
+
+def _iter_batches(
+    tasks: list[tuple[int, str, str]],
+    batch_size: int,
+) -> list[list[tuple[int, str, str]]]:
+    return [
+        tasks[start : start + batch_size]
+        for start in range(0, len(tasks), batch_size)
+    ]
+
+
 def _compute_stats_parallel(
     df: pd.DataFrame,
     id_col: str,
@@ -135,50 +226,69 @@ def _compute_stats_parallel(
         for col in FIELD_SUMMARY_COLUMNS:
             df_with_stats[col] = "" if col.endswith("_key") or col.endswith("_fields") else np.nan
 
-    # Load checkpoint if exists
+    stats_cols: list[str] = []
+    if compute_time:
+        stats_cols.extend(["time_span_days", "points_per_day"])
+    if compute_cameras:
+        stats_cols.append("n_cameras")
+    if compute_fields:
+        stats_cols.extend([col for col in FIELD_SUMMARY_COLUMNS if col not in stats_cols])
+
+    checkpoint_cols = [id_col] + stats_cols
+
+    # Load checkpoint if exists. New progress is stored in sidecar part files so
+    # large legacy checkpoints do not get rewritten on every save.
     checkpoint_df = None
     if checkpoint_path is not None:
         checkpoint_path = Path(checkpoint_path)
-        if checkpoint_path.exists():
-            try:
-                checkpoint_df = pd.read_parquet(checkpoint_path)
-                if show_tqdm:
-                    tqdm.write(f"[stats] Loaded checkpoint with {len(checkpoint_df)} rows from {checkpoint_path}")
-            except Exception as e:
-                if show_tqdm:
-                    tqdm.write(f"[stats] Warning: Could not load checkpoint: {e}")
+        checkpoint_df = _load_stats_checkpoint(
+            checkpoint_path,
+            checkpoint_cols,
+            show_tqdm=show_tqdm,
+        )
 
     # Merge checkpoint data if available
     already_computed = set()
     if checkpoint_df is not None and id_col in checkpoint_df.columns:
-        # Use vectorized merge instead of row-by-row iteration
+        available_cols = [col for col in checkpoint_cols if col in checkpoint_df.columns]
+        checkpoint_df = checkpoint_df.loc[:, available_cols]
         checkpoint_df[id_col] = checkpoint_df[id_col].astype(str)
-        already_computed = set(checkpoint_df[id_col].unique())
 
-        # Determine which columns to update
-        update_cols = []
-        if compute_time and "time_span_days" in checkpoint_df.columns:
-            update_cols.extend(["time_span_days", "points_per_day"])
-        if compute_cameras and "n_cameras" in checkpoint_df.columns:
-            update_cols.append("n_cameras")
-        if compute_fields:
-            update_cols.extend([col for col in FIELD_SUMMARY_COLUMNS if col in checkpoint_df.columns])
+        required_complete_cols: list[str] = []
+        if compute_time:
+            required_complete_cols.extend(["time_span_days", "points_per_day"])
+        if compute_cameras:
+            required_complete_cols.append("n_cameras")
+        if not required_complete_cols and compute_fields:
+            required_complete_cols.extend([col for col in FIELD_SUMMARY_COLUMNS if col in checkpoint_df.columns])
 
+        if required_complete_cols and all(col in checkpoint_df.columns for col in required_complete_cols):
+            complete_mask = checkpoint_df[required_complete_cols].notna().all(axis=1)
+            checkpoint_complete = checkpoint_df.loc[complete_mask].drop_duplicates(subset=[id_col], keep="last")
+        else:
+            checkpoint_complete = checkpoint_df.drop_duplicates(subset=[id_col], keep="last")
+
+        already_computed = set(checkpoint_complete[id_col].unique())
+
+        update_cols = [col for col in stats_cols if col in checkpoint_complete.columns]
         if update_cols:
             # Merge checkpoint values into df_with_stats
             df_with_stats[id_col] = df_with_stats[id_col].astype(str)
-            checkpoint_subset = checkpoint_df[[id_col] + update_cols].drop_duplicates(subset=[id_col])
+            checkpoint_subset = checkpoint_complete[[id_col] + update_cols]
             df_with_stats = df_with_stats.drop(columns=update_cols, errors='ignore')
             df_with_stats = df_with_stats.merge(checkpoint_subset, on=id_col, how='left')
 
     # Prepare tasks for rows not yet computed
-    tasks = []
-    for idx, row in df.iterrows():
-        asas_sn_id = str(row[id_col])
-        if asas_sn_id in already_computed:
-            continue
-        dir_path = str(row[path_col])
-        tasks.append((idx, asas_sn_id, dir_path))
+    df_with_stats[id_col] = df_with_stats[id_col].astype(str)
+    pending_mask = ~df_with_stats[id_col].isin(already_computed) if already_computed else pd.Series(True, index=df_with_stats.index)
+    pending = df_with_stats.loc[pending_mask, [id_col, path_col]]
+    tasks = list(
+        zip(
+            pending.index.tolist(),
+            pending[id_col].astype(str).tolist(),
+            pending[path_col].astype(str).tolist(),
+        )
+    )
 
     if not tasks:
         if show_tqdm:
@@ -191,84 +301,109 @@ def _compute_stats_parallel(
     # Process in chunks with checkpoint saves
     pbar = tqdm(total=len(tasks), desc="Computing stats (parallel)", leave=False, disable=not show_tqdm)
 
-    results_buffer = []  # Buffer results for checkpoint saves
+    def apply_results(result_rows: list[tuple[int, dict]]) -> None:
+        if not result_rows:
+            return
+        records = []
+        indices = []
+        for idx, result in result_rows:
+            record = {col: result.get(col) for col in stats_cols}
+            records.append(record)
+            indices.append(idx)
 
-    def save_checkpoint():
-        """Save current progress to checkpoint file."""
+        result_df = pd.DataFrame.from_records(records, index=indices)
+        for col in result_df.columns:
+            df_with_stats.loc[result_df.index, col] = result_df[col].values
+
+    def save_checkpoint(result_rows: list[tuple[int, dict]]) -> None:
+        """Save newly computed progress to an incremental checkpoint part."""
+        if checkpoint_path is None or not result_rows:
+            return
+
+        records = []
+        for _, result in result_rows:
+            record = {id_col: str(result["asas_sn_id"])}
+            for col in stats_cols:
+                record[col] = result.get(col)
+            records.append(record)
+
+        df_checkpoint = pd.DataFrame.from_records(records, columns=checkpoint_cols)
+        df_checkpoint = df_checkpoint.drop_duplicates(subset=[id_col], keep="last")
+
+        parts_dir = _stats_checkpoint_parts_dir(checkpoint_path)
+        parts_dir.mkdir(parents=True, exist_ok=True)
+        part_id = f"{time_ns()}-{uuid.uuid4().hex}"
+        tmp_path = parts_dir / f".part-{part_id}.tmp"
+        final_path = parts_dir / f"part-{part_id}.parquet"
+        try:
+            df_checkpoint.to_parquet(tmp_path, index=False, compression=PARQUET_CACHE_COMPRESSION)
+            tmp_path.replace(final_path)
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
+
+    task_batch_size = max(1, min(chunk_size, max(32, min(1000, chunk_size // max(1, n_workers)))))
+
+    def process_chunk(
+        chunk_tasks: list[tuple[int, str, str]],
+        executor: ProcessPoolExecutor | None = None,
+    ) -> list[tuple[int, dict]]:
+        chunk_results: list[tuple[int, dict]] = []
+        task_batches = _iter_batches(chunk_tasks, task_batch_size)
+
+        if executor is None:
+            for batch in task_batches:
+                batch_results = _compute_stats_for_batch(batch, compute_time, compute_cameras, compute_fields, file_ext)
+                apply_results(batch_results)
+                chunk_results.extend(batch_results)
+                pbar.update(len(batch_results))
+            return chunk_results
+
+        futures = [
+            executor.submit(
+                _compute_stats_for_batch,
+                batch,
+                compute_time,
+                compute_cameras,
+                compute_fields,
+                file_ext,
+            )
+            for batch in task_batches
+        ]
+        for future in as_completed(futures):
+            batch_results = future.result()
+            apply_results(batch_results)
+            chunk_results.extend(batch_results)
+            pbar.update(len(batch_results))
+        return chunk_results
+
+    def finish_chunk(chunk_end: int, chunk_results: list[tuple[int, dict]]) -> None:
         if checkpoint_path is None:
             return
 
-        # Build checkpoint dataframe from df_with_stats (rows with non-NaN stats)
-        if compute_time:
-            mask = df_with_stats["time_span_days"].notna()
-        elif compute_cameras:
-            mask = df_with_stats["n_cameras"].notna()
-        else:
-            return
-
-        checkpoint_cols = [id_col]
-        if compute_time:
-            checkpoint_cols.extend(["time_span_days", "points_per_day"])
-        if compute_cameras:
-            checkpoint_cols.append("n_cameras")
-        if compute_fields:
-            checkpoint_cols.extend([col for col in FIELD_SUMMARY_COLUMNS if col in df_with_stats.columns])
-
-        df_checkpoint = df_with_stats.loc[mask, checkpoint_cols].drop_duplicates(subset=[id_col])
-
-        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-        df_checkpoint.to_parquet(checkpoint_path, index=False, compression=PARQUET_CACHE_COMPRESSION)
-
-    processed_since_save = 0
-
-    with ProcessPoolExecutor(max_workers=n_workers) as executor:
-        # Submit tasks in chunks to avoid memory issues with millions of futures
-        for chunk_start in range(0, len(tasks), chunk_size):
-            chunk_end = min(chunk_start + chunk_size, len(tasks))
-            chunk_tasks = tasks[chunk_start:chunk_end]
-
-            futures = {
-                executor.submit(
-                    _compute_stats_for_row,
-                    asas_sn_id,
-                    dir_path,
-                    compute_time,
-                    compute_cameras,
-                    compute_fields,
-                    file_ext,
-                ): idx
-                for idx, asas_sn_id, dir_path in chunk_tasks
-            }
-
-            for future in as_completed(futures):
-                idx = futures[future]
-                result = future.result()
-
-                if compute_time:
-                    df_with_stats.loc[idx, "time_span_days"] = result["time_span_days"]
-                    df_with_stats.loc[idx, "points_per_day"] = result["points_per_day"]
-                if compute_cameras:
-                    df_with_stats.loc[idx, "n_cameras"] = result["n_cameras"]
-                if compute_fields:
-                    for col in FIELD_SUMMARY_COLUMNS:
-                        df_with_stats.loc[idx, col] = result.get(col)
-
-                pbar.update(1)
-                processed_since_save += 1
-
-            # Save checkpoint after each chunk
-            if checkpoint_path is not None:
-                save_checkpoint()
-                if show_tqdm:
-                    tqdm.write(f"[stats] Checkpoint saved: {chunk_end}/{len(tasks)} rows processed")
-
-    pbar.close()
-
-    # Final checkpoint save
-    if checkpoint_path is not None:
-        save_checkpoint()
+        # Save only new rows after each chunk. Existing checkpoint rows are read
+        # on resume and are not rewritten.
+        save_checkpoint(chunk_results)
+        parts_dir = _stats_checkpoint_parts_dir(checkpoint_path)
         if show_tqdm:
-            tqdm.write(f"[stats] Final checkpoint saved to {checkpoint_path}")
+            tqdm.write(f"[stats] Checkpoint part saved: {chunk_end}/{len(tasks)} rows processed in {parts_dir}")
+
+    try:
+        # Submit work in chunks to bound memory use and checkpoint periodically.
+        if n_workers <= 1:
+            for chunk_start in range(0, len(tasks), chunk_size):
+                chunk_end = min(chunk_start + chunk_size, len(tasks))
+                chunk_results = process_chunk(tasks[chunk_start:chunk_end])
+                finish_chunk(chunk_end, chunk_results)
+        else:
+            with ProcessPoolExecutor(max_workers=n_workers) as executor:
+                for chunk_start in range(0, len(tasks), chunk_size):
+                    chunk_end = min(chunk_start + chunk_size, len(tasks))
+                    chunk_results = process_chunk(tasks[chunk_start:chunk_end], executor)
+                    finish_chunk(chunk_end, chunk_results)
+    finally:
+        pbar.close()
+
 
     return df_with_stats
 

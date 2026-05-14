@@ -73,6 +73,68 @@ def test_apply_tags_honors_file_extension_override(tmp_path: Path) -> None:
     assert out.loc[0, "camera_field_key"] == "cam1/field1"
 
 
+def test_compute_stats_parallel_writes_incremental_checkpoint_parts(tmp_path: Path) -> None:
+    flat_dir = tmp_path / "flat"
+    _write_mock_dat(flat_dir / "2002.dat2")
+
+    checkpoint = tmp_path / "stats.parquet"
+    pd.DataFrame(
+        {
+            "source_id": ["2001"],
+            "time_span_days": [123.0],
+            "points_per_day": [4.5],
+            "n_cameras": [2],
+        }
+    ).to_parquet(checkpoint, index=False)
+
+    df = pd.DataFrame(
+        {
+            "source_id": ["2001", "2002"],
+            "path": [str(flat_dir), str(flat_dir)],
+        }
+    )
+
+    out = tag._compute_stats_parallel(
+        df,
+        "source_id",
+        "path",
+        compute_time=True,
+        compute_cameras=True,
+        compute_fields=True,
+        file_ext="dat2",
+        n_workers=1,
+        checkpoint_path=checkpoint,
+        chunk_size=1,
+    )
+
+    assert out.loc[out["source_id"] == "2001", "time_span_days"].item() == 123.0
+    assert out.loc[out["source_id"] == "2002", "time_span_days"].item() == 20.0
+    assert out.loc[out["source_id"] == "2002", "asassn_field_key"].item() == "field1"
+
+    # The legacy checkpoint remains read-only; new progress is appended as a part.
+    assert pd.read_parquet(checkpoint)["source_id"].astype(str).tolist() == ["2001"]
+    parts_dir = checkpoint.with_name(f"{checkpoint.name}.parts")
+    parts = sorted(parts_dir.glob("part-*.parquet"))
+    assert len(parts) == 1
+    assert pd.read_parquet(parts[0])["source_id"].astype(str).tolist() == ["2002"]
+
+    out_resume = tag._compute_stats_parallel(
+        df,
+        "source_id",
+        "path",
+        compute_time=True,
+        compute_cameras=True,
+        compute_fields=True,
+        file_ext="dat2",
+        n_workers=1,
+        checkpoint_path=checkpoint,
+        chunk_size=1,
+    )
+
+    assert out_resume["time_span_days"].tolist() == [123.0, 20.0]
+    assert sorted(parts_dir.glob("part-*.parquet")) == parts
+
+
 def test_filter_camera_medians_marks_raw_suspects_without_exclusions(tmp_path: Path) -> None:
     lc_path = tmp_path / "C1.dat2"
     lc_path.write_text("", encoding="ascii")
