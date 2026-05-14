@@ -1986,6 +1986,21 @@ def main():
             except Exception as e:
                 log(f"Warning: could not inspect existing {branch_name} branch output: {e}")
 
+            try:
+                if error_log.exists():
+                    df_existing_errors = pd.read_parquet(error_log, columns=["path"])
+                    error_paths = set(df_existing_errors["path"].dropna().astype(str))
+                    new_error_paths = error_paths - processed_paths
+                    if new_error_paths:
+                        processed_paths |= new_error_paths
+                        log(
+                            f"{branch_name.title()} branch error log contains "
+                            f"{len(new_error_paths)} additional failed paths; "
+                            "skipping them on resume"
+                        )
+            except Exception as e:
+                log(f"Warning: could not inspect existing {branch_name} branch error log: {e}")
+
         remaining = [path_value for path_value in file_paths if str(path_value) not in processed_paths]
         if file_paths and (not remaining):
             log(f"All {branch_name} branch paths already processed according to checkpoint/output.")
