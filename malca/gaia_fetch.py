@@ -47,7 +47,15 @@ SELECT
     g.distance_gspphot, g.ag_gspphot,
 
     xm_tm.original_ext_source_id AS tmass_id,
-    xm_aw.original_ext_source_id AS allwise_id
+    xm_aw.original_ext_source_id AS allwise_id,
+    aw.w1mpro AS w1,
+    aw.w1sigmpro AS w1_err,
+    aw.w2mpro AS w2,
+    aw.w2sigmpro AS w2_err,
+    aw.w3mpro AS w3,
+    aw.w3sigmpro AS w3_err,
+    aw.w4mpro AS w4,
+    aw.w4sigmpro AS w4_err
 
 FROM TAP_UPLOAD.upload_table AS u
 JOIN gaiadr3.gaia_source AS g
@@ -58,6 +66,9 @@ LEFT JOIN gaiadr3.tmass_psc_xsc_best_neighbour AS xm_tm
 
 LEFT JOIN gaiadr3.allwise_best_neighbour AS xm_aw
     ON g.source_id = xm_aw.source_id
+
+LEFT JOIN catalogs.allwise AS aw
+    ON xm_aw.allwise_oid = aw.allwise_oid
 """
 
 MAX_RETRIES = 3
@@ -90,22 +101,47 @@ GAIA_EXPECTED_COLUMNS = (
     "tmass_h_err",
     "tmass_k_err",
     "allwise_id",
-    "unwise_w1",
-    "unwise_w2",
-    "unwise_w1_err",
-    "unwise_w2_err",
+    "w1",
+    "w1_err",
+    "w2",
+    "w2_err",
+    "w3",
+    "w3_err",
+    "w4",
+    "w4_err",
 )
 GAIA_STRING_COLUMNS = {"source_id", "tmass_id", "allwise_id"}
+WISE_FETCH_COLUMNS = {"w1", "w1_err", "w2", "w2_err", "w3", "w3_err", "w4", "w4_err"}
 
 
 def _has_required_gaia_columns(df: pd.DataFrame | None) -> bool:
     return df is not None and all(col in df.columns for col in GAIA_REQUIRED_COLUMNS)
 
 
+def _has_current_wise_fetch_schema(df: pd.DataFrame | None) -> bool:
+    if df is None or df.empty:
+        return False
+    columns = {str(col).lower() for col in df.columns}
+    return WISE_FETCH_COLUMNS.issubset(columns)
+
+
 def _ensure_gaia_schema(df: pd.DataFrame) -> pd.DataFrame:
     """Normalize Gaia cache schema for downstream consumers."""
     out = df.copy()
     out.columns = [str(c).lower() for c in out.columns]
+    legacy_wise_columns = {
+        "unwise_w1": "w1",
+        "unwise_w1_err": "w1_err",
+        "unwise_w2": "w2",
+        "unwise_w2_err": "w2_err",
+        "allwise_w3": "w3",
+        "allwise_w3_err": "w3_err",
+        "allwise_w4": "w4",
+        "allwise_w4_err": "w4_err",
+    }
+    for old_col, new_col in legacy_wise_columns.items():
+        if old_col in out.columns and new_col not in out.columns:
+            out = out.rename(columns={old_col: new_col})
 
     if not _has_required_gaia_columns(out):
         return out
@@ -215,7 +251,14 @@ def _chunk_part_path(checkpoint_dir: Path, key: str) -> Path:
 
 
 def _chunk_is_checkpointed(checkpoint_dir: Path, key: str) -> bool:
-    return _chunk_part_path(checkpoint_dir, key).exists()
+    path = _chunk_part_path(checkpoint_dir, key)
+    if not path.exists():
+        return False
+    try:
+        part = pd.read_parquet(path)
+    except Exception:
+        return False
+    return _has_current_wise_fetch_schema(part)
 
 
 def _load_checkpoint_parts(checkpoint_dir: Path) -> pd.DataFrame:
@@ -223,7 +266,12 @@ def _load_checkpoint_parts(checkpoint_dir: Path) -> pd.DataFrame:
     part_files = sorted(checkpoint_dir.glob("*.parquet"))
     if not part_files:
         return pd.DataFrame()
-    return pd.concat([pd.read_parquet(p) for p in part_files], ignore_index=True)
+    frames: list[pd.DataFrame] = []
+    for path in part_files:
+        part = pd.read_parquet(path)
+        if _has_current_wise_fetch_schema(part):
+            frames.append(part)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
 def _load_checkpointed_ids(checkpoint_dir: Path) -> set[str]:
@@ -300,8 +348,9 @@ def fetch_gaia_catalog(
         except Exception as e:
             print(f"  Warning: could not read existing Gaia cache at {output_path}: {e}")
         else:
+            cache_has_current_wise = _has_current_wise_fetch_schema(cached_candidate)
             cached_candidate = _ensure_gaia_schema(cached_candidate)
-            if _has_required_gaia_columns(cached_candidate) and not cached_candidate.empty:
+            if _has_required_gaia_columns(cached_candidate) and cache_has_current_wise and not cached_candidate.empty:
                 cached_df = cached_candidate
                 cached_df["source_id"] = cached_df["source_id"].astype(str)
                 existing_ids = set(cached_df["source_id"])
@@ -312,7 +361,7 @@ def fetch_gaia_catalog(
                     print("All IDs already present in local catalog. Nothing to fetch.")
                     return cached_df
             else:
-                print(f"  Warning: ignoring invalid existing Gaia cache at {output_path}")
+                print(f"  Warning: ignoring stale or invalid existing Gaia cache at {output_path}")
 
     if not gaia_ids:
         checkpoint_df = _load_checkpoint_parts(checkpoint_dir)

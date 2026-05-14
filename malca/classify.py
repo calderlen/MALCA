@@ -371,7 +371,7 @@ def classify_yso(df: pd.DataFrame) -> pd.DataFrame:
     Classify YSO candidates using 2MASS-WISE IR colors.
     Following Koenig & Leisawitz (2014).
     
-    Returns df with columns: yso_class, H_K, W1_W2
+    Returns df with columns: yso_class, H_K, w1_w2
     """
     df = df.copy()
     
@@ -379,8 +379,8 @@ def classify_yso(df: pd.DataFrame) -> pd.DataFrame:
     col_map = {
         'H': ['Hmag', 'tmass_h'], 
         'K': ['Kmag', 'tmass_k'], 
-        'W1': ['W1mag', 'unwise_w1', 'w1mpro'], 
-        'W2': ['W2mag', 'unwise_w2', 'w2mpro']
+        'W1': ['w1', 'W1mag', 'w1mpro'], 
+        'W2': ['w2', 'W2mag', 'w2mpro']
     }
     
     vals = {}
@@ -411,13 +411,13 @@ def classify_yso(df: pd.DataFrame) -> pd.DataFrame:
         w1w2_color = w1w2_color - (YSO_DUST_CORRECTION_W1W2 * av)
     
     df['H_K'] = hk_color 
-    df['W1_W2'] = w1w2_color
+    df['w1_w2'] = w1w2_color
     
     # Classification
-    class_i = df['W1_W2'] > YSO_CLASS_I_W1W2
-    class_ii = ((df['W1_W2'] > YSO_CLASS_II_W1W2_MIN) & (df['W1_W2'] < YSO_CLASS_I_W1W2) & (df['H_K'] > YSO_CLASS_II_HK))
-    trans = ((df['W1_W2'] > YSO_CLASS_II_W1W2_MIN) & (df['W1_W2'] < YSO_CLASS_I_W1W2) & (df['H_K'] < YSO_CLASS_II_HK))
-    ms = df['W1_W2'] < YSO_CLASS_II_W1W2_MIN
+    class_i = df['w1_w2'] > YSO_CLASS_I_W1W2
+    class_ii = ((df['w1_w2'] > YSO_CLASS_II_W1W2_MIN) & (df['w1_w2'] < YSO_CLASS_I_W1W2) & (df['H_K'] > YSO_CLASS_II_HK))
+    trans = ((df['w1_w2'] > YSO_CLASS_II_W1W2_MIN) & (df['w1_w2'] < YSO_CLASS_I_W1W2) & (df['H_K'] < YSO_CLASS_II_HK))
+    ms = df['w1_w2'] < YSO_CLASS_II_W1W2_MIN
     
     df['yso_class'] = 'unknown'
     df.loc[class_i, 'yso_class'] = 'Class I'
@@ -549,8 +549,8 @@ def estimate_disk_probability(df: pd.DataFrame) -> pd.DataFrame:
 
     # Check WISE upper limits (no hot disk)
     # If W3/W4 not detected, consistent with cool/no disk
-    if 'unwise_w1' in df.columns and 'unwise_w2' in df.columns:
-        no_ir_excess = df['W1_W2'] < YSO_CLASS_II_W1W2_MIN if 'W1_W2' in df.columns else True
+    if 'w1' in df.columns and 'w2' in df.columns:
+        no_ir_excess = df['w1_w2'] < YSO_CLASS_II_W1W2_MIN if 'w1_w2' in df.columns else True
         if isinstance(no_ir_excess, pd.Series):
             df.loc[no_ir_excess, 'P_disk'] += DISK_NO_IR_EXCESS_BONUS
 

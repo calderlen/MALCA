@@ -76,6 +76,7 @@ from malca.config import PARQUET_CACHE_COMPRESSION, PARQUET_OUTPUT_COMPRESSION
 from malca.config import (
     DEFAULT_CACHE_DIR,
     GAIA_AIP_TAP_URL,
+    GAIA_CHUNK_SIZE,
     GAIA_LOCAL_CATALOG,
     VSX_CROSSMATCH_PATH,
 )
@@ -658,6 +659,7 @@ def fetch_gaia_dr3_eb_periods(
 def fetch_gaia_dr3_ruwe(
     source_ids: list[int] | None = None,
     show_tqdm: bool = True,
+    catalog_path: str | Path | None = None,
     **_kwargs,
 ) -> pd.DataFrame:
     """
@@ -671,6 +673,8 @@ def fetch_gaia_dr3_ruwe(
         Gaia source IDs to look up
     show_tqdm : bool
         Show progress messages
+    catalog_path : str | Path | None
+        Local Gaia cache path. Defaults to ``GAIA_LOCAL_CATALOG``.
 
     Returns
     -------
@@ -681,20 +685,20 @@ def fetch_gaia_dr3_ruwe(
     if source_ids is None or len(source_ids) == 0:
         raise ValueError("Must provide source_ids")
 
-    catalog_path = GAIA_LOCAL_CATALOG if GAIA_LOCAL_CATALOG.exists() else None
-    if catalog_path is None:
+    resolved_catalog_path = Path(catalog_path).expanduser() if catalog_path is not None else GAIA_LOCAL_CATALOG
+    if not resolved_catalog_path.exists():
         raise FileNotFoundError(
-            "Local Gaia catalog not found. Run:\n"
+            f"Local Gaia catalog not found at {resolved_catalog_path}. Run:\n"
             "  malca gaia-fetch --input <your_candidates.parquet>\n"
             "to download Gaia DR3 data before running filter RUWE validation."
         )
 
     if show_tqdm:
-        tqdm.write(f"[fetch_gaia_dr3_ruwe] Loading local Gaia catalog from {catalog_path}")
+        tqdm.write(f"[fetch_gaia_dr3_ruwe] Loading local Gaia catalog from {resolved_catalog_path}")
 
-    gaia_df = pd.read_parquet(catalog_path)
+    gaia_df = pd.read_parquet(resolved_catalog_path)
     if "source_id" not in gaia_df.columns or "ruwe" not in gaia_df.columns:
-        raise ValueError(f"Local Gaia catalog at {catalog_path} missing required columns (source_id, ruwe).")
+        raise ValueError(f"Local Gaia catalog at {resolved_catalog_path} missing required columns (source_id, ruwe).")
 
     gaia_df["source_id"] = gaia_df["source_id"].astype(int)
     requested_ids = set(int(sid) for sid in source_ids)
@@ -767,6 +771,62 @@ def _passing_mask_from_failures(
             mask &= ~_to_bool_mask(df[col])
 
     return mask
+
+
+def _gaia_ids_from_frame(df: pd.DataFrame, mask: pd.Series | None = None) -> list[str]:
+    """Return unique Gaia IDs as digit strings from ``df['gaia_id']``."""
+    if "gaia_id" not in df.columns:
+        return []
+
+    if mask is not None:
+        checked_mask = mask.reindex(df.index, fill_value=False).astype(bool)
+        values = df.loc[checked_mask, "gaia_id"].tolist()
+    else:
+        values = df["gaia_id"].tolist()
+
+    return sorted({str(gid) for gid in (_parse_gaia_id_int(v) for v in values) if gid is not None})
+
+
+def _ensure_gaia_cache_for_validation(
+    df: pd.DataFrame,
+    *,
+    catalog_path: str | Path | None,
+    chunk_size: int,
+    passers_only: bool,
+    strict: bool,
+    show_tqdm: bool,
+) -> None:
+    """Populate the Gaia cache for rows about to run RUWE/PM validation."""
+    if "gaia_id" not in df.columns:
+        if show_tqdm:
+            tqdm.write("[gaia_cache] No gaia_id column; skipping Gaia auto-fetch")
+        return
+
+    eligible_mask = _passing_mask_from_failures(df) if passers_only else pd.Series(True, index=df.index, dtype=bool)
+    gaia_ids = _gaia_ids_from_frame(df, eligible_mask)
+    if not gaia_ids:
+        if show_tqdm:
+            tqdm.write("[gaia_cache] No valid Gaia IDs for Gaia auto-fetch")
+        return
+
+    resolved_catalog_path = Path(catalog_path).expanduser() if catalog_path is not None else GAIA_LOCAL_CATALOG
+    if show_tqdm:
+        scope = "currently passing candidates" if passers_only else "all candidates"
+        tqdm.write(
+            f"[gaia_cache] Ensuring Gaia DR3 cache covers {len(gaia_ids)} {scope} "
+            f"at {resolved_catalog_path}"
+        )
+
+    try:
+        from malca.gaia_fetch import fetch_gaia_catalog
+
+        fetch_gaia_catalog(gaia_ids, output_path=resolved_catalog_path, chunk_size=chunk_size)
+    except Exception as e:
+        message = f"[gaia_cache] Gaia auto-fetch failed: {e}"
+        if strict:
+            raise RuntimeError(message) from e
+        if show_tqdm:
+            tqdm.write(f"Warning: {message}")
 
 
 def _clear_annotation_columns(
@@ -2007,6 +2067,7 @@ def validate_gaia_ruwe(
     *,
     max_ruwe: float = POST_FILTER_MAX_RUWE,
     flag_only: bool = True,
+    catalog_path: str | Path | None = None,
     show_tqdm: bool = False,
     verbose: bool = False,
     rejected_log_csv: str | Path | None = None,
@@ -2062,14 +2123,21 @@ def validate_gaia_ruwe(
         df_out["high_ruwe_flag"] = False
         return df_out
 
-    # Fetch RUWE from Gaia TAP by source_id
+    # Fetch RUWE from the local Gaia cache by source_id.
     if show_tqdm:
-        tqdm.write(f"[validate_gaia_ruwe] Querying Gaia TAP for {len(unique_ids)} unique sources...")
+        tqdm.write(f"[validate_gaia_ruwe] Looking up RUWE for {len(unique_ids)} unique Gaia IDs...")
     try:
         gaia_df = fetch_gaia_dr3_ruwe(
             source_ids=unique_ids,
             show_tqdm=show_tqdm,
+            catalog_path=catalog_path,
         )
+    except FileNotFoundError as e:
+        if not flag_only:
+            raise RuntimeError(f"[validate_gaia_ruwe] Gaia RUWE lookup failed: {e}") from e
+        if show_tqdm:
+            tqdm.write(f"Warning: [validate_gaia_ruwe] {e}; setting RUWE to NaN")
+        gaia_df = pd.DataFrame(columns=["source_id", "ruwe"])
     except Exception as e:
         raise RuntimeError(f"[validate_gaia_ruwe] Gaia RUWE lookup failed: {e}") from e
 
@@ -2078,9 +2146,11 @@ def validate_gaia_ruwe(
     if missing_ids:
         preview = ", ".join(str(v) for v in missing_ids[:5])
         more = f" (+{len(missing_ids) - 5} more)" if len(missing_ids) > 5 else ""
-        raise RuntimeError(
-            f"[validate_gaia_ruwe] Local Gaia catalog is missing RUWE rows for source_id(s): {preview}{more}"
-        )
+        message = f"[validate_gaia_ruwe] Local Gaia catalog is missing RUWE rows for source_id(s): {preview}{more}"
+        if not flag_only:
+            raise RuntimeError(message)
+        if show_tqdm:
+            tqdm.write(f"Warning: {message}; setting missing RUWE values to NaN")
 
     # Create lookup dict from Gaia results
     ruwe_lookup = dict(zip(gaia_df["source_id"].astype(int), gaia_df["ruwe"]))
@@ -2122,6 +2192,7 @@ def validate_gaia_proper_motion(
     *,
     max_pm: float = POST_FILTER_MAX_PM,
     flag_only: bool = True,
+    catalog_path: str | Path | None = None,
     show_tqdm: bool = False,
     verbose: bool = False,
     rejected_log_csv: str | Path | None = None,
@@ -2149,7 +2220,17 @@ def validate_gaia_proper_motion(
         if show_tqdm:
             tqdm.write(f"[validate_gaia_proper_motion] Looking up PM for {len(unique_ids)} unique Gaia IDs...")
         try:
-            gaia_df = fetch_gaia_dr3_ruwe(source_ids=unique_ids, show_tqdm=show_tqdm)
+            gaia_df = fetch_gaia_dr3_ruwe(
+                source_ids=unique_ids,
+                show_tqdm=show_tqdm,
+                catalog_path=catalog_path,
+            )
+        except FileNotFoundError as e:
+            if not flag_only:
+                raise RuntimeError(f"[validate_gaia_proper_motion] Gaia PM lookup failed: {e}") from e
+            if show_tqdm:
+                tqdm.write(f"Warning: [validate_gaia_proper_motion] {e}; using existing PM columns only")
+            gaia_df = pd.DataFrame()
         except Exception as e:
             raise RuntimeError(f"[validate_gaia_proper_motion] Gaia PM lookup failed: {e}") from e
 
@@ -2179,8 +2260,10 @@ def validate_gaia_proper_motion(
                         pmdec.iat[i] = float(vals[1])
             elif show_tqdm:
                 tqdm.write("[validate_gaia_proper_motion] Local Gaia cache has no pmra/pmdec columns - using existing PM columns only")
-        elif pmra.isna().all() or pmdec.isna().all():
+        elif (pmra.isna().all() or pmdec.isna().all()) and not flag_only:
             raise RuntimeError("[validate_gaia_proper_motion] Local Gaia catalog returned no PM rows")
+        elif show_tqdm and (pmra.isna().all() or pmdec.isna().all()):
+            tqdm.write("[validate_gaia_proper_motion] Local Gaia catalog returned no PM rows - using existing PM columns only")
     elif show_tqdm:
         tqdm.write("[validate_gaia_proper_motion] No valid Gaia IDs - using existing PM columns only")
 
@@ -2560,6 +2643,10 @@ def apply_filters(
     apply_gaia_pm_validation: bool = True,
     gaia_max_pm: float = POST_FILTER_MAX_PM,
     gaia_pm_flag_only: bool = True,
+    gaia_catalog_path: str | Path | None = None,
+    auto_fetch_gaia_cache: bool = False,
+    gaia_fetch_chunk_size: int = GAIA_CHUNK_SIZE,
+    gaia_fetch_passers_only: bool = True,
     # Validation: periodic catalog
     apply_periodic_catalog_validation: bool = True,
     periodic_catalog_max_sep: float = POST_FILTER_MAX_SEP_ARCSEC,
@@ -2591,9 +2678,17 @@ def apply_filters(
         Run periodicity validation on every row in the current table instead of
         only rows that pass the prerequisite failed_* filters.
     apply_gaia_ruwe_validation : bool
-        Apply Gaia RUWE validation (queries Gaia TAP)
+        Apply Gaia RUWE validation from the local Gaia cache
     apply_gaia_pm_validation : bool
         Apply Gaia proper-motion validation (uses local Gaia catalog)
+    gaia_catalog_path : str | Path | None
+        Local Gaia cache path used by RUWE/PM validation
+    auto_fetch_gaia_cache : bool
+        If True, fetch missing Gaia DR3 rows into ``gaia_catalog_path`` before
+        RUWE/PM validation runs
+    gaia_fetch_passers_only : bool
+        If True, auto-fetch Gaia rows only for candidates that have not failed
+        filters already applied before RUWE/PM
     apply_periodic_catalog_validation : bool
         Apply periodic-catalog evidence and period-consensus validation
     home_passers_only : bool
@@ -2724,6 +2819,7 @@ def apply_filters(
         filters.append(("gaia_ruwe", validate_gaia_ruwe, {
             "max_ruwe": gaia_max_ruwe,
             "flag_only": gaia_flag_only,
+            "catalog_path": gaia_catalog_path,
             "show_tqdm": show_tqdm,
             "verbose": verbose,
         }, list(GAIA_RUWE_MERGE_COLS)))
@@ -2732,6 +2828,7 @@ def apply_filters(
         filters.append(("gaia_pm", validate_gaia_proper_motion, {
             "max_pm": gaia_max_pm,
             "flag_only": gaia_pm_flag_only,
+            "catalog_path": gaia_catalog_path,
             "show_tqdm": show_tqdm,
             "verbose": verbose,
         }, list(GAIA_PM_MERGE_COLS)))
@@ -2834,11 +2931,31 @@ def apply_filters(
     # Apply filters and tag failures (all rows kept)
     total_steps = len(filters)
     if total_steps > 0:
+        gaia_cache_checked = False
         with tqdm(total=total_steps, desc="apply_filters", leave=True, disable=not show_tqdm) as pbar:
             for filter_entry in filters:
                 label, func, kwargs = filter_entry[0], filter_entry[1], filter_entry[2]
                 merge_cols = filter_entry[3] if len(filter_entry) > 3 else None
                 start = perf_counter()
+
+                if (
+                    auto_fetch_gaia_cache
+                    and (not gaia_cache_checked)
+                    and label in {"gaia_ruwe", "gaia_pm"}
+                ):
+                    strict_gaia_cache = (
+                        (apply_gaia_ruwe_validation and not gaia_flag_only)
+                        or (apply_gaia_pm_validation and not gaia_pm_flag_only)
+                    )
+                    _ensure_gaia_cache_for_validation(
+                        df_filtered,
+                        catalog_path=gaia_catalog_path,
+                        chunk_size=gaia_fetch_chunk_size,
+                        passers_only=(gaia_fetch_passers_only and not strict_gaia_cache),
+                        strict=strict_gaia_cache,
+                        show_tqdm=show_tqdm,
+                    )
+                    gaia_cache_checked = True
 
                 subset_cfg = subset_filter_configs.get(label)
                 if subset_cfg is not None:
@@ -3014,7 +3131,15 @@ Example usage:
                         help="Allow alias periods for phase plots (default: disabled)")
 
     g_gaia_ruwe.add_argument("--skip-gaia-ruwe-validation", action="store_true",
-                        help="Skip Gaia RUWE validation (on by default, queries Gaia TAP)")
+                        help="Skip Gaia RUWE validation (on by default, uses local Gaia cache)")
+    g_gaia_ruwe.add_argument("--gaia-cache", type=Path, default=GAIA_LOCAL_CATALOG,
+                        help=f"Local Gaia DR3 cache for RUWE/PM validation (default: {GAIA_LOCAL_CATALOG})")
+    g_gaia_ruwe.add_argument("--auto-fetch-gaia-cache", action=argparse.BooleanOptionalAction, default=True,
+                        help="Fetch missing Gaia DR3 rows into --gaia-cache before RUWE/PM validation (default: enabled)")
+    g_gaia_ruwe.add_argument("--gaia-fetch-chunk-size", type=int, default=GAIA_CHUNK_SIZE,
+                        help=f"Number of Gaia source IDs per TAP chunk when auto-fetching (default: {GAIA_CHUNK_SIZE})")
+    g_gaia_ruwe.add_argument("--gaia-fetch-all-candidates", action="store_true",
+                        help="Auto-fetch Gaia rows for all candidates instead of only candidates still passing prior filters")
     g_gaia_ruwe.add_argument("--gaia-max-ruwe", type=float, default=POST_FILTER_MAX_RUWE,
                         help="Maximum RUWE to keep (default: 1.4)")
     g_gaia_ruwe.add_argument("--gaia-reject", action="store_true",
@@ -3211,6 +3336,10 @@ Example usage:
         apply_gaia_pm_validation=not args.skip_gaia_pm_validation,
         gaia_max_pm=args.gaia_max_pm,
         gaia_pm_flag_only=not args.gaia_pm_reject,
+        gaia_catalog_path=args.gaia_cache.expanduser() if args.gaia_cache else GAIA_LOCAL_CATALOG,
+        auto_fetch_gaia_cache=args.auto_fetch_gaia_cache,
+        gaia_fetch_chunk_size=args.gaia_fetch_chunk_size,
+        gaia_fetch_passers_only=not args.gaia_fetch_all_candidates,
         # Periodic catalog validation
         apply_periodic_catalog_validation=not args.skip_periodic_catalog_validation,
         periodic_catalog_max_sep=args.periodic_catalog_max_sep,
@@ -3282,6 +3411,10 @@ Example usage:
                     "gaia_reject": args.gaia_reject if not args.skip_gaia_ruwe_validation else None,
                     "gaia_max_pm": args.gaia_max_pm if not args.skip_gaia_pm_validation else None,
                     "gaia_pm_reject": args.gaia_pm_reject if not args.skip_gaia_pm_validation else None,
+                    "gaia_cache": str(args.gaia_cache) if args.gaia_cache else None,
+                    "auto_fetch_gaia_cache": args.auto_fetch_gaia_cache,
+                    "gaia_fetch_chunk_size": args.gaia_fetch_chunk_size,
+                    "gaia_fetch_passers_only": not args.gaia_fetch_all_candidates,
                     "periodic_catalog_max_sep": args.periodic_catalog_max_sep if not args.skip_periodic_catalog_validation else None,
                     "periodic_catalog_consensus_rel_tol": args.periodic_catalog_consensus_rel_tol if not args.skip_periodic_catalog_validation else None,
                     "periodic_catalog_use_gaia_eb": (not args.periodic_catalog_no_gaia_eb) if not args.skip_periodic_catalog_validation else None,

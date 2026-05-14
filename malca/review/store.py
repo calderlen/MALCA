@@ -111,6 +111,45 @@ def _opt_bool(d: dict[str, Any], key: str) -> int | None:
     return int(_as_bool(v)) if v is not None else None
 
 
+def _canonicalize_wise_fields(row: dict[str, Any]) -> dict[str, Any]:
+    out = dict(row)
+    legacy_map = {
+        "unwise_w1": "w1",
+        "unwise_w1_err": "w1_err",
+        "unwise_w2": "w2",
+        "unwise_w2_err": "w2_err",
+        "allwise_w3": "w3",
+        "allwise_w3_err": "w3_err",
+        "allwise_w4": "w4",
+        "allwise_w4_err": "w4_err",
+        "W1_W2": "w1_w2",
+        "W1_W2_dered": "w1_w2_dered",
+    }
+    for old_col, new_col in legacy_map.items():
+        if old_col not in out:
+            continue
+        if new_col not in out or out.get(new_col) is None:
+            out[new_col] = out[old_col]
+        out.pop(old_col, None)
+
+    for left, right in (
+        ("w1", "w2"),
+        ("w1", "w3"),
+        ("w1", "w4"),
+        ("w2", "w3"),
+        ("w2", "w4"),
+        ("w3", "w4"),
+    ):
+        color_col = f"{left}_{right}"
+        if color_col in out and out.get(color_col) is not None:
+            continue
+        left_value = _to_float(out.get(left))
+        right_value = _to_float(out.get(right))
+        if left_value is not None and right_value is not None:
+            out[color_col] = left_value - right_value
+    return out
+
+
 def _candidate_insert_tuple_from_row_dict(
     row_dict: dict[str, Any],
     *,
@@ -119,6 +158,7 @@ def _candidate_insert_tuple_from_row_dict(
 ) -> tuple[Any, ...]:
     normalized = {k: (None if pd.isna(v) else v) for k, v in row_dict.items()}
     normalized = normalize_vsx_record(normalized)
+    normalized = _canonicalize_wise_fields(normalized)
 
     candidate_id = _normalize_large_integer_like_id(normalized.get("candidate_id"))
     if not candidate_id:
@@ -466,14 +506,14 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("tmass_h_err",              "REAL",    "float"),
     ("tmass_k",                  "REAL",    "float"),
     ("tmass_k_err",              "REAL",    "float"),
-    ("unwise_w1",                "REAL",    "float"),
-    ("unwise_w1_err",            "REAL",    "float"),
-    ("unwise_w2",                "REAL",    "float"),
-    ("unwise_w2_err",            "REAL",    "float"),
-    ("allwise_w3",               "REAL",    "float"),
-    ("allwise_w3_err",           "REAL",    "float"),
-    ("allwise_w4",               "REAL",    "float"),
-    ("allwise_w4_err",           "REAL",    "float"),
+    ("w1",                       "REAL",    "float"),
+    ("w1_err",                   "REAL",    "float"),
+    ("w2",                       "REAL",    "float"),
+    ("w2_err",                   "REAL",    "float"),
+    ("w3",                       "REAL",    "float"),
+    ("w3_err",                   "REAL",    "float"),
+    ("w4",                       "REAL",    "float"),
+    ("w4_err",                   "REAL",    "float"),
     ("apass_v",                  "REAL",    "float"),
     ("apass_v_err",              "REAL",    "float"),
     ("apass_b",                  "REAL",    "float"),
@@ -489,7 +529,12 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("galex_nuv",                "REAL",    "float"),
     ("galex_nuv_err",            "REAL",    "float"),
     ("H_K",                      "REAL",    "float"),
-    ("W1_W2",                    "REAL",    "float"),
+    ("w1_w2",                    "REAL",    "float"),
+    ("w1_w3",                    "REAL",    "float"),
+    ("w1_w4",                    "REAL",    "float"),
+    ("w2_w3",                    "REAL",    "float"),
+    ("w2_w4",                    "REAL",    "float"),
+    ("w3_w4",                    "REAL",    "float"),
     ("iphas_ha_mag",             "REAL",    "float"),
     ("iphas_r_ha",               "REAL",    "float"),
     ("unwise_w1_zscore",         "REAL",    "float"),
@@ -994,11 +1039,41 @@ def init_db(conn: sqlite3.Connection) -> None:
         """
     )
     # Migrate: add any columns missing from older DBs.
-    existing_lower = {row[1].lower() for row in conn.execute("PRAGMA table_info(candidates)").fetchall()}
+    existing_candidate_columns = {
+        str(row[1]).lower(): str(row[1])
+        for row in conn.execute("PRAGMA table_info(candidates)").fetchall()
+    }
+    legacy_candidate_column_renames = {
+        "unwise_w1": "w1",
+        "unwise_w1_err": "w1_err",
+        "unwise_w2": "w2",
+        "unwise_w2_err": "w2_err",
+        "allwise_w3": "w3",
+        "allwise_w3_err": "w3_err",
+        "allwise_w4": "w4",
+        "allwise_w4_err": "w4_err",
+        "w1_w2": "w1_w2",
+    }
+    legacy_candidate_column_renames["W1_W2".lower()] = "w1_w2"
+    for old_col, new_col in legacy_candidate_column_renames.items():
+        old_actual = existing_candidate_columns.get(old_col)
+        new_actual = existing_candidate_columns.get(new_col)
+        if old_actual and (not new_actual or old_actual != new_col):
+            try:
+                conn.execute(f"ALTER TABLE candidates RENAME COLUMN {old_actual} TO {new_col}")
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" not in str(e).lower():
+                    raise
+                continue
+            existing_candidate_columns.pop(old_col, None)
+            existing_candidate_columns[new_col] = new_col
+
+    existing_lower = set(existing_candidate_columns)
     for col, dtype, _ in _CANDIDATE_COLUMNS:
         if col.lower() not in existing_lower:
             try:
                 conn.execute(f"ALTER TABLE candidates ADD COLUMN {col} {dtype}")
+                existing_lower.add(col.lower())
             except sqlite3.OperationalError as e:
                 if "duplicate column name" not in str(e).lower():
                     raise
@@ -1670,12 +1745,12 @@ def get_diagnostic_background(conn: sqlite3.Connection) -> dict:
 
     # IR color-color: prefer dereddened from payload, fall back to observed
     rows = conn.execute(
-        "SELECT tmass_h - tmass_k, unwise_w1 - unwise_w2, "
+        "SELECT tmass_h - tmass_k, w1 - w2, "
         "       json_extract(payload_json, '$.H_K_dered'), "
-        "       json_extract(payload_json, '$.W1_W2_dered') "
+        "       json_extract(payload_json, '$.w1_w2_dered') "
         "FROM candidates "
         "WHERE tmass_h IS NOT NULL AND tmass_k IS NOT NULL "
-        "  AND unwise_w1 IS NOT NULL AND unwise_w2 IS NOT NULL"
+        "  AND w1 IS NOT NULL AND w2 IS NOT NULL"
     ).fetchall()
     hk_list, w1w2_list = [], []
     for hk_obs, w1w2_obs, hk_d, w1w2_d in rows:

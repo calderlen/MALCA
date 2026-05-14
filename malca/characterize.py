@@ -72,6 +72,54 @@ STARHORSE_TAP_CACHE_FILE = CATALOG_CACHE_DIR / "starhorse_tap_cache.parquet"
 OPEN_CLUSTER_META_CACHE_FILE = CATALOG_CACHE_DIR / "cantat_gaudin2020_table1.parquet"
 UNWISE_CHECKPOINT_BASENAME = "unwise_variability_CHECKPOINT.parquet"
 
+WISE_LEGACY_COLUMN_RENAMES = {
+    "unwise_w1": "w1",
+    "unwise_w1_err": "w1_err",
+    "unwise_w2": "w2",
+    "unwise_w2_err": "w2_err",
+    "allwise_w3": "w3",
+    "allwise_w3_err": "w3_err",
+    "allwise_w4": "w4",
+    "allwise_w4_err": "w4_err",
+}
+WISE_COLOR_PAIRS = (
+    ("w1", "w2"),
+    ("w1", "w3"),
+    ("w1", "w4"),
+    ("w2", "w3"),
+    ("w2", "w4"),
+    ("w3", "w4"),
+)
+
+
+def _canonicalize_wise_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Collapse legacy provenance-prefixed WISE magnitude columns to w1..w4."""
+    if df.empty:
+        return df
+    out = df.copy()
+    for old_col, new_col in WISE_LEGACY_COLUMN_RENAMES.items():
+        if old_col not in out.columns:
+            continue
+        if new_col not in out.columns:
+            out = out.rename(columns={old_col: new_col})
+            continue
+        old_values = pd.to_numeric(out[old_col], errors="coerce")
+        new_values = pd.to_numeric(out[new_col], errors="coerce")
+        missing = new_values.isna() & old_values.notna()
+        out.loc[missing, new_col] = out.loc[missing, old_col]
+        out = out.drop(columns=[old_col])
+    return out
+
+
+def _add_wise_color_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Add all pairwise WISE color columns available from w1..w4."""
+    out = _canonicalize_wise_columns(df)
+    for left, right in WISE_COLOR_PAIRS:
+        color_col = f"{left}_{right}"
+        if left in out.columns and right in out.columns:
+            out[color_col] = pd.to_numeric(out[left], errors="coerce") - pd.to_numeric(out[right], errors="coerce")
+    return out
+
 
 # =============================================================================
 # GAIA DR3 QUERYING
@@ -149,6 +197,7 @@ def query_gaia_by_ids(source_ids: list[str | int], chunk_size: int = GAIA_CHUNK_
     gaia_df["source_id"] = gaia_df["source_id"].astype(str)
     requested = _normalize_source_ids(source_ids)
     result = gaia_df[gaia_df["source_id"].isin(requested)].copy()
+    result = _add_wise_color_columns(result)
 
     print(f"Matched {len(result)}/{len(requested)} requested Gaia IDs from local catalog.")
     return result
@@ -478,8 +527,8 @@ def get_dust_extinction(df: pd.DataFrame) -> pd.DataFrame:
         'tmass_j': 0.282,
         'tmass_h': 0.175,
         'tmass_k': 0.112,
-        'unwise_w1': 0.061,
-        'unwise_w2': 0.047,
+        'w1': 0.061,
+        'w2': 0.047,
         'apass_b': 1.321,
         'apass_v': 1.000,
         'apass_g': 1.199,
@@ -511,14 +560,14 @@ def classify_yso(df: pd.DataFrame) -> pd.DataFrame:
     Classify YSO candidates using 2MASS-WISE color-color diagram.
     Supports dust-corrected colors if A_v_3d is present.
     """
-    df = df.copy()
+    df = _add_wise_color_columns(df)
     
-    # Map columns (support multiple naming conventions)
+    # Map columns (support current and common external naming conventions)
     col_map = {
         'H': ['Hmag', 'tmass_h'], 
         'K': ['Kmag', 'tmass_k'], 
-        'W1': ['W1mag', 'unwise_w1', 'w1mpro'], 
-        'W2': ['W2mag', 'unwise_w2', 'w2mpro']
+        'W1': ['w1', 'W1mag', 'w1mpro'], 
+        'W2': ['w2', 'W2mag', 'w2mpro']
     }
     
     vals = {}
@@ -548,16 +597,16 @@ def classify_yso(df: pd.DataFrame) -> pd.DataFrame:
         hk_color = hk_color - (YSO_DUST_CORRECTION_HK * av)
         w1w2_color = w1w2_color - (YSO_DUST_CORRECTION_W1W2 * av)
         df['H_K_dered'] = hk_color
-        df['W1_W2_dered'] = w1w2_color
+        df['w1_w2_dered'] = w1w2_color
     
     df['H_K'] = hk_color 
-    df['W1_W2'] = w1w2_color
+    df['w1_w2'] = w1w2_color
     
     # Classification criteria
-    class_i = df['W1_W2'] > YSO_CLASS_I_W1W2
-    class_ii = ((df['W1_W2'] > YSO_CLASS_II_W1W2_MIN) & (df['W1_W2'] < YSO_CLASS_I_W1W2) & (df['H_K'] > YSO_CLASS_II_HK))
-    trans = ((df['W1_W2'] > YSO_CLASS_II_W1W2_MIN) & (df['W1_W2'] < YSO_CLASS_I_W1W2) & (df['H_K'] < YSO_CLASS_II_HK))
-    ms = df['W1_W2'] < YSO_CLASS_II_W1W2_MIN
+    class_i = df['w1_w2'] > YSO_CLASS_I_W1W2
+    class_ii = ((df['w1_w2'] > YSO_CLASS_II_W1W2_MIN) & (df['w1_w2'] < YSO_CLASS_I_W1W2) & (df['H_K'] > YSO_CLASS_II_HK))
+    trans = ((df['w1_w2'] > YSO_CLASS_II_W1W2_MIN) & (df['w1_w2'] < YSO_CLASS_I_W1W2) & (df['H_K'] < YSO_CLASS_II_HK))
+    ms = df['w1_w2'] < YSO_CLASS_II_W1W2_MIN
     
     df['yso_class'] = 'unknown'
     df.loc[class_i, 'yso_class'] = 'Class I'
@@ -881,29 +930,29 @@ def crossmatch_galex(df: pd.DataFrame, max_sep_arcsec: float = GALEX_MAX_SEP_ARC
     return df
 
 
-def crossmatch_allwise_w3w4(df: pd.DataFrame, max_sep_arcsec: float = ALLWISE_MAX_SEP_ARCSEC) -> pd.DataFrame:
+def crossmatch_allwise(df: pd.DataFrame, max_sep_arcsec: float = ALLWISE_MAX_SEP_ARCSEC) -> pd.DataFrame:
     """
-    Crossmatch to AllWISE (Vizier II/328/allwise) for W3 and W4 magnitudes.
-    (W1 and W2 are usually taken from unWISE or catwise, but AllWISE provides W3/W4).
+    Crossmatch to AllWISE (Vizier II/328/allwise) for W1-W4 magnitudes.
     """
     if df.empty:
         return df
-    df = df.copy()
+    df = _canonicalize_wise_columns(df)
     
     # Initialize output columns
-    for col in ["allwise_w3", "allwise_w3_err", "allwise_w4", "allwise_w4_err"]:
-        df[col] = np.nan
+    for col in ["w1", "w1_err", "w2", "w2_err", "w3", "w3_err", "w4", "w4_err"]:
+        if col not in df.columns:
+            df[col] = np.nan
         
     valid_mask = df['ra'].notna() & df['dec'].notna()
     if not valid_mask.any():
-        return df
+        return _add_wise_color_columns(df)
         
     source_table = Table()
     source_table['_idx'] = np.where(valid_mask)[0]
     source_table['ra'] = df.loc[valid_mask, 'ra'].values
     source_table['dec'] = df.loc[valid_mask, 'dec'].values
     
-    print(f"Running AllWISE XMatch (W3/W4) for {len(source_table)} sources...")
+    print(f"Running AllWISE XMatch (W1-W4) for {len(source_table)} sources...")
     try:
         result = XMatch.query(
             cat1=source_table,
@@ -920,8 +969,10 @@ def crossmatch_allwise_w3w4(df: pd.DataFrame, max_sep_arcsec: float = ALLWISE_MA
                 result_df = result_df.drop_duplicates(subset='_idx', keep='first')
                 
             col_map = {
-                "W3mag": "allwise_w3", "e_W3mag": "allwise_w3_err",
-                "W4mag": "allwise_w4", "e_W4mag": "allwise_w4_err"
+                "W1mag": "w1", "e_W1mag": "w1_err",
+                "W2mag": "w2", "e_W2mag": "w2_err",
+                "W3mag": "w3", "e_W3mag": "w3_err",
+                "W4mag": "w4", "e_W4mag": "w4_err",
             }
             
             for _, row in result_df.iterrows():
@@ -935,7 +986,7 @@ def crossmatch_allwise_w3w4(df: pd.DataFrame, max_sep_arcsec: float = ALLWISE_MA
     except Exception as e:
         print(f"AllWISE XMatch error: {e}")
         
-    return df
+    return _add_wise_color_columns(df)
 
 
 def crossmatch_2mass(df: pd.DataFrame, max_sep_arcsec: float = TMASS_MAX_SEP_ARCSEC) -> pd.DataFrame:
@@ -1599,7 +1650,7 @@ def characterize_candidates_df(
                     out[column] = base.combine_first(values)
             else:
                 out[column] = values
-        return out
+        return _add_wise_color_columns(out)
 
     # If source_id + coordinates already present (e.g. from SkyPatrol fetch),
     # we can skip the crossmatch step and use source_id directly for Gaia enrichment.
@@ -1617,6 +1668,7 @@ def characterize_candidates_df(
     if checkpoint_path and Path(checkpoint_path).exists():
         try:
             df_char = pd.read_parquet(checkpoint_path)
+            df_char = _add_wise_color_columns(df_char)
             completed = [m for m in ["population", "starhorse", "dust", "yso",
                                       "banyan", "iphas", "sfr", "clusters", "unwise",
                                       "apass", "galex", "allwise"]
@@ -1631,12 +1683,13 @@ def characterize_candidates_df(
     # If source_id + coords already present, skip the crossmatch+Gaia block
     if df_char is None and _has_gaia_already:
         print("Gaia identifiers already present (source_id + coords), skipping crossmatch")
-        df_char = df.copy()
+        df_char = _add_wise_color_columns(df)
         if "source_id" in df_char.columns:
             df_char["source_id"] = df_char["source_id"].astype(str)
         if _needs_gaia_enrichment(df_char):
             print("Gaia photometry/astrometry incomplete; fetching Gaia catalog rows")
             df_char = _merge_missing_gaia_columns(df_char)
+            df_char = _add_wise_color_columns(df_char)
         _ra_col = "ra"
         _dec_col = "dec"
         _gc_mask = np.isfinite(df_char[_ra_col].astype(float)) & np.isfinite(df_char[_dec_col].astype(float))
@@ -1656,7 +1709,7 @@ def characterize_candidates_df(
 
     # Run Gaia merge + galactic coords if not already done (checkpoint has source_id)
     if df_char is None or "source_id" not in df_char.columns:
-        df_in = df.copy()
+        df_in = _add_wise_color_columns(df)
         xmatch_path = crossmatch.expanduser()
 
         if not xmatch_path.exists():
@@ -1767,6 +1820,7 @@ def characterize_candidates_df(
 
         print("Merging Gaia results...")
         df_char = df_merged.merge(gaia_df, left_on="gaia_id", right_on="source_id", how="left", suffixes=("", "_gaia"))
+        df_char = _add_wise_color_columns(df_char)
 
         # Compute Galactic coordinates from RA/Dec
         _ra_col = "ra" if "ra" in df_char.columns else ("ra_deg" if "ra_deg" in df_char.columns else None)
@@ -1837,6 +1891,14 @@ def characterize_candidates_df(
         if checkpoint_path:
             _save_char_checkpoint(df_char, checkpoint_path)
 
+    if not _module_completed(df_char, "allwise"):
+        df_char = _run_optional_module(
+            df_char, module="allwise", enabled=run_allwise,
+            description="Running AllWISE (W1-W4) crossmatch...",
+            func=crossmatch_allwise
+        )
+        if checkpoint_path: _save_char_checkpoint(df_char, checkpoint_path)
+
     if not _module_completed(df_char, "yso"):
         if ("tmass_j" not in df_char.columns or df_char["tmass_j"].isna().all()) and "ra" in df_char.columns and "dec" in df_char.columns and df_char["ra"].notna().any():
             df_char = crossmatch_2mass(df_char)
@@ -1869,14 +1931,6 @@ def characterize_candidates_df(
             df_char, module="galex", enabled=run_galex,
             description="Running GALEX AIS crossmatch...",
             func=crossmatch_galex
-        )
-        if checkpoint_path: _save_char_checkpoint(df_char, checkpoint_path)
-
-    if not _module_completed(df_char, "allwise"):
-        df_char = _run_optional_module(
-            df_char, module="allwise", enabled=run_allwise,
-            description="Running AllWISE (W3/W4) crossmatch...",
-            func=crossmatch_allwise_w3w4
         )
         if checkpoint_path: _save_char_checkpoint(df_char, checkpoint_path)
 

@@ -195,6 +195,8 @@ RUN_REUSE_PARAM_ATTRS = (
     "skip_gaia_pm_validation",
     "gaia_max_pm",
     "gaia_pm_reject",
+    "auto_fetch_gaia_cache",
+    "gaia_fetch_passers_only",
     "skip_periodic_catalog_validation",
     "periodic_catalog_max_sep",
     "periodic_catalog_reject",
@@ -375,6 +377,8 @@ PIPELINE_CONFIG_DEFAULTS: dict[str, Any] = {
     "skip_gaia_pm_validation": False,
     "gaia_max_pm": 100.0,
     "gaia_pm_reject": False,
+    "auto_fetch_gaia_cache": True,
+    "gaia_fetch_passers_only": True,
     "skip_periodic_catalog_validation": False,
     "periodic_catalog_max_sep": 3.0,
     "periodic_catalog_reject": False,
@@ -1071,6 +1075,10 @@ def _build_filter_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "apply_gaia_pm_validation": not args.skip_gaia_pm_validation,
         "gaia_max_pm": args.gaia_max_pm,
         "gaia_pm_flag_only": not args.gaia_pm_reject,
+        "gaia_catalog_path": args.gaia_cache,
+        "auto_fetch_gaia_cache": args.auto_fetch_gaia_cache,
+        "gaia_fetch_chunk_size": args.gaia_fetch_chunk_size,
+        "gaia_fetch_passers_only": args.gaia_fetch_passers_only,
         "apply_periodic_catalog_validation": not args.skip_periodic_catalog_validation,
         "periodic_catalog_max_sep": args.periodic_catalog_max_sep,
         "periodic_catalog_flag_only": not args.periodic_catalog_reject,
@@ -1105,9 +1113,16 @@ def _build_home_external_validation_cmd(
         str(args.gaia_max_ruwe),
         "--gaia-max-pm",
         str(args.gaia_max_pm),
+        "--gaia-cache",
+        str(args.gaia_cache),
         "--periodic-catalog-max-sep",
         str(args.periodic_catalog_max_sep),
     ]
+    if not args.auto_fetch_gaia_cache:
+        cmd.append("--no-auto-fetch-gaia-cache")
+    if not args.gaia_fetch_passers_only:
+        cmd.append("--gaia-fetch-all-candidates")
+    cmd.extend(["--gaia-fetch-chunk-size", str(args.gaia_fetch_chunk_size)])
 
     if args.apply_periodicity_validation:
         cmd.extend(
@@ -1228,6 +1243,30 @@ def main():
         choices=["full", "cluster", "home"],
         help="Pipeline stage: full=all steps, cluster=raw-dependent upstream, home=downstream only",
     )
+    g_filter.add_argument(
+        "--gaia-cache",
+        type=Path,
+        default=None,
+        help=f"Shared Gaia DR3 cache for RUWE/PM validation and characterization (default: {GAIA_LOCAL_CATALOG})",
+    )
+    g_filter.add_argument(
+        "--no-auto-fetch-gaia-cache",
+        dest="auto_fetch_gaia_cache",
+        action="store_false",
+        help="Disable automatic Gaia cache fetch before RUWE/PM filtering.",
+    )
+    g_filter.add_argument(
+        "--gaia-fetch-all-candidates",
+        dest="gaia_fetch_passers_only",
+        action="store_false",
+        help="Fetch Gaia rows for all event rows before RUWE/PM instead of only rows still passing prior filters.",
+    )
+    g_filter.add_argument(
+        "--gaia-fetch-chunk-size",
+        type=int,
+        default=None,
+        help=f"Number of Gaia source IDs per TAP chunk when auto-fetching (default: {GAIA_CHUNK_SIZE})",
+    )
 
     add_config_args(g_general)
     g_general.add_argument("--workers", type=int, default=WORKERS, help="Workers for parallel processing")
@@ -1258,6 +1297,14 @@ def main():
         cli_overrides["export_bundle_enabled"] = True
     if cli_has_option("--no-export-bundle"):
         cli_overrides["export_bundle_enabled"] = False
+    if cli_has_option("--gaia-cache"):
+        cli_overrides["gaia_cache"] = args.gaia_cache
+    if cli_has_option("--no-auto-fetch-gaia-cache"):
+        cli_overrides["auto_fetch_gaia_cache"] = args.auto_fetch_gaia_cache
+    if cli_has_option("--gaia-fetch-all-candidates"):
+        cli_overrides["gaia_fetch_passers_only"] = args.gaia_fetch_passers_only
+    if cli_has_option("--gaia-fetch-chunk-size"):
+        cli_overrides["gaia_fetch_chunk_size"] = args.gaia_fetch_chunk_size
 
     apply_config(
         args,
@@ -1436,9 +1483,7 @@ def main():
             log(f"Using imported flat light-curve directory: {args.flat_lc_dir}")
 
     if args.gaia_cache is None:
-        gaia_cache_dir = out_dir / "gaia_cache"
-        gaia_cache_dir.mkdir(parents=True, exist_ok=True)
-        args.gaia_cache = gaia_cache_dir / "gaia_cache.parquet"
+        args.gaia_cache = GAIA_LOCAL_CATALOG
 
     manifests_dir = out_dir / "manifests"
     tags_dir = out_dir / "tags"
@@ -1731,6 +1776,8 @@ def main():
             "skip_gaia_pm_validation": args.skip_gaia_pm_validation,
             "gaia_max_pm": args.gaia_max_pm,
             "gaia_pm_reject": args.gaia_pm_reject,
+            "auto_fetch_gaia_cache": args.auto_fetch_gaia_cache,
+            "gaia_fetch_passers_only": args.gaia_fetch_passers_only,
             "skip_periodic_catalog_validation": args.skip_periodic_catalog_validation,
             "periodic_catalog_max_sep": args.periodic_catalog_max_sep,
             "periodic_catalog_reject": args.periodic_catalog_reject,

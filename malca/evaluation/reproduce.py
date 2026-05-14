@@ -1717,7 +1717,7 @@ def build_reproduction_report(
                         "teff_gspphot", "logg_gspphot", "mh_gspphot",
                         "distance_gspphot", "ag_gspphot",
                         "tmass_j", "tmass_h", "tmass_k",
-                        "unwise_w1", "unwise_w2",
+                        "w1", "w2", "w3", "w4",
                     ]
                     gaia_cols_present = [c for c in gaia_cols if c in gaia_df.columns]
                     gaia_subset = gaia_df[gaia_cols_present].copy()

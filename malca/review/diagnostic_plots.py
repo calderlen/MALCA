@@ -409,8 +409,8 @@ def build_ir_colorcolor_figure(
     # Observed magnitudes
     h = _safe_float(payload, "tmass_h")
     k = _safe_float(payload, "tmass_k")
-    w1 = _safe_float(payload, "unwise_w1")
-    w2 = _safe_float(payload, "unwise_w2")
+    w1 = _safe_float(payload, "w1")
+    w2 = _safe_float(payload, "w2")
 
     if h is None or k is None or w1 is None or w2 is None:
         return None
@@ -420,7 +420,7 @@ def build_ir_colorcolor_figure(
 
     # Pre-computed dereddened colors or compute from A_v
     hk_dered = _safe_float(payload, "H_K_dered")
-    w1w2_dered = _safe_float(payload, "W1_W2_dered")
+    w1w2_dered = _safe_float(payload, "w1_w2_dered")
 
     if hk_dered is None or w1w2_dered is None:
         av = _safe_float(payload, "A_v_3d")
