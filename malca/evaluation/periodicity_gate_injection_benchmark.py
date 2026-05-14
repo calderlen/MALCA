@@ -60,14 +60,18 @@ from malca.config import (
     TRIGGER_MODE,
 )
 from malca.events import score_lightcurve
+from malca.filter import apply_filters
 from malca.lightcurve_io import load_lightcurve_df
 from malca.phase import phase_fold_dataframe
+from malca.score import compute_event_score
 from malca.stats import compute_ce_stats
 from malca.utils import clean_lc, compute_n_cameras, filter_bad_cameras
 
 
 BENCHMARK_CLASS_ORDER: tuple[str, ...] = (
     "no_injection_control",
+    "shuffled_magnitude_control",
+    "synthetic_gaussian_noise_control",
     "single_non_recurrent_dip",
     "non_periodic_recurrent_dips",
     "semi_periodic_dips",
@@ -79,6 +83,8 @@ BENCHMARK_CLASS_ORDER: tuple[str, ...] = (
 
 TARGET_DIP_BY_CLASS: dict[str, bool] = {
     "no_injection_control": False,
+    "shuffled_magnitude_control": False,
+    "synthetic_gaussian_noise_control": False,
     "single_non_recurrent_dip": True,
     "non_periodic_recurrent_dips": True,
     "semi_periodic_dips": True,
@@ -90,6 +96,8 @@ TARGET_DIP_BY_CLASS: dict[str, bool] = {
 
 TARGET_GATE_LABEL_BY_CLASS: dict[str, str] = {
     "no_injection_control": "non_periodic",
+    "shuffled_magnitude_control": "non_periodic",
+    "synthetic_gaussian_noise_control": "non_periodic",
     "single_non_recurrent_dip": "non_periodic",
     "non_periodic_recurrent_dips": "non_periodic",
     "semi_periodic_dips": "ambiguous",
@@ -106,6 +114,38 @@ THRESHOLD_PHASE_PEAK_SNR_VALUES: tuple[float, ...] = (2.0, 2.5, 3.0)
 PERIOD_SEARCH_N_PERIODS_VALUES: tuple[int, ...] = (2000, 5000)
 PERIOD_SEARCH_MIN_PERIOD_VALUES: tuple[float, ...] = (0.2, 0.5)
 PERIOD_SEARCH_MAX_PERIOD_VALUES: tuple[float, ...] = (50.0, 100.0, 200.0)
+
+PIPELINE_DETECTED_COLUMNS: dict[str, str] = {
+    "standard_only": "standard_detected",
+    "phase_folded_only": "phase_folded_detected",
+    "bifurcated_gate": "bifurcated_detected",
+}
+
+POST_FILTER_FIELD_COLUMNS: tuple[str, ...] = (
+    "dip_significant",
+    "jump_significant",
+    "dip_count",
+    "jump_count",
+    "dip_run_count",
+    "jump_run_count",
+    "dip_max_run_points",
+    "jump_max_run_points",
+    "dip_max_run_cameras",
+    "jump_max_run_cameras",
+    "dip_max_log_bf_local",
+    "jump_max_log_bf_local",
+    "dip_bayes_factor",
+    "jump_bayes_factor",
+    "baseline_mag",
+    "dip_best_mag_event",
+    "jump_best_mag_event",
+    "dip_best_morph",
+    "jump_best_morph",
+    "dip_best_delta_bic",
+    "jump_best_delta_bic",
+    "dipper_score",
+    "jumper_score",
+)
 
 PERIOD_MATCH_HARMONIC_FACTORS: tuple[float, ...] = (
     1.0,
@@ -124,9 +164,9 @@ class BenchmarkConfig:
     output_base_dir: Path = Path("output/diagnostics/periodicity_gate_injection_benchmark")
     run_tag: str | None = None
     smoke_mode: bool = False
-    total_trials: int = 60000
+    total_trials: int = 6000
     smoke_total_trials: int = 512
-    control_sample_size: int = 2048
+    control_sample_size: int = 205
     smoke_control_sample_size: int = 96
     seed: int = 20260513
     cache_generated_lightcurves: bool = True
@@ -146,19 +186,23 @@ class BenchmarkConfig:
     gate_min_period: float = PRE_PERIODICITY_MIN_PERIOD
     gate_max_period: float = PRE_PERIODICITY_MAX_PERIOD
     # The production pregate default is PRE_PERIODICITY_N_PERIODS=5000. That is
-    # too expensive for a 60k injection grid, so the benchmark defaults to a
+    # too expensive for a multi-thousand-trial injection grid, so the benchmark defaults to a
     # coarse scan and reserves 5000-period comparisons for the subset sweep.
     gate_n_periods: int = 500
     smoke_gate_n_periods: int = 800
     gate_ce_snr_threshold: float = PRE_PERIODICITY_CE_SNR_THRESHOLD
     gate_min_points: int = PRE_PERIODICITY_MIN_POINTS
     gate_scatter_ratio_max: float = PRE_PERIODICITY_SCATTER_RATIO_MAX
-    period_search_subset_size: int = 1000
+    period_search_subset_size: int = 100
     smoke_period_search_subset_size: int = 64
     checkpoint_every: int = 1000
     workers: int = 10
     trial_task_size: int = 1
     show_progress: bool = True
+    post_filter_apply_periodic_catalog_validation: bool = False
+    post_filter_apply_gaia_ruwe_validation: bool = False
+    post_filter_apply_gaia_pm_validation: bool = False
+    post_filter_apply_periodicity_validation: bool = False
 
     @property
     def effective_total_trials(self) -> int:
@@ -187,6 +231,8 @@ class BenchmarkRun:
     gate_threshold_sweep: pd.DataFrame
     period_search_subset_sweep: pd.DataFrame
     summary_metrics: pd.DataFrame
+    post_filter_results: pd.DataFrame
+    post_filter_rejection_summary: pd.DataFrame
     generated_lightcurves: dict[int, pd.DataFrame]
 
 
@@ -402,6 +448,45 @@ def _periodic_centers(
     return centers
 
 
+def _shuffle_magnitudes_within_camera(df: pd.DataFrame, rng: np.random.Generator) -> pd.DataFrame:
+    out = df.copy()
+    mag = pd.to_numeric(out["mag"], errors="coerce").to_numpy(dtype=float)
+    shuffled = mag.copy()
+    if "camera#" in out.columns:
+        camera_values = out["camera#"].fillna("__missing__").astype(str).to_numpy()
+        for camera in np.unique(camera_values):
+            idx = np.flatnonzero(camera_values == camera)
+            finite_idx = idx[np.isfinite(mag[idx])]
+            if finite_idx.size > 1:
+                shuffled[finite_idx] = mag[rng.permutation(finite_idx)]
+    else:
+        finite_idx = np.flatnonzero(np.isfinite(mag))
+        if finite_idx.size > 1:
+            shuffled[finite_idx] = mag[rng.permutation(finite_idx)]
+    out["mag"] = shuffled
+    return out
+
+
+def _replace_with_gaussian_noise_control(df: pd.DataFrame, rng: np.random.Generator) -> pd.DataFrame:
+    out = df.copy()
+    mag = pd.to_numeric(out["mag"], errors="coerce")
+    err = pd.to_numeric(out["error"], errors="coerce").to_numpy(dtype=float)
+    finite_err = err[np.isfinite(err) & (err > 0)]
+    fallback_err = float(np.nanmedian(finite_err)) if finite_err.size else 0.05
+    err = np.where(np.isfinite(err) & (err > 0), err, fallback_err)
+
+    if "camera#" in out.columns:
+        camera_values = out["camera#"].fillna("__missing__").astype(str)
+        centers = mag.groupby(camera_values).transform("median")
+        global_center = float(np.nanmedian(mag.to_numpy(dtype=float)))
+        centers = centers.fillna(global_center)
+    else:
+        centers = pd.Series(float(np.nanmedian(mag.to_numpy(dtype=float))), index=out.index)
+
+    out["mag"] = centers.to_numpy(dtype=float) + rng.normal(0.0, err, size=len(out))
+    return out
+
+
 def generate_trial_lightcurve(base_df: pd.DataFrame, trial: pd.Series | dict[str, Any]) -> tuple[pd.DataFrame, dict[str, Any]]:
     row = dict(trial)
     df = base_df.copy()
@@ -409,9 +494,14 @@ def generate_trial_lightcurve(base_df: pd.DataFrame, trial: pd.Series | dict[str
         return df, {"injected_event_count": 0, "injected_max_delta_mag": np.nan}
 
     rng = np.random.default_rng(int(row["trial_seed"]))
+    class_name = str(row["class_name"])
+    if class_name == "shuffled_magnitude_control":
+        df = _shuffle_magnitudes_within_camera(df, rng)
+    elif class_name == "synthetic_gaussian_noise_control":
+        df = _replace_with_gaussian_noise_control(df, rng)
+
     t = pd.to_numeric(df["JD"], errors="coerce").to_numpy(dtype=float)
     signal = np.zeros(len(df), dtype=float)
-    class_name = str(row["class_name"])
     amplitude = float(row.get("amplitude", 0.0) or 0.0)
     duration = float(row.get("duration", 0.0) or 0.0)
     injected_event_count = 0
@@ -752,6 +842,90 @@ def _baseline_kwargs(config: BenchmarkConfig, *, period_days: float | None = Non
     return out
 
 
+def _best_morph_info(run_list: list[dict[str, Any]] | None) -> dict[str, float | str]:
+    if not run_list:
+        return {"morph": "none", "delta_bic": 0.0}
+    best_run = max(run_list, key=lambda x: x.get("run_max", -np.inf))
+    return {
+        "morph": str(best_run.get("morphology", "none")),
+        "delta_bic": float(best_run.get("delta_bic_null", 0.0) or 0.0),
+    }
+
+
+def _score_filter_fields(res: dict[str, Any]) -> dict[str, Any]:
+    dip = res["dip"]
+    jump = res["jump"]
+    df = res.get("df")
+    df_base = res.get("df_base")
+    baseline_mags = None
+    if isinstance(df_base, pd.DataFrame) and "baseline" in df_base.columns:
+        baseline_mags = df_base["baseline"].to_numpy()
+
+    dipper_score = 0.0
+    jumper_score = 0.0
+    if isinstance(df, pd.DataFrame) and bool(dip.get("significant", False)):
+        dipper_score = float(compute_event_score(df, event_type="dip", baseline_mags=baseline_mags)[0])
+    if isinstance(df, pd.DataFrame) and bool(jump.get("significant", False)):
+        jumper_score = float(compute_event_score(df, event_type="jump", baseline_mags=baseline_mags)[0])
+
+    dip_morph = _best_morph_info(dip.get("run_summaries", []))
+    jump_morph = _best_morph_info(jump.get("run_summaries", []))
+    return {
+        "dip_count": int(len(dip.get("event_indices", []))),
+        "jump_count": int(len(jump.get("event_indices", []))),
+        "dip_run_count": int(dip.get("n_runs", 0) or 0),
+        "jump_run_count": int(jump.get("n_runs", 0) or 0),
+        "dip_max_run_points": int(dip.get("max_run_points", 0) or 0),
+        "jump_max_run_points": int(jump.get("max_run_points", 0) or 0),
+        "dip_max_run_cameras": int(dip.get("max_run_cameras", 0) or 0),
+        "jump_max_run_cameras": int(jump.get("max_run_cameras", 0) or 0),
+        "dip_best_morph": str(dip_morph["morph"]),
+        "jump_best_morph": str(jump_morph["morph"]),
+        "dip_best_delta_bic": float(dip_morph["delta_bic"]),
+        "jump_best_delta_bic": float(jump_morph["delta_bic"]),
+        "dipper_score": dipper_score,
+        "jumper_score": jumper_score,
+    }
+
+
+def _empty_score_result(baseline_name: str, error: str | None = None) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "detected": False,
+        "dip_significant": False,
+        "jump_significant": False,
+        "dip_bayes_factor": np.nan,
+        "jump_bayes_factor": np.nan,
+        "dip_best_p": np.nan,
+        "jump_best_p": np.nan,
+        "dip_max_log_bf_local": np.nan,
+        "jump_max_log_bf_local": np.nan,
+        "baseline_mag": np.nan,
+        "dip_best_mag_event": np.nan,
+        "jump_best_mag_event": np.nan,
+        "baseline_source": str(baseline_name),
+        "error": error,
+    }
+    out.update(
+        {
+            "dip_count": 0,
+            "jump_count": 0,
+            "dip_run_count": 0,
+            "jump_run_count": 0,
+            "dip_max_run_points": 0,
+            "jump_max_run_points": 0,
+            "dip_max_run_cameras": 0,
+            "jump_max_run_cameras": 0,
+            "dip_best_morph": "none",
+            "jump_best_morph": "none",
+            "dip_best_delta_bic": 0.0,
+            "jump_best_delta_bic": 0.0,
+            "dipper_score": 0.0,
+            "jumper_score": 0.0,
+        }
+    )
+    return out
+
+
 def score_detection(
     df_lc: pd.DataFrame,
     config: BenchmarkConfig,
@@ -791,7 +965,7 @@ def score_detection(
         else:
             baseline_source = str(baseline_name)
 
-        return {
+        out = {
             "detected": bool(dip_significant),
             "dip_significant": bool(dip_significant),
             "jump_significant": bool(jump_significant),
@@ -799,27 +973,18 @@ def score_detection(
             "jump_bayes_factor": float(jump.get("bayes_factor", np.nan)),
             "dip_best_p": float(dip.get("best_p", np.nan)),
             "jump_best_p": float(jump.get("best_p", np.nan)),
+            "dip_max_log_bf_local": float(dip.get("max_log_bf_local", np.nan)),
+            "jump_max_log_bf_local": float(jump.get("max_log_bf_local", np.nan)),
             "baseline_mag": baseline_mag,
             "dip_best_mag_event": dip_best_mag_event,
             "jump_best_mag_event": jump_best_mag_event,
             "baseline_source": baseline_source,
             "error": None,
         }
+        out.update(_score_filter_fields(res))
+        return out
     except Exception as exc:
-        return {
-            "detected": False,
-            "dip_significant": False,
-            "jump_significant": False,
-            "dip_bayes_factor": np.nan,
-            "jump_bayes_factor": np.nan,
-            "dip_best_p": np.nan,
-            "jump_best_p": np.nan,
-            "baseline_mag": np.nan,
-            "dip_best_mag_event": np.nan,
-            "jump_best_mag_event": np.nan,
-            "baseline_source": str(baseline_name),
-            "error": str(exc),
-        }
+        return _empty_score_result(baseline_name, error=str(exc))
 
 
 def _prefix_dict(prefix: str, values: dict[str, Any]) -> dict[str, Any]:
@@ -976,6 +1141,10 @@ def run_benchmark(config: BenchmarkConfig) -> BenchmarkRun:
     trial_results = pd.DataFrame(rows)
     _save_parquet(trial_results, run_dir / "trial_results.parquet")
 
+    post_filter_results, post_filter_rejection_summary = run_post_filter_analysis(trial_results, config)
+    _save_parquet(post_filter_results, run_dir / "post_filter_results.parquet")
+    _save_parquet(post_filter_rejection_summary, run_dir / "post_filter_rejection_summary.parquet")
+
     if not generated_lightcurves and bool(config.cache_generated_lightcurves):
         generated_lightcurves = _build_representative_lightcurve_cache(trial_results, controls)
 
@@ -990,7 +1159,7 @@ def run_benchmark(config: BenchmarkConfig) -> BenchmarkRun:
     )
     _save_parquet(period_search_subset_sweep, run_dir / "period_search_subset_sweep.parquet")
 
-    summary_metrics = summarize_results(trial_results)
+    summary_metrics = summarize_results(trial_results, post_filter_results)
     _save_parquet(summary_metrics, run_dir / "summary_metrics.parquet")
 
     save_benchmark_plots(
@@ -998,6 +1167,8 @@ def run_benchmark(config: BenchmarkConfig) -> BenchmarkRun:
         gate_threshold_sweep,
         run_dir=run_dir,
         generated_lightcurves=generated_lightcurves,
+        controls=controls,
+        post_filter_results=post_filter_results,
     )
     return BenchmarkRun(
         config=config,
@@ -1008,6 +1179,8 @@ def run_benchmark(config: BenchmarkConfig) -> BenchmarkRun:
         gate_threshold_sweep=gate_threshold_sweep,
         period_search_subset_sweep=period_search_subset_sweep,
         summary_metrics=summary_metrics,
+        post_filter_results=post_filter_results,
+        post_filter_rejection_summary=post_filter_rejection_summary,
         generated_lightcurves=generated_lightcurves,
     )
 
@@ -1043,12 +1216,174 @@ def _route_confusion_metrics(df: pd.DataFrame, route_periodic: pd.Series) -> dic
     }
 
 
-def summarize_results(results: pd.DataFrame) -> pd.DataFrame:
+def _default_post_filter_value(column: str) -> Any:
+    if column.endswith("_significant"):
+        return False
+    if column.endswith("_morph"):
+        return "none"
+    if column.endswith("_score"):
+        return 0.0
+    if column.endswith("_count") or column.endswith("_points") or column.endswith("_cameras"):
+        return 0
+    if column.endswith("_delta_bic"):
+        return 0.0
+    return np.nan
+
+
+def _pipeline_post_filter_input(results: pd.DataFrame, pipeline: str) -> pd.DataFrame:
+    if pipeline not in PIPELINE_DETECTED_COLUMNS:
+        raise ValueError(f"Unknown pipeline: {pipeline}")
+
+    route_phase = results["pre_periodic_flag"].fillna(False).astype(bool)
+    out = pd.DataFrame(
+        {
+            "path": [f"synthetic://{pipeline}/trial_{int(tid)}" for tid in results["trial_id"]],
+            "trial_id": results["trial_id"].astype(int).to_numpy(),
+            "class_name": results["class_name"].astype(str).to_numpy(),
+            "source_id": results["source_id"].astype(str).to_numpy(),
+            "source_path": results["source_path"].astype(str).to_numpy(),
+            "target_dip": results["target_dip"].fillna(False).astype(bool).to_numpy(),
+            "target_gate_label": results["target_gate_label"].astype(str).to_numpy(),
+            "raw_detected": results[PIPELINE_DETECTED_COLUMNS[pipeline]].fillna(False).astype(bool).to_numpy(),
+            "gaia_id": "",
+            "pmra": np.nan,
+            "pmdec": np.nan,
+            "ra": np.nan,
+            "dec": np.nan,
+        }
+    )
+
+    if pipeline == "bifurcated_gate":
+        for column in POST_FILTER_FIELD_COLUMNS:
+            std_col = f"standard_{column}"
+            phase_col = f"phase_folded_{column}"
+            std_values = results[std_col] if std_col in results.columns else _default_post_filter_value(column)
+            phase_values = results[phase_col] if phase_col in results.columns else _default_post_filter_value(column)
+            out[column] = np.where(route_phase.to_numpy(), phase_values, std_values)
+    else:
+        prefix = "standard" if pipeline == "standard_only" else "phase_folded"
+        for column in POST_FILTER_FIELD_COLUMNS:
+            src = f"{prefix}_{column}"
+            out[column] = results[src].to_numpy() if src in results.columns else _default_post_filter_value(column)
+
+    return out
+
+
+def _summarize_post_filter_rejections(post_filter_results: pd.DataFrame) -> pd.DataFrame:
+    failed_cols = [
+        col
+        for col in post_filter_results.columns
+        if col.startswith("failed_") and col != "failed_any"
+    ]
+    rows: list[dict[str, Any]] = []
+    for pipeline, pipe_group in post_filter_results.groupby("pipeline", sort=False):
+        groups: list[tuple[str, str, pd.DataFrame]] = [("all", "ALL", pipe_group)]
+        groups.extend(
+            ("class", str(class_name), group)
+            for class_name, group in pipe_group.groupby("class_name", sort=False)
+        )
+        for scope, class_name, group in groups:
+            raw = group["raw_detected"].fillna(False).astype(bool)
+            post_pass = group["post_filter_passed"].fillna(False).astype(bool)
+            failed_any = group.get("failed_any", pd.Series(False, index=group.index)).fillna(False).astype(bool)
+            rows.append(
+                {
+                    "scope": scope,
+                    "class_name": class_name,
+                    "pipeline": pipeline,
+                    "filter": "failed_any",
+                    "n": int(len(group)),
+                    "raw_detected_n": int(raw.sum()),
+                    "post_filter_passed_n": int(post_pass.sum()),
+                    "rejected_raw_detected_n": int((raw & failed_any).sum()),
+                    "reject_fraction_raw_detected": float((raw & failed_any).sum() / raw.sum()) if int(raw.sum()) else np.nan,
+                }
+            )
+            for failed_col in failed_cols:
+                failed = group[failed_col].fillna(False).astype(bool)
+                rows.append(
+                    {
+                        "scope": scope,
+                        "class_name": class_name,
+                        "pipeline": pipeline,
+                        "filter": failed_col.removeprefix("failed_"),
+                        "n": int(len(group)),
+                        "raw_detected_n": int(raw.sum()),
+                        "post_filter_passed_n": int(post_pass.sum()),
+                        "rejected_raw_detected_n": int((raw & failed).sum()),
+                        "reject_fraction_raw_detected": float((raw & failed).sum() / raw.sum()) if int(raw.sum()) else np.nan,
+                    }
+                )
+    return pd.DataFrame(rows)
+
+
+def run_post_filter_analysis(
+    results: pd.DataFrame,
+    config: BenchmarkConfig,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    frames: list[pd.DataFrame] = []
+    for pipeline in PIPELINE_DETECTED_COLUMNS:
+        filter_input = _pipeline_post_filter_input(results, pipeline)
+        filtered = apply_filters(
+            filter_input,
+            apply_periodic_catalog_validation=bool(config.post_filter_apply_periodic_catalog_validation),
+            apply_gaia_ruwe_validation=bool(config.post_filter_apply_gaia_ruwe_validation),
+            apply_gaia_pm_validation=bool(config.post_filter_apply_gaia_pm_validation),
+            apply_periodicity_validation=bool(config.post_filter_apply_periodicity_validation),
+            show_tqdm=bool(config.show_progress),
+            verbose=False,
+        )
+        raw = filtered["raw_detected"].fillna(False).astype(bool)
+        failed_any = filtered.get("failed_any", pd.Series(False, index=filtered.index)).fillna(False).astype(bool)
+        filtered["pipeline"] = pipeline
+        filtered["post_filter_passed"] = raw & ~failed_any
+        frames.append(filtered)
+
+    post_filter_results = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    return post_filter_results, _summarize_post_filter_rejections(post_filter_results)
+
+
+def _post_filter_metrics_for_trials(
+    post_filter_results: pd.DataFrame | None,
+    *,
+    pipeline: str,
+    trial_ids: pd.Series,
+) -> dict[str, Any]:
+    empty = {
+        "post_filter_passed_n": np.nan,
+        "post_filter_pass_rate": np.nan,
+        "post_filter_target_recovery": np.nan,
+        "final_false_positive_rate": np.nan,
+        "post_filter_detection_rate": np.nan,
+    }
+    if post_filter_results is None or post_filter_results.empty:
+        return empty
+    ids = set(pd.to_numeric(trial_ids, errors="coerce").dropna().astype(int))
+    group = post_filter_results[
+        post_filter_results["pipeline"].eq(pipeline)
+        & post_filter_results["trial_id"].astype(int).isin(ids)
+    ]
+    if group.empty:
+        return empty
+    target = group["target_dip"].fillna(False).astype(bool)
+    passed = group["post_filter_passed"].fillna(False).astype(bool)
+    return {
+        "post_filter_passed_n": int(passed.sum()),
+        "post_filter_pass_rate": _mean_bool(passed),
+        "post_filter_target_recovery": _mean_bool(passed[target]) if bool(target.any()) else np.nan,
+        "final_false_positive_rate": _mean_bool(passed[~target]) if bool((~target).any()) else np.nan,
+        "post_filter_detection_rate": _mean_bool(passed),
+    }
+
+
+def summarize_results(
+    results: pd.DataFrame,
+    post_filter_results: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
     pipelines = {
-        "standard_only": results["standard_detected"].fillna(False).astype(bool),
-        "phase_folded_only": results["phase_folded_detected"].fillna(False).astype(bool),
-        "bifurcated_gate": results["bifurcated_detected"].fillna(False).astype(bool),
+        pipeline: results[column].fillna(False).astype(bool)
+        for pipeline, column in PIPELINE_DETECTED_COLUMNS.items()
     }
     for pipeline, detected in pipelines.items():
         target = results["target_dip"].fillna(False).astype(bool)
@@ -1058,9 +1393,15 @@ def summarize_results(results: pd.DataFrame) -> pd.DataFrame:
                 "class_name": "ALL",
                 "pipeline": pipeline,
                 "n": int(len(results)),
+                "raw_detected_n": int(detected.sum()),
                 "target_recovery": _mean_bool(detected[target]),
                 "false_positive_rate": _mean_bool(detected[~target]),
                 "detection_rate": _mean_bool(detected),
+                **_post_filter_metrics_for_trials(
+                    post_filter_results,
+                    pipeline=pipeline,
+                    trial_ids=results["trial_id"],
+                ),
                 "gate_periodic_fraction": _mean_bool(results["pre_periodic_flag"]),
                 "period_usable_rate": _mean_bool(results.loc[results["target_gate_label"].isin(["periodic", "ambiguous"]), "period_usable"]),
                 **_route_confusion_metrics(results, results["pre_periodic_flag"].fillna(False).astype(bool)),
@@ -1075,9 +1416,15 @@ def summarize_results(results: pd.DataFrame) -> pd.DataFrame:
                     "class_name": str(class_name),
                     "pipeline": pipeline,
                     "n": int(len(group)),
+                    "raw_detected_n": int(gdet.sum()),
                     "target_recovery": _mean_bool(gdet[gtarget]) if bool(gtarget.any()) else np.nan,
                     "false_positive_rate": _mean_bool(gdet[~gtarget]) if bool((~gtarget).any()) else np.nan,
                     "detection_rate": _mean_bool(gdet),
+                    **_post_filter_metrics_for_trials(
+                        post_filter_results,
+                        pipeline=pipeline,
+                        trial_ids=group["trial_id"],
+                    ),
                     "gate_periodic_fraction": _mean_bool(group["pre_periodic_flag"]),
                     "period_usable_rate": _mean_bool(group.loc[group["target_gate_label"].isin(["periodic", "ambiguous"]), "period_usable"]),
                     **_route_confusion_metrics(group, group["pre_periodic_flag"].fillna(False).astype(bool)),
@@ -1224,6 +1571,8 @@ def save_benchmark_plots(
     *,
     run_dir: Path,
     generated_lightcurves: dict[int, pd.DataFrame] | None = None,
+    controls: dict[str, pd.DataFrame] | None = None,
+    post_filter_results: pd.DataFrame | None = None,
 ) -> None:
     plots_dir = Path(run_dir) / "plots"
     plots_dir.mkdir(parents=True, exist_ok=True)
@@ -1234,6 +1583,13 @@ def save_benchmark_plots(
     _plot_pareto(threshold_sweep, plots_dir / "gate_sweep_pareto.png")
     if generated_lightcurves:
         _plot_representative_examples(results, generated_lightcurves, plots_dir / "representative_gate_examples.png")
+    if controls:
+        _plot_standard_no_injection_false_positives(
+            results,
+            controls,
+            plots_dir / "standard_no_injection_false_positives.png",
+            post_filter_results=post_filter_results,
+        )
 
 
 def _plot_recovery_by_class(results: pd.DataFrame, output_path: Path) -> None:
@@ -1444,6 +1800,73 @@ def _plot_representative_examples(
         else:
             ax_phase.text(0.5, 0.5, "No selected period", ha="center", va="center")
             ax_phase.set_axis_off()
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=180)
+    plt.close(fig)
+
+
+def _plot_standard_no_injection_false_positives(
+    results: pd.DataFrame,
+    controls: dict[str, pd.DataFrame],
+    output_path: Path,
+    *,
+    post_filter_results: pd.DataFrame | None = None,
+    max_examples: int = 12,
+) -> None:
+    fp = results[
+        results["class_name"].eq("no_injection_control")
+        & results["standard_detected"].fillna(False).astype(bool)
+    ].copy()
+    if fp.empty:
+        fig, ax = plt.subplots(figsize=(7, 4))
+        ax.text(0.5, 0.5, "No standard_only no-injection false positives", ha="center", va="center")
+        ax.set_axis_off()
+        fig.tight_layout()
+        fig.savefig(output_path, dpi=180)
+        plt.close(fig)
+        return
+
+    examples = fp.sample(n=min(int(max_examples), len(fp)), random_state=20260513)
+    n = len(examples)
+    ncols = 3
+    nrows = int(np.ceil(n / ncols))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(15, 3.4 * nrows), squeeze=False)
+
+    post_lookup: dict[int, bool] = {}
+    if post_filter_results is not None and not post_filter_results.empty:
+        sub = post_filter_results[post_filter_results["pipeline"].eq("standard_only")]
+        post_lookup = dict(
+            zip(
+                sub["trial_id"].astype(int),
+                sub["post_filter_passed"].fillna(False).astype(bool),
+                strict=False,
+            )
+        )
+
+    for ax, (_, row) in zip(axes.flat, examples.iterrows(), strict=False):
+        trial_id = int(row["trial_id"])
+        base = controls.get(str(row["source_path"]))
+        if base is None:
+            ax.text(0.5, 0.5, f"Missing light curve for trial {trial_id}", ha="center", va="center")
+            ax.set_axis_off()
+            continue
+        df, _ = generate_trial_lightcurve(base, row)
+        ax.scatter(df["JD"], df["mag"], s=7, alpha=0.62)
+        ax.invert_yaxis()
+        post_text = "post-pass" if bool(post_lookup.get(trial_id, False)) else "post-reject"
+        ax.set_title(
+            f"trial {trial_id} | BF={row.get('standard_dip_bayes_factor', np.nan):.3g} | {post_text}",
+            fontsize=9,
+            loc="left",
+        )
+        ax.set_xlabel("JD")
+        ax.set_ylabel("mag")
+        ax.grid(alpha=0.25)
+
+    for ax in axes.flat[n:]:
+        ax.set_axis_off()
+
+    fig.suptitle("Random standard_only false positives on no-injection controls", y=1.0)
     fig.tight_layout()
     fig.savefig(output_path, dpi=180)
     plt.close(fig)
