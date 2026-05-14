@@ -892,7 +892,7 @@ def apply_tags(
     rejected_log_csv: str | Path | None = "rejected_tag.parquet",
     # Checkpoint for stats computation
     stats_checkpoint: str | Path | None = None,
-    stats_chunk_size: int = 10000,
+    stats_chunk_size: int = STATS_CHUNK_SIZE,
 ) -> pd.DataFrame:
     """
     Apply tagging filters before running events.py.
@@ -917,7 +917,7 @@ def apply_tags(
         Path to parquet file for checkpointing stats computation. If provided,
         progress can be resumed if interrupted.
     stats_chunk_size : int
-        Number of rows to process before saving checkpoint (default 10000).
+        Number of rows to process before saving checkpoint (default from STATS_CHUNK_SIZE).
 
     Returns
     -------
