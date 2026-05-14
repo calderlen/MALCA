@@ -62,10 +62,17 @@ from malca.config import (
 from malca.events import score_lightcurve
 from malca.filter import apply_filters
 from malca.lightcurve_io import load_lightcurve_df
-from malca.lightcurve_publication import plot_lightcurve_panel, plot_phase_panel
+from malca.lightcurve_publication import (
+    plot_lightcurve_panel,
+    plot_phase_panel,
+    plot_residual_panel,
+    publication_style_context,
+    style_publication_axis,
+)
 from malca.phase import phase_fold_dataframe
 from malca.score import compute_event_score
 from malca.stats import compute_ce_stats
+from malca.triggering import posterior_probability_threshold
 from malca.utils import clean_lc, compute_n_cameras, filter_bad_cameras
 
 
@@ -1564,6 +1571,906 @@ def run_period_search_subset_sweep(
             }
         )
     return pd.DataFrame(rows)
+
+
+def _finite_metric(value: object) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return np.nan
+    return number if np.isfinite(number) else np.nan
+
+
+def _fmt_metric(value: object, fmt: str = ".3g") -> str:
+    number = _finite_metric(value)
+    return format(number, fmt) if np.isfinite(number) else "nan"
+
+
+def _as_bool(value: object, *, default: bool = False) -> bool:
+    if pd.isna(value):
+        return bool(default)
+    return bool(value)
+
+
+def _take_example_rows(
+    df: pd.DataFrame,
+    *,
+    mask: pd.Series,
+    label: str,
+    n: int,
+    sort_by: tuple[str, ...] = ("pre_periodicity_score", "injected_max_delta_mag"),
+) -> pd.DataFrame:
+    sub = df.loc[mask].copy()
+    if sub.empty:
+        return sub
+    sort_cols = [col for col in sort_by if col in sub.columns]
+    if sort_cols:
+        sub = sub.sort_values(sort_cols, ascending=[False] * len(sort_cols))
+    return sub.head(int(n)).assign(example_kind=label)
+
+
+def select_gate_processing_examples(
+    results: pd.DataFrame,
+    *,
+    per_bucket: int = 2,
+    max_examples: int = 14,
+) -> pd.DataFrame:
+    """Select deterministic light-curve examples for gate processing diagnostics."""
+    if results.empty:
+        return results.copy()
+
+    route_periodic = results["pre_periodic_flag"].fillna(False).astype(bool)
+    target_periodic = results["target_gate_label"].eq("periodic")
+    target_nonperiodic = results["target_gate_label"].eq("non_periodic")
+    target_dip = results["target_dip"].fillna(False).astype(bool)
+    recovered = results["bifurcated_detected"].fillna(False).astype(bool)
+
+    frames: list[pd.DataFrame] = [
+        _take_example_rows(
+            results,
+            mask=target_periodic & route_periodic,
+            label="periodic target routed periodic",
+            n=per_bucket,
+        ),
+        _take_example_rows(
+            results,
+            mask=target_periodic & ~route_periodic,
+            label="periodic target routed non-periodic",
+            n=per_bucket,
+        ),
+        _take_example_rows(
+            results,
+            mask=target_nonperiodic & ~route_periodic & target_dip,
+            label="non-periodic dip routed non-periodic",
+            n=per_bucket,
+        ),
+        _take_example_rows(
+            results,
+            mask=target_nonperiodic & route_periodic,
+            label="non-periodic target routed periodic",
+            n=per_bucket,
+        ),
+        _take_example_rows(
+            results,
+            mask=results["class_name"].eq("semi_periodic_dips") & route_periodic,
+            label="semi-periodic routed periodic",
+            n=per_bucket,
+        ),
+        _take_example_rows(
+            results,
+            mask=results["class_name"].eq("semi_periodic_dips") & ~route_periodic,
+            label="semi-periodic routed non-periodic",
+            n=per_bucket,
+        ),
+        _take_example_rows(
+            results,
+            mask=target_dip & recovered & ~results["standard_detected"].fillna(False).astype(bool),
+            label="bifurcated rescue",
+            n=per_bucket,
+            sort_by=("injected_max_delta_mag", "pre_periodicity_score"),
+        ),
+        _take_example_rows(
+            results,
+            mask=target_dip & ~recovered,
+            label="bifurcated miss",
+            n=per_bucket,
+            sort_by=("injected_max_delta_mag", "pre_periodicity_score"),
+        ),
+        _take_example_rows(
+            results,
+            mask=results["class_name"].eq("no_injection_control")
+            & results["standard_detected"].fillna(False).astype(bool),
+            label="standard false positive control",
+            n=per_bucket,
+            sort_by=("standard_dip_bayes_factor", "standard_dip_max_log_bf_local"),
+        ),
+    ]
+
+    selected = pd.concat([frame for frame in frames if not frame.empty], ignore_index=True)
+    if selected.empty:
+        selected = results.head(int(max_examples)).copy().assign(example_kind="fallback")
+
+    selected = selected.drop_duplicates(subset=["trial_id"], keep="first").head(int(max_examples)).copy()
+    route = selected["pre_periodic_flag"].fillna(False).astype(bool)
+    selected["routed_branch"] = np.where(route, "periodic", "non_periodic")
+    return selected.reset_index(drop=True)
+
+
+def _load_trial_lightcurve_for_row(
+    row: pd.Series | dict[str, Any],
+    *,
+    controls: dict[str, pd.DataFrame] | None = None,
+) -> pd.DataFrame:
+    row_dict = dict(row)
+    source_path = str(row_dict["source_path"])
+    if controls is not None and source_path in controls:
+        base = controls[source_path]
+    else:
+        base = load_lightcurve_df(source_path)
+    df_trial, _ = generate_trial_lightcurve(base, row_dict)
+    return df_trial
+
+
+def _prepare_gate_processing_frames(
+    df_lc: pd.DataFrame,
+    config: BenchmarkConfig,
+) -> dict[str, Any]:
+    raw = df_lc.copy().reset_index(drop=True)
+    raw["_pgib_original_index"] = np.arange(len(raw), dtype=int)
+
+    if raw.empty:
+        empty = raw.copy()
+        return {
+            "raw": raw,
+            "camera_filtered": empty,
+            "cleaned": empty,
+            "gp_base": empty,
+            "bad_cameras": set(),
+            "bad_camera_rejected": empty,
+            "bad_point_rejected": empty,
+        }
+
+    camera_filtered, bad_cameras = filter_bad_cameras(
+        raw,
+        filter_scatter=False,
+        filter_offset=False,
+        filter_catastrophic=True,
+        scatter_ratio_threshold=BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
+    )
+    cleaned = clean_lc(
+        camera_filtered,
+        max_error_absolute=CLEAN_LC_MAX_ERROR_ABSOLUTE,
+        max_error_sigma=CLEAN_LC_MAX_ERROR_SIGMA,
+    )
+
+    camera_index = camera_filtered.get("_pgib_original_index", pd.Series(dtype=float))
+    clean_index = cleaned.get("_pgib_original_index", pd.Series(dtype=float))
+    camera_ids = set(pd.to_numeric(camera_index, errors="coerce").dropna().astype(int))
+    clean_ids = set(pd.to_numeric(clean_index, errors="coerce").dropna().astype(int))
+    raw_ids = pd.to_numeric(raw["_pgib_original_index"], errors="coerce").astype(int)
+    bad_camera_rejected = raw.loc[~raw_ids.isin(camera_ids)].copy()
+    bad_point_rejected = raw.loc[raw_ids.isin(camera_ids) & ~raw_ids.isin(clean_ids)].copy()
+
+    gp_base = pd.DataFrame()
+    if not cleaned.empty:
+        gp_base = per_camera_gp_baseline_masked(cleaned, **_baseline_kwargs(config))
+
+    return {
+        "raw": raw,
+        "camera_filtered": camera_filtered.reset_index(drop=True),
+        "cleaned": cleaned.reset_index(drop=True),
+        "gp_base": gp_base.reset_index(drop=True) if not gp_base.empty else gp_base,
+        "bad_cameras": set(bad_cameras),
+        "bad_camera_rejected": bad_camera_rejected.reset_index(drop=True),
+        "bad_point_rejected": bad_point_rejected.reset_index(drop=True),
+    }
+
+
+def _score_branch_for_processing_plot(
+    cleaned: pd.DataFrame,
+    row: pd.Series | dict[str, Any],
+    config: BenchmarkConfig,
+) -> dict[str, Any]:
+    if cleaned.empty:
+        return {"df": cleaned, "df_base": cleaned, "dip": {}, "jump": {}, "branch_baseline": "empty"}
+
+    route_periodic = _as_bool(dict(row).get("pre_periodic_flag", False))
+    selected_period = _finite_metric(dict(row).get("pre_periodicity_selected_period", np.nan))
+    use_phase_template = bool(route_periodic and np.isfinite(selected_period) and selected_period > 0)
+    if use_phase_template:
+        baseline_func = phase_template_baseline
+        baseline_name = "phase_template"
+        baseline_kwargs = _baseline_kwargs(config, period_days=selected_period)
+    else:
+        baseline_func = baseline_func_from_name(config.baseline_func)
+        baseline_name = str(config.baseline_func)
+        baseline_kwargs = _baseline_kwargs(config)
+
+    try:
+        scored = score_lightcurve(
+            cleaned,
+            baseline_func=baseline_func,
+            baseline_kwargs=baseline_kwargs,
+            filter_residual_bad_cameras_enabled=False,
+            bad_camera_scatter_ratio=BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
+            **_detection_options(config),
+        )
+        scored["branch_baseline"] = baseline_name
+        return scored
+    except Exception as exc:
+        fallback = baseline_func(cleaned, **baseline_kwargs)
+        return {
+            "df": cleaned,
+            "df_base": fallback,
+            "dip": {"event_indices": [], "error": str(exc)},
+            "jump": {"event_indices": [], "error": str(exc)},
+            "branch_baseline": baseline_name,
+        }
+
+
+def _empty_branch_score(cleaned: pd.DataFrame, label: str, reason: str) -> dict[str, Any]:
+    return {
+        "df": cleaned,
+        "df_base": pd.DataFrame(),
+        "dip": {"event_indices": [], "log_bf_local": np.array([]), "event_probability": None, "error": reason},
+        "jump": {"event_indices": [], "log_bf_local": np.array([]), "event_probability": None, "error": reason},
+        "branch_baseline": label,
+        "score_error": reason,
+    }
+
+
+def _score_named_branch_for_processing_plot(
+    cleaned: pd.DataFrame,
+    config: BenchmarkConfig,
+    *,
+    baseline_name: str,
+    period_days: float | None = None,
+) -> dict[str, Any]:
+    if cleaned.empty:
+        return _empty_branch_score(cleaned, baseline_name, "empty_cleaned_lightcurve")
+
+    baseline_func = baseline_func_from_name(baseline_name)
+    baseline_kwargs = _baseline_kwargs(config, period_days=period_days)
+    try:
+        scored = score_lightcurve(
+            cleaned,
+            baseline_func=baseline_func,
+            baseline_kwargs=baseline_kwargs,
+            filter_residual_bad_cameras_enabled=False,
+            bad_camera_scatter_ratio=BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
+            **_detection_options(config),
+        )
+        scored["branch_baseline"] = baseline_name
+        return scored
+    except Exception as exc:
+        try:
+            fallback = baseline_func(cleaned, **baseline_kwargs)
+        except Exception:
+            fallback = pd.DataFrame()
+        return {
+            "df": cleaned,
+            "df_base": fallback,
+            "dip": {"event_indices": [], "log_bf_local": np.array([]), "event_probability": None, "error": str(exc)},
+            "jump": {"event_indices": [], "log_bf_local": np.array([]), "event_probability": None, "error": str(exc)},
+            "branch_baseline": baseline_name,
+            "score_error": str(exc),
+        }
+
+
+def _score_processing_branches(
+    cleaned: pd.DataFrame,
+    row: pd.Series | dict[str, Any],
+    config: BenchmarkConfig,
+) -> dict[str, dict[str, Any]]:
+    selected_period = _finite_metric(dict(row).get("pre_periodicity_selected_period", np.nan))
+    stochastic = _score_named_branch_for_processing_plot(
+        cleaned,
+        config,
+        baseline_name=str(config.baseline_func),
+    )
+    if np.isfinite(selected_period) and selected_period > 0:
+        phase = _score_named_branch_for_processing_plot(
+            cleaned,
+            config,
+            baseline_name="phase_template",
+            period_days=selected_period,
+        )
+    else:
+        phase = _empty_branch_score(cleaned, "phase_template", "missing_gate_selected_period")
+    return {"stochastic": stochastic, "phase": phase}
+
+
+def _branch_frames(score: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame]:
+    df = pd.DataFrame(score.get("df", pd.DataFrame())).reset_index(drop=True)
+    df_base = pd.DataFrame(score.get("df_base", pd.DataFrame())).reset_index(drop=True)
+    return df, df_base
+
+
+def _plot_missing_panel(ax, message: str, *, title: str | None = None) -> None:
+    ax.text(0.5, 0.5, message, ha="center", va="center", wrap=True)
+    if title:
+        ax.set_title(title, fontsize=10)
+    ax.set_axis_off()
+
+
+def _plot_branch_baseline_panel(
+    ax,
+    score: dict[str, Any],
+    *,
+    title: str,
+    color: str,
+) -> None:
+    df, df_base = _branch_frames(score)
+    if df.empty or df_base.empty or "baseline" not in df_base.columns:
+        _plot_missing_panel(ax, str(score.get("score_error", "missing branch baseline")), title=title)
+        return
+    group_by = "camera" if "camera#" in df.columns else "none"
+    plot_lightcurve_panel(
+        ax,
+        df,
+        group_by=group_by,
+        camera_col="camera#" if "camera#" in df.columns else None,
+        show_errorbars=False,
+        marker_size=2.5,
+        legend="none",
+        time_offset="none",
+        xlabel="JD",
+        ylabel="mag",
+        baseline=df_base,
+        baseline_col="baseline",
+        baseline_time_col="JD",
+        baseline_group_col="camera#" if "camera#" in df_base.columns else None,
+        baseline_label=str(score.get("branch_baseline", "baseline")),
+        baseline_style={"color": color, "linewidth": 1.15, "alpha": 0.9},
+    )
+    ax.set_title(title, fontsize=10)
+
+
+def _plot_branch_residual_time_panel(
+    ax,
+    score: dict[str, Any],
+    *,
+    title: str,
+) -> None:
+    df, df_base = _branch_frames(score)
+    if df.empty or df_base.empty or "resid" not in df_base.columns:
+        _plot_missing_panel(ax, str(score.get("score_error", "missing branch residuals")), title=title)
+        return
+    plot_residual_panel(
+        ax,
+        df_base,
+        residual_col="resid",
+        group_by="camera" if "camera#" in df_base.columns else "none",
+        camera_col="camera#" if "camera#" in df_base.columns else None,
+        show_errorbars=False,
+        marker_size=2.6,
+        legend="none",
+        time_offset="none",
+        xlabel="JD",
+        ylabel="mag - baseline",
+        invert_y=False,
+    )
+    dip_idx = np.asarray(score.get("dip", {}).get("event_indices", []), dtype=int)
+    _highlight_event_indices(ax, df, df_base["resid"], dip_idx, label="dip event points")
+    if dip_idx.size:
+        ax.legend(frameon=False, fontsize=8, loc="best")
+    ax.set_title(title, fontsize=10)
+
+
+def _highlight_phase_event_indices(
+    ax,
+    df: pd.DataFrame,
+    y_values: pd.Series | np.ndarray,
+    indices: Sequence[int],
+    *,
+    period_days: float,
+    label: str,
+) -> None:
+    period = _finite_metric(period_days)
+    if not np.isfinite(period) or period <= 0:
+        return
+    idx = np.asarray(indices, dtype=int)
+    y_array = np.asarray(y_values, dtype=float)
+    idx = idx[(idx >= 0) & (idx < len(df)) & (idx < y_array.size)]
+    if idx.size == 0 or "JD" not in df.columns:
+        return
+    jd_all = pd.to_numeric(df["JD"], errors="coerce").to_numpy(dtype=float)
+    finite_jd = jd_all[np.isfinite(jd_all)]
+    if finite_jd.size == 0:
+        return
+    epoch = float(np.min(finite_jd))
+    phase = np.mod((jd_all[idx] - epoch) / period, 1.0)
+    y = y_array[idx]
+    mask = np.isfinite(phase) & np.isfinite(y)
+    if not mask.any():
+        return
+    phase = phase[mask]
+    y = y[mask]
+    ax.scatter(
+        phase,
+        y,
+        marker="x",
+        s=46,
+        color="goldenrod",
+        linewidths=1.2,
+        label=label,
+        zorder=9,
+    )
+    ax.scatter(
+        phase + 1.0,
+        y,
+        marker="x",
+        s=46,
+        color="goldenrod",
+        linewidths=1.2,
+        zorder=9,
+    )
+
+
+def _plot_branch_residual_phase_panel(
+    ax,
+    score: dict[str, Any],
+    *,
+    period_days: float,
+    title: str,
+) -> None:
+    df, df_base = _branch_frames(score)
+    if df.empty or df_base.empty or "resid" not in df_base.columns:
+        _plot_missing_panel(ax, str(score.get("score_error", "missing phase residuals")), title=title)
+        return
+    period = _finite_metric(period_days)
+    if not np.isfinite(period) or period <= 0:
+        _plot_missing_panel(ax, "No finite gate-selected period", title=title)
+        return
+    try:
+        plot_phase_panel(
+            ax,
+            df_base,
+            period_days=period,
+            value_mode="resid",
+            residual_col="resid",
+            group_by="band" if "v_g_band" in df_base.columns else "none",
+            show_errorbars=False,
+            marker_size=2.6,
+            legend="none",
+            ylabel="mag - phase baseline",
+        )
+        ax.axhline(0.0, color="0.2", linestyle="--", linewidth=0.8, alpha=0.65)
+        dip_idx = np.asarray(score.get("dip", {}).get("event_indices", []), dtype=int)
+        _highlight_phase_event_indices(
+            ax,
+            df,
+            df_base["resid"],
+            dip_idx,
+            period_days=period,
+            label="dip event points",
+        )
+        if dip_idx.size:
+            ax.legend(frameon=False, fontsize=8, loc="best")
+        ax.set_title(title, fontsize=10)
+    except Exception as exc:
+        _plot_missing_panel(ax, f"Phase residual plot failed: {exc}", title=title)
+
+
+def _dip_evidence_frame(score: dict[str, Any], metric: str) -> tuple[pd.DataFrame, np.ndarray]:
+    df, df_base = _branch_frames(score)
+    dip = score.get("dip", {}) or {}
+    values = dip.get(metric)
+    if values is None:
+        return pd.DataFrame(), np.asarray(dip.get("event_indices", []), dtype=int)
+    values_arr = np.asarray(values, dtype=float)
+    if values_arr.size == 0:
+        return pd.DataFrame(), np.asarray(dip.get("event_indices", []), dtype=int)
+
+    source = df_base if len(df_base) == values_arr.size else df
+    if source.empty or "JD" not in source.columns or len(source) != values_arr.size:
+        return pd.DataFrame(), np.asarray(dip.get("event_indices", []), dtype=int)
+
+    out = source.reset_index(drop=True).copy()
+    out["evidence_value"] = values_arr
+    return out, np.asarray(dip.get("event_indices", []), dtype=int)
+
+
+def _plot_evidence_time_panel(
+    ax,
+    score: dict[str, Any],
+    *,
+    metric: str,
+    title: str,
+    ylabel: str,
+    threshold: float | None = None,
+    color: str = "0.25",
+) -> None:
+    frame, event_idx = _dip_evidence_frame(score, metric)
+    if frame.empty:
+        _plot_missing_panel(ax, f"No {ylabel} values", title=title)
+        return
+    jd = pd.to_numeric(frame["JD"], errors="coerce").to_numpy(dtype=float)
+    values = pd.to_numeric(frame["evidence_value"], errors="coerce").to_numpy(dtype=float)
+    mask = np.isfinite(jd) & np.isfinite(values)
+    if not mask.any():
+        _plot_missing_panel(ax, f"No finite {ylabel} values", title=title)
+        return
+    ax.scatter(jd[mask], values[mask], s=11, color=color, alpha=0.72, linewidths=0)
+    idx = event_idx[(event_idx >= 0) & (event_idx < len(frame))]
+    if idx.size:
+        ev_jd = jd[idx]
+        ev_values = values[idx]
+        ev_mask = np.isfinite(ev_jd) & np.isfinite(ev_values)
+        ax.scatter(
+            ev_jd[ev_mask],
+            ev_values[ev_mask],
+            marker="x",
+            s=42,
+            color="goldenrod",
+            linewidths=1.2,
+            label="kept dip points",
+            zorder=8,
+        )
+        ax.legend(frameon=False, fontsize=8, loc="best")
+    if threshold is not None and np.isfinite(float(threshold)):
+        ax.axhline(float(threshold), color="crimson", linestyle="--", linewidth=0.9, alpha=0.75)
+    ax.set_xlabel("JD")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title, fontsize=10)
+    style_publication_axis(ax)
+
+
+def _plot_evidence_phase_panel(
+    ax,
+    score: dict[str, Any],
+    *,
+    metric: str,
+    period_days: float,
+    title: str,
+    ylabel: str,
+    threshold: float | None = None,
+    color: str = "0.25",
+) -> None:
+    period = _finite_metric(period_days)
+    if not np.isfinite(period) or period <= 0:
+        _plot_missing_panel(ax, "No finite gate-selected period", title=title)
+        return
+    frame, event_idx = _dip_evidence_frame(score, metric)
+    if frame.empty:
+        _plot_missing_panel(ax, f"No {ylabel} values", title=title)
+        return
+    jd = pd.to_numeric(frame["JD"], errors="coerce").to_numpy(dtype=float)
+    values = pd.to_numeric(frame["evidence_value"], errors="coerce").to_numpy(dtype=float)
+    finite_jd = jd[np.isfinite(jd)]
+    if finite_jd.size == 0:
+        _plot_missing_panel(ax, "No finite phase times", title=title)
+        return
+    epoch = float(np.min(finite_jd))
+    phase = np.mod((jd - epoch) / period, 1.0)
+    mask = np.isfinite(phase) & np.isfinite(values)
+    if not mask.any():
+        _plot_missing_panel(ax, f"No finite {ylabel} values", title=title)
+        return
+    ax.scatter(phase[mask], values[mask], s=11, color=color, alpha=0.72, linewidths=0)
+    ax.scatter(phase[mask] + 1.0, values[mask], s=11, color=color, alpha=0.45, linewidths=0)
+    idx = event_idx[(event_idx >= 0) & (event_idx < len(frame))]
+    if idx.size:
+        ev_phase = phase[idx]
+        ev_values = values[idx]
+        ev_mask = np.isfinite(ev_phase) & np.isfinite(ev_values)
+        ax.scatter(
+            ev_phase[ev_mask],
+            ev_values[ev_mask],
+            marker="x",
+            s=42,
+            color="goldenrod",
+            linewidths=1.2,
+            label="kept dip points",
+            zorder=8,
+        )
+        ax.scatter(
+            ev_phase[ev_mask] + 1.0,
+            ev_values[ev_mask],
+            marker="x",
+            s=42,
+            color="goldenrod",
+            linewidths=1.2,
+            zorder=8,
+        )
+        ax.legend(frameon=False, fontsize=8, loc="best")
+    if threshold is not None and np.isfinite(float(threshold)):
+        ax.axhline(float(threshold), color="crimson", linestyle="--", linewidth=0.9, alpha=0.75)
+    for x in (0.0, 1.0, 2.0):
+        ax.axvline(x, color="0.45", linestyle="--", linewidth=0.8, alpha=0.55)
+    ax.set_xlim(0.0, 2.0)
+    ax.set_xlabel("Phase")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title, fontsize=10)
+    style_publication_axis(ax)
+
+
+def _scatter_rejected_points(ax, rejected: pd.DataFrame, *, label: str, color: str, marker: str) -> None:
+    if rejected.empty or "JD" not in rejected.columns or "mag" not in rejected.columns:
+        return
+    jd = pd.to_numeric(rejected["JD"], errors="coerce")
+    mag = pd.to_numeric(rejected["mag"], errors="coerce")
+    mask = np.isfinite(jd) & np.isfinite(mag)
+    if not mask.any():
+        return
+    ax.scatter(
+        jd.loc[mask],
+        mag.loc[mask],
+        marker=marker,
+        s=32,
+        color=color,
+        linewidths=0.9,
+        alpha=0.9,
+        label=label,
+        zorder=8,
+    )
+
+
+def _highlight_event_indices(
+    ax,
+    df: pd.DataFrame,
+    y_values: pd.Series | np.ndarray,
+    indices: Sequence[int],
+    *,
+    label: str,
+) -> None:
+    idx = np.asarray(indices, dtype=int)
+    y_array = np.asarray(y_values, dtype=float)
+    idx = idx[(idx >= 0) & (idx < len(df)) & (idx < y_array.size)]
+    if idx.size == 0 or "JD" not in df.columns:
+        return
+    jd = pd.to_numeric(df.iloc[idx]["JD"], errors="coerce").to_numpy(dtype=float)
+    y = y_array[idx]
+    mask = np.isfinite(jd) & np.isfinite(y)
+    if not mask.any():
+        return
+    ax.scatter(
+        jd[mask],
+        y[mask],
+        marker="x",
+        s=48,
+        color="goldenrod",
+        linewidths=1.2,
+        label=label,
+        zorder=9,
+    )
+
+
+def plot_gate_processing_trial_diagnostic(
+    run: BenchmarkRun,
+    trial_id: int,
+    *,
+    controls: dict[str, pd.DataFrame] | None = None,
+    example_kind: str | None = None,
+    ax: np.ndarray | None = None,
+) -> np.ndarray:
+    """Plot one injected light curve through rejection, GP subtraction, and gate routing."""
+    rows = run.trial_results[run.trial_results["trial_id"].astype(int).eq(int(trial_id))]
+    if rows.empty:
+        raise KeyError(f"trial_id {trial_id} not found")
+    row = rows.iloc[0]
+    df_trial = _load_trial_lightcurve_for_row(row, controls=controls)
+    frames = _prepare_gate_processing_frames(df_trial, run.config)
+    branch_scores = _score_processing_branches(frames["cleaned"], row, run.config)
+    stochastic_score = branch_scores["stochastic"]
+    phase_score = branch_scores["phase"]
+    selected_period = _finite_metric(row.get("pre_periodicity_selected_period", np.nan))
+
+    if ax is None:
+        _, ax = plt.subplots(5, 2, figsize=(15.2, 16.8), squeeze=False)
+    axes = np.asarray(ax)
+    if axes.size < 10:
+        raise ValueError("plot_gate_processing_trial_diagnostic requires at least 10 axes")
+    axes = axes.reshape(-1)[:10].reshape(5, 2)
+    (
+        ax_raw,
+        ax_gp,
+        ax_stoch_base,
+        ax_phase_base,
+        ax_stoch_resid,
+        ax_phase_resid,
+        ax_stoch_prob,
+        ax_phase_prob,
+        ax_stoch_logbf,
+        ax_phase_logbf,
+    ) = axes.flat
+
+    group_by = "camera" if "camera#" in frames["raw"].columns else "none"
+    plot_lightcurve_panel(
+        ax_raw,
+        frames["raw"],
+        group_by=group_by,
+        camera_col="camera#" if "camera#" in frames["raw"].columns else None,
+        show_errorbars=False,
+        marker_size=2.6,
+        legend="none",
+        time_offset="none",
+        xlabel="JD",
+        ylabel="mag",
+    )
+    _scatter_rejected_points(
+        ax_raw,
+        frames["bad_camera_rejected"],
+        label="rejected camera",
+        color="crimson",
+        marker="x",
+    )
+    _scatter_rejected_points(
+        ax_raw,
+        frames["bad_point_rejected"],
+        label="rejected point",
+        color="black",
+        marker="+",
+    )
+    if frames["bad_camera_rejected"].empty and frames["bad_point_rejected"].empty:
+        ax_raw.set_title("Raw injected light curve; no points rejected", fontsize=10)
+    else:
+        ax_raw.set_title(
+            f"Raw injected light curve; rejected {len(frames['raw']) - len(frames['cleaned'])}/{len(frames['raw'])}",
+            fontsize=10,
+        )
+        ax_raw.legend(frameon=False, fontsize=8, loc="best")
+
+    if frames["cleaned"].empty or frames["gp_base"].empty:
+        _plot_missing_panel(ax_gp, "No cleaned points for GP baseline", title="Cleaned pregate curve")
+    else:
+        plot_lightcurve_panel(
+            ax_gp,
+            frames["cleaned"],
+            group_by=group_by,
+            camera_col="camera#" if "camera#" in frames["cleaned"].columns else None,
+            show_errorbars=False,
+            marker_size=2.7,
+            legend="none",
+            time_offset="none",
+            xlabel="JD",
+            ylabel="mag",
+            baseline=frames["gp_base"],
+            baseline_col="baseline",
+            baseline_time_col="JD",
+            baseline_group_col="camera#" if "camera#" in frames["gp_base"].columns else None,
+            baseline_label="masked GP baseline",
+            baseline_style={"linewidth": 1.15, "alpha": 0.9},
+        )
+        ax_gp.set_title("Cleaned curve with masked per-camera GP baseline", fontsize=10)
+
+    _plot_branch_baseline_panel(
+        ax_stoch_base,
+        stochastic_score,
+        title="Stochastic/non-periodic branch baseline",
+        color="crimson",
+    )
+    _plot_branch_baseline_panel(
+        ax_phase_base,
+        phase_score,
+        title="Phase-template branch baseline",
+        color="seagreen",
+    )
+    _plot_branch_residual_time_panel(
+        ax_stoch_resid,
+        stochastic_score,
+        title="Stochastic residuals vs time",
+    )
+    _plot_branch_residual_phase_panel(
+        ax_phase_resid,
+        phase_score,
+        period_days=selected_period,
+        title=f"Phase-template residuals vs phase (P={_fmt_metric(selected_period)} d)",
+    )
+
+    posterior_threshold = posterior_probability_threshold(run.config.significance_threshold)
+    _plot_evidence_time_panel(
+        ax_stoch_prob,
+        stochastic_score,
+        metric="event_probability",
+        title="Stochastic LOO posterior vs time",
+        ylabel="LOO P(dip)",
+        threshold=posterior_threshold,
+        color="#4c78a8",
+    )
+    _plot_evidence_phase_panel(
+        ax_phase_prob,
+        phase_score,
+        metric="event_probability",
+        period_days=selected_period,
+        title="Phase-template LOO posterior vs phase",
+        ylabel="LOO P(dip)",
+        threshold=posterior_threshold,
+        color="#4c78a8",
+    )
+    _plot_evidence_time_panel(
+        ax_stoch_logbf,
+        stochastic_score,
+        metric="log_bf_local",
+        title="Stochastic local log BF vs time",
+        ylabel="local log BF",
+        threshold=run.config.logbf_threshold_dip,
+        color="#7f3c8d",
+    )
+    _plot_evidence_phase_panel(
+        ax_phase_logbf,
+        phase_score,
+        metric="log_bf_local",
+        period_days=selected_period,
+        title="Phase-template local log BF vs phase",
+        ylabel="local log BF",
+        threshold=run.config.logbf_threshold_dip,
+        color="#7f3c8d",
+    )
+
+    bad_cameras = sorted(str(cam) for cam in frames["bad_cameras"])
+    bad_camera_text = ",".join(bad_cameras) if bad_cameras else "none"
+    branch = "periodic" if _as_bool(row.get("pre_periodic_flag", False)) else "non-periodic"
+    example_text = example_kind if example_kind is not None else str(row.get("example_kind", ""))
+    title = (
+        f"trial {int(row['trial_id'])} | {row['class_name']} | {example_text}\n"
+        f"gate target={row['target_gate_label']} -> {row['pre_periodicity_label']} ({branch} branch), "
+        f"reason={row.get('pre_periodicity_reason', '')}; "
+        f"CE S/N={_fmt_metric(row.get('pre_periodicity_score'))}, "
+        f"scatter ratio={_fmt_metric(row.get('pre_periodicity_scatter_ratio'))}, "
+        f"phase peak S/N={_fmt_metric(row.get('pre_periodicity_phase_peak_snr'))}; "
+        f"bad cameras={bad_camera_text}"
+    )
+    axes.flat[0].figure.suptitle(title, fontsize=11, y=0.995)
+    axes.flat[0].figure.tight_layout(rect=(0, 0, 1, 0.95))
+    return axes
+
+
+def save_gate_processing_visualizations(
+    run: BenchmarkRun,
+    *,
+    output_dir: Path | None = None,
+    per_bucket: int = 2,
+    max_examples: int = 14,
+    controls: dict[str, pd.DataFrame] | None = None,
+) -> pd.DataFrame:
+    """Save publication-style per-trial diagnostics for selected gate examples."""
+    output_root = (
+        Path(output_dir)
+        if output_dir is not None
+        else run.run_dir / "plots" / "gate_processing_examples"
+    )
+    output_root.mkdir(parents=True, exist_ok=True)
+    examples = select_gate_processing_examples(
+        run.trial_results,
+        per_bucket=per_bucket,
+        max_examples=max_examples,
+    )
+    rows: list[dict[str, Any]] = []
+    with publication_style_context():
+        for _, row in examples.iterrows():
+            trial_id = int(row["trial_id"])
+            fig, axes = plt.subplots(5, 2, figsize=(15.2, 16.8), squeeze=False)
+            plot_gate_processing_trial_diagnostic(
+                run,
+                trial_id,
+                controls=controls,
+                example_kind=str(row.get("example_kind", "")),
+                ax=axes,
+            )
+            safe_kind = str(row.get("example_kind", "example")).replace(" ", "_").replace("/", "_")
+            out_path = output_root / f"trial_{trial_id:05d}_{safe_kind}.png"
+            fig.savefig(out_path, dpi=220)
+            plt.close(fig)
+            record = {
+                "trial_id": trial_id,
+                "example_kind": row.get("example_kind", ""),
+                "class_name": row.get("class_name", ""),
+                "target_gate_label": row.get("target_gate_label", ""),
+                "pre_periodicity_label": row.get("pre_periodicity_label", ""),
+                "routed_branch": row.get("routed_branch", ""),
+                "selected_period_days": row.get("pre_periodicity_selected_period", np.nan),
+                "pre_periodicity_score": row.get("pre_periodicity_score", np.nan),
+                "pre_periodicity_scatter_ratio": row.get("pre_periodicity_scatter_ratio", np.nan),
+                "standard_detected": row.get("standard_detected", False),
+                "phase_folded_detected": row.get("phase_folded_detected", False),
+                "bifurcated_detected": row.get("bifurcated_detected", False),
+                "figure_path": str(out_path),
+            }
+            rows.append(record)
+    summary = pd.DataFrame(rows)
+    summary.to_csv(output_root / "manifest.csv", index=False)
+    return summary
 
 
 def save_benchmark_plots(
