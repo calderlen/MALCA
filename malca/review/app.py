@@ -95,7 +95,7 @@ from malca.review.filter_schema import (
     VETTING_KNOWN_SELECT_FILTERS,
 )
 from malca.review.handoff import build_explorer_command, launch_detached
-from malca.review.pipeline import detect_pipeline_status
+from malca.review.pipeline import detect_pipeline_status, detect_sed_photometry_status
 from malca.review.pipeline import run_missing_stages
 from malca.review.pipeline import update_candidate_payload
 from malca.review.period_search import (
@@ -132,6 +132,7 @@ from malca.review.store import (
     get_numeric_bounds,
 )
 from malca.review.store import import_lightcurve_files
+from malca.review.sed import build_sed_figure, load_sed_rows
 
 
 
@@ -4516,6 +4517,7 @@ def create_layout():
         dcc.Store(id='startup-selection-applied', data=False),
         dcc.Store(id='last-candidate-saved', data=0),
         dcc.Download(id='plot-export-download'),
+        dcc.Download(id='sed-export-download'),
         dcc.Download(id='run-config-download'),
         dcc.Interval(id='keyboard-init', interval=200, n_intervals=0, max_intervals=1),
         dcc.Interval(id='review-metrics-interval', interval=1000, n_intervals=0),
@@ -5054,6 +5056,8 @@ def create_layout():
                                                 className='compact-btn', style={'fontSize': '10px'}),
                                     html.Button('Recompute Characterize', id='rerun-stage-characterize-btn', n_clicks=0,
                                                 className='compact-btn', style={'fontSize': '10px'}),
+                                    html.Button('Recompute SED', id='rerun-stage-sed-photometry-btn', n_clicks=0,
+                                                className='compact-btn', style={'fontSize': '10px'}),
                                     html.Button('Recompute Vetting', id='rerun-stage-vetting-btn', n_clicks=0,
                                                 className='compact-btn', style={'fontSize': '10px'}),
                                     html.Button('Recompute External LCs', id='rerun-stage-external-lcs-btn', n_clicks=0,
@@ -5097,6 +5101,46 @@ def create_layout():
                                 type='default',
                             ),
                         ], id='external-followup-details', open=False, className='metadata-sections', style={'margin-top': '0'}),
+                        html.Details([
+                            html.Summary('SED', style={'cursor': 'pointer'}),
+                            html.Div([
+                                html.Div([
+                                    html.Span('Extinction', style={'fontSize': '10px', 'color': '#7d91a6', 'marginRight': '8px'}),
+                                    dcc.RadioItems(
+                                        id='sed-extinction-mode',
+                                        options=[
+                                            {'label': ' Observed', 'value': 'observed'},
+                                            {'label': ' ISM-corrected', 'value': 'corrected'},
+                                            {'label': ' Both', 'value': 'both'},
+                                        ],
+                                        value='observed',
+                                        inline=True,
+                                        inputStyle={'marginRight': '3px'},
+                                        labelStyle={'fontSize': '10px', 'marginRight': '10px'},
+                                        persistence=_review_persistence_token(),
+                                        persistence_type='local',
+                                    ),
+                                    html.Button(
+                                        'Export SED PDF',
+                                        id='export-sed-plot',
+                                        n_clicks=0,
+                                        className='compact-btn',
+                                        style={'marginLeft': 'auto'},
+                                    ),
+                                ], style={'display': 'flex', 'alignItems': 'center', 'gap': '6px', 'flexWrap': 'wrap', 'padding': '8px 10px 0 10px'}),
+                                html.Div(
+                                    id='sed-status',
+                                    style={'fontSize': '10px', 'color': '#7d91a6', 'padding': '4px 10px 0 10px'},
+                                ),
+                                dcc.Loading(
+                                    html.Div(
+                                        id='sed-plot-panel',
+                                        style={'padding': '8px 10px', 'display': 'grid', 'gap': '8px'},
+                                    ),
+                                    type='default',
+                                ),
+                            ]),
+                        ], id='sed-details', open=False, className='metadata-sections', style={'margin-top': '0'}),
                         html.Details([
                             html.Summary('Diagnostic Plots', style={'cursor': 'pointer'}),
                             html.Div(
@@ -8384,6 +8428,122 @@ def update_external_followup_panel(is_open, candidate_id, theme_mode):
     return _render_external_followup(payload, str(candidate_id), str(theme_mode or DEFAULT_THEME))
 
 
+def _load_sed_figure_for_candidate(candidate_id, extinction_mode, theme_mode):
+    payload, _stored_lc_path, _source_path = _candidate_context(candidate_id)
+    with closing(db_connect(Path(DB_PATH))) as conn:
+        external_rows = load_sed_rows(conn, str(candidate_id))
+    return build_sed_figure(
+        payload,
+        candidate_id=str(candidate_id),
+        external_rows=external_rows,
+        extinction_mode=str(extinction_mode or "observed"),
+        theme=str(theme_mode or DEFAULT_THEME),
+    )
+
+
+def _sed_status_text(rows: pd.DataFrame, warnings_list: list[str]) -> str:
+    if rows is None or rows.empty:
+        base = "No SED photometry available. Run `malca sed-photometry ... --review-db <db>` to add external SED catalogs."
+    else:
+        sources = sorted(str(x) for x in rows["source"].dropna().unique()) if "source" in rows.columns else []
+        source_text = ", ".join(sources[:8])
+        if len(sources) > 8:
+            source_text += f", +{len(sources) - 8} more"
+        base = f"{len(rows)} SED points"
+        if source_text:
+            base += f" from {source_text}"
+        if bool(rows.get("lambda_l_lambda", pd.Series(dtype=float)).isna().all()):
+            base += "; luminosity unavailable without distance"
+    if warnings_list:
+        return f"{base}. {' '.join(str(w) for w in warnings_list)}"
+    return base
+
+
+@app.callback(
+    [Output('sed-plot-panel', 'children'),
+     Output('sed-status', 'children')],
+    [Input('sed-details', 'open'),
+     Input('current-candidate-id', 'data'),
+     Input('sed-extinction-mode', 'value'),
+     Input('theme-mode-store', 'data')],
+    prevent_initial_call=False,
+)
+def update_sed_panel(is_open, candidate_id, extinction_mode, theme_mode):
+    """Render SED photometry for the current candidate."""
+    if not is_open:
+        return [], ''
+    if not candidate_id:
+        return [], 'No candidates loaded.'
+    try:
+        fig, rows, warnings_list = _load_sed_figure_for_candidate(candidate_id, extinction_mode, theme_mode)
+    except Exception as exc:
+        return [], f"SED rendering failed: {exc}"
+    graph = dcc.Graph(
+        id='sed-plot',
+        figure=fig,
+        mathjax=True,
+        config={'displayModeBar': True, 'responsive': True},
+        style={'height': '340px'},
+    )
+    return graph, _sed_status_text(rows, warnings_list)
+
+
+@app.callback(
+    [Output('sed-export-download', 'data'),
+     Output('notification', 'children', allow_duplicate=True)],
+    Input('export-sed-plot', 'n_clicks'),
+    [State('current-candidate-id', 'data'),
+     State('sed-extinction-mode', 'value'),
+     State('theme-mode-store', 'data')],
+    prevent_initial_call=True,
+)
+def export_sed_plot(n_clicks, candidate_id, extinction_mode, theme_mode):
+    """Export the current candidate SED as PDF."""
+    if not n_clicks:
+        return no_update, no_update
+    if not candidate_id:
+        return no_update, 'No candidate is selected.'
+    try:
+        fig, _rows, _warnings_list = _load_sed_figure_for_candidate(candidate_id, extinction_mode, theme_mode)
+        export_fig = go.Figure(fig)
+        export_fig.update_layout(
+            paper_bgcolor='white',
+            plot_bgcolor='white',
+            font=dict(color='#111111', family='Monaco, Courier New, monospace', size=11),
+            title_font=dict(color='#111111'),
+            margin=dict(t=54, l=70, r=26, b=58),
+            legend=dict(
+                bgcolor='rgba(255,255,255,0.95)',
+                bordercolor='rgba(40,40,40,0.25)',
+                borderwidth=1,
+                font=dict(color='#111111', size=9),
+            ),
+        )
+        export_fig.update_xaxes(
+            color='#111111',
+            title_font_color='#111111',
+            tickfont_color='#111111',
+            showgrid=True,
+            gridcolor='rgba(0,0,0,0.12)',
+            zeroline=False,
+        )
+        export_fig.update_yaxes(
+            color='#111111',
+            title_font_color='#111111',
+            tickfont_color='#111111',
+            showgrid=True,
+            gridcolor='rgba(0,0,0,0.12)',
+            zeroline=False,
+        )
+        image_bytes = pio.to_image(export_fig, format='pdf', width=1000, height=700)
+    except Exception as exc:
+        return no_update, f'Export failed (SED PDF). Install/enable kaleido. {exc}'
+    safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(candidate_id)).strip("_") or "unknown"
+    mode = str(extinction_mode or "observed").replace("-", "_")
+    fname = f"malca_sed_{safe_id}_{mode}.pdf"
+    return dcc.send_bytes(image_bytes, fname), f'Exported {fname}'
+
+
 def _render_diagnostic_plots(payload: dict, theme: str, background: dict | None = None) -> list:
     """Build diagnostic plot cards from candidate payload data."""
     theme_tokens = _external_followup_theme(theme)
@@ -9666,6 +9826,7 @@ def _pipeline_status_chip_elements(candidate_id) -> list:
     """Build pipeline status chips for the active candidate."""
     chips = []
     stage_labels = {
+        'sed_photometry': 'SED',
         'external_lcs': 'External LCs',
         'periodicity': 'Periodicity',
     }
@@ -9674,6 +9835,8 @@ def _pipeline_status_chip_elements(candidate_id) -> list:
     try:
         payload, _stored_lc_path, _source_path = _candidate_context(candidate_id)
         status = detect_pipeline_status(payload)
+        with closing(db_connect(Path(DB_PATH))) as conn:
+            status['sed_photometry'] = detect_sed_photometry_status(conn, str(candidate_id), payload)
 
         periodicity_sig_cols = (
             'periodicity_score',
@@ -9774,7 +9937,7 @@ def render_pipeline_module_log(log_data):
     return "\n".join(lines[-300:])
 
 
-def _run_pipeline_impl(set_progress, run_clicks, rerun_clicks, rerun_stats_clicks, rerun_events_clicks, rerun_characterize_clicks, rerun_vetting_clicks, rerun_external_lcs_clicks, auto_trigger, queue_data, idx, current_trigger, current_progress_tick):
+def _run_pipeline_impl(set_progress, run_clicks, rerun_clicks, rerun_stats_clicks, rerun_events_clicks, rerun_characterize_clicks, rerun_sed_photometry_clicks, rerun_vetting_clicks, rerun_external_lcs_clicks, auto_trigger, queue_data, idx, current_trigger, current_progress_tick):
 
     ctx = dash.callback_context
     triggered_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else None
@@ -9790,6 +9953,7 @@ def _run_pipeline_impl(set_progress, run_clicks, rerun_clicks, rerun_stats_click
         and not rerun_stats_clicks
         and not rerun_events_clicks
         and not rerun_characterize_clicks
+        and not rerun_sed_photometry_clicks
         and not rerun_vetting_clicks
         and not rerun_external_lcs_clicks
         and not auto_trigger
@@ -9858,7 +10022,7 @@ def _run_pipeline_impl(set_progress, run_clicks, rerun_clicks, rerun_stats_click
             force_stages = []
             force_only = False
             if triggered_id == 'rerun-pipeline-btn':
-                force_stages = ['stats', 'events', 'characterize', 'vetting', 'external_lcs']
+                force_stages = ['stats', 'events', 'characterize', 'sed_photometry', 'vetting', 'external_lcs']
             elif triggered_id == 'rerun-stage-stats-btn':
                 force_stages = ['stats']
                 force_only = True
@@ -9868,6 +10032,9 @@ def _run_pipeline_impl(set_progress, run_clicks, rerun_clicks, rerun_stats_click
             elif triggered_id == 'rerun-stage-characterize-btn':
                 force_stages = ['characterize']
                 force_only = True
+            elif triggered_id == 'rerun-stage-sed-photometry-btn':
+                force_stages = ['sed_photometry']
+                force_only = True
             elif triggered_id == 'rerun-stage-vetting-btn':
                 force_stages = ['vetting']
                 force_only = True
@@ -9875,9 +10042,9 @@ def _run_pipeline_impl(set_progress, run_clicks, rerun_clicks, rerun_stats_click
                 force_stages = ['external_lcs']
                 force_only = True
             elif fetch_mode == 'full':
-                force_stages = ['stats', 'events', 'characterize', 'vetting']
+                force_stages = ['stats', 'events', 'characterize', 'sed_photometry', 'vetting']
             elif fetch_mode in ('full_ext', 'full_ext_crts'):
-                force_stages = ['stats', 'events', 'characterize', 'vetting', 'external_lcs']
+                force_stages = ['stats', 'events', 'characterize', 'sed_photometry', 'vetting', 'external_lcs']
                 
             stages = run_missing_stages(
                 conn,
@@ -9922,6 +10089,7 @@ def _run_pipeline_impl(set_progress, run_clicks, rerun_clicks, rerun_stats_click
                 'rerun-stage-stats-btn',
                 'rerun-stage-events-btn',
                 'rerun-stage-characterize-btn',
+                'rerun-stage-sed-photometry-btn',
                 'rerun-stage-vetting-btn',
                 'rerun-stage-external-lcs-btn',
             }:
@@ -9942,6 +10110,7 @@ if _background_callback_manager is not None:
          Input('rerun-stage-stats-btn', 'n_clicks'),
          Input('rerun-stage-events-btn', 'n_clicks'),
          Input('rerun-stage-characterize-btn', 'n_clicks'),
+         Input('rerun-stage-sed-photometry-btn', 'n_clicks'),
          Input('rerun-stage-vetting-btn', 'n_clicks'),
          Input('rerun-stage-external-lcs-btn', 'n_clicks'),
          Input('auto-run-pipeline-trigger', 'data')],
@@ -9956,6 +10125,7 @@ if _background_callback_manager is not None:
             (Output('rerun-stage-stats-btn', 'disabled'), True, False),
             (Output('rerun-stage-events-btn', 'disabled'), True, False),
             (Output('rerun-stage-characterize-btn', 'disabled'), True, False),
+            (Output('rerun-stage-sed-photometry-btn', 'disabled'), True, False),
             (Output('rerun-stage-vetting-btn', 'disabled'), True, False),
             (Output('rerun-stage-external-lcs-btn', 'disabled'), True, False),
         ],
@@ -9966,8 +10136,8 @@ if _background_callback_manager is not None:
         ],
         prevent_initial_call='initial_duplicate'
     )
-    def run_pipeline_callback(set_progress, n_clicks, rerun_clicks, rerun_stats_clicks, rerun_events_clicks, rerun_characterize_clicks, rerun_vetting_clicks, rerun_external_lcs_clicks, auto_trigger, queue_data, idx, current_trigger, current_progress_tick):
-        return _run_pipeline_impl(set_progress, n_clicks, rerun_clicks, rerun_stats_clicks, rerun_events_clicks, rerun_characterize_clicks, rerun_vetting_clicks, rerun_external_lcs_clicks, auto_trigger, queue_data, idx, current_trigger, current_progress_tick)
+    def run_pipeline_callback(set_progress, n_clicks, rerun_clicks, rerun_stats_clicks, rerun_events_clicks, rerun_characterize_clicks, rerun_sed_photometry_clicks, rerun_vetting_clicks, rerun_external_lcs_clicks, auto_trigger, queue_data, idx, current_trigger, current_progress_tick):
+        return _run_pipeline_impl(set_progress, n_clicks, rerun_clicks, rerun_stats_clicks, rerun_events_clicks, rerun_characterize_clicks, rerun_sed_photometry_clicks, rerun_vetting_clicks, rerun_external_lcs_clicks, auto_trigger, queue_data, idx, current_trigger, current_progress_tick)
 else:
     @app.callback(
         [Output('pipeline-run-status', 'children'),
@@ -9978,6 +10148,7 @@ else:
          Input('rerun-stage-stats-btn', 'n_clicks'),
          Input('rerun-stage-events-btn', 'n_clicks'),
          Input('rerun-stage-characterize-btn', 'n_clicks'),
+         Input('rerun-stage-sed-photometry-btn', 'n_clicks'),
          Input('rerun-stage-vetting-btn', 'n_clicks'),
          Input('rerun-stage-external-lcs-btn', 'n_clicks'),
          Input('auto-run-pipeline-trigger', 'data')],
@@ -9987,8 +10158,8 @@ else:
          State('pipeline-progress-trigger', 'data')],
         prevent_initial_call='initial_duplicate'
     )
-    def run_pipeline_callback(n_clicks, rerun_clicks, rerun_stats_clicks, rerun_events_clicks, rerun_characterize_clicks, rerun_vetting_clicks, rerun_external_lcs_clicks, auto_trigger, queue_data, idx, current_trigger, current_progress_tick):
-        return _run_pipeline_impl(None, n_clicks, rerun_clicks, rerun_stats_clicks, rerun_events_clicks, rerun_characterize_clicks, rerun_vetting_clicks, rerun_external_lcs_clicks, auto_trigger, queue_data, idx, current_trigger, current_progress_tick)
+    def run_pipeline_callback(n_clicks, rerun_clicks, rerun_stats_clicks, rerun_events_clicks, rerun_characterize_clicks, rerun_sed_photometry_clicks, rerun_vetting_clicks, rerun_external_lcs_clicks, auto_trigger, queue_data, idx, current_trigger, current_progress_tick):
+        return _run_pipeline_impl(None, n_clicks, rerun_clicks, rerun_stats_clicks, rerun_events_clicks, rerun_characterize_clicks, rerun_sed_photometry_clicks, rerun_vetting_clicks, rerun_external_lcs_clicks, auto_trigger, queue_data, idx, current_trigger, current_progress_tick)
 
 
 # Export reviews

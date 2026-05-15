@@ -136,6 +136,23 @@ def detect_pipeline_status(payload: dict) -> dict[str, str]:
     return result
 
 
+def detect_sed_photometry_status(conn: sqlite3.Connection, candidate_id: str, payload: dict | None = None) -> str:
+    """Return completion status for the SED sidecar table."""
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM sed_photometry WHERE candidate_id = ?",
+            (str(candidate_id),),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return "missing"
+    count = int(row[0] or 0) if row else 0
+    if count > 0:
+        return "complete"
+    if isinstance(payload, dict) and bool(payload.get("sed_photometry_checked")):
+        return "complete"
+    return "missing"
+
+
 def run_missing_stages(
     conn: sqlite3.Connection,
     candidate_id: str,
@@ -163,6 +180,7 @@ def run_missing_stages(
 
     # 2. Detect current status
     status = detect_pipeline_status(payload)
+    status["sed_photometry"] = detect_sed_photometry_status(conn, candidate_id, payload)
     stages_run: list[str] = []
 
     def p(msg: str):
@@ -207,6 +225,20 @@ def run_missing_stages(
             _run_characterize_stage(payload, p)
             stages_run.append("characterize")
             mark_stage_complete("characterize")
+
+    if should_run("sed_photometry"):
+        p("Fetching SED photometry...")
+        n_sed_rows = _run_sed_photometry_stage(
+            conn,
+            candidate_id,
+            payload,
+            p,
+            replace=("sed_photometry" in force),
+        )
+        payload["sed_photometry_checked"] = True
+        payload["sed_photometry_n_rows"] = int(n_sed_rows)
+        stages_run.append("sed_photometry")
+        mark_stage_complete("sed_photometry")
 
     if should_run("vetting"):
         ra = payload.get("ra_deg")
@@ -336,6 +368,36 @@ def _run_characterize_stage(payload: dict, p: Callable | None = None) -> None:
     except Exception as e:
         if p: p(f"Characterize stage failed: {e}")
         else: print(f"[pipeline] Characterize stage failed: {e}")
+
+
+def _run_sed_photometry_stage(
+    conn: sqlite3.Connection,
+    candidate_id: str,
+    payload: dict,
+    p: Callable | None = None,
+    *,
+    replace: bool = False,
+    sources: str = "default",
+) -> int:
+    """Run SED photometry fetch/normalization for a 1-row candidate payload."""
+    try:
+        from malca.review.sed import fetch_sed_photometry, upsert_sed_rows
+
+        df = pd.DataFrame([payload])
+        if "candidate_id" not in df.columns:
+            df["candidate_id"] = str(candidate_id)
+        sed_rows = _run_with_progress_capture(lambda: fetch_sed_photometry(df, sources=sources), p)
+        if replace:
+            conn.execute("DELETE FROM sed_photometry WHERE candidate_id = ?", (str(candidate_id),))
+            conn.commit()
+        n_rows = upsert_sed_rows(conn, sed_rows) if isinstance(sed_rows, pd.DataFrame) else 0
+        if p:
+            p(f"SED photometry: {n_rows} rows")
+        return int(n_rows)
+    except Exception as e:
+        if p: p(f"SED photometry stage failed: {e}")
+        else: print(f"[pipeline] SED photometry stage failed: {e}")
+        return 0
 
 
 def _run_vetting_stage(payload: dict, p: Callable | None = None) -> None:

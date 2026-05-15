@@ -1038,6 +1038,78 @@ def init_db(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sed_photometry (
+            candidate_id TEXT NOT NULL,
+            source TEXT NOT NULL,
+            band TEXT NOT NULL,
+            mag REAL,
+            mag_err REAL,
+            mag_system TEXT,
+            lambda_eff_angstrom REAL,
+            flux_lambda REAL,
+            flux_lambda_err REAL,
+            lambda_l_lambda REAL,
+            lambda_l_lambda_err REAL,
+            flux_nu_jy REAL,
+            flux_nu_jy_err REAL,
+            sep_arcsec REAL,
+            is_synthetic INTEGER DEFAULT 0,
+            is_upper_limit INTEGER DEFAULT 0,
+            quality_flags TEXT,
+            svo_filter_id TEXT,
+            av_coeff REAL,
+            PRIMARY KEY(candidate_id, source, band),
+            FOREIGN KEY(candidate_id) REFERENCES candidates(candidate_id)
+        )
+        """
+    )
+    existing_sed_lower = {
+        str(row[1]).lower()
+        for row in conn.execute("PRAGMA table_info(sed_photometry)").fetchall()
+    }
+    sed_column_defs = {
+        "candidate_id": "TEXT",
+        "source": "TEXT",
+        "band": "TEXT",
+        "mag": "REAL",
+        "mag_err": "REAL",
+        "mag_system": "TEXT",
+        "lambda_eff_angstrom": "REAL",
+        "flux_lambda": "REAL",
+        "flux_lambda_err": "REAL",
+        "lambda_l_lambda": "REAL",
+        "lambda_l_lambda_err": "REAL",
+        "flux_nu_jy": "REAL",
+        "flux_nu_jy_err": "REAL",
+        "sep_arcsec": "REAL",
+        "is_synthetic": "INTEGER DEFAULT 0",
+        "is_upper_limit": "INTEGER DEFAULT 0",
+        "quality_flags": "TEXT",
+        "svo_filter_id": "TEXT",
+        "av_coeff": "REAL",
+    }
+    for col, dtype in sed_column_defs.items():
+        if col.lower() not in existing_sed_lower:
+            try:
+                conn.execute(f"ALTER TABLE sed_photometry ADD COLUMN {col} {dtype}")
+                existing_sed_lower.add(col.lower())
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" not in str(e).lower():
+                    raise
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_sed_photometry_candidate
+        ON sed_photometry(candidate_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_sed_photometry_unique
+        ON sed_photometry(candidate_id, source, band)
+        """
+    )
     # Migrate: add any columns missing from older DBs.
     existing_candidate_columns = {
         str(row[1]).lower(): str(row[1])

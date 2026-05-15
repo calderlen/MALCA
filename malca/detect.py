@@ -215,6 +215,8 @@ RUN_REUSE_PARAM_ATTRS = (
     "characterize_sfr",
     "characterize_clusters",
     "characterize_unwise",
+    "run_sed_photometry",
+    "sed_sources",
     "run_classify",
     "run_enrich",
     "enrich_compute_ls",
@@ -259,6 +261,8 @@ RUN_REUSE_CODE_FILES = (
     "stats.py",
     "enrich/neighbor.py",
     "enrich/spectra.py",
+    "review/sed.py",
+    "sed_photometry.py",
     "vetting.py",
 )
 
@@ -399,6 +403,8 @@ PIPELINE_CONFIG_DEFAULTS: dict[str, Any] = {
     "characterize_clusters": True,
     "characterize_unwise": False,
     "run_dust": True,
+    "run_sed_photometry": True,
+    "sed_sources": "default",
     "run_classify": True,
     "run_enrich": True,
     "enrich_compute_ls": False,
@@ -894,6 +900,7 @@ def export_bundle_zip(bundle_zip: Path, out_dir: Path, include_all: bool = False
         "results/lc_events_classified.parquet",
         "results/lc_events_neighbors.parquet",
         "results/lc_events_spectra.parquet",
+        "results/sed_photometry.parquet",
     ]
     if mag_bin_tag:
         include_rel_paths.extend([
@@ -1186,6 +1193,7 @@ def main():
     g_filter = parser.add_argument_group("Filter")
     g_postprocess = parser.add_argument_group("Postprocess")
     g_characterize = parser.add_argument_group("Characterize")
+    g_sed = parser.add_argument_group("SED photometry")
     g_classify = parser.add_argument_group("Classify")
     g_enrich = parser.add_argument_group("Enrich")
     g_neighbor = parser.add_argument_group("Neighbor enrichment")
@@ -1273,6 +1281,28 @@ def main():
         default=None,
         help=f"Number of Gaia source IDs per TAP chunk when auto-fetching (default: {GAIA_CHUNK_SIZE})",
     )
+    g_sed.add_argument(
+        "--run-sed-photometry",
+        dest="run_sed_photometry",
+        action="store_true",
+        help="Enable the SED photometry enrichment stage after characterization.",
+    )
+    g_sed.add_argument(
+        "--no-sed-photometry",
+        dest="run_sed_photometry",
+        action="store_false",
+        help="Disable the SED photometry enrichment stage after characterization.",
+    )
+    g_sed.add_argument(
+        "--sed-sources",
+        type=str,
+        default="default",
+        help=(
+            "SED source keys: 'default' for payload/Gaia GSPC/PS1/SDSS/SkyMapper/DES/"
+            "DECaPS/UKIDSS/VISTA/VPHAS+/Spitzer, 'all' to include AKARI/IRAS/Herschel, "
+            "or a comma-separated source list."
+        ),
+    )
 
     add_config_args(g_general)
     g_general.add_argument("--workers", type=int, default=WORKERS, help="Workers for parallel processing")
@@ -1313,6 +1343,10 @@ def main():
         cli_overrides["gaia_fetch_passers_only"] = args.gaia_fetch_passers_only
     if cli_has_option("--gaia-fetch-chunk-size"):
         cli_overrides["gaia_fetch_chunk_size"] = args.gaia_fetch_chunk_size
+    if cli_has_option("--run-sed-photometry", "--no-sed-photometry"):
+        cli_overrides["run_sed_photometry"] = args.run_sed_photometry
+    if cli_has_option("--sed-sources"):
+        cli_overrides["sed_sources"] = args.sed_sources
 
     apply_config(
         args,
@@ -1376,7 +1410,7 @@ def main():
             args.mag_bin = detected_mag_bins
             print(f"Info: auto-detected --mag-bin={args.mag_bin} from {detected_source}")
 
-    if stage == "cluster" and (args.run_characterize or args.run_dust or args.run_classify or args.run_neighbor_enrich or args.run_spectra_enrich):
+    if stage == "cluster" and (args.run_characterize or args.run_dust or args.run_sed_photometry or args.run_classify or args.run_neighbor_enrich or args.run_spectra_enrich):
         print("Info: --stage cluster runs upstream only (steps 1-6 plus enrich). Downstream steps are skipped.")
     if stage == "home" and (args.force_manifest or args.force_tag):
         print("Info: --stage home skips manifest/tag/events regardless of force flags.")
@@ -1631,6 +1665,10 @@ def main():
             "clusters": args.characterize_clusters,
             "unwise": args.characterize_unwise,
         },
+        "sed_photometry": {
+            "run_sed_photometry": args.run_sed_photometry,
+            "sources": args.sed_sources,
+        },
         "downstream_pass_logic": "characterize/classify/enrich run on filter passers (failed_any == False)",
     }
 
@@ -1808,6 +1846,9 @@ def main():
             "characterize_sfr": args.characterize_sfr,
             "characterize_clusters": args.characterize_clusters,
             "characterize_unwise": args.characterize_unwise,
+            # Step 9: SED photometry
+            "run_sed_photometry": args.run_sed_photometry,
+            "sed_sources": args.sed_sources,
             # Step 9: Classify
             "run_classify": args.run_classify,
             # Step 6: Enrich
@@ -2862,16 +2903,75 @@ def main():
 
                 traceback.print_exc()
 
-    # Step 9: Run classification (optional)
+    # Step 9: SED photometry (enabled by default)
+    sed_photometry_output = results_dir / "sed_photometry.parquet"
+    if run_downstream and args.run_sed_photometry:
+        if not has_post_filter_output:
+            print(f"Warning: downstream stage requires filtered results at {post_filter_output}. Skipping SED photometry.")
+        elif sed_photometry_output.exists() and not args.overwrite:
+            log(f"\n=== Step 9: SED photometry output exists, skipping: {sed_photometry_output} ===")
+        else:
+            log("\n=== Step 9: Fetching SED photometry ===")
+            sed_started = time.perf_counter()
+            try:
+                from malca.review.sed import SED_COLUMNS, fetch_sed_photometry, resolve_sed_sources
+
+                characterize_output = results_dir / "lc_events_characterized.parquet"
+                post_filter_output = results_dir / "lc_events_filtered.parquet"
+
+                if characterize_output.exists():
+                    df_sed_in = load_table(characterize_output)
+                elif post_filter_output.exists():
+                    df_sed_in = load_table(post_filter_output)
+                else:
+                    df_sed_in = None
+
+                if df_sed_in is None:
+                    log("Warning: no suitable input found for SED photometry, skipping")
+                else:
+                    df_sed_in = _select_passing_candidates(df_sed_in)
+                    sources = resolve_sed_sources(args.sed_sources)
+                    log(f"SED input: {len(df_sed_in)} passing candidates; sources={','.join(sources)}")
+                    sed_rows = fetch_sed_photometry(df_sed_in, sources=sources)
+                    for col in SED_COLUMNS:
+                        if col not in sed_rows.columns:
+                            sed_rows[col] = None
+                    sed_rows = sed_rows[SED_COLUMNS]
+                    save_table(sed_rows, sed_photometry_output)
+
+                    by_source = (
+                        sed_rows.groupby("source", dropna=False).size().to_dict()
+                        if (not sed_rows.empty and "source" in sed_rows.columns)
+                        else {}
+                    )
+                    summary["sed_photometry_stats"] = {
+                        "rows_input": int(len(df_sed_in)),
+                        "rows_output": int(len(sed_rows)),
+                        "sources_requested": list(sources),
+                        "rows_by_source": {str(k): int(v) for k, v in by_source.items()},
+                        "output": str(sed_photometry_output),
+                    }
+                    with open(run_summary_file, "w") as f:
+                        json.dump(summary, f, indent=2, default=str)
+
+                    log(f"SED photometry saved to {sed_photometry_output} ({len(sed_rows)} rows)")
+                    log(f"Step 9 completed in {time.perf_counter() - sed_started:.1f}s")
+            except Exception as e:
+                print(f"Error in SED photometry step: {e}")
+                if args.verbose:
+
+                    traceback.print_exc()
+
+    # Step 10: Run classification (optional)
     if run_downstream and args.run_classify:
         if not has_post_filter_output:
             print(f"Warning: downstream stage requires filtered results at {post_filter_output}. Skipping classification.")
         else:
             classify_output = results_dir / "lc_events_classified.parquet"
             if classify_output.exists() and not args.overwrite:
-                log(f"\n=== Step 9: Classification output exists, skipping: {classify_output} ===")
+                log(f"\n=== Step 10: Classification output exists, skipping: {classify_output} ===")
             else:
-                log("\n=== Step 9: Running classification ===")
+                log("\n=== Step 10: Running classification ===")
                 classify_started = time.perf_counter()
                 try:
                     characterize_output = results_dir / "lc_events_characterized.parquet"
@@ -2908,10 +3008,10 @@ def main():
                                 json.dump(summary, f, indent=2, default=str)
 
                             log(f"Classification: {len(df_classified)} candidates classified")
-                            log(f"Step 9 completed in {time.perf_counter() - classify_started:.1f}s")
+                            log(f"Step 10 completed in {time.perf_counter() - classify_started:.1f}s")
                         else:
                             log("No passing candidates to classify.")
-                            log(f"Step 9 completed in {time.perf_counter() - classify_started:.1f}s")
+                            log(f"Step 10 completed in {time.perf_counter() - classify_started:.1f}s")
 
                 except Exception as e:
                     print(f"Error in classification step: {e}")
@@ -2919,12 +3019,12 @@ def main():
 
                         traceback.print_exc()
 
-    # Step 10: Neighbor enrichment (optional)
+    # Step 11: Neighbor enrichment (optional)
     if run_downstream and args.run_neighbor_enrich:
         if not has_post_filter_output:
             print(f"Warning: downstream stage requires filtered results at {post_filter_output}. Skipping neighbor enrichment.")
         else:
-            log("\n=== Step 10: Bulk neighbor enrichment ===")
+            log("\n=== Step 11: Bulk neighbor enrichment ===")
             neighbor_started = time.perf_counter()
             try:
                 enrich_output = results_dir / "lc_events_enriched.parquet"
@@ -2982,7 +3082,7 @@ def main():
                     with open(run_summary_file, "w") as f:
                         json.dump(summary, f, indent=2, default=str)
                     log(f"Neighbor enrichment outputs written to {neighbor_dir}")
-                    log(f"Step 10 completed in {time.perf_counter() - neighbor_started:.1f}s")
+                    log(f"Step 11 completed in {time.perf_counter() - neighbor_started:.1f}s")
 
             except Exception as e:
                 print(f"Error in neighbor enrichment step: {e}")
@@ -2990,12 +3090,12 @@ def main():
 
                     traceback.print_exc()
 
-    # Step 11: Spectra availability enrichment (optional)
+    # Step 12: Spectra availability enrichment (optional)
     if run_downstream and args.run_spectra_enrich:
         if not has_post_filter_output:
             print(f"Warning: downstream stage requires filtered results at {post_filter_output}. Skipping spectra enrichment.")
         else:
-            log("\n=== Step 11: Spectra availability enrichment ===")
+            log("\n=== Step 12: Spectra availability enrichment ===")
             spectra_started = time.perf_counter()
             try:
                 neighbor_output = results_dir / "lc_events_neighbors.parquet"
@@ -3056,7 +3156,7 @@ def main():
                     with open(run_summary_file, "w") as f:
                         json.dump(summary, f, indent=2, default=str)
                     log(f"Spectra enrichment outputs written to {spectra_dir}")
-                    log(f"Step 11 completed in {time.perf_counter() - spectra_started:.1f}s")
+                    log(f"Step 12 completed in {time.perf_counter() - spectra_started:.1f}s")
 
             except Exception as e:
                 print(f"Error in spectra enrichment step: {e}")
@@ -3064,9 +3164,9 @@ def main():
 
                     traceback.print_exc()
 
-    # Step 12: Post-review vetting (enabled by default)
+    # Step 13: Post-review vetting (enabled by default)
     if run_downstream and args.run_vetting:
-        log("\n=== Step 12: Post-review vetting ===")
+        log("\n=== Step 13: Post-review vetting ===")
         vetting_started = time.perf_counter()
         try:
             # Find the best input file for vetting
@@ -3132,7 +3232,7 @@ def main():
                 }
                 with open(run_summary_file, "w") as f:
                     json.dump(summary, f, indent=2, default=str)
-                log(f"Step 12 completed in {time.perf_counter() - vetting_started:.1f}s")
+                log(f"Step 13 completed in {time.perf_counter() - vetting_started:.1f}s")
 
         except Exception as e:
             print(f"Error in vetting step: {e}")
@@ -3140,9 +3240,9 @@ def main():
 
                 traceback.print_exc()
 
-    # Step 13: Auto-import into review DB
+    # Step 14: Auto-import into review DB
     if run_downstream and has_post_filter_output:
-        log("\n=== Step 13: Importing candidates into review DB ===")
+        log("\n=== Step 14: Importing candidates into review DB ===")
         review_db_path = out_dir / "review" / "review.db"
         review_db_updated = False
         try:
@@ -3186,6 +3286,15 @@ def main():
                         characterize_before_import=False,
                         vet_before_import=False,
                     )
+                    if sed_photometry_output.exists():
+                        try:
+                            from malca.review.sed import upsert_sed_rows
+
+                            sed_rows_for_review = load_table(sed_photometry_output)
+                            n_sed = upsert_sed_rows(conn, sed_rows_for_review)
+                            log(f"Imported {n_sed} SED photometry rows into {review_db_path}")
+                        except Exception as sed_exc:
+                            log(f"Warning: SED photometry review import failed: {sed_exc}")
                     conn.close()
                     review_db_updated = True
                     log(f"Imported {n_new} new candidates ({n_total} total) into {review_db_path}")

@@ -27,10 +27,14 @@ def test_external_and_diagnostic_panels_are_above_long_metadata() -> None:
     ids = _component_ids_in_order(app.layout)
 
     external_idx = ids.index("external-followup-details")
+    sed_idx = ids.index("sed-details")
+    sed_button_idx = ids.index("rerun-stage-sed-photometry-btn")
     diagnostic_idx = ids.index("diagnostic-plots-details")
     metadata_idx = ids.index("candidate-info-grid")
     run_config_idx = ids.index("run-config-details")
 
     assert external_idx < metadata_idx
+    assert external_idx < sed_idx < metadata_idx
+    assert sed_button_idx < metadata_idx
     assert diagnostic_idx < metadata_idx
     assert metadata_idx < run_config_idx

@@ -15,6 +15,7 @@ kaleido
 
 # Optional: multiwavelength analysis
 astroquery>=0.4.6
+dust_extinction
 dustmaps3d
 
 # Optional: notebooks
