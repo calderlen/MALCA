@@ -51,7 +51,7 @@ LTV_CACHE_DIR = Path("/tmp/ltv_cache")
 
 # Parallelism
 WORKERS = 12
-BATCH_SIZE = 10000
+BATCH_SIZE = 100000
 
 # Bayesian detection
 TRIGGER_MODE = "posterior_prob"
