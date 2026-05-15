@@ -95,7 +95,7 @@ from malca.review.filter_schema import (
     VETTING_KNOWN_SELECT_FILTERS,
 )
 from malca.review.handoff import build_explorer_command, launch_detached
-from malca.review.pipeline import detect_pipeline_status, detect_sed_photometry_status
+from malca.review.pipeline import detect_pipeline_status, detect_sed_model_status, detect_sed_photometry_status
 from malca.review.pipeline import run_missing_stages
 from malca.review.pipeline import update_candidate_payload
 from malca.review.period_search import (
@@ -133,6 +133,7 @@ from malca.review.store import (
 )
 from malca.review.store import import_lightcurve_files
 from malca.review.sed import build_sed_figure, load_sed_rows
+from malca.sed_model import load_sed_model_curves, load_sed_model_fits
 
 
 
@@ -1872,6 +1873,7 @@ EXTERNAL_SOURCE_VIEW_OPTIONS = [
     {"label": "ATLAS", "value": "atlas"},
     {"label": "ZTF", "value": "ztf"},
     {"label": "Gaia Epoch", "value": "gaia_epoch"},
+    {"label": "TESS", "value": "tess"},
     {"label": "PS1", "value": "ps1"},
     {"label": "CRTS", "value": "crts"},
 ]
@@ -3889,6 +3891,35 @@ def _render_external_followup(payload: dict, candidate_id: str, theme: str | Non
     run_dir = _resolve_run_dir_from_plot_dir(PLOT_DIR)
     lookup_keys = _candidate_lookup_keys(candidate_id, payload)
 
+    def _fmt_ms(value, digits: int = 3) -> str:
+        try:
+            if value is None or pd.isna(value):
+                return "n/a"
+            return f"{float(value):.{digits}g}"
+        except Exception:
+            text = str(value or "").strip()
+            return text if text else "n/a"
+
+    multi_survey_children = [
+        html.Div(f"Status: {payload.get('ms_feature_status') or 'missing'}", style={'fontSize': '11px'}),
+        html.Div(
+            f"Event: {payload.get('ms_event_type') or 'n/a'} @ {_fmt_ms(payload.get('ms_event_t0_jd'), 7)}",
+            style={'fontSize': '11px'},
+        ),
+        html.Div(
+            f"ZTF g-r delta: {_fmt_ms(payload.get('ms_ztf_gr_delta'))} "
+            f"({payload.get('ms_ztf_gr_event_pairs', 0)} event pairs)",
+            style={'fontSize': '11px'},
+        ),
+        html.Div(f"NEOWISE W1 delta: {_fmt_ms(payload.get('ms_neowise_w1_delta'))}", style={'fontSize': '11px'}),
+        html.Div(f"TESS delta F/F: {_fmt_ms(payload.get('ms_tess_flux_frac_delta'))}", style={'fontSize': '11px'}),
+        html.Div(f"Gaia G delta: {_fmt_ms(payload.get('ms_gaia_epoch_g_delta'))}", style={'fontSize': '11px'}),
+    ]
+    multi_survey_card = html.Div([
+        html.Div('Multi-survey Features', style={'fontWeight': '600', 'marginBottom': '4px'}),
+        *multi_survey_children,
+    ], style=card_style)
+
     # Spectra
     has_spectrum = _coerce_bool(payload.get('has_spectrum'))
     spectrum_sources = str(payload.get('spectrum_sources') or '').strip()
@@ -4081,6 +4112,48 @@ def _render_external_followup(payload: dict, candidate_id: str, theme: str | Non
         *gaia_epoch_children,
     ], style=card_style)
 
+    # TESS LC card
+    tess_children = [
+        html.Div(f"Sectors: {payload.get('tess_n_sectors', 'n/a')}", style={'fontSize': '11px'}),
+        html.Div(f"Points: {payload.get('tess_total_points', 'n/a')}", style={'fontSize': '11px'}),
+        html.Div(f"Flux range: {payload.get('tess_flux_range', 'n/a')}", style={'fontSize': '11px'}),
+    ]
+    if run_dir is not None:
+        tess_idx = _index_external_lc_paths(str(run_dir.resolve()), "tess")
+        for key in lookup_keys:
+            path_str = tess_idx.get(str(key))
+            if path_str:
+                tess_path = Path(path_str)
+                if tess_path.exists():
+                    try:
+                        tess_lc = pd.read_parquet(tess_path)
+                        tess_fig = _build_external_lc_figure(
+                            tess_lc, "TESS",
+                            [("TESS", "flux", "flux_err", "#cc66ff")],
+                            time_col="time",
+                            yaxis_label="flux",
+                            reverse_y=False,
+                            source_name="tess",
+                            theme=theme,
+                            jd_system="btjd",
+                        )
+                        tess_children.append(
+                            dcc.Graph(
+                                figure=tess_fig,
+                                mathjax=True,
+                                config={'displayModeBar': False},
+                                style={'height': '250px'},
+                            )
+                        )
+                    except Exception:
+                        pass
+                break
+
+    tess_card = html.Div([
+        html.Div('TESS', style={'fontWeight': '600', 'marginBottom': '4px'}),
+        *tess_children,
+    ], style=card_style)
+
     # Pan-STARRS LC card
     ps1_children = [
         html.Div(f"Points: {payload.get('ps1_lc_n_points', 'n/a')}", style={'fontSize': '11px'}),
@@ -4148,7 +4221,7 @@ def _render_external_followup(payload: dict, candidate_id: str, theme: str | Non
         *crts_children,
     ], style=card_style)
 
-    return [spectra_card, atlas_card, neowise_card, ztf_card, gaia_epoch_card, ps1_card, crts_card]
+    return [multi_survey_card, spectra_card, atlas_card, neowise_card, ztf_card, gaia_epoch_card, tess_card, ps1_card, crts_card]
 
 
 # ---- sidebar filter helpers ------------------------------------------------
@@ -5062,6 +5135,8 @@ def create_layout():
                                                 className='compact-btn', style={'fontSize': '10px'}),
                                     html.Button('Recompute External LCs', id='rerun-stage-external-lcs-btn', n_clicks=0,
                                                 className='compact-btn', style={'fontSize': '10px'}),
+                                    html.Button('Recompute Multi-survey', id='rerun-stage-multi-survey-btn', n_clicks=0,
+                                                className='compact-btn', style={'fontSize': '10px'}),
                                 ], style={'display': 'flex', 'gap': '6px', 'marginTop': '4px', 'flexWrap': 'wrap'}),
                                 dcc.Loading(
                                     id='loading-pipeline', type='dot',
@@ -5645,7 +5720,7 @@ app.clientside_callback(
             var mode = (obj.mode && ['native', 'png'].includes(obj.mode)) ? obj.mode : nu;
             var opacity = (typeof obj.opacity === 'number') ? obj.opacity : nu;
             var resHeight = (typeof obj.resHeight === 'number') ? obj.resHeight : nu;
-            var allowedSources = ['all', 'asassn', 'atlas', 'ztf', 'gaia_epoch', 'ps1', 'crts'];
+            var allowedSources = ['all', 'asassn', 'atlas', 'ztf', 'gaia_epoch', 'tess', 'ps1', 'crts'];
             var externalSource = (obj.externalSource && allowedSources.includes(obj.externalSource))
                 ? obj.externalSource : nu;
             return [preset, overlays, mode, opacity, resHeight, externalSource, true];
@@ -8225,7 +8300,7 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
         default_results_root = Path(__file__).resolve().parents[2] / "output" / "results"
         if default_results_root not in search_roots:
             search_roots.append(default_results_root)
-        for prefix in ("atlas", "ztf", "gaia_epoch", "ps1", "crts"):
+        for prefix in ("atlas", "ztf", "gaia_epoch", "tess", "ps1", "crts"):
             for root in search_roots:
                 idx_map = _index_external_lc_paths_from_root(str(root.resolve()), prefix)
                 for key in lk:
@@ -8432,10 +8507,14 @@ def _load_sed_figure_for_candidate(candidate_id, extinction_mode, theme_mode):
     payload, _stored_lc_path, _source_path = _candidate_context(candidate_id)
     with closing(db_connect(Path(DB_PATH))) as conn:
         external_rows = load_sed_rows(conn, str(candidate_id))
+        model_curve_rows = load_sed_model_curves(conn, str(candidate_id))
+        model_fit_rows = load_sed_model_fits(conn, str(candidate_id))
     return build_sed_figure(
         payload,
         candidate_id=str(candidate_id),
         external_rows=external_rows,
+        model_curve_rows=model_curve_rows,
+        model_fit_rows=model_fit_rows,
         extinction_mode=str(extinction_mode or "observed"),
         theme=str(theme_mode or DEFAULT_THEME),
     )
@@ -9827,7 +9906,9 @@ def _pipeline_status_chip_elements(candidate_id) -> list:
     chips = []
     stage_labels = {
         'sed_photometry': 'SED',
+        'sed_model_fit': 'SED model',
         'external_lcs': 'External LCs',
+        'multi_survey_features': 'Multi-survey',
         'periodicity': 'Periodicity',
     }
     if candidate_id is None:
@@ -9837,6 +9918,7 @@ def _pipeline_status_chip_elements(candidate_id) -> list:
         status = detect_pipeline_status(payload)
         with closing(db_connect(Path(DB_PATH))) as conn:
             status['sed_photometry'] = detect_sed_photometry_status(conn, str(candidate_id), payload)
+            status['sed_model_fit'] = detect_sed_model_status(conn, str(candidate_id), payload)
 
         periodicity_sig_cols = (
             'periodicity_score',
@@ -9937,7 +10019,7 @@ def render_pipeline_module_log(log_data):
     return "\n".join(lines[-300:])
 
 
-def _run_pipeline_impl(set_progress, run_clicks, rerun_clicks, rerun_stats_clicks, rerun_events_clicks, rerun_characterize_clicks, rerun_sed_photometry_clicks, rerun_vetting_clicks, rerun_external_lcs_clicks, auto_trigger, queue_data, idx, current_trigger, current_progress_tick):
+def _run_pipeline_impl(set_progress, run_clicks, rerun_clicks, rerun_stats_clicks, rerun_events_clicks, rerun_characterize_clicks, rerun_sed_photometry_clicks, rerun_vetting_clicks, rerun_external_lcs_clicks, rerun_multi_survey_clicks, auto_trigger, queue_data, idx, current_trigger, current_progress_tick):
 
     ctx = dash.callback_context
     triggered_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else None
@@ -9956,6 +10038,7 @@ def _run_pipeline_impl(set_progress, run_clicks, rerun_clicks, rerun_stats_click
         and not rerun_sed_photometry_clicks
         and not rerun_vetting_clicks
         and not rerun_external_lcs_clicks
+        and not rerun_multi_survey_clicks
         and not auto_trigger
     ):
         raise dash.exceptions.PreventUpdate
@@ -10022,7 +10105,7 @@ def _run_pipeline_impl(set_progress, run_clicks, rerun_clicks, rerun_stats_click
             force_stages = []
             force_only = False
             if triggered_id == 'rerun-pipeline-btn':
-                force_stages = ['stats', 'events', 'characterize', 'sed_photometry', 'vetting', 'external_lcs']
+                force_stages = ['stats', 'events', 'characterize', 'sed_photometry', 'sed_model_fit', 'vetting', 'external_lcs', 'multi_survey_features']
             elif triggered_id == 'rerun-stage-stats-btn':
                 force_stages = ['stats']
                 force_only = True
@@ -10033,18 +10116,21 @@ def _run_pipeline_impl(set_progress, run_clicks, rerun_clicks, rerun_stats_click
                 force_stages = ['characterize']
                 force_only = True
             elif triggered_id == 'rerun-stage-sed-photometry-btn':
-                force_stages = ['sed_photometry']
+                force_stages = ['sed_photometry', 'sed_model_fit']
                 force_only = True
             elif triggered_id == 'rerun-stage-vetting-btn':
                 force_stages = ['vetting']
                 force_only = True
             elif triggered_id == 'rerun-stage-external-lcs-btn':
-                force_stages = ['external_lcs']
+                force_stages = ['external_lcs', 'multi_survey_features']
+                force_only = True
+            elif triggered_id == 'rerun-stage-multi-survey-btn':
+                force_stages = ['multi_survey_features']
                 force_only = True
             elif fetch_mode == 'full':
-                force_stages = ['stats', 'events', 'characterize', 'sed_photometry', 'vetting']
+                force_stages = ['stats', 'events', 'characterize', 'sed_photometry', 'sed_model_fit', 'vetting']
             elif fetch_mode in ('full_ext', 'full_ext_crts'):
-                force_stages = ['stats', 'events', 'characterize', 'sed_photometry', 'vetting', 'external_lcs']
+                force_stages = ['stats', 'events', 'characterize', 'sed_photometry', 'sed_model_fit', 'vetting', 'external_lcs', 'multi_survey_features']
                 
             stages = run_missing_stages(
                 conn,
@@ -10071,12 +10157,27 @@ def _run_pipeline_impl(set_progress, run_clicks, rerun_clicks, rerun_stats_click
                     else (Path(__file__).resolve().parents[2] / "output" / "results")
                 )
                 ext_output.mkdir(parents=True, exist_ok=True)
-                df_ext = fetch_external_lcs(df, output_dir=ext_output, progress_callback=p)
+                df_ext = fetch_external_lcs(
+                    df,
+                    output_dir=ext_output,
+                    run_atlas=False,
+                    run_tess=True,
+                    run_neowise=True,
+                    progress_callback=p,
+                )
                 if isinstance(df_ext, pd.DataFrame) and not df_ext.empty:
                     row = df_ext.iloc[0].to_dict()
                     update_candidate_payload(conn, candidate_id, row)
                     stages.append('external_lcs')
                     on_stage_complete('external_lcs')
+                    p("Computing multi-survey features...")
+                    from malca.review.pipeline import _run_multi_survey_features_stage
+
+                    payload = get_candidate_payload(conn, candidate_id)
+                    _run_multi_survey_features_stage(payload, ext_output, p)
+                    update_candidate_payload(conn, candidate_id, payload)
+                    stages.append('multi_survey_features')
+                    on_stage_complete('multi_survey_features')
 
         refresh_idx = int(idx or 0) if idx is not None else 0
         if stages:
@@ -10092,6 +10193,7 @@ def _run_pipeline_impl(set_progress, run_clicks, rerun_clicks, rerun_stats_click
                 'rerun-stage-sed-photometry-btn',
                 'rerun-stage-vetting-btn',
                 'rerun-stage-external-lcs-btn',
+                'rerun-stage-multi-survey-btn',
             }:
                 return "No stages could be rerun (missing requirements)", no_update, no_update
             return "All stages already complete (or missing requirements)", no_update, no_update
@@ -10113,6 +10215,7 @@ if _background_callback_manager is not None:
          Input('rerun-stage-sed-photometry-btn', 'n_clicks'),
          Input('rerun-stage-vetting-btn', 'n_clicks'),
          Input('rerun-stage-external-lcs-btn', 'n_clicks'),
+         Input('rerun-stage-multi-survey-btn', 'n_clicks'),
          Input('auto-run-pipeline-trigger', 'data')],
         [State('queue-data', 'data'),
          State('current-index', 'data'),
@@ -10128,6 +10231,7 @@ if _background_callback_manager is not None:
             (Output('rerun-stage-sed-photometry-btn', 'disabled'), True, False),
             (Output('rerun-stage-vetting-btn', 'disabled'), True, False),
             (Output('rerun-stage-external-lcs-btn', 'disabled'), True, False),
+            (Output('rerun-stage-multi-survey-btn', 'disabled'), True, False),
         ],
         progress=[
             Output('pipeline-run-status', 'children'),
@@ -10136,8 +10240,8 @@ if _background_callback_manager is not None:
         ],
         prevent_initial_call='initial_duplicate'
     )
-    def run_pipeline_callback(set_progress, n_clicks, rerun_clicks, rerun_stats_clicks, rerun_events_clicks, rerun_characterize_clicks, rerun_sed_photometry_clicks, rerun_vetting_clicks, rerun_external_lcs_clicks, auto_trigger, queue_data, idx, current_trigger, current_progress_tick):
-        return _run_pipeline_impl(set_progress, n_clicks, rerun_clicks, rerun_stats_clicks, rerun_events_clicks, rerun_characterize_clicks, rerun_sed_photometry_clicks, rerun_vetting_clicks, rerun_external_lcs_clicks, auto_trigger, queue_data, idx, current_trigger, current_progress_tick)
+    def run_pipeline_callback(set_progress, n_clicks, rerun_clicks, rerun_stats_clicks, rerun_events_clicks, rerun_characterize_clicks, rerun_sed_photometry_clicks, rerun_vetting_clicks, rerun_external_lcs_clicks, rerun_multi_survey_clicks, auto_trigger, queue_data, idx, current_trigger, current_progress_tick):
+        return _run_pipeline_impl(set_progress, n_clicks, rerun_clicks, rerun_stats_clicks, rerun_events_clicks, rerun_characterize_clicks, rerun_sed_photometry_clicks, rerun_vetting_clicks, rerun_external_lcs_clicks, rerun_multi_survey_clicks, auto_trigger, queue_data, idx, current_trigger, current_progress_tick)
 else:
     @app.callback(
         [Output('pipeline-run-status', 'children'),
@@ -10151,6 +10255,7 @@ else:
          Input('rerun-stage-sed-photometry-btn', 'n_clicks'),
          Input('rerun-stage-vetting-btn', 'n_clicks'),
          Input('rerun-stage-external-lcs-btn', 'n_clicks'),
+         Input('rerun-stage-multi-survey-btn', 'n_clicks'),
          Input('auto-run-pipeline-trigger', 'data')],
         [State('queue-data', 'data'),
          State('current-index', 'data'),
@@ -10158,8 +10263,8 @@ else:
          State('pipeline-progress-trigger', 'data')],
         prevent_initial_call='initial_duplicate'
     )
-    def run_pipeline_callback(n_clicks, rerun_clicks, rerun_stats_clicks, rerun_events_clicks, rerun_characterize_clicks, rerun_sed_photometry_clicks, rerun_vetting_clicks, rerun_external_lcs_clicks, auto_trigger, queue_data, idx, current_trigger, current_progress_tick):
-        return _run_pipeline_impl(None, n_clicks, rerun_clicks, rerun_stats_clicks, rerun_events_clicks, rerun_characterize_clicks, rerun_sed_photometry_clicks, rerun_vetting_clicks, rerun_external_lcs_clicks, auto_trigger, queue_data, idx, current_trigger, current_progress_tick)
+    def run_pipeline_callback(n_clicks, rerun_clicks, rerun_stats_clicks, rerun_events_clicks, rerun_characterize_clicks, rerun_sed_photometry_clicks, rerun_vetting_clicks, rerun_external_lcs_clicks, rerun_multi_survey_clicks, auto_trigger, queue_data, idx, current_trigger, current_progress_tick):
+        return _run_pipeline_impl(None, n_clicks, rerun_clicks, rerun_stats_clicks, rerun_events_clicks, rerun_characterize_clicks, rerun_sed_photometry_clicks, rerun_vetting_clicks, rerun_external_lcs_clicks, rerun_multi_survey_clicks, auto_trigger, queue_data, idx, current_trigger, current_progress_tick)
 
 
 # Export reviews

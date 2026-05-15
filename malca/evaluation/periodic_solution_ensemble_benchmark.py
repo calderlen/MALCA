@@ -4,7 +4,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 import json
 import os
 
@@ -981,6 +981,7 @@ def recompute_solution_trial(
         df,
         baseline_func=baseline_func,
         baseline_kwargs=baseline_kwargs,
+        filter_residual_bad_cameras_enabled=False,
         p_points=run.config.p_points,
         mag_points=run.config.mag_points,
         trigger_mode=run.config.trigger_mode,
@@ -1004,6 +1005,404 @@ def recompute_solution_trial(
             "jump": scored["jump"],
         },
     )
+
+
+def _resolve_modes(
+    run: PeriodicSolutionBenchmarkRun,
+    modes: Sequence[str] | None,
+) -> tuple[str, ...]:
+    resolved = tuple(str(mode) for mode in (modes if modes is not None else run.config.mode_names))
+    for mode in resolved:
+        if mode not in SOLUTION_SPECS:
+            raise ValueError(f"Unknown periodic solution mode: {mode}")
+    return resolved
+
+
+def recompute_solution_trial_baseline_modes(
+    run: PeriodicSolutionBenchmarkRun,
+    trial_id: int,
+    *,
+    modes: Sequence[str] | None = None,
+) -> tuple[pd.DataFrame, dict[str, dict[str, object]]]:
+    """Recompute one simulated trial with several baseline modes."""
+    row = run.trial_design.loc[run.trial_design["trial_id"] == int(trial_id)]
+    if row.empty:
+        raise KeyError(f"trial_id {trial_id} not found")
+    row_series = row.iloc[0]
+    raw_df = simulate_periodic_lightcurve(row_series)
+    clean_df: pd.DataFrame | None = None
+    outputs: dict[str, dict[str, object]] = {}
+
+    for mode in _resolve_modes(run, modes):
+        selected_period = selected_period_for_mode(row_series, mode, run.config.seed)
+        baseline_func, baseline_kwargs = baseline_for_mode(mode, selected_period, run.config)
+        try:
+            scored = score_lightcurve(
+                raw_df,
+                baseline_func=baseline_func,
+                baseline_kwargs=baseline_kwargs,
+                filter_residual_bad_cameras_enabled=False,
+                p_points=run.config.p_points,
+                mag_points=run.config.mag_points,
+                trigger_mode=run.config.trigger_mode,
+                logbf_threshold_dip=run.config.logbf_threshold_dip,
+                logbf_threshold_jump=run.config.logbf_threshold_jump,
+                significance_threshold=run.config.significance_threshold,
+                run_min_points=run.config.run_min_points,
+                max_gap_points=run.config.run_max_gap_points,
+                run_max_gap_days=run.config.run_max_gap_days,
+                run_min_duration_days=run.config.run_min_duration_days,
+                compute_event_prob=run.config.compute_event_prob,
+            )
+            scored_df = scored["df"].reset_index(drop=True)
+            if clean_df is None:
+                clean_df = scored_df
+            outputs[mode] = {
+                "mode": mode,
+                "mode_label": str(SOLUTION_SPECS[mode]["label"]),
+                "baseline_strategy": str(SOLUTION_SPECS[mode]["baseline"]),
+                "selected_period_days": selected_period,
+                "df_base": scored["df_base"].reset_index(drop=True),
+                "dip": scored["dip"],
+                "jump": scored["jump"],
+                "status": "ok",
+                "error": "",
+            }
+        except Exception as exc:
+            outputs[mode] = {
+                "mode": mode,
+                "mode_label": str(SOLUTION_SPECS[mode]["label"]),
+                "baseline_strategy": str(SOLUTION_SPECS[mode]["baseline"]),
+                "selected_period_days": selected_period,
+                "status": "error",
+                "error": str(exc),
+            }
+
+    if clean_df is None:
+        details = "; ".join(f"{mode}: {info.get('error', '')}" for mode, info in outputs.items())
+        raise RuntimeError(f"All baseline modes failed for trial_id {trial_id}: {details}")
+    return clean_df, outputs
+
+
+def _safe_metric_label(results: pd.DataFrame, trial_id: int, mode: str) -> str:
+    if results.empty or not {"trial_id", "mode"}.issubset(results.columns):
+        return ""
+    row = results[(results["trial_id"].eq(int(trial_id))) & (results["mode"].eq(mode))]
+    if row.empty:
+        return ""
+    item = row.iloc[0]
+    parts: list[str] = []
+    for column, label, fmt in (
+        ("baseline_mae_outside_dip", "MAE", ".3f"),
+        ("resid_mad_outside_dip", "resid MAD", ".3f"),
+        ("amp_recovery_ratio", "amp rec", ".2f"),
+    ):
+        value = item.get(column, np.nan)
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            number = np.nan
+        if np.isfinite(number):
+            parts.append(f"{label}={number:{fmt}}")
+    return " | ".join(parts)
+
+
+def plot_solution_baseline_mode_grid(
+    run: PeriodicSolutionBenchmarkRun,
+    trial_id: int,
+    *,
+    modes: Sequence[str] | None = None,
+    ax: np.ndarray | None = None,
+    mark_truth: bool = True,
+    mark_detected: bool = True,
+    show_true_baseline: bool = True,
+) -> np.ndarray:
+    """Plot observed baseline fits and baseline-subtracted residuals by mode."""
+    mode_names = _resolve_modes(run, modes)
+    n_modes = len(mode_names)
+    if n_modes == 0:
+        raise ValueError("At least one mode is required")
+
+    if ax is None:
+        _, ax = plt.subplots(
+            n_modes,
+            2,
+            figsize=(16, max(3.0 * n_modes, 5.5)),
+            sharex="col",
+            squeeze=False,
+        )
+    axes = np.asarray(ax, dtype=object)
+    if axes.ndim == 1:
+        axes = axes.reshape(n_modes, 2)
+    if axes.shape[0] < n_modes or axes.shape[1] < 2:
+        raise ValueError(f"Expected axes with shape at least ({n_modes}, 2)")
+
+    df, mode_outputs = recompute_solution_trial_baseline_modes(run, trial_id, modes=mode_names)
+    jd = pd.to_numeric(df["JD"], errors="coerce").to_numpy(dtype=float)
+    truth_mask = (
+        df["truth_dip_mask"].to_numpy(dtype=bool)
+        if "truth_dip_mask" in df.columns
+        else np.zeros(len(df), dtype=bool)
+    )
+    true_baseline = (
+        pd.to_numeric(df["true_baseline_mag"], errors="coerce").to_numpy(dtype=float)
+        if "true_baseline_mag" in df.columns
+        else np.full(len(df), np.nan, dtype=float)
+    )
+
+    for row_idx, mode in enumerate(mode_names):
+        ax_lc = axes[row_idx, 0]
+        ax_resid = axes[row_idx, 1]
+        info = mode_outputs[mode]
+        mode_label = str(info.get("mode_label", mode))
+        metric_label = _safe_metric_label(run.solution_results, trial_id, mode)
+        selected_period = info.get("selected_period_days", np.nan)
+        try:
+            period_label = f"P={float(selected_period):.4g} d" if np.isfinite(float(selected_period)) else "P=n/a"
+        except (TypeError, ValueError):
+            period_label = "P=n/a"
+
+        if info.get("status") != "ok":
+            message = f"{mode_label}\nfailed: {info.get('error', '')}"
+            for axis in (ax_lc, ax_resid):
+                axis.text(0.5, 0.5, message, transform=axis.transAxes, ha="center", va="center", fontsize=9)
+                axis.set_axis_off()
+            continue
+
+        df_base = info["df_base"]
+        if not isinstance(df_base, pd.DataFrame):
+            raise TypeError(f"Mode {mode} did not return a DataFrame baseline")
+        baseline = pd.to_numeric(df_base["baseline"], errors="coerce").to_numpy(dtype=float)
+        resid = pd.to_numeric(df_base["resid"], errors="coerce").to_numpy(dtype=float)
+        if len(baseline) != len(df) or len(resid) != len(df):
+            raise ValueError(f"Mode {mode} returned a baseline with length {len(baseline)} for {len(df)} points")
+
+        baseline_overlay = pd.DataFrame(
+            {
+                "JD": jd,
+                "baseline": baseline,
+                "camera": df["camera#"].astype(str) if "camera#" in df.columns else "all",
+            }
+        )
+        plot_lightcurve_panel(
+            ax_lc,
+            df,
+            group_by="camera",
+            camera_col="camera#",
+            show_errorbars=False,
+            marker_size=2.7,
+            legend="none",
+            time_offset="none",
+            xlabel="JD" if row_idx == n_modes - 1 else "",
+            ylabel="mag",
+            baseline=baseline_overlay,
+            baseline_col="baseline",
+            baseline_time_col="JD",
+            baseline_group_col="camera",
+            baseline_label="fit baseline",
+            baseline_style={"color": "crimson", "linewidth": 1.15, "alpha": 0.9},
+        )
+        if show_true_baseline and np.isfinite(true_baseline).any():
+            order = np.argsort(jd)
+            ax_lc.plot(jd[order], true_baseline[order], color="black", lw=0.95, alpha=0.8, label="true baseline")
+
+        residual_plot = df.copy()
+        residual_plot.loc[:, "resid"] = resid
+        plot_residual_panel(
+            ax_resid,
+            residual_plot,
+            group_by="camera",
+            camera_col="camera#",
+            show_errorbars=False,
+            marker_size=2.7,
+            legend="none",
+            time_offset="none",
+            xlabel="JD" if row_idx == n_modes - 1 else "",
+            ylabel="mag - baseline",
+            invert_y=False,
+        )
+        ax_resid.axhline(0.0, color="0.2", linestyle="--", linewidth=0.8, alpha=0.65)
+
+        dip = info.get("dip", {})
+        event_idx = np.asarray(dip.get("event_indices", []) if isinstance(dip, dict) else [], dtype=int)
+        event_idx = event_idx[(event_idx >= 0) & (event_idx < len(df))]
+        if mark_truth and truth_mask.any():
+            ax_lc.scatter(
+                jd[truth_mask],
+                df.loc[truth_mask, "mag"],
+                s=26,
+                facecolors="none",
+                edgecolors="limegreen",
+                linewidths=0.9,
+                label="truth dip support",
+                zorder=8,
+            )
+            ax_resid.scatter(
+                jd[truth_mask],
+                resid[truth_mask],
+                s=26,
+                facecolors="none",
+                edgecolors="limegreen",
+                linewidths=0.9,
+                zorder=8,
+            )
+        if mark_detected and event_idx.size:
+            ax_lc.scatter(
+                jd[event_idx],
+                df.loc[event_idx, "mag"],
+                marker="x",
+                s=36,
+                color="gold",
+                linewidths=1.0,
+                label="detected event points",
+                zorder=9,
+            )
+            ax_resid.scatter(
+                jd[event_idx],
+                resid[event_idx],
+                marker="x",
+                s=36,
+                color="gold",
+                linewidths=1.0,
+                zorder=9,
+            )
+
+        subtitle = f"{mode_label} | {period_label}"
+        if metric_label:
+            subtitle = f"{subtitle} | {metric_label}"
+        ax_lc.set_title(f"{subtitle}\nobserved light curve + baseline", fontsize=9)
+        ax_resid.set_title("baseline-subtracted residuals", fontsize=9)
+        if row_idx != n_modes - 1:
+            ax_lc.set_xlabel("")
+            ax_resid.set_xlabel("")
+        if row_idx == 0:
+            handles, labels = ax_lc.get_legend_handles_labels()
+            if handles:
+                ax_lc.legend(handles, labels, ncol=min(4, len(labels)), fontsize=7, frameon=False, loc="best")
+
+    return axes
+
+
+def select_baseline_gallery_trials(
+    df: pd.DataFrame,
+    *,
+    reference_mode: str | None = None,
+    n_trials: int = 24,
+    seed: int = 0,
+) -> list[int]:
+    """Select a diverse set of trial IDs for baseline-gallery figures."""
+    ok = df[df["status"].eq("ok")].copy()
+    if ok.empty:
+        return []
+    if reference_mode is None:
+        reference_mode = str(ok["mode"].iloc[0])
+    sub = ok[ok["mode"].eq(reference_mode)].copy()
+    if sub.empty:
+        sub = ok.drop_duplicates("trial_id").copy()
+
+    n_trials = max(int(n_trials), 0)
+    if n_trials == 0:
+        return []
+    selected: list[int] = []
+
+    def add_rows(rows: pd.DataFrame, *, sort_col: str | None = None, ascending: bool = False, limit: int = 3) -> None:
+        added = 0
+        if rows.empty or len(selected) >= n_trials:
+            return
+        pool = rows.copy()
+        if sort_col is not None and sort_col in pool.columns:
+            pool = pool.sort_values(sort_col, ascending=ascending)
+        for trial_id in pool["trial_id"].astype(int):
+            if trial_id not in selected:
+                selected.append(int(trial_id))
+                added += 1
+            if len(selected) >= n_trials or added >= limit:
+                break
+
+    per_bucket = max(1, int(np.ceil(n_trials / 8.0)))
+    has_dip = sub["has_dip"].fillna(False).astype(bool)
+    observable = sub["truth_observable_actual"].fillna(False).astype(bool) if "truth_observable_actual" in sub.columns else has_dip
+    recovered = sub["target_recovered"].fillna(False).astype(bool) if "target_recovered" in sub.columns else pd.Series(False, index=sub.index)
+    off_target = sub["off_target_detection"].fillna(False).astype(bool) if "off_target_detection" in sub.columns else pd.Series(False, index=sub.index)
+    false_positive = sub["false_positive"].fillna(False).astype(bool) if "false_positive" in sub.columns else pd.Series(False, index=sub.index)
+    phase_local = sub["phase_local_detected"].fillna(False).astype(bool) if "phase_local_detected" in sub.columns else pd.Series(False, index=sub.index)
+
+    add_rows(sub[has_dip & observable & recovered], sort_col="dip_bayes_factor", ascending=False, limit=per_bucket)
+    add_rows(sub[has_dip & observable & ~recovered], sort_col="dip_amp_mag", ascending=False, limit=per_bucket)
+    add_rows(sub[off_target], sort_col="dip_bayes_factor", ascending=False, limit=per_bucket)
+    add_rows(sub[~has_dip & false_positive], sort_col="dip_bayes_factor", ascending=False, limit=per_bucket)
+    add_rows(sub[phase_local & ~recovered], sort_col="phase_local_truth_peak_snr", ascending=False, limit=per_bucket)
+
+    if len(selected) < n_trials:
+        rng = np.random.default_rng(int(seed))
+        group_cols = [col for col in ("waveform_kind", "dip_amp_bin", "period_bin") if col in sub.columns]
+        if group_cols:
+            shuffled = sub.sample(frac=1.0, random_state=int(rng.integers(0, 2**31 - 1)))
+            for _, group in shuffled.groupby(group_cols, dropna=False):
+                if len(selected) >= n_trials:
+                    break
+                trial_id = int(group["trial_id"].iloc[0])
+                if trial_id not in selected:
+                    selected.append(trial_id)
+
+    if len(selected) < n_trials:
+        remaining = sub[~sub["trial_id"].astype(int).isin(selected)]
+        if not remaining.empty:
+            remaining = remaining.sample(
+                n=min(len(remaining), n_trials - len(selected)),
+                random_state=int(seed),
+            )
+            selected.extend([int(x) for x in remaining["trial_id"]])
+    return selected[:n_trials]
+
+
+def write_solution_baseline_gallery(
+    run: PeriodicSolutionBenchmarkRun,
+    *,
+    trial_ids: Sequence[int] | None = None,
+    modes: Sequence[str] | None = None,
+    n_trials: int = 24,
+    output_dir: Path | str | None = None,
+    dpi: int = 150,
+    close: bool = True,
+    show_progress: bool | None = None,
+) -> list[Path]:
+    """Write many baseline/residual comparison figures for one benchmark run."""
+    mode_names = _resolve_modes(run, modes)
+    if not mode_names:
+        raise ValueError("At least one mode is required")
+    if trial_ids is None:
+        trial_ids = select_baseline_gallery_trials(
+            run.solution_results,
+            reference_mode=mode_names[0] if mode_names else None,
+            n_trials=n_trials,
+            seed=run.config.seed,
+        )
+    out_dir = Path(output_dir) if output_dir is not None else run.run_dir / "plots" / "baseline_mode_gallery"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    paths: list[Path] = []
+    iterator: Any = [int(trial_id) for trial_id in trial_ids]
+    should_show_progress = bool(show_progress) if show_progress is not None else bool(run.config.show_progress)
+    if should_show_progress:
+        iterator = tqdm(iterator, desc="Baseline gallery figures")
+    for trial_id in iterator:
+        fig, axes = plt.subplots(
+            len(mode_names),
+            2,
+            figsize=(16, max(3.0 * len(mode_names), 5.5)),
+            sharex="col",
+            squeeze=False,
+        )
+        plot_solution_baseline_mode_grid(run, int(trial_id), modes=mode_names, ax=axes)
+        fig.suptitle(f"Trial {int(trial_id)} baseline solutions by mode", y=0.995)
+        fig.tight_layout()
+        path = out_dir / f"trial_{int(trial_id):05d}_baseline_modes.png"
+        fig.savefig(path, dpi=int(dpi), bbox_inches="tight")
+        if close:
+            plt.close(fig)
+        paths.append(path)
+    return paths
 
 
 def plot_solution_trial_diagnostic(

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import math
+import sys
+import types
 from contextlib import closing
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from astropy.table import Table
 
 from malca.review.sed import (
     SED_COLUMNS,
@@ -17,12 +20,20 @@ from malca.review.sed import (
     flux_lambda_from_flux_nu_jy,
     flux_nu_jy_from_mag,
     load_sed_rows,
+    query_gaia_gspc_photometry,
     resolve_sed_sources,
     rows_from_payload,
     upsert_sed_rows,
 )
-from malca.review.pipeline import detect_sed_photometry_status
+from malca.review.pipeline import detect_sed_model_status, detect_sed_photometry_status
 from malca.review.store import db_connect
+from malca.sed_model import (
+    SED_MODEL_CURVE_COLUMNS,
+    SED_MODEL_FIT_COLUMNS,
+    load_sed_model_curves,
+    load_sed_model_fits,
+    upsert_sed_model_results,
+)
 
 
 def test_ab_and_vega_flux_conversions() -> None:
@@ -36,14 +47,15 @@ def test_ab_and_vega_flux_conversions() -> None:
     assert flux_lambda_from_flux_nu_jy(3631.0, ps1_g.lambda_eff_angstrom) > 0
 
 
-def test_default_sed_sources_exclude_far_ir_catalogs() -> None:
+def test_sed_sources_always_include_far_ir_catalogs() -> None:
     default_sources = set(resolve_sed_sources("default"))
+    custom_sources = set(resolve_sed_sources("payload,ps1"))
 
     assert "payload" in default_sources
     assert "ps1" in default_sources
-    assert "akari" not in default_sources
-    assert set(resolve_sed_sources("far-ir")) == {"akari", "iras", "herschel"}
-    assert "herschel" in set(resolve_sed_sources("all"))
+    assert {"akari", "iras", "herschel"}.issubset(default_sources)
+    assert {"akari", "iras", "herschel"}.issubset(custom_sources)
+    assert set(resolve_sed_sources("far-ir")) == set(resolve_sed_sources("default"))
 
 
 def test_rows_from_payload_computes_luminosity_with_distance() -> None:
@@ -121,6 +133,73 @@ def test_external_rows_merge_with_payload() -> None:
     assert np.isfinite(rows["flux_lambda"]).all()
 
 
+def test_gaia_gspc_adapter_uses_aip_available_columns(monkeypatch) -> None:
+    captured: dict[str, str] = {}
+
+    class FakeTapService:
+        def __init__(self, url: str) -> None:
+            captured["url"] = url
+
+        def search(self, query: str):
+            captured["query"] = query
+            table = Table(rows=[
+                (
+                    123,
+                    17.0, 2.0e-30, 4.0e-32,
+                    np.nan, np.nan, np.nan,
+                    np.nan, np.nan, np.nan,
+                    np.nan, np.nan, np.nan,
+                    np.nan, np.nan, np.nan,
+                    16.2, 3.0e-30, 9.0e-32,
+                )
+            ], names=[
+                "source_id",
+                "u_sdss_mag", "u_sdss_flux", "u_sdss_flux_error",
+                "g_sdss_mag", "g_sdss_flux", "g_sdss_flux_error",
+                "r_sdss_mag", "r_sdss_flux", "r_sdss_flux_error",
+                "i_sdss_mag", "i_sdss_flux", "i_sdss_flux_error",
+                "z_sdss_mag", "z_sdss_flux", "z_sdss_flux_error",
+                "y_ps1_mag", "y_ps1_flux", "y_ps1_flux_error",
+            ])
+            return types.SimpleNamespace(to_table=lambda: table)
+
+    fake_pyvo = types.SimpleNamespace(dal=types.SimpleNamespace(TAPService=FakeTapService))
+    monkeypatch.setitem(sys.modules, "pyvo", fake_pyvo)
+
+    rows = query_gaia_gspc_photometry(
+        pd.DataFrame([{"asas_sn_id": "cand-gspc", "gaia_id": "123", "distance_gspphot": 1000.0}])
+    )
+
+    assert captured["url"] == "https://gea.esac.esa.int/tap-server/tap"
+    assert "g_ps1_mag" not in captured["query"]
+    assert "u_sdss_mag_error" not in captured["query"]
+    assert "u_sdss_flux_error" in captured["query"]
+    assert "y_ps1_mag" in captured["query"]
+    assert set(rows["band"]) == {"SDSS_u", "PS1_y"}
+    assert np.isfinite(rows["mag_err"]).all()
+    assert rows["is_synthetic"].all()
+
+
+def test_nonpositive_magnitude_errors_are_treated_as_missing() -> None:
+    payload = {"candidate_id": "cand-4a", "distance_gspphot": 1000.0}
+    external = pd.DataFrame([
+        {
+            "candidate_id": "cand-4a",
+            "source": "Pan-STARRS",
+            "band": "g",
+            "mag": 17.2,
+            "mag_err": -999.0,
+            "mag_system": "AB",
+            "lambda_eff_angstrom": 4810.0,
+        }
+    ])
+
+    rows = build_sed_dataframe(payload, external_rows=external)
+
+    assert pd.isna(rows.loc[0, "mag_err"])
+    assert pd.isna(rows.loc[0, "flux_nu_jy_err"])
+
+
 def test_jy_catalog_rows_roundtrip_as_flux_density() -> None:
     payload = {"candidate_id": "cand-4b", "distance_gspphot": 1000.0}
     external = pd.DataFrame([
@@ -172,3 +251,72 @@ def test_sed_rows_roundtrip_review_db(tmp_path: Path) -> None:
     assert len(loaded) == 1
     assert loaded.loc[0, "source"] == "Pan-STARRS"
     assert loaded.loc[0, "band"] == "g"
+
+
+def test_sed_model_rows_roundtrip_review_db_and_overlay(tmp_path: Path) -> None:
+    db_path = tmp_path / "review.db"
+    fit = {col: None for col in SED_MODEL_FIT_COLUMNS}
+    fit.update({
+        "candidate_id": "cand-6",
+        "model_family": "Castelli/Kurucz 2004",
+        "teff_k": 5750.0,
+        "logg": 4.5,
+        "z": 0.02,
+        "av_fixed": 0.0,
+        "scale": 1.0,
+        "luminosity_lsun": 1.0,
+        "radius_rsun": 1.0,
+        "chi2": 1.2,
+        "reduced_chi2": 0.4,
+        "n_fit_points": 5,
+        "fit_lambda_min": 3500.0,
+        "fit_lambda_max": 9000.0,
+        "fit_bands_json": "[]",
+        "status": "ok",
+        "warning": "",
+    })
+    curves = pd.DataFrame([
+        {
+            "candidate_id": "cand-6",
+            "model_family": "Castelli/Kurucz 2004",
+            "wavelength_angstrom": wave,
+            "lambda_l_lambda": value,
+            "flux_lambda": value * 1.0e-45,
+            "teff_k": 5750.0,
+            "scale": 1.0,
+        }
+        for wave, value in [(3500.0, 1.0e33), (5500.0, 2.0e33), (9000.0, 8.0e32)]
+    ], columns=SED_MODEL_CURVE_COLUMNS)
+
+    with closing(db_connect(db_path)) as conn:
+        conn.execute(
+            "INSERT INTO candidates (candidate_id, payload_json, imported_at) VALUES (?, ?, ?)",
+            ("cand-6", "{}", "2026-05-14T00:00:00"),
+        )
+        assert detect_sed_model_status(conn, "cand-6") == "missing"
+        n_fit, n_curve = upsert_sed_model_results(conn, pd.DataFrame([fit]), curves)
+        assert n_fit == 1
+        assert n_curve == 3
+        assert detect_sed_model_status(conn, "cand-6") == "complete"
+        loaded_fits = load_sed_model_fits(conn, "cand-6")
+        loaded_curves = load_sed_model_curves(conn, "cand-6")
+
+    fig, _rows, warnings = build_sed_figure(
+        {"candidate_id": "cand-6", "distance_gspphot": 1000.0},
+        external_rows=pd.DataFrame([
+            {
+                "candidate_id": "cand-6",
+                "source": "Pan-STARRS",
+                "band": "g",
+                "mag": 17.2,
+                "mag_system": "AB",
+                "lambda_eff_angstrom": 4810.0,
+                "lambda_l_lambda": 1.5e33,
+            }
+        ]),
+        model_curve_rows=loaded_curves,
+        model_fit_rows=loaded_fits,
+    )
+
+    assert any("Castelli/Kurucz fit" in str(trace.name) for trace in fig.data)
+    assert any("CK fit" in warning for warning in warnings)

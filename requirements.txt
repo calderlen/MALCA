@@ -8,6 +8,7 @@ matplotlib
 astropy
 celerite2
 pyarrow
+pystellibs
 
 # Optional: visualization
 plotly

@@ -7,8 +7,9 @@ import math
 import sqlite3
 import time
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 import numpy as np
 import pandas as pd
@@ -17,6 +18,7 @@ from astropy import units as u
 
 
 SED_TABLE_NAME = "sed_photometry"
+VIZIER_QUERY_TIMEOUT_SEC = 30
 
 SED_COLUMNS = [
     "candidate_id",
@@ -117,10 +119,6 @@ for _b in [
     _bp("Gaia GSPC", "SDSS_r", "gspc_sdss_r", "gspc_sdss_r_err", "AB", 6231.0, None, 0.858, "SLOAN/SDSS.r", True),
     _bp("Gaia GSPC", "SDSS_i", "gspc_sdss_i", "gspc_sdss_i_err", "AB", 7625.0, None, 0.639, "SLOAN/SDSS.i", True),
     _bp("Gaia GSPC", "SDSS_z", "gspc_sdss_z", "gspc_sdss_z_err", "AB", 9134.0, None, 0.453, "SLOAN/SDSS.z", True),
-    _bp("Gaia GSPC", "PS1_g", "gspc_ps1_g", "gspc_ps1_g_err", "AB", 4810.0, None, 1.199, "PAN-STARRS/PS1.g", True),
-    _bp("Gaia GSPC", "PS1_r", "gspc_ps1_r", "gspc_ps1_r_err", "AB", 6170.0, None, 0.858, "PAN-STARRS/PS1.r", True),
-    _bp("Gaia GSPC", "PS1_i", "gspc_ps1_i", "gspc_ps1_i_err", "AB", 7520.0, None, 0.639, "PAN-STARRS/PS1.i", True),
-    _bp("Gaia GSPC", "PS1_z", "gspc_ps1_z", "gspc_ps1_z_err", "AB", 8660.0, None, 0.453, "PAN-STARRS/PS1.z", True),
     _bp("Gaia GSPC", "PS1_y", "gspc_ps1_y", "gspc_ps1_y_err", "AB", 9620.0, None, 0.385, "PAN-STARRS/PS1.y", True),
     _bp("Pan-STARRS", "g", "ps1_g", "ps1_g_err", "AB", 4810.0, None, 1.199, "PAN-STARRS/PS1.g"),
     _bp("Pan-STARRS", "r", "ps1_r", "ps1_r_err", "AB", 6170.0, None, 0.858, "PAN-STARRS/PS1.r"),
@@ -162,11 +160,11 @@ for _b in [
     _bp("VPHAS+", "r", "vphas_r", "vphas_r_err", "AB", 6231.0, None, 0.858),
     _bp("VPHAS+", "i", "vphas_i", "vphas_i_err", "AB", 7625.0, None, 0.639),
     _bp("VPHAS+", "Halpha", "vphas_ha", "vphas_ha_err", "AB", 6568.0, None, 0.815),
-    _bp("Spitzer SEIP", "IRAC1", "spitzer_irac1", "spitzer_irac1_err", "Vega", 35500.0, 280.9, 0.0, confusion_risk=True),
-    _bp("Spitzer SEIP", "IRAC2", "spitzer_irac2", "spitzer_irac2_err", "Vega", 44930.0, 179.7, 0.0, confusion_risk=True),
-    _bp("Spitzer SEIP", "IRAC3", "spitzer_irac3", "spitzer_irac3_err", "Vega", 57310.0, 115.0, 0.0, confusion_risk=True),
-    _bp("Spitzer SEIP", "IRAC4", "spitzer_irac4", "spitzer_irac4_err", "Vega", 78720.0, 64.13, 0.0, confusion_risk=True),
-    _bp("Spitzer SEIP", "MIPS24", "spitzer_mips24", "spitzer_mips24_err", "Vega", 235000.0, 7.17, 0.0, confusion_risk=True),
+    _bp("Spitzer SEIP", "IRAC1", "spitzer_irac1", "spitzer_irac1_err", "Jy", 35500.0, None, 0.0, confusion_risk=True),
+    _bp("Spitzer SEIP", "IRAC2", "spitzer_irac2", "spitzer_irac2_err", "Jy", 44930.0, None, 0.0, confusion_risk=True),
+    _bp("Spitzer SEIP", "IRAC3", "spitzer_irac3", "spitzer_irac3_err", "Jy", 57310.0, None, 0.0, confusion_risk=True),
+    _bp("Spitzer SEIP", "IRAC4", "spitzer_irac4", "spitzer_irac4_err", "Jy", 78720.0, None, 0.0, confusion_risk=True),
+    _bp("Spitzer SEIP", "MIPS24", "spitzer_mips24", "spitzer_mips24_err", "Jy", 235000.0, None, 0.0, confusion_risk=True),
     _bp("AKARI", "S9W", "akari_s9w", "akari_s9w_err", "Jy", 90000.0, None, 0.0, confusion_risk=True),
     _bp("AKARI", "L18W", "akari_l18w", "akari_l18w_err", "Jy", 180000.0, None, 0.0, confusion_risk=True),
     _bp("AKARI", "N60", "akari_n60", "akari_n60_err", "Jy", 650000.0, None, 0.0, confusion_risk=True),
@@ -217,6 +215,8 @@ SOURCE_COLORS = {
 
 
 def _safe_float(value: object) -> float | None:
+    if np.ma.is_masked(value):
+        return None
     try:
         if value is None or pd.isna(value):
             return None
@@ -228,6 +228,32 @@ def _safe_float(value: object) -> float | None:
     except (TypeError, ValueError):
         return None
     return out if math.isfinite(out) else None
+
+
+def _normalize_integer_id(value: object) -> str | None:
+    try:
+        if value is None or pd.isna(value):
+            return None
+    except Exception:
+        if value is None:
+            return None
+    if isinstance(value, (int, np.integer)):
+        return str(int(value))
+    if isinstance(value, (float, np.floating)):
+        if not math.isfinite(float(value)):
+            return None
+        return str(int(value))
+    text = str(value).strip()
+    if not text or text.lower() in {"nan", "<na>", "none", "--"}:
+        return None
+    if text.endswith(".0") and text[:-2].isdigit():
+        return text[:-2]
+    if "e" in text.lower():
+        try:
+            return str(int(Decimal(text)))
+        except (InvalidOperation, ValueError):
+            return text
+    return text
 
 
 def _to_bool_int(value: object) -> int:
@@ -337,7 +363,9 @@ def _row_from_bandpass(
     flux_lambda_err = None
     lambda_l_err = None
     merr = _safe_float(mag_err)
-    if merr is not None and merr > 0:
+    if merr is not None and merr <= 0:
+        merr = None
+    if merr is not None:
         frac = math.log(10.0) * 0.4 * merr
         flux_nu_err = abs(flux_nu) * frac
         flux_lambda_err = abs(flux_lambda) * frac
@@ -526,6 +554,8 @@ def build_sed_figure(
     *,
     candidate_id: str | None = None,
     external_rows: pd.DataFrame | Iterable[dict] | None = None,
+    model_curve_rows: pd.DataFrame | Iterable[dict] | None = None,
+    model_fit_rows: pd.DataFrame | Iterable[dict] | None = None,
     extinction_mode: str = "observed",
     theme: str | None = None,
 ) -> tuple[go.Figure, pd.DataFrame, list[str]]:
@@ -603,6 +633,59 @@ def build_sed_figure(
                 ),
             ))
 
+    if model_curve_rows is not None:
+        model_df = pd.DataFrame(model_curve_rows)
+    else:
+        model_df = pd.DataFrame()
+    if model_fit_rows is not None:
+        fit_df = pd.DataFrame(model_fit_rows)
+    else:
+        fit_df = pd.DataFrame()
+    if not fit_df.empty:
+        fit_status = str(fit_df.iloc[0].get("status") or "").strip()
+        fit_warning = str(fit_df.iloc[0].get("warning") or "").strip()
+        teff = _safe_float(fit_df.iloc[0].get("teff_k"))
+        chi2_nu = _safe_float(fit_df.iloc[0].get("reduced_chi2"))
+        n_fit = _safe_float(fit_df.iloc[0].get("n_fit_points"))
+        if fit_status == "ok":
+            details = []
+            if teff is not None:
+                details.append(f"Teff={teff:.0f} K")
+            if chi2_nu is not None:
+                details.append(f"chi2_nu={chi2_nu:.2g}")
+            if n_fit is not None:
+                details.append(f"n={int(n_fit)}")
+            warnings.append("CK fit: " + ", ".join(details) if details else "CK fit available.")
+        elif fit_status:
+            warnings.append(f"CK fit: {fit_status}" + (f" ({fit_warning})" if fit_warning else ""))
+
+    if not model_df.empty and y_col in model_df.columns and "wavelength_angstrom" in model_df.columns:
+        curve = model_df.copy()
+        curve["x"] = pd.to_numeric(curve["wavelength_angstrom"], errors="coerce")
+        curve["y"] = pd.to_numeric(curve[y_col], errors="coerce")
+        curve = curve[np.isfinite(curve["x"]) & np.isfinite(curve["y"]) & (curve["x"] > 0) & (curve["y"] > 0)]
+        if not curve.empty:
+            curve = curve.sort_values("x")
+            teff = _safe_float(curve.iloc[0].get("teff_k"))
+            name = "Castelli/Kurucz fit"
+            if teff is not None:
+                name += f" ({teff:.0f} K)"
+            model_color = "#111827" if str(theme or "black").strip().lower() == "white" else "#f8fafc"
+            fig.add_trace(go.Scatter(
+                x=curve["x"],
+                y=curve["y"],
+                mode="lines",
+                name=name,
+                line=dict(color=model_color, width=2.2),
+                opacity=0.95,
+                hovertemplate=(
+                    "<b>%{fullData.name}</b><br>"
+                    "lambda: %{x:.5g} A<br>"
+                    + ("lambda L_lambda: %{y:.4e} erg/s" if y_col == "lambda_l_lambda" else "F_lambda: %{y:.4e}")
+                    + "<extra></extra>"
+                ),
+            ))
+
     y_title = "lambda L_lambda [erg s^-1]" if y_col == "lambda_l_lambda" else "F_lambda [erg s^-1 cm^-2 A^-1]"
     fig.update_layout(
         title="Spectral Energy Distribution",
@@ -674,14 +757,25 @@ def _candidate_id_for_row(row: pd.Series) -> str:
     return str(row.name)
 
 
-def rows_from_candidate_frame(df: pd.DataFrame) -> pd.DataFrame:
+ProgressCallback = Callable[[str], None]
+
+
+def rows_from_candidate_frame(df: pd.DataFrame, progress_callback: ProgressCallback | None = None) -> pd.DataFrame:
     rows = []
-    for _, row in df.iterrows():
+    total = len(df)
+    for idx, (_, row) in enumerate(df.iterrows(), start=1):
+        if progress_callback and (idx == 1 or idx % 1000 == 0 or idx == total):
+            progress_callback(f"[SED] payload {idx}/{total}")
         payload = row.to_dict()
         rows.append(rows_from_payload(payload, candidate_id=_candidate_id_for_row(row), extinction_mode="observed"))
     if not rows:
         return pd.DataFrame(columns=SED_COLUMNS)
-    return pd.concat(rows, ignore_index=True) if any(not part.empty for part in rows) else pd.DataFrame(columns=SED_COLUMNS)
+    if not any(not part.empty for part in rows):
+        return pd.DataFrame(columns=SED_COLUMNS)
+    return pd.DataFrame(
+        [record for part in rows for record in part.to_dict("records")],
+        columns=SED_COLUMNS,
+    )
 
 
 def _try_requests_get_csv(url: str, timeout: int = 30) -> pd.DataFrame:
@@ -744,16 +838,34 @@ def _row_value(row: pd.Series, aliases: str | Iterable[str] | None) -> object:
     return None
 
 
+def _row_float_value(row: pd.Series, aliases: str | Iterable[str] | None) -> float | None:
+    if aliases is None:
+        return None
+    names = [aliases] if isinstance(aliases, str) else list(aliases)
+    for name in names:
+        value = _safe_float(_row_value(row, name))
+        if value is not None:
+            return value
+    return None
+
+
 def _ra_dec_from_row(row: pd.Series) -> tuple[float | None, float | None]:
     ra = _safe_float(_row_value(row, ("ra", "ra_deg", "RA", "RAJ2000", "RA_ICRS", "RAICRS")))
     dec = _safe_float(_row_value(row, ("dec", "dec_deg", "DEC", "DEJ2000", "DE_ICRS", "DEICRS")))
     return ra, dec
 
 
-def query_ps1_mean_photometry(df: pd.DataFrame, radius_arcsec: float = 1.5) -> pd.DataFrame:
+def query_ps1_mean_photometry(
+    df: pd.DataFrame,
+    radius_arcsec: float = 1.5,
+    progress_callback: ProgressCallback | None = None,
+) -> pd.DataFrame:
     """Fetch PS1 DR2 mean photometry from MAST, best effort."""
     rows: list[dict] = []
-    for _, item in df.iterrows():
+    total = len(df)
+    for idx, (_, item) in enumerate(df.iterrows(), start=1):
+        if progress_callback and (idx == 1 or idx % 500 == 0 or idx == total):
+            progress_callback(f"[SED] ps1 {idx}/{total}")
         ra, dec = _ra_dec_from_row(item)
         if ra is None or dec is None or dec < -30.5:
             continue
@@ -779,19 +891,30 @@ def query_ps1_mean_photometry(df: pd.DataFrame, radius_arcsec: float = 1.5) -> p
                 "y": (_safe_float(row.get("yMeanPSFMag")), _safe_float(row.get("yMeanPSFMagErr"))),
             }
             sep = _safe_float(row.get("distance"))
+            if sep is not None and sep <= radius_deg * 1.1:
+                sep *= 3600.0
             rows.extend(_rows_from_simple_mag_dict(cid, values, source="Pan-STARRS", distance_pc=distance_pc_from_payload(payload), sep_arcsec=sep))
         except Exception:
             continue
     return pd.DataFrame(rows, columns=SED_COLUMNS)
 
 
-def query_gaia_gspc_photometry(df: pd.DataFrame, chunk_size: int = 100) -> pd.DataFrame:
-    """Fetch Gaia DR3 GSPC synthetic SDSS/PS1 photometry, best effort."""
+def query_gaia_gspc_photometry(
+    df: pd.DataFrame,
+    chunk_size: int = 1000,
+    progress_callback: ProgressCallback | None = None,
+) -> pd.DataFrame:
+    """Fetch Gaia DR3 GSPC synthetic SDSS and PS1-y photometry, best effort."""
     ids = []
     id_to_payload: dict[str, dict] = {}
     for _, item in df.iterrows():
-        sid = str(item.get("gaia_id") or item.get("source_id") or "").strip()
-        if sid and sid.lower() not in {"nan", "<na>"}:
+        sid = None
+        for id_col in ("gaia_id", "source_id"):
+            candidate_sid = _normalize_integer_id(item.get(id_col))
+            if candidate_sid:
+                sid = candidate_sid
+                break
+        if sid:
             ids.append(sid)
             id_to_payload[sid] = item.to_dict()
     if not ids:
@@ -800,38 +923,50 @@ def query_gaia_gspc_photometry(df: pd.DataFrame, chunk_size: int = 100) -> pd.Da
     try:
         import pyvo
 
-        tap = pyvo.dal.TAPService("https://gaia.aip.de/tap")
+        tap = pyvo.dal.TAPService("https://gea.esac.esa.int/tap-server/tap")
+
+        def mag_err_from_flux(row: object, prefix: str) -> float | None:
+            flux = _safe_float(row[f"{prefix}_flux"])
+            flux_err = _safe_float(row[f"{prefix}_flux_error"])
+            if flux is None or flux <= 0 or flux_err is None or flux_err <= 0:
+                return None
+            return flux_err / flux / (0.4 * math.log(10.0))
+
         for start in range(0, len(ids), chunk_size):
+            if progress_callback:
+                progress_callback(f"[SED] gaia_gspc {min(start + chunk_size, len(ids))}/{len(ids)}")
             chunk = ids[start:start + chunk_size]
             id_list = ",".join(chunk)
             query = (
                 "SELECT source_id, "
-                "u_sdss_mag, u_sdss_mag_error, g_sdss_mag, g_sdss_mag_error, "
-                "r_sdss_mag, r_sdss_mag_error, i_sdss_mag, i_sdss_mag_error, z_sdss_mag, z_sdss_mag_error, "
-                "g_ps1_mag, g_ps1_mag_error, r_ps1_mag, r_ps1_mag_error, i_ps1_mag, i_ps1_mag_error, "
-                "z_ps1_mag, z_ps1_mag_error, y_ps1_mag, y_ps1_mag_error "
+                "u_sdss_mag, u_sdss_flux, u_sdss_flux_error, "
+                "g_sdss_mag, g_sdss_flux, g_sdss_flux_error, "
+                "r_sdss_mag, r_sdss_flux, r_sdss_flux_error, "
+                "i_sdss_mag, i_sdss_flux, i_sdss_flux_error, "
+                "z_sdss_mag, z_sdss_flux, z_sdss_flux_error, "
+                "y_ps1_mag, y_ps1_flux, y_ps1_flux_error "
                 "FROM gaiadr3.synthetic_photometry_gspc "
                 f"WHERE source_id IN ({id_list})"
             )
-            table = tap.search(query).to_table().to_pandas()
-            for _, row in table.iterrows():
-                sid = str(row.get("source_id")).strip()
+            table = tap.search(query).to_table()
+            for row in table:
+                sid = _normalize_integer_id(row["source_id"])
+                if not sid:
+                    continue
                 payload = id_to_payload.get(sid, {})
                 cid = str(payload.get("candidate_id") or payload.get("asas_sn_id") or sid)
                 values = {
-                    "SDSS_u": (_safe_float(row.get("u_sdss_mag")), _safe_float(row.get("u_sdss_mag_error"))),
-                    "SDSS_g": (_safe_float(row.get("g_sdss_mag")), _safe_float(row.get("g_sdss_mag_error"))),
-                    "SDSS_r": (_safe_float(row.get("r_sdss_mag")), _safe_float(row.get("r_sdss_mag_error"))),
-                    "SDSS_i": (_safe_float(row.get("i_sdss_mag")), _safe_float(row.get("i_sdss_mag_error"))),
-                    "SDSS_z": (_safe_float(row.get("z_sdss_mag")), _safe_float(row.get("z_sdss_mag_error"))),
-                    "PS1_g": (_safe_float(row.get("g_ps1_mag")), _safe_float(row.get("g_ps1_mag_error"))),
-                    "PS1_r": (_safe_float(row.get("r_ps1_mag")), _safe_float(row.get("r_ps1_mag_error"))),
-                    "PS1_i": (_safe_float(row.get("i_ps1_mag")), _safe_float(row.get("i_ps1_mag_error"))),
-                    "PS1_z": (_safe_float(row.get("z_ps1_mag")), _safe_float(row.get("z_ps1_mag_error"))),
-                    "PS1_y": (_safe_float(row.get("y_ps1_mag")), _safe_float(row.get("y_ps1_mag_error"))),
+                    "SDSS_u": (_safe_float(row["u_sdss_mag"]), mag_err_from_flux(row, "u_sdss")),
+                    "SDSS_g": (_safe_float(row["g_sdss_mag"]), mag_err_from_flux(row, "g_sdss")),
+                    "SDSS_r": (_safe_float(row["r_sdss_mag"]), mag_err_from_flux(row, "r_sdss")),
+                    "SDSS_i": (_safe_float(row["i_sdss_mag"]), mag_err_from_flux(row, "i_sdss")),
+                    "SDSS_z": (_safe_float(row["z_sdss_mag"]), mag_err_from_flux(row, "z_sdss")),
+                    "PS1_y": (_safe_float(row["y_ps1_mag"]), mag_err_from_flux(row, "y_ps1")),
                 }
                 rows.extend(_rows_from_simple_mag_dict(cid, values, source="Gaia GSPC", distance_pc=distance_pc_from_payload(payload), quality_flags="synthetic_from_gaia_xp"))
-    except Exception:
+    except Exception as exc:
+        if progress_callback:
+            progress_callback(f"[SED] gaia_gspc failed: {exc}")
         return pd.DataFrame(columns=SED_COLUMNS)
     return pd.DataFrame(rows, columns=SED_COLUMNS)
 
@@ -853,9 +988,6 @@ VIZIER_SOURCE_SPECS: dict[str, VizierSourceSpec] = {
     "skymapper": VizierSourceSpec("SkyMapper", "II/379/smssdr4", 1.5, "RAICRS", "DEICRS", {
         "u": ("uPSF", "e_uPSF"), "v": ("vPSF", "e_vPSF"), "g": ("gPSF", "e_gPSF"), "r": ("rPSF", "e_rPSF"), "i": ("iPSF", "e_iPSF"), "z": ("zPSF", "e_zPSF"),
     }),
-    "decaps": VizierSourceSpec("DECaPS", "II/376/decaps2", 1.2, "RA_ICRS", "DE_ICRS", {
-        "g": ("gmag", "e_gmag"), "r": ("rmag", "e_rmag"), "i": ("imag", "e_imag"), "z": ("zmag", "e_zmag"), "Y": ("Ymag", "e_Ymag"),
-    }),
     "des": VizierSourceSpec("DES", "II/371/des_dr2", 1.2, "RA_ICRS", "DE_ICRS", {
         "g": (("WAVG_MAG_PSF_G", "MAG_PSF_G", "gmag"), ("WAVG_MAGERR_PSF_G", "MAGERR_PSF_G", "e_gmag")),
         "r": (("WAVG_MAG_PSF_R", "MAG_PSF_R", "rmag"), ("WAVG_MAGERR_PSF_R", "MAGERR_PSF_R", "e_rmag")),
@@ -866,19 +998,28 @@ VIZIER_SOURCE_SPECS: dict[str, VizierSourceSpec] = {
     "ukidss": VizierSourceSpec("UKIDSS", "II/319/las9", 1.2, "RAJ2000", "DEJ2000", {
         "Y": ("Ymag", "e_Ymag"), "J": ("Jmag", "e_Jmag"), "H": ("Hmag", "e_Hmag"), "K": ("Kmag", "e_Kmag"),
     }),
-    "vista": VizierSourceSpec("VISTA/VVV", "II/348/vvv2", 1.2, "RAJ2000", "DEJ2000", {
-        "Z": ("Zmag", "e_Zmag"), "Y": ("Ymag", "e_Ymag"), "J": ("Jmag", "e_Jmag"), "H": ("Hmag", "e_Hmag"), "Ks": ("Ksmag", "e_Ksmag"),
+    "vista": VizierSourceSpec("VISTA/VVV", "II/376/vvv4", 1.2, "RAJ2000", "DEJ2000", {
+        "Z": (("Z1ap3", "Z2ap3", "Zmag3"), ("e_Z1ap3", "e_Z2ap3", "e_Zmag3")),
+        "Y": (("Y1ap3", "Y2ap3", "Ymag3"), ("e_Y1ap3", "e_Y2ap3", "e_Ymag3")),
+        "J": (("J1ap3", "J2ap3", "Jmag3"), ("e_J1ap3", "e_J2ap3", "e_Jmag3")),
+        "H": (("H1ap3", "H2ap3", "Hmag3"), ("e_H1ap3", "e_H2ap3", "e_Hmag3")),
+        "Ks": (("Ks1ap3", "Ks2ap3", "Ksmag3"), ("e_Ks1ap3", "e_Ks2ap3", "e_Ksmag3")),
     }),
-    "vphas": VizierSourceSpec("VPHAS+", "II/383/vphas2", 1.0, "RAJ2000", "DEJ2000", {
-        "u": ("umag", "e_umag"), "g": ("gmag", "e_gmag"), "r": ("rmag", "e_rmag"), "i": ("imag", "e_imag"), "Halpha": ("Ham", "e_Ham"),
-    }),
-    "spitzer": VizierSourceSpec("Spitzer SEIP", "II/368/sstsl2", 2.0, "RAJ2000", "DEJ2000", {
-        "IRAC1": ("I1mag", "e_I1mag"), "IRAC2": ("I2mag", "e_I2mag"), "IRAC3": ("I3mag", "e_I3mag"), "IRAC4": ("I4mag", "e_I4mag"), "MIPS24": ("M24mag", "e_M24mag"),
+    "vphas": VizierSourceSpec("VPHAS+", "II/386/vphasplus32", 1.0, "RAJ2000", "DEJ2000", {
+        "u": ("uap3", "e_uap3"),
+        "g": ("gap3", "e_gap3"),
+        "r": ("rap3", "e_rap3"),
+        "i": ("iap3", "e_iap3"),
+        "Halpha": ("Haap3", "e_Haap3"),
     }),
 }
 
 
-def query_vizier_source(df: pd.DataFrame, key: str) -> pd.DataFrame:
+def query_vizier_source(
+    df: pd.DataFrame,
+    key: str,
+    progress_callback: ProgressCallback | None = None,
+) -> pd.DataFrame:
     """Fetch one VizieR-backed source spec by nearest cone match, best effort."""
     spec = VIZIER_SOURCE_SPECS[key]
     rows: list[dict] = []
@@ -889,7 +1030,11 @@ def query_vizier_source(df: pd.DataFrame, key: str) -> pd.DataFrame:
         return pd.DataFrame(columns=SED_COLUMNS)
 
     viz = Vizier(columns=["**"], row_limit=5)
-    for _, item in df.iterrows():
+    viz.TIMEOUT = VIZIER_QUERY_TIMEOUT_SEC
+    total = len(df)
+    for idx, (_, item) in enumerate(df.iterrows(), start=1):
+        if progress_callback and (idx == 1 or idx % 500 == 0 or idx == total):
+            progress_callback(f"[SED] {key} {idx}/{total}")
         ra, dec = _ra_dec_from_row(item)
         if ra is None or dec is None:
             continue
@@ -909,7 +1054,7 @@ def query_vizier_source(df: pd.DataFrame, key: str) -> pd.DataFrame:
                 continue
             row = result.iloc[0]
             values = {
-                band: (_safe_float(_row_value(row, mag_col)), _safe_float(_row_value(row, err_col)) if err_col else None)
+                band: (_row_float_value(row, mag_col), _row_float_value(row, err_col) if err_col else None)
                 for band, (mag_col, err_col) in spec.bands.items()
             }
             sep_arcsec = None
@@ -925,13 +1070,96 @@ def query_vizier_source(df: pd.DataFrame, key: str) -> pd.DataFrame:
                 sep_arcsec=sep_arcsec,
             ))
             time.sleep(0.02)
-        except Exception:
+        except Exception as exc:
+            if progress_callback and idx == 1:
+                progress_callback(f"[SED] {key} first lookup failed: {exc}")
             continue
     return pd.DataFrame(rows, columns=SED_COLUMNS)
 
 
-def query_des_photometry(df: pd.DataFrame) -> pd.DataFrame:
-    return query_vizier_source(df, "des")
+def query_decaps_photometry(
+    df: pd.DataFrame,
+    radius_arcsec: float = 1.2,
+    progress_callback: ProgressCallback | None = None,
+) -> pd.DataFrame:
+    """Fetch DECaPS DR2 mean photometry from NOIRLab Astro Data Lab TAP."""
+    rows: list[dict] = []
+    try:
+        import pyvo
+    except Exception:
+        return pd.DataFrame(columns=SED_COLUMNS)
+
+    tap = pyvo.dal.TAPService("https://datalab.noirlab.edu/tap")
+    total = len(df)
+    radius_deg = float(radius_arcsec) / 3600.0
+    for idx, (_, item) in enumerate(df.iterrows(), start=1):
+        if progress_callback and (idx == 1 or idx % 500 == 0 or idx == total):
+            progress_callback(f"[SED] decaps {idx}/{total}")
+        ra, dec = _ra_dec_from_row(item)
+        if ra is None or dec is None:
+            continue
+        cid = _candidate_id_for_row(item)
+        payload = item.to_dict()
+        ra_pad = radius_deg / max(math.cos(math.radians(dec)), 0.01)
+        ra_min = ra - ra_pad
+        ra_max = ra + ra_pad
+        if ra_min < 0:
+            ra_clause = f"(ra >= {ra_min + 360.0} OR ra <= {ra_max})"
+        elif ra_max >= 360.0:
+            ra_clause = f"(ra >= {ra_min} OR ra <= {ra_max - 360.0})"
+        else:
+            ra_clause = f"ra BETWEEN {ra_min} AND {ra_max}"
+        query = (
+            "SELECT TOP 20 ra, dec, "
+            "mean_mag_g, median_mag_g, mean_cmag_g, median_cmag_g, "
+            "mean_mag_r, median_mag_r, mean_cmag_r, median_cmag_r, "
+            "mean_mag_i, median_mag_i, mean_cmag_i, median_cmag_i, "
+            "mean_mag_z, median_mag_z, mean_cmag_z, median_cmag_z, "
+            "mean_mag_y, median_mag_y, mean_cmag_y, median_cmag_y, "
+            f"((ra-({ra}))*(ra-({ra})) + (dec-({dec}))*(dec-({dec}))) AS dist2 "
+            "FROM decaps_dr2.object "
+            f"WHERE {ra_clause} "
+            f"AND dec BETWEEN {dec - radius_deg} AND {dec + radius_deg} "
+            "ORDER BY dist2 ASC"
+        )
+        try:
+            result = tap.search(query).to_table().to_pandas()
+            if result.empty:
+                continue
+            for _, row in result.iterrows():
+                values = {
+                    "g": (_row_float_value(row, ("mean_mag_g", "median_mag_g", "mean_cmag_g", "median_cmag_g")), None),
+                    "r": (_row_float_value(row, ("mean_mag_r", "median_mag_r", "mean_cmag_r", "median_cmag_r")), None),
+                    "i": (_row_float_value(row, ("mean_mag_i", "median_mag_i", "mean_cmag_i", "median_cmag_i")), None),
+                    "z": (_row_float_value(row, ("mean_mag_z", "median_mag_z", "mean_cmag_z", "median_cmag_z")), None),
+                    "Y": (_row_float_value(row, ("mean_mag_y", "median_mag_y", "mean_cmag_y", "median_cmag_y")), None),
+                }
+                sep_arcsec = None
+                match_ra = _safe_float(row.get("ra"))
+                match_dec = _safe_float(row.get("dec"))
+                if match_ra is not None and match_dec is not None:
+                    dra = (match_ra - ra) * math.cos(math.radians(dec))
+                    ddec = match_dec - dec
+                    sep_arcsec = math.hypot(dra, ddec) * 3600.0
+                candidate_rows = _rows_from_simple_mag_dict(
+                    cid,
+                    values,
+                    source="DECaPS",
+                    distance_pc=distance_pc_from_payload(payload),
+                    sep_arcsec=sep_arcsec,
+                )
+                if candidate_rows:
+                    rows.extend(candidate_rows)
+                    break
+        except Exception as exc:
+            if progress_callback and idx == 1:
+                progress_callback(f"[SED] decaps first lookup failed: {exc}")
+            continue
+    return pd.DataFrame(rows, columns=SED_COLUMNS)
+
+
+def query_des_photometry(df: pd.DataFrame, progress_callback: ProgressCallback | None = None) -> pd.DataFrame:
+    return query_vizier_source(df, "des", progress_callback=progress_callback)
 
 
 @dataclass(frozen=True)
@@ -940,25 +1168,34 @@ class VizierFluxSpec:
     catalog: str
     radius_arcsec: float
     bands: dict[str, tuple[str | tuple[str, ...], str | tuple[str, ...] | None]]
+    flux_scale_to_jy: float = 1.0
+    error_is_percent: bool = False
 
 
 VIZIER_FLUX_SPECS: dict[str, VizierFluxSpec] = {
+    "spitzer": VizierFluxSpec("Spitzer SEIP", "II/368/sstsl2", 2.0, {
+        "IRAC1": (("F3.6Ap1", "F3.6Ap2"), ("e_F3.6Ap1", "e_F3.6Ap2")),
+        "IRAC2": (("F4.5Ap1", "F4.5Ap2"), ("e_F4.5Ap1", "e_F4.5Ap2")),
+        "IRAC3": (("F5.8Ap1", "F5.8Ap2"), ("e_F5.8Ap1", "e_F5.8Ap2")),
+        "IRAC4": (("F8.0Ap1", "F8.0Ap2"), ("e_F8.0Ap1", "e_F8.0Ap2")),
+        "MIPS24": (("F24-PSF", "F24-Ap"), ("e_F24-PSF", "e_F24-Ap")),
+    }, flux_scale_to_jy=1.0e-6),
     "akari": VizierFluxSpec("AKARI", "II/297/irc", 5.0, {
         "S9W": (("S9W", "F09", "Flux9"), ("e_S9W", "e_F09", "e_Flux9")),
         "L18W": (("L18W", "F18", "Flux18"), ("e_L18W", "e_F18", "e_Flux18")),
     }),
     "akari_fis": VizierFluxSpec("AKARI", "II/298/fis", 20.0, {
-        "N60": (("F65", "N60", "Flux65"), ("e_F65", "e_N60")),
-        "WIDE-S": (("F90", "WIDES", "Flux90"), ("e_F90", "e_WIDES")),
-        "WIDE-L": (("F140", "WIDEL", "Flux140"), ("e_F140", "e_WIDEL")),
-        "N160": (("F160", "N160", "Flux160"), ("e_F160", "e_N160")),
+        "N60": (("S65", "F65", "N60", "Flux65"), ("e_S65", "e_F65", "e_N60")),
+        "WIDE-S": (("S90", "F90", "WIDES", "Flux90"), ("e_S90", "e_F90", "e_WIDES")),
+        "WIDE-L": (("S140", "F140", "WIDEL", "Flux140"), ("e_S140", "e_F140", "e_WIDEL")),
+        "N160": (("S160", "F160", "N160", "Flux160"), ("e_S160", "e_F160", "e_N160")),
     }),
     "iras": VizierFluxSpec("IRAS", "II/125/main", 30.0, {
-        "12": (("F12", "f12"), ("e_F12",)),
-        "25": (("F25", "f25"), ("e_F25",)),
-        "60": (("F60", "f60"), ("e_F60",)),
-        "100": (("F100", "f100"), ("e_F100",)),
-    }),
+        "12": (("Fnu_12", "F12", "f12"), ("e_Fnu_12", "e_F12")),
+        "25": (("Fnu_25", "F25", "f25"), ("e_Fnu_25", "e_F25")),
+        "60": (("Fnu_60", "F60", "f60"), ("e_Fnu_60", "e_F60")),
+        "100": (("Fnu_100", "F100", "f100"), ("e_Fnu_100", "e_F100")),
+    }, error_is_percent=True),
     "herschel70": VizierFluxSpec("Herschel", "VIII/106/hppsc070", 8.0, {
         "PACS70": (("Flux", "flux", "F70", "Fnu"), ("e_Flux", "e_flux", "e_F70")),
     }),
@@ -971,7 +1208,11 @@ VIZIER_FLUX_SPECS: dict[str, VizierFluxSpec] = {
 }
 
 
-def query_flux_catalog_source(df: pd.DataFrame, source_key: str) -> pd.DataFrame:
+def query_flux_catalog_source(
+    df: pd.DataFrame,
+    source_key: str,
+    progress_callback: ProgressCallback | None = None,
+) -> pd.DataFrame:
     """Fetch a flux-density catalog source from VizieR, best effort."""
     requested_keys = {
         "akari": ("akari", "akari_fis"),
@@ -986,7 +1227,11 @@ def query_flux_catalog_source(df: pd.DataFrame, source_key: str) -> pd.DataFrame
 
     out: list[dict] = []
     viz = Vizier(columns=["**"], row_limit=5)
-    for _, item in df.iterrows():
+    viz.TIMEOUT = VIZIER_QUERY_TIMEOUT_SEC
+    total = len(df)
+    for idx, (_, item) in enumerate(df.iterrows(), start=1):
+        if progress_callback and (idx == 1 or idx % 500 == 0 or idx == total):
+            progress_callback(f"[SED] {source_key} {idx}/{total}")
         ra, dec = _ra_dec_from_row(item)
         if ra is None or dec is None:
             continue
@@ -1009,18 +1254,23 @@ def query_flux_catalog_source(df: pd.DataFrame, source_key: str) -> pd.DataFrame
                     continue
                 row = result.iloc[0]
                 for band, (flux_aliases, err_aliases) in spec.bands.items():
-                    flux = _safe_float(_row_value(row, flux_aliases))
-                    if flux is None or flux <= 0:
+                    raw_flux = _row_float_value(row, flux_aliases)
+                    if raw_flux is None or raw_flux <= 0:
                         continue
+                    flux = raw_flux * float(spec.flux_scale_to_jy)
                     bp = bandpass_for(spec.source, band)
                     if bp is None:
                         continue
-                    flux_err = _safe_float(_row_value(row, err_aliases))
+                    raw_flux_err = _row_float_value(row, err_aliases)
+                    if spec.error_is_percent:
+                        flux_err = flux * raw_flux_err / 100.0 if raw_flux_err is not None and raw_flux_err > 0 else None
+                    else:
+                        flux_err = raw_flux_err * float(spec.flux_scale_to_jy) if raw_flux_err is not None and raw_flux_err > 0 else None
                     sed_row = _row_from_bandpass(
                         candidate_id=cid,
                         bandpass=bp,
                         mag=flux,
-                        mag_err=(flux_err / flux / (0.4 * math.log(10.0)) if flux_err is not None and flux_err > 0 else None),
+                        mag_err=(flux_err / flux / (0.4 * math.log(10.0)) if flux_err is not None else None),
                         distance_pc=distance_pc_from_payload(payload),
                         av=None,
                         dereddened=False,
@@ -1034,7 +1284,9 @@ def query_flux_catalog_source(df: pd.DataFrame, source_key: str) -> pd.DataFrame
                         sed_row["mag_system"] = "AB"
                         out.append(sed_row)
                 time.sleep(0.02)
-            except Exception:
+            except Exception as exc:
+                if progress_callback and idx == 1:
+                    progress_callback(f"[SED] {source_key} first lookup failed: {exc}")
                 continue
     return pd.DataFrame(out, columns=SED_COLUMNS)
 
@@ -1043,25 +1295,27 @@ CATALOG_FETCHERS = {
     "payload": rows_from_candidate_frame,
     "gaia_gspc": query_gaia_gspc_photometry,
     "ps1": query_ps1_mean_photometry,
-    "sdss": lambda df: query_vizier_source(df, "sdss"),
-    "skymapper": lambda df: query_vizier_source(df, "skymapper"),
+    "sdss": lambda df, progress_callback=None: query_vizier_source(df, "sdss", progress_callback=progress_callback),
+    "skymapper": lambda df, progress_callback=None: query_vizier_source(df, "skymapper", progress_callback=progress_callback),
     "des": query_des_photometry,
-    "decaps": lambda df: query_vizier_source(df, "decaps"),
-    "ukidss": lambda df: query_vizier_source(df, "ukidss"),
-    "vista": lambda df: query_vizier_source(df, "vista"),
-    "vphas": lambda df: query_vizier_source(df, "vphas"),
-    "spitzer": lambda df: query_vizier_source(df, "spitzer"),
-    "akari": lambda df: query_flux_catalog_source(df, "akari"),
-    "iras": lambda df: query_flux_catalog_source(df, "iras"),
-    "herschel": lambda df: query_flux_catalog_source(df, "herschel"),
+    "decaps": query_decaps_photometry,
+    "ukidss": lambda df, progress_callback=None: query_vizier_source(df, "ukidss", progress_callback=progress_callback),
+    "vista": lambda df, progress_callback=None: query_vizier_source(df, "vista", progress_callback=progress_callback),
+    "vphas": lambda df, progress_callback=None: query_vizier_source(df, "vphas", progress_callback=progress_callback),
+    "spitzer": lambda df, progress_callback=None: query_flux_catalog_source(df, "spitzer", progress_callback=progress_callback),
+    "akari": lambda df, progress_callback=None: query_flux_catalog_source(df, "akari", progress_callback=progress_callback),
+    "iras": lambda df, progress_callback=None: query_flux_catalog_source(df, "iras", progress_callback=progress_callback),
+    "herschel": lambda df, progress_callback=None: query_flux_catalog_source(df, "herschel", progress_callback=progress_callback),
 }
 
 ALL_CATALOG_SOURCES = tuple(CATALOG_FETCHERS)
 FAR_IR_CATALOG_SOURCES = ("akari", "iras", "herschel")
-DEFAULT_PIPELINE_SED_SOURCES = tuple(
-    source for source in ALL_CATALOG_SOURCES
-    if source not in FAR_IR_CATALOG_SOURCES
-)
+DEFAULT_PIPELINE_SED_SOURCES = ALL_CATALOG_SOURCES
+
+
+def _include_mandatory_far_ir(sources: Iterable[str]) -> tuple[str, ...]:
+    requested = tuple(str(x).strip().lower() for x in sources if str(x).strip())
+    return requested + tuple(source for source in FAR_IR_CATALOG_SOURCES if source not in requested)
 
 
 def resolve_sed_sources(sources: Iterable[str] | str = "default") -> tuple[str, ...]:
@@ -1072,27 +1326,44 @@ def resolve_sed_sources(sources: Iterable[str] | str = "default") -> tuple[str, 
         if text == "all":
             return ALL_CATALOG_SOURCES
         if text in {"far_ir", "far-ir", "farir"}:
-            return FAR_IR_CATALOG_SOURCES
+            return ALL_CATALOG_SOURCES
         requested = tuple(x.strip().lower() for x in text.split(",") if x.strip())
     else:
         requested = tuple(str(x).strip().lower() for x in sources if str(x).strip())
-    return requested
+    return _include_mandatory_far_ir(requested)
 
 
-def fetch_sed_photometry(df: pd.DataFrame, sources: Iterable[str] | str = "default") -> pd.DataFrame:
+def fetch_sed_photometry(
+    df: pd.DataFrame,
+    sources: Iterable[str] | str = "default",
+    progress_callback: ProgressCallback | None = None,
+) -> pd.DataFrame:
     requested = resolve_sed_sources(sources)
     frames = []
-    for key in requested:
+    for idx, key in enumerate(requested, start=1):
         fetcher = CATALOG_FETCHERS.get(key)
         if fetcher is None:
+            if progress_callback:
+                progress_callback(f"[SED] skipping unknown source {key}")
             continue
+        started = time.perf_counter()
+        if progress_callback:
+            progress_callback(f"[SED] source {idx}/{len(requested)} {key}: start")
         try:
-            part = fetcher(df)
-        except Exception:
+            part = fetcher(df, progress_callback=progress_callback)
+        except Exception as exc:
+            if progress_callback:
+                progress_callback(f"[SED] source {key}: failed ({exc})")
             part = pd.DataFrame(columns=SED_COLUMNS)
         if part is not None and not part.empty:
             frames.append(part)
+        if progress_callback:
+            n_rows = 0 if part is None else len(part)
+            progress_callback(f"[SED] source {idx}/{len(requested)} {key}: {n_rows} rows in {time.perf_counter() - started:.1f}s")
     if not frames:
         return pd.DataFrame(columns=SED_COLUMNS)
-    out = pd.concat(frames, ignore_index=True)
+    out = pd.DataFrame(
+        [record for frame in frames for record in frame.to_dict("records")],
+        columns=SED_COLUMNS,
+    )
     return out.drop_duplicates(subset=["candidate_id", "source", "band"], keep="first").reset_index(drop=True)

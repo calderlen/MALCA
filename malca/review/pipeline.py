@@ -103,11 +103,17 @@ STAGE_SIGNATURES: dict[str, list[str]] = {
         "vetting_likely_known",
     ],
     "external_lcs": [
-        "atlas_has_phot",
         "ztf_lc_n_det",
         "gaia_epoch_lc_n_g",
+        "tess_n_sectors",
+        "neowise_n_epochs",
         "ps1_lc_n_points",
         "crts_lc_n_points",
+    ],
+    "multi_survey_features": [
+        "ms_feature_status",
+        "ms_event_type",
+        "ms_event_t0_jd",
     ],
 }
 
@@ -121,12 +127,29 @@ def detect_pipeline_status(payload: dict) -> dict[str, str]:
       "missing"   = no signature columns present
     """
     result = {}
+
+    def _is_present(value: object) -> bool:
+        if value is None:
+            return False
+        try:
+            return not bool(pd.isna(value))
+        except Exception:
+            return True
+
     for stage, sig_cols in STAGE_SIGNATURES.items():
-        present = sum(
-            1 for c in sig_cols
-            if c in payload and payload[c] is not None
-            and not (isinstance(payload[c], float) and np.isnan(payload[c]))
-        )
+        if stage == "multi_survey_features":
+            status_value = str(payload.get("ms_feature_status") or "").strip().lower()
+            event_type = str(payload.get("ms_event_type") or "").strip()
+            has_t0 = _is_present(payload.get("ms_event_t0_jd"))
+            if not status_value:
+                result[stage] = "missing"
+            elif status_value == "ok":
+                result[stage] = "complete" if event_type and has_t0 else "partial"
+            else:
+                result[stage] = "complete" if event_type else "partial"
+            continue
+
+        present = sum(1 for c in sig_cols if c in payload and _is_present(payload[c]))
         if present == 0:
             result[stage] = "missing"
         elif present == len(sig_cols):
@@ -149,6 +172,21 @@ def detect_sed_photometry_status(conn: sqlite3.Connection, candidate_id: str, pa
     if count > 0:
         return "complete"
     if isinstance(payload, dict) and bool(payload.get("sed_photometry_checked")):
+        return "complete"
+    return "missing"
+
+
+def detect_sed_model_status(conn: sqlite3.Connection, candidate_id: str, payload: dict | None = None) -> str:
+    """Return completion status for the SED model sidecar tables."""
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM sed_model_fits WHERE candidate_id = ?",
+            (str(candidate_id),),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return "missing"
+    count = int(row[0] or 0) if row else 0
+    if count > 0:
         return "complete"
     return "missing"
 
@@ -181,6 +219,7 @@ def run_missing_stages(
     # 2. Detect current status
     status = detect_pipeline_status(payload)
     status["sed_photometry"] = detect_sed_photometry_status(conn, candidate_id, payload)
+    status["sed_model_fit"] = detect_sed_model_status(conn, candidate_id, payload)
     stages_run: list[str] = []
 
     def p(msg: str):
@@ -240,6 +279,21 @@ def run_missing_stages(
         stages_run.append("sed_photometry")
         mark_stage_complete("sed_photometry")
 
+    if should_run("sed_model_fit"):
+        p("Fitting SED atmosphere model...")
+        n_fit_rows, n_curve_rows = _run_sed_model_fit_stage(
+            conn,
+            candidate_id,
+            payload,
+            p,
+            replace=("sed_model_fit" in force),
+        )
+        payload["sed_model_fit_checked"] = True
+        payload["sed_model_fit_n_rows"] = int(n_fit_rows)
+        payload["sed_model_curve_n_rows"] = int(n_curve_rows)
+        stages_run.append("sed_model_fit")
+        mark_stage_complete("sed_model_fit")
+
     if should_run("vetting"):
         ra = payload.get("ra_deg")
         dec = payload.get("dec_deg")
@@ -257,6 +311,12 @@ def run_missing_stages(
             _run_external_lcs_stage(payload, output_dir=_resolve_output_dir(conn, candidate_id), p=p)
             stages_run.append("external_lcs")
             mark_stage_complete("external_lcs")
+
+    if should_run("multi_survey_features"):
+        p("Computing multi-survey features...")
+        _run_multi_survey_features_stage(payload, output_dir=_resolve_output_dir(conn, candidate_id), p=p)
+        stages_run.append("multi_survey_features")
+        mark_stage_complete("multi_survey_features")
 
     return stages_run
 
@@ -386,7 +446,10 @@ def _run_sed_photometry_stage(
         df = pd.DataFrame([payload])
         if "candidate_id" not in df.columns:
             df["candidate_id"] = str(candidate_id)
-        sed_rows = _run_with_progress_capture(lambda: fetch_sed_photometry(df, sources=sources), p)
+        sed_rows = _run_with_progress_capture(
+            lambda: fetch_sed_photometry(df, sources=sources, progress_callback=p),
+            p,
+        )
         if replace:
             conn.execute("DELETE FROM sed_photometry WHERE candidate_id = ?", (str(candidate_id),))
             conn.commit()
@@ -398,6 +461,49 @@ def _run_sed_photometry_stage(
         if p: p(f"SED photometry stage failed: {e}")
         else: print(f"[pipeline] SED photometry stage failed: {e}")
         return 0
+
+
+def _run_sed_model_fit_stage(
+    conn: sqlite3.Connection,
+    candidate_id: str,
+    payload: dict,
+    p: Callable | None = None,
+    *,
+    replace: bool = False,
+) -> tuple[int, int]:
+    """Run Castelli/Kurucz SED atmosphere fitting for one candidate."""
+    try:
+        from malca.review.sed import load_sed_rows
+        from malca.sed_model import fit_sed_models, upsert_sed_model_results
+
+        sed_rows = load_sed_rows(conn, str(candidate_id))
+        if sed_rows.empty:
+            if p:
+                p("SED model: no SED photometry rows available")
+            return 0, 0
+        df = pd.DataFrame([payload])
+        if "candidate_id" not in df.columns:
+            df["candidate_id"] = str(candidate_id)
+        fits, curves = _run_with_progress_capture(
+            lambda: fit_sed_models(df, sed_rows, progress_callback=p),
+            p,
+        )
+        n_fit_rows, n_curve_rows = upsert_sed_model_results(
+            conn,
+            fits,
+            curves,
+            replace_candidate_ids=[str(candidate_id)] if replace else None,
+        )
+        if p:
+            ok = 0
+            if isinstance(fits, pd.DataFrame) and "status" in fits.columns:
+                ok = int((fits["status"].astype(str) == "ok").sum())
+            p(f"SED model: {ok}/{n_fit_rows} fits ok; {n_curve_rows} curve rows")
+        return int(n_fit_rows), int(n_curve_rows)
+    except Exception as e:
+        if p: p(f"SED model fit stage failed: {e}")
+        else: print(f"[pipeline] SED model fit stage failed: {e}")
+        return 0, 0
 
 
 def _run_vetting_stage(payload: dict, p: Callable | None = None) -> None:
@@ -453,10 +559,11 @@ def _run_external_lcs_stage(payload: dict, output_dir: Path, p: Callable | None 
             lambda: fetch_external_lcs(
                 df,
                 output_dir=output_dir,
-                run_atlas=True,
+                run_atlas=False,
                 run_ztf=True,
                 run_gaia_epoch=True,
-                run_tess=False,
+                run_tess=True,
+                run_neowise=True,
                 run_kepler=False,
                 run_aavso=False,
                 run_ps1=True,
@@ -473,3 +580,32 @@ def _run_external_lcs_stage(payload: dict, output_dir: Path, p: Callable | None 
     except Exception as e:
         if p: p(f"External LCs stage failed: {e}")
         else: print(f"[pipeline] External LCs stage failed: {e}")
+
+
+def _run_multi_survey_features_stage(payload: dict, output_dir: Path, p: Callable | None = None) -> None:
+    """Compute event-relative multi-survey features for a 1-row payload."""
+    try:
+        from malca.multi_survey_features import MS_FEATURE_COLUMNS, compute_multi_survey_features
+
+        df = pd.DataFrame([payload])
+        df_out = _run_with_progress_capture(
+            lambda: compute_multi_survey_features(df, external_lc_dir=output_dir),
+            p,
+        )
+        if isinstance(df_out, pd.DataFrame) and not df_out.empty:
+            row = df_out.iloc[0].to_dict()
+            for key in MS_FEATURE_COLUMNS:
+                value = row.get(key)
+                if value is None:
+                    payload[key] = None
+                    continue
+                try:
+                    if pd.isna(value):
+                        payload[key] = None
+                        continue
+                except Exception:
+                    pass
+                payload[key] = value
+    except Exception as e:
+        if p: p(f"Multi-survey features stage failed: {e}")
+        else: print(f"[pipeline] Multi-survey features stage failed: {e}")

@@ -217,6 +217,7 @@ RUN_REUSE_PARAM_ATTRS = (
     "characterize_unwise",
     "run_sed_photometry",
     "sed_sources",
+    "fit_atmosphere",
     "run_classify",
     "run_enrich",
     "enrich_compute_ls",
@@ -262,6 +263,7 @@ RUN_REUSE_CODE_FILES = (
     "enrich/neighbor.py",
     "enrich/spectra.py",
     "review/sed.py",
+    "sed_model.py",
     "sed_photometry.py",
     "vetting.py",
 )
@@ -405,6 +407,7 @@ PIPELINE_CONFIG_DEFAULTS: dict[str, Any] = {
     "run_dust": True,
     "run_sed_photometry": True,
     "sed_sources": "default",
+    "fit_atmosphere": True,
     "run_classify": True,
     "run_enrich": True,
     "enrich_compute_ls": False,
@@ -901,6 +904,8 @@ def export_bundle_zip(bundle_zip: Path, out_dir: Path, include_all: bool = False
         "results/lc_events_neighbors.parquet",
         "results/lc_events_spectra.parquet",
         "results/sed_photometry.parquet",
+        "results/sed_model_fits.parquet",
+        "results/sed_model_curves.parquet",
     ]
     if mag_bin_tag:
         include_rel_paths.extend([
@@ -1299,9 +1304,21 @@ def main():
         default="default",
         help=(
             "SED source keys: 'default' for payload/Gaia GSPC/PS1/SDSS/SkyMapper/DES/"
-            "DECaPS/UKIDSS/VISTA/VPHAS+/Spitzer, 'all' to include AKARI/IRAS/Herschel, "
-            "or a comma-separated source list."
+            "DECaPS/UKIDSS/VISTA/VPHAS+/Spitzer/AKARI/IRAS/Herschel, "
+            "or a comma-separated source list. AKARI/IRAS/Herschel are always included."
         ),
+    )
+    g_sed.add_argument(
+        "--fit-atmosphere",
+        dest="fit_atmosphere",
+        action="store_true",
+        help="Enable mandatory pystellibs Castelli/Kurucz atmosphere fitting after SED photometry.",
+    )
+    g_sed.add_argument(
+        "--no-fit-atmosphere",
+        dest="fit_atmosphere",
+        action="store_false",
+        help="Disable Castelli/Kurucz atmosphere fitting after SED photometry.",
     )
 
     add_config_args(g_general)
@@ -1347,6 +1364,8 @@ def main():
         cli_overrides["run_sed_photometry"] = args.run_sed_photometry
     if cli_has_option("--sed-sources"):
         cli_overrides["sed_sources"] = args.sed_sources
+    if cli_has_option("--fit-atmosphere", "--no-fit-atmosphere"):
+        cli_overrides["fit_atmosphere"] = args.fit_atmosphere
 
     apply_config(
         args,
@@ -1668,6 +1687,7 @@ def main():
         "sed_photometry": {
             "run_sed_photometry": args.run_sed_photometry,
             "sources": args.sed_sources,
+            "fit_atmosphere": args.fit_atmosphere,
         },
         "downstream_pass_logic": "characterize/classify/enrich run on filter passers (failed_any == False)",
     }
@@ -1849,6 +1869,7 @@ def main():
             # Step 9: SED photometry
             "run_sed_photometry": args.run_sed_photometry,
             "sed_sources": args.sed_sources,
+            "fit_atmosphere": args.fit_atmosphere,
             # Step 9: Classify
             "run_classify": args.run_classify,
             # Step 6: Enrich
@@ -2905,6 +2926,8 @@ def main():
 
     # Step 9: SED photometry (enabled by default)
     sed_photometry_output = results_dir / "sed_photometry.parquet"
+    sed_model_fits_output = results_dir / "sed_model_fits.parquet"
+    sed_model_curves_output = results_dir / "sed_model_curves.parquet"
     if run_downstream and args.run_sed_photometry:
         if not has_post_filter_output:
             print(f"Warning: downstream stage requires filtered results at {post_filter_output}. Skipping SED photometry.")
@@ -2932,7 +2955,7 @@ def main():
                     df_sed_in = _select_passing_candidates(df_sed_in)
                     sources = resolve_sed_sources(args.sed_sources)
                     log(f"SED input: {len(df_sed_in)} passing candidates; sources={','.join(sources)}")
-                    sed_rows = fetch_sed_photometry(df_sed_in, sources=sources)
+                    sed_rows = fetch_sed_photometry(df_sed_in, sources=sources, progress_callback=log)
                     for col in SED_COLUMNS:
                         if col not in sed_rows.columns:
                             sed_rows[col] = None
@@ -2958,6 +2981,73 @@ def main():
                     log(f"Step 9 completed in {time.perf_counter() - sed_started:.1f}s")
             except Exception as e:
                 print(f"Error in SED photometry step: {e}")
+                if args.verbose:
+
+                    traceback.print_exc()
+
+    # Step 9b: Castelli/Kurucz SED atmosphere fitting
+    if run_downstream and args.run_sed_photometry and args.fit_atmosphere:
+        if not sed_photometry_output.exists():
+            log(f"Warning: SED model fitting requires {sed_photometry_output}. Skipping atmosphere fit.")
+        elif sed_model_fits_output.exists() and sed_model_curves_output.exists() and not args.overwrite:
+            log(f"\n=== Step 9b: SED model outputs exist, skipping: {sed_model_fits_output}, {sed_model_curves_output} ===")
+        else:
+            log("\n=== Step 9b: Fitting Castelli/Kurucz SED atmosphere models ===")
+            sed_model_started = time.perf_counter()
+            try:
+                from malca.sed_model import SED_MODEL_CURVE_COLUMNS, SED_MODEL_FIT_COLUMNS, fit_sed_models
+
+                characterize_output = results_dir / "lc_events_characterized.parquet"
+                post_filter_output = results_dir / "lc_events_filtered.parquet"
+
+                if characterize_output.exists():
+                    df_model_in = load_table(characterize_output)
+                elif post_filter_output.exists():
+                    df_model_in = load_table(post_filter_output)
+                else:
+                    df_model_in = None
+
+                if df_model_in is None:
+                    log("Warning: no suitable input found for SED model fitting, skipping")
+                else:
+                    df_model_in = _select_passing_candidates(df_model_in)
+                    sed_rows_for_model = load_table(sed_photometry_output)
+                    log(f"SED model input: {len(df_model_in)} passing candidates; {len(sed_rows_for_model)} SED rows")
+                    sed_model_fits, sed_model_curves = fit_sed_models(
+                        df_model_in,
+                        sed_rows_for_model,
+                        progress_callback=log,
+                    )
+                    for col in SED_MODEL_FIT_COLUMNS:
+                        if col not in sed_model_fits.columns:
+                            sed_model_fits[col] = None
+                    for col in SED_MODEL_CURVE_COLUMNS:
+                        if col not in sed_model_curves.columns:
+                            sed_model_curves[col] = None
+                    sed_model_fits = sed_model_fits[SED_MODEL_FIT_COLUMNS]
+                    sed_model_curves = sed_model_curves[SED_MODEL_CURVE_COLUMNS]
+                    save_table(sed_model_fits, sed_model_fits_output)
+                    save_table(sed_model_curves, sed_model_curves_output)
+                    n_ok = int((sed_model_fits["status"].astype(str) == "ok").sum()) if "status" in sed_model_fits.columns else 0
+                    summary["sed_model_fit_stats"] = {
+                        "rows_input": int(len(df_model_in)),
+                        "fit_rows_output": int(len(sed_model_fits)),
+                        "curve_rows_output": int(len(sed_model_curves)),
+                        "fits_ok": int(n_ok),
+                        "fits_output": str(sed_model_fits_output),
+                        "curves_output": str(sed_model_curves_output),
+                    }
+                    with open(run_summary_file, "w") as f:
+                        json.dump(summary, f, indent=2, default=str)
+
+                    log(
+                        f"SED model fits saved to {sed_model_fits_output} "
+                        f"({len(sed_model_fits)} rows, {n_ok} ok)"
+                    )
+                    log(f"SED model curves saved to {sed_model_curves_output} ({len(sed_model_curves)} rows)")
+                    log(f"Step 9b completed in {time.perf_counter() - sed_model_started:.1f}s")
+            except Exception as e:
+                print(f"Error in SED model fitting step: {e}")
                 if args.verbose:
 
                     traceback.print_exc()
@@ -3295,6 +3385,31 @@ def main():
                             log(f"Imported {n_sed} SED photometry rows into {review_db_path}")
                         except Exception as sed_exc:
                             log(f"Warning: SED photometry review import failed: {sed_exc}")
+                    if sed_model_fits_output.exists() or sed_model_curves_output.exists():
+                        try:
+                            from malca.sed_model import upsert_sed_model_results
+
+                            sed_model_fits_for_review = (
+                                load_table(sed_model_fits_output)
+                                if sed_model_fits_output.exists()
+                                else pd.DataFrame()
+                            )
+                            sed_model_curves_for_review = (
+                                load_table(sed_model_curves_output)
+                                if sed_model_curves_output.exists()
+                                else pd.DataFrame()
+                            )
+                            n_model_fits, n_model_curves = upsert_sed_model_results(
+                                conn,
+                                sed_model_fits_for_review,
+                                sed_model_curves_for_review,
+                            )
+                            log(
+                                f"Imported {n_model_fits} SED model fit rows and "
+                                f"{n_model_curves} curve rows into {review_db_path}"
+                            )
+                        except Exception as sed_model_exc:
+                            log(f"Warning: SED model review import failed: {sed_model_exc}")
                     conn.close()
                     review_db_updated = True
                     log(f"Imported {n_new} new candidates ({n_total} total) into {review_db_path}")

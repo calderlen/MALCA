@@ -3086,10 +3086,8 @@ def fetch_tess_lightcurves(
     """
     Fetch TESS light curves via ``lightkurve``.
 
-    Prefers 2-min cadence SPOC, falls back to QLP/FFI products.
-    If review-mode TESS overlays are re-enabled later, this fetcher should be
-    tightened to choose one best search match/product per sector instead of
-    concatenating every light curve returned by the search cone.
+    Prefers 2-min cadence SPOC, falls back to QLP/FFI products. Review-mode
+    overlays use this output directly, so the search cone should stay narrow.
 
     Adds columns: tess_n_sectors, tess_total_points, tess_flux_range.
     If *output_dir* is set, saves per-candidate parquet files as
@@ -3902,10 +3900,11 @@ def fetch_external_lcs(
     df: pd.DataFrame,
     *,
     output_dir: Path | None = None,
-    run_atlas: bool = True,
+    run_atlas: bool = False,
     run_ztf: bool = True,
     run_gaia_epoch: bool = True,
-    run_tess: bool = False,
+    run_tess: bool = True,
+    run_neowise: bool = True,
     run_kepler: bool = False,
     run_aavso: bool = False,
     run_ps1: bool = True,
@@ -3921,7 +3920,8 @@ def fetch_external_lcs(
 
     Calls each fetch function in sequence with *output_dir*.
     Supports checkpoint resume (same pattern as ``vet_candidates``).
-    NEOWISE is NOT included here (already part of vetting).
+    NEOWISE full light curves are included as cached precursor data for
+    downstream multi-survey feature extraction.
     """
     def _emit(msg: str) -> None:
         if progress_callback:
@@ -3953,6 +3953,7 @@ def fetch_external_lcs(
         "ZTF LCs": "ztf_lc_n_det",
         "Gaia epoch LCs": "gaia_epoch_lc_n_g",
         "TESS LCs": "tess_n_sectors",
+        "NEOWISE LCs": "neowise_n_epochs",
         "Kepler LCs": "kepler_n_quarters",
         "AAVSO LCs": "aavso_lc_n_points",
         "Pan-STARRS LCs": "ps1_lc_n_points",
@@ -3990,6 +3991,9 @@ def fetch_external_lcs(
 
     if run_tess:
         _run_module("TESS LCs", fetch_tess_lightcurves, output_dir=output_dir, workers=min(workers, 2), refresh_cache=refresh_cache)
+
+    if run_neowise:
+        _run_module("NEOWISE LCs", query_neowise_lightcurves, output_dir=output_dir, workers=workers, refresh_cache=refresh_cache)
 
     if run_kepler:
         _run_module("Kepler LCs", fetch_kepler_k2_lightcurves, output_dir=output_dir, workers=min(workers, 2), refresh_cache=refresh_cache)

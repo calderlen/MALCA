@@ -15,6 +15,7 @@ import pandas as pd
 from malca.config import GAIA_CHUNK_SIZE
 from malca.config import LTV_MAX_PM
 from malca.config import VSX_CROSSMATCH_PATH, GAIA_CACHE_FILE
+from malca.multi_survey_features import MS_FEATURE_COLUMN_SPECS
 from malca.review.metadata import normalize_vsx_record
 from malca.table_io import read_parquet_table, write_parquet_table
 from malca.review.taxonomy import (
@@ -643,6 +644,8 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("ps1_lc_n_points",          "INTEGER", "float"),
     # -- external light curves: CRTS --
     ("crts_lc_n_points",         "INTEGER", "float"),
+    # -- multi-survey event-relative features --
+    *MS_FEATURE_COLUMN_SPECS,
     # -- vetting details: other --
     ("cluster_dist_pc",          "REAL",    "float"),
     ("iphas_ha_excess",          "REAL",    "float"),
@@ -1108,6 +1111,108 @@ def init_db(conn: sqlite3.Connection) -> None:
         """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_sed_photometry_unique
         ON sed_photometry(candidate_id, source, band)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sed_model_fits (
+            candidate_id TEXT PRIMARY KEY,
+            model_family TEXT,
+            teff_k REAL,
+            logg REAL,
+            z REAL,
+            av_fixed REAL,
+            scale REAL,
+            luminosity_lsun REAL,
+            radius_rsun REAL,
+            chi2 REAL,
+            reduced_chi2 REAL,
+            n_fit_points INTEGER,
+            fit_lambda_min REAL,
+            fit_lambda_max REAL,
+            fit_bands_json TEXT,
+            status TEXT,
+            warning TEXT,
+            FOREIGN KEY(candidate_id) REFERENCES candidates(candidate_id)
+        )
+        """
+    )
+    existing_sed_model_fit_lower = {
+        str(row[1]).lower()
+        for row in conn.execute("PRAGMA table_info(sed_model_fits)").fetchall()
+    }
+    sed_model_fit_column_defs = {
+        "candidate_id": "TEXT",
+        "model_family": "TEXT",
+        "teff_k": "REAL",
+        "logg": "REAL",
+        "z": "REAL",
+        "av_fixed": "REAL",
+        "scale": "REAL",
+        "luminosity_lsun": "REAL",
+        "radius_rsun": "REAL",
+        "chi2": "REAL",
+        "reduced_chi2": "REAL",
+        "n_fit_points": "INTEGER",
+        "fit_lambda_min": "REAL",
+        "fit_lambda_max": "REAL",
+        "fit_bands_json": "TEXT",
+        "status": "TEXT",
+        "warning": "TEXT",
+    }
+    for col, dtype in sed_model_fit_column_defs.items():
+        if col.lower() not in existing_sed_model_fit_lower:
+            try:
+                conn.execute(f"ALTER TABLE sed_model_fits ADD COLUMN {col} {dtype}")
+                existing_sed_model_fit_lower.add(col.lower())
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" not in str(e).lower():
+                    raise
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sed_model_curves (
+            candidate_id TEXT NOT NULL,
+            model_family TEXT,
+            wavelength_angstrom REAL NOT NULL,
+            lambda_l_lambda REAL,
+            flux_lambda REAL,
+            teff_k REAL,
+            scale REAL,
+            FOREIGN KEY(candidate_id) REFERENCES candidates(candidate_id)
+        )
+        """
+    )
+    existing_sed_model_curve_lower = {
+        str(row[1]).lower()
+        for row in conn.execute("PRAGMA table_info(sed_model_curves)").fetchall()
+    }
+    sed_model_curve_column_defs = {
+        "candidate_id": "TEXT",
+        "model_family": "TEXT",
+        "wavelength_angstrom": "REAL",
+        "lambda_l_lambda": "REAL",
+        "flux_lambda": "REAL",
+        "teff_k": "REAL",
+        "scale": "REAL",
+    }
+    for col, dtype in sed_model_curve_column_defs.items():
+        if col.lower() not in existing_sed_model_curve_lower:
+            try:
+                conn.execute(f"ALTER TABLE sed_model_curves ADD COLUMN {col} {dtype}")
+                existing_sed_model_curve_lower.add(col.lower())
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" not in str(e).lower():
+                    raise
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_sed_model_fits_candidate
+        ON sed_model_fits(candidate_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_sed_model_curves_candidate
+        ON sed_model_curves(candidate_id)
         """
     )
     # Migrate: add any columns missing from older DBs.
