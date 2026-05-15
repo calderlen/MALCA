@@ -29,6 +29,8 @@ import pyarrow as pa
 import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 
+_trapezoid = getattr(np, "trapezoid", np.trapz)
+
 from malca.baseline import (
     global_median_baseline,
     phase_template_baseline,
@@ -598,8 +600,8 @@ def compute_symmetry_score(
     resid_egress = resid[center_idx:end_idx + 1]
     err_egress = sigma_eff[center_idx:end_idx + 1]
 
-    I_ingress = np.trapezoid(resid_ingress, t_ingress)
-    I_egress = np.trapezoid(resid_egress, t_egress)
+    I_ingress = _trapezoid(resid_ingress, t_ingress)
+    I_egress = _trapezoid(resid_egress, t_egress)
 
     # trapezoidal rule weights for variance calculation
     def trapezoid_weights(t):

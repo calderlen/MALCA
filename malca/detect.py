@@ -548,7 +548,18 @@ def _stored_run_reuse_fingerprint_matches(params: dict[str, Any], current_finger
 
 
 def _score_filter_enabled(args: argparse.Namespace) -> bool:
-    return bool(args.apply_score_filter)
+    return bool(getattr(args, "apply_score_filter", getattr(args, "apply_score", False)))
+
+
+def _gaia_cache_arg(args: argparse.Namespace) -> Path:
+    return getattr(args, "gaia_cache", None) or GAIA_LOCAL_CATALOG
+
+
+def _config_arg(args: argparse.Namespace, name: str) -> Any:
+    value = getattr(args, name, None)
+    if value is None:
+        return PIPELINE_CONFIG_DEFAULTS[name]
+    return value
 
 
 def save_table(df: pd.DataFrame, path: Path) -> None:
@@ -1045,6 +1056,10 @@ def _add_gaia_ids_from_index(df_events: pd.DataFrame, index_path) -> pd.DataFram
 
 def _build_filter_kwargs(args: argparse.Namespace) -> dict[str, Any]:
     """Build apply_filters kwargs from detect CLI arguments."""
+    gaia_cache = _gaia_cache_arg(args)
+    auto_fetch_gaia_cache = bool(_config_arg(args, "auto_fetch_gaia_cache"))
+    gaia_fetch_chunk_size = int(_config_arg(args, "gaia_fetch_chunk_size"))
+    gaia_fetch_passers_only = bool(_config_arg(args, "gaia_fetch_passers_only"))
     return {
         # Core filters
         "apply_evidence_strength": not args.skip_evidence_strength,
@@ -1087,10 +1102,10 @@ def _build_filter_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "apply_gaia_pm_validation": not args.skip_gaia_pm_validation,
         "gaia_max_pm": args.gaia_max_pm,
         "gaia_pm_flag_only": not args.gaia_pm_reject,
-        "gaia_catalog_path": args.gaia_cache,
-        "auto_fetch_gaia_cache": args.auto_fetch_gaia_cache,
-        "gaia_fetch_chunk_size": args.gaia_fetch_chunk_size,
-        "gaia_fetch_passers_only": args.gaia_fetch_passers_only,
+        "gaia_catalog_path": gaia_cache,
+        "auto_fetch_gaia_cache": auto_fetch_gaia_cache,
+        "gaia_fetch_chunk_size": gaia_fetch_chunk_size,
+        "gaia_fetch_passers_only": gaia_fetch_passers_only,
         "apply_periodic_catalog_validation": not args.skip_periodic_catalog_validation,
         "periodic_catalog_max_sep": args.periodic_catalog_max_sep,
         "periodic_catalog_flag_only": not args.periodic_catalog_reject,
@@ -1107,6 +1122,10 @@ def _build_home_external_validation_cmd(
     index_file: Path,
 ) -> list[str]:
     """Build the home-stage external validation subprocess command."""
+    gaia_cache = _gaia_cache_arg(args)
+    auto_fetch_gaia_cache = bool(_config_arg(args, "auto_fetch_gaia_cache"))
+    gaia_fetch_chunk_size = int(_config_arg(args, "gaia_fetch_chunk_size"))
+    gaia_fetch_passers_only = bool(_config_arg(args, "gaia_fetch_passers_only"))
     cmd = [
         sys.executable,
         "-m",
@@ -1126,15 +1145,15 @@ def _build_home_external_validation_cmd(
         "--gaia-max-pm",
         str(args.gaia_max_pm),
         "--gaia-cache",
-        str(args.gaia_cache),
+        str(gaia_cache),
         "--periodic-catalog-max-sep",
         str(args.periodic_catalog_max_sep),
     ]
-    if not args.auto_fetch_gaia_cache:
+    if not auto_fetch_gaia_cache:
         cmd.append("--no-auto-fetch-gaia-cache")
-    if not args.gaia_fetch_passers_only:
+    if not gaia_fetch_passers_only:
         cmd.append("--gaia-fetch-all-candidates")
-    cmd.extend(["--gaia-fetch-chunk-size", str(args.gaia_fetch_chunk_size)])
+    cmd.extend(["--gaia-fetch-chunk-size", str(gaia_fetch_chunk_size)])
 
     if args.apply_periodicity_validation:
         cmd.extend(

@@ -20,6 +20,8 @@ from malca.sed_model import (
 )
 from malca.table_io import write_parquet_table
 
+_trapezoid = getattr(np, "trapezoid", np.trapz)
+
 
 class FakeKurucz:
     source = "/tmp/fake-kurucz2004.grid.fits"
@@ -45,7 +47,7 @@ class FakeKurucz:
         c2 = 1.438776877e8
         exponent = np.clip(c2 / (wave * teff), 1.0e-4, 700.0)
         shape = 1.0 / (np.power(wave, 5.0) * np.expm1(exponent))
-        shape = shape / np.trapezoid(shape, wave)
+        shape = shape / _trapezoid(shape, wave)
         return shape * LSUN_ERG_S * (10.0 ** float(logL))
 
 
