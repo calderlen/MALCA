@@ -342,6 +342,299 @@ def _cached_rows_by_key(cache: pd.DataFrame, key_col: str, keys: set[str]) -> di
     return {str(row[key_col]): row for _, row in cache.iterrows()}
 
 
+EXTERNAL_LC_STATUS_FILE = "_external_lc_status.parquet"
+
+
+def _candidate_cache_id(df: pd.DataFrame, idx) -> str:
+    if "candidate_id" in df.columns:
+        value = df.loc[idx, "candidate_id"]
+        if pd.notna(value) and str(value).strip():
+            return str(value)
+    return str(idx)
+
+
+def _external_lc_path(output_dir: Path | str | None, file_prefix: str, df: pd.DataFrame, idx) -> Path | None:
+    if output_dir is None:
+        return None
+    return Path(output_dir) / f"{file_prefix}_{_candidate_cache_id(df, idx)}.parquet"
+
+
+def _external_lc_status_path(output_dir: Path | str | None) -> Path | None:
+    if output_dir is None:
+        return None
+    return Path(output_dir) / EXTERNAL_LC_STATUS_FILE
+
+
+def _read_external_lc_status(output_dir: Path | str | None) -> pd.DataFrame:
+    path = _external_lc_status_path(output_dir)
+    if path is None or not path.exists():
+        return pd.DataFrame()
+    try:
+        return pd.read_parquet(path)
+    except Exception as exc:
+        print(f"  External LC cache warning: could not read {path}: {_short_error(exc)}")
+        return pd.DataFrame()
+
+
+def _write_external_lc_status(output_dir: Path | str | None, rows: list[dict]) -> None:
+    path = _external_lc_status_path(output_dir)
+    if path is None or not rows:
+        return
+    try:
+        new = pd.DataFrame(rows)
+        existing = pd.read_parquet(path) if path.exists() else pd.DataFrame()
+        combined = pd.concat([existing, new], ignore_index=True) if not existing.empty else new
+        combined = combined.drop_duplicates(subset=["module", "candidate_id", "cache_key"], keep="last")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        combined.to_parquet(path, index=False, compression=PARQUET_CACHE_COMPRESSION)
+    except Exception as exc:
+        print(f"  External LC cache warning: could not write {path}: {_short_error(exc)}")
+
+
+def _coord_lookup_cache_key(df: pd.DataFrame, idx, radius_arcsec: float, *extra: object) -> str | None:
+    if "ra" not in df.columns or "dec" not in df.columns:
+        return None
+    key = _coord_cache_key(df.loc[idx, "ra"], df.loc[idx, "dec"], radius_arcsec)
+    if key is None:
+        return None
+    if extra:
+        return "|".join([key, *[str(x) for x in extra]])
+    return key
+
+
+def _source_lookup_cache_key(source_id: object, *extra: object) -> str | None:
+    if source_id is None:
+        return None
+    try:
+        if pd.isna(source_id):
+            return None
+    except Exception:
+        pass
+    text = str(source_id).strip()
+    if not text:
+        return None
+    if extra:
+        return "|".join([text, *[str(x) for x in extra]])
+    return text
+
+
+def _external_lc_status_hit(
+    status_df: pd.DataFrame,
+    module: str,
+    candidate_id: str,
+    cache_key: str | None,
+    summary_cols: list[str],
+) -> dict | None:
+    if status_df.empty or cache_key is None:
+        return None
+    required = {"module", "candidate_id", "cache_key", "status"}
+    if not required.issubset(status_df.columns):
+        return None
+    mask = (
+        (status_df["module"].astype(str) == module)
+        & (status_df["candidate_id"].astype(str) == candidate_id)
+        & (status_df["cache_key"].astype(str) == str(cache_key))
+    )
+    rows = status_df[mask]
+    if rows.empty:
+        return None
+    row = rows.iloc[-1]
+    if str(row.get("status", "")) != "no_data":
+        return None
+    return {col: row.get(col, np.nan) for col in summary_cols}
+
+
+def _read_external_lc_file(path: Path | None) -> pd.DataFrame | None:
+    if path is None or not path.exists():
+        return None
+    try:
+        if path.stat().st_size <= 0:
+            return None
+        df = pd.read_parquet(path)
+    except Exception:
+        return None
+    if df.empty:
+        return None
+    return df
+
+
+def _summary_is_positive(summary: dict, match_col: str) -> bool:
+    value = summary.get(match_col)
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    try:
+        return bool(pd.notna(value) and float(value) > 0)
+    except Exception:
+        return False
+
+
+def _apply_external_lc_cache_hits(
+    df: pd.DataFrame,
+    valid_idx: list,
+    *,
+    output_dir: Path | str | None,
+    refresh_cache: bool,
+    module: str,
+    file_prefix: str,
+    summary_cols: list[str],
+    match_col: str,
+    cache_key_func: Callable,
+    summarize_func: Callable[[pd.DataFrame], dict],
+) -> tuple[list, int, int]:
+    if output_dir is None or refresh_cache:
+        return valid_idx, 0, 0
+
+    status_df = _read_external_lc_status(output_dir)
+    missing_idx = []
+    n_cached = 0
+    n_matched = 0
+
+    for idx in valid_idx:
+        cand_id = _candidate_cache_id(df, idx)
+        lc_path = _external_lc_path(output_dir, file_prefix, df, idx)
+        cached_lc = _read_external_lc_file(lc_path)
+        summary = None
+        if cached_lc is not None:
+            try:
+                summary = summarize_func(cached_lc)
+            except Exception:
+                summary = None
+        if summary is None:
+            cache_key = cache_key_func(idx)
+            summary = _external_lc_status_hit(status_df, module, cand_id, cache_key, summary_cols)
+        if summary is None:
+            missing_idx.append(idx)
+            continue
+
+        for col in summary_cols:
+            df.loc[idx, col] = summary.get(col, np.nan)
+        n_cached += 1
+        if _summary_is_positive(summary, match_col):
+            n_matched += 1
+
+    if n_cached:
+        print(f"{module}: served {n_cached} from cache; fetching {len(missing_idx)} misses")
+    return missing_idx, n_cached, n_matched
+
+
+def _external_lc_status_row(
+    df: pd.DataFrame,
+    idx,
+    *,
+    module: str,
+    cache_key: str | None,
+    summary: dict,
+    status: str,
+) -> dict | None:
+    if cache_key is None:
+        return None
+    row = {
+        "module": module,
+        "candidate_id": _candidate_cache_id(df, idx),
+        "cache_key": cache_key,
+        "status": status,
+        "updated_unix": time.time(),
+    }
+    row.update(summary)
+    return row
+
+
+def _write_external_lc_file(output_dir: Path | str | None, file_prefix: str, df: pd.DataFrame, idx, lc_df: pd.DataFrame) -> None:
+    path = _external_lc_path(output_dir, file_prefix, df, idx)
+    if path is None or lc_df.empty:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lc_df.to_parquet(path, index=False, compression=PARQUET_CACHE_COMPRESSION)
+
+
+def _summarize_atlas_lc(phot: pd.DataFrame) -> dict:
+    if phot.empty:
+        raise ValueError("empty ATLAS light curve")
+    summary = {
+        "atlas_has_phot": True,
+        "atlas_n_det_cyan": 0,
+        "atlas_n_det_orange": 0,
+        "atlas_cyan_range": np.nan,
+        "atlas_orange_range": np.nan,
+    }
+    if "F" in phot.columns:
+        cyan = phot[phot["F"] == "c"]
+        orange = phot[phot["F"] == "o"]
+    elif "filter" in phot.columns:
+        cyan = phot[phot["filter"] == "c"]
+        orange = phot[phot["filter"] == "o"]
+    else:
+        return summary
+
+    mag_col = "m" if "m" in phot.columns else "mag" if "mag" in phot.columns else None
+    if mag_col is None:
+        return summary
+
+    c_mags = pd.to_numeric(cyan[mag_col], errors="coerce").dropna()
+    o_mags = pd.to_numeric(orange[mag_col], errors="coerce").dropna()
+    summary["atlas_n_det_cyan"] = len(c_mags)
+    summary["atlas_n_det_orange"] = len(o_mags)
+    if len(c_mags) >= 2:
+        summary["atlas_cyan_range"] = round(float(c_mags.max() - c_mags.min()), 4)
+    if len(o_mags) >= 2:
+        summary["atlas_orange_range"] = round(float(o_mags.max() - o_mags.min()), 4)
+    return summary
+
+
+def _summarize_ztf_lc(lc: pd.DataFrame) -> dict:
+    if lc.empty or "mag" not in lc.columns:
+        raise ValueError("invalid ZTF light curve")
+    mag = pd.to_numeric(lc["mag"], errors="coerce")
+    band = lc["band"] if "band" in lc.columns else pd.Series("", index=lc.index)
+    g_mags = mag[band == "zg"].dropna()
+    r_mags = mag[band == "zr"].dropna()
+    return {
+        "ztf_lc_n_det": len(lc),
+        "ztf_lc_g_range": float(g_mags.max() - g_mags.min()) if len(g_mags) >= 2 else np.nan,
+        "ztf_lc_r_range": float(r_mags.max() - r_mags.min()) if len(r_mags) >= 2 else np.nan,
+    }
+
+
+def _summarize_gaia_epoch_lc(lc: pd.DataFrame) -> dict:
+    if lc.empty or "mag" not in lc.columns:
+        raise ValueError("invalid Gaia epoch light curve")
+    g_mags = pd.to_numeric(lc["mag"], errors="coerce").dropna()
+    return {
+        "gaia_epoch_lc_n_g": len(lc),
+        "gaia_epoch_lc_g_range": float(g_mags.max() - g_mags.min()) if len(g_mags) >= 2 else np.nan,
+    }
+
+
+def _summarize_neowise_lc(lc: pd.DataFrame) -> dict:
+    if lc.empty:
+        raise ValueError("empty NEOWISE light curve")
+    w1 = pd.to_numeric(lc["w1mpro"], errors="coerce").dropna() if "w1mpro" in lc.columns else pd.Series(dtype=float)
+    w2 = pd.to_numeric(lc["w2mpro"], errors="coerce").dropna() if "w2mpro" in lc.columns else pd.Series(dtype=float)
+    return {
+        "neowise_n_epochs": len(lc),
+        "neowise_w1_range": float(w1.max() - w1.min()) if len(w1) >= 2 else np.nan,
+        "neowise_w2_range": float(w2.max() - w2.min()) if len(w2) >= 2 else np.nan,
+    }
+
+
+def _summarize_flux_lc(lc: pd.DataFrame, group_col: str, n_col: str, total_col: str, range_col: str) -> dict:
+    if lc.empty or "flux" not in lc.columns:
+        raise ValueError("invalid flux light curve")
+    flux_vals = pd.to_numeric(lc["flux"], errors="coerce").dropna()
+    n_groups = lc[group_col].nunique(dropna=True) if group_col in lc.columns else 0
+    return {
+        n_col: int(n_groups),
+        total_col: len(lc),
+        range_col: float(flux_vals.max() - flux_vals.min()) if len(flux_vals) >= 2 else np.nan,
+    }
+
+
+def _summarize_count_lc(lc: pd.DataFrame, n_col: str) -> dict:
+    if lc.empty:
+        raise ValueError("empty light curve")
+    return {n_col: len(lc)}
+
+
 # =============================================================================
 # SIMBAD BATCH QUERY
 # =============================================================================
@@ -1843,6 +2136,7 @@ def query_atlas_forced_phot(
     df: pd.DataFrame,
     token: str | None = None,
     output_dir: Path | None = None,
+    refresh_cache: bool = False,
 ) -> pd.DataFrame:
     """
     Query ATLAS forced photometry for independent variability confirmation.
@@ -1861,11 +2155,6 @@ def query_atlas_forced_phot(
     df["atlas_cyan_range"] = np.nan
     df["atlas_orange_range"] = np.nan
 
-    token = token or os.environ.get("MALCA_ATLAS_TOKEN") or os.environ.get("ATLAS_API_TOKEN")
-    if not token:
-        print("ATLAS: no API token provided, skipping (register at https://fallingstar-data.com/forcedphot/)")
-        return df
-
     valid = df["ra"].notna() & df["dec"].notna()
     if not valid.any():
         return df
@@ -1873,12 +2162,37 @@ def query_atlas_forced_phot(
     if output_dir:
         Path(output_dir).mkdir(parents=True, exist_ok=True)
 
-    n_valid = int(valid.sum())
-    print(f"ATLAS: submitting {n_valid} forced photometry jobs")
-    matched = 0
+    valid_idx = df.index[valid].tolist()
+    summary_cols = ["atlas_has_phot", "atlas_n_det_cyan", "atlas_n_det_orange", "atlas_cyan_range", "atlas_orange_range"]
+    valid_idx, _, cached_matched = _apply_external_lc_cache_hits(
+        df,
+        valid_idx,
+        output_dir=output_dir,
+        refresh_cache=refresh_cache,
+        module="ATLAS LCs",
+        file_prefix="atlas_lc",
+        summary_cols=summary_cols,
+        match_col="atlas_has_phot",
+        cache_key_func=lambda idx: _coord_lookup_cache_key(df, idx, 0.0, "atlas", ATLAS_MJD_MIN),
+        summarize_func=_summarize_atlas_lc,
+    )
+    if not valid_idx:
+        print(f"ATLAS: {cached_matched}/{int(valid.sum())} candidates with photometry")
+        return df
 
-    for idx in tqdm(df.index[valid], desc="ATLAS forced phot"):
+    token = token or os.environ.get("MALCA_ATLAS_TOKEN") or os.environ.get("ATLAS_API_TOKEN")
+    if not token:
+        print("ATLAS: no API token provided, skipping uncached candidates (register at https://fallingstar-data.com/forcedphot/)")
+        return df
+
+    n_valid = int(valid.sum())
+    print(f"ATLAS: submitting {len(valid_idx)} forced photometry jobs")
+    matched = cached_matched
+    status_rows: list[dict] = []
+
+    for idx in tqdm(valid_idx, desc="ATLAS forced phot"):
         ra, dec = float(df.loc[idx, "ra"]), float(df.loc[idx, "dec"])
+        cache_key = _coord_lookup_cache_key(df, idx, 0.0, "atlas", ATLAS_MJD_MIN)
 
         task_url = _atlas_submit_job(ra, dec, token)
         if task_url is None:
@@ -1886,44 +2200,45 @@ def query_atlas_forced_phot(
 
         phot = _atlas_poll_result(task_url, token)
         if phot is None or phot.empty:
+            row = _external_lc_status_row(
+                df,
+                idx,
+                module="ATLAS LCs",
+                cache_key=cache_key,
+                summary={
+                    "atlas_has_phot": False,
+                    "atlas_n_det_cyan": 0,
+                    "atlas_n_det_orange": 0,
+                    "atlas_cyan_range": np.nan,
+                    "atlas_orange_range": np.nan,
+                },
+                status="no_data",
+            )
+            if row is not None:
+                status_rows.append(row)
             continue
 
-        df.loc[idx, "atlas_has_phot"] = True
-
-        # Separate cyan (c) and orange (o) bands
-        if "F" in phot.columns:
-            cyan = phot[phot["F"] == "c"]
-            orange = phot[phot["F"] == "o"]
-        elif "filter" in phot.columns:
-            cyan = phot[phot["filter"] == "c"]
-            orange = phot[phot["filter"] == "o"]
-        else:
-            matched += 1
-            continue
-
-        mag_col = "m" if "m" in phot.columns else "mag" if "mag" in phot.columns else None
-        if mag_col is None:
-            matched += 1
-            continue
-
-        if len(cyan) > 0:
-            c_mags = pd.to_numeric(cyan[mag_col], errors="coerce").dropna()
-            df.loc[idx, "atlas_n_det_cyan"] = len(c_mags)
-            if len(c_mags) >= 2:
-                df.loc[idx, "atlas_cyan_range"] = round(float(c_mags.max() - c_mags.min()), 4)
-
-        if len(orange) > 0:
-            o_mags = pd.to_numeric(orange[mag_col], errors="coerce").dropna()
-            df.loc[idx, "atlas_n_det_orange"] = len(o_mags)
-            if len(o_mags) >= 2:
-                df.loc[idx, "atlas_orange_range"] = round(float(o_mags.max() - o_mags.min()), 4)
+        summary = _summarize_atlas_lc(phot)
+        for col, value in summary.items():
+            df.loc[idx, col] = value
 
         if output_dir and not phot.empty:
-            cand_id = str(df.loc[idx, "candidate_id"]) if "candidate_id" in df.columns else str(idx)
-            phot.to_parquet(Path(output_dir) / f"atlas_lc_{cand_id}.parquet", index=False)
+            _write_external_lc_file(output_dir, "atlas_lc", df, idx, phot)
+
+        row = _external_lc_status_row(
+            df,
+            idx,
+            module="ATLAS LCs",
+            cache_key=cache_key,
+            summary=summary,
+            status="fetched",
+        )
+        if row is not None:
+            status_rows.append(row)
 
         matched += 1
 
+    _write_external_lc_status(output_dir, status_rows)
     print(f"ATLAS: {matched}/{n_valid} candidates with photometry")
     return df
 
@@ -1940,6 +2255,7 @@ def fetch_ztf_lightcurves(
     radius_arcsec: float = 2.0,
     output_dir: Path | None = None,
     workers: int = 4,
+    refresh_cache: bool = False,
 ) -> pd.DataFrame:
     """
     Fetch ZTF light curves from IRSA ZTF DR22.
@@ -1966,12 +2282,32 @@ def fetch_ztf_lightcurves(
     n_valid = int(valid.sum())
     print(f"ZTF LCs: fetching {n_valid} light curves")
 
+    valid_idx = df.index[valid].tolist()
+    summary_cols = ["ztf_lc_n_det", "ztf_lc_g_range", "ztf_lc_r_range"]
+    valid_idx, _, cached_matched = _apply_external_lc_cache_hits(
+        df,
+        valid_idx,
+        output_dir=output_dir,
+        refresh_cache=refresh_cache,
+        module="ZTF LCs",
+        file_prefix="ztf_lc",
+        summary_cols=summary_cols,
+        match_col="ztf_lc_n_det",
+        cache_key_func=lambda idx: _coord_lookup_cache_key(df, idx, radius_arcsec, "ztf_dr22"),
+        summarize_func=_summarize_ztf_lc,
+    )
+    if not valid_idx:
+        print(f"ZTF LCs: {cached_matched}/{n_valid} with data")
+        return df
+
     tap = pyvo.dal.TAPService(IRSA_TAP_URL)
 
     def _fetch_one(idx: int) -> tuple:
         ra, dec = float(df.loc[idx, "ra"]), float(df.loc[idx, "dec"])
         if not (np.isfinite(ra) and np.isfinite(dec)):
-            return (idx, 0, np.nan, np.nan, None)
+            return (idx, 0, np.nan, np.nan, None, None)
+
+        cache_key = _coord_lookup_cache_key(df, idx, radius_arcsec, "ztf_dr22")
 
         try:
             # Find matching ZTF objects
@@ -1986,7 +2322,7 @@ def fetch_ztf_lightcurves(
             obj_result = tap.run_sync(obj_query)
             obj_table = obj_result.to_table()
             if obj_table is None or len(obj_table) == 0:
-                return (idx, 0, np.nan, np.nan, None)
+                return (idx, 0, np.nan, np.nan, None, cache_key)
 
             oids = [str(row["oid"]) for row in obj_table]
             oid_list = ",".join(oids)
@@ -2002,7 +2338,7 @@ def fetch_ztf_lightcurves(
             lc_result = tap.run_sync(lc_query)
             lc_table = lc_result.to_table()
             if lc_table is None or len(lc_table) == 0:
-                return (idx, 0, np.nan, np.nan, None)
+                return (idx, 0, np.nan, np.nan, None, cache_key)
 
             lc = lc_table.to_pandas()
 
@@ -2029,40 +2365,51 @@ def fetch_ztf_lightcurves(
                 band_map = {1: "zg", 2: "zr", 3: "zi"}
                 lc["band"] = pd.to_numeric(lc["band"], errors="coerce").map(band_map).fillna(lc["band"].astype(str))
 
-            n_det = len(lc)
-            mag = pd.to_numeric(lc.get("mag"), errors="coerce")
-            g_mask = lc["band"] == "zg" if "band" in lc.columns else pd.Series(False, index=lc.index)
-            r_mask = lc["band"] == "zr" if "band" in lc.columns else pd.Series(False, index=lc.index)
-            g_mags = mag[g_mask].dropna()
-            r_mags = mag[r_mask].dropna()
-            g_range = float(g_mags.max() - g_mags.min()) if len(g_mags) >= 2 else np.nan
-            r_range = float(r_mags.max() - r_mags.min()) if len(r_mags) >= 2 else np.nan
+            summary = _summarize_ztf_lc(lc)
 
             if output_dir and not lc.empty:
-                cand_id = str(df.loc[idx, "candidate_id"]) if "candidate_id" in df.columns else str(idx)
-                lc.to_parquet(Path(output_dir) / f"ztf_lc_{cand_id}.parquet", index=False)
+                _write_external_lc_file(output_dir, "ztf_lc", df, idx, lc)
 
-            return (idx, n_det, g_range, r_range, None)
+            return (
+                idx,
+                summary["ztf_lc_n_det"],
+                summary["ztf_lc_g_range"],
+                summary["ztf_lc_r_range"],
+                None,
+                cache_key,
+            )
         except Exception as exc:
-            return (idx, 0, np.nan, np.nan, f"{idx}: {_short_error(exc)}")
+            return (idx, 0, np.nan, np.nan, f"{idx}: {_short_error(exc)}", cache_key)
 
-    matched = 0
+    matched = cached_matched
     failures: list[str] = []
-    valid_idx = df.index[valid].tolist()
+    status_rows: list[dict] = []
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(_fetch_one, idx): idx for idx in valid_idx}
         for fut in tqdm(as_completed(futures), total=len(futures), desc="ZTF LCs"):
-            idx, n_det, g_range, r_range, error = fut.result()
+            idx, n_det, g_range, r_range, error, cache_key = fut.result()
             if error is not None:
                 failures.append(error)
                 continue
             df.loc[idx, "ztf_lc_n_det"] = n_det
             df.loc[idx, "ztf_lc_g_range"] = g_range
             df.loc[idx, "ztf_lc_r_range"] = r_range
+            summary = {"ztf_lc_n_det": n_det, "ztf_lc_g_range": g_range, "ztf_lc_r_range": r_range}
+            row = _external_lc_status_row(
+                df,
+                idx,
+                module="ZTF LCs",
+                cache_key=cache_key,
+                summary=summary,
+                status="fetched" if n_det > 0 else "no_data",
+            )
+            if row is not None:
+                status_rows.append(row)
             if n_det > 0:
                 matched += 1
 
+    _write_external_lc_status(output_dir, status_rows)
     _raise_lookup_failures("ZTF LCs", failures, n_valid)
     print(f"ZTF LCs: {matched}/{n_valid} with data")
     return df
@@ -2198,6 +2545,7 @@ def fetch_gaia_epoch_lcs(
     df: pd.DataFrame,
     chunk_size: int = 50,
     output_dir: Path | None = None,
+    refresh_cache: bool = False,
 ) -> pd.DataFrame:
     """
     Download full Gaia DR3 epoch photometry time series.
@@ -2224,14 +2572,34 @@ def fetch_gaia_epoch_lcs(
     if not valid.any():
         print("Gaia epoch LCs: no candidates with epoch photometry available")
         return df
+    n_valid_total = int(valid.sum())
 
     if output_dir:
         Path(output_dir).mkdir(parents=True, exist_ok=True)
 
+    valid_idx = df.index[valid].tolist()
+    summary_cols = ["gaia_epoch_lc_n_g", "gaia_epoch_lc_g_range"]
+    valid_idx, _, cached_matched = _apply_external_lc_cache_hits(
+        df,
+        valid_idx,
+        output_dir=output_dir,
+        refresh_cache=refresh_cache,
+        module="Gaia epoch LCs",
+        file_prefix="gaia_epoch_lc",
+        summary_cols=summary_cols,
+        match_col="gaia_epoch_lc_n_g",
+        cache_key_func=lambda idx: _source_lookup_cache_key(_parse_gaia_source_id_str(df.loc[idx, "gaia_id"]), "gaia_epoch_lc"),
+        summarize_func=_summarize_gaia_epoch_lc,
+    )
+    if not valid_idx:
+        print(f"Gaia epoch LCs: {cached_matched}/{n_valid_total} with time-series data")
+        return df
+
     # Build gaia_id -> index mapping
     gaia_ids = []
     idx_map: dict[str, list] = {}
-    for idx, val in df.loc[valid, "gaia_id"].items():
+    for idx in valid_idx:
+        val = df.loc[idx, "gaia_id"]
         sid = _parse_gaia_source_id_str(val)
         if sid is None:
             continue
@@ -2249,7 +2617,9 @@ def fetch_gaia_epoch_lcs(
     test = f"SELECT source_id FROM gaiadr3.epoch_photometry WHERE source_id = {gaia_ids[0]} AND transit_id IS NOT NULL"
     taps = _connect_gaia_taps_until_available(test, label="Gaia epoch LC download", maxrec=1)
 
-    matched = 0
+    matched = cached_matched
+    seen_with_data: set[str] = set()
+    status_rows: list[dict] = []
     for i in tqdm(range(0, len(gaia_ids), chunk_size), desc="Gaia epoch LCs"):
         chunk = gaia_ids[i : i + chunk_size]
         ids_str = ",".join(chunk)
@@ -2282,23 +2652,52 @@ def fetch_gaia_epoch_lcs(
             src_lc["mag_error"] = pd.to_numeric(src_lc["mag_error"], errors="coerce")
             src_lc = src_lc.dropna(subset=["time", "mag"])
 
-            n_g = len(src_lc)
-            g_mags = src_lc["mag"].dropna()
-            g_range = float(g_mags.max() - g_mags.min()) if len(g_mags) >= 2 else np.nan
+            if src_lc.empty:
+                continue
+
+            summary = _summarize_gaia_epoch_lc(src_lc)
+            n_g = int(summary["gaia_epoch_lc_n_g"])
+            g_range = summary["gaia_epoch_lc_g_range"]
 
             for df_idx in idx_map.get(sid, []):
                 df.loc[df_idx, "gaia_epoch_lc_n_g"] = n_g
                 df.loc[df_idx, "gaia_epoch_lc_g_range"] = g_range
+                row = _external_lc_status_row(
+                    df,
+                    df_idx,
+                    module="Gaia epoch LCs",
+                    cache_key=_source_lookup_cache_key(sid, "gaia_epoch_lc"),
+                    summary=summary,
+                    status="fetched",
+                )
+                if row is not None:
+                    status_rows.append(row)
 
             if output_dir and not src_lc.empty:
                 for df_idx in idx_map.get(sid, []):
-                    cand_id = str(df.loc[df_idx, "candidate_id"]) if "candidate_id" in df.columns else str(df_idx)
-                    src_lc.to_parquet(Path(output_dir) / f"gaia_epoch_lc_{cand_id}.parquet", index=False)
-                    break  # one file per gaia source
+                    _write_external_lc_file(output_dir, "gaia_epoch_lc", df, df_idx, src_lc)
 
-            matched += 1
+            seen_with_data.add(sid)
+            matched += len(idx_map.get(sid, []))
 
-    print(f"Gaia epoch LCs: {matched}/{n_total} with time-series data")
+    for sid in gaia_ids:
+        if sid in seen_with_data:
+            continue
+        summary = {"gaia_epoch_lc_n_g": 0, "gaia_epoch_lc_g_range": np.nan}
+        for df_idx in idx_map.get(sid, []):
+            row = _external_lc_status_row(
+                df,
+                df_idx,
+                module="Gaia epoch LCs",
+                cache_key=_source_lookup_cache_key(sid, "gaia_epoch_lc"),
+                summary=summary,
+                status="no_data",
+            )
+            if row is not None:
+                status_rows.append(row)
+
+    _write_external_lc_status(output_dir, status_rows)
+    print(f"Gaia epoch LCs: {matched}/{n_valid_total} with time-series data")
     return df
 
 
@@ -2538,6 +2937,7 @@ def query_neowise_lightcurves(
     max_sep_arcsec: float = NEOWISE_MAX_SEP_ARCSEC,
     output_dir: Path | None = None,
     workers: int = 4,
+    refresh_cache: bool = False,
 ) -> pd.DataFrame:
     """
     Fetch full NEOWISE light curves for candidates.
@@ -2562,10 +2962,30 @@ def query_neowise_lightcurves(
     n_valid = int(valid.sum())
     print(f"NEOWISE LCs: fetching {n_valid} light curves")
 
+    valid_idx = df.index[valid].tolist()
+    summary_cols = ["neowise_n_epochs", "neowise_w1_range", "neowise_w2_range"]
+    valid_idx, _, cached_matched = _apply_external_lc_cache_hits(
+        df,
+        valid_idx,
+        output_dir=output_dir,
+        refresh_cache=refresh_cache,
+        module="NEOWISE LCs",
+        file_prefix="neowise_lc",
+        summary_cols=summary_cols,
+        match_col="neowise_n_epochs",
+        cache_key_func=lambda idx: _coord_lookup_cache_key(df, idx, max_sep_arcsec, "neowise"),
+        summarize_func=_summarize_neowise_lc,
+    )
+    if not valid_idx:
+        print(f"NEOWISE LCs: {cached_matched}/{n_valid} with data")
+        return df
+
     def _fetch_one(idx: int) -> tuple:
         ra, dec = float(df.loc[idx, "ra"]), float(df.loc[idx, "dec"])
         if not (np.isfinite(ra) and np.isfinite(dec)):
-            return (idx, 0, np.nan, np.nan, None)
+            return (idx, 0, np.nan, np.nan, None, None)
+
+        cache_key = _coord_lookup_cache_key(df, idx, max_sep_arcsec, "neowise")
 
         query = f"""
         SELECT mjd, w1mpro, w1sigmpro, w2mpro, w2sigmpro, w1snr, w2snr,
@@ -2581,7 +3001,7 @@ def query_neowise_lightcurves(
             result = Irsa.query_tap(query)
             table = result.to_table()
             if table is None or len(table) == 0:
-                return (idx, 0, np.nan, np.nan, None)
+                return (idx, 0, np.nan, np.nan, None, cache_key)
 
             lc = table.to_pandas()
 
@@ -2599,40 +3019,54 @@ def query_neowise_lightcurves(
                 lc = lc[pd.to_numeric(lc["w1snr"], errors="coerce") >= 3.0]
 
             if lc.empty:
-                return (idx, 0, np.nan, np.nan, None)
+                return (idx, 0, np.nan, np.nan, None, cache_key)
 
-            w1 = pd.to_numeric(lc.get("w1mpro"), errors="coerce").dropna()
-            w2 = pd.to_numeric(lc.get("w2mpro"), errors="coerce").dropna()
-            n_epochs = len(lc)
-            w1_range = float(w1.max() - w1.min()) if len(w1) >= 2 else np.nan
-            w2_range = float(w2.max() - w2.min()) if len(w2) >= 2 else np.nan
+            summary = _summarize_neowise_lc(lc)
 
             # Save individual LC if output_dir set
             if output_dir and not lc.empty:
-                cand_id = str(df.loc[idx, "candidate_id"]) if "candidate_id" in df.columns else str(idx)
-                lc.to_parquet(Path(output_dir) / f"neowise_lc_{cand_id}.parquet", index=False)
+                _write_external_lc_file(output_dir, "neowise_lc", df, idx, lc)
 
-            return (idx, n_epochs, w1_range, w2_range, None)
+            return (
+                idx,
+                summary["neowise_n_epochs"],
+                summary["neowise_w1_range"],
+                summary["neowise_w2_range"],
+                None,
+                cache_key,
+            )
         except Exception as exc:
-            return (idx, 0, np.nan, np.nan, f"{idx}: {_short_error(exc)}")
+            return (idx, 0, np.nan, np.nan, f"{idx}: {_short_error(exc)}", cache_key)
 
-    matched = 0
+    matched = cached_matched
     failures: list[str] = []
-    valid_idx = df.index[valid].tolist()
+    status_rows: list[dict] = []
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(_fetch_one, idx): idx for idx in valid_idx}
         for fut in tqdm(as_completed(futures), total=len(futures), desc="NEOWISE LCs"):
-            idx, n_epochs, w1_range, w2_range, error = fut.result()
+            idx, n_epochs, w1_range, w2_range, error, cache_key = fut.result()
             if error is not None:
                 failures.append(error)
                 continue
             df.loc[idx, "neowise_n_epochs"] = n_epochs
             df.loc[idx, "neowise_w1_range"] = w1_range
             df.loc[idx, "neowise_w2_range"] = w2_range
+            summary = {"neowise_n_epochs": n_epochs, "neowise_w1_range": w1_range, "neowise_w2_range": w2_range}
+            row = _external_lc_status_row(
+                df,
+                idx,
+                module="NEOWISE LCs",
+                cache_key=cache_key,
+                summary=summary,
+                status="fetched" if n_epochs > 0 else "no_data",
+            )
+            if row is not None:
+                status_rows.append(row)
             if n_epochs > 0:
                 matched += 1
 
+    _write_external_lc_status(output_dir, status_rows)
     _raise_lookup_failures("NEOWISE LCs", failures, n_valid)
     print(f"NEOWISE LCs: {matched}/{n_valid} with data")
     return df
@@ -2647,6 +3081,7 @@ def fetch_tess_lightcurves(
     df: pd.DataFrame,
     output_dir: Path | None = None,
     workers: int = 2,
+    refresh_cache: bool = False,
 ) -> pd.DataFrame:
     """
     Fetch TESS light curves via ``lightkurve``.
@@ -2675,16 +3110,36 @@ def fetch_tess_lightcurves(
     n_valid = int(valid.sum())
     print(f"TESS LCs: fetching {n_valid} light curves")
 
+    valid_idx = df.index[valid].tolist()
+    summary_cols = ["tess_n_sectors", "tess_total_points", "tess_flux_range"]
+    valid_idx, _, cached_matched = _apply_external_lc_cache_hits(
+        df,
+        valid_idx,
+        output_dir=output_dir,
+        refresh_cache=refresh_cache,
+        module="TESS LCs",
+        file_prefix="tess_lc",
+        summary_cols=summary_cols,
+        match_col="tess_n_sectors",
+        cache_key_func=lambda idx: _coord_lookup_cache_key(df, idx, TESS_SEARCH_RADIUS_ARCSEC, "tess"),
+        summarize_func=lambda lc: _summarize_flux_lc(lc, "sector", "tess_n_sectors", "tess_total_points", "tess_flux_range"),
+    )
+    if not valid_idx:
+        print(f"TESS LCs: {cached_matched}/{n_valid} with data")
+        return df
+
     def _fetch_one(idx: int) -> tuple:
         ra, dec = float(df.loc[idx, "ra"]), float(df.loc[idx, "dec"])
         if not (np.isfinite(ra) and np.isfinite(dec)):
-            return (idx, 0, 0, np.nan, None)
+            return (idx, 0, 0, np.nan, None, None)
+
+        cache_key = _coord_lookup_cache_key(df, idx, TESS_SEARCH_RADIUS_ARCSEC, "tess")
 
         try:
             coord = SkyCoord(ra=ra, dec=dec, unit="deg")
             search = lk.search_lightcurve(coord, radius=21, mission="TESS")
             if search is None or len(search) == 0:
-                return (idx, 0, 0, np.nan, None)
+                return (idx, 0, 0, np.nan, None, cache_key)
 
             # Prefer SPOC 2-min, then QLP, then any
             spoc = search[search.author == "SPOC"]
@@ -2698,7 +3153,7 @@ def fetch_tess_lightcurves(
                     lc_collection = search.download_all(quality_bitmask="default")
 
             if lc_collection is None or len(lc_collection) == 0:
-                return (idx, 0, 0, np.nan, None)
+                return (idx, 0, 0, np.nan, None, cache_key)
 
             rows = []
             sectors = set()
@@ -2721,42 +3176,57 @@ def fetch_tess_lightcurves(
                     })
 
             if not rows:
-                return (idx, 0, 0, np.nan, None)
+                return (idx, 0, 0, np.nan, None, cache_key)
 
             lc_df = pd.DataFrame(rows)
             lc_df = lc_df[np.isfinite(lc_df["flux"])].copy()
 
-            n_sectors = len(sectors)
-            total_points = len(lc_df)
-            flux_vals = lc_df["flux"].dropna()
-            flux_range = float(flux_vals.max() - flux_vals.min()) if len(flux_vals) >= 2 else np.nan
+            summary = _summarize_flux_lc(lc_df, "sector", "tess_n_sectors", "tess_total_points", "tess_flux_range")
 
             if output_dir and not lc_df.empty:
-                cand_id = str(df.loc[idx, "candidate_id"]) if "candidate_id" in df.columns else str(idx)
-                lc_df.to_parquet(Path(output_dir) / f"tess_lc_{cand_id}.parquet", index=False)
+                _write_external_lc_file(output_dir, "tess_lc", df, idx, lc_df)
 
-            return (idx, n_sectors, total_points, flux_range, None)
+            return (
+                idx,
+                summary["tess_n_sectors"],
+                summary["tess_total_points"],
+                summary["tess_flux_range"],
+                None,
+                cache_key,
+            )
         except Exception as exc:
-            return (idx, 0, 0, np.nan, f"{idx}: {_short_error(exc)}")
+            return (idx, 0, 0, np.nan, f"{idx}: {_short_error(exc)}", cache_key)
 
-    matched = 0
+    matched = cached_matched
     failures: list[str] = []
-    valid_idx = df.index[valid].tolist()
+    status_rows: list[dict] = []
 
     # lightkurve queries MAST — use low parallelism
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(_fetch_one, idx): idx for idx in valid_idx}
         for fut in tqdm(as_completed(futures), total=len(futures), desc="TESS LCs"):
-            idx, n_sectors, total_points, flux_range, error = fut.result()
+            idx, n_sectors, total_points, flux_range, error, cache_key = fut.result()
             if error is not None:
                 failures.append(error)
                 continue
             df.loc[idx, "tess_n_sectors"] = n_sectors
             df.loc[idx, "tess_total_points"] = total_points
             df.loc[idx, "tess_flux_range"] = flux_range
+            summary = {"tess_n_sectors": n_sectors, "tess_total_points": total_points, "tess_flux_range": flux_range}
+            row = _external_lc_status_row(
+                df,
+                idx,
+                module="TESS LCs",
+                cache_key=cache_key,
+                summary=summary,
+                status="fetched" if n_sectors > 0 else "no_data",
+            )
+            if row is not None:
+                status_rows.append(row)
             if n_sectors > 0:
                 matched += 1
 
+    _write_external_lc_status(output_dir, status_rows)
     _raise_lookup_failures("TESS LCs", failures, n_valid)
     print(f"TESS LCs: {matched}/{n_valid} with data")
     return df
@@ -2771,6 +3241,7 @@ def fetch_kepler_k2_lightcurves(
     df: pd.DataFrame,
     output_dir: Path | None = None,
     workers: int = 2,
+    refresh_cache: bool = False,
 ) -> pd.DataFrame:
     """
     Fetch Kepler/K2 light curves via ``lightkurve``.
@@ -2794,20 +3265,40 @@ def fetch_kepler_k2_lightcurves(
     n_valid = int(valid.sum())
     print(f"Kepler/K2 LCs: fetching {n_valid} light curves")
 
+    valid_idx = df.index[valid].tolist()
+    summary_cols = ["kepler_n_quarters", "kepler_total_points", "kepler_flux_range"]
+    valid_idx, _, cached_matched = _apply_external_lc_cache_hits(
+        df,
+        valid_idx,
+        output_dir=output_dir,
+        refresh_cache=refresh_cache,
+        module="Kepler LCs",
+        file_prefix="kepler_lc",
+        summary_cols=summary_cols,
+        match_col="kepler_n_quarters",
+        cache_key_func=lambda idx: _coord_lookup_cache_key(df, idx, 21.0, "kepler_k2"),
+        summarize_func=lambda lc: _summarize_flux_lc(lc, "quarter", "kepler_n_quarters", "kepler_total_points", "kepler_flux_range"),
+    )
+    if not valid_idx:
+        print(f"Kepler/K2 LCs: {cached_matched}/{n_valid} with data")
+        return df
+
     def _fetch_one(idx: int) -> tuple:
         ra, dec = float(df.loc[idx, "ra"]), float(df.loc[idx, "dec"])
         if not (np.isfinite(ra) and np.isfinite(dec)):
-            return (idx, 0, 0, np.nan, None)
+            return (idx, 0, 0, np.nan, None, None)
+
+        cache_key = _coord_lookup_cache_key(df, idx, 21.0, "kepler_k2")
 
         try:
             coord = SkyCoord(ra=ra, dec=dec, unit="deg")
             search = lk.search_lightcurve(coord, radius=21, mission=("Kepler", "K2"))
             if search is None or len(search) == 0:
-                return (idx, 0, 0, np.nan, None)
+                return (idx, 0, 0, np.nan, None, cache_key)
 
             lc_collection = search.download_all()
             if lc_collection is None or len(lc_collection) == 0:
-                return (idx, 0, 0, np.nan, None)
+                return (idx, 0, 0, np.nan, None, cache_key)
 
             rows = []
             quarters = set()
@@ -2830,41 +3321,56 @@ def fetch_kepler_k2_lightcurves(
                     })
 
             if not rows:
-                return (idx, 0, 0, np.nan, None)
+                return (idx, 0, 0, np.nan, None, cache_key)
 
             lc_df = pd.DataFrame(rows)
             lc_df = lc_df[np.isfinite(lc_df["flux"])].copy()
 
-            n_quarters = len(quarters)
-            total_points = len(lc_df)
-            flux_vals = lc_df["flux"].dropna()
-            flux_range = float(flux_vals.max() - flux_vals.min()) if len(flux_vals) >= 2 else np.nan
+            summary = _summarize_flux_lc(lc_df, "quarter", "kepler_n_quarters", "kepler_total_points", "kepler_flux_range")
 
             if output_dir and not lc_df.empty:
-                cand_id = str(df.loc[idx, "candidate_id"]) if "candidate_id" in df.columns else str(idx)
-                lc_df.to_parquet(Path(output_dir) / f"kepler_lc_{cand_id}.parquet", index=False)
+                _write_external_lc_file(output_dir, "kepler_lc", df, idx, lc_df)
 
-            return (idx, n_quarters, total_points, flux_range, None)
+            return (
+                idx,
+                summary["kepler_n_quarters"],
+                summary["kepler_total_points"],
+                summary["kepler_flux_range"],
+                None,
+                cache_key,
+            )
         except Exception as exc:
-            return (idx, 0, 0, np.nan, f"{idx}: {_short_error(exc)}")
+            return (idx, 0, 0, np.nan, f"{idx}: {_short_error(exc)}", cache_key)
 
-    matched = 0
+    matched = cached_matched
     failures: list[str] = []
-    valid_idx = df.index[valid].tolist()
+    status_rows: list[dict] = []
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(_fetch_one, idx): idx for idx in valid_idx}
         for fut in tqdm(as_completed(futures), total=len(futures), desc="Kepler LCs"):
-            idx, n_quarters, total_points, flux_range, error = fut.result()
+            idx, n_quarters, total_points, flux_range, error, cache_key = fut.result()
             if error is not None:
                 failures.append(error)
                 continue
             df.loc[idx, "kepler_n_quarters"] = n_quarters
             df.loc[idx, "kepler_total_points"] = total_points
             df.loc[idx, "kepler_flux_range"] = flux_range
+            summary = {"kepler_n_quarters": n_quarters, "kepler_total_points": total_points, "kepler_flux_range": flux_range}
+            row = _external_lc_status_row(
+                df,
+                idx,
+                module="Kepler LCs",
+                cache_key=cache_key,
+                summary=summary,
+                status="fetched" if n_quarters > 0 else "no_data",
+            )
+            if row is not None:
+                status_rows.append(row)
             if n_quarters > 0:
                 matched += 1
 
+    _write_external_lc_status(output_dir, status_rows)
     _raise_lookup_failures("Kepler/K2 LCs", failures, n_valid)
     print(f"Kepler/K2 LCs: {matched}/{n_valid} with data")
     return df
@@ -2879,6 +3385,7 @@ def fetch_aavso_lightcurves(
     df: pd.DataFrame,
     output_dir: Path | None = None,
     workers: int = 4,
+    refresh_cache: bool = False,
 ) -> pd.DataFrame:
     """
     Fetch AAVSO light curves via WebObs scraping.
@@ -2917,9 +3424,28 @@ def fetch_aavso_lightcurves(
     n_valid = int(valid.sum())
     print(f"AAVSO LCs: fetching {n_valid} light curves by name")
 
+    valid_idx = df.index[valid].tolist()
+    summary_cols = ["aavso_lc_n_points"]
+    valid_idx, _, cached_matched = _apply_external_lc_cache_hits(
+        df,
+        valid_idx,
+        output_dir=output_dir,
+        refresh_cache=refresh_cache,
+        module="AAVSO LCs",
+        file_prefix="aavso_lc",
+        summary_cols=summary_cols,
+        match_col="aavso_lc_n_points",
+        cache_key_func=lambda idx: _source_lookup_cache_key(best_names[idx], "aavso"),
+        summarize_func=lambda lc: _summarize_count_lc(lc, "aavso_lc_n_points"),
+    )
+    if not valid_idx:
+        print(f"AAVSO LCs: {cached_matched}/{n_valid} with data")
+        return df
+
     def _fetch_one(idx: int) -> tuple:
         star_name = best_names[idx]
         obj_url = star_name.replace("V*", "").strip().replace(" ", "+")
+        cache_key = _source_lookup_cache_key(star_name, "aavso")
         
         try:
             dfs = []
@@ -2949,7 +3475,7 @@ def fetch_aavso_lightcurves(
                     break
             
             if not dfs:
-                return (idx, 0, None)
+                return (idx, 0, None, cache_key)
                 
             lc_df = pd.concat(dfs, ignore_index=True)
             # Clean up types and limit rows with values
@@ -2965,28 +3491,39 @@ def fetch_aavso_lightcurves(
             n_points = len(lc_df)
             
             if output_dir and n_points > 0:
-                cand_id = str(df.loc[idx, "candidate_id"]) if "candidate_id" in df.columns else str(idx)
-                lc_df.to_parquet(Path(output_dir) / f"aavso_lc_{cand_id}.parquet", index=False)
+                _write_external_lc_file(output_dir, "aavso_lc", df, idx, lc_df)
 
-            return (idx, n_points, None)
+            return (idx, n_points, None, cache_key)
         except Exception as exc:
-            return (idx, 0, f"{idx}: {_short_error(exc)}")
+            return (idx, 0, f"{idx}: {_short_error(exc)}", cache_key)
 
-    matched = 0
+    matched = cached_matched
     failures: list[str] = []
-    valid_idx = df.index[valid].tolist()
+    status_rows: list[dict] = []
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(_fetch_one, idx): idx for idx in valid_idx}
         for fut in tqdm(as_completed(futures), total=len(futures), desc="AAVSO LCs"):
-            idx, n_points, error = fut.result()
+            idx, n_points, error, cache_key = fut.result()
             if error is not None:
                 failures.append(error)
                 continue
             df.loc[idx, "aavso_lc_n_points"] = n_points
+            summary = {"aavso_lc_n_points": n_points}
+            row = _external_lc_status_row(
+                df,
+                idx,
+                module="AAVSO LCs",
+                cache_key=cache_key,
+                summary=summary,
+                status="fetched" if n_points > 0 else "no_data",
+            )
+            if row is not None:
+                status_rows.append(row)
             if n_points > 0:
                 matched += 1
 
+    _write_external_lc_status(output_dir, status_rows)
     _raise_lookup_failures("AAVSO LCs", failures, n_valid)
     print(f"AAVSO LCs: {matched}/{n_valid} with data")
     return df
@@ -3001,6 +3538,7 @@ def fetch_panstarrs_lightcurves(
     df: pd.DataFrame,
     output_dir: Path | None = None,
     workers: int = 4,
+    refresh_cache: bool = False,
 ) -> pd.DataFrame:
     """
     Fetch Pan-STARRS (PS1 DR2) epoch photometry.
@@ -3022,14 +3560,33 @@ def fetch_panstarrs_lightcurves(
     n_valid = int(valid.sum())
     print(f"Pan-STARRS LCs: fetching {n_valid} light curves")
 
+    valid_idx = df.index[valid].tolist()
+    summary_cols = ["ps1_lc_n_points"]
+    valid_idx, _, cached_matched = _apply_external_lc_cache_hits(
+        df,
+        valid_idx,
+        output_dir=output_dir,
+        refresh_cache=refresh_cache,
+        module="Pan-STARRS LCs",
+        file_prefix="ps1_lc",
+        summary_cols=summary_cols,
+        match_col="ps1_lc_n_points",
+        cache_key_func=lambda idx: _coord_lookup_cache_key(df, idx, 0.0015 * 3600.0, "ps1_dr2"),
+        summarize_func=lambda lc: _summarize_count_lc(lc, "ps1_lc_n_points"),
+    )
+    if not valid_idx:
+        print(f"Pan-STARRS LCs: {cached_matched}/{n_valid} with data")
+        return df
+
     def _fetch_one(idx: int) -> tuple:
         ra, dec = float(df.loc[idx, "ra"]), float(df.loc[idx, "dec"])
         if not (np.isfinite(ra) and np.isfinite(dec)):
-            return (idx, 0, None)
+            return (idx, 0, None, None)
+        cache_key = _coord_lookup_cache_key(df, idx, 0.0015 * 3600.0, "ps1_dr2")
 
         # Skip southern hemisphere queries (-30 limit for PS1)
         if dec < -30.5:
-            return (idx, 0, None)
+            return (idx, 0, None, cache_key)
 
         try:
             url = f"https://catalogs.mast.stsci.edu/api/v0.1/panstarrs/dr2/detection.csv?ra={ra}&dec={dec}&radius=0.0015&pagesize=10000&format=csv"
@@ -3037,12 +3594,12 @@ def fetch_panstarrs_lightcurves(
             if res.status_code != 200:
                 raise RuntimeError(f"Pan-STARRS HTTP {res.status_code}")
             if "obsTime" not in res.text:
-                return (idx, 0, None)
+                return (idx, 0, None, cache_key)
 
             lc_df = pd.read_csv(io.StringIO(res.text))
             
             if lc_df.empty or "obsTime" not in lc_df.columns:
-                return (idx, 0, None)
+                return (idx, 0, None, cache_key)
 
             # Filter by infoFlag if present
             if "infoFlag" in lc_df.columns:
@@ -3055,7 +3612,7 @@ def fetch_panstarrs_lightcurves(
                 lc_df = lc_df[~bad_mask].copy()
 
             if lc_df.empty:
-                return (idx, 0, None)
+                return (idx, 0, None, cache_key)
                 
             # Rename for consistency mapping
             lc_df = lc_df.rename(columns={
@@ -3088,28 +3645,39 @@ def fetch_panstarrs_lightcurves(
             n_points = len(lc_df)
 
             if output_dir and n_points > 0:
-                cand_id = str(df.loc[idx, "candidate_id"]) if "candidate_id" in df.columns else str(idx)
-                lc_df.to_parquet(Path(output_dir) / f"ps1_lc_{cand_id}.parquet", index=False)
+                _write_external_lc_file(output_dir, "ps1_lc", df, idx, lc_df)
 
-            return (idx, n_points, None)
+            return (idx, n_points, None, cache_key)
         except Exception as exc:
-            return (idx, 0, f"{idx}: {_short_error(exc)}")
+            return (idx, 0, f"{idx}: {_short_error(exc)}", cache_key)
 
-    matched = 0
+    matched = cached_matched
     failures: list[str] = []
-    valid_idx = df.index[valid].tolist()
+    status_rows: list[dict] = []
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(_fetch_one, idx): idx for idx in valid_idx}
         for fut in tqdm(as_completed(futures), total=len(futures), desc="Pan-STARRS LCs"):
-            idx, n_points, error = fut.result()
+            idx, n_points, error, cache_key = fut.result()
             if error is not None:
                 failures.append(error)
                 continue
             df.loc[idx, "ps1_lc_n_points"] = n_points
+            summary = {"ps1_lc_n_points": n_points}
+            row = _external_lc_status_row(
+                df,
+                idx,
+                module="Pan-STARRS LCs",
+                cache_key=cache_key,
+                summary=summary,
+                status="fetched" if n_points > 0 else "no_data",
+            )
+            if row is not None:
+                status_rows.append(row)
             if n_points > 0:
                 matched += 1
 
+    _write_external_lc_status(output_dir, status_rows)
     _raise_lookup_failures("Pan-STARRS LCs", failures, n_valid)
     print(f"Pan-STARRS LCs: {matched}/{n_valid} with data")
     return df
@@ -3123,6 +3691,7 @@ def fetch_panstarrs_lightcurves(
 def fetch_crts_lightcurves(
     df: pd.DataFrame,
     output_dir: Path | None = None,
+    refresh_cache: bool = False,
 ) -> pd.DataFrame:
     """
     Fetch CRTS light curves using VizieR TAP (II/341/data table).
@@ -3144,12 +3713,30 @@ def fetch_crts_lightcurves(
     n_valid = int(valid.sum())
     print(f"CRTS LCs: fetching {n_valid} light curves via TAP")
 
+    valid_idx = df.index[valid].tolist()
+    summary_cols = ["crts_lc_n_points"]
+    valid_idx, _, cached_matched = _apply_external_lc_cache_hits(
+        df,
+        valid_idx,
+        output_dir=output_dir,
+        refresh_cache=refresh_cache,
+        module="CRTS LCs",
+        file_prefix="crts_lc",
+        summary_cols=summary_cols,
+        match_col="crts_lc_n_points",
+        cache_key_func=lambda idx: _coord_lookup_cache_key(df, idx, 3.0, "crts"),
+        summarize_func=lambda lc: _summarize_count_lc(lc, "crts_lc_n_points"),
+    )
+    if not valid_idx:
+        print(f"CRTS LCs: {cached_matched}/{n_valid} with data")
+        return df
+
     # We do a batch query against II/341/data which has epoch photometry.
     # Because II/341/data is massive, doing a batch crossmatch is best.
     coords_df = pd.DataFrame({
-        "_idx": df.index[valid],
-        "ra": df.loc[valid, "ra"].values,
-        "dec": df.loc[valid, "dec"].values,
+        "_idx": valid_idx,
+        "ra": df.loc[valid_idx, "ra"].values,
+        "dec": df.loc[valid_idx, "dec"].values,
     })
     
     # Actually, II/341/data does not have RA/DEC, only "ID" which links to II/341/ptss
@@ -3173,6 +3760,19 @@ def fetch_crts_lightcurves(
     
     if prss_result.empty:
         print("CRTS LCs: no counterparts found")
+        status_rows = []
+        for idx in valid_idx:
+            row = _external_lc_status_row(
+                df,
+                idx,
+                module="CRTS LCs",
+                cache_key=_coord_lookup_cache_key(df, idx, 3.0, "crts"),
+                summary={"crts_lc_n_points": 0},
+                status="no_data",
+            )
+            if row is not None:
+                status_rows.append(row)
+        _write_external_lc_status(output_dir, status_rows)
         return df
         
     # Keep closest match per input index
@@ -3181,6 +3781,19 @@ def fetch_crts_lightcurves(
     id_to_idx = dict(zip(prss_result["ID"].astype(str), prss_result["_idx"]))
 
     if not crts_ids:
+        status_rows = []
+        for idx in valid_idx:
+            row = _external_lc_status_row(
+                df,
+                idx,
+                module="CRTS LCs",
+                cache_key=_coord_lookup_cache_key(df, idx, 3.0, "crts"),
+                summary={"crts_lc_n_points": 0},
+                status="no_data",
+            )
+            if row is not None:
+                status_rows.append(row)
+        _write_external_lc_status(output_dir, status_rows)
         return df
 
     print(f"CRTS LCs: fetching full LCs for {len(crts_ids)} matches...")
@@ -3210,13 +3823,28 @@ def fetch_crts_lightcurves(
 
     if not all_lcs:
         print("CRTS LCs: no epoch data retrieved")
+        status_rows = []
+        for idx in valid_idx:
+            row = _external_lc_status_row(
+                df,
+                idx,
+                module="CRTS LCs",
+                cache_key=_coord_lookup_cache_key(df, idx, 3.0, "crts"),
+                summary={"crts_lc_n_points": 0},
+                status="no_data",
+            )
+            if row is not None:
+                status_rows.append(row)
+        _write_external_lc_status(output_dir, status_rows)
         return df
 
     full_data = pd.concat(all_lcs, ignore_index=True)
     full_data = full_data.rename(columns={"ObsTime": "mjd", "Mag": "mag", "e_Mag": "mag_err", "ID": "CRTS_ID"})
     full_data["CRTS_ID"] = full_data["CRTS_ID"].astype(str)
     
-    matched = 0
+    matched = cached_matched
+    seen_with_data: set = set()
+    status_rows: list[dict] = []
     grouped = full_data.groupby("CRTS_ID")
     for cid, group in grouped:
         if cid not in id_to_idx:
@@ -3226,12 +3854,40 @@ def fetch_crts_lightcurves(
         lc_df = group.sort_values("mjd").dropna(subset=["mjd", "mag"]).copy()
         n_points = len(lc_df)
         df.loc[idx, "crts_lc_n_points"] = n_points
+        summary = {"crts_lc_n_points": n_points}
         
         if output_dir and n_points > 0:
-            cand_id = str(df.loc[idx, "candidate_id"]) if "candidate_id" in df.columns else str(idx)
-            lc_df.to_parquet(Path(output_dir) / f"crts_lc_{cand_id}.parquet", index=False)
+            _write_external_lc_file(output_dir, "crts_lc", df, idx, lc_df)
+
+        row = _external_lc_status_row(
+            df,
+            idx,
+            module="CRTS LCs",
+            cache_key=_coord_lookup_cache_key(df, idx, 3.0, "crts"),
+            summary=summary,
+            status="fetched" if n_points > 0 else "no_data",
+        )
+        if row is not None:
+            status_rows.append(row)
+        seen_with_data.add(idx)
+        if n_points > 0:
             matched += 1
 
+    for idx in valid_idx:
+        if idx in seen_with_data:
+            continue
+        row = _external_lc_status_row(
+            df,
+            idx,
+            module="CRTS LCs",
+            cache_key=_coord_lookup_cache_key(df, idx, 3.0, "crts"),
+            summary={"crts_lc_n_points": 0},
+            status="no_data",
+        )
+        if row is not None:
+            status_rows.append(row)
+
+    _write_external_lc_status(output_dir, status_rows)
     print(f"CRTS LCs: {matched}/{n_valid} with data")
     return df
 
@@ -3258,6 +3914,7 @@ def fetch_external_lcs(
     workers: int = 4,
     checkpoint_path: Path | None = None,
     progress_callback: Callable[[str], None] | None = None,
+    refresh_cache: bool = False,
 ) -> pd.DataFrame:
     """
     Orchestrator for fetching external light curves from all sources.
@@ -3323,28 +3980,28 @@ def fetch_external_lcs(
             df.to_parquet(checkpoint_path, index=False)
 
     if run_atlas:
-        _run_module("ATLAS LCs", query_atlas_forced_phot, token=atlas_token, output_dir=output_dir)
+        _run_module("ATLAS LCs", query_atlas_forced_phot, token=atlas_token, output_dir=output_dir, refresh_cache=refresh_cache)
 
     if run_ztf:
-        _run_module("ZTF LCs", fetch_ztf_lightcurves, output_dir=output_dir, workers=workers)
+        _run_module("ZTF LCs", fetch_ztf_lightcurves, output_dir=output_dir, workers=workers, refresh_cache=refresh_cache)
 
     if run_gaia_epoch:
-        _run_module("Gaia epoch LCs", fetch_gaia_epoch_lcs, output_dir=output_dir)
+        _run_module("Gaia epoch LCs", fetch_gaia_epoch_lcs, output_dir=output_dir, refresh_cache=refresh_cache)
 
     if run_tess:
-        _run_module("TESS LCs", fetch_tess_lightcurves, output_dir=output_dir, workers=min(workers, 2))
+        _run_module("TESS LCs", fetch_tess_lightcurves, output_dir=output_dir, workers=min(workers, 2), refresh_cache=refresh_cache)
 
     if run_kepler:
-        _run_module("Kepler LCs", fetch_kepler_k2_lightcurves, output_dir=output_dir, workers=min(workers, 2))
+        _run_module("Kepler LCs", fetch_kepler_k2_lightcurves, output_dir=output_dir, workers=min(workers, 2), refresh_cache=refresh_cache)
 
     if run_aavso:
-        _run_module("AAVSO LCs", fetch_aavso_lightcurves, output_dir=output_dir, workers=workers)
+        _run_module("AAVSO LCs", fetch_aavso_lightcurves, output_dir=output_dir, workers=workers, refresh_cache=refresh_cache)
 
     if run_ps1:
-        _run_module("Pan-STARRS LCs", fetch_panstarrs_lightcurves, output_dir=output_dir, workers=workers)
+        _run_module("Pan-STARRS LCs", fetch_panstarrs_lightcurves, output_dir=output_dir, workers=workers, refresh_cache=refresh_cache)
 
     if run_crts:
-        _run_module("CRTS LCs", fetch_crts_lightcurves, output_dir=output_dir)
+        _run_module("CRTS LCs", fetch_crts_lightcurves, output_dir=output_dir, refresh_cache=refresh_cache)
 
     elapsed = time.perf_counter() - total_start
     _emit(f"External LCs completed in {elapsed:.1f}s")
@@ -3560,14 +4217,21 @@ def vet_candidates(
         _run_module("eROSITA", crossmatch_erosita, radius_arcsec=erosita_radius_arcsec, method=_erosita_method)
 
     if run_atlas:
-        _run_module("ATLAS forced phot", query_atlas_forced_phot, token=atlas_token, output_dir=atlas_output_dir)
+        _run_module(
+            "ATLAS forced phot",
+            query_atlas_forced_phot,
+            token=atlas_token,
+            output_dir=atlas_output_dir,
+            refresh_cache=refresh_cache,
+        )
 
     if run_pm_check:
         _run_module("PM consistency", check_pm_consistency)
 
     if run_neowise_lc:
         _run_module("NEOWISE LCs", query_neowise_lightcurves,
-                    output_dir=neowise_output_dir, workers=neowise_workers)
+                    output_dir=neowise_output_dir, workers=neowise_workers,
+                    refresh_cache=refresh_cache)
 
     # Summary
     _print_vetting_summary(df, total_start)

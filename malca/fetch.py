@@ -17,6 +17,7 @@ from __future__ import annotations
 from base64 import encodebytes
 from pathlib import Path
 import io
+import json
 import math
 import os
 import re
@@ -53,6 +54,19 @@ _SKYPATROL2_DEFAULT_BLOCK_SERVERS = [
 ]
 
 _SKYPATROL1_UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE)
+
+_SKYPATROL_WEB_COLS = [
+    "JD",
+    "Flux",
+    "Flux Error",
+    "Mag",
+    "Mag Error",
+    "Limit",
+    "FWHM",
+    "Filter",
+    "Quality",
+    "Camera",
+]
 
 
 _service_meta: dict | None = None
@@ -120,6 +134,73 @@ def _safe_cache_token(text: str) -> str:
     return token or "target"
 
 
+def _json_safe_scalar(value):
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, Path):
+        return str(value)
+    return value
+
+
+def _skypatrol_meta_path(lc_path: Path) -> Path:
+    return lc_path.with_suffix(lc_path.suffix + ".meta.json")
+
+
+def _read_skypatrol_metadata(lc_path: Path) -> dict:
+    meta_path = _skypatrol_meta_path(lc_path)
+    if not meta_path.exists():
+        return {}
+    try:
+        with meta_path.open("r", encoding="utf-8") as f:
+            payload = json.load(f)
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_skypatrol_metadata(lc_path: Path, metadata: dict) -> None:
+    if not metadata:
+        return
+    payload = {str(k): _json_safe_scalar(v) for k, v in metadata.items()}
+    try:
+        with _skypatrol_meta_path(lc_path).open("w", encoding="utf-8") as f:
+            json.dump(payload, f, sort_keys=True)
+    except Exception:
+        pass
+
+
+def _is_valid_skypatrol_cache(lc_path: Path) -> bool:
+    if not lc_path.exists():
+        return False
+    try:
+        if lc_path.stat().st_size <= 0:
+            return False
+        df = pd.read_csv(lc_path, nrows=25)
+    except Exception:
+        return False
+    if df.empty or "JD" not in df.columns:
+        return False
+    if not ({"Mag", "Flux"} & set(df.columns)):
+        return False
+    jd = pd.to_numeric(df["JD"], errors="coerce")
+    return bool(jd.notna().any())
+
+
+def _cached_skypatrol_result(lc_path: Path, refresh_cache: bool) -> tuple[Path, dict] | None:
+    if refresh_cache:
+        return None
+    if not _is_valid_skypatrol_cache(lc_path):
+        return None
+    return lc_path, _read_skypatrol_metadata(lc_path)
+
+
 def _infer_filter_from_camera(camera) -> str:
     """Infer ASAS-SN filter band from camera code.
 
@@ -178,26 +259,14 @@ def _save_lc_as_skypatrol_csv(lc_data: pd.DataFrame, out_path: Path) -> Path:
     if "Quality" not in df.columns:
         df["Quality"] = "G"
 
-    web_cols = [
-        "JD",
-        "Flux",
-        "Flux Error",
-        "Mag",
-        "Mag Error",
-        "Limit",
-        "FWHM",
-        "Filter",
-        "Quality",
-        "Camera",
-    ]
-    for c in web_cols:
+    for c in _SKYPATROL_WEB_COLS:
         if c not in df.columns:
             df[c] = np.nan
 
     df["JD"] = pd.to_numeric(df["JD"], errors="coerce")
     df = df[pd.notna(df["JD"])].copy()
     df = df.sort_values("JD").reset_index(drop=True)
-    df = df[web_cols]
+    df = df[_SKYPATROL_WEB_COLS]
     df.to_csv(out_path, index=False)
     return out_path
 
@@ -567,9 +636,14 @@ def _sp2_cone_search_catalog(
 def _sp2_download_lightcurve_by_id(
     asas_sn_id: str,
     cache_dir: str | Path,
+    *,
+    refresh_cache: bool = False,
 ) -> tuple[Path, dict]:
     cache = _ensure_cache(cache_dir)
     out = cache / f"{asas_sn_id}.csv"
+    cached = _cached_skypatrol_result(out, refresh_cache)
+    if cached is not None:
+        return cached
 
     catalog_info = _sp2_query_catalog_info([int(asas_sn_id)], id_col="asas_sn_id", catalog="stellar_main")
 
@@ -594,15 +668,21 @@ def _sp2_download_lightcurve_by_id(
         raise RuntimeError(f"No light curve returned for ASAS-SN ID {asas_sn_id}")
 
     _save_lc_as_skypatrol_csv(lc, out)
+    _write_skypatrol_metadata(out, catalog_info)
     return out, catalog_info
 
 
 def _sp2_download_lightcurve_by_gaia_id(
     gaia_id: str,
     cache_dir: str | Path,
+    *,
+    refresh_cache: bool = False,
 ) -> tuple[Path, dict]:
     cache = _ensure_cache(cache_dir)
     out = cache / f"gaia_{gaia_id}.csv"
+    cached = _cached_skypatrol_result(out, refresh_cache)
+    if cached is not None:
+        return cached
 
     catalog_info = _sp2_query_catalog_info([int(gaia_id)], id_col="gaia_id", catalog="stellar_main")
     lc = _sp2_download_lc([int(gaia_id)], id_col="gaia_id", catalog="stellar_main")
@@ -610,6 +690,7 @@ def _sp2_download_lightcurve_by_gaia_id(
         raise RuntimeError(f"No light curve returned for Gaia ID {gaia_id}")
 
     _save_lc_as_skypatrol_csv(lc, out)
+    _write_skypatrol_metadata(out, catalog_info)
     return out, catalog_info
 
 
@@ -905,6 +986,8 @@ def _sp1_resolve_source_from_coords(ra: float, dec: float, radius_arcsec: float 
 def _sp1_download_lightcurve_by_id(
     asas_sn_id: str,
     cache_dir: str | Path,
+    *,
+    refresh_cache: bool = False,
 ) -> tuple[Path, dict]:
     """SkyPatrol1 implementation for ASAS-SN ID fetch.
 
@@ -921,6 +1004,9 @@ def _sp1_download_lightcurve_by_id(
     # Case 1: direct SkyPatrol1 photometry UUID
     if _sp1_is_uuid(query):
         out = cache / f"{query}.csv"
+        cached = _cached_skypatrol_result(out, refresh_cache)
+        if cached is not None:
+            return cached
         lc = _sp1_download_photometry_csv(query)
         _save_lc_as_skypatrol_csv(_normalize_sp1_lc_frame(lc), out)
         ra_deg, dec_deg = _sp1_extract_coords_from_photometry_html(query)
@@ -931,10 +1017,16 @@ def _sp1_download_lightcurve_by_id(
         if ra_deg is not None and dec_deg is not None:
             catalog_info["ra_deg"] = ra_deg
             catalog_info["dec_deg"] = dec_deg
+        _write_skypatrol_metadata(out, catalog_info)
         return out, catalog_info
 
     # Case 2: numeric SkyPatrol2 ASAS-SN id -> resolve coords -> nearest SkyPatrol1 source
     if query.isdigit():
+        out = cache / f"{query}.csv"
+        cached = _cached_skypatrol_result(out, refresh_cache)
+        if cached is not None:
+            return cached
+
         catalog_info = _sp2_query_catalog_info([int(query)], id_col="asas_sn_id", catalog="stellar_main")
         if not catalog_info:
             catalog_info = _sp2_query_catalog_info([int(query)], id_col="asas_sn_id", catalog="master_list")
@@ -951,7 +1043,6 @@ def _sp1_download_lightcurve_by_id(
         if not _sp1_is_uuid(source_uuid):
             raise RuntimeError(f"Could not resolve SkyPatrol1 source UUID near ASAS-SN ID {query}")
 
-        out = cache / f"{query}.csv"
         lc = _sp1_download_photometry_csv(source_uuid)
         _save_lc_as_skypatrol_csv(_normalize_sp1_lc_frame(lc), out)
 
@@ -961,18 +1052,24 @@ def _sp1_download_lightcurve_by_id(
         merged["sp1_source_id"] = source_uuid
         merged["sp1_sep_arcsec"] = sep_arcsec
         merged["asas_sn_id"] = query
+        _write_skypatrol_metadata(out, merged)
         return out, merged
 
     # Case 3: ASASSN variable-style name (ASASSN-V J...) via variable lookup
+    out = cache / f"{_safe_cache_token(query)}.csv"
+    cached = _cached_skypatrol_result(out, refresh_cache)
+    if cached is not None:
+        return cached
+
     variable_uuid = _sp1_lookup_variable_uuid(query)
     if variable_uuid:
-        out = cache / f"{_safe_cache_token(query)}.csv"
         lc = _sp1_download_variable_csv(variable_uuid)
         _save_lc_as_skypatrol_csv(_normalize_sp1_lc_frame(lc), out)
 
         metadata = _sp1_fetch_variable_metadata_by_name(query)
         metadata.setdefault("sp1_variable_uuid", variable_uuid)
         metadata.setdefault("asas_sn_id", metadata.get("asassn_name", query))
+        _write_skypatrol_metadata(out, metadata)
         return out, metadata
 
     raise RuntimeError(
@@ -984,6 +1081,8 @@ def _sp1_download_lightcurve_by_id(
 def _sp1_download_lightcurve_by_gaia_id(
     gaia_id: str,
     cache_dir: str | Path,
+    *,
+    refresh_cache: bool = False,
 ) -> tuple[Path, dict]:
     """SkyPatrol1 implementation for Gaia DR3 id fetch.
 
@@ -996,6 +1095,11 @@ def _sp1_download_lightcurve_by_gaia_id(
         raise RuntimeError("Gaia query is empty")
     if not query.isdigit():
         raise RuntimeError(f"Gaia ID must be numeric, got: {gaia_id}")
+
+    out = cache / f"gaia_{query}.csv"
+    cached = _cached_skypatrol_result(out, refresh_cache)
+    if cached is not None:
+        return cached
 
     catalog_info = _sp2_query_catalog_info([int(query)], id_col="gaia_id", catalog="stellar_main")
     if not catalog_info:
@@ -1011,7 +1115,6 @@ def _sp1_download_lightcurve_by_gaia_id(
     if not _sp1_is_uuid(source_uuid):
         raise RuntimeError(f"Could not resolve SkyPatrol1 source UUID near Gaia ID {query}")
 
-    out = cache / f"gaia_{query}.csv"
     lc = _sp1_download_photometry_csv(source_uuid)
     _save_lc_as_skypatrol_csv(_normalize_sp1_lc_frame(lc), out)
 
@@ -1021,6 +1124,7 @@ def _sp1_download_lightcurve_by_gaia_id(
     merged["source_id"] = source_uuid
     merged["sp1_source_id"] = source_uuid
     merged["sp1_sep_arcsec"] = sep_arcsec
+    _write_skypatrol_metadata(out, merged)
     return out, merged
 
 
@@ -1032,12 +1136,13 @@ def download_lightcurve_by_id(
     cache_dir: str | Path = _DEFAULT_CACHE,
     *,
     backend: str | None = None,
+    refresh_cache: bool = False,
 ) -> tuple[Path, dict]:
     """Download a light curve by ASAS-SN id using selected backend."""
     backend_name = _normalize_backend_name(backend)
     if backend_name == "skypatrol1":
-        return _sp1_download_lightcurve_by_id(asas_sn_id, cache_dir)
-    return _sp2_download_lightcurve_by_id(asas_sn_id, cache_dir)
+        return _sp1_download_lightcurve_by_id(asas_sn_id, cache_dir, refresh_cache=refresh_cache)
+    return _sp2_download_lightcurve_by_id(asas_sn_id, cache_dir, refresh_cache=refresh_cache)
 
 
 def download_lightcurve_by_gaia_id(
@@ -1045,12 +1150,13 @@ def download_lightcurve_by_gaia_id(
     cache_dir: str | Path = _DEFAULT_CACHE,
     *,
     backend: str | None = None,
+    refresh_cache: bool = False,
 ) -> tuple[Path, dict]:
     """Download a light curve by Gaia DR3 source id using selected backend."""
     backend_name = _normalize_backend_name(backend)
     if backend_name == "skypatrol1":
-        return _sp1_download_lightcurve_by_gaia_id(gaia_id, cache_dir)
-    return _sp2_download_lightcurve_by_gaia_id(gaia_id, cache_dir)
+        return _sp1_download_lightcurve_by_gaia_id(gaia_id, cache_dir, refresh_cache=refresh_cache)
+    return _sp2_download_lightcurve_by_gaia_id(gaia_id, cache_dir, refresh_cache=refresh_cache)
 
 
 def cone_search(

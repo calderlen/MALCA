@@ -10,9 +10,12 @@ downloaded SkyPatrol-format CSV and then hand the result to import_candidates.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 import traceback
 
+import numpy as np
 import pandas as pd
 
 from malca.config import RUN_MAX_GAP_POINTS, BASELINE_FUNC
@@ -32,11 +35,14 @@ def fetch_and_analyze_by_id(
     run_stats: bool = True,
     run_events: bool = False,
     backend: str = "skypatrol2",
+    refresh_cache: bool = False,
+    refresh_stats_cache: bool = False,
 ) -> tuple[pd.DataFrame, Path]:
     """Download LC by ASAS-SN ID, compute basic stats, return (1-row DF, lc_path)."""
-    lc_path, catalog_info = download_lightcurve_by_id(asas_sn_id, backend=backend)
+    lc_path, catalog_info = download_lightcurve_by_id(asas_sn_id, backend=backend, refresh_cache=refresh_cache)
     df = _build_candidate_row(asas_sn_id, lc_path, catalog_info,
-                              run_stats=run_stats, run_events=run_events)
+                              run_stats=run_stats, run_events=run_events,
+                              refresh_stats_cache=refresh_stats_cache)
     return df, lc_path
 
 
@@ -46,12 +52,15 @@ def fetch_and_analyze_by_gaia_id(
     run_stats: bool = True,
     run_events: bool = False,
     backend: str = "skypatrol2",
+    refresh_cache: bool = False,
+    refresh_stats_cache: bool = False,
 ) -> tuple[pd.DataFrame, Path]:
     """Download LC by Gaia DR3 source_id, compute basic stats."""
-    lc_path, catalog_info = download_lightcurve_by_gaia_id(gaia_id, backend=backend)
+    lc_path, catalog_info = download_lightcurve_by_gaia_id(gaia_id, backend=backend, refresh_cache=refresh_cache)
     candidate_id = str(catalog_info.get("asas_sn_id", f"gaia_{gaia_id}"))
     df = _build_candidate_row(candidate_id, lc_path, catalog_info,
-                              run_stats=run_stats, run_events=run_events)
+                              run_stats=run_stats, run_events=run_events,
+                              refresh_stats_cache=refresh_stats_cache)
     return df, lc_path
 
 
@@ -77,6 +86,7 @@ def _build_candidate_row(
     *,
     run_stats: bool = True,
     run_events: bool = False,
+    refresh_stats_cache: bool = False,
 ) -> pd.DataFrame:
     """Create a single-row candidate DataFrame suitable for import_candidates."""
     row: dict = {
@@ -111,7 +121,7 @@ def _build_candidate_row(
         row["source_id"] = row["gaia_id"]
 
     if run_stats:
-        stats = _compute_stats_from_skypatrol_csv(lc_path)
+        stats = _compute_stats_from_skypatrol_csv(lc_path, refresh_stats_cache=refresh_stats_cache)
         print(f"[fetch] Full stats computed: {len(stats)} keys")
         row.update(stats)
 
@@ -122,8 +132,58 @@ def _build_candidate_row(
     return pd.DataFrame([row])
 
 
-def _compute_stats_from_skypatrol_csv(lc_path: Path) -> dict:
+def _stats_cache_path(lc_path: Path) -> Path | None:
+    try:
+        path = Path(lc_path).expanduser().resolve()
+        stat = path.stat()
+    except Exception:
+        return None
+    key = f"{path}|{stat.st_size}|{stat.st_mtime_ns}"
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:24]
+    return path.parent / "stats_cache" / f"{path.stem}.{digest}.json"
+
+
+def _read_stats_cache(cache_path: Path | None) -> dict | None:
+    if cache_path is None or not cache_path.exists():
+        return None
+    try:
+        with cache_path.open("r", encoding="utf-8") as f:
+            payload = json.load(f)
+        return payload if isinstance(payload, dict) else None
+    except Exception:
+        return None
+
+
+def _json_safe_stats(value):
+    if value is None:
+        return None
+    if isinstance(value, (float, np.floating)) and np.isnan(value):
+        return None
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+def _write_stats_cache(cache_path: Path | None, stats: dict) -> None:
+    if cache_path is None or not stats:
+        return
+    try:
+        payload = {str(k): _json_safe_stats(v) for k, v in stats.items()}
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        with cache_path.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, sort_keys=True)
+    except Exception:
+        pass
+
+
+def _compute_stats_from_skypatrol_csv(lc_path: Path, *, refresh_stats_cache: bool = False) -> dict:
     """Compute full compute_stats() suite from a SkyPatrol-format CSV."""
+    cache_path = _stats_cache_path(lc_path)
+    if not refresh_stats_cache:
+        cached = _read_stats_cache(cache_path)
+        if cached is not None:
+            return cached
+
     try:
         from malca.stats import compute_stats
 
@@ -132,6 +192,7 @@ def _compute_stats_from_skypatrol_csv(lc_path: Path) -> dict:
         _df, summary = compute_stats(candidate_id, parent, compute_ls=True)
         out: dict = {}
         merge_stats_summary_into_payload(out, summary)
+        _write_stats_cache(cache_path, out)
         return out
     except Exception as e:
         print(f"[fetch] Warning: full stats computation failed: {e}")

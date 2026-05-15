@@ -99,6 +99,13 @@ from malca.utils import read_lc_dat2
 # =============================================================================
 
 DEFAULT_CACHE_DIR = DEFAULT_CACHE_DIR.expanduser()
+COMPACT_TQDM_BAR_FORMAT = (
+    "{desc}: {percentage:3.0f}% {n_fmt}/{total_fmt} "
+    "[{elapsed}<{remaining}, {rate_fmt}]"
+)
+GAIA_EB_OUTPUT_COLUMNS = ["source_id", "period", "var_type", "global_ranking"]
+GAIA_EB_CACHE_COLUMNS = [*GAIA_EB_OUTPUT_COLUMNS, "matched"]
+GAIA_EB_CACHE_FLUSH_CHUNKS = 50
 
 PERIOD_SOURCE_PRIORITY = (
     "gaia_eb",
@@ -568,14 +575,22 @@ def fetch_gaia_dr3_eb_periods(
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_file = cache_dir / "gaia_dr3_eb_periods.parquet"
 
-    cached_df = pd.DataFrame(columns=["source_id", "period", "var_type", "global_ranking"])
+    cached_df = pd.DataFrame(columns=GAIA_EB_CACHE_COLUMNS)
     if cache_file.exists():
         try:
             cached_df = pd.read_parquet(cache_file)
             if "source_id" in cached_df.columns:
                 cached_df["source_id"] = pd.to_numeric(cached_df["source_id"], errors="coerce").astype("Int64")
         except Exception:
-            cached_df = pd.DataFrame(columns=["source_id", "period", "var_type", "global_ranking"])
+            cached_df = pd.DataFrame(columns=GAIA_EB_CACHE_COLUMNS)
+    for col in GAIA_EB_CACHE_COLUMNS:
+        if col not in cached_df.columns:
+            if col == "matched":
+                cached_df[col] = True
+            else:
+                cached_df[col] = np.nan if col in {"source_id", "period", "global_ranking"} else ""
+    cached_df = cached_df.loc[:, GAIA_EB_CACHE_COLUMNS].copy()
+    cached_df["source_id"] = pd.to_numeric(cached_df["source_id"], errors="coerce").astype("Int64")
 
     cached_ids: set[int] = set()
     if "source_id" in cached_df.columns:
@@ -589,10 +604,35 @@ def fetch_gaia_dr3_eb_periods(
         tqdm.write(f"[fetch_gaia_eb] Querying Gaia TAP for {len(missing_ids)} uncached source IDs")
 
     new_rows: list[dict[str, object]] = []
+
+    def flush_cache() -> None:
+        nonlocal cached_df, new_rows
+        if not new_rows:
+            return
+        new_df = pd.DataFrame.from_records(new_rows, columns=GAIA_EB_CACHE_COLUMNS)
+        if cached_df.empty:
+            full_df = new_df.copy()
+        else:
+            full_df = pd.concat([cached_df, new_df], ignore_index=True)
+        full_df["source_id"] = pd.to_numeric(full_df["source_id"], errors="coerce").astype("Int64")
+        full_df = full_df.dropna(subset=["source_id"])
+        full_df = full_df.drop_duplicates(subset=["source_id"], keep="last")
+        full_df.to_parquet(cache_file, index=False, compression=PARQUET_CACHE_COMPRESSION)
+        cached_df = full_df
+        new_rows = []
+
     if missing_ids:
         tap = pyvo.dal.TAPService(GAIA_AIP_TAP_URL)
         chunks = range(0, len(missing_ids), max(1, int(chunk_size)))
-        iterator = tqdm(chunks, desc="fetch_gaia_eb", leave=False, disable=not show_tqdm)
+        iterator = tqdm(
+            chunks,
+            desc="fetch_gaia_eb",
+            unit="chunk",
+            leave=False,
+            disable=not show_tqdm,
+            dynamic_ncols=True,
+            bar_format=COMPACT_TQDM_BAR_FORMAT,
+        )
         for i in iterator:
             chunk = missing_ids[i : i + max(1, int(chunk_size))]
             ids_str = ",".join(str(sid) for sid in chunk)
@@ -619,8 +659,11 @@ def fetch_gaia_dr3_eb_periods(
                         )
                     time.sleep(delay)
 
+            found_ids: set[int] = set()
             for row in result:
                 sid = row["source_id"]
+                sid_int = int(sid)
+                found_ids.add(sid_int)
                 freq = row["frequency"]
                 period = np.nan
                 if freq is not None:
@@ -633,27 +676,39 @@ def fetch_gaia_dr3_eb_periods(
 
                 new_rows.append(
                     {
-                        "source_id": int(sid),
+                        "source_id": sid_int,
                         "period": period,
                         "var_type": str(row["model_type"]) if row["model_type"] is not None else "",
                         "global_ranking": float(row["global_ranking"]) if row["global_ranking"] is not None else np.nan,
+                        "matched": True,
                     }
                 )
 
-    if new_rows:
-        new_df = pd.DataFrame(new_rows)
-        full_df = pd.concat([cached_df, new_df], ignore_index=True)
-        full_df = full_df.drop_duplicates(subset=["source_id"], keep="last")
-        full_df.to_parquet(cache_file, index=False, compression=PARQUET_CACHE_COMPRESSION)
-    else:
-        full_df = cached_df
+            for sid in chunk:
+                if int(sid) not in found_ids:
+                    new_rows.append(
+                        {
+                            "source_id": int(sid),
+                            "period": np.nan,
+                            "var_type": "",
+                            "global_ranking": np.nan,
+                            "matched": False,
+                        }
+                    )
+
+            if (iterator.n + 1) % GAIA_EB_CACHE_FLUSH_CHUNKS == 0:
+                flush_cache()
+
+    flush_cache()
+    full_df = cached_df
 
     if full_df.empty:
         return full_df
 
     full_df["source_id"] = pd.to_numeric(full_df["source_id"], errors="coerce").astype("Int64")
     keep = full_df["source_id"].isin(requested_ids)
-    return full_df.loc[keep].reset_index(drop=True)
+    matched = full_df["matched"].astype("boolean").fillna(True).to_numpy(dtype=bool)
+    return full_df.loc[keep & matched, GAIA_EB_OUTPUT_COLUMNS].reset_index(drop=True)
 
 
 def fetch_gaia_dr3_ruwe(

@@ -11,6 +11,53 @@ def _empty_catalog() -> pd.DataFrame:
     return pd.DataFrame(columns=["gaia_id", "ra", "dec", "period", "var_type"])
 
 
+def test_fetch_gaia_dr3_eb_periods_caches_negative_lookups(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    class FakeTap:
+        def __init__(self, _url: str) -> None:
+            pass
+
+        def run_sync(self, query: str) -> list[dict[str, object]]:
+            calls.append(query)
+            return [
+                {
+                    "source_id": 1,
+                    "frequency": 0.5,
+                    "model_type": "ECL",
+                    "global_ranking": 0.8,
+                }
+            ]
+
+    monkeypatch.setattr(post_filter.pyvo.dal, "TAPService", FakeTap)
+
+    first = post_filter.fetch_gaia_dr3_eb_periods(
+        [1, 2],
+        cache_dir=tmp_path,
+        chunk_size=2,
+        show_tqdm=False,
+    )
+    second = post_filter.fetch_gaia_dr3_eb_periods(
+        [1, 2],
+        cache_dir=tmp_path,
+        chunk_size=2,
+        show_tqdm=False,
+    )
+
+    assert len(calls) == 1
+    assert first["source_id"].astype(int).tolist() == [1]
+    assert second["source_id"].astype(int).tolist() == [1]
+
+    cache = pd.read_parquet(tmp_path / "gaia_dr3_eb_periods.parquet")
+    by_id = cache.set_index(cache["source_id"].astype(int))
+    assert set(by_id.index) == {1, 2}
+    assert bool(by_id.loc[1, "matched"]) is True
+    assert bool(by_id.loc[2, "matched"]) is False
+
+
 def test_validate_periodic_catalog_builds_multisource_consensus(monkeypatch: pytest.MonkeyPatch) -> None:
     df = pd.DataFrame(
         {
