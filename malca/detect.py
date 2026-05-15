@@ -1214,6 +1214,12 @@ def main():
         choices=["gp", "gp_masked", "global_median", "per_camera_median", "phase_template"],
         help="Baseline model for event detection. Default: gp_masked from config.",
     )
+    g_events.add_argument(
+        "--chunk-size",
+        type=int,
+        default=None,
+        help=f"Event result rows per output chunk. Default: {EVENTS_OUTPUT_CHUNK_SIZE} from config.",
+    )
 
     g_output.add_argument("--output-dir", dest="out_dir", type=str, default=None,
                         help="Directory for all outputs (default: output/runs/<timestamp>)")
@@ -1292,6 +1298,8 @@ def main():
         cli_overrides["trigger_mode"] = args.trigger_mode
     if cli_has_option("--baseline-func"):
         cli_overrides["baseline_func"] = args.baseline_func
+    if cli_has_option("--chunk-size"):
+        cli_overrides["chunk_size"] = args.chunk_size
     if cli_has_option("--export-bundle"):
         cli_overrides["export_bundle"] = args.export_bundle
         cli_overrides["export_bundle_enabled"] = True

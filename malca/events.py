@@ -1951,6 +1951,51 @@ def _process_one(path: str, path_metadata: dict | None) -> dict:
     return process_lightcurve(path, path_metadata=path_metadata, **_worker_config)
 
 
+def _iter_batches(items: list, batch_size: int):
+    batch_size = max(1, int(batch_size))
+    for start in range(0, len(items), batch_size):
+        yield items[start:start + batch_size]
+
+
+def _process_batch(batch: list[tuple[str, dict | None]]) -> list[dict]:
+    """Process a small batch in one worker while preserving per-path failures."""
+    batch_results: list[dict] = []
+    for path, path_metadata in batch:
+        try:
+            result = _process_one(path, path_metadata)
+            batch_results.append(
+                {
+                    "path": str(path),
+                    "result": result,
+                    "error": None,
+                    "traceback": None,
+                }
+            )
+        except Exception as e:
+            batch_results.append(
+                {
+                    "path": str(path),
+                    "result": None,
+                    "error": repr(e),
+                    "traceback": traceback.format_exc(),
+                }
+            )
+    return batch_results
+
+
+def _resolve_events_chunk_size(value: int | None) -> int | None:
+    if value is None:
+        return EVENTS_OUTPUT_CHUNK_SIZE
+    if value > 0:
+        return int(value)
+    return None
+
+
+def _event_task_batch_size(task_chunk_size: int, n_workers: int) -> int:
+    target_per_worker = max(1, task_chunk_size // max(1, int(n_workers) * 8))
+    return max(1, min(32, target_per_worker, task_chunk_size))
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run Bayesian event scoring on light curves in parallel.")
     g_input = parser.add_argument_group("Input")
@@ -2208,13 +2253,10 @@ def main():
     results = []
     errors = []
     
-    if args.chunk_size is None:
-        chunk_size = 10000
-        _log(f"Auto-selected chunk size: {chunk_size}", quiet)
-    elif args.chunk_size > 0:
-        chunk_size = args.chunk_size
-    else:
-        chunk_size = None
+    chunk_size = _resolve_events_chunk_size(args.chunk_size)
+    task_chunk_size = max(1, int(chunk_size or EVENTS_OUTPUT_CHUNK_SIZE))
+    task_batch_size = _event_task_batch_size(task_chunk_size, args.workers)
+    event_batch_total = (len(expanded_inputs) + task_chunk_size - 1) // task_chunk_size
 
     total_written = 0
     total_dip_sig = 0
@@ -2432,41 +2474,75 @@ def main():
         "bad_camera_scatter_ratio": args.bad_camera_scatter_ratio,
     }
 
+    def make_task(path: str) -> tuple[str, dict | None]:
+        path_meta = None
+        if metadata_by_path:
+            meta = metadata_by_path.get(str(path))
+            if meta:
+                path_meta = dict(meta)
+        return str(path), path_meta
+
+    def handle_batch_result(batch_result: dict) -> None:
+        nonlocal results
+        path = str(batch_result["path"])
+        error = batch_result.get("error")
+        if error is not None:
+            tb_str = str(batch_result.get("traceback") or "")
+            errors.append(dict(path=path, error=error, traceback=tb_str))
+            print(f"ERROR processing {path}: {error}", flush=True)
+            if "too many values to unpack" in error:
+                print(f"Full traceback:\n{tb_str}", flush=True)
+            return
+
+        result = dict(batch_result["result"])
+        if metadata_by_path:
+            meta = metadata_by_path.get(path)
+            if meta:
+                result.update(meta)
+        results.append(result)
+        if chunk_size and len(results) >= chunk_size:
+            write_chunk(results)
+            results = []
+
     with ProcessPoolExecutor(
         max_workers=args.workers,
         initializer=_init_worker,
         initargs=(worker_config,),
-    ) as ex:
-        futs = {}
-        for path in expanded_inputs:
-            path_meta = None
-            if metadata_by_path:
-                meta = metadata_by_path.get(str(path))
-                if meta:
-                    path_meta = dict(meta)
+    ) as ex, tqdm(
+        total=event_batch_total,
+        desc="Event batches",
+        unit="batch",
+        position=0,
+        disable=quiet,
+    ) as batch_pbar, tqdm(
+        total=len(expanded_inputs),
+        desc="LCs",
+        unit="lc",
+        position=1,
+        disable=quiet,
+    ) as pbar:
+        for chunk_start in range(0, len(expanded_inputs), task_chunk_size):
+            path_chunk = expanded_inputs[chunk_start:chunk_start + task_chunk_size]
+            batch_pbar.set_postfix(rows=len(path_chunk), refresh=False)
+            task_batches = list(_iter_batches([make_task(path) for path in path_chunk], task_batch_size))
+            futs = {ex.submit(_process_batch, batch): batch for batch in task_batches}
 
-            fut = ex.submit(_process_one, path, path_meta)
-            futs[fut] = path
+            for fut in as_completed(futs):
+                batch = futs[fut]
+                try:
+                    batch_results = fut.result()
+                except Exception as e:
+                    tb_str = traceback.format_exc()
+                    for path, _path_meta in batch:
+                        errors.append(dict(path=str(path), error=repr(e), traceback=tb_str))
+                        print(f"ERROR processing {path}: {e}", flush=True)
+                    pbar.update(len(batch))
+                    continue
 
-
-        for fut in tqdm(as_completed(futs), total=len(futs), desc="LCs", unit="lc", disable=quiet):
-            path = futs[fut]
-            try:
-                result = fut.result()
-                if metadata_by_path:
-                    meta = metadata_by_path.get(str(path))
-                    if meta:
-                        result.update(meta)
-                results.append(result)
-                if chunk_size and len(results) >= chunk_size:
-                    write_chunk(results)
-                    results = []
-            except Exception as e:
-
-                tb_str = traceback.format_exc()
-                errors.append(dict(path=str(path), error=repr(e), traceback=tb_str))
-                print(f"ERROR processing {path}: {e}", flush=True)
-                if "too many values to unpack" in str(e): print(f"Full traceback:\n{tb_str}", flush=True)
+                for batch_result in batch_results:
+                    handle_batch_result(batch_result)
+                pbar.update(len(batch_results))
+            batch_pbar.update(1)
 
     if results:
         write_chunk(results, is_final=True)

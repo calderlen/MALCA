@@ -22,6 +22,7 @@ from malca.detect import (
     _should_skip_filter_stage,
     main as detect_main,
 )
+from malca.config import EVENTS_OUTPUT_CHUNK_SIZE
 
 
 def _base_args() -> argparse.Namespace:
@@ -394,6 +395,7 @@ def test_pipeline_event_subprocesses_always_use_parquet_chunk(tmp_path: Path, mo
     assert captured_cmds
     for cmd in captured_cmds:
         assert cmd[cmd.index("--output-format") + 1] == "parquet_chunk"
+        assert int(cmd[cmd.index("--chunk-size") + 1]) == EVENTS_OUTPUT_CHUNK_SIZE
         assert cmd[cmd.index("--trigger-mode") + 1] == "logbf"
         assert cmd[cmd.index("--baseline-func") + 1] == "per_camera_median"
     assert captured_paths
