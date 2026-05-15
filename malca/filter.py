@@ -32,7 +32,6 @@ Required input columns (from events.py):
 from __future__ import annotations
 
 from datetime import datetime
-from decimal import Decimal, InvalidOperation
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
 from pathlib import Path as WorkerPath
@@ -83,6 +82,7 @@ from malca.config import (
 from malca.config import ASASSN_INDEX_PATH
 from malca.config import WORKERS, MIN_MAG_OFFSET
 from malca.config import PDM_METHOD_CHOICES
+from malca.gaia_ids import parse_gaia_source_id
 from malca.phase import align_v_to_g_magnitude
 from malca.stats import compute_pdm_stats, compute_ce_stats
 from malca.table_io import read_parquet_table, write_parquet_table
@@ -769,23 +769,12 @@ def fetch_gaia_dr3_ruwe(
 
 def _parse_gaia_id_int(value: object) -> int | None:
     """Parse Gaia source ID-like values to int when possible."""
-    if pd.isna(value):
-        return None
-
-    s = str(value).strip()
-    if not s:
+    source_id = parse_gaia_source_id(value)
+    if source_id is None:
         return None
 
     try:
-        d = Decimal(s)
-    except (InvalidOperation, ValueError):
-        return None
-
-    if d != d.to_integral_value():
-        return None
-
-    try:
-        return int(d)
+        return int(source_id)
     except Exception:
         return None
 

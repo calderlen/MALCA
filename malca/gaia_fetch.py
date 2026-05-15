@@ -27,6 +27,7 @@ from malca.config import (
     GAIA_LOCAL_CATALOG,
     VSX_CROSSMATCH_PATH,
 )
+from malca.gaia_ids import normalize_gaia_source_ids
 from malca.table_io import read_parquet_table
 
 
@@ -155,26 +156,7 @@ def _ensure_gaia_schema(df: pd.DataFrame) -> pd.DataFrame:
 
 def _normalize_gaia_ids(values: list[object]) -> list[str]:
     """Normalize mixed-type Gaia IDs to digit strings."""
-    normalized: list[str] = []
-    seen: set[str] = set()
-
-    for value in values:
-        if bool(pd.isna(value)):
-            continue
-
-        s = str(value).strip()
-        if not s:
-            continue
-
-        gid: str | None = s if s.isdigit() else None
-
-        if gid is None:
-            continue
-        if gid not in seen:
-            seen.add(gid)
-            normalized.append(gid)
-
-    return normalized
+    return normalize_gaia_source_ids(values)
 
 
 def _extract_gaia_ids(
@@ -280,7 +262,7 @@ def _load_checkpointed_ids(checkpoint_dir: Path) -> set[str]:
 
     parts_df = _load_checkpoint_parts(checkpoint_dir)
     if (not parts_df.empty) and ("source_id" in parts_df.columns):
-        completed.update(parts_df["source_id"].dropna().astype(str).tolist())
+        completed.update(_normalize_gaia_ids(parts_df["source_id"].dropna().tolist()))
 
     return completed
 
@@ -326,6 +308,7 @@ def fetch_gaia_catalog(
     Returns the full catalog (cached + newly fetched).
     """
     output_path = Path(output_path)
+    gaia_ids = _normalize_gaia_ids(gaia_ids)
     cached_df = pd.DataFrame()
 
     checkpoint_dir = _checkpoint_dir_for_output(output_path)

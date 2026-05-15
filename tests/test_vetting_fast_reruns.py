@@ -124,6 +124,32 @@ def test_simbad_cache_hit_and_refresh(monkeypatch, tmp_path) -> None:
     assert calls["n"] == 2
 
 
+def test_vet_candidates_missing_coordinates_skips_coordinate_crossmatches() -> None:
+    df = pd.DataFrame({"gaia_id": ["123"]})
+
+    out = vetting.vet_candidates(
+        df,
+        run_simbad=True,
+        run_gaia_var=False,
+        run_asassn_var=False,
+        run_microlens=False,
+        run_ztf_var=False,
+        run_tns=False,
+        run_gaia_eb=False,
+        run_alerce=False,
+        run_atlas=False,
+        run_gaia_epoch=False,
+        run_erosita=False,
+        run_pm_check=False,
+    )
+
+    assert "ra" in out.columns
+    assert "dec" in out.columns
+    assert out["ra"].isna().all()
+    assert out["dec"].isna().all()
+    assert out.loc[0, "simbad_main_id"] == ""
+
+
 def test_alerce_cache_hit_and_refresh(monkeypatch, tmp_path) -> None:
     df = pd.DataFrame({"ra": [1.0], "dec": [2.0]})
     calls = {"n": 0}

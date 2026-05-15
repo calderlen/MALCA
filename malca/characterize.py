@@ -58,6 +58,7 @@ from malca.config import (
     DEFAULT_CACHE_DIR, GAIA_CACHE_FILE,
     GAIA_LOCAL_CATALOG,
 )
+from malca.gaia_ids import normalize_gaia_source_ids, parse_gaia_source_id
 from malca.table_io import read_parquet_table, write_parquet_table
 
 
@@ -128,26 +129,7 @@ def _add_wise_color_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 def _normalize_source_ids(source_ids: list[str | int]) -> list[str]:
     """Normalize mixed-type source IDs to digit strings."""
-    normalized: list[str] = []
-    seen: set[str] = set()
-
-    for value in source_ids:
-        if pd.isna(value):
-            continue
-
-        s = str(value).strip()
-        if not s:
-            continue
-
-        sid: str | None = s if s.isdigit() else None
-
-        if sid is None:
-            continue
-        if sid not in seen:
-            seen.add(sid)
-            normalized.append(sid)
-
-    return normalized
+    return normalize_gaia_source_ids(source_ids)
 
 def query_gaia_by_ids(source_ids: list[str | int], chunk_size: int = GAIA_CHUNK_SIZE, cache_file: str | None = None) -> pd.DataFrame:
     """
@@ -194,7 +176,8 @@ def query_gaia_by_ids(source_ids: list[str | int], chunk_size: int = GAIA_CHUNK_
             "to download Gaia DR3 data before characterization."
         )
 
-    gaia_df["source_id"] = gaia_df["source_id"].astype(str)
+    gaia_df["source_id"] = gaia_df["source_id"].map(parse_gaia_source_id)
+    gaia_df = gaia_df.dropna(subset=["source_id"])
     requested = _normalize_source_ids(source_ids)
     result = gaia_df[gaia_df["source_id"].isin(requested)].copy()
     result = _add_wise_color_columns(result)
@@ -1637,7 +1620,7 @@ def characterize_candidates_df(
         lookup = gaia_df.drop_duplicates(subset=["source_id"], keep="last").set_index("source_id")
 
         out = frame.copy()
-        source_ids = out["source_id"].astype(str)
+        source_ids = out["source_id"].map(parse_gaia_source_id)
         for column in lookup.columns:
             values = source_ids.map(lookup[column])
             if column in out.columns:
@@ -1797,6 +1780,7 @@ def characterize_candidates_df(
         if cache:
             cache.parent.mkdir(parents=True, exist_ok=True)
 
+        df_merged["gaia_id"] = df_merged["gaia_id"].map(parse_gaia_source_id)
         missing_gaia = df_merged["gaia_id"].isna().sum()
         print(f"Found Gaia IDs for {len(df_merged) - missing_gaia}/{len(df_merged)} sources")
         gaia_ids = df_merged["gaia_id"].dropna().unique().tolist()
@@ -1815,8 +1799,8 @@ def characterize_candidates_df(
             print("Warning: characterize Gaia query returned no rows")
             return df_merged
 
-        df_merged["gaia_id"] = df_merged["gaia_id"].astype(str)
-        gaia_df["source_id"] = gaia_df["source_id"].astype(str)
+        gaia_df["source_id"] = gaia_df["source_id"].map(parse_gaia_source_id)
+        gaia_df = gaia_df.dropna(subset=["source_id"])
 
         print("Merging Gaia results...")
         df_char = df_merged.merge(gaia_df, left_on="gaia_id", right_on="source_id", how="left", suffixes=("", "_gaia"))

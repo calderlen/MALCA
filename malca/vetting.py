@@ -30,7 +30,6 @@ import io
 import os
 import re
 import time
-from decimal import Decimal, InvalidOperation
 from html.parser import HTMLParser
 from urllib.parse import urljoin
 
@@ -92,6 +91,7 @@ from malca.config import (
     AAVSO_MAX_PAGES,
     AAVSO_RESULTS_PER_PAGE,
 )
+from malca.gaia_ids import parse_gaia_source_id
 from malca.utils import batch_tap_crossmatch
 from malca.table_io import read_parquet_table, write_parquet_table
 
@@ -156,26 +156,7 @@ def _gaia_retry_delay(attempt: int) -> float:
 
 def _parse_gaia_source_id_str(value: object) -> str | None:
     """Parse Gaia source ID-like values to a plain integer string."""
-    try:
-        if value is None or pd.isna(value):
-            return None
-    except Exception:
-        if value is None:
-            return None
-
-    text = str(value).strip()
-    if not text:
-        return None
-
-    try:
-        source_id = Decimal(text)
-    except (InvalidOperation, ValueError):
-        return None
-
-    if source_id != source_id.to_integral_value():
-        return None
-
-    return format(source_id.to_integral_value(), "f")
+    return parse_gaia_source_id(value)
 
 
 def _connect_gaia_taps_until_available(
@@ -4091,6 +4072,14 @@ def vet_candidates(
         df = df.rename(columns={"ra_deg": "ra"})
     if "dec" not in df.columns and "dec_deg" in df.columns:
         df = df.rename(columns={"dec_deg": "dec"})
+    missing_coord_cols = [col for col in ("ra", "dec") if col not in df.columns]
+    if missing_coord_cols:
+        print(
+            "Warning: vetting input is missing coordinate column(s): "
+            f"{', '.join(missing_coord_cols)}; coordinate crossmatches will be skipped"
+        )
+        for col in missing_coord_cols:
+            df[col] = np.nan
 
     # Resume from checkpoint if available.
     _resumed = False

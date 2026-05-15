@@ -74,6 +74,7 @@ from malca.config import PDM_METHOD_CHOICES
 from malca.enrich.neighbor import run_neighbor_enrichment
 from malca.enrich.spectra import run_spectra_availability
 from malca.gaia_fetch import _extract_gaia_ids, fetch_gaia_catalog
+from malca.gaia_ids import normalize_gaia_source_id_series
 from malca.manifest import build_manifest
 from malca.periodicity_gate import apply_pre_periodicity_gate, PREGATE_ROUTER_MODE
 from malca.plot import plot_passing_candidates
@@ -1036,6 +1037,7 @@ def _add_gaia_ids_from_index(df_events: pd.DataFrame, index_path) -> pd.DataFram
         df_index["asas_sn_id"] = pd.to_numeric(df_index["asas_sn_id"], errors="coerce")
         df_index = df_index.dropna(subset=["asas_sn_id"])
         df_index["asas_sn_id"] = df_index["asas_sn_id"].astype("int64")
+        df_index["gaia_id"] = normalize_gaia_source_id_series(df_index["gaia_id"])
 
         df_merged = df.merge(
             df_index[["asas_sn_id", "gaia_id"]].drop_duplicates(subset=["asas_sn_id"]),
