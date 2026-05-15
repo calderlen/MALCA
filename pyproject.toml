@@ -40,7 +40,7 @@ dependencies = [
     "pytest",
     "pytest-cov",
     "pytest-xdist",
-    "pystellibs",
+    "pystellibs @ git+https://github.com/mfouesneau/pystellibs.git@v1.0.0",
 ]
 
 [project.optional-dependencies]

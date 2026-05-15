@@ -8,7 +8,7 @@ matplotlib
 astropy
 celerite2
 pyarrow
-pystellibs
+pystellibs @ git+https://github.com/mfouesneau/pystellibs.git@v1.0.0
 
 # Optional: visualization
 plotly
