@@ -55,8 +55,8 @@ from malca.config import PARQUET_CACHE_COMPRESSION
 from malca.config import PARQUET_OUTPUT_COMPRESSION
 from malca.config import (
     VSX_CROSSMATCH_PATH, STARHORSE_DEFAULT_PATH, STARHORSE_TAP_URL,
-    DEFAULT_CACHE_DIR, GAIA_CACHE_FILE,
-    GAIA_LOCAL_CATALOG,
+    DEFAULT_CACHE_DIR, LEGACY_DEFAULT_CACHE_DIR, GAIA_CACHE_FILE,
+    GAIA_LOCAL_CATALOG, LEGACY_GAIA_CACHE_FILE, LEGACY_GAIA_LOCAL_CATALOG,
 )
 from malca.gaia_ids import normalize_gaia_source_ids, parse_gaia_source_id
 from malca.table_io import read_parquet_table, write_parquet_table
@@ -69,8 +69,12 @@ warnings.simplefilter('ignore', category=AstropyWarning)
 
 
 CATALOG_CACHE_DIR = DEFAULT_CACHE_DIR.expanduser()
-STARHORSE_TAP_CACHE_FILE = CATALOG_CACHE_DIR / "starhorse_tap_cache.parquet"
-OPEN_CLUSTER_META_CACHE_FILE = CATALOG_CACHE_DIR / "cantat_gaudin2020_table1.parquet"
+LEGACY_CATALOG_CACHE_DIR = LEGACY_DEFAULT_CACHE_DIR.expanduser()
+STARHORSE_TAP_CACHE_FILE = CATALOG_CACHE_DIR / "starhorse" / "starhorse_tap_cache.parquet"
+LEGACY_STARHORSE_TAP_CACHE_FILE = LEGACY_CATALOG_CACHE_DIR / "starhorse_tap_cache.parquet"
+OPEN_CLUSTER_META_CACHE_FILE = CATALOG_CACHE_DIR / "open_clusters" / "cantat_gaudin2020_table1.parquet"
+LEGACY_OPEN_CLUSTER_META_CACHE_FILE = LEGACY_CATALOG_CACHE_DIR / "cantat_gaudin2020_table1.parquet"
+CHARACTERIZE_CACHE_DIR = CATALOG_CACHE_DIR / "characterize"
 UNWISE_CHECKPOINT_BASENAME = "unwise_variability_CHECKPOINT.parquet"
 
 WISE_LEGACY_COLUMN_RENAMES = {
@@ -91,6 +95,25 @@ WISE_COLOR_PAIRS = (
     ("w2", "w4"),
     ("w3", "w4"),
 )
+WISE_COLOR_COLUMNS = [f"{left}_{right}" for left, right in WISE_COLOR_PAIRS]
+
+CHARACTERIZE_CACHE_META_COLUMNS = {"_cache_key", "_cache_status", "_cache_updated_at"}
+ALLWISE_CACHE_COLUMNS = ["w1", "w1_err", "w2", "w2_err", "w3", "w3_err", "w4", "w4_err", *WISE_COLOR_COLUMNS]
+TMASS_CACHE_COLUMNS = ["tmass_j", "tmass_j_err", "tmass_h", "tmass_h_err", "tmass_k", "tmass_k_err"]
+APASS_CACHE_COLUMNS = [
+    "apass_v", "apass_v_err", "apass_b", "apass_b_err",
+    "apass_g", "apass_g_err", "apass_r", "apass_r_err", "apass_i", "apass_i_err",
+]
+GALEX_CACHE_COLUMNS = ["galex_fuv", "galex_fuv_err", "galex_nuv", "galex_nuv_err"]
+IPHAS_CACHE_COLUMNS = ["iphas_r_ha", "iphas_r_i", "iphas_ha_excess"]
+OPEN_CLUSTER_CACHE_COLUMNS = ["cluster_name", "cluster_age_myr", "cluster_dist_pc"]
+DUST_BASE_CACHE_COLUMNS = ["A_v_3d", "ebv_3d", "dust_sigma", "dust_max_dist_kpc"]
+DUST_DERED_SOURCE_COLUMNS = [
+    "phot_g_mean_mag", "phot_bp_mean_mag", "phot_rp_mean_mag",
+    "tmass_j", "tmass_h", "tmass_k", "w1", "w2",
+    "apass_b", "apass_v", "apass_g", "apass_r", "apass_i",
+    "galex_fuv", "galex_nuv", "baseline_mag", "g", "r", "i",
+]
 
 
 def _canonicalize_wise_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -122,6 +145,147 @@ def _add_wise_color_columns(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _characterize_cache_path(module: str) -> Path:
+    return CHARACTERIZE_CACHE_DIR / f"{module}.parquet"
+
+
+def _row_distance_token(row: pd.Series) -> str:
+    dist = np.nan
+    if "distance_gspphot" in row.index:
+        dist = pd.to_numeric(row.get("distance_gspphot"), errors="coerce")
+    if not np.isfinite(dist) and "parallax" in row.index:
+        plx = pd.to_numeric(row.get("parallax"), errors="coerce")
+        if np.isfinite(plx) and plx > 0:
+            dist = 1000.0 / plx
+    return f"{float(dist):.3f}" if np.isfinite(dist) else "nan"
+
+
+def _characterize_cache_key(row: pd.Series, module: str) -> str | None:
+    for id_col in ("source_id", "gaia_id"):
+        if id_col in row.index:
+            sid = parse_gaia_source_id(row.get(id_col))
+            if sid:
+                if module == "dust":
+                    return f"gaia:{sid}:dist_pc:{_row_distance_token(row)}"
+                return f"gaia:{sid}"
+
+    ra_col = "ra" if "ra" in row.index else ("ra_deg" if "ra_deg" in row.index else None)
+    dec_col = "dec" if "dec" in row.index else ("dec_deg" if "dec_deg" in row.index else None)
+    if not ra_col or not dec_col:
+        return None
+    try:
+        ra = float(row.get(ra_col))
+        dec = float(row.get(dec_col))
+    except (TypeError, ValueError):
+        return None
+    if not (np.isfinite(ra) and np.isfinite(dec)):
+        return None
+    if module == "dust":
+        return f"coord:{ra:.7f}:{dec:.7f}:dist_pc:{_row_distance_token(row)}"
+    return f"coord:{ra:.7f}:{dec:.7f}"
+
+
+def _characterize_cache_keys(df: pd.DataFrame, module: str) -> pd.Series:
+    if df.empty:
+        return pd.Series(dtype=object)
+    return df.apply(lambda row: _characterize_cache_key(row, module), axis=1)
+
+
+def _read_characterize_cache(module: str) -> pd.DataFrame:
+    path = _characterize_cache_path(module).expanduser()
+    if not path.exists():
+        return pd.DataFrame()
+    try:
+        cache = pd.read_parquet(path)
+    except Exception as exc:
+        print(f"Warning: could not read characterize cache {path}: {exc}")
+        return pd.DataFrame()
+    if "_cache_key" not in cache.columns:
+        return pd.DataFrame()
+    cache = cache.copy()
+    cache["_cache_key"] = cache["_cache_key"].astype(str)
+    return cache.drop_duplicates(subset=["_cache_key"], keep="last")
+
+
+def _write_characterize_cache(module: str, rows: pd.DataFrame, key_cols: list[str]) -> None:
+    if rows.empty:
+        return
+    path = _characterize_cache_path(module).expanduser()
+    try:
+        existing = pd.read_parquet(path) if path.exists() else pd.DataFrame()
+        combined = pd.concat([existing, rows], ignore_index=True) if not existing.empty else rows.copy()
+        combined = combined.drop_duplicates(subset=["_cache_key"], keep="last")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        combined.to_parquet(path, index=False, compression=PARQUET_CACHE_COMPRESSION)
+    except Exception as exc:
+        print(f"Warning: could not write characterize cache {path}: {exc}")
+
+
+def _dust_cache_columns(frame: pd.DataFrame) -> list[str]:
+    cols = list(DUST_BASE_CACHE_COLUMNS)
+    cols.extend(f"{col}_dered" for col in DUST_DERED_SOURCE_COLUMNS if col in frame.columns)
+    return cols
+
+
+def _run_cached_characterization_module(
+    df: pd.DataFrame,
+    *,
+    module: str,
+    func,
+    output_columns: list[str],
+    **kwargs,
+) -> pd.DataFrame:
+    """Run a characterization lookup using durable per-source catalog cache."""
+    if df.empty:
+        return df
+
+    out = df.copy()
+    keys = _characterize_cache_keys(out, module)
+    cache = _read_characterize_cache(module)
+    cache_columns = [c for c in cache.columns if c not in CHARACTERIZE_CACHE_META_COLUMNS]
+    cache_hit_mask = pd.Series(False, index=out.index)
+
+    if not cache.empty and cache_columns:
+        lookup = cache.set_index("_cache_key")
+        cache_hit_mask = keys.notna() & keys.astype(str).isin(lookup.index)
+        if cache_hit_mask.any():
+            for col in cache_columns:
+                if col not in out.columns:
+                    out[col] = pd.NA
+                values = keys.astype(str).map(lookup[col])
+                out.loc[cache_hit_mask, col] = values.loc[cache_hit_mask]
+
+    cacheable_mask = keys.notna()
+    run_mask = ~cache_hit_mask
+    run_df = out.loc[run_mask].copy()
+    if not cache.empty or cache_hit_mask.any():
+        print(f"{module} cache hit: {int(cache_hit_mask.sum())}/{int(cacheable_mask.sum())}")
+    if run_df.empty:
+        return _add_wise_color_columns(out) if module == "allwise" else out
+
+    result = func(run_df, **kwargs)
+    if result is None:
+        result = run_df
+    result = result.copy()
+
+    for col in output_columns:
+        if col not in result.columns:
+            result[col] = pd.NA
+        if col not in out.columns:
+            out[col] = pd.NA
+        out.loc[result.index, col] = result[col]
+
+    result_keys = keys.loc[result.index]
+    cache_rows = result.loc[result_keys.notna(), output_columns].copy()
+    if not cache_rows.empty:
+        cache_rows.insert(0, "_cache_key", result_keys.loc[result_keys.notna()].astype(str).values)
+        cache_rows["_cache_status"] = "ok"
+        cache_rows["_cache_updated_at"] = pd.Timestamp.utcnow().isoformat()
+        _write_characterize_cache(module, cache_rows, output_columns)
+
+    return _add_wise_color_columns(out) if module == "allwise" else out
+
+
 # =============================================================================
 # GAIA DR3 QUERYING
 # =============================================================================
@@ -146,7 +310,12 @@ def query_gaia_by_ids(source_ids: list[str | int], chunk_size: int = GAIA_CHUNK_
     gaia_df: pd.DataFrame | None = None
     catalog_path: Path | None = None
 
-    for candidate in [cache_file, GAIA_LOCAL_CATALOG]:
+    for candidate in [
+        cache_file,
+        GAIA_LOCAL_CATALOG,
+        LEGACY_GAIA_LOCAL_CATALOG,
+        LEGACY_GAIA_CACHE_FILE,
+    ]:
         if not candidate:
             continue
         path = Path(candidate)
@@ -242,10 +411,13 @@ STARHORSE_PREFERRED_COLUMNS = (
 
 def _load_starhorse_cache(cache_path: Path) -> pd.DataFrame:
     """Load StarHorse TAP cache parquet if present."""
-    if not cache_path.exists():
+    read_path = cache_path
+    if not read_path.exists() and cache_path == STARHORSE_TAP_CACHE_FILE.expanduser():
+        read_path = LEGACY_STARHORSE_TAP_CACHE_FILE.expanduser()
+    if not read_path.exists():
         return pd.DataFrame()
     try:
-        df_cache = pd.read_parquet(cache_path)
+        df_cache = pd.read_parquet(read_path)
     except Exception:
         return pd.DataFrame()
 
@@ -1127,10 +1299,13 @@ def check_sfr_proximity(df: pd.DataFrame, max_dist_kpc: float = SFR_MAX_DIST_KPC
 def _load_open_cluster_metadata(cache_file: Path | None = None) -> pd.DataFrame:
     """Load Cantat-Gaudin+2020 cluster metadata (age, distance) with local cache."""
     cache_path = Path(cache_file).expanduser() if cache_file else OPEN_CLUSTER_META_CACHE_FILE.expanduser()
+    read_path = cache_path
+    if not read_path.exists() and cache_path == OPEN_CLUSTER_META_CACHE_FILE.expanduser():
+        read_path = LEGACY_OPEN_CLUSTER_META_CACHE_FILE.expanduser()
 
-    if cache_path.exists():
+    if read_path.exists():
         try:
-            cached = pd.read_parquet(cache_path)
+            cached = pd.read_parquet(read_path)
             if {"cluster_name", "cluster_age_myr", "cluster_dist_pc"}.issubset(cached.columns):
                 return cached
         except Exception:
@@ -1870,7 +2045,12 @@ def characterize_candidates_df(
             module="dust",
             enabled=dust,
             description="Computing 3D dust extinction (dustmaps3d)...",
-            func=get_dust_extinction,
+            func=lambda frame: _run_cached_characterization_module(
+                frame,
+                module="dust",
+                func=get_dust_extinction,
+                output_columns=_dust_cache_columns(frame),
+            ),
         )
         if checkpoint_path:
             _save_char_checkpoint(df_char, checkpoint_path)
@@ -1879,13 +2059,23 @@ def characterize_candidates_df(
         df_char = _run_optional_module(
             df_char, module="allwise", enabled=run_allwise,
             description="Running AllWISE (W1-W4) crossmatch...",
-            func=crossmatch_allwise
+            func=lambda frame: _run_cached_characterization_module(
+                frame,
+                module="allwise",
+                func=crossmatch_allwise,
+                output_columns=ALLWISE_CACHE_COLUMNS,
+            )
         )
         if checkpoint_path: _save_char_checkpoint(df_char, checkpoint_path)
 
     if not _module_completed(df_char, "yso"):
         if ("tmass_j" not in df_char.columns or df_char["tmass_j"].isna().all()) and "ra" in df_char.columns and "dec" in df_char.columns and df_char["ra"].notna().any():
-            df_char = crossmatch_2mass(df_char)
+            df_char = _run_cached_characterization_module(
+                df_char,
+                module="2mass",
+                func=crossmatch_2mass,
+                output_columns=TMASS_CACHE_COLUMNS,
+            )
         if "tmass_j" in df_char.columns:
             print("Classifying YSOs...")
             try:
@@ -1906,7 +2096,12 @@ def characterize_candidates_df(
         df_char = _run_optional_module(
             df_char, module="apass", enabled=run_apass,
             description="Running APASS DR9 crossmatch...",
-            func=crossmatch_apass
+            func=lambda frame: _run_cached_characterization_module(
+                frame,
+                module="apass",
+                func=crossmatch_apass,
+                output_columns=APASS_CACHE_COLUMNS,
+            )
         )
         if checkpoint_path: _save_char_checkpoint(df_char, checkpoint_path)
 
@@ -1914,7 +2109,12 @@ def characterize_candidates_df(
         df_char = _run_optional_module(
             df_char, module="galex", enabled=run_galex,
             description="Running GALEX AIS crossmatch...",
-            func=crossmatch_galex
+            func=lambda frame: _run_cached_characterization_module(
+                frame,
+                module="galex",
+                func=crossmatch_galex,
+                output_columns=GALEX_CACHE_COLUMNS,
+            )
         )
         if checkpoint_path: _save_char_checkpoint(df_char, checkpoint_path)
 
@@ -1935,7 +2135,12 @@ def characterize_candidates_df(
             module="iphas",
             enabled=run_iphas,
             description="Running IPHAS H-alpha crossmatch...",
-            func=crossmatch_iphas,
+            func=lambda frame: _run_cached_characterization_module(
+                frame,
+                module="iphas",
+                func=crossmatch_iphas,
+                output_columns=IPHAS_CACHE_COLUMNS,
+            ),
         )
         if checkpoint_path:
             _save_char_checkpoint(df_char, checkpoint_path)
@@ -1955,7 +2160,12 @@ def characterize_candidates_df(
             module="clusters",
             enabled=run_clusters,
             description="Running open cluster crossmatch...",
-            func=crossmatch_open_clusters,
+            func=lambda frame: _run_cached_characterization_module(
+                frame,
+                module="open_clusters",
+                func=crossmatch_open_clusters,
+                output_columns=OPEN_CLUSTER_CACHE_COLUMNS,
+            ),
         )
         if checkpoint_path:
             _save_char_checkpoint(df_char, checkpoint_path)
@@ -2000,7 +2210,7 @@ def main():
     parser.add_argument("--cache", type=Path, default=GAIA_CACHE_FILE, help="Cache file for Gaia queries")
     parser.add_argument("--enable-dust", dest="dust", action="store_true", help="Enable dustmaps3d 3D extinction query")
     parser.add_argument("--starhorse", type=str, default=None, help="StarHorse stellar ages/masses: 'tap' for remote TAP query (recommended), or path to local catalog file")
-    parser.add_argument("--starhorse-cache", type=Path, default=STARHORSE_TAP_CACHE_FILE, help="StarHorse TAP cache parquet path (default: ~/.cache/malca/catalogs/starhorse_tap_cache.parquet)")
+    parser.add_argument("--starhorse-cache", type=Path, default=STARHORSE_TAP_CACHE_FILE, help=f"StarHorse TAP cache parquet path (default: {STARHORSE_TAP_CACHE_FILE})")
     parser.add_argument("--unwise-workers", type=int, default=UNWISE_WORKERS, help="Parallel workers for unWISE variability queries")
     parser.add_argument("--unwise-checkpoint-every", type=int, default=UNWISE_CHECKPOINT_EVERY, help="Persist unWISE checkpoint every N completed sources")
     parser.add_argument("--no-characterize-banyan", dest="characterize_banyan", action="store_false", help="Disable BANYAN Sigma enrichment")

@@ -372,7 +372,7 @@ def fetch_chen2020_ztf_periodic(
     Parameters
     ----------
     cache_dir : Path | None
-        Directory to cache downloaded catalog (default: ~/.cache/malca/catalogs)
+        Directory to cache downloaded catalog (default: output/cache/catalogs)
     force_download : bool
         Re-download even if cached file exists
     show_tqdm : bool

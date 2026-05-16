@@ -25,6 +25,8 @@ from malca.config import GAIA_CHUNK_SIZE
 from malca.config import (
     GAIA_AIP_TAP_URL,
     GAIA_LOCAL_CATALOG,
+    LEGACY_GAIA_CACHE_FILE,
+    LEGACY_GAIA_LOCAL_CATALOG,
     VSX_CROSSMATCH_PATH,
 )
 from malca.gaia_ids import normalize_gaia_source_ids
@@ -323,13 +325,20 @@ def fetch_gaia_catalog(
             f"{len(gaia_ids)} IDs remain after checkpoint resume filtering."
         )
 
-    # Load existing catalog for incremental fetch
-    if output_path.exists():
-        print(f"Loading existing Gaia catalog from {output_path}...")
+    # Load existing catalog for incremental fetch.  New writes always go to
+    # output_path, but default cache reads can fall back to pre-unification
+    # cache locations once.
+    read_candidates = [output_path]
+    if output_path == GAIA_LOCAL_CATALOG:
+        read_candidates.extend([LEGACY_GAIA_LOCAL_CATALOG, LEGACY_GAIA_CACHE_FILE])
+
+    existing_read_path = next((path for path in read_candidates if path.exists()), None)
+    if existing_read_path is not None:
+        print(f"Loading existing Gaia catalog from {existing_read_path}...")
         try:
-            cached_candidate = pd.read_parquet(output_path)
+            cached_candidate = pd.read_parquet(existing_read_path)
         except Exception as e:
-            print(f"  Warning: could not read existing Gaia cache at {output_path}: {e}")
+            print(f"  Warning: could not read existing Gaia cache at {existing_read_path}: {e}")
         else:
             cache_has_current_wise = _has_current_wise_fetch_schema(cached_candidate)
             cached_candidate = _ensure_gaia_schema(cached_candidate)
@@ -342,9 +351,13 @@ def fetch_gaia_catalog(
                 print(f"  {len(existing_ids)} IDs already cached, {len(gaia_ids)} new IDs to fetch.")
                 if not gaia_ids:
                     print("All IDs already present in local catalog. Nothing to fetch.")
+                    if existing_read_path != output_path:
+                        output_path.parent.mkdir(parents=True, exist_ok=True)
+                        cached_df.to_parquet(output_path, index=False, compression="snappy")
+                        print(f"Migrated Gaia cache to {output_path}")
                     return cached_df
             else:
-                print(f"  Warning: ignoring stale or invalid existing Gaia cache at {output_path}")
+                print(f"  Warning: ignoring stale or invalid existing Gaia cache at {existing_read_path}")
 
     if not gaia_ids:
         checkpoint_df = _load_checkpoint_parts(checkpoint_dir)

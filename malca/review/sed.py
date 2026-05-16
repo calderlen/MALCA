@@ -16,9 +16,13 @@ import pandas as pd
 import plotly.graph_objects as go
 from astropy import units as u
 
+from malca.config import DEFAULT_CACHE_DIR, PARQUET_CACHE_COMPRESSION
 
 SED_TABLE_NAME = "sed_photometry"
 VIZIER_QUERY_TIMEOUT_SEC = 30
+SED_CACHE_DIR = DEFAULT_CACHE_DIR.expanduser() / "sed"
+SED_CACHE_META_COLUMNS = {"_cache_candidate_id", "_cache_status", "_cache_updated_at"}
+SED_CACHE_SKIP_SOURCES = {"payload"}
 
 SED_COLUMNS = [
     "candidate_id",
@@ -760,6 +764,124 @@ def _candidate_id_for_row(row: pd.Series) -> str:
 ProgressCallback = Callable[[str], None]
 
 
+def _sed_cache_path(source_key: str) -> Path:
+    token = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in source_key.lower()).strip("_")
+    return SED_CACHE_DIR / f"{token or 'source'}.parquet"
+
+
+def _sed_candidate_ids(df: pd.DataFrame) -> pd.Series:
+    if df.empty:
+        return pd.Series(dtype=str)
+    return df.apply(_candidate_id_for_row, axis=1).astype(str)
+
+
+def _read_sed_source_cache(source_key: str) -> pd.DataFrame:
+    path = _sed_cache_path(source_key).expanduser()
+    if not path.exists():
+        return pd.DataFrame()
+    try:
+        cache = pd.read_parquet(path)
+    except Exception as exc:
+        print(f"[SED] cache warning: could not read {path}: {exc}")
+        return pd.DataFrame()
+    if "_cache_candidate_id" not in cache.columns:
+        return pd.DataFrame()
+    cache = cache.copy()
+    cache["_cache_candidate_id"] = cache["_cache_candidate_id"].astype(str)
+    return cache
+
+
+def _write_sed_source_cache(source_key: str, rows: pd.DataFrame) -> None:
+    if rows.empty:
+        return
+    path = _sed_cache_path(source_key).expanduser()
+    try:
+        existing = pd.read_parquet(path) if path.exists() else pd.DataFrame()
+        combined = pd.concat([existing, rows], ignore_index=True) if not existing.empty else rows.copy()
+        if "_cache_candidate_id" in combined.columns:
+            sort_cols = [c for c in ["_cache_candidate_id", "source", "band"] if c in combined.columns]
+            combined = combined.drop_duplicates(subset=sort_cols, keep="last")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        combined.to_parquet(path, index=False, compression=PARQUET_CACHE_COMPRESSION)
+    except Exception as exc:
+        print(f"[SED] cache warning: could not write {path}: {exc}")
+
+
+def _cache_rows_for_sed_result(source_key: str, input_ids: set[str], fetched: pd.DataFrame) -> pd.DataFrame:
+    updated_at = pd.Timestamp.utcnow().isoformat()
+    frames: list[pd.DataFrame] = []
+    hit_ids: set[str] = set()
+    if fetched is not None and not fetched.empty:
+        hit_rows = fetched.copy()
+        for col in SED_COLUMNS:
+            if col not in hit_rows.columns:
+                hit_rows[col] = None
+        hit_rows = hit_rows[SED_COLUMNS]
+        hit_rows.insert(0, "_cache_candidate_id", hit_rows["candidate_id"].astype(str))
+        hit_rows["_cache_status"] = "hit"
+        hit_rows["_cache_updated_at"] = updated_at
+        hit_ids = set(hit_rows["_cache_candidate_id"].astype(str))
+        frames.append(hit_rows)
+
+    miss_ids = sorted(input_ids - hit_ids)
+    if miss_ids:
+        miss_rows = pd.DataFrame([{col: None for col in SED_COLUMNS} for _ in miss_ids])
+        miss_rows["candidate_id"] = miss_ids
+        miss_rows["source"] = source_key
+        miss_rows.insert(0, "_cache_candidate_id", miss_ids)
+        miss_rows["_cache_status"] = "miss"
+        miss_rows["_cache_updated_at"] = updated_at
+        frames.append(miss_rows)
+
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+def _fetch_sed_source_with_cache(
+    source_key: str,
+    fetcher: Callable,
+    df: pd.DataFrame,
+    progress_callback: ProgressCallback | None = None,
+) -> pd.DataFrame:
+    if source_key in SED_CACHE_SKIP_SOURCES:
+        return fetcher(df, progress_callback=progress_callback)
+
+    candidate_ids = _sed_candidate_ids(df)
+    requested_ids = set(candidate_ids.astype(str))
+    cache = _read_sed_source_cache(source_key)
+    cached_ids = set(cache["_cache_candidate_id"].astype(str)) if not cache.empty else set()
+    hit_cache = pd.DataFrame(columns=SED_COLUMNS)
+    if not cache.empty:
+        status = (
+            cache["_cache_status"].astype(str)
+            if "_cache_status" in cache.columns
+            else pd.Series("hit", index=cache.index)
+        )
+        cached_rows = cache[
+            cache["_cache_candidate_id"].isin(requested_ids)
+            & (status == "hit")
+        ].copy()
+        if not cached_rows.empty:
+            hit_cache = cached_rows.reindex(columns=SED_COLUMNS)
+
+    missing_ids = requested_ids - cached_ids
+    if progress_callback and cached_ids:
+        progress_callback(f"[SED] {source_key} cache hit: {len(requested_ids) - len(missing_ids)}/{len(requested_ids)}")
+    if not missing_ids:
+        return hit_cache.reset_index(drop=True)
+
+    to_fetch = df.loc[candidate_ids.isin(missing_ids)].copy()
+    fresh = fetcher(to_fetch, progress_callback=progress_callback)
+    if fresh is None:
+        fresh = pd.DataFrame(columns=SED_COLUMNS)
+    cache_rows = _cache_rows_for_sed_result(source_key, missing_ids, fresh)
+    _write_sed_source_cache(source_key, cache_rows)
+
+    frames = [frame for frame in (hit_cache, fresh) if frame is not None and not frame.empty]
+    if not frames:
+        return pd.DataFrame(columns=SED_COLUMNS)
+    return pd.concat(frames, ignore_index=True).reindex(columns=SED_COLUMNS)
+
+
 def rows_from_candidate_frame(df: pd.DataFrame, progress_callback: ProgressCallback | None = None) -> pd.DataFrame:
     rows = []
     total = len(df)
@@ -1350,7 +1472,12 @@ def fetch_sed_photometry(
         if progress_callback:
             progress_callback(f"[SED] source {idx}/{len(requested)} {key}: start")
         try:
-            part = fetcher(df, progress_callback=progress_callback)
+            part = _fetch_sed_source_with_cache(
+                key,
+                fetcher,
+                df,
+                progress_callback=progress_callback,
+            )
         except Exception as exc:
             if progress_callback:
                 progress_callback(f"[SED] source {key}: failed ({exc})")

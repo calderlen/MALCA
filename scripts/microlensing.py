@@ -5828,7 +5828,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--crossmatch-gaia-catalog",
         type=Path,
         default=None,
-        help="Gaia DR3 parquet for characterize (default: <repo>/input/gaia/gaia_dr3_crossmatched.parquet).",
+        help="Gaia DR3 parquet for characterize (default: <repo>/output/cache/catalogs/gaia/gaia_dr3_crossmatched.parquet).",
     )
     g_x.add_argument(
         "--crossmatch-vsx",

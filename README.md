@@ -695,8 +695,14 @@ output/
                                       #   - Galactic population (thin_disk/thick_disk)
                                       #   - StarHorse ages/masses (if provided)
                                       #   - Auxiliary crossmatches (BANYAN Σ, IPHAS, etc.)
-└── gaia_cache/                       # Gaia query cache (created when cache is used)
-    └── gaia_results_{hash}.parquet
+└── cache/                            # Reusable lookup/cache products
+    ├── catalogs/
+    │   ├── gaia/                     # Gaia DR3 local catalog + chunks
+    │   ├── sed/                      # Per-source SED catalog caches
+    │   ├── characterize/             # Per-module XMatch/dust caches
+    │   └── vetting/                  # SIMBAD/Gaia/ALeRCE vetting caches
+    ├── lightcurves/                  # External light-curve caches
+    └── joblib/                       # Joblib-backed compute caches
 ```
 
 #### Dipper Classification

@@ -21,13 +21,14 @@ import json
 import math
 import os
 import re
+import shutil
 import time
 
 import numpy as np
 import pandas as pd
 import requests
 
-from malca.config import SKYPATROL_CACHE_DIR
+from malca.config import LEGACY_SKYPATROL_CACHE_DIR, SKYPATROL_CACHE_DIR
 
 
 SUPPORTED_FETCH_BACKENDS = ("skypatrol2", "skypatrol1")
@@ -76,6 +77,14 @@ _service_meta: dict | None = None
 # Default cache directory
 # ---------------------------------------------------------------------------
 _DEFAULT_CACHE = SKYPATROL_CACHE_DIR
+
+
+def _legacy_skypatrol_path(path: Path) -> Path | None:
+    try:
+        rel = path.resolve().relative_to(SKYPATROL_CACHE_DIR.expanduser().resolve())
+    except Exception:
+        return None
+    return LEGACY_SKYPATROL_CACHE_DIR.expanduser() / rel
 
 
 def _normalize_backend_name(backend: str | None) -> str:
@@ -197,7 +206,14 @@ def _cached_skypatrol_result(lc_path: Path, refresh_cache: bool) -> tuple[Path, 
     if refresh_cache:
         return None
     if not _is_valid_skypatrol_cache(lc_path):
-        return None
+        legacy_path = _legacy_skypatrol_path(lc_path)
+        if legacy_path is None or not _is_valid_skypatrol_cache(legacy_path):
+            return None
+        lc_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(legacy_path, lc_path)
+        legacy_meta = _skypatrol_meta_path(legacy_path)
+        if legacy_meta.exists():
+            shutil.copy2(legacy_meta, _skypatrol_meta_path(lc_path))
     return lc_path, _read_skypatrol_metadata(lc_path)
 
 

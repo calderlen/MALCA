@@ -50,7 +50,7 @@ from malca.config import GAIA_CHUNK_SIZE
 from malca.config import PARQUET_CACHE_COMPRESSION
 from malca.config import VIZIER_TAP_URL
 from malca.config import GAIA_AIP_TAP_URL
-from malca.config import DEFAULT_CACHE_DIR
+from malca.config import DEFAULT_CACHE_DIR, LEGACY_DEFAULT_CACHE_DIR
 from malca.config import (
     VETTING_SIMBAD_BATCH_SIZE,
     VETTING_SIMBAD_RETRY_DELAY,
@@ -238,7 +238,7 @@ TNS_RADIUS_ARCSEC = CFG_TNS_RADIUS_ARCSEC
 TNS_BATCH_SIZE = CFG_TNS_BATCH_SIZE
 OGLE_MICROLENS_CATALOG = OGLE_MICROLENS_CATALOG_ID
 OGLE_MICROLENS_RADIUS_ARCSEC = CFG_OGLE_MICROLENS_RADIUS_ARCSEC
-MICROLENS_CACHE_DIR = DEFAULT_CACHE_DIR.expanduser()
+MICROLENS_CACHE_DIR = (DEFAULT_CACHE_DIR / "microlensing").expanduser()
 MICROLENS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 TNS_LOCAL_INPUT_DIR = Path(__file__).resolve().parent.parent / "input"
 TNS_LOCAL_CSVS = [
@@ -264,12 +264,20 @@ GAIA_EPOCH_VET_CHUNK_SIZE = CFG_GAIA_EPOCH_VET_CHUNK_SIZE
 
 
 def _vetting_cache_path(cache_dir: Path | str | None, cache_name: str) -> Path:
-    base = Path(cache_dir).expanduser() if cache_dir is not None else DEFAULT_CACHE_DIR.expanduser()
+    base = Path(cache_dir).expanduser() if cache_dir is not None else (DEFAULT_CACHE_DIR / "vetting").expanduser()
     return base / VETTING_CACHE_FILES[cache_name]
+
+
+def _legacy_vetting_cache_path(cache_name: str) -> Path:
+    return LEGACY_DEFAULT_CACHE_DIR.expanduser() / VETTING_CACHE_FILES[cache_name]
 
 
 def _read_vetting_cache(cache_dir: Path | str | None, cache_name: str) -> pd.DataFrame:
     path = _vetting_cache_path(cache_dir, cache_name)
+    if not path.exists() and cache_dir is None:
+        legacy_path = _legacy_vetting_cache_path(cache_name)
+        if legacy_path.exists():
+            path = legacy_path
     if not path.exists():
         return pd.DataFrame()
     try:
@@ -290,7 +298,7 @@ def _write_vetting_cache(
         return
     path = _vetting_cache_path(cache_dir, cache_name)
     try:
-        existing = pd.read_parquet(path) if path.exists() else pd.DataFrame()
+        existing = _read_vetting_cache(cache_dir, cache_name) if not path.exists() else pd.read_parquet(path)
         combined = pd.concat([existing, rows], ignore_index=True) if not existing.empty else rows.copy()
         combined = combined.drop_duplicates(subset=key_cols, keep="last")
         path.parent.mkdir(parents=True, exist_ok=True)

@@ -2,6 +2,7 @@
 
 from datetime import datetime, timezone
 import math
+import os
 from pathlib import Path
 
 
@@ -29,8 +30,11 @@ VSX_RAW_CATALOG_PATH = Path("input/vsx/vsxcat.090525.csv")
 ASASSN_INDEX_PATH = Path("input/asassn_index_masked_concat_cleaned_20250919_154524_brotli.parquet")
 STARHORSE_DEFAULT_PATH = "input/starhorse/starhorse2021.parquet"
 MIST_GRID_PATH = Path("input/mist/mist_cmd_minimal.csv")
-DEFAULT_CACHE_DIR = Path("~/.cache/malca/catalogs")
-GAIA_CACHE_FILE = Path("output/gaia_cache.parquet")
+MALCA_CACHE_ROOT = Path(os.environ.get("MALCA_CACHE_ROOT", "output/cache"))
+DEFAULT_CACHE_DIR = MALCA_CACHE_ROOT / "catalogs"
+LEGACY_DEFAULT_CACHE_DIR = Path("~/.cache/malca/catalogs")
+GAIA_CACHE_FILE = DEFAULT_CACHE_DIR / "gaia" / "gaia_dr3_crossmatched.parquet"
+LEGACY_GAIA_CACHE_FILE = Path("output/gaia_cache.parquet")
 LTV_OUTPUT_DIR = Path("output/ltv")
 LTV_INJECTION_OUTPUT_DIR = LTV_OUTPUT_DIR / "injection"
 SYDNEY_LTV_CSV_PATH = Path("input/SydneyLTVs.csv")
@@ -38,11 +42,16 @@ LCV2_ROOT = Path("/data/poohbah/1/assassin/rowan.90/lcsv2")
 UNTIMELY_API_URL = "https://irsa.ipac.caltech.edu/cgi-bin/Gator/nph-query"
 STARHORSE_TAP_URL = "https://gaia.aip.de/tap"
 GAIA_AIP_TAP_URL = "https://gaia.aip.de/tap"
-GAIA_LOCAL_CATALOG = Path("input/gaia/gaia_dr3_crossmatched.parquet")
+GAIA_LOCAL_CATALOG = DEFAULT_CACHE_DIR / "gaia" / "gaia_dr3_crossmatched.parquet"
+LEGACY_GAIA_LOCAL_CATALOG = Path("input/gaia/gaia_dr3_crossmatched.parquet")
 DEFAULT_OUTPUT_DIR = Path("output")
 LCV2_MASKED_ROOT = Path("/data/poohbah/1/assassin/lenhart/malca-older/calder/lcsv2_masked")
-SKYPATROL_CACHE_DIR = Path("output/cache/skypatrol")
-LTV_CACHE_DIR = Path("/tmp/ltv_cache")
+SKYPATROL_CACHE_DIR = MALCA_CACHE_ROOT / "lightcurves" / "skypatrol"
+LEGACY_SKYPATROL_CACHE_DIR = Path("output/cache/skypatrol")
+LTV_CACHE_DIR = MALCA_CACHE_ROOT / "joblib" / "ltv"
+LEGACY_LTV_CACHE_DIR = Path("/tmp/ltv_cache")
+REVIEW_IMPORTED_LC_CACHE_DIR = MALCA_CACHE_ROOT / "review" / "imported_lightcurves"
+LEGACY_REVIEW_IMPORTED_LC_CACHE_DIR = Path("~/.malca/cache/imported")
 
 
 # =============================================================================

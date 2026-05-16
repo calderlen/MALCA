@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+import hashlib
 import json
 import math
 import shutil
@@ -14,7 +15,14 @@ import pandas as pd
 
 from malca.config import GAIA_CHUNK_SIZE
 from malca.config import LTV_MAX_PM
-from malca.config import VSX_CROSSMATCH_PATH, GAIA_CACHE_FILE
+from malca.config import (
+    VSX_CROSSMATCH_PATH,
+    DEFAULT_CACHE_DIR,
+    GAIA_CACHE_FILE,
+    GAIA_LOCAL_CATALOG,
+    LEGACY_GAIA_CACHE_FILE,
+    REVIEW_IMPORTED_LC_CACHE_DIR,
+)
 from malca.multi_survey_features import MS_FEATURE_COLUMN_SPECS
 from malca.review.metadata import normalize_vsx_record
 from malca.table_io import read_parquet_table, write_parquet_table
@@ -345,10 +353,17 @@ def detect_run_directory_files(run_dir: Path) -> dict[str, Path | None]:
     else:
         results['warnings'].append("plots/ directory not found")
 
-    # Detect gaia cache (optional, no warning if missing)
-    gaia_cache = run_dir / "gaia_cache" / "gaia_cache.parquet"
-    if gaia_cache.exists():
-        results['gaia_cache'] = gaia_cache
+    # Detect Gaia cache (optional, no warning if missing).  Prefer the unified
+    # repo cache, then fall back to older per-run/global locations.
+    for gaia_cache in (
+        GAIA_LOCAL_CATALOG,
+        GAIA_CACHE_FILE,
+        run_dir / "gaia_cache" / "gaia_cache.parquet",
+        LEGACY_GAIA_CACHE_FILE,
+    ):
+        if gaia_cache.exists():
+            results['gaia_cache'] = gaia_cache
+            break
 
     return results
 
@@ -1460,26 +1475,42 @@ def import_candidates(
             from malca.vetting import vet_candidates
 
             # --- vetting cache: skip candidates already vetted ----
-            # Use file-based cache for real paths or fetch:// sources
-            if source_path and source_path.startswith("fetch://"):
-                _vetting_cache_dir = Path("output") / "cache" / "vetting_cache"
+            # Use the unified repo cache for real paths or fetch:// sources.
+            if source_path:
+                _vetting_cache_dir = (DEFAULT_CACHE_DIR / "vetting" / "review_import").expanduser()
                 _vetting_cache_dir.mkdir(parents=True, exist_ok=True)
-                _cache_name = source_path.replace("fetch://", "").replace("/", "_") + ".parquet"
-                _vetting_cache_path = _vetting_cache_dir / _cache_name
-                _use_cache = True
-            elif source_path:
-                _vetting_cache_path = Path(source_path + ".vetting_cache.parquet")
+                _digest = hashlib.sha1(source_path.encode("utf-8")).hexdigest()[:16]
+                _cache_token = "".join(
+                    ch if ch.isalnum() or ch in {"_", "-"} else "_"
+                    for ch in source_path.replace("fetch://", "")
+                ).strip("_")[:80] or "source"
+                _vetting_cache_path = _vetting_cache_dir / f"{_cache_token}_{_digest}.parquet"
+                _legacy_vetting_cache_path = (
+                    Path("output") / "cache" / "vetting_cache" / (source_path.replace("fetch://", "").replace("/", "_") + ".parquet")
+                    if source_path.startswith("fetch://")
+                    else Path(source_path + ".vetting_cache.parquet")
+                )
                 _use_cache = True
             else:
                 _vetting_cache_path = None
+                _legacy_vetting_cache_path = None
                 _use_cache = False
             _cache_df = None
             _id_col = "candidate_id" if "candidate_id" in df_use.columns else None
             n_new = len(df_use)  # default: vet everything
 
-            if _id_col and _vetting_cache_path is not None and _vetting_cache_path.exists():
+            _vetting_read_cache_path = _vetting_cache_path
+            if (
+                _vetting_read_cache_path is not None
+                and not _vetting_read_cache_path.exists()
+                and _legacy_vetting_cache_path is not None
+                and _legacy_vetting_cache_path.exists()
+            ):
+                _vetting_read_cache_path = _legacy_vetting_cache_path
+
+            if _id_col and _vetting_read_cache_path is not None and _vetting_read_cache_path.exists():
                 try:
-                    _cache_df = pd.read_parquet(_vetting_cache_path)
+                    _cache_df = pd.read_parquet(_vetting_read_cache_path)
                     valid_cache_mask = _positive_vetting_mask(_cache_df)
                     if not valid_cache_mask.all():
                         n_ignored = int((~valid_cache_mask).sum())
@@ -1501,6 +1532,12 @@ def import_candidates(
                     on=_id_col, how="left", suffixes=("", "_cached"),
                 )
                 df_use = df_use[[c for c in df_use.columns if not c.endswith("_cached")]]
+                if _vetting_cache_path is not None and _vetting_read_cache_path != _vetting_cache_path:
+                    try:
+                        _vetting_cache_path.parent.mkdir(parents=True, exist_ok=True)
+                        _cache_df.to_parquet(_vetting_cache_path, index=False)
+                    except Exception:
+                        pass
                 print("Vetting: all candidates served from cache")
             else:
                 if _cache_df is not None and n_new > 0:
@@ -1541,6 +1578,7 @@ def import_candidates(
                                 _cache_df[~_cache_df[_id_col].isin(new_cache[_id_col])],
                                 new_cache,
                             ], ignore_index=True)
+                        _vetting_cache_path.parent.mkdir(parents=True, exist_ok=True)
                         new_cache.to_parquet(_vetting_cache_path, index=False)
                         print(f"Vetting cache saved: {len(new_cache)} entries → {_vetting_cache_path}")
                     except Exception as e:
@@ -2759,7 +2797,7 @@ def export_review_subset_bundle(
 # ---------------------------------------------------------------------------
 # Raw light-curve file import
 # ---------------------------------------------------------------------------
-_LC_CACHE_DIR = Path("~/.malca/cache/imported").expanduser()
+_LC_CACHE_DIR = REVIEW_IMPORTED_LC_CACHE_DIR.expanduser()
 
 
 def import_lightcurve_files(
