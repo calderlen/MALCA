@@ -85,7 +85,12 @@ from malca.review.store import db_connect, import_candidates
 from concurrent.futures import ProcessPoolExecutor
 from malca.stats import compute_stats, _enrich_row_worker
 from malca.tag import RAW_MEDIAN_SUSPECT_COL, apply_tags, filter_camera_medians
-from malca.table_io import read_parquet_table, require_parquet_path, write_parquet_table
+from malca.table_io import (
+    read_parquet_table,
+    read_passing_parquet_table,
+    require_parquet_path,
+    write_parquet_table,
+)
 from malca.utils import log as _log
 from malca.vetting import vet_candidates
 
@@ -498,6 +503,10 @@ def load_table(path: Path) -> pd.DataFrame:
     return read_parquet_table(path)
 
 
+def load_passing_table(path: Path, *, columns: list[str] | None = None) -> pd.DataFrame:
+    return _select_passing_candidates(read_passing_parquet_table(path, columns=columns))
+
+
 def _json_stable(value: Any) -> Any:
     """Normalize values so run fingerprints compare exactly after JSON round trips."""
     if isinstance(value, Path):
@@ -673,6 +682,17 @@ def _first_existing_candidate_result(results_dir: Path, *, include_extended: boo
         if candidate_path.exists():
             return candidate_path
     return None
+
+
+def _copy_single_tagged_table_output(tagged_outputs: list[Path], merged_path: Path) -> bool:
+    """Copy a single tagged Parquet table to its canonical path without loading it."""
+    if len(tagged_outputs) != 1:
+        return False
+    source = tagged_outputs[0]
+    merged_path.parent.mkdir(parents=True, exist_ok=True)
+    if source.resolve() != merged_path.resolve():
+        shutil.copy2(source, merged_path)
+    return True
 
 
 def _ensure_candidate_id_column(df: pd.DataFrame) -> pd.DataFrame:
@@ -965,7 +985,10 @@ def _collect_bundle_lightcurve_files(out_dir: Path, mag_bin_tag: str | None = No
         return []
 
     try:
-        df_candidates = pd.read_parquet(filtered_candidates)
+        if include_all:
+            df_candidates = pd.read_parquet(filtered_candidates, columns=["path"])
+        else:
+            df_candidates = load_passing_table(filtered_candidates, columns=["path"])
     except Exception as exc:
         print(f"Warning: could not read {filtered_candidates} for light curve bundling: {exc}")
         return []
@@ -973,10 +996,8 @@ def _collect_bundle_lightcurve_files(out_dir: Path, mag_bin_tag: str | None = No
     if "path" not in df_candidates.columns:
         return []
 
-    if not include_all and "failed_any" in df_candidates.columns:
-        n_before = len(df_candidates)
-        df_candidates = df_candidates[~df_candidates["failed_any"].astype(bool)]
-        print(f"Bundling light curves for {len(df_candidates)}/{n_before} passing candidates (failed_any=False)")
+    if not include_all:
+        print(f"Bundling light curves for {len(df_candidates)} passing candidates (failed_any=False)")
 
     files_to_bundle: list[tuple[Path, str]] = []
     seen_files: set[Path] = set()
@@ -2837,17 +2858,13 @@ def main():
                 post_filter_output = results_dir / f"lc_events_filtered_{mag_bin_tag}.parquet"
 
                 if post_filter_output.exists():
-                    df_to_enrich = load_table(post_filter_output)
+                    df_to_enrich = load_passing_table(post_filter_output)
                 else:
                     print(f"Warning: No filter output found at {post_filter_output}")
                     df_to_enrich = None
 
                 if df_to_enrich is not None:
-                    # Filter to passing candidates only
-                    if "failed_any" in df_to_enrich.columns:
-                        df_passed = df_to_enrich[~df_to_enrich["failed_any"]].copy()
-                    else:
-                        df_passed = df_to_enrich.copy()
+                    df_passed = df_to_enrich
 
                     if len(df_passed) > 0:
                         log(f"Enriching {len(df_passed)} candidates with compute_stats...")
@@ -3011,7 +3028,10 @@ def main():
             merged_path = results_dir / merge_prefix if merge_prefix == "lc_events_results" else results_dir / f"{merge_prefix}.parquet"
             if tagged_outputs:
                 try:
-                    if merge_prefix == "lc_events_results":
+                    if merge_prefix != "lc_events_results" and _copy_single_tagged_table_output(tagged_outputs, merged_path):
+                        log(f"Merged 1 output into {merged_path} by copying {tagged_outputs[0].name}")
+                        continue
+                    elif merge_prefix == "lc_events_results":
                         dfs = [
                             _load_events_output(path, events_format) if path.is_dir() else pd.read_parquet(path)
                             for path in tagged_outputs
@@ -3109,10 +3129,7 @@ def main():
         log("\n=== Step 8: Characterizing candidates ===")
         characterize_started = time.perf_counter()
         try:
-            df_char = load_table(post_filter_output)
-
-            if "failed_any" in df_char.columns:
-                df_char = df_char[~df_char["failed_any"]].copy()
+            df_char = load_passing_table(post_filter_output)
 
             if "path" in df_char.columns and "asas_sn_id" not in df_char.columns:
                 def _extract_id(path_str: str) -> str:
@@ -3174,16 +3191,15 @@ def main():
                 post_filter_output = results_dir / "lc_events_filtered.parquet"
 
                 if characterize_output.exists():
-                    df_sed_in = load_table(characterize_output)
+                    df_sed_in = load_passing_table(characterize_output)
                 elif post_filter_output.exists():
-                    df_sed_in = load_table(post_filter_output)
+                    df_sed_in = load_passing_table(post_filter_output)
                 else:
                     df_sed_in = None
 
                 if df_sed_in is None:
                     log("Warning: no suitable input found for SED photometry, skipping")
                 else:
-                    df_sed_in = _select_passing_candidates(df_sed_in)
                     sources = resolve_sed_sources(args.sed_sources)
                     log(f"SED input: {len(df_sed_in)} passing candidates; sources={','.join(sources)}")
                     sed_rows = fetch_sed_photometry(df_sed_in, sources=sources, progress_callback=log)
@@ -3232,16 +3248,15 @@ def main():
                 post_filter_output = results_dir / "lc_events_filtered.parquet"
 
                 if characterize_output.exists():
-                    df_model_in = load_table(characterize_output)
+                    df_model_in = load_passing_table(characterize_output)
                 elif post_filter_output.exists():
-                    df_model_in = load_table(post_filter_output)
+                    df_model_in = load_passing_table(post_filter_output)
                 else:
                     df_model_in = None
 
                 if df_model_in is None:
                     log("Warning: no suitable input found for SED model fitting, skipping")
                 else:
-                    df_model_in = _select_passing_candidates(df_model_in)
                     sed_rows_for_model = load_table(sed_photometry_output)
                     log(f"SED model input: {len(df_model_in)} passing candidates; {len(sed_rows_for_model)} SED rows")
                     sed_model_fits, sed_model_curves = fit_sed_models(
@@ -3299,16 +3314,16 @@ def main():
                     post_filter_output = results_dir / "lc_events_filtered.parquet"
 
                     if characterize_output.exists():
-                        df_post_filtered = load_table(characterize_output)
+                        df_post_filtered = load_passing_table(characterize_output)
                     elif post_filter_output.exists():
-                        df_post_filtered = load_table(post_filter_output)
+                        df_post_filtered = load_passing_table(post_filter_output)
                     else:
                         df_post_filtered = None
                         print(f"Warning: filter output not found at {post_filter_output}")
 
                     if df_post_filtered is not None:
                         # Run classification on passing candidates
-                        df_passed = df_post_filtered[~df_post_filtered["failed_any"]].copy() if "failed_any" in df_post_filtered.columns else df_post_filtered.copy()
+                        df_passed = df_post_filtered
 
                         if len(df_passed) > 0:
                             df_classified = compute_all_classifications(df_passed)
@@ -3354,20 +3369,17 @@ def main():
                 post_filter_output = results_dir / "lc_events_filtered.parquet"
 
                 if classify_output.exists():
-                    df_neighbors_in = load_table(classify_output)
+                    df_neighbors_in = load_passing_table(classify_output)
                 elif characterize_output.exists():
-                    df_neighbors_in = load_table(characterize_output)
+                    df_neighbors_in = load_passing_table(characterize_output)
                 elif enrich_output.exists():
-                    df_neighbors_in = load_table(enrich_output)
+                    df_neighbors_in = load_passing_table(enrich_output)
                 elif post_filter_output.exists():
-                    df_neighbors_in = load_table(post_filter_output)
+                    df_neighbors_in = load_passing_table(post_filter_output)
                 else:
                     df_neighbors_in = None
 
                 if df_neighbors_in is not None:
-                    if "failed_any" in df_neighbors_in.columns:
-                        df_neighbors_in = df_neighbors_in[~df_neighbors_in["failed_any"]].copy()
-
                     neighbor_dir = results_dir / "neighbor_enrichment"
                     neighbor_cache = args.neighbor_cache.expanduser() if args.neighbor_cache else (neighbor_dir / "neighbors_cache.parquet")
                     neighbor_checkpoint = neighbor_dir / "neighbors_CHECKPOINT.parquet"
@@ -3426,22 +3438,19 @@ def main():
                 post_filter_output = results_dir / "lc_events_filtered.parquet"
 
                 if neighbor_output.exists():
-                    df_spectra_in = load_table(neighbor_output)
+                    df_spectra_in = load_passing_table(neighbor_output)
                 elif enrich_output.exists():
-                    df_spectra_in = load_table(enrich_output)
+                    df_spectra_in = load_passing_table(enrich_output)
                 elif classify_output.exists():
-                    df_spectra_in = load_table(classify_output)
+                    df_spectra_in = load_passing_table(classify_output)
                 elif characterize_output.exists():
-                    df_spectra_in = load_table(characterize_output)
+                    df_spectra_in = load_passing_table(characterize_output)
                 elif post_filter_output.exists():
-                    df_spectra_in = load_table(post_filter_output)
+                    df_spectra_in = load_passing_table(post_filter_output)
                 else:
                     df_spectra_in = None
 
                 if df_spectra_in is not None:
-                    if "failed_any" in df_spectra_in.columns:
-                        df_spectra_in = df_spectra_in[~df_spectra_in["failed_any"]].copy()
-
                     spectra_dir = results_dir / "spectra_enrichment"
                     spectra_cache = args.spectra_cache.expanduser() if args.spectra_cache else (spectra_dir / "spectra_cache.parquet")
                     spectra_checkpoint = spectra_dir / "spectra_CHECKPOINT.parquet"
@@ -3506,8 +3515,7 @@ def main():
             if vetting_input is None or not Path(vetting_input).exists():
                 log("Warning: no suitable input found for vetting, skipping")
             else:
-                df_vet = load_table(vetting_input)
-                df_vet = _select_passing_candidates(df_vet)
+                df_vet = load_passing_table(Path(vetting_input))
                 log(f"Vetting input: {vetting_input} ({len(df_vet)} passing candidates)")
 
                 if args.vetting_min_score is not None and "interest_score" in df_vet.columns:
@@ -3574,8 +3582,7 @@ def main():
             if external_input is None or not external_input.exists():
                 log("Warning: no suitable input found for external light-curve enrichment, skipping")
             else:
-                df_external_in = load_table(external_input)
-                df_external_in = _select_passing_candidates(df_external_in)
+                df_external_in = load_passing_table(external_input)
                 log(f"External LC input: {external_input} ({len(df_external_in)} passing candidates)")
                 if df_external_in.empty:
                     log("No passing candidates for external light-curve enrichment")
@@ -3620,8 +3627,7 @@ def main():
             if multi_input is None or not multi_input.exists():
                 log("Warning: no suitable input found for multi-survey features, skipping")
             else:
-                df_multi_in = load_table(multi_input)
-                df_multi_in = _select_passing_candidates(df_multi_in)
+                df_multi_in = load_passing_table(multi_input)
                 log(f"Multi-survey input: {multi_input} ({len(df_multi_in)} passing candidates)")
                 if df_multi_in.empty:
                     log("No passing candidates for multi-survey feature extraction")
@@ -3660,8 +3666,7 @@ def main():
 
             if _import_file is not None:
                 conn = db_connect(review_db_path)
-                df_import = load_table(_import_file)
-                df_import = _select_passing_candidates(df_import)
+                df_import = load_passing_table(_import_file)
                 if df_import.empty:
                     conn.close()
                     log(f"No passing candidates to import into {review_db_path}")

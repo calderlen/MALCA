@@ -26,6 +26,65 @@ def read_parquet_table(path: str | Path, **kwargs) -> pd.DataFrame:
     return table.to_frame() if isinstance(table, pd.Series) else table
 
 
+def read_passing_parquet_table(
+    path: str | Path,
+    *,
+    columns: list[str] | None = None,
+    failed_col: str = "failed_any",
+    **kwargs,
+) -> pd.DataFrame:
+    """Read rows that pass filtering without materializing full audit tables."""
+    out = require_parquet_path(path)
+    read_kwargs = dict(kwargs)
+    if columns is not None:
+        read_kwargs["columns"] = columns
+
+    try:
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        schema = pq.read_schema(out)
+        if failed_col not in schema.names:
+            return read_parquet_table(out, **read_kwargs)
+
+        field_type = schema.field(failed_col).type
+        if pa.types.is_boolean(field_type):
+            filters = [(failed_col, "==", False)]
+        elif pa.types.is_integer(field_type):
+            filters = [(failed_col, "==", 0)]
+        else:
+            filters = None
+
+        if filters is not None:
+            table = pd.read_parquet(out, filters=filters, **read_kwargs)
+            return table.to_frame() if isinstance(table, pd.Series) else table
+    except Exception:
+        # Fall back to a normal read below; callers still get correct rows.
+        pass
+
+    fallback_kwargs = dict(read_kwargs)
+    requested_columns = fallback_kwargs.get("columns")
+    if requested_columns is not None and failed_col not in requested_columns:
+        fallback_kwargs["columns"] = list(requested_columns) + [failed_col]
+    table = read_parquet_table(out, **fallback_kwargs)
+    if failed_col not in table.columns:
+        return table
+
+    failed = table[failed_col]
+    if pd.api.types.is_bool_dtype(failed):
+        mask = ~failed.fillna(False).astype(bool)
+    elif pd.api.types.is_numeric_dtype(failed):
+        mask = failed.fillna(0).astype(float) == 0.0
+    else:
+        lowered = failed.astype("string").str.strip().str.lower()
+        mask = ~lowered.isin({"1", "true", "t", "yes", "y"}).fillna(False)
+
+    table = table.loc[mask].copy()
+    if requested_columns is not None and failed_col not in requested_columns:
+        table = table.drop(columns=[failed_col])
+    return table
+
+
 def write_parquet_table(
     df: pd.DataFrame,
     path: str | Path,

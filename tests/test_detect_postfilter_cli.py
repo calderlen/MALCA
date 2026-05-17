@@ -20,6 +20,8 @@ from malca.detect import (
     _build_filter_kwargs,
     _build_home_external_validation_cmd,
     _candidate_result_priority,
+    _collect_bundle_lightcurve_files,
+    _copy_single_tagged_table_output,
     _first_existing_candidate_result,
     _run_external_lcs_enrichment,
     _run_multi_survey_features_enrichment,
@@ -105,6 +107,34 @@ def test_candidate_result_priority_prefers_extended_outputs(tmp_path: Path) -> N
     assert priority[1].name == "lc_events_external_lcs.parquet"
     assert _first_existing_candidate_result(results_dir).name == "lc_events_multi_survey_features.parquet"
     assert _first_existing_candidate_result(results_dir, include_extended=False).name == "lc_events_vetted.parquet"
+
+
+def test_bundle_lightcurves_reads_only_passing_candidates(tmp_path: Path) -> None:
+    results_dir = tmp_path / "results"
+    results_dir.mkdir()
+    pass_lc = tmp_path / "pass.dat2"
+    fail_lc = tmp_path / "fail.dat2"
+    pass_lc.write_text("1 13.0 0.1\n", encoding="ascii")
+    fail_lc.write_text("1 14.0 0.1\n", encoding="ascii")
+    pd.DataFrame(
+        {
+            "path": [str(pass_lc), str(fail_lc)],
+            "failed_any": [False, True],
+        }
+    ).to_parquet(results_dir / "lc_events_filtered.parquet", index=False)
+
+    files = _collect_bundle_lightcurve_files(tmp_path)
+
+    assert [path.name for path, _arcname in files] == ["pass.dat2"]
+
+
+def test_single_tagged_table_merge_copies_without_reading(tmp_path: Path) -> None:
+    source = tmp_path / "lc_events_filtered_all.parquet"
+    merged = tmp_path / "lc_events_filtered.parquet"
+    source.write_bytes(b"not actually parquet")
+
+    assert _copy_single_tagged_table_output([source], merged)
+    assert merged.read_bytes() == b"not actually parquet"
 
 
 def test_extended_enrichment_helpers_use_passers_and_safe_defaults(tmp_path: Path, monkeypatch) -> None:
