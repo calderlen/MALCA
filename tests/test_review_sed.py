@@ -110,7 +110,7 @@ def test_missing_distance_plots_flux_only_with_warning() -> None:
     assert not rows.empty
     assert rows["lambda_l_lambda"].isna().all()
     assert any("No distance available" in warning for warning in warnings)
-    assert "F_lambda" in fig.layout.yaxis.title.text
+    assert "F_{\\lambda}" in fig.layout.yaxis.title.text
 
 
 def test_external_rows_merge_with_payload() -> None:

@@ -8559,7 +8559,7 @@ def update_sed_panel(candidate_id, extinction_mode, theme_mode):
         figure=fig,
         mathjax=True,
         config={'displayModeBar': True, 'responsive': True},
-        style={'height': '340px'},
+        style={'height': '420px'},
     )
     return graph, _sed_status_text(rows, warnings_list)
 
@@ -8580,19 +8580,40 @@ def export_sed_plot(n_clicks, candidate_id, extinction_mode, theme_mode):
     if not candidate_id:
         return no_update, 'No candidate is selected.'
     try:
-        fig, _rows, _warnings_list = _load_sed_figure_for_candidate(candidate_id, extinction_mode, theme_mode)
+        fig, _rows, _warnings_list = _load_sed_figure_for_candidate(candidate_id, extinction_mode, "white")
         export_fig = go.Figure(fig)
+        for trace in export_fig.data:
+            trace_name = str(getattr(trace, "name", "") or "")
+            if "Castelli/Kurucz" in trace_name and getattr(trace, "line", None) is not None:
+                trace.line.color = "#111827"
+                trace.line.width = 2.6
+            if getattr(trace, "marker", None) is not None:
+                trace.marker.size = 8.5
+                if getattr(trace.marker, "line", None) is not None:
+                    trace.marker.line.color = "#111827"
+                    trace.marker.line.width = 0.7
         export_fig.update_layout(
             paper_bgcolor='white',
             plot_bgcolor='white',
-            font=dict(color='#111111', family='Monaco, Courier New, monospace', size=11),
-            title_font=dict(color='#111111'),
-            margin=dict(t=86, l=70, r=26, b=58),
+            font=dict(color='#111111', family='Arial, DejaVu Sans, sans-serif', size=13),
+            title=dict(
+                text='Spectral Energy Distribution',
+                x=0.5,
+                xanchor='center',
+                y=0.965,
+                font=dict(color='#111111', size=18),
+            ),
+            margin=dict(t=112, l=92, r=34, b=78),
             legend=dict(
+                orientation='h',
+                x=0.5,
+                xanchor='center',
+                y=1.12,
+                yanchor='bottom',
                 bgcolor='rgba(255,255,255,0.95)',
                 bordercolor='rgba(40,40,40,0.25)',
                 borderwidth=1,
-                font=dict(color='#111111', size=9),
+                font=dict(color='#111111', size=10),
             ),
         )
         export_fig.update_xaxes(
@@ -8600,7 +8621,9 @@ def export_sed_plot(n_clicks, candidate_id, extinction_mode, theme_mode):
             title_font_color='#111111',
             tickfont_color='#111111',
             showgrid=True,
-            gridcolor='rgba(0,0,0,0.12)',
+            gridcolor='rgba(0,0,0,0.16)',
+            linecolor='rgba(0,0,0,0.45)',
+            ticks='outside',
             zeroline=False,
         )
         export_fig.update_yaxes(
@@ -8608,10 +8631,12 @@ def export_sed_plot(n_clicks, candidate_id, extinction_mode, theme_mode):
             title_font_color='#111111',
             tickfont_color='#111111',
             showgrid=True,
-            gridcolor='rgba(0,0,0,0.12)',
+            gridcolor='rgba(0,0,0,0.16)',
+            linecolor='rgba(0,0,0,0.45)',
+            ticks='outside',
             zeroline=False,
         )
-        image_bytes = pio.to_image(export_fig, format='pdf', width=1000, height=700)
+        image_bytes = pio.to_image(export_fig, format='pdf', width=1200, height=820)
     except Exception as exc:
         return no_update, f'Export failed (SED PDF). Install/enable kaleido. {exc}'
     safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(candidate_id)).strip("_") or "unknown"

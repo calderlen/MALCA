@@ -697,17 +697,22 @@ def build_sed_figure(
                 ),
             ))
 
-    y_title = "lambda L_lambda [erg s^-1]" if y_col == "lambda_l_lambda" else "F_lambda [erg s^-1 cm^-2 A^-1]"
+    x_title = r"$\lambda\ [\mathrm{\AA}]$"
+    y_title = (
+        r"$\lambda L_{\lambda}\ [\mathrm{erg\,s^{-1}}]$"
+        if y_col == "lambda_l_lambda"
+        else r"$F_{\lambda}\ [\mathrm{erg\,s^{-1}\,cm^{-2}\,\AA^{-1}}]$"
+    )
     fig.update_layout(
         title="Spectral Energy Distribution",
-        height=320,
-        margin=dict(l=58, r=14, t=68, b=48),
+        height=390,
+        margin=dict(l=72, r=18, t=82, b=62),
         paper_bgcolor=spec["paper"],
         plot_bgcolor=spec["plot"],
         font=dict(color=spec["font"], size=10),
-        legend=dict(orientation="h", y=1.16, x=0.0, bgcolor="rgba(0,0,0,0)"),
+        legend=dict(orientation="h", y=1.17, x=0.0, bgcolor="rgba(0,0,0,0)"),
     )
-    fig.update_xaxes(title="lambda [Angstrom]", type="log", gridcolor=spec["grid"], zeroline=False)
+    fig.update_xaxes(title=x_title, type="log", gridcolor=spec["grid"], zeroline=False)
     fig.update_yaxes(title=y_title, type="log", gridcolor=spec["grid"], zeroline=False)
     return fig, sed_df, warnings
 
