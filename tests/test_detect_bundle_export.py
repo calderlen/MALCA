@@ -58,6 +58,33 @@ def test_export_bundle_includes_chunked_mag_bin_event_results(tmp_path: Path) ->
         assert expected in set(zf.namelist())
 
 
+def test_export_bundle_includes_vetted_and_extended_outputs(tmp_path: Path) -> None:
+    out_dir = tmp_path / "run"
+    results_dir = out_dir / "results"
+    external_dir = results_dir / "external_lcs"
+    external_dir.mkdir(parents=True, exist_ok=True)
+    for rel in [
+        "results/lc_events_vetted.parquet",
+        "results/lc_events_external_lcs.parquet",
+        "results/lc_events_multi_survey_features.parquet",
+        "results/external_lcs/ztf_lc_C1.parquet",
+    ]:
+        (out_dir / rel).write_bytes(b"placeholder\n")
+
+    bundle_zip = tmp_path / "bundle.zip"
+    bundled = export_bundle_zip(bundle_zip, out_dir)
+
+    expected = {
+        "results/lc_events_vetted.parquet",
+        "results/lc_events_external_lcs.parquet",
+        "results/lc_events_multi_survey_features.parquet",
+        "results/external_lcs/ztf_lc_C1.parquet",
+    }
+    assert expected.issubset(set(bundled))
+    with zipfile.ZipFile(bundle_zip, "r") as zf:
+        assert expected.issubset(set(zf.namelist()))
+
+
 def test_resolve_index_prefers_bundle_assets_file(tmp_path: Path) -> None:
     out_dir = tmp_path / "output" / "runs" / "run_a"
     bundled_index = out_dir / "bundle_assets" / "asassn_index_full.parquet"

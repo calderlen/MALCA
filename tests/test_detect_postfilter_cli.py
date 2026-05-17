@@ -15,11 +15,19 @@ pytest.importorskip("dustmaps3d")
 pytest.importorskip("banyan_sigma")
 
 from malca.detect import (
+    PIPELINE_STAGE_CHOICES,
     _branch_events_attempted_this_run,
     _build_filter_kwargs,
     _build_home_external_validation_cmd,
+    _candidate_result_priority,
+    _first_existing_candidate_result,
+    _run_external_lcs_enrichment,
+    _run_multi_survey_features_enrichment,
     _select_passing_candidates,
     _should_skip_filter_stage,
+    _stage_defaults_to_extended_enrichment,
+    _stage_runs_downstream,
+    _stage_runs_upstream,
     main as detect_main,
 )
 from malca.config import EVENTS_OUTPUT_CHUNK_SIZE
@@ -70,6 +78,96 @@ def _base_args() -> argparse.Namespace:
         phase_plot_allow_alias=False,
         verbose=False,
     )
+
+
+def test_full_extended_stage_semantics() -> None:
+    assert "full-extended" in PIPELINE_STAGE_CHOICES
+    assert _stage_runs_upstream("full-extended")
+    assert _stage_runs_downstream("full-extended")
+    assert _stage_defaults_to_extended_enrichment("full-extended")
+    assert not _stage_defaults_to_extended_enrichment("full")
+
+
+def test_candidate_result_priority_prefers_extended_outputs(tmp_path: Path) -> None:
+    results_dir = tmp_path / "results"
+    results_dir.mkdir()
+    for name in [
+        "lc_events_classified.parquet",
+        "lc_events_vetted.parquet",
+        "lc_events_external_lcs.parquet",
+        "lc_events_multi_survey_features.parquet",
+    ]:
+        (results_dir / name).write_text("x", encoding="ascii")
+
+    priority = _candidate_result_priority(results_dir)
+
+    assert priority[0].name == "lc_events_multi_survey_features.parquet"
+    assert priority[1].name == "lc_events_external_lcs.parquet"
+    assert _first_existing_candidate_result(results_dir).name == "lc_events_multi_survey_features.parquet"
+    assert _first_existing_candidate_result(results_dir, include_extended=False).name == "lc_events_vetted.parquet"
+
+
+def test_extended_enrichment_helpers_use_passers_and_safe_defaults(tmp_path: Path, monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_fetch_external_lcs(df: pd.DataFrame, **kwargs) -> pd.DataFrame:
+        captured["external_ids"] = df["candidate_id"].tolist()
+        captured["external_kwargs"] = kwargs
+        out = df.copy()
+        out["ztf_lc_n_det"] = 3
+        return out
+
+    def fake_compute_multi_survey_features(df: pd.DataFrame, *, external_lc_dir: Path) -> pd.DataFrame:
+        captured["multi_ids"] = df["candidate_id"].tolist()
+        captured["multi_external_lc_dir"] = external_lc_dir
+        out = df.copy()
+        out["ms_feature_status"] = "ok"
+        return out
+
+    monkeypatch.setattr("malca.vetting.fetch_external_lcs", fake_fetch_external_lcs)
+    monkeypatch.setattr("malca.multi_survey_features.compute_multi_survey_features", fake_compute_multi_survey_features)
+
+    df = pd.DataFrame({
+        "candidate_id": ["C1", "C2"],
+        "failed_any": [False, True],
+        "ra": [10.0, 11.0],
+        "dec": [20.0, 21.0],
+    })
+    results_dir = tmp_path / "results"
+
+    external_path, external_dir, external_df = _run_external_lcs_enrichment(
+        df,
+        results_dir=results_dir,
+        atlas=False,
+        atlas_token=None,
+        workers=7,
+        refresh_cache=True,
+    )
+    multi_path, multi_df = _run_multi_survey_features_enrichment(
+        external_df,
+        results_dir=results_dir,
+        external_lc_dir=external_dir,
+    )
+
+    kwargs = captured["external_kwargs"]
+    assert captured["external_ids"] == ["C1"]
+    assert kwargs["run_atlas"] is False
+    assert kwargs["run_ztf"] is True
+    assert kwargs["run_gaia_epoch"] is True
+    assert kwargs["run_tess"] is True
+    assert kwargs["run_neowise"] is True
+    assert kwargs["run_ps1"] is True
+    assert kwargs["run_crts"] is True
+    assert kwargs["run_kepler"] is False
+    assert kwargs["run_aavso"] is False
+    assert kwargs["workers"] == 7
+    assert kwargs["refresh_cache"] is True
+    assert captured["multi_ids"] == ["C1"]
+    assert captured["multi_external_lc_dir"] == external_dir
+    assert external_path.exists()
+    assert multi_path.exists()
+    assert external_df["ztf_lc_n_det"].iloc[0] == 3
+    assert multi_df["ms_feature_status"].iloc[0] == "ok"
 
 
 def test_build_filter_kwargs_defaults_match_pipeline_behavior() -> None:

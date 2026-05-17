@@ -245,6 +245,12 @@ RUN_REUSE_PARAM_ATTRS = (
     "vetting_atlas_token",
     "vetting_neowise_lc",
     "vetting_input",
+    "run_external_lcs",
+    "run_multi_survey_features",
+    "external_lc_workers",
+    "external_lc_refresh_cache",
+    "external_lc_atlas",
+    "external_lc_atlas_token",
 )
 
 RUN_REUSE_CODE_FILES = (
@@ -270,6 +276,20 @@ RUN_REUSE_CODE_FILES = (
     "sed_photometry.py",
     "vetting.py",
 )
+
+PIPELINE_STAGE_CHOICES = ("full", "cluster", "home", "full-extended")
+
+
+def _stage_runs_upstream(stage: str) -> bool:
+    return str(stage) in {"full", "cluster", "full-extended"}
+
+
+def _stage_runs_downstream(stage: str) -> bool:
+    return str(stage) in {"full", "home", "full-extended"}
+
+
+def _stage_defaults_to_extended_enrichment(stage: str) -> bool:
+    return str(stage) == "full-extended"
 
 
 # Set threading environment variables before importing numpy/pandas/numba
@@ -438,6 +458,12 @@ PIPELINE_CONFIG_DEFAULTS: dict[str, Any] = {
     "vetting_atlas_token": None,
     "vetting_neowise_lc": False,
     "vetting_input": None,
+    "run_external_lcs": False,
+    "run_multi_survey_features": False,
+    "external_lc_workers": 4,
+    "external_lc_refresh_cache": False,
+    "external_lc_atlas": False,
+    "external_lc_atlas_token": None,
     "test_run": False,
     "test_run_n": 10000,
 }
@@ -570,9 +596,105 @@ def save_table(df: pd.DataFrame, path: Path) -> None:
     safe_write_parquet(df, require_parquet_path(path))
 
 
+def _run_external_lcs_enrichment(
+    df_input: pd.DataFrame,
+    *,
+    results_dir: Path,
+    atlas: bool,
+    atlas_token: str | None,
+    workers: int,
+    refresh_cache: bool,
+    overwrite: bool = False,
+) -> tuple[Path, Path, pd.DataFrame]:
+    """Fetch safe-default external light curves and write the enriched table."""
+    from malca.vetting import fetch_external_lcs
+
+    external_lc_dir = results_dir / "external_lcs"
+    external_lc_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = external_lc_dir / "external_lcs_CHECKPOINT.parquet"
+    if overwrite and checkpoint_path.exists():
+        checkpoint_path.unlink()
+    output_path = results_dir / "lc_events_external_lcs.parquet"
+
+    df_run = _ensure_candidate_id_column(_select_passing_candidates(df_input))
+    df_out = fetch_external_lcs(
+        df_run,
+        output_dir=external_lc_dir,
+        run_atlas=bool(atlas),
+        run_ztf=True,
+        run_gaia_epoch=True,
+        run_tess=True,
+        run_neowise=True,
+        run_kepler=False,
+        run_aavso=False,
+        run_ps1=True,
+        run_crts=True,
+        atlas_token=atlas_token or os.environ.get("MALCA_ATLAS_TOKEN") or os.environ.get("ATLAS_API_TOKEN"),
+        workers=int(workers or 4),
+        checkpoint_path=checkpoint_path,
+        refresh_cache=bool(refresh_cache),
+    )
+    save_table(df_out, output_path)
+    return output_path, external_lc_dir, df_out
+
+
+def _run_multi_survey_features_enrichment(
+    df_input: pd.DataFrame,
+    *,
+    results_dir: Path,
+    external_lc_dir: Path,
+) -> tuple[Path, pd.DataFrame]:
+    """Compute event-relative multi-survey features and write the enriched table."""
+    from malca.multi_survey_features import compute_multi_survey_features
+
+    output_path = results_dir / "lc_events_multi_survey_features.parquet"
+    df_run = _ensure_candidate_id_column(_select_passing_candidates(df_input))
+    df_out = compute_multi_survey_features(df_run, external_lc_dir=external_lc_dir)
+    save_table(df_out, output_path)
+    return output_path, df_out
+
+
 def _select_passing_candidates(df: pd.DataFrame) -> pd.DataFrame:
     """Return only rows with failed_any == False when that column exists."""
     return select_passing_candidates(df)
+
+
+def _candidate_result_priority(results_dir: Path, *, include_extended: bool = True) -> list[Path]:
+    """Return candidate result files from most to least enriched."""
+    paths: list[Path] = []
+    if include_extended:
+        paths.extend([
+            results_dir / "lc_events_multi_survey_features.parquet",
+            results_dir / "lc_events_external_lcs.parquet",
+        ])
+    paths.extend([
+        results_dir / "lc_events_vetted.parquet",
+        results_dir / "lc_events_spectra.parquet",
+        results_dir / "lc_events_neighbors.parquet",
+        results_dir / "lc_events_classified.parquet",
+        results_dir / "lc_events_characterized.parquet",
+        results_dir / "lc_events_filtered.parquet",
+    ])
+    return paths
+
+
+def _first_existing_candidate_result(results_dir: Path, *, include_extended: bool = True) -> Path | None:
+    for candidate_path in _candidate_result_priority(results_dir, include_extended=include_extended):
+        if candidate_path.exists():
+            return candidate_path
+    return None
+
+
+def _ensure_candidate_id_column(df: pd.DataFrame) -> pd.DataFrame:
+    """Ensure downstream enrichment has a candidate_id key when one can be inferred."""
+    if "candidate_id" in df.columns:
+        return df
+    out = df.copy()
+    if "asas_sn_id" in out.columns:
+        out["candidate_id"] = out["asas_sn_id"].astype(str)
+    elif "path" in out.columns:
+        out["candidate_id"] = out["path"].apply(lambda p: Path(str(p)).stem.split(".")[0])
+    return out
 
 
 def _branch_events_attempted_this_run(branch_detection_stats: dict[str, object] | None) -> int | None:
@@ -906,6 +1028,9 @@ def export_bundle_zip(bundle_zip: Path, out_dir: Path, include_all: bool = False
         "results/lc_events_classified.parquet",
         "results/lc_events_neighbors.parquet",
         "results/lc_events_spectra.parquet",
+        "results/lc_events_vetted.parquet",
+        "results/lc_events_external_lcs.parquet",
+        "results/lc_events_multi_survey_features.parquet",
         "results/sed_photometry.parquet",
         "results/sed_model_fits.parquet",
         "results/sed_model_curves.parquet",
@@ -924,6 +1049,7 @@ def export_bundle_zip(bundle_zip: Path, out_dir: Path, include_all: bool = False
     ]
     include_dirs = [
         "plots",
+        "results/external_lcs",
     ]
     if include_all:
         include_dirs.extend(["manifests", "tags", "paths", "gaia_cache"])
@@ -1222,6 +1348,7 @@ def main():
     g_neighbor = parser.add_argument_group("Neighbor enrichment")
     g_spectra = parser.add_argument_group("Spectra enrichment")
     g_vetting = parser.add_argument_group("Vetting")
+    g_external_lcs = parser.add_argument_group("External light-curve enrichment")
     g_general = parser.add_argument_group("General")
 
     g_manifest.add_argument("--mag-bin", nargs="+", help="Magnitude bin(s) to process. Use 'all' to process all bins automatically.")
@@ -1277,8 +1404,12 @@ def main():
         "--stage",
         type=str,
         default="full",
-        choices=["full", "cluster", "home"],
-        help="Pipeline stage: full=all steps, cluster=raw-dependent upstream, home=downstream only",
+        choices=PIPELINE_STAGE_CHOICES,
+        help=(
+            "Pipeline stage: full=standard discovery pipeline, "
+            "full-extended=full plus external LCs and multi-survey features, "
+            "cluster=raw-dependent upstream, home=downstream only"
+        ),
     )
     g_filter.add_argument(
         "--gaia-cache",
@@ -1350,6 +1481,52 @@ def main():
         action="store_false",
         help="Disable Castelli/Kurucz atmosphere fitting after SED photometry.",
     )
+    g_external_lcs.add_argument(
+        "--run-external-lcs",
+        dest="run_external_lcs",
+        action="store_true",
+        help="Run external light-curve enrichment after vetting.",
+    )
+    g_external_lcs.add_argument(
+        "--no-external-lcs",
+        dest="run_external_lcs",
+        action="store_false",
+        help="Disable external light-curve enrichment.",
+    )
+    g_external_lcs.add_argument(
+        "--run-multi-survey-features",
+        dest="run_multi_survey_features",
+        action="store_true",
+        help="Compute event-relative multi-survey features after external LC enrichment.",
+    )
+    g_external_lcs.add_argument(
+        "--no-multi-survey-features",
+        dest="run_multi_survey_features",
+        action="store_false",
+        help="Disable event-relative multi-survey feature extraction.",
+    )
+    g_external_lcs.add_argument(
+        "--external-lc-workers",
+        type=int,
+        default=None,
+        help="Workers for supported external light-curve fetchers (default: 4).",
+    )
+    g_external_lcs.add_argument(
+        "--external-lc-refresh-cache",
+        action="store_true",
+        help="Ignore cached external light-curve products.",
+    )
+    g_external_lcs.add_argument(
+        "--external-lc-atlas",
+        action="store_true",
+        help="Enable ATLAS forced photometry in external light-curve enrichment.",
+    )
+    g_external_lcs.add_argument(
+        "--external-lc-atlas-token",
+        type=str,
+        default=None,
+        help="ATLAS forced-photometry token, or set MALCA_ATLAS_TOKEN/ATLAS_API_TOKEN.",
+    )
 
     add_config_args(g_general)
     g_general.add_argument("--workers", type=int, default=WORKERS, help="Workers for parallel processing")
@@ -1398,6 +1575,18 @@ def main():
         cli_overrides["sed_sources"] = args.sed_sources
     if cli_has_option("--fit-atmosphere", "--no-fit-atmosphere"):
         cli_overrides["fit_atmosphere"] = args.fit_atmosphere
+    if cli_has_option("--run-external-lcs", "--no-external-lcs"):
+        cli_overrides["run_external_lcs"] = args.run_external_lcs
+    if cli_has_option("--run-multi-survey-features", "--no-multi-survey-features"):
+        cli_overrides["run_multi_survey_features"] = args.run_multi_survey_features
+    if cli_has_option("--external-lc-workers"):
+        cli_overrides["external_lc_workers"] = args.external_lc_workers
+    if cli_has_option("--external-lc-refresh-cache"):
+        cli_overrides["external_lc_refresh_cache"] = args.external_lc_refresh_cache
+    if cli_has_option("--external-lc-atlas"):
+        cli_overrides["external_lc_atlas"] = args.external_lc_atlas
+    if cli_has_option("--external-lc-atlas-token"):
+        cli_overrides["external_lc_atlas_token"] = args.external_lc_atlas_token
 
     apply_config(
         args,
@@ -1419,8 +1608,13 @@ def main():
         args.mag_bin = list(reversed(MAG_BINS))
 
     stage = str(args.stage)
-    run_upstream = stage in {"full", "cluster"}
-    run_downstream = stage in {"full", "home"}
+    if _stage_defaults_to_extended_enrichment(stage):
+        if not cli_has_option("--no-external-lcs"):
+            args.run_external_lcs = True
+        if not cli_has_option("--no-multi-survey-features"):
+            args.run_multi_survey_features = True
+    run_upstream = _stage_runs_upstream(stage)
+    run_downstream = _stage_runs_downstream(stage)
 
     if stage != "home" and not args.mag_bin:
         parser.error("--mag-bin is required unless --stage home is used.")
@@ -1722,6 +1916,13 @@ def main():
             "sources": args.sed_sources,
             "fit_atmosphere": args.fit_atmosphere,
         },
+        "extended_enrichment": {
+            "run_external_lcs": args.run_external_lcs,
+            "run_multi_survey_features": args.run_multi_survey_features,
+            "external_lc_workers": args.external_lc_workers,
+            "external_lc_refresh_cache": args.external_lc_refresh_cache,
+            "external_lc_atlas": args.external_lc_atlas,
+        },
         "downstream_pass_logic": "external validations and downstream products run on filter passers (failed_any == False) by default",
     }
 
@@ -1924,6 +2125,12 @@ def main():
             "vetting_min_score": args.vetting_min_score,
             "vetting_simbad_radius": args.vetting_simbad_radius,
             "vetting_asassn_radius": args.vetting_asassn_radius,
+            # Step 13b/13c: Extended external enrichment
+            "run_external_lcs": args.run_external_lcs,
+            "run_multi_survey_features": args.run_multi_survey_features,
+            "external_lc_workers": args.external_lc_workers,
+            "external_lc_refresh_cache": args.external_lc_refresh_cache,
+            "external_lc_atlas": args.external_lc_atlas,
             # File paths
             "index_root": str(args.index_root),
             "lc_root": str(args.lc_root),
@@ -3364,6 +3571,92 @@ def main():
 
                 traceback.print_exc()
 
+    external_lcs_output = results_dir / "lc_events_external_lcs.parquet"
+    multi_survey_output = results_dir / "lc_events_multi_survey_features.parquet"
+    external_lc_dir = results_dir / "external_lcs"
+
+    # Step 13b: External light-curve enrichment (explicit/extended only)
+    if run_downstream and args.run_external_lcs:
+        log("\n=== Step 13b: External light-curve enrichment ===")
+        external_started = time.perf_counter()
+        try:
+            external_input = _first_existing_candidate_result(results_dir, include_extended=False)
+            if external_input is None or not external_input.exists():
+                log("Warning: no suitable input found for external light-curve enrichment, skipping")
+            else:
+                df_external_in = load_table(external_input)
+                df_external_in = _select_passing_candidates(df_external_in)
+                log(f"External LC input: {external_input} ({len(df_external_in)} passing candidates)")
+                if df_external_in.empty:
+                    log("No passing candidates for external light-curve enrichment")
+                else:
+                    external_lcs_output, external_lc_dir, df_external = _run_external_lcs_enrichment(
+                        df_external_in,
+                        results_dir=results_dir,
+                        atlas=args.external_lc_atlas,
+                        atlas_token=args.external_lc_atlas_token,
+                        workers=args.external_lc_workers or 4,
+                        refresh_cache=args.external_lc_refresh_cache,
+                        overwrite=args.overwrite,
+                    )
+                    summary["external_lc_stats"] = {
+                        "rows_input": int(len(df_external_in)),
+                        "rows_output": int(len(df_external)),
+                        "output": str(external_lcs_output),
+                        "output_dir": str(external_lc_dir),
+                        "atlas": bool(args.external_lc_atlas),
+                        "workers": int(args.external_lc_workers or 4),
+                    }
+                    with open(run_summary_file, "w") as f:
+                        json.dump(summary, f, indent=2, default=str)
+                    log(f"External light-curve output: {external_lcs_output}")
+                    log(f"Step 13b completed in {time.perf_counter() - external_started:.1f}s")
+
+        except Exception as e:
+            print(f"Error in external light-curve enrichment step: {e}")
+            if args.verbose:
+                traceback.print_exc()
+
+    # Step 13c: Multi-survey feature extraction (explicit/extended only)
+    if run_downstream and args.run_multi_survey_features:
+        log("\n=== Step 13c: Multi-survey feature extraction ===")
+        multi_started = time.perf_counter()
+        try:
+            if external_lcs_output.exists():
+                multi_input = external_lcs_output
+            else:
+                multi_input = _first_existing_candidate_result(results_dir, include_extended=False)
+
+            if multi_input is None or not multi_input.exists():
+                log("Warning: no suitable input found for multi-survey features, skipping")
+            else:
+                df_multi_in = load_table(multi_input)
+                df_multi_in = _select_passing_candidates(df_multi_in)
+                log(f"Multi-survey input: {multi_input} ({len(df_multi_in)} passing candidates)")
+                if df_multi_in.empty:
+                    log("No passing candidates for multi-survey feature extraction")
+                else:
+                    multi_survey_output, df_multi = _run_multi_survey_features_enrichment(
+                        df_multi_in,
+                        results_dir=results_dir,
+                        external_lc_dir=external_lc_dir,
+                    )
+                    summary["multi_survey_feature_stats"] = {
+                        "rows_input": int(len(df_multi_in)),
+                        "rows_output": int(len(df_multi)),
+                        "output": str(multi_survey_output),
+                        "external_lc_dir": str(external_lc_dir),
+                    }
+                    with open(run_summary_file, "w") as f:
+                        json.dump(summary, f, indent=2, default=str)
+                    log(f"Multi-survey feature output: {multi_survey_output}")
+                    log(f"Step 13c completed in {time.perf_counter() - multi_started:.1f}s")
+
+        except Exception as e:
+            print(f"Error in multi-survey feature extraction step: {e}")
+            if args.verbose:
+                traceback.print_exc()
+
     # Step 14: Auto-import into review DB
     if run_downstream and has_post_filter_output:
         log("\n=== Step 14: Importing candidates into review DB ===")
@@ -3373,18 +3666,7 @@ def main():
 
 
             # Find best available results file
-            _import_file = None
-            for _candidate_path in [
-                results_dir / "lc_events_vetted.parquet",
-                results_dir / "lc_events_spectra.parquet",
-                results_dir / "lc_events_neighbors.parquet",
-                results_dir / "lc_events_classified.parquet",
-                results_dir / "lc_events_characterized.parquet",
-                results_dir / "lc_events_filtered.parquet",
-            ]:
-                if _candidate_path.exists():
-                    _import_file = _candidate_path
-                    break
+            _import_file = _first_existing_candidate_result(results_dir, include_extended=True)
 
             if _import_file is not None:
                 conn = db_connect(review_db_path)

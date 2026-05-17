@@ -11,6 +11,7 @@ from malca.review.store import (
     db_connect,
     export_review_subset_bundle,
     get_candidate_payload,
+    import_candidates,
     merge_candidate_results,
     merge_review_databases,
     merge_vetting_results,
@@ -49,6 +50,38 @@ def _seed_review_db(path: Path, candidates: list[dict[str, object]], reviews: li
                 ),
             )
         conn.commit()
+
+
+def test_import_candidates_preserves_extended_enrichment_payload(tmp_path: Path) -> None:
+    db_path = tmp_path / "review.db"
+    df = pd.DataFrame([
+        {
+            "candidate_id": "C1",
+            "asas_sn_id": "C1",
+            "failed_any": False,
+            "simbad_main_id": "Example Star",
+            "ztf_lc_n_det": 12,
+            "neowise_n_epochs": 4,
+            "ms_feature_status": "ok",
+            "ms_event_type": "dip",
+        }
+    ])
+
+    with db_connect(db_path) as conn:
+        import_candidates(
+            conn,
+            df,
+            source_path=str(tmp_path),
+            characterize_before_import=False,
+            vet_before_import=False,
+        )
+        payload = get_candidate_payload(conn, "C1")
+
+    assert payload["simbad_main_id"] == "Example Star"
+    assert payload["ztf_lc_n_det"] == 12
+    assert payload["neowise_n_epochs"] == 4
+    assert payload["ms_feature_status"] == "ok"
+    assert payload["ms_event_type"] == "dip"
 
 
 def test_merge_review_databases_prefers_newer_updated_at(tmp_path: Path) -> None:
