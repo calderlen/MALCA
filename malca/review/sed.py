@@ -645,6 +645,9 @@ def build_sed_figure(
         fit_df = pd.DataFrame(model_fit_rows)
     else:
         fit_df = pd.DataFrame()
+    corrected_modes = {"corrected", "ism-corrected", "ism_corrected", "dereddened"}
+    model_is_comparable = mode == "both" or mode in corrected_modes
+
     if not fit_df.empty:
         fit_status = str(fit_df.iloc[0].get("status") or "").strip()
         fit_warning = str(fit_df.iloc[0].get("warning") or "").strip()
@@ -659,11 +662,15 @@ def build_sed_figure(
                 details.append(f"chi2_nu={chi2_nu:.2g}")
             if n_fit is not None:
                 details.append(f"n={int(n_fit)}")
-            warnings.append("CK fit: " + ", ".join(details) if details else "CK fit available.")
+            if model_is_comparable:
+                warnings.append("CK fit: " + ", ".join(details) if details else "CK fit available.")
+            else:
+                summary = ", ".join(details) if details else "available"
+                warnings.append(f"CK fit is dereddened ({summary}); switch to ISM-corrected or Both to compare it with the points.")
         elif fit_status:
             warnings.append(f"CK fit: {fit_status}" + (f" ({fit_warning})" if fit_warning else ""))
 
-    if not model_df.empty and y_col in model_df.columns and "wavelength_angstrom" in model_df.columns:
+    if model_is_comparable and not model_df.empty and y_col in model_df.columns and "wavelength_angstrom" in model_df.columns:
         curve = model_df.copy()
         curve["x"] = pd.to_numeric(curve["wavelength_angstrom"], errors="coerce")
         curve["y"] = pd.to_numeric(curve[y_col], errors="coerce")
@@ -671,7 +678,7 @@ def build_sed_figure(
         if not curve.empty:
             curve = curve.sort_values("x")
             teff = _safe_float(curve.iloc[0].get("teff_k"))
-            name = "Castelli/Kurucz fit"
+            name = "Castelli/Kurucz dereddened fit"
             if teff is not None:
                 name += f" ({teff:.0f} K)"
             model_color = "#111827" if str(theme or "black").strip().lower() == "white" else "#f8fafc"

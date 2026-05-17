@@ -5188,7 +5188,7 @@ def create_layout():
                                             {'label': ' ISM-corrected', 'value': 'corrected'},
                                             {'label': ' Both', 'value': 'both'},
                                         ],
-                                        value='observed',
+                                        value='corrected',
                                         inline=True,
                                         inputStyle={'marginRight': '3px'},
                                         labelStyle={'fontSize': '10px', 'marginRight': '10px'},

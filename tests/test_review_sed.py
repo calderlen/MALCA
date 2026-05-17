@@ -316,7 +316,29 @@ def test_sed_model_rows_roundtrip_review_db_and_overlay(tmp_path: Path) -> None:
         ]),
         model_curve_rows=loaded_curves,
         model_fit_rows=loaded_fits,
+        extinction_mode="corrected",
     )
 
-    assert any("Castelli/Kurucz fit" in str(trace.name) for trace in fig.data)
+    assert any("Castelli/Kurucz" in str(trace.name) for trace in fig.data)
     assert any("CK fit" in warning for warning in warnings)
+
+    observed_fig, _rows, observed_warnings = build_sed_figure(
+        {"candidate_id": "cand-6", "distance_gspphot": 1000.0},
+        external_rows=pd.DataFrame([
+            {
+                "candidate_id": "cand-6",
+                "source": "Pan-STARRS",
+                "band": "g",
+                "mag": 17.2,
+                "mag_system": "AB",
+                "lambda_eff_angstrom": 4810.0,
+                "lambda_l_lambda": 1.5e33,
+            }
+        ]),
+        model_curve_rows=loaded_curves,
+        model_fit_rows=loaded_fits,
+        extinction_mode="observed",
+    )
+
+    assert not any("Castelli/Kurucz" in str(trace.name) for trace in observed_fig.data)
+    assert any("dereddened" in warning for warning in observed_warnings)
