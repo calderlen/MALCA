@@ -29,6 +29,7 @@ from malca.config import (
     LEGACY_GAIA_LOCAL_CATALOG,
     VSX_CROSSMATCH_PATH,
 )
+from malca.candidates import select_passing_candidates_if_present
 from malca.gaia_ids import normalize_gaia_source_ids
 from malca.table_io import read_parquet_table
 
@@ -171,11 +172,8 @@ def _extract_gaia_ids(
     print(f"Loading candidates from {input_path}...")
     df = read_parquet_table(input_path)
 
-    if only_passers and ("failed_any" in df.columns):
-        before = len(df)
-        failed = df["failed_any"].fillna(False).astype(bool)
-        df = df.loc[~failed].copy()
-        print(f"Using passers only (failed_any=False): {len(df)}/{before} rows")
+    if only_passers:
+        df = select_passing_candidates_if_present(df, label="rows", printer=print)
 
     if "gaia_id" in df.columns:
         # Already has gaia_id (e.g. from a previous merge)
@@ -477,11 +475,16 @@ def main():
         default=GAIA_CHUNK_SIZE,
         help=f"Number of Gaia IDs per TAP query (default: {GAIA_CHUNK_SIZE})",
     )
+    parser.add_argument(
+        "--all-candidates",
+        action="store_true",
+        help="Fetch Gaia rows for all input candidates instead of only failed_any=False passers.",
+    )
 
     args = parser.parse_args()
 
     # Extract Gaia IDs from input + crossmatch
-    gaia_ids = _extract_gaia_ids(args.input, args.vsx_crossmatch)
+    gaia_ids = _extract_gaia_ids(args.input, args.vsx_crossmatch, only_passers=not args.all_candidates)
 
     if not gaia_ids:
         print("No Gaia IDs found. Nothing to fetch.")

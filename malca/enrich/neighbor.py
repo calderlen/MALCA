@@ -10,6 +10,7 @@ from astropy.table import Table
 from astroquery.xmatch import XMatch
 from tqdm.auto import tqdm
 
+from malca.candidates import select_passing_candidates_if_present
 from malca.config import NEIGHBOR_RADIUS_ARCSEC, NEIGHBOR_CHUNK_SIZE
 from malca.table_io import read_parquet_table
 
@@ -231,9 +232,12 @@ def main() -> None:
     parser.add_argument("--radius-arcsec", type=float, default=NEIGHBOR_RADIUS_ARCSEC)
     parser.add_argument("--chunk-size", type=int, default=NEIGHBOR_CHUNK_SIZE)
     parser.add_argument("--cache", type=Path, default=None)
+    parser.add_argument("--all-candidates", action="store_true", help="Query all input rows instead of only failed_any=False passers")
     args = parser.parse_args()
 
     df = read_parquet_table(args.input)
+    if not args.all_candidates:
+        df = select_passing_candidates_if_present(df, printer=print)
     run_neighbor_enrichment(
         df,
         out_dir=args.out_dir,

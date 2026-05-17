@@ -353,3 +353,60 @@ def test_apply_filters_home_validations_only_check_upstream_passers(
     row_d = by_path.loc["/tmp/d.dat2"]
     assert bool(row_d["failed_gaia_pm"]) is True
     assert bool(row_d["failed_any"]) is True
+
+
+def test_apply_filters_external_validations_default_to_upstream_passers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    df = pd.DataFrame(
+        {
+            "path": ["/tmp/a.dat2", "/tmp/b.dat2"],
+            "gaia_id": ["1", "2"],
+            "failed_posterior_strength": [False, True],
+            "failed_any": [False, True],
+        }
+    )
+    checked: dict[str, list[str]] = {}
+
+    def fake_periodic_catalog(subset: pd.DataFrame, **_kwargs) -> pd.DataFrame:
+        checked["periodic_catalog"] = subset["path"].tolist()
+        out = subset.copy()
+        out["catalog_match"] = False
+        out["catalog_period"] = np.nan
+        out["catalog_class"] = ""
+        out["catalog_source"] = ""
+        out["period_sources"] = ""
+        out["period_n_sources"] = 0
+        out["period_consensus_days"] = np.nan
+        out["period_consensus_agree"] = False
+        out["period_conflict_flag"] = False
+        out["period_consensus_support"] = np.nan
+        out["period_primary_source"] = ""
+        out["period_source_periods"] = ""
+        for src in ("gaia_eb", "vsx", "asassn_var", "ztf_periodic", "ogle"):
+            out[f"period_{src}_match"] = False
+            out[f"period_{src}_days"] = np.nan
+            out[f"period_{src}_class"] = ""
+            out[f"period_{src}_sep_arcsec"] = np.nan
+        return out
+
+    monkeypatch.setattr(post_filter, "validate_periodic_catalog", fake_periodic_catalog)
+
+    out = post_filter.apply_filters(
+        df,
+        apply_evidence_strength=False,
+        apply_significant_detection=False,
+        apply_run_robustness=False,
+        apply_morphology=False,
+        apply_score=False,
+        apply_periodic_catalog_validation=True,
+        apply_gaia_ruwe_validation=False,
+        apply_gaia_pm_validation=False,
+        apply_periodicity_validation=False,
+        show_tqdm=False,
+    )
+
+    assert checked["periodic_catalog"] == ["/tmp/a.dat2"]
+    by_path = out.set_index("path")
+    assert str(by_path.loc["/tmp/b.dat2", "catalog_source"]) == ""
+    assert bool(by_path.loc["/tmp/b.dat2", "failed_periodic_catalog"]) is False

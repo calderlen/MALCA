@@ -93,6 +93,7 @@ from malca.config import (
 )
 from malca.gaia_ids import parse_gaia_source_id
 from malca.utils import batch_tap_crossmatch
+from malca.candidates import select_passing_candidates_if_present
 from malca.table_io import read_parquet_table, write_parquet_table
 
 
@@ -4414,6 +4415,7 @@ def main():
     g_io.add_argument("input", type=Path, help="Input Parquet with candidates (needs ra, dec columns)")
     g_io.add_argument("-o", "--output", type=Path, default=None, help="Output Parquet path (default: <input>_vetted.parquet)")
     g_io.add_argument("--min-score", type=float, default=None, help="Only vet candidates with interest_score >= this value")
+    g_io.add_argument("--all-candidates", action="store_true", help="Vet all input rows instead of only failed_any=False passers")
     g_radii.add_argument("--simbad-radius", type=float, default=SIMBAD_RADIUS_ARCSEC, help=f"SIMBAD search radius in arcsec (default: {SIMBAD_RADIUS_ARCSEC})")
     g_radii.add_argument("--asassn-radius", type=float, default=ASASSN_VAR_RADIUS_ARCSEC, help=f"ASAS-SN crossmatch radius in arcsec (default: {ASASSN_VAR_RADIUS_ARCSEC})")
     g_radii.add_argument("--microlens-radius", type=float, default=OGLE_MICROLENS_RADIUS_ARCSEC, help=f"Microlensing catalog crossmatch radius in arcsec (default: {OGLE_MICROLENS_RADIUS_ARCSEC})")
@@ -4498,6 +4500,8 @@ def main():
         before = len(df)
         df = df[df["interest_score"] >= args.min_score].copy()
         print(f"Filtered to {len(df)} candidates with score >= {args.min_score} (from {before})")
+    if not args.all_candidates:
+        df = select_passing_candidates_if_present(df, printer=print)
 
     if only_modules is not None:
         print("Running only vetting modules: " + ", ".join(sorted(only_modules)))

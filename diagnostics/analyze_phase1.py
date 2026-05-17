@@ -261,7 +261,7 @@ def main():
     phase1b_runs = {
         "1b_baseline": "Baseline",
         "1b_short_gp": "Shorter GP Timescale (~100d)",
-        "1b_trend_baseline": "Trend Baseline (no GP)",
+        "1b_median_baseline": "Per-Camera Median Baseline (no GP)",
         "1b_masked_gp": "Masked GP",
     }
     

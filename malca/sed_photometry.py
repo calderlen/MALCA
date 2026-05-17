@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from malca.candidates import select_passing_candidates_if_present
 from malca.sed_model import (
     SED_MODEL_CURVE_COLUMNS,
     SED_MODEL_FIT_COLUMNS,
@@ -69,6 +70,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="Only write SED photometry; skip Castelli/Kurucz atmosphere fitting.",
     )
+    parser.add_argument(
+        "--all-candidates",
+        action="store_true",
+        help="Fetch SED photometry for all input rows instead of only failed_any=False passers.",
+    )
     return parser
 
 
@@ -115,6 +121,8 @@ def run(args: argparse.Namespace) -> Path:
 
     df = _read_candidate_table(input_path)
     df = _ensure_candidate_id(df)
+    if not args.all_candidates:
+        df = select_passing_candidates_if_present(df, printer=print)
     requested_sources = args.sources
     print(f"Loaded {len(df)} candidates from {input_path}")
     print(f"SED sources: {', '.join(resolve_sed_sources(requested_sources))}")

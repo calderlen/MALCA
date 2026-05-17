@@ -58,6 +58,7 @@ from malca.config import (
     DEFAULT_CACHE_DIR, LEGACY_DEFAULT_CACHE_DIR, GAIA_CACHE_FILE,
     GAIA_LOCAL_CATALOG, LEGACY_GAIA_CACHE_FILE, LEGACY_GAIA_LOCAL_CATALOG,
 )
+from malca.candidates import select_passing_candidates_if_present
 from malca.gaia_ids import normalize_gaia_source_ids, parse_gaia_source_id
 from malca.table_io import read_parquet_table, write_parquet_table
 
@@ -2219,6 +2220,7 @@ def main():
     parser.add_argument("--no-characterize-clusters", dest="characterize_clusters", action="store_false", help="Disable open-cluster enrichment")
     parser.add_argument("--characterize-unwise", dest="characterize_unwise", action="store_true", help="Enable unWISE/unTimely variability enrichment (default: disabled)")
     parser.add_argument("--no-characterize-unwise", dest="characterize_unwise", action="store_false", help="Disable unWISE variability enrichment")
+    parser.add_argument("--all-candidates", action="store_true", help="Characterize all input rows instead of only failed_any=False passers")
     parser.set_defaults(
         characterize_banyan=True,
         characterize_iphas=True,
@@ -2232,6 +2234,8 @@ def main():
     # Load input
     print(f"Loading {args.input}...")
     df = read_parquet_table(args.input)
+    if not args.all_candidates:
+        df = select_passing_candidates_if_present(df, printer=print)
         
     df_char = characterize_candidates_df(
         df,

@@ -42,6 +42,7 @@ from malca.config import (
     CLASSIFY_DISK_THRESHOLD, CLASSIFY_MS_EB_REJECTION, CLASSIFY_MS_CV_REJECTION,
     CLASSIFY_IPHAS_RADIUS_ARCSEC, CLASSIFY_PS1_RADIUS_ARCSEC,
 )
+from malca.candidates import select_passing_candidates_if_present
 from malca.table_io import read_parquet_table, write_parquet_table
 from malca.config import VIZIER_TAP_URL
 from malca.utils import batch_tap_crossmatch
@@ -632,12 +633,15 @@ def main():
     parser.add_argument("--skip-starspot", action="store_true", help="Skip starspot check")
     parser.add_argument("--enable-iphas", dest="iphas", action="store_true", help="Query IPHAS for H-alpha photometry (slow)")
     parser.add_argument("--enable-ps1", dest="ps1", action="store_true", help="Query PS1 for grizy photometry (slow)")
+    parser.add_argument("--all-candidates", action="store_true", help="Classify all input rows instead of only failed_any=False passers")
     
     args = parser.parse_args()
     
     # Load
     print(f"Loading {args.input}...")
     df = read_parquet_table(args.input)
+    if not args.all_candidates:
+        df = select_passing_candidates_if_present(df, printer=print)
     
     print(f"Loaded {len(df)} events")
     

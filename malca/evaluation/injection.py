@@ -29,6 +29,7 @@ from malca.baseline import (
     global_median_baseline,
     per_camera_median_baseline,
     per_camera_gp_baseline,
+    per_camera_gp_baseline_masked,
 )
 from malca.cli_config import add_config_args, apply_config, namespace_keys
 from malca.config import INJECTION_CHUNK_SIZE
@@ -97,6 +98,8 @@ INJECTION_CONFIG_DEFAULTS = {
 
 
 _GLOBAL: dict[str, object] = {}
+
+BASELINE_CHOICES = ("gp", "gp_masked", "global_median", "per_camera_median")
 
 
 def skewnormal_dip(
@@ -173,6 +176,7 @@ def inject_dip(
     amplitude: float,
     skewness: float = 0.0,
     mag_err_poly: np.poly1d | None = None,
+    rng: np.random.Generator | None = None,
     mag_col: str = "mag",
     time_col: str = "JD",
     err_col: str = "error",
@@ -205,9 +209,25 @@ def inject_dip(
         fallback = 0.01
     sigma_i = np.where(valid_mask, sigma_i, fallback)
 
-    noise = np.random.normal(0.0, sigma_i, size=len(t))
+    rng = np.random.default_rng() if rng is None else rng
+    noise = rng.normal(0.0, sigma_i, size=len(t))
     df_out[mag_col] = mag_old + dip_profile + noise
     return df_out
+
+
+def _baseline_func_from_name(name: str):
+    baseline_map = {
+        "gp": per_camera_gp_baseline,
+        "gp_masked": per_camera_gp_baseline_masked,
+        "global_median": global_median_baseline,
+        "per_camera_median": per_camera_median_baseline,
+    }
+    try:
+        return baseline_map[str(name)]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unsupported baseline_func {name!r}; expected one of {', '.join(BASELINE_CHOICES)}"
+        ) from exc
 
 
 def _get_id_col(df: pd.DataFrame) -> str:
@@ -263,12 +283,6 @@ def select_control_sample(
 
 
 def _build_detection_kwargs(args: argparse.Namespace) -> dict:
-    baseline_map = {
-        "gp": per_camera_gp_baseline,
-        "global_median": global_median_baseline,
-        "per_camera_median": per_camera_median_baseline,
-    }
-
     # Build baseline_kwargs from CLI args
     baseline_kwargs = dict(
         S0=args.baseline_s0,
@@ -305,7 +319,7 @@ def _build_detection_kwargs(args: argparse.Namespace) -> dict:
         run_max_gap_days=args.run_max_gap_days,
         run_min_duration_days=args.run_min_duration_days,
         compute_event_prob=(not args.no_event_prob),
-        baseline_func=baseline_map.get(args.baseline_func, per_camera_gp_baseline),
+        baseline_func=_baseline_func_from_name(args.baseline_func),
         baseline_kwargs=baseline_kwargs,
     )
 
@@ -461,7 +475,15 @@ def _simulate_trial(
             # Prefix all keys with pre_injection_
             pre_injection_result = {f"pre_injection_{k}": v for k, v in pre_inj.items()}
 
-        df_injected = inject_dip(df, t_center, duration, amplitude, skewness, mag_err_poly)
+        df_injected = inject_dip(
+            df,
+            t_center,
+            duration,
+            amplitude,
+            skewness,
+            mag_err_poly,
+            rng=rng,
+        )
         detection_result = _default_detection_func(
             df_injected,
             detection_kwargs,
@@ -687,9 +709,10 @@ def run_injection_recovery(
         nonlocal results
         if not results:
             return
-        if writer is not None:
-            writer.write_chunk(results)
-        if is_final and writer is not None:
+        if writer is None:
+            return
+        writer.write_chunk(results)
+        if is_final:
             writer.close()
         results = []
 
@@ -1640,6 +1663,7 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
     )
     g_io = parser.add_argument_group("Input / output")
     g_injection = parser.add_argument_group("Injection parameters")
+    g_detection = parser.add_argument_group("Detection")
     g_workers = parser.add_argument_group("Workers & chunks")
     g_postprocess = parser.add_argument_group("Postprocess")
 
@@ -1671,6 +1695,47 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
     g_injection.add_argument("--skew-max", type=float, default=0.5)
     g_injection.add_argument("--mag-err-order", type=int, default=5)
     g_injection.add_argument("--mag-err-sample", type=int, default=100)
+
+    g_detection.add_argument("--trigger-mode", choices=["posterior_prob", "logbf"], default=TRIGGER_MODE)
+    g_detection.add_argument("--logbf-threshold-dip", type=float, default=LOGBF_THRESHOLD_DIP)
+    g_detection.add_argument("--logbf-threshold-jump", type=float, default=LOGBF_THRESHOLD_JUMP)
+    g_detection.add_argument("--significance-threshold", type=float, default=SIGNIFICANCE_THRESHOLD)
+    g_detection.add_argument("--p-points", type=int, default=P_POINTS)
+    g_detection.add_argument("--p-min-dip", type=float, default=None)
+    g_detection.add_argument("--p-max-dip", type=float, default=None)
+    g_detection.add_argument("--p-min-jump", type=float, default=None)
+    g_detection.add_argument("--p-max-jump", type=float, default=None)
+    g_detection.add_argument("--mag-points", type=int, default=MAG_POINTS)
+    g_detection.add_argument("--mag-min-dip", type=float, default=None)
+    g_detection.add_argument("--mag-max-dip", type=float, default=None)
+    g_detection.add_argument("--mag-min-jump", type=float, default=None)
+    g_detection.add_argument("--mag-max-jump", type=float, default=None)
+    g_detection.add_argument("--run-min-points", type=int, default=RUN_MIN_POINTS)
+    g_detection.add_argument("--run-max-gap-points", type=int, default=RUN_MAX_GAP_POINTS)
+    g_detection.add_argument("--run-max-gap-days", type=float, default=None)
+    g_detection.add_argument("--run-min-duration-days", type=float, default=0.0)
+    g_detection.add_argument("--baseline-func", choices=BASELINE_CHOICES, default=BASELINE_FUNC)
+    g_detection.add_argument("--baseline-s0", type=float, default=BASELINE_S0)
+    g_detection.add_argument("--baseline-w0", type=float, default=BASELINE_W0)
+    g_detection.add_argument("--baseline-q", type=float, default=BASELINE_Q)
+    g_detection.add_argument("--baseline-jitter", type=float, default=BASELINE_JITTER)
+    g_detection.add_argument("--baseline-sigma-floor", type=float, default=None)
+    g_detection.add_argument("--no-event-prob", action="store_true", default=False)
+    g_detection.add_argument("--min-mag-offset", type=float, default=MIN_MAG_OFFSET)
+    g_detection.add_argument(
+        "--measure-pre-injection",
+        dest="measure_pre_injection",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Measure the detection rate before injecting each synthetic dip.",
+    )
+    g_detection.add_argument(
+        "--no-measure-pre-injection",
+        dest="measure_pre_injection",
+        action="store_false",
+        default=argparse.SUPPRESS,
+        help="Skip pre-injection detection measurement.",
+    )
 
     g_workers.add_argument("--workers", type=int, default=WORKERS, help="Parallel workers.")
     g_workers.add_argument("--task-size", type=int, default=50, help="Trials per worker task.")

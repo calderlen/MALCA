@@ -846,7 +846,11 @@ def _ensure_gaia_cache_for_validation(
             tqdm.write("[gaia_cache] No gaia_id column; skipping Gaia auto-fetch")
         return
 
-    eligible_mask = _passing_mask_from_failures(df) if passers_only else pd.Series(True, index=df.index, dtype=bool)
+    eligible_mask = (
+        _passing_mask_from_failures(df, ignore_labels=HOME_ONLY_FILTER_LABELS)
+        if passers_only
+        else pd.Series(True, index=df.index, dtype=bool)
+    )
     gaia_ids = _gaia_ids_from_frame(df, eligible_mask)
     if not gaia_ids:
         if show_tqdm:
@@ -2702,7 +2706,8 @@ def apply_filters(
     periodic_catalog_use_vsx_period: bool = True,
     periodic_catalog_use_ogle_periodic: bool = True,
     periodic_catalog_vsx_crossmatch_csv: str | Path = VSX_CROSSMATCH_PATH,
-    home_passers_only: bool = False,
+    external_validations_passers_only: bool = True,
+    home_passers_only: bool | None = None,
     # General
     show_tqdm: bool = True,
     verbose: bool = False,
@@ -2735,9 +2740,11 @@ def apply_filters(
         filters already applied before RUWE/PM
     apply_periodic_catalog_validation : bool
         Apply periodic-catalog evidence and period-consensus validation
-    home_passers_only : bool
-        During home-stage revalidation, run home-only validations only on rows
-        with no upstream failed_* flags while keeping the full output table.
+    external_validations_passers_only : bool
+        Run external validators only on rows with no upstream failed_* flags
+        while keeping the full output table.
+    home_passers_only : bool | None
+        Deprecated alias for external_validations_passers_only.
     show_tqdm : bool
         Show progress bars
     verbose : bool
@@ -2752,6 +2759,8 @@ def apply_filters(
     """
     df_filtered = df.copy()
     n_start = len(df_filtered)
+    if home_passers_only is not None:
+        external_validations_passers_only = bool(home_passers_only)
 
     def _merge_columns_by_path(
         df_base: pd.DataFrame,
@@ -2895,26 +2904,26 @@ def apply_filters(
     subset_filter_configs: dict[str, dict[str, object]] = {
         "periodic_catalog": {
             "failure_indicator_col": "catalog_match",
-            "clear_defaults": HOME_ONLY_CLEAR_DEFAULTS["periodic_catalog"] if home_passers_only else None,
+            "clear_defaults": HOME_ONLY_CLEAR_DEFAULTS["periodic_catalog"] if external_validations_passers_only else None,
             "eligible_mask_fn": (
                 lambda frame: _passing_mask_from_failures(frame, ignore_labels=HOME_ONLY_FILTER_LABELS)
-                if home_passers_only else pd.Series(True, index=frame.index, dtype=bool)
+                if external_validations_passers_only else pd.Series(True, index=frame.index, dtype=bool)
             ),
         },
         "gaia_ruwe": {
             "failure_indicator_col": "high_ruwe_flag",
-            "clear_defaults": HOME_ONLY_CLEAR_DEFAULTS["gaia_ruwe"] if home_passers_only else None,
+            "clear_defaults": HOME_ONLY_CLEAR_DEFAULTS["gaia_ruwe"] if external_validations_passers_only else None,
             "eligible_mask_fn": (
                 lambda frame: _passing_mask_from_failures(frame, ignore_labels=HOME_ONLY_FILTER_LABELS)
-                if home_passers_only else pd.Series(True, index=frame.index, dtype=bool)
+                if external_validations_passers_only else pd.Series(True, index=frame.index, dtype=bool)
             ),
         },
         "gaia_pm": {
             "failure_indicator_col": "high_pm_flag",
-            "clear_defaults": HOME_ONLY_CLEAR_DEFAULTS["gaia_pm"] if home_passers_only else None,
+            "clear_defaults": HOME_ONLY_CLEAR_DEFAULTS["gaia_pm"] if external_validations_passers_only else None,
             "eligible_mask_fn": (
                 lambda frame: _passing_mask_from_failures(frame, ignore_labels=HOME_ONLY_FILTER_LABELS)
-                if home_passers_only else pd.Series(True, index=frame.index, dtype=bool)
+                if external_validations_passers_only else pd.Series(True, index=frame.index, dtype=bool)
             ),
         },
         "periodicity": {
@@ -2991,11 +3000,14 @@ def apply_filters(
                         (apply_gaia_ruwe_validation and not gaia_flag_only)
                         or (apply_gaia_pm_validation and not gaia_pm_flag_only)
                     )
+                    gaia_cache_passers_only = external_validations_passers_only or (
+                        gaia_fetch_passers_only and not strict_gaia_cache
+                    )
                     _ensure_gaia_cache_for_validation(
                         df_filtered,
                         catalog_path=gaia_catalog_path,
                         chunk_size=gaia_fetch_chunk_size,
-                        passers_only=(gaia_fetch_passers_only and not strict_gaia_cache),
+                        passers_only=gaia_cache_passers_only,
                         strict=strict_gaia_cache,
                         show_tqdm=show_tqdm,
                     )
@@ -3216,8 +3228,12 @@ Example usage:
                         help="Disable OGLE period evidence in periodic-catalog validation")
     g_periodic_catalog.add_argument("--periodic-catalog-reject", action="store_true",
                         help="Reject catalog matches (default: flag only)")
-    g_periodic_catalog.add_argument("--home-passers-only", action="store_true",
-                        help="Run home-only validations only on rows that already pass upstream filters")
+    g_periodic_catalog.add_argument("--external-validations-passers-only", dest="external_validations_passers_only", action="store_true", default=True,
+                        help="Run external validations only on rows that already pass upstream filters (default)")
+    g_periodic_catalog.add_argument("--external-validations-all-candidates", dest="external_validations_passers_only", action="store_false",
+                        help="Run external validations on every row, including rows already failed by upstream filters")
+    g_periodic_catalog.add_argument("--home-passers-only", dest="external_validations_passers_only", action="store_true",
+                        help=argparse.SUPPRESS)
 
     g_general.add_argument("--no-progress", action="store_true", help="Disable progress bars")
     g_general.add_argument("-v", "--verbose", action="store_true", help="Print per-filter summaries (default: off)")
@@ -3395,7 +3411,7 @@ Example usage:
         periodic_catalog_use_vsx_period=not args.periodic_catalog_no_vsx,
         periodic_catalog_use_ogle_periodic=not args.periodic_catalog_no_ogle,
         periodic_catalog_vsx_crossmatch_csv=args.periodic_catalog_vsx_crossmatch,
-        home_passers_only=args.home_passers_only,
+        external_validations_passers_only=args.external_validations_passers_only,
         # General
         show_tqdm=not args.no_progress,
         verbose=args.verbose,
@@ -3435,7 +3451,7 @@ Example usage:
                     "apply_gaia_ruwe_validation": not args.skip_gaia_ruwe_validation,
                     "apply_gaia_pm_validation": not args.skip_gaia_pm_validation,
                     "apply_periodic_catalog_validation": not args.skip_periodic_catalog_validation,
-                    "home_passers_only": args.home_passers_only,
+                    "external_validations_passers_only": args.external_validations_passers_only,
                     "min_bayes_factor": args.min_bayes_factor,
                     "require_finite_local_bf": not args.allow_infinite_local_bf,
                     "significant_require_flag": not args.significant_no_require_flag,

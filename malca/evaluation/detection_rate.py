@@ -27,6 +27,7 @@ from malca.baseline import (
     global_median_baseline,
     per_camera_median_baseline,
     per_camera_gp_baseline,
+    per_camera_gp_baseline_masked,
 )
 from malca.cli_config import add_config_args, apply_config, namespace_keys
 from malca.config import (
@@ -83,6 +84,8 @@ DETECTION_RATE_CONFIG_DEFAULTS = {
     "no_event_prob": False,
     "min_mag_offset": MIN_MAG_OFFSET,
 }
+
+BASELINE_CHOICES = ("gp", "gp_masked", "global_median", "per_camera_median")
 
 
 
@@ -149,9 +152,16 @@ def _build_detection_kwargs(args: argparse.Namespace) -> dict:
 
     baseline_map = {
         "gp": per_camera_gp_baseline,
+        "gp_masked": per_camera_gp_baseline_masked,
         "global_median": global_median_baseline,
         "per_camera_median": per_camera_median_baseline,
     }
+    try:
+        baseline_func = baseline_map[str(args.baseline_func)]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unsupported baseline_func {args.baseline_func!r}; expected one of {', '.join(BASELINE_CHOICES)}"
+        ) from exc
 
     # Build mag grids from min/max/points if bounds are provided
     mag_grid_dip = None
@@ -180,7 +190,7 @@ def _build_detection_kwargs(args: argparse.Namespace) -> dict:
         run_min_duration_days=args.run_min_duration_days,
         compute_event_prob=(not args.no_event_prob),
         min_mag_offset=args.min_mag_offset,
-        baseline_func=baseline_map.get(args.baseline_func, per_camera_gp_baseline),
+        baseline_func=baseline_func,
         baseline_kwargs=baseline_kwargs,
     )
 
@@ -475,6 +485,7 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
     )
     g_io = parser.add_argument_group("Input / output")
     g_sample = parser.add_argument_group("Sample")
+    g_detection = parser.add_argument_group("Detection")
     g_workers = parser.add_argument_group("Workers")
     g_config = parser.add_argument_group("Config")
 
@@ -488,6 +499,7 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
                         help="Override output path (default: <out-dir>/<timestamp>/results/detection_rate_results.parquet)")
     g_sample.add_argument(
         "--control-sample-size",
+        "--sample-size",
         dest="control_sample_size",
         type=int,
         default=INJECTION_N_SAMPLE,
@@ -495,6 +507,33 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
     )
     g_sample.add_argument("--min-points", type=int, default=INJECTION_MIN_POINTS, help="Minimum points in control sample if available.")
     g_sample.add_argument("--seed", type=int, default=INJECTION_SEED)
+
+    g_detection.add_argument("--trigger-mode", choices=["posterior_prob", "logbf"], default=TRIGGER_MODE)
+    g_detection.add_argument("--logbf-threshold-dip", type=float, default=LOGBF_THRESHOLD_DIP)
+    g_detection.add_argument("--logbf-threshold-jump", type=float, default=LOGBF_THRESHOLD_JUMP)
+    g_detection.add_argument("--significance-threshold", type=float, default=SIGNIFICANCE_THRESHOLD)
+    g_detection.add_argument("--p-points", type=int, default=P_POINTS)
+    g_detection.add_argument("--p-min-dip", type=float, default=None)
+    g_detection.add_argument("--p-max-dip", type=float, default=None)
+    g_detection.add_argument("--p-min-jump", type=float, default=None)
+    g_detection.add_argument("--p-max-jump", type=float, default=None)
+    g_detection.add_argument("--mag-points", type=int, default=MAG_POINTS)
+    g_detection.add_argument("--mag-min-dip", type=float, default=None)
+    g_detection.add_argument("--mag-max-dip", type=float, default=None)
+    g_detection.add_argument("--mag-min-jump", type=float, default=None)
+    g_detection.add_argument("--mag-max-jump", type=float, default=None)
+    g_detection.add_argument("--run-min-points", type=int, default=RUN_MIN_POINTS)
+    g_detection.add_argument("--run-max-gap-points", type=int, default=RUN_MAX_GAP_POINTS)
+    g_detection.add_argument("--run-max-gap-days", type=float, default=None)
+    g_detection.add_argument("--run-min-duration-days", type=float, default=0.0)
+    g_detection.add_argument("--baseline-func", choices=BASELINE_CHOICES, default=BASELINE_FUNC)
+    g_detection.add_argument("--baseline-s0", type=float, default=BASELINE_S0)
+    g_detection.add_argument("--baseline-w0", type=float, default=BASELINE_W0)
+    g_detection.add_argument("--baseline-q", type=float, default=BASELINE_Q)
+    g_detection.add_argument("--baseline-jitter", type=float, default=BASELINE_JITTER)
+    g_detection.add_argument("--baseline-sigma-floor", type=float, default=None)
+    g_detection.add_argument("--no-event-prob", action="store_true", default=False)
+    g_detection.add_argument("--min-mag-offset", type=float, default=MIN_MAG_OFFSET)
 
     g_workers.add_argument("--workers", type=int, default=WORKERS, help="Parallel workers.")
     g_workers.add_argument("--checkpoint-interval", type=int, default=1000, help="Trials per checkpoint update.")

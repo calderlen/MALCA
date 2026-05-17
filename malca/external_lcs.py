@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from malca.candidates import select_passing_candidates_if_present
 from malca.review.store import db_connect, merge_candidate_results
 from malca.table_io import read_parquet_table, write_parquet_table
 
@@ -69,6 +70,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Optional review SQLite DB to merge enriched candidate fields into",
+    )
+    parser.add_argument(
+        "--all-candidates",
+        action="store_true",
+        help="Fetch external light curves for all input rows instead of only failed_any=False passers.",
     )
     parser.add_argument(
         "--checkpoint",
@@ -150,6 +156,8 @@ def run(args: argparse.Namespace) -> Path:
 
     df = read_parquet_table(input_path)
     df = _ensure_candidate_id(df)
+    if not args.all_candidates:
+        df = select_passing_candidates_if_present(df, printer=print)
     print(f"Loaded {len(df)} candidates from {input_path}")
     print(f"Writing per-candidate LC files to {output_dir}")
 

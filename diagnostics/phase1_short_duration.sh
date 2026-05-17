@@ -1,6 +1,6 @@
 #!/bin/bash
 # Phase 1B: Diagnose Short Duration Bottleneck
-# Tests: baseline, short_gp, trend_baseline, masked_gp
+# Tests: baseline, short_gp, median_baseline, masked_gp
 # Also runs detection_rate to measure false positive rates
 
 set -e
@@ -14,7 +14,7 @@ echo "==================================================================="
 echo ""
 echo "[1/4] Running baseline (current config)..."
 echo "  - Injection test (100x100 grid, 100 inj/cell = 1M trials)..."
-python -m malca.injection --run-tag "1b_baseline" \
+malca injection --run-tag "1b_baseline" \
   --amp-min 0.05 --amp-max 5.0 --amp-steps 100 \
   --dur-min 1 --dur-max 300 --dur-steps 100 \
   --n-injections-per-grid 100 \
@@ -23,8 +23,8 @@ python -m malca.injection --run-tag "1b_baseline" \
   --measure-pre-injection
 
 echo "  - Detection rate (false positive measurement)..."
-python -m malca.detection_rate --run-tag "1b_baseline" \
-  --sample-size 10000 \
+malca detection-rate --run-tag "1b_baseline" \
+  --control-sample-size 10000 \
   --mag-points 25 \
   --workers 40
 
@@ -32,7 +32,7 @@ python -m malca.detection_rate --run-tag "1b_baseline" \
 echo ""
 echo "[2/4] Running with shorter GP timescale (~100 days)..."
 echo "  - Injection test (100x100 grid, 100 inj/cell = 1M trials)..."
-python -m malca.injection --run-tag "1b_short_gp" \
+malca injection --run-tag "1b_short_gp" \
   --amp-min 0.05 --amp-max 5.0 --amp-steps 100 \
   --dur-min 1 --dur-max 300 --dur-steps 100 \
   --n-injections-per-grid 100 \
@@ -42,37 +42,37 @@ python -m malca.injection --run-tag "1b_short_gp" \
   --measure-pre-injection
 
 echo "  - Detection rate (false positive measurement)..."
-python -m malca.detection_rate --run-tag "1b_short_gp" \
-  --sample-size 10000 \
+malca detection-rate --run-tag "1b_short_gp" \
+  --control-sample-size 10000 \
   --mag-points 25 \
   --workers 40 \
   --baseline-s0 0.002 --baseline-w0 0.0314
 
-# Test 1B-3: Use trend baseline (no GP absorption)
+# Test 1B-3: Use per-camera median baseline (no GP absorption)
 echo ""
-echo "[3/4] Running with trend baseline (no GP)..."
+echo "[3/4] Running with per-camera median baseline (no GP)..."
 echo "  - Injection test (100x100 grid, 100 inj/cell = 1M trials)..."
-python -m malca.injection --run-tag "1b_trend_baseline" \
+malca injection --run-tag "1b_median_baseline" \
   --amp-min 0.05 --amp-max 5.0 --amp-steps 100 \
   --dur-min 1 --dur-max 300 --dur-steps 100 \
   --n-injections-per-grid 100 \
   --mag-points 25 \
   --workers 40 \
-  --baseline-func trend \
+  --baseline-func per_camera_median \
   --measure-pre-injection
 
 echo "  - Detection rate (false positive measurement)..."
-python -m malca.detection_rate --run-tag "1b_trend_baseline" \
-  --sample-size 10000 \
+malca detection-rate --run-tag "1b_median_baseline" \
+  --control-sample-size 10000 \
   --mag-points 25 \
   --workers 40 \
-  --baseline-func trend
+  --baseline-func per_camera_median
 
 # Test 1B-4: Use masked GP
 echo ""
 echo "[4/4] Running with masked GP..."
 echo "  - Injection test (100x100 grid, 100 inj/cell = 1M trials)..."
-python -m malca.injection --run-tag "1b_masked_gp" \
+malca injection --run-tag "1b_masked_gp" \
   --amp-min 0.05 --amp-max 5.0 --amp-steps 100 \
   --dur-min 1 --dur-max 300 --dur-steps 100 \
   --n-injections-per-grid 100 \
@@ -82,8 +82,8 @@ python -m malca.injection --run-tag "1b_masked_gp" \
   --measure-pre-injection
 
 echo "  - Detection rate (false positive measurement)..."
-python -m malca.detection_rate --run-tag "1b_masked_gp" \
-  --sample-size 10000 \
+malca detection-rate --run-tag "1b_masked_gp" \
+  --control-sample-size 10000 \
   --mag-points 25 \
   --workers 40 \
   --baseline-func gp_masked
@@ -95,13 +95,13 @@ echo "Results in:"
 echo "  Injection (completeness):"
 echo "    - output/injection/1b_baseline/"
 echo "    - output/injection/1b_short_gp/"
-echo "    - output/injection/1b_trend_baseline/"
+echo "    - output/injection/1b_median_baseline/"
 echo "    - output/injection/1b_masked_gp/"
 echo ""
 echo "  Detection rate (contamination):"
 echo "    - output/detection_rate/1b_baseline/"
 echo "    - output/detection_rate/1b_short_gp/"
-echo "    - output/detection_rate/1b_trend_baseline/"
+echo "    - output/detection_rate/1b_median_baseline/"
 echo "    - output/detection_rate/1b_masked_gp/"
 echo ""
 echo "Next: Compare completeness vs contamination trade-offs"

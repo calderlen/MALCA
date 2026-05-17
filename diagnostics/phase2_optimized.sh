@@ -28,7 +28,7 @@ echo ""
 # Test 2-1: min-mag-offset=0.0
 echo "[1/5] Running min-mag-offset=0.00 (no amplitude filter)..."
 echo "  - Injection test..."
-python -m malca.injection --run-tag "2_offset_0.00" \
+malca injection --run-tag "2_offset_0.00" \
   --amp-min 0.05 --amp-max 5.0 --amp-steps 200 \
   --dur-min 1 --dur-max 300 --dur-steps 200 \
   --n-injections-per-grid 100 \
@@ -37,8 +37,8 @@ python -m malca.injection --run-tag "2_offset_0.00" \
   --min-mag-offset 0.0
 
 echo "  - Detection rate (false positive measurement)..."
-python -m malca.detection_rate --run-tag "2_offset_0.00" \
-  --sample-size 10000 \
+malca detection-rate --run-tag "2_offset_0.00" \
+  --control-sample-size 10000 \
   --mag-points 25 \
   --workers 50 \
   --min-mag-offset 0.0
@@ -47,7 +47,7 @@ python -m malca.detection_rate --run-tag "2_offset_0.00" \
 echo ""
 echo "[2/5] Running min-mag-offset=0.01..."
 echo "  - Injection test..."
-python -m malca.injection --run-tag "2_offset_0.01" \
+malca injection --run-tag "2_offset_0.01" \
   --amp-min 0.05 --amp-max 5.0 --amp-steps 200 \
   --dur-min 1 --dur-max 300 --dur-steps 200 \
   --n-injections-per-grid 100 \
@@ -56,8 +56,8 @@ python -m malca.injection --run-tag "2_offset_0.01" \
   --min-mag-offset 0.01
 
 echo "  - Detection rate (false positive measurement)..."
-python -m malca.detection_rate --run-tag "2_offset_0.01" \
-  --sample-size 10000 \
+malca detection-rate --run-tag "2_offset_0.01" \
+  --control-sample-size 10000 \
   --mag-points 25 \
   --workers 50 \
   --min-mag-offset 0.01
@@ -66,7 +66,7 @@ python -m malca.detection_rate --run-tag "2_offset_0.01" \
 echo ""
 echo "[3/5] Running min-mag-offset=0.02..."
 echo "  - Injection test..."
-python -m malca.injection --run-tag "2_offset_0.02" \
+malca injection --run-tag "2_offset_0.02" \
   --amp-min 0.05 --amp-max 5.0 --amp-steps 200 \
   --dur-min 1 --dur-max 300 --dur-steps 200 \
   --n-injections-per-grid 100 \
@@ -75,8 +75,8 @@ python -m malca.injection --run-tag "2_offset_0.02" \
   --min-mag-offset 0.02
 
 echo "  - Detection rate (false positive measurement)..."
-python -m malca.detection_rate --run-tag "2_offset_0.02" \
-  --sample-size 10000 \
+malca detection-rate --run-tag "2_offset_0.02" \
+  --control-sample-size 10000 \
   --mag-points 25 \
   --workers 50 \
   --min-mag-offset 0.02
@@ -85,7 +85,7 @@ python -m malca.detection_rate --run-tag "2_offset_0.02" \
 echo ""
 echo "[4/5] Running min-mag-offset=0.05..."
 echo "  - Injection test..."
-python -m malca.injection --run-tag "2_offset_0.05" \
+malca injection --run-tag "2_offset_0.05" \
   --amp-min 0.05 --amp-max 5.0 --amp-steps 200 \
   --dur-min 1 --dur-max 300 --dur-steps 200 \
   --n-injections-per-grid 100 \
@@ -94,8 +94,8 @@ python -m malca.injection --run-tag "2_offset_0.05" \
   --min-mag-offset 0.05
 
 echo "  - Detection rate (false positive measurement)..."
-python -m malca.detection_rate --run-tag "2_offset_0.05" \
-  --sample-size 10000 \
+malca detection-rate --run-tag "2_offset_0.05" \
+  --control-sample-size 10000 \
   --mag-points 25 \
   --workers 50 \
   --min-mag-offset 0.05
@@ -104,7 +104,7 @@ python -m malca.detection_rate --run-tag "2_offset_0.05" \
 echo ""
 echo "[5/5] Running min-mag-offset=0.10..."
 echo "  - Injection test..."
-python -m malca.injection --run-tag "2_offset_0.10" \
+malca injection --run-tag "2_offset_0.10" \
   --amp-min 0.05 --amp-max 5.0 --amp-steps 200 \
   --dur-min 1 --dur-max 300 --dur-steps 200 \
   --n-injections-per-grid 100 \
@@ -113,8 +113,8 @@ python -m malca.injection --run-tag "2_offset_0.10" \
   --min-mag-offset 0.1
 
 echo "  - Detection rate (false positive measurement)..."
-python -m malca.detection_rate --run-tag "2_offset_0.10" \
-  --sample-size 10000 \
+malca detection-rate --run-tag "2_offset_0.10" \
+  --control-sample-size 10000 \
   --mag-points 25 \
   --workers 50 \
   --min-mag-offset 0.1

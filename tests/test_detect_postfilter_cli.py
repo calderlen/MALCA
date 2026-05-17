@@ -99,6 +99,7 @@ def test_build_filter_kwargs_defaults_match_pipeline_behavior() -> None:
     assert kwargs["periodic_catalog_flag_only"] is True
     assert kwargs["periodicity_flag_only"] is True
     assert kwargs["periodicity_all_candidates"] is False
+    assert kwargs["external_validations_passers_only"] is True
 
     assert kwargs["phase_plot_max_sig"] == 0.01
     assert kwargs["phase_plot_min_power"] == 0.3
@@ -138,6 +139,7 @@ def test_build_filter_kwargs_respects_cli_overrides() -> None:
     args.gaia_pm_reject = True
     args.skip_periodic_catalog_validation = True
     args.periodic_catalog_reject = True
+    args.external_validations_passers_only = False
 
     kwargs = _build_filter_kwargs(args)
 
@@ -176,6 +178,7 @@ def test_build_filter_kwargs_respects_cli_overrides() -> None:
 
     assert kwargs["apply_periodic_catalog_validation"] is False
     assert kwargs["periodic_catalog_flag_only"] is False
+    assert kwargs["external_validations_passers_only"] is False
 
 
 def test_select_passing_candidates_filters_truthy_failed_any_values() -> None:
@@ -280,6 +283,7 @@ def test_build_home_external_validation_cmd_forwards_periodicity_options() -> No
     assert "--phase-plot-min-power" in cmd
     assert "0.5" in cmd
     assert "--phase-plot-allow-alias" in cmd
+    assert "--external-validations-passers-only" in cmd
     assert "--verbose" in cmd
 
 

@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from malca.candidates import select_passing_candidates_if_present
 from malca.config import GAIA_TCB_EPOCH_JD, MJD_TO_JD, SKYPATROL_JD_OFFSET, TESS_BTJD_OFFSET
 from malca.lightcurve_io import load_lightcurve_df
 from malca.table_io import read_parquet_table, write_parquet_table
@@ -724,6 +725,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional review SQLite DB to merge ms_* fields into",
     )
+    parser.add_argument(
+        "--all-candidates",
+        action="store_true",
+        help="Compute features for all input rows instead of only failed_any=False passers.",
+    )
     return parser
 
 
@@ -733,6 +739,8 @@ def run(args: argparse.Namespace) -> Path:
     external_lc_dir = (args.external_lc_dir or input_path.parent).expanduser()
 
     df = _ensure_candidate_id(read_parquet_table(input_path))
+    if not args.all_candidates:
+        df = select_passing_candidates_if_present(df, printer=print)
     print(f"Loaded {len(df)} candidates from {input_path}")
     print(f"Reading external LC files from {external_lc_dir}")
     out = compute_multi_survey_features(df, external_lc_dir=external_lc_dir)

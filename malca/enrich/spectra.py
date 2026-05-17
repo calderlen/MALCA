@@ -7,6 +7,7 @@ import pandas as pd
 from tqdm.auto import tqdm
 
 from malca.enrich.neighbor import _ensure_candidate_id, _query_catalog_bulk
+from malca.candidates import select_passing_candidates_if_present
 from malca.config import SPECTRA_RADIUS_ARCSEC, SPECTRA_CHUNK_SIZE
 from malca.table_io import read_parquet_table
 
@@ -178,9 +179,12 @@ def main() -> None:
     parser.add_argument("--radius-arcsec", type=float, default=SPECTRA_RADIUS_ARCSEC)
     parser.add_argument("--chunk-size", type=int, default=SPECTRA_CHUNK_SIZE)
     parser.add_argument("--cache", type=Path, default=None)
+    parser.add_argument("--all-candidates", action="store_true", help="Query all input rows instead of only failed_any=False passers")
     args = parser.parse_args()
 
     df = read_parquet_table(args.input)
+    if not args.all_candidates:
+        df = select_passing_candidates_if_present(df, printer=print)
     run_spectra_availability(
         df,
         out_dir=args.out_dir,

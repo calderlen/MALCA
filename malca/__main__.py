@@ -21,6 +21,7 @@ GROUP_ORDER = [
 COMMAND_GROUPS = {
     "manifest": "Discovery",
     "pipeline": "Discovery",
+    "detect": "Discovery",
     "filter": "Discovery",
     "tag": "Discovery",
     "events": "Discovery",
@@ -109,7 +110,7 @@ def main():
     # Check if user is calling a subcommand with --help
     # If so, forward directly to the submodule
     if len(sys.argv) >= 2 and sys.argv[1] in [
-        "manifest", "pipeline", "reproduce", "injection",
+        "manifest", "pipeline", "detect", "reproduce", "injection",
         "detection-rate", "validate", "plot",
         "events", "lc-plot", "gaia-fetch", "characterize", "classify", "filter", "tag",
         "attrition", "review", "review-qt", "review-refresh", "review-merge", "review-explore", "review-sync", "review-taxonomy", "review-maint",
@@ -124,7 +125,7 @@ def main():
         # Dispatch to appropriate module (--help will be handled by that module)
         if command == "manifest":
             _run_module_main("malca.manifest", remaining)
-        elif command == "pipeline":
+        elif command in {"pipeline", "detect"}:
             _run_module_main("malca.detect", remaining)
         elif command == "reproduce":
             reproduce = importlib.import_module("malca.evaluation.reproduce")
@@ -295,6 +296,7 @@ def main():
     # Discovery
     subparsers.add_parser("manifest", description="Build manifest (source_id → path index)")
     subparsers.add_parser("pipeline", description="Run full discovery pipeline")
+    subparsers.add_parser("detect", description="Alias for pipeline")
     subparsers.add_parser("filter", description="Apply candidate filters")
     subparsers.add_parser("tag", description="Apply tagging filters to candidate tables")
     subparsers.add_parser("events", description="Run event detection directly")
@@ -337,7 +339,10 @@ def main():
     subparsers.add_parser("vetting", description="Run post-review vetting (SIMBAD, Gaia, ASAS-SN, ZTF, TNS, eROSITA, ...)")
     subparsers.add_parser("dev", description="Developer diagnostics (score, stats)")
 
-    parser.print_help()
+    if len(sys.argv) == 1:
+        parser.print_help()
+    else:
+        parser.parse_args()
     return 0
 
 

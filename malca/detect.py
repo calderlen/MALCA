@@ -48,6 +48,7 @@ from malca.config import (
     SPECTRA_RADIUS_ARCSEC, SPECTRA_CHUNK_SIZE,
     UNWISE_CHECKPOINT_EVERY,
 )
+from malca.candidates import select_passing_candidates
 from malca.config import (
     MIN_TIME_SPAN, MIN_POINTS_PER_DAY, MIN_CAMERAS,
     VSX_MAX_SEP_ARCSEC, CAMERA_MEDIAN_TOLERANCE, STATS_CHUNK_SIZE,
@@ -198,6 +199,7 @@ RUN_REUSE_PARAM_ATTRS = (
     "gaia_pm_reject",
     "auto_fetch_gaia_cache",
     "gaia_fetch_passers_only",
+    "external_validations_passers_only",
     "skip_periodic_catalog_validation",
     "periodic_catalog_max_sep",
     "periodic_catalog_reject",
@@ -386,6 +388,7 @@ PIPELINE_CONFIG_DEFAULTS: dict[str, Any] = {
     "gaia_pm_reject": False,
     "auto_fetch_gaia_cache": True,
     "gaia_fetch_passers_only": True,
+    "external_validations_passers_only": True,
     "skip_periodic_catalog_validation": False,
     "periodic_catalog_max_sep": 3.0,
     "periodic_catalog_reject": False,
@@ -569,19 +572,7 @@ def save_table(df: pd.DataFrame, path: Path) -> None:
 
 def _select_passing_candidates(df: pd.DataFrame) -> pd.DataFrame:
     """Return only rows with failed_any == False when that column exists."""
-    if "failed_any" not in df.columns:
-        return df.copy()
-
-    failed = df["failed_any"]
-    if pd.api.types.is_bool_dtype(failed):
-        keep = ~failed.fillna(False).astype(bool)
-    elif pd.api.types.is_numeric_dtype(failed):
-        keep = failed.fillna(0).astype(float) == 0.0
-    else:
-        lowered = failed.fillna("").astype(str).str.strip().str.lower()
-        keep = ~lowered.isin({"1", "true", "t", "yes", "y"})
-
-    return df.loc[keep].copy()
+    return select_passing_candidates(df)
 
 
 def _branch_events_attempted_this_run(branch_detection_stats: dict[str, object] | None) -> int | None:
@@ -1062,6 +1053,7 @@ def _build_filter_kwargs(args: argparse.Namespace) -> dict[str, Any]:
     auto_fetch_gaia_cache = bool(_config_arg(args, "auto_fetch_gaia_cache"))
     gaia_fetch_chunk_size = int(_config_arg(args, "gaia_fetch_chunk_size"))
     gaia_fetch_passers_only = bool(_config_arg(args, "gaia_fetch_passers_only"))
+    external_validations_passers_only = bool(_config_arg(args, "external_validations_passers_only"))
     return {
         # Core filters
         "apply_evidence_strength": not args.skip_evidence_strength,
@@ -1108,6 +1100,7 @@ def _build_filter_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "auto_fetch_gaia_cache": auto_fetch_gaia_cache,
         "gaia_fetch_chunk_size": gaia_fetch_chunk_size,
         "gaia_fetch_passers_only": gaia_fetch_passers_only,
+        "external_validations_passers_only": external_validations_passers_only,
         "apply_periodic_catalog_validation": not args.skip_periodic_catalog_validation,
         "periodic_catalog_max_sep": args.periodic_catalog_max_sep,
         "periodic_catalog_flag_only": not args.periodic_catalog_reject,
@@ -1128,6 +1121,7 @@ def _build_home_external_validation_cmd(
     auto_fetch_gaia_cache = bool(_config_arg(args, "auto_fetch_gaia_cache"))
     gaia_fetch_chunk_size = int(_config_arg(args, "gaia_fetch_chunk_size"))
     gaia_fetch_passers_only = bool(_config_arg(args, "gaia_fetch_passers_only"))
+    external_validations_passers_only = bool(_config_arg(args, "external_validations_passers_only"))
     cmd = [
         sys.executable,
         "-m",
@@ -1138,7 +1132,6 @@ def _build_home_external_validation_cmd(
         str(post_filter_output),
         "--index-file",
         str(index_file),
-        "--home-passers-only",
         "--skip-evidence-strength",
         "--skip-significant-detection",
         "--skip-run-robustness",
@@ -1155,6 +1148,10 @@ def _build_home_external_validation_cmd(
         cmd.append("--no-auto-fetch-gaia-cache")
     if not gaia_fetch_passers_only:
         cmd.append("--gaia-fetch-all-candidates")
+    if external_validations_passers_only:
+        cmd.append("--external-validations-passers-only")
+    else:
+        cmd.append("--external-validations-all-candidates")
     cmd.extend(["--gaia-fetch-chunk-size", str(gaia_fetch_chunk_size)])
 
     if args.apply_periodicity_validation:
@@ -1302,6 +1299,18 @@ def main():
         help="Fetch Gaia rows for all event rows before RUWE/PM instead of only rows still passing prior filters.",
     )
     g_filter.add_argument(
+        "--external-validations-passers-only",
+        dest="external_validations_passers_only",
+        action="store_true",
+        help="Run filter-stage external validations only on rows still passing prior filters (default).",
+    )
+    g_filter.add_argument(
+        "--external-validations-all-candidates",
+        dest="external_validations_passers_only",
+        action="store_false",
+        help="Run filter-stage external validations on all event rows.",
+    )
+    g_filter.add_argument(
         "--gaia-fetch-chunk-size",
         type=int,
         default=None,
@@ -1379,6 +1388,8 @@ def main():
         cli_overrides["auto_fetch_gaia_cache"] = args.auto_fetch_gaia_cache
     if cli_has_option("--gaia-fetch-all-candidates"):
         cli_overrides["gaia_fetch_passers_only"] = args.gaia_fetch_passers_only
+    if cli_has_option("--external-validations-passers-only", "--external-validations-all-candidates"):
+        cli_overrides["external_validations_passers_only"] = args.external_validations_passers_only
     if cli_has_option("--gaia-fetch-chunk-size"):
         cli_overrides["gaia_fetch_chunk_size"] = args.gaia_fetch_chunk_size
     if cli_has_option("--run-sed-photometry", "--no-sed-photometry"):
@@ -1689,6 +1700,7 @@ def main():
             "apply_gaia_pm_validation": not args.skip_gaia_pm_validation,
             "gaia_max_pm": args.gaia_max_pm,
             "gaia_pm_flag_only": not args.gaia_pm_reject,
+            "external_validations_passers_only": args.external_validations_passers_only,
             "apply_periodic_catalog_validation": not args.skip_periodic_catalog_validation,
             "periodic_catalog_max_sep": args.periodic_catalog_max_sep,
             "periodic_catalog_flag_only": not args.periodic_catalog_reject,
@@ -1710,7 +1722,7 @@ def main():
             "sources": args.sed_sources,
             "fit_atmosphere": args.fit_atmosphere,
         },
-        "downstream_pass_logic": "characterize/classify/enrich run on filter passers (failed_any == False)",
+        "downstream_pass_logic": "external validations and downstream products run on filter passers (failed_any == False) by default",
     }
 
     run_params_file = out_dir / "run_params.json"
@@ -1865,6 +1877,7 @@ def main():
             "gaia_pm_reject": args.gaia_pm_reject,
             "auto_fetch_gaia_cache": args.auto_fetch_gaia_cache,
             "gaia_fetch_passers_only": args.gaia_fetch_passers_only,
+            "external_validations_passers_only": args.external_validations_passers_only,
             "skip_periodic_catalog_validation": args.skip_periodic_catalog_validation,
             "periodic_catalog_max_sep": args.periodic_catalog_max_sep,
             "periodic_catalog_reject": args.periodic_catalog_reject,

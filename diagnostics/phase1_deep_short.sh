@@ -14,7 +14,7 @@ echo "==================================================================="
 echo ""
 echo "[1/3] Running baseline (current config)..."
 echo "  - Injection test (100x100 grid, 100 inj/cell = 1M trials)..."
-python -m malca.injection --run-tag "1c_baseline" \
+malca injection --run-tag "1c_baseline" \
   --amp-min 0.05 --amp-max 5.0 --amp-steps 100 \
   --dur-min 1 --dur-max 300 --dur-steps 100 \
   --n-injections-per-grid 100 \
@@ -23,8 +23,8 @@ python -m malca.injection --run-tag "1c_baseline" \
   --measure-pre-injection
 
 echo "  - Detection rate (false positive measurement)..."
-python -m malca.detection_rate --run-tag "1c_baseline" \
-  --sample-size 10000 \
+malca detection-rate --run-tag "1c_baseline" \
+  --control-sample-size 10000 \
   --mag-points 25 \
   --workers 40
 
@@ -32,7 +32,7 @@ python -m malca.detection_rate --run-tag "1c_baseline" \
 echo ""
 echo "[2/3] Running with extended mag grid (--mag-max-dip 18.0)..."
 echo "  - Injection test (100x100 grid, 100 inj/cell = 1M trials)..."
-python -m malca.injection --run-tag "1c_extended_mag_grid" \
+malca injection --run-tag "1c_extended_mag_grid" \
   --amp-min 0.05 --amp-max 5.0 --amp-steps 100 \
   --dur-min 1 --dur-max 300 --dur-steps 100 \
   --n-injections-per-grid 100 \
@@ -42,8 +42,8 @@ python -m malca.injection --run-tag "1c_extended_mag_grid" \
   --measure-pre-injection
 
 echo "  - Detection rate (false positive measurement)..."
-python -m malca.detection_rate --run-tag "1c_extended_mag_grid" \
-  --sample-size 10000 \
+malca detection-rate --run-tag "1c_extended_mag_grid" \
+  --control-sample-size 10000 \
   --mag-points 25 \
   --workers 40 \
   --mag-max-dip 18.0
@@ -52,7 +52,7 @@ python -m malca.detection_rate --run-tag "1c_extended_mag_grid" \
 echo ""
 echo "[3/3] Running with very deep mag grid (--mag-max-dip 20.0)..."
 echo "  - Injection test (100x100 grid, 100 inj/cell = 1M trials)..."
-python -m malca.injection --run-tag "1c_deep_mag_grid" \
+malca injection --run-tag "1c_deep_mag_grid" \
   --amp-min 0.05 --amp-max 5.0 --amp-steps 100 \
   --dur-min 1 --dur-max 300 --dur-steps 100 \
   --n-injections-per-grid 100 \
@@ -62,8 +62,8 @@ python -m malca.injection --run-tag "1c_deep_mag_grid" \
   --measure-pre-injection
 
 echo "  - Detection rate (false positive measurement)..."
-python -m malca.detection_rate --run-tag "1c_deep_mag_grid" \
-  --sample-size 10000 \
+malca detection-rate --run-tag "1c_deep_mag_grid" \
+  --control-sample-size 10000 \
   --mag-points 25 \
   --workers 40 \
   --mag-max-dip 20.0

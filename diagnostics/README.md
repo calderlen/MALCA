@@ -71,7 +71,7 @@ Tests: depth 0.2-0.8, duration 1-100 days
 
 1. **Baseline**: Current configuration (GP ~2000 day timescale)
 2. **Short GP**: GP ~100 day timescale
-3. **Trend baseline**: No GP (linear trend only)
+3. **Per-camera median baseline**: No GP baseline absorption
 4. **Masked GP**: GP with event masking
 
 **Hypothesis**: GP baseline absorption is killing short events
