@@ -11,6 +11,7 @@ import pandas as pd
 from astropy.table import Table
 
 from malca.review.sed import (
+    LSUN_ERG_S,
     SED_COLUMNS,
     bandpass_for,
     build_sed_dataframe,
@@ -74,6 +75,19 @@ def test_rows_from_payload_computes_luminosity_with_distance() -> None:
     assert {"Gaia DR3", "2MASS", "AllWISE"}.issubset(set(rows["source"]))
     assert np.isfinite(rows["flux_lambda"]).all()
     assert np.isfinite(rows["lambda_l_lambda"]).all()
+
+
+def test_sed_luminosity_plot_uses_solar_units() -> None:
+    payload = {"candidate_id": "cand-lsun", "w1": 11.7, "distance_gspphot": 1000.0}
+
+    fig, rows, warnings = build_sed_figure(payload)
+
+    assert not warnings
+    assert "L_{\\odot}" in fig.layout.yaxis.title.text
+    assert len(fig.data) == 1
+    plotted_y = float(fig.data[0].y[0])
+    expected_y = float(rows["lambda_l_lambda"].iloc[0]) / LSUN_ERG_S
+    assert math.isclose(plotted_y, expected_y, rel_tol=1.0e-12)
 
 
 def test_distance_fallback_uses_positive_parallax() -> None:

@@ -23,6 +23,7 @@ VIZIER_QUERY_TIMEOUT_SEC = 30
 SED_CACHE_DIR = DEFAULT_CACHE_DIR.expanduser() / "sed"
 SED_CACHE_META_COLUMNS = {"_cache_candidate_id", "_cache_status", "_cache_updated_at"}
 SED_CACHE_SKIP_SOURCES = {"payload"}
+LSUN_ERG_S = 3.828e33
 
 SED_COLUMNS = [
     "candidate_id",
@@ -595,7 +596,8 @@ def build_sed_figure(
     else:
         plot_df = sed_df.copy()
         plot_df["x"] = pd.to_numeric(plot_df["lambda_eff_angstrom"], errors="coerce")
-        plot_df["y"] = pd.to_numeric(plot_df[y_col], errors="coerce")
+        y_scale = LSUN_ERG_S if y_col == "lambda_l_lambda" else 1.0
+        plot_df["y"] = pd.to_numeric(plot_df[y_col], errors="coerce") / y_scale
         plot_df = plot_df[np.isfinite(plot_df["x"]) & np.isfinite(plot_df["y"]) & (plot_df["x"] > 0) & (plot_df["y"] > 0)]
         for (mode_name, source), grp in plot_df.groupby(["sed_mode", "source"], dropna=False):
             color = SOURCE_COLORS.get(str(source), "#bbbbbb")
@@ -612,7 +614,7 @@ def build_sed_figure(
                     symbols.append("circle")
             opacity = 0.5 if mode_name == "ISM-corrected" and mode == "both" else 0.9
             y_err_col = "lambda_l_lambda_err" if y_col == "lambda_l_lambda" else "flux_lambda_err"
-            y_err = pd.to_numeric(grp.get(y_err_col), errors="coerce") if y_err_col in grp.columns else None
+            y_err = (pd.to_numeric(grp.get(y_err_col), errors="coerce") / y_scale) if y_err_col in grp.columns else None
             show_y_err = bool(y_err is not None and np.isfinite(y_err).any())
             fig.add_trace(go.Scatter(
                 x=grp["x"],
@@ -632,7 +634,7 @@ def build_sed_figure(
                     "band: %{customdata[0]}<br>"
                     "lambda: %{x:.5g} A<br>"
                     "mag: %{customdata[1]:.4g} %{customdata[2]}<br>"
-                    + ("lambda L_lambda: %{y:.4e} erg/s<br>" if y_col == "lambda_l_lambda" else "F_lambda: %{y:.4e}<br>")
+                    + ("lambda L_lambda: %{y:.4e} Lsun<br>" if y_col == "lambda_l_lambda" else "F_lambda: %{y:.4e}<br>")
                     + "flags: %{customdata[3]}<extra></extra>"
                 ),
             ))
@@ -673,7 +675,8 @@ def build_sed_figure(
     if model_is_comparable and not model_df.empty and y_col in model_df.columns and "wavelength_angstrom" in model_df.columns:
         curve = model_df.copy()
         curve["x"] = pd.to_numeric(curve["wavelength_angstrom"], errors="coerce")
-        curve["y"] = pd.to_numeric(curve[y_col], errors="coerce")
+        y_scale = LSUN_ERG_S if y_col == "lambda_l_lambda" else 1.0
+        curve["y"] = pd.to_numeric(curve[y_col], errors="coerce") / y_scale
         curve = curve[np.isfinite(curve["x"]) & np.isfinite(curve["y"]) & (curve["x"] > 0) & (curve["y"] > 0)]
         if not curve.empty:
             curve = curve.sort_values("x")
@@ -692,14 +695,26 @@ def build_sed_figure(
                 hovertemplate=(
                     "<b>%{fullData.name}</b><br>"
                     "lambda: %{x:.5g} A<br>"
-                    + ("lambda L_lambda: %{y:.4e} erg/s" if y_col == "lambda_l_lambda" else "F_lambda: %{y:.4e}")
+                    + ("lambda L_lambda: %{y:.4e} Lsun" if y_col == "lambda_l_lambda" else "F_lambda: %{y:.4e}")
                     + "<extra></extra>"
                 ),
             ))
 
+    if fig.data:
+        model_traces = [
+            trace for trace in fig.data
+            if "Castelli/Kurucz" in str(getattr(trace, "name", "") or "")
+        ]
+        if model_traces:
+            marker_traces = [
+                trace for trace in fig.data
+                if "Castelli/Kurucz" not in str(getattr(trace, "name", "") or "")
+            ]
+            fig.data = tuple([*model_traces, *marker_traces])
+
     x_title = r"$\lambda\ [\mathring{\mathrm{A}}]$"
     y_title = (
-        r"$\lambda L_{\lambda}\ [\mathrm{erg\,s^{-1}}]$"
+        r"$\lambda L_{\lambda}\ [L_{\odot}]$"
         if y_col == "lambda_l_lambda"
         else r"$F_{\lambda}\ [\mathrm{erg\,s^{-1}\,cm^{-2}}\,\mathring{\mathrm{A}}^{-1}]$"
     )
