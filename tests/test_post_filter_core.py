@@ -100,6 +100,7 @@ def test_apply_filters_tags_significant_detection_failures() -> None:
             "jump_run_count": [0, 0],
         }
     )
+    df.index = pd.Index([10, 20], name="source_pos")
 
     out = post_filter.apply_filters(
         df,
@@ -117,6 +118,8 @@ def test_apply_filters_tags_significant_detection_failures() -> None:
     )
 
     assert "failed_significant_detection" in out.columns
+    assert len(out) == len(df)
+    assert out.index.equals(df.index)
     assert out.set_index("path").loc["pass.csv", "failed_significant_detection"] == 0
     assert out.set_index("path").loc["fail.csv", "failed_significant_detection"] == 1
     assert out.set_index("path").loc["pass.csv", "failed_any"] == 0

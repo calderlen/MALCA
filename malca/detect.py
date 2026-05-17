@@ -33,7 +33,6 @@ import shlex
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 import traceback
 import zipfile
@@ -86,7 +85,7 @@ from malca.review.store import db_connect, import_candidates
 from concurrent.futures import ProcessPoolExecutor
 from malca.stats import compute_stats, _enrich_row_worker
 from malca.tag import RAW_MEDIAN_SUSPECT_COL, apply_tags, filter_camera_medians
-from malca.table_io import read_parquet_table, require_parquet_path
+from malca.table_io import read_parquet_table, require_parquet_path, write_parquet_table
 from malca.utils import log as _log
 from malca.vetting import vet_candidates
 
@@ -492,16 +491,7 @@ PIPELINE_CONFIG_PATH_KEYS = {
 
 def safe_write_parquet(df: pd.DataFrame, path: Path) -> None:
     """Write parquet atomically to avoid corruption on interruption."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(dir=path.parent, suffix=".tmp", delete=False) as tmp:
-        tmp_path = Path(tmp.name)
-    try:
-        df.to_parquet(tmp_path, index=False, compression=PARQUET_OUTPUT_COMPRESSION)
-        tmp_path.replace(path)
-    except Exception:
-        tmp_path.unlink(missing_ok=True)
-        raise
+    write_parquet_table(df, path, compression=PARQUET_OUTPUT_COMPRESSION)
 
 
 def load_table(path: Path) -> pd.DataFrame:

@@ -785,8 +785,8 @@ def _to_bool_mask(series: pd.Series) -> pd.Series:
         return series.fillna(False).astype(bool)
     if pd.api.types.is_numeric_dtype(series):
         return series.fillna(0).astype(float) != 0.0
-    lowered = series.fillna("").astype(str).str.strip().str.lower()
-    return lowered.isin({"1", "true", "t", "yes", "y"})
+    lowered = series.astype("string").str.strip().str.lower()
+    return lowered.isin({"1", "true", "t", "yes", "y"}).fillna(False)
 
 
 def _passing_mask_from_failures(
@@ -2794,9 +2794,15 @@ def apply_filters(
         for col in cols:
             mapped = base_keys.map(updates_idx[col])
             if col in df_base.columns:
-                df_base.loc[matched, col] = mapped.loc[matched].to_numpy()
+                values = mapped.loc[matched]
+                if pd.api.types.is_bool_dtype(df_base[col]):
+                    values = _to_bool_mask(values)
+                df_base.loc[matched, col] = values.to_numpy()
             else:
-                df_base[col] = mapped.to_numpy()
+                if pd.api.types.is_bool_dtype(updates_idx[col]):
+                    df_base[col] = _to_bool_mask(mapped).to_numpy()
+                else:
+                    df_base[col] = mapped.to_numpy()
         return df_base
 
     filters = []
@@ -3071,13 +3077,16 @@ def apply_filters(
     # Add summary column
     failed_cols = [c for c in df_filtered.columns if c.startswith("failed_") and c != "failed_any"]
     if failed_cols:
-        df_filtered["failed_any"] = df_filtered[failed_cols].any(axis=1)
+        failed_any = pd.Series(False, index=df_filtered.index, dtype=bool)
+        for col in failed_cols:
+            failed_any |= _to_bool_mask(df_filtered[col])
+        df_filtered["failed_any"] = failed_any
 
     if show_tqdm and verbose:
         n_failed_any = int(df_filtered["failed_any"].sum()) if "failed_any" in df_filtered.columns else 0
         tqdm.write(f"\n[apply_filters] {n_failed_any}/{n_start} failed at least one filter")
 
-    return df_filtered.reset_index(drop=True)
+    return df_filtered
 
 
 # =============================================================================
