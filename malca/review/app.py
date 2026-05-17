@@ -8541,16 +8541,13 @@ def _sed_status_text(rows: pd.DataFrame, warnings_list: list[str]) -> str:
 @app.callback(
     [Output('sed-plot-panel', 'children'),
      Output('sed-status', 'children')],
-    [Input('sed-details', 'open'),
-     Input('current-candidate-id', 'data'),
+    [Input('current-candidate-id', 'data'),
      Input('sed-extinction-mode', 'value'),
      Input('theme-mode-store', 'data')],
     prevent_initial_call=False,
 )
-def update_sed_panel(is_open, candidate_id, extinction_mode, theme_mode):
+def update_sed_panel(candidate_id, extinction_mode, theme_mode):
     """Render SED photometry for the current candidate."""
-    if not is_open:
-        return [], ''
     if not candidate_id:
         return [], 'No candidates loaded.'
     try:
@@ -8590,7 +8587,7 @@ def export_sed_plot(n_clicks, candidate_id, extinction_mode, theme_mode):
             plot_bgcolor='white',
             font=dict(color='#111111', family='Monaco, Courier New, monospace', size=11),
             title_font=dict(color='#111111'),
-            margin=dict(t=54, l=70, r=26, b=58),
+            margin=dict(t=86, l=70, r=26, b=58),
             legend=dict(
                 bgcolor='rgba(255,255,255,0.95)',
                 bordercolor='rgba(40,40,40,0.25)',

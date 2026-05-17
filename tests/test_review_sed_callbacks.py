@@ -18,7 +18,7 @@ def test_update_sed_panel_renders_graph(monkeypatch) -> None:
 
     monkeypatch.setattr(review_app, "_load_sed_figure_for_candidate", fake_load)
 
-    graph, status = review_app.update_sed_panel(True, "cand-1", "observed", "black")
+    graph, status = review_app.update_sed_panel("cand-1", "observed", "black")
 
     assert isinstance(graph, dcc.Graph)
     assert "1 SED points" in status

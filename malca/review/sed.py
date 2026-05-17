@@ -694,11 +694,11 @@ def build_sed_figure(
     fig.update_layout(
         title="Spectral Energy Distribution",
         height=320,
-        margin=dict(l=58, r=14, t=36, b=48),
+        margin=dict(l=58, r=14, t=68, b=48),
         paper_bgcolor=spec["paper"],
         plot_bgcolor=spec["plot"],
         font=dict(color=spec["font"], size=10),
-        legend=dict(orientation="h", y=1.08, x=0.0, bgcolor="rgba(0,0,0,0)"),
+        legend=dict(orientation="h", y=1.16, x=0.0, bgcolor="rgba(0,0,0,0)"),
     )
     fig.update_xaxes(title="lambda [Angstrom]", type="log", gridcolor=spec["grid"], zeroline=False)
     fig.update_yaxes(title=y_title, type="log", gridcolor=spec["grid"], zeroline=False)
