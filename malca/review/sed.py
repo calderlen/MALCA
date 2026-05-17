@@ -697,11 +697,11 @@ def build_sed_figure(
                 ),
             ))
 
-    x_title = r"$\lambda\ [\mathrm{\AA}]$"
+    x_title = r"$\lambda\ [\mathring{\mathrm{A}}]$"
     y_title = (
         r"$\lambda L_{\lambda}\ [\mathrm{erg\,s^{-1}}]$"
         if y_col == "lambda_l_lambda"
-        else r"$F_{\lambda}\ [\mathrm{erg\,s^{-1}\,cm^{-2}\,\AA^{-1}}]$"
+        else r"$F_{\lambda}\ [\mathrm{erg\,s^{-1}\,cm^{-2}}\,\mathring{\mathrm{A}}^{-1}]$"
     )
     fig.update_layout(
         title="Spectral Energy Distribution",

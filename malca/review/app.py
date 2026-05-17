@@ -8487,15 +8487,12 @@ else:
 
 @app.callback(
     Output('external-followup-panel', 'children'),
-    [Input('external-followup-details', 'open'),
-     Input('current-candidate-id', 'data'),
+    [Input('current-candidate-id', 'data'),
      Input('theme-mode-store', 'data')],
     prevent_initial_call=False,
 )
-def update_external_followup_panel(is_open, candidate_id, theme_mode):
+def update_external_followup_panel(candidate_id, theme_mode):
     """Render external follow-up artifacts for the current candidate."""
-    if not is_open:
-        return []
     if not candidate_id:
         return html.Div("No candidates loaded.", style={'font-size': '11px', 'color': '#c77'})
     payload, _stored_lc_path, _source_path = _candidate_context(candidate_id)
@@ -8600,16 +8597,16 @@ def export_sed_plot(n_clicks, candidate_id, extinction_mode, theme_mode):
                 text='Spectral Energy Distribution',
                 x=0.5,
                 xanchor='center',
-                y=0.965,
+                y=0.975,
                 font=dict(color='#111111', size=18),
             ),
-            margin=dict(t=112, l=92, r=34, b=78),
+            margin=dict(t=92, l=96, r=285, b=84),
             legend=dict(
-                orientation='h',
-                x=0.5,
-                xanchor='center',
-                y=1.12,
-                yanchor='bottom',
+                orientation='v',
+                x=1.02,
+                xanchor='left',
+                y=1.0,
+                yanchor='top',
                 bgcolor='rgba(255,255,255,0.95)',
                 bordercolor='rgba(40,40,40,0.25)',
                 borderwidth=1,
@@ -8690,14 +8687,6 @@ def _render_diagnostic_plots(payload: dict, theme: str, background: dict | None 
 
 def _prepare_diagnostic_background(is_open, _import_trigger, _pipeline_progress, existing_state):
     """Load and cache diagnostic plot background data for the current review DB."""
-    if not is_open:
-        return existing_state if isinstance(existing_state, dict) else {
-            'signature': '',
-            'ready': False,
-            'cached': False,
-            'token': 0,
-        }
-
     signature = _diagnostic_background_signature(DB_PATH)
     cached = _get_cached_diagnostic_background(signature)
     if cached is None:
@@ -8754,16 +8743,13 @@ else:
 @app.callback(
     [Output('diagnostic-plots-panel', 'children'),
      Output('diagnostic-plots-status', 'children', allow_duplicate=True)],
-    [Input('diagnostic-plots-details', 'open'),
-     Input('current-candidate-id', 'data'),
+    [Input('current-candidate-id', 'data'),
      Input('theme-mode-store', 'data'),
      Input('diagnostic-background-state', 'data')],
     prevent_initial_call=True,
 )
-def update_diagnostic_plots(is_open, candidate_id, theme_mode, background_state):
+def update_diagnostic_plots(candidate_id, theme_mode, background_state):
     """Render diagnostic plots for the current candidate."""
-    if not is_open:
-        return no_update, ''
     if not candidate_id:
         return [], ''
 
