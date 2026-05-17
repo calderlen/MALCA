@@ -4500,7 +4500,7 @@ def main():
         before = len(df)
         df = df[df["interest_score"] >= args.min_score].copy()
         print(f"Filtered to {len(df)} candidates with score >= {args.min_score} (from {before})")
-    if not args.all_candidates:
+    if not getattr(args, "all_candidates", False):
         df = select_passing_candidates_if_present(df, printer=print)
 
     if only_modules is not None:

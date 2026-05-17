@@ -156,7 +156,7 @@ def run(args: argparse.Namespace) -> Path:
 
     df = read_parquet_table(input_path)
     df = _ensure_candidate_id(df)
-    if not args.all_candidates:
+    if not getattr(args, "all_candidates", False):
         df = select_passing_candidates_if_present(df, printer=print)
     print(f"Loaded {len(df)} candidates from {input_path}")
     print(f"Writing per-candidate LC files to {output_dir}")

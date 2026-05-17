@@ -739,7 +739,7 @@ def run(args: argparse.Namespace) -> Path:
     external_lc_dir = (args.external_lc_dir or input_path.parent).expanduser()
 
     df = _ensure_candidate_id(read_parquet_table(input_path))
-    if not args.all_candidates:
+    if not getattr(args, "all_candidates", False):
         df = select_passing_candidates_if_present(df, printer=print)
     print(f"Loaded {len(df)} candidates from {input_path}")
     print(f"Reading external LC files from {external_lc_dir}")

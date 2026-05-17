@@ -236,7 +236,7 @@ def main() -> None:
     args = parser.parse_args()
 
     df = read_parquet_table(args.input)
-    if not args.all_candidates:
+    if not getattr(args, "all_candidates", False):
         df = select_passing_candidates_if_present(df, printer=print)
     run_neighbor_enrichment(
         df,

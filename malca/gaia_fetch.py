@@ -484,7 +484,11 @@ def main():
     args = parser.parse_args()
 
     # Extract Gaia IDs from input + crossmatch
-    gaia_ids = _extract_gaia_ids(args.input, args.vsx_crossmatch, only_passers=not args.all_candidates)
+    gaia_ids = _extract_gaia_ids(
+        args.input,
+        args.vsx_crossmatch,
+        only_passers=not getattr(args, "all_candidates", False),
+    )
 
     if not gaia_ids:
         print("No Gaia IDs found. Nothing to fetch.")

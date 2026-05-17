@@ -640,7 +640,7 @@ def main():
     # Load
     print(f"Loading {args.input}...")
     df = read_parquet_table(args.input)
-    if not args.all_candidates:
+    if not getattr(args, "all_candidates", False):
         df = select_passing_candidates_if_present(df, printer=print)
     
     print(f"Loaded {len(df)} events")
