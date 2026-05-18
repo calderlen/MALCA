@@ -1,5 +1,42 @@
 from __future__ import annotations
 
+import importlib.util
+import sys
+import types
+
+
+def _install_review_app_import_stubs() -> None:
+    if "celerite2" not in sys.modules and importlib.util.find_spec("celerite2") is None:
+        fake_celerite2 = types.ModuleType("celerite2")
+        fake_terms = types.ModuleType("celerite2.terms")
+
+        class _FakeGaussianProcess:
+            def __init__(self, *args, **kwargs):
+                pass
+
+        class _FakeTerm:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def __add__(self, other):
+                return self
+
+        fake_terms.SHOTerm = _FakeTerm
+        fake_terms.RealTerm = _FakeTerm
+        fake_celerite2.GaussianProcess = _FakeGaussianProcess
+        fake_celerite2.terms = fake_terms
+        sys.modules["celerite2"] = fake_celerite2
+        sys.modules["celerite2.terms"] = fake_terms
+
+    if "multiprocess" not in sys.modules and importlib.util.find_spec("multiprocess") is None:
+        fake_multiprocess = types.ModuleType("multiprocess")
+        fake_multiprocess.get_all_start_methods = lambda: ["spawn"]
+        fake_multiprocess.set_start_method = lambda *args, **kwargs: None
+        sys.modules["multiprocess"] = fake_multiprocess
+
+
+_install_review_app_import_stubs()
+
 from malca.review.app import EXTERNAL_SOURCE_VIEW_OPTIONS, _render_external_followup, app
 
 
@@ -23,7 +60,27 @@ def _component_ids_in_order(node: object) -> list[object]:
     return ids
 
 
-def test_external_and_diagnostic_panels_are_above_long_metadata() -> None:
+def _graph_configs_in_order(node: object) -> list[dict]:
+    configs: list[dict] = []
+
+    def walk(item: object) -> None:
+        if isinstance(item, (list, tuple)):
+            for child in item:
+                walk(child)
+            return
+        if item is None or isinstance(item, (str, int, float, bool)):
+            return
+        config = getattr(item, "config", None)
+        if isinstance(config, dict):
+            configs.append(config)
+        walk(getattr(item, "children", None))
+
+    layout = node() if callable(node) else node
+    walk(layout)
+    return configs
+
+
+def test_candidate_panels_appear_before_diagnostic_plots() -> None:
     ids = _component_ids_in_order(app.layout)
 
     external_idx = ids.index("external-followup-details")
@@ -31,22 +88,46 @@ def test_external_and_diagnostic_panels_are_above_long_metadata() -> None:
     dustycult_idx = ids.index("dustycult-details")
     sed_button_idx = ids.index("rerun-stage-sed-photometry-btn")
     multi_survey_button_idx = ids.index("rerun-stage-multi-survey-btn")
+    candidate_panels_idx = ids.index("candidate-panels-details")
     diagnostic_idx = ids.index("diagnostic-plots-details")
     metadata_idx = ids.index("candidate-info-grid")
     run_config_idx = ids.index("run-config-details")
 
     assert external_idx < metadata_idx
     assert external_idx < sed_idx < metadata_idx
-    assert sed_idx < dustycult_idx < diagnostic_idx < metadata_idx
+    assert sed_idx < dustycult_idx < candidate_panels_idx < metadata_idx < diagnostic_idx
     assert sed_button_idx < metadata_idx
     assert multi_survey_button_idx < metadata_idx
-    assert metadata_idx < run_config_idx
+    assert diagnostic_idx < run_config_idx
+
+
+def test_layout_graphs_disable_plotly_image_export() -> None:
+    configs = _graph_configs_in_order(app.layout)
+
+    assert configs
+    assert all("toImage" in config.get("modeBarButtonsToRemove", []) for config in configs)
 
 
 def test_external_source_selector_exposes_tess() -> None:
     values = {str(option.get("value")) for option in EXTERNAL_SOURCE_VIEW_OPTIONS}
 
     assert "tess" in values
+
+
+def test_dustycult_publication_export_controls_are_present() -> None:
+    ids = _component_ids_in_order(app.layout)
+
+    assert "dustycult-export-download" in ids
+    assert "mini-plot-export-download" in ids
+    assert "dustycult-export-fit-btn" in ids
+    assert "dustycult-export-occulter-btn" in ids
+
+
+def test_vetting_filter_group_has_definite_known_type_preset() -> None:
+    ids = _component_ids_in_order(app.layout)
+
+    assert "vetting-known-types-btn" in ids
+    assert "vetting-definite-known-types-btn" in ids
 
 
 def test_external_followup_exposes_multi_survey_summary() -> None:

@@ -17,9 +17,25 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-import plotly.io as pio
 
-from malca.review.app import _render_stat_cards
+from malca.review.app import (
+    _DUSTYCULT_CONTROL_FIELDS,
+    _dustycult_config_status_text,
+    _dustycult_control_values_from_states,
+    _dustycult_controls_layout,
+    _dustycult_fit_publication_figure,
+    _dustycult_occulter_publication_figure,
+    _dustycult_parameter_table,
+    _dustycult_result_figure,
+    _dustycult_status_cards,
+    _export_mini_plot_pdf_from_state,
+    _render_diagnostic_plots,
+    _render_external_followup,
+    _render_metadata_health,
+    _render_stat_cards,
+    _render_vetting_banner,
+    _select_dustycult_display_row,
+)
 from malca.review.explore_data import (
     BEST_FIELDS,
     DEFAULT_COLOR,
@@ -46,11 +62,46 @@ from malca.review.explore_data import (
 from malca.review.filter_schema import SIDEBAR_GROUPS
 from malca.review.handoff import build_review_command, launch_detached
 from malca.review.interactive_plot import build_interactive_lightcurve_figure, resolve_lightcurve_path as review_resolve_lightcurve_path
+from malca.review.lightcurve_publication import build_review_lightcurve_publication_pdf
 from malca.review.keyboard import CLASS_KEY_MAP
-from malca.review.metadata import bracket_unit_label
+from malca.review.metadata import extract_review_metadata_grouped, is_group_default_open, bracket_unit_label
+from malca.review.pipeline import (
+    detect_pipeline_status,
+    detect_sed_model_status,
+    detect_sed_photometry_status,
+    run_missing_stages,
+)
 from malca.review.period_search import has_external_period, run_period_search_for_payload
-from malca.review.store import db_connect, export_review_subset_bundle, get_review, load_app_state, save_app_state, save_review
+from malca.review.dustycult_visualization import build_dustycult_occulter_figure
+from malca.review.publication import graph_config_without_image_export, publication_figure, render_publication_pdf, slugify_token
+from malca.review.dustycult import (
+    check_dustycult_available,
+    control_defaults_for_candidate,
+    load_dustycult_curve,
+    load_dustycult_fits,
+    run_dustycult_fit,
+)
+from malca.review.sed import build_sed_figure, load_sed_rows
+from malca.review.store import (
+    db_connect,
+    export_review_subset_bundle,
+    get_diagnostic_background,
+    get_candidate_payload,
+    get_review,
+    load_app_state,
+    save_app_state,
+    save_review,
+)
 from malca.review.sync import auto_export_review_bundle
+from malca.review.taxonomy import (
+    MORPHOLOGY_PRIMARY,
+    PHYSICAL_PRIMARY,
+    derive_event_class,
+    keyboard_payload,
+    label_for,
+    selection_from_review,
+)
+from malca.sed_model import load_sed_model_curves, load_sed_model_fits
 
 
 DEFAULT_THEME = "black"
@@ -728,21 +779,44 @@ def _normalize_review_state(review: dict[str, object] | None) -> dict[str, objec
     if status not in {"reviewed", "needs_followup", "unreviewed"}:
         status = "reviewed"
 
-    return {
+    normalized = {
         "interest_score": score_val,
         "event_class": event_class,
         "review_pass": review_pass,
         "notes": "" if raw.get("notes") is None else str(raw.get("notes")),
         "status": status,
+        "workflow_status": status,
         "reviewer": "" if raw.get("reviewer") is None else str(raw.get("reviewer")),
         "updated_at": raw.get("updated_at"),
     }
+    for key in (
+        "disposition",
+        "morphology_primary",
+        "morphology_secondary",
+        "morphology_polarity",
+        "morphology_recurrence",
+        "baseline_behavior",
+        "physical_primary",
+        "physical_secondary",
+        "classification_confidence",
+        "priority_tags_json",
+        "evidence_flags_json",
+        "model_tags_json",
+        "duplicate_of",
+        "known_object_id",
+        "known_object_source",
+        "taxonomy_version",
+        "legacy_review_json",
+    ):
+        if key in raw:
+            normalized[key] = raw.get(key)
+    return normalized
 
 
 def _record_review_state(record: dict[str, object] | None) -> dict[str, object]:
     if not isinstance(record, dict):
         return _normalize_review_state(None)
-    return _normalize_review_state({
+    raw = {
         "interest_score": record.get("interest_score"),
         "event_class": record.get("event_class"),
         "review_pass": record.get("review_pass"),
@@ -750,7 +824,29 @@ def _record_review_state(record: dict[str, object] | None) -> dict[str, object]:
         "status": record.get("status"),
         "reviewer": record.get("reviewer"),
         "updated_at": record.get("updated_at"),
-    })
+    }
+    for key in (
+        "disposition",
+        "morphology_primary",
+        "morphology_secondary",
+        "morphology_polarity",
+        "morphology_recurrence",
+        "baseline_behavior",
+        "physical_primary",
+        "physical_secondary",
+        "classification_confidence",
+        "priority_tags_json",
+        "evidence_flags_json",
+        "model_tags_json",
+        "duplicate_of",
+        "known_object_id",
+        "known_object_source",
+        "taxonomy_version",
+        "legacy_review_json",
+    ):
+        if key in record:
+            raw[key] = record.get(key)
+    return _normalize_review_state(raw)
 
 
 def _apply_review_override_to_record(
@@ -854,6 +950,253 @@ def _render_stats(stat_rows: list[tuple[str, str]]) -> html.Div:
     return html.Div(_render_stat_cards(stat_rows), className="explorer-review-stats")
 
 
+def _record_candidate_id(record: dict[str, object] | None) -> str:
+    if not isinstance(record, dict):
+        return ""
+    for key in ("candidate_id", "asas_sn_id", "gaia_id"):
+        value = _normalized_id(record.get(key))
+        if value:
+            return value
+    return ""
+
+
+def _record_lc_path(record: dict[str, object] | None) -> str | None:
+    if not isinstance(record, dict):
+        return None
+    for key in ("lc_path", "path"):
+        value = record.get(key)
+        if value not in (None, ""):
+            text = str(value).strip()
+            if text:
+                return text
+    return None
+
+
+def _panel_message(message: str) -> html.Div:
+    return html.Div(message, style={"fontSize": "12px", "color": TEXT_MUTED})
+
+
+def _render_explorer_metadata_panels(record: dict[str, object] | None) -> tuple[html.Div, html.Div, html.Div]:
+    if not isinstance(record, dict):
+        empty = _panel_message("No candidate selected.")
+        return _render_metadata_health(None, context_msg="No candidate selected."), _render_vetting_banner(None), empty
+
+    grouped = extract_review_metadata_grouped(record, round_sigfigs=True)
+    details = []
+    for group_name, items in grouped:
+        rows = [
+            html.Div(
+                [
+                    html.Span(label, className="explorer-meta-label"),
+                    html.Span(str(value), className="explorer-meta-value"),
+                ],
+                className="explorer-meta-row",
+            )
+            for label, value in items
+        ]
+        details.append(
+            html.Details(
+                [
+                    html.Summary(f"{group_name} ({len(items)})"),
+                    html.Div(rows, className="explorer-meta-grid"),
+                ],
+                open=is_group_default_open(group_name),
+                className="explorer-details",
+            )
+        )
+    return (
+        _render_metadata_health(grouped),
+        _render_vetting_banner(record),
+        html.Div(details or [_panel_message("No metadata fields available.")], className="explorer-candidate-panels"),
+    )
+
+
+def _render_explorer_pipeline_chips(record: dict[str, object] | None) -> list:
+    if not isinstance(record, dict):
+        return []
+    candidate_id = _record_candidate_id(record)
+    status = detect_pipeline_status(record)
+    review_db, _plot_dir = _record_review_target(record)
+    if review_db is not None and candidate_id:
+        try:
+            with closing(db_connect(review_db)) as conn:
+                status["sed_photometry"] = detect_sed_photometry_status(conn, candidate_id, record)
+                status["sed_model_fit"] = detect_sed_model_status(conn, candidate_id, record)
+        except Exception:
+            pass
+
+    periodicity_cols = ("periodicity_score", "lsp_period", "lsp_power", "lsp_is_significant")
+    periodicity_present = sum(
+        1
+        for col in periodicity_cols
+        if record.get(col) is not None and not (isinstance(record.get(col), float) and np.isnan(record.get(col)))
+    )
+    if periodicity_present == 0:
+        status["periodicity"] = "missing"
+    elif periodicity_present == len(periodicity_cols):
+        status["periodicity"] = "complete"
+    else:
+        status["periodicity"] = "partial"
+
+    labels = {
+        "stats": "Stats",
+        "events": "Events",
+        "characterize": "Characterize",
+        "vetting": "Vetting",
+        "sed_photometry": "SED",
+        "sed_model_fit": "SED model",
+        "external_lcs": "External LCs",
+        "multi_survey_features": "Multi-survey",
+        "periodicity": "Periodicity",
+    }
+    class_map = {"complete": "complete", "partial": "partial", "missing": "missing"}
+    chips = []
+    for stage, state in status.items():
+        chips.append(
+            html.Span(
+                f"{'●' if state == 'complete' else '○'} {labels.get(stage, stage)}",
+                className=f"explorer-pipeline-chip {class_map.get(state, 'missing')}",
+            )
+        )
+    return chips
+
+
+def _sed_status_text(rows: pd.DataFrame, warnings_list: list[str]) -> str:
+    if rows is None or rows.empty:
+        base = "No SED photometry available."
+    else:
+        sources = sorted(str(x) for x in rows["source"].dropna().unique()) if "source" in rows.columns else []
+        source_text = ", ".join(sources[:8])
+        if len(sources) > 8:
+            source_text += f", +{len(sources) - 8} more"
+        base = f"{len(rows)} SED points"
+        if source_text:
+            base += f" from {source_text}"
+    if warnings_list:
+        return f"{base}. {' '.join(str(w) for w in warnings_list)}"
+    return base
+
+
+def _render_explorer_sed_panel(
+    record: dict[str, object] | None,
+    extinction_mode: object,
+    theme: object,
+) -> tuple[object, str]:
+    if not isinstance(record, dict):
+        return html.Div(), "No candidate selected."
+    candidate_id = _record_candidate_id(record)
+    review_db, _plot_dir = _record_review_target(record)
+    if review_db is None or not candidate_id:
+        return html.Div(), "SED panels require a DB-backed candidate."
+    try:
+        with closing(db_connect(review_db)) as conn:
+            rows = load_sed_rows(conn, candidate_id)
+            curves = load_sed_model_curves(conn, candidate_id)
+            fits = load_sed_model_fits(conn, candidate_id)
+        fig, rows, warnings_list = build_sed_figure(
+            record,
+            candidate_id=candidate_id,
+            external_rows=rows,
+            model_curve_rows=curves,
+            model_fit_rows=fits,
+            extinction_mode=str(extinction_mode or "corrected"),
+            theme=str(theme or DEFAULT_THEME),
+        )
+    except Exception as exc:
+        return html.Div(), f"SED rendering failed: {exc}"
+    return (
+        dcc.Graph(
+            figure=fig,
+            mathjax=True,
+            config=graph_config_without_image_export({"displayModeBar": True, "responsive": True}),
+            style={"height": "420px", "width": "100%"},
+        ),
+        _sed_status_text(rows, warnings_list),
+    )
+
+
+def _render_explorer_dustycult_panel(
+    record: dict[str, object] | None,
+    theme: object,
+    _refresh_token: object = None,
+) -> tuple[list, str]:
+    if not isinstance(record, dict):
+        return [_panel_message("No candidate selected.")], _dustycult_config_status_text()
+    candidate_id = _record_candidate_id(record)
+    review_db, _plot_dir = _record_review_target(record)
+    if review_db is None or not candidate_id:
+        return [_panel_message("DustyCult fits require a DB-backed candidate.")], _dustycult_config_status_text()
+    try:
+        with closing(db_connect(review_db)) as conn:
+            fits = load_dustycult_fits(conn, candidate_id)
+    except Exception as exc:
+        return [_panel_message(f"DustyCult result load failed: {exc}")], _dustycult_config_status_text()
+
+    children: list = []
+    availability = check_dustycult_available()
+    if not availability.ok:
+        children.append(html.Div(f"Unavailable: {availability.message}", className="explorer-error-text"))
+    children.append(_dustycult_status_cards(fits, str(theme or DEFAULT_THEME)))
+    if fits.empty:
+        children.append(_panel_message("No DustyCult fit has been run for this candidate."))
+        return children, _dustycult_config_status_text()
+
+    fit_row = _select_dustycult_display_row(fits)
+    if fit_row is None:
+        children.append(_panel_message("No DustyCult fit row is available."))
+        return children, _dustycult_config_status_text()
+
+    mode = str(fit_row.get("mode") or "quick")
+    error = str(fit_row.get("error") or "").strip()
+    if error and str(fit_row.get("status") or "") != "ok":
+        children.append(html.Div(error, className="explorer-error-text"))
+    try:
+        with closing(db_connect(review_db)) as conn:
+            curves = load_dustycult_curve(conn, candidate_id, mode)
+    except Exception:
+        curves = pd.DataFrame()
+    children.append(
+        dcc.Graph(
+            figure=_dustycult_result_figure(curves, fit_row, str(theme or DEFAULT_THEME)),
+            mathjax=True,
+            config=graph_config_without_image_export({"displayModeBar": True, "responsive": True}),
+            style={"height": "420px"},
+        )
+    )
+    if str(fit_row.get("status") or "").lower() == "ok":
+        try:
+            children.append(
+                dcc.Graph(
+                    figure=build_dustycult_occulter_figure(fit_row, theme=str(theme or DEFAULT_THEME), grid_n=251),
+                    mathjax=True,
+                    config=graph_config_without_image_export({"displayModeBar": True, "responsive": True}),
+                    style={"height": "430px"},
+                )
+            )
+        except Exception as exc:
+            children.append(html.Div(f"Occulter model unavailable: {exc}", className="explorer-error-text"))
+    children.append(_dustycult_parameter_table(fit_row, str(theme or DEFAULT_THEME)))
+    return children, _dustycult_config_status_text()
+
+
+def _render_explorer_diagnostic_panels(record: dict[str, object] | None, theme: object) -> tuple[list, str]:
+    if not isinstance(record, dict):
+        return [], "No candidate selected."
+    review_db, _plot_dir = _record_review_target(record)
+    background = None
+    status = ""
+    if review_db is not None:
+        try:
+            with closing(db_connect(review_db)) as conn:
+                background = get_diagnostic_background(conn)
+        except Exception as exc:
+            status = f"Population background unavailable: {exc}"
+    cards = _render_diagnostic_plots(record, str(theme or DEFAULT_THEME), background=background)
+    if not cards:
+        return [], status or "No diagnostic plots available for this candidate."
+    return cards, status
+
+
 def _resolve_sources(args) -> list[Path]:
     review_dbs = getattr(args, "review_db", None) or []
     if review_dbs:
@@ -911,41 +1254,16 @@ def _slugify_token(value: object, *, fallback: str = "selection") -> str:
 
 
 def _journal_export_figure(figure: go.Figure | dict[str, object]) -> go.Figure:
-    export_fig = go.Figure(figure)
-    export_fig.update_layout(
-        template="plotly_white",
-        paper_bgcolor="white",
-        plot_bgcolor="white",
-        font={"color": "#111111", "family": "Helvetica, Arial, sans-serif", "size": 12},
-        title_font={"color": "#111111", "family": "Helvetica, Arial, sans-serif", "size": 16},
-        margin={"t": 82, "l": 84, "r": 30, "b": 72},
-        legend={
-            "bgcolor": "rgba(255,255,255,0.96)",
-            "bordercolor": "rgba(40,40,40,0.20)",
-            "borderwidth": 1,
-            "font": {"color": "#111111", "family": "Helvetica, Arial, sans-serif", "size": 10},
-        },
-        autosize=False,
+    return publication_figure(
+        figure,
         width=1400,
         height=900,
+        legend_outside=True,
+        right_margin=280,
+        top_margin=86,
+        left_margin=86,
+        bottom_margin=76,
     )
-    export_fig.update_xaxes(
-        color="#111111",
-        title_font_color="#111111",
-        tickfont_color="#111111",
-        showgrid=True,
-        gridcolor="rgba(0,0,0,0.12)",
-        zeroline=False,
-    )
-    export_fig.update_yaxes(
-        color="#111111",
-        title_font_color="#111111",
-        tickfont_color="#111111",
-        showgrid=True,
-        gridcolor="rgba(0,0,0,0.12)",
-        zeroline=False,
-    )
-    return export_fig
 
 
 def _axis_window_from_relayout(relayout_data: dict[str, object] | None, axis: str, *, log_axis: bool) -> tuple[float, float] | None:
@@ -1162,6 +1480,27 @@ def _record_review_target(record: dict[str, object]) -> tuple[Path | None, Path 
     return source_path, infer_plot_dir_from_source(source_path)
 
 
+def _freshen_record_from_db(record: dict[str, object] | None) -> dict[str, object] | None:
+    if not isinstance(record, dict):
+        return record
+    review_db, _plot_dir = _record_review_target(record)
+    candidate_id = _record_candidate_id(record)
+    if review_db is None or not candidate_id:
+        return dict(record)
+    try:
+        with closing(db_connect(review_db)) as conn:
+            payload = get_candidate_payload(conn, candidate_id)
+            review = get_review(conn, candidate_id)
+    except Exception:
+        return dict(record)
+    merged = dict(record)
+    if isinstance(payload, dict):
+        merged.update(payload)
+    if isinstance(review, dict):
+        merged.update(_normalize_review_state(review))
+    return merged
+
+
 def _graph_layout(height: int | None, *, theme: str = DEFAULT_THEME, uirevision: str | None = None) -> dict[str, object]:
     colors = _theme_palette(theme)
     layout: dict[str, object] = {
@@ -1296,7 +1635,7 @@ def _graph_card(graph_id: str, reset_button_id: str, *, height: str, class_name:
             dcc.Graph(
                 id=graph_id,
                 mathjax=True,
-                config={"displaylogo": False, "scrollZoom": True, "doubleClick": False},
+                config=graph_config_without_image_export({"displaylogo": False, "scrollZoom": True, "doubleClick": False}),
                 style={"height": height},
                 className="explorer-graph",
             ),
@@ -1881,6 +2220,11 @@ def build_explorer_app(
             dcc.Store(id="saved-explorer-gui-state", data=None),
             dcc.Store(id="explorer-review-overrides", data={}, storage_type="session"),
             dcc.Store(id="explorer-review-save-request", data={"nonce": 0}),
+            dcc.Store(id="explorer-taxonomy-selection-store", data={}),
+            dcc.Store(id="explorer-active-taxonomy-menu", data=""),
+            dcc.Store(id="explorer-taxonomy-submenu-store", data=""),
+            dcc.Store(id="explorer-dustycult-refresh-token", data=0),
+            dcc.Store(id="explorer-pipeline-refresh-token", data=0),
             dcc.Store(id="explorer-review-launch-url", data=""),
             dcc.Store(id="explorer-review-launch-pending", data=0),
             dcc.Store(id="explorer-review-launch-opened", data=0),
@@ -1891,13 +2235,15 @@ def build_explorer_app(
             dcc.Interval(id="explorer-keyboard-init", interval=200, n_intervals=0, max_intervals=1),
             dcc.Download(id="explorer-plot-download"),
             dcc.Download(id="explorer-native-plot-download"),
+            dcc.Download(id="explorer-sed-download"),
+            dcc.Download(id="explorer-dustycult-download"),
+            dcc.Download(id="explorer-mini-plot-download"),
             html.Div(
                 [
                     html.Button("Hide Sidebar", id="explorer-sidebar-toggle", n_clicks=0, className="explorer-action-btn explorer-sidebar-toggle"),
                     html.Div(
                         [
-                            html.Div("MALCA Explorer", className="explorer-main-title"),
-                            html.Div(f"Sources: {len(combined.sources)} | Rows: {len(combined.df):,}", className="explorer-main-subtitle"),
+                            html.Div(f"[{len(combined.sources):,}/{len(combined.df):,}]", className="explorer-main-subtitle"),
                         ],
                         className="explorer-main-header",
                     ),
@@ -2097,7 +2443,7 @@ def build_explorer_app(
                                             dcc.Graph(
                                                 id="custom-graph",
                                                 mathjax=True,
-                                                config={"displaylogo": False, "scrollZoom": True, "doubleClick": False, "responsive": True},
+                                                config=graph_config_without_image_export({"displaylogo": False, "scrollZoom": True, "doubleClick": False, "responsive": True}),
                                                 responsive=True,
                                                 style={"height": "clamp(360px, 56vh, 760px)", "width": "100%", "minWidth": "0"},
                                                 className="explorer-graph",
@@ -2173,10 +2519,38 @@ def build_explorer_app(
                                             html.Div(id="selected-status", className="explorer-status-line"),
                                             html.Div(id="review-launch-status", className="explorer-status-line"),
                                             html.Div(id="viewer-summary", className="explorer-summary"),
+                                            html.Div(id="explorer-metadata-health", className="explorer-panel-status"),
+                                            html.Div(id="explorer-vetting-banner"),
                                             html.Hr(className="explorer-rule"),
-                                            html.Div("Explorer grading", className="explorer-card-title"),
+                                            html.Div("Review taxonomy", className="explorer-card-title"),
                                             html.Div(id="explorer-review-target-status", className="explorer-status-line"),
+                                            html.Div(id="explorer-review-pass-status", className="explorer-status-line"),
                                             html.Div(id="explorer-review-save-status", className="explorer-status-line"),
+                                            html.Div(
+                                                [
+                                                    html.Button(
+                                                        f"[{item['key'].upper()}] {item['label']}",
+                                                        id={"type": "explorer-taxonomy-primary-btn", "value": item["value"]},
+                                                        n_clicks=0,
+                                                        className="explorer-taxonomy-btn",
+                                                    )
+                                                    for item in MORPHOLOGY_PRIMARY
+                                                ],
+                                                className="explorer-taxonomy-button-grid",
+                                            ),
+                                            html.Div(
+                                                [
+                                                    html.Button(
+                                                        "[H] hypothesis",
+                                                        id="explorer-taxonomy-hypothesis-btn",
+                                                        n_clicks=0,
+                                                        className="explorer-taxonomy-btn",
+                                                    )
+                                                ],
+                                                className="explorer-button-row",
+                                            ),
+                                            html.Div(id="explorer-taxonomy-submenu-panel", className="explorer-taxonomy-submenu"),
+                                            html.Div(id="explorer-taxonomy-summary", className="explorer-status-line"),
                                             _label("Class"),
                                             dcc.Dropdown(
                                                 id="explorer-review-class",
@@ -2212,11 +2586,98 @@ def build_explorer_app(
                                                         n_clicks=0,
                                                         className="explorer-action-btn explorer-primary-btn",
                                                     ),
+                                                    html.Button(
+                                                        "Save + Next",
+                                                        id="explorer-review-done-btn",
+                                                        n_clicks=0,
+                                                        className="explorer-action-btn",
+                                                    ),
                                                 ],
                                                 className="explorer-button-row",
                                             ),
                                         ],
                                         className="explorer-card",
+                                    ),
+                                    html.Div(
+                                        [
+                                            html.Div("Pipeline", className="explorer-card-title"),
+                                            html.Div(id="explorer-pipeline-status-chips", className="explorer-pipeline-chip-row"),
+                                            html.Div(
+                                                [
+                                                    html.Button("Run Missing", id="explorer-run-pipeline-btn", n_clicks=0, className="explorer-action-btn"),
+                                                    html.Button("Stats", id="explorer-rerun-stage-stats-btn", n_clicks=0, className="explorer-action-btn"),
+                                                    html.Button("Events", id="explorer-rerun-stage-events-btn", n_clicks=0, className="explorer-action-btn"),
+                                                    html.Button("Characterize", id="explorer-rerun-stage-characterize-btn", n_clicks=0, className="explorer-action-btn"),
+                                                    html.Button("SED", id="explorer-rerun-stage-sed-photometry-btn", n_clicks=0, className="explorer-action-btn"),
+                                                    html.Button("Vetting", id="explorer-rerun-stage-vetting-btn", n_clicks=0, className="explorer-action-btn"),
+                                                    html.Button("External LCs", id="explorer-rerun-stage-external-lcs-btn", n_clicks=0, className="explorer-action-btn"),
+                                                    html.Button("Multi-survey", id="explorer-rerun-stage-multi-survey-btn", n_clicks=0, className="explorer-action-btn"),
+                                                ],
+                                                className="explorer-button-row",
+                                            ),
+                                            html.Div(id="explorer-pipeline-run-status", className="explorer-status-line"),
+                                        ],
+                                        className="explorer-card",
+                                    ),
+                                    html.Div(
+                                        [
+                                            html.Details(
+                                                [
+                                                    html.Summary("Candidate Panels"),
+                                                    html.Div(id="explorer-candidate-panels"),
+                                                ],
+                                                open=False,
+                                                className="explorer-details",
+                                            ),
+                                            html.Details(
+                                                [
+                                                    html.Summary("External Data"),
+                                                    html.Div(id="explorer-external-panel", className="explorer-panel-grid"),
+                                                ],
+                                                open=False,
+                                                className="explorer-details",
+                                            ),
+                                            html.Details(
+                                                [
+                                                    html.Summary("SED"),
+                                                    dcc.RadioItems(
+                                                        id="explorer-sed-extinction-mode",
+                                                        options=[
+                                                            {"label": " Observed", "value": "observed"},
+                                                            {"label": " ISM-corrected", "value": "corrected"},
+                                                            {"label": " Both", "value": "both"},
+                                                        ],
+                                                        value="corrected",
+                                                        className="explorer-inline-radio",
+                                                    ),
+                                                    html.Button("Export SED PDF", id="explorer-export-sed-plot", n_clicks=0, className="explorer-action-btn"),
+                                                    html.Div(id="explorer-sed-status", className="explorer-status-line"),
+                                                    dcc.Loading(html.Div(id="explorer-sed-panel"), type="default"),
+                                                ],
+                                                open=False,
+                                                className="explorer-details",
+                                            ),
+                                            html.Details(
+                                                [
+                                                    html.Summary("DustyCult"),
+                                                    html.Div(id="explorer-dustycult-config-status", className="explorer-status-line"),
+                                                    _dustycult_controls_layout(),
+                                                    dcc.Loading(html.Div(id="explorer-dustycult-result-panel"), type="default"),
+                                                ],
+                                                open=False,
+                                                className="explorer-details",
+                                            ),
+                                            html.Details(
+                                                [
+                                                    html.Summary("Diagnostic Plots"),
+                                                    html.Div(id="explorer-diagnostic-plots-status", className="explorer-status-line"),
+                                                    dcc.Loading(html.Div(id="explorer-diagnostic-plots-panel", className="explorer-panel-grid"), type="default"),
+                                                ],
+                                                open=False,
+                                                className="explorer-details",
+                                            ),
+                                        ],
+                                        className="explorer-card explorer-review-panels-card",
                                     ),
                                     html.Div(
                                         [
@@ -2231,7 +2692,7 @@ def build_explorer_app(
                                             dcc.Graph(
                                                 id="lightcurve-graph",
                                                 mathjax=True,
-                                                config={"displaylogo": False, "scrollZoom": True, "doubleClick": False, "responsive": True},
+                                                config=graph_config_without_image_export({"displaylogo": False, "scrollZoom": True, "doubleClick": False, "responsive": True}),
                                                 responsive=True,
                                                 style={"height": "clamp(420px, 72vh, 1100px)", "width": "100%", "minWidth": "0"},
                                                 className="explorer-graph",
@@ -2421,6 +2882,11 @@ def build_explorer_app(
         Input("explorer-filter-search-query", "n_submit"),
         prevent_initial_call=False,
     )
+
+    def _selected_record_for_callbacks(selected_key, review_overrides):
+        source_frame = _apply_review_overrides(combined.df, review_overrides)
+        record = _get_candidate_record_from_frame(source_frame, selected_key) or get_candidate_record_by_key(combined, selected_key)
+        return _freshen_record_from_db(record)
 
     @app.callback(
         Output("saved-explorer-gui-state", "data"),
@@ -2983,7 +3449,14 @@ def build_explorer_app(
         if not figure:
             return dash.no_update, "No custom plot is available to export."
         try:
-            image_bytes = pio.to_image(_journal_export_figure(figure), format="pdf", width=1400, height=900)
+            image_bytes = render_publication_pdf(
+                _journal_export_figure(figure),
+                title="Explorer Custom Plot",
+                width=1400,
+                height=900,
+                legend_outside=True,
+                style=False,
+            )
         except Exception as exc:
             return dash.no_update, f"PDF export failed: {exc}"
         slug_x = _slugify_token(x_metric or "x")
@@ -2997,15 +3470,74 @@ def build_explorer_app(
         Input("export-native-pdf-btn", "n_clicks"),
         State("lightcurve-graph", "figure"),
         State("selected-key-store", "data"),
+        State("camera-checklist", "value"),
+        State("band-checklist", "value"),
+        State("panel-options", "value"),
+        State("period-input", "value"),
+        State("yaxis-mode", "value"),
+        State("period-search-store", "data"),
+        State("theme-mode-store", "data"),
+        State("explorer-review-overrides", "data"),
         prevent_initial_call=True,
     )
-    def export_native_plot_pdf(n_clicks, figure, selected_key):
+    def export_native_plot_pdf(
+        n_clicks,
+        figure,
+        selected_key,
+        selected_cameras,
+        selected_bands,
+        panel_options,
+        period_value,
+        yaxis_mode,
+        period_search_result,
+        theme_mode,
+        review_overrides,
+    ):
         if not n_clicks:
             return dash.no_update, dash.no_update
-        if not figure:
+        if not figure and not selected_key:
             return dash.no_update, "No native light curve plot is available to export."
         try:
-            image_bytes = pio.to_image(_journal_export_figure(figure), format="pdf", width=1400, height=900)
+            source_frame = _apply_review_overrides(combined.df, review_overrides)
+            record = _get_candidate_record_from_frame(source_frame, selected_key) or get_candidate_record_by_key(combined, selected_key)
+            if record is None:
+                return dash.no_update, "No candidate selected."
+            plot_dir = infer_plot_dir_for_record(record, Path(str(record.get("plot_dir"))).expanduser().resolve() if record.get("plot_dir") else None)
+            run_params = load_run_params(plot_dir)
+            options = set(panel_options or [])
+            override_period = None
+            if period_value not in (None, ""):
+                try:
+                    candidate_period = float(period_value)
+                    if candidate_period > 0:
+                        override_period = candidate_period
+                except Exception:
+                    override_period = None
+            if override_period is None and isinstance(period_search_result, dict):
+                try:
+                    period_candidate = float(period_search_result.get("best_period"))
+                    if np.isfinite(period_candidate) and period_candidate > 0:
+                        override_period = period_candidate
+                except Exception:
+                    override_period = None
+            _ = theme_mode
+            image_bytes = build_review_lightcurve_publication_pdf(
+                record,
+                plot_dir=plot_dir,
+                selected_cameras=selected_cameras or [],
+                selected_bands=selected_bands or ["g", "V"],
+                filter_bad_cameras="filter_bad_cameras" in options,
+                show_baseline="baseline" in options,
+                show_event_markers="events" in options,
+                show_residuals="resid" in options,
+                show_phase_fold="phase" in options,
+                show_raw_mag="raw" in options,
+                override_period=override_period,
+                show_diagnostics="diagnostics" in options,
+                confidence_colors=True,
+                run_params=run_params,
+                yaxis_mode="flux" if str(yaxis_mode or "mag") == "flux" else "mag",
+            )
         except Exception as exc:
             return dash.no_update, f"Native PDF export failed: {exc}"
         fname = f"explorer_native_lightcurve_{_slugify_token(selected_key or 'candidate')}.pdf"
@@ -3164,7 +3696,16 @@ def build_explorer_app(
             result = export_review_subset_bundle(bundle_dir, export_df, selection_meta=selection_meta)
             if figure:
                 pdf_path = Path(result["bundle_dir"]) / "selection_plot.pdf"
-                pdf_path.write_bytes(pio.to_image(_journal_export_figure(figure), format="pdf", width=1400, height=900))
+                pdf_path.write_bytes(
+                    render_publication_pdf(
+                        _journal_export_figure(figure),
+                        title="Explorer Selection Plot",
+                        width=1400,
+                        height=900,
+                        legend_outside=True,
+                        style=False,
+                    )
+                )
             review_db = Path(result["review_db"])
             if triggered == "open-selection-in-review-btn":
                 selected_record = _get_candidate_record_from_frame(source_frame, selected_key) or get_candidate_record_by_key(combined, selected_key)
@@ -3244,16 +3785,17 @@ def build_explorer_app(
         Output("explorer-review-followup", "value"),
         Output("explorer-review-notes", "value"),
         Output("explorer-review-target-status", "children"),
+        Output("explorer-review-pass-status", "children"),
         Output("explorer-review-save-btn", "disabled"),
+        Output("explorer-review-done-btn", "disabled"),
         Input("selected-key-store", "data"),
         Input("explorer-review-overrides", "data"),
         prevent_initial_call=False,
     )
     def load_explorer_review_form(selected_key, review_overrides):
-        source_frame = _apply_review_overrides(combined.df, review_overrides)
-        record = _get_candidate_record_from_frame(source_frame, selected_key) or get_candidate_record_by_key(combined, selected_key)
+        record = _selected_record_for_callbacks(selected_key, review_overrides)
         if record is None:
-            return "unclassified", None, [], "", "No candidate selected.", True
+            return "unclassified", None, [], "", "No candidate selected.", "Pass: n/a", True, True
 
         review_state = _record_review_state(record)
         review_db, _plot_dir = _record_review_target(record)
@@ -3269,6 +3811,8 @@ def build_explorer_app(
                     ["followup"] if review_state.get("status") == "needs_followup" else [],
                     str(review_state.get("notes") or ""),
                     f"Inline grading unavailable: {exc}",
+                    f"Pass: {review_state.get('review_pass') or 1}",
+                    True,
                     True,
                 )
             target_status = f"Inline grading saves to {review_db}"
@@ -3283,8 +3827,519 @@ def build_explorer_app(
             ["followup"] if review_state.get("status") == "needs_followup" else [],
             str(review_state.get("notes") or ""),
             target_status,
+            f"Pass: {review_state.get('review_pass') or 1}",
+            save_disabled,
             save_disabled,
         )
+
+    @app.callback(
+        Output("explorer-metadata-health", "children"),
+        Output("explorer-vetting-banner", "children"),
+        Output("explorer-candidate-panels", "children"),
+        Output("explorer-external-panel", "children"),
+        Output("explorer-pipeline-status-chips", "children"),
+        Input("selected-key-store", "data"),
+        Input("theme-mode-store", "data"),
+        Input("explorer-review-overrides", "data"),
+        Input("explorer-pipeline-refresh-token", "data"),
+        prevent_initial_call=False,
+    )
+    def render_explorer_review_panels(selected_key, theme_mode, review_overrides, _pipeline_refresh_token):
+        record = _selected_record_for_callbacks(selected_key, review_overrides)
+        if record is None:
+            health, banner, panels = _render_explorer_metadata_panels(None)
+            return health, banner, panels, _panel_message("No candidate selected."), []
+        health, banner, panels = _render_explorer_metadata_panels(record)
+        candidate_id = _record_candidate_id(record) or str(selected_key or "")
+        _review_db, plot_dir = _record_review_target(record)
+        try:
+            external = _render_external_followup(record, candidate_id, str(theme_mode or DEFAULT_THEME), plot_dir=plot_dir)
+        except Exception as exc:
+            external = [_panel_message(f"External data rendering failed: {exc}")]
+        return health, banner, panels, external, _render_explorer_pipeline_chips(record)
+
+    @app.callback(
+        Output("explorer-sed-panel", "children"),
+        Output("explorer-sed-status", "children"),
+        Input("selected-key-store", "data"),
+        Input("explorer-sed-extinction-mode", "value"),
+        Input("theme-mode-store", "data"),
+        Input("explorer-pipeline-refresh-token", "data"),
+        State("explorer-review-overrides", "data"),
+        prevent_initial_call=False,
+    )
+    def render_explorer_sed_panel(selected_key, extinction_mode, theme_mode, _pipeline_refresh_token, review_overrides):
+        record = _selected_record_for_callbacks(selected_key, review_overrides)
+        return _render_explorer_sed_panel(record, extinction_mode, theme_mode)
+
+    @app.callback(
+        Output("explorer-sed-download", "data"),
+        Output("explorer-sed-status", "children", allow_duplicate=True),
+        Input("explorer-export-sed-plot", "n_clicks"),
+        State("selected-key-store", "data"),
+        State("explorer-sed-extinction-mode", "value"),
+        State("theme-mode-store", "data"),
+        State("explorer-review-overrides", "data"),
+        prevent_initial_call=True,
+    )
+    def export_explorer_sed_pdf(n_clicks, selected_key, extinction_mode, theme_mode, review_overrides):
+        if not n_clicks:
+            raise dash.exceptions.PreventUpdate
+        record = _selected_record_for_callbacks(selected_key, review_overrides)
+        if record is None:
+            return dash.no_update, "No candidate selected."
+        candidate_id = _record_candidate_id(record)
+        review_db, _plot_dir = _record_review_target(record)
+        if review_db is None or not candidate_id:
+            return dash.no_update, "SED export requires a DB-backed candidate."
+        try:
+            with closing(db_connect(review_db)) as conn:
+                rows = load_sed_rows(conn, candidate_id)
+                curves = load_sed_model_curves(conn, candidate_id)
+                fits = load_sed_model_fits(conn, candidate_id)
+            fig, _rows, _warnings = build_sed_figure(
+                record,
+                candidate_id=candidate_id,
+                external_rows=rows,
+                model_curve_rows=curves,
+                model_fit_rows=fits,
+                extinction_mode=str(extinction_mode or "corrected"),
+                theme="white",
+            )
+            image_bytes = render_publication_pdf(
+                fig,
+                title="Spectral Energy Distribution",
+                width=1200,
+                height=820,
+                legend_outside=True,
+                right_margin=285,
+                top_margin=92,
+                bottom_margin=84,
+                left_margin=96,
+            )
+        except Exception as exc:
+            return dash.no_update, f"SED PDF export failed: {exc}"
+        safe_id = _slugify_token(candidate_id, fallback="candidate")
+        return dcc.send_bytes(image_bytes, f"{safe_id}_sed.pdf"), f"Exported {safe_id}_sed.pdf"
+
+    @app.callback(
+        Output("explorer-diagnostic-plots-panel", "children"),
+        Output("explorer-diagnostic-plots-status", "children"),
+        Input("selected-key-store", "data"),
+        Input("theme-mode-store", "data"),
+        Input("explorer-pipeline-refresh-token", "data"),
+        State("explorer-review-overrides", "data"),
+        prevent_initial_call=False,
+    )
+    def render_explorer_diagnostic_panel(selected_key, theme_mode, _pipeline_refresh_token, review_overrides):
+        record = _selected_record_for_callbacks(selected_key, review_overrides)
+        return _render_explorer_diagnostic_panels(record, theme_mode)
+
+    @app.callback(
+        Output("explorer-mini-plot-download", "data"),
+        Output("bundle-status", "children", allow_duplicate=True),
+        Input({"type": "mini-plot-export-btn", "panel": ALL, "name": ALL}, "n_clicks"),
+        State({"type": "mini-plot-export-graph", "panel": ALL, "name": ALL}, "id"),
+        State({"type": "mini-plot-export-graph", "panel": ALL, "name": ALL}, "figure"),
+        State("selected-key-store", "data"),
+        State("explorer-review-overrides", "data"),
+        prevent_initial_call=True,
+    )
+    def export_explorer_mini_plot_pdf(_clicks, graph_ids, figures, selected_key, review_overrides):
+        record = _selected_record_for_callbacks(selected_key, review_overrides)
+        candidate_id = _record_candidate_id(record) if record is not None else str(selected_key or "")
+        button_inputs = dash.callback_context.inputs_list[0] if dash.callback_context.inputs_list else []
+        if isinstance(button_inputs, dict):
+            button_inputs = [button_inputs]
+        button_ids = [item.get("id") for item in button_inputs if isinstance(item, dict)]
+        return _export_mini_plot_pdf_from_state(
+            dash.callback_context.triggered_id,
+            button_ids,
+            _clicks,
+            graph_ids,
+            figures,
+            candidate_id,
+        )
+
+    @app.callback(
+        Output("explorer-dustycult-result-panel", "children"),
+        Output("explorer-dustycult-config-status", "children"),
+        Input("selected-key-store", "data"),
+        Input("theme-mode-store", "data"),
+        Input("explorer-dustycult-refresh-token", "data"),
+        State("explorer-review-overrides", "data"),
+        prevent_initial_call=False,
+    )
+    def render_explorer_dustycult_panel(selected_key, theme_mode, refresh_token, review_overrides):
+        record = _selected_record_for_callbacks(selected_key, review_overrides)
+        return _render_explorer_dustycult_panel(record, theme_mode, refresh_token)
+
+    @app.callback(
+        Output("explorer-dustycult-download", "data"),
+        Output("explorer-dustycult-config-status", "children", allow_duplicate=True),
+        Input("dustycult-export-fit-btn", "n_clicks"),
+        Input("dustycult-export-occulter-btn", "n_clicks"),
+        State("selected-key-store", "data"),
+        State("explorer-review-overrides", "data"),
+        prevent_initial_call=True,
+    )
+    def export_explorer_dustycult_pdf(fit_clicks, occulter_clicks, selected_key, review_overrides):
+        triggered = dash.callback_context.triggered_id
+        if not triggered or (triggered == "dustycult-export-fit-btn" and not fit_clicks) or (triggered == "dustycult-export-occulter-btn" and not occulter_clicks):
+            raise dash.exceptions.PreventUpdate
+        record = _selected_record_for_callbacks(selected_key, review_overrides)
+        if record is None:
+            return dash.no_update, "No candidate selected."
+        candidate_id = _record_candidate_id(record)
+        review_db, _plot_dir = _record_review_target(record)
+        if review_db is None or not candidate_id:
+            return dash.no_update, "DustyCult export requires a DB-backed candidate."
+        try:
+            with closing(db_connect(review_db)) as conn:
+                if triggered == "dustycult-export-occulter-btn":
+                    fig, mode = _dustycult_occulter_publication_figure(conn, candidate_id)
+                    kind = "occulter"
+                    width, height = 1200, 620
+                else:
+                    fig, mode = _dustycult_fit_publication_figure(conn, candidate_id)
+                    kind = "fit"
+                    width, height = 1200, 820
+                image_bytes = render_publication_pdf(
+                    fig,
+                    title=f"DustyCult {kind.capitalize()}",
+                    width=width,
+                    height=height,
+                    legend_outside=kind != "occulter",
+                    style=False,
+                )
+        except Exception as exc:
+            return dash.no_update, f"DustyCult PDF export failed: {exc}"
+        safe_id = slugify_token(candidate_id, fallback="candidate")
+        fname = f"malca_dustycult_{kind}_{safe_id}_{mode}.pdf"
+        return dcc.send_bytes(image_bytes, fname), f"Exported {fname}"
+
+    @app.callback(
+        [Output(field_id, "value") for _key, field_id, _label, _step in _DUSTYCULT_CONTROL_FIELDS]
+        + [Output("dustycult-defaults-status", "children")],
+        [Input("selected-key-store", "data"),
+         Input("dustycult-recompute-dip-btn", "n_clicks")],
+        State("explorer-review-overrides", "data"),
+        prevent_initial_call=False,
+    )
+    def update_explorer_dustycult_controls(selected_key, _recompute_clicks, review_overrides):
+        record = _selected_record_for_callbacks(selected_key, review_overrides)
+        if record is None:
+            return tuple([None] * len(_DUSTYCULT_CONTROL_FIELDS) + ["No candidate selected."])
+        candidate_id = _record_candidate_id(record)
+        review_db, plot_dir = _record_review_target(record)
+        run_params = load_run_params(plot_dir)
+        triggered = dash.callback_context.triggered_id
+        recompute = triggered == "dustycult-recompute-dip-btn"
+        try:
+            if review_db is not None:
+                with closing(db_connect(review_db)) as conn:
+                    defaults = control_defaults_for_candidate(
+                        conn,
+                        candidate_id,
+                        record,
+                        lc_path=_record_lc_path(record),
+                        plot_dir=plot_dir,
+                        run_params=run_params,
+                        recompute=recompute,
+                    )
+            else:
+                defaults = control_defaults_for_candidate(
+                    None,
+                    candidate_id,
+                    record,
+                    lc_path=_record_lc_path(record),
+                    plot_dir=plot_dir,
+                    run_params=run_params,
+                    recompute=recompute,
+                )
+        except Exception as exc:
+            return tuple([None] * len(_DUSTYCULT_CONTROL_FIELDS) + [f"DustyCult defaults failed: {exc}"])
+        values = [defaults.get(key) for key, _field_id, _label, _step in _DUSTYCULT_CONTROL_FIELDS]
+        msg = f"{defaults.get('source', 'unknown')}: {defaults.get('message', '')}".strip()
+        return tuple(values + [msg])
+
+    @app.callback(
+        Output("dustycult-run-status", "children"),
+        Output("explorer-dustycult-refresh-token", "data"),
+        Input("dustycult-quick-fit-btn", "n_clicks"),
+        Input("dustycult-full-fit-btn", "n_clicks"),
+        State("selected-key-store", "data"),
+        State("explorer-dustycult-refresh-token", "data"),
+        State("explorer-review-overrides", "data"),
+        *[State(field_id, "value") for _key, field_id, _label, _step in _DUSTYCULT_CONTROL_FIELDS],
+        prevent_initial_call=True,
+    )
+    def run_explorer_dustycult_fit(quick_clicks, full_clicks, selected_key, refresh_token, review_overrides, *control_values):
+        triggered = dash.callback_context.triggered_id
+        if triggered == "dustycult-quick-fit-btn":
+            if not quick_clicks:
+                raise dash.exceptions.PreventUpdate
+            mode = "quick"
+        elif triggered == "dustycult-full-fit-btn":
+            if not full_clicks:
+                raise dash.exceptions.PreventUpdate
+            mode = "full"
+        else:
+            raise dash.exceptions.PreventUpdate
+        record = _selected_record_for_callbacks(selected_key, review_overrides)
+        if record is None:
+            return "No candidate selected.", refresh_token or 0
+        candidate_id = _record_candidate_id(record)
+        review_db, plot_dir = _record_review_target(record)
+        if review_db is None or not candidate_id:
+            return "DustyCult fits require a DB-backed candidate.", refresh_token or 0
+        controls = _dustycult_control_values_from_states(control_values)
+        run_params = load_run_params(plot_dir)
+        try:
+            with closing(db_connect(review_db)) as conn:
+                row = run_dustycult_fit(
+                    conn,
+                    candidate_id,
+                    record,
+                    db_path=review_db,
+                    controls=controls,
+                    mode=mode,
+                    lc_path=_record_lc_path(record),
+                    plot_dir=plot_dir,
+                    run_params=run_params,
+                )
+        except Exception as exc:
+            return f"DustyCult {mode} fit crashed: {exc}", int(refresh_token or 0) + 1
+        status = str(row.get("status") or "unknown")
+        if status == "ok":
+            return f"DustyCult {mode} fit complete.", int(refresh_token or 0) + 1
+        return f"DustyCult {mode} fit failed: {row.get('error') or 'unknown error'}", int(refresh_token or 0) + 1
+
+    @app.callback(
+        Output("explorer-pipeline-run-status", "children"),
+        Output("explorer-pipeline-refresh-token", "data"),
+        Input("explorer-run-pipeline-btn", "n_clicks"),
+        Input("explorer-rerun-stage-stats-btn", "n_clicks"),
+        Input("explorer-rerun-stage-events-btn", "n_clicks"),
+        Input("explorer-rerun-stage-characterize-btn", "n_clicks"),
+        Input("explorer-rerun-stage-sed-photometry-btn", "n_clicks"),
+        Input("explorer-rerun-stage-vetting-btn", "n_clicks"),
+        Input("explorer-rerun-stage-external-lcs-btn", "n_clicks"),
+        Input("explorer-rerun-stage-multi-survey-btn", "n_clicks"),
+        State("selected-key-store", "data"),
+        State("explorer-pipeline-refresh-token", "data"),
+        State("explorer-review-overrides", "data"),
+        prevent_initial_call=True,
+    )
+    def run_explorer_pipeline_stage(
+        run_clicks,
+        stats_clicks,
+        events_clicks,
+        characterize_clicks,
+        sed_clicks,
+        vetting_clicks,
+        external_clicks,
+        multi_clicks,
+        selected_key,
+        refresh_token,
+        review_overrides,
+    ):
+        _ = run_clicks, stats_clicks, events_clicks, characterize_clicks, sed_clicks, vetting_clicks, external_clicks, multi_clicks
+        trigger = dash.callback_context.triggered_id
+        if not trigger:
+            raise dash.exceptions.PreventUpdate
+        stage_map = {
+            "explorer-rerun-stage-stats-btn": "stats",
+            "explorer-rerun-stage-events-btn": "events",
+            "explorer-rerun-stage-characterize-btn": "characterize",
+            "explorer-rerun-stage-sed-photometry-btn": "sed_photometry",
+            "explorer-rerun-stage-vetting-btn": "vetting",
+            "explorer-rerun-stage-external-lcs-btn": "external_lcs",
+            "explorer-rerun-stage-multi-survey-btn": "multi_survey_features",
+        }
+        force = []
+        only_force = False
+        if trigger in stage_map:
+            force = [stage_map[trigger]]
+            only_force = True
+        record = _selected_record_for_callbacks(selected_key, review_overrides)
+        if record is None:
+            return "No candidate selected.", int(refresh_token or 0)
+        candidate_id = _record_candidate_id(record)
+        review_db, _plot_dir = _record_review_target(record)
+        if review_db is None or not candidate_id:
+            return "Pipeline recompute requires a DB-backed candidate.", int(refresh_token or 0)
+        messages: list[str] = []
+        try:
+            with closing(db_connect(review_db)) as conn:
+                stages = run_missing_stages(
+                    conn,
+                    candidate_id,
+                    progress_callback=lambda msg: messages.append(str(msg)),
+                    force_stages=force,
+                    only_force=only_force,
+                )
+                conn.commit()
+        except Exception as exc:
+            return f"Pipeline run failed: {exc}", int(refresh_token or 0) + 1
+        if stages:
+            return f"Ran: {', '.join(stages)}", int(refresh_token or 0) + 1
+        detail = messages[-1] if messages else "No stages needed."
+        return detail, int(refresh_token or 0) + 1
+
+    @app.callback(
+        Output("explorer-taxonomy-selection-store", "data"),
+        Output("explorer-active-taxonomy-menu", "data"),
+        Output("explorer-taxonomy-submenu-store", "data"),
+        Input("selected-key-store", "data"),
+        Input("explorer-review-overrides", "data"),
+        prevent_initial_call=False,
+    )
+    def load_explorer_taxonomy_selection(selected_key, review_overrides):
+        record = _selected_record_for_callbacks(selected_key, review_overrides)
+        if record is None:
+            return {}, "", ""
+        review_db, _plot_dir = _record_review_target(record)
+        candidate_id = _record_candidate_id(record)
+        raw_review = record
+        if review_db is not None and candidate_id:
+            try:
+                with closing(db_connect(review_db)) as conn:
+                    raw_review = get_review(conn, candidate_id)
+            except Exception:
+                raw_review = record
+        return selection_from_review(raw_review), "", ""
+
+    @app.callback(
+        Output("explorer-taxonomy-selection-store", "data", allow_duplicate=True),
+        Output("explorer-active-taxonomy-menu", "data", allow_duplicate=True),
+        Output("explorer-taxonomy-submenu-store", "data", allow_duplicate=True),
+        Input({"type": "explorer-taxonomy-primary-btn", "value": ALL}, "n_clicks"),
+        Input("explorer-taxonomy-hypothesis-btn", "n_clicks"),
+        State("explorer-taxonomy-selection-store", "data"),
+        State("explorer-active-taxonomy-menu", "data"),
+        prevent_initial_call=True,
+    )
+    def click_explorer_taxonomy_primary(_primary_clicks, _hypothesis_clicks, selection, active_menu):
+        triggered = dash.callback_context.triggered_id
+        if not triggered:
+            raise dash.exceptions.PreventUpdate
+        current = selection_from_review(selection if isinstance(selection, dict) else {})
+        if triggered == "explorer-taxonomy-hypothesis-btn":
+            next_menu = "" if active_menu in {"physical_primary", "physical_secondary"} else "physical_primary"
+            return current, next_menu, ""
+        if not isinstance(triggered, dict) or triggered.get("type") != "explorer-taxonomy-primary-btn":
+            raise dash.exceptions.PreventUpdate
+        value = str(triggered.get("value") or "")
+        if not value:
+            raise dash.exceptions.PreventUpdate
+        if current.get("morphology_primary") == value:
+            current["morphology_primary"] = None
+            current["morphology_secondary"] = None
+            return current, "", ""
+        current["morphology_primary"] = value
+        current["morphology_secondary"] = None
+        return current, "morphology_secondary", ""
+
+    @app.callback(
+        Output("explorer-taxonomy-selection-store", "data", allow_duplicate=True),
+        Output("explorer-active-taxonomy-menu", "data", allow_duplicate=True),
+        Output("explorer-taxonomy-submenu-store", "data", allow_duplicate=True),
+        Input({"type": "explorer-taxonomy-option-btn", "menu": ALL, "value": ALL}, "n_clicks"),
+        State("explorer-taxonomy-selection-store", "data"),
+        State("explorer-active-taxonomy-menu", "data"),
+        prevent_initial_call=True,
+    )
+    def click_explorer_taxonomy_option(_option_clicks, selection, active_menu):
+        triggered = dash.callback_context.triggered_id
+        if not isinstance(triggered, dict) or triggered.get("type") != "explorer-taxonomy-option-btn":
+            raise dash.exceptions.PreventUpdate
+        menu = str(triggered.get("menu") or active_menu or "")
+        value = str(triggered.get("value") or "")
+        current = selection_from_review(selection if isinstance(selection, dict) else {})
+        if menu == "morphology_secondary":
+            current["morphology_secondary"] = None if current.get("morphology_secondary") == value else value
+            return current, "", ""
+        if menu == "physical_primary":
+            if current.get("physical_primary") == value:
+                current["physical_primary"] = None
+                current["physical_secondary"] = None
+                return current, "", ""
+            current["physical_primary"] = value
+            current["physical_secondary"] = None
+            return current, "physical_secondary", ""
+        if menu == "physical_secondary":
+            current["physical_secondary"] = None if current.get("physical_secondary") == value else value
+            return current, "", ""
+        raise dash.exceptions.PreventUpdate
+
+    @app.callback(
+        [Output({"type": "explorer-taxonomy-primary-btn", "value": ALL}, "className"),
+         Output("explorer-taxonomy-hypothesis-btn", "className"),
+         Output("explorer-taxonomy-summary", "children")],
+        [Input("explorer-taxonomy-selection-store", "data"),
+         Input("explorer-active-taxonomy-menu", "data")],
+        prevent_initial_call=False,
+    )
+    def render_explorer_taxonomy_state(selection, active_menu):
+        current = selection_from_review(selection if isinstance(selection, dict) else {})
+        primary = current.get("morphology_primary")
+        primary_classes = [
+            "explorer-taxonomy-btn active" if item["value"] == primary else "explorer-taxonomy-btn"
+            for item in MORPHOLOGY_PRIMARY
+        ]
+        hypothesis_class = (
+            "explorer-taxonomy-btn active"
+            if active_menu in {"physical_primary", "physical_secondary"} or current.get("physical_primary")
+            else "explorer-taxonomy-btn"
+        )
+        parts = []
+        for key in ("morphology_primary", "morphology_secondary", "physical_primary", "physical_secondary"):
+            value = current.get(key)
+            if value:
+                parts.append(label_for(value))
+        return primary_classes, hypothesis_class, " | ".join(parts) if parts else "No taxonomy selection"
+
+    @app.callback(
+        Output("explorer-taxonomy-submenu-panel", "children"),
+        [Input("explorer-active-taxonomy-menu", "data"),
+         Input("explorer-taxonomy-selection-store", "data")],
+        prevent_initial_call=False,
+    )
+    def render_explorer_taxonomy_submenu(active_menu, selection):
+        current = selection_from_review(selection if isinstance(selection, dict) else {})
+        taxonomy = keyboard_payload()
+        menu = str(active_menu or "")
+        if menu == "morphology_secondary":
+            primary = current.get("morphology_primary")
+            options = taxonomy["morphology_secondary"].get(primary or "", [])
+            title = "Morphology detail"
+            active_value = current.get("morphology_secondary")
+        elif menu == "physical_primary":
+            options = list(PHYSICAL_PRIMARY)
+            title = "Physical hypothesis"
+            active_value = current.get("physical_primary")
+        elif menu == "physical_secondary":
+            family = current.get("physical_primary")
+            options = taxonomy["physical_secondary"].get(family or "", [])
+            title = "Hypothesis detail"
+            active_value = current.get("physical_secondary")
+        else:
+            return []
+        if not options:
+            return []
+        return [
+            html.Span(f"{title}: ", className="explorer-taxonomy-submenu-title"),
+            *[
+                html.Button(
+                    item["label"],
+                    id={"type": "explorer-taxonomy-option-btn", "menu": menu, "value": item["value"]},
+                    n_clicks=0,
+                    className="explorer-taxonomy-btn active" if item["value"] == active_value else "explorer-taxonomy-btn",
+                )
+                for item in options
+            ],
+        ]
 
     @app.callback(
         Output("explorer-review-save-status", "children"),
@@ -3346,24 +4401,31 @@ def build_explorer_app(
     @app.callback(
         Output("explorer-review-save-status", "children", allow_duplicate=True),
         Output("explorer-review-overrides", "data"),
+        Output("selected-key-store", "data", allow_duplicate=True),
         Input("explorer-review-save-btn", "n_clicks"),
+        Input("explorer-review-done-btn", "n_clicks"),
         Input("explorer-review-save-request", "data"),
         State("selected-key-store", "data"),
+        State("candidate-table", "data"),
         State("explorer-review-class", "value"),
         State("explorer-review-confidence", "value"),
         State("explorer-review-followup", "value"),
         State("explorer-review-notes", "value"),
+        State("explorer-taxonomy-selection-store", "data"),
         State("explorer-review-overrides", "data"),
         prevent_initial_call=True,
     )
     def save_explorer_grade(
         n_clicks,
+        done_clicks,
         save_request,
         selected_key,
+        table_data,
         event_class,
         interest_score,
         followup_value,
         notes,
+        taxonomy_selection,
         review_overrides,
     ):
         trigger = dash.callback_context.triggered_id
@@ -3386,18 +4448,21 @@ def build_explorer_app(
             interest_score_value = request.get("interest_score", interest_score_value)
             followup_state = ["followup"] if request.get("needs_followup") else []
             notes_value = request.get("notes", notes_value)
+        elif trigger == "explorer-review-done-btn":
+            if not done_clicks:
+                raise dash.exceptions.PreventUpdate
         elif not n_clicks:
             raise dash.exceptions.PreventUpdate
 
         source_frame = _apply_review_overrides(combined.df, review_overrides)
         record = _get_candidate_record_from_frame(source_frame, selected_key_value) or get_candidate_record_by_key(combined, selected_key_value)
         if record is None:
-            return "No candidate selected to save.", dash.no_update
+            return "No candidate selected to save.", dash.no_update, dash.no_update
 
         review_db, _plot_dir = _record_review_target(record)
         candidate_id = str(record.get("candidate_id") or "").strip()
         if review_db is None or not candidate_id:
-            return "Inline grading is available only for DB-backed candidates.", dash.no_update
+            return "Inline grading is available only for DB-backed candidates.", dash.no_update, dash.no_update
 
         try:
             score = None if interest_score_value in (None, "") else int(interest_score_value)
@@ -3406,10 +4471,19 @@ def build_explorer_app(
         event_class_literal = str(event_class_value or "unclassified").strip() or "unclassified"
         if event_class_literal not in REVIEW_EVENT_CLASSES:
             event_class_literal = "other"
+        selection = selection_from_review(taxonomy_selection if isinstance(taxonomy_selection, dict) else {})
+        if increment_pass:
+            if score is None:
+                return "Confidence required before Save + Next.", dash.no_update, dash.no_update
+            if not selection.get("morphology_primary"):
+                return "Morphology required before Save + Next.", dash.no_update, dash.no_update
+        derived_class = derive_event_class(selection)
+        if derived_class and derived_class != "unclassified":
+            event_class_literal = derived_class
         status = "needs_followup" if followup_state and "followup" in followup_state else "reviewed"
         reviewer = str(os.environ.get("USER") or "explorer")
         event_type = "explorer_save"
-        increment_pass = False
+        increment_pass = trigger == "explorer-review-done-btn"
         if trigger == "explorer-review-save-request":
             request = dict(save_request or {})
             event_type = str(request.get("event_type") or "keyboard").strip() or "keyboard"
@@ -3428,16 +4502,39 @@ def build_explorer_app(
                     review_pass=review_pass,
                     notes=str(notes_value or ""),
                     status=status,
+                    disposition=selection.get("disposition") or "keep",
+                    morphology_primary=selection.get("morphology_primary"),
+                    morphology_secondary=selection.get("morphology_secondary"),
+                    morphology_polarity=selection.get("morphology_polarity"),
+                    morphology_recurrence=selection.get("morphology_recurrence"),
+                    baseline_behavior=selection.get("baseline_behavior"),
+                    physical_primary=selection.get("physical_primary"),
+                    physical_secondary=selection.get("physical_secondary"),
+                    classification_confidence=selection.get("classification_confidence"),
+                    priority_tags=selection.get("priority_tags"),
+                    evidence_flags=selection.get("evidence_flags"),
+                    model_tags=selection.get("model_tags"),
+                    duplicate_of=selection.get("duplicate_of"),
+                    known_object_id=selection.get("known_object_id"),
+                    known_object_source=selection.get("known_object_source"),
                     reviewer=reviewer,
                     event_type=event_type,
                 )
                 saved_review = _normalize_review_state(get_review(conn, candidate_id))
         except Exception as exc:
-            return f"Save failed: {exc}", dash.no_update
+            return f"Save failed: {exc}", dash.no_update, dash.no_update
 
         updated_overrides = dict(review_overrides or {})
         updated_overrides[str(record.get("candidate_key") or candidate_id)] = saved_review
-        return f"Saved {candidate_id} to {review_db}.", updated_overrides
+        next_key = dash.no_update
+        if trigger == "explorer-review-done-btn":
+            keys = _candidate_keys_from_table_data(table_data)
+            current_key = str(selected_key_value or "").strip()
+            if current_key in keys:
+                idx = keys.index(current_key)
+                if idx + 1 < len(keys):
+                    next_key = keys[idx + 1]
+        return f"Saved {candidate_id} to {review_db}. Pass {saved_review.get('review_pass') or 1}.", updated_overrides, next_key
 
     @app.callback(
         Output("selected-key-store", "data"),

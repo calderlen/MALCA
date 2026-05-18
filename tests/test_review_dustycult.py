@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from malca.review.dustycult import (
     DEFAULT_CONTROLS,
@@ -20,6 +21,12 @@ from malca.review.dustycult import (
     prepare_dustycult_input,
     run_dustycult_fit,
     upsert_dustycult_fit,
+)
+from malca.review.dustycult_visualization import (
+    DustOcculterParameters,
+    DustStarParameters,
+    occulter_absorption_grid,
+    occulter_parameters_from_fit,
 )
 from malca.review.store import db_connect
 
@@ -270,3 +277,66 @@ def test_run_dustycult_fit_imports_mocked_artifacts(tmp_path: Path, monkeypatch)
     assert config["prior_kwargs"]["t0_center"] == 10.5
     assert row["n_curve_points"] == 2
     assert len(curves) == 2
+
+
+def test_occulter_parameters_extract_physical_and_log_posteriors() -> None:
+    row = {
+        "t0_jd": 10.5,
+        "posterior_json": json.dumps(
+            {
+                "t0": {"median": 10.6},
+                "log_v": {"median": np.log(2.0)},
+                "b": {"median": 0.2},
+                "log_tau0": {"median": np.log(0.4)},
+                "log_lambda0": {"median": np.log(510.0)},
+                "alpha": {"median": 1.2},
+                "log_sigma_y": {"median": np.log(0.3)},
+                "sigma_x_plus": {"median": 0.4},
+                "log_sigma_x_minus": {"median": np.log(0.5)},
+            }
+        ),
+        "stellar_json": json.dumps({"R": 1.3, "u1": 0.2, "u2": 0.1}),
+    }
+
+    params = occulter_parameters_from_fit(row)
+
+    assert np.isclose(params.t0, 10.6)
+    assert np.isclose(params.v, 2.0)
+    assert np.isclose(params.b, 0.2)
+    assert np.isclose(params.tau0, 0.4)
+    assert np.isclose(params.lambda0, 510.0)
+    assert np.isclose(params.alpha, 1.2)
+    assert np.isclose(params.sigma_y, 0.3)
+    assert np.isclose(params.sigma_x_plus, 0.4)
+    assert np.isclose(params.sigma_x_minus, 0.5)
+
+
+def test_occulter_parameters_report_missing_required_values() -> None:
+    row = {"posterior_json": json.dumps({"t0": {"median": 1.0}})}
+
+    with pytest.raises(ValueError, match="Missing DustyCult posterior parameters"):
+        occulter_parameters_from_fit(row)
+
+
+def test_occulter_absorption_grid_matches_dustycult_formula() -> None:
+    dust = DustOcculterParameters(
+        t0=0.0,
+        v=1.0,
+        b=0.0,
+        tau0=0.5,
+        lambda0=500.0,
+        alpha=1.0,
+        sigma_y=0.25,
+        sigma_x_plus=0.25,
+        sigma_x_minus=0.25,
+    )
+    star = DustStarParameters(R=1.0, I0=1.0, u1=0.2, u2=0.1)
+
+    x, y, absorption, _extent = occulter_absorption_grid(dust, star, 500.0, grid_n=51)
+
+    center = absorption[len(y) // 2, len(x) // 2]
+    expected = 1.0 - np.exp(-0.5)
+    assert np.isclose(center, expected)
+
+    _x2, _y2, blue_absorption, _extent2 = occulter_absorption_grid(dust, star, 250.0, grid_n=51)
+    assert blue_absorption[len(y) // 2, len(x) // 2] > center

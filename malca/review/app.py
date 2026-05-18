@@ -30,7 +30,6 @@ import diskcache
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-import plotly.io as pio
 
 from malca.config import GAIA_CHUNK_SIZE
 from malca.phase import phase_template, template_phase_lag
@@ -47,6 +46,7 @@ from malca.config import (
 from malca.review.diagnostic_plots import (
     build_atlas_range_figure,
     build_autocorr_memory_figure,
+    build_publication_diagnostic_pdf,
     build_catalog_support_figure,
     build_classifier_plane_figure,
     build_cluster_astrometry_figure,
@@ -87,6 +87,7 @@ from malca.review.interactive_plot import (
     _build_stat_rows,
     normalize_external_lc_dataframe,
 )
+from malca.review.lightcurve_publication import build_review_lightcurve_publication_pdf
 from malca.review.keyboard import (
     HELP_TEXT,
     CLASS_KEY_MAP,
@@ -101,6 +102,7 @@ from malca.review.filter_schema import (
     SIDEBAR_GROUPS as REVIEW_FILTER_SIDEBAR_GROUPS,
     VETTING_KNOWN_BOOL_FILTERS,
     VETTING_KNOWN_SELECT_FILTERS,
+    is_definite_known_type_value,
 )
 from malca.review.handoff import build_explorer_command, launch_detached
 from malca.review.pipeline import detect_pipeline_status, detect_sed_model_status, detect_sed_photometry_status
@@ -110,6 +112,8 @@ from malca.review.period_search import (
     has_external_period as shared_has_external_period,
     run_period_search_for_payload as shared_run_period_search_for_payload,
 )
+from malca.review.dustycult_visualization import build_dustycult_occulter_figure
+from malca.review.publication import graph_config_without_image_export, publication_figure, render_publication_pdf, slugify_token
 from malca.review.session import create_queue_data_dict
 from malca.review.sync import auto_export_review_bundle
 from malca.review.taxonomy import (
@@ -695,6 +699,14 @@ app.index_string = '''
         }
         .vetting-banner-shell.new .vetting-banner-cell {
             background: #1a2a1a;
+        }
+        .vetting-banner-cell.hit.known {
+            background: #3a1515;
+            border-color: #b94a4a;
+        }
+        .vetting-banner-cell.hit.new {
+            background: #153a1b;
+            border-color: #4aa864;
         }
         .vetting-banner-label {
             color: #888;
@@ -1814,6 +1826,14 @@ app.index_string = '''
         body[data-theme="white"] .vetting-banner-shell.new .vetting-banner-cell {
             background: #f7fafc !important;
         }
+        body[data-theme="white"] .vetting-banner-cell.hit.known {
+            background: #fbe7e7 !important;
+            border-color: #d88b8b !important;
+        }
+        body[data-theme="white"] .vetting-banner-cell.hit.new {
+            background: #e8f7ec !important;
+            border-color: #95cca3 !important;
+        }
         body[data-theme="white"] .vetting-banner-header.known {
             background: #fbe7e7 !important;
             color: #9f2d2d !important;
@@ -2628,10 +2648,13 @@ def _render_vetting_banner(payload: dict | None, radius_arcsec: float = 10.0) ->
         return html.Span(text, className=cls, title=title)
 
     def _cell(left: str, right: str, *, hit: bool = False, title: str | None = None) -> html.Div:
+        cell_class = 'vetting-banner-cell'
+        if hit:
+            cell_class += f' hit {banner_state}'
         return html.Div([
             _label(left),
             _value(right, hit=hit, title=title),
-        ], className='vetting-banner-cell')
+        ], className=cell_class)
 
     # SIMBAD cell
     simbad_id = payload.get('simbad_main_id')
@@ -2977,13 +3000,8 @@ def _review_db_state_signature(db_path: str | Path | None = None) -> str:
 
 
 def _diagnostic_background_signature(db_path: str | Path | None = None) -> str:
-    """Return a stable cache signature for diagnostic background data."""
-    try:
-        resolved = Path(db_path or DB_PATH).expanduser().resolve()
-        stat = resolved.stat()
-        return f"{resolved}:{int(stat.st_mtime_ns)}:{int(stat.st_size)}"
-    except Exception:
-        return str(Path(db_path or DB_PATH).expanduser())
+    """Return a cache signature for diagnostic background data."""
+    return _review_db_state_signature(db_path or DB_PATH)
 
 
 def _diagnostic_background_cache_key(signature: str) -> str:
@@ -3007,6 +3025,19 @@ def _store_cached_diagnostic_background(signature: str, background: dict) -> Non
     if not signature:
         return
     _bc_cache.set(_diagnostic_background_cache_key(signature), background)
+
+
+def _load_or_cache_diagnostic_background(signature: str | None = None) -> tuple[dict, bool]:
+    """Load diagnostic background from cache, falling back to the review DB."""
+    resolved_signature = signature or _diagnostic_background_signature(DB_PATH)
+    cached = _get_cached_diagnostic_background(resolved_signature)
+    if cached is not None:
+        return cached, True
+
+    with closing(db_connect(Path(DB_PATH))) as conn:
+        background = get_diagnostic_background(conn)
+    _store_cached_diagnostic_background(resolved_signature, background)
+    return background, False
 
 
 @lru_cache(maxsize=512)
@@ -3672,6 +3703,60 @@ def _apply_external_figure_layout(
     return fig
 
 
+def _plot_title_text(fig: go.Figure | dict | None, fallback: str) -> str:
+    if fig is None:
+        return fallback
+    try:
+        title = go.Figure(fig).layout.title.text
+    except Exception:
+        title = None
+    text = str(title or "").strip()
+    return text or fallback
+
+
+def _exportable_graph(
+    fig: go.Figure,
+    *,
+    panel: str,
+    name: str,
+    height: str = "250px",
+) -> html.Div:
+    safe_panel = slugify_token(panel, fallback="panel")
+    safe_name = slugify_token(name, fallback="plot")
+    graph_id = {"type": "mini-plot-export-graph", "panel": safe_panel, "name": safe_name}
+    button_id = {"type": "mini-plot-export-btn", "panel": safe_panel, "name": safe_name}
+    return html.Div(
+        [
+            html.Div(
+                html.Button("Export PDF", id=button_id, n_clicks=0, className="compact-btn"),
+                style={"display": "flex", "justifyContent": "flex-end", "marginBottom": "4px"},
+            ),
+            dcc.Graph(
+                id=graph_id,
+                figure=fig,
+                mathjax=True,
+                config=graph_config_without_image_export({'displayModeBar': False}),
+                style={'height': height},
+            ),
+        ],
+        style={"display": "grid", "gap": "2px"},
+    )
+
+
+def _exportable_plot_card(
+    fig: go.Figure,
+    *,
+    panel: str,
+    name: str,
+    card_style: dict,
+    height: str = "280px",
+) -> html.Div:
+    return html.Div(
+        _exportable_graph(fig, panel=panel, name=name, height=height),
+        style=card_style,
+    )
+
+
 def _build_neowise_figure_with_theme(df_neowise: pd.DataFrame, theme: str) -> go.Figure:
     """Build a compact NEOWISE light-curve panel."""
     fig = go.Figure()
@@ -3891,12 +3976,17 @@ def _candidate_lookup_keys(candidate_id: str, payload: dict) -> list[str]:
     return [k for k in keys if k and not (k in seen or seen.add(k))]
 
 
-def _render_external_followup(payload: dict, candidate_id: str, theme: str | None = None) -> list:
+def _render_external_followup(
+    payload: dict,
+    candidate_id: str,
+    theme: str | None = None,
+    plot_dir: str | Path | None = None,
+) -> list:
     theme_spec = _external_followup_theme(theme)
     card_style = theme_spec["card_style"]
     muted_text_style = {'fontSize': '10px', 'color': theme_spec["muted"]}
     error_text_style = {'fontSize': '10px', 'color': theme_spec["error"]}
-    run_dir = _resolve_run_dir_from_plot_dir(PLOT_DIR)
+    run_dir = _resolve_run_dir_from_plot_dir(plot_dir if plot_dir is not None else PLOT_DIR)
     lookup_keys = _candidate_lookup_keys(candidate_id, payload)
 
     def _fmt_ms(value, digits: int = 3) -> str:
@@ -4002,7 +4092,7 @@ def _render_external_followup(payload: dict, candidate_id: str, theme: str | Non
                             theme=theme,
                             jd_system="mjd",
                         )
-                        atlas_children.append(dcc.Graph(figure=atlas_fig, mathjax=True, config={'displayModeBar': False}, style={'height': '250px'}))
+                        atlas_children.append(_exportable_graph(atlas_fig, panel="external", name="atlas", height="250px"))
                     except Exception:
                         pass
                 break
@@ -4027,11 +4117,11 @@ def _render_external_followup(payload: dict, candidate_id: str, theme: str | Non
     if neowise_path and neowise_path.exists():
         try:
             neowise_rows = pd.read_parquet(neowise_path)
-            neowise_plot = dcc.Graph(
-                figure=_build_neowise_figure_with_theme(neowise_rows, theme),
-                mathjax=True,
-                config={'displayModeBar': False},
-                style={'height': '250px'},
+            neowise_plot = _exportable_graph(
+                _build_neowise_figure_with_theme(neowise_rows, theme),
+                panel="external",
+                name="neowise",
+                height="250px",
             )
         except Exception:
             neowise_plot = html.Div(f"Could not load NEOWISE parquet: {neowise_path}", style=error_text_style)
@@ -4077,7 +4167,7 @@ def _render_external_followup(payload: dict, candidate_id: str, theme: str | Non
                             theme=theme,
                             jd_system="mjd",
                         )
-                        ztf_children.append(dcc.Graph(figure=ztf_fig, mathjax=True, config={'displayModeBar': False}, style={'height': '250px'}))
+                        ztf_children.append(_exportable_graph(ztf_fig, panel="external", name="ztf", height="250px"))
                     except Exception:
                         pass
                 break
@@ -4110,7 +4200,7 @@ def _render_external_followup(payload: dict, candidate_id: str, theme: str | Non
                             theme=theme,
                             jd_system="bjd_gaia",
                         )
-                        gaia_epoch_children.append(dcc.Graph(figure=gaia_fig, mathjax=True, config={'displayModeBar': False}, style={'height': '250px'}))
+                        gaia_epoch_children.append(_exportable_graph(gaia_fig, panel="external", name="gaia-epoch", height="250px"))
                     except Exception:
                         pass
                 break
@@ -4146,12 +4236,7 @@ def _render_external_followup(payload: dict, candidate_id: str, theme: str | Non
                             jd_system="btjd",
                         )
                         tess_children.append(
-                            dcc.Graph(
-                                figure=tess_fig,
-                                mathjax=True,
-                                config={'displayModeBar': False},
-                                style={'height': '250px'},
-                            )
+                            _exportable_graph(tess_fig, panel="external", name="tess", height="250px")
                         )
                     except Exception:
                         pass
@@ -4188,7 +4273,7 @@ def _render_external_followup(payload: dict, candidate_id: str, theme: str | Non
                             theme=theme,
                             jd_system="mjd",
                         )
-                        ps1_children.append(dcc.Graph(figure=ps1_fig, mathjax=True, config={'displayModeBar': False}, style={'height': '250px'}))
+                        ps1_children.append(_exportable_graph(ps1_fig, panel="external", name="pan-starrs", height="250px"))
                     except Exception:
                         pass
                 break
@@ -4219,7 +4304,7 @@ def _render_external_followup(payload: dict, candidate_id: str, theme: str | Non
                             theme=theme,
                             jd_system="mjd",
                         )
-                        crts_children.append(dcc.Graph(figure=crts_fig, mathjax=True, config={'displayModeBar': False}, style={'height': '250px'}))
+                        crts_children.append(_exportable_graph(crts_fig, panel="external", name="crts", height="250px"))
                     except Exception:
                         pass
                 break
@@ -4410,13 +4495,34 @@ def _select_all_dropdown_values(options: list[dict[str, object]] | None) -> list
     return values
 
 
+def _select_definite_dropdown_values(
+    col: str,
+    options: list[dict[str, object]] | None,
+) -> list[str]:
+    """Return dropdown values that represent definite known-type catalog labels."""
+    return [
+        value
+        for value in _select_all_dropdown_values(options)
+        if is_definite_known_type_value(col, value)
+    ]
+
+
 def _vetting_known_filter_preset(
     select_options: dict[str, list[dict[str, object]] | None],
+    *,
+    include_uncertain: bool = True,
 ) -> tuple[list[str], list[list[str]]]:
-    """Exclude definite known-type vetting matches while leaving uncertainty flags untouched."""
-    bool_values = ['False'] * len(VETTING_KNOWN_BOOL_FILTERS)
+    """Build the known-type exclusion preset for broad or definite-only filtering."""
+    bool_values = [
+        'False' if include_uncertain or col == 'microlens_match' else 'Any'
+        for col in VETTING_KNOWN_BOOL_FILTERS
+    ]
     select_values = [
-        _select_all_dropdown_values(select_options.get(col))
+        (
+            _select_all_dropdown_values(select_options.get(col))
+            if include_uncertain
+            else _select_definite_dropdown_values(col, select_options.get(col))
+        )
         for col in VETTING_KNOWN_SELECT_FILTERS
     ]
     return bool_values, select_values
@@ -4499,9 +4605,16 @@ def _make_filter_group(name: str, items: list, *, default_open: bool = False):
                     id='vetting-known-types-btn',
                     n_clicks=0,
                     className='compact-btn',
-                    title='Turn on definite known-type vetting filters and leave uncertainty-style flags untouched.',
+                    title='Turn on broad known-type vetting filters, including uncertainty and candidate-style labels.',
                 ),
-            ], style={'display': 'flex', 'margin-bottom': '6px'})
+                html.Button(
+                    'Exclude Certain Known Types',
+                    id='vetting-definite-known-types-btn',
+                    n_clicks=0,
+                    className='compact-btn',
+                    title='Exclude only definite catalog known-type labels; keep possible, candidate, suspected, and question-marked labels visible.',
+                ),
+            ], style={'display': 'flex', 'gap': '6px', 'flexWrap': 'wrap', 'margin-bottom': '6px'})
         )
     for ftype, col in items:
         if ftype == 'bool':
@@ -4598,6 +4711,8 @@ def _dustycult_controls_layout() -> html.Div:
             html.Button('Recompute Dip Defaults', id='dustycult-recompute-dip-btn', n_clicks=0, className='compact-btn'),
             html.Button('Quick Fit', id='dustycult-quick-fit-btn', n_clicks=0, className='compact-btn'),
             html.Button('Full Fit', id='dustycult-full-fit-btn', n_clicks=0, className='compact-btn'),
+            html.Button('Export Fit PDF', id='dustycult-export-fit-btn', n_clicks=0, className='compact-btn'),
+            html.Button('Export Occulter PDF', id='dustycult-export-occulter-btn', n_clicks=0, className='compact-btn'),
             html.Span(id='dustycult-run-status', style={'fontSize': '10px', 'color': '#7da8c4'}),
         ], style={'display': 'flex', 'gap': '6px', 'alignItems': 'center', 'flexWrap': 'wrap', 'padding': '8px 10px 0 10px'}),
         html.Div(id='dustycult-defaults-status', style={'fontSize': '10px', 'color': '#7d91a6', 'padding': '4px 10px 8px 10px'}),
@@ -4672,6 +4787,8 @@ def create_layout():
         dcc.Store(id='last-candidate-saved', data=0),
         dcc.Download(id='plot-export-download'),
         dcc.Download(id='sed-export-download'),
+        dcc.Download(id='dustycult-export-download'),
+        dcc.Download(id='mini-plot-export-download'),
         dcc.Download(id='run-config-download'),
         dcc.Interval(id='keyboard-init', interval=200, n_intervals=0, max_intervals=1),
         dcc.Interval(id='review-metrics-interval', interval=1000, n_intervals=0),
@@ -5313,6 +5430,24 @@ def create_layout():
                             ),
                         ], id='dustycult-details', open=False, className='metadata-sections', style={'margin-top': '0'}),
                         html.Details([
+                            html.Summary([
+                                html.Span('Candidate Panels', style={'marginRight': '10px'}),
+                                dcc.Checklist(
+                                    id='round-sigfigs',
+                                    options=[{'label': ' Round', 'value': 'yes'}],
+                                    value=['yes'],
+                                    style={'display': 'inline-block', 'font-size': '11px', 'marginRight': '6px'},
+                                    persistence=_review_persistence_token(),
+                                    persistence_type='local',
+                                ),
+                                html.Button('Collapse all', id='toggle-meta-all', n_clicks=0, className='compact-btn'),
+                            ], style={'display': 'flex', 'alignItems': 'center', 'gap': '8px', 'flexWrap': 'wrap'}),
+                            html.Div([
+                                html.Div(id='vetting-banner'),
+                                html.Div(id='candidate-info-grid', className='candidate-metadata'),
+                            ], style={'padding': '4px 0 8px'}),
+                        ], id='candidate-panels-details', open=True, className='metadata-sections', style={'margin-top': '0'}),
+                        html.Details([
                             html.Summary('Diagnostic Plots', style={'cursor': 'pointer'}),
                             html.Div(
                                 id='diagnostic-plots-status',
@@ -5326,25 +5461,6 @@ def create_layout():
                                 type='default',
                             ),
                         ], id='diagnostic-plots-details', open=False, className='metadata-sections', style={'margin-top': '0'}),
-                        # Grouped candidate metadata sections (collapsible, includes stats)
-                        html.Div([
-                            html.Div([
-                                html.Span('Candidate Panels', className='title'),
-                                dcc.Checklist(
-                                    id='round-sigfigs',
-                                    options=[{'label': ' Round', 'value': 'yes'}],
-                                    value=['yes'],
-                                    style={'display': 'inline-block', 'font-size': '11px', 'margin-right': '6px'},
-                                    persistence=_review_persistence_token(),
-                                    persistence_type='local',
-                                ),
-                                html.Button('Collapse all', id='toggle-meta-all', n_clicks=0, className='compact-btn'),
-                            ], className='meta-toolbar'),
-                            html.Div([
-                                html.Div(id='vetting-banner'),
-                                html.Div(id='candidate-info-grid', className='candidate-metadata'),
-                            ], className='metadata-sections'),
-                        ]),
                         # Run config / reproducibility
                         html.Details([
                             html.Summary('Run Config', style={'cursor': 'pointer'}),
@@ -5371,11 +5487,11 @@ def create_layout():
                             id='interactive-plot',
                             className='plot-native',
                             mathjax=True,
-                            config={
+                            config=graph_config_without_image_export({
                                 'displaylogo': False,
                                 'modeBarButtonsToRemove': ['lasso2d', 'select2d'],
                                 'responsive': True,
-                            },
+                            }),
                             style={'display': 'block', 'width': '100%', 'height': '100%', 'min-height': '600px'},
                         ),
                         html.Img(
@@ -6670,14 +6786,25 @@ else:
 
 @app.callback(
     _VETTING_KNOWN_FILTER_OUTPUTS,
-    Input('vetting-known-types-btn', 'n_clicks'),
+    [Input('vetting-known-types-btn', 'n_clicks'),
+     Input('vetting-definite-known-types-btn', 'n_clicks')],
     _VETTING_KNOWN_FILTER_OPTION_STATES,
     prevent_initial_call=True,
 )
-def apply_vetting_known_type_filters(n_clicks, *select_options):
-    """Apply the definite known-type vetting preset."""
-    if not n_clicks:
+def apply_vetting_known_type_filters(known_clicks, definite_clicks, *select_options):
+    """Apply the broad or definite-only known-type vetting preset."""
+    triggered_id = getattr(callback_context, 'triggered_id', None)
+    if triggered_id == 'vetting-known-types-btn':
+        if not known_clicks:
+            raise dash.exceptions.PreventUpdate
+        include_uncertain = True
+    elif triggered_id == 'vetting-definite-known-types-btn':
+        if not definite_clicks:
+            raise dash.exceptions.PreventUpdate
+        include_uncertain = False
+    else:
         raise dash.exceptions.PreventUpdate
+
     queue_source_scope, *option_lists = select_options
     select_options_by_col = dict(zip(VETTING_KNOWN_SELECT_FILTERS, option_lists))
     if any(not select_options_by_col.get(col) for col in VETTING_KNOWN_SELECT_FILTERS):
@@ -6685,7 +6812,10 @@ def apply_vetting_known_type_filters(n_clicks, *select_options):
         for col, options in hydrated_options.items():
             if not select_options_by_col.get(col):
                 select_options_by_col[col] = options
-    bool_values, select_values = _vetting_known_filter_preset(select_options_by_col)
+    bool_values, select_values = _vetting_known_filter_preset(
+        select_options_by_col,
+        include_uncertain=include_uncertain,
+    )
     return ([], *bool_values, *select_values)
 
 
@@ -8651,7 +8781,7 @@ def update_sed_panel(candidate_id, extinction_mode, theme_mode):
         id='sed-plot',
         figure=fig,
         mathjax=True,
-        config={'displayModeBar': True, 'responsive': True},
+        config=graph_config_without_image_export({'displayModeBar': True, 'responsive': True}),
         style={'height': '420px'},
     )
     return graph, _sed_status_text(rows, warnings_list)
@@ -8681,57 +8811,24 @@ def export_sed_plot(n_clicks, candidate_id, extinction_mode, theme_mode):
                 trace.line.color = "#111827"
                 trace.line.width = 2.6
             if getattr(trace, "marker", None) is not None:
-                trace.marker.size = 8.5
+                trace.marker.size = 11.0
+                trace.marker.opacity = 1.0
                 if getattr(trace.marker, "line", None) is not None:
                     trace.marker.line.color = "#111827"
                     trace.marker.line.width = 0.7
-        export_fig.update_layout(
-            paper_bgcolor='white',
-            plot_bgcolor='white',
-            font=dict(color='#111111', family='Arial, DejaVu Sans, sans-serif', size=13),
-            title=dict(
-                text='Spectral Energy Distribution',
-                x=0.5,
-                xanchor='center',
-                y=0.975,
-                font=dict(color='#111111', size=18),
-            ),
-            margin=dict(t=92, l=96, r=285, b=84),
-            legend=dict(
-                orientation='v',
-                x=1.02,
-                xanchor='left',
-                y=1.0,
-                yanchor='top',
-                bgcolor='rgba(255,255,255,0.95)',
-                bordercolor='rgba(40,40,40,0.25)',
-                borderwidth=1,
-                font=dict(color='#111111', size=10),
-            ),
+        image_bytes = render_publication_pdf(
+            export_fig,
+            title='Spectral Energy Distribution',
+            width=1200,
+            height=820,
+            legend_outside=True,
+            right_margin=285,
+            top_margin=92,
+            bottom_margin=84,
+            left_margin=96,
         )
-        export_fig.update_xaxes(
-            color='#111111',
-            title_font_color='#111111',
-            tickfont_color='#111111',
-            showgrid=True,
-            gridcolor='rgba(0,0,0,0.16)',
-            linecolor='rgba(0,0,0,0.45)',
-            ticks='outside',
-            zeroline=False,
-        )
-        export_fig.update_yaxes(
-            color='#111111',
-            title_font_color='#111111',
-            tickfont_color='#111111',
-            showgrid=True,
-            gridcolor='rgba(0,0,0,0.16)',
-            linecolor='rgba(0,0,0,0.45)',
-            ticks='outside',
-            zeroline=False,
-        )
-        image_bytes = pio.to_image(export_fig, format='pdf', width=1200, height=820)
     except Exception as exc:
-        return no_update, f'Export failed (SED PDF). Install/enable kaleido. {exc}'
+        return no_update, f'Export failed (SED PDF). {exc}'
     safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(candidate_id)).strip("_") or "unknown"
     mode = str(extinction_mode or "observed").replace("-", "_")
     fname = f"malca_sed_{safe_id}_{mode}.pdf"
@@ -8928,8 +9025,8 @@ def _dustycult_result_figure(curves: pd.DataFrame, fit_row: pd.Series, theme: st
             borderwidth=1,
         ),
     )
-    fig.update_xaxes(title="JD", gridcolor=spec["grid"], zeroline=False)
-    fig.update_yaxes(title="Relative flux", gridcolor=spec["grid"], zeroline=False)
+    fig.update_xaxes(title=r"$t\ [\mathrm{JD}]$", gridcolor=spec["grid"], zeroline=False)
+    fig.update_yaxes(title=r"$F/F_{\mathrm{GP}}$", gridcolor=spec["grid"], zeroline=False)
     return fig
 
 
@@ -8989,9 +9086,23 @@ def _render_dustycult_result_panel(candidate_id: str, theme_mode: str | None, _r
         children.append(dcc.Graph(
             id='dustycult-fit-plot',
             figure=_dustycult_result_figure(curves, fit_row, theme_mode),
-            config={'displayModeBar': True, 'responsive': True},
+            mathjax=True,
+            config=graph_config_without_image_export({'displayModeBar': True, 'responsive': True}),
             style={'height': '370px'},
         ))
+        try:
+            children.append(dcc.Graph(
+                id='dustycult-occulter-plot',
+                figure=build_dustycult_occulter_figure(fit_row, theme=theme_mode, grid_n=251),
+                mathjax=True,
+                config=graph_config_without_image_export({'displayModeBar': True, 'responsive': True}),
+                style={'height': '430px'},
+            ))
+        except Exception as exc:
+            children.append(html.Div(
+                f"Occulter model unavailable: {exc}",
+                style={'fontSize': '11px', 'color': spec["error"], 'overflowWrap': 'anywhere'},
+            ))
     else:
         error = str(fit_row.get("error") or "DustyCult fit failed.")
         stderr = str(fit_row.get("stderr_tail") or "").strip()
@@ -9019,6 +9130,60 @@ def _render_dustycult_result_panel(candidate_id: str, theme_mode: str | None, _r
     children.append(html.Div(" | ".join(meta), style={'fontSize': '10px', 'color': spec["muted"], 'overflowWrap': 'anywhere'}))
     children.append(_dustycult_parameter_table(fit_row, theme_mode))
     return children
+
+
+def _dustycult_display_fit(conn, candidate_id: str) -> tuple[pd.Series | None, pd.DataFrame]:
+    fits = load_dustycult_fits(conn, str(candidate_id))
+    fit_row = _select_dustycult_display_row(fits)
+    if fit_row is None:
+        return None, pd.DataFrame()
+    curves = load_dustycult_curve(conn, str(candidate_id), str(fit_row.get("mode") or "quick"))
+    return fit_row, curves
+
+
+def _dustycult_fit_publication_figure(conn, candidate_id: str) -> tuple[go.Figure, str]:
+    fit_row, curves = _dustycult_display_fit(conn, candidate_id)
+    if fit_row is None:
+        raise ValueError("No DustyCult fit has been run for this candidate.")
+    status = str(fit_row.get("status") or "").lower()
+    if status != "ok":
+        raise ValueError(f"DustyCult fit is not exportable because status is {status or 'unknown'}.")
+    mode = str(fit_row.get("mode") or "quick")
+    fig = _dustycult_result_figure(curves, fit_row, "white")
+    export_fig = publication_figure(
+        fig,
+        title=f"DustyCult {mode.capitalize()} Fit",
+        width=1200,
+        height=820,
+        legend_outside=True,
+        right_margin=285,
+        xaxis_title=r"$t\ [\mathrm{JD}]$",
+        yaxis_title=r"$F/F_{\mathrm{GP}}$",
+    )
+    return export_fig, mode
+
+
+def _dustycult_occulter_publication_figure(conn, candidate_id: str) -> tuple[go.Figure, str]:
+    fit_row, _curves = _dustycult_display_fit(conn, candidate_id)
+    if fit_row is None:
+        raise ValueError("No DustyCult fit has been run for this candidate.")
+    status = str(fit_row.get("status") or "").lower()
+    if status != "ok":
+        raise ValueError(f"DustyCult occulter is not exportable because fit status is {status or 'unknown'}.")
+    mode = str(fit_row.get("mode") or "quick")
+    fig = build_dustycult_occulter_figure(fit_row, theme="white", grid_n=501)
+    export_fig = publication_figure(
+        fig,
+        title=f"DustyCult Occulter Model ({mode})",
+        width=1200,
+        height=620,
+        legend_outside=False,
+        right_margin=135,
+        top_margin=86,
+        bottom_margin=74,
+        left_margin=86,
+    )
+    return export_fig, mode
 
 
 def _dustycult_config_status_text() -> str:
@@ -9173,6 +9338,132 @@ def update_dustycult_result_panel(candidate_id, theme_mode, refresh_token):
     )
 
 
+@app.callback(
+    [Output('dustycult-export-download', 'data'),
+     Output('notification', 'children', allow_duplicate=True)],
+    [Input('dustycult-export-fit-btn', 'n_clicks'),
+     Input('dustycult-export-occulter-btn', 'n_clicks')],
+    State('current-candidate-id', 'data'),
+    prevent_initial_call=True,
+)
+def export_dustycult_pdf(fit_clicks, occulter_clicks, candidate_id):
+    """Export DustyCult fit or occulter model as publication PDF."""
+    triggered = callback_context.triggered_id
+    if not triggered or (triggered == 'dustycult-export-fit-btn' and not fit_clicks) or (triggered == 'dustycult-export-occulter-btn' and not occulter_clicks):
+        return no_update, no_update
+    if not candidate_id:
+        return no_update, 'No candidate is selected.'
+    try:
+        with closing(db_connect(Path(DB_PATH))) as conn:
+            if triggered == 'dustycult-export-occulter-btn':
+                fig, mode = _dustycult_occulter_publication_figure(conn, str(candidate_id))
+                kind = "occulter"
+                width, height = 1200, 620
+            else:
+                fig, mode = _dustycult_fit_publication_figure(conn, str(candidate_id))
+                kind = "fit"
+                width, height = 1200, 820
+            image_bytes = render_publication_pdf(
+                fig,
+                title=f"DustyCult {kind.capitalize()}",
+                width=width,
+                height=height,
+                legend_outside=kind != "occulter",
+                style=False,
+            )
+    except Exception as exc:
+        return no_update, f'Export failed (DustyCult PDF). {exc}'
+    safe_id = slugify_token(candidate_id, fallback="candidate")
+    fname = f"malca_dustycult_{kind}_{safe_id}_{mode}.pdf"
+    return dcc.send_bytes(image_bytes, fname), f'Exported {fname}'
+
+
+def _matching_positive_click(
+    triggered_id: object,
+    button_ids: list[object] | tuple[object, ...] | None,
+    clicks: list[object] | tuple[object, ...] | None,
+) -> bool:
+    if not isinstance(triggered_id, dict):
+        return False
+    target_panel = str(triggered_id.get("panel") or "")
+    target_name = str(triggered_id.get("name") or "")
+    for button_id, click_count in zip(button_ids or [], clicks or []):
+        if not isinstance(button_id, dict):
+            continue
+        if str(button_id.get("panel") or "") != target_panel:
+            continue
+        if str(button_id.get("name") or "") != target_name:
+            continue
+        try:
+            return int(click_count or 0) > 0
+        except (TypeError, ValueError):
+            return False
+    return False
+
+
+def _export_mini_plot_pdf_from_state(triggered_id, button_ids, clicks, graph_ids, figures, candidate_id):
+    if not isinstance(triggered_id, dict):
+        return no_update, no_update
+    if not _matching_positive_click(triggered_id, button_ids, clicks):
+        return no_update, no_update
+    panel = str(triggered_id.get("panel") or "panel")
+    name = str(triggered_id.get("name") or "plot")
+    safe_id = slugify_token(candidate_id, fallback="candidate")
+    if panel == "diagnostic":
+        try:
+            payload, _stored_lc_path, _source_path = _candidate_context(str(candidate_id or ""))
+            signature = _diagnostic_background_signature(DB_PATH)
+            background, _used_cache = _load_or_cache_diagnostic_background(signature)
+            image_bytes = build_publication_diagnostic_pdf(name, payload, background)
+        except Exception as exc:
+            return no_update, f'Export failed (diagnostic PDF). {exc}'
+        if image_bytes:
+            fname = f"malca_{slugify_token(panel)}_{slugify_token(name)}_{safe_id}.pdf"
+            return dcc.send_bytes(image_bytes, fname), f"Exported {fname}"
+
+    selected = None
+    for graph_id, figure in zip(graph_ids or [], figures or []):
+        if not isinstance(graph_id, dict):
+            continue
+        if str(graph_id.get("panel")) == panel and str(graph_id.get("name")) == name:
+            selected = figure
+            break
+    if not selected:
+        return no_update, "No plot is available to export."
+    title = _plot_title_text(selected, name.replace("-", " ").title())
+    try:
+        image_bytes = render_publication_pdf(
+            selected,
+            title=title,
+            width=1200,
+            height=820,
+            legend_outside=True,
+            right_margin=260,
+        )
+    except Exception as exc:
+        return no_update, f'Export failed (plot PDF). {exc}'
+    fname = f"malca_{slugify_token(panel)}_{slugify_token(name)}_{safe_id}.pdf"
+    return dcc.send_bytes(image_bytes, fname), f"Exported {fname}"
+
+
+@app.callback(
+    [Output('mini-plot-export-download', 'data'),
+     Output('notification', 'children', allow_duplicate=True)],
+    Input({'type': 'mini-plot-export-btn', 'panel': ALL, 'name': ALL}, 'n_clicks'),
+    [State({'type': 'mini-plot-export-graph', 'panel': ALL, 'name': ALL}, 'id'),
+     State({'type': 'mini-plot-export-graph', 'panel': ALL, 'name': ALL}, 'figure'),
+     State('current-candidate-id', 'data')],
+    prevent_initial_call=True,
+)
+def export_mini_plot_pdf(_clicks, graph_ids, figures, candidate_id):
+    button_inputs = callback_context.inputs_list[0] if callback_context.inputs_list else []
+    if isinstance(button_inputs, dict):
+        button_inputs = [button_inputs]
+    button_ids = button_inputs
+    button_ids = [item.get("id") for item in button_ids if isinstance(item, dict)]
+    return _export_mini_plot_pdf_from_state(callback_context.triggered_id, button_ids, _clicks, graph_ids, figures, candidate_id)
+
+
 def _render_diagnostic_plots(payload: dict, theme: str, background: dict | None = None) -> list:
     """Build diagnostic plot cards from candidate payload data."""
     theme_tokens = _external_followup_theme(theme)
@@ -9208,10 +9499,12 @@ def _render_diagnostic_plots(payload: dict, theme: str, background: dict | None 
         except Exception:
             fig = None
         if fig is not None:
-            cards.append(html.Div(
-                dcc.Graph(figure=fig, mathjax=True, config={'displayModeBar': False},
-                          style={'height': '280px'}),
-                style=card_style,
+            cards.append(_exportable_plot_card(
+                fig,
+                panel="diagnostic",
+                name=str(getattr(builder, "__name__", "diagnostic")).replace("build_", "").replace("_figure", ""),
+                card_style=card_style,
+                height="280px",
             ))
     return cards
 
@@ -9219,14 +9512,7 @@ def _render_diagnostic_plots(payload: dict, theme: str, background: dict | None 
 def _prepare_diagnostic_background(is_open, _import_trigger, _pipeline_progress, existing_state):
     """Load and cache diagnostic plot background data for the current review DB."""
     signature = _diagnostic_background_signature(DB_PATH)
-    cached = _get_cached_diagnostic_background(signature)
-    if cached is None:
-        with closing(db_connect(Path(DB_PATH))) as conn:
-            cached = get_diagnostic_background(conn)
-        _store_cached_diagnostic_background(signature, cached)
-        used_cache = False
-    else:
-        used_cache = True
+    _background, used_cache = _load_or_cache_diagnostic_background(signature)
 
     next_token = 1
     if isinstance(existing_state, dict):
@@ -9290,9 +9576,14 @@ def update_diagnostic_plots(candidate_id, theme_mode, background_state):
     cached_background = None
     if isinstance(background_state, dict) and background_state.get('ready') and background_state.get('signature') == signature:
         cached_background = _get_cached_diagnostic_background(signature)
+    status = ''
+    if cached_background is None:
+        try:
+            cached_background, _used_cache = _load_or_cache_diagnostic_background(signature)
+        except Exception as exc:
+            status = f'Population background unavailable: {exc}'
 
     panels = _render_diagnostic_plots(payload, str(theme_mode or DEFAULT_THEME), background=cached_background)
-    status = '' if cached_background is not None else 'Population background loading...'
     return panels, status
 
 
@@ -9353,22 +9644,24 @@ def update_header_key_info(candidate_id, queue_size, queue_filter_hash, import_p
      State('plot-mode', 'value'),
      State('plot-image', 'src'),
      State('current-index', 'data'),
-     State('current-candidate-id', 'data')],
+     State('current-candidate-id', 'data'),
+     State('plot-render-request', 'data')],
     prevent_initial_call=True,
 )
-def export_active_plot(n_clicks, figure, plot_mode, plot_src, idx, candidate_id):
+def export_active_plot(n_clicks, figure, plot_mode, plot_src, idx, candidate_id, render_request):
     """Export the currently shown plot.
 
-    Native mode exports PDF with enhanced metadata and high resolution.
-    PNG mode exports the currently displayed PNG file.
+    Native and PNG display modes export a Matplotlib-rendered PDF from the
+    candidate light-curve data and current plot controls.
     """
     if not n_clicks:
         return no_update, no_update
 
     ordinal = int(idx) + 1 if idx is not None else 0
+    plot_mode_value = str(plot_mode or '').strip().lower()
 
-    if plot_mode == 'native':
-        if not figure:
+    if plot_mode_value in {'native', 'png'}:
+        if not figure and not candidate_id:
             return no_update, 'No native plot is available to export.'
 
         # Get ASAS-SN ID for filename
@@ -9382,58 +9675,55 @@ def export_active_plot(n_clicks, figure, plot_mode, plot_src, idx, candidate_id)
 
         fname = f"malca_plot_{ordinal}_{asas_sn_id}.pdf"
         try:
-            export_fig = go.Figure(figure)
-            export_fig.update_layout(
-                paper_bgcolor='white',
-                plot_bgcolor='white',
-                font=dict(color='#111111', family='Monaco, Courier New, monospace', size=11),
-                title_font=dict(color='#111111'),
-                margin=dict(t=54, l=60, r=20, b=50),
-                legend=dict(
-                    bgcolor='rgba(255,255,255,0.95)',
-                    bordercolor='rgba(40,40,40,0.25)',
-                    borderwidth=1,
-                    font=dict(color='#111111', size=9),
-                ),
+            state = {}
+            if isinstance(render_request, dict) and isinstance(render_request.get('state'), dict):
+                state = dict(render_request.get('state') or {})
+            export_candidate_id = str(candidate_id or state.get('candidate_id') or '').strip()
+            if not export_candidate_id:
+                return no_update, 'No candidate is selected.'
+            payload, _stored_lc_path, _source_path = _candidate_context(export_candidate_id)
+            run_params = _load_run_params_for_plot_dir(str(PLOT_DIR) if PLOT_DIR else None)
+            overlays = set(state.get('overlay_values') or [])
+            override_period = state.get('override_period')
+            if override_period is not None:
+                try:
+                    override_period = float(override_period)
+                    if override_period <= 0:
+                        override_period = None
+                except (TypeError, ValueError):
+                    override_period = None
+            residual_height = state.get('residual_height', DEFAULT_RESIDUAL_FRACTION)
+            baseline_opacity = state.get('baseline_opacity', 0.5)
+            try:
+                residual_height = float(residual_height)
+            except (TypeError, ValueError):
+                residual_height = DEFAULT_RESIDUAL_FRACTION
+            try:
+                baseline_opacity = float(baseline_opacity)
+            except (TypeError, ValueError):
+                baseline_opacity = 0.5
+            image_bytes = build_review_lightcurve_publication_pdf(
+                payload,
+                plot_dir=_configured_plot_dir(),
+                selected_cameras=list(state.get('selected_cameras') or []),
+                selected_bands=list(state.get('selected_bands') or ['g', 'V']),
+                filter_bad_cameras='filter_bad_cameras' in overlays,
+                show_baseline=baseline_opacity > 0,
+                show_event_markers='markers' in overlays,
+                show_residuals='residuals' in overlays,
+                show_phase_fold='phase' in overlays,
+                show_raw_mag='raw' in overlays,
+                override_period=override_period,
+                show_diagnostics='diagnostics' in overlays,
+                confidence_colors='confidence' in overlays,
+                run_params=run_params or {},
+                residual_fraction=residual_height,
+                baseline_opacity=baseline_opacity,
+                yaxis_mode='flux' if str(state.get('yaxis_mode') or 'mag') == 'flux' else 'mag',
             )
-            export_fig.update_xaxes(
-                color='#111111',
-                title_font_color='#111111',
-                tickfont_color='#111111',
-                showgrid=True,
-                gridcolor='rgba(0,0,0,0.12)',
-                zeroline=False,
-            )
-            export_fig.update_yaxes(
-                color='#111111',
-                title_font_color='#111111',
-                tickfont_color='#111111',
-                showgrid=True,
-                gridcolor='rgba(0,0,0,0.12)',
-                zeroline=False,
-            )
-            image_bytes = pio.to_image(export_fig, format='pdf')
         except Exception as exc:
-            return no_update, f'Export failed (PDF). Install/enable kaleido. {exc}'
+            return no_update, f'Export failed (PDF). {exc}'
         return dcc.send_bytes(image_bytes, fname), f'Exported {fname}'
-
-    if plot_mode == 'png':
-        if not plot_src:
-            return no_update, 'No PNG plot is available to export.'
-        src = str(plot_src)
-        plot_file: Path | None = None
-        if src.startswith('/plots/'):
-            plot_file = _plot_file_from_src(src)
-        else:
-            candidate = Path(src)
-            if candidate.exists():
-                plot_file = candidate
-
-        if plot_file is None or not plot_file.exists():
-            return no_update, 'Current PNG file could not be found on disk.'
-
-        fname = plot_file.name
-        return dcc.send_file(str(plot_file)), f'Exported {fname}'
 
     return no_update, 'Unknown plot mode; nothing exported.'
 

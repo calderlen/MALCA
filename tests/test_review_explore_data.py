@@ -1,14 +1,52 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import sqlite3
+import sys
+import types
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
+
+def _install_explorer_import_stubs() -> None:
+    if "celerite2" not in sys.modules and importlib.util.find_spec("celerite2") is None:
+        fake_celerite2 = types.ModuleType("celerite2")
+        fake_terms = types.ModuleType("celerite2.terms")
+
+        class _FakeGaussianProcess:
+            def __init__(self, *args, **kwargs):
+                pass
+
+        class _FakeTerm:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def __add__(self, other):
+                return self
+
+        fake_terms.SHOTerm = _FakeTerm
+        fake_terms.RealTerm = _FakeTerm
+        fake_celerite2.GaussianProcess = _FakeGaussianProcess
+        fake_celerite2.terms = fake_terms
+        sys.modules["celerite2"] = fake_celerite2
+        sys.modules["celerite2.terms"] = fake_terms
+
+    if "multiprocess" not in sys.modules and importlib.util.find_spec("multiprocess") is None:
+        fake_multiprocess = types.ModuleType("multiprocess")
+        fake_multiprocess.get_all_start_methods = lambda: ["spawn"]
+        fake_multiprocess.set_start_method = lambda *args, **kwargs: None
+        sys.modules["multiprocess"] = fake_multiprocess
+
+
+_install_explorer_import_stubs()
+
 from malca.review.explore_data import (
     add_eda_columns,
+    CandidateSourceData,
+    CombinedCandidateData,
     find_candidate_key,
     get_candidate_record_by_key,
     infer_plot_dir_from_source,
@@ -22,7 +60,9 @@ from malca.review.explorer import (
     _resolve_sources,
     _review_db_paths_from_frame,
     build_arg_parser,
+    build_explorer_app,
 )
+from malca.review import explorer as review_explorer
 
 
 def _write_review_db(path: Path, rows: list[dict[str, object]]) -> None:
@@ -41,6 +81,63 @@ def _write_review_db(path: Path, rows: list[dict[str, object]]) -> None:
         conn.commit()
 
 
+def _collect_layout_text(node: object) -> list[str]:
+    text: list[str] = []
+
+    def walk(item: object) -> None:
+        if isinstance(item, (list, tuple)):
+            for child in item:
+                walk(child)
+            return
+        if isinstance(item, str):
+            text.append(item)
+            return
+        if item is None or isinstance(item, (int, float, bool)):
+            return
+        walk(getattr(item, "children", None))
+
+    walk(node)
+    return text
+
+
+def _collect_layout_ids(node: object) -> list[object]:
+    ids: list[object] = []
+
+    def walk(item: object) -> None:
+        if isinstance(item, (list, tuple)):
+            for child in item:
+                walk(child)
+            return
+        if item is None or isinstance(item, (str, int, float, bool)):
+            return
+        cid = getattr(item, "id", None)
+        if cid is not None:
+            ids.append(cid)
+        walk(getattr(item, "children", None))
+
+    walk(node)
+    return ids
+
+
+def _collect_graph_configs(node: object) -> list[dict]:
+    configs: list[dict] = []
+
+    def walk(item: object) -> None:
+        if isinstance(item, (list, tuple)):
+            for child in item:
+                walk(child)
+            return
+        if item is None or isinstance(item, (str, int, float, bool)):
+            return
+        config = getattr(item, "config", None)
+        if isinstance(config, dict):
+            configs.append(config)
+        walk(getattr(item, "children", None))
+
+    walk(node)
+    return configs
+
+
 def test_load_combined_source_data_adds_candidate_keys(tmp_path: Path) -> None:
     db1 = tmp_path / "output" / "runs" / "run_a" / "review" / "review.db"
     db2 = tmp_path / "output" / "runs" / "run_b" / "review" / "review.db"
@@ -52,6 +149,170 @@ def test_load_combined_source_data_adds_candidate_keys(tmp_path: Path) -> None:
     assert len(combined.df) == 2
     assert combined.df["candidate_key"].nunique() == 2
     assert find_candidate_key(combined, "A1") is not None
+
+
+def test_explorer_header_uses_compact_source_row_count(tmp_path: Path) -> None:
+    row_count = 13_743
+    frame = pd.DataFrame(
+        {
+            "candidate_key": [f"C{i}" for i in range(row_count)],
+            "candidate_id": [f"C{i}" for i in range(row_count)],
+            "source_label": ["demo"] * row_count,
+            "dipper_score": [0.0] * row_count,
+        }
+    )
+    source = CandidateSourceData(
+        source_path=tmp_path / "review.db",
+        source_kind="db",
+        source_label="demo",
+        df=frame,
+        lookup={"C0": 0},
+        default_plot_dir=None,
+    )
+    combined = CombinedCandidateData(
+        df=frame,
+        sources=[source],
+        key_lookup={"C0": 0},
+        id_lookup={"C0": ["C0"]},
+    )
+
+    app = build_explorer_app(combined, host="127.0.0.1", port=8050)
+    text = _collect_layout_text(app.layout)
+
+    assert "MALCA Explorer" not in text
+    assert "[1/13,743]" in text
+
+
+def test_explorer_layout_has_publication_export_targets(tmp_path: Path) -> None:
+    frame = pd.DataFrame(
+        {
+            "candidate_key": ["C0"],
+            "candidate_id": ["C0"],
+            "source_label": ["demo"],
+            "dipper_score": [0.0],
+        }
+    )
+    source = CandidateSourceData(
+        source_path=tmp_path / "review.db",
+        source_kind="db",
+        source_label="demo",
+        df=frame,
+        lookup={"C0": 0},
+        default_plot_dir=None,
+    )
+    combined = CombinedCandidateData(
+        df=frame,
+        sources=[source],
+        key_lookup={"C0": 0},
+        id_lookup={"C0": ["C0"]},
+    )
+
+    app = build_explorer_app(combined, host="127.0.0.1", port=8050)
+    ids = _collect_layout_ids(app.layout)
+
+    assert "explorer-dustycult-download" in ids
+    assert "explorer-mini-plot-download" in ids
+    assert "dustycult-export-fit-btn" in ids
+    assert "dustycult-export-occulter-btn" in ids
+
+
+def test_explorer_layout_graphs_disable_plotly_image_export(tmp_path: Path) -> None:
+    frame = pd.DataFrame(
+        {
+            "candidate_key": ["C0"],
+            "candidate_id": ["C0"],
+            "source_label": ["demo"],
+            "dipper_score": [0.0],
+        }
+    )
+    source = CandidateSourceData(
+        source_path=tmp_path / "review.db",
+        source_kind="db",
+        source_label="demo",
+        df=frame,
+        lookup={"C0": 0},
+        default_plot_dir=None,
+    )
+    combined = CombinedCandidateData(
+        df=frame,
+        sources=[source],
+        key_lookup={"C0": 0},
+        id_lookup={"C0": ["C0"]},
+    )
+
+    app = build_explorer_app(combined, host="127.0.0.1", port=8050)
+    configs = _collect_graph_configs(app.layout)
+
+    assert configs
+    assert all("toImage" in config.get("modeBarButtonsToRemove", []) for config in configs)
+
+
+def test_explorer_mini_plot_export_passes_button_ids_and_clicks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = pd.DataFrame(
+        {
+            "candidate_key": ["C0"],
+            "candidate_id": ["cand-0"],
+            "source_label": ["demo"],
+            "dipper_score": [0.0],
+        }
+    )
+    source = CandidateSourceData(
+        source_path=tmp_path / "review.db",
+        source_kind="db",
+        source_label="demo",
+        df=frame,
+        lookup={"C0": 0},
+        default_plot_dir=None,
+    )
+    combined = CombinedCandidateData(
+        df=frame,
+        sources=[source],
+        key_lookup={"C0": 0},
+        id_lookup={"cand-0": ["C0"]},
+    )
+    app = build_explorer_app(combined, host="127.0.0.1", port=8050)
+    callback = next(
+        spec["callback"].__wrapped__
+        for key, spec in app.callback_map.items()
+        if "explorer-mini-plot-download" in key
+    )
+    seen = {}
+
+    def fake_export(triggered_id, button_ids, clicks, graph_ids, figures, candidate_id):
+        seen.update(
+            triggered_id=triggered_id,
+            button_ids=button_ids,
+            clicks=clicks,
+            graph_ids=graph_ids,
+            figures=figures,
+            candidate_id=candidate_id,
+        )
+        return "download", "status"
+
+    triggered_id = {"type": "mini-plot-export-btn", "panel": "external", "name": "cmd"}
+    button_id = {"type": "mini-plot-export-btn", "panel": "external", "name": "cmd"}
+    graph_id = {"type": "mini-plot-export-graph", "panel": "external", "name": "cmd"}
+    monkeypatch.setattr(review_explorer, "_export_mini_plot_pdf_from_state", fake_export)
+    monkeypatch.setattr(
+        review_explorer.dash,
+        "callback_context",
+        types.SimpleNamespace(triggered_id=triggered_id, inputs_list=[[{"id": button_id}]]),
+    )
+
+    data, status = callback([1], [graph_id], [{"data": []}], "C0", {})
+
+    assert (data, status) == ("download", "status")
+    assert seen == {
+        "triggered_id": triggered_id,
+        "button_ids": [button_id],
+        "clicks": [1],
+        "graph_ids": [graph_id],
+        "figures": [{"data": []}],
+        "candidate_id": "cand-0",
+    }
 
 
 def test_review_explore_parser_uses_review_db_cli(tmp_path: Path) -> None:

@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import re
+
 
 SPECIAL_FILTERS = {
     "only_unreviewed": "Only unreviewed",
     "require_failed_any_false": "Require failed_any=False",
 }
 
-# Definite catalog/type hits that indicate an already-known object.
-# Keep uncertainty-style vetting flags (PM diagnostics, broad YSO heuristics, etc.)
-# out of this preset so the UI can apply only the hard known-type exclusions.
+# Catalog/type filters controlled by the vetting known-type presets.
+# The broad preset uses all of them; the "certain known" preset leaves
+# vetting_likely_known unset and drops uncertainty-style categorical labels.
 VETTING_KNOWN_BOOL_FILTERS = (
     "vetting_likely_known",
     "microlens_match",
@@ -24,6 +26,58 @@ VETTING_KNOWN_SELECT_FILTERS = (
     "tns_type",
     "alerce_lc_class",
 )
+
+_VSX_GENERIC_CLASSES = {"*", "MISC", "NONE", "VAR"}
+_ASASSN_GENERIC_CLASSES = {"VAR"}
+_SIMBAD_GENERIC_TYPES = {"*", "**", "G", "FIR", "MUL"}
+_TNS_UNCERTAIN_RE = re.compile(
+    r"(?:^|[\s_\-/(,.;:])(?:candidate|possible|probable|probably|suspected|tentative|uncertain)"
+    r"(?:$|[\s_\-/),.;:])",
+    re.IGNORECASE,
+)
+_TNS_DEFINITE_SN_RE = re.compile(r"^(?:sn|supernova)\b", re.IGNORECASE)
+
+
+def _normalized_class_value(value: object) -> str:
+    return str(value or "").strip()
+
+
+def _is_tns_definite_type(text: str) -> bool:
+    lowered = text.lower()
+    if "?" in text:
+        return False
+    if _TNS_UNCERTAIN_RE.search(text):
+        return False
+    if _TNS_DEFINITE_SN_RE.search(text):
+        return True
+    if lowered in {"cv", "cataclysmic variable", "nova", "classical nova", "tde"}:
+        return True
+    if lowered.startswith("tidal disruption"):
+        return True
+    return False
+
+
+def is_definite_known_type_value(column: str, value: object) -> bool:
+    """Return whether a catalog class value is a definite known-type exclusion."""
+    text = _normalized_class_value(value)
+    if not text:
+        return False
+
+    col = str(column or "").strip()
+    upper = text.upper()
+
+    if col == "vsx_class":
+        return ":" not in text and upper not in _VSX_GENERIC_CLASSES
+    if col == "asassn_var_type":
+        return ":" not in text and upper not in _ASASSN_GENERIC_CLASSES
+    if col == "simbad_otype":
+        return "?" not in text and upper not in _SIMBAD_GENERIC_TYPES
+    if col == "tns_type":
+        return _is_tns_definite_type(text)
+    if col in {"gaia_var_class", "ztf_var_type", "alerce_lc_class", "microlens_catalog"}:
+        return True
+
+    return True
 
 
 SIDEBAR_GROUPS = [

@@ -6,7 +6,11 @@ returning a plotly Figure or None if required data is missing.
 
 from __future__ import annotations
 
+from io import BytesIO
 import math
+import os
+from pathlib import Path
+import tempfile
 
 import numpy as np
 import plotly.graph_objects as go
@@ -22,6 +26,9 @@ from malca.config import (
 
 
 _BACKGROUND_POINT_LIMIT = 4000
+
+_PUBLICATION_DPI = 300
+_PUBLICATION_DENSITY_BINS = 240
 
 
 def _safe_float(payload: dict, key: str) -> float | None:
@@ -596,6 +603,648 @@ def build_kiel_figure(
     fig.update_yaxes(title="log g [cgs]", range=[6, -1])
 
     return fig
+
+
+def _publication_imports():
+    cache_dir = Path(tempfile.gettempdir()) / "malca-matplotlib"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    if "MPLCONFIGDIR" not in os.environ:
+        default_config = Path.home() / ".config" / "matplotlib"
+        if not os.access(default_config, os.W_OK):
+            os.environ["MPLCONFIGDIR"] = str(cache_dir)
+    if "XDG_CACHE_HOME" not in os.environ:
+        default_cache = Path.home() / ".cache"
+        if not os.access(default_cache, os.W_OK):
+            os.environ["XDG_CACHE_HOME"] = str(cache_dir)
+
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LinearSegmentedColormap, LogNorm
+
+    return plt, LinearSegmentedColormap, LogNorm
+
+
+def _finite_publication_xy(
+    background: dict | None,
+    x_key: str,
+    y_key: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    bg = background or {}
+    try:
+        x = np.asarray(bg.get(x_key), dtype=float).reshape(-1)
+        y = np.asarray(bg.get(y_key), dtype=float).reshape(-1)
+    except Exception:
+        return np.empty(0), np.empty(0)
+    if x.size == 0 or y.size == 0 or x.size != y.size:
+        return np.empty(0), np.empty(0)
+    mask = np.isfinite(x) & np.isfinite(y)
+    return x[mask], y[mask]
+
+
+def _quantile_limits(
+    values: np.ndarray,
+    extras: tuple[float | None, ...] = (),
+    *,
+    qlo: float = 0.005,
+    qhi: float = 0.995,
+    default: tuple[float, float],
+    pad_fraction: float = 0.06,
+    min_pad: float = 0.15,
+) -> tuple[float, float]:
+    finite = [float(v) for v in np.asarray(values, dtype=float).reshape(-1) if np.isfinite(v)]
+    if finite:
+        lo = float(np.quantile(finite, qlo))
+        hi = float(np.quantile(finite, qhi))
+    else:
+        lo, hi = default
+    for extra in extras:
+        if extra is None:
+            continue
+        try:
+            value = float(extra)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(value):
+            lo = min(lo, value)
+            hi = max(hi, value)
+    if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+        lo, hi = default
+    pad = max(min_pad, (hi - lo) * pad_fraction)
+    return lo - pad, hi + pad
+
+
+def _publication_axes(ax, *, title: str | None = None, xlabel: str, ylabel: str) -> None:
+    if title:
+        ax.set_title(title, fontsize=10.5, pad=10, fontweight="semibold")
+    ax.set_xlabel(xlabel, fontsize=9.5, labelpad=7)
+    ax.set_ylabel(ylabel, fontsize=9.5, labelpad=7)
+    ax.tick_params(axis="both", labelsize=8.5, length=3.5, width=0.7, colors="#222222")
+    ax.grid(True, color="#9ca3af", alpha=0.24, linewidth=0.55)
+    ax.set_axisbelow(True)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    for side in ("left", "bottom"):
+        ax.spines[side].set_color("#333333")
+        ax.spines[side].set_linewidth(0.8)
+
+
+def _background_density(ax, x: np.ndarray, y: np.ndarray, *, extent: tuple[float, float, float, float]) -> None:
+    if x.size == 0 or y.size == 0:
+        return
+    _plt, LinearSegmentedColormap, LogNorm = _publication_imports()
+    cmap = LinearSegmentedColormap.from_list(
+        "malca_density_blue",
+        ["#ffffff", "#d9e7f3", "#96b7d4", "#4f7fa7", "#1f4f75"],
+    )
+    xmin, xmax, ymin, ymax = extent
+    mask = (x >= xmin) & (x <= xmax) & (y >= ymin) & (y <= ymax)
+    if not mask.any():
+        return
+
+    hist, xedges, yedges = np.histogram2d(
+        x[mask],
+        y[mask],
+        bins=_PUBLICATION_DENSITY_BINS,
+        range=((xmin, xmax), (ymin, ymax)),
+    )
+    density = hist.astype(float, copy=False)
+    positive = density[np.isfinite(density) & (density > 0)]
+    if positive.size == 0:
+        return
+    cutoff = max(float(np.nanmax(positive)) * 0.012, float(np.nanpercentile(positive, 8)))
+    vmin = max(cutoff, float(np.nanpercentile(positive, 12)))
+    vmax = float(np.nanmax(positive))
+    if not np.isfinite(vmin) or not np.isfinite(vmax) or vmax <= vmin:
+        return
+
+    occupied = np.isfinite(density) & (density > cutoff)
+    if not occupied.any():
+        return
+    x_centers = 0.5 * (xedges[:-1] + xedges[1:])
+    y_centers = 0.5 * (yedges[:-1] + yedges[1:])
+    x_idx, y_idx = np.nonzero(occupied)
+    counts = density[x_idx, y_idx]
+    ax.scatter(
+        x_centers[x_idx],
+        y_centers[y_idx],
+        c=counts,
+        s=5.5,
+        marker="o",
+        cmap=cmap,
+        norm=LogNorm(vmin=vmin, vmax=vmax),
+        alpha=0.95,
+        linewidths=0.0,
+        edgecolors="none",
+        rasterized=True,
+        zorder=1,
+    )
+
+
+def _save_publication_pdf(fig) -> bytes:
+    buf = BytesIO()
+    try:
+        fig.savefig(
+            buf,
+            format="pdf",
+            dpi=_PUBLICATION_DPI,
+            bbox_inches="tight",
+            pad_inches=0.04,
+            metadata={"Creator": "MALCA"},
+        )
+        return buf.getvalue()
+    finally:
+        try:
+            import matplotlib.pyplot as plt
+
+            plt.close(fig)
+        except Exception:
+            pass
+
+
+def _cmd_publication_pdf(payload: dict, background: dict | None) -> bytes | None:
+    g_mag = _safe_float(payload, "phot_g_mean_mag")
+    bp_rp = _safe_float(payload, "bp_rp")
+    av = _safe_float(payload, "A_v_3d")
+    bprp0_payload = _safe_float(payload, "bprp0")
+    mg0_payload = _safe_float(payload, "mg0")
+
+    dist = _safe_float(payload, "distance_gspphot")
+    if dist is None or dist <= 0:
+        plx = _safe_float(payload, "parallax")
+        dist = 1000.0 / plx if plx is not None and plx > 0 else None
+    if g_mag is None or dist is None or dist <= 0:
+        return None
+    if bp_rp is None:
+        bp = _safe_float(payload, "phot_bp_mean_mag")
+        rp = _safe_float(payload, "phot_rp_mean_mag")
+        if bp is None or rp is None:
+            return None
+        bp_rp = bp - rp
+
+    m_g = g_mag - 5.0 * math.log10(dist) + 5.0
+    if mg0_payload is not None and bprp0_payload is not None:
+        m_g0 = mg0_payload
+        bp_rp0 = bprp0_payload
+    elif av is not None and av >= 0:
+        m_g0 = m_g - CMD_A_G_PER_AV * av
+        bp_rp0 = bp_rp - CMD_E_BP_RP_PER_AV * av
+    else:
+        m_g0 = m_g
+        bp_rp0 = bp_rp
+
+    plt, _LinearSegmentedColormap, _LogNorm = _publication_imports()
+    bg_x, bg_y = _finite_publication_xy(background, "cmd_bprp0", "cmd_mg0")
+    xlim = _quantile_limits(bg_x, (bp_rp0, bp_rp), default=(-0.5, 4.5), min_pad=0.18)
+    ylim = _quantile_limits(bg_y, (m_g0, m_g), default=(-6.0, 14.0), min_pad=0.45)
+    xlim = (max(-0.8, xlim[0]), min(5.0, xlim[1]))
+    ylim = (max(-8.0, ylim[0]), min(16.0, ylim[1]))
+
+    fig, ax = plt.subplots(figsize=(4.9, 4.2), constrained_layout=True)
+    _background_density(ax, bg_x, bg_y, extent=(xlim[0], xlim[1], ylim[0], ylim[1]))
+    if abs(bp_rp0 - bp_rp) > 0.01 or abs(m_g0 - m_g) > 0.01:
+        ax.scatter(
+            [bp_rp],
+            [m_g],
+            s=42,
+            marker="*",
+            facecolors="white",
+            edgecolors="#374151",
+            linewidths=0.9,
+            zorder=5,
+        )
+        ax.annotate(
+            "",
+            xy=(bp_rp0, m_g0),
+            xytext=(bp_rp, m_g),
+            arrowprops=dict(arrowstyle="->", color="#6b7280", linewidth=0.9, shrinkA=4, shrinkB=5),
+            zorder=4,
+        )
+    ax.scatter(
+        [bp_rp0],
+        [m_g0],
+        s=88,
+        marker="*",
+        facecolors="#d95f02",
+        edgecolors="#111827",
+        linewidths=0.8,
+        zorder=6,
+    )
+    ax.text(0.70, 0.18, "main sequence", transform=ax.transAxes, color="#374151", fontsize=7.2)
+    ax.text(0.67, 0.79, "giants", transform=ax.transAxes, color="#374151", fontsize=7.2)
+    _publication_axes(ax, xlabel=r"$(G_{\rm BP}-G_{\rm RP})_0$", ylabel=r"$M_{G,0}$")
+    ax.set_xlim(*xlim)
+    ax.set_ylim(ylim[1], ylim[0])
+    return _save_publication_pdf(fig)
+
+
+def _ir_colorcolor_publication_pdf(payload: dict, background: dict | None) -> bytes | None:
+    h = _safe_float(payload, "tmass_h")
+    k = _safe_float(payload, "tmass_k")
+    w1 = _safe_float(payload, "w1")
+    w2 = _safe_float(payload, "w2")
+    if h is None or k is None or w1 is None or w2 is None:
+        return None
+
+    hk_obs = h - k
+    w1w2_obs = w1 - w2
+    hk_dered = _safe_float(payload, "H_K_dered")
+    w1w2_dered = _safe_float(payload, "w1_w2_dered")
+    if hk_dered is None or w1w2_dered is None:
+        av = _safe_float(payload, "A_v_3d")
+        if av is not None and av > 0:
+            hk_dered = hk_obs - YSO_DUST_CORRECTION_HK * av
+            w1w2_dered = w1w2_obs - YSO_DUST_CORRECTION_W1W2 * av
+        else:
+            hk_dered = hk_obs
+            w1w2_dered = w1w2_obs
+
+    plt, _LinearSegmentedColormap, _LogNorm = _publication_imports()
+    bg_x, bg_y = _finite_publication_xy(background, "ir_w1w2", "ir_hk")
+    xlim = (-0.5, 2.5)
+    ylim = (-0.3, 2.0)
+
+    fig, ax = plt.subplots(figsize=(5.05, 4.0), constrained_layout=True)
+    regions = [
+        ("Photospheres", xlim[0], YSO_CLASS_II_W1W2_MIN, ylim[0], ylim[1], "#f3f4f6"),
+        ("Transition disk", YSO_CLASS_II_W1W2_MIN, YSO_CLASS_I_W1W2, ylim[0], YSO_CLASS_II_HK, "#fff7d6"),
+        ("Class II", YSO_CLASS_II_W1W2_MIN, YSO_CLASS_I_W1W2, YSO_CLASS_II_HK, ylim[1], "#ffedd5"),
+        ("Class I", YSO_CLASS_I_W1W2, xlim[1], ylim[0], ylim[1], "#fee2e2"),
+    ]
+    region_labels = {
+        "Photospheres": ((xlim[0] + YSO_CLASS_II_W1W2_MIN) / 2.0, 1.86, "center", "top"),
+        "Transition disk": ((YSO_CLASS_II_W1W2_MIN + YSO_CLASS_I_W1W2) / 2.0, 0.13, "center", "center"),
+        "Class II": ((YSO_CLASS_II_W1W2_MIN + YSO_CLASS_I_W1W2) / 2.0, 1.86, "center", "top"),
+        "Class I": ((YSO_CLASS_I_W1W2 + xlim[1]) / 2.0, 1.86, "center", "top"),
+    }
+    for label, x0, x1, y0, y1, color in regions:
+        ax.axvspan(x0, x1, ymin=(y0 - ylim[0]) / (ylim[1] - ylim[0]), ymax=(y1 - ylim[0]) / (ylim[1] - ylim[0]), color=color, zorder=0)
+    for label, (x, y, ha, va) in region_labels.items():
+        ax.text(
+            x,
+            y,
+            label,
+            ha=ha,
+            va=va,
+            fontsize=7.2,
+            color="#374151",
+            bbox=dict(facecolor="white", edgecolor="none", alpha=0.55, boxstyle="round,pad=0.12"),
+            zorder=2,
+        )
+    _background_density(ax, bg_x, bg_y, extent=(xlim[0], xlim[1], ylim[0], ylim[1]))
+    if abs(hk_dered - hk_obs) > 0.01 or abs(w1w2_dered - w1w2_obs) > 0.01:
+        ax.scatter(
+            [w1w2_obs],
+            [hk_obs],
+            s=34,
+            facecolors="white",
+            edgecolors="#374151",
+            linewidths=0.9,
+            zorder=5,
+        )
+        ax.annotate(
+            "",
+            xy=(w1w2_dered, hk_dered),
+            xytext=(w1w2_obs, hk_obs),
+            arrowprops=dict(arrowstyle="->", color="#6b7280", linewidth=0.9, shrinkA=4, shrinkB=5),
+            zorder=4,
+        )
+    ax.scatter(
+        [w1w2_dered],
+        [hk_dered],
+        s=54,
+        facecolors="#d95f02",
+        edgecolors="#111827",
+        linewidths=0.95,
+        zorder=6,
+    )
+    ax.annotate(
+        "candidate",
+        xy=(w1w2_dered, hk_dered),
+        xycoords="data",
+        xytext=(8, 8),
+        textcoords="offset points",
+        fontsize=7.4,
+        color="#111827",
+        ha="left",
+        va="bottom",
+        arrowprops=dict(arrowstyle="-", color="#111827", linewidth=0.55, shrinkA=2, shrinkB=4),
+        bbox=dict(facecolor="white", edgecolor="none", alpha=0.78, boxstyle="round,pad=0.12"),
+        zorder=7,
+    )
+    _publication_axes(ax, xlabel=r"$W1-W2$", ylabel=r"$H-K_s$")
+    ax.set_xlim(*xlim)
+    ax.set_ylim(*ylim)
+    return _save_publication_pdf(fig)
+
+
+def _kiel_publication_pdf(payload: dict, background: dict | None) -> bytes | None:
+    teff = _safe_float(payload, "teff50")
+    logg = _safe_float(payload, "logg50")
+    teff16 = _safe_float(payload, "teff16")
+    teff84 = _safe_float(payload, "teff84")
+    logg16 = _safe_float(payload, "logg16")
+    logg84 = _safe_float(payload, "logg84")
+    if teff is None or logg is None:
+        teff = _safe_float(payload, "teff_gspphot")
+        logg = _safe_float(payload, "logg_gspphot")
+        teff16 = teff84 = logg16 = logg84 = None
+    if teff is None or logg is None:
+        return None
+
+    plt, _LinearSegmentedColormap, _LogNorm = _publication_imports()
+    bg_x, bg_y = _finite_publication_xy(background, "kiel_teff", "kiel_logg")
+    xlim = _quantile_limits(bg_x, (teff,), default=(3200.0, 18000.0), qlo=0.005, qhi=0.995, min_pad=350.0)
+    ylim = _quantile_limits(bg_y, (logg,), default=(0.0, 5.2), qlo=0.005, qhi=0.995, min_pad=0.25)
+    xlim = (max(2500.0, xlim[0]), min(40000.0, max(xlim[1], min(18000.0, float(teff) * 1.08))))
+    ylim = (max(-0.5, ylim[0]), min(6.0, ylim[1]))
+
+    fig, ax = plt.subplots(figsize=(4.9, 4.2), constrained_layout=True)
+    _background_density(ax, bg_x, bg_y, extent=(xlim[0], xlim[1], ylim[0], ylim[1]))
+    xerr = None
+    yerr = None
+    if teff16 is not None and teff84 is not None:
+        xerr = [[max(0.0, teff - teff16)], [max(0.0, teff84 - teff)]]
+    if logg16 is not None and logg84 is not None:
+        yerr = [[max(0.0, logg - logg16)], [max(0.0, logg84 - logg)]]
+    ax.errorbar(
+        [teff],
+        [logg],
+        xerr=xerr,
+        yerr=yerr,
+        fmt="*",
+        markersize=10,
+        markerfacecolor="#d95f02",
+        markeredgecolor="#111827",
+        markeredgewidth=0.8,
+        ecolor="#374151",
+        elinewidth=0.8,
+        capsize=2.5,
+        zorder=6,
+    )
+    ax.text(0.77, 0.14, "main sequence", transform=ax.transAxes, ha="center", color="#374151", fontsize=7.2)
+    ax.text(0.18, 0.68, "giants", transform=ax.transAxes, ha="center", color="#374151", fontsize=7.2)
+    ax.text(0.70, 0.45, "subgiants", transform=ax.transAxes, ha="center", color="#374151", fontsize=7.2)
+    _publication_axes(ax, xlabel=r"$T_{\rm eff}\ {\rm [K]}$", ylabel=r"$\log g\ {\rm [cgs]}$")
+    ax.set_xlim(xlim[1], xlim[0])
+    ax.set_ylim(ylim[1], ylim[0])
+    return _save_publication_pdf(fig)
+
+
+def _sample_publication_points(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    if x.size <= _BACKGROUND_POINT_LIMIT:
+        return x, y
+    idx = np.linspace(0, x.size - 1, _BACKGROUND_POINT_LIMIT, dtype=int)
+    return x[idx], y[idx]
+
+
+def _publication_scatter_background(
+    ax,
+    x: np.ndarray,
+    y: np.ndarray,
+    *,
+    color: str = "#4f7fa7",
+    size: float = 5.0,
+    alpha: float = 0.18,
+) -> None:
+    if x.size == 0 or y.size == 0:
+        return
+    x, y = _sample_publication_points(x, y)
+    ax.scatter(
+        x,
+        y,
+        s=size,
+        c=color,
+        alpha=alpha,
+        edgecolors="none",
+        linewidths=0.0,
+        rasterized=True,
+        zorder=2,
+    )
+
+
+def _publication_candidate_marker(ax, x: float, y: float, *, label: bool = True, marker: str = "o") -> None:
+    ax.scatter(
+        [x],
+        [y],
+        s=58 if marker == "o" else 86,
+        marker=marker,
+        facecolors="#d95f02",
+        edgecolors="#111827",
+        linewidths=0.9,
+        zorder=6,
+    )
+    if label:
+        ax.annotate(
+            "candidate",
+            xy=(x, y),
+            xycoords="data",
+            xytext=(7, 7),
+            textcoords="offset points",
+            fontsize=7.3,
+            color="#111827",
+            ha="left",
+            va="bottom",
+            arrowprops=dict(arrowstyle="-", color="#111827", linewidth=0.5, shrinkA=2, shrinkB=4),
+            bbox=dict(facecolor="white", edgecolor="none", alpha=0.76, boxstyle="round,pad=0.12"),
+            zorder=7,
+        )
+
+
+def _positive_log_limits(
+    values: np.ndarray,
+    extras: tuple[float | None, ...] = (),
+    *,
+    default: tuple[float, float],
+    qlo: float = 0.01,
+    qhi: float = 0.99,
+    pad_fraction: float = 0.08,
+) -> tuple[float, float]:
+    positive = [float(v) for v in np.asarray(values, dtype=float).reshape(-1) if np.isfinite(v) and v > 0]
+    if positive:
+        logs = np.log10(np.asarray(positive, dtype=float))
+        lo = float(np.quantile(logs, qlo))
+        hi = float(np.quantile(logs, qhi))
+    else:
+        lo = math.log10(default[0])
+        hi = math.log10(default[1])
+    for extra in extras:
+        if extra is None:
+            continue
+        try:
+            value = float(extra)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(value) and value > 0:
+            log_value = math.log10(value)
+            lo = min(lo, log_value)
+            hi = max(hi, log_value)
+    if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+        lo = math.log10(default[0])
+        hi = math.log10(default[1])
+    pad = max(0.08, (hi - lo) * pad_fraction)
+    return 10 ** (lo - pad), 10 ** (hi + pad)
+
+
+def _metric_publication_limits(
+    x: np.ndarray,
+    y: np.ndarray,
+    candidate_x: float,
+    candidate_y: float,
+    *,
+    default: tuple[float, float],
+    fixed: tuple[float, float] | None = None,
+    nonnegative: bool = False,
+) -> tuple[float, float]:
+    if fixed is not None:
+        return fixed
+    both = np.concatenate([np.asarray(x, dtype=float).reshape(-1), np.asarray(y, dtype=float).reshape(-1)])
+    lo, hi = _quantile_limits(
+        both,
+        (candidate_x, candidate_y),
+        default=default,
+        qlo=0.005,
+        qhi=0.995,
+        min_pad=0.2,
+    )
+    if nonnegative:
+        lo = min(-0.08 * max(hi, 1.0), lo)
+    return lo, hi
+
+
+def _score_balance_publication_pdf(payload: dict, background: dict | None) -> bytes | None:
+    dipper_score = _safe_float(payload, "dipper_score")
+    jumper_score = _safe_float(payload, "jumper_score")
+    if dipper_score is None or jumper_score is None:
+        return None
+
+    plt, _LinearSegmentedColormap, _LogNorm = _publication_imports()
+    bg_x, bg_y = _finite_publication_xy(background, "metric_dipper_score", "metric_jumper_score")
+    upper_lo, upper_hi = _metric_publication_limits(
+        bg_x,
+        bg_y,
+        dipper_score,
+        jumper_score,
+        default=(0.0, 6.0),
+        nonnegative=True,
+    )
+    upper = max(6.0, upper_hi)
+    lower = min(-0.25, upper_lo)
+
+    fig, ax = plt.subplots(figsize=(4.45, 3.75), constrained_layout=True)
+    _publication_scatter_background(ax, bg_x, bg_y)
+    ax.plot([0.0, upper], [0.0, upper], color="#6b7280", linewidth=0.75, linestyle=":", zorder=3)
+    ax.text(0.73, 0.20, "dip-like", transform=ax.transAxes, fontsize=7.2, color="#374151")
+    ax.text(0.18, 0.78, "jump-like", transform=ax.transAxes, fontsize=7.2, color="#374151")
+    _publication_candidate_marker(ax, dipper_score, jumper_score, marker="*")
+    _publication_axes(ax, xlabel=r"$S_{\rm dip}$", ylabel=r"$S_{\rm jump}$")
+    ax.set_xlim(lower, upper)
+    ax.set_ylim(lower, upper)
+    ax.set_aspect("equal", adjustable="box")
+    return _save_publication_pdf(fig)
+
+
+def _catalog_support_publication_pdf(payload: dict, background: dict | None) -> bytes | None:
+    period_sources = _safe_float(payload, "period_n_sources")
+    dip_runs = _safe_float(payload, "dip_run_count")
+    if period_sources is None or dip_runs is None:
+        return None
+
+    plt, _LinearSegmentedColormap, _LogNorm = _publication_imports()
+    bg_x, bg_y = _finite_publication_xy(background, "plane_catalog_support_x", "plane_catalog_support_y")
+
+    fig, ax = plt.subplots(figsize=(4.45, 3.75), constrained_layout=True)
+    _publication_scatter_background(ax, bg_x, bg_y)
+    ax.axvline(2.0, color="#6b7280", linewidth=0.75, linestyle=":", zorder=3)
+    ax.axhline(2.0, color="#6b7280", linewidth=0.75, linestyle=":", zorder=3)
+    ax.text(0.57, 0.82, "strong catalog support", transform=ax.transAxes, fontsize=7.1, color="#374151")
+    ax.text(0.58, 0.18, "repeated dips", transform=ax.transAxes, fontsize=7.1, color="#374151")
+    _publication_candidate_marker(ax, period_sources, dip_runs)
+    _publication_axes(ax, xlabel=r"$N_{\rm period\ sources}$", ylabel=r"$N_{\rm dip\ runs}$")
+    ax.set_xlim(-0.25, 5.25)
+    ax.set_ylim(-0.25, 8.25)
+    return _save_publication_pdf(fig)
+
+
+def _recurrence_regularity_publication_pdf(payload: dict, background: dict | None) -> bytes | None:
+    spacing_median = _safe_float(payload, "dip_inter_event_spacing_median")
+    spacing_std = _safe_float(payload, "dip_inter_event_spacing_std")
+    if spacing_median is None or spacing_std is None or spacing_median <= 0 or spacing_std <= 0:
+        return None
+
+    plt, _LinearSegmentedColormap, _LogNorm = _publication_imports()
+    bg_x, bg_y = _finite_publication_xy(background, "plane_recurrence_regularity_x", "plane_recurrence_regularity_y")
+    mask = (bg_x > 0) & (bg_y > 0)
+    bg_x = bg_x[mask]
+    bg_y = bg_y[mask]
+    xlim = _positive_log_limits(bg_x, (spacing_median,), default=(1.0, 1000.0))
+    ylim = _positive_log_limits(bg_y, (spacing_std,), default=(0.5, 1000.0))
+
+    fig, ax = plt.subplots(figsize=(4.45, 3.75), constrained_layout=True)
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    _publication_scatter_background(ax, bg_x, bg_y)
+    diag_lo = max(min(xlim[0], ylim[0]), 1e-6)
+    diag_hi = max(xlim[1], ylim[1])
+    ax.plot([diag_lo, diag_hi], [diag_lo, diag_hi], color="#6b7280", linewidth=0.75, linestyle=":", zorder=3)
+    ax.text(0.17, 0.82, "less regular", transform=ax.transAxes, fontsize=7.1, color="#374151")
+    ax.text(0.62, 0.22, "more regular", transform=ax.transAxes, fontsize=7.1, color="#374151")
+    _publication_candidate_marker(ax, spacing_median, spacing_std)
+    _publication_axes(
+        ax,
+        xlabel=r"$\tilde{\Delta t}_{\rm dip}\ [{\rm d}]$",
+        ylabel=r"$\sigma_{\Delta t}\ [{\rm d}]$",
+    )
+    ax.set_xlim(*xlim)
+    ax.set_ylim(*ylim)
+    return _save_publication_pdf(fig)
+
+
+def _dip_repeatability_publication_pdf(payload: dict, background: dict | None) -> bytes | None:
+    amp_consistency = _safe_float(payload, "dip_amplitude_consistency")
+    duration_consistency = _safe_float(payload, "dip_duration_consistency")
+    if amp_consistency is None or duration_consistency is None:
+        return None
+
+    plt, _LinearSegmentedColormap, _LogNorm = _publication_imports()
+    bg_x, bg_y = _finite_publication_xy(background, "plane_dip_repeatability_x", "plane_dip_repeatability_y")
+
+    fig, ax = plt.subplots(figsize=(4.45, 3.75), constrained_layout=True)
+    _publication_scatter_background(ax, bg_x, bg_y)
+    ax.axvline(0.5, color="#6b7280", linewidth=0.75, linestyle=":", zorder=3)
+    ax.axhline(0.5, color="#6b7280", linewidth=0.75, linestyle=":", zorder=3)
+    ax.text(0.58, 0.82, "repeatable dips", transform=ax.transAxes, fontsize=7.1, color="#374151")
+    _publication_candidate_marker(ax, amp_consistency, duration_consistency)
+    _publication_axes(ax, xlabel=r"$C_{\rm amp}$", ylabel=r"$C_{\rm duration}$")
+    ax.set_xlim(-0.05, 1.05)
+    ax.set_ylim(-0.05, 1.05)
+    ax.set_aspect("equal", adjustable="box")
+    return _save_publication_pdf(fig)
+
+
+def build_publication_diagnostic_pdf(
+    plot_name: str,
+    payload: dict,
+    background: dict | None = None,
+) -> bytes | None:
+    """Render selected diagnostic plots as purpose-built Matplotlib PDFs."""
+    key = str(plot_name or "").strip().lower().replace("-", "_")
+    if key == "cmd":
+        return _cmd_publication_pdf(payload, background)
+    if key == "ir_colorcolor":
+        return _ir_colorcolor_publication_pdf(payload, background)
+    if key == "kiel":
+        return _kiel_publication_pdf(payload, background)
+    if key in {"score_balance", "morphology_scores"}:
+        return _score_balance_publication_pdf(payload, background)
+    if key in {"catalog_support", "catalog_support_vs_dip_recurrence"}:
+        return _catalog_support_publication_pdf(payload, background)
+    if key == "recurrence_regularity":
+        return _recurrence_regularity_publication_pdf(payload, background)
+    if key == "dip_repeatability":
+        return _dip_repeatability_publication_pdf(payload, background)
+    return None
 
 
 # ---------------------------------------------------------------------------

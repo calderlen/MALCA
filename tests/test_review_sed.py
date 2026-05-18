@@ -88,6 +88,8 @@ def test_sed_luminosity_plot_uses_solar_units() -> None:
     plotted_y = float(fig.data[0].y[0])
     expected_y = float(rows["lambda_l_lambda"].iloc[0]) / LSUN_ERG_S
     assert math.isclose(plotted_y, expected_y, rel_tol=1.0e-12)
+    assert fig.data[0].marker.opacity == 1.0
+    assert fig.data[0].marker.size >= 10
 
 
 def test_distance_fallback_uses_positive_parallax() -> None:
@@ -358,3 +360,62 @@ def test_sed_model_rows_roundtrip_review_db_and_overlay(tmp_path: Path) -> None:
 
     assert not any("Castelli/Kurucz" in str(trace.name) for trace in observed_fig.data)
     assert any("dereddened" in warning for warning in observed_warnings)
+
+
+def test_sed_axis_crop_uses_photometry_not_model_extent() -> None:
+    external_rows = pd.DataFrame(
+        [
+            {
+                "candidate_id": "cand-crop",
+                "source": "Catalog",
+                "band": f"b{idx}",
+                "mag": 14.0 + idx,
+                "mag_system": "AB",
+                "lambda_eff_angstrom": wave,
+            }
+            for idx, wave in enumerate([5000.0, 10000.0, 20000.0])
+        ]
+    )
+    model_curve_rows = pd.DataFrame(
+        [
+            {
+                "candidate_id": "cand-crop",
+                "model_family": "Castelli/Kurucz 2004",
+                "wavelength_angstrom": wave,
+                "lambda_l_lambda": value,
+                "flux_lambda": value * 1.0e-45,
+                "teff_k": 6000.0,
+                "scale": 1.0,
+            }
+            for wave, value in [(100.0, 1.0e28), (5000.0, 1.0e33), (1.0e6, 1.0e28)]
+        ],
+        columns=SED_MODEL_CURVE_COLUMNS,
+    )
+    model_fit_rows = pd.DataFrame(
+        [
+            {
+                **{col: None for col in SED_MODEL_FIT_COLUMNS},
+                "candidate_id": "cand-crop",
+                "model_family": "Castelli/Kurucz 2004",
+                "status": "ok",
+                "n_fit_points": 3,
+            }
+        ],
+        columns=SED_MODEL_FIT_COLUMNS,
+    )
+
+    fig, rows, _warnings = build_sed_figure(
+        {"candidate_id": "cand-crop", "distance_gspphot": 1000.0},
+        external_rows=external_rows,
+        model_curve_rows=model_curve_rows,
+        model_fit_rows=model_fit_rows,
+        extinction_mode="corrected",
+    )
+
+    assert not rows.empty
+    assert any("Castelli/Kurucz" in str(trace.name) for trace in fig.data)
+    x0, x1 = fig.layout.xaxis.range
+    assert x0 > math.log10(100.0)
+    assert x1 < math.log10(1.0e6)
+    assert x0 < math.log10(float(rows["lambda_eff_angstrom"].min()))
+    assert x1 > math.log10(float(rows["lambda_eff_angstrom"].max()))

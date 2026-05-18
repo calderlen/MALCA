@@ -554,6 +554,21 @@ def _theme(theme: str | None) -> dict[str, str]:
     return {"paper": "#0d0d0d", "plot": "#0d0d0d", "font": "#dce8f2", "grid": "rgba(96,116,130,0.22)", "muted": "#9fb6cb"}
 
 
+def _log_axis_range_from_data(values: Iterable[object], *, pad_dex: float = 0.08, min_span_dex: float = 0.35) -> list[float] | None:
+    """Return a Plotly log-axis range based only on positive finite data values."""
+    arr = pd.to_numeric(pd.Series(list(values)), errors="coerce").to_numpy(dtype=float)
+    arr = arr[np.isfinite(arr) & (arr > 0)]
+    if arr.size == 0:
+        return None
+    logs = np.log10(arr)
+    lo = float(np.nanmin(logs))
+    hi = float(np.nanmax(logs))
+    center = 0.5 * (lo + hi)
+    span = max(hi - lo, min_span_dex)
+    half = 0.5 * span + pad_dex
+    return [center - half, center + half]
+
+
 def build_sed_figure(
     payload: dict,
     *,
@@ -593,12 +608,16 @@ def build_sed_figure(
 
     if sed_df.empty:
         fig.add_annotation(text="No SED photometry available", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False)
+        phot_x = np.array([], dtype=float)
+        phot_y = np.array([], dtype=float)
     else:
         plot_df = sed_df.copy()
         plot_df["x"] = pd.to_numeric(plot_df["lambda_eff_angstrom"], errors="coerce")
         y_scale = LSUN_ERG_S if y_col == "lambda_l_lambda" else 1.0
         plot_df["y"] = pd.to_numeric(plot_df[y_col], errors="coerce") / y_scale
         plot_df = plot_df[np.isfinite(plot_df["x"]) & np.isfinite(plot_df["y"]) & (plot_df["x"] > 0) & (plot_df["y"] > 0)]
+        phot_x = plot_df["x"].to_numpy(dtype=float)
+        phot_y = plot_df["y"].to_numpy(dtype=float)
         for (mode_name, source), grp in plot_df.groupby(["sed_mode", "source"], dropna=False):
             color = SOURCE_COLORS.get(str(source), "#bbbbbb")
             symbols = []
@@ -612,7 +631,7 @@ def build_sed_figure(
                     symbols.append("diamond-open")
                 else:
                     symbols.append("circle")
-            opacity = 0.5 if mode_name == "ISM-corrected" and mode == "both" else 0.9
+            opacity = 1.0
             y_err_col = "lambda_l_lambda_err" if y_col == "lambda_l_lambda" else "flux_lambda_err"
             y_err = (pd.to_numeric(grp.get(y_err_col), errors="coerce") / y_scale) if y_err_col in grp.columns else None
             show_y_err = bool(y_err is not None and np.isfinite(y_err).any())
@@ -621,7 +640,7 @@ def build_sed_figure(
                 y=grp["y"],
                 mode="markers",
                 name=f"{source} ({mode_name})" if mode == "both" else str(source),
-                marker=dict(size=8, color=color, symbol=symbols, opacity=opacity, line=dict(width=1, color=spec["font"])),
+                marker=dict(size=10, color=color, symbol=symbols, opacity=opacity, line=dict(width=1, color=spec["font"])),
                 error_y=dict(type="data", array=y_err, visible=show_y_err, thickness=0.8),
                 customdata=np.column_stack([
                     grp["band"].astype(str),
@@ -727,8 +746,10 @@ def build_sed_figure(
         font=dict(color=spec["font"], size=10),
         legend=dict(orientation="h", y=1.17, x=0.0, bgcolor="rgba(0,0,0,0)"),
     )
-    fig.update_xaxes(title=x_title, type="log", gridcolor=spec["grid"], zeroline=False)
-    fig.update_yaxes(title=y_title, type="log", gridcolor=spec["grid"], zeroline=False)
+    x_range = _log_axis_range_from_data(phot_x, pad_dex=0.10, min_span_dex=0.45)
+    y_range = _log_axis_range_from_data(phot_y, pad_dex=0.16, min_span_dex=0.60)
+    fig.update_xaxes(title=x_title, type="log", gridcolor=spec["grid"], zeroline=False, range=x_range)
+    fig.update_yaxes(title=y_title, type="log", gridcolor=spec["grid"], zeroline=False, range=y_range)
     return fig, sed_df, warnings
 
 
