@@ -31,7 +31,7 @@ from malca.config import (
 )
 from malca.candidates import select_passing_candidates_if_present
 from malca.gaia_ids import normalize_gaia_source_ids
-from malca.table_io import read_parquet_table
+from malca.table_io import read_parquet_table, read_passing_parquet_table
 
 
 
@@ -162,6 +162,43 @@ def _normalize_gaia_ids(values: list[object]) -> list[str]:
     return normalize_gaia_source_ids(values)
 
 
+def _parquet_column_names(path: Path) -> list[str] | None:
+    """Return Parquet column names without reading row data."""
+    try:
+        import pyarrow.parquet as pq
+
+        return list(pq.read_schema(path).names)
+    except Exception:
+        return None
+
+
+def _read_candidate_id_columns(
+    input_path: Path,
+    *,
+    only_passers: bool,
+) -> pd.DataFrame:
+    """Read only columns needed to derive Gaia IDs from a candidate table."""
+    columns = _parquet_column_names(input_path)
+    if columns is None:
+        df = read_parquet_table(input_path)
+        if only_passers:
+            df = select_passing_candidates_if_present(df, label="rows", printer=print)
+        return df
+
+    if "gaia_id" in columns:
+        wanted = ["gaia_id"]
+    elif "asas_sn_id" in columns:
+        wanted = ["asas_sn_id"]
+    else:
+        raise ValueError(
+            f"Input file {input_path} has neither 'gaia_id' nor 'asas_sn_id' column."
+        )
+
+    if only_passers:
+        return read_passing_parquet_table(input_path, columns=wanted)
+    return read_parquet_table(input_path, columns=wanted)
+
+
 def _extract_gaia_ids(
     input_path: Path,
     crossmatch_path: Path,
@@ -170,10 +207,7 @@ def _extract_gaia_ids(
 ) -> list[str]:
     """Read candidates and merge with VSX crossmatch to get Gaia source IDs."""
     print(f"Loading candidates from {input_path}...")
-    df = read_parquet_table(input_path)
-
-    if only_passers:
-        df = select_passing_candidates_if_present(df, label="rows", printer=print)
+    df = _read_candidate_id_columns(input_path, only_passers=only_passers)
 
     if "gaia_id" in df.columns:
         # Already has gaia_id (e.g. from a previous merge)
@@ -196,11 +230,17 @@ def _extract_gaia_ids(
 
     print(f"Loading crossmatch file {xmatch_path}...")
     xmatch_cols = ["asas_sn_id", "gaia_id", "tmass_id", "allwise_id"]
-    xmatch = read_parquet_table(xmatch_path)
-    header = xmatch.columns
+    header = _parquet_column_names(xmatch_path)
+    if header is None:
+        xmatch = read_parquet_table(xmatch_path)
+        header = xmatch.columns
+    else:
+        xmatch = None
     use_cols = ["asas_sn_id"] + [
         c for c in xmatch_cols if c in header and c != "asas_sn_id"
     ]
+    if xmatch is None:
+        xmatch = read_parquet_table(xmatch_path, columns=use_cols)
     df_xmatch = xmatch[use_cols].astype(str)
 
     df["asas_sn_id"] = df["asas_sn_id"].astype(str)

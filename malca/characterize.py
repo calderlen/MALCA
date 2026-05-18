@@ -117,6 +117,16 @@ DUST_DERED_SOURCE_COLUMNS = [
 ]
 
 
+def _parquet_column_names(path: Path) -> list[str] | None:
+    """Return Parquet column names without materializing row data."""
+    try:
+        import pyarrow.parquet as pq
+
+        return list(pq.read_schema(path).names)
+    except Exception:
+        return None
+
+
 def _canonicalize_wise_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Collapse legacy provenance-prefixed WISE magnitude columns to w1..w4."""
     if df.empty:
@@ -1869,20 +1879,25 @@ def characterize_candidates_df(
     # Run Gaia merge + galactic coords if not already done (checkpoint has source_id)
     if df_char is None or "source_id" not in df_char.columns:
         df_in = _add_wise_color_columns(df)
-        xmatch_path = crossmatch.expanduser()
 
-        if not xmatch_path.exists():
-            print(f"Warning: Crossmatch file {xmatch_path} not found")
-            if "gaia_id" in df_in.columns:
-                print("Proceeding with existing gaia_id column")
-                df_merged = df_in
-            else:
-                return df_in
+        if "gaia_id" in df_in.columns:
+            print("Using existing gaia_id column; skipping characterize crossmatch")
+            df_merged = df_in
         else:
+            xmatch_path = crossmatch.expanduser()
+
+            if not xmatch_path.exists():
+                print(f"Warning: Crossmatch file {xmatch_path} not found")
+                return df_in
+
             print(f"Loading crossmatch file {xmatch_path}...")
             try:
-                df_xmatch = read_parquet_table(xmatch_path).astype(str)
-                header = list(df_xmatch.columns)
+                header = _parquet_column_names(xmatch_path)
+                if header is None:
+                    df_xmatch = read_parquet_table(xmatch_path).astype(str)
+                    header = list(df_xmatch.columns)
+                else:
+                    df_xmatch = None
                 id_col = next((c for c in ("asas_sn_id", "ASAS-SN ID", "asassn_id") if c in header), None)
                 if id_col is None:
                     raise ValueError(f"crossmatch missing ASAS-SN ID column; found columns: {header[:15]}")
@@ -1897,7 +1912,12 @@ def characterize_candidates_df(
                     "class",
                     "sep_arcsec",
                 }
-                df_xmatch = df_xmatch[[c for c in df_xmatch.columns if c in requested]]
+                use_cols = [c for c in header if c in requested]
+                if df_xmatch is None:
+                    df_xmatch = read_parquet_table(xmatch_path, columns=use_cols).astype(str)
+                else:
+                    df_xmatch = df_xmatch[use_cols].astype(str)
+                header = list(df_xmatch.columns)
 
                 rename_map: dict[str, str] = {}
                 if id_col != "asas_sn_id":

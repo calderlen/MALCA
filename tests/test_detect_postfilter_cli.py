@@ -22,6 +22,7 @@ from malca.detect import (
     _candidate_result_priority,
     _collect_bundle_lightcurve_files,
     _copy_single_tagged_table_output,
+    _effective_enrich_workers,
     _first_existing_candidate_result,
     _run_external_lcs_enrichment,
     _run_multi_survey_features_enrichment,
@@ -88,6 +89,20 @@ def test_full_extended_stage_semantics() -> None:
     assert _stage_runs_downstream("full-extended")
     assert _stage_defaults_to_extended_enrichment("full-extended")
     assert not _stage_defaults_to_extended_enrichment("full")
+
+
+def test_effective_enrich_workers_caps_general_worker_default() -> None:
+    workers, note = _effective_enrich_workers(SimpleNamespace(workers=50, enrich_workers=None))
+
+    assert workers == 8
+    assert note is not None
+
+
+def test_effective_enrich_workers_respects_explicit_override() -> None:
+    workers, note = _effective_enrich_workers(SimpleNamespace(workers=50, enrich_workers=12))
+
+    assert workers == 12
+    assert note is None
 
 
 def test_candidate_result_priority_prefers_extended_outputs(tmp_path: Path) -> None:

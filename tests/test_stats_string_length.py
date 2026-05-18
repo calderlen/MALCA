@@ -105,3 +105,18 @@ def test_enrich_row_worker_flattens_field_summary(monkeypatch: pytest.MonkeyPatc
     assert row["stats_asassn_field_count"] == 2
     assert row["stats_camera_field_key"] == "cam1/field1"
     assert "stats_by_field" not in row
+
+
+def test_enrich_row_worker_passes_file_extension(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_compute_stats(*args, **kwargs):
+        seen["kwargs"] = kwargs
+        return pd.DataFrame(), {"n_points_total": 5}
+
+    monkeypatch.setattr(stats, "compute_stats", fake_compute_stats)
+
+    row = stats._enrich_row_worker(({"path": "lc/1001.dat2"}, "1001", "lc", False, "dat2"))
+
+    assert seen["kwargs"]["file_ext"] == "dat2"
+    assert row["stats_n_points_total"] == 5

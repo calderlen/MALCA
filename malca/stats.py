@@ -1610,7 +1610,7 @@ def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=Tr
 
     df_g, df_v = read_lc_csv(asassn_id, path)
     if df_g.empty and df_v.empty:
-        df_g, df_v = read_skypatrol_lc_csv, compute_camera_loo_metrics(asassn_id, path)
+        df_g, df_v = read_skypatrol_lc_csv(asassn_id, path)
     if df_g.empty and df_v.empty:
         df_g, df_v = read_lc_dat2(asassn_id, path, file_ext=file_ext)
 
@@ -2127,15 +2127,25 @@ def _enrich_row_worker(args: tuple) -> dict:
     """Top-level picklable worker for parallel compute_stats enrichment.
 
     Args:
-        args: (row_dict, asassn_id, dir_path, compute_ls)
+        args: (row_dict, asassn_id, dir_path, compute_ls[, file_ext])
 
     Returns:
         Row dict with flattened stats_* columns merged in, or the original
         row dict unchanged if compute_stats raises.
     """
-    row_dict, asassn_id, dir_path, compute_ls = args
+    if len(args) >= 5:
+        row_dict, asassn_id, dir_path, compute_ls, file_ext = args[:5]
+    else:
+        row_dict, asassn_id, dir_path, compute_ls = args
+        file_ext = None
     try:
-        _, stats_dict = compute_stats(asassn_id, dir_path, use_only_good=True, compute_ls=compute_ls)
+        _, stats_dict = compute_stats(
+            asassn_id,
+            dir_path,
+            use_only_good=True,
+            compute_ls=compute_ls,
+            file_ext=file_ext,
+        )
         merged = dict(row_dict)
         for k, v in stats_dict.items():
             if isinstance(v, dict):

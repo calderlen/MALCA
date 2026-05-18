@@ -1584,8 +1584,9 @@ def _lsp_worker(args: tuple) -> dict:
         path = WorkerPath(path_str)
         asassn_id = path.stem
         dir_path = str(path.parent)
+        file_ext = path.suffix.lstrip(".") or None
 
-        dfg, dfv = read_lc_dat2(asassn_id, dir_path)
+        dfg, dfv = read_lc_dat2(asassn_id, dir_path, file_ext=file_ext)
         df_lc = pd.concat([dfg, dfv], ignore_index=True)
         df_lc_aligned, _ = align_v_to_g_magnitude(df_lc)
 

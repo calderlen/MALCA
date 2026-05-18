@@ -227,6 +227,7 @@ RUN_REUSE_PARAM_ATTRS = (
     "fit_atmosphere",
     "run_classify",
     "run_enrich",
+    "enrich_workers",
     "enrich_compute_ls",
     "run_neighbor_enrich",
     "neighbor_radius_arcsec",
@@ -438,6 +439,7 @@ PIPELINE_CONFIG_DEFAULTS: dict[str, Any] = {
     "fit_atmosphere": True,
     "run_classify": True,
     "run_enrich": True,
+    "enrich_workers": None,
     "enrich_compute_ls": False,
     "run_neighbor_enrich": True,
     "neighbor_radius_arcsec": NEIGHBOR_RADIUS_ARCSEC,
@@ -505,6 +507,22 @@ def load_table(path: Path) -> pd.DataFrame:
 
 def load_passing_table(path: Path, *, columns: list[str] | None = None) -> pd.DataFrame:
     return _select_passing_candidates(read_passing_parquet_table(path, columns=columns))
+
+
+def _effective_enrich_workers(args: argparse.Namespace) -> tuple[int, str | None]:
+    """Return worker count for compute_stats enrichment and optional log note."""
+    explicit_workers = getattr(args, "enrich_workers", None)
+    if explicit_workers is not None:
+        return max(1, int(explicit_workers)), None
+
+    general_workers = max(1, int(getattr(args, "workers", WORKERS)))
+    capped_workers = min(general_workers, 8)
+    if capped_workers < general_workers:
+        return (
+            capped_workers,
+            f"--enrich-workers unset; capped from --workers={general_workers}",
+        )
+    return capped_workers, None
 
 
 def _json_stable(value: Any) -> Any:
@@ -1492,6 +1510,36 @@ def main():
         action="store_false",
         help="Disable Castelli/Kurucz atmosphere fitting after SED photometry.",
     )
+    g_enrich.add_argument(
+        "--run-enrich",
+        dest="run_enrich",
+        action="store_true",
+        help="Enable compute_stats enrichment after filtering.",
+    )
+    g_enrich.add_argument(
+        "--no-enrich",
+        dest="run_enrich",
+        action="store_false",
+        help="Disable compute_stats enrichment after filtering.",
+    )
+    g_enrich.add_argument(
+        "--enrich-workers",
+        type=int,
+        default=None,
+        help="Workers for compute_stats enrichment (default: min(--workers, 8)).",
+    )
+    g_enrich.add_argument(
+        "--enrich-compute-ls",
+        dest="enrich_compute_ls",
+        action="store_true",
+        help="Also compute Lomb-Scargle features during compute_stats enrichment.",
+    )
+    g_enrich.add_argument(
+        "--no-enrich-compute-ls",
+        dest="enrich_compute_ls",
+        action="store_false",
+        help="Skip Lomb-Scargle features during compute_stats enrichment.",
+    )
     g_external_lcs.add_argument(
         "--run-external-lcs",
         dest="run_external_lcs",
@@ -1586,6 +1634,12 @@ def main():
         cli_overrides["sed_sources"] = args.sed_sources
     if cli_has_option("--fit-atmosphere", "--no-fit-atmosphere"):
         cli_overrides["fit_atmosphere"] = args.fit_atmosphere
+    if cli_has_option("--run-enrich", "--no-enrich"):
+        cli_overrides["run_enrich"] = args.run_enrich
+    if cli_has_option("--enrich-workers"):
+        cli_overrides["enrich_workers"] = args.enrich_workers
+    if cli_has_option("--enrich-compute-ls", "--no-enrich-compute-ls"):
+        cli_overrides["enrich_compute_ls"] = args.enrich_compute_ls
     if cli_has_option("--run-external-lcs", "--no-external-lcs"):
         cli_overrides["run_external_lcs"] = args.run_external_lcs
     if cli_has_option("--run-multi-survey-features", "--no-multi-survey-features"):
@@ -1927,6 +1981,11 @@ def main():
             "sources": args.sed_sources,
             "fit_atmosphere": args.fit_atmosphere,
         },
+        "enrich": {
+            "run_enrich": args.run_enrich,
+            "enrich_workers": args.enrich_workers,
+            "enrich_compute_ls": args.enrich_compute_ls,
+        },
         "extended_enrichment": {
             "run_external_lcs": args.run_external_lcs,
             "run_multi_survey_features": args.run_multi_survey_features,
@@ -2120,6 +2179,7 @@ def main():
             "run_classify": args.run_classify,
             # Step 6: Enrich
             "run_enrich": args.run_enrich,
+            "enrich_workers": args.enrich_workers,
             "enrich_compute_ls": args.enrich_compute_ls,
             # Step 10: Neighbor enrichment
             "run_neighbor_enrich": args.run_neighbor_enrich,
@@ -2886,27 +2946,40 @@ def main():
                                 log(f"Warning: could not load enrichment checkpoint: {e}")
 
                         ENRICH_SAVE_INTERVAL = 10000
-                        n_enrich_workers = max(1, args.workers)
-                        log(f"Using {n_enrich_workers} workers for compute_stats enrichment")
+                        n_enrich_workers, worker_note = _effective_enrich_workers(args)
+                        if worker_note:
+                            log(f"Using {n_enrich_workers} workers for compute_stats enrichment ({worker_note})")
+                        else:
+                            log(f"Using {n_enrich_workers} workers for compute_stats enrichment")
 
-                        # Build task list, handling already-enriched and missing paths serially
-                        pending_tasks: list[tuple] = []
-                        for idx, row in df_passed.iterrows():
-                            lc_path = Path(row["path"])
-                            if str(lc_path) in already_enriched:
-                                continue
-                            if not lc_path.exists():
-                                enriched_rows.append(row.to_dict())
-                                continue
-                            asassn_id = lc_path.stem.split("-")[0]
-                            dir_path = str(lc_path.parent)
-                            pending_tasks.append((row.to_dict(), asassn_id, dir_path, args.enrich_compute_ls))
+                        # Generate tasks lazily so large post-filter tables do not
+                        # get duplicated into a second full list of row dicts.
+                        df_passed_columns = list(df_passed.columns)
+                        path_col_idx = df_passed_columns.index("path")
+
+                        def _iter_enrichment_tasks():
+                            for values in df_passed.itertuples(index=False, name=None):
+                                raw_path = values[path_col_idx]
+                                lc_path = Path(raw_path)
+                                path_key = str(lc_path)
+                                if path_key in already_enriched:
+                                    continue
+                                row_dict = dict(zip(df_passed_columns, values))
+                                if not lc_path.exists():
+                                    enriched_rows.append(row_dict)
+                                    continue
+                                asassn_id = lc_path.stem.split("-")[0]
+                                dir_path = str(lc_path.parent)
+                                yield (row_dict, asassn_id, dir_path, args.enrich_compute_ls, args.extension)
 
                         new_count = 0
                         with ProcessPoolExecutor(max_workers=n_enrich_workers) as executor:
                             for result in tqdm(
-                                executor.map(_enrich_row_worker, pending_tasks),
-                                total=len(pending_tasks),
+                                executor.map(
+                                    _enrich_row_worker,
+                                    _iter_enrichment_tasks(),
+                                    chunksize=64,
+                                ),
                                 desc="compute_stats",
                                 disable=not args.verbose,
                             ):

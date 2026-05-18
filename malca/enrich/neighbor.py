@@ -32,6 +32,10 @@ def _ensure_candidate_id(df: pd.DataFrame) -> pd.DataFrame:
             out["candidate_id"] = out["path"].astype(str).map(lambda p: Path(p).stem.split("-")[0])
         else:
             out["candidate_id"] = np.arange(len(out)).astype(str)
+    if "ra_deg" not in out.columns and "ra" in out.columns:
+        out["ra_deg"] = pd.to_numeric(out["ra"], errors="coerce")
+    if "dec_deg" not in out.columns and "dec" in out.columns:
+        out["dec_deg"] = pd.to_numeric(out["dec"], errors="coerce")
     return out
 
 

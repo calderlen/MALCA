@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import pandas as pd
 
+import malca.characterize as characterize
 from malca.characterize import query_gaia_by_ids
 from malca.detect import _add_gaia_ids_from_index
-from malca.gaia_fetch import _normalize_gaia_ids
+from malca.gaia_fetch import _extract_gaia_ids, _normalize_gaia_ids
 from malca.gaia_ids import normalize_gaia_source_id_series, parse_gaia_source_id
 
 
@@ -20,6 +21,45 @@ def test_parse_gaia_source_id_rejects_unsafe_large_float() -> None:
 
 def test_normalize_gaia_ids_accepts_numeric_strings_without_duplicates() -> None:
     assert _normalize_gaia_ids(["123.0", "4.56e2", 123, "bad", None]) == ["123", "456"]
+
+
+def test_extract_gaia_ids_reads_direct_gaia_passers(tmp_path) -> None:
+    input_path = tmp_path / "candidates.parquet"
+    xmatch_path = tmp_path / "unused_xmatch.parquet"
+    pd.DataFrame(
+        {
+            "gaia_id": ["1001", "1002", "bad"],
+            "failed_any": [False, True, False],
+            "large_payload": ["x" * 1000, "y" * 1000, "z" * 1000],
+        }
+    ).to_parquet(input_path, index=False)
+
+    out = _extract_gaia_ids(input_path, xmatch_path, only_passers=True)
+
+    assert out == ["1001"]
+
+
+def test_extract_gaia_ids_uses_minimal_crossmatch_columns(tmp_path) -> None:
+    input_path = tmp_path / "candidates.parquet"
+    xmatch_path = tmp_path / "xmatch.parquet"
+    pd.DataFrame(
+        {
+            "asas_sn_id": ["A", "B"],
+            "failed_any": [False, True],
+            "large_payload": ["x" * 1000, "y" * 1000],
+        }
+    ).to_parquet(input_path, index=False)
+    pd.DataFrame(
+        {
+            "asas_sn_id": ["A", "B"],
+            "gaia_id": ["2001", "2002"],
+            "unused_payload": ["u" * 1000, "v" * 1000],
+        }
+    ).to_parquet(xmatch_path, index=False)
+
+    out = _extract_gaia_ids(input_path, xmatch_path, only_passers=True)
+
+    assert out == ["2001"]
 
 
 def test_detect_index_merge_preserves_large_gaia_ids_as_strings(tmp_path) -> None:
@@ -63,3 +103,42 @@ def test_query_gaia_by_ids_matches_numeric_like_requested_ids(tmp_path) -> None:
     assert len(out) == 1
     assert out.loc[out.index[0], "source_id"] == str(LARGE_GAIA_ID)
     assert float(out.loc[out.index[0], "ra"]) == 12.3
+
+
+def test_characterize_uses_existing_gaia_id_without_crossmatch(tmp_path, monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_query_gaia_by_ids(gaia_ids, **_kwargs):
+        seen["gaia_ids"] = list(gaia_ids)
+        return pd.DataFrame(
+            {
+                "source_id": [str(LARGE_GAIA_ID)],
+                "ra": [12.3],
+                "dec": [-45.6],
+                "phot_g_mean_mag": [14.0],
+                "bp_rp": [1.2],
+                "parallax": [2.0],
+                "pmra": [1.0],
+                "pmdec": [2.0],
+            }
+        )
+
+    monkeypatch.setattr(characterize, "query_gaia_by_ids", fake_query_gaia_by_ids)
+    monkeypatch.setattr(characterize, "_module_completed", lambda *_args, **_kwargs: True)
+
+    out = characterize.characterize_candidates_df(
+        pd.DataFrame({"asas_sn_id": ["A"], "gaia_id": [str(LARGE_GAIA_ID)]}),
+        crossmatch=tmp_path / "missing_crossmatch.parquet",
+        cache=None,
+        dust=False,
+        starhorse=None,
+        run_banyan=False,
+        run_iphas=False,
+        run_sfr=False,
+        run_clusters=False,
+        run_unwise=False,
+    )
+
+    assert seen["gaia_ids"] == [str(LARGE_GAIA_ID)]
+    assert out.loc[0, "source_id"] == str(LARGE_GAIA_ID)
+    assert float(out.loc[0, "ra"]) == 12.3

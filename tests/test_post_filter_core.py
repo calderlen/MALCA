@@ -377,6 +377,7 @@ def test_lsp_worker_aligns_simple_v_minus_g_median_offset(monkeypatch: pytest.Mo
     captured: dict[str, np.ndarray] = {}
 
     def _fake_read_lc_dat2(*_args: object, **_kwargs: object) -> tuple[pd.DataFrame, pd.DataFrame]:
+        captured["file_ext"] = _kwargs.get("file_ext")
         return df_g.copy(), df_v.copy()
 
     def _fake_pdm_stats(_jd: np.ndarray, mag: np.ndarray, _err: np.ndarray, **_kwargs: object) -> dict[str, float]:
@@ -413,6 +414,7 @@ def test_lsp_worker_aligns_simple_v_minus_g_median_offset(monkeypatch: pytest.Mo
         mag = captured[key]
         assert np.isclose(np.median(mag[:g_count]), np.median(mag[g_count:]), atol=1e-10)
     assert out["pdm_method"] == "plavchan"
+    assert captured["file_ext"] == "dat3"
     assert np.isclose(expected_offset, 0.8, atol=5e-3)
 
 
