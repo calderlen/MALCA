@@ -4,5 +4,4 @@ output/transfer/ltv_review/*.jsonl filter=lfs diff=lfs merge=lfs -text
 output/runs/runs_march18_bundle_all/review/review.taxonomy_filled.db filter=lfs diff=lfs merge=lfs -text
 output/runs/runs_march18_bundle_all/bundle_assets/lightcurves/*.dat3 filter=lfs diff=lfs merge=lfs -text
 output/ltv/ltv/ltv_candidates.db filter=lfs diff=lfs merge=lfs -text
-output/ltv/ltv/ltv_bundle.zip filter=lfs diff=lfs merge=lfs -text
 output/ltv/ltv/bundle_assets/lightcurves/*.dat2 filter=lfs diff=lfs merge=lfs -text

@@ -35,7 +35,6 @@ htmlcov/
 !/output/ltv/ltv/
 /output/ltv/ltv/*
 !/output/ltv/ltv/ltv_candidates.db
-!/output/ltv/ltv/ltv_bundle.zip
 .DS_Store
 
 input/*.csv
