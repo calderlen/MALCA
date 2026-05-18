@@ -28,6 +28,7 @@ def test_external_and_diagnostic_panels_are_above_long_metadata() -> None:
 
     external_idx = ids.index("external-followup-details")
     sed_idx = ids.index("sed-details")
+    dustycult_idx = ids.index("dustycult-details")
     sed_button_idx = ids.index("rerun-stage-sed-photometry-btn")
     multi_survey_button_idx = ids.index("rerun-stage-multi-survey-btn")
     diagnostic_idx = ids.index("diagnostic-plots-details")
@@ -36,9 +37,9 @@ def test_external_and_diagnostic_panels_are_above_long_metadata() -> None:
 
     assert external_idx < metadata_idx
     assert external_idx < sed_idx < metadata_idx
+    assert sed_idx < dustycult_idx < diagnostic_idx < metadata_idx
     assert sed_button_idx < metadata_idx
     assert multi_survey_button_idx < metadata_idx
-    assert diagnostic_idx < metadata_idx
     assert metadata_idx < run_config_idx
 
 

@@ -1,0 +1,3 @@
+[submodule "vendor/dustycult"]
+	path = vendor/dustycult
+	url = git@github.com:calderlen/dustycult.git

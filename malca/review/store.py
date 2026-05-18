@@ -1230,6 +1230,135 @@ def init_db(conn: sqlite3.Connection) -> None:
         ON sed_model_curves(candidate_id)
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS dustycult_fits (
+            candidate_id TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            status TEXT,
+            created_at TEXT,
+            updated_at TEXT,
+            runtime_sec REAL,
+            artifact_dir TEXT,
+            input_path TEXT,
+            config_path TEXT,
+            manifest_path TEXT,
+            command_json TEXT,
+            config_json TEXT,
+            controls_json TEXT,
+            window_json TEXT,
+            stellar_json TEXT,
+            posterior_json TEXT,
+            summary_json TEXT,
+            stderr_tail TEXT,
+            stdout_tail TEXT,
+            error TEXT,
+            t0_jd REAL,
+            start_jd REAL,
+            end_jd REAL,
+            n_input_points INTEGER,
+            n_curve_points INTEGER,
+            PRIMARY KEY(candidate_id, mode),
+            FOREIGN KEY(candidate_id) REFERENCES candidates(candidate_id)
+        )
+        """
+    )
+    existing_dustycult_fit_lower = {
+        str(row[1]).lower()
+        for row in conn.execute("PRAGMA table_info(dustycult_fits)").fetchall()
+    }
+    dustycult_fit_column_defs = {
+        "candidate_id": "TEXT",
+        "mode": "TEXT",
+        "status": "TEXT",
+        "created_at": "TEXT",
+        "updated_at": "TEXT",
+        "runtime_sec": "REAL",
+        "artifact_dir": "TEXT",
+        "input_path": "TEXT",
+        "config_path": "TEXT",
+        "manifest_path": "TEXT",
+        "command_json": "TEXT",
+        "config_json": "TEXT",
+        "controls_json": "TEXT",
+        "window_json": "TEXT",
+        "stellar_json": "TEXT",
+        "posterior_json": "TEXT",
+        "summary_json": "TEXT",
+        "stderr_tail": "TEXT",
+        "stdout_tail": "TEXT",
+        "error": "TEXT",
+        "t0_jd": "REAL",
+        "start_jd": "REAL",
+        "end_jd": "REAL",
+        "n_input_points": "INTEGER",
+        "n_curve_points": "INTEGER",
+    }
+    for col, dtype in dustycult_fit_column_defs.items():
+        if col.lower() not in existing_dustycult_fit_lower:
+            try:
+                conn.execute(f"ALTER TABLE dustycult_fits ADD COLUMN {col} {dtype}")
+                existing_dustycult_fit_lower.add(col.lower())
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" not in str(e).lower():
+                    raise
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_dustycult_fits_candidate
+        ON dustycult_fits(candidate_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS dustycult_predictive_curves (
+            candidate_id TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            point_id INTEGER,
+            time REAL,
+            band TEXT,
+            observed REAL,
+            error REAL,
+            lower95 REAL,
+            lower68 REAL,
+            median REAL,
+            upper68 REAL,
+            upper95 REAL,
+            FOREIGN KEY(candidate_id) REFERENCES candidates(candidate_id)
+        )
+        """
+    )
+    existing_dustycult_curve_lower = {
+        str(row[1]).lower()
+        for row in conn.execute("PRAGMA table_info(dustycult_predictive_curves)").fetchall()
+    }
+    dustycult_curve_column_defs = {
+        "candidate_id": "TEXT",
+        "mode": "TEXT",
+        "point_id": "INTEGER",
+        "time": "REAL",
+        "band": "TEXT",
+        "observed": "REAL",
+        "error": "REAL",
+        "lower95": "REAL",
+        "lower68": "REAL",
+        "median": "REAL",
+        "upper68": "REAL",
+        "upper95": "REAL",
+    }
+    for col, dtype in dustycult_curve_column_defs.items():
+        if col.lower() not in existing_dustycult_curve_lower:
+            try:
+                conn.execute(f"ALTER TABLE dustycult_predictive_curves ADD COLUMN {col} {dtype}")
+                existing_dustycult_curve_lower.add(col.lower())
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" not in str(e).lower():
+                    raise
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_dustycult_curves_candidate_mode
+        ON dustycult_predictive_curves(candidate_id, mode)
+        """
+    )
     # Migrate: add any columns missing from older DBs.
     existing_candidate_columns = {
         str(row[1]).lower(): str(row[1])

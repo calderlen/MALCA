@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pandas as pd
 import plotly.graph_objects as go
 from dash import dcc, no_update
 
 from malca.review import app as review_app
+from malca.review.dustycult import DustyCultAvailability
 
 
 def test_update_sed_panel_renders_graph(monkeypatch) -> None:
@@ -145,3 +148,72 @@ def test_diagnostic_background_prepares_even_when_details_closed(monkeypatch) ->
     assert state["ready"] is True
     assert state["cached"] is True
     assert state["token"] == 4
+
+
+def test_dustycult_result_panel_renders_unavailable_state(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(review_app, "DB_PATH", str(tmp_path / "review.db"))
+    monkeypatch.setattr(
+        review_app,
+        "check_dustycult_available",
+        lambda: DustyCultAvailability(False, "julia", Path("missing"), Path("missing/scripts/fit_lightcurve.jl"), "Julia executable not found"),
+    )
+
+    panel, status = review_app.update_dustycult_result_panel("cand-1", "black", 0)
+    rendered = "\n".join([status] + _collect_text(panel))
+
+    assert "Julia executable not found" in rendered
+    assert "No DustyCult fit" in rendered
+
+
+def test_update_dustycult_controls_uses_candidate_defaults(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(review_app, "DB_PATH", str(tmp_path / "review.db"))
+    monkeypatch.setattr(review_app, "_candidate_context", lambda candidate_id: ({"candidate_id": candidate_id}, "/tmp/cand.dat2", "source"))
+    monkeypatch.setattr(review_app, "_effective_local_lc_path", lambda payload, stored_lc_path=None, source_path=None: stored_lc_path)
+    monkeypatch.setattr(review_app, "_load_run_params_for_plot_dir", lambda _plot_dir: {"baseline_func": "global_median"})
+    monkeypatch.setattr(
+        review_app,
+        "control_defaults_for_candidate",
+        lambda *_args, **_kwargs: {
+            "source": "stored_event_columns",
+            "message": "Loaded dip defaults from stored event columns.",
+            "start_jd": 1.0,
+            "end_jd": 3.0,
+            "t0_jd": 2.0,
+            "t0_width_days": 0.5,
+            "log_v_width": 1.0,
+            "b_center": 0.0,
+            "b_width": 0.5,
+            "log_tau0_width": 1.5,
+            "alpha_center": 0.0,
+            "alpha_width": 2.0,
+            "log_sigma_width": 0.75,
+            "star_R": 1.1,
+            "star_u1": 0.2,
+            "star_u2": 0.3,
+        },
+    )
+
+    values = review_app.update_dustycult_controls("cand-1", 0)
+
+    assert values[0:3] == (1.0, 3.0, 2.0)
+    assert values[-4:-1] == (1.1, 0.2, 0.3)
+    assert "stored_event_columns" in values[-1]
+
+
+def _collect_text(node) -> list[str]:
+    text: list[str] = []
+
+    def walk(item) -> None:
+        if isinstance(item, (list, tuple)):
+            for child in item:
+                walk(child)
+            return
+        if isinstance(item, str):
+            text.append(item)
+            return
+        if item is None or isinstance(item, (int, float, bool)):
+            return
+        walk(getattr(item, "children", None))
+
+    walk(node)
+    return text
