@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from astropy.table import Table
 import pandas as pd
 import pytest
 
@@ -119,9 +118,9 @@ def test_fetch_ztf_lightcurves_reuses_cached_parquet(tmp_path: Path, monkeypatch
     ).to_parquet(tmp_path / "ztf_lc_C1.parquet", index=False)
 
     def fail(*_args, **_kwargs):
-        raise AssertionError("IRSA TAP should not be constructed on cache hit")
+        raise AssertionError("IRSA ZTF API should not be called on cache hit")
 
-    monkeypatch.setattr(vetting.pyvo.dal, "TAPService", fail)
+    monkeypatch.setattr(vetting.requests, "get", fail)
 
     out = vetting.fetch_ztf_lightcurves(df, output_dir=tmp_path)
 
@@ -130,47 +129,37 @@ def test_fetch_ztf_lightcurves_reuses_cached_parquet(tmp_path: Path, monkeypatch
     assert out.loc[0, "ztf_lc_r_range"] == 3.0
 
 
-def test_fetch_ztf_lightcurves_corrupt_cache_falls_back_to_tap(
+def test_fetch_ztf_lightcurves_corrupt_cache_falls_back_to_api(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     df = pd.DataFrame([{"candidate_id": "C1", "ra": 1.0, "dec": 2.0}])
     (tmp_path / "ztf_lc_C1.parquet").write_text("not parquet", encoding="ascii")
 
-    class Result:
-        def __init__(self, table: Table):
-            self._table = table
+    calls: list[dict] = []
 
-        def to_table(self) -> Table:
-            return self._table
+    class FakeResponse:
+        text = (
+            "oid,hjd,hmjd,mag,MAG,magerr,filtercode,FILTER,catflags\n"
+            "123,2450000.5,,15.0,,0.1,1,g,0\n"
+            "123,2450001.5,,14.0,,0.1,1,g,0\n"
+        )
 
-    class FakeTap:
-        def __init__(self):
-            self.calls = 0
+        def raise_for_status(self) -> None:
+            return None
 
-        def run_sync(self, query: str):
-            self.calls += 1
-            if "lightcurve" in query:
-                return Result(
-                    Table(
-                        {
-                            "oid": [123, 123],
-                            "hjd": [2450000.5, 2450001.5],
-                            "mag": [15.0, 14.0],
-                            "magerr": [0.1, 0.1],
-                            "filtercode": [1, 1],
-                            "catflags": [0, 0],
-                        }
-                    )
-                )
-            return Result(Table({"oid": [123]}))
+    def fake_get(url: str, **kwargs):
+        calls.append({"url": url, **kwargs})
+        return FakeResponse()
 
-    fake_tap = FakeTap()
-    monkeypatch.setattr(vetting.pyvo.dal, "TAPService", lambda *_args, **_kwargs: fake_tap)
+    monkeypatch.setattr(vetting.requests, "get", fake_get)
 
     out = vetting.fetch_ztf_lightcurves(df, output_dir=tmp_path, workers=1)
 
-    assert fake_tap.calls == 2
+    assert len(calls) == 1
+    assert calls[0]["url"] == vetting.ZTF_LC_API_URL
+    assert calls[0]["params"]["COLLECTION"] == "ztf_dr22"
+    assert calls[0]["params"]["FORMAT"] == "CSV"
     assert int(out.loc[0, "ztf_lc_n_det"]) == 2
     assert out.loc[0, "ztf_lc_g_range"] == 1.0
 
@@ -193,10 +182,70 @@ def test_fetch_ztf_lightcurves_reuses_no_data_status(tmp_path: Path, monkeypatch
     ).to_parquet(tmp_path / vetting.EXTERNAL_LC_STATUS_FILE, index=False)
 
     def fail(*_args, **_kwargs):
-        raise AssertionError("IRSA TAP should not be constructed on no-data cache hit")
+        raise AssertionError("IRSA ZTF API should not be called on no-data cache hit")
 
-    monkeypatch.setattr(vetting.pyvo.dal, "TAPService", fail)
+    monkeypatch.setattr(vetting.requests, "get", fail)
 
     out = vetting.fetch_ztf_lightcurves(df, output_dir=tmp_path)
 
     assert int(out.loc[0, "ztf_lc_n_det"]) == 0
+
+
+def test_fetch_external_lcs_continues_after_module_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    df = pd.DataFrame([{"candidate_id": "C1", "ra": 1.0, "dec": 2.0}])
+    messages: list[str] = []
+
+    def fail_ztf(_df: pd.DataFrame, **_kwargs) -> pd.DataFrame:
+        raise RuntimeError("synthetic ZTF outage")
+
+    def fake_tess(in_df: pd.DataFrame, **_kwargs) -> pd.DataFrame:
+        out = in_df.copy()
+        out["tess_n_sectors"] = 1
+        out["tess_total_points"] = 12
+        out["tess_flux_range"] = 0.1
+        return out
+
+    monkeypatch.setattr(vetting, "fetch_ztf_lightcurves", fail_ztf)
+    monkeypatch.setattr(vetting, "fetch_tess_lightcurves", fake_tess)
+
+    out = vetting.fetch_external_lcs(
+        df,
+        output_dir=tmp_path,
+        run_atlas=False,
+        run_ztf=True,
+        run_gaia_epoch=False,
+        run_tess=True,
+        run_neowise=False,
+        run_kepler=False,
+        run_aavso=False,
+        run_ps1=False,
+        run_crts=False,
+        progress_callback=messages.append,
+    )
+
+    assert int(out.loc[0, "tess_n_sectors"]) == 1
+    assert out.attrs["external_lc_failures"] == ["ZTF LCs failed: synthetic ZTF outage"]
+    assert any("ZTF LCs failed" in message for message in messages)
+    assert any("TESS LCs completed" in message for message in messages)
+
+
+def test_fetch_crts_lightcurves_records_no_data_when_catalog_schema_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    df = pd.DataFrame([{"candidate_id": "C1", "ra": 1.0, "dec": 2.0}])
+
+    def fail_crossmatch(*_args, **_kwargs) -> pd.DataFrame:
+        raise RuntimeError("unresolved identifiers")
+
+    monkeypatch.setattr(vetting, "batch_tap_crossmatch", fail_crossmatch)
+
+    out = vetting.fetch_crts_lightcurves(df, output_dir=tmp_path)
+
+    assert int(out.loc[0, "crts_lc_n_points"]) == 0
+    status = pd.read_parquet(tmp_path / vetting.EXTERNAL_LC_STATUS_FILE)
+    assert status.loc[0, "module"] == "CRTS LCs"
+    assert status.loc[0, "status"] == "no_data"

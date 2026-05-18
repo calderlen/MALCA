@@ -59,7 +59,6 @@ from malca.config import (
     ALERCE_API_BASE,
     ATLAS_API_BASE,
     TNS_API_BASE,
-    IRSA_TAP_URL,
     ASASSN_VAR_CATALOG_ID,
     ZTF_VAR_CATALOG_ID,
     EROSITA_CATALOG_ID,
@@ -572,6 +571,7 @@ def _summarize_atlas_lc(phot: pd.DataFrame) -> dict:
 
 
 def _summarize_ztf_lc(lc: pd.DataFrame) -> dict:
+    lc = _coalesce_duplicate_columns(lc)
     if lc.empty or "mag" not in lc.columns:
         raise ValueError("invalid ZTF light curve")
     mag = pd.to_numeric(lc["mag"], errors="coerce")
@@ -2234,10 +2234,71 @@ def query_atlas_forced_phot(
 
 
 # =============================================================================
-# ZTF LIGHT CURVE FETCHING (IRSA TAP)
+# ZTF LIGHT CURVE FETCHING (IRSA API)
 # =============================================================================
 
-IRSA_TAP_URL = "https://irsa.ipac.caltech.edu/TAP"
+ZTF_LC_API_URL = "https://irsa.ipac.caltech.edu/cgi-bin/ZTF/nph_light_curves"
+ZTF_LC_COLLECTION = "ztf_dr22"
+
+
+def _coalesce_duplicate_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Collapse duplicate labels by taking the first non-null value per row."""
+    if df.empty or not df.columns.duplicated().any():
+        return df
+    out = pd.DataFrame(index=df.index)
+    for col in pd.Index(df.columns).unique():
+        subset = df.loc[:, df.columns == col]
+        if subset.shape[1] == 1:
+            out[col] = subset.iloc[:, 0]
+        else:
+            out[col] = subset.bfill(axis=1).iloc[:, 0]
+    return out
+
+
+def _normalize_ztf_api_lc(lc: pd.DataFrame) -> pd.DataFrame:
+    """Normalize IRSA ZTF light-curve API output to MALCA's LC schema."""
+    if lc.empty:
+        return lc
+    col_map = {}
+    for col in lc.columns:
+        cl = str(col).strip().lower()
+        if cl in {"hjd", "hmjd", "mjd"}:
+            col_map[col] = "mjd"
+        elif cl in {"filtercode", "filterid", "fid", "filter", "band", "bandname"}:
+            col_map[col] = "band"
+        else:
+            col_map[col] = cl.replace(" ", "_")
+    lc = lc.rename(columns=col_map)
+    lc = _coalesce_duplicate_columns(lc)
+
+    if "catflags" in lc.columns:
+        catflags = pd.to_numeric(lc["catflags"], errors="coerce")
+        lc = lc.loc[catflags.fillna(0) == 0].copy()
+
+    if "mjd" in lc.columns:
+        lc["mjd"] = pd.to_numeric(lc["mjd"], errors="coerce")
+        mask = lc["mjd"] > 2400000
+        lc.loc[mask, "mjd"] = lc.loc[mask, "mjd"] - 2400000.5
+
+    if "band" in lc.columns:
+        def _band_name(value: object) -> str:
+            text = str(value).strip().lower()
+            if text.endswith(".0"):
+                text = text[:-2]
+            return {
+                "1": "zg",
+                "2": "zr",
+                "3": "zi",
+                "g": "zg",
+                "r": "zr",
+                "i": "zi",
+                "zg": "zg",
+                "zr": "zr",
+                "zi": "zi",
+            }.get(text, str(value))
+
+        lc["band"] = lc["band"].map(_band_name)
+    return lc
 
 
 def fetch_ztf_lightcurves(
@@ -2250,8 +2311,8 @@ def fetch_ztf_lightcurves(
     """
     Fetch ZTF light curves from IRSA ZTF DR22.
 
-    Queries the ``ztf_objects_dr22`` table for matching objects, then downloads
-    their light curves from ``ztf_objects_dr22.lightcurve``.
+    Uses IRSA's ZTF light-curve API. The API performs the object lookup and
+    light-curve retrieval for the requested position/collection.
 
     Adds columns: ztf_lc_n_det, ztf_lc_g_range, ztf_lc_r_range.
     If *output_dir* is set, saves per-candidate parquet files as
@@ -2290,8 +2351,6 @@ def fetch_ztf_lightcurves(
         print(f"ZTF LCs: {cached_matched}/{n_valid} with data")
         return df
 
-    tap = pyvo.dal.TAPService(IRSA_TAP_URL)
-
     def _fetch_one(idx: int) -> tuple:
         ra, dec = float(df.loc[idx, "ra"]), float(df.loc[idx, "dec"])
         if not (np.isfinite(ra) and np.isfinite(dec)):
@@ -2300,60 +2359,29 @@ def fetch_ztf_lightcurves(
         cache_key = _coord_lookup_cache_key(df, idx, radius_arcsec, "ztf_dr22")
 
         try:
-            # Find matching ZTF objects
-            obj_query = f"""
-            SELECT oid
-            FROM ztf_objects_dr22
-            WHERE CONTAINS(
-                POINT('ICRS', ra, dec),
-                CIRCLE('ICRS', {ra:.7f}, {dec:.7f}, {radius_arcsec / 3600.0})
-            ) = 1
-            """
-            obj_result = tap.run_sync(obj_query)
-            obj_table = obj_result.to_table()
-            if obj_table is None or len(obj_table) == 0:
+            response = requests.get(
+                ZTF_LC_API_URL,
+                params={
+                    "POS": f"CIRCLE {ra:.7f} {dec:.7f} {radius_arcsec / 3600.0:.8f}",
+                    "BAD_CATFLAGS_MASK": "32768",
+                    "COLLECTION": ZTF_LC_COLLECTION,
+                    "FORMAT": "CSV",
+                },
+                timeout=60,
+            )
+            response.raise_for_status()
+            text = str(response.text or "").strip()
+            if not text:
                 return (idx, 0, np.nan, np.nan, None, cache_key)
-
-            oids = [str(row["oid"]) for row in obj_table]
-            oid_list = ",".join(oids)
-
-            # Fetch light curve data
-            lc_query = f"""
-            SELECT oid, hjd, mag, magerr, filtercode, catflags
-            FROM ztf_objects_dr22.lightcurve
-            WHERE oid IN ({oid_list})
-            AND catflags = 0
-            ORDER BY hjd ASC
-            """
-            lc_result = tap.run_sync(lc_query)
-            lc_table = lc_result.to_table()
-            if lc_table is None or len(lc_table) == 0:
+            if "<html" in text[:200].lower():
+                raise RuntimeError("IRSA ZTF light-curve API returned HTML instead of CSV")
+            try:
+                lc = pd.read_csv(io.StringIO(text), comment="#")
+            except pd.errors.EmptyDataError:
                 return (idx, 0, np.nan, np.nan, None, cache_key)
-
-            lc = lc_table.to_pandas()
-
-            # Normalize column names
-            col_map = {}
-            for c in lc.columns:
-                cl = c.lower()
-                if cl == "hjd":
-                    col_map[c] = "mjd"
-                elif cl == "filtercode":
-                    col_map[c] = "band"
-                else:
-                    col_map[c] = cl
-            lc = lc.rename(columns=col_map)
-
-            # Convert HJD to MJD (approximate: MJD = HJD - 2400000.5)
-            if "mjd" in lc.columns:
-                lc["mjd"] = pd.to_numeric(lc["mjd"], errors="coerce")
-                mask = lc["mjd"] > 2400000
-                lc.loc[mask, "mjd"] = lc.loc[mask, "mjd"] - 2400000.5
-
-            # Map filter codes to band names
-            if "band" in lc.columns:
-                band_map = {1: "zg", 2: "zr", 3: "zi"}
-                lc["band"] = pd.to_numeric(lc["band"], errors="coerce").map(band_map).fillna(lc["band"].astype(str))
+            lc = _normalize_ztf_api_lc(lc)
+            if lc.empty:
+                return (idx, 0, np.nan, np.nan, None, cache_key)
 
             summary = _summarize_ztf_lc(lc)
 
@@ -3719,6 +3747,21 @@ def fetch_crts_lightcurves(
         print(f"CRTS LCs: {cached_matched}/{n_valid} with data")
         return df
 
+    def _record_no_data(indices: list) -> None:
+        status_rows = []
+        for idx in indices:
+            row = _external_lc_status_row(
+                df,
+                idx,
+                module="CRTS LCs",
+                cache_key=_coord_lookup_cache_key(df, idx, 3.0, "crts"),
+                summary={"crts_lc_n_points": 0},
+                status="no_data",
+            )
+            if row is not None:
+                status_rows.append(row)
+        _write_external_lc_status(output_dir, status_rows)
+
     # We do a batch query against II/341/data which has epoch photometry.
     # Because II/341/data is massive, doing a batch crossmatch is best.
     coords_df = pd.DataFrame({
@@ -3731,36 +3774,29 @@ def fetch_crts_lightcurves(
     # It has "RAJ2000" and "DEJ2000" but usually crossmatching directly on data tables is disallowed.
     # Let's crossmatch against the main catalog II/341/crts_prss first.
     t0 = time.perf_counter()
-    prss_result = batch_tap_crossmatch(
-        coords_df,
-        tap_url=VIZIER_TAP_URL,
-        catalog_table='"II/341/crts_prss"',
-        select_cols='c."ID"',
-        ra_col="RAJ2000",
-        dec_col="DEJ2000",
-        match_radius_arcsec=3.0,
-        chunk_size=1000,
-        n_workers=2,
-        desc="CRTS crossmatch",
-        raise_on_all_failed=True,
-        raise_on_failed_chunk=True,
-    )
+    try:
+        prss_result = batch_tap_crossmatch(
+            coords_df,
+            tap_url=VIZIER_TAP_URL,
+            catalog_table='"II/341/crts_prss"',
+            select_cols='c."ID"',
+            ra_col="RAJ2000",
+            dec_col="DEJ2000",
+            match_radius_arcsec=3.0,
+            chunk_size=1000,
+            n_workers=2,
+            desc="CRTS crossmatch",
+            raise_on_all_failed=True,
+            raise_on_failed_chunk=True,
+        )
+    except Exception as exc:
+        print(f"CRTS LCs: catalog crossmatch unavailable ({_short_error(exc)}); recording no data")
+        _record_no_data(valid_idx)
+        return df
     
     if prss_result.empty:
         print("CRTS LCs: no counterparts found")
-        status_rows = []
-        for idx in valid_idx:
-            row = _external_lc_status_row(
-                df,
-                idx,
-                module="CRTS LCs",
-                cache_key=_coord_lookup_cache_key(df, idx, 3.0, "crts"),
-                summary={"crts_lc_n_points": 0},
-                status="no_data",
-            )
-            if row is not None:
-                status_rows.append(row)
-        _write_external_lc_status(output_dir, status_rows)
+        _record_no_data(valid_idx)
         return df
         
     # Keep closest match per input index
@@ -3769,19 +3805,7 @@ def fetch_crts_lightcurves(
     id_to_idx = dict(zip(prss_result["ID"].astype(str), prss_result["_idx"]))
 
     if not crts_ids:
-        status_rows = []
-        for idx in valid_idx:
-            row = _external_lc_status_row(
-                df,
-                idx,
-                module="CRTS LCs",
-                cache_key=_coord_lookup_cache_key(df, idx, 3.0, "crts"),
-                summary={"crts_lc_n_points": 0},
-                status="no_data",
-            )
-            if row is not None:
-                status_rows.append(row)
-        _write_external_lc_status(output_dir, status_rows)
+        _record_no_data(valid_idx)
         return df
 
     print(f"CRTS LCs: fetching full LCs for {len(crts_ids)} matches...")
@@ -3807,23 +3831,11 @@ def fetch_crts_lightcurves(
             if not res_df.empty:
                 all_lcs.append(res_df)
         except Exception as e:
-            raise RuntimeError(f"CRTS epoch lookup failed for chunk starting at {i}: {e}") from e
+            print(f"CRTS LCs: epoch lookup failed for chunk starting at {i}: {_short_error(e)}")
 
     if not all_lcs:
         print("CRTS LCs: no epoch data retrieved")
-        status_rows = []
-        for idx in valid_idx:
-            row = _external_lc_status_row(
-                df,
-                idx,
-                module="CRTS LCs",
-                cache_key=_coord_lookup_cache_key(df, idx, 3.0, "crts"),
-                summary={"crts_lc_n_points": 0},
-                status="no_data",
-            )
-            if row is not None:
-                status_rows.append(row)
-        _write_external_lc_status(output_dir, status_rows)
+        _record_no_data(valid_idx)
         return df
 
     full_data = pd.concat(all_lcs, ignore_index=True)
@@ -3959,16 +3971,25 @@ def fetch_external_lcs(
         s = df[col]
         return s.notna().any() and (s != 0).any()
 
+    failures: list[str] = []
+
     def _run_module(name, func, **kwargs):
         nonlocal df
         if _module_done(name):
             _emit(f"{name} skipped (already in checkpoint)")
             return
         t0 = time.perf_counter()
-        df = func(df, **kwargs)
-        _emit(f"{name} completed in {time.perf_counter() - t0:.1f}s")
-        if checkpoint_path:
-            df.to_parquet(checkpoint_path, index=False)
+        try:
+            df = func(df, **kwargs)
+        except Exception as exc:
+            msg = f"{name} failed: {_short_error(exc)}"
+            failures.append(msg)
+            _emit(msg)
+        else:
+            _emit(f"{name} completed in {time.perf_counter() - t0:.1f}s")
+        finally:
+            if checkpoint_path:
+                df.to_parquet(checkpoint_path, index=False)
 
     if run_atlas:
         _run_module("ATLAS LCs", query_atlas_forced_phot, token=atlas_token, output_dir=output_dir, refresh_cache=refresh_cache)
@@ -3998,7 +4019,11 @@ def fetch_external_lcs(
         _run_module("CRTS LCs", fetch_crts_lightcurves, output_dir=output_dir, refresh_cache=refresh_cache)
 
     elapsed = time.perf_counter() - total_start
-    _emit(f"External LCs completed in {elapsed:.1f}s")
+    if failures:
+        df.attrs["external_lc_failures"] = list(failures)
+        _emit(f"External LCs completed with {len(failures)} module failure(s) in {elapsed:.1f}s")
+    else:
+        _emit(f"External LCs completed in {elapsed:.1f}s")
     return df
 
 

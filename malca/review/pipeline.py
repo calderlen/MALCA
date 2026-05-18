@@ -118,6 +118,31 @@ STAGE_SIGNATURES: dict[str, list[str]] = {
 }
 
 
+def _coordinate_value(payload: dict, key: str) -> object | None:
+    value = payload.get(key)
+    return value if _to_float(value) is not None else None
+
+
+def _normalize_coordinate_aliases(payload: dict) -> None:
+    """Keep both coordinate naming conventions available to stage runners."""
+    ra_deg = _coordinate_value(payload, "ra_deg")
+    dec_deg = _coordinate_value(payload, "dec_deg")
+    ra = _coordinate_value(payload, "ra")
+    dec = _coordinate_value(payload, "dec")
+    if ra_deg is None and ra is not None:
+        payload["ra_deg"] = ra
+    if dec_deg is None and dec is not None:
+        payload["dec_deg"] = dec
+    if ra is None and ra_deg is not None:
+        payload["ra"] = ra_deg
+    if dec is None and dec_deg is not None:
+        payload["dec"] = dec_deg
+
+
+def _has_coordinates(payload: dict) -> bool:
+    return _coordinate_value(payload, "ra_deg") is not None and _coordinate_value(payload, "dec_deg") is not None
+
+
 def detect_pipeline_status(payload: dict) -> dict[str, str]:
     """Determine which pipeline stages have completed for a candidate.
 
@@ -214,6 +239,7 @@ def run_missing_stages(
         raise ValueError(f"Candidate {candidate_id} not found in DB")
 
     payload = json.loads(row[0]) if row[0] else {}
+    _normalize_coordinate_aliases(payload)
     lc_path = row[1] or payload.get("lc_path")
 
     # 2. Detect current status
@@ -257,13 +283,13 @@ def run_missing_stages(
             mark_stage_complete("events")
 
     if should_run("characterize"):
-        ra = payload.get("ra_deg")
-        dec = payload.get("dec_deg")
-        if ra is not None and dec is not None:
+        if _has_coordinates(payload):
             p("Characterizing...")
             _run_characterize_stage(payload, p)
             stages_run.append("characterize")
             mark_stage_complete("characterize")
+        else:
+            p("Characterize skipped: missing coordinates")
 
     if should_run("sed_photometry"):
         p("Fetching SED photometry...")
@@ -295,22 +321,31 @@ def run_missing_stages(
         mark_stage_complete("sed_model_fit")
 
     if should_run("vetting"):
-        ra = payload.get("ra_deg")
-        dec = payload.get("dec_deg")
-        if ra is not None and dec is not None:
+        if _has_coordinates(payload):
             p("Vetting crossmatches...")
             _run_vetting_stage(payload, p)
             stages_run.append("vetting")
             mark_stage_complete("vetting")
+        else:
+            p("Vetting skipped: missing coordinates")
 
     if should_run("external_lcs"):
-        ra = payload.get("ra_deg")
-        dec = payload.get("dec_deg")
-        if ra is not None and dec is not None:
+        if _has_coordinates(payload):
             p("Fetching external LCs...")
-            _run_external_lcs_stage(payload, output_dir=_resolve_output_dir(conn, candidate_id), p=p)
+            external_lcs_ok = _run_external_lcs_stage(
+                payload,
+                output_dir=_resolve_output_dir(conn, candidate_id),
+                p=p,
+                refresh_cache=("external_lcs" in force),
+            )
             stages_run.append("external_lcs")
-            mark_stage_complete("external_lcs")
+            if external_lcs_ok:
+                mark_stage_complete("external_lcs")
+            else:
+                update_candidate_payload(conn, candidate_id, payload)
+                p("External LCs finished with failures; status may remain partial")
+        else:
+            p("External LCs skipped: missing coordinates")
 
     if should_run("multi_survey_features"):
         p("Computing multi-survey features...")
@@ -549,11 +584,18 @@ def _resolve_output_dir(conn: sqlite3.Connection, candidate_id: str) -> Path:
     return default
 
 
-def _run_external_lcs_stage(payload: dict, output_dir: Path, p: Callable | None = None) -> None:
+def _run_external_lcs_stage(
+    payload: dict,
+    output_dir: Path,
+    p: Callable | None = None,
+    *,
+    refresh_cache: bool = False,
+) -> bool:
     """Run fetch_external_lcs on a 1-row DataFrame."""
     try:
         from malca.vetting import fetch_external_lcs
 
+        _normalize_coordinate_aliases(payload)
         df = pd.DataFrame([payload])
         df_out = _run_with_progress_capture(
             lambda: fetch_external_lcs(
@@ -568,6 +610,7 @@ def _run_external_lcs_stage(payload: dict, output_dir: Path, p: Callable | None 
                 run_aavso=False,
                 run_ps1=True,
                 run_crts=True,
+                refresh_cache=refresh_cache,
                 progress_callback=p,
             ),
             p,
@@ -577,9 +620,16 @@ def _run_external_lcs_stage(payload: dict, output_dir: Path, p: Callable | None 
             for k, v in row.items():
                 if v is not None and not (isinstance(v, float) and np.isnan(v)):
                     payload[k] = v
+            failures = list(getattr(df_out, "attrs", {}).get("external_lc_failures") or [])
+            if failures:
+                if p:
+                    p(f"External LCs finished with module failure(s): {'; '.join(failures[:3])}")
+                return False
+        return True
     except Exception as e:
         if p: p(f"External LCs stage failed: {e}")
         else: print(f"[pipeline] External LCs stage failed: {e}")
+        return False
 
 
 def _run_multi_survey_features_stage(payload: dict, output_dir: Path, p: Callable | None = None) -> None:
