@@ -79,6 +79,8 @@ def infer_source_kind(source_path: str | Path) -> str:
         return "db"
     if suffix == ".parquet":
         return "parquet"
+    if suffix == ".csv":
+        return "csv"
     raise ValueError(f"Could not infer source kind from {path}")
 
 
@@ -168,6 +170,8 @@ def load_candidate_source(source_path: str | Path, source_kind: str | None = Non
         return load_review_db(path)
     if kind == "parquet":
         return read_parquet_table(path)
+    if kind == "csv":
+        return pd.read_csv(path)
     raise ValueError(f"Unsupported source kind: {kind}")
 
 

@@ -123,6 +123,8 @@ DEFAULT_TOP_EXPORT_COLUMNS = (
     "asas_sn_id",
     "event_class",
     "status",
+    "possible_missed_eb",
+    "known_review_eb_hint",
     "eb_likely_label",
     "eb_likely_flag",
     "eb_bin",
@@ -629,6 +631,8 @@ def compute_eb_triage(df: pd.DataFrame) -> pd.DataFrame:
     eb_bin_text = _text_series(out, "eb_bin")
     out["eb_likely_flag"] = eb_bin_text.isin(LIKELY_EB_BINS)
     out["eb_likely_label"] = np.where(out["eb_likely_flag"], "likely_eb", "not_likely_eb")
+    out["known_review_eb_hint"] = False
+    out["possible_missed_eb"] = out["eb_likely_flag"] & ~out["known_eb_hint"]
 
     out = out.sort_values(
         ["eb_bin", "eb_score", "ls_fap_score", "dip_run_count", "dipper_score", "candidate_id"],
@@ -636,6 +640,57 @@ def compute_eb_triage(df: pd.DataFrame) -> pd.DataFrame:
         na_position="last",
     ).reset_index(drop=True)
     return out
+
+
+def _review_label_eb_hint(df: pd.DataFrame) -> pd.Series:
+    hint = pd.Series(False, index=df.index, dtype=bool)
+    for column in LABEL_COLUMN_CANDIDATES:
+        if column in df.columns:
+            hint |= _series_contains_pattern(df, column, EB_REGEX)
+    return hint
+
+
+def load_eb_scan_source(
+    source: str | Path | pd.DataFrame,
+    source_kind: str | None = None,
+) -> pd.DataFrame:
+    """Load an arbitrary candidate/review source for advisory EB scanning."""
+    if isinstance(source, pd.DataFrame):
+        return _ensure_candidate_id(source)
+    path = Path(source).expanduser().resolve()
+    kind = source_kind or infer_source_kind(path)
+    loaded = load_candidate_source(path, kind)
+    return _ensure_candidate_id(loaded)
+
+
+def scan_eb_candidates(
+    source: str | Path | pd.DataFrame,
+    source_kind: str | None = None,
+    *,
+    only_possible_missed: bool = False,
+) -> pd.DataFrame:
+    """Rank EB-like objects without requiring prior ``event_class == other`` review labels.
+
+    The output is advisory only.  It adds ``known_review_eb_hint`` and
+    ``possible_missed_eb`` but does not mutate review labels.
+    """
+    candidates = load_eb_scan_source(source, source_kind=source_kind)
+    triage = compute_eb_triage(candidates)
+    review_hint = _review_label_eb_hint(triage)
+    triage["known_review_eb_hint"] = review_hint.astype(bool)
+    triage["possible_missed_eb"] = (
+        triage["eb_likely_flag"].astype(bool)
+        & ~triage["known_eb_hint"].astype(bool)
+        & ~triage["known_review_eb_hint"].astype(bool)
+    )
+    triage = triage.sort_values(
+        ["possible_missed_eb", "eb_bin", "eb_score", "ls_fap_score", "dip_run_count", "candidate_id"],
+        ascending=[False, True, False, False, False, True],
+        na_position="last",
+    ).reset_index(drop=True)
+    if only_possible_missed:
+        triage = triage.loc[triage["possible_missed_eb"].astype(bool)].reset_index(drop=True)
+    return triage
 
 
 def top_candidate_export_frame(df: pd.DataFrame) -> pd.DataFrame:

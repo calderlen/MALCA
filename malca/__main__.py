@@ -49,6 +49,7 @@ COMMAND_GROUPS = {
     "validate": "Evaluation",
     "attrition": "Evaluation",
     "reproduce": "Evaluation",
+    "audit": "Evaluation",
     "false-positive": "Evaluation",
     "neighbors": "Enrichment",
     "spectra": "Enrichment",
@@ -111,7 +112,7 @@ def main():
     # If so, forward directly to the submodule
     if len(sys.argv) >= 2 and sys.argv[1] in [
         "manifest", "pipeline", "detect", "reproduce", "injection",
-        "detection-rate", "validate", "plot",
+        "detection-rate", "validate", "plot", "audit",
         "events", "lc-plot", "gaia-fetch", "characterize", "classify", "filter", "tag",
         "attrition", "review", "review-qt", "review-refresh", "review-merge", "review-explore", "review-sync", "review-taxonomy", "review-maint",
         "neighbors", "spectra", "false-positive", "vsx-filter", "vsx-crossmatch", "external-lcs", "multi-survey-features", "sed-photometry",
@@ -143,6 +144,8 @@ def main():
             attrition = importlib.import_module("malca.evaluation.attrition")
             sys.argv = [sys.argv[0]] + remaining
             attrition.main()
+        elif command == "audit":
+            _run_module_main("malca.audit", remaining)
         elif command == "plot":
             _run_module_main("malca.plot", remaining)
         elif command == "lc-plot":
@@ -326,6 +329,7 @@ def main():
     subparsers.add_parser("validate", description="Validate results against known candidates")
     subparsers.add_parser("attrition", description="Summarize pre/filter attrition")
     subparsers.add_parser("reproduce", description="Re-run detection on known objects (needs raw data)")
+    subparsers.add_parser("audit", description="Audit result tables, LTV status, and baseline comparison commands")
     subparsers.add_parser("false-positive", description="Run false-positive contaminant benchmark")
     # Enrichment
     subparsers.add_parser("neighbors", description="Run bulk nearest-neighbor enrichment")

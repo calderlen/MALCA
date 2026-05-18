@@ -71,9 +71,13 @@ from malca.utils import read_lc_dat2
 
 
 CANDIDATE_USECOLS = {
+    "candidate_id",
+    "asas_sn_id",
     "path",
     "source_id",
     "mag_bin",
+    "ra_deg",
+    "dec_deg",
 }
 
 
@@ -200,7 +204,20 @@ def load_manifest_df(manifest_path: Path | str) -> pd.DataFrame:
 
 
 def load_candidates_df(cand_path: Path) -> pd.DataFrame:
-    df = read_parquet_table(cand_path)
+    path = Path(cand_path).expanduser()
+    if path.suffix.lower() == ".csv":
+        df = pd.read_csv(path)
+    else:
+        df = read_parquet_table(path)
+    if "source_id" not in df.columns and "asas_sn_id" in df.columns:
+        df["source_id"] = df["asas_sn_id"].astype(str)
+    if "candidate_id" not in df.columns:
+        if "asas_sn_id" in df.columns:
+            df["candidate_id"] = df["asas_sn_id"].astype(str)
+        elif "source_id" in df.columns:
+            df["candidate_id"] = df["source_id"].astype(str)
+        elif "path" in df.columns:
+            df["candidate_id"] = df["path"].map(lambda value: Path(str(value)).stem)
     usecols = [col for col in df.columns if col in CANDIDATE_USECOLS]
     return df[usecols].copy() if usecols else df
 

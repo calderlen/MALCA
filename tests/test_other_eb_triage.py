@@ -15,6 +15,7 @@ from malca.review.other_eb_triage import (
     load_reviewed_other_subset,
     plot_example_lightcurves,
     resolve_local_paths,
+    scan_eb_candidates,
     select_example_candidates,
 )
 
@@ -218,6 +219,66 @@ def test_load_reviewed_other_subset_filters_reviewed_other_from_db(tmp_path: Pat
     assert subset["candidate_id"].tolist() == ["C1"]
     assert subset.loc[0, "event_class"] == "other"
     assert subset.loc[0, "status"] == "reviewed"
+
+
+def test_scan_eb_candidates_finds_unreviewed_possible_missed_objects() -> None:
+    source = pd.DataFrame(
+        [
+            {
+                "candidate_id": "missed",
+                "event_class": "unclassified",
+                "dip_run_count": 3,
+                "dip_inter_event_spacing_median": 5.0,
+                "dip_inter_event_spacing_std": 0.2,
+                "dip_amplitude_consistency": 0.1,
+                "dip_duration_consistency": 0.1,
+                "dip_symmetry_score": 0.1,
+                "stats_variability_lomb_scargle_best_period_days": 2.5,
+                "stats_variability_lomb_scargle_peak_power": 0.4,
+                "stats_variability_lomb_scargle_fap": 1e-8,
+                "stats_variability_von_neumann_ratio": 1.8,
+                "stats_variability_stetson_J": 0.8,
+                "dipper_score": 12.0,
+                "gaia_var_class": "",
+                "gaia_eb_period": np.nan,
+                "gaia_eb_morph": "",
+                "vsx_class": "",
+                "catalog_match": 0,
+                "periodic_flag": 0,
+            },
+            {
+                "candidate_id": "known_review",
+                "event_class": "EA",
+                "dip_run_count": 3,
+                "dip_inter_event_spacing_median": 5.0,
+                "dip_inter_event_spacing_std": 0.2,
+                "dip_amplitude_consistency": 0.1,
+                "dip_duration_consistency": 0.1,
+                "dip_symmetry_score": 0.1,
+                "stats_variability_lomb_scargle_best_period_days": 2.5,
+                "stats_variability_lomb_scargle_peak_power": 0.4,
+                "stats_variability_lomb_scargle_fap": 1e-8,
+                "stats_variability_von_neumann_ratio": 1.8,
+                "stats_variability_stetson_J": 0.8,
+                "dipper_score": 12.0,
+                "gaia_var_class": "",
+                "gaia_eb_period": np.nan,
+                "gaia_eb_morph": "",
+                "vsx_class": "",
+                "catalog_match": 0,
+                "periodic_flag": 0,
+            },
+        ]
+    )
+
+    ranked = scan_eb_candidates(source)
+
+    missed = ranked.set_index("candidate_id").loc["missed"]
+    known_review = ranked.set_index("candidate_id").loc["known_review"]
+    assert bool(missed["eb_likely_flag"])
+    assert bool(missed["possible_missed_eb"])
+    assert bool(known_review["known_review_eb_hint"])
+    assert not bool(known_review["possible_missed_eb"])
 
 
 def test_load_reviewed_other_subset_joins_exported_labels_by_candidate_id(tmp_path: Path) -> None:

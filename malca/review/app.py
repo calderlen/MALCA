@@ -77,6 +77,14 @@ from malca.review.dustycult import (
     normalize_controls,
     run_dustycult_fit,
 )
+from malca.review.phoebe_fit import (
+    PHOEBE_MODEL_KINDS,
+    check_phoebe_available,
+    infer_period_days,
+    load_phoebe_fits,
+    parse_phoebe_json,
+    run_phoebe_fit,
+)
 from malca.review.interactive_plot import (
     _baseline_config_from_run_params,
     build_interactive_lightcurve_figure,
@@ -4719,6 +4727,45 @@ def _dustycult_controls_layout() -> html.Div:
     ])
 
 
+def _phoebe_controls_layout() -> html.Div:
+    return html.Div([
+        html.Div([
+            html.Div([
+                html.Label(
+                    'Period [d]',
+                    htmlFor='phoebe-period-days',
+                    style={'fontSize': '10px', 'color': '#7d91a6', 'marginBottom': '2px'},
+                ),
+                dcc.Input(
+                    id='phoebe-period-days',
+                    type='number',
+                    min=0,
+                    step=0.0001,
+                    debounce=True,
+                    style={'width': '100%', 'fontSize': '11px', 'height': '28px', 'padding': '2px 6px'},
+                ),
+            ], style={'minWidth': '120px'}),
+            html.Div([
+                html.Label(
+                    'Model',
+                    htmlFor='phoebe-model-kind',
+                    style={'fontSize': '10px', 'color': '#7d91a6', 'marginBottom': '2px'},
+                ),
+                dcc.Dropdown(
+                    id='phoebe-model-kind',
+                    options=[{'label': value.capitalize(), 'value': value} for value in PHOEBE_MODEL_KINDS],
+                    value='detached',
+                    clearable=False,
+                    style={'fontSize': '11px', 'minWidth': '145px'},
+                ),
+            ], style={'minWidth': '145px'}),
+            html.Button('PHOEBE Fit', id='phoebe-fit-btn', n_clicks=0, className='compact-btn'),
+            html.Span(id='phoebe-run-status', style={'fontSize': '10px', 'color': '#7da8c4'}),
+        ], style={'display': 'flex', 'gap': '8px', 'alignItems': 'end', 'flexWrap': 'wrap', 'padding': '8px 10px 0 10px'}),
+        html.Div(id='phoebe-period-status', style={'fontSize': '10px', 'color': '#7d91a6', 'padding': '4px 10px 8px 10px'}),
+    ])
+
+
 def create_layout():
     """Create app layout."""
     return html.Div([
@@ -4771,6 +4818,7 @@ def create_layout():
         dcc.Store(id='auto-period-cache', data={}, storage_type='session'),
         dcc.Store(id='auto-period-request', data={'nonce': 0}),
         dcc.Store(id='dustycult-refresh-token', data=0),
+        dcc.Store(id='phoebe-refresh-token', data=0),
         dcc.Store(id='plot-render-request', data={'nonce': 1, 'ts': 0.0, 'state': {'idx': 0, 'candidate_id': None, 'plot_mode': 'native', 'overlay_values': list(PLOT_PRESETS['Diagnostics']['overlays']), 'selected_cameras': [], 'selected_bands': ['g', 'V'], 'preset': 'Diagnostics', 'theme': DEFAULT_THEME, 'residual_height': DEFAULT_RESIDUAL_FRACTION, 'baseline_opacity': 0.5, 'external_source_view': DEFAULT_EXTERNAL_SOURCE_VIEW}}),
         dcc.Store(id='plot-render-applied', data=0),
         dcc.Store(id='plot-defaults-initialized', data=False),
@@ -5429,6 +5477,21 @@ def create_layout():
                                 type='default',
                             ),
                         ], id='dustycult-details', open=False, className='metadata-sections', style={'margin-top': '0'}),
+                        html.Details([
+                            html.Summary('PHOEBE', style={'cursor': 'pointer'}),
+                            html.Div(
+                                id='phoebe-config-status',
+                                style={'fontSize': '10px', 'color': '#7d91a6', 'padding': '4px 10px 0 10px'},
+                            ),
+                            _phoebe_controls_layout(),
+                            dcc.Loading(
+                                html.Div(
+                                    id='phoebe-result-panel',
+                                    style={'padding': '8px 10px', 'display': 'grid', 'gap': '8px'},
+                                ),
+                                type='default',
+                            ),
+                        ], id='phoebe-details', open=False, className='metadata-sections', style={'margin-top': '0'}),
                         html.Details([
                             html.Summary([
                                 html.Span('Candidate Panels', style={'marginRight': '10px'}),
@@ -9186,6 +9249,180 @@ def _dustycult_occulter_publication_figure(conn, candidate_id: str) -> tuple[go.
     return export_fig, mode
 
 
+def _phoebe_config_status_text() -> str:
+    availability = check_phoebe_available()
+    return availability.message if availability.ok else f"Unavailable: {availability.message}"
+
+
+def _phoebe_status_cards(fits: pd.DataFrame, theme: str | None) -> html.Div:
+    spec = _external_followup_theme(theme)
+    muted = str(spec["muted"])
+    row = fits.iloc[-1] if fits is not None and not fits.empty else None
+    status = "not run"
+    detail = ""
+    if row is not None:
+        status = str(row.get("status") or "unknown")
+        detail_parts = []
+        runtime = row.get("runtime_sec")
+        n_points = row.get("n_input_points")
+        period = row.get("period_days")
+        if runtime is not None and not pd.isna(runtime):
+            detail_parts.append(f"{_dustycult_float(runtime, 3)} s")
+        if period is not None and not pd.isna(period):
+            detail_parts.append(f"P={_dustycult_float(period, 6)} d")
+        if n_points is not None and not pd.isna(n_points):
+            detail_parts.append(f"{int(float(n_points))} pts")
+        error = str(row.get("error") or "").strip()
+        if status != "ok" and error:
+            detail_parts.append(error[:140])
+        detail = " | ".join(detail_parts)
+    color = "#64c27b" if status == "ok" else ("#dd8080" if status == "failed" else muted)
+    return html.Div([
+        html.Div([
+            html.Div("Latest", style={'fontSize': '10px', 'color': muted}),
+            html.Div(status, style={'fontSize': '13px', 'fontWeight': 600, 'color': color}),
+            html.Div(detail, style={'fontSize': '10px', 'color': muted, 'overflowWrap': 'anywhere'}),
+        ], style={
+            'border': '1px solid rgba(125, 145, 166, 0.28)',
+            'borderRadius': '6px',
+            'padding': '6px 8px',
+            'minWidth': '160px',
+        })
+    ], style={'display': 'flex', 'gap': '8px', 'flexWrap': 'wrap'})
+
+
+def _phoebe_result_figure(fit_row: pd.Series, theme: str | None) -> go.Figure:
+    spec = _external_followup_theme(theme)
+    payload = parse_phoebe_json(fit_row.get("plot_json"), {})
+    fig = go.Figure()
+    try:
+        phase = np.asarray(payload.get("phase") or [], dtype=float)
+        flux = np.asarray(payload.get("flux") or [], dtype=float)
+        flux_err = np.asarray(payload.get("flux_err") or [], dtype=float)
+    except Exception:
+        phase = np.asarray([], dtype=float)
+        flux = np.asarray([], dtype=float)
+        flux_err = np.asarray([], dtype=float)
+    valid = np.isfinite(phase) & np.isfinite(flux)
+    if bool(valid.any()):
+        error_y = None
+        if flux_err.size == phase.size and bool(np.isfinite(flux_err[valid]).any()):
+            error_y = dict(type="data", array=flux_err[valid], visible=True, thickness=0.7)
+        fig.add_trace(go.Scatter(
+            x=phase[valid],
+            y=flux[valid],
+            mode="markers",
+            name="observed",
+            marker=dict(color="#69c779", size=5, opacity=0.78, line=dict(color="#111827", width=0.35)),
+            error_y=error_y,
+        ))
+        model_payload = payload.get("model_flux")
+        if isinstance(model_payload, list) and len(model_payload) == len(phase):
+            model = np.asarray(model_payload, dtype=float)
+            model_valid = valid & np.isfinite(model)
+            if bool(model_valid.any()):
+                order = np.argsort(phase[model_valid])
+                fig.add_trace(go.Scatter(
+                    x=phase[model_valid][order],
+                    y=model[model_valid][order],
+                    mode="lines",
+                    name="PHOEBE model",
+                    line=dict(color="#f2c86b", width=2),
+                ))
+    else:
+        fig.add_annotation(text="No PHOEBE plot data stored for this fit.", showarrow=False, x=0.5, y=0.5, xref="paper", yref="paper")
+    period = fit_row.get("period_days")
+    title = "PHOEBE Fit"
+    if period is not None and not pd.isna(period):
+        title += f" (P={_dustycult_float(period, 6)} d)"
+    fig.update_layout(
+        template=None,
+        title=title,
+        paper_bgcolor=spec["paper_bg"],
+        plot_bgcolor=spec["plot_bg"],
+        font=dict(color=spec["font"], size=11),
+        margin=dict(l=56, r=18, t=42, b=48),
+        height=340,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1,
+            bgcolor=spec["legend_bg"],
+            bordercolor=spec["legend_border"],
+            borderwidth=1,
+        ),
+    )
+    fig.update_xaxes(title="phase", gridcolor=spec["grid"], zeroline=False)
+    fig.update_yaxes(title="relative flux", gridcolor=spec["grid"], zeroline=False)
+    return fig
+
+
+def _phoebe_parameter_table(fit_row: pd.Series, theme: str | None) -> html.Div:
+    spec = _external_followup_theme(theme)
+    metrics = parse_phoebe_json(fit_row.get("metrics_json"), {})
+    params = parse_phoebe_json(fit_row.get("params_json"), {})
+    rows = []
+    for label, value in (
+        ("period_source", fit_row.get("period_source")),
+        ("model_kind", fit_row.get("model_kind")),
+        ("reduced_chi2", metrics.get("reduced_chi2") if isinstance(metrics, dict) else None),
+        ("rms_residual", metrics.get("rms_residual") if isinstance(metrics, dict) else None),
+        ("model_flux_source", metrics.get("model_flux_source") if isinstance(metrics, dict) else None),
+        ("solver_status", params.get("solver_status") if isinstance(params, dict) else None),
+        ("compute_status", params.get("compute_status") if isinstance(params, dict) else None),
+    ):
+        rows.append(html.Tr([
+            html.Td(str(label), style={'padding': '3px 6px', 'fontWeight': 600}),
+            html.Td(_dustycult_float(value) if isinstance(value, (int, float, np.integer, np.floating)) else str(value or "-"), style={'padding': '3px 6px'}),
+        ]))
+    return html.Table(html.Tbody(rows), style={'width': '100%', 'fontSize': '11px', 'borderCollapse': 'collapse', 'color': spec["font"]})
+
+
+def _render_phoebe_result_panel(candidate_id: str, theme_mode: str | None, _refresh_token: object = None) -> list:
+    spec = _external_followup_theme(theme_mode)
+    if not candidate_id:
+        return [html.Div("No candidates loaded.", style={'fontSize': '11px', 'color': spec["error"]})]
+    with closing(db_connect(Path(DB_PATH))) as conn:
+        fits = load_phoebe_fits(conn, str(candidate_id))
+    availability = check_phoebe_available()
+    children: list = []
+    if not availability.ok:
+        children.append(html.Div(
+            availability.message,
+            style={'fontSize': '10px', 'color': spec["error"], 'overflowWrap': 'anywhere'},
+        ))
+    children.append(_phoebe_status_cards(fits, theme_mode))
+    if fits is None or fits.empty:
+        children.append(html.Div("No PHOEBE fit has been run for this candidate.", style={'fontSize': '11px', 'color': spec["muted"]}))
+        return children
+    fit_row = fits.iloc[-1]
+    status = str(fit_row.get("status") or "").lower()
+    if status == "ok":
+        children.append(dcc.Graph(
+            id='phoebe-fit-plot',
+            figure=_phoebe_result_figure(fit_row, theme_mode),
+            mathjax=True,
+            config=graph_config_without_image_export({'displayModeBar': True, 'responsive': True}),
+            style={'height': '350px'},
+        ))
+    else:
+        children.append(html.Div(
+            str(fit_row.get("error") or "PHOEBE fit failed."),
+            style={'fontSize': '11px', 'color': spec["error"], 'overflowWrap': 'anywhere'},
+        ))
+    meta = [
+        f"status={fit_row.get('status') or 'unknown'}",
+        f"runtime={_dustycult_float(fit_row.get('runtime_sec'), 3)} s",
+        f"version={fit_row.get('phoebe_version') or '-'}",
+        f"input={fit_row.get('input_path') or '-'}",
+    ]
+    children.append(html.Div(" | ".join(meta), style={'fontSize': '10px', 'color': spec["muted"], 'overflowWrap': 'anywhere'}))
+    children.append(_phoebe_parameter_table(fit_row, theme_mode))
+    return children
+
+
 def _dustycult_config_status_text() -> str:
     availability = check_dustycult_available()
     if availability.ok:
@@ -9335,6 +9572,110 @@ def update_dustycult_result_panel(candidate_id, theme_mode, refresh_token):
     return (
         _render_dustycult_result_panel(str(candidate_id) if candidate_id else "", str(theme_mode or DEFAULT_THEME), refresh_token),
         _dustycult_config_status_text(),
+    )
+
+
+@app.callback(
+    [Output('phoebe-period-days', 'value'),
+     Output('phoebe-period-status', 'children')],
+    Input('current-candidate-id', 'data'),
+    prevent_initial_call=False,
+)
+def update_phoebe_period_control(candidate_id):
+    """Populate the PHOEBE period field from the best available active-candidate period."""
+    if not candidate_id:
+        return None, "No candidates loaded."
+    try:
+        payload, _stored_lc_path, _source_path = _candidate_context(candidate_id)
+        period_days, source = infer_period_days(payload)
+    except Exception as exc:
+        return None, f"Period inference failed: {exc}"
+    if period_days is None:
+        return None, "No Gaia/VSX/ASAS-SN/ZTF/LS period found. Enter a period in days."
+    return period_days, f"Using {source} period."
+
+
+def _phoebe_fit_callback_impl(clicks, candidate_id, refresh_token, period_days, model_kind):
+    if not clicks:
+        raise dash.exceptions.PreventUpdate
+    if not candidate_id:
+        return "No candidate selected.", refresh_token
+    try:
+        payload, stored_lc_path, source_path = _candidate_context(candidate_id)
+        lc_path = _effective_local_lc_path(payload, stored_lc_path=stored_lc_path, source_path=source_path)
+        inferred_period, _period_source = infer_period_days(payload)
+        manual_period = period_days
+        try:
+            if inferred_period is not None and period_days is not None and np.isclose(float(period_days), float(inferred_period), rtol=0, atol=1e-8):
+                manual_period = None
+        except Exception:
+            pass
+        with closing(db_connect(Path(DB_PATH))) as conn:
+            row = run_phoebe_fit(
+                conn,
+                str(candidate_id),
+                payload,
+                lc_path=lc_path,
+                manual_period_days=manual_period,
+                model_kind=model_kind or "detached",
+            )
+    except Exception as exc:
+        row = {"status": "failed", "error": str(exc), "runtime_sec": None}
+    next_token = int(refresh_token or 0) + 1
+    status = str(row.get("status") or "unknown")
+    if status == "ok":
+        return (
+            f"PHOEBE fit complete in {_dustycult_float(row.get('runtime_sec'), 3)} s.",
+            next_token,
+        )
+    return f"PHOEBE fit failed: {row.get('error') or 'unknown error'}", next_token
+
+
+if _background_callback_manager is not None:
+    @app.callback(
+        [Output('phoebe-run-status', 'children'),
+         Output('phoebe-refresh-token', 'data')],
+        Input('phoebe-fit-btn', 'n_clicks'),
+        [State('current-candidate-id', 'data'),
+         State('phoebe-refresh-token', 'data'),
+         State('phoebe-period-days', 'value'),
+         State('phoebe-model-kind', 'value')],
+        background=True,
+        running=[
+            (Output('phoebe-fit-btn', 'disabled'), True, False),
+        ],
+        prevent_initial_call=True,
+    )
+    def run_phoebe_fit_callback(clicks, candidate_id, refresh_token, period_days, model_kind):
+        return _phoebe_fit_callback_impl(clicks, candidate_id, refresh_token, period_days, model_kind)
+else:
+    @app.callback(
+        [Output('phoebe-run-status', 'children'),
+         Output('phoebe-refresh-token', 'data')],
+        Input('phoebe-fit-btn', 'n_clicks'),
+        [State('current-candidate-id', 'data'),
+         State('phoebe-refresh-token', 'data'),
+         State('phoebe-period-days', 'value'),
+         State('phoebe-model-kind', 'value')],
+        prevent_initial_call=True,
+    )
+    def run_phoebe_fit_callback(clicks, candidate_id, refresh_token, period_days, model_kind):
+        return _phoebe_fit_callback_impl(clicks, candidate_id, refresh_token, period_days, model_kind)
+
+
+@app.callback(
+    [Output('phoebe-result-panel', 'children'),
+     Output('phoebe-config-status', 'children')],
+    [Input('current-candidate-id', 'data'),
+     Input('theme-mode-store', 'data'),
+     Input('phoebe-refresh-token', 'data')],
+    prevent_initial_call=False,
+)
+def update_phoebe_result_panel(candidate_id, theme_mode, refresh_token):
+    """Render PHOEBE availability, fit status, and stored fit plot."""
+    return (
+        _render_phoebe_result_panel(str(candidate_id) if candidate_id else "", str(theme_mode or DEFAULT_THEME), refresh_token),
+        _phoebe_config_status_text(),
     )
 
 

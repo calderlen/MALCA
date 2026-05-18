@@ -270,10 +270,49 @@ def infer_candidate_id(df: pd.DataFrame) -> pd.Series:
     return vals
 
 
+def _candidate_ids_from_columns(df: pd.DataFrame) -> pd.Series:
+    ids = pd.Series("", index=df.index, dtype="object")
+    if "candidate_id" in df.columns:
+        ids = df["candidate_id"].map(_normalize_large_integer_like_id).fillna("").astype(str).str.strip()
+
+    missing = ids.eq("")
+    for column in ("asas_sn_id", "source_id", "gaia_id"):
+        if not bool(missing.any()) or column not in df.columns:
+            continue
+        fill = df.loc[missing, column].map(_normalize_large_integer_like_id).fillna("").astype(str).str.strip()
+        ids.loc[missing] = fill
+        missing = ids.eq("")
+
+    for column in ("path", "dat_path", "lc_path", "local_lightcurve_path"):
+        if not bool(missing.any()) or column not in df.columns:
+            continue
+        stems = df.loc[missing, column].map(
+            lambda value: Path(str(value)).stem if value is not None and str(value).strip() else ""
+        )
+        ids.loc[missing] = stems.map(_normalize_large_integer_like_id).fillna("").astype(str).str.strip()
+        missing = ids.eq("")
+
+    return ids
+
+
+def normalize_candidate_input_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize review/reproduction candidate tables loaded from Parquet or CSV."""
+    out = df.copy()
+    out["candidate_id"] = _candidate_ids_from_columns(out)
+    if "source_id" not in out.columns and "asas_sn_id" in out.columns:
+        out["source_id"] = out["asas_sn_id"].map(_normalize_large_integer_like_id)
+    if "lc_path" not in out.columns and "path" in out.columns:
+        out["lc_path"] = out["path"].astype(str)
+    return out
+
+
 def load_candidates_file(path: Path) -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(f"File not found: {path}")
-    return read_parquet_table(path)
+    suffix = path.suffix.lower()
+    if suffix == ".csv":
+        return normalize_candidate_input_frame(pd.read_csv(path))
+    return normalize_candidate_input_frame(read_parquet_table(path))
 
 
 def detect_run_directory_files(run_dir: Path) -> dict[str, Path | None]:
@@ -1357,6 +1396,67 @@ def init_db(conn: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_dustycult_curves_candidate_mode
         ON dustycult_predictive_curves(candidate_id, mode)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS phoebe_fits (
+            candidate_id TEXT PRIMARY KEY,
+            status TEXT,
+            created_at TEXT,
+            updated_at TEXT,
+            runtime_sec REAL,
+            model_kind TEXT,
+            period_days REAL,
+            period_source TEXT,
+            manual_period_days REAL,
+            t0_jd REAL,
+            input_path TEXT,
+            n_input_points INTEGER,
+            params_json TEXT,
+            metrics_json TEXT,
+            plot_json TEXT,
+            error TEXT,
+            phoebe_version TEXT,
+            FOREIGN KEY(candidate_id) REFERENCES candidates(candidate_id)
+        )
+        """
+    )
+    existing_phoebe_fit_lower = {
+        str(row[1]).lower()
+        for row in conn.execute("PRAGMA table_info(phoebe_fits)").fetchall()
+    }
+    phoebe_fit_column_defs = {
+        "candidate_id": "TEXT",
+        "status": "TEXT",
+        "created_at": "TEXT",
+        "updated_at": "TEXT",
+        "runtime_sec": "REAL",
+        "model_kind": "TEXT",
+        "period_days": "REAL",
+        "period_source": "TEXT",
+        "manual_period_days": "REAL",
+        "t0_jd": "REAL",
+        "input_path": "TEXT",
+        "n_input_points": "INTEGER",
+        "params_json": "TEXT",
+        "metrics_json": "TEXT",
+        "plot_json": "TEXT",
+        "error": "TEXT",
+        "phoebe_version": "TEXT",
+    }
+    for col, dtype in phoebe_fit_column_defs.items():
+        if col.lower() not in existing_phoebe_fit_lower:
+            try:
+                conn.execute(f"ALTER TABLE phoebe_fits ADD COLUMN {col} {dtype}")
+                existing_phoebe_fit_lower.add(col.lower())
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" not in str(e).lower():
+                    raise
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_phoebe_fits_candidate
+        ON phoebe_fits(candidate_id)
         """
     )
     # Migrate: add any columns missing from older DBs.

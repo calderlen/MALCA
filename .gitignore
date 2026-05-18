@@ -25,3 +25,9 @@ malca/changes.txt
 results_test/
 skypatrol
 review.db
+*.db-shm
+*.db-wal
+runs*_review.db
+malca/reproduction/
+dip/
+ltv/
