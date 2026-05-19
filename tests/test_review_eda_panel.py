@@ -75,6 +75,12 @@ def test_eda_table_rows_tolerate_missing_optional_columns() -> None:
     assert rows == [{"candidate_id": "A", "dipper_score": 1.5}]
 
 
+def test_eda_table_rows_keep_candidate_key_payload() -> None:
+    rows = eda_table_rows(pd.DataFrame({"candidate_id": ["A"], "candidate_key": ["K"], "dipper_score": [1.5]}))
+
+    assert rows == [{"candidate_id": "A", "dipper_score": 1.5, "candidate_key": "K"}]
+
+
 def test_eda_scatter_figure_highlights_selected_candidate() -> None:
     frame = pd.DataFrame(
         {

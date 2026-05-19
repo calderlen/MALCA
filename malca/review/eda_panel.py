@@ -32,7 +32,6 @@ EDA_TABLE_COLUMNS = [
     {"name": "period_consensus_days", "id": "period_consensus_days"},
     {"name": "dip_run_count", "id": "dip_run_count"},
     {"name": "periodic_evidence_bucket", "id": "periodic_evidence_bucket"},
-    {"name": "candidate_key", "id": "candidate_key"},
 ]
 
 EDA_COLOR_SEQUENCE = [
@@ -521,6 +520,8 @@ def _jsonable(value: Any) -> Any:
 
 def eda_table_rows(frame: pd.DataFrame) -> list[dict[str, Any]]:
     cols = [col["id"] for col in EDA_TABLE_COLUMNS if col["id"] in frame.columns]
+    if "candidate_key" in frame.columns:
+        cols.append("candidate_key")
     rows: list[dict[str, Any]] = []
     for record in frame.loc[:, cols].to_dict("records"):
         rows.append({key: _jsonable(value) for key, value in record.items()})

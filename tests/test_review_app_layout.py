@@ -160,6 +160,8 @@ def test_eda_table_has_native_sorting_and_filtering() -> None:
     assert getattr(table, "sort_action", None) == "native"
     assert getattr(table, "sort_mode", None) == "multi"
     assert getattr(table, "filter_action", None) == "native"
+    assert getattr(table, "hidden_columns", None) in (None, [])
+    assert all(column.get("id") != "candidate_key" for column in table.columns)
 
 
 def test_eda_splitter_reuses_metadata_splitter_style() -> None:

@@ -5834,7 +5834,6 @@ def create_layout():
                             dash_table.DataTable(
                                 id='eda-candidate-table',
                                 columns=EDA_TABLE_COLUMNS,
-                                hidden_columns=['candidate_key'],
                                 data=[],
                                 page_action='native',
                                 page_size=12,
@@ -6945,6 +6944,7 @@ def export_eda_plot_pdf(n_clicks, queue_data, current_index, x_metric, y_metric,
 def navigate_from_eda(click_data, active_cell, visible_table_data, table_data, queue_data, current_index):
     triggered = callback_context.triggered_id
     candidate_id = ''
+    candidate_ids = []
     if triggered == 'eda-custom-graph':
         points = (click_data or {}).get('points') or []
         if points:
@@ -6953,6 +6953,8 @@ def navigate_from_eda(click_data, active_cell, visible_table_data, table_data, q
                 candidate_id = str(custom[0])
             elif custom:
                 candidate_id = str(custom)
+            if candidate_id:
+                candidate_ids.append(candidate_id)
     elif triggered == 'eda-candidate-table' and isinstance(active_cell, dict):
         row_idx = active_cell.get('row')
         try:
@@ -6960,9 +6962,16 @@ def navigate_from_eda(click_data, active_cell, visible_table_data, table_data, q
             row = visible_rows[int(row_idx)]
         except Exception:
             row = {}
-        candidate_id = str(row.get('candidate_id') or '')
+        for value in (row.get('candidate_key'), row.get('candidate_id')):
+            text = str(value or '').strip()
+            if text and text not in candidate_ids:
+                candidate_ids.append(text)
 
-    next_index = candidate_index_in_queue(queue_data, candidate_id)
+    next_index = None
+    for candidate_id in candidate_ids:
+        next_index = candidate_index_in_queue(queue_data, candidate_id)
+        if next_index is not None:
+            break
     if next_index is None:
         raise dash.exceptions.PreventUpdate
     try:
