@@ -45,7 +45,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-qt = ["PySide6>=6.4", "PySide6-WebEngine>=6.4"]
+qt = ["PySide6>=6.4", "PySide6-Addons>=6.4"]
 
 [project.scripts]
 malca = "malca.__main__:main"

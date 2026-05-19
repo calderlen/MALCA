@@ -204,15 +204,17 @@ def detect_sed_photometry_status(conn: sqlite3.Connection, candidate_id: str, pa
 def detect_sed_model_status(conn: sqlite3.Connection, candidate_id: str, payload: dict | None = None) -> str:
     """Return completion status for the SED model sidecar tables."""
     try:
-        row = conn.execute(
-            "SELECT COUNT(*) FROM sed_model_fits WHERE candidate_id = ?",
+        rows = conn.execute(
+            "SELECT status FROM sed_model_fits WHERE candidate_id = ?",
             (str(candidate_id),),
-        ).fetchone()
+        ).fetchall()
     except sqlite3.OperationalError:
         return "missing"
-    count = int(row[0] or 0) if row else 0
-    if count > 0:
+    statuses = [str(row[0] or "").strip().lower() for row in rows]
+    if any(status == "ok" for status in statuses):
         return "complete"
+    if statuses:
+        return "partial"
     return "missing"
 
 
@@ -314,11 +316,19 @@ def run_missing_stages(
             p,
             replace=("sed_model_fit" in force),
         )
-        payload["sed_model_fit_checked"] = True
-        payload["sed_model_fit_n_rows"] = int(n_fit_rows)
-        payload["sed_model_curve_n_rows"] = int(n_curve_rows)
-        stages_run.append("sed_model_fit")
-        mark_stage_complete("sed_model_fit")
+        sed_model_status = detect_sed_model_status(conn, candidate_id, payload)
+        if sed_model_status == "complete":
+            payload["sed_model_fit_checked"] = True
+            payload["sed_model_fit_n_rows"] = int(n_fit_rows)
+            payload["sed_model_curve_n_rows"] = int(n_curve_rows)
+            stages_run.append("sed_model_fit")
+            mark_stage_complete("sed_model_fit")
+        else:
+            payload["sed_model_fit_checked"] = False
+            payload["sed_model_fit_n_rows"] = 0
+            payload["sed_model_curve_n_rows"] = int(n_curve_rows)
+            update_candidate_payload(conn, candidate_id, payload)
+            p(f"SED model fit did not complete successfully; status is {sed_model_status}")
 
     if should_run("vetting"):
         if _has_coordinates(payload):
@@ -508,19 +518,27 @@ def _run_sed_model_fit_stage(
 ) -> tuple[int, int]:
     """Run Castelli/Kurucz SED atmosphere fitting for one candidate."""
     try:
-        from malca.review.sed import load_sed_rows
+        from malca.review.sed import build_sed_dataframe, load_sed_rows
         from malca.sed_model import fit_sed_models, upsert_sed_model_results
 
         sed_rows = load_sed_rows(conn, str(candidate_id))
-        if sed_rows.empty:
+        model_rows = build_sed_dataframe(
+            payload,
+            candidate_id=str(candidate_id),
+            external_rows=sed_rows,
+            extinction_mode="observed",
+        )
+        if model_rows.empty:
             if p:
                 p("SED model: no SED photometry rows available")
             return 0, 0
+        if p and sed_rows.empty:
+            p(f"SED model: using {len(model_rows)} payload SED rows")
         df = pd.DataFrame([payload])
         if "candidate_id" not in df.columns:
             df["candidate_id"] = str(candidate_id)
         fits, curves = _run_with_progress_capture(
-            lambda: fit_sed_models(df, sed_rows, progress_callback=p),
+            lambda: fit_sed_models(df, model_rows, progress_callback=p),
             p,
         )
         n_fit_rows, n_curve_rows = upsert_sed_model_results(

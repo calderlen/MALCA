@@ -595,6 +595,16 @@ def _status_figure(message: str, theme: str = "black") -> go.Figure:
     return fig
 
 
+def _subplot_axis_ref(row: int, axis: Literal["x", "y"]) -> str:
+    """Return Plotly's axis reference string for a one-column subplot row."""
+    return axis if row <= 1 else f"{axis}{row}"
+
+
+def _subplot_domain_ref(row: int, axis: Literal["x", "y"]) -> str:
+    """Return the subplot domain reference for layout-only overlays."""
+    return f"{_subplot_axis_ref(row, axis)} domain"
+
+
 _EXTERNAL_LC_SPECS: dict[str, dict] = {
     "atlas": {
         "time_col": "mjd",
@@ -1169,13 +1179,14 @@ def build_interactive_lightcurve_figure(
     )
 
     warnings: list[str] = list(baseline_warnings)
-    if show_phase_fold:
+    phase_requested = bool(show_phase_fold)
+    if phase_requested:
         phase_period, phase_source = resolve_phase_period(payload, override_period=override_period)
     else:
         phase_period = None
         phase_source = ""
-    phase_enabled = bool(show_phase_fold and phase_period is not None)
-    if show_phase_fold and not phase_enabled:
+    phase_enabled = bool(phase_requested and phase_period is not None)
+    if phase_requested and not phase_enabled:
         warnings.append("Phase panel requested, but no valid period was found. Use Find Period to search manually.")
 
     try:
@@ -1199,7 +1210,7 @@ def build_interactive_lightcurve_figure(
         row_map['resid'] = current_row
         current_row += 1
         
-    if phase_enabled:
+    if phase_requested:
         row_map['phase'] = current_row
         current_row += 1
         
@@ -1229,7 +1240,7 @@ def build_interactive_lightcurve_figure(
     elif n_rows == 2:
         if show_raw_mag and show_residuals:
             row_heights = [1.0 - residual_fraction, residual_fraction]
-        elif show_raw_mag and phase_enabled:
+        elif show_raw_mag and phase_requested:
             row_heights = [0.5, 0.5]
         else:
             # Resid + Phase or just two unknown panels (unlikely with current logic)
@@ -1242,7 +1253,7 @@ def build_interactive_lightcurve_figure(
     fig = make_subplots(
         rows=n_rows,
         cols=1,
-        shared_xaxes=(not phase_enabled) if show_raw_mag else False,
+        shared_xaxes=(not phase_requested) if show_raw_mag else False,
         vertical_spacing=0.05,
         row_heights=row_heights,
     )
@@ -1380,10 +1391,9 @@ def build_interactive_lightcurve_figure(
 
     event_entries = _event_entries(payload, jd_offset, run_params)
     if show_event_markers and show_raw_mag:
-        if is_flux and not df.empty:
-            y_ref = float(_mag_to_flux(np.array([df["mag"].min()]))[0])
-        else:
-            y_ref = float(df["mag"].min()) if not df.empty else 0.0
+        raw_row = row_map['raw']
+        raw_xref = _subplot_axis_ref(raw_row, "x")
+        raw_y_domain_ref = _subplot_domain_ref(raw_row, "y")
         for entry in event_entries:
             color = entry["base_color"]
             conf = float(entry["confidence"])
@@ -1399,54 +1409,66 @@ def build_interactive_lightcurve_figure(
                 else:
                     color = f"rgba(92,214,110,{alpha:.3f})"
 
-            fig.add_vline(x=float(entry["x0"]), line_color=color, line_dash="dash", line_width=1.8, row=row_map['raw'], col=1)
+            event_x = float(entry["x0"])
+            hover_text = (
+                f"{str(entry['kind']).title()} event<br>"
+                f"t0 [JD]: {float(entry['t0']):.5f}<br>"
+                f"w: {float(entry['half_width']) / 2.0:.3f}<br>"
+                f"log BF: {bf_text}<br>"
+                f"log BF thr: {logbf_thr_text}<br>"
+                f"sig thr: {sig_thr_text}<br>"
+                f"morph: {entry['morph'] or 'n/a'}<br>"
+                f"c: {float(entry['confidence']):.2f}"
+            )
+            fig.add_shape(
+                type="line",
+                x0=event_x,
+                x1=event_x,
+                y0=0.0,
+                y1=1.0,
+                xref=raw_xref,
+                yref=raw_y_domain_ref,
+                line={"color": color, "dash": "dash", "width": 1.8},
+            )
 
             if show_diagnostics and float(entry["half_width"]) > 0:
-                fig.add_vrect(
-                    x0=float(entry["x0"]) - float(entry["half_width"]),
-                    x1=float(entry["x0"]) + float(entry["half_width"]),
+                half_width = float(entry["half_width"])
+                fig.add_shape(
+                    type="rect",
+                    x0=event_x - half_width,
+                    x1=event_x + half_width,
+                    y0=0.0,
+                    y1=1.0,
+                    xref=raw_xref,
+                    yref=raw_y_domain_ref,
                     fillcolor=color,
                     opacity=0.11,
-                    line_width=0,
+                    line={"width": 0},
                     layer="below",
-                    row=row_map['raw'],
-                    col=1,
                 )
                 fig.add_annotation(
-                    x=float(entry["x0"]),
-                    y=1.0,
-                    xref="x",
-                    yref="paper",
+                    x=event_x,
+                    y=0.98,
+                    xref=raw_xref,
+                    yref=raw_y_domain_ref,
                     text=(
                         f"{str(entry['kind']).title()} thr logBF={logbf_thr_text}, sig={sig_thr_text}"
                     ),
                     showarrow=False,
                     font={"size": 9, "color": colors["annotation"]},
-                    yshift=-12 if entry["kind"] == "dip" else -24,
-                    row=row_map['raw'],
-                    col=1,
+                    yanchor="top",
+                    yshift=-4 if entry["kind"] == "dip" else -16,
                 )
 
-            fig.add_trace(
-                go.Scatter(
-                    x=[float(entry["x0"])],
-                    y=[y_ref],
-                    mode="markers",
-                    marker={"size": 9, "color": color, "symbol": "diamond"},
-                    showlegend=False,
-                    hovertemplate=(
-                        f"<b>{str(entry['kind']).title()} event</b><br>"
-                        f"t<sub>0</sub> [JD]: {float(entry['t0']):.5f}<br>"
-                        f"w: {float(entry['half_width']) / 2.0:.3f}<br>"
-                        f"log BF: {bf_text}<br>"
-                        f"log BF<sub>thr</sub>: {logbf_thr_text}<br>"
-                        f"sig<sub>thr</sub>: {sig_thr_text}<br>"
-                        f"morph: {entry['morph'] or 'n/a'}<br>"
-                        f"c: {float(entry['confidence']):.2f}<extra></extra>"
-                    ),
-                ),
-                row=row_map['raw'],
-                col=1,
+            fig.add_annotation(
+                x=event_x,
+                y=0.5,
+                xref=raw_xref,
+                yref=raw_y_domain_ref,
+                text="◆",
+                showarrow=False,
+                font={"size": 18, "color": color},
+                hovertext=hover_text,
             )
 
     phase_diag: dict[str, object] = {}
@@ -1613,6 +1635,24 @@ def build_interactive_lightcurve_figure(
             row=row_map['phase'],
             col=1,
             autorange="reversed" if not is_flux else True,
+        )
+    elif phase_requested and 'phase' in row_map:
+        phase_row = row_map['phase']
+        fig.update_xaxes(title_text=r"$\phi$", row=phase_row, col=1, range=[0.0, 1.0])
+        fig.update_yaxes(
+            title_text=r"$\Delta F/F$" if is_flux else r"$\Delta m$ [mag]",
+            row=phase_row,
+            col=1,
+            visible=True,
+        )
+        fig.add_annotation(
+            text="No phase period available. Run Find Period or enter Manual P.",
+            x=0.5,
+            y=0.5,
+            xref=_subplot_domain_ref(phase_row, "x"),
+            yref=_subplot_domain_ref(phase_row, "y"),
+            showarrow=False,
+            font={"size": 12, "color": colors["text"]},
         )
 
     # Set JD axis on the bottom-most plot that uses JD

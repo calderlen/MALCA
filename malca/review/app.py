@@ -152,7 +152,7 @@ from malca.review.store import (
     get_numeric_bounds,
 )
 from malca.review.store import import_lightcurve_files
-from malca.review.sed import build_sed_figure, load_sed_rows
+from malca.review.sed import build_sed_figure, load_sed_rows, sed_source_statuses
 from malca.sed_model import load_sed_model_curves, load_sed_model_fits
 
 
@@ -3096,6 +3096,10 @@ def _candidate_context(candidate_id: str | None) -> tuple[dict, str | None, str 
         payload = {}
     if not payload.get("candidate_id"):
         payload["candidate_id"] = cid
+    if stored_lc_path and not payload.get("lc_path"):
+        payload["lc_path"] = stored_lc_path
+    if source_path and not payload.get("source_path"):
+        payload["source_path"] = source_path
     return payload, stored_lc_path, source_path
 
 
@@ -3137,6 +3141,30 @@ def _run_dir_from_source_path(source_path: object = None) -> Path | None:
     return _resolve_run_dir_from_db_path(DB_PATH)
 
 
+def _review_plot_dir_for_context(source_path: object = None) -> Path | None:
+    """Return a plot-dir anchor for the active review context.
+
+    Native plotting resolves bundled light curves relative to a run's plots
+    directory.  A review DB sitting inside ``<run>/review`` is enough context to
+    infer that anchor, even when the run has no rendered PNG plots.
+    """
+    plot_dir = _configured_plot_dir()
+    if plot_dir is not None:
+        return plot_dir
+
+    run_dir = _run_dir_from_source_path(source_path)
+    if run_dir is None:
+        return None
+
+    if (
+        (run_dir / "bundle_assets" / "lightcurves").is_dir()
+        or (run_dir / "plots").is_dir()
+        or (run_dir / "run_params.json").exists()
+    ):
+        return run_dir / "plots"
+    return None
+
+
 def _effective_local_lc_path(
     payload: dict | None,
     *,
@@ -3161,11 +3189,7 @@ def _effective_local_lc_path(
     if explicit_local_paths and not payload_dict.get("lc_path"):
         payload_dict["lc_path"] = explicit_local_paths[0]
 
-    plot_dir = _configured_plot_dir()
-    if plot_dir is None:
-        run_dir = _run_dir_from_source_path(source_path)
-        if run_dir is not None:
-            plot_dir = run_dir / "plots"
+    plot_dir = _review_plot_dir_for_context(source_path)
 
     try:
         resolved = resolve_lightcurve_path(payload_dict, plot_dir)
@@ -3254,6 +3278,10 @@ def _plot_search_root_for_payload(payload: dict | None) -> Path | None:
     plot_dir = _configured_plot_dir()
     if plot_dir is not None:
         return plot_dir
+
+    inferred_plot_dir = _review_plot_dir_for_context((payload or {}).get("source_path"))
+    if inferred_plot_dir is not None and inferred_plot_dir.is_dir():
+        return inferred_plot_dir
 
     for key in ("plot_path", "png_path", "path", "lc_path"):
         raw_path = (payload or {}).get(key)
@@ -7558,7 +7586,7 @@ def _run_period_search_for_payload(
     method: str,
 ) -> tuple[dict | None, str]:
     """Run a period search against the current candidate payload."""
-    plot_dir_path = _configured_plot_dir()
+    plot_dir_path = _review_plot_dir_for_context(payload.get("source_path"))
     run_params = _load_run_params_for_plot_dir(str(plot_dir_path) if plot_dir_path else None)
     filter_bad_cameras = not bool(run_params.get('skip_camera_median', False))
     scatter_ratio = float(run_params.get('bad_camera_scatter_ratio', BAD_CAMERA_SCATTER_RATIO_THRESHOLD)) if run_params else BAD_CAMERA_SCATTER_RATIO_THRESHOLD
@@ -8395,7 +8423,8 @@ def initialize_plot_defaults_from_run_params(queue_size, initialized):
     if int(queue_size or 0) <= 0:
         raise dash.exceptions.PreventUpdate
 
-    run_params = _load_run_params_for_plot_dir(str(PLOT_DIR) if PLOT_DIR else None)
+    plot_dir_path = _review_plot_dir_for_context()
+    run_params = _load_run_params_for_plot_dir(str(plot_dir_path) if plot_dir_path else None)
     preset, overlays = _derive_defaults_from_run_params(run_params)
     return preset, overlays, True
 
@@ -8492,7 +8521,7 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
 
     payload, stored_lc_path, source_path = _candidate_context(candidate_id)
 
-    plot_dir_path = _configured_plot_dir()
+    plot_dir_path = _review_plot_dir_for_context(source_path)
     plot_search_root = _plot_search_root_for_payload(payload)
 
     grouped = extract_review_metadata_grouped(payload, round_sigfigs=round_sigfigs)
@@ -8529,8 +8558,8 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
     progress = f"[{idx + 1}/{queue_size}]"
 
     if plot_mode == 'png':
-        run_params, run_params_status, run_params_msg = _load_run_params_meta_for_plot_dir(str(PLOT_DIR) if PLOT_DIR else None)
-        run_params_path = _run_params_path_for_plot_dir(str(PLOT_DIR) if PLOT_DIR else None)
+        run_params, run_params_status, run_params_msg = _load_run_params_meta_for_plot_dir(str(plot_dir_path) if plot_dir_path else None)
+        run_params_path = _run_params_path_for_plot_dir(str(plot_dir_path) if plot_dir_path else None)
         mismatch_warnings = _run_config_mismatch_warnings(run_params if run_params else None, overlays)
         if run_params_status != 'loaded':
             mismatch_warnings.append(run_params_msg)
@@ -8569,8 +8598,8 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
             nonce,
         )
 
-    run_params, run_params_status, run_params_msg = _load_run_params_meta_for_plot_dir(str(PLOT_DIR) if PLOT_DIR else None)
-    run_params_path = _run_params_path_for_plot_dir(str(PLOT_DIR) if PLOT_DIR else None)
+    run_params, run_params_status, run_params_msg = _load_run_params_meta_for_plot_dir(str(plot_dir_path) if plot_dir_path else None)
+    run_params_path = _run_params_path_for_plot_dir(str(plot_dir_path) if plot_dir_path else None)
     mismatch_warnings = _run_config_mismatch_warnings(run_params if run_params else None, overlays)
     if run_params_status != 'loaded':
         mismatch_warnings.append(run_params_msg)
@@ -8580,7 +8609,7 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
     ext_lcs: dict[str, Path] | None = None
     requested_external_source = str(external_source_view or DEFAULT_EXTERNAL_SOURCE_VIEW).strip().lower()
     if requested_external_source not in {'', 'asassn'}:
-        run_dir = _resolve_run_dir_from_plot_dir(PLOT_DIR)
+        run_dir = _resolve_run_dir_from_plot_dir(str(plot_dir_path) if plot_dir_path else None)
         lk = _candidate_lookup_keys(candidate_id, payload)
         found: dict[str, Path] = {}
         search_roots: list[Path] = []
@@ -8806,22 +8835,127 @@ def _load_sed_figure_for_candidate(candidate_id, extinction_mode, theme_mode):
     )
 
 
-def _sed_status_text(rows: pd.DataFrame, warnings_list: list[str]) -> str:
+def _load_sed_source_status_for_candidate(candidate_id) -> list[dict[str, object]]:
+    payload, _stored_lc_path, _source_path = _candidate_context(candidate_id)
+    with closing(db_connect(Path(DB_PATH))) as conn:
+        external_rows = load_sed_rows(conn, str(candidate_id))
+    return sed_source_statuses(str(candidate_id), payload=payload, external_rows=external_rows)
+
+
+def _format_sed_source_labels(labels: list[str], *, limit: int = 8) -> str:
+    clean = [str(label) for label in labels if str(label).strip()]
+    if not clean:
+        return ""
+    shown = ", ".join(clean[:limit])
+    if len(clean) > limit:
+        shown += f", +{len(clean) - limit} more"
+    return shown
+
+
+def _sed_status_labels_for(source_statuses: list[dict[str, object]] | None, status: str) -> list[str]:
+    if not source_statuses:
+        return []
+    labels = []
+    for item in source_statuses:
+        key = str(item.get("key") or "").strip().lower()
+        if key == "payload":
+            continue
+        if str(item.get("status") or "").strip().lower() == status:
+            labels.append(str(item.get("label") or key))
+    return labels
+
+
+def _sed_status_text(
+    rows: pd.DataFrame,
+    warnings_list: list[str],
+    source_statuses: list[dict[str, object]] | None = None,
+) -> str:
     if rows is None or rows.empty:
         base = "No SED photometry available. Run `malca sed-photometry ... --review-db <db>` to add external SED catalogs."
     else:
         sources = sorted(str(x) for x in rows["source"].dropna().unique()) if "source" in rows.columns else []
-        source_text = ", ".join(sources[:8])
-        if len(sources) > 8:
-            source_text += f", +{len(sources) - 8} more"
+        source_text = _format_sed_source_labels(sources)
         base = f"{len(rows)} SED points"
         if source_text:
             base += f" from {source_text}"
         if bool(rows.get("lambda_l_lambda", pd.Series(dtype=float)).isna().all()):
             base += "; luminosity unavailable without distance"
+    miss_text = _format_sed_source_labels(_sed_status_labels_for(source_statuses, "miss"))
+    if miss_text:
+        base += f"; no match from {miss_text}"
+    not_queried_text = _format_sed_source_labels(_sed_status_labels_for(source_statuses, "not_queried"))
+    if not_queried_text:
+        base += f"; not queried: {not_queried_text}"
+    unknown_text = _format_sed_source_labels(_sed_status_labels_for(source_statuses, "unknown"))
+    if unknown_text:
+        base += f"; source status unknown: {unknown_text}"
     if warnings_list:
         return f"{base}. {' '.join(str(w) for w in warnings_list)}"
     return base
+
+
+def _render_sed_fetch_provenance(source_statuses: list[dict[str, object]] | None):
+    if not source_statuses:
+        return html.Div()
+
+    colors = {
+        "hit": "#8ee0a1",
+        "miss": "#d7b96f",
+        "not_queried": "#7d91a6",
+        "unknown": "#f59e9e",
+    }
+    rows = []
+    for item in source_statuses:
+        status = str(item.get("status") or "unknown").strip().lower()
+        label = str(item.get("label") or item.get("key") or "source")
+        n_rows = int(item.get("n_rows") or 0)
+        source_names = item.get("source_names") or []
+        bands = item.get("bands") or []
+        storage = str(item.get("storage") or "").strip()
+        message = str(item.get("message") or "").strip()
+        if status == "hit":
+            status_text = f"{n_rows} row" + ("" if n_rows == 1 else "s")
+        elif status == "miss":
+            status_text = "no match"
+        elif status == "not_queried":
+            status_text = "not queried"
+        else:
+            status_text = "unknown"
+        detail_parts = []
+        if source_names and source_names != [label]:
+            detail_parts.append(_format_sed_source_labels([str(x) for x in source_names], limit=4))
+        if bands:
+            detail_parts.append(_format_sed_source_labels([str(x) for x in bands], limit=5))
+        if storage:
+            detail_parts.append(storage)
+        if message:
+            detail_parts.append(message)
+        rows.append(html.Div([
+            html.Span(label, style={'fontWeight': '600', 'color': '#c8d8e6'}),
+            html.Span(status_text, style={'color': colors.get(status, '#f59e9e')}),
+            html.Span(" | ".join(detail_parts), style={'color': '#7d91a6', 'minWidth': 0, 'overflow': 'hidden', 'textOverflow': 'ellipsis'}),
+        ], style={
+            'display': 'grid',
+            'gridTemplateColumns': '92px 72px minmax(0, 1fr)',
+            'gap': '8px',
+            'alignItems': 'baseline',
+        }))
+    return html.Details([
+        html.Summary('SED Fetch Provenance', style={'cursor': 'pointer', 'color': '#9fb6cb'}),
+        html.Div(rows, style={
+            'display': 'grid',
+            'gap': '3px',
+            'marginTop': '6px',
+            'fontSize': '10px',
+            'lineHeight': '1.35',
+        }),
+    ], open=False, style={
+        'border': '1px solid rgba(125, 145, 166, 0.25)',
+        'borderRadius': '6px',
+        'padding': '6px 8px',
+        'fontSize': '10px',
+        'background': 'rgba(8, 16, 24, 0.45)',
+    })
 
 
 @app.callback(
@@ -8840,6 +8974,11 @@ def update_sed_panel(candidate_id, extinction_mode, theme_mode):
         fig, rows, warnings_list = _load_sed_figure_for_candidate(candidate_id, extinction_mode, theme_mode)
     except Exception as exc:
         return [], f"SED rendering failed: {exc}"
+    try:
+        source_statuses = _load_sed_source_status_for_candidate(candidate_id)
+    except Exception as exc:
+        source_statuses = []
+        warnings_list = [*warnings_list, f"SED fetch provenance unavailable: {exc}"]
     graph = dcc.Graph(
         id='sed-plot',
         figure=fig,
@@ -8847,7 +8986,7 @@ def update_sed_panel(candidate_id, extinction_mode, theme_mode):
         config=graph_config_without_image_export({'displayModeBar': True, 'responsive': True}),
         style={'height': '420px'},
     )
-    return graph, _sed_status_text(rows, warnings_list)
+    return [graph, _render_sed_fetch_provenance(source_statuses)], _sed_status_text(rows, warnings_list, source_statuses)
 
 
 @app.callback(
@@ -9446,14 +9585,15 @@ def update_dustycult_controls(candidate_id, _recompute_clicks):
     try:
         payload, stored_lc_path, source_path = _candidate_context(candidate_id)
         lc_path = _effective_local_lc_path(payload, stored_lc_path=stored_lc_path, source_path=source_path)
-        run_params = _load_run_params_for_plot_dir(str(PLOT_DIR) if PLOT_DIR else None)
+        plot_dir_path = _review_plot_dir_for_context(source_path)
+        run_params = _load_run_params_for_plot_dir(str(plot_dir_path) if plot_dir_path else None)
         with closing(db_connect(Path(DB_PATH))) as conn:
             defaults = control_defaults_for_candidate(
                 conn,
                 str(candidate_id),
                 payload,
                 lc_path=lc_path,
-                plot_dir=PLOT_DIR,
+                plot_dir=str(plot_dir_path) if plot_dir_path else None,
                 run_params=run_params,
                 recompute=recompute,
             )
@@ -9482,7 +9622,8 @@ def _dustycult_fit_callback_impl(triggered_id, quick_clicks, full_clicks, candid
     try:
         payload, stored_lc_path, source_path = _candidate_context(candidate_id)
         lc_path = _effective_local_lc_path(payload, stored_lc_path=stored_lc_path, source_path=source_path)
-        run_params = _load_run_params_for_plot_dir(str(PLOT_DIR) if PLOT_DIR else None)
+        plot_dir_path = _review_plot_dir_for_context(source_path)
+        run_params = _load_run_params_for_plot_dir(str(plot_dir_path) if plot_dir_path else None)
         with closing(db_connect(Path(DB_PATH))) as conn:
             row = run_dustycult_fit(
                 conn,
@@ -9492,7 +9633,7 @@ def _dustycult_fit_callback_impl(triggered_id, quick_clicks, full_clicks, candid
                 controls=controls,
                 mode=mode,
                 lc_path=lc_path,
-                plot_dir=PLOT_DIR,
+                plot_dir=str(plot_dir_path) if plot_dir_path else None,
                 run_params=run_params,
             )
     except Exception as exc:
@@ -10022,8 +10163,9 @@ def export_active_plot(n_clicks, figure, plot_mode, plot_src, idx, candidate_id,
             export_candidate_id = str(candidate_id or state.get('candidate_id') or '').strip()
             if not export_candidate_id:
                 return no_update, 'No candidate is selected.'
-            payload, _stored_lc_path, _source_path = _candidate_context(export_candidate_id)
-            run_params = _load_run_params_for_plot_dir(str(PLOT_DIR) if PLOT_DIR else None)
+            payload, _stored_lc_path, source_path = _candidate_context(export_candidate_id)
+            plot_dir_path = _review_plot_dir_for_context(source_path)
+            run_params = _load_run_params_for_plot_dir(str(plot_dir_path) if plot_dir_path else None)
             overlays = set(state.get('overlay_values') or [])
             override_period = state.get('override_period')
             if override_period is not None:
@@ -10045,7 +10187,7 @@ def export_active_plot(n_clicks, figure, plot_mode, plot_src, idx, candidate_id,
                 baseline_opacity = 0.5
             image_bytes = build_review_lightcurve_publication_pdf(
                 payload,
-                plot_dir=_configured_plot_dir(),
+                plot_dir=plot_dir_path,
                 selected_cameras=list(state.get('selected_cameras') or []),
                 selected_bands=list(state.get('selected_bands') or ['g', 'V']),
                 filter_bad_cameras='filter_bad_cameras' in overlays,
@@ -11131,10 +11273,11 @@ def _pipeline_status_chip_elements(candidate_id) -> list:
     Output('pipeline-status-chips', 'children'),
     [Input('queue-data', 'modified_timestamp'),
      Input('current-candidate-id', 'data'),
-     Input('pipeline-progress-trigger', 'data')],
+     Input('pipeline-progress-trigger', 'data'),
+     Input('pipeline-run-status', 'children')],
     prevent_initial_call=True
 )
-def update_pipeline_status_chips(_queue_data_ts, candidate_id, _pipeline_progress):
+def update_pipeline_status_chips(_queue_data_ts, candidate_id, _pipeline_progress, _pipeline_status_text):
     """Show pipeline stage completion status for the current candidate."""
     return _pipeline_status_chip_elements(candidate_id)
 

@@ -56,13 +56,33 @@ def test_update_sed_panel_renders_graph(monkeypatch) -> None:
         return fig, rows, []
 
     monkeypatch.setattr(review_app, "_load_sed_figure_for_candidate", fake_load)
+    monkeypatch.setattr(review_app, "_load_sed_source_status_for_candidate", lambda _candidate_id: [])
 
-    graph, status = review_app.update_sed_panel("cand-1", "observed", "black")
+    children, status = review_app.update_sed_panel("cand-1", "observed", "black")
 
+    graph = children[0]
     assert isinstance(graph, dcc.Graph)
     assert "toImage" in graph.config.get("modeBarButtonsToRemove", [])
     assert "1 SED points" in status
     assert "AllWISE" in status
+
+
+def test_sed_status_text_reports_mixed_fetch_provenance() -> None:
+    rows = pd.DataFrame({
+        "source": ["Gaia GSPC"],
+        "lambda_l_lambda": [1.0e32],
+    })
+    statuses = [
+        {"key": "gaia_gspc", "label": "Gaia GSPC", "status": "hit", "n_rows": 1},
+        {"key": "ps1", "label": "PS1", "status": "miss", "n_rows": 0},
+        {"key": "sdss", "label": "SDSS", "status": "not_queried", "n_rows": 0},
+    ]
+
+    text = review_app._sed_status_text(rows, [], statuses)
+
+    assert "1 SED points from Gaia GSPC" in text
+    assert "no match from PS1" in text
+    assert "not queried: SDSS" in text
 
 
 def test_export_sed_pdf_reports_matplotlib_failure(monkeypatch) -> None:

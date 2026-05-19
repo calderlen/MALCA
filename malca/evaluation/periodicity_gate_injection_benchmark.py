@@ -37,6 +37,7 @@ from malca.config import (
     BASELINE_W0,
     CLEAN_LC_MAX_ERROR_ABSOLUTE,
     CLEAN_LC_MAX_ERROR_SIGMA,
+    LIGHT_CURVE_FILE_EXTENSION,
     LOGBF_THRESHOLD_DIP,
     LOGBF_THRESHOLD_JUMP,
     MAG_POINTS,
@@ -169,6 +170,7 @@ PERIOD_MATCH_HARMONIC_FACTORS: tuple[float, ...] = (
 @dataclass
 class BenchmarkConfig:
     bundle_lc_dir: Path = Path("output/runs/runs_march18_bundle_all/bundle_assets/lightcurves")
+    lightcurve_file_ext: str | None = None
     output_base_dir: Path = Path("output/diagnostics/periodicity_gate_injection_benchmark")
     run_tag: str | None = None
     smoke_mode: bool = False
@@ -254,9 +256,30 @@ def make_run_dir(config: BenchmarkConfig) -> Path:
     return run_dir
 
 
-def discover_control_paths(bundle_lc_dir: Path | str, *, limit: int | None = None) -> list[Path]:
+def _control_file_extensions(file_ext: str | None = None) -> tuple[str, ...]:
+    if file_ext:
+        return (str(file_ext).lstrip("."),)
+
+    extensions: list[str] = []
+    for ext in (LIGHT_CURVE_FILE_EXTENSION, "dat3", "dat2", "dat"):
+        ext_normalized = str(ext).lstrip(".")
+        if ext_normalized and ext_normalized not in extensions:
+            extensions.append(ext_normalized)
+    return tuple(extensions)
+
+
+def discover_control_paths(
+    bundle_lc_dir: Path | str,
+    *,
+    file_ext: str | None = None,
+    limit: int | None = None,
+) -> list[Path]:
     root = Path(bundle_lc_dir).expanduser()
-    paths = sorted(root.glob("*.dat3"))
+    paths: list[Path] = []
+    for ext in _control_file_extensions(file_ext):
+        paths = sorted(root.glob(f"*.{ext}"))
+        if paths:
+            break
     if limit is not None:
         paths = paths[: int(limit)]
     return paths
@@ -270,11 +293,13 @@ def load_control_lightcurves(
     min_points: int = PRE_PERIODICITY_MIN_POINTS,
     mag_lo: float = 12.0,
     mag_hi: float = 15.0,
+    file_ext: str | None = None,
     show_progress: bool = True,
 ) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
-    paths = discover_control_paths(bundle_lc_dir)
+    paths = discover_control_paths(bundle_lc_dir, file_ext=file_ext)
     if not paths:
-        raise FileNotFoundError(f"No .dat3 light curves found in {bundle_lc_dir}")
+        extensions = ", ".join(f"*.{ext}" for ext in _control_file_extensions(file_ext))
+        raise FileNotFoundError(f"No light curves ({extensions}) found in {bundle_lc_dir}")
 
     rng = np.random.default_rng(seed)
     order = rng.permutation(len(paths))
@@ -1099,6 +1124,7 @@ def run_benchmark(config: BenchmarkConfig) -> BenchmarkRun:
         config.bundle_lc_dir,
         sample_size=config.effective_control_sample_size,
         seed=config.seed,
+        file_ext=config.lightcurve_file_ext,
         show_progress=config.show_progress,
     )
     trial_design = build_trial_design(control_table, config)

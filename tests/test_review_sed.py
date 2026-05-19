@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import json
 import sys
 import types
 from contextlib import closing
@@ -10,6 +11,7 @@ import numpy as np
 import pandas as pd
 from astropy.table import Table
 
+import malca.review.sed as review_sed
 from malca.review.sed import (
     LSUN_ERG_S,
     SED_COLUMNS,
@@ -24,9 +26,10 @@ from malca.review.sed import (
     query_gaia_gspc_photometry,
     resolve_sed_sources,
     rows_from_payload,
+    sed_source_statuses,
     upsert_sed_rows,
 )
-from malca.review.pipeline import detect_sed_model_status, detect_sed_photometry_status
+from malca.review.pipeline import detect_sed_model_status, detect_sed_photometry_status, run_missing_stages
 from malca.review.store import db_connect
 from malca.sed_model import (
     SED_MODEL_CURVE_COLUMNS,
@@ -57,6 +60,65 @@ def test_sed_sources_always_include_far_ir_catalogs() -> None:
     assert {"akari", "iras", "herschel"}.issubset(default_sources)
     assert {"akari", "iras", "herschel"}.issubset(custom_sources)
     assert set(resolve_sed_sources("far-ir")) == set(resolve_sed_sources("default"))
+
+
+def test_sed_source_statuses_reports_cached_miss_as_no_match(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(review_sed, "SED_CACHE_DIR", tmp_path)
+    pd.DataFrame([
+        {
+            "_cache_candidate_id": "cand-ps1",
+            "_cache_status": "miss",
+            "_cache_updated_at": "2026-05-19T00:00:00Z",
+            "candidate_id": "cand-ps1",
+            "source": "ps1",
+            "band": None,
+        }
+    ]).to_parquet(tmp_path / "ps1.parquet", index=False)
+
+    statuses = sed_source_statuses(
+        "cand-ps1",
+        external_rows=pd.DataFrame(),
+        sources=["ps1", "sdss"],
+    )
+    by_key = {str(item["key"]): item for item in statuses}
+
+    assert by_key["ps1"]["status"] == "miss"
+    assert by_key["ps1"]["message"] == "queried; no catalog match"
+    assert by_key["sdss"]["status"] == "not_queried"
+
+
+def test_sed_source_statuses_reports_cached_hit_row_counts(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(review_sed, "SED_CACHE_DIR", tmp_path)
+    pd.DataFrame([
+        {
+            "_cache_candidate_id": "cand-gspc",
+            "_cache_status": "hit",
+            "_cache_updated_at": "2026-05-19T00:00:00Z",
+            "candidate_id": "cand-gspc",
+            "source": "Gaia GSPC",
+            "band": "SDSS_u",
+        },
+        {
+            "_cache_candidate_id": "cand-gspc",
+            "_cache_status": "hit",
+            "_cache_updated_at": "2026-05-19T00:00:00Z",
+            "candidate_id": "cand-gspc",
+            "source": "Gaia GSPC",
+            "band": "SDSS_g",
+        },
+    ]).to_parquet(tmp_path / "gaia_gspc.parquet", index=False)
+
+    statuses = sed_source_statuses(
+        "cand-gspc",
+        external_rows=pd.DataFrame(),
+        sources=["gaia_gspc"],
+    )
+    gspc = {str(item["key"]): item for item in statuses}["gaia_gspc"]
+
+    assert gspc["status"] == "hit"
+    assert gspc["n_rows"] == 2
+    assert gspc["source_names"] == ["Gaia GSPC"]
+    assert gspc["bands"] == ["SDSS_g", "SDSS_u"]
 
 
 def test_rows_from_payload_computes_luminosity_with_distance() -> None:
@@ -360,6 +422,151 @@ def test_sed_model_rows_roundtrip_review_db_and_overlay(tmp_path: Path) -> None:
 
     assert not any("Castelli/Kurucz" in str(trace.name) for trace in observed_fig.data)
     assert any("dereddened" in warning for warning in observed_warnings)
+
+
+def test_sed_model_stage_failure_is_not_marked_complete(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "review.db"
+    sed_row = {col: None for col in SED_COLUMNS}
+    sed_row.update(
+        {
+            "candidate_id": "cand-sed-fail",
+            "source": "Pan-STARRS",
+            "band": "g",
+            "mag": 17.2,
+            "mag_system": "AB",
+            "lambda_eff_angstrom": 4810.0,
+            "flux_lambda": 1.0e-16,
+        }
+    )
+
+    def fail_fit(*_args, **_kwargs):
+        raise RuntimeError("kurucz grid missing")
+
+    monkeypatch.setattr("malca.sed_model.fit_sed_models", fail_fit)
+    log_lines: list[str] = []
+    completed: list[str] = []
+
+    with closing(db_connect(db_path)) as conn:
+        conn.execute(
+            "INSERT INTO candidates (candidate_id, payload_json, imported_at) VALUES (?, ?, ?)",
+            ("cand-sed-fail", '{"candidate_id": "cand-sed-fail"}', "2026-05-14T00:00:00"),
+        )
+        assert upsert_sed_rows(conn, pd.DataFrame([sed_row])) == 1
+
+        stages = run_missing_stages(
+            conn,
+            "cand-sed-fail",
+            progress_callback=log_lines.append,
+            stage_complete_callback=completed.append,
+            force_stages=["sed_model_fit"],
+            only_force=True,
+        )
+        payload_json = conn.execute(
+            "SELECT payload_json FROM candidates WHERE candidate_id = ?",
+            ("cand-sed-fail",),
+        ).fetchone()[0]
+
+        assert detect_sed_model_status(conn, "cand-sed-fail") == "missing"
+
+    assert stages == []
+    assert completed == []
+    assert "sed_model_fit_checked" not in payload_json or '"sed_model_fit_checked": false' in payload_json
+    assert any("SED model fit stage failed: kurucz grid missing" in line for line in log_lines)
+    assert any("status is missing" in line for line in log_lines)
+
+
+def test_sed_model_stage_uses_payload_sed_rows_when_sidecar_is_empty(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "review.db"
+    payload = {
+        "candidate_id": "cand-payload-sed",
+        "apass_b": 14.1,
+        "apass_v": 13.8,
+        "tmass_j": 12.1,
+        "tmass_h": 11.7,
+        "tmass_k": 11.4,
+        "w1": 10.8,
+        "w2": 10.6,
+        "distance_gspphot": 1000.0,
+    }
+    seen: dict[str, pd.DataFrame] = {}
+
+    def fake_fit(candidates, sed_rows, **_kwargs):
+        seen["sed_rows"] = pd.DataFrame(sed_rows)
+        fit = {col: None for col in SED_MODEL_FIT_COLUMNS}
+        fit.update(
+            {
+                "candidate_id": "cand-payload-sed",
+                "model_family": "Castelli/Kurucz 2004",
+                "teff_k": 5000.0,
+                "status": "ok",
+                "warning": "",
+                "n_fit_points": int(len(sed_rows)),
+            }
+        )
+        curve = {col: None for col in SED_MODEL_CURVE_COLUMNS}
+        curve.update(
+            {
+                "candidate_id": "cand-payload-sed",
+                "model_family": "Castelli/Kurucz 2004",
+                "wavelength_angstrom": 5000.0,
+                "lambda_l_lambda": 1.0,
+                "flux_lambda": 1.0,
+                "teff_k": 5000.0,
+                "scale": 1.0,
+            }
+        )
+        return pd.DataFrame([fit]), pd.DataFrame([curve])
+
+    monkeypatch.setattr("malca.sed_model.fit_sed_models", fake_fit)
+    log_lines: list[str] = []
+
+    with closing(db_connect(db_path)) as conn:
+        conn.execute(
+            "INSERT INTO candidates (candidate_id, payload_json, imported_at) VALUES (?, ?, ?)",
+            ("cand-payload-sed", json.dumps(payload), "2026-05-14T00:00:00"),
+        )
+
+        stages = run_missing_stages(
+            conn,
+            "cand-payload-sed",
+            progress_callback=log_lines.append,
+            force_stages=["sed_model_fit"],
+            only_force=True,
+        )
+
+        assert load_sed_rows(conn, "cand-payload-sed").empty
+        assert detect_sed_model_status(conn, "cand-payload-sed") == "complete"
+        assert len(load_sed_model_fits(conn, "cand-payload-sed")) == 1
+        assert len(load_sed_model_curves(conn, "cand-payload-sed")) == 1
+
+    assert stages == ["sed_model_fit"]
+    assert "sed_rows" in seen
+    assert {"APASS", "2MASS", "AllWISE"}.issubset(set(seen["sed_rows"]["source"]))
+    assert any("using 7 payload SED rows" in line for line in log_lines)
+
+
+def test_non_ok_sed_model_fit_row_is_partial_not_complete(tmp_path: Path) -> None:
+    db_path = tmp_path / "review.db"
+    fit = {col: None for col in SED_MODEL_FIT_COLUMNS}
+    fit.update(
+        {
+            "candidate_id": "cand-sed-partial",
+            "model_family": "Castelli/Kurucz 2004",
+            "status": "fit_failed",
+            "warning": "optimizer failed",
+        }
+    )
+
+    with closing(db_connect(db_path)) as conn:
+        conn.execute(
+            "INSERT INTO candidates (candidate_id, payload_json, imported_at) VALUES (?, ?, ?)",
+            ("cand-sed-partial", "{}", "2026-05-14T00:00:00"),
+        )
+        n_fit, n_curve = upsert_sed_model_results(conn, pd.DataFrame([fit]), pd.DataFrame(columns=SED_MODEL_CURVE_COLUMNS))
+
+        assert n_fit == 1
+        assert n_curve == 0
+        assert detect_sed_model_status(conn, "cand-sed-partial") == "partial"
 
 
 def test_sed_axis_crop_uses_photometry_not_model_extent() -> None:

@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib
 import json
 import math
+import sys
+import types
 from pathlib import Path
 
 import numpy as np
@@ -10,12 +12,14 @@ import pandas as pd
 import pytest
 
 import malca.sed_photometry as sed_photometry
+from malca.review.sed import build_sed_dataframe
 from malca.sed_model import (
     LSUN_ERG_S,
     PC_CM,
     SED_MODEL_CURVE_COLUMNS,
     SED_MODEL_FIT_COLUMNS,
     PystellibsSetupError,
+    _patch_pystellibs_kurucz_libsdir,
     fit_sed_models,
 )
 from malca.table_io import write_parquet_table
@@ -138,6 +142,28 @@ def test_kurucz_fitter_ignores_ir_excess_and_recovers_teff_scale() -> None:
     assert set(SED_MODEL_CURVE_COLUMNS).issubset(curves.columns)
 
 
+def test_kurucz_fitter_reports_insufficient_data_with_eligible_bands() -> None:
+    payload = {
+        "candidate_id": "sed-two-bands",
+        "apass_b": 15.2,
+        "apass_v": 14.8,
+        "tmass_j": 12.4,
+        "w1": 11.9,
+        "distance_gspphot": 1000.0,
+        "A_v_3d": 0.0,
+    }
+    candidate = pd.DataFrame([payload])
+    sed_rows = build_sed_dataframe(payload, candidate_id="sed-two-bands", extinction_mode="observed")
+
+    fits, curves = fit_sed_models(candidate, sed_rows, library=FakeKurucz(), curve_points=32)
+
+    fit = fits.iloc[0]
+    assert fit["status"] == "insufficient_data"
+    assert "Need at least 3 finite optical photospheric SED points" in str(fit["warning"])
+    assert "found 2: APASS B,V" in str(fit["warning"])
+    assert curves.empty
+
+
 def test_missing_pystellibs_raises_actionable_error(monkeypatch) -> None:
     real_import_module = importlib.import_module
 
@@ -152,6 +178,26 @@ def test_missing_pystellibs_raises_actionable_error(monkeypatch) -> None:
 
     with pytest.raises(PystellibsSetupError, match="pystellibs is required"):
         fit_sed_models(candidate, sed_rows)
+
+
+def test_pystellibs_kurucz_libsdir_falls_back_to_packaged_libs(tmp_path: Path, monkeypatch) -> None:
+    package_root = tmp_path / "pystellibs"
+    (package_root / "libs").mkdir(parents=True)
+    (package_root / "ezunits" / "libs").mkdir(parents=True)
+    (package_root / "__init__.py").write_text("", encoding="ascii")
+    packaged_grid = package_root / "libs" / "kurucz2004.grid.fits"
+    packaged_grid.write_text("grid", encoding="ascii")
+
+    fake_pystellibs = types.SimpleNamespace(__file__=str(package_root / "__init__.py"))
+    fake_config = types.SimpleNamespace(libsdir=str(package_root / "ezunits" / "libs"))
+    fake_kurucz = types.SimpleNamespace(libsdir=str(package_root / "ezunits" / "libs"))
+    monkeypatch.setitem(sys.modules, "pystellibs.config", fake_config)
+    monkeypatch.setitem(sys.modules, "pystellibs.kurucz", fake_kurucz)
+
+    _patch_pystellibs_kurucz_libsdir(fake_pystellibs)
+
+    assert fake_config.libsdir == str(package_root / "libs")
+    assert fake_kurucz.libsdir == str(package_root / "libs")
 
 
 def test_sed_photometry_cli_writes_fit_and_curve_outputs(tmp_path: Path, monkeypatch) -> None:

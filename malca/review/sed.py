@@ -218,6 +218,46 @@ SOURCE_COLORS = {
     "VPHAS+": "#e377c2",
 }
 
+SED_SOURCE_LABELS = {
+    "payload": "Payload",
+    "gaia_gspc": "Gaia GSPC",
+    "ps1": "PS1",
+    "sdss": "SDSS",
+    "skymapper": "SkyMapper",
+    "des": "DES",
+    "decaps": "DECaPS",
+    "ukidss": "UKIDSS",
+    "vista": "VISTA/VVV",
+    "vphas": "VPHAS+",
+    "spitzer": "Spitzer",
+    "akari": "AKARI",
+    "iras": "IRAS",
+    "herschel": "Herschel",
+}
+
+_PAYLOAD_SED_SOURCES = {"gaia dr3", "galex", "apass", "2mass", "allwise", "iphas"}
+_SED_ROW_SOURCE_TO_KEY = {
+    "gaia gspc": "gaia_gspc",
+    "pan-starrs": "ps1",
+    "pan starrs": "ps1",
+    "ps1": "ps1",
+    "sdss": "sdss",
+    "skymapper": "skymapper",
+    "des": "des",
+    "decaps": "decaps",
+    "ukidss": "ukidss",
+    "vista/vvv": "vista",
+    "vista": "vista",
+    "vvv": "vista",
+    "vphas+": "vphas",
+    "vphas": "vphas",
+    "spitzer seip": "spitzer",
+    "spitzer": "spitzer",
+    "akari": "akari",
+    "iras": "iras",
+    "herschel": "herschel",
+}
+
 
 def _safe_float(value: object) -> float | None:
     if np.ma.is_masked(value):
@@ -824,19 +864,25 @@ def _sed_candidate_ids(df: pd.DataFrame) -> pd.Series:
 
 
 def _read_sed_source_cache(source_key: str) -> pd.DataFrame:
+    cache, error = _read_sed_source_cache_with_error(source_key)
+    if error:
+        print(f"[SED] cache warning: {error}")
+    return cache
+
+
+def _read_sed_source_cache_with_error(source_key: str) -> tuple[pd.DataFrame, str | None]:
     path = _sed_cache_path(source_key).expanduser()
     if not path.exists():
-        return pd.DataFrame()
+        return pd.DataFrame(), None
     try:
         cache = pd.read_parquet(path)
     except Exception as exc:
-        print(f"[SED] cache warning: could not read {path}: {exc}")
-        return pd.DataFrame()
+        return pd.DataFrame(), f"could not read {path}: {exc}"
     if "_cache_candidate_id" not in cache.columns:
-        return pd.DataFrame()
+        return pd.DataFrame(), f"{path} has no _cache_candidate_id column"
     cache = cache.copy()
     cache["_cache_candidate_id"] = cache["_cache_candidate_id"].astype(str)
-    return cache
+    return cache, None
 
 
 def _write_sed_source_cache(source_key: str, rows: pd.DataFrame) -> None:
@@ -1501,6 +1547,173 @@ def resolve_sed_sources(sources: Iterable[str] | str = "default") -> tuple[str, 
     else:
         requested = tuple(str(x).strip().lower() for x in sources if str(x).strip())
     return _include_mandatory_far_ir(requested)
+
+
+def _normalize_source_name(value: object) -> str:
+    text = str(value or "").strip().lower().replace("_", " ")
+    return " ".join(text.split())
+
+
+def _sed_source_key_for_row_source(value: object) -> str | None:
+    norm = _normalize_source_name(value)
+    if not norm:
+        return None
+    if norm in _PAYLOAD_SED_SOURCES:
+        return "payload"
+    return _SED_ROW_SOURCE_TO_KEY.get(norm)
+
+
+def _sed_source_label(source_key: str) -> str:
+    return SED_SOURCE_LABELS.get(str(source_key).strip().lower(), str(source_key))
+
+
+def _sed_source_row_summary(source_key: str, rows: pd.DataFrame) -> dict[str, object]:
+    if rows is None or rows.empty:
+        return {
+            "key": source_key,
+            "label": _sed_source_label(source_key),
+            "status": "not_queried",
+            "n_rows": 0,
+            "source_names": [],
+            "bands": [],
+            "storage": "",
+            "message": "",
+        }
+    source_names = sorted(str(x) for x in rows.get("source", pd.Series(dtype=object)).dropna().unique())
+    bands = sorted(str(x) for x in rows.get("band", pd.Series(dtype=object)).dropna().unique())
+    return {
+        "key": source_key,
+        "label": _sed_source_label(source_key),
+        "status": "hit",
+        "n_rows": int(len(rows)),
+        "source_names": source_names,
+        "bands": bands,
+        "storage": "",
+        "message": "",
+    }
+
+
+def _sed_source_rows_for_key(rows: pd.DataFrame | None, candidate_id: str, source_key: str) -> pd.DataFrame:
+    if rows is None or rows.empty or "source" not in rows.columns:
+        return pd.DataFrame()
+    frame = pd.DataFrame(rows).copy()
+    if "candidate_id" in frame.columns:
+        frame = frame[frame["candidate_id"].astype(str) == str(candidate_id)].copy()
+    if frame.empty:
+        return pd.DataFrame()
+    key_mask = frame["source"].map(_sed_source_key_for_row_source) == source_key
+    return frame.loc[key_mask].copy()
+
+
+def sed_source_statuses(
+    candidate_id: str,
+    *,
+    payload: dict | pd.Series | None = None,
+    external_rows: pd.DataFrame | Iterable[dict] | None = None,
+    sources: Iterable[str] | str = "default",
+) -> list[dict[str, object]]:
+    """Return per-source SED fetch provenance for one candidate.
+
+    Status values are:
+    - ``hit``: persisted SED rows exist, or a cache hit has rows.
+    - ``miss``: the source was fetched and cached with no matched rows.
+    - ``not_queried``: neither persisted rows nor a per-source cache entry exists.
+    - ``unknown``: a cache entry exists but cannot be interpreted.
+    """
+    cid = str(candidate_id)
+    requested = resolve_sed_sources(sources)
+    persisted = pd.DataFrame(external_rows) if external_rows is not None else pd.DataFrame()
+
+    payload_rows = pd.DataFrame()
+    if payload is not None and "payload" in requested:
+        payload_dict = dict(payload) if not isinstance(payload, dict) else payload
+        payload_rows = rows_from_payload(payload_dict, candidate_id=cid, extinction_mode="observed")
+        persisted_payload_rows = _sed_source_rows_for_key(persisted, cid, "payload")
+        if not persisted_payload_rows.empty:
+            payload_rows = (
+                pd.concat([payload_rows, persisted_payload_rows], ignore_index=True)
+                if not payload_rows.empty
+                else persisted_payload_rows
+            )
+            payload_rows = payload_rows.drop_duplicates(
+                subset=[c for c in ["candidate_id", "source", "band", "quality_flags"] if c in payload_rows.columns],
+                keep="first",
+            )
+
+    statuses: list[dict[str, object]] = []
+    for source_key in requested:
+        key = str(source_key).strip().lower()
+        if not key:
+            continue
+        if key == "payload":
+            summary = _sed_source_row_summary(key, payload_rows)
+            if summary["status"] == "hit":
+                summary["storage"] = "payload"
+            statuses.append(summary)
+            continue
+
+        db_rows = _sed_source_rows_for_key(persisted, cid, key)
+        if not db_rows.empty:
+            summary = _sed_source_row_summary(key, db_rows)
+            summary["storage"] = "review_db"
+            statuses.append(summary)
+            continue
+
+        cache, cache_error = _read_sed_source_cache_with_error(key)
+        if cache_error:
+            statuses.append({
+                "key": key,
+                "label": _sed_source_label(key),
+                "status": "unknown",
+                "n_rows": 0,
+                "source_names": [],
+                "bands": [],
+                "storage": "cache",
+                "message": cache_error,
+            })
+            continue
+        if cache.empty:
+            statuses.append(_sed_source_row_summary(key, pd.DataFrame()))
+            continue
+
+        cache_rows = cache[cache["_cache_candidate_id"].astype(str) == cid].copy()
+        if cache_rows.empty:
+            statuses.append(_sed_source_row_summary(key, pd.DataFrame()))
+            continue
+
+        cache_status = (
+            cache_rows["_cache_status"].fillna("hit").astype(str).str.strip().str.lower()
+            if "_cache_status" in cache_rows.columns
+            else pd.Series("hit", index=cache_rows.index)
+        )
+        hit_rows = cache_rows.loc[cache_status == "hit"].copy()
+        if not hit_rows.empty:
+            summary = _sed_source_row_summary(key, hit_rows.reindex(columns=SED_COLUMNS))
+            summary["storage"] = "cache"
+            statuses.append(summary)
+        elif (cache_status == "miss").any():
+            statuses.append({
+                "key": key,
+                "label": _sed_source_label(key),
+                "status": "miss",
+                "n_rows": 0,
+                "source_names": [],
+                "bands": [],
+                "storage": "cache",
+                "message": "queried; no catalog match",
+            })
+        else:
+            statuses.append({
+                "key": key,
+                "label": _sed_source_label(key),
+                "status": "unknown",
+                "n_rows": 0,
+                "source_names": [],
+                "bands": [],
+                "storage": "cache",
+                "message": "cache entry has no hit/miss status",
+            })
+    return statuses
 
 
 def fetch_sed_photometry(

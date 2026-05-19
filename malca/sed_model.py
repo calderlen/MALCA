@@ -197,6 +197,8 @@ def _load_kurucz_library() -> object:
             "Install it and make sure the Kurucz data file kurucz2004.grid.fits is available."
         ) from exc
 
+    _patch_pystellibs_kurucz_libsdir(pystellibs)
+
     try:
         library = pystellibs.Kurucz()
     except Exception as exc:
@@ -217,6 +219,33 @@ def _load_kurucz_library() -> object:
     if not hasattr(library, "generate_stellar_spectrum"):
         raise PystellibsSetupError("pystellibs.Kurucz does not expose generate_stellar_spectrum().")
     return library
+
+
+def _patch_pystellibs_kurucz_libsdir(pystellibs: object) -> None:
+    """Use the packaged Kurucz grid location when pystellibs points at ezunits/libs.
+
+    The pinned pystellibs package can install ``kurucz2004.grid.fits`` under
+    ``pystellibs/libs`` while its config points ``Kurucz`` at
+    ``pystellibs/ezunits/libs``.  Patch the module-level libsdir in memory so
+    model fitting works without manually editing site-packages.
+    """
+    package_file = getattr(pystellibs, "__file__", None)
+    if not package_file:
+        return
+
+    root = Path(str(package_file)).expanduser().parent
+    configured_grid = root / "ezunits" / "libs" / "kurucz2004.grid.fits"
+    packaged_grid = root / "libs" / "kurucz2004.grid.fits"
+    if configured_grid.exists() or not packaged_grid.exists():
+        return
+
+    libsdir = str(packaged_grid.parent)
+    for module_name in ("pystellibs.config", "pystellibs.kurucz"):
+        try:
+            module = importlib.import_module(module_name)
+            setattr(module, "libsdir", libsdir)
+        except Exception:
+            continue
 
 
 def _library_logt_bounds(library: object) -> tuple[float, float]:
@@ -373,6 +402,30 @@ def _prepare_fit_points(candidate_id: str, candidate: pd.Series | dict, sed_rows
     return out, y_col
 
 
+def _format_fit_point_labels(points: pd.DataFrame, *, limit: int = 6) -> str:
+    if points is None or points.empty:
+        return ""
+    grouped: dict[str, list[str]] = {}
+    for _, row in points.iterrows():
+        source = str(row.get("source") or "").strip()
+        band = str(row.get("band") or "").strip()
+        source_key = source or "SED"
+        if source_key not in grouped:
+            grouped[source_key] = []
+        if band and band not in grouped[source_key]:
+            grouped[source_key].append(band)
+    labels = []
+    for source, bands in grouped.items():
+        if bands:
+            labels.append(f"{source} {','.join(bands)}")
+        else:
+            labels.append(source)
+    shown = ", ".join(labels[:limit])
+    if len(labels) > limit:
+        shown += f", +{len(labels) - limit} more"
+    return shown
+
+
 def _fit_single_candidate(
     candidate_id: str,
     candidate: pd.Series | dict,
@@ -383,10 +436,14 @@ def _fit_single_candidate(
 ) -> tuple[dict, pd.DataFrame]:
     points, y_col = _prepare_fit_points(candidate_id, candidate, sed_rows)
     if len(points) < MIN_FIT_POINTS:
+        found = f"found {len(points)}"
+        labels = _format_fit_point_labels(points)
+        if labels:
+            found += f": {labels}"
         fit_row = _empty_fit_row(
             candidate_id,
             status="insufficient_data",
-            warning=f"Need at least {MIN_FIT_POINTS} finite optical photospheric SED points; found {len(points)}.",
+            warning=f"Need at least {MIN_FIT_POINTS} finite optical photospheric SED points; {found}.",
             row=candidate,
         )
         return fit_row, pd.DataFrame(columns=SED_MODEL_CURVE_COLUMNS)

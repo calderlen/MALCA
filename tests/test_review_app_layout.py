@@ -37,6 +37,7 @@ def _install_review_app_import_stubs() -> None:
 
 _install_review_app_import_stubs()
 
+from malca.review import app as review_app
 from malca.review.app import EXTERNAL_SOURCE_VIEW_OPTIONS, _render_external_followup, app
 
 
@@ -112,6 +113,41 @@ def test_external_source_selector_exposes_tess() -> None:
     values = {str(option.get("value")) for option in EXTERNAL_SOURCE_VIEW_OPTIONS}
 
     assert "tess" in values
+
+
+def test_review_plot_dir_infers_run_bundle_from_db_path(tmp_path, monkeypatch) -> None:
+    run_dir = tmp_path / "march18_bundle"
+    (run_dir / "review").mkdir(parents=True)
+    (run_dir / "bundle_assets" / "lightcurves").mkdir(parents=True)
+    db_path = run_dir / "review" / "review.db"
+    db_path.write_bytes(b"")
+
+    monkeypatch.setattr(review_app, "PLOT_DIR", None)
+    monkeypatch.setattr(review_app, "DB_PATH", str(db_path))
+
+    assert review_app._review_plot_dir_for_context() == run_dir / "plots"
+
+
+def test_effective_local_lc_path_uses_inferred_bundle_without_plot_dir(tmp_path, monkeypatch) -> None:
+    run_dir = tmp_path / "march18_bundle"
+    lc_dir = run_dir / "bundle_assets" / "lightcurves"
+    (run_dir / "review").mkdir(parents=True)
+    lc_dir.mkdir(parents=True)
+    db_path = run_dir / "review" / "review.db"
+    db_path.write_bytes(b"")
+    lc_path = lc_dir / "C1.dat3"
+    lc_path.write_text("", encoding="ascii")
+
+    monkeypatch.setattr(review_app, "PLOT_DIR", None)
+    monkeypatch.setattr(review_app, "DB_PATH", str(db_path))
+
+    resolved = review_app._effective_local_lc_path(
+        {"candidate_id": "C1", "asas_sn_id": "C1", "lc_path": "/old/root/C1.dat3"},
+        stored_lc_path="/old/root/C1.dat3",
+        source_path="/old/root",
+    )
+
+    assert resolved == str(lc_path)
 
 
 def test_dustycult_publication_export_controls_are_present() -> None:
