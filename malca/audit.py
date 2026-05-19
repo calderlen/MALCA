@@ -10,6 +10,7 @@ from typing import Any, Iterable
 
 import pandas as pd
 
+from malca.ltv.paths import discover_ltv_output_dir, default_ltv_review_db_for_output
 from malca.table_io import read_parquet_table
 
 
@@ -180,11 +181,12 @@ def _review_db_summary(review_db: str | Path | None) -> dict[str, Any]:
 
 
 def ltv_status(
-    output_dir: str | Path = "output/ltv/ltv",
+    output_dir: str | Path | None = None,
     *,
-    review_db: str | Path | None = "ltv_candidates.db",
+    review_db: str | Path | None = None,
 ) -> dict[str, Any]:
-    root = Path(output_dir).expanduser()
+    root = Path(output_dir).expanduser() if output_dir is not None else discover_ltv_output_dir()
+    resolved_review_db = review_db if review_db is not None else default_ltv_review_db_for_output(root)
     bins = []
     if root.exists():
         candidates = sorted(root.glob("LTvar*.parquet"))
@@ -219,7 +221,7 @@ def ltv_status(
         "output_dir": str(root),
         "exists": root.exists(),
         "bins": bins,
-        "review_db": _review_db_summary(review_db),
+        "review_db": _review_db_summary(resolved_review_db),
     }
 
 
@@ -341,8 +343,16 @@ def build_parser() -> argparse.ArgumentParser:
     compare.set_defaults(func=_run_compare_results)
 
     ltv = sub.add_parser("ltv-status", help="Summarize LTV chunk outputs and review completion.")
-    ltv.add_argument("--output-dir", default="output/ltv/ltv", help="Directory containing LTV parquet datasets.")
-    ltv.add_argument("--review-db", default="ltv_candidates.db", help="Review DB to summarize.")
+    ltv.add_argument(
+        "--output-dir",
+        default=None,
+        help="Directory containing LTV parquet datasets (default: discover output/runs/ltv, then output/runs/ltv_*, then legacy output/ltv/ltv).",
+    )
+    ltv.add_argument(
+        "--review-db",
+        default=None,
+        help="Review DB to summarize (default: <run>/review/review.db when using run-style output).",
+    )
     ltv.set_defaults(func=_run_ltv_status)
 
     baseline = sub.add_parser("baseline-compare", help="Build or run global-median smoke and per-camera full commands.")

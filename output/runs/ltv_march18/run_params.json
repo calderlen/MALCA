@@ -1,0 +1,19 @@
+{
+  "pipeline": "ltv",
+  "run_id": "ltv_march18",
+  "migrated_from": "output/ltv/ltv",
+  "tracked_scope": "minimal_review_bundle",
+  "results_dir": "results",
+  "review_db": "review/review.db",
+  "fresh_review_db": "review/review.fresh.db",
+  "legacy_root_review_db": "review/review.legacy_root.db",
+  "lightcurve_dir": "bundle_assets/lightcurves",
+  "mag_bins": [
+    "12_12.5",
+    "12.5_13",
+    "13_13.5",
+    "13.5_14",
+    "14_14.5",
+    "14.5_15"
+  ]
+}

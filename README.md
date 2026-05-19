@@ -416,6 +416,27 @@ malca reproduce --manifest output/lc_manifest.parquet --candidates my_targets.pa
 ```
 **Note**: Reproduction uses Bayesian detection.
 
+#### malca ltv-pipeline
+
+LTV commands use the same run-bundle layout as detection runs. By default, new outputs go under `output/runs/ltv`.
+
+```bash
+# Core seasonal-trend products
+malca ltv-core --mag-bin 13_13.5 --run-dir output/runs/ltv
+
+# Build filtered/crossmatched LTV candidate products
+malca ltv-build --mag-bin 13_13.5 --run-dir output/runs/ltv
+
+# Build and ingest into the run-local review DB
+malca ltv-pipeline --mag-bin 13_13.5 --run-dir output/runs/ltv
+
+# Open the review GUI
+malca review --review-db output/runs/ltv/review/review.db
+
+# Open the migrated March 18 LTV bundle
+malca review --review-db output/runs/ltv_march18/review/review.db
+```
+
 #### malca validate
 
 ```bash
@@ -639,6 +660,20 @@ output/runs/20250121_143052/          # Timestamp-based run directory
 - `plot_log.json`: Plotting parameters, GP settings, number of plots generated
 
 **Note:** Event scores (dipper_score, dipper_n_dips, dipper_n_valid_dips) are automatically computed during detection for significant events and included in the results table.
+
+### LTV Run Bundle
+
+LTV run artifacts are stored under `output/runs/<ltv_run>/`, with March 18 migrated to `output/runs/ltv_march18/`.
+
+```
+output/runs/ltv/
+├── results/
+│   └── LTvar13-13.5_pipeline.parquet
+├── review/
+│   └── review.db
+└── bundle_assets/
+    └── lightcurves/
+```
 
 ### Standalone Module Outputs
 

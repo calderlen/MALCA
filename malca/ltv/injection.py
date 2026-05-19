@@ -812,8 +812,8 @@ def main() -> None:
         description="Run LTV rejection-recovery injections and generate diagnostic plots.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Output structure (default --output-dir output/ltv/injection):
-  output/ltv/injection/
+Output structure (default --output-dir output/runs/ltv/injection):
+  output/runs/ltv/injection/
     20260314_101500/
       run_params.json
       results/

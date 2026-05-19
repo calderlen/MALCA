@@ -24,7 +24,7 @@ import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 
-from malca.config import LTV_OUTPUT_DIR, SYDNEY_LTV_CSV_PATH
+from malca.config import SYDNEY_LTV_CSV_PATH
 from malca.config import (
     LTV_MIN_SLOPE,
     LTV_MIN_DIFF,
@@ -56,6 +56,7 @@ from malca.ltv.gaia_epoch import query_gaia_epoch_photometry_batch, apply_gaia_e
 from malca.ltv.stochastic import add_stochastic_postfilter_features
 from malca.characterize import get_dust_extinction
 from malca.table_io import read_parquet_table, write_parquet_table
+from malca.ltv.paths import DEFAULT_LTV_RUN_DIR, ltv_core_output_path, ltv_pipeline_output_path
 
 
 LTV_BUILD_CONFIG_DEFAULTS = {
@@ -412,19 +413,25 @@ def add_pipeline_args(parser):
         type=str,
         default=None,
         choices=["12_12.5", "12.5_13", "13_13.5", "13.5_14", "14_14.5", "14.5_15"],
-        help="Magnitude bin (auto-resolves input/output in output/ltv/)",
+        help="Magnitude bin (auto-resolves input/output in <run-dir>/results/)",
+    )
+    g_io.add_argument(
+        "--run-dir",
+        type=str,
+        default=str(DEFAULT_LTV_RUN_DIR),
+        help="LTV run directory for default inputs/outputs (default: output/runs/ltv)",
     )
     g_io.add_argument(
         "--input",
         type=str,
         default=None,
-        help="Input Parquet from ltv.core (default: output/ltv/LTvar<MAG>.parquet)",
+        help="Input Parquet from ltv.core (default: <run-dir>/results/LTvar<MAG>.parquet)",
     )
     g_io.add_argument(
         "--output",
         type=str,
         default=None,
-        help="Output Parquet for pipeline results (default: output/ltv/LTvar<MAG>_pipeline.parquet)",
+        help="Output Parquet for pipeline results (default: <run-dir>/results/LTvar<MAG>_pipeline.parquet)",
     )
     g_filters.add_argument(
         "--min-slope",
@@ -472,11 +479,11 @@ def run_pipeline_cli(args):
     if args.input is None:
         if args.mag_bin is None:
             raise SystemExit("Error: must specify --input or --mag-bin")
-        args.input = str(LTV_OUTPUT_DIR / f"LTvar{args.mag_bin.replace('_', '-')}.parquet")
+        args.input = str(ltv_core_output_path(args.mag_bin, args.run_dir))
     if args.output is None:
         if args.mag_bin is None:
             raise SystemExit("Error: must specify --output or --mag-bin")
-        args.output = str(LTV_OUTPUT_DIR / f"LTvar{args.mag_bin.replace('_', '-')}_pipeline.parquet")
+        args.output = str(ltv_pipeline_output_path(args.mag_bin, args.run_dir))
 
     # Load input
     input_path = Path(args.input)

@@ -20,6 +20,7 @@ htmlcov/
 !/output/transfer/ltv_review/reviews.jsonl
 !/output/runs/
 /output/runs/*
+# Keep tracked run bundles review-focused: DBs/assets plus curated candidate tables.
 !/output/runs/runs_march18_bundle_all/
 /output/runs/runs_march18_bundle_all/*
 !/output/runs/runs_march18_bundle_all/review/
@@ -30,11 +31,22 @@ htmlcov/
 !/output/runs/runs_march18_bundle_all/bundle_assets/lightcurves/
 /output/runs/runs_march18_bundle_all/bundle_assets/lightcurves/*
 !/output/runs/runs_march18_bundle_all/bundle_assets/lightcurves/*.dat3
-!/output/ltv/
-/output/ltv/*
-!/output/ltv/ltv/
-/output/ltv/ltv/*
-!/output/ltv/ltv/ltv_candidates.db
+!/output/runs/ltv_march18/
+/output/runs/ltv_march18/*
+!/output/runs/ltv_march18/run_params.json
+!/output/runs/ltv_march18/run_summary.json
+!/output/runs/ltv_march18/results/
+/output/runs/ltv_march18/results/*
+!/output/runs/ltv_march18/results/*_pipeline.parquet
+!/output/runs/ltv_march18/review/
+/output/runs/ltv_march18/review/*
+!/output/runs/ltv_march18/review/review.fresh.db
+!/output/runs/ltv_march18/review/review.legacy_root.db
+!/output/runs/ltv_march18/bundle_assets/
+/output/runs/ltv_march18/bundle_assets/*
+!/output/runs/ltv_march18/bundle_assets/lightcurves/
+/output/runs/ltv_march18/bundle_assets/lightcurves/*
+!/output/runs/ltv_march18/bundle_assets/lightcurves/*.dat2
 .DS_Store
 
 input/*.csv
@@ -51,9 +63,11 @@ malca/changes.txt
 results_test/
 skypatrol
 review.db
+ltv_candidates.db
 *.db-shm
 *.db-wal
 runs*_review.db
+!/output/runs/ltv_march18/review/review.db
 malca/reproduction/
 /dip/
 /ltv/

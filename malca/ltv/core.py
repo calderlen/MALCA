@@ -57,11 +57,12 @@ from malca.config import (
     LTV_LS_FAP_THRESHOLD,
     LTV_LS_SAMPLES_PER_PEAK,
 )
-from malca.config import LCV2_ROOT, LTV_OUTPUT_DIR
+from malca.config import LCV2_ROOT
 from malca.config import MAG_BINS, SKYPATROL_JD_OFFSET
 from malca.config import PARQUET_OUTPUT_COMPRESSION
 from malca.utils import clean_lc
 from malca.stats import inverse_von_neumann_ratio, reduced_chisq, roms_statistic
+from malca.ltv.paths import DEFAULT_LTV_RUN_DIR, ltv_core_output_path
 
 from malca.ltv.optim import (
     _season_medians_fast,
@@ -109,8 +110,7 @@ def _build_config(a, mag_bin: str) -> Config:
     root = Path(a.root)
     out = a.output
     if out is None:
-        LTV_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        out = str(LTV_OUTPUT_DIR / f"LTvar{mag_bin.replace('_','-')}.parquet")
+        out = str(ltv_core_output_path(mag_bin, a.run_dir))
     output = Path(out)
 
     file_ext = a.extension if a.extension is not None else LIGHT_CURVE_FILE_EXTENSION
@@ -144,6 +144,10 @@ def parse_args() -> tuple[list[Config], bool]:
     p.add_argument("--root",
                    default=str(LCV2_ROOT),
                    type=str)
+    p.add_argument("--run-dir",
+                   default=str(DEFAULT_LTV_RUN_DIR),
+                   type=str,
+                   help="LTV run directory for default outputs (default: output/runs/ltv)")
     p.add_argument("--mag-bin",
                    default="13_13.5",
                    type=str,
@@ -152,7 +156,7 @@ def parse_args() -> tuple[list[Config], bool]:
     p.add_argument("--output",
                    default=None,
                    type=str,
-                   help="Chunked parquet dataset directory (default: LTvar<MAG>.parquet)")
+                   help="Chunked parquet dataset directory (default: <run-dir>/results/LTvar<MAG>.parquet)")
     p.add_argument("--dspring",
                    type=float,
                    default=LTV_DSPRING)

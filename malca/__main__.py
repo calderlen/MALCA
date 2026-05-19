@@ -7,6 +7,7 @@ Run 'malca --help' for grouped commands; 'malca <command> --help' for options.
 import argparse
 import importlib
 import os
+from pathlib import Path
 import sys
 
 # Command groups for grouped --help (order = importance)
@@ -67,7 +68,7 @@ Run 'malca <command> --help' for per-command options.
 
 Common workflows:
   Discovery   malca pipeline  then  malca review --plot-dir <run>/plots
-  LTV         malca ltv-pipeline  then  malca review --review-db ltv_candidates.db
+  LTV         malca ltv-pipeline  then  malca review --review-db output/runs/ltv/review/review.db
 """
 
 
@@ -219,6 +220,7 @@ def main():
         elif command == "ltv-pipeline":
             ltv_pipeline = importlib.import_module("malca.ltv.pipeline")
             ltv_review = importlib.import_module("malca.ltv.review")
+            ltv_paths = importlib.import_module("malca.ltv.paths")
             parser = ltv_pipeline.add_pipeline_args(argparse.ArgumentParser(
                 prog="malca ltv-pipeline",
                 description="Full LTV workflow: build then ingest into review DB (run malca review separately to open GUI).",
@@ -226,8 +228,8 @@ def main():
             parser.add_argument(
                 "--review-db",
                 type=str,
-                default="ltv_candidates.db",
-                help="Path to LTV review SQLite DB for ingest (default: ltv_candidates.db)",
+                default=None,
+                help="Path to LTV review SQLite DB for ingest (default: <run-dir>/review/review.db)",
             )
             parser.add_argument(
                 "--skip-characterize",
@@ -256,6 +258,9 @@ def main():
                 help="Path to ASASSN index parquet for Gaia ID lookup during ingest",
             )
             args = parser.parse_args(remaining)
+            run_dir = Path(args.run_dir).expanduser()
+            if args.review_db is None:
+                args.review_db = str(ltv_paths.ltv_review_db_path(run_dir))
             df = ltv_pipeline.run_pipeline_cli(args)
             ltv_review.ingest_ltv_results(
                 args.review_db,
@@ -266,6 +271,7 @@ def main():
                 stats_compute_ls=args.stats_compute_ls,
                 n_workers=args.workers,
                 index_path=args.index_file,
+                source_path=run_dir,
                 verbose=args.verbose,
             )
         elif command == "dev":

@@ -6,11 +6,11 @@ candidates into a standalone LTV review DB (separate from STV candidates).
 
 Usage:
     # CLI
-    malca ltv-ingest --input ltv_build_output.parquet --review-db ltv_candidates.db -v
+    malca ltv-ingest --run-dir output/runs/ltv -v
 
     # Python API
     from malca.ltv.review import ingest_ltv_results
-    n_total, n_new = ingest_ltv_results("ltv_candidates.db", ltv_df)
+    n_total, n_new = ingest_ltv_results("output/runs/ltv/review/review.db", ltv_df)
 """
 from __future__ import annotations
 
@@ -28,6 +28,12 @@ from malca.config import LTV_MAX_PM
 from malca.review.store import db_connect, import_candidates
 from malca.stats import compute_stats, _enrich_row_worker
 from malca.table_io import read_parquet_table, require_parquet_path
+from malca.ltv.paths import (
+    DEFAULT_LTV_RUN_DIR,
+    ltv_results_dir,
+    ltv_review_db_path,
+    ltv_run_dir_from_review_db,
+)
 
 
 
@@ -321,6 +327,7 @@ def ingest_ltv_results(
     stats_compute_ls: bool = False,
     n_workers: int = 1,
     index_path: Path | str | None = None,
+    source_path: Path | str | None = None,
     verbose: bool = True,
 ) -> tuple[int, int]:
     """
@@ -345,6 +352,8 @@ def ingest_ltv_results(
         n_workers: Number of parallel workers for compute_stats enrichment.
         index_path: Path to the ASASSN index parquet for gaia_id lookup.
             Auto-resolved from ASASSN_INDEX_PATH if not provided.
+        source_path: Source path stored in the review DB. Defaults to the
+            enclosing LTV run directory when db_path is <run>/review/review.db.
         verbose: Print progress.
 
     Returns:
@@ -353,6 +362,8 @@ def ingest_ltv_results(
 
 
     db_path = Path(db_path)
+    if source_path is None:
+        source_path = ltv_run_dir_from_review_db(db_path) or db_path
     if verbose:
         print(f"[ltv-ingest] Ingesting {len(ltv_df):,} LTV candidates → {db_path}")
 
@@ -393,7 +404,7 @@ def ingest_ltv_results(
     total, new = import_candidates(
         conn,
         df,
-        source_path=str(db_path),
+        source_path=str(source_path),
         characterize_before_import=run_characterize,
         vet_before_import=run_vetting,
     )
@@ -414,10 +425,16 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Ingest LTV pipeline results into a review DB.",
     )
     p.add_argument(
-        "--input", "-i",
-        required=True,
+        "--run-dir",
+        default=str(DEFAULT_LTV_RUN_DIR),
         type=str,
-        help="Path to LTV build output Parquet or directory containing such files",
+        help="LTV run directory for default input and review DB (default: output/runs/ltv)",
+    )
+    p.add_argument(
+        "--input", "-i",
+        default=None,
+        type=str,
+        help="Path to LTV build output Parquet or directory containing such files (default: <run-dir>/results)",
     )
     p.add_argument(
         "--pattern",
@@ -428,9 +445,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--review-db",
-        default="ltv_candidates.db",
+        default=None,
         type=str,
-        help="Path to LTV review SQLite DB (default: ltv_candidates.db)",
+        help="Path to LTV review SQLite DB (default: <run-dir>/review/review.db)",
     )
     p.add_argument(
         "--skip-characterize",
@@ -476,7 +493,13 @@ def _build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = _build_parser().parse_args()
 
-    input_path = Path(args.input)
+    run_dir = Path(args.run_dir).expanduser()
+    if args.input is None:
+        args.input = str(ltv_results_dir(run_dir))
+    if args.review_db is None:
+        args.review_db = str(ltv_review_db_path(run_dir))
+
+    input_path = Path(args.input).expanduser()
     if not input_path.exists():
         raise FileNotFoundError(f"Input path not found: {input_path}")
 
@@ -495,6 +518,7 @@ def main() -> None:
             stats_compute_ls=args.stats_compute_ls,
             n_workers=args.workers,
             index_path=args.index_file,
+            source_path=run_dir,
             verbose=args.verbose,
         )
         return
@@ -531,6 +555,7 @@ def main() -> None:
                 stats_compute_ls=args.stats_compute_ls,
                 n_workers=args.workers,
                 index_path=args.index_file,
+                source_path=run_dir,
                 verbose=args.verbose,
             )
 
