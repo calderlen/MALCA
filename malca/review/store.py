@@ -16,6 +16,8 @@ import pandas as pd
 from malca.config import GAIA_CHUNK_SIZE
 from malca.config import LTV_MAX_PM
 from malca.config import (
+    CMD_A_G_PER_AV,
+    CMD_E_BP_RP_PER_AV,
     VSX_CROSSMATCH_PATH,
     DEFAULT_CACHE_DIR,
     GAIA_CACHE_FILE,
@@ -24,6 +26,7 @@ from malca.config import (
     REVIEW_IMPORTED_LC_CACHE_DIR,
 )
 from malca.multi_survey_features import MS_FEATURE_COLUMN_SPECS
+from malca.review.filter_schema import REVIEW_FILTER_COLUMN_TYPES
 from malca.review.metadata import normalize_vsx_record
 from malca.table_io import read_parquet_table, write_parquet_table
 from malca.review.taxonomy import (
@@ -923,6 +926,15 @@ _FLOAT_COLS = {c[0] for c in _CANDIDATE_COLUMNS if c[2] == "float"}
 _TEXT_COLS = {c[0] for c in _CANDIDATE_COLUMNS if c[2] == "text"}
 _SELECT_COLS = {c[0] for c in _CANDIDATE_COLUMNS if c[2] == "select"}
 _COL_TYPE_MAP = {c[0]: c[2] for c in _CANDIDATE_COLUMNS}
+_REVIEW_FLOAT_COLS = {col for col, kind in REVIEW_FILTER_COLUMN_TYPES.items() if kind == "num"}
+_REVIEW_TEXT_COLS = {col for col, kind in REVIEW_FILTER_COLUMN_TYPES.items() if kind == "text"}
+_REVIEW_SELECT_COLS = {col for col, kind in REVIEW_FILTER_COLUMN_TYPES.items() if kind == "select"}
+
+
+def _review_filter_expr(column: str) -> str:
+    if column == "workflow_status":
+        return "COALESCE(r.workflow_status, 'unreviewed')"
+    return f"r.{column}"
 
 
 def get_distinct_values(
@@ -935,33 +947,36 @@ def get_distinct_values(
     source_path_like_any: list[str] | None = None,
 ) -> list[str]:
     """Return sorted distinct non-empty values for a select-filter column."""
-    if column not in _SELECT_COLS and column not in _TEXT_COLS:
+    is_review_col = column in _REVIEW_SELECT_COLS or column in _REVIEW_TEXT_COLS
+    if column not in _SELECT_COLS and column not in _TEXT_COLS and not is_review_col:
         return []
 
-    where = [f"{column} IS NOT NULL", f"{column} != ''"]
+    expr = _review_filter_expr(column) if is_review_col else f"c.{column}"
+    where = [f"{expr} IS NOT NULL", f"{expr} != ''"]
     params: list[str] = []
     if source_path:
-        where.append("source_path = ?")
+        where.append("c.source_path = ?")
         params.append(str(source_path))
     if source_paths:
         source_paths = [str(p) for p in source_paths if str(p)]
         if source_paths:
             placeholders = ",".join(["?"] * len(source_paths))
-            where.append(f"source_path IN ({placeholders})")
+            where.append(f"c.source_path IN ({placeholders})")
             params.extend(source_paths)
     if source_path_like:
-        where.append("source_path LIKE ?")
+        where.append("c.source_path LIKE ?")
         params.append(f"%{str(source_path_like)}%")
     if source_path_like_any:
         source_path_like_any = [str(v) for v in source_path_like_any if str(v)]
         if source_path_like_any:
-            where.append("(" + " OR ".join(["source_path LIKE ?"] * len(source_path_like_any)) + ")")
+            where.append("(" + " OR ".join(["c.source_path LIKE ?"] * len(source_path_like_any)) + ")")
             params.extend([f"%{value}%" for value in source_path_like_any])
 
     rows = conn.execute(
-        f"SELECT DISTINCT {column} FROM candidates "
+        f"SELECT DISTINCT {expr} AS value FROM candidates c "
+        f"LEFT JOIN reviews r ON r.candidate_id = c.candidate_id "
         f"WHERE {' AND '.join(where)} "
-        f"ORDER BY {column}",
+        f"ORDER BY value",
         params,
     ).fetchall()
     cleaned = set()
@@ -988,37 +1003,41 @@ def get_numeric_bounds(
     source_path_like_any: list[str] | None = None,
 ) -> dict[str, dict[str, float | None]]:
     """Return min/max bounds for numeric candidate columns."""
-    selected_cols = columns or sorted(_FLOAT_COLS)
-    selected_cols = [col for col in selected_cols if col in _FLOAT_COLS]
+    selected_cols = columns or sorted(_FLOAT_COLS | _REVIEW_FLOAT_COLS)
+    selected_cols = [col for col in selected_cols if col in _FLOAT_COLS or col in _REVIEW_FLOAT_COLS]
     if not selected_cols:
         return {}
 
     select_parts = []
     for col in selected_cols:
-        select_parts.append(f"MIN({col}) AS min_{col}")
-        select_parts.append(f"MAX({col}) AS max_{col}")
+        expr = _review_filter_expr(col) if col in _REVIEW_FLOAT_COLS else f"c.{col}"
+        select_parts.append(f"MIN({expr}) AS min_{col}")
+        select_parts.append(f"MAX({expr}) AS max_{col}")
 
     where: list[str] = []
     params: list[str] = []
     if source_path:
-        where.append("source_path = ?")
+        where.append("c.source_path = ?")
         params.append(str(source_path))
     if source_paths:
         source_paths = [str(p) for p in source_paths if str(p)]
         if source_paths:
             placeholders = ",".join(["?"] * len(source_paths))
-            where.append(f"source_path IN ({placeholders})")
+            where.append(f"c.source_path IN ({placeholders})")
             params.extend(source_paths)
     if source_path_like:
-        where.append("source_path LIKE ?")
+        where.append("c.source_path LIKE ?")
         params.append(f"%{str(source_path_like)}%")
     if source_path_like_any:
         source_path_like_any = [str(v) for v in source_path_like_any if str(v)]
         if source_path_like_any:
-            where.append("(" + " OR ".join(["source_path LIKE ?"] * len(source_path_like_any)) + ")")
+            where.append("(" + " OR ".join(["c.source_path LIKE ?"] * len(source_path_like_any)) + ")")
             params.extend([f"%{value}%" for value in source_path_like_any])
 
-    query = f"SELECT {', '.join(select_parts)} FROM candidates"
+    query = (
+        f"SELECT {', '.join(select_parts)} FROM candidates c "
+        f"LEFT JOIN reviews r ON r.candidate_id = c.candidate_id"
+    )
     if where:
         query += " WHERE " + " AND ".join(where)
 
@@ -1878,32 +1897,35 @@ def _queue_where_params(filters: dict | None = None) -> tuple[list[str], list[ob
 
     # --- numeric range filters (auto-generated) ---
     # Convention: "min_<col>" → >=, "max_<col>" → <=
-    for col in sorted(_FLOAT_COLS):
+    for col in sorted(_FLOAT_COLS | _REVIEW_FLOAT_COLS):
+        expr = _review_filter_expr(col) if col in _REVIEW_FLOAT_COLS else f"c.{col}"
         for prefix, op in [("min_", ">="), ("max_", "<=")]:
             key = f"{prefix}{col}"
             val = filters.get(key)
             if val is not None:
-                where.append(f"(c.{col} IS NOT NULL AND c.{col} {op} ?)")
+                where.append(f"({expr} IS NOT NULL AND {expr} {op} ?)")
                 params.append(float(val))
 
     # --- string filters (auto-generated; exact match) ---
-    for col in sorted(_TEXT_COLS):
+    for col in sorted(_TEXT_COLS | _REVIEW_TEXT_COLS):
+        expr = _review_filter_expr(col) if col in _REVIEW_TEXT_COLS else f"c.{col}"
         val = filters.get(col)
         if val and val != "Any":
             val = str(val).strip()
             if val and val != "Any":
-                where.append(f"(c.{col} IS NOT NULL AND c.{col} = ?)")
+                where.append(f"({expr} IS NOT NULL AND {expr} = ?)")
                 params.append(val)
 
     # --- select-exclude filters (multi-value dropdown) ---
-    for col in sorted(_SELECT_COLS):
+    for col in sorted(_SELECT_COLS | _REVIEW_SELECT_COLS):
+        expr = _review_filter_expr(col) if col in _REVIEW_SELECT_COLS else f"c.{col}"
         exc = filters.get(f"exclude_{col}")
         if exc:
             placeholders = ",".join(["?"] * len(exc))
             if select_filter_mode == "include":
-                where.append(f"(c.{col} IS NOT NULL AND c.{col} IN ({placeholders}))")
+                where.append(f"({expr} IS NOT NULL AND {expr} IN ({placeholders}))")
             else:
-                where.append(f"(c.{col} IS NULL OR c.{col} NOT IN ({placeholders}))")
+                where.append(f"({expr} IS NULL OR {expr} NOT IN ({placeholders}))")
             params.extend(exc)
 
     return where, params
@@ -1916,6 +1938,7 @@ def _queue_order_clause(filters: dict | None = None) -> str:
 
     # --- sorting (any float column + review columns, multi-column) ---
     _sortable = {c: f"c.{c}" for c in _FLOAT_COLS}
+    _sortable.update({c: _review_filter_expr(c) for c in _REVIEW_FLOAT_COLS})
     _sortable["candidate_id"] = "c.candidate_id"
     _sortable.update({"updated_at": "r.updated_at", "interest_score": "r.interest_score",
                        "review_pass": "r.review_pass"})
@@ -2123,11 +2146,56 @@ def replace_candidate_payload_fields(
     return True
 
 
-def _load_background_pair(conn: sqlite3.Connection, x_expr: str, y_expr: str) -> tuple[np.ndarray, np.ndarray]:
+def _quote_sql_identifier(name: str) -> str:
+    return '"' + str(name).replace('"', '""') + '"'
+
+
+def _candidate_column_map(conn: sqlite3.Connection) -> dict[str, str]:
+    rows = conn.execute("PRAGMA table_info(candidates)").fetchall()
+    return {str(row[1]).lower(): str(row[1]) for row in rows}
+
+
+def _json_value_expr(key: str) -> str:
+    path = str(key).replace("'", "''")
+    return (
+        "COALESCE("
+        f"json_extract(payload_json, '$.{path}'), "
+        f"json_extract(json_extract(payload_json, '$.payload_json'), '$.{path}')"
+        ")"
+    )
+
+
+def _background_value_expr(
+    key: str,
+    column_map: dict[str, str],
+    *,
+    aliases: tuple[str, ...] = (),
+) -> str:
+    exprs: list[str] = []
+    for candidate_key in (key, *aliases):
+        actual_column = column_map.get(str(candidate_key).lower())
+        if actual_column is not None:
+            exprs.append(_quote_sql_identifier(actual_column))
+        exprs.append(_json_value_expr(str(candidate_key)))
+    if not exprs:
+        return "NULL"
+    if len(exprs) == 1:
+        return exprs[0]
+    return "COALESCE(" + ", ".join(exprs) + ")"
+
+
+def _load_background_pair(
+    conn: sqlite3.Connection,
+    x_expr: str,
+    y_expr: str,
+    column_map: dict[str, str] | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
     """Return finite paired arrays for a diagnostic background plane."""
+    columns = column_map if column_map is not None else _candidate_column_map(conn)
+    x_sql = _background_value_expr(x_expr, columns)
+    y_sql = _background_value_expr(y_expr, columns)
     rows = conn.execute(
-        f"SELECT {x_expr}, {y_expr} FROM candidates "
-        f"WHERE {x_expr} IS NOT NULL AND {y_expr} IS NOT NULL"
+        f"SELECT {x_sql}, {y_sql} FROM candidates"
     ).fetchall()
     if not rows:
         return np.empty(0), np.empty(0)
@@ -2147,12 +2215,15 @@ def get_diagnostic_background(conn: sqlite3.Connection) -> dict:
     Values are numpy arrays (may be empty).
     """
     result: dict = {}
+    column_map = _candidate_column_map(conn)
 
     # Kiel: prefer StarHorse teff50/logg50 from payload, fall back to GSP-Phot columns
+    teff_gsp_expr = _background_value_expr("teff_gspphot", column_map)
+    logg_gsp_expr = _background_value_expr("logg_gspphot", column_map)
+    teff50_expr = _background_value_expr("teff50", column_map)
+    logg50_expr = _background_value_expr("logg50", column_map)
     rows = conn.execute(
-        "SELECT teff_gspphot, logg_gspphot, "
-        "       json_extract(payload_json, '$.teff50'), "
-        "       json_extract(payload_json, '$.logg50') "
+        f"SELECT {teff_gsp_expr}, {logg_gsp_expr}, {teff50_expr}, {logg50_expr} "
         "FROM candidates"
     ).fetchall()
     teff_list, logg_list = [], []
@@ -2170,60 +2241,102 @@ def get_diagnostic_background(conn: sqlite3.Connection) -> dict:
     result["kiel_teff"] = np.array(teff_list, dtype=np.float64)
     result["kiel_logg"] = np.array(logg_list, dtype=np.float64)
 
-    # CMD: mg0 and bprp0 are in payload_json
+    # CMD: prefer pre-computed dereddened values, fall back to Gaia photometry.
+    mg0_expr = _background_value_expr("mg0", column_map)
+    bprp0_expr = _background_value_expr("bprp0", column_map)
+    phot_g_expr = _background_value_expr("phot_g_mean_mag", column_map)
+    bp_rp_expr = _background_value_expr("bp_rp", column_map)
+    phot_bp_expr = _background_value_expr("phot_bp_mean_mag", column_map)
+    phot_rp_expr = _background_value_expr("phot_rp_mean_mag", column_map)
+    dist_expr = _background_value_expr("distance_gspphot", column_map)
+    parallax_expr = _background_value_expr("parallax", column_map)
+    av_expr = _background_value_expr("A_v_3d", column_map)
     rows = conn.execute(
-        "SELECT json_extract(payload_json, '$.mg0'), "
-        "       json_extract(payload_json, '$.bprp0') "
-        "FROM candidates "
-        "WHERE json_extract(payload_json, '$.mg0') IS NOT NULL "
-        "  AND json_extract(payload_json, '$.bprp0') IS NOT NULL"
+        f"SELECT {mg0_expr}, {bprp0_expr}, {phot_g_expr}, {bp_rp_expr}, "
+        f"{phot_bp_expr}, {phot_rp_expr}, {dist_expr}, {parallax_expr}, {av_expr} "
+        "FROM candidates"
     ).fetchall()
-    if rows:
-        arr = np.array(rows, dtype=np.float64)
-        mask = np.isfinite(arr).all(axis=1)
-        result["cmd_bprp0"] = arr[mask, 1]
-        result["cmd_mg0"] = arr[mask, 0]
-    else:
-        result["cmd_bprp0"] = np.empty(0)
-        result["cmd_mg0"] = np.empty(0)
+    cmd_bprp0: list[float] = []
+    cmd_mg0: list[float] = []
+    for mg0, bprp0, g_mag, bp_rp, bp_mag, rp_mag, dist, plx, av in rows:
+        try:
+            if mg0 is not None and bprp0 is not None:
+                mg0_f = float(mg0)
+                bprp0_f = float(bprp0)
+                if math.isfinite(mg0_f) and math.isfinite(bprp0_f):
+                    cmd_mg0.append(mg0_f)
+                    cmd_bprp0.append(bprp0_f)
+                    continue
+            g_f = float(g_mag)
+            if bp_rp is not None:
+                bprp_f = float(bp_rp)
+            else:
+                bprp_f = float(bp_mag) - float(rp_mag)
+            dist_f = float(dist) if dist is not None else None
+            if dist_f is None or not math.isfinite(dist_f) or dist_f <= 0:
+                plx_f = float(plx)
+                dist_f = 1000.0 / plx_f if math.isfinite(plx_f) and plx_f > 0 else None
+            if dist_f is None or not math.isfinite(dist_f) or dist_f <= 0:
+                continue
+            mg_f = g_f - 5.0 * math.log10(dist_f) + 5.0
+            av_f = float(av) if av is not None else 0.0
+            if math.isfinite(av_f) and av_f >= 0:
+                mg_f -= CMD_A_G_PER_AV * av_f
+                bprp_f -= CMD_E_BP_RP_PER_AV * av_f
+            if math.isfinite(mg_f) and math.isfinite(bprp_f):
+                cmd_mg0.append(mg_f)
+                cmd_bprp0.append(bprp_f)
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
+    result["cmd_bprp0"] = np.array(cmd_bprp0, dtype=np.float64)
+    result["cmd_mg0"] = np.array(cmd_mg0, dtype=np.float64)
 
     # IR color-color: prefer dereddened from payload, fall back to observed
+    h_expr = _background_value_expr("tmass_h", column_map)
+    k_expr = _background_value_expr("tmass_k", column_map)
+    w1_expr = _background_value_expr("w1", column_map, aliases=("unwise_w1",))
+    w2_expr = _background_value_expr("w2", column_map, aliases=("unwise_w2",))
+    hk_expr = _background_value_expr("H_K", column_map)
+    w1w2_expr = _background_value_expr("w1_w2", column_map, aliases=("W1_W2",))
+    hk_dered_expr = _background_value_expr("H_K_dered", column_map)
+    w1w2_dered_expr = _background_value_expr("w1_w2_dered", column_map, aliases=("W1_W2_dered",))
     rows = conn.execute(
-        "SELECT tmass_h - tmass_k, w1 - w2, "
-        "       json_extract(payload_json, '$.H_K_dered'), "
-        "       json_extract(payload_json, '$.w1_w2_dered') "
-        "FROM candidates "
-        "WHERE tmass_h IS NOT NULL AND tmass_k IS NOT NULL "
-        "  AND w1 IS NOT NULL AND w2 IS NOT NULL"
+        f"SELECT {h_expr}, {k_expr}, {w1_expr}, {w2_expr}, "
+        f"{hk_expr}, {w1w2_expr}, {hk_dered_expr}, {w1w2_dered_expr} "
+        "FROM candidates"
     ).fetchall()
     hk_list, w1w2_list = [], []
-    for hk_obs, w1w2_obs, hk_d, w1w2_d in rows:
-        hk = hk_d if hk_d is not None else hk_obs
-        w1w2 = w1w2_d if w1w2_d is not None else w1w2_obs
-        if hk is not None and w1w2 is not None:
-            try:
-                hkf, wf = float(hk), float(w1w2)
-                if math.isfinite(hkf) and math.isfinite(wf):
-                    hk_list.append(hkf)
-                    w1w2_list.append(wf)
-            except (TypeError, ValueError):
-                pass
+    for h, k, w1, w2, hk_obs_col, w1w2_obs_col, hk_d, w1w2_d in rows:
+        try:
+            hk = hk_d if hk_d is not None else hk_obs_col
+            w1w2 = w1w2_d if w1w2_d is not None else w1w2_obs_col
+            if hk is None and h is not None and k is not None:
+                hk = float(h) - float(k)
+            if w1w2 is None and w1 is not None and w2 is not None:
+                w1w2 = float(w1) - float(w2)
+            if hk is None or w1w2 is None:
+                continue
+            hkf, wf = float(hk), float(w1w2)
+            if math.isfinite(hkf) and math.isfinite(wf):
+                hk_list.append(hkf)
+                w1w2_list.append(wf)
+        except (TypeError, ValueError):
+            pass
     result["ir_hk"] = np.array(hk_list, dtype=np.float64)
     result["ir_w1w2"] = np.array(w1w2_list, dtype=np.float64)
 
     # RPM: H_G = G + 5*log10(pm_arcsec) + 5
+    pmra_expr = _background_value_expr("pmra", column_map)
+    pmdec_expr = _background_value_expr("pmdec", column_map)
     rows = conn.execute(
-        "SELECT json_extract(payload_json, '$.phot_g_mean_mag'), "
-        "       json_extract(payload_json, '$.bp_rp'), pmra, pmdec "
-        "FROM candidates "
-        "WHERE json_extract(payload_json, '$.phot_g_mean_mag') IS NOT NULL "
-        "  AND json_extract(payload_json, '$.bp_rp') IS NOT NULL "
-        "  AND pmra IS NOT NULL AND pmdec IS NOT NULL"
+        f"SELECT {phot_g_expr}, {bp_rp_expr}, {phot_bp_expr}, {phot_rp_expr}, {pmra_expr}, {pmdec_expr} "
+        "FROM candidates"
     ).fetchall()
     rpm_bprp_list, rpm_hg_list = [], []
-    for g_mag, bprp, pmra, pmdec in rows:
+    for g_mag, bprp, bp_mag, rp_mag, pmra, pmdec in rows:
         try:
-            g_f, bprp_f = float(g_mag), float(bprp)
+            g_f = float(g_mag)
+            bprp_f = float(bprp) if bprp is not None else float(bp_mag) - float(rp_mag)
             pm_total = math.sqrt(float(pmra) ** 2 + float(pmdec) ** 2)
             if pm_total > 0 and math.isfinite(g_f) and math.isfinite(bprp_f):
                 pm_arcsec = pm_total / 1000.0
@@ -2236,22 +2349,25 @@ def get_diagnostic_background(conn: sqlite3.Connection) -> dict:
     result["rpm_hg"] = np.array(rpm_hg_list, dtype=np.float64)
 
     # UV-Optical: NUV - G vs BP-RP
+    nuv_expr = _background_value_expr("galex_nuv", column_map)
     rows = conn.execute(
-        "SELECT galex_nuv - json_extract(payload_json, '$.phot_g_mean_mag'), "
-        "       json_extract(payload_json, '$.bp_rp') "
-        "FROM candidates "
-        "WHERE galex_nuv IS NOT NULL "
-        "  AND json_extract(payload_json, '$.phot_g_mean_mag') IS NOT NULL "
-        "  AND json_extract(payload_json, '$.bp_rp') IS NOT NULL"
+        f"SELECT {nuv_expr}, {phot_g_expr}, {bp_rp_expr}, {phot_bp_expr}, {phot_rp_expr} "
+        "FROM candidates"
     ).fetchall()
-    if rows:
-        arr = np.array(rows, dtype=np.float64)
-        mask = np.isfinite(arr).all(axis=1)
-        result["uv_nuv_g"] = arr[mask, 0]
-        result["uv_bprp"] = arr[mask, 1]
-    else:
-        result["uv_nuv_g"] = np.empty(0)
-        result["uv_bprp"] = np.empty(0)
+    uv_bprp_list, uv_nuv_g_list = [], []
+    for nuv, g_mag, bprp, bp_mag, rp_mag in rows:
+        try:
+            nuv_f = float(nuv)
+            g_f = float(g_mag)
+            bprp_f = float(bprp) if bprp is not None else float(bp_mag) - float(rp_mag)
+            nuv_g = nuv_f - g_f
+            if math.isfinite(nuv_g) and math.isfinite(bprp_f):
+                uv_nuv_g_list.append(nuv_g)
+                uv_bprp_list.append(bprp_f)
+        except (TypeError, ValueError):
+            pass
+    result["uv_nuv_g"] = np.array(uv_nuv_g_list, dtype=np.float64)
+    result["uv_bprp"] = np.array(uv_bprp_list, dtype=np.float64)
 
     pair_specs = (
         ("metric_periodicity_score", "metric_phase_quality_score", "periodicity_score", "phase_quality_score"),
@@ -2274,7 +2390,7 @@ def get_diagnostic_background(conn: sqlite3.Connection) -> dict:
         ("plane_neowise_trend_x", "plane_neowise_trend_y", "ltv_neowise_w1_slope", "ltv_neowise_w1_w2_slope"),
     )
     for x_key, y_key, x_expr, y_expr in pair_specs:
-        result[x_key], result[y_key] = _load_background_pair(conn, x_expr, y_expr)
+        result[x_key], result[y_key] = _load_background_pair(conn, x_expr, y_expr, column_map)
 
     return result
 
@@ -2962,64 +3078,6 @@ def merge_review_databases(
         "reviews_updated": updated_reviews,
         "reviews_skipped": skipped_reviews,
         "history_inserted": inserted_history,
-    }
-
-
-def export_review_subset_bundle(
-    bundle_dir: Path,
-    candidate_df: pd.DataFrame,
-    *,
-    selection_meta: dict[str, Any],
-    write_parquet: bool = True,
-) -> dict[str, Any]:
-    """Write a self-contained review bundle for an explorer subset."""
-    bundle_path = Path(bundle_dir).expanduser().resolve()
-    bundle_path.mkdir(parents=True, exist_ok=True)
-    review_db_path = bundle_path / "review.db"
-    if review_db_path.exists():
-        review_db_path.unlink()
-
-    export_df = candidate_df.copy()
-    if export_df.empty:
-        raise ValueError("Cannot export an empty candidate subset.")
-
-    review_like_cols = [
-        col
-        for col in ("interest_score", "event_class", "review_pass", "notes", "status", "reviewer", "updated_at")
-        if col in export_df.columns
-    ]
-    if review_like_cols:
-        export_df = export_df.drop(columns=review_like_cols)
-
-    if write_parquet:
-        export_df.to_parquet(bundle_path / "selection_candidates.parquet", index=False)
-
-    meta_path = bundle_path / "selection_meta.json"
-    meta_path.write_text(json.dumps(selection_meta, indent=2, sort_keys=True, default=str), encoding="utf-8")
-
-    with db_connect(review_db_path) as conn:
-        upsert_candidates_frame(conn, export_df)
-        save_app_state(conn, "explorer_selection_meta", json.dumps(selection_meta, default=str))
-
-    merged_sources: list[dict[str, Any]] = []
-    if "source_file" in export_df.columns:
-        for source_file, source_group in export_df.groupby(export_df["source_file"].fillna("")):
-            source_text = str(source_file or "").strip()
-            if not source_text or Path(source_text).suffix.lower() != ".db":
-                continue
-            merge_stats = merge_review_databases(
-                Path(source_text),
-                review_db_path,
-                candidate_ids=source_group["candidate_id"].astype(str).tolist(),
-                only_reviewed=False,
-            )
-            merged_sources.append({"source_db": source_text, **merge_stats})
-
-    return {
-        "bundle_dir": bundle_path,
-        "review_db": review_db_path,
-        "candidate_count": int(len(export_df)),
-        "merged_sources": merged_sources,
     }
 
 

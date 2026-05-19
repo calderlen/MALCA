@@ -232,20 +232,178 @@ def test_fetch_external_lcs_continues_after_module_failure(
     assert any("TESS LCs completed" in message for message in messages)
 
 
-def test_fetch_crts_lightcurves_records_no_data_when_catalog_schema_fails(
+class _FakeCRTSResponse:
+    def __init__(self, text: str, *, status_code: int = 200, url: str = "http://nunuku.caltech.edu/cgi-bin/getcssconedb_priv.cgi") -> None:
+        self.text = text
+        self.status_code = status_code
+        self.url = url
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise vetting.requests.HTTPError(f"HTTP {self.status_code}")
+
+
+def _crts_csv(rows: list[tuple[object, float, float, float, float, float, int]]) -> str:
+    body = ["MasterID,Mag,Magerr,RA,Dec,MJD,Blend"]
+    body.extend(",".join(str(value) for value in row) for row in rows)
+    return "\n".join(body)
+
+
+def test_crts_cgi_html_link_and_csv_normalization() -> None:
+    html = '<html><a href="/DataRelease/upload/result_web_file.csv">Download CSV</a></html>'
+
+    assert vetting._extract_crts_csv_url(html, vetting.CRTS_CGI_URL).endswith(
+        "/DataRelease/upload/result_web_file.csv"
+    )
+
+    raw = pd.DataFrame(
+        {
+            "MasterID": ["near", "near", "far"],
+            "Mag": [14.0, 14.2, 16.0],
+            "Magerr": [0.05, 0.06, 0.08],
+            "RA": [10.0, 10.0, 10.001],
+            "Dec": [20.0, 20.0, 20.0],
+            "MJD": [56000.0, 56001.0, 56000.5],
+            "Blend": [0, 0, 0],
+        }
+    )
+
+    lc = vetting._normalize_crts_cgi_lightcurve(
+        raw,
+        ra=10.0,
+        dec=20.0,
+        radius_arcsec=10.0,
+        catalog="photcat",
+    )
+
+    assert lc["crts_id"].unique().tolist() == ["near"]
+    assert lc["mag"].tolist() == [14.0, 14.2]
+    assert lc["catalog"].unique().tolist() == ["photcat"]
+    assert lc["mjd"].tolist() == [56000.0, 56001.0]
+
+
+def test_fetch_crts_lightcurves_cgi_success_writes_parquet_and_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    df = pd.DataFrame([{"candidate_id": "C1", "ra": 1.0, "dec": 2.0}])
+    calls: list[tuple[str, dict]] = []
+    csv_text = _crts_csv(
+        [
+            (1149024031442, 14.1, 0.08, 1.0, 2.0, 56000.0, 0),
+            (1149024031442, 14.3, 0.09, 1.0, 2.0, 56001.0, 0),
+        ]
+    )
+
+    def fake_get(url: str, **kwargs):
+        calls.append((url, kwargs))
+        params = kwargs.get("params") or {}
+        if url == vetting.CRTS_CGI_URL:
+            assert params["DB"] == "photcat"
+            return _FakeCRTSResponse(
+                '<html><a href="/DataRelease/upload/result.csv">CSV</a></html>',
+                url=vetting.CRTS_CGI_URL,
+            )
+        assert url.endswith("/DataRelease/upload/result.csv")
+        return _FakeCRTSResponse(csv_text, url=url)
+
+    monkeypatch.setattr(vetting.requests, "get", fake_get)
+
+    out = vetting.fetch_crts_lightcurves(df, output_dir=tmp_path)
+
+    assert int(out.loc[0, "crts_lc_n_points"]) == 2
+    assert [call[1].get("params", {}).get("DB") for call in calls if call[0] == vetting.CRTS_CGI_URL] == ["photcat"]
+    parquet = tmp_path / "crts_lc_C1.parquet"
+    assert parquet.exists()
+    saved = pd.read_parquet(parquet)
+    assert saved["crts_id"].astype(str).unique().tolist() == ["1149024031442"]
+    assert saved["mag"].tolist() == [14.1, 14.3]
+    status = pd.read_parquet(tmp_path / vetting.EXTERNAL_LC_STATUS_FILE)
+    assert status.loc[0, "module"] == "CRTS LCs"
+    assert status.loc[0, "status"] == "fetched"
+    assert int(status.loc[0, "crts_lc_n_points"]) == 2
+
+
+def test_fetch_crts_lightcurves_retries_orphancat_when_photcat_empty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    df = pd.DataFrame([{"candidate_id": "C1", "ra": 1.0, "dec": 2.0}])
+    db_calls: list[str] = []
+
+    def fake_get(url: str, **kwargs):
+        params = kwargs.get("params") or {}
+        if url == vetting.CRTS_CGI_URL:
+            db_calls.append(params["DB"])
+            if params["DB"] == "photcat":
+                return _FakeCRTSResponse("There were 0 lines returned", url=vetting.CRTS_CGI_URL)
+            return _FakeCRTSResponse('<a href="/DataRelease/upload/orphan.csv">CSV</a>', url=vetting.CRTS_CGI_URL)
+        return _FakeCRTSResponse(
+            _crts_csv([(9001, 15.1, 0.1, 1.0, 2.0, 56010.0, 0)]),
+            url=url,
+        )
+
+    monkeypatch.setattr(vetting.requests, "get", fake_get)
+
+    out = vetting.fetch_crts_lightcurves(df, output_dir=tmp_path)
+
+    assert db_calls == ["photcat", "orphancat"]
+    assert int(out.loc[0, "crts_lc_n_points"]) == 1
+    saved = pd.read_parquet(tmp_path / "crts_lc_C1.parquet")
+    assert saved["catalog"].unique().tolist() == ["orphancat"]
+
+
+def test_fetch_crts_lightcurves_schema_failure_is_error_not_no_data(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     df = pd.DataFrame([{"candidate_id": "C1", "ra": 1.0, "dec": 2.0}])
 
-    def fail_crossmatch(*_args, **_kwargs) -> pd.DataFrame:
-        raise RuntimeError("unresolved identifiers")
+    def fake_get(url: str, **kwargs):
+        if url == vetting.CRTS_CGI_URL:
+            return _FakeCRTSResponse("<html>There were 4 lines but no CSV link</html>", url=vetting.CRTS_CGI_URL)
+        raise AssertionError("CSV URL should not be fetched")
 
-    monkeypatch.setattr(vetting, "batch_tap_crossmatch", fail_crossmatch)
+    monkeypatch.setattr(vetting.requests, "get", fake_get)
 
-    out = vetting.fetch_crts_lightcurves(df, output_dir=tmp_path)
+    with pytest.raises(RuntimeError, match="CRTS LCs"):
+        vetting.fetch_crts_lightcurves(df, output_dir=tmp_path)
 
-    assert int(out.loc[0, "crts_lc_n_points"]) == 0
+    assert not (tmp_path / "crts_lc_C1.parquet").exists()
     status = pd.read_parquet(tmp_path / vetting.EXTERNAL_LC_STATUS_FILE)
     assert status.loc[0, "module"] == "CRTS LCs"
-    assert status.loc[0, "status"] == "no_data"
+    assert status.loc[0, "status"] == "error"
+    assert int(status.loc[0, "crts_lc_n_points"]) == 0
+    assert "CSV download link" in status.loc[0, "error_message"]
+
+
+def test_fetch_external_lcs_records_crts_failure_attr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    df = pd.DataFrame([{"candidate_id": "C1", "ra": 1.0, "dec": 2.0}])
+
+    def fake_get(url: str, **kwargs):
+        if url == vetting.CRTS_CGI_URL:
+            return _FakeCRTSResponse("", status_code=502, url=vetting.CRTS_CGI_URL)
+        raise AssertionError("CSV URL should not be fetched")
+
+    monkeypatch.setattr(vetting.requests, "get", fake_get)
+
+    out = vetting.fetch_external_lcs(
+        df,
+        output_dir=tmp_path,
+        run_atlas=False,
+        run_ztf=False,
+        run_gaia_epoch=False,
+        run_tess=False,
+        run_neowise=False,
+        run_kepler=False,
+        run_aavso=False,
+        run_ps1=False,
+        run_crts=True,
+    )
+
+    assert out.attrs["external_lc_failures"][0].startswith("CRTS LCs failed:")
+    status = pd.read_parquet(tmp_path / vetting.EXTERNAL_LC_STATUS_FILE)
+    assert status.loc[0, "status"] == "error"

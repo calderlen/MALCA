@@ -3703,6 +3703,164 @@ def fetch_panstarrs_lightcurves(
 # CRTS LIGHT CURVES
 # =============================================================================
 
+CRTS_CGI_URL = "http://nunuku.caltech.edu/cgi-bin/getcssconedb_priv.cgi"
+CRTS_CGI_BASE_URL = "http://nunuku.caltech.edu"
+
+
+class _CRTSCSVLinkParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.links: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() != "a":
+            return
+        attr_map = {str(key).lower(): value for key, value in attrs}
+        href = attr_map.get("href")
+        if href and ".csv" in href.lower():
+            self.links.append(href)
+
+
+def _extract_crts_csv_url(html: str, base_url: str = CRTS_CGI_BASE_URL) -> str | None:
+    parser = _CRTSCSVLinkParser()
+    parser.feed(str(html or ""))
+    for href in parser.links:
+        return urljoin(base_url, href)
+
+    match = re.search(r"""(?:https?://[^\s"'<>]+|/[^\s"'<>]+)\.csv(?:\?[^\s"'<>]*)?""", str(html or ""), flags=re.I)
+    if match:
+        return urljoin(base_url, match.group(0))
+    return None
+
+
+def _crts_cgi_response_is_empty(text: str) -> bool:
+    lower = str(text or "").lower()
+    return any(
+        marker in lower
+        for marker in (
+            "there were 0 lines",
+            "there are 0 lines",
+            "no object",
+            "no match",
+            "no rows",
+        )
+    )
+
+
+def _read_crts_csv_text(csv_text: str) -> pd.DataFrame:
+    text = str(csv_text or "").strip()
+    if not text:
+        return pd.DataFrame()
+    try:
+        table = pd.read_csv(io.StringIO(text))
+    except Exception as exc:
+        raise RuntimeError(f"CRTS CSV parser failed: {_short_error(exc)}") from exc
+    required = {"MasterID", "Mag", "Magerr", "RA", "Dec", "MJD", "Blend"}
+    missing = required.difference(table.columns)
+    if missing:
+        raise RuntimeError(f"CRTS CSV missing required columns: {', '.join(sorted(missing))}")
+    return table
+
+
+def _fetch_crts_cgi_catalog(ra: float, dec: float, radius_arcsec: float, catalog: str) -> pd.DataFrame:
+    params = {
+        "RA": f"{float(ra):.7f}",
+        "Dec": f"{float(dec):.7f}",
+        "Rad": f"{float(radius_arcsec) / 60.0:.5f}",
+        "DB": catalog,
+        "OUT": "csv",
+        "SHORT": "short",
+        "PLOT": "plot",
+    }
+    response = requests.get(CRTS_CGI_URL, params=params, timeout=VETTING_HTTP_TIMEOUT)
+    response.raise_for_status()
+    text = getattr(response, "text", "") or ""
+    if text.lstrip().startswith("MasterID,"):
+        return _read_crts_csv_text(text)
+    if _crts_cgi_response_is_empty(text):
+        return pd.DataFrame()
+
+    csv_url = _extract_crts_csv_url(text, getattr(response, "url", CRTS_CGI_BASE_URL) or CRTS_CGI_BASE_URL)
+    if not csv_url:
+        raise RuntimeError(f"CRTS {catalog} response did not include a CSV download link")
+
+    csv_response = requests.get(csv_url, timeout=VETTING_HTTP_TIMEOUT)
+    csv_response.raise_for_status()
+    csv_text = getattr(csv_response, "text", "") or ""
+    if _crts_cgi_response_is_empty(csv_text):
+        return pd.DataFrame()
+    return _read_crts_csv_text(csv_text)
+
+
+def _normalize_crts_cgi_lightcurve(
+    raw: pd.DataFrame,
+    *,
+    ra: float,
+    dec: float,
+    radius_arcsec: float,
+    catalog: str,
+) -> pd.DataFrame:
+    if raw.empty:
+        return pd.DataFrame(columns=["crts_id", "mag", "mag_err", "ra", "dec", "mjd", "blend", "catalog", "sep_arcsec"])
+
+    required = {"MasterID", "Mag", "Magerr", "RA", "Dec", "MJD", "Blend"}
+    missing = required.difference(raw.columns)
+    if missing:
+        raise RuntimeError(f"CRTS CSV missing required columns: {', '.join(sorted(missing))}")
+
+    lc = raw.rename(
+        columns={
+            "MasterID": "crts_id",
+            "Mag": "mag",
+            "Magerr": "mag_err",
+            "RA": "ra",
+            "Dec": "dec",
+            "MJD": "mjd",
+            "Blend": "blend",
+        }
+    ).copy()
+    for col in ("mag", "mag_err", "ra", "dec", "mjd", "blend"):
+        lc[col] = pd.to_numeric(lc[col], errors="coerce")
+    lc = lc.dropna(subset=["crts_id", "mag", "ra", "dec", "mjd"])
+    lc["crts_id"] = lc["crts_id"].astype(str)
+    if lc.empty:
+        return pd.DataFrame(columns=["crts_id", "mag", "mag_err", "ra", "dec", "mjd", "blend", "catalog", "sep_arcsec"])
+
+    target = SkyCoord(ra=float(ra) * u.deg, dec=float(dec) * u.deg)
+    grouped_pos = lc.groupby("crts_id", dropna=False)[["ra", "dec"]].median().dropna()
+    if grouped_pos.empty:
+        return pd.DataFrame(columns=["crts_id", "mag", "mag_err", "ra", "dec", "mjd", "blend", "catalog", "sep_arcsec"])
+    group_coords = SkyCoord(
+        ra=grouped_pos["ra"].to_numpy(dtype=float) * u.deg,
+        dec=grouped_pos["dec"].to_numpy(dtype=float) * u.deg,
+    )
+    group_sep = pd.Series(group_coords.separation(target).arcsec, index=grouped_pos.index)
+    closest_id = str(group_sep.sort_values().index[0])
+    closest_sep = float(group_sep.loc[closest_id])
+    if np.isfinite(closest_sep) and closest_sep > float(radius_arcsec):
+        return pd.DataFrame(columns=["crts_id", "mag", "mag_err", "ra", "dec", "mjd", "blend", "catalog", "sep_arcsec"])
+
+    lc = lc[lc["crts_id"] == closest_id].copy()
+    lc["catalog"] = catalog
+    lc["sep_arcsec"] = closest_sep
+    cols = ["crts_id", "mag", "mag_err", "ra", "dec", "mjd", "blend", "catalog", "sep_arcsec"]
+    return lc[cols].sort_values("mjd").reset_index(drop=True)
+
+
+def _query_crts_cgi_lightcurve(ra: float, dec: float, radius_arcsec: float) -> pd.DataFrame:
+    for catalog in ("photcat", "orphancat"):
+        raw = _fetch_crts_cgi_catalog(ra, dec, radius_arcsec, catalog)
+        lc = _normalize_crts_cgi_lightcurve(
+            raw,
+            ra=ra,
+            dec=dec,
+            radius_arcsec=radius_arcsec,
+            catalog=catalog,
+        )
+        if not lc.empty:
+            return lc
+    return pd.DataFrame(columns=["crts_id", "mag", "mag_err", "ra", "dec", "mjd", "blend", "catalog", "sep_arcsec"])
+
 
 def fetch_crts_lightcurves(
     df: pd.DataFrame,
@@ -3710,7 +3868,7 @@ def fetch_crts_lightcurves(
     refresh_cache: bool = False,
 ) -> pd.DataFrame:
     """
-    Fetch CRTS light curves using VizieR TAP (II/341/data table).
+    Fetch CRTS light curves using the CRTS DR2 CGI endpoint.
 
     Adds columns: crts_lc_n_points.
     If *output_dir* is set, saves per-candidate parquet files as
@@ -3727,7 +3885,7 @@ def fetch_crts_lightcurves(
         Path(output_dir).mkdir(parents=True, exist_ok=True)
 
     n_valid = int(valid.sum())
-    print(f"CRTS LCs: fetching {n_valid} light curves via TAP")
+    print(f"CRTS LCs: fetching {n_valid} light curves via CGI")
 
     valid_idx = df.index[valid].tolist()
     summary_cols = ["crts_lc_n_points"]
@@ -3740,154 +3898,59 @@ def fetch_crts_lightcurves(
         file_prefix="crts_lc",
         summary_cols=summary_cols,
         match_col="crts_lc_n_points",
-        cache_key_func=lambda idx: _coord_lookup_cache_key(df, idx, 3.0, "crts"),
+        cache_key_func=lambda idx: _coord_lookup_cache_key(df, idx, CRTS_MATCH_RADIUS_ARCSEC, "crts"),
         summarize_func=lambda lc: _summarize_count_lc(lc, "crts_lc_n_points"),
     )
     if not valid_idx:
         print(f"CRTS LCs: {cached_matched}/{n_valid} with data")
         return df
 
-    def _record_no_data(indices: list) -> None:
-        status_rows = []
-        for idx in indices:
+    matched = cached_matched
+    status_rows: list[dict] = []
+    failures: list[str] = []
+    for idx in tqdm(valid_idx, desc="CRTS LCs"):
+        cache_key = _coord_lookup_cache_key(df, idx, CRTS_MATCH_RADIUS_ARCSEC, "crts")
+        try:
+            lc_df = _query_crts_cgi_lightcurve(
+                float(df.loc[idx, "ra"]),
+                float(df.loc[idx, "dec"]),
+                CRTS_MATCH_RADIUS_ARCSEC,
+            )
+        except Exception as exc:
+            short = _short_error(exc)
+            failures.append(f"{_candidate_cache_id(df, idx)}: {short}")
             row = _external_lc_status_row(
                 df,
                 idx,
                 module="CRTS LCs",
-                cache_key=_coord_lookup_cache_key(df, idx, 3.0, "crts"),
-                summary={"crts_lc_n_points": 0},
-                status="no_data",
+                cache_key=cache_key,
+                summary={"crts_lc_n_points": 0, "error_message": short},
+                status="error",
             )
             if row is not None:
                 status_rows.append(row)
-        _write_external_lc_status(output_dir, status_rows)
-
-    # We do a batch query against II/341/data which has epoch photometry.
-    # Because II/341/data is massive, doing a batch crossmatch is best.
-    coords_df = pd.DataFrame({
-        "_idx": valid_idx,
-        "ra": df.loc[valid_idx, "ra"].values,
-        "dec": df.loc[valid_idx, "dec"].values,
-    })
-    
-    # Actually, II/341/data does not have RA/DEC, only "ID" which links to II/341/ptss
-    # It has "RAJ2000" and "DEJ2000" but usually crossmatching directly on data tables is disallowed.
-    # Let's crossmatch against the main catalog II/341/crts_prss first.
-    t0 = time.perf_counter()
-    try:
-        prss_result = batch_tap_crossmatch(
-            coords_df,
-            tap_url=VIZIER_TAP_URL,
-            catalog_table='"II/341/crts_prss"',
-            select_cols='c."ID"',
-            ra_col="RAJ2000",
-            dec_col="DEJ2000",
-            match_radius_arcsec=3.0,
-            chunk_size=1000,
-            n_workers=2,
-            desc="CRTS crossmatch",
-            raise_on_all_failed=True,
-            raise_on_failed_chunk=True,
-        )
-    except Exception as exc:
-        print(f"CRTS LCs: catalog crossmatch unavailable ({_short_error(exc)}); recording no data")
-        _record_no_data(valid_idx)
-        return df
-    
-    if prss_result.empty:
-        print("CRTS LCs: no counterparts found")
-        _record_no_data(valid_idx)
-        return df
-        
-    # Keep closest match per input index
-    prss_result = prss_result.sort_values("sep_arcsec").drop_duplicates(subset="_idx", keep="first")
-    crts_ids = prss_result["ID"].dropna().astype(str).tolist()
-    id_to_idx = dict(zip(prss_result["ID"].astype(str), prss_result["_idx"]))
-
-    if not crts_ids:
-        _record_no_data(valid_idx)
-        return df
-
-    print(f"CRTS LCs: fetching full LCs for {len(crts_ids)} matches...")
-    
-    # Query the II/341/data table for all matched IDs
-    tap_serv = pyvo.dal.TAPService(VIZIER_TAP_URL)
-    
-    # Doing chunks of 100 IDs
-    chunk_size = 100
-    all_lcs = []
-    
-    for i in tqdm(range(0, len(crts_ids), chunk_size), desc="CRTS Epoch"):
-        chunk_ids = crts_ids[i:i+chunk_size]
-        ids_str = ", ".join(f"'{cid}'" for cid in chunk_ids)
-        query = f"""
-        SELECT "ID", "ObsTime", "Mag", "e_Mag"
-        FROM "II/341/data"
-        WHERE "ID" IN ({ids_str})
-        """
-        try:
-            res = tap_serv.search(query, maxrec=500000)
-            res_df = res.to_table().to_pandas()
-            if not res_df.empty:
-                all_lcs.append(res_df)
-        except Exception as e:
-            print(f"CRTS LCs: epoch lookup failed for chunk starting at {i}: {_short_error(e)}")
-
-    if not all_lcs:
-        print("CRTS LCs: no epoch data retrieved")
-        _record_no_data(valid_idx)
-        return df
-
-    full_data = pd.concat(all_lcs, ignore_index=True)
-    full_data = full_data.rename(columns={"ObsTime": "mjd", "Mag": "mag", "e_Mag": "mag_err", "ID": "CRTS_ID"})
-    full_data["CRTS_ID"] = full_data["CRTS_ID"].astype(str)
-    
-    matched = cached_matched
-    seen_with_data: set = set()
-    status_rows: list[dict] = []
-    grouped = full_data.groupby("CRTS_ID")
-    for cid, group in grouped:
-        if cid not in id_to_idx:
             continue
-        idx = id_to_idx[cid]
-        
-        lc_df = group.sort_values("mjd").dropna(subset=["mjd", "mag"]).copy()
-        n_points = len(lc_df)
+
+        n_points = int(len(lc_df))
         df.loc[idx, "crts_lc_n_points"] = n_points
-        summary = {"crts_lc_n_points": n_points}
-        
         if output_dir and n_points > 0:
             _write_external_lc_file(output_dir, "crts_lc", df, idx, lc_df)
-
-        row = _external_lc_status_row(
-            df,
-            idx,
-            module="CRTS LCs",
-            cache_key=_coord_lookup_cache_key(df, idx, 3.0, "crts"),
-            summary=summary,
-            status="fetched" if n_points > 0 else "no_data",
-        )
-        if row is not None:
-            status_rows.append(row)
-        seen_with_data.add(idx)
         if n_points > 0:
             matched += 1
 
-    for idx in valid_idx:
-        if idx in seen_with_data:
-            continue
         row = _external_lc_status_row(
             df,
             idx,
             module="CRTS LCs",
-            cache_key=_coord_lookup_cache_key(df, idx, 3.0, "crts"),
-            summary={"crts_lc_n_points": 0},
-            status="no_data",
+            cache_key=cache_key,
+            summary={"crts_lc_n_points": n_points},
+            status="fetched" if n_points > 0 else "no_data",
         )
         if row is not None:
             status_rows.append(row)
 
     _write_external_lc_status(output_dir, status_rows)
+    _raise_lookup_failures("CRTS LCs", failures, n_valid)
     print(f"CRTS LCs: {matched}/{n_valid} with data")
     return df
 

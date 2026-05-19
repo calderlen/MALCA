@@ -4,6 +4,9 @@ from pathlib import Path
 import sys
 import types
 
+import pandas as pd
+import pytest
+
 
 if "celerite2" not in sys.modules:
     sys.modules["celerite2"] = types.SimpleNamespace(
@@ -31,6 +34,18 @@ def _write_dat2(path: Path) -> None:
         ),
         encoding="ascii",
     )
+
+
+def _write_tess_parquet(path: Path) -> None:
+    pd.DataFrame(
+        {
+            "time": [1000.0, 1001.0, 1002.0],
+            "flux": [1.0, 0.9, 1.1],
+            "flux_err": [0.01, 0.01, 0.02],
+            "quality": [0, 0, 0],
+            "sector": [1, 1, 1],
+        }
+    ).to_parquet(path, index=False)
 
 
 def test_review_lightcurve_publication_pdf_uses_native_matplotlib_data_path(tmp_path: Path) -> None:
@@ -164,3 +179,84 @@ def test_interactive_phase_panel_shows_placeholder_without_period(tmp_path: Path
         and str(annotation.yref).endswith(" domain")
         for annotation in fig.layout.annotations
     )
+
+
+def test_interactive_tess_overlay_appears_as_relative_magnitude_in_mag_mode(tmp_path: Path) -> None:
+    lc_path = tmp_path / "123.dat2"
+    tess_path = tmp_path / "tess_lc_123.parquet"
+    _write_dat2(lc_path)
+    _write_tess_parquet(tess_path)
+    payload = {
+        "candidate_id": "123",
+        "asas_sn_id": "123",
+        "lc_path": str(lc_path),
+        "baseline_mag": 14.0,
+    }
+
+    result = build_interactive_lightcurve_figure(
+        payload,
+        plot_dir=None,
+        selected_cameras=[],
+        selected_bands=["g", "V"],
+        filter_bad_cameras=False,
+        show_baseline=True,
+        show_event_markers=False,
+        show_residuals=False,
+        show_phase_fold=False,
+        show_raw_mag=True,
+        override_period=None,
+        show_diagnostics=False,
+        confidence_colors=False,
+        run_params={"baseline_func": "global_median"},
+        uirevision_key="test",
+        yaxis_mode="mag",
+        external_lcs={"tess": tess_path},
+    )
+
+    tess_trace = next(trace for trace in result["figure"].data if trace.name == "TESS rel. Δm")
+    assert tess_trace.y[0] == pytest.approx(14.0)
+    assert tess_trace.y[1] > 14.0
+    assert tess_trace.y[2] < 14.0
+    assert "raw flux" in tess_trace.hovertemplate
+    assert any("relative magnitude" in warning for warning in result["warnings"])
+    assert any("not calibrated TESS-band magnitude" in warning for warning in result["warnings"])
+
+
+def test_interactive_tess_overlay_appears_as_flux_in_flux_mode(tmp_path: Path) -> None:
+    lc_path = tmp_path / "123.dat2"
+    tess_path = tmp_path / "tess_lc_123.parquet"
+    _write_dat2(lc_path)
+    _write_tess_parquet(tess_path)
+    payload = {
+        "candidate_id": "123",
+        "asas_sn_id": "123",
+        "lc_path": str(lc_path),
+        "baseline_mag": 14.0,
+    }
+
+    result = build_interactive_lightcurve_figure(
+        payload,
+        plot_dir=None,
+        selected_cameras=[],
+        selected_bands=["g", "V"],
+        filter_bad_cameras=False,
+        show_baseline=True,
+        show_event_markers=False,
+        show_residuals=False,
+        show_phase_fold=False,
+        show_raw_mag=True,
+        override_period=None,
+        show_diagnostics=False,
+        confidence_colors=False,
+        run_params={"baseline_func": "global_median"},
+        uirevision_key="test",
+        yaxis_mode="flux",
+        external_lcs={"tess": tess_path},
+    )
+
+    fig = result["figure"]
+    tess_trace = next(trace for trace in fig.data if trace.name == "TESS flux")
+    assert list(tess_trace.y) == [1.0, 0.9, 1.1]
+    assert "F: %{y:.4e}" in tess_trace.hovertemplate
+    assert fig.layout.yaxis.autorange is True
+    assert not any("not calibrated TESS-band magnitude" in warning for warning in result["warnings"])

@@ -1,0 +1,185 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+from pathlib import Path
+
+import pandas as pd
+
+from malca.review.eda_panel import (
+    eda_plot_row_counts,
+    eda_publication_figure,
+    eda_scatter_figure,
+    eda_table_rows,
+    load_review_eda_frame,
+    queue_eda_frame,
+    selected_row_style,
+)
+
+
+def _write_review_db(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE candidates (candidate_id TEXT, source_path TEXT, payload_json TEXT)")
+        conn.execute(
+            "CREATE TABLE reviews (candidate_id TEXT, interest_score REAL, event_class TEXT, review_pass INTEGER, notes TEXT, status TEXT, reviewer TEXT, updated_at TEXT)"
+        )
+        for candidate_id, score, period_sources, dip_runs in (
+            ("A", 3.0, 2, 1),
+            ("B", 1.0, 0, 4),
+            ("C", 4.0, 1, 2),
+        ):
+            payload = {
+                "candidate_id": candidate_id,
+                "asas_sn_id": f"ASAS-{candidate_id}",
+                "dipper_score": score * 2,
+                "period_n_sources": period_sources,
+                "dip_run_count": dip_runs,
+            }
+            conn.execute(
+                "INSERT INTO candidates VALUES (?, ?, ?)",
+                (candidate_id, str(path.parent.parent), json.dumps(payload)),
+            )
+        conn.execute(
+            "INSERT INTO reviews VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("B", 2.0, "dipper", 1, "note", "reviewed", "tester", "2026-01-01"),
+        )
+        conn.commit()
+
+
+def test_load_review_eda_frame_adds_review_and_proxy_columns(tmp_path: Path) -> None:
+    db_path = tmp_path / "run" / "review" / "review.db"
+    _write_review_db(db_path)
+
+    frame = load_review_eda_frame(db_path, "sig1")
+
+    assert set(frame["candidate_id"]) == {"A", "B", "C"}
+    assert "periodic_evidence_bucket" in frame.columns
+    assert "is_reviewed" in frame.columns
+    assert frame.loc[frame["candidate_id"] == "B", "event_class"].iloc[0] == "dipper"
+
+
+def test_queue_eda_frame_preserves_queue_order(tmp_path: Path) -> None:
+    db_path = tmp_path / "run" / "review" / "review.db"
+    _write_review_db(db_path)
+    frame = load_review_eda_frame(db_path, "sig2")
+
+    queue_frame = queue_eda_frame(frame, ["C", "A"])
+
+    assert queue_frame["candidate_id"].tolist() == ["C", "A"]
+
+
+def test_eda_table_rows_tolerate_missing_optional_columns() -> None:
+    rows = eda_table_rows(pd.DataFrame({"candidate_id": ["A"], "dipper_score": [1.5]}))
+
+    assert rows == [{"candidate_id": "A", "dipper_score": 1.5}]
+
+
+def test_eda_scatter_figure_highlights_selected_candidate() -> None:
+    frame = pd.DataFrame(
+        {
+            "candidate_id": ["A", "B"],
+            "dipper_score": [1.0, 3.0],
+            "period_n_sources": [0, 2],
+        }
+    )
+
+    fig = eda_scatter_figure(
+        frame,
+        x_metric="period_n_sources",
+        y_metric="dipper_score",
+        selected_candidate_id="B",
+        theme="black",
+    )
+
+    assert len(fig.data) >= 2
+    assert fig.data[-1].name == "current"
+    assert fig.data[-1].customdata[0][0] == "B"
+
+
+def test_eda_scatter_figure_uses_plain_list_trace_data() -> None:
+    frame = pd.DataFrame(
+        {
+            "candidate_id": ["A", "B"],
+            "dipper_score": [1.0, 3.0],
+            "period_n_sources": [0, 2],
+        }
+    )
+
+    fig = eda_scatter_figure(
+        frame,
+        x_metric="period_n_sources",
+        y_metric="dipper_score",
+        selected_candidate_id="B",
+    )
+    raw = fig.to_dict()["data"][0]
+
+    assert raw["x"] == [0.0, 2.0]
+    assert raw["y"] == [1.0, 3.0]
+    assert not isinstance(raw["x"], dict)
+    assert fig.data[-1].x == (2.0,)
+    assert fig.data[-1].y == (3.0,)
+
+
+def test_eda_scatter_figure_reports_log_filtered_empty_data() -> None:
+    frame = pd.DataFrame(
+        {
+            "candidate_id": ["A", "B"],
+            "dipper_score": [1.0, 3.0],
+            "period_n_sources": [0, -2],
+        }
+    )
+
+    counts = eda_plot_row_counts(
+        frame,
+        x_metric="period_n_sources",
+        y_metric="dipper_score",
+        log_x=True,
+    )
+    fig = eda_scatter_figure(
+        frame,
+        x_metric="period_n_sources",
+        y_metric="dipper_score",
+        log_x=True,
+    )
+
+    assert counts["plottable_rows"] == 0
+    assert counts["dropped_nonpositive"] == 2
+    assert len(fig.data) == 0
+    assert "log-axis filtering" in fig.layout.annotations[0].text
+
+
+def test_eda_publication_figure_uses_publication_style_and_highlight() -> None:
+    frame = pd.DataFrame(
+        {
+            "candidate_id": ["A", "B"],
+            "dipper_score": [1.0, 3.0],
+            "period_n_sources": [0, 2],
+        }
+    )
+
+    fig = eda_publication_figure(
+        frame,
+        x_metric="period_n_sources",
+        y_metric="dipper_score",
+        selected_candidate_id="B",
+    )
+
+    assert fig.layout.paper_bgcolor == "white"
+    assert fig.layout.plot_bgcolor == "white"
+    assert "Helvetica" in fig.layout.font.family
+    assert fig.layout.xaxis.title.text == "period_n_sources"
+    assert fig.layout.yaxis.title.text == "dipper_score"
+    assert fig.data[-1].name == "current"
+    assert fig.data[-1].marker.line.color == "#111827"
+
+
+def test_selected_row_style_targets_selected_candidate() -> None:
+    style = selected_row_style(
+        [{"candidate_id": "A"}, {"candidate_id": "B"}],
+        "B",
+        theme="white",
+    )
+
+    assert style[0]["if"] == {"filter_query": '{candidate_id} = "B"'}
+    assert style[0]["fontWeight"] == "700"

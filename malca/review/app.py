@@ -21,7 +21,7 @@ import traceback
 import warnings
 import webbrowser
 
-from dash import dcc, html, Input, Output, State, callback_context, no_update, ALL, MATCH
+from dash import dcc, html, Input, Output, State, callback_context, no_update, ALL, MATCH, dash_table
 from dash import DiskcacheManager
 from flask import abort, send_from_directory
 import dash
@@ -112,7 +112,6 @@ from malca.review.filter_schema import (
     VETTING_KNOWN_SELECT_FILTERS,
     is_definite_known_type_value,
 )
-from malca.review.handoff import build_explorer_command, launch_detached
 from malca.review.pipeline import detect_pipeline_status, detect_sed_model_status, detect_sed_photometry_status
 from malca.review.pipeline import run_missing_stages
 from malca.review.pipeline import update_candidate_payload
@@ -153,6 +152,21 @@ from malca.review.store import (
 )
 from malca.review.store import import_lightcurve_files
 from malca.review.sed import build_sed_figure, load_sed_rows, sed_source_statuses
+from malca.review.eda_panel import (
+    EDA_TABLE_COLUMNS,
+    candidate_index_in_queue,
+    eda_metric_options,
+    eda_plot_row_counts,
+    eda_publication_figure,
+    eda_scatter_figure,
+    eda_status_figure,
+    eda_table_rows,
+    load_review_eda_frame,
+    queue_eda_frame,
+    resolve_eda_metric_values,
+    selected_candidate_from_queue,
+    selected_row_style,
+)
 from malca.sed_model import load_sed_model_curves, load_sed_model_fits
 
 
@@ -497,6 +511,130 @@ app.index_string = '''
             min-height: 260px;
             padding: 0 2px 0 8px;
             gap: 8px;
+        }
+        .eda-panel {
+            flex: 0 0 430px;
+            width: 430px;
+            min-width: 320px;
+            max-width: 82vw;
+            height: 100%;
+            min-height: 0;
+            overflow: hidden;
+            padding-left: 8px;
+            display: flex;
+            flex-direction: column;
+        }
+        .eda-panel.is-expanded {
+            flex-basis: min(82vw, 980px);
+            width: min(82vw, 980px);
+        }
+        .eda-panel.is-collapsed {
+            display: none;
+        }
+        .eda-panel-inner {
+            height: 100%;
+            min-height: 0;
+            overflow-y: auto;
+            overflow-x: hidden;
+            border: 1px solid rgba(84, 118, 140, 0.35);
+            border-radius: 8px;
+            background: linear-gradient(180deg, rgba(8, 18, 24, 0.94), rgba(3, 8, 12, 0.82));
+            padding: 10px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .eda-panel-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            min-width: 0;
+        }
+        .eda-panel-actions {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex: 0 0 auto;
+        }
+        .eda-panel-title {
+            color: #c6d7e8;
+            font-size: 12px;
+            font-weight: 600;
+            letter-spacing: 0.2px;
+        }
+        .eda-status-line {
+            color: #7d91a6;
+            font-size: 10px;
+            line-height: 1.35;
+            min-height: 14px;
+        }
+        .eda-controls {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 6px;
+        }
+        .eda-control-full {
+            grid-column: 1 / -1;
+        }
+        .eda-field-label {
+            color: #8ba4b8;
+            font-size: 10px;
+            line-height: 1.25;
+            margin-bottom: 2px;
+        }
+        .eda-graph-card,
+        .eda-table-card {
+            border: 1px solid rgba(84, 118, 140, 0.32);
+            border-radius: 8px;
+            background: rgba(3, 8, 12, 0.58);
+            padding: 8px;
+            min-width: 0;
+        }
+        .eda-graph-card {
+            flex: 0 0 auto;
+        }
+        .eda-graph-wrap {
+            height: clamp(320px, 38vh, 560px);
+            min-width: 0;
+        }
+        .eda-panel.is-expanded .eda-graph-wrap {
+            height: clamp(430px, 58vh, 760px);
+        }
+        .eda-table-card {
+            flex: 1 1 auto;
+            min-height: 260px;
+            display: flex;
+            flex-direction: column;
+        }
+        .eda-table-card .dash-table-container {
+            flex: 1 1 auto;
+            min-height: 0;
+        }
+        .eda-splitter {
+            position: relative;
+        }
+        .eda-drag-handle {
+            display: none;
+        }
+        .eda-panel-toggle {
+            appearance: none;
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            border: 0;
+            background: transparent;
+            color: transparent;
+            font-size: 0;
+            line-height: 0;
+            padding: 0;
+            cursor: pointer;
+            z-index: 3;
+            display: none;
+        }
+        .eda-splitter.collapsed .eda-panel-toggle {
+            display: block;
         }
         .panel-splitter-vertical {
             position: relative;
@@ -1513,7 +1651,10 @@ app.index_string = '''
         body[data-theme="white"] .review-form,
         body[data-theme="white"] .plot-status,
         body[data-theme="white"] .run-config-item,
-        body[data-theme="white"] .plot-toolbar { background-color: #ffffff !important; border-color: #c5d0da !important; color: #1c2733 !important; }
+        body[data-theme="white"] .plot-toolbar,
+        body[data-theme="white"] .eda-panel-inner,
+        body[data-theme="white"] .eda-graph-card,
+        body[data-theme="white"] .eda-table-card { background-color: #ffffff !important; border-color: #c5d0da !important; color: #1c2733 !important; }
         body[data-theme="black"] .section-title,
         body[data-theme="black"] .help-link,
         body[data-theme="black"] .metadata-sections summary,
@@ -1614,6 +1755,8 @@ app.index_string = '''
         body[data-theme="white"] .run-config-item .v,
         body[data-theme="white"] .plot-status,
         body[data-theme="white"] .plot-status .status-line,
+        body[data-theme="white"] .eda-status-line,
+        body[data-theme="white"] .eda-field-label,
         body[data-theme="white"] .plot-status li,
         body[data-theme="white"] .metadata-health,
         body[data-theme="white"] .bottom-context-v,
@@ -1668,9 +1811,7 @@ app.index_string = '''
             background: #fff3d8 !important;
         }
         body[data-theme="white"] .sidebar hr,
-        body[data-theme="white"] .metadata-sections details {
-            border-color: #d6e0e8 !important;
-        }
+        body[data-theme="white"] .metadata-sections details,
         body[data-theme="white"] .dash-checklist label,
         body[data-theme="white"] .dash-radioitems label {
             box-shadow: none !important;
@@ -2464,37 +2605,6 @@ def _render_repro_badge(run_params: dict | None, warnings: list[str]) -> html.Sp
     return html.Span(text, className=cls)
 
 
-def _render_explorer_selection_panel(selection_meta: dict | None) -> list:
-    """Render compact provenance for queues exported from explorer."""
-    meta = dict(selection_meta or {})
-    if not meta:
-        return [html.Div('This review DB was not exported from explorer.', style={'color': '#7d91a6'})]
-
-    plot_meta = dict(meta.get('plot') or {})
-    filter_meta = dict(meta.get('filters') or {})
-    rows: list[tuple[str, object]] = [
-        ('Created', meta.get('created_at')),
-        ('Candidates', meta.get('candidate_count')),
-        ('Filtered rows', meta.get('filtered_count')),
-        ('Sources', ', '.join(str(v) for v in (meta.get('source_labels') or [])) or '-'),
-        ('Query', filter_meta.get('query') or '-'),
-        ('X metric', plot_meta.get('x_metric') or '-'),
-        ('Y metric', plot_meta.get('y_metric') or '-'),
-    ]
-    source_files = [str(v) for v in (meta.get('source_files') or []) if str(v).strip()]
-    if source_files:
-        rows.append(('Source DBs', '; '.join(source_files[:3]) + (' ...' if len(source_files) > 3 else '')))
-
-    return [
-        html.Div([
-            html.Span(f'{label}: ', className='meta-field-label'),
-            html.Span(str(value), className='meta-field-value'),
-        ], className='meta-field-row')
-        for label, value in rows
-        if value not in (None, '')
-    ]
-
-
 def _format_queue_count(value: object) -> str:
     try:
         return f"{int(value):,}"
@@ -3117,6 +3227,17 @@ def _progress_counts() -> tuple[int, int]:
         str(Path(DB_PATH).expanduser()),
         _review_db_state_signature(DB_PATH),
     )
+
+
+def _current_eda_frame() -> pd.DataFrame:
+    """Load the EDA dataframe for the active review DB."""
+    return load_review_eda_frame(DB_PATH, _review_db_state_signature(DB_PATH))
+
+
+def _queue_candidate_ids(queue_data: object) -> list[str]:
+    if not isinstance(queue_data, dict):
+        return []
+    return [str(value) for value in (queue_data.get('candidate_ids') or [])]
 
 
 def _clear_review_state_caches() -> None:
@@ -4501,10 +4622,11 @@ def _review_filter_search_text(group_name: str, col: str) -> str:
 
 
 def _review_filter_anchor(group_name: str, col: str, child):
+    child_items = list(child) if isinstance(child, (list, tuple)) else [child]
     return html.Div(
         [
             html.Span(_review_filter_search_text(group_name, col), style={'display': 'none'}),
-            child,
+            *child_items,
         ],
         id=_review_filter_anchor_id(group_name, col),
         className='review-filter-anchor',
@@ -4856,6 +4978,8 @@ def create_layout():
         dcc.Store(id='review-session-start', data=None, storage_type='session'),
         dcc.Store(id='metadata-resize-init', data=0),
         dcc.Store(id='status-resize-init', data=0),
+        dcc.Store(id='eda-resize-init', data=0),
+        dcc.Store(id='eda-panel-state', data='open', storage_type='local'),
         dcc.Store(id='sidebar-plot-saved', data=0),  # dummy sink for plot prefs save callback
         dcc.Store(id='candidate-start-time', data=0),
         dcc.Store(id='review-progress-state', data={'reviewed': 0, 'total': 0}),
@@ -4865,6 +4989,7 @@ def create_layout():
         dcc.Download(id='sed-export-download'),
         dcc.Download(id='dustycult-export-download'),
         dcc.Download(id='mini-plot-export-download'),
+        dcc.Download(id='eda-plot-export-download'),
         dcc.Download(id='run-config-download'),
         dcc.Interval(id='keyboard-init', interval=200, n_intervals=0, max_intervals=1),
         dcc.Interval(id='review-metrics-interval', interval=1000, n_intervals=0),
@@ -4930,7 +5055,8 @@ def create_layout():
                     [{'label': 'Candidate ID', 'value': 'candidate_id'}]
                     + [{'label': col, 'value': col}
                        for _, items in _SIDEBAR_GROUPS
-                       for ftype, col in items if ftype == 'num']
+                       for ftype, col in items
+                       if ftype == 'num' and col not in {'interest_score', 'review_pass'}]
                      + [{'label': 'Confidence', 'value': 'interest_score'},
                         {'label': 'Review Pass', 'value': 'review_pass'},
                         {'label': 'Updated At', 'value': 'updated_at'}]
@@ -4972,17 +5098,8 @@ def create_layout():
             ),
 
             html.Div('Explore', className='section-title', style={'margin-top': '8px'}),
-            html.Div([
-                html.Button('Open Candidate In Explorer', id='open-candidate-in-explorer-btn', n_clicks=0,
-                            className='action-btn', style={'flex': '1 1 0'}),
-                html.Button('Open DB In Explorer', id='open-db-in-explorer-btn', n_clicks=0,
-                            className='action-btn', style={'flex': '1 1 0'}),
-            ], style={'display': 'flex', 'gap': '6px', 'marginBottom': '6px'}),
-            html.Div(id='explorer-launch-status', style={'fontSize': '10px', 'color': '#7da8c4', 'marginBottom': '6px'}),
-            html.Details([
-                html.Summary('Explorer Selection'),
-                html.Div(id='explorer-selection-panel', style={'fontSize': '10px', 'marginTop': '4px'}),
-            ], open=False),
+            html.Div('Use the EDA rail on the right to plot and jump within the current queue.',
+                     style={'fontSize': '10px', 'color': '#7d91a6', 'marginBottom': '6px'}),
 
             html.Hr(),
 
@@ -5060,8 +5177,10 @@ def create_layout():
                         style={'width': '100%'}),
             dcc.Loading(
                 id='loading-fetch', type='dot',
-                children=html.Div(id='fetch-status',
-                                  style={'fontSize': '11px', 'marginTop': '4px', 'color': '#7da8c4'}),
+                children=[
+                    html.Div(id='fetch-status',
+                             style={'fontSize': '11px', 'marginTop': '4px', 'color': '#7da8c4'}),
+                ],
             ),
             html.Div(id='cone-results-container', style={'fontSize': '10px', 'marginTop': '4px'}),
 
@@ -5414,9 +5533,11 @@ def create_layout():
                                 ], style={'display': 'flex', 'gap': '6px', 'marginTop': '4px', 'flexWrap': 'wrap'}),
                                 dcc.Loading(
                                     id='loading-pipeline', type='dot',
-                                    children=html.Div(id='pipeline-run-status',
-                                                      style={'fontSize': '10px', 'marginTop': '2px',
-                                                             'color': '#7da8c4'}),
+                                    children=[
+                                        html.Div(id='pipeline-run-status',
+                                                 style={'fontSize': '10px', 'marginTop': '2px',
+                                                        'color': '#7da8c4'}),
+                                    ],
                                 ),
                                 html.Details([
                                     html.Summary('Log', style={'cursor': 'pointer', 'marginTop': '4px'}),
@@ -5443,10 +5564,12 @@ def create_layout():
                         html.Details([
                             html.Summary('External Data', style={'cursor': 'pointer'}),
                             dcc.Loading(
-                                html.Div(
-                                    id='external-followup-panel',
-                                    style={'padding': '8px 10px', 'display': 'grid', 'gap': '8px'},
-                                ),
+                                [
+                                    html.Div(
+                                        id='external-followup-panel',
+                                        style={'padding': '8px 10px', 'display': 'grid', 'gap': '8px'},
+                                    ),
+                                ],
                                 type='default',
                             ),
                         ], id='external-followup-details', open=False, className='metadata-sections', style={'margin-top': '0'}),
@@ -5482,10 +5605,12 @@ def create_layout():
                                     style={'fontSize': '10px', 'color': '#7d91a6', 'padding': '4px 10px 0 10px'},
                                 ),
                                 dcc.Loading(
-                                    html.Div(
-                                        id='sed-plot-panel',
-                                        style={'padding': '8px 10px', 'display': 'grid', 'gap': '8px'},
-                                    ),
+                                    [
+                                        html.Div(
+                                            id='sed-plot-panel',
+                                            style={'padding': '8px 10px', 'display': 'grid', 'gap': '8px'},
+                                        ),
+                                    ],
                                     type='default',
                                 ),
                             ]),
@@ -5498,10 +5623,12 @@ def create_layout():
                             ),
                             _dustycult_controls_layout(),
                             dcc.Loading(
-                                html.Div(
-                                    id='dustycult-result-panel',
-                                    style={'padding': '8px 10px', 'display': 'grid', 'gap': '8px'},
-                                ),
+                                [
+                                    html.Div(
+                                        id='dustycult-result-panel',
+                                        style={'padding': '8px 10px', 'display': 'grid', 'gap': '8px'},
+                                    ),
+                                ],
                                 type='default',
                             ),
                         ], id='dustycult-details', open=False, className='metadata-sections', style={'margin-top': '0'}),
@@ -5513,16 +5640,18 @@ def create_layout():
                             ),
                             _phoebe_controls_layout(),
                             dcc.Loading(
-                                html.Div(
-                                    id='phoebe-result-panel',
-                                    style={'padding': '8px 10px', 'display': 'grid', 'gap': '8px'},
-                                ),
+                                [
+                                    html.Div(
+                                        id='phoebe-result-panel',
+                                        style={'padding': '8px 10px', 'display': 'grid', 'gap': '8px'},
+                                    ),
+                                ],
                                 type='default',
                             ),
                         ], id='phoebe-details', open=False, className='metadata-sections', style={'margin-top': '0'}),
                         html.Details([
-                            html.Summary([
-                                html.Span('Candidate Panels', style={'marginRight': '10px'}),
+                            html.Summary('Candidate Panels', style={'cursor': 'pointer'}),
+                            html.Div([
                                 dcc.Checklist(
                                     id='round-sigfigs',
                                     options=[{'label': ' Round', 'value': 'yes'}],
@@ -5545,10 +5674,12 @@ def create_layout():
                                 style={'fontSize': '10px', 'color': '#7d91a6', 'padding': '4px 10px 0 10px'},
                             ),
                             dcc.Loading(
-                                html.Div(
-                                    id='diagnostic-plots-panel',
-                                    style={'padding': '8px 10px', 'display': 'grid', 'gap': '8px'},
-                                ),
+                                [
+                                    html.Div(
+                                        id='diagnostic-plots-panel',
+                                        style={'padding': '8px 10px', 'display': 'grid', 'gap': '8px'},
+                                    ),
+                                ],
                                 type='default',
                             ),
                         ], id='diagnostic-plots-details', open=False, className='metadata-sections', style={'margin-top': '0'}),
@@ -5593,6 +5724,147 @@ def create_layout():
                         ),
                     ], className='plot-frame'),
                 ], className='plot-container right-plot-panel'),
+
+                html.Div(
+                    [
+                        html.Div(id='eda-drag-handle', className='eda-drag-handle', title='Drag to resize EDA panel'),
+                        html.Button('EDA', id='eda-panel-toggle', className='eda-panel-toggle', title='Show EDA panel', n_clicks=0),
+                    ],
+                    id='eda-splitter',
+                    className='eda-splitter panel-splitter-vertical',
+                    title='Drag to resize EDA panel',
+                ),
+
+                html.Div([
+                    html.Div([
+                        html.Div([
+                            html.Div([
+                                html.Div('Queue EDA', className='eda-panel-title'),
+                                html.Div(id='eda-status', className='eda-status-line'),
+                            ], style={'minWidth': '0'}),
+                            html.Div([
+                                html.Button('Wide', id='eda-expand-btn', n_clicks=0, className='compact-btn', title='Expand EDA panel'),
+                                html.Button('Hide', id='eda-collapse-btn', n_clicks=0, className='compact-btn', title='Collapse EDA panel'),
+                            ], className='eda-panel-actions'),
+                        ], className='eda-panel-header'),
+                        html.Div([
+                            html.Div([
+                                html.Div('X metric', className='eda-field-label'),
+                                dcc.Dropdown(
+                                    id='eda-x-metric',
+                                    options=[],
+                                    value=None,
+                                    clearable=True,
+                                    persistence=_review_persistence_token(),
+                                    persistence_type='local',
+                                ),
+                            ]),
+                            html.Div([
+                                html.Div('Y metric', className='eda-field-label'),
+                                dcc.Dropdown(
+                                    id='eda-y-metric',
+                                    options=[],
+                                    value=None,
+                                    clearable=True,
+                                    persistence=_review_persistence_token(),
+                                    persistence_type='local',
+                                ),
+                            ]),
+                            html.Div([
+                                html.Div('Color', className='eda-field-label'),
+                                dcc.Dropdown(
+                                    id='eda-color-metric',
+                                    options=[],
+                                    value=None,
+                                    clearable=True,
+                                    persistence=_review_persistence_token(),
+                                    persistence_type='local',
+                                ),
+                            ]),
+                            html.Div([
+                                html.Div('Symbol', className='eda-field-label'),
+                                dcc.Dropdown(
+                                    id='eda-symbol-metric',
+                                    options=[],
+                                    value=None,
+                                    clearable=True,
+                                    persistence=_review_persistence_token(),
+                                    persistence_type='local',
+                                ),
+                            ]),
+                            html.Div([
+                                dcc.Checklist(
+                                    id='eda-log-flags',
+                                    options=[
+                                        {'label': ' Log X', 'value': 'logx'},
+                                        {'label': ' Log Y', 'value': 'logy'},
+                                    ],
+                                    value=[],
+                                    inline=True,
+                                    persistence=_review_persistence_token(),
+                                    persistence_type='local',
+                                ),
+                            ], className='eda-control-full'),
+                        ], className='eda-controls'),
+                        html.Div([
+                            html.Div([
+                                html.Div('Custom Plot', className='eda-panel-title'),
+                                html.Div([
+                                    html.Button('Export PDF', id='eda-export-pdf-btn', n_clicks=0, className='compact-btn'),
+                                    html.Div(id='eda-export-status', className='eda-status-line'),
+                                ], style={'display': 'flex', 'alignItems': 'center', 'gap': '8px', 'minWidth': '0'}),
+                            ], style={'display': 'flex', 'alignItems': 'center', 'justifyContent': 'space-between', 'gap': '8px', 'marginBottom': '6px'}),
+                            html.Div([
+                                dcc.Graph(
+                                    id='eda-custom-graph',
+                                    mathjax=True,
+                                    config=graph_config_without_image_export({
+                                        'displaylogo': False,
+                                        'scrollZoom': True,
+                                        'doubleClick': False,
+                                        'responsive': True,
+                                    }),
+                                    responsive=True,
+                                    style={'height': '100%', 'width': '100%', 'minWidth': '0'},
+                                ),
+                            ], className='eda-graph-wrap'),
+                        ], className='eda-graph-card'),
+                        html.Div([
+                            html.Div('Candidates', className='eda-panel-title', style={'marginBottom': '6px'}),
+                            dash_table.DataTable(
+                                id='eda-candidate-table',
+                                columns=EDA_TABLE_COLUMNS,
+                                hidden_columns=['candidate_key'],
+                                data=[],
+                                page_action='native',
+                                page_size=12,
+                                sort_action='native',
+                                sort_mode='multi',
+                                filter_action='native',
+                                cell_selectable=True,
+                                style_table={'overflowX': 'auto', 'minHeight': '220px'},
+                                style_cell={
+                                    'backgroundColor': '#071016',
+                                    'color': '#dce8f2',
+                                    'border': '1px solid rgba(84, 118, 140, 0.35)',
+                                    'fontFamily': "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+                                    'fontSize': '11px',
+                                    'padding': '6px 7px',
+                                    'maxWidth': '130px',
+                                    'overflow': 'hidden',
+                                    'textOverflow': 'ellipsis',
+                                },
+                                style_header={
+                                    'backgroundColor': '#101b24',
+                                    'color': '#dce8f2',
+                                    'fontWeight': '600',
+                                    'border': '1px solid rgba(84, 118, 140, 0.45)',
+                                },
+                                style_data_conditional=[],
+                            ),
+                        ], className='eda-table-card'),
+                    ], className='eda-panel-inner'),
+                ], id='eda-panel', className='eda-panel'),
             ], className='workspace-panels'),
 
             # Control bar
@@ -5647,7 +5919,9 @@ def create_layout():
                     html.Span(' | ', style={'color': '#444', 'margin-right': '10px'}),
                     dcc.Loading(
                         id='loading-pipeline-bottom', type='dot',
-                        children=html.Span(id='bottom-pipeline-status', style={'color': '#7da8c4', 'font-size': '11px'}),
+                        children=[
+                            html.Span(id='bottom-pipeline-status', style={'color': '#7da8c4', 'font-size': '11px'}),
+                        ],
                     ),
                 ], style={'display': 'flex', 'align-items': 'center'}),
             ], className='control-bar'),
@@ -5679,8 +5953,12 @@ def create_layout():
 
         # Help modal
         dbc.Modal([
-            dbc.ModalBody(html.Pre(HELP_TEXT, style={'color': '#e0e0e0', 'margin': '0', 'font-size': '11px'})),
-            dbc.ModalFooter(dbc.Button("Close", id="close-help", className="action-btn")),
+            dbc.ModalBody([
+                html.Pre(HELP_TEXT, style={'color': '#e0e0e0', 'margin': '0', 'font-size': '11px'}),
+            ]),
+            dbc.ModalFooter([
+                dbc.Button("Close", id="close-help", className="action-btn"),
+            ]),
         ], id="help-modal", is_open=False),
     ], className='main-container')
 
@@ -6291,6 +6569,410 @@ app.clientside_callback(
     Input('keyboard-init', 'n_intervals'),
     prevent_initial_call=False,
 )
+
+
+app.clientside_callback(
+    """
+    function(_tick, panelState) {
+        var splitter = document.getElementById('eda-splitter');
+        var panel = document.getElementById('eda-panel');
+        var workspace = document.querySelector('.workspace-panels');
+        if (!splitter || !panel || !workspace) {
+            return window.dash_clientside.no_update;
+        }
+
+        var storageKey = 'malca.review.eda_panel.width.v1';
+        var minWidth = 320;
+        var defaultWidth = 430;
+        var state = String(panelState || 'open');
+
+        var computeMaxWidth = function() {
+            var total = workspace.clientWidth || window.innerWidth;
+            return Math.max(minWidth + 80, Math.floor(total * 0.82));
+        };
+
+        var clampWidth = function(value) {
+            var maxWidth = computeMaxWidth();
+            var numeric = Number(value);
+            if (!isFinite(numeric)) numeric = defaultWidth;
+            if (numeric < minWidth) numeric = minWidth;
+            if (numeric > maxWidth) numeric = maxWidth;
+            return Math.round(numeric);
+        };
+
+        var applyWidth = function(value, persist) {
+            var w = clampWidth(value);
+            panel.classList.remove('is-expanded');
+            panel.style.width = String(w) + 'px';
+            panel.style.flex = '0 0 ' + String(w) + 'px';
+            if (persist) {
+                try { window.localStorage.setItem(storageKey, String(w)); } catch (e) {}
+            }
+            return w;
+        };
+
+        var applyExpandedWidth = function() {
+            var w = computeMaxWidth();
+            panel.style.width = String(w) + 'px';
+            panel.style.flex = '0 0 ' + String(w) + 'px';
+            panel.classList.add('is-expanded');
+            return w;
+        };
+
+        if (!window.__malcaEdaSplitterAttached) {
+            var drag = { active: false, startX: 0, startWidth: 0, pointerId: null };
+
+            var panelIsOpen = function() {
+                return panel && !panel.classList.contains('is-collapsed');
+            };
+
+            var onPointerMove = function(e) {
+                if (!drag.active) return;
+                var nextWidth = drag.startWidth - (e.clientX - drag.startX);
+                applyWidth(nextWidth, false);
+                e.preventDefault();
+            };
+
+            var stopDrag = function(e) {
+                if (!drag.active) return;
+                drag.active = false;
+                splitter.classList.remove('dragging');
+                window.removeEventListener('pointermove', onPointerMove);
+                window.removeEventListener('pointerup', stopDrag);
+                window.removeEventListener('pointercancel', stopDrag);
+                if (drag.pointerId !== null && splitter.releasePointerCapture) {
+                    try { splitter.releasePointerCapture(drag.pointerId); } catch (err) {}
+                }
+                drag.pointerId = null;
+                applyWidth(panel.getBoundingClientRect().width, true);
+                if (e) e.preventDefault();
+            };
+
+            splitter.addEventListener('pointerdown', function(e) {
+                if (!panelIsOpen()) return;
+                drag.active = true;
+                drag.startX = e.clientX;
+                drag.startWidth = panel.getBoundingClientRect().width;
+                drag.pointerId = (typeof e.pointerId === 'number') ? e.pointerId : null;
+                splitter.classList.add('dragging');
+                panel.classList.remove('is-expanded');
+                if (drag.pointerId !== null && splitter.setPointerCapture) {
+                    try { splitter.setPointerCapture(drag.pointerId); } catch (err) {}
+                }
+                window.addEventListener('pointermove', onPointerMove);
+                window.addEventListener('pointerup', stopDrag);
+                window.addEventListener('pointercancel', stopDrag);
+                e.preventDefault();
+            });
+
+            window.addEventListener('resize', function() {
+                if (panelIsOpen()) {
+                    if (panel.classList.contains('is-expanded')) {
+                        applyExpandedWidth();
+                    } else {
+                        applyWidth(panel.getBoundingClientRect().width, false);
+                    }
+                }
+            });
+
+            window.__malcaEdaSplitterAttached = true;
+        }
+
+        if (state === 'expanded') {
+            applyExpandedWidth();
+        } else if (state !== 'collapsed') {
+            var saved = null;
+            try { saved = window.localStorage.getItem(storageKey); } catch (e) { saved = null; }
+            var initialWidth = defaultWidth;
+            if (saved !== null && saved !== '') {
+                var parsed = parseInt(saved, 10);
+                if (!isNaN(parsed)) initialWidth = parsed;
+            }
+            applyWidth(initialWidth, false);
+        }
+
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output('eda-resize-init', 'data'),
+    Input('keyboard-init', 'n_intervals'),
+    Input('eda-panel-state', 'data'),
+    prevent_initial_call=False,
+)
+
+
+@app.callback(
+    [Output('eda-panel', 'className'),
+     Output('eda-splitter', 'className'),
+     Output('eda-expand-btn', 'children'),
+     Output('eda-expand-btn', 'title'),
+     Output('eda-panel-toggle', 'children'),
+     Output('eda-panel-toggle', 'title'),
+     Output('eda-panel-state', 'data')],
+    [Input('eda-collapse-btn', 'n_clicks'),
+     Input('eda-expand-btn', 'n_clicks'),
+     Input('eda-panel-toggle', 'n_clicks')],
+    State('eda-panel-state', 'data'),
+    prevent_initial_call=False,
+)
+def toggle_eda_panel(collapse_clicks, expand_clicks, restore_clicks, panel_state):
+    """Set embedded EDA rail state: collapsed, restored width, or expanded wide."""
+    state = str(panel_state or 'open')
+    if state not in {'open', 'collapsed', 'expanded'}:
+        state = 'open'
+
+    triggered = callback_context.triggered_id
+    if triggered == 'eda-collapse-btn' and collapse_clicks:
+        state = 'collapsed'
+    elif triggered == 'eda-panel-toggle' and restore_clicks:
+        state = 'open'
+    elif triggered == 'eda-expand-btn' and expand_clicks:
+        state = 'open' if state == 'expanded' else 'expanded'
+
+    panel_class = 'eda-panel'
+    splitter_class = 'eda-splitter panel-splitter-vertical'
+    if state == 'collapsed':
+        panel_class += ' is-collapsed'
+        splitter_class += ' collapsed'
+    elif state == 'expanded':
+        panel_class += ' is-expanded'
+
+    expand_text = 'Restore' if state == 'expanded' else 'Wide'
+    expand_title = 'Restore saved EDA width' if state == 'expanded' else 'Expand EDA panel'
+    return panel_class, splitter_class, expand_text, expand_title, 'EDA', 'Show EDA panel', state
+
+
+@app.callback(
+    [Output('eda-x-metric', 'options'),
+     Output('eda-x-metric', 'value'),
+     Output('eda-y-metric', 'options'),
+     Output('eda-y-metric', 'value'),
+     Output('eda-color-metric', 'options'),
+     Output('eda-color-metric', 'value'),
+     Output('eda-symbol-metric', 'options'),
+     Output('eda-symbol-metric', 'value')],
+    [Input('queue-data', 'data'),
+     Input('review-db-scope', 'data'),
+     Input('last-candidate-saved', 'data'),
+     Input('import-trigger', 'data')],
+    [State('eda-x-metric', 'value'),
+     State('eda-y-metric', 'value'),
+     State('eda-color-metric', 'value'),
+     State('eda-symbol-metric', 'value')],
+    prevent_initial_call=False,
+)
+def sync_eda_metric_controls(queue_data, _db_scope, _last_saved, _import_trigger, x_metric, y_metric, color_metric, symbol_metric):
+    try:
+        frame = _current_eda_frame()
+        queue_frame = queue_eda_frame(frame, _queue_candidate_ids(queue_data))
+        metric_frame = queue_frame if not queue_frame.empty else frame
+        options = eda_metric_options(metric_frame)
+        x_value, y_value, color_value, symbol_value = resolve_eda_metric_values(
+            metric_frame,
+            x_metric=x_metric,
+            y_metric=y_metric,
+            color_metric=color_metric,
+            symbol_metric=symbol_metric,
+        )
+    except Exception:
+        options = []
+        x_value = y_value = color_value = symbol_value = None
+    return options, x_value, options, y_value, options, color_value, options, symbol_value
+
+
+@app.callback(
+    [Output('eda-status', 'children'),
+     Output('eda-custom-graph', 'figure'),
+     Output('eda-candidate-table', 'data'),
+     Output('eda-candidate-table', 'style_data_conditional')],
+    [Input('queue-data', 'data'),
+     Input('current-index', 'data'),
+     Input('eda-x-metric', 'value'),
+     Input('eda-y-metric', 'value'),
+     Input('eda-color-metric', 'value'),
+     Input('eda-symbol-metric', 'value'),
+     Input('eda-log-flags', 'value'),
+     Input('theme-mode-store', 'data'),
+     Input('last-candidate-saved', 'data'),
+     Input('import-trigger', 'data'),
+     Input('review-db-scope', 'data')],
+    prevent_initial_call=False,
+)
+def update_eda_panel(queue_data, current_index, x_metric, y_metric, color_metric, symbol_metric, log_flags, theme_mode, _last_saved, _import_trigger, _db_scope):
+    theme = str(theme_mode or DEFAULT_THEME)
+    try:
+        frame = _current_eda_frame()
+        queue_ids = _queue_candidate_ids(queue_data)
+        queue_frame = queue_eda_frame(frame, queue_ids)
+    except Exception as exc:
+        return f"EDA unavailable: {exc}", eda_status_figure("EDA data unavailable.", theme=theme), [], []
+
+    selected_candidate = selected_candidate_from_queue(queue_data, current_index)
+    if not queue_ids:
+        fig = eda_status_figure("Refresh the review queue to populate EDA.", theme=theme)
+        return "No active review queue.", fig, [], []
+
+    x_value, y_value, color_value, symbol_value = resolve_eda_metric_values(
+        queue_frame if not queue_frame.empty else frame,
+        x_metric=x_metric,
+        y_metric=y_metric,
+        color_metric=color_metric,
+        symbol_metric=symbol_metric,
+    )
+    flags = set(log_flags or [])
+    fig = eda_scatter_figure(
+        queue_frame,
+        x_metric=x_value,
+        y_metric=y_value,
+        color_metric=color_value,
+        symbol_metric=symbol_value,
+        selected_candidate_id=selected_candidate,
+        log_x='logx' in flags,
+        log_y='logy' in flags,
+        theme=theme,
+    )
+    rows = eda_table_rows(queue_frame)
+    style = selected_row_style(rows, selected_candidate, theme=theme)
+    selected_text = selected_candidate or 'none'
+    counts = eda_plot_row_counts(
+        queue_frame,
+        x_metric=x_value,
+        y_metric=y_value,
+        log_x='logx' in flags,
+        log_y='logy' in flags,
+    )
+    status_parts = [
+        f"Queue rows: {len(queue_frame):,}/{len(frame):,}",
+        f"Plotted: {int(counts.get('plottable_rows') or 0):,}",
+    ]
+    dropped_missing = int(counts.get('dropped_missing') or 0)
+    dropped_nonpositive = int(counts.get('dropped_nonpositive') or 0)
+    if dropped_missing:
+        status_parts.append(f"Dropped missing: {dropped_missing:,}")
+    if dropped_nonpositive:
+        status_parts.append(f"Dropped log<=0: {dropped_nonpositive:,}")
+    status_parts.append(f"Current: {selected_text}")
+    status = " | ".join(status_parts)
+    return status, fig, rows, style
+
+
+@app.callback(
+    [Output('eda-plot-export-download', 'data'),
+     Output('eda-export-status', 'children')],
+    Input('eda-export-pdf-btn', 'n_clicks'),
+    [State('queue-data', 'data'),
+     State('current-index', 'data'),
+     State('eda-x-metric', 'value'),
+     State('eda-y-metric', 'value'),
+     State('eda-color-metric', 'value'),
+     State('eda-symbol-metric', 'value'),
+     State('eda-log-flags', 'value')],
+    prevent_initial_call=True,
+)
+def export_eda_plot_pdf(n_clicks, queue_data, current_index, x_metric, y_metric, color_metric, symbol_metric, log_flags):
+    if not n_clicks:
+        return no_update, no_update
+    queue_ids = _queue_candidate_ids(queue_data)
+    if not queue_ids:
+        return no_update, "No active review queue to export."
+    x_value = str(x_metric or "").strip()
+    y_value = str(y_metric or "").strip()
+    if not x_value or not y_value:
+        return no_update, "Choose valid X and Y metrics before exporting."
+    try:
+        frame = _current_eda_frame()
+        queue_frame = queue_eda_frame(frame, queue_ids)
+    except Exception as exc:
+        return no_update, f"EDA PDF export failed: {exc}"
+    if queue_frame.empty:
+        return no_update, "Current queue has no EDA rows to export."
+    missing = [metric for metric in (x_value, y_value) if metric not in queue_frame.columns]
+    if missing:
+        return no_update, f"Missing EDA metric: {', '.join(missing)}"
+    flags = set(log_flags or [])
+    counts = eda_plot_row_counts(
+        queue_frame,
+        x_metric=x_value,
+        y_metric=y_value,
+        log_x='logx' in flags,
+        log_y='logy' in flags,
+    )
+    if int(counts.get('plottable_rows') or 0) <= 0:
+        if int(counts.get('dropped_nonpositive') or 0):
+            return no_update, f"No queue rows remain after log-axis filtering for {y_value} vs {x_value}."
+        return no_update, f"No queue rows have plottable {x_value} and {y_value} values."
+
+    color_value = str(color_metric).strip() if color_metric and str(color_metric).strip() in queue_frame.columns else None
+    symbol_value = str(symbol_metric).strip() if symbol_metric and str(symbol_metric).strip() in queue_frame.columns else None
+    selected_candidate = selected_candidate_from_queue(queue_data, current_index)
+    title = f"{y_value} vs {x_value}"
+    try:
+        export_fig = eda_publication_figure(
+            queue_frame,
+            x_metric=x_value,
+            y_metric=y_value,
+            color_metric=color_value,
+            symbol_metric=symbol_value,
+            selected_candidate_id=selected_candidate,
+            log_x='logx' in flags,
+            log_y='logy' in flags,
+        )
+        image_bytes = render_publication_pdf(
+            export_fig,
+            title=title,
+            width=1200,
+            height=820,
+            legend_outside=True,
+            style=False,
+        )
+    except Exception as exc:
+        return no_update, f"EDA PDF export failed: {exc}"
+    fname = f"review_eda_{slugify_token(y_value, fallback='y')}_vs_{slugify_token(x_value, fallback='x')}.pdf"
+    return dcc.send_bytes(image_bytes, fname), f"Exported {fname}"
+
+
+@app.callback(
+    [Output('current-index', 'data', allow_duplicate=True),
+     Output('notification', 'children', allow_duplicate=True)],
+    [Input('eda-custom-graph', 'clickData'),
+     Input('eda-candidate-table', 'active_cell')],
+    [State('eda-candidate-table', 'derived_virtual_data'),
+     State('eda-candidate-table', 'data'),
+     State('queue-data', 'data'),
+     State('current-index', 'data')],
+    prevent_initial_call=True,
+)
+def navigate_from_eda(click_data, active_cell, visible_table_data, table_data, queue_data, current_index):
+    triggered = callback_context.triggered_id
+    candidate_id = ''
+    if triggered == 'eda-custom-graph':
+        points = (click_data or {}).get('points') or []
+        if points:
+            custom = points[0].get('customdata')
+            if isinstance(custom, (list, tuple)) and custom:
+                candidate_id = str(custom[0])
+            elif custom:
+                candidate_id = str(custom)
+    elif triggered == 'eda-candidate-table' and isinstance(active_cell, dict):
+        row_idx = active_cell.get('row')
+        try:
+            visible_rows = visible_table_data or table_data or []
+            row = visible_rows[int(row_idx)]
+        except Exception:
+            row = {}
+        candidate_id = str(row.get('candidate_id') or '')
+
+    next_index = candidate_index_in_queue(queue_data, candidate_id)
+    if next_index is None:
+        raise dash.exceptions.PreventUpdate
+    try:
+        if int(current_index or 0) == int(next_index):
+            raise dash.exceptions.PreventUpdate
+    except dash.exceptions.PreventUpdate:
+        raise
+    except Exception:
+        pass
+    return next_index, f"EDA selected {candidate_id}."
 
 
 # Toggle sidebar
@@ -7768,47 +8450,6 @@ def restore_startup_candidate(queue_data, already_applied):
     return no_update, no_update, no_update, True
 
 
-@app.callback(
-    Output('explorer-launch-status', 'children'),
-    [Input('open-candidate-in-explorer-btn', 'n_clicks'),
-     Input('open-db-in-explorer-btn', 'n_clicks')],
-    State('current-candidate-id', 'data'),
-    prevent_initial_call=True,
-)
-def open_in_explorer(_open_candidate_clicks, _open_db_clicks, current_candidate_id):
-    """Launch explorer on this DB, optionally focused on the current candidate."""
-    triggered = callback_context.triggered[0]['prop_id'].split('.')[0] if callback_context.triggered else ''
-    candidate_id = str(current_candidate_id or '').strip()
-    if triggered == 'open-candidate-in-explorer-btn' and not candidate_id:
-        return 'No candidate selected to open in explorer.'
-
-    command, url = build_explorer_command(
-        sources=[DB_PATH],
-        candidate=(candidate_id if triggered == 'open-candidate-in-explorer-btn' else None),
-        plot_dir=PLOT_DIR,
-    )
-    launch_detached(command)
-    return f"Opened explorer at {url}."
-
-
-@app.callback(
-    Output('explorer-selection-panel', 'children'),
-    Input('keyboard-init', 'n_intervals'),
-    prevent_initial_call=False,
-)
-def load_explorer_selection_panel(_tick):
-    """Display selection provenance when this review DB came from explorer."""
-    with closing(db_connect(Path(DB_PATH))) as conn:
-        raw = str(load_app_state(conn, 'explorer_selection_meta', '') or '').strip()
-    if not raw:
-        return _render_explorer_selection_panel(None)
-    try:
-        selection_meta = json.loads(raw)
-    except Exception:
-        selection_meta = None
-    return _render_explorer_selection_panel(selection_meta)
-
-
 def _do_save(candidate_id, score, taxonomy_selection, needs_followup, notes, event_type, *, increment_pass=False):
     """Shared save helper.  Auto-sets status; only increments review_pass on Done."""
     with closing(db_connect(Path(DB_PATH))) as conn:
@@ -9139,14 +9780,22 @@ def _dustycult_result_figure(curves: pd.DataFrame, fit_row: pd.Series, theme: st
         for col in ("time", "observed", "error", "lower95", "lower68", "median", "upper68", "upper95"):
             if col in work.columns:
                 work[col] = pd.to_numeric(work[col], errors="coerce")
-        bands = sorted(str(b) for b in work["band"].dropna().unique()) if "band" in work.columns else [""]
+        band_order = {"g": 0, "v": 1}
+        bands = (
+            sorted(
+                (str(b) for b in work["band"].dropna().unique()),
+                key=lambda value: (band_order.get(str(value).lower(), 99), str(value)),
+            )
+            if "band" in work.columns
+            else [""]
+        )
         for band in bands:
             part = work[work["band"].astype(str) == band].sort_values("time")
             color = palette.get(band, "#7da8c4")
             name_prefix = f"{band} " if band else ""
             for lower, upper, fill, opacity in (
-                ("lower95", "upper95", "95%", 0.14),
-                ("lower68", "upper68", "68%", 0.24),
+                ("lower95", "upper95", "95%", 0.08),
+                ("lower68", "upper68", "68%", 0.16),
             ):
                 if lower in part.columns and upper in part.columns:
                     interval = part[np.isfinite(part["time"]) & np.isfinite(part[lower]) & np.isfinite(part[upper])]
@@ -9158,6 +9807,7 @@ def _dustycult_result_figure(curves: pd.DataFrame, fit_row: pd.Series, theme: st
                             line=dict(width=0, color=color),
                             hoverinfo="skip",
                             showlegend=False,
+                            legendgroup=band,
                         ))
                         fig.add_trace(go.Scatter(
                             x=interval["time"],
@@ -9168,6 +9818,8 @@ def _dustycult_result_figure(curves: pd.DataFrame, fit_row: pd.Series, theme: st
                             fillcolor=f"rgba({int(color[1:3], 16)}, {int(color[3:5], 16)}, {int(color[5:7], 16)}, {opacity})",
                             name=f"{name_prefix}{fill}",
                             hoverinfo="skip",
+                            showlegend=False,
+                            legendgroup=band,
                         ))
             if "median" in part.columns:
                 med = part[np.isfinite(part["time"]) & np.isfinite(part["median"])]
@@ -9178,6 +9830,7 @@ def _dustycult_result_figure(curves: pd.DataFrame, fit_row: pd.Series, theme: st
                         mode="lines",
                         name=f"{name_prefix}median",
                         line=dict(color=color, width=2),
+                        legendgroup=band,
                     ))
             obs = part[np.isfinite(part["time"]) & np.isfinite(part.get("observed", np.nan))]
             if not obs.empty:
@@ -9191,6 +9844,7 @@ def _dustycult_result_figure(curves: pd.DataFrame, fit_row: pd.Series, theme: st
                     name=f"{name_prefix}observed",
                     marker=dict(color=color, size=6, line=dict(color="#111827", width=0.5)),
                     error_y=error_y,
+                    legendgroup=band,
                 ))
     else:
         fig.add_annotation(text="No predictive curve rows stored for this fit.", showarrow=False, x=0.5, y=0.5, xref="paper", yref="paper")
@@ -9210,25 +9864,34 @@ def _dustycult_result_figure(curves: pd.DataFrame, fit_row: pd.Series, theme: st
         pass
     fig.update_layout(
         template=None,
-        title=f"DustyCult {mode.capitalize()} Fit",
+        title=dict(
+            text=f"DustyCult {mode.capitalize()} Fit",
+            x=0.02,
+            xanchor="left",
+            y=0.985,
+            yanchor="top",
+            font=dict(size=14),
+        ),
         paper_bgcolor=spec["paper_bg"],
         plot_bgcolor=spec["plot_bg"],
         font=dict(color=spec["font"], size=11),
-        margin=dict(l=56, r=18, t=42, b=48),
-        height=360,
+        margin=dict(l=58, r=24, t=86, b=56),
+        height=390,
         legend=dict(
             orientation="h",
             yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1,
+            y=1.06,
+            xanchor="left",
+            x=0,
             bgcolor=spec["legend_bg"],
             bordercolor=spec["legend_border"],
             borderwidth=1,
+            font=dict(size=10),
+            itemwidth=30,
         ),
     )
-    fig.update_xaxes(title=r"$t\ [\mathrm{JD}]$", gridcolor=spec["grid"], zeroline=False)
-    fig.update_yaxes(title=r"$F/F_{\mathrm{GP}}$", gridcolor=spec["grid"], zeroline=False)
+    fig.update_xaxes(title=dict(text=r"$t\ [\mathrm{JD}]$", standoff=8), gridcolor=spec["grid"], zeroline=False, ticks="outside")
+    fig.update_yaxes(title=dict(text=r"$F/F_{\mathrm{GP}}$", standoff=8), gridcolor=spec["grid"], zeroline=False, ticks="outside")
     return fig
 
 
@@ -9289,16 +9952,16 @@ def _render_dustycult_result_panel(candidate_id: str, theme_mode: str | None, _r
             id='dustycult-fit-plot',
             figure=_dustycult_result_figure(curves, fit_row, theme_mode),
             mathjax=True,
-            config=graph_config_without_image_export({'displayModeBar': True, 'responsive': True}),
-            style={'height': '370px'},
+            config=graph_config_without_image_export({'displayModeBar': False, 'responsive': True}),
+            style={'height': '400px'},
         ))
         try:
             children.append(dcc.Graph(
                 id='dustycult-occulter-plot',
                 figure=build_dustycult_occulter_figure(fit_row, theme=theme_mode, grid_n=251),
                 mathjax=True,
-                config=graph_config_without_image_export({'displayModeBar': True, 'responsive': True}),
-                style={'height': '430px'},
+                config=graph_config_without_image_export({'displayModeBar': False, 'responsive': True}),
+                style={'height': '440px'},
             ))
         except Exception as exc:
             children.append(html.Div(
@@ -11481,16 +12144,20 @@ def _run_pipeline_impl(set_progress, run_clicks, rerun_clicks, rerun_stats_click
                 if isinstance(df_ext, pd.DataFrame) and not df_ext.empty:
                     row = df_ext.iloc[0].to_dict()
                     update_candidate_payload(conn, candidate_id, row)
-                    stages.append('external_lcs')
-                    on_stage_complete('external_lcs')
-                    p("Computing multi-survey features...")
-                    from malca.review.pipeline import _run_multi_survey_features_stage
+                    failures = list(getattr(df_ext, "attrs", {}).get("external_lc_failures") or [])
+                    if failures:
+                        p(f"External LCs finished with failures; leaving stage partial: {'; '.join(failures[:3])}")
+                    else:
+                        stages.append('external_lcs')
+                        on_stage_complete('external_lcs')
+                        p("Computing multi-survey features...")
+                        from malca.review.pipeline import _run_multi_survey_features_stage
 
-                    payload = get_candidate_payload(conn, candidate_id)
-                    _run_multi_survey_features_stage(payload, ext_output, p)
-                    update_candidate_payload(conn, candidate_id, payload)
-                    stages.append('multi_survey_features')
-                    on_stage_complete('multi_survey_features')
+                        payload = get_candidate_payload(conn, candidate_id)
+                        _run_multi_survey_features_stage(payload, ext_output, p)
+                        update_candidate_payload(conn, candidate_id, payload)
+                        stages.append('multi_survey_features')
+                        on_stage_complete('multi_survey_features')
 
         refresh_idx = int(idx or 0) if idx is not None else 0
         if stages:

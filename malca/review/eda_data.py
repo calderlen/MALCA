@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -101,47 +100,13 @@ def infer_plot_dir_from_source(source_path: str | Path, explicit_plot_dir: str |
     return None
 
 
-def infer_plot_dir_for_record(record: dict[str, Any], fallback_plot_dir: Path | None) -> Path | None:
-    source_path = record.get("source_path")
-    if source_path:
-        candidate = Path(str(source_path)).expanduser()
-        if candidate.exists() and candidate.is_dir():
-            plot_dir = candidate / "plots"
-            if plot_dir.is_dir():
-                return plot_dir.resolve()
-    plot_dir_value = record.get("plot_dir")
-    if plot_dir_value:
-        plot_dir = Path(str(plot_dir_value)).expanduser()
-        if plot_dir.is_dir():
-            return plot_dir.resolve()
-    return fallback_plot_dir
-
-
-def load_run_params(plot_dir: Path | None) -> dict[str, Any] | None:
-    if plot_dir is None:
-        return None
-    run_dir = plot_dir.parent if plot_dir.name == "plots" else plot_dir
-    candidates = [run_dir / "run_params.json"]
-    candidates.extend(sorted(run_dir.glob("run_params_*.json")))
-    for candidate in candidates:
-        if not candidate.exists():
-            continue
-        try:
-            data = json.loads(candidate.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        if isinstance(data, dict):
-            return data
-    return None
-
-
 def load_review_db(source_path: str | Path) -> pd.DataFrame:
     path = Path(source_path).expanduser().resolve()
     with sqlite3.connect(path) as conn:
         df = pd.read_sql_query("SELECT * FROM candidates", conn)
         try:
             reviews = pd.read_sql_query(
-                "SELECT candidate_id, interest_score, event_class, review_pass, notes, status, reviewer, updated_at FROM reviews",
+                "SELECT * FROM reviews",
                 conn,
             )
         except Exception:
@@ -173,232 +138,6 @@ def load_candidate_source(source_path: str | Path, source_kind: str | None = Non
     if kind == "csv":
         return pd.read_csv(path)
     raise ValueError(f"Unsupported source kind: {kind}")
-
-
-def _normalized_id(value: object) -> str:
-    if value is None:
-        return ""
-    text = str(value).strip()
-    if text.endswith(".0"):
-        try:
-            return str(int(float(text)))
-        except Exception:
-            return text
-    return text
-
-
-def _build_lookup(df: pd.DataFrame) -> dict[str, int]:
-    lookup: dict[str, int] = {}
-    for idx, row in df.iterrows():
-        for col in ("candidate_id", "asas_sn_id", "gaia_id"):
-            if col not in row:
-                continue
-            key = _normalized_id(row.get(col))
-            if key and key not in lookup:
-                lookup[key] = int(idx)
-    return lookup
-
-
-def _candidate_base_id(row: pd.Series, fallback: str) -> str:
-    for col in ("candidate_id", "asas_sn_id", "gaia_id"):
-        key = _normalized_id(row.get(col))
-        if key:
-            return key
-    return fallback
-
-
-def _source_label_from_path(source_path: Path) -> str:
-    if source_path.suffix.lower() == ".db" and source_path.parent.name == "review":
-        return source_path.parent.parent.name
-    if source_path.parent.name == "results":
-        return source_path.parent.parent.name
-    return source_path.stem
-
-
-@dataclass
-class CandidateSourceData:
-    source_path: Path
-    source_kind: str
-    source_label: str
-    df: pd.DataFrame
-    lookup: dict[str, int]
-    default_plot_dir: Path | None
-
-    @property
-    def default_candidate_id(self) -> str:
-        if self.df.empty:
-            return ""
-        row = self.df.iloc[0]
-        for col in ("candidate_id", "asas_sn_id", "gaia_id"):
-            key = _normalized_id(row.get(col))
-            if key:
-                return key
-        return ""
-
-
-@dataclass
-class CombinedCandidateData:
-    df: pd.DataFrame
-    sources: list[CandidateSourceData]
-    key_lookup: dict[str, int]
-    id_lookup: dict[str, list[str]]
-
-    @property
-    def default_candidate_key(self) -> str:
-        if self.df.empty or "candidate_key" not in self.df.columns:
-            return ""
-        return str(self.df.iloc[0]["candidate_key"])
-
-
-def load_source_data(
-    source_path: str | Path,
-    source_kind: str | None = None,
-    plot_dir: str | Path | None = None,
-    source_label: str | None = None,
-) -> CandidateSourceData:
-    path = Path(source_path).expanduser().resolve()
-    kind = source_kind or infer_source_kind(path)
-    label = source_label or _source_label_from_path(path)
-    df = load_candidate_source(path, kind).copy()
-    df["source_file"] = str(path)
-    df["source_label"] = label
-    default_plot_dir = infer_plot_dir_from_source(path, plot_dir)
-    if default_plot_dir is not None:
-        df["plot_dir"] = str(default_plot_dir)
-
-    used_keys: set[str] = set()
-    candidate_keys: list[str] = []
-    for idx, row in df.iterrows():
-        base_id = _candidate_base_id(row, fallback=str(idx))
-        key = f"{label}::{base_id}"
-        if key in used_keys:
-            key = f"{key}::{idx}"
-        used_keys.add(key)
-        candidate_keys.append(key)
-    df["candidate_key"] = candidate_keys
-
-    return CandidateSourceData(
-        source_path=path,
-        source_kind=kind,
-        source_label=label,
-        df=df,
-        lookup=_build_lookup(df),
-        default_plot_dir=default_plot_dir,
-    )
-
-
-def discover_default_sources(repo_root: str | Path | None = None) -> list[Path]:
-    root = Path.cwd().resolve() if repo_root is None else Path(repo_root).expanduser().resolve()
-    run_dbs = sorted(root.glob("output/runs/*/review/review.db"))
-    populated = []
-    for path in run_dbs:
-        try:
-            with sqlite3.connect(path) as conn:
-                count = int(conn.execute("SELECT COUNT(*) FROM candidates").fetchone()[0])
-        except Exception:
-            count = -1
-        if count > 0:
-            populated.append(path)
-    if populated:
-        return populated
-
-    for path in (root / "output" / "review" / "review.db", root / "output" / "review" / "standalone.db"):
-        if path.exists():
-            return [path]
-
-    parquet_patterns = [
-        "output/runs/*/results/lc_events_vetted.parquet",
-        "output/runs/*/results/lc_events_spectra.parquet",
-        "output/runs/*/results/lc_events_neighbors.parquet",
-        "output/runs/*/results/lc_events_classified.parquet",
-        "output/runs/*/results/lc_events_characterized.parquet",
-        "output/runs/*/results/lc_events_filtered.parquet",
-    ]
-    parquet_matches: list[Path] = []
-    for pattern in parquet_patterns:
-        parquet_matches.extend(sorted(root.glob(pattern)))
-    return parquet_matches
-
-
-def load_combined_source_data(
-    *,
-    sources: list[str | Path] | None = None,
-    source_kind: str | None = None,
-    plot_dir: str | Path | None = None,
-    repo_root: str | Path | None = None,
-) -> CombinedCandidateData:
-    source_paths = [Path(s).expanduser().resolve() for s in (sources or discover_default_sources(repo_root))]
-    if not source_paths:
-        raise FileNotFoundError("No candidate sources were found. Pass --source explicitly or create run review DBs.")
-
-    loaded_sources = [load_source_data(path, source_kind=source_kind, plot_dir=plot_dir) for path in source_paths]
-    frames = [src.df for src in loaded_sources if not src.df.empty]
-    if frames:
-        combined = pd.concat(frames, ignore_index=True, sort=False)
-    else:
-        combined = pd.DataFrame()
-
-    key_lookup: dict[str, int] = {}
-    id_lookup: dict[str, list[str]] = {}
-    if not combined.empty:
-        for idx, row in combined.iterrows():
-            candidate_key = str(row.get("candidate_key") or "")
-            if candidate_key:
-                key_lookup[candidate_key] = int(idx)
-            for col in ("candidate_id", "asas_sn_id", "gaia_id"):
-                key = _normalized_id(row.get(col))
-                if not key or not candidate_key:
-                    continue
-                id_lookup.setdefault(key, []).append(candidate_key)
-
-    return CombinedCandidateData(df=combined, sources=loaded_sources, key_lookup=key_lookup, id_lookup=id_lookup)
-
-
-def get_candidate_record(source_data: CandidateSourceData, candidate_id: str | None) -> dict[str, Any] | None:
-    if source_data.df.empty:
-        return None
-    key = _normalized_id(candidate_id)
-    if not key:
-        key = source_data.default_candidate_id
-    idx = source_data.lookup.get(key)
-    if idx is None:
-        return None
-    row = source_data.df.loc[idx]
-    return row.to_dict() if isinstance(row, pd.Series) else None
-
-
-def get_candidate_record_by_key(combined: CombinedCandidateData, candidate_key: str | None) -> dict[str, Any] | None:
-    if combined.df.empty:
-        return None
-    key = str(candidate_key or "").strip()
-    if not key:
-        key = combined.default_candidate_key
-    idx = combined.key_lookup.get(key)
-    if idx is None:
-        return None
-    row = combined.df.loc[idx]
-    return row.to_dict() if isinstance(row, pd.Series) else None
-
-
-def find_candidate_key(combined: CombinedCandidateData, search_value: str | None, subset: pd.DataFrame | None = None) -> str | None:
-    key = _normalized_id(search_value)
-    if not key:
-        return None
-    if subset is not None and not subset.empty:
-        subset_lookup = _build_lookup(subset)
-        idx = subset_lookup.get(key)
-        if idx is not None:
-            row = subset.loc[idx]
-            if isinstance(row, pd.Series):
-                candidate_key = str(row.get("candidate_key") or "")
-                if candidate_key:
-                    return candidate_key
-    matches = combined.id_lookup.get(key)
-    if matches:
-        return matches[0]
-    if key in combined.key_lookup:
-        return key
-    return None
 
 
 def bool_series(frame: pd.DataFrame, col: str, default: bool = False) -> pd.Series:
@@ -593,55 +332,6 @@ def add_eda_columns(frame: pd.DataFrame) -> pd.DataFrame:
 
     out["final_class_label"] = text_series(out, "final_class").replace("", "unknown")
     return out
-
-
-def query_mask(frame: pd.DataFrame, query: str | None = None) -> pd.Series:
-    if not query:
-        return pd.Series(True, index=frame.index, dtype="bool")
-    idx = frame.query(query, engine="python").index
-    return pd.Series(frame.index.isin(idx), index=frame.index, dtype="bool")
-
-
-def cut_summary(
-    frame: pd.DataFrame,
-    mask: pd.Series,
-    *,
-    target_col: str,
-    reject_col: str,
-    eligible_query: str | None = None,
-    name: str = "cut",
-) -> pd.Series:
-    eligible = query_mask(frame, eligible_query)
-    selected = eligible & mask.fillna(False).astype(bool)
-    target = eligible & bool_series(frame, target_col)
-    reject = eligible & bool_series(frame, reject_col)
-
-    n_selected = int(selected.sum())
-    n_target = int(target.sum())
-    n_reject = int(reject.sum())
-    n_selected_target = int((selected & target).sum())
-    n_selected_reject = int((selected & reject).sum())
-
-    purity = n_selected_target / n_selected if n_selected else np.nan
-    target_recall = n_selected_target / n_target if n_target else np.nan
-    reject_leakage = n_selected_reject / n_selected if n_selected else np.nan
-    lift = purity / (n_target / int(eligible.sum())) if n_selected and int(eligible.sum()) and n_target else np.nan
-
-    return pd.Series(
-        {
-            "name": name,
-            "eligible": int(eligible.sum()),
-            "selected": n_selected,
-            "target_total": n_target,
-            "reject_total": n_reject,
-            "selected_target": n_selected_target,
-            "selected_reject": n_selected_reject,
-            "purity": purity,
-            "target_recall": target_recall,
-            "reject_leakage": reject_leakage,
-            "lift_vs_base_rate": lift,
-        }
-    )
 
 
 def available_metric_columns(frame: pd.DataFrame) -> list[str]:

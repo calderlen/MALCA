@@ -215,6 +215,8 @@ def build_dustycult_occulter_figure(
                 zmin=0.0,
                 zmax=zmax,
                 coloraxis="coloraxis",
+                zsmooth="best",
+                hoverongaps=False,
                 hovertemplate=(
                     f"<b>{band}</b><br>"
                     "$x/R_\\star$: %{x:.3f}<br>"
@@ -255,7 +257,7 @@ def build_dustycult_occulter_figure(
                 mode="markers",
                 marker=dict(size=7, color="#d66b6b", line=dict(color=font, width=0.7)),
                 name="occulter center" if idx == 1 else "occulter center",
-                showlegend=idx == 1,
+                showlegend=False,
                 hovertemplate="center<br>$x/R_\\star$: %{x:.3f}<br>$y/R_\\star$: %{y:.3f}<extra></extra>",
             ),
             row=1,
@@ -277,33 +279,61 @@ def build_dustycult_occulter_figure(
             arrowcolor=font,
             text="",
         )
-        fig.update_xaxes(range=[-extent, extent], scaleanchor=yref, scaleratio=1, row=1, col=idx)
-        fig.update_yaxes(range=[-extent, extent], row=1, col=idx)
+        fig.update_xaxes(range=[-extent, extent], scaleanchor=yref, scaleratio=1, constrain="domain", row=1, col=idx)
+        fig.update_yaxes(range=[-extent, extent], constrain="domain", row=1, col=idx)
 
     fig.update_layout(
         template=None,
-        title=f"{title}{mode_title}",
+        title=dict(
+            text=f"{title}{mode_title}",
+            x=0.02,
+            xanchor="left",
+            y=0.985,
+            yanchor="top",
+            font=dict(size=14),
+        ),
         paper_bgcolor=paper,
         plot_bgcolor=plot,
         font=dict(color=font, size=11),
-        margin=dict(l=58, r=82, t=54, b=54),
-        height=420,
+        margin=dict(l=58, r=94, t=78, b=62),
+        height=430,
+        showlegend=False,
         coloraxis=dict(
             colorscale="Inferno",
             cmin=0.0,
             cmax=zmax,
-            colorbar=dict(title=r"$1-e^{-\tau_\lambda}$"),
-        ),
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1.0,
-            bgcolor="rgba(255,255,255,0.82)" if white else "rgba(13,13,13,0.82)",
+            colorbar=dict(
+                title=dict(text="absorption", side="right", font=dict(size=11)),
+                len=0.76,
+                y=0.46,
+                yanchor="middle",
+                thickness=18,
+                x=1.02,
+                xanchor="left",
+                tickformat=".2f",
+                tickfont=dict(size=10),
+                ticks="outside",
+            ),
         ),
     )
-    fig.update_xaxes(title=r"$x/R_\star$", gridcolor=grid, zeroline=False)
-    fig.update_yaxes(title=r"$y/R_\star$", gridcolor=grid, zeroline=False)
+    for annotation in fig.layout.annotations:
+        if annotation.xref == "paper" and annotation.yref == "paper" and not annotation.showarrow:
+            annotation.font = dict(size=14, color=font)
+            annotation.y = 1.02
+    fig.update_xaxes(
+        title=dict(text=r"$x/R_\star$", standoff=8),
+        gridcolor=grid,
+        zeroline=False,
+        ticks="outside",
+        tickfont=dict(size=10),
+        constrain="domain",
+    )
+    fig.update_yaxes(
+        title=dict(text=r"$y/R_\star$", standoff=8),
+        gridcolor=grid,
+        zeroline=False,
+        ticks="outside",
+        tickfont=dict(size=10),
+        constrain="domain",
+    )
     return fig
-

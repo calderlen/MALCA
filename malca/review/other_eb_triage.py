@@ -12,7 +12,7 @@ import pandas as pd
 from malca.lightcurve_publication import PUBLICATION_STYLE, plot_lightcurve_panel, plot_phase_panel
 from malca.lightcurve_io import load_lightcurve_df
 from malca.notebook_paths import find_repo_root, localize_lightcurve_frame_paths
-from malca.review.explore_data import infer_source_kind, load_candidate_source
+from malca.review.eda_data import infer_source_kind, load_candidate_source
 
 
 DEFAULT_CANDIDATES_SOURCE = Path("output/candidates.parquet")

@@ -69,7 +69,7 @@ from astropy.coordinates.solar_system import get_body_barycentric_posvel
 from scipy.optimize import least_squares, lsq_linear
 
 from malca.lightcurve_io import load_lightcurve_df
-from malca.review.explore_data import infer_plot_dir_from_source
+from malca.review.eda_data import infer_plot_dir_from_source
 from malca.review.interactive_plot import resolve_lightcurve_path
 from malca.review.store import get_candidate_payload, init_db
 from malca.utils import batch_gaia_cone_query, clean_lc

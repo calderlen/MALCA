@@ -146,6 +146,108 @@ def test_export_sed_pdf_uses_white_theme_and_dark_model_line(monkeypatch) -> Non
     assert "Exported" in message
 
 
+def test_export_eda_plot_pdf_uses_publication_renderer(monkeypatch) -> None:
+    seen = {}
+    frame = pd.DataFrame(
+        {
+            "candidate_id": ["B", "A"],
+            "period_n_sources": [2, 0],
+            "dipper_score": [4.0, 1.0],
+            "status": ["reviewed", "pending"],
+        }
+    )
+
+    def fake_render(fig, *args, **kwargs):
+        seen["fig"] = fig
+        seen.update(kwargs)
+        return b"%PDF"
+
+    monkeypatch.setattr(review_app, "_current_eda_frame", lambda: frame)
+    monkeypatch.setattr(review_app, "render_publication_pdf", fake_render)
+
+    data, message = review_app.export_eda_plot_pdf(
+        1,
+        {"candidate_ids": ["B", "A"]},
+        0,
+        "period_n_sources",
+        "dipper_score",
+        "status",
+        None,
+        [],
+    )
+
+    assert data is not no_update
+    assert data["filename"] == "review_eda_dipper_score_vs_period_n_sources.pdf"
+    assert "Exported review_eda_dipper_score_vs_period_n_sources.pdf" in message
+    assert seen["title"] == "dipper_score vs period_n_sources"
+    assert seen["width"] == 1200
+    assert seen["height"] == 820
+    assert seen["style"] is False
+    assert seen["fig"].layout.paper_bgcolor == "white"
+    assert seen["fig"].data[-1].name == "current"
+    assert seen["fig"].data[-1].customdata[0][0] == "B"
+
+
+def test_export_eda_plot_pdf_reports_empty_queue() -> None:
+    data, message = review_app.export_eda_plot_pdf(
+        1,
+        {"candidate_ids": []},
+        0,
+        "period_n_sources",
+        "dipper_score",
+        None,
+        None,
+        [],
+    )
+
+    assert data is no_update
+    assert "No active review queue" in message
+
+
+def test_export_eda_plot_pdf_reports_missing_metric(monkeypatch) -> None:
+    frame = pd.DataFrame({"candidate_id": ["A"], "period_n_sources": [1]})
+    monkeypatch.setattr(review_app, "_current_eda_frame", lambda: frame)
+
+    data, message = review_app.export_eda_plot_pdf(
+        1,
+        {"candidate_ids": ["A"]},
+        0,
+        "period_n_sources",
+        "dipper_score",
+        None,
+        None,
+        [],
+    )
+
+    assert data is no_update
+    assert "Missing EDA metric: dipper_score" in message
+
+
+def test_export_eda_plot_pdf_reports_log_filtered_rows(monkeypatch) -> None:
+    frame = pd.DataFrame(
+        {
+            "candidate_id": ["A"],
+            "period_n_sources": [0],
+            "dipper_score": [2.0],
+        }
+    )
+    monkeypatch.setattr(review_app, "_current_eda_frame", lambda: frame)
+
+    data, message = review_app.export_eda_plot_pdf(
+        1,
+        {"candidate_ids": ["A"]},
+        0,
+        "period_n_sources",
+        "dipper_score",
+        None,
+        None,
+        ["logx"],
+    )
+
+    assert data is no_update
+    assert "log-axis filtering" in message
+
+
 def test_export_active_plot_png_mode_uses_matplotlib_lightcurve_renderer(monkeypatch) -> None:
     seen = {}
 

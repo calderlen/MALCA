@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 from io import BytesIO
 import os
 from pathlib import Path
@@ -274,12 +275,45 @@ def _plotly_color(value: object, fallback: str = "#1f77b4") -> tuple[float, floa
         return to_rgba(fallback)
 
 
+def _decode_plotly_bdata(value: object) -> list[float] | None:
+    if not isinstance(value, dict) or "bdata" not in value:
+        return None
+    try:
+        import numpy as np
+
+        dtype_text = str(value.get("dtype") or "f8")
+        dtype_aliases = {
+            "f8": "float64",
+            "f4": "float32",
+            "i8": "int64",
+            "i4": "int32",
+            "i2": "int16",
+            "i1": "int8",
+            "u8": "uint64",
+            "u4": "uint32",
+            "u2": "uint16",
+            "u1": "uint8",
+        }
+        dtype = np.dtype(dtype_aliases.get(dtype_text, dtype_text))
+        payload = base64.b64decode(str(value.get("bdata") or ""))
+        arr = np.frombuffer(payload, dtype=dtype)
+        shape = value.get("shape")
+        if shape:
+            if isinstance(shape, str):
+                shape = [int(part) for part in re.split(r"[,x ]+", shape) if part.strip()]
+            arr = arr.reshape(tuple(shape))
+        return [float(v) for v in arr.reshape(-1)]
+    except Exception:
+        return []
+
+
 def _trace_array(trace: dict[str, Any], key: str) -> list[float]:
     raw = trace.get(key)
     if raw is None:
         return []
-    if isinstance(raw, dict) and "bdata" in raw:
-        return []
+    decoded = _decode_plotly_bdata(raw)
+    if decoded is not None:
+        return decoded
     try:
         import numpy as np
 
@@ -298,8 +332,14 @@ def _trace_array(trace: dict[str, Any], key: str) -> list[float]:
 def _numeric_sequence(value: object) -> list[float]:
     if value is None or isinstance(value, str):
         return []
-    if isinstance(value, dict) and "bdata" in value:
-        return []
+    decoded = _decode_plotly_bdata(value)
+    if decoded is not None:
+        try:
+            import numpy as np
+
+            return [float(v) for v in decoded if np.isfinite(v)]
+        except Exception:
+            return []
     try:
         import numpy as np
 

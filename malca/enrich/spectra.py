@@ -28,7 +28,7 @@ def _generate_link(row: pd.Series) -> str | None:
     if "sdss" in survey:
         sid = row.get("SpObjID") or row.get("SpecObjID")
         if sid:
-            # Link to SDSS Explorer using the spectral ID (sid)
+            # Link to the SDSS spectral summary using the spectral ID (sid)
             return f"http://skyserver.sdss.org/dr17/en/tools/explore/Summary.aspx?sid={sid}"
 
     # LAMOST DR8 (VizieR V/164/dr8 usually has 'ObsID')

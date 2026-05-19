@@ -863,7 +863,7 @@ def build_external_lookup_links(
             f"https://www.aavso.org/vsx/index.php?view=results.get&coords={ra}+{dec}&format=d&num=1",
         ))
 
-    # -- ALeRCE Explorer ------------------------------------------------------
+    # -- ALeRCE ---------------------------------------------------------------
     alerce_oid = _safe_str(payload.get("alerce_oid"))
     if alerce_oid:
         links.append((

@@ -29,6 +29,11 @@ _BACKGROUND_POINT_LIMIT = 4000
 
 _PUBLICATION_DPI = 300
 _PUBLICATION_DENSITY_BINS = 240
+_CANDIDATE_COLOR = "#dc2626"
+_DEREDDENED_COLOR = "#2563eb"
+_CANDIDATE_EDGE_COLOR = "#111827"
+_PLOTLY_CANDIDATE_SIZE = 9
+_PUBLICATION_CANDIDATE_SIZE = 42
 
 
 def _safe_float(payload: dict, key: str) -> float | None:
@@ -88,9 +93,20 @@ def _apply_layout(fig: go.Figure, *, title: str, spec: dict, height: int = 280) 
         font=dict(color=spec["font"], size=10),
         showlegend=False,
     )
+    fig.update_traces(showlegend=False)
     fig.update_xaxes(gridcolor=spec["grid"], zeroline=False)
     fig.update_yaxes(gridcolor=spec["grid"], zeroline=False)
     return fig
+
+
+def _plotly_candidate_marker(*, dereddened: bool = False, size: int = _PLOTLY_CANDIDATE_SIZE) -> dict:
+    """Consistent candidate marker for diagnostic Plotly figures."""
+    return dict(
+        size=size,
+        color=_DEREDDENED_COLOR if dereddened else _CANDIDATE_COLOR,
+        symbol="circle",
+        line=dict(width=1.5, color=_CANDIDATE_EDGE_COLOR),
+    )
 
 
 def _axis_range_with_padding(values: list[float], *, pad_fraction: float, min_pad: float) -> list[float] | None:
@@ -248,7 +264,7 @@ def _metric_plane_figure(
         x=[x_val],
         y=[y_val],
         mode="markers",
-        marker=dict(size=12, color=spec["marker"], symbol="star", line=dict(width=2, color=spec["font"])),
+        marker=_plotly_candidate_marker(),
         name="Candidate",
         hovertemplate=f"{x_title} = {x_val:.3g}<br>{y_title} = {y_val:.3g}<extra></extra>",
     ))
@@ -333,11 +349,8 @@ def build_cmd_figure(
     spec = _theme_spec(theme)
     fig = go.Figure()
 
-    # Background sample
-    bg = background or {}
-    bg_x = bg.get("cmd_bprp0")
-    bg_y = bg.get("cmd_mg0")
-    if bg_x is not None and bg_y is not None and len(bg_x) > 0:
+    bg_x, bg_y = _finite_xy(background, "cmd_bprp0", "cmd_mg0")
+    if bg_x.size > 0:
         fig.add_trace(go.Scattergl(
             x=bg_x, y=bg_y,
             mode="markers",
@@ -350,12 +363,10 @@ def build_cmd_figure(
     show_vector = (abs(bp_rp0 - bp_rp) > 0.01 or abs(m_g0 - m_g) > 0.01)
 
     if show_vector:
-        # Observed (hollow)
         fig.add_trace(go.Scattergl(
             x=[bp_rp], y=[m_g],
             mode="markers",
-            marker=dict(size=10, color=spec["plot_bg"], symbol="star",
-                        line=dict(width=1.5, color=spec["marker"])),
+            marker=_plotly_candidate_marker(),
             name="Observed",
             hovertemplate=f"BP-RP = {bp_rp:.2f}<br>M_G = {m_g:.2f}<extra>observed</extra>",
         ))
@@ -367,12 +378,10 @@ def build_cmd_figure(
             arrowcolor=spec["muted"], opacity=0.6,
         )
 
-    # Dereddened (filled)
     fig.add_trace(go.Scattergl(
         x=[bp_rp0], y=[m_g0],
         mode="markers",
-        marker=dict(size=12, color=spec["marker"], symbol="star",
-                    line=dict(width=2, color=spec["font"])),
+        marker=_plotly_candidate_marker(dereddened=True),
         name="Dereddened",
         hovertemplate=f"BP-RP₀ = {bp_rp0:.2f}<br>M_G₀ = {m_g0:.2f}<extra>dereddened</extra>",
     ))
@@ -441,11 +450,8 @@ def build_ir_colorcolor_figure(
     spec = _theme_spec(theme)
     fig = go.Figure()
 
-    # Background sample
-    bg = background or {}
-    bg_x = bg.get("ir_w1w2")
-    bg_y = bg.get("ir_hk")
-    if bg_x is not None and bg_y is not None and len(bg_x) > 0:
+    bg_x, bg_y = _finite_xy(background, "ir_w1w2", "ir_hk")
+    if bg_x.size > 0:
         fig.add_trace(go.Scattergl(
             x=bg_x, y=bg_y,
             mode="markers",
@@ -484,12 +490,10 @@ def build_ir_colorcolor_figure(
     show_vector = (abs(hk_dered - hk_obs) > 0.01 or abs(w1w2_dered - w1w2_obs) > 0.01)
 
     if show_vector:
-        # Observed (hollow)
         fig.add_trace(go.Scattergl(
             x=[w1w2_obs], y=[hk_obs],
             mode="markers",
-            marker=dict(size=8, color=spec["plot_bg"], symbol="circle",
-                        line=dict(width=1.5, color=spec["marker"])),
+            marker=_plotly_candidate_marker(),
             name="Observed",
             hovertemplate=f"W1-W2 = {w1w2_obs:.2f}<br>H-K = {hk_obs:.2f}<extra>observed</extra>",
         ))
@@ -501,12 +505,10 @@ def build_ir_colorcolor_figure(
             arrowcolor=spec["muted"], opacity=0.6,
         )
 
-    # Dereddened (filled)
     fig.add_trace(go.Scattergl(
         x=[w1w2_dered], y=[hk_dered],
         mode="markers",
-        marker=dict(size=11, color=spec["marker"], symbol="circle",
-                    line=dict(width=2, color=spec["font"])),
+        marker=_plotly_candidate_marker(dereddened=True),
         name="Dereddened",
         hovertemplate=f"W1-W2₀ = {w1w2_dered:.2f}<br>H-K₀ = {hk_dered:.2f}<extra>dereddened</extra>",
     ))
@@ -567,11 +569,8 @@ def build_kiel_figure(
     spec = _theme_spec(theme)
     fig = go.Figure()
 
-    # Background sample
-    bg = background or {}
-    bg_x = bg.get("kiel_teff")
-    bg_y = bg.get("kiel_logg")
-    if bg_x is not None and bg_y is not None and len(bg_x) > 0:
+    bg_x, bg_y = _finite_xy(background, "kiel_teff", "kiel_logg")
+    if bg_x.size > 0:
         fig.add_trace(go.Scattergl(
             x=bg_x, y=bg_y,
             mode="markers",
@@ -583,8 +582,7 @@ def build_kiel_figure(
     fig.add_trace(go.Scattergl(
         x=[teff], y=[logg],
         mode="markers",
-        marker=dict(size=12, color=spec["marker"], symbol="star",
-                    line=dict(width=2, color=spec["font"])),
+        marker=_plotly_candidate_marker(),
         error_x=error_x,
         error_y=error_y,
         name="Candidate",
@@ -702,10 +700,12 @@ def _background_density(ax, x: np.ndarray, y: np.ndarray, *, extent: tuple[float
     mask = (x >= xmin) & (x <= xmax) & (y >= ymin) & (y <= ymax)
     if not mask.any():
         return
+    visible_x = x[mask]
+    visible_y = y[mask]
 
     hist, xedges, yedges = np.histogram2d(
-        x[mask],
-        y[mask],
+        visible_x,
+        visible_y,
         bins=_PUBLICATION_DENSITY_BINS,
         range=((xmin, xmax), (ymin, ymax)),
     )
@@ -717,10 +717,12 @@ def _background_density(ax, x: np.ndarray, y: np.ndarray, *, extent: tuple[float
     vmin = max(cutoff, float(np.nanpercentile(positive, 12)))
     vmax = float(np.nanmax(positive))
     if not np.isfinite(vmin) or not np.isfinite(vmax) or vmax <= vmin:
+        _publication_scatter_background(ax, visible_x, visible_y, size=4.8, alpha=0.18)
         return
 
     occupied = np.isfinite(density) & (density > cutoff)
     if not occupied.any():
+        _publication_scatter_background(ax, visible_x, visible_y, size=4.8, alpha=0.18)
         return
     x_centers = 0.5 * (xedges[:-1] + xedges[1:])
     y_centers = 0.5 * (yedges[:-1] + yedges[1:])
@@ -807,11 +809,11 @@ def _cmd_publication_pdf(payload: dict, background: dict | None) -> bytes | None
         ax.scatter(
             [bp_rp],
             [m_g],
-            s=42,
-            marker="*",
-            facecolors="white",
-            edgecolors="#374151",
-            linewidths=0.9,
+            s=_PUBLICATION_CANDIDATE_SIZE,
+            marker="o",
+            facecolors=_CANDIDATE_COLOR,
+            edgecolors=_CANDIDATE_EDGE_COLOR,
+            linewidths=0.95,
             zorder=5,
         )
         ax.annotate(
@@ -824,11 +826,11 @@ def _cmd_publication_pdf(payload: dict, background: dict | None) -> bytes | None
     ax.scatter(
         [bp_rp0],
         [m_g0],
-        s=88,
-        marker="*",
-        facecolors="#d95f02",
-        edgecolors="#111827",
-        linewidths=0.8,
+        s=_PUBLICATION_CANDIDATE_SIZE,
+        marker="o",
+        facecolors=_DEREDDENED_COLOR,
+        edgecolors=_CANDIDATE_EDGE_COLOR,
+        linewidths=0.95,
         zorder=6,
     )
     ax.text(0.70, 0.18, "main sequence", transform=ax.transAxes, color="#374151", fontsize=7.2)
@@ -897,10 +899,11 @@ def _ir_colorcolor_publication_pdf(payload: dict, background: dict | None) -> by
         ax.scatter(
             [w1w2_obs],
             [hk_obs],
-            s=34,
-            facecolors="white",
-            edgecolors="#374151",
-            linewidths=0.9,
+            s=_PUBLICATION_CANDIDATE_SIZE,
+            marker="o",
+            facecolors=_CANDIDATE_COLOR,
+            edgecolors=_CANDIDATE_EDGE_COLOR,
+            linewidths=0.95,
             zorder=5,
         )
         ax.annotate(
@@ -913,25 +916,12 @@ def _ir_colorcolor_publication_pdf(payload: dict, background: dict | None) -> by
     ax.scatter(
         [w1w2_dered],
         [hk_dered],
-        s=54,
-        facecolors="#d95f02",
-        edgecolors="#111827",
+        s=_PUBLICATION_CANDIDATE_SIZE,
+        marker="o",
+        facecolors=_DEREDDENED_COLOR,
+        edgecolors=_CANDIDATE_EDGE_COLOR,
         linewidths=0.95,
         zorder=6,
-    )
-    ax.annotate(
-        "candidate",
-        xy=(w1w2_dered, hk_dered),
-        xycoords="data",
-        xytext=(8, 8),
-        textcoords="offset points",
-        fontsize=7.4,
-        color="#111827",
-        ha="left",
-        va="bottom",
-        arrowprops=dict(arrowstyle="-", color="#111827", linewidth=0.55, shrinkA=2, shrinkB=4),
-        bbox=dict(facecolor="white", edgecolor="none", alpha=0.78, boxstyle="round,pad=0.12"),
-        zorder=7,
     )
     _publication_axes(ax, xlabel=r"$W1-W2$", ylabel=r"$H-K_s$")
     ax.set_xlim(*xlim)
@@ -973,11 +963,11 @@ def _kiel_publication_pdf(payload: dict, background: dict | None) -> bytes | Non
         [logg],
         xerr=xerr,
         yerr=yerr,
-        fmt="*",
-        markersize=10,
-        markerfacecolor="#d95f02",
-        markeredgecolor="#111827",
-        markeredgewidth=0.8,
+        fmt="o",
+        markersize=5.8,
+        markerfacecolor=_CANDIDATE_COLOR,
+        markeredgecolor=_CANDIDATE_EDGE_COLOR,
+        markeredgewidth=0.95,
         ecolor="#374151",
         elinewidth=0.8,
         capsize=2.5,
@@ -1024,32 +1014,24 @@ def _publication_scatter_background(
     )
 
 
-def _publication_candidate_marker(ax, x: float, y: float, *, label: bool = True, marker: str = "o") -> None:
+def _publication_candidate_marker(
+    ax,
+    x: float,
+    y: float,
+    *,
+    color: str = _CANDIDATE_COLOR,
+    size: float = _PUBLICATION_CANDIDATE_SIZE,
+) -> None:
     ax.scatter(
         [x],
         [y],
-        s=58 if marker == "o" else 86,
-        marker=marker,
-        facecolors="#d95f02",
-        edgecolors="#111827",
-        linewidths=0.9,
+        s=size,
+        marker="o",
+        facecolors=color,
+        edgecolors=_CANDIDATE_EDGE_COLOR,
+        linewidths=0.95,
         zorder=6,
     )
-    if label:
-        ax.annotate(
-            "candidate",
-            xy=(x, y),
-            xycoords="data",
-            xytext=(7, 7),
-            textcoords="offset points",
-            fontsize=7.3,
-            color="#111827",
-            ha="left",
-            va="bottom",
-            arrowprops=dict(arrowstyle="-", color="#111827", linewidth=0.5, shrinkA=2, shrinkB=4),
-            bbox=dict(facecolor="white", edgecolor="none", alpha=0.76, boxstyle="round,pad=0.12"),
-            zorder=7,
-        )
 
 
 def _positive_log_limits(
@@ -1137,7 +1119,7 @@ def _score_balance_publication_pdf(payload: dict, background: dict | None) -> by
     ax.plot([0.0, upper], [0.0, upper], color="#6b7280", linewidth=0.75, linestyle=":", zorder=3)
     ax.text(0.73, 0.20, "dip-like", transform=ax.transAxes, fontsize=7.2, color="#374151")
     ax.text(0.18, 0.78, "jump-like", transform=ax.transAxes, fontsize=7.2, color="#374151")
-    _publication_candidate_marker(ax, dipper_score, jumper_score, marker="*")
+    _publication_candidate_marker(ax, dipper_score, jumper_score)
     _publication_axes(ax, xlabel=r"$S_{\rm dip}$", ylabel=r"$S_{\rm jump}$")
     ax.set_xlim(lower, upper)
     ax.set_ylim(lower, upper)
@@ -1223,6 +1205,118 @@ def _dip_repeatability_publication_pdf(payload: dict, background: dict | None) -
     return _save_publication_pdf(fig)
 
 
+def _variability_strength_publication_pdf(payload: dict, background: dict | None) -> bytes | None:
+    robust_sigma = _safe_float(payload, "stats_photometry_robust_sigma_mag")
+    dipper_score = _safe_float(payload, "dipper_score")
+    if robust_sigma is None or robust_sigma <= 0 or dipper_score is None:
+        return None
+
+    plt, _LinearSegmentedColormap, _LogNorm = _publication_imports()
+    bg_x, bg_y = _finite_publication_xy(background, "plane_var_strength_x", "plane_var_strength_y")
+    mask = bg_x > 0
+    bg_x = bg_x[mask]
+    bg_y = bg_y[mask]
+    xlim = _positive_log_limits(bg_x, (robust_sigma,), default=(0.003, 2.0))
+    ylim = _quantile_limits(bg_y, (dipper_score, 5.0), default=(0.0, 20.0), min_pad=0.8)
+    ylim = (min(-0.5, ylim[0]), ylim[1])
+
+    fig, ax = plt.subplots(figsize=(4.45, 3.75), constrained_layout=True)
+    ax.set_xscale("log")
+    _publication_scatter_background(ax, bg_x, bg_y)
+    ax.axhline(5.0, color="#6b7280", linewidth=0.75, linestyle=":", zorder=3)
+    _publication_candidate_marker(ax, robust_sigma, dipper_score)
+    _publication_axes(ax, xlabel=r"$\sigma_{\rm robust}\ [{\rm mag}]$", ylabel=r"$S_{\rm dip}$")
+    ax.set_xlim(*xlim)
+    ax.set_ylim(*ylim)
+    return _save_publication_pdf(fig)
+
+
+def _stetson_scatter_publication_pdf(payload: dict, background: dict | None) -> bytes | None:
+    robust_sigma = _safe_float(payload, "stats_photometry_robust_sigma_mag")
+    stetson_j = _safe_float(payload, "stats_variability_stetson_J")
+    if robust_sigma is None or robust_sigma <= 0 or stetson_j is None:
+        return None
+
+    plt, _LinearSegmentedColormap, _LogNorm = _publication_imports()
+    bg_x, bg_y = _finite_publication_xy(background, "plane_stetson_x", "plane_stetson_y")
+    mask = bg_x > 0
+    bg_x = bg_x[mask]
+    bg_y = bg_y[mask]
+    xlim = _positive_log_limits(bg_x, (robust_sigma,), default=(0.003, 2.0))
+    ylim = _quantile_limits(bg_y, (stetson_j,), default=(-0.2, 5.0), min_pad=0.35)
+
+    fig, ax = plt.subplots(figsize=(4.45, 3.75), constrained_layout=True)
+    ax.set_xscale("log")
+    _publication_scatter_background(ax, bg_x, bg_y)
+    _publication_candidate_marker(ax, robust_sigma, stetson_j)
+    _publication_axes(ax, xlabel=r"$\sigma_{\rm robust}\ [{\rm mag}]$", ylabel=r"${\rm Stetson}\ J$")
+    ax.set_xlim(*xlim)
+    ax.set_ylim(*ylim)
+    return _save_publication_pdf(fig)
+
+
+def _shape_impulsiveness_publication_pdf(payload: dict, background: dict | None) -> bytes | None:
+    skew = _safe_float(payload, "stats_skew")
+    max_slope = _safe_float(payload, "stats_max_slope")
+    if skew is None or max_slope is None or max_slope <= 0:
+        return None
+
+    plt, _LinearSegmentedColormap, _LogNorm = _publication_imports()
+    bg_x, bg_y = _finite_publication_xy(background, "plane_shape_x", "plane_shape_y")
+    mask = bg_y > 0
+    bg_x = bg_x[mask]
+    bg_y = bg_y[mask]
+    xlim = _quantile_limits(bg_x, (skew,), default=(-2.5, 3.0), min_pad=0.25)
+    ylim = _positive_log_limits(bg_y, (max_slope,), default=(0.02, 1.0e5))
+
+    fig, ax = plt.subplots(figsize=(4.45, 3.75), constrained_layout=True)
+    ax.set_yscale("log")
+    _publication_scatter_background(ax, bg_x, bg_y)
+    _publication_candidate_marker(ax, skew, max_slope)
+    _publication_axes(ax, xlabel=r"${\rm Skew}$", ylabel=r"${\rm Max\ slope}$")
+    ax.set_xlim(*xlim)
+    ax.set_ylim(*ylim)
+    return _save_publication_pdf(fig)
+
+
+def _rpm_publication_pdf(payload: dict, background: dict | None) -> bytes | None:
+    g_mag = _safe_float(payload, "phot_g_mean_mag")
+    pmra = _safe_float(payload, "pmra")
+    pmdec = _safe_float(payload, "pmdec")
+    if g_mag is None or pmra is None or pmdec is None:
+        return None
+
+    bp_rp = _safe_float(payload, "bp_rp")
+    if bp_rp is None:
+        bp = _safe_float(payload, "phot_bp_mean_mag")
+        rp = _safe_float(payload, "phot_rp_mean_mag")
+        if bp is None or rp is None:
+            return None
+        bp_rp = bp - rp
+
+    pm_total = math.sqrt(pmra**2 + pmdec**2)
+    if pm_total <= 0:
+        return None
+    h_g = g_mag + 5.0 * math.log10(pm_total / 1000.0) + 5.0
+
+    plt, _LinearSegmentedColormap, _LogNorm = _publication_imports()
+    bg_x, bg_y = _finite_publication_xy(background, "rpm_bprp", "rpm_hg")
+    xlim = _quantile_limits(bg_x, (bp_rp,), default=(-0.4, 4.5), min_pad=0.2)
+    ylim = _quantile_limits(bg_y, (h_g,), default=(0.0, 18.0), min_pad=0.7)
+    xlim = (max(-1.0, xlim[0]), min(5.5, xlim[1]))
+    ylim = (max(-5.0, ylim[0]), min(22.0, ylim[1]))
+
+    fig, ax = plt.subplots(figsize=(4.45, 3.75), constrained_layout=True)
+    _publication_scatter_background(ax, bg_x, bg_y)
+    _publication_candidate_marker(ax, bp_rp, h_g)
+    ax.text(0.25, 0.24, "main sequence", transform=ax.transAxes, color="#374151", fontsize=7.2)
+    ax.text(0.65, 0.76, "giants", transform=ax.transAxes, color="#374151", fontsize=7.2)
+    _publication_axes(ax, xlabel=r"$G_{\rm BP}-G_{\rm RP}$", ylabel=r"$H_G$")
+    ax.set_xlim(*xlim)
+    ax.set_ylim(ylim[1], ylim[0])
+    return _save_publication_pdf(fig)
+
+
 def build_publication_diagnostic_pdf(
     plot_name: str,
     payload: dict,
@@ -1236,6 +1330,8 @@ def build_publication_diagnostic_pdf(
         return _ir_colorcolor_publication_pdf(payload, background)
     if key == "kiel":
         return _kiel_publication_pdf(payload, background)
+    if key == "rpm":
+        return _rpm_publication_pdf(payload, background)
     if key in {"score_balance", "morphology_scores"}:
         return _score_balance_publication_pdf(payload, background)
     if key in {"catalog_support", "catalog_support_vs_dip_recurrence"}:
@@ -1244,6 +1340,12 @@ def build_publication_diagnostic_pdf(
         return _recurrence_regularity_publication_pdf(payload, background)
     if key == "dip_repeatability":
         return _dip_repeatability_publication_pdf(payload, background)
+    if key == "variability_strength":
+        return _variability_strength_publication_pdf(payload, background)
+    if key == "stetson_scatter":
+        return _stetson_scatter_publication_pdf(payload, background)
+    if key == "shape_impulsiveness":
+        return _shape_impulsiveness_publication_pdf(payload, background)
     return None
 
 
@@ -1288,11 +1390,8 @@ def build_rpm_figure(
     spec = _theme_spec(theme)
     fig = go.Figure()
 
-    # Background sample
-    bg = background or {}
-    bg_x = bg.get("rpm_bprp")
-    bg_y = bg.get("rpm_hg")
-    if bg_x is not None and bg_y is not None and len(bg_x) > 0:
+    bg_x, bg_y = _finite_xy(background, "rpm_bprp", "rpm_hg")
+    if bg_x.size > 0:
         fig.add_trace(go.Scattergl(
             x=bg_x, y=bg_y,
             mode="markers",
@@ -1301,12 +1400,10 @@ def build_rpm_figure(
             name="Sample",
         ))
 
-    # Candidate marker
     fig.add_trace(go.Scattergl(
         x=[bp_rp], y=[h_g],
         mode="markers",
-        marker=dict(size=12, color=spec["marker"], symbol="star",
-                    line=dict(width=2, color=spec["font"])),
+        marker=_plotly_candidate_marker(),
         name="Candidate",
         hovertemplate=f"BP-RP = {bp_rp:.2f}<br>H_G = {h_g:.2f}<extra></extra>",
     ))
@@ -1319,8 +1416,11 @@ def build_rpm_figure(
         )
 
     _apply_layout(fig, title="Reduced Proper Motion", spec=spec)
-    fig.update_xaxes(title="BP - RP")
-    fig.update_yaxes(title="H<sub>G</sub>", autorange="reversed")
+    x_values = [bp_rp] + (bg_x.tolist() if bg_x.size > 0 else [])
+    y_values = [h_g] + (bg_y.tolist() if bg_y.size > 0 else [])
+    y_range = _axis_range_with_padding(y_values, pad_fraction=0.08, min_pad=0.6)
+    fig.update_xaxes(title="BP - RP", range=_axis_range_with_padding(x_values, pad_fraction=0.08, min_pad=0.2))
+    fig.update_yaxes(title="H<sub>G</sub>", range=[y_range[1], y_range[0]] if y_range else None)
 
     return fig
 
@@ -1351,11 +1451,8 @@ def build_uv_optical_figure(
     spec = _theme_spec(theme)
     fig = go.Figure()
 
-    # Background sample
-    bg = background or {}
-    bg_x = bg.get("uv_bprp")
-    bg_y = bg.get("uv_nuv_g")
-    if bg_x is not None and bg_y is not None and len(bg_x) > 0:
+    bg_x, bg_y = _finite_xy(background, "uv_bprp", "uv_nuv_g")
+    if bg_x.size > 0:
         fig.add_trace(go.Scattergl(
             x=bg_x, y=bg_y,
             mode="markers",
@@ -1364,12 +1461,10 @@ def build_uv_optical_figure(
             name="Sample",
         ))
 
-    # Candidate marker
     fig.add_trace(go.Scattergl(
         x=[bp_rp], y=[nuv_g],
         mode="markers",
-        marker=dict(size=12, color=spec["marker"], symbol="star",
-                    line=dict(width=2, color=spec["font"])),
+        marker=_plotly_candidate_marker(),
         name="Candidate",
         hovertemplate=f"BP-RP = {bp_rp:.2f}<br>NUV-G = {nuv_g:.2f}<extra></extra>",
     ))
@@ -1382,8 +1477,10 @@ def build_uv_optical_figure(
         )
 
     _apply_layout(fig, title="UV-Optical Color", spec=spec)
-    fig.update_xaxes(title="BP - RP")
-    fig.update_yaxes(title="NUV - G")
+    x_values = [bp_rp] + (bg_x.tolist() if bg_x.size > 0 else [])
+    y_values = [nuv_g] + (bg_y.tolist() if bg_y.size > 0 else [])
+    fig.update_xaxes(title="BP - RP", range=_axis_range_with_padding(x_values, pad_fraction=0.08, min_pad=0.2))
+    fig.update_yaxes(title="NUV - G", range=_axis_range_with_padding(y_values, pad_fraction=0.08, min_pad=0.6))
 
     return fig
 
@@ -1420,7 +1517,7 @@ def build_periodicity_plane_figure(
         x=[periodicity],
         y=[phase_quality],
         mode="markers",
-        marker=dict(size=12, color=spec["marker"], symbol="star", line=dict(width=2, color=spec["font"])),
+        marker=_plotly_candidate_marker(),
         name="Candidate",
         hovertemplate=(
             f"Periodicity score = {periodicity:.3f}<br>"
@@ -1489,7 +1586,7 @@ def build_score_balance_figure(
         x=[dipper_score],
         y=[jumper_score],
         mode="markers",
-        marker=dict(size=12, color=spec["marker"], symbol="star", line=dict(width=2, color=spec["font"])),
+        marker=_plotly_candidate_marker(),
         name="Candidate",
         hovertemplate=(
             f"Dipper score = {dipper_score:.3f}<br>"

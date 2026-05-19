@@ -162,11 +162,10 @@ flowchart TB
     %% ── Review App ───────────────────────────────────────────
     subgraph reviewgrp["Review App (review/)"]
         STORE["store.py<br/>SQLite candidate DB"]
-        APP["app.py<br/>Dash GUI: scoring, event classes,<br/>vetting cards, diagnostic plots"]
+        APP["app.py<br/>Dash app: scoring, event classes,<br/>vetting cards, diagnostic plots"]
         RPIPE["pipeline.py<br/>Run missing stages on demand"]
         RMERGE["merge.py<br/>Merge review DBs"]
         RDIAG["diagnostic_plots.py<br/>CMD, Kiel, NEOWISE, Gaia epoch"]
-        REXPLORE["explorer.py<br/>EDA + LC explorer"]
         STORE --> APP
         RPIPE -.-> APP
         RDIAG -.-> APP
@@ -270,7 +269,7 @@ flowchart TB
 - **Discovery pipeline**: `manifest.py` &rarr; `tag.py` &rarr; `events.py` &rarr; `filter.py` (orchestrated by `detect.py`)
 - **Post-detection**: `characterize.py` (Gaia, dust, YSO, galactic coords, auxiliary catalogs) &rarr; `vetting.py` (SIMBAD, ZTF, TNS, eROSITA, ALeRCE, ATLAS, NEOWISE, ...) &rarr; `classify.py` (EB/CV/starspot/disk/YSO) &rarr; `enrich/` (neighbor catalogs, spectra availability)
 - **LTV pipeline**: `ltv/pipeline.py` &rarr; `core.py` &rarr; `filter.py` &rarr; `crossmatch.py` &rarr; `stochastic.py` &rarr; `neowise.py` &rarr; `dust.py` &rarr; `cmd.py` &rarr; `bundle.py` &rarr; `review.py` (ingest to review DB)
-- **Review**: `review/app.py` (Dash GUI with scoring, event classes, diagnostic plots, vetting cards) &rarr; labeled training set
+- **Review**: `review/app.py` (Dash app with scoring, event classes, diagnostic plots, vetting cards) &rarr; labeled training set
 - **Machine learning**: `malca/meta_analysis/ml/lightgbm_classifier_prototype.ipynb` (draft LightGBM classifier workflow)
 - **Notebooks**: `malca/notebooks/README.md` documents the purpose-based notebook folders.
 - **Evaluation**: `injection.py` (synthetic dips), `detection_rate.py`, `validation.py`, `reproduce.py`, `attrition.py`, `false_positive.py`
@@ -430,7 +429,7 @@ malca ltv-build --mag-bin 13_13.5 --run-dir output/runs/ltv
 # Build and ingest into the run-local review DB
 malca ltv-pipeline --mag-bin 13_13.5 --run-dir output/runs/ltv
 
-# Open the review GUI
+# Open the review app
 malca review --review-db output/runs/ltv/review/review.db
 
 # Open the migrated March 18 LTV bundle
@@ -547,7 +546,7 @@ malca vetting output/characterized.parquet --checkpoint output/vetting_checkpoin
 
 **Pipeline default:** vetting runs by default in `malca pipeline`; use `--no-run-vetting` to opt out.
 
-**Vetting is also available during import** in the review GUI ("Vet on import" toggle). Results are cached per input file so re-imports skip already-vetted candidates.
+**Vetting is also available during import** in the review app ("Vet on import" toggle). Results are cached per input file so re-imports skip already-vetted candidates.
 
 #### malca classify
 
@@ -570,14 +569,14 @@ malca attrition --pre output/pre.parquet --post output/post.parquet
 ### Candidate Review
 
 ```bash
-# Launch Dash review GUI against an existing run bundle
+# Launch the Dash review app against an existing run bundle
 malca review --plot-dir output/runs/YOUR_RUN/plots
 
 # Standalone mode (no plot directory required)
 malca review
 ```
 
-**Dash GUI features:**
+**Dash review app features:**
 - Native Plotly light-curve viewer with PNG fallback, camera filtering, and plot presets/overlays (raw points, dip/jump markers, residuals, phase-fold, diagnostics)
 - Confidence scoring (`1-4`) via number keys or clickable buttons
 - Event class labeling (single-select) with direct key shortcuts and clickable badges: `dipper`, `microlensing`, `flare`, `yso`, `unknown_interesting`, `instrumental`, `other` (toggle off to `unclassified`)

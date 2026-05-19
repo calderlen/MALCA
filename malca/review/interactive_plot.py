@@ -866,6 +866,8 @@ def _overlay_external_lcs(
     is_flux: bool,
     ext_source_ranges: dict[str, tuple[int, int]],
     trace_offset: int,
+    mag_anchor: float | None = None,
+    warnings: list[str] | None = None,
 ) -> None:
     """Load external LC parquets and overlay traces on the raw magnitude panel."""
     current_trace = len(fig.data)
@@ -879,8 +881,6 @@ def _overlay_external_lcs(
         if spec is None:
             continue
         is_flux_source = bool(spec.get("is_flux", False))
-        if is_flux_source and not is_flux:
-            continue
         try:
             lc_path = Path(lc_path)
             if not lc_path.exists():
@@ -943,6 +943,7 @@ def _overlay_external_lcs(
         if actual_mag is None:
             continue
 
+        source_transform_warned = False
         for band_key, band_info in spec["bands"].items():
             if actual_filt:
                 mask = df_ext[actual_filt].astype(str) == band_key
@@ -955,22 +956,54 @@ def _overlay_external_lcs(
             if band_df.empty:
                 continue
 
-            y = pd.to_numeric(band_df[actual_mag], errors="coerce").to_numpy()
-            good = np.isfinite(band_x) & np.isfinite(y)
+            raw_y = pd.to_numeric(band_df[actual_mag], errors="coerce").to_numpy(dtype=float)
+            good = np.isfinite(band_x) & np.isfinite(raw_y)
             if not good.any():
                 continue
 
-            if not is_flux_source and is_flux:
+            display_label = str(band_info["label"])
+            flux_to_relative_mag = bool(is_flux_source and not is_flux)
+            y = raw_y.copy()
+            ref_flux = np.nan
+            anchor_mag = np.nan
+            if flux_to_relative_mag:
+                positive = good & (raw_y > 0)
+                if not positive.any():
+                    continue
+                ref_flux = float(np.nanmedian(raw_y[positive]))
+                if not np.isfinite(ref_flux) or ref_flux <= 0:
+                    continue
+                anchor_mag = float(mag_anchor) if mag_anchor is not None and np.isfinite(float(mag_anchor)) else 0.0
+                y = np.full(raw_y.shape, np.nan, dtype=float)
+                y[positive] = anchor_mag - 2.5 * np.log10(raw_y[positive] / ref_flux)
+                good = np.isfinite(band_x) & np.isfinite(y)
+                if not good.any():
+                    continue
+                display_label = f"{display_label} rel. Δm"
+                if warnings is not None and not source_transform_warned:
+                    warnings.append(
+                        f"{band_info['label']} flux plotted as relative magnitude anchored to m={anchor_mag:.4f}; "
+                        f"not calibrated {band_info['label']}-band magnitude."
+                    )
+                    source_transform_warned = True
+            elif is_flux_source and is_flux:
+                display_label = f"{display_label} flux"
+            elif not is_flux_source and is_flux:
                 y = np.power(10.0, -0.4 * y)
 
-            err_array = None
+            err_full = None
             if actual_err and actual_err in band_df.columns:
-                ev = pd.to_numeric(band_df[actual_err], errors="coerce").to_numpy()
-                if np.isfinite(ev[good]).any():
-                    if not is_flux_source and is_flux:
-                        err_array = 0.921 * y[good] * ev[good]
+                ev = pd.to_numeric(band_df[actual_err], errors="coerce").to_numpy(dtype=float)
+                valid_err = good & np.isfinite(ev)
+                if valid_err.any():
+                    err_full = np.full(y.shape, np.nan, dtype=float)
+                    if flux_to_relative_mag:
+                        valid_flux_err = valid_err & (raw_y > 0)
+                        err_full[valid_flux_err] = (2.5 / np.log(10.0)) * ev[valid_flux_err] / raw_y[valid_flux_err]
+                    elif not is_flux_source and is_flux:
+                        err_full[valid_err] = 0.921 * y[valid_err] * ev[valid_err]
                     else:
-                        err_array = ev[good]
+                        err_full[valid_err] = ev[valid_err]
 
             good_idx = np.flatnonzero(good)
             if good_idx.size > _MAX_EXTERNAL_TRACE_POINTS:
@@ -980,13 +1013,36 @@ def _overlay_external_lcs(
             x_vals = band_x[good_idx]
             y_vals = y[good_idx]
             jd_vals = x_vals + plot_jd_offset
-            if err_array is not None:
-                err_array = err_array[good_idx]
+            err_array = err_full[good_idx] if err_full is not None else None
+            if err_array is not None and not np.isfinite(err_array).any():
+                err_array = None
 
-            if err_array is not None:
+            if flux_to_relative_mag:
+                raw_flux_vals = raw_y[good_idx]
+                err_vals = err_array if err_array is not None else np.full(jd_vals.shape, np.nan, dtype=float)
+                custom_ext = np.column_stack(
+                    [
+                        jd_vals,
+                        raw_flux_vals,
+                        np.full(jd_vals.shape, ref_flux, dtype=float),
+                        np.full(jd_vals.shape, anchor_mag, dtype=float),
+                        err_vals,
+                    ]
+                )
+                hover_ext = (
+                    f"<b>{display_label}</b><br>"
+                    "JD: %{customdata[0]:.5f}<br>"
+                    f"JD - {int(plot_jd_offset)}: %{{x:.5f}}<br>"
+                    "m<sub>rel</sub>: %{y:.4f}<br>"
+                    "raw flux: %{customdata[1]:.4e}<br>"
+                    "median flux: %{customdata[2]:.4e}<br>"
+                    "anchor m: %{customdata[3]:.4f}<br>"
+                    + ("σ<sub>m,rel</sub>: %{customdata[4]:.4f}<extra></extra>" if err_array is not None else "<extra></extra>")
+                )
+            elif err_array is not None:
                 custom_ext = np.column_stack([jd_vals, err_array])
                 hover_ext = (
-                    f"<b>{band_info['label']}</b><br>"
+                    f"<b>{display_label}</b><br>"
                     "JD: %{customdata[0]:.5f}<br>"
                     f"JD - {int(plot_jd_offset)}: %{{x:.5f}}<br>"
                     + ("F: %{y:.4e}<br>" if is_flux else "m: %{y:.4f}<br>")
@@ -995,7 +1051,7 @@ def _overlay_external_lcs(
             else:
                 custom_ext = jd_vals.reshape(-1, 1)
                 hover_ext = (
-                    f"<b>{band_info['label']}</b><br>"
+                    f"<b>{display_label}</b><br>"
                     "JD: %{customdata[0]:.5f}<br>"
                     f"JD - {int(plot_jd_offset)}: %{{x:.5f}}<br>"
                     + ("F: %{y:.4e}<br>" if is_flux else "m: %{y:.4f}<br>")
@@ -1007,7 +1063,7 @@ def _overlay_external_lcs(
                     x=x_vals,
                     y=y_vals,
                     mode="markers",
-                    name=band_info["label"],
+                    name=display_label,
                     marker={
                         "size": 6,
                         "symbol": band_info["marker"],
@@ -1682,7 +1738,27 @@ def build_interactive_lightcurve_figure(
             active_external_lcs = ({requested_source: external_lcs[requested_source]}
                                    if requested_source in external_lcs else {})
     if active_external_lcs and 'raw' in row_map:
-        _overlay_external_lcs(fig, row_map['raw'], active_external_lcs, jd_offset, colors, theme, is_flux, ext_source_ranges, ext_trace_start)
+        mag_anchor = _coerce_finite_float(payload.get("baseline_mag"))
+        if mag_anchor is None:
+            finite_mag = pd.to_numeric(df["mag"], errors="coerce").to_numpy(dtype=float)
+            finite_mag = finite_mag[np.isfinite(finite_mag)]
+            if finite_mag.size:
+                mag_anchor = float(np.nanmedian(finite_mag))
+        _overlay_external_lcs(
+            fig,
+            row_map['raw'],
+            active_external_lcs,
+            jd_offset,
+            colors,
+            theme,
+            is_flux,
+            ext_source_ranges,
+            ext_trace_start,
+            mag_anchor=mag_anchor,
+            warnings=warnings,
+        )
+        if is_flux and any(bool(_EXTERNAL_LC_SPECS.get(src, {}).get("is_flux", False)) for src in active_external_lcs):
+            fig.update_yaxes(autorange=True, row=row_map['raw'], col=1)
 
     fig.update_layout(
         title=_build_title(payload, df),

@@ -34,11 +34,9 @@ COMMAND_GROUPS = {
     "review": "Review",
     "review-refresh": "Review",
     "review-merge": "Review",
-    "review-explore": "Review",
     "review-sync": "Review",
     "review-taxonomy": "Review",
     "review-maint": "Review",
-    "review-qt": "Review",
     "ltv-core": "LTV",
     "ltv-build": "LTV",
     "ltv-pipeline": "LTV",
@@ -115,7 +113,7 @@ def main():
         "manifest", "pipeline", "detect", "reproduce", "injection",
         "detection-rate", "validate", "plot", "audit",
         "events", "lc-plot", "gaia-fetch", "characterize", "classify", "filter", "tag",
-        "attrition", "review", "review-qt", "review-refresh", "review-merge", "review-explore", "review-sync", "review-taxonomy", "review-maint",
+        "attrition", "review", "review-refresh", "review-merge", "review-sync", "review-taxonomy", "review-maint",
         "neighbors", "spectra", "false-positive", "vsx-filter", "vsx-crossmatch", "external-lcs", "multi-survey-features", "sed-photometry",
         "vetting",
         "ltv-core", "ltv-build", "ltv-pipeline", "ltv-injection", "ltv-ingest", "ltv-bundle",
@@ -165,16 +163,10 @@ def main():
             _run_module_main("malca.tag", remaining)
         elif command == "review":
             _run_module_main("malca.review.app", remaining)
-        elif command == "review-qt":
-            review_qt = importlib.import_module("malca.review_qt.main")
-            sys.argv = [sys.argv[0]] + remaining
-            return review_qt.main()
         elif command == "review-refresh":
             _run_module_main("malca.review.refresh", remaining)
         elif command == "review-merge":
             _run_module_main("malca.review.merge", remaining)
-        elif command == "review-explore":
-            _run_module_main("malca.review.explorer", remaining)
         elif command == "review-sync":
             _run_module_main("malca.review.sync", remaining)
         elif command == "review-taxonomy":
@@ -318,7 +310,6 @@ def main():
     subparsers.add_parser("review", description="Launch Dash review GUI (keyboard-driven, fast)")
     subparsers.add_parser("review-refresh", description="Refresh review DB stats from a run or bundle")
     subparsers.add_parser("review-merge", description="Merge reviewed subset DB content into a master review DB")
-    subparsers.add_parser("review-explore", description="Launch unified EDA and light-curve explorer")
     subparsers.add_parser("review-sync", description="Import/export Git-trackable review bundle files")
     subparsers.add_parser("review-taxonomy", description="Migrate legacy review DBs to taxonomy schema")
     subparsers.add_parser("review-maint", description="Review DB maintenance commands")

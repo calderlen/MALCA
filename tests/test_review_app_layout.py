@@ -81,6 +81,29 @@ def _graph_configs_in_order(node: object) -> list[dict]:
     return configs
 
 
+def _component_by_id(node: object, target_id: object) -> object | None:
+    found: object | None = None
+
+    def walk(item: object) -> None:
+        nonlocal found
+        if found is not None:
+            return
+        if isinstance(item, (list, tuple)):
+            for child in item:
+                walk(child)
+            return
+        if item is None or isinstance(item, (str, int, float, bool)):
+            return
+        if getattr(item, "id", None) == target_id:
+            found = item
+            return
+        walk(getattr(item, "children", None))
+
+    layout = node() if callable(node) else node
+    walk(layout)
+    return found
+
+
 def test_candidate_panels_appear_before_diagnostic_plots() -> None:
     ids = _component_ids_in_order(app.layout)
 
@@ -107,6 +130,65 @@ def test_layout_graphs_disable_plotly_image_export() -> None:
 
     assert configs
     assert all("toImage" in config.get("modeBarButtonsToRemove", []) for config in configs)
+
+
+def test_layout_embeds_eda_panel() -> None:
+    ids = _component_ids_in_order(app.layout)
+
+    assert "eda-panel-toggle" in ids
+    assert "eda-splitter" in ids
+    assert "eda-drag-handle" in ids
+    assert "eda-panel" in ids
+    assert "eda-panel-state" in ids
+    assert "eda-collapse-btn" in ids
+    assert "eda-expand-btn" in ids
+    assert "eda-x-metric" in ids
+    assert "eda-y-metric" in ids
+    assert "eda-color-metric" in ids
+    assert "eda-symbol-metric" in ids
+    assert "eda-custom-graph" in ids
+    assert "eda-candidate-table" in ids
+    assert "eda-plot-export-download" in ids
+    assert "eda-export-pdf-btn" in ids
+    assert "eda-export-status" in ids
+
+
+def test_eda_table_has_native_sorting_and_filtering() -> None:
+    table = _component_by_id(app.layout, "eda-candidate-table")
+
+    assert table is not None
+    assert getattr(table, "sort_action", None) == "native"
+    assert getattr(table, "sort_mode", None) == "multi"
+    assert getattr(table, "filter_action", None) == "native"
+
+
+def test_eda_splitter_reuses_metadata_splitter_style() -> None:
+    splitter = _component_by_id(app.layout, "eda-splitter")
+
+    assert splitter is not None
+    assert "panel-splitter-vertical" in str(getattr(splitter, "className", ""))
+
+
+def test_eda_panel_state_callback_supports_collapse_restore_and_wide(monkeypatch) -> None:
+    monkeypatch.setattr(review_app, "callback_context", types.SimpleNamespace(triggered_id="eda-collapse-btn"))
+    panel_class, splitter_class, _wide_text, _wide_title, toggle_text, _toggle_title, state = review_app.toggle_eda_panel(1, 0, 0, "open")
+    assert panel_class == "eda-panel is-collapsed"
+    assert splitter_class == "eda-splitter panel-splitter-vertical collapsed"
+    assert toggle_text == "EDA"
+    assert state == "collapsed"
+
+    monkeypatch.setattr(review_app, "callback_context", types.SimpleNamespace(triggered_id="eda-panel-toggle"))
+    panel_class, splitter_class, _wide_text, _wide_title, _toggle_text, _toggle_title, state = review_app.toggle_eda_panel(0, 0, 1, "collapsed")
+    assert panel_class == "eda-panel"
+    assert splitter_class == "eda-splitter panel-splitter-vertical"
+    assert state == "open"
+
+    monkeypatch.setattr(review_app, "callback_context", types.SimpleNamespace(triggered_id="eda-expand-btn"))
+    panel_class, splitter_class, wide_text, _wide_title, _toggle_text, _toggle_title, state = review_app.toggle_eda_panel(0, 1, 0, "open")
+    assert panel_class == "eda-panel is-expanded"
+    assert splitter_class == "eda-splitter panel-splitter-vertical"
+    assert wide_text == "Restore"
+    assert state == "expanded"
 
 
 def test_external_source_selector_exposes_tess() -> None:

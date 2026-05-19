@@ -6,10 +6,9 @@ from pathlib import Path
 
 import pandas as pd
 
-from malca.review.explore_data import load_review_db
+from malca.review.eda_data import load_review_db
 from malca.review.store import (
     db_connect,
-    export_review_subset_bundle,
     get_candidate_payload,
     import_candidates,
     merge_candidate_results,
@@ -116,38 +115,6 @@ def test_merge_review_databases_prefers_newer_updated_at(tmp_path: Path) -> None
     assert result["candidates_inserted"] == 1
     assert row_c1["notes"] == "newer"
     assert row_c2["event_class"] == "flare"
-
-
-def test_export_review_subset_bundle_writes_review_ready_bundle(tmp_path: Path) -> None:
-    source_db = tmp_path / "source.db"
-    _seed_review_db(
-        source_db,
-        [{"candidate_id": "C3", "source_path": "/src", "asas_sn_id": "C3", "dipper_score": 6.0, "lc_path": "/tmp/C3.dat2"}],
-        [{"candidate_id": "C3", "interest_score": 3, "event_class": "dipper", "review_pass": 1, "notes": "kept", "status": "reviewed", "reviewer": "src", "updated_at": "2026-03-12T09:00:00+00:00"}],
-    )
-
-    export_df = load_review_db(source_db)
-    export_df["source_file"] = str(source_db)
-    bundle_dir = tmp_path / "bundle"
-
-    result = export_review_subset_bundle(
-        bundle_dir,
-        export_df,
-        selection_meta={"plot": {"x_metric": "period_n_sources", "y_metric": "dipper_score"}, "candidate_count": 1},
-    )
-
-    assert (bundle_dir / "review.db").exists()
-    assert (bundle_dir / "selection_candidates.parquet").exists()
-    assert (bundle_dir / "selection_meta.json").exists()
-    bundled = load_review_db(bundle_dir / "review.db")
-    assert bundled.loc[0, "candidate_id"] == "C3"
-    assert bundled.loc[0, "notes"] == "kept"
-
-    with sqlite3.connect(bundle_dir / "review.db") as conn:
-        row = conn.execute("SELECT value FROM app_state WHERE key='explorer_selection_meta'").fetchone()
-    assert row is not None
-    assert json.loads(row[0])["candidate_count"] == 1
-    assert Path(result["review_db"]) == bundle_dir / "review.db"
 
 
 def test_merge_vetting_results_updates_gaia_variable_sql_column(tmp_path: Path) -> None:
