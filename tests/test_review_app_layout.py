@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
+import re
 import sys
 import types
 
@@ -169,6 +171,18 @@ def test_eda_splitter_reuses_metadata_splitter_style() -> None:
 
     assert splitter is not None
     assert "panel-splitter-vertical" in str(getattr(splitter, "className", ""))
+
+
+def test_eda_panel_drag_can_collapse_to_zero_width() -> None:
+    source = inspect.getsource(review_app)
+
+    assert re.search(r"\.eda-panel \{[^}]*min-width: 0;", app.index_string, re.S)
+    assert re.search(
+        r"var storageKey = 'malca\.review\.eda_panel\.width\.v1';[^}]*var minWidth = 0;",
+        source,
+        re.S,
+    )
+    assert "if (numeric < minWidth) numeric = minWidth;" in source
 
 
 def test_eda_panel_state_callback_supports_collapse_restore_and_wide(monkeypatch) -> None:

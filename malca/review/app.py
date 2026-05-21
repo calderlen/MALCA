@@ -515,12 +515,12 @@ app.index_string = '''
         .eda-panel {
             flex: 0 0 430px;
             width: 430px;
-            min-width: 320px;
+            min-width: 0;
             max-width: 82vw;
             height: 100%;
             min-height: 0;
             overflow: hidden;
-            padding-left: 8px;
+            padding-left: 0;
             display: flex;
             flex-direction: column;
         }
@@ -536,6 +536,7 @@ app.index_string = '''
             min-height: 0;
             overflow-y: auto;
             overflow-x: hidden;
+            margin-left: 8px;
             border: 1px solid rgba(84, 118, 140, 0.35);
             border-radius: 8px;
             background: linear-gradient(180deg, rgba(8, 18, 24, 0.94), rgba(3, 8, 12, 0.82));
@@ -6581,13 +6582,13 @@ app.clientside_callback(
         }
 
         var storageKey = 'malca.review.eda_panel.width.v1';
-        var minWidth = 320;
+        var minWidth = 0;
         var defaultWidth = 430;
         var state = String(panelState || 'open');
 
         var computeMaxWidth = function() {
             var total = workspace.clientWidth || window.innerWidth;
-            return Math.max(minWidth + 80, Math.floor(total * 0.82));
+            return Math.max(80, Math.floor(total * 0.82));
         };
 
         var clampWidth = function(value) {
