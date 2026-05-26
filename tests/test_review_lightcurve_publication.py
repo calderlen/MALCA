@@ -94,6 +94,9 @@ def test_interactive_event_overlays_do_not_expand_raw_y_autorange(tmp_path: Path
         "dip_best_t0": 2458002.0,
         "dip_best_width_param": 0.4,
         "dip_bayes_factor": 20.0,
+        "jump_best_t0": 2458000.5,
+        "jump_best_width_param": 0.4,
+        "jump_bayes_factor": 20.0,
     }
 
     result = build_interactive_lightcurve_figure(
@@ -135,10 +138,36 @@ def test_interactive_event_overlays_do_not_expand_raw_y_autorange(tmp_path: Path
     event_annotations = [
         annotation
         for annotation in fig.layout.annotations
-        if annotation.text == "◆" or str(annotation.text).startswith("Dip thr")
+        if annotation.text == "◆"
+        or str(annotation.text).startswith("Dip thr")
+        or str(annotation.text).startswith("Jump thr")
     ]
     assert event_annotations
-    assert all(str(annotation.yref).endswith(" domain") for annotation in event_annotations)
+    assert all(str(annotation.yref) == "y" for annotation in event_annotations)
+    dip_label = next(annotation for annotation in event_annotations if str(annotation.text).startswith("Dip thr"))
+    jump_label = next(annotation for annotation in event_annotations if str(annotation.text).startswith("Jump thr"))
+    dip_marker = next(
+        annotation
+        for annotation in event_annotations
+        if annotation.text == "◆" and str(annotation.font.color).startswith("rgba(255")
+    )
+    jump_marker = next(
+        annotation
+        for annotation in event_annotations
+        if annotation.text == "◆" and str(annotation.font.color).startswith("rgba(0,150,255")
+    )
+    raw_xy = [
+        (float(x), float(y))
+        for trace in fig.data
+        if getattr(trace, "mode", None) == "markers" and getattr(trace, "showlegend", None) is not False
+        for x, y in zip(trace.x, trace.y)
+    ]
+    raw_y = [y for _, y in raw_xy]
+    dip_local_y = [y for x, y in raw_xy if abs(x - 2.0) <= 0.8]
+    assert float(dip_label.y) > max(dip_local_y)
+    assert float(dip_marker.y) > max(dip_local_y)
+    assert float(jump_label.y) < min(raw_y)
+    assert float(jump_marker.y) < min(raw_y)
 
 
 def test_interactive_phase_panel_shows_placeholder_without_period(tmp_path: Path) -> None:

@@ -37,6 +37,8 @@ from malca.config import (
 from malca.config import MAD_SCALE
 from malca.events import score_lightcurve
 from malca.lightcurve_publication import (
+    DIP_EVENT_COLOR,
+    JUMP_EVENT_COLOR,
     PUBLICATION_STYLE,
     plot_phase_panel,
 )
@@ -684,9 +686,9 @@ def plot_bayes_results(
 
                 jd_plot_start = jd_start - (jd_offset if median_jd > 2000000 else 8000.0)
                 jd_plot_end = jd_end - (jd_offset if median_jd > 2000000 else 8000.0)
-                ax_main.axvline(jd_plot_start, color="red", linestyle="--", alpha=0.7, linewidth=1.5)
+                ax_main.axvline(jd_plot_start, color=DIP_EVENT_COLOR, linestyle="--", alpha=0.7, linewidth=1.5)
                 if jd_plot_end != jd_plot_start:
-                    ax_main.axvline(jd_plot_end, color="red", linestyle="--", alpha=0.7, linewidth=1.5)
+                    ax_main.axvline(jd_plot_end, color=DIP_EVENT_COLOR, linestyle="--", alpha=0.7, linewidth=1.5)
 
                 morph = run_summary.get("morphology", "none")
                 params = run_summary.get("params", {})
@@ -695,7 +697,7 @@ def plot_bayes_results(
                     t0 = params.get("t0", (jd_start + jd_end) / 2)
                     if t0 is not None and np.isfinite(t0):
                         t0_plot = t0 - (jd_offset if median_jd > 2000000 else 8000.0)
-                        ax_main.axvline(t0_plot, color="red", linestyle="--", alpha=0.7, linewidth=1.0)
+                        ax_main.axvline(t0_plot, color=DIP_EVENT_COLOR, linestyle="--", alpha=0.7, linewidth=1.0)
                     if plot_fits:
                         sigma = params.get("sigma", (jd_end - jd_start) / 4)
                         amp = params.get("amp", 0.1)
@@ -706,7 +708,7 @@ def plot_bayes_results(
                         ax_main.plot(
                             t_fit_plot,
                             mag_fit,
-                            color="red",
+                            color=DIP_EVENT_COLOR,
                             linestyle="-",
                             linewidth=2,
                             alpha=0.8,
@@ -716,7 +718,7 @@ def plot_bayes_results(
                     t0 = params.get("t0", (jd_start + jd_end) / 2)
                     if t0 is not None and np.isfinite(t0):
                         t0_plot = t0 - (jd_offset if median_jd > 2000000 else 8000.0)
-                        ax_main.axvline(t0_plot, color="red", linestyle="--", alpha=0.7, linewidth=1.0)
+                        ax_main.axvline(t0_plot, color=DIP_EVENT_COLOR, linestyle="--", alpha=0.7, linewidth=1.0)
                     if plot_fits:
                         tE = params.get("tE", (jd_end - jd_start) / 2)
                         amp = params.get("amp", -0.1)
@@ -727,7 +729,7 @@ def plot_bayes_results(
                         ax_main.plot(
                             t_fit_plot,
                             mag_fit,
-                            color="blue",
+                            color=DIP_EVENT_COLOR,
                             linestyle="-",
                             linewidth=2,
                             alpha=0.8,
@@ -742,9 +744,9 @@ def plot_bayes_results(
 
                 jd_plot_start = jd_start - (jd_offset if median_jd > 2000000 else 8000.0)
                 jd_plot_end = jd_end - (jd_offset if median_jd > 2000000 else 8000.0)
-                ax_main.axvline(jd_plot_start, color="green", linestyle="--", alpha=0.7, linewidth=1.5)
+                ax_main.axvline(jd_plot_start, color=JUMP_EVENT_COLOR, linestyle="--", alpha=0.7, linewidth=1.5)
                 if jd_plot_end != jd_plot_start:
-                    ax_main.axvline(jd_plot_end, color="green", linestyle="--", alpha=0.7, linewidth=1.5)
+                    ax_main.axvline(jd_plot_end, color=JUMP_EVENT_COLOR, linestyle="--", alpha=0.7, linewidth=1.5)
 
                 morph = run_summary.get("morphology", "none")
                 params = run_summary.get("params", {})
@@ -753,7 +755,7 @@ def plot_bayes_results(
                     t0 = params.get("t0", (jd_start + jd_end) / 2)
                     if t0 is not None and np.isfinite(t0):
                         t0_plot = t0 - (jd_offset if median_jd > 2000000 else 8000.0)
-                        ax_main.axvline(t0_plot, color="green", linestyle="--", alpha=0.7, linewidth=1.0)
+                        ax_main.axvline(t0_plot, color=JUMP_EVENT_COLOR, linestyle="--", alpha=0.7, linewidth=1.0)
                     if plot_fits:
                         sigma = params.get("sigma", (jd_end - jd_start) / 4)
                         amp = params.get("amp", -0.1)
@@ -764,7 +766,7 @@ def plot_bayes_results(
                         ax_main.plot(
                             t_fit_plot,
                             mag_fit,
-                            color="green",
+                            color=JUMP_EVENT_COLOR,
                             linestyle="-",
                             linewidth=2,
                             alpha=0.8,
@@ -774,7 +776,7 @@ def plot_bayes_results(
                     t0 = params.get("t0", (jd_start + jd_end) / 2)
                     if t0 is not None and np.isfinite(t0):
                         t0_plot = t0 - (jd_offset if median_jd > 2000000 else 8000.0)
-                        ax_main.axvline(t0_plot, color="green", linestyle="--", alpha=0.7, linewidth=1.0)
+                        ax_main.axvline(t0_plot, color=JUMP_EVENT_COLOR, linestyle="--", alpha=0.7, linewidth=1.0)
                     if plot_fits:
                         tE = params.get("tE", (jd_end - jd_start) / 2)
                         amp = params.get("amp", -0.1)
@@ -785,7 +787,7 @@ def plot_bayes_results(
                         ax_main.plot(
                             t_fit_plot,
                             mag_fit,
-                            color="cyan",
+                            color=JUMP_EVENT_COLOR,
                             linestyle="-",
                             linewidth=2,
                             alpha=0.8,
@@ -795,7 +797,7 @@ def plot_bayes_results(
                     t0 = params.get("t0", (jd_start + jd_end) / 2)
                     if t0 is not None and np.isfinite(t0):
                         t0_plot = t0 - (jd_offset if median_jd > 2000000 else 8000.0)
-                        ax_main.axvline(t0_plot, color="green", linestyle="--", alpha=0.7, linewidth=1.0)
+                        ax_main.axvline(t0_plot, color=JUMP_EVENT_COLOR, linestyle="--", alpha=0.7, linewidth=1.0)
                     if plot_fits:
                         tau = params.get("tau", 0.05)
                         amp = params.get("amp", -0.1)
@@ -809,7 +811,7 @@ def plot_bayes_results(
                         ax_main.plot(
                             t_fit_plot,
                             mag_fit,
-                            color="magenta",
+                            color=JUMP_EVENT_COLOR,
                             linestyle="-",
                             linewidth=2,
                             alpha=0.8,
@@ -873,9 +875,9 @@ def plot_bayes_results(
 
         # Add event color legend entries
         if has_dip:
-            legend_handles.append((Line2D([0], [0], color="red", linestyle="--", linewidth=1.5), "Dip"))
+            legend_handles.append((Line2D([0], [0], color=DIP_EVENT_COLOR, linestyle="--", linewidth=1.5), "Dip"))
         if has_jump:
-            legend_handles.append((Line2D([0], [0], color="green", linestyle="--", linewidth=1.5), "Jump"))
+            legend_handles.append((Line2D([0], [0], color=JUMP_EVENT_COLOR, linestyle="--", linewidth=1.5), "Jump"))
 
         if legend_handles:
             final_handles = [h for h, _ in legend_handles]

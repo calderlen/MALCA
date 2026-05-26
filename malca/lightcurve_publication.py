@@ -16,6 +16,8 @@ from malca.lightcurve_io import load_lightcurve_df
 
 
 JD_OFFSET = 2450000.0
+DIP_EVENT_COLOR = "#ff6b6b"
+JUMP_EVENT_COLOR = "#0096FF"
 
 BAND_COLORS = {
     "g": "#238b45",
@@ -727,7 +729,7 @@ def _plot_vertical_spans(
 
 
 def _event_overlay_specs(event_runs: Sequence[dict[str, object]], event_kind: str) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
-    color = "crimson" if event_kind == "dip" else "seagreen" if event_kind == "jump" else "0.35"
+    color = DIP_EVENT_COLOR if event_kind == "dip" else JUMP_EVENT_COLOR if event_kind == "jump" else "0.35"
     lines: list[dict[str, object]] = []
     spans: list[dict[str, object]] = []
     for run in event_runs:

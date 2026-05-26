@@ -21,6 +21,9 @@ from malca.lightcurve_publication import PUBLICATION_STYLE, _load_matplotlib, st
 from malca.lightcurve_io import stable_camera_color
 from malca.phase import BAND_LABELS, phase_fold_dataframe, phase_time_dataframe, resolve_phase_epoch, resolve_phase_period
 from malca.review.interactive_plot import (
+    DIP_EVENT_COLOR,
+    JUMP_EVENT_COLOR,
+    PHASE_TIME_COLORSCALE,
     REQUIRED_COLUMNS,
     _baseline_config_from_run_params,
     _camera_labels,
@@ -30,6 +33,7 @@ from malca.review.interactive_plot import (
     _load_cleaned_df,
     _mag_to_flux,
     resolve_lightcurve_path,
+    _zero_centered_color_bounds,
 )
 
 
@@ -161,6 +165,15 @@ def _robust_color_bounds(values: np.ndarray) -> tuple[float | None, float | None
         lo = float(lo) - pad
         hi = float(hi) + pad
     return float(lo), float(hi)
+
+
+def _phase_time_colormap():
+    from matplotlib.colors import LinearSegmentedColormap
+
+    return LinearSegmentedColormap.from_list(
+        "malca_phase_time_delta_m",
+        [item[1] for item in PHASE_TIME_COLORSCALE],
+    )
 
 
 def _style_lightcurve_axis(ax) -> None:
@@ -369,7 +382,7 @@ def build_review_lightcurve_publication_pdf(
         if show_event_markers and "raw" in ax_by_panel:
             event_ax = ax_by_panel["raw"]
             for entry in _event_entries(payload, jd_offset, run_params):
-                color = "#cc2f3b" if entry["kind"] == "dip" else "#2f9e44"
+                color = DIP_EVENT_COLOR if entry["kind"] == "dip" else JUMP_EVENT_COLOR
                 if confidence_colors:
                     alpha = 0.28 + 0.42 * float(entry.get("confidence") or 0.0)
                 else:
@@ -408,7 +421,8 @@ def build_review_lightcurve_publication_pdf(
                 if phase_panel_mode == "time" and not phase_df.empty and "v_g_band" in phase_df.columns:
                     phase_ax = ax_by_panel["phase"]
                     color_values = pd.to_numeric(phase_df.get("phase_value"), errors="coerce").to_numpy(dtype=float)
-                    cmin, cmax = _robust_color_bounds(color_values)
+                    cmin, cmax = _zero_centered_color_bounds(color_values)
+                    cmap = _phase_time_colormap()
                     scatter_for_colorbar = None
                     for band in active_bands:
                         band_df = phase_df[pd.to_numeric(phase_df["v_g_band"], errors="coerce") == band]
@@ -429,7 +443,7 @@ def build_review_lightcurve_publication_pdf(
                                 "s": 8.0,
                                 "marker": marker,
                                 "c": resid[valid],
-                                "cmap": "viridis",
+                                "cmap": cmap,
                                 "edgecolors": "0.12",
                                 "linewidths": 0.25,
                                 "alpha": 0.84,

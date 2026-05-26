@@ -153,6 +153,29 @@ def test_queue_filters_review_taxonomy_columns(tmp_path: Path) -> None:
         assert score_ids == ["C1"]
 
 
+def test_microlens_false_filter_keeps_unset_rows(tmp_path: Path) -> None:
+    db_path = tmp_path / "review.db"
+    with db_connect(db_path) as conn:
+        upsert_candidates_frame(
+            conn,
+            pd.DataFrame(
+                [
+                    {"candidate_id": "C1"},
+                    {"candidate_id": "C2", "microlens_match": False},
+                    {"candidate_id": "C3", "microlens_match": True},
+                ]
+            ),
+        )
+
+        ids = query_queue(
+            conn,
+            filters={"microlens_match_mode": "False"},
+            ids_only=True,
+        )["candidate_id"].tolist()
+
+    assert ids == ["C1", "C2"]
+
+
 def test_vsx_uncertainty_and_generic_classes_stay_visible() -> None:
     assert is_definite_known_type_value("vsx_class", "EA") is True
     assert is_definite_known_type_value("vsx_class", "EA:") is False

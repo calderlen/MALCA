@@ -47,6 +47,13 @@ BASELINE_FUNCTIONS = {
 }
 
 REQUIRED_COLUMNS = {"JD", "mag", "v_g_band"}
+DIP_EVENT_COLOR = "#ff6b6b"
+JUMP_EVENT_COLOR = "#0096FF"
+PHASE_TIME_COLORSCALE = [
+    [0.0, JUMP_EVENT_COLOR],
+    [0.5, "#ffffff"],
+    [1.0, DIP_EVENT_COLOR],
+]
 
 
 def _coerce_finite_float(value: object) -> float | None:
@@ -131,6 +138,21 @@ def _robust_color_bounds(values: np.ndarray) -> tuple[float | None, float | None
         lo = float(lo) - pad
         hi = float(hi) + pad
     return float(lo), float(hi)
+
+
+def _zero_centered_color_bounds(values: np.ndarray) -> tuple[float | None, float | None]:
+    """Return symmetric bounds so Δm=0 maps to the color midpoint."""
+    lo, hi = _robust_color_bounds(values)
+    if lo is None or hi is None:
+        return None, None
+    limit = max(abs(float(lo)), abs(float(hi)))
+    if not np.isfinite(limit) or limit <= 0:
+        vals = np.asarray(values, dtype=float)
+        vals = vals[np.isfinite(vals)]
+        limit = float(np.nanmax(np.abs(vals))) if vals.size else 0.0
+    if not np.isfinite(limit) or limit <= 0:
+        limit = 0.05
+    return -limit, limit
 
 
 # Keep plotting caches bounded; large values can inflate long-running GUI memory.
@@ -507,7 +529,7 @@ def _event_entries(payload: dict, jd_offset: float, run_params: dict | None) -> 
         return [dict(x) for x in cached]
 
     entries: list[dict[str, object]] = []
-    for prefix, color in (("dip", "#ff6b6b"), ("jump", "#55d66d")):
+    for prefix, color in (("dip", DIP_EVENT_COLOR), ("jump", JUMP_EVENT_COLOR)):
         t0 = _parse_num(payload, f"{prefix}_best_t0")
         if t0 is None:
             continue
@@ -622,6 +644,52 @@ def _subplot_axis_ref(row: int, axis: Literal["x", "y"]) -> str:
 def _subplot_domain_ref(row: int, axis: Literal["x", "y"]) -> str:
     """Return the subplot domain reference for layout-only overlays."""
     return f"{_subplot_axis_ref(row, axis)} domain"
+
+
+def _event_annotation_y(
+    x_values: np.ndarray,
+    y_values: np.ndarray,
+    event_x: float,
+    half_width: float,
+    *,
+    kind: str,
+    is_flux: bool,
+    pad: float,
+) -> tuple[float, float]:
+    """Return marker and label y-values that sit just outside nearby data."""
+    x = np.asarray(x_values, dtype=float)
+    y = np.asarray(y_values, dtype=float)
+    finite = np.isfinite(x) & np.isfinite(y)
+    if not finite.any():
+        return 0.0, 0.0
+
+    x = x[finite]
+    y = y[finite]
+    event_x = float(event_x)
+    half_width = float(half_width) if np.isfinite(half_width) else 0.0
+    local_window = max(half_width, 0.5)
+    local = np.abs(x - event_x) <= local_window
+    if local.any():
+        local_y = y[local]
+    else:
+        nearest = np.argsort(np.abs(x - event_x))[: min(5, x.size)]
+        local_y = y[nearest]
+
+    top = float(np.nanmax(y) if is_flux else np.nanmin(y))
+    local_bottom = float(np.nanmin(local_y) if is_flux else np.nanmax(local_y))
+    marker_gap = 0.30 * pad
+    label_gap = 0.66 * pad
+
+    if str(kind).lower() == "dip":
+        return (
+            local_bottom - marker_gap if is_flux else local_bottom + marker_gap,
+            local_bottom - label_gap if is_flux else local_bottom + label_gap,
+        )
+
+    return (
+        top + marker_gap if is_flux else top - marker_gap,
+        top + label_gap if is_flux else top - label_gap,
+    )
 
 
 _EXTERNAL_LC_SPECS: dict[str, dict] = {
@@ -1470,7 +1538,25 @@ def build_interactive_lightcurve_figure(
     if show_event_markers and show_raw_mag:
         raw_row = row_map['raw']
         raw_xref = _subplot_axis_ref(raw_row, "x")
+        raw_yref = _subplot_axis_ref(raw_row, "y")
         raw_y_domain_ref = _subplot_domain_ref(raw_row, "y")
+        visible_raw_df = df[df["v_g_band"].isin(active_bands)].copy() if "v_g_band" in df.columns else df.copy()
+        if visible_raw_df.empty:
+            visible_raw_df = df.copy()
+        raw_event_x_values = visible_raw_df["JD_plot"].to_numpy(dtype=float)
+        raw_event_y_values = (
+            _mag_to_flux(visible_raw_df["mag"].to_numpy(dtype=float))
+            if is_flux
+            else visible_raw_df["mag"].to_numpy(dtype=float)
+        )
+        finite_raw_event_y = raw_event_y_values[np.isfinite(raw_event_y_values)]
+        if finite_raw_event_y.size:
+            raw_event_span = float(np.nanmax(finite_raw_event_y) - np.nanmin(finite_raw_event_y))
+        else:
+            raw_event_span = 1.0
+        raw_event_pad = raw_event_span * 0.10
+        if not np.isfinite(raw_event_pad) or raw_event_pad <= 0:
+            raw_event_pad = 0.05 * max(1.0, abs(float(finite_raw_event_y[0])) if finite_raw_event_y.size else 1.0)
         for entry in event_entries:
             color = entry["base_color"]
             conf = float(entry["confidence"])
@@ -1482,11 +1568,21 @@ def build_interactive_lightcurve_figure(
             if confidence_colors:
                 alpha = 0.35 + 0.55 * conf
                 if entry["kind"] == "dip":
-                    color = f"rgba(255,96,96,{alpha:.3f})"
+                    color = f"rgba(255,107,107,{alpha:.3f})"
                 else:
-                    color = f"rgba(92,214,110,{alpha:.3f})"
+                    color = f"rgba(0,150,255,{alpha:.3f})"
 
             event_x = float(entry["x0"])
+            marker_y, label_y = _event_annotation_y(
+                raw_event_x_values,
+                raw_event_y_values,
+                event_x,
+                float(entry["half_width"]),
+                kind=str(entry["kind"]),
+                is_flux=is_flux,
+                pad=raw_event_pad,
+            )
+            label_yanchor = "top" if entry["kind"] == "dip" else "bottom"
             hover_text = (
                 f"{str(entry['kind']).title()} event<br>"
                 f"t0 [JD]: {float(entry['t0']):.5f}<br>"
@@ -1525,23 +1621,24 @@ def build_interactive_lightcurve_figure(
                 )
                 fig.add_annotation(
                     x=event_x,
-                    y=0.98,
+                    y=label_y,
                     xref=raw_xref,
-                    yref=raw_y_domain_ref,
+                    yref=raw_yref,
                     text=(
                         f"{str(entry['kind']).title()} thr logBF={logbf_thr_text}, sig={sig_thr_text}"
                     ),
                     showarrow=False,
                     font={"size": 9, "color": colors["annotation"]},
-                    yanchor="top",
-                    yshift=-4 if entry["kind"] == "dip" else -16,
+                    yanchor=label_yanchor,
+                    bgcolor=colors["paper_bg"],
+                    opacity=0.92,
                 )
 
             fig.add_annotation(
                 x=event_x,
-                y=0.5,
+                y=marker_y,
                 xref=raw_xref,
-                yref=raw_y_domain_ref,
+                yref=raw_yref,
                 text="◆",
                 showarrow=False,
                 font={"size": 18, "color": color},
@@ -1577,7 +1674,7 @@ def build_interactive_lightcurve_figure(
                 if not phase_time_df.empty and "phase_value" in phase_time_df.columns
                 else np.array([], dtype=float)
             )
-            cmin, cmax = _robust_color_bounds(color_values)
+            cmin, cmax = _zero_centered_color_bounds(color_values)
             colorbar_shown = False
             for band in active_bands:
                 if phase_time_df.empty or "v_g_band" not in phase_time_df.columns:
@@ -1604,7 +1701,7 @@ def build_interactive_lightcurve_figure(
                         "size": 6,
                         "symbol": band_markers[band],
                         "color": resid,
-                        "colorscale": "Viridis",
+                        "colorscale": PHASE_TIME_COLORSCALE,
                         "line": {"width": 0.45, "color": colors["marker_line"]},
                         "showscale": not colorbar_shown,
                         "colorbar": {"title": "Δm", "len": 0.34},
@@ -1750,7 +1847,8 @@ def build_interactive_lightcurve_figure(
         
         if y_vals.size > 0:
             y_min, y_max = np.nanmin(y_vals), np.nanmax(y_vals)
-            y_pad = (y_max - y_min) * 0.05
+            y_pad_fraction = 0.10 if show_event_markers and event_entries else 0.05
+            y_pad = (y_max - y_min) * y_pad_fraction
             if y_pad == 0:
                 y_pad = 0.5 if not is_flux else y_max * 0.05
             if is_flux:

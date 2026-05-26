@@ -1892,7 +1892,10 @@ def _queue_where_params(filters: dict | None = None) -> tuple[list[str], list[ob
         if val == "unset":
             where.append(f"(c.{col} IS NULL)")
         elif val is not None:
-            where.append(f"(c.{col} = ?)")
+            if col == "microlens_match" and val == 0:
+                where.append(f"(c.{col} IS NULL OR c.{col} = ?)")
+            else:
+                where.append(f"(c.{col} = ?)")
             params.append(val)
 
     # --- numeric range filters (auto-generated) ---
