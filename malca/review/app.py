@@ -4970,7 +4970,7 @@ def create_layout():
         dcc.Store(id='auto-period-request', data={'nonce': 0}),
         dcc.Store(id='dustycult-refresh-token', data=0),
         dcc.Store(id='phoebe-refresh-token', data=0),
-        dcc.Store(id='plot-render-request', data={'nonce': 1, 'ts': 0.0, 'state': {'idx': 0, 'candidate_id': None, 'plot_mode': 'native', 'overlay_values': list(PLOT_PRESETS['Diagnostics']['overlays']), 'selected_cameras': [], 'selected_bands': ['g', 'V'], 'preset': 'Diagnostics', 'theme': DEFAULT_THEME, 'residual_height': DEFAULT_RESIDUAL_FRACTION, 'baseline_opacity': 0.5, 'external_source_view': DEFAULT_EXTERNAL_SOURCE_VIEW}}),
+        dcc.Store(id='plot-render-request', data={'nonce': 1, 'ts': 0.0, 'state': {'idx': 0, 'candidate_id': None, 'plot_mode': 'native', 'overlay_values': list(PLOT_PRESETS['Diagnostics']['overlays']), 'selected_cameras': [], 'selected_bands': ['g', 'V'], 'preset': 'Diagnostics', 'theme': DEFAULT_THEME, 'residual_height': DEFAULT_RESIDUAL_FRACTION, 'baseline_opacity': 0.5, 'external_source_view': DEFAULT_EXTERNAL_SOURCE_VIEW, 'phase_panel_mode': 'fold'}}),
         dcc.Store(id='plot-render-applied', data=0),
         dcc.Store(id='plot-defaults-initialized', data=False),
         dcc.Store(id='queue-source-path', data=''),
@@ -5455,6 +5455,20 @@ def create_layout():
                                           'margin-left': '10px', 'border-left': '1px solid #444',
                                           'padding-left': '10px'}),
                                 html.Div([
+                                    html.Span('Phase view', style={'color': '#9fb6cb', 'font-size': '10px',
+                                                                    'white-space': 'nowrap', 'margin-right': '4px'}),
+                                    dcc.RadioItems(
+                                        id='phase-panel-mode',
+                                        options=[
+                                            {'label': ' Fold', 'value': 'fold'},
+                                            {'label': ' Time', 'value': 'time'},
+                                        ],
+                                        value='fold',
+                                        inline=True,
+                                        style={'font-size': '10px', 'margin-right': '8px'},
+                                        persistence=_review_persistence_token(),
+                                        persistence_type='local',
+                                    ),
                                     html.Span('Period', style={'color': '#9fb6cb', 'font-size': '10px',
                                                                'white-space': 'nowrap', 'margin-right': '4px'}),
                                     dcc.Dropdown(
@@ -6252,17 +6266,19 @@ app.clientside_callback(
 # --- Sidebar plot prefs: save to localStorage on change ---
 app.clientside_callback(
     """
-    function(preset, overlays, mode, opacity, resHeight, externalSource, reviewScope) {
+    function(preset, overlays, mode, opacity, resHeight, externalSource, phasePanelMode, reviewScope) {
         var scope = String(reviewScope || 'default');
         var storageKey = 'malca.review.sidebar.plot.v2::' + scope;
         try {
+            var phaseMode = ['fold', 'time'].includes(phasePanelMode) ? phasePanelMode : 'fold';
             var obj = {
                 preset: preset,
                 overlays: overlays || [],
                 mode: mode,
                 opacity: opacity,
                 resHeight: resHeight,
-                externalSource: externalSource
+                externalSource: externalSource,
+                phasePanelMode: phaseMode
             };
             window.localStorage.setItem(storageKey, JSON.stringify(obj));
         } catch (e) {}
@@ -6275,7 +6291,8 @@ app.clientside_callback(
      Input('plot-mode', 'value'),
      Input('baseline-opacity-slider', 'value'),
      Input('residual-height-slider', 'value'),
-     Input('external-source-view', 'value')],
+     Input('external-source-view', 'value'),
+     Input('phase-panel-mode', 'value')],
     State('review-db-scope', 'data'),
     prevent_initial_call=True,
 )
@@ -6284,16 +6301,16 @@ app.clientside_callback(
 # --- Sidebar plot prefs: load from localStorage on init ---
 app.clientside_callback(
     """
-    function(_savedStateTs, savedState, curPreset, curOverlays, curMode, curOpacity, curResHeight, curExternalSource, reviewScope) {
+    function(_savedStateTs, savedState, curPreset, curOverlays, curMode, curOpacity, curResHeight, curExternalSource, curPhasePanelMode, reviewScope) {
         var nu = window.dash_clientside.no_update;
         if (savedState && typeof savedState === 'object') {
-            return [nu, nu, nu, nu, nu, nu, true];
+            return [nu, nu, nu, nu, nu, nu, nu, true];
         }
         var scope = String(reviewScope || 'default');
         var storageKey = 'malca.review.sidebar.plot.v2::' + scope;
         try {
             var raw = window.localStorage.getItem(storageKey);
-            if (!raw) return [nu, nu, nu, nu, nu, nu, false];
+            if (!raw) return [nu, nu, nu, nu, nu, nu, nu, false];
             var obj = JSON.parse(raw);
             var preset = (obj.preset && ['Clean', 'Diagnostics', 'Full'].includes(obj.preset))
                 ? obj.preset : nu;
@@ -6304,9 +6321,11 @@ app.clientside_callback(
             var allowedSources = ['all', 'asassn', 'atlas', 'ztf', 'gaia_epoch', 'tess', 'ps1', 'crts'];
             var externalSource = (obj.externalSource && allowedSources.includes(obj.externalSource))
                 ? obj.externalSource : nu;
-            return [preset, overlays, mode, opacity, resHeight, externalSource, true];
+            var phasePanelMode = (obj.phasePanelMode && ['fold', 'time'].includes(obj.phasePanelMode))
+                ? obj.phasePanelMode : nu;
+            return [preset, overlays, mode, opacity, resHeight, externalSource, phasePanelMode, true];
         } catch (e) {
-            return [nu, nu, nu, nu, nu, nu, false];
+            return [nu, nu, nu, nu, nu, nu, nu, false];
         }
     }
     """,
@@ -6316,6 +6335,7 @@ app.clientside_callback(
      Output('baseline-opacity-slider', 'value', allow_duplicate=True),
      Output('residual-height-slider', 'value', allow_duplicate=True),
      Output('external-source-view', 'value', allow_duplicate=True),
+     Output('phase-panel-mode', 'value', allow_duplicate=True),
      Output('plot-defaults-initialized', 'data', allow_duplicate=True)],
     Input('saved-review-gui-state', 'modified_timestamp'),
     [State('saved-review-gui-state', 'data'),
@@ -6325,6 +6345,7 @@ app.clientside_callback(
      State('baseline-opacity-slider', 'value'),
      State('residual-height-slider', 'value'),
      State('external-source-view', 'value'),
+     State('phase-panel-mode', 'value'),
      State('review-db-scope', 'data')],
     prevent_initial_call='initial_duplicate',
 )
@@ -7181,6 +7202,7 @@ def _review_gui_state_from_values(
     camera_values: object,
     band_values: object,
     yaxis_mode: object,
+    phase_panel_mode: object,
     period_method: object,
     pdm_min_period: object,
     pdm_max_period: object,
@@ -7198,6 +7220,7 @@ def _review_gui_state_from_values(
         'camera_values': _coerce_string_list(camera_values),
         'band_values': _coerce_string_list(band_values) or ['g', 'V'],
         'yaxis_mode': _coerce_choice(yaxis_mode, {'mag', 'flux'}, 'mag'),
+        'phase_panel_mode': _coerce_choice(phase_panel_mode, {'fold', 'time'}, 'fold'),
         'period_method': _coerce_choice(period_method, {'lsp', 'pdm', 'ce'}, 'pdm'),
         'pdm_min_period': _coerce_numeric_input_value(pdm_min_period),
         'pdm_max_period': _coerce_numeric_input_value(pdm_max_period),
@@ -7218,6 +7241,7 @@ def _normalize_review_gui_state(raw_state: object) -> dict[str, object] | None:
         camera_values=raw_state.get('camera_values'),
         band_values=raw_state.get('band_values'),
         yaxis_mode=raw_state.get('yaxis_mode'),
+        phase_panel_mode=raw_state.get('phase_panel_mode'),
         period_method=raw_state.get('period_method'),
         pdm_min_period=raw_state.get('pdm_min_period'),
         pdm_max_period=raw_state.get('pdm_max_period'),
@@ -7758,6 +7782,7 @@ def load_saved_review_gui_state(_tick):
      Output('camera-checklist', 'value', allow_duplicate=True),
      Output('band-checklist', 'value', allow_duplicate=True),
      Output('yaxis-mode', 'value', allow_duplicate=True),
+     Output('phase-panel-mode', 'value', allow_duplicate=True),
      Output('period-method', 'value', allow_duplicate=True),
      Output('pdm-min-period', 'value', allow_duplicate=True),
      Output('pdm-max-period', 'value', allow_duplicate=True),
@@ -7770,7 +7795,7 @@ def load_saved_review_gui_state(_tick):
 def restore_saved_review_gui_state(saved_state):
     state = _normalize_review_gui_state(saved_state)
     if state is None:
-        return tuple([no_update] * 14)
+        return tuple([no_update] * 15)
     return (
         state['plot_mode'],
         state['plot_overlays'],
@@ -7780,6 +7805,7 @@ def restore_saved_review_gui_state(saved_state):
         state['camera_values'],
         state['band_values'],
         state['yaxis_mode'],
+        state['phase_panel_mode'],
         state['period_method'],
         state['pdm_min_period'],
         state['pdm_max_period'],
@@ -7804,6 +7830,7 @@ def restore_saved_review_gui_state(saved_state):
         State('camera-checklist', 'value'),
         State('band-checklist', 'value'),
         State('yaxis-mode', 'value'),
+        State('phase-panel-mode', 'value'),
         State('period-method', 'value'),
         State('pdm-min-period', 'value'),
         State('pdm-max-period', 'value'),
@@ -7829,10 +7856,11 @@ def save_review_gui_state(n_clicks, *state_values):
         camera_values=extra_values[6],
         band_values=extra_values[7],
         yaxis_mode=extra_values[8],
-        period_method=extra_values[9],
-        pdm_min_period=extra_values[10],
-        pdm_max_period=extra_values[11],
-        pdm_manual_period=extra_values[12],
+        phase_panel_mode=extra_values[9],
+        period_method=extra_values[10],
+        pdm_min_period=extra_values[11],
+        pdm_max_period=extra_values[12],
+        pdm_manual_period=extra_values[13],
     )
     try:
         with closing(db_connect(Path(DB_PATH))) as conn:
@@ -8826,11 +8854,12 @@ def persist_review_save_request(save_request, current_candidate_id):
      Input('pdm-result-store', 'data'),
      Input('pdm-manual-period', 'value'),
      Input('yaxis-mode', 'value'),
+     Input('phase-panel-mode', 'value'),
      Input('external-source-view', 'value')],
      State('plot-render-request', 'data'),
     prevent_initial_call=True,
 )
-def queue_plot_render_request(idx, current_candidate_id, plot_mode, overlay_values, selected_cameras, preset, residual_height, theme_mode, _queue_size, _pipeline_progress, baseline_opacity, selected_bands, round_sigfigs, link_radius, pdm_result, pdm_manual_period, yaxis_mode, external_source_view, existing_request):
+def queue_plot_render_request(idx, current_candidate_id, plot_mode, overlay_values, selected_cameras, preset, residual_height, theme_mode, _queue_size, _pipeline_progress, baseline_opacity, selected_bands, round_sigfigs, link_radius, pdm_result, pdm_manual_period, yaxis_mode, phase_panel_mode, external_source_view, existing_request):
     """Debounced render request queue for native plot UX."""
     req = existing_request or {'nonce': 0, 'ts': 0.0}
     # Determine effective PDM period: manual override > PDM result
@@ -8862,6 +8891,7 @@ def queue_plot_render_request(idx, current_candidate_id, plot_mode, overlay_valu
             'link_radius': float(link_radius) if link_radius is not None else 10.0,
             'override_period': override_period,
             'yaxis_mode': str(yaxis_mode or 'mag'),
+            'phase_panel_mode': str(phase_panel_mode or 'fold'),
             'external_source_view': str(external_source_view or DEFAULT_EXTERNAL_SOURCE_VIEW),
         },
     }
@@ -9138,6 +9168,7 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
     round_sigfigs = bool(state.get('round_sigfigs', True))
     link_radius = float(state.get('link_radius', 10.0))
     yaxis_mode = str(state.get('yaxis_mode', 'mag') or 'mag')
+    phase_panel_mode = _coerce_choice(state.get('phase_panel_mode'), {'fold', 'time'}, 'fold')
     external_source_view = str(state.get('external_source_view', DEFAULT_EXTERNAL_SOURCE_VIEW) or DEFAULT_EXTERNAL_SOURCE_VIEW)
     override_period = state.get('override_period')
     if override_period is not None:
@@ -9254,7 +9285,7 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
     mismatch_warnings = _run_config_mismatch_warnings(run_params if run_params else None, overlays)
     if run_params_status != 'loaded':
         mismatch_warnings.append(run_params_msg)
-    uirevision_key = f"{candidate_id}|{','.join(sorted(str(c) for c in selected_cameras))}|{','.join(sorted(str(b) for b in selected_bands))}|{theme_mode}|{residual_height:.3f}|{baseline_opacity:.2f}|{yaxis_mode}|{external_source_view}"
+    uirevision_key = f"{candidate_id}|{','.join(sorted(str(c) for c in selected_cameras))}|{','.join(sorted(str(b) for b in selected_bands))}|{theme_mode}|{residual_height:.3f}|{baseline_opacity:.2f}|{yaxis_mode}|{phase_panel_mode}|{external_source_view}"
 
     # Discover external LC parquets only when the user explicitly asks for them.
     ext_lcs: dict[str, Path] | None = None
@@ -9293,6 +9324,7 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
             show_event_markers='markers' in overlays,
             show_residuals='residuals' in overlays,
             show_phase_fold='phase' in overlays,
+            phase_panel_mode=phase_panel_mode,
             show_raw_mag='raw' in overlays,
             override_period=override_period,
             show_diagnostics='diagnostics' in overlays,
@@ -10868,6 +10900,7 @@ def export_active_plot(n_clicks, figure, plot_mode, plot_src, idx, candidate_id,
                 show_event_markers='markers' in overlays,
                 show_residuals='residuals' in overlays,
                 show_phase_fold='phase' in overlays,
+                phase_panel_mode=_coerce_choice(state.get('phase_panel_mode'), {'fold', 'time'}, 'fold'),
                 show_raw_mag='raw' in overlays,
                 override_period=override_period,
                 show_diagnostics='diagnostics' in overlays,

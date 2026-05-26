@@ -7,6 +7,7 @@ from malca.phase import (
     camera_labels,
     compute_band_phase_lag,
     phase_fold_dataframe,
+    phase_time_dataframe,
     resolve_phase_epoch,
     resolve_phase_period,
     template_phase_lag,
@@ -68,6 +69,33 @@ def test_phase_fold_dataframe_supports_residual_mode_labels_and_duplicate_cycles
     assert set(folded["camera_label"]) == {"1", "2"}
     assert set(np.round(folded["phase"], 6)) == {0.0, 0.5, 1.0, 1.5}
     assert np.allclose(folded.iloc[:4]["phase_value"], df["resid"])
+    assert diag["epoch_jd"] == 10.0
+    assert diag["value_col"] == "resid"
+
+
+def test_phase_time_dataframe_tracks_cycles_and_duplicates_phase() -> None:
+    df = pd.DataFrame(
+        {
+            "JD": [10.0, 10.25, 10.75, 11.25],
+            "mag": [14.0, 14.1, 14.2, 14.3],
+            "resid": [0.0, 0.3, -0.2, 0.5],
+            "error": [0.01, 0.01, 0.02, 0.02],
+            "v_g_band": [0, 1, 0, 1],
+            "camera#": [1, 1, 2, 2],
+        }
+    )
+
+    phase_time, diag = phase_time_dataframe(df, 1.0, value_mode="resid")
+    original = phase_time.iloc[: len(df)]
+    duplicate = phase_time.iloc[len(df):].reset_index(drop=True)
+
+    assert len(phase_time) == 8
+    assert np.all((original["phase"] >= 0.0) & (original["phase"] < 1.0))
+    assert np.allclose(duplicate["phase"], original["phase"].to_numpy() + 1.0)
+    assert original["cycle"].tolist() == [0, 0, 0, 1]
+    assert np.allclose(original["phase_value"], df["resid"])
+    assert set(phase_time["band_label"]) == set(BAND_LABELS.values())
+    assert set(phase_time["camera_label"]) == {"1", "2"}
     assert diag["epoch_jd"] == 10.0
     assert diag["value_col"] == "resid"
 

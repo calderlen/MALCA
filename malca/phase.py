@@ -366,3 +366,81 @@ def phase_fold_dataframe(
         **lag_diag,
     }
     return folded, diagnostics
+
+
+def phase_time_dataframe(
+    df: pd.DataFrame,
+    period_days: float,
+    *,
+    epoch_jd: float | None = None,
+    jd_col: str = "JD",
+    mag_col: str = "mag",
+    error_col: str = "error",
+    band_col: str = "v_g_band",
+    resid_col: str = "resid",
+    value_mode: str = "resid",
+    duplicate_cycles: bool = True,
+) -> tuple[pd.DataFrame, dict[str, object]]:
+    """Return phase, cycle, and plot value for a phase-time diagnostic.
+
+    ``phase`` is in cycles and ``cycle`` is the integer cycle number since the
+    chosen epoch. ``phase_value`` uses residuals when requested and available,
+    otherwise it falls back to the magnitude column.
+    """
+    period = _finite_float(period_days)
+    if period is None or period <= 0:
+        raise ValueError("period_days must be positive and finite")
+    if value_mode not in {"mag", "resid"}:
+        raise ValueError("value_mode must be 'mag' or 'resid'")
+
+    out = df.copy()
+    if value_mode == "resid" and resid_col in out.columns:
+        value_col = resid_col
+    else:
+        value_col = mag_col
+
+    diagnostics = {
+        "period_days": float(period),
+        "epoch_jd": None,
+        "value_mode": value_mode,
+        "value_col": value_col,
+        "n_phase_time_points": 0,
+    }
+    if out.empty or jd_col not in out.columns or value_col not in out.columns:
+        return out.iloc[0:0].copy(), diagnostics
+
+    jd = pd.to_numeric(out[jd_col], errors="coerce").to_numpy(dtype=float)
+    values = pd.to_numeric(out[value_col], errors="coerce").to_numpy(dtype=float)
+    finite = np.isfinite(jd) & np.isfinite(values)
+    out = out.loc[finite].copy()
+    if out.empty:
+        return out, diagnostics
+
+    epoch = resolve_phase_epoch(out, explicit_epoch_jd=epoch_jd, jd_col=jd_col)
+    if epoch is None:
+        return out.iloc[0:0].copy(), diagnostics
+
+    jd = pd.to_numeric(out[jd_col], errors="coerce").to_numpy(dtype=float)
+    values = pd.to_numeric(out[value_col], errors="coerce").to_numpy(dtype=float)
+    cycles_float = (jd - float(epoch)) / float(period)
+    out["phase"] = np.mod(cycles_float, 1.0)
+    out["cycle"] = np.floor(cycles_float).astype(int)
+    out["phase_value"] = values
+    out["band_label"] = band_labels(out, band_col=band_col)
+    out["camera_label"] = camera_labels(out)
+
+    diagnostics = {
+        "period_days": float(period),
+        "epoch_jd": float(epoch),
+        "value_mode": value_mode,
+        "value_col": value_col,
+        "n_phase_time_points": int(len(out)),
+    }
+
+    phase_time = out
+    if duplicate_cycles:
+        wrap = out.copy()
+        wrap["phase"] = wrap["phase"] + 1.0
+        phase_time = pd.concat([out, wrap], ignore_index=True)
+
+    return phase_time, diagnostics

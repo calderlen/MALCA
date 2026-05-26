@@ -18,7 +18,7 @@ from malca.baseline import (
     per_camera_median_baseline,
 )
 from malca.lightcurve_io import load_lightcurve_df, stable_camera_color
-from malca.phase import BAND_LABELS, phase_fold_dataframe, resolve_phase_epoch, resolve_phase_period
+from malca.phase import BAND_LABELS, phase_fold_dataframe, phase_time_dataframe, resolve_phase_epoch, resolve_phase_period
 from malca.utils import (
     clean_lc,
     identify_bad_cameras,
@@ -112,6 +112,25 @@ def _mag_to_flux(mag: np.ndarray) -> np.ndarray:
 def _flux_err_from_mag_err(flux: np.ndarray, mag_err: np.ndarray) -> np.ndarray:
     """Propagate magnitude error to flux: flux_err ≈ 0.921 * flux * mag_err."""
     return np.where(np.isfinite(flux) & np.isfinite(mag_err), 0.921 * flux * mag_err, np.nan)
+
+
+def _robust_color_bounds(values: np.ndarray) -> tuple[float | None, float | None]:
+    """Return percentile color bounds with a finite fallback."""
+    vals = np.asarray(values, dtype=float)
+    vals = vals[np.isfinite(vals)]
+    if vals.size == 0:
+        return None, None
+    lo, hi = np.nanpercentile(vals, [5, 95])
+    if not np.isfinite(lo) or not np.isfinite(hi) or lo == hi:
+        lo = float(np.nanmin(vals))
+        hi = float(np.nanmax(vals))
+    if not np.isfinite(lo) or not np.isfinite(hi):
+        return None, None
+    if lo == hi:
+        pad = max(abs(float(lo)) * 0.05, 0.05)
+        lo = float(lo) - pad
+        hi = float(hi) + pad
+    return float(lo), float(hi)
 
 
 # Keep plotting caches bounded; large values can inflate long-running GUI memory.
@@ -1095,6 +1114,7 @@ def build_interactive_lightcurve_figure(
     show_event_markers: bool,
     show_residuals: bool,
     show_phase_fold: bool = False,
+    phase_panel_mode: Literal["fold", "time"] = "fold",
     show_raw_mag: bool = True,
     override_period: float | None = None,
     show_diagnostics: bool,
@@ -1111,6 +1131,7 @@ def build_interactive_lightcurve_figure(
 ) -> dict:
     """Build a native Plotly light-curve figure for review mode."""
     colors = _theme_palette(theme)
+    phase_panel_mode = "time" if str(phase_panel_mode or "fold").strip().lower() == "time" else "fold"
 
     plot_dir = Path(plot_dir) if plot_dir else None
     lc_path = resolve_lightcurve_path(payload, plot_dir)
@@ -1529,108 +1550,188 @@ def build_interactive_lightcurve_figure(
 
     phase_diag: dict[str, object] = {}
     if phase_enabled and 'phase' in row_map and phase_period is not None:
-        # Phase-fold uses residuals (mag - baseline) from band_dfs.
+        # Phase diagnostics use residuals (mag - baseline) from band_dfs.
         phase_zero_jd = resolve_phase_epoch(df)
         phase_inputs = [
             band_dfs[band]
             for band in active_bands
             if band in band_dfs and band_dfs[band] is not None and not band_dfs[band].empty
         ]
-        phase_bdf = pd.DataFrame()
         if phase_inputs:
             phase_source_df = pd.concat(phase_inputs, ignore_index=True)
-            phase_bdf, phase_diag = phase_fold_dataframe(
-                phase_source_df,
-                float(phase_period),
-                epoch_jd=phase_zero_jd,
-                value_mode="resid",
-                duplicate_cycles=True,
-            )
+        else:
+            phase_source_df = pd.DataFrame()
 
-        for band in active_bands:
-            if phase_bdf.empty or "v_g_band" not in phase_bdf.columns:
-                continue
-            band_phase_df = phase_bdf[pd.to_numeric(phase_bdf["v_g_band"], errors="coerce") == band]
-            if band_phase_df.empty:
-                continue
-            for cam in selected:
-                cdf = band_phase_df[band_phase_df["camera_label"] == cam]
-                if cdf.empty:
+        if phase_panel_mode == "time":
+            phase_time_df = pd.DataFrame()
+            if not phase_source_df.empty:
+                phase_time_df, phase_diag = phase_time_dataframe(
+                    phase_source_df,
+                    float(phase_period),
+                    epoch_jd=phase_zero_jd,
+                    value_mode="resid",
+                    duplicate_cycles=True,
+                )
+            color_values = (
+                pd.to_numeric(phase_time_df.get("phase_value"), errors="coerce").to_numpy(dtype=float)
+                if not phase_time_df.empty and "phase_value" in phase_time_df.columns
+                else np.array([], dtype=float)
+            )
+            cmin, cmax = _robust_color_bounds(color_values)
+            colorbar_shown = False
+            for band in active_bands:
+                if phase_time_df.empty or "v_g_band" not in phase_time_df.columns:
                     continue
-                color = stable_camera_color(cam)
-                err = cdf["error"].to_numpy() if "error" in cdf.columns else np.full(len(cdf), np.nan)
-                resid = cdf["phase_value"].to_numpy()
-                y_phase = (_mag_to_flux(resid) - 1.0) if is_flux else resid
-                err_phase = _flux_err_from_mag_err(_mag_to_flux(resid), err) if is_flux else err
-                jd_full_phase = cdf["JD_plot"].to_numpy() + JD_OFFSET
-                hover_phase = np.column_stack([jd_full_phase, err, cdf["mag"].to_numpy(), resid, err_phase])
-                phase_hovertemplate = (
-                    "<b>%{fullData.name}</b><br>"
-                    "φ: %{x:.4f}<br>"
-                    "JD: %{customdata[0]:.5f}<br>"
-                )
-                if is_flux:
-                    phase_hovertemplate += (
-                        "ΔF/F: %{y:.4f}<br>"
-                        "σ<sub>F</sub>: %{customdata[4]:.3e}<br>"
-                        "Δm: %{customdata[3]:.4f}<br>"
-                        "m: %{customdata[2]:.4f}<br>"
-                        "σ<sub>m</sub>: %{customdata[1]:.4f}<extra></extra>"
+                band_phase_df = phase_time_df[pd.to_numeric(phase_time_df["v_g_band"], errors="coerce") == band]
+                if band_phase_df.empty:
+                    continue
+                for cam in selected:
+                    cdf = band_phase_df[band_phase_df["camera_label"] == cam]
+                    if cdf.empty:
+                        continue
+                    err = cdf["error"].to_numpy() if "error" in cdf.columns else np.full(len(cdf), np.nan)
+                    resid = pd.to_numeric(cdf["phase_value"], errors="coerce").to_numpy(dtype=float)
+                    jd_full_phase = cdf["JD_plot"].to_numpy() + JD_OFFSET
+                    hover_phase = np.column_stack([
+                        jd_full_phase,
+                        err,
+                        pd.to_numeric(cdf["mag"], errors="coerce").to_numpy(dtype=float),
+                        resid,
+                        pd.to_numeric(cdf["cycle"], errors="coerce").to_numpy(dtype=float),
+                        pd.to_numeric(cdf["v_g_band"], errors="coerce").to_numpy(dtype=float),
+                    ])
+                    marker = {
+                        "size": 6,
+                        "symbol": band_markers[band],
+                        "color": resid,
+                        "colorscale": "Viridis",
+                        "line": {"width": 0.45, "color": colors["marker_line"]},
+                        "showscale": not colorbar_shown,
+                        "colorbar": {"title": "Δm", "len": 0.34},
+                    }
+                    if cmin is not None and cmax is not None:
+                        marker["cmin"] = cmin
+                        marker["cmax"] = cmax
+                    fig.add_trace(
+                        go.Scatter(
+                            x=cdf["phase"],
+                            y=cdf["cycle"],
+                            mode="markers",
+                            name=f"{cam} ({band_labels[band]})",
+                            showlegend=False,
+                            marker=marker,
+                            customdata=hover_phase,
+                            hovertemplate=(
+                                "<b>%{fullData.name}</b><br>"
+                                "φ: %{x:.4f}<br>"
+                                "cycle: %{customdata[4]:.0f}<br>"
+                                "JD: %{customdata[0]:.5f}<br>"
+                                "Δm: %{customdata[3]:.4f}<br>"
+                                "m: %{customdata[2]:.4f}<br>"
+                                "σ<sub>m</sub>: %{customdata[1]:.4f}<br>"
+                                "band: %{customdata[5]:.0f}<extra></extra>"
+                            ),
+                        ),
+                        row=row_map['phase'],
+                        col=1,
                     )
-                else:
-                    phase_hovertemplate += (
-                        "Δm: %{y:.4f}<br>"
-                        "σ<sub>m</sub>: %{customdata[1]:.4f}<br>"
-                        "m: %{customdata[2]:.4f}<extra></extra>"
+                    colorbar_shown = True
+        else:
+            phase_bdf = pd.DataFrame()
+            if not phase_source_df.empty:
+                phase_bdf, phase_diag = phase_fold_dataframe(
+                    phase_source_df,
+                    float(phase_period),
+                    epoch_jd=phase_zero_jd,
+                    value_mode="resid",
+                    duplicate_cycles=True,
+                )
+
+            for band in active_bands:
+                if phase_bdf.empty or "v_g_band" not in phase_bdf.columns:
+                    continue
+                band_phase_df = phase_bdf[pd.to_numeric(phase_bdf["v_g_band"], errors="coerce") == band]
+                if band_phase_df.empty:
+                    continue
+                for cam in selected:
+                    cdf = band_phase_df[band_phase_df["camera_label"] == cam]
+                    if cdf.empty:
+                        continue
+                    color = stable_camera_color(cam)
+                    err = cdf["error"].to_numpy() if "error" in cdf.columns else np.full(len(cdf), np.nan)
+                    resid = cdf["phase_value"].to_numpy()
+                    y_phase = (_mag_to_flux(resid) - 1.0) if is_flux else resid
+                    err_phase = _flux_err_from_mag_err(_mag_to_flux(resid), err) if is_flux else err
+                    jd_full_phase = cdf["JD_plot"].to_numpy() + JD_OFFSET
+                    hover_phase = np.column_stack([jd_full_phase, err, cdf["mag"].to_numpy(), resid, err_phase])
+                    phase_hovertemplate = (
+                        "<b>%{fullData.name}</b><br>"
+                        "φ: %{x:.4f}<br>"
+                        "JD: %{customdata[0]:.5f}<br>"
+                    )
+                    if is_flux:
+                        phase_hovertemplate += (
+                            "ΔF/F: %{y:.4f}<br>"
+                            "σ<sub>F</sub>: %{customdata[4]:.3e}<br>"
+                            "Δm: %{customdata[3]:.4f}<br>"
+                            "m: %{customdata[2]:.4f}<br>"
+                            "σ<sub>m</sub>: %{customdata[1]:.4f}<extra></extra>"
+                        )
+                    else:
+                        phase_hovertemplate += (
+                            "Δm: %{y:.4f}<br>"
+                            "σ<sub>m</sub>: %{customdata[1]:.4f}<br>"
+                            "m: %{customdata[2]:.4f}<extra></extra>"
+                        )
+
+                    fig.add_trace(
+                        go.Scatter(
+                            x=cdf["phase"],
+                            y=y_phase,
+                            mode="markers",
+                            name=f"{cam} ({band_labels[band]})",
+                            showlegend=False,
+                            marker={
+                                "size": 6,
+                                "symbol": band_markers[band],
+                                "color": color,
+                                "line": {"width": 0.7, "color": "rgba(10,10,10,0.95)"},
+                            },
+                            error_y={"type": "data", "array": err_phase, "visible": True, "thickness": 1, "width": 0, "color": color},
+                            customdata=hover_phase,
+                            hovertemplate=phase_hovertemplate,
+                        ),
+                        row=row_map['phase'],
+                        col=1,
                     )
 
-                fig.add_trace(
-                    go.Scatter(
-                        x=cdf["phase"],
-                        y=y_phase,
-                        mode="markers",
-                        name=f"{cam} ({band_labels[band]})",
-                        showlegend=False,
-                        marker={
-                            "size": 6,
-                            "symbol": band_markers[band],
-                            "color": color,
-                            "line": {"width": 0.7, "color": "rgba(10,10,10,0.95)"},
-                        },
-                        error_y={"type": "data", "array": err_phase, "visible": True, "thickness": 1, "width": 0, "color": color},
-                        customdata=hover_phase,
-                        hovertemplate=phase_hovertemplate,
-                    ),
-                    row=row_map['phase'],
-                    col=1,
+            phase_lag = float(phase_diag.get("phase_lag_g_v_cycles", np.nan))
+            phase_lag_abs = float(phase_diag.get("phase_lag_g_v_abs_cycles", np.nan))
+            if np.isfinite(phase_lag):
+                lag_text = f"g-V lag {phase_lag:+.3f} cyc"
+                if np.isfinite(phase_lag_abs):
+                    lag_text += f" (|lag| {phase_lag_abs:.3f})"
+                fig.add_annotation(
+                    text=lag_text,
+                    x=0.99,
+                    y=0.98,
+                    xref="paper",
+                    yref="paper",
+                    xanchor="right",
+                    yanchor="top",
+                    showarrow=False,
+                    font={"size": 11, "color": colors["text"]},
+                    bgcolor=colors["paper_bg"],
+                    bordercolor=colors["grid"],
+                    borderwidth=1,
+                    opacity=0.9,
                 )
-
-        phase_lag = float(phase_diag.get("phase_lag_g_v_cycles", np.nan))
-        phase_lag_abs = float(phase_diag.get("phase_lag_g_v_abs_cycles", np.nan))
-        if np.isfinite(phase_lag):
-            lag_text = f"g-V lag {phase_lag:+.3f} cyc"
-            if np.isfinite(phase_lag_abs):
-                lag_text += f" (|lag| {phase_lag_abs:.3f})"
-            fig.add_annotation(
-                text=lag_text,
-                x=0.99,
-                y=0.98,
-                xref="paper",
-                yref="paper",
-                xanchor="right",
-                yanchor="top",
-                showarrow=False,
-                font={"size": 11, "color": colors["text"]},
-                bgcolor=colors["paper_bg"],
-                bordercolor=colors["grid"],
-                borderwidth=1,
-                opacity=0.9,
-            )
 
         fig.add_vline(x=0.0, line_color=colors["guide_line"], line_dash="dot", line_width=1.0, row=row_map['phase'], col=1)
         fig.add_vline(x=1.0, line_color=colors["guide_line"], line_dash="dot", line_width=1.0, row=row_map['phase'], col=1)
         fig.add_vline(x=2.0, line_color=colors["guide_line"], line_dash="dot", line_width=1.0, row=row_map['phase'], col=1)
-        fig.add_hline(y=0.0, line_color=colors["guide_line"], line_dash="dot", row=row_map['phase'], col=1)
+        if phase_panel_mode == "fold":
+            fig.add_hline(y=0.0, line_color=colors["guide_line"], line_dash="dot", row=row_map['phase'], col=1)
 
     if show_raw_mag:
         # Explicitly calculate range to ensure full visibility
@@ -1684,14 +1785,21 @@ def build_interactive_lightcurve_figure(
         fig.add_hline(y=0.0, line_color=colors["guide_line"], line_dash="dot", row=row_map['resid'], col=1)
 
     if phase_enabled and 'phase' in row_map and phase_period is not None:
-        phase_axis_title = rf"$\phi\,(P={phase_period:.5f}\,\mathrm{{d}})$"
-        fig.update_xaxes(title_text=phase_axis_title, row=row_map['phase'], col=1, range=[-0.02, 2.02])
-        fig.update_yaxes(
-            title_text=r"$\Delta F/F$" if is_flux else r"$\Delta m$ [mag]",
-            row=row_map['phase'],
-            col=1,
-            autorange="reversed" if not is_flux else True,
+        phase_axis_title = (
+            rf"$\phi\ \mathrm{{vs.}}\ E\,(P={phase_period:.5f}\,\mathrm{{d}})$"
+            if phase_panel_mode == "time"
+            else rf"$\phi\,(P={phase_period:.5f}\,\mathrm{{d}})$"
         )
+        fig.update_xaxes(title_text=phase_axis_title, row=row_map['phase'], col=1, range=[-0.02, 2.02])
+        if phase_panel_mode == "time":
+            fig.update_yaxes(title_text="Cycle E", row=row_map['phase'], col=1, autorange=True)
+        else:
+            fig.update_yaxes(
+                title_text=r"$\Delta F/F$" if is_flux else r"$\Delta m$ [mag]",
+                row=row_map['phase'],
+                col=1,
+                autorange="reversed" if not is_flux else True,
+            )
     elif phase_requested and 'phase' in row_map:
         phase_row = row_map['phase']
         fig.update_xaxes(title_text=r"$\phi$", row=phase_row, col=1, range=[0.0, 1.0])
@@ -1808,7 +1916,9 @@ def build_interactive_lightcurve_figure(
 
     status_message = ""
     if phase_enabled and phase_period is not None:
-        phase_bits = [f"Phase-fold P={float(phase_period):.5f} d"]
+        phase_bits = [
+            f"{'Phase-time' if phase_panel_mode == 'time' else 'Phase-fold'} P={float(phase_period):.5f} d"
+        ]
         if phase_source:
             phase_bits.append(f"source={phase_source}")
         phase_lag = float(phase_diag.get("phase_lag_g_v_cycles", np.nan))

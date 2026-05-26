@@ -181,6 +181,48 @@ def test_interactive_phase_panel_shows_placeholder_without_period(tmp_path: Path
     )
 
 
+def test_interactive_phase_time_panel_uses_cycle_axis_and_residual_color(tmp_path: Path) -> None:
+    lc_path = tmp_path / "123.dat2"
+    _write_dat2(lc_path)
+    payload = {
+        "candidate_id": "123",
+        "asas_sn_id": "123",
+        "lc_path": str(lc_path),
+        "period_consensus_days": 2.0,
+    }
+
+    result = build_interactive_lightcurve_figure(
+        payload,
+        plot_dir=None,
+        selected_cameras=[],
+        selected_bands=["g", "V"],
+        filter_bad_cameras=False,
+        show_baseline=True,
+        show_event_markers=False,
+        show_residuals=True,
+        show_phase_fold=True,
+        phase_panel_mode="time",
+        show_raw_mag=True,
+        override_period=None,
+        show_diagnostics=False,
+        confidence_colors=False,
+        run_params={"baseline_func": "global_median"},
+        uirevision_key="test",
+        yaxis_mode="mag",
+    )
+
+    fig = result["figure"]
+    phase_time_traces = [trace for trace in fig.data if "cycle:" in str(getattr(trace, "hovertemplate", ""))]
+
+    assert result["status"] == "ok"
+    assert "Phase-time P=2.00000 d" in result["status_message"]
+    assert fig.layout.yaxis3.title.text == "Cycle E"
+    assert fig.layout.xaxis3.range == (-0.02, 2.02)
+    assert phase_time_traces
+    assert any(max(trace.x) > 1.0 for trace in phase_time_traces)
+    assert any(getattr(trace.marker, "showscale", False) for trace in phase_time_traces)
+
+
 def test_interactive_tess_overlay_appears_as_relative_magnitude_in_mag_mode(tmp_path: Path) -> None:
     lc_path = tmp_path / "123.dat2"
     tess_path = tmp_path / "tess_lc_123.parquet"

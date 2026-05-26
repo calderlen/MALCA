@@ -155,6 +155,15 @@ def test_layout_embeds_eda_panel() -> None:
     assert "eda-export-status" in ids
 
 
+def test_layout_exposes_phase_time_toggle() -> None:
+    control = _component_by_id(app.layout, "phase-panel-mode")
+
+    assert control is not None
+    assert getattr(control, "value", None) == "fold"
+    values = {str(option.get("value")) for option in getattr(control, "options", [])}
+    assert values == {"fold", "time"}
+
+
 def test_eda_table_has_native_sorting_and_filtering() -> None:
     table = _component_by_id(app.layout, "eda-candidate-table")
 
