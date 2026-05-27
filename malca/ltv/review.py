@@ -5,12 +5,9 @@ Maps LTV pipeline output columns to the review DB schema and ingests
 candidates into a standalone LTV review DB (separate from STV candidates).
 
 Usage:
-    # CLI
-    malca ltv-ingest --run-dir output/runs/ltv -v
-
-    # Python API
+    # Python API used by malca ltv-pipeline
     from malca.ltv.review import ingest_ltv_results
-    n_total, n_new = ingest_ltv_results("output/runs/ltv/review/review.db", ltv_df)
+    n_total, n_new = ingest_ltv_results("output/runs/ltv/latest/review/review.db", ltv_df)
 """
 from __future__ import annotations
 
@@ -26,7 +23,6 @@ from concurrent.futures import ProcessPoolExecutor
 from malca.config import ASASSN_INDEX_PATH
 from malca.config import LTV_MAX_PM
 from malca.review.store import db_connect, import_candidates
-from malca.stats import compute_stats, _enrich_row_worker
 from malca.table_io import read_parquet_table, require_parquet_path
 from malca.ltv.paths import (
     DEFAULT_LTV_RUN_DIR,
@@ -116,8 +112,8 @@ def map_ltv_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
     Rename LTV pipeline output columns to review DB schema names.
 
-    Handles both core-only output (from ltv-core) and full pipeline output
-    (from ltv-build, which adds crossmatch, NEOWISE, dust, extinction).
+    Handles both raw LTV core output and full LTV pipeline output
+    (with crossmatch, NEOWISE, dust, extinction).
 
     Returns a new DataFrame with:
     - candidate_id = "ltv_{asas_sn_id}"
@@ -156,8 +152,17 @@ def map_ltv_columns(df: pd.DataFrame) -> pd.DataFrame:
     if "gaia_alert_name" in df.columns and "ltv_gaia_alert_match" not in df.columns:
         df["ltv_gaia_alert_match"] = df["gaia_alert_name"].notna().astype(int)
 
-    # --- All ingested candidates passed the LTV filters (implied by inclusion) ---
-    if "ltv_passed_filters" not in df.columns:
+    # --- Normalize LTV filter pass flag ---
+    if "failed_any" in df.columns and "ltv_passed_filters" not in df.columns:
+        failed = df["failed_any"]
+        if pd.api.types.is_bool_dtype(failed):
+            df["ltv_passed_filters"] = (~failed.fillna(False).astype(bool)).astype(int)
+        elif pd.api.types.is_numeric_dtype(failed):
+            df["ltv_passed_filters"] = (failed.fillna(0).astype(float) == 0.0).astype(int)
+        else:
+            lowered = failed.astype("string").str.strip().str.lower()
+            df["ltv_passed_filters"] = (~lowered.isin({"1", "true", "t", "yes", "y"}).fillna(False)).astype(int)
+    elif "ltv_passed_filters" not in df.columns:
         df["ltv_passed_filters"] = 1
 
     # --- Rename PanSTARRS g-mag to baseline_mag if not already present ---
@@ -183,6 +188,14 @@ def map_ltv_columns(df: pd.DataFrame) -> pd.DataFrame:
     # --- Cast int bool columns ---
     for col in (
         "ltv_passed_filters",
+        "ltv_failed_slope",
+        "ltv_failed_max_diff",
+        "ltv_failed_dec",
+        "ltv_failed_refcat_offset",
+        "ltv_failed_photometric_scatter",
+        "ltv_failed_high_pm",
+        "ltv_failed_neighbor_high_pm",
+        "ltv_failed_crowding",
         "ltv_dust_candidate",
         "ltv_dust_excess",
         "ltv_vsx_match",
@@ -215,20 +228,22 @@ def enrich_with_stats(
     The flattening logic mirrors detect.py's --run-enrich step, producing
     the same stats_* column names that live in _CANDIDATE_COLUMNS.
     """
+    from malca.stats import _enrich_row_worker
+
     if "lc_path" not in df.columns:
         if verbose:
-            print("[ltv-ingest] No lc_path column — skipping compute_stats enrichment")
+            print("[ltv-review] No lc_path column; skipping compute_stats enrichment")
         return df
 
     valid_mask = df["lc_path"].notna() & (df["lc_path"].astype(str) != "")
     n_valid = valid_mask.sum()
     if n_valid == 0:
         if verbose:
-            print("[ltv-ingest] No valid lc_path values — skipping compute_stats")
+            print("[ltv-review] No valid lc_path values; skipping compute_stats")
         return df
 
     if verbose:
-        print(f"[ltv-ingest] Running compute_stats on {n_valid:,} candidates ({n_workers} workers)...")
+        print(f"[ltv-review] Running compute_stats on {n_valid:,} candidates ({n_workers} workers)...")
 
     rows = df.to_dict("records")
     # Build parallel tasks; rows with no valid path pass through unchanged.
@@ -288,7 +303,7 @@ def _add_gaia_ids_from_index_ltv(df: pd.DataFrame, index_path: Path, verbose: bo
         return df
     try:
         if verbose:
-            print(f"[ltv-ingest] Loading ASASSN index for gaia_id lookup: {index_path.name}")
+            print(f"[ltv-review] Loading ASASSN index for gaia_id lookup: {index_path.name}")
         df_idx = pd.read_parquet(require_parquet_path(index_path), columns=["asas_sn_id", "gaia_id"])
         df_idx["asas_sn_id"] = pd.to_numeric(df_idx["asas_sn_id"], errors="coerce")
         df_idx = df_idx.dropna(subset=["asas_sn_id"])
@@ -309,11 +324,11 @@ def _add_gaia_ids_from_index_ltv(df: pd.DataFrame, index_path: Path, verbose: bo
         out.loc[missing, "gaia_id"] = merged.loc[missing, "_gaia_id_idx"]
         n_filled = int(missing.sum()) - int(out["gaia_id"].isna().sum())
         if verbose:
-            print(f"[ltv-ingest] Filled gaia_id for {n_filled}/{len(out)} candidates from ASASSN index")
+            print(f"[ltv-review] Filled gaia_id for {n_filled}/{len(out)} candidates from ASASSN index")
         return out
     except Exception as e:
         if verbose:
-            print(f"[ltv-ingest] Warning: gaia_id index lookup failed: {e}")
+            print(f"[ltv-review] Warning: gaia_id index lookup failed: {e}")
         return df
 
 
@@ -338,7 +353,7 @@ def ingest_ltv_results(
 
     Args:
         db_path: Path to the LTV review SQLite DB (created if it doesn't exist).
-        ltv_df: DataFrame from ltv-core or ltv-build.
+        ltv_df: DataFrame from LTV core metrics or enriched pipeline output.
         run_characterize: Run Gaia/dust characterization at ingest time.
             Disable if the pipeline already ran extinction correction and
             Gaia crossmatching.
@@ -347,7 +362,7 @@ def ingest_ltv_results(
             crossmatch step in pipeline.py.
         run_stats: Run compute_stats on each candidate's raw LC to populate
             stats_variability_* columns (von Neumann, Stetson, etc.).
-            Requires a valid lc_path column in ltv_df (added by ltv-core).
+            Requires a valid lc_path column in ltv_df (added by LTV core metrics).
         stats_compute_ls: Also compute Lomb-Scargle in compute_stats (slower).
         n_workers: Number of parallel workers for compute_stats enrichment.
         index_path: Path to the ASASSN index parquet for gaia_id lookup.
@@ -365,9 +380,23 @@ def ingest_ltv_results(
     if source_path is None:
         source_path = ltv_run_dir_from_review_db(db_path) or db_path
     if verbose:
-        print(f"[ltv-ingest] Ingesting {len(ltv_df):,} LTV candidates → {db_path}")
+        print(f"[ltv-review] Ingesting {len(ltv_df):,} LTV candidates -> {db_path}")
 
     df = map_ltv_columns(ltv_df)
+
+    if "failed_any" in df.columns:
+        failed = df["failed_any"]
+        if pd.api.types.is_bool_dtype(failed):
+            pass_mask = ~failed.fillna(False).astype(bool)
+        elif pd.api.types.is_numeric_dtype(failed):
+            pass_mask = failed.fillna(0).astype(float) == 0.0
+        else:
+            lowered = failed.astype("string").str.strip().str.lower()
+            pass_mask = ~lowered.isin({"1", "true", "t", "yes", "y"}).fillna(False)
+        n_before = len(df)
+        df = df.loc[pass_mask].copy()
+        if verbose and len(df) != n_before:
+            print(f"[ltv-review] Importing {len(df):,}/{n_before:,} rows with failed_any=False")
 
     # Pre-populate gaia_id from the ASASSN index so characterize_candidates_df
     # has real Gaia IDs for all sources (not just the ~99K in the VSX crossmatch).
@@ -376,7 +405,7 @@ def ingest_ltv_results(
         if _idx_path:
             df = _add_gaia_ids_from_index_ltv(df, _idx_path, verbose=verbose)
         elif verbose:
-            print("[ltv-ingest] Warning: ASASSN index not found; Gaia characterization will have limited coverage")
+            print("[ltv-review] Warning: ASASSN index not found; Gaia characterization will have limited coverage")
 
     # The DB upsert requires candidate_id values to be unique within the
     # ingested frame. Some pipeline outputs may contain duplicates (e.g. if
@@ -389,13 +418,20 @@ def ingest_ltv_results(
             if verbose:
                 n_unique = int(df["candidate_id"].nunique())
                 print(
-                    f"[ltv-ingest] Warning: dropping {n_dups} duplicate candidate_id row(s) "
+                    f"[ltv-review] Warning: dropping {n_dups} duplicate candidate_id row(s) "
                     f"({n_unique:,} unique / {len(df):,} total) before DB upsert."
                 )
             df = df.loc[~dup_mask].copy()
 
+    if df.empty:
+        conn = db_connect(db_path)
+        conn.close()
+        if verbose:
+            print("[ltv-review] No passing LTV candidates to import.")
+        return 0, 0
+
     if verbose:
-        print(f"[ltv-ingest] Mapped columns. candidate_id sample: {df['candidate_id'].iloc[0]!r}")
+        print(f"[ltv-review] Mapped columns. candidate_id sample: {df['candidate_id'].iloc[0]!r}")
 
     if run_stats:
         df = enrich_with_stats(df, compute_ls=stats_compute_ls, n_workers=n_workers, verbose=verbose)
@@ -410,18 +446,18 @@ def ingest_ltv_results(
     )
 
     if verbose:
-        print(f"[ltv-ingest] Done. {new} new / {total} total rows.")
+        print(f"[ltv-review] Done. {new} new / {total} total rows.")
 
     return total, new
 
 
 # ---------------------------------------------------------------------------
-# CLI (malca ltv-ingest)
+# Internal CLI retained for module-level debugging; public workflow is malca ltv-pipeline.
 # ---------------------------------------------------------------------------
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="malca ltv-ingest",
+        prog="python -m malca.ltv.review",
         description="Ingest LTV pipeline results into a review DB.",
     )
     p.add_argument(
@@ -539,12 +575,12 @@ def main() -> None:
 
         for fp in files:
             if args.verbose:
-                print(f"[ltv-ingest] Loading {fp} ...")
+                print(f"[ltv-review] Loading {fp} ...")
 
             df = read_parquet_table(fp)
 
             if args.verbose:
-                print(f"[ltv-ingest] Loaded {len(df):,} rows from {fp}")
+                print(f"[ltv-review] Loaded {len(df):,} rows from {fp}")
 
             total_rows, new_rows = ingest_ltv_results(
                 args.review_db,
@@ -565,7 +601,7 @@ def main() -> None:
 
         if args.verbose:
             print(
-                f"[ltv-ingest] Ingested {total_files} file(s) from {input_path}. "
+                f"[ltv-review] Ingested {total_files} file(s) from {input_path}. "
                 f"{sum_new_rows} new / {last_total_rows} total rows in DB."
             )
         return

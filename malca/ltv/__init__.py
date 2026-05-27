@@ -12,147 +12,91 @@ Modules:
     pipeline: Full pipeline integration
 
 Usage:
-    # Core processing (compute seasonal trends)
-    malca ltv.core --mag-bin 13_13.5 --output ltv_output.parquet
-    
-    # Full pipeline (filtering + crossmatch + NEOWISE + extinction)
-    from malca.ltv import run_full_pipeline
-    df_candidates = run_full_pipeline(df_ltv, verbose=True)
+    malca ltv-pipeline --mag-bin 13_13.5
 """
 
-from malca.ltv.core import (
-    process_one_lc,
-    compute_trend_metrics,
-    compute_lomb_scargle,
-    seasonal_midpoints_from_ra,
-    assign_seasons_strict,
-    season_medians_with_gap_indices,
-)
-
-from malca.ltv.filter import (
-    filter_slope_threshold,
-    filter_max_diff_threshold,
-    filter_south_pole,
-    filter_refcat_offset,
-    filter_photometric_scatter,
-    filter_crowding,
-    filter_high_proper_motion,
-    filter_neighbor_high_pm,
-    apply_all_filters,
-)
-
-from malca.ltv.crossmatch import (
-    load_local_catalog,
-    merge_local_catalog,
-    crossmatch_from_local,
-    crossmatch_gaia_alerts,
-    crossmatch_milliquas,
-    query_simbad_classification,
-    crossmatch_all_catalogs,
-    crossmatch_tap_catalog,
-)
-
-from malca.ltv.neowise import (
-    query_neowise_lc,
-    combine_epochs,
-    fit_neowise_trends,
-    extract_neowise_trends,
-)
-
-from malca.ltv.dust import (
-    apply_dust_flags,
-)
-
-from malca.ltv.cmd import (
-    load_mist_grid,
-    compute_cmd_features,
-    assign_cmd_groups,
-    fetch_bailer_jones_distances,
-)
-
-from malca.ltv.gaia_epoch import (
-    query_gaia_epoch_photometry_batch,
-    apply_gaia_epoch_flags,
-)
-from malca.ltv.stochastic import (
-    add_stochastic_postfilter_features,
-)
-from malca.ltv.pipeline import (
-    run_full_pipeline,
-)
-from malca.ltv.injection import (
-    inject_trend,
-    run_injection_recovery as run_ltv_injection_recovery,
-    compute_rejection_summary,
-    generate_plots as generate_ltv_injection_plots,
-)
-
-from malca.ltv.optim import (
-    check_optimizations,
-    cached,
-    clear_cache,
-    get_pooled_session,
-)
-
-from malca.ltv.review import (
-    map_ltv_columns,
-    ingest_ltv_results,
-)
+from importlib import import_module
 
 
-__all__ = [
+_EXPORT_MODULES = {
     # Core
-    "process_one_lc",
-    "compute_trend_metrics",
-    "compute_lomb_scargle",
-    "seasonal_midpoints_from_ra",
-    "assign_seasons_strict",
-    "season_medians_with_gap_indices",
+    "process_one_lc": "malca.ltv.core",
+    "compute_trend_metrics": "malca.ltv.core",
+    "compute_lomb_scargle": "malca.ltv.core",
+    "seasonal_midpoints_from_ra": "malca.ltv.core",
+    "assign_seasons_strict": "malca.ltv.core",
+    "season_medians_with_gap_indices": "malca.ltv.core",
     # Filter
-    "filter_slope_threshold",
-    "filter_max_diff_threshold",
-    "filter_south_pole",
-    "filter_refcat_offset",
-    "filter_photometric_scatter",
-    "filter_crowding",
-    "filter_high_proper_motion",
-    "filter_neighbor_high_pm",
-    "apply_all_filters",
-    # Crossmatch (API only — Gaia DR3 and VSX use local catalog)
-    "crossmatch_gaia_alerts",
-    "crossmatch_milliquas",
-    "query_simbad_classification",
-    "crossmatch_all_catalogs",
-    "crossmatch_tap_catalog",
+    "filter_slope_threshold": "malca.ltv.filter",
+    "filter_max_diff_threshold": "malca.ltv.filter",
+    "filter_south_pole": "malca.ltv.filter",
+    "filter_refcat_offset": "malca.ltv.filter",
+    "filter_photometric_scatter": "malca.ltv.filter",
+    "filter_crowding": "malca.ltv.filter",
+    "filter_high_proper_motion": "malca.ltv.filter",
+    "filter_neighbor_high_pm": "malca.ltv.filter",
+    "apply_all_filters": "malca.ltv.filter",
+    "apply_all_filters_audit": "malca.ltv.filter",
+    # Crossmatch (API only; Gaia DR3 and VSX use local catalog)
+    "load_local_catalog": "malca.ltv.crossmatch",
+    "merge_local_catalog": "malca.ltv.crossmatch",
+    "crossmatch_from_local": "malca.ltv.crossmatch",
+    "crossmatch_gaia_alerts": "malca.ltv.crossmatch",
+    "crossmatch_milliquas": "malca.ltv.crossmatch",
+    "query_simbad_classification": "malca.ltv.crossmatch",
+    "crossmatch_all_catalogs": "malca.ltv.crossmatch",
+    "crossmatch_tap_catalog": "malca.ltv.crossmatch",
     # NEOWISE
-    "query_neowise_lc",
-    "combine_epochs",
-    "fit_neowise_trends",
-    "extract_neowise_trends",
+    "query_neowise_lc": "malca.ltv.neowise",
+    "combine_epochs": "malca.ltv.neowise",
+    "fit_neowise_trends": "malca.ltv.neowise",
+    "extract_neowise_trends": "malca.ltv.neowise",
     # Dust flags
-    "apply_dust_flags",
+    "apply_dust_flags": "malca.ltv.dust",
     # CMD scaffolding
-    "load_mist_grid",
-    "compute_cmd_features",
-    "assign_cmd_groups",
+    "load_mist_grid": "malca.ltv.cmd",
+    "compute_cmd_features": "malca.ltv.cmd",
+    "assign_cmd_groups": "malca.ltv.cmd",
+    "fetch_bailer_jones_distances": "malca.ltv.cmd",
     # Gaia epoch photometry
-    "query_gaia_epoch_photometry_batch",
-    "apply_gaia_epoch_flags",
+    "query_gaia_epoch_photometry_batch": "malca.ltv.gaia_epoch",
+    "apply_gaia_epoch_flags": "malca.ltv.gaia_epoch",
     # Stochastic post-filter features
-    "add_stochastic_postfilter_features",
+    "add_stochastic_postfilter_features": "malca.ltv.stochastic",
+    # LTV external-survey summaries
+    "compute_ltv_multi_survey_features": "malca.ltv.multi_survey",
+    "write_ltv_multi_survey_features": "malca.ltv.multi_survey",
     # Pipeline
-    "run_full_pipeline",
-    "inject_trend",
-    "run_ltv_injection_recovery",
-    "compute_rejection_summary",
-    "generate_ltv_injection_plots",
+    "run_full_pipeline": "malca.ltv.pipeline",
+    # Injection
+    "inject_trend": "malca.ltv.injection",
+    "run_ltv_injection_recovery": "malca.ltv.injection",
+    "compute_rejection_summary": "malca.ltv.injection",
+    "generate_ltv_injection_plots": "malca.ltv.injection",
     # Optimization
-    "check_optimizations",
-    # Local catalog
-    "load_local_catalog",
-    "merge_local_catalog",
-    "crossmatch_from_local",
+    "check_optimizations": "malca.ltv.optim",
+    "cached": "malca.ltv.optim",
+    "clear_cache": "malca.ltv.optim",
+    "get_pooled_session": "malca.ltv.optim",
     # Review DB ingest
-    "map_ltv_columns",
-    "ingest_ltv_results",
-]
+    "map_ltv_columns": "malca.ltv.review",
+    "ingest_ltv_results": "malca.ltv.review",
+}
+
+
+_EXPORT_ALIASES = {
+    "run_ltv_injection_recovery": ("malca.ltv.injection", "run_injection_recovery"),
+    "generate_ltv_injection_plots": ("malca.ltv.injection", "generate_plots"),
+}
+
+
+def __getattr__(name: str):
+    if name not in _EXPORT_MODULES:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module_name, attr_name = _EXPORT_ALIASES.get(name, (_EXPORT_MODULES[name], name))
+    value = getattr(import_module(module_name), attr_name)
+    globals()[name] = value
+    return value
+
+
+__all__ = list(_EXPORT_MODULES)

@@ -2,16 +2,13 @@ from __future__ import annotations
 
 import argparse
 import sqlite3
-import sys
+import zipfile
 from pathlib import Path
 
 import pandas as pd
 
-import malca.__main__ as cli
 from malca.audit import ltv_status
-from malca.ltv import core as ltv_core
 from malca.ltv import pipeline as ltv_pipeline
-from malca.ltv import review as ltv_review
 
 
 def _write_review_db(path: Path, *, candidate_rows: int = 2, review_rows: int = 1) -> None:
@@ -30,116 +27,284 @@ def _write_review_db(path: Path, *, candidate_rows: int = 2, review_rows: int = 
         conn.commit()
 
 
-def test_ltv_core_run_dir_sets_default_output(monkeypatch, tmp_path: Path) -> None:
-    run_dir = tmp_path / "runs" / "ltv"
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        ["malca", "--mag-bin", "13_13.5", "--run-dir", str(run_dir)],
+def _core_rows(tmp_path: Path) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "asas_sn_id": ["123", "456"],
+            "Slope": [0.4, 0.01],
+            "max diff": [0.6, 0.6],
+            "dec_deg": [0.0, 0.0],
+            "Median": [13.0, 13.0],
+            "Pstarss gmag": [13.1, 13.1],
+            "Dispersion": [0.02, 0.02],
+            "Median_err": [0.02, 0.02],
+            "gaia_pm_total": [0.0, 0.0],
+            "neighbor_pm_contam": [False, False],
+            "crowding_count": [0, 0],
+            "lc_path": [str(tmp_path / "123.dat2"), str(tmp_path / "456.dat2")],
+        }
     )
 
-    configs, run_all = ltv_core.parse_args()
 
-    assert run_all is False
-    assert configs[0].output == run_dir / "results" / "LTvar13-13.5.parquet"
+def test_ltv_pipeline_full_writes_audit_metadata_and_ingests_passers(monkeypatch, tmp_path: Path) -> None:
+    run_dir = tmp_path / "runs" / "ltv_run"
+    captured: dict[str, object] = {}
 
-
-def test_ltv_build_run_dir_sets_default_input_and_output(monkeypatch, tmp_path: Path) -> None:
-    run_dir = tmp_path / "runs" / "ltv"
-    results_dir = run_dir / "results"
-    results_dir.mkdir(parents=True)
-    input_path = results_dir / "LTvar13-13.5.parquet"
-    pd.DataFrame({"asas_sn_id": ["123"], "Slope": [0.4], "max diff": [0.6]}).to_parquet(input_path, index=False)
+    def fake_run_core(args: argparse.Namespace, mag_bin: str, run_dir_arg: Path) -> Path:
+        path = ltv_pipeline.ltv_core_output_path(mag_bin, run_dir_arg)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _core_rows(tmp_path).to_parquet(path, index=False)
+        return path
 
     def fake_run_full_pipeline(df: pd.DataFrame, **_kwargs: object) -> pd.DataFrame:
         return df.copy()
 
+    def fake_ingest(review_db: Path, df: pd.DataFrame, **kwargs: object) -> tuple[int, int]:
+        captured["review_db"] = review_db
+        captured["rows"] = len(df)
+        captured["run_characterize"] = kwargs["run_characterize"]
+        captured["source_path"] = kwargs["source_path"]
+        return len(df), len(df)
+
+    monkeypatch.setattr(ltv_pipeline, "_run_core_if_needed", fake_run_core)
     monkeypatch.setattr(ltv_pipeline, "run_full_pipeline", fake_run_full_pipeline)
-    args = ltv_pipeline.add_pipeline_args(argparse.ArgumentParser()).parse_args(
-        ["--mag-bin", "13_13.5", "--run-dir", str(run_dir)]
+    monkeypatch.setattr("malca.ltv.review.ingest_ltv_results", fake_ingest)
+
+    args = ltv_pipeline.add_ltv_pipeline_args(argparse.ArgumentParser()).parse_args(
+        [
+            "--mag-bin", "13_13.5",
+            "--run-dir", str(run_dir),
+            "--no-export-bundle",
+            "--no-review-sync",
+            "--skip-stats",
+        ]
     )
 
-    ltv_pipeline.run_pipeline_cli(args)
+    summary = ltv_pipeline.run_ltv_pipeline_cli(args)
 
-    assert Path(args.input) == input_path
-    assert Path(args.output) == results_dir / "LTvar13-13.5_pipeline.parquet"
-    assert Path(args.output).exists()
+    filtered = pd.read_parquet(run_dir / "results" / "LTvar13-13.5_filtered.parquet")
+    enriched = pd.read_parquet(run_dir / "results" / "LTvar13-13.5_pipeline.parquet")
 
-
-def test_ltv_pipeline_defaults_review_db_to_run_dir(monkeypatch, tmp_path: Path) -> None:
-    run_dir = tmp_path / "runs" / "ltv"
-    captured: dict[str, object] = {}
-    real_import_module = cli.importlib.import_module
-
-    class FakePipelineModule:
-        @staticmethod
-        def add_pipeline_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-            parser.add_argument("--mag-bin")
-            parser.add_argument("--run-dir", default="output/runs/ltv")
-            parser.add_argument("--workers", type=int, default=1)
-            parser.add_argument("--verbose", action="store_true")
-            return parser
-
-        @staticmethod
-        def run_pipeline_cli(args: argparse.Namespace) -> pd.DataFrame:
-            captured["pipeline_review_db"] = args.review_db
-            captured["pipeline_run_dir"] = args.run_dir
-            return pd.DataFrame({"asas_sn_id": ["123"]})
-
-    class FakeReviewModule:
-        @staticmethod
-        def ingest_ltv_results(review_db: str, df: pd.DataFrame, **kwargs: object) -> tuple[int, int]:
-            captured["review_db"] = review_db
-            captured["source_path"] = kwargs["source_path"]
-            captured["rows"] = len(df)
-            return len(df), len(df)
-
-    def fake_import_module(name: str):
-        if name == "malca.ltv.pipeline":
-            return FakePipelineModule
-        if name == "malca.ltv.review":
-            return FakeReviewModule
-        return real_import_module(name)
-
-    monkeypatch.setattr(cli.importlib, "import_module", fake_import_module)
-    monkeypatch.setattr(sys, "argv", ["malca", "ltv-pipeline", "--mag-bin", "13_13.5", "--run-dir", str(run_dir)])
-
-    assert cli.main() == 0
-    assert captured["pipeline_review_db"] == str(run_dir / "review" / "review.db")
-    assert captured["review_db"] == str(run_dir / "review" / "review.db")
-    assert captured["source_path"] == run_dir
+    assert len(filtered) == 2
+    assert filtered["failed_any"].tolist() == [False, True]
+    assert filtered["ltv_failed_slope"].tolist() == [False, True]
+    assert len(enriched) == 1
+    assert enriched.loc[0, "ltv_class"] == "ltv_candidate"
+    assert (run_dir / "run_params.json").exists()
+    assert (run_dir / "run_summary.json").exists()
+    assert (run_dir / "run.log").exists()
     assert captured["rows"] == 1
+    assert captured["run_characterize"] is False
+    assert captured["source_path"] == run_dir
+    assert summary["per_bin"]["13_13.5"]["passing_rows"] == 1
 
 
-def test_ltv_ingest_defaults_input_and_review_db_to_run_dir(monkeypatch, tmp_path: Path) -> None:
-    run_dir = tmp_path / "runs" / "ltv"
+def test_ltv_pipeline_cluster_skips_downstream_ingest(monkeypatch, tmp_path: Path) -> None:
+    run_dir = tmp_path / "runs" / "ltv_cluster"
+
+    def fake_run_core(args: argparse.Namespace, mag_bin: str, run_dir_arg: Path) -> Path:
+        path = ltv_pipeline.ltv_core_output_path(mag_bin, run_dir_arg)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _core_rows(tmp_path).to_parquet(path, index=False)
+        return path
+
+    monkeypatch.setattr(ltv_pipeline, "_run_core_if_needed", fake_run_core)
+
+    args = ltv_pipeline.add_ltv_pipeline_args(argparse.ArgumentParser()).parse_args(
+        ["--stage", "cluster", "--mag-bin", "13_13.5", "--run-dir", str(run_dir), "--no-export-bundle"]
+    )
+    summary = ltv_pipeline.run_ltv_pipeline_cli(args)
+
+    assert (run_dir / "results" / "LTvar13-13.5_filtered.parquet").exists()
+    assert not (run_dir / "results" / "LTvar13-13.5_pipeline.parquet").exists()
+    assert summary["review"] is None
+
+
+def _patch_ltv_pipeline_no_network(monkeypatch, tmp_path: Path, calls: dict[str, int] | None = None) -> None:
+    calls = calls if calls is not None else {}
+
+    def fake_run_core(args: argparse.Namespace, mag_bin: str, run_dir_arg: Path) -> Path:
+        path = ltv_pipeline.ltv_core_output_path(mag_bin, run_dir_arg)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _core_rows(tmp_path).to_parquet(path, index=False)
+        return path
+
+    def fake_run_full_pipeline(df: pd.DataFrame, **_kwargs: object) -> pd.DataFrame:
+        return df.copy()
+
+    def fake_ingest(_review_db: Path, df: pd.DataFrame, **_kwargs: object) -> tuple[int, int]:
+        return len(df), len(df)
+
+    def fake_external(args: argparse.Namespace, mag_bin: str, run_dir: Path, candidates: pd.DataFrame):
+        calls["external"] = calls.get("external", 0) + 1
+        out = candidates.copy()
+        out["ztf_lc_n_det"] = 2
+        path = ltv_pipeline.ltv_external_lcs_output_path(mag_bin, run_dir)
+        external_dir = run_dir / "results" / "external_lcs"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        out.to_parquet(path, index=False)
+        return path, external_dir, out
+
+    def fake_multi(args: argparse.Namespace, mag_bin: str, run_dir: Path, candidates: pd.DataFrame, *, external_lc_dir: Path):
+        calls["multi"] = calls.get("multi", 0) + 1
+        out = candidates.copy()
+        out["ltv_ms_feature_status"] = "ok"
+        out["ltv_ms_ztf_n_points"] = 2
+        path = ltv_pipeline.ltv_multi_survey_output_path(mag_bin, run_dir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        out.to_parquet(path, index=False)
+        return path, out
+
+    monkeypatch.setattr(ltv_pipeline, "_run_core_if_needed", fake_run_core)
+    monkeypatch.setattr(ltv_pipeline, "run_full_pipeline", fake_run_full_pipeline)
+    monkeypatch.setattr(ltv_pipeline, "_write_ltv_external_lcs", fake_external)
+    monkeypatch.setattr(ltv_pipeline, "_write_ltv_multi_survey_features", fake_multi)
+    monkeypatch.setattr("malca.ltv.review.ingest_ltv_results", fake_ingest)
+
+
+def test_ltv_stage_full_extended_runs_extended_products(monkeypatch, tmp_path: Path) -> None:
+    calls: dict[str, int] = {}
+    _patch_ltv_pipeline_no_network(monkeypatch, tmp_path, calls)
+    run_dir = tmp_path / "runs" / "ltv_full_extended"
+
+    args = ltv_pipeline.add_ltv_pipeline_args(argparse.ArgumentParser()).parse_args(
+        [
+            "--stage", "full-extended",
+            "--mag-bin", "13_13.5",
+            "--run-dir", str(run_dir),
+            "--no-export-bundle",
+            "--no-review-sync",
+            "--skip-stats",
+        ]
+    )
+    summary = ltv_pipeline.run_ltv_pipeline_cli(args)
+    enriched = pd.read_parquet(run_dir / "results" / "LTvar13-13.5_pipeline.parquet")
+
+    assert calls == {"external": 1, "multi": 1}
+    assert enriched.loc[0, "ztf_lc_n_det"] == 2
+    assert enriched.loc[0, "ltv_ms_feature_status"] == "ok"
+    assert summary["per_bin"]["13_13.5"]["external_lcs_rows"] == 1
+    assert summary["per_bin"]["13_13.5"]["ltv_multi_survey_rows"] == 1
+
+
+def test_ltv_stage_full_extended_opt_in_and_out(monkeypatch, tmp_path: Path) -> None:
+    calls: dict[str, int] = {}
+    _patch_ltv_pipeline_no_network(monkeypatch, tmp_path, calls)
+
+    args = ltv_pipeline.add_ltv_pipeline_args(argparse.ArgumentParser()).parse_args(
+        [
+            "--stage", "full",
+            "--mag-bin", "13_13.5",
+            "--run-dir", str(tmp_path / "runs" / "full_default"),
+            "--no-export-bundle",
+            "--no-review-sync",
+            "--skip-stats",
+        ]
+    )
+    ltv_pipeline.run_ltv_pipeline_cli(args)
+    assert calls == {}
+
+    args = ltv_pipeline.add_ltv_pipeline_args(argparse.ArgumentParser()).parse_args(
+        [
+            "--stage", "full",
+            "--run-external-lcs",
+            "--run-multi-survey-features",
+            "--mag-bin", "13_13.5",
+            "--run-dir", str(tmp_path / "runs" / "full_opt_in"),
+            "--no-export-bundle",
+            "--no-review-sync",
+            "--skip-stats",
+        ]
+    )
+    ltv_pipeline.run_ltv_pipeline_cli(args)
+    assert calls == {"external": 1, "multi": 1}
+
+    args = ltv_pipeline.add_ltv_pipeline_args(argparse.ArgumentParser()).parse_args(
+        [
+            "--stage", "full-extended",
+            "--no-external-lcs",
+            "--no-multi-survey-features",
+            "--mag-bin", "13_13.5",
+            "--run-dir", str(tmp_path / "runs" / "extended_opt_out"),
+            "--no-export-bundle",
+            "--no-review-sync",
+            "--skip-stats",
+        ]
+    )
+    ltv_pipeline.run_ltv_pipeline_cli(args)
+    assert calls == {"external": 1, "multi": 1}
+
+
+def test_ltv_stage_cluster_skips_extended_flags(monkeypatch, tmp_path: Path) -> None:
+    calls: dict[str, int] = {}
+    _patch_ltv_pipeline_no_network(monkeypatch, tmp_path, calls)
+
+    args = ltv_pipeline.add_ltv_pipeline_args(argparse.ArgumentParser()).parse_args(
+        [
+            "--stage", "cluster",
+            "--run-external-lcs",
+            "--run-multi-survey-features",
+            "--mag-bin", "13_13.5",
+            "--run-dir", str(tmp_path / "runs" / "cluster_extended"),
+            "--no-export-bundle",
+        ]
+    )
+    ltv_pipeline.run_ltv_pipeline_cli(args)
+    assert calls == {}
+
+
+def test_ltv_full_bundle_includes_candidate_lightcurves(tmp_path: Path) -> None:
+    run_dir = tmp_path / "runs" / "ltv_bundle"
     results_dir = run_dir / "results"
     results_dir.mkdir(parents=True)
-    pd.DataFrame({"asas_sn_id": ["123"], "Slope": [0.4], "max diff": [0.6]}).to_parquet(
-        results_dir / "LTvar13-13.5_pipeline.parquet",
+    lc_path = tmp_path / "123.dat2"
+    lc_path.write_text("hjd,mag\n1,13.2\n", encoding="ascii")
+    pd.DataFrame(
+        {
+            "asas_sn_id": ["123"],
+            "lc_path": [str(lc_path)],
+            "failed_any": [False],
+        }
+    ).to_parquet(results_dir / "LTvar13-13.5_pipeline.parquet", index=False)
+    pd.DataFrame({"candidate_id": ["ltv_123"], "ztf_lc_n_det": [2]}).to_parquet(
+        results_dir / "LTvar13-13.5_external_lcs.parquet",
+        index=False,
+    )
+    pd.DataFrame({"candidate_id": ["ltv_123"], "ltv_ms_feature_status": ["ok"]}).to_parquet(
+        results_dir / "LTvar13-13.5_ltv_multi_survey.parquet",
+        index=False,
+    )
+    external_dir = results_dir / "external_lcs"
+    external_dir.mkdir()
+    pd.DataFrame({"jd": [2450000.0], "mag": [13.0]}).to_parquet(
+        external_dir / "ztf_lc_ltv_123.parquet",
         index=False,
     )
 
-    captured: dict[str, object] = {}
+    bundle_path = tmp_path / "ltv_bundle.zip"
+    names = ltv_pipeline._export_ltv_run_bundle(run_dir, bundle_path, full_bundle=True)
 
-    def fake_ingest_ltv_results(review_db: str, df: pd.DataFrame, **kwargs: object) -> tuple[int, int]:
-        captured["review_db"] = review_db
-        captured["source_path"] = kwargs["source_path"]
-        captured["rows"] = len(df)
-        return len(df), len(df)
+    assert "bundle_assets/lightcurves/123.dat2" in names
+    assert "results/LTvar13-13.5_external_lcs.parquet" in names
+    assert "results/LTvar13-13.5_ltv_multi_survey.parquet" in names
+    assert "results/external_lcs/ztf_lc_ltv_123.parquet" in names
+    with zipfile.ZipFile(bundle_path) as zf:
+        assert "bundle_assets/lightcurves/123.dat2" in zf.namelist()
+        assert "results/external_lcs/ztf_lc_ltv_123.parquet" in zf.namelist()
 
-    monkeypatch.setattr(ltv_review, "ingest_ltv_results", fake_ingest_ltv_results)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        ["malca ltv-ingest", "--run-dir", str(run_dir), "--skip-characterize", "--skip-stats"],
-    )
 
-    ltv_review.main()
+def test_ltv_overwrite_clears_core_chunks_and_checkpoint(tmp_path: Path) -> None:
+    output_path = tmp_path / "results" / "LTvar13-13.5.parquet"
+    output_path.mkdir(parents=True)
+    chunk = output_path / "chunk_000000.parquet"
+    chunk.write_text("stale", encoding="ascii")
+    checkpoint = output_path.with_name("LTvar13-13.5_PROCESSED.txt")
+    checkpoint.write_text("old.dat2\n", encoding="ascii")
 
-    assert captured["review_db"] == str(run_dir / "review" / "review.db")
-    assert captured["source_path"] == run_dir
-    assert captured["rows"] == 1
+    ltv_pipeline._clear_ltv_core_outputs(output_path)
+
+    assert not chunk.exists()
+    assert not checkpoint.exists()
 
 
 def test_ltv_status_discovers_run_style_outputs(monkeypatch, tmp_path: Path) -> None:

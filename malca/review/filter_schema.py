@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import re
 
+from malca.ltv.multi_survey import LTV_MS_FEATURE_COLUMN_SPECS
+
 
 SPECIAL_FILTERS = {
     "only_unreviewed": "Only unreviewed",
@@ -173,6 +175,10 @@ SIDEBAR_GROUPS = [
         ("num", "ltv_neowise_w1_w2_slope"),
         ("num", "ltv_neowise_n_epochs"),
         ("bool", "ltv_passed_filters"),
+        ("text", "ltv_filter_reason"),
+        ("text", "ltv_class"),
+        ("text", "ltv_class_reason"),
+        ("num", "ltv_interest_score"),
         ("bool", "ltv_dust_candidate"),
         ("bool", "ltv_dust_excess"),
         ("bool", "ltv_vsx_match"),
@@ -218,6 +224,12 @@ SIDEBAR_GROUPS = [
         ("num", "ltv_stoch_mhps_ratio"),
         ("num", "ltv_stoch_gp_drw_sigma"),
         ("num", "ltv_stoch_gp_drw_tau"),
+    ]),
+    ("LTV Multi-Survey", [
+        *[
+            ("text" if kind == "text" else "bool" if kind == "bool" else "num", col)
+            for col, _sql, kind in LTV_MS_FEATURE_COLUMN_SPECS
+        ],
     ]),
     ("External Coverage", [
         ("num", "neowise_n_epochs"),
@@ -688,6 +700,14 @@ SIDEBAR_GROUPS = [
     ]),
     ("Fail Flags", [
         ("bool", "failed_any"),
+        ("bool", "ltv_failed_slope"),
+        ("bool", "ltv_failed_max_diff"),
+        ("bool", "ltv_failed_dec"),
+        ("bool", "ltv_failed_refcat_offset"),
+        ("bool", "ltv_failed_photometric_scatter"),
+        ("bool", "ltv_failed_high_pm"),
+        ("bool", "ltv_failed_neighbor_high_pm"),
+        ("bool", "ltv_failed_crowding"),
         ("bool", "failed_periodic_catalog"),
         ("bool", "failed_gaia_ruwe"),
         ("bool", "period_conflict_flag"),

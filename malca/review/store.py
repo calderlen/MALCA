@@ -25,6 +25,7 @@ from malca.config import (
     LEGACY_GAIA_CACHE_FILE,
     REVIEW_IMPORTED_LC_CACHE_DIR,
 )
+from malca.ltv.multi_survey import LTV_MS_FEATURE_COLUMN_SPECS
 from malca.multi_survey_features import MS_FEATURE_COLUMN_SPECS
 from malca.review.filter_schema import REVIEW_FILTER_COLUMN_TYPES
 from malca.review.metadata import normalize_vsx_record
@@ -895,6 +896,18 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("ltv_trend_delta_bic_quadratic", "REAL",   "float"),
     # -- LTV: filter flags --
     ("ltv_passed_filters",           "INTEGER", "bool"),   # passed all false positive filters
+    ("ltv_failed_slope",             "INTEGER", "bool"),
+    ("ltv_failed_max_diff",          "INTEGER", "bool"),
+    ("ltv_failed_dec",               "INTEGER", "bool"),
+    ("ltv_failed_refcat_offset",     "INTEGER", "bool"),
+    ("ltv_failed_photometric_scatter", "INTEGER", "bool"),
+    ("ltv_failed_high_pm",           "INTEGER", "bool"),
+    ("ltv_failed_neighbor_high_pm",  "INTEGER", "bool"),
+    ("ltv_failed_crowding",          "INTEGER", "bool"),
+    ("ltv_filter_reason",            "TEXT",    "text"),
+    ("ltv_class",                    "TEXT",    "text"),
+    ("ltv_class_reason",             "TEXT",    "text"),
+    ("ltv_interest_score",           "REAL",    "float"),
     ("ltv_dust_candidate",           "INTEGER", "bool"),   # dust-driven variability flag
     ("ltv_dust_excess",              "INTEGER", "bool"),   # mid-IR excess flag
     # -- LTV: crossmatch --
@@ -917,6 +930,8 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("ltv_stoch_mhps_ratio",         "REAL",    "float"),
     ("ltv_stoch_gp_drw_sigma",       "REAL",    "float"),
     ("ltv_stoch_gp_drw_tau",         "REAL",    "float"),
+    # -- LTV: external multi-survey long-term summaries --
+    *LTV_MS_FEATURE_COLUMN_SPECS,
 ]
 
 # Derived helpers

@@ -33,6 +33,34 @@ def ltv_pipeline_output_path(mag_bin: str, run_dir: str | Path | None = None) ->
     return ltv_results_dir(run_dir) / f"LTvar{mag_bin.replace('_', '-')}_pipeline.parquet"
 
 
+def ltv_external_lcs_output_path(mag_bin: str, run_dir: str | Path | None = None) -> Path:
+    return ltv_results_dir(run_dir) / f"LTvar{mag_bin.replace('_', '-')}_external_lcs.parquet"
+
+
+def ltv_multi_survey_output_path(mag_bin: str, run_dir: str | Path | None = None) -> Path:
+    return ltv_results_dir(run_dir) / f"LTvar{mag_bin.replace('_', '-')}_ltv_multi_survey.parquet"
+
+
+def ltv_filtered_output_path(mag_bin: str, run_dir: str | Path | None = None) -> Path:
+    return ltv_results_dir(run_dir) / f"LTvar{mag_bin.replace('_', '-')}_filtered.parquet"
+
+
+def ltv_all_filtered_output_path(run_dir: str | Path | None = None) -> Path:
+    return ltv_results_dir(run_dir) / "LTvar_all_filtered.parquet"
+
+
+def ltv_all_pipeline_output_path(run_dir: str | Path | None = None) -> Path:
+    return ltv_results_dir(run_dir) / "LTvar_all_pipeline.parquet"
+
+
+def ltv_all_external_lcs_output_path(run_dir: str | Path | None = None) -> Path:
+    return ltv_results_dir(run_dir) / "LTvar_all_external_lcs.parquet"
+
+
+def ltv_all_multi_survey_output_path(run_dir: str | Path | None = None) -> Path:
+    return ltv_results_dir(run_dir) / "LTvar_all_ltv_multi_survey.parquet"
+
+
 def ltv_run_dir_from_review_db(db_path: str | Path) -> Path | None:
     path = Path(db_path).expanduser()
     if path.name == "review.db" and path.parent.name == "review":

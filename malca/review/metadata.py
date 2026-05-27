@@ -10,6 +10,8 @@ from urllib.parse import quote, quote_plus
 
 import pandas as pd
 
+from malca.ltv.multi_survey import LTV_MS_FEATURE_COLUMN_SPECS
+
 
 # Grouped metadata fields: list of (group_name, fields) where each field is
 # a (label, key) tuple.  Groups are rendered as collapsible sections in the
@@ -42,6 +44,10 @@ REVIEW_METADATA_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("V/g overlap (days)", "ltv_vg_overlap_days"),
         ("V/g overlap fraction", "ltv_vg_overlap_fraction"),
         ("Passed filters", "ltv_passed_filters"),
+        ("Filter reason", "ltv_filter_reason"),
+        ("LTV class", "ltv_class"),
+        ("LTV class reason", "ltv_class_reason"),
+        ("LTV interest score", "ltv_interest_score"),
         ("Dust candidate", "ltv_dust_candidate"),
         ("Dust excess", "ltv_dust_excess"),
         ("VSX match", "ltv_vsx_match"),
@@ -89,6 +95,10 @@ REVIEW_METADATA_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("MHPS ratio", "ltv_stoch_mhps_ratio"),
         ("GP-DRW sigma", "ltv_stoch_gp_drw_sigma"),
         ("GP-DRW tau", "ltv_stoch_gp_drw_tau"),
+    ]),
+    ("LTV Multi-Survey", [
+        (col.replace("ltv_ms_", "").replace("_", " "), col)
+        for col, _sql, _kind in LTV_MS_FEATURE_COLUMN_SPECS
     ]),
     ("Identification", [
         ("ASAS-SN ID", "asas_sn_id"),

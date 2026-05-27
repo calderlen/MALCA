@@ -7,7 +7,6 @@ Run 'malca --help' for grouped commands; 'malca <command> --help' for options.
 import argparse
 import importlib
 import os
-from pathlib import Path
 import sys
 
 # Command groups for grouped --help (order = importance)
@@ -37,10 +36,7 @@ COMMAND_GROUPS = {
     "review-sync": "Review",
     "review-taxonomy": "Review",
     "review-maint": "Review",
-    "ltv-core": "LTV",
-    "ltv-build": "LTV",
     "ltv-pipeline": "LTV",
-    "ltv-ingest": "LTV",
     "ltv-injection": "LTV",
     "ltv-bundle": "LTV",
     "injection": "Evaluation",
@@ -66,7 +62,7 @@ Run 'malca <command> --help' for per-command options.
 
 Common workflows:
   Discovery   malca pipeline  then  malca review --plot-dir <run>/plots
-  LTV         malca ltv-pipeline  then  malca review --review-db output/runs/ltv/review/review.db
+  LTV         malca ltv-pipeline --mag-bin 13_13.5  then  malca review --review-db <run>/review/review.db
 """
 
 
@@ -116,7 +112,7 @@ def main():
         "attrition", "review", "review-refresh", "review-merge", "review-sync", "review-taxonomy", "review-maint",
         "neighbors", "spectra", "false-positive", "vsx-filter", "vsx-crossmatch", "external-lcs", "multi-survey-features", "sed-photometry",
         "vetting",
-        "ltv-core", "ltv-build", "ltv-pipeline", "ltv-injection", "ltv-ingest", "ltv-bundle",
+        "ltv-pipeline", "ltv-injection", "ltv-bundle",
         "dev",
     ]:
         command = sys.argv[1]
@@ -201,71 +197,8 @@ def main():
             _run_module_main("malca.sed_photometry", remaining)
         elif command == "vetting":
             _run_module_main("malca.vetting", remaining)
-        elif command == "ltv-core":
-            _run_module_main("malca.ltv.core", remaining)
-        elif command == "ltv-build":
-            ltv_pipeline = importlib.import_module("malca.ltv.pipeline")
-            sys.argv = [sys.argv[0]] + remaining
-            ltv_pipeline.run_pipeline_cli(
-                ltv_pipeline.add_pipeline_args(argparse.ArgumentParser()).parse_args()
-            )
         elif command == "ltv-pipeline":
-            ltv_pipeline = importlib.import_module("malca.ltv.pipeline")
-            ltv_review = importlib.import_module("malca.ltv.review")
-            ltv_paths = importlib.import_module("malca.ltv.paths")
-            parser = ltv_pipeline.add_pipeline_args(argparse.ArgumentParser(
-                prog="malca ltv-pipeline",
-                description="Full LTV workflow: build then ingest into review DB (run malca review separately to open GUI).",
-            ))
-            parser.add_argument(
-                "--review-db",
-                type=str,
-                default=None,
-                help="Path to LTV review SQLite DB for ingest (default: <run-dir>/review/review.db)",
-            )
-            parser.add_argument(
-                "--skip-characterize",
-                action="store_true",
-                help="Skip Gaia/dust characterization during ingest",
-            )
-            parser.add_argument(
-                "--run-vetting",
-                action="store_true",
-                help="Run STV vetting during ingest",
-            )
-            parser.add_argument(
-                "--skip-stats",
-                action="store_true",
-                help="Skip compute_stats enrichment during ingest",
-            )
-            parser.add_argument(
-                "--stats-compute-ls",
-                action="store_true",
-                help="Also compute Lomb-Scargle during compute_stats ingest enrichment",
-            )
-            parser.add_argument(
-                "--index-file",
-                type=str,
-                default=None,
-                help="Path to ASASSN index parquet for Gaia ID lookup during ingest",
-            )
-            args = parser.parse_args(remaining)
-            run_dir = Path(args.run_dir).expanduser()
-            if args.review_db is None:
-                args.review_db = str(ltv_paths.ltv_review_db_path(run_dir))
-            df = ltv_pipeline.run_pipeline_cli(args)
-            ltv_review.ingest_ltv_results(
-                args.review_db,
-                df,
-                run_characterize=not args.skip_characterize,
-                run_vetting=args.run_vetting,
-                run_stats=not args.skip_stats,
-                stats_compute_ls=args.stats_compute_ls,
-                n_workers=args.workers,
-                index_path=args.index_file,
-                source_path=run_dir,
-                verbose=args.verbose,
-            )
+            _run_module_main("malca.ltv.pipeline", remaining)
         elif command == "dev":
             if not remaining:
                 raise SystemExit("usage: malca dev {score,stats} ...")
@@ -278,8 +211,6 @@ def main():
                 raise SystemExit(f"unknown dev command: {dev_command}")
         elif command == "ltv-injection":
             _run_module_main("malca.ltv.injection", remaining)
-        elif command == "ltv-ingest":
-            _run_module_main("malca.ltv.review", remaining)
         elif command == "ltv-bundle":
             _run_module_main("malca.ltv.bundle", remaining)
         return 0
@@ -314,10 +245,7 @@ def main():
     subparsers.add_parser("review-taxonomy", description="Migrate legacy review DBs to taxonomy schema")
     subparsers.add_parser("review-maint", description="Review DB maintenance commands")
     # LTV
-    subparsers.add_parser("ltv-core", description="Compute seasonal trends for long-term variability detection")
-    subparsers.add_parser("ltv-build", description="Build LTV candidate table (filters + crossmatch + NEOWISE + extinction)")
-    subparsers.add_parser("ltv-pipeline", description="Full LTV workflow up to review: build then ingest into review DB (run malca review separately to open GUI)")
-    subparsers.add_parser("ltv-ingest", description="Ingest LTV build output into a review DB")
+    subparsers.add_parser("ltv-pipeline", description="Run full LTV workflow with run metadata, audit filtering, enrichment, and review ingest")
     subparsers.add_parser("ltv-injection", description="Run LTV rejection-recovery injections and plots")
     subparsers.add_parser("ltv-bundle", description="Bundle light curve files for LTV candidates passing slope/diff filters")
     # Evaluation

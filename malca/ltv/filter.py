@@ -797,3 +797,225 @@ def apply_all_filters(
         return df, df_rejected
 
     return df
+
+
+LTV_AUDIT_FAILED_COLUMNS = {
+    "slope": "ltv_failed_slope",
+    "max_diff": "ltv_failed_max_diff",
+    "dec": "ltv_failed_dec",
+    "refcat_offset": "ltv_failed_refcat_offset",
+    "photometric_scatter": "ltv_failed_photometric_scatter",
+    "high_pm": "ltv_failed_high_pm",
+    "neighbor_high_pm": "ltv_failed_neighbor_high_pm",
+    "crowding": "ltv_failed_crowding",
+}
+
+
+def _false_mask(df: pd.DataFrame) -> pd.Series:
+    return pd.Series(False, index=df.index, dtype=bool)
+
+
+def _numeric_series(df: pd.DataFrame, col: str) -> pd.Series:
+    return pd.to_numeric(df[col], errors="coerce")
+
+
+def _merge_audit_annotations(
+    audit: pd.DataFrame,
+    annotated: pd.DataFrame,
+    audit_id_col: str,
+) -> pd.DataFrame:
+    if annotated.empty or audit_id_col not in annotated.columns:
+        return audit
+
+    updates = annotated.drop_duplicates(subset=[audit_id_col], keep="first").set_index(audit_id_col)
+    ids = audit[audit_id_col]
+    matched = ids.isin(updates.index)
+    if not bool(matched.any()):
+        return audit
+
+    for col in updates.columns:
+        if col == audit_id_col:
+            continue
+        if col not in audit.columns:
+            audit[col] = pd.NA
+        audit.loc[matched, col] = ids.loc[matched].map(updates[col]).to_numpy()
+    return audit
+
+
+def _first_ltv_filter_reason(row: pd.Series) -> str | None:
+    for reason, col in LTV_AUDIT_FAILED_COLUMNS.items():
+        if bool(row.get(col, False)):
+            return reason
+    return None
+
+
+def apply_all_filters_audit(
+    df: pd.DataFrame,
+    *,
+    min_slope: float = LTV_MIN_SLOPE,
+    min_diff: float = LTV_MIN_DIFF,
+    min_dec: float = LTV_MIN_DEC,
+    max_pm: float = LTV_MAX_PM,
+    max_refcat_offset: float = LTV_MAX_REFCAT_OFFSET,
+    max_reduced_chi2: float = LTV_MAX_REDUCED_CHI2,
+    max_crowding_count: int = LTV_MAX_CROWDING_COUNT,
+    aperture_radius_arcsec: float = LTV_APERTURE_RADIUS_ARCSEC,
+    neighbor_flux_ratio_limit: float = LTV_NEIGHBOR_FLUX_RATIO_LIMIT,
+    neighbor_search_radius_arcsec: float = LTV_NEIGHBOR_SEARCH_RADIUS_ARCSEC,
+    neighbor_min_pm_mas_yr: float = LTV_NEIGHBOR_MIN_PM_MAS_YR,
+    run_enhanced_filters: bool = True,
+    run_neighbor_pm_filter: bool = True,
+    query_gaia: bool = True,
+    chunk_size: int = LTV_CHUNK_SIZE,
+    n_workers: int = LTV_WORKERS,
+    verbose: bool = False,
+    return_passers: bool = False,
+) -> pd.DataFrame | tuple[pd.DataFrame, pd.DataFrame]:
+    """Apply LTV filters with STV-style audit semantics.
+
+    Unlike ``apply_all_filters``, this preserves every input row and annotates
+    failures with ``ltv_failed_*`` plus ``failed_any``. Expensive Gaia-backed
+    checks run only on rows still passing earlier filters, then their annotation
+    columns are merged back into the full audit table.
+    """
+    audit = df.copy().reset_index(drop=True)
+    audit_id_col = "_ltv_audit_id"
+    audit[audit_id_col] = np.arange(len(audit), dtype=np.int64)
+
+    for col in LTV_AUDIT_FAILED_COLUMNS.values():
+        audit[col] = False
+
+    passing = pd.Series(True, index=audit.index, dtype=bool)
+
+    def mark_failures(label: str, fail_mask: pd.Series) -> None:
+        nonlocal passing, audit
+        fail_col = LTV_AUDIT_FAILED_COLUMNS[label]
+        fail_mask = fail_mask.reindex(audit.index, fill_value=False).fillna(False).astype(bool)
+        fail_mask &= passing
+        audit[fail_col] = fail_mask
+        passing &= ~fail_mask
+        if verbose:
+            print(f"[ltv audit filter:{label}] failed {int(fail_mask.sum())}/{len(audit)}")
+
+    if "Slope" in audit.columns:
+        mark_failures("slope", _numeric_series(audit, "Slope").abs() <= float(min_slope))
+    else:
+        mark_failures("slope", _false_mask(audit))
+        if verbose:
+            print("Warning: 'Slope' column not found, skipping slope filter")
+
+    if "max diff" in audit.columns:
+        mark_failures("max_diff", _numeric_series(audit, "max diff").abs() <= float(min_diff))
+    else:
+        mark_failures("max_diff", _false_mask(audit))
+        if verbose:
+            print("Warning: 'max diff' column not found, skipping max-diff filter")
+
+    if "dec_deg" in audit.columns:
+        mark_failures("dec", _numeric_series(audit, "dec_deg") < float(min_dec))
+    else:
+        mark_failures("dec", _false_mask(audit))
+        if verbose:
+            print("Warning: 'dec_deg' column not found, skipping declination filter")
+
+    if {"Median", "Pstarss gmag"}.issubset(audit.columns):
+        diff = _numeric_series(audit, "Median") - _numeric_series(audit, "Pstarss gmag")
+        mark_failures("refcat_offset", (diff < -float(max_refcat_offset)) & diff.notna())
+    else:
+        mark_failures("refcat_offset", _false_mask(audit))
+        if verbose:
+            print("Warning: 'Median' or 'Pstarss gmag' not found, skipping REFCAT offset filter")
+
+    if run_enhanced_filters and "Dispersion" in audit.columns:
+        dispersion = _numeric_series(audit, "Dispersion")
+        if "Median_err" in audit.columns:
+            err = _numeric_series(audit, "Median_err").clip(lower=0.01)
+            chi2 = (dispersion / err) ** 2
+        else:
+            chi2 = (dispersion / 0.02) ** 2
+        if "Slope" in audit.columns:
+            slope = _numeric_series(audit, "Slope").abs()
+            fail = (chi2 > float(max_reduced_chi2)) & (slope < 0.05)
+        else:
+            fail = chi2 > float(max_reduced_chi2)
+        mark_failures("photometric_scatter", fail.fillna(False))
+    else:
+        mark_failures("photometric_scatter", _false_mask(audit))
+        if verbose and run_enhanced_filters:
+            print("Warning: 'Dispersion' not found, skipping photometric scatter filter")
+
+    # Gaia-backed filters run on current passers only.
+    eligible = passing.copy()
+    if bool(eligible.any()) and query_gaia:
+        subset = audit.loc[eligible].copy()
+        if "gaia_pm_total" not in subset.columns:
+            subset = query_gaia_proper_motions_batch(
+                subset,
+                chunk_size=chunk_size,
+                n_workers=n_workers,
+                verbose=verbose,
+            )
+        audit = _merge_audit_annotations(audit, subset, audit_id_col)
+    if "gaia_pm_total" in audit.columns:
+        mark_failures("high_pm", _numeric_series(audit, "gaia_pm_total") > float(max_pm))
+    else:
+        mark_failures("high_pm", _false_mask(audit))
+        if verbose and query_gaia:
+            print("Warning: 'gaia_pm_total' column not found, skipping high-PM filter")
+
+    if run_neighbor_pm_filter:
+        eligible = passing.copy()
+        if bool(eligible.any()) and query_gaia:
+            subset = audit.loc[eligible].copy()
+            if "neighbor_pm_contam" not in subset.columns:
+                subset = query_neighbor_high_pm_batch(
+                    subset,
+                    search_radius_arcsec=neighbor_search_radius_arcsec,
+                    aperture_radius_arcsec=aperture_radius_arcsec,
+                    flux_ratio_limit=neighbor_flux_ratio_limit,
+                    min_pm_mas_yr=neighbor_min_pm_mas_yr,
+                    chunk_size=chunk_size,
+                    n_workers=n_workers,
+                    verbose=verbose,
+                )
+            audit = _merge_audit_annotations(audit, subset, audit_id_col)
+        if "neighbor_pm_contam" in audit.columns:
+            mark_failures("neighbor_high_pm", audit["neighbor_pm_contam"].fillna(False).astype(bool))
+        else:
+            mark_failures("neighbor_high_pm", _false_mask(audit))
+    else:
+        mark_failures("neighbor_high_pm", _false_mask(audit))
+
+    if run_enhanced_filters:
+        eligible = passing.copy()
+        if bool(eligible.any()) and query_gaia:
+            subset = audit.loc[eligible].copy()
+            if "crowding_count" not in subset.columns:
+                subset = query_crowding_batch(
+                    subset,
+                    chunk_size=chunk_size,
+                    n_workers=n_workers,
+                    verbose=verbose,
+                )
+            audit = _merge_audit_annotations(audit, subset, audit_id_col)
+        if "crowding_count" in audit.columns:
+            mark_failures("crowding", _numeric_series(audit, "crowding_count") > int(max_crowding_count))
+        else:
+            mark_failures("crowding", _false_mask(audit))
+    else:
+        mark_failures("crowding", _false_mask(audit))
+
+    fail_cols = list(LTV_AUDIT_FAILED_COLUMNS.values())
+    audit["failed_any"] = audit[fail_cols].fillna(False).astype(bool).any(axis=1)
+    audit["ltv_passed_filters"] = ~audit["failed_any"]
+    audit["ltv_filter_reason"] = audit.apply(_first_ltv_filter_reason, axis=1)
+    audit = audit.drop(columns=[audit_id_col])
+
+    if verbose:
+        n_pass = int((~audit["failed_any"]).sum())
+        pct = (n_pass / len(audit) * 100.0) if len(audit) else 0.0
+        print(f"[ltv audit filter] passed {n_pass}/{len(audit)} ({pct:.2f}%)")
+
+    if return_passers:
+        return audit, audit.loc[~audit["failed_any"]].reset_index(drop=True).copy()
+    return audit

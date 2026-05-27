@@ -1054,13 +1054,21 @@ def run_mag_bin(cfg: Config) -> None:
     checkpoint_log = output_path.with_name(f"{output_path.stem}_PROCESSED.txt")
 
     processed_files = set()
-    if checkpoint_log.exists() and cfg.overwrite:
-        try:
-            with open(checkpoint_log, "w"):
-                pass
+    if cfg.overwrite:
+        if output_path.exists():
+            if output_path.is_dir():
+                removed_any = False
+                for child in output_path.glob("chunk_*.parquet*"):
+                    child.unlink()
+                    removed_any = True
+                if removed_any:
+                    print(f"Overwriting existing output chunks in {output_path}")
+            else:
+                output_path.unlink()
+                print(f"Overwriting existing output file: {output_path}")
+        if checkpoint_log.exists():
+            checkpoint_log.unlink()
             print(f"Overwriting checkpoint log: {checkpoint_log}")
-        except Exception as e:
-            print(f"Warning: could not overwrite checkpoint log {checkpoint_log}: {e}")
 
     if checkpoint_log.exists() and not cfg.overwrite:
         print(f"Resume mode: loading checkpoint from {checkpoint_log}")

@@ -256,7 +256,7 @@ flowchart TB
     end
 
     %% ── CLI Entry Point ──────────────────────────────────────
-    CLI["__main__.py — malca CLI<br/>manifest, pipeline, filter, tag, events, plot, characterize, classify,<br/>vetting, review, injection, validate, reproduce,<br/>ltv-pipeline, ltv-core, ltv-build, ltv-ingest, attrition, dev, ..."]
+    CLI["__main__.py — malca CLI<br/>manifest, pipeline, filter, tag, events, plot, characterize, classify,<br/>vetting, review, injection, validate, reproduce,<br/>ltv-pipeline, attrition, dev, ..."]
     CLI -.-> discovery
     CLI -.-> postdet
     CLI -.-> reviewgrp
@@ -420,17 +420,20 @@ malca reproduce --manifest output/lc_manifest.parquet --candidates my_targets.pa
 LTV commands use the same run-bundle layout as detection runs. By default, new outputs go under `output/runs/ltv`.
 
 ```bash
-# Core seasonal-trend products
-malca ltv-core --mag-bin 13_13.5 --run-dir output/runs/ltv
+# Full LTV workflow: source metrics, audit filtering, enrichment, and review ingest
+malca ltv-pipeline --mag-bin 13_13.5
 
-# Build filtered/crossmatched LTV candidate products
-malca ltv-build --mag-bin 13_13.5 --run-dir output/runs/ltv
-
-# Build and ingest into the run-local review DB
-malca ltv-pipeline --mag-bin 13_13.5 --run-dir output/runs/ltv
+# Full LTV workflow plus external light curves and LTV multi-survey summaries
+malca ltv-pipeline --stage full-extended --mag-bin 13_13.5
 
 # Open the review app
-malca review --review-db output/runs/ltv/review/review.db
+malca review --review-db output/runs/ltv/latest/review/review.db
+
+# Raw-dependent cluster stage only
+malca ltv-pipeline --stage cluster --mag-bin 13_13.5 --export-bundle output/ltv_cluster_bundle.zip
+
+# Home/catalog/review stage from an imported bundle
+malca ltv-pipeline --stage home --import-bundle output/ltv_cluster_bundle.zip
 
 # Open the migrated March 18 LTV bundle
 malca review --review-db output/runs/ltv_march18/review/review.db
@@ -666,6 +669,28 @@ LTV run artifacts are stored under `output/runs/<ltv_run>/`, with March 18 migra
 
 ```
 output/runs/ltv/
+├── latest -> 20260527_143052
+├── 20260527_143052/
+│   ├── run_params.json
+│   ├── run_summary.json
+│   ├── run.log
+│   ├── results/
+│   │   ├── LTvar13-13.5.parquet
+│   │   ├── LTvar13-13.5_filtered.parquet
+│   │   ├── LTvar13-13.5_pipeline.parquet
+│   │   ├── LTvar13-13.5_external_lcs.parquet
+│   │   ├── LTvar13-13.5_ltv_multi_survey.parquet
+│   │   └── external_lcs/
+│   ├── review/
+│   │   └── review.db
+│   └── bundle_assets/
+│       └── lightcurves/
+```
+
+Legacy fixed run directories and migrated LTV bundles are still supported:
+
+```
+output/runs/ltv_march18/
 ├── results/
 │   └── LTvar13-13.5_pipeline.parquet
 ├── review/
