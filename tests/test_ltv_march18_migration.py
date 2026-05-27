@@ -7,16 +7,27 @@ import pytest
 
 
 RUN_DIR = Path("output") / "runs" / "ltv_march18"
+REVIEW_DB = RUN_DIR / "review" / "review.db"
+
+
+def _has_sqlite_database(path: Path) -> bool:
+    if not path.exists():
+        return False
+    try:
+        with path.open("rb") as handle:
+            return handle.read(16) == b"SQLite format 3\0"
+    except OSError:
+        return False
 
 
 pytestmark = pytest.mark.skipif(
-    not (RUN_DIR / "review" / "review.db").exists(),
+    not _has_sqlite_database(REVIEW_DB),
     reason="migrated LTV March 18 bundle is not present",
 )
 
 
 def test_ltv_march18_review_db_counts() -> None:
-    with sqlite3.connect(RUN_DIR / "review" / "review.db") as conn:
+    with sqlite3.connect(REVIEW_DB) as conn:
         assert conn.execute("select count(*) from candidates").fetchone()[0] == 868
         assert conn.execute("select count(*) from reviews").fetchone()[0] == 588
 
