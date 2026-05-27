@@ -5074,7 +5074,7 @@ def create_layout():
                 style={'margin-bottom': '6px'},
             ),
 
-            html.Button('Refresh Queue [R]', id='refresh-btn', n_clicks=0,
+            html.Button('Refresh Queue', id='refresh-btn', n_clicks=0,
                        style={'width': '100%'}, className='action-btn queue-refresh-btn'),
 
             html.Button('↻ Reset to Beginning', id='reset-queue-btn', n_clicks=0,
@@ -6186,12 +6186,6 @@ app.clientside_callback(
                     return;
                 }
 
-                if (!e.shiftKey && (key === 'R' || key === 'r')) {
-                    e.preventDefault();
-                    dispatchKeyToDash('r');
-                    return;
-                }
-
                 // Prevent browser defaults for keys we use as shortcuts
                 if (key === 'Backspace' || key === 'Tab' || key === 'Enter') {
                     e.preventDefault();
@@ -7043,19 +7037,6 @@ def toggle_sidebar(n_clicks, key_value, is_expanded, active_taxonomy_menu):
     return sidebar_class, toggle_class, is_expanded
 
 
-@app.callback(
-    Output('refresh-btn', 'n_clicks', allow_duplicate=True),
-    Input('keyboard-input', 'value'),
-    State('refresh-btn', 'n_clicks'),
-    prevent_initial_call=True,
-)
-def keyboard_refresh_queue(key_value, current_clicks):
-    """Trigger Refresh Queue from plain R."""
-    if _keyboard_key(key_value).lower() != 'r':
-        raise dash.exceptions.PreventUpdate
-    return int(current_clicks or 0) + 1
-
-
 # --- All filter State components used by load_queue -------------------------
 # Auto-generated from _SIDEBAR_GROUPS so the UI and callback always stay in sync.
 _BOOL_MODE_STATES: list[tuple[str, str]] = []
@@ -7565,6 +7546,18 @@ def _load_vetting_known_select_options(queue_source_scope) -> dict[str, list[dic
         }
 
 
+def _fresh_vetting_known_select_options(
+    queue_source_scope,
+    current_options: dict[str, list[dict[str, object]] | None],
+) -> dict[str, list[dict[str, object]] | None]:
+    """Return DB-backed known-type options for the active queue scope."""
+    refreshed_options = _load_vetting_known_select_options(queue_source_scope)
+    resolved = dict(current_options)
+    for col in VETTING_KNOWN_SELECT_FILTERS:
+        resolved[col] = refreshed_options.get(col, [])
+    return resolved
+
+
 if _background_callback_manager is not None and _UI_BACKGROUND_CALLBACKS:
     @app.callback(
         _SIDEBAR_FILTER_OUTPUTS,
@@ -7614,11 +7607,10 @@ def apply_vetting_known_type_filters(known_clicks, definite_clicks, *select_opti
 
     queue_source_scope, *option_lists = select_options
     select_options_by_col = dict(zip(VETTING_KNOWN_SELECT_FILTERS, option_lists))
-    if any(not select_options_by_col.get(col) for col in VETTING_KNOWN_SELECT_FILTERS):
-        hydrated_options = _load_vetting_known_select_options(queue_source_scope)
-        for col, options in hydrated_options.items():
-            if not select_options_by_col.get(col):
-                select_options_by_col[col] = options
+    select_options_by_col = _fresh_vetting_known_select_options(
+        queue_source_scope,
+        select_options_by_col,
+    )
     bool_values, select_values = _vetting_known_filter_preset(
         select_options_by_col,
         include_uncertain=include_uncertain,
@@ -8560,7 +8552,7 @@ app.clientside_callback(
         if (keyValue) {
             key = String(keyValue).split('\\t', 1)[0].trim();
         }
-        if (!key || key === '?' || key.toLowerCase() === 'r') {
+        if (!key || key === '?') {
             return [no, no, no, no, no, no, no, no, no, no];
         }
 
@@ -8627,31 +8619,11 @@ app.clientside_callback(
             return [no, no, no, no, no, no, no, no, no, no];
         }
 
-        if (primaryByKey[lower]) {
-            var primary = primaryByKey[lower];
-            if (selection.morphology_primary === primary.value) {
-                selection.morphology_primary = null;
-                selection.morphology_secondary = null;
-                nextActiveMenu = '';
-                nextSubmenu = '';
-                return emitTaxonomy('Morphology cleared');
-            }
-            selection.morphology_primary = primary.value;
-            selection.morphology_secondary = null;
-            nextActiveMenu = 'morphology_secondary';
-            nextSubmenu = primary.value;
-            return emitTaxonomy('Morphology: ' + primary.label);
-        }
-
-        if (lower === 'h') {
-            if (nextActiveMenu === 'physical_primary') {
-                nextActiveMenu = '';
-                nextSubmenu = '';
-                return emitTaxonomy('Hypothesis menu closed');
-            }
-            nextActiveMenu = 'physical_primary';
-            nextSubmenu = '';
-            return emitTaxonomy('Hypothesis menu');
+        if (key === '1' || key === '2' || key === '3' || key === '4') {
+            nextScore = parseInt(key, 10);
+            notice = '✓ Confidence: ' + String(nextScore);
+            saveReq = buildSaveRequest(nextScore, false);
+            return [no, notice, nextScore, no, no, prefixOut, saveReq, no, no, no];
         }
 
         if (nextActiveMenu === 'morphology_secondary') {
@@ -8711,6 +8683,33 @@ app.clientside_callback(
             }
         }
 
+        if (primaryByKey[lower]) {
+            var primary = primaryByKey[lower];
+            if (selection.morphology_primary === primary.value) {
+                selection.morphology_primary = null;
+                selection.morphology_secondary = null;
+                nextActiveMenu = '';
+                nextSubmenu = '';
+                return emitTaxonomy('Morphology cleared');
+            }
+            selection.morphology_primary = primary.value;
+            selection.morphology_secondary = null;
+            nextActiveMenu = 'morphology_secondary';
+            nextSubmenu = primary.value;
+            return emitTaxonomy('Morphology: ' + primary.label);
+        }
+
+        if (lower === 'h') {
+            if (nextActiveMenu === 'physical_primary') {
+                nextActiveMenu = '';
+                nextSubmenu = '';
+                return emitTaxonomy('Hypothesis menu closed');
+            }
+            nextActiveMenu = 'physical_primary';
+            nextSubmenu = '';
+            return emitTaxonomy('Hypothesis menu');
+        }
+
         if (key === ',') {
             nextFollowup = !nextFollowup;
             notice = 'Followup: ' + (nextFollowup ? 'ON' : 'OFF');
@@ -8749,13 +8748,6 @@ app.clientside_callback(
             notice = '✓ Saved + Next →';
             saveReq = buildSaveRequest(currentScore, true);
             return [nextIdx !== idx ? nextIdx : no, notice, no, no, no, prefixOut, saveReq, no, no, no];
-        }
-
-        if (key === '1' || key === '2' || key === '3' || key === '4') {
-            nextScore = parseInt(key, 10);
-            notice = '✓ Confidence: ' + String(nextScore);
-            saveReq = buildSaveRequest(nextScore, false);
-            return [no, notice, nextScore, no, no, prefixOut, saveReq, no, no, no];
         }
 
         return [no, no, no, no, no, prefixOut, no, no, no, no];
@@ -12482,7 +12474,7 @@ def main():
     print(f"  Plot dir:  {PLOT_DIR}")
     print(f"  Server:    http://{args.host}:{args.port}")
     print(f"\nKeyboard shortcuts:")
-    print("  [D]ipper [M]icrolensing [F]lare [Y]so [U]nknown [I]nstrumental [O]ther | [1-4] Confidence | [.] Save | [Enter] Done | [Backspace] Back | [Esc] Sidebar | [R] Refresh | [?] Help")
+    print("  [D]ipper [M]icrolensing [F]lare [Y]so [U]nknown [I]nstrumental [O]ther | [1-4] Confidence | [.] Save | [Enter] Done | [Backspace] Back | [Esc] Sidebar | [?] Help")
     print("")
 
     # Auto-open browser

@@ -59,17 +59,17 @@ def _entry(value: str, key: str, label: str) -> dict[str, str]:
 
 
 MORPHOLOGY_PRIMARY: tuple[dict[str, str], ...] = (
-    _entry("artifact_or_bad_photometry", "x", "artifact / bad photometry"),
-    _entry("nonvariable_or_low_snr", "n", "nonvariable / low SNR"),
-    _entry("dimming_event", "d", "dimming event"),
-    _entry("brightening_event", "b", "brightening event"),
-    _entry("mixed_dip_and_burst", "m", "mixed dip + burst"),
-    _entry("periodic", "p", "periodic"),
-    _entry("quasi_periodic", "q", "quasi-periodic"),
-    _entry("stochastic", "s", "stochastic"),
-    _entry("long_term_trend", "l", "long-term trend"),
-    _entry("complex_or_composite", "c", "complex / composite"),
-    _entry("unclear", "u", "unclear"),
+    _entry("artifact_or_bad_photometry", "q", "artifact / bad photometry"),
+    _entry("nonvariable_or_low_snr", "w", "nonvariable / low SNR"),
+    _entry("dimming_event", "e", "dimming event"),
+    _entry("brightening_event", "r", "brightening event"),
+    _entry("mixed_dip_and_burst", "t", "mixed dip + burst"),
+    _entry("periodic", "y", "periodic"),
+    _entry("quasi_periodic", "u", "quasi-periodic"),
+    _entry("stochastic", "i", "stochastic"),
+    _entry("long_term_trend", "o", "long-term trend"),
+    _entry("complex_or_composite", "p", "complex / composite"),
+    _entry("unclear", "[", "unclear"),
 )
 
 MORPHOLOGY_SECONDARY: dict[str, tuple[str, ...]] = {
@@ -370,7 +370,9 @@ LEGACY_EVENT_CLASS_TAXONOMY_MAP: dict[str, dict[str, Any]] = {
     },
 }
 
-SECONDARY_KEY_SEQUENCE = "123456789abcdefghijklmnopqrstuvwxyz"
+# Detail/subclass shortcuts start on the ASDF row. Longer menus continue
+# through lower-row keys, then the QWERTY row.
+SECONDARY_KEY_SEQUENCE = "asdfghjklzxcvbnmqwertyuiop[]"
 
 
 def label_for(value: str | None) -> str:

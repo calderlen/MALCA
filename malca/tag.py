@@ -43,6 +43,7 @@ from malca.config import PARQUET_CACHE_COMPRESSION, PARQUET_OUTPUT_COMPRESSION
 from malca.config import VSX_CROSSMATCH_PATH
 from malca.config import WORKERS
 from malca.table_io import read_parquet_table, write_parquet_table
+from malca.vsx.metadata import normalize_vsx_match_columns, select_best_vsx_matches
 from malca.utils import (
     read_lc_dat2,
     get_id_col,
@@ -485,7 +486,7 @@ def attach_vsx_info(
     """
     Attach VSX crossmatch info (vsx_sep_arcsec/vsx_class) to the dataframe.
 
-    Uses the provided crossmatch Parquet, or requires vsx_sep_arcsec/vsx_class columns.
+    Uses the provided full crossmatch Parquet, or keeps existing VSX columns.
     """
     if "vsx_sep_arcsec" in df.columns and "vsx_class" in df.columns:
         return df
@@ -493,14 +494,7 @@ def attach_vsx_info(
         raise ValueError("vsx_crossmatch_csv is required to attach VSX info.")
 
     vsx_crossmatch_csv = Path(vsx_crossmatch_csv)
-    xmatch = read_parquet_table(vsx_crossmatch_csv)
-    rename_map = {}
-    if "vsx_sep_arcsec" not in xmatch.columns and "sep_arcsec" in xmatch.columns:
-        rename_map["sep_arcsec"] = "vsx_sep_arcsec"
-    if "vsx_class" not in xmatch.columns and "class" in xmatch.columns:
-        rename_map["class"] = "vsx_class"
-    if rename_map:
-        xmatch = xmatch.rename(columns=rename_map)
+    xmatch = normalize_vsx_match_columns(read_parquet_table(vsx_crossmatch_csv))
 
     missing_cols = [c for c in ("asas_sn_id", "vsx_sep_arcsec", "vsx_class") if c not in xmatch.columns]
     if missing_cols:
@@ -509,12 +503,27 @@ def attach_vsx_info(
             f"Found columns: {list(xmatch.columns)}"
         )
 
-    xmatch = xmatch[["asas_sn_id", "vsx_sep_arcsec", "vsx_class"]]
-    xmatch["asas_sn_id"] = xmatch["asas_sn_id"].astype(str)
+    vsx_cols = [c for c in ("vsx_sep_arcsec", "vsx_class", "vsx_period") if c in xmatch.columns]
+    xmatch = select_best_vsx_matches(xmatch[["asas_sn_id", *vsx_cols]], id_column="asas_sn_id")
     id_col = get_id_col(df)
     df = df.copy()
     df[id_col] = df[id_col].astype(str)
     df = df.merge(xmatch, left_on=id_col, right_on="asas_sn_id", how="left", suffixes=("", "_vsx"))
+    for col in vsx_cols:
+        xcol = f"{col}_vsx"
+        if xcol not in df.columns:
+            continue
+        if col == "vsx_class":
+            base = df[col] if col in df.columns else pd.Series(pd.NA, index=df.index)
+            missing = base.isna() | base.astype(str).str.strip().str.lower().isin({"", "nan", "none", "<na>"})
+            if col not in df.columns:
+                df[col] = pd.NA
+            df.loc[missing, col] = df.loc[missing, xcol]
+        else:
+            base = pd.to_numeric(df[col], errors="coerce") if col in df.columns else pd.Series(np.nan, index=df.index)
+            fill = pd.to_numeric(df[xcol], errors="coerce")
+            df[col] = base.combine_first(fill)
+        df = df.drop(columns=[xcol])
     if id_col != "asas_sn_id" and "asas_sn_id_vsx" in df.columns:
         df = df.drop(columns=["asas_sn_id_vsx"], errors="ignore")
     return df

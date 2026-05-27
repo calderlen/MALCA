@@ -97,6 +97,20 @@ def test_vetting_banner_marks_known_catalog_cells_as_red_hit_boxes() -> None:
     assert classes.count("vetting-banner-cell hit known") == 2
 
 
+def test_vetting_banner_displays_vsx_class() -> None:
+    banner = _render_vetting_banner(
+        {
+            "vetting_likely_known": True,
+            "vsx_class": "GCAS",
+        }
+    )
+
+    text = " ".join(_component_text(banner))
+
+    assert "VSX" in text
+    assert "GCAS" in text
+
+
 def test_vetting_banner_marks_gaia_class_as_known_without_summary_flag() -> None:
     banner = _render_vetting_banner(
         {

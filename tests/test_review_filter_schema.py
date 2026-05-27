@@ -177,7 +177,10 @@ def test_microlens_false_filter_keeps_unset_rows(tmp_path: Path) -> None:
 
 
 def test_vsx_uncertainty_and_generic_classes_stay_visible() -> None:
+    assert is_definite_known_type_value("vsx_class", "GCAS") is True
+    assert is_definite_known_type_value("vsx_class", "BE") is True
     assert is_definite_known_type_value("vsx_class", "EA") is True
+    assert is_definite_known_type_value("vsx_class", "DSCT") is True
     assert is_definite_known_type_value("vsx_class", "EA:") is False
     assert is_definite_known_type_value("vsx_class", "DSCT:+VAR") is False
     assert is_definite_known_type_value("vsx_class", "VAR") is False

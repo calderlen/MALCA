@@ -44,6 +44,7 @@ _install_review_app_import_stubs()
 
 from malca.review import app as review_app
 from malca.review.dustycult import DustyCultAvailability, upsert_dustycult_fit
+from malca.review.store import upsert_candidates_frame
 
 
 def test_update_sed_panel_renders_graph(monkeypatch) -> None:
@@ -389,7 +390,10 @@ def test_vetting_known_preset_can_leave_uncertain_types_visible() -> None:
         {"label": "possible SN", "value": "possible SN"},
     ]
     options["vsx_class"] = [
+        {"label": "GCAS", "value": "GCAS"},
+        {"label": "BE", "value": "BE"},
         {"label": "EA", "value": "EA"},
+        {"label": "DSCT", "value": "DSCT"},
         {"label": "EA:", "value": "EA:"},
         {"label": "DSCT:+VAR", "value": "DSCT:+VAR"},
         {"label": "VAR", "value": "VAR"},
@@ -414,7 +418,7 @@ def test_vetting_known_preset_can_leave_uncertain_types_visible() -> None:
 
     assert bool_values_by_col["vetting_likely_known"] == "Any"
     assert bool_values_by_col["microlens_match"] == "False"
-    assert select_values_by_col["vsx_class"] == ["EA"]
+    assert select_values_by_col["vsx_class"] == ["GCAS", "BE", "EA", "DSCT"]
     assert select_values_by_col["asassn_var_type"] == ["ROT"]
     assert select_values_by_col["tns_type"] == ["SN Ia"]
     assert select_values_by_col["simbad_otype"] == ["V*"]
@@ -428,8 +432,12 @@ def test_vetting_known_preset_broad_mode_keeps_existing_behavior() -> None:
         {"label": "SN?", "value": "SN?"},
     ]
     options["vsx_class"] = [
+        {"label": "GCAS", "value": "GCAS"},
+        {"label": "BE", "value": "BE"},
         {"label": "EA", "value": "EA"},
+        {"label": "VAR", "value": "VAR"},
         {"label": "EA:", "value": "EA:"},
+        {"label": "DSCT:+VAR", "value": "DSCT:+VAR"},
     ]
 
     bool_values, select_values = review_app._vetting_known_filter_preset(
@@ -441,8 +449,76 @@ def test_vetting_known_preset_broad_mode_keeps_existing_behavior() -> None:
 
     assert bool_values_by_col["vetting_likely_known"] == "False"
     assert bool_values_by_col["microlens_match"] == "False"
-    assert select_values_by_col["vsx_class"] == ["EA", "EA:"]
+    assert select_values_by_col["vsx_class"] == ["GCAS", "BE", "EA", "VAR", "EA:", "DSCT:+VAR"]
     assert select_values_by_col["tns_type"] == ["SN Ia", "CV candidate", "SN?"]
+
+
+def test_vetting_known_options_loader_includes_backfilled_vsx_classes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "review.db"
+    monkeypatch.setattr(review_app, "DB_PATH", str(db_path))
+    with review_app.db_connect(db_path) as conn:
+        upsert_candidates_frame(
+            conn,
+            pd.DataFrame(
+                [
+                    {"candidate_id": "cand-gcas", "source_path": "run-a", "vsx_class": "GCAS"},
+                    {"candidate_id": "cand-be", "source_path": "run-a", "vsx_class": "BE"},
+                    {"candidate_id": "cand-var", "source_path": "run-a", "vsx_class": "VAR"},
+                    {"candidate_id": "cand-other", "source_path": "run-b", "vsx_class": "EA"},
+                ]
+            ),
+        )
+
+    options = review_app._load_vetting_known_select_options(
+        {"source_paths": ["run-a/results/candidates.parquet"]}
+    )
+
+    assert options["vsx_class"] == [
+        {"label": "BE", "value": "BE"},
+        {"label": "GCAS", "value": "GCAS"},
+        {"label": "VAR", "value": "VAR"},
+    ]
+
+
+def test_vetting_known_options_refresh_replaces_stale_vsx_classes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "review.db"
+    monkeypatch.setattr(review_app, "DB_PATH", str(db_path))
+    with review_app.db_connect(db_path) as conn:
+        upsert_candidates_frame(
+            conn,
+            pd.DataFrame(
+                [
+                    {"candidate_id": "cand-gcas", "source_path": "run-a", "vsx_class": "GCAS"},
+                    {"candidate_id": "cand-be", "source_path": "run-a", "vsx_class": "BE"},
+                    {"candidate_id": "cand-var", "source_path": "run-a", "vsx_class": "VAR"},
+                ]
+            ),
+        )
+    stale_options = {col: [] for col in review_app.VETTING_KNOWN_SELECT_FILTERS}
+    stale_options["vsx_class"] = [{"label": "EA", "value": "EA"}]
+
+    options = review_app._fresh_vetting_known_select_options(
+        {"source_paths": ["run-a/results/candidates.parquet"]},
+        stale_options,
+    )
+    _bool_values, select_values = review_app._vetting_known_filter_preset(
+        options,
+        include_uncertain=False,
+    )
+    select_values_by_col = dict(zip(review_app.VETTING_KNOWN_SELECT_FILTERS, select_values))
+
+    assert options["vsx_class"] == [
+        {"label": "BE", "value": "BE"},
+        {"label": "GCAS", "value": "GCAS"},
+        {"label": "VAR", "value": "VAR"},
+    ]
+    assert select_values_by_col["vsx_class"] == ["BE", "GCAS"]
 
 
 def test_diagnostic_background_signature_tracks_wal_file(tmp_path: Path, monkeypatch) -> None:

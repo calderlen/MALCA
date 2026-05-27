@@ -58,7 +58,7 @@ Actions:
   [.] Save  [,] Toggle followup
 
 UI:
-  [Esc] Toggle sidebar  [R] Refresh queue  [?] Show this help
+  [Esc] Toggle sidebar  [?] Show this help
 """
 
 

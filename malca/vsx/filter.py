@@ -251,11 +251,15 @@ def load_vsx_catalog(path: Path | str = DEFAULT_VSX_FILE) -> pd.DataFrame:
     return df
 
 
+def normalize_vsx_catalog(df_vsx: pd.DataFrame) -> pd.DataFrame:
+    """Return the full VSX catalog with usable coordinates, without class exclusions."""
+    return df_vsx.dropna(subset=["ra", "dec"]).reset_index(drop=True)
+
+
 def filter_vsx(df_vsx: pd.DataFrame) -> pd.DataFrame:
     """Return a VSX subset excluding unwanted variability classes."""
     mask = df_vsx["class"].progress_apply(filter_vsx_classes)
-    df = df_vsx[~mask].copy()
-    return df.dropna(subset=["ra", "dec"]).reset_index(drop=True)
+    return normalize_vsx_catalog(df_vsx[~mask].copy())
 
 
 def load_masked_indexes(masked_root: Path | str = DEFAULT_LC_DIR_MASKED) -> pd.DataFrame:
@@ -290,24 +294,30 @@ def collect_present_ids(lc_root: Path | str = DEFAULT_LC_DIR) -> set[str]:
 def write_clean_outputs(
     df_asassn: pd.DataFrame,
     df_vsx: pd.DataFrame,
+    df_vsx_all: pd.DataFrame | None = None,
     output_dir: Path | str = DEFAULT_OUTPUT_DIR,
     stamp: str | None = None,
-) -> tuple[Path, Path]:
-    """Write cleaned ASAS-SN index and VSX Parquets, returning their paths."""
+) -> tuple[Path, Path, Path]:
+    """Write cleaned ASAS-SN index plus full and filtered VSX Parquets."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    if df_vsx_all is None:
+        df_vsx_all = normalize_vsx_catalog(df_vsx)
 
     if stamp:
         asas_out = output_dir / f"asassn_index_masked_concat_cleaned_{stamp}.parquet"
         vsx_out = output_dir / f"vsx_cleaned_{stamp}.parquet"
+        vsx_all_out = output_dir / f"vsx_all_{stamp}.parquet"
     else:
         # Use simple default names matching tag.py expectations
         asas_out = output_dir / "asassn_catalog.parquet"
         vsx_out = output_dir / "vsx_cleaned.parquet"
+        vsx_all_out = output_dir / "vsx_all.parquet"
 
     df_asassn.to_parquet(asas_out, index=False)
     df_vsx.to_parquet(vsx_out, index=False)
-    return asas_out, vsx_out
+    df_vsx_all.to_parquet(vsx_all_out, index=False)
+    return asas_out, vsx_out, vsx_all_out
 
 
 def main(
@@ -315,12 +325,13 @@ def main(
     masked_dir: Path | str = DEFAULT_LC_DIR_MASKED,
     output_dir: Path | str = DEFAULT_OUTPUT_DIR,
     stamp: str | None = None,
-) -> tuple[Path, Path]:
-    """Run VSX filtering and ASAS-SN index cleaning and write cleaned Parquets."""
+) -> tuple[Path, Path, Path]:
+    """Run VSX filtering and ASAS-SN index cleaning and write VSX Parquets."""
     df_vsx_raw = load_vsx_catalog(vsx_file)
+    df_vsx_all = normalize_vsx_catalog(df_vsx_raw)
     df_vsx_clean = filter_vsx(df_vsx_raw)
     df_asassn_clean = load_masked_indexes(masked_dir)
-    return write_clean_outputs(df_asassn_clean, df_vsx_clean, output_dir=output_dir, stamp=stamp)
+    return write_clean_outputs(df_asassn_clean, df_vsx_clean, df_vsx_all, output_dir=output_dir, stamp=stamp)
 
 
 def cli():
@@ -340,7 +351,7 @@ def cli():
                         help="Timestamp suffix for output filenames (default: no stamp)")
     args = parser.parse_args()
 
-    asas_path, vsx_path = main(
+    asas_path, vsx_path, vsx_all_path = main(
         vsx_file=args.vsx_file,
         masked_dir=args.masked_dir,
         output_dir=args.output_dir,
@@ -348,6 +359,7 @@ def cli():
     )
     print(f"Wrote ASAS-SN cleaned index to {asas_path}")
     print(f"Wrote VSX cleaned catalog to {vsx_path}")
+    print(f"Wrote full VSX catalog to {vsx_all_path}")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime
 from pathlib import Path
 import argparse
 
@@ -10,12 +9,14 @@ from astropy.time import Time
 import numpy as np
 import pandas as pd
 
+from malca.config import VSX_ALL_CATALOG_PATH
+from malca.vsx.metadata import normalize_vsx_match_columns
 
 
 
 
 DEFAULT_ASASSN_PATH = Path(__file__).parent.parent.parent / "input" / "vsx" / "asassn_catalog.parquet"
-DEFAULT_VSX_PATH = Path(__file__).parent.parent.parent / "input" / "vsx" / "vsx_cleaned.parquet"
+DEFAULT_VSX_PATH = VSX_ALL_CATALOG_PATH
 DEFAULT_OUTPUT_DIR = Path(__file__).parent.parent.parent / "input" / "vsx"
 
 
@@ -37,7 +38,7 @@ def load_vsx_catalog(path: Path) -> pd.DataFrame:
     df = pd.read_parquet(path)
     for col in ["ra", "dec"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
-    return df
+    return df.dropna(subset=["ra", "dec"]).reset_index(drop=True)
 
 
 def propagate_asassn_coords(
@@ -98,9 +99,7 @@ def crossmatch_asassn_vsx(
             suffixes=("_targ", "_vsx"),
         )
     )
-    if "class" in out.columns and "vsx_class" not in out.columns:
-        out = out.rename(columns={"class": "vsx_class"})
-    return out
+    return normalize_vsx_match_columns(out)
 
 
 def write_crossmatch(
@@ -113,8 +112,8 @@ def write_crossmatch(
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    stamp = stamp or datetime.now().strftime("%Y%m%d_%H%M")
-    path = output_dir / f"asassn_x_vsx_matches_{stamp}.parquet"
+    default_name = "asassn_x_vsx_matches_full.parquet" if not stamp else f"asassn_x_vsx_matches_{stamp}.parquet"
+    path = output_dir / default_name
     matches.to_parquet(path, index=False)
     return path
 
@@ -139,13 +138,13 @@ def cli():
     parser.add_argument("--asassn-table", type=Path, default=DEFAULT_ASASSN_PATH,
                         help=f"Cleaned ASAS-SN index Parquet (default: {DEFAULT_ASASSN_PATH})")
     parser.add_argument("--vsx-table", type=Path, default=DEFAULT_VSX_PATH,
-                        help=f"Cleaned VSX catalog Parquet (default: {DEFAULT_VSX_PATH})")
+                        help=f"Full VSX catalog Parquet (default: {DEFAULT_VSX_PATH})")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR,
                         help=f"Output directory (default: {DEFAULT_OUTPUT_DIR})")
     parser.add_argument("--radius", type=float, default=3.0,
                         help="Match radius in arcseconds (default: 3.0)")
     parser.add_argument("--stamp", type=str, default=None,
-                        help="Timestamp suffix for output filename (default: current time)")
+                        help="Timestamp suffix for output filename (default: canonical full crossmatch filename)")
     args = parser.parse_args()
 
     matches = crossmatch_asassn_vsx(args.asassn_table, args.vsx_table,

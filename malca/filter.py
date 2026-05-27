@@ -86,6 +86,7 @@ from malca.gaia_ids import parse_gaia_source_id
 from malca.phase import align_v_to_g_magnitude
 from malca.stats import compute_pdm_stats, compute_ce_stats
 from malca.table_io import read_parquet_table, write_parquet_table
+from malca.vsx.metadata import normalize_vsx_match_columns, select_best_vsx_matches
 from malca.utils import log_rejections
 from malca.utils import read_lc_dat2
 
@@ -527,35 +528,21 @@ def fetch_vsx_period_catalog(
     if show_tqdm:
         tqdm.write(f"[fetch_vsx_period] Loading VSX crossmatch from {path}")
 
-    xmatch = read_parquet_table(path)
-    rename_map: dict[str, str] = {}
-    if "sep_arcsec" in xmatch.columns and "vsx_sep_arcsec" not in xmatch.columns:
-        rename_map["sep_arcsec"] = "vsx_sep_arcsec"
-    if "class" in xmatch.columns and "vsx_class" not in xmatch.columns:
-        rename_map["class"] = "vsx_class"
-    if rename_map:
-        xmatch = xmatch.rename(columns=rename_map)
+    xmatch = normalize_vsx_match_columns(read_parquet_table(path))
 
     required_cols = {"asas_sn_id"}
     missing = [c for c in required_cols if c not in xmatch.columns]
     if missing:
         raise ValueError(f"VSX crossmatch file missing required columns: {missing}")
 
-    keep_cols = [c for c in ["asas_sn_id", "period", "vsx_class", "vsx_sep_arcsec", "gaia_id", "ra", "dec"] if c in xmatch.columns]
+    keep_cols = [c for c in ["asas_sn_id", "vsx_period", "vsx_class", "vsx_sep_arcsec", "gaia_id", "ra", "dec"] if c in xmatch.columns]
     out = xmatch[keep_cols].copy()
-    out["asas_sn_id"] = out["asas_sn_id"].astype(str).str.strip()
-    if "period" in out.columns:
-        out["period"] = pd.to_numeric(out["period"], errors="coerce")
     if "gaia_id" in out.columns:
         out["gaia_id"] = pd.to_numeric(out["gaia_id"], errors="coerce").astype("Int64")
 
-    if "vsx_sep_arcsec" in out.columns:
-        out["vsx_sep_arcsec"] = pd.to_numeric(out["vsx_sep_arcsec"], errors="coerce")
-        out = out.sort_values("vsx_sep_arcsec", na_position="last").drop_duplicates("asas_sn_id", keep="first")
-    else:
-        out = out.drop_duplicates("asas_sn_id", keep="first")
+    out = select_best_vsx_matches(out, id_column="asas_sn_id")
 
-    out = out.rename(columns={"vsx_class": "var_type"})
+    out = out.rename(columns={"vsx_class": "var_type", "vsx_period": "period"})
     return out.reset_index(drop=True)
 
 

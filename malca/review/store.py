@@ -2412,7 +2412,7 @@ VETTING_COLUMNS = [
     "alerce_oid", "alerce_ndet", "alerce_lc_class", "alerce_lc_prob",
     "alerce_stamp_class", "alerce_stamp_prob",
     "xray_det", "xray_flux", "xray_sep_arcsec",
-    "vsx_class", "vsx_sep_arcsec",
+    "vsx_class", "vsx_sep_arcsec", "vsx_period",
     "sfr_name", "sfr_sep_arcmin",
     "cluster_name", "cluster_dist_pc",
     "banyan_best_assoc", "banyan_field_prob",
@@ -2475,11 +2475,13 @@ def merge_vetting_results(
         return 0
 
     # Fetch all candidates and update payloads
-    rows = conn.execute("SELECT candidate_id, payload_json FROM candidates").fetchall()
+    rows = conn.execute("SELECT candidate_id, asas_sn_id, payload_json FROM candidates").fetchall()
     updated = 0
-    for cid, payload_json in rows:
+    for cid, asas_sn_id, payload_json in rows:
         cid_str = str(cid).strip()
         vetting_data = lookup.get(cid_str)
+        if vetting_data is None and asas_sn_id is not None:
+            vetting_data = lookup.get(str(asas_sn_id).strip())
         if vetting_data is None:
             continue
 
@@ -2500,7 +2502,8 @@ def merge_vetting_results(
                               "gaia_var_flag",
                               "microlens_catalog", "asassn_var_type",
                               "gaia_var_class", "simbad_otype", "ztf_var_type",
-                              "tns_type", "yso_class"}
+                              "tns_type", "yso_class",
+                              "vsx_class", "vsx_sep_arcsec", "vsx_period"}
         for col in _REAL_VETTING_COLS:
             if col in vetting_data:
                 val = vetting_data[col]

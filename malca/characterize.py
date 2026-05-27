@@ -61,6 +61,7 @@ from malca.config import (
 from malca.candidates import select_passing_candidates_if_present
 from malca.gaia_ids import normalize_gaia_source_ids, parse_gaia_source_id
 from malca.table_io import read_parquet_table, write_parquet_table
+from malca.vsx.metadata import normalize_asas_sn_ids, normalize_vsx_match_columns, select_best_vsx_matches
 
 
 
@@ -1909,39 +1910,23 @@ def characterize_candidates_df(
                     "allwise_id",
                     "vsx_class",
                     "vsx_sep_arcsec",
+                    "vsx_period",
                     "class",
                     "sep_arcsec",
+                    "period",
                 }
                 use_cols = [c for c in header if c in requested]
                 if df_xmatch is None:
                     df_xmatch = read_parquet_table(xmatch_path, columns=use_cols).astype(str)
                 else:
                     df_xmatch = df_xmatch[use_cols].astype(str)
-                header = list(df_xmatch.columns)
-
-                rename_map: dict[str, str] = {}
                 if id_col != "asas_sn_id":
-                    rename_map[id_col] = "asas_sn_id"
-                if "class" in df_xmatch.columns and "vsx_class" not in df_xmatch.columns:
-                    rename_map["class"] = "vsx_class"
-                if "sep_arcsec" in df_xmatch.columns and "vsx_sep_arcsec" not in df_xmatch.columns:
-                    rename_map["sep_arcsec"] = "vsx_sep_arcsec"
-                if rename_map:
-                    df_xmatch = df_xmatch.rename(columns=rename_map)
-
-                def _normalize_asas_ids(series: pd.Series) -> pd.Series:
-                    s = series.astype(str).str.strip()
-                    s = s.replace({"nan": pd.NA, "None": pd.NA, "<NA>": pd.NA, "": pd.NA})
-                    num = pd.to_numeric(s, errors="coerce")
-                    integral_mask = num.notna() & np.isfinite(num) & (num % 1 == 0)
-                    if integral_mask.any():
-                        s.loc[integral_mask] = num.loc[integral_mask].astype("Int64").astype(str)
-                    return s
+                    df_xmatch = df_xmatch.rename(columns={id_col: "asas_sn_id"})
+                df_xmatch = normalize_vsx_match_columns(df_xmatch)
 
                 df_in = df_in.copy()
-                df_in["asas_sn_id"] = _normalize_asas_ids(df_in["asas_sn_id"])
-                df_xmatch["asas_sn_id"] = _normalize_asas_ids(df_xmatch["asas_sn_id"])
-                df_xmatch = df_xmatch.drop_duplicates(subset=["asas_sn_id"], keep="first")
+                df_in["asas_sn_id"] = normalize_asas_sn_ids(df_in["asas_sn_id"])
+                df_xmatch = select_best_vsx_matches(df_xmatch, id_column="asas_sn_id")
 
                 overlap_cols = [c for c in df_xmatch.columns if c != "asas_sn_id" and c in df_in.columns]
                 if overlap_cols:
@@ -1951,7 +1936,7 @@ def characterize_candidates_df(
 
                 for col in overlap_cols:
                     xcol = f"{col}_xmatch"
-                    if col == "vsx_sep_arcsec":
+                    if col in {"vsx_sep_arcsec", "vsx_period"}:
                         base_num = pd.to_numeric(df_merged[col], errors="coerce")
                         fill_num = pd.to_numeric(df_merged[xcol], errors="coerce")
                         df_merged[col] = base_num.combine_first(fill_num)
@@ -1964,6 +1949,8 @@ def characterize_candidates_df(
 
                 if "vsx_sep_arcsec" in df_merged.columns:
                     df_merged["vsx_sep_arcsec"] = pd.to_numeric(df_merged["vsx_sep_arcsec"], errors="coerce")
+                if "vsx_period" in df_merged.columns:
+                    df_merged["vsx_period"] = pd.to_numeric(df_merged["vsx_period"], errors="coerce")
                 print(f"Merged {len(df_merged)} rows")
             except Exception as e:
                 print(f"Warning: characterize crossmatch read failed: {e}")
