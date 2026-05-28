@@ -623,6 +623,9 @@ def compute_basic_lc_stats(JD: np.ndarray) -> dict[str, float | int]:
             "n_unique_nights": 0,
         }
 
+    season_stats = {f"ltv_{key}": value for key, value in season_stats.items()}
+    trend_stats = {f"ltv_{key}": value for key, value in trend_stats.items()}
+
     return {
         "n_points": int(JD.size),
         "time_span_days": float(JD.max() - JD.min()),
@@ -950,8 +953,14 @@ def process_one_lc(
     season_spans = np.asarray(season_spans, dtype=float)
     season_counts = np.asarray(season_counts, dtype=int)
     t_years = (season_times - JD.min()) / 365.25 if season_times.size > 0 else np.array([])
-    season_stats = compute_season_diagnostics(meds, t_years, season_spans, season_counts)
-    trend_stats = compute_time_trend_diagnostics(t_years, meds)
+    season_stats = {
+        f"ltv_{key}": value
+        for key, value in compute_season_diagnostics(meds, t_years, season_spans, season_counts).items()
+    }
+    trend_stats = {
+        f"ltv_{key}": value
+        for key, value in compute_time_trend_diagnostics(t_years, meds).items()
+    }
 
     lin_coeff = None
     quad_coeff = None
@@ -979,27 +988,29 @@ def process_one_lc(
 
     return {
         "asas_sn_id": target,
-        "ra_deg": ra_val,
-        "dec_deg": meta.dec_deg,
-        "Pstarss gmag": p_mag,
+        "candidate_id": f"ltv_{target}",
+        "timescale": "ltv",
+        "ra": ra_val,
+        "dec": meta.dec_deg,
+        "baseline_mag": p_mag,
         **basic_stats,
-        "Median": lc_median,
-        "Median_err": lc_mad,
-        "Dispersion": lc_dispersion,
-        "Slope": lin_slope,
-        "Quad Slope": quad_slope,
-        "coeff1": c1,
-        "coeff2": c2,
-        "max diff": diff,
+        "ltv_median": lc_median,
+        "ltv_median_err": lc_mad,
+        "ltv_dispersion": lc_dispersion,
+        "ltv_slope": lin_slope,
+        "ltv_slope_quad": quad_slope,
+        "ltv_coeff1": c1,
+        "ltv_coeff2": c2,
+        "ltv_max_diff": diff,
         **season_stats,
         **trend_stats,
-        "vg_has_v": vg_has_v,
-        "vg_overlap_days": vg_overlap_days,
-        "vg_overlap_fraction": vg_overlap_frac,
-        "vg_offset_applied": vg_offset_applied,
-        "ls_period": ls_result["ls_period"],
-        "ls_power": ls_result["ls_power"],
-        "ls_fap": ls_result["ls_fap"],
+        "ltv_vg_has_v": vg_has_v,
+        "ltv_vg_overlap_days": vg_overlap_days,
+        "ltv_vg_overlap_fraction": vg_overlap_frac,
+        "ltv_vg_offset_applied": vg_offset_applied,
+        "ltv_ls_period": ls_result["ls_period"],
+        "ltv_ls_power": ls_result["ls_power"],
+        "ltv_ls_fap": ls_result["ls_fap"],
         "inverse_von_neumann_ratio": vnr,
         "reduced_chi2_vs_constant": rchisq,
         "roms": roms,

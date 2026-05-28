@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from malca.events import score_lightcurve
+from malca.stv.events import score_lightcurve
 from malca.baseline import per_camera_gp_baseline
 from malca.utils import read_lc_dat2
 from malca.config import (

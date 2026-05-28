@@ -208,7 +208,7 @@ def _compute_events_for_csv(lc_path: Path) -> dict:
             SIGNIFICANCE_THRESHOLD, P_POINTS, MAG_POINTS,
             RUN_MIN_POINTS, RUN_MAX_GAP_POINTS, BASELINE_FUNC,
         )
-        from malca.events import process_lightcurve
+        from malca.stv.events import process_lightcurve
 
         result = process_lightcurve(
             str(lc_path),

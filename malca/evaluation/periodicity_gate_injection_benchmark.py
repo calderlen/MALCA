@@ -20,7 +20,7 @@ import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 
-import malca.periodicity_gate as pregate
+import malca.stv.periodicity_gate as pregate
 from malca.baseline import (
     global_median_baseline,
     per_camera_gp_baseline,
@@ -60,8 +60,8 @@ from malca.config import (
     SIGNIFICANCE_THRESHOLD,
     TRIGGER_MODE,
 )
-from malca.events import score_lightcurve
-from malca.filter import apply_filters
+from malca.stv.events import score_lightcurve
+from malca.stv.filter import apply_filters
 from malca.lightcurve_io import load_lightcurve_df
 from malca.lightcurve_publication import (
     plot_lightcurve_panel,
@@ -71,9 +71,9 @@ from malca.lightcurve_publication import (
     style_publication_axis,
 )
 from malca.phase import phase_fold_dataframe
-from malca.score import compute_event_score
+from malca.stv.score import compute_event_score
 from malca.stats import compute_ce_stats
-from malca.triggering import posterior_probability_threshold
+from malca.stv.triggering import posterior_probability_threshold
 from malca.utils import clean_lc, compute_n_cameras, filter_bad_cameras
 
 

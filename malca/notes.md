@@ -43,7 +43,7 @@
     - why are the filter and validation modules separate?
 
 - **data output**
-    - generating plots with malca plot before review may just be a waste of space. at the very least add a toggle on/off for plot generation at this stage since the LC info is bundled anyway and looked at in the reviews stage. default behavior should be NOT to plot at this stage.
+    - generating plots with malca stv-plot before review may just be a waste of space. at the very least add a toggle on/off for plot generation at this stage since the LC info is bundled anyway and looked at in the reviews stage. default behavior should be NOT to plot at this stage.
     - 
 
 - **review**

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from malca import tag
+from malca.stv import tag
 from malca.review.maintenance import backfill_vsx_results
 from malca.review.store import db_connect, get_candidate_payload, upsert_candidates_frame
 from malca.vsx import crossmatch as vsx_crossmatch

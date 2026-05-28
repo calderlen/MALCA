@@ -25,8 +25,8 @@ from malca.baseline import (
     per_camera_median_baseline,
     per_camera_trend_baseline,
 )
-from malca.events import run_bayesian_significance
-from malca.plot import read_skypatrol_csv, JD_OFFSET
+from malca.stv.events import run_bayesian_significance
+from malca.stv.plot import read_skypatrol_csv, JD_OFFSET
 from malca.utils import gaussian, paczynski_kernel
 
 

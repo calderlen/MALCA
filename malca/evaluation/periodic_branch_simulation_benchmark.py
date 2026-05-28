@@ -40,7 +40,7 @@ from malca.config import (
     SIGNIFICANCE_THRESHOLD,
     TRIGGER_MODE,
 )
-from malca.events import score_lightcurve
+from malca.stv.events import score_lightcurve
 from malca.lightcurve_publication import (
     plot_lightcurve_panel,
     plot_phase_panel,

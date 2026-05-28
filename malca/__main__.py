@@ -8,6 +8,7 @@ import argparse
 import importlib
 import os
 import sys
+import textwrap
 
 # Command groups for grouped --help (order = importance)
 GROUP_ORDER = [
@@ -20,12 +21,11 @@ GROUP_ORDER = [
 ]
 COMMAND_GROUPS = {
     "manifest": "Discovery",
-    "pipeline": "Discovery",
-    "detect": "Discovery",
-    "filter": "Discovery",
-    "tag": "Discovery",
-    "events": "Discovery",
-    "plot": "Discovery",
+    "stv-pipeline": "Discovery",
+    "stv-filter": "Discovery",
+    "stv-tag": "Discovery",
+    "stv-events": "Discovery",
+    "stv-plot": "Discovery",
     "lc-plot": "Discovery",
     "gaia-fetch": "Discovery",
     "characterize": "Discovery",
@@ -38,13 +38,13 @@ COMMAND_GROUPS = {
     "review-maint": "Review",
     "ltv-pipeline": "LTV",
     "ltv-injection": "LTV",
-    "ltv-bundle": "LTV",
     "injection": "Evaluation",
     "detection-rate": "Evaluation",
     "validate": "Evaluation",
     "attrition": "Evaluation",
     "reproduce": "Evaluation",
     "audit": "Evaluation",
+    "bad-photometry": "Evaluation",
     "false-positive": "Evaluation",
     "neighbors": "Enrichment",
     "spectra": "Enrichment",
@@ -61,8 +61,10 @@ MALCA_EPILOG = """
 Run 'malca <command> --help' for per-command options.
 
 Common workflows:
-  Discovery   malca pipeline  then  malca review --plot-dir <run>/plots
-  LTV         malca ltv-pipeline --mag-bin 13_13.5  then  malca review --review-db <run>/review/review.db
+  STV           malca stv-pipeline  then  malca review --review-db <run>/review/review.db
+  STV extended  malca stv-pipeline --stage full-extended
+  LTV           malca ltv-pipeline --mag-bin 13_13.5  then  malca review --review-db <run>/review/review.db
+  LTV extended  malca ltv-pipeline --stage full-extended --full-bundle
 """
 
 
@@ -86,7 +88,18 @@ class _GroupedHelpFormatter(argparse.RawDescriptionHelpFormatter):
                 continue
             parts.append(f"  {group}:")
             for name, help_str in items:
-                parts.append(f"    {name:<20} {help_str}")
+                prefix = f"    {name:<20} "
+                wrapped = textwrap.wrap(
+                    help_str,
+                    width=max(32, self._width - len(prefix)),
+                    subsequent_indent=" " * len(prefix),
+                    break_on_hyphens=False,
+                )
+                if wrapped:
+                    parts.append(prefix + wrapped[0])
+                    parts.extend(wrapped[1:])
+                else:
+                    parts.append(prefix)
             parts.append("")
         return "\n".join(parts) + "\n"
 
@@ -106,13 +119,14 @@ def main():
     # Check if user is calling a subcommand with --help
     # If so, forward directly to the submodule
     if len(sys.argv) >= 2 and sys.argv[1] in [
-        "manifest", "pipeline", "detect", "reproduce", "injection",
-        "detection-rate", "validate", "plot", "audit",
-        "events", "lc-plot", "gaia-fetch", "characterize", "classify", "filter", "tag",
+        "manifest", "stv-pipeline", "reproduce", "injection",
+        "detection-rate", "validate", "stv-plot", "audit",
+        "bad-photometry",
+        "stv-events", "lc-plot", "gaia-fetch", "characterize", "classify", "stv-filter", "stv-tag",
         "attrition", "review", "review-refresh", "review-merge", "review-sync", "review-taxonomy", "review-maint",
         "neighbors", "spectra", "false-positive", "vsx-filter", "vsx-crossmatch", "external-lcs", "multi-survey-features", "sed-photometry",
         "vetting",
-        "ltv-pipeline", "ltv-injection", "ltv-bundle",
+        "ltv-pipeline", "ltv-injection",
         "dev",
     ]:
         command = sys.argv[1]
@@ -121,8 +135,8 @@ def main():
         # Dispatch to appropriate module (--help will be handled by that module)
         if command == "manifest":
             _run_module_main("malca.manifest", remaining)
-        elif command in {"pipeline", "detect"}:
-            _run_module_main("malca.detect", remaining)
+        elif command == "stv-pipeline":
+            _run_module_main("malca.stv.pipeline", remaining)
         elif command == "reproduce":
             reproduce = importlib.import_module("malca.evaluation.reproduce")
             sys.argv = [sys.argv[0]] + remaining
@@ -141,22 +155,24 @@ def main():
             attrition.main()
         elif command == "audit":
             _run_module_main("malca.audit", remaining)
-        elif command == "plot":
-            _run_module_main("malca.plot", remaining)
+        elif command == "bad-photometry":
+            _run_module_main("malca.meta_analysis.ml.bad_photometry", remaining)
+        elif command == "stv-plot":
+            _run_module_main("malca.stv.plot", remaining)
         elif command == "lc-plot":
             _run_module_main("malca.lightcurve_publication", remaining)
-        elif command == "events":
-            _run_module_main("malca.events", remaining)
+        elif command == "stv-events":
+            _run_module_main("malca.stv.events", remaining)
         elif command == "gaia-fetch":
             _run_module_main("malca.gaia_fetch", remaining)
         elif command == "characterize":
             _run_module_main("malca.characterize", remaining)
         elif command == "classify":
             _run_module_main("malca.classify", remaining)
-        elif command == "filter":
-            _run_module_main("malca.filter", remaining)
-        elif command == "tag":
-            _run_module_main("malca.tag", remaining)
+        elif command == "stv-filter":
+            _run_module_main("malca.stv.filter", remaining)
+        elif command == "stv-tag":
+            _run_module_main("malca.stv.tag", remaining)
         elif command == "review":
             _run_module_main("malca.review.app", remaining)
         elif command == "review-refresh":
@@ -204,15 +220,13 @@ def main():
                 raise SystemExit("usage: malca dev {score,stats} ...")
             dev_command, dev_args = remaining[0], remaining[1:]
             if dev_command == "score":
-                _run_module_main("malca.score", dev_args)
+                _run_module_main("malca.stv.score", dev_args)
             elif dev_command == "stats":
                 _run_module_main("malca.stats", dev_args)
             else:
                 raise SystemExit(f"unknown dev command: {dev_command}")
         elif command == "ltv-injection":
             _run_module_main("malca.ltv.injection", remaining)
-        elif command == "ltv-bundle":
-            _run_module_main("malca.ltv.bundle", remaining)
         return 0
     
     # If no subcommand or just --help for main, show main help
@@ -227,12 +241,14 @@ def main():
     # Register in group order (Discovery, Review, LTV, Evaluation, Enrichment, Other)
     # Discovery
     subparsers.add_parser("manifest", description="Build manifest (source_id → path index)")
-    subparsers.add_parser("pipeline", description="Run full discovery pipeline")
-    subparsers.add_parser("detect", description="Alias for pipeline")
-    subparsers.add_parser("filter", description="Apply candidate filters")
-    subparsers.add_parser("tag", description="Apply tagging filters to candidate tables")
-    subparsers.add_parser("events", description="Run event detection directly")
-    subparsers.add_parser("plot", description="Plot light curves with events")
+    subparsers.add_parser(
+        "stv-pipeline",
+        description="Run STV discovery pipeline; --stage full-extended adds external LCs and multi-survey features",
+    )
+    subparsers.add_parser("stv-filter", description="Apply STV candidate filters")
+    subparsers.add_parser("stv-tag", description="Apply STV tagging filters to candidate tables")
+    subparsers.add_parser("stv-events", description="Run STV event detection directly")
+    subparsers.add_parser("stv-plot", description="Plot STV light curves with events")
     subparsers.add_parser("lc-plot", description="Create a publication-quality light-curve figure")
     subparsers.add_parser("gaia-fetch", description="Download Gaia DR3 data for candidates (AIP TAP mirror)")
     subparsers.add_parser("characterize", description="Characterize candidates with external catalogs")
@@ -245,9 +261,11 @@ def main():
     subparsers.add_parser("review-taxonomy", description="Migrate legacy review DBs to taxonomy schema")
     subparsers.add_parser("review-maint", description="Review DB maintenance commands")
     # LTV
-    subparsers.add_parser("ltv-pipeline", description="Run full LTV workflow with run metadata, audit filtering, enrichment, and review ingest")
+    subparsers.add_parser(
+        "ltv-pipeline",
+        description="Run LTV workflow; --stage full-extended adds external LCs/multi-survey and --full-bundle includes LC assets",
+    )
     subparsers.add_parser("ltv-injection", description="Run LTV rejection-recovery injections and plots")
-    subparsers.add_parser("ltv-bundle", description="Bundle light curve files for LTV candidates passing slope/diff filters")
     # Evaluation
     subparsers.add_parser("injection", description="Run injection-recovery tests")
     subparsers.add_parser("detection-rate", description="Measure detection rate")
@@ -255,6 +273,7 @@ def main():
     subparsers.add_parser("attrition", description="Summarize pre/filter attrition")
     subparsers.add_parser("reproduce", description="Re-run detection on known objects (needs raw data)")
     subparsers.add_parser("audit", description="Audit result tables, LTV status, and baseline comparison commands")
+    subparsers.add_parser("bad-photometry", description="Train/apply v1-v2 bad-photometry dropout models")
     subparsers.add_parser("false-positive", description="Run false-positive contaminant benchmark")
     # Enrichment
     subparsers.add_parser("neighbors", description="Run bulk nearest-neighbor enrichment")

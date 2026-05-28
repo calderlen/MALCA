@@ -1,12 +1,12 @@
 #!/usr/bin/env python
-"""Run filter on all detect run directories."""
+"""Run filter on all STV run directories."""
 
 import subprocess
 import sys
 from pathlib import Path
 
 def main():
-    runs_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("output/runs")
+    runs_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("output/runs/stv")
 
     if not runs_dir.exists():
         print(f"Error: {runs_dir} does not exist")
@@ -32,7 +32,7 @@ def main():
 
         print(f"\n[{run_dir.name}] Running filter...")
         cmd = [
-            sys.executable, "-m", "malca.filter",
+            sys.executable, "-m", "malca.stv.filter",
             "--detect-run", str(run_dir),
             "-v"
         ]

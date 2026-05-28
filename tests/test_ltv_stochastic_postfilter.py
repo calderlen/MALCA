@@ -29,16 +29,16 @@ def test_add_stochastic_postfilter_features_merges_columns(
         assert len(mag) == 3
         assert len(err) == 3
         return {
-            "stoch_sf_ml_amplitude": 0.4,
-            "stoch_sf_ml_gamma": 0.7,
-            "stoch_iar_phi": 0.9,
-            "stoch_mhps_high": 1.0,
-            "stoch_mhps_low": 2.0,
-            "stoch_mhps_non_zero": 3.0,
-            "stoch_mhps_pn_flag": 0.0,
-            "stoch_mhps_ratio": 2.0,
-            "stoch_gp_drw_sigma": 0.05 if include_drw else float("nan"),
-            "stoch_gp_drw_tau": 120.0 if include_drw else float("nan"),
+            "ltv_stoch_sf_ml_amplitude": 0.4,
+            "ltv_stoch_sf_ml_gamma": 0.7,
+            "ltv_stoch_iar_phi": 0.9,
+            "ltv_stoch_mhps_high": 1.0,
+            "ltv_stoch_mhps_low": 2.0,
+            "ltv_stoch_mhps_non_zero": 3.0,
+            "ltv_stoch_mhps_pn_flag": 0.0,
+            "ltv_stoch_mhps_ratio": 2.0,
+            "ltv_stoch_gp_drw_sigma": 0.05 if include_drw else float("nan"),
+            "ltv_stoch_gp_drw_tau": 120.0 if include_drw else float("nan"),
         }
 
     monkeypatch.setattr(ltv_stochastic, "_load_stochastic_functions", lambda include_drw: {})
@@ -52,11 +52,11 @@ def test_add_stochastic_postfilter_features_merges_columns(
         verbose=False,
     )
 
-    assert out.loc[0, "stoch_sf_ml_amplitude"] == 0.4
-    assert out.loc[0, "stoch_sf_ml_gamma"] == 0.7
-    assert out.loc[0, "stoch_iar_phi"] == 0.9
-    assert out.loc[0, "stoch_mhps_ratio"] == 2.0
-    assert out.loc[0, "stoch_gp_drw_tau"] == 120.0
+    assert out.loc[0, "ltv_stoch_sf_ml_amplitude"] == 0.4
+    assert out.loc[0, "ltv_stoch_sf_ml_gamma"] == 0.7
+    assert out.loc[0, "ltv_stoch_iar_phi"] == 0.9
+    assert out.loc[0, "ltv_stoch_mhps_ratio"] == 2.0
+    assert out.loc[0, "ltv_stoch_gp_drw_tau"] == 120.0
 
 
 def test_run_full_pipeline_invokes_stochastic_stage(monkeypatch) -> None:
@@ -65,13 +65,13 @@ def test_run_full_pipeline_invokes_stochastic_stage(monkeypatch) -> None:
     def _fake_stochastic(df: pd.DataFrame, **kwargs) -> pd.DataFrame:
         seen["called"] = True
         out = df.copy()
-        out["stoch_sf_ml_amplitude"] = 1.23
-        out["stoch_iar_phi"] = 0.88
+        out["ltv_stoch_sf_ml_amplitude"] = 1.23
+        out["ltv_stoch_iar_phi"] = 0.88
         return out
 
     monkeypatch.setattr(ltv_pipeline, "add_stochastic_postfilter_features", _fake_stochastic)
 
-    df = pd.DataFrame({"lc_path": ["/tmp/fake.dat2"], "Slope": [0.1], "max diff": [0.5]})
+    df = pd.DataFrame({"lc_path": ["/tmp/fake.dat2"], "ltv_slope": [0.1], "ltv_max_diff": [0.5]})
     out = ltv_pipeline.run_full_pipeline(
         df,
         run_filters=False,
@@ -87,5 +87,5 @@ def test_run_full_pipeline_invokes_stochastic_stage(monkeypatch) -> None:
     )
 
     assert seen["called"] is True
-    assert out.loc[0, "stoch_sf_ml_amplitude"] == 1.23
-    assert out.loc[0, "stoch_iar_phi"] == 0.88
+    assert out.loc[0, "ltv_stoch_sf_ml_amplitude"] == 1.23
+    assert out.loc[0, "ltv_stoch_iar_phi"] == 0.88

@@ -4,7 +4,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-post_filter = pytest.importorskip("malca.filter")
+import malca.periodic_catalogs as periodic_catalogs
+
+post_filter = pytest.importorskip("malca.stv.filter")
 
 
 def _empty_catalog() -> pd.DataFrame:
@@ -32,7 +34,7 @@ def test_fetch_gaia_dr3_eb_periods_caches_negative_lookups(
                 }
             ]
 
-    monkeypatch.setattr(post_filter.pyvo.dal, "TAPService", FakeTap)
+    monkeypatch.setattr(periodic_catalogs.pyvo.dal, "TAPService", FakeTap)
 
     first = post_filter.fetch_gaia_dr3_eb_periods(
         [1, 2],
@@ -61,10 +63,10 @@ def test_fetch_gaia_dr3_eb_periods_caches_negative_lookups(
 def test_validate_periodic_catalog_builds_multisource_consensus(monkeypatch: pytest.MonkeyPatch) -> None:
     df = pd.DataFrame(
         {
-            "path": ["/tmp/1001.dat2", "/tmp/2002.dat2"],
+            "lc_path": ["/tmp/1001.dat2", "/tmp/2002.dat2"],
             "gaia_id": ["1", "2"],
-            "ra_deg": [10.0, 20.0],
-            "dec_deg": [-5.0, 1.0],
+            "ra": [10.0, 20.0],
+            "dec": [-5.0, 1.0],
         }
     )
 
@@ -121,7 +123,7 @@ def test_validate_periodic_catalog_builds_multisource_consensus(monkeypatch: pyt
     monkeypatch.setattr(post_filter, "fetch_ogle_periodic_catalog", lambda *args, **kwargs: _empty_catalog())
 
     out = post_filter.validate_periodic_catalog(df, show_tqdm=False)
-    by_path = out.set_index("path")
+    by_path = out.set_index("lc_path")
 
     row0 = by_path.loc["/tmp/1001.dat2"]
     assert bool(row0["catalog_match"]) is True
@@ -141,10 +143,10 @@ def test_validate_periodic_catalog_builds_multisource_consensus(monkeypatch: pyt
 def test_validate_periodic_catalog_flags_conflicts(monkeypatch: pytest.MonkeyPatch) -> None:
     df = pd.DataFrame(
         {
-            "path": ["/tmp/1001.dat2"],
+            "lc_path": ["/tmp/1001.dat2"],
             "gaia_id": ["1"],
-            "ra_deg": [10.0],
-            "dec_deg": [-5.0],
+            "ra": [10.0],
+            "dec": [-5.0],
         }
     )
 
@@ -191,10 +193,10 @@ def test_validate_periodic_catalog_overwrites_existing_output_columns(
 ) -> None:
     df = pd.DataFrame(
         {
-            "path": ["/tmp/1001.dat2"],
+            "lc_path": ["/tmp/1001.dat2"],
             "gaia_id": ["1"],
-            "ra_deg": [10.0],
-            "dec_deg": [-5.0],
+            "ra": [10.0],
+            "dec": [-5.0],
             "catalog_match": [False],
             "catalog_source": ["stale"],
             "period_sources": ["stale"],
@@ -239,7 +241,7 @@ def test_apply_filters_home_validations_only_check_upstream_passers(
 ) -> None:
     df = pd.DataFrame(
         {
-            "path": ["/tmp/a.dat2", "/tmp/b.dat2", "/tmp/c.dat2", "/tmp/d.dat2"],
+            "lc_path": ["/tmp/a.dat2", "/tmp/b.dat2", "/tmp/c.dat2", "/tmp/d.dat2"],
             "gaia_id": ["1", "2", "3", "4"],
             "failed_posterior_strength": [False, True, False, False],
             "failed_periodic_catalog": [True, False, False, False],
@@ -262,7 +264,7 @@ def test_apply_filters_home_validations_only_check_upstream_passers(
     checked: dict[str, list[str]] = {}
 
     def fake_periodic_catalog(subset: pd.DataFrame, **_kwargs) -> pd.DataFrame:
-        checked["periodic_catalog"] = subset["path"].tolist()
+        checked["periodic_catalog"] = subset["lc_path"].tolist()
         out = subset.copy()
         out["catalog_match"] = False
         out["catalog_period"] = np.nan
@@ -284,14 +286,14 @@ def test_apply_filters_home_validations_only_check_upstream_passers(
         return out
 
     def fake_gaia_ruwe(subset: pd.DataFrame, **_kwargs) -> pd.DataFrame:
-        checked["gaia_ruwe"] = subset["path"].tolist()
+        checked["gaia_ruwe"] = subset["lc_path"].tolist()
         out = subset.copy()
         out["ruwe"] = [1.0, 2.2, 1.1]
         out["high_ruwe_flag"] = [False, True, False]
         return out
 
     def fake_gaia_pm(subset: pd.DataFrame, **_kwargs) -> pd.DataFrame:
-        checked["gaia_pm"] = subset["path"].tolist()
+        checked["gaia_pm"] = subset["lc_path"].tolist()
         out = subset.copy()
         out["pmra"] = [1.0, 2.0, 120.0]
         out["pmdec"] = [1.0, 2.0, 0.0]
@@ -325,7 +327,7 @@ def test_apply_filters_home_validations_only_check_upstream_passers(
     assert checked["gaia_ruwe"] == ["/tmp/a.dat2", "/tmp/c.dat2", "/tmp/d.dat2"]
     assert checked["gaia_pm"] == ["/tmp/a.dat2", "/tmp/c.dat2", "/tmp/d.dat2"]
 
-    by_path = out.set_index("path")
+    by_path = out.set_index("lc_path")
 
     row_a = by_path.loc["/tmp/a.dat2"]
     assert bool(row_a["failed_any"]) is False
@@ -360,7 +362,7 @@ def test_apply_filters_external_validations_default_to_upstream_passers(
 ) -> None:
     df = pd.DataFrame(
         {
-            "path": ["/tmp/a.dat2", "/tmp/b.dat2"],
+            "lc_path": ["/tmp/a.dat2", "/tmp/b.dat2"],
             "gaia_id": ["1", "2"],
             "failed_posterior_strength": [False, True],
             "failed_any": [False, True],
@@ -369,7 +371,7 @@ def test_apply_filters_external_validations_default_to_upstream_passers(
     checked: dict[str, list[str]] = {}
 
     def fake_periodic_catalog(subset: pd.DataFrame, **_kwargs) -> pd.DataFrame:
-        checked["periodic_catalog"] = subset["path"].tolist()
+        checked["periodic_catalog"] = subset["lc_path"].tolist()
         out = subset.copy()
         out["catalog_match"] = False
         out["catalog_period"] = np.nan
@@ -407,6 +409,6 @@ def test_apply_filters_external_validations_default_to_upstream_passers(
     )
 
     assert checked["periodic_catalog"] == ["/tmp/a.dat2"]
-    by_path = out.set_index("path")
+    by_path = out.set_index("lc_path")
     assert str(by_path.loc["/tmp/b.dat2", "catalog_source"]) == ""
     assert bool(by_path.loc["/tmp/b.dat2", "failed_periodic_catalog"]) is False

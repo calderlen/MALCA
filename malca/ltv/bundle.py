@@ -1,14 +1,14 @@
-"""Bundle light curve files for LTV candidates passing slope/diff filters."""
+"""Build standalone light-curve ZIPs from existing LTV candidate tables."""
 from __future__ import annotations
 
 import argparse
-import zipfile
 from pathlib import Path
 
 import pandas as pd
 
 from malca.config import LTV_MIN_SLOPE, LTV_MIN_DIFF
 from malca.ltv.filter import filter_slope_threshold, filter_max_diff_threshold
+from malca.run_bundle import BundleFileCollection, collect_candidate_lightcurve_files, export_run_bundle
 from malca.table_io import read_parquet_table
 
 
@@ -51,9 +51,8 @@ def _collect_lightcurve_paths(
     min_slope: float,
     min_diff: float,
     verbose: bool,
-) -> tuple[list[Path], int, int]:
-    unique_paths: list[Path] = []
-    seen: set[Path] = set()
+) -> tuple[BundleFileCollection, int, int]:
+    frames: list[pd.DataFrame] = []
     total_rows = 0
     total_passing_rows = 0
 
@@ -72,15 +71,15 @@ def _collect_lightcurve_paths(
             raise KeyError(
                 f"Input file must contain an 'lc_path' column (missing in {file_path})"
             )
+        frames.append(df)
 
-        for lc_path in df["lc_path"].dropna().astype(str).unique():
-            resolved = Path(lc_path).expanduser()
-            if resolved in seen:
-                continue
-            seen.add(resolved)
-            unique_paths.append(resolved)
-
-    return unique_paths, total_rows, total_passing_rows
+    combined = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    collection = collect_candidate_lightcurve_files(
+        combined,
+        path_cols=("lc_path",),
+        arc_prefix="lightcurves",
+    )
+    return collection, total_rows, total_passing_rows
 
 
 def export_ltv_bundle(
@@ -97,7 +96,7 @@ def export_ltv_bundle(
     output_zip = Path(output_zip).expanduser()
 
     input_files = _discover_input_files(input_path, pattern=pattern)
-    paths, total_rows, total_passing_rows = _collect_lightcurve_paths(
+    collection, total_rows, total_passing_rows = _collect_lightcurve_paths(
         input_files,
         min_slope=min_slope,
         min_diff=min_diff,
@@ -105,32 +104,29 @@ def export_ltv_bundle(
     )
     if verbose:
         print(
-            f"{len(paths)} unique light curve files after filtering "
+            f"{collection.added} unique light curve files after filtering "
             f"({total_rows} -> {total_passing_rows} rows across {len(input_files)} file(s))"
         )
 
-    output_zip.parent.mkdir(parents=True, exist_ok=True)
-
-    added = 0
-    missing = 0
-    with zipfile.ZipFile(output_zip, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
-        for lc_path in paths:
-            p = Path(lc_path)
-            if not p.exists():
-                missing += 1
-                if verbose:
-                    print(f"  warning: missing {p}")
-                continue
-            zf.write(p, arcname=f"lightcurves/{p.name}")
-            added += 1
-
-    print(f"Wrote {added} files to {output_zip}" + (f" ({missing} missing)" if missing else ""))
+    export_run_bundle(
+        output_zip,
+        input_path if input_path.is_dir() else input_path.parent,
+        external_files=collection.files,
+        description="LTV light-curve",
+    )
+    print(
+        f"Wrote {collection.added} files to {output_zip}"
+        + (f" ({collection.missing} missing)" if collection.missing else "")
+    )
     return output_zip
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Bundle light curve files for LTV candidates passing slope/diff filters.",
+        description=(
+            "Build a standalone light-curve ZIP from existing LTV candidate tables. "
+            "Use 'malca ltv-pipeline --full-bundle' for a run-integrated bundle."
+        ),
     )
     parser.add_argument(
         "--input", required=True,
@@ -145,8 +141,8 @@ def main() -> None:
         "--output", default=None,
         help="Output zip path (default: <input_stem>_bundle.zip)",
     )
-    parser.add_argument("--min-slope", type=float, default=LTV_MIN_SLOPE, help="Minimum |Slope| threshold (mag/yr)")
-    parser.add_argument("--min-diff", type=float, default=LTV_MIN_DIFF, help="Minimum |max diff| threshold (mag)")
+    parser.add_argument("--min-slope", type=float, default=LTV_MIN_SLOPE, help="Minimum |ltv_slope| threshold (mag/yr)")
+    parser.add_argument("--min-diff", type=float, default=LTV_MIN_DIFF, help="Minimum |ltv_max_diff| threshold (mag)")
     parser.add_argument("--extension", "-e", type=str, default=None, help="Light curve file extension (e.g., dat, dat2, dat3). Default: dat3 (from config)")
     parser.add_argument("-v", "--verbose", action="store_true")
 

@@ -29,7 +29,7 @@ The notebooks are grouped by workflow purpose. Keep new notebooks in the shallow
 - `baseline.ipynb`: batch GP baseline plots and baseline smoke tests.
 - `detection_runs_analysis.ipynb`: analysis of saved detection runs.
 - `events.ipynb`: event-result inspection and event-scoring experiments.
-- `events_profiling.ipynb`: `malca.events` profiling on SkyPatrol light curves.
+- `events_profiling.ipynb`: `malca.stv.events` profiling on SkyPatrol light curves.
 - `pipeline_runtime_profiling.ipynb`: runtime profiling for small candidate subsets.
 - `post_filter_attrition.ipynb`: post-filter failure and retained-candidate attrition analysis.
 

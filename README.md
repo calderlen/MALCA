@@ -57,33 +57,33 @@ conda activate malca
 malca manifest --index-root /path/to/lcsv2 --lc-root /path/to/lcsv2 --mag-bin 13_13.5 --output output/manifest.parquet --workers 10
 
 # Run event detection pipeline
-malca pipeline --mag-bin 13_13.5 --workers 10 --lc-root /path/to/lcsv2 --index-root /path/to/lcsv2 --output-dir output/run_001
+malca stv-pipeline --mag-bin 13_13.5 --workers 10 --lc-root /path/to/lcsv2 --index-root /path/to/lcsv2 --output-dir output/run_001
 
 # Validate results against known candidates (no raw data needed)
 malca validate --results output/results.parquet
 
 # Plot light curves
-malca plot --input /path/to/lc123.dat2 --output-dir output/plots
+malca stv-plot --input /path/to/lc123.dat2 --output-dir output/plots
 
 # Apply quality filters
-malca filter --input output/results.parquet --output output/filtered.parquet
+malca stv-filter --input output/results.parquet --output output/filtered.parquet
 
 # Multi-wavelength characterization (post-detection)
 malca characterize --input output/filtered.parquet --output output/characterized.parquet --enable-dust --starhorse input/starhorse/starhorse2021.parquet
 
 # Get help for any command
 malca --help
-malca pipeline --help
+malca stv-pipeline --help
 ```
 
 Minimal split workflow (cluster -> home):
 
 ```bash
 # On cluster: run upstream/raw-dependent steps and export transfer bundle
-malca pipeline --stage cluster --mag-bin 13_13.5 --output-dir output/run_001 --config cluster.toml
+malca stv-pipeline --stage cluster --mag-bin 13_13.5 --output-dir output/run_001 --config cluster.toml
 
 # On home machine: import bundle and run downstream/catalog steps only
-malca pipeline --stage home --output-dir output/run_001 --config home.toml
+malca stv-pipeline --stage home --output-dir output/run_001 --config home.toml
 ```
 
 ## Pipeline Architecture
@@ -121,10 +121,10 @@ flowchart TB
     VSX_RAW --> VFILT
 
     %% ── Discovery Pipeline ───────────────────────────────────
-    subgraph discovery["Discovery Pipeline (detect.py orchestrator)"]
-        TAG["tag.py<br/>Sparse-LC, multi-camera,<br/>VSX quality tags"]
-        EVENTS["events.py<br/>Bayesian detection, morphology fits,<br/>recurrence analysis, Bayes factors"]
-        FILT["filter.py<br/>Evidence strength, run robustness,<br/>morphology, periodicity,<br/>Gaia RUWE/PM, periodic catalogs"]
+    subgraph discovery["STV Discovery Pipeline (stv/pipeline.py orchestrator)"]
+        TAG["stv/tag.py<br/>Sparse-LC, multi-camera,<br/>VSX quality tags"]
+        EVENTS["stv/events.py<br/>Bayesian detection, morphology fits,<br/>recurrence analysis, Bayes factors"]
+        FILT["stv/filter.py<br/>Evidence strength, run robustness,<br/>morphology, periodicity,<br/>Gaia RUWE/PM, periodic catalogs"]
         TAG --> EVENTS --> FILT
     end
 
@@ -154,7 +154,7 @@ flowchart TB
     enrichgrp --> ENRICHED[("Enriched .parquet")]
 
     %% ── Visualization ────────────────────────────────────────
-    PLOT["plot.py<br/>Light curve + event visualization"]
+    PLOT["stv/plot.py<br/>Light curve + event visualization"]
     CAND --> PLOT
     RAW -.-> PLOT
     SKY -.-> PLOT
@@ -197,12 +197,11 @@ flowchart TB
         LTV_NEO["neowise.py<br/>IRSA TAP IR light curves"]
         LTV_DUST["dust.py<br/>Dust excess flags"]
         LTV_CMD["cmd.py<br/>MIST grid, Bailer-Jones distances"]
-        LTV_BUNDLE["bundle.py<br/>Package .dat2 files"]
         LTV_INGEST["review.py<br/>Ingest into review DB"]
         LTV_PIPE --> LTV_CORE --> LTV_FILT
         LTV_FILT --> LTV_CROSS --> LTV_STOCH
         LTV_STOCH --> LTV_NEO --> LTV_DUST --> LTV_CMD
-        LTV_CMD --> LTV_BUNDLE --> LTV_INGEST
+        LTV_CMD --> LTV_INGEST
     end
 
     RAW --> LTV_PIPE
@@ -256,7 +255,7 @@ flowchart TB
     end
 
     %% ── CLI Entry Point ──────────────────────────────────────
-    CLI["__main__.py — malca CLI<br/>manifest, pipeline, filter, tag, events, plot, characterize, classify,<br/>vetting, review, injection, validate, reproduce,<br/>ltv-pipeline, attrition, dev, ..."]
+    CLI["__main__.py — malca CLI<br/>manifest, stv-pipeline, stv-filter, stv-tag, stv-events, stv-plot,<br/>characterize, classify, vetting, review, injection, validate, reproduce,<br/>ltv-pipeline, attrition, dev, ..."]
     CLI -.-> discovery
     CLI -.-> postdet
     CLI -.-> reviewgrp
@@ -266,14 +265,14 @@ flowchart TB
 ```
 
 **Key Components:**
-- **Discovery pipeline**: `manifest.py` &rarr; `tag.py` &rarr; `events.py` &rarr; `filter.py` (orchestrated by `detect.py`)
+- **STV discovery pipeline**: `manifest.py` &rarr; `stv/tag.py` &rarr; `stv/events.py` &rarr; `stv/filter.py` (orchestrated by `stv/pipeline.py`)
 - **Post-detection**: `characterize.py` (Gaia, dust, YSO, galactic coords, auxiliary catalogs) &rarr; `vetting.py` (SIMBAD, ZTF, TNS, eROSITA, ALeRCE, ATLAS, NEOWISE, ...) &rarr; `classify.py` (EB/CV/starspot/disk/YSO) &rarr; `enrich/` (neighbor catalogs, spectra availability)
-- **LTV pipeline**: `ltv/pipeline.py` &rarr; `core.py` &rarr; `filter.py` &rarr; `crossmatch.py` &rarr; `stochastic.py` &rarr; `neowise.py` &rarr; `dust.py` &rarr; `cmd.py` &rarr; `bundle.py` &rarr; `review.py` (ingest to review DB)
+- **LTV pipeline**: `ltv/pipeline.py` &rarr; `core.py` &rarr; `filter.py` &rarr; `crossmatch.py` &rarr; `stochastic.py` &rarr; `neowise.py` &rarr; `dust.py` &rarr; `cmd.py` &rarr; `review.py` (ingest to review DB; run bundles are exported by `ltv-pipeline --full-bundle`)
 - **Review**: `review/app.py` (Dash app with scoring, event classes, diagnostic plots, vetting cards) &rarr; labeled training set
 - **Machine learning**: `malca/meta_analysis/ml/lightgbm_classifier_prototype.ipynb` (draft LightGBM classifier workflow)
 - **Notebooks**: `malca/notebooks/README.md` documents the purpose-based notebook folders.
 - **Evaluation**: `injection.py` (synthetic dips), `detection_rate.py`, `validation.py`, `reproduce.py`, `attrition.py`, `false_positive.py`
-- **Core libraries**: `utils.py`, `lightcurve_io.py`, `baseline.py`, `triggering.py`, `score.py`, `stats.py`, `periodogram.py`, `fetch.py`, `gaia_fetch.py`
+- **Core libraries**: `utils.py`, `lightcurve_io.py`, `baseline.py`, `stats.py`, `periodogram.py`, `fetch.py`, `gaia_fetch.py`; STV-specific logic lives in `stv/`
 - **Configuration**: `config.py` centralizes all pipeline parameters
 - **CLI**: Unified interface via `malca [command]` (`__main__.py`)
 
@@ -291,36 +290,36 @@ The full detection workflow has three steps: build a manifest, run detection wit
    ```
 2) Tag and run events in batches with resume support:
    ```bash
-   malca pipeline --mag-bin 13_13.5 --workers 10 --lc-root /path/to/lcsv2 --index-root /path/to/lcsv2 --output-dir output/run_13_13.5 --config pipeline.toml
+   malca stv-pipeline --mag-bin 13_13.5 --workers 10 --lc-root /path/to/lcsv2 --index-root /path/to/lcsv2 --output-dir output/run_13_13.5 --config pipeline.toml
    ```
-   - The pipeline command builds/loads the manifest, runs tag checks, then calls `events.py` in batches.
+   - The pipeline command builds/loads the manifest, runs tag checks, then calls `stv/events.py` in batches.
    - Resume: if interrupted, skips already-processed paths using the checkpoint file.
    - VSX tags are saved to `tags/vsx_tags/` and merged into results.
    - Advanced tag, detection, filter, and catalog settings live in `--config` / `--profile`.
 
 3) Filter events:
    ```bash
-   malca filter --input output/lc_events_results_13_13.5.parquet --output output/lc_events_results_13_13.5_filtered.parquet
+   malca stv-filter --input output/lc_events_results_13_13.5.parquet --output output/lc_events_results_13_13.5_filtered.parquet
 
    # With custom thresholds
-   malca filter --input results.parquet --output filtered.parquet --min-bayes-factor 20 --min-run-points 3 --apply-morphology
+   malca stv-filter --input results.parquet --output filtered.parquet --min-bayes-factor 20 --min-run-points 3 --apply-morphology
    ```
    - **Implemented filters**: posterior strength, run robustness, score, morphology, periodicity, Gaia RUWE, Gaia PM, multi-catalog periodic consensus
 
-4) Optional: tune filter behavior directly from `malca pipeline` / `malca detect`.
+4) Optional: tune filter behavior directly from `malca stv-pipeline`.
    ```bash
-   malca pipeline --mag-bin 13_13.5 --config pipeline.toml --profile strict
+   malca stv-pipeline --mag-bin 13_13.5 --config pipeline.toml --profile strict
    ```
    - **Defaults in pipeline**: evidence strength, run robustness, score, Gaia RUWE, Gaia PM, and periodic-catalog consensus validation are on; morphology and periodicity-validation are off.
-   - Advanced controls are config/profile keys rather than public `malca pipeline` flags.
+   - Advanced controls are config/profile keys rather than public `malca stv-pipeline` flags.
 
 **Detect options:**
 ```bash
 # logBF triggering (faster)
-malca pipeline --mag-bin 13_13.5 --workers 8 --lc-root /path/to/lcsv2 --index-root /path/to/lcsv2 --output-dir output/events_logbf --config logbf.toml
+malca stv-pipeline --mag-bin 13_13.5 --workers 8 --lc-root /path/to/lcsv2 --index-root /path/to/lcsv2 --output-dir output/events_logbf --config logbf.toml
 
 # Multiple mag bins (writes one output per bin)
-malca pipeline --mag-bin 12_12.5 12.5_13 13_13.5 --lc-root /path/to/lcsv2 --index-root /path/to/lcsv2 --output-dir output/multi_bin --config logbf.toml
+malca stv-pipeline --mag-bin 12_12.5 12.5_13 13_13.5 --lc-root /path/to/lcsv2 --index-root /path/to/lcsv2 --output-dir output/multi_bin --config logbf.toml
 ```
 
 ### Individual Commands
@@ -331,43 +330,43 @@ malca pipeline --mag-bin 12_12.5 12.5_13 13_13.5 --lc-root /path/to/lcsv2 --inde
 malca manifest --index-root <index_dir> --lc-root <lc_dir> --mag-bin 12_12.5 --output output/lc_manifest.parquet
 ```
 
-#### malca events
+#### malca stv-events
 
 Run event detection directly (without the pipeline orchestrator):
 ```bash
-malca events --input /path/to/lc*_cal/*.dat2 --output output/results.parquet --workers 10
+malca stv-events --input /path/to/lc*_cal/*.dat2 --output output/results.parquet --workers 10
 
 # Advanced detection settings are supplied through --config / --profile
-malca events --input /path/to/lc*_cal/*.dat2 --output output/results.parquet --workers 10 --config events.toml
+malca stv-events --input /path/to/lc*_cal/*.dat2 --output output/results.parquet --workers 10 --config events.toml
 ```
 - Default Bayesian grid is 12x12. Change advanced detection settings through config/profile keys.
 - Output includes per-event morphology fit parameters (`best_amp`, `best_t0`, `best_alpha`, `best_tau`, `best_morph`, `delta_bic`, `width_param`, `symmetry_score`) and recurrence statistics (`is_single_event`, `inter_event_spacing_median/std`, `amplitude_consistency`, `duration_consistency`) for both dips and jumps.
 
-#### malca tag
+#### malca stv-tag
 
 ```bash
-malca tag --help
+malca stv-tag --help
 ```
 - Expects columns `asas_sn_id` and `path` pointing to lc_dir.
 - VSX handling tags rows with `vsx_sep_arcsec` / `vsx_class` when enabled.
 
-#### malca filter
+#### malca stv-filter
 
 ```bash
-malca filter --input output/results.parquet --output output/results_filtered.parquet
+malca stv-filter --input output/results.parquet --output output/results_filtered.parquet
 ```
 
-#### malca plot
+#### malca stv-plot
 
 ```bash
 # Single file
-malca plot --input /path/to/lc123.dat2 --output-dir output/plots --format png
+malca stv-plot --input /path/to/lc123.dat2 --output-dir output/plots --format png
 
 # Multiple files (glob patterns supported)
-malca plot --input input/skypatrol2/*.csv --output-dir output/plots --skip-events
+malca stv-plot --input input/skypatrol2/*.csv --output-dir output/plots --skip-events
 
 # All files from events.py results
-malca plot --results output/lc_events_results_13_13.5_filtered.parquet --output-dir output/plots
+malca stv-plot --results output/lc_events_results_13_13.5_filtered.parquet --output-dir output/plots
 ```
 
 **Note:** Event scores are computed automatically during detection and included in the results table (dipper_score, dipper_n_dips, dipper_n_valid_dips columns).
@@ -423,8 +422,8 @@ LTV commands use the same run-bundle layout as detection runs. By default, new o
 # Full LTV workflow: source metrics, audit filtering, enrichment, and review ingest
 malca ltv-pipeline --mag-bin 13_13.5
 
-# Full LTV workflow plus external light curves and LTV multi-survey summaries
-malca ltv-pipeline --stage full-extended --mag-bin 13_13.5
+# Full LTV workflow plus external light curves, LTV multi-survey summaries, and LC assets in the run bundle
+malca ltv-pipeline --stage full-extended --full-bundle --mag-bin 13_13.5
 
 # Open the review app
 malca review --review-db output/runs/ltv/latest/review/review.db
@@ -454,11 +453,11 @@ malca validate --method loo --mag-bin 13_13.5
 # Direct file specification
 malca validate --results output/results.parquet
 
-# Validate latest detect run output (output/runs/<timestamp>/results)
+# Validate latest STV run output (output/runs/stv/<timestamp>/results)
 malca validate --latest-run
 
-# Validate a specific detect run directory
-malca validate --run-dir output/runs/20250119_1349
+# Validate a specific STV run directory
+malca validate --run-dir output/runs/stv/20250119_1349
 
 # With custom candidates
 malca validate --method loo --candidates my_targets.parquet -v
@@ -547,7 +546,7 @@ malca vetting output/characterized.parquet --checkpoint output/vetting_checkpoin
 - **ATLAS** (opt-in, `--atlas-token`): Forced photometry light curves
 - **NEOWISE** (opt-in, `--neowise-lc`): Full NEOWISE light curves
 
-**Pipeline default:** vetting runs by default in `malca pipeline`; use `--no-run-vetting` to opt out.
+**Pipeline default:** vetting runs by default in `malca stv-pipeline`; use `--no-run-vetting` to opt out.
 
 **Vetting is also available during import** in the review app ("Vet on import" toggle). Results are cached per input file so re-imports skip already-vetted candidates.
 
@@ -572,8 +571,11 @@ malca attrition --pre output/pre.parquet --post output/post.parquet
 ### Candidate Review
 
 ```bash
-# Launch the Dash review app against an existing run bundle
-malca review --plot-dir output/runs/YOUR_RUN/plots
+# Launch the Dash review app against an existing STV run
+malca review --review-db output/runs/stv/YOUR_RUN/review/review.db
+
+# Optional, if pre-rendered review plots were generated
+malca review --review-db output/runs/stv/YOUR_RUN/review/review.db --plot-dir output/runs/stv/YOUR_RUN/plots
 
 # Standalone mode (no plot directory required)
 malca review
@@ -616,14 +618,14 @@ malca vsx-crossmatch --radius 5.0 --stamp 20260213_120000
 
 ### Integrated Pipeline
 
-When running `malca pipeline`, the following directory structure is created for complete provenance tracking:
+When running `malca stv-pipeline`, the following directory structure is created for complete provenance tracking:
 
 ```
-output/runs/20250121_143052/          # Timestamp-based run directory
-├── run_params.json                   # Detection parameters (detect.py)
-├── run_summary.json                 # Detection results stats (detect.py)
-├── filter_log.json                   # Filtering parameters & stats (filter.py)
-├── plot_log.json                     # Plotting parameters (plot.py)
+output/runs/stv/20250121_143052/          # Timestamp-based run directory
+├── run_params.json                   # STV pipeline parameters (stv/pipeline.py)
+├── run_summary.json                 # STV detection results stats (stv/pipeline.py)
+├── filter_log.json                   # Filtering parameters & stats (stv/filter.py)
+├── plot_log.json                     # Plotting parameters (stv/plot.py)
 ├── run.log                           # Simple text log with paths
 │
 ├── manifests/                        # Manifest files
@@ -640,10 +642,13 @@ output/runs/20250121_143052/          # Timestamp-based run directory
 ├── results/                          # Detection results
 │   ├── lc_events_results.parquet     # Raw detection output (includes dipper_score)
 │   ├── lc_events_results_PROCESSED.txt  # Checkpoint log
-│   ├── lc_events_results_filtered.parquet   # After filter.py
+│   ├── lc_events_results_filtered.parquet   # After stv/filter.py
 │   └── rejected_filter.parquet       # Filter rejections
 │
-└── plots/                            # Visualizations (plot.py)
+├── review/                           # Review database for the run
+│   └── review.db
+│
+└── plots/                            # Optional visualizations (stv/plot.py)
     ├── {source_id}_dips.png
     ├── {source_id}_dips.png
     └── ...
@@ -665,7 +670,7 @@ output/runs/20250121_143052/          # Timestamp-based run directory
 
 ### LTV Run Bundle
 
-LTV run artifacts are stored under `output/runs/<ltv_run>/`, with March 18 migrated to `output/runs/ltv_march18/`.
+LTV run artifacts are stored under `output/runs/ltv/<timestamp>/`, with March 18 migrated to `output/runs/ltv_march18/`.
 
 ```
 output/runs/ltv/

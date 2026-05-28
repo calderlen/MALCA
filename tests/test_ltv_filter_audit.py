@@ -9,14 +9,14 @@ def test_apply_all_filters_audit_preserves_rejected_rows() -> None:
     df = pd.DataFrame(
         {
             "asas_sn_id": ["pass", "low_slope", "low_diff", "south"],
-            "Slope": [0.1, 0.01, 0.1, 0.1],
-            "max diff": [0.5, 0.5, 0.1, 0.5],
-            "dec_deg": [0.0, 0.0, 0.0, -89.0],
-            "Median": [13.0, 13.0, 13.0, 13.0],
-            "Pstarss gmag": [13.0, 13.0, 13.0, 13.0],
-            "Dispersion": [0.02, 0.02, 0.02, 0.02],
-            "Median_err": [0.02, 0.02, 0.02, 0.02],
-            "gaia_pm_total": [0.0, 0.0, 0.0, 0.0],
+            "ltv_slope": [0.1, 0.01, 0.1, 0.1],
+            "ltv_max_diff": [0.5, 0.5, 0.1, 0.5],
+            "dec": [0.0, 0.0, 0.0, -89.0],
+            "ltv_median": [13.0, 13.0, 13.0, 13.0],
+            "baseline_mag": [13.0, 13.0, 13.0, 13.0],
+            "ltv_dispersion": [0.02, 0.02, 0.02, 0.02],
+            "ltv_median_err": [0.02, 0.02, 0.02, 0.02],
+            "pm_total": [0.0, 0.0, 0.0, 0.0],
             "neighbor_pm_contam": [False, False, False, False],
             "crowding_count": [0, 0, 0, 0],
         }

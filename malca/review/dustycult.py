@@ -151,7 +151,7 @@ def default_dustycult_project_path() -> Path:
     env_path = str(os.environ.get("MALCA_DUSTYCULT_PROJECT") or "").strip()
     if env_path:
         return Path(env_path).expanduser()
-    return _repo_root() / "vendor" / "dustycult"
+    return _repo_root() / "external" / "dustycult"
 
 
 def default_julia_executable() -> str:
@@ -344,7 +344,7 @@ def _deepest_point_defaults(df: pd.DataFrame) -> dict[str, object]:
 def recompute_dip_defaults(df: pd.DataFrame, run_params: Mapping[str, object] | None = None) -> dict[str, object]:
     if df is None or df.empty:
         return {}
-    from malca.events import score_lightcurve
+    from malca.stv.events import score_lightcurve
     from malca.review.interactive_plot import BASELINE_FUNCTIONS, _baseline_config_from_run_params
 
     baseline_name, baseline_kwargs, warnings = _baseline_config_from_run_params(dict(run_params or {}))

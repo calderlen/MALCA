@@ -430,7 +430,7 @@ def _run_stats_stage(payload: dict, lc_path: str, p: Callable | None = None) -> 
 def _run_events_stage(payload: dict, lc_path: str, p: Callable | None = None) -> None:
     """Run process_lightcurve and merge results into payload."""
     try:
-        from malca.events import process_lightcurve
+        from malca.stv.events import process_lightcurve
 
         result = process_lightcurve(
             str(lc_path),

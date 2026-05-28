@@ -5,7 +5,10 @@ from pathlib import Path
 import json
 
 from malca.run_metadata import (
+    build_fingerprint,
     build_run_summary,
+    fingerprint_digest,
+    json_stable,
     load_summary_state,
     preserve_imported_run_snapshots,
 )
@@ -120,3 +123,32 @@ def test_build_run_summary_uses_upstream_manifest_counts_when_available() -> Non
         "filtered_sources": 250,
         "kept_fraction": 0.25,
     }
+
+
+def test_fingerprint_digest_is_stable_after_json_round_trip(tmp_path: Path) -> None:
+    fingerprint = {
+        "version": 1,
+        "params": {"path": tmp_path / "input", "mag_bin": ("13_13.5", "13.5_14")},
+        "code": {"stv/pipeline.py": "abc123"},
+    }
+
+    normalized = json_stable(fingerprint)
+    round_tripped = json.loads(json.dumps(normalized))
+
+    assert fingerprint_digest(fingerprint) == fingerprint_digest(round_tripped)
+
+
+def test_build_fingerprint_stabilizes_params_and_hashes_code(tmp_path: Path) -> None:
+    code = tmp_path / "module.py"
+    code.write_text("print('ok')\n", encoding="ascii")
+
+    fingerprint = build_fingerprint(
+        version="1",
+        params={"path": Path("output/runs/stv/example"), "bins": ("13_13.5",)},
+        code_base=tmp_path,
+        code_paths=["module.py", "missing.py"],
+    )
+
+    assert fingerprint["version"] == "1"
+    assert fingerprint["params"] == {"bins": ["13_13.5"], "path": "output/runs/stv/example"}
+    assert set(fingerprint["code"]) == {"module.py"}

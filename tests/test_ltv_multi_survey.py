@@ -49,6 +49,11 @@ def test_ltv_multi_survey_columns_persist_in_review_db(tmp_path: Path) -> None:
         pd.DataFrame(
             {
                 "asas_sn_id": ["123"],
+                "candidate_id": ["ltv_123"],
+                "timescale": ["ltv"],
+                "lc_path": [str(tmp_path / "123.dat2")],
+                "ra": [1.0],
+                "dec": [2.0],
                 "ltv_ms_feature_status": ["ok"],
                 "ltv_ms_ztf_n_points": [2],
                 "ltv_ms_ztf_mag_range": [1.0],

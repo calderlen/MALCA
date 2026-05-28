@@ -38,10 +38,10 @@ from malca.config import (
 )
 from malca.config import VSX_CROSSMATCH_PATH
 from malca.utils import batch_tap_crossmatch as shared_batch_tap_crossmatch
-from malca.filter import (
+from malca.periodic_catalogs import (
     fetch_chen2020_ztf_periodic,
     fetch_ogle_periodic_catalog,
-    _match_period_catalog,
+    match_period_catalog,
 )
 
 
@@ -58,14 +58,14 @@ from malca.filter import (
 DEFAULT_CATALOG_PATH = VSX_CROSSMATCH_PATH
 
 GAIA_COLUMN_MAP = {
-    "gaia_id": "gaia_source_id",
-    "plx": "gaia_parallax",
-    "pm_ra": "gaia_pmra",
-    "pm_dec": "gaia_pmdec",
-    "gaia_mag": "gaia_phot_g_mean_mag",
-    "gaia_b_mag": "gaia_bp_mag",
-    "gaia_r_mag": "gaia_rp_mag",
-    "gaia_eff_temp": "gaia_teff",
+    "gaia_id": "gaia_id",
+    "plx": "parallax",
+    "pm_ra": "pmra",
+    "pm_dec": "pmdec",
+    "gaia_mag": "phot_g_mean_mag",
+    "gaia_b_mag": "phot_bp_mean_mag",
+    "gaia_r_mag": "phot_rp_mean_mag",
+    "gaia_eff_temp": "teff_gspphot",
 }
 
 VSX_COLUMN_MAP = {
@@ -109,8 +109,8 @@ def load_local_catalog(
     rename_map = {k: v for k, v in rename_map.items() if k in df.columns}
     df = df.rename(columns=rename_map)
     
-    if "gaia_source_id" in df.columns:
-        df["gaia_source_id"] = df["gaia_source_id"].astype(str)
+    if "gaia_id" in df.columns:
+        df["gaia_id"] = df["gaia_id"].astype(str)
     
     if verbose:
         print(f"Loaded {len(df):,} sources with Gaia/VSX data")
@@ -166,7 +166,9 @@ def merge_local_catalog(
             df = df.drop(columns=[local_col])
     
     if verbose:
-        n_matched = df["gaia_source_id"].notna().sum() if "gaia_source_id" in df.columns else 0
+        if "gaia_id" in df.columns and "source_id" not in df.columns:
+            df["source_id"] = df["gaia_id"]
+        n_matched = df["gaia_id"].notna().sum() if "gaia_id" in df.columns else 0
         print(f"[merge_local_catalog] Matched {n_matched}/{n_before} from local catalog")
     
     return df
@@ -176,8 +178,8 @@ def crossmatch_from_local(
     df: pd.DataFrame,
     *,
     catalog_path: str | Path | None = None,
-    ra_column: str = "ra_deg",
-    dec_column: str = "dec_deg",
+    ra_column: str = "ra",
+    dec_column: str = "dec",
     match_radius_arcsec: float = LTV_MATCH_RADIUS_ARCSEC,
     verbose: bool = False,
 ) -> pd.DataFrame:
@@ -323,8 +325,8 @@ def crossmatch_tap_catalog(
     tap_service: str,
     catalog_table: str,
     select_cols: str,
-    ra_column: str = "ra_deg",
-    dec_column: str = "dec_deg",
+    ra_column: str = "ra",
+    dec_column: str = "dec",
     ra_col: str = "RAJ2000",
     dec_col: str = "DEJ2000",
     match_radius_arcsec: float = LTV_MATCH_RADIUS_ARCSEC,
@@ -397,8 +399,8 @@ def crossmatch_tap_catalog(
 def crossmatch_milliquas(
     df: pd.DataFrame,
     *,
-    ra_column: str = "ra_deg",
-    dec_column: str = "dec_deg",
+    ra_column: str = "ra",
+    dec_column: str = "dec",
     match_radius_arcsec: float = LTV_MATCH_RADIUS_ARCSEC,
     chunk_size: int = LTV_CROSSMATCH_CHUNK_SIZE,
     n_workers: int = LTV_WORKERS,
@@ -461,8 +463,8 @@ def crossmatch_milliquas(
 def crossmatch_gaia_alerts(
     df: pd.DataFrame,
     *,
-    ra_column: str = "ra_deg",
-    dec_column: str = "dec_deg",
+    ra_column: str = "ra",
+    dec_column: str = "dec",
     match_radius_arcsec: float = LTV_MATCH_RADIUS_ARCSEC,
     chunk_size: int = LTV_CROSSMATCH_CHUNK_SIZE,
     n_workers: int = LTV_WORKERS,
@@ -524,8 +526,8 @@ def crossmatch_gaia_alerts(
 def query_simbad_classification(
     df: pd.DataFrame,
     *,
-    ra_column: str = "ra_deg",
-    dec_column: str = "dec_deg",
+    ra_column: str = "ra",
+    dec_column: str = "dec",
     match_radius_arcsec: float = LTV_MATCH_RADIUS_ARCSEC,
     chunk_size: int = LTV_CROSSMATCH_CHUNK_SIZE,
     n_workers: int = LTV_WORKERS,
@@ -611,8 +613,8 @@ def _sydney_2mass_to_ra_dec(clean_2mass: str) -> tuple[float | None, float | Non
 def crossmatch_2mass(
     df: pd.DataFrame,
     *,
-    ra_column: str = "ra_deg",
-    dec_column: str = "dec_deg",
+    ra_column: str = "ra",
+    dec_column: str = "dec",
     match_radius_arcsec: float = LTV_MATCH_RADIUS_ARCSEC,
     chunk_size: int = LTV_CROSSMATCH_CHUNK_SIZE,
     n_workers: int = LTV_WORKERS,
@@ -736,18 +738,18 @@ def crossmatch_sydney_ltv(
     if (
         sydney_coord_catalog is not None
         and not sydney_coord_catalog.empty
-        and "ra_deg" in df.columns
-        and "dec_deg" in df.columns
+        and "ra" in df.columns
+        and "dec" in df.columns
     ):
         miss_mask = (
             (df["sydney_Class"].isna() if "sydney_Class" in df.columns else pd.Series(True, index=df.index))
-            & df["ra_deg"].notna()
-            & df["dec_deg"].notna()
+            & df["ra"].notna()
+            & df["dec"].notna()
         )
         if miss_mask.any():
             cand_coords = SkyCoord(
-                ra=df.loc[miss_mask, "ra_deg"].values * u.deg,
-                dec=df.loc[miss_mask, "dec_deg"].values * u.deg,
+                ra=df.loc[miss_mask, "ra"].values * u.deg,
+                dec=df.loc[miss_mask, "dec"].values * u.deg,
             )
             cat_coords = SkyCoord(
                 ra=sydney_coord_catalog["_ra_deg"].values * u.deg,
@@ -791,14 +793,14 @@ def crossmatch_ztf_periodic(
     verbose: bool = False,
 ) -> pd.DataFrame:
     """Crossmatch to ZTF periodic variables (Chen+2020). Adds period_ztf_periodic_* columns."""
-    if "ra_deg" not in df.columns or "dec_deg" not in df.columns:
+    if "ra" not in df.columns or "dec" not in df.columns:
         if verbose:
-            print("  [ZTF periodic] Skipping: ra_deg/dec_deg not found")
+            print("  [ZTF periodic] Skipping: ra/dec not found")
         return df
 
     added_gaia_id = False
-    if "gaia_source_id" in df.columns and "gaia_id" not in df.columns:
-        df = df.assign(gaia_id=df["gaia_source_id"])
+    if "source_id" in df.columns and "gaia_id" not in df.columns:
+        df = df.assign(gaia_id=df["source_id"])
         added_gaia_id = True
 
     try:
@@ -810,7 +812,7 @@ def crossmatch_ztf_periodic(
             df = df.drop(columns=["gaia_id"])
         return df
 
-    ztf_match = _match_period_catalog(
+    ztf_match = match_period_catalog(
         df,
         ztf_cat,
         source_label="ztf_periodic",
@@ -833,9 +835,9 @@ def crossmatch_ogle_periodic(
     verbose: bool = False,
 ) -> pd.DataFrame:
     """Crossmatch to OGLE periodic variables (II/213). Adds period_ogle_* columns."""
-    if "ra_deg" not in df.columns or "dec_deg" not in df.columns:
+    if "ra" not in df.columns or "dec" not in df.columns:
         if verbose:
-            print("  [OGLE periodic] Skipping: ra_deg/dec_deg not found")
+            print("  [OGLE periodic] Skipping: ra/dec not found")
         return df
 
     try:
@@ -845,7 +847,7 @@ def crossmatch_ogle_periodic(
             print(f"  [OGLE periodic] Fetch failed: {e}")
         return df
 
-    ogle_match = _match_period_catalog(
+    ogle_match = match_period_catalog(
         df,
         ogle_cat,
         source_label="ogle",
@@ -920,7 +922,7 @@ def crossmatch_all_catalogs(
             )
 
         if verbose:
-            n_gaia = df["gaia_source_id"].notna().sum() if "gaia_source_id" in df.columns else 0
+            n_gaia = df["gaia_id"].notna().sum() if "gaia_id" in df.columns else 0
             n_vsx = df["vsx_name"].notna().sum() if "vsx_name" in df.columns else 0
             print(f"  Local catalog: {n_gaia} Gaia, {n_vsx} VSX matches (no API queries)")
 
@@ -984,8 +986,8 @@ def crossmatch_all_catalogs(
 
     if verbose:
         print(f"[crossmatch_all_catalogs] Complete")
-        if "gaia_source_id" in df.columns:
-            print(f"  Gaia DR3: {df['gaia_source_id'].notna().sum()}/{len(df)} matched")
+        if "gaia_id" in df.columns:
+            print(f"  Gaia DR3: {df['gaia_id'].notna().sum()}/{len(df)} matched")
         if "vsx_name" in df.columns:
             print(f"  VSX: {df['vsx_name'].notna().sum()}/{len(df)} matched")
         if "milliquas_name" in df.columns:

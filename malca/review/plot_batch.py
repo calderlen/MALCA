@@ -25,7 +25,7 @@ from malca.config import (
 from malca.config import (
     JD_OFFSET, LOGBF_THRESHOLD_DIP, LOGBF_THRESHOLD_JUMP,
 )
-from malca.plot import plot_bayes_results, plot_phase_folded_lightcurve, BASELINE_FUNCTIONS
+from malca.stv.plot import plot_bayes_results, plot_phase_folded_lightcurve, BASELINE_FUNCTIONS
 from malca.review.metadata import REVIEW_METADATA_FIELDS, normalize_vsx_df, normalize_vsx_record
 from malca.table_io import read_parquet_table, write_parquet_table
 
@@ -387,10 +387,10 @@ def plot_passing_candidates(
             annotations["jump_runs"] = str(int(row["jump_run_count"]))
 
         # Coordinates
-        if "ra_deg" in row.index and pd.notna(row["ra_deg"]):
-            annotations["RA"] = f"{row['ra_deg']:.5f}"
-        if "dec_deg" in row.index and pd.notna(row["dec_deg"]):
-            annotations["Dec"] = f"{row['dec_deg']:.5f}"
+        if "ra" in row.index and pd.notna(row["ra"]):
+            annotations["RA"] = f"{row['ra']:.5f}"
+        if "dec" in row.index and pd.notna(row["dec"]):
+            annotations["Dec"] = f"{row['dec']:.5f}"
 
         # Gaia ID
         if "gaia_id" in row.index and pd.notna(row["gaia_id"]):
@@ -536,9 +536,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Example usage:
-  malca plot --detect-run output/runs/20260128_163911
-  malca plot --results results_filtered.parquet --output-dir plots/
-  malca plot --detect-run output/runs/20260128_163911 --max-plots 10
+  malca stv-plot --detect-run output/runs/20260128_163911
+  malca stv-plot --results results_filtered.parquet --output-dir plots/
+  malca stv-plot --detect-run output/runs/20260128_163911 --max-plots 10
 """
     )
 

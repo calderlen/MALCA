@@ -23,8 +23,8 @@ def test_export_ltv_bundle_single_file(tmp_path: Path) -> None:
     input_path = tmp_path / "LTvar13-13.5.parquet"
     pd.DataFrame(
         {
-            "Slope": [0.08, 0.01],
-            "max diff": [0.4, 0.4],
+            "ltv_slope": [0.08, 0.01],
+            "ltv_max_diff": [0.4, 0.4],
             "lc_path": [str(kept), str(rejected)],
         }
     ).to_parquet(input_path, index=False)
@@ -51,15 +51,15 @@ def test_export_ltv_bundle_directory_collects_all_mag_bins(tmp_path: Path) -> No
 
     pd.DataFrame(
         {
-            "Slope": [0.08, 0.09],
-            "max diff": [0.4, 0.5],
+            "ltv_slope": [0.08, 0.09],
+            "ltv_max_diff": [0.4, 0.5],
             "lc_path": [str(first), str(shared)],
         }
     ).to_parquet(out_dir / "LTvar12-12.5_pipeline.parquet", index=False)
     pd.DataFrame(
         {
-            "Slope": [0.11, 0.12],
-            "max diff": [0.6, 0.7],
+            "ltv_slope": [0.11, 0.12],
+            "ltv_max_diff": [0.6, 0.7],
             "lc_path": [str(second), str(shared)],
         }
     ).to_parquet(out_dir / "LTvar12.5-13_pipeline.parquet", index=False)
@@ -87,15 +87,15 @@ def test_export_ltv_bundle_directory_pattern_override(tmp_path: Path) -> None:
 
     pd.DataFrame(
         {
-            "Slope": [0.08],
-            "max diff": [0.4],
+            "ltv_slope": [0.08],
+            "ltv_max_diff": [0.4],
             "lc_path": [str(wanted)],
         }
     ).to_parquet(out_dir / "custom_a.parquet", index=False)
     pd.DataFrame(
         {
-            "Slope": [0.08],
-            "max diff": [0.4],
+            "ltv_slope": [0.08],
+            "ltv_max_diff": [0.4],
             "lc_path": [str(skipped)],
         }
     ).to_parquet(out_dir / "custom_b.parquet", index=False)

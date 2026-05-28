@@ -11,6 +11,9 @@ from astroquery.utils.tap.core import TapPlus
 from scipy.special import erf
 from tqdm import tqdm
 import numpy as np
+
+os.environ.setdefault("NUMBA_NUM_THREADS", "1")
+
 from numba import njit
 try:
     np.set_printoptions(legacy='1.21')
@@ -60,7 +63,7 @@ def paczynski_kernel(t, amp, t0, tE, baseline):
     Simple Paczyński kernel approximation + baseline term.
 
     Fast approximation for curve fitting. For full physical microlensing
-    model with magnification, see malca.score.paczynski().
+    model with magnification, see malca.stv.score.paczynski().
 
     Parameters
     ----------

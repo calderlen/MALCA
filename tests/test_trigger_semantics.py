@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from malca.triggering import (
+from malca.stv.triggering import (
     normalize_trigger_block,
     posterior_probability_threshold,
     resolve_trigger_indices,

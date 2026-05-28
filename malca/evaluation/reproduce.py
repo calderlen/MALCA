@@ -51,16 +51,16 @@ from malca.config import (
     BASELINE_JITTER,
     JD_OFFSET,
 )
-from malca.events import score_lightcurve
-from malca.filter import apply_filters, filter_signal_amplitude
-from malca.plot import plot_passing_candidates
-from malca.plot import read_skypatrol_csv
-from malca.score import compute_event_score
+from malca.stv.events import score_lightcurve
+from malca.stv.filter import apply_filters, filter_signal_amplitude
+from malca.stv.plot import plot_passing_candidates
+from malca.stv.plot import read_skypatrol_csv
+from malca.stv.score import compute_event_score
 from concurrent.futures import ProcessPoolExecutor
 from malca.stats import median_dt, compute_stats, _enrich_row_worker
-from malca.tag import apply_tags
+from malca.stv.tag import apply_tags
 from malca.table_io import read_parquet_table, write_parquet_table
-from malca.triggering import normalize_trigger_block
+from malca.stv.triggering import normalize_trigger_block
 from malca.utils import read_lc_dat2
 
 

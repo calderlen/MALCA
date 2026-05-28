@@ -981,14 +981,30 @@ def filter_camera_medians(
                 else:
                     save_checkpoint_part(chunk_results)
         else:
-            with ProcessPoolExecutor(max_workers=n_workers) as executor:
+            try:
+                executor_cm = ProcessPoolExecutor(max_workers=n_workers)
+            except (OSError, PermissionError) as exc:
+                if show_tqdm:
+                    tqdm.write(f"[filter_camera_medians] Falling back to sequential execution: {exc}")
+                executor_cm = None
+
+            if executor_cm is None:
                 for chunk_start in range(0, n_tasks, chunk_size):
                     chunk_end = min(chunk_start + chunk_size, n_tasks)
-                    chunk_results = process_chunk(make_tasks(pending.iloc[chunk_start:chunk_end]), executor)
+                    chunk_results = process_chunk(make_tasks(pending.iloc[chunk_start:chunk_end]))
                     if checkpoint_path is None:
                         new_results.extend(chunk_results)
                     else:
                         save_checkpoint_part(chunk_results)
+            else:
+                with executor_cm as executor:
+                    for chunk_start in range(0, n_tasks, chunk_size):
+                        chunk_end = min(chunk_start + chunk_size, n_tasks)
+                        chunk_results = process_chunk(make_tasks(pending.iloc[chunk_start:chunk_end]), executor)
+                        if checkpoint_path is None:
+                            new_results.extend(chunk_results)
+                        else:
+                            save_checkpoint_part(chunk_results)
     finally:
         pbar.close()
 

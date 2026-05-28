@@ -4,7 +4,7 @@ import pandas as pd
 
 import malca.characterize as characterize
 from malca.characterize import query_gaia_by_ids
-from malca.detect import _add_gaia_ids_from_index
+from malca.stv.pipeline import _add_gaia_ids_from_index
 from malca.gaia_fetch import _extract_gaia_ids, _normalize_gaia_ids
 from malca.gaia_ids import normalize_gaia_source_id_series, parse_gaia_source_id
 
@@ -71,7 +71,7 @@ def test_detect_index_merge_preserves_large_gaia_ids_as_strings(tmp_path) -> Non
         }
     ).to_parquet(index_path, index=False)
 
-    events = pd.DataFrame({"path": ["/data/101.dat3", "/data/999.dat3"]})
+    events = pd.DataFrame({"lc_path": ["/data/101.dat3", "/data/999.dat3"]})
     out = _add_gaia_ids_from_index(events, index_path)
 
     assert out.loc[0, "gaia_id"] == str(LARGE_GAIA_ID)

@@ -1,6 +1,10 @@
 """Period-finding methods for malca review: LSP, PDM, and Conditional Entropy."""
 from __future__ import annotations
 
+import os
+
+os.environ.setdefault("NUMBA_NUM_THREADS", "1")
+
 from astropy.timeseries import LombScargle
 import numba
 import numpy as np

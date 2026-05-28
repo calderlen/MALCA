@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-post_filter = pytest.importorskip("malca.filter")
+post_filter = pytest.importorskip("malca.stv.filter")
 
 
 @pytest.mark.parametrize(
@@ -31,7 +31,7 @@ def test_is_periodic_by_snr_requires_both_metrics(
 def test_filter_run_robustness_respects_max_run_count() -> None:
     df = pd.DataFrame(
         {
-            "path": ["a.csv", "b.csv"],
+            "lc_path": ["a.csv", "b.csv"],
             "dip_run_count": [2, 5],
             "jump_run_count": [0, 0],
             "dip_max_run_points": [4, 4],
@@ -49,26 +49,26 @@ def test_filter_run_robustness_respects_max_run_count() -> None:
         min_run_cameras=2,
     )
 
-    assert list(out["path"]) == ["a.csv"]
+    assert list(out["lc_path"]) == ["a.csv"]
 
 
 def test_filter_score_branch_specific_thresholds() -> None:
     df = pd.DataFrame(
         {
-            "path": ["dip.csv", "jump.csv", "none.csv"],
+            "lc_path": ["dip.csv", "jump.csv", "none.csv"],
             "dipper_score": [1.2, -1.0, -2.0],
             "jumper_score": [-1.0, 0.8, -2.0],
         }
     )
 
     out = post_filter.filter_score(df, min_dip_score=0.5, min_jump_score=0.5)
-    assert set(out["path"]) == {"dip.csv", "jump.csv"}
+    assert set(out["lc_path"]) == {"dip.csv", "jump.csv"}
 
 
 def test_filter_significant_detection_explicit_gate() -> None:
     df = pd.DataFrame(
         {
-            "path": ["dip_ok.csv", "no_peak.csv", "flag_false.csv", "jump_ok.csv"],
+            "lc_path": ["dip_ok.csv", "no_peak.csv", "flag_false.csv", "jump_ok.csv"],
             "dip_significant": [True, True, False, False],
             "jump_significant": [False, False, False, True],
             "dip_count": [1, 0, 1, 0],
@@ -85,13 +85,13 @@ def test_filter_significant_detection_explicit_gate() -> None:
         min_run_count=1,
     )
 
-    assert set(out["path"]) == {"dip_ok.csv", "jump_ok.csv"}
+    assert set(out["lc_path"]) == {"dip_ok.csv", "jump_ok.csv"}
 
 
 def test_apply_filters_tags_significant_detection_failures() -> None:
     df = pd.DataFrame(
         {
-            "path": ["pass.csv", "fail.csv"],
+            "lc_path": ["pass.csv", "fail.csv"],
             "dip_significant": [True, False],
             "jump_significant": [False, False],
             "dip_count": [1, 0],
@@ -120,17 +120,17 @@ def test_apply_filters_tags_significant_detection_failures() -> None:
     assert "failed_significant_detection" in out.columns
     assert len(out) == len(df)
     assert out.index.equals(df.index)
-    assert out.set_index("path").loc["pass.csv", "failed_significant_detection"] == 0
-    assert out.set_index("path").loc["fail.csv", "failed_significant_detection"] == 1
-    assert out.set_index("path").loc["pass.csv", "failed_any"] == 0
-    assert out.set_index("path").loc["fail.csv", "failed_any"] == 1
+    assert out.set_index("lc_path").loc["pass.csv", "failed_significant_detection"] == 0
+    assert out.set_index("lc_path").loc["fail.csv", "failed_significant_detection"] == 1
+    assert out.set_index("lc_path").loc["pass.csv", "failed_any"] == 0
+    assert out.set_index("lc_path").loc["fail.csv", "failed_any"] == 1
 
 
 def test_apply_filters_periodicity_checks_only_prereq_passers(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: dict[str, object] = {}
 
     def _fake_validate_periodicity(df: pd.DataFrame, **_kwargs) -> pd.DataFrame:
-        seen["paths"] = list(df["path"].astype(str))
+        seen["paths"] = list(df["lc_path"].astype(str))
         seen["kwargs"] = dict(_kwargs)
         out = df.copy()
         out["lsp_power"] = 0.42
@@ -146,7 +146,7 @@ def test_apply_filters_periodicity_checks_only_prereq_passers(monkeypatch: pytes
 
     df = pd.DataFrame(
         {
-            "path": ["pass.csv", "prefail.csv"],
+            "lc_path": ["pass.csv", "prefail.csv"],
             "dip_significant": [True, False],
             "jump_significant": [False, False],
             "dip_count": [1, 0],
@@ -173,7 +173,7 @@ def test_apply_filters_periodicity_checks_only_prereq_passers(monkeypatch: pytes
 
     assert seen["paths"] == ["pass.csv"]
     assert seen["kwargs"]["pdm_method"] == "plavchan"
-    out_by_path = out.set_index("path")
+    out_by_path = out.set_index("lc_path")
     assert float(out_by_path.loc["pass.csv", "lsp_period"]) == 2.5
     assert pd.isna(out_by_path.loc["prefail.csv", "lsp_period"])
     assert int(out_by_path.loc["pass.csv", "failed_periodicity"]) == 0
@@ -184,7 +184,7 @@ def test_apply_filters_periodicity_reject_only_marks_checked_rows(monkeypatch: p
     seen: dict[str, list[str]] = {}
 
     def _fake_validate_periodicity(df: pd.DataFrame, **_kwargs) -> pd.DataFrame:
-        seen["paths"] = list(df["path"].astype(str))
+        seen["paths"] = list(df["lc_path"].astype(str))
         out = df.copy()
         out["lsp_power"] = 0.5
         out["lsp_period"] = 1.5
@@ -192,14 +192,14 @@ def test_apply_filters_periodicity_reject_only_marks_checked_rows(monkeypatch: p
         out["lsp_is_alias"] = False
         out["lsp_is_significant"] = True
         out["periodicity_score"] = 4.0
-        out["periodic_flag"] = out["path"].astype(str).eq("reject.csv")
+        out["periodic_flag"] = out["lc_path"].astype(str).eq("reject.csv")
         return out
 
     monkeypatch.setattr(post_filter, "validate_periodicity", _fake_validate_periodicity)
 
     df = pd.DataFrame(
         {
-            "path": ["reject.csv", "keep.csv", "prefail.csv"],
+            "lc_path": ["reject.csv", "keep.csv", "prefail.csv"],
             "dip_significant": [True, True, False],
             "jump_significant": [False, False, False],
             "dip_count": [1, 1, 0],
@@ -226,7 +226,7 @@ def test_apply_filters_periodicity_reject_only_marks_checked_rows(monkeypatch: p
     )
 
     assert seen["paths"] == ["reject.csv", "keep.csv"]
-    out_by_path = out.set_index("path")
+    out_by_path = out.set_index("lc_path")
     assert int(out_by_path.loc["reject.csv", "failed_periodicity"]) == 1
     assert int(out_by_path.loc["keep.csv", "failed_periodicity"]) == 0
     assert int(out_by_path.loc["prefail.csv", "failed_periodicity"]) == 0
@@ -236,7 +236,7 @@ def test_apply_filters_periodicity_all_candidates_overrides_prereq_mask(monkeypa
     seen: dict[str, list[str]] = {}
 
     def _fake_validate_periodicity(df: pd.DataFrame, **_kwargs) -> pd.DataFrame:
-        seen["paths"] = list(df["path"].astype(str))
+        seen["paths"] = list(df["lc_path"].astype(str))
         out = df.copy()
         out["lsp_power"] = 0.42
         out["lsp_period"] = 2.5
@@ -251,7 +251,7 @@ def test_apply_filters_periodicity_all_candidates_overrides_prereq_mask(monkeypa
 
     df = pd.DataFrame(
         {
-            "path": ["pass.csv", "prefail.csv"],
+            "lc_path": ["pass.csv", "prefail.csv"],
             "dip_significant": [True, False],
             "jump_significant": [False, False],
             "dip_count": [1, 0],
@@ -278,7 +278,7 @@ def test_apply_filters_periodicity_all_candidates_overrides_prereq_mask(monkeypa
     )
 
     assert seen["paths"] == ["pass.csv", "prefail.csv"]
-    out_by_path = out.set_index("path")
+    out_by_path = out.set_index("lc_path")
     assert float(out_by_path.loc["pass.csv", "lsp_period"]) == 2.5
     assert float(out_by_path.loc["prefail.csv", "lsp_period"]) == 2.5
 
@@ -298,7 +298,7 @@ def test_validate_periodicity_uses_local_bundle_lightcurves(
         seen["args"] = args
         original_path, resolved_path, *_ = args
         return {
-            "path": original_path,
+            "lc_path": original_path,
             "resolved_path": resolved_path,
             "lsp_power": np.nan,
             "lsp_period": 2.5,
@@ -325,7 +325,7 @@ def test_validate_periodicity_uses_local_bundle_lightcurves(
 
     df = pd.DataFrame(
         {
-            "path": ["/data/poohbah/cluster/123.dat3"],
+            "lc_path": ["/data/poohbah/cluster/123.dat3"],
             "asas_sn_id": ["123"],
             "n_points": [100],
         }
@@ -433,7 +433,7 @@ def test_validate_periodicity_recomputes_stale_checkpoint_rows(
     pd.DataFrame(
         [
             {
-                "path": "/data/poohbah/cluster/123.dat3",
+                "lc_path": "/data/poohbah/cluster/123.dat3",
                 "resolved_path": "/data/poohbah/cluster/123.dat3",
                 "lsp_period": np.nan,
                 "lsp_bootstrap_sig": np.nan,
@@ -461,7 +461,7 @@ def test_validate_periodicity_recomputes_stale_checkpoint_rows(
         seen["calls"] += 1
         original_path, resolved_path, *_ = args
         return {
-            "path": original_path,
+            "lc_path": original_path,
             "resolved_path": resolved_path,
             "lsp_power": np.nan,
             "lsp_period": 3.5,
@@ -488,7 +488,7 @@ def test_validate_periodicity_recomputes_stale_checkpoint_rows(
 
     df = pd.DataFrame(
         {
-            "path": ["/data/poohbah/cluster/123.dat3"],
+            "lc_path": ["/data/poohbah/cluster/123.dat3"],
             "asas_sn_id": ["123"],
             "n_points": [250],
         }

@@ -6,7 +6,7 @@ from pathlib import Path
 import pandas as pd
 
 from malca.config import ASASSN_INDEX_PATH
-from malca.detect import _resolve_asassn_index_path, export_bundle_zip
+from malca.stv.pipeline import _resolve_asassn_index_path, export_bundle_zip
 
 
 def _write_text(path: Path, content: str) -> None:
@@ -25,7 +25,7 @@ def test_export_bundle_includes_candidate_dat2_and_raw2(tmp_path: Path) -> None:
     _write_text(dat2_path, "dat2 content\n")
     _write_text(raw2_path, "raw2 content\n")
 
-    pd.DataFrame({"path": [str(dat2_path)]}).to_parquet(results_dir / "lc_events_filtered.parquet", index=False)
+    pd.DataFrame({"lc_path": [str(dat2_path)]}).to_parquet(results_dir / "lc_events_filtered.parquet", index=False)
 
     bundle_zip = tmp_path / "bundle.zip"
     bundled = export_bundle_zip(bundle_zip, out_dir)

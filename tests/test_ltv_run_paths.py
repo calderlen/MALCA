@@ -31,14 +31,17 @@ def _core_rows(tmp_path: Path) -> pd.DataFrame:
     return pd.DataFrame(
         {
             "asas_sn_id": ["123", "456"],
-            "Slope": [0.4, 0.01],
-            "max diff": [0.6, 0.6],
-            "dec_deg": [0.0, 0.0],
-            "Median": [13.0, 13.0],
-            "Pstarss gmag": [13.1, 13.1],
-            "Dispersion": [0.02, 0.02],
-            "Median_err": [0.02, 0.02],
-            "gaia_pm_total": [0.0, 0.0],
+            "candidate_id": ["ltv_123", "ltv_456"],
+            "timescale": ["ltv", "ltv"],
+            "ra": [1.0, 2.0],
+            "dec": [0.0, 0.0],
+            "ltv_slope": [0.4, 0.01],
+            "ltv_max_diff": [0.6, 0.6],
+            "ltv_median": [13.0, 13.0],
+            "baseline_mag": [13.1, 13.1],
+            "ltv_dispersion": [0.02, 0.02],
+            "ltv_median_err": [0.02, 0.02],
+            "pm_total": [0.0, 0.0],
             "neighbor_pm_contam": [False, False],
             "crowding_count": [0, 0],
             "lc_path": [str(tmp_path / "123.dat2"), str(tmp_path / "456.dat2")],
@@ -262,7 +265,11 @@ def test_ltv_full_bundle_includes_candidate_lightcurves(tmp_path: Path) -> None:
     pd.DataFrame(
         {
             "asas_sn_id": ["123"],
+            "candidate_id": ["ltv_123"],
+            "timescale": ["ltv"],
             "lc_path": [str(lc_path)],
+            "ra": [1.0],
+            "dec": [2.0],
             "failed_any": [False],
         }
     ).to_parquet(results_dir / "LTvar13-13.5_pipeline.parquet", index=False)

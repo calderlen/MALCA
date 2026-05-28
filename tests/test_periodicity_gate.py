@@ -20,8 +20,8 @@ if "iar.IARModel" not in sys.modules:
     sys.modules["iar"] = fake_iar_pkg
     sys.modules["iar.IARModel"] = fake_iar_model
 
-import malca.periodicity_gate as periodicity_gate
-from malca.periodicity_gate import apply_pre_periodicity_gate
+import malca.stv.periodicity_gate as periodicity_gate
+from malca.stv.periodicity_gate import apply_pre_periodicity_gate
 
 
 def _write_dat3(path: Path, times: np.ndarray, mags: np.ndarray) -> None:

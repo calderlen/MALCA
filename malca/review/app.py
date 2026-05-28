@@ -2211,8 +2211,8 @@ def _render_stat_cards(stat_rows: list[tuple[str, str]]) -> list:
         "stats_camera_field_key_fraction": "Camera-field fraction",
         "ltv_median": "Median (mag)",
         "ltv_median_err": "Median err proxy (mag)",
-        "ltv_time_span_days": "Time span (days)",
-        "ltv_n_unique_nights": "Unique nights",
+        "time_span_days": "Time span (days)",
+        "n_unique_nights": "Unique nights",
         "ltv_vg_has_v": "Has V band",
         "ltv_vg_overlap_days": "V/g overlap (days)",
         "ltv_vg_overlap_fraction": "V/g overlap fraction",
@@ -12433,7 +12433,7 @@ def main():
         if not Path(PLOT_DIR).exists() or not Path(PLOT_DIR).is_dir():
             print(f"Error: plot directory does not exist: {PLOT_DIR}")
             print("Use an existing run bundle plots directory, for example:")
-            print("  malca review --plot-dir output/runs/output_bundle_13_13.5/plots")
+            print("  malca review --review-db output/runs/stv/20250121_143052/review/review.db --plot-dir output/runs/stv/20250121_143052/plots")
             sys.exit(1)
     else:
         # Try current directory first

@@ -57,7 +57,7 @@ def filter_slope_threshold(
     df: pd.DataFrame,
     *,
     min_slope: float = LTV_MIN_SLOPE,
-    slope_column: str = "Slope",
+    slope_column: str = "ltv_slope",
     verbose: bool = False,
     log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
@@ -86,7 +86,7 @@ def filter_max_diff_threshold(
     df: pd.DataFrame,
     *,
     min_diff: float = LTV_MIN_DIFF,
-    diff_column: str = "max diff",
+    diff_column: str = "ltv_max_diff",
     verbose: bool = False,
     log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
@@ -115,7 +115,7 @@ def filter_south_pole(
     df: pd.DataFrame,
     *,
     min_dec: float = LTV_MIN_DEC,
-    dec_column: str = "dec_deg",
+    dec_column: str = "dec",
     verbose: bool = False,
     log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
@@ -144,9 +144,9 @@ def filter_photometric_scatter(
     df: pd.DataFrame,
     *,
     max_reduced_chi2: float = LTV_MAX_REDUCED_CHI2,
-    slope_column: str = "Slope",
-    dispersion_column: str = "Dispersion",
-    median_err_column: str = "Median_err",
+    slope_column: str = "ltv_slope",
+    dispersion_column: str = "ltv_dispersion",
+    median_err_column: str = "ltv_median_err",
     verbose: bool = False,
     log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
@@ -199,8 +199,8 @@ def filter_photometric_scatter(
 def query_gaia_proper_motions_batch(
     df: pd.DataFrame,
     *,
-    ra_column: str = "ra_deg",
-    dec_column: str = "dec_deg",
+    ra_column: str = "ra",
+    dec_column: str = "dec",
     match_radius_arcsec: float = LTV_MATCH_RADIUS_ARCSEC,
     chunk_size: int = LTV_CHUNK_SIZE,
     n_workers: int = LTV_WORKERS,
@@ -210,8 +210,8 @@ def query_gaia_proper_motions_batch(
     Batch query Gaia DR3 for proper motions.
     
     Uses TAP upload for efficient server-side crossmatch.
-    Returns df with added columns: gaia_pmra, gaia_pmdec, gaia_pm_total,
-    gaia_source_id, gaia_sep_arcsec.
+    Returns df with added columns: pmra, pmdec, pm_total, source_id,
+    gaia_id, gaia_sep_arcsec.
     """
     if ra_column not in df.columns or dec_column not in df.columns:
         if verbose:
@@ -219,11 +219,11 @@ def query_gaia_proper_motions_batch(
         return df
     
     df = df.copy()
-    df["gaia_source_id"] = pd.Series(index=df.index, dtype="Int64")
+    df["source_id"] = pd.Series(index=df.index, dtype="Int64")
     df["gaia_sep_arcsec"] = np.nan
-    df["gaia_pmra"] = np.nan
-    df["gaia_pmdec"] = np.nan
-    df["gaia_pm_total"] = np.nan
+    df["pmra"] = np.nan
+    df["pmdec"] = np.nan
+    df["pm_total"] = np.nan
     
     valid_mask = df[ra_column].notna() & df[dec_column].notna()
     
@@ -260,16 +260,19 @@ def query_gaia_proper_motions_batch(
         idx = int(row["_idx"])
         if idx in df.index:
             if pd.notna(row.get("source_id", np.nan)):
-                df.loc[idx, "gaia_source_id"] = int(row["source_id"])
+                df.loc[idx, "source_id"] = int(row["source_id"])
+                if "gaia_id" not in df.columns:
+                    df["gaia_id"] = pd.Series(index=df.index, dtype="object")
+                df.loc[idx, "gaia_id"] = str(int(row["source_id"]))
             if pd.notna(row.get("sep_arcsec", np.nan)):
                 df.loc[idx, "gaia_sep_arcsec"] = float(row["sep_arcsec"])
-            df.loc[idx, "gaia_pmra"] = row["pmra"] if pd.notna(row["pmra"]) else np.nan
-            df.loc[idx, "gaia_pmdec"] = row["pmdec"] if pd.notna(row["pmdec"]) else np.nan
+            df.loc[idx, "pmra"] = row["pmra"] if pd.notna(row["pmra"]) else np.nan
+            df.loc[idx, "pmdec"] = row["pmdec"] if pd.notna(row["pmdec"]) else np.nan
             if pd.notna(row["pmra"]) and pd.notna(row["pmdec"]):
-                df.loc[idx, "gaia_pm_total"] = np.sqrt(row["pmra"]**2 + row["pmdec"]**2)
+                df.loc[idx, "pm_total"] = np.sqrt(row["pmra"]**2 + row["pmdec"]**2)
     
     if verbose:
-        n_matched = df["gaia_pm_total"].notna().sum()
+        n_matched = df["pm_total"].notna().sum()
         print(f"[query_gaia_proper_motions_batch] Matched {n_matched}/{len(df)}")
     
     return df
@@ -279,7 +282,7 @@ def filter_high_proper_motion(
     df: pd.DataFrame,
     *,
     max_pm: float = LTV_MAX_PM,
-    pm_column: str = "gaia_pm_total",
+    pm_column: str = "pm_total",
     query_gaia: bool = True,
     chunk_size: int = LTV_CHUNK_SIZE,
     n_workers: int = LTV_WORKERS,
@@ -325,10 +328,10 @@ def filter_high_proper_motion(
 def query_crowding_batch(
     df: pd.DataFrame,
     *,
-    ra_column: str = "ra_deg",
-    dec_column: str = "dec_deg",
+    ra_column: str = "ra",
+    dec_column: str = "dec",
     search_radius_arcsec: float = LTV_CROWDING_SEARCH_RADIUS_ARCSEC,
-    target_mag_column: str = "Pstarss gmag",
+    target_mag_column: str = "baseline_mag",
     chunk_size: int = LTV_GAIA_CHUNK_SIZE,
     n_workers: int = LTV_WORKERS,
     verbose: bool = False,
@@ -447,8 +450,8 @@ def filter_refcat_offset(
     df: pd.DataFrame,
     *,
     max_refcat_offset: float = LTV_MAX_REFCAT_OFFSET,
-    asas_mag_col: str = "Median",
-    refcat_mag_col: str = "Pstarss gmag",
+    asas_mag_col: str = "ltv_median",
+    refcat_mag_col: str = "baseline_mag",
     verbose: bool = False,
     log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
@@ -494,9 +497,9 @@ def filter_refcat_offset(
 def query_neighbor_high_pm_batch(
     df: pd.DataFrame,
     *,
-    ra_column: str = "ra_deg",
-    dec_column: str = "dec_deg",
-    target_mag_col: str = "Pstarss gmag",
+    ra_column: str = "ra",
+    dec_column: str = "dec",
+    target_mag_col: str = "baseline_mag",
     search_radius_arcsec: float = LTV_NEIGHBOR_SEARCH_RADIUS_ARCSEC,
     aperture_radius_arcsec: float = LTV_APERTURE_RADIUS_ARCSEC,
     flux_ratio_limit: float = LTV_NEIGHBOR_FLUX_RATIO_LIMIT,
@@ -569,7 +572,7 @@ def query_neighbor_high_pm_batch(
         target_dec = float(df.loc[idx, dec_column])
         target_mag = float(df.loc[idx, mag_col]) if mag_col else 14.0
         cos_dec = np.cos(np.radians(target_dec))
-        target_gaia_source_id = df.loc[idx, "gaia_source_id"] if "gaia_source_id" in df.columns else pd.NA
+        target_gaia_source_id = df.loc[idx, "source_id"] if "source_id" in df.columns else pd.NA
 
         for _, nb in neighbors.iterrows():
             nb_source_id = nb.get("source_id", np.nan)
@@ -744,7 +747,7 @@ def apply_all_filters(
         df_out = func(df_in, **kwargs)
         if return_rejected:
             id_col = None
-            for candidate in ["ASAS-SN ID", "path", "asas_sn_id", "id", "source_id"]:
+            for candidate in ["candidate_id", "asas_sn_id", "lc_path", "source_id"]:
                 if candidate in df_in.columns:
                     id_col = candidate
                     break
@@ -842,7 +845,7 @@ def _merge_audit_annotations(
     return audit
 
 
-def _first_ltv_filter_reason(row: pd.Series) -> str | None:
+def _first_filter_reason(row: pd.Series) -> str | None:
     for reason, col in LTV_AUDIT_FAILED_COLUMNS.items():
         if bool(row.get(col, False)):
             return reason
@@ -897,58 +900,38 @@ def apply_all_filters_audit(
         if verbose:
             print(f"[ltv audit filter:{label}] failed {int(fail_mask.sum())}/{len(audit)}")
 
-    if "Slope" in audit.columns:
-        mark_failures("slope", _numeric_series(audit, "Slope").abs() <= float(min_slope))
-    else:
-        mark_failures("slope", _false_mask(audit))
-        if verbose:
-            print("Warning: 'Slope' column not found, skipping slope filter")
+    required = ("ltv_slope", "ltv_max_diff", "dec", "ltv_median", "baseline_mag")
+    missing = [col for col in required if col not in audit.columns]
+    if missing:
+        raise ValueError(f"LTV candidate products missing canonical filter columns: {', '.join(missing)}")
 
-    if "max diff" in audit.columns:
-        mark_failures("max_diff", _numeric_series(audit, "max diff").abs() <= float(min_diff))
-    else:
-        mark_failures("max_diff", _false_mask(audit))
-        if verbose:
-            print("Warning: 'max diff' column not found, skipping max-diff filter")
+    mark_failures("slope", _numeric_series(audit, "ltv_slope").abs() <= float(min_slope))
+    mark_failures("max_diff", _numeric_series(audit, "ltv_max_diff").abs() <= float(min_diff))
+    mark_failures("dec", _numeric_series(audit, "dec") < float(min_dec))
 
-    if "dec_deg" in audit.columns:
-        mark_failures("dec", _numeric_series(audit, "dec_deg") < float(min_dec))
-    else:
-        mark_failures("dec", _false_mask(audit))
-        if verbose:
-            print("Warning: 'dec_deg' column not found, skipping declination filter")
+    diff = _numeric_series(audit, "ltv_median") - _numeric_series(audit, "baseline_mag")
+    mark_failures("refcat_offset", (diff < -float(max_refcat_offset)) & diff.notna())
 
-    if {"Median", "Pstarss gmag"}.issubset(audit.columns):
-        diff = _numeric_series(audit, "Median") - _numeric_series(audit, "Pstarss gmag")
-        mark_failures("refcat_offset", (diff < -float(max_refcat_offset)) & diff.notna())
-    else:
-        mark_failures("refcat_offset", _false_mask(audit))
-        if verbose:
-            print("Warning: 'Median' or 'Pstarss gmag' not found, skipping REFCAT offset filter")
-
-    if run_enhanced_filters and "Dispersion" in audit.columns:
-        dispersion = _numeric_series(audit, "Dispersion")
-        if "Median_err" in audit.columns:
-            err = _numeric_series(audit, "Median_err").clip(lower=0.01)
+    if run_enhanced_filters and "ltv_dispersion" in audit.columns:
+        dispersion = _numeric_series(audit, "ltv_dispersion")
+        if "ltv_median_err" in audit.columns:
+            err = _numeric_series(audit, "ltv_median_err").clip(lower=0.01)
             chi2 = (dispersion / err) ** 2
         else:
             chi2 = (dispersion / 0.02) ** 2
-        if "Slope" in audit.columns:
-            slope = _numeric_series(audit, "Slope").abs()
-            fail = (chi2 > float(max_reduced_chi2)) & (slope < 0.05)
-        else:
-            fail = chi2 > float(max_reduced_chi2)
+        slope = _numeric_series(audit, "ltv_slope").abs()
+        fail = (chi2 > float(max_reduced_chi2)) & (slope < 0.05)
         mark_failures("photometric_scatter", fail.fillna(False))
     else:
         mark_failures("photometric_scatter", _false_mask(audit))
         if verbose and run_enhanced_filters:
-            print("Warning: 'Dispersion' not found, skipping photometric scatter filter")
+            print("Warning: 'ltv_dispersion' not found, skipping photometric scatter filter")
 
     # Gaia-backed filters run on current passers only.
     eligible = passing.copy()
     if bool(eligible.any()) and query_gaia:
         subset = audit.loc[eligible].copy()
-        if "gaia_pm_total" not in subset.columns:
+        if "pm_total" not in subset.columns:
             subset = query_gaia_proper_motions_batch(
                 subset,
                 chunk_size=chunk_size,
@@ -956,12 +939,12 @@ def apply_all_filters_audit(
                 verbose=verbose,
             )
         audit = _merge_audit_annotations(audit, subset, audit_id_col)
-    if "gaia_pm_total" in audit.columns:
-        mark_failures("high_pm", _numeric_series(audit, "gaia_pm_total") > float(max_pm))
+    if "pm_total" in audit.columns:
+        mark_failures("high_pm", _numeric_series(audit, "pm_total") > float(max_pm))
     else:
         mark_failures("high_pm", _false_mask(audit))
         if verbose and query_gaia:
-            print("Warning: 'gaia_pm_total' column not found, skipping high-PM filter")
+            print("Warning: 'pm_total' column not found, skipping high-PM filter")
 
     if run_neighbor_pm_filter:
         eligible = passing.copy()
@@ -1007,8 +990,7 @@ def apply_all_filters_audit(
 
     fail_cols = list(LTV_AUDIT_FAILED_COLUMNS.values())
     audit["failed_any"] = audit[fail_cols].fillna(False).astype(bool).any(axis=1)
-    audit["ltv_passed_filters"] = ~audit["failed_any"]
-    audit["ltv_filter_reason"] = audit.apply(_first_ltv_filter_reason, axis=1)
+    audit["filter_reason"] = audit.apply(_first_filter_reason, axis=1)
     audit = audit.drop(columns=[audit_id_col])
 
     if verbose:

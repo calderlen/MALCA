@@ -223,18 +223,18 @@ def fit_neowise_trends(
     Returns dict with trend metrics.
     """
     result = {
-        "w1_slope": np.nan,
-        "w1_quad_coeff": np.nan,
-        "w1_w2_slope": np.nan,
-        "w1_w2_quad_coeff": np.nan,
-        "w1_w2_median": np.nan,
-        "neowise_n_epochs": 0,
+        "ltv_neowise_w1_slope": np.nan,
+        "ltv_neowise_w1_quad_coeff": np.nan,
+        "ltv_neowise_w1_w2_slope": np.nan,
+        "ltv_neowise_w1_w2_quad_coeff": np.nan,
+        "ltv_neowise_w1_w2_median": np.nan,
+        "ltv_neowise_n_epochs": 0,
     }
     
     if lc.empty or len(lc) < 3:
         return result
     
-    result["neowise_n_epochs"] = len(lc)
+    result["ltv_neowise_n_epochs"] = len(lc)
     
     # Convert MJD to years (relative to first epoch)
     mjd = lc["mjd"].values
@@ -244,25 +244,25 @@ def fit_neowise_trends(
     w1 = lc["w1mpro"].values
     try:
         lin_fit = np.polyfit(t_years, w1, 1)
-        result["w1_slope"] = float(lin_fit[0])
+        result["ltv_neowise_w1_slope"] = float(lin_fit[0])
         
         if len(lc) >= 4:
             quad_fit = np.polyfit(t_years, w1, 2)
-            result["w1_quad_coeff"] = float(quad_fit[0])
+            result["ltv_neowise_w1_quad_coeff"] = float(quad_fit[0])
     except Exception:
         pass
     
     # Fit W1-W2 color
     w1_w2 = lc["w1_w2"].values
-    result["w1_w2_median"] = float(np.median(w1_w2))
+    result["ltv_neowise_w1_w2_median"] = float(np.median(w1_w2))
     
     try:
         lin_fit = np.polyfit(t_years, w1_w2, 1)
-        result["w1_w2_slope"] = float(lin_fit[0])
+        result["ltv_neowise_w1_w2_slope"] = float(lin_fit[0])
         
         if len(lc) >= 4:
             quad_fit = np.polyfit(t_years, w1_w2, 2)
-            result["w1_w2_quad_coeff"] = float(quad_fit[0])
+            result["ltv_neowise_w1_w2_quad_coeff"] = float(quad_fit[0])
     except Exception:
         pass
     
@@ -307,8 +307,8 @@ def _extract_one_source(
 def extract_neowise_trends(
     df: pd.DataFrame,
     *,
-    ra_column: str = "ra_deg",
-    dec_column: str = "dec_deg",
+    ra_column: str = "ra",
+    dec_column: str = "dec",
     match_radius_arcsec: float = NEOWISE_MATCH_RADIUS_ARCSEC,
     epoch_days: float = EPOCH_COMBINE_DAYS,
     n_workers: int = 1,  # Kept for compatibility but not used in bulk mode
@@ -320,12 +320,12 @@ def extract_neowise_trends(
     Uses bulk table upload queries for efficiency.
     
     Adds columns:
-    - w1_slope: Linear slope of W1 (mag/yr)
-    - w1_quad_coeff: Quadratic coefficient of W1
-    - w1_w2_slope: Linear slope of W1-W2 color (mag/yr)
-    - w1_w2_quad_coeff: Quadratic coefficient of W1-W2
-    - w1_w2_median: Median W1-W2 color
-    - neowise_n_epochs: Number of NEOWISE epochs
+    - ltv_neowise_w1_slope: Linear slope of W1 (mag/yr)
+    - ltv_neowise_w1_quad_coeff: Quadratic coefficient of W1
+    - ltv_neowise_w1_w2_slope: Linear slope of W1-W2 color (mag/yr)
+    - ltv_neowise_w1_w2_quad_coeff: Quadratic coefficient of W1-W2
+    - ltv_neowise_w1_w2_median: Median W1-W2 color
+    - ltv_neowise_n_epochs: Number of NEOWISE epochs
     """
     if ra_column not in df.columns or dec_column not in df.columns:
         if verbose:
@@ -336,13 +336,13 @@ def extract_neowise_trends(
     
     # Initialize new columns
     new_cols = [
-        "w1_slope", "w1_quad_coeff",
-        "w1_w2_slope", "w1_w2_quad_coeff", "w1_w2_median",
-        "neowise_n_epochs"
+        "ltv_neowise_w1_slope", "ltv_neowise_w1_quad_coeff",
+        "ltv_neowise_w1_w2_slope", "ltv_neowise_w1_w2_quad_coeff", "ltv_neowise_w1_w2_median",
+        "ltv_neowise_n_epochs"
     ]
     for col in new_cols:
         df[col] = np.nan
-    df["neowise_n_epochs"] = 0
+    df["ltv_neowise_n_epochs"] = 0
     
     valid_mask = df[ra_column].notna() & df[dec_column].notna()
     
@@ -384,7 +384,7 @@ def extract_neowise_trends(
                     df.loc[target_id, col] = trends[col]
                     
     if verbose:
-        n_with_data = (df["neowise_n_epochs"] > 0).sum()
+        n_with_data = (df["ltv_neowise_n_epochs"] > 0).sum()
         print(f"[extract_neowise_trends] {n_with_data}/{len(df)} sources have NEOWISE data")
     
     return df

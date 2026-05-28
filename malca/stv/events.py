@@ -48,9 +48,9 @@ from malca.config import (
     BASELINE_FUNC, BASELINE_S0, BASELINE_W0, BASELINE_Q, BASELINE_JITTER,
 )
 from malca.cli_config import add_config_args, apply_config, namespace_keys
-from malca.score import compute_event_score
+from malca.stv.score import compute_event_score
 from malca.stats import log_gaussian, median_dt, bic
-from malca.triggering import resolve_trigger_indices
+from malca.stv.triggering import resolve_trigger_indices
 from malca.utils import (
     read_lc_dat2,
     read_lc_csv,
@@ -121,7 +121,10 @@ EVENTS_CONFIG_PATH_KEYS = {"output", "error_output", "metadata", "input_file"}
 
 
 EVENTS_CORE_COLUMNS: tuple[str, ...] = (
-    "path",
+    "candidate_id",
+    "timescale",
+    "asas_sn_id",
+    "lc_path",
     "dip_significant",
     "jump_significant",
     "n_points",
@@ -254,7 +257,10 @@ EVENTS_INT_COLUMNS: frozenset[str] = frozenset(
 
 EVENTS_STRING_COLUMNS: frozenset[str] = frozenset(
     {
-        "path",
+        "candidate_id",
+        "timescale",
+        "asas_sn_id",
+        "lc_path",
         "dip_best_morph",
         "jump_best_morph",
         "camera_ids",
@@ -303,7 +309,7 @@ def build_events_writer_columns(metadata_columns: Iterable[str] | None = None) -
     metadata = [
         str(col)
         for col in metadata_source
-        if str(col) not in {"", "path", "extra_json"}
+        if str(col) not in {"", "lc_path", "extra_json"}
     ]
     return _unique_preserve_order(
         (
@@ -423,7 +429,7 @@ def infer_events_metadata_column_kinds(meta_df: pd.DataFrame | None) -> dict[str
         return {}
     kinds: dict[str, str] = {}
     for column in meta_df.columns:
-        if column == "path":
+        if column == "lc_path":
             continue
         if column in EVENTS_BOOL_COLUMNS:
             kinds[column] = "bool"
@@ -1836,8 +1842,14 @@ def process_lightcurve(
         jumper_n_jumps = int(len(events))
         jumper_n_valid_jumps = int(sum(1 for e in events if e.valid))
 
+    lc_path = str(path)
+    asas_sn_id = Path(path).stem
+
     return dict(
-        path=str(path),
+        candidate_id=f"stv_{asas_sn_id}",
+        timescale="stv",
+        asas_sn_id=asas_sn_id,
+        lc_path=lc_path,
 
         dip_significant=bool(dip["significant"]),
         jump_significant=bool(jump["significant"]),
@@ -1967,7 +1979,7 @@ def _process_batch(batch: list[tuple[str, dict | None]]) -> list[dict]:
             result = _process_one(path, path_metadata)
             batch_results.append(
                 {
-                    "path": str(path),
+                    "lc_path": str(path),
                     "result": result,
                     "error": None,
                     "traceback": None,
@@ -1976,7 +1988,7 @@ def _process_batch(batch: list[tuple[str, dict | None]]) -> list[dict]:
         except Exception as e:
             batch_results.append(
                 {
-                    "path": str(path),
+                    "lc_path": str(path),
                     "result": None,
                     "error": repr(e),
                     "traceback": traceback.format_exc(),
@@ -2016,7 +2028,7 @@ def main():
     g_output.add_argument("--output", type=Path, default=None, help="Output path for results (suffix adjusted per format).")
     g_output.add_argument("--output-format", choices=("parquet", "parquet_chunk"), default=OUTPUT_FORMAT, help="Output format for results.")
     g_output.add_argument("--error-output", type=Path, default=None, help="Optional Parquet path for per-light-curve processing errors.")
-    g_output.add_argument("--metadata", type=Path, default=None, help="Optional Parquet with 'path' and extra metadata columns to attach to results.")
+    g_output.add_argument("--metadata", type=Path, default=None, help="Optional Parquet with 'lc_path' and extra metadata columns to attach to results.")
     g_output.add_argument("--chunk-size", type=int, help="Number of result rows per output chunk; <=0 buffers until the end.")
 
     g_detection.add_argument("--trigger-mode", choices=("posterior_prob", "logbf"), help="Triggering criterion to use.")
@@ -2095,10 +2107,10 @@ def main():
     metadata_by_path = None
     if args.metadata:
         meta_df = pd.read_parquet(args.metadata)
-        if "path" not in meta_df.columns:
-            raise SystemExit("metadata parquet must include a 'path' column")
-        meta_df["path"] = meta_df["path"].astype(str)
-        metadata_by_path = meta_df.set_index("path").to_dict(orient="index")
+        if "lc_path" not in meta_df.columns:
+            raise SystemExit("metadata parquet must include an 'lc_path' column")
+        meta_df["lc_path"] = meta_df["lc_path"].astype(str)
+        metadata_by_path = meta_df.set_index("lc_path").to_dict(orient="index")
 
     events_writer_columns = build_events_writer_columns(meta_df.columns if meta_df is not None else None)
     events_column_kinds = infer_events_metadata_column_kinds(meta_df)
@@ -2117,17 +2129,17 @@ def main():
             return set()
         try:
             if fmt == "parquet":
-                table = pq.read_table(path, columns=["path"])
+                table = pq.read_table(path, columns=["lc_path"])
                 df_existing = table.to_pandas()
             elif fmt == "parquet_chunk":
 
                 dataset = ds.dataset(path, format="parquet")
-                table = dataset.to_table(columns=["path"])
+                table = dataset.to_table(columns=["lc_path"])
                 df_existing = table.to_pandas()
             else:
                 return set()
-            if "path" in df_existing.columns:
-                return set(df_existing["path"].astype(str))
+            if "lc_path" in df_existing.columns:
+                return set(df_existing["lc_path"].astype(str))
         except Exception as e:
             _log(f"Warning: could not read existing output {path} to skip duplicates: {e}", quiet)
         return set()
@@ -2420,7 +2432,7 @@ def main():
             mode = "a"
             with open(checkpoint_log, mode) as f:
                 for row in chunk_results:
-                    f.write(str(row['path']) + "\n")
+                    f.write(str(row["lc_path"]) + "\n")
 
         chunk_dip, chunk_jump, chunk_any = count_significant(chunk_results)
         total_dip_sig += chunk_dip
@@ -2486,11 +2498,11 @@ def main():
 
     def handle_batch_result(batch_result: dict) -> None:
         nonlocal results
-        path = str(batch_result["path"])
+        path = str(batch_result["lc_path"])
         error = batch_result.get("error")
         if error is not None:
             tb_str = str(batch_result.get("traceback") or "")
-            errors.append(dict(path=path, error=error, traceback=tb_str))
+            errors.append(dict(lc_path=path, error=error, traceback=tb_str))
             print(f"ERROR processing {path}: {error}", flush=True)
             if "too many values to unpack" in error:
                 print(f"Full traceback:\n{tb_str}", flush=True)
@@ -2536,7 +2548,7 @@ def main():
                 except Exception as e:
                     tb_str = traceback.format_exc()
                     for path, _path_meta in batch:
-                        errors.append(dict(path=str(path), error=repr(e), traceback=tb_str))
+                        errors.append(dict(lc_path=str(path), error=repr(e), traceback=tb_str))
                         print(f"ERROR processing {path}: {e}", flush=True)
                     pbar.update(len(batch))
                     continue
@@ -2553,7 +2565,7 @@ def main():
     else:
         if not quiet:
             for row in results:
-                print(f"{row['path']}\tmode={row['trigger_mode']}\tdip_sig={row['dip_significant']} jump_sig={row['jump_significant']}")
+                print(f"{row['lc_path']}\tmode={row['trigger_mode']}\tdip_sig={row['dip_significant']} jump_sig={row['jump_significant']}")
 
     if errors:
         write_errors(errors)

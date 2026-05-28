@@ -20,20 +20,15 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime
-import hashlib
-import json
 import os
 from pathlib import Path
-import shlex
-import shutil
-import sys
 import time
-import zipfile
 
 import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 
+from malca.candidates import merge_candidate_columns, select_passing_candidates
 from malca.config import SYDNEY_LTV_CSV_PATH
 from malca.config import (
     LTV_MIN_SLOPE,
@@ -77,7 +72,19 @@ from malca.ltv.paths import (
     ltv_pipeline_output_path,
     ltv_review_db_path,
 )
-from malca.review.sync import auto_export_review_bundle
+from malca.product_schema import add_ltv_identity, assert_ltv_product_schema
+from malca.run_bundle import collect_candidate_lightcurve_files, export_run_bundle, import_bundle_zip
+from malca.run_context import (
+    init_pipeline_run_context,
+    maybe_sync_review_bundle,
+    run_dir_from_bundle,
+    timestamped_run_dir,
+    update_latest_symlink,
+    write_run_log,
+    write_run_params,
+    write_run_summary,
+)
+from malca.run_metadata import build_fingerprint, fingerprint_digest, json_stable
 
 
 LTV_BUILD_CONFIG_DEFAULTS = {
@@ -412,7 +419,7 @@ def run_full_pipeline(
         print()
 
     # =========================================================================
-    # Stage 4c: Bailer-Jones (2023) distances (optional, feeds CMD M_G)
+    # Stage 4c: Bailer-Jones (2023) distances (optional, feeds CMD mg)
     # =========================================================================
     if run_bailer_jones:
         from malca.ltv.cmd import fetch_bailer_jones_distances
@@ -465,23 +472,23 @@ def run_full_pipeline(
             n_agn = df["milliquas_name"].notna().sum()
             print(f"AGN (MILLIQUAS): {n_agn:,}")
         
-        if "ls_fap" in df.columns:
-            n_periodic = (df["ls_fap"] < 0.1).sum()
+        if "ltv_ls_fap" in df.columns:
+            n_periodic = (df["ltv_ls_fap"] < 0.1).sum()
             pct = n_periodic/len(df)*100 if len(df) > 0 else 0
             print(f"Periodic sources (FAP < 0.1): {n_periodic:,} ({pct:.1f}%)")
         
-        if "neowise_n_epochs" in df.columns:
-            n_neowise = (df["neowise_n_epochs"] > 0).sum()
+        if "ltv_neowise_n_epochs" in df.columns:
+            n_neowise = (df["ltv_neowise_n_epochs"] > 0).sum()
             pct = n_neowise/len(df)*100 if len(df) > 0 else 0
             print(f"With NEOWISE data: {n_neowise:,} ({pct:.1f}%)")
 
-        if "dust_candidate" in df.columns:
-            n_dust = df["dust_candidate"].sum()
+        if "ltv_dust_candidate" in df.columns:
+            n_dust = df["ltv_dust_candidate"].sum()
             pct = n_dust/len(df)*100 if len(df) > 0 else 0
             print(f"Dust candidates: {n_dust:,} ({pct:.1f}%)")
 
-        if "stoch_sf_ml_amplitude" in df.columns:
-            n_stoch = df["stoch_sf_ml_amplitude"].notna().sum()
+        if "ltv_stoch_sf_ml_amplitude" in df.columns:
+            n_stoch = df["ltv_stoch_sf_ml_amplitude"].notna().sum()
             pct = n_stoch/len(df)*100 if len(df) > 0 else 0
             print(f"With stochastic post-filter features: {n_stoch:,} ({pct:.1f}%)")
         
@@ -502,33 +509,7 @@ def run_full_pipeline(
 # =============================================================================
 
 def _json_stable(value):
-    if isinstance(value, Path):
-        return str(value.expanduser())
-    if isinstance(value, dict):
-        return {str(k): _json_stable(v) for k, v in sorted(value.items(), key=lambda item: str(item[0]))}
-    if isinstance(value, (list, tuple)):
-        return [_json_stable(v) for v in value]
-    return value
-
-
-def _sha256_file(path: Path) -> str | None:
-    try:
-        digest = hashlib.sha256()
-        with path.open("rb") as f:
-            for chunk in iter(lambda: f.read(1024 * 1024), b""):
-                digest.update(chunk)
-        return digest.hexdigest()
-    except OSError:
-        return None
-
-
-def _ltv_code_fingerprint() -> dict[str, str | None]:
-    module_dir = Path(__file__).resolve().parent.parent
-    return {
-        rel_path: _sha256_file(module_dir / rel_path)
-        for rel_path in LTV_CODE_FINGERPRINT_FILES
-        if (module_dir / rel_path).exists()
-    }
+    return json_stable(value)
 
 
 def _ltv_run_fingerprint(args: argparse.Namespace, mag_bins: list[str]) -> dict:
@@ -537,46 +518,32 @@ def _ltv_run_fingerprint(args: argparse.Namespace, mag_bins: list[str]) -> dict:
         for key in sorted(LTV_ORCHESTRATOR_CONFIG_DEFAULTS)
     }
     params["mag_bin"] = list(mag_bins)
-    return {
-        "version": LTV_RUN_REUSE_FINGERPRINT_VERSION,
-        "params": params,
-        "code": _ltv_code_fingerprint(),
-    }
+    return build_fingerprint(
+        version=LTV_RUN_REUSE_FINGERPRINT_VERSION,
+        params=params,
+        code_base=Path(__file__).resolve().parent.parent,
+        code_paths=LTV_CODE_FINGERPRINT_FILES,
+    )
 
 
 def _fingerprint_digest(fingerprint: dict) -> str:
-    payload = json.dumps(_json_stable(fingerprint), sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return fingerprint_digest(fingerprint)
 
 
 def default_ltv_timestamp_run_dir() -> Path:
-    return DEFAULT_LTV_RUN_DIR / datetime.now().strftime("%Y%m%d_%H%M%S")
+    return timestamped_run_dir(DEFAULT_LTV_RUN_DIR)
 
 
 def _resolve_ltv_run_dir(args: argparse.Namespace) -> Path:
     if args.run_dir is not None:
         return Path(args.run_dir).expanduser()
     if args.import_bundle is not None:
-        bundle_path = Path(args.import_bundle).expanduser()
-        stem = bundle_path.stem.removesuffix("_bundle")
-        return DEFAULT_LTV_RUN_DIR / stem
+        return run_dir_from_bundle(Path(args.import_bundle).expanduser(), DEFAULT_LTV_RUN_DIR)
     return default_ltv_timestamp_run_dir()
 
 
 def _update_latest_symlink(run_dir: Path) -> None:
-    latest = DEFAULT_LTV_RUN_DIR / "latest"
-    try:
-        if run_dir.resolve() == DEFAULT_LTV_RUN_DIR.resolve():
-            return
-        latest.parent.mkdir(parents=True, exist_ok=True)
-        if latest.is_symlink() or latest.exists():
-            if latest.is_dir() and not latest.is_symlink():
-                shutil.rmtree(latest)
-            else:
-                latest.unlink()
-        latest.symlink_to(run_dir.resolve(), target_is_directory=True)
-    except Exception as exc:
-        print(f"Warning: could not update LTV latest symlink: {exc}")
+    update_latest_symlink(run_dir, DEFAULT_LTV_RUN_DIR / "latest", label="LTV")
 
 
 def _clear_parquet_dataset(path: Path) -> None:
@@ -607,26 +574,17 @@ def _stage_defaults_to_ltv_extended(stage: str) -> bool:
 
 
 def _passing_ltv_rows(df: pd.DataFrame) -> pd.DataFrame:
-    if "failed_any" not in df.columns:
-        return df.copy()
-    failed = df["failed_any"]
-    if pd.api.types.is_bool_dtype(failed):
-        mask = ~failed.fillna(False).astype(bool)
-    elif pd.api.types.is_numeric_dtype(failed):
-        mask = failed.fillna(0).astype(float) == 0.0
-    else:
-        lowered = failed.astype("string").str.strip().str.lower()
-        mask = ~lowered.isin({"1", "true", "t", "yes", "y"}).fillna(False)
-    return df.loc[mask].reset_index(drop=True).copy()
+    return select_passing_candidates(df).reset_index(drop=True)
 
 
 def _ensure_ltv_candidate_id(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-    if "candidate_id" in out.columns:
-        out["candidate_id"] = out["candidate_id"].astype(str)
-        return out
-    if "asas_sn_id" in out.columns:
-        out["candidate_id"] = "ltv_" + out["asas_sn_id"].astype(str)
+    return add_ltv_identity(df)
+
+
+def _write_ltv_candidate_table(df: pd.DataFrame, path: Path, *, stage: str) -> pd.DataFrame:
+    out = _ensure_ltv_candidate_id(df)
+    assert_ltv_product_schema(out, stage=stage)
+    write_parquet_table(out, path)
     return out
 
 
@@ -635,25 +593,11 @@ def _merge_ltv_candidate_columns(
     extra: pd.DataFrame,
     value_cols: list[str] | tuple[str, ...],
 ) -> pd.DataFrame:
-    if extra.empty:
-        return base
-    out = _ensure_ltv_candidate_id(base)
-    extra = _ensure_ltv_candidate_id(extra)
-    if "candidate_id" not in out.columns or "candidate_id" not in extra.columns:
-        return out
-
-    cols = [col for col in value_cols if col in extra.columns]
-    if not cols:
-        return out
-
-    merge_df = extra[["candidate_id", *cols]].drop_duplicates(subset=["candidate_id"], keep="last")
-    merged = out.merge(merge_df, on="candidate_id", how="left", suffixes=("", "_ltv_new"))
-    for col in cols:
-        new_col = f"{col}_ltv_new"
-        if new_col in merged.columns:
-            merged[col] = merged[new_col].where(merged[new_col].notna(), merged[col] if col in merged.columns else np.nan)
-            merged = merged.drop(columns=[new_col])
-    return merged
+    return merge_candidate_columns(
+        _ensure_ltv_candidate_id(base),
+        _ensure_ltv_candidate_id(extra),
+        value_cols,
+    )
 
 
 def classify_ltv_candidates(df: pd.DataFrame) -> pd.DataFrame:
@@ -703,7 +647,7 @@ def classify_ltv_candidates(df: pd.DataFrame) -> pd.DataFrame:
     )
 
     assign(cmd_group.str.contains("evolved", na=False), "evolved_star_candidate", "cmd_group", 3)
-    assign(bool_col("dust_candidate") | bool_col("ltv_dust_candidate") | bool_col("dust_excess"), "dust_candidate", "dust_or_ir_excess", 4)
+    assign(bool_col("ltv_dust_candidate") | bool_col("ltv_dust_excess"), "dust_candidate", "dust_or_ir_excess", 4)
     assign(known_periodic, "known_periodic", "periodic_catalog_match", 1)
     assign(motion, "motion_contaminant", "proper_motion_or_neighbor_pm", 0)
     assign(has_text("milliquas_name") | bool_col("ltv_milliquas_match"), "agn", "milliquas_match", 1)
@@ -759,19 +703,20 @@ def _write_filtered_audit(
 
     if filtered_path.exists() and not args.overwrite:
         audit = read_parquet_table(filtered_path)
+        assert_ltv_product_schema(audit, stage="ltv-filtered")
         return filtered_path, audit, _passing_ltv_rows(audit)
 
     if not core_path.exists():
         raise FileNotFoundError(f"LTV core output not found: {core_path}")
 
     core_df = read_parquet_table(core_path)
+    assert_ltv_product_schema(core_df, stage="ltv-core")
     if args.skip_filters:
-        audit = core_df.copy()
+        audit = _ensure_ltv_candidate_id(core_df)
         for col in LTV_AUDIT_FAILED_COLUMNS.values():
             audit[col] = False
         audit["failed_any"] = False
-        audit["ltv_passed_filters"] = True
-        audit["ltv_filter_reason"] = None
+        audit["filter_reason"] = None
         passers = audit.copy()
     else:
         audit, passers = apply_all_filters_audit(
@@ -784,7 +729,8 @@ def _write_filtered_audit(
             verbose=args.verbose,
             return_passers=True,
         )
-    write_parquet_table(audit, filtered_path)
+    audit = _write_ltv_candidate_table(audit, filtered_path, stage="ltv-filtered")
+    passers = _passing_ltv_rows(audit)
     if args.verbose:
         print(f"[ltv-pipeline] Saved LTV audit table to {filtered_path}")
     return filtered_path, audit, passers
@@ -799,6 +745,7 @@ def _write_pipeline_candidates(
     output_path = ltv_pipeline_output_path(mag_bin, run_dir)
     if output_path.exists() and not args.overwrite:
         df = read_parquet_table(output_path)
+        assert_ltv_product_schema(df, stage="ltv-pipeline")
         return output_path, df
 
     df = run_full_pipeline(
@@ -832,7 +779,7 @@ def _write_pipeline_candidates(
         df = df.drop(columns=["_idx"])
     if "asas_sn_id" in df.columns:
         df["asas_sn_id"] = df["asas_sn_id"].astype(object).map(lambda x: str(x) if pd.notna(x) else "")
-    write_parquet_table(df, output_path)
+    df = _write_ltv_candidate_table(df, output_path, stage="ltv-pipeline")
     if args.verbose:
         print(f"[ltv-pipeline] Saved enriched LTV candidates to {output_path}")
     return output_path, df
@@ -851,7 +798,9 @@ def _write_ltv_external_lcs(
     external_lc_dir.mkdir(parents=True, exist_ok=True)
 
     if output_path.exists() and not args.overwrite:
-        return output_path, external_lc_dir, read_parquet_table(output_path)
+        df = read_parquet_table(output_path)
+        assert_ltv_product_schema(df, stage="ltv-external-lcs")
+        return output_path, external_lc_dir, df
 
     run_df = _ensure_ltv_candidate_id(candidates)
     checkpoint_path = external_lc_dir / f"{output_path.stem}_CHECKPOINT.parquet"
@@ -875,7 +824,7 @@ def _write_ltv_external_lcs(
         checkpoint_path=checkpoint_path,
         refresh_cache=bool(args.external_lc_refresh_cache),
     )
-    write_parquet_table(out, output_path)
+    out = _write_ltv_candidate_table(out, output_path, stage="ltv-external-lcs")
     checkpoint_path.unlink(missing_ok=True)
     if args.verbose:
         print(f"[ltv-pipeline] Saved external LC summary to {output_path}")
@@ -894,13 +843,15 @@ def _write_ltv_multi_survey_features(
 
     output_path = ltv_multi_survey_output_path(mag_bin, run_dir)
     if output_path.exists() and not args.overwrite:
-        return output_path, read_parquet_table(output_path)
+        df = read_parquet_table(output_path)
+        assert_ltv_product_schema(df, stage="ltv-multi-survey")
+        return output_path, df
 
     out = compute_ltv_multi_survey_features(
         _ensure_ltv_candidate_id(candidates),
         external_lc_dir=external_lc_dir,
     )
-    write_parquet_table(out, output_path)
+    out = _write_ltv_candidate_table(out, output_path, stage="ltv-multi-survey")
     if args.verbose:
         print(f"[ltv-pipeline] Saved LTV multi-survey features to {output_path}")
     return output_path, out
@@ -945,14 +896,16 @@ def _write_ltv_extended_products(
         stats["ltv_multi_survey_rows"] = int(len(multi_df))
 
     if bool(args.run_external_lcs) or bool(args.run_multi_survey_features):
-        write_parquet_table(updated, pipeline_path)
+        updated = _write_ltv_candidate_table(updated, pipeline_path, stage="ltv-pipeline")
     return updated, stats
 
 
 def _merge_outputs(paths: list[Path], output_path: Path) -> pd.DataFrame:
     frames = [read_parquet_table(path) for path in paths if path.exists()]
     merged = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-    write_parquet_table(merged, output_path)
+    merged = _write_ltv_candidate_table(merged, output_path, stage=output_path.stem) if not merged.empty else merged
+    if merged.empty:
+        write_parquet_table(merged, output_path)
     return merged
 
 
@@ -965,9 +918,7 @@ def _collect_ltv_candidate_lightcurves(run_dir: Path) -> list[tuple[Path, str]]:
     if not tables:
         tables = sorted(results_dir.glob("*_filtered.parquet"))
 
-    seen_paths: set[Path] = set()
-    used_arcnames: set[str] = set()
-    collected: list[tuple[Path, str]] = []
+    frames: list[pd.DataFrame] = []
 
     for table_path in tables:
         try:
@@ -976,78 +927,34 @@ def _collect_ltv_candidate_lightcurves(run_dir: Path) -> list[tuple[Path, str]]:
             continue
         if "failed_any" in df.columns:
             df = _passing_ltv_rows(df)
-        if "lc_path" not in df.columns:
-            continue
+        frames.append(df)
 
-        for raw_path in df["lc_path"].dropna().astype(str):
-            path = Path(raw_path).expanduser()
-            try:
-                resolved = path.resolve()
-            except OSError:
-                resolved = path
-            if resolved in seen_paths or not path.exists():
-                continue
-            seen_paths.add(resolved)
-            arcname = f"bundle_assets/lightcurves/{path.name}"
-            if arcname in used_arcnames:
-                arcname = f"bundle_assets/lightcurves/{len(used_arcnames):06d}_{path.name}"
-            used_arcnames.add(arcname)
-            collected.append((path, arcname))
-
-    return collected
+    if not frames:
+        return []
+    collection = collect_candidate_lightcurve_files(
+        pd.concat(frames, ignore_index=True),
+        path_cols=("lc_path",),
+        arc_prefix="bundle_assets/lightcurves",
+    )
+    return collection.files
 
 
 def _export_ltv_run_bundle(run_dir: Path, bundle_zip: Path, *, full_bundle: bool = False) -> list[str]:
-    include_roots = [run_dir / "results", run_dir / "review"]
+    include_dirs = ["results", "review"]
     if full_bundle:
-        include_roots.append(run_dir / "bundle_assets")
-    include_files = [
-        run_dir / "run_params.json",
-        run_dir / "run_summary.json",
-        run_dir / "run.log",
-    ]
-
-    files: set[Path] = set()
-    for path in include_files:
-        if path.exists() and path.is_file():
-            files.add(path)
-    for root in include_roots:
-        if root.exists():
-            files.update(p for p in root.rglob("*") if p.is_file())
-
-    if not files:
-        raise FileNotFoundError(f"No LTV run files found under {run_dir}")
-
-    bundle_zip = Path(bundle_zip).expanduser()
-    bundle_zip.parent.mkdir(parents=True, exist_ok=True)
-    files.discard(bundle_zip)
-
-    names: list[str] = []
-    with zipfile.ZipFile(bundle_zip, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
-        for path in sorted(files, key=lambda p: str(p.relative_to(run_dir))):
-            arcname = str(path.relative_to(run_dir))
-            zf.write(path, arcname)
-            names.append(arcname)
-        if full_bundle:
-            for path, arcname in _collect_ltv_candidate_lightcurves(run_dir):
-                if arcname in names:
-                    continue
-                zf.write(path, arcname)
-                names.append(arcname)
-    return names
+        include_dirs.append("bundle_assets")
+    return export_run_bundle(
+        bundle_zip,
+        run_dir,
+        include_files=["run_params.json", "run_summary.json", "run.log"],
+        include_dirs=include_dirs,
+        external_files=_collect_ltv_candidate_lightcurves(run_dir) if full_bundle else [],
+        description="LTV run",
+    )
 
 
 def _import_ltv_run_bundle(bundle_zip: Path, run_dir: Path, *, overwrite: bool = False) -> None:
-    bundle_zip = Path(bundle_zip).expanduser()
-    if not bundle_zip.exists():
-        raise FileNotFoundError(f"Bundle not found: {bundle_zip}")
-    if not zipfile.is_zipfile(bundle_zip):
-        raise ValueError(f"Bundle is not a valid zip file: {bundle_zip}")
-    if run_dir.exists() and overwrite:
-        shutil.rmtree(run_dir)
-    run_dir.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(bundle_zip, "r") as zf:
-        zf.extractall(run_dir)
+    import_bundle_zip(bundle_zip, run_dir, overwrite=overwrite)
 
 
 def add_ltv_pipeline_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -1070,7 +977,16 @@ def add_ltv_pipeline_args(parser: argparse.ArgumentParser) -> argparse.ArgumentP
     g_io.add_argument("--mag-bin", nargs="+", default=["13_13.5"], choices=[*MAG_BINS, "all"])
     g_io.add_argument("--root", type=Path, default=LCV2_ROOT, help="Raw ASAS-SN light-curve root")
     g_io.add_argument("--run-dir", type=Path, default=None, help="LTV run directory (default: output/runs/ltv/<timestamp>)")
-    g_stage.add_argument("--stage", choices=LTV_PIPELINE_STAGE_CHOICES, default="full")
+    g_stage.add_argument(
+        "--stage",
+        choices=LTV_PIPELINE_STAGE_CHOICES,
+        default="full",
+        help=(
+            "Pipeline stage: full=standard LTV workflow, full-extended=full plus "
+            "external LCs and LTV multi-survey summaries, cluster=raw-dependent "
+            "upstream, home=downstream/catalog/review only."
+        ),
+    )
     g_filters.add_argument("--min-slope", type=float, default=LTV_MIN_SLOPE)
     g_filters.add_argument("--min-diff", type=float, default=LTV_MIN_DIFF)
     g_core.add_argument("--dspring", type=float, default=LTV_DSPRING)
@@ -1097,19 +1013,41 @@ def add_ltv_pipeline_args(parser: argparse.ArgumentParser) -> argparse.ArgumentP
     g_cmd.add_argument("--skip-cmd", action="store_true")
     g_stochastic.add_argument("--run-stochastic-postfilter", action="store_true")
     g_stochastic.add_argument("--stochastic-include-drw", action="store_true")
-    g_external_lcs.add_argument("--run-external-lcs", dest="run_external_lcs", action="store_true", default=None)
-    g_external_lcs.add_argument("--no-external-lcs", dest="run_external_lcs", action="store_false")
-    g_external_lcs.add_argument("--run-multi-survey-features", dest="run_multi_survey_features", action="store_true", default=None)
-    g_external_lcs.add_argument("--no-multi-survey-features", dest="run_multi_survey_features", action="store_false")
-    g_external_lcs.add_argument("--external-lc-workers", type=int, default=4)
-    g_external_lcs.add_argument("--external-lc-refresh-cache", action="store_true")
-    g_external_lcs.add_argument("--external-lc-atlas", action="store_true")
-    g_external_lcs.add_argument("--atlas-token", "--external-lc-atlas-token", dest="atlas_token", type=str, default=None)
-    g_bundle.add_argument("--import-bundle", type=Path, default=None)
+    g_external_lcs.add_argument(
+        "--run-external-lcs",
+        dest="run_external_lcs",
+        action="store_true",
+        default=None,
+        help="Fetch supported external light curves after LTV review candidates are written.",
+    )
+    g_external_lcs.add_argument(
+        "--no-external-lcs",
+        dest="run_external_lcs",
+        action="store_false",
+        help="Disable external light-curve enrichment, including in full-extended stage.",
+    )
+    g_external_lcs.add_argument(
+        "--run-multi-survey-features",
+        dest="run_multi_survey_features",
+        action="store_true",
+        default=None,
+        help="Compute LTV multi-survey summaries after external LC enrichment.",
+    )
+    g_external_lcs.add_argument(
+        "--no-multi-survey-features",
+        dest="run_multi_survey_features",
+        action="store_false",
+        help="Disable LTV multi-survey summary extraction, including in full-extended stage.",
+    )
+    g_external_lcs.add_argument("--external-lc-workers", type=int, default=4, help="Workers for supported external light-curve fetchers.")
+    g_external_lcs.add_argument("--external-lc-refresh-cache", action="store_true", help="Ignore cached external light-curve products.")
+    g_external_lcs.add_argument("--external-lc-atlas", action="store_true", help="Enable ATLAS forced photometry in external light-curve enrichment.")
+    g_external_lcs.add_argument("--atlas-token", "--external-lc-atlas-token", dest="atlas_token", type=str, default=None, help="ATLAS forced-photometry token, or set MALCA_ATLAS_TOKEN/ATLAS_API_TOKEN.")
+    g_bundle.add_argument("--import-bundle", type=Path, default=None, help="Import a run transfer bundle ZIP before running the selected stage.")
     bundle_group = g_bundle.add_mutually_exclusive_group()
-    bundle_group.add_argument("--export-bundle", type=Path, default=None)
-    bundle_group.add_argument("--no-export-bundle", dest="export_bundle_enabled", action="store_false")
-    g_bundle.add_argument("--full-bundle", action="store_true")
+    bundle_group.add_argument("--export-bundle", type=Path, default=None, help="Write a run transfer bundle ZIP to this path and enable bundle export.")
+    bundle_group.add_argument("--no-export-bundle", dest="export_bundle_enabled", action="store_false", help="Disable run transfer bundle export.")
+    g_bundle.add_argument("--full-bundle", action="store_true", help="Include candidate light-curve assets in the exported run bundle.")
     g_review.add_argument("--review-db", type=Path, default=None)
     g_review.add_argument("--run-vetting", action="store_true")
     g_review.add_argument("--skip-stats", action="store_true")
@@ -1161,17 +1099,16 @@ def run_ltv_pipeline_cli(args: argparse.Namespace) -> dict:
     run_dir = _resolve_ltv_run_dir(args)
     if args.import_bundle is not None:
         _import_ltv_run_bundle(args.import_bundle, run_dir, overwrite=args.overwrite)
-    run_dir.mkdir(parents=True, exist_ok=True)
-    results_dir = run_dir / "results"
-    review_dir = run_dir / "review"
-    results_dir.mkdir(parents=True, exist_ok=True)
-    review_dir.mkdir(parents=True, exist_ok=True)
+    ctx = init_pipeline_run_context("ltv", run_dir)
+    run_dir = ctx.run_dir
+    results_dir = ctx.results_dir
+    review_dir = ctx.review_dir
 
     fingerprint = _ltv_run_fingerprint(args, mag_bins)
     fingerprint_hash = _fingerprint_digest(fingerprint)
-    started = datetime.now()
-    started_perf = time.perf_counter()
-    cmd = shlex.join(getattr(sys, "orig_argv", None) or ([sys.executable] + sys.argv))
+    started = ctx.started_at
+    started_perf = ctx.started_perf
+    cmd = ctx.command
 
     run_params = {
         "timestamp": started.isoformat(),
@@ -1215,17 +1152,17 @@ def run_ltv_pipeline_cli(args: argparse.Namespace) -> dict:
         "run_reuse_fingerprint": fingerprint,
         "run_reuse_fingerprint_hash": fingerprint_hash,
     }
-    (run_dir / "run_params.json").write_text(json.dumps(run_params, indent=2, default=str), encoding="ascii")
-    (run_dir / "run.log").write_text(
-        "\n".join([
+    write_run_params(ctx, run_params)
+    write_run_log(
+        ctx,
+        [
             f"timestamp: {started.isoformat()}",
             f"command: {cmd}",
             f"stage: {args.stage}",
             f"run_dir: {run_dir}",
             f"results_dir: {results_dir}",
             f"review_db: {args.review_db or ltv_review_db_path(run_dir)}",
-        ]) + "\n",
-        encoding="ascii",
+        ],
     )
 
     per_bin: dict[str, dict] = {}
@@ -1324,13 +1261,13 @@ def run_ltv_pipeline_cli(args: argparse.Namespace) -> dict:
             verbose=args.verbose,
         )
         review_stats = {"review_db": str(review_db_path), "total": int(total), "new": int(new)}
-        if args.review_sync_enabled:
-            auto_export_review_bundle(
-                review_db_path,
-                args.review_sync_dir,
-                hash_assets=bool(args.review_sync_hash_assets),
-                logger=print if args.verbose else (lambda _msg: None),
-            )
+        maybe_sync_review_bundle(
+            args.review_sync_enabled,
+            review_db_path,
+            args.review_sync_dir,
+            hash_assets=bool(args.review_sync_hash_assets),
+            verbose=args.verbose,
+        )
 
     summary = {
         "timestamp": datetime.now().isoformat(),
@@ -1348,7 +1285,7 @@ def run_ltv_pipeline_cli(args: argparse.Namespace) -> dict:
         "merged_ltv_multi_survey_rows": int(merged_ltv_multi_survey_rows),
         "review": review_stats,
     }
-    (run_dir / "run_summary.json").write_text(json.dumps(summary, indent=2, default=str), encoding="ascii")
+    write_run_summary(ctx, summary)
     _update_latest_symlink(run_dir)
 
     if args.export_bundle_enabled:
@@ -1356,7 +1293,7 @@ def run_ltv_pipeline_cli(args: argparse.Namespace) -> dict:
         try:
             bundled = _export_ltv_run_bundle(run_dir, bundle_path, full_bundle=args.full_bundle)
             summary["export_bundle"] = {"path": str(bundle_path), "files": len(bundled)}
-            (run_dir / "run_summary.json").write_text(json.dumps(summary, indent=2, default=str), encoding="ascii")
+            write_run_summary(ctx, summary)
         except Exception as exc:
             print(f"Error creating LTV export bundle: {exc}")
 
@@ -1366,7 +1303,11 @@ def run_ltv_pipeline_cli(args: argparse.Namespace) -> dict:
 def main(argv: list[str] | None = None) -> None:
     parser = add_ltv_pipeline_args(argparse.ArgumentParser(
         prog="malca ltv-pipeline",
-        description="Run the LTV workflow with STV-style run metadata, audit filtering, and review ingest.",
+        description=(
+            "Run the LTV workflow with run metadata, audit filtering, enrichment, "
+            "and review ingest. Use --stage full-extended for external LCs and "
+            "multi-survey summaries; add --full-bundle to include candidate LC assets."
+        ),
     ))
     args = parser.parse_args(argv)
     run_ltv_pipeline_cli(args)
@@ -1418,13 +1359,13 @@ def add_pipeline_args(parser):
         "--min-slope",
         type=float,
         default=LTV_MIN_SLOPE,
-        help="Minimum |Slope| threshold (mag/yr)",
+        help="Minimum |ltv_slope| threshold (mag/yr)",
     )
     g_filters.add_argument(
         "--min-diff",
         type=float,
         default=LTV_MIN_DIFF,
-        help="Minimum |max diff| threshold (mag)",
+        help="Minimum |ltv_max_diff| threshold (mag)",
     )
     g_general.add_argument(
         "--workers",
@@ -1513,7 +1454,7 @@ def run_pipeline_cli(args):
 
     # Save output
     output_path = Path(args.output)
-    write_parquet_table(df, output_path)
+    df = _write_ltv_candidate_table(df, output_path, stage="ltv-pipeline")
     
     print(f"Saved {len(df):,} candidates to {output_path}")
     return df

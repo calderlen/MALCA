@@ -35,7 +35,7 @@ from malca.config import (
     LOGBF_THRESHOLD_DIP, LOGBF_THRESHOLD_JUMP,
 )
 from malca.config import MAD_SCALE
-from malca.events import score_lightcurve
+from malca.stv.events import score_lightcurve
 from malca.lightcurve_publication import (
     DIP_EVENT_COLOR,
     JUMP_EVENT_COLOR,
@@ -1087,7 +1087,7 @@ def main():
         "--detect-run",
         type=Path,
         default=None,
-        help="Detect run directory (e.g., output/runs/20250121_143052). If specified, reads events from <detect-run>/results/ and writes plots to <detect-run>/plots/",
+        help="STV run directory (e.g., output/runs/stv/20250121_143052). If specified, reads events from <detect-run>/results/ and writes plots to <detect-run>/plots/",
     )
     g_input.add_argument(
         "--input",

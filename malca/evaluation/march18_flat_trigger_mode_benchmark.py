@@ -35,8 +35,8 @@ from malca.config import (
     RUN_MIN_POINTS,
     SIGNIFICANCE_THRESHOLD,
 )
-from malca.events import build_runs, filter_runs, score_lightcurve, summarize_kept_runs
-from malca.triggering import posterior_probability_threshold, resolve_trigger_indices
+from malca.stv.events import build_runs, filter_runs, score_lightcurve, summarize_kept_runs
+from malca.stv.triggering import posterior_probability_threshold, resolve_trigger_indices
 from malca.utils import clean_lc, filter_bad_cameras, read_lc_dat2, read_skypatrol_csv
 
 

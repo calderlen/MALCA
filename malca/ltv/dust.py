@@ -24,9 +24,9 @@ from malca.config import (
 def apply_dust_flags(
     df: pd.DataFrame,
     *,
-    optical_slope_col: str = "Slope",
-    w1_w2_median_col: str = "w1_w2_median",
-    w1_w2_slope_col: str = "w1_w2_slope",
+    optical_slope_col: str = "ltv_slope",
+    w1_w2_median_col: str = "ltv_neowise_w1_w2_median",
+    w1_w2_slope_col: str = "ltv_neowise_w1_w2_slope",
     optical_slope_thresh: float = LTV_DUST_OPTICAL_SLOPE_THRESH,
     color_slope_thresh: float = LTV_DUST_COLOR_SLOPE_THRESH,
     color_excess_thresh: float = LTV_DUST_COLOR_EXCESS_THRESH,
@@ -35,10 +35,10 @@ def apply_dust_flags(
     Add dust-driven variability flags to a dataframe.
 
     Adds columns:
-    - dust_excess: bool (W1-W2 median > threshold)
-    - dust_trend_class: {"redder+fainter","bluer+brighter",None}
-    - dust_trend_flag: bool (either dust_forming or dust_clearing)
-    - dust_candidate: bool (dust_excess OR dust_trend_flag)
+    - ltv_dust_excess: bool (W1-W2 median > threshold)
+    - ltv_dust_trend_class: {"redder+fainter","bluer+brighter",None}
+    - ltv_dust_trend_flag: bool (either dust_forming or dust_clearing)
+    - ltv_dust_candidate: bool (dust_excess OR dust_trend_flag)
     """
     if df.empty:
         return df
@@ -59,9 +59,9 @@ def apply_dust_flags(
     trend_class = np.where(dust_forming, "redder+fainter",
                    np.where(dust_clearing, "bluer+brighter", None))
 
-    df["dust_excess"] = dust_excess
-    df["dust_trend_class"] = trend_class
-    df["dust_trend_flag"] = dust_forming | dust_clearing
-    df["dust_candidate"] = df["dust_excess"] | df["dust_trend_flag"]
+    df["ltv_dust_excess"] = dust_excess
+    df["ltv_dust_trend_class"] = trend_class
+    df["ltv_dust_trend_flag"] = dust_forming | dust_clearing
+    df["ltv_dust_candidate"] = df["ltv_dust_excess"] | df["ltv_dust_trend_flag"]
 
     return df

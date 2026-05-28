@@ -347,10 +347,10 @@ def _run_trial_worker(trial_index: int) -> dict:
 
         result.update(
             {
-                "measured_slope": _series_value(pd.Series(ltv_row), "Slope"),
-                "measured_max_diff": _series_value(pd.Series(ltv_row), "max diff"),
-                "measured_median": _series_value(pd.Series(ltv_row), "Median"),
-                "measured_ls_fap": _series_value(pd.Series(ltv_row), "ls_fap"),
+                "measured_slope": _series_value(pd.Series(ltv_row), "ltv_slope"),
+                "measured_max_diff": _series_value(pd.Series(ltv_row), "ltv_max_diff"),
+                "measured_median": _series_value(pd.Series(ltv_row), "ltv_median"),
+                "measured_ls_fap": _series_value(pd.Series(ltv_row), "ltv_ls_fap"),
             }
         )
 

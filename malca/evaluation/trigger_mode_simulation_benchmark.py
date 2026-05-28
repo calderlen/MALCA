@@ -33,14 +33,14 @@ from malca.config import (
     RUN_MIN_POINTS,
     SIGNIFICANCE_THRESHOLD,
 )
-from malca.events import build_runs, filter_runs, score_events_bayesian, summarize_kept_runs
+from malca.stv.events import build_runs, filter_runs, score_events_bayesian, summarize_kept_runs
 from malca.lightcurve_publication import (
     plot_lightcurve_panel,
     plot_phase_panel,
     plot_residual_panel,
     style_publication_axis,
 )
-from malca.triggering import posterior_probability_threshold, resolve_trigger_indices
+from malca.stv.triggering import posterior_probability_threshold, resolve_trigger_indices
 from malca.utils import clean_lc
 
 from malca.evaluation.periodic_branch_simulation_benchmark import (

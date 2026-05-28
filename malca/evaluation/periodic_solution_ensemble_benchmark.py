@@ -36,7 +36,7 @@ from malca.config import (
     SIGNIFICANCE_THRESHOLD,
     TRIGGER_MODE,
 )
-from malca.events import score_lightcurve
+from malca.stv.events import score_lightcurve
 from malca.evaluation.periodic_branch_simulation_benchmark import (
     add_metric_bins,
     generate_trial_design,

@@ -325,7 +325,7 @@ def _batch_gaia_epoch_datalink(
 def query_gaia_epoch_photometry_batch(
     df: pd.DataFrame,
     *,
-    source_id_col: str = "gaia_source_id",
+    source_id_col: str = "source_id",
     tap_table: str | None = None,
     time_col: str = "time",
     g_col: str = "g_mag",

@@ -15,16 +15,16 @@ from malca.utils import clean_lc, read_lc_dat2
 
 
 STOCHASTIC_COLUMNS = [
-    "stoch_sf_ml_amplitude",
-    "stoch_sf_ml_gamma",
-    "stoch_iar_phi",
-    "stoch_mhps_high",
-    "stoch_mhps_low",
-    "stoch_mhps_non_zero",
-    "stoch_mhps_pn_flag",
-    "stoch_mhps_ratio",
-    "stoch_gp_drw_sigma",
-    "stoch_gp_drw_tau",
+    "ltv_stoch_sf_ml_amplitude",
+    "ltv_stoch_sf_ml_gamma",
+    "ltv_stoch_iar_phi",
+    "ltv_stoch_mhps_high",
+    "ltv_stoch_mhps_low",
+    "ltv_stoch_mhps_non_zero",
+    "ltv_stoch_mhps_pn_flag",
+    "ltv_stoch_mhps_ratio",
+    "ltv_stoch_gp_drw_sigma",
+    "ltv_stoch_gp_drw_tau",
 ]
 
 
@@ -65,21 +65,21 @@ def _compute_feature_bundle(
     out = _empty_stochastic_result()
 
     sf_amp, sf_gamma = funcs["structure_function"](mag, jd)
-    out["stoch_sf_ml_amplitude"] = float(sf_amp) if np.isfinite(sf_amp) else np.nan
-    out["stoch_sf_ml_gamma"] = float(sf_gamma) if np.isfinite(sf_gamma) else np.nan
+    out["ltv_stoch_sf_ml_amplitude"] = float(sf_amp) if np.isfinite(sf_amp) else np.nan
+    out["ltv_stoch_sf_ml_gamma"] = float(sf_gamma) if np.isfinite(sf_gamma) else np.nan
 
     iar_phi = funcs["iar_phi_fit"](jd, mag, err)
-    out["stoch_iar_phi"] = float(iar_phi) if np.isfinite(iar_phi) else np.nan
+    out["ltv_stoch_iar_phi"] = float(iar_phi) if np.isfinite(iar_phi) else np.nan
 
     mhps_result = funcs["mhps"](jd, mag, err)
     for key in ("mhps_high", "mhps_low", "mhps_non_zero", "mhps_pn_flag", "mhps_ratio"):
         value = mhps_result.get(key, np.nan)
-        out[f"stoch_{key}"] = float(value) if np.isfinite(value) else np.nan
+        out[f"ltv_stoch_{key}"] = float(value) if np.isfinite(value) else np.nan
 
     if include_drw:
         drw_sigma, drw_tau = funcs["fit_drw"](jd, mag, err)
-        out["stoch_gp_drw_sigma"] = float(drw_sigma) if np.isfinite(drw_sigma) else np.nan
-        out["stoch_gp_drw_tau"] = float(drw_tau) if np.isfinite(drw_tau) else np.nan
+        out["ltv_stoch_gp_drw_sigma"] = float(drw_sigma) if np.isfinite(drw_sigma) else np.nan
+        out["ltv_stoch_gp_drw_tau"] = float(drw_tau) if np.isfinite(drw_tau) else np.nan
 
     return out
 
@@ -199,7 +199,7 @@ def add_stochastic_postfilter_features(
             out_df.loc[features_df.index, col] = features_df[col].astype(float)
 
     if verbose:
-        n_with_sf = int(out_df["stoch_sf_ml_amplitude"].notna().sum())
+        n_with_sf = int(out_df["ltv_stoch_sf_ml_amplitude"].notna().sum())
         print(f"[ltv-stochastic] Added stochastic features to {n_with_sf:,} candidates")
 
     return out_df

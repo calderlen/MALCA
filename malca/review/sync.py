@@ -155,7 +155,7 @@ def _candidate_records(conn: sqlite3.Connection, *, only_reviewed: bool = False)
         payload_extra = {
             str(key): value
             for key, value in payload.items()
-            if str(key) not in first_class
+            if str(key) not in first_class or _is_missing(row.get(str(key)))
         }
 
         record: dict[str, object] = {"schema_version": SCHEMA_VERSION}

@@ -1,11 +1,4 @@
-"""
-CMD (color-magnitude diagram) utilities for LTV candidates.
-
-Scaffolding for:
-- Extinction-corrected BP-RP and M_G
-- MIST isochrone loading (vendored grid)
-- Group assignment (rules supplied later)
-"""
+"""CMD (color-magnitude diagram) utilities for LTV candidates."""
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -91,9 +84,7 @@ def fetch_bailer_jones_distances(
     df["bj_r_med_photogeo"] = np.nan
     df["bj_r_med_geo"] = np.nan
 
-    src_col = source_id_col or _first_existing_column(
-        df, ["source_id", "gaia_source_id", "gaia_dr3_source_id"]
-    )
+    src_col = source_id_col or _first_existing_column(df, ["source_id", "gaia_id"])
     if src_col is None:
         if verbose:
             print("Warning: no source_id column found; skipping Bailer-Jones query")
@@ -172,15 +163,15 @@ def compute_cmd_features(
     e_bp_rp_per_av: float = CMD_E_BP_RP_PER_AV,
 ) -> pd.DataFrame:
     """
-    Compute CMD quantities (BP-RP, M_G), with optional extinction correction.
+    Compute canonical CMD quantities with optional extinction correction.
 
     Uses A_v_3d if present to compute:
       A_G = a_g_per_av * A_V
       E(BP-RP) = e_bp_rp_per_av * A_V
 
     Adds columns:
-      - bp_rp, bp_rp0
-      - M_G, M_G0
+      - bp_rp, bprp0
+      - mg, mg0
       - distance_pc (if derived from parallax)
     """
     if df.empty:
@@ -188,9 +179,9 @@ def compute_cmd_features(
 
     df = df.copy()
 
-    g_col = g_col or _first_existing_column(df, ["gaia_phot_g_mean_mag", "phot_g_mean_mag", "G", "g_mag"])
-    bp_col = bp_col or _first_existing_column(df, ["gaia_bp_mag", "phot_bp_mean_mag", "BP", "bp_mag"])
-    rp_col = rp_col or _first_existing_column(df, ["gaia_rp_mag", "phot_rp_mean_mag", "RP", "rp_mag"])
+    g_col = g_col or _first_existing_column(df, ["phot_g_mean_mag", "G", "g_mag"])
+    bp_col = bp_col or _first_existing_column(df, ["phot_bp_mean_mag", "BP", "bp_mag"])
+    rp_col = rp_col or _first_existing_column(df, ["phot_rp_mean_mag", "RP", "rp_mag"])
 
     if g_col is None or bp_col is None or rp_col is None:
         return df
@@ -204,12 +195,9 @@ def compute_cmd_features(
             "bj_r_med_geo",
             "distance_gspphot",
             "distance_pc",
-            "gaia_distance_pc",
         ],
     )
-    parallax_col = parallax_mas_col or _first_existing_column(
-        df, ["gaia_parallax", "parallax"]
-    )
+    parallax_col = parallax_mas_col or _first_existing_column(df, ["parallax"])
 
     if dist_col is not None:
         dist_pc = df[dist_col].astype(float)
@@ -227,7 +215,7 @@ def compute_cmd_features(
     g = df[g_col].astype(float)
 
     df["bp_rp"] = bp - rp
-    df["M_G"] = g - 5.0 * np.log10(dist_pc) + 5.0
+    df["mg"] = g - 5.0 * np.log10(dist_pc) + 5.0
 
     # Extinction correction if available
     if av_col in df.columns:
@@ -235,8 +223,8 @@ def compute_cmd_features(
         a_g = a_g_per_av * av
         e_bp_rp = e_bp_rp_per_av * av
 
-        df["bp_rp0"] = df["bp_rp"] - e_bp_rp
-        df["M_G0"] = df["M_G"] - a_g
+        df["bprp0"] = df["bp_rp"] - e_bp_rp
+        df["mg0"] = df["mg"] - a_g
         df["A_G"] = a_g
         df["E_bp_rp"] = e_bp_rp
         df["R_V"] = r_v
@@ -248,8 +236,8 @@ def assign_cmd_groups(
     df: pd.DataFrame,
     *,
     boundaries: dict | None = None,
-    cmd_color_col: str = "bp_rp0",
-    cmd_mag_col: str = "M_G0",
+    cmd_color_col: str = "bprp0",
+    cmd_mag_col: str = "mg0",
 ) -> pd.DataFrame:
     """
     Assign CMD groups based on provided boundary rules.

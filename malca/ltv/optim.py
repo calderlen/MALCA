@@ -23,6 +23,8 @@ from malca.config import MAD_SCALE
 # NUMBA JIT FUNCTIONS
 # =============================================================================
 
+os.environ.setdefault("NUMBA_NUM_THREADS", "1")
+
 from numba import jit, prange
 
 

@@ -4,13 +4,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
-post_filter = pytest.importorskip("malca.filter")
+post_filter = pytest.importorskip("malca.stv.filter")
 
 
 def test_validate_gaia_proper_motion_flags_without_reject(monkeypatch) -> None:
     df = pd.DataFrame(
         {
-            "path": ["a.csv", "b.csv"],
+            "lc_path": ["a.csv", "b.csv"],
             "gaia_id": ["1001", "1002"],
         }
     )
@@ -40,7 +40,7 @@ def test_validate_gaia_proper_motion_flags_without_reject(monkeypatch) -> None:
 def test_validate_gaia_proper_motion_rejects_high_pm(monkeypatch) -> None:
     df = pd.DataFrame(
         {
-            "path": ["a.csv", "b.csv"],
+            "lc_path": ["a.csv", "b.csv"],
             "gaia_id": ["2001", "2002"],
         }
     )
@@ -62,5 +62,5 @@ def test_validate_gaia_proper_motion_rejects_high_pm(monkeypatch) -> None:
     out = post_filter.validate_gaia_proper_motion(df, max_pm=100.0, flag_only=False)
 
     assert len(out) == 1
-    assert out.iloc[0]["path"] == "a.csv"
+    assert out.iloc[0]["lc_path"] == "a.csv"
     assert bool(out.iloc[0]["high_pm_flag"]) is False

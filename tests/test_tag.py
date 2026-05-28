@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from malca import tag
+from malca.stv import tag
 
 
 def _write_mock_dat(path: Path) -> None:

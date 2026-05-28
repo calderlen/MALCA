@@ -13,15 +13,16 @@ from __future__ import annotations
 
 from pathlib import Path
 import argparse
-import os
 
 from tqdm.auto import tqdm
 import numpy as np
 import pandas as pd
 
 from concurrent.futures import ProcessPoolExecutor
+from malca.candidates import passing_candidates_mask
 from malca.config import ASASSN_INDEX_PATH
 from malca.config import LTV_MAX_PM
+from malca.product_schema import add_ltv_identity, assert_ltv_product_schema
 from malca.review.store import db_connect, import_candidates
 from malca.table_io import read_parquet_table, require_parquet_path
 from malca.ltv.paths import (
@@ -37,112 +38,24 @@ from malca.ltv.paths import (
 
 
 
-# ---------------------------------------------------------------------------
-# Column mapping: LTV pipeline output → review DB schema
-# ---------------------------------------------------------------------------
-
-# Core output columns from core.py → ltv_* names
-_CORE_COL_MAP = {
-    "Slope":       "ltv_slope",
-    "Quad Slope":  "ltv_slope_quad",
-    "max diff":    "ltv_max_diff",
-    "Dispersion":  "ltv_dispersion",
-    "Median":      "ltv_median",
-    "Median_err":  "ltv_median_err",
-    "n_seasons":   "ltv_n_seasons",
-    "time_span_days": "ltv_time_span_days",
-    "n_unique_nights": "ltv_n_unique_nights",
-    "ls_period":   "ltv_ls_period",
-    "ls_power":    "ltv_ls_power",
-    "ls_fap":      "ltv_ls_fap",
-    "coeff1":      "ltv_coeff1",
-    "coeff2":      "ltv_coeff2",
-    "vg_has_v":    "ltv_vg_has_v",
-    "vg_overlap_days": "ltv_vg_overlap_days",
-    "vg_overlap_fraction": "ltv_vg_overlap_fraction",
-    "season_points_min": "ltv_season_points_min",
-    "season_points_median": "ltv_season_points_median",
-    "season_points_max": "ltv_season_points_max",
-    "season_span_days_mean": "ltv_season_span_days_mean",
-    "season_span_days_median": "ltv_season_span_days_median",
-    "season_span_days_max": "ltv_season_span_days_max",
-    "season_step_max_mag": "ltv_season_step_max_mag",
-    "season_step_mean_abs_mag": "ltv_season_step_mean_abs_mag",
-    "season_step_max_fraction": "ltv_season_step_max_fraction",
-    "season_monotonicity_fraction": "ltv_season_monotonicity_fraction",
-    "season_spearman_rho": "ltv_season_spearman_rho",
-    "season_kendall_tau": "ltv_season_kendall_tau",
-    "leave1out_slope_std": "ltv_leave1out_slope_std",
-    "leave1out_slope_range": "ltv_leave1out_slope_range",
-    "trend_slope_mag_per_year": "ltv_trend_slope_mag_per_year",
-    "trend_quad_mag_per_year2": "ltv_trend_quad_mag_per_year2",
-    "trend_slope_err_mag_per_year": "ltv_trend_slope_err_mag_per_year",
-    "trend_slope_snr": "ltv_trend_slope_snr",
-    "trend_r2": "ltv_trend_r2",
-    "trend_delta_bic_linear": "ltv_trend_delta_bic_linear",
-    "trend_delta_bic_quadratic": "ltv_trend_delta_bic_quadratic",
-}
-
-# Pipeline output columns (neowise, crossmatch, dust) → ltv_* names
-_PIPELINE_COL_MAP = {
-    # NEOWISE
-    "w1_slope":         "ltv_neowise_w1_slope",
-    "w1_w2_slope":      "ltv_neowise_w1_w2_slope",
-    "neowise_n_epochs": "ltv_neowise_n_epochs",
-    # Crossmatch
-    "vsx_name":         "ltv_vsx_name",
-    # Dust flags
-    "dust_candidate":   "ltv_dust_candidate",
-    "dust_excess":      "ltv_dust_excess",
-    # Stochastic post-filter features
-    "stoch_sf_ml_amplitude": "ltv_stoch_sf_ml_amplitude",
-    "stoch_sf_ml_gamma":     "ltv_stoch_sf_ml_gamma",
-    "stoch_iar_phi":         "ltv_stoch_iar_phi",
-    "stoch_mhps_high":       "ltv_stoch_mhps_high",
-    "stoch_mhps_low":        "ltv_stoch_mhps_low",
-    "stoch_mhps_non_zero":   "ltv_stoch_mhps_non_zero",
-    "stoch_mhps_pn_flag":    "ltv_stoch_mhps_pn_flag",
-    "stoch_mhps_ratio":      "ltv_stoch_mhps_ratio",
-    "stoch_gp_drw_sigma":    "ltv_stoch_gp_drw_sigma",
-    "stoch_gp_drw_tau":      "ltv_stoch_gp_drw_tau",
-}
-
-
 def map_ltv_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Rename LTV pipeline output columns to review DB schema names.
-
-    Handles both raw LTV core output and full LTV pipeline output
-    (with crossmatch, NEOWISE, dust, extinction).
+    Normalize canonical LTV pipeline output for review DB ingest.
 
     Returns a new DataFrame with:
-    - candidate_id = "ltv_{asas_sn_id}"
-    - asas_sn_id preserved as the standard LTV source ID column
-    - ltv_* columns from pipeline output
-    - ra_deg, dec_deg preserved for characterization
+    - candidate_id = "ltv_{asas_sn_id}" when missing
+    - canonical shared product columns preserved
+    - derived review convenience flags for canonical crossmatch/context columns
     """
     df = df.copy()
-
-    if "asas_sn_id" not in df.columns:
-        raise ValueError("LTV DataFrame must have an 'asas_sn_id' column")
-
+    df = add_ltv_identity(df)
+    assert_ltv_product_schema(df, stage="review_ingest")
     df["asas_sn_id"] = df["asas_sn_id"].astype(str)
 
-    df["candidate_id"] = "ltv_" + df["asas_sn_id"]
-
-    # --- Map core columns ---
-    for src, dst in _CORE_COL_MAP.items():
-        if src in df.columns and dst not in df.columns:
-            df[dst] = df[src]
-            df = df.drop(columns=[src])
-
-    # --- Map pipeline columns ---
-    for src, dst in _PIPELINE_COL_MAP.items():
-        if src in df.columns and dst not in df.columns:
-            df[dst] = df[src]
-            df = df.drop(columns=[src])
-
-    # --- Derive boolean crossmatch flags from name columns ---
+    # Generic VSX catalog columns are canonical shared enrichment output;
+    # mirror the name into the LTV-specific review column used by the UI.
+    if "vsx_name" in df.columns and "ltv_vsx_name" not in df.columns:
+        df["ltv_vsx_name"] = df["vsx_name"]
     if "ltv_vsx_name" in df.columns and "ltv_vsx_match" not in df.columns:
         df["ltv_vsx_match"] = df["ltv_vsx_name"].notna().astype(int)
 
@@ -152,31 +65,6 @@ def map_ltv_columns(df: pd.DataFrame) -> pd.DataFrame:
     if "gaia_alert_name" in df.columns and "ltv_gaia_alert_match" not in df.columns:
         df["ltv_gaia_alert_match"] = df["gaia_alert_name"].notna().astype(int)
 
-    # --- Normalize LTV filter pass flag ---
-    if "failed_any" in df.columns and "ltv_passed_filters" not in df.columns:
-        failed = df["failed_any"]
-        if pd.api.types.is_bool_dtype(failed):
-            df["ltv_passed_filters"] = (~failed.fillna(False).astype(bool)).astype(int)
-        elif pd.api.types.is_numeric_dtype(failed):
-            df["ltv_passed_filters"] = (failed.fillna(0).astype(float) == 0.0).astype(int)
-        else:
-            lowered = failed.astype("string").str.strip().str.lower()
-            df["ltv_passed_filters"] = (~lowered.isin({"1", "true", "t", "yes", "y"}).fillna(False)).astype(int)
-    elif "ltv_passed_filters" not in df.columns:
-        df["ltv_passed_filters"] = 1
-
-    # --- Rename PanSTARRS g-mag to baseline_mag if not already present ---
-    if "Pstarss gmag" in df.columns and "baseline_mag" not in df.columns:
-        df["baseline_mag"] = df["Pstarss gmag"]
-        df = df.drop(columns=["Pstarss gmag"])
-
-    # --- Normalize Gaia proper motion outputs to review-standard names ---
-    if "gaia_pmra" in df.columns and "pmra" not in df.columns:
-        df["pmra"] = df["gaia_pmra"]
-    if "gaia_pmdec" in df.columns and "pmdec" not in df.columns:
-        df["pmdec"] = df["gaia_pmdec"]
-    if "gaia_pm_total" in df.columns and "pm_total" not in df.columns:
-        df["pm_total"] = df["gaia_pm_total"]
     if "pm_total" not in df.columns and {"pmra", "pmdec"}.issubset(df.columns):
         pmra = pd.to_numeric(df["pmra"], errors="coerce")
         pmdec = pd.to_numeric(df["pmdec"], errors="coerce")
@@ -187,7 +75,7 @@ def map_ltv_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     # --- Cast int bool columns ---
     for col in (
-        "ltv_passed_filters",
+        "failed_any",
         "ltv_failed_slope",
         "ltv_failed_max_diff",
         "ltv_failed_dec",
@@ -385,14 +273,7 @@ def ingest_ltv_results(
     df = map_ltv_columns(ltv_df)
 
     if "failed_any" in df.columns:
-        failed = df["failed_any"]
-        if pd.api.types.is_bool_dtype(failed):
-            pass_mask = ~failed.fillna(False).astype(bool)
-        elif pd.api.types.is_numeric_dtype(failed):
-            pass_mask = failed.fillna(0).astype(float) == 0.0
-        else:
-            lowered = failed.astype("string").str.strip().str.lower()
-            pass_mask = ~lowered.isin({"1", "true", "t", "yes", "y"}).fillna(False)
+        pass_mask = passing_candidates_mask(df)
         n_before = len(df)
         df = df.loc[pass_mask].copy()
         if verbose and len(df) != n_before:

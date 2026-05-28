@@ -52,7 +52,7 @@ from malca.config import (
     INJECTION_MIN_POINTS,
     INJECTION_SEED,
 )
-from malca.events import score_lightcurve
+from malca.stv.events import score_lightcurve
 from malca.utils import read_lc_dat2
 
 

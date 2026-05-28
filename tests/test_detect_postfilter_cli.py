@@ -14,7 +14,7 @@ pytest.importorskip("astroquery")
 pytest.importorskip("dustmaps3d")
 pytest.importorskip("banyan_sigma")
 
-from malca.detect import (
+from malca.stv.pipeline import (
     PIPELINE_STAGE_CHOICES,
     _branch_events_attempted_this_run,
     _build_filter_kwargs,
@@ -133,7 +133,7 @@ def test_bundle_lightcurves_reads_only_passing_candidates(tmp_path: Path) -> Non
     fail_lc.write_text("1 14.0 0.1\n", encoding="ascii")
     pd.DataFrame(
         {
-            "path": [str(pass_lc), str(fail_lc)],
+            "lc_path": [str(pass_lc), str(fail_lc)],
             "failed_any": [False, True],
         }
     ).to_parquet(results_dir / "lc_events_filtered.parquet", index=False)
@@ -174,6 +174,7 @@ def test_extended_enrichment_helpers_use_passers_and_safe_defaults(tmp_path: Pat
 
     df = pd.DataFrame({
         "candidate_id": ["C1", "C2"],
+        "lc_path": ["/tmp/C1.dat2", "/tmp/C2.dat2"],
         "failed_any": [False, True],
         "ra": [10.0, 11.0],
         "dec": [20.0, 21.0],
@@ -195,7 +196,7 @@ def test_extended_enrichment_helpers_use_passers_and_safe_defaults(tmp_path: Pat
     )
 
     kwargs = captured["external_kwargs"]
-    assert captured["external_ids"] == ["C1"]
+    assert captured["external_ids"] == ["stv_C1"]
     assert kwargs["run_atlas"] is False
     assert kwargs["run_ztf"] is True
     assert kwargs["run_gaia_epoch"] is True
@@ -207,7 +208,7 @@ def test_extended_enrichment_helpers_use_passers_and_safe_defaults(tmp_path: Pat
     assert kwargs["run_aavso"] is False
     assert kwargs["workers"] == 7
     assert kwargs["refresh_cache"] is True
-    assert captured["multi_ids"] == ["C1"]
+    assert captured["multi_ids"] == ["stv_C1"]
     assert captured["multi_external_lc_dir"] == external_dir
     assert external_path.exists()
     assert multi_path.exists()
@@ -498,14 +499,14 @@ def test_pipeline_event_subprocesses_always_use_parquet_chunk(tmp_path: Path, mo
         output_dir.mkdir(parents=True, exist_ok=True)
         pd.DataFrame(
             {
-                "path": paths,
+                "lc_path": paths,
                 "dip_significant": [False] * len(paths),
                 "jump_significant": [False] * len(paths),
             }
         ).to_parquet(output_dir / "chunk_000000.parquet", index=False)
         return SimpleNamespace(returncode=0)
 
-    monkeypatch.setattr("malca.detect.subprocess.run", fake_run)
+    monkeypatch.setattr("malca.stv.pipeline.subprocess.run", fake_run)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -571,7 +572,7 @@ def test_pipeline_home_accepts_import_bundle_cli(tmp_path: Path, monkeypatch) ->
     bundle_src = tmp_path / "bundle_src"
     filtered = bundle_src / "results" / "lc_events_filtered.parquet"
     filtered.parent.mkdir(parents=True)
-    pd.DataFrame(columns=["path", "failed_any"]).to_parquet(filtered, index=False)
+    pd.DataFrame(columns=["lc_path", "candidate_id", "timescale", "failed_any"]).to_parquet(filtered, index=False)
     (bundle_src / "run_params.json").write_text(
         json.dumps({"mag_bin": ["13_13.5"]}),
         encoding="ascii",

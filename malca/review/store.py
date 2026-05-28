@@ -423,8 +423,13 @@ def detect_run_directory_files(run_dir: Path) -> dict[str, Path | None]:
 # ---------------------------------------------------------------------------
 _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     # -- identification --
+    ("timescale",                "TEXT",    "text"),
     ("asas_sn_id",               "TEXT",    "text"),
     ("lc_path",                  "TEXT",    "text"),
+    ("source_id",                "TEXT",    "text"),
+    ("gaia_id",                  "TEXT",    "text"),
+    ("ra",                       "REAL",    "float"),
+    ("dec",                      "REAL",    "float"),
     ("asassn_field_key",         "TEXT",    "text"),
     ("asassn_fields",            "TEXT",    "text"),
     ("asassn_field_count",       "REAL",    "float"),
@@ -435,6 +440,7 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("camera_field_key_fraction","REAL",    "float"),
     # -- top-level filter flags --
     ("failed_any",               "INTEGER", "bool"),
+    ("filter_reason",            "TEXT",    "text"),
     ("periodic_flag",            "INTEGER", "bool"),
     ("catalog_match",            "INTEGER", "bool"),
     ("catalog_source",           "TEXT",    "text"),
@@ -559,6 +565,13 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("pm_total",                 "REAL",    "float"),
     ("high_pm_flag",             "INTEGER", "bool"),
     # -- photometry --
+    ("phot_g_mean_mag",          "REAL",    "float"),
+    ("phot_bp_mean_mag",         "REAL",    "float"),
+    ("phot_rp_mean_mag",         "REAL",    "float"),
+    ("bp_rp",                    "REAL",    "float"),
+    ("mg",                       "REAL",    "float"),
+    ("mg0",                      "REAL",    "float"),
+    ("bprp0",                    "REAL",    "float"),
     ("tmass_j",                  "REAL",    "float"),
     ("tmass_j_err",              "REAL",    "float"),
     ("tmass_h",                  "REAL",    "float"),
@@ -709,6 +722,10 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("iphas_ha_excess",          "REAL",    "float"),
     # -- light curve basics --
     ("n_points",                 "REAL",    "float"),
+    ("jd_first",                 "REAL",    "float"),
+    ("jd_last",                  "REAL",    "float"),
+    ("time_span_days",           "REAL",    "float"),
+    ("n_unique_nights",          "REAL",    "float"),
     ("n_cameras",                "REAL",    "float"),
     ("baseline_mag",             "REAL",    "float"),
     ("baseline_source",          "TEXT",    "text"),
@@ -863,8 +880,6 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("ltv_median",                   "REAL",    "float"),  # median magnitude
     ("ltv_median_err",               "REAL",    "float"),  # robust LC scatter proxy from core output
     ("ltv_n_seasons",                "INTEGER", "float"),  # number of non-empty seasons
-    ("ltv_time_span_days",           "REAL",    "float"),
-    ("ltv_n_unique_nights",          "INTEGER", "float"),
     ("ltv_ls_period",                "REAL",    "float"),  # best LS period (days)
     ("ltv_ls_power",                 "REAL",    "float"),  # LS power at best period
     ("ltv_ls_fap",                   "REAL",    "float"),  # LS false alarm probability
@@ -895,7 +910,6 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("ltv_trend_delta_bic_linear",   "REAL",    "float"),
     ("ltv_trend_delta_bic_quadratic", "REAL",   "float"),
     # -- LTV: filter flags --
-    ("ltv_passed_filters",           "INTEGER", "bool"),   # passed all false positive filters
     ("ltv_failed_slope",             "INTEGER", "bool"),
     ("ltv_failed_max_diff",          "INTEGER", "bool"),
     ("ltv_failed_dec",               "INTEGER", "bool"),
@@ -904,7 +918,6 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("ltv_failed_high_pm",           "INTEGER", "bool"),
     ("ltv_failed_neighbor_high_pm",  "INTEGER", "bool"),
     ("ltv_failed_crowding",          "INTEGER", "bool"),
-    ("ltv_filter_reason",            "TEXT",    "text"),
     ("ltv_class",                    "TEXT",    "text"),
     ("ltv_class_reason",             "TEXT",    "text"),
     ("ltv_interest_score",           "REAL",    "float"),

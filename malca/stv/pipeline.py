@@ -14,10 +14,10 @@ Workflow:
 9. [Optional] Enrich passing candidates with comprehensive light curve stats
 
 Usage:
-    malca detect --mag-bin 13_13.5 [options...]
-    malca detect --mag-bin 13_13.5 14_14.5 [options...]  # Process multiple bins together
-    malca detect --mag-bin all [options...]  # Process all 6 magnitude bins together
-    malca detect --mag-bin 13_13.5 --run-filter --run-classify --run-enrich
+    malca stv-pipeline --mag-bin 13_13.5 [options...]
+    malca stv-pipeline --mag-bin 13_13.5 14_14.5 [options...]  # Process multiple bins together
+    malca stv-pipeline --mag-bin all [options...]  # Process all 6 magnitude bins together
+    malca stv-pipeline --mag-bin 13_13.5 --run-filter --run-classify --run-enrich
 """
 from __future__ import annotations
 
@@ -25,7 +25,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 import argparse
-import hashlib
 import json
 import os
 import re
@@ -47,7 +46,7 @@ from malca.config import (
     SPECTRA_RADIUS_ARCSEC, SPECTRA_CHUNK_SIZE,
     UNWISE_CHECKPOINT_EVERY,
 )
-from malca.candidates import select_passing_candidates
+from malca.candidates import ensure_candidate_id, merge_candidate_columns, select_passing_candidates
 from malca.config import (
     MIN_TIME_SPAN, MIN_POINTS_PER_DAY, MIN_CAMERAS,
     VSX_MAX_SEP_ARCSEC, CAMERA_MEDIAN_TOLERANCE, STATS_CHUNK_SIZE,
@@ -76,15 +75,31 @@ from malca.enrich.spectra import run_spectra_availability
 from malca.gaia_fetch import _extract_gaia_ids, fetch_gaia_catalog
 from malca.gaia_ids import normalize_gaia_source_id_series
 from malca.manifest import build_manifest
-from malca.periodicity_gate import apply_pre_periodicity_gate, PREGATE_ROUTER_MODE
-from malca.plot import plot_passing_candidates
-from malca.filter import apply_filters
-from malca.review.sync import auto_export_review_bundle
-from malca.run_metadata import build_run_summary, load_summary_state, preserve_imported_run_snapshots
+from malca.product_schema import add_stv_identity, assert_stv_product_schema
+from malca.stv.periodicity_gate import apply_pre_periodicity_gate, PREGATE_ROUTER_MODE
+from malca.stv.plot import plot_passing_candidates
+from malca.stv.filter import apply_filters
+from malca.run_bundle import collect_candidate_lightcurve_files, export_run_bundle, import_bundle_zip
+from malca.run_context import (
+    init_pipeline_run_context,
+    maybe_sync_review_bundle,
+    run_dir_from_bundle,
+    write_run_log,
+    write_run_params,
+    write_run_summary,
+)
+from malca.run_metadata import (
+    build_fingerprint,
+    build_run_summary,
+    fingerprint_digest,
+    json_stable,
+    load_summary_state,
+    preserve_imported_run_snapshots,
+)
 from malca.review.store import db_connect, import_candidates
 from concurrent.futures import ProcessPoolExecutor
 from malca.stats import compute_stats, _enrich_row_worker
-from malca.tag import RAW_MEDIAN_SUSPECT_COL, apply_tags, filter_camera_medians
+from malca.stv.tag import RAW_MEDIAN_SUSPECT_COL, apply_tags, filter_camera_medians
 from malca.table_io import (
     read_parquet_table,
     read_passing_parquet_table,
@@ -261,15 +276,15 @@ RUN_REUSE_PARAM_ATTRS = (
 RUN_REUSE_CODE_FILES = (
     "config.py",
     "cli_config.py",
-    "detect.py",
     "manifest.py",
-    "tag.py",
-    "events.py",
+    "stv/pipeline.py",
+    "stv/tag.py",
+    "stv/events.py",
     "baseline.py",
-    "triggering.py",
-    "score.py",
-    "filter.py",
-    "periodicity_gate.py",
+    "stv/triggering.py",
+    "stv/score.py",
+    "stv/filter.py",
+    "stv/periodicity_gate.py",
     "utils.py",
     "characterize.py",
     "classify.py",
@@ -525,37 +540,6 @@ def _effective_enrich_workers(args: argparse.Namespace) -> tuple[int, str | None
     return capped_workers, None
 
 
-def _json_stable(value: Any) -> Any:
-    """Normalize values so run fingerprints compare exactly after JSON round trips."""
-    if isinstance(value, Path):
-        return str(value.expanduser())
-    if isinstance(value, dict):
-        return {str(k): _json_stable(v) for k, v in sorted(value.items(), key=lambda item: str(item[0]))}
-    if isinstance(value, (list, tuple)):
-        return [_json_stable(v) for v in value]
-    return value
-
-
-def _sha256_file(path: Path) -> str | None:
-    try:
-        digest = hashlib.sha256()
-        with path.open("rb") as f:
-            for chunk in iter(lambda: f.read(1024 * 1024), b""):
-                digest.update(chunk)
-        return digest.hexdigest()
-    except OSError:
-        return None
-
-
-def _pipeline_code_fingerprint() -> dict[str, str | None]:
-    module_dir = Path(__file__).resolve().parent
-    return {
-        rel_path: _sha256_file(module_dir / rel_path)
-        for rel_path in RUN_REUSE_CODE_FILES
-        if (module_dir / rel_path).exists()
-    }
-
-
 def build_run_reuse_fingerprint(
     args: argparse.Namespace,
     *,
@@ -564,7 +548,7 @@ def build_run_reuse_fingerprint(
 ) -> dict[str, Any]:
     """Build the science-product fingerprint required for implicit run reuse."""
     params = {
-        name: _json_stable(getattr(args, name, None))
+        name: json_stable(getattr(args, name, None))
         for name in RUN_REUSE_PARAM_ATTRS
     }
     params.update({
@@ -575,23 +559,23 @@ def build_run_reuse_fingerprint(
         "clean_max_error_sigma": CLEAN_LC_MAX_ERROR_SIGMA,
         "bad_camera_scatter_ratio": BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
     })
-    return {
-        "version": RUN_REUSE_FINGERPRINT_VERSION,
-        "params": _json_stable(params),
-        "code": _pipeline_code_fingerprint(),
-    }
+    return build_fingerprint(
+        version=RUN_REUSE_FINGERPRINT_VERSION,
+        params=params,
+        code_base=Path(__file__).resolve().parent.parent,
+        code_paths=RUN_REUSE_CODE_FILES,
+    )
 
 
 def run_reuse_fingerprint_digest(fingerprint: dict[str, Any]) -> str:
-    payload = json.dumps(_json_stable(fingerprint), sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return fingerprint_digest(fingerprint)
 
 
 def _stored_run_reuse_fingerprint_matches(params: dict[str, Any], current_fingerprint: dict[str, Any]) -> bool:
     stored_fingerprint = params.get("run_reuse_fingerprint")
     if not isinstance(stored_fingerprint, dict):
         return False
-    return _json_stable(stored_fingerprint) == _json_stable(current_fingerprint)
+    return json_stable(stored_fingerprint) == json_stable(current_fingerprint)
 
 
 def _score_filter_enabled(args: argparse.Namespace) -> bool:
@@ -610,6 +594,9 @@ def _config_arg(args: argparse.Namespace, name: str) -> Any:
 
 
 def save_table(df: pd.DataFrame, path: Path) -> None:
+    if Path(path).name.startswith("lc_events_"):
+        df = add_stv_identity(df)
+        assert_stv_product_schema(df, stage=Path(path).stem)
     safe_write_parquet(df, require_parquet_path(path))
 
 
@@ -715,14 +702,7 @@ def _copy_single_tagged_table_output(tagged_outputs: list[Path], merged_path: Pa
 
 def _ensure_candidate_id_column(df: pd.DataFrame) -> pd.DataFrame:
     """Ensure downstream enrichment has a candidate_id key when one can be inferred."""
-    if "candidate_id" in df.columns:
-        return df
-    out = df.copy()
-    if "asas_sn_id" in out.columns:
-        out["candidate_id"] = out["asas_sn_id"].astype(str)
-    elif "path" in out.columns:
-        out["candidate_id"] = out["path"].apply(lambda p: Path(str(p)).stem.split(".")[0])
-    return out
+    return add_stv_identity(df)
 
 
 def _branch_events_attempted_this_run(branch_detection_stats: dict[str, object] | None) -> int | None:
@@ -777,7 +757,7 @@ def _unique_paths(paths: list[Path]) -> list[Path]:
 def _candidate_asassn_index_paths(out_dir: Path, index_override: Path | None = None) -> list[Path]:
     out_dir = Path(out_dir).expanduser()
     default_index = ASASSN_INDEX_PATH.expanduser()
-    output_root = out_dir.parents[1] if len(out_dir.parents) >= 2 else out_dir.parent
+    output_root = _output_root_from_run_dir(out_dir)
 
     candidates: list[Path] = []
     if index_override is not None:
@@ -809,6 +789,15 @@ def _candidate_asassn_index_paths(out_dir: Path, index_override: Path | None = N
     return _unique_paths(candidates)
 
 
+def _output_root_from_run_dir(out_dir: Path) -> Path:
+    path = Path(out_dir).expanduser()
+    if path.parent.name in {"stv", "ltv"} and path.parent.parent.name == "runs":
+        return path.parent.parent.parent
+    if path.parent.name == "runs":
+        return path.parent.parent
+    return path.parent
+
+
 def _resolve_asassn_index_path(out_dir: Path, index_override: Path | None = None) -> tuple[Path | None, list[Path]]:
     candidates = _candidate_asassn_index_paths(out_dir, index_override=index_override)
     for candidate in candidates:
@@ -819,7 +808,7 @@ def _resolve_asassn_index_path(out_dir: Path, index_override: Path | None = None
 
 def default_run_dir(base_root: Path) -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return base_root / "runs" / timestamp
+    return base_root / "runs" / "stv" / timestamp
 
 
 def find_latest_run_dir(
@@ -828,7 +817,7 @@ def find_latest_run_dir(
     reuse_fingerprint: dict[str, Any] | None = None,
 ) -> Path | None:
     """Find the newest run directory safe to reuse for the current configuration."""
-    runs_dir = base_root / "runs"
+    runs_dir = base_root / "runs" / "stv"
     if not runs_dir.is_dir():
         return None
     for d in sorted(runs_dir.iterdir(), reverse=True):
@@ -930,21 +919,8 @@ def get_out_dir_from_bundle(bundle_path: Path, base_root: Path, *, overwrite: bo
       - return it directly when ``overwrite`` is True
       - otherwise return a ``_home``-suffixed directory for safety
     """
-    bundle_name = bundle_path.stem  # e.g., "20260209_162336_bundle" -> "20260209_162336_bundle"
-    base_name = bundle_name.removesuffix("_bundle")  # Always strip _bundle
-
-    runs_dir = base_root / "runs"
-    runs_dir.mkdir(parents=True, exist_ok=True)
-
-    candidate = runs_dir / base_name
-    if not candidate.exists():
-        return candidate
-
-    if overwrite:
-        return candidate
-
-    # If exists, append _home
-    return runs_dir / f"{base_name}_home"
+    runs_dir = base_root / "runs" / "stv"
+    return run_dir_from_bundle(bundle_path, runs_dir, collision_suffix="_home", overwrite=overwrite)
 
 
 def clear_existing_output(path: Path | None, fmt: str) -> None:
@@ -961,30 +937,6 @@ def clear_existing_output(path: Path | None, fmt: str) -> None:
 
     path.unlink()
     print(f"Overwriting existing output file: {path}")
-
-
-def import_bundle_zip(bundle_zip: Path, out_dir: Path, *, show_progress: bool = False) -> None:
-    """Extract a pipeline transfer bundle into out_dir."""
-    bundle_zip = Path(bundle_zip).expanduser()
-    if not bundle_zip.exists():
-        raise FileNotFoundError(f"Bundle not found: {bundle_zip}")
-    if not zipfile.is_zipfile(bundle_zip):
-        raise ValueError(f"Bundle is not a valid zip file: {bundle_zip}")
-
-    out_dir.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(bundle_zip, "r") as zf:
-        members = zf.infolist()
-        files = [m for m in members if not m.is_dir()]
-        total_bytes = sum(m.file_size for m in files)
-
-        if show_progress:
-            with tqdm(total=total_bytes, desc="Import bundle", unit="B", unit_scale=True) as pbar:
-                for member in members:
-                    zf.extract(member, out_dir)
-                    if not member.is_dir():
-                        pbar.update(member.file_size)
-        else:
-            zf.extractall(out_dir)
 
 
 def _collect_bundle_lightcurve_files(out_dir: Path, mag_bin_tag: str | None = None, include_all: bool = False) -> list[tuple[Path, str]]:
@@ -1004,49 +956,30 @@ def _collect_bundle_lightcurve_files(out_dir: Path, mag_bin_tag: str | None = No
 
     try:
         if include_all:
-            df_candidates = pd.read_parquet(filtered_candidates, columns=["path"])
+            df_candidates = pd.read_parquet(filtered_candidates)
         else:
-            df_candidates = load_passing_table(filtered_candidates, columns=["path"])
+            df_candidates = load_passing_table(filtered_candidates)
     except Exception as exc:
         print(f"Warning: could not read {filtered_candidates} for light curve bundling: {exc}")
         return []
 
-    if "path" not in df_candidates.columns:
+    if "lc_path" not in df_candidates.columns:
         return []
 
     if not include_all:
         print(f"Bundling light curves for {len(df_candidates)} passing candidates (failed_any=False)")
 
-    files_to_bundle: list[tuple[Path, str]] = []
-    seen_files: set[Path] = set()
-
-    path_series = pd.Series(df_candidates["path"])
-    for raw_path in path_series.dropna().astype(str).unique().tolist():
-        dat_path = Path(raw_path).expanduser()
-        # Accept any dat extension (.dat, .dat2, .dat3, etc.)
-        if not dat_path.suffix.lower().startswith(".dat"):
-            continue
-
-        for source_file in (dat_path, dat_path.with_suffix(".raw2")):
-            if not source_file.exists() or (not source_file.is_file()):
-                continue
-
-            resolved = source_file.resolve()
-            if resolved in seen_files:
-                continue
-
-            seen_files.add(resolved)
-            arcname = f"bundle_assets/lightcurves/{resolved.name}"
-            files_to_bundle.append((resolved, arcname))
-
-    return files_to_bundle
+    return collect_candidate_lightcurve_files(
+        df_candidates,
+        path_cols=("lc_path",),
+        arc_prefix="bundle_assets/lightcurves",
+        allowed_suffix_prefixes=("dat",),
+        sidecar_suffixes=(".raw2",),
+    ).files
 
 
 def export_bundle_zip(bundle_zip: Path, out_dir: Path, include_all: bool = False, mag_bin_tag: str | None = None) -> list[str]:
     """Create transfer bundle zip from a pipeline out_dir."""
-    bundle_zip = Path(bundle_zip).expanduser()
-    bundle_zip.parent.mkdir(parents=True, exist_ok=True)
-
     include_rel_paths = [
         "run_params.json",
         "run_summary.json",
@@ -1082,53 +1015,17 @@ def export_bundle_zip(bundle_zip: Path, out_dir: Path, include_all: bool = False
     ]
     if include_all:
         include_dirs.extend(["manifests", "tags", "paths", "gaia_cache"])
-
-    files_to_add: set[Path] = set()
-    for rel in include_rel_paths:
-        p = out_dir / rel
-        if p.exists() and p.is_file():
-            files_to_add.add(p)
-        elif p.exists() and p.is_dir():
-            files_to_add.update(child for child in p.rglob("*") if child.is_file())
-
-    for pattern in include_globs:
-        for p in out_dir.glob(pattern):
-            if p.exists() and p.is_file():
-                files_to_add.add(p)
-            elif p.exists() and p.is_dir():
-                files_to_add.update(child for child in p.rglob("*") if child.is_file())
-
-    for rel_dir in include_dirs:
-        d = out_dir / rel_dir
-        if d.exists() and d.is_dir():
-            for p in d.rglob("*"):
-                if p.is_file():
-                    files_to_add.add(p)
-
-    # Prevent accidental self-inclusion if bundle path is inside out_dir.
-    files_to_add.discard(bundle_zip)
-
     lightcurve_files = _collect_bundle_lightcurve_files(out_dir, mag_bin_tag=mag_bin_tag, include_all=include_all)
-
-    if not files_to_add and not lightcurve_files:
-        raise FileNotFoundError(f"No bundle files found under {out_dir}")
-
-    ordered_files = sorted(files_to_add, key=lambda p: str(p.relative_to(out_dir)))
-    ordered_lightcurve_files = sorted(lightcurve_files, key=lambda item: item[1])
-
-    total_files = len(ordered_files) + len(ordered_lightcurve_files)
-    print(f"Bundling {total_files} files with ZIP_DEFLATED compression...")
-
-    bundled_paths: list[str] = []
-    with zipfile.ZipFile(bundle_zip, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
-        for p in ordered_files:
-            arcname = str(p.relative_to(out_dir))
-            zf.write(p, arcname=arcname)
-            bundled_paths.append(arcname)
-        for source_file, arcname in ordered_lightcurve_files:
-            zf.write(source_file, arcname=arcname)
-            bundled_paths.append(arcname)
-
+    bundled_paths = export_run_bundle(
+        bundle_zip,
+        out_dir,
+        include_files=include_rel_paths,
+        include_globs=include_globs,
+        include_dirs=include_dirs,
+        external_files=lightcurve_files,
+        description="STV run",
+    )
+    print(f"Bundled {len(bundled_paths)} files with ZIP_DEFLATED compression.")
     return bundled_paths
 
 
@@ -1143,7 +1040,7 @@ def _add_gaia_ids_from_index(df_events: pd.DataFrame, index_path) -> pd.DataFram
     Parameters
     ----------
     df_events : pd.DataFrame
-        Events DataFrame from events.py (must have 'path' column).
+        Events DataFrame from events.py (must have 'lc_path' column).
     index_path : Path or str
         Path to the ASASSN index parquet (or CSV) file.
 
@@ -1153,8 +1050,8 @@ def _add_gaia_ids_from_index(df_events: pd.DataFrame, index_path) -> pd.DataFram
         Events DataFrame with gaia_id and asas_sn_id columns added
         (NaN for the rare unmatched sources).
     """
-    if "path" not in df_events.columns:
-        _log("Warning: Cannot add gaia_id - 'path' column not found")
+    if "lc_path" not in df_events.columns:
+        _log("Warning: Cannot add gaia_id - 'lc_path' column not found")
         return df_events
 
     if not Path(index_path).exists():
@@ -1173,7 +1070,7 @@ def _add_gaia_ids_from_index(df_events: pd.DataFrame, index_path) -> pd.DataFram
             except Exception:
                 return None
 
-        df["asas_sn_id"] = df["path"].apply(_extract_id)
+        df["asas_sn_id"] = df["lc_path"].apply(_extract_id)
 
         # Load only the columns we need from the index
         index_path = Path(index_path)
@@ -1280,7 +1177,7 @@ def _build_home_external_validation_cmd(
     cmd = [
         sys.executable,
         "-m",
-        "malca.filter",
+        "malca.stv.filter",
         "--input",
         str(post_filter_output),
         "--output",
@@ -1409,7 +1306,7 @@ def main():
     )
 
     g_output.add_argument("--output-dir", dest="out_dir", type=str, default=None,
-                        help="Directory for all outputs (default: output/runs/<timestamp>)")
+                        help="Directory for all outputs (default: output/runs/stv/<timestamp>)")
     g_output.add_argument(
         "--import-bundle",
         type=Path,
@@ -1837,10 +1734,11 @@ def main():
     if args.gaia_cache is None:
         args.gaia_cache = GAIA_LOCAL_CATALOG
 
+    ctx = init_pipeline_run_context("stv", out_dir)
     manifests_dir = out_dir / "manifests"
     tags_dir = out_dir / "tags"
     paths_dir = out_dir / "paths"
-    results_dir = out_dir / "results"
+    results_dir = ctx.results_dir
     for d in (manifests_dir, tags_dir, paths_dir, results_dir):
         d.mkdir(parents=True, exist_ok=True)
 
@@ -1881,7 +1779,7 @@ def main():
         pre_periodicity_checkpoint = Path(args.pre_periodicity_checkpoint).expanduser()
 
     # Save run parameters to JSON for full reproducibility
-    run_start_time = datetime.now()
+    run_start_time = ctx.started_at
 
     # Build a compact fingerprint of filtering/characterization behavior.
     if args.pass_all_tags:
@@ -1996,9 +1894,9 @@ def main():
         "downstream_pass_logic": "external validations and downstream products run on filter passers (failed_any == False) by default",
     }
 
-    run_params_file = out_dir / "run_params.json"
+    run_params_file = ctx.run_params_file
     run_params_tagged_file = out_dir / f"run_params_{mag_bin_tag}.json"
-    run_summary_file = out_dir / "run_summary.json"
+    run_summary_file = ctx.run_summary_file
     imported_run_params_snapshot, imported_run_summary_snapshot = preserve_imported_run_snapshots(
         stage=stage,
         import_bundle=args.import_bundle,
@@ -2024,7 +1922,7 @@ def main():
     )
 
     results_files: list[Path] = []
-    cmd = shlex.join(getattr(sys, "orig_argv", None) or ([sys.executable] + sys.argv))
+    cmd = ctx.command
     try:
         run_params = {
             "timestamp": run_start_time.isoformat(),
@@ -2222,24 +2120,17 @@ def main():
             "paths_file_count": paths_file_count,
         }
 
-        for p in (run_params_file, run_params_tagged_file):
-            try:
-                with open(p, "w") as f:
-                    json.dump(run_params, f, indent=2, default=str)
-            except Exception as e:
-                if args.verbose:
-                    print(f"Warning: could not write {p.name}: {e}")
+        write_run_params(ctx, run_params, extra_paths=[run_params_tagged_file])
 
     except Exception as e:
         if args.verbose:
             print(f"Warning: could not write run_params.json: {e}")
 
     # Write a simple run log with the command and key paths.
-    run_log = out_dir / "run.log"
     run_log_tagged = out_dir / f"run_{mag_bin_tag}.log"
     try:
-        events_cmd_preview = shlex.join([sys.executable, "-m", "malca.events", *events_args, "--", "<paths_file>"])
-        run_log_text = "\n".join([
+        events_cmd_preview = shlex.join([sys.executable, "-m", "malca.stv.events", *events_args, "--", "<paths_file>"])
+        run_log_lines = [
                 f"timestamp: {run_start_time.isoformat()}",
                 f"command: {cmd}",
                 f"events_cmd: {events_cmd_preview}",
@@ -2255,9 +2146,9 @@ def main():
                 f"filtered_file: {filtered_file}",
                 f"stats_checkpoint: {stats_checkpoint_file}",
                 f"rejected_tag: {tags_dir / f'rejected_tag_{mag_bin_tag}.parquet'}",
-            ]) + "\n"
-        for p in (run_log, run_log_tagged):
-            p.write_text(run_log_text)
+            ]
+        write_run_log(ctx, run_log_lines)
+        run_log_tagged.write_text("\n".join(run_log_lines) + "\n", encoding="ascii")
     except Exception as e:
         if args.verbose:
             print(f"Warning: could not write run log: {e}")
@@ -2288,6 +2179,8 @@ def main():
 
     def _write_events_output(df: pd.DataFrame, path: Path, fmt: str) -> list[Path]:
         path = _normalized_output_path(path, fmt)
+        df = add_stv_identity(df)
+        assert_stv_product_schema(df, stage="events")
         if fmt == "parquet_chunk":
             if path.exists():
                 clear_existing_output(path, fmt)
@@ -2332,7 +2225,7 @@ def main():
             metadata_df.to_parquet(metadata_path, index=False, compression=PARQUET_OUTPUT_COMPRESSION)
             log(
                 f"Wrote {branch_name} metadata Parquet with columns: "
-                f"{', '.join(col for col in metadata_df.columns if col != 'path')}"
+                f"{', '.join(col for col in metadata_df.columns if col != 'lc_path')}"
             )
 
         if branch_paths_file is not None:
@@ -2356,8 +2249,8 @@ def main():
         if not args.overwrite:
             try:
                 df_existing_branch = _load_events_output(branch_output, events_format)
-                if "path" in df_existing_branch.columns:
-                    output_paths = set(df_existing_branch["path"].dropna().astype(str))
+                if "lc_path" in df_existing_branch.columns:
+                    output_paths = set(df_existing_branch["lc_path"].dropna().astype(str))
                     new_output_paths = output_paths - processed_paths
                     if new_output_paths:
                         processed_paths |= new_output_paths
@@ -2370,8 +2263,8 @@ def main():
 
             try:
                 if error_log.exists():
-                    df_existing_errors = pd.read_parquet(error_log, columns=["path"])
-                    error_paths = set(df_existing_errors["path"].dropna().astype(str))
+                    df_existing_errors = pd.read_parquet(error_log, columns=["lc_path"])
+                    error_paths = set(df_existing_errors["lc_path"].dropna().astype(str))
                     new_error_paths = error_paths - processed_paths
                     if new_error_paths:
                         processed_paths |= new_error_paths
@@ -2418,7 +2311,7 @@ def main():
             events_cmd = [
                 sys.executable,
                 "-m",
-                "malca.events",
+                "malca.stv.events",
                 *branch_events_args,
                 "--input-file",
                 str(batch_paths_file),
@@ -2679,13 +2572,13 @@ def main():
                 meta_cols.append(col)
         if len(meta_cols) == 1:
             return None
-        return df_branch[meta_cols].rename(columns={path_col: "path"}).copy()
+        return df_branch[meta_cols].rename(columns={path_col: "lc_path"}).copy()
 
     paths_file = paths_dir / f"filtered_paths_{mag_bin_tag}.txt"
     if run_upstream:
-        if run_log.exists():
+        if ctx.run_log_file.exists():
             try:
-                with run_log.open("a") as f:
+                with ctx.run_log_file.open("a") as f:
                     f.write(f"paths_file: {paths_file}\n")
                     f.write(f"periodic_paths_file: {periodic_paths_file}\n")
             except Exception as e:
@@ -2748,8 +2641,8 @@ def main():
         branch_frames = [df for df in (df_stochastic_events, df_periodic_events) if not df.empty]
         if branch_frames:
             df_events_merged = pd.concat(branch_frames, ignore_index=True)
-            if "path" in df_events_merged.columns:
-                df_events_merged = df_events_merged.drop_duplicates(subset=["path"], keep="last")
+            if "lc_path" in df_events_merged.columns:
+                df_events_merged = df_events_merged.drop_duplicates(subset=["lc_path"], keep="last")
             results_files = _write_events_output(df_events_merged, events_output, events_format)
             log(f"\nMerged branch outputs into canonical events product at {events_output}")
         else:
@@ -2766,7 +2659,6 @@ def main():
 
     # Generate run summary with results statistics
     run_end_time = datetime.now()
-    run_summary_file = out_dir / "run_summary.json"
     try:
         summary = build_run_summary(
             previous_summary=summary_state if isinstance(summary_state, dict) else {},
@@ -2812,7 +2704,7 @@ def main():
 
                 detection_stats = {
                     "total_detections": len(df_results),
-                    "unique_sources": df_results["path"].nunique() if "path" in df_results.columns else None,
+                    "unique_sources": df_results["lc_path"].nunique() if "lc_path" in df_results.columns else None,
                 }
 
                 # Count significant detections
@@ -2832,8 +2724,7 @@ def main():
                     print(f"Warning: could not parse detection results: {e}")
 
         # Write summary (will be updated again if filter/postprocess run)
-        with open(run_summary_file, "w") as f:
-            json.dump(summary, f, indent=2, default=str)
+        write_run_summary(ctx, summary)
 
         log(f"\nRun summary saved to {run_summary_file}")
 
@@ -2940,7 +2831,7 @@ def main():
                             try:
                                 df_ckpt = pd.read_parquet(enrich_checkpoint)
                                 enriched_rows = df_ckpt.to_dict("records")
-                                already_enriched = set(df_ckpt["path"].astype(str))
+                                already_enriched = set(df_ckpt["lc_path"].astype(str))
                                 log(f"Loaded enrichment checkpoint: {len(already_enriched)} already enriched")
                             except Exception as e:
                                 log(f"Warning: could not load enrichment checkpoint: {e}")
@@ -2955,7 +2846,7 @@ def main():
                         # Generate tasks lazily so large post-filter tables do not
                         # get duplicated into a second full list of row dicts.
                         df_passed_columns = list(df_passed.columns)
-                        path_col_idx = df_passed_columns.index("path")
+                        path_col_idx = df_passed_columns.index("lc_path")
 
                         def _iter_enrichment_tasks():
                             for values in df_passed.itertuples(index=False, name=None):
@@ -2993,7 +2884,7 @@ def main():
 
                         df_enriched = pd.DataFrame(enriched_rows)
                         if not df_enriched.empty:
-                            df_enriched = df_enriched.drop_duplicates(subset=["path"], keep="last")
+                            df_enriched = df_enriched.drop_duplicates(subset=["lc_path"], keep="last")
 
                         # Save enriched results
                         enrich_output = results_dir / f"lc_events_enriched_{mag_bin_tag}.parquet"
@@ -3112,8 +3003,8 @@ def main():
                     else:
                         dfs = [pd.read_parquet(f) for f in tagged_outputs]
                     merged = pd.concat(dfs, ignore_index=True)
-                    if "path" in merged.columns:
-                        merged = merged.drop_duplicates(subset=["path"], keep="last")
+                    if "lc_path" in merged.columns:
+                        merged = merged.drop_duplicates(subset=["lc_path"], keep="last")
                     if merge_prefix == "lc_events_results":
                         _write_events_output(merged, merged_path, events_format)
                     else:
@@ -3204,12 +3095,12 @@ def main():
         try:
             df_char = load_passing_table(post_filter_output)
 
-            if "path" in df_char.columns and "asas_sn_id" not in df_char.columns:
+            if "lc_path" in df_char.columns and "asas_sn_id" not in df_char.columns:
                 def _extract_id(path_str: str) -> str:
                     name = Path(path_str).name
                     return Path(name).stem.split("-")[0]
 
-                df_char["asas_sn_id"] = df_char["path"].astype(str).map(_extract_id)
+                df_char["asas_sn_id"] = df_char["lc_path"].astype(str).map(_extract_id)
 
             # Use full characterize pipeline (single source of truth)
             char_checkpoint = results_dir / "lc_events_characterized_CHECKPOINT.parquet"
@@ -3273,6 +3164,7 @@ def main():
                 if df_sed_in is None:
                     log("Warning: no suitable input found for SED photometry, skipping")
                 else:
+                    df_sed_in = ensure_candidate_id(df_sed_in, prefix="stv")
                     sources = resolve_sed_sources(args.sed_sources)
                     log(f"SED input: {len(df_sed_in)} passing candidates; sources={','.join(sources)}")
                     sed_rows = fetch_sed_photometry(df_sed_in, sources=sources, progress_callback=log)
@@ -3453,6 +3345,7 @@ def main():
                     df_neighbors_in = None
 
                 if df_neighbors_in is not None:
+                    df_neighbors_in = ensure_candidate_id(df_neighbors_in, prefix="stv")
                     neighbor_dir = results_dir / "neighbor_enrichment"
                     neighbor_cache = args.neighbor_cache.expanduser() if args.neighbor_cache else (neighbor_dir / "neighbors_cache.parquet")
                     neighbor_checkpoint = neighbor_dir / "neighbors_CHECKPOINT.parquet"
@@ -3469,14 +3362,11 @@ def main():
                     )
 
                     if not df_neighbor_summary.empty:
-                        key_col = "candidate_id" if "candidate_id" in df_neighbors_in.columns else "asas_sn_id"
-                        left = df_neighbors_in.copy()
-                        if key_col not in left.columns and "path" in left.columns:
-                            left[key_col] = left["path"].astype(str).map(lambda p: Path(p).stem.split("-")[0])
-                        left[key_col] = left[key_col].astype(str)
-                        right = df_neighbor_summary.copy()
-                        right["candidate_id"] = right["candidate_id"].astype(str)
-                        merged = left.merge(right, left_on=key_col, right_on="candidate_id", how="left")
+                        merged = merge_candidate_columns(
+                            df_neighbors_in,
+                            ensure_candidate_id(df_neighbor_summary, prefix="stv"),
+                            [col for col in df_neighbor_summary.columns if col != "candidate_id"],
+                        )
                         save_table(merged, results_dir / "lc_events_neighbors.parquet")
 
                     summary["neighbor_enrichment_stats"] = {
@@ -3524,6 +3414,7 @@ def main():
                     df_spectra_in = None
 
                 if df_spectra_in is not None:
+                    df_spectra_in = ensure_candidate_id(df_spectra_in, prefix="stv")
                     spectra_dir = results_dir / "spectra_enrichment"
                     spectra_cache = args.spectra_cache.expanduser() if args.spectra_cache else (spectra_dir / "spectra_cache.parquet")
                     spectra_checkpoint = spectra_dir / "spectra_CHECKPOINT.parquet"
@@ -3540,14 +3431,11 @@ def main():
                     )
 
                     if not spectra_summary.empty:
-                        key_col = "candidate_id" if "candidate_id" in df_spectra_in.columns else "asas_sn_id"
-                        left = df_spectra_in.copy()
-                        if key_col not in left.columns and "path" in left.columns:
-                            left[key_col] = left["path"].astype(str).map(lambda p: Path(p).stem.split("-")[0])
-                        left[key_col] = left[key_col].astype(str)
-                        right = spectra_summary.copy()
-                        right["candidate_id"] = right["candidate_id"].astype(str)
-                        merged = left.merge(right, left_on=key_col, right_on="candidate_id", how="left")
+                        merged = merge_candidate_columns(
+                            df_spectra_in,
+                            ensure_candidate_id(spectra_summary, prefix="stv"),
+                            [col for col in spectra_summary.columns if col != "candidate_id"],
+                        )
                         save_table(merged, results_dir / "lc_events_spectra.parquet")
 
                     summary["spectra_enrichment_stats"] = {
@@ -3744,15 +3632,8 @@ def main():
                     conn.close()
                     log(f"No passing candidates to import into {review_db_path}")
                 else:
-                    if "candidate_id" not in df_import.columns:
-                        if "asas_sn_id" in df_import.columns:
-                            df_import = df_import.copy()
-                            df_import["candidate_id"] = df_import["asas_sn_id"].astype(str)
-                        elif "path" in df_import.columns:
-                            df_import = df_import.copy()
-                            df_import["candidate_id"] = df_import["path"].apply(
-                                lambda p: Path(str(p)).stem.split(".")[0]
-                            )
+                    df_import = add_stv_identity(df_import)
+                    assert_stv_product_schema(df_import, stage="review_import")
                     n_total, n_new = import_candidates(
                         conn,
                         df_import,
@@ -3807,11 +3688,12 @@ def main():
                 traceback.print_exc()
         if review_db_updated:
             if args.review_sync_enabled:
-                auto_export_review_bundle(
+                maybe_sync_review_bundle(
+                    True,
                     review_db_path,
                     args.review_sync_dir,
                     hash_assets=bool(args.review_sync_hash_assets),
-                    logger=log,
+                    verbose=args.verbose,
                 )
             else:
                 log("Review Git bundle auto-sync disabled by --no-review-sync")

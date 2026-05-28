@@ -12,7 +12,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 import pytest
 
-from malca.events import (
+from malca.stv.events import (
     build_events_writer_columns,
     build_runs,
     classify_run_morphology,
@@ -350,12 +350,12 @@ class TestRunBayesianSignificance:
                 "trigger_max": 10.0,
             }
 
-        monkeypatch.setattr("malca.events.resolve_trigger_indices", fake_resolve_trigger_indices)
+        monkeypatch.setattr("malca.stv.events.resolve_trigger_indices", fake_resolve_trigger_indices)
         monkeypatch.setattr(
-            "malca.events.classify_run_morphology",
+            "malca.stv.events.classify_run_morphology",
             lambda *args, **kwargs: {"morphology": "test", "bic": 0.0, "delta_bic_null": 0.0, "params": {}},
         )
-        monkeypatch.setattr("malca.events.compute_symmetry_score", lambda *args, **kwargs: 0.0)
+        monkeypatch.setattr("malca.stv.events.compute_symmetry_score", lambda *args, **kwargs: 0.0)
 
         result = score_events_bayesian(
             df,
@@ -409,9 +409,9 @@ class TestRunBayesianSignificance:
             seen_sigma_eff.append(np.asarray(sigma_eff_arr, dtype=float).copy())
             return {"morphology": "test", "bic": 0.0, "delta_bic_null": 0.0, "params": {}}
 
-        monkeypatch.setattr("malca.events.resolve_trigger_indices", fake_resolve_trigger_indices)
-        monkeypatch.setattr("malca.events.classify_run_morphology", fake_classify_run_morphology)
-        monkeypatch.setattr("malca.events.compute_symmetry_score", lambda *args, **kwargs: 0.0)
+        monkeypatch.setattr("malca.stv.events.resolve_trigger_indices", fake_resolve_trigger_indices)
+        monkeypatch.setattr("malca.stv.events.classify_run_morphology", fake_classify_run_morphology)
+        monkeypatch.setattr("malca.stv.events.compute_symmetry_score", lambda *args, **kwargs: 0.0)
 
         result = score_events_bayesian(
             df,
@@ -496,7 +496,7 @@ def test_events_main_phase_template_uses_metadata_period_and_keeps_audit_fields(
     metadata_file = tmp_path / "metadata.parquet"
     pd.DataFrame(
         {
-            "path": [str(lc_path)],
+            "lc_path": [str(lc_path)],
             "excluded_cameras": [""],
             "raw_median_suspect_cameras": ["5"],
             "pre_periodicity_label": ["periodic"],
@@ -515,12 +515,12 @@ def test_events_main_phase_template_uses_metadata_period_and_keeps_audit_fields(
         logbf_threshold_jump=2.0,
         run_min_points=2,
     )
-    monkeypatch.setattr("malca.events.ProcessPoolExecutor", ThreadPoolExecutor)
+    monkeypatch.setattr("malca.stv.events.ProcessPoolExecutor", ThreadPoolExecutor)
     monkeypatch.setattr(
         sys,
         "argv",
         [
-            "malca.events",
+            "malca.stv.events",
             "--input-file",
             str(input_file),
             "--metadata",
@@ -570,18 +570,18 @@ def test_events_main_fails_on_high_error_fraction_and_only_checkpoints_successes
         if path.startswith("bad"):
             raise RuntimeError(f"synthetic failure for {path}")
         return {
-            "path": path,
+            "lc_path": path,
             "dip_significant": False,
             "jump_significant": False,
         }
 
-    monkeypatch.setattr("malca.events.ProcessPoolExecutor", ThreadPoolExecutor)
-    monkeypatch.setattr("malca.events._process_one", fake_process_one)
+    monkeypatch.setattr("malca.stv.events.ProcessPoolExecutor", ThreadPoolExecutor)
+    monkeypatch.setattr("malca.stv.events._process_one", fake_process_one)
     monkeypatch.setattr(
         sys,
         "argv",
         [
-            "malca.events",
+            "malca.stv.events",
             "--input-file",
             str(input_file),
             "--output",
@@ -599,14 +599,14 @@ def test_events_main_fails_on_high_error_fraction_and_only_checkpoints_successes
     assert exc_info.value.code == 2
 
     out = pd.read_parquet(output_path)
-    assert out["path"].tolist() == ["ok.dat2"]
+    assert out["lc_path"].tolist() == ["ok.dat2"]
 
     checkpoint = output_path.with_name(f"{output_path.stem}_PROCESSED.txt")
     assert checkpoint.read_text(encoding="ascii").splitlines() == ["ok.dat2"]
 
     error_log = output_path.with_name(f"{output_path.stem}_ERRORS.parquet")
     errors = pd.read_parquet(error_log)
-    assert set(errors["path"]) == {"bad1.dat2", "bad2.dat2"}
+    assert set(errors["lc_path"]) == {"bad1.dat2", "bad2.dat2"}
 
 
 def test_events_main_preserves_existing_rows_when_parquet_metadata_type_changes(
@@ -622,7 +622,7 @@ def test_events_main_preserves_existing_rows_when_parquet_metadata_type_changes(
         metadata_file = tmp_path / f"{path_value}.metadata.parquet"
         pd.DataFrame(
             {
-                "path": [path_value],
+                "lc_path": [path_value],
                 "observer_note": [observer_note],
                 "priority_rank": [priority_rank],
             }
@@ -630,18 +630,18 @@ def test_events_main_preserves_existing_rows_when_parquet_metadata_type_changes(
 
         def fake_process_one(path: str, path_metadata: dict | None) -> dict:
             return {
-                "path": path,
+                "lc_path": path,
                 "dip_significant": False,
                 "jump_significant": False,
             }
 
-        monkeypatch.setattr("malca.events.ProcessPoolExecutor", ThreadPoolExecutor)
-        monkeypatch.setattr("malca.events._process_one", fake_process_one)
+        monkeypatch.setattr("malca.stv.events.ProcessPoolExecutor", ThreadPoolExecutor)
+        monkeypatch.setattr("malca.stv.events._process_one", fake_process_one)
         monkeypatch.setattr(
             sys,
             "argv",
             [
-                "malca.events",
+                "malca.stv.events",
                 "--input-file",
                 str(input_file),
                 "--metadata",
@@ -661,7 +661,7 @@ def test_events_main_preserves_existing_rows_when_parquet_metadata_type_changes(
     run_once("second.dat2", "present", 2)
 
     out = pd.read_parquet(output_path)
-    assert out["path"].tolist() == ["first.dat2", "second.dat2"]
+    assert out["lc_path"].tolist() == ["first.dat2", "second.dat2"]
     assert "observer_note" in out.columns
     assert "priority_rank" in out.columns
     assert pd.isna(out.loc[0, "observer_note"])
@@ -689,7 +689,7 @@ def test_events_main_unexpected_worker_keys_go_to_extra_json(
 
     def fake_process_one(path: str, path_metadata: dict | None) -> dict:
         row = {
-            "path": path,
+            "lc_path": path,
             "dip_significant": False,
             "jump_significant": False,
         }
@@ -697,13 +697,13 @@ def test_events_main_unexpected_worker_keys_go_to_extra_json(
             row["worker_debug_note"] = "late"
         return row
 
-    monkeypatch.setattr("malca.events.ProcessPoolExecutor", ThreadPoolExecutor)
-    monkeypatch.setattr("malca.events._process_one", fake_process_one)
+    monkeypatch.setattr("malca.stv.events.ProcessPoolExecutor", ThreadPoolExecutor)
+    monkeypatch.setattr("malca.stv.events._process_one", fake_process_one)
     monkeypatch.setattr(
         sys,
         "argv",
         [
-            "malca.events",
+            "malca.stv.events",
             "--input-file",
             str(input_file),
             "--output",
@@ -740,7 +740,7 @@ def test_events_main_parquet_chunk_files_share_schema(
 
     def fake_process_one(path: str, path_metadata: dict | None) -> dict:
         row = {
-            "path": path,
+            "lc_path": path,
             "dip_significant": False,
             "jump_significant": False,
         }
@@ -748,13 +748,13 @@ def test_events_main_parquet_chunk_files_share_schema(
             row["late_metric"] = 3.5
         return row
 
-    monkeypatch.setattr("malca.events.ProcessPoolExecutor", ThreadPoolExecutor)
-    monkeypatch.setattr("malca.events._process_one", fake_process_one)
+    monkeypatch.setattr("malca.stv.events.ProcessPoolExecutor", ThreadPoolExecutor)
+    monkeypatch.setattr("malca.stv.events._process_one", fake_process_one)
     monkeypatch.setattr(
         sys,
         "argv",
         [
-            "malca.events",
+            "malca.stv.events",
             "--input-file",
             str(input_file),
             "--output",
@@ -784,7 +784,7 @@ def test_events_main_normalizes_older_parquet_before_append(
     output_path = tmp_path / "lc_events_results.parquet"
     pd.DataFrame(
         {
-            "path": ["old.dat2"],
+            "lc_path": ["old.dat2"],
             "dip_significant": [False],
             "jump_significant": [False],
             "legacy_metric": ["old-value"],
@@ -797,18 +797,18 @@ def test_events_main_normalizes_older_parquet_before_append(
 
     def fake_process_one(path: str, path_metadata: dict | None) -> dict:
         return {
-            "path": path,
+            "lc_path": path,
             "dip_significant": False,
             "jump_significant": False,
         }
 
-    monkeypatch.setattr("malca.events.ProcessPoolExecutor", ThreadPoolExecutor)
-    monkeypatch.setattr("malca.events._process_one", fake_process_one)
+    monkeypatch.setattr("malca.stv.events.ProcessPoolExecutor", ThreadPoolExecutor)
+    monkeypatch.setattr("malca.stv.events._process_one", fake_process_one)
     monkeypatch.setattr(
         sys,
         "argv",
         [
-            "malca.events",
+            "malca.stv.events",
             "--input-file",
             str(input_file),
             "--output",
@@ -823,7 +823,7 @@ def test_events_main_normalizes_older_parquet_before_append(
     events_main()
 
     out = pd.read_parquet(output_path)
-    assert out["path"].tolist() == ["old.dat2", "new.dat2"]
+    assert out["lc_path"].tolist() == ["old.dat2", "new.dat2"]
     assert "legacy_metric" not in out.columns
     assert json.loads(out.loc[0, "extra_json"]) == {"legacy_metric": "old-value"}
     assert json.loads(out.loc[1, "extra_json"]) == {}
@@ -840,18 +840,18 @@ def test_events_main_parquet_schema_uses_canonical_order(
 
     def fake_process_one(path: str, path_metadata: dict | None) -> dict:
         return {
-            "path": path,
+            "lc_path": path,
             "dip_significant": False,
             "jump_significant": False,
         }
 
-    monkeypatch.setattr("malca.events.ProcessPoolExecutor", ThreadPoolExecutor)
-    monkeypatch.setattr("malca.events._process_one", fake_process_one)
+    monkeypatch.setattr("malca.stv.events.ProcessPoolExecutor", ThreadPoolExecutor)
+    monkeypatch.setattr("malca.stv.events._process_one", fake_process_one)
     monkeypatch.setattr(
         sys,
         "argv",
         [
-            "malca.events",
+            "malca.stv.events",
             "--input-file",
             str(input_file),
             "--output",
