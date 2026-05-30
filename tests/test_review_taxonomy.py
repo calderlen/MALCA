@@ -7,8 +7,23 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from malca.review.taxonomy import legacy_review_to_taxonomy, migrate_legacy_review_db
+from malca.review.taxonomy import keyboard_payload, legacy_review_to_taxonomy, migrate_legacy_review_db
 from malca.review.store import db_connect, get_review, save_review, upsert_candidates_frame
+
+
+def test_keyboard_payload_keeps_dimming_recurrent_dip_shortcuts() -> None:
+    payload = keyboard_payload()
+    primary_by_key = {
+        str(item["key"]).lower(): item["value"]
+        for item in payload["morphology_primary"]
+    }
+    dimming_detail_by_key = {
+        str(item["key"]).lower(): item["value"]
+        for item in payload["morphology_secondary"]["dimming_event"]
+    }
+
+    assert primary_by_key["e"] == "dimming_event"
+    assert dimming_detail_by_key["k"] == "recurrent_dips"
 
 
 def test_save_review_round_trips_taxonomy_fields(tmp_path: Path) -> None:

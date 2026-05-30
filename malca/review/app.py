@@ -8569,6 +8569,15 @@ app.clientside_callback(
         var selection = taxonomySelection && typeof taxonomySelection === 'object'
             ? Object.assign({}, taxonomySelection)
             : {};
+        var nextActiveMenu = activeMenu || '';
+        var nextSubmenu = taxonomySubmenu || '';
+        var cache = window.__malcaTaxonomyKeyState;
+        var nowMs = Date.now();
+        if (cache && cache.candidateId === candidateId && (nowMs - cache.updatedAt) < 5000) {
+            selection = Object.assign({}, selection, cache.selection || {});
+            nextActiveMenu = cache.activeMenu || nextActiveMenu;
+            nextSubmenu = cache.submenu || nextSubmenu;
+        }
         if (!selection.priority_tags) { selection.priority_tags = []; }
         if (!selection.evidence_flags) { selection.evidence_flags = []; }
         if (!selection.model_tags) { selection.model_tags = []; }
@@ -8577,8 +8586,6 @@ app.clientside_callback(
         var nextIdx = idx;
         var notice = no;
         var saveReq = no;
-        var nextActiveMenu = activeMenu || '';
-        var nextSubmenu = taxonomySubmenu || '';
         var prefixOut = no;
         var selectionOut = no;
         var activeOut = no;
@@ -8607,6 +8614,13 @@ app.clientside_callback(
             selectionOut = selection;
             activeOut = nextActiveMenu;
             submenuOut = nextSubmenu;
+            window.__malcaTaxonomyKeyState = {
+                candidateId: candidateId,
+                selection: Object.assign({}, selection),
+                activeMenu: nextActiveMenu,
+                submenu: nextSubmenu,
+                updatedAt: Date.now()
+            };
             return [no, message, no, no, no, prefixOut, no, selectionOut, activeOut, submenuOut];
         };
 
@@ -8629,15 +8643,13 @@ app.clientside_callback(
         if (nextActiveMenu === 'morphology_secondary') {
             if (key === 'Backspace') {
                 selection.morphology_secondary = null;
-                nextActiveMenu = '';
-                nextSubmenu = '';
+                nextSubmenu = selection.morphology_primary || nextSubmenu;
                 return emitTaxonomy('Secondary morphology cleared');
             }
             var secondary = secondaryByKey(selection.morphology_primary || nextSubmenu)[lower];
             if (secondary) {
                 selection.morphology_secondary = (selection.morphology_secondary === secondary.value) ? null : secondary.value;
-                nextActiveMenu = '';
-                nextSubmenu = '';
+                nextSubmenu = selection.morphology_primary || nextSubmenu;
                 return emitTaxonomy('Detail: ' + (selection.morphology_secondary || 'cleared'));
             }
         }
@@ -8677,9 +8689,22 @@ app.clientside_callback(
             var subclass = subclassByKey(selection.physical_primary || nextSubmenu)[lower];
             if (subclass) {
                 selection.physical_secondary = (selection.physical_secondary === subclass.value) ? null : subclass.value;
-                nextActiveMenu = '';
-                nextSubmenu = '';
+                nextSubmenu = selection.physical_primary || nextSubmenu;
                 return emitTaxonomy('Subclass: ' + (selection.physical_secondary || 'cleared'));
+            }
+        }
+
+        // Let detail keys work against the selected morphology even if Dash
+        // has not yet rendered the submenu after the primary keypress.
+        // H is reserved for opening the hypothesis menu unless the detail
+        // submenu is already active, where it selects the H-labeled detail.
+        if (selection.morphology_primary && lower !== 'h') {
+            var activeSecondary = secondaryByKey(selection.morphology_primary)[lower];
+            if (activeSecondary) {
+                selection.morphology_secondary = (selection.morphology_secondary === activeSecondary.value) ? null : activeSecondary.value;
+                nextActiveMenu = 'morphology_secondary';
+                nextSubmenu = selection.morphology_primary;
+                return emitTaxonomy('Detail: ' + (selection.morphology_secondary || 'cleared'));
             }
         }
 
@@ -11208,7 +11233,8 @@ def click_taxonomy_option(_option_clicks, selection, active_menu):
     selection = selection_from_review(selection if isinstance(selection, dict) else {})
     if menu == 'morphology_secondary':
         selection['morphology_secondary'] = None if selection.get('morphology_secondary') == value else value
-        return selection, '', '', f"Detail: {label_for(selection.get('morphology_secondary') or 'cleared')}"
+        submenu = selection.get('morphology_primary') or ''
+        return selection, 'morphology_secondary', submenu, f"Detail: {label_for(selection.get('morphology_secondary') or 'cleared')}"
     if menu == 'physical_primary':
         if selection.get('physical_primary') == value:
             selection['physical_primary'] = None
@@ -11222,7 +11248,8 @@ def click_taxonomy_option(_option_clicks, selection, active_menu):
         return selection, '', '', f"Hypothesis: {label_for(value)}"
     if menu == 'physical_secondary':
         selection['physical_secondary'] = None if selection.get('physical_secondary') == value else value
-        return selection, '', '', f"Subclass: {label_for(selection.get('physical_secondary') or 'cleared')}"
+        submenu = selection.get('physical_primary') or ''
+        return selection, 'physical_secondary', submenu, f"Subclass: {label_for(selection.get('physical_secondary') or 'cleared')}"
     return no_update, no_update, no_update, no_update
 
 
