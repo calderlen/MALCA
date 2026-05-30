@@ -38,6 +38,7 @@ dependencies = [
     "iar",
     "lightgbm",
     "scikit-learn",
+    "torch",
     "pytest",
     "pytest-cov",
     "pytest-xdist",

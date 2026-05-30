@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import json
 import math
+import re
 import sqlite3
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -49,6 +50,21 @@ CURRENT_TAXONOMY_TARGET_COLUMNS = (
 )
 
 LEGACY_MARCH18_TARGET_COLUMNS = ("event_class",)
+
+RECOMPUTE_SURVIVAL_TARGET_COLUMNS = ("recompute_survived",)
+
+DEFAULT_RECOMPUTE_SURVIVAL_OLD_VETTED_PATHS: tuple[Path, ...] = (
+    Path("output/runs/output_bundle_12_12.5_home_bundle_12_12.5/results/lc_events_vetted.parquet"),
+    Path("output/runs/output_bundle_12.5_13_home_bundle_12.5_13/results/lc_events_vetted.parquet"),
+    Path("output/runs/output_bundle_13_13.5_bundle_13_13.5/results/lc_events_vetted.parquet"),
+    Path("output/runs/output_bundle_13.5_14_bundle_13.5_14/results/lc_events_vetted.parquet"),
+)
+
+DEFAULT_RECOMPUTE_SURVIVAL_RECOMPUTED_PATH = Path(
+    "output/runs/runs_march18_bundle_all/results/lc_events_vetted.parquet"
+)
+
+DEFAULT_RECOMPUTE_SURVIVAL_MAG_BINS = ("12_12.5", "12.5_13", "13_13.5", "13.5_14")
 
 REVIEW_METADATA_COLUMNS = {
     "interest_score",
@@ -113,6 +129,8 @@ JSON_PAYLOAD_COLUMNS = {
 
 NON_FEATURE_UTILITY_COLUMNS = {
     "schema_mode",
+    "timescale",
+    "recompute_status",
 }
 
 DEFAULT_DROP_COLUMNS = (
@@ -122,6 +140,9 @@ DEFAULT_DROP_COLUMNS = (
     | JSON_PAYLOAD_COLUMNS
     | NON_FEATURE_UTILITY_COLUMNS
 )
+
+INTEGER_FLOAT_RE = re.compile(r"^([+-]?\d+)\.0+$")
+MAG_BIN_RE = re.compile(r"/(\d+(?:\.\d+)?_\d+(?:\.\d+)?)(?:/|$)")
 
 
 @dataclass(frozen=True)
@@ -232,6 +253,172 @@ def _reviewed_current_mask(df: pd.DataFrame) -> pd.Series:
 def _reviewed_legacy_mask(df: pd.DataFrame) -> pd.Series:
     status = df["status"].fillna("").astype(str).str.strip()
     return status.ne("") & status.ne("unreviewed")
+
+
+def _read_candidate_product(path: str | Path) -> pd.DataFrame:
+    product_path = Path(path).expanduser()
+    if not product_path.exists():
+        raise FileNotFoundError(f"Candidate product not found: {product_path}")
+    suffix = product_path.suffix.lower()
+    if suffix == ".parquet" or product_path.is_dir():
+        table = pd.read_parquet(product_path)
+    elif suffix == ".csv":
+        table = pd.read_csv(product_path, dtype=str, keep_default_na=False)
+    else:
+        raise ValueError(f"Unsupported candidate product type: {product_path}")
+    return table.to_frame() if isinstance(table, pd.Series) else table
+
+
+def _normalize_recompute_id(value: object) -> str:
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip()
+    if not text or text.lower() in {"nan", "none", "<na>", "null"}:
+        return ""
+    match = INTEGER_FLOAT_RE.match(text)
+    if match:
+        text = match.group(1)
+    return text.casefold()
+
+
+def _path_stem(value: object) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text or text.lower() in {"nan", "none", "<na>", "null"}:
+        return ""
+    return Path(text).stem.strip()
+
+
+def _normalize_mag_bin(value: object) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text or text.lower() in {"nan", "none", "<na>", "null"}:
+        return ""
+    text = text.replace("-", "_")
+    parts = [part.strip() for part in text.split("_")]
+    normalized_parts = []
+    for part in parts:
+        match = INTEGER_FLOAT_RE.match(part)
+        normalized_parts.append(match.group(1) if match else part)
+    return "_".join(normalized_parts)
+
+
+def _mag_bin_from_path(value: object) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    match = MAG_BIN_RE.search(text)
+    return _normalize_mag_bin(match.group(1)) if match else ""
+
+
+def _id_series_from_asas_or_path(df: pd.DataFrame) -> pd.Series:
+    if "asas_sn_id" in df.columns:
+        ids = df["asas_sn_id"].map(_normalize_recompute_id)
+    else:
+        ids = pd.Series("", index=df.index, dtype="object")
+    missing = ids.eq("")
+    if "path" in df.columns and bool(missing.any()):
+        path_ids = df.loc[missing, "path"].map(_path_stem).map(_normalize_recompute_id)
+        ids = ids.where(~missing, path_ids)
+    return ids.astype(str)
+
+
+def _ensure_recompute_identity_columns(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
+    out = df.copy()
+    ids = _id_series_from_asas_or_path(out)
+    if bool(ids.eq("").any()):
+        missing_count = int(ids.eq("").sum())
+        raise ValueError(
+            f"{missing_count} candidate rows are missing both asas_sn_id and path-derived IDs"
+        )
+
+    if "asas_sn_id" not in out.columns:
+        out["asas_sn_id"] = ids
+    else:
+        asas = out["asas_sn_id"].astype("object")
+        missing_asas = asas.isna() | asas.astype(str).str.strip().eq("")
+        out["asas_sn_id"] = asas.where(~missing_asas, ids)
+
+    if "candidate_id" not in out.columns:
+        out["candidate_id"] = out["asas_sn_id"].astype(str)
+    else:
+        candidate_id = out["candidate_id"].astype("object")
+        missing_candidate_id = candidate_id.isna() | candidate_id.astype(str).str.strip().eq("")
+        out["candidate_id"] = candidate_id.where(
+            ~missing_candidate_id,
+            out["asas_sn_id"].astype(str),
+        )
+
+    if "mag_bin" in out.columns:
+        out["mag_bin"] = out["mag_bin"].map(_normalize_mag_bin)
+    elif "path" in out.columns:
+        out["mag_bin"] = out["path"].map(_mag_bin_from_path)
+    else:
+        out["mag_bin"] = ""
+
+    return out, ids
+
+
+def _normalized_mag_bin_set(mag_bins: Sequence[str] | None) -> set[str] | None:
+    if mag_bins is None:
+        return None
+    normalized = [_normalize_mag_bin(value) for value in mag_bins]
+    return {value for value in normalized if value}
+
+
+def load_recompute_survival_training_table(
+    old_vetted_paths: Sequence[str | Path] | None = None,
+    recomputed_candidates_path: str | Path = DEFAULT_RECOMPUTE_SURVIVAL_RECOMPUTED_PATH,
+    *,
+    mag_bins: Sequence[str] | None = DEFAULT_RECOMPUTE_SURVIVAL_MAG_BINS,
+) -> pd.DataFrame:
+    """Load old candidate features labeled by March 18 recompute survival.
+
+    The March 18 recomputed table is used only to derive the survived ID set.
+    Its feature columns are intentionally not merged into the returned table.
+    """
+
+    feature_paths = tuple(old_vetted_paths or DEFAULT_RECOMPUTE_SURVIVAL_OLD_VETTED_PATHS)
+    if not feature_paths:
+        raise ValueError("At least one old vetted feature path is required")
+
+    old_frames = [_read_candidate_product(path) for path in feature_paths]
+    old = pd.concat(old_frames, ignore_index=True, sort=False)
+    old, old_ids = _ensure_recompute_identity_columns(old)
+
+    mag_bin_set = _normalized_mag_bin_set(mag_bins)
+    if mag_bin_set is not None:
+        old = old.loc[old["mag_bin"].isin(mag_bin_set)].copy()
+        old_ids = old_ids.loc[old.index]
+
+    duplicate_ids = old_ids[old_ids.duplicated(keep=False)]
+    if not duplicate_ids.empty:
+        examples = ", ".join(sorted(duplicate_ids.unique())[:5])
+        raise ValueError(f"Old vetted candidate IDs are not unique; examples: {examples}")
+
+    recomputed = _read_candidate_product(recomputed_candidates_path)
+    recomputed, recomputed_ids = _ensure_recompute_identity_columns(recomputed)
+    if mag_bin_set is not None:
+        recomputed = recomputed.loc[recomputed["mag_bin"].isin(mag_bin_set)].copy()
+        recomputed_ids = recomputed_ids.loc[recomputed.index]
+
+    survived_ids = {value for value in recomputed_ids.tolist() if value}
+    out = old.copy()
+    survived = old_ids.isin(survived_ids)
+    out["recompute_survived"] = survived.astype("int8")
+    out["recompute_status"] = np.where(survived, "survived_recompute", "fell_away")
+    out["timescale"] = "stv"
+    out["schema_mode"] = "recompute_survival"
+    return out.reset_index(drop=True)
 
 
 def load_current_schema_training_table(
