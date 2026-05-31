@@ -1,0 +1,932 @@
+# This file was mechanically split from malca.review.app; preserve behavior when editing.
+@lru_cache(maxsize=8)
+def _load_run_params_meta_for_plot_dir(plot_dir: str | None) -> tuple[dict | None, str, str]:
+    """Load run_params with status/meta from active plot directory."""
+    if not plot_dir:
+        return None, "missing", "No plot directory set"
+    run_params_path = Path(plot_dir).resolve().parent / "run_params.json"
+    if not run_params_path.exists():
+        return None, "missing", f"Missing {run_params_path}"
+    try:
+        with open(run_params_path) as f:
+            data = json.load(f)
+    except Exception as exc:
+        return None, "invalid", f"Could not parse run_params.json: {exc}"
+    if not isinstance(data, dict):
+        return None, "invalid", "run_params.json is not a JSON object"
+    return data, "loaded", f"Loaded from {run_params_path}"
+
+
+def _load_run_params_for_plot_dir(plot_dir: str | None) -> dict:
+    """Load run_params.json near the active plot directory."""
+    run_params, _status, _msg = _load_run_params_meta_for_plot_dir(plot_dir)
+    return run_params or {}
+
+
+def _render_stat_cards(stat_rows: list[tuple[str, str]]) -> list:
+    """Render stats as grouped collapsible sections with readable labels."""
+    if not stat_rows:
+        return []
+
+    label_overrides = {
+        "stats_jd_start": "JD start (day)",
+        "stats_jd_end": "JD end (day)",
+        "stats_time_span_days": "Time span (days)",
+        "stats_n_unique_nights": "Unique nights",
+        "stats_duty_cycle_fraction": "Duty cycle",
+        "stats_file_points_total": "Points total",
+        "stats_file_points_kept_after_filter": "Points kept after filter",
+        "stats_cadence_mean_dt_days": r"Cadence mean $\Delta t$ (days)",
+        "stats_cadence_median_dt_days": r"Cadence median $\Delta t$ (days)",
+        "stats_cadence_p05_dt_days": r"Cadence $P_{05}$ $\Delta t$ (days)",
+        "stats_cadence_p95_dt_days": r"Cadence $P_{95}$ $\Delta t$ (days)",
+        "stats_photometry_robust_sigma_mag": r"Robust $\sigma_m$ (mag)",
+        "stats_photometry_std_mag": r"$\sigma_m$ (mag)",
+        "stats_photometry_IQR_mag": r"IQR($m$) (mag)",
+        "stats_photometry_mean_mag": r"Mean($m$) (mag)",
+        "stats_photometry_median_mag": r"Median($m$) (mag)",
+        "stats_photometry_weighted_mean_mag": r"Weighted mean($m$) (mag)",
+        "stats_photometry_weighted_mean_sem": r"SEM($\bar{m}_w$) (mag)",
+        "stats_photometry_weighted_std_mag": r"Weighted $\sigma_m$ (mag)",
+        "stats_photometry_p05_mag": r"$P_{05}(m)$ (mag)",
+        "stats_photometry_p16_mag": r"$P_{16}(m)$ (mag)",
+        "stats_photometry_p84_mag": r"$P_{84}(m)$ (mag)",
+        "stats_photometry_p95_mag": r"$P_{95}(m)$ (mag)",
+        "stats_clipped_mean_mag_3sigma_about_median": r"Clipped mean (3$\sigma$ about median) (mag)",
+        "stats_clipped_std_mag_3sigma_about_median": r"Clipped std (3$\sigma$ about median) (mag)",
+        "stats_n_outliers_removed_robust_3sigma": r"Outliers removed (robust 3$\sigma$)",
+        "stats_error_and_snr_stats_error_mean": "Error mean (mag)",
+        "stats_error_and_snr_stats_error_median": "Error median (mag)",
+        "stats_error_and_snr_stats_error_p05": r"Error $P_{05}$ (mag)",
+        "stats_error_and_snr_stats_error_p95": r"Error $P_{95}$ (mag)",
+        "stats_error_and_snr_stats_snr_median": "SNR median",
+        "stats_error_and_snr_stats_snr_p05": r"SNR $P_{05}$",
+        "stats_error_and_snr_stats_snr_p95": r"SNR $P_{95}$",
+        "stats_variability_reduced_chi2_vs_constant": r"Reduced $\chi^2$ vs constant",
+        "stats_variability_von_neumann_ratio": r"Inverse von Neumann ratio $1/\eta$",
+        "stats_variability_roms": "RoMS",
+        "stats_variability_lag1_autocorr": r"Lag-1 $\rho$",
+        "stats_variability_stetson_I": r"Stetson $I$",
+        "stats_variability_stetson_J": r"Stetson $J$",
+        "stats_variability_stetson_K": r"Stetson $K$",
+        "stats_variability_stetson_L": r"Stetson $L$",
+        "stats_variability_stetson_J_time": r"Stetson $J_\mathrm{time}$",
+        "stats_variability_stetson_L_time": r"Stetson $L_\mathrm{time}$",
+        "stats_variability_string_length_resid_total": "String length total (mag)",
+        "stats_variability_string_length_resid_mean_step": "String length mean step (mag)",
+        "stats_variability_string_length_resid_n_steps": "String length n steps",
+        "stats_variability_lomb_scargle_best_period_days": "Lomb-Scargle best period (days)",
+        "stats_variability_lomb_scargle_peak_power": "Lomb-Scargle peak power",
+        "stats_variability_lomb_scargle_fap": "Lomb-Scargle FAP",
+        "stats_trend_slope_mag_per_day": r"$\mathrm{d}m/\mathrm{d}t$ (mag/day)",
+        "stats_trend_slope_mag_per_year": r"$\mathrm{d}m/\mathrm{d}t$ (mag/year)",
+        "stats_trend_r2": r"Trend $R^2$",
+        "stats_gp_drw_sigma": r"GP-DRW $\sigma$ (mag)",
+        "stats_gp_drw_tau": r"GP-DRW $\tau$",
+        "stats_iar_phi": r"IAR $\phi$",
+        "stats_sf_ml_amplitude": "SF-ML amplitude (mag)",
+        "stats_sf_ml_gamma": r"SF-ML $\gamma$",
+        "stats_psi_cs": r"Psi CS ($\psi_{\mathrm{CS}}$)",
+        "stats_psi_eta": r"Psi eta ($\psi_{\eta}$)",
+        "stats_con": "Con statistic",
+        "stats_intrinsic_sigma_mag": r"Intrinsic $\sigma$ (mag)",
+        "stats_excess_var": r"Intrinsic $\sigma$ (mag)",
+        "stats_amplitude": "Amplitude (mag)",
+        "stats_first_mag": r"First $m$ (mag)",
+        "stats_max_slope": "Max slope (mag/day)",
+        "stats_median_abs_dev": r"Median abs dev (mag)",
+        "stats_gskew": "g-skew",
+        "stats_meanvariance": "Mean/variance",
+        "stats_median_brp": "Median BRP",
+        "stats_constancy_p_value": "Constancy p-value",
+        "stats_pvar": "Constancy p-value",
+        "stats_q31": r"$Q_{31}$ (mag)",
+        "stats_rcs": "RCS",
+        "stats_autocor_length": "Autocorrelation length",
+        "stats_delta_mag_fid": r"$\Delta m_{\mathrm{fid}}$ (mag)",
+        "stats_beyond_1_std": "Beyond 1 std",
+        "stats_small_kurtosis": "Small kurtosis",
+        "stats_pair_slope_trend": "Pair slope trend",
+        "stats_harmonics_mse": r"$\mathrm{MSE}$ ($\mathrm{mag}^2$)",
+        "stats_harmonics_order": "Recommended harmonic order",
+        "stats_harmonics_period": "Adopted period (d)",
+        "stats_harmonics_a0": r"Zero-point $A_0$ (mag)",
+        "stats_harmonics_model_amplitude": "Model amplitude (mag)",
+        "stats_harmonics_reduced_chi2": r"Reduced $\chi^2$",
+        "stats_mhps_pn_flag": "MHPS PN flag",
+        "stats_mhps_non_zero": "MHPS non-zero count",
+        "stats_asassn_field_key": "ASAS-SN field",
+        "stats_asassn_fields": "ASAS-SN fields",
+        "stats_asassn_field_count": "ASAS-SN field count",
+        "stats_asassn_field_key_fraction": "ASAS-SN field fraction",
+        "stats_camera_field_key": "Camera-field",
+        "stats_camera_fields": "Camera-fields",
+        "stats_camera_field_count": "Camera-field count",
+        "stats_camera_field_key_fraction": "Camera-field fraction",
+        "ltv_median": "Median (mag)",
+        "ltv_median_err": "Median err proxy (mag)",
+        "time_span_days": "Time span (days)",
+        "n_unique_nights": "Unique nights",
+        "ltv_vg_has_v": "Has V band",
+        "ltv_vg_overlap_days": "V/g overlap (days)",
+        "ltv_vg_overlap_fraction": "V/g overlap fraction",
+        "filtered_cams": "Filtered cameras",
+    }
+
+    alerce_feature_keys = {
+        "stats_amplitude",
+        "stats_beyond_1_std",
+        "stats_con",
+        "stats_delta_mag_fid",
+        "stats_intrinsic_sigma_mag",
+        "stats_excess_var",
+        "stats_first_mag",
+        "stats_gskew",
+        "stats_max_slope",
+        "stats_meanvariance",
+        "stats_median_abs_dev",
+        "stats_median_brp",
+        "stats_percent_amplitude",
+        "stats_q31",
+        "stats_skew",
+        "stats_small_kurtosis",
+        "stats_constancy_p_value",
+        "stats_pvar",
+        "stats_anderson_darling",
+        "stats_pair_slope_trend",
+        "stats_rcs",
+        "stats_autocor_length",
+    }
+
+    group_order = [
+        "LTV Summary",
+        "LTV Trend",
+        "LTV Seasons",
+        "LTV Stochastic",
+        "Coverage & Cadence",
+        "Photometry & SNR",
+        "Periodicity",
+        "Variability",
+        "Trend",
+        "Harmonics",
+        "Stochastic Models",
+        "MHPS / Structure Function",
+        "ALeRCE Features",
+        "Camera Diagnostics",
+        "Other",
+    ]
+
+    def _stat_group(key: str) -> str:
+        if key == "filtered_cams":
+            return "Camera Diagnostics"
+        if key.startswith("stats_asassn_field_") or key.startswith("stats_camera_field_"):
+            return "Camera Diagnostics"
+        if key.startswith("ltv_stoch_"):
+            return "LTV Stochastic"
+        if key.startswith("ltv_season_") or key.startswith("ltv_leave1out_"):
+            return "LTV Seasons"
+        if key.startswith("ltv_trend_") or key in {
+            "ltv_slope", "ltv_slope_quad", "ltv_max_diff", "ltv_coeff1", "ltv_coeff2"
+        }:
+            return "LTV Trend"
+        if key.startswith("ltv_"):
+            return "LTV Summary"
+        if key.startswith("stats_file_points_") or key in {
+            "stats_jd_start", "stats_jd_end", "stats_time_span_days",
+            "stats_n_unique_nights", "stats_duty_cycle_fraction",
+        } or key.startswith("stats_cadence_"):
+            return "Coverage & Cadence"
+        if key.startswith("stats_photometry_") or key.startswith("stats_error_and_snr_stats_") or key.startswith("stats_clipped_") or key == "stats_n_outliers_removed_robust_3sigma":
+            return "Photometry & SNR"
+        if key.startswith("stats_variability_lomb_scargle_") or key.startswith("stats_psi_"):
+            return "Periodicity"
+        if key.startswith("stats_variability_"):
+            return "Variability"
+        if key.startswith("stats_trend_"):
+            return "Trend"
+        if key.startswith("stats_harmonics_"):
+            return "Harmonics"
+        if key.startswith("stats_gp_drw_") or key.startswith("stats_iar_"):
+            return "Stochastic Models"
+        if key.startswith("stats_mhps_") or key.startswith("stats_sf_ml_"):
+            return "MHPS / Structure Function"
+        if key in alerce_feature_keys:
+            return "ALeRCE Features"
+        return "Other"
+
+    def _fallback_label(key: str) -> str:
+        if key.startswith("stats_"):
+            raw = key[6:]
+        elif key.startswith("ltv_"):
+            raw = key[4:]
+        else:
+            raw = key
+        token_map = {
+            "jd": "JD",
+            "snr": "SNR",
+            "iqr": "IQR",
+            "std": "Std",
+            "gp": "GP",
+            "drw": "DRW",
+            "iar": "IAR",
+            "mhps": "MHPS",
+            "rcs": "RCS",
+            "fap": "FAP",
+            "bic": "BIC",
+            "ls": "LS",
+            "vg": "V/g",
+            "ml": "ML",
+            "chi2": r"$\chi^2$",
+            "r2": r"$R^2$",
+            "sigma": r"$\sigma$",
+            "tau": r"$\tau$",
+            "phi": r"$\phi$",
+            "rho": r"$\rho$",
+            "gamma": r"$\gamma$",
+            "eta": r"$\eta$",
+            "psi": r"$\psi$",
+        }
+        parts: list[str] = []
+        for tok in [t for t in raw.split("_") if t]:
+            lower = tok.lower()
+            p_match = re.fullmatch(r"p(\d{2})", lower)
+            if p_match:
+                parts.append(rf"$P_{{{p_match.group(1)}}}$")
+            elif lower in token_map:
+                parts.append(token_map[lower])
+            elif lower.isdigit():
+                parts.append(lower)
+            else:
+                parts.append(lower.capitalize())
+        return " ".join(parts)
+
+    def _stat_label(key: str) -> str:
+        if key in label_overrides:
+            return label_overrides[key]
+        mag_match = re.fullmatch(r"stats_harmonics_mag_(\d+)", key)
+        if mag_match:
+            n = mag_match.group(1)
+            return rf"Amplitude $A_{{{n}}}$ (mag)"
+        ratio_match = re.fullmatch(r"stats_harmonics_r(\d+)1", key)
+        if ratio_match:
+            n = ratio_match.group(1)
+            return rf"Amplitude ratio $R_{{{n}1}}$"
+        phase_match = re.fullmatch(r"stats_harmonics_phase_(\d+)", key)
+        if phase_match:
+            n = phase_match.group(1)
+            return rf"Phase combination $\phi_{{{n}1}}$ (rad)"
+        return _fallback_label(key)
+
+    grouped: dict[str, list[tuple[str, str]]] = {name: [] for name in group_order}
+    for key_raw, value in stat_rows:
+        key = str(key_raw)
+        grouped.setdefault(_stat_group(key), []).append((markdown_literal_unit_label(_stat_label(key)), str(value)))
+
+    sections = []
+    for group_name in group_order:
+        rows = grouped.get(group_name, [])
+        if not rows:
+            continue
+        field_divs = [
+            html.Div([
+                dcc.Markdown(label, className='meta-field-label stat-field-label', mathjax=True),
+                dcc.Markdown(value, className='meta-field-value', mathjax=True),
+            ], className='meta-field-row')
+            for label, value in rows
+        ]
+        sections.append(
+            html.Details(
+                [html.Summary(f"{group_name} ({len(rows)})"), html.Div(field_divs, className='meta-grid')],
+                open=group_name in {"Coverage & Cadence", "Photometry & SNR"},
+            )
+        )
+
+    total_rows = sum(len(grouped.get(name, [])) for name in group_order)
+    return [html.Details(
+        [html.Summary(f"Stats ({total_rows})"), html.Div(sections, className='metadata-sections')],
+        open='open',
+    )]
+
+
+def _render_plot_status_panel(status: str, message: str, warnings: list[str] | None) -> html.Div:
+    """Render native plot status and warnings panel."""
+    warnings = [str(w) for w in (warnings or []) if str(w).strip()]
+    cls = 'plot-status'
+    if status in {'missing-file', 'missing-columns', 'empty-after-filter', 'empty-camera-selection', 'error'}:
+        cls += ' error'
+    elif warnings:
+        cls += ' warn'
+
+    base_message = str(message or '').strip()
+    if not base_message:
+        base_message = 'Native interactive plot active.'
+
+    headline = html.Div(base_message, className='status-line')
+    if not warnings:
+        return html.Div([headline], className=cls)
+
+    warning_items = [html.Li(w) for w in warnings[:8]]
+    if len(warnings) > 8:
+        warning_items.append(html.Li(f"...and {len(warnings) - 8} more"))
+
+    details = html.Details([
+        html.Summary(f"{len(warnings)} warning(s)"),
+        html.Ul(warning_items),
+    ])
+    return html.Div([headline, details], className=cls)
+
+
+def _render_camera_diag_panel(camera_diagnostics: dict[str, list[str]], filtered_values: list[str] | None) -> list:
+    """Render explainable camera filtering tags."""
+    if not filtered_values:
+        return []
+
+    chips = []
+    for cam in sorted(filtered_values):
+        reasons = camera_diagnostics.get(str(cam), [])
+        label = f"Cam {cam}: {','.join(reasons) if reasons else 'unknown'}"
+        chips.append(html.Div(label, className='item'))
+    return chips
+
+
+def _run_params_path_for_plot_dir(plot_dir: str | None) -> Path | None:
+    """Get run_params.json path from current plot directory."""
+    if not plot_dir:
+        return None
+    candidate = Path(plot_dir).resolve().parent / "run_params.json"
+    return candidate if candidate.exists() else None
+
+
+def _derive_defaults_from_run_params(run_params: dict | None) -> tuple[str, list[str]]:
+    """Derive initial preset and overlays from run config."""
+    if not run_params:
+        preset = 'Diagnostics'
+        return preset, list(PLOT_PRESETS[preset]['overlays'])
+
+    run_filter = bool(run_params.get('run_filter', True))
+    run_postprocess = bool(run_params.get('run_postprocess', True))
+    min_bf = float(run_params.get('min_bayes_factor', 0.0) or 0.0)
+    if (not run_filter) and (not run_postprocess):
+        preset = 'Clean'
+    elif min_bf >= 12:
+        preset = 'Full'
+    else:
+        preset = 'Diagnostics'
+
+    overlays = set(PLOT_PRESETS[preset]['overlays'])
+    if bool(run_params.get('skip_camera_median', False)):
+        overlays.discard('filter_bad_cameras')
+    if not bool(run_params.get('run_postprocess', True)):
+        overlays.discard('diagnostics')
+        overlays.discard('confidence')
+    return preset, sorted(list(overlays))
+
+
+def _run_config_rows(run_params: dict) -> list[tuple[str, str]]:
+    """Compact rows for run config panel."""
+    rows: list[tuple[str, str]] = []
+    for label, key in (
+        ('Stage', 'stage'),
+        ('Baseline', 'baseline_func'),
+        ('Baseline S0', 'baseline_s0'),
+        ('Baseline w0', 'baseline_w0'),
+        ('Baseline q', 'baseline_q'),
+        ('Baseline jitter', 'baseline_jitter'),
+        ('Baseline sigma floor', 'baseline_sigma_floor'),
+        ('Trigger mode', 'trigger_mode'),
+        ('Workers', 'workers'),
+        ('Batch size', 'batch_size'),
+        ('Min Bayes factor', 'min_bayes_factor'),
+        ('LogBF dip thr', 'logbf_threshold_dip'),
+        ('LogBF jump thr', 'logbf_threshold_jump'),
+        ('Significance thr', 'significance_threshold'),
+        ('Clean err abs', 'clean_max_error_absolute'),
+        ('Clean err sigma', 'clean_max_error_sigma'),
+        ('Bad cam scatter', 'bad_camera_scatter_ratio'),
+    ):
+        val = run_params.get(key)
+        if val is None:
+            continue
+        rows.append((label, str(val)))
+    return rows
+
+
+def _run_config_mismatch_warnings(run_params: dict | None, overlays: set[str]) -> list[str]:
+    """Warnings for GUI/view assumptions mismatching run config."""
+    if not run_params:
+        return ["run_params.json missing; native plot uses fallback defaults."]
+
+    warns: list[str] = []
+    expected_filter_bad = not bool(run_params.get('skip_camera_median', False))
+    if ('filter_bad_cameras' in overlays) != expected_filter_bad:
+        warns.append(
+            f"Bad-camera filter toggle differs from run config (expected {'on' if expected_filter_bad else 'off'})."
+        )
+
+    if run_params.get('baseline_func') is None:
+        warns.append("baseline_func missing in run_params; baseline defaults may differ from original run.")
+    if run_params.get('clean_max_error_absolute') is None or run_params.get('clean_max_error_sigma') is None:
+        warns.append("cleaning thresholds missing in run_params; fallback cleaning defaults are active.")
+    return warns
+
+
+def _path_is_under(path: Path | None, root: Path | None) -> bool:
+    """Return True when *path* is located under *root*."""
+    if path is None or root is None:
+        return False
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except Exception:
+        return False
+
+
+def _baseline_provenance_warning(
+    payload: dict,
+    *,
+    plot_dir: Path | None,
+    run_params: dict | None,
+    stored_lc_path: object = None,
+    source_path: object = None,
+) -> str | None:
+    """Describe when the displayed baseline is not provenance-matched to a pipeline run."""
+    lc_path = resolve_lightcurve_path(payload, plot_dir)
+    if lc_path is None:
+        return None
+
+    if not run_params:
+        return "Baseline is recomputed live in review with fallback defaults; no run_params.json is loaded."
+
+    source_text = str(source_path or '').strip()
+    if source_text.startswith('fetch://'):
+        return "Baseline is recomputed from the imported SkyPatrol light curve using the current run settings; it is not a saved pipeline baseline."
+
+    plot_run_dir = plot_dir.parent.resolve() if plot_dir is not None else None
+    source_run_dir = _run_dir_from_source_path(source_path)
+
+    if _path_is_under(lc_path, plot_run_dir) or _path_is_under(lc_path, source_run_dir):
+        return None
+
+    cluster_path = str(payload.get('path') or '').strip()
+    if cluster_path:
+        try:
+            if Path(cluster_path).expanduser().resolve() == lc_path.resolve():
+                return None
+        except Exception:
+            pass
+
+    stored_lc_text = str(stored_lc_path or '').strip()
+    if stored_lc_text:
+        try:
+            if Path(stored_lc_text).expanduser().resolve() == lc_path.resolve():
+                return "Baseline is recomputed from the local review copy of this light curve; it may differ from the original pipeline baseline source."
+        except Exception:
+            pass
+
+    if lc_path.suffix.lower() == '.csv':
+        return "Baseline is recomputed from a local CSV light curve in review; it may not match the original pipeline baseline source."
+
+    return "Baseline is recomputed from the currently resolved local light curve; it may differ from the original pipeline baseline source."
+
+
+def _render_run_config_panel(run_params: dict | None, run_params_path: Path | None, warnings: list[str]) -> list:
+    """Render run config as simple meta-field rows (same style as stats/metadata)."""
+    rows: list[tuple[str, str]] = [
+        ('Status', 'Loaded' if run_params else 'Missing'),
+        ('Path', str(run_params_path) if run_params_path else 'not found'),
+    ]
+    rows.extend(_run_config_rows(run_params or {}))
+    if warnings:
+        rows.append(('Warnings', ' | '.join(warnings)))
+
+    field_divs = [
+        html.Div([
+            html.Span(label, className='meta-field-label'),
+            html.Span(str(value), className='meta-field-value'),
+        ], className='meta-field-row')
+        for label, value in rows
+    ]
+    return [html.Div(field_divs, className='meta-grid')]
+
+
+def _render_repro_badge(run_params: dict | None, warnings: list[str]) -> html.Span:
+    """Render reproducibility status badge."""
+    if (run_params is None) or warnings:
+        text = 'Repro: fallback/defaults'
+        cls = 'repro-badge warn'
+    else:
+        text = 'Repro: exact run params'
+        cls = 'repro-badge'
+    return html.Span(text, className=cls)
+
+
+def _format_queue_count(value: object) -> str:
+    try:
+        return f"{int(value):,}"
+    except Exception:
+        return "0"
+
+
+def _render_queue_filter_provenance_panel(queue_data: dict | None) -> list:
+    """Render queue attrition summary for active sidebar filters."""
+    data = dict(queue_data or {})
+    scope_size = int(data.get("scope_size") or 0)
+    visible_size = int(data.get("queue_size") or 0)
+    filtered_out = int(data.get("filtered_out_count") or max(scope_size - visible_size, 0))
+    active_filters = list(data.get("filter_provenance") or [])
+
+    summary_rows = [
+        ("Scoped queue", _format_queue_count(scope_size)),
+        ("Visible now", _format_queue_count(visible_size)),
+        ("Filtered out", _format_queue_count(filtered_out)),
+        ("Active sidebar filters", _format_queue_count(len(active_filters))),
+    ]
+
+    summary = html.Div([
+        html.Div([
+            html.Span(label, className='meta-field-label'),
+            html.Span(str(value), className='meta-field-value'),
+        ], className='meta-field-row')
+        for label, value in summary_rows
+    ], className='meta-grid')
+
+    if active_filters:
+        details = html.Ul([
+            html.Li(
+                f"{item.get('label', 'filter')}: "
+                f"{_format_queue_count(item.get('filtered_count', 0))} filtered out "
+                f"({_format_queue_count(item.get('remaining_count', 0))} remain)"
+            )
+            for item in active_filters
+        ], className='queue-provenance-list')
+        note = html.Div(
+            "Per-filter counts are relative to the full scoped queue. "
+            "Filters can overlap, so these counts do not sum to the total filtered-out rows.",
+            className='queue-provenance-note',
+        )
+    else:
+        details = html.Div(
+            "No sidebar filters are active. The visible queue matches the full scoped queue.",
+            className='queue-provenance-note',
+        )
+        note = None
+
+    children: list = [summary, details]
+    if note is not None:
+        children.append(note)
+    return [html.Div(children, className='queue-provenance-panel')]
+
+
+_METADATA_EXTRA_GROUPS = (
+    "Triage Summary",
+    "Vetting",
+    "Period Consensus",
+    "External Follow-up",
+    "Stellar Parameters",
+    "Photometry",
+    "Environment",
+    "YSO / Classification",
+)
+
+_METADATA_CATALOG_GROUPS = (
+    "Vetting",
+    "Period Consensus",
+    "External Follow-up",
+    "Stellar Parameters",
+    "Photometry",
+    "Environment",
+)
+
+
+def _summarize_group_names(group_names: list[str], max_items: int = 2) -> str:
+    names = [str(n) for n in group_names if str(n).strip()]
+    if not names:
+        return "none"
+    if len(names) <= max_items:
+        return ", ".join(names)
+    return f"{', '.join(names[:max_items])} +{len(names) - max_items}"
+
+
+def _render_metadata_health(grouped: list[tuple[str, list[tuple[str, object]]]] | None, *, context_msg: str | None = None) -> html.Div:
+    """Render compact metadata-enrichment status for current candidate."""
+    if context_msg:
+        return html.Div([
+            html.Span("Base only", className='chip'),
+            html.Span(str(context_msg), className='detail'),
+        ], className='metadata-health metadata-health-base')
+
+    grouped_map = {name: items for name, items in (grouped or [])}
+    extra_present = [name for name in _METADATA_EXTRA_GROUPS if grouped_map.get(name)]
+    catalog_present = [name for name in _METADATA_CATALOG_GROUPS if grouped_map.get(name)]
+    extra_fields = int(sum(len(grouped_map.get(name) or []) for name in extra_present))
+
+    if not extra_present:
+        return html.Div([
+            html.Span("Base only", className='chip'),
+            html.Span(
+                "No crossmatch/classification/catalog metadata fields are present for this candidate.",
+                className='detail',
+            ),
+        ], className='metadata-health metadata-health-base')
+
+    if catalog_present:
+        detail = (
+            f"Catalog metadata present in {_summarize_group_names(catalog_present)} "
+            f"({extra_fields} extra fields total)."
+        )
+        return html.Div([
+            html.Span("Catalog enriched", className='chip'),
+            html.Span(detail, className='detail'),
+        ], className='metadata-health metadata-health-enriched')
+
+    extra_label = _summarize_group_names(extra_present)
+    return html.Div([
+        html.Span("Partial", className='chip'),
+        html.Span(
+            f"Only {extra_label} metadata is present ({extra_fields} extra fields); no catalog stellar/photometric enrichment.",
+            className='detail',
+        ),
+    ], className='metadata-health metadata-health-partial')
+
+
+def _render_vetting_banner(payload: dict | None, radius_arcsec: float = 10.0) -> html.Div:
+    """Render a vetting status panel with source cards above the metadata grid."""
+    if not payload:
+        return html.Div("Not vetted", className='vetting-banner-empty')
+
+    def _ok(v) -> bool:
+        """True if v is a non-empty, non-NaN string."""
+        return bool(v) and str(v).strip().lower() not in ('nan', '<na>')
+
+    gaia_cls = payload.get('gaia_var_class')
+    gaia_has_class = _ok(gaia_cls)
+    if 'vetting_likely_known' not in payload and not gaia_has_class:
+        return html.Div("Not vetted", className='vetting-banner-empty')
+
+    known = _coerce_bool(payload.get('vetting_likely_known')) or gaia_has_class
+    banner_state = 'known' if known else 'new'
+
+    # Status header
+    header_text = "KNOWN VARIABLE" if known else "POTENTIALLY NEW"
+
+    cards = []
+
+    def _label(text: str) -> html.Span:
+        return html.Span(text, className='vetting-banner-label')
+
+    def _value(text: str, *, hit: bool = False, title: str | None = None) -> html.Span:
+        cls = 'vetting-banner-value'
+        if hit:
+            cls += f' vetting-banner-hit {banner_state}'
+        return html.Span(text, className=cls, title=title)
+
+    def _cell(left: str, right: str, *, hit: bool = False, title: str | None = None) -> html.Div:
+        cell_class = 'vetting-banner-cell'
+        if hit:
+            cell_class += f' hit {banner_state}'
+        return html.Div([
+            _label(left),
+            _value(right, hit=hit, title=title),
+        ], className=cell_class)
+
+    # SIMBAD cell
+    simbad_id = payload.get('simbad_main_id')
+    simbad_otype = payload.get('simbad_otype')
+    if _ok(simbad_id) or _ok(simbad_otype):
+        refs = payload.get('simbad_nbref')
+        parts = []
+        if _ok(simbad_otype):
+            parts.append(str(simbad_otype))
+        if _ok(simbad_id):
+            parts.append(str(simbad_id))
+        if refs:
+            parts.append(f"({refs} refs)")
+        cards.append(_cell("SIMBAD", " \u00b7 ".join(parts), hit=True, title=str(simbad_id or '')))
+
+    # VSX cell
+    vsx_cls = payload.get('vsx_class')
+    if _ok(vsx_cls):
+        vsx_sep = payload.get('vsx_sep_arcsec')
+        sep_str = f" ({vsx_sep:.1f}\")" if vsx_sep and not pd.isna(vsx_sep) else ""
+        vsx_p = payload.get('vsx_period')
+        p_str = f", P={vsx_p:.4f}d" if vsx_p and not pd.isna(vsx_p) else ""
+        cards.append(_cell("VSX", f"{vsx_cls}{p_str}{sep_str}", hit=True))
+
+    # Gaia variability cell
+    if _ok(gaia_cls):
+        score = payload.get('gaia_var_score')
+        score_str = f" ({score:.2f})" if score and not pd.isna(score) else ""
+        cards.append(_cell("Gaia DR3", f"{gaia_cls}{score_str}", hit=True))
+
+    # Gaia EB period cell
+    eb_period = payload.get('gaia_eb_period')
+    if eb_period and not pd.isna(eb_period):
+        cards.append(_cell("Gaia EB", f"P={eb_period:.4f} d", hit=True))
+
+    # ASAS-SN cell
+    asassn_type = payload.get('asassn_var_type')
+    if _ok(asassn_type):
+        period = payload.get('asassn_var_period')
+        p_str = f" P={period:.4f}d" if period and not pd.isna(period) else ""
+        cards.append(_cell("ASAS-SN", f"{asassn_type}{p_str}", hit=True))
+
+    # Microlensing catalog cell
+    if _coerce_bool(payload.get('microlens_match')):
+        ml_catalog = payload.get('microlens_catalog')
+        ml_name = payload.get('microlens_name')
+        ml_te = payload.get('microlens_te_days')
+        ml_sep = payload.get('microlens_sep_arcsec')
+        display = ml_name if _ok(ml_name) else (ml_catalog if _ok(ml_catalog) else "Match")
+        te_str = f" tE={ml_te:.1f}d" if ml_te and not pd.isna(ml_te) else ""
+        sep_str = f" ({ml_sep:.1f}\")" if ml_sep and not pd.isna(ml_sep) else ""
+        cards.append(_cell("Microlens", f"{display}{te_str}{sep_str}", hit=True))
+
+    # ZTF cell
+    ztf_type = payload.get('ztf_var_type')
+    if _ok(ztf_type):
+        ztf_p = payload.get('ztf_var_period')
+        zp_str = f" P={ztf_p:.4f}d" if ztf_p and not pd.isna(ztf_p) else ""
+        cards.append(_cell("ZTF", f"{ztf_type}{zp_str}", hit=True))
+
+    # TNS cell
+    tns_name = payload.get('tns_name')
+    if _ok(tns_name):
+        tns_type = payload.get('tns_type', '')
+        cards.append(_cell("TNS", f"{tns_name} ({tns_type})" if tns_type else tns_name, hit=True))
+
+    # ALeRCE cell
+    alerce_cls = payload.get('alerce_lc_class')
+    if _ok(alerce_cls):
+        prob = payload.get('alerce_lc_prob')
+        prob_str = f" ({prob:.0%})" if prob and not pd.isna(prob) else ""
+        cards.append(_cell("ALeRCE", f"{alerce_cls}{prob_str}", hit=True))
+
+    # X-ray cell
+    xray = payload.get('xray_det')
+    if xray:
+        flux = payload.get('xray_flux')
+        flux_str = f" {flux:.1e}" if flux and not pd.isna(flux) else ""
+        cards.append(_cell("X-ray", f"Detected{flux_str}", hit=True))
+
+    # SFR cell
+    sfr_name = payload.get('sfr_name')
+    if _ok(sfr_name):
+        sfr_sep = payload.get('sfr_sep_arcmin')
+        sep_str = f" ({sfr_sep:.1f}')" if sfr_sep and not pd.isna(sfr_sep) else ""
+        cards.append(_cell("SFR", f"{sfr_name}{sep_str}", hit=True))
+
+    # Cluster cell
+    cluster_name = payload.get('cluster_name')
+    if _ok(cluster_name):
+        cluster_dist = payload.get('cluster_dist_pc')
+        d_str = f" ({cluster_dist:.0f} pc)" if cluster_dist and not pd.isna(cluster_dist) else ""
+        cards.append(_cell("Cluster", f"{cluster_name}{d_str}", hit=True))
+
+    # BANYAN cell
+    banyan_assoc = payload.get('banyan_best_assoc')
+    banyan_fp = payload.get('banyan_field_prob')
+    if _ok(banyan_assoc) and str(banyan_assoc).strip().lower() != 'field':
+        fp_str = f" (P_field={banyan_fp:.0%})" if banyan_fp and not pd.isna(banyan_fp) else ""
+        cards.append(_cell("BANYAN", f"{banyan_assoc}{fp_str}", hit=True))
+
+    # YSO class cell (skip generic classifications from IR color-color)
+    yso_cls = payload.get('yso_class')
+    if yso_cls and str(yso_cls).strip().lower() not in ('nan', '<na>', '', 'main sequence', 'unknown'):
+        cards.append(_cell("YSO", str(yso_cls), hit=True))
+
+    # Spectra cell
+    has_spectrum = _coerce_bool(payload.get('has_spectrum'))
+    if has_spectrum:
+        sources = payload.get('spectrum_sources')
+        src_str = f" ({sources})" if sources and not pd.isna(sources) else ""
+        cards.append(_cell("Spectra", f"Available{src_str}", hit=True))
+
+    # OGLE cell
+    ogle_match = payload.get('period_ogle_match')
+    if ogle_match:
+        ogle_cls = payload.get('period_ogle_class', '')
+        ogle_p = payload.get('period_ogle_days')
+        ogle_sep = payload.get('period_ogle_sep_arcsec')
+        p_str = f" P={ogle_p:.4f}d" if ogle_p and not pd.isna(ogle_p) else ""
+        sep_str = f" ({ogle_sep:.1f}\")" if ogle_sep and not pd.isna(ogle_sep) else ""
+        cards.append(_cell("OGLE", f"{ogle_cls}{p_str}{sep_str}" if ogle_cls else f"Match{p_str}{sep_str}", hit=True))
+
+    # unWISE W1 variability cell
+    w1_var = payload.get('unwise_w1_var')
+    if w1_var:
+        w1_z = payload.get('unwise_w1_zscore')
+        z_str = f" (z={w1_z:.1f})" if w1_z and not pd.isna(w1_z) else ""
+        cards.append(_cell("unWISE W1", f"Variable{z_str}", hit=True))
+
+    # LTV trend cell
+    ltv_slope = payload.get('ltv_slope')
+    if ltv_slope is not None and not pd.isna(ltv_slope):
+        ltv_diff = payload.get('ltv_max_diff')
+        ltv_fap = payload.get('ltv_ls_fap')
+        direction = "▲" if ltv_slope > 0 else "▼"
+        diff_str = f" Δ{ltv_diff:.3f}mag" if ltv_diff and not pd.isna(ltv_diff) else ""
+        fap_str = f" FAP={ltv_fap:.2e}" if ltv_fap and not pd.isna(ltv_fap) else ""
+        cards.append(_cell("LTV", f"{direction}{ltv_slope:+.4f} mag/yr{diff_str}{fap_str}", hit=True))
+
+    # IPHAS H-alpha excess cell
+    ha_excess = payload.get('iphas_ha_excess')
+    if ha_excess and not pd.isna(ha_excess) and float(ha_excess) > 0:
+        cards.append(_cell("IPHAS Hα", f"excess={float(ha_excess):.2f}", hit=True))
+
+    # Gaia epoch cell (non-hit, informational)
+    epoch_n = payload.get('gaia_epoch_n_obs')
+    if epoch_n and int(epoch_n) > 0:
+        g_range = payload.get('gaia_epoch_g_range')
+        r_str = f", dG={g_range:.2f}" if g_range and not pd.isna(g_range) else ""
+        cards.append(_cell("Gaia epoch", f"{int(epoch_n)} obs{r_str}"))
+
+    if not cards and not known:
+        # No matches at all — emphasize "new"
+        cards.append(html.Div([
+            _value("No catalog matches found", hit=True),
+        ], className='vetting-banner-cell'))
+
+    # External links toolbar
+    links = build_external_lookup_links(payload, radius_arcsec=radius_arcsec)
+    links_row = None
+    if links:
+        link_els = []
+        for label, url in links:
+            link_els.append(html.A(
+                label,
+                href=url,
+                target='_blank',
+                rel='noopener noreferrer',
+                className='vetting-banner-link',
+            ))
+
+        links_row = html.Div(link_els, className='vetting-banner-links')
+
+    children = [
+        html.Div(header_text, className=f'vetting-banner-header {banner_state}'),
+        html.Div(cards, className='vetting-banner-grid with-links' if links_row else 'vetting-banner-grid'),
+    ]
+    if links_row:
+        children.append(links_row)
+
+    return html.Div(children, className=f'vetting-banner-shell {banner_state}')
+
+
+def _keyboard_key(key_value: str | None) -> str:
+    """Extract raw key token from encoded keyboard input value."""
+    if not key_value:
+        return ""
+    return str(key_value).split("\t", 1)[0].strip()
+
+
+def _format_large_integer_like_display(value) -> str:
+    """Format integer-like values without scientific notation for display."""
+    if value is None:
+        return ""
+    s = str(value).strip()
+    if not s:
+        return ""
+    try:
+        d = Decimal(s)
+    except (InvalidOperation, ValueError):
+        return s
+    if d != d.to_integral_value():
+        return s
+    try:
+        return format(d.to_integral_value(), "f")
+    except Exception:
+        return s
+
+
+def _truncate_bottom_context_value(value: object, *, max_len: int = 84, tail_parts: int = 4) -> tuple[str, str]:
+    """Return (full_text, display_text) for compact bottom-bar display."""
+    full = str(value or "-").strip() or "-"
+    if len(full) <= max_len:
+        return full, full
+
+    normalized = full.replace("\\", "/")
+    if "/" in normalized:
+        parts = [p for p in normalized.split("/") if p]
+        prefix = "/" if normalized.startswith("/") else ""
+        if len(parts) > tail_parts:
+            display = f"{prefix}.../{'/'.join(parts[-tail_parts:])}"
+            if len(display) <= max_len:
+                return full, display
+
+    head = max(12, max_len // 2 - 6)
+    tail = max(12, max_len - head - 3)
+    return full, f"{full[:head]}...{full[-tail:]}"
+
+
+def _render_bottom_context(label: str, value: object) -> html.Div:
+    """Render one labeled bottom-bar context item."""
+    full, display = _truncate_bottom_context_value(value)
+    return html.Div(
+        [
+            html.Span(f"{label}:", className='bottom-context-k'),
+            html.Span(display, className='bottom-context-v', title=full),
+        ],
+        className='bottom-context-item',
+    )
+
+

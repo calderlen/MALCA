@@ -38,11 +38,12 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
-from astropy.stats import mad_std
+from astropy.stats import bayesian_blocks, mad_std
 from astropy.timeseries import LombScargle
 import celerite2
 from celerite2 import terms
 from scipy.optimize import minimize
+from scipy import stats as sp_stats
 from tqdm import tqdm
 
 from malca.config import (
@@ -56,6 +57,13 @@ from malca.config import (
     LTV_LS_MAX_PERIOD_DAYS,
     LTV_LS_FAP_THRESHOLD,
     LTV_LS_SAMPLES_PER_PEAK,
+    LTV_SMOOTH_WINDOW_DAYS,
+    LTV_SMOOTH_WINDOWS_DAYS,
+    LTV_SMOOTH_MIN_POINTS,
+    LTV_LOWESS_FRAC,
+    LTV_LOWESS_ROBUST_ITERS,
+    LTV_BINNED_SF_BIN_DAYS,
+    LTV_BINNED_SF_LAG_BINS_DAYS,
 )
 from malca.config import LCV2_ROOT
 from malca.config import MAG_BINS, SKYPATROL_JD_OFFSET
@@ -623,14 +631,467 @@ def compute_basic_lc_stats(JD: np.ndarray) -> dict[str, float | int]:
             "n_unique_nights": 0,
         }
 
-    season_stats = {f"ltv_{key}": value for key, value in season_stats.items()}
-    trend_stats = {f"ltv_{key}": value for key, value in trend_stats.items()}
-
     return {
         "n_points": int(JD.size),
         "time_span_days": float(JD.max() - JD.min()),
         "n_unique_nights": int(np.unique(np.floor(JD)).size),
     }
+
+
+def _finite_sorted_xy(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    mask = np.isfinite(x) & np.isfinite(y)
+    if not np.any(mask):
+        return np.array([], dtype=float), np.array([], dtype=float)
+    x = x[mask]
+    y = y[mask]
+    order = np.argsort(x)
+    return x[order], y[order]
+
+
+def _day_window_label(days: float) -> str:
+    rounded = int(round(float(days)))
+    if np.isclose(float(days), rounded):
+        return f"{rounded}d"
+    return f"{str(float(days)).replace('.', 'p')}d"
+
+
+def _empty_rolling_smooth_window_features() -> dict[str, float | int]:
+    return {
+        "p95_p5": np.nan,
+        "smooth_var": np.nan,
+        "resid_var": np.nan,
+        "long_short_var_ratio": np.nan,
+        "n_points": 0,
+    }
+
+
+def _compute_rolling_smooth_window_features(
+    t: np.ndarray,
+    y: np.ndarray,
+    *,
+    window_days: float,
+    min_points: int,
+) -> dict[str, float | int]:
+    out = _empty_rolling_smooth_window_features()
+    n = y.size
+    if n < int(min_points) or float(window_days) <= 0:
+        return out
+
+    half_window = float(window_days) / 2.0
+    smooth = np.full(n, np.nan, dtype=float)
+    left = 0
+    right = 0
+
+    for i, t_i in enumerate(t):
+        while left < n and t[left] < t_i - half_window:
+            left += 1
+        while right < n and t[right] <= t_i + half_window:
+            right += 1
+        if right - left >= int(min_points):
+            smooth[i] = float(np.median(y[left:right]))
+
+    valid = np.isfinite(smooth)
+    n_smooth = int(valid.sum())
+    out["n_points"] = n_smooth
+    if n_smooth < 2:
+        return out
+
+    smooth_valid = smooth[valid]
+    residual = y[valid] - smooth_valid
+    out["p95_p5"] = float(np.percentile(smooth_valid, 95) - np.percentile(smooth_valid, 5))
+    out["smooth_var"] = float(np.var(smooth_valid, ddof=1))
+    if residual.size >= 2:
+        resid_var = float(np.var(residual, ddof=1))
+        out["resid_var"] = resid_var
+        if np.isfinite(resid_var) and resid_var > 0:
+            out["long_short_var_ratio"] = float(out["smooth_var"] / resid_var)
+
+    return out
+
+
+def compute_rolling_smooth_features(
+    JD: np.ndarray,
+    mag: np.ndarray,
+    *,
+    window_days: float = LTV_SMOOTH_WINDOW_DAYS,
+    windows_days: tuple[float, ...] = LTV_SMOOTH_WINDOWS_DAYS,
+    min_points: int = LTV_SMOOTH_MIN_POINTS,
+) -> dict[str, float | int]:
+    """Compute raw-light-curve slow-component features across smoothing windows."""
+    t, y = _finite_sorted_xy(JD, mag)
+    windows: list[float] = []
+    for item in tuple(windows_days) + (float(window_days),):
+        value = float(item)
+        if value <= 0:
+            continue
+        if not any(np.isclose(value, existing) for existing in windows):
+            windows.append(value)
+
+    out: dict[str, float | int] = {}
+    per_window: dict[str, dict[str, float | int]] = {}
+    for value in windows:
+        label = _day_window_label(value)
+        features = _compute_rolling_smooth_window_features(
+            t,
+            y,
+            window_days=value,
+            min_points=min_points,
+        )
+        per_window[label] = features
+        for key, feature_value in features.items():
+            out[f"smooth_{label}_{key}"] = feature_value
+
+    alias_label = _day_window_label(float(window_days))
+    alias_features = per_window.get(alias_label, _empty_rolling_smooth_window_features())
+    out["smooth_p95_p5"] = alias_features["p95_p5"]
+    out["smooth_var"] = alias_features["smooth_var"]
+    out["resid_var"] = alias_features["resid_var"]
+    out["long_short_var_ratio"] = alias_features["long_short_var_ratio"]
+    out["smooth_n_points"] = alias_features["n_points"]
+
+    return out
+
+
+def compute_theil_sen_trend(t_years: np.ndarray, meds: np.ndarray) -> dict[str, float]:
+    """Compute robust monotonic trend diagnostics from seasonal medians."""
+    out = {
+        "theil_sen_slope_mag_per_year": np.nan,
+        "theil_sen_intercept_mag": np.nan,
+        "theil_sen_low_slope_mag_per_year": np.nan,
+        "theil_sen_high_slope_mag_per_year": np.nan,
+    }
+    x, y = _finite_sorted_xy(t_years, meds)
+    if y.size < 2 or np.allclose(x, x[0]):
+        return out
+
+    try:
+        slope, intercept, low_slope, high_slope = sp_stats.theilslopes(y, x)
+    except Exception:
+        return out
+
+    out["theil_sen_slope_mag_per_year"] = float(slope)
+    out["theil_sen_intercept_mag"] = float(intercept)
+    out["theil_sen_low_slope_mag_per_year"] = float(low_slope)
+    out["theil_sen_high_slope_mag_per_year"] = float(high_slope)
+    return out
+
+
+def _seasonal_measure_errors(meds: np.ndarray, meds_err: np.ndarray | None) -> np.ndarray:
+    y = np.asarray(meds, dtype=float)
+    err = np.full(y.shape, np.nan, dtype=float)
+    if meds_err is not None:
+        raw = np.asarray(meds_err, dtype=float)
+        if raw.shape == y.shape:
+            err = raw
+
+    positive = err[np.isfinite(err) & (err > 0)]
+    scatter = float(mad_std(y[np.isfinite(y)])) if np.isfinite(y).sum() >= 2 else np.nan
+    candidates = [0.02]
+    if positive.size:
+        candidates.append(float(np.median(positive)))
+    if np.isfinite(scatter) and scatter > 0:
+        candidates.append(float(0.1 * scatter))
+    fallback = max(candidates)
+    return np.where(np.isfinite(err) & (err > 0), err, fallback)
+
+
+def compute_bayesian_block_features(
+    t_years: np.ndarray,
+    meds: np.ndarray,
+    meds_err: np.ndarray | None = None,
+) -> dict[str, float | int]:
+    """Summarize Bayesian Blocks state changes in seasonal medians."""
+    out: dict[str, float | int] = {
+        "bb_n_blocks": 0,
+        "bb_n_change_points": 0,
+        "bb_range_mag": np.nan,
+        "bb_largest_jump_mag": np.nan,
+        "bb_max_block_offset_mag": np.nan,
+    }
+    x, y = _finite_sorted_xy(t_years, meds)
+    if y.size < 2 or np.allclose(x, x[0]):
+        return out
+
+    if meds_err is None:
+        yerr_sorted = None
+    else:
+        raw_x = np.asarray(t_years, dtype=float)
+        raw_y = np.asarray(meds, dtype=float)
+        raw_err = np.asarray(meds_err, dtype=float)
+        mask = np.isfinite(raw_x) & np.isfinite(raw_y)
+        if raw_err.shape == raw_y.shape:
+            order = np.argsort(raw_x[mask])
+            yerr_sorted = raw_err[mask][order]
+        else:
+            yerr_sorted = None
+    sigma = _seasonal_measure_errors(y, yerr_sorted)
+
+    try:
+        edges = bayesian_blocks(x, y, sigma=sigma, fitness="measures")
+    except Exception:
+        return out
+
+    if edges.size < 2:
+        return out
+
+    block_medians: list[float] = []
+    for i in range(edges.size - 1):
+        if i == edges.size - 2:
+            mask = (x >= edges[i]) & (x <= edges[i + 1])
+        else:
+            mask = (x >= edges[i]) & (x < edges[i + 1])
+        if np.any(mask):
+            block_medians.append(float(np.median(y[mask])))
+
+    if not block_medians:
+        return out
+
+    blocks = np.asarray(block_medians, dtype=float)
+    out["bb_n_blocks"] = int(blocks.size)
+    out["bb_n_change_points"] = int(max(0, blocks.size - 1))
+    out["bb_range_mag"] = float(np.max(blocks) - np.min(blocks))
+    out["bb_max_block_offset_mag"] = float(np.max(np.abs(blocks - np.median(y))))
+    if blocks.size >= 2:
+        out["bb_largest_jump_mag"] = float(np.max(np.abs(np.diff(blocks))))
+    return out
+
+
+def _local_linear_prediction(x: np.ndarray, y: np.ndarray, x0: float, weights: np.ndarray) -> float:
+    valid = np.isfinite(x) & np.isfinite(y) & np.isfinite(weights) & (weights > 0)
+    if int(valid.sum()) == 0:
+        return np.nan
+
+    xv = x[valid] - float(x0)
+    yv = y[valid]
+    wv = weights[valid]
+    sw = float(np.sum(wv))
+    if sw <= 0:
+        return np.nan
+    if int(valid.sum()) < 2 or np.allclose(xv, xv[0]):
+        return float(np.sum(wv * yv) / sw)
+
+    sx = float(np.sum(wv * xv))
+    sy = float(np.sum(wv * yv))
+    sxx = float(np.sum(wv * xv * xv))
+    sxy = float(np.sum(wv * xv * yv))
+    denom = sw * sxx - sx * sx
+    if abs(denom) < 1e-12:
+        return float(sy / sw)
+    return float((sxx * sy - sx * sxy) / denom)
+
+
+def _lowess_smooth(
+    x: np.ndarray,
+    y: np.ndarray,
+    *,
+    frac: float = LTV_LOWESS_FRAC,
+    robust_iters: int = LTV_LOWESS_ROBUST_ITERS,
+) -> np.ndarray:
+    x, y = _finite_sorted_xy(x, y)
+    n = y.size
+    if n < 2:
+        return np.full(n, np.nan, dtype=float)
+
+    k = int(np.ceil(float(frac) * n))
+    k = min(n, max(2, k))
+    robust_weights = np.ones(n, dtype=float)
+    fitted = np.full(n, np.nan, dtype=float)
+
+    for iteration in range(max(0, int(robust_iters)) + 1):
+        for i, x_i in enumerate(x):
+            dist = np.abs(x - x_i)
+            bandwidth = float(np.partition(dist, k - 1)[k - 1])
+            if bandwidth <= 0:
+                base_weights = (dist == 0).astype(float)
+            else:
+                u = dist / bandwidth
+                base_weights = np.where(u < 1.0, (1.0 - u**3) ** 3, 0.0)
+            weights = base_weights * robust_weights
+            fitted[i] = _local_linear_prediction(x, y, x_i, weights)
+
+        if iteration >= int(robust_iters):
+            break
+        resid = y - fitted
+        finite_resid = resid[np.isfinite(resid)]
+        if finite_resid.size == 0:
+            break
+        scale = 6.0 * float(np.median(np.abs(finite_resid - np.median(finite_resid))))
+        if not np.isfinite(scale) or scale <= 0:
+            break
+        u = resid / scale
+        robust_weights = np.where(np.abs(u) < 1.0, (1.0 - u * u) ** 2, 0.0)
+
+    return fitted
+
+
+def compute_lowess_features(
+    t_years: np.ndarray,
+    meds: np.ndarray,
+    *,
+    frac: float = LTV_LOWESS_FRAC,
+    robust_iters: int = LTV_LOWESS_ROBUST_ITERS,
+) -> dict[str, float]:
+    """Compute lightweight LOWESS diagnostics on seasonal medians."""
+    out = {
+        "lowess_p95_p5": np.nan,
+        "lowess_resid_std": np.nan,
+        "lowess_max_abs_resid": np.nan,
+    }
+    x, y = _finite_sorted_xy(t_years, meds)
+    if y.size < 2:
+        return out
+
+    fitted = _lowess_smooth(x, y, frac=frac, robust_iters=robust_iters)
+    valid = np.isfinite(fitted) & np.isfinite(y)
+    if int(valid.sum()) < 2:
+        return out
+
+    fit = fitted[valid]
+    resid = y[valid] - fit
+    out["lowess_p95_p5"] = float(np.percentile(fit, 95) - np.percentile(fit, 5))
+    out["lowess_resid_std"] = float(np.std(resid, ddof=1)) if resid.size >= 2 else np.nan
+    out["lowess_max_abs_resid"] = float(np.max(np.abs(resid))) if resid.size else np.nan
+    return out
+
+
+def compute_variogram_features(t_years: np.ndarray, meds: np.ndarray) -> dict[str, float]:
+    """Compute coarse seasonal-median variogram features."""
+    out = {
+        "variogram_short_mag2": np.nan,
+        "variogram_mid_mag2": np.nan,
+        "variogram_long_mag2": np.nan,
+        "variogram_long_short_ratio": np.nan,
+        "variogram_slope": np.nan,
+    }
+    x, y = _finite_sorted_xy(t_years, meds)
+    if y.size < 3:
+        return out
+
+    dt_parts = []
+    dm2_parts = []
+    for i in range(y.size - 1):
+        dt_parts.append(x[i + 1 :] - x[i])
+        dm2_parts.append(np.square(y[i + 1 :] - y[i]))
+    dt = np.concatenate(dt_parts)
+    dm2 = np.concatenate(dm2_parts)
+    valid = np.isfinite(dt) & np.isfinite(dm2) & (dt > 0)
+    dt = dt[valid]
+    dm2 = dm2[valid]
+    if dt.size == 0:
+        return out
+
+    bins = {
+        "short": dt < 1.5,
+        "mid": (dt >= 1.5) & (dt < 3.5),
+        "long": dt >= 3.5,
+    }
+    binned: list[tuple[float, float]] = []
+    for label, mask in bins.items():
+        if np.any(mask):
+            value = float(np.median(dm2[mask]))
+            out[f"variogram_{label}_mag2"] = value
+            tau = float(np.median(dt[mask]))
+            if np.isfinite(value) and value > 0 and np.isfinite(tau) and tau > 0:
+                binned.append((tau, value))
+
+    short = out["variogram_short_mag2"]
+    long = out["variogram_long_mag2"]
+    if np.isfinite(short) and np.isfinite(long) and float(short) > 0:
+        out["variogram_long_short_ratio"] = float(long) / float(short)
+
+    if len(binned) >= 2:
+        tau = np.asarray([item[0] for item in binned], dtype=float)
+        val = np.asarray([item[1] for item in binned], dtype=float)
+        out["variogram_slope"] = float(np.polyfit(np.log10(tau), np.log10(val), 1)[0])
+
+    return out
+
+
+_BINNED_SF_LABELS = ("30d", "100d", "300d", "1000d", "3000d")
+
+
+def _median_time_bins(
+    JD: np.ndarray,
+    mag: np.ndarray,
+    *,
+    bin_days: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    t, y = _finite_sorted_xy(JD, mag)
+    if y.size == 0 or float(bin_days) <= 0:
+        return np.array([], dtype=float), np.array([], dtype=float)
+
+    bin_index = np.floor((t - float(t.min())) / float(bin_days)).astype(np.int64)
+    unique_bins = np.unique(bin_index)
+    bin_times = []
+    bin_mags = []
+    for idx in unique_bins:
+        mask = bin_index == idx
+        if np.any(mask):
+            bin_times.append(float(np.median(t[mask])))
+            bin_mags.append(float(np.median(y[mask])))
+    return np.asarray(bin_times, dtype=float), np.asarray(bin_mags, dtype=float)
+
+
+def compute_binned_structure_function_features(
+    JD: np.ndarray,
+    mag: np.ndarray,
+    *,
+    bin_days: float = LTV_BINNED_SF_BIN_DAYS,
+    lag_bins_days: tuple[tuple[float, float], ...] = LTV_BINNED_SF_LAG_BINS_DAYS,
+) -> dict[str, float | int]:
+    """Compute lag-binned structure-function features from 30-day medians."""
+    out: dict[str, float | int] = {"binned_sf_n_bins": 0}
+    labels = _BINNED_SF_LABELS[: len(lag_bins_days)]
+    for label in labels:
+        out[f"binned_sf_{label}_mag2"] = np.nan
+    for label in ("300d", "1000d", "3000d"):
+        out[f"binned_sf_{label}_30d_ratio"] = np.nan
+    out["binned_sf_slope"] = np.nan
+
+    t, y = _median_time_bins(JD, mag, bin_days=bin_days)
+    out["binned_sf_n_bins"] = int(y.size)
+    if y.size < 2:
+        return out
+
+    dt_parts = []
+    dm2_parts = []
+    for i in range(y.size - 1):
+        dt_parts.append(t[i + 1 :] - t[i])
+        dm2_parts.append(np.square(y[i + 1 :] - y[i]))
+    dt = np.concatenate(dt_parts)
+    dm2 = np.concatenate(dm2_parts)
+    valid = np.isfinite(dt) & np.isfinite(dm2) & (dt > 0)
+    dt = dt[valid]
+    dm2 = dm2[valid]
+    if dt.size == 0:
+        return out
+
+    binned_for_slope: list[tuple[float, float]] = []
+    for label, (lo, hi) in zip(labels, lag_bins_days):
+        mask = (dt >= float(lo)) & (dt < float(hi))
+        if not np.any(mask):
+            continue
+        value = float(np.median(dm2[mask]))
+        out[f"binned_sf_{label}_mag2"] = value
+        tau = float(np.median(dt[mask]))
+        if np.isfinite(value) and value > 0 and np.isfinite(tau) and tau > 0:
+            binned_for_slope.append((tau, value))
+
+    base = out.get("binned_sf_30d_mag2", np.nan)
+    if np.isfinite(base) and float(base) > 0:
+        for label in ("300d", "1000d", "3000d"):
+            value = out.get(f"binned_sf_{label}_mag2", np.nan)
+            if np.isfinite(value):
+                out[f"binned_sf_{label}_30d_ratio"] = float(value) / float(base)
+
+    if len(binned_for_slope) >= 2:
+        tau = np.asarray([item[0] for item in binned_for_slope], dtype=float)
+        value = np.asarray([item[1] for item in binned_for_slope], dtype=float)
+        out["binned_sf_slope"] = float(np.polyfit(np.log10(tau), np.log10(value), 1)[0])
+
+    return out
 
 
 def compute_season_diagnostics(
@@ -928,7 +1389,7 @@ def process_one_lc(
         return None
 
     season_idx = assign_seasons_strict(JD, mids)
-    indexes, meds, _meds_err = season_medians_with_gap_indices(
+    indexes, meds, meds_err = season_medians_with_gap_indices(
         mag, season_idx, min_points_per_season=cfg.min_points_per_season
     )
 
@@ -960,6 +1421,30 @@ def process_one_lc(
     trend_stats = {
         f"ltv_{key}": value
         for key, value in compute_time_trend_diagnostics(t_years, meds).items()
+    }
+    smooth_stats = {
+        f"ltv_{key}": value
+        for key, value in compute_rolling_smooth_features(JD, mag).items()
+    }
+    robust_trend_stats = {
+        f"ltv_{key}": value
+        for key, value in compute_theil_sen_trend(t_years, meds).items()
+    }
+    bayesian_block_stats = {
+        f"ltv_{key}": value
+        for key, value in compute_bayesian_block_features(t_years, meds, meds_err).items()
+    }
+    lowess_stats = {
+        f"ltv_{key}": value
+        for key, value in compute_lowess_features(t_years, meds).items()
+    }
+    variogram_stats = {
+        f"ltv_{key}": value
+        for key, value in compute_variogram_features(t_years, meds).items()
+    }
+    binned_sf_stats = {
+        f"ltv_{key}": value
+        for key, value in compute_binned_structure_function_features(JD, mag).items()
     }
 
     lin_coeff = None
@@ -1004,6 +1489,12 @@ def process_one_lc(
         "ltv_max_diff": diff,
         **season_stats,
         **trend_stats,
+        **smooth_stats,
+        **robust_trend_stats,
+        **bayesian_block_stats,
+        **lowess_stats,
+        **variogram_stats,
+        **binned_sf_stats,
         "ltv_vg_has_v": vg_has_v,
         "ltv_vg_overlap_days": vg_overlap_days,
         "ltv_vg_overlap_fraction": vg_overlap_frac,

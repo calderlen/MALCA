@@ -118,3 +118,73 @@ def test_review_schema_and_ui_include_ltv_stochastic_columns() -> None:
         for _label, key in fields
     }
     assert expected == metadata_cols
+
+
+def test_review_schema_and_ui_include_ltv_long_term_feature_columns() -> None:
+    expected = {
+        "ltv_smooth_p95_p5",
+        "ltv_smooth_var",
+        "ltv_resid_var",
+        "ltv_long_short_var_ratio",
+        "ltv_smooth_n_points",
+        "ltv_smooth_100d_p95_p5",
+        "ltv_smooth_100d_smooth_var",
+        "ltv_smooth_100d_resid_var",
+        "ltv_smooth_100d_long_short_var_ratio",
+        "ltv_smooth_100d_n_points",
+        "ltv_smooth_300d_p95_p5",
+        "ltv_smooth_300d_smooth_var",
+        "ltv_smooth_300d_resid_var",
+        "ltv_smooth_300d_long_short_var_ratio",
+        "ltv_smooth_300d_n_points",
+        "ltv_smooth_1000d_p95_p5",
+        "ltv_smooth_1000d_smooth_var",
+        "ltv_smooth_1000d_resid_var",
+        "ltv_smooth_1000d_long_short_var_ratio",
+        "ltv_smooth_1000d_n_points",
+        "ltv_binned_sf_n_bins",
+        "ltv_binned_sf_30d_mag2",
+        "ltv_binned_sf_100d_mag2",
+        "ltv_binned_sf_300d_mag2",
+        "ltv_binned_sf_1000d_mag2",
+        "ltv_binned_sf_3000d_mag2",
+        "ltv_binned_sf_300d_30d_ratio",
+        "ltv_binned_sf_1000d_30d_ratio",
+        "ltv_binned_sf_3000d_30d_ratio",
+        "ltv_binned_sf_slope",
+        "ltv_theil_sen_slope_mag_per_year",
+        "ltv_theil_sen_intercept_mag",
+        "ltv_theil_sen_low_slope_mag_per_year",
+        "ltv_theil_sen_high_slope_mag_per_year",
+        "ltv_bb_n_blocks",
+        "ltv_bb_n_change_points",
+        "ltv_bb_range_mag",
+        "ltv_bb_largest_jump_mag",
+        "ltv_bb_max_block_offset_mag",
+        "ltv_lowess_p95_p5",
+        "ltv_lowess_resid_std",
+        "ltv_lowess_max_abs_resid",
+        "ltv_variogram_short_mag2",
+        "ltv_variogram_mid_mag2",
+        "ltv_variogram_long_mag2",
+        "ltv_variogram_long_short_ratio",
+        "ltv_variogram_slope",
+    }
+
+    assert expected.issubset(set(_COL_NAMES))
+
+    sidebar_cols = {
+        col
+        for group_name, items in SIDEBAR_GROUPS
+        if group_name == "LTV Long-Term Features"
+        for _ftype, col in items
+    }
+    assert expected == sidebar_cols
+
+    metadata_cols = {
+        key
+        for group_name, fields in REVIEW_METADATA_GROUPS
+        if group_name == "LTV Long-Term Features"
+        for _label, key in fields
+    }
+    assert expected == metadata_cols
