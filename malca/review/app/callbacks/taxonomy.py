@@ -85,7 +85,7 @@ def render_taxonomy_state(selection, active_menu):
         'badge-btn active' if item['value'] == primary else 'badge-btn'
         for item in MORPHOLOGY_PRIMARY
     ]
-    hypothesis_class = 'badge-btn active' if active_menu in {'physical_primary', 'physical_secondary'} or selection.get('physical_primary') else 'badge-btn'
+    hypothesis_class = 'badge-btn active' if active_menu in {'physical_primary', 'physical_secondary'} else 'badge-btn'
     parts = []
     if primary:
         detail = selection.get('morphology_secondary')
