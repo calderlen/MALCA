@@ -188,6 +188,17 @@ def _present_columns(df: pd.DataFrame, forbidden: Iterable[str]) -> tuple[str, .
     return tuple(column for column in forbidden if column in df.columns)
 
 
+def _ltv_forbidden_columns() -> tuple[str, ...]:
+    from malca.external_lcs import EXTERNAL_LC_COLUMNS
+
+    allowed_external_lc_columns = set(EXTERNAL_LC_COLUMNS)
+    return tuple(
+        column
+        for column in LTV_FORBIDDEN_PRODUCT_COLUMNS
+        if column not in allowed_external_lc_columns
+    )
+
+
 def _assert_timescale_values(df: pd.DataFrame, timescale: str, *, stage: str | None) -> None:
     if "timescale" not in df.columns:
         return
@@ -247,7 +258,7 @@ def assert_ltv_product_schema(
         timescale=TIMESCALE_LTV,
         stage=stage,
         required=required or LTV_REQUIRED_COLUMNS,
-        forbidden=LTV_FORBIDDEN_PRODUCT_COLUMNS,
+        forbidden=_ltv_forbidden_columns(),
     )
 
 
