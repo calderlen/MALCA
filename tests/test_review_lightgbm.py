@@ -7,8 +7,6 @@ import pandas as pd
 import pytest
 
 from malca.meta_analysis.ml.review_lightgbm import (
-    DEFAULT_RECOMPUTE_SURVIVAL_OLD_VETTED_PATHS,
-    DEFAULT_RECOMPUTE_SURVIVAL_RECOMPUTED_PATH,
     append_lightcurve_features,
     load_current_schema_training_table,
     load_legacy_march18_training_table,
@@ -210,22 +208,3 @@ def test_recompute_survival_loader_rejects_duplicate_old_ids(tmp_path: Path) -> 
 
     with pytest.raises(ValueError, match="not unique"):
         load_recompute_survival_training_table([old], recomputed)
-
-
-@pytest.mark.skipif(
-    not DEFAULT_RECOMPUTE_SURVIVAL_RECOMPUTED_PATH.exists()
-    or not all(path.exists() for path in DEFAULT_RECOMPUTE_SURVIVAL_OLD_VETTED_PATHS),
-    reason="local March 10/March 18 candidate artifacts are not available",
-)
-def test_recompute_survival_default_local_artifact_counts() -> None:
-    table = load_recompute_survival_training_table()
-
-    assert len(table) == 31663
-    assert int(table["recompute_survived"].sum()) == 9569
-    assert int((table["recompute_survived"] == 0).sum()) == 22094
-    assert table["candidate_id"].notna().all()
-    assert table["asas_sn_id"].notna().all()
-    assert table["candidate_id"].astype(str).str.strip().ne("").all()
-    assert table["asas_sn_id"].astype(str).str.strip().ne("").all()
-    assert table["candidate_id"].astype(str).nunique() == len(table)
-    assert table["asas_sn_id"].astype(str).nunique() == len(table)

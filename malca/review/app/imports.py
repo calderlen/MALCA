@@ -126,6 +126,7 @@ from malca.review.session import create_queue_data_dict
 from malca.review.sync import auto_export_review_bundle
 from malca.review.taxonomy import (
     MORPHOLOGY_PRIMARY,
+    json_list,
     keyboard_payload,
     label_for,
     selection_from_review,

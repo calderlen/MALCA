@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 
 from malca.ltv.multi_survey import LTV_MS_FEATURE_COLUMN_SPECS
+from malca.vsx.filter import EXCLUDE as VSX_EXCLUDE_CLASSES
+from malca.vsx.filter import tokenize_classes as tokenize_vsx_classes
 
 
 SPECIAL_FILTERS = {
@@ -53,7 +55,7 @@ REVIEW_FILTER_COLUMN_TYPES = {
     col: kind for kind, col in REVIEW_TAXONOMY_FILTER_COLUMNS
 }
 
-_VSX_GENERIC_CLASSES = {"*", "MISC", "NONE", "VAR"}
+_VSX_GENERIC_CLASSES = {"*", "MISC", "NAN", "NONE", "VAR"}
 _ASASSN_GENERIC_CLASSES = {"VAR"}
 _SIMBAD_GENERIC_TYPES = {"*", "**", "G", "FIR", "MUL"}
 _TNS_UNCERTAIN_RE = re.compile(
@@ -83,6 +85,18 @@ def _is_tns_definite_type(text: str) -> bool:
     return False
 
 
+def _is_vsx_definite_known_type(text: str) -> bool:
+    """Return whether a VSX label contains a known-type contaminant token."""
+    if text.upper() in _VSX_GENERIC_CLASSES:
+        return False
+    if ":" in text:
+        return False
+    tokens = set(tokenize_vsx_classes(text))
+    if not tokens or tokens <= _VSX_GENERIC_CLASSES:
+        return False
+    return bool(tokens & VSX_EXCLUDE_CLASSES)
+
+
 def is_definite_known_type_value(column: str, value: object) -> bool:
     """Return whether a catalog class value is a definite known-type exclusion."""
     text = _normalized_class_value(value)
@@ -93,7 +107,7 @@ def is_definite_known_type_value(column: str, value: object) -> bool:
     upper = text.upper()
 
     if col == "vsx_class":
-        return ":" not in text and upper not in _VSX_GENERIC_CLASSES
+        return _is_vsx_definite_known_type(text)
     if col == "asassn_var_type":
         return ":" not in text and upper not in _ASASSN_GENERIC_CLASSES
     if col == "simbad_otype":

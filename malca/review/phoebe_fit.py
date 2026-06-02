@@ -36,6 +36,14 @@ PHOEBE_FIT_COLUMNS = (
     "phoebe_version",
 )
 PHOEBE_MODEL_KINDS = ("detached", "semidetached", "contact")
+PHOEBE_DETACHED_FIT_PARAMETERS = (
+    "incl@binary",
+    "q@binary",
+    "requiv@primary",
+    "requiv@secondary",
+)
+PHOEBE_DEFAULT_MAX_ITERATIONS = 4
+PHOEBE_DEFAULT_MAX_POINTS = 300
 
 
 @dataclass(frozen=True)
@@ -256,6 +264,45 @@ def _extract_model_flux(bundle: object, n_points: int) -> np.ndarray | None:
     return None
 
 
+def _finite_summary(values: np.ndarray, prefix: str) -> dict[str, float | None]:
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return {
+            f"{prefix}_min": None,
+            f"{prefix}_median": None,
+            f"{prefix}_max": None,
+        }
+    return {
+        f"{prefix}_min": float(np.nanmin(finite)),
+        f"{prefix}_median": float(np.nanmedian(finite)),
+        f"{prefix}_max": float(np.nanmax(finite)),
+    }
+
+
+def _normalize_model_flux(
+    observed_flux: np.ndarray,
+    model_flux: np.ndarray,
+) -> tuple[np.ndarray, dict[str, object]]:
+    observed = np.asarray(observed_flux, dtype=float)
+    raw_model = np.asarray(model_flux, dtype=float)
+    valid_observed = observed[np.isfinite(observed)]
+    valid_model = raw_model[np.isfinite(raw_model)]
+    observed_median = float(np.nanmedian(valid_observed)) if valid_observed.size else np.nan
+    model_median = float(np.nanmedian(valid_model)) if valid_model.size else np.nan
+    if np.isfinite(observed_median) and np.isfinite(model_median) and model_median != 0:
+        scale = float(observed_median / model_median)
+    else:
+        scale = 1.0
+    normalized = raw_model * scale
+    meta: dict[str, object] = {
+        "model_flux_scale": scale,
+        **_finite_summary(observed, "observed_flux"),
+        **_finite_summary(raw_model, "model_flux_raw"),
+        **_finite_summary(normalized, "model_flux_normalized"),
+    }
+    return normalized, meta
+
+
 def _run_phoebe_model(
     phoebe: object,
     frame: pd.DataFrame,
@@ -300,6 +347,9 @@ def _run_phoebe_model(
         bundle.add_dataset("lc", **add_dataset_kwargs)
 
     solver_status = "not_requested"
+    solver_warning = ""
+    fit_parameters = list(PHOEBE_DETACHED_FIT_PARAMETERS)
+    params["fit_parameters"] = fit_parameters
     if hasattr(bundle, "add_solver") and hasattr(bundle, "run_solver") and max_iterations > 0:
         try:
             bundle.add_solver(
@@ -308,13 +358,23 @@ def _run_phoebe_model(
                 maxiter=int(max_iterations),
                 overwrite=True,
             )
+            if not _try_set_value(bundle, "fit_parameters@nm_fit", fit_parameters):
+                raise RuntimeError("failed to set fit_parameters@nm_fit")
+            if hasattr(bundle, "run_checks"):
+                checks = bundle.run_checks(solver="nm_fit")
+                passed = bool(getattr(checks, "passed", False))
+                params["solver_checks_passed"] = passed
+                if not passed:
+                    raise RuntimeError(f"PHOEBE solver checks failed: {checks}")
             bundle.run_solver(solver="nm_fit", solution="nm_solution", overwrite=True)
             if hasattr(bundle, "adopt_solution"):
                 bundle.adopt_solution("nm_solution")
             solver_status = "ok"
         except Exception as exc:
             solver_status = f"skipped:{exc}"
+            solver_warning = str(exc)
     params["solver_status"] = solver_status
+    params["solver_warning"] = solver_warning
 
     compute_status = "not_run"
     try:
@@ -325,7 +385,11 @@ def _run_phoebe_model(
     params["compute_status"] = compute_status
 
     model_flux = _extract_model_flux(bundle, len(frame))
-    return model_flux, params, {"solver_status": solver_status, "compute_status": compute_status}
+    return model_flux, params, {
+        "solver_status": solver_status,
+        "solver_warning": solver_warning,
+        "compute_status": compute_status,
+    }
 
 
 def _build_plot_payload(
@@ -419,8 +483,8 @@ def run_phoebe_fit(
     lc_path: str | Path | None,
     manual_period_days: object | None = None,
     model_kind: str = "detached",
-    max_iterations: int = 40,
-    max_points: int = 2500,
+    max_iterations: int = PHOEBE_DEFAULT_MAX_ITERATIONS,
+    max_points: int = PHOEBE_DEFAULT_MAX_POINTS,
 ) -> dict[str, object]:
     """Run a bounded PHOEBE model pass for one review candidate and persist it."""
     started_at = time.monotonic()
@@ -451,6 +515,22 @@ def run_phoebe_fit(
             period_source=period_source,
             input_path=str(lc_path),
             error="No positive EB period is available. Enter a period in days before running PHOEBE.",
+        )
+        upsert_phoebe_fit(conn, row)
+        return row
+    if kind != "detached":
+        row = _failure_row(
+            candidate_id=cid,
+            started_at=started_at,
+            model_kind=kind,
+            manual_period_days=manual_period_days,
+            period_days=period_days,
+            period_source=period_source,
+            input_path=str(lc_path),
+            error=(
+                "PHOEBE optimization currently supports only detached models; "
+                f"{kind} is not implemented yet."
+            ),
         )
         upsert_phoebe_fit(conn, row)
         return row
@@ -487,8 +567,11 @@ def run_phoebe_fit(
 
         observed = frame["relative_flux"].to_numpy(dtype=float)
         sigma = frame["relative_flux_error"].to_numpy(dtype=float)
+        model_scale_meta: dict[str, object] = {}
+        plot_model: np.ndarray | None = None
         if model_flux is not None and len(model_flux) == len(observed):
-            model = np.asarray(model_flux, dtype=float)
+            model, model_scale_meta = _normalize_model_flux(observed, np.asarray(model_flux, dtype=float))
+            plot_model = model
             model_source = "phoebe"
         else:
             model = np.full_like(observed, float(np.nanmedian(observed)))
@@ -504,14 +587,28 @@ def run_phoebe_fit(
             "mad_residual": float(np.nanmedian(np.abs(residual - np.nanmedian(residual)))),
             "model_flux_source": model_source,
             "n_model_points": int(len(observed)),
+            **model_scale_meta,
             **status_meta,
         }
         params.update(prep_meta)
         params.update({"period_source": period_source, "manual_period_days": _finite_positive(manual_period_days)})
+        params.update(model_scale_meta)
+
+        compute_status = str(status_meta.get("compute_status") or "")
+        solver_status = str(status_meta.get("solver_status") or "")
+        if compute_status == "ok" and model_source == "phoebe" and solver_status == "ok":
+            status = "ok"
+            error = ""
+        elif compute_status == "ok" and model_source == "phoebe":
+            status = "warning"
+            error = f"PHOEBE solver did not complete; diagnostic model only. {solver_status}".strip()
+        else:
+            status = "failed"
+            error = compute_status if compute_status.startswith("failed:") else "PHOEBE model flux was unavailable."
 
         row = {
             "candidate_id": cid,
-            "status": "ok",
+            "status": status,
             "runtime_sec": float(time.monotonic() - started_at),
             "model_kind": kind,
             "period_days": float(period_days),
@@ -522,8 +619,8 @@ def run_phoebe_fit(
             "n_input_points": int(len(frame)),
             "params_json": _json_dumps(params),
             "metrics_json": _json_dumps(metrics),
-            "plot_json": _json_dumps(_build_plot_payload(frame, period_days=period_days, model_flux=model_flux)),
-            "error": "",
+            "plot_json": _json_dumps(_build_plot_payload(frame, period_days=period_days, model_flux=plot_model)),
+            "error": error,
             "phoebe_version": phoebe_version,
         }
     except Exception as exc:

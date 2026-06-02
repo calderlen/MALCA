@@ -196,6 +196,9 @@ def build_review_lightcurve_publication_pdf(
     show_raw_mag: bool,
     phase_panel_mode: Literal["fold", "time"] = "fold",
     override_period: float | None,
+    override_period_source: str = "manual/search",
+    phase_period_pending: bool = False,
+    suppress_catalog_phase_period: bool = False,
     show_diagnostics: bool,
     confidence_colors: bool,
     run_params: dict | None,
@@ -265,11 +268,15 @@ def build_review_lightcurve_publication_pdf(
         baseline_kwargs=baseline_kwargs,
     )
 
-    phase_period, _phase_source = (
-        resolve_phase_period(payload, override_period=override_period)
-        if show_phase_fold
-        else (None, "")
-    )
+    if show_phase_fold and not phase_period_pending:
+        period_payload = {} if suppress_catalog_phase_period else payload
+        phase_period, _phase_source = resolve_phase_period(
+            period_payload,
+            override_period=override_period,
+            override_source=override_period_source or "manual/search",
+        )
+    else:
+        phase_period, _phase_source = (None, "")
     phase_enabled = bool(show_phase_fold and phase_period is not None)
     panels: list[str] = []
     if show_raw_mag:

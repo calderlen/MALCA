@@ -132,6 +132,9 @@ def _render_diagnostic_plots(payload: dict, theme: str, background: dict | None 
 
 def _prepare_diagnostic_background(is_open, _import_trigger, _pipeline_progress, existing_state):
     """Load and cache diagnostic plot background data for the current review DB."""
+    if not _details_open(is_open):
+        raise dash.exceptions.PreventUpdate
+
     signature = _diagnostic_background_signature(DB_PATH)
     _background, used_cache = _load_or_cache_diagnostic_background(signature)
 
@@ -183,11 +186,14 @@ else:
      Output('diagnostic-plots-status', 'children', allow_duplicate=True)],
     [Input('current-candidate-id', 'data'),
      Input('theme-mode-store', 'data'),
-     Input('diagnostic-background-state', 'data')],
+     Input('diagnostic-background-state', 'data'),
+     Input('diagnostic-plots-details', 'open')],
     prevent_initial_call=True,
 )
-def update_diagnostic_plots(candidate_id, theme_mode, background_state):
+def update_diagnostic_plots(candidate_id, theme_mode, background_state, details_open=True):
     """Render diagnostic plots for the current candidate."""
+    if not _details_open(details_open):
+        return no_update, no_update
     if not candidate_id:
         return [], ''
 
@@ -255,5 +261,4 @@ def update_header_key_info(candidate_id, queue_size, queue_filter_hash, import_p
     gaia_fmt = _format_large_integer_like_display(gaia_id)
     gaia_text = f"Gaia ID: {gaia_fmt}" if gaia_fmt else 'Gaia ID: -'
     return asas_text, gaia_text, _bottom_bar(cluster_lc_path, local_lc_path)
-
 

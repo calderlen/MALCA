@@ -439,7 +439,7 @@ def create_layout():
                             html.Div([
                                 dcc.Dropdown(
                                     id='plot-preset',
-                                    options=[{'label': p, 'value': p} for p in ('Clean', 'Diagnostics', 'Full')],
+                                    options=[{'label': p, 'value': p} for p in ('Fast Review', 'Clean', 'Diagnostics', 'Full')],
                                     value='Diagnostics',
                                     clearable=False,
                                     style={'minWidth': '140px', 'font-size': '10px'},
@@ -1063,4 +1063,3 @@ app.layout = create_layout
 
 
 # --- Pace Timer Callbacks ---
-

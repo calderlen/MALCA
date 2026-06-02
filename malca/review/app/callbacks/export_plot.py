@@ -49,6 +49,9 @@ def export_active_plot(n_clicks, figure, plot_mode, plot_src, idx, candidate_id,
             run_params = _load_run_params_for_plot_dir(str(plot_dir_path) if plot_dir_path else None)
             overlays = set(state.get('overlay_values') or [])
             override_period = state.get('override_period')
+            override_period_source = str(state.get('override_period_source') or 'manual/search')
+            phase_period_pending = bool(state.get('phase_period_pending', False))
+            suppress_catalog_phase_period = bool(state.get('suppress_catalog_phase_period', False))
             if override_period is not None:
                 try:
                     override_period = float(override_period)
@@ -79,6 +82,9 @@ def export_active_plot(n_clicks, figure, plot_mode, plot_src, idx, candidate_id,
                 phase_panel_mode=_coerce_choice(state.get('phase_panel_mode'), {'fold', 'time'}, 'fold'),
                 show_raw_mag='raw' in overlays,
                 override_period=override_period,
+                override_period_source=override_period_source,
+                phase_period_pending=phase_period_pending,
+                suppress_catalog_phase_period=suppress_catalog_phase_period,
                 show_diagnostics='diagnostics' in overlays,
                 confidence_colors='confidence' in overlays,
                 run_params=run_params or {},

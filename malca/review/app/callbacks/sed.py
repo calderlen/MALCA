@@ -144,11 +144,14 @@ def _render_sed_fetch_provenance(source_statuses: list[dict[str, object]] | None
      Output('sed-status', 'children')],
     [Input('current-candidate-id', 'data'),
      Input('sed-extinction-mode', 'value'),
-     Input('theme-mode-store', 'data')],
+     Input('theme-mode-store', 'data'),
+     Input('sed-details', 'open')],
     prevent_initial_call=False,
 )
-def update_sed_panel(candidate_id, extinction_mode, theme_mode):
+def update_sed_panel(candidate_id, extinction_mode, theme_mode, details_open=True):
     """Render SED photometry for the current candidate."""
+    if not _details_open(details_open):
+        return no_update, no_update
     if not candidate_id:
         return [], 'No candidates loaded.'
     try:
@@ -216,5 +219,4 @@ def export_sed_plot(n_clicks, candidate_id, extinction_mode, theme_mode):
     mode = str(extinction_mode or "observed").replace("-", "_")
     fname = f"malca_sed_{safe_id}_{mode}.pdf"
     return dcc.send_bytes(image_bytes, fname), f'Exported {fname}'
-
 

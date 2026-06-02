@@ -188,6 +188,17 @@ def _review_records(conn: sqlite3.Connection, *, only_reviewed: bool = False) ->
             value = row.get(field)
             if field in {"interest_score", "review_pass", "taxonomy_version"} and not _is_missing(value):
                 record[field] = int(value)
+            elif field == "morphology_secondary_json":
+                selection = normalize_selection(
+                    {
+                        "morphology_secondary": row.get("morphology_secondary"),
+                        "morphology_secondary_json": value,
+                    }
+                )
+                details = selection.get("morphology_secondary_list") or []
+                record["morphology_secondary"] = selection.get("morphology_secondary")
+                record["morphology_secondary_list"] = details
+                record[field] = selection.get("morphology_secondary_json")
             elif field in {"priority_tags_json", "evidence_flags_json", "model_tags_json"}:
                 key = field.removesuffix("_json")
                 try:
@@ -654,6 +665,8 @@ def _import_review_records(
             {
                 "morphology_primary": record.get("morphology_primary"),
                 "morphology_secondary": record.get("morphology_secondary"),
+                "morphology_secondary_json": record.get("morphology_secondary_json"),
+                "morphology_secondary_list": record.get("morphology_secondary_list"),
                 "morphology_polarity": record.get("morphology_polarity"),
                 "morphology_recurrence": record.get("morphology_recurrence"),
                 "baseline_behavior": record.get("baseline_behavior"),
@@ -678,6 +691,7 @@ def _import_review_records(
             "disposition": selection.get("disposition"),
             "morphology_primary": selection.get("morphology_primary"),
             "morphology_secondary": selection.get("morphology_secondary"),
+            "morphology_secondary_json": selection.get("morphology_secondary_json"),
             "morphology_polarity": selection.get("morphology_polarity"),
             "morphology_recurrence": selection.get("morphology_recurrence"),
             "baseline_behavior": selection.get("baseline_behavior"),

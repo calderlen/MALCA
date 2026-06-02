@@ -1185,6 +1185,9 @@ def build_interactive_lightcurve_figure(
     phase_panel_mode: Literal["fold", "time"] = "fold",
     show_raw_mag: bool = True,
     override_period: float | None = None,
+    override_period_source: str = "manual/search",
+    phase_period_pending: bool = False,
+    suppress_catalog_phase_period: bool = False,
     show_diagnostics: bool,
     confidence_colors: bool,
     run_params: dict | None,
@@ -1326,13 +1329,23 @@ def build_interactive_lightcurve_figure(
     warnings: list[str] = list(baseline_warnings)
     phase_requested = bool(show_phase_fold)
     if phase_requested:
-        phase_period, phase_source = resolve_phase_period(payload, override_period=override_period)
+        period_payload = {} if suppress_catalog_phase_period else payload
+        phase_period, phase_source = resolve_phase_period(
+            period_payload,
+            override_period=override_period,
+            override_source=override_period_source or "manual/search",
+        )
     else:
         phase_period = None
         phase_source = ""
     phase_enabled = bool(phase_requested and phase_period is not None)
     if phase_requested and not phase_enabled:
-        warnings.append("Phase panel requested, but no valid period was found. Use Find Period to search manually.")
+        if phase_period_pending:
+            warnings.append("Auto PDM period search is running; the phase panel will update when it finishes.")
+        elif suppress_catalog_phase_period:
+            warnings.append("Auto PDM did not return a valid period. Run Find Period or enter Manual P.")
+        else:
+            warnings.append("Phase panel requested, but no valid period was found. Use Find Period to search manually.")
 
     try:
         residual_fraction = float(residual_fraction)
@@ -1907,8 +1920,14 @@ def build_interactive_lightcurve_figure(
             col=1,
             visible=True,
         )
+        if phase_period_pending:
+            phase_placeholder = "Auto PDM period search is running..."
+        elif suppress_catalog_phase_period:
+            phase_placeholder = "No automatic PDM period available. Run Find Period or enter Manual P."
+        else:
+            phase_placeholder = "No phase period available. Run Find Period or enter Manual P."
         fig.add_annotation(
-            text="No phase period available. Run Find Period or enter Manual P.",
+            text=phase_placeholder,
             x=0.5,
             y=0.5,
             xref=_subplot_domain_ref(phase_row, "x"),
@@ -2026,6 +2045,10 @@ def build_interactive_lightcurve_figure(
             if np.isfinite(phase_lag_abs):
                 phase_bits.append(f"|lag|={phase_lag_abs:.3f}")
         status_message = "; ".join(phase_bits)
+    elif phase_requested and phase_period_pending:
+        status_message = "Auto PDM: searching..."
+    elif phase_requested and suppress_catalog_phase_period:
+        status_message = "Auto PDM: no valid period"
 
     camera_options = [{"label": f"{cam}", "value": str(cam)} for cam in camera_ids]
     return {

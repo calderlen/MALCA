@@ -434,9 +434,39 @@ def _path_is_under(path: Path | None, root: Path | None) -> bool:
     """Return True when *path* is located under *root*."""
     if path is None or root is None:
         return False
+    path = Path(path).expanduser()
+    root = Path(root).expanduser()
     try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        pass
+    except Exception:
+        pass
+    try:
+        if not path.exists() or not root.exists():
+            return False
         path.resolve().relative_to(root.resolve())
         return True
+    except Exception:
+        return False
+
+
+def _paths_equal_existing(left: object, right: object) -> bool:
+    """Compare paths without resolving nonexistent stale absolute paths."""
+    if left in (None, "") or right in (None, ""):
+        return False
+    try:
+        left_path = Path(str(left)).expanduser()
+        right_path = Path(str(right)).expanduser()
+    except Exception:
+        return False
+    if str(left_path) == str(right_path):
+        return True
+    try:
+        if not left_path.exists() or not right_path.exists():
+            return False
+        return left_path.resolve() == right_path.resolve()
     except Exception:
         return False
 
@@ -461,27 +491,19 @@ def _baseline_provenance_warning(
     if source_text.startswith('fetch://'):
         return "Baseline is recomputed from the imported SkyPatrol light curve using the current run settings; it is not a saved pipeline baseline."
 
-    plot_run_dir = plot_dir.parent.resolve() if plot_dir is not None else None
+    plot_run_dir = plot_dir.parent if plot_dir is not None else None
     source_run_dir = _run_dir_from_source_path(source_path)
 
     if _path_is_under(lc_path, plot_run_dir) or _path_is_under(lc_path, source_run_dir):
         return None
 
     cluster_path = str(payload.get('path') or '').strip()
-    if cluster_path:
-        try:
-            if Path(cluster_path).expanduser().resolve() == lc_path.resolve():
-                return None
-        except Exception:
-            pass
+    if cluster_path and _paths_equal_existing(cluster_path, lc_path):
+        return None
 
     stored_lc_text = str(stored_lc_path or '').strip()
-    if stored_lc_text:
-        try:
-            if Path(stored_lc_text).expanduser().resolve() == lc_path.resolve():
-                return "Baseline is recomputed from the local review copy of this light curve; it may differ from the original pipeline baseline source."
-        except Exception:
-            pass
+    if stored_lc_text and _paths_equal_existing(stored_lc_text, lc_path):
+        return "Baseline is recomputed from the local review copy of this light curve; it may differ from the original pipeline baseline source."
 
     if lc_path.suffix.lower() == '.csv':
         return "Baseline is recomputed from a local CSV light curve in review; it may not match the original pipeline baseline source."
@@ -928,5 +950,4 @@ def _render_bottom_context(label: str, value: object) -> html.Div:
         ],
         className='bottom-context-item',
     )
-
 

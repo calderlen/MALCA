@@ -5,6 +5,7 @@ import json
 import math
 import sys
 import types
+from contextlib import closing
 from pathlib import Path
 
 import numpy as np
@@ -13,6 +14,7 @@ import pytest
 
 import malca.sed_photometry as sed_photometry
 from malca.review.sed import build_sed_dataframe
+from malca.review.store import db_connect, upsert_candidates_frame
 from malca.sed_model import (
     LSUN_ERG_S,
     PC_CM,
@@ -225,3 +227,58 @@ def test_sed_photometry_cli_writes_fit_and_curve_outputs(tmp_path: Path, monkeyp
     assert output_path.exists()
     assert fit_path.exists()
     assert curve_path.exists()
+
+
+def test_sed_photometry_cli_reads_candidates_from_review_db_by_default(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "review.db"
+    with closing(db_connect(db_path)) as conn:
+        upsert_candidates_frame(
+            conn,
+            pd.DataFrame([{
+                "candidate_id": "sed-cand",
+                "ra_deg": 1.0,
+                "dec_deg": 2.0,
+                "gaia_id": "123456789",
+                "failed_any": False,
+            }]),
+        )
+
+    sed_rows = _rows_from_fake_model("sed-cand")
+    fits = pd.DataFrame([{col: None for col in SED_MODEL_FIT_COLUMNS}])
+    fits.loc[0, "candidate_id"] = "sed-cand"
+    fits.loc[0, "model_family"] = "Castelli/Kurucz 2004"
+    fits.loc[0, "status"] = "ok"
+    curves = pd.DataFrame([{col: None for col in SED_MODEL_CURVE_COLUMNS}])
+    curves.loc[0, "candidate_id"] = "sed-cand"
+    curves.loc[0, "model_family"] = "Castelli/Kurucz 2004"
+    curves.loc[0, "wavelength_angstrom"] = 5000.0
+    curves.loc[0, "lambda_l_lambda"] = 1.0e33
+    curves.loc[0, "flux_lambda"] = 1.0e-12
+
+    seen: dict[str, object] = {}
+
+    def fake_fetch(df: pd.DataFrame, *args, **kwargs):
+        seen["input_rows"] = len(df)
+        seen["candidate_id"] = str(df.loc[0, "candidate_id"])
+        seen["ra_deg"] = float(df.loc[0, "ra_deg"])
+        seen["dec_deg"] = float(df.loc[0, "dec_deg"])
+        seen["gaia_id"] = str(df.loc[0, "gaia_id"])
+        return sed_rows
+
+    monkeypatch.setattr(sed_photometry, "fetch_sed_photometry", fake_fetch)
+    monkeypatch.setattr(sed_photometry, "fit_sed_models", lambda *args, **kwargs: (fits, curves))
+
+    args = sed_photometry.build_arg_parser().parse_args([str(db_path), "--sources", "payload"])
+    output_path = sed_photometry.run(args)
+
+    assert output_path.exists()
+    assert seen == {
+        "input_rows": 1,
+        "candidate_id": "sed-cand",
+        "ra_deg": 1.0,
+        "dec_deg": 2.0,
+        "gaia_id": "123456789",
+    }
+    with closing(db_connect(db_path)) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM sed_photometry").fetchone()[0] == len(sed_rows)
+        assert conn.execute("SELECT COUNT(*) FROM sed_model_fits").fetchone()[0] == len(fits)

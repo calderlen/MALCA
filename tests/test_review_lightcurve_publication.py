@@ -210,6 +210,83 @@ def test_interactive_phase_panel_shows_placeholder_without_period(tmp_path: Path
     )
 
 
+def test_interactive_phase_panel_waits_for_pending_auto_pdm_instead_of_vsx(tmp_path: Path) -> None:
+    lc_path = tmp_path / "123.dat2"
+    _write_dat2(lc_path)
+    payload = {
+        "candidate_id": "123",
+        "asas_sn_id": "123",
+        "lc_path": str(lc_path),
+        "vsx_period": 9.0,
+    }
+
+    result = build_interactive_lightcurve_figure(
+        payload,
+        plot_dir=None,
+        selected_cameras=[],
+        selected_bands=["g", "V"],
+        filter_bad_cameras=False,
+        show_baseline=True,
+        show_event_markers=False,
+        show_residuals=True,
+        show_phase_fold=True,
+        show_raw_mag=True,
+        override_period=None,
+        phase_period_pending=True,
+        suppress_catalog_phase_period=True,
+        show_diagnostics=False,
+        confidence_colors=False,
+        run_params={"baseline_func": "global_median"},
+        uirevision_key="test",
+        yaxis_mode="mag",
+    )
+
+    assert result["status"] == "ok"
+    assert result["status_message"] == "Auto PDM: searching..."
+    assert any("auto pdm period search is running" in warning.lower() for warning in result["warnings"])
+    assert any(
+        str(annotation.text).startswith("Auto PDM period search")
+        for annotation in result["figure"].layout.annotations
+    )
+    assert "9.00000" not in result["status_message"]
+
+
+def test_interactive_phase_panel_uses_completed_auto_pdm_over_vsx(tmp_path: Path) -> None:
+    lc_path = tmp_path / "123.dat2"
+    _write_dat2(lc_path)
+    payload = {
+        "candidate_id": "123",
+        "asas_sn_id": "123",
+        "lc_path": str(lc_path),
+        "vsx_period": 9.0,
+    }
+
+    result = build_interactive_lightcurve_figure(
+        payload,
+        plot_dir=None,
+        selected_cameras=[],
+        selected_bands=["g", "V"],
+        filter_bad_cameras=False,
+        show_baseline=True,
+        show_event_markers=False,
+        show_residuals=True,
+        show_phase_fold=True,
+        show_raw_mag=True,
+        override_period=1.5,
+        override_period_source="Auto PDM",
+        show_diagnostics=False,
+        confidence_colors=False,
+        run_params={"baseline_func": "global_median"},
+        uirevision_key="test",
+        yaxis_mode="mag",
+    )
+
+    assert result["status"] == "ok"
+    assert "Phase-fold P=1.50000 d" in result["status_message"]
+    assert "source=Auto PDM" in result["status_message"]
+    assert "9.00000" not in result["status_message"]
+
+
 def test_interactive_phase_time_panel_uses_cycle_axis_and_residual_color(tmp_path: Path) -> None:
     lc_path = tmp_path / "123.dat2"
     _write_dat2(lc_path)

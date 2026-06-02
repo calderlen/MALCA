@@ -17,6 +17,7 @@ def _do_save(candidate_id, score, taxonomy_selection, needs_followup, notes, eve
             disposition=selection.get('disposition') or 'keep',
             morphology_primary=selection.get('morphology_primary'),
             morphology_secondary=selection.get('morphology_secondary'),
+            morphology_secondary_json=selection.get('morphology_secondary_json'),
             morphology_polarity=selection.get('morphology_polarity'),
             morphology_recurrence=selection.get('morphology_recurrence'),
             baseline_behavior=selection.get('baseline_behavior'),
@@ -100,6 +101,79 @@ app.clientside_callback(
         if (!selection.priority_tags) { selection.priority_tags = []; }
         if (!selection.evidence_flags) { selection.evidence_flags = []; }
         if (!selection.model_tags) { selection.model_tags = []; }
+        var detailLabelByValue = {};
+        Object.keys(taxonomy.morphology_secondary || {}).forEach(function(primary) {
+            (taxonomy.morphology_secondary[primary] || []).forEach(function(item) {
+                detailLabelByValue[String(item.value)] = item.label || item.value;
+            });
+        });
+        var normalizeDetailList = function(raw, scalar) {
+            var source = [];
+            if (Array.isArray(raw)) {
+                source = raw.slice();
+            } else if (typeof raw === 'string' && raw.trim()) {
+                try {
+                    var parsed = JSON.parse(raw);
+                    source = Array.isArray(parsed) ? parsed : [raw];
+                } catch (_err) {
+                    source = [raw];
+                }
+            } else if (raw !== null && raw !== undefined && raw !== '') {
+                source = [raw];
+            }
+            if (scalar !== null && scalar !== undefined && String(scalar).trim()) {
+                source.unshift(scalar);
+            }
+            var seen = {};
+            var out = [];
+            source.forEach(function(item) {
+                var text = String(item == null ? '' : item).trim();
+                if (text && !seen[text]) {
+                    seen[text] = true;
+                    out.push(text);
+                }
+            });
+            return out;
+        };
+        var setDetailList = function(details) {
+            var normalized = normalizeDetailList(details, null);
+            selection.morphology_secondary_list = normalized;
+            selection.morphology_secondary = normalized.length ? normalized[0] : null;
+            selection.morphology_secondary_json = JSON.stringify(normalized);
+            return normalized;
+        };
+        var describeDetailList = function(details) {
+            var normalized = normalizeDetailList(details, null);
+            if (!normalized.length) {
+                return 'cleared';
+            }
+            return normalized.map(function(value) {
+                return detailLabelByValue[value] || value;
+            }).join(', ');
+        };
+        var toggleDetail = function(value) {
+            var details = normalizeDetailList(
+                selection.morphology_secondary_list || selection.morphology_secondary_json,
+                selection.morphology_secondary
+            );
+            var next = [];
+            var removed = false;
+            details.forEach(function(item) {
+                if (item === value) {
+                    removed = true;
+                } else {
+                    next.push(item);
+                }
+            });
+            if (!removed) {
+                next.push(value);
+            }
+            return setDetailList(next);
+        };
+        setDetailList(normalizeDetailList(
+            selection.morphology_secondary_list || selection.morphology_secondary_json,
+            selection.morphology_secondary
+        ));
         var nextScore = currentScore;
         var nextFollowup = !!needsFollowup;
         var nextIdx = idx;
@@ -161,15 +235,15 @@ app.clientside_callback(
 
         if (nextActiveMenu === 'morphology_secondary') {
             if (key === 'Backspace') {
-                selection.morphology_secondary = null;
+                setDetailList([]);
                 nextSubmenu = selection.morphology_primary || nextSubmenu;
-                return emitTaxonomy('Secondary morphology cleared');
+                return emitTaxonomy('Detail cleared');
             }
             var secondary = secondaryByKey(selection.morphology_primary || nextSubmenu)[lower];
             if (secondary) {
-                selection.morphology_secondary = (selection.morphology_secondary === secondary.value) ? null : secondary.value;
+                var details = toggleDetail(secondary.value);
                 nextSubmenu = selection.morphology_primary || nextSubmenu;
-                return emitTaxonomy('Detail: ' + (selection.morphology_secondary || 'cleared'));
+                return emitTaxonomy('Detail: ' + describeDetailList(details));
             }
         }
 
@@ -220,10 +294,10 @@ app.clientside_callback(
         if (selection.morphology_primary && lower !== 'h') {
             var activeSecondary = secondaryByKey(selection.morphology_primary)[lower];
             if (activeSecondary) {
-                selection.morphology_secondary = (selection.morphology_secondary === activeSecondary.value) ? null : activeSecondary.value;
+                var activeDetails = toggleDetail(activeSecondary.value);
                 nextActiveMenu = 'morphology_secondary';
                 nextSubmenu = selection.morphology_primary;
-                return emitTaxonomy('Detail: ' + (selection.morphology_secondary || 'cleared'));
+                return emitTaxonomy('Detail: ' + describeDetailList(activeDetails));
             }
         }
 
@@ -231,13 +305,13 @@ app.clientside_callback(
             var primary = primaryByKey[lower];
             if (selection.morphology_primary === primary.value) {
                 selection.morphology_primary = null;
-                selection.morphology_secondary = null;
+                setDetailList([]);
                 nextActiveMenu = '';
                 nextSubmenu = '';
                 return emitTaxonomy('Morphology cleared');
             }
             selection.morphology_primary = primary.value;
-            selection.morphology_secondary = null;
+            setDetailList([]);
             nextActiveMenu = 'morphology_secondary';
             nextSubmenu = primary.value;
             return emitTaxonomy('Morphology: ' + primary.label);
@@ -388,6 +462,8 @@ def persist_review_save_request(save_request, current_candidate_id):
      Input('round-sigfigs', 'value'),
      Input('link-radius-arcsec', 'value'),
      Input('pdm-result-store', 'data'),
+     Input('pdm-min-period', 'value'),
+     Input('pdm-max-period', 'value'),
      Input('pdm-manual-period', 'value'),
      Input('yaxis-mode', 'value'),
      Input('phase-panel-mode', 'value'),
@@ -395,26 +471,64 @@ def persist_review_save_request(save_request, current_candidate_id):
      State('plot-render-request', 'data'),
     prevent_initial_call=True,
 )
-def queue_plot_render_request(idx, current_candidate_id, plot_mode, overlay_values, selected_cameras, preset, residual_height, theme_mode, _queue_size, _pipeline_progress, baseline_opacity, selected_bands, round_sigfigs, link_radius, pdm_result, pdm_manual_period, yaxis_mode, phase_panel_mode, external_source_view, existing_request):
+def queue_plot_render_request(idx, current_candidate_id, plot_mode, overlay_values, selected_cameras, preset, residual_height, theme_mode, _queue_size, _pipeline_progress, baseline_opacity, selected_bands, round_sigfigs, link_radius, pdm_result, pdm_min_period, pdm_max_period, pdm_manual_period, yaxis_mode, phase_panel_mode, external_source_view, existing_request):
     """Debounced render request queue for native plot UX."""
     req = existing_request or {'nonce': 0, 'ts': 0.0}
-    # Determine effective PDM period: manual override > PDM result
+    # Determine effective phase period: manual override > search result > pending auto PDM.
     override_period = None
+    override_period_source = ''
+    phase_period_pending = False
+    suppress_catalog_phase_period = False
+    candidate_id = str(current_candidate_id) if current_candidate_id is not None else None
     if pdm_manual_period is not None:
         try:
             p = float(pdm_manual_period)
             if p > 0:
                 override_period = p
+                override_period_source = 'manual/search'
         except (TypeError, ValueError):
             pass
-    if override_period is None and pdm_result and isinstance(pdm_result, dict):
-        override_period = pdm_result.get('best_period')
+    if override_period is None:
+        min_p, max_p = _normalize_period_search_bounds(pdm_min_period, pdm_max_period)
+        result_matches_context = False
+        if isinstance(pdm_result, dict):
+            result_candidate = str(pdm_result.get('candidate_id') or '')
+            result_matches_context = bool(candidate_id and result_candidate == candidate_id)
+            try:
+                result_min = float(pdm_result.get('min_period'))
+                result_max = float(pdm_result.get('max_period'))
+            except (TypeError, ValueError):
+                result_matches_context = False
+            else:
+                result_matches_context = bool(
+                    result_matches_context
+                    and np.isclose(result_min, min_p)
+                    and np.isclose(result_max, max_p)
+                )
+
+        if isinstance(pdm_result, dict) and result_matches_context:
+            if bool(pdm_result.get('pending')):
+                phase_period_pending = True
+                suppress_catalog_phase_period = True
+            else:
+                try:
+                    period = float(pdm_result.get('best_period'))
+                except (TypeError, ValueError):
+                    period = np.nan
+                if np.isfinite(period) and period > 0:
+                    override_period = period
+                    override_period_source = str(pdm_result.get('source') or pdm_result.get('method') or 'period search')
+                elif bool(pdm_result.get('auto')):
+                    suppress_catalog_phase_period = True
+        elif candidate_id:
+            phase_period_pending = True
+            suppress_catalog_phase_period = True
     return {
         'nonce': int(req.get('nonce', 0)) + 1,
         'ts': float(time.time()),
         'state': {
             'idx': idx,
-            'candidate_id': str(current_candidate_id) if current_candidate_id is not None else None,
+            'candidate_id': candidate_id,
             'plot_mode': plot_mode,
             'overlay_values': list(overlay_values or []),
             'selected_cameras': list(selected_cameras or []),
@@ -426,10 +540,11 @@ def queue_plot_render_request(idx, current_candidate_id, plot_mode, overlay_valu
             'round_sigfigs': bool(True if round_sigfigs is None else ('yes' in round_sigfigs)),
             'link_radius': float(link_radius) if link_radius is not None else 10.0,
             'override_period': override_period,
+            'override_period_source': override_period_source,
+            'phase_period_pending': bool(phase_period_pending),
+            'suppress_catalog_phase_period': bool(suppress_catalog_phase_period),
             'yaxis_mode': str(yaxis_mode or 'mag'),
             'phase_panel_mode': str(phase_panel_mode or 'fold'),
             'external_source_view': str(external_source_view or DEFAULT_EXTERNAL_SOURCE_VIEW),
         },
     }
-
-

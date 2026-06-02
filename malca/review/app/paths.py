@@ -3,17 +3,31 @@ def _resolve_run_dir_from_plot_dir(plot_dir: str | None) -> Path | None:
     """Infer run directory from plot-dir or run-dir style path."""
     if not plot_dir:
         return None
-    p = Path(str(plot_dir)).expanduser().resolve()
+    cached = _resolve_run_dir_from_plot_dir_cached(str(plot_dir))
+    return Path(cached) if cached else None
+
+
+@lru_cache(maxsize=64)
+def _resolve_run_dir_from_plot_dir_cached(plot_dir_text: str) -> str | None:
+    """Cached implementation for run-dir inference from plot-dir text."""
+    if not plot_dir_text:
+        return None
+    p = Path(str(plot_dir_text)).expanduser()
+    try:
+        if p.exists():
+            p = p.resolve()
+    except Exception:
+        pass
     if p.name == "plots":
-        return p.parent
+        return str(p.parent)
     if (p / "plots").is_dir():
-        return p
+        return str(p)
     if (p / "results").is_dir():
-        return p
+        return str(p)
     if (p.parent / "results").is_dir():
-        return p.parent
+        return str(p.parent)
     if (p.parent / "plots").is_dir():
-        return p.parent
+        return str(p.parent)
     return None
 
 
@@ -21,16 +35,30 @@ def _resolve_run_dir_from_db_path(db_path: str | Path | None) -> Path | None:
     """Infer run directory from a review DB path or standalone bundled DB path."""
     if not db_path:
         return None
-    p = Path(str(db_path)).expanduser().resolve()
+    cached = _resolve_run_dir_from_db_path_cached(str(db_path))
+    return Path(cached) if cached else None
+
+
+@lru_cache(maxsize=16)
+def _resolve_run_dir_from_db_path_cached(db_path_text: str) -> str | None:
+    """Cached implementation for run-dir inference from a review DB path."""
+    if not db_path_text:
+        return None
+    p = Path(str(db_path_text)).expanduser()
+    try:
+        if p.exists():
+            p = p.resolve()
+    except Exception:
+        pass
     if p.suffix.lower() != ".db":
         return None
     if (p.parent / "results").is_dir() or (p.parent / "plots").is_dir() or (p.parent / "bundle_assets" / "lightcurves").is_dir():
-        return p.parent
+        return str(p.parent)
     if p.parent.name != "review":
         return None
     run_dir = p.parent.parent
     if (run_dir / "results").is_dir() or (run_dir / "plots").is_dir() or (run_dir / "bundle_assets" / "lightcurves").is_dir():
-        return run_dir
+        return str(run_dir)
     return None
 
 
@@ -79,21 +107,50 @@ def _configured_plot_dir() -> Path | None:
     """Return the configured plot directory, if any."""
     if not PLOT_DIR:
         return None
-    return Path(str(PLOT_DIR)).expanduser().resolve()
+    cached = _configured_plot_dir_cached(str(PLOT_DIR))
+    return Path(cached) if cached else None
+
+
+@lru_cache(maxsize=8)
+def _configured_plot_dir_cached(plot_dir_text: str) -> str | None:
+    if not plot_dir_text:
+        return None
+    p = Path(str(plot_dir_text)).expanduser()
+    try:
+        if p.exists():
+            p = p.resolve()
+    except Exception:
+        pass
+    return str(p)
+
+
+@lru_cache(maxsize=512)
+def _existing_run_dir_from_path_text(path_text: str) -> str | None:
+    """Infer a run dir from an existing local path without resolving stale roots."""
+    text = str(path_text or "").strip()
+    if not text or "://" in text:
+        return None
+    p = Path(text).expanduser()
+    candidates = (p, p.parent, p.parent.parent)
+    for candidate in candidates:
+        try:
+            if (candidate / "results").is_dir() or (candidate / "bundle_assets" / "lightcurves").is_dir():
+                try:
+                    return str(candidate.resolve())
+                except Exception:
+                    return str(candidate)
+        except Exception:
+            continue
+    return None
 
 
 def _run_dir_from_source_path(source_path: object = None) -> Path | None:
     """Infer a run directory from a candidate source path when possible."""
     text = str(source_path or "").strip()
     if text:
-        try:
-            source = Path(text).expanduser().resolve()
-        except Exception:
-            source = Path(text).expanduser()
-
-        for candidate in (source, source.parent, source.parent.parent):
-            if (candidate / "results").is_dir() or (candidate / "bundle_assets" / "lightcurves").is_dir():
-                return candidate
+        source_run = _existing_run_dir_from_path_text(text)
+        if source_run:
+            return Path(source_run)
 
     return _resolve_run_dir_from_db_path(DB_PATH)
 
@@ -240,24 +297,30 @@ def _plot_search_root_for_payload(payload: dict | None) -> Path | None:
     if inferred_plot_dir is not None and inferred_plot_dir.is_dir():
         return inferred_plot_dir
 
-    for key in ("plot_path", "png_path", "path", "lc_path"):
+    for key in ("plot_path", "png_path"):
         raw_path = (payload or {}).get(key)
         if not raw_path:
             continue
         candidate = Path(str(raw_path)).expanduser()
-        try:
-            candidate = candidate.resolve()
-        except Exception:
-            pass
-
         if candidate.suffix.lower() in _PLOT_STATIC_EXTENSIONS and candidate.exists():
-            return candidate.parent
+            try:
+                return candidate.resolve().parent
+            except Exception:
+                return candidate.parent
 
-        for parent in candidate.parents:
-            run_dir = _resolve_run_dir_from_plot_dir(str(parent))
-            if run_dir is None:
-                continue
-            plot_candidate = run_dir / "plots"
+        run_dir_text = _existing_run_dir_from_path_text(str(candidate.parent))
+        if run_dir_text:
+            plot_candidate = Path(run_dir_text) / "plots"
+            if plot_candidate.is_dir():
+                return plot_candidate
+
+    for key in ("path", "lc_path"):
+        raw_path = (payload or {}).get(key)
+        if not raw_path:
+            continue
+        run_dir_text = _existing_run_dir_from_path_text(str(raw_path))
+        if run_dir_text:
+            plot_candidate = Path(run_dir_text) / "plots"
             if plot_candidate.is_dir():
                 return plot_candidate
 
@@ -954,5 +1017,4 @@ def _coerce_bool(value: object) -> bool:
         return float(value) != 0.0
     s = str(value).strip().lower()
     return s in {"1", "true", "t", "yes", "y"}
-
 

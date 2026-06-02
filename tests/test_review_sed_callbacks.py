@@ -395,8 +395,14 @@ def test_vetting_known_preset_can_leave_uncertain_types_visible() -> None:
         {"label": "EA", "value": "EA"},
         {"label": "DSCT", "value": "DSCT"},
         {"label": "EA:", "value": "EA:"},
+        {"label": "EA/SD:", "value": "EA/SD:"},
+        {"label": "BE:", "value": "BE:"},
+        {"label": "BY+Microlens:", "value": "BY+Microlens:"},
+        {"label": "ACEP|CEP", "value": "ACEP|CEP"},
+        {"label": "BE|GCAS|SDOR|WR", "value": "BE|GCAS|SDOR|WR"},
         {"label": "DSCT:+VAR", "value": "DSCT:+VAR"},
         {"label": "VAR", "value": "VAR"},
+        {"label": "nan", "value": "nan"},
     ]
     options["asassn_var_type"] = [
         {"label": "ROT", "value": "ROT"},
@@ -418,7 +424,14 @@ def test_vetting_known_preset_can_leave_uncertain_types_visible() -> None:
 
     assert bool_values_by_col["vetting_likely_known"] == "Any"
     assert bool_values_by_col["microlens_match"] == "False"
-    assert select_values_by_col["vsx_class"] == ["GCAS", "BE", "EA", "DSCT"]
+    assert select_values_by_col["vsx_class"] == [
+        "GCAS",
+        "BE",
+        "EA",
+        "DSCT",
+        "ACEP|CEP",
+        "BE|GCAS|SDOR|WR",
+    ]
     assert select_values_by_col["asassn_var_type"] == ["ROT"]
     assert select_values_by_col["tns_type"] == ["SN Ia"]
     assert select_values_by_col["simbad_otype"] == ["V*"]
@@ -533,21 +546,24 @@ def test_diagnostic_background_signature_tracks_wal_file(tmp_path: Path, monkeyp
     assert before != after
 
 
-def test_diagnostic_background_prepares_even_when_details_closed(monkeypatch) -> None:
+def test_diagnostic_background_skips_when_details_closed(monkeypatch) -> None:
     monkeypatch.setattr(review_app, "_diagnostic_background_signature", lambda _path: "sig")
-    monkeypatch.setattr(review_app, "_load_or_cache_diagnostic_background", lambda _sig: ({"cached": True}, True))
 
-    state = review_app._prepare_diagnostic_background(
-        False,
-        None,
-        None,
-        {"signature": "", "ready": False, "cached": False, "token": 3},
-    )
+    def fail(*_args, **_kwargs):
+        raise AssertionError("closed diagnostics should not prepare background")
 
-    assert state["signature"] == "sig"
-    assert state["ready"] is True
-    assert state["cached"] is True
-    assert state["token"] == 4
+    monkeypatch.setattr(review_app, "_load_or_cache_diagnostic_background", fail)
+
+    try:
+        review_app._prepare_diagnostic_background(
+            False,
+            None,
+            None,
+            {"signature": "", "ready": False, "cached": False, "token": 3},
+        )
+    except review_app.dash.exceptions.PreventUpdate:
+        return
+    raise AssertionError("closed diagnostics should raise PreventUpdate")
 
 
 def test_dustycult_result_panel_renders_unavailable_state(tmp_path, monkeypatch) -> None:

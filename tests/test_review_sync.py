@@ -48,14 +48,18 @@ def _seed_candidate_and_review(
                 (json.dumps(payload, sort_keys=True), str(candidate["candidate_id"])),
             )
         if review is not None:
+            morphology_details = review.get("morphology_secondary_list")
+            if morphology_details is None:
+                morphology_details = [review["morphology_secondary"]] if review.get("morphology_secondary") else []
             conn.execute(
                 """
                 INSERT INTO reviews (
                     candidate_id, interest_score, event_class, review_pass, notes, status, workflow_status,
-                    morphology_primary, morphology_secondary, physical_primary, physical_secondary, priority_tags_json,
+                    morphology_primary, morphology_secondary, morphology_secondary_json,
+                    physical_primary, physical_secondary, priority_tags_json,
                     taxonomy_version, legacy_review_json, reviewer, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     review["candidate_id"],
@@ -67,6 +71,7 @@ def _seed_candidate_and_review(
                     review.get("workflow_status", review.get("status", "unreviewed")),
                     review.get("morphology_primary"),
                     review.get("morphology_secondary"),
+                    json.dumps(morphology_details, sort_keys=True, separators=(",", ":")),
                     review.get("physical_primary"),
                     review.get("physical_secondary"),
                     json.dumps(review.get("priority_tags", []), sort_keys=True),
@@ -111,6 +116,8 @@ def test_review_sync_export_import_roundtrip_and_manifest_hashes(tmp_path: Path)
             "notes": "line one,\nline two",
             "status": "reviewed",
             "morphology_primary": "dimming_event",
+            "morphology_secondary": "recurrent_dips",
+            "morphology_secondary_list": ["recurrent_dips", "multi_depth_dips"],
             "physical_primary": "young_stellar_object_or_pms",
             "physical_secondary": "yso_dipper",
             "priority_tags": ["priority_dipper"],
@@ -144,6 +151,9 @@ def test_review_sync_export_import_roundtrip_and_manifest_hashes(tmp_path: Path)
 
     review_record = json.loads(reviews_text.splitlines()[0])
     assert review_record["notes"] == "line one,\nline two"
+    assert review_record["morphology_secondary"] == "recurrent_dips"
+    assert review_record["morphology_secondary_list"] == ["recurrent_dips", "multi_depth_dips"]
+    assert json.loads(review_record["morphology_secondary_json"]) == ["recurrent_dips", "multi_depth_dips"]
     assert review_record["physical_primary"] == "young_stellar_object_or_pms"
     assert review_record["physical_secondary"] == "yso_dipper"
     assert "physical_family" not in review_record
@@ -172,6 +182,8 @@ def test_review_sync_export_import_roundtrip_and_manifest_hashes(tmp_path: Path)
     assert payload["dipper_score"] == 6.0
     assert review["notes"] == "line one,\nline two"
     assert review["event_class"] == "dipper"
+    assert review["morphology_secondary"] == "recurrent_dips"
+    assert review["morphology_secondary_list"] == ["recurrent_dips", "multi_depth_dips"]
 
 
 def test_review_sync_import_merge_keeps_newer_target_review(tmp_path: Path) -> None:

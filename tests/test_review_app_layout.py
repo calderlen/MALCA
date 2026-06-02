@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import inspect
+import json
 import re
 import sys
 import types
@@ -164,6 +165,237 @@ def test_layout_exposes_phase_time_toggle() -> None:
     assert values == {"fold", "time"}
 
 
+def test_taxonomy_subtype_render_event_does_not_select_brightening_detail(monkeypatch) -> None:
+    trigger = {
+        "type": "taxonomy-option-btn",
+        "menu": "morphology_secondary",
+        "value": "single_brightening",
+    }
+    monkeypatch.setattr(
+        review_app,
+        "callback_context",
+        types.SimpleNamespace(triggered_id=trigger, inputs_list=[[{"id": trigger}]]),
+    )
+
+    out = review_app.click_taxonomy_option(
+        [0],
+        {"morphology_primary": "brightening_event"},
+        "morphology_secondary",
+    )
+
+    assert out == (
+        review_app.no_update,
+        review_app.no_update,
+        review_app.no_update,
+        review_app.no_update,
+    )
+
+
+def test_taxonomy_subtype_positive_click_selects_brightening_detail(monkeypatch) -> None:
+    trigger = {
+        "type": "taxonomy-option-btn",
+        "menu": "morphology_secondary",
+        "value": "single_brightening",
+    }
+    monkeypatch.setattr(
+        review_app,
+        "callback_context",
+        types.SimpleNamespace(triggered_id=trigger, inputs_list=[[{"id": trigger}]]),
+    )
+
+    selection, active_menu, submenu, note = review_app.click_taxonomy_option(
+        [1],
+        {"morphology_primary": "brightening_event"},
+        "morphology_secondary",
+    )
+
+    assert selection["morphology_secondary"] == "single_brightening"
+    assert selection["morphology_secondary_list"] == ["single_brightening"]
+    assert json.loads(selection["morphology_secondary_json"]) == ["single_brightening"]
+    assert active_menu == "morphology_secondary"
+    assert submenu == "brightening_event"
+    assert "single brightening" in note
+
+
+def test_auto_period_on_navigate_queues_pdm_even_with_external_period(monkeypatch) -> None:
+    monkeypatch.setattr(review_app, "_has_external_period", lambda _payload: True)
+
+    result, label, manual_period, cache_update, request = review_app.auto_period_on_navigate(
+        "cand-1",
+        0.1,
+        10.0,
+        {},
+        {"nonce": 4},
+    )
+
+    assert result["pending"] is True
+    assert result["source"] == "Auto PDM"
+    assert label == "Auto PDM: searching..."
+    assert manual_period is None
+    assert cache_update is review_app.no_update
+    assert request["candidate_id"] == "cand-1"
+    assert request["method"] == "pdm"
+    assert request["nonce"] == 5
+
+
+def test_auto_period_cache_reuses_only_matching_bounds() -> None:
+    cached_result = {
+        "candidate_id": "cand-1",
+        "search_method": "pdm",
+        "method": "PDM",
+        "source": "Auto PDM",
+        "best_period": 2.5,
+        "min_period": 0.1,
+        "max_period": 10.0,
+        "auto": True,
+    }
+    key = review_app._period_cache_key("cand-1", "pdm", 0.1, 10.0)
+    cache = {
+        key: {
+            "candidate_id": "cand-1",
+            "method": "pdm",
+            "min_period": 0.1,
+            "max_period": 10.0,
+            "result": cached_result,
+            "label": "Auto PDM: P=2.50000 d",
+        }
+    }
+
+    result, label, _manual_period, cache_update, request = review_app.auto_period_on_navigate(
+        "cand-1",
+        0.1,
+        10.0,
+        cache,
+        {"nonce": 1},
+    )
+    assert result == cached_result
+    assert label == "Auto PDM: P=2.50000 d"
+    assert cache_update is review_app.no_update
+    assert request is review_app.no_update
+
+    changed_result, changed_label, _manual_period, _cache_update, changed_request = review_app.auto_period_on_navigate(
+        "cand-1",
+        0.1,
+        12.0,
+        cache,
+        {"nonce": 1},
+    )
+    assert changed_result["pending"] is True
+    assert changed_label == "Auto PDM: searching..."
+    assert changed_request["method"] == "pdm"
+    assert changed_request["max_period"] == 12.0
+
+
+def test_run_auto_period_search_marks_result_and_cache_as_auto_pdm(monkeypatch) -> None:
+    monkeypatch.setattr(review_app, "_candidate_context", lambda _candidate_id: ({"candidate_id": "cand-1"}, None, None))
+
+    def fake_search(_payload, *, min_period, max_period, method):
+        assert method == "pdm"
+        assert min_period == 0.1
+        assert max_period == 10.0
+        return {"best_period": 1.234, "method": "PDM"}, "PDM: P=1.23400 d"
+
+    monkeypatch.setattr(review_app, "_run_period_search_for_payload", fake_search)
+
+    result, label, cache = review_app.run_auto_period_search(
+        {"nonce": 2, "candidate_id": "cand-1", "min_period": 0.1, "max_period": 10.0, "method": "pdm"},
+        {},
+    )
+
+    key = review_app._period_cache_key("cand-1", "pdm", 0.1, 10.0)
+    assert label == "Auto PDM: P=1.23400 d"
+    assert result["auto"] is True
+    assert result["source"] == "Auto PDM"
+    assert result["candidate_id"] == "cand-1"
+    assert cache[key]["method"] == "pdm"
+    assert cache[key]["result"]["best_period"] == 1.234
+
+
+def test_plot_render_request_manual_overrides_pending_auto_pdm() -> None:
+    pending_result = {
+        "pending": True,
+        "candidate_id": "cand-1",
+        "search_method": "pdm",
+        "method": "PDM",
+        "source": "Auto PDM",
+        "min_period": 0.1,
+        "max_period": 10.0,
+    }
+
+    request = review_app.queue_plot_render_request(
+        0,
+        "cand-1",
+        "native",
+        ["phase"],
+        [],
+        "Diagnostics",
+        0.3,
+        "black",
+        1,
+        0,
+        0.5,
+        ["g", "V"],
+        ["yes"],
+        10.0,
+        pending_result,
+        0.1,
+        10.0,
+        3.25,
+        "mag",
+        "fold",
+        "asassn",
+        {"nonce": 9},
+    )
+
+    state = request["state"]
+    assert state["override_period"] == 3.25
+    assert state["override_period_source"] == "manual/search"
+    assert state["phase_period_pending"] is False
+    assert state["suppress_catalog_phase_period"] is False
+
+
+def test_plot_render_request_suppresses_catalog_until_matching_pdm_result() -> None:
+    stale_result = {
+        "candidate_id": "old-cand",
+        "search_method": "pdm",
+        "method": "PDM",
+        "source": "Auto PDM",
+        "best_period": 9.0,
+        "min_period": 0.1,
+        "max_period": 10.0,
+    }
+
+    request = review_app.queue_plot_render_request(
+        0,
+        "cand-1",
+        "native",
+        ["phase"],
+        [],
+        "Diagnostics",
+        0.3,
+        "black",
+        1,
+        0,
+        0.5,
+        ["g", "V"],
+        ["yes"],
+        10.0,
+        stale_result,
+        0.1,
+        10.0,
+        None,
+        "mag",
+        "fold",
+        "asassn",
+        {"nonce": 9},
+    )
+
+    state = request["state"]
+    assert state["override_period"] is None
+    assert state["phase_period_pending"] is True
+    assert state["suppress_catalog_phase_period"] is True
+
+
 def test_eda_table_has_native_sorting_and_filtering() -> None:
     table = _component_by_id(app.layout, "eda-candidate-table")
 
@@ -255,6 +487,95 @@ def test_effective_local_lc_path_uses_inferred_bundle_without_plot_dir(tmp_path,
     )
 
     assert resolved == str(lc_path)
+
+
+def test_plot_resolution_prefers_local_db_context_over_stale_payload_paths(tmp_path, monkeypatch) -> None:
+    run_dir = tmp_path / "march18_bundle"
+    lc_dir = run_dir / "bundle_assets" / "lightcurves"
+    plot_dir = run_dir / "plots"
+    (run_dir / "review").mkdir(parents=True)
+    lc_dir.mkdir(parents=True)
+    plot_dir.mkdir()
+    db_path = run_dir / "review" / "review.db"
+    db_path.write_bytes(b"")
+    lc_path = lc_dir / "C1.dat3"
+    lc_path.write_text("", encoding="ascii")
+
+    monkeypatch.setattr(review_app, "PLOT_DIR", None)
+    monkeypatch.setattr(review_app, "DB_PATH", str(db_path))
+
+    payload = {
+        "candidate_id": "C1",
+        "asas_sn_id": "C1",
+        "source_path": "/old/root",
+        "path": "/old/root/C1.dat3",
+        "lc_path": "/old/root/C1.dat3",
+    }
+
+    assert review_app._review_plot_dir_for_context(payload["source_path"]) == plot_dir
+    assert review_app._plot_search_root_for_payload(payload) == plot_dir
+    assert review_app._effective_local_lc_path(
+        payload,
+        stored_lc_path="/old/root/C1.dat3",
+        source_path="/old/root",
+    ) == str(lc_path)
+    assert review_app._baseline_provenance_warning(
+        payload,
+        plot_dir=plot_dir,
+        run_params={"baseline_func": "per_camera_median"},
+        stored_lc_path="/old/root/C1.dat3",
+        source_path="/old/root",
+    ) is None
+
+
+def test_closed_lazy_panels_skip_candidate_work(monkeypatch) -> None:
+    def fail(*_args, **_kwargs):
+        raise AssertionError("closed panel should not render")
+
+    monkeypatch.setattr(review_app, "_candidate_context", fail)
+    monkeypatch.setattr(review_app, "_load_sed_figure_for_candidate", fail)
+    monkeypatch.setattr(review_app, "_render_dustycult_result_panel", fail)
+    monkeypatch.setattr(review_app, "_render_phoebe_result_panel", fail)
+    monkeypatch.setattr(review_app, "control_defaults_for_candidate", fail)
+    monkeypatch.setattr(review_app, "infer_period_days", fail)
+
+    assert review_app.update_external_followup_panel("C1", "black", False) is review_app.no_update
+    assert review_app.update_sed_panel("C1", "observed", "black", False) == (review_app.no_update, review_app.no_update)
+    assert review_app.update_diagnostic_plots("C1", "black", {"ready": False}, False) == (review_app.no_update, review_app.no_update)
+    assert review_app.update_dustycult_result_panel("C1", "black", 0, False) == (review_app.no_update, review_app.no_update)
+    assert review_app.update_phoebe_result_panel("C1", "black", 0, False) == (review_app.no_update, review_app.no_update)
+    assert review_app.update_phoebe_period_control("C1", False) == (review_app.no_update, review_app.no_update)
+
+    dustycult_controls = review_app.update_dustycult_controls("C1", 0, False)
+    assert dustycult_controls == tuple(
+        [review_app.no_update] * len(review_app._DUSTYCULT_CONTROL_FIELDS) + [review_app.no_update]
+    )
+
+
+def test_open_lazy_panels_render_current_candidate(monkeypatch) -> None:
+    monkeypatch.setattr(review_app, "_candidate_context", lambda *_args: ({"candidate_id": "C1"}, None, None))
+    monkeypatch.setattr(review_app, "_render_external_followup", lambda *_args, **_kwargs: ["external"])
+    monkeypatch.setattr(review_app, "_load_sed_figure_for_candidate", lambda *_args, **_kwargs: ({"data": [], "layout": {}}, [], []))
+    monkeypatch.setattr(review_app, "_load_sed_source_status_for_candidate", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(review_app, "_render_sed_fetch_provenance", lambda *_args, **_kwargs: "provenance")
+    monkeypatch.setattr(review_app, "_sed_status_text", lambda *_args, **_kwargs: "sed status")
+    monkeypatch.setattr(review_app, "_diagnostic_background_signature", lambda *_args, **_kwargs: "sig")
+    monkeypatch.setattr(review_app, "_get_cached_diagnostic_background", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(review_app, "_render_diagnostic_plots", lambda *_args, **_kwargs: ["diag"])
+    monkeypatch.setattr(review_app, "_render_dustycult_result_panel", lambda *_args, **_kwargs: ["dust"])
+    monkeypatch.setattr(review_app, "_dustycult_config_status_text", lambda: "dust config")
+    monkeypatch.setattr(review_app, "_render_phoebe_result_panel", lambda *_args, **_kwargs: ["phoebe"])
+    monkeypatch.setattr(review_app, "_phoebe_config_status_text", lambda: "phoebe config")
+    monkeypatch.setattr(review_app, "infer_period_days", lambda *_args, **_kwargs: (2.5, "test"))
+
+    assert review_app.update_external_followup_panel("C1", "black", True) == ["external"]
+    sed_children, sed_status = review_app.update_sed_panel("C1", "observed", "black", True)
+    assert len(sed_children) == 2
+    assert isinstance(sed_status, str)
+    assert review_app.update_diagnostic_plots("C1", "black", {"ready": True, "signature": "sig"}, True) == (["diag"], "")
+    assert review_app.update_dustycult_result_panel("C1", "black", 0, True) == (["dust"], "dust config")
+    assert review_app.update_phoebe_result_panel("C1", "black", 0, True) == (["phoebe"], "phoebe config")
+    assert review_app.update_phoebe_period_control("C1", True) == (2.5, "Using test period.")
 
 
 def test_dustycult_publication_export_controls_are_present() -> None:

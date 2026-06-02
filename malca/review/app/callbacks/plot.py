@@ -11,7 +11,23 @@ def run_period_search(n_clicks, candidate_id, min_period, max_period, method, au
     payload, _stored_lc_path, _source_path = _candidate_context(candidate_id)
 
     result, label = _run_period_search_for_payload(payload, min_period=min_p, max_period=max_p, method=method)
-    auto_period_cache[candidate_id] = {'result': result, 'label': label}
+    if isinstance(result, dict):
+        result = dict(result)
+        result.setdefault('candidate_id', candidate_id)
+        result.setdefault('search_method', method)
+        result.setdefault('source', str(result.get('method') or method.upper()))
+        result.setdefault('auto', False)
+        result.setdefault('min_period', min_p)
+        result.setdefault('max_period', max_p)
+        _store_period_cache_entry(
+            auto_period_cache,
+            candidate_id=candidate_id,
+            method=method,
+            min_period=min_p,
+            max_period=max_p,
+            result=result,
+            label=label,
+        )
     return result, label, auto_period_cache
 
 
@@ -60,14 +76,108 @@ def _normalize_period_search_bounds(min_period, max_period) -> tuple[float, floa
     """Normalize period-search bounds from UI inputs."""
     try:
         min_p = float(min_period) if min_period else 0.1
-        max_p = float(max_period) if max_period else 100.0
+        max_p = float(max_period) if max_period else 10.0
     except (TypeError, ValueError):
-        min_p, max_p = 0.1, 100.0
+        min_p, max_p = 0.1, 10.0
     if min_p <= 0:
         min_p = 0.01
     if max_p <= min_p:
         max_p = min_p + 1.0
     return min_p, max_p
+
+
+def _period_cache_key(candidate_id: object, method: object, min_period: float, max_period: float) -> str:
+    method_name = str(method or 'pdm').strip().lower()
+    return f"{str(candidate_id)}|{method_name}|{float(min_period):.12g}|{float(max_period):.12g}"
+
+
+def _period_cache_entry(
+    auto_period_cache: dict | None,
+    *,
+    candidate_id: object,
+    method: object,
+    min_period: float,
+    max_period: float,
+) -> dict | None:
+    cache = dict(auto_period_cache or {})
+    key = _period_cache_key(candidate_id, method, min_period, max_period)
+    entry = cache.get(key)
+    if not isinstance(entry, dict):
+        return None
+    if str(entry.get('candidate_id') or '') != str(candidate_id):
+        return None
+    if str(entry.get('method') or '').strip().lower() != str(method or 'pdm').strip().lower():
+        return None
+    try:
+        entry_min = float(entry.get('min_period'))
+        entry_max = float(entry.get('max_period'))
+    except (TypeError, ValueError):
+        return None
+    if not (np.isclose(entry_min, float(min_period)) and np.isclose(entry_max, float(max_period))):
+        return None
+    return entry
+
+
+def _store_period_cache_entry(
+    auto_period_cache: dict,
+    *,
+    candidate_id: object,
+    method: object,
+    min_period: float,
+    max_period: float,
+    result: dict | None,
+    label: str,
+) -> None:
+    method_name = str(method or 'pdm').strip().lower()
+    key = _period_cache_key(candidate_id, method_name, min_period, max_period)
+    auto_period_cache[key] = {
+        'candidate_id': str(candidate_id),
+        'method': method_name,
+        'min_period': float(min_period),
+        'max_period': float(max_period),
+        'result': result,
+        'label': str(label or ''),
+    }
+
+
+def _pending_auto_pdm_result(candidate_id: object, min_period: float, max_period: float) -> dict:
+    return {
+        'pending': True,
+        'auto': True,
+        'candidate_id': str(candidate_id),
+        'method': 'PDM',
+        'search_method': 'pdm',
+        'source': 'Auto PDM',
+        'min_period': float(min_period),
+        'max_period': float(max_period),
+    }
+
+
+def _failed_auto_pdm_result(candidate_id: object, min_period: float, max_period: float, label: str) -> dict:
+    return {
+        'auto': True,
+        'candidate_id': str(candidate_id),
+        'method': 'PDM',
+        'search_method': 'pdm',
+        'source': 'Auto PDM',
+        'min_period': float(min_period),
+        'max_period': float(max_period),
+        'error': str(label or 'No valid period'),
+    }
+
+
+def _auto_period_label(method: str, label: str) -> str:
+    method_name = str(method or 'pdm').strip().lower()
+    clean_label = str(label or '').strip()
+    if method_name == 'pdm':
+        if clean_label.startswith('PDM:'):
+            return f"Auto PDM:{clean_label[len('PDM:'):]}"
+        if clean_label.lower().startswith('auto pdm:'):
+            return clean_label
+        return f"Auto PDM: {clean_label}" if clean_label else "Auto PDM: no result"
+    if clean_label.lower().startswith('auto'):
+        return clean_label
+    return f"Auto {method_name.upper()}: {clean_label}" if clean_label else f"Auto {method_name.upper()}: no result"
 
 
 @app.callback(
@@ -76,10 +186,10 @@ def _normalize_period_search_bounds(min_period, max_period) -> tuple[float, floa
      Output('pdm-manual-period', 'value', allow_duplicate=True),
      Output('auto-period-cache', 'data', allow_duplicate=True),
      Output('auto-period-request', 'data', allow_duplicate=True)],
-    Input('current-candidate-id', 'data'),
-    [State('pdm-min-period', 'value'),
-     State('pdm-max-period', 'value'),
-     State('auto-period-cache', 'data'),
+    [Input('current-candidate-id', 'data'),
+     Input('pdm-min-period', 'value'),
+     Input('pdm-max-period', 'value')],
+    [State('auto-period-cache', 'data'),
      State('auto-period-request', 'data')],
     prevent_initial_call=True,
 )
@@ -90,8 +200,15 @@ def auto_period_on_navigate(candidate_id, min_period, max_period, auto_period_ca
     candidate_id = str(candidate_id)
     auto_period_cache = dict(auto_period_cache or {})
     auto_period_request = dict(auto_period_request or {})
+    min_p, max_p = _normalize_period_search_bounds(min_period, max_period)
 
-    cached_entry = auto_period_cache.get(candidate_id)
+    cached_entry = _period_cache_entry(
+        auto_period_cache,
+        candidate_id=candidate_id,
+        method='pdm',
+        min_period=min_p,
+        max_period=max_p,
+    )
     if isinstance(cached_entry, dict):
         return (
             cached_entry.get('result'),
@@ -101,21 +218,14 @@ def auto_period_on_navigate(candidate_id, min_period, max_period, auto_period_ca
             no_update,
         )
 
-    min_p, max_p = _normalize_period_search_bounds(min_period, max_period)
-
-    payload, _stored_lc_path, _source_path = _candidate_context(candidate_id)
-
-    if _has_external_period(payload):
-        return None, 'Catalog/pipeline period', None, no_update, {'nonce': 0}
-
     request = {
         'nonce': int(auto_period_request.get('nonce', 0) or 0) + 1,
         'candidate_id': candidate_id,
         'min_period': min_p,
         'max_period': max_p,
-        'method': 'auto',
+        'method': 'pdm',
     }
-    return None, 'Auto-searching period...', None, no_update, request
+    return _pending_auto_pdm_result(candidate_id, min_p, max_p), 'Auto PDM: searching...', None, no_update, request
 
 
 def run_auto_period_search(auto_period_request, auto_period_cache):
@@ -139,7 +249,7 @@ def run_auto_period_search(auto_period_request, auto_period_cache):
         auto_period_request.get('min_period'),
         auto_period_request.get('max_period'),
     )
-    method = str(auto_period_request.get('method') or 'auto').strip().lower()
+    method = str(auto_period_request.get('method') or 'pdm').strip().lower()
 
     payload, _stored_lc_path, _source_path = _candidate_context(candidate_id)
     result, label = _run_period_search_for_payload(
@@ -148,16 +258,26 @@ def run_auto_period_search(auto_period_request, auto_period_cache):
         max_period=max_p,
         method=method,
     )
-    if method == 'auto' and result is None and not str(label or '').lower().startswith('auto'):
-        label = f'Auto search: {label}'
+    label = _auto_period_label(method, label)
     if isinstance(result, dict):
         result = dict(result)
-        result.setdefault('auto', method == 'auto')
-
-    auto_period_cache[candidate_id] = {
-        'result': result,
-        'label': label,
-    }
+        result['auto'] = True
+        result['candidate_id'] = candidate_id
+        result['search_method'] = method
+        result['source'] = 'Auto PDM' if method == 'pdm' else f"Auto {method.upper()}"
+        result['min_period'] = min_p
+        result['max_period'] = max_p
+    elif method == 'pdm':
+        result = _failed_auto_pdm_result(candidate_id, min_p, max_p, label)
+    _store_period_cache_entry(
+        auto_period_cache,
+        candidate_id=candidate_id,
+        method=method,
+        min_period=min_p,
+        max_period=max_p,
+        result=result,
+        label=label,
+    )
     return result, label, auto_period_cache
 
 
@@ -272,6 +392,9 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
     yaxis_mode = str(state.get('yaxis_mode', 'mag') or 'mag')
     phase_panel_mode = _coerce_choice(state.get('phase_panel_mode'), {'fold', 'time'}, 'fold')
     external_source_view = str(state.get('external_source_view', DEFAULT_EXTERNAL_SOURCE_VIEW) or DEFAULT_EXTERNAL_SOURCE_VIEW)
+    override_period_source = str(state.get('override_period_source') or 'manual/search')
+    phase_period_pending = bool(state.get('phase_period_pending', False))
+    suppress_catalog_phase_period = bool(state.get('suppress_catalog_phase_period', False))
     override_period = state.get('override_period')
     if override_period is not None:
         try:
@@ -429,6 +552,9 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
             phase_panel_mode=phase_panel_mode,
             show_raw_mag='raw' in overlays,
             override_period=override_period,
+            override_period_source=override_period_source,
+            phase_period_pending=phase_period_pending,
+            suppress_catalog_phase_period=suppress_catalog_phase_period,
             show_diagnostics='diagnostics' in overlays,
             confidence_colors='confidence' in overlays,
             run_params=run_params or {},
@@ -541,6 +667,9 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
     )
 
 
+update_display = _review_perf_wrapped('update_display', update_display)
+
+
 _DISPLAY_OUTPUTS = [Output('plot-image', 'src'),
     Output('candidate-info-grid', 'children'),
     Output('metadata-health-indicator', 'children'),
@@ -591,15 +720,16 @@ else:
 @app.callback(
     Output('external-followup-panel', 'children'),
     [Input('current-candidate-id', 'data'),
-     Input('theme-mode-store', 'data')],
+     Input('theme-mode-store', 'data'),
+     Input('external-followup-details', 'open')],
     prevent_initial_call=False,
 )
-def update_external_followup_panel(candidate_id, theme_mode):
+def update_external_followup_panel(candidate_id, theme_mode, details_open=True):
     """Render external follow-up artifacts for the current candidate."""
+    if not _details_open(details_open):
+        return no_update
     if not candidate_id:
         return html.Div("No candidates loaded.", style={'font-size': '11px', 'color': '#c77'})
     payload, _stored_lc_path, _source_path = _candidate_context(candidate_id)
 
     return _render_external_followup(payload, str(candidate_id), str(theme_mode or DEFAULT_THEME))
-
-

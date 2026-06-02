@@ -35,6 +35,7 @@ REVIEW_TAXONOMY_SQL_COLUMNS: tuple[tuple[str, str], ...] = (
     ("disposition", "TEXT"),
     ("morphology_primary", "TEXT"),
     ("morphology_secondary", "TEXT"),
+    ("morphology_secondary_json", "TEXT"),
     ("morphology_polarity", "TEXT"),
     ("morphology_recurrence", "TEXT"),
     ("baseline_behavior", "TEXT"),
@@ -409,6 +410,8 @@ def empty_taxonomy_selection() -> dict[str, Any]:
     return {
         "morphology_primary": None,
         "morphology_secondary": None,
+        "morphology_secondary_list": [],
+        "morphology_secondary_json": "[]",
         "morphology_polarity": None,
         "morphology_recurrence": None,
         "baseline_behavior": None,
@@ -463,9 +466,19 @@ def normalize_selection(selection: dict[str, Any] | None) -> dict[str, Any]:
     out = empty_taxonomy_selection()
     if isinstance(selection, dict):
         out.update(selection)
+
+    secondary_scalar = coerce_optional_text(out.get("morphology_secondary"))
+    secondary_list = coerce_json_list(out.get("morphology_secondary_list"))
+    if not secondary_list:
+        secondary_list = coerce_json_list(out.get("morphology_secondary_json"))
+    if secondary_scalar and secondary_scalar not in secondary_list:
+        secondary_list.insert(0, secondary_scalar)
+    out["morphology_secondary_list"] = secondary_list
+    out["morphology_secondary"] = secondary_list[0] if secondary_list else None
+    out["morphology_secondary_json"] = json_list(secondary_list)
+
     for key in (
         "morphology_primary",
-        "morphology_secondary",
         "morphology_polarity",
         "morphology_recurrence",
         "baseline_behavior",
@@ -489,6 +502,8 @@ def selection_from_review(review: dict[str, Any]) -> dict[str, Any]:
         {
             "morphology_primary": review.get("morphology_primary"),
             "morphology_secondary": review.get("morphology_secondary"),
+            "morphology_secondary_json": review.get("morphology_secondary_json"),
+            "morphology_secondary_list": review.get("morphology_secondary_list"),
             "morphology_polarity": review.get("morphology_polarity"),
             "morphology_recurrence": review.get("morphology_recurrence"),
             "baseline_behavior": review.get("baseline_behavior"),
@@ -644,6 +659,7 @@ def migrate_legacy_review_db(
                 "disposition": mapped.get("disposition"),
                 "morphology_primary": mapped.get("morphology_primary"),
                 "morphology_secondary": mapped.get("morphology_secondary"),
+                "morphology_secondary_json": mapped.get("morphology_secondary_json"),
                 "morphology_polarity": mapped.get("morphology_polarity"),
                 "morphology_recurrence": mapped.get("morphology_recurrence"),
                 "baseline_behavior": mapped.get("baseline_behavior"),

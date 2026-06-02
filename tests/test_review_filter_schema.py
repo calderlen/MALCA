@@ -176,16 +176,23 @@ def test_microlens_false_filter_keeps_unset_rows(tmp_path: Path) -> None:
     assert ids == ["C1", "C2"]
 
 
-def test_vsx_uncertainty_and_generic_classes_stay_visible() -> None:
+def test_vsx_known_type_detection_tokenizes_certain_composites() -> None:
     assert is_definite_known_type_value("vsx_class", "GCAS") is True
     assert is_definite_known_type_value("vsx_class", "BE") is True
     assert is_definite_known_type_value("vsx_class", "EA") is True
     assert is_definite_known_type_value("vsx_class", "DSCT") is True
+    assert is_definite_known_type_value("vsx_class", "ACEP|CEP") is True
+    assert is_definite_known_type_value("vsx_class", "BE|GCAS|SDOR|WR") is True
     assert is_definite_known_type_value("vsx_class", "EA:") is False
+    assert is_definite_known_type_value("vsx_class", "EA/SD:") is False
+    assert is_definite_known_type_value("vsx_class", "BE:") is False
+    assert is_definite_known_type_value("vsx_class", "BY+Microlens:") is False
     assert is_definite_known_type_value("vsx_class", "DSCT:+VAR") is False
     assert is_definite_known_type_value("vsx_class", "VAR") is False
     assert is_definite_known_type_value("vsx_class", "MISC") is False
     assert is_definite_known_type_value("vsx_class", "None") is False
+    assert is_definite_known_type_value("vsx_class", None) is False
+    assert is_definite_known_type_value("vsx_class", "nan") is False
     assert is_definite_known_type_value("vsx_class", "*") is False
 
 

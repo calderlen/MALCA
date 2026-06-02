@@ -377,14 +377,45 @@ def _phoebe_config_status_text() -> str:
     return availability.message if availability.ok else f"Unavailable: {availability.message}"
 
 
+def _phoebe_row_json(fit_row: pd.Series | dict, column: str) -> dict:
+    value = fit_row.get(column) if hasattr(fit_row, "get") else None
+    parsed = parse_phoebe_json(value, {})
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _phoebe_solver_status(fit_row: pd.Series | dict) -> str:
+    params = _phoebe_row_json(fit_row, "params_json")
+    metrics = _phoebe_row_json(fit_row, "metrics_json")
+    return str(params.get("solver_status") or metrics.get("solver_status") or "").strip()
+
+
+def _phoebe_display_status(fit_row: pd.Series | dict | None) -> str:
+    if fit_row is None:
+        return "not run"
+    status = str(fit_row.get("status") or "unknown").strip().lower()
+    solver_status = _phoebe_solver_status(fit_row)
+    if status == "ok" and solver_status and solver_status != "ok":
+        return "warning"
+    return status
+
+
+def _phoebe_warning_text(fit_row: pd.Series | dict) -> str:
+    error = str(fit_row.get("error") or "").strip()
+    if error:
+        return error
+    solver_status = _phoebe_solver_status(fit_row)
+    if solver_status and solver_status != "ok":
+        return f"PHOEBE solver did not complete; diagnostic model only. {solver_status}"
+    return "PHOEBE solver did not complete; diagnostic model only."
+
+
 def _phoebe_status_cards(fits: pd.DataFrame, theme: str | None) -> html.Div:
     spec = _external_followup_theme(theme)
     muted = str(spec["muted"])
     row = fits.iloc[-1] if fits is not None and not fits.empty else None
-    status = "not run"
+    status = _phoebe_display_status(row)
     detail = ""
     if row is not None:
-        status = str(row.get("status") or "unknown")
         detail_parts = []
         runtime = row.get("runtime_sec")
         n_points = row.get("n_input_points")
@@ -398,8 +429,10 @@ def _phoebe_status_cards(fits: pd.DataFrame, theme: str | None) -> html.Div:
         error = str(row.get("error") or "").strip()
         if status != "ok" and error:
             detail_parts.append(error[:140])
+        elif status == "warning":
+            detail_parts.append(_phoebe_warning_text(row)[:140])
         detail = " | ".join(detail_parts)
-    color = "#64c27b" if status == "ok" else ("#dd8080" if status == "failed" else muted)
+    color = "#64c27b" if status == "ok" else ("#d99a28" if status == "warning" else ("#dd8080" if status == "failed" else muted))
     return html.Div([
         html.Div([
             html.Div("Latest", style={'fontSize': '10px', 'color': muted}),
@@ -455,7 +488,7 @@ def _phoebe_result_figure(fit_row: pd.Series, theme: str | None) -> go.Figure:
     else:
         fig.add_annotation(text="No PHOEBE plot data stored for this fit.", showarrow=False, x=0.5, y=0.5, xref="paper", yref="paper")
     period = fit_row.get("period_days")
-    title = "PHOEBE Fit"
+    title = "PHOEBE Fit" if _phoebe_display_status(fit_row) == "ok" else "PHOEBE Diagnostic Model"
     if period is not None and not pd.isna(period):
         title += f" (P={_dustycult_float(period, 6)} d)"
     fig.update_layout(
@@ -484,8 +517,8 @@ def _phoebe_result_figure(fit_row: pd.Series, theme: str | None) -> go.Figure:
 
 def _phoebe_parameter_table(fit_row: pd.Series, theme: str | None) -> html.Div:
     spec = _external_followup_theme(theme)
-    metrics = parse_phoebe_json(fit_row.get("metrics_json"), {})
-    params = parse_phoebe_json(fit_row.get("params_json"), {})
+    metrics = _phoebe_row_json(fit_row, "metrics_json")
+    params = _phoebe_row_json(fit_row, "params_json")
     rows = []
     for label, value in (
         ("period_source", fit_row.get("period_source")),
@@ -493,6 +526,7 @@ def _phoebe_parameter_table(fit_row: pd.Series, theme: str | None) -> html.Div:
         ("reduced_chi2", metrics.get("reduced_chi2") if isinstance(metrics, dict) else None),
         ("rms_residual", metrics.get("rms_residual") if isinstance(metrics, dict) else None),
         ("model_flux_source", metrics.get("model_flux_source") if isinstance(metrics, dict) else None),
+        ("model_flux_scale", metrics.get("model_flux_scale") if isinstance(metrics, dict) else None),
         ("solver_status", params.get("solver_status") if isinstance(params, dict) else None),
         ("compute_status", params.get("compute_status") if isinstance(params, dict) else None),
     ):
@@ -521,8 +555,13 @@ def _render_phoebe_result_panel(candidate_id: str, theme_mode: str | None, _refr
         children.append(html.Div("No PHOEBE fit has been run for this candidate.", style={'fontSize': '11px', 'color': spec["muted"]}))
         return children
     fit_row = fits.iloc[-1]
-    status = str(fit_row.get("status") or "").lower()
-    if status == "ok":
+    status = _phoebe_display_status(fit_row)
+    if status in {"ok", "warning"}:
+        if status == "warning":
+            children.append(html.Div(
+                _phoebe_warning_text(fit_row),
+                style={'fontSize': '11px', 'color': '#d99a28', 'overflowWrap': 'anywhere'},
+            ))
         children.append(dcc.Graph(
             id='phoebe-fit-plot',
             figure=_phoebe_result_figure(fit_row, theme_mode),
@@ -536,7 +575,7 @@ def _render_phoebe_result_panel(candidate_id: str, theme_mode: str | None, _refr
             style={'fontSize': '11px', 'color': spec["error"], 'overflowWrap': 'anywhere'},
         ))
     meta = [
-        f"status={fit_row.get('status') or 'unknown'}",
+        f"status={status}",
         f"runtime={_dustycult_float(fit_row.get('runtime_sec'), 3)} s",
         f"version={fit_row.get('phoebe_version') or '-'}",
         f"input={fit_row.get('input_path') or '-'}",
@@ -557,11 +596,14 @@ def _dustycult_config_status_text() -> str:
     [Output(field_id, 'value') for _key, field_id, _label, _step in _DUSTYCULT_CONTROL_FIELDS]
     + [Output('dustycult-defaults-status', 'children')],
     [Input('current-candidate-id', 'data'),
-     Input('dustycult-recompute-dip-btn', 'n_clicks')],
+     Input('dustycult-recompute-dip-btn', 'n_clicks'),
+     Input('dustycult-details', 'open')],
     prevent_initial_call=False,
 )
-def update_dustycult_controls(candidate_id, _recompute_clicks):
+def update_dustycult_controls(candidate_id, _recompute_clicks, details_open=True):
     """Populate editable DustyCult defaults for the current candidate."""
+    if not _details_open(details_open):
+        return tuple([no_update] * len(_DUSTYCULT_CONTROL_FIELDS) + [no_update])
     if not candidate_id:
         return tuple([None] * len(_DUSTYCULT_CONTROL_FIELDS) + ["No candidates loaded."])
     triggered_id = _dash_triggered_id()
@@ -689,11 +731,14 @@ else:
      Output('dustycult-config-status', 'children')],
     [Input('current-candidate-id', 'data'),
      Input('theme-mode-store', 'data'),
-     Input('dustycult-refresh-token', 'data')],
+     Input('dustycult-refresh-token', 'data'),
+     Input('dustycult-details', 'open')],
     prevent_initial_call=False,
 )
-def update_dustycult_result_panel(candidate_id, theme_mode, refresh_token):
+def update_dustycult_result_panel(candidate_id, theme_mode, refresh_token, details_open=True):
     """Render DustyCult status, predictive overlay, and posterior summary."""
+    if not _details_open(details_open):
+        return no_update, no_update
     return (
         _render_dustycult_result_panel(str(candidate_id) if candidate_id else "", str(theme_mode or DEFAULT_THEME), refresh_token),
         _dustycult_config_status_text(),
@@ -703,11 +748,14 @@ def update_dustycult_result_panel(candidate_id, theme_mode, refresh_token):
 @app.callback(
     [Output('phoebe-period-days', 'value'),
      Output('phoebe-period-status', 'children')],
-    Input('current-candidate-id', 'data'),
+    [Input('current-candidate-id', 'data'),
+     Input('phoebe-details', 'open')],
     prevent_initial_call=False,
 )
-def update_phoebe_period_control(candidate_id):
+def update_phoebe_period_control(candidate_id, details_open=True):
     """Populate the PHOEBE period field from the best available active-candidate period."""
+    if not _details_open(details_open):
+        return no_update, no_update
     if not candidate_id:
         return None, "No candidates loaded."
     try:
@@ -747,10 +795,15 @@ def _phoebe_fit_callback_impl(clicks, candidate_id, refresh_token, period_days, 
     except Exception as exc:
         row = {"status": "failed", "error": str(exc), "runtime_sec": None}
     next_token = int(refresh_token or 0) + 1
-    status = str(row.get("status") or "unknown")
+    status = _phoebe_display_status(row)
     if status == "ok":
         return (
             f"PHOEBE fit complete in {_dustycult_float(row.get('runtime_sec'), 3)} s.",
+            next_token,
+        )
+    if status == "warning":
+        return (
+            f"PHOEBE fit warning: {_phoebe_warning_text(row)}",
             next_token,
         )
     return f"PHOEBE fit failed: {row.get('error') or 'unknown error'}", next_token
@@ -793,11 +846,14 @@ else:
      Output('phoebe-config-status', 'children')],
     [Input('current-candidate-id', 'data'),
      Input('theme-mode-store', 'data'),
-     Input('phoebe-refresh-token', 'data')],
+     Input('phoebe-refresh-token', 'data'),
+     Input('phoebe-details', 'open')],
     prevent_initial_call=False,
 )
-def update_phoebe_result_panel(candidate_id, theme_mode, refresh_token):
+def update_phoebe_result_panel(candidate_id, theme_mode, refresh_token, details_open=True):
     """Render PHOEBE availability, fit status, and stored fit plot."""
+    if not _details_open(details_open):
+        return no_update, no_update
     return (
         _render_phoebe_result_panel(str(candidate_id) if candidate_id else "", str(theme_mode or DEFAULT_THEME), refresh_token),
         _phoebe_config_status_text(),
@@ -842,5 +898,3 @@ def export_dustycult_pdf(fit_clicks, occulter_clicks, candidate_id):
     safe_id = slugify_token(candidate_id, fallback="candidate")
     fname = f"malca_dustycult_{kind}_{safe_id}_{mode}.pdf"
     return dcc.send_bytes(image_bytes, fname), f'Exported {fname}'
-
-

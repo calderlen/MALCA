@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import sqlite3
 from contextlib import closing
 from pathlib import Path
 
@@ -97,6 +99,10 @@ def _default_model_output_paths(output_path: Path) -> tuple[Path, Path]:
     )
 
 
+def _is_sqlite_input(path: Path) -> bool:
+    return path.suffix.lower() in {".db", ".sqlite", ".sqlite3"}
+
+
 def _ensure_candidate_id(df: pd.DataFrame) -> pd.DataFrame:
     if "candidate_id" in df.columns:
         return df
@@ -107,10 +113,55 @@ def _ensure_candidate_id(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _is_present(value: object) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip() != ""
+    try:
+        return not bool(pd.isna(value))
+    except Exception:
+        return True
+
+
+def _expand_sqlite_candidate_payloads(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or "payload_json" not in df.columns:
+        return df
+
+    records: list[dict] = []
+    for raw in df.to_dict("records"):
+        payload_raw = raw.get("payload_json")
+        if isinstance(payload_raw, str) and payload_raw.strip():
+            try:
+                payload = json.loads(payload_raw)
+            except Exception:
+                payload = {}
+        else:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        merged = dict(payload)
+        for key, value in raw.items():
+            if _is_present(value):
+                merged[key] = value
+            elif key not in merged:
+                merged[key] = value
+        records.append(merged)
+    return pd.DataFrame.from_records(records)
+
+
 def _read_candidate_table(input_path: Path) -> pd.DataFrame:
     suffix = input_path.suffix.lower()
     if suffix in {".csv", ".txt"}:
         return pd.read_csv(input_path)
+    if _is_sqlite_input(input_path):
+        with closing(sqlite3.connect(input_path)) as conn:
+            has_candidates = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'candidates'"
+            ).fetchone()
+            if has_candidates is None:
+                raise ValueError(f"SQLite input {input_path} does not contain a candidates table")
+            return _expand_sqlite_candidate_payloads(pd.read_sql_query("SELECT * FROM candidates", conn))
     return read_parquet_table(input_path)
 
 
@@ -118,6 +169,11 @@ def run(args: argparse.Namespace) -> Path:
     input_path = args.input.expanduser()
     output_path = (args.output or _default_output_path(input_path)).expanduser()
     fit_atmosphere = bool(getattr(args, "fit_atmosphere", True))
+    review_db_path = (
+        args.review_db.expanduser()
+        if args.review_db
+        else (input_path if _is_sqlite_input(input_path) else None)
+    )
 
     df = _read_candidate_table(input_path)
     df = _ensure_candidate_id(df)
@@ -168,17 +224,16 @@ def run(args: argparse.Namespace) -> Path:
         print(f"Saved {len(fits)} SED model fit rows to {fit_output_path} ({n_ok} ok)")
         print(f"Saved {len(curves)} SED model curve rows to {curve_output_path}")
 
-    if args.review_db:
-        review_db = args.review_db.expanduser()
-        with closing(db_connect(review_db)) as conn:
+    if review_db_path:
+        with closing(db_connect(review_db_path)) as conn:
             updated = upsert_sed_rows(conn, rows)
             if fit_atmosphere:
                 n_fits, n_curves = upsert_sed_model_results(conn, fits, curves)
             else:
                 n_fits, n_curves = 0, 0
-        print(f"\nUpserted {updated} SED rows into {review_db}")
+        print(f"\nUpserted {updated} SED rows into {review_db_path}")
         if fit_atmosphere:
-            print(f"Upserted {n_fits} SED model fit rows and {n_curves} curve rows into {review_db}")
+            print(f"Upserted {n_fits} SED model fit rows and {n_curves} curve rows into {review_db_path}")
 
     return output_path
 

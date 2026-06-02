@@ -1,4 +1,25 @@
 # This file was mechanically split from malca.review.app; preserve behavior when editing.
+def _matching_positive_pattern_click(triggered_id, inputs_list, clicks) -> bool:
+    """Return whether the triggered pattern button has a positive click count."""
+    if not isinstance(triggered_id, dict):
+        return False
+    input_items = inputs_list
+    if isinstance(input_items, dict):
+        input_items = [input_items]
+    if not isinstance(input_items, (list, tuple)):
+        input_items = []
+    for input_item, click_count in zip(input_items, clicks or []):
+        if not isinstance(input_item, dict):
+            continue
+        if input_item.get('id') != triggered_id:
+            continue
+        try:
+            return int(click_count or 0) > 0
+        except (TypeError, ValueError):
+            return False
+    return False
+
+
 @app.callback(
     [Output('taxonomy-selection-store', 'data', allow_duplicate=True),
      Output('active-taxonomy-menu', 'data', allow_duplicate=True),
@@ -25,9 +46,13 @@ def click_taxonomy_primary(_primary_clicks, _hypothesis_clicks, selection, activ
     if selection.get('morphology_primary') == value:
         selection['morphology_primary'] = None
         selection['morphology_secondary'] = None
+        selection['morphology_secondary_list'] = []
+        selection['morphology_secondary_json'] = json_list([])
         return selection, '', '', 'Morphology cleared'
     selection['morphology_primary'] = value
     selection['morphology_secondary'] = None
+    selection['morphology_secondary_list'] = []
+    selection['morphology_secondary_json'] = json_list([])
     return selection, 'morphology_secondary', value, f"Morphology: {label_for(value)}"
 
 
@@ -45,13 +70,23 @@ def click_taxonomy_option(_option_clicks, selection, active_menu):
     triggered = callback_context.triggered_id
     if not isinstance(triggered, dict) or triggered.get('type') != 'taxonomy-option-btn':
         return no_update, no_update, no_update, no_update
+    option_inputs = callback_context.inputs_list[0] if callback_context.inputs_list else []
+    if not _matching_positive_pattern_click(triggered, option_inputs, _option_clicks):
+        return no_update, no_update, no_update, no_update
     menu = str(triggered.get('menu') or active_menu or '')
     value = str(triggered.get('value') or '')
     selection = selection_from_review(selection if isinstance(selection, dict) else {})
     if menu == 'morphology_secondary':
-        selection['morphology_secondary'] = None if selection.get('morphology_secondary') == value else value
+        details = list(selection.get('morphology_secondary_list') or [])
+        if value in details:
+            details = [item for item in details if item != value]
+        else:
+            details.append(value)
+        selection['morphology_secondary_list'] = details
+        selection['morphology_secondary'] = details[0] if details else None
+        selection['morphology_secondary_json'] = json_list(details)
         submenu = selection.get('morphology_primary') or ''
-        return selection, 'morphology_secondary', submenu, f"Detail: {label_for(selection.get('morphology_secondary') or 'cleared')}"
+        return selection, 'morphology_secondary', submenu, f"Detail: {', '.join(label_for(item) for item in details) if details else 'cleared'}"
     if menu == 'physical_primary':
         if selection.get('physical_primary') == value:
             selection['physical_primary'] = None
@@ -88,8 +123,9 @@ def render_taxonomy_state(selection, active_menu):
     hypothesis_class = 'badge-btn active' if active_menu in {'physical_primary', 'physical_secondary'} else 'badge-btn'
     parts = []
     if primary:
-        detail = selection.get('morphology_secondary')
-        parts.append(f"Morphology: {label_for(primary)}" + (f" / {label_for(detail)}" if detail else ""))
+        details = list(selection.get('morphology_secondary_list') or [])
+        detail_text = ", ".join(label_for(detail) for detail in details)
+        parts.append(f"Morphology: {label_for(primary)}" + (f" / {detail_text}" if detail_text else ""))
     if selection.get('physical_primary'):
         family = selection.get('physical_primary')
         subclass = selection.get('physical_secondary')
@@ -109,15 +145,15 @@ def render_taxonomy_submenu(active_menu, submenu, selection):
     active_menu = str(active_menu or '')
     if active_menu == 'morphology_secondary':
         options = TAXONOMY_KEYBOARD_PAYLOAD['morphology_secondary'].get(str(submenu or selection.get('morphology_primary') or ''), [])
-        active_value = selection.get('morphology_secondary')
+        active_values = set(selection.get('morphology_secondary_list') or [])
         title = 'Detail'
     elif active_menu == 'physical_primary':
         options = TAXONOMY_KEYBOARD_PAYLOAD['physical_primary']
-        active_value = selection.get('physical_primary')
+        active_values = {selection.get('physical_primary')}
         title = 'Hypothesis'
     elif active_menu == 'physical_secondary':
         options = TAXONOMY_KEYBOARD_PAYLOAD['physical_secondary'].get(str(submenu or selection.get('physical_primary') or ''), [])
-        active_value = selection.get('physical_secondary')
+        active_values = {selection.get('physical_secondary')}
         title = 'Subclass'
     else:
         return []
@@ -130,7 +166,7 @@ def render_taxonomy_submenu(active_menu, submenu, selection):
                 f'[{item["key"].upper()}] {item["label"]}',
                 id={'type': 'taxonomy-option-btn', 'menu': active_menu, 'value': item['value']},
                 n_clicks=0,
-                className='badge-btn active' if item['value'] == active_value else 'badge-btn',
+                className='badge-btn active' if item['value'] in active_values else 'badge-btn',
             )
             for item in options
         ],

@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from malca.review.taxonomy import keyboard_payload, legacy_review_to_taxonomy, migrate_legacy_review_db
+from malca.review.taxonomy import keyboard_payload, legacy_review_to_taxonomy, migrate_legacy_review_db, normalize_selection
 from malca.review.store import db_connect, get_review, save_review, upsert_candidates_frame
 
 
@@ -40,6 +40,7 @@ def test_save_review_round_trips_taxonomy_fields(tmp_path: Path) -> None:
             disposition="keep",
             morphology_primary="dimming_event",
             morphology_secondary="big_dipper",
+            morphology_secondary_json=["big_dipper", "recurrent_dips", "multi_depth_dips"],
             physical_primary="young_stellar_object_or_pms",
             physical_secondary="yso_dipper",
             classification_confidence="likely",
@@ -54,6 +55,8 @@ def test_save_review_round_trips_taxonomy_fields(tmp_path: Path) -> None:
     assert review["event_class"] == "dipper"
     assert review["morphology_primary"] == "dimming_event"
     assert review["morphology_secondary"] == "big_dipper"
+    assert review["morphology_secondary_list"] == ["big_dipper", "recurrent_dips", "multi_depth_dips"]
+    assert json.loads(review["morphology_secondary_json"]) == ["big_dipper", "recurrent_dips", "multi_depth_dips"]
     assert review["physical_primary"] == "young_stellar_object_or_pms"
     assert review["physical_secondary"] == "yso_dipper"
     assert review["priority_tags"] == ["priority_dipper", "priority_followup"]
@@ -132,10 +135,24 @@ def test_init_db_renames_legacy_physical_taxonomy_columns(tmp_path: Path) -> Non
 
     assert review["physical_primary"] == "young_stellar_object_or_pms"
     assert review["physical_secondary"] == "yso_dipper"
+    assert "morphology_secondary_json" in columns
     assert "physical_primary" in columns
     assert "physical_secondary" in columns
     assert "physical_family" not in columns
     assert "physical_subclass" not in columns
+
+
+def test_normalize_selection_promotes_legacy_single_detail_to_list() -> None:
+    selection = normalize_selection(
+        {
+            "morphology_primary": "dimming_event",
+            "morphology_secondary": "recurrent_dips",
+        }
+    )
+
+    assert selection["morphology_secondary"] == "recurrent_dips"
+    assert selection["morphology_secondary_list"] == ["recurrent_dips"]
+    assert json.loads(selection["morphology_secondary_json"]) == ["recurrent_dips"]
 
 
 @pytest.mark.parametrize(
