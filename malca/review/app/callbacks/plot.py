@@ -421,10 +421,10 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
         candidate_id = str(candidate_id)
 
     if queue_size <= 0 or not candidate_id:
-        return '', 'No candidates in queue', _render_metadata_health(None, context_msg='Queue is empty.'), _render_vetting_banner(None, radius_arcsec=link_radius), '[0/0]', empty_fig, {'display': 'block', 'width': '100%', 'height': '100%'}, {'display': 'none'}, [], [], _render_plot_status_panel('error', 'No candidates in queue.', []), _render_camera_diag_panel({}, []), _render_run_config_panel(None, None, ['Queue is empty']), _render_repro_badge(None, ['Queue is empty']), '', nonce
+        return '', 'No candidates in queue', _render_metadata_health(None, context_msg='Queue is empty.'), _render_vetting_banner(None, radius_arcsec=link_radius), '[0/0]', empty_fig, {'display': 'block', 'width': '100%', 'height': '100%'}, {'display': 'none'}, [], [], _render_plot_status_panel('error', 'No candidates in queue.', []), _render_camera_diag_panel({}, []), 'No run configuration: queue is empty.', _render_run_config_panel(None, None, ['Queue is empty']), _render_repro_badge(None, ['Queue is empty']), '', nonce
 
     if idx < 0 or idx >= queue_size:
-        return '', 'Invalid index', _render_metadata_health(None, context_msg='Invalid queue index.'), _render_vetting_banner(None, radius_arcsec=link_radius), f'[{idx}/{queue_size}]', empty_fig, {'display': 'block', 'width': '100%', 'height': '100%'}, {'display': 'none'}, [], [], _render_plot_status_panel('error', 'Invalid queue index.', []), _render_camera_diag_panel({}, []), _render_run_config_panel(None, None, ['Invalid queue index']), _render_repro_badge(None, ['Invalid queue index']), '', nonce
+        return '', 'Invalid index', _render_metadata_health(None, context_msg='Invalid queue index.'), _render_vetting_banner(None, radius_arcsec=link_radius), f'[{idx}/{queue_size}]', empty_fig, {'display': 'block', 'width': '100%', 'height': '100%'}, {'display': 'none'}, [], [], _render_plot_status_panel('error', 'Invalid queue index.', []), _render_camera_diag_panel({}, []), 'No run configuration: invalid queue index.', _render_run_config_panel(None, None, ['Invalid queue index']), _render_repro_badge(None, ['Invalid queue index']), '', nonce
 
     payload, stored_lc_path, source_path = _candidate_context(candidate_id)
 
@@ -486,6 +486,7 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
         elif 'phase' in overlays:
             mismatch_warnings.append('Phase-fold overlay selected, but no phase PNG was found for this candidate.')
         panel = _render_run_config_panel(run_params if run_params else None, run_params_path, mismatch_warnings)
+        run_config_status = run_params_msg if run_params_status != 'loaded' else f"Loaded run configuration from {run_params_path}"
         return (
             png_src,
             merged_grid,
@@ -499,6 +500,7 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
             [],
             _render_plot_status_panel('ok', png_msg, mismatch_warnings),
             _render_camera_diag_panel({}, []),
+            run_config_status,
             panel,
             _render_repro_badge(run_params if run_params else None, mismatch_warnings),
             json.dumps(run_params, indent=2, sort_keys=True) if run_params else '',
@@ -570,6 +572,7 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
 
         traceback.print_exc()
         panel = _render_run_config_panel(run_params if run_params else None, run_params_path, [str(exc)])
+        run_config_status = run_params_msg if run_params_status != 'loaded' else f"Loaded run configuration from {run_params_path}"
         plot_src = _candidate_plot_src(payload)
         if plot_src:
             return (
@@ -579,6 +582,7 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
                 [], [],
                 _render_plot_status_panel('error', f'Native plot error: {exc}', mismatch_warnings),
                 _render_camera_diag_panel({}, []),
+                run_config_status,
                 panel,
                 _render_repro_badge(None, [str(exc)]),
                 '', nonce,
@@ -590,6 +594,7 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
             [], [],
             _render_plot_status_panel('error', f'Native plot error: {exc}', mismatch_warnings),
             _render_camera_diag_panel({}, []),
+            run_config_status,
             panel,
             _render_repro_badge(None, [str(exc)]),
             '', nonce,
@@ -631,6 +636,7 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
             [],
             _render_plot_status_panel('warn', f"{fallback_msg} Showing PNG fallback.", fallback_warnings),
             _render_camera_diag_panel(native.get('camera_diagnostics', {}), []),
+            run_params_msg if run_params_status != 'loaded' else f"Loaded run configuration from {run_params_path}",
             _render_run_config_panel(run_params if run_params else None, run_params_path, run_config_warnings),
             _render_repro_badge(run_params if run_params else None, run_config_warnings),
             json.dumps(run_params, indent=2, sort_keys=True) if run_params else '',
@@ -660,6 +666,7 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
         [],  # stats merged into candidate-info-grid
         _render_plot_status_panel(native.get('status', 'ok'), native.get('status_message', ''), (native_warnings + mismatch_warnings)),
         _render_camera_diag_panel(native.get('camera_diagnostics', {}), filtered),
+        run_params_msg if run_params_status != 'loaded' else f"Loaded run configuration from {run_params_path}",
         _render_run_config_panel(run_params if run_params else None, run_params_path, run_config_warnings),
         _render_repro_badge(run_params if run_params else None, run_config_warnings),
         json.dumps(run_params, indent=2, sort_keys=True) if run_params else '',
@@ -682,6 +689,7 @@ _DISPLAY_OUTPUTS = [Output('plot-image', 'src'),
     Output('plot-stats-cards', 'children'),
     Output('plot-status-panel', 'children'),
     Output('camera-filter-panel', 'children'),
+    Output('run-config-status', 'children'),
     Output('run-config-panel', 'children'),
     Output('repro-badge', 'children'),
     Output('run-config-json-store', 'data'),
@@ -718,18 +726,19 @@ else:
 
 
 @app.callback(
-    Output('external-followup-panel', 'children'),
+    [Output('external-followup-panel', 'children'),
+     Output('external-followup-status', 'children')],
     [Input('current-candidate-id', 'data'),
      Input('theme-mode-store', 'data'),
-     Input('external-followup-details', 'open')],
+     Input('external-followup-summary', 'n_clicks')],
     prevent_initial_call=False,
 )
-def update_external_followup_panel(candidate_id, theme_mode, details_open=True):
+def update_external_followup_panel(candidate_id, theme_mode, panel_requested=True):
     """Render external follow-up artifacts for the current candidate."""
-    if not _details_open(details_open):
-        return no_update
+    if not _details_open(panel_requested):
+        return no_update, no_update
     if not candidate_id:
-        return html.Div("No candidates loaded.", style={'font-size': '11px', 'color': '#c77'})
+        return _lazy_panel_placeholder("No candidates loaded.", "error"), "No candidates loaded."
     payload, _stored_lc_path, _source_path = _candidate_context(candidate_id)
 
-    return _render_external_followup(payload, str(candidate_id), str(theme_mode or DEFAULT_THEME))
+    return _render_external_followup(payload, str(candidate_id), str(theme_mode or DEFAULT_THEME)), f"Loaded external data for {candidate_id}."

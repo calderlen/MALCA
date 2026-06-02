@@ -22,6 +22,13 @@ from malca.review.dustycult import (
     run_dustycult_fit,
     upsert_dustycult_fit,
 )
+from malca.review.dustycult_display import (
+    build_dustycult_fit_figure,
+    dustycult_fit_metadata_rows,
+    dustycult_geometry_rows,
+    dustycult_posterior_rows,
+    select_dustycult_display_row,
+)
 from malca.review.dustycult_visualization import (
     DustOcculterParameters,
     DustStarParameters,
@@ -29,6 +36,88 @@ from malca.review.dustycult_visualization import (
     occulter_parameters_from_fit,
 )
 from malca.review.store import db_connect
+
+
+def _fit_row_with_posterior(**overrides: object) -> dict[str, object]:
+    row: dict[str, object] = {
+        "candidate_id": "cand-1",
+        "mode": "quick",
+        "status": "ok",
+        "runtime_sec": 1.25,
+        "start_jd": 10.0,
+        "end_jd": 12.0,
+        "artifact_dir": "/tmp/dustycult",
+        "t0_jd": 10.5,
+        "posterior_json": json.dumps(
+            {
+                "t0": {"median": 10.6, "p16": 10.5, "p84": 10.7},
+                "v": {"median": 2.0, "p16": 1.8, "p84": 2.2},
+                "b": {"median": 0.2, "p16": 0.1, "p84": 0.3},
+                "tau0": {"median": 0.4, "p16": 0.3, "p84": 0.5},
+                "lambda0": {"median": 510.0, "p16": 500.0, "p84": 520.0},
+                "alpha": {"median": 1.2, "p16": 1.0, "p84": 1.4},
+                "sigma_y": {"median": 0.3, "p16": 0.2, "p84": 0.4},
+                "sigma_x_plus": {"median": 0.4, "p16": 0.3, "p84": 0.5},
+                "sigma_x_minus": {"median": 0.5, "p16": 0.4, "p84": 0.6},
+            }
+        ),
+        "stellar_json": json.dumps({"R": 1.3, "u1": 0.2, "u2": 0.1}),
+    }
+    row.update(overrides)
+    return row
+
+
+def test_dustycult_display_selects_full_ok_then_quick_ok_then_latest() -> None:
+    fits = pd.DataFrame(
+        [
+            {"mode": "quick", "status": "ok", "updated_at": "2026-01-01T00:00:00Z"},
+            {"mode": "full", "status": "failed", "updated_at": "2026-01-02T00:00:00Z"},
+            {"mode": "full", "status": "ok", "updated_at": "2026-01-03T00:00:00Z"},
+        ]
+    )
+
+    assert select_dustycult_display_row(fits).get("mode") == "full"
+    assert select_dustycult_display_row(fits, mode="quick").get("mode") == "quick"
+    no_ok = fits.assign(status=["failed", "failed", "failed"])
+    assert select_dustycult_display_row(no_ok).get("updated_at") == "2026-01-03T00:00:00Z"
+
+
+def test_dustycult_display_rows_extract_metadata_geometry_and_posterior() -> None:
+    row = pd.Series(_fit_row_with_posterior())
+
+    metadata = dict(dustycult_fit_metadata_rows(row))
+    geometry = dict(dustycult_geometry_rows(row))
+    posterior = dustycult_posterior_rows(row, limit=None)
+
+    assert metadata["mode"] == "quick"
+    assert metadata["status"] == "ok"
+    assert metadata["artifact"] == "/tmp/dustycult"
+    assert geometry["R_star"] == "1.3"
+    assert geometry["b / R_star"] != "-"
+    assert ("t0", "10.6", "10.5", "10.7") in posterior
+
+
+def test_dustycult_display_fit_figure_uses_stored_predictive_curves() -> None:
+    row = pd.Series(_fit_row_with_posterior())
+    curves = pd.DataFrame(
+        {
+            "time": [10.0, 11.0],
+            "band": ["g", "g"],
+            "observed": [0.98, 0.9],
+            "error": [0.02, 0.02],
+            "lower95": [0.8, 0.82],
+            "lower68": [0.9, 0.88],
+            "median": [0.95, 0.92],
+            "upper68": [1.0, 0.98],
+            "upper95": [1.05, 1.02],
+        }
+    )
+
+    fig = build_dustycult_fit_figure(curves, row, theme="white")
+
+    assert "DustyCult Quick Fit" in fig.layout.title.text
+    assert "$F/F" in fig.layout.yaxis.title.text
+    assert any(trace.name == "g median" for trace in fig.data)
 
 
 def test_control_defaults_use_stored_dip_columns_for_window(tmp_path: Path) -> None:

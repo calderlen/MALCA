@@ -145,19 +145,19 @@ def _render_sed_fetch_provenance(source_statuses: list[dict[str, object]] | None
     [Input('current-candidate-id', 'data'),
      Input('sed-extinction-mode', 'value'),
      Input('theme-mode-store', 'data'),
-     Input('sed-details', 'open')],
+     Input('sed-summary', 'n_clicks')],
     prevent_initial_call=False,
 )
-def update_sed_panel(candidate_id, extinction_mode, theme_mode, details_open=True):
+def update_sed_panel(candidate_id, extinction_mode, theme_mode, panel_requested=True):
     """Render SED photometry for the current candidate."""
-    if not _details_open(details_open):
+    if not _details_open(panel_requested):
         return no_update, no_update
     if not candidate_id:
-        return [], 'No candidates loaded.'
+        return _lazy_panel_placeholder('No candidates loaded.', 'error'), 'No candidates loaded.'
     try:
         fig, rows, warnings_list = _load_sed_figure_for_candidate(candidate_id, extinction_mode, theme_mode)
     except Exception as exc:
-        return [], f"SED rendering failed: {exc}"
+        return _lazy_panel_placeholder(f"SED rendering failed: {exc}", 'error'), f"SED rendering failed: {exc}"
     try:
         source_statuses = _load_sed_source_status_for_candidate(candidate_id)
     except Exception as exc:
@@ -219,4 +219,3 @@ def export_sed_plot(n_clicks, candidate_id, extinction_mode, theme_mode):
     mode = str(extinction_mode or "observed").replace("-", "_")
     fname = f"malca_sed_{safe_id}_{mode}.pdf"
     return dcc.send_bytes(image_bytes, fname), f'Exported {fname}'
-

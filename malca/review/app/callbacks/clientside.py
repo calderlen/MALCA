@@ -225,6 +225,50 @@ app.clientside_callback(
 
 app.clientside_callback(
     """
+    function(_tick) {
+        if (!window.__malcaMetadataCopyAttached) {
+            document.addEventListener('click', async function(e) {
+                var target = e.target;
+                var button = target && target.closest ? target.closest('.metadata-copy-btn') : null;
+                if (!button) {
+                    return;
+                }
+                e.preventDefault();
+                e.stopPropagation();
+                var text = button.getAttribute('data-copy-text') || '';
+                var originalTitle = button.getAttribute('title') || 'Copy raw value';
+                try {
+                    await navigator.clipboard.writeText(text);
+                    button.classList.remove('copy-failed');
+                    button.classList.add('copied');
+                    button.setAttribute('title', 'Copied raw value');
+                    setTimeout(function() {
+                        button.classList.remove('copied');
+                        button.setAttribute('title', originalTitle);
+                    }, 900);
+                } catch (err) {
+                    button.classList.remove('copied');
+                    button.classList.add('copy-failed');
+                    button.setAttribute('title', 'Clipboard copy failed');
+                    setTimeout(function() {
+                        button.classList.remove('copy-failed');
+                        button.setAttribute('title', originalTitle);
+                    }, 1200);
+                }
+            });
+            window.__malcaMetadataCopyAttached = true;
+        }
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output('metadata-copy-init', 'data'),
+    Input('keyboard-init', 'n_intervals'),
+    prevent_initial_call=False,
+)
+
+
+app.clientside_callback(
+    """
     function(_savedStateTs, savedState, currentTheme, reviewScope) {
         var nu = window.dash_clientside.no_update;
         if (savedState && typeof savedState === 'object') {
@@ -731,5 +775,4 @@ app.clientside_callback(
     Input('eda-panel-state', 'data'),
     prevent_initial_call=False,
 )
-
 

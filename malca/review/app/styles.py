@@ -16,6 +16,11 @@ app.index_string = '''
         body {
             background-color: #000;
             color: #e0e0e0;
+            --review-table-cell-bg: #071016;
+            --review-table-header-bg: #101b24;
+            --review-table-text: #dce8f2;
+            --review-table-border: rgba(84, 118, 140, 0.35);
+            --review-table-header-border: rgba(84, 118, 140, 0.45);
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
             margin: 0;
             padding: 0;
@@ -377,15 +382,71 @@ app.index_string = '''
             background: rgba(12, 26, 35, 0.96);
         }
         .plot-toolbar {
-            display: flex;
-            align-items: center;
-            gap: 14px;
-            flex-wrap: wrap;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(min(150px, 100%), 1fr));
+            align-items: start;
+            gap: 8px;
             padding: 8px 10px;
             border: 1px solid rgba(84, 118, 140, 0.35);
             background: linear-gradient(180deg, rgba(8, 18, 24, 0.9), rgba(3, 8, 12, 0.75));
             border-radius: 8px;
             font-size: 11px;
+        }
+        .plot-control-group {
+            min-width: 0;
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+        .plot-control-full {
+            grid-column: 1 / -1;
+        }
+        .plot-control-label {
+            color: #9fb6cb;
+            font-size: 10px;
+            white-space: nowrap;
+        }
+        .plot-control-preset .dash-dropdown {
+            flex: 1 1 130px;
+            min-width: 0;
+        }
+        .plot-control-checks .dash-checklist,
+        .plot-control-radio .dash-radioitems {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+        .plot-control-checks .dash-checklist label,
+        .plot-control-radio .dash-radioitems label,
+        .plot-control-group label {
+            margin: 0;
+        }
+        .plot-actions {
+            align-items: center;
+        }
+        .plot-source-control .form-select {
+            flex: 1 1 130px;
+            min-width: 0;
+        }
+        .plot-period-controls {
+            align-items: center;
+        }
+        .period-method-control {
+            flex: 0 1 86px;
+            min-width: 76px;
+        }
+        .period-number-input {
+            width: 72px;
+        }
+        .period-manual-input {
+            width: 92px;
+        }
+        .plot-control-status {
+            flex: 1 1 160px;
+            min-width: 0;
+            overflow-wrap: anywhere;
+            word-break: break-word;
         }
         .compact-btn {
             background-color: #14212b;
@@ -449,8 +510,30 @@ app.index_string = '''
             display: inline-flex;
             align-items: center;
             gap: 6px;
-            min-width: 140px;
-            max-width: 200px;
+            flex: 1 1 145px;
+            min-width: 130px;
+            max-width: none;
+        }
+        .toolbar-slider-control > div {
+            flex: 1 1 90px;
+            min-width: 80px;
+        }
+        .plot-control-status:empty {
+            display: none;
+        }
+        .pipeline-log-panel {
+            font-size: 10px;
+            line-height: 1.35;
+            margin-top: 6px;
+            max-height: 220px;
+            overflow-y: auto;
+            padding: 8px;
+            background: rgba(8, 16, 24, 0.75);
+            border: 1px solid #284059;
+            border-radius: 6px;
+            white-space: pre-wrap;
+            word-break: break-word;
+            color: #9fc6df;
         }
         .meta-field-row {
             display: flex;
@@ -458,6 +541,14 @@ app.index_string = '''
             gap: 8px;
             padding: 2px 0;
             border-bottom: 1px solid #1a1a1a;
+        }
+        .copyable-math-field {
+            display: inline-flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 4px;
+            min-width: 0;
+            flex: 1 1 auto;
         }
         .meta-field-label {
             color: #7fa3bc;
@@ -477,9 +568,56 @@ app.index_string = '''
             word-break: break-word;
             white-space: normal;
         }
+        .metadata-copy-btn {
+            opacity: 0;
+            width: 20px;
+            height: 20px;
+            border-radius: 4px;
+            border: 1px solid rgba(125, 145, 166, 0.42);
+            background: rgba(9, 18, 26, 0.84);
+            color: #9fc6df;
+            font-size: 12px;
+            line-height: 18px;
+            padding: 0;
+            cursor: pointer;
+            flex: 0 0 auto;
+            transition: opacity 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+        }
+        .meta-field-row:hover .metadata-copy-btn,
+        .metadata-copy-btn:focus {
+            opacity: 1;
+        }
+        .metadata-copy-btn.copied {
+            opacity: 1;
+            color: #77d28f;
+            border-color: rgba(100, 194, 123, 0.72);
+        }
+        .metadata-copy-btn.copy-failed {
+            opacity: 1;
+            color: #dd8080;
+            border-color: rgba(221, 128, 128, 0.72);
+        }
         .meta-field-label p,
         .meta-field-value p {
             margin: 0;
+        }
+        .lazy-panel-placeholder {
+            border: 1px dashed rgba(125, 145, 166, 0.36);
+            border-radius: 6px;
+            padding: 8px 10px;
+            color: #9fb6cb;
+            background: rgba(8, 16, 24, 0.42);
+            font-size: 11px;
+            line-height: 1.35;
+        }
+        .lazy-panel-placeholder-error {
+            color: #dd8080;
+            border-color: rgba(221, 128, 128, 0.45);
+            background: rgba(48, 18, 18, 0.26);
+        }
+        .dustycult-param-table th,
+        .dustycult-param-table td {
+            border-bottom: 1px solid rgba(125, 145, 166, 0.18);
         }
         .vetting-banner-empty {
             padding: 6px 12px;
@@ -1206,6 +1344,25 @@ app.index_string = '''
                 gap: 12px;
                 align-items: start;
             }
+            .candidate-metadata > .stats-details {
+                grid-column: 1 / -1;
+            }
+        }
+        .stats-details {
+            min-width: 0;
+        }
+        .metadata-sections.stats-sections-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 4px 12px;
+            padding: 0 8px 8px 8px;
+        }
+        .stats-sections-grid .stats-section {
+            min-width: 0;
+            border-bottom: 1px solid #222;
+        }
+        .metadata-sections.stats-sections-grid .meta-grid {
+            padding: 2px 4px 6px 4px;
         }
         .metadata-health {
             display: flex;
@@ -1310,14 +1467,29 @@ app.index_string = '''
         body[data-theme="black"] {
             background-color: #000 !important;
             color: #e0e0e0 !important;
+            --review-table-cell-bg: #071016;
+            --review-table-header-bg: #101b24;
+            --review-table-text: #dce8f2;
+            --review-table-border: rgba(84, 118, 140, 0.35);
+            --review-table-header-border: rgba(84, 118, 140, 0.45);
         }
         body[data-theme="gray"] {
             background-color: #2e3440 !important;
             color: #d8dee9 !important;
+            --review-table-cell-bg: #2f3744;
+            --review-table-header-bg: #3b4252;
+            --review-table-text: #eceff4;
+            --review-table-border: #4c566a;
+            --review-table-header-border: #596778;
         }
         body[data-theme="white"] {
             background-color: #eef2f6 !important;
             color: #1c2733 !important;
+            --review-table-cell-bg: #ffffff;
+            --review-table-header-bg: #edf4fa;
+            --review-table-text: #1c2733;
+            --review-table-border: #d6e0e8;
+            --review-table-header-border: #c5d0da;
         }
         body[data-theme="black"] .main-container,
         body[data-theme="gray"] .main-container,
@@ -1350,7 +1522,12 @@ app.index_string = '''
         body[data-theme="white"] .plot-toolbar,
         body[data-theme="white"] .eda-panel-inner,
         body[data-theme="white"] .eda-graph-card,
-        body[data-theme="white"] .eda-table-card { background-color: #ffffff !important; border-color: #c5d0da !important; color: #1c2733 !important; }
+        body[data-theme="white"] .eda-table-card,
+        body[data-theme="white"] .queue-provenance-panel,
+        body[data-theme="white"] .stat-card,
+        body[data-theme="white"] .lazy-panel-placeholder,
+        body[data-theme="white"] .pipeline-log-panel,
+        body[data-theme="white"] .plot-frame { background-color: #ffffff !important; border-color: #c5d0da !important; color: #1c2733 !important; }
         body[data-theme="black"] .section-title,
         body[data-theme="black"] .help-link,
         body[data-theme="black"] .metadata-sections summary,
@@ -1383,11 +1560,17 @@ app.index_string = '''
             color: #4f6273 !important;
         }
         body[data-theme="white"] .plot-toolbar,
+        body[data-theme="white"] .eda-panel-inner,
+        body[data-theme="white"] .eda-graph-card,
+        body[data-theme="white"] .eda-table-card,
         body[data-theme="white"] .meta-toolbar,
         body[data-theme="white"] .camera-diag .item,
         body[data-theme="white"] .run-config-item,
         body[data-theme="white"] .repro-badge,
         body[data-theme="white"] .metadata-health,
+        body[data-theme="white"] .queue-provenance-panel,
+        body[data-theme="white"] .stat-card,
+        body[data-theme="white"] .plot-frame,
         body[data-theme="white"] .compact-btn,
         body[data-theme="white"] .score-btn,
         body[data-theme="white"] .badge-btn,
@@ -1426,10 +1609,15 @@ app.index_string = '''
         body[data-theme="white"] .camera-diag,
         body[data-theme="white"] .run-config-item .k,
         body[data-theme="white"] .plot-toolbar .label-chip,
+        body[data-theme="white"] .plot-control-label,
+        body[data-theme="white"] .eda-panel-title,
         body[data-theme="white"] .plot-toolbar .dash-checklist label,
         body[data-theme="white"] .plot-toolbar label,
         body[data-theme="white"] .meta-toolbar .title,
         body[data-theme="white"] .metadata-health .detail,
+        body[data-theme="white"] .queue-provenance-list,
+        body[data-theme="white"] .queue-provenance-note,
+        body[data-theme="white"] .stat-card .label,
         body[data-theme="white"] .plot-status summary,
         body[data-theme="white"] .sidebar label,
         body[data-theme="white"] .sidebar details summary,
@@ -1454,10 +1642,13 @@ app.index_string = '''
         body[data-theme="white"] .eda-status-line,
         body[data-theme="white"] .eda-field-label,
         body[data-theme="white"] .plot-status li,
+        body[data-theme="white"] .pipeline-log-panel,
         body[data-theme="white"] .metadata-health,
         body[data-theme="white"] .bottom-context-v,
         body[data-theme="white"] .meta-field-label,
         body[data-theme="white"] .meta-field-value,
+        body[data-theme="white"] .lazy-panel-placeholder,
+        body[data-theme="white"] .stat-card .value,
         body[data-theme="white"] .vetting-banner-label,
         body[data-theme="white"] .vetting-banner-value,
         body[data-theme="white"] .vetting-banner-empty,
@@ -1471,6 +1662,49 @@ app.index_string = '''
         }
         body[data-theme="white"] .meta-field-row {
             border-color: #d6e0e8 !important;
+        }
+        body[data-theme="white"] .metadata-copy-btn {
+            background: #edf4fa !important;
+            border-color: #b9c9d7 !important;
+            color: #245f8f !important;
+        }
+        body[data-theme="white"] .metadata-copy-btn.copied {
+            color: #2f7a57 !important;
+            border-color: #a8d0ba !important;
+        }
+        body[data-theme="white"] .metadata-copy-btn.copy-failed {
+            color: #a53a3a !important;
+            border-color: #d9aaaa !important;
+        }
+        body[data-theme="white"] .lazy-panel-placeholder-error {
+            color: #a53a3a !important;
+            border-color: #d9aaaa !important;
+            background: #fff0f0 !important;
+        }
+        body[data-theme="white"] .dustycult-param-table th,
+        body[data-theme="white"] .dustycult-param-table td {
+            border-color: #d6e0e8 !important;
+        }
+        body[data-theme="white"] .pipeline-log-panel {
+            background: #f7fafc !important;
+            border-color: #c5d0da !important;
+            color: #1c2733 !important;
+        }
+        body[data-theme="white"] .eda-table-card .dash-table-container,
+        body[data-theme="white"] #eda-candidate-table,
+        body[data-theme="white"] #eda-candidate-table .dash-spreadsheet-container,
+        body[data-theme="white"] #eda-candidate-table .dash-spreadsheet-inner,
+        body[data-theme="white"] #eda-candidate-table .dash-spreadsheet,
+        body[data-theme="white"] #eda-candidate-table table {
+            background: #ffffff !important;
+            background-image: none !important;
+            color: #1c2733 !important;
+            border-color: #d6e0e8 !important;
+        }
+        body[data-theme="white"] #eda-candidate-table input {
+            background: #ffffff !important;
+            color: #1c2733 !important;
+            border-color: #c5d0da !important;
         }
         body[data-theme="white"] .plot-status.warn {
             border-color: rgba(186, 144, 44, 0.45) !important;

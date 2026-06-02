@@ -22,47 +22,19 @@ def _jsonish(value: object, default: object) -> object:
 
 
 def _dustycult_float(value: object, digits: int = 4) -> str:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return "-"
-    if not np.isfinite(number):
-        return "-"
-    if number == 0:
-        return "0"
-    if abs(number) >= 10000 or abs(number) < 0.001:
-        return f"{number:.{digits}g}"
-    return f"{number:.{digits}f}".rstrip("0").rstrip(".")
+    return format_dustycult_float(value, digits)
 
 
 def _dustycult_status_cards(fits: pd.DataFrame, theme: str | None) -> html.Div:
     spec = _external_followup_theme(theme)
     muted = str(spec["muted"])
-    rows = {}
-    if fits is not None and not fits.empty:
-        for _, row in fits.iterrows():
-            rows[str(row.get("mode") or "").lower()] = row
     cards = []
-    for mode in ("quick", "full"):
-        row = rows.get(mode)
-        status = "not run"
-        detail = ""
-        if row is not None:
-            status = str(row.get("status") or "unknown")
-            runtime = row.get("runtime_sec")
-            n_points = row.get("n_input_points")
-            detail_parts = []
-            if runtime is not None and not pd.isna(runtime):
-                detail_parts.append(f"{_dustycult_float(runtime, 3)} s")
-            if n_points is not None and not pd.isna(n_points):
-                detail_parts.append(f"{int(float(n_points))} pts")
-            error = str(row.get("error") or "").strip()
-            if status != "ok" and error:
-                detail_parts.append(error[:120])
-            detail = " | ".join(detail_parts)
+    for card in dustycult_status_card_rows(fits):
+        status = str(card.get("status") or "not run")
+        detail = str(card.get("detail") or "")
         color = "#64c27b" if status == "ok" else ("#dd8080" if status == "failed" else muted)
         cards.append(html.Div([
-            html.Div(mode.capitalize(), style={'fontSize': '10px', 'color': muted}),
+            html.Div(str(card.get("label") or card.get("mode") or ""), style={'fontSize': '10px', 'color': muted}),
             html.Div(status, style={'fontSize': '13px', 'fontWeight': 600, 'color': color}),
             html.Div(detail, style={'fontSize': '10px', 'color': muted, 'overflowWrap': 'anywhere'}),
         ], style={
@@ -75,165 +47,18 @@ def _dustycult_status_cards(fits: pd.DataFrame, theme: str | None) -> html.Div:
 
 
 def _select_dustycult_display_row(fits: pd.DataFrame) -> pd.Series | None:
-    if fits is None or fits.empty:
-        return None
-    for mode in ("full", "quick"):
-        matches = fits[
-            (fits["mode"].astype(str).str.lower() == mode)
-            & (fits["status"].astype(str).str.lower() == "ok")
-        ]
-        if not matches.empty:
-            return matches.iloc[-1]
-    for mode in ("full", "quick"):
-        matches = fits[fits["mode"].astype(str).str.lower() == mode]
-        if not matches.empty:
-            return matches.iloc[-1]
-    return fits.iloc[-1]
+    return select_dustycult_display_row(fits)
 
 
 def _dustycult_result_figure(curves: pd.DataFrame, fit_row: pd.Series, theme: str | None) -> go.Figure:
-    spec = _external_followup_theme(theme)
-    fig = go.Figure()
-    mode = str(fit_row.get("mode") or "quick")
-    palette = {"g": "#69c779", "V": "#f2c86b"}
-    if curves is not None and not curves.empty:
-        work = curves.copy()
-        for col in ("time", "observed", "error", "lower95", "lower68", "median", "upper68", "upper95"):
-            if col in work.columns:
-                work[col] = pd.to_numeric(work[col], errors="coerce")
-        band_order = {"g": 0, "v": 1}
-        bands = (
-            sorted(
-                (str(b) for b in work["band"].dropna().unique()),
-                key=lambda value: (band_order.get(str(value).lower(), 99), str(value)),
-            )
-            if "band" in work.columns
-            else [""]
-        )
-        for band in bands:
-            part = work[work["band"].astype(str) == band].sort_values("time")
-            color = palette.get(band, "#7da8c4")
-            name_prefix = f"{band} " if band else ""
-            for lower, upper, fill, opacity in (
-                ("lower95", "upper95", "95%", 0.08),
-                ("lower68", "upper68", "68%", 0.16),
-            ):
-                if lower in part.columns and upper in part.columns:
-                    interval = part[np.isfinite(part["time"]) & np.isfinite(part[lower]) & np.isfinite(part[upper])]
-                    if not interval.empty:
-                        fig.add_trace(go.Scatter(
-                            x=interval["time"],
-                            y=interval[lower],
-                            mode="lines",
-                            line=dict(width=0, color=color),
-                            hoverinfo="skip",
-                            showlegend=False,
-                            legendgroup=band,
-                        ))
-                        fig.add_trace(go.Scatter(
-                            x=interval["time"],
-                            y=interval[upper],
-                            mode="lines",
-                            line=dict(width=0, color=color),
-                            fill="tonexty",
-                            fillcolor=f"rgba({int(color[1:3], 16)}, {int(color[3:5], 16)}, {int(color[5:7], 16)}, {opacity})",
-                            name=f"{name_prefix}{fill}",
-                            hoverinfo="skip",
-                            showlegend=False,
-                            legendgroup=band,
-                        ))
-            if "median" in part.columns:
-                med = part[np.isfinite(part["time"]) & np.isfinite(part["median"])]
-                if not med.empty:
-                    fig.add_trace(go.Scatter(
-                        x=med["time"],
-                        y=med["median"],
-                        mode="lines",
-                        name=f"{name_prefix}median",
-                        line=dict(color=color, width=2),
-                        legendgroup=band,
-                    ))
-            obs = part[np.isfinite(part["time"]) & np.isfinite(part.get("observed", np.nan))]
-            if not obs.empty:
-                error_y = None
-                if "error" in obs.columns and np.isfinite(obs["error"]).any():
-                    error_y = dict(type="data", array=obs["error"], visible=True, thickness=0.8)
-                fig.add_trace(go.Scatter(
-                    x=obs["time"],
-                    y=obs["observed"],
-                    mode="markers",
-                    name=f"{name_prefix}observed",
-                    marker=dict(color=color, size=6, line=dict(color="#111827", width=0.5)),
-                    error_y=error_y,
-                    legendgroup=band,
-                ))
-    else:
-        fig.add_annotation(text="No predictive curve rows stored for this fit.", showarrow=False, x=0.5, y=0.5, xref="paper", yref="paper")
-
-    start = fit_row.get("start_jd")
-    end = fit_row.get("end_jd")
-    t0 = fit_row.get("t0_jd")
-    try:
-        if np.isfinite(float(start)) and np.isfinite(float(end)):
-            fig.add_vrect(x0=float(start), x1=float(end), fillcolor="rgba(125,145,166,0.10)", line_width=0)
-    except Exception:
-        pass
-    try:
-        if np.isfinite(float(t0)):
-            fig.add_vline(x=float(t0), line=dict(color="#d66b6b", width=1.4, dash="dash"))
-    except Exception:
-        pass
-    fig.update_layout(
-        template=None,
-        title=dict(
-            text=f"DustyCult {mode.capitalize()} Fit",
-            x=0.02,
-            xanchor="left",
-            y=0.985,
-            yanchor="top",
-            font=dict(size=14),
-        ),
-        paper_bgcolor=spec["paper_bg"],
-        plot_bgcolor=spec["plot_bg"],
-        font=dict(color=spec["font"], size=11),
-        margin=dict(l=58, r=24, t=86, b=56),
-        height=390,
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.06,
-            xanchor="left",
-            x=0,
-            bgcolor=spec["legend_bg"],
-            bordercolor=spec["legend_border"],
-            borderwidth=1,
-            font=dict(size=10),
-            itemwidth=30,
-        ),
-    )
-    fig.update_xaxes(title=dict(text=r"$t\ [\mathrm{JD}]$", standoff=8), gridcolor=spec["grid"], zeroline=False, ticks="outside")
-    fig.update_yaxes(title=dict(text=r"$F/F_{\mathrm{GP}}$", standoff=8), gridcolor=spec["grid"], zeroline=False, ticks="outside")
-    return fig
+    return build_dustycult_fit_figure(curves, fit_row, theme)
 
 
 def _dustycult_parameter_table(fit_row: pd.Series, theme: str | None) -> html.Div:
     spec = _external_followup_theme(theme)
-    posterior = _jsonish(fit_row.get("posterior_json"), {})
-    if not isinstance(posterior, dict) or not posterior:
-        return html.Div("No posterior summary stored.", style={'fontSize': '11px', 'color': spec["muted"]})
-    rows = []
-    for name in sorted(posterior.keys())[:18]:
-        stats = posterior.get(name)
-        if not isinstance(stats, dict):
-            continue
-        rows.append(html.Tr([
-            html.Td(str(name), style={'padding': '3px 6px', 'fontWeight': 600}),
-            html.Td(_dustycult_float(stats.get("median")), style={'padding': '3px 6px'}),
-            html.Td(_dustycult_float(stats.get("p16")), style={'padding': '3px 6px'}),
-            html.Td(_dustycult_float(stats.get("p84")), style={'padding': '3px 6px'}),
-        ]))
+    rows = dustycult_posterior_rows(fit_row)
     if not rows:
-        return html.Div("No finite posterior summary stored.", style={'fontSize': '11px', 'color': spec["muted"]})
+        return html.Div("No posterior summary stored.", style={'fontSize': '11px', 'color': spec["muted"]})
     return html.Table([
         html.Thead(html.Tr([
             html.Th("Parameter", style={'padding': '3px 6px'}),
@@ -241,8 +66,41 @@ def _dustycult_parameter_table(fit_row: pd.Series, theme: str | None) -> html.Di
             html.Th("p16", style={'padding': '3px 6px'}),
             html.Th("p84", style={'padding': '3px 6px'}),
         ])),
-        html.Tbody(rows),
-    ], style={'width': '100%', 'fontSize': '11px', 'borderCollapse': 'collapse'})
+        html.Tbody([
+            html.Tr([
+                html.Td(parameter, style={'padding': '3px 6px', 'fontWeight': 600}),
+                html.Td(median, style={'padding': '3px 6px'}),
+                html.Td(p16, style={'padding': '3px 6px'}),
+                html.Td(p84, style={'padding': '3px 6px'}),
+            ])
+            for parameter, median, p16, p84 in rows
+        ]),
+    ], className='dustycult-param-table', style={'width': '100%', 'fontSize': '11px', 'borderCollapse': 'collapse'})
+
+
+def _dustycult_geometry_table(fit_row: pd.Series, theme: str | None) -> html.Div:
+    spec = _external_followup_theme(theme)
+    try:
+        rows = dustycult_geometry_rows(fit_row)
+    except Exception as exc:
+        return html.Div(
+            f"Circumstellar geometry unavailable: {exc}",
+            style={'fontSize': '11px', 'color': spec["error"], 'overflowWrap': 'anywhere'},
+        )
+    return html.Div([
+        html.Div("Circumstellar Dust Geometry", style={'fontSize': '11px', 'fontWeight': 700, 'color': spec["font"], 'marginBottom': '4px'}),
+        html.Table(
+            html.Tbody([
+                html.Tr([
+                    html.Td(label, style={'padding': '3px 6px', 'fontWeight': 600}),
+                    html.Td(value, style={'padding': '3px 6px'}),
+                ])
+                for label, value in rows
+            ]),
+            className='dustycult-param-table',
+            style={'width': '100%', 'fontSize': '11px', 'borderCollapse': 'collapse'},
+        ),
+    ])
 
 
 def _render_dustycult_result_panel(candidate_id: str, theme_mode: str | None, _refresh_token: object = None) -> list:
@@ -304,16 +162,8 @@ def _render_dustycult_result_panel(candidate_id: str, theme_mode: str | None, _r
                 'marginTop': '6px',
             }),
         ]))
-    artifact_dir = str(fit_row.get("artifact_dir") or "").strip()
-    meta = [
-        f"mode={mode}",
-        f"status={fit_row.get('status') or 'unknown'}",
-        f"runtime={_dustycult_float(fit_row.get('runtime_sec'), 3)} s",
-        f"window={_dustycult_float(fit_row.get('start_jd'), 2)} to {_dustycult_float(fit_row.get('end_jd'), 2)}",
-    ]
-    if artifact_dir:
-        meta.append(f"artifact={artifact_dir}")
-    children.append(html.Div(" | ".join(meta), style={'fontSize': '10px', 'color': spec["muted"], 'overflowWrap': 'anywhere'}))
+    children.append(html.Div(dustycult_fit_metadata_text(fit_row), style={'fontSize': '10px', 'color': spec["muted"], 'overflowWrap': 'anywhere'}))
+    children.append(_dustycult_geometry_table(fit_row, theme_mode))
     children.append(_dustycult_parameter_table(fit_row, theme_mode))
     return children
 
@@ -597,12 +447,12 @@ def _dustycult_config_status_text() -> str:
     + [Output('dustycult-defaults-status', 'children')],
     [Input('current-candidate-id', 'data'),
      Input('dustycult-recompute-dip-btn', 'n_clicks'),
-     Input('dustycult-details', 'open')],
+     Input('dustycult-summary', 'n_clicks')],
     prevent_initial_call=False,
 )
-def update_dustycult_controls(candidate_id, _recompute_clicks, details_open=True):
+def update_dustycult_controls(candidate_id, _recompute_clicks, panel_requested=True):
     """Populate editable DustyCult defaults for the current candidate."""
-    if not _details_open(details_open):
+    if not _details_open(panel_requested):
         return tuple([no_update] * len(_DUSTYCULT_CONTROL_FIELDS) + [no_update])
     if not candidate_id:
         return tuple([None] * len(_DUSTYCULT_CONTROL_FIELDS) + ["No candidates loaded."])
@@ -732,13 +582,15 @@ else:
     [Input('current-candidate-id', 'data'),
      Input('theme-mode-store', 'data'),
      Input('dustycult-refresh-token', 'data'),
-     Input('dustycult-details', 'open')],
+     Input('dustycult-summary', 'n_clicks')],
     prevent_initial_call=False,
 )
-def update_dustycult_result_panel(candidate_id, theme_mode, refresh_token, details_open=True):
+def update_dustycult_result_panel(candidate_id, theme_mode, refresh_token, panel_requested=True):
     """Render DustyCult status, predictive overlay, and posterior summary."""
-    if not _details_open(details_open):
+    if not _details_open(panel_requested):
         return no_update, no_update
+    if not candidate_id:
+        return _render_dustycult_result_panel("", str(theme_mode or DEFAULT_THEME), refresh_token), "No candidates loaded."
     return (
         _render_dustycult_result_panel(str(candidate_id) if candidate_id else "", str(theme_mode or DEFAULT_THEME), refresh_token),
         _dustycult_config_status_text(),
@@ -749,12 +601,12 @@ def update_dustycult_result_panel(candidate_id, theme_mode, refresh_token, detai
     [Output('phoebe-period-days', 'value'),
      Output('phoebe-period-status', 'children')],
     [Input('current-candidate-id', 'data'),
-     Input('phoebe-details', 'open')],
+     Input('phoebe-summary', 'n_clicks')],
     prevent_initial_call=False,
 )
-def update_phoebe_period_control(candidate_id, details_open=True):
+def update_phoebe_period_control(candidate_id, panel_requested=True):
     """Populate the PHOEBE period field from the best available active-candidate period."""
-    if not _details_open(details_open):
+    if not _details_open(panel_requested):
         return no_update, no_update
     if not candidate_id:
         return None, "No candidates loaded."
@@ -847,13 +699,15 @@ else:
     [Input('current-candidate-id', 'data'),
      Input('theme-mode-store', 'data'),
      Input('phoebe-refresh-token', 'data'),
-     Input('phoebe-details', 'open')],
+     Input('phoebe-summary', 'n_clicks')],
     prevent_initial_call=False,
 )
-def update_phoebe_result_panel(candidate_id, theme_mode, refresh_token, details_open=True):
+def update_phoebe_result_panel(candidate_id, theme_mode, refresh_token, panel_requested=True):
     """Render PHOEBE availability, fit status, and stored fit plot."""
-    if not _details_open(details_open):
+    if not _details_open(panel_requested):
         return no_update, no_update
+    if not candidate_id:
+        return _render_phoebe_result_panel("", str(theme_mode or DEFAULT_THEME), refresh_token), "No candidates loaded."
     return (
         _render_phoebe_result_panel(str(candidate_id) if candidate_id else "", str(theme_mode or DEFAULT_THEME), refresh_token),
         _phoebe_config_status_text(),

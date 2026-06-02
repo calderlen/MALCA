@@ -23,6 +23,32 @@ def _load_run_params_for_plot_dir(plot_dir: str | None) -> dict:
     return run_params or {}
 
 
+def _lazy_panel_placeholder(message: str, tone: str = "muted") -> html.Div:
+    """Small visible placeholder for lazy-loaded collapsible panels."""
+    cls = "lazy-panel-placeholder"
+    if tone:
+        cls += f" lazy-panel-placeholder-{tone}"
+    return html.Div(str(message), className=cls)
+
+
+def _copyable_math_value(value: object) -> html.Div:
+    """Render a MathJax value with a raw-value clipboard affordance."""
+    raw = str(value)
+    return html.Div([
+        dcc.Markdown(raw, className='meta-field-value', mathjax=True),
+        html.Button(
+            "⧉",
+            type="button",
+            title="Copy raw value",
+            className="metadata-copy-btn",
+            **{
+                "aria-label": "Copy raw value",
+                "data-copy-text": raw,
+            },
+        ),
+    ], className="copyable-math-field")
+
+
 def _render_stat_cards(stat_rows: list[tuple[str, str]]) -> list:
     """Render stats as grouped collapsible sections with readable labels."""
     if not stat_rows:
@@ -290,7 +316,7 @@ def _render_stat_cards(stat_rows: list[tuple[str, str]]) -> list:
         field_divs = [
             html.Div([
                 dcc.Markdown(label, className='meta-field-label stat-field-label', mathjax=True),
-                dcc.Markdown(value, className='meta-field-value', mathjax=True),
+                _copyable_math_value(value),
             ], className='meta-field-row')
             for label, value in rows
         ]
@@ -298,13 +324,15 @@ def _render_stat_cards(stat_rows: list[tuple[str, str]]) -> list:
             html.Details(
                 [html.Summary(f"{group_name} ({len(rows)})"), html.Div(field_divs, className='meta-grid')],
                 open=group_name in {"Coverage & Cadence", "Photometry & SNR"},
+                className='stats-section',
             )
         )
 
     total_rows = sum(len(grouped.get(name, [])) for name in group_order)
     return [html.Details(
-        [html.Summary(f"Stats ({total_rows})"), html.Div(sections, className='metadata-sections')],
-        open='open',
+        [html.Summary(f"Stats ({total_rows})"), html.Div(sections, className='metadata-sections stats-sections-grid')],
+        open=True,
+        className='stats-details',
     )]
 
 
@@ -950,4 +978,3 @@ def _render_bottom_context(label: str, value: object) -> html.Div:
         ],
         className='bottom-context-item',
     )
-

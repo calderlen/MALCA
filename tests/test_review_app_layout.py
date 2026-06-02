@@ -156,6 +156,77 @@ def test_layout_embeds_eda_panel() -> None:
     assert "eda-export-status" in ids
 
 
+def test_layout_exposes_lazy_feedback_and_copy_initializer() -> None:
+    ids = _component_ids_in_order(app.layout)
+
+    assert "metadata-copy-init" in ids
+    assert "external-followup-summary" in ids
+    assert "sed-summary" in ids
+    assert "dustycult-summary" in ids
+    assert "phoebe-summary" in ids
+    assert "diagnostic-plots-summary" in ids
+    assert "external-followup-status" in ids
+    assert "sed-status" in ids
+    assert "dustycult-config-status" in ids
+    assert "phoebe-config-status" in ids
+    assert "diagnostic-plots-status" in ids
+    assert "run-config-status" in ids
+
+
+def test_lazy_panel_callbacks_use_summary_clicks() -> None:
+    callback_inputs_by_output = {
+        output: {(item["id"], item["property"]) for item in spec.get("inputs", [])}
+        for output, spec in app.callback_map.items()
+    }
+
+    expected = {
+        "external-followup-panel.children": ("external-followup-summary", "n_clicks"),
+        "sed-plot-panel.children": ("sed-summary", "n_clicks"),
+        "dustycult-result-panel.children": ("dustycult-summary", "n_clicks"),
+        "phoebe-result-panel.children": ("phoebe-summary", "n_clicks"),
+        "diagnostic-plots-panel.children": ("diagnostic-plots-summary", "n_clicks"),
+        "diagnostic-background-state.data": ("diagnostic-plots-summary", "n_clicks"),
+    }
+    for output_id, input_id in expected.items():
+        matches = [
+            inputs
+            for output, inputs in callback_inputs_by_output.items()
+            if output_id in output
+        ]
+        assert matches, output_id
+        assert input_id in matches[0]
+        assert (output_id.rsplit(".", 1)[0].replace("-panel", "-details"), "open") not in matches[0]
+
+
+def test_stat_cards_are_full_width_and_copyable() -> None:
+    cards = review_app._render_stat_cards([
+        ("stats_photometry_weighted_mean_sem", r"2.64723 \times 10^{-4}"),
+    ])
+
+    assert len(cards) == 1
+    stats = cards[0]
+    assert getattr(stats, "className", "") == "stats-details"
+    inner = getattr(stats, "children", [None, None])[1]
+    assert "stats-sections-grid" in getattr(inner, "className", "")
+
+    buttons = []
+
+    def walk(item: object) -> None:
+        if isinstance(item, (list, tuple)):
+            for child in item:
+                walk(child)
+            return
+        if item is None or isinstance(item, (str, int, float, bool)):
+            return
+        if getattr(item, "className", "") == "metadata-copy-btn":
+            buttons.append(item)
+        walk(getattr(item, "children", None))
+
+    walk(stats)
+    assert buttons
+    assert buttons[0].to_plotly_json()["props"]["data-copy-text"] == r"2.64723 \times 10^{-4}"
+
+
 def test_layout_exposes_phase_time_toggle() -> None:
     control = _component_by_id(app.layout, "phase-panel-mode")
 
@@ -539,7 +610,7 @@ def test_closed_lazy_panels_skip_candidate_work(monkeypatch) -> None:
     monkeypatch.setattr(review_app, "control_defaults_for_candidate", fail)
     monkeypatch.setattr(review_app, "infer_period_days", fail)
 
-    assert review_app.update_external_followup_panel("C1", "black", False) is review_app.no_update
+    assert review_app.update_external_followup_panel("C1", "black", False) == (review_app.no_update, review_app.no_update)
     assert review_app.update_sed_panel("C1", "observed", "black", False) == (review_app.no_update, review_app.no_update)
     assert review_app.update_diagnostic_plots("C1", "black", {"ready": False}, False) == (review_app.no_update, review_app.no_update)
     assert review_app.update_dustycult_result_panel("C1", "black", 0, False) == (review_app.no_update, review_app.no_update)
@@ -568,7 +639,7 @@ def test_open_lazy_panels_render_current_candidate(monkeypatch) -> None:
     monkeypatch.setattr(review_app, "_phoebe_config_status_text", lambda: "phoebe config")
     monkeypatch.setattr(review_app, "infer_period_days", lambda *_args, **_kwargs: (2.5, "test"))
 
-    assert review_app.update_external_followup_panel("C1", "black", True) == ["external"]
+    assert review_app.update_external_followup_panel("C1", "black", True) == (["external"], "Loaded external data for C1.")
     sed_children, sed_status = review_app.update_sed_panel("C1", "observed", "black", True)
     assert len(sed_children) == 2
     assert isinstance(sed_status, str)

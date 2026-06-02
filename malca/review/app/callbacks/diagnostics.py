@@ -156,7 +156,7 @@ def _prepare_diagnostic_background(is_open, _import_trigger, _pipeline_progress,
 if _background_callback_manager is not None and _UI_BACKGROUND_CALLBACKS:
     @app.callback(
         Output('diagnostic-background-state', 'data'),
-        [Input('diagnostic-plots-details', 'open'),
+        [Input('diagnostic-plots-summary', 'n_clicks'),
          Input('import-trigger', 'data'),
          Input('pipeline-progress-trigger', 'data')],
         State('diagnostic-background-state', 'data'),
@@ -171,10 +171,13 @@ if _background_callback_manager is not None and _UI_BACKGROUND_CALLBACKS:
 else:
     @app.callback(
         Output('diagnostic-background-state', 'data'),
-        [Input('diagnostic-plots-details', 'open'),
+        [Input('diagnostic-plots-summary', 'n_clicks'),
          Input('import-trigger', 'data'),
          Input('pipeline-progress-trigger', 'data')],
         State('diagnostic-background-state', 'data'),
+        running=[
+            (Output('diagnostic-plots-status', 'children'), 'Loading population background...', ''),
+        ],
         prevent_initial_call=False,
     )
     def prepare_diagnostic_background(is_open, import_trigger, pipeline_progress, existing_state):
@@ -187,15 +190,15 @@ else:
     [Input('current-candidate-id', 'data'),
      Input('theme-mode-store', 'data'),
      Input('diagnostic-background-state', 'data'),
-     Input('diagnostic-plots-details', 'open')],
+     Input('diagnostic-plots-summary', 'n_clicks')],
     prevent_initial_call=True,
 )
-def update_diagnostic_plots(candidate_id, theme_mode, background_state, details_open=True):
+def update_diagnostic_plots(candidate_id, theme_mode, background_state, panel_requested=True):
     """Render diagnostic plots for the current candidate."""
-    if not _details_open(details_open):
+    if not _details_open(panel_requested):
         return no_update, no_update
     if not candidate_id:
-        return [], ''
+        return _lazy_panel_placeholder("No candidates loaded.", "error"), "No candidates loaded."
 
     payload, _stored_lc_path, _source_path = _candidate_context(candidate_id)
 
@@ -203,15 +206,11 @@ def update_diagnostic_plots(candidate_id, theme_mode, background_state, details_
     cached_background = None
     if isinstance(background_state, dict) and background_state.get('ready') and background_state.get('signature') == signature:
         cached_background = _get_cached_diagnostic_background(signature)
-    status = ''
     if cached_background is None:
-        try:
-            cached_background, _used_cache = _load_or_cache_diagnostic_background(signature)
-        except Exception as exc:
-            status = f'Population background unavailable: {exc}'
+        return _lazy_panel_placeholder("Loading population background for diagnostic plots."), "Loading population background..."
 
     panels = _render_diagnostic_plots(payload, str(theme_mode or DEFAULT_THEME), background=cached_background)
-    return panels, status
+    return panels, ''
 
 
 @app.callback(
@@ -261,4 +260,3 @@ def update_header_key_info(candidate_id, queue_size, queue_filter_hash, import_p
     gaia_fmt = _format_large_integer_like_display(gaia_id)
     gaia_text = f"Gaia ID: {gaia_fmt}" if gaia_fmt else 'Gaia ID: -'
     return asas_text, gaia_text, _bottom_bar(cluster_lc_path, local_lc_path)
-

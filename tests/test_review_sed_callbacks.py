@@ -318,9 +318,10 @@ def test_external_followup_panel_renders_without_details_open_state(monkeypatch)
     monkeypatch.setattr(review_app, "_candidate_context", fake_candidate_context)
     monkeypatch.setattr(review_app, "_render_external_followup", fake_render)
 
-    panel = review_app.update_external_followup_panel("cand-1", "black")
+    panel, status = review_app.update_external_followup_panel("cand-1", "black")
 
     assert panel == ["external-card"]
+    assert status == "Loaded external data for cand-1."
     assert seen == {"candidate_id": "cand-1", "theme": "black"}
 
 
@@ -352,7 +353,7 @@ def test_diagnostic_plots_render_without_details_open_state(monkeypatch) -> None
     assert seen == {"candidate_id": "cand-1", "theme": "black", "background": {"ready": True}}
 
 
-def test_diagnostic_plots_load_background_when_state_is_stale(monkeypatch) -> None:
+def test_diagnostic_plots_show_loading_when_background_state_is_stale(monkeypatch) -> None:
     seen = {}
 
     def fake_candidate_context(candidate_id):
@@ -367,7 +368,6 @@ def test_diagnostic_plots_load_background_when_state_is_stale(monkeypatch) -> No
     monkeypatch.setattr(review_app, "_candidate_context", fake_candidate_context)
     monkeypatch.setattr(review_app, "_diagnostic_background_signature", lambda _path: "fresh-sig")
     monkeypatch.setattr(review_app, "_get_cached_diagnostic_background", lambda _sig: None)
-    monkeypatch.setattr(review_app, "_load_or_cache_diagnostic_background", lambda _sig: ({"fresh": True}, False))
     monkeypatch.setattr(review_app, "_render_diagnostic_plots", fake_render)
 
     panel, status = review_app.update_diagnostic_plots(
@@ -376,9 +376,9 @@ def test_diagnostic_plots_load_background_when_state_is_stale(monkeypatch) -> No
         {"ready": True, "signature": "stale-sig"},
     )
 
-    assert panel == ["diagnostic-card"]
-    assert status == ""
-    assert seen == {"candidate_id": "cand-1", "theme": "black", "background": {"fresh": True}}
+    assert "Loading population background" in status
+    assert "lazy-panel-placeholder" in getattr(panel, "className", "")
+    assert seen == {}
 
 
 def test_vetting_known_preset_can_leave_uncertain_types_visible() -> None:
