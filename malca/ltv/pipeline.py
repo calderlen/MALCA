@@ -38,6 +38,7 @@ from malca.config import (
     LTV_MATCH_RADIUS_ARCSEC,
     LTV_WORKERS,
     LTV_CHUNK_SIZE,
+    LTV_GAIA_CHUNK_SIZE,
     LTV_CORE_CHUNK_SIZE,
     GAIA_EPOCH_DATA_RELEASE,
     GAIA_EPOCH_DATA_STRUCTURE,
@@ -175,6 +176,12 @@ LTV_ORCHESTRATOR_CONFIG_PATH_KEYS = {
 }
 
 
+def _ltv_tap_chunk_size(chunk_size: int | None) -> int:
+    if chunk_size is None:
+        return int(LTV_GAIA_CHUNK_SIZE)
+    return max(1, min(int(chunk_size), int(LTV_GAIA_CHUNK_SIZE)))
+
+
 def add_stochastic_postfilter_features(*args, **kwargs):
     """Lazy wrapper kept for tests and callers that monkeypatch this pipeline hook."""
     from malca.ltv.stochastic import add_stochastic_postfilter_features as _impl
@@ -248,6 +255,8 @@ def run_full_pipeline(
     - Crossmatch: ~hours (not weeks) because of reduced set
     """
     n0 = len(df)
+    tap_chunk_size = _ltv_tap_chunk_size(chunk_size)
+    raw_chunk_size = int(chunk_size) if chunk_size is not None else tap_chunk_size
     
     if verbose:
         print("=" * 60)
@@ -255,6 +264,8 @@ def run_full_pipeline(
         print("=" * 60)
         print(f"Input: {n0:,} sources")
         print(f"Workers: {n_workers}, Chunk size: {chunk_size}")
+        if tap_chunk_size != raw_chunk_size:
+            print(f"TAP chunk size: {tap_chunk_size}")
         print()
     
     # =========================================================================
@@ -274,7 +285,7 @@ def run_full_pipeline(
             min_dec=min_dec,
             max_pm=max_pm,
             query_gaia=True,
-            chunk_size=chunk_size,
+            chunk_size=tap_chunk_size,
             n_workers=n_workers,
             verbose=verbose,
             log_csv=log_csv,
@@ -412,7 +423,7 @@ def run_full_pipeline(
             valid_data=gaia_epoch_valid_data,
             band=gaia_epoch_band,
             n_workers=n_workers,
-            chunk_size=chunk_size,
+            chunk_size=tap_chunk_size,
             verbose=verbose,
         )
         df = apply_gaia_epoch_flags(df)
@@ -430,7 +441,7 @@ def run_full_pipeline(
             print("-" * 60)
         df = fetch_bailer_jones_distances(
             df,
-            chunk_size=chunk_size,
+            chunk_size=tap_chunk_size,
             n_workers=n_workers,
             verbose=verbose,
         )
@@ -724,7 +735,7 @@ def _write_filtered_audit(
             min_slope=args.min_slope,
             min_diff=args.min_diff,
             query_gaia=query_gaia,
-            chunk_size=args.chunk_size,
+            chunk_size=_ltv_tap_chunk_size(args.chunk_size),
             n_workers=args.workers,
             verbose=args.verbose,
             return_passers=True,

@@ -30,10 +30,12 @@ from malca.config import (
 from malca.config import GAIA_AIP_TAP_URL
 
 
-
-
-
-
+def _adql_identifier(name: str) -> str:
+    """Quote an ADQL identifier, preserving dotted qualifiers."""
+    parts = [part.strip() for part in str(name).split(".")]
+    if not parts or any(not part for part in parts):
+        raise ValueError(f"Invalid ADQL identifier: {name!r}")
+    return ".".join(f'"{part.replace(chr(34), chr(34) * 2)}"' for part in parts)
 
 
 def _chunked(iterable: Iterable, size: int):
@@ -54,9 +56,6 @@ def _batch_gaia_epoch_tap_query(
     n_workers: int = LTV_WORKERS,
     verbose: bool = False,
 ) -> pd.DataFrame:
-
-
-
     if ids_df.empty:
         return pd.DataFrame()
 
@@ -71,10 +70,10 @@ def _batch_gaia_epoch_tap_query(
             SELECT
                 u._idx AS _idx,
                 e.source_id AS source_id,
-                e.{time_col} AS t,
-                e.{g_col} AS g_mag,
-                e.{bp_col} AS bp_mag,
-                e.{rp_col} AS rp_mag
+                e.{_adql_identifier(time_col)} AS t,
+                e.{_adql_identifier(g_col)} AS g_mag,
+                e.{_adql_identifier(bp_col)} AS bp_mag,
+                e.{_adql_identifier(rp_col)} AS rp_mag
             FROM TAP_UPLOAD.upload_table AS u
             JOIN {tap_table} AS e
             ON e.source_id = u.source_id
@@ -301,11 +300,35 @@ def _batch_gaia_epoch_datalink(
     SELECT
         source_id,
         transit_id,
-        band,
-        time,
-        mag
+        'G' AS band,
+        g_transit_time AS obs_time,
+        g_transit_mag AS mag
     FROM gaiadr3.epoch_photometry
     WHERE source_id IN ({ids_str})
+      AND g_transit_time IS NOT NULL
+      AND g_transit_mag IS NOT NULL
+    UNION ALL
+    SELECT
+        source_id,
+        transit_id,
+        'BP' AS band,
+        bp_obs_time AS obs_time,
+        bp_mag AS mag
+    FROM gaiadr3.epoch_photometry
+    WHERE source_id IN ({ids_str})
+      AND bp_obs_time IS NOT NULL
+      AND bp_mag IS NOT NULL
+    UNION ALL
+    SELECT
+        source_id,
+        transit_id,
+        'RP' AS band,
+        rp_obs_time AS obs_time,
+        rp_mag AS mag
+    FROM gaiadr3.epoch_photometry
+    WHERE source_id IN ({ids_str})
+      AND rp_obs_time IS NOT NULL
+      AND rp_mag IS NOT NULL
     """
 
     try:

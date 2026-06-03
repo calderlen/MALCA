@@ -18,13 +18,7 @@ from malca.config import (
     LTV_GAIA_CHUNK_SIZE,
     LTV_WORKERS,
 )
-from malca.config import GAIA_AIP_TAP_URL, MIST_GRID_PATH
-
-
-
-
-
-
+from malca.config import GAIA_AIP_TAP_URL, GAIA_ESA_TAP_URL, MIST_GRID_PATH
 
 
 DEFAULT_MIST_PATH = MIST_GRID_PATH
@@ -64,7 +58,7 @@ def fetch_bailer_jones_distances(
     """
     Fetch Bailer-Jones et al. (2023) distances from the Gaia TAP service.
 
-    Queries ``external.gaiaedr3_distance`` (available on the Gaia AIP TAP)
+    Queries ``external.gaiaedr3_distance`` (available on the Gaia archive TAP)
     for every source with a known Gaia DR3 source_id and retrieves:
 
       - ``bj_r_med_photogeo``: median photogeometric distance (pc)
@@ -73,10 +67,6 @@ def fetch_bailer_jones_distances(
     Uses TAP_UPLOAD for batch efficiency — one async job per chunk.
     Distances are matched by source_id; sources without a BJ entry get NaN.
     """
-
-
-
-
     if df.empty:
         return df
 
@@ -95,8 +85,6 @@ def fetch_bailer_jones_distances(
     if len(source_ids) == 0:
         return df
 
-    tap = pyvo.dal.TAPService(GAIA_AIP_TAP_URL)
-
     adql = """
         SELECT t.source_id, bj.r_med_photogeo, bj.r_med_geo
         FROM TAP_UPLOAD.t AS t
@@ -109,21 +97,36 @@ def fetch_bailer_jones_distances(
         for i in range(0, len(source_ids), chunk_size)
     ]
 
-    def _query_chunk(chunk: pd.Series) -> pd.DataFrame:
+    def _query_chunk(tap_url: str, chunk: pd.Series) -> pd.DataFrame:
+        tap = pyvo.dal.TAPService(tap_url)
         upload = Table({"source_id": chunk.values.astype(np.int64)})
         job = tap.run_sync(adql, uploads={"t": upload})
         return job.to_table().to_pandas()
 
     results = []
-    with ThreadPoolExecutor(max_workers=n_workers) as pool:
-        futures = {pool.submit(_query_chunk, ch): ch for ch in chunks}
-        it = tqdm(as_completed(futures), total=len(futures), desc="BJ distances", disable=not verbose)
-        for fut in it:
-            try:
-                results.append(fut.result())
-            except Exception as exc:
-                if verbose:
-                    tqdm.write(f"[fetch_bailer_jones_distances] chunk failed: {exc}")
+    tap_urls = [GAIA_ESA_TAP_URL, GAIA_AIP_TAP_URL]
+    for tap_url in tap_urls:
+        endpoint_results = []
+        with ThreadPoolExecutor(max_workers=n_workers) as pool:
+            futures = {pool.submit(_query_chunk, tap_url, ch): ch for ch in chunks}
+            it = tqdm(
+                as_completed(futures),
+                total=len(futures),
+                desc=f"BJ distances ({tap_url})",
+                disable=not verbose,
+            )
+            for fut in it:
+                try:
+                    endpoint_results.append(fut.result())
+                except Exception as exc:
+                    if verbose:
+                        tqdm.write(f"[fetch_bailer_jones_distances] {tap_url} chunk failed: {exc}")
+        endpoint_results = [res for res in endpoint_results if res is not None and not res.empty]
+        if endpoint_results:
+            results = endpoint_results
+            break
+        if verbose and tap_url != tap_urls[-1]:
+            print(f"[fetch_bailer_jones_distances] no usable results from {tap_url}; trying fallback TAP")
 
     if not results:
         return df

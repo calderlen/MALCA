@@ -1222,7 +1222,11 @@ def compute_season_diagnostics(
         if total_change > 0:
             out["season_monotonicity_fraction"] = float(np.mean((steps * (meds[-1] - meds[0])) >= 0.0))
 
-    if season_times.size >= 2:
+    if (
+        season_times.size >= 2
+        and not np.allclose(season_times, season_times[0], equal_nan=True)
+        and not np.allclose(meds, meds[0], equal_nan=True)
+    ):
         try:
             rho = pd.Series(season_times).corr(pd.Series(meds), method="spearman")
             out["season_spearman_rho"] = float(rho)
@@ -1372,6 +1376,9 @@ def compute_lomb_scargle(
         trend = np.full_like(mag, baseline, dtype=float)
 
     mag_detrended = mag - trend
+    finite_detrended = mag_detrended[np.isfinite(mag_detrended)]
+    if finite_detrended.size < 2 or np.allclose(finite_detrended, finite_detrended[0]):
+        return result
     
     # Compute Lomb-Scargle
     if err is not None and len(err) == len(JD):

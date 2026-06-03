@@ -154,6 +154,19 @@ def _gaia_retry_delay(attempt: int) -> float:
     return min(GAIA_TAP_RETRY_BASE_DELAY * max(1, attempt), GAIA_TAP_RETRY_MAX_DELAY)
 
 
+def _gaia_tap_error_is_nonretryable(exc: Exception) -> bool:
+    text = str(exc).lower()
+    nonretryable_markers = (
+        "code='invalid'",
+        'code="invalid"',
+        "column ",
+        " not found",
+        "error while translating your query",
+        "syntax error",
+    )
+    return any(marker in text for marker in nonretryable_markers)
+
+
 def _parse_gaia_source_id_str(value: object) -> str | None:
     """Parse Gaia source ID-like values to a plain integer string."""
     return parse_gaia_source_id(value)
@@ -173,6 +186,7 @@ def _connect_gaia_taps_until_available(
         attempt += 1
         taps: list[tuple[str, pyvo.dal.TAPService]] = []
         errors: list[str] = []
+        nonretryable_errors: list[str] = []
         for tap_url in tap_urls:
             try:
                 tap = pyvo.dal.TAPService(tap_url)
@@ -184,12 +198,19 @@ def _connect_gaia_taps_until_available(
             except KeyboardInterrupt:
                 raise
             except Exception as exc:
-                errors.append(f"{tap_url}: {_short_error(exc)}")
+                msg = f"{tap_url}: {_short_error(exc)}"
+                if _gaia_tap_error_is_nonretryable(exc):
+                    nonretryable_errors.append(msg)
+                else:
+                    errors.append(msg)
         if taps:
             return taps
+        if nonretryable_errors and not errors:
+            detail = " | ".join(nonretryable_errors)
+            raise RuntimeError(f"{label}: Gaia TAP test query is invalid: {detail}")
 
         delay = _gaia_retry_delay(attempt)
-        detail = " | ".join(errors) if errors else "no TAP services configured"
+        detail = " | ".join(errors + nonretryable_errors) if (errors or nonretryable_errors) else "no TAP services configured"
         print(
             f"  {label}: all Gaia TAP servers unavailable "
             f"(attempt {attempt}); retrying in {delay:.0f}s. Last errors: {detail}"
@@ -209,6 +230,7 @@ def _run_gaia_tap_query_until_success(
     while True:
         attempt += 1
         errors: list[str] = []
+        nonretryable_errors: list[str] = []
         for i, (tap_url, tap) in enumerate(list(taps)):
             try:
                 if maxrec is None:
@@ -221,10 +243,17 @@ def _run_gaia_tap_query_until_success(
             except KeyboardInterrupt:
                 raise
             except Exception as exc:
-                errors.append(f"{tap_url}: {_short_error(exc)}")
+                msg = f"{tap_url}: {_short_error(exc)}"
+                if _gaia_tap_error_is_nonretryable(exc):
+                    nonretryable_errors.append(msg)
+                else:
+                    errors.append(msg)
+        if nonretryable_errors and not errors:
+            detail = " | ".join(nonretryable_errors)
+            raise RuntimeError(f"{label}: Gaia TAP query is invalid: {detail}")
 
         delay = _gaia_retry_delay(attempt)
-        detail = " | ".join(errors) if errors else "no TAP services available"
+        detail = " | ".join(errors + nonretryable_errors) if (errors or nonretryable_errors) else "no TAP services available"
         print(
             f"  {label}: Gaia TAP query failed on all mirrors "
             f"(attempt {attempt}); retrying in {delay:.0f}s. Last errors: {detail}"
@@ -2409,6 +2438,18 @@ def fetch_ztf_lightcurves(
             idx, n_det, g_range, r_range, error, cache_key = fut.result()
             if error is not None:
                 failures.append(error)
+                summary = {"ztf_lc_n_det": 0, "ztf_lc_g_range": np.nan, "ztf_lc_r_range": np.nan}
+                row = _external_lc_status_row(
+                    df,
+                    idx,
+                    module="ZTF LCs",
+                    cache_key=cache_key,
+                    summary=summary,
+                    status="failed",
+                )
+                if row is not None:
+                    row["error"] = error
+                    status_rows.append(row)
                 continue
             df.loc[idx, "ztf_lc_n_det"] = n_det
             df.loc[idx, "ztf_lc_g_range"] = g_range
@@ -2428,7 +2469,10 @@ def fetch_ztf_lightcurves(
                 matched += 1
 
     _write_external_lc_status(output_dir, status_rows)
-    _raise_lookup_failures("ZTF LCs", failures, n_valid)
+    if failures:
+        detail = "; ".join(failures[:3])
+        more = f" (+{len(failures) - 3} more)" if len(failures) > 3 else ""
+        print(f"ZTF LCs: lookup failed for {len(failures)}/{n_valid} candidates; keeping partial results: {detail}{more}")
     print(f"ZTF LCs: {matched}/{n_valid} with data")
     return df
 
@@ -2645,11 +2689,11 @@ def fetch_gaia_epoch_lcs(
             SELECT source_id, transit_id,
                    g_transit_time AS "time",
                    g_transit_mag AS mag,
-                   g_transit_mag_error AS mag_error,
-                   'G' AS band,
-                   rejected_by_variability
+                   'G' AS band
             FROM gaiadr3.epoch_photometry
             WHERE source_id IN ({ids_str})
+              AND g_transit_time IS NOT NULL
+              AND g_transit_mag IS NOT NULL
             ORDER BY source_id, g_transit_time
         """
         result = _run_gaia_tap_query_until_success(taps, query, label=f"Gaia epoch LC chunk {i}")
@@ -2667,7 +2711,10 @@ def fetch_gaia_epoch_lcs(
 
             src_lc["time"] = pd.to_numeric(src_lc["time"], errors="coerce")
             src_lc["mag"] = pd.to_numeric(src_lc["mag"], errors="coerce")
-            src_lc["mag_error"] = pd.to_numeric(src_lc["mag_error"], errors="coerce")
+            if "mag_error" in src_lc.columns:
+                src_lc["mag_error"] = pd.to_numeric(src_lc["mag_error"], errors="coerce")
+            else:
+                src_lc["mag_error"] = np.nan
             src_lc = src_lc.dropna(subset=["time", "mag"])
 
             if src_lc.empty:
@@ -4031,6 +4078,14 @@ def fetch_external_lcs(
         col = _MODULE_MARKERS.get(name)
         if col is None or col not in df.columns:
             return False
+        status_df = _read_external_lc_status(output_dir)
+        if not status_df.empty and {"module", "status"}.issubset(status_df.columns):
+            failed = (
+                (status_df["module"].astype(str) == name)
+                & (status_df["status"].astype(str) == "failed")
+            )
+            if bool(failed.any()):
+                return False
         s = df[col]
         return s.notna().any() and (s != 0).any()
 
