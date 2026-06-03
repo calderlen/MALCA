@@ -113,15 +113,15 @@ class SourceMeta:
 
 def _build_config(a, mag_bin: str) -> Config:
     """Build a Config for a single mag bin from parsed args."""
-    from malca.config import LIGHT_CURVE_FILE_EXTENSION
-    
+    from malca.config import LTV_LIGHT_CURVE_FILE_EXTENSION
+
     root = Path(a.root)
     out = a.output
     if out is None:
         out = str(ltv_core_output_path(mag_bin, a.run_dir))
     output = Path(out)
 
-    file_ext = a.extension if a.extension is not None else LIGHT_CURVE_FILE_EXTENSION
+    file_ext = a.extension if a.extension is not None else LTV_LIGHT_CURVE_FILE_EXTENSION
 
     return Config(
         root=root,
@@ -253,33 +253,116 @@ def iter_light_curve_jobs(
     lc_dirs: list[Path],
     processed_files: set[str],
     file_ext: str,
+    stats: dict | None = None,
 ) -> Iterator[tuple[str, SourceMeta]]:
-    """Yield light-curve jobs lazily to avoid materializing a whole mag bin."""
+    """Yield light-curve jobs lazily to avoid materializing a whole mag bin.
+
+    If ``stats`` is provided, it will be mutated in-place with per-directory
+    attrition counters so the caller can print a diagnostic summary once
+    iteration is complete. Without this, several drop paths (wrong extension,
+    file stem not in index, stale checkpoint) are silent and can produce
+    surprisingly low yields (e.g. 80 lc_cal dirs -> 5 LCs) without any signal.
+    """
+    if stats is not None:
+        stats.setdefault("dirs_seen", 0)
+        stats.setdefault("dirs_missing_index", 0)
+        stats.setdefault("dirs_zero_globbed", 0)
+        stats.setdefault("dirs_zero_yielded", 0)
+        stats.setdefault("globbed", 0)
+        stats.setdefault("yielded", 0)
+        stats.setdefault("dropped_already_processed", 0)
+        stats.setdefault("dropped_non_int_stem", 0)
+        stats.setdefault("dropped_no_meta_match", 0)
+        stats.setdefault("ext_observed", {})
+        stats.setdefault("per_dir_warnings", [])
+
     for lc_dir in lc_dirs:
         match = IDX_PATTERN.search(lc_dir.name)
         if match is None:
             continue
+        if stats is not None:
+            stats["dirs_seen"] += 1
         x = int(match.group(1))
         index_path = mag_bin_dir / f"index{x}.csv"
 
         if not index_path.exists():
             print(f"Skipping lc{x}_cal: missing index{x}.csv")
+            if stats is not None:
+                stats["dirs_missing_index"] += 1
             continue
 
         meta_by_id = read_index_map(index_path)
 
+        dir_globbed = 0
+        dir_yielded = 0
+        dir_dropped_processed = 0
+        dir_dropped_non_int = 0
+        dir_dropped_no_meta = 0
+
         for file_path in sorted(lc_dir.glob(f"*.{file_ext}")):
+            dir_globbed += 1
             file_path_str = str(file_path)
             if file_path_str in processed_files:
+                dir_dropped_processed += 1
                 continue
             try:
                 target = int(file_path.stem)
             except ValueError:
+                dir_dropped_non_int += 1
                 continue
             meta = meta_by_id.get(target)
             if meta is None:
+                dir_dropped_no_meta += 1
                 continue
+            dir_yielded += 1
             yield file_path_str, meta
+
+        if stats is not None:
+            stats["globbed"] += dir_globbed
+            stats["yielded"] += dir_yielded
+            stats["dropped_already_processed"] += dir_dropped_processed
+            stats["dropped_non_int_stem"] += dir_dropped_non_int
+            stats["dropped_no_meta_match"] += dir_dropped_no_meta
+            if dir_globbed == 0:
+                stats["dirs_zero_globbed"] += 1
+                # Sample sibling extensions so we can tell whether the dir is
+                # truly empty vs. has files under a different extension.
+                try:
+                    sibling_exts: dict[str, int] = {}
+                    for p in lc_dir.iterdir():
+                        if p.is_file():
+                            ext = p.suffix.lstrip(".")
+                            sibling_exts[ext] = sibling_exts.get(ext, 0) + 1
+                    if sibling_exts:
+                        for ext, n in sibling_exts.items():
+                            stats["ext_observed"][ext] = (
+                                stats["ext_observed"].get(ext, 0) + n
+                            )
+                        stats["per_dir_warnings"].append(
+                            f"{lc_dir.name}: 0 *.{file_ext} files (other exts: "
+                            + ", ".join(
+                                f"{ext}={n}" for ext, n in sorted(sibling_exts.items())
+                            )
+                            + f"; index_rows={len(meta_by_id)})"
+                        )
+                    else:
+                        stats["per_dir_warnings"].append(
+                            f"{lc_dir.name}: directory is empty"
+                            f" (index_rows={len(meta_by_id)})"
+                        )
+                except OSError as e:
+                    stats["per_dir_warnings"].append(
+                        f"{lc_dir.name}: could not list contents: {e}"
+                    )
+            elif dir_yielded == 0:
+                stats["dirs_zero_yielded"] += 1
+                stats["per_dir_warnings"].append(
+                    f"{lc_dir.name}: globbed {dir_globbed} *.{file_ext} files but "
+                    f"yielded 0 (no_meta={dir_dropped_no_meta}, "
+                    f"non_int={dir_dropped_non_int}, "
+                    f"already_processed={dir_dropped_processed}, "
+                    f"index_rows={len(meta_by_id)})"
+                )
 
 
 def read_lc_dat2_fast(asassn_id: str, path: str, *, include_v: bool, file_ext: str) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -1543,6 +1626,57 @@ def make_writer(path: Path | None):
     return ChunkedParquetWriter(path)
 
 
+def _print_iter_stats_summary(stats: dict, file_ext: str, lc_dirs_total: int) -> None:
+    """Print a diagnostic summary so that silent attrition in
+    ``iter_light_curve_jobs`` (e.g. wrong --extension, file-stem/index ID
+    mismatches, stale checkpoints) becomes visible. This is the chunk-level
+    analog of the visibility we added in events.py for the STV path; here
+    drops happen at the *job submission* layer rather than the *write* layer,
+    but the failure mode -- a mag bin silently producing far fewer candidates
+    than it should -- looks the same to the user.
+    """
+    if not stats:
+        return
+
+    dirs_seen = stats.get("dirs_seen", 0)
+    yielded = stats.get("yielded", 0)
+    globbed = stats.get("globbed", 0)
+    print(
+        f"[ltv-core iter] mag-bin scan: lc_dirs_total={lc_dirs_total} "
+        f"dirs_seen={dirs_seen} "
+        f"missing_index={stats.get('dirs_missing_index', 0)} "
+        f"zero_globbed={stats.get('dirs_zero_globbed', 0)} "
+        f"zero_yielded={stats.get('dirs_zero_yielded', 0)} | "
+        f"globbed(*.{file_ext})={globbed} yielded={yielded} "
+        f"dropped(no_meta)={stats.get('dropped_no_meta_match', 0)} "
+        f"dropped(non_int)={stats.get('dropped_non_int_stem', 0)} "
+        f"dropped(checkpoint)={stats.get('dropped_already_processed', 0)}"
+    )
+
+    ext_observed = stats.get("ext_observed") or {}
+    if ext_observed and stats.get("dirs_zero_globbed", 0) > 0:
+        ext_summary = ", ".join(
+            f"{ext}={n}" for ext, n in sorted(ext_observed.items(), key=lambda kv: -kv[1])
+        )
+        print(
+            f"[ltv-core iter] WARNING: {stats['dirs_zero_globbed']} of "
+            f"{dirs_seen} lc_cal dirs had ZERO *.{file_ext} files. "
+            f"Other extensions present in those dirs: {ext_summary}. "
+            f"If you expected those, retry with --extension <ext>."
+        )
+
+    warnings = stats.get("per_dir_warnings") or []
+    if warnings:
+        sample = warnings[:8]
+        for line in sample:
+            print(f"[ltv-core iter]   - {line}")
+        if len(warnings) > len(sample):
+            print(
+                f"[ltv-core iter]   ... and {len(warnings) - len(sample)} "
+                "more directories with the same problem"
+            )
+
+
 def run_mag_bin(cfg: Config) -> None:
     """Run the full LTV pipeline for a single magnitude bin."""
     mag_bin_dir = cfg.root / cfg.mag_bin
@@ -1579,7 +1713,10 @@ def run_mag_bin(cfg: Config) -> None:
         print(f"Found {len(processed_files)} previously processed files")
 
     max_in_flight = max(1, cfg.workers * 2)
-    job_iter = iter_light_curve_jobs(mag_bin_dir, lc_dirs, processed_files, cfg.file_ext)
+    iter_stats: dict = {}
+    job_iter = iter_light_curve_jobs(
+        mag_bin_dir, lc_dirs, processed_files, cfg.file_ext, stats=iter_stats
+    )
 
     with ProcessPoolExecutor(max_workers=cfg.workers) as executor:
         pending = {}
@@ -1605,6 +1742,7 @@ def run_mag_bin(cfg: Config) -> None:
 
         if submitted == 0:
             print("No files to process (all may be completed)")
+            _print_iter_stats_summary(iter_stats, cfg.file_ext, len(lc_dirs))
             return
 
         writer = make_writer(output_path)
@@ -1658,6 +1796,7 @@ def run_mag_bin(cfg: Config) -> None:
         writer.close()
 
     print(f"Complete! Wrote {total_written} rows to {output_path}")
+    _print_iter_stats_summary(iter_stats, cfg.file_ext, len(lc_dirs))
 
 
 def main() -> None:

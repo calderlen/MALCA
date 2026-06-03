@@ -19,6 +19,10 @@ REPRODUCE_CHUNK_SIZE = 10000
 
 # Default file extension for light curve files (can be overridden via --extension/-e flag).
 LIGHT_CURVE_FILE_EXTENSION = "dat3"
+# LTV uses dat2 by default because dat3 reductions are not consistently
+# present across all mag bins on the cluster (notably 14.5_15), which caused
+# iter_light_curve_jobs to silently yield no jobs for those dirs.
+LTV_LIGHT_CURVE_FILE_EXTENSION = "dat2"
 
 
 # =============================================================================

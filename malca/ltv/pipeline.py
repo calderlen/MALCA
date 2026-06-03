@@ -655,7 +655,7 @@ def classify_ltv_candidates(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _make_core_config(args: argparse.Namespace, mag_bin: str, run_dir: Path):
-    from malca.config import LIGHT_CURVE_FILE_EXTENSION
+    from malca.config import LTV_LIGHT_CURVE_FILE_EXTENSION
     from malca.ltv.core import Config
 
     return Config(
@@ -672,7 +672,7 @@ def _make_core_config(args: argparse.Namespace, mag_bin: str, run_dir: Path):
         workers=int(args.workers),
         chunk_size=int(args.chunk_size or LTV_CORE_CHUNK_SIZE),
         overwrite=bool(args.overwrite),
-        file_ext=str(args.extension or LIGHT_CURVE_FILE_EXTENSION),
+        file_ext=str(args.extension or LTV_LIGHT_CURVE_FILE_EXTENSION),
     )
 
 
