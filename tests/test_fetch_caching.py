@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import io
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -230,6 +232,115 @@ def test_fetch_external_lcs_continues_after_module_failure(
     assert out.attrs["external_lc_failures"] == ["ZTF LCs failed: synthetic ZTF outage"]
     assert any("ZTF LCs failed" in message for message in messages)
     assert any("TESS LCs completed" in message for message in messages)
+
+
+def test_fetch_external_lcs_module_failure_survives_closed_stdout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    df = pd.DataFrame([{"candidate_id": "C1", "ra": 1.0, "dec": 2.0}])
+
+    def fail_ztf(_df: pd.DataFrame, **_kwargs) -> pd.DataFrame:
+        raise RuntimeError("synthetic ZTF outage")
+
+    monkeypatch.setattr(vetting, "fetch_ztf_lightcurves", fail_ztf)
+    closed_stdout = io.StringIO()
+    closed_stdout.close()
+    fallback_stderr = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", closed_stdout)
+    monkeypatch.setattr(sys, "__stderr__", fallback_stderr)
+
+    out = vetting.fetch_external_lcs(
+        df,
+        output_dir=tmp_path,
+        run_atlas=False,
+        run_ztf=True,
+        run_gaia_epoch=False,
+        run_tess=False,
+        run_neowise=False,
+        run_kepler=False,
+        run_aavso=False,
+        run_ps1=False,
+        run_crts=False,
+    )
+
+    assert out.attrs["external_lc_failures"] == ["ZTF LCs failed: synthetic ZTF outage"]
+    assert "ZTF LCs failed: synthetic ZTF outage" in fallback_stderr.getvalue()
+
+
+def test_fetch_external_lcs_resume_retries_error_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    df = pd.DataFrame([{"candidate_id": "C1", "ra": 1.0, "dec": 2.0}])
+    checkpoint_path = tmp_path / "external_lcs_CHECKPOINT.parquet"
+    checkpoint = df.copy()
+    checkpoint["ztf_lc_n_det"] = 12
+    checkpoint.to_parquet(checkpoint_path, index=False)
+    pd.DataFrame(
+        [
+            {
+                "module": "ZTF LCs",
+                "candidate_id": "C1",
+                "cache_key": "ztf-error-key",
+                "status": "error",
+            }
+        ]
+    ).to_parquet(tmp_path / vetting.EXTERNAL_LC_STATUS_FILE, index=False)
+    calls: list[bool] = []
+
+    def fake_ztf(in_df: pd.DataFrame, **_kwargs) -> pd.DataFrame:
+        calls.append(True)
+        return in_df
+
+    monkeypatch.setattr(vetting, "fetch_ztf_lightcurves", fake_ztf)
+
+    vetting.fetch_external_lcs(
+        df,
+        output_dir=tmp_path,
+        run_atlas=False,
+        run_ztf=True,
+        run_gaia_epoch=False,
+        run_tess=False,
+        run_neowise=False,
+        run_kepler=False,
+        run_aavso=False,
+        run_ps1=False,
+        run_crts=False,
+        checkpoint_path=checkpoint_path,
+        progress_callback=lambda _msg: None,
+    )
+
+    assert calls == [True]
+
+
+def test_fetch_tess_lightcurves_records_lookup_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    df = pd.DataFrame(
+        [
+            {"candidate_id": "C1", "ra": 1.0, "dec": 2.0},
+            {"candidate_id": "C2", "ra": 3.0, "dec": 4.0},
+        ]
+    )
+
+    def fake_search_lightcurve(coord, **_kwargs):
+        if float(coord.ra.deg) == 1.0:
+            raise RuntimeError("mast stream blew up")
+        return []
+
+    monkeypatch.setattr(vetting.lk, "search_lightcurve", fake_search_lightcurve)
+
+    out = vetting.fetch_tess_lightcurves(df, output_dir=tmp_path, workers=1)
+
+    assert out["tess_n_sectors"].tolist() == [0, 0]
+    status = pd.read_parquet(tmp_path / vetting.EXTERNAL_LC_STATUS_FILE)
+    error_row = status[status["candidate_id"] == "C1"].iloc[0]
+    no_data_row = status[status["candidate_id"] == "C2"].iloc[0]
+    assert error_row["status"] == "error"
+    assert "mast stream blew up" in error_row["error_message"]
+    assert no_data_row["status"] == "no_data"
 
 
 class _FakeCRTSResponse:

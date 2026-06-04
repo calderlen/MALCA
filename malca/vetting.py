@@ -29,6 +29,7 @@ import argparse
 import io
 import os
 import re
+import sys
 import time
 from html.parser import HTMLParser
 from urllib.parse import urljoin
@@ -138,6 +139,18 @@ ATLAS_MAX_POLL = CFG_ATLAS_MAX_POLL
 def _short_error(exc: Exception, max_len: int = 240) -> str:
     msg = str(exc).splitlines()[0].strip()
     return msg if len(msg) <= max_len else msg[:max_len - 3] + "..."
+
+
+def _safe_print(msg: str) -> None:
+    try:
+        print(msg)
+    except ValueError:
+        stream = getattr(sys, "__stderr__", None) or sys.stderr
+        try:
+            stream.write(f"{msg}\n")
+            stream.flush()
+        except Exception:
+            pass
 
 
 def _raise_lookup_failures(label: str, failures: list[str], n_total: int) -> None:
@@ -390,7 +403,7 @@ def _read_external_lc_status(output_dir: Path | str | None) -> pd.DataFrame:
     try:
         return pd.read_parquet(path)
     except Exception as exc:
-        print(f"  External LC cache warning: could not read {path}: {_short_error(exc)}")
+        _safe_print(f"  External LC cache warning: could not read {path}: {_short_error(exc)}")
         return pd.DataFrame()
 
 
@@ -406,7 +419,7 @@ def _write_external_lc_status(output_dir: Path | str | None, rows: list[dict]) -
         path.parent.mkdir(parents=True, exist_ok=True)
         combined.to_parquet(path, index=False, compression=PARQUET_CACHE_COMPRESSION)
     except Exception as exc:
-        print(f"  External LC cache warning: could not write {path}: {_short_error(exc)}")
+        _safe_print(f"  External LC cache warning: could not write {path}: {_short_error(exc)}")
 
 
 def _coord_lookup_cache_key(df: pd.DataFrame, idx, radius_arcsec: float, *extra: object) -> str | None:
@@ -531,7 +544,7 @@ def _apply_external_lc_cache_hits(
             n_matched += 1
 
     if n_cached:
-        print(f"{module}: served {n_cached} from cache; fetching {len(missing_idx)} misses")
+        _safe_print(f"{module}: served {n_cached} from cache; fetching {len(missing_idx)} misses")
     return missing_idx, n_cached, n_matched
 
 
@@ -3171,7 +3184,7 @@ def fetch_tess_lightcurves(
         Path(output_dir).mkdir(parents=True, exist_ok=True)
 
     n_valid = int(valid.sum())
-    print(f"TESS LCs: fetching {n_valid} light curves")
+    _safe_print(f"TESS LCs: fetching {n_valid} light curves")
 
     valid_idx = df.index[valid].tolist()
     summary_cols = ["tess_n_sectors", "tess_total_points", "tess_flux_range"]
@@ -3188,7 +3201,7 @@ def fetch_tess_lightcurves(
         summarize_func=lambda lc: _summarize_flux_lc(lc, "sector", "tess_n_sectors", "tess_total_points", "tess_flux_range"),
     )
     if not valid_idx:
-        print(f"TESS LCs: {cached_matched}/{n_valid} with data")
+        _safe_print(f"TESS LCs: {cached_matched}/{n_valid} with data")
         return df
 
     def _fetch_one(idx: int) -> tuple:
@@ -3271,6 +3284,21 @@ def fetch_tess_lightcurves(
             idx, n_sectors, total_points, flux_range, error, cache_key = fut.result()
             if error is not None:
                 failures.append(error)
+                row = _external_lc_status_row(
+                    df,
+                    idx,
+                    module="TESS LCs",
+                    cache_key=cache_key,
+                    summary={
+                        "tess_n_sectors": 0,
+                        "tess_total_points": 0,
+                        "tess_flux_range": np.nan,
+                        "error_message": error,
+                    },
+                    status="error",
+                )
+                if row is not None:
+                    status_rows.append(row)
                 continue
             df.loc[idx, "tess_n_sectors"] = n_sectors
             df.loc[idx, "tess_total_points"] = total_points
@@ -3290,8 +3318,10 @@ def fetch_tess_lightcurves(
                 matched += 1
 
     _write_external_lc_status(output_dir, status_rows)
-    _raise_lookup_failures("TESS LCs", failures, n_valid)
-    print(f"TESS LCs: {matched}/{n_valid} with data")
+    if failures:
+        _safe_print(f"TESS LCs: {matched}/{n_valid} with data; {len(failures)} lookup error(s) recorded")
+    else:
+        _safe_print(f"TESS LCs: {matched}/{n_valid} with data")
     return df
 
 
@@ -4039,7 +4069,7 @@ def fetch_external_lcs(
         if progress_callback:
             progress_callback(msg)
         else:
-            print(msg)
+            _safe_print(msg)
 
     # Normalise coordinate column names
     if "ra" not in df.columns and "ra_deg" in df.columns:
@@ -4082,7 +4112,7 @@ def fetch_external_lcs(
         if not status_df.empty and {"module", "status"}.issubset(status_df.columns):
             failed = (
                 (status_df["module"].astype(str) == name)
-                & (status_df["status"].astype(str) == "failed")
+                & (status_df["status"].astype(str).isin({"error", "failed"}))
             )
             if bool(failed.any()):
                 return False
