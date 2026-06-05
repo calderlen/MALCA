@@ -22,6 +22,7 @@ Usage:
 """
 from __future__ import annotations
 
+import contextlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable, Literal
@@ -141,16 +142,48 @@ def _short_error(exc: Exception, max_len: int = 240) -> str:
     return msg if len(msg) <= max_len else msg[:max_len - 3] + "..."
 
 
-def _safe_print(msg: str) -> None:
+def _write_to_stream(stream: object | None, text: str) -> bool:
+    if stream is None:
+        return False
     try:
-        print(msg)
-    except ValueError:
-        stream = getattr(sys, "__stderr__", None) or sys.stderr
-        try:
-            stream.write(f"{msg}\n")
-            stream.flush()
-        except Exception:
-            pass
+        stream.write(text)
+        stream.flush()
+        return True
+    except Exception:
+        return False
+
+
+class _SafeOutputStream(io.TextIOBase):
+    """Forward writes to a stream, falling back if that stream was closed."""
+
+    def __init__(self, primary: object | None, fallback: object | None) -> None:
+        super().__init__()
+        self._primary = primary
+        self._fallback = fallback
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, text: str) -> int:
+        text = str(text)
+        if not _write_to_stream(self._primary, text):
+            _write_to_stream(self._fallback, text)
+        return len(text)
+
+    def flush(self) -> None:
+        for stream in (self._primary, self._fallback):
+            try:
+                stream.flush()
+                return
+            except Exception:
+                continue
+
+
+def _safe_print(msg: str) -> None:
+    text = f"{msg}\n"
+    if _write_to_stream(sys.stdout, text):
+        return
+    _write_to_stream(getattr(sys, "__stderr__", None) or sys.stderr, text)
 
 
 def _raise_lookup_failures(label: str, failures: list[str], n_total: int) -> None:
@@ -4127,8 +4160,12 @@ def fetch_external_lcs(
             _emit(f"{name} skipped (already in checkpoint)")
             return
         t0 = time.perf_counter()
+        fallback_stream = getattr(sys, "__stderr__", None) or getattr(sys, "stderr", None)
+        stdout_stream = _SafeOutputStream(sys.stdout, fallback_stream)
+        stderr_stream = _SafeOutputStream(sys.stderr, fallback_stream)
         try:
-            df = func(df, **kwargs)
+            with contextlib.redirect_stdout(stdout_stream), contextlib.redirect_stderr(stderr_stream):
+                df = func(df, **kwargs)
         except Exception as exc:
             msg = f"{name} failed: {_short_error(exc)}"
             failures.append(msg)

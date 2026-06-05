@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import io
 import sqlite3
+import sys
 import zipfile
 from pathlib import Path
 
@@ -188,6 +190,56 @@ def test_ltv_stage_full_extended_runs_extended_products(monkeypatch, tmp_path: P
     assert enriched.loc[0, "ltv_ms_feature_status"] == "ok"
     assert summary["per_bin"]["13_13.5"]["external_lcs_rows"] == 1
     assert summary["per_bin"]["13_13.5"]["ltv_multi_survey_rows"] == 1
+
+
+def test_ltv_external_lcs_verbose_survives_closed_stdout(monkeypatch, tmp_path: Path) -> None:
+    run_dir = tmp_path / "runs" / "ltv_closed_stdout"
+
+    def fake_run_core(args: argparse.Namespace, mag_bin: str, run_dir_arg: Path) -> Path:
+        path = ltv_pipeline.ltv_core_output_path(mag_bin, run_dir_arg)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _core_rows(tmp_path).to_parquet(path, index=False)
+        return path
+
+    def fake_run_full_pipeline(df: pd.DataFrame, **_kwargs: object) -> pd.DataFrame:
+        return df.copy()
+
+    def fake_ingest(_review_db: Path, df: pd.DataFrame, **_kwargs: object) -> tuple[int, int]:
+        return len(df), len(df)
+
+    def fake_fetch_external_lcs(df: pd.DataFrame, **_kwargs: object) -> pd.DataFrame:
+        out = df.copy()
+        out["ztf_lc_n_det"] = 2
+        return out
+
+    monkeypatch.setattr(ltv_pipeline, "_run_core_if_needed", fake_run_core)
+    monkeypatch.setattr(ltv_pipeline, "run_full_pipeline", fake_run_full_pipeline)
+    monkeypatch.setattr("malca.ltv.review.ingest_ltv_results", fake_ingest)
+    monkeypatch.setattr("malca.vetting.fetch_external_lcs", fake_fetch_external_lcs)
+
+    closed_stdout = io.StringIO()
+    closed_stdout.close()
+    fallback_stderr = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", closed_stdout)
+    monkeypatch.setattr(sys, "__stderr__", fallback_stderr)
+
+    args = ltv_pipeline.add_ltv_pipeline_args(argparse.ArgumentParser()).parse_args(
+        [
+            "--stage", "full",
+            "--run-external-lcs",
+            "--mag-bin", "13_13.5",
+            "--run-dir", str(run_dir),
+            "--skip-filters",
+            "--no-export-bundle",
+            "--no-review-sync",
+            "--skip-stats",
+            "-v",
+        ]
+    )
+    summary = ltv_pipeline.run_ltv_pipeline_cli(args)
+
+    assert summary["per_bin"]["13_13.5"]["external_lcs_rows"] == 2
+    assert "Saved external LC summary" in fallback_stderr.getvalue()
 
 
 def test_ltv_stage_full_extended_opt_in_and_out(monkeypatch, tmp_path: Path) -> None:

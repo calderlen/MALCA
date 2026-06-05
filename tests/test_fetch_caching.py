@@ -268,6 +268,46 @@ def test_fetch_external_lcs_module_failure_survives_closed_stdout(
     assert "ZTF LCs failed: synthetic ZTF outage" in fallback_stderr.getvalue()
 
 
+def test_fetch_external_lcs_module_print_survives_closed_stdout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    df = pd.DataFrame([{"candidate_id": "C1", "ra": 1.0, "dec": 2.0}])
+
+    def fake_ztf(_df: pd.DataFrame, **_kwargs) -> pd.DataFrame:
+        print("synthetic ZTF summary")
+        out = _df.copy()
+        out["ztf_lc_n_det"] = 1
+        out["ztf_lc_g_range"] = float("nan")
+        out["ztf_lc_r_range"] = float("nan")
+        return out
+
+    monkeypatch.setattr(vetting, "fetch_ztf_lightcurves", fake_ztf)
+    closed_stdout = io.StringIO()
+    closed_stdout.close()
+    fallback_stderr = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", closed_stdout)
+    monkeypatch.setattr(sys, "__stderr__", fallback_stderr)
+
+    out = vetting.fetch_external_lcs(
+        df,
+        output_dir=tmp_path,
+        run_atlas=False,
+        run_ztf=True,
+        run_gaia_epoch=False,
+        run_tess=False,
+        run_neowise=False,
+        run_kepler=False,
+        run_aavso=False,
+        run_ps1=False,
+        run_crts=False,
+    )
+
+    assert int(out.loc[0, "ztf_lc_n_det"]) == 1
+    assert "external_lc_failures" not in out.attrs
+    assert "synthetic ZTF summary" in fallback_stderr.getvalue()
+
+
 def test_fetch_external_lcs_resume_retries_error_status(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

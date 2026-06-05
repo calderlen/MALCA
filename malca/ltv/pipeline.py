@@ -22,6 +22,7 @@ import argparse
 from datetime import datetime
 import os
 from pathlib import Path
+import sys
 import time
 
 import numpy as np
@@ -86,6 +87,22 @@ from malca.run_context import (
     write_run_summary,
 )
 from malca.run_metadata import build_fingerprint, fingerprint_digest, json_stable
+
+
+def _safe_status_print(message: object = "") -> None:
+    text = f"{message}\n"
+    try:
+        sys.stdout.write(text)
+        sys.stdout.flush()
+        return
+    except Exception:
+        pass
+    stream = getattr(sys, "__stderr__", None) or getattr(sys, "stderr", None)
+    try:
+        stream.write(text)
+        stream.flush()
+    except Exception:
+        pass
 
 
 LTV_BUILD_CONFIG_DEFAULTS = {
@@ -693,7 +710,7 @@ def _run_core_if_needed(args: argparse.Namespace, mag_bin: str, run_dir: Path) -
     output_path = ltv_core_output_path(mag_bin, run_dir)
     if output_path.exists() and not args.overwrite:
         if args.verbose:
-            print(f"[ltv-pipeline] Reusing core output: {output_path}")
+            _safe_status_print(f"[ltv-pipeline] Reusing core output: {output_path}")
         return output_path
     if args.overwrite:
         _clear_ltv_core_outputs(output_path)
@@ -743,7 +760,7 @@ def _write_filtered_audit(
     audit = _write_ltv_candidate_table(audit, filtered_path, stage="ltv-filtered")
     passers = _passing_ltv_rows(audit)
     if args.verbose:
-        print(f"[ltv-pipeline] Saved LTV audit table to {filtered_path}")
+        _safe_status_print(f"[ltv-pipeline] Saved LTV audit table to {filtered_path}")
     return filtered_path, audit, passers
 
 
@@ -792,7 +809,7 @@ def _write_pipeline_candidates(
         df["asas_sn_id"] = df["asas_sn_id"].astype(object).map(lambda x: str(x) if pd.notna(x) else "")
     df = _write_ltv_candidate_table(df, output_path, stage="ltv-pipeline")
     if args.verbose:
-        print(f"[ltv-pipeline] Saved enriched LTV candidates to {output_path}")
+        _safe_status_print(f"[ltv-pipeline] Saved enriched LTV candidates to {output_path}")
     return output_path, df
 
 
@@ -833,12 +850,13 @@ def _write_ltv_external_lcs(
         atlas_token=args.atlas_token or os.environ.get("MALCA_ATLAS_TOKEN") or os.environ.get("ATLAS_API_TOKEN"),
         workers=int(args.external_lc_workers or 4),
         checkpoint_path=checkpoint_path,
+        progress_callback=_safe_status_print,
         refresh_cache=bool(args.external_lc_refresh_cache),
     )
     out = _write_ltv_candidate_table(out, output_path, stage="ltv-external-lcs")
     checkpoint_path.unlink(missing_ok=True)
     if args.verbose:
-        print(f"[ltv-pipeline] Saved external LC summary to {output_path}")
+        _safe_status_print(f"[ltv-pipeline] Saved external LC summary to {output_path}")
     return output_path, external_lc_dir, out
 
 
@@ -864,7 +882,7 @@ def _write_ltv_multi_survey_features(
     )
     out = _write_ltv_candidate_table(out, output_path, stage="ltv-multi-survey")
     if args.verbose:
-        print(f"[ltv-pipeline] Saved LTV multi-survey features to {output_path}")
+        _safe_status_print(f"[ltv-pipeline] Saved LTV multi-survey features to {output_path}")
     return output_path, out
 
 
@@ -1103,7 +1121,7 @@ def run_ltv_pipeline_cli(args: argparse.Namespace) -> dict:
         args.run_multi_survey_features = _stage_defaults_to_ltv_extended(args.stage)
     if args.stage == "cluster":
         if args.run_external_lcs or args.run_multi_survey_features:
-            print("Info: --stage cluster runs raw-dependent LTV products only. Extended external-LC work is skipped.")
+            _safe_status_print("Info: --stage cluster runs raw-dependent LTV products only. Extended external-LC work is skipped.")
         args.run_external_lcs = False
         args.run_multi_survey_features = False
 
@@ -1306,7 +1324,7 @@ def run_ltv_pipeline_cli(args: argparse.Namespace) -> dict:
             summary["export_bundle"] = {"path": str(bundle_path), "files": len(bundled)}
             write_run_summary(ctx, summary)
         except Exception as exc:
-            print(f"Error creating LTV export bundle: {exc}")
+            _safe_status_print(f"Error creating LTV export bundle: {exc}")
 
     return summary
 
