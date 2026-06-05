@@ -62,7 +62,7 @@ from malca.config import (
 )
 from malca.stv.events import score_lightcurve
 from malca.stv.filter import apply_filters
-from malca.lightcurve_io import load_lightcurve_df
+from malca.lightcurve_io import load_lightcurve_df, to_legacy_asassn_frame
 from malca.lightcurve_publication import (
     plot_lightcurve_panel,
     plot_phase_panel,
@@ -309,7 +309,7 @@ def load_control_lightcurves(
     for idx in iterator:
         path = paths[int(idx)]
         try:
-            df = load_lightcurve_df(path)
+            df = to_legacy_asassn_frame(load_lightcurve_df(path))
         except Exception:
             continue
         if df.empty or len(df) < int(min_points):
@@ -1732,7 +1732,7 @@ def _load_trial_lightcurve_for_row(
     if controls is not None and source_path in controls:
         base = controls[source_path]
     else:
-        base = load_lightcurve_df(source_path)
+        base = to_legacy_asassn_frame(load_lightcurve_df(source_path))
     df_trial, _ = generate_trial_lightcurve(base, row_dict)
     return df_trial
 

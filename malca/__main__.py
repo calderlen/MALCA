@@ -53,6 +53,7 @@ COMMAND_GROUPS = {
     "external-lcs": "Enrichment",
     "multi-survey-features": "Enrichment",
     "sed-photometry": "Enrichment",
+    "nuclear-context": "Enrichment",
     "vetting": "Other",
     "dev": "Other",
 }
@@ -124,7 +125,7 @@ def main():
         "bad-photometry",
         "stv-events", "lc-plot", "gaia-fetch", "characterize", "classify", "stv-filter", "stv-tag",
         "attrition", "review", "review-refresh", "review-merge", "review-sync", "review-taxonomy", "review-maint",
-        "neighbors", "spectra", "false-positive", "vsx-filter", "vsx-crossmatch", "external-lcs", "multi-survey-features", "sed-photometry",
+        "neighbors", "spectra", "false-positive", "vsx-filter", "vsx-crossmatch", "external-lcs", "multi-survey-features", "sed-photometry", "nuclear-context",
         "vetting",
         "ltv-pipeline", "ltv-injection",
         "dev",
@@ -211,6 +212,8 @@ def main():
             _run_module_main("malca.multi_survey_features", remaining)
         elif command == "sed-photometry":
             _run_module_main("malca.sed_photometry", remaining)
+        elif command == "nuclear-context":
+            _run_module_main("malca.nuclear.cmd", remaining)
         elif command == "vetting":
             _run_module_main("malca.vetting", remaining)
         elif command == "ltv-pipeline":
@@ -283,6 +286,7 @@ def main():
     subparsers.add_parser("external-lcs", description="Fetch external light curves for candidate tables")
     subparsers.add_parser("multi-survey-features", description="Compute event-relative multi-survey features")
     subparsers.add_parser("sed-photometry", description="Fetch and normalize SED photometry for candidate tables")
+    subparsers.add_parser("nuclear-context", description="Run nuclear context enrichment and AGN/TDE/CLAGN scores")
     # Other
     subparsers.add_parser("vetting", description="Run post-review vetting (SIMBAD, Gaia, ASAS-SN, ZTF, TNS, eROSITA, ...)")
     subparsers.add_parser("dev", description="Developer diagnostics (score, stats)")

@@ -286,26 +286,12 @@ def _load_asassn_lc(row: pd.Series | dict[str, Any]) -> pd.DataFrame:
         raw = load_lightcurve_df(path)
         if raw is None or raw.empty:
             continue
-        time_col = _first_column(raw, ("JD", "jd", "hjd", "mjd", "time"))
-        mag_col = _first_column(raw, ("mag", "m", "magnitude"))
-        if time_col is None or mag_col is None:
+        if "jd" not in raw.columns or "mag" not in raw.columns:
             continue
         out = pd.DataFrame()
-        out["jd"] = _time_to_jd(raw[time_col], "asassn")
-        out["mag"] = pd.to_numeric(raw[mag_col], errors="coerce")
-        if "v_g_band" in raw.columns:
-            band = pd.to_numeric(raw["v_g_band"], errors="coerce").map({0: "g", 1: "V"})
-            out["band"] = band.fillna(raw["v_g_band"].astype(str))
-        else:
-            band_col = _first_column(raw, ("phot_filter", "filter", "band", "passband"))
-            out["band"] = raw[band_col].astype(str).str.strip() if band_col else "all"
-        if "good_bad" in raw.columns:
-            good_bad = pd.to_numeric(raw["good_bad"], errors="coerce")
-            if (good_bad == 0).any():
-                out = out.loc[good_bad.to_numpy() == 0].copy()
-        if "saturated" in raw.columns and not out.empty:
-            sat = pd.to_numeric(raw.loc[out.index, "saturated"], errors="coerce")
-            out = out.loc[sat.fillna(0).to_numpy() == 0].copy()
+        out["jd"] = pd.to_numeric(raw["jd"], errors="coerce")
+        out["mag"] = pd.to_numeric(raw["mag"], errors="coerce")
+        out["band"] = raw["band"].astype(str).str.strip() if "band" in raw.columns else "all"
         return out[np.isfinite(out["jd"]) & np.isfinite(out["mag"])].reset_index(drop=True)
     return pd.DataFrame(columns=["jd", "mag", "band"])
 

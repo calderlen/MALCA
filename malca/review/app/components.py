@@ -17,10 +17,41 @@ def _render_external_followup(
     candidate_id: str,
     theme: str | None = None,
     plot_dir: str | Path | None = None,
+    selected_cutout_survey: str | None = None,
 ) -> list:
     theme_spec = _external_followup_theme(theme)
-    card_style = theme_spec["card_style"]
-    muted_text_style = {'fontSize': '10px', 'color': theme_spec["muted"]}
+    card_style = {
+        **theme_spec["card_style"],
+        'borderRadius': '4px',
+        'padding': '5px 7px',
+        'minWidth': 0,
+        'lineHeight': 1.2,
+    }
+    section_title_style = {
+        'fontSize': '11px',
+        'fontWeight': '700',
+        'lineHeight': 1.1,
+        'marginBottom': '3px',
+    }
+    metrics_style = {
+        'display': 'grid',
+        'gridTemplateColumns': 'repeat(auto-fit, minmax(118px, 1fr))',
+        'gap': '2px 8px',
+    }
+    metric_style = {
+        'display': 'flex',
+        'gap': '4px',
+        'minWidth': 0,
+        'fontSize': '10px',
+        'lineHeight': 1.25,
+        'alignItems': 'baseline',
+    }
+    metric_label_style = {'color': theme_spec["muted"], 'flex': '0 0 auto'}
+    metric_value_style = {
+        'minWidth': 0,
+        'overflowWrap': 'anywhere',
+    }
+    muted_text_style = {'fontSize': '9px', 'lineHeight': 1.2, 'color': theme_spec["muted"]}
     error_text_style = {'fontSize': '10px', 'color': theme_spec["error"]}
     run_dir = _resolve_run_dir_from_plot_dir(plot_dir if plot_dir is not None else PLOT_DIR)
     lookup_keys = _candidate_lookup_keys(candidate_id, payload)
@@ -34,25 +65,89 @@ def _render_external_followup(
             text = str(value or "").strip()
             return text if text else "n/a"
 
-    multi_survey_children = [
-        html.Div(f"Status: {payload.get('ms_feature_status') or 'missing'}", style={'fontSize': '11px'}),
-        html.Div(
-            f"Event: {payload.get('ms_event_type') or 'n/a'} @ {_fmt_ms(payload.get('ms_event_t0_jd'), 7)}",
-            style={'fontSize': '11px'},
-        ),
-        html.Div(
-            f"ZTF g-r delta: {_fmt_ms(payload.get('ms_ztf_gr_delta'))} "
-            f"({payload.get('ms_ztf_gr_event_pairs', 0)} event pairs)",
-            style={'fontSize': '11px'},
-        ),
-        html.Div(f"NEOWISE W1 delta: {_fmt_ms(payload.get('ms_neowise_w1_delta'))}", style={'fontSize': '11px'}),
-        html.Div(f"TESS delta F/F: {_fmt_ms(payload.get('ms_tess_flux_frac_delta'))}", style={'fontSize': '11px'}),
-        html.Div(f"Gaia G delta: {_fmt_ms(payload.get('ms_gaia_epoch_g_delta'))}", style={'fontSize': '11px'}),
-    ]
-    multi_survey_card = html.Div([
-        html.Div('Multi-survey Features', style={'fontWeight': '600', 'marginBottom': '4px'}),
-        *multi_survey_children,
-    ], style=card_style)
+    def _metric(label: str, value) -> html.Div:
+        return html.Div([
+            html.Span(f"{label}:", style=metric_label_style),
+            html.Span(str(value), style=metric_value_style, title=str(value)),
+        ], style=metric_style)
+
+    def _section(title: str, metrics: list, extras: list | None = None) -> html.Div:
+        children = [
+            html.Div(title, style=section_title_style),
+            html.Div(metrics, style=metrics_style),
+        ]
+        if extras:
+            children.extend(extras)
+        style = dict(card_style)
+        if extras:
+            style['gridColumn'] = '1 / -1'
+        return html.Div(children, style=style)
+
+    cutout_data = cutout_payload_for_candidate(payload, selected_key=selected_cutout_survey)
+    cutout_has_coords = bool(cutout_data.get("has_coordinates"))
+    cutout_card_style = dict(card_style)
+    cutout_card_style.update({'gridColumn': '1 / -1', 'padding': '6px 7px 7px 7px'})
+    cutout_viewer_class = "cutout-viewer" if cutout_has_coords else "cutout-viewer cutout-viewer-empty"
+    cutout_status_style = muted_text_style if cutout_has_coords else error_text_style
+    cutout_card = html.Div([
+        html.Div([
+            html.Div('Survey Cutout', style={**section_title_style, 'marginBottom': '0'}),
+            html.A(
+                'Open source image',
+                id='cutout-source-link',
+                href=str(cutout_data.get("source_url") or "#"),
+                target='_blank',
+                rel='noopener noreferrer',
+                title=str(cutout_data.get("source_url") or ""),
+                className='cutout-source-link',
+            ),
+        ], className='cutout-card-header'),
+        html.Div([
+            dcc.Dropdown(
+                id='cutout-survey-select',
+                options=available_cutout_options(),
+                value=str(cutout_data.get("selected_key") or DEFAULT_CUTOUT_SURVEY_KEY),
+                clearable=False,
+                searchable=True,
+                disabled=not cutout_has_coords,
+                className='cutout-survey-select dash-dropdown',
+            ),
+            html.Div(
+                str(cutout_data.get("message") or ""),
+                id='cutout-status',
+                className='cutout-status',
+                style=cutout_status_style,
+            ),
+        ], className='cutout-controls-row'),
+        html.Div([
+            html.Img(
+                id='cutout-image',
+                src=str(cutout_data.get("image_url") or ""),
+                alt='Candidate survey cutout',
+                className='cutout-image',
+            ),
+            html.Div(className='cutout-crosshair'),
+            html.Div(
+                'No coordinates',
+                className='cutout-empty-label',
+            ),
+        ], className=cutout_viewer_class),
+    ], style=cutout_card_style, className='survey-cutout-card')
+
+    multi_survey_card = _section(
+        'Multi-survey Features',
+        [
+            _metric("Status", payload.get('ms_feature_status') or 'missing'),
+            _metric("Event", f"{payload.get('ms_event_type') or 'n/a'} @ {_fmt_ms(payload.get('ms_event_t0_jd'), 7)}"),
+            _metric(
+                "ZTF g-r delta",
+                f"{_fmt_ms(payload.get('ms_ztf_gr_delta'))} ({payload.get('ms_ztf_gr_event_pairs', 0)} event pairs)",
+            ),
+            _metric("NEOWISE W1 delta", _fmt_ms(payload.get('ms_neowise_w1_delta'))),
+            _metric("TESS delta F/F", _fmt_ms(payload.get('ms_tess_flux_frac_delta'))),
+            _metric("Gaia G delta", _fmt_ms(payload.get('ms_gaia_epoch_g_delta'))),
+        ],
+    )
 
     # Spectra
     has_spectrum = _coerce_bool(payload.get('has_spectrum'))
@@ -65,10 +160,11 @@ def _render_external_followup(
         if not spectra_rows.empty:
             break
 
-    spectra_children = [
-        html.Div(f"Has spectra: {'yes' if has_spectrum else 'no'}", style={'fontSize': '11px'}),
-        html.Div(f"Sources: {spectrum_sources or 'none'}", style={'fontSize': '11px', 'color': theme_spec["muted"]}),
+    spectra_metrics = [
+        _metric("Has spectra", 'yes' if has_spectrum else 'no'),
+        _metric("Sources", spectrum_sources or 'none'),
     ]
+    spectra_extras = []
     if not spectra_rows.empty:
         spectra_rows = spectra_rows.head(8)
         hdr = html.Tr([html.Th('survey'), html.Th('catalog'), html.Th('sep\"')])
@@ -80,11 +176,11 @@ def _render_external_followup(
             ])
             for _, r in spectra_rows.iterrows()
         ]
-        spectra_children.append(html.Table([html.Thead(hdr), html.Tbody(body)], style={'width': '100%', 'fontSize': '10px'}))
+        spectra_extras.append(html.Table([html.Thead(hdr), html.Tbody(body)], style={'width': '100%', 'fontSize': '10px', 'marginTop': '4px'}))
     if spectrum_links:
-        spectra_children.append(
+        spectra_extras.append(
             html.Div([
-                html.Div('Links:', style={'fontSize': '11px', 'marginTop': '4px'}),
+                html.Div('Links:', style={'fontSize': '10px', 'marginTop': '4px'}),
                 html.Div([
                     html.A(
                         link,
@@ -98,17 +194,15 @@ def _render_external_followup(
             ])
         )
 
-    spectra_card = html.Div([
-        html.Div('Spectra', style={'fontWeight': '600', 'marginBottom': '4px'}),
-        *spectra_children,
-    ], style=card_style)
+    spectra_card = _section('Spectra', spectra_metrics, spectra_extras)
 
     # ATLAS summary + optional light curve panel
-    atlas_children = [
-        html.Div(f"Photometry: {'yes' if _coerce_bool(payload.get('atlas_has_phot')) else 'no'}", style={'fontSize': '11px'}),
-        html.Div(f"cyan n/range: {payload.get('atlas_n_det_cyan', 'n/a')} / {payload.get('atlas_cyan_range', 'n/a')}", style={'fontSize': '11px'}),
-        html.Div(f"orange n/range: {payload.get('atlas_n_det_orange', 'n/a')} / {payload.get('atlas_orange_range', 'n/a')}", style={'fontSize': '11px'}),
+    atlas_metrics = [
+        _metric("Photometry", 'yes' if _coerce_bool(payload.get('atlas_has_phot')) else 'no'),
+        _metric("cyan n/range", f"{payload.get('atlas_n_det_cyan', 'n/a')} / {payload.get('atlas_cyan_range', 'n/a')}"),
+        _metric("orange n/range", f"{payload.get('atlas_n_det_orange', 'n/a')} / {payload.get('atlas_orange_range', 'n/a')}"),
     ]
+    atlas_extras = []
     if run_dir is not None:
         atlas_idx = _index_external_lc_paths(str(run_dir.resolve()), "atlas")
         for key in lookup_keys:
@@ -128,15 +222,12 @@ def _render_external_followup(
                             theme=theme,
                             jd_system="mjd",
                         )
-                        atlas_children.append(_exportable_graph(atlas_fig, panel="external", name="atlas", height="250px"))
+                        atlas_extras.append(_exportable_graph(atlas_fig, panel="external", name="atlas", height="250px"))
                     except Exception:
                         pass
                 break
 
-    atlas_card = html.Div([
-        html.Div('ATLAS', style={'fontWeight': '600', 'marginBottom': '4px'}),
-        *atlas_children,
-    ], style=card_style)
+    atlas_card = _section('ATLAS', atlas_metrics, atlas_extras)
 
     # NEOWISE summary + optional light curve panel
     neowise_epochs = payload.get('neowise_n_epochs', 0)
@@ -162,27 +253,26 @@ def _render_external_followup(
         except Exception:
             neowise_plot = html.Div(f"Could not load NEOWISE parquet: {neowise_path}", style=error_text_style)
 
-    neowise_children = [
-        html.Div(f"Epochs: {neowise_epochs}", style={'fontSize': '11px'}),
-        html.Div(f"W1 range: {payload.get('neowise_w1_range', 'n/a')}", style={'fontSize': '11px'}),
-        html.Div(f"W2 range: {payload.get('neowise_w2_range', 'n/a')}", style={'fontSize': '11px'}),
+    neowise_metrics = [
+        _metric("Epochs", neowise_epochs),
+        _metric("W1 range", payload.get('neowise_w1_range', 'n/a')),
+        _metric("W2 range", payload.get('neowise_w2_range', 'n/a')),
     ]
+    neowise_extras = []
     if neowise_path:
-        neowise_children.append(html.Div(f"File: {neowise_path.name}", style=muted_text_style))
+        neowise_extras.append(html.Div(f"File: {neowise_path.name}", style=muted_text_style))
     if neowise_plot is not None:
-        neowise_children.append(neowise_plot)
+        neowise_extras.append(neowise_plot)
 
-    neowise_card = html.Div([
-        html.Div('NEOWISE', style={'fontWeight': '600', 'marginBottom': '4px'}),
-        *neowise_children,
-    ], style=card_style)
+    neowise_card = _section('NEOWISE', neowise_metrics, neowise_extras)
 
     # ZTF LC card
-    ztf_children = [
-        html.Div(f"Detections: {payload.get('ztf_lc_n_det', 'n/a')}", style={'fontSize': '11px'}),
-        html.Div(f"g range: {payload.get('ztf_lc_g_range', 'n/a')}", style={'fontSize': '11px'}),
-        html.Div(f"r range: {payload.get('ztf_lc_r_range', 'n/a')}", style={'fontSize': '11px'}),
+    ztf_metrics = [
+        _metric("Detections", payload.get('ztf_lc_n_det', 'n/a')),
+        _metric("g range", payload.get('ztf_lc_g_range', 'n/a')),
+        _metric("r range", payload.get('ztf_lc_r_range', 'n/a')),
     ]
+    ztf_extras = []
     if run_dir is not None:
         ztf_idx = _index_external_lc_paths(str(run_dir.resolve()), "ztf")
         for key in lookup_keys:
@@ -203,21 +293,19 @@ def _render_external_followup(
                             theme=theme,
                             jd_system="mjd",
                         )
-                        ztf_children.append(_exportable_graph(ztf_fig, panel="external", name="ztf", height="250px"))
+                        ztf_extras.append(_exportable_graph(ztf_fig, panel="external", name="ztf", height="250px"))
                     except Exception:
                         pass
                 break
 
-    ztf_card = html.Div([
-        html.Div('ZTF', style={'fontWeight': '600', 'marginBottom': '4px'}),
-        *ztf_children,
-    ], style=card_style)
+    ztf_card = _section('ZTF', ztf_metrics, ztf_extras)
 
     # Gaia epoch LC card
-    gaia_epoch_children = [
-        html.Div(f"G points: {payload.get('gaia_epoch_lc_n_g', 'n/a')}", style={'fontSize': '11px'}),
-        html.Div(f"G range: {payload.get('gaia_epoch_lc_g_range', 'n/a')}", style={'fontSize': '11px'}),
+    gaia_epoch_metrics = [
+        _metric("G points", payload.get('gaia_epoch_lc_n_g', 'n/a')),
+        _metric("G range", payload.get('gaia_epoch_lc_g_range', 'n/a')),
     ]
+    gaia_epoch_extras = []
     if run_dir is not None:
         gaia_idx = _index_external_lc_paths(str(run_dir.resolve()), "gaia_epoch")
         for key in lookup_keys:
@@ -236,22 +324,20 @@ def _render_external_followup(
                             theme=theme,
                             jd_system="bjd_gaia",
                         )
-                        gaia_epoch_children.append(_exportable_graph(gaia_fig, panel="external", name="gaia-epoch", height="250px"))
+                        gaia_epoch_extras.append(_exportable_graph(gaia_fig, panel="external", name="gaia-epoch", height="250px"))
                     except Exception:
                         pass
                 break
 
-    gaia_epoch_card = html.Div([
-        html.Div('Gaia Epoch', style={'fontWeight': '600', 'marginBottom': '4px'}),
-        *gaia_epoch_children,
-    ], style=card_style)
+    gaia_epoch_card = _section('Gaia Epoch', gaia_epoch_metrics, gaia_epoch_extras)
 
     # TESS LC card
-    tess_children = [
-        html.Div(f"Sectors: {payload.get('tess_n_sectors', 'n/a')}", style={'fontSize': '11px'}),
-        html.Div(f"Points: {payload.get('tess_total_points', 'n/a')}", style={'fontSize': '11px'}),
-        html.Div(f"Flux range: {payload.get('tess_flux_range', 'n/a')}", style={'fontSize': '11px'}),
+    tess_metrics = [
+        _metric("Sectors", payload.get('tess_n_sectors', 'n/a')),
+        _metric("Points", payload.get('tess_total_points', 'n/a')),
+        _metric("Flux range", payload.get('tess_flux_range', 'n/a')),
     ]
+    tess_extras = []
     if run_dir is not None:
         tess_idx = _index_external_lc_paths(str(run_dir.resolve()), "tess")
         for key in lookup_keys:
@@ -271,22 +357,20 @@ def _render_external_followup(
                             theme=theme,
                             jd_system="btjd",
                         )
-                        tess_children.append(
+                        tess_extras.append(
                             _exportable_graph(tess_fig, panel="external", name="tess", height="250px")
                         )
                     except Exception:
                         pass
                 break
 
-    tess_card = html.Div([
-        html.Div('TESS', style={'fontWeight': '600', 'marginBottom': '4px'}),
-        *tess_children,
-    ], style=card_style)
+    tess_card = _section('TESS', tess_metrics, tess_extras)
 
     # Pan-STARRS LC card
-    ps1_children = [
-        html.Div(f"Points: {payload.get('ps1_lc_n_points', 'n/a')}", style={'fontSize': '11px'}),
+    ps1_metrics = [
+        _metric("Points", payload.get('ps1_lc_n_points', 'n/a')),
     ]
+    ps1_extras = []
     if run_dir is not None:
         ps1_idx = _index_external_lc_paths(str(run_dir.resolve()), "ps1")
         for key in lookup_keys:
@@ -309,20 +393,18 @@ def _render_external_followup(
                             theme=theme,
                             jd_system="mjd",
                         )
-                        ps1_children.append(_exportable_graph(ps1_fig, panel="external", name="pan-starrs", height="250px"))
+                        ps1_extras.append(_exportable_graph(ps1_fig, panel="external", name="pan-starrs", height="250px"))
                     except Exception:
                         pass
                 break
 
-    ps1_card = html.Div([
-        html.Div('Pan-STARRS', style={'fontWeight': '600', 'marginBottom': '4px'}),
-        *ps1_children,
-    ], style=card_style)
+    ps1_card = _section('Pan-STARRS', ps1_metrics, ps1_extras)
 
     # CRTS LC card
-    crts_children = [
-        html.Div(f"Points: {payload.get('crts_lc_n_points', 'n/a')}", style={'fontSize': '11px'}),
+    crts_metrics = [
+        _metric("Points", payload.get('crts_lc_n_points', 'n/a')),
     ]
+    crts_extras = []
     if run_dir is not None:
         crts_idx = _index_external_lc_paths(str(run_dir.resolve()), "crts")
         for key in lookup_keys:
@@ -340,17 +422,14 @@ def _render_external_followup(
                             theme=theme,
                             jd_system="mjd",
                         )
-                        crts_children.append(_exportable_graph(crts_fig, panel="external", name="crts", height="250px"))
+                        crts_extras.append(_exportable_graph(crts_fig, panel="external", name="crts", height="250px"))
                     except Exception:
                         pass
                 break
 
-    crts_card = html.Div([
-        html.Div('CRTS', style={'fontWeight': '600', 'marginBottom': '4px'}),
-        *crts_children,
-    ], style=card_style)
+    crts_card = _section('CRTS', crts_metrics, crts_extras)
 
-    return [multi_survey_card, spectra_card, atlas_card, neowise_card, ztf_card, gaia_epoch_card, tess_card, ps1_card, crts_card]
+    return [cutout_card, multi_survey_card, spectra_card, atlas_card, neowise_card, ztf_card, gaia_epoch_card, tess_card, ps1_card, crts_card]
 
 
 # ---- sidebar filter helpers ------------------------------------------------
@@ -793,5 +872,3 @@ def _phoebe_controls_layout() -> html.Div:
         ], style={'display': 'flex', 'gap': '8px', 'alignItems': 'end', 'flexWrap': 'wrap', 'padding': '8px 10px 0 10px'}),
         html.Div(id='phoebe-period-status', style={'fontSize': '10px', 'color': '#7d91a6', 'padding': '4px 10px 8px 10px'}),
     ])
-
-

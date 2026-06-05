@@ -616,14 +616,14 @@ def summarize_lightcurve(path: str | Path) -> dict[str, Any]:
     """Compute compact numeric features from one light curve file."""
 
     lc_path = Path(path).expanduser()
-    df = load_lightcurve_df(lc_path)
+    df = load_lightcurve_df(lc_path, apply_quality=False)
     if df.empty or "mag" not in df.columns:
         return _nan_feature_row(lc_path.stem, lc_path)
 
     mag = pd.to_numeric(df["mag"], errors="coerce")
-    jd = pd.to_numeric(df.get("JD"), errors="coerce")
-    err = pd.to_numeric(df.get("error"), errors="coerce")
-    good = pd.to_numeric(df.get("good_bad"), errors="coerce")
+    jd = pd.to_numeric(df.get("jd"), errors="coerce")
+    err = pd.to_numeric(df.get("mag_err"), errors="coerce")
+    good = df.get("is_good", pd.Series(False, index=df.index)).astype(bool)
     finite_mag = mag[np.isfinite(mag)]
     median = float(finite_mag.median()) if not finite_mag.empty else np.nan
     mad = float((finite_mag - median).abs().median()) if not finite_mag.empty else np.nan
@@ -636,9 +636,9 @@ def summarize_lightcurve(path: str | Path) -> dict[str, Any]:
     out.update(
         {
             "lc_n_points": int(len(df)),
-            "lc_n_good": int((good == 1).sum()) if good.notna().any() else np.nan,
-            "lc_n_cameras": int(df["camera#"].nunique(dropna=True)) if "camera#" in df.columns else np.nan,
-            "lc_n_bands": int(df["v_g_band"].nunique(dropna=True)) if "v_g_band" in df.columns else np.nan,
+            "lc_n_good": int(good.sum()) if len(good) else np.nan,
+            "lc_n_cameras": int(df["camera"].nunique(dropna=True)) if "camera" in df.columns else np.nan,
+            "lc_n_bands": int(df["band"].nunique(dropna=True)) if "band" in df.columns else np.nan,
             "lc_time_span_days": float(jd.max() - jd.min()) if jd.notna().any() else np.nan,
             "lc_mag_median": median,
             "lc_mag_std": float(finite_mag.std(ddof=0)) if not finite_mag.empty else np.nan,
@@ -651,9 +651,9 @@ def summarize_lightcurve(path: str | Path) -> dict[str, Any]:
         }
     )
 
-    if "v_g_band" in df.columns:
-        bands = pd.to_numeric(df["v_g_band"], errors="coerce")
-        for value, name in ((0, "g"), (1, "v")):
+    if "band" in df.columns:
+        bands = df["band"].astype(str).str.strip().str.lower()
+        for value, name in (("g", "g"), ("v", "v")):
             band_mag = mag.loc[bands == value].dropna()
             out[f"lc_{name}_n_points"] = int(len(band_mag))
             out[f"lc_{name}_mag_median"] = float(band_mag.median()) if not band_mag.empty else np.nan

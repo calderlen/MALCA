@@ -731,9 +731,10 @@ else:
     [Input('current-candidate-id', 'data'),
      Input('theme-mode-store', 'data'),
      Input('external-followup-summary', 'n_clicks')],
+    [State('cutout-selected-survey', 'data')],
     prevent_initial_call=False,
 )
-def update_external_followup_panel(candidate_id, theme_mode, panel_requested=True):
+def update_external_followup_panel(candidate_id, theme_mode, panel_requested=True, selected_cutout_survey=None):
     """Render external follow-up artifacts for the current candidate."""
     if not _details_open(panel_requested):
         return no_update, no_update
@@ -741,4 +742,42 @@ def update_external_followup_panel(candidate_id, theme_mode, panel_requested=Tru
         return _lazy_panel_placeholder("No candidates loaded.", "error"), "No candidates loaded."
     payload, _stored_lc_path, _source_path = _candidate_context(candidate_id)
 
-    return _render_external_followup(payload, str(candidate_id), str(theme_mode or DEFAULT_THEME)), f"Loaded external data for {candidate_id}."
+    return (
+        _render_external_followup(
+            payload,
+            str(candidate_id),
+            str(theme_mode or DEFAULT_THEME),
+            selected_cutout_survey=selected_cutout_survey,
+        ),
+        f"Loaded external data for {candidate_id}.",
+    )
+
+
+@app.callback(
+    [Output('cutout-image', 'src'),
+     Output('cutout-source-link', 'href'),
+     Output('cutout-source-link', 'title'),
+     Output('cutout-status', 'children'),
+     Output('cutout-selected-survey', 'data')],
+    [Input('cutout-survey-select', 'value'),
+     Input('current-candidate-id', 'data')],
+    [State('cutout-selected-survey', 'data')],
+    prevent_initial_call=True,
+)
+def update_survey_cutout(selected_survey, candidate_id, stored_survey):
+    """Update the live survey cutout URL when the selected survey changes."""
+    selected_key = selected_survey or stored_survey or DEFAULT_CUTOUT_SURVEY_KEY
+    if not candidate_id:
+        return "", "#", "", "No candidates loaded.", selected_key
+
+    payload, _stored_lc_path, _source_path = _candidate_context(candidate_id)
+    cutout_data = cutout_payload_for_candidate(payload, selected_key=selected_key)
+    image_url = str(cutout_data.get("image_url") or "")
+    source_url = str(cutout_data.get("source_url") or "#")
+    return (
+        image_url,
+        source_url,
+        source_url if image_url else "",
+        str(cutout_data.get("message") or ""),
+        str(cutout_data.get("selected_key") or selected_key),
+    )

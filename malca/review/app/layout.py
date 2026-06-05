@@ -58,6 +58,7 @@ def create_layout():
         dcc.Store(id='queue-source-path', data=''),
         dcc.Store(id='run-config-json-store', data=''),
         dcc.Store(id='theme-mode-store', data=DEFAULT_THEME),
+        dcc.Store(id='cutout-selected-survey', data=DEFAULT_CUTOUT_SURVEY_KEY, storage_type='session'),
         dcc.Store(id='review-session-start', data=None, storage_type='session'),
         dcc.Store(id='metadata-resize-init', data=0),
         dcc.Store(id='status-resize-init', data=0),
@@ -681,7 +682,13 @@ def create_layout():
                                     html.Div(
                                         id='external-followup-panel',
                                         children=_lazy_panel_placeholder('Waiting for external data panel to load.'),
-                                        style={'padding': '8px 10px', 'display': 'grid', 'gap': '8px'},
+                                        style={
+                                            'padding': '4px 6px 6px 6px',
+                                            'display': 'grid',
+                                            'gridTemplateColumns': 'repeat(auto-fit, minmax(190px, 1fr))',
+                                            'gap': '4px',
+                                            'alignItems': 'start',
+                                        },
                                     ),
                                 ],
                                 type='default',

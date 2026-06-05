@@ -42,6 +42,7 @@ _install_review_app_import_stubs()
 
 from malca.review import app as review_app
 from malca.review.app import EXTERNAL_SOURCE_VIEW_OPTIONS, _render_external_followup, app
+from malca.review.cutouts import CUTOUT_SURVEYS, DEFAULT_CUTOUT_SURVEY_KEY
 
 
 def _component_ids_in_order(node: object) -> list[object]:
@@ -107,6 +108,12 @@ def _component_by_id(node: object, target_id: object) -> object | None:
     return found
 
 
+def _props(component: object) -> dict:
+    if component is None:
+        return {}
+    return component.to_plotly_json().get("props", {})
+
+
 def test_candidate_panels_appear_before_diagnostic_plots() -> None:
     ids = _component_ids_in_order(app.layout)
 
@@ -160,6 +167,7 @@ def test_layout_exposes_lazy_feedback_and_copy_initializer() -> None:
     ids = _component_ids_in_order(app.layout)
 
     assert "metadata-copy-init" in ids
+    assert "cutout-selected-survey" in ids
     assert "external-followup-summary" in ids
     assert "sed-summary" in ids
     assert "dustycult-summary" in ids
@@ -196,6 +204,58 @@ def test_lazy_panel_callbacks_use_summary_clicks() -> None:
         assert matches, output_id
         assert input_id in matches[0]
         assert (output_id.rsplit(".", 1)[0].replace("-panel", "-details"), "open") not in matches[0]
+
+
+def test_external_followup_renders_static_cutout_panel() -> None:
+    cards = _render_external_followup(
+        {"candidate_id": "C1", "ra": 240.48595227, "dec": -55.342},
+        "C1",
+    )
+
+    survey_select = _component_by_id(cards, "cutout-survey-select")
+    image = _component_by_id(cards, "cutout-image")
+    source_link = _component_by_id(cards, "cutout-source-link")
+    status = _component_by_id(cards, "cutout-status")
+
+    select_props = _props(survey_select)
+    image_props = _props(image)
+    link_props = _props(source_link)
+    assert select_props["value"] == DEFAULT_CUTOUT_SURVEY_KEY
+    assert select_props["disabled"] is False
+    assert [option["label"] for option in select_props["options"]] == [survey.label for survey in CUTOUT_SURVEYS]
+    assert "CDS%2FP%2FPanSTARRS%2FDR1%2Fcolor-i-r-g" in image_props["src"]
+    assert "fov=0.01666666667" in image_props["src"]
+    assert link_props["href"] == image_props["src"]
+    assert "PanSTARRS DR1 color" in str(_props(status).get("children"))
+
+
+def test_external_followup_cutout_handles_missing_coordinates() -> None:
+    cards = _render_external_followup({"candidate_id": "C2"}, "C2")
+
+    survey_select = _component_by_id(cards, "cutout-survey-select")
+    image = _component_by_id(cards, "cutout-image")
+    source_link = _component_by_id(cards, "cutout-source-link")
+    status = _component_by_id(cards, "cutout-status")
+
+    assert _props(survey_select)["disabled"] is True
+    assert _props(image)["src"] == ""
+    assert _props(source_link)["href"] == "#"
+    assert "RA/Dec" in str(_props(status).get("children"))
+
+
+def test_cutout_selector_callback_is_separate_from_plot_rendering() -> None:
+    callback_specs = [
+        spec
+        for output, spec in app.callback_map.items()
+        if "cutout-image.src" in output
+    ]
+
+    assert callback_specs
+    inputs = {(item["id"], item["property"]) for item in callback_specs[0].get("inputs", [])}
+    outputs = str(callback_specs[0].get("output", ""))
+    assert ("cutout-survey-select", "value") in inputs
+    assert ("plot-render-request", "data") not in inputs
+    assert "plot-render-request" not in outputs
 
 
 def test_stat_cards_are_full_width_and_copyable() -> None:

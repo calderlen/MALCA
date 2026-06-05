@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 from malca.lightcurve_publication import PUBLICATION_STYLE, plot_lightcurve_panel, plot_phase_panel
-from malca.lightcurve_io import load_lightcurve_df
+from malca.lightcurve_io import load_lightcurve_df, to_legacy_asassn_frame
 from malca.notebook_paths import find_repo_root, localize_lightcurve_frame_paths
 from malca.review.eda_data import infer_source_kind, load_candidate_source
 
@@ -974,7 +974,7 @@ def inspect_candidate(
             print(message)
         return result
 
-    lc_df = load_lightcurve_df(path_obj)
+    lc_df = to_legacy_asassn_frame(load_lightcurve_df(path_obj))
     result["lightcurve_df"] = lc_df
     if not isinstance(lc_df, pd.DataFrame) or lc_df.empty or "JD" not in lc_df.columns or "mag" not in lc_df.columns:
         message = f"Light-curve file could not be loaded for plotting: {path_obj}"

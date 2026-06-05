@@ -116,6 +116,11 @@ from malca.review.metadata import (
     build_external_lookup_links,
     markdown_literal_unit_label,
 )
+from malca.review.cutouts import (
+    DEFAULT_CUTOUT_SURVEY_KEY,
+    available_cutout_options,
+    cutout_payload_for_candidate,
+)
 from malca.review.filter_schema import (
     SIDEBAR_GROUPS as REVIEW_FILTER_SIDEBAR_GROUPS,
     VETTING_KNOWN_BOOL_FILTERS,

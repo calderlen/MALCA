@@ -45,7 +45,12 @@ from malca.lightcurve_publication import (
 from malca.phase import camera_labels
 from malca.review.metadata import REVIEW_METADATA_FIELDS, normalize_vsx_record
 from malca.table_io import read_parquet_table
-from malca.utils import clean_lc, read_lc_dat2, filter_bad_cameras
+from malca.lightcurve_io import (
+    load_lightcurve_df as _canonical_load_lightcurve_df,
+    read_asassn_dat as _read_asassn_dat,
+    to_legacy_asassn_frame,
+)
+from malca.utils import clean_lc
 from malca.utils import gaussian, paczynski_kernel, read_skypatrol_csv as _read_skypatrol_csv
 
 read_skypatrol_csv = _read_skypatrol_csv
@@ -98,23 +103,7 @@ def read_asassn_dat(dat_path):
     """
     Read an ASAS-SN .dat file using whitespace separation.
     """
-    df = pd.read_csv(
-        dat_path,
-        sep=r"\s+",
-        names=asassn_columns,
-        dtype={
-            "JD": float,
-            "mag": float,
-            "error": float,
-            "good_bad": int,
-            "camera#": int,
-            "v_g_band": int,
-            "saturated": int,
-            "cam_field": str,
-        },
-        comment="#",
-    )
-    return df
+    return _read_asassn_dat(dat_path)
 
 
 
@@ -147,26 +136,16 @@ def load_lightcurve_df(
     filtered_cameras : set[int]
         Only returned if return_filtered_info=True. Set of camera IDs removed.
     """
-    path = Path(path)
-    suffix = path.suffix.lower()
-    if suffix in (".dat", ".dat2", ".dat3"):
-        dfg, dfv = read_lc_dat2(path.stem, str(path.parent), file_ext=suffix[1:])
-        if dfg.empty and dfv.empty:
-            return (pd.DataFrame(), set()) if return_filtered_info else pd.DataFrame()
-        df = pd.concat([dfg, dfv], ignore_index=True)
-    elif suffix == ".csv":
-        df = _read_skypatrol_csv(path)
-    else:
-        df = read_asassn_dat(path)
-    
-    # Optionally filter bad cameras
-    filtered_cameras: set = set()
-    if filter_bad_cameras_enabled and not df.empty and "camera#" in df.columns:
-        df, filtered_cameras = filter_bad_cameras(df, lc_path=str(path), scatter_ratio_threshold=bad_camera_scatter_ratio)
-    
+    loaded = _canonical_load_lightcurve_df(
+        path,
+        filter_bad_cameras_enabled=filter_bad_cameras_enabled,
+        bad_camera_scatter_ratio=bad_camera_scatter_ratio,
+        return_filtered_info=return_filtered_info,
+    )
     if return_filtered_info:
-        return df, filtered_cameras
-    return df
+        df, filtered_cameras = loaded
+        return to_legacy_asassn_frame(df), filtered_cameras
+    return to_legacy_asassn_frame(loaded)
 
 
 def load_events_paths(

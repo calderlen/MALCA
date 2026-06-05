@@ -17,7 +17,7 @@ from malca.baseline import (
     per_camera_gp_baseline_masked,
     per_camera_median_baseline,
 )
-from malca.lightcurve_io import load_lightcurve_df, stable_camera_color
+from malca.lightcurve_io import load_lightcurve_df, stable_camera_color, to_legacy_asassn_frame
 from malca.phase import BAND_LABELS, phase_fold_dataframe, phase_time_dataframe, resolve_phase_epoch, resolve_phase_period
 from malca.utils import (
     clean_lc,
@@ -317,6 +317,7 @@ def _load_cleaned_df(
         bad_camera_scatter_ratio=scatter_ratio,
         return_filtered_info=True,
     )
+    df = to_legacy_asassn_frame(df)
     diagnostics = _get_camera_reason_diagnostics(df, scatter_ratio)
     df = clean_lc(df, max_error_absolute=clean_max_error_absolute, max_error_sigma=clean_max_error_sigma)
     _cache_put(_CLEAN_CACHE, key, (df.copy(), set(filtered_cameras), diagnostics))

@@ -12,7 +12,7 @@ from typing import Any, Sequence
 import numpy as np
 import pandas as pd
 
-from malca.lightcurve_io import load_lightcurve_df
+from malca.lightcurve_io import load_lightcurve_df, normalize_asassn_lightcurve
 
 
 JD_OFFSET = 2450000.0
@@ -71,6 +71,7 @@ COLUMN_ALIASES = {
         "calmag",
     ),
     "mag_error": (
+        "mag_err",
         "mag error",
         "mag_error",
         "magerr",
@@ -247,6 +248,14 @@ def _read_csv_frame(path: Path) -> pd.DataFrame:
     return pd.read_csv(path, comment="#", skip_blank_lines=True)
 
 
+def _looks_like_asassn_csv(df: pd.DataFrame) -> bool:
+    cols = {str(col).strip().lower() for col in df.columns}
+    has_jd = "jd" in cols
+    has_measurement = bool({"flux", "flux error", "flux_error", "mag", "mag error", "mag_err"} & cols)
+    has_asassn_context = bool({"filter", "quality", "camera", "limit", "fwhm", "band"} & cols)
+    return has_jd and has_measurement and has_asassn_context
+
+
 def _load_matplotlib():
     if "MPLCONFIGDIR" not in os.environ:
         default_config = Path.home() / ".config" / "matplotlib"
@@ -265,6 +274,14 @@ def _read_raw_lightcurve(path: Path) -> pd.DataFrame:
     suffix = path.suffix.lower()
     if suffix in {".dat", ".dat2", ".dat3"}:
         return load_lightcurve_df(path, file_ext=suffix[1:])
+    if suffix == ".csv":
+        df = _read_csv_frame(path)
+        if _looks_like_asassn_csv(df):
+            try:
+                return normalize_asassn_lightcurve(df, source_path=path)
+            except Exception:
+                return df
+        return df
     return _read_csv_frame(path)
 
 

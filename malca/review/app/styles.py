@@ -615,6 +615,132 @@ app.index_string = '''
             border-color: rgba(221, 128, 128, 0.45);
             background: rgba(48, 18, 18, 0.26);
         }
+        .survey-cutout-card {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            min-width: 0;
+        }
+        .cutout-card-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            min-width: 0;
+        }
+        .cutout-source-link {
+            flex: 0 0 auto;
+            color: #86c7ff;
+            font-size: 10px;
+            font-weight: 600;
+            line-height: 1.1;
+            text-decoration: none;
+        }
+        .cutout-source-link:hover {
+            color: #b7dcff;
+            text-decoration: underline;
+        }
+        .cutout-controls-row {
+            display: grid;
+            grid-template-columns: minmax(190px, 260px) minmax(160px, 1fr);
+            align-items: center;
+            gap: 6px 10px;
+            min-width: 0;
+        }
+        .cutout-survey-select {
+            min-width: 0;
+            font-size: 11px;
+        }
+        .cutout-survey-select .Select-control {
+            min-height: 30px;
+            height: 30px;
+            border-radius: 4px;
+        }
+        .cutout-survey-select .Select-value,
+        .cutout-survey-select .Select-placeholder,
+        .cutout-survey-select .Select-input {
+            line-height: 28px !important;
+        }
+        .cutout-status {
+            min-width: 0;
+            overflow-wrap: anywhere;
+        }
+        .cutout-viewer {
+            position: relative;
+            width: min(100%, 512px);
+            max-width: 512px;
+            aspect-ratio: 1 / 1;
+            overflow: hidden;
+            border-radius: 5px;
+            border: 1px solid rgba(125, 145, 166, 0.42);
+            background: #020406;
+            box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.03);
+        }
+        .cutout-image {
+            width: 100%;
+            height: 100%;
+            display: block;
+            object-fit: cover;
+            background: #020406;
+        }
+        .cutout-image[src=""] {
+            display: none;
+        }
+        .cutout-crosshair {
+            pointer-events: none;
+            position: absolute;
+            inset: 0;
+        }
+        .cutout-crosshair::before,
+        .cutout-crosshair::after {
+            content: "";
+            position: absolute;
+            background: rgba(255, 255, 255, 0.86);
+            box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.28);
+        }
+        .cutout-crosshair::before {
+            left: 50%;
+            top: calc(50% - 14px);
+            width: 1px;
+            height: 28px;
+            transform: translateX(-50%);
+        }
+        .cutout-crosshair::after {
+            left: calc(50% - 14px);
+            top: 50%;
+            width: 28px;
+            height: 1px;
+            transform: translateY(-50%);
+        }
+        .cutout-empty-label {
+            display: none;
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            transform: translate(-50%, -50%);
+            color: #7d91a6;
+            font-size: 11px;
+            font-weight: 600;
+            text-align: center;
+        }
+        .cutout-viewer-empty {
+            background: rgba(8, 16, 24, 0.46);
+            border-style: dashed;
+        }
+        .cutout-viewer-empty .cutout-crosshair {
+            display: none;
+        }
+        .cutout-viewer-empty .cutout-empty-label {
+            display: block;
+        }
+        @media (max-width: 760px) {
+            .cutout-controls-row {
+                grid-template-columns: 1fr;
+            }
+            .cutout-viewer {
+                width: 100%;
+            }
+        }
         .dustycult-param-table th,
         .dustycult-param-table td {
             border-bottom: 1px solid rgba(125, 145, 166, 0.18);

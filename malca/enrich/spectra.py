@@ -14,10 +14,34 @@ from malca.table_io import read_parquet_table
 
 DEFAULT_SPECTRA_CATALOGS: dict[str, str] = {
     "sdss_dr17_spec": "V/156/dr17",
+    "sixdf_gs": "VII/259/6dfgs",
     "lamost_dr8": "V/164/dr8",
     "galah_dr3": "III/283/galah_dr3",
     "rave_dr5": "III/279/rave_dr5",
 }
+
+SPECTRA_REDSHIFT_COLUMNS: tuple[str, ...] = ("z", "Z", "zsp", "zspec", "Redshift", "cz")
+SPECTRA_TYPE_COLUMNS: tuple[str, ...] = ("Class", "class", "SpType", "Type", "objtype", "SubClass", "subClass")
+
+
+def _first_numeric_column(frame: pd.DataFrame, columns: tuple[str, ...]) -> pd.Series:
+    for col in columns:
+        if col not in frame.columns:
+            continue
+        values = pd.to_numeric(frame[col], errors="coerce")
+        if values.notna().any():
+            return values
+    return pd.Series(pd.NA, index=frame.index, dtype="Float64")
+
+
+def _first_text_column(frame: pd.DataFrame, columns: tuple[str, ...]) -> pd.Series:
+    for col in columns:
+        if col not in frame.columns:
+            continue
+        values = frame[col].fillna("").astype(str).str.strip()
+        if values.ne("").any():
+            return values
+    return pd.Series("", index=frame.index, dtype=object)
 
 
 def _generate_link(row: pd.Series) -> str | None:
@@ -44,6 +68,11 @@ def _generate_link(row: pd.Series) -> str | None:
         sobj = row.get("sobject_id")
         if sobj:
             return f"https://cloud.datacentral.org.au/teamdata/GALAH/public/GALAH_DR3/spectra/{sobj}.fits"
+
+    if "sixdf" in survey or "6df" in survey:
+        sid = row.get("SeqNum") or row.get("Name") or row.get("6dFGS")
+        if sid:
+            return f"https://vizier.cds.unistra.fr/viz-bin/VizieR-5?-source=VII/259/6dfgs&Name={sid}"
 
     return None
 
@@ -125,8 +154,10 @@ def run_spectra_availability(
         spectra_long["candidate_id"] = spectra_long["candidate_id"].astype(str)
         # Generate links before filtering columns
         spectra_long["link"] = spectra_long.apply(_generate_link, axis=1)
+        spectra_long["spectrum_redshift"] = _first_numeric_column(spectra_long, SPECTRA_REDSHIFT_COLUMNS)
+        spectra_long["spectrum_spectral_type"] = _first_text_column(spectra_long, SPECTRA_TYPE_COLUMNS)
 
-        keep_cols = [c for c in ["candidate_id", "survey", "catalog", "sep_arcsec", "link"] if c in spectra_long.columns]
+        keep_cols = [c for c in ["candidate_id", "survey", "catalog", "sep_arcsec", "link", "spectrum_redshift", "spectrum_spectral_type"] if c in spectra_long.columns]
         keep_cols += [c for c in spectra_long.columns if c not in keep_cols]
         spectra_long = spectra_long[keep_cols]
 
@@ -143,18 +174,16 @@ def run_spectra_availability(
         by_id = spectra_long.groupby("candidate_id")
         sources = by_id["survey"].apply(lambda s: ",".join(sorted({str(x) for x in s.dropna()}))).rename("spectrum_sources")
         
-        def _agg_links(group):
-            # Collect unique non-empty links
-            links = sorted({str(x) for x in group["link"].dropna() if x})
-            return ",".join(links)
-
-        links_agg = by_id.apply(_agg_links).rename("spectrum_links")
+        links_agg = by_id["link"].apply(lambda s: ",".join(sorted({str(x) for x in s.dropna() if x}))).rename("spectrum_links")
 
         summary = summary.merge(sources, on="candidate_id", how="left")
         summary = summary.merge(links_agg, on="candidate_id", how="left")
+        summary = summary.merge(by_id["spectrum_redshift"].first().rename("spectrum_redshift"), on="candidate_id", how="left")
+        summary = summary.merge(by_id["spectrum_spectral_type"].first().rename("spectrum_spectral_type"), on="candidate_id", how="left")
         
         summary["spectrum_sources"] = summary["spectrum_sources"].fillna("")
         summary["spectrum_links"] = summary["spectrum_links"].fillna("")
+        summary["spectrum_spectral_type"] = summary["spectrum_spectral_type"].fillna("")
         summary["has_spectrum"] = summary["spectrum_sources"].str.len() > 0
 
     # Save checkpoint before final output
