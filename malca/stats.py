@@ -3,7 +3,7 @@ Outputs:
 - Core timing/cadence stats (including 3-day exposure metrics and largest gaps)
 - Photometric stats (weighted/unweighted/clipped/MAD/IQR/weighted std/percentiles)
 - Quality & error stats (SNR dist, fractions by good/saturated)
-- Variability diagnostics (reduced chisq, inverse von Neumann ratio, RoMS, lag-1 autocorr, trend slope, Stetson I/J/K/L + J(time)/L(time))
+- Variability diagnostics (reduced chisq, inverse von Neumann ratio, RoMS, lag-1 autocorr, trend slope, Stetson I/J/K/L + J(time)/L(time), Cody Q/M)
 - Optional Lomb-Scargle periodogram summary stats
 - Nightly/seasonal coverage & duty cycle
 - Per-camera / per-field / per-band usage + offsets and scatter
@@ -154,6 +154,29 @@ def paper_iqr(x):
     if lower.size == 0 or upper.size == 0:
         return np.nan
     return float(np.median(upper) - np.median(lower))
+
+
+def flux_asymmetry_metric(mag) -> float:
+    """Cody-style flux asymmetry metric on magnitudes.
+
+    Positive values indicate variability dominated by high-magnitude fading
+    events; negative values indicate low-magnitude brightening events.
+    """
+    mag = np.asarray(mag, float)
+    mag = mag[np.isfinite(mag)]
+    if mag.size < 10:
+        return np.nan
+
+    sigma = float(np.std(mag, ddof=1))
+    if not np.isfinite(sigma) or sigma <= 0:
+        return np.nan
+
+    decile_n = max(1, int(np.floor(0.1 * mag.size)))
+    sorted_mag = np.sort(mag)
+    decile_mean = float(np.mean(np.concatenate([sorted_mag[:decile_n], sorted_mag[-decile_n:]])))
+    median = float(np.median(mag))
+    return float((decile_mean - median) / sigma)
+
 
 def log_gaussian(x, mu, sigma):
     """
@@ -1329,16 +1352,13 @@ def _solve_fourier_least_squares(
     }
 
 
-def fit_fourier_decomposition(mag, time, period, err=None, max_harmonics=7):
-    """Fit a classical harmonic series to a phase-folded light curve.
-
-    The returned amplitudes are the Fourier ``A_k`` terms. The returned
-    ``harmonics_phase_k`` values are the classical phase combinations
-    ``phi_k1 = phi_k - k * phi_1`` in a cosine-series convention, wrapped onto
-    ``[0, 2pi)``.
-    """
-    result = _fourier_nan_result(max_harmonics)
-
+def _fit_phase_fourier_series(
+    mag,
+    time,
+    period,
+    err=None,
+    max_harmonics: int = 7,
+) -> dict[str, object] | None:
     mag = np.asarray(mag, float)
     time = np.asarray(time, float)
     if err is not None:
@@ -1348,9 +1368,9 @@ def fit_fourier_decomposition(mag, time, period, err=None, max_harmonics=7):
         mask = np.isfinite(mag) & np.isfinite(time)
 
     if (not np.isfinite(period)) or period <= 0:
-        return result
+        return None
     if int(mask.sum()) < 5:
-        return result
+        return None
 
     mag = mag[mask]
     time = time[mask]
@@ -1359,7 +1379,7 @@ def fit_fourier_decomposition(mag, time, period, err=None, max_harmonics=7):
     n = len(mag)
     max_order = min(int(max_harmonics), max((n - 2) // 2, 0))
     if max_order < 1:
-        return result
+        return None
 
     t0 = float(np.min(time))
     phase = np.mod((time - t0) / float(period), 1.0)
@@ -1373,10 +1393,36 @@ def fit_fourier_decomposition(mag, time, period, err=None, max_harmonics=7):
 
     fits = [fit for fit in fits if np.isfinite(fit["bic"])]
     if not fits:
+        return None
+
+    return {
+        "mag": mag,
+        "time": time,
+        "err": err,
+        "phase": phase,
+        "max_order": max_order,
+        "fits": fits,
+        "best_fit": min(fits, key=lambda fit: float(fit["bic"])),
+        "full_fit": fits[-1],
+    }
+
+
+def fit_fourier_decomposition(mag, time, period, err=None, max_harmonics=7):
+    """Fit a classical harmonic series to a phase-folded light curve.
+
+    The returned amplitudes are the Fourier ``A_k`` terms. The returned
+    ``harmonics_phase_k`` values are the classical phase combinations
+    ``phi_k1 = phi_k - k * phi_1`` in a cosine-series convention, wrapped onto
+    ``[0, 2pi)``.
+    """
+    result = _fourier_nan_result(max_harmonics)
+    phase_fit = _fit_phase_fourier_series(mag, time, period, err=err, max_harmonics=max_harmonics)
+    if phase_fit is None:
         return result
 
-    best_fit = min(fits, key=lambda fit: float(fit["bic"]))
-    full_fit = fits[-1]
+    max_order = int(phase_fit["max_order"])
+    best_fit = phase_fit["best_fit"]
+    full_fit = phase_fit["full_fit"]
     coeffs = np.asarray(full_fit["coeffs"], float)
 
     result["harmonics_order"] = int(best_fit["order"])
@@ -1406,6 +1452,49 @@ def fit_fourier_decomposition(mag, time, period, err=None, max_harmonics=7):
     model_grid = _build_fourier_design_matrix(phase_grid, max_order) @ coeffs
     result["harmonics_model_amplitude"] = float(np.nanmax(model_grid) - np.nanmin(model_grid))
     return result
+
+
+def quasi_periodicity_metric(mag, time, err, period, max_harmonics=7) -> float:
+    """Cody-style quasi-periodicity metric from raw and phased residual variance."""
+    if (not np.isfinite(period)) or period <= 0:
+        return np.nan
+
+    mag = np.asarray(mag, float)
+    time = np.asarray(time, float)
+    err = np.asarray(err, float)
+    mask = np.isfinite(mag) & np.isfinite(time) & np.isfinite(err) & (err > 0)
+    if int(mask.sum()) < 5:
+        return np.nan
+
+    mag = mag[mask]
+    time = time[mask]
+    err = err[mask]
+
+    raw_var = float(np.var(mag, ddof=1))
+    noise_var = float(np.mean(np.square(err)))
+    denom = raw_var - noise_var
+    if not np.isfinite(denom) or denom <= 0:
+        return np.nan
+
+    phase_fit = _fit_phase_fourier_series(mag, time, period, err=err, max_harmonics=max_harmonics)
+    if phase_fit is None:
+        return np.nan
+
+    best_fit = phase_fit["best_fit"]
+    fitted = np.asarray(best_fit["fitted"], float)
+    fit_mag = np.asarray(phase_fit["mag"], float)
+    fit_err = np.asarray(phase_fit["err"], float)
+    if fitted.size != fit_mag.size or fitted.size < 2:
+        return np.nan
+
+    resid = fit_mag - fitted
+    resid_var = float(np.var(resid, ddof=1))
+    fit_noise_var = float(np.mean(np.square(fit_err)))
+    numer = resid_var - fit_noise_var
+    if not np.isfinite(numer):
+        return np.nan
+
+    return float(numer / denom)
 
 
 def psi_cs(mag, time, period):
@@ -1757,6 +1846,7 @@ def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=Tr
     slope_d_per_year = slope_d_per_day * 365.25 if np.isfinite(slope_d_per_day) else np.nan
     roms = float(roms_statistic(mag, merr))
     stetson = paper_stetson_indices(df["JD"].values, mag, merr)
+    flux_asymmetry_m = flux_asymmetry_metric(mag)
     string_length_stats = baseline_subtracted_string_length(df)
     ls_stats = lomb_scargle_summary(df["JD"].values, mag, merr) if compute_ls else {
         "ls_best_period_days": np.nan,
@@ -1790,6 +1880,7 @@ def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=Tr
 
     # period-dependent features (use LS best period)
     best_period = ls_stats["ls_best_period_days"]
+    quasi_periodicity_q = quasi_periodicity_metric(mag, jd_arr, merr, best_period)
     _harmonics = fit_fourier_decomposition(mag, jd_arr, best_period, err=merr)
     _psi_cs = psi_cs(mag, jd_arr, best_period)
     _psi_eta = psi_eta(mag, jd_arr, best_period)
@@ -1911,6 +2002,8 @@ def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=Tr
         ("variability_stetson_L", stetson["stetson_L"]),
         ("variability_stetson_J_time", stetson["stetson_J_time"]),
         ("variability_stetson_L_time", stetson["stetson_L_time"]),
+        ("variability_flux_asymmetry_m", flux_asymmetry_m),
+        ("variability_quasi_periodicity_q", quasi_periodicity_q),
         ("variability_string_length_resid_total", string_length_stats["string_length_total"]),
         ("variability_string_length_resid_mean_step", string_length_stats["string_length_mean_step"]),
         ("variability_string_length_resid_n_steps", string_length_stats["string_length_n_steps"]),

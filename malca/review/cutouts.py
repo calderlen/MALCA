@@ -12,7 +12,7 @@ HIPS2FITS_URL = "https://alasky.cds.unistra.fr/hips-image-services/hips2fits"
 LEGACY_CUTOUT_URL = "https://www.legacysurvey.org/viewer/jpeg-cutout"
 SKYVIEW_URL = "https://skyview.gsfc.nasa.gov/current/cgi/runquery.pl"
 
-DEFAULT_CUTOUT_FOV_ARCSEC = 60.0
+DEFAULT_CUTOUT_FOV_ARCSEC = 120.0
 DEFAULT_CUTOUT_SIZE_PX = 512
 DEFAULT_CUTOUT_SURVEY_KEY = "panstarrs-dr1-color"
 

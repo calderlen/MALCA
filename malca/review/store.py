@@ -864,6 +864,8 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("stats_variability_stetson_L",                "REAL", "float"),
     ("stats_variability_stetson_J_time",           "REAL", "float"),
     ("stats_variability_stetson_L_time",           "REAL", "float"),
+    ("stats_variability_flux_asymmetry_m",         "REAL", "float"),
+    ("stats_variability_quasi_periodicity_q",      "REAL", "float"),
     ("stats_variability_string_length_resid_total", "REAL", "float"),
     ("stats_variability_string_length_resid_mean_step", "REAL", "float"),
     ("stats_variability_string_length_resid_n_steps", "REAL", "float"),

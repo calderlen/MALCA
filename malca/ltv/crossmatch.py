@@ -37,6 +37,7 @@ from malca.config import (
     SIMBAD_TAP_URL,
 )
 from malca.config import VSX_CROSSMATCH_PATH
+from malca.table_io import read_parquet_table
 from malca.utils import batch_tap_crossmatch as shared_batch_tap_crossmatch
 from malca.periodic_catalogs import (
     fetch_chen2020_ztf_periodic,
@@ -79,6 +80,7 @@ VSX_COLUMN_MAP = {
 }
 
 _cached_catalog = None
+_cached_catalog_path = None
 
 
 def load_local_catalog(
@@ -88,22 +90,31 @@ def load_local_catalog(
     verbose: bool = False,
 ) -> pd.DataFrame:
     """Load pre-matched ASAS-SN x VSX catalog (~99K sources with Gaia/VSX data)."""
-    global _cached_catalog
-    
-    if cache and _cached_catalog is not None:
-        return _cached_catalog
-    
+    global _cached_catalog, _cached_catalog_path
+
     if path is None:
         path = DEFAULT_CATALOG_PATH
-    path = Path(path)
-    
+    path = Path(path).expanduser()
+    cache_path = path.resolve() if path.exists() else path
+
+    if cache and _cached_catalog is not None and _cached_catalog_path == cache_path:
+        return _cached_catalog
+
     if not path.exists():
         raise FileNotFoundError(f"Local catalog not found: {path}")
-    
+
     if verbose:
         print(f"Loading local catalog from {path}...")
-    
-    df = pd.read_csv(path)
+
+    suffix = path.suffix.lower()
+    if suffix == ".parquet":
+        df = read_parquet_table(path)
+    elif suffix in {".csv", ".txt"}:
+        df = pd.read_csv(path)
+    elif suffix == ".tsv":
+        df = pd.read_csv(path, sep="\t")
+    else:
+        raise ValueError(f"Unsupported local catalog format: {path}")
     
     rename_map = {**GAIA_COLUMN_MAP, **VSX_COLUMN_MAP}
     rename_map = {k: v for k, v in rename_map.items() if k in df.columns}
@@ -117,6 +128,7 @@ def load_local_catalog(
     
     if cache:
         _cached_catalog = df
+        _cached_catalog_path = cache_path
     
     return df
 
@@ -234,8 +246,9 @@ def crossmatch_from_local(
 
 def clear_catalog_cache():
     """Clear the cached local catalog from memory."""
-    global _cached_catalog
+    global _cached_catalog, _cached_catalog_path
     _cached_catalog = None
+    _cached_catalog_path = None
 
 
 # =============================================================================

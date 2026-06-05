@@ -1232,22 +1232,27 @@ def batch_gaia_cone_query(
     chunk_size: int,
     n_workers: int,
     verbose: bool = False,
+    max_attempts: int = 3,
+    retry_base_sleep: float = 1.0,
+    raise_on_all_failed: bool = False,
+    raise_on_failed_chunk: bool = False,
 ) -> pd.DataFrame:
     """Batch Gaia TAP query using table upload for efficient cone search.
 
     Uses a pyvo async job with an uploaded coordinate table for server-side
     crossmatch.  ``coords_df`` must have columns ``_idx``, ``ra``, ``dec``.
+    By default failed chunks are omitted for backward compatibility.  Set
+    ``raise_on_all_failed`` or ``raise_on_failed_chunk`` for paths where an
+    incomplete Gaia lookup must not be treated as a clean non-match.
     """
-
-
-
-
     if coords_df.empty:
         return pd.DataFrame()
 
-    tap = pyvo.dal.TAPService(GAIA_AIP_TAP_URL)
     results = []
     chunks = [coords_df.iloc[i:i + chunk_size] for i in range(0, len(coords_df), chunk_size)]
+    n_failed_chunks = 0
+    failure_messages: list[str] = []
+    attempts = max(1, int(max_attempts))
 
     def process_chunk(chunk_df):
         import numpy as np
@@ -1255,31 +1260,42 @@ def batch_gaia_cone_query(
             np.set_printoptions(legacy="1.21")
         except TypeError:
             pass
-        try:
-            upload_table = Table.from_pandas(chunk_df[["_idx", "ra", "dec"]])
 
-            query = f"""
-            SELECT
-                u._idx as _idx,
-                g.source_id,
-                {select_cols},
-                DISTANCE(POINT('ICRS', g.ra, g.dec), POINT('ICRS', u.ra, u.dec)) * 3600.0 as sep_arcsec
-            FROM TAP_UPLOAD.upload_table AS u
-            JOIN gaiadr3.gaia_source AS g
-            ON 1=CONTAINS(
-                POINT('ICRS', g.ra, g.dec),
-                CIRCLE('ICRS', u.ra, u.dec, {match_radius_arcsec / 3600.0})
-            )
-            {extra_where}
-            """
-            result = tap.run_async(query, uploads={"upload_table": upload_table})
-            return result.to_table().to_pandas() if result else pd.DataFrame()
-        except Exception as e:
-            if verbose:
-                print(f"Gaia batch query error: {e}")
-                import traceback
-                traceback.print_exc()
-            return pd.DataFrame()
+        query = f"""
+        SELECT
+            u._idx as _idx,
+            g.source_id,
+            {select_cols},
+            DISTANCE(POINT('ICRS', g.ra, g.dec), POINT('ICRS', u.ra, u.dec)) * 3600.0 as sep_arcsec
+        FROM TAP_UPLOAD.upload_table AS u
+        JOIN gaiadr3.gaia_source AS g
+        ON 1=CONTAINS(
+            POINT('ICRS', g.ra, g.dec),
+            CIRCLE('ICRS', u.ra, u.dec, {match_radius_arcsec / 3600.0})
+        )
+        {extra_where}
+        """
+        last_error: str | None = None
+
+        for attempt in range(1, attempts + 1):
+            upload_table = Table.from_pandas(chunk_df[["_idx", "ra", "dec"]])
+            try:
+                tap = pyvo.dal.TAPService(GAIA_AIP_TAP_URL)
+                result = tap.run_async(query, uploads={"upload_table": upload_table})
+                return result.to_table().to_pandas() if result else pd.DataFrame(), None
+            except Exception as e:
+                last_error = str(e)
+                if verbose:
+                    print(f"Gaia batch query error (attempt {attempt}/{attempts}): {e}")
+                    if attempt == attempts:
+                        import traceback
+                        traceback.print_exc()
+                if attempt < attempts:
+                    wait = max(0.0, float(retry_base_sleep)) * (2 ** (attempt - 1))
+                    if wait:
+                        time.sleep(wait)
+
+        return pd.DataFrame(), last_error or "unknown Gaia TAP failure"
 
     with ThreadPoolExecutor(max_workers=n_workers) as executor:
         futures = {executor.submit(process_chunk, chunk): i for i, chunk in enumerate(chunks)}
@@ -1287,11 +1303,29 @@ def batch_gaia_cone_query(
             as_completed(futures), total=len(futures),
             desc="Gaia batch query", disable=not verbose,
         ):
-            result = future.result()
+            try:
+                result, error = future.result()
+            except Exception as exc:
+                n_failed_chunks += 1
+                failure_messages.append(str(exc))
+                continue
+            if error is not None:
+                n_failed_chunks += 1
+                failure_messages.append(error)
             if not result.empty:
                 results.append(result)
 
+    if n_failed_chunks and (verbose or raise_on_all_failed or raise_on_failed_chunk):
+        print(f"Gaia batch query: {n_failed_chunks}/{len(chunks)} chunk(s) failed; results may be incomplete")
+    if n_failed_chunks and raise_on_failed_chunk:
+        detail = "; ".join(failure_messages[:3]) if failure_messages else "unknown Gaia TAP failure"
+        more = f" (+{len(failure_messages) - 3} more)" if len(failure_messages) > 3 else ""
+        raise RuntimeError(f"Gaia batch query: {n_failed_chunks}/{len(chunks)} chunk(s) failed ({detail}{more})")
+
     if not results:
+        if raise_on_all_failed and n_failed_chunks:
+            detail = failure_messages[0] if failure_messages else "unknown Gaia TAP failure"
+            raise RuntimeError(f"Gaia batch query: all chunk queries failed ({detail})")
         return pd.DataFrame()
 
     return pd.concat(results, ignore_index=True)

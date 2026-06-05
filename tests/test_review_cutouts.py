@@ -36,7 +36,7 @@ def test_hips2fits_url_contains_expected_cutout_parameters() -> None:
     assert params["hips"] == ["CDS/P/PanSTARRS/DR1/color-i-r-g"]
     assert params["ra"] == ["240.48595227"]
     assert params["dec"] == ["-55.34200000"]
-    assert float(params["fov"][0]) == pytest.approx(60.0 / 3600.0)
+    assert float(params["fov"][0]) == pytest.approx(120.0 / 3600.0)
     assert params["width"] == ["512"]
     assert params["height"] == ["512"]
     assert params["projection"] == ["TAN"]

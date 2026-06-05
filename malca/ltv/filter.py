@@ -247,6 +247,7 @@ def query_gaia_proper_motions_batch(
         chunk_size=chunk_size,
         n_workers=n_workers,
         verbose=verbose,
+        raise_on_failed_chunk=True,
     )
     
     if result.empty:
@@ -378,6 +379,7 @@ def query_crowding_batch(
         chunk_size=chunk_size,
         n_workers=n_workers,
         verbose=verbose,
+        raise_on_failed_chunk=True,
     )
     
     if result.empty:
@@ -556,6 +558,7 @@ def query_neighbor_high_pm_batch(
         chunk_size=chunk_size,
         n_workers=n_workers,
         verbose=verbose,
+        raise_on_failed_chunk=True,
     )
 
     if result.empty:

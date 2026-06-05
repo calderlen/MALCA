@@ -62,6 +62,8 @@ def merge_stats_summary_into_payload(payload: dict, summary: dict) -> None:
         "variability_stetson_L": "stats_variability_stetson_L",
         "variability_stetson_J_time": "stats_variability_stetson_J_time",
         "variability_stetson_L_time": "stats_variability_stetson_L_time",
+        "variability_flux_asymmetry_m": "stats_variability_flux_asymmetry_m",
+        "variability_quasi_periodicity_q": "stats_variability_quasi_periodicity_q",
         "variability_string_length_resid_total": "stats_variability_string_length_resid_total",
         "variability_string_length_resid_mean_step": "stats_variability_string_length_resid_mean_step",
         "variability_string_length_resid_n_steps": "stats_variability_string_length_resid_n_steps",

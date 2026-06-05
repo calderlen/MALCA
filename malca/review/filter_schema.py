@@ -640,6 +640,8 @@ SIDEBAR_GROUPS = [
         ("num", "stats_variability_stetson_L"),
         ("num", "stats_variability_stetson_J_time"),
         ("num", "stats_variability_stetson_L_time"),
+        ("num", "stats_variability_flux_asymmetry_m"),
+        ("num", "stats_variability_quasi_periodicity_q"),
         ("num", "stats_variability_string_length_resid_total"),
         ("num", "stats_variability_string_length_resid_mean_step"),
         ("num", "stats_variability_string_length_resid_n_steps"),

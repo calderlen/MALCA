@@ -98,6 +98,8 @@ def _render_stat_cards(stat_rows: list[tuple[str, str]]) -> list:
         "stats_variability_stetson_L": r"Stetson $L$",
         "stats_variability_stetson_J_time": r"Stetson $J_\mathrm{time}$",
         "stats_variability_stetson_L_time": r"Stetson $L_\mathrm{time}$",
+        "stats_variability_flux_asymmetry_m": r"Flux asymmetry $M$",
+        "stats_variability_quasi_periodicity_q": r"Quasi-periodicity $Q$",
         "stats_variability_string_length_resid_total": "String length total (mag)",
         "stats_variability_string_length_resid_mean_step": "String length mean step (mag)",
         "stats_variability_string_length_resid_n_steps": "String length n steps",

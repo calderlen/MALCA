@@ -224,7 +224,7 @@ def test_external_followup_renders_static_cutout_panel() -> None:
     assert select_props["disabled"] is False
     assert [option["label"] for option in select_props["options"]] == [survey.label for survey in CUTOUT_SURVEYS]
     assert "CDS%2FP%2FPanSTARRS%2FDR1%2Fcolor-i-r-g" in image_props["src"]
-    assert "fov=0.01666666667" in image_props["src"]
+    assert "fov=0.03333333333" in image_props["src"]
     assert link_props["href"] == image_props["src"]
     assert "PanSTARRS DR1 color" in str(_props(status).get("children"))
 
