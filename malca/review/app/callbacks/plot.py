@@ -759,9 +759,9 @@ def update_external_followup_panel(candidate_id, theme_mode, panel_requested=Tru
      Output('cutout-source-link', 'title'),
      Output('cutout-status', 'children'),
      Output('cutout-selected-survey', 'data')],
-    [Input('cutout-survey-select', 'value'),
-     Input('current-candidate-id', 'data')],
-    [State('cutout-selected-survey', 'data')],
+    [Input('cutout-survey-select', 'value')],
+    [State('current-candidate-id', 'data'),
+     State('cutout-selected-survey', 'data')],
     prevent_initial_call=True,
 )
 def update_survey_cutout(selected_survey, candidate_id, stored_survey):
@@ -771,7 +771,12 @@ def update_survey_cutout(selected_survey, candidate_id, stored_survey):
         return "", "#", "", "No candidates loaded.", selected_key
 
     payload, _stored_lc_path, _source_path = _candidate_context(candidate_id)
-    cutout_data = cutout_payload_for_candidate(payload, selected_key=selected_key)
+    triggered_id = getattr(callback_context, "triggered_id", None)
+    cutout_data = cutout_payload_for_candidate(
+        payload,
+        selected_key=selected_key,
+        prefer_compatible=(triggered_id != 'cutout-survey-select'),
+    )
     image_url = str(cutout_data.get("image_url") or "")
     source_url = str(cutout_data.get("source_url") or "#")
     return (

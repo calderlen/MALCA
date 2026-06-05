@@ -28,13 +28,23 @@ class CutoutSurvey:
     skyview_survey: str | None = None
     default_format: str = "jpg"
     coverage_note: str | None = None
+    min_dec: float | None = None
+    max_dec: float | None = None
 
 
 def _slug(label: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", label.lower()).strip("-")
 
 
-def _hips(label: str, hips_id: str, *, image_format: str = "jpg", note: str | None = None) -> CutoutSurvey:
+def _hips(
+    label: str,
+    hips_id: str,
+    *,
+    image_format: str = "jpg",
+    note: str | None = None,
+    min_dec: float | None = None,
+    max_dec: float | None = None,
+) -> CutoutSurvey:
     return CutoutSurvey(
         key=_slug(label),
         label=label,
@@ -42,6 +52,8 @@ def _hips(label: str, hips_id: str, *, image_format: str = "jpg", note: str | No
         hips_id=hips_id,
         default_format=image_format,
         coverage_note=note,
+        min_dec=min_dec,
+        max_dec=max_dec,
     )
 
 
@@ -55,10 +67,15 @@ CUTOUT_SURVEYS: tuple[CutoutSurvey, ...] = (
     _hips("DSS2", "CDS/P/DSS2/color"),
     _hips("Mellinger", "CDS/P/Mellinger/color"),
     _hips("Finkbeiner", "CDS/P/Finkbeiner"),
-    _hips("SDSS9", "CDS/P/SDSS9/color"),
+    _hips("SDSS9", "CDS/P/SDSS9/color", note="SDSS imaging has incomplete southern coverage"),
     _hips("DSS2 red", "CDS/P/DSS2/red"),
-    _hips("VTSS Ha", "CDS/P/VTSS/HaCC"),
-    _hips("PanSTARRS DR1 color", "CDS/P/PanSTARRS/DR1/color-i-r-g"),
+    _hips("VTSS Ha", "CDS/P/VTSS/HaCC", note="northern H-alpha survey", min_dec=-15.0),
+    _hips(
+        "PanSTARRS DR1 color",
+        "CDS/P/PanSTARRS/DR1/color-i-r-g",
+        note="PanSTARRS has limited coverage south of Dec -30",
+        min_dec=-30.0,
+    ),
     CutoutSurvey(
         key="desi-legacy-dr10",
         label="DESI Legacy DR10",
@@ -121,6 +138,41 @@ def candidate_coordinates(payload: dict | None) -> tuple[float, float] | None:
 def normalize_cutout_survey_key(survey_key: str | None) -> str:
     key = str(survey_key or "").strip()
     return key if key in CUTOUT_SURVEY_BY_KEY else DEFAULT_CUTOUT_SURVEY_KEY
+
+
+def survey_matches_coordinates(survey: CutoutSurvey, ra: float, dec: float) -> bool:
+    del ra
+    if survey.min_dec is not None and dec < survey.min_dec:
+        return False
+    if survey.max_dec is not None and dec > survey.max_dec:
+        return False
+    return True
+
+
+def default_cutout_survey_key_for_coordinates(ra: float, dec: float) -> str:
+    del ra
+    if dec < -30.0:
+        return "dss2"
+    return DEFAULT_CUTOUT_SURVEY_KEY
+
+
+def resolve_cutout_survey_key(
+    payload: dict | None,
+    selected_key: str | None = None,
+    *,
+    prefer_compatible: bool = True,
+) -> str:
+    key = normalize_cutout_survey_key(selected_key)
+    coords = candidate_coordinates(payload)
+    if coords is None:
+        return key
+    ra, dec = coords
+    survey = CUTOUT_SURVEY_BY_KEY[key]
+    if prefer_compatible and not survey_matches_coordinates(survey, ra, dec):
+        return default_cutout_survey_key_for_coordinates(ra, dec)
+    if not selected_key:
+        return default_cutout_survey_key_for_coordinates(ra, dec)
+    return key
 
 
 def _image_size(size_px: int | float) -> int:
@@ -229,10 +281,11 @@ def cutout_payload_for_candidate(
     payload: dict | None,
     *,
     selected_key: str | None = None,
+    prefer_compatible: bool = True,
     fov_arcsec: float = DEFAULT_CUTOUT_FOV_ARCSEC,
     size_px: int = DEFAULT_CUTOUT_SIZE_PX,
 ) -> dict[str, object]:
-    key = normalize_cutout_survey_key(selected_key)
+    key = resolve_cutout_survey_key(payload, selected_key, prefer_compatible=prefer_compatible)
     survey = CUTOUT_SURVEY_BY_KEY[key]
     fov = _fov_arcsec(fov_arcsec)
     size = _image_size(size_px)
@@ -248,10 +301,20 @@ def cutout_payload_for_candidate(
             "source_url": "",
             "fov_arcsec": fov,
             "size_px": size,
+            "coverage_warning": "",
             "message": "No RA/Dec available for survey cutout.",
         }
     ra, dec = coords
     image_url = build_cutout_url(key, ra, dec, fov_arcsec=fov, size_px=size)
+    compatible = survey_matches_coordinates(survey, ra, dec)
+    coverage_warning = ""
+    if not compatible and survey.coverage_note:
+        coverage_warning = f"May be blank: {survey.coverage_note}."
+    elif survey.coverage_note:
+        coverage_warning = survey.coverage_note
+    message = f"{survey.label} | {fov:g}\" FOV | RA {ra:.6f}, Dec {dec:.6f}"
+    if coverage_warning:
+        message = f"{message} | {coverage_warning}"
     return {
         "has_coordinates": True,
         "ra": ra,
@@ -262,5 +325,6 @@ def cutout_payload_for_candidate(
         "source_url": image_url,
         "fov_arcsec": fov,
         "size_px": size,
-        "message": f"{survey.label} | {fov:g}\" FOV | RA {ra:.6f}, Dec {dec:.6f}",
+        "coverage_warning": coverage_warning,
+        "message": message,
     }

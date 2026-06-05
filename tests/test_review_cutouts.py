@@ -12,6 +12,7 @@ from malca.review.cutouts import (
     build_hips2fits_url,
     candidate_coordinates,
     cutout_payload_for_candidate,
+    resolve_cutout_survey_key,
 )
 
 
@@ -74,3 +75,18 @@ def test_missing_or_invalid_coordinates_return_empty_cutout_payload() -> None:
     assert "RA/Dec" in str(missing["message"])
     assert invalid["has_coordinates"] is False
     assert invalid["image_url"] == ""
+
+
+def test_southern_coordinates_default_to_dss2() -> None:
+    payload = {"ra": 240.48595227, "dec": -55.342371}
+
+    assert resolve_cutout_survey_key(payload, None) == "dss2"
+    assert resolve_cutout_survey_key(payload, "vtss-ha") == "dss2"
+
+
+def test_explicit_incompatible_survey_can_be_kept_with_warning() -> None:
+    payload = {"ra": 240.48595227, "dec": -55.342371}
+    cutout = cutout_payload_for_candidate(payload, selected_key="vtss-ha", prefer_compatible=False)
+
+    assert cutout["selected_key"] == "vtss-ha"
+    assert "May be blank" in str(cutout["message"])

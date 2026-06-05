@@ -208,7 +208,7 @@ def test_lazy_panel_callbacks_use_summary_clicks() -> None:
 
 def test_external_followup_renders_static_cutout_panel() -> None:
     cards = _render_external_followup(
-        {"candidate_id": "C1", "ra": 240.48595227, "dec": -55.342},
+        {"candidate_id": "C1", "ra": 240.48595227, "dec": 20.0},
         "C1",
     )
 
@@ -227,6 +227,22 @@ def test_external_followup_renders_static_cutout_panel() -> None:
     assert "fov=0.01666666667" in image_props["src"]
     assert link_props["href"] == image_props["src"]
     assert "PanSTARRS DR1 color" in str(_props(status).get("children"))
+
+
+def test_external_followup_uses_dss2_default_for_southern_cutout() -> None:
+    cards = _render_external_followup(
+        {"candidate_id": "C1", "ra": 240.48595227, "dec": -55.342371},
+        "C1",
+        selected_cutout_survey="vtss-ha",
+    )
+
+    survey_select = _component_by_id(cards, "cutout-survey-select")
+    image = _component_by_id(cards, "cutout-image")
+    status = _component_by_id(cards, "cutout-status")
+
+    assert _props(survey_select)["value"] == "dss2"
+    assert "CDS%2FP%2FDSS2%2Fcolor" in _props(image)["src"]
+    assert "DSS2" in str(_props(status).get("children"))
 
 
 def test_external_followup_cutout_handles_missing_coordinates() -> None:
@@ -254,6 +270,7 @@ def test_cutout_selector_callback_is_separate_from_plot_rendering() -> None:
     inputs = {(item["id"], item["property"]) for item in callback_specs[0].get("inputs", [])}
     outputs = str(callback_specs[0].get("output", ""))
     assert ("cutout-survey-select", "value") in inputs
+    assert ("current-candidate-id", "data") not in inputs
     assert ("plot-render-request", "data") not in inputs
     assert "plot-render-request" not in outputs
 
