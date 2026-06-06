@@ -1,4 +1,7 @@
 # This file was mechanically split from malca.review.app; preserve behavior when editing.
+NATIVE_PLOT_STYLE = {'display': 'block', 'width': '100%', 'height': '100%', 'minHeight': '600px'}
+
+
 def run_period_search(n_clicks, candidate_id, min_period, max_period, method, auto_period_cache):
     """Run period search (LSP/PDM/CE) on current candidate's light curve."""
     if not n_clicks or not candidate_id:
@@ -421,10 +424,10 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
         candidate_id = str(candidate_id)
 
     if queue_size <= 0 or not candidate_id:
-        return '', 'No candidates in queue', _render_metadata_health(None, context_msg='Queue is empty.'), _render_vetting_banner(None, radius_arcsec=link_radius), '[0/0]', empty_fig, {'display': 'block', 'width': '100%', 'height': '100%'}, {'display': 'none'}, [], [], _render_plot_status_panel('error', 'No candidates in queue.', []), _render_camera_diag_panel({}, []), 'No run configuration: queue is empty.', _render_run_config_panel(None, None, ['Queue is empty']), _render_repro_badge(None, ['Queue is empty']), '', nonce
+        return '', 'No candidates in queue', _render_metadata_health(None, context_msg='Queue is empty.'), _render_vetting_banner(None, radius_arcsec=link_radius), '[0/0]', empty_fig, NATIVE_PLOT_STYLE, {'display': 'none'}, [], [], _render_plot_status_panel('error', 'No candidates in queue.', []), _render_camera_diag_panel({}, []), 'No run configuration: queue is empty.', _render_run_config_panel(None, None, ['Queue is empty']), _render_repro_badge(None, ['Queue is empty']), '', nonce
 
     if idx < 0 or idx >= queue_size:
-        return '', 'Invalid index', _render_metadata_health(None, context_msg='Invalid queue index.'), _render_vetting_banner(None, radius_arcsec=link_radius), f'[{idx}/{queue_size}]', empty_fig, {'display': 'block', 'width': '100%', 'height': '100%'}, {'display': 'none'}, [], [], _render_plot_status_panel('error', 'Invalid queue index.', []), _render_camera_diag_panel({}, []), 'No run configuration: invalid queue index.', _render_run_config_panel(None, None, ['Invalid queue index']), _render_repro_badge(None, ['Invalid queue index']), '', nonce
+        return '', 'Invalid index', _render_metadata_health(None, context_msg='Invalid queue index.'), _render_vetting_banner(None, radius_arcsec=link_radius), f'[{idx}/{queue_size}]', empty_fig, NATIVE_PLOT_STYLE, {'display': 'none'}, [], [], _render_plot_status_panel('error', 'Invalid queue index.', []), _render_camera_diag_panel({}, []), 'No run configuration: invalid queue index.', _render_run_config_panel(None, None, ['Invalid queue index']), _render_repro_badge(None, ['Invalid queue index']), '', nonce
 
     payload, stored_lc_path, source_path = _candidate_context(candidate_id)
 
@@ -495,7 +498,7 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
             progress,
             no_update,
             {'display': 'none'},
-            {'display': 'block', 'width': '100%', 'height': '100%'},
+            NATIVE_PLOT_STYLE,
             no_update,
             [],
             _render_plot_status_panel('ok', png_msg, mismatch_warnings),
@@ -578,7 +581,7 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
             return (
                 plot_src, grid_items, metadata_health, vetting_banner, progress, no_update,
                 {'display': 'none'},
-                {'display': 'block', 'width': '100%', 'height': '100%'},
+                NATIVE_PLOT_STYLE,
                 [], [],
                 _render_plot_status_panel('error', f'Native plot error: {exc}', mismatch_warnings),
                 _render_camera_diag_panel({}, []),
@@ -589,7 +592,7 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
             )
         return (
             '', grid_items, metadata_health, vetting_banner, progress, empty_fig,
-            {'display': 'block', 'width': '100%', 'height': '100%'},
+            NATIVE_PLOT_STYLE,
             {'display': 'none'},
             [], [],
             _render_plot_status_panel('error', f'Native plot error: {exc}', mismatch_warnings),
@@ -631,7 +634,7 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
             progress,
             no_update,
             {'display': 'none'},
-            {'display': 'block', 'width': '100%', 'height': '100%'},
+            NATIVE_PLOT_STYLE,
             [],
             [],
             _render_plot_status_panel('warn', f"{fallback_msg} Showing PNG fallback.", fallback_warnings),
@@ -660,7 +663,7 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
         vetting_banner,
         progress,
         native['figure'],
-        {'display': 'block', 'width': '100%', 'height': '100%'},
+        NATIVE_PLOT_STYLE,
         {'display': 'none'},
         native['camera_options'],
         [],  # stats merged into candidate-info-grid
