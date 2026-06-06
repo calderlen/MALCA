@@ -6,6 +6,7 @@ import json
 import re
 import sys
 import types
+from pathlib import Path
 
 
 def _install_review_app_import_stubs() -> None:
@@ -43,6 +44,9 @@ _install_review_app_import_stubs()
 from malca.review import app as review_app
 from malca.review.app import EXTERNAL_SOURCE_VIEW_OPTIONS, _render_external_followup, app
 from malca.review.cutouts import CUTOUT_SURVEYS, DEFAULT_CUTOUT_SURVEY_KEY
+
+
+_APP_SOURCE_DIR = Path(review_app.__file__).resolve().parent
 
 
 def _component_ids_in_order(node: object) -> list[object]:
@@ -83,6 +87,25 @@ def _graph_configs_in_order(node: object) -> list[dict]:
     layout = node() if callable(node) else node
     walk(layout)
     return configs
+
+
+def _components_by_type(node: object, target_type: str) -> list[object]:
+    matches: list[object] = []
+
+    def walk(item: object) -> None:
+        if isinstance(item, (list, tuple)):
+            for child in item:
+                walk(child)
+            return
+        if item is None or isinstance(item, (str, int, float, bool)):
+            return
+        if item.__class__.__name__ == target_type:
+            matches.append(item)
+        walk(getattr(item, "children", None))
+
+    layout = node() if callable(node) else node
+    walk(layout)
+    return matches
 
 
 def _component_by_id(node: object, target_id: object) -> object | None:
@@ -140,6 +163,77 @@ def test_layout_graphs_disable_plotly_image_export() -> None:
 
     assert configs
     assert all("toImage" in config.get("modeBarButtonsToRemove", []) for config in configs)
+
+
+def test_dash_runtime_endpoints_are_not_cached_by_browsers() -> None:
+    client = app.server.test_client()
+
+    for path in ("/_dash-layout", "/_dash-dependencies"):
+        response = client.get(path)
+        assert response.status_code == 200
+        assert "no-store" in response.headers.get("Cache-Control", "")
+        assert response.headers.get("Pragma") == "no-cache"
+
+
+def test_layout_graphs_enable_dash_mathjax_without_dash_responsive_prop() -> None:
+    graphs = _components_by_type(app.layout, "Graph")
+
+    assert graphs
+    assert all(_props(graph).get("mathjax") is True for graph in graphs)
+    assert all(_props(graph).get("responsive") is not True for graph in graphs)
+
+
+def test_metadata_markdown_enables_dash_mathjax() -> None:
+    value_markdowns = _components_by_type(review_app._copyable_math_value(r"$\mathrm{JD}$"), "Markdown")
+    stats_markdowns = _components_by_type(review_app._render_stat_cards([("stats_period", "1.0")]), "Markdown")
+
+    assert value_markdowns
+    assert stats_markdowns
+    assert all(_props(markdown).get("mathjax") is True for markdown in [*value_markdowns, *stats_markdowns])
+
+
+def test_review_app_source_avoids_chromium_sensitive_graph_flags() -> None:
+    source = "\n".join(path.read_text() for path in _APP_SOURCE_DIR.rglob("*.py"))
+
+    assert "responsive=True" not in source
+
+
+def test_primary_light_curve_graph_uses_plotly_config_responsiveness_only() -> None:
+    graph = _component_by_id(app.layout, "interactive-plot")
+
+    assert graph is not None
+    props = _props(graph)
+    assert props["className"] == "plot-native"
+    assert props.get("responsive") is not True
+    assert props["config"]["responsive"] is True
+    assert "figure" not in props
+    assert props["style"] == {
+        "display": "block",
+        "width": "100%",
+        "height": "100%",
+        "min-height": "600px",
+    }
+
+
+def test_primary_light_curve_css_does_not_force_plotly_internal_containers() -> None:
+    assert ".plot-native .plot-container" not in app.index_string
+    assert ".plot-native .svg-container" not in app.index_string
+    assert ".plot-frame #plot-image" not in app.index_string
+
+
+def test_primary_light_curve_has_no_custom_resize_callback() -> None:
+    scripts = "\n".join(getattr(app, "_inline_scripts", []))
+    resize_callbacks = [
+        spec for output, spec in app.callback_map.items()
+        if "plot-resize-trigger.data" in output
+    ]
+
+    assert not resize_callbacks
+    assert "plot-resize-trigger" not in scripts
+    assert "window.__malcaInteractivePlotState" not in scripts
+    assert "window.Plotly.react(root, data, layout, plotConfig)" not in scripts
+    assert "MutationObserver" not in scripts
+    assert "setInterval(function()" not in scripts
 
 
 def test_layout_embeds_eda_panel() -> None:

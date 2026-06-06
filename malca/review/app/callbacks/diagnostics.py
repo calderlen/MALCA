@@ -164,7 +164,7 @@ if _background_callback_manager is not None and _UI_BACKGROUND_CALLBACKS:
         running=[
             (Output('diagnostic-plots-status', 'children'), 'Loading population background...', ''),
         ],
-        prevent_initial_call=False,
+        prevent_initial_call=True,
     )
     def prepare_diagnostic_background(is_open, import_trigger, pipeline_progress, existing_state):
         return _prepare_diagnostic_background(is_open, import_trigger, pipeline_progress, existing_state)
@@ -178,7 +178,7 @@ else:
         running=[
             (Output('diagnostic-plots-status', 'children'), 'Loading population background...', ''),
         ],
-        prevent_initial_call=False,
+        prevent_initial_call=True,
     )
     def prepare_diagnostic_background(is_open, import_trigger, pipeline_progress, existing_state):
         return _prepare_diagnostic_background(is_open, import_trigger, pipeline_progress, existing_state)

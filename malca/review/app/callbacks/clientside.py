@@ -12,37 +12,6 @@ app.clientside_callback(
 
 app.clientside_callback(
     """
-    function(figure, style, edaState) {
-        var nu = window.dash_clientside.no_update;
-        function resizePlot() {
-            var el = document.getElementById('interactive-plot');
-            if (!el || !window.Plotly || !window.Plotly.Plots) {
-                return;
-            }
-            try {
-                window.Plotly.Plots.resize(el);
-            } catch (err) {
-                // Resize is best-effort; the next figure update will retry.
-            }
-        }
-        resizePlot();
-        if (window.requestAnimationFrame) {
-            window.requestAnimationFrame(resizePlot);
-        }
-        window.setTimeout(resizePlot, 80);
-        window.setTimeout(resizePlot, 250);
-        return Date.now();
-    }
-    """,
-    Output('plot-resize-trigger', 'data'),
-    [Input('interactive-plot', 'figure'),
-     Input('interactive-plot', 'style'),
-     Input('eda-panel-state', 'data')],
-    prevent_initial_call=False,
-)
-
-app.clientside_callback(
-    """
     function(idx) {
         return Date.now();
     }

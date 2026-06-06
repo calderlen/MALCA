@@ -388,7 +388,7 @@ def build_review_lightcurve_publication_pdf(
 
         if show_event_markers and "raw" in ax_by_panel:
             event_ax = ax_by_panel["raw"]
-            for entry in _event_entries(payload, jd_offset, run_params):
+            for entry in _event_entries(payload, jd_offset, run_params, lc_median=median_jd):
                 color = DIP_EVENT_COLOR if entry["kind"] == "dip" else JUMP_EVENT_COLOR
                 if confidence_colors:
                     alpha = 0.28 + 0.42 * float(entry.get("confidence") or 0.0)

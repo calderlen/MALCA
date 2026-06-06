@@ -24,7 +24,7 @@ import webbrowser
 
 from dash import dcc, html, Input, Output, State, callback_context, no_update, ALL, MATCH, dash_table
 from dash import DiskcacheManager
-from flask import abort, send_from_directory
+from flask import abort, request, send_from_directory
 import dash
 import dash_bootstrap_components as dbc
 import diskcache

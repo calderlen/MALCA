@@ -27,6 +27,7 @@ from malca.utils import (
 )
 from malca.config import (
     JD_OFFSET, MJD_TO_JD, GAIA_TCB_EPOCH_JD, TESS_BTJD_OFFSET, KEPLER_BKJD_OFFSET,
+    SKYPATROL_JD_OFFSET,
     REVIEW_CACHE_LIMIT, REVIEW_MAX_EXTERNAL_POINTS, REVIEW_RESIDUAL_FRACTION,
 )
 from malca.config import (
@@ -509,7 +510,40 @@ def _event_thresholds(run_params: dict | None) -> dict[str, float | None]:
     return {"dip_logbf": dip_thr, "jump_logbf": jump_thr, "sig": sig_thr}
 
 
-def _event_entries(payload: dict, jd_offset: float, run_params: dict | None) -> list[dict[str, object]]:
+def _event_time_to_lc_scale(value: object, lc_median: float | None, jd_offset: float) -> float | None:
+    """Convert stored event times to the light-curve time scale before plotting."""
+    t = _coerce_finite_float(value)
+    if t is None:
+        return None
+    scale_anchor = lc_median
+    if scale_anchor is None or not np.isfinite(scale_anchor):
+        scale_anchor = jd_offset
+    if scale_anchor > 2_000_000.0:
+        if t > 2_000_000.0:
+            return t
+        if t > 50_000.0:
+            return t + MJD_TO_JD
+        return t + SKYPATROL_JD_OFFSET
+    if scale_anchor > 50_000.0:
+        if t > 2_000_000.0:
+            return t - MJD_TO_JD
+        if t < 50_000.0:
+            return t + SKYPATROL_JD_OFFSET - MJD_TO_JD
+        return t
+    if t > 2_000_000.0:
+        return t - SKYPATROL_JD_OFFSET
+    if t > 50_000.0:
+        return t + MJD_TO_JD - SKYPATROL_JD_OFFSET
+    return t
+
+
+def _event_entries(
+    payload: dict,
+    jd_offset: float,
+    run_params: dict | None,
+    *,
+    lc_median: float | None = None,
+) -> list[dict[str, object]]:
     thresholds = _event_thresholds(run_params)
     key = (
         _parse_num(payload, "dip_best_t0"),
@@ -524,6 +558,7 @@ def _event_entries(payload: dict, jd_offset: float, run_params: dict | None) -> 
         thresholds["jump_logbf"],
         thresholds["sig"],
         jd_offset,
+        None if lc_median is None else float(lc_median),
     )
     cached = _cache_get(_EVENT_CACHE, key)
     if cached is not None:
@@ -533,6 +568,9 @@ def _event_entries(payload: dict, jd_offset: float, run_params: dict | None) -> 
     for prefix, color in (("dip", DIP_EVENT_COLOR), ("jump", JUMP_EVENT_COLOR)):
         t0 = _parse_num(payload, f"{prefix}_best_t0")
         if t0 is None:
+            continue
+        t0_lc = _event_time_to_lc_scale(t0, lc_median, jd_offset)
+        if t0_lc is None:
             continue
         width = _parse_num(payload, f"{prefix}_best_width_param")
         bf = _parse_num(payload, f"{prefix}_bayes_factor")
@@ -544,8 +582,9 @@ def _event_entries(payload: dict, jd_offset: float, run_params: dict | None) -> 
         entries.append(
             {
                 "kind": prefix,
-                "t0": t0,
-                "x0": t0 - jd_offset,
+                "t0": t0_lc,
+                "t0_raw": t0,
+                "x0": t0_lc - jd_offset,
                 "half_width": approx_half_width,
                 "bf": bf,
                 "morph": morph,
@@ -1548,7 +1587,7 @@ def build_interactive_lightcurve_figure(
                     col=1,
                 )
 
-    event_entries = _event_entries(payload, jd_offset, run_params)
+    event_entries = _event_entries(payload, jd_offset, run_params, lc_median=median_jd)
     if show_event_markers and show_raw_mag:
         raw_row = row_map['raw']
         raw_xref = _subplot_axis_ref(raw_row, "x")

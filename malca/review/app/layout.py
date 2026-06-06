@@ -54,7 +54,6 @@ def create_layout():
         dcc.Store(id='phoebe-refresh-token', data=0),
         dcc.Store(id='plot-render-request', data={'nonce': 1, 'ts': 0.0, 'state': {'idx': 0, 'candidate_id': None, 'plot_mode': 'native', 'overlay_values': list(PLOT_PRESETS['Diagnostics']['overlays']), 'selected_cameras': [], 'selected_bands': ['g', 'V'], 'preset': 'Diagnostics', 'theme': DEFAULT_THEME, 'residual_height': DEFAULT_RESIDUAL_FRACTION, 'baseline_opacity': 0.5, 'external_source_view': DEFAULT_EXTERNAL_SOURCE_VIEW, 'phase_panel_mode': 'fold'}}),
         dcc.Store(id='plot-render-applied', data=0),
-        dcc.Store(id='plot-resize-trigger', data=None),
         dcc.Store(id='plot-defaults-initialized', data=False),
         dcc.Store(id='queue-source-path', data=''),
         dcc.Store(id='run-config-json-store', data=''),
@@ -78,6 +77,7 @@ def create_layout():
         dcc.Download(id='eda-plot-export-download'),
         dcc.Download(id='run-config-download'),
         dcc.Interval(id='keyboard-init', interval=200, n_intervals=0, max_intervals=1),
+        dcc.Interval(id='startup-lazy-init', interval=2500, n_intervals=0, max_intervals=1),
         dcc.Interval(id='review-metrics-interval', interval=1000, n_intervals=0),
 
         # Sidebar toggle button
@@ -844,7 +844,6 @@ def create_layout():
                             id='interactive-plot',
                             className='plot-native',
                             mathjax=True,
-                            responsive=True,
                             config=graph_config_without_image_export({
                                 'displaylogo': False,
                                 'modeBarButtonsToRemove': ['lasso2d', 'select2d'],
@@ -960,7 +959,6 @@ def create_layout():
                                         'doubleClick': False,
                                         'responsive': True,
                                     }),
-                                    responsive=True,
                                     style={'height': '100%', 'width': '100%', 'minWidth': '0'},
                                 ),
                             ], className='eda-graph-wrap'),

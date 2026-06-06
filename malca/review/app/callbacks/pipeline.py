@@ -222,7 +222,7 @@ if _background_callback_manager is not None:
             Output('pipeline-progress-trigger', 'data'),
             Output('pipeline-module-log', 'data'),
         ],
-        prevent_initial_call='initial_duplicate'
+        prevent_initial_call=True
     )
     def run_pipeline_callback(set_progress, n_clicks, rerun_clicks, rerun_stats_clicks, rerun_events_clicks, rerun_characterize_clicks, rerun_sed_photometry_clicks, rerun_vetting_clicks, rerun_external_lcs_clicks, rerun_multi_survey_clicks, auto_trigger, queue_data, idx, current_trigger, current_progress_tick):
         return _run_pipeline_impl(set_progress, n_clicks, rerun_clicks, rerun_stats_clicks, rerun_events_clicks, rerun_characterize_clicks, rerun_sed_photometry_clicks, rerun_vetting_clicks, rerun_external_lcs_clicks, rerun_multi_survey_clicks, auto_trigger, queue_data, idx, current_trigger, current_progress_tick)
@@ -245,7 +245,7 @@ else:
          State('current-index', 'data'),
          State('import-trigger', 'data'),
          State('pipeline-progress-trigger', 'data')],
-        prevent_initial_call='initial_duplicate'
+        prevent_initial_call=True
     )
     def run_pipeline_callback(n_clicks, rerun_clicks, rerun_stats_clicks, rerun_events_clicks, rerun_characterize_clicks, rerun_sed_photometry_clicks, rerun_vetting_clicks, rerun_external_lcs_clicks, rerun_multi_survey_clicks, auto_trigger, queue_data, idx, current_trigger, current_progress_tick):
         return _run_pipeline_impl(None, n_clicks, rerun_clicks, rerun_stats_clicks, rerun_events_clicks, rerun_characterize_clicks, rerun_sed_photometry_clicks, rerun_vetting_clicks, rerun_external_lcs_clicks, rerun_multi_survey_clicks, auto_trigger, queue_data, idx, current_trigger, current_progress_tick)

@@ -640,8 +640,8 @@ def persist_queue_filters(*callback_values):
 
 @app.callback(
     Output('saved-review-gui-state', 'data'),
-    Input('keyboard-init', 'n_intervals'),
-    prevent_initial_call=False,
+    Input('startup-lazy-init', 'n_intervals'),
+    prevent_initial_call=True,
 )
 def load_saved_review_gui_state(_tick):
     try:

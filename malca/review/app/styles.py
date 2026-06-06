@@ -904,14 +904,6 @@ app.index_string = '''
             height: 100%;
             min-height: 600px;
         }
-        .plot-native > div,
-        .plot-native .js-plotly-plot,
-        .plot-native .plot-container,
-        .plot-native .svg-container {
-            width: 100% !important;
-            height: 100% !important;
-            min-height: 600px;
-        }
         .plot-container img {
             max-width: 100%;
             max-height: 100%;

@@ -2,9 +2,9 @@
 @app.callback(
     [Output('import-path', 'value'),
      Output('sidebar-status', 'children', allow_duplicate=True)],
-    Input('keyboard-init', 'n_intervals'),
+    Input('startup-lazy-init', 'n_intervals'),
     State('import-path', 'value'),
-    prevent_initial_call='initial_duplicate',
+    prevent_initial_call=True,
 )
 def auto_populate_detected_files(_n_intervals, current_import_path):
     """Auto-detect linked run files on app startup and fill import path."""
@@ -567,5 +567,4 @@ def render_pipeline_module_log(log_data):
     if not lines:
         return "No pipeline run log yet."
     return "\n".join(lines[-300:])
-
 

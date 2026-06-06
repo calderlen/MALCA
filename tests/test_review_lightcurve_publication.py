@@ -170,6 +170,57 @@ def test_interactive_event_overlays_do_not_expand_raw_y_autorange(tmp_path: Path
     assert float(jump_marker.y) < min(raw_y)
 
 
+def test_interactive_event_overlays_convert_skypatrol_reduced_t0_to_plot_axis(tmp_path: Path) -> None:
+    lc_path = tmp_path / "123.dat2"
+    _write_dat2(lc_path)
+    payload = {
+        "candidate_id": "123",
+        "asas_sn_id": "123",
+        "lc_path": str(lc_path),
+        "dip_best_t0": 8002.0,
+        "dip_best_width_param": 0.4,
+        "dip_bayes_factor": 20.0,
+    }
+
+    result = build_interactive_lightcurve_figure(
+        payload,
+        plot_dir=None,
+        selected_cameras=[],
+        selected_bands=["g", "V"],
+        filter_bad_cameras=False,
+        show_baseline=True,
+        show_event_markers=True,
+        show_residuals=True,
+        show_phase_fold=False,
+        show_raw_mag=True,
+        override_period=None,
+        show_diagnostics=True,
+        confidence_colors=True,
+        run_params={"baseline_func": "global_median"},
+        uirevision_key="test",
+        yaxis_mode="mag",
+    )
+
+    fig = result["figure"]
+    assert result["status"] == "ok"
+    dip_line = next(
+        shape
+        for shape in fig.layout.shapes
+        if getattr(getattr(shape, "line", None), "dash", None) == "dash"
+    )
+    dip_label = next(
+        annotation
+        for annotation in fig.layout.annotations
+        if str(annotation.text).startswith("Dip thr")
+    )
+    dip_marker = next(annotation for annotation in fig.layout.annotations if annotation.text == "◆")
+
+    assert float(dip_line.x0) == pytest.approx(2.0)
+    assert float(dip_line.x1) == pytest.approx(2.0)
+    assert float(dip_label.x) == pytest.approx(2.0)
+    assert float(dip_marker.x) == pytest.approx(2.0)
+
+
 def test_interactive_phase_panel_shows_placeholder_without_period(tmp_path: Path) -> None:
     lc_path = tmp_path / "123.dat2"
     _write_dat2(lc_path)

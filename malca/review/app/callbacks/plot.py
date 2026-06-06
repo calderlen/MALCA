@@ -1,5 +1,5 @@
 # This file was mechanically split from malca.review.app; preserve behavior when editing.
-NATIVE_PLOT_STYLE = {'display': 'block', 'width': '100%', 'height': '100%', 'minHeight': '600px'}
+NATIVE_PLOT_STYLE = {'display': 'block', 'width': '100%', 'height': '100%'}
 
 
 def run_period_search(n_clicks, candidate_id, min_period, max_period, method, auto_period_cache):
@@ -657,7 +657,7 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
     merged_grid = stats_group + grid_items
 
     return (
-        plot_src,
+        '',
         merged_grid,
         metadata_health,
         vetting_banner,

@@ -7,3 +7,12 @@ app = dash.Dash(
     background_callback_manager=_background_callback_manager,
 )
 
+
+@app.server.after_request
+def _disable_dash_runtime_cache(response):
+    """Keep browser tabs from reusing stale Dash callback maps after code changes."""
+    if request.path in {"/_dash-layout", "/_dash-dependencies", "/_dash-update-component"}:
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
