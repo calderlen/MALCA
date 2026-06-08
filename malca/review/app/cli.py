@@ -22,7 +22,7 @@ def main():
         if not Path(PLOT_DIR).exists() or not Path(PLOT_DIR).is_dir():
             print(f"Error: plot directory does not exist: {PLOT_DIR}")
             print("Use an existing run bundle plots directory, for example:")
-            print("  malca review --review-db output/runs/stv/20250121_143052/review/review.db --plot-dir output/runs/stv/20250121_143052/plots")
+            print(f"  malca review --review-db {DEFAULT_OUTPUT_DIR}/runs/stv/20250121_143052/review/review.db --plot-dir {DEFAULT_OUTPUT_DIR}/runs/stv/20250121_143052/plots")
             sys.exit(1)
     else:
         # Try current directory first

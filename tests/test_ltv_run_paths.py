@@ -10,6 +10,7 @@ from pathlib import Path
 import pandas as pd
 
 from malca.audit import ltv_status
+from malca.config import DEFAULT_OUTPUT_DIR
 from malca.feature_layers import with_feature_columns
 from malca.ltv import pipeline as ltv_pipeline
 from malca.table_io import read_feature_table, write_feature_table
@@ -377,7 +378,7 @@ def test_ltv_overwrite_clears_core_chunks_and_checkpoint(tmp_path: Path) -> None
 
 def test_ltv_status_discovers_run_style_outputs(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.chdir(tmp_path)
-    run_dir = Path("output") / "runs" / "ltv_march18"
+    run_dir = DEFAULT_OUTPUT_DIR / "runs" / "ltv_march18"
     results_dir = run_dir / "results"
     results_dir.mkdir(parents=True)
     write_feature_table(pd.DataFrame({"asas_sn_id": ["123"], "candidate_id": ["ltv_123"], "timescale": ["ltv"], "lc_path": ["123.dat2"], "ra": [1.0], "dec": [2.0], "ltv_slope": [0.4]}),

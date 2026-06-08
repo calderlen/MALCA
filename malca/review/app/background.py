@@ -81,7 +81,7 @@ class TrackingDiskcacheManager(DiskcacheManager):
 
 
 # Background callback manager for long-running fetch/import (DiskCache for local dev)
-_bc_cache = diskcache.Cache(_APP_REPO_ROOT / "output" / "review" / ".dash_cache")
+_bc_cache = diskcache.Cache(_APP_REPO_ROOT / DEFAULT_OUTPUT_DIR / "review" / ".dash_cache")
 _background_callback_manager = TrackingDiskcacheManager(_bc_cache)
 # High-frequency review UI callbacks (plot render, auto period, sidebar hydration)
 # are intentionally synchronous to avoid long-session file-descriptor exhaustion.

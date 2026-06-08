@@ -51,6 +51,7 @@ from malca.config import (
     INJECTION_N_SAMPLE,
     INJECTION_MIN_POINTS,
     INJECTION_SEED,
+    DEFAULT_OUTPUT_DIR,
 )
 from malca.stv.events import score_lightcurve
 from malca.utils import read_lc_dat2
@@ -463,9 +464,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Run detection rate measurement (no injection).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Output structure (default --output-dir output/detection_rate):
-  output/detection_rate/
+        epilog=f"""
+Output structure (default --output-dir {DEFAULT_OUTPUT_DIR / 'detection_rate'}):
+  {DEFAULT_OUTPUT_DIR / 'detection_rate'}/
     20250121_143052/             # Timestamped run directory
       run_params.json            # Full parameter dump
       results/
@@ -489,10 +490,10 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
     g_workers = parser.add_argument_group("Workers")
     g_config = parser.add_argument_group("Config")
 
-    g_io.add_argument("--manifest", type=Path, default=Path("output/lc_manifest_all.parquet"),
-                        help="Manifest parquet path (default: output/lc_manifest_all.parquet)")
-    g_io.add_argument("--output-dir", dest="out_dir", type=Path, default=Path("output/detection_rate"),
-                        help="Base output directory (default: output/detection_rate)")
+    g_io.add_argument("--manifest", type=Path, default=DEFAULT_OUTPUT_DIR / "lc_manifest_all.parquet",
+                        help=f"Manifest parquet path (default: {DEFAULT_OUTPUT_DIR / 'lc_manifest_all.parquet'})")
+    g_io.add_argument("--output-dir", dest="out_dir", type=Path, default=DEFAULT_OUTPUT_DIR / "detection_rate",
+                        help=f"Base output directory (default: {DEFAULT_OUTPUT_DIR / 'detection_rate'})")
     g_io.add_argument("--run-tag", type=str, default=None,
                         help="Optional tag to append to run directory name (e.g., 'mag12-13')")
     g_io.add_argument("--output", type=Path, default=None,

@@ -30,12 +30,13 @@ from typing import Iterable
 
 import pandas as pd
 
+from malca.config import DEFAULT_OUTPUT_DIR
 from malca.table_io import read_feature_table
 
 
 DEFAULT_CANDIDATES = Path("output/12-15mag_candidates_v2_minus_previous.csv")
-DEFAULT_OUTPUT = Path("output/missing_coord_audit.csv")
-DEFAULT_SUMMARY = Path("output/missing_coord_audit_summary.json")
+DEFAULT_OUTPUT = DEFAULT_OUTPUT_DIR / "missing_coord_audit.csv"
+DEFAULT_SUMMARY = DEFAULT_OUTPUT_DIR / "missing_coord_audit_summary.json"
 DEFAULT_ASASSN_INDEX_CANDIDATES = (
     Path("output/asassn_index_masked_concat_cleaned_20250919_154524_brotli.parquet"),
     Path("input/asassn_index_masked_concat_cleaned_20250919_154524_brotli.parquet"),

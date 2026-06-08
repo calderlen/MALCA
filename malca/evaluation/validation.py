@@ -18,7 +18,7 @@ from typing import Literal
 import pandas as pd
 import numpy as np
 
-from malca.config import VSX_MAX_SEP_ARCSEC
+from malca.config import DEFAULT_OUTPUT_DIR, VSX_MAX_SEP_ARCSEC
 from malca.table_io import read_feature_table, write_parquet_table
 
 
@@ -287,8 +287,8 @@ def main():
     parser.add_argument(
         "--output-dir",
         type=str,
-        default="output",
-        help="Base output directory containing results subdirectories (default: output)",
+        default=str(DEFAULT_OUTPUT_DIR),
+        help=f"Base output directory containing results subdirectories (default: {DEFAULT_OUTPUT_DIR})",
     )
     parser.add_argument(
         "--run-dir",

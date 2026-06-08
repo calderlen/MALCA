@@ -25,6 +25,7 @@ from malca.config import (
     BASELINE_Q,
     BASELINE_S0,
     BASELINE_W0,
+    DEFAULT_OUTPUT_DIR,
     LOGBF_THRESHOLD_DIP,
     MAG_POINTS,
     PARQUET_OUTPUT_COMPRESSION,
@@ -78,7 +79,7 @@ DEFAULT_LOGBF_THRESHOLDS: tuple[float, ...] = (
 
 @dataclass
 class TriggerModeBenchmarkConfig:
-    output_base_dir: Path = Path("output/diagnostics/trigger_mode_simulation_benchmark")
+    output_base_dir: Path = DEFAULT_OUTPUT_DIR / "diagnostics" / "trigger_mode_simulation_benchmark"
     run_tag: str | None = None
     n_trials: int = 12000
     seed: int = 20260514

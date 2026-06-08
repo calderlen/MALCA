@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from malca.config import DEFAULT_OUTPUT_DIR
 from malca.feature_layers import with_feature_columns
 from malca.lightcurve_publication import PUBLICATION_STYLE, plot_lightcurve_panel, plot_phase_panel
 from malca.lightcurve_io import load_lightcurve_df, to_asassn_algorithm_frame
@@ -16,11 +17,14 @@ from malca.notebook_paths import find_repo_root, localize_lightcurve_frame_paths
 from malca.review.eda_data import infer_source_kind, load_candidate_source
 
 
-DEFAULT_CANDIDATES_SOURCE = Path("output/candidates.parquet")
-DEFAULT_EXPORT_DIR = Path("output/triage/march18_other_eb")
+DEFAULT_CANDIDATES_SOURCE = DEFAULT_OUTPUT_DIR / "candidates.parquet"
+DEFAULT_EXPORT_DIR = DEFAULT_OUTPUT_DIR / "triage" / "march18_other_eb"
 DEFAULT_EVENT_CLASS_FILTER = "other"
 DEFAULT_REVIEW_DB_GLOBS = (
     "review.db",
+    str(DEFAULT_OUTPUT_DIR / "review" / "review.db"),
+    str(DEFAULT_OUTPUT_DIR / "review" / "standalone.db"),
+    str(DEFAULT_OUTPUT_DIR / "runs" / "*" / "review" / "review.db"),
     "output/review/review.db",
     "output/review/standalone.db",
     "output/runs/*/review/review.db",

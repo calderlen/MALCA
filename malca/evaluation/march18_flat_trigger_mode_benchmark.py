@@ -26,6 +26,7 @@ from malca.config import (
     BASELINE_Q,
     BASELINE_S0,
     BASELINE_W0,
+    DEFAULT_OUTPUT_DIR,
     LOGBF_THRESHOLD_DIP,
     LOGBF_THRESHOLD_JUMP,
     MAG_POINTS,
@@ -65,7 +66,7 @@ DEFAULT_LOGBF_THRESHOLDS: tuple[float, ...] = (
 
 @dataclass
 class March18FlatTriggerConfig:
-    output_base_dir: Path = Path("output/diagnostics/march18_flat_trigger_mode_benchmark")
+    output_base_dir: Path = DEFAULT_OUTPUT_DIR / "diagnostics" / "march18_flat_trigger_mode_benchmark"
     run_tag: str | None = None
     flat_lc_dir: Path = Path("output/runs/runs_march18_bundle_all/bundle_assets/lightcurves")
     manifest_path: Path | None = Path("output/runs/local_lc_all_run/manifests/lc_manifest_all.parquet")

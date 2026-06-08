@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from malca.config import DEFAULT_OUTPUT_DIR
 from malca.nuclear.context import NuclearContextConfig, run_nuclear_context
 from malca.table_io import read_feature_table
 
@@ -10,7 +11,7 @@ from malca.table_io import read_feature_table
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run nuclear context enrichment and AGN/TDE/CLAGN scoring")
     parser.add_argument("--input", type=Path, required=True, help="Input candidate Parquet table")
-    parser.add_argument("--run-dir", type=Path, default=Path("output") / "runs" / "nuclear_context")
+    parser.add_argument("--run-dir", type=Path, default=DEFAULT_OUTPUT_DIR / "runs" / "nuclear_context")
     parser.add_argument("--cache-dir", type=Path, default=None)
     parser.add_argument("--checkpoint-dir", type=Path, default=None)
     parser.add_argument("--workers", type=int, default=4)

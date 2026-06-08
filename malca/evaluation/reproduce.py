@@ -50,6 +50,7 @@ from malca.config import (
     BASELINE_Q,
     BASELINE_JITTER,
     JD_OFFSET,
+    DEFAULT_OUTPUT_DIR,
 )
 from malca.stv.events import score_lightcurve
 from malca.stv.filter import apply_filters, filter_signal_amplitude
@@ -2013,7 +2014,7 @@ Examples:
     g_output.add_argument(
         "--output-dir",
         dest="out_dir",
-        default="./output/plots/reproduction",
+        default=str(DEFAULT_OUTPUT_DIR / "plots" / "reproduction"),
         help="Directory for peak_results output",
     )
     g_output.add_argument(
@@ -2232,7 +2233,7 @@ def main(argv: Iterable[str] | None = None) -> None:
     )
 
     # Set up logging
-    log_dir = Path("output/logs/reproduction")
+    log_dir = DEFAULT_OUTPUT_DIR / "logs" / "reproduction"
     log_dir.mkdir(parents=True, exist_ok=True)
 
     non_default_args = get_non_default_args(args, parser)

@@ -55,6 +55,7 @@ from malca.config import (
     INJECTION_MIN_POINTS,
     INJECTION_SEED,
     INJECTION_MAX_ATTEMPTS,
+    DEFAULT_OUTPUT_DIR,
 )
 from malca.stv.events import score_lightcurve
 from malca.utils import read_lc_dat2
@@ -1639,9 +1640,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Run injection-recovery tests for dip detection.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Output structure (default --output-dir output/injection):
-  output/injection/
+        epilog=f"""
+Output structure (default --output-dir {DEFAULT_OUTPUT_DIR / 'injection'}):
+  {DEFAULT_OUTPUT_DIR / 'injection'}/
     20250121_143052/             # Timestamped run directory
       run_params.json            # Full parameter dump
       results/
@@ -1667,10 +1668,10 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
     g_workers = parser.add_argument_group("Workers & chunks")
     g_postprocess = parser.add_argument_group("Postprocess")
 
-    g_io.add_argument("--manifest", type=Path, default=Path("output/lc_manifest_all.parquet"),
-                        help="Manifest parquet path (default: output/lc_manifest_all.parquet)")
-    g_io.add_argument("--output-dir", dest="out_dir", type=Path, default=Path("output/injection"),
-                        help="Base output directory (default: output/injection)")
+    g_io.add_argument("--manifest", type=Path, default=DEFAULT_OUTPUT_DIR / "lc_manifest_all.parquet",
+                        help=f"Manifest parquet path (default: {DEFAULT_OUTPUT_DIR / 'lc_manifest_all.parquet'})")
+    g_io.add_argument("--output-dir", dest="out_dir", type=Path, default=DEFAULT_OUTPUT_DIR / "injection",
+                        help=f"Base output directory (default: {DEFAULT_OUTPUT_DIR / 'injection'})")
     g_io.add_argument("--run-tag", type=str, default=None,
                         help="Optional tag to append to run directory name (e.g., 'deep_dips_mag18')")
     g_io.add_argument("--output", type=Path, default=None,

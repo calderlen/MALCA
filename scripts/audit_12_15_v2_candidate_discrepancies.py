@@ -19,11 +19,12 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from malca.evaluation.validation import DEFAULT_CANDIDATES as BRAYDEN_CANDIDATES
+from malca.config import DEFAULT_OUTPUT_DIR as MALCA_DEFAULT_OUTPUT_DIR
 
 
 DEFAULT_CANDIDATES_CSV = Path("output/12-15mag_candidates_v2.csv")
-DEFAULT_REPRODUCTION_DIR = Path("output/logs/reproduction")
-DEFAULT_OUTPUT_DIR = Path("output/audits/12_15_v2_candidate_discrepancies")
+DEFAULT_REPRODUCTION_DIR = MALCA_DEFAULT_OUTPUT_DIR / "logs" / "reproduction"
+DEFAULT_OUTPUT_DIR = MALCA_DEFAULT_OUTPUT_DIR / "audits" / "12_15_v2_candidate_discrepancies"
 DEFAULT_PROVENANCE_TABLES = (
     Path("output/runs/12_12.5_may13testrun/results/lc_events_enriched.parquet"),
     Path("output/runs/output_bundle_12.5_13_home_bundle_12.5_13/results/lc_events_enriched.parquet"),

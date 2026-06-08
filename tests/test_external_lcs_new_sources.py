@@ -122,6 +122,37 @@ def test_stripe82_link_candidates_keep_known_fallbacks_first(monkeypatch: pytest
     assert any(url.endswith("S82variables.dat.gz") for url in master_urls[1:])
 
 
+def test_allwise_mep_query_uses_published_qi_fact_column(monkeypatch: pytest.MonkeyPatch) -> None:
+    queries: list[str] = []
+
+    def fake_query_tap(query: str) -> _FakeTapResult:
+        queries.append(query)
+        if "FROM allwise_p3as_psd" in query:
+            return _FakeTapResult(pd.DataFrame([{"source_id": "0000p000_ac51-000001", "cntr": 1}]))
+        if "FROM allwise_p3as_mep" in query:
+            lowered = query.lower()
+            assert "qi_fact" in lowered
+            assert "qual_frame" not in lowered
+            return _FakeTapResult(
+                pd.DataFrame(
+                    {
+                        "mjd": [55400.0],
+                        "w1mpro_ep": [12.0],
+                        "w1sigmpro_ep": [0.03],
+                        "qi_fact": [1.0],
+                    }
+                )
+            )
+        raise AssertionError(f"unexpected AllWISE MEP query: {query}")
+
+    monkeypatch.setattr(vetting.Irsa, "query_tap", staticmethod(fake_query_tap))
+
+    out = vetting._query_allwise_mep_one(1.0, 1.0)
+
+    assert out["w1mpro"].tolist() == [12.0]
+    assert len(queries) == 2
+
+
 def test_allwise_mep_fetch_records_fetched_no_data_and_remote_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -10,8 +10,9 @@ from typing import Any, Iterable
 
 import pandas as pd
 
+from malca.config import DEFAULT_OUTPUT_DIR
 from malca.feature_layers import with_feature_columns
-from malca.ltv.paths import discover_ltv_output_dir, default_ltv_review_db_for_output
+from malca.ltv.paths import DEFAULT_LTV_RUN_DIR, discover_ltv_output_dir, default_ltv_review_db_for_output
 from malca.table_io import read_feature_table
 
 
@@ -241,7 +242,7 @@ def _write_smoke_candidates(candidate_list: Path, output_root: Path, smoke_count
 def baseline_compare_commands(
     candidate_list: str | Path = "output/lc_events_collect_candidates_14_14.5.csv",
     *,
-    output_root: str | Path = "output/audit/baseline_compare",
+    output_root: str | Path = DEFAULT_OUTPUT_DIR / "audit" / "baseline_compare",
     smoke_count: int = 100,
     workers: int = 1,
     path_prefix: str | None = None,
@@ -350,7 +351,7 @@ def build_parser() -> argparse.ArgumentParser:
     ltv.add_argument(
         "--output-dir",
         default=None,
-        help="Directory containing LTV parquet datasets (default: discover output/runs/ltv, then output/runs/ltv_*, then legacy output/ltv/ltv).",
+        help=f"Directory containing LTV parquet datasets (default: discover {DEFAULT_LTV_RUN_DIR}, then {DEFAULT_OUTPUT_DIR / 'runs'}/ltv_*, then legacy output/ltv/ltv).",
     )
     ltv.add_argument(
         "--review-db",
@@ -361,7 +362,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     baseline = sub.add_parser("baseline-compare", help="Build or run global-median smoke and per-camera full commands.")
     baseline.add_argument("--candidate-list", default="output/lc_events_collect_candidates_14_14.5.csv")
-    baseline.add_argument("--output-root", default="output/audit/baseline_compare")
+    baseline.add_argument("--output-root", default=str(DEFAULT_OUTPUT_DIR / "audit" / "baseline_compare"))
     baseline.add_argument("--smoke-count", type=int, default=100)
     baseline.add_argument("--workers", type=int, default=1)
     baseline.add_argument("--path-prefix", default=None)

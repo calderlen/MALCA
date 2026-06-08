@@ -1064,7 +1064,7 @@ def add_ltv_pipeline_args(parser: argparse.ArgumentParser) -> argparse.ArgumentP
 
     g_io.add_argument("--mag-bin", nargs="+", default=["13_13.5"], choices=[*MAG_BINS, "all"])
     g_io.add_argument("--root", type=Path, default=LCV2_ROOT, help="Raw ASAS-SN light-curve root")
-    g_io.add_argument("--run-dir", type=Path, default=None, help="LTV run directory (default: output/runs/ltv/<timestamp>)")
+    g_io.add_argument("--run-dir", type=Path, default=None, help=f"LTV run directory (default: {DEFAULT_LTV_RUN_DIR}/<timestamp>)")
     g_stage.add_argument(
         "--stage",
         choices=LTV_PIPELINE_STAGE_CHOICES,
@@ -1429,7 +1429,7 @@ def add_pipeline_args(parser):
         "--run-dir",
         type=str,
         default=str(DEFAULT_LTV_RUN_DIR),
-        help="LTV run directory for default inputs/outputs (default: output/runs/ltv)",
+        help=f"LTV run directory for default inputs/outputs (default: {DEFAULT_LTV_RUN_DIR})",
     )
     g_io.add_argument(
         "--input",

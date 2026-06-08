@@ -19,6 +19,7 @@ from malca.config import (
     CMD_A_G_PER_AV,
     CMD_E_BP_RP_PER_AV,
     VSX_CROSSMATCH_PATH,
+    DEFAULT_OUTPUT_DIR,
     DEFAULT_CACHE_DIR,
     GAIA_CACHE_FILE,
     GAIA_LOCAL_CATALOG,
@@ -55,8 +56,8 @@ from malca.review.taxonomy import (
 
 
 
-DEFAULT_DB_PATH = Path(__file__).resolve().parents[2] / "output" / "review" / "review.db"
-DEFAULT_STANDALONE_DB_PATH = Path(__file__).resolve().parents[2] / "output" / "review" / "standalone.db"
+DEFAULT_DB_PATH = Path(__file__).resolve().parents[2] / DEFAULT_OUTPUT_DIR / "review" / "review.db"
+DEFAULT_STANDALONE_DB_PATH = Path(__file__).resolve().parents[2] / DEFAULT_OUTPUT_DIR / "review" / "standalone.db"
 SQLITE_BUSY_TIMEOUT_MS = 30_000
 STATUS_OPTIONS = ["unreviewed", "reviewed", "needs_followup"]
 EVENT_CLASS_OPTIONS = [

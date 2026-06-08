@@ -68,6 +68,7 @@ from astropy.time import Time
 from astropy.coordinates.solar_system import get_body_barycentric_posvel
 from scipy.optimize import least_squares, lsq_linear
 
+from malca.config import DEFAULT_OUTPUT_DIR
 from malca.lightcurve_io import load_lightcurve_df
 from malca.review.eda_data import infer_plot_dir_from_source
 from malca.review.interactive_plot import resolve_lightcurve_path
@@ -159,8 +160,8 @@ VISUAL_INSPECTION_SUBJECTIVE_NOTE = (
     "(see microlensing.py VISUAL_INSPECTION_BAD_IDS / VISUAL_INSPECTION_PROBABLY_BAD_IDS)."
 )
 
-DB_PATH = REPO_ROOT / "output" / "runs" / "runs_march18_bundle_all" / "review" / "review.db"
-MICROLENSING_OUTPUT_ROOT = (REPO_ROOT / "output" / "microlensing").resolve()
+DB_PATH = REPO_ROOT / DEFAULT_OUTPUT_DIR / "runs" / "runs_march18_bundle_all" / "review" / "review.db"
+MICROLENSING_OUTPUT_ROOT = (REPO_ROOT / DEFAULT_OUTPUT_DIR / "microlensing").resolve()
 MICROLENSING_FIT_PDF_DIR = (MICROLENSING_OUTPUT_ROOT / "fit_pdfs").resolve()
 MICROLENSING_FIT_PDF_DPI = 300
 
@@ -5160,9 +5161,9 @@ def run_microlensing_pipeline(
     DB_PATH = (
         Path(db_path).expanduser().resolve()
         if db_path is not None
-        else (REPO_ROOT / "output" / "runs" / "runs_march18_bundle_all" / "review" / "review.db")
+        else (REPO_ROOT / DEFAULT_OUTPUT_DIR / "runs" / "runs_march18_bundle_all" / "review" / "review.db")
     )
-    MICROLENSING_OUTPUT_ROOT = (REPO_ROOT / "output" / "microlensing").resolve()
+    MICROLENSING_OUTPUT_ROOT = (REPO_ROOT / DEFAULT_OUTPUT_DIR / "microlensing").resolve()
     MICROLENSING_FIT_PDF_DIR = (MICROLENSING_OUTPUT_ROOT / "fit_pdfs").resolve()
     MICROLENSING_OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
 
@@ -5828,7 +5829,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--crossmatch-gaia-catalog",
         type=Path,
         default=None,
-        help="Gaia DR3 parquet for characterize (default: <repo>/output/cache/catalogs/gaia/gaia_dr3_crossmatched.parquet).",
+        help=f"Gaia DR3 parquet for characterize (default: <repo>/{DEFAULT_OUTPUT_DIR}/cache/catalogs/gaia/gaia_dr3_crossmatched.parquet).",
     )
     g_x.add_argument(
         "--crossmatch-vsx",

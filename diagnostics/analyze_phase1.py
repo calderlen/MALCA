@@ -19,6 +19,7 @@ import re
 # Import from malca
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
+from malca.config import DEFAULT_OUTPUT_DIR
 from malca.evaluation.injection import load_efficiency_cube, plot_detection_efficiency
 
 
@@ -207,7 +208,7 @@ def compare_efficiency_cubes(
 def main():
     """Run diagnostic analysis on Phase 1 results."""
     
-    base_dir = Path("output/injection")
+    base_dir = DEFAULT_OUTPUT_DIR / "injection"
     analysis_dir = Path("diagnostics/results")
     
     # Phase 1A: Shallow Dips
@@ -343,7 +344,7 @@ def main():
     print("DETECTION RATE COMPARISON (FALSE POSITIVES)")
     print("="*70)
     
-    detection_rate_dir = Path("output/detection_rate")
+    detection_rate_dir = DEFAULT_OUTPUT_DIR / "detection_rate"
     
     # Combine all phases
     all_runs = {**phase1a_runs, **phase1b_runs, **phase1c_runs}

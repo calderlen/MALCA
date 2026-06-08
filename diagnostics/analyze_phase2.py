@@ -17,6 +17,7 @@ import re
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
+from malca.config import DEFAULT_OUTPUT_DIR
 from malca.evaluation.injection import load_efficiency_cube
 
 
@@ -110,8 +111,8 @@ def compute_efficiency_stats(cube: dict) -> dict:
 def main():
     """Run Phase 2 analysis."""
 
-    injection_dir = Path("output/injection")
-    detection_dir = Path("output/detection_rate")
+    injection_dir = DEFAULT_OUTPUT_DIR / "injection"
+    detection_dir = DEFAULT_OUTPUT_DIR / "detection_rate"
     output_dir = Path("diagnostics/results/phase2")
     output_dir.mkdir(parents=True, exist_ok=True)
 

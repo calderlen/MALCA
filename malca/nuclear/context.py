@@ -7,6 +7,7 @@ import time
 
 import pandas as pd
 
+from malca.config import DEFAULT_OUTPUT_DIR
 from malca.nuclear.targets import normalize_nuclear_targets
 from malca.nuclear.features import compute_lightcurve_feature_table
 from malca.nuclear.redshift import resolve_redshift_spectral_types
@@ -18,7 +19,7 @@ from malca.table_io import write_feature_table
 
 @dataclass
 class NuclearContextConfig:
-    run_dir: Path = Path("output") / "runs" / "nuclear_context"
+    run_dir: Path = DEFAULT_OUTPUT_DIR / "runs" / "nuclear_context"
     cache_dir: Path | None = None
     checkpoint_dir: Path | None = None
     workers: int = 4

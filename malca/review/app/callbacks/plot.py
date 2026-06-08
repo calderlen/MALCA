@@ -546,7 +546,7 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
         search_roots: list[Path] = []
         if run_dir is not None:
             search_roots.append(run_dir / "results")
-        default_results_root = _APP_REPO_ROOT / "output" / "results"
+        default_results_root = _APP_REPO_ROOT / DEFAULT_OUTPUT_DIR / "results"
         if default_results_root not in search_roots:
             search_roots.append(default_results_root)
         for prefix in requested_external_sources:

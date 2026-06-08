@@ -32,6 +32,7 @@ from malca.migration.schema_aliases import (
     migrate_camera_field_frame,
     migrate_camera_field_mapping,
 )
+from malca.config import DEFAULT_OUTPUT_DIR
 from malca.table_io import read_parquet_table, write_parquet_table
 
 
@@ -169,8 +170,7 @@ class MigrationSummary:
 
 
 def default_output_root(now: datetime | None = None) -> Path:
-    stamp = (now or datetime.now()).strftime("%Y%m%d_%H%M%S")
-    return Path(f"output_migrated_{stamp}")
+    return DEFAULT_OUTPUT_DIR
 
 
 def _json_dumps(value: Any) -> str:

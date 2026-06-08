@@ -811,9 +811,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Run LTV rejection-recovery injections and generate diagnostic plots.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Output structure (default --output-dir output/runs/ltv/injection):
-  output/runs/ltv/injection/
+        epilog=f"""
+Output structure (default --output-dir {LTV_INJECTION_OUTPUT_DIR}):
+  {LTV_INJECTION_OUTPUT_DIR}/
     20260314_101500/
       run_params.json
       results/
@@ -838,7 +838,7 @@ Output structure (default --output-dir output/runs/ltv/injection):
     g_plots = parser.add_argument_group("Plots")
 
     g_io.add_argument("--manifest", type=Path, required=True, help="Manifest Parquet with dat_path metadata.")
-    g_io.add_argument("--output-dir", dest="out_dir", type=Path, default=LTV_INJECTION_OUTPUT_DIR, help="Base output directory.")
+    g_io.add_argument("--output-dir", dest="out_dir", type=Path, default=LTV_INJECTION_OUTPUT_DIR, help=f"Base output directory (default: {LTV_INJECTION_OUTPUT_DIR}).")
     g_io.add_argument("--run-tag", type=str, default=None, help="Optional suffix for the run directory.")
     g_io.add_argument("--output", type=Path, default=None, help="Override trial Parquet output path.")
     g_sample.add_argument(

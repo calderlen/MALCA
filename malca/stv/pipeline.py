@@ -61,7 +61,7 @@ from malca.config import (
 from malca.cli_config import add_config_args, apply_config, namespace_keys
 from malca.config import EVENTS_OUTPUT_CHUNK_SIZE
 from malca.config import PARQUET_OUTPUT_COMPRESSION, PARQUET_CACHE_COMPRESSION
-from malca.config import ASASSN_INDEX_PATH, LCV2_ROOT, VSX_CROSSMATCH_PATH, GAIA_LOCAL_CATALOG
+from malca.config import ASASSN_INDEX_PATH, LCV2_ROOT, VSX_CROSSMATCH_PATH, GAIA_LOCAL_CATALOG, DEFAULT_OUTPUT_DIR
 from malca.config import (
     WORKERS, BATCH_SIZE, TRIGGER_MODE, P_POINTS, MAG_POINTS,
     LOGBF_THRESHOLD_DIP, LOGBF_THRESHOLD_JUMP, SIGNIFICANCE_THRESHOLD,
@@ -786,7 +786,7 @@ def _candidate_asassn_index_paths(out_dir: Path, index_override: Path | None = N
         out_dir,
         output_root,
         Path("input"),
-        Path("output"),
+        DEFAULT_OUTPUT_DIR,
     ]
     for search_dir in _unique_paths(search_dirs):
         if not search_dir.exists() or (not search_dir.is_dir()):
@@ -1314,7 +1314,7 @@ def main():
     )
 
     g_output.add_argument("--output-dir", dest="out_dir", type=str, default=None,
-                        help="Directory for all outputs (default: output/runs/stv/<timestamp>)")
+                        help=f"Directory for all outputs (default: {DEFAULT_OUTPUT_DIR / 'runs' / 'stv'}/<timestamp>)")
     g_output.add_argument(
         "--import-bundle",
         type=Path,
@@ -1696,7 +1696,7 @@ def main():
     mag_bin_tag = "all" if is_auto_all_mode else (args.mag_bin[0] if len(args.mag_bin) == 1 else "multi")
 
     # IMPORTANT: never write to filesystem root (/output). Default to a writable directory.
-    base_output_root = Path("output").resolve()
+    base_output_root = DEFAULT_OUTPUT_DIR.resolve()
     if args.out_dir is not None:
         out_dir = Path(args.out_dir).expanduser()
     elif args.import_bundle is not None:

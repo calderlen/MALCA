@@ -156,7 +156,7 @@ def parse_args() -> tuple[list[Config], bool]:
     p.add_argument("--run-dir",
                    default=str(DEFAULT_LTV_RUN_DIR),
                    type=str,
-                   help="LTV run directory for default outputs (default: output/runs/ltv)")
+                   help=f"LTV run directory for default outputs (default: {DEFAULT_LTV_RUN_DIR})")
     p.add_argument("--mag-bin",
                    default="13_13.5",
                    type=str,

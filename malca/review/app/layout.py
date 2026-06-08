@@ -333,7 +333,7 @@ def create_layout():
 
             html.Div('Export', className='section-title'),
             dcc.Input(id='export-path', placeholder='Export file path', type='text',
-                     value='output/review/reviewed_candidates.parquet', style=_inp_style,
+                     value=str(DEFAULT_OUTPUT_DIR / 'review' / 'reviewed_candidates.parquet'), style=_inp_style,
                      persistence=_review_persistence_token(), persistence_type='local'),
             dcc.Checklist(
                 id='export-only-reviewed',
@@ -366,7 +366,7 @@ def create_layout():
                 id='merge-target-db-path',
                 placeholder='Target review DB path',
                 type='text',
-                value='output/review/review.db',
+                value=str(DEFAULT_OUTPUT_DIR / 'review' / 'review.db'),
                 style=_inp_style,
                 persistence=_review_persistence_token(),
                 persistence_type='local',

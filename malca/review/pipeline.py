@@ -19,6 +19,7 @@ from malca.config import (
     TRIGGER_MODE, LOGBF_THRESHOLD_DIP, LOGBF_THRESHOLD_JUMP,
     SIGNIFICANCE_THRESHOLD, P_POINTS, MAG_POINTS,
     RUN_MIN_POINTS, RUN_MAX_GAP_POINTS, BASELINE_FUNC,
+    DEFAULT_OUTPUT_DIR,
 )
 from malca.feature_layers import feature_mapping_get, to_layer_first_mapping
 from malca.review.stats_merge import merge_stats_summary_into_payload as _merge_stats_summary_into_payload
@@ -603,7 +604,7 @@ def _resolve_output_dir(conn: sqlite3.Connection, candidate_id: str) -> Path:
         if (src.parent / "results").is_dir():
             return src.parent / "results"
     # Fallback: use the default output directory
-    default = Path(__file__).resolve().parents[2] / "output" / "results"
+    default = Path(__file__).resolve().parents[2] / DEFAULT_OUTPUT_DIR / "results"
     default.mkdir(parents=True, exist_ok=True)
     return default
 

@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from malca.config import DEFAULT_OUTPUT_DIR
 from malca.table_io import read_feature_table
 
 
@@ -58,7 +59,7 @@ def _pdf_id_from_name(pdf_path: Path) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     repo_root = _find_repo_root(Path.cwd().resolve())
-    out_root = (repo_root / "output" / "microlensing").resolve()
+    out_root = (repo_root / DEFAULT_OUTPUT_DIR / "microlensing").resolve()
 
     ap = argparse.ArgumentParser(
         description="Copy fit PDFs for candidates not flagged bad/probably_bad by visual inspection.",

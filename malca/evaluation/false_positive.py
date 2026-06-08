@@ -19,6 +19,7 @@ from malca.config import (
     RUN_MAX_GAP_POINTS,
     FP_TRIALS_PER_FAMILY,
     INJECTION_SEED,
+    DEFAULT_OUTPUT_DIR,
 )
 from malca.table_io import read_parquet_table, write_parquet_table
 
@@ -170,7 +171,7 @@ def run_false_positive_benchmark(
 def main() -> None:
     parser = argparse.ArgumentParser(description="False-positive contaminant benchmark for MALCA")
     parser.add_argument("--manifest", type=Path, required=True, help="Manifest Parquet with asas_sn_id and path")
-    parser.add_argument("--output-dir", dest="out_dir", type=Path, default=Path("output/false_positive"))
+    parser.add_argument("--output-dir", dest="out_dir", type=Path, default=DEFAULT_OUTPUT_DIR / "false_positive")
     parser.add_argument("--families", type=str, default="camera_offset,camera_cluster,semiregular,rcb_like")
     parser.add_argument("--n-trials-per-family", type=int, default=FP_TRIALS_PER_FAMILY)
     parser.add_argument("--seed", type=int, default=INJECTION_SEED)

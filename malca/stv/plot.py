@@ -29,6 +29,7 @@ from malca.config import (
     CLEAN_LC_MAX_ERROR_ABSOLUTE,
     CLEAN_LC_MAX_ERROR_SIGMA,
     BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
+    DEFAULT_OUTPUT_DIR,
 )
 from malca.config import (
     WORKERS, JD_OFFSET, PLOT_FIGSIZE,
@@ -1067,7 +1068,7 @@ def main():
         "--detect-run",
         type=Path,
         default=None,
-        help="STV run directory (e.g., output/runs/stv/20250121_143052). If specified, reads events from <detect-run>/results/ and writes plots to <detect-run>/plots/",
+        help=f"STV run directory (e.g., {DEFAULT_OUTPUT_DIR / 'runs' / 'stv' / '20250121_143052'}). If specified, reads events from <detect-run>/results/ and writes plots to <detect-run>/plots/",
     )
     g_input.add_argument(
         "--input",

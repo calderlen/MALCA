@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from malca.config import DEFAULT_OUTPUT_DIR
 from malca.feature_layers import with_feature_columns
 from malca.table_io import read_feature_table
 
@@ -189,8 +190,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("output/new_candidates_12_15.csv"),
-        help="Output CSV. Default: output/new_candidates_12_15.csv",
+        default=DEFAULT_OUTPUT_DIR / "new_candidates_12_15.csv",
+        help=f"Output CSV. Default: {DEFAULT_OUTPUT_DIR / 'new_candidates_12_15.csv'}",
     )
     parser.add_argument("--key", default=None, help="Candidate ID column. Defaults to auto-detect.")
     parser.add_argument(

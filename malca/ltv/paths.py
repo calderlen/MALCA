@@ -3,9 +3,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from malca.config import DEFAULT_OUTPUT_DIR
 
-DEFAULT_LTV_RUN_DIR = Path("output") / "runs" / "ltv"
-MIGRATED_LTV_RUN_DIR = Path("output") / "runs" / "ltv_march18"
+DEFAULT_LTV_RUN_DIR = DEFAULT_OUTPUT_DIR / "runs" / "ltv"
+MIGRATED_LTV_RUN_DIR = DEFAULT_OUTPUT_DIR / "runs" / "ltv_march18"
 LEGACY_LTV_OUTPUT_DIR = Path("output") / "ltv"
 
 
@@ -78,7 +79,7 @@ def discover_ltv_output_dir() -> Path:
     if default_results.exists():
         return default_results
 
-    runs_root = Path("output") / "runs"
+    runs_root = DEFAULT_OUTPUT_DIR / "runs"
     for run_dir in sorted(runs_root.glob("ltv_*")):
         results = ltv_results_dir(run_dir)
         if results.exists():

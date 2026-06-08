@@ -134,7 +134,7 @@ def _run_pipeline_impl(set_progress, run_clicks, rerun_clicks, rerun_stats_click
                 ext_output = (
                     run_dir / "results"
                     if run_dir
-                    else (_APP_REPO_ROOT / "output" / "results")
+                    else (_APP_REPO_ROOT / DEFAULT_OUTPUT_DIR / "results")
                 )
                 ext_output.mkdir(parents=True, exist_ok=True)
                 df_ext = fetch_external_lcs(

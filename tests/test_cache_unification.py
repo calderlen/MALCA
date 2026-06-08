@@ -12,13 +12,15 @@ from malca import vetting
 
 
 def test_cache_defaults_are_under_output_cache() -> None:
-    assert config.MALCA_CACHE_ROOT == Path("output/cache")
-    assert config.DEFAULT_CACHE_DIR == Path("output/cache/catalogs")
-    assert config.GAIA_LOCAL_CATALOG == Path("output/cache/catalogs/gaia/gaia_dr3_crossmatched.parquet")
-    assert config.SKYPATROL_CACHE_DIR == Path("output/cache/lightcurves/skypatrol")
-    assert config.LTV_CACHE_DIR == Path("output/cache/joblib/ltv")
-    assert config.REVIEW_IMPORTED_LC_CACHE_DIR == Path("output/cache/review/imported_lightcurves")
-    assert vetting._vetting_cache_path(None, "simbad") == Path("output/cache/catalogs/vetting/vetting_simbad.parquet")
+    output_root = Path("output_migrated_camera_field_20260606")
+    assert config.DEFAULT_OUTPUT_DIR == output_root
+    assert config.MALCA_CACHE_ROOT == output_root / "cache"
+    assert config.DEFAULT_CACHE_DIR == output_root / "cache" / "catalogs"
+    assert config.GAIA_LOCAL_CATALOG == output_root / "cache" / "catalogs" / "gaia" / "gaia_dr3_crossmatched.parquet"
+    assert config.SKYPATROL_CACHE_DIR == output_root / "cache" / "lightcurves" / "skypatrol"
+    assert config.LTV_CACHE_DIR == output_root / "cache" / "joblib" / "ltv"
+    assert config.REVIEW_IMPORTED_LC_CACHE_DIR == output_root / "cache" / "review" / "imported_lightcurves"
+    assert vetting._vetting_cache_path(None, "simbad") == output_root / "cache" / "catalogs" / "vetting" / "vetting_simbad.parquet"
 
 
 def test_gaia_fetch_reads_legacy_default_and_migrates_to_new_cache(

@@ -5,8 +5,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+from malca.config import DEFAULT_OUTPUT_DIR
+
 def main():
-    runs_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("output/runs/stv")
+    runs_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_OUTPUT_DIR / "runs" / "stv"
 
     if not runs_dir.exists():
         print(f"Error: {runs_dir} does not exist")

@@ -37,6 +37,7 @@ from malca.config import (
     BASELINE_W0,
     CLEAN_LC_MAX_ERROR_ABSOLUTE,
     CLEAN_LC_MAX_ERROR_SIGMA,
+    DEFAULT_OUTPUT_DIR,
     LIGHT_CURVE_FILE_EXTENSION,
     LOGBF_THRESHOLD_DIP,
     LOGBF_THRESHOLD_JUMP,
@@ -171,7 +172,7 @@ PERIOD_MATCH_HARMONIC_FACTORS: tuple[float, ...] = (
 class BenchmarkConfig:
     bundle_lc_dir: Path = Path("output/runs/runs_march18_bundle_all/bundle_assets/lightcurves")
     lightcurve_file_ext: str | None = None
-    output_base_dir: Path = Path("output/diagnostics/periodicity_gate_injection_benchmark")
+    output_base_dir: Path = DEFAULT_OUTPUT_DIR / "diagnostics" / "periodicity_gate_injection_benchmark"
     run_tag: str | None = None
     smoke_mode: bool = False
     total_trials: int = 6000

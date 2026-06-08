@@ -29,7 +29,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from malca.fetch import cone_search, download_lightcurve_by_id
-from malca.config import SKYPATROL_CACHE_DIR
+from malca.config import DEFAULT_OUTPUT_DIR, SKYPATROL_CACHE_DIR
 
 
 def parse_asassn_microlens_csv(csv_path: Path) -> pd.DataFrame:
@@ -421,7 +421,7 @@ def main():
                         help='Maximum number of events to test')
     parser.add_argument('--workers', type=int, default=1,
                         help='Number of parallel workers')
-    parser.add_argument('--output', type=str, default='output/recovery_test',
+    parser.add_argument('--output', type=str, default=str(DEFAULT_OUTPUT_DIR / "recovery_test"),
                         help='Output directory')
     parser.add_argument('--input', type=str, default=None,
                         help='Path to known events CSV (default: input/asas_sn_microlens.csv)')

@@ -13,6 +13,7 @@ from pathlib import Path
 import pandas as pd
 import pyarrow.parquet as pq
 
+from malca.config import DEFAULT_OUTPUT_DIR
 from malca.table_io import read_feature_table, write_feature_table
 
 
@@ -61,15 +62,15 @@ def main():
     )
     parser.add_argument(
         "--runs-dir",
-        default="output/runs",
+        default=DEFAULT_OUTPUT_DIR / "runs",
         type=Path,
-        help="Parent directory containing run dirs (default: output/runs)",
+        help=f"Parent directory containing run dirs (default: {DEFAULT_OUTPUT_DIR / 'runs'})",
     )
     parser.add_argument(
         "--output",
-        default="output/all_candidates.parquet",
+        default=DEFAULT_OUTPUT_DIR / "all_candidates.parquet",
         type=Path,
-        help="Output parquet path (default: output/all_candidates.parquet)",
+        help=f"Output parquet path (default: {DEFAULT_OUTPUT_DIR / 'all_candidates.parquet'})",
     )
     parser.add_argument(
         "--mag-bins",

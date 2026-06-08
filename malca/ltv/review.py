@@ -7,7 +7,7 @@ candidates into a standalone LTV review DB (separate from STV candidates).
 Usage:
     # Python API used by malca ltv-pipeline
     from malca.ltv.review import ingest_ltv_results
-    n_total, n_new = ingest_ltv_results("output/runs/ltv/latest/review/review.db", ltv_df)
+    n_total, n_new = ingest_ltv_results("<ltv-run>/review/review.db", ltv_df)
 """
 from __future__ import annotations
 
@@ -364,7 +364,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--run-dir",
         default=str(DEFAULT_LTV_RUN_DIR),
         type=str,
-        help="LTV run directory for default input and review DB (default: output/runs/ltv)",
+        help=f"LTV run directory for default input and review DB (default: {DEFAULT_LTV_RUN_DIR})",
     )
     p.add_argument(
         "--input", "-i",

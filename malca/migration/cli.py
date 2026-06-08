@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from typing import Sequence
 
+from malca.config import DEFAULT_OUTPUT_DIR
 from malca.migration.core import migrate_tree
 
 
@@ -16,14 +17,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--input",
         type=Path,
-        default=Path("output"),
-        help="Input output tree or artifact to migrate. Default: output",
+        default=DEFAULT_OUTPUT_DIR,
+        help=f"Input output tree or artifact to migrate. Default: {DEFAULT_OUTPUT_DIR}",
     )
     parser.add_argument(
         "--output",
         type=Path,
         default=None,
-        help="Destination mirror tree. Default: output_migrated_<timestamp>",
+        help=f"Destination mirror tree. Default: {DEFAULT_OUTPUT_DIR}",
     )
     parser.add_argument(
         "--scan-only",

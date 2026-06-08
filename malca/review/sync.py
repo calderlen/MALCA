@@ -22,6 +22,7 @@ from malca.review.store import (
     _CANDIDATE_COLUMNS,
     _COL_NAMES,
     _COL_TYPE_MAP,
+    DEFAULT_DB_PATH,
     _as_bool,
     _parse_updated_at,
     _to_float,
@@ -847,13 +848,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     export_parser = subparsers.add_parser("export", help="Export review DB to reviews/*.jsonl and manifest")
-    export_parser.add_argument("--review-db", type=Path, default=Path("output/review/review.db"), help="Review SQLite DB path")
+    export_parser.add_argument("--review-db", type=Path, default=DEFAULT_DB_PATH, help="Review SQLite DB path")
     export_parser.add_argument("--output-dir", type=Path, default=Path("reviews"), help="Output review bundle directory")
     export_parser.add_argument("--hash-assets", action="store_true", help="Include SHA-256 hashes for resolved assets")
     export_parser.add_argument("--only-reviewed", action="store_true", help="Export only reviewed/non-unreviewed rows")
 
     import_parser = subparsers.add_parser("import", help="Import reviews/*.jsonl into a review DB")
-    import_parser.add_argument("--review-db", type=Path, default=Path("output/review/review.db"), help="Review SQLite DB path")
+    import_parser.add_argument("--review-db", type=Path, default=DEFAULT_DB_PATH, help="Review SQLite DB path")
     import_parser.add_argument("--input-dir", type=Path, default=Path("reviews"), help="Input review bundle directory")
     import_parser.add_argument("--replace", action="store_true", help="Replace the target DB before import")
 
