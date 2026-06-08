@@ -18,6 +18,7 @@ from malca.review.other_eb_triage import (
     scan_eb_candidates,
     select_example_candidates,
 )
+from malca.table_io import write_feature_table
 
 
 def _write_review_db(
@@ -285,18 +286,24 @@ def test_load_reviewed_other_subset_joins_exported_labels_by_candidate_id(tmp_pa
     candidates_path = tmp_path / "candidates.parquet"
     labels_path = tmp_path / "labels.parquet"
 
-    pd.DataFrame(
-        [
-            {"candidate_id": "A1", "dip_run_count": 2, "dipper_score": 8.0},
-            {"candidate_id": "A2", "dip_run_count": 1, "dipper_score": 3.0},
-        ]
-    ).to_parquet(candidates_path, index=False)
-    pd.DataFrame(
-        [
-            {"candidate_id": "A1", "event_class": "other", "status": "reviewed", "interest_score": 4},
-            {"candidate_id": "A2", "event_class": "dipper", "status": "reviewed", "interest_score": 2},
-        ]
-    ).to_parquet(labels_path, index=False)
+    write_feature_table(
+        pd.DataFrame(
+            [
+                {"candidate_id": "A1", "timescale": "stv", "dip_run_count": 2, "dipper_score": 8.0},
+                {"candidate_id": "A2", "timescale": "stv", "dip_run_count": 1, "dipper_score": 3.0},
+            ]
+        ),
+        candidates_path,
+    )
+    write_feature_table(
+        pd.DataFrame(
+            [
+                {"candidate_id": "A1", "timescale": "stv", "event_class": "other", "status": "reviewed", "interest_score": 4},
+                {"candidate_id": "A2", "timescale": "stv", "event_class": "dipper", "status": "reviewed", "interest_score": 2},
+            ]
+        ),
+        labels_path,
+    )
 
     subset = load_reviewed_other_subset(labels_path, candidates_path)
 

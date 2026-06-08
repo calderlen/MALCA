@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from malca.table_io import read_parquet_table
+from malca.table_io import read_feature_table
 
 
 BEST_FIELDS = [
@@ -134,7 +134,7 @@ def load_candidate_source(source_path: str | Path, source_kind: str | None = Non
     if kind == "db":
         return load_review_db(path)
     if kind == "parquet":
-        return read_parquet_table(path)
+        return read_feature_table(path)
     if kind == "csv":
         return pd.read_csv(path)
     raise ValueError(f"Unsupported source kind: {kind}")

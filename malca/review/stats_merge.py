@@ -10,6 +10,9 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from malca.derived_stats import DERIVED_FEATURE_COLUMNS, append_derived_features
+from malca.feature_layers import to_layer_first_mapping
+
 
 def _is_missing_value(value: object) -> bool:
     """Return True when a payload value should be treated as absent."""
@@ -86,6 +89,7 @@ def merge_stats_summary_into_payload(payload: dict, summary: dict) -> None:
         "median_abs_dev": "stats_median_abs_dev",
         "median_brp": "stats_median_brp",
         "percent_amplitude": "stats_percent_amplitude",
+        "ahl_ratio": "stats_ahl_ratio",
         "q31": "stats_q31",
         "skew": "stats_skew",
         "small_kurtosis": "stats_small_kurtosis",
@@ -124,6 +128,12 @@ def merge_stats_summary_into_payload(payload: dict, summary: dict) -> None:
         "harmonics_mse": "stats_harmonics_mse",
         "psi_cs": "stats_psi_cs",
         "psi_eta": "stats_psi_eta",
+        "lafler_kinman_t_time": "stats_lafler_kinman_t_time",
+        "lafler_kinman_t_phase": "stats_lafler_kinman_t_phase",
+        "lafler_kinman_delta": "stats_lafler_kinman_delta",
+        "eb_rminima": "stats_eb_rminima",
+        "eb_primary_min_depth": "stats_eb_primary_min_depth",
+        "eb_secondary_min_depth": "stats_eb_secondary_min_depth",
         # stochastic model features
         "gp_drw_sigma": "stats_gp_drw_sigma",
         "gp_drw_tau": "stats_gp_drw_tau",
@@ -137,6 +147,16 @@ def merge_stats_summary_into_payload(payload: dict, summary: dict) -> None:
         "camera_loo_corr_median": "stats_camera_loo_corr_median",
         "camera_loo_rms_max": "stats_camera_loo_rms_max",
     }
+    scalar_map.update({f"harmonics_a{k}": f"stats_harmonics_a{k}" for k in range(1, 8)})
+    scalar_map.update({f"harmonics_b{k}": f"stats_harmonics_b{k}" for k in range(1, 8)})
+    scalar_map.update({
+        f"window_alias_period_{k}": f"stats_window_alias_period_{k}"
+        for k in range(1, 6)
+    })
+    scalar_map.update({
+        f"window_alias_power_{k}": f"stats_window_alias_power_{k}"
+        for k in range(1, 6)
+    })
 
     for source_key, target_key in scalar_map.items():
         value = summary.get(source_key)
@@ -146,21 +166,14 @@ def merge_stats_summary_into_payload(payload: dict, summary: dict) -> None:
             continue
         payload[target_key] = value
 
-    # Backward compatibility for older summary payloads.
-    legacy_scalar_map = {
-        "excess_var": "stats_intrinsic_sigma_mag",
-        "pvar": "stats_constancy_p_value",
-    }
-    for source_key, target_key in legacy_scalar_map.items():
-        if target_key in payload:
-            continue
-        value = summary.get(source_key)
-        if _is_missing_value(value):
-            continue
-        if isinstance(value, (pd.DataFrame, pd.Series, dict, list, tuple, set)):
-            continue
-        payload[target_key] = value
-
+    derived_frame = append_derived_features(pd.DataFrame([payload]))
+    if not derived_frame.empty:
+        derived_row = derived_frame.iloc[0]
+        for col in DERIVED_FEATURE_COLUMNS:
+            value = derived_row.get(col)
+            if _is_missing_value(value):
+                continue
+            payload[col] = value
     err_stats = summary.get("error_and_snr_stats")
     if isinstance(err_stats, dict):
         for subkey, value in err_stats.items():
@@ -187,3 +200,7 @@ def merge_stats_summary_into_payload(payload: dict, summary: dict) -> None:
     by_camera = summary.get("by_camera")
     if isinstance(by_camera, pd.DataFrame) and not by_camera.empty:
         payload["n_cameras"] = int(len(by_camera))
+
+    layered = to_layer_first_mapping(payload, layer_values_as_json=False, run_derived=False)
+    payload.clear()
+    payload.update(layered)

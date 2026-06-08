@@ -22,9 +22,10 @@ from concurrent.futures import ProcessPoolExecutor
 from malca.candidates import passing_candidates_mask
 from malca.config import ASASSN_INDEX_PATH
 from malca.config import LTV_MAX_PM
+from malca.feature_layers import to_layer_first_frame, with_feature_columns
 from malca.product_schema import add_ltv_identity, assert_ltv_product_schema
 from malca.review.store import db_connect, import_candidates
-from malca.table_io import read_parquet_table, require_parquet_path
+from malca.table_io import read_feature_table, require_parquet_path
 from malca.ltv.paths import (
     DEFAULT_LTV_RUN_DIR,
     ltv_results_dir,
@@ -47,9 +48,21 @@ def map_ltv_columns(df: pd.DataFrame) -> pd.DataFrame:
     - canonical shared product columns preserved
     - derived review convenience flags for canonical crossmatch/context columns
     """
-    df = df.copy()
+    df = with_feature_columns(
+        df,
+        [
+            "failed_any",
+            "vsx_name",
+            "ltv_vsx_name",
+            "milliquas_name",
+            "gaia_alert_name",
+            "pm_total",
+            "pmra",
+            "pmdec",
+            "high_pm_flag",
+        ],
+    )
     df = add_ltv_identity(df)
-    assert_ltv_product_schema(df, stage="review_ingest")
     df["asas_sn_id"] = df["asas_sn_id"].astype(str)
 
     # Generic VSX catalog columns are canonical shared enrichment output;
@@ -65,11 +78,13 @@ def map_ltv_columns(df: pd.DataFrame) -> pd.DataFrame:
     if "gaia_alert_name" in df.columns and "ltv_gaia_alert_match" not in df.columns:
         df["ltv_gaia_alert_match"] = df["gaia_alert_name"].notna().astype(int)
 
-    if "pm_total" not in df.columns and {"pmra", "pmdec"}.issubset(df.columns):
+    pm_total_missing = "pm_total" not in df.columns or df["pm_total"].isna().all()
+    if pm_total_missing and {"pmra", "pmdec"}.issubset(df.columns):
         pmra = pd.to_numeric(df["pmra"], errors="coerce")
         pmdec = pd.to_numeric(df["pmdec"], errors="coerce")
         df["pm_total"] = np.sqrt(pmra * pmra + pmdec * pmdec)
-    if "pm_total" in df.columns and "high_pm_flag" not in df.columns:
+    high_pm_missing = "high_pm_flag" not in df.columns or df["high_pm_flag"].isna().all()
+    if "pm_total" in df.columns and high_pm_missing:
         pm_total = pd.to_numeric(df["pm_total"], errors="coerce")
         df["high_pm_flag"] = (pm_total > float(LTV_MAX_PM)).fillna(False).astype(int)
 
@@ -96,7 +111,9 @@ def map_ltv_columns(df: pd.DataFrame) -> pd.DataFrame:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
 
-    return df
+    out = to_layer_first_frame(df)
+    assert_ltv_product_schema(out, stage="review_ingest")
+    return out
 
 
 def enrich_with_stats(
@@ -159,7 +176,7 @@ def enrich_with_stats(
         )):
             results[idx] = result
 
-    return pd.DataFrame(results)
+    return to_layer_first_frame(pd.DataFrame(results))
 
 
 def _resolve_ltv_index_path(index_override: Path | None = None) -> Path | None:
@@ -185,6 +202,7 @@ def _add_gaia_ids_from_index_ltv(df: pd.DataFrame, index_path: Path, verbose: bo
     """
     if "asas_sn_id" not in df.columns:
         return df
+    df = with_feature_columns(df, ["gaia_id"])
     needs_fill = "gaia_id" not in df.columns or df["gaia_id"].isna().all()
     already_filled = "gaia_id" in df.columns and not df["gaia_id"].isna().any()
     if already_filled:
@@ -272,12 +290,11 @@ def ingest_ltv_results(
 
     df = map_ltv_columns(ltv_df)
 
-    if "failed_any" in df.columns:
-        pass_mask = passing_candidates_mask(df)
-        n_before = len(df)
-        df = df.loc[pass_mask].copy()
-        if verbose and len(df) != n_before:
-            print(f"[ltv-review] Importing {len(df):,}/{n_before:,} rows with failed_any=False")
+    pass_mask = passing_candidates_mask(df)
+    n_before = len(df)
+    df = df.loc[pass_mask].copy()
+    if verbose and len(df) != n_before:
+        print(f"[ltv-review] Importing {len(df):,}/{n_before:,} rows with failed_any=False")
 
     # Pre-populate gaia_id from the ASASSN index so characterize_candidates_df
     # has real Gaia IDs for all sources (not just the ~99K in the VSX crossmatch).
@@ -316,6 +333,8 @@ def ingest_ltv_results(
 
     if run_stats:
         df = enrich_with_stats(df, compute_ls=stats_compute_ls, n_workers=n_workers, verbose=verbose)
+    else:
+        df = to_layer_first_frame(df)
 
     conn = db_connect(db_path)
     total, new = import_candidates(
@@ -422,7 +441,7 @@ def main() -> None:
 
     # Single-file mode: preserve existing behaviour
     if input_path.is_file():
-        df = read_parquet_table(input_path)
+        df = read_feature_table(input_path)
 
         print(f"Loaded {len(df):,} rows from {input_path}")
 
@@ -458,7 +477,7 @@ def main() -> None:
             if args.verbose:
                 print(f"[ltv-review] Loading {fp} ...")
 
-            df = read_parquet_table(fp)
+            df = read_feature_table(fp)
 
             if args.verbose:
                 print(f"[ltv-review] Loaded {len(df):,} rows from {fp}")

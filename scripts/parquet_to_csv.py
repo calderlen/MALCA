@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from malca.table_io import read_feature_table
+
 
 def _parse_columns(values: list[str] | None) -> list[str] | None:
     if not values:
@@ -51,7 +53,7 @@ def convert_one(
 ) -> int:
     if output_path.exists() and not force:
         raise FileExistsError(f"Output exists, use --force to overwrite: {output_path}")
-    df = pd.read_parquet(input_path, columns=columns)
+    df = read_feature_table(input_path, columns=columns)
     if limit is not None:
         df = df.head(max(int(limit), 0))
     output_path.parent.mkdir(parents=True, exist_ok=True)

@@ -1526,12 +1526,7 @@ CATALOG_FETCHERS = {
 
 ALL_CATALOG_SOURCES = tuple(CATALOG_FETCHERS)
 FAR_IR_CATALOG_SOURCES = ("akari", "iras", "herschel")
-DEFAULT_PIPELINE_SED_SOURCES = ALL_CATALOG_SOURCES
-
-
-def _include_mandatory_far_ir(sources: Iterable[str]) -> tuple[str, ...]:
-    requested = tuple(str(x).strip().lower() for x in sources if str(x).strip())
-    return requested + tuple(source for source in FAR_IR_CATALOG_SOURCES if source not in requested)
+DEFAULT_PIPELINE_SED_SOURCES = ("payload", "ps1", "skymapper", "sdss")
 
 
 def resolve_sed_sources(sources: Iterable[str] | str = "default") -> tuple[str, ...]:
@@ -1542,11 +1537,11 @@ def resolve_sed_sources(sources: Iterable[str] | str = "default") -> tuple[str, 
         if text == "all":
             return ALL_CATALOG_SOURCES
         if text in {"far_ir", "far-ir", "farir"}:
-            return ALL_CATALOG_SOURCES
+            return FAR_IR_CATALOG_SOURCES
         requested = tuple(x.strip().lower() for x in text.split(",") if x.strip())
     else:
         requested = tuple(str(x).strip().lower() for x in sources if str(x).strip())
-    return _include_mandatory_far_ir(requested)
+    return requested
 
 
 def _normalize_source_name(value: object) -> str:

@@ -106,6 +106,9 @@ def _render_stat_cards(stat_rows: list[tuple[str, str]]) -> list:
         "stats_variability_lomb_scargle_best_period_days": "Lomb-Scargle best period (days)",
         "stats_variability_lomb_scargle_peak_power": "Lomb-Scargle peak power",
         "stats_variability_lomb_scargle_fap": "Lomb-Scargle FAP",
+        "stats_lafler_kinman_t_time": r"Lafler-Kinman $T(t)$",
+        "stats_lafler_kinman_t_phase": r"Lafler-Kinman $T(\phi|P)$",
+        "stats_lafler_kinman_delta": r"Lafler-Kinman $\delta$",
         "stats_trend_slope_mag_per_day": r"$\mathrm{d}m/\mathrm{d}t$ (mag/day)",
         "stats_trend_slope_mag_per_year": r"$\mathrm{d}m/\mathrm{d}t$ (mag/year)",
         "stats_trend_r2": r"Trend $R^2$",
@@ -135,6 +138,10 @@ def _render_stat_cards(stat_rows: list[tuple[str, str]]) -> list:
         "stats_beyond_1_std": "Beyond 1 std",
         "stats_small_kurtosis": "Small kurtosis",
         "stats_pair_slope_trend": "Pair slope trend",
+        "stats_ahl_ratio": "AHL bright/faint ratio",
+        "stats_eb_rminima": "EB minimum depth ratio",
+        "stats_eb_primary_min_depth": "EB primary minimum depth",
+        "stats_eb_secondary_min_depth": "EB secondary minimum depth",
         "stats_harmonics_mse": r"$\mathrm{MSE}$ ($\mathrm{mag}^2$)",
         "stats_harmonics_order": "Recommended harmonic order",
         "stats_harmonics_period": "Adopted period (d)",
@@ -147,10 +154,10 @@ def _render_stat_cards(stat_rows: list[tuple[str, str]]) -> list:
         "stats_asassn_fields": "ASAS-SN fields",
         "stats_asassn_field_count": "ASAS-SN field count",
         "stats_asassn_field_key_fraction": "ASAS-SN field fraction",
-        "stats_camera_field_key": "Camera-field",
-        "stats_camera_fields": "Camera-fields",
-        "stats_camera_field_count": "Camera-field count",
-        "stats_camera_field_key_fraction": "Camera-field fraction",
+        "stats_camera_name_key": "Camera name",
+        "stats_camera_names": "Camera names",
+        "stats_camera_name_count": "Camera name count",
+        "stats_camera_name_key_fraction": "Camera name fraction",
         "ltv_median": "Median (mag)",
         "ltv_median_err": "Median err proxy (mag)",
         "time_span_days": "Time span (days)",
@@ -159,6 +166,17 @@ def _render_stat_cards(stat_rows: list[tuple[str, str]]) -> list:
         "ltv_vg_overlap_days": "V/g overlap (days)",
         "ltv_vg_overlap_fraction": "V/g overlap fraction",
         "filtered_cams": "Filtered cameras",
+        "derived_bp_rp": r"Derived BP$-$RP",
+        "derived_j_k": r"Derived J$-$Ks",
+        "derived_mrp": r"Derived $M_{RP}$",
+        "derived_mks": r"Derived $M_{Ks}$",
+        "derived_wrp": r"Derived $W_{RP}$",
+        "derived_wjk": r"Derived $W_{JK}$",
+        "derived_harmonics_r32": r"Amplitude ratio $R_{32}$",
+        "derived_harmonics_r42": r"Amplitude ratio $R_{42}$",
+        "derived_harmonics_r43": r"Amplitude ratio $R_{43}$",
+        "derived_harmonics_a4_a2": r"Fourier coefficient ratio $a_4/a_2$",
+        "derived_harmonics_b4_b2": r"Fourier coefficient ratio $b_4/b_2$",
     }
 
     alerce_feature_keys = {
@@ -175,6 +193,7 @@ def _render_stat_cards(stat_rows: list[tuple[str, str]]) -> list:
         "stats_median_abs_dev",
         "stats_median_brp",
         "stats_percent_amplitude",
+        "stats_ahl_ratio",
         "stats_q31",
         "stats_skew",
         "stats_small_kurtosis",
@@ -197,6 +216,7 @@ def _render_stat_cards(stat_rows: list[tuple[str, str]]) -> list:
         "Variability",
         "Trend",
         "Harmonics",
+        "Derived Features",
         "Stochastic Models",
         "MHPS / Structure Function",
         "ALeRCE Features",
@@ -207,7 +227,7 @@ def _render_stat_cards(stat_rows: list[tuple[str, str]]) -> list:
     def _stat_group(key: str) -> str:
         if key == "filtered_cams":
             return "Camera Diagnostics"
-        if key.startswith("stats_asassn_field_") or key.startswith("stats_camera_field_"):
+        if key.startswith("stats_asassn_field_") or key.startswith("stats_camera_name_"):
             return "Camera Diagnostics"
         if key.startswith("ltv_stoch_"):
             return "LTV Stochastic"
@@ -226,7 +246,12 @@ def _render_stat_cards(stat_rows: list[tuple[str, str]]) -> list:
             return "Coverage & Cadence"
         if key.startswith("stats_photometry_") or key.startswith("stats_error_and_snr_stats_") or key.startswith("stats_clipped_") or key == "stats_n_outliers_removed_robust_3sigma":
             return "Photometry & SNR"
-        if key.startswith("stats_variability_lomb_scargle_") or key.startswith("stats_psi_"):
+        if (
+            key.startswith("stats_variability_lomb_scargle_")
+            or key.startswith("stats_psi_")
+            or key.startswith("stats_lafler_kinman_")
+            or key.startswith("stats_window_alias_")
+        ):
             return "Periodicity"
         if key.startswith("stats_variability_"):
             return "Variability"
@@ -234,6 +259,10 @@ def _render_stat_cards(stat_rows: list[tuple[str, str]]) -> list:
             return "Trend"
         if key.startswith("stats_harmonics_"):
             return "Harmonics"
+        if key.startswith("stats_eb_"):
+            return "Harmonics"
+        if key.startswith("derived_"):
+            return "Derived Features"
         if key.startswith("stats_gp_drw_") or key.startswith("stats_iar_"):
             return "Stochastic Models"
         if key.startswith("stats_mhps_") or key.startswith("stats_sf_ml_"):
@@ -295,6 +324,10 @@ def _render_stat_cards(stat_rows: list[tuple[str, str]]) -> list:
         if mag_match:
             n = mag_match.group(1)
             return rf"Amplitude $A_{{{n}}}$ (mag)"
+        coeff_match = re.fullmatch(r"stats_harmonics_([ab])(\d+)", key)
+        if coeff_match:
+            coeff, n = coeff_match.groups()
+            return rf"Fourier coefficient ${coeff}_{{{n}}}$"
         ratio_match = re.fullmatch(r"stats_harmonics_r(\d+)1", key)
         if ratio_match:
             n = ratio_match.group(1)

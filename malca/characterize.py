@@ -59,8 +59,9 @@ from malca.config import (
     GAIA_LOCAL_CATALOG, LEGACY_GAIA_CACHE_FILE, LEGACY_GAIA_LOCAL_CATALOG,
 )
 from malca.candidates import select_passing_candidates_if_present
+from malca.feature_layers import to_layer_first_frame
 from malca.gaia_ids import normalize_gaia_source_ids, parse_gaia_source_id
-from malca.table_io import read_parquet_table, write_parquet_table
+from malca.table_io import read_feature_table, read_parquet_table, write_feature_table
 from malca.vsx.metadata import normalize_asas_sn_ids, normalize_vsx_match_columns, select_best_vsx_matches
 
 
@@ -2196,6 +2197,8 @@ def characterize_candidates_df(
         if checkpoint_path:
             _save_char_checkpoint(df_char, checkpoint_path)
 
+    df_char = to_layer_first_frame(df_char)
+
     # Clean up checkpoint on success
     if checkpoint_path and Path(checkpoint_path).exists():
         Path(checkpoint_path).unlink()
@@ -2240,7 +2243,7 @@ def main():
     
     # Load input
     print(f"Loading {args.input}...")
-    df = read_parquet_table(args.input)
+    df = read_feature_table(args.input)
     if not getattr(args, "all_candidates", False):
         df = select_passing_candidates_if_present(df, printer=print)
         
@@ -2264,7 +2267,7 @@ def main():
     # Save results
     print("Saving results...")
     output_path = args.output.expanduser()
-    write_parquet_table(df_char, output_path)
+    write_feature_table(df_char, output_path)
         
     print(f"Saved to {output_path}")
 

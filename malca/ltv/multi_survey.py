@@ -8,8 +8,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from malca.config import GAIA_TCB_EPOCH_JD, MJD_TO_JD, SKYPATROL_JD_OFFSET, TESS_BTJD_OFFSET
-from malca.table_io import read_parquet_table, write_parquet_table
+from malca.config import GAIA_TCB_EPOCH_JD, KEPLER_BKJD_OFFSET, MJD_TO_JD, SKYPATROL_JD_OFFSET, TESS_BTJD_OFFSET
+from malca.table_io import read_parquet_table, write_feature_table
 
 
 LTV_MS_FEATURE_VERSION = "1"
@@ -40,11 +40,62 @@ LTV_MS_FEATURE_COLUMN_SPECS: tuple[tuple[str, str, str], ...] = (
     ("ltv_ms_neowise_w2_range", "REAL", "float"),
     ("ltv_ms_neowise_w2_median", "REAL", "float"),
     ("ltv_ms_neowise_w2_slope_per_year", "REAL", "float"),
+    ("ltv_ms_allwise_mep_n_points", "INTEGER", "float"),
+    ("ltv_ms_allwise_mep_time_span_days", "REAL", "float"),
+    ("ltv_ms_allwise_mep_w1_range", "REAL", "float"),
+    ("ltv_ms_allwise_mep_w1_median", "REAL", "float"),
+    ("ltv_ms_allwise_mep_w1_slope_per_year", "REAL", "float"),
+    ("ltv_ms_allwise_mep_w2_range", "REAL", "float"),
+    ("ltv_ms_allwise_mep_w2_median", "REAL", "float"),
+    ("ltv_ms_allwise_mep_w2_slope_per_year", "REAL", "float"),
+    ("ltv_ms_allwise_mep_w3_range", "REAL", "float"),
+    ("ltv_ms_allwise_mep_w3_median", "REAL", "float"),
+    ("ltv_ms_allwise_mep_w3_slope_per_year", "REAL", "float"),
+    ("ltv_ms_allwise_mep_w4_range", "REAL", "float"),
+    ("ltv_ms_allwise_mep_w4_median", "REAL", "float"),
+    ("ltv_ms_allwise_mep_w4_slope_per_year", "REAL", "float"),
     ("ltv_ms_tess_n_points", "INTEGER", "float"),
     ("ltv_ms_tess_time_span_days", "REAL", "float"),
     ("ltv_ms_tess_flux_range", "REAL", "float"),
     ("ltv_ms_tess_flux_median", "REAL", "float"),
     ("ltv_ms_tess_flux_slope_per_year", "REAL", "float"),
+    ("ltv_ms_kepler_n_points", "INTEGER", "float"),
+    ("ltv_ms_kepler_time_span_days", "REAL", "float"),
+    ("ltv_ms_kepler_flux_range", "REAL", "float"),
+    ("ltv_ms_kepler_flux_median", "REAL", "float"),
+    ("ltv_ms_kepler_flux_slope_per_year", "REAL", "float"),
+    ("ltv_ms_aavso_n_points", "INTEGER", "float"),
+    ("ltv_ms_aavso_time_span_days", "REAL", "float"),
+    ("ltv_ms_aavso_mag_range", "REAL", "float"),
+    ("ltv_ms_aavso_mag_median", "REAL", "float"),
+    ("ltv_ms_aavso_mag_slope_per_year", "REAL", "float"),
+    ("ltv_ms_ogle_n_points", "INTEGER", "float"),
+    ("ltv_ms_ogle_time_span_days", "REAL", "float"),
+    ("ltv_ms_ogle_mag_range", "REAL", "float"),
+    ("ltv_ms_ogle_mag_median", "REAL", "float"),
+    ("ltv_ms_ogle_mag_slope_per_year", "REAL", "float"),
+    ("ltv_ms_stripe82_n_points", "INTEGER", "float"),
+    ("ltv_ms_stripe82_time_span_days", "REAL", "float"),
+    ("ltv_ms_stripe82_mag_range", "REAL", "float"),
+    ("ltv_ms_stripe82_mag_median", "REAL", "float"),
+    ("ltv_ms_stripe82_mag_slope_per_year", "REAL", "float"),
+    ("ltv_ms_vvvx_virac_n_points", "INTEGER", "float"),
+    ("ltv_ms_vvvx_virac_time_span_days", "REAL", "float"),
+    ("ltv_ms_vvvx_virac_z_range", "REAL", "float"),
+    ("ltv_ms_vvvx_virac_z_median", "REAL", "float"),
+    ("ltv_ms_vvvx_virac_z_slope_per_year", "REAL", "float"),
+    ("ltv_ms_vvvx_virac_y_range", "REAL", "float"),
+    ("ltv_ms_vvvx_virac_y_median", "REAL", "float"),
+    ("ltv_ms_vvvx_virac_y_slope_per_year", "REAL", "float"),
+    ("ltv_ms_vvvx_virac_j_range", "REAL", "float"),
+    ("ltv_ms_vvvx_virac_j_median", "REAL", "float"),
+    ("ltv_ms_vvvx_virac_j_slope_per_year", "REAL", "float"),
+    ("ltv_ms_vvvx_virac_h_range", "REAL", "float"),
+    ("ltv_ms_vvvx_virac_h_median", "REAL", "float"),
+    ("ltv_ms_vvvx_virac_h_slope_per_year", "REAL", "float"),
+    ("ltv_ms_vvvx_virac_ks_range", "REAL", "float"),
+    ("ltv_ms_vvvx_virac_ks_median", "REAL", "float"),
+    ("ltv_ms_vvvx_virac_ks_slope_per_year", "REAL", "float"),
     ("ltv_ms_ps1_n_points", "INTEGER", "float"),
     ("ltv_ms_ps1_time_span_days", "REAL", "float"),
     ("ltv_ms_ps1_mag_range", "REAL", "float"),
@@ -65,7 +116,13 @@ _SURVEY_PREFIXES = {
     "ztf": "ztf_lc",
     "gaia_epoch": "gaia_epoch_lc",
     "neowise": "neowise_lc",
+    "allwise_mep": "allwise_mep_lc",
     "tess": "tess_lc",
+    "kepler": "kepler_lc",
+    "aavso": "aavso_lc",
+    "ogle": "ogle_lc",
+    "stripe82": "stripe82_lc",
+    "vvvx_virac": "vvvx_virac_lc",
     "ps1": "ps1_lc",
     "crts": "crts_lc",
 }
@@ -137,6 +194,8 @@ def _time_jd(df: pd.DataFrame, survey: str) -> pd.Series:
         return time + MJD_TO_JD
     if survey == "tess":
         return time + TESS_BTJD_OFFSET
+    if survey == "kepler":
+        return time + KEPLER_BKJD_OFFSET
     if survey == "gaia_epoch":
         return time + GAIA_TCB_EPOCH_JD
     return time + SKYPATROL_JD_OFFSET
@@ -190,21 +249,66 @@ def _summarize_tess(df: pd.DataFrame) -> dict[str, object]:
     return _summarize_value_series("tess", df, "tess", "flux", flux)
 
 
-def _summarize_neowise(df: pd.DataFrame) -> dict[str, object]:
-    time = _time_jd(df, "neowise")
-    w1 = _numeric_col(df, ("w1mpro", "w1_mag", "w1"))
-    w2 = _numeric_col(df, ("w2mpro", "w2_mag", "w2"))
-    n_points = int((w1.notna() | w2.notna()).sum())
-    finite_time = time.loc[w1.notna() | w2.notna()].dropna()
-    out = {
-        "ltv_ms_neowise_n_points": n_points,
-        "ltv_ms_neowise_time_span_days": float(finite_time.max() - finite_time.min()) if len(finite_time) >= 2 else np.nan,
+def _summarize_kepler(df: pd.DataFrame) -> dict[str, object]:
+    flux = _numeric_col(df, ("flux", "sap_flux", "pdcsap_flux"))
+    return _summarize_value_series("kepler", df, "kepler", "flux", flux)
+
+
+def _summarize_wise_bands(prefix: str, df: pd.DataFrame, survey: str, bands: tuple[str, ...]) -> dict[str, object]:
+    time = _time_jd(df, survey)
+    values_by_band = {
+        band: _numeric_col(df, (f"{band}mpro", f"{band}_mag", band, band.upper()))
+        for band in bands
     }
-    for band, values in (("w1", w1), ("w2", w2)):
+    any_valid = pd.Series(False, index=df.index)
+    for values in values_by_band.values():
+        any_valid = any_valid | values.notna()
+    n_points = int(any_valid.sum())
+    finite_time = time.loc[any_valid].dropna()
+    out = {
+        f"ltv_ms_{prefix}_n_points": n_points,
+        f"ltv_ms_{prefix}_time_span_days": float(finite_time.max() - finite_time.min()) if len(finite_time) >= 2 else np.nan,
+    }
+    for band, values in values_by_band.items():
         valid = values.dropna()
-        out[f"ltv_ms_neowise_{band}_range"] = float(valid.max() - valid.min()) if len(valid) >= 2 else np.nan
-        out[f"ltv_ms_neowise_{band}_median"] = float(valid.median()) if len(valid) else np.nan
-        out[f"ltv_ms_neowise_{band}_slope_per_year"] = _slope_per_year(time, values)
+        out[f"ltv_ms_{prefix}_{band}_range"] = float(valid.max() - valid.min()) if len(valid) >= 2 else np.nan
+        out[f"ltv_ms_{prefix}_{band}_median"] = float(valid.median()) if len(valid) else np.nan
+        out[f"ltv_ms_{prefix}_{band}_slope_per_year"] = _slope_per_year(time, values)
+    return out
+
+
+def _summarize_neowise(df: pd.DataFrame) -> dict[str, object]:
+    return _summarize_wise_bands("neowise", df, "neowise", ("w1", "w2"))
+
+
+def _summarize_allwise_mep(df: pd.DataFrame) -> dict[str, object]:
+    return _summarize_wise_bands("allwise_mep", df, "allwise_mep", ("w1", "w2", "w3", "w4"))
+
+
+def _summarize_band_mag_survey(prefix: str, df: pd.DataFrame, survey: str, bands: tuple[str, ...]) -> dict[str, object]:
+    time = _time_jd(df, survey)
+    band_col = _first_existing_col(df, ("band", "filter", "Filter"))
+    mag = _numeric_col(df, ("mag", "m", "Mag", "MAG", "magnitude", "mag_psf"))
+    if band_col is None:
+        return _summarize_value_series(prefix, df, survey, "mag", mag)
+
+    band_values = df[band_col].astype(str).str.strip().str.lower()
+    out: dict[str, object] = {
+        f"ltv_ms_{prefix}_n_points": int(mag.notna().sum()),
+        f"ltv_ms_{prefix}_time_span_days": np.nan,
+    }
+    valid_all = mag.notna()
+    finite_time = time.loc[valid_all].dropna()
+    if len(finite_time) >= 2:
+        out[f"ltv_ms_{prefix}_time_span_days"] = float(finite_time.max() - finite_time.min())
+    for band in bands:
+        mask = (band_values == band.lower()) & mag.notna()
+        valid = mag.loc[mask].dropna().astype(float)
+        out[f"ltv_ms_{prefix}_{band.lower()}_range"] = float(valid.max() - valid.min()) if len(valid) >= 2 else np.nan
+        out[f"ltv_ms_{prefix}_{band.lower()}_median"] = float(valid.median()) if len(valid) else np.nan
+        band_value = pd.Series(np.nan, index=df.index, dtype=float)
+        band_value.loc[mask] = mag.loc[mask]
+        out[f"ltv_ms_{prefix}_{band.lower()}_slope_per_year"] = _slope_per_year(time, band_value)
     return out
 
 
@@ -246,6 +350,32 @@ def compute_ltv_multi_survey_features(
             features.update(summary)
             any_data = any_data or int(summary.get("ltv_ms_tess_n_points") or 0) > 0
 
+        kepler = _read_external_lc(root, "kepler", candidate_id)
+        if not kepler.empty:
+            summary = _summarize_kepler(kepler)
+            features.update(summary)
+            any_data = any_data or int(summary.get("ltv_ms_kepler_n_points") or 0) > 0
+
+        allwise_mep = _read_external_lc(root, "allwise_mep", candidate_id)
+        if not allwise_mep.empty:
+            summary = _summarize_allwise_mep(allwise_mep)
+            features.update(summary)
+            any_data = any_data or int(summary.get("ltv_ms_allwise_mep_n_points") or 0) > 0
+
+        for survey in ("aavso", "ogle", "stripe82"):
+            lc = _read_external_lc(root, survey, candidate_id)
+            if lc.empty:
+                continue
+            summary = _summarize_mag_survey(lc, survey)
+            features.update(summary)
+            any_data = any_data or int(summary.get(f"ltv_ms_{survey}_n_points") or 0) > 0
+
+        vvvx_virac = _read_external_lc(root, "vvvx_virac", candidate_id)
+        if not vvvx_virac.empty:
+            summary = _summarize_band_mag_survey("vvvx_virac", vvvx_virac, "vvvx_virac", ("z", "y", "j", "h", "ks"))
+            features.update(summary)
+            any_data = any_data or int(summary.get("ltv_ms_vvvx_virac_n_points") or 0) > 0
+
         if any_data:
             features["ltv_ms_feature_status"] = "ok"
         rows.append(features)
@@ -263,5 +393,5 @@ def write_ltv_multi_survey_features(
     external_lc_dir: Path | str | None,
 ) -> pd.DataFrame:
     out = compute_ltv_multi_survey_features(df, external_lc_dir=external_lc_dir)
-    write_parquet_table(out, output_path)
+    write_feature_table(out, output_path)
     return out

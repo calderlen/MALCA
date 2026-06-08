@@ -59,7 +59,7 @@ from malca.stv.score import compute_event_score
 from concurrent.futures import ProcessPoolExecutor
 from malca.stats import median_dt, compute_stats, _enrich_row_worker
 from malca.stv.tag import apply_tags
-from malca.table_io import read_parquet_table, write_parquet_table
+from malca.table_io import read_feature_table, read_parquet_table, write_parquet_table
 from malca.stv.triggering import normalize_trigger_block
 from malca.utils import read_lc_dat2
 
@@ -208,7 +208,7 @@ def load_candidates_df(cand_path: Path) -> pd.DataFrame:
     if path.suffix.lower() == ".csv":
         df = pd.read_csv(path)
     else:
-        df = read_parquet_table(path)
+        df = read_feature_table(path)
     if "source_id" not in df.columns and "asas_sn_id" in df.columns:
         df["source_id"] = df["asas_sn_id"].astype(str)
     if "candidate_id" not in df.columns:

@@ -69,8 +69,8 @@ def _selected_bands(selected_bands: list[str] | None, available_labels: list[str
 
 def _axis_label_for_offset(jd_offset: float) -> str:
     if abs(float(jd_offset) - round(float(jd_offset))) < 1e-6:
-        return rf"$\mathrm{{JD}} - {int(round(float(jd_offset)))}$"
-    return rf"$\mathrm{{JD}} - {float(jd_offset):.1f}$"
+        return rf"$\mathrm{{JD}} - {int(round(float(jd_offset)))}\ [\mathrm{{d}}]$"
+    return rf"$\mathrm{{JD}} - {float(jd_offset):.1f}\ [\mathrm{{d}}]$"
 
 
 def _plot_points(

@@ -10,8 +10,9 @@ from typing import Any, Iterable
 
 import pandas as pd
 
+from malca.feature_layers import with_feature_columns
 from malca.ltv.paths import discover_ltv_output_dir, default_ltv_review_db_for_output
-from malca.table_io import read_parquet_table
+from malca.table_io import read_feature_table
 
 
 def _read_table(path: str | Path) -> pd.DataFrame:
@@ -21,7 +22,7 @@ def _read_table(path: str | Path) -> pd.DataFrame:
         return pd.read_csv(table_path)
     if suffix == ".json":
         return pd.read_json(table_path)
-    return read_parquet_table(table_path)
+    return read_feature_table(table_path)
 
 
 def _read_config(path: str | Path | None) -> dict[str, Any]:
@@ -38,15 +39,18 @@ def _read_config(path: str | Path | None) -> dict[str, Any]:
 
 
 def _key_series(df: pd.DataFrame, key: str) -> pd.Series:
+    df = with_feature_columns(df, [key])
     if key in df.columns:
         return df[key].fillna("").astype(str)
-    for fallback in ("path", "candidate_id", "asas_sn_id", "source_id", "gaia_id"):
+    for fallback in ("lc_path", "candidate_id", "asas_sn_id", "source_id", "gaia_id"):
+        df = with_feature_columns(df, [fallback])
         if fallback in df.columns:
             return df[fallback].fillna("").astype(str)
     raise ValueError(f"Key column {key!r} was not found and no fallback ID column is available.")
 
 
 def _table_summary(df: pd.DataFrame, key: str) -> dict[str, Any]:
+    df = with_feature_columns(df, ["failed_any", "filter_reason"])
     keys = _key_series(df, key)
     nonempty = keys[keys != ""]
     summary: dict[str, Any] = {

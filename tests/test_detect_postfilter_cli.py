@@ -34,6 +34,7 @@ from malca.stv.pipeline import (
     main as detect_main,
 )
 from malca.config import EVENTS_OUTPUT_CHUNK_SIZE
+from malca.table_io import write_feature_table
 
 
 def _base_args() -> argparse.Namespace:
@@ -131,12 +132,17 @@ def test_bundle_lightcurves_reads_only_passing_candidates(tmp_path: Path) -> Non
     fail_lc = tmp_path / "fail.dat2"
     pass_lc.write_text("1 13.0 0.1\n", encoding="ascii")
     fail_lc.write_text("1 14.0 0.1\n", encoding="ascii")
-    pd.DataFrame(
-        {
-            "lc_path": [str(pass_lc), str(fail_lc)],
-            "failed_any": [False, True],
-        }
-    ).to_parquet(results_dir / "lc_events_filtered.parquet", index=False)
+    write_feature_table(
+        pd.DataFrame(
+            {
+                "candidate_id": ["stv_pass", "stv_fail"],
+                "timescale": ["stv", "stv"],
+                "lc_path": [str(pass_lc), str(fail_lc)],
+                "failed_any": [False, True],
+            }
+        ),
+        results_dir / "lc_events_filtered.parquet",
+    )
 
     files = _collect_bundle_lightcurve_files(tmp_path)
 
@@ -204,8 +210,12 @@ def test_extended_enrichment_helpers_use_passers_and_safe_defaults(tmp_path: Pat
     assert kwargs["run_neowise"] is True
     assert kwargs["run_ps1"] is True
     assert kwargs["run_crts"] is True
-    assert kwargs["run_kepler"] is False
-    assert kwargs["run_aavso"] is False
+    assert kwargs["run_kepler"] is True
+    assert kwargs["run_aavso"] is True
+    assert kwargs["run_ogle"] is True
+    assert kwargs["run_stripe82"] is True
+    assert kwargs["run_allwise_mep"] is True
+    assert kwargs["run_vvvx_virac"] is True
     assert kwargs["workers"] == 7
     assert kwargs["refresh_cache"] is True
     assert captured["multi_ids"] == ["stv_C1"]
@@ -497,13 +507,15 @@ def test_pipeline_event_subprocesses_always_use_parquet_chunk(tmp_path: Path, mo
         paths = [line.strip() for line in input_file.read_text(encoding="ascii").splitlines() if line.strip()]
         captured_paths.extend(paths)
         output_dir.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame(
+        write_feature_table(pd.DataFrame(
             {
                 "lc_path": paths,
+                "candidate_id": [Path(path).stem for path in paths],
+                "timescale": ["stv"] * len(paths),
                 "dip_significant": [False] * len(paths),
                 "jump_significant": [False] * len(paths),
             }
-        ).to_parquet(output_dir / "chunk_000000.parquet", index=False)
+        ), output_dir / "chunk_000000.parquet")
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr("malca.stv.pipeline.subprocess.run", fake_run)

@@ -60,7 +60,8 @@ from malca.ltv.filter import (
     filter_south_pole,
     filter_high_proper_motion,
 )
-from malca.table_io import read_parquet_table, write_parquet_table
+from malca.feature_layers import to_layer_first_frame, with_feature_columns
+from malca.table_io import read_feature_table, read_parquet_table, write_feature_table
 from malca.ltv.paths import (
     DEFAULT_LTV_RUN_DIR,
     ltv_all_external_lcs_output_path,
@@ -602,7 +603,26 @@ def _stage_defaults_to_ltv_extended(stage: str) -> bool:
 
 
 def _passing_ltv_rows(df: pd.DataFrame) -> pd.DataFrame:
-    return select_passing_candidates(df).reset_index(drop=True)
+    return select_passing_candidates(
+        with_feature_columns(
+            df,
+            [
+                "failed_any",
+                "ra",
+                "dec",
+                "ltv_slope",
+                "ltv_max_diff",
+                "ltv_median",
+                "baseline_mag",
+                "ltv_dispersion",
+                "ltv_median_err",
+                "pm_total",
+                "high_pm_flag",
+                "neighbor_pm_contam",
+                "crowding_count",
+            ],
+        )
+    ).reset_index(drop=True)
 
 
 def _ensure_ltv_candidate_id(df: pd.DataFrame) -> pd.DataFrame:
@@ -610,9 +630,9 @@ def _ensure_ltv_candidate_id(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _write_ltv_candidate_table(df: pd.DataFrame, path: Path, *, stage: str) -> pd.DataFrame:
-    out = _ensure_ltv_candidate_id(df)
+    out = to_layer_first_frame(_ensure_ltv_candidate_id(df))
     assert_ltv_product_schema(out, stage=stage)
-    write_parquet_table(out, path)
+    write_feature_table(out, path)
     return out
 
 
@@ -621,6 +641,7 @@ def _merge_ltv_candidate_columns(
     extra: pd.DataFrame,
     value_cols: list[str] | tuple[str, ...],
 ) -> pd.DataFrame:
+    extra = with_feature_columns(extra, value_cols)
     return merge_candidate_columns(
         _ensure_ltv_candidate_id(base),
         _ensure_ltv_candidate_id(extra),
@@ -730,15 +751,32 @@ def _write_filtered_audit(
     filtered_path = ltv_filtered_output_path(mag_bin, run_dir)
 
     if filtered_path.exists() and not args.overwrite:
-        audit = read_parquet_table(filtered_path)
+        audit = read_feature_table(filtered_path)
         assert_ltv_product_schema(audit, stage="ltv-filtered")
         return filtered_path, audit, _passing_ltv_rows(audit)
 
     if not core_path.exists():
         raise FileNotFoundError(f"LTV core output not found: {core_path}")
 
-    core_df = read_parquet_table(core_path)
-    assert_ltv_product_schema(core_df, stage="ltv-core")
+    raw_core_df = read_feature_table(core_path)
+    assert_ltv_product_schema(raw_core_df, stage="ltv-core")
+    core_df = with_feature_columns(
+        raw_core_df,
+        [
+            "ra",
+            "dec",
+            "ltv_slope",
+            "ltv_max_diff",
+            "ltv_median",
+            "baseline_mag",
+            "ltv_dispersion",
+            "ltv_median_err",
+            "pm_total",
+            "high_pm_flag",
+            "neighbor_pm_contam",
+            "crowding_count",
+        ],
+    )
     if args.skip_filters:
         audit = _ensure_ltv_candidate_id(core_df)
         for col in LTV_AUDIT_FAILED_COLUMNS.values():
@@ -772,12 +810,27 @@ def _write_pipeline_candidates(
 ) -> tuple[Path, pd.DataFrame]:
     output_path = ltv_pipeline_output_path(mag_bin, run_dir)
     if output_path.exists() and not args.overwrite:
-        df = read_parquet_table(output_path)
+        df = read_feature_table(output_path)
         assert_ltv_product_schema(df, stage="ltv-pipeline")
         return output_path, df
 
     df = run_full_pipeline(
-        passers,
+        with_feature_columns(
+            passers,
+            [
+                "ra",
+                "dec",
+                "ltv_slope",
+                "ltv_max_diff",
+                "ltv_median",
+                "baseline_mag",
+                "ltv_dispersion",
+                "ltv_median_err",
+                "pm_total",
+                "neighbor_pm_contam",
+                "crowding_count",
+            ],
+        ),
         min_slope=args.min_slope,
         min_diff=args.min_diff,
         run_filters=False,
@@ -826,11 +879,11 @@ def _write_ltv_external_lcs(
     external_lc_dir.mkdir(parents=True, exist_ok=True)
 
     if output_path.exists() and not args.overwrite:
-        df = read_parquet_table(output_path)
+        df = read_feature_table(output_path)
         assert_ltv_product_schema(df, stage="ltv-external-lcs")
         return output_path, external_lc_dir, df
 
-    run_df = _ensure_ltv_candidate_id(candidates)
+    run_df = _ensure_ltv_candidate_id(with_feature_columns(candidates, ["ra", "dec", "pm_total", "failed_any"]))
     checkpoint_path = external_lc_dir / f"{output_path.stem}_CHECKPOINT.parquet"
     if args.overwrite:
         checkpoint_path.unlink(missing_ok=True)
@@ -843,8 +896,12 @@ def _write_ltv_external_lcs(
         run_gaia_epoch=True,
         run_tess=True,
         run_neowise=True,
-        run_kepler=False,
-        run_aavso=False,
+        run_kepler=True,
+        run_aavso=True,
+        run_ogle=True,
+        run_stripe82=True,
+        run_allwise_mep=True,
+        run_vvvx_virac=True,
         run_ps1=True,
         run_crts=True,
         atlas_token=args.atlas_token or os.environ.get("MALCA_ATLAS_TOKEN") or os.environ.get("ATLAS_API_TOKEN"),
@@ -872,12 +929,14 @@ def _write_ltv_multi_survey_features(
 
     output_path = ltv_multi_survey_output_path(mag_bin, run_dir)
     if output_path.exists() and not args.overwrite:
-        df = read_parquet_table(output_path)
+        df = read_feature_table(output_path)
         assert_ltv_product_schema(df, stage="ltv-multi-survey")
         return output_path, df
 
     out = compute_ltv_multi_survey_features(
-        _ensure_ltv_candidate_id(candidates),
+        _ensure_ltv_candidate_id(
+            with_feature_columns(candidates, ["ra", "dec", "ltv_slope", "ltv_max_diff", "failed_any"])
+        ),
         external_lc_dir=external_lc_dir,
     )
     out = _write_ltv_candidate_table(out, output_path, stage="ltv-multi-survey")
@@ -930,11 +989,11 @@ def _write_ltv_extended_products(
 
 
 def _merge_outputs(paths: list[Path], output_path: Path) -> pd.DataFrame:
-    frames = [read_parquet_table(path) for path in paths if path.exists()]
+    frames = [read_feature_table(path) for path in paths if path.exists()]
     merged = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     merged = _write_ltv_candidate_table(merged, output_path, stage=output_path.stem) if not merged.empty else merged
     if merged.empty:
-        write_parquet_table(merged, output_path)
+        write_feature_table(merged, output_path)
     return merged
 
 
@@ -951,7 +1010,7 @@ def _collect_ltv_candidate_lightcurves(run_dir: Path) -> list[tuple[Path, str]]:
 
     for table_path in tables:
         try:
-            df = read_parquet_table(table_path)
+            df = read_feature_table(table_path)
         except Exception:
             continue
         if "failed_any" in df.columns:
@@ -1230,7 +1289,7 @@ def run_ltv_pipeline_cli(args: argparse.Namespace) -> dict:
                 filtered_path = ltv_filtered_output_path(mag_bin, run_dir)
                 if not filtered_path.exists():
                     raise FileNotFoundError(f"Home stage needs {core_path} or {filtered_path}")
-                audit_df = read_parquet_table(filtered_path)
+                audit_df = read_feature_table(filtered_path)
                 passers = _passing_ltv_rows(audit_df)
             audit_rows = len(audit_df)
             passing_rows = len(passers)
@@ -1275,7 +1334,7 @@ def run_ltv_pipeline_cli(args: argparse.Namespace) -> dict:
         ingest_df = (
             _merge_outputs(pipeline_paths, ltv_all_pipeline_output_path(run_dir))
             if len(pipeline_paths) > 1
-            else read_parquet_table(pipeline_paths[0])
+            else read_feature_table(pipeline_paths[0])
         )
         total, new = ingest_ltv_results(
             review_db_path,
@@ -1438,7 +1497,7 @@ def run_pipeline_cli(args):
 
     # Load input
     input_path = Path(args.input)
-    df = read_parquet_table(input_path)
+    df = read_feature_table(input_path)
     
     print(f"Loaded {len(df):,} sources from {input_path}")
     

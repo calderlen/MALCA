@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from malca.table_io import read_feature_table
+
 
 def _find_repo_root(start: Path) -> Path:
     for p in (start, *start.parents):
@@ -95,7 +97,7 @@ def main(argv: list[str] | None = None) -> int:
     if not source_dir.is_dir():
         raise FileNotFoundError(f"Source PDF directory not found: {source_dir}")
 
-    df = pd.read_parquet(results_parquet)
+    df = read_feature_table(results_parquet)
     if df.empty:
         print(f"No rows in {results_parquet}")
         return 0

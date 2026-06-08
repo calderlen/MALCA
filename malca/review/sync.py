@@ -10,6 +10,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
+from malca.feature_layers import FEATURE_LAYER_COLUMNS, to_layer_first_mapping
 from malca.review.taxonomy import (
     REVIEW_TAXONOMY_FIELDS,
     TAXONOMY_VERSION,
@@ -114,6 +115,28 @@ def _parse_payload_json(raw: object) -> dict[str, object]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _parse_layer_object(raw: object) -> dict[str, object]:
+    if isinstance(raw, dict):
+        return raw
+    if raw in (None, ""):
+        return {}
+    try:
+        parsed = json.loads(str(raw))
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _flatten_layer_payload(payload: dict[str, object]) -> dict[str, object]:
+    flat = dict(payload)
+    for layer in FEATURE_LAYER_COLUMNS:
+        layer_values = _parse_layer_object(flat.get(layer))
+        for key, value in layer_values.items():
+            if key not in flat or _is_missing(flat.get(key)):
+                flat[str(key)] = value
+    return flat
+
+
 def _candidate_column_value(column: str, value: object) -> object:
     if _is_missing(value):
         return None
@@ -168,7 +191,7 @@ def _candidate_records(conn: sqlite3.Connection, *, only_reviewed: bool = False)
                 record[col] = None
             else:
                 record[col] = str(row.get(col))
-        record["payload"] = _json_value(payload_extra)
+        record["payload"] = _json_value(to_layer_first_mapping(payload_extra, layer_values_as_json=False))
         records.append(record)
     return records
 
@@ -586,6 +609,7 @@ def _candidate_sql_rows(records: Sequence[dict[str, object]]) -> list[tuple[obje
             and not _is_missing(value)
         }
         payload_json = {**payload_dict, **first_class_payload}
+        sql_source = _flatten_layer_payload(payload_json)
 
         source_path = record.get("source_path")
         imported_at = record.get("imported_at") or _utc_now()
@@ -594,7 +618,7 @@ def _candidate_sql_rows(records: Sequence[dict[str, object]]) -> list[tuple[obje
             None if _is_missing(source_path) else str(source_path),
         ]
         for col, _dtype, _etype in _CANDIDATE_COLUMNS:
-            values.append(_sqlite_column_value(col, record.get(col)))
+            values.append(_sqlite_column_value(col, sql_source.get(col)))
         values.append(_json_dumps(payload_json))
         values.append(str(imported_at))
         rows.append(tuple(values))

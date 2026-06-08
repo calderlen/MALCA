@@ -40,6 +40,8 @@ from malca.config import (
     PERIODOGRAM_REFINE_WINDOW_STEPS,
     PERIODOGRAM_REFINE_N_GRID,
 )
+from malca.derived_stats import compute_derived_feature_row
+from malca.feature_layers import to_layer_first_frame
 from malca.periodogram import pdm_find_period, ce_find_period
 from malca.utils import read_lc_dat2, read_lc_csv, read_skypatrol_lc_csv, compute_camera_loo_metrics, compute_field_summary
 
@@ -1095,6 +1097,24 @@ def percent_amplitude(mag):
     return float(max(abs(np.max(mag) - med), abs(np.min(mag) - med)) / abs(med))
 
 
+def ahl_ratio(mag):
+    """Ratio of points brighter than the mean to points fainter than the mean.
+
+    This follows the ASAS-SN ``AHL`` feature convention in magnitude space:
+    brighter points have smaller magnitudes than the mean.
+    """
+    mag = np.asarray(mag, float)
+    mag = mag[np.isfinite(mag)]
+    if mag.size < 3:
+        return np.nan
+    mean_mag = float(np.mean(mag))
+    n_brighter = int(np.sum(mag < mean_mag))
+    n_fainter = int(np.sum(mag > mean_mag))
+    if n_fainter <= 0:
+        return np.nan
+    return float(n_brighter / n_fainter)
+
+
 def q31(mag):
     """Difference between 75th and 25th percentile."""
     mag = np.asarray(mag, float)
@@ -1266,6 +1286,151 @@ def structure_function(mag, time):
     return sf_amplitude, sf_gamma
 
 
+def lafler_kinman_t(mag, order=None, *, wrap: bool = True) -> float:
+    """Normalized Lafler-Kinman successive-difference statistic."""
+    mag = np.asarray(mag, float)
+    if order is not None:
+        order = np.asarray(order)
+        if order.size != mag.size:
+            return np.nan
+        mag = mag[np.argsort(order, kind="mergesort")]
+    mag = mag[np.isfinite(mag)]
+    if mag.size < 3:
+        return np.nan
+
+    diffs = np.diff(mag)
+    if wrap:
+        diffs = np.concatenate((diffs, np.asarray([mag[0] - mag[-1]], dtype=float)))
+    denom = float(np.sum(np.square(mag - np.mean(mag))))
+    if denom <= 0 or not np.isfinite(denom):
+        return np.nan
+    return float(np.sum(np.square(diffs)) / denom)
+
+
+def lafler_kinman_period_stats(time, mag, period) -> dict[str, float]:
+    """Return ASAS-SN-style time and folded Lafler-Kinman metrics."""
+    out = {
+        "lafler_kinman_t_time": np.nan,
+        "lafler_kinman_t_phase": np.nan,
+        "lafler_kinman_delta": np.nan,
+    }
+    time = np.asarray(time, float)
+    mag = np.asarray(mag, float)
+    mask = np.isfinite(time) & np.isfinite(mag)
+    if int(mask.sum()) < 3:
+        return out
+    time = time[mask]
+    mag = mag[mask]
+
+    t_time = lafler_kinman_t(mag, order=time, wrap=False)
+    out["lafler_kinman_t_time"] = t_time
+
+    if np.isfinite(period) and float(period) > 0:
+        phase = np.mod((time - np.nanmin(time)) / float(period), 1.0)
+        t_phase = lafler_kinman_t(mag, order=phase, wrap=True)
+        out["lafler_kinman_t_phase"] = t_phase
+        if np.isfinite(t_phase) and np.isfinite(t_time) and t_time != 0:
+            out["lafler_kinman_delta"] = float((t_phase - t_time) / t_time)
+    return out
+
+
+def window_function_alias_peaks(
+    time,
+    *,
+    min_frequency: float = LS_MIN_FREQUENCY,
+    max_frequency: float = LS_MAX_FREQUENCY,
+    n_peaks: int = 5,
+    n_frequency: int = 2048,
+) -> dict[str, float]:
+    """Return strongest sampling-window periods and powers.
+
+    The spectral window power is ``|sum(exp(2*pi*i*f*t))|^2 / N^2``.
+    """
+    out: dict[str, float] = {}
+    for idx in range(1, int(n_peaks) + 1):
+        out[f"window_alias_period_{idx}"] = np.nan
+        out[f"window_alias_power_{idx}"] = np.nan
+
+    time = np.asarray(time, float)
+    time = time[np.isfinite(time)]
+    if time.size < 3:
+        return out
+    min_frequency = float(min_frequency)
+    max_frequency = float(max_frequency)
+    if not np.isfinite(min_frequency) or not np.isfinite(max_frequency) or max_frequency <= min_frequency:
+        return out
+
+    centered = time - np.min(time)
+    frequency = np.linspace(min_frequency, max_frequency, max(32, int(n_frequency)))
+    power = np.empty(frequency.size, dtype=float)
+    chunk_size = 512
+    norm = float(time.size * time.size)
+    for start in range(0, frequency.size, chunk_size):
+        stop = min(start + chunk_size, frequency.size)
+        phase = 2.0 * np.pi * frequency[start:stop, None] * centered[None, :]
+        power[start:stop] = np.square(np.abs(np.sum(np.exp(1j * phase), axis=1))) / norm
+    if power.size == 0 or not np.isfinite(power).any():
+        return out
+
+    chosen: list[int] = []
+    min_sep = max(1, int(round(power.size / max(50, 10 * int(n_peaks)))))
+    for idx in np.argsort(-power):
+        idx = int(idx)
+        if not np.isfinite(power[idx]):
+            continue
+        if any(abs(idx - prev) < min_sep for prev in chosen):
+            continue
+        chosen.append(idx)
+        if len(chosen) >= int(n_peaks):
+            break
+
+    for rank, idx in enumerate(chosen, start=1):
+        freq = float(frequency[idx])
+        out[f"window_alias_period_{rank}"] = float(1.0 / freq) if freq > 0 else np.nan
+        out[f"window_alias_power_{rank}"] = float(power[idx])
+    return out
+
+
+def eb_minima_ratio(mag, time, period) -> dict[str, float]:
+    """Estimate the primary/secondary eclipse depth ratio from a folded curve."""
+    out = {
+        "eb_rminima": np.nan,
+        "eb_primary_min_depth": np.nan,
+        "eb_secondary_min_depth": np.nan,
+    }
+    mag = np.asarray(mag, float)
+    time = np.asarray(time, float)
+    mask = np.isfinite(mag) & np.isfinite(time)
+    if int(mask.sum()) < 10 or not np.isfinite(period) or float(period) <= 0:
+        return out
+
+    mag = mag[mask]
+    time = time[mask]
+    primary_idx = int(np.nanargmax(mag))
+    epoch = float(time[primary_idx])
+    phase = np.mod((time - epoch) / float(period), 1.0)
+    baseline = float(np.nanpercentile(mag, 25.0))
+    if not np.isfinite(baseline):
+        return out
+
+    def window_depth(center: float, half_width: float = 0.08) -> float:
+        distance = np.abs(((phase - center + 0.5) % 1.0) - 0.5)
+        local = mag[distance <= half_width]
+        if local.size < 2:
+            return np.nan
+        eclipse_mag = float(np.nanpercentile(local, 90.0))
+        return float(max(0.0, eclipse_mag - baseline)) if np.isfinite(eclipse_mag) else np.nan
+
+    primary_depth = window_depth(0.0)
+    secondary_depth = window_depth(0.5)
+    out["eb_primary_min_depth"] = primary_depth
+    out["eb_secondary_min_depth"] = secondary_depth
+    depths = [d for d in (primary_depth, secondary_depth) if np.isfinite(d) and d > 0]
+    if len(depths) == 2:
+        out["eb_rminima"] = float(min(depths) / max(depths))
+    return out
+
+
 def _wrap_angle_2pi(angle: float) -> float:
     if not np.isfinite(angle):
         return np.nan
@@ -1283,6 +1448,8 @@ def _fourier_nan_result(max_harmonics: int) -> dict[str, float]:
     }
     for k in range(1, max_harmonics + 1):
         result[f"harmonics_mag_{k}"] = np.nan
+        result[f"harmonics_a{k}"] = np.nan
+        result[f"harmonics_b{k}"] = np.nan
     for k in range(2, max_harmonics + 1):
         result[f"harmonics_phase_{k}"] = np.nan
         result[f"harmonics_r{k}1"] = np.nan
@@ -1439,6 +1606,9 @@ def fit_fourier_decomposition(mag, time, period, err=None, max_harmonics=7):
         amplitudes[k] = float(np.hypot(cos_coeff, sin_coeff))
         phases_abs[k] = _wrap_angle_2pi(np.arctan2(-sin_coeff, cos_coeff))
         result[f"harmonics_mag_{k}"] = amplitudes[k]
+        # Paper convention: a_k multiplies sin(2*pi*k*phase), b_k multiplies cos(...).
+        result[f"harmonics_a{k}"] = sin_coeff
+        result[f"harmonics_b{k}"] = cos_coeff
 
     amp1 = amplitudes.get(1, np.nan)
     phi1 = phases_abs.get(1, np.nan)
@@ -1868,6 +2038,7 @@ def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=Tr
     _median_abs_dev = median_abs_dev(mag)
     _median_brp = median_brp(mag)
     _percent_amplitude = percent_amplitude(mag)
+    _ahl_ratio = ahl_ratio(mag)
     _q31 = q31(mag)
     _skew = skew(mag)
     _small_kurtosis = small_kurtosis(mag)
@@ -1884,6 +2055,9 @@ def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=Tr
     _harmonics = fit_fourier_decomposition(mag, jd_arr, best_period, err=merr)
     _psi_cs = psi_cs(mag, jd_arr, best_period)
     _psi_eta = psi_eta(mag, jd_arr, best_period)
+    _lk_stats = lafler_kinman_period_stats(jd_arr, mag, best_period)
+    _window_alias = window_function_alias_peaks(jd_arr)
+    _eb_minima = eb_minima_ratio(mag, jd_arr, best_period)
 
     # stochastic model features
     _drw_sigma, _drw_tau = fit_drw(jd_arr, mag, merr)
@@ -1939,7 +2113,7 @@ def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=Tr
 
     by_field   = per_group_stats(df.groupby("field"), "field")
     by_band    = per_group_stats(df.groupby("v_g_band"), "v_g_band")
-    by_camfld  = per_group_stats(df.groupby(["camera_name","field"]), "camera_field")
+    by_camera_and_field = per_group_stats(df.groupby(["camera_name","field"]), "camera_and_field")
 
     # cadence distributions per camera
     def per_cam_cadence(d):
@@ -2026,6 +2200,7 @@ def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=Tr
         ("median_abs_dev", _median_abs_dev),
         ("median_brp", _median_brp),
         ("percent_amplitude", _percent_amplitude),
+        ("ahl_ratio", _ahl_ratio),
         ("q31", _q31),
         ("skew", _skew),
         ("small_kurtosis", _small_kurtosis),
@@ -2049,6 +2224,20 @@ def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=Tr
         ("harmonics_mag_5", _harmonics["harmonics_mag_5"]),
         ("harmonics_mag_6", _harmonics["harmonics_mag_6"]),
         ("harmonics_mag_7", _harmonics["harmonics_mag_7"]),
+        ("harmonics_a1", _harmonics["harmonics_a1"]),
+        ("harmonics_a2", _harmonics["harmonics_a2"]),
+        ("harmonics_a3", _harmonics["harmonics_a3"]),
+        ("harmonics_a4", _harmonics["harmonics_a4"]),
+        ("harmonics_a5", _harmonics["harmonics_a5"]),
+        ("harmonics_a6", _harmonics["harmonics_a6"]),
+        ("harmonics_a7", _harmonics["harmonics_a7"]),
+        ("harmonics_b1", _harmonics["harmonics_b1"]),
+        ("harmonics_b2", _harmonics["harmonics_b2"]),
+        ("harmonics_b3", _harmonics["harmonics_b3"]),
+        ("harmonics_b4", _harmonics["harmonics_b4"]),
+        ("harmonics_b5", _harmonics["harmonics_b5"]),
+        ("harmonics_b6", _harmonics["harmonics_b6"]),
+        ("harmonics_b7", _harmonics["harmonics_b7"]),
         ("harmonics_r21", _harmonics["harmonics_r21"]),
         ("harmonics_r31", _harmonics["harmonics_r31"]),
         ("harmonics_r41", _harmonics["harmonics_r41"]),
@@ -2064,6 +2253,22 @@ def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=Tr
         ("harmonics_mse", _harmonics["harmonics_mse"]),
         ("psi_cs", _psi_cs),
         ("psi_eta", _psi_eta),
+        ("lafler_kinman_t_time", _lk_stats["lafler_kinman_t_time"]),
+        ("lafler_kinman_t_phase", _lk_stats["lafler_kinman_t_phase"]),
+        ("lafler_kinman_delta", _lk_stats["lafler_kinman_delta"]),
+        ("window_alias_period_1", _window_alias["window_alias_period_1"]),
+        ("window_alias_power_1", _window_alias["window_alias_power_1"]),
+        ("window_alias_period_2", _window_alias["window_alias_period_2"]),
+        ("window_alias_power_2", _window_alias["window_alias_power_2"]),
+        ("window_alias_period_3", _window_alias["window_alias_period_3"]),
+        ("window_alias_power_3", _window_alias["window_alias_power_3"]),
+        ("window_alias_period_4", _window_alias["window_alias_period_4"]),
+        ("window_alias_power_4", _window_alias["window_alias_power_4"]),
+        ("window_alias_period_5", _window_alias["window_alias_period_5"]),
+        ("window_alias_power_5", _window_alias["window_alias_power_5"]),
+        ("eb_rminima", _eb_minima["eb_rminima"]),
+        ("eb_primary_min_depth", _eb_minima["eb_primary_min_depth"]),
+        ("eb_secondary_min_depth", _eb_minima["eb_secondary_min_depth"]),
         # stochastic model features
         ("gp_drw_sigma", _drw_sigma),
         ("gp_drw_tau", _drw_tau),
@@ -2080,18 +2285,19 @@ def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=Tr
         ("asassn_fields", field_summary["asassn_fields"]),
         ("asassn_field_count", field_summary["asassn_field_count"]),
         ("asassn_field_key_fraction", field_summary["asassn_field_key_fraction"]),
-        ("camera_field_key", field_summary["camera_field_key"]),
-        ("camera_fields", field_summary["camera_fields"]),
-        ("camera_field_count", field_summary["camera_field_count"]),
-        ("camera_field_key_fraction", field_summary["camera_field_key_fraction"]),
+        ("camera_name_key", field_summary["camera_name_key"]),
+        ("camera_names", field_summary["camera_names"]),
+        ("camera_name_count", field_summary["camera_name_count"]),
+        ("camera_name_key_fraction", field_summary["camera_name_key_fraction"]),
         ("by_camera", by_camera),
         ("by_field", by_field),
         ("by_band", by_band),
-        ("by_camera_field", by_camfld),
+        ("by_camera_and_field", by_camera_and_field),
         ("cadence_by_camera", cadence_by_camera),
         ("nightly_table", nightly),
         ("seasons", pd.DataFrame(seasons)),
     ])
+    summary.update(compute_derived_feature_row(summary))
 
     return df, summary
 
@@ -2183,7 +2389,7 @@ def print_summary(summary, max_rows=10):
     print("\n=== BY BAND (all) ===")
     print(headframe(summary["by_band"]))
     print("\n=== BY CAMERA+FIELD (top) ===")
-    print(headframe(summary["by_camera_field"]))
+    print(headframe(summary["by_camera_and_field"]))
 
     print("\n=== CADENCE BY CAMERA ===")
     print(headframe(summary["cadence_by_camera"]))
@@ -2203,8 +2409,7 @@ def load_dat(path, has_header=False):
             "camera#",
             "v_g_band",
             "saturated",
-            "camera_name",
-            "field"]    
+            "cam_field"]
     kw = dict(sep=r"\s+", comment="#", engine="python")
     if has_header:
         df = pd.read_csv(path, **kw)
@@ -2213,6 +2418,14 @@ def load_dat(path, has_header=False):
             df.columns = names[:len(df.columns)]
     else:
         df = pd.read_csv(path, header=None, names=names, **kw)
+
+    if "cam_field" in df.columns:
+        split = df["cam_field"].astype("string").str.split("/", n=1, expand=True)
+        if split.shape[1] >= 1:
+            df["camera_name"] = split[0].fillna("").astype(str).str.strip()
+        if split.shape[1] >= 2:
+            df["field"] = split[1].fillna("").astype(str).str.strip()
+        df = df.drop(columns=["cam_field"])
 
     return df
 
@@ -2248,8 +2461,17 @@ def _enrich_row_worker(args: tuple) -> dict:
                         merged[col] = sub_v
             elif isinstance(v, (pd.DataFrame, pd.Series)):
                 continue
+            elif str(k).startswith("derived_"):
+                if k not in merged:
+                    merged[k] = v
             elif f"stats_{k}" not in merged:
                 merged[f"stats_{k}"] = v
+        for k, v in compute_derived_feature_row(merged).items():
+            if k not in merged:
+                merged[k] = v
+        layered = to_layer_first_frame(pd.DataFrame([merged]), run_derived=False)
+        if not layered.empty:
+            merged.update(layered.iloc[0].to_dict())
         return merged
     except Exception:
         return row_dict

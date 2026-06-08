@@ -68,6 +68,7 @@ from malca.config import (
 from malca.config import LCV2_ROOT
 from malca.config import MAG_BINS, SKYPATROL_JD_OFFSET
 from malca.config import PARQUET_OUTPUT_COMPRESSION
+from malca.feature_layers import to_layer_first_frame
 from malca.utils import clean_lc
 from malca.stats import inverse_von_neumann_ratio, reduced_chisq, roms_statistic
 from malca.ltv.paths import DEFAULT_LTV_RUN_DIR, ltv_core_output_path
@@ -1615,7 +1616,7 @@ class ChunkedParquetWriter:
     def write_chunk(self, chunk_results):
         if not chunk_results:
             return
-        df_chunk = pd.DataFrame(chunk_results)
+        df_chunk = to_layer_first_frame(pd.DataFrame(chunk_results))
         table = pa.Table.from_pandas(df_chunk, preserve_index=False)
         tmp_path = self.path / f"chunk_{self.counter:06d}.parquet.tmp"
         final_path = self.path / f"chunk_{self.counter:06d}.parquet"

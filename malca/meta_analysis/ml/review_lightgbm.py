@@ -23,6 +23,7 @@ from sklearn.model_selection import StratifiedKFold, train_test_split
 
 from malca.lightcurve_io import load_lightcurve_df
 from malca.review.taxonomy import legacy_review_to_taxonomy
+from malca.table_io import read_feature_table
 
 
 CURRENT_SCHEMA_REQUIRED_REVIEW_COLUMNS = (
@@ -261,7 +262,7 @@ def _read_candidate_product(path: str | Path) -> pd.DataFrame:
         raise FileNotFoundError(f"Candidate product not found: {product_path}")
     suffix = product_path.suffix.lower()
     if suffix == ".parquet" or product_path.is_dir():
-        table = pd.read_parquet(product_path)
+        table = read_feature_table(product_path)
     elif suffix == ".csv":
         table = pd.read_csv(product_path, dtype=str, keep_default_na=False)
     else:
@@ -326,8 +327,8 @@ def _id_series_from_asas_or_path(df: pd.DataFrame) -> pd.Series:
     else:
         ids = pd.Series("", index=df.index, dtype="object")
     missing = ids.eq("")
-    if "path" in df.columns and bool(missing.any()):
-        path_ids = df.loc[missing, "path"].map(_path_stem).map(_normalize_recompute_id)
+    if "lc_path" in df.columns and bool(missing.any()):
+        path_ids = df.loc[missing, "lc_path"].map(_path_stem).map(_normalize_recompute_id)
         ids = ids.where(~missing, path_ids)
     return ids.astype(str)
 
@@ -338,7 +339,7 @@ def _ensure_recompute_identity_columns(df: pd.DataFrame) -> tuple[pd.DataFrame, 
     if bool(ids.eq("").any()):
         missing_count = int(ids.eq("").sum())
         raise ValueError(
-            f"{missing_count} candidate rows are missing both asas_sn_id and path-derived IDs"
+            f"{missing_count} candidate rows are missing both asas_sn_id and lc_path-derived IDs"
         )
 
     if "asas_sn_id" not in out.columns:
@@ -360,8 +361,8 @@ def _ensure_recompute_identity_columns(df: pd.DataFrame) -> tuple[pd.DataFrame, 
 
     if "mag_bin" in out.columns:
         out["mag_bin"] = out["mag_bin"].map(_normalize_mag_bin)
-    elif "path" in out.columns:
-        out["mag_bin"] = out["path"].map(_mag_bin_from_path)
+    elif "lc_path" in out.columns:
+        out["mag_bin"] = out["lc_path"].map(_mag_bin_from_path)
     else:
         out["mag_bin"] = ""
 

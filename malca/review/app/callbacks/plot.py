@@ -339,30 +339,35 @@ def initialize_plot_defaults_from_run_params(queue_size, initialized):
     [Output('plot-overlays', 'value'),
      Output('camera-checklist', 'value', allow_duplicate=True),
      Output('band-checklist', 'value', allow_duplicate=True),
-     Output('external-source-view', 'value', allow_duplicate=True)],
+     Output('external-source-values', 'value', allow_duplicate=True)],
     [Input('plot-preset', 'value'),
      Input('plot-reset-btn', 'n_clicks'),
      Input('cams-all-btn', 'n_clicks'),
      Input('cams-clear-btn', 'n_clicks'),
-     Input('cams-invert-btn', 'n_clicks')],
+     Input('cams-invert-btn', 'n_clicks'),
+     Input('sources-all-btn', 'n_clicks'),
+     Input('sources-native-btn', 'n_clicks'),
+     Input('sources-clear-btn', 'n_clicks')],
     [State('camera-checklist', 'options'),
      State('camera-checklist', 'value'),
-     State('plot-overlays', 'value')],
+     State('plot-overlays', 'value'),
+     State('external-source-values', 'value')],
     prevent_initial_call=True,
 )
-def update_plot_controls(preset, n_reset, n_all, n_clear, n_invert, camera_options, camera_values, overlay_values):
-    """Preset mapping + camera selection action buttons."""
-    _ = n_reset, n_all, n_clear, n_invert
+def update_plot_controls(preset, n_reset, n_all, n_clear, n_invert, n_sources_all, n_sources_native, n_sources_clear, camera_options, camera_values, overlay_values, source_values):
+    """Preset mapping plus camera/source selection action buttons."""
+    _ = n_reset, n_all, n_clear, n_invert, n_sources_all, n_sources_native, n_sources_clear
     trig = callback_context.triggered[0]['prop_id'].split('.')[0] if callback_context.triggered else ''
     cams = [str(opt.get('value')) for opt in (camera_options or [])]
     selected = [str(v) for v in (camera_values or []) if str(v) in cams]
     overlays = list(overlay_values or [])
+    _ = source_values
 
     if trig == 'plot-preset' or trig == 'plot-reset-btn':
         cfg = PLOT_PRESETS.get(preset or 'Diagnostics', PLOT_PRESETS['Diagnostics'])
         new_overlays = list(cfg['overlays'])
         new_cams = list(cams)
-        return new_overlays, new_cams, ['g', 'V'], DEFAULT_EXTERNAL_SOURCE_VIEW
+        return new_overlays, new_cams, ['g', 'V'], list(DEFAULT_EXTERNAL_SOURCE_VALUES)
     if trig == 'cams-all-btn':
         return overlays, list(cams), no_update, no_update
     if trig == 'cams-clear-btn':
@@ -370,6 +375,12 @@ def update_plot_controls(preset, n_reset, n_all, n_clear, n_invert, camera_optio
     if trig == 'cams-invert-btn':
         inv = [c for c in cams if c not in set(selected)]
         return overlays, inv, no_update, no_update
+    if trig == 'sources-all-btn':
+        return overlays, no_update, no_update, list(EXTERNAL_SOURCE_VALUES)
+    if trig == 'sources-native-btn':
+        return overlays, no_update, no_update, ['asassn']
+    if trig == 'sources-clear-btn':
+        return overlays, no_update, no_update, []
     return no_update, no_update, no_update, no_update
 
 
@@ -394,7 +405,11 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
     link_radius = float(state.get('link_radius', 10.0))
     yaxis_mode = str(state.get('yaxis_mode', 'mag') or 'mag')
     phase_panel_mode = _coerce_choice(state.get('phase_panel_mode'), {'fold', 'time'}, 'fold')
-    external_source_view = str(state.get('external_source_view', DEFAULT_EXTERNAL_SOURCE_VIEW) or DEFAULT_EXTERNAL_SOURCE_VIEW)
+    external_source_values = normalize_external_source_values(
+        state.get('external_source_values', state.get('external_source_view', DEFAULT_EXTERNAL_SOURCE_VIEW)),
+        default=list(DEFAULT_EXTERNAL_SOURCE_VALUES),
+    )
+    external_source_layout = normalize_external_source_layout(state.get('external_source_layout'))
     override_period_source = str(state.get('override_period_source') or 'manual/search')
     phase_period_pending = bool(state.get('phase_period_pending', False))
     suppress_catalog_phase_period = bool(state.get('suppress_catalog_phase_period', False))
@@ -515,12 +530,16 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
     mismatch_warnings = _run_config_mismatch_warnings(run_params if run_params else None, overlays)
     if run_params_status != 'loaded':
         mismatch_warnings.append(run_params_msg)
-    uirevision_key = f"{candidate_id}|{','.join(sorted(str(c) for c in selected_cameras))}|{','.join(sorted(str(b) for b in selected_bands))}|{theme_mode}|{residual_height:.3f}|{baseline_opacity:.2f}|{yaxis_mode}|{phase_panel_mode}|{external_source_view}"
+    axis_convention_revision = "mag-dimming-down-v1"
+    uirevision_key = f"{candidate_id}|{','.join(sorted(str(c) for c in selected_cameras))}|{','.join(sorted(str(b) for b in selected_bands))}|{theme_mode}|{residual_height:.3f}|{baseline_opacity:.2f}|{yaxis_mode}|{phase_panel_mode}|{','.join(external_source_values)}|{external_source_layout}|{axis_convention_revision}"
 
     # Discover external LC parquets only when the user explicitly asks for them.
     ext_lcs: dict[str, Path] | None = None
-    requested_external_source = str(external_source_view or DEFAULT_EXTERNAL_SOURCE_VIEW).strip().lower()
-    if requested_external_source not in {'', 'asassn'}:
+    requested_external_sources = [
+        value for value in external_source_values
+        if value in EXTERNAL_SOURCE_VALUE_SET and value != 'asassn'
+    ]
+    if requested_external_sources:
         run_dir = _resolve_run_dir_from_plot_dir(str(plot_dir_path) if plot_dir_path else None)
         lk = _candidate_lookup_keys(candidate_id, payload)
         found: dict[str, Path] = {}
@@ -530,7 +549,7 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
         default_results_root = _APP_REPO_ROOT / "output" / "results"
         if default_results_root not in search_roots:
             search_roots.append(default_results_root)
-        for prefix in ("atlas", "ztf", "gaia_epoch", "tess", "ps1", "crts"):
+        for prefix in requested_external_sources:
             for root in search_roots:
                 idx_map = _index_external_lc_paths_from_root(str(root.resolve()), prefix)
                 for key in lk:
@@ -569,7 +588,8 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
             baseline_opacity=baseline_opacity,
             yaxis_mode=yaxis_mode,
             external_lcs=ext_lcs,
-            external_source_view=external_source_view,
+            external_source_view=external_source_values,
+            external_panel_mode=external_source_layout,
         )
     except Exception as exc:
 

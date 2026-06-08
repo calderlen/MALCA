@@ -26,6 +26,7 @@ from malca.config import (
     STETSON_REWEIGHT_MIN_ITERS,
     STETSON_REWEIGHT_RTOL,
 )
+from malca.feature_layers import feature_mapping_get
 from malca.review.stats_merge import merge_stats_summary_into_payload
 from malca.stats import (
     inverse_von_neumann_ratio,
@@ -134,9 +135,9 @@ def test_merge_stats_summary_maps_new_paper_stats() -> None:
         },
     )
 
-    assert payload["stats_photometry_weighted_std_mag"] == 0.21
-    assert payload["stats_variability_von_neumann_ratio"] == 1.8
-    assert payload["stats_variability_roms"] == 1.3
-    assert payload["stats_variability_stetson_L"] == 2.4
-    assert payload["stats_variability_stetson_J_time"] == 1.7
-    assert payload["stats_variability_stetson_L_time"] == 2.1
+    assert feature_mapping_get(payload, "stats_photometry_weighted_std_mag") == 0.21
+    assert feature_mapping_get(payload, "stats_variability_von_neumann_ratio") == 1.8
+    assert feature_mapping_get(payload, "stats_variability_roms") == 1.3
+    assert feature_mapping_get(payload, "stats_variability_stetson_L") == 2.4
+    assert feature_mapping_get(payload, "stats_variability_stetson_J_time") == 1.7
+    assert feature_mapping_get(payload, "stats_variability_stetson_L_time") == 2.1

@@ -10,7 +10,9 @@ from pathlib import Path
 import pandas as pd
 
 from malca.audit import ltv_status
+from malca.feature_layers import with_feature_columns
 from malca.ltv import pipeline as ltv_pipeline
+from malca.table_io import read_feature_table, write_feature_table
 
 
 def _write_review_db(path: Path, *, candidate_rows: int = 2, review_rows: int = 1) -> None:
@@ -58,7 +60,7 @@ def test_ltv_pipeline_full_writes_audit_metadata_and_ingests_passers(monkeypatch
     def fake_run_core(args: argparse.Namespace, mag_bin: str, run_dir_arg: Path) -> Path:
         path = ltv_pipeline.ltv_core_output_path(mag_bin, run_dir_arg)
         path.parent.mkdir(parents=True, exist_ok=True)
-        _core_rows(tmp_path).to_parquet(path, index=False)
+        write_feature_table(_core_rows(tmp_path), path)
         return path
 
     def fake_run_full_pipeline(df: pd.DataFrame, **_kwargs: object) -> pd.DataFrame:
@@ -87,8 +89,14 @@ def test_ltv_pipeline_full_writes_audit_metadata_and_ingests_passers(monkeypatch
 
     summary = ltv_pipeline.run_ltv_pipeline_cli(args)
 
-    filtered = pd.read_parquet(run_dir / "results" / "LTvar13-13.5_filtered.parquet")
-    enriched = pd.read_parquet(run_dir / "results" / "LTvar13-13.5_pipeline.parquet")
+    filtered = with_feature_columns(
+        read_feature_table(run_dir / "results" / "LTvar13-13.5_filtered.parquet"),
+        ["failed_any", "ltv_failed_slope"],
+    )
+    enriched = with_feature_columns(
+        read_feature_table(run_dir / "results" / "LTvar13-13.5_pipeline.parquet"),
+        ["ltv_class"],
+    )
 
     assert len(filtered) == 2
     assert filtered["failed_any"].tolist() == [False, True]
@@ -110,7 +118,7 @@ def test_ltv_pipeline_cluster_skips_downstream_ingest(monkeypatch, tmp_path: Pat
     def fake_run_core(args: argparse.Namespace, mag_bin: str, run_dir_arg: Path) -> Path:
         path = ltv_pipeline.ltv_core_output_path(mag_bin, run_dir_arg)
         path.parent.mkdir(parents=True, exist_ok=True)
-        _core_rows(tmp_path).to_parquet(path, index=False)
+        write_feature_table(_core_rows(tmp_path), path)
         return path
 
     monkeypatch.setattr(ltv_pipeline, "_run_core_if_needed", fake_run_core)
@@ -131,7 +139,7 @@ def _patch_ltv_pipeline_no_network(monkeypatch, tmp_path: Path, calls: dict[str,
     def fake_run_core(args: argparse.Namespace, mag_bin: str, run_dir_arg: Path) -> Path:
         path = ltv_pipeline.ltv_core_output_path(mag_bin, run_dir_arg)
         path.parent.mkdir(parents=True, exist_ok=True)
-        _core_rows(tmp_path).to_parquet(path, index=False)
+        write_feature_table(_core_rows(tmp_path), path)
         return path
 
     def fake_run_full_pipeline(df: pd.DataFrame, **_kwargs: object) -> pd.DataFrame:
@@ -147,7 +155,7 @@ def _patch_ltv_pipeline_no_network(monkeypatch, tmp_path: Path, calls: dict[str,
         path = ltv_pipeline.ltv_external_lcs_output_path(mag_bin, run_dir)
         external_dir = run_dir / "results" / "external_lcs"
         path.parent.mkdir(parents=True, exist_ok=True)
-        out.to_parquet(path, index=False)
+        write_feature_table(out, path)
         return path, external_dir, out
 
     def fake_multi(args: argparse.Namespace, mag_bin: str, run_dir: Path, candidates: pd.DataFrame, *, external_lc_dir: Path):
@@ -157,7 +165,7 @@ def _patch_ltv_pipeline_no_network(monkeypatch, tmp_path: Path, calls: dict[str,
         out["ltv_ms_ztf_n_points"] = 2
         path = ltv_pipeline.ltv_multi_survey_output_path(mag_bin, run_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
-        out.to_parquet(path, index=False)
+        write_feature_table(out, path)
         return path, out
 
     monkeypatch.setattr(ltv_pipeline, "_run_core_if_needed", fake_run_core)
@@ -183,7 +191,10 @@ def test_ltv_stage_full_extended_runs_extended_products(monkeypatch, tmp_path: P
         ]
     )
     summary = ltv_pipeline.run_ltv_pipeline_cli(args)
-    enriched = pd.read_parquet(run_dir / "results" / "LTvar13-13.5_pipeline.parquet")
+    enriched = with_feature_columns(
+        read_feature_table(run_dir / "results" / "LTvar13-13.5_pipeline.parquet"),
+        ["ztf_lc_n_det", "ltv_ms_feature_status"],
+    )
 
     assert calls == {"external": 1, "multi": 1}
     assert enriched.loc[0, "ztf_lc_n_det"] == 2
@@ -198,7 +209,7 @@ def test_ltv_external_lcs_verbose_survives_closed_stdout(monkeypatch, tmp_path: 
     def fake_run_core(args: argparse.Namespace, mag_bin: str, run_dir_arg: Path) -> Path:
         path = ltv_pipeline.ltv_core_output_path(mag_bin, run_dir_arg)
         path.parent.mkdir(parents=True, exist_ok=True)
-        _core_rows(tmp_path).to_parquet(path, index=False)
+        write_feature_table(_core_rows(tmp_path), path)
         return path
 
     def fake_run_full_pipeline(df: pd.DataFrame, **_kwargs: object) -> pd.DataFrame:
@@ -314,7 +325,7 @@ def test_ltv_full_bundle_includes_candidate_lightcurves(tmp_path: Path) -> None:
     results_dir.mkdir(parents=True)
     lc_path = tmp_path / "123.dat2"
     lc_path.write_text("hjd,mag\n1,13.2\n", encoding="ascii")
-    pd.DataFrame(
+    write_feature_table(pd.DataFrame(
         {
             "asas_sn_id": ["123"],
             "candidate_id": ["ltv_123"],
@@ -324,14 +335,12 @@ def test_ltv_full_bundle_includes_candidate_lightcurves(tmp_path: Path) -> None:
             "dec": [2.0],
             "failed_any": [False],
         }
-    ).to_parquet(results_dir / "LTvar13-13.5_pipeline.parquet", index=False)
-    pd.DataFrame({"candidate_id": ["ltv_123"], "ztf_lc_n_det": [2]}).to_parquet(
+    ), results_dir / "LTvar13-13.5_pipeline.parquet")
+    write_feature_table(pd.DataFrame({"candidate_id": ["ltv_123"], "ztf_lc_n_det": [2]}),
         results_dir / "LTvar13-13.5_external_lcs.parquet",
-        index=False,
     )
-    pd.DataFrame({"candidate_id": ["ltv_123"], "ltv_ms_feature_status": ["ok"]}).to_parquet(
+    write_feature_table(pd.DataFrame({"candidate_id": ["ltv_123"], "ltv_ms_feature_status": ["ok"]}),
         results_dir / "LTvar13-13.5_ltv_multi_survey.parquet",
-        index=False,
     )
     external_dir = results_dir / "external_lcs"
     external_dir.mkdir()
@@ -371,9 +380,8 @@ def test_ltv_status_discovers_run_style_outputs(monkeypatch, tmp_path: Path) -> 
     run_dir = Path("output") / "runs" / "ltv_march18"
     results_dir = run_dir / "results"
     results_dir.mkdir(parents=True)
-    pd.DataFrame({"asas_sn_id": ["123"], "Slope": [0.4]}).to_parquet(
+    write_feature_table(pd.DataFrame({"asas_sn_id": ["123"], "candidate_id": ["ltv_123"], "timescale": ["ltv"], "lc_path": ["123.dat2"], "ra": [1.0], "dec": [2.0], "ltv_slope": [0.4]}),
         results_dir / "LTvar13-13.5_pipeline.parquet",
-        index=False,
     )
     _write_review_db(run_dir / "review" / "review.db", candidate_rows=2, review_rows=1)
 
@@ -390,9 +398,8 @@ def test_ltv_status_accepts_explicit_legacy_paths(tmp_path: Path) -> None:
     legacy_dir = tmp_path / "output" / "ltv" / "ltv"
     legacy_dir.mkdir(parents=True)
     legacy_db = legacy_dir / "ltv_candidates.db"
-    pd.DataFrame({"asas_sn_id": ["123"], "Slope": [0.4]}).to_parquet(
+    write_feature_table(pd.DataFrame({"asas_sn_id": ["123"], "candidate_id": ["ltv_123"], "timescale": ["ltv"], "lc_path": ["123.dat2"], "ra": [1.0], "dec": [2.0], "ltv_slope": [0.4]}),
         legacy_dir / "LTvar13-13.5_pipeline.parquet",
-        index=False,
     )
     _write_review_db(legacy_db, candidate_rows=3, review_rows=2)
 

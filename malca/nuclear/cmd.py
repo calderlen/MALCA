@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 
 from malca.nuclear.context import NuclearContextConfig, run_nuclear_context
-from malca.table_io import read_parquet_table
+from malca.table_io import read_feature_table
 
 
 def main() -> None:
@@ -53,7 +53,7 @@ def main() -> None:
         run_radio=remote,
         run_swift=remote,
     )
-    df = read_parquet_table(args.input)
+    df = read_feature_table(args.input)
     out = run_nuclear_context(df, config)
     print(f"Nuclear context written to {config.results_dir / 'nuclear_context.parquet'} ({len(out)} rows)")
 

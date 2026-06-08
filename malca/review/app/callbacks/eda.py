@@ -234,13 +234,16 @@ def export_eda_plot_pdf(n_clicks, queue_data, current_index, x_metric, y_metric,
      Output('notification', 'children', allow_duplicate=True)],
     [Input('eda-custom-graph', 'clickData'),
      Input('eda-candidate-table', 'active_cell')],
-    [State('eda-candidate-table', 'derived_virtual_data'),
+    [State('eda-candidate-table', 'derived_viewport_data'),
+     State('eda-candidate-table', 'derived_virtual_data'),
      State('eda-candidate-table', 'data'),
+     State('eda-candidate-table', 'page_current'),
+     State('eda-candidate-table', 'page_size'),
      State('queue-data', 'data'),
      State('current-index', 'data')],
     prevent_initial_call=True,
 )
-def navigate_from_eda(click_data, active_cell, visible_table_data, table_data, queue_data, current_index):
+def navigate_from_eda(click_data, active_cell, viewport_table_data, visible_table_data, table_data, page_current, page_size, queue_data, current_index):
     triggered = callback_context.triggered_id
     candidate_id = ''
     candidate_ids = []
@@ -255,16 +258,16 @@ def navigate_from_eda(click_data, active_cell, visible_table_data, table_data, q
             if candidate_id:
                 candidate_ids.append(candidate_id)
     elif triggered == 'eda-candidate-table' and isinstance(active_cell, dict):
-        row_idx = active_cell.get('row')
-        try:
-            visible_rows = visible_table_data or table_data or []
-            row = visible_rows[int(row_idx)]
-        except Exception:
-            row = {}
-        for value in (row.get('candidate_key'), row.get('candidate_id')):
-            text = str(value or '').strip()
-            if text and text not in candidate_ids:
-                candidate_ids.append(text)
+        candidate_ids.extend(
+            candidate_ids_from_eda_table_context(
+                active_cell,
+                viewport_table_data,
+                visible_table_data,
+                table_data,
+                page_current,
+                page_size,
+            )
+        )
 
     next_index = None
     for candidate_id in candidate_ids:

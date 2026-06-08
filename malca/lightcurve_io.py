@@ -48,7 +48,8 @@ CANONICAL_ASASSN_COLUMNS = [
     "source_path",
     "is_good",
     "saturated",
-    "camera_field",
+    "camera_name",
+    "field",
 ]
 
 MJD_OFFSET = 2400000.5
@@ -125,6 +126,47 @@ def _string_column(
     if col is None:
         return pd.Series(default, index=index, dtype="object")
     return df[col].astype("string").fillna("").astype(str).str.strip()
+
+
+def _camera_name_field_columns(
+    raw: pd.DataFrame,
+    index: pd.Index,
+    camera: pd.Series,
+) -> tuple[pd.Series, pd.Series]:
+    camera_name = _string_column(raw, ("camera_name", "camera name", "cam_name"), index)
+    field = _string_column(raw, ("field", "asassn_field", "asassn field"), index)
+
+    combined_col = _find_column(raw, ("camera_field", "cam_field", "camera,field", "cam/field"))
+    field_only_combined_mask = pd.Series(False, index=index)
+    if combined_col is not None:
+        combined = raw[combined_col].astype("string").fillna("").astype(str).str.strip()
+        split = combined.str.split("/", n=1, expand=True)
+        if split.shape[1] >= 2:
+            split_camera = split[0].fillna("").astype(str).str.strip()
+            split_field = split[1].fillna("").astype(str).str.strip()
+            slash_mask = combined.str.contains("/", regex=False).fillna(False)
+            camera_name = camera_name.mask((camera_name == "") & slash_mask, split_camera)
+            field = field.mask((field == "") & slash_mask, split_field)
+        else:
+            slash_mask = pd.Series(False, index=index)
+
+        if str(combined_col).strip().lower() == "camera_field":
+            field_only_combined_mask = ~slash_mask & (combined != "")
+            field = field.mask((field == "") & field_only_combined_mask, combined)
+    else:
+        combined = pd.Series("", index=index, dtype="object")
+
+    has_named_camera_col = _find_column(raw, ("camera_name", "camera name", "cam_name")) is not None
+    has_numbered_camera_col = (
+        _find_column(raw, ("camera#", "camera_id", "camera id", "camera number", "camera_number")) is not None
+    )
+    if not has_named_camera_col and not has_numbered_camera_col:
+        camera_name = camera_name.mask(
+            (camera_name == "") & ~field_only_combined_mask,
+            camera.astype(str).str.strip(),
+        )
+
+    return camera_name, field
 
 
 def _normalize_band_value(value: object) -> str:
@@ -361,6 +403,7 @@ def normalize_asassn_lightcurve(
 
     out["quality"] = _quality_from_raw(raw, index)
     out["camera"] = _string_column(raw, ("camera", "Camera", "camera#", "camera_name"), index)
+    out["camera_name"], out["field"] = _camera_name_field_columns(raw, index, out["camera"])
     out["limit"] = _numeric_column(raw, ("limit", "Limit"), index)
     out["fwhm"] = _numeric_column(raw, ("fwhm", "FWHM"), index)
     out["source_path"] = _source_path_series(raw, index, source_path)
@@ -370,8 +413,6 @@ def normalize_asassn_lightcurve(
         out["saturated"] = False
     else:
         out["saturated"] = _boolish_series(raw[saturated_col], default=False)
-
-    out["camera_field"] = _string_column(raw, ("camera_field", "cam_field", "field"), index)
 
     _compute_mag_flux_density(out)
     _compute_relative_flux(out)
@@ -404,8 +445,8 @@ def filter_asassn_quality(frame: pd.DataFrame) -> pd.DataFrame:
     return normalize_asassn_lightcurve(frame, apply_quality=True)
 
 
-def to_legacy_asassn_frame(frame: pd.DataFrame) -> pd.DataFrame:
-    """Convert a canonical ASAS-SN frame to the historical MALCA column names."""
+def to_asassn_algorithm_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    """Convert a canonical ASAS-SN frame to the working columns used by event algorithms."""
     canonical = normalize_asassn_lightcurve(frame, apply_quality=False, sort_by_time=False)
     out = pd.DataFrame(index=canonical.index)
     out["JD"] = pd.to_numeric(canonical["jd"], errors="coerce")
@@ -415,7 +456,8 @@ def to_legacy_asassn_frame(frame: pd.DataFrame) -> pd.DataFrame:
     out["camera#"] = canonical["camera"].astype(str)
     out["v_g_band"] = canonical["band"].map(_legacy_band_code)
     out["saturated"] = canonical["saturated"].astype(int)
-    out["cam_field"] = canonical["camera_field"].astype(str)
+    out["camera_name"] = canonical["camera_name"].astype(str)
+    out["field"] = canonical["field"].astype(str)
     return out.reset_index(drop=True)
 
 

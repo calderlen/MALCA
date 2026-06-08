@@ -26,6 +26,47 @@ def test_ltv_multi_survey_features_summarize_external_lc_files(tmp_path: Path) -
             "w2mpro": [9.5, 9.0],
         }
     ).to_parquet(external_dir / "neowise_lc_ltv_123.parquet", index=False)
+    pd.DataFrame(
+        {
+            "mjd": [55400.0, 55765.25],
+            "w1mpro": [12.0, 12.5],
+            "w3mpro": [8.0, 8.4],
+        }
+    ).to_parquet(external_dir / "allwise_mep_lc_ltv_123.parquet", index=False)
+    pd.DataFrame(
+        {
+            "time": [100.0, 465.25],
+            "flux": [1.0, 1.2],
+        }
+    ).to_parquet(external_dir / "kepler_lc_ltv_123.parquet", index=False)
+    pd.DataFrame(
+        {
+            "mjd": [59000.0, 59365.25],
+            "mag": [13.0, 13.5],
+            "band": ["V", "V"],
+        }
+    ).to_parquet(external_dir / "aavso_lc_ltv_123.parquet", index=False)
+    pd.DataFrame(
+        {
+            "mjd": [57000.0, 57365.25],
+            "mag": [15.0, 15.4],
+            "band": ["I", "I"],
+        }
+    ).to_parquet(external_dir / "ogle_lc_ltv_123.parquet", index=False)
+    pd.DataFrame(
+        {
+            "mjd": [52000.0, 52365.25],
+            "mag": [18.0, 17.8],
+            "band": ["g", "g"],
+        }
+    ).to_parquet(external_dir / "stripe82_lc_ltv_123.parquet", index=False)
+    pd.DataFrame(
+        {
+            "mjd": [57000.0, 57365.25],
+            "mag": [14.0, 14.7],
+            "band": ["ks", "ks"],
+        }
+    ).to_parquet(external_dir / "vvvx_virac_lc_ltv_123.parquet", index=False)
 
     out = compute_ltv_multi_survey_features(
         pd.DataFrame({"asas_sn_id": ["123"], "candidate_id": ["ltv_123"]}),
@@ -40,6 +81,18 @@ def test_ltv_multi_survey_features_summarize_external_lc_files(tmp_path: Path) -
     assert out.loc[0, "ltv_ms_neowise_n_points"] == 2
     assert out.loc[0, "ltv_ms_neowise_w1_range"] == 1.0
     assert round(float(out.loc[0, "ltv_ms_neowise_w1_slope_per_year"]), 6) == 1.0
+    assert out.loc[0, "ltv_ms_allwise_mep_n_points"] == 2
+    assert out.loc[0, "ltv_ms_allwise_mep_w1_range"] == 0.5
+    assert out.loc[0, "ltv_ms_kepler_n_points"] == 2
+    assert round(float(out.loc[0, "ltv_ms_kepler_flux_range"]), 6) == 0.2
+    assert out.loc[0, "ltv_ms_aavso_n_points"] == 2
+    assert out.loc[0, "ltv_ms_aavso_mag_range"] == 0.5
+    assert out.loc[0, "ltv_ms_ogle_n_points"] == 2
+    assert round(float(out.loc[0, "ltv_ms_ogle_mag_range"]), 6) == 0.4
+    assert out.loc[0, "ltv_ms_stripe82_n_points"] == 2
+    assert round(float(out.loc[0, "ltv_ms_stripe82_mag_slope_per_year"]), 6) == -0.2
+    assert out.loc[0, "ltv_ms_vvvx_virac_n_points"] == 2
+    assert round(float(out.loc[0, "ltv_ms_vvvx_virac_ks_range"]), 6) == 0.7
 
 
 def test_ltv_multi_survey_columns_persist_in_review_db(tmp_path: Path) -> None:

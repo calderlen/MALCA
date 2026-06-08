@@ -24,7 +24,7 @@ from malca.sed_model import (
     _patch_pystellibs_kurucz_libsdir,
     fit_sed_models,
 )
-from malca.table_io import write_parquet_table
+from malca.table_io import write_feature_table, write_parquet_table
 
 _trapezoid = getattr(np, "trapezoid", np.trapz)
 
@@ -204,7 +204,7 @@ def test_pystellibs_kurucz_libsdir_falls_back_to_packaged_libs(tmp_path: Path, m
 
 def test_sed_photometry_cli_writes_fit_and_curve_outputs(tmp_path: Path, monkeypatch) -> None:
     input_path = tmp_path / "candidates.parquet"
-    write_parquet_table(pd.DataFrame([{"candidate_id": "sed-cand", "ra_deg": 1.0, "dec_deg": 2.0}]), input_path)
+    write_feature_table(pd.DataFrame([{"candidate_id": "sed-cand", "timescale": "stv", "ra": 1.0, "dec": 2.0}]), input_path)
     sed_rows = _rows_from_fake_model("sed-cand")
     fits = pd.DataFrame([{col: None for col in SED_MODEL_FIT_COLUMNS}])
     fits.loc[0, "candidate_id"] = "sed-cand"
@@ -236,8 +236,8 @@ def test_sed_photometry_cli_reads_candidates_from_review_db_by_default(tmp_path:
             conn,
             pd.DataFrame([{
                 "candidate_id": "sed-cand",
-                "ra_deg": 1.0,
-                "dec_deg": 2.0,
+                "ra": 1.0,
+                "dec": 2.0,
                 "gaia_id": "123456789",
                 "failed_any": False,
             }]),
@@ -260,8 +260,8 @@ def test_sed_photometry_cli_reads_candidates_from_review_db_by_default(tmp_path:
     def fake_fetch(df: pd.DataFrame, *args, **kwargs):
         seen["input_rows"] = len(df)
         seen["candidate_id"] = str(df.loc[0, "candidate_id"])
-        seen["ra_deg"] = float(df.loc[0, "ra_deg"])
-        seen["dec_deg"] = float(df.loc[0, "dec_deg"])
+        seen["ra"] = float(df.loc[0, "ra"])
+        seen["dec"] = float(df.loc[0, "dec"])
         seen["gaia_id"] = str(df.loc[0, "gaia_id"])
         return sed_rows
 
@@ -275,8 +275,8 @@ def test_sed_photometry_cli_reads_candidates_from_review_db_by_default(tmp_path:
     assert seen == {
         "input_rows": 1,
         "candidate_id": "sed-cand",
-        "ra_deg": 1.0,
-        "dec_deg": 2.0,
+        "ra": 1.0,
+        "dec": 2.0,
         "gaia_id": "123456789",
     }
     with closing(db_connect(db_path)) as conn:

@@ -33,6 +33,8 @@ def test_gaia_fetch_reads_legacy_default_and_migrates_to_new_cache(
             "source_id": ["123"],
             "ra": [1.0],
             "dec": [2.0],
+            "phot_bp_mean_mag": [15.1],
+            "phot_rp_mean_mag": [14.2],
             "w1": [11.0],
             "w1_err": [0.1],
             "w2": [10.8],
@@ -58,7 +60,7 @@ def test_gaia_fetch_reads_legacy_default_and_migrates_to_new_cache(
 
 def test_sed_source_cache_persists_hits_and_misses(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(sed, "SED_CACHE_DIR", tmp_path / "sed")
-    calls = {"ps1": 0, "akari": 0, "iras": 0, "herschel": 0}
+    calls = {"ps1": 0}
 
     def ps1_fetch(df: pd.DataFrame, progress_callback=None) -> pd.DataFrame:
         calls["ps1"] += 1
@@ -74,17 +76,7 @@ def test_sed_source_cache_persists_hits_and_misses(tmp_path: Path, monkeypatch) 
         )
         return pd.DataFrame([row], columns=sed.SED_COLUMNS)
 
-    def empty_fetch(name: str):
-        def _fetch(_df: pd.DataFrame, progress_callback=None) -> pd.DataFrame:
-            calls[name] += 1
-            return pd.DataFrame(columns=sed.SED_COLUMNS)
-
-        return _fetch
-
     monkeypatch.setitem(sed.CATALOG_FETCHERS, "ps1", ps1_fetch)
-    monkeypatch.setitem(sed.CATALOG_FETCHERS, "akari", empty_fetch("akari"))
-    monkeypatch.setitem(sed.CATALOG_FETCHERS, "iras", empty_fetch("iras"))
-    monkeypatch.setitem(sed.CATALOG_FETCHERS, "herschel", empty_fetch("herschel"))
 
     df = pd.DataFrame([{"candidate_id": "C1", "ra": 1.0, "dec": 2.0}])
     first = sed.fetch_sed_photometry(df, sources="ps1")
@@ -92,7 +84,7 @@ def test_sed_source_cache_persists_hits_and_misses(tmp_path: Path, monkeypatch) 
 
     assert len(first) == 1
     assert len(second) == 1
-    assert calls == {"ps1": 1, "akari": 1, "iras": 1, "herschel": 1}
+    assert calls == {"ps1": 1}
     assert (tmp_path / "sed" / "ps1.parquet").exists()
 
 

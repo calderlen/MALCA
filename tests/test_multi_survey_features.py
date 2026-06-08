@@ -18,7 +18,8 @@ from malca.review.pipeline import (
     detect_pipeline_status,
 )
 from malca.review.store import db_connect, get_candidate_payload, upsert_candidates_frame
-from malca.table_io import read_parquet_table, write_parquet_table
+from malca.feature_layers import feature_mapping_get, with_feature_columns
+from malca.table_io import read_feature_table, write_feature_table, write_parquet_table
 
 
 def _base_event_row(candidate_id: str = "C1") -> dict[str, object]:
@@ -181,7 +182,7 @@ def test_cli_writes_enriched_parquet_and_merges_review_db(tmp_path: Path) -> Non
     input_path = tmp_path / "candidates.parquet"
     output_path = tmp_path / "features.parquet"
     db_path = tmp_path / "review.db"
-    write_parquet_table(pd.DataFrame([row]), input_path)
+    write_feature_table(pd.DataFrame([row]), input_path)
 
     with closing(db_connect(db_path)) as conn:
         upsert_candidates_frame(conn, pd.DataFrame([row]))
@@ -194,13 +195,13 @@ def test_cli_writes_enriched_parquet_and_merges_review_db(tmp_path: Path) -> Non
     )
     result_path = run_multi_survey_features(args)
 
-    out = read_parquet_table(result_path)
+    out = with_feature_columns(read_feature_table(result_path), ["ms_feature_status"])
     assert result_path == output_path
     assert out.loc[0, "ms_feature_status"] == "ok"
     with closing(db_connect(db_path)) as conn:
         payload = get_candidate_payload(conn, "C1")
-    assert payload["ms_feature_status"] == "ok"
-    assert payload["ms_event_type"] == "dip"
+    assert feature_mapping_get(payload, "ms_feature_status") == "ok"
+    assert feature_mapping_get(payload, "ms_event_type") == "dip"
 
 
 def test_review_stage_status_and_runner(tmp_path: Path) -> None:

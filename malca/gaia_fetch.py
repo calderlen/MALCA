@@ -30,8 +30,13 @@ from malca.config import (
     VSX_CROSSMATCH_PATH,
 )
 from malca.candidates import select_passing_candidates_if_present
+from malca.feature_layers import with_feature_columns
 from malca.gaia_ids import normalize_gaia_source_ids
-from malca.table_io import read_parquet_table, read_passing_parquet_table
+from malca.table_io import (
+    is_layer_first_table,
+    read_feature_table,
+    read_parquet_table,
+)
 
 
 
@@ -46,7 +51,7 @@ SELECT
     g.pmra, g.pmdec,
     g.radial_velocity,
     g.rv_amplitude_robust,
-    g.phot_g_mean_mag, g.bp_rp,
+    g.phot_g_mean_mag, g.phot_bp_mean_mag, g.phot_rp_mean_mag, g.bp_rp,
     g.teff_gspphot, g.logg_gspphot, g.mh_gspphot,
     g.distance_gspphot, g.ag_gspphot,
 
@@ -91,6 +96,8 @@ GAIA_EXPECTED_COLUMNS = (
     "radial_velocity",
     "rv_amplitude_robust",
     "phot_g_mean_mag",
+    "phot_bp_mean_mag",
+    "phot_rp_mean_mag",
     "bp_rp",
     "teff_gspphot",
     "logg_gspphot",
@@ -116,17 +123,18 @@ GAIA_EXPECTED_COLUMNS = (
 )
 GAIA_STRING_COLUMNS = {"source_id", "tmass_id", "allwise_id"}
 WISE_FETCH_COLUMNS = {"w1", "w1_err", "w2", "w2_err", "w3", "w3_err", "w4", "w4_err"}
+GAIA_CURRENT_FETCH_COLUMNS = WISE_FETCH_COLUMNS | {"phot_bp_mean_mag", "phot_rp_mean_mag"}
 
 
 def _has_required_gaia_columns(df: pd.DataFrame | None) -> bool:
     return df is not None and all(col in df.columns for col in GAIA_REQUIRED_COLUMNS)
 
 
-def _has_current_wise_fetch_schema(df: pd.DataFrame | None) -> bool:
+def _has_current_gaia_fetch_schema(df: pd.DataFrame | None) -> bool:
     if df is None or df.empty:
         return False
     columns = {str(col).lower() for col in df.columns}
-    return WISE_FETCH_COLUMNS.issubset(columns)
+    return GAIA_CURRENT_FETCH_COLUMNS.issubset(columns)
 
 
 def _ensure_gaia_schema(df: pd.DataFrame) -> pd.DataFrame:
@@ -180,10 +188,25 @@ def _read_candidate_id_columns(
     """Read only columns needed to derive Gaia IDs from a candidate table."""
     columns = _parquet_column_names(input_path)
     if columns is None:
-        df = read_parquet_table(input_path)
+        df = read_feature_table(input_path)
         if only_passers:
             df = select_passing_candidates_if_present(df, label="rows", printer=print)
         return df
+
+    if is_layer_first_table(input_path):
+        df = with_feature_columns(read_feature_table(input_path), ["gaia_id", "source_id", "failed_any"])
+        if only_passers:
+            df = select_passing_candidates_if_present(df, label="rows", printer=print)
+        if "gaia_id" in df.columns and df["gaia_id"].notna().any():
+            return df
+        if "source_id" in df.columns and df["source_id"].notna().any():
+            df["gaia_id"] = df["source_id"]
+            return df
+        if "asas_sn_id" in df.columns:
+            return df
+        raise ValueError(
+            f"Input file {input_path} has neither 'gaia_id' nor 'asas_sn_id' column."
+        )
 
     if "gaia_id" in columns:
         wanted = ["gaia_id"]
@@ -194,9 +217,7 @@ def _read_candidate_id_columns(
             f"Input file {input_path} has neither 'gaia_id' nor 'asas_sn_id' column."
         )
 
-    if only_passers:
-        return read_passing_parquet_table(input_path, columns=wanted)
-    return read_parquet_table(input_path, columns=wanted)
+    raise ValueError(f"Input file is not layer-first: {input_path}. Run 'malca migrate' before Gaia fetch.")
 
 
 def _extract_gaia_ids(
@@ -213,8 +234,13 @@ def _extract_gaia_ids(
         # Already has gaia_id (e.g. from a previous merge)
         raw_gaia_ids = df["gaia_id"].dropna().tolist()
         gaia_ids = _normalize_gaia_ids(raw_gaia_ids)
-        print(f"Found {len(raw_gaia_ids)} Gaia IDs directly in input file; normalized to {len(gaia_ids)} unique valid IDs.")
-        return gaia_ids
+        if gaia_ids:
+            print(f"Found {len(raw_gaia_ids)} Gaia IDs directly in input file; normalized to {len(gaia_ids)} unique valid IDs.")
+            return gaia_ids
+        if "asas_sn_id" not in df.columns:
+            print(f"Found {len(raw_gaia_ids)} Gaia IDs directly in input file, but none were valid.")
+        else:
+            df = df.drop(columns=["gaia_id"])
 
     if "asas_sn_id" not in df.columns:
         raise ValueError(
@@ -280,7 +306,7 @@ def _chunk_is_checkpointed(checkpoint_dir: Path, key: str) -> bool:
         part = pd.read_parquet(path)
     except Exception:
         return False
-    return _has_current_wise_fetch_schema(part)
+    return _has_current_gaia_fetch_schema(part)
 
 
 def _load_checkpoint_parts(checkpoint_dir: Path) -> pd.DataFrame:
@@ -291,7 +317,7 @@ def _load_checkpoint_parts(checkpoint_dir: Path) -> pd.DataFrame:
     frames: list[pd.DataFrame] = []
     for path in part_files:
         part = pd.read_parquet(path)
-        if _has_current_wise_fetch_schema(part):
+        if _has_current_gaia_fetch_schema(part):
             frames.append(part)
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
@@ -378,9 +404,9 @@ def fetch_gaia_catalog(
         except Exception as e:
             print(f"  Warning: could not read existing Gaia cache at {existing_read_path}: {e}")
         else:
-            cache_has_current_wise = _has_current_wise_fetch_schema(cached_candidate)
+            cache_has_current_gaia_schema = _has_current_gaia_fetch_schema(cached_candidate)
             cached_candidate = _ensure_gaia_schema(cached_candidate)
-            if _has_required_gaia_columns(cached_candidate) and cache_has_current_wise and not cached_candidate.empty:
+            if _has_required_gaia_columns(cached_candidate) and cache_has_current_gaia_schema and not cached_candidate.empty:
                 cached_df = cached_candidate
                 cached_df["source_id"] = cached_df["source_id"].astype(str)
                 existing_ids = set(cached_df["source_id"])

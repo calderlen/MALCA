@@ -7,6 +7,7 @@ from pathlib import Path
 import pandas as pd
 
 from malca.review.eda_panel import (
+    candidate_ids_from_eda_table_context,
     eda_plot_row_counts,
     eda_publication_figure,
     eda_scatter_figure,
@@ -72,13 +73,62 @@ def test_queue_eda_frame_preserves_queue_order(tmp_path: Path) -> None:
 def test_eda_table_rows_tolerate_missing_optional_columns() -> None:
     rows = eda_table_rows(pd.DataFrame({"candidate_id": ["A"], "dipper_score": [1.5]}))
 
-    assert rows == [{"candidate_id": "A", "dipper_score": 1.5}]
+    assert rows == [{"candidate_id": "A", "dipper_score": 1.5, "id": "A"}]
 
 
 def test_eda_table_rows_keep_candidate_key_payload() -> None:
     rows = eda_table_rows(pd.DataFrame({"candidate_id": ["A"], "candidate_key": ["K"], "dipper_score": [1.5]}))
 
-    assert rows == [{"candidate_id": "A", "dipper_score": 1.5, "candidate_key": "K"}]
+    assert rows == [{"candidate_id": "A", "dipper_score": 1.5, "candidate_key": "K", "id": "A"}]
+
+
+def test_candidate_ids_from_eda_table_context_prefers_row_id() -> None:
+    candidate_ids = candidate_ids_from_eda_table_context(
+        {"row": 0, "row_id": "C-from-row-id"},
+        [{"candidate_id": "C-from-viewport"}],
+        [{"candidate_id": "C-from-virtual"}],
+        [{"candidate_id": "C-from-table"}],
+    )
+
+    assert candidate_ids[0] == "C-from-row-id"
+
+
+def test_candidate_ids_from_eda_table_context_uses_current_viewport_page() -> None:
+    virtual_rows = [
+        {"candidate_id": f"C{i}"}
+        for i in range(24)
+    ]
+    viewport_rows = virtual_rows[12:24]
+
+    candidate_ids = candidate_ids_from_eda_table_context(
+        {"row": 2},
+        viewport_rows,
+        virtual_rows,
+        virtual_rows,
+        page_current=1,
+        page_size=12,
+    )
+
+    assert candidate_ids[0] == "C14"
+    assert "C2" not in candidate_ids[:2]
+
+
+def test_candidate_ids_from_eda_table_context_uses_absolute_page_fallback() -> None:
+    virtual_rows = [
+        {"candidate_id": f"C{i}"}
+        for i in range(24)
+    ]
+
+    candidate_ids = candidate_ids_from_eda_table_context(
+        {"row": 2},
+        None,
+        virtual_rows,
+        virtual_rows,
+        page_current=1,
+        page_size=12,
+    )
+
+    assert candidate_ids[0] == "C14"
 
 
 def test_eda_scatter_figure_highlights_selected_candidate() -> None:

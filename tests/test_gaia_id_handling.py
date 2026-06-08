@@ -4,9 +4,17 @@ import pandas as pd
 
 import malca.characterize as characterize
 from malca.characterize import query_gaia_by_ids
+from malca.feature_layers import with_feature_columns
 from malca.stv.pipeline import _add_gaia_ids_from_index
-from malca.gaia_fetch import _extract_gaia_ids, _normalize_gaia_ids
+from malca.gaia_fetch import (
+    _GAIA_QUERY_TEMPLATE,
+    _ensure_gaia_schema,
+    _extract_gaia_ids,
+    _has_current_gaia_fetch_schema,
+    _normalize_gaia_ids,
+)
 from malca.gaia_ids import normalize_gaia_source_id_series, parse_gaia_source_id
+from malca.table_io import write_feature_table
 
 
 LARGE_GAIA_ID = 3564313717372918912
@@ -26,13 +34,18 @@ def test_normalize_gaia_ids_accepts_numeric_strings_without_duplicates() -> None
 def test_extract_gaia_ids_reads_direct_gaia_passers(tmp_path) -> None:
     input_path = tmp_path / "candidates.parquet"
     xmatch_path = tmp_path / "unused_xmatch.parquet"
-    pd.DataFrame(
-        {
-            "gaia_id": ["1001", "1002", "bad"],
-            "failed_any": [False, True, False],
-            "large_payload": ["x" * 1000, "y" * 1000, "z" * 1000],
-        }
-    ).to_parquet(input_path, index=False)
+    write_feature_table(
+        pd.DataFrame(
+            {
+                "candidate_id": ["stv_1001", "stv_1002", "stv_bad"],
+                "timescale": ["stv", "stv", "stv"],
+                "gaia_id": ["1001", "1002", "bad"],
+                "failed_any": [False, True, False],
+                "large_payload": ["x" * 1000, "y" * 1000, "z" * 1000],
+            }
+        ),
+        input_path,
+    )
 
     out = _extract_gaia_ids(input_path, xmatch_path, only_passers=True)
 
@@ -42,13 +55,18 @@ def test_extract_gaia_ids_reads_direct_gaia_passers(tmp_path) -> None:
 def test_extract_gaia_ids_uses_minimal_crossmatch_columns(tmp_path) -> None:
     input_path = tmp_path / "candidates.parquet"
     xmatch_path = tmp_path / "xmatch.parquet"
-    pd.DataFrame(
-        {
-            "asas_sn_id": ["A", "B"],
-            "failed_any": [False, True],
-            "large_payload": ["x" * 1000, "y" * 1000],
-        }
-    ).to_parquet(input_path, index=False)
+    write_feature_table(
+        pd.DataFrame(
+            {
+                "candidate_id": ["stv_A", "stv_B"],
+                "timescale": ["stv", "stv"],
+                "asas_sn_id": ["A", "B"],
+                "failed_any": [False, True],
+                "large_payload": ["x" * 1000, "y" * 1000],
+            }
+        ),
+        input_path,
+    )
     pd.DataFrame(
         {
             "asas_sn_id": ["A", "B"],
@@ -105,6 +123,32 @@ def test_query_gaia_by_ids_matches_numeric_like_requested_ids(tmp_path) -> None:
     assert float(out.loc[out.index[0], "ra"]) == 12.3
 
 
+def test_gaia_fetch_current_schema_requires_separate_bp_rp() -> None:
+    stale = pd.DataFrame(
+        {
+            "source_id": ["123"],
+            "w1": [11.0],
+            "w1_err": [0.1],
+            "w2": [10.8],
+            "w2_err": [0.1],
+            "w3": [10.0],
+            "w3_err": [0.2],
+            "w4": [9.5],
+            "w4_err": [0.3],
+        }
+    )
+    current = stale.assign(phot_bp_mean_mag=[15.1], phot_rp_mean_mag=[14.2])
+
+    assert not _has_current_gaia_fetch_schema(stale)
+    assert _has_current_gaia_fetch_schema(current)
+    assert "g.phot_bp_mean_mag" in _GAIA_QUERY_TEMPLATE
+    assert "g.phot_rp_mean_mag" in _GAIA_QUERY_TEMPLATE
+
+    normalized = _ensure_gaia_schema(current)
+    assert "phot_bp_mean_mag" in normalized.columns
+    assert "phot_rp_mean_mag" in normalized.columns
+
+
 def test_characterize_uses_existing_gaia_id_without_crossmatch(tmp_path, monkeypatch) -> None:
     seen: dict[str, object] = {}
 
@@ -140,5 +184,6 @@ def test_characterize_uses_existing_gaia_id_without_crossmatch(tmp_path, monkeyp
     )
 
     assert seen["gaia_ids"] == [str(LARGE_GAIA_ID)]
-    assert out.loc[0, "source_id"] == str(LARGE_GAIA_ID)
-    assert float(out.loc[0, "ra"]) == 12.3
+    view = with_feature_columns(out, ["source_id", "ra"])
+    assert view.loc[0, "source_id"] == str(LARGE_GAIA_ID)
+    assert float(view.loc[0, "ra"]) == 12.3

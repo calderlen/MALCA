@@ -19,7 +19,7 @@ import pandas as pd
 import numpy as np
 
 from malca.config import VSX_MAX_SEP_ARCSEC
-from malca.table_io import read_parquet_table, write_parquet_table
+from malca.table_io import read_feature_table, write_parquet_table
 
 
 # Default validation candidates (Brayden's list)
@@ -263,7 +263,7 @@ def load_and_aggregate_results(files: list[Path]) -> pd.DataFrame:
     """Load multiple results files and aggregate into single DataFrame."""
     dfs = []
     for f in files:
-        df = read_parquet_table(f)
+        df = read_feature_table(f)
         df["_source_file"] = f.name
         dfs.append(df)
     
@@ -364,7 +364,7 @@ def main():
     if args.results:
         # Direct file specification
         print(f"Loading results from: {args.results}")
-        results_df = read_parquet_table(args.results)
+        results_df = read_feature_table(args.results)
     elif args.run_dir or args.latest_run or (args.method is None and args.results is None):
         base_dir = Path(args.output_dir)
         run_dir = Path(args.run_dir).expanduser() if args.run_dir else None
@@ -415,7 +415,7 @@ def main():
     # Load or use default candidates
     if args.candidates:
         print(f"Loading candidates from: {args.candidates}")
-        candidates_df = read_parquet_table(args.candidates)
+        candidates_df = read_feature_table(args.candidates)
     else:
         print("Using default Brayden candidate list")
         candidates_df = pd.DataFrame(DEFAULT_CANDIDATES)

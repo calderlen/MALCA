@@ -4,10 +4,12 @@ import io
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
 from malca import fetch as skypatrol_fetch
+from malca.feature_layers import feature_mapping_get
 from malca.review import fetch as review_fetch
 from malca import vetting
 
@@ -98,7 +100,7 @@ def test_review_stats_cache_reuses_and_invalidates_by_lc_file_state(
 
     assert calls["stats"] == 1
     assert first == second
-    assert first["stats_photometry_mean_mag"] == 15.0
+    assert feature_mapping_get(first, "stats_photometry_mean_mag") == 15.0
 
     with lc_path.open("a", encoding="utf-8") as f:
         f.write("2450002.5,1.2,0.1,13.8,0.02,,2.0,g,G,bi\n")
@@ -106,7 +108,7 @@ def test_review_stats_cache_reuses_and_invalidates_by_lc_file_state(
     third = review_fetch._compute_stats_from_skypatrol_csv(lc_path)
 
     assert calls["stats"] == 2
-    assert third["stats_photometry_mean_mag"] == 16.0
+    assert feature_mapping_get(third, "stats_photometry_mean_mag") == 16.0
 
 
 def test_fetch_ztf_lightcurves_reuses_cached_parquet(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -193,6 +195,45 @@ def test_fetch_ztf_lightcurves_reuses_no_data_status(tmp_path: Path, monkeypatch
     assert int(out.loc[0, "ztf_lc_n_det"]) == 0
 
 
+def test_fetch_panstarrs_lightcurves_retries_http_429(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    df = pd.DataFrame([{"candidate_id": "C1", "ra": 10.0, "dec": 20.0}])
+    csv_text = "obsTime,filterID,psfFlux,psfFluxErr,infoFlag\n2459000.5,1,1000.0,10.0,0\n"
+    calls: list[tuple[str, dict]] = []
+    sleeps: list[float] = []
+
+    class FakeResponse:
+        def __init__(self, status_code: int, text: str = "", headers: dict[str, str] | None = None) -> None:
+            self.status_code = status_code
+            self.text = text
+            self.headers = headers or {}
+
+    responses = [
+        FakeResponse(429, headers={"Retry-After": "0"}),
+        FakeResponse(200, csv_text),
+    ]
+
+    def fake_get(url: str, **kwargs):
+        calls.append((url, kwargs))
+        return responses.pop(0)
+
+    monkeypatch.setattr(vetting.requests, "get", fake_get)
+    monkeypatch.setattr(vetting.time, "sleep", lambda delay: sleeps.append(delay))
+
+    out = vetting.fetch_panstarrs_lightcurves(df, output_dir=tmp_path, workers=1)
+
+    assert len(calls) == 2
+    assert calls[0][1]["timeout"] == vetting.VETTING_HTTP_TIMEOUT
+    assert sleeps == [0.0]
+    assert int(out.loc[0, "ps1_lc_n_points"]) == 1
+    saved = pd.read_parquet(tmp_path / "ps1_lc_C1.parquet")
+    assert saved.loc[0, "mjd"] == pytest.approx(59000.0)
+    status = pd.read_parquet(tmp_path / vetting.EXTERNAL_LC_STATUS_FILE)
+    assert status.loc[0, "status"] == "fetched"
+
+
 def test_fetch_external_lcs_continues_after_module_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -223,6 +264,10 @@ def test_fetch_external_lcs_continues_after_module_failure(
         run_neowise=False,
         run_kepler=False,
         run_aavso=False,
+        run_ogle=False,
+        run_stripe82=False,
+        run_allwise_mep=False,
+        run_vvvx_virac=False,
         run_ps1=False,
         run_crts=False,
         progress_callback=messages.append,
@@ -260,6 +305,10 @@ def test_fetch_external_lcs_module_failure_survives_closed_stdout(
         run_neowise=False,
         run_kepler=False,
         run_aavso=False,
+        run_ogle=False,
+        run_stripe82=False,
+        run_allwise_mep=False,
+        run_vvvx_virac=False,
         run_ps1=False,
         run_crts=False,
     )
@@ -299,6 +348,10 @@ def test_fetch_external_lcs_module_print_survives_closed_stdout(
         run_neowise=False,
         run_kepler=False,
         run_aavso=False,
+        run_ogle=False,
+        run_stripe82=False,
+        run_allwise_mep=False,
+        run_vvvx_virac=False,
         run_ps1=False,
         run_crts=False,
     )
@@ -345,6 +398,10 @@ def test_fetch_external_lcs_resume_retries_error_status(
         run_neowise=False,
         run_kepler=False,
         run_aavso=False,
+        run_ogle=False,
+        run_stripe82=False,
+        run_allwise_mep=False,
+        run_vvvx_virac=False,
         run_ps1=False,
         run_crts=False,
         checkpoint_path=checkpoint_path,
@@ -381,6 +438,172 @@ def test_fetch_tess_lightcurves_records_lookup_errors(
     assert error_row["status"] == "error"
     assert "mast stream blew up" in error_row["error_message"]
     assert no_data_row["status"] == "no_data"
+
+
+class _FakeGaiaEpochTapTable:
+    def __init__(self, df: pd.DataFrame) -> None:
+        self._df = df
+
+    def __len__(self) -> int:
+        return len(self._df)
+
+    def to_pandas(self) -> pd.DataFrame:
+        return self._df.copy()
+
+
+class _FakeGaiaEpochTapResult:
+    def __init__(self, df: pd.DataFrame) -> None:
+        self._df = df
+
+    def to_table(self) -> _FakeGaiaEpochTapTable:
+        return _FakeGaiaEpochTapTable(self._df)
+
+
+class _FakeGaiaEpochRawTapResult:
+    def __init__(self, table: object) -> None:
+        self._table = table
+
+    def to_table(self) -> object:
+        return self._table
+
+
+class _FakeMaskedGaiaEpochTapTable:
+    colnames = ["source_id", "transit_id", "time", "mag", "band"]
+
+    def __init__(self, source_id: int) -> None:
+        self._data = {
+            "source_id": np.ma.array([source_id, source_id], mask=[False, False]),
+            "transit_id": np.ma.array([301, 0], mask=[False, True]),
+            "time": np.ma.array([1800.0, 1801.0], mask=[False, False]),
+            "mag": np.ma.array([13.0, 13.4], mask=[False, False]),
+            "band": np.array(["G", "G"]),
+        }
+
+    def __len__(self) -> int:
+        return 2
+
+    def __getitem__(self, key: str) -> object:
+        return self._data[key]
+
+    def to_pandas(self) -> pd.DataFrame:
+        raise AssertionError("Gaia epoch fetcher should not call table.to_pandas() directly")
+
+
+def test_fetch_gaia_epoch_lcs_expands_array_valued_tap_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_id = "2192699590525791232"
+    df = pd.DataFrame(
+        [
+            {
+                "candidate_id": "C1",
+                "gaia_id": source_id,
+                "gaia_epoch_available": True,
+            }
+        ]
+    )
+    tap_df = pd.DataFrame(
+        {
+            "source_id": [int(source_id)],
+            "transit_id": [np.ma.array([101, 102, 103], mask=[False, False, False])],
+            "time": [np.ma.array([1688.1, 1688.3, 1688.5], mask=[False, False, False])],
+            "mag": [np.ma.array([12.7, 12.5, 13.1], mask=[False, False, False])],
+            "band": ["G"],
+        }
+    )
+
+    monkeypatch.setattr(vetting, "_connect_gaia_taps_until_available", lambda *args, **kwargs: ["fake-tap"])
+    monkeypatch.setattr(
+        vetting,
+        "_run_gaia_tap_query_until_success",
+        lambda *_args, **_kwargs: _FakeGaiaEpochTapResult(tap_df),
+    )
+
+    out = vetting.fetch_gaia_epoch_lcs(df, output_dir=tmp_path)
+
+    assert int(out.loc[0, "gaia_epoch_lc_n_g"]) == 3
+    assert float(out.loc[0, "gaia_epoch_lc_g_range"]) == pytest.approx(0.6)
+    saved = pd.read_parquet(tmp_path / "gaia_epoch_lc_C1.parquet")
+    assert saved["time"].tolist() == [1688.1, 1688.3, 1688.5]
+    assert saved["mag"].tolist() == [12.7, 12.5, 13.1]
+    assert saved["band"].tolist() == ["G", "G", "G"]
+    status = pd.read_parquet(tmp_path / vetting.EXTERNAL_LC_STATUS_FILE)
+    assert status.loc[0, "status"] == "fetched"
+    assert int(status.loc[0, "gaia_epoch_lc_n_g"]) == 3
+
+
+def test_fetch_gaia_epoch_lcs_accepts_scalar_tap_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_id = "427299085038300928"
+    df = pd.DataFrame(
+        [
+            {
+                "candidate_id": "C1",
+                "gaia_id": source_id,
+                "gaia_epoch_available": True,
+            }
+        ]
+    )
+    tap_df = pd.DataFrame(
+        {
+            "source_id": [int(source_id), int(source_id)],
+            "transit_id": [201, 202],
+            "time": [1700.0, 1701.0],
+            "mag": [11.9, 12.2],
+            "band": ["G", "G"],
+            "mag_error": [0.01, 0.02],
+        }
+    )
+
+    monkeypatch.setattr(vetting, "_connect_gaia_taps_until_available", lambda *args, **kwargs: ["fake-tap"])
+    monkeypatch.setattr(
+        vetting,
+        "_run_gaia_tap_query_until_success",
+        lambda *_args, **_kwargs: _FakeGaiaEpochTapResult(tap_df),
+    )
+
+    out = vetting.fetch_gaia_epoch_lcs(df, output_dir=tmp_path)
+
+    assert int(out.loc[0, "gaia_epoch_lc_n_g"]) == 2
+    assert float(out.loc[0, "gaia_epoch_lc_g_range"]) == pytest.approx(0.3)
+    saved = pd.read_parquet(tmp_path / "gaia_epoch_lc_C1.parquet")
+    assert saved["transit_id"].tolist() == [201, 202]
+    assert saved["mag_error"].tolist() == [0.01, 0.02]
+
+
+def test_fetch_gaia_epoch_lcs_handles_masked_integer_tap_columns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_id = "427299085038300928"
+    df = pd.DataFrame(
+        [
+            {
+                "candidate_id": "C1",
+                "gaia_id": source_id,
+                "gaia_epoch_available": True,
+            }
+        ]
+    )
+
+    monkeypatch.setattr(vetting, "_connect_gaia_taps_until_available", lambda *args, **kwargs: ["fake-tap"])
+    monkeypatch.setattr(
+        vetting,
+        "_run_gaia_tap_query_until_success",
+        lambda *_args, **_kwargs: _FakeGaiaEpochRawTapResult(_FakeMaskedGaiaEpochTapTable(int(source_id))),
+    )
+
+    out = vetting.fetch_gaia_epoch_lcs(df, output_dir=tmp_path)
+
+    assert int(out.loc[0, "gaia_epoch_lc_n_g"]) == 2
+    assert float(out.loc[0, "gaia_epoch_lc_g_range"]) == pytest.approx(0.4)
+    saved = pd.read_parquet(tmp_path / "gaia_epoch_lc_C1.parquet")
+    assert saved["time"].tolist() == [1800.0, 1801.0]
+    assert saved["mag"].tolist() == [13.0, 13.4]
+    assert pd.isna(saved.loc[1, "transit_id"])
 
 
 class _FakeCRTSResponse:
@@ -504,7 +727,7 @@ def test_fetch_crts_lightcurves_retries_orphancat_when_photcat_empty(
     assert saved["catalog"].unique().tolist() == ["orphancat"]
 
 
-def test_fetch_crts_lightcurves_schema_failure_is_error_not_no_data(
+def test_fetch_crts_lightcurves_missing_csv_link_is_no_data(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -517,15 +740,14 @@ def test_fetch_crts_lightcurves_schema_failure_is_error_not_no_data(
 
     monkeypatch.setattr(vetting.requests, "get", fake_get)
 
-    with pytest.raises(RuntimeError, match="CRTS LCs"):
-        vetting.fetch_crts_lightcurves(df, output_dir=tmp_path)
+    out = vetting.fetch_crts_lightcurves(df, output_dir=tmp_path)
 
+    assert int(out.loc[0, "crts_lc_n_points"]) == 0
     assert not (tmp_path / "crts_lc_C1.parquet").exists()
     status = pd.read_parquet(tmp_path / vetting.EXTERNAL_LC_STATUS_FILE)
     assert status.loc[0, "module"] == "CRTS LCs"
-    assert status.loc[0, "status"] == "error"
+    assert status.loc[0, "status"] == "no_data"
     assert int(status.loc[0, "crts_lc_n_points"]) == 0
-    assert "CSV download link" in status.loc[0, "error_message"]
 
 
 def test_fetch_external_lcs_records_crts_failure_attr(
@@ -551,6 +773,10 @@ def test_fetch_external_lcs_records_crts_failure_attr(
         run_neowise=False,
         run_kepler=False,
         run_aavso=False,
+        run_ogle=False,
+        run_stripe82=False,
+        run_allwise_mep=False,
+        run_vvvx_virac=False,
         run_ps1=False,
         run_crts=True,
     )

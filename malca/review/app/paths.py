@@ -24,9 +24,13 @@ def _resolve_run_dir_from_plot_dir_cached(plot_dir_text: str) -> str | None:
         return str(p)
     if (p / "results").is_dir():
         return str(p)
+    if (p / "bundle_assets" / "lightcurves").is_dir():
+        return str(p)
     if (p.parent / "results").is_dir():
         return str(p.parent)
     if (p.parent / "plots").is_dir():
+        return str(p.parent)
+    if (p.parent / "bundle_assets" / "lightcurves").is_dir():
         return str(p.parent)
     return None
 
@@ -67,7 +71,21 @@ def _review_db_for_plot_dir(plot_dir: str | None) -> Path | None:
     run_dir = _resolve_run_dir_from_plot_dir(plot_dir)
     if run_dir is None:
         return None
-    candidate = run_dir / "review" / "review.db"
+    review_dir = run_dir / "review"
+    candidate = review_dir / "review.db"
+    if candidate.exists() and _count_candidates_in_db(candidate) > 0:
+        return candidate.resolve()
+    if review_dir.is_dir():
+        populated = [
+            db_path
+            for db_path in sorted(review_dir.glob("*.db"))
+            if _count_candidates_in_db(db_path) > 0
+        ]
+        if populated:
+            return max(
+                populated,
+                key=lambda db_path: (_count_candidates_in_db(db_path), db_path.stat().st_size),
+            ).resolve()
     if candidate.exists():
         return candidate.resolve()
     return None
@@ -353,11 +371,32 @@ def _count_candidates_in_db(path: Path) -> int:
         return -1
 
 
+def _db_path_with_appended_suffix(path: Path) -> Path:
+    """Return the sibling path produced by appending '.db' to the filename."""
+    return path.with_name(f"{path.name}.db")
+
+
+def _prefer_populated_db_sibling(path: Path) -> Path:
+    """Prefer a populated '<name>.db' sibling over an empty suffixless DB."""
+    if path.suffix.lower() == ".db":
+        return path
+
+    sibling = _db_path_with_appended_suffix(path)
+    if not sibling.exists():
+        return path
+
+    selected_count = _count_candidates_in_db(path)
+    sibling_count = _count_candidates_in_db(sibling)
+    if sibling_count > 0 and selected_count <= 0:
+        return sibling
+    return path
+
+
 def _resolve_db_cli_path(raw_path: str) -> Path:
     """Resolve --review-db robustly for both cwd-relative and repo-relative usage."""
     p = Path(raw_path).expanduser()
     if p.is_absolute():
-        return p.resolve()
+        return _prefer_populated_db_sibling(p.resolve()).resolve()
 
     cwd_candidate = (Path.cwd() / p).resolve()
     repo_candidate = (_project_root() / p).resolve()
@@ -369,9 +408,9 @@ def _resolve_db_cli_path(raw_path: str) -> Path:
             key=lambda x: (_count_candidates_in_db(x), x.stat().st_size),
             reverse=True,
         )
-        return ranked[0]
+        return _prefer_populated_db_sibling(ranked[0]).resolve()
     if len(existing) == 1:
-        return existing[0]
+        return _prefer_populated_db_sibling(existing[0]).resolve()
     return repo_candidate
 
 
@@ -533,13 +572,29 @@ def _source_path_for_queue_filter(path_str: str) -> str:
     return path_str
 
 
+def _source_path_fallback_tokens(paths: list[str]) -> list[str]:
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for path in paths:
+        token = Path(str(path)).name.strip()
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        tokens.append(token)
+    return tokens
+
+
 def _queue_scope_filter_kwargs(scope_value: object) -> dict[str, object]:
     """Translate queue-source store payload into DB filter kwargs."""
     if isinstance(scope_value, dict):
         if scope_value.get('source_paths'):
             # Normalize so file paths (e.g. .../results/foo.parquet) become run dirs to match candidates.source_path
             normalized = [_source_path_for_queue_filter(p) for p in scope_value['source_paths']]
-            return {'source_paths': normalized}
+            kwargs: dict[str, object] = {'source_paths': normalized}
+            fallback_tokens = _source_path_fallback_tokens(normalized)
+            if fallback_tokens:
+                kwargs['source_path_fallback_like_any'] = fallback_tokens
+            return kwargs
         if scope_value.get('source_path_like_any'):
             return {'source_path_like_any': list(scope_value['source_path_like_any'])}
         return {}
@@ -749,7 +804,7 @@ def _apply_external_figure_layout(
         plot_bgcolor=spec["plot_bg"],
         font=dict(color=spec["font"]),
     )
-    fig.update_xaxes(title="JD - 2458000", gridcolor=spec["grid"], zeroline=False)
+    fig.update_xaxes(title="JD - 2458000 [d]", gridcolor=spec["grid"], zeroline=False)
     fig.update_yaxes(
         title=yaxis_label,
         autorange="reversed" if reverse_y else True,
@@ -1017,4 +1072,3 @@ def _coerce_bool(value: object) -> bool:
         return float(value) != 0.0
     s = str(value).strip().lower()
     return s in {"1", "true", "t", "yes", "y"}
-

@@ -51,15 +51,14 @@ def test_ab_and_vega_flux_conversions() -> None:
     assert flux_lambda_from_flux_nu_jy(3631.0, ps1_g.lambda_eff_angstrom) > 0
 
 
-def test_sed_sources_always_include_far_ir_catalogs() -> None:
-    default_sources = set(resolve_sed_sources("default"))
-    custom_sources = set(resolve_sed_sources("payload,ps1"))
+def test_sed_sources_default_is_broad_classification_set() -> None:
+    default_sources = resolve_sed_sources("default")
+    custom_sources = resolve_sed_sources("payload,ps1")
 
-    assert "payload" in default_sources
-    assert "ps1" in default_sources
-    assert {"akari", "iras", "herschel"}.issubset(default_sources)
-    assert {"akari", "iras", "herschel"}.issubset(custom_sources)
-    assert set(resolve_sed_sources("far-ir")) == set(resolve_sed_sources("default"))
+    assert default_sources == ("payload", "ps1", "skymapper", "sdss")
+    assert custom_sources == ("payload", "ps1")
+    assert resolve_sed_sources("far-ir") == ("akari", "iras", "herschel")
+    assert {"akari", "iras", "herschel"}.issubset(set(resolve_sed_sources("all")))
 
 
 def test_sed_source_statuses_reports_cached_miss_as_no_match(tmp_path: Path, monkeypatch) -> None:

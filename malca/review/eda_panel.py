@@ -524,8 +524,75 @@ def eda_table_rows(frame: pd.DataFrame) -> list[dict[str, Any]]:
         cols.append("candidate_key")
     rows: list[dict[str, Any]] = []
     for record in frame.loc[:, cols].to_dict("records"):
-        rows.append({key: _jsonable(value) for key, value in record.items()})
+        row = {key: _jsonable(value) for key, value in record.items()}
+        row_id = str(row.get("candidate_id") or row.get("candidate_key") or "").strip()
+        if row_id:
+            row["id"] = row_id
+        rows.append(row)
     return rows
+
+
+def candidate_ids_from_eda_table_context(
+    active_cell: object,
+    viewport_rows: object,
+    virtual_rows: object,
+    table_rows: object,
+    page_current: object = None,
+    page_size: object = None,
+) -> list[str]:
+    """Resolve candidate IDs from a Dash DataTable active cell across paging modes."""
+    if not isinstance(active_cell, dict):
+        return []
+
+    candidate_ids: list[str] = []
+
+    def add(value: object) -> None:
+        text = str(value or "").strip()
+        if text and text not in candidate_ids:
+            candidate_ids.append(text)
+
+    def add_row(row: object) -> None:
+        if not isinstance(row, dict):
+            return
+        for value in (row.get("candidate_key"), row.get("candidate_id"), row.get("id")):
+            add(value)
+
+    add(active_cell.get("row_id"))
+    if candidate_ids:
+        return candidate_ids
+    try:
+        row_idx = int(active_cell.get("row"))
+    except (TypeError, ValueError):
+        return candidate_ids
+
+    for rows, idx in (
+        (viewport_rows, row_idx),
+        (virtual_rows, _absolute_table_row_index(row_idx, page_current, page_size)),
+        (virtual_rows, row_idx),
+        (table_rows, row_idx),
+    ):
+        if idx is None or not isinstance(rows, list):
+            continue
+        try:
+            before = len(candidate_ids)
+            add_row(rows[int(idx)])
+        except Exception:
+            continue
+        if len(candidate_ids) > before:
+            return candidate_ids
+
+    return candidate_ids
+
+
+def _absolute_table_row_index(row_idx: int, page_current: object, page_size: object) -> int | None:
+    try:
+        page = int(page_current or 0)
+        size = int(page_size or 0)
+    except (TypeError, ValueError):
+        return None
+    if page < 0 or size <= 0:
+        return None
+    return page * size + int(row_idx)
 
 
 def candidate_index_in_queue(queue_data: object, candidate_id: object) -> int | None:

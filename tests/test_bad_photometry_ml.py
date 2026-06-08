@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from malca.meta_analysis.ml import bad_photometry as bp
+from malca.table_io import write_feature_table
 
 
 def _write_dat3(path: Path, rows: list[tuple[float, float, float, int, int, int, int, str]]) -> None:
@@ -24,13 +25,27 @@ def test_build_dropout_dataset_labels_v1_minus_v2(tmp_path: Path) -> None:
     v1 = tmp_path / "v1.parquet"
     v2 = tmp_path / "v2.parquet"
     out = tmp_path / "dataset.parquet"
-    pd.DataFrame(
-        {
-            "asas_sn_id": ["100", "200", "300"],
-            "dipper_score": [10.0, 2.0, 5.0],
-        }
-    ).to_parquet(v1, index=False)
-    pd.DataFrame({"asas_sn_id": ["100", "300"]}).to_parquet(v2, index=False)
+    write_feature_table(
+        pd.DataFrame(
+            {
+                "candidate_id": ["stv_100", "stv_200", "stv_300"],
+                "timescale": ["stv", "stv", "stv"],
+                "asas_sn_id": ["100", "200", "300"],
+                "dipper_score": [10.0, 2.0, 5.0],
+            }
+        ),
+        v1,
+    )
+    write_feature_table(
+        pd.DataFrame(
+            {
+                "candidate_id": ["stv_100", "stv_300"],
+                "timescale": ["stv", "stv"],
+                "asas_sn_id": ["100", "300"],
+            }
+        ),
+        v2,
+    )
 
     dataset = bp.build_dropout_dataset(v1, v2, output=out, key="asas_sn_id")
 

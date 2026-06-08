@@ -17,7 +17,7 @@ from malca.baseline import (
     per_camera_gp_baseline_masked,
     per_camera_median_baseline,
 )
-from malca.lightcurve_io import load_lightcurve_df, stable_camera_color, to_legacy_asassn_frame
+from malca.lightcurve_io import load_lightcurve_df, stable_camera_color, to_asassn_algorithm_frame
 from malca.phase import BAND_LABELS, phase_fold_dataframe, phase_time_dataframe, resolve_phase_epoch, resolve_phase_period
 from malca.utils import (
     clean_lc,
@@ -318,7 +318,7 @@ def _load_cleaned_df(
         bad_camera_scatter_ratio=scatter_ratio,
         return_filtered_info=True,
     )
-    df = to_legacy_asassn_frame(df)
+    df = to_asassn_algorithm_frame(df)
     diagnostics = _get_camera_reason_diagnostics(df, scatter_ratio)
     df = clean_lc(df, max_error_absolute=clean_max_error_absolute, max_error_sigma=clean_max_error_sigma)
     _cache_put(_CLEAN_CACHE, key, (df.copy(), set(filtered_cameras), diagnostics))
@@ -778,6 +778,30 @@ _EXTERNAL_LC_SPECS: dict[str, dict] = {
         "mag_col": "flux",
         "err_col": "flux_err",
     },
+    "neowise": {
+        "time_col": "mjd",
+        "jd_system": "mjd",
+        "bands": {
+            "W1": {"color": "#4fa3ff", "marker": "x", "label": "NEOWISE W1", "mag_col": "w1mpro", "err_col": "w1sigmpro"},
+            "W2": {"color": "#ff8c42", "marker": "x", "label": "NEOWISE W2", "mag_col": "w2mpro", "err_col": "w2sigmpro"},
+        },
+        "filter_col": None,
+        "mag_col": "w1mpro",
+        "err_col": "w1sigmpro",
+    },
+    "allwise_mep": {
+        "time_col": "mjd",
+        "jd_system": "mjd",
+        "bands": {
+            "W1": {"color": "#4fa3ff", "marker": "cross", "label": "AllWISE W1", "mag_col": "w1mpro", "err_col": "w1sigmpro"},
+            "W2": {"color": "#ff8c42", "marker": "cross", "label": "AllWISE W2", "mag_col": "w2mpro", "err_col": "w2sigmpro"},
+            "W3": {"color": "#d89cff", "marker": "cross", "label": "AllWISE W3", "mag_col": "w3mpro", "err_col": "w3sigmpro"},
+            "W4": {"color": "#ffcc66", "marker": "cross", "label": "AllWISE W4", "mag_col": "w4mpro", "err_col": "w4sigmpro"},
+        },
+        "filter_col": None,
+        "mag_col": "w1mpro",
+        "err_col": "w1sigmpro",
+    },
     "kepler": {
         "time_col": "time",
         "jd_system": "bkjd",  # BKJD = BJD - 2454833.0
@@ -798,6 +822,45 @@ _EXTERNAL_LC_SPECS: dict[str, dict] = {
             "CV": {"color": "#aaaaaa", "marker": "circle", "label": "AAVSO CV"},
         },
         "filter_col": "filter",
+        "mag_col": "mag",
+        "err_col": "mag_err",
+    },
+    "ogle": {
+        "time_col": "mjd",
+        "jd_system": "mjd",
+        "bands": {
+            "I": {"color": "#cc3344", "marker": "diamond-open", "label": "OGLE I"},
+            "V": {"color": "#44aa44", "marker": "diamond-open", "label": "OGLE V"},
+        },
+        "filter_col": "band",
+        "mag_col": "mag",
+        "err_col": "mag_err",
+    },
+    "stripe82": {
+        "time_col": "mjd",
+        "jd_system": "mjd",
+        "bands": {
+            "u": {"color": "#6c7cff", "marker": "square-open", "label": "Stripe 82 u"},
+            "g": {"color": "#44aa44", "marker": "square-open", "label": "Stripe 82 g"},
+            "r": {"color": "#dd4444", "marker": "square-open", "label": "Stripe 82 r"},
+            "i": {"color": "#8844cc", "marker": "square-open", "label": "Stripe 82 i"},
+            "z": {"color": "#ccaa44", "marker": "square-open", "label": "Stripe 82 z"},
+        },
+        "filter_col": "band",
+        "mag_col": "mag",
+        "err_col": "mag_err",
+    },
+    "vvvx_virac": {
+        "time_col": "mjd",
+        "jd_system": "mjd",
+        "bands": {
+            "z": {"color": "#5f7fff", "marker": "triangle-down-open", "label": "VVVX Z"},
+            "y": {"color": "#57a773", "marker": "triangle-down-open", "label": "VVVX Y"},
+            "j": {"color": "#e0b448", "marker": "triangle-down-open", "label": "VVVX J"},
+            "h": {"color": "#df6f53", "marker": "triangle-down-open", "label": "VVVX H"},
+            "ks": {"color": "#c45fd8", "marker": "triangle-down-open", "label": "VVVX Ks"},
+        },
+        "filter_col": "band",
         "mag_col": "mag",
         "err_col": "mag_err",
     },
@@ -826,6 +889,73 @@ _EXTERNAL_LC_SPECS: dict[str, dict] = {
         "err_col": "mag_err",
     },
 }
+
+_EXTERNAL_SOURCE_ORDER = (
+    "asassn", "atlas", "ztf", "gaia_epoch", "tess", "neowise",
+    "kepler", "aavso", "ogle", "stripe82", "allwise_mep", "vvvx_virac",
+    "ps1", "crts",
+)
+_EXTERNAL_SOURCE_LABELS = {
+    "asassn": "ASAS-SN",
+    "atlas": "ATLAS",
+    "ztf": "ZTF",
+    "gaia_epoch": "Gaia Epoch",
+    "tess": "TESS",
+    "neowise": "NEOWISE W1/W2",
+    "kepler": "Kepler/K2",
+    "aavso": "AAVSO",
+    "ogle": "OGLE I/V",
+    "stripe82": "SDSS Stripe 82",
+    "allwise_mep": "AllWISE MEP",
+    "vvvx_virac": "VVVX/VIRAC2",
+    "ps1": "PS1",
+    "crts": "CRTS",
+}
+_EXTERNAL_SOURCE_VALUES = set(_EXTERNAL_SOURCE_ORDER)
+
+
+def _coerce_external_source_values(raw_value: object) -> list[str]:
+    """Normalize old single-select source values and new multi-select lists."""
+    if raw_value is None:
+        values = ["asassn"]
+    elif isinstance(raw_value, str):
+        values = [raw_value]
+    elif isinstance(raw_value, (list, tuple, set, np.ndarray, pd.Series)):
+        values = list(raw_value)
+    else:
+        values = [raw_value]
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value).strip().lower()
+        if not text:
+            continue
+        if text == "all":
+            return list(_EXTERNAL_SOURCE_ORDER)
+        if text in {"wise", "w1", "w2", "wise_w1_w2"}:
+            text = "neowise"
+        elif text in {"k2", "kepler_k2"}:
+            text = "kepler"
+        elif text in {"sdss_s82", "s82", "stripe_82", "sdss_stripe82"}:
+            text = "stripe82"
+        elif text in {"allwise", "allwise_multiepoch", "wise_mep"}:
+            text = "allwise_mep"
+        elif text in {"vvv", "vvvx", "virac", "virac2", "vvvx_virac2"}:
+            text = "vvvx_virac"
+        if text not in _EXTERNAL_SOURCE_VALUES or text in seen:
+            continue
+        out.append(text)
+        seen.add(text)
+
+    if isinstance(raw_value, str) and out and out[0] != "asassn":
+        out.insert(0, "asassn")
+    return out
+
+
+def _external_source_label(source_name: object) -> str:
+    source = str(source_name or "").strip().lower()
+    return _EXTERNAL_SOURCE_LABELS.get(source, source.upper() if source else "External")
 
 
 def _rename_first_present(df: pd.DataFrame, canonical: str, aliases: tuple[str, ...]) -> pd.DataFrame:
@@ -903,6 +1033,20 @@ def normalize_external_lc_dataframe(source_name: str, df_ext: pd.DataFrame) -> p
         df = _rename_first_present(df, "flux", ("flux",))
         df = _rename_first_present(df, "flux_err", ("flux_err",))
         _coerce_numeric_column(df, "time")
+    elif source == "neowise":
+        df = _rename_first_present(df, "mjd", ("mjd", "MJD", "JD"))
+        df = _rename_first_present(df, "w1mpro", ("w1mpro", "W1", "w1", "w1_mag"))
+        df = _rename_first_present(df, "w1sigmpro", ("w1sigmpro", "w1err", "w1_err", "w1_mag_err"))
+        df = _rename_first_present(df, "w2mpro", ("w2mpro", "W2", "w2", "w2_mag"))
+        df = _rename_first_present(df, "w2sigmpro", ("w2sigmpro", "w2err", "w2_err", "w2_mag_err"))
+        _normalize_mjd_column(df)
+    elif source == "allwise_mep":
+        df = _rename_first_present(df, "mjd", ("mjd", "MJD", "JD"))
+        for band in ("w1", "w2", "w3", "w4"):
+            upper = band.upper()
+            df = _rename_first_present(df, f"{band}mpro", (f"{band}mpro", f"{band}mpro_ep", upper, band, f"{band}_mag"))
+            df = _rename_first_present(df, f"{band}sigmpro", (f"{band}sigmpro", f"{band}sigmpro_ep", f"{band}err", f"{band}_err", f"{band}_mag_err"))
+        _normalize_mjd_column(df)
     elif source == "kepler":
         df = _rename_first_present(df, "time", ("time",))
         df = _rename_first_present(df, "flux", ("flux",))
@@ -911,11 +1055,47 @@ def normalize_external_lc_dataframe(source_name: str, df_ext: pd.DataFrame) -> p
     elif source == "aavso":
         df = _rename_first_present(df, "mjd", ("mjd", "JD"))
         df = _rename_first_present(df, "filter", ("filter", "Filter"))
+        df = _rename_first_present(df, "band", ("band", "Band"))
         df = _rename_first_present(df, "mag", ("mag", "Mag"))
         df = _rename_first_present(df, "mag_err", ("mag_err", "Err"))
         _normalize_mjd_column(df)
+        if "filter" not in df.columns and "band" in df.columns:
+            df["filter"] = df["band"]
         if "filter" in df.columns:
             df["filter"] = df["filter"].astype(str).str.strip().str.upper()
+        if "band" not in df.columns and "filter" in df.columns:
+            df["band"] = df["filter"]
+    elif source == "ogle":
+        df = _rename_first_present(df, "mjd", ("mjd", "MJD", "JD"))
+        df = _rename_first_present(df, "band", ("band", "filter", "Filter"))
+        df = _rename_first_present(df, "mag", ("mag", "Mag", "magnitude"))
+        df = _rename_first_present(df, "mag_err", ("mag_err", "Err", "magerr", "error"))
+        _normalize_mjd_column(df)
+        if "band" in df.columns:
+            df["band"] = df["band"].astype(str).str.strip().str.upper()
+    elif source == "stripe82":
+        df = _rename_first_present(df, "mjd", ("mjd", "MJD", "JD"))
+        df = _rename_first_present(df, "band", ("band", "filter", "Filter"))
+        df = _rename_first_present(df, "mag", ("mag", "Mag", "magnitude"))
+        df = _rename_first_present(df, "mag_err", ("mag_err", "Err", "magerr", "error"))
+        _normalize_mjd_column(df)
+        if "band" in df.columns:
+            df["band"] = df["band"].astype(str).str.strip().str.lower()
+    elif source == "vvvx_virac":
+        df = _rename_first_present(df, "mjd", ("mjd", "MJD", "JD", "obs_mjd"))
+        df = _rename_first_present(df, "band", ("band", "filter", "Filter"))
+        df = _rename_first_present(df, "mag", ("mag", "Mag", "magnitude"))
+        df = _rename_first_present(df, "mag_err", ("mag_err", "Err", "magerr", "error"))
+        _normalize_mjd_column(df)
+        if "band" in df.columns:
+            band_map = {"k": "ks", "ks": "ks", "k_s": "ks", "z": "z", "y": "y", "j": "j", "h": "h"}
+            df["band"] = (
+                df["band"]
+                .astype(str)
+                .str.strip()
+                .str.lower()
+                .map(lambda v: band_map.get(v, v))
+            )
     elif source == "ps1":
         df = _rename_first_present(df, "mjd", ("mjd", "obsTime"))
         df = _rename_first_present(df, "filter", ("filter", "filterID"))
@@ -1058,20 +1238,21 @@ def _overlay_external_lcs(
             x_plot = t - jd_offset
 
         filter_col = spec.get("filter_col")
-        mag_col = spec["mag_col"]
-        err_col = spec.get("err_col", "")
+        default_mag_col = spec["mag_col"]
+        default_err_col = spec.get("err_col", "")
 
         # Resolve actual column names (case-insensitive)
         col_lookup = {c.lower(): c for c in df_ext.columns}
-        actual_mag = col_lookup.get(mag_col.lower())
-        actual_err = col_lookup.get(err_col.lower()) if err_col else None
         actual_filt = col_lookup.get(filter_col.lower()) if filter_col else None
-
-        if actual_mag is None:
-            continue
 
         source_transform_warned = False
         for band_key, band_info in spec["bands"].items():
+            band_mag_col = str(band_info.get("mag_col") or default_mag_col)
+            band_err_col = str(band_info.get("err_col") or default_err_col or "")
+            actual_mag = col_lookup.get(band_mag_col.lower())
+            actual_err = col_lookup.get(band_err_col.lower()) if band_err_col else None
+            if actual_mag is None:
+                continue
             if actual_filt:
                 mask = df_ext[actual_filt].astype(str) == band_key
                 band_df = df_ext[mask]
@@ -1237,12 +1418,31 @@ def build_interactive_lightcurve_figure(
     baseline_opacity: float = 0.5,
     yaxis_mode: Literal["mag", "flux"] = "mag",
     external_lcs: dict[str, Path] | None = None,
-    external_source_view: str = "all",
+    external_source_view: str | list[str] = "asassn",
+    external_panel_mode: Literal["overlay", "split"] = "overlay",
     selected_bands: list[str] | None = None,
 ) -> dict:
     """Build a native Plotly light-curve figure for review mode."""
     colors = _theme_palette(theme)
     phase_panel_mode = "time" if str(phase_panel_mode or "fold").strip().lower() == "time" else "fold"
+    source_values = _coerce_external_source_values(external_source_view)
+    external_panel_mode = "split" if str(external_panel_mode or "").strip().lower() == "split" else "overlay"
+    native_source_enabled = "asassn" in source_values
+    requested_external_sources = [src for src in source_values if src != "asassn"]
+    external_lcs_by_source = {str(k).strip().lower(): Path(v) for k, v in dict(external_lcs or {}).items()}
+    active_external_lcs = {
+        src: external_lcs_by_source[src]
+        for src in requested_external_sources
+        if src in external_lcs_by_source
+    }
+    missing_external_sources = [
+        src for src in requested_external_sources
+        if src not in external_lcs_by_source
+    ]
+    split_external_lcs = active_external_lcs if external_panel_mode == "split" else {}
+    overlay_external_lcs = active_external_lcs if external_panel_mode != "split" else {}
+    show_native_raw = bool(show_raw_mag and native_source_enabled)
+    show_raw_panel = bool(show_native_raw or (show_raw_mag and overlay_external_lcs))
 
     plot_dir = Path(plot_dir) if plot_dir else None
     lc_path = resolve_lightcurve_path(payload, plot_dir)
@@ -1367,6 +1567,8 @@ def build_interactive_lightcurve_figure(
     )
 
     warnings: list[str] = list(baseline_warnings)
+    for source_name in missing_external_sources:
+        warnings.append(f"{_external_source_label(source_name)} light curve is not available for this candidate.")
     phase_requested = bool(show_phase_fold)
     if phase_requested:
         period_payload = {} if suppress_catalog_phase_period else payload
@@ -1395,27 +1597,33 @@ def build_interactive_lightcurve_figure(
         residual_fraction = REVIEW_RESIDUAL_FRACTION
     residual_fraction = float(np.clip(residual_fraction, 0.15, 0.85))
 
-    # Dynamic row allocation
-    # Row indices are 1-based
-    row_map = {}
+    # Dynamic row allocation. Row indices are 1-based.
+    row_map: dict[str, int] = {}
+    row_weights: list[float] = []
     current_row = 1
-    
-    if show_raw_mag:
-        row_map['raw'] = current_row
+
+    def _add_row(name: str, weight: float) -> None:
+        nonlocal current_row
+        row_map[name] = current_row
+        row_weights.append(float(weight))
         current_row += 1
-    
+
+    if show_raw_panel:
+        _add_row('raw', 1.0)
+
+    for source_name in split_external_lcs:
+        _add_row(f'external:{source_name}', 0.55)
+
     if show_residuals:
-        row_map['resid'] = current_row
-        current_row += 1
-        
+        _add_row('resid', float(np.clip(residual_fraction, 0.15, 0.45)))
+
     if phase_requested:
-        row_map['phase'] = current_row
-        current_row += 1
-        
+        _add_row('phase', 0.45)
+
     n_rows = current_row - 1
     if n_rows == 0:
         return {
-            "figure": _status_figure("No panels selected. Enable Raw, Residuals, or Phase-fold.", theme=theme),
+            "figure": _status_figure("No panels selected. Enable an LC source, Residuals, or Phase-fold.", theme=theme),
             "camera_options": [{"label": f"{cam}", "value": str(cam)} for cam in camera_ids],
             "camera_values": selected,
             "stat_rows": [],
@@ -1425,33 +1633,13 @@ def build_interactive_lightcurve_figure(
             "warnings": ["No panels selected"],
         }
 
-    # Calculate row heights
-    # Logic:
-    # - If 1 row: 1.0
-    # - If 2 rows: raw/resid split or raw/phase split or resid/phase split
-    # - If 3 rows: raw/resid/phase
-    
-    row_heights = []
-    
-    if n_rows == 1:
-        row_heights = [1.0]
-    elif n_rows == 2:
-        if show_raw_mag and show_residuals:
-            row_heights = [1.0 - residual_fraction, residual_fraction]
-        elif show_raw_mag and phase_requested:
-            row_heights = [0.5, 0.5]
-        else:
-            # Resid + Phase or just two unknown panels (unlikely with current logic)
-            row_heights = [0.5, 0.5]
-    elif n_rows == 3:
-        lower_fraction = float(np.clip(residual_fraction, 0.15, 0.425))
-        main_fraction = 1.0 - (2.0 * lower_fraction)
-        row_heights = [main_fraction, lower_fraction, lower_fraction]
+    total_weight = float(sum(row_weights)) if row_weights else 1.0
+    row_heights = [weight / total_weight for weight in row_weights]
 
     fig = make_subplots(
         rows=n_rows,
         cols=1,
-        shared_xaxes=(not phase_requested) if show_raw_mag else False,
+        shared_xaxes=False,
         vertical_spacing=0.05,
         row_heights=row_heights,
     )
@@ -1475,7 +1663,7 @@ def build_interactive_lightcurve_figure(
             jd_full = cdf["JD_plot"].to_numpy() + JD_OFFSET
             mag_raw = cdf["mag"].to_numpy()
 
-            if show_raw_mag:
+            if show_native_raw:
                 y_raw = _mag_to_flux(mag_raw) if is_flux else mag_raw
                 err_raw = _flux_err_from_mag_err(y_raw, err) if is_flux else err
                 hover_raw = np.column_stack([jd_full, err, resid, baseline, err_raw, mag_raw])
@@ -1562,7 +1750,7 @@ def build_interactive_lightcurve_figure(
                     col=1,
                 )
 
-        if show_raw_mag and show_baseline and "baseline" in bdf.columns:
+        if show_native_raw and show_baseline and "baseline" in bdf.columns:
             for cam in selected:
                 cbase = bdf[(bdf["camera_label"] == cam) & np.isfinite(bdf["baseline"])].sort_values("JD_plot")
                 if cbase.empty:
@@ -1588,7 +1776,7 @@ def build_interactive_lightcurve_figure(
                 )
 
     event_entries = _event_entries(payload, jd_offset, run_params, lc_median=median_jd)
-    if show_event_markers and show_raw_mag:
+    if show_event_markers and show_native_raw:
         raw_row = row_map['raw']
         raw_xref = _subplot_axis_ref(raw_row, "x")
         raw_yref = _subplot_axis_ref(raw_row, "y")
@@ -1883,40 +2071,48 @@ def build_interactive_lightcurve_figure(
         if phase_panel_mode == "fold":
             fig.add_hline(y=0.0, line_color=colors["guide_line"], line_dash="dot", row=row_map['phase'], col=1)
 
-    if show_raw_mag:
-        # Explicitly calculate range to ensure full visibility
-        if is_flux:
-            y_vals = _mag_to_flux(df["mag"].to_numpy())
-            if show_baseline and "baseline" in df.columns:
-                b_vals = df["baseline"].dropna().to_numpy()
-                if b_vals.size > 0:
-                    y_vals = np.concatenate([y_vals, _mag_to_flux(b_vals)])
-        else:
-            y_vals = df["mag"].to_numpy()
-            if show_baseline and "baseline" in df.columns:
-                b_vals = df["baseline"].dropna().to_numpy()
-                if b_vals.size > 0:
-                    y_vals = np.concatenate([y_vals, b_vals])
-        
-        if y_vals.size > 0:
-            y_min, y_max = np.nanmin(y_vals), np.nanmax(y_vals)
-            y_pad_fraction = 0.10 if show_event_markers and event_entries else 0.05
-            y_pad = (y_max - y_min) * y_pad_fraction
-            if y_pad == 0:
-                y_pad = 0.5 if not is_flux else y_max * 0.05
+    if show_raw_panel:
+        if show_native_raw:
+            # Explicitly calculate range to ensure full native-LC visibility.
             if is_flux:
-                fig.update_yaxes(
-                    title_text=r"$F$ [arb]",
-                    row=row_map['raw'],
-                    col=1,
-                    range=[max(0, y_min - y_pad), y_max + y_pad],
-                )
+                y_vals = _mag_to_flux(df["mag"].to_numpy())
+                if show_baseline and "baseline" in df.columns:
+                    b_vals = df["baseline"].dropna().to_numpy()
+                    if b_vals.size > 0:
+                        y_vals = np.concatenate([y_vals, _mag_to_flux(b_vals)])
+            else:
+                y_vals = df["mag"].to_numpy()
+                if show_baseline and "baseline" in df.columns:
+                    b_vals = df["baseline"].dropna().to_numpy()
+                    if b_vals.size > 0:
+                        y_vals = np.concatenate([y_vals, b_vals])
+
+            if y_vals.size > 0:
+                y_min, y_max = np.nanmin(y_vals), np.nanmax(y_vals)
+                y_pad_fraction = 0.10 if show_event_markers and event_entries else 0.05
+                y_pad = (y_max - y_min) * y_pad_fraction
+                if y_pad == 0:
+                    y_pad = 0.5 if not is_flux else y_max * 0.05
+                if is_flux:
+                    fig.update_yaxes(
+                        title_text=r"$F$ [arb]",
+                        row=row_map['raw'],
+                        col=1,
+                        range=[max(0, y_min - y_pad), y_max + y_pad],
+                    )
+                else:
+                    fig.update_yaxes(
+                        title_text=r"$m$ [mag]",
+                        row=row_map['raw'],
+                        col=1,
+                        range=[y_max + y_pad, y_min - y_pad],
+                    )
             else:
                 fig.update_yaxes(
-                    title_text=r"$m$ [mag]",
+                    title_text=r"$F$ [arb]" if is_flux else r"$m$ [mag]",
                     row=row_map['raw'],
                     col=1,
-                    range=[y_max + y_pad, y_min - y_pad],
+                    autorange="reversed" if not is_flux else True,
                 )
         else:
             fig.update_yaxes(
@@ -1976,33 +2172,23 @@ def build_interactive_lightcurve_figure(
             font={"size": 12, "color": colors["text"]},
         )
 
-    # Set JD axis on the bottom-most plot that uses JD
-    jd_axis_row = None
+    jd_rows: list[int] = []
+    if show_raw_panel:
+        jd_rows.append(row_map['raw'])
+    jd_rows.extend(row_map[f'external:{source_name}'] for source_name in split_external_lcs)
     if show_residuals:
-        jd_axis_row = row_map['resid']
-    elif show_raw_mag:
-        jd_axis_row = row_map['raw']
-        
-    if jd_axis_row is not None:
-        fig.update_xaxes(title_text=rf"$\mathrm{{JD}} - {int(JD_OFFSET)}$", row=jd_axis_row, col=1)
-        # Link x-axes if both raw and resid are present
-        if show_raw_mag and show_residuals:
-             fig.update_xaxes(matches="x", row=row_map['resid'], col=1)
+        jd_rows.append(row_map['resid'])
 
-    # Overlay external light curves on raw magnitude panel
-    ext_trace_start = len(fig.data)
+    if jd_rows:
+        fig.update_xaxes(title_text=rf"$\mathrm{{JD}} - {int(JD_OFFSET)}\ [\mathrm{{d}}]$", row=jd_rows[-1], col=1)
+        anchor_axis = _subplot_axis_ref(jd_rows[0], "x")
+        for row in jd_rows[1:]:
+            fig.update_xaxes(matches=anchor_axis, row=row, col=1)
+
+    # Overlay or split selected external light curves.
     ext_source_ranges: dict[str, tuple[int, int]] = {}
-    requested_source = str(external_source_view or "all").strip().lower()
-    active_external_lcs: dict[str, Path] | None = None
-    if external_lcs:
-        if requested_source == "asassn":
-            active_external_lcs = {}
-        elif requested_source in {"", "all"}:
-            active_external_lcs = dict(external_lcs)
-        else:
-            active_external_lcs = ({requested_source: external_lcs[requested_source]}
-                                   if requested_source in external_lcs else {})
-    if active_external_lcs and 'raw' in row_map:
+    ext_trace_start = len(fig.data)
+    if overlay_external_lcs and 'raw' in row_map:
         mag_anchor = _coerce_finite_float(payload.get("baseline_mag"))
         if mag_anchor is None:
             finite_mag = pd.to_numeric(df["mag"], errors="coerce").to_numpy(dtype=float)
@@ -2012,7 +2198,7 @@ def build_interactive_lightcurve_figure(
         _overlay_external_lcs(
             fig,
             row_map['raw'],
-            active_external_lcs,
+            overlay_external_lcs,
             jd_offset,
             colors,
             theme,
@@ -2022,8 +2208,47 @@ def build_interactive_lightcurve_figure(
             mag_anchor=mag_anchor,
             warnings=warnings,
         )
-        if is_flux and any(bool(_EXTERNAL_LC_SPECS.get(src, {}).get("is_flux", False)) for src in active_external_lcs):
-            fig.update_yaxes(autorange=True, row=row_map['raw'], col=1)
+        fig.update_yaxes(autorange=True if is_flux else "reversed", row=row_map['raw'], col=1)
+
+    for source_name, lc_path in split_external_lcs.items():
+        row = row_map.get(f'external:{source_name}')
+        if row is None:
+            continue
+        start_idx = len(fig.data)
+        _overlay_external_lcs(
+            fig,
+            row,
+            {source_name: lc_path},
+            jd_offset,
+            colors,
+            theme,
+            is_flux,
+            ext_source_ranges,
+            start_idx,
+            mag_anchor=_coerce_finite_float(payload.get("baseline_mag")),
+            warnings=warnings,
+        )
+        fig.update_yaxes(
+            title_text=r"$F$ [arb]" if is_flux else r"$m$ [mag]",
+            row=row,
+            col=1,
+            autorange=True if is_flux else "reversed",
+        )
+        fig.add_annotation(
+            text=_external_source_label(source_name),
+            x=0.01,
+            y=0.96,
+            xanchor="left",
+            yanchor="top",
+            xref=_subplot_domain_ref(row, "x"),
+            yref=_subplot_domain_ref(row, "y"),
+            showarrow=False,
+            font={"size": 11, "color": colors["annotation"]},
+            bgcolor=colors["paper_bg"],
+            bordercolor=colors["grid"],
+            borderwidth=1,
+            opacity=0.9,
+        )
 
     fig.update_layout(
         title=_build_title(payload, df),
@@ -2043,30 +2268,9 @@ def build_interactive_lightcurve_figure(
         uirevision=uirevision_key,
     )
 
-    # Apply external source visibility from sidebar control.
-    if ext_source_ranges:
-        n_total = len(fig.data)
-        all_visible = [True] * n_total
-        asassn_only = [True] * ext_trace_start + [False] * (n_total - ext_trace_start)
-        visible = all_visible
-
-        if requested_source == "asassn":
-            visible = asassn_only
-        elif requested_source not in {"", "all"}:
-            source_range = ext_source_ranges.get(requested_source)
-            if source_range is None:
-                visible = asassn_only
-                warnings.append(f"{requested_source.upper()} light curve is not available for this candidate.")
-            else:
-                start, end = source_range
-                visible = [True] * ext_trace_start + [False] * (n_total - ext_trace_start)
-                for i in range(start, end):
-                    visible[i] = True
-
-        for trace_idx, is_visible in enumerate(visible):
-            fig.data[trace_idx].visible = bool(is_visible)
-    elif external_lcs and requested_source not in {"", "all", "asassn"}:
-        warnings.append(f"{requested_source.upper()} light curve is not available for this candidate.")
+    for source_name in active_external_lcs:
+        if source_name not in ext_source_ranges:
+            warnings.append(f"{_external_source_label(source_name)} light curve has no plottable points for this candidate.")
 
     fig.update_xaxes(showgrid=True, gridcolor=colors["grid"], zeroline=False)
     fig.update_yaxes(showgrid=True, gridcolor=colors["grid"], zeroline=False)

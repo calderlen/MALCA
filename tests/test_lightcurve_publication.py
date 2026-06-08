@@ -63,7 +63,7 @@ def test_resolve_time_axis_auto_for_full_jd():
         offset="auto",
     )
 
-    assert label == "JD - 2450000"
+    assert label == "JD - 2450000 [d]"
     assert np.allclose(plotted, [7000.0, 7001.0])
 
 
@@ -97,10 +97,11 @@ def test_direct_dataframe_normalization_and_axes_reuse():
             "JD": [2457000.0, 2457001.0, 2457002.0],
             "mag": [13.0, 13.2, 13.1],
             "error": [0.02, 0.03, 0.02],
-            "camera_field": ["ba/F1", "ba/F1", "bb/F2"],
+            "camera_name": ["ba", "ba", "bb"],
+            "field": ["F1", "F1", "F2"],
         }
     )
-    lc = normalize_lightcurve_frame(frame.rename(columns={"camera_field": "camera"}), "inline")
+    lc = normalize_lightcurve_frame(frame.rename(columns={"camera_name": "camera"}), "inline")
     assert len(lc.df) == 3
 
     fig, ax = plt.subplots()
@@ -108,7 +109,7 @@ def test_direct_dataframe_normalization_and_axes_reuse():
         ax,
         frame,
         group_by="group",
-        group_col="camera_field",
+        group_col="camera_name",
         show_errorbars=True,
         legend="none",
     )

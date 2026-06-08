@@ -10,7 +10,7 @@ from malca.lightcurve_io import (
     filter_asassn_quality,
     load_lightcurve_df,
     normalize_asassn_lightcurve,
-    to_legacy_asassn_frame,
+    to_asassn_algorithm_frame,
 )
 
 
@@ -36,6 +36,8 @@ def test_load_skypatrol_csv_returns_canonical_schema(tmp_path):
     assert df.loc[0, "flux_provenance"] == "asassn_survey_flux"
     assert df.loc[0, "quality"] == "G"
     assert df.loc[0, "camera"] == "ba"
+    assert df.loc[0, "camera_name"] == "ba"
+    assert df.loc[0, "field"] == ""
     assert df.loc[0, "source_path"] == str(path)
     assert pd.isna(df.loc[1, "mag"])
     assert df.loc[1, "flux"] == 0.8
@@ -44,6 +46,49 @@ def test_load_skypatrol_csv_returns_canonical_schema(tmp_path):
     unfiltered = load_lightcurve_df(path, apply_quality=False)
     assert len(unfiltered) == 3
     assert unfiltered["is_good"].tolist() == [True, False, True]
+
+
+def test_load_dat_preserves_camera_field_split(tmp_path):
+    path = tmp_path / "123.dat2"
+    path.write_text(
+        "\n".join(
+            [
+                "7479.8 14.10 0.02 1 4 0 0 ba/F1",
+                "7480.8 14.20 0.03 1 5 1 0 bb/F2",
+            ]
+        )
+        + "\n",
+        encoding="ascii",
+    )
+
+    df = load_lightcurve_df(path, apply_quality=False)
+
+    assert df["camera"].tolist() == ["4", "5"]
+    assert df["camera_name"].tolist() == ["ba", "bb"]
+    assert df["field"].tolist() == ["F1", "F2"]
+    assert "camera_field" not in df.columns
+
+
+def test_field_only_camera_field_normalizes_to_field():
+    raw = pd.DataFrame(
+        {
+            "jd": [2459000.5],
+            "band": ["g"],
+            "mag": [15.0],
+            "mag_err": [0.02],
+            "quality": ["G"],
+            "camera": ["4"],
+            "saturated": [0],
+            "camera_field": ["F1"],
+        }
+    )
+
+    df = normalize_asassn_lightcurve(raw, apply_quality=False)
+
+    assert df.loc[0, "camera"] == "4"
+    assert df.loc[0, "camera_name"] == ""
+    assert df.loc[0, "field"] == "F1"
+    assert "camera_field" not in df.columns
 
 
 def test_mag_only_legacy_rows_get_labeled_flux_density_not_survey_flux():
@@ -92,7 +137,7 @@ def test_quality_filter_handles_quality_saturation_and_bad_errors():
     assert filtered["jd"].tolist() == [2459000.5]
 
 
-def test_legacy_adapter_restores_old_column_names():
+def test_algorithm_adapter_uses_split_camera_and_field_columns():
     canonical = pd.DataFrame(
         {
             "jd": [2459000.5, 2459001.5],
@@ -103,15 +148,28 @@ def test_legacy_adapter_restores_old_column_names():
             "quality": ["G", "G"],
             "camera": ["ba", "bb"],
             "saturated": [False, False],
-            "camera_field": ["ba/1", "bb/2"],
+            "camera_name": ["ba", "bb"],
+            "field": ["1", "2"],
         }
     )
 
-    legacy = to_legacy_asassn_frame(canonical)
+    legacy = to_asassn_algorithm_frame(canonical)
 
-    assert legacy.columns.tolist() == ["JD", "mag", "error", "good_bad", "camera#", "v_g_band", "saturated", "cam_field"]
+    assert legacy.columns.tolist() == [
+        "JD",
+        "mag",
+        "error",
+        "good_bad",
+        "camera#",
+        "v_g_band",
+        "saturated",
+        "camera_name",
+        "field",
+    ]
     assert legacy["JD"].tolist() == [2459000.5, 2459001.5]
     assert legacy["error"].tolist() == [0.02, 0.03]
     assert legacy["good_bad"].tolist() == [1, 1]
     assert legacy["camera#"].tolist() == ["ba", "bb"]
     assert legacy["v_g_band"].tolist() == [0.0, 1.0]
+    assert legacy["camera_name"].tolist() == ["ba", "bb"]
+    assert legacy["field"].tolist() == ["1", "2"]

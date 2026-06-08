@@ -12,9 +12,15 @@ TRUTHY_FAILED_ANY_VALUES = {"1", "true", "t", "yes", "y"}
 def passing_candidates_mask(df: pd.DataFrame, *, failed_col: str = "failed_any") -> pd.Series:
     """Return True for rows that have not failed candidate filtering."""
     if failed_col not in df.columns:
-        return pd.Series(True, index=df.index, dtype=bool)
+        if failed_col == "failed_any" and "derived_stats" in df.columns:
+            from malca.feature_layers import feature_value_series
 
-    failed = df[failed_col]
+            failed = feature_value_series(df, "derived_stats.failed_any", default=False)
+        else:
+            return pd.Series(True, index=df.index, dtype=bool)
+    else:
+        failed = df[failed_col]
+
     if pd.api.types.is_bool_dtype(failed):
         return ~failed.fillna(False).astype(bool)
     if pd.api.types.is_numeric_dtype(failed):
@@ -36,7 +42,7 @@ def select_passing_candidates_if_present(
     printer: Callable[[str], None] | None = None,
 ) -> pd.DataFrame:
     """Filter to passers when failed_any exists, logging the reduction if requested."""
-    if "failed_any" not in df.columns:
+    if "failed_any" not in df.columns and "derived_stats" not in df.columns:
         return df.copy()
 
     before = len(df)

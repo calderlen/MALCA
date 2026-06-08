@@ -100,10 +100,12 @@ from malca.review.store import db_connect, import_candidates
 from concurrent.futures import ProcessPoolExecutor
 from malca.stats import compute_stats, _enrich_row_worker
 from malca.stv.tag import RAW_MEDIAN_SUSPECT_COL, apply_tags, filter_camera_medians
+from malca.feature_layers import to_layer_first_frame
 from malca.table_io import (
-    read_parquet_table,
-    read_passing_parquet_table,
+    read_feature_table,
+    read_passing_feature_table,
     require_parquet_path,
+    write_feature_table,
     write_parquet_table,
 )
 from malca.utils import log as _log
@@ -517,11 +519,11 @@ def safe_write_parquet(df: pd.DataFrame, path: Path) -> None:
 
 
 def load_table(path: Path) -> pd.DataFrame:
-    return read_parquet_table(path)
+    return read_feature_table(path)
 
 
 def load_passing_table(path: Path, *, columns: list[str] | None = None) -> pd.DataFrame:
-    return _select_passing_candidates(read_passing_parquet_table(path, columns=columns))
+    return _select_passing_candidates(read_passing_feature_table(path, columns=columns))
 
 
 def _effective_enrich_workers(args: argparse.Namespace) -> tuple[int, str | None]:
@@ -595,9 +597,11 @@ def _config_arg(args: argparse.Namespace, name: str) -> Any:
 
 def save_table(df: pd.DataFrame, path: Path) -> None:
     if Path(path).name.startswith("lc_events_"):
-        df = add_stv_identity(df)
+        df = to_layer_first_frame(add_stv_identity(df))
         assert_stv_product_schema(df, stage=Path(path).stem)
-    safe_write_parquet(df, require_parquet_path(path))
+        write_feature_table(df, require_parquet_path(path), compression=PARQUET_OUTPUT_COMPRESSION)
+    else:
+        safe_write_parquet(df, require_parquet_path(path))
 
 
 def _run_external_lcs_enrichment(
@@ -629,8 +633,12 @@ def _run_external_lcs_enrichment(
         run_gaia_epoch=True,
         run_tess=True,
         run_neowise=True,
-        run_kepler=False,
-        run_aavso=False,
+        run_kepler=True,
+        run_aavso=True,
+        run_ogle=True,
+        run_stripe82=True,
+        run_allwise_mep=True,
+        run_vvvx_virac=True,
         run_ps1=True,
         run_crts=True,
         atlas_token=atlas_token or os.environ.get("MALCA_ATLAS_TOKEN") or os.environ.get("ATLAS_API_TOKEN"),
@@ -956,7 +964,7 @@ def _collect_bundle_lightcurve_files(out_dir: Path, mag_bin_tag: str | None = No
 
     try:
         if include_all:
-            df_candidates = pd.read_parquet(filtered_candidates)
+            df_candidates = load_table(filtered_candidates)
         else:
             df_candidates = load_passing_table(filtered_candidates)
     except Exception as exc:
@@ -1390,9 +1398,9 @@ def main():
         type=str,
         default="default",
         help=(
-            "SED source keys: 'default' for payload/Gaia GSPC/PS1/SDSS/SkyMapper/DES/"
-            "DECaPS/UKIDSS/VISTA/VPHAS+/Spitzer/AKARI/IRAS/Herschel, "
-            "or a comma-separated source list. AKARI/IRAS/Herschel are always included."
+            "SED source keys: 'default' for payload/PS1/SkyMapper/SDSS broad-classification "
+            "photometry, 'all' for every registered source, 'far-ir' for AKARI/IRAS/Herschel, "
+            "or a comma-separated source list."
         ),
     )
     g_sed.add_argument(
@@ -2175,7 +2183,7 @@ def main():
         files = _output_files_for_path(path, fmt)
         if not files:
             return pd.DataFrame()
-        return pd.concat([pd.read_parquet(f) for f in files], ignore_index=True)
+        return pd.concat([read_feature_table(f) for f in files], ignore_index=True)
 
     def _write_events_output(df: pd.DataFrame, path: Path, fmt: str) -> list[Path]:
         path = _normalized_output_path(path, fmt)
@@ -2189,14 +2197,14 @@ def main():
             files: list[Path] = []
             for idx, start in enumerate(range(0, len(df), chunk_rows)):
                 chunk_path = path / f"chunk_{idx:06d}.parquet"
-                df.iloc[start : start + chunk_rows].to_parquet(
+                write_feature_table(
+                    df.iloc[start : start + chunk_rows],
                     chunk_path,
-                    index=False,
                     compression=PARQUET_OUTPUT_COMPRESSION,
                 )
                 files.append(chunk_path)
             return files
-        safe_write_parquet(df, path)
+        write_feature_table(df, path, compression=PARQUET_OUTPUT_COMPRESSION)
         return [path]
 
     def _run_events_branch(
@@ -2749,7 +2757,7 @@ def main():
             try:
                 # Load events results
                 if events_format == "parquet_chunk":
-                    df_events = pd.concat([pd.read_parquet(f) for f in results_files], ignore_index=True)
+                    df_events = pd.concat([read_feature_table(f) for f in results_files], ignore_index=True)
                 else:
                     df_events = load_table(results_files[0])
 
@@ -2997,11 +3005,11 @@ def main():
                         continue
                     elif merge_prefix == "lc_events_results":
                         dfs = [
-                            _load_events_output(path, events_format) if path.is_dir() else pd.read_parquet(path)
+                            _load_events_output(path, events_format) if path.is_dir() else read_feature_table(path)
                             for path in tagged_outputs
                         ]
                     else:
-                        dfs = [pd.read_parquet(f) for f in tagged_outputs]
+                        dfs = [read_feature_table(f) for f in tagged_outputs]
                     merged = pd.concat(dfs, ignore_index=True)
                     if "lc_path" in merged.columns:
                         merged = merged.drop_duplicates(subset=["lc_path"], keep="last")

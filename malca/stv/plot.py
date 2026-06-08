@@ -44,11 +44,11 @@ from malca.lightcurve_publication import (
 )
 from malca.phase import camera_labels
 from malca.review.metadata import REVIEW_METADATA_FIELDS, normalize_vsx_record
-from malca.table_io import read_parquet_table
+from malca.table_io import read_feature_table
 from malca.lightcurve_io import (
     load_lightcurve_df as _canonical_load_lightcurve_df,
     read_asassn_dat as _read_asassn_dat,
-    to_legacy_asassn_frame,
+    to_asassn_algorithm_frame,
 )
 from malca.utils import clean_lc
 from malca.utils import gaussian, paczynski_kernel, read_skypatrol_csv as _read_skypatrol_csv
@@ -86,7 +86,8 @@ asassn_columns = [
     "camera#",
     "v_g_band",
     "saturated",
-    "cam_field",
+    "camera_name",
+    "field",
 ]
 
 asassn_raw_columns = [
@@ -144,8 +145,8 @@ def load_lightcurve_df(
     )
     if return_filtered_info:
         df, filtered_cameras = loaded
-        return to_legacy_asassn_frame(df), filtered_cameras
-    return to_legacy_asassn_frame(loaded)
+        return to_asassn_algorithm_frame(df), filtered_cameras
+    return to_asassn_algorithm_frame(loaded)
 
 
 def load_events_paths(
@@ -160,7 +161,7 @@ def load_events_paths(
     Supports Parquet.
     """
     events_path = Path(events_path)
-    df = read_parquet_table(events_path)
+    df = read_feature_table(events_path)
 
     if path_col not in df.columns:
         raise KeyError(f"Missing '{path_col}' column in {events_path}")
@@ -286,7 +287,7 @@ def load_detection_results(table_path):
     if not table_path.exists():
         raise FileNotFoundError(f"detection_results file not found: {table_path}")
 
-    df = read_parquet_table(table_path)
+    df = read_feature_table(table_path)
     df = df.fillna("")
     df = df.apply(lambda x: x.astype(str).str.strip() if x.dtype == "object" else x)
     path_col = "DAT_Path" if "DAT_Path" in df.columns else "path" if "path" in df.columns else None
@@ -817,7 +818,7 @@ def plot_bayes_results(
         # For non-unified layout, configure axes per-band
         if not unified_layout:
             ax_main.tick_params(top=True, labeltop=True, bottom=False, labelbottom=False)
-            ax_main.set_xlabel(f"JD - {int(jd_offset)}", fontsize=10)
+            ax_main.set_xlabel(f"JD - {int(jd_offset)} [d]", fontsize=10)
             ax_main.xaxis.set_label_position("top")
             ax_main.set_ylabel(f"{band_labels[band]} band [mag]", fontsize=12)
             ax_main.grid(True, alpha=0.3)
@@ -837,13 +838,13 @@ def plot_bayes_results(
                 resid_min, resid_max = band_df["resid"].min(), band_df["resid"].max()
                 pad = (resid_max - resid_min) * 0.1 if resid_max != resid_min else 0.1
                 ax_resid.set_ylim(max(resid_max + pad, sigma_5 + 0.05), min(resid_min - pad, -sigma_5 - 0.05))
-            ax_resid.set_xlabel(f"JD - {int(jd_offset)}", fontsize=10)
+            ax_resid.set_xlabel(f"JD - {int(jd_offset)} [d]", fontsize=10)
 
     # Configure unified axes (after plotting all bands)
     if unified_layout:
         ax_main.invert_yaxis()
         ax_main.tick_params(top=True, labeltop=True, bottom=False, labelbottom=False)
-        ax_main.set_xlabel(f"JD - {int(jd_offset)}", fontsize=10)
+        ax_main.set_xlabel(f"JD - {int(jd_offset)} [d]", fontsize=10)
         ax_main.xaxis.set_label_position("top")
         ax_main.set_ylabel("Magnitude [mag]", fontsize=12)
         ax_main.grid(True, alpha=0.3)
@@ -883,7 +884,7 @@ def plot_bayes_results(
             pad = (resid_max - resid_min) * 0.1 if resid_max != resid_min else 0.1
             ax_resid.set_ylim(max(resid_max + pad, sigma_5 + 0.05), min(resid_min - pad, -sigma_5 - 0.05))
 
-        ax_resid.set_xlabel(f"JD - {int(jd_offset)}", fontsize=10)
+        ax_resid.set_xlabel(f"JD - {int(jd_offset)} [d]", fontsize=10)
     
 
 
@@ -1305,7 +1306,7 @@ def main():
         csv_paths = []
 
     if args.results and args.results.exists():
-        results_df = read_parquet_table(args.results)
+        results_df = read_feature_table(args.results)
 
         results_ids: set[str] = set()
         for p in results_df["path"].dropna().astype(str):

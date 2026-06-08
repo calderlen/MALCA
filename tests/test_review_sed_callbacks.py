@@ -310,7 +310,7 @@ def test_external_followup_panel_renders_without_details_open_state(monkeypatch)
     def fake_candidate_context(candidate_id):
         return {"candidate_id": candidate_id, "simbad_main_id": "Star"}, None, None
 
-    def fake_render(payload, candidate_id, theme):
+    def fake_render(payload, candidate_id, theme, **_kwargs):
         seen["candidate_id"] = candidate_id
         seen["theme"] = theme
         return ["external-card"]

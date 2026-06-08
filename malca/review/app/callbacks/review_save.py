@@ -467,12 +467,16 @@ def persist_review_save_request(save_request, current_candidate_id):
      Input('pdm-manual-period', 'value'),
      Input('yaxis-mode', 'value'),
      Input('phase-panel-mode', 'value'),
-     Input('external-source-view', 'value')],
+     Input('external-source-values', 'value'),
+     Input('external-source-layout', 'value')],
      State('plot-render-request', 'data'),
     prevent_initial_call=True,
 )
-def queue_plot_render_request(idx, current_candidate_id, plot_mode, overlay_values, selected_cameras, preset, residual_height, theme_mode, _queue_size, _pipeline_progress, baseline_opacity, selected_bands, round_sigfigs, link_radius, pdm_result, pdm_min_period, pdm_max_period, pdm_manual_period, yaxis_mode, phase_panel_mode, external_source_view, existing_request):
+def queue_plot_render_request(idx, current_candidate_id, plot_mode, overlay_values, selected_cameras, preset, residual_height, theme_mode, _queue_size, _pipeline_progress, baseline_opacity, selected_bands, round_sigfigs, link_radius, pdm_result, pdm_min_period, pdm_max_period, pdm_manual_period, yaxis_mode, phase_panel_mode, external_source_values, external_source_layout=None, existing_request=None):
     """Debounced render request queue for native plot UX."""
+    if existing_request is None and isinstance(external_source_layout, dict):
+        existing_request = external_source_layout
+        external_source_layout = DEFAULT_EXTERNAL_SOURCE_LAYOUT
     req = existing_request or {'nonce': 0, 'ts': 0.0}
     # Determine effective phase period: manual override > search result > pending auto PDM.
     override_period = None
@@ -523,6 +527,10 @@ def queue_plot_render_request(idx, current_candidate_id, plot_mode, overlay_valu
         elif candidate_id:
             phase_period_pending = True
             suppress_catalog_phase_period = True
+    normalized_external_sources = normalize_external_source_values(
+        external_source_values,
+        default=list(DEFAULT_EXTERNAL_SOURCE_VALUES),
+    )
     return {
         'nonce': int(req.get('nonce', 0)) + 1,
         'ts': float(time.time()),
@@ -545,6 +553,8 @@ def queue_plot_render_request(idx, current_candidate_id, plot_mode, overlay_valu
             'suppress_catalog_phase_period': bool(suppress_catalog_phase_period),
             'yaxis_mode': str(yaxis_mode or 'mag'),
             'phase_panel_mode': str(phase_panel_mode or 'fold'),
-            'external_source_view': str(external_source_view or DEFAULT_EXTERNAL_SOURCE_VIEW),
+            'external_source_values': normalized_external_sources,
+            'external_source_layout': normalize_external_source_layout(external_source_layout),
+            'external_source_view': legacy_external_source_view(normalized_external_sources),
         },
     }

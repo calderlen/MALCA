@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 from malca.enrich.neighbor import _ensure_candidate_id, _query_catalog_bulk
-from malca.table_io import read_parquet_table, write_parquet_table
+from malca.table_io import read_feature_table, write_parquet_table
 
 
 DEFAULT_HOST_CATALOGS: dict[str, str] = {
@@ -156,7 +156,7 @@ def main() -> None:
     parser.add_argument("--cache", type=Path, default=None)
     args = parser.parse_args()
 
-    df = read_parquet_table(args.input)
+    df = read_feature_table(args.input)
     run_host_association(df, out_dir=args.out_dir, radius_arcsec=args.radius_arcsec, chunk_size=args.chunk_size, cache_file=args.cache)
     print(f"Host association written to {args.out_dir}")
 

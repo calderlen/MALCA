@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from malca.feature_layers import feature_mapping_get
 from malca.review.filter_schema import SIDEBAR_GROUPS
 from malca.review.stats_merge import merge_stats_summary_into_payload
 from malca.review.store import _COL_NAMES
@@ -71,8 +72,8 @@ def test_qm_stats_merge_and_review_schema_entries() -> None:
         },
     )
 
-    assert payload["stats_variability_quasi_periodicity_q"] == 0.12
-    assert payload["stats_variability_flux_asymmetry_m"] == 0.34
+    assert feature_mapping_get(payload, "stats_variability_quasi_periodicity_q") == 0.12
+    assert feature_mapping_get(payload, "stats_variability_flux_asymmetry_m") == 0.34
     assert "stats_variability_quasi_periodicity_q" in _COL_NAMES
     assert "stats_variability_flux_asymmetry_m" in _COL_NAMES
 

@@ -147,7 +147,7 @@ def test_review_sync_export_import_roundtrip_and_manifest_hashes(tmp_path: Path)
 
     candidate_record = json.loads(candidates_text.splitlines()[0])
     assert candidate_record["payload"]["custom_nested"]["values"][2]["ok"] is True
-    assert candidate_record["payload"]["phot_g_mean_mag"] == 14.2
+    assert candidate_record["payload"]["external_stats"]["phot_g_mean_mag"] == 14.2
 
     review_record = json.loads(reviews_text.splitlines()[0])
     assert review_record["notes"] == "line one,\nline two"
@@ -184,6 +184,34 @@ def test_review_sync_export_import_roundtrip_and_manifest_hashes(tmp_path: Path)
     assert review["event_class"] == "dipper"
     assert review["morphology_secondary"] == "recurrent_dips"
     assert review["morphology_secondary_list"] == ["recurrent_dips", "multi_depth_dips"]
+
+
+def test_review_store_payload_is_layer_first_but_display_payload_is_flat(tmp_path: Path) -> None:
+    db_path = tmp_path / "review.db"
+    with db_connect(db_path) as conn:
+        upsert_candidates_frame(
+            conn,
+            pd.DataFrame(
+                [
+                    {
+                        "candidate_id": "C1",
+                        "asas_sn_id": "C1",
+                        "dipper_score": 6.0,
+                        "phot_g_mean_mag": 14.2,
+                    }
+                ]
+            ),
+        )
+        raw_payload = json.loads(
+            conn.execute("SELECT payload_json FROM candidates WHERE candidate_id='C1'").fetchone()[0]
+        )
+        display_payload = get_candidate_payload(conn, "C1")
+
+    assert "dipper_score" not in raw_payload
+    assert raw_payload["lc_stats"]["dipper_score"] == 6.0
+    assert raw_payload["external_stats"]["phot_g_mean_mag"] == 14.2
+    assert display_payload["dipper_score"] == 6.0
+    assert display_payload["phot_g_mean_mag"] == 14.2
 
 
 def test_review_sync_import_merge_keeps_newer_target_review(tmp_path: Path) -> None:

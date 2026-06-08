@@ -321,18 +321,21 @@ app.clientside_callback(
 # --- Sidebar plot prefs: save to localStorage on change ---
 app.clientside_callback(
     """
-    function(preset, overlays, mode, opacity, resHeight, externalSource, phasePanelMode, reviewScope) {
+    function(preset, overlays, mode, opacity, resHeight, externalSources, externalLayout, phasePanelMode, reviewScope) {
         var scope = String(reviewScope || 'default');
-        var storageKey = 'malca.review.sidebar.plot.v2::' + scope;
+        var storageKey = 'malca.review.sidebar.plot.v3::' + scope;
         try {
             var phaseMode = ['fold', 'time'].includes(phasePanelMode) ? phasePanelMode : 'fold';
+            var sourceLayout = ['overlay', 'split'].includes(externalLayout) ? externalLayout : 'overlay';
+            var sources = Array.isArray(externalSources) ? externalSources : [];
             var obj = {
                 preset: preset,
                 overlays: overlays || [],
                 mode: mode,
                 opacity: opacity,
                 resHeight: resHeight,
-                externalSource: externalSource,
+                externalSources: sources,
+                externalLayout: sourceLayout,
                 phasePanelMode: phaseMode
             };
             window.localStorage.setItem(storageKey, JSON.stringify(obj));
@@ -346,7 +349,8 @@ app.clientside_callback(
      Input('plot-mode', 'value'),
      Input('baseline-opacity-slider', 'value'),
      Input('residual-height-slider', 'value'),
-     Input('external-source-view', 'value'),
+     Input('external-source-values', 'value'),
+     Input('external-source-layout', 'value'),
      Input('phase-panel-mode', 'value')],
     State('review-db-scope', 'data'),
     prevent_initial_call=True,
@@ -356,31 +360,56 @@ app.clientside_callback(
 # --- Sidebar plot prefs: load from localStorage on init ---
 app.clientside_callback(
     """
-    function(_savedStateTs, savedState, curPreset, curOverlays, curMode, curOpacity, curResHeight, curExternalSource, curPhasePanelMode, reviewScope) {
+    function(_savedStateTs, savedState, curPreset, curOverlays, curMode, curOpacity, curResHeight, curExternalSources, curExternalLayout, curPhasePanelMode, reviewScope) {
         var nu = window.dash_clientside.no_update;
         if (savedState && typeof savedState === 'object') {
-            return [nu, nu, nu, nu, nu, nu, nu, true];
+            return [nu, nu, nu, nu, nu, nu, nu, nu, true];
         }
         var scope = String(reviewScope || 'default');
-        var storageKey = 'malca.review.sidebar.plot.v2::' + scope;
+        var storageKey = 'malca.review.sidebar.plot.v3::' + scope;
+        var legacyKey = 'malca.review.sidebar.plot.v2::' + scope;
+        var allowedSources = ['asassn', 'atlas', 'ztf', 'gaia_epoch', 'tess', 'neowise', 'kepler', 'aavso', 'ogle', 'stripe82', 'allwise_mep', 'vvvx_virac', 'ps1', 'crts'];
+        function normalizeSources(value) {
+            var raw = Array.isArray(value) ? value : (value ? [value] : []);
+            var out = [];
+            var seen = {};
+            for (var i = 0; i < raw.length; i++) {
+                var text = String(raw[i] || '').trim().toLowerCase();
+                if (!text) continue;
+                if (text === 'all') return allowedSources.slice();
+                if (['wise', 'w1', 'w2', 'wise_w1_w2'].includes(text)) text = 'neowise';
+                else if (['k2', 'kepler_k2'].includes(text)) text = 'kepler';
+                else if (['sdss_s82', 's82', 'stripe_82', 'sdss_stripe82'].includes(text)) text = 'stripe82';
+                else if (['allwise', 'allwise_multiepoch', 'wise_mep'].includes(text)) text = 'allwise_mep';
+                else if (['vvv', 'vvvx', 'virac', 'virac2', 'vvvx_virac2'].includes(text)) text = 'vvvx_virac';
+                if (!allowedSources.includes(text) || seen[text]) continue;
+                out.push(text);
+                seen[text] = true;
+            }
+            if (!Array.isArray(value) && out.length && out[0] !== 'asassn') {
+                out.unshift('asassn');
+            }
+            return out;
+        }
         try {
-            var raw = window.localStorage.getItem(storageKey);
-            if (!raw) return [nu, nu, nu, nu, nu, nu, nu, false];
+            var raw = window.localStorage.getItem(storageKey) || window.localStorage.getItem(legacyKey);
+            if (!raw) return [nu, nu, nu, nu, nu, nu, nu, nu, false];
             var obj = JSON.parse(raw);
-            var preset = (obj.preset && ['Clean', 'Diagnostics', 'Full'].includes(obj.preset))
+            var preset = (obj.preset && ['Fast Review', 'Clean', 'Diagnostics', 'Full'].includes(obj.preset))
                 ? obj.preset : nu;
             var overlays = Array.isArray(obj.overlays) ? obj.overlays : nu;
             var mode = (obj.mode && ['native', 'png'].includes(obj.mode)) ? obj.mode : nu;
             var opacity = (typeof obj.opacity === 'number') ? obj.opacity : nu;
             var resHeight = (typeof obj.resHeight === 'number') ? obj.resHeight : nu;
-            var allowedSources = ['all', 'asassn', 'atlas', 'ztf', 'gaia_epoch', 'tess', 'ps1', 'crts'];
-            var externalSource = (obj.externalSource && allowedSources.includes(obj.externalSource))
-                ? obj.externalSource : nu;
+            var sources = normalizeSources(obj.externalSources || obj.externalSource);
+            var externalSources = sources.length ? sources : nu;
+            var externalLayout = (obj.externalLayout && ['overlay', 'split'].includes(obj.externalLayout))
+                ? obj.externalLayout : nu;
             var phasePanelMode = (obj.phasePanelMode && ['fold', 'time'].includes(obj.phasePanelMode))
                 ? obj.phasePanelMode : nu;
-            return [preset, overlays, mode, opacity, resHeight, externalSource, phasePanelMode, true];
+            return [preset, overlays, mode, opacity, resHeight, externalSources, externalLayout, phasePanelMode, true];
         } catch (e) {
-            return [nu, nu, nu, nu, nu, nu, nu, false];
+            return [nu, nu, nu, nu, nu, nu, nu, nu, false];
         }
     }
     """,
@@ -389,7 +418,8 @@ app.clientside_callback(
      Output('plot-mode', 'value', allow_duplicate=True),
      Output('baseline-opacity-slider', 'value', allow_duplicate=True),
      Output('residual-height-slider', 'value', allow_duplicate=True),
-     Output('external-source-view', 'value', allow_duplicate=True),
+     Output('external-source-values', 'value', allow_duplicate=True),
+     Output('external-source-layout', 'value', allow_duplicate=True),
      Output('phase-panel-mode', 'value', allow_duplicate=True),
      Output('plot-defaults-initialized', 'data', allow_duplicate=True)],
     Input('saved-review-gui-state', 'modified_timestamp'),
@@ -399,7 +429,8 @@ app.clientside_callback(
      State('plot-mode', 'value'),
      State('baseline-opacity-slider', 'value'),
      State('residual-height-slider', 'value'),
-     State('external-source-view', 'value'),
+     State('external-source-values', 'value'),
+     State('external-source-layout', 'value'),
      State('phase-panel-mode', 'value'),
      State('review-db-scope', 'data')],
     prevent_initial_call='initial_duplicate',

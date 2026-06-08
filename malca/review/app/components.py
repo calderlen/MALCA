@@ -89,6 +89,22 @@ def _render_external_followup(
     cutout_card_style.update({'gridColumn': '1 / -1', 'padding': '6px 7px 7px 7px'})
     cutout_viewer_class = "cutout-viewer" if cutout_has_coords else "cutout-viewer cutout-viewer-empty"
     cutout_status_style = muted_text_style if cutout_has_coords else error_text_style
+    try:
+        fwhm_arcsec = float(cutout_data.get("asassn_fwhm_arcsec") or 0.0)
+    except (TypeError, ValueError):
+        fwhm_arcsec = 0.0
+    try:
+        fwhm_overlay_fraction = float(cutout_data.get("asassn_fwhm_overlay_fraction") or 0.0)
+    except (TypeError, ValueError):
+        fwhm_overlay_fraction = 0.0
+    fwhm_overlay_percent = max(0.0, fwhm_overlay_fraction * 100.0)
+    fwhm_overlay_label = f"ASAS-SN FWHM ~{fwhm_arcsec:g} arcsec"
+    fwhm_overlay_style = {
+        'width': f"{fwhm_overlay_percent:.4g}%",
+        'height': f"{fwhm_overlay_percent:.4g}%",
+    }
+    if not cutout_has_coords:
+        fwhm_overlay_style['display'] = 'none'
     cutout_card = html.Div([
         html.Div([
             html.Div('Survey Cutout', style={**section_title_style, 'marginBottom': '0'}),
@@ -125,6 +141,14 @@ def _render_external_followup(
                 src=str(cutout_data.get("image_url") or ""),
                 alt='Candidate survey cutout',
                 className='cutout-image',
+            ),
+            html.Div(
+                id='cutout-asassn-fwhm-overlay',
+                className='cutout-asassn-fwhm-overlay',
+                title=fwhm_overlay_label,
+                role='img',
+                style=fwhm_overlay_style,
+                **{'aria-label': fwhm_overlay_label},
             ),
             html.Div(className='cutout-crosshair'),
             html.Div(

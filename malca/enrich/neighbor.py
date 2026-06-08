@@ -12,7 +12,7 @@ from tqdm.auto import tqdm
 
 from malca.candidates import select_passing_candidates_if_present
 from malca.config import NEIGHBOR_RADIUS_ARCSEC, NEIGHBOR_CHUNK_SIZE
-from malca.table_io import read_parquet_table
+from malca.table_io import read_feature_table
 
 
 DEFAULT_NEIGHBOR_CATALOGS: dict[str, str] = {
@@ -239,7 +239,7 @@ def main() -> None:
     parser.add_argument("--all-candidates", action="store_true", help="Query all input rows instead of only failed_any=False passers")
     args = parser.parse_args()
 
-    df = read_parquet_table(args.input)
+    df = read_feature_table(args.input)
     if not getattr(args, "all_candidates", False):
         df = select_passing_candidates_if_present(df, printer=print)
     run_neighbor_enrichment(

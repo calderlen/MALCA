@@ -5,8 +5,10 @@ from pathlib import Path
 
 import pandas as pd
 
+from malca.feature_layers import feature_mapping_get, parse_layer_value
 from malca.review import refresh as review_refresh
 from malca.review.store import db_connect, get_candidate_payload, import_candidates, save_review
+from malca.table_io import write_feature_table
 
 
 def test_refresh_review_stats_from_run_replaces_stats_only(tmp_path: Path, monkeypatch) -> None:
@@ -17,7 +19,10 @@ def test_refresh_review_stats_from_run_replaces_stats_only(tmp_path: Path, monke
     bundle_dir.mkdir(parents=True)
 
     candidate_source = results_dir / "lc_events_filtered.parquet"
-    pd.DataFrame([{"candidate_id": "REFRESH-1"}]).to_parquet(candidate_source, index=False)
+    write_feature_table(
+        pd.DataFrame([{"candidate_id": "REFRESH-1", "timescale": "stv"}]),
+        candidate_source,
+    )
 
     lc_path = bundle_dir / "REFRESH-1.dat2"
     lc_path.write_text("dummy", encoding="ascii")
@@ -31,7 +36,6 @@ def test_refresh_review_stats_from_run_replaces_stats_only(tmp_path: Path, monke
                     {
                         "candidate_id": "REFRESH-1",
                         "asas_sn_id": "REFRESH-1",
-                        "path": "/missing/original/REFRESH-1.dat2",
                         "lc_path": "/missing/original/REFRESH-1.dat2",
                         "parallax": 7.1,
                         "stats_file_points_total": 999.0,
@@ -71,14 +75,14 @@ def test_refresh_review_stats_from_run_replaces_stats_only(tmp_path: Path, monke
             ("REFRESH-1",),
         ).fetchone()
 
-    assert payload["parallax"] == 7.1
+    assert feature_mapping_get(payload, "parallax") == 7.1
     assert payload["lc_path"] == str(lc_path)
-    assert payload["stats_file_points_total"] == 12.0
-    assert payload["stats_photometry_mean_mag"] == 14.2
-    assert payload["n_points"] == 11.0
-    assert payload["cadence_median_days"] == 2.5
-    assert payload["baseline_mag"] == 14.1
-    assert "stats_legacy_extra" not in payload
+    assert feature_mapping_get(payload, "stats_file_points_total") == 12.0
+    assert feature_mapping_get(payload, "stats_photometry_mean_mag") == 14.2
+    assert feature_mapping_get(payload, "n_points") == 11.0
+    assert feature_mapping_get(payload, "cadence_median_days") == 2.5
+    assert feature_mapping_get(payload, "baseline_mag") == 14.1
+    assert "stats_legacy_extra" not in parse_layer_value(payload.get("lc_stats"))
     assert row == (str(lc_path), 12.0, 14.2)
 
 
@@ -133,7 +137,12 @@ def test_refresh_review_stats_from_ltv_scope_matches_db_by_asas_sn_id(tmp_path: 
     bundle_dir.mkdir(parents=True)
 
     candidate_source = run_dir / "LTvar12-12.5_pipeline.parquet"
-    pd.DataFrame([{"asas_sn_id": "123"}]).to_parquet(candidate_source, index=False)
+    write_feature_table(
+        pd.DataFrame(
+            [{"candidate_id": "ltv_123", "timescale": "ltv", "asas_sn_id": "123", "lc_path": "123.dat2"}]
+        ),
+        candidate_source,
+    )
 
     lc_path = bundle_dir / "123.dat2"
     lc_path.write_text("dummy", encoding="ascii")
@@ -147,7 +156,6 @@ def test_refresh_review_stats_from_ltv_scope_matches_db_by_asas_sn_id(tmp_path: 
                     {
                         "candidate_id": "ltv_123",
                         "asas_sn_id": "123",
-                        "path": "/missing/original/123.dat2",
                         "lc_path": "/missing/original/123.dat2",
                     }
                 ]
@@ -186,7 +194,7 @@ def test_refresh_review_stats_from_ltv_scope_matches_db_by_asas_sn_id(tmp_path: 
     assert payload["lc_path"] == str(lc_path)
 
 
-def test_get_candidate_payload_aliases_legacy_ltv_pm_fields(tmp_path: Path) -> None:
+def test_get_candidate_payload_reads_canonical_ltv_pm_fields(tmp_path: Path) -> None:
     db_path = tmp_path / "ltv_review.db"
     with db_connect(db_path) as conn:
         import_candidates(
@@ -196,9 +204,9 @@ def test_get_candidate_payload_aliases_legacy_ltv_pm_fields(tmp_path: Path) -> N
                     {
                         "candidate_id": "ltv_pm",
                         "asas_sn_id": "999",
-                        "gaia_pmra": 6.0,
-                        "gaia_pmdec": 8.0,
-                        "gaia_pm_total": 10.0,
+                        "pmra": 6.0,
+                        "pmdec": 8.0,
+                        "pm_total": 10.0,
                     }
                 ]
             ),
@@ -208,10 +216,10 @@ def test_get_candidate_payload_aliases_legacy_ltv_pm_fields(tmp_path: Path) -> N
         )
         payload = get_candidate_payload(conn, "ltv_pm")
 
-    assert payload["pmra"] == 6.0
-    assert payload["pmdec"] == 8.0
-    assert payload["pm_total"] == 10.0
-    assert payload["high_pm_flag"] is False
+    assert feature_mapping_get(payload, "pmra") == 6.0
+    assert feature_mapping_get(payload, "pmdec") == 8.0
+    assert feature_mapping_get(payload, "pm_total") == 10.0
+    assert feature_mapping_get(payload, "high_pm_flag") is False
 
     with db_connect(db_path) as conn:
         row = conn.execute(

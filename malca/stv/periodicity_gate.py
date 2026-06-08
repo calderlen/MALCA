@@ -25,7 +25,7 @@ from malca.config import (
 )
 from malca.config import WORKERS
 from malca.config import LS_ALIAS_PERIODS, LS_ALIAS_TOLERANCE
-from malca.lightcurve_io import load_lightcurve_df, to_legacy_asassn_frame
+from malca.lightcurve_io import load_lightcurve_df, to_asassn_algorithm_frame
 from malca.phase import align_v_to_g_magnitude, phase_template, template_phase_lag
 from malca.stats import compute_ce_stats
 from malca.utils import clean_lc, compute_n_cameras
@@ -495,7 +495,7 @@ def _evaluate_periodicity_worker(args: tuple[object, ...]) -> dict[str, object]:
             filter_bad_cameras_enabled=True,
             bad_camera_scatter_ratio=float(bad_camera_scatter_ratio),
         )
-        df_lc = to_legacy_asassn_frame(df_lc)
+        df_lc = to_asassn_algorithm_frame(df_lc)
         if df_lc.empty:
             return _empty_result(path_str, checkpoint_key, reason="empty_lc")
 

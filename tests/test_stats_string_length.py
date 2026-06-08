@@ -89,10 +89,10 @@ def test_enrich_row_worker_flattens_field_summary(monkeypatch: pytest.MonkeyPatc
             "asassn_fields": "field1,field2",
             "asassn_field_count": 2,
             "asassn_field_key_fraction": 0.75,
-            "camera_field_key": "cam1/field1",
-            "camera_fields": "cam1/field1,cam2/field2",
-            "camera_field_count": 2,
-            "camera_field_key_fraction": 0.5,
+            "camera_name_key": "cam1",
+            "camera_names": "cam1,cam2",
+            "camera_name_count": 2,
+            "camera_name_key_fraction": 0.5,
             "by_field": pd.DataFrame({"field": ["field1"]}),
         }
 
@@ -103,7 +103,7 @@ def test_enrich_row_worker_flattens_field_summary(monkeypatch: pytest.MonkeyPatc
     assert row["stats_asassn_field_key"] == "field1"
     assert row["stats_asassn_fields"] == "field1,field2"
     assert row["stats_asassn_field_count"] == 2
-    assert row["stats_camera_field_key"] == "cam1/field1"
+    assert row["stats_camera_name_key"] == "cam1"
     assert "stats_by_field" not in row
 
 

@@ -42,7 +42,7 @@ from malca.config import (
 from malca.config import PARQUET_CACHE_COMPRESSION, PARQUET_OUTPUT_COMPRESSION
 from malca.config import VSX_CROSSMATCH_PATH
 from malca.config import WORKERS
-from malca.table_io import read_parquet_table, write_parquet_table
+from malca.table_io import read_feature_table, read_parquet_table, write_feature_table
 from malca.vsx.metadata import normalize_vsx_match_columns, select_best_vsx_matches
 from malca.utils import (
     read_lc_dat2,
@@ -225,7 +225,7 @@ def _compute_stats_parallel(
         df_with_stats["n_cameras"] = np.nan
     if compute_fields:
         for col in FIELD_SUMMARY_COLUMNS:
-            df_with_stats[col] = "" if col.endswith("_key") or col.endswith("_fields") else np.nan
+            df_with_stats[col] = "" if col.endswith("_key") or col in {"asassn_fields", "camera_names"} else np.nan
 
     stats_cols: list[str] = []
     if compute_time:
@@ -1229,7 +1229,7 @@ def main() -> None:
 
     input_path = args.input.expanduser()
     output_path = args.output.expanduser()
-    df = read_parquet_table(input_path)
+    df = read_feature_table(input_path)
 
     out = apply_tags(
         df,
@@ -1249,7 +1249,7 @@ def main() -> None:
         stats_chunk_size=args.stats_chunk_size,
     )
 
-    write_parquet_table(out, output_path)
+    write_feature_table(out, output_path)
 
     print(f"Saved tag output: {output_path} ({len(out)} rows)")
 

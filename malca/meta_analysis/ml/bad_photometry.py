@@ -27,7 +27,7 @@ from typing import Any, Iterable, Mapping, Sequence
 import numpy as np
 import pandas as pd
 
-from malca.table_io import read_parquet_table, write_parquet_table
+from malca.table_io import read_feature_table, write_feature_table
 
 
 ID_COLUMNS = (
@@ -72,7 +72,8 @@ RAW_FEATURE_NAMES = (
     "camera_hash",
     "band",
     "saturated",
-    "cam_field_hash",
+    "camera_name_hash",
+    "field_hash",
 )
 EMBEDDING_PREFIX = "raw_emb_"
 
@@ -178,7 +179,7 @@ def _read_table(path: str | Path) -> pd.DataFrame:
         raise FileNotFoundError(f"Table not found: {table_path}")
     suffix = table_path.suffix.lower()
     if suffix == ".parquet" or table_path.is_dir():
-        return read_parquet_table(table_path)
+        return read_feature_table(table_path)
     if suffix == ".csv":
         return pd.read_csv(table_path, dtype=str, keep_default_na=False)
     raise ValueError(f"Unsupported table type: {table_path}")
@@ -187,7 +188,7 @@ def _read_table(path: str | Path) -> pd.DataFrame:
 def _write_table(df: pd.DataFrame, path: str | Path) -> None:
     out = Path(path).expanduser()
     if out.suffix.lower() == ".parquet":
-        write_parquet_table(df, out)
+        write_feature_table(df, out)
     elif out.suffix.lower() == ".csv":
         out.parent.mkdir(parents=True, exist_ok=True)
         df.to_csv(out, index=False)
@@ -872,6 +873,13 @@ def read_native_lightcurve(path: str | Path) -> pd.DataFrame:
     for col in ("JD", "mag", "error", "good_bad", "camera#", "v_g_band", "saturated"):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
+    if "cam_field" in df.columns:
+        split = df["cam_field"].astype("string").str.split("/", n=1, expand=True)
+        if split.shape[1] >= 1:
+            df["camera_name"] = split[0].fillna("").astype(str).str.strip()
+        if split.shape[1] >= 2:
+            df["field"] = split[1].fillna("").astype(str).str.strip()
+        df = df.drop(columns=["cam_field"])
     return df
 
 
@@ -1005,9 +1013,10 @@ def _point_feature_matrix(
     err = pd.to_numeric(err_source, errors="coerce").to_numpy(dtype=float)
     good_bad = pd.to_numeric(good_source, errors="coerce").fillna(0).to_numpy(dtype=float)
     camera = df["camera#"] if "camera#" in df.columns else pd.Series([""] * len(df), index=df.index)
+    camera_name = df["camera_name"] if "camera_name" in df.columns else camera
+    field = df["field"] if "field" in df.columns else pd.Series([""] * len(df), index=df.index)
     band = pd.to_numeric(band_source, errors="coerce").fillna(-1).to_numpy(dtype=float)
     saturated = pd.to_numeric(sat_source, errors="coerce").fillna(0).to_numpy(dtype=float)
-    cam_field = df["cam_field"] if "cam_field" in df.columns else pd.Series([""] * len(df), index=df.index)
 
     jd_min = float(stats["jd_min"])
     jd_max = float(stats["jd_max"])
@@ -1044,8 +1053,12 @@ def _point_feature_matrix(
         [_stable_hash(value, buckets=config.hash_buckets) for value in camera],
         dtype=float,
     )
-    cam_field_hash = np.asarray(
-        [_stable_hash(value, buckets=config.hash_buckets) for value in cam_field],
+    camera_name_hash = np.asarray(
+        [_stable_hash(value, buckets=config.hash_buckets) for value in camera_name],
+        dtype=float,
+    )
+    field_hash = np.asarray(
+        [_stable_hash(value, buckets=config.hash_buckets) for value in field],
         dtype=float,
     )
     matrix = np.column_stack(
@@ -1063,7 +1076,8 @@ def _point_feature_matrix(
             camera_hash,
             band,
             saturated,
-            cam_field_hash,
+            camera_name_hash,
+            field_hash,
         ]
     )
     matrix = np.nan_to_num(matrix, nan=0.0, posinf=0.0, neginf=0.0)

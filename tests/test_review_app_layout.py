@@ -8,6 +8,8 @@ import sys
 import types
 from pathlib import Path
 
+import pandas as pd
+
 
 def _install_review_app_import_stubs() -> None:
     if "celerite2" not in sys.modules and importlib.util.find_spec("celerite2") is None:
@@ -43,7 +45,8 @@ _install_review_app_import_stubs()
 
 from malca.review import app as review_app
 from malca.review.app import EXTERNAL_SOURCE_VIEW_OPTIONS, _render_external_followup, app
-from malca.review.cutouts import CUTOUT_SURVEYS, DEFAULT_CUTOUT_SURVEY_KEY
+from malca.review.store import count_queue, db_connect, upsert_candidates_frame
+from malca.review.cutouts import ASASSN_FWHM_ARCSEC, CUTOUT_SURVEYS, DEFAULT_CUTOUT_SURVEY_KEY
 
 
 _APP_SOURCE_DIR = Path(review_app.__file__).resolve().parent
@@ -308,17 +311,23 @@ def test_external_followup_renders_static_cutout_panel() -> None:
 
     survey_select = _component_by_id(cards, "cutout-survey-select")
     image = _component_by_id(cards, "cutout-image")
+    fwhm_overlay = _component_by_id(cards, "cutout-asassn-fwhm-overlay")
     source_link = _component_by_id(cards, "cutout-source-link")
     status = _component_by_id(cards, "cutout-status")
 
     select_props = _props(survey_select)
     image_props = _props(image)
+    overlay_props = _props(fwhm_overlay)
     link_props = _props(source_link)
     assert select_props["value"] == DEFAULT_CUTOUT_SURVEY_KEY
     assert select_props["disabled"] is False
     assert [option["label"] for option in select_props["options"]] == [survey.label for survey in CUTOUT_SURVEYS]
     assert "CDS%2FP%2FPanSTARRS%2FDR1%2Fcolor-i-r-g" in image_props["src"]
     assert "fov=0.03333333333" in image_props["src"]
+    assert overlay_props["title"] == f"ASAS-SN FWHM ~{ASASSN_FWHM_ARCSEC:g} arcsec"
+    assert overlay_props["style"]["width"] == "13.33%"
+    assert overlay_props["style"]["height"] == "13.33%"
+    assert "display" not in overlay_props["style"]
     assert link_props["href"] == image_props["src"]
     assert "PanSTARRS DR1 color" in str(_props(status).get("children"))
 
@@ -344,11 +353,13 @@ def test_external_followup_cutout_handles_missing_coordinates() -> None:
 
     survey_select = _component_by_id(cards, "cutout-survey-select")
     image = _component_by_id(cards, "cutout-image")
+    fwhm_overlay = _component_by_id(cards, "cutout-asassn-fwhm-overlay")
     source_link = _component_by_id(cards, "cutout-source-link")
     status = _component_by_id(cards, "cutout-status")
 
     assert _props(survey_select)["disabled"] is True
     assert _props(image)["src"] == ""
+    assert _props(fwhm_overlay)["style"]["display"] == "none"
     assert _props(source_link)["href"] == "#"
     assert "RA/Dec" in str(_props(status).get("children"))
 
@@ -693,7 +704,15 @@ def test_eda_panel_state_callback_supports_collapse_restore_and_wide(monkeypatch
 def test_external_source_selector_exposes_tess() -> None:
     values = {str(option.get("value")) for option in EXTERNAL_SOURCE_VIEW_OPTIONS}
 
-    assert "tess" in values
+    assert {
+        "tess",
+        "kepler",
+        "aavso",
+        "ogle",
+        "stripe82",
+        "allwise_mep",
+        "vvvx_virac",
+    }.issubset(values)
 
 
 def test_review_plot_dir_infers_run_bundle_from_db_path(tmp_path, monkeypatch) -> None:
@@ -768,6 +787,73 @@ def test_plot_resolution_prefers_local_db_context_over_stale_payload_paths(tmp_p
         stored_lc_path="/old/root/C1.dat3",
         source_path="/old/root",
     ) is None
+
+
+def test_queue_scope_for_migrated_path_falls_back_to_run_token(tmp_path) -> None:
+    db_path = tmp_path / "review.db"
+    old_run_dir = "/home/calder/code/malca/output/runs/march18_bundle"
+    new_run_dir = tmp_path / "output_migrated" / "runs" / "march18_bundle"
+    results_file = new_run_dir / "results" / "lc_events_vetted.parquet"
+    results_file.parent.mkdir(parents=True)
+    results_file.write_text("", encoding="ascii")
+
+    with db_connect(db_path) as conn:
+        upsert_candidates_frame(
+            conn,
+            pd.DataFrame(
+                [
+                    {
+                        "candidate_id": "C1",
+                        "asas_sn_id": "C1",
+                        "source_path": old_run_dir,
+                    }
+                ]
+            ),
+        )
+        exact_scope = {"source_paths": [str(new_run_dir)]}
+        portable_scope = review_app._queue_scope_filter_kwargs(
+            review_app._queue_scope_from_import_text(str(results_file))
+        )
+
+        assert count_queue(conn, filters=exact_scope) == 0
+        assert portable_scope["source_paths"] == [str(new_run_dir)]
+        assert portable_scope["source_path_fallback_like_any"] == ["march18_bundle"]
+        assert count_queue(conn, filters=portable_scope) == 1
+
+
+def test_review_db_for_plot_dir_prefers_populated_sibling_over_empty_review_db(tmp_path) -> None:
+    run_dir = tmp_path / "march18_bundle"
+    review_dir = run_dir / "review"
+    (run_dir / "bundle_assets" / "lightcurves").mkdir(parents=True)
+    review_dir.mkdir(parents=True)
+    empty_db = review_dir / "review.db"
+    empty_db.write_bytes(b"")
+    populated_db = review_dir / "review.taxonomy_filled.db"
+
+    with db_connect(populated_db) as conn:
+        upsert_candidates_frame(
+            conn,
+            pd.DataFrame([{"candidate_id": "C1", "asas_sn_id": "C1"}]),
+        )
+
+    assert review_app._review_db_for_plot_dir(str(run_dir)) == populated_db.resolve()
+
+
+def test_resolve_db_cli_path_prefers_populated_appended_db_sibling(tmp_path) -> None:
+    review_dir = tmp_path / "review"
+    review_dir.mkdir()
+    typo_db = review_dir / "review.taxonomy_filled"
+    populated_db = review_dir / "review.taxonomy_filled.db"
+
+    with db_connect(typo_db):
+        pass
+    with db_connect(populated_db) as conn:
+        upsert_candidates_frame(
+            conn,
+            pd.DataFrame([{"candidate_id": "C1", "asas_sn_id": "C1"}]),
+        )
+
+    assert review_app._resolve_db_cli_path(str(typo_db)) == populated_db.resolve()
 
 
 def test_closed_lazy_panels_skip_candidate_work(monkeypatch) -> None:

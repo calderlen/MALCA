@@ -91,7 +91,7 @@ from malca.periodic_catalogs import (
 from malca.phase import align_v_to_g_magnitude
 from malca.product_schema import add_stv_identity, assert_stv_product_schema
 from malca.stats import compute_pdm_stats, compute_ce_stats
-from malca.table_io import read_parquet_table, write_parquet_table
+from malca.table_io import read_feature_table, write_feature_table
 from malca.utils import log_rejections
 from malca.utils import read_lc_dat2
 
@@ -2607,7 +2607,7 @@ Example usage:
         raise ValueError("Must specify either --input or --detect-run")
 
     # Load input
-    df = read_parquet_table(input_path)
+    df = read_feature_table(input_path)
 
     print(f"Loaded {len(df)} rows from {input_path}")
 
@@ -2616,7 +2616,7 @@ Example usage:
     if not index_path.exists():
         raise FileNotFoundError(f"Index file not found: {index_path}")
 
-    index_df = read_parquet_table(index_path)
+    index_df = read_feature_table(index_path)
 
     # Determine join column (asas_sn_id or lc_path stem)
     if "asas_sn_id" in df.columns and "asas_sn_id" in index_df.columns:
@@ -2861,7 +2861,7 @@ Example usage:
     # Save output
     df_filtered = add_stv_identity(df_filtered)
     assert_stv_product_schema(df_filtered, stage="stv-filter")
-    write_parquet_table(df_filtered, output_path)
+    write_feature_table(df_filtered, output_path)
 
     n_failed = int(df_filtered["failed_any"].sum()) if "failed_any" in df_filtered.columns else 0
     n_passed = len(df_filtered) - n_failed

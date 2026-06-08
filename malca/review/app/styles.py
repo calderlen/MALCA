@@ -425,9 +425,30 @@ app.index_string = '''
         .plot-actions {
             align-items: center;
         }
-        .plot-source-control .form-select {
-            flex: 1 1 130px;
+        .plot-source-control {
+            align-items: stretch;
+            flex-direction: column;
+            gap: 5px;
+        }
+        .plot-source-header {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 5px;
+        }
+        .plot-source-header .plot-control-label {
+            margin-right: 2px;
+        }
+        .plot-source-checklist,
+        .plot-source-layout {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 5px;
             min-width: 0;
+        }
+        .plot-source-checklist label,
+        .plot-source-layout label {
+            margin-right: 0 !important;
         }
         .plot-period-controls {
             align-items: center;
@@ -690,6 +711,22 @@ app.index_string = '''
             pointer-events: none;
             position: absolute;
             inset: 0;
+            z-index: 2;
+        }
+        .cutout-asassn-fwhm-overlay {
+            pointer-events: none;
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            transform: translate(-50%, -50%);
+            box-sizing: border-box;
+            border: 1.5px dashed rgba(255, 214, 102, 0.92);
+            border-radius: 50%;
+            background: rgba(255, 214, 102, 0.055);
+            box-shadow:
+                0 0 0 1px rgba(0, 0, 0, 0.34),
+                0 0 10px rgba(255, 214, 102, 0.18);
+            z-index: 1;
         }
         .cutout-crosshair::before,
         .cutout-crosshair::after {
@@ -722,12 +759,16 @@ app.index_string = '''
             font-size: 11px;
             font-weight: 600;
             text-align: center;
+            z-index: 3;
         }
         .cutout-viewer-empty {
             background: rgba(8, 16, 24, 0.46);
             border-style: dashed;
         }
         .cutout-viewer-empty .cutout-crosshair {
+            display: none;
+        }
+        .cutout-viewer-empty .cutout-asassn-fwhm-overlay {
             display: none;
         }
         .cutout-viewer-empty .cutout-empty-label {

@@ -6,7 +6,7 @@ from typing import Iterable, Sequence
 
 import pandas as pd
 
-from malca.table_io import read_parquet_table
+from malca.table_io import read_feature_table
 
 
 def load_many(paths: Sequence[str | Path]) -> pd.DataFrame:
@@ -17,9 +17,9 @@ def load_many(paths: Sequence[str | Path]) -> pd.DataFrame:
             continue
         if p.is_dir():
             for f in sorted(p.glob("*.parquet")):
-                frames.append(read_parquet_table(f))
+                frames.append(read_feature_table(f))
         else:
-            frames.append(read_parquet_table(p))
+            frames.append(read_feature_table(p))
     if not frames:
         return pd.DataFrame()
     return pd.concat(frames, ignore_index=True)

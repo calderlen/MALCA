@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+from malca.feature_layers import to_layer_first_frame
 from malca.product_schema import (
     ProductSchemaError,
     add_ltv_identity,
@@ -58,7 +59,7 @@ def test_ltv_schema_rejects_raw_core_columns() -> None:
 
 
 def test_ltv_schema_rejects_wrong_timescale_value() -> None:
-    df = pd.DataFrame(
+    df = to_layer_first_frame(pd.DataFrame(
         {
             "candidate_id": ["ltv_1"],
             "timescale": ["stv"],
@@ -67,7 +68,26 @@ def test_ltv_schema_rejects_wrong_timescale_value() -> None:
             "ra": [1.0],
             "dec": [2.0],
         }
-    )
+    ))
 
     with pytest.raises(ProductSchemaError, match="Unexpected timescale"):
         assert_ltv_product_schema(df, stage="pipeline")
+
+
+def test_ltv_schema_accepts_layer_first_required_features() -> None:
+    flat = pd.DataFrame(
+        {
+            "candidate_id": ["ltv_1"],
+            "timescale": ["ltv"],
+            "asas_sn_id": ["1"],
+            "lc_path": ["1.dat2"],
+            "ra": [1.0],
+            "dec": [2.0],
+            "ltv_slope": [0.2],
+        }
+    )
+    layered = to_layer_first_frame(flat)
+
+    assert "ra" not in layered.columns
+    assert "dec" not in layered.columns
+    assert_ltv_product_schema(layered, stage="layered")

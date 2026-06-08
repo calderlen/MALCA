@@ -13,7 +13,6 @@ import pyarrow.parquet as pq
 import pytest
 
 from malca.stv.events import (
-    build_events_writer_columns,
     build_runs,
     classify_run_morphology,
     filter_runs,
@@ -22,6 +21,7 @@ from malca.stv.events import (
     score_lightcurve,
 )
 from malca.baseline import per_camera_gp_baseline
+from malca.feature_layers import with_feature_columns
 
 
 def _global_constant_baseline(df: pd.DataFrame, **kwargs) -> pd.DataFrame:
@@ -536,7 +536,21 @@ def test_events_main_phase_template_uses_metadata_period_and_keeps_audit_fields(
 
     events_main()
 
-    out = pd.read_parquet(output_path)
+    out = with_feature_columns(
+        pd.read_parquet(output_path),
+        [
+            "baseline_source",
+            "pre_periodicity_label",
+            "pre_periodic_flag",
+            "pre_periodicity_selected_period",
+            "pre_periodicity_method",
+            "asassn_field_key",
+            "asassn_fields",
+            "asassn_field_count",
+            "camera_name_key",
+            "raw_median_suspect_cameras",
+        ],
+    )
     assert len(out) == 1
     assert out.loc[0, "baseline_source"] == "phase_template"
     assert out.loc[0, "pre_periodicity_label"] == "periodic"
@@ -546,7 +560,7 @@ def test_events_main_phase_template_uses_metadata_period_and_keeps_audit_fields(
     assert out.loc[0, "asassn_field_key"] == "field1"
     assert out.loc[0, "asassn_fields"] == "field1"
     assert int(out.loc[0, "asassn_field_count"]) == 1
-    assert out.loc[0, "camera_field_key"] == "cam1/field1"
+    assert out.loc[0, "camera_name_key"] == "cam1"
     assert out.loc[0, "raw_median_suspect_cameras"] == "5"
 
 
@@ -866,4 +880,14 @@ def test_events_main_parquet_schema_uses_canonical_order(
     events_main()
 
     columns = pd.read_parquet(output_path).columns.tolist()
-    assert columns == build_events_writer_columns()
+    assert columns == [
+        "candidate_id",
+        "timescale",
+        "asas_sn_id",
+        "lc_path",
+        "extra_json",
+        "lc_stats",
+        "external_stats",
+        "derived_stats",
+        "feature_layer_version",
+    ]

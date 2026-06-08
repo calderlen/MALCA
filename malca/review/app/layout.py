@@ -52,7 +52,7 @@ def create_layout():
         dcc.Store(id='auto-period-request', data={'nonce': 0}),
         dcc.Store(id='dustycult-refresh-token', data=0),
         dcc.Store(id='phoebe-refresh-token', data=0),
-        dcc.Store(id='plot-render-request', data={'nonce': 1, 'ts': 0.0, 'state': {'idx': 0, 'candidate_id': None, 'plot_mode': 'native', 'overlay_values': list(PLOT_PRESETS['Diagnostics']['overlays']), 'selected_cameras': [], 'selected_bands': ['g', 'V'], 'preset': 'Diagnostics', 'theme': DEFAULT_THEME, 'residual_height': DEFAULT_RESIDUAL_FRACTION, 'baseline_opacity': 0.5, 'external_source_view': DEFAULT_EXTERNAL_SOURCE_VIEW, 'phase_panel_mode': 'fold'}}),
+        dcc.Store(id='plot-render-request', data={'nonce': 1, 'ts': 0.0, 'state': {'idx': 0, 'candidate_id': None, 'plot_mode': 'native', 'overlay_values': list(PLOT_PRESETS['Diagnostics']['overlays']), 'selected_cameras': [], 'selected_bands': ['g', 'V'], 'preset': 'Diagnostics', 'theme': DEFAULT_THEME, 'residual_height': DEFAULT_RESIDUAL_FRACTION, 'baseline_opacity': 0.5, 'external_source_values': list(DEFAULT_EXTERNAL_SOURCE_VALUES), 'external_source_view': DEFAULT_EXTERNAL_SOURCE_VIEW, 'external_source_layout': DEFAULT_EXTERNAL_SOURCE_LAYOUT, 'phase_panel_mode': 'fold'}}),
         dcc.Store(id='plot-render-applied', data=0),
         dcc.Store(id='plot-defaults-initialized', data=False),
         dcc.Store(id='queue-source-path', data=''),
@@ -532,17 +532,31 @@ def create_layout():
                                     html.Span(id='repro-badge', className='label-chip plot-control-status'),
                                 ], className='plot-control-group plot-actions plot-control-full'),
                                 html.Div([
-                                    html.Span('LC Source', className='plot-control-label'),
-                                    dbc.Select(
-                                        id='external-source-view',
+                                    html.Div([
+                                        html.Span('LC Sources', className='plot-control-label'),
+                                        html.Button('All', id='sources-all-btn', n_clicks=0, className='compact-btn'),
+                                        html.Button('ASAS-SN', id='sources-native-btn', n_clicks=0, className='compact-btn'),
+                                        html.Button('Clear', id='sources-clear-btn', n_clicks=0, className='compact-btn'),
+                                    ], className='plot-source-header'),
+                                    dcc.Checklist(
+                                        id='external-source-values',
                                         options=EXTERNAL_SOURCE_VIEW_OPTIONS,
-                                        value=DEFAULT_EXTERNAL_SOURCE_VIEW,
-                                        size='sm',
-                                        style={'font-size': '10px'},
+                                        value=list(DEFAULT_EXTERNAL_SOURCE_VALUES),
+                                        inline=True,
+                                        className='plot-source-checklist',
                                         persistence=_review_persistence_token(),
                                         persistence_type='local',
                                     ),
-                                ], className='plot-control-group plot-source-control'),
+                                    dcc.RadioItems(
+                                        id='external-source-layout',
+                                        options=EXTERNAL_SOURCE_LAYOUT_OPTIONS,
+                                        value=DEFAULT_EXTERNAL_SOURCE_LAYOUT,
+                                        inline=True,
+                                        className='plot-source-layout',
+                                        persistence=_review_persistence_token(),
+                                        persistence_type='local',
+                                    ),
+                                ], className='plot-control-group plot-source-control plot-control-full'),
                                 html.Div([
                                     html.Span('Phase view', className='plot-control-label'),
                                     dcc.RadioItems(

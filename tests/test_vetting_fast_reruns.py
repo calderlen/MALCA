@@ -190,8 +190,8 @@ def test_vetting_cli_only_cache_refresh_and_skip_existing(monkeypatch, tmp_path)
     output_path = tmp_path / "output.parquet"
     cache_dir = tmp_path / "cache"
 
-    monkeypatch.setattr(vetting, "read_parquet_table", lambda path: pd.DataFrame({"ra": [1.0], "dec": [2.0]}))
-    monkeypatch.setattr(vetting, "write_parquet_table", lambda df, path: captured.setdefault("output_path", path))
+    monkeypatch.setattr(vetting, "read_feature_table", lambda path: pd.DataFrame({"ra": [1.0], "dec": [2.0]}))
+    monkeypatch.setattr(vetting, "write_feature_table", lambda df, path: captured.setdefault("output_path", path))
 
     def fake_vet_candidates(df, **kwargs):
         captured["kwargs"] = kwargs

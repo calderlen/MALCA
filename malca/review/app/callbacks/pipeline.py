@@ -141,8 +141,18 @@ def _run_pipeline_impl(set_progress, run_clicks, rerun_clicks, rerun_stats_click
                     df,
                     output_dir=ext_output,
                     run_atlas=False,
+                    run_ztf=True,
+                    run_gaia_epoch=True,
                     run_tess=True,
                     run_neowise=True,
+                    run_kepler=True,
+                    run_aavso=True,
+                    run_ogle=True,
+                    run_stripe82=True,
+                    run_allwise_mep=True,
+                    run_vvvx_virac=True,
+                    run_ps1=True,
+                    run_crts=True,
                     progress_callback=p,
                 )
                 if isinstance(df_ext, pd.DataFrame) and not df_ext.empty:

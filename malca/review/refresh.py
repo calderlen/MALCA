@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from malca.feature_layers import FEATURE_LAYER_COLUMNS, feature_mapping_get, parse_layer_value
 from malca.review.stats_merge import merge_stats_summary_into_payload
 from malca.review.sync import auto_export_review_bundle
 from malca.review.store import (
@@ -104,8 +105,8 @@ def _resolve_lightcurve_path(payload: dict, run_dir: Path) -> Path | None:
     bundle_dir = run_dir / "bundle_assets" / "lightcurves"
     candidate_names: list[str] = []
 
-    for key in ("path", "lc_path"):
-        raw_path = payload.get(key)
+    for key in ("lc_path",):
+        raw_path = feature_mapping_get(payload, key)
         if not raw_path:
             continue
         candidate = Path(str(raw_path)).expanduser()
@@ -119,7 +120,7 @@ def _resolve_lightcurve_path(payload: dict, run_dir: Path) -> Path | None:
             return candidate
 
     for key in ("candidate_id", "asas_sn_id"):
-        raw = payload.get(key)
+        raw = feature_mapping_get(payload, key)
         if raw is None:
             continue
         text = str(raw).strip()
@@ -200,7 +201,10 @@ def refresh_review_stats_from_run(
                 payload = json.loads(payload_json) if payload_json else {}
             except Exception:
                 payload = {}
-            payload_by_id[cid] = payload if isinstance(payload, dict) else {}
+            if isinstance(payload, dict) and payload:
+                payload_by_id[cid] = payload
+            else:
+                payload_by_id[cid] = {}
 
         table_cols = {
             str(info[1])
@@ -218,9 +222,12 @@ def refresh_review_stats_from_run(
         for idx, candidate_id in enumerate(matched_ids, start=1):
             payload = dict(payload_by_id[candidate_id])
             clear_keys = set(clear_base)
-            clear_keys.update(
-                key for key in payload if key.startswith("stats_") or key in CORE_STATS_KEYS
-            )
+            for layer in FEATURE_LAYER_COLUMNS:
+                clear_keys.update(
+                    key
+                    for key in parse_layer_value(payload.get(layer))
+                    if key.startswith("stats_") or key in CORE_STATS_KEYS
+                )
 
             lc_path = _resolve_lightcurve_path(payload, run_dir)
             if lc_path is None:

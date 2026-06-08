@@ -219,10 +219,10 @@ FIELD_SUMMARY_COLUMNS: tuple[str, ...] = (
     "asassn_fields",
     "asassn_field_count",
     "asassn_field_key_fraction",
-    "camera_field_key",
-    "camera_fields",
-    "camera_field_count",
-    "camera_field_key_fraction",
+    "camera_name_key",
+    "camera_names",
+    "camera_name_count",
+    "camera_name_key_fraction",
 )
 
 
@@ -232,10 +232,10 @@ def _empty_field_summary() -> dict[str, object]:
         "asassn_fields": "",
         "asassn_field_count": 0,
         "asassn_field_key_fraction": np.nan,
-        "camera_field_key": "",
-        "camera_fields": "",
-        "camera_field_count": 0,
-        "camera_field_key_fraction": np.nan,
+        "camera_name_key": "",
+        "camera_names": "",
+        "camera_name_count": 0,
+        "camera_name_key_fraction": np.nan,
     }
 
 
@@ -289,23 +289,22 @@ def compute_field_summary(df_lc: pd.DataFrame) -> dict[str, object]:
             }
         )
 
-    camera_field_values = pd.Series([], dtype="string")
-    if "camera_name" in df.columns and "field" in df.columns:
-        camera = df["camera_name"].astype("string").fillna("").str.strip()
-        field = df["field"].astype("string").fillna("").str.strip()
-        mask = (camera != "") & (field != "")
-        camera_field_values = (camera[mask] + "/" + field[mask]).astype("string")
-    elif "cam_field" in df.columns:
-        raw = df["cam_field"].astype("string").fillna("").str.strip()
-        camera_field_values = raw[raw.str.contains("/", regex=False)]
+    if "camera_name" in df.columns:
+        camera_name_values = df["camera_name"]
+    elif "camera" in df.columns:
+        camera_name_values = df["camera"]
+    elif "camera#" in df.columns:
+        camera_name_values = df["camera#"]
+    else:
+        camera_name_values = pd.Series([], dtype="string")
 
-    key, labels, count, fraction = _summarize_label_series(camera_field_values)
+    key, labels, count, fraction = _summarize_label_series(camera_name_values)
     out.update(
         {
-            "camera_field_key": key,
-            "camera_fields": labels,
-            "camera_field_count": count,
-            "camera_field_key_fraction": fraction,
+            "camera_name_key": key,
+            "camera_names": labels,
+            "camera_name_count": count,
+            "camera_name_key_fraction": fraction,
         }
     )
     return out
@@ -494,7 +493,8 @@ def read_skypatrol_csv(csv_path: str | Path) -> pd.DataFrame:
 
     df["camera"] = df["camera"].astype(str).str.strip()
     df["camera#"] = df["camera"]
-    df["cam_field"] = df["camera#"]
+    df["camera_name"] = df["camera"]
+    df["field"] = ""
 
     df["quality_flag"] = df["quality_flag"].astype(str).str.strip().str.upper()
     df["good_bad"] = (df["quality_flag"] == "G").astype(int)

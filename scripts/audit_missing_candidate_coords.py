@@ -30,6 +30,8 @@ from typing import Iterable
 
 import pandas as pd
 
+from malca.table_io import read_feature_table
+
 
 DEFAULT_CANDIDATES = Path("output/12-15mag_candidates_v2_minus_previous.csv")
 DEFAULT_OUTPUT = Path("output/missing_coord_audit.csv")
@@ -107,7 +109,7 @@ def read_table(path: Path, *, columns: list[str] | None = None) -> pd.DataFrame:
     if suffix == ".csv":
         return pd.read_csv(path, dtype=str, keep_default_na=False, usecols=columns)
     if suffix == ".parquet":
-        return pd.read_parquet(path, columns=columns)
+        return read_feature_table(path, columns=columns)
     raise ValueError(f"Unsupported table type: {path}")
 
 

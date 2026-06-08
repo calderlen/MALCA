@@ -18,6 +18,17 @@ class _FakeResponse:
             raise vetting.requests.HTTPError(f"HTTP {self.status_code}")
 
 
+class _FakeTapResult:
+    def __init__(self, df: pd.DataFrame) -> None:
+        self._df = df
+
+    def to_table(self) -> "_FakeTapResult":
+        return self
+
+    def to_pandas(self) -> pd.DataFrame:
+        return self._df.copy()
+
+
 def test_new_external_lc_parsers_normalize_fixture_lightcurves() -> None:
     aavso = vetting._parse_aavso_vsx_response(
         """<?xml version="1.0" encoding="UTF-8"?>
@@ -75,6 +86,10 @@ JD,mag,uncert,band,by,starName,mtype,obsID,fainterThan,obsType
         "mag_err": [0.05, 0.06],
         "band": ["ks", "j"],
     }
+    vvvx_summary = vetting._summarize_vvvx_virac_lc(vvvx)
+    assert vvvx_summary["vvvx_virac_n_epochs"] == 2
+    assert "vvvx_virac_n_points" not in vvvx_summary
+    assert pd.isna(vvvx_summary["vvvx_virac_ks_range"])
 
     stripe_summary = vetting._summarize_stripe82_lc(
         pd.DataFrame(
@@ -182,6 +197,71 @@ def test_allwise_mep_fetch_reuses_cached_parquet(
 
     assert int(out.loc[0, "allwise_mep_n_epochs"]) == 2
     assert out.loc[0, "allwise_mep_w1_range"] == pytest.approx(0.4)
+
+
+def test_vvvx_virac_query_uses_published_de_column_and_sourceid(monkeypatch: pytest.MonkeyPatch) -> None:
+    queries: list[str] = []
+
+    class FakeTapService:
+        def __init__(self, url: str) -> None:
+            assert url == vetting.ESO_TAP_CAT_URL
+
+        def search(self, query: str) -> _FakeTapResult:
+            queries.append(query)
+            assert "POINT('ICRS', ra, dec)" not in query
+            if "VVVX_VIRAC_V2_SOURCES" in query:
+                assert "POINT('ICRS', ra, de)" in query
+                return _FakeTapResult(pd.DataFrame([{"sourceid": 123, "ra": 10.0, "de": -1.0}]))
+            if "WHERE sourceid = 123" in query:
+                return _FakeTapResult(
+                    pd.DataFrame(
+                        {
+                            "sourceid": [123],
+                            "mjdobs": [57000.0],
+                            "filter": ["Ks"],
+                            "mag": [14.0],
+                            "emag": [0.04],
+                        }
+                    )
+                )
+            raise AssertionError(f"unexpected VIRAC2 query: {query}")
+
+    monkeypatch.setattr(vetting.pyvo.dal, "TAPService", FakeTapService)
+
+    lc = vetting._query_vvvx_virac_one(10.0, -1.0)
+
+    assert lc[["mjd", "mag", "mag_err", "band"]].to_dict("records") == [
+        {"mjd": 57000.0, "mag": 14.0, "mag_err": 0.04, "band": "ks"}
+    ]
+    assert len(queries) == 2
+
+
+def test_vvvx_virac_empty_lightcurve_is_no_data_not_bad_alias_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    queries: list[str] = []
+
+    class FakeTapService:
+        def __init__(self, _url: str) -> None:
+            return None
+
+        def search(self, query: str) -> _FakeTapResult:
+            queries.append(query)
+            assert "source_id" not in query
+            assert "virac_id" not in query
+            assert "srcid" not in query
+            assert "POINT('ICRS', ra, dec)" not in query
+            if "VVVX_VIRAC_V2_SOURCES" in query:
+                return _FakeTapResult(pd.DataFrame([{"sourceid": 456, "ra": 11.0, "de": -2.0}]))
+            if "WHERE sourceid = 456" in query:
+                return _FakeTapResult(pd.DataFrame())
+            assert "POINT('ICRS', ra, de)" in query
+            return _FakeTapResult(pd.DataFrame())
+
+    monkeypatch.setattr(vetting.pyvo.dal, "TAPService", FakeTapService)
+
+    lc = vetting._query_vvvx_virac_one(11.0, -2.0)
+
+    assert lc.empty
+    assert len(queries) == 3
 
 
 def test_aavso_fetch_uses_vsx_api_names_not_candidate_ids(

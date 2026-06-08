@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+from malca.feature_layers import with_feature_columns
 from malca.ltv.review import map_ltv_columns
 from malca.review.filter_schema import SIDEBAR_GROUPS
 from malca.review.metadata import REVIEW_METADATA_GROUPS
@@ -35,14 +36,25 @@ def test_map_ltv_columns_preserves_stochastic_outputs() -> None:
     )
 
     out = map_ltv_columns(df)
+    view = with_feature_columns(
+        out,
+        [
+            "ltv_stoch_sf_ml_amplitude",
+            "ltv_stoch_sf_ml_gamma",
+            "ltv_stoch_iar_phi",
+            "ltv_stoch_mhps_ratio",
+            "ltv_stoch_gp_drw_tau",
+            "ltv_stoch_mhps_pn_flag",
+        ],
+    )
 
     assert out.loc[0, "candidate_id"] == "ltv_123"
-    assert out.loc[0, "ltv_stoch_sf_ml_amplitude"] == 0.21
-    assert out.loc[0, "ltv_stoch_sf_ml_gamma"] == 0.54
-    assert out.loc[0, "ltv_stoch_iar_phi"] == 0.87
-    assert out.loc[0, "ltv_stoch_mhps_ratio"] == 1.9
-    assert out.loc[0, "ltv_stoch_gp_drw_tau"] == 140.0
-    assert out.loc[0, "ltv_stoch_mhps_pn_flag"] == 1
+    assert view.loc[0, "ltv_stoch_sf_ml_amplitude"] == 0.21
+    assert view.loc[0, "ltv_stoch_sf_ml_gamma"] == 0.54
+    assert view.loc[0, "ltv_stoch_iar_phi"] == 0.87
+    assert view.loc[0, "ltv_stoch_mhps_ratio"] == 1.9
+    assert view.loc[0, "ltv_stoch_gp_drw_tau"] == 140.0
+    assert view.loc[0, "ltv_stoch_mhps_pn_flag"] == 1
     assert out.loc[0, "timescale"] == "ltv"
 
 
@@ -63,11 +75,12 @@ def test_map_ltv_columns_preserves_extended_core_outputs() -> None:
     df = pd.DataFrame({**_canonical_base(456), **canonical_cols})
 
     out = map_ltv_columns(df)
+    view = with_feature_columns(out, canonical_cols)
 
     assert out.loc[0, "candidate_id"] == "ltv_456"
     for dst in canonical_cols:
-        assert dst in out.columns
-    assert out.loc[0, "ltv_vg_has_v"] == 1
+        assert dst in view.columns
+    assert view.loc[0, "ltv_vg_has_v"] == 1
 
 
 def test_map_ltv_columns_derives_pm_total_when_missing() -> None:
@@ -80,11 +93,12 @@ def test_map_ltv_columns_derives_pm_total_when_missing() -> None:
     )
 
     out = map_ltv_columns(df)
+    view = with_feature_columns(out, ["pmra", "pmdec", "pm_total", "high_pm_flag"])
 
-    assert out.loc[0, "pmra"] == 3.0
-    assert out.loc[0, "pmdec"] == 4.0
-    assert out.loc[0, "pm_total"] == 5.0
-    assert out.loc[0, "high_pm_flag"] == 0
+    assert view.loc[0, "pmra"] == 3.0
+    assert view.loc[0, "pmdec"] == 4.0
+    assert view.loc[0, "pm_total"] == 5.0
+    assert view.loc[0, "high_pm_flag"] == 0
 
 
 def test_review_schema_and_ui_include_ltv_stochastic_columns() -> None:

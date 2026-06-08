@@ -11,6 +11,7 @@ from pathlib import Path
 import pandas as pd
 
 from malca.candidates import select_passing_candidates_if_present
+from malca.feature_layers import with_feature_columns
 from malca.sed_model import (
     SED_MODEL_CURVE_COLUMNS,
     SED_MODEL_FIT_COLUMNS,
@@ -26,7 +27,7 @@ from malca.review.sed import (
     upsert_sed_rows,
 )
 from malca.review.store import db_connect
-from malca.table_io import read_parquet_table, write_parquet_table
+from malca.table_io import read_feature_table, write_parquet_table
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -53,8 +54,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=str,
         default="default",
         help=(
-            "Comma-separated source keys or 'default'. "
-            "AKARI/IRAS/Herschel far-IR sources are always included. "
+            "Comma-separated source keys, 'default', 'all', or 'far-ir'. "
+            "Default is the broad-classification set; far-IR sources are explicit. "
             f"Default: {', '.join(DEFAULT_PIPELINE_SED_SOURCES)}. "
             f"Available: {', '.join(ALL_CATALOG_SOURCES)}"
         ),
@@ -140,7 +141,7 @@ def _expand_sqlite_candidate_payloads(df: pd.DataFrame) -> pd.DataFrame:
             payload = {}
         if not isinstance(payload, dict):
             payload = {}
-        merged = dict(payload)
+        merged = dict(payload) if payload else {}
         for key, value in raw.items():
             if _is_present(value):
                 merged[key] = value
@@ -162,7 +163,7 @@ def _read_candidate_table(input_path: Path) -> pd.DataFrame:
             if has_candidates is None:
                 raise ValueError(f"SQLite input {input_path} does not contain a candidates table")
             return _expand_sqlite_candidate_payloads(pd.read_sql_query("SELECT * FROM candidates", conn))
-    return read_parquet_table(input_path)
+    return read_feature_table(input_path)
 
 
 def run(args: argparse.Namespace) -> Path:
@@ -177,6 +178,7 @@ def run(args: argparse.Namespace) -> Path:
 
     df = _read_candidate_table(input_path)
     df = _ensure_candidate_id(df)
+    df = with_feature_columns(df, ["failed_any", "ra", "dec", "gaia_id"])
     if not getattr(args, "all_candidates", False):
         df = select_passing_candidates_if_present(df, printer=print)
     requested_sources = args.sources

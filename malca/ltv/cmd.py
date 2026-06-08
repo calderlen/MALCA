@@ -19,6 +19,7 @@ from malca.config import (
     LTV_WORKERS,
 )
 from malca.config import GAIA_AIP_TAP_URL, GAIA_ESA_TAP_URL, MIST_GRID_PATH
+from malca.derived_stats import append_derived_features
 
 
 DEFAULT_MIST_PATH = MIST_GRID_PATH
@@ -187,7 +188,7 @@ def compute_cmd_features(
     rp_col = rp_col or _first_existing_column(df, ["phot_rp_mean_mag", "RP", "rp_mag"])
 
     if g_col is None or bp_col is None or rp_col is None:
-        return df
+        return append_derived_features(df)
 
     # Distance in parsec — prefer Bailer-Jones photogeometric, then geometric,
     # then Gaia GSP-Phot, then a pre-existing distance_pc column.
@@ -210,7 +211,7 @@ def compute_cmd_features(
         dist_pc = pd.Series(np.where(plx > 0, 1000.0 / plx, np.nan), index=df.index)
         df["distance_pc"] = dist_pc
     else:
-        return df
+        return append_derived_features(df)
 
     # Observed colors/magnitudes
     bp = df[bp_col].astype(float)
@@ -232,7 +233,7 @@ def compute_cmd_features(
         df["E_bp_rp"] = e_bp_rp
         df["R_V"] = r_v
 
-    return df
+    return append_derived_features(df)
 
 
 def assign_cmd_groups(

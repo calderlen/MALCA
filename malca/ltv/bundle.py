@@ -7,13 +7,14 @@ from pathlib import Path
 import pandas as pd
 
 from malca.config import LTV_MIN_SLOPE, LTV_MIN_DIFF
+from malca.feature_layers import with_feature_columns
 from malca.ltv.filter import filter_slope_threshold, filter_max_diff_threshold
 from malca.run_bundle import BundleFileCollection, collect_candidate_lightcurve_files, export_run_bundle
-from malca.table_io import read_parquet_table
+from malca.table_io import read_feature_table
 
 
 def _load_ltv_table(path: Path) -> pd.DataFrame:
-    return read_parquet_table(path)
+    return read_feature_table(path)
 
 
 def _discover_input_files(input_path: Path, pattern: str | None = None) -> list[Path]:
@@ -63,6 +64,7 @@ def _collect_lightcurve_paths(
         if verbose:
             print(f"Loaded {n0} rows from {file_path}")
 
+        df = with_feature_columns(df, ["ltv_slope", "ltv_max_diff", "failed_any"])
         df = filter_slope_threshold(df, min_slope=min_slope, verbose=verbose)
         df = filter_max_diff_threshold(df, min_diff=min_diff, verbose=verbose)
         total_passing_rows += len(df)

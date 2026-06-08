@@ -60,6 +60,60 @@ def test_fetch_gaia_dr3_eb_periods_caches_negative_lookups(
     assert bool(by_id.loc[2, "matched"]) is False
 
 
+def test_match_period_catalog_preserves_source_name() -> None:
+    out = periodic_catalogs.match_period_catalog(
+        pd.DataFrame({"ra": [10.0], "dec": [-5.0]}),
+        pd.DataFrame(
+            {
+                "ra": [10.0],
+                "dec": [-5.0],
+                "period": [1.234],
+                "var_type": ["RRLYR"],
+                "source_name": ["OGLE-BLG-RRLYR-00001"],
+            }
+        ),
+        source_label="ogle",
+        max_sep_arcsec=1.0,
+        show_tqdm=False,
+    )
+
+    assert bool(out.loc[0, "period_ogle_match"]) is True
+    assert out.loc[0, "period_ogle_name"] == "OGLE-BLG-RRLYR-00001"
+
+
+def test_fetch_ogle_periodic_catalog_parses_sexagesimal_coordinates(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeTable:
+        def to_pandas(self) -> pd.DataFrame:
+            return pd.DataFrame(
+                {
+                    "OGLE": ["BWC V1"],
+                    "RAJ2000": ["18 03 33.61"],
+                    "DEJ2000": ["-30 01 14.4"],
+                    "Per": [1.74795],
+                    "Type": ["ACEP"],
+                }
+            )
+
+    class FakeVizier:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def get_catalogs(self, catalog: str) -> list[FakeTable]:
+            assert catalog == "II/213/pvar"
+            return [FakeTable()]
+
+    monkeypatch.setattr(periodic_catalogs, "Vizier", FakeVizier)
+
+    out = periodic_catalogs.fetch_ogle_periodic_catalog(cache_dir=tmp_path, show_tqdm=False)
+
+    assert out.loc[0, "source_name"] == "BWC V1"
+    assert out.loc[0, "ra"] == pytest.approx(270.8900417, rel=1e-7)
+    assert out.loc[0, "dec"] == pytest.approx(-30.0206667, rel=1e-7)
+
+
 def test_validate_periodic_catalog_builds_multisource_consensus(monkeypatch: pytest.MonkeyPatch) -> None:
     df = pd.DataFrame(
         {

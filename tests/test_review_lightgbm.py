@@ -12,6 +12,7 @@ from malca.meta_analysis.ml.review_lightgbm import (
     load_legacy_march18_training_table,
     load_recompute_survival_training_table,
 )
+from malca.table_io import write_feature_table
 
 
 def _create_candidates(conn: sqlite3.Connection) -> None:
@@ -128,48 +129,67 @@ def test_recompute_survival_loader_labels_old_vetted_candidates(tmp_path: Path) 
     old_a = tmp_path / "old_a.parquet"
     old_b = tmp_path / "old_b.parquet"
     recomputed = tmp_path / "recomputed.parquet"
-    pd.DataFrame(
-        [
-            {
-                "candidate_id": "",
-                "asas_sn_id": "123.0",
-                "path": "/data/lcsv2/12_12.5/lc1_cal/123.dat2",
-                "old_only_feature": 1.5,
-            },
-            {
-                "candidate_id": "456",
-                "asas_sn_id": "456",
-                "path": "/data/lcsv2/12.5_13/lc1_cal/456.dat2",
-                "old_only_feature": 2.5,
-            },
-        ]
-    ).to_parquet(old_a, index=False)
-    pd.DataFrame(
-        [
-            {
-                "path": "/data/lcsv2/13_13.5/lc1_cal/789.dat2",
-                "old_only_feature": 3.5,
-            },
-            {
-                "asas_sn_id": "999",
-                "path": "/data/lcsv2/14.5_15/lc1_cal/999.dat2",
-                "old_only_feature": 4.5,
-            },
-        ]
-    ).to_parquet(old_b, index=False)
-    pd.DataFrame(
-        [
-            {
-                "asas_sn_id": "123",
-                "path": "/data/lcsv2/12_12.5/lc1_cal/123.dat3",
-                "recomputed_only_feature": 10,
-            },
-            {
-                "path": "/data/lcsv2/13_13.5/lc1_cal/789.dat3",
-                "recomputed_only_feature": 11,
-            },
-        ]
-    ).to_parquet(recomputed, index=False)
+    write_feature_table(
+        pd.DataFrame(
+            [
+                {
+                    "candidate_id": "",
+                    "timescale": "stv",
+                    "asas_sn_id": "123.0",
+                    "lc_path": "/data/lcsv2/12_12.5/lc1_cal/123.dat2",
+                    "old_only_feature": 1.5,
+                },
+                {
+                    "candidate_id": "456",
+                    "timescale": "stv",
+                    "asas_sn_id": "456",
+                    "lc_path": "/data/lcsv2/12.5_13/lc1_cal/456.dat2",
+                    "old_only_feature": 2.5,
+                },
+            ]
+        ),
+        old_a,
+    )
+    write_feature_table(
+        pd.DataFrame(
+            [
+                {
+                    "candidate_id": "789",
+                    "timescale": "stv",
+                    "lc_path": "/data/lcsv2/13_13.5/lc1_cal/789.dat2",
+                    "old_only_feature": 3.5,
+                },
+                {
+                    "candidate_id": "999",
+                    "timescale": "stv",
+                    "asas_sn_id": "999",
+                    "lc_path": "/data/lcsv2/14.5_15/lc1_cal/999.dat2",
+                    "old_only_feature": 4.5,
+                },
+            ]
+        ),
+        old_b,
+    )
+    write_feature_table(
+        pd.DataFrame(
+            [
+                {
+                    "candidate_id": "123",
+                    "timescale": "stv",
+                    "asas_sn_id": "123",
+                    "lc_path": "/data/lcsv2/12_12.5/lc1_cal/123.dat3",
+                    "recomputed_only_feature": 10,
+                },
+                {
+                    "candidate_id": "789",
+                    "timescale": "stv",
+                    "lc_path": "/data/lcsv2/13_13.5/lc1_cal/789.dat3",
+                    "recomputed_only_feature": 11,
+                },
+            ]
+        ),
+        recomputed,
+    )
 
     table = load_recompute_survival_training_table(
         [old_a, old_b],
@@ -196,15 +216,21 @@ def test_recompute_survival_loader_labels_old_vetted_candidates(tmp_path: Path) 
 def test_recompute_survival_loader_rejects_duplicate_old_ids(tmp_path: Path) -> None:
     old = tmp_path / "old.parquet"
     recomputed = tmp_path / "recomputed.parquet"
-    pd.DataFrame(
-        [
-            {"asas_sn_id": "C1", "path": "/data/lcsv2/12_12.5/a/C1.dat2"},
-            {"asas_sn_id": "C1", "path": "/data/lcsv2/12_12.5/b/C1.dat2"},
-        ]
-    ).to_parquet(old, index=False)
-    pd.DataFrame(
-        [{"asas_sn_id": "C1", "path": "/data/lcsv2/12_12.5/a/C1.dat3"}]
-    ).to_parquet(recomputed, index=False)
+    write_feature_table(
+        pd.DataFrame(
+            [
+                {"candidate_id": "C1_a", "timescale": "stv", "asas_sn_id": "C1", "lc_path": "/data/lcsv2/12_12.5/a/C1.dat2"},
+                {"candidate_id": "C1_b", "timescale": "stv", "asas_sn_id": "C1", "lc_path": "/data/lcsv2/12_12.5/b/C1.dat2"},
+            ]
+        ),
+        old,
+    )
+    write_feature_table(
+        pd.DataFrame(
+            [{"candidate_id": "C1", "timescale": "stv", "asas_sn_id": "C1", "lc_path": "/data/lcsv2/12_12.5/a/C1.dat3"}]
+        ),
+        recomputed,
+    )
 
     with pytest.raises(ValueError, match="not unique"):
         load_recompute_survival_training_table([old], recomputed)

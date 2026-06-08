@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from malca.feature_layers import feature_mapping_get
 from malca.review.stats_merge import merge_stats_summary_into_payload
 from malca.stats import fit_fourier_decomposition
 
@@ -66,11 +67,11 @@ def test_merge_stats_summary_maps_fourier_fields() -> None:
         },
     )
 
-    assert payload["stats_harmonics_order"] == 3
-    assert payload["stats_harmonics_period"] == 2.75
-    assert payload["stats_harmonics_a0"] == 12.3
-    assert payload["stats_harmonics_model_amplitude"] == 0.72
-    assert payload["stats_harmonics_reduced_chi2"] == 0.91
-    assert payload["stats_harmonics_mag_1"] == 0.35
-    assert payload["stats_harmonics_r21"] == 0.4
-    assert payload["stats_harmonics_phase_2"] == 0.5
+    assert feature_mapping_get(payload, "stats_harmonics_order") == 3
+    assert feature_mapping_get(payload, "stats_harmonics_period") == 2.75
+    assert feature_mapping_get(payload, "stats_harmonics_a0") == 12.3
+    assert feature_mapping_get(payload, "stats_harmonics_model_amplitude") == 0.72
+    assert feature_mapping_get(payload, "stats_harmonics_reduced_chi2") == 0.91
+    assert feature_mapping_get(payload, "stats_harmonics_mag_1") == 0.35
+    assert feature_mapping_get(payload, "stats_harmonics_r21") == 0.4
+    assert feature_mapping_get(payload, "stats_harmonics_phase_2") == 0.5

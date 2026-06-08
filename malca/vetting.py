@@ -25,6 +25,7 @@ from __future__ import annotations
 import contextlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+import tarfile
 from typing import Callable, Literal
 import argparse
 import io
@@ -32,6 +33,7 @@ import os
 import re
 import sys
 import time
+import xml.etree.ElementTree as ET
 from html.parser import HTMLParser
 from urllib.parse import urljoin
 
@@ -47,6 +49,11 @@ import numpy as np
 import pandas as pd
 import pyvo
 import requests
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX fallback
+    fcntl = None
 
 from malca.config import GAIA_CHUNK_SIZE
 from malca.config import PARQUET_CACHE_COMPRESSION
@@ -84,6 +91,7 @@ from malca.config import (
     ATLAS_MAX_POLL as CFG_ATLAS_MAX_POLL,
     VETTING_HTTP_TIMEOUT,
     VETTING_BACKOFF_CAP,
+    MJD_TO_JD,
     MICROLENS_OGLE_EWS_START_YEAR,
     MICROLENS_KMTNET_START_YEAR,
     MICROLENS_DEFAULT_END_YEAR,
@@ -95,7 +103,7 @@ from malca.config import (
 from malca.gaia_ids import parse_gaia_source_id
 from malca.utils import batch_tap_crossmatch
 from malca.candidates import select_passing_candidates_if_present
-from malca.table_io import read_parquet_table, write_parquet_table
+from malca.table_io import read_feature_table, write_feature_table
 
 
 
@@ -407,6 +415,36 @@ def _cached_rows_by_key(cache: pd.DataFrame, key_col: str, keys: set[str]) -> di
 
 
 EXTERNAL_LC_STATUS_FILE = "_external_lc_status.parquet"
+OGLE_OCVS_BASE_URLS = (
+    "https://ogle.astrouw.edu.pl/ogle/ogle4/OCVS",
+    "https://www.astrouw.edu.pl/ogle/ogle4/OCVS",
+)
+STRIPE82_VARIABLES_URL = "https://faculty.washington.edu/ivezic/sdss/catalogs/S82variables.html"
+STRIPE82_MASTER_FALLBACK_URLS = (
+    "https://faculty.washington.edu/ivezic/sdss/catalogs/stripe82candidateVar_v1.1.dat.gz",
+    "https://faculty.washington.edu/ivezic/sdss/catalogs/S82variables/S82variables.dat.gz",
+    "https://faculty.washington.edu/ivezic/sdss/catalogs/S82variables.dat.gz",
+)
+STRIPE82_LC_ARCHIVE_FALLBACK_URLS = (
+    "https://faculty.washington.edu/ivezic/sdss/catalogs/AllLCs.tar.gz",
+    "https://faculty.washington.edu/ivezic/sdss/catalogs/S82variables/AllLCs.tar.gz",
+)
+ALLWISE_MEP_MAX_SEP_ARCSEC = 3.0
+VVVX_VIRAC_MAX_SEP_ARCSEC = 1.0
+OGLE_LC_MAX_SEP_ARCSEC = 2.0
+STRIPE82_MAX_SEP_ARCSEC = 1.5
+ESO_TAP_CAT_URL = "https://archive.eso.org/tap_cat"
+AAVSO_VSX_API_URLS = (
+    "https://www.aavso.org/vsx/index.php",
+    "https://vsx.aavso.org/index.php",
+)
+AAVSO_VSX_API_URL = AAVSO_VSX_API_URLS[0]
+AAVSO_DEFAULT_FROM_JD = 2456000.5
+AAVSO_MAX_POINTS = AAVSO_MAX_PAGES * AAVSO_RESULTS_PER_PAGE
+AAVSO_NAME_COLUMNS = ("vsx_name", "asassn_var_name", "simbad_main_id", "tns_name", "ztf_var_name")
+PANSTARRS_LC_RADIUS_DEG = 0.0015
+PANSTARRS_LC_MAX_ATTEMPTS = 5
+PANSTARRS_LC_RETRY_STATUSES = {429, 500, 502, 503, 504}
 
 
 def _candidate_cache_id(df: pd.DataFrame, idx) -> str:
@@ -445,12 +483,20 @@ def _write_external_lc_status(output_dir: Path | str | None, rows: list[dict]) -
     if path is None or not rows:
         return
     try:
-        new = pd.DataFrame(rows)
-        existing = pd.read_parquet(path) if path.exists() else pd.DataFrame()
-        combined = pd.concat([existing, new], ignore_index=True) if not existing.empty else new
-        combined = combined.drop_duplicates(subset=["module", "candidate_id", "cache_key"], keep="last")
         path.parent.mkdir(parents=True, exist_ok=True)
-        combined.to_parquet(path, index=False, compression=PARQUET_CACHE_COMPRESSION)
+        lock_path = path.with_suffix(path.suffix + ".lock")
+        with open(lock_path, "a", encoding="ascii") as lock_file:
+            if fcntl is not None:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                new = pd.DataFrame(rows)
+                existing = pd.read_parquet(path) if path.exists() else pd.DataFrame()
+                combined = pd.concat([existing, new], ignore_index=True) if not existing.empty else new
+                combined = combined.drop_duplicates(subset=["module", "candidate_id", "cache_key"], keep="last")
+                combined.to_parquet(path, index=False, compression=PARQUET_CACHE_COMPRESSION)
+            finally:
+                if fcntl is not None:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
     except Exception as exc:
         _safe_print(f"  External LC cache warning: could not write {path}: {_short_error(exc)}")
 
@@ -611,6 +657,43 @@ def _write_external_lc_file(output_dir: Path | str | None, file_prefix: str, df:
     lc_df.to_parquet(path, index=False, compression=PARQUET_CACHE_COMPRESSION)
 
 
+def _external_catalog_cache_dir(source: str) -> Path:
+    path = Path(DEFAULT_CACHE_DIR) / "external_lcs" / source
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _download_to_cache(url: str, path: Path, *, timeout: float = 120.0) -> Path:
+    if path.exists() and path.stat().st_size > 0:
+        return path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    response = requests.get(url, timeout=timeout, stream=True)
+    response.raise_for_status()
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("wb") as fh:
+        for chunk in response.iter_content(chunk_size=1024 * 1024):
+            if chunk:
+                fh.write(chunk)
+    tmp.replace(path)
+    return path
+
+
+def _band_mag_range(lc: pd.DataFrame, band: str, *, band_col: str = "band", mag_col: str = "mag") -> float:
+    if lc.empty or band_col not in lc.columns or mag_col not in lc.columns:
+        return np.nan
+    mags = pd.to_numeric(lc.loc[lc[band_col].astype(str).str.lower() == band.lower(), mag_col], errors="coerce").dropna()
+    return float(mags.max() - mags.min()) if len(mags) >= 2 else np.nan
+
+
+def _summarize_long_mag_lc(lc: pd.DataFrame, prefix: str, bands: tuple[str, ...]) -> dict:
+    if lc.empty or "mag" not in lc.columns:
+        raise ValueError(f"invalid {prefix} light curve")
+    out = {f"{prefix}_n_points": int(len(lc))}
+    for band in bands:
+        out[f"{prefix}_{band.lower()}_range"] = _band_mag_range(lc, band)
+    return out
+
+
 def _summarize_atlas_lc(phot: pd.DataFrame) -> dict:
     if phot.empty:
         raise ValueError("empty ATLAS light curve")
@@ -670,6 +753,128 @@ def _summarize_gaia_epoch_lc(lc: pd.DataFrame) -> dict:
     }
 
 
+def _gaia_epoch_cell_values(value: object) -> list:
+    if isinstance(value, np.ma.MaskedArray):
+        data = np.asarray(value.data, dtype=object).ravel()
+        mask = np.ma.getmaskarray(value).ravel()
+        return [np.nan if bool(is_masked) else item for item, is_masked in zip(data, mask)]
+    if isinstance(value, np.ndarray):
+        return np.ravel(value).tolist()
+    if isinstance(value, pd.Series):
+        return value.tolist()
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    try:
+        if value is None or pd.isna(value):
+            return []
+    except Exception:
+        if value is None:
+            return []
+    return [value]
+
+
+def _gaia_epoch_table_value(value: object) -> object:
+    """Convert one Astropy table cell without forcing masked ints through NaN."""
+    if np.ma.is_masked(value):
+        return pd.NA
+    if isinstance(value, np.ma.MaskedArray):
+        if value.shape == ():
+            mask = np.ma.getmaskarray(value)
+            if bool(np.asarray(mask).item()):
+                return pd.NA
+            return np.asarray(value.data).item()
+        return value
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+def _gaia_epoch_table_to_frame(table: object) -> pd.DataFrame:
+    """Convert Gaia TAP tables to pandas while preserving masked nullable columns."""
+    if table is None or len(table) == 0:
+        return pd.DataFrame()
+    if isinstance(table, pd.DataFrame):
+        return table.copy()
+    colnames = getattr(table, "colnames", None)
+    if colnames is None:
+        return table.to_pandas()
+    data = {
+        name: [_gaia_epoch_table_value(value) for value in table[name]]
+        for name in colnames
+    }
+    return pd.DataFrame(data, columns=list(colnames))
+
+
+def _gaia_epoch_broadcast_values(value: object, n_rows: int, default: object) -> list:
+    values = _gaia_epoch_cell_values(value)
+    if not values:
+        return [default] * n_rows
+    if len(values) == n_rows:
+        return values
+    if len(values) == 1:
+        return values * n_rows
+    return [default] * n_rows
+
+
+def _normalize_gaia_epoch_tap_lightcurve(lc_all: pd.DataFrame) -> pd.DataFrame:
+    """Expand Gaia epoch TAP rows to one row per G-band transit."""
+    columns = ["source_id", "transit_id", "time", "mag", "band", "mag_error"]
+    if lc_all.empty:
+        return pd.DataFrame(columns=columns)
+
+    rows: list[dict] = []
+    for _, row in lc_all.iterrows():
+        time_values = _gaia_epoch_cell_values(row.get("time"))
+        mag_values = _gaia_epoch_cell_values(row.get("mag"))
+        n_rows = max(len(time_values), len(mag_values))
+        if n_rows == 0:
+            continue
+        if len(time_values) == 1 and n_rows > 1:
+            time_values = time_values * n_rows
+        if len(mag_values) == 1 and n_rows > 1:
+            mag_values = mag_values * n_rows
+        if len(time_values) != n_rows or len(mag_values) != n_rows:
+            continue
+
+        source_values = _gaia_epoch_broadcast_values(row.get("source_id"), n_rows, pd.NA)
+        transit_values = _gaia_epoch_broadcast_values(row.get("transit_id"), n_rows, pd.NA)
+        band_values = _gaia_epoch_broadcast_values(row.get("band"), n_rows, "G")
+        mag_error_values = _gaia_epoch_broadcast_values(row.get("mag_error"), n_rows, np.nan)
+
+        for i in range(n_rows):
+            band = band_values[i]
+            try:
+                if pd.isna(band):
+                    band = "G"
+            except Exception:
+                pass
+            rows.append(
+                {
+                    "source_id": source_values[i],
+                    "transit_id": transit_values[i],
+                    "time": time_values[i],
+                    "mag": mag_values[i],
+                    "band": band,
+                    "mag_error": mag_error_values[i],
+                }
+            )
+
+    if not rows:
+        return pd.DataFrame(columns=columns)
+
+    out = pd.DataFrame(rows)
+    out["source_id"] = pd.to_numeric(out["source_id"], errors="coerce")
+    out["time"] = pd.to_numeric(out["time"], errors="coerce")
+    out["mag"] = pd.to_numeric(out["mag"], errors="coerce")
+    out["mag_error"] = pd.to_numeric(out["mag_error"], errors="coerce")
+    out = out.dropna(subset=["source_id", "time", "mag"])
+    if out.empty:
+        return pd.DataFrame(columns=columns)
+    out["source_id"] = out["source_id"].astype(np.int64)
+    out["band"] = out["band"].fillna("G").astype(str)
+    return out[columns]
+
+
 def _summarize_neowise_lc(lc: pd.DataFrame) -> dict:
     if lc.empty:
         raise ValueError("empty NEOWISE light curve")
@@ -698,6 +903,31 @@ def _summarize_count_lc(lc: pd.DataFrame, n_col: str) -> dict:
     if lc.empty:
         raise ValueError("empty light curve")
     return {n_col: len(lc)}
+
+
+def _summarize_ogle_lc(lc: pd.DataFrame) -> dict:
+    return _summarize_long_mag_lc(lc, "ogle_lc", ("i", "v"))
+
+
+def _summarize_stripe82_lc(lc: pd.DataFrame) -> dict:
+    return _summarize_long_mag_lc(lc, "stripe82_lc", ("u", "g", "r", "i", "z"))
+
+
+def _summarize_vvvx_virac_lc(lc: pd.DataFrame) -> dict:
+    summary = _summarize_long_mag_lc(lc, "vvvx_virac", ("z", "y", "j", "h", "ks"))
+    summary["vvvx_virac_n_epochs"] = summary.pop("vvvx_virac_n_points")
+    return summary
+
+
+def _summarize_allwise_mep_lc(lc: pd.DataFrame) -> dict:
+    if lc.empty:
+        raise ValueError("empty AllWISE MEP light curve")
+    out = {"allwise_mep_n_epochs": int(len(lc))}
+    for band in ("w1", "w2", "w3", "w4"):
+        col = f"{band}mpro"
+        vals = pd.to_numeric(lc[col], errors="coerce").dropna() if col in lc.columns else pd.Series(dtype=float)
+        out[f"allwise_mep_{band}_range"] = float(vals.max() - vals.min()) if len(vals) >= 2 else np.nan
+    return out
 
 
 # =============================================================================
@@ -2746,7 +2976,9 @@ def fetch_gaia_epoch_lcs(
         table = result.to_table()
         if table is None or len(table) == 0:
             continue
-        lc_all = table.to_pandas()
+        lc_all = _normalize_gaia_epoch_tap_lightcurve(_gaia_epoch_table_to_frame(table))
+        if lc_all.empty:
+            continue
 
         # Process per source
         for sid in chunk:
@@ -3507,6 +3739,163 @@ def fetch_kepler_k2_lightcurves(
 # =============================================================================
 
 
+def _finite_jd(value: object) -> float | None:
+    try:
+        jd = float(value)
+    except Exception:
+        return None
+    if not np.isfinite(jd):
+        return None
+    if 40_000.0 < jd < 100_000.0:
+        jd += MJD_TO_JD
+    if jd < 2_300_000.0:
+        return None
+    return jd
+
+
+def _aavso_jd_window(df: pd.DataFrame, idx) -> tuple[float, float]:
+    starts = [
+        _finite_jd(df.loc[idx, col])
+        for col in ("jd_first", "stats_jd_start")
+        if col in df.columns
+    ]
+    ends = [
+        _finite_jd(df.loc[idx, col])
+        for col in ("jd_last", "stats_jd_end")
+        if col in df.columns
+    ]
+    starts = [value for value in starts if value is not None]
+    ends = [value for value in ends if value is not None]
+    now_jd = time.time() / 86400.0 + 2440587.5
+    from_jd = min(starts) - 365.0 if starts else AAVSO_DEFAULT_FROM_JD
+    to_jd = max(ends) + 365.0 if ends else now_jd
+    if to_jd < from_jd:
+        to_jd = now_jd
+    return max(2_300_000.0, from_jd), min(now_jd + 7.0, to_jd)
+
+
+def _normalize_aavso_identifier(value: object) -> str:
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    text = re.sub(r"\s+", " ", str(value).strip())
+    if not text:
+        return ""
+    if text.lower() in {"nan", "none", "null", "[]", "{}"}:
+        return ""
+    text = re.sub(r"^(v\*|var)\s+", "", text, flags=re.I).strip()
+    if re.fullmatch(r"\d+", text):
+        return ""
+    if re.match(r"^(gaia|tic)\b", text, flags=re.I):
+        return ""
+    return text[:96]
+
+
+def _best_aavso_identifier(row: pd.Series, name_cols: tuple[str, ...] = AAVSO_NAME_COLUMNS) -> str:
+    for col in name_cols:
+        if col not in row.index:
+            continue
+        ident = _normalize_aavso_identifier(row[col])
+        if ident:
+            return ident
+    return ""
+
+
+def _parse_aavso_vsx_response(text: str) -> pd.DataFrame:
+    raw = str(text or "")
+    raw_lower = raw[:4096].lower()
+    if "<html" in raw_lower or "human verification" in raw_lower or "awswaf" in raw_lower:
+        return pd.DataFrame(columns=["mjd", "mag", "mag_err", "band"])
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError as exc:
+        raise RuntimeError(f"AAVSO XML parse failed: {_short_error(exc)}") from exc
+    data_node = root.find("Data")
+    csv_text = data_node.text if data_node is not None else ""
+    if not csv_text or not csv_text.strip():
+        return pd.DataFrame(columns=["mjd", "mag", "mag_err", "band"])
+    lc_df = pd.read_csv(io.StringIO(csv_text))
+    if lc_df.empty or "JD" not in lc_df.columns or "mag" not in lc_df.columns:
+        return pd.DataFrame(columns=["mjd", "mag", "mag_err", "band"])
+    lc_df["JD"] = pd.to_numeric(lc_df["JD"], errors="coerce")
+    lc_df["mag"] = pd.to_numeric(lc_df["mag"].astype(str).str.replace("<", "", regex=False), errors="coerce")
+    if "uncert" in lc_df.columns:
+        lc_df["uncert"] = pd.to_numeric(lc_df["uncert"], errors="coerce")
+    else:
+        lc_df["uncert"] = np.nan
+    lc_df = lc_df.dropna(subset=["JD", "mag"]).copy()
+    if lc_df.empty:
+        return pd.DataFrame(columns=["mjd", "mag", "mag_err", "band"])
+    band = lc_df["band"] if "band" in lc_df.columns else pd.Series("", index=lc_df.index)
+
+    out = pd.DataFrame(
+        {
+            "mjd": lc_df["JD"] - MJD_TO_JD,
+            "mag": lc_df["mag"],
+            "mag_err": lc_df["uncert"],
+            "band": band.astype(str).str.strip(),
+        }
+    )
+    if "by" in lc_df.columns:
+        out["observer"] = lc_df["by"].astype(str).str.strip()
+    if "starName" in lc_df.columns:
+        out["aavso_name"] = lc_df["starName"].astype(str).str.strip()
+    if "obsID" in lc_df.columns:
+        out["obs_id"] = lc_df["obsID"]
+    if "obsType" in lc_df.columns:
+        out["obs_type"] = lc_df["obsType"].astype(str).str.strip()
+    if "mtype" in lc_df.columns:
+        out["mtype"] = lc_df["mtype"].astype(str).str.strip()
+    if "fainterThan" in lc_df.columns:
+        out["fainter_than"] = pd.to_numeric(lc_df["fainterThan"], errors="coerce").fillna(0).astype(int)
+    auid_node = root.find("AUID")
+    name_node = root.find("Name")
+    if auid_node is not None and auid_node.text:
+        out["auid"] = auid_node.text.strip()
+    if name_node is not None and name_node.text:
+        out["vsx_name"] = name_node.text.strip()
+    return out.sort_values("mjd").reset_index(drop=True)
+
+
+def _query_aavso_vsx_lightcurve(identifier: str, from_jd: float, to_jd: float, max_points: int = AAVSO_MAX_POINTS) -> pd.DataFrame:
+    params = {
+        "view": "api.object",
+        "ident": identifier,
+        "data": int(max_points),
+        "fromjd": f"{from_jd:.5f}",
+        "tojd": f"{to_jd:.5f}",
+        "csv": "",
+        "mtype": "std",
+    }
+    headers = {"User-Agent": "malca-external-lcs/1.0 (+https://github.com)"}
+    last_error: Exception | None = None
+    for url in AAVSO_VSX_API_URLS:
+        try:
+            response = requests.get(url, params=params, headers=headers, timeout=VETTING_HTTP_TIMEOUT)
+            try:
+                response.raise_for_status()
+            except requests.HTTPError as exc:
+                status = getattr(response, "status_code", None)
+                if status in {403, 404, 405}:
+                    last_error = exc
+                    continue
+                raise
+            return _parse_aavso_vsx_response(response.text)
+        except requests.HTTPError as exc:
+            last_error = exc
+            continue
+    if last_error is not None:
+        status = getattr(getattr(last_error, "response", None), "status_code", None)
+        if status in {403, 404, 405} or "403" in str(last_error) or "404" in str(last_error) or "405" in str(last_error):
+            return pd.DataFrame(columns=["mjd", "mag", "mag_err", "band"])
+        raise last_error
+    return pd.DataFrame(columns=["mjd", "mag", "mag_err", "band"])
+
+
 def fetch_aavso_lightcurves(
     df: pd.DataFrame,
     output_dir: Path | None = None,
@@ -3514,7 +3903,7 @@ def fetch_aavso_lightcurves(
     refresh_cache: bool = False,
 ) -> pd.DataFrame:
     """
-    Fetch AAVSO light curves via WebObs scraping.
+    Fetch AAVSO light curves via the public VSX light-curve API.
 
     Adds columns: aavso_lc_n_points.
     If *output_dir* is set, saves per-candidate parquet files as
@@ -3522,25 +3911,12 @@ def fetch_aavso_lightcurves(
     """
     df = df.copy()
     df["aavso_lc_n_points"] = 0
-    num_pages = 50 # Limit max pages (10,000 pts) per source
 
-    # Needs to match by simbad_main_id, tns_name, asassn_var_name or vsx_name if available.
-    # AAVSO searches rely on star name. If no name, skipped.
-    name_cols = [c for c in ["simbad_main_id", "asassn_var_name", "vsx_name", "tns_name", "ztf_var_name", "candidate_id"] if c in df.columns]
-    
-    valid = pd.Series(False, index=df.index)
-    best_names = pd.Series("", index=df.index)
-    
-    for idx in df.index:
-        for col in name_cols:
-            val = df.loc[idx, col]
-            if pd.notna(val) and str(val).strip() != "" and "J" not in str(val) and "TIC" not in str(val) and "Gaia" not in str(val) and len(str(val)) < 20: 
-                valid[idx] = True
-                best_names[idx] = str(val).strip()
-                break
-                
-    # Fall back to vsx_name if simbad is not available, try to format correctly.
-    # In vetting, it's mostly "V* XX YYY" or similar which works well.
+    name_cols = tuple(c for c in AAVSO_NAME_COLUMNS if c in df.columns)
+    if not name_cols:
+        return df
+    best_names = df.apply(lambda row: _best_aavso_identifier(row, name_cols), axis=1)
+    valid = best_names.astype(str).str.len() > 0
     if not valid.any():
         return df
 
@@ -3561,7 +3937,10 @@ def fetch_aavso_lightcurves(
         file_prefix="aavso_lc",
         summary_cols=summary_cols,
         match_col="aavso_lc_n_points",
-        cache_key_func=lambda idx: _source_lookup_cache_key(best_names[idx], "aavso"),
+        cache_key_func=lambda idx: _source_lookup_cache_key(
+            f"{best_names.loc[idx]}|{_aavso_jd_window(df, idx)[0]:.1f}|{_aavso_jd_window(df, idx)[1]:.1f}",
+            "aavso_vsx",
+        ),
         summarize_func=lambda lc: _summarize_count_lc(lc, "aavso_lc_n_points"),
     )
     if not valid_idx:
@@ -3569,53 +3948,12 @@ def fetch_aavso_lightcurves(
         return df
 
     def _fetch_one(idx: int) -> tuple:
-        star_name = best_names[idx]
-        obj_url = star_name.replace("V*", "").strip().replace(" ", "+")
-        cache_key = _source_lookup_cache_key(star_name, "aavso")
-        
+        star_name = str(best_names.loc[idx])
+        from_jd, to_jd = _aavso_jd_window(df, idx)
+        cache_key = _source_lookup_cache_key(f"{star_name}|{from_jd:.1f}|{to_jd:.1f}", "aavso_vsx")
         try:
-            dfs = []
-            for page in range(1, num_pages + 1):
-                url = f"https://app.aavso.org/webobs/results/?star={obj_url}&num_results=200&obs_types=ccd&page={page}"
-                res = requests.get(url, timeout=10)
-                if res.status_code != 200:
-                    raise RuntimeError(f"AAVSO HTTP {res.status_code}")
-                if "No observations found" in res.text or "Error" in res.text:
-                    break
-                
-                try:
-                    tables = pd.read_html(io.StringIO(res.text))
-                except ValueError:
-                    break
-                
-                if not tables:
-                    break
-                
-                page_df = tables[0]
-                # Columns are ['Star', 'JD', 'Calendar Date', 'Mag', 'Err', 'Filter', 'Observer', 'Cmp1', 'Cmp2', 'Chart', 'Comments', ...]
-                if "JD" not in page_df.columns or "Mag" not in page_df.columns:
-                    break
-                    
-                dfs.append(page_df[["JD", "Mag", "Err", "Filter", "Observer"]])
-                if len(page_df) < 200:
-                    break
-            
-            if not dfs:
-                return (idx, 0, None, cache_key)
-                
-            lc_df = pd.concat(dfs, ignore_index=True)
-            # Clean up types and limit rows with values
-            lc_df["Mag"] = pd.to_numeric(lc_df["Mag"].astype(str).str.replace("<", ""), errors="coerce")
-            lc_df["Err"] = pd.to_numeric(lc_df["Err"], errors="coerce")
-            lc_df["JD"] = pd.to_numeric(lc_df["JD"], errors="coerce")
-            lc_df = lc_df.dropna(subset=["JD", "Mag"])
-            
-            # Map columns to lowercase standard
-            lc_df = lc_df.rename(columns={"JD": "mjd", "Mag": "mag", "Err": "mag_err", "Filter": "filter", "Observer": "observer"})
-            lc_df["mjd"] = lc_df["mjd"] - 2400000.5 # Convert JD to MJD
-            
+            lc_df = _query_aavso_vsx_lightcurve(star_name, from_jd, to_jd)
             n_points = len(lc_df)
-            
             if output_dir and n_points > 0:
                 _write_external_lc_file(output_dir, "aavso_lc", df, idx, lc_df)
 
@@ -3656,8 +3994,837 @@ def fetch_aavso_lightcurves(
 
 
 # =============================================================================
+# OGLE LIGHT CURVES
+# =============================================================================
+
+
+def _normalize_ogle_source_name(value: object) -> str:
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    text = str(value).strip()
+    if not text:
+        return ""
+    return re.sub(r"\s+", "-", text)
+
+
+def _ogle_ocvs_path_parts(source_name: str) -> tuple[str, str] | None:
+    parts = _normalize_ogle_source_name(source_name).split("-")
+    if len(parts) < 3 or parts[0].upper() != "OGLE":
+        return None
+    region = parts[1].lower()
+    cls = parts[2].lower()
+    class_map = {
+        "rrlyr": "rrlyr",
+        "rrl": "rrlyr",
+        "cep": "cep",
+        "t2cep": "t2cep",
+        "acep": "acep",
+        "ecl": "ecl",
+        "lpv": "lpv",
+        "dsct": "dsct",
+        "rot": "rot",
+        "mira": "lpv",
+    }
+    return region, class_map.get(cls, cls)
+
+
+def _ogle_candidate_urls(source_name: str, band: str) -> list[str]:
+    name = _normalize_ogle_source_name(source_name)
+    parts = _ogle_ocvs_path_parts(name)
+    if not name or parts is None:
+        return []
+    region, cls = parts
+    band_dir = str(band).upper()
+    urls = []
+    for base in OGLE_OCVS_BASE_URLS:
+        urls.append(f"{base}/{region}/{cls}/phot/{band_dir}/{name}.dat")
+    return urls
+
+
+def _parse_ogle_dat(text: str, *, source_name: str, band: str, url: str = "") -> pd.DataFrame:
+    rows: list[tuple[float, float, float]] = []
+    for line in str(text or "").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        parts = stripped.split()
+        if len(parts) < 3:
+            continue
+        try:
+            rows.append((float(parts[0]), float(parts[1]), float(parts[2])))
+        except Exception:
+            continue
+    if not rows:
+        return pd.DataFrame(columns=["mjd", "mag", "mag_err", "band", "ogle_name", "source_url"])
+    out = pd.DataFrame(rows, columns=["mjd", "mag", "mag_err"])
+    finite = out["mjd"].to_numpy(dtype=float)
+    finite = finite[np.isfinite(finite)]
+    if finite.size:
+        median = float(np.nanmedian(finite))
+        if median > 2_400_000.0:
+            out["mjd"] = out["mjd"] - MJD_TO_JD
+        elif median < 20_000.0:
+            out["mjd"] = out["mjd"] + 50_000.0 - 0.5
+    out["band"] = str(band).upper()
+    out["ogle_name"] = _normalize_ogle_source_name(source_name)
+    out["source_url"] = str(url)
+    return out.dropna(subset=["mjd", "mag"]).reset_index(drop=True)
+
+
+def _download_ogle_band(source_name: str, band: str) -> pd.DataFrame:
+    for url in _ogle_candidate_urls(source_name, band):
+        response = requests.get(url, timeout=VETTING_HTTP_TIMEOUT)
+        if response.status_code == 404:
+            continue
+        response.raise_for_status()
+        lc = _parse_ogle_dat(response.text, source_name=source_name, band=band, url=url)
+        if not lc.empty:
+            return lc
+    return pd.DataFrame(columns=["mjd", "mag", "mag_err", "band", "ogle_name", "source_url"])
+
+
+def _match_ogle_names_by_coord(df: pd.DataFrame, candidate_indices: list) -> pd.Series:
+    names = pd.Series("", index=df.index, dtype=object)
+    if not candidate_indices:
+        return names
+    try:
+        from malca.periodic_catalogs import fetch_ogle_periodic_catalog
+
+        cat = fetch_ogle_periodic_catalog(show_tqdm=False)
+    except Exception:
+        return names
+    if cat.empty or not {"ra", "dec", "source_name"}.issubset(cat.columns):
+        return names
+    cand = df.loc[candidate_indices]
+    valid = cand["ra"].notna() & cand["dec"].notna()
+    if not valid.any():
+        return names
+    cat_ra = pd.to_numeric(cat["ra"], errors="coerce")
+    cat_dec = pd.to_numeric(cat["dec"], errors="coerce")
+    valid_cat = cat_ra.notna() & cat_dec.notna()
+    if not valid_cat.any():
+        return names
+    cand_coords = SkyCoord(ra=cand.loc[valid, "ra"].astype(float).to_numpy() * u.deg, dec=cand.loc[valid, "dec"].astype(float).to_numpy() * u.deg)
+    cat_valid = cat.loc[valid_cat].reset_index(drop=True)
+    cat_coords = SkyCoord(ra=cat_valid["ra"].astype(float).to_numpy() * u.deg, dec=cat_valid["dec"].astype(float).to_numpy() * u.deg)
+    idx_cat, sep, _ = cand_coords.match_to_catalog_sky(cat_coords)
+    for row_idx, cat_idx, sep_arcsec in zip(cand.loc[valid].index, idx_cat, sep.arcsec):
+        if float(sep_arcsec) <= OGLE_LC_MAX_SEP_ARCSEC:
+            names.loc[row_idx] = _normalize_ogle_source_name(cat_valid.iloc[int(cat_idx)]["source_name"])
+    return names
+
+
+def fetch_ogle_lightcurves(
+    df: pd.DataFrame,
+    output_dir: Path | None = None,
+    workers: int = 4,
+    refresh_cache: bool = False,
+) -> pd.DataFrame:
+    """Fetch OGLE OCVS I/V light curves for candidates with an OGLE source name."""
+    df = df.copy()
+    for col in ("ogle_lc_n_points", "ogle_lc_i_range", "ogle_lc_v_range"):
+        df[col] = 0 if col == "ogle_lc_n_points" else np.nan
+
+    name_cols = [c for c in ("period_ogle_name", "ogle_name", "source_name") if c in df.columns]
+    source_names = pd.Series("", index=df.index, dtype=object)
+    for idx in df.index:
+        for col in name_cols:
+            name = _normalize_ogle_source_name(df.loc[idx, col])
+            if name:
+                source_names.loc[idx] = name
+                break
+
+    missing_name_idx = [idx for idx in df.index if not source_names.loc[idx]]
+    if missing_name_idx and {"ra", "dec"}.issubset(df.columns):
+        matched_names = _match_ogle_names_by_coord(df, missing_name_idx)
+        for idx, name in matched_names.items():
+            if name and not source_names.loc[idx]:
+                source_names.loc[idx] = name
+
+    valid = source_names.astype(str).str.len() > 0
+    if not valid.any():
+        return df
+    if output_dir:
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+    n_valid = int(valid.sum())
+    print(f"OGLE LCs: fetching {n_valid} light curves")
+    valid_idx = df.index[valid].tolist()
+    summary_cols = ["ogle_lc_n_points", "ogle_lc_i_range", "ogle_lc_v_range"]
+    valid_idx, _, cached_matched = _apply_external_lc_cache_hits(
+        df,
+        valid_idx,
+        output_dir=output_dir,
+        refresh_cache=refresh_cache,
+        module="OGLE LCs",
+        file_prefix="ogle_lc",
+        summary_cols=summary_cols,
+        match_col="ogle_lc_n_points",
+        cache_key_func=lambda idx: _source_lookup_cache_key(source_names.loc[idx], "ogle_ocvs"),
+        summarize_func=_summarize_ogle_lc,
+    )
+    if not valid_idx:
+        print(f"OGLE LCs: {cached_matched}/{n_valid} with data")
+        return df
+
+    def _fetch_one(idx) -> tuple:
+        name = source_names.loc[idx]
+        cache_key = _source_lookup_cache_key(name, "ogle_ocvs")
+        try:
+            parts = [_download_ogle_band(name, band) for band in ("I", "V")]
+            lc_df = pd.concat([part for part in parts if not part.empty], ignore_index=True) if any(not part.empty for part in parts) else pd.DataFrame()
+            if lc_df.empty:
+                summary = {"ogle_lc_n_points": 0, "ogle_lc_i_range": np.nan, "ogle_lc_v_range": np.nan}
+                return (idx, summary, None, cache_key, None)
+            lc_df = lc_df.sort_values(["mjd", "band"]).reset_index(drop=True)
+            summary = _summarize_ogle_lc(lc_df)
+            if output_dir:
+                _write_external_lc_file(output_dir, "ogle_lc", df, idx, lc_df)
+            return (idx, summary, None, cache_key, lc_df)
+        except Exception as exc:
+            return (idx, {"ogle_lc_n_points": 0, "ogle_lc_i_range": np.nan, "ogle_lc_v_range": np.nan}, f"{_candidate_cache_id(df, idx)}: {_short_error(exc)}", cache_key, None)
+
+    matched = cached_matched
+    failures: list[str] = []
+    status_rows: list[dict] = []
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(_fetch_one, idx): idx for idx in valid_idx}
+        for fut in tqdm(as_completed(futures), total=len(futures), desc="OGLE LCs"):
+            idx, summary, error, cache_key, _lc_df = fut.result()
+            if error is not None:
+                failures.append(error)
+                summary = dict(summary)
+                summary["error_message"] = error
+                row = _external_lc_status_row(df, idx, module="OGLE LCs", cache_key=cache_key, summary=summary, status="error")
+                if row is not None:
+                    status_rows.append(row)
+                continue
+            for col in summary_cols:
+                df.loc[idx, col] = summary.get(col, np.nan)
+            if int(summary.get("ogle_lc_n_points") or 0) > 0:
+                matched += 1
+            row = _external_lc_status_row(
+                df,
+                idx,
+                module="OGLE LCs",
+                cache_key=cache_key,
+                summary=summary,
+                status="fetched" if int(summary.get("ogle_lc_n_points") or 0) > 0 else "no_data",
+            )
+            if row is not None:
+                status_rows.append(row)
+
+    _write_external_lc_status(output_dir, status_rows)
+    _raise_lookup_failures("OGLE LCs", failures, n_valid)
+    print(f"OGLE LCs: {matched}/{n_valid} with data")
+    return df
+
+
+# =============================================================================
+# SDSS STRIPE 82 LIGHT CURVES
+# =============================================================================
+
+
+def _stripe82_in_footprint(ra: float, dec: float) -> bool:
+    if not (np.isfinite(ra) and np.isfinite(dec)):
+        return False
+    return abs(float(dec)) <= 1.35 and (float(ra) >= 308.5 or float(ra) <= 60.0)
+
+
+def _stripe82_link_candidates() -> tuple[list[str], list[str]]:
+    master_urls = list(STRIPE82_MASTER_FALLBACK_URLS)
+    archive_urls = list(STRIPE82_LC_ARCHIVE_FALLBACK_URLS)
+    try:
+        response = requests.get(STRIPE82_VARIABLES_URL, timeout=VETTING_HTTP_TIMEOUT)
+        response.raise_for_status()
+        hrefs = re.findall(r"""href=["']([^"']+)["']""", response.text, flags=re.I)
+        for href in hrefs:
+            url = urljoin(STRIPE82_VARIABLES_URL, href)
+            lower = url.lower()
+            if "alllc" in lower or lower.endswith(".tar.gz"):
+                archive_urls.append(url)
+            elif lower.endswith(".gz"):
+                master_urls.append(url)
+    except Exception:
+        pass
+    return list(dict.fromkeys(master_urls)), list(dict.fromkeys(archive_urls))
+
+
+def _load_stripe82_master() -> pd.DataFrame:
+    cache_dir = _external_catalog_cache_dir("stripe82")
+    cache_file = cache_dir / "master.parquet"
+    if cache_file.exists():
+        return pd.read_parquet(cache_file)
+    master_urls, _archive_urls = _stripe82_link_candidates()
+    last_error: Exception | None = None
+    names = [
+        "stripe82_id",
+        "ra",
+        "dec",
+        "period",
+        "r_mag",
+        "ug",
+        "gr",
+        "ri",
+        "iz",
+        "g_n",
+        "g_ampl",
+        "r_n",
+        "r_ampl",
+        "i_n",
+        "i_ampl",
+        "z_qso",
+        "mi_qso",
+    ]
+    for i, url in enumerate(master_urls):
+        try:
+            path = _download_to_cache(url, cache_dir / f"master_{i}.dat.gz")
+            table = pd.read_csv(path, comment="#", sep=r"\s+", names=names, engine="python")
+            table = table.dropna(subset=["stripe82_id", "ra", "dec"])
+            table["stripe82_id"] = table["stripe82_id"].astype(str)
+            table.to_parquet(cache_file, index=False, compression=PARQUET_CACHE_COMPRESSION)
+            return table
+        except Exception as exc:
+            last_error = exc
+            continue
+    raise RuntimeError(f"Stripe 82 master catalog download/parse failed: {_short_error(last_error or RuntimeError('no URLs'))}")
+
+
+def _stripe82_archive_path() -> Path:
+    cache_dir = _external_catalog_cache_dir("stripe82")
+    _master_urls, archive_urls = _stripe82_link_candidates()
+    last_error: Exception | None = None
+    for i, url in enumerate(archive_urls):
+        try:
+            return _download_to_cache(url, cache_dir / f"AllLCs_{i}.tar.gz", timeout=300.0)
+        except Exception as exc:
+            last_error = exc
+            continue
+    raise RuntimeError(f"Stripe 82 LC archive download failed: {_short_error(last_error or RuntimeError('no URLs'))}")
+
+
+def _read_stripe82_lc_member(tar: tarfile.TarFile, member_name: str, stripe82_id: str) -> pd.DataFrame:
+    fh = tar.extractfile(member_name)
+    if fh is None:
+        return pd.DataFrame(columns=["mjd", "band", "mag", "mag_err", "stripe82_id"])
+    text = fh.read().decode("utf-8", errors="replace")
+    rows = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        parts = stripped.split()
+        if len(parts) < 4:
+            continue
+        try:
+            rows.append((float(parts[0]), str(parts[1]).lower(), float(parts[2]), float(parts[3])))
+        except Exception:
+            continue
+    if not rows:
+        return pd.DataFrame(columns=["mjd", "band", "mag", "mag_err", "stripe82_id"])
+    out = pd.DataFrame(rows, columns=["mjd", "band", "mag", "mag_err"])
+    out["stripe82_id"] = str(stripe82_id)
+    out = out.dropna(subset=["mjd", "mag"])
+    return out.sort_values("mjd").reset_index(drop=True)
+
+
+def fetch_stripe82_lightcurves(
+    df: pd.DataFrame,
+    output_dir: Path | None = None,
+    refresh_cache: bool = False,
+) -> pd.DataFrame:
+    """Fetch UW SDSS Stripe 82 variable-source ugriz light curves."""
+    df = df.copy()
+    summary_cols = [
+        "stripe82_lc_n_points",
+        "stripe82_lc_u_range",
+        "stripe82_lc_g_range",
+        "stripe82_lc_r_range",
+        "stripe82_lc_i_range",
+        "stripe82_lc_z_range",
+    ]
+    for col in summary_cols:
+        df[col] = 0 if col == "stripe82_lc_n_points" else np.nan
+    if not {"ra", "dec"}.issubset(df.columns):
+        return df
+
+    valid = df.apply(lambda row: _stripe82_in_footprint(float(row["ra"]) if pd.notna(row["ra"]) else np.nan, float(row["dec"]) if pd.notna(row["dec"]) else np.nan), axis=1)
+    if not valid.any():
+        return df
+    if output_dir:
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+    n_valid = int(valid.sum())
+    print(f"Stripe 82 LCs: fetching {n_valid} footprint candidates")
+
+    valid_idx = df.index[valid].tolist()
+    valid_idx, _, cached_matched = _apply_external_lc_cache_hits(
+        df,
+        valid_idx,
+        output_dir=output_dir,
+        refresh_cache=refresh_cache,
+        module="Stripe 82 LCs",
+        file_prefix="stripe82_lc",
+        summary_cols=summary_cols,
+        match_col="stripe82_lc_n_points",
+        cache_key_func=lambda idx: _coord_lookup_cache_key(df, idx, STRIPE82_MAX_SEP_ARCSEC, "stripe82"),
+        summarize_func=_summarize_stripe82_lc,
+    )
+    if not valid_idx:
+        print(f"Stripe 82 LCs: {cached_matched}/{n_valid} with data")
+        return df
+
+    failures: list[str] = []
+    status_rows: list[dict] = []
+    matched = cached_matched
+    try:
+        master = _load_stripe82_master()
+        archive_path = _stripe82_archive_path()
+    except Exception as exc:
+        raise RuntimeError(f"Stripe 82 setup failed: {_short_error(exc)}") from exc
+
+    cand = df.loc[valid_idx]
+    cand_coords = SkyCoord(ra=cand["ra"].astype(float).to_numpy() * u.deg, dec=cand["dec"].astype(float).to_numpy() * u.deg)
+    master_coords = SkyCoord(ra=master["ra"].astype(float).to_numpy() * u.deg, dec=master["dec"].astype(float).to_numpy() * u.deg)
+    idx_master, sep, _ = cand_coords.match_to_catalog_sky(master_coords)
+
+    with tarfile.open(archive_path, "r:gz") as tar:
+        members_by_base = {Path(member.name).name: member.name for member in tar.getmembers() if member.isfile()}
+        for row_idx, master_idx, sep_arcsec in tqdm(list(zip(valid_idx, idx_master, sep.arcsec)), desc="Stripe 82 LCs"):
+            cache_key = _coord_lookup_cache_key(df, row_idx, STRIPE82_MAX_SEP_ARCSEC, "stripe82")
+            summary = {col: (0 if col == "stripe82_lc_n_points" else np.nan) for col in summary_cols}
+            if float(sep_arcsec) > STRIPE82_MAX_SEP_ARCSEC:
+                row = _external_lc_status_row(df, row_idx, module="Stripe 82 LCs", cache_key=cache_key, summary=summary, status="no_data")
+                if row is not None:
+                    status_rows.append(row)
+                continue
+            stripe82_id = str(master.iloc[int(master_idx)]["stripe82_id"])
+            basename = f"LC_{stripe82_id}.dat"
+            member_name = members_by_base.get(basename)
+            if member_name is None:
+                row = _external_lc_status_row(df, row_idx, module="Stripe 82 LCs", cache_key=cache_key, summary=summary, status="no_data")
+                if row is not None:
+                    status_rows.append(row)
+                continue
+            try:
+                lc_df = _read_stripe82_lc_member(tar, member_name, stripe82_id)
+                if not lc_df.empty and output_dir:
+                    _write_external_lc_file(output_dir, "stripe82_lc", df, row_idx, lc_df)
+                summary = _summarize_stripe82_lc(lc_df) if not lc_df.empty else summary
+                for col in summary_cols:
+                    df.loc[row_idx, col] = summary.get(col, np.nan)
+                if int(summary.get("stripe82_lc_n_points") or 0) > 0:
+                    matched += 1
+                row = _external_lc_status_row(df, row_idx, module="Stripe 82 LCs", cache_key=cache_key, summary=summary, status="fetched" if int(summary.get("stripe82_lc_n_points") or 0) > 0 else "no_data")
+                if row is not None:
+                    status_rows.append(row)
+            except Exception as exc:
+                short = _short_error(exc)
+                failures.append(f"{_candidate_cache_id(df, row_idx)}: {short}")
+                summary["error_message"] = short
+                row = _external_lc_status_row(df, row_idx, module="Stripe 82 LCs", cache_key=cache_key, summary=summary, status="error")
+                if row is not None:
+                    status_rows.append(row)
+
+    _write_external_lc_status(output_dir, status_rows)
+    _raise_lookup_failures("Stripe 82 LCs", failures, n_valid)
+    print(f"Stripe 82 LCs: {matched}/{n_valid} with data")
+    return df
+
+
+# =============================================================================
+# ALLWISE MULTIEPOCH LIGHT CURVES
+# =============================================================================
+
+
+def _normalize_allwise_mep_table(raw: pd.DataFrame) -> pd.DataFrame:
+    if raw.empty:
+        return pd.DataFrame()
+    df = raw.copy()
+    rename = {
+        "w1mpro_ep": "w1mpro",
+        "w1sigmpro_ep": "w1sigmpro",
+        "w2mpro_ep": "w2mpro",
+        "w2sigmpro_ep": "w2sigmpro",
+        "w3mpro_ep": "w3mpro",
+        "w3sigmpro_ep": "w3sigmpro",
+        "w4mpro_ep": "w4mpro",
+        "w4sigmpro_ep": "w4sigmpro",
+        "mjd_ep": "mjd",
+    }
+    lower_to_actual = {str(col).lower(): col for col in df.columns}
+    for old, new in rename.items():
+        actual = lower_to_actual.get(old)
+        if actual is not None and new not in df.columns:
+            df = df.rename(columns={actual: new})
+    if "mjd" not in df.columns:
+        time_col = next((lower_to_actual.get(name) for name in ("mjd", "mjd_ep", "jd") if lower_to_actual.get(name)), None)
+        if time_col:
+            df = df.rename(columns={time_col: "mjd"})
+    for col in ("mjd", "w1mpro", "w1sigmpro", "w2mpro", "w2sigmpro", "w3mpro", "w3sigmpro", "w4mpro", "w4sigmpro"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    if "mjd" in df.columns:
+        finite = df["mjd"].dropna()
+        if len(finite) and float(finite.median()) > 1_000_000.0:
+            df["mjd"] = df["mjd"] - MJD_TO_JD
+    mag_cols = [col for col in ("w1mpro", "w2mpro", "w3mpro", "w4mpro") if col in df.columns]
+    if "mjd" in df.columns and mag_cols:
+        df = df.dropna(subset=["mjd"], how="any")
+        df = df[df[mag_cols].notna().any(axis=1)]
+    return df.reset_index(drop=True)
+
+
+def _query_allwise_mep_one(ra: float, dec: float, max_sep_arcsec: float = ALLWISE_MEP_MAX_SEP_ARCSEC) -> pd.DataFrame:
+    radius_deg = float(max_sep_arcsec) / 3600.0
+    source_query = f"""
+    SELECT TOP 1 source_id, cntr, ra, dec
+    FROM allwise_p3as_psd
+    WHERE CONTAINS(
+        POINT('ICRS', ra, dec),
+        CIRCLE('ICRS', {ra:.8f}, {dec:.8f}, {radius_deg:.10f})
+    ) = 1
+    """
+    source_result = Irsa.query_tap(source_query).to_table().to_pandas()
+    if source_result.empty:
+        return pd.DataFrame()
+    source_row = source_result.iloc[0]
+    source_id = str(source_row.get("source_id", "")).strip()
+    cntr = source_row.get("cntr", None)
+    where = f"source_id_mf = '{source_id}'" if source_id else ""
+    if not where and pd.notna(cntr):
+        where = f"cntr_mf = {int(cntr)}"
+    if not where:
+        return pd.DataFrame()
+    mep_query = f"""
+    SELECT mjd, source_id_mf, cntr_mf,
+           w1mpro_ep, w1sigmpro_ep, w2mpro_ep, w2sigmpro_ep,
+           w3mpro_ep, w3sigmpro_ep, w4mpro_ep, w4sigmpro_ep,
+           qual_frame, saa_sep, moon_masked
+    FROM allwise_p3as_mep
+    WHERE {where}
+    ORDER BY mjd ASC
+    """
+    mep = Irsa.query_tap(mep_query).to_table().to_pandas()
+    return _normalize_allwise_mep_table(mep)
+
+
+def fetch_allwise_mep_lightcurves(
+    df: pd.DataFrame,
+    output_dir: Path | None = None,
+    workers: int = 4,
+    refresh_cache: bool = False,
+) -> pd.DataFrame:
+    """Fetch historical AllWISE Multiepoch W1-W4 photometry."""
+    df = df.copy()
+    summary_cols = ["allwise_mep_n_epochs", "allwise_mep_w1_range", "allwise_mep_w2_range", "allwise_mep_w3_range", "allwise_mep_w4_range"]
+    for col in summary_cols:
+        df[col] = 0 if col == "allwise_mep_n_epochs" else np.nan
+    valid = df["ra"].notna() & df["dec"].notna() if {"ra", "dec"}.issubset(df.columns) else pd.Series(False, index=df.index)
+    if not valid.any():
+        return df
+    if output_dir:
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+    n_valid = int(valid.sum())
+    print(f"AllWISE MEP LCs: fetching {n_valid} light curves")
+    valid_idx = df.index[valid].tolist()
+    valid_idx, _, cached_matched = _apply_external_lc_cache_hits(
+        df,
+        valid_idx,
+        output_dir=output_dir,
+        refresh_cache=refresh_cache,
+        module="AllWISE MEP LCs",
+        file_prefix="allwise_mep_lc",
+        summary_cols=summary_cols,
+        match_col="allwise_mep_n_epochs",
+        cache_key_func=lambda idx: _coord_lookup_cache_key(df, idx, ALLWISE_MEP_MAX_SEP_ARCSEC, "allwise_mep"),
+        summarize_func=_summarize_allwise_mep_lc,
+    )
+    if not valid_idx:
+        print(f"AllWISE MEP LCs: {cached_matched}/{n_valid} with data")
+        return df
+
+    def _fetch_one(idx) -> tuple:
+        cache_key = _coord_lookup_cache_key(df, idx, ALLWISE_MEP_MAX_SEP_ARCSEC, "allwise_mep")
+        try:
+            lc_df = _query_allwise_mep_one(float(df.loc[idx, "ra"]), float(df.loc[idx, "dec"]))
+            if lc_df.empty:
+                summary = {col: (0 if col == "allwise_mep_n_epochs" else np.nan) for col in summary_cols}
+                return (idx, summary, None, cache_key)
+            summary = _summarize_allwise_mep_lc(lc_df)
+            if output_dir:
+                _write_external_lc_file(output_dir, "allwise_mep_lc", df, idx, lc_df)
+            return (idx, summary, None, cache_key)
+        except Exception as exc:
+            return (idx, {col: (0 if col == "allwise_mep_n_epochs" else np.nan) for col in summary_cols}, f"{_candidate_cache_id(df, idx)}: {_short_error(exc)}", cache_key)
+
+    matched = cached_matched
+    failures: list[str] = []
+    status_rows: list[dict] = []
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(_fetch_one, idx): idx for idx in valid_idx}
+        for fut in tqdm(as_completed(futures), total=len(futures), desc="AllWISE MEP LCs"):
+            idx, summary, error, cache_key = fut.result()
+            status = "fetched" if int(summary.get("allwise_mep_n_epochs") or 0) > 0 else "no_data"
+            if error is not None:
+                failures.append(error)
+                summary = dict(summary)
+                summary["error_message"] = error
+                status = "error"
+            for col in summary_cols:
+                df.loc[idx, col] = summary.get(col, np.nan)
+            if status == "fetched":
+                matched += 1
+            row = _external_lc_status_row(df, idx, module="AllWISE MEP LCs", cache_key=cache_key, summary=summary, status=status)
+            if row is not None:
+                status_rows.append(row)
+
+    _write_external_lc_status(output_dir, status_rows)
+    _raise_lookup_failures("AllWISE MEP LCs", failures, n_valid)
+    print(f"AllWISE MEP LCs: {matched}/{n_valid} with data")
+    return df
+
+
+# =============================================================================
+# VVVX/VIRAC2 LIGHT CURVES
+# =============================================================================
+
+
+def _first_column_by_lower(df: pd.DataFrame, names: tuple[str, ...]) -> str | None:
+    lookup = {str(col).lower(): col for col in df.columns}
+    for name in names:
+        if name.lower() in lookup:
+            return lookup[name.lower()]
+    return None
+
+
+def _normalize_vvvx_virac_table(raw: pd.DataFrame, source_id: object = None) -> pd.DataFrame:
+    if raw.empty:
+        return pd.DataFrame(columns=["mjd", "mag", "mag_err", "band", "virac_source_id"])
+    df = raw.copy()
+    time_col = _first_column_by_lower(df, ("mjd", "mjdobs", "mjd_obs", "hmjd", "hjd", "jd", "epoch_mjd"))
+    if time_col is None:
+        return pd.DataFrame(columns=["mjd", "mag", "mag_err", "band", "virac_source_id"])
+    band_col = _first_column_by_lower(df, ("band", "filter", "filter_name", "filterid"))
+    mag_col = _first_column_by_lower(df, ("mag", "m", "aper_mag", "psf_mag", "mag_auto"))
+    err_col = _first_column_by_lower(df, ("mag_err", "magerr", "emag", "e_mag", "mag_error", "err"))
+    id_col = _first_column_by_lower(df, ("sourceid", "source_id", "sourceid_vvv", "virac_id", "srcid"))
+    rows: list[dict] = []
+    if band_col and mag_col:
+        for _, row in df.iterrows():
+            rows.append(
+                {
+                    "mjd": row.get(time_col),
+                    "mag": row.get(mag_col),
+                    "mag_err": row.get(err_col) if err_col else np.nan,
+                    "band": str(row.get(band_col, "")).strip().lower().replace("k_s", "ks"),
+                    "virac_source_id": row.get(id_col) if id_col else source_id,
+                }
+            )
+    else:
+        lower_cols = {str(col).lower(): col for col in df.columns}
+        band_aliases = {
+            "z": ("zmag", "z_mag", "mag_z", "z"),
+            "y": ("ymag", "y_mag", "mag_y", "y"),
+            "j": ("jmag", "j_mag", "mag_j", "j"),
+            "h": ("hmag", "h_mag", "mag_h", "h"),
+            "ks": ("ksmag", "ks_mag", "mag_ks", "ks", "k_s"),
+        }
+        err_aliases = {
+            "z": ("ezmag", "zerr", "z_mag_err", "e_zmag", "e_z"),
+            "y": ("eymag", "yerr", "y_mag_err", "e_ymag", "e_y"),
+            "j": ("ejmag", "jerr", "j_mag_err", "e_jmag", "e_j"),
+            "h": ("ehmag", "herr", "h_mag_err", "e_hmag", "e_h"),
+            "ks": ("eksmag", "kserr", "ks_mag_err", "e_ksmag", "e_ks"),
+        }
+        for band, aliases in band_aliases.items():
+            b_col = next((lower_cols[a] for a in aliases if a in lower_cols), None)
+            if b_col is None:
+                continue
+            e_col = next((lower_cols[a] for a in err_aliases[band] if a in lower_cols), None)
+            for _, row in df.iterrows():
+                rows.append(
+                    {
+                        "mjd": row.get(time_col),
+                        "mag": row.get(b_col),
+                        "mag_err": row.get(e_col) if e_col else np.nan,
+                        "band": band,
+                        "virac_source_id": row.get(id_col) if id_col else source_id,
+                    }
+                )
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return pd.DataFrame(columns=["mjd", "mag", "mag_err", "band", "virac_source_id"])
+    out["mjd"] = pd.to_numeric(out["mjd"], errors="coerce")
+    out["mag"] = pd.to_numeric(out["mag"], errors="coerce")
+    out["mag_err"] = pd.to_numeric(out["mag_err"], errors="coerce")
+    finite = out["mjd"].dropna()
+    if len(finite) and float(finite.median()) > 1_000_000.0:
+        out["mjd"] = out["mjd"] - MJD_TO_JD
+    out["band"] = out["band"].astype(str).str.lower().str.replace("k_s", "ks")
+    out = out.dropna(subset=["mjd", "mag"])
+    out = out[out["band"].isin(["z", "y", "j", "h", "ks"])]
+    return out.sort_values(["mjd", "band"]).reset_index(drop=True)
+
+
+def _query_vvvx_virac_one(ra: float, dec: float, max_sep_arcsec: float = VVVX_VIRAC_MAX_SEP_ARCSEC) -> pd.DataFrame:
+    service = pyvo.dal.TAPService(ESO_TAP_CAT_URL)
+    radius_deg = float(max_sep_arcsec) / 3600.0
+    # VIRAC2 uses ``de`` rather than the more common ``dec`` column label.
+    source_query = f"""
+    SELECT TOP 1 *
+    FROM VVVX_VIRAC_V2_SOURCES
+    WHERE CONTAINS(
+        POINT('ICRS', ra, de),
+        CIRCLE('ICRS', {ra:.8f}, {dec:.8f}, {radius_deg:.10f})
+    ) = 1
+    """
+    source_table = service.search(source_query).to_table().to_pandas()
+    if source_table.empty:
+        return pd.DataFrame()
+    source_row = source_table.iloc[0]
+    id_col = _first_column_by_lower(source_table, ("sourceid", "source_id", "virac_id", "srcid"))
+    source_id = source_row.get(id_col) if id_col else None
+    queries = []
+    if source_id is not None and pd.notna(source_id):
+        id_value = str(source_id).strip()
+        id_expr = id_value if re.fullmatch(r"[-+]?\d+(?:\.\d+)?", id_value) else f"'{id_value}'"
+        queries.append(f"SELECT TOP 5000 * FROM VVVX_VIRAC_V2_LC WHERE sourceid = {id_expr}")
+    queries.append(
+        f"""
+        SELECT TOP 5000 *
+        FROM VVVX_VIRAC_V2_LC
+        WHERE CONTAINS(
+            POINT('ICRS', ra, de),
+            CIRCLE('ICRS', {ra:.8f}, {dec:.8f}, {radius_deg:.10f})
+        ) = 1
+        """
+    )
+    last_error: Exception | None = None
+    for query in queries:
+        try:
+            lc = service.search(query).to_table().to_pandas()
+            norm = _normalize_vvvx_virac_table(lc, source_id=source_id)
+            if not norm.empty:
+                return norm
+        except Exception as exc:
+            last_error = exc
+            continue
+    if last_error is not None:
+        raise last_error
+    return pd.DataFrame()
+
+
+def fetch_vvvx_virac_lightcurves(
+    df: pd.DataFrame,
+    output_dir: Path | None = None,
+    workers: int = 2,
+    refresh_cache: bool = False,
+) -> pd.DataFrame:
+    """Fetch VVV/VVVX VIRAC2 near-IR time-series photometry from ESO TAP."""
+    df = df.copy()
+    summary_cols = ["vvvx_virac_n_epochs", "vvvx_virac_z_range", "vvvx_virac_y_range", "vvvx_virac_j_range", "vvvx_virac_h_range", "vvvx_virac_ks_range"]
+    for col in summary_cols:
+        df[col] = 0 if col == "vvvx_virac_n_epochs" else np.nan
+    valid = df["ra"].notna() & df["dec"].notna() if {"ra", "dec"}.issubset(df.columns) else pd.Series(False, index=df.index)
+    if not valid.any():
+        return df
+    if output_dir:
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+    n_valid = int(valid.sum())
+    print(f"VVVX/VIRAC2 LCs: fetching {n_valid} light curves")
+    valid_idx = df.index[valid].tolist()
+    valid_idx, _, cached_matched = _apply_external_lc_cache_hits(
+        df,
+        valid_idx,
+        output_dir=output_dir,
+        refresh_cache=refresh_cache,
+        module="VVVX/VIRAC2 LCs",
+        file_prefix="vvvx_virac_lc",
+        summary_cols=summary_cols,
+        match_col="vvvx_virac_n_epochs",
+        cache_key_func=lambda idx: _coord_lookup_cache_key(df, idx, VVVX_VIRAC_MAX_SEP_ARCSEC, "vvvx_virac2"),
+        summarize_func=_summarize_vvvx_virac_lc,
+    )
+    if not valid_idx:
+        print(f"VVVX/VIRAC2 LCs: {cached_matched}/{n_valid} with data")
+        return df
+
+    def _fetch_one(idx) -> tuple:
+        cache_key = _coord_lookup_cache_key(df, idx, VVVX_VIRAC_MAX_SEP_ARCSEC, "vvvx_virac2")
+        try:
+            lc_df = _query_vvvx_virac_one(float(df.loc[idx, "ra"]), float(df.loc[idx, "dec"]))
+            if lc_df.empty:
+                summary = {col: (0 if col == "vvvx_virac_n_epochs" else np.nan) for col in summary_cols}
+                return (idx, summary, None, cache_key)
+            summary = _summarize_vvvx_virac_lc(lc_df)
+            if output_dir:
+                _write_external_lc_file(output_dir, "vvvx_virac_lc", df, idx, lc_df)
+            return (idx, summary, None, cache_key)
+        except Exception as exc:
+            return (idx, {col: (0 if col == "vvvx_virac_n_epochs" else np.nan) for col in summary_cols}, f"{_candidate_cache_id(df, idx)}: {_short_error(exc)}", cache_key)
+
+    matched = cached_matched
+    failures: list[str] = []
+    status_rows: list[dict] = []
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(_fetch_one, idx): idx for idx in valid_idx}
+        for fut in tqdm(as_completed(futures), total=len(futures), desc="VVVX/VIRAC2 LCs"):
+            idx, summary, error, cache_key = fut.result()
+            status = "fetched" if int(summary.get("vvvx_virac_n_epochs") or 0) > 0 else "no_data"
+            if error is not None:
+                failures.append(error)
+                summary = dict(summary)
+                summary["error_message"] = error
+                status = "error"
+            for col in summary_cols:
+                df.loc[idx, col] = summary.get(col, np.nan)
+            if status == "fetched":
+                matched += 1
+            row = _external_lc_status_row(df, idx, module="VVVX/VIRAC2 LCs", cache_key=cache_key, summary=summary, status=status)
+            if row is not None:
+                status_rows.append(row)
+
+    _write_external_lc_status(output_dir, status_rows)
+    _raise_lookup_failures("VVVX/VIRAC2 LCs", failures, n_valid)
+    print(f"VVVX/VIRAC2 LCs: {matched}/{n_valid} with data")
+    return df
+
+
+# =============================================================================
 # PAN-STARRS LIGHT CURVES
 # =============================================================================
+
+
+def _panstarrs_lc_retry_delay(response: object, attempt: int) -> float:
+    headers = getattr(response, "headers", {}) or {}
+    retry_after = headers.get("Retry-After") if hasattr(headers, "get") else None
+    if retry_after is not None:
+        try:
+            delay = float(retry_after)
+            if np.isfinite(delay) and delay >= 0:
+                return min(delay, VETTING_BACKOFF_CAP)
+        except (TypeError, ValueError):
+            pass
+    return min(2.0 ** max(0, attempt), VETTING_BACKOFF_CAP)
+
+
+def _request_panstarrs_detection_csv(url: str) -> str:
+    last_status: int | None = None
+    for attempt in range(PANSTARRS_LC_MAX_ATTEMPTS):
+        res = requests.get(url, timeout=VETTING_HTTP_TIMEOUT)
+        last_status = int(getattr(res, "status_code", 0) or 0)
+        if last_status == 200:
+            return getattr(res, "text", "") or ""
+        if last_status in PANSTARRS_LC_RETRY_STATUSES and attempt < PANSTARRS_LC_MAX_ATTEMPTS - 1:
+            time.sleep(_panstarrs_lc_retry_delay(res, attempt))
+            continue
+        raise RuntimeError(f"Pan-STARRS HTTP {last_status}")
+    raise RuntimeError(f"Pan-STARRS HTTP {last_status}")
 
 
 def fetch_panstarrs_lightcurves(
@@ -3697,7 +4864,7 @@ def fetch_panstarrs_lightcurves(
         file_prefix="ps1_lc",
         summary_cols=summary_cols,
         match_col="ps1_lc_n_points",
-        cache_key_func=lambda idx: _coord_lookup_cache_key(df, idx, 0.0015 * 3600.0, "ps1_dr2"),
+        cache_key_func=lambda idx: _coord_lookup_cache_key(df, idx, PANSTARRS_LC_RADIUS_DEG * 3600.0, "ps1_dr2"),
         summarize_func=lambda lc: _summarize_count_lc(lc, "ps1_lc_n_points"),
     )
     if not valid_idx:
@@ -3708,21 +4875,19 @@ def fetch_panstarrs_lightcurves(
         ra, dec = float(df.loc[idx, "ra"]), float(df.loc[idx, "dec"])
         if not (np.isfinite(ra) and np.isfinite(dec)):
             return (idx, 0, None, None)
-        cache_key = _coord_lookup_cache_key(df, idx, 0.0015 * 3600.0, "ps1_dr2")
+        cache_key = _coord_lookup_cache_key(df, idx, PANSTARRS_LC_RADIUS_DEG * 3600.0, "ps1_dr2")
 
         # Skip southern hemisphere queries (-30 limit for PS1)
         if dec < -30.5:
             return (idx, 0, None, cache_key)
 
         try:
-            url = f"https://catalogs.mast.stsci.edu/api/v0.1/panstarrs/dr2/detection.csv?ra={ra}&dec={dec}&radius=0.0015&pagesize=10000&format=csv"
-            res = requests.get(url, timeout=20)
-            if res.status_code != 200:
-                raise RuntimeError(f"Pan-STARRS HTTP {res.status_code}")
-            if "obsTime" not in res.text:
+            url = f"https://catalogs.mast.stsci.edu/api/v0.1/panstarrs/dr2/detection.csv?ra={ra}&dec={dec}&radius={PANSTARRS_LC_RADIUS_DEG}&pagesize=10000&format=csv"
+            text = _request_panstarrs_detection_csv(url)
+            if "obsTime" not in text:
                 return (idx, 0, None, cache_key)
 
-            lc_df = pd.read_csv(io.StringIO(res.text))
+            lc_df = pd.read_csv(io.StringIO(text))
             
             if lc_df.empty or "obsTime" not in lc_df.columns:
                 return (idx, 0, None, cache_key)
@@ -3892,7 +5057,7 @@ def _fetch_crts_cgi_catalog(ra: float, dec: float, radius_arcsec: float, catalog
 
     csv_url = _extract_crts_csv_url(text, getattr(response, "url", CRTS_CGI_BASE_URL) or CRTS_CGI_BASE_URL)
     if not csv_url:
-        raise RuntimeError(f"CRTS {catalog} response did not include a CSV download link")
+        return pd.DataFrame()
 
     csv_response = requests.get(csv_url, timeout=VETTING_HTTP_TIMEOUT)
     csv_response.raise_for_status()
@@ -4080,8 +5245,12 @@ def fetch_external_lcs(
     run_gaia_epoch: bool = True,
     run_tess: bool = True,
     run_neowise: bool = True,
-    run_kepler: bool = False,
-    run_aavso: bool = False,
+    run_kepler: bool = True,
+    run_aavso: bool = True,
+    run_ogle: bool = True,
+    run_stripe82: bool = True,
+    run_allwise_mep: bool = True,
+    run_vvvx_virac: bool = True,
     run_ps1: bool = True,
     run_crts: bool = True,
     atlas_token: str | None = None,
@@ -4131,6 +5300,10 @@ def fetch_external_lcs(
         "NEOWISE LCs": "neowise_n_epochs",
         "Kepler LCs": "kepler_n_quarters",
         "AAVSO LCs": "aavso_lc_n_points",
+        "OGLE LCs": "ogle_lc_n_points",
+        "Stripe 82 LCs": "stripe82_lc_n_points",
+        "AllWISE MEP LCs": "allwise_mep_n_epochs",
+        "VVVX/VIRAC2 LCs": "vvvx_virac_n_epochs",
         "Pan-STARRS LCs": "ps1_lc_n_points",
         "CRTS LCs": "crts_lc_n_points",
     }
@@ -4196,6 +5369,18 @@ def fetch_external_lcs(
 
     if run_aavso:
         _run_module("AAVSO LCs", fetch_aavso_lightcurves, output_dir=output_dir, workers=workers, refresh_cache=refresh_cache)
+
+    if run_ogle:
+        _run_module("OGLE LCs", fetch_ogle_lightcurves, output_dir=output_dir, workers=workers, refresh_cache=refresh_cache)
+
+    if run_stripe82:
+        _run_module("Stripe 82 LCs", fetch_stripe82_lightcurves, output_dir=output_dir, refresh_cache=refresh_cache)
+
+    if run_allwise_mep:
+        _run_module("AllWISE MEP LCs", fetch_allwise_mep_lightcurves, output_dir=output_dir, workers=workers, refresh_cache=refresh_cache)
+
+    if run_vvvx_virac:
+        _run_module("VVVX/VIRAC2 LCs", fetch_vvvx_virac_lightcurves, output_dir=output_dir, workers=min(workers, 2), refresh_cache=refresh_cache)
 
     if run_ps1:
         _run_module("Pan-STARRS LCs", fetch_panstarrs_lightcurves, output_dir=output_dir, workers=workers, refresh_cache=refresh_cache)
@@ -4693,7 +5878,7 @@ def main():
 
     # Load input
     path = args.input.expanduser()
-    df = read_parquet_table(path)
+    df = read_feature_table(path)
 
     print(f"Loaded {len(df)} candidates from {path}")
 
@@ -4758,7 +5943,7 @@ def main():
 
     # Save output
     out_path = args.output or path.with_name(path.stem + "_vetted.parquet")
-    write_parquet_table(df, out_path)
+    write_feature_table(df, out_path)
     print(f"\nSaved vetted results to {out_path}")
 
     # Clean up checkpoint on successful completion.

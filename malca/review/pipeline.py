@@ -20,6 +20,7 @@ from malca.config import (
     SIGNIFICANCE_THRESHOLD, P_POINTS, MAG_POINTS,
     RUN_MIN_POINTS, RUN_MAX_GAP_POINTS, BASELINE_FUNC,
 )
+from malca.feature_layers import feature_mapping_get, to_layer_first_mapping
 from malca.review.stats_merge import merge_stats_summary_into_payload as _merge_stats_summary_into_payload
 from malca.review.store import _CANDIDATE_COLUMNS, _as_bool, _to_float
 
@@ -107,6 +108,12 @@ STAGE_SIGNATURES: dict[str, list[str]] = {
         "gaia_epoch_lc_n_g",
         "tess_n_sectors",
         "neowise_n_epochs",
+        "kepler_n_quarters",
+        "aavso_lc_n_points",
+        "ogle_lc_n_points",
+        "stripe82_lc_n_points",
+        "allwise_mep_n_epochs",
+        "vvvx_virac_n_epochs",
         "ps1_lc_n_points",
         "crts_lc_n_points",
     ],
@@ -119,28 +126,22 @@ STAGE_SIGNATURES: dict[str, list[str]] = {
 
 
 def _coordinate_value(payload: dict, key: str) -> object | None:
-    value = payload.get(key)
+    value = feature_mapping_get(payload, key)
     return value if _to_float(value) is not None else None
 
 
 def _normalize_coordinate_aliases(payload: dict) -> None:
-    """Keep both coordinate naming conventions available to stage runners."""
-    ra_deg = _coordinate_value(payload, "ra_deg")
-    dec_deg = _coordinate_value(payload, "dec_deg")
+    """Keep canonical coordinates available for stage runners."""
     ra = _coordinate_value(payload, "ra")
     dec = _coordinate_value(payload, "dec")
-    if ra_deg is None and ra is not None:
-        payload["ra_deg"] = ra
-    if dec_deg is None and dec is not None:
-        payload["dec_deg"] = dec
-    if ra is None and ra_deg is not None:
-        payload["ra"] = ra_deg
-    if dec is None and dec_deg is not None:
-        payload["dec"] = dec_deg
+    if ra is not None:
+        payload["ra"] = ra
+    if dec is not None:
+        payload["dec"] = dec
 
 
 def _has_coordinates(payload: dict) -> bool:
-    return _coordinate_value(payload, "ra_deg") is not None and _coordinate_value(payload, "dec_deg") is not None
+    return _coordinate_value(payload, "ra") is not None and _coordinate_value(payload, "dec") is not None
 
 
 def detect_pipeline_status(payload: dict) -> dict[str, str]:
@@ -163,9 +164,9 @@ def detect_pipeline_status(payload: dict) -> dict[str, str]:
 
     for stage, sig_cols in STAGE_SIGNATURES.items():
         if stage == "multi_survey_features":
-            status_value = str(payload.get("ms_feature_status") or "").strip().lower()
-            event_type = str(payload.get("ms_event_type") or "").strip()
-            has_t0 = _is_present(payload.get("ms_event_t0_jd"))
+            status_value = str(feature_mapping_get(payload, "ms_feature_status") or "").strip().lower()
+            event_type = str(feature_mapping_get(payload, "ms_event_type") or "").strip()
+            has_t0 = _is_present(feature_mapping_get(payload, "ms_event_t0_jd"))
             if not status_value:
                 result[stage] = "missing"
             elif status_value == "ok":
@@ -174,7 +175,7 @@ def detect_pipeline_status(payload: dict) -> dict[str, str]:
                 result[stage] = "complete" if event_type else "partial"
             continue
 
-        present = sum(1 for c in sig_cols if c in payload and _is_present(payload[c]))
+        present = sum(1 for c in sig_cols if _is_present(feature_mapping_get(payload, c)))
         if present == 0:
             result[stage] = "missing"
         elif present == len(sig_cols):
@@ -196,7 +197,7 @@ def detect_sed_photometry_status(conn: sqlite3.Connection, candidate_id: str, pa
     count = int(row[0] or 0) if row else 0
     if count > 0:
         return "complete"
-    if isinstance(payload, dict) and bool(payload.get("sed_photometry_checked")):
+    if isinstance(payload, dict) and bool(feature_mapping_get(payload, "sed_photometry_checked")):
         return "complete"
     return "missing"
 
@@ -241,8 +242,10 @@ def run_missing_stages(
         raise ValueError(f"Candidate {candidate_id} not found in DB")
 
     payload = json.loads(row[0]) if row[0] else {}
+    if not isinstance(payload, dict):
+        payload = {}
     _normalize_coordinate_aliases(payload)
-    lc_path = row[1] or payload.get("lc_path")
+    lc_path = row[1] or feature_mapping_get(payload, "lc_path")
 
     # 2. Detect current status
     status = detect_pipeline_status(payload)
@@ -379,10 +382,13 @@ def update_candidate_payload(
     if row is None:
         return
     existing = json.loads(row[0]) if row[0] else {}
+    if not isinstance(existing, dict):
+        existing = {}
     existing.update(updates)
+    payload_json = to_layer_first_mapping(existing, layer_values_as_json=False)
     conn.execute(
         "UPDATE candidates SET payload_json = ? WHERE candidate_id = ?",
-        (json.dumps(existing, default=str), candidate_id),
+        (json.dumps(payload_json, default=str), candidate_id),
     )
 
     # Also update extracted columns if they match _CANDIDATE_COLUMNS
@@ -624,8 +630,12 @@ def _run_external_lcs_stage(
                 run_gaia_epoch=True,
                 run_tess=True,
                 run_neowise=True,
-                run_kepler=False,
-                run_aavso=False,
+                run_kepler=True,
+                run_aavso=True,
+                run_ogle=True,
+                run_stripe82=True,
+                run_allwise_mep=True,
+                run_vvvx_virac=True,
                 run_ps1=True,
                 run_crts=True,
                 refresh_cache=refresh_cache,

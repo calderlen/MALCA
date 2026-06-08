@@ -48,6 +48,7 @@ from malca.config import (
     BASELINE_FUNC, BASELINE_S0, BASELINE_W0, BASELINE_Q, BASELINE_JITTER,
 )
 from malca.cli_config import add_config_args, apply_config, namespace_keys
+from malca.feature_layers import is_layer_first_frame, to_layer_first_frame
 from malca.stv.score import compute_event_score
 from malca.stats import log_gaussian, median_dt, bic
 from malca.stv.triggering import resolve_trigger_indices
@@ -181,10 +182,10 @@ EVENTS_CORE_COLUMNS: tuple[str, ...] = (
     "asassn_fields",
     "asassn_field_count",
     "asassn_field_key_fraction",
-    "camera_field_key",
-    "camera_fields",
-    "camera_field_count",
-    "camera_field_key_fraction",
+    "camera_name_key",
+    "camera_names",
+    "camera_name_count",
+    "camera_name_key_fraction",
     "dipper_score",
     "dipper_n_dips",
     "dipper_n_valid_dips",
@@ -247,7 +248,7 @@ EVENTS_INT_COLUMNS: frozenset[str] = frozenset(
         "camera_min_points",
         "camera_max_points",
         "asassn_field_count",
-        "camera_field_count",
+        "camera_name_count",
         "dipper_n_dips",
         "dipper_n_valid_dips",
         "jumper_n_jumps",
@@ -266,8 +267,8 @@ EVENTS_STRING_COLUMNS: frozenset[str] = frozenset(
         "camera_ids",
         "asassn_field_key",
         "asassn_fields",
-        "camera_field_key",
-        "camera_fields",
+        "camera_name_key",
+        "camera_names",
         "baseline_source",
         "trigger_mode",
         "bad_cameras_filtered",
@@ -1915,10 +1916,10 @@ def process_lightcurve(
         asassn_fields=str(field_summary.get("asassn_fields", "")),
         asassn_field_count=int(field_summary.get("asassn_field_count") or 0),
         asassn_field_key_fraction=float(field_summary.get("asassn_field_key_fraction", np.nan)),
-        camera_field_key=str(field_summary.get("camera_field_key", "")),
-        camera_fields=str(field_summary.get("camera_fields", "")),
-        camera_field_count=int(field_summary.get("camera_field_count") or 0),
-        camera_field_key_fraction=float(field_summary.get("camera_field_key_fraction", np.nan)),
+        camera_name_key=str(field_summary.get("camera_name_key", "")),
+        camera_names=str(field_summary.get("camera_names", "")),
+        camera_name_count=int(field_summary.get("camera_name_count") or 0),
+        camera_name_key_fraction=float(field_summary.get("camera_name_key_fraction", np.nan)),
 
         dipper_score=float(dipper_score),
         dipper_n_dips=int(dipper_n_dips),
@@ -2297,6 +2298,7 @@ def main():
                 self.schema_columns,
                 column_kinds=self.column_kinds,
             )
+            df_chunk = to_layer_first_frame(df_chunk)
             self.path.parent.mkdir(parents=True, exist_ok=True)
             if self.append:
                 try:
@@ -2305,17 +2307,15 @@ def main():
                     _log(f"Warning: could not read existing {self.path}, starting fresh: {e}", False)
                     existing_df = None
                 if existing_df is not None:
-                    existing_df = normalize_events_frame(
-                        existing_df,
-                        self.schema_columns,
-                        column_kinds=self.column_kinds,
-                    )
+                    if not is_layer_first_frame(existing_df):
+                        existing_df = normalize_events_frame(
+                            existing_df,
+                            self.schema_columns,
+                            column_kinds=self.column_kinds,
+                        )
+                        existing_df = to_layer_first_frame(existing_df)
                     df_chunk = pd.concat([existing_df, df_chunk], ignore_index=True, sort=False)
-            table = events_table_from_frame(
-                df_chunk,
-                self.schema_columns,
-                column_kinds=self.column_kinds,
-            )
+            table = pa.Table.from_pandas(df_chunk, preserve_index=False)
             tmp_path = self.path.with_suffix('.parquet.tmp')
             pq.write_table(table, tmp_path, compression=PARQUET_OUTPUT_COMPRESSION)
             os.replace(tmp_path, self.path)
@@ -2348,11 +2348,13 @@ def main():
         def write_chunk(self, chunk_results):
             if not chunk_results:
                 return
-            table = events_table_from_frame(
+            df_chunk = normalize_events_frame(
                 pd.DataFrame(chunk_results),
                 self.schema_columns,
                 column_kinds=self.column_kinds,
             )
+            df_chunk = to_layer_first_frame(df_chunk)
+            table = pa.Table.from_pandas(df_chunk, preserve_index=False)
             tmp_path = self.path / f"chunk_{self.counter:06d}.parquet.tmp"
             final_path = self.path / f"chunk_{self.counter:06d}.parquet"
             pq.write_table(table, tmp_path, compression=PARQUET_OUTPUT_COMPRESSION)

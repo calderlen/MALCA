@@ -12,11 +12,25 @@ import pandas as pd
 
 from malca.candidates import select_passing_candidates_if_present
 from malca.config import GAIA_TCB_EPOCH_JD, MJD_TO_JD, SKYPATROL_JD_OFFSET, TESS_BTJD_OFFSET
+from malca.feature_layers import with_feature_columns
 from malca.lightcurve_io import load_lightcurve_df
-from malca.table_io import read_parquet_table, write_parquet_table
+from malca.table_io import read_feature_table, write_feature_table
 
 
 MS_FEATURE_VERSION = "1"
+EVENT_WINDOW_COLUMNS = (
+    "failed_any",
+    "dip_best_t0",
+    "dip_significant",
+    "dip_bayes_factor",
+    "dip_best_width_param",
+    "dip_max_run_duration",
+    "jump_best_t0",
+    "jump_significant",
+    "jump_bayes_factor",
+    "jump_best_width_param",
+    "jump_max_run_duration",
+)
 
 MS_FEATURE_COLUMN_SPECS: tuple[tuple[str, str, str], ...] = (
     ("ms_feature_status", "TEXT", "text"),
@@ -724,14 +738,14 @@ def run(args: argparse.Namespace) -> Path:
     output_path = (args.output or _default_output_path(input_path)).expanduser()
     external_lc_dir = (args.external_lc_dir or input_path.parent).expanduser()
 
-    df = _ensure_candidate_id(read_parquet_table(input_path))
+    df = with_feature_columns(_ensure_candidate_id(read_feature_table(input_path)), EVENT_WINDOW_COLUMNS)
     if not getattr(args, "all_candidates", False):
         df = select_passing_candidates_if_present(df, printer=print)
     print(f"Loaded {len(df)} candidates from {input_path}")
     print(f"Reading external LC files from {external_lc_dir}")
     out = compute_multi_survey_features(df, external_lc_dir=external_lc_dir)
 
-    write_parquet_table(out, output_path)
+    write_feature_table(out, output_path)
     print(f"Saved multi-survey feature table to {output_path}")
 
     if args.review_db:

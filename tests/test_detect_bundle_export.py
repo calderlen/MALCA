@@ -7,6 +7,7 @@ import pandas as pd
 
 from malca.config import ASASSN_INDEX_PATH
 from malca.stv.pipeline import _resolve_asassn_index_path, export_bundle_zip
+from malca.table_io import write_feature_table
 
 
 def _write_text(path: Path, content: str) -> None:
@@ -25,7 +26,16 @@ def test_export_bundle_includes_candidate_dat2_and_raw2(tmp_path: Path) -> None:
     _write_text(dat2_path, "dat2 content\n")
     _write_text(raw2_path, "raw2 content\n")
 
-    pd.DataFrame({"lc_path": [str(dat2_path)]}).to_parquet(results_dir / "lc_events_filtered.parquet", index=False)
+    write_feature_table(
+        pd.DataFrame(
+            {
+                "candidate_id": ["stv_ASASSN-TEST-001"],
+                "timescale": ["stv"],
+                "lc_path": [str(dat2_path)],
+            }
+        ),
+        results_dir / "lc_events_filtered.parquet",
+    )
 
     bundle_zip = tmp_path / "bundle.zip"
     bundled = export_bundle_zip(bundle_zip, out_dir)

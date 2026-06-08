@@ -10,9 +10,12 @@ from pathlib import Path
 
 import pandas as pd
 
+from malca.feature_layers import with_feature_columns
+from malca.table_io import read_feature_table
 
-DEFAULT_COLUMNS = ("path", "asas_sn_id", "mag_bin", "ra_deg", "dec_deg")
-DEFAULT_KEY_COLUMNS = ("asas_sn_id", "candidate_id", "source_id", "id")
+
+DEFAULT_COLUMNS = ("lc_path", "asas_sn_id", "mag_bin", "ra", "dec")
+DEFAULT_KEY_COLUMNS = ("asas_sn_id", "candidate_id", "source_id", "gaia_id", "id")
 MAG_BIN_RE = re.compile(r"/(\d+(?:\.\d+)?_\d+(?:\.\d+)?)(?:/|$)")
 INTEGER_FLOAT_RE = re.compile(r"^([+-]?\d+)\.0+$")
 
@@ -24,7 +27,7 @@ def _read_table(path: Path) -> pd.DataFrame:
     if suffix == ".csv":
         return pd.read_csv(path, dtype=str, keep_default_na=False)
     if suffix == ".parquet" or path.is_dir():
-        return pd.read_parquet(path)
+        return read_feature_table(path)
     raise ValueError(f"Unsupported input type: {path}")
 
 
@@ -72,8 +75,8 @@ def _ensure_asas_sn_id(df: pd.DataFrame, key: str) -> pd.DataFrame:
     if "asas_sn_id" not in out.columns:
         if key in out.columns:
             out["asas_sn_id"] = out[key].astype(str)
-        elif "path" in out.columns:
-            out["asas_sn_id"] = out["path"].map(_id_from_path)
+        elif "lc_path" in out.columns:
+            out["asas_sn_id"] = out["lc_path"].map(_id_from_path)
     if "asas_sn_id" in out.columns:
         out["asas_sn_id"] = out["asas_sn_id"].astype(str).str.strip()
     return out
@@ -82,8 +85,8 @@ def _ensure_asas_sn_id(df: pd.DataFrame, key: str) -> pd.DataFrame:
 def _ensure_mag_bin(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     if "mag_bin" not in out.columns:
-        if "path" in out.columns:
-            out["mag_bin"] = out["path"].map(_mag_bin_from_path)
+        if "lc_path" in out.columns:
+            out["mag_bin"] = out["lc_path"].map(_mag_bin_from_path)
         else:
             out["mag_bin"] = ""
     return out
@@ -97,12 +100,14 @@ def _merge_coordinates_from_characterized(
 ) -> pd.DataFrame:
     if characterized_path is None or not characterized_path.exists():
         return candidates
-    if {"ra_deg", "dec_deg"}.issubset(candidates.columns) and candidates[["ra_deg", "dec_deg"]].notna().any().any():
+    candidates = with_feature_columns(candidates, ["ra", "dec"])
+    if {"ra", "dec"}.issubset(candidates.columns) and candidates[["ra", "dec"]].notna().any().any():
         return candidates
+    candidates = candidates.drop(columns=[c for c in ("ra", "dec") if c in candidates.columns])
 
-    characterized = _read_table(characterized_path)
+    characterized = with_feature_columns(_read_table(characterized_path), ["ra", "dec"])
     char_key = key if key in characterized.columns else _choose_key(characterized, None)
-    coord_cols = [c for c in ("ra_deg", "dec_deg") if c in characterized.columns]
+    coord_cols = [c for c in ("ra", "dec") if c in characterized.columns]
     if not coord_cols:
         return candidates
 

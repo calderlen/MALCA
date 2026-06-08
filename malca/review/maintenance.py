@@ -17,7 +17,7 @@ from malca.review.store import (
     merge_candidate_results,
     merge_vetting_results,
 )
-from malca.table_io import read_parquet_table
+from malca.table_io import read_feature_table, read_parquet_table
 from malca.vsx.filter import colspecs as VSX_COLSPECS, vsx_columns as VSX_COLUMNS
 from malca.vsx.metadata import normalize_vsx_match_columns, select_best_vsx_matches
 
@@ -221,7 +221,7 @@ def main() -> None:
             input_path = args.input.expanduser().resolve()
             if not input_path.exists():
                 raise SystemExit(f"Input file not found: {input_path}")
-            df = read_parquet_table(input_path)
+            df = read_feature_table(input_path)
             updated = merge_vetting_results(conn, df)
         elif args.command == "merge-candidates":
             input_path = args.input.expanduser().resolve()

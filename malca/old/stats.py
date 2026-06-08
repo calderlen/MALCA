@@ -245,7 +245,7 @@ def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=Tr
     by_camera  = per_group_stats(df.groupby("camera_name"), "camera")
     by_field   = per_group_stats(df.groupby("field"), "field")
     by_band    = per_group_stats(df.groupby("v_g_band"), "v_g_band")
-    by_camfld  = per_group_stats(df.groupby(["camera_name","field"]), "camera_field")
+    by_camera_and_field = per_group_stats(df.groupby(["camera_name","field"]), "camera_and_field")
 
     # cadence distributions per camera
     def per_cam_cadence(d):
@@ -306,7 +306,7 @@ def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=Tr
         ("by_camera", by_camera),
         ("by_field", by_field),
         ("by_band", by_band),
-        ("by_camera_field", by_camfld),
+        ("by_camera_and_field", by_camera_and_field),
         ("cadence_by_camera", cadence_by_camera),
         ("nightly_table", nightly),
         ("seasons", pd.DataFrame(seasons)),
@@ -355,7 +355,7 @@ def print_summary(summary, max_rows=10):
     print("\n=== BY BAND (all) ===")
     print(headframe(summary["by_band"]))
     print("\n=== BY CAMERA+FIELD (top) ===")
-    print(headframe(summary["by_camera_field"]))
+    print(headframe(summary["by_camera_and_field"]))
 
     print("\n=== CADENCE BY CAMERA ===")
     print(headframe(summary["cadence_by_camera"]))
@@ -375,8 +375,7 @@ def load_dat(path, has_header=False):
             "camera#",
             "v_g_band",
             "saturated",
-            "camera_name",
-            "field"]    
+            "cam_field"]
     kw = dict(sep=r"\s+", comment="#", engine="python")
     if has_header:
         df = pd.read_csv(path, **kw)
@@ -385,6 +384,14 @@ def load_dat(path, has_header=False):
             df.columns = names[:len(df.columns)]
     else:
         df = pd.read_csv(path, header=None, names=names, **kw)
+
+    if "cam_field" in df.columns:
+        split = df["cam_field"].astype("string").str.split("/", n=1, expand=True)
+        if split.shape[1] >= 1:
+            df["camera_name"] = split[0].fillna("").astype(str).str.strip()
+        if split.shape[1] >= 2:
+            df["field"] = split[1].fillna("").astype(str).str.strip()
+        df = df.drop(columns=["cam_field"])
 
     return df
 

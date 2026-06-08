@@ -462,7 +462,7 @@ def resolve_time_axis(
         if "mjd" in norm_col:
             return raw, "MJD"
         if "jd" in norm_col and np.isfinite(median) and median < 100000:
-            return raw, "JD - 2450000"
+            return raw, "JD - 2450000 [d]"
         return raw, f"{source_column} [days]"
 
     if requested == "auto":
@@ -470,15 +470,15 @@ def resolve_time_axis(
             return raw, "MJD"
         if "jd" in norm_col:
             if np.isfinite(median) and median > 2000000:
-                return raw - JD_OFFSET, "JD - 2450000"
-            return raw, "JD - 2450000"
+                return raw - JD_OFFSET, "JD - 2450000 [d]"
+            return raw, "JD - 2450000 [d]"
         return raw, f"{source_column} [days]"
 
     try:
         numeric_offset = float(requested)
     except ValueError as exc:
         raise ValueError("--time-offset must be 'auto', 'none', or a numeric value") from exc
-    return raw - numeric_offset, f"{source_column} - {numeric_offset:g}"
+    return raw - numeric_offset, f"{source_column} - {numeric_offset:g} [d]"
 
 
 def _group_label(row: pd.Series, group_by: str) -> str:

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 import math
 import re
 from urllib.parse import urlencode
 
+from malca.feature_layers import FEATURE_LAYER_COLUMNS, parse_layer_value
 from malca.nuclear.targets import DEC_ALIASES, RA_ALIASES
 
 
@@ -15,6 +17,9 @@ SKYVIEW_URL = "https://skyview.gsfc.nasa.gov/current/cgi/runquery.pl"
 DEFAULT_CUTOUT_FOV_ARCSEC = 120.0
 DEFAULT_CUTOUT_SIZE_PX = 512
 DEFAULT_CUTOUT_SURVEY_KEY = "panstarrs-dr1-color"
+ASASSN_PIXEL_SCALE_ARCSEC = 8.0
+ASASSN_FWHM_PIXELS = 2.0
+ASASSN_FWHM_ARCSEC = ASASSN_PIXEL_SCALE_ARCSEC * ASASSN_FWHM_PIXELS
 
 
 @dataclass(frozen=True)
@@ -110,13 +115,46 @@ def _safe_float(value: object) -> float | None:
     return number
 
 
-def _first_payload_number(payload: dict, aliases: tuple[str, ...]) -> float | None:
+def _first_mapping_number(payload: Mapping[str, object], aliases: tuple[str, ...]) -> float | None:
     lower_lookup = {str(key).lower(): key for key in payload.keys()}
     for alias in aliases:
         key = alias if alias in payload else lower_lookup.get(alias.lower())
         if key is None:
             continue
         value = _safe_float(payload.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _iter_payload_coordinate_sources(payload: Mapping[str, object]):
+    """Yield mappings that may contain coordinates, including layer-first payloads."""
+    queue: list[tuple[Mapping[str, object], int]] = [(payload, 0)]
+    seen: set[int] = set()
+    while queue:
+        mapping, depth = queue.pop(0)
+        marker = id(mapping)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        yield mapping
+        if depth >= 3:
+            continue
+
+        for layer in FEATURE_LAYER_COLUMNS:
+            layer_payload = parse_layer_value(mapping.get(layer))
+            if layer_payload:
+                queue.append((layer_payload, depth + 1))
+
+        for nested_key in ("payload", "payload_json"):
+            nested_payload = parse_layer_value(mapping.get(nested_key))
+            if nested_payload:
+                queue.append((nested_payload, depth + 1))
+
+
+def _first_payload_number(payload: Mapping[str, object], aliases: tuple[str, ...]) -> float | None:
+    for mapping in _iter_payload_coordinate_sources(payload):
+        value = _first_mapping_number(mapping, aliases)
         if value is not None:
             return value
     return None
@@ -188,6 +226,22 @@ def _fov_arcsec(fov_arcsec: int | float) -> float:
     if value is None or value <= 0:
         return DEFAULT_CUTOUT_FOV_ARCSEC
     return max(1.0, min(7200.0, value))
+
+
+def asassn_fwhm_overlay_metadata(
+    *,
+    fov_arcsec: float,
+    size_px: int,
+) -> dict[str, float]:
+    """Return ASAS-SN FWHM overlay dimensions for the current cutout scale."""
+    fov = _fov_arcsec(fov_arcsec)
+    size = _image_size(size_px)
+    overlay_fraction = ASASSN_FWHM_ARCSEC / fov
+    return {
+        "asassn_fwhm_arcsec": ASASSN_FWHM_ARCSEC,
+        "asassn_fwhm_overlay_fraction": overlay_fraction,
+        "asassn_fwhm_overlay_px": overlay_fraction * float(size),
+    }
 
 
 def build_hips2fits_url(
@@ -289,6 +343,7 @@ def cutout_payload_for_candidate(
     survey = CUTOUT_SURVEY_BY_KEY[key]
     fov = _fov_arcsec(fov_arcsec)
     size = _image_size(size_px)
+    overlay_metadata = asassn_fwhm_overlay_metadata(fov_arcsec=fov, size_px=size)
     coords = candidate_coordinates(payload)
     if coords is None:
         return {
@@ -301,6 +356,7 @@ def cutout_payload_for_candidate(
             "source_url": "",
             "fov_arcsec": fov,
             "size_px": size,
+            **overlay_metadata,
             "coverage_warning": "",
             "message": "No RA/Dec available for survey cutout.",
         }
@@ -325,6 +381,7 @@ def cutout_payload_for_candidate(
         "source_url": image_url,
         "fov_arcsec": fov,
         "size_px": size,
+        **overlay_metadata,
         "coverage_warning": coverage_warning,
         "message": message,
     }

@@ -13,7 +13,7 @@ from malca.nuclear.redshift import resolve_redshift_spectral_types
 from malca.nuclear.scoring import score_nuclear_candidates
 from malca.nuclear.clagn_catalogs import load_known_clagn_catalogs, match_known_clagn_catalogs
 from malca.run_context import init_pipeline_run_context, write_run_params, write_run_summary
-from malca.table_io import write_parquet_table
+from malca.table_io import write_feature_table
 
 
 @dataclass
@@ -97,7 +97,7 @@ def _merge_summary(df: pd.DataFrame, summary: pd.DataFrame) -> pd.DataFrame:
 
 
 def _write_stage(df: pd.DataFrame, config: NuclearContextConfig, name: str) -> None:
-    write_parquet_table(df, config.results_dir / f"nuclear_{name}.parquet")
+    write_feature_table(df, config.results_dir / f"nuclear_{name}.parquet")
 
 
 def _run_dataframe_stage(
@@ -308,8 +308,8 @@ def run_nuclear_context(df: pd.DataFrame, config: NuclearContextConfig | None = 
     if config.run_scores:
         out = _run_dataframe_stage(out, stage="scores", config=config, func=score_nuclear_candidates)
 
-    write_parquet_table(out, config.results_dir / "nuclear_context.parquet")
-    write_parquet_table(out, config.results_dir / "nuclear_scores.parquet")
+    write_feature_table(out, config.results_dir / "nuclear_context.parquet")
+    write_feature_table(out, config.results_dir / "nuclear_scores.parquet")
     write_run_summary(
         ctx,
         {

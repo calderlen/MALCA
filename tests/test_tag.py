@@ -76,7 +76,7 @@ def test_apply_tags_honors_file_extension_override(tmp_path: Path) -> None:
     assert out.loc[0, "asassn_field_key"] == "field1"
     assert out.loc[0, "asassn_fields"] == "field1"
     assert int(out.loc[0, "asassn_field_count"]) == 1
-    assert out.loc[0, "camera_field_key"] == "cam1/field1"
+    assert out.loc[0, "camera_name_key"] == "cam1"
 
 
 def test_compute_stats_parallel_writes_incremental_checkpoint_parts(tmp_path: Path) -> None:

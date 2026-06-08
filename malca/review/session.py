@@ -8,6 +8,7 @@ from malca.review.store import count_queue, query_queue
 _QUEUE_SCOPE_KEYS = {
     "source_path",
     "source_paths",
+    "source_path_fallback_like_any",
     "source_path_like",
     "source_path_like_any",
 }

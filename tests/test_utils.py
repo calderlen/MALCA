@@ -40,10 +40,10 @@ def test_compute_field_summary_single_field() -> None:
     assert out["asassn_fields"] == "field1"
     assert out["asassn_field_count"] == 1
     assert out["asassn_field_key_fraction"] == 1.0
-    assert out["camera_field_key"] == "cam1/field1"
-    assert out["camera_fields"] == "cam1/field1,cam2/field1"
-    assert out["camera_field_count"] == 2
-    assert out["camera_field_key_fraction"] == 2 / 3
+    assert out["camera_name_key"] == "cam1"
+    assert out["camera_names"] == "cam1,cam2"
+    assert out["camera_name_count"] == 2
+    assert out["camera_name_key_fraction"] == 2 / 3
 
 
 def test_compute_field_summary_mixed_fields() -> None:
@@ -79,6 +79,10 @@ def test_compute_field_summary_ties_are_deterministic() -> None:
     assert out["asassn_field_key"] == "fieldA"
     assert out["asassn_fields"] == "fieldA,fieldB"
     assert out["asassn_field_key_fraction"] == 0.5
+    assert out["camera_name_key"] == "cam1"
+    assert out["camera_names"] == "cam1,cam2,cam3,cam4"
+    assert out["camera_name_count"] == 4
+    assert out["camera_name_key_fraction"] == 0.25
 
 
 def test_filter_bad_cameras_flags_isolated_catastrophic_camera():

@@ -5,6 +5,7 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 
 from malca.review.cutouts import (
+    ASASSN_FWHM_ARCSEC,
     CUTOUT_SURVEY_BY_KEY,
     DEFAULT_CUTOUT_FOV_ARCSEC,
     DEFAULT_CUTOUT_SIZE_PX,
@@ -66,6 +67,51 @@ def test_candidate_coordinates_use_existing_aliases() -> None:
     assert coords == (12.5, -4.25)
 
 
+def test_candidate_coordinates_use_layer_first_external_stats() -> None:
+    coords = candidate_coordinates(
+        {
+            "candidate_id": "C1",
+            "external_stats": {"ra": "12.5", "dec": "-4.25"},
+        }
+    )
+
+    assert coords == (12.5, -4.25)
+
+
+def test_candidate_coordinates_use_json_layer_aliases() -> None:
+    coords = candidate_coordinates(
+        {
+            "candidate_id": "C1",
+            "ra": "",
+            "dec": "",
+            "external_stats": '{"ra_deg":240.48595227,"dec_deg":20.0}',
+        }
+    )
+
+    assert coords == (240.48595227, 20.0)
+
+
+def test_cutout_payload_uses_nested_payload_json_coordinates() -> None:
+    cutout = cutout_payload_for_candidate(
+        {
+            "candidate_id": "C1",
+            "payload_json": '{"ra":240.48595227,"dec":20.0}',
+        }
+    )
+
+    assert cutout["has_coordinates"] is True
+    assert "PanSTARRS DR1 color" in str(cutout["message"])
+    assert "CDS%2FP%2FPanSTARRS%2FDR1%2Fcolor-i-r-g" in str(cutout["image_url"])
+
+
+def test_cutout_payload_includes_asassn_fwhm_overlay_metadata() -> None:
+    cutout = cutout_payload_for_candidate({"candidate_id": "C1", "ra": 10.0, "dec": 20.0})
+
+    assert cutout["asassn_fwhm_arcsec"] == pytest.approx(ASASSN_FWHM_ARCSEC)
+    assert cutout["asassn_fwhm_overlay_fraction"] == pytest.approx(16.0 / 120.0)
+    assert cutout["asassn_fwhm_overlay_px"] == pytest.approx((16.0 / 120.0) * 512.0)
+
+
 def test_missing_or_invalid_coordinates_return_empty_cutout_payload() -> None:
     missing = cutout_payload_for_candidate({"candidate_id": "C1"})
     invalid = cutout_payload_for_candidate({"ra": 361.0, "dec": 0.0})
@@ -73,6 +119,7 @@ def test_missing_or_invalid_coordinates_return_empty_cutout_payload() -> None:
     assert missing["has_coordinates"] is False
     assert missing["image_url"] == ""
     assert "RA/Dec" in str(missing["message"])
+    assert missing["asassn_fwhm_arcsec"] == pytest.approx(ASASSN_FWHM_ARCSEC)
     assert invalid["has_coordinates"] is False
     assert invalid["image_url"] == ""
 

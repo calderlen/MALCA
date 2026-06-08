@@ -43,7 +43,7 @@ from malca.config import (
     CLASSIFY_IPHAS_RADIUS_ARCSEC, CLASSIFY_PS1_RADIUS_ARCSEC,
 )
 from malca.candidates import select_passing_candidates_if_present
-from malca.table_io import read_parquet_table, write_parquet_table
+from malca.table_io import read_feature_table, write_feature_table
 from malca.config import VIZIER_TAP_URL
 from malca.utils import batch_tap_crossmatch
 
@@ -639,7 +639,7 @@ def main():
     
     # Load
     print(f"Loading {args.input}...")
-    df = read_parquet_table(args.input)
+    df = read_feature_table(args.input)
     if not getattr(args, "all_candidates", False):
         df = select_passing_candidates_if_present(df, printer=print)
     
@@ -664,7 +664,7 @@ def main():
     
     # Save
     print(f"\nSaving to {args.output}...")
-    write_parquet_table(df, args.output)
+    write_feature_table(df, args.output)
     
     print("Done!")
 

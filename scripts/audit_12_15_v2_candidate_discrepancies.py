@@ -12,6 +12,8 @@ from typing import Iterable
 
 import pandas as pd
 
+from malca.table_io import read_feature_table
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -188,7 +190,7 @@ def candidate_counts_by_mag_bin(candidates: pd.DataFrame) -> pd.DataFrame:
 def read_provenance_ids(path: Path) -> pd.DataFrame:
     for column in ("asas_sn_id", "candidate_id", "source_id", "path"):
         try:
-            df = pd.read_parquet(path, columns=[column])
+            df = read_feature_table(path, columns=[column])
         except Exception:
             continue
         out = pd.DataFrame()

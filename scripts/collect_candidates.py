@@ -13,6 +13,8 @@ from pathlib import Path
 import pandas as pd
 import pyarrow.parquet as pq
 
+from malca.table_io import read_feature_table, write_feature_table
+
 
 def find_best_parquet(run_dir: Path, mag_bin: str) -> Path | None:
     """Return the most-enriched upstream parquet in a run directory.
@@ -115,7 +117,7 @@ def main():
             print(f"  Skipping {run_dir.name}: no enriched/filtered parquet found")
             continue
 
-        df = pd.read_parquet(pq_path)
+        df = read_feature_table(pq_path)
         source = "enriched" if "enriched" in pq_path.name else "filtered"
         print(f"  {run_dir.name}: {len(df)} rows from {source}")
 
@@ -190,7 +192,7 @@ def main():
 
     # Write output
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    combined.to_parquet(args.output, index=False)
+    write_feature_table(combined, args.output)
     print(f"\nWrote {len(combined)} candidates to {args.output}")
 
 

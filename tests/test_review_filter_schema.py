@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from malca.feature_layers import ALL_FEATURE_LAYER_COLUMNS
 from malca.review.filter_schema import (
     REVIEW_FILTER_COLUMN_TYPES,
     REVIEW_TAXONOMY_FILTER_COLUMNS,
@@ -24,7 +25,7 @@ from malca.review.store import (
 def test_sidebar_schema_is_complete_and_explicit_for_db_columns() -> None:
     sidebar_cols = [col for _name, items in SIDEBAR_GROUPS for _kind, col in items]
     candidate_col_types = {col: extract_type for col, _sql_type, extract_type in _CANDIDATE_COLUMNS}
-    candidate_cols = set(candidate_col_types)
+    candidate_cols = set(candidate_col_types) - set(ALL_FEATURE_LAYER_COLUMNS)
     allowed_cols = candidate_cols | set(REVIEW_FILTER_COLUMN_TYPES)
     filter_to_store_type = {"bool": "bool", "num": "float", "text": "text", "select": "select"}
 

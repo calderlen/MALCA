@@ -279,6 +279,25 @@ def fetch_asassn_variable_catalog(
         raise RuntimeError(f"Failed to fetch ASAS-SN variable catalog from VizieR: {e}") from e
 
 
+def _parse_vizier_coordinates(cat: pd.DataFrame, ra_col: str = "RAJ2000", dec_col: str = "DEJ2000") -> tuple[pd.Series, pd.Series]:
+    ra = pd.to_numeric(cat.get(ra_col), errors="coerce")
+    dec = pd.to_numeric(cat.get(dec_col), errors="coerce")
+    missing = ra.isna() | dec.isna()
+    if missing.any() and ra_col in cat.columns and dec_col in cat.columns:
+        try:
+            coords = SkyCoord(
+                cat.loc[missing, ra_col].astype(str).to_numpy(),
+                cat.loc[missing, dec_col].astype(str).to_numpy(),
+                unit=(u.hourangle, u.deg),
+                frame="icrs",
+            )
+            ra.loc[missing] = coords.ra.deg
+            dec.loc[missing] = coords.dec.deg
+        except Exception:
+            pass
+    return ra, dec
+
+
 def fetch_ogle_periodic_catalog(
     cache_dir: Path | None = None,
     force_download: bool = False,
@@ -290,9 +309,17 @@ def fetch_ogle_periodic_catalog(
     cache_file = cache_dir / "ogle_ii213_pvar.parquet"
 
     if cache_file.exists() and not force_download:
+        cached = pd.read_parquet(cache_file)
+        valid_coords = (
+            pd.to_numeric(cached.get("ra"), errors="coerce").notna()
+            & pd.to_numeric(cached.get("dec"), errors="coerce").notna()
+        )
+        if valid_coords.any():
+            if show_tqdm:
+                tqdm.write(f"[fetch_ogle] Loading cached catalog from {cache_file}")
+            return cached
         if show_tqdm:
-            tqdm.write(f"[fetch_ogle] Loading cached catalog from {cache_file}")
-        return pd.read_parquet(cache_file)
+            tqdm.write(f"[fetch_ogle] Cached catalog at {cache_file} has no usable coordinates; refreshing")
 
     if show_tqdm:
         tqdm.write("[fetch_ogle] Querying VizieR II/213/pvar...")
@@ -304,11 +331,12 @@ def fetch_ogle_periodic_catalog(
             raise ValueError("No tables returned from VizieR query")
 
         cat = tables[0].to_pandas()
+        ra, dec = _parse_vizier_coordinates(cat)
         df = pd.DataFrame(
             {
                 "source_name": cat.get("OGLE", pd.Series(index=cat.index)).astype(str),
-                "ra": pd.to_numeric(cat.get("RAJ2000"), errors="coerce"),
-                "dec": pd.to_numeric(cat.get("DEJ2000"), errors="coerce"),
+                "ra": ra,
+                "dec": dec,
                 "period": pd.to_numeric(cat.get("Per"), errors="coerce"),
                 "var_type": cat.get("Type", pd.Series(index=cat.index)).astype(str),
             }
@@ -515,6 +543,7 @@ def match_period_catalog(
     dec_col: str = "dec",
     candidate_asassn_ids: pd.Series | None = None,
     catalog_asassn_col: str | None = None,
+    source_name_col: str = "source_name",
     show_tqdm: bool = False,
 ) -> pd.DataFrame:
     """Match one catalog to candidates and return per-source period columns."""
@@ -523,21 +552,25 @@ def match_period_catalog(
     period = np.full(n0, np.nan, dtype=float)
     cls = np.array([""] * n0, dtype=object)
     sep = np.full(n0, np.nan, dtype=float)
+    source_name = np.array([""] * n0, dtype=object)
+    include_source_name = catalog_df is not None and source_name_col in getattr(catalog_df, "columns", [])
 
     if catalog_df is None or catalog_df.empty:
-        return pd.DataFrame(
-            {
-                f"period_{source_label}_match": match,
-                f"period_{source_label}_days": period,
-                f"period_{source_label}_class": cls,
-                f"period_{source_label}_sep_arcsec": sep,
-            },
-            index=df.index,
-        )
+        data = {
+            f"period_{source_label}_match": match,
+            f"period_{source_label}_days": period,
+            f"period_{source_label}_class": cls,
+            f"period_{source_label}_sep_arcsec": sep,
+        }
+        if include_source_name:
+            data[f"period_{source_label}_name"] = source_name
+        return pd.DataFrame(data, index=df.index)
 
     cat = catalog_df.copy()
     cat[period_col] = pd.to_numeric(cat[period_col], errors="coerce") if period_col in cat.columns else np.nan
     cat[class_col] = cat[class_col].fillna("").astype(str) if class_col in cat.columns else ""
+    if include_source_name:
+        cat[source_name_col] = cat[source_name_col].fillna("").astype(str)
 
     if gaia_col in cat.columns and "gaia_id" in df.columns:
         cand_gaia = pd.Series([parse_gaia_id_int(v) for v in df["gaia_id"].tolist()], index=df.index, dtype="object")
@@ -552,12 +585,15 @@ def match_period_catalog(
 
             mapped_period = cand_gaia.map(cat_valid[period_col])
             mapped_class = cand_gaia.map(cat_valid[class_col]).fillna("")
+            mapped_name = cand_gaia.map(cat_valid[source_name_col]).fillna("") if include_source_name else pd.Series("", index=df.index)
             valid_period = mapped_period.notna() & np.isfinite(mapped_period.to_numpy(dtype=float)) & (mapped_period.to_numpy(dtype=float) > 0)
             if valid_period.any():
                 idx_mask = valid_period.to_numpy()
                 match[idx_mask] = True
                 period[idx_mask] = mapped_period.loc[valid_period].to_numpy(dtype=float)
                 cls[idx_mask] = mapped_class.loc[valid_period].astype(str).to_numpy()
+                if include_source_name:
+                    source_name[idx_mask] = mapped_name.loc[valid_period].astype(str).to_numpy()
                 sep[idx_mask] = 0.0
 
     if catalog_asassn_col and catalog_asassn_col in cat.columns and candidate_asassn_ids is not None:
@@ -572,6 +608,7 @@ def match_period_catalog(
 
             mapped_period = candidate_asassn_ids.map(cat_valid[period_col])
             mapped_class = candidate_asassn_ids.map(cat_valid[class_col]).fillna("")
+            mapped_name = candidate_asassn_ids.map(cat_valid[source_name_col]).fillna("") if include_source_name else pd.Series("", index=df.index)
             mapped_sep = (
                 candidate_asassn_ids.map(cat_valid["vsx_sep_arcsec"])
                 if "vsx_sep_arcsec" in cat_valid.columns
@@ -584,6 +621,8 @@ def match_period_catalog(
                 match[idx_mask] = True
                 period[idx_mask] = mapped_period.loc[idx_mask].to_numpy(dtype=float)
                 cls[idx_mask] = mapped_class.loc[idx_mask].astype(str).to_numpy()
+                if include_source_name:
+                    source_name[idx_mask] = mapped_name.loc[idx_mask].astype(str).to_numpy()
                 sep[idx_mask] = pd.to_numeric(mapped_sep.loc[idx_mask], errors="coerce").to_numpy(dtype=float)
 
     ra_cand_col, dec_cand_col = pick_coord_columns(df)
@@ -597,12 +636,14 @@ def match_period_catalog(
         cat_dec = pd.to_numeric(cat[dec_col], errors="coerce").to_numpy(dtype=float)
         cat_period = pd.to_numeric(cat[period_col], errors="coerce").to_numpy(dtype=float)
         cat_class = cat[class_col].astype(str).to_numpy(dtype=object)
+        cat_name = cat[source_name_col].astype(str).to_numpy(dtype=object) if include_source_name else np.array([""] * len(cat), dtype=object)
 
         valid_cat = np.isfinite(cat_ra) & np.isfinite(cat_dec) & np.isfinite(cat_period) & (cat_period > 0)
         if valid_cand.any() and valid_cat.any():
             cat_coords = SkyCoord(ra=cat_ra[valid_cat] * u.deg, dec=cat_dec[valid_cat] * u.deg)
             cat_period_valid = cat_period[valid_cat]
             cat_class_valid = cat_class[valid_cat]
+            cat_name_valid = cat_name[valid_cat]
 
             cand_indices = np.flatnonzero(valid_cand)
             iterator = range(0, len(cand_indices), POST_FILTER_COORD_CHUNK_SIZE)
@@ -622,17 +663,19 @@ def match_period_catalog(
                 match[out_idx] = True
                 period[out_idx] = cat_period_valid[src_idx]
                 cls[out_idx] = cat_class_valid[src_idx]
+                if include_source_name:
+                    source_name[out_idx] = cat_name_valid[src_idx]
                 sep[out_idx] = sep_arcsec[within]
 
-    return pd.DataFrame(
-        {
-            f"period_{source_label}_match": match,
-            f"period_{source_label}_days": period,
-            f"period_{source_label}_class": cls,
-            f"period_{source_label}_sep_arcsec": sep,
-        },
-        index=df.index,
-    )
+    data = {
+        f"period_{source_label}_match": match,
+        f"period_{source_label}_days": period,
+        f"period_{source_label}_class": cls,
+        f"period_{source_label}_sep_arcsec": sep,
+    }
+    if include_source_name:
+        data[f"period_{source_label}_name"] = source_name
+    return pd.DataFrame(data, index=df.index)
 
 
 _extract_asassn_ids = extract_asassn_ids
