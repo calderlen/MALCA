@@ -46,7 +46,7 @@ _install_review_app_import_stubs()
 from malca.review import app as review_app
 from malca.review.app import EXTERNAL_SOURCE_VIEW_OPTIONS, _render_external_followup, app
 from malca.review.store import count_queue, db_connect, upsert_candidates_frame
-from malca.review.cutouts import ASASSN_FWHM_ARCSEC, CUTOUT_SURVEYS, DEFAULT_CUTOUT_SURVEY_KEY
+from malca.review.cutouts import CUTOUT_SURVEYS, DEFAULT_CUTOUT_SURVEY_KEY
 
 
 _APP_SOURCE_DIR = Path(review_app.__file__).resolve().parent
@@ -324,7 +324,8 @@ def test_external_followup_renders_static_cutout_panel() -> None:
     assert [option["label"] for option in select_props["options"]] == [survey.label for survey in CUTOUT_SURVEYS]
     assert "CDS%2FP%2FPanSTARRS%2FDR1%2Fcolor-i-r-g" in image_props["src"]
     assert "fov=0.03333333333" in image_props["src"]
-    assert overlay_props["title"] == f"ASAS-SN FWHM ~{ASASSN_FWHM_ARCSEC:g} arcsec"
+    assert "title" not in overlay_props
+    assert "aria-label" not in overlay_props
     assert overlay_props["style"]["width"] == "13.33%"
     assert overlay_props["style"]["height"] == "13.33%"
     assert "display" not in overlay_props["style"]
@@ -362,6 +363,16 @@ def test_external_followup_cutout_handles_missing_coordinates() -> None:
     assert _props(fwhm_overlay)["style"]["display"] == "none"
     assert _props(source_link)["href"] == "#"
     assert "RA/Dec" in str(_props(status).get("children"))
+
+
+def test_cutout_fwhm_overlay_uses_simple_negative_circle_without_crosshair_or_glow() -> None:
+    css = (_APP_SOURCE_DIR / "styles.py").read_text(encoding="utf-8")
+
+    assert ".cutout-crosshair" not in css
+    assert "mix-blend-mode: difference" in css
+    assert "border: 2px solid #fff" in css
+    overlay_block = css.split(".cutout-asassn-fwhm-overlay", 1)[1].split("}", 1)[0]
+    assert "box-shadow" not in overlay_block
 
 
 def test_cutout_selector_callback_is_separate_from_plot_rendering() -> None:

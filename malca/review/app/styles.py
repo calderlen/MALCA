@@ -707,12 +707,6 @@ app.index_string = '''
         .cutout-image[src=""] {
             display: none;
         }
-        .cutout-crosshair {
-            pointer-events: none;
-            position: absolute;
-            inset: 0;
-            z-index: 2;
-        }
         .cutout-asassn-fwhm-overlay {
             pointer-events: none;
             position: absolute;
@@ -720,34 +714,11 @@ app.index_string = '''
             top: 50%;
             transform: translate(-50%, -50%);
             box-sizing: border-box;
-            border: 1.5px dashed rgba(255, 214, 102, 0.92);
+            border: 2px solid #fff;
             border-radius: 50%;
-            background: rgba(255, 214, 102, 0.055);
-            box-shadow:
-                0 0 0 1px rgba(0, 0, 0, 0.34),
-                0 0 10px rgba(255, 214, 102, 0.18);
+            background: transparent;
+            mix-blend-mode: difference;
             z-index: 1;
-        }
-        .cutout-crosshair::before,
-        .cutout-crosshair::after {
-            content: "";
-            position: absolute;
-            background: rgba(255, 255, 255, 0.86);
-            box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.28);
-        }
-        .cutout-crosshair::before {
-            left: 50%;
-            top: calc(50% - 14px);
-            width: 1px;
-            height: 28px;
-            transform: translateX(-50%);
-        }
-        .cutout-crosshair::after {
-            left: calc(50% - 14px);
-            top: 50%;
-            width: 28px;
-            height: 1px;
-            transform: translateY(-50%);
         }
         .cutout-empty-label {
             display: none;
@@ -764,9 +735,6 @@ app.index_string = '''
         .cutout-viewer-empty {
             background: rgba(8, 16, 24, 0.46);
             border-style: dashed;
-        }
-        .cutout-viewer-empty .cutout-crosshair {
-            display: none;
         }
         .cutout-viewer-empty .cutout-asassn-fwhm-overlay {
             display: none;

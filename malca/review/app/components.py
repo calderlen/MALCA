@@ -90,15 +90,10 @@ def _render_external_followup(
     cutout_viewer_class = "cutout-viewer" if cutout_has_coords else "cutout-viewer cutout-viewer-empty"
     cutout_status_style = muted_text_style if cutout_has_coords else error_text_style
     try:
-        fwhm_arcsec = float(cutout_data.get("asassn_fwhm_arcsec") or 0.0)
-    except (TypeError, ValueError):
-        fwhm_arcsec = 0.0
-    try:
         fwhm_overlay_fraction = float(cutout_data.get("asassn_fwhm_overlay_fraction") or 0.0)
     except (TypeError, ValueError):
         fwhm_overlay_fraction = 0.0
     fwhm_overlay_percent = max(0.0, fwhm_overlay_fraction * 100.0)
-    fwhm_overlay_label = f"ASAS-SN FWHM ~{fwhm_arcsec:g} arcsec"
     fwhm_overlay_style = {
         'width': f"{fwhm_overlay_percent:.4g}%",
         'height': f"{fwhm_overlay_percent:.4g}%",
@@ -145,12 +140,8 @@ def _render_external_followup(
             html.Div(
                 id='cutout-asassn-fwhm-overlay',
                 className='cutout-asassn-fwhm-overlay',
-                title=fwhm_overlay_label,
-                role='img',
                 style=fwhm_overlay_style,
-                **{'aria-label': fwhm_overlay_label},
             ),
-            html.Div(className='cutout-crosshair'),
             html.Div(
                 'No coordinates',
                 className='cutout-empty-label',
