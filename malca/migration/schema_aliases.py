@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 import json
+import re
 import shutil
 from typing import Literal
 
@@ -100,6 +101,19 @@ LTV_PIPELINE_ALIAS_MAP: dict[str, str] = {
 }
 
 LTV_DROP_COLUMNS: tuple[str, ...] = ("ltv_passed_filters",)
+
+CAMERA_FIELD_ALIAS_MAP: dict[str, str] = {
+    "camera_field_key": "camera_name_key",
+    "camera_fields": "camera_names",
+    "camera_field_count": "camera_name_count",
+    "camera_field_key_fraction": "camera_name_key_fraction",
+    "stats_camera_field_key": "stats_camera_name_key",
+    "stats_camera_fields": "stats_camera_names",
+    "stats_camera_field_count": "stats_camera_name_count",
+    "stats_camera_field_key_fraction": "stats_camera_name_key_fraction",
+}
+
+_LAYER_COLUMNS = ("lc_stats", "external_stats", "derived_stats")
 
 
 @dataclass(frozen=True)
@@ -221,6 +235,192 @@ def _values_equal(left: pd.Series, right: pd.Series) -> bool:
     return bool(left_vals.equals(right_vals))
 
 
+def _is_missing_scalar(value: object) -> bool:
+    if value is None:
+        return True
+    if value is pd.NA:
+        return True
+    if isinstance(value, float):
+        return bool(np.isnan(value))
+    try:
+        missing = pd.isna(value)
+    except Exception:
+        return False
+    if missing is pd.NA:
+        return True
+    return bool(missing) if isinstance(missing, (bool, np.bool_)) else False
+
+
+def _camera_field_tokens(value: object) -> list[str]:
+    if _is_missing_scalar(value):
+        return []
+    if isinstance(value, (list, tuple, set)):
+        raw_tokens = list(value)
+    else:
+        text = str(value).strip()
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            parsed = None
+        if isinstance(parsed, list):
+            raw_tokens = parsed
+        else:
+            raw_tokens = re.split(r"[,;]", text)
+    tokens: list[str] = []
+    for token in raw_tokens:
+        token_text = str(token).strip()
+        if token_text:
+            tokens.append(token_text)
+    return tokens
+
+
+def _camera_name_from_combined_token(token: object) -> str:
+    text = "" if _is_missing_scalar(token) else str(token).strip()
+    if "/" not in text:
+        return ""
+    return text.split("/", 1)[0].strip()
+
+
+def _camera_name_key_value(value: object) -> object:
+    if _is_missing_scalar(value):
+        return value
+    return _camera_name_from_combined_token(value)
+
+
+def _camera_names_value(value: object) -> str:
+    cameras = {
+        camera
+        for token in _camera_field_tokens(value)
+        for camera in [_camera_name_from_combined_token(token)]
+        if camera
+    }
+    return ",".join(sorted(cameras))
+
+
+def _count_from_label_string(value: object) -> int | object:
+    if _is_missing_scalar(value):
+        return value
+    labels = [token for token in _camera_field_tokens(value) if token]
+    return len(labels)
+
+
+def _camera_field_column_values(out: pd.DataFrame, src: str, dst: str) -> pd.Series:
+    values = out[src]
+    if src.endswith("_key"):
+        return values.map(_camera_name_key_value)
+    if src.endswith("_fields"):
+        return values.map(_camera_names_value)
+    if src.endswith("_count"):
+        names_col = "stats_camera_names" if src.startswith("stats_") else "camera_names"
+        if names_col in out.columns:
+            return out[names_col].map(_count_from_label_string)
+        return values
+    if src.endswith("_fraction"):
+        return values
+    return values
+
+
+def _assign_migrated_column(
+    out: pd.DataFrame,
+    *,
+    src: str,
+    dst: str,
+    values: pd.Series,
+    prefer: PreferPolicy,
+) -> pd.DataFrame:
+    if dst in out.columns:
+        if not _values_equal(values, out[dst]):
+            if prefer == "fail":
+                raise ValueError(f"Conflicting legacy/canonical columns: {src} -> {dst}")
+            if prefer == "legacy":
+                out[dst] = values
+        return out.drop(columns=[src])
+    out[dst] = values
+    return out.drop(columns=[src])
+
+
+def migrate_camera_field_frame(
+    df: pd.DataFrame,
+    *,
+    prefer: PreferPolicy = "fail",
+) -> pd.DataFrame:
+    """Rewrite legacy combined camera-field columns to split camera-name columns.
+
+    This is a schema migration for saved products.  It can split values such as
+    ``ba/F1`` into ``ba``.  If a legacy artifact only saved field-only labels
+    such as ``F1``, the camera name is unrecoverable from that artifact and the
+    migrated camera-name value is left blank.
+    """
+    out = df.copy()
+    for src, dst in CAMERA_FIELD_ALIAS_MAP.items():
+        if src not in out.columns:
+            continue
+        values = _camera_field_column_values(out, src, dst)
+        out = _assign_migrated_column(out, src=src, dst=dst, values=values, prefer=prefer)
+
+    for layer in _LAYER_COLUMNS:
+        if layer not in out.columns:
+            continue
+        out[layer] = out[layer].map(lambda value: _json_dumps_mapping(migrate_camera_field_mapping(_parse_mapping(value))))
+    return out
+
+
+def _parse_mapping(value: object) -> dict[str, object]:
+    if _is_missing_scalar(value):
+        return {}
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except Exception:
+            return {}
+        return dict(parsed) if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _json_dumps_mapping(value: dict[str, object]) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _mapping_value_for_legacy_camera_field(mapping: dict[str, object], src: str) -> object:
+    value = mapping.get(src)
+    if src.endswith("_key"):
+        return _camera_name_key_value(value)
+    if src.endswith("_fields"):
+        return _camera_names_value(value)
+    if src.endswith("_count"):
+        names_key = "stats_camera_names" if src.startswith("stats_") else "camera_names"
+        if names_key in mapping:
+            return _count_from_label_string(mapping.get(names_key))
+        return value
+    return value
+
+
+def migrate_camera_field_mapping(
+    mapping: dict[str, object],
+    *,
+    prefer: PreferPolicy = "legacy",
+) -> dict[str, object]:
+    """Rewrite legacy camera-field keys in a row/payload mapping."""
+    out = dict(mapping)
+    for layer in _LAYER_COLUMNS:
+        layer_payload = _parse_mapping(out.get(layer))
+        if layer_payload:
+            out[layer] = migrate_camera_field_mapping(layer_payload, prefer=prefer)
+
+    for src, dst in CAMERA_FIELD_ALIAS_MAP.items():
+        if src not in out:
+            continue
+        value = _mapping_value_for_legacy_camera_field(out, src)
+        if dst not in out or prefer == "legacy":
+            out[dst] = value
+        out.pop(src, None)
+    return out
+
+
 def _apply_alias_map(
     df: pd.DataFrame,
     mapping: dict[str, str],
@@ -304,6 +504,7 @@ def convert_product_frame(
         raise ValueError(f"Unsupported timescale: {timescale}")
 
     out, _changed, _dropped = _apply_alias_map(df, _legacy_map_for_timescale(timescale), prefer=prefer)
+    out = migrate_camera_field_frame(out, prefer=prefer)
 
     if timescale == TIMESCALE_LTV:
         drop_cols = [col for col in LTV_DROP_COLUMNS if col in out.columns]
@@ -325,6 +526,7 @@ def _conversion_details(
     timescale: str,
 ) -> tuple[dict[str, str], list[str], list[str]]:
     mapping = _legacy_map_for_timescale(timescale)
+    mapping.update(CAMERA_FIELD_ALIAS_MAP)
     changed = {src: dst for src, dst in mapping.items() if src in before.columns and dst in after.columns}
     dropped = [col for col in before.columns if col not in after.columns]
     added = [col for col in after.columns if col not in before.columns]
@@ -337,6 +539,7 @@ def scan_product(path: str | Path, *, timescale: str | None = None) -> SchemaSca
         df, kind = _read_product(product_path)
         detected = detect_product_timescale(product_path, df, explicit=timescale)
         mapping = _legacy_map_for_timescale(detected)
+        mapping.update(CAMERA_FIELD_ALIAS_MAP)
         legacy = [col for col in df.columns if col in mapping or col in LTV_DROP_COLUMNS]
         canonical = [col for col in df.columns if col in set(mapping.values()) or col in {"candidate_id", "timescale", "lc_path"}]
         return SchemaScanResult(

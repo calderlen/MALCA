@@ -91,192 +91,188 @@ malca stv-pipeline --stage home --output-dir output/run_001 --config home.toml
 ```mermaid
 flowchart TB
 
-    %% ── Data Sources ─────────────────────────────────────────
+    %% Data sources
     subgraph sources["Data Sources"]
-        RAW["ASAS-SN .dat2 Light Curves"]
-        IDX["Index CSVs<br/>(per mag bin)"]
-        SKY["SkyPatrol CSVs"]
-        VSX_RAW["VSX Catalog"]
-        GAIA_SRC["Gaia DR3"]
-        SH_SRC["StarHorse Catalog"]
-        DUST_SRC["3D Dust Maps<br/>(Wang+ 2025)"]
+        RAW["ASAS-SN light curves<br/>STV default .dat3; LTV default .dat2"]
+        IDX["Per-mag-bin index CSVs"]
+        EXT_SRC["SkyPatrol and external light curves"]
+        CAT_SRC["Catalog services and local catalogs<br/>Gaia DR3, PS1/SkyMapper, APASS, GALEX,<br/>2MASS/AllWISE, VSX, StarHorse, dust maps,<br/>SIMBAD, ZTF, TNS, eROSITA, ASAS-SN Var"]
     end
 
-    %% ── Data Preparation ─────────────────────────────────────
-    subgraph prep["Data Preparation"]
-        MAN["manifest.py<br/>Build source_id-to-path index"]
-        MAN_OUT[("Manifest .parquet")]
-        MAN --> MAN_OUT
-
-        subgraph vsxtools["VSX Preprocessing (vsx/)"]
-            VFILT["filter.py<br/>Clean variable classes"]
-            VCROSS["crossmatch.py<br/>PM-corrected positional match"]
-            VFILT --> VCROSS
-        end
-        VCROSS --> VSX_MATCH[("VSX Crossmatch")]
+    %% CLI
+    subgraph cli["CLI Entry Point"]
+        CLI["__main__.py<br/>malca command dispatcher"]
     end
 
-    RAW --> MAN
-    IDX --> MAN
-    VSX_RAW --> VFILT
-
-    %% ── Discovery Pipeline ───────────────────────────────────
-    subgraph discovery["STV Discovery Pipeline (stv/pipeline.py orchestrator)"]
-        TAG["stv/tag.py<br/>Sparse-LC, multi-camera,<br/>VSX quality tags"]
-        EVENTS["stv/events.py<br/>Bayesian detection, morphology fits,<br/>recurrence analysis, Bayes factors"]
-        FILT["stv/filter.py<br/>Evidence strength, run robustness,<br/>morphology, periodicity,<br/>Gaia RUWE/PM, periodic catalogs"]
-        TAG --> EVENTS --> FILT
+    %% STV
+    subgraph stv["STV Discovery"]
+        STV_PIPE["stv/pipeline.py<br/>orchestrates full, cluster, home,<br/>and full-extended stages"]
+        MAN["manifest.py<br/>source_id-to-path manifest"]
+        TAG["stv/tag.py<br/>light-curve quality, camera,<br/>and VSX tags"]
+        EVENTS["stv/events.py<br/>Bayesian event detection,<br/>morphology, recurrence, Bayes factors"]
+        FILTER["stv/filter.py<br/>evidence, run robustness, scores,<br/>Gaia and periodic-catalog validation"]
+        STV_RUN[("STV run bundle<br/>results, review DB, plots, provenance")]
+        STV_PIPE --> MAN --> TAG --> EVENTS --> FILTER --> STV_RUN
     end
 
-    MAN_OUT --> TAG
-    VSX_MATCH -.-> TAG
-    GAIA_SRC -.-> FILT
-    FILT --> CAND[("Candidates .parquet")]
+    RAW --> STV_PIPE
+    IDX --> STV_PIPE
+    CAT_SRC -.-> TAG
+    CAT_SRC -.-> FILTER
 
-    %% ── Post-Detection Characterization ──────────────────────
-    subgraph postdet["Post-Detection"]
-        CHAR["characterize.py<br/>Gaia astrometry/photometry, 3D dust,<br/>YSO classes, galactic coords,<br/>BANYAN, IPHAS, SFR, clusters, unWISE"]
-        VET["vetting.py<br/>SIMBAD, Gaia variability/EB,<br/>ASAS-SN Var, ZTF, TNS, ALeRCE,<br/>eROSITA, ATLAS, NEOWISE"]
-        CLASS["classify.py<br/>EB/CV/starspot/disk/YSO"]
-
-        subgraph enrichgrp["Enrichment (enrich/)"]
-            NEIGH["neighbor.py<br/>Gaia, 2MASS, AllWISE, VSX"]
-            SPECTRA["spectra.py<br/>SDSS, LAMOST, GALAH, RAVE"]
-        end
-
-        CHAR --> VET --> CLASS --> enrichgrp
+    %% Post-detection
+    subgraph postdet["Post-Detection and Enrichment"]
+        CHAR["characterize.py<br/>Gaia, dust, YSO, galactic context,<br/>BANYAN, IPHAS, SFR, clusters, unWISE"]
+        SED["sed_photometry.py<br/>catalog photometry and SED inputs"]
+        VET["vetting.py<br/>SIMBAD, Gaia variability/EB, ASAS-SN Var,<br/>ZTF, TNS, ALeRCE, eROSITA, ATLAS, NEOWISE"]
+        CLASS["classify.py<br/>EB/CV/starspot/disk/YSO classes"]
+        EXT_LC["external_lcs.py<br/>supported external light curves"]
+        MULTI["multi_survey_features.py module<br/>event-relative multi-survey features"]
+        LAYERS["feature_layers.py<br/>LC, external, and derived feature layers"]
+        ENRICH["enrich/neighbor.py and enrich/spectra.py<br/>neighbor catalogs and spectra availability"]
+        CHAR --> SED --> VET --> CLASS
+        VET --> EXT_LC --> MULTI --> LAYERS
+        CLASS --> ENRICH
     end
 
-    CAND --> CHAR
-    GAIA_SRC -.-> CHAR
-    DUST_SRC -.-> CHAR
-    SH_SRC -.-> CHAR
-    enrichgrp --> ENRICHED[("Enriched .parquet")]
+    STV_RUN --> CHAR
+    CAT_SRC -.-> CHAR
+    CAT_SRC -.-> VET
+    EXT_SRC -.-> EXT_LC
 
-    %% ── Visualization ────────────────────────────────────────
-    PLOT["stv/plot.py<br/>Light curve + event visualization"]
-    CAND --> PLOT
-    RAW -.-> PLOT
-    SKY -.-> PLOT
-
-    %% ── Review App ───────────────────────────────────────────
-    subgraph reviewgrp["Review App (review/)"]
-        STORE["store.py<br/>SQLite candidate DB"]
-        APP["app.py<br/>Dash app: scoring, event classes,<br/>vetting cards, diagnostic plots"]
-        RPIPE["pipeline.py<br/>Run missing stages on demand"]
-        RMERGE["merge.py<br/>Merge review DBs"]
-        RDIAG["diagnostic_plots.py<br/>CMD, Kiel, NEOWISE, Gaia epoch"]
-        STORE --> APP
-        RPIPE -.-> APP
-        RDIAG -.-> APP
-    end
-
-    CAND --> STORE
-    ENRICHED -.-> STORE
-    APP --> LABELS[("Labeled Reviews<br/>score + event_class")]
-
-    %% ── Machine Learning ─────────────────────────────────────
-    subgraph mlgrp["Machine Learning (meta_analysis/ml/)"]
-        FEAT["features.py<br/>107 curated features"]
-        TRAIN["train.py<br/>LightGBM classifier"]
-        PRED["predict.py<br/>Score new candidates"]
-        FEAT --> TRAIN --> MODEL[("Model + schema")]
-        MODEL --> PRED
-    end
-
-    LABELS -.-> TRAIN
-    ENRICHED -.-> FEAT
-
-    %% ── LTV Pipeline ─────────────────────────────────────────
-    subgraph ltvpipe["LTV Pipeline - Long-Term Variability (ltv/)"]
-        LTV_PIPE["pipeline.py<br/>Orchestrator"]
-        LTV_CORE["core.py<br/>Season medians, linear/quad fits,<br/>slopes, Lomb-Scargle"]
-        LTV_FILT["filter.py<br/>Slope, max diff, dec, PM cuts"]
-        LTV_CROSS["crossmatch.py<br/>Gaia, VSX, OGLE, ZTF,<br/>Gaia Alerts, MilliQuas, SIMBAD"]
-        LTV_STOCH["stochastic.py<br/>Structure function, IAR,<br/>MHPS, DRW"]
-        LTV_NEO["neowise.py<br/>IRSA TAP IR light curves"]
-        LTV_DUST["dust.py<br/>Dust excess flags"]
-        LTV_CMD["cmd.py<br/>MIST grid, Bailer-Jones distances"]
-        LTV_INGEST["review.py<br/>Ingest into review DB"]
-        LTV_PIPE --> LTV_CORE --> LTV_FILT
-        LTV_FILT --> LTV_CROSS --> LTV_STOCH
-        LTV_STOCH --> LTV_NEO --> LTV_DUST --> LTV_CMD
-        LTV_CMD --> LTV_INGEST
+    %% LTV
+    subgraph ltvpipe["LTV Pipeline"]
+        LTV_PIPE["ltv/pipeline.py<br/>orchestrates full, cluster, home,<br/>and full-extended stages"]
+        LTV_CORE["ltv/core.py<br/>season medians, slopes,<br/>quadratic fits, Lomb-Scargle"]
+        LTV_FILTER["ltv/filter.py<br/>slope, max-diff, Dec, PM cuts"]
+        LTV_CROSS["ltv/crossmatch.py<br/>Gaia, VSX, OGLE, ZTF,<br/>Gaia Alerts, MilliQuas, SIMBAD"]
+        LTV_STOCH["ltv/stochastic.py<br/>structure function, IAR, MHPS, DRW"]
+        LTV_NEO["ltv/neowise.py<br/>IRSA TAP IR light curves"]
+        LTV_DUST["ltv/dust.py<br/>dust excess flags"]
+        LTV_CMD["ltv/cmd.py<br/>MIST grid and Bailer-Jones distances"]
+        LTV_EXT["external_lcs.py and ltv/multi_survey.py<br/>full-extended external-LC summaries"]
+        LTV_REVIEW["ltv/review.py<br/>review DB ingest"]
+        LTV_RUN[("LTV run bundle<br/>results, review DB, LC assets, provenance")]
+        LTV_PIPE --> LTV_CORE --> LTV_FILTER --> LTV_CROSS --> LTV_STOCH
+        LTV_STOCH --> LTV_NEO --> LTV_DUST --> LTV_CMD --> LTV_REVIEW --> LTV_RUN
+        LTV_PIPE --> LTV_EXT --> LTV_RUN
     end
 
     RAW --> LTV_PIPE
     IDX --> LTV_PIPE
-    GAIA_SRC -.-> LTV_CROSS
-    LTV_INGEST --> STORE
+    CAT_SRC -.-> LTV_CROSS
+    CAT_SRC -.-> LTV_CMD
+    EXT_SRC -.-> LTV_EXT
 
-    %% ── Evaluation ───────────────────────────────────────────
-    subgraph evalgrp["Evaluation (evaluation/)"]
-        INJ["injection.py<br/>Synthetic dip injection-recovery"]
-        DET_RATE["detection_rate.py<br/>Baseline detection rate"]
-        VALID["validation.py<br/>Precision/recall vs known targets"]
-        REPRO["reproduce.py<br/>Re-run detection on known objects"]
-        ATTR["attrition.py<br/>Filter attrition summary"]
-        FP_EVAL["false_positive.py<br/>FP contaminant benchmark"]
+    %% Review
+    subgraph reviewgrp["Review"]
+        STORE["store.py<br/>SQLite candidate DB"]
+        APP["review/app/<br/>Dash review package"]
+        RPIPE["review/pipeline.py<br/>run and re-run missing stages"]
+        SYNC["review/sync.py<br/>Git-trackable review bundles"]
+        RMERGE["review/merge.py<br/>merge review DBs"]
+        TAX["review/taxonomy.py and review/maintenance.py<br/>schema migration and upkeep"]
+        RDIAG["diagnostic_plots.py, eda_*.py, publication.py<br/>diagnostics, EDA, and exports"]
+        STORE --> APP
+        RPIPE -.-> APP
+        SYNC --> STORE
+        RMERGE --> STORE
+        TAX --> STORE
+        RDIAG -.-> APP
     end
 
-    MAN_OUT -.-> INJ
-    MAN_OUT -.-> DET_RATE
-    MAN_OUT -.-> REPRO
-    CAND -.-> VALID
-    CAND -.-> REPRO
-    CAND -.-> ATTR
+    STV_RUN --> STORE
+    LTV_RUN --> STORE
+    LAYERS -.-> STORE
+    ENRICH -.-> STORE
+    APP --> LABELS[("Labeled Reviews<br/>score + event_class")]
 
-    %% ── Core Libraries ───────────────────────────────────────
+    %% Science, ML, and product outputs
+    subgraph productgrp["Science, ML, and Product"]
+        NUCLEAR["nuclear/<br/>host context and AGN/TDE/CLAGN scores"]
+        ML["meta_analysis/ml/<br/>LightGBM notebooks and bad-photometry models"]
+        MALCAT["external/malcat<br/>light-curve Transformer training"]
+        MIGRATE["migration/<br/>three-layer product mirroring"]
+        PRODUCT[("Product tables, models, and migrated outputs")]
+        NUCLEAR --> PRODUCT
+        ML --> PRODUCT
+        MALCAT --> PRODUCT
+        MIGRATE --> PRODUCT
+    end
+
+    STV_RUN --> NUCLEAR
+    LAYERS --> ML
+    LABELS --> ML
+    LABELS --> MALCAT
+    STV_RUN --> MIGRATE
+    LTV_RUN --> MIGRATE
+
+    %% Evaluation
+    subgraph evalgrp["Evaluation (evaluation/)"]
+        INJ["injection.py<br/>STV injection-recovery"]
+        LTV_INJ["ltv/injection.py<br/>LTV rejection-recovery"]
+        VALID["validation.py<br/>known-candidate validation"]
+        REPRO["reproduce.py<br/>raw-data reproduction"]
+        ATTR["attrition.py<br/>filter attrition"]
+        DET_RATE["detection_rate.py<br/>baseline detection rate"]
+        FP_EVAL["false_positive.py<br/>contaminant benchmark"]
+        AUDIT["audit.py<br/>run and baseline audits"]
+    end
+
+    MAN -.-> INJ
+    MAN -.-> DET_RATE
+    MAN -.-> REPRO
+    STV_RUN -.-> VALID
+    STV_RUN -.-> ATTR
+    STV_RUN -.-> FP_EVAL
+    LTV_RUN -.-> LTV_INJ
+    STV_RUN -.-> AUDIT
+    LTV_RUN -.-> AUDIT
+
+    %% Core libraries
     subgraph corelibs["Core Libraries"]
-        UTILS["utils.py<br/>LC I/O, cleaning, kernels"]
-        LCIO["lightcurve_io.py<br/>.dat2 / .csv readers"]
+        CONFIG["config.py and cli_config.py<br/>defaults, profiles, paths, thresholds"]
+        IO["lightcurve_io.py, table_io.py, candidates.py<br/>light-curve and table loading"]
         BASE["baseline.py<br/>GP + median baselines"]
-        TRIG["triggering.py<br/>logBF / posterior trigger resolution"]
-        SCORE_LIB["score.py<br/>Dip/jump/microlensing scoring"]
+        TRIG["stv/triggering.py and stv/score.py<br/>trigger resolution and event scoring"]
         STATS_LIB["stats.py<br/>Stetson, von Neumann, RoMS, LS"]
-        PERIOD_LIB["periodogram.py<br/>Lomb-Scargle, PDM,<br/>Conditional Entropy"]
+        PERIOD_LIB["periodogram.py and phase.py<br/>period search and phase utilities"]
         FETCH_LIB["fetch.py<br/>SkyPatrol V1/V2 download"]
         GAIA_FETCH["gaia_fetch.py<br/>Bulk Gaia DR3 via AIP TAP"]
+        BUNDLE_LIB["run_bundle.py, run_context.py, run_metadata.py<br/>bundle and provenance helpers"]
     end
 
-    UTILS -.-> EVENTS
+    CONFIG -.-> STV_PIPE
+    CONFIG -.-> LTV_PIPE
+    IO -.-> MAN
+    IO -.-> LTV_CORE
     BASE -.-> EVENTS
     TRIG -.-> EVENTS
-    SCORE_LIB -.-> EVENTS
-    STATS_LIB -.-> SCORE_LIB
-    PERIOD_LIB -.-> FILT
-    UTILS -.-> REPRO
+    STATS_LIB -.-> TRIG
+    PERIOD_LIB -.-> FILTER
+    FETCH_LIB -.-> EXT_LC
+    GAIA_FETCH -.-> CHAR
+    BUNDLE_LIB -.-> STV_RUN
+    BUNDLE_LIB -.-> LTV_RUN
     BASE -.-> REPRO
 
-    %% ── Configuration ────────────────────────────────────────
-    subgraph configgrp["Configuration"]
-        direction LR
-        CONF["config.py<br/>centralized constants, paths, thresholds, and service strings"]
-    end
-
-    %% ── CLI Entry Point ──────────────────────────────────────
-    CLI["__main__.py — malca CLI<br/>manifest, stv-pipeline, stv-filter, stv-tag, stv-events, stv-plot,<br/>characterize, classify, vetting, review, injection, validate, reproduce,<br/>ltv-pipeline, attrition, dev, ..."]
-    CLI -.-> discovery
+    CLI -.-> stv
     CLI -.-> postdet
-    CLI -.-> reviewgrp
     CLI -.-> ltvpipe
+    CLI -.-> reviewgrp
+    CLI -.-> productgrp
     CLI -.-> evalgrp
-    CLI -.-> PLOT
 ```
 
 **Key Components:**
-- **STV discovery pipeline**: `manifest.py` &rarr; `stv/tag.py` &rarr; `stv/events.py` &rarr; `stv/filter.py` (orchestrated by `stv/pipeline.py`)
-- **Post-detection**: `characterize.py` (Gaia, dust, YSO, galactic coords, auxiliary catalogs) &rarr; `vetting.py` (SIMBAD, ZTF, TNS, eROSITA, ALeRCE, ATLAS, NEOWISE, ...) &rarr; `classify.py` (EB/CV/starspot/disk/YSO) &rarr; `enrich/` (neighbor catalogs, spectra availability)
-- **LTV pipeline**: `ltv/pipeline.py` &rarr; `core.py` &rarr; `filter.py` &rarr; `crossmatch.py` &rarr; `stochastic.py` &rarr; `neowise.py` &rarr; `dust.py` &rarr; `cmd.py` &rarr; `review.py` (ingest to review DB; run bundles are exported by `ltv-pipeline --full-bundle`)
-- **Review**: `review/app.py` (Dash app with scoring, event classes, diagnostic plots, vetting cards) &rarr; labeled training set
-- **Machine learning**: `malca/meta_analysis/ml/lightgbm_classifier_prototype.ipynb` (draft LightGBM classifier workflow)
-- **Notebooks**: `malca/notebooks/README.md` documents the purpose-based notebook folders.
-- **Evaluation**: `injection.py` (synthetic dips), `detection_rate.py`, `validation.py`, `reproduce.py`, `attrition.py`, `false_positive.py`
-- **Core libraries**: `utils.py`, `lightcurve_io.py`, `baseline.py`, `stats.py`, `periodogram.py`, `fetch.py`, `gaia_fetch.py`; STV-specific logic lives in `stv/`
-- **Configuration**: `config.py` centralizes all pipeline parameters
-- **CLI**: Unified interface via `malca [command]` (`__main__.py`)
-
-See [docs/architecture.md](docs/architecture.md) for detailed documentation.
+- **CLI and configuration**: `__main__.py` dispatches `malca [command]`; `config.py` and `cli_config.py` centralize defaults, paths, thresholds, and profiles.
+- **STV discovery**: `manifest.py` &rarr; `stv/tag.py` &rarr; `stv/events.py` &rarr; `stv/filter.py`, orchestrated by `stv/pipeline.py` with full/cluster/home/full-extended stages and run bundles.
+- **Post-detection and enrichment**: `characterize.py`, `sed_photometry.py`, `vetting.py`, `classify.py`, `external_lcs.py`, `multi_survey_features.py`, `feature_layers.py`, and `enrich/` add catalog context, external light curves, feature layers, classifications, and spectra/neighbor products.
+- **LTV pipeline**: `ltv/pipeline.py` orchestrates `core.py`, `filter.py`, `crossmatch.py`, `stochastic.py`, `neowise.py`, `dust.py`, `cmd.py`, and `review.py`; full-extended stages add external light curves and LTV multi-survey summaries.
+- **Review**: `review/app/` is the Dash review package backed by `review/store.py`, with on-demand stages in `review/pipeline.py`, sync/merge/taxonomy utilities, diagnostics, EDA, and publication helpers.
+- **Science, ML, and product tooling**: `nuclear/`, `meta_analysis/ml/`, `external/malcat`, and `migration/` support AGN/TDE/CLAGN context, LightGBM/bad-photometry workflows, Transformer training, and three-layer product exports.
+- **Evaluation**: `evaluation/injection.py`, `validation.py`, `reproduce.py`, `attrition.py`, `detection_rate.py`, `false_positive.py`, and `ltv/injection.py` cover discovery validation, injection/recovery, attrition, contaminants, and LTV rejection-recovery.
+- **Core libraries**: `lightcurve_io.py`, `table_io.py`, `candidates.py`, `baseline.py`, `stats.py`, `periodogram.py`, `phase.py`, `fetch.py`, `gaia_fetch.py`, and run-bundle helpers provide shared I/O, modeling, catalog access, and provenance support.
 
 ## Usage Guide
 
@@ -478,7 +474,8 @@ malca characterize --input output/filtered.parquet --output output/characterized
 ```
 
 **Features:**
-- **Gaia DR3 Queries**: Astrometry, astrophysics (Teff, logg, metallicity, distance), 2MASS/AllWISE photometry
+- **Gaia DR3 Queries**: G/BP/RP photometry, astrometry, RUWE, astrophysics (Teff, logg, metallicity, distance), and linked AllWISE context
+- **Core color context**: 2MASS, AllWISE, APASS, and GALEX crossmatches; default SED fetches payload photometry plus Pan-STARRS1/SkyMapper and opportunistic SDSS
 - **3D Dust Extinction**: All-sky coverage via `dustmaps3d` (Wang et al. 2025, ~350MB)
 - **YSO Classification**: Koenig & Leisawitz (2014) IR color-color diagram with dust correction
 - **Galactic Coordinates**: Galactic longitude/latitude (l, b) from ra/dec
@@ -500,8 +497,8 @@ malca characterize --input output/filtered.parquet --output output/characterized
 ```
 
 **Output columns:**
-- `source_id`, `ra`, `dec`, `parallax`, `distance_gspphot`
-- `tmass_j`, `tmass_h`, `tmass_k`, `unwise_w1`, `unwise_w2`
+- `source_id`, `ra`, `dec`, `parallax`, `pmra`, `pmdec`, `ruwe`, `phot_g_mean_mag`, `phot_bp_mean_mag`, `phot_rp_mean_mag`, `bp_rp`, `distance_gspphot`
+- `tmass_j`, `tmass_h`, `tmass_k`, `w1`, `w2`, `w3`, `w4`, `apass_b`, `apass_v`, `apass_g`, `apass_r`, `apass_i`, `galex_fuv`, `galex_nuv`
 - `A_v_3d`, `ebv_3d` (3D dust extinction)
 - `H_K`, `W1_W2`, `yso_class` (Class I/II/Transition Disk/Main Sequence)
 - `population` (thin_disk/thick_disk from metallicity or age)

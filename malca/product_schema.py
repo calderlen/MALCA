@@ -6,6 +6,14 @@ from typing import Iterable
 import pandas as pd
 
 from malca.candidates import ensure_candidate_id
+from malca.feature_layers import (
+    ALL_FEATURE_LAYER_COLUMNS,
+    FEATURE_LAYER_COLUMNS,
+    feature_layer_for_column,
+    non_layer_feature_columns,
+    parse_layer_value,
+    split_layer_path,
+)
 
 
 TIMESCALE_STV = "stv"
@@ -62,6 +70,12 @@ CMD_COLUMNS: tuple[str, ...] = (
     "mg",
     "mg0",
     "bprp0",
+    "derived_bp_rp",
+    "derived_j_k",
+    "derived_mrp",
+    "derived_mks",
+    "derived_wrp",
+    "derived_wjk",
 )
 
 SHARED_PRODUCT_COLUMNS: tuple[str, ...] = (
@@ -70,6 +84,7 @@ SHARED_PRODUCT_COLUMNS: tuple[str, ...] = (
     *LIGHTCURVE_BASIC_COLUMNS,
     *FILTER_COLUMNS,
     *GAIA_CONTEXT_COLUMNS,
+    *ALL_FEATURE_LAYER_COLUMNS,
     *CMD_COLUMNS,
 )
 
@@ -181,7 +196,27 @@ class ProductSchemaError(ValueError):
 
 
 def _missing_columns(df: pd.DataFrame, required: Iterable[str]) -> tuple[str, ...]:
-    return tuple(column for column in required if column not in df.columns)
+    return tuple(column for column in required if not _has_required_column_or_feature(df, str(column)))
+
+
+def _has_required_column_or_feature(df: pd.DataFrame, column: str) -> bool:
+    if column in df.columns:
+        return True
+    if "." in column:
+        try:
+            layer, key = split_layer_path(column)
+        except ValueError:
+            return False
+    else:
+        layer = feature_layer_for_column(column)
+        if layer is None:
+            return False
+        key = column
+    if layer not in df.columns:
+        return False
+    if df.empty:
+        return True
+    return bool(df[layer].map(lambda value: key in parse_layer_value(value)).any())
 
 
 def _present_columns(df: pd.DataFrame, forbidden: Iterable[str]) -> tuple[str, ...]:
@@ -220,8 +255,10 @@ def assert_candidate_product_schema(
     required: Iterable[str] | None = None,
     forbidden: Iterable[str] = (),
 ) -> None:
-    missing = _missing_columns(df, required or ())
+    missing = _missing_columns(df, (*FEATURE_LAYER_COLUMNS, *(required or ())))
     present_forbidden = _present_columns(df, forbidden)
+    flat_features = tuple(non_layer_feature_columns(df.columns))
+    present_forbidden = tuple(dict.fromkeys((*present_forbidden, *flat_features)))
     if missing or present_forbidden:
         raise ProductSchemaError(
             timescale=timescale,

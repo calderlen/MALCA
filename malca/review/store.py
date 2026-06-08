@@ -25,11 +25,19 @@ from malca.config import (
     LEGACY_GAIA_CACHE_FILE,
     REVIEW_IMPORTED_LC_CACHE_DIR,
 )
+from malca.derived_stats import DERIVED_FEATURE_COLUMNS
+from malca.feature_layers import (
+    FEATURE_LAYER_VERSION_COLUMN,
+    FEATURE_LAYER_COLUMNS,
+    parse_layer_value,
+    to_layer_first_frame,
+    to_layer_first_mapping,
+)
 from malca.ltv.multi_survey import LTV_MS_FEATURE_COLUMN_SPECS
 from malca.multi_survey_features import MS_FEATURE_COLUMN_SPECS
 from malca.review.filter_schema import REVIEW_FILTER_COLUMN_TYPES
 from malca.review.metadata import normalize_vsx_record
-from malca.table_io import read_parquet_table, write_parquet_table
+from malca.table_io import read_feature_table, read_parquet_table, write_feature_table, write_parquet_table
 from malca.review.taxonomy import (
     REVIEW_TAXONOMY_FIELDS,
     REVIEW_TAXONOMY_SQL_COLUMNS,
@@ -163,6 +171,67 @@ def _canonicalize_wise_fields(row: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _layer_first_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return to_layer_first_mapping(payload, layer_values_as_json=False)
+
+
+def _payload_layer_value(payload: dict[str, Any], key: str) -> Any:
+    if key in payload:
+        return payload.get(key)
+    for layer in FEATURE_LAYER_COLUMNS:
+        layer_payload = parse_layer_value(payload.get(layer))
+        if key in layer_payload:
+            return layer_payload.get(key)
+    return None
+
+
+def _drop_payload_keys(payload: dict[str, Any], keys: set[str]) -> dict[str, Any]:
+    out = dict(payload)
+    clear_stats_family = any(str(key).startswith("stats_") for key in keys)
+    for key in keys:
+        out.pop(key, None)
+    for layer in FEATURE_LAYER_COLUMNS:
+        layer_payload = parse_layer_value(out.get(layer))
+        changed = False
+        if clear_stats_family:
+            for layer_key in list(layer_payload):
+                if str(layer_key).startswith("stats_"):
+                    layer_payload.pop(layer_key, None)
+                    changed = True
+        for key in keys:
+            if key in layer_payload:
+                layer_payload.pop(key, None)
+                changed = True
+        if changed or isinstance(out.get(layer), dict):
+            out[layer] = layer_payload
+    return out
+
+
+def _merge_layer_payload_updates(payload: dict[str, Any], updates: dict[str, object]) -> dict[str, Any]:
+    out = dict(payload)
+    for key, value in updates.items():
+        if key in FEATURE_LAYER_COLUMNS:
+            continue
+        out[key] = value
+    for layer in FEATURE_LAYER_COLUMNS:
+        merged = parse_layer_value(out.get(layer))
+        merged.update(parse_layer_value(updates.get(layer)))
+        if merged:
+            out[layer] = merged
+    return out
+
+
+def _payload_update_values(updates: dict[str, object]) -> dict[str, object]:
+    values: dict[str, object] = {
+        str(key): value
+        for key, value in updates.items()
+        if str(key) not in FEATURE_LAYER_COLUMNS
+    }
+    for layer in FEATURE_LAYER_COLUMNS:
+        values.update(parse_layer_value(updates.get(layer)))
+    return values
+
+
 def _candidate_insert_tuple_from_row_dict(
     row_dict: dict[str, Any],
     *,
@@ -178,16 +247,21 @@ def _candidate_insert_tuple_from_row_dict(
         raise ValueError("Candidate rows must include a non-empty candidate_id")
     normalized["candidate_id"] = candidate_id
 
-    if "gaia_id" in normalized:
-        normalized["gaia_id"] = _normalize_large_integer_like_id(normalized.get("gaia_id"))
-    if "source_id" in normalized and normalized.get("source_id") is not None:
-        normalized["source_id"] = _normalize_large_integer_like_id(normalized.get("source_id"))
+    if _payload_layer_value(normalized, "gaia_id") is not None:
+        normalized["gaia_id"] = _normalize_large_integer_like_id(_payload_layer_value(normalized, "gaia_id"))
+    if _payload_layer_value(normalized, "source_id") is not None:
+        normalized["source_id"] = _normalize_large_integer_like_id(_payload_layer_value(normalized, "source_id"))
 
     if not normalized.get("asassn_var_type") and normalized.get("period_asassn_var_class"):
         normalized["asassn_var_type"] = normalized.get("period_asassn_var_class")
 
     if not normalized.get("ztf_var_type") and normalized.get("period_ztf_periodic_class"):
         normalized["ztf_var_type"] = normalized.get("period_ztf_periodic_class")
+
+    if _payload_layer_value(normalized, "high_pm_flag") in (None, "") and _payload_layer_value(normalized, "pm_total") not in (None, ""):
+        pm_total = _to_float(_payload_layer_value(normalized, "pm_total"))
+        if pm_total is not None:
+            normalized["high_pm_flag"] = bool(pm_total > LTV_MAX_PM)
 
     gaia_var_class = str(normalized.get("gaia_var_class") or "").strip()
     if gaia_var_class and gaia_var_class.lower() not in {"nan", "<na>"}:
@@ -198,14 +272,14 @@ def _candidate_insert_tuple_from_row_dict(
 
     vals: list[Any] = [candidate_id, row_source_path]
     for col, _dtype, etype in _CANDIDATE_COLUMNS:
-        raw = normalized.get(col)
+        raw = _payload_layer_value(normalized, col)
         if etype == "bool":
-            vals.append(_opt_bool(normalized, col))
+            vals.append(int(_as_bool(raw)) if raw is not None else None)
         elif etype == "float":
             vals.append(_to_float(raw))
         else:
-            vals.append(_opt_str(normalized, col))
-    vals.append(json.dumps(normalized, default=str))
+            vals.append(str(raw) if raw is not None else None)
+    vals.append(json.dumps(_layer_first_payload(normalized), default=str))
     vals.append(row_imported_at)
     return tuple(vals)
 
@@ -316,7 +390,7 @@ def load_candidates_file(path: Path) -> pd.DataFrame:
     suffix = path.suffix.lower()
     if suffix == ".csv":
         return normalize_candidate_input_frame(pd.read_csv(path))
-    return normalize_candidate_input_frame(read_parquet_table(path))
+    return normalize_candidate_input_frame(read_feature_table(path))
 
 
 def detect_run_directory_files(run_dir: Path) -> dict[str, Path | None]:
@@ -434,10 +508,10 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("asassn_fields",            "TEXT",    "text"),
     ("asassn_field_count",       "REAL",    "float"),
     ("asassn_field_key_fraction","REAL",    "float"),
-    ("camera_field_key",         "TEXT",    "text"),
-    ("camera_fields",            "TEXT",    "text"),
-    ("camera_field_count",       "REAL",    "float"),
-    ("camera_field_key_fraction","REAL",    "float"),
+    ("camera_name_key",         "TEXT",    "text"),
+    ("camera_names",            "TEXT",    "text"),
+    ("camera_name_count",       "REAL",    "float"),
+    ("camera_name_key_fraction","REAL",    "float"),
     # -- top-level filter flags --
     ("failed_any",               "INTEGER", "bool"),
     ("filter_reason",            "TEXT",    "text"),
@@ -452,6 +526,7 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("period_consensus_support", "REAL",    "float"),
     ("period_primary_source",    "TEXT",    "text"),
     ("period_source_periods",    "TEXT",    "text"),
+    ("period_ogle_name",         "TEXT",    "text"),
     ("period_ogle_match",        "INTEGER", "bool"),
     ("period_ogle_days",         "REAL",    "float"),
     ("period_ogle_class",        "TEXT",    "text"),
@@ -775,6 +850,30 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("kepler_flux_range",        "REAL",    "float"),
     # -- external light curves: AAVSO --
     ("aavso_lc_n_points",        "INTEGER", "float"),
+    # -- external light curves: OGLE --
+    ("ogle_lc_n_points",         "INTEGER", "float"),
+    ("ogle_lc_i_range",          "REAL",    "float"),
+    ("ogle_lc_v_range",          "REAL",    "float"),
+    # -- external light curves: SDSS Stripe 82 --
+    ("stripe82_lc_n_points",     "INTEGER", "float"),
+    ("stripe82_lc_u_range",      "REAL",    "float"),
+    ("stripe82_lc_g_range",      "REAL",    "float"),
+    ("stripe82_lc_r_range",      "REAL",    "float"),
+    ("stripe82_lc_i_range",      "REAL",    "float"),
+    ("stripe82_lc_z_range",      "REAL",    "float"),
+    # -- external light curves: AllWISE Multiepoch --
+    ("allwise_mep_n_epochs",     "INTEGER", "float"),
+    ("allwise_mep_w1_range",     "REAL",    "float"),
+    ("allwise_mep_w2_range",     "REAL",    "float"),
+    ("allwise_mep_w3_range",     "REAL",    "float"),
+    ("allwise_mep_w4_range",     "REAL",    "float"),
+    # -- external light curves: VVVX/VIRAC2 --
+    ("vvvx_virac_n_epochs",      "INTEGER", "float"),
+    ("vvvx_virac_z_range",       "REAL",    "float"),
+    ("vvvx_virac_y_range",       "REAL",    "float"),
+    ("vvvx_virac_j_range",       "REAL",    "float"),
+    ("vvvx_virac_h_range",       "REAL",    "float"),
+    ("vvvx_virac_ks_range",      "REAL",    "float"),
     # -- external light curves: Pan-STARRS --
     ("ps1_lc_n_points",          "INTEGER", "float"),
     # -- external light curves: CRTS --
@@ -820,6 +919,9 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("failed_periodic_catalog",  "INTEGER", "bool"),
     ("failed_signal_amplitude",  "INTEGER", "bool"),
     ("bad_cameras_filtered",     "INTEGER", "bool"),
+    # -- structured feature layers; flat columns below remain canonical SQL fields --
+    (FEATURE_LAYER_VERSION_COLUMN, "TEXT",   "text"),
+    *((col, "TEXT", "text") for col in FEATURE_LAYER_COLUMNS),
     # -- light curve statistics (from stats.py / enrichment) --
     ("stats_file_points_total",                    "REAL", "float"),
     ("stats_file_points_kept_after_filter",         "REAL", "float"),
@@ -888,6 +990,7 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("stats_median_abs_dev",                       "REAL", "float"),
     ("stats_median_brp",                           "REAL", "float"),
     ("stats_percent_amplitude",                    "REAL", "float"),
+    ("stats_ahl_ratio",                            "REAL", "float"),
     ("stats_q31",                                  "REAL", "float"),
     ("stats_skew",                                 "REAL", "float"),
     ("stats_small_kurtosis",                       "REAL", "float"),
@@ -911,6 +1014,20 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("stats_harmonics_mag_5",                      "REAL", "float"),
     ("stats_harmonics_mag_6",                      "REAL", "float"),
     ("stats_harmonics_mag_7",                      "REAL", "float"),
+    ("stats_harmonics_a1",                         "REAL", "float"),
+    ("stats_harmonics_a2",                         "REAL", "float"),
+    ("stats_harmonics_a3",                         "REAL", "float"),
+    ("stats_harmonics_a4",                         "REAL", "float"),
+    ("stats_harmonics_a5",                         "REAL", "float"),
+    ("stats_harmonics_a6",                         "REAL", "float"),
+    ("stats_harmonics_a7",                         "REAL", "float"),
+    ("stats_harmonics_b1",                         "REAL", "float"),
+    ("stats_harmonics_b2",                         "REAL", "float"),
+    ("stats_harmonics_b3",                         "REAL", "float"),
+    ("stats_harmonics_b4",                         "REAL", "float"),
+    ("stats_harmonics_b5",                         "REAL", "float"),
+    ("stats_harmonics_b6",                         "REAL", "float"),
+    ("stats_harmonics_b7",                         "REAL", "float"),
     ("stats_harmonics_r21",                        "REAL", "float"),
     ("stats_harmonics_r31",                        "REAL", "float"),
     ("stats_harmonics_r41",                        "REAL", "float"),
@@ -926,6 +1043,22 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("stats_harmonics_mse",                        "REAL", "float"),
     ("stats_psi_cs",                               "REAL", "float"),
     ("stats_psi_eta",                              "REAL", "float"),
+    ("stats_lafler_kinman_t_time",                 "REAL", "float"),
+    ("stats_lafler_kinman_t_phase",                "REAL", "float"),
+    ("stats_lafler_kinman_delta",                  "REAL", "float"),
+    ("stats_window_alias_period_1",                "REAL", "float"),
+    ("stats_window_alias_power_1",                 "REAL", "float"),
+    ("stats_window_alias_period_2",                "REAL", "float"),
+    ("stats_window_alias_power_2",                 "REAL", "float"),
+    ("stats_window_alias_period_3",                "REAL", "float"),
+    ("stats_window_alias_power_3",                 "REAL", "float"),
+    ("stats_window_alias_period_4",                "REAL", "float"),
+    ("stats_window_alias_power_4",                 "REAL", "float"),
+    ("stats_window_alias_period_5",                "REAL", "float"),
+    ("stats_window_alias_power_5",                 "REAL", "float"),
+    ("stats_eb_rminima",                           "REAL", "float"),
+    ("stats_eb_primary_min_depth",                 "REAL", "float"),
+    ("stats_eb_secondary_min_depth",               "REAL", "float"),
     # -- stochastic model features --
     ("stats_gp_drw_sigma",                         "REAL", "float"),
     ("stats_gp_drw_tau",                           "REAL", "float"),
@@ -938,6 +1071,8 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("stats_camera_loo_corr_min",                    "REAL", "float"),
     ("stats_camera_loo_corr_median",                 "REAL", "float"),
     ("stats_camera_loo_rms_max",                     "REAL", "float"),
+    # -- derived statistics and color-magnitude quantities --
+    *((col, "REAL", "float") for col in DERIVED_FEATURE_COLUMNS),
     # -- LTV: long-term variability core metrics --
     ("ltv_slope",                    "REAL",    "float"),  # mag/year linear slope
     ("ltv_slope_quad",               "REAL",    "float"),  # quadratic term (mag/yr^2)
@@ -1084,6 +1219,7 @@ def get_distinct_values(
     *,
     source_path: str | None = None,
     source_paths: list[str] | None = None,
+    source_path_fallback_like_any: list[str] | None = None,
     source_path_like: str | None = None,
     source_path_like_any: list[str] | None = None,
 ) -> list[str]:
@@ -1095,15 +1231,25 @@ def get_distinct_values(
     expr = _review_filter_expr(column) if is_review_col else f"c.{column}"
     where = [f"{expr} IS NOT NULL", f"{expr} != ''"]
     params: list[str] = []
+    source_scope_terms: list[str] = []
+    source_scope_params: list[str] = []
     if source_path:
-        where.append("c.source_path = ?")
-        params.append(str(source_path))
+        source_scope_terms.append("c.source_path = ?")
+        source_scope_params.append(str(source_path))
     if source_paths:
         source_paths = [str(p) for p in source_paths if str(p)]
         if source_paths:
             placeholders = ",".join(["?"] * len(source_paths))
-            where.append(f"c.source_path IN ({placeholders})")
-            params.extend(source_paths)
+            source_scope_terms.append(f"c.source_path IN ({placeholders})")
+            source_scope_params.extend(source_paths)
+    if source_path_fallback_like_any:
+        source_path_fallback_like_any = [str(v) for v in source_path_fallback_like_any if str(v)]
+        if source_path_fallback_like_any:
+            source_scope_terms.extend(["c.source_path LIKE ?"] * len(source_path_fallback_like_any))
+            source_scope_params.extend([f"%{value}%" for value in source_path_fallback_like_any])
+    if source_scope_terms:
+        where.append("(" + " OR ".join(source_scope_terms) + ")")
+        params.extend(source_scope_params)
     if source_path_like:
         where.append("c.source_path LIKE ?")
         params.append(f"%{str(source_path_like)}%")
@@ -1140,6 +1286,7 @@ def get_numeric_bounds(
     columns: list[str] | None = None,
     source_path: str | None = None,
     source_paths: list[str] | None = None,
+    source_path_fallback_like_any: list[str] | None = None,
     source_path_like: str | None = None,
     source_path_like_any: list[str] | None = None,
 ) -> dict[str, dict[str, float | None]]:
@@ -1157,15 +1304,25 @@ def get_numeric_bounds(
 
     where: list[str] = []
     params: list[str] = []
+    source_scope_terms: list[str] = []
+    source_scope_params: list[str] = []
     if source_path:
-        where.append("c.source_path = ?")
-        params.append(str(source_path))
+        source_scope_terms.append("c.source_path = ?")
+        source_scope_params.append(str(source_path))
     if source_paths:
         source_paths = [str(p) for p in source_paths if str(p)]
         if source_paths:
             placeholders = ",".join(["?"] * len(source_paths))
-            where.append(f"c.source_path IN ({placeholders})")
-            params.extend(source_paths)
+            source_scope_terms.append(f"c.source_path IN ({placeholders})")
+            source_scope_params.extend(source_paths)
+    if source_path_fallback_like_any:
+        source_path_fallback_like_any = [str(v) for v in source_path_fallback_like_any if str(v)]
+        if source_path_fallback_like_any:
+            source_scope_terms.extend(["c.source_path LIKE ?"] * len(source_path_fallback_like_any))
+            source_scope_params.extend([f"%{value}%" for value in source_path_fallback_like_any])
+    if source_scope_terms:
+        where.append("(" + " OR ".join(source_scope_terms) + ")")
+        params.extend(source_scope_params)
     if source_path_like:
         where.append("c.source_path LIKE ?")
         params.append(f"%{str(source_path_like)}%")
@@ -1664,18 +1821,6 @@ def init_db(conn: sqlite3.Connection) -> None:
         str(row[1]).lower(): str(row[1])
         for row in conn.execute("PRAGMA table_info(reviews)").fetchall()
     }
-    legacy_review_column_renames = {
-        "physical_family": "physical_primary",
-        "physical_subclass": "physical_secondary",
-    }
-    for old_col, new_col in legacy_review_column_renames.items():
-        old_actual = existing_review_columns.get(old_col)
-        new_actual = existing_review_columns.get(new_col)
-        if old_actual and not new_actual:
-            conn.execute(f"ALTER TABLE reviews RENAME COLUMN {old_actual} TO {new_col}")
-            existing_review_columns.pop(old_col, None)
-            existing_review_columns[new_col] = new_col
-
     existing_review_lower = set(existing_review_columns)
     for col, dtype in REVIEW_TAXONOMY_SQL_COLUMNS:
         if col.lower() not in existing_review_lower:
@@ -1686,35 +1831,6 @@ def init_db(conn: sqlite3.Connection) -> None:
                 if "duplicate column name" not in str(e).lower():
                     raise
 
-    # Backfill legacy LTV proper-motion fields that were previously stored only
-    # in payload_json under gaia_pm* keys.
-    try:
-        conn.execute(
-            """
-            UPDATE candidates
-            SET
-                pmra = COALESCE(pmra, CAST(json_extract(payload_json, '$.gaia_pmra') AS REAL)),
-                pmdec = COALESCE(pmdec, CAST(json_extract(payload_json, '$.gaia_pmdec') AS REAL)),
-                pm_total = COALESCE(pm_total, CAST(json_extract(payload_json, '$.gaia_pm_total') AS REAL))
-            WHERE
-                pmra IS NULL OR pmdec IS NULL OR pm_total IS NULL
-            """
-        )
-        conn.execute(
-            """
-            UPDATE candidates
-            SET high_pm_flag = CASE
-                WHEN pm_total > ? THEN 1
-                WHEN pm_total IS NOT NULL THEN 0
-                ELSE high_pm_flag
-            END
-            WHERE high_pm_flag IS NULL AND pm_total IS NOT NULL
-            """,
-            (float(LTV_MAX_PM),),
-        )
-    except sqlite3.OperationalError:
-        # Older SQLite builds or schema edge cases should not block opening the DB.
-        pass
     conn.commit()
 
 
@@ -1784,6 +1900,8 @@ def import_candidates(
         except Exception as e:
             print(f"Warning: characterization before import failed: {e}")
             df_use = df
+
+    df_use = to_layer_first_frame(df_use)
 
     if vet_before_import:
         # Auto-detect completed vetting from positive evidence only. A populated
@@ -1997,19 +2115,32 @@ def _queue_where_params(filters: dict | None = None) -> tuple[list[str], list[ob
     if filters.get('require_failed_any_false'):
         where.append("(c.failed_any IS NULL OR c.failed_any = 0)")
 
-    # --- optional source-path scoping (exact path) ---
+    # --- optional source-path scoping (exact path, with portable run-token fallback) ---
+    source_scope_terms: list[str] = []
+    source_scope_params: list[object] = []
     source_path = filters.get('source_path')
     if source_path:
-        where.append("(c.source_path = ?)")
-        params.append(str(source_path))
+        source_scope_terms.append("c.source_path = ?")
+        source_scope_params.append(str(source_path))
 
     source_paths = filters.get('source_paths')
     if source_paths:
         source_paths = [str(p) for p in source_paths if str(p)]
         if source_paths:
             placeholders = ",".join(["?"] * len(source_paths))
-            where.append(f"(c.source_path IN ({placeholders}))")
-            params.extend(source_paths)
+            source_scope_terms.append(f"c.source_path IN ({placeholders})")
+            source_scope_params.extend(source_paths)
+
+    source_path_fallback_like_any = filters.get('source_path_fallback_like_any')
+    if source_path_fallback_like_any:
+        source_path_fallback_like_any = [str(v) for v in source_path_fallback_like_any if str(v)]
+        if source_path_fallback_like_any:
+            source_scope_terms.extend(["c.source_path LIKE ?"] * len(source_path_fallback_like_any))
+            source_scope_params.extend([f"%{value}%" for value in source_path_fallback_like_any])
+
+    if source_scope_terms:
+        where.append("(" + " OR ".join(source_scope_terms) + ")")
+        params.extend(source_scope_params)
 
     # --- optional source-path scope token (bundle-like substring) ---
     source_path_like = filters.get('source_path_like')
@@ -2186,6 +2317,8 @@ def get_candidate_payload(conn: sqlite3.Connection, candidate_id: str) -> dict:
         payload = json.loads(row[0]) if row[0] else {}
     except Exception:
         payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
     # Merge SQL columns into payload so asassn_var_type, ztf_var_type, tns_type etc. show when only in SQL
     for i, col in enumerate(cols_to_fetch):
         if i + 1 >= len(row):
@@ -2203,18 +2336,10 @@ def get_candidate_payload(conn: sqlite3.Connection, candidate_id: str) -> dict:
         else:
             payload[col] = str(raw).strip() if raw is not None else ""
 
-    # Back-compat for older LTV ingests that stored Gaia PM under gaia_pm* names
-    # instead of the review-standard pm* fields.
-    if payload.get("pmra") in (None, "") and payload.get("gaia_pmra") not in (None, ""):
-        payload["pmra"] = payload.get("gaia_pmra")
-    if payload.get("pmdec") in (None, "") and payload.get("gaia_pmdec") not in (None, ""):
-        payload["pmdec"] = payload.get("gaia_pmdec")
-    if payload.get("pm_total") in (None, "") and payload.get("gaia_pm_total") not in (None, ""):
-        payload["pm_total"] = payload.get("gaia_pm_total")
-    if payload.get("high_pm_flag") in (None, "") and payload.get("pm_total") not in (None, ""):
-        pm_total = _to_float(payload.get("pm_total"))
+    if _payload_layer_value(payload, "high_pm_flag") in (None, "") and _payload_layer_value(payload, "pm_total") not in (None, ""):
+        pm_total = _to_float(_payload_layer_value(payload, "pm_total"))
         if pm_total is not None:
-            payload["high_pm_flag"] = bool(pm_total > LTV_MAX_PM)
+            payload = _layer_first_payload({**payload, "high_pm_flag": bool(pm_total > LTV_MAX_PM)})
     return payload
 
 
@@ -2243,11 +2368,10 @@ def replace_candidate_payload_fields(
         payload = json.loads(row[0]) if row[0] else {}
     except Exception:
         payload = {}
-
     clear = set(clear_keys or ())
-    for key in clear:
-        payload.pop(key, None)
-    payload.update(updates)
+    payload = _drop_payload_keys(payload if isinstance(payload, dict) else {}, clear)
+    payload = _merge_layer_payload_updates(payload, updates)
+    payload = _layer_first_payload(payload)
 
     conn.execute(
         "UPDATE candidates SET payload_json = ? WHERE candidate_id = ?",
@@ -2258,19 +2382,28 @@ def replace_candidate_payload_fields(
         str(info[1])
         for info in conn.execute("PRAGMA table_info(candidates)").fetchall()
     }
+    update_values = _payload_update_values(updates)
     sql_targets = {key for key in clear if key in table_cols}
-    sql_targets.update(key for key in updates if key in table_cols)
+    sql_targets.update(key for key in update_values if key in table_cols)
+    if any(key in updates for key in (*FEATURE_LAYER_COLUMNS, FEATURE_LAYER_VERSION_COLUMN)):
+        sql_targets.update(key for key in (*FEATURE_LAYER_COLUMNS, FEATURE_LAYER_VERSION_COLUMN) if key in table_cols)
 
     if sql_targets:
         assignments: list[str] = []
         params: list[object] = []
         for col in sorted(sql_targets):
             assignments.append(f"{col} = ?")
-            if col not in updates:
+            if col in FEATURE_LAYER_COLUMNS:
+                params.append(json.dumps(parse_layer_value(payload.get(col)), default=str))
+                continue
+            if col == FEATURE_LAYER_VERSION_COLUMN:
+                params.append(str(payload.get(FEATURE_LAYER_VERSION_COLUMN) or ""))
+                continue
+            if col not in update_values:
                 params.append(None)
                 continue
 
-            raw = updates[col]
+            raw = update_values[col]
             etype = _COL_TYPE_MAP.get(col)
             if etype == "bool":
                 params.append(int(_as_bool(raw)) if raw is not None else None)
@@ -2563,6 +2696,15 @@ VETTING_COLUMNS = [
     "atlas_has_phot", "atlas_n_det_cyan", "atlas_n_det_orange",
     "atlas_cyan_range", "atlas_orange_range",
     "neowise_n_epochs", "neowise_w1_range", "neowise_w2_range",
+    "kepler_n_quarters", "kepler_total_points", "kepler_flux_range",
+    "aavso_lc_n_points",
+    "ogle_lc_n_points", "ogle_lc_i_range", "ogle_lc_v_range",
+    "stripe82_lc_n_points", "stripe82_lc_u_range", "stripe82_lc_g_range",
+    "stripe82_lc_r_range", "stripe82_lc_i_range", "stripe82_lc_z_range",
+    "allwise_mep_n_epochs", "allwise_mep_w1_range", "allwise_mep_w2_range",
+    "allwise_mep_w3_range", "allwise_mep_w4_range",
+    "vvvx_virac_n_epochs", "vvvx_virac_z_range", "vvvx_virac_y_range",
+    "vvvx_virac_j_range", "vvvx_virac_h_range", "vvvx_virac_ks_range",
 ]
 
 
@@ -2630,8 +2772,11 @@ def merge_vetting_results(
             payload = json.loads(payload_json) if payload_json else {}
         except Exception:
             payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
 
         payload.update(vetting_data)
+        payload = _layer_first_payload(payload)
 
         # Update payload JSON
         conn.execute(
@@ -3057,7 +3202,7 @@ def export_reviews(conn: sqlite3.Connection, out_path: Path, only_reviewed: bool
     if only_reviewed:
         query += " WHERE r.workflow_status IS NOT NULL AND r.workflow_status != 'unreviewed'"
     df = pd.read_sql_query(query, conn)
-    write_parquet_table(df, out_path)
+    write_feature_table(df, out_path)
 
 
 def merge_review_databases(

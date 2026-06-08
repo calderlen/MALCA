@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import tempfile
+from typing import Iterable
 
 import pandas as pd
 
@@ -24,6 +25,111 @@ def read_parquet_table(path: str | Path, **kwargs) -> pd.DataFrame:
     """Read a MALCA-owned Parquet table."""
     table = pd.read_parquet(require_parquet_path(path), **kwargs)
     return table.to_frame() if isinstance(table, pd.Series) else table
+
+
+def _normalize_columns(columns: Iterable[str] | None) -> list[str] | None:
+    if columns is None:
+        return None
+    return [str(col) for col in columns]
+
+
+def _parquet_schema_names(path: str | Path) -> list[str]:
+    out = require_parquet_path(path)
+    try:
+        import pyarrow.parquet as pq
+
+        return list(pq.read_schema(out).names)
+    except Exception:
+        return list(pd.read_parquet(out).columns)
+
+
+def is_layer_first_frame(df: pd.DataFrame) -> bool:
+    """Return True when a DataFrame uses canonical three-layer feature columns."""
+    if not isinstance(df, pd.DataFrame):
+        return False
+    from malca.feature_layers import FEATURE_LAYER_COLUMNS
+
+    return set(FEATURE_LAYER_COLUMNS).issubset(set(map(str, df.columns)))
+
+
+def is_layer_first_table(path: str | Path) -> bool:
+    """Return True when a parquet table has canonical three-layer feature columns."""
+    from malca.feature_layers import FEATURE_LAYER_COLUMNS
+
+    names = set(_parquet_schema_names(path))
+    return set(FEATURE_LAYER_COLUMNS).issubset(names)
+
+
+def _feature_read_columns(
+    schema_names: list[str],
+    requested_columns: list[str] | None,
+) -> list[str] | None:
+    if requested_columns is None:
+        return None
+
+    from malca.feature_layers import FEATURE_LAYER_COLUMNS, feature_layer_for_column, is_layer_path, split_layer_path
+
+    schema_set = set(schema_names)
+    read_cols: list[str] = []
+    for col in requested_columns:
+        if col in schema_set and col not in read_cols:
+            read_cols.append(col)
+        elif is_layer_path(col):
+            layer, _key = split_layer_path(col)
+            if layer in schema_set and layer not in read_cols:
+                read_cols.append(layer)
+        elif feature_layer_for_column(col) is not None:
+            path = f"{feature_layer_for_column(col)}.{col}"
+            raise ValueError(
+                f"Flat feature column '{col}' is not supported at product boundaries; "
+                f"use canonical layer path '{path}'"
+            )
+        else:
+            # Let pandas raise the same missing-column error callers expect.
+            read_cols.append(col)
+    return read_cols
+
+
+def read_feature_table(
+    path: str | Path,
+    *,
+    columns: Iterable[str] | None = None,
+    **kwargs,
+) -> pd.DataFrame:
+    """Read a canonical layer-first candidate/product table.
+
+    Raw/cache parquet readers should keep using :func:`read_parquet_table`.
+    """
+    out = require_parquet_path(path)
+    requested_columns = _normalize_columns(columns)
+    if not is_layer_first_table(out):
+        raise ValueError(
+            f"Feature table is not layer-first: {out}. Run 'malca migrate' before using runtime commands."
+        )
+
+    schema_names = _parquet_schema_names(out)
+    read_kwargs = dict(kwargs)
+    read_cols = _feature_read_columns(schema_names, requested_columns)
+    if read_cols is not None:
+        read_kwargs["columns"] = read_cols
+    table = read_parquet_table(out, **read_kwargs)
+    if requested_columns is None:
+        return table
+
+    from malca.feature_layers import is_layer_path, feature_value_series
+
+    projected = pd.DataFrame(index=table.index)
+    for col in requested_columns:
+        if col in table.columns:
+            projected[col] = table[col]
+        elif is_layer_path(col):
+            projected[col] = feature_value_series(table, col)
+    remaining_missing = [col for col in requested_columns if col not in projected.columns]
+    if remaining_missing:
+        raise KeyError(
+            "Requested columns not found in feature table: " + ", ".join(remaining_missing)
+        )
+    return projected[requested_columns].copy()
 
 
 def read_passing_parquet_table(
@@ -80,6 +186,45 @@ def read_passing_parquet_table(
         mask = ~lowered.isin({"1", "true", "t", "yes", "y"}).fillna(False)
 
     table = table.loc[mask].copy()
+    if requested_columns is not None and failed_col not in requested_columns:
+        table = table.drop(columns=[failed_col])
+    return table
+
+
+def _passing_mask(series: pd.Series) -> pd.Series:
+    if pd.api.types.is_bool_dtype(series):
+        return ~series.fillna(False).astype(bool)
+    if pd.api.types.is_numeric_dtype(series):
+        return series.fillna(0).astype(float) == 0.0
+    lowered = series.astype("string").str.strip().str.lower()
+    return ~lowered.isin({"1", "true", "t", "yes", "y"}).fillna(False)
+
+
+def read_passing_feature_table(
+    path: str | Path,
+    *,
+    columns: Iterable[str] | None = None,
+    failed_col: str = "derived_stats.failed_any",
+    **kwargs,
+) -> pd.DataFrame:
+    """Read passing rows from a canonical layer-first candidate/product table."""
+    out = require_parquet_path(path)
+    requested_columns = _normalize_columns(columns)
+    if not is_layer_first_table(out):
+        raise ValueError(
+            f"Feature table is not layer-first: {out}. Run 'malca migrate' before using runtime commands."
+        )
+
+    read_columns = requested_columns
+    if read_columns is not None and failed_col not in read_columns:
+        read_columns = [*read_columns, failed_col]
+    table = read_feature_table(out, columns=read_columns, **kwargs)
+    if failed_col not in table.columns:
+        if requested_columns is not None:
+            return table[requested_columns].copy()
+        return table
+
+    table = table.loc[_passing_mask(table[failed_col])].copy()
     if requested_columns is not None and failed_col not in requested_columns:
         table = table.drop(columns=[failed_col])
     return table
@@ -158,3 +303,24 @@ def write_parquet_table(
     except Exception:
         tmp_path.unlink(missing_ok=True)
         raise
+
+
+def write_feature_table(
+    df: pd.DataFrame,
+    path: str | Path,
+    *,
+    compression: str = PARQUET_OUTPUT_COMPRESSION,
+    chunk_rows: int | None = PARQUET_WRITE_CHUNK_ROWS,
+    **kwargs,
+) -> None:
+    """Write a candidate/product table as canonical layer-first parquet."""
+    from malca.feature_layers import to_layer_first_frame
+
+    df = to_layer_first_frame(df)
+    write_parquet_table(
+        df,
+        path,
+        compression=compression,
+        chunk_rows=chunk_rows,
+        **kwargs,
+    )

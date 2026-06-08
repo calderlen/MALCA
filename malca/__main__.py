@@ -52,10 +52,13 @@ COMMAND_GROUPS = {
     "vsx-crossmatch": "Enrichment",
     "external-lcs": "Enrichment",
     "multi-survey-features": "Enrichment",
+    "feature-layers": "Enrichment",
+    "migrate": "Enrichment",
     "sed-photometry": "Enrichment",
     "nuclear-context": "Enrichment",
     "vetting": "Other",
     "dev": "Other",
+    "malcat-train": "Other",
 }
 
 MALCA_EPILOG = """
@@ -125,10 +128,10 @@ def main():
         "bad-photometry",
         "stv-events", "lc-plot", "gaia-fetch", "characterize", "classify", "stv-filter", "stv-tag",
         "attrition", "review", "review-refresh", "review-merge", "review-sync", "review-taxonomy", "review-maint",
-        "neighbors", "spectra", "false-positive", "vsx-filter", "vsx-crossmatch", "external-lcs", "multi-survey-features", "sed-photometry", "nuclear-context",
+        "neighbors", "spectra", "false-positive", "vsx-filter", "vsx-crossmatch", "external-lcs", "multi-survey-features", "feature-layers", "migrate", "sed-photometry", "nuclear-context",
         "vetting",
         "ltv-pipeline", "ltv-injection",
-        "dev",
+        "dev", "malcat-train",
     ]:
         command = sys.argv[1]
         remaining = sys.argv[2:]
@@ -210,6 +213,10 @@ def main():
             _run_module_main("malca.external_lcs", remaining)
         elif command == "multi-survey-features":
             _run_module_main("malca.multi_survey_features", remaining)
+        elif command == "feature-layers":
+            _run_module_main("malca.feature_layers", remaining)
+        elif command == "migrate":
+            _run_module_main("malca.migration.cli", remaining)
         elif command == "sed-photometry":
             _run_module_main("malca.sed_photometry", remaining)
         elif command == "nuclear-context":
@@ -230,6 +237,8 @@ def main():
                 raise SystemExit(f"unknown dev command: {dev_command}")
         elif command == "ltv-injection":
             _run_module_main("malca.ltv.injection", remaining)
+        elif command == "malcat-train":
+            _run_module_main("malcat.train", remaining)
         return 0
     
     # If no subcommand or just --help for main, show main help
@@ -285,11 +294,14 @@ def main():
     subparsers.add_parser("vsx-crossmatch", description="Crossmatch ASAS-SN catalog with VSX catalog")
     subparsers.add_parser("external-lcs", description="Fetch external light curves for candidate tables")
     subparsers.add_parser("multi-survey-features", description="Compute event-relative multi-survey features")
+    subparsers.add_parser("feature-layers", description="Materialize lc/external/derived feature layers for candidate tables")
+    subparsers.add_parser("migrate", description="Mirror-copy outputs into the three-layer product structure")
     subparsers.add_parser("sed-photometry", description="Fetch and normalize SED photometry for candidate tables")
     subparsers.add_parser("nuclear-context", description="Run nuclear context enrichment and AGN/TDE/CLAGN scores")
     # Other
     subparsers.add_parser("vetting", description="Run post-review vetting (SIMBAD, Gaia, ASAS-SN, ZTF, TNS, eROSITA, ...)")
     subparsers.add_parser("dev", description="Developer diagnostics (score, stats)")
+    subparsers.add_parser("malcat-train", description="Train the MALCAT light-curve Transformer")
 
     if len(sys.argv) == 1:
         parser.print_help()
