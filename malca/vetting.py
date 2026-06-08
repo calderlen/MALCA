@@ -4504,7 +4504,7 @@ def _query_allwise_mep_one(ra: float, dec: float, max_sep_arcsec: float = ALLWIS
     SELECT mjd, source_id_mf, cntr_mf,
            w1mpro_ep, w1sigmpro_ep, w2mpro_ep, w2sigmpro_ep,
            w3mpro_ep, w3sigmpro_ep, w4mpro_ep, w4sigmpro_ep,
-           qual_frame, saa_sep, moon_masked
+           qi_fact, saa_sep, moon_masked
     FROM allwise_p3as_mep
     WHERE {where}
     ORDER BY mjd ASC
