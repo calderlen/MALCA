@@ -27,6 +27,35 @@ def test_normalize_nuclear_targets_adds_ids_and_coordinate_aliases() -> None:
     assert out.loc[0, "timescale"] == "nuclear"
 
 
+def test_normalize_nuclear_targets_accepts_gaia_coordinate_aliases() -> None:
+    df = pd.DataFrame([{"candidate_id": "C1", "ra_gaia": 123.4, "dec_gaia": -56.7}])
+
+    out = normalize_nuclear_targets(df)
+
+    assert out.loc[0, "ra"] == 123.4
+    assert out.loc[0, "ra_deg"] == 123.4
+    assert out.loc[0, "dec"] == -56.7
+    assert out.loc[0, "dec_deg"] == -56.7
+
+
+def test_normalize_nuclear_targets_accepts_nested_external_stats_coordinates() -> None:
+    df = pd.DataFrame(
+        [
+            {
+                "candidate_id": "C1",
+                "external_stats": '{"ra_deg": 332.79225107, "dec_deg": 37.98689959}',
+            }
+        ]
+    )
+
+    out = normalize_nuclear_targets(df)
+
+    assert out.loc[0, "ra"] == 332.79225107
+    assert out.loc[0, "ra_deg"] == 332.79225107
+    assert out.loc[0, "dec"] == 37.98689959
+    assert out.loc[0, "dec_deg"] == 37.98689959
+
+
 def test_score_nuclear_candidates_promotes_agn_and_demotes_stars() -> None:
     df = pd.DataFrame(
         [
