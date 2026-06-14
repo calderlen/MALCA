@@ -855,6 +855,16 @@ def _first_filter_reason(row: pd.Series) -> str | None:
     return None
 
 
+def _filter_reason_series(audit: pd.DataFrame) -> pd.Series:
+    reason = pd.Series(pd.NA, index=audit.index, dtype="string")
+    for label, col in LTV_AUDIT_FAILED_COLUMNS.items():
+        if col not in audit.columns:
+            continue
+        mask = audit[col].fillna(False).astype(bool) & reason.isna()
+        reason = reason.mask(mask, label)
+    return reason
+
+
 def apply_all_filters_audit(
     df: pd.DataFrame,
     *,
@@ -993,7 +1003,7 @@ def apply_all_filters_audit(
 
     fail_cols = list(LTV_AUDIT_FAILED_COLUMNS.values())
     audit["failed_any"] = audit[fail_cols].fillna(False).astype(bool).any(axis=1)
-    audit["filter_reason"] = audit.apply(_first_filter_reason, axis=1)
+    audit["filter_reason"] = _filter_reason_series(audit)
     audit = audit.drop(columns=[audit_id_col])
 
     if verbose:

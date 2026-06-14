@@ -104,6 +104,32 @@ def test_read_passing_feature_table_filters_layer_failed_any(tmp_path) -> None:
     assert out["lc_stats.dipper_score"].tolist() == [8.0]
 
 
+def test_write_feature_table_chunked_layer_conversion(tmp_path) -> None:
+    path = tmp_path / "layered_chunked.parquet"
+    n_rows = 7
+    df = pd.DataFrame(
+        {
+            "candidate_id": [f"ltv_{idx}" for idx in range(n_rows)],
+            "timescale": ["ltv"] * n_rows,
+            "lc_path": [f"{idx}.dat2" for idx in range(n_rows)],
+            "ra": [float(idx) for idx in range(n_rows)],
+            "dec": [float(idx) for idx in range(n_rows)],
+            "ltv_slope": [0.1 * idx for idx in range(n_rows)],
+            "failed_any": [idx % 2 == 0 for idx in range(n_rows)],
+        }
+    )
+
+    write_feature_table(df, path, layer_chunk_rows=2)
+
+    projected = read_feature_table(
+        path,
+        columns=["candidate_id", "lc_stats.ltv_slope", "derived_stats.failed_any"],
+    )
+    assert len(projected) == n_rows
+    assert projected["lc_stats.ltv_slope"].tolist() == [0.1 * idx for idx in range(n_rows)]
+    assert projected["derived_stats.failed_any"].tolist() == [idx % 2 == 0 for idx in range(n_rows)]
+
+
 def test_read_feature_table_flat_file_fails(tmp_path) -> None:
     path = tmp_path / "flat.parquet"
     df = pd.DataFrame({"candidate_id": ["a"], "dipper_score": [1.5]})

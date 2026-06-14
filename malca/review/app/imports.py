@@ -171,6 +171,7 @@ from malca.review.sed import build_sed_figure, load_sed_rows, sed_source_statuse
 from malca.review.eda_panel import (
     EDA_TABLE_COLUMNS,
     candidate_ids_from_eda_table_context,
+    candidate_ids_from_plotly_selection,
     candidate_index_in_queue,
     eda_metric_options,
     eda_plot_row_counts,

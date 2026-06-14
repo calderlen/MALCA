@@ -247,12 +247,15 @@ def test_layout_embeds_eda_panel() -> None:
     assert "eda-drag-handle" in ids
     assert "eda-panel" in ids
     assert "eda-panel-state" in ids
+    assert "eda-selection-candidate-ids" in ids
     assert "eda-collapse-btn" in ids
     assert "eda-expand-btn" in ids
     assert "eda-x-metric" in ids
     assert "eda-y-metric" in ids
     assert "eda-color-metric" in ids
     assert "eda-symbol-metric" in ids
+    assert "eda-selection-mode" in ids
+    assert "eda-clear-selection-btn" in ids
     assert "eda-custom-graph" in ids
     assert "eda-candidate-table" in ids
     assert "eda-plot-export-download" in ids
@@ -669,6 +672,109 @@ def test_eda_table_has_native_sorting_and_filtering() -> None:
     assert getattr(table, "filter_action", None) == "native"
     assert getattr(table, "hidden_columns", None) in (None, [])
     assert all(column.get("id") != "candidate_key" for column in table.columns)
+
+
+def test_eda_plot_selection_filters_table_only_when_enabled(monkeypatch) -> None:
+    frame = pd.DataFrame(
+        {
+            "candidate_id": ["A", "B", "C"],
+            "dipper_score": [1.0, 2.0, 3.0],
+            "interest_score": [4.0, 5.0, 6.0],
+        }
+    )
+    queue_data = {"candidate_ids": ["A", "B", "C"], "queue_size": 3}
+    monkeypatch.setattr(review_app, "_current_eda_frame", lambda: frame)
+
+    _status, fig, rows, _style = review_app.update_eda_panel(
+        queue_data,
+        0,
+        "dipper_score",
+        "interest_score",
+        None,
+        None,
+        [],
+        [],
+        ["B", "C"],
+        "black",
+        0,
+        0,
+        "scope",
+    )
+
+    assert [row["candidate_id"] for row in rows] == ["A", "B", "C"]
+    assert fig.layout.dragmode == "zoom"
+
+    graph_fig = review_app.eda_scatter_figure(
+        frame,
+        x_metric="dipper_score",
+        y_metric="interest_score",
+        selected_candidate_id="A",
+    )
+    selected_ids = review_app.capture_eda_selection(
+        {"points": [{"curveNumber": 0, "pointNumber": 1}, {"curveNumber": 0, "pointNumber": 2}]},
+        graph_fig.to_dict(),
+        ["table"],
+    )
+
+    assert selected_ids == ["B", "C"]
+
+    status, fig, rows, _style = review_app.update_eda_panel(
+        queue_data,
+        0,
+        "dipper_score",
+        "interest_score",
+        None,
+        None,
+        [],
+        ["table"],
+        selected_ids,
+        "black",
+        0,
+        0,
+        "scope",
+    )
+
+    assert [row["candidate_id"] for row in rows] == ["B", "C"]
+    assert "Selected: 2" in status
+    assert fig.layout.dragmode == "select"
+
+    status, _fig, rows, _style = review_app.update_eda_panel(
+        queue_data,
+        0,
+        "dipper_score",
+        "interest_score",
+        None,
+        None,
+        [],
+        ["table"],
+        ["B", "C"],
+        "black",
+        0,
+        0,
+        "scope",
+    )
+
+    assert [row["candidate_id"] for row in rows] == ["B", "C"]
+    assert "Selected: 2" in status
+
+    status, _fig, rows, _style = review_app.update_eda_panel(
+        queue_data,
+        0,
+        "dipper_score",
+        "interest_score",
+        None,
+        None,
+        [],
+        ["table"],
+        [],
+        "black",
+        0,
+        0,
+        "scope",
+    )
+
+    assert [row["candidate_id"] for row in rows] == ["A", "B", "C"]
+    assert "Selected:" not in status
 
 
 def test_eda_splitter_reuses_metadata_splitter_style() -> None:

@@ -305,22 +305,101 @@ def write_parquet_table(
         raise
 
 
+def _write_layer_first_feature_table_chunked(
+    df: pd.DataFrame,
+    path: str | Path,
+    *,
+    compression: str,
+    layer_chunk_rows: int,
+    **kwargs,
+) -> None:
+    """Convert a flat feature table to layer-first form and stream it to Parquet."""
+    from malca.feature_layers import to_layer_first_frame
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    out = require_parquet_path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=out.parent, suffix=".tmp", delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+    try:
+        writer: pq.ParquetWriter | None = None
+        schema = None
+        chunk_size = max(1, int(layer_chunk_rows))
+        for start in range(0, len(df), chunk_size):
+            layered_chunk = to_layer_first_frame(df.iloc[start : start + chunk_size])
+            if writer is None:
+                table = pa.Table.from_pandas(layered_chunk, preserve_index=False)
+                schema = table.schema
+                writer = pq.ParquetWriter(tmp_path, schema, compression=compression)
+                writer.write_table(table)
+            else:
+                table = pa.Table.from_pandas(
+                    layered_chunk,
+                    schema=schema,
+                    preserve_index=False,
+                )
+                writer.write_table(table)
+        if writer is None:
+            layered = to_layer_first_frame(df)
+            layered.to_parquet(tmp_path, index=False, compression=compression, **kwargs)
+        else:
+            writer.close()
+        tmp_path.replace(out)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
 def write_feature_table(
     df: pd.DataFrame,
     path: str | Path,
     *,
     compression: str = PARQUET_OUTPUT_COMPRESSION,
     chunk_rows: int | None = PARQUET_WRITE_CHUNK_ROWS,
+    layer_chunk_rows: int | None = None,
     **kwargs,
 ) -> None:
     """Write a candidate/product table as canonical layer-first parquet."""
-    from malca.feature_layers import to_layer_first_frame
+    from malca.feature_layers import is_layer_first_frame, to_layer_first_frame
 
-    df = to_layer_first_frame(df)
-    write_parquet_table(
+    if is_layer_first_frame(df):
+        write_parquet_table(
+            df,
+            path,
+            compression=compression,
+            chunk_rows=chunk_rows,
+            **kwargs,
+        )
+        return
+
+    encode_chunk_rows = (
+        int(layer_chunk_rows)
+        if layer_chunk_rows is not None
+        else int(chunk_rows)
+        if chunk_rows is not None
+        else None
+    )
+    if (
+        encode_chunk_rows is None
+        or encode_chunk_rows <= 0
+        or len(df) <= encode_chunk_rows
+    ):
+        layered = to_layer_first_frame(df)
+        write_parquet_table(
+            layered,
+            path,
+            compression=compression,
+            chunk_rows=chunk_rows,
+            **kwargs,
+        )
+        return
+
+    _write_layer_first_feature_table_chunked(
         df,
         path,
         compression=compression,
-        chunk_rows=chunk_rows,
+        layer_chunk_rows=encode_chunk_rows,
         **kwargs,
     )

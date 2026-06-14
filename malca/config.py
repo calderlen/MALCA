@@ -358,6 +358,7 @@ SIMBAD_TAP_URL = "https://simbad.cds.unistra.fr/simbad/sim-tap"
 LTV_WORKERS = 10
 LTV_CHUNK_SIZE = 10000
 LTV_GAIA_CHUNK_SIZE = 1000
+LTV_GAIA_TAP_WORKERS = 1
 LTV_CROSSMATCH_CHUNK_SIZE = 1000
 
 # LTV injection benchmark

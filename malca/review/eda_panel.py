@@ -188,7 +188,7 @@ def _style_eda_figure(fig: go.Figure, *, theme: str | None, height: int = 360) -
         paper_bgcolor=colors["paper"],
         plot_bgcolor=colors["plot"],
         font={"color": colors["text"], "size": 11},
-        margin={"l": 52, "r": 20, "t": 34, "b": 48},
+        margin={"l": 58, "r": 20, "t": 42, "b": 58},
         height=height,
         hovermode="closest",
         legend={
@@ -421,9 +421,9 @@ def eda_scatter_figure(
             )
         )
     _style_eda_figure(fig, theme=theme, height=height)
-    fig.update_layout(title=f"{y_metric} vs {x_metric}")
-    fig.update_xaxes(type="log" if log_x else "linear")
-    fig.update_yaxes(type="log" if log_y else "linear")
+    fig.update_layout(title=None)
+    fig.update_xaxes(title_text=str(x_metric), title_standoff=8, type="log" if log_x else "linear")
+    fig.update_yaxes(title_text=str(y_metric), title_standoff=10, type="log" if log_y else "linear")
 
     selected_id = str(selected_candidate_id or "").strip()
     if selected_id:
@@ -443,7 +443,7 @@ def eda_scatter_figure(
                     name="current",
                     customdata=[[str(v)] for v in selected["candidate_id"].astype(str).tolist()],
                     hovertemplate="current %{customdata[0]}<extra></extra>",
-                    showlegend=True,
+                    showlegend=False,
                 )
             )
     return fig
@@ -580,6 +580,74 @@ def candidate_ids_from_eda_table_context(
             continue
         if len(candidate_ids) > before:
             return candidate_ids
+
+    return candidate_ids
+
+
+def _trace_customdata_value(figure: object, curve_number: object, point_number: object) -> object:
+    try:
+        curve_idx = int(curve_number)
+        point_idx = int(point_number)
+    except (TypeError, ValueError):
+        return None
+    if curve_idx < 0 or point_idx < 0:
+        return None
+
+    traces = []
+    if isinstance(figure, go.Figure):
+        traces = list(figure.data)
+    elif isinstance(figure, dict):
+        raw_traces = figure.get("data")
+        traces = raw_traces if isinstance(raw_traces, list) else []
+    if curve_idx >= len(traces):
+        return None
+
+    trace = traces[curve_idx]
+    customdata = trace.get("customdata") if isinstance(trace, dict) else getattr(trace, "customdata", None)
+    try:
+        value = customdata[point_idx]
+    except Exception:
+        return None
+    if isinstance(value, (list, tuple)) and value:
+        return value[0]
+    return value
+
+
+def candidate_ids_from_plotly_selection(selection_data: object, figure: object | None = None) -> list[str]:
+    """Resolve candidate IDs from Plotly selectedData point payloads."""
+    if not isinstance(selection_data, dict):
+        return []
+
+    candidate_ids: list[str] = []
+
+    def add(value: object) -> None:
+        text = str(value or "").strip()
+        if text and text not in candidate_ids:
+            candidate_ids.append(text)
+
+    def add_from_text(value: object) -> None:
+        text = str(value or "")
+        for part in text.replace("<br />", "<br>").split("<br>"):
+            label, sep, raw_candidate_id = part.partition(":")
+            if sep and label.strip() == "candidate_id":
+                add(raw_candidate_id)
+                return
+
+    for point in selection_data.get("points") or []:
+        if not isinstance(point, dict):
+            continue
+        custom = point.get("customdata")
+        if isinstance(custom, (list, tuple)) and custom:
+            add(custom[0])
+        elif custom is not None:
+            add(custom)
+        else:
+            point_number = point.get("pointNumber", point.get("pointIndex"))
+            trace_value = _trace_customdata_value(figure, point.get("curveNumber"), point_number)
+            if trace_value is not None:
+                add(trace_value)
+            else:
+                add_from_text(point.get("text") or point.get("hovertext"))
 
     return candidate_ids
 

@@ -8,6 +8,7 @@ import pandas as pd
 
 from malca.review.eda_panel import (
     candidate_ids_from_eda_table_context,
+    candidate_ids_from_plotly_selection,
     eda_plot_row_counts,
     eda_publication_figure,
     eda_scatter_figure,
@@ -131,6 +132,47 @@ def test_candidate_ids_from_eda_table_context_uses_absolute_page_fallback() -> N
     assert candidate_ids[0] == "C14"
 
 
+def test_candidate_ids_from_plotly_selection_reads_customdata_once() -> None:
+    selected = {
+        "points": [
+            {"customdata": ["B"]},
+            {"customdata": ["C", "ignored"]},
+            {"customdata": ["B"]},
+            {"customdata": "D"},
+            {"text": "candidate_id: E<br>dipper_score: 1.0"},
+            {"x": 1.0},
+        ]
+    }
+
+    assert candidate_ids_from_plotly_selection(selected) == ["B", "C", "D", "E"]
+
+
+def test_candidate_ids_from_plotly_selection_uses_trace_point_indices() -> None:
+    frame = pd.DataFrame(
+        {
+            "candidate_id": ["A", "B", "C"],
+            "dipper_score": [1.0, 2.0, 3.0],
+            "period_n_sources": [0, 1, 2],
+            "periodic_evidence_bucket": ["none", "one", "one"],
+        }
+    )
+    fig = eda_scatter_figure(
+        frame,
+        x_metric="period_n_sources",
+        y_metric="dipper_score",
+        color_metric="periodic_evidence_bucket",
+    )
+    traces_by_name = {str(trace.name): idx for idx, trace in enumerate(fig.data)}
+    selected = {
+        "points": [
+            {"curveNumber": traces_by_name["none"], "pointNumber": 0},
+            {"curveNumber": traces_by_name["one"], "pointNumber": 1},
+        ]
+    }
+
+    assert candidate_ids_from_plotly_selection(selected, fig.to_dict()) == ["A", "C"]
+
+
 def test_eda_scatter_figure_highlights_selected_candidate() -> None:
     frame = pd.DataFrame(
         {
@@ -151,6 +193,10 @@ def test_eda_scatter_figure_highlights_selected_candidate() -> None:
     assert len(fig.data) >= 2
     assert fig.data[-1].name == "current"
     assert fig.data[-1].customdata[0][0] == "B"
+    assert fig.data[-1].showlegend is False
+    assert fig.layout.title.text in (None, "")
+    assert fig.layout.xaxis.title.text == "period_n_sources"
+    assert fig.layout.yaxis.title.text == "dipper_score"
 
 
 def test_eda_scatter_figure_uses_plain_list_trace_data() -> None:

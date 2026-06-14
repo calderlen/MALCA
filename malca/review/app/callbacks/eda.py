@@ -90,13 +90,29 @@ def sync_eda_metric_controls(queue_data, _db_scope, _last_saved, _import_trigger
      Input('eda-color-metric', 'value'),
      Input('eda-symbol-metric', 'value'),
      Input('eda-log-flags', 'value'),
+     Input('eda-selection-mode', 'value'),
+     Input('eda-selection-candidate-ids', 'data'),
      Input('theme-mode-store', 'data'),
      Input('last-candidate-saved', 'data'),
      Input('import-trigger', 'data'),
      Input('review-db-scope', 'data')],
     prevent_initial_call=False,
 )
-def update_eda_panel(queue_data, current_index, x_metric, y_metric, color_metric, symbol_metric, log_flags, theme_mode, _last_saved, _import_trigger, _db_scope):
+def update_eda_panel(
+    queue_data,
+    current_index,
+    x_metric,
+    y_metric,
+    color_metric,
+    symbol_metric,
+    log_flags,
+    selection_mode,
+    selection_candidate_ids,
+    theme_mode,
+    _last_saved,
+    _import_trigger,
+    _db_scope,
+):
     theme = str(theme_mode or DEFAULT_THEME)
     try:
         frame = _current_eda_frame()
@@ -129,7 +145,20 @@ def update_eda_panel(queue_data, current_index, x_metric, y_metric, color_metric
         log_y='logy' in flags,
         theme=theme,
     )
-    rows = eda_table_rows(queue_frame)
+    selection_values = [selection_mode] if isinstance(selection_mode, str) else list(selection_mode or [])
+    selection_enabled = 'table' in {str(value) for value in selection_values}
+    if selection_enabled:
+        fig.update_layout(dragmode='select')
+    else:
+        fig.update_layout(dragmode='zoom')
+
+    table_frame = queue_frame
+    selection_ids = {str(value) for value in (selection_candidate_ids or [])} if selection_enabled else set()
+    selection_active = bool(selection_ids)
+    if selection_active:
+        table_frame = queue_frame[queue_frame["candidate_id"].astype(str).isin(selection_ids)].copy()
+
+    rows = eda_table_rows(table_frame)
     style = selected_row_style(rows, selected_candidate, theme=theme)
     selected_text = selected_candidate or 'none'
     counts = eda_plot_row_counts(
@@ -149,9 +178,54 @@ def update_eda_panel(queue_data, current_index, x_metric, y_metric, color_metric
         status_parts.append(f"Dropped missing: {dropped_missing:,}")
     if dropped_nonpositive:
         status_parts.append(f"Dropped log<=0: {dropped_nonpositive:,}")
+    if selection_active:
+        status_parts.append(f"Selected: {len(table_frame):,}")
     status_parts.append(f"Current: {selected_text}")
     status = " | ".join(status_parts)
     return status, fig, rows, style
+
+
+def _eda_selection_enabled(selection_mode):
+    selection_values = [selection_mode] if isinstance(selection_mode, str) else list(selection_mode or [])
+    return 'table' in {str(value) for value in selection_values}
+
+
+@app.callback(
+    Output('eda-selection-candidate-ids', 'data'),
+    Input('eda-custom-graph', 'selectedData'),
+    State('eda-custom-graph', 'figure'),
+    State('eda-selection-mode', 'value'),
+    prevent_initial_call=True,
+)
+def capture_eda_selection(selected_data, figure, selection_mode):
+    if not _eda_selection_enabled(selection_mode):
+        raise dash.exceptions.PreventUpdate
+    if not isinstance(selected_data, dict):
+        raise dash.exceptions.PreventUpdate
+    return candidate_ids_from_plotly_selection(selected_data, figure)
+
+
+@app.callback(
+    [Output('eda-custom-graph', 'selectedData'),
+     Output('eda-selection-candidate-ids', 'data', allow_duplicate=True)],
+    Input('eda-clear-selection-btn', 'n_clicks'),
+    prevent_initial_call=True,
+)
+def clear_eda_selection(n_clicks):
+    if not n_clicks:
+        raise dash.exceptions.PreventUpdate
+    return None, []
+
+
+@app.callback(
+    Output('eda-selection-candidate-ids', 'data', allow_duplicate=True),
+    Input('eda-selection-mode', 'value'),
+    prevent_initial_call=True,
+)
+def clear_eda_selection_when_disabled(selection_mode):
+    if _eda_selection_enabled(selection_mode):
+        raise dash.exceptions.PreventUpdate
+    return []
 
 
 @app.callback(

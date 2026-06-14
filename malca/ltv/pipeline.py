@@ -40,6 +40,7 @@ from malca.config import (
     LTV_WORKERS,
     LTV_CHUNK_SIZE,
     LTV_GAIA_CHUNK_SIZE,
+    LTV_GAIA_TAP_WORKERS,
     LTV_CORE_CHUNK_SIZE,
     GAIA_EPOCH_DATA_RELEASE,
     GAIA_EPOCH_DATA_STRUCTURE,
@@ -131,6 +132,7 @@ LTV_BUILD_CONFIG_DEFAULTS = {
     "external_lc_atlas": False,
     "atlas_token": None,
     "log_rejections": None,
+    "tap_workers": LTV_GAIA_TAP_WORKERS,
 }
 
 LTV_BUILD_CONFIG_PATH_KEYS = {"log_rejections"}
@@ -200,6 +202,12 @@ def _ltv_tap_chunk_size(chunk_size: int | None) -> int:
     return max(1, min(int(chunk_size), int(LTV_GAIA_CHUNK_SIZE)))
 
 
+def _ltv_tap_workers(tap_workers: int | None = None) -> int:
+    if tap_workers is None:
+        tap_workers = LTV_GAIA_TAP_WORKERS
+    return max(1, int(tap_workers))
+
+
 def add_stochastic_postfilter_features(*args, **kwargs):
     """Lazy wrapper kept for tests and callers that monkeypatch this pipeline hook."""
     from malca.ltv.stochastic import add_stochastic_postfilter_features as _impl
@@ -252,6 +260,7 @@ def run_full_pipeline(
     match_radius_arcsec: float = LTV_MATCH_RADIUS_ARCSEC,
     # Parallel processing
     n_workers: int = LTV_WORKERS,
+    tap_workers: int = LTV_GAIA_TAP_WORKERS,
     chunk_size: int = LTV_CHUNK_SIZE,
     # Output
     log_csv: str | Path | None = None,
@@ -274,6 +283,7 @@ def run_full_pipeline(
     """
     n0 = len(df)
     tap_chunk_size = _ltv_tap_chunk_size(chunk_size)
+    tap_n_workers = _ltv_tap_workers(tap_workers)
     raw_chunk_size = int(chunk_size) if chunk_size is not None else tap_chunk_size
     
     if verbose:
@@ -282,6 +292,7 @@ def run_full_pipeline(
         print("=" * 60)
         print(f"Input: {n0:,} sources")
         print(f"Workers: {n_workers}, Chunk size: {chunk_size}")
+        print(f"Gaia TAP workers: {tap_n_workers}")
         if tap_chunk_size != raw_chunk_size:
             print(f"TAP chunk size: {tap_chunk_size}")
         print()
@@ -304,7 +315,7 @@ def run_full_pipeline(
             max_pm=max_pm,
             query_gaia=True,
             chunk_size=tap_chunk_size,
-            n_workers=n_workers,
+            n_workers=tap_n_workers,
             verbose=verbose,
             log_csv=log_csv,
             return_rejected=True,
@@ -630,10 +641,15 @@ def _ensure_ltv_candidate_id(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _write_ltv_candidate_table(df: pd.DataFrame, path: Path, *, stage: str) -> pd.DataFrame:
-    out = to_layer_first_frame(_ensure_ltv_candidate_id(df))
-    assert_ltv_product_schema(out, stage=stage)
-    write_feature_table(out, path)
-    return out
+    prepared = _ensure_ltv_candidate_id(df)
+    if not prepared.empty:
+        sample_rows = min(len(prepared), 1_000)
+        assert_ltv_product_schema(
+            to_layer_first_frame(prepared.iloc[:sample_rows]),
+            stage=stage,
+        )
+    write_feature_table(prepared, path)
+    return prepared
 
 
 def _merge_ltv_candidate_columns(
@@ -791,7 +807,7 @@ def _write_filtered_audit(
             min_diff=args.min_diff,
             query_gaia=query_gaia,
             chunk_size=_ltv_tap_chunk_size(args.chunk_size),
-            n_workers=args.workers,
+            n_workers=_ltv_tap_workers(getattr(args, "tap_workers", None)),
             verbose=args.verbose,
             return_passers=True,
         )
@@ -1147,6 +1163,12 @@ def add_ltv_pipeline_args(parser: argparse.ArgumentParser) -> argparse.ArgumentP
     add_config_args(g_general)
     g_general.add_argument("--log-rejections", type=Path, default=None)
     g_general.add_argument("--workers", type=int, default=LTV_WORKERS)
+    g_general.add_argument(
+        "--tap-workers",
+        type=int,
+        default=LTV_GAIA_TAP_WORKERS,
+        help="Parallel Gaia TAP upload workers for filter queries; keep low for public TAP stability.",
+    )
     g_general.add_argument("--chunk-size", type=int, default=LTV_CHUNK_SIZE)
     g_general.add_argument("-o", "--overwrite", action="store_true")
     g_general.add_argument("-v", "--verbose", action="store_true")
@@ -1462,6 +1484,12 @@ def add_pipeline_args(parser):
         help="Number of parallel workers",
     )
     g_general.add_argument(
+        "--tap-workers",
+        type=int,
+        default=LTV_GAIA_TAP_WORKERS,
+        help="Parallel Gaia TAP upload workers for filter queries; keep low for public TAP stability.",
+    )
+    g_general.add_argument(
         "--chunk-size",
         type=int,
         default=LTV_CHUNK_SIZE,
@@ -1524,6 +1552,7 @@ def run_pipeline_cli(args):
         gaia_epoch_valid_data=not args.gaia_epoch_include_invalid,
         gaia_epoch_band=args.gaia_epoch_band,
         n_workers=args.workers,
+        tap_workers=args.tap_workers,
         chunk_size=args.chunk_size,
         log_csv=args.log_rejections,
         verbose=args.verbose,

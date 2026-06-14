@@ -63,6 +63,7 @@ def create_layout():
         dcc.Store(id='metadata-resize-init', data=0),
         dcc.Store(id='status-resize-init', data=0),
         dcc.Store(id='eda-resize-init', data=0),
+        dcc.Store(id='eda-selection-candidate-ids', data=[]),
         dcc.Store(id='metadata-copy-init', data=0),
         dcc.Store(id='eda-panel-state', data='open', storage_type='local'),
         dcc.Store(id='sidebar-plot-saved', data=0),  # dummy sink for plot prefs save callback
@@ -954,6 +955,22 @@ def create_layout():
                                     persistence_type='local',
                                 ),
                             ], className='eda-control-full'),
+                            html.Div([
+                                dcc.Checklist(
+                                    id='eda-selection-mode',
+                                    options=[{'label': ' Selection filters table', 'value': 'table'}],
+                                    value=[],
+                                    inline=True,
+                                    persistence=_review_persistence_token(),
+                                    persistence_type='local',
+                                ),
+                                html.Button(
+                                    'Clear selection',
+                                    id='eda-clear-selection-btn',
+                                    n_clicks=0,
+                                    className='compact-btn',
+                                ),
+                            ], className='eda-control-full', style={'display': 'flex', 'alignItems': 'center', 'gap': '8px'}),
                         ], className='eda-controls'),
                         html.Div([
                             html.Div([
