@@ -376,7 +376,7 @@ class TestLateOnsetConsensus:
         )
 
     def test_late_onset_dip_residuals_positive(self):
-        """With consensus base_rough, the dip should produce positive residuals
+        """With consensus baseline, the dip should produce positive residuals
         (fainter than baseline) in the late-onset camera, not inverted."""
         df = _make_late_onset_lc(dip_amplitude=0.5, dip_sigma=15.0)
         result = per_camera_gp_baseline_masked(
@@ -387,6 +387,19 @@ class TestLateOnsetConsensus:
         dip_resid = result.loc[late_mask & dip_window, "resid"].to_numpy(float)
         assert np.nanmax(dip_resid) > 0.1, (
             f"Expected positive residuals in dip window, got max={np.nanmax(dip_resid):.3f}"
+        )
+
+    def test_late_onset_baseline_does_not_track_dip(self):
+        """Late-onset final baseline should stay near quiescent, not follow the dip."""
+        df = _make_late_onset_lc(dip_amplitude=0.5, dip_sigma=15.0)
+        result = per_camera_gp_baseline_masked(
+            df, late_onset_buffer_days=300.0, min_anchor_overlap_days=30.0,
+        )
+        late_mask = result["camera#"].str.startswith("late_")
+        dip_window = np.abs(result["JD"] - 9600.0) < 30.0
+        late_baseline = result.loc[late_mask & dip_window, "baseline"].to_numpy(float)
+        assert np.all(np.abs(late_baseline - 14.0) < 0.15), (
+            f"Late-onset baseline tracks dip: mean={np.mean(late_baseline):.3f}"
         )
 
     def test_anchor_cameras_unaffected(self):

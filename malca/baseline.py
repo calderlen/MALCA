@@ -1015,8 +1015,8 @@ def per_camera_gp_baseline_masked(
     """Per-camera GP baseline with dip masking (excludes significant dips from fit).
 
     Cameras that start late within a band and lack sufficient quiet baseline
-    borrow anchor consensus base_rough for masking, preventing stiff-GP tracking
-    of excursions at camera onset.
+    borrow the median anchor final baseline for masking and as their own
+    baseline, preventing stiff/loose GP tracking of excursions at camera onset.
     """
 
     def robust_sigma_floor(resid, mag_err_here, var_here):
@@ -1151,7 +1151,7 @@ def per_camera_gp_baseline_masked(
             band_anchors[band_id] = anchors
             needs_consensus.update(consensus_cams)
 
-    def _build_cross_band_consensus(current_band_id, t_target):
+    def _build_cross_band_consensus(curve_source, current_band_id, t_target):
         if not has_band_col:
             return None
         best_consensus = None
@@ -1160,7 +1160,7 @@ def per_camera_gp_baseline_masked(
             if band_id == current_band_id or not anchors:
                 continue
             c = _build_band_consensus(
-                anchor_base_rough,
+                curve_source,
                 band_id,
                 t_target,
                 anchors,
@@ -1174,8 +1174,24 @@ def per_camera_gp_baseline_masked(
                     best_consensus = c
         return best_consensus
 
-    # ---- Pass 3: final masking + loose GP per camera ----
-    for cam_id, cached in cam_cache.items():
+    def _write_flat_baseline(idx, mag, mag_err, baseline):
+        resid = mag - baseline
+        floor_here = float(max(sigma_floor, 0.0)) if sigma_floor is not None else float(jitter)
+        sigma_eff = np.sqrt(mag_err**2 + floor_here**2)
+        sigma_resid = resid / sigma_eff
+        df_out.loc[idx, "baseline"] = baseline
+        df_out.loc[idx, "resid"] = resid
+        df_out.loc[idx, "sigma_resid"] = sigma_resid
+        if add_sigma_eff_col:
+            df_out.loc[idx, "sigma_eff"] = sigma_eff
+
+    def _finalize_camera(
+        cam_id,
+        cached,
+        *,
+        curve_source,
+        use_consensus_baseline=False,
+    ):
         idx = cached["idx"]
         t = cached["t"]
         mag = cached["mag"]
@@ -1183,12 +1199,13 @@ def per_camera_gp_baseline_masked(
         finite = cached["finite"]
         median_mag = cached["median_mag"]
         base_rough = cached["base_rough"].copy()
+        consensus = None
 
         if cam_id in needs_consensus:
             band_id = cam_band_map.get(cam_id)
             anchors = band_anchors.get(band_id, set()) if band_id is not None else set()
             consensus = _build_band_consensus(
-                anchor_base_rough,
+                curve_source,
                 band_id,
                 t,
                 anchors,
@@ -1196,11 +1213,16 @@ def per_camera_gp_baseline_masked(
                 min_anchor_overlap_days=min_anchor_overlap_days,
             )
             if consensus is None:
-                consensus = _build_cross_band_consensus(band_id, t)
+                consensus = _build_cross_band_consensus(curve_source, band_id, t)
             if consensus is not None:
                 base_rough = np.where(np.isfinite(consensus), consensus, base_rough)
 
         df_out.loc[idx, "base_rough"] = base_rough
+
+        if use_consensus_baseline and consensus is not None and np.isfinite(consensus).any():
+            baseline = np.where(np.isfinite(consensus), consensus, median_mag)
+            _write_flat_baseline(idx, mag, mag_err, baseline)
+            return baseline
 
         _flags, keep, _intervals, _s0 = _mask_excursions(
             t,
@@ -1216,35 +1238,14 @@ def per_camera_gp_baseline_masked(
 
         if keep.sum() < min_gp_points:
             baseline = np.full_like(mag, median_mag, dtype=float)
-            resid = mag - baseline
-
-            mag_err_full = mag_err
-            floor_here = float(max(sigma_floor, 0.0)) if sigma_floor is not None else float(jitter)
-            sigma_eff = np.sqrt(mag_err_full**2 + floor_here**2)
-            sigma_resid = resid / sigma_eff
-
-            df_out.loc[idx, "baseline"] = baseline
-            df_out.loc[idx, "resid"] = resid
-            df_out.loc[idx, "sigma_resid"] = sigma_resid
-            if add_sigma_eff_col:
-                df_out.loc[idx, "sigma_eff"] = sigma_eff
-            continue
+            _write_flat_baseline(idx, mag, mag_err, baseline)
+            return baseline
 
         fit_keep = keep & np.isfinite(mag_err) & (mag_err > 0)
         if np.count_nonzero(fit_keep) < min_gp_points:
             baseline = np.full_like(mag, median_mag, dtype=float)
-            resid = mag - baseline
-            mag_err_full = mag_err
-            floor_here = float(max(sigma_floor, 0.0)) if sigma_floor is not None else float(jitter)
-            sigma_eff = np.sqrt(mag_err_full**2 + floor_here**2)
-            sigma_resid = resid / sigma_eff
-
-            df_out.loc[idx, "baseline"] = baseline
-            df_out.loc[idx, "resid"] = resid
-            df_out.loc[idx, "sigma_resid"] = sigma_resid
-            if add_sigma_eff_col:
-                df_out.loc[idx, "sigma_eff"] = sigma_eff
-            continue
+            _write_flat_baseline(idx, mag, mag_err, baseline)
+            return baseline
 
         t_fit = t[fit_keep]
         mag_fit = mag[fit_keep]
@@ -1271,19 +1272,8 @@ def per_camera_gp_baseline_masked(
             mean_prediction, var = gp.predict(mag_fit_centered, t, return_var=True)
         except Exception:
             baseline = np.full_like(mag, median_mag, dtype=float)
-            resid = mag - baseline
-
-            mag_err_full = mag_err
-            floor_here = float(max(sigma_floor, 0.0)) if sigma_floor is not None else float(jitter)
-            sigma_eff = np.sqrt(mag_err_full**2 + floor_here**2)
-            sigma_resid = resid / sigma_eff
-
-            df_out.loc[idx, "baseline"] = baseline
-            df_out.loc[idx, "resid"] = resid
-            df_out.loc[idx, "sigma_resid"] = sigma_resid
-            if add_sigma_eff_col:
-                df_out.loc[idx, "sigma_eff"] = sigma_eff
-            continue
+            _write_flat_baseline(idx, mag, mag_err, baseline)
+            return baseline
 
         baseline = np.asarray(mean_prediction, float) + mean_mag
         resid = mag - baseline
@@ -1291,14 +1281,12 @@ def per_camera_gp_baseline_masked(
         var = np.asarray(var, float)
         var = np.maximum(var, 0.0)
 
-        mag_err_full = mag_err
-
         if sigma_floor is None:
-            floor_here = robust_sigma_floor(resid, mag_err_full, var)
+            floor_here = robust_sigma_floor(resid, mag_err, var)
         else:
             floor_here = float(max(sigma_floor, 0.0))
 
-        sigma_eff2 = mag_err_full**2 + floor_here**2 + var
+        sigma_eff2 = mag_err**2 + floor_here**2 + var
         sigma_eff = np.sqrt(np.maximum(sigma_eff2, 1e-12))
         sigma_resid = resid / sigma_eff
 
@@ -1308,5 +1296,23 @@ def per_camera_gp_baseline_masked(
         df_out.loc[idx, "baseline"] = baseline
         df_out.loc[idx, "resid"] = resid
         df_out.loc[idx, "sigma_resid"] = sigma_resid
+        return baseline
+
+    # ---- Pass 3a: loose GP for cameras with their own quiet baseline ----
+    anchor_final_baseline: dict = {}
+    consensus_order = [cam_id for cam_id in cam_cache if cam_id not in needs_consensus]
+    consensus_order += [cam_id for cam_id in cam_cache if cam_id in needs_consensus]
+
+    for cam_id in consensus_order:
+        cached = cam_cache[cam_id]
+        use_consensus = cam_id in needs_consensus
+        baseline = _finalize_camera(
+            cam_id,
+            cached,
+            curve_source=anchor_final_baseline if use_consensus else anchor_base_rough,
+            use_consensus_baseline=use_consensus,
+        )
+        if not use_consensus:
+            anchor_final_baseline[cam_id] = (cached["t"], np.asarray(baseline, float))
 
     return df_out
