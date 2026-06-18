@@ -224,7 +224,8 @@ CMD_DENSITY_UPSAMPLE_FACTOR = 2
 CMD_DENSITY_CONTOUR_LEVELS = 20
 CMD_DENSITY_CUTOFF_PERCENTILE = 30.0
 CMD_DENSITY_CUTOFF_FRAC_MAX = 0.04
-CMD_MARKER_SIZE_SCALE = 1.25
+CMD_MARKER_SIZE_SCALE = 1.05
+DEFAULT_BACKGROUND_STYLE = "density"
 GAIA_BG_PATH = Path("input/gaia/gaia_dr3_crossmatched.parquet")
 
 # "density" background style: full-field pcolormesh, viridis, lighter smoothing.
@@ -233,6 +234,15 @@ CMD_DENSITY_STYLE_BINS = 120
 CMD_DENSITY_STYLE_SMOOTH_SIGMA = 1.0
 CMD_DENSITY_STYLE_CUTOFF_PERCENTILE = 8.0
 CMD_DENSITY_STYLE_CUTOFF_FRAC_MAX = 0.012
+
+# "corner" background style: monochrome scatter + line contours (corner-plot-like).
+CMD_CORNER_STYLE_BINS = 100
+CMD_CORNER_STYLE_SMOOTH_SIGMA = 1.2
+CMD_CORNER_STYLE_SCATTER_COLOR = "#888888"
+CMD_CORNER_STYLE_SCATTER_ALPHA = 0.28
+CMD_CORNER_STYLE_CONTOUR_LEVELS = 6
+CMD_CORNER_STYLE_CONTOUR_COLOR = "#333333"
+CMD_CORNER_STYLE_CONTOUR_LINEWIDTH = 0.55
 
 
 def _build_cmd_density_field(
@@ -424,6 +434,56 @@ def _plot_cmd_background_density(ax, bg_x: np.ndarray, bg_y: np.ndarray) -> None
     )
 
 
+def _plot_cmd_background_corner(ax, bg_x: np.ndarray, bg_y: np.ndarray) -> None:
+    """Monochrome scatter + line-density contours, corner-plot style."""
+    from scipy.ndimage import gaussian_filter
+
+    if len(bg_x) == 0:
+        return
+
+    ax.scatter(
+        bg_x,
+        bg_y,
+        s=CMD_BG_SCATTER_SIZE,
+        c=CMD_CORNER_STYLE_SCATTER_COLOR,
+        alpha=CMD_CORNER_STYLE_SCATTER_ALPHA,
+        edgecolors="none",
+        linewidths=0.0,
+        rasterized=True,
+        zorder=0,
+    )
+
+    xrange = (CMD_XLIM[0], CMD_XLIM[1])
+    yrange = (CMD_YLIM[0], CMD_YLIM[1])
+    hist, xedges, yedges = np.histogram2d(
+        bg_x,
+        bg_y,
+        bins=CMD_CORNER_STYLE_BINS,
+        range=[xrange, yrange],
+    )
+    density = gaussian_filter(hist.T.astype(float), sigma=CMD_CORNER_STYLE_SMOOTH_SIGMA)
+    positive = density[np.isfinite(density) & (density > 0)]
+    if positive.size == 0:
+        return
+
+    x_centers = 0.5 * (xedges[:-1] + xedges[1:])
+    y_centers = 0.5 * (yedges[:-1] + yedges[1:])
+    percentiles = np.linspace(55, 95, CMD_CORNER_STYLE_CONTOUR_LEVELS)
+    levels = sorted({float(np.percentile(positive, p)) for p in percentiles})
+    if not levels:
+        return
+
+    ax.contour(
+        x_centers,
+        y_centers,
+        density,
+        levels=levels,
+        colors=CMD_CORNER_STYLE_CONTOUR_COLOR,
+        linewidths=CMD_CORNER_STYLE_CONTOUR_LINEWIDTH,
+        zorder=1,
+    )
+
+
 def _load_gaia_background() -> tuple[np.ndarray, np.ndarray]:
     """Load the full Gaia DR3 crossmatched sample for CMD density background."""
     import pandas as pd
@@ -444,7 +504,7 @@ def _plot_cmd(
     out_path: Path,
     *,
     bucket_order: list[str] | None = None,
-    background_style: str = "hybrid",
+    background_style: str = DEFAULT_BACKGROUND_STYLE,
 ) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     bucket_order = bucket_order or BUCKET_ORDER
@@ -465,6 +525,8 @@ def _plot_cmd(
 
     if background_style == "density":
         _plot_cmd_background_density(ax, bg_x, bg_y)
+    elif background_style == "corner":
+        _plot_cmd_background_corner(ax, bg_x, bg_y)
     else:
         _plot_cmd_background(ax, bg_x, bg_y)
 
@@ -535,7 +597,7 @@ def build_plot(
     buckets: list[str] | None = None,
     title: str | None = None,
     only_reviewed: bool = True,
-    background_style: str = "hybrid",
+    background_style: str = DEFAULT_BACKGROUND_STYLE,
 ) -> tuple[pd.DataFrame, dict[str, int]]:
     bucket_order = buckets or BUCKET_ORDER
     reviews = _read_reviews(review_db, only_reviewed=only_reviewed)
@@ -589,9 +651,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--title", default=None, help="Optional plot title override.")
     parser.add_argument(
         "--background-style",
-        choices=("hybrid", "density"),
-        default="hybrid",
-        help="Background rendering: 'hybrid' (scatter+contourf magma) or 'density' (pcolormesh viridis).",
+        choices=("hybrid", "density", "corner"),
+        default=DEFAULT_BACKGROUND_STYLE,
+        help=(
+            "Background rendering: 'density' (pcolormesh viridis, default), "
+            "'hybrid' (scatter+contourf magma), or 'corner' (grey scatter+line contours)."
+        ),
     )
     parser.add_argument(
         "--include-unreviewed",
@@ -602,8 +667,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def _apply_output_suffix(output: Path, background_style: str) -> Path:
-    """Insert style suffix (e.g. '_density') before the extension when not hybrid."""
-    if background_style == "hybrid":
+    """Insert style suffix before the extension for non-default background styles."""
+    if background_style == DEFAULT_BACKGROUND_STYLE:
         return output
     stem = output.stem
     if not stem.endswith(f"_{background_style}"):

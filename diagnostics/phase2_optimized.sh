@@ -29,9 +29,9 @@ echo ""
 echo "[1/5] Running min-mag-offset=0.00 (no amplitude filter)..."
 echo "  - Injection test..."
 malca injection --run-tag "2_offset_0.00" \
-  --amp-min 0.05 --amp-max 5.0 --amp-steps 200 \
-  --dur-min 1 --dur-max 300 --dur-steps 200 \
-  --n-injections-per-grid 100 \
+  --amp-min 0.05 --amp-max 5.0 \
+  --dur-min 1 --dur-max 300 \
+  --total-trials 4000000 \
   --mag-points 25 \
   --workers 50 \
   --min-mag-offset 0.0
@@ -48,9 +48,9 @@ echo ""
 echo "[2/5] Running min-mag-offset=0.01..."
 echo "  - Injection test..."
 malca injection --run-tag "2_offset_0.01" \
-  --amp-min 0.05 --amp-max 5.0 --amp-steps 200 \
-  --dur-min 1 --dur-max 300 --dur-steps 200 \
-  --n-injections-per-grid 100 \
+  --amp-min 0.05 --amp-max 5.0 \
+  --dur-min 1 --dur-max 300 \
+  --total-trials 4000000 \
   --mag-points 25 \
   --workers 50 \
   --min-mag-offset 0.01
@@ -67,9 +67,9 @@ echo ""
 echo "[3/5] Running min-mag-offset=0.02..."
 echo "  - Injection test..."
 malca injection --run-tag "2_offset_0.02" \
-  --amp-min 0.05 --amp-max 5.0 --amp-steps 200 \
-  --dur-min 1 --dur-max 300 --dur-steps 200 \
-  --n-injections-per-grid 100 \
+  --amp-min 0.05 --amp-max 5.0 \
+  --dur-min 1 --dur-max 300 \
+  --total-trials 4000000 \
   --mag-points 25 \
   --workers 50 \
   --min-mag-offset 0.02
@@ -86,9 +86,9 @@ echo ""
 echo "[4/5] Running min-mag-offset=0.05..."
 echo "  - Injection test..."
 malca injection --run-tag "2_offset_0.05" \
-  --amp-min 0.05 --amp-max 5.0 --amp-steps 200 \
-  --dur-min 1 --dur-max 300 --dur-steps 200 \
-  --n-injections-per-grid 100 \
+  --amp-min 0.05 --amp-max 5.0 \
+  --dur-min 1 --dur-max 300 \
+  --total-trials 4000000 \
   --mag-points 25 \
   --workers 50 \
   --min-mag-offset 0.05
@@ -105,9 +105,9 @@ echo ""
 echo "[5/5] Running min-mag-offset=0.10..."
 echo "  - Injection test..."
 malca injection --run-tag "2_offset_0.10" \
-  --amp-min 0.05 --amp-max 5.0 --amp-steps 200 \
-  --dur-min 1 --dur-max 300 --dur-steps 200 \
-  --n-injections-per-grid 100 \
+  --amp-min 0.05 --amp-max 5.0 \
+  --dur-min 1 --dur-max 300 \
+  --total-trials 4000000 \
   --mag-points 25 \
   --workers 50 \
   --min-mag-offset 0.1

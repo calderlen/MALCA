@@ -374,7 +374,7 @@ malca stv-plot --results output/lc_events_results_13_13.5_filtered.parquet --out
 malca injection --workers 10
 
 # Quick test with limited trials
-malca injection --max-trials 1000 --workers 10
+malca injection --total-trials 1000 --workers 10
 
 # Custom manifest and output directory
 malca injection --manifest /path/to/manifest.parquet --output-dir output/injection

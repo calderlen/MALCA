@@ -15,9 +15,9 @@ echo ""
 echo "[1/4] Running baseline (current config)..."
 echo "  - Injection test (100x100 grid, 100 inj/cell = 1M trials)..."
 malca injection --run-tag "1b_baseline" \
-  --amp-min 0.05 --amp-max 5.0 --amp-steps 100 \
-  --dur-min 1 --dur-max 300 --dur-steps 100 \
-  --n-injections-per-grid 100 \
+  --amp-min 0.05 --amp-max 5.0 \
+  --dur-min 1 --dur-max 300 \
+  --total-trials 1000000 \
   --mag-points 25 \
   --workers 40 \
   --measure-pre-injection
@@ -33,9 +33,9 @@ echo ""
 echo "[2/4] Running with shorter GP timescale (~100 days)..."
 echo "  - Injection test (100x100 grid, 100 inj/cell = 1M trials)..."
 malca injection --run-tag "1b_short_gp" \
-  --amp-min 0.05 --amp-max 5.0 --amp-steps 100 \
-  --dur-min 1 --dur-max 300 --dur-steps 100 \
-  --n-injections-per-grid 100 \
+  --amp-min 0.05 --amp-max 5.0 \
+  --dur-min 1 --dur-max 300 \
+  --total-trials 1000000 \
   --mag-points 25 \
   --workers 40 \
   --baseline-s0 0.002 --baseline-w0 0.0314 \
@@ -53,9 +53,9 @@ echo ""
 echo "[3/4] Running with per-camera median baseline (no GP)..."
 echo "  - Injection test (100x100 grid, 100 inj/cell = 1M trials)..."
 malca injection --run-tag "1b_median_baseline" \
-  --amp-min 0.05 --amp-max 5.0 --amp-steps 100 \
-  --dur-min 1 --dur-max 300 --dur-steps 100 \
-  --n-injections-per-grid 100 \
+  --amp-min 0.05 --amp-max 5.0 \
+  --dur-min 1 --dur-max 300 \
+  --total-trials 1000000 \
   --mag-points 25 \
   --workers 40 \
   --baseline-func per_camera_median \
@@ -73,9 +73,9 @@ echo ""
 echo "[4/4] Running with masked GP..."
 echo "  - Injection test (100x100 grid, 100 inj/cell = 1M trials)..."
 malca injection --run-tag "1b_masked_gp" \
-  --amp-min 0.05 --amp-max 5.0 --amp-steps 100 \
-  --dur-min 1 --dur-max 300 --dur-steps 100 \
-  --n-injections-per-grid 100 \
+  --amp-min 0.05 --amp-max 5.0 \
+  --dur-min 1 --dur-max 300 \
+  --total-trials 1000000 \
   --mag-points 25 \
   --workers 40 \
   --baseline-func gp_masked \

@@ -15,6 +15,8 @@ from malca.config import (
     GP_STIFF_SCALE_FRACTION, GP_STIFF_MIN_DAYS,
     GP_LOOSE_SCALE_FRACTION, GP_LOOSE_MIN_DAYS, GP_MIN_GP_POINTS,
     GP_DIP_SIGMA_THRESH, GP_BRIGHT_SIGMA_THRESH, GP_PAD_DAYS,
+    GP_LATE_ONSET_BUFFER_DAYS, GP_MIN_ANCHOR_OVERLAP_DAYS,
+    GP_MIN_QUIET_BASELINE_DAYS, GP_CONSENSUS_START_RESID_SIGMA,
     ROLLING_WINDOW_DAYS, ROLLING_MIN_POINTS, ROLLING_MIN_DAYS,
 )
 from malca.config import MAD_SCALE
@@ -583,6 +585,397 @@ def per_camera_gp_baseline(
     return df_out
 
 
+def _fit_stiff_gp(
+    t,
+    mag,
+    mag_err,
+    finite,
+    *,
+    auto_scale_gp,
+    min_gp_points,
+    stiff_scale_fraction,
+    stiff_min_days,
+    S0,
+    q,
+):
+    """Fit a stiff SHO GP for masking; returns base_rough or None."""
+    if not (auto_scale_gp and finite.sum() >= min_gp_points):
+        return None
+    try:
+        fit_finite = finite & np.isfinite(mag_err) & (mag_err > 0)
+        if np.count_nonzero(fit_finite) < min_gp_points:
+            raise ValueError("insufficient finite mag_err points for stiff GP")
+
+        t_stiff = t[fit_finite]
+        mag_stiff = mag[fit_finite]
+        mean_mag_stiff = float(np.mean(mag_stiff))
+        mag_stiff_centered = mag_stiff - mean_mag_stiff
+        mag_err_stiff = mag_err[fit_finite]
+
+        time_span_stiff = float(t_stiff.max() - t_stiff.min())
+        target_timescale_stiff = max(
+            time_span_stiff * float(stiff_scale_fraction), float(stiff_min_days)
+        )
+        w0_stiff = 2.0 * np.pi / target_timescale_stiff
+        k_stiff = terms.SHOTerm(S0=float(S0), w0=w0_stiff, Q=float(q))
+
+        gp_stiff = GaussianProcess(k_stiff)
+        gp_stiff.compute(t_stiff, diag=mag_err_stiff**2)
+        mean_prediction_stiff = gp_stiff.predict(
+            mag_stiff_centered, t, return_var=False
+        )
+
+        return np.asarray(mean_prediction_stiff, dtype=float) + mean_mag_stiff
+    except Exception:
+        return None
+
+
+def _compute_base_rough(
+    t,
+    mag,
+    mag_err,
+    finite,
+    median_mag,
+    *,
+    auto_scale_gp,
+    min_gp_points,
+    stiff_scale_fraction,
+    stiff_min_days,
+    S0,
+    q,
+):
+    base_rough = _fit_stiff_gp(
+        t,
+        mag,
+        mag_err,
+        finite,
+        auto_scale_gp=auto_scale_gp,
+        min_gp_points=min_gp_points,
+        stiff_scale_fraction=stiff_scale_fraction,
+        stiff_min_days=stiff_min_days,
+        S0=S0,
+        q=q,
+    )
+    if base_rough is None:
+        base_rough = rolling_time_median(t, mag, past_only=False)
+    return np.where(np.isfinite(base_rough), base_rough, median_mag)
+
+
+def _mask_excursion_sigma(
+    mag,
+    base_rough,
+    finite,
+    mag_err,
+):
+    rough_resid = mag - base_rough
+    rough_resid_finite = rough_resid[finite]
+    median_rough_resid = float(np.nanmedian(rough_resid_finite))
+    mad_rough_resid = MAD_SCALE * float(
+        np.nanmedian(np.abs(rough_resid_finite - median_rough_resid))
+    )
+    median_mag_err = float(np.nanmedian(mag_err[finite & np.isfinite(mag_err)]))
+    s0 = float(np.sqrt(max(mad_rough_resid, 0.0) ** 2 + max(median_mag_err, 0.0) ** 2))
+    return max(s0, 1e-6)
+
+
+def _mask_excursions(
+    t,
+    mag,
+    base_rough,
+    finite,
+    median_mag,
+    *,
+    mag_err,
+    dip_sigma_thresh,
+    bright_sigma_thresh,
+    pad_days,
+):
+    """Stateful dip/flare masking; returns flags, keep mask, and padded intervals."""
+    s0 = _mask_excursion_sigma(mag, base_rough, finite, mag_err)
+
+    flags = np.zeros(len(t), dtype=bool)
+    in_dip = False
+    in_flare = False
+
+    valid_base_idx = np.where(np.isfinite(base_rough) & finite)[0]
+    ref_baseline = base_rough[valid_base_idx[0]] if len(valid_base_idx) > 0 else median_mag
+
+    thresh_dip = float(dip_sigma_thresh)
+    thresh_bright = float(bright_sigma_thresh)
+
+    for i in range(len(t)):
+        if not finite[i]:
+            continue
+
+        if not (in_dip or in_flare):
+            ref_baseline = base_rough[i]
+
+        sig = (mag[i] - ref_baseline) / s0
+
+        if sig > thresh_dip:
+            in_dip = True
+            in_flare = False
+            flags[i] = True
+        elif in_dip and sig > 1.0:
+            flags[i] = True
+        else:
+            in_dip = False
+
+        if not in_dip:
+            if sig < thresh_bright:
+                in_flare = True
+                flags[i] = True
+            elif in_flare and sig < -1.0:
+                flags[i] = True
+            else:
+                in_flare = False
+
+    event_flag = finite & flags
+    keep = finite.copy()
+    intervals: list[tuple[float, float]] = []
+    if event_flag.any():
+        t_event = t[event_flag]
+        bad = np.zeros_like(keep, dtype=bool)
+        for td in t_event:
+            lo = float(td) - float(pad_days)
+            hi = float(td) + float(pad_days)
+            bad |= (t >= lo) & (t <= hi)
+            intervals.append((lo, hi))
+        keep &= ~bad
+
+    return flags, keep, _union_intervals(intervals), s0
+
+
+def _union_intervals(intervals: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    if not intervals:
+        return []
+    sorted_iv = sorted(intervals, key=lambda x: x[0])
+    merged = [sorted_iv[0]]
+    for lo, hi in sorted_iv[1:]:
+        prev_lo, prev_hi = merged[-1]
+        if lo <= prev_hi:
+            merged[-1] = (prev_lo, max(prev_hi, hi))
+        else:
+            merged.append((lo, hi))
+    return merged
+
+
+def _time_in_intervals(t_val: float, intervals: list[tuple[float, float]]) -> bool:
+    for lo, hi in intervals:
+        if lo <= float(t_val) <= hi:
+            return True
+    return False
+
+
+def _quiet_span_before_first_excursion(
+    t_first: float,
+    t_last: float,
+    intervals: list[tuple[float, float]],
+) -> float:
+    """Days from first observation to the start of the first overlapping excursion."""
+    overlapping = [
+        (lo, hi) for lo, hi in intervals if hi >= float(t_first) and lo <= float(t_last)
+    ]
+    if not overlapping:
+        return float(t_last) - float(t_first)
+    first_start = min(lo for lo, _hi in overlapping)
+    return max(float(first_start) - float(t_first), 0.0)
+
+
+def _camera_overlap_days(
+    t_a_min: float,
+    t_a_max: float,
+    t_b_min: float,
+    t_b_max: float,
+) -> float:
+    return max(0.0, min(float(t_a_max), float(t_b_max)) - max(float(t_a_min), float(t_b_min)))
+
+
+def _build_band_consensus(
+    anchor_base_rough,
+    band_id,
+    t_target,
+    anchor_ids,
+    cam_band_map,
+    *,
+    min_anchor_overlap_days,
+):
+    """Robust median of selected anchor base_rough curves at t_target epochs."""
+    contributions = []
+    t_min = float(np.min(t_target))
+    t_max = float(np.max(t_target))
+    target_span = t_max - t_min
+    point_target = target_span < float(min_anchor_overlap_days)
+    for cam_id in anchor_ids:
+        if cam_id not in anchor_base_rough:
+            continue
+        if cam_band_map.get(cam_id) != band_id:
+            continue
+        t_anchor, br_anchor = anchor_base_rough[cam_id]
+        anchor_min = float(t_anchor.min())
+        anchor_max = float(t_anchor.max())
+        if point_target:
+            in_range = (t_target >= anchor_min) & (t_target <= anchor_max)
+            if not np.any(in_range):
+                continue
+            interped = np.interp(t_target, t_anchor, br_anchor)
+            interped[~in_range] = np.nan
+        else:
+            overlap = _camera_overlap_days(t_min, t_max, anchor_min, anchor_max)
+            if overlap < float(min_anchor_overlap_days):
+                continue
+            interped = np.interp(t_target, t_anchor, br_anchor)
+            in_range = (t_target >= anchor_min) & (t_target <= anchor_max)
+            interped[~in_range] = np.nan
+        contributions.append(interped)
+
+    if not contributions:
+        return None
+    stack = np.column_stack(contributions)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        consensus = np.nanmedian(stack, axis=1)
+    if np.isfinite(consensus).sum() == 0:
+        return None
+    return consensus
+
+
+def _classify_band_cameras(
+    band_cam_ids,
+    cam_meta,
+    anchor_base_rough,
+    cam_band_map,
+    band_id,
+    *,
+    late_onset_buffer_days,
+    min_quiet_baseline_days,
+    min_anchor_overlap_days,
+    consensus_start_resid_sigma,
+):
+    """Bootstrap anchors and identify cameras needing consensus base_rough."""
+    if not band_cam_ids:
+        return set(), set()
+
+    band_start = min(cam_meta[c]["t_first"] for c in band_cam_ids)
+
+    # Seed anchors from cameras with sufficient quiet baseline on their own masking.
+    seed_anchors = {
+        cam_id
+        for cam_id in band_cam_ids
+        if cam_meta[cam_id]["quiet_span"] >= float(min_quiet_baseline_days)
+    }
+
+    band_excursion_union: list[tuple[float, float]] = []
+    for cam_id in seed_anchors:
+        band_excursion_union = _union_intervals(
+            band_excursion_union + cam_meta[cam_id]["excursion_intervals"]
+        )
+
+    anchors = set(seed_anchors)
+    changed = True
+    while changed:
+        changed = False
+        for cam_id in sorted(band_cam_ids, key=lambda c: cam_meta[c]["t_first"]):
+            if cam_id in anchors:
+                continue
+            meta = cam_meta[cam_id]
+            quiet_span_band = _quiet_span_before_first_excursion(
+                meta["t_first"], meta["t_last"], band_excursion_union
+            )
+            if quiet_span_band < float(min_quiet_baseline_days):
+                continue
+            if _time_in_intervals(meta["t_first"], band_excursion_union):
+                continue
+            has_overlap = any(
+                _camera_overlap_days(
+                    meta["t_first"],
+                    meta["t_last"],
+                    cam_meta[other]["t_first"],
+                    cam_meta[other]["t_last"],
+                )
+                >= float(min_anchor_overlap_days)
+                for other in band_cam_ids
+                if other != cam_id
+            )
+            if not has_overlap:
+                continue
+            anchors.add(cam_id)
+            changed = True
+            band_excursion_union = _union_intervals(
+                band_excursion_union + meta["excursion_intervals"]
+            )
+
+    # Rebuild union from final anchor set.
+    band_excursion_union = []
+    for cam_id in anchors:
+        band_excursion_union = _union_intervals(
+            band_excursion_union + cam_meta[cam_id]["excursion_intervals"]
+        )
+
+    # Final anchor qualification: overlap with another camera and not started in union.
+    qualified_anchors = set()
+    for cam_id in anchors:
+        meta = cam_meta[cam_id]
+        quiet_span_band = _quiet_span_before_first_excursion(
+            meta["t_first"], meta["t_last"], band_excursion_union
+        )
+        if quiet_span_band < float(min_quiet_baseline_days):
+            continue
+        if _time_in_intervals(meta["t_first"], band_excursion_union):
+            continue
+        has_overlap = any(
+            _camera_overlap_days(
+                meta["t_first"],
+                meta["t_last"],
+                cam_meta[other]["t_first"],
+                cam_meta[other]["t_last"],
+            )
+            >= float(min_anchor_overlap_days)
+            for other in band_cam_ids
+            if other != cam_id
+        )
+        if has_overlap:
+            qualified_anchors.add(cam_id)
+
+    needs_consensus: set = set()
+    for cam_id in band_cam_ids:
+        meta = cam_meta[cam_id]
+        late_in_band = (meta["t_first"] - band_start) > float(late_onset_buffer_days)
+        if not late_in_band:
+            continue
+
+        quiet_span_band = _quiet_span_before_first_excursion(
+            meta["t_first"], meta["t_last"], band_excursion_union
+        )
+        excursion_failure = _time_in_intervals(meta["t_first"], band_excursion_union)
+        excursion_failure |= quiet_span_band < float(min_quiet_baseline_days)
+
+        other_anchors = qualified_anchors - {cam_id}
+        if other_anchors:
+            t_start = np.array([meta["t_first"]], dtype=float)
+            consensus_at_start = _build_band_consensus(
+                anchor_base_rough,
+                band_id,
+                t_start,
+                other_anchors,
+                cam_band_map,
+                min_anchor_overlap_days=min_anchor_overlap_days,
+            )
+            if consensus_at_start is not None and np.isfinite(consensus_at_start[0]):
+                mag_start = float(meta["mag_at_first"])
+                resid_start = mag_start - float(consensus_at_start[0])
+                s0 = meta["mask_s0"]
+                if s0 > 0 and (resid_start / s0) > float(consensus_start_resid_sigma):
+                    excursion_failure = True
+
+        if not excursion_failure:
+            continue
+
+        needs_consensus.add(cam_id)
+
+    return qualified_anchors, needs_consensus
+
+
 def per_camera_gp_baseline_masked(
     df,
     *,
@@ -601,6 +994,7 @@ def per_camera_gp_baseline_masked(
     mag_col="mag",
     mag_err_col="error",
     cam_col="camera#",
+    band_col="v_g_band",
     min_gp_points=GP_MIN_GP_POINTS,
     add_sigma_eff_col=True,
     sigma_floor=None,
@@ -612,11 +1006,19 @@ def per_camera_gp_baseline_masked(
     stiff_min_days=GP_STIFF_MIN_DAYS,
     loose_scale_fraction=GP_LOOSE_SCALE_FRACTION,
     loose_min_days=GP_LOOSE_MIN_DAYS,
+    late_onset_buffer_days=GP_LATE_ONSET_BUFFER_DAYS,
+    min_anchor_overlap_days=GP_MIN_ANCHOR_OVERLAP_DAYS,
+    min_quiet_baseline_days=GP_MIN_QUIET_BASELINE_DAYS,
+    consensus_start_resid_sigma=GP_CONSENSUS_START_RESID_SIGMA,
     **kwargs,
 ):
-    """Per-camera GP baseline with dip masking (excludes significant dips from fit)."""
+    """Per-camera GP baseline with dip masking (excludes significant dips from fit).
 
-    
+    Cameras that start late within a band and lack sufficient quiet baseline
+    borrow anchor consensus base_rough for masking, preventing stiff-GP tracking
+    of excursions at camera onset.
+    """
+
     def robust_sigma_floor(resid, mag_err_here, var_here):
         finite0 = np.isfinite(resid) & np.isfinite(mag_err_here) & np.isfinite(var_here)
         if finite0.sum() < max(10, min_floor_points):
@@ -657,109 +1059,160 @@ def per_camera_gp_baseline_masked(
         if col not in df_out.columns:
             df_out[col] = np.nan
 
-    for _, sub in df_out.groupby(cam_col, group_keys=False):
+    has_band_col = band_col in df_out.columns
+    cam_band_map: dict = {}
+    if has_band_col:
+        for row_cam, row_band in zip(df_out[cam_col], df_out[band_col]):
+            cam_band_map[row_cam] = row_band
+
+    # ---- Pass 1: stiff GP + masking for all cameras ----
+    cam_cache: dict = {}
+    anchor_base_rough: dict = {}
+    cam_meta: dict = {}
+
+    for cam_id, sub in df_out.groupby(cam_col, group_keys=False):
         idx = sub.sort_values(t_col).index
         t = df_out.loc[idx, t_col].to_numpy(float)
         mag = df_out.loc[idx, mag_col].to_numpy(float)
         mag_err = df_out.loc[idx, mag_err_col].to_numpy(float)
-
         finite = np.isfinite(t) & np.isfinite(mag)
-        median_mag = float(np.nanmedian(mag[finite]))
-        
-        # Step 1: Two-Pass Trend-Aware Masking (Stiff GP)
-        base_rough = None
-        if auto_scale_gp and finite.sum() >= min_gp_points:
-            try:
-                fit_finite = finite & np.isfinite(mag_err) & (mag_err > 0)
-                if np.count_nonzero(fit_finite) < min_gp_points:
-                    raise ValueError("insufficient finite mag_err points for stiff GP")
+        median_mag = float(np.nanmedian(mag[finite])) if finite.any() else np.nan
 
-                t_stiff = t[fit_finite]
-                mag_stiff = mag[fit_finite]
-                mean_mag_stiff = float(np.mean(mag_stiff))
-                mag_stiff_centered = mag_stiff - mean_mag_stiff
-                mag_err_stiff = mag_err[fit_finite]
-                
-                time_span_stiff = float(t_stiff.max() - t_stiff.min())
-                target_timescale_stiff = max(time_span_stiff * float(stiff_scale_fraction), float(stiff_min_days))
-                w0_stiff = 2.0 * np.pi / target_timescale_stiff
-                # Do not bound by w0 here; we want it to be as stiff as possible
-                k_stiff = terms.SHOTerm(S0=float(S0), w0=w0_stiff, Q=float(q))
-                
-                gp_stiff = GaussianProcess(k_stiff)
-                gp_stiff.compute(t_stiff, diag=mag_err_stiff**2)
-                mean_prediction_stiff = gp_stiff.predict(mag_stiff_centered, t, return_var=False)
-                
-                base_rough = np.full_like(mag, np.nan, dtype=float)
-                base_rough[:] = np.asarray(mean_prediction_stiff, dtype=float) + mean_mag_stiff
-                
-            except Exception:
-                base_rough = None
+        base_rough = _compute_base_rough(
+            t,
+            mag,
+            mag_err,
+            finite,
+            median_mag,
+            auto_scale_gp=auto_scale_gp,
+            min_gp_points=min_gp_points,
+            stiff_scale_fraction=stiff_scale_fraction,
+            stiff_min_days=stiff_min_days,
+            S0=S0,
+            q=q,
+        )
+        anchor_base_rough[cam_id] = (t, base_rough)
 
-        if base_rough is None:
-            base_rough = rolling_time_median(t, mag, past_only=False)
-            
-        # Fallback if base_rough has NaNs
-        base_rough = np.where(np.isfinite(base_rough), base_rough, median_mag)
-        df_out.loc[idx, "base_rough"] = base_rough
-        rough_resid = mag - base_rough
+        flags, keep, excursion_intervals, mask_s0 = _mask_excursions(
+            t,
+            mag,
+            base_rough,
+            finite,
+            median_mag,
+            mag_err=mag_err,
+            dip_sigma_thresh=dip_sigma_thresh,
+            bright_sigma_thresh=bright_sigma_thresh,
+            pad_days=pad_days,
+        )
 
-        rough_resid_finite = rough_resid[finite]
-        median_rough_resid = float(np.nanmedian(rough_resid_finite))
-        mad_rough_resid = MAD_SCALE * float(np.nanmedian(np.abs(rough_resid_finite - median_rough_resid)))
+        t_first = float(t[finite].min()) if finite.any() else np.nan
+        t_last = float(t[finite].max()) if finite.any() else np.nan
+        quiet_span = _quiet_span_before_first_excursion(
+            t_first, t_last, excursion_intervals
+        )
 
-        median_mag_err = float(np.nanmedian(mag_err[finite & np.isfinite(mag_err)]))
+        cam_cache[cam_id] = {
+            "idx": idx,
+            "t": t,
+            "mag": mag,
+            "mag_err": mag_err,
+            "finite": finite,
+            "median_mag": median_mag,
+            "base_rough": base_rough,
+            "keep": keep,
+        }
+        cam_meta[cam_id] = {
+            "t_first": t_first,
+            "t_last": t_last,
+            "quiet_span": quiet_span,
+            "excursion_intervals": excursion_intervals,
+            "mask_s0": mask_s0,
+            "mag_at_first": float(mag[finite][0]) if finite.any() else np.nan,
+        }
 
-        s0 = float(np.sqrt(max(mad_rough_resid, 0.0) ** 2 + max(median_mag_err, 0.0) ** 2))
-        s0 = max(s0, 1e-6)
+    # ---- Pass 2: per-band anchor bootstrapping and consensus classification ----
+    band_anchors: dict = {}
+    needs_consensus: set = set()
 
-        # Step 2: Stateful Bidirectional Outlier Rejection
-        flags = np.zeros(len(t), dtype=bool)
-        in_dip = False
-        in_flare = False
-        
-        valid_base_idx = np.where(np.isfinite(base_rough) & finite)[0]
-        ref_baseline = base_rough[valid_base_idx[0]] if len(valid_base_idx) > 0 else median_mag
-        
-        thresh_dip = float(dip_sigma_thresh)
-        thresh_bright = float(bright_sigma_thresh)
-        
-        for i in range(len(t)):
-            if not finite[i]:
+    if has_band_col and late_onset_buffer_days > 0:
+        for band_id, band_sub in df_out.groupby(band_col, group_keys=False):
+            band_cam_ids = list(band_sub[cam_col].unique())
+            anchors, consensus_cams = _classify_band_cameras(
+                band_cam_ids,
+                cam_meta,
+                anchor_base_rough,
+                cam_band_map,
+                band_id,
+                late_onset_buffer_days=late_onset_buffer_days,
+                min_quiet_baseline_days=min_quiet_baseline_days,
+                min_anchor_overlap_days=min_anchor_overlap_days,
+                consensus_start_resid_sigma=consensus_start_resid_sigma,
+            )
+            band_anchors[band_id] = anchors
+            needs_consensus.update(consensus_cams)
+
+    def _build_cross_band_consensus(current_band_id, t_target):
+        if not has_band_col:
+            return None
+        best_consensus = None
+        best_overlap = 0.0
+        for band_id, anchors in band_anchors.items():
+            if band_id == current_band_id or not anchors:
                 continue
-                
-            if not (in_dip or in_flare):
-                ref_baseline = base_rough[i]
-                
-            sig = (mag[i] - ref_baseline) / s0
-            
-            if sig > thresh_dip:
-                in_dip = True
-                in_flare = False
-                flags[i] = True
-            elif in_dip and sig > 1.0:
-                flags[i] = True
-            else:
-                in_dip = False
-                
-            if not in_dip:
-                if sig < thresh_bright:
-                    in_flare = True
-                    flags[i] = True
-                elif in_flare and sig < -1.0:
-                    flags[i] = True
-                else:
-                    in_flare = False
+            c = _build_band_consensus(
+                anchor_base_rough,
+                band_id,
+                t_target,
+                anchors,
+                cam_band_map,
+                min_anchor_overlap_days=min_anchor_overlap_days,
+            )
+            if c is not None:
+                overlap = float(np.isfinite(c).sum())
+                if overlap > best_overlap:
+                    best_overlap = overlap
+                    best_consensus = c
+        return best_consensus
 
-        event_flag = finite & flags
+    # ---- Pass 3: final masking + loose GP per camera ----
+    for cam_id, cached in cam_cache.items():
+        idx = cached["idx"]
+        t = cached["t"]
+        mag = cached["mag"]
+        mag_err = cached["mag_err"]
+        finite = cached["finite"]
+        median_mag = cached["median_mag"]
+        base_rough = cached["base_rough"].copy()
 
-        keep = finite.copy()
-        if event_flag.any():
-            t_event = t[event_flag]
-            bad = np.zeros_like(keep, dtype=bool)
-            for td in t_event:
-                bad |= np.abs(t - td) <= float(pad_days)
-            keep &= ~bad
+        if cam_id in needs_consensus:
+            band_id = cam_band_map.get(cam_id)
+            anchors = band_anchors.get(band_id, set()) if band_id is not None else set()
+            consensus = _build_band_consensus(
+                anchor_base_rough,
+                band_id,
+                t,
+                anchors,
+                cam_band_map,
+                min_anchor_overlap_days=min_anchor_overlap_days,
+            )
+            if consensus is None:
+                consensus = _build_cross_band_consensus(band_id, t)
+            if consensus is not None:
+                base_rough = np.where(np.isfinite(consensus), consensus, base_rough)
+
+        df_out.loc[idx, "base_rough"] = base_rough
+
+        _flags, keep, _intervals, _s0 = _mask_excursions(
+            t,
+            mag,
+            base_rough,
+            finite,
+            median_mag,
+            mag_err=mag_err,
+            dip_sigma_thresh=dip_sigma_thresh,
+            bright_sigma_thresh=bright_sigma_thresh,
+            pad_days=pad_days,
+        )
 
         if keep.sum() < min_gp_points:
             baseline = np.full_like(mag, median_mag, dtype=float)
@@ -777,8 +1230,6 @@ def per_camera_gp_baseline_masked(
                 df_out.loc[idx, "sigma_eff"] = sigma_eff
             continue
 
-        t_fit = t[keep]
-        mag_fit = mag[keep]
         fit_keep = keep & np.isfinite(mag_err) & (mag_err > 0)
         if np.count_nonzero(fit_keep) < min_gp_points:
             baseline = np.full_like(mag, median_mag, dtype=float)

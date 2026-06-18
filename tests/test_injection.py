@@ -131,8 +131,12 @@ def test_injection_cli_exposes_diagnostics_detection_flags() -> None:
         "--baseline-func",
         "--logbf-threshold-dip",
         "--measure-pre-injection",
+        "--total-trials",
     ):
         assert flag in help_text
+
+    for flag in ("--amp-steps", "--dur-steps", "--n-injections-per-grid", "--max-trials"):
+        assert flag not in help_text
 
 
 def test_diagnostics_scripts_use_current_cli_entrypoints() -> None:

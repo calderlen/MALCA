@@ -9,6 +9,7 @@ import pytest
 from malca.baseline import (
     global_median_baseline,
     per_camera_gp_baseline,
+    per_camera_gp_baseline_masked,
     per_camera_median_baseline,
     phase_template_baseline,
 )
@@ -248,3 +249,302 @@ class TestPhaseTemplateBaseline:
         assert set(result["baseline_source"].astype(str)) == {"phase_template"}
         assert np.nanstd(result.loc[~event_mask, "resid"]) < 0.08
         assert float(result.loc[event_mask, "resid"].min()) < -0.18
+
+
+def _make_late_onset_lc(
+    *,
+    n_anchor_cams: int = 3,
+    n_late_cams: int = 1,
+    base_mag: float = 14.0,
+    scatter: float = 0.02,
+    error: float = 0.015,
+    jd_start: float = 7000.0,
+    jd_end: float = 11000.0,
+    late_onset_jd: float = 9500.0,
+    dip_center_jd: float = 9600.0,
+    dip_amplitude: float = 0.5,
+    dip_sigma: float = 15.0,
+    cadence: float = 5.0,
+    band: int = 0,
+    seed: int = 99,
+) -> pd.DataFrame:
+    """Build a lightcurve where late-onset cameras start observing during a dip.
+
+    Anchor cameras span the full time range. Late-onset cameras only begin
+    observing near the dip, so their per-camera stiff GP would track the dip
+    as quiescent if not corrected by the consensus mechanism.
+    """
+    rng = np.random.default_rng(seed)
+    rows = []
+
+    for cam_i in range(n_anchor_cams):
+        jd = np.arange(jd_start, jd_end, cadence) + rng.uniform(-1, 1, int((jd_end - jd_start) / cadence))
+        jd = np.sort(jd)
+        mag = base_mag + rng.normal(0, scatter, len(jd))
+        dip = dip_amplitude * np.exp(-0.5 * ((jd - dip_center_jd) / dip_sigma) ** 2)
+        mag += dip
+        err = np.full(len(jd), error) + rng.uniform(0, 0.003, len(jd))
+        for j, m, e in zip(jd, mag, err):
+            rows.append({
+                "JD": j, "mag": m, "error": e,
+                "camera#": f"anchor_{cam_i}", "v_g_band": band, "saturated": 0,
+            })
+
+    for cam_i in range(n_late_cams):
+        jd = np.arange(late_onset_jd, jd_end, cadence) + rng.uniform(-1, 1, int((jd_end - late_onset_jd) / cadence))
+        jd = np.sort(jd)
+        mag = base_mag + rng.normal(0, scatter, len(jd))
+        dip = dip_amplitude * np.exp(-0.5 * ((jd - dip_center_jd) / dip_sigma) ** 2)
+        mag += dip
+        err = np.full(len(jd), error) + rng.uniform(0, 0.003, len(jd))
+        for j, m, e in zip(jd, mag, err):
+            rows.append({
+                "JD": j, "mag": m, "error": e,
+                "camera#": f"late_{cam_i}", "v_g_band": band, "saturated": 0,
+            })
+
+    return pd.DataFrame(rows).sort_values("JD").reset_index(drop=True)
+
+
+def _make_staggered_rollout_lc(
+    *,
+    base_mag: float = 14.0,
+    scatter: float = 0.02,
+    error: float = 0.015,
+    jd_start: float = 7000.0,
+    jd_end: float = 11000.0,
+    dip_center_jd: float = 10000.0,
+    dip_amplitude: float = 0.5,
+    dip_sigma: float = 20.0,
+    cadence: float = 5.0,
+    band: int = 0,
+    seed: int = 42,
+) -> pd.DataFrame:
+    """Staggered g-band rollout: mid-band cameras have long baselines; one starts near dip."""
+    rng = np.random.default_rng(seed)
+    rows = []
+    camera_starts = {
+        "bj": jd_start,
+        "bn": jd_start + 500.0,
+        "bF": jd_start + 1000.0,
+        "cB": jd_start + 2800.0,
+    }
+
+    def _add_camera(name: str, start_jd: float):
+        jd = np.arange(start_jd, jd_end, cadence) + rng.uniform(-1, 1, int((jd_end - start_jd) / cadence))
+        jd = np.sort(jd)
+        mag = base_mag + rng.normal(0, scatter, len(jd))
+        dip = dip_amplitude * np.exp(-0.5 * ((jd - dip_center_jd) / dip_sigma) ** 2)
+        mag += dip
+        err = np.full(len(jd), error) + rng.uniform(0, 0.003, len(jd))
+        for j, m, e in zip(jd, mag, err):
+            rows.append({
+                "JD": j, "mag": m, "error": e,
+                "camera#": name, "v_g_band": band, "saturated": 0,
+            })
+
+    for name, start in camera_starts.items():
+        _add_camera(name, start)
+
+    return pd.DataFrame(rows).sort_values("JD").reset_index(drop=True)
+
+
+class TestLateOnsetConsensus:
+    """Test that late-onset cameras use the band consensus for masking."""
+
+    def test_late_onset_camera_classified(self):
+        """A camera starting 500+ days after band start should be late-onset."""
+        df = _make_late_onset_lc(late_onset_jd=9500.0)
+        result = per_camera_gp_baseline_masked(
+            df, late_onset_buffer_days=300.0, min_anchor_overlap_days=30.0,
+        )
+        assert "base_rough" in result.columns
+        assert result["baseline"].notna().all()
+
+    def test_late_onset_base_rough_near_quiescent(self):
+        """Late-onset camera's base_rough should be near the quiescent level,
+        not tracking the dip."""
+        df = _make_late_onset_lc(dip_amplitude=0.5)
+        result = per_camera_gp_baseline_masked(
+            df, late_onset_buffer_days=300.0, min_anchor_overlap_days=30.0,
+        )
+        late_mask = result["camera#"].str.startswith("late_")
+        late_base_rough = result.loc[late_mask, "base_rough"].to_numpy(float)
+        assert np.all(np.abs(late_base_rough - 14.0) < 0.15), (
+            f"Late-onset base_rough deviates too far from quiescent: "
+            f"mean={np.mean(late_base_rough):.3f}"
+        )
+
+    def test_late_onset_dip_residuals_positive(self):
+        """With consensus base_rough, the dip should produce positive residuals
+        (fainter than baseline) in the late-onset camera, not inverted."""
+        df = _make_late_onset_lc(dip_amplitude=0.5, dip_sigma=15.0)
+        result = per_camera_gp_baseline_masked(
+            df, late_onset_buffer_days=300.0, min_anchor_overlap_days=30.0,
+        )
+        late_mask = result["camera#"].str.startswith("late_")
+        dip_window = np.abs(result["JD"] - 9600.0) < 30.0
+        dip_resid = result.loc[late_mask & dip_window, "resid"].to_numpy(float)
+        assert np.nanmax(dip_resid) > 0.1, (
+            f"Expected positive residuals in dip window, got max={np.nanmax(dip_resid):.3f}"
+        )
+
+    def test_anchor_cameras_unaffected(self):
+        """Anchor and mid-band cameras with long baselines match disabled consensus."""
+        df = _make_late_onset_lc()
+        result_with = per_camera_gp_baseline_masked(
+            df, late_onset_buffer_days=100.0, min_anchor_overlap_days=30.0,
+        )
+        result_without = per_camera_gp_baseline_masked(
+            df, late_onset_buffer_days=0,
+        )
+        anchor_mask = result_with["camera#"].str.startswith("anchor_")
+        np.testing.assert_allclose(
+            result_with.loc[anchor_mask, "baseline"].to_numpy(float),
+            result_without.loc[anchor_mask, "baseline"].to_numpy(float),
+            atol=1e-10,
+        )
+
+    def test_staggered_rollout_only_excursion_camera_differs(self):
+        """Mid-band cameras with quiet history are unchanged; only cB-like camera is fixed."""
+        df = _make_staggered_rollout_lc()
+        result_with = per_camera_gp_baseline_masked(
+            df,
+            late_onset_buffer_days=100.0,
+            min_quiet_baseline_days=250.0,
+            min_anchor_overlap_days=30.0,
+        )
+        result_without = per_camera_gp_baseline_masked(
+            df, late_onset_buffer_days=0,
+        )
+
+        for cam in ("bj", "bn", "bF"):
+            mask = result_with["camera#"] == cam
+            np.testing.assert_allclose(
+                result_with.loc[mask, "baseline"].to_numpy(float),
+                result_without.loc[mask, "baseline"].to_numpy(float),
+                atol=1e-10,
+                err_msg=f"{cam} baseline should be unchanged by consensus logic",
+            )
+
+        cB_mask = result_with["camera#"] == "cB"
+        dip_window = np.abs(result_with["JD"] - 10000.0) < 40.0
+        dip_resid = result_with.loc[cB_mask & dip_window, "resid"].to_numpy(float)
+        assert np.nanmax(dip_resid) > 0.08, (
+            f"cB-like camera should retain positive dip residuals, max={np.nanmax(dip_resid):.3f}"
+        )
+
+    def test_staggered_rollout_cB_base_rough_near_quiescent(self):
+        df = _make_staggered_rollout_lc()
+        result = per_camera_gp_baseline_masked(
+            df,
+            late_onset_buffer_days=100.0,
+            min_quiet_baseline_days=250.0,
+            min_anchor_overlap_days=30.0,
+        )
+        cB_base = result.loc[result["camera#"] == "cB", "base_rough"].to_numpy(float)
+        assert np.all(np.abs(cB_base - 14.0) < 0.2)
+
+    def test_camera_starts_in_anchor_excursion_window(self):
+        """Camera whose first obs fall inside anchor excursion window needs consensus."""
+        rng = np.random.default_rng(55)
+        rows = []
+        base_mag = 14.0
+        dip_center = 10000.0
+        for cam_i in range(2):
+            jd = np.arange(7000.0, 11000.0, 5.0) + rng.uniform(-1, 1, 800)
+            jd = np.sort(jd)
+            mag = base_mag + rng.normal(0, 0.02, len(jd))
+            mag += 0.6 * np.exp(-0.5 * ((jd - dip_center) / 15.0) ** 2)
+            err = np.full(len(jd), 0.015)
+            for j, m, e in zip(jd, mag, err):
+                rows.append({
+                    "JD": j, "mag": m, "error": e,
+                    "camera#": f"anchor_{cam_i}", "v_g_band": 0, "saturated": 0,
+                })
+        jd_late = np.arange(9980.0, 11000.0, 5.0)
+        mag_late = base_mag + 0.55 + rng.normal(0, 0.02, len(jd_late))
+        mag_late += 0.6 * np.exp(-0.5 * ((jd_late - dip_center) / 15.0) ** 2)
+        for j, m in zip(jd_late, mag_late):
+            rows.append({
+                "JD": j, "mag": m, "error": 0.015,
+                "camera#": "late_in_dip", "v_g_band": 0, "saturated": 0,
+            })
+        df = pd.DataFrame(rows).sort_values("JD").reset_index(drop=True)
+        result = per_camera_gp_baseline_masked(
+            df, late_onset_buffer_days=100.0, min_quiet_baseline_days=250.0,
+        )
+        late_base = result.loc[result["camera#"] == "late_in_dip", "base_rough"].to_numpy(float)
+        assert np.all(np.abs(late_base - base_mag) < 0.2)
+
+    def test_multiple_anchors_contribute_to_consensus(self):
+        """Consensus uses all qualifying anchors, not only the earliest."""
+        df = _make_staggered_rollout_lc(seed=7)
+        result = per_camera_gp_baseline_masked(
+            df,
+            late_onset_buffer_days=100.0,
+            min_quiet_baseline_days=250.0,
+            min_anchor_overlap_days=30.0,
+        )
+        cB_base = result.loc[result["camera#"] == "cB", "base_rough"].to_numpy(float)
+        bj_only = result.loc[result["camera#"] == "bj", "base_rough"].to_numpy(float)
+        overlap_len = min(len(cB_base), len(bj_only))
+        assert not np.allclose(cB_base[:overlap_len], bj_only[:overlap_len], atol=1e-6)
+
+    def test_no_band_col_graceful(self):
+        """Without a band column, late-onset detection is skipped gracefully."""
+        df = _make_late_onset_lc().drop(columns=["v_g_band"])
+        result = per_camera_gp_baseline_masked(df, late_onset_buffer_days=300.0)
+        assert result["baseline"].notna().all()
+
+    def test_single_camera_band_not_flagged(self):
+        """A band with only one camera should not be flagged as late-onset."""
+        df = _make_late_onset_lc(n_anchor_cams=0, n_late_cams=1, late_onset_jd=7000.0)
+        result = per_camera_gp_baseline_masked(
+            df, late_onset_buffer_days=300.0, min_anchor_overlap_days=30.0,
+        )
+        assert result["baseline"].notna().all()
+
+    def test_cross_band_fallback(self):
+        """When all cameras in a new band start late, fall back to previous band."""
+        rng = np.random.default_rng(77)
+        rows = []
+        base_mag = 14.0
+        dip_center = 9600.0
+
+        for cam_i in range(3):
+            jd = np.arange(7000.0, 11000.0, 5.0) + rng.uniform(-1, 1, 800)
+            jd = np.sort(jd)
+            mag = base_mag + rng.normal(0, 0.02, len(jd))
+            dip = 0.5 * np.exp(-0.5 * ((jd - dip_center) / 15.0) ** 2)
+            mag += dip
+            err = np.full(len(jd), 0.015)
+            for j, m, e in zip(jd, mag, err):
+                rows.append({
+                    "JD": j, "mag": m, "error": e,
+                    "camera#": f"old_band_{cam_i}", "v_g_band": 0, "saturated": 0,
+                })
+
+        for cam_i in range(2):
+            jd = np.arange(9500.0, 11000.0, 5.0) + rng.uniform(-1, 1, 300)
+            jd = np.sort(jd)
+            mag = base_mag + rng.normal(0, 0.02, len(jd))
+            dip = 0.5 * np.exp(-0.5 * ((jd - dip_center) / 15.0) ** 2)
+            mag += dip
+            err = np.full(len(jd), 0.015)
+            for j, m, e in zip(jd, mag, err):
+                rows.append({
+                    "JD": j, "mag": m, "error": e,
+                    "camera#": f"new_band_{cam_i}", "v_g_band": 1, "saturated": 0,
+                })
+
+        df = pd.DataFrame(rows).sort_values("JD").reset_index(drop=True)
+        result = per_camera_gp_baseline_masked(
+            df, late_onset_buffer_days=300.0, min_anchor_overlap_days=30.0,
+        )
+        new_band_mask = result["camera#"].str.startswith("new_band_")
+        new_band_base_rough = result.loc[new_band_mask, "base_rough"].to_numpy(float)
+        assert np.all(np.abs(new_band_base_rough - base_mag) < 0.15), (
+            f"Cross-band fallback base_rough deviates from quiescent: "
+            f"mean={np.mean(new_band_base_rough):.3f}"
+        )

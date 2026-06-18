@@ -63,6 +63,7 @@ from malca.config import (
     INJECTION_MAG_LO,
     INJECTION_MAG_HI,
     INJECTION_N_SAMPLE,
+    INJECTION_TOTAL_TRIALS,
     INJECTION_MIN_POINTS,
     INJECTION_SEED,
     INJECTION_MAX_ATTEMPTS,
@@ -371,20 +372,6 @@ def _default_detection_func(df: pd.DataFrame, detection_kwargs: dict, min_mag_of
     )
 
 
-def _trial_indices_to_params(
-    trial_index: int,
-    n_injections_per_grid: int,
-    n_durations: int,
-) -> tuple[int, int, int]:
-    n_per_amp = n_durations * n_injections_per_grid
-    amp_idx = trial_index // n_per_amp
-    rem = trial_index % n_per_amp
-    dur_idx = rem // n_injections_per_grid
-    inj_idx = rem % n_injections_per_grid
-    return amp_idx, dur_idx, inj_idx
-
-
-
 def _simulate_trial(
     trial_index: int,
     *,
@@ -629,7 +616,7 @@ def run_injection_recovery(
     detection_kwargs: dict,
     min_mag_offset: float = 0.0,
     measure_pre_injection: bool = False,
-    total_trials: int = INJECTION_N_SAMPLE,
+    total_trials: int = INJECTION_TOTAL_TRIALS,
     amplitude_range: tuple[float, float] = (0.05, 5.0),
     duration_range: tuple[float, float] = (1.0, 300.0),
     skewness_range: tuple[float, float] = (-0.5, 0.5),
@@ -644,7 +631,6 @@ def run_injection_recovery(
     checkpoint_path: Path | None = None,
     resume: bool = True,
     overwrite: bool = False,
-    max_trials: int | None = None,
     show_progress: bool = True,
     file_ext: str | None = None,
 ) -> pd.DataFrame | None:
@@ -652,9 +638,6 @@ def run_injection_recovery(
     Run injection-recovery with optional parallelism and checkpointing.
     Uses Monte Carlo sampling for Amplitude and Duration.
     """
-    if max_trials is not None:
-        total_trials = min(total_trials, max_trials)
-
     if output_path is not None:
         output_path = Path(output_path)
         if output_path.exists() and overwrite and not resume:
@@ -1555,14 +1538,6 @@ def compute_auxiliary_statistics(df_lc: pd.DataFrame, mag_col: str = "mag") -> d
     return {"skewness": skewness_val, "von_neumann_ratio": von_neumann_ratio}
 
 
-def _build_grid_linear(min_val: float, max_val: float, steps: int) -> np.ndarray:
-    return np.linspace(float(min_val), float(max_val), int(steps))
-
-
-def _build_grid_log(min_val: float, max_val: float, steps: int) -> np.ndarray:
-    return np.logspace(np.log10(float(min_val)), np.log10(float(max_val)), int(steps))
-
-
 def _get_non_default_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> dict:
     non_defaults = {}
     for action in parser._actions:
@@ -1611,7 +1586,7 @@ def _generate_output_suffix(non_default_args: dict) -> str:
         "amp_max",
         "dur_min",
         "dur_max",
-        "n_injections_per_grid",
+        "total_trials",
         "skew_min",
         "skew_max",
         "mag_err_order",
@@ -1689,11 +1664,14 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
     g_injection.add_argument("--seed", type=int, default=INJECTION_SEED)
     g_injection.add_argument("--amp-min", type=float, default=0.05)
     g_injection.add_argument("--amp-max", type=float, default=5.0)
-    g_injection.add_argument("--amp-steps", type=int, default=100)
     g_injection.add_argument("--dur-min", type=float, default=1.0)
     g_injection.add_argument("--dur-max", type=float, default=300.0)
-    g_injection.add_argument("--dur-steps", type=int, default=100)
-    g_injection.add_argument("--n-injections-per-grid", type=int, default=100)
+    g_injection.add_argument(
+        "--total-trials",
+        type=int,
+        default=INJECTION_TOTAL_TRIALS,
+        help="Number of Monte Carlo injection-recovery trials to run.",
+    )
     g_injection.add_argument("--skew-min", type=float, default=-0.5)
     g_injection.add_argument("--skew-max", type=float, default=0.5)
     g_injection.add_argument("--mag-err-order", type=int, default=5)
@@ -1744,7 +1722,6 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
     g_workers.add_argument("--task-size", type=int, default=50, help="Trials per worker task.")
     g_workers.add_argument("--checkpoint-interval", type=int, default=1000, help="Trials per checkpoint update.")
     g_workers.add_argument("--chunk-size", type=int, default=INJECTION_CHUNK_SIZE, help="Rows per output flush.")
-    g_workers.add_argument("--max-trials", type=int, default=None, help="Limit total trials (debug).")
     g_workers.add_argument("--no-resume", action="store_true", help="Disable resume even if checkpoint exists.")
     g_workers.add_argument("--overwrite", action="store_true", help="Overwrite output/checkpoint.")
 
@@ -1826,16 +1803,12 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
     print(f"  Latest symlink: {latest_link} -> {run_name}\n")
 
 
-    # Calculate Total Trials equivalent to previous grid based approach
-    # We maintain the same "density" concept for user convenience
-    total_trials = args.amp_steps * args.dur_steps * args.n_injections_per_grid
-
     run_injection_recovery(
         control_sample,
         detection_kwargs=detection_kwargs,
         min_mag_offset=args.min_mag_offset,
         measure_pre_injection=args.measure_pre_injection,
-        total_trials=total_trials,
+        total_trials=max(1, args.total_trials),
         amplitude_range=(args.amp_min, args.amp_max),
         duration_range=(args.dur_min, args.dur_max),
         skewness_range=(args.skew_min, args.skew_max),
@@ -1850,7 +1823,6 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
         checkpoint_path=None,
         resume=not args.no_resume,
         overwrite=args.overwrite,
-        max_trials=args.max_trials,
         show_progress=True,
         file_ext=args.file_ext,
     )

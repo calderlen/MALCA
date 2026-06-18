@@ -76,10 +76,10 @@ CMD_MARKER_EDGE_SOLID = 0.3
 CMD_MARKER_EDGE_HOLLOW = 0.45
 CMD_LEGEND_MARKERSCALE = 0.7
 CMD_BUCKET_STYLE: dict[str, dict[str, object]] = {
-    "Dipper": {"color": "#0072B2", "marker": "v", "size": 16, "zorder": 6},
-    "Interesting": {"color": "#E69F00", "marker": "o", "size": 10, "zorder": 4},
-    "LTV": {"color": "#009E73", "marker": "v", "size": 16, "zorder": 7},
-    "Microlensing": {"color": "#E6B800", "marker": "*", "size": 28, "zorder": 9},
+    "Dipper": {"color": "#E41A1C", "marker": "v", "size": 16, "zorder": 6},
+    "Interesting": {"color": "#009E73", "marker": "o", "size": 10, "zorder": 4},
+    "LTV": {"color": "#ED9224", "marker": "v", "size": 16, "zorder": 7},
+    "Microlensing": {"color": "#F0E442", "marker": "*", "size": 28, "zorder": 9},
     "Eclipsing binary": {"color": "#CC79A7", "marker": "s", "size": 18, "zorder": 8},
     "Unknown": {"color": "#6A3D9A", "marker": "D", "size": 12, "zorder": 5},
 }
