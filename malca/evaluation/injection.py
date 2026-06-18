@@ -65,6 +65,7 @@ from malca.config import (
     INJECTION_SEED,
     INJECTION_MAX_ATTEMPTS,
     DEFAULT_OUTPUT_DIR,
+    LIGHT_CURVE_FILE_EXTENSION,
 )
 from malca.stv.events import score_lightcurve
 from malca.utils import read_lc_dat2
@@ -258,8 +259,8 @@ def _resolve_lc_dir(row: pd.Series) -> Path | None:
     return None
 
 
-def _load_lc(asas_sn_id: str, lc_dir: Path) -> pd.DataFrame:
-    df_g, df_v = read_lc_dat2(asas_sn_id, str(lc_dir))
+def _load_lc(asas_sn_id: str, lc_dir: Path, *, file_ext: str | None = None) -> pd.DataFrame:
+    df_g, df_v = read_lc_dat2(asas_sn_id, str(lc_dir), file_ext=file_ext)
     if df_g.empty and df_v.empty:
         return pd.DataFrame()
     return pd.concat([df_g, df_v], ignore_index=True)
@@ -395,6 +396,7 @@ def _simulate_trial(
     min_mag_offset: float,
     measure_pre_injection: bool,
     seed: int,
+    file_ext: str | None = None,
 ) -> dict:
     rng = np.random.default_rng(seed + int(trial_index))
     
@@ -414,7 +416,7 @@ def _simulate_trial(
         lc_dir = Path(str(control_dirs[control_idx]))
 
         try:
-            df = _load_lc(asas_sn_id, lc_dir)
+            df = _load_lc(asas_sn_id, lc_dir, file_ext=file_ext)
             if df.empty or len(df) < 10:
                 if attempt == max_attempts - 1:
                     return dict(
@@ -537,6 +539,7 @@ def _init_worker(
     min_mag_offset: float,
     measure_pre_injection: bool,
     seed: int,
+    file_ext: str | None = None,
 ) -> None:
     _GLOBAL["control_ids"] = control_ids
     _GLOBAL["control_dirs"] = control_dirs
@@ -548,6 +551,7 @@ def _init_worker(
     _GLOBAL["min_mag_offset"] = min_mag_offset
     _GLOBAL["measure_pre_injection"] = measure_pre_injection
     _GLOBAL["seed"] = seed
+    _GLOBAL["file_ext"] = file_ext
 
 
 def _process_trial_batch(trial_indices: list[int]) -> list[dict]:
@@ -566,6 +570,7 @@ def _process_trial_batch(trial_indices: list[int]) -> list[dict]:
                 min_mag_offset=float(_GLOBAL["min_mag_offset"]),
                 measure_pre_injection=bool(_GLOBAL["measure_pre_injection"]),
                 seed=int(_GLOBAL["seed"]),
+                file_ext=_GLOBAL.get("file_ext"),
             )
         )
     return results
@@ -639,6 +644,7 @@ def run_injection_recovery(
     overwrite: bool = False,
     max_trials: int | None = None,
     show_progress: bool = True,
+    file_ext: str | None = None,
 ) -> pd.DataFrame | None:
     """
     Run injection-recovery with optional parallelism and checkpointing.
@@ -696,7 +702,7 @@ def run_injection_recovery(
         if lc_dir is None:
             continue
         try:
-            df = _load_lc(asas_sn_id, lc_dir)
+            df = _load_lc(asas_sn_id, lc_dir, file_ext=file_ext)
             if not df.empty:
                 lc_sample.append(df)
         except Exception:
@@ -740,6 +746,7 @@ def run_injection_recovery(
                 min_mag_offset=min_mag_offset,
                 measure_pre_injection=measure_pre_injection,
                 seed=seed,
+                file_ext=file_ext,
             )
             results.append(res)
             pbar.update(1)
@@ -770,6 +777,7 @@ def run_injection_recovery(
             min_mag_offset,
             measure_pre_injection,
             seed,
+            file_ext,
         ),
     ) as ex:
         for batch_start in range(start_index, total_trials, checkpoint_interval):
@@ -1692,6 +1700,8 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
                         help="Optional tag to append to run directory name (e.g., 'deep_dips_mag18')")
     g_io.add_argument("--output", type=Path, default=None,
                         help="Override Parquet output path (default: <out-dir>/<timestamp>/results/injection_results.parquet)")
+    g_io.add_argument("--file-ext", type=str, default=None,
+                        help=f"Light curve file extension (e.g., dat2, dat3). Default: {LIGHT_CURVE_FILE_EXTENSION} (from config).")
     g_injection.add_argument(
         "--control-sample-size",
         dest="control_sample_size",
@@ -1866,6 +1876,7 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
         overwrite=args.overwrite,
         max_trials=args.max_trials,
         show_progress=True,
+        file_ext=args.file_ext,
     )
 
 
