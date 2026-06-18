@@ -19,6 +19,7 @@ from malca.lightcurve_publication import (
     FIG_SINGLE_COL_SQUARE,
     PUBLICATION_PLOTLY_FONT,
     apply_publication_rcparams,
+    finalize_publication_figure,
 )
 from malca.ltv.cmd import dustmaps_cmd_from_fields
 from malca.config import (
@@ -740,14 +741,14 @@ def _background_density(ax, x: np.ndarray, y: np.ndarray, *, extent: tuple[float
 
 
 def _save_publication_pdf(fig) -> bytes:
+    finalize_publication_figure(fig)
     buf = BytesIO()
     try:
         fig.savefig(
             buf,
             format="pdf",
             dpi=_PUBLICATION_DPI,
-            bbox_inches="tight",
-            pad_inches=0.04,
+            bbox_inches=None,
             metadata={"Creator": "MALCA"},
         )
         return buf.getvalue()
@@ -777,7 +778,7 @@ def _cmd_publication_pdf(payload: dict, background: dict | None) -> bytes | None
     xlim = (max(-0.8, xlim[0]), min(5.0, xlim[1]))
     ylim = (max(-8.0, ylim[0]), min(16.0, ylim[1]))
 
-    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_SQUARE, constrained_layout=True)
+    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_SQUARE)
     _background_density(ax, bg_x, bg_y, extent=(xlim[0], xlim[1], ylim[0], ylim[1]))
     if abs(bp_rp0 - bp_rp) > 0.01 or abs(m_g0 - m_g) > 0.01:
         ax.scatter(
@@ -841,7 +842,7 @@ def _ir_colorcolor_publication_pdf(payload: dict, background: dict | None) -> by
     xlim = (-0.5, 2.5)
     ylim = (-0.3, 2.0)
 
-    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_SQUARE, constrained_layout=True)
+    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_SQUARE)
     regions = [
         ("Photospheres", xlim[0], YSO_CLASS_II_W1W2_MIN, ylim[0], ylim[1], "#f3f4f6"),
         ("Transition disk", YSO_CLASS_II_W1W2_MIN, YSO_CLASS_I_W1W2, ylim[0], YSO_CLASS_II_HK, "#fff7d6"),
@@ -924,7 +925,7 @@ def _kiel_publication_pdf(payload: dict, background: dict | None) -> bytes | Non
     xlim = (max(2500.0, xlim[0]), min(40000.0, max(xlim[1], min(18000.0, float(teff) * 1.08))))
     ylim = (max(-0.5, ylim[0]), min(6.0, ylim[1]))
 
-    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_SQUARE, constrained_layout=True)
+    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_SQUARE)
     _background_density(ax, bg_x, bg_y, extent=(xlim[0], xlim[1], ylim[0], ylim[1]))
     xerr = None
     yerr = None
@@ -1088,7 +1089,7 @@ def _score_balance_publication_pdf(payload: dict, background: dict | None) -> by
     upper = max(6.0, upper_hi)
     lower = min(-0.25, upper_lo)
 
-    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_SQUARE, constrained_layout=True)
+    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_SQUARE)
     _publication_scatter_background(ax, bg_x, bg_y)
     ax.plot([0.0, upper], [0.0, upper], color="#6b7280", linewidth=0.75, linestyle=":", zorder=3)
     ax.text(0.73, 0.20, "dip-like", transform=ax.transAxes, fontsize=7.2, color="#374151")
@@ -1110,7 +1111,7 @@ def _catalog_support_publication_pdf(payload: dict, background: dict | None) -> 
     plt, _LinearSegmentedColormap, _LogNorm = _publication_imports()
     bg_x, bg_y = _finite_publication_xy(background, "plane_catalog_support_x", "plane_catalog_support_y")
 
-    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_SQUARE, constrained_layout=True)
+    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_SQUARE)
     _publication_scatter_background(ax, bg_x, bg_y)
     ax.axvline(2.0, color="#6b7280", linewidth=0.75, linestyle=":", zorder=3)
     ax.axhline(2.0, color="#6b7280", linewidth=0.75, linestyle=":", zorder=3)
@@ -1137,7 +1138,7 @@ def _recurrence_regularity_publication_pdf(payload: dict, background: dict | Non
     xlim = _positive_log_limits(bg_x, (spacing_median,), default=(1.0, 1000.0))
     ylim = _positive_log_limits(bg_y, (spacing_std,), default=(0.5, 1000.0))
 
-    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_SQUARE, constrained_layout=True)
+    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_SQUARE)
     ax.set_xscale("log")
     ax.set_yscale("log")
     _publication_scatter_background(ax, bg_x, bg_y)
@@ -1166,7 +1167,7 @@ def _dip_repeatability_publication_pdf(payload: dict, background: dict | None) -
     plt, _LinearSegmentedColormap, _LogNorm = _publication_imports()
     bg_x, bg_y = _finite_publication_xy(background, "plane_dip_repeatability_x", "plane_dip_repeatability_y")
 
-    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_SQUARE, constrained_layout=True)
+    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_SQUARE)
     _publication_scatter_background(ax, bg_x, bg_y)
     ax.axvline(0.5, color="#6b7280", linewidth=0.75, linestyle=":", zorder=3)
     ax.axhline(0.5, color="#6b7280", linewidth=0.75, linestyle=":", zorder=3)
@@ -1194,7 +1195,7 @@ def _variability_strength_publication_pdf(payload: dict, background: dict | None
     ylim = _quantile_limits(bg_y, (dipper_score, 5.0), default=(0.0, 20.0), min_pad=0.8)
     ylim = (min(-0.5, ylim[0]), ylim[1])
 
-    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_SQUARE, constrained_layout=True)
+    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_SQUARE)
     ax.set_xscale("log")
     _publication_scatter_background(ax, bg_x, bg_y)
     ax.axhline(5.0, color="#6b7280", linewidth=0.75, linestyle=":", zorder=3)
@@ -1219,7 +1220,7 @@ def _stetson_scatter_publication_pdf(payload: dict, background: dict | None) -> 
     xlim = _positive_log_limits(bg_x, (robust_sigma,), default=(0.003, 2.0))
     ylim = _quantile_limits(bg_y, (stetson_j,), default=(-0.2, 5.0), min_pad=0.35)
 
-    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_SQUARE, constrained_layout=True)
+    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_SQUARE)
     ax.set_xscale("log")
     _publication_scatter_background(ax, bg_x, bg_y)
     _publication_candidate_marker(ax, robust_sigma, stetson_j)
@@ -1243,7 +1244,7 @@ def _shape_impulsiveness_publication_pdf(payload: dict, background: dict | None)
     xlim = _quantile_limits(bg_x, (skew,), default=(-2.5, 3.0), min_pad=0.25)
     ylim = _positive_log_limits(bg_y, (max_slope,), default=(0.02, 1.0e5))
 
-    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_SQUARE, constrained_layout=True)
+    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_SQUARE)
     ax.set_yscale("log")
     _publication_scatter_background(ax, bg_x, bg_y)
     _publication_candidate_marker(ax, skew, max_slope)
@@ -1280,7 +1281,7 @@ def _rpm_publication_pdf(payload: dict, background: dict | None) -> bytes | None
     xlim = (max(-1.0, xlim[0]), min(5.5, xlim[1]))
     ylim = (max(-5.0, ylim[0]), min(22.0, ylim[1]))
 
-    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_SQUARE, constrained_layout=True)
+    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_SQUARE)
     _publication_scatter_background(ax, bg_x, bg_y)
     _publication_candidate_marker(ax, bp_rp, h_g)
     ax.text(0.25, 0.24, "main sequence", transform=ax.transAxes, color="#374151", fontsize=7.2)

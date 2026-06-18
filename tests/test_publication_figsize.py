@@ -19,6 +19,10 @@ from malca.lightcurve_publication import (
     FIG_SINGLE_COL_WIDTH,
     FIG_TWO_COL_STANDARD,
     FIG_TWO_COL_WIDTH,
+    PUBLICATION_STYLE,
+    PUBLICATION_TIGHT_LAYOUT_PAD,
+    finalize_publication_figure,
+    save_publication_figure,
     figsize_feature_grid,
     figsize_from_legacy,
     figsize_heatmap_single_col,
@@ -81,3 +85,50 @@ def test_scaled_publication_text_sizes() -> None:
     sizes = scaled_publication_text_sizes(FIG_SINGLE_COL_HEATMAP)
     assert sizes["label"] < 14.0
     assert sizes["title"] < 16.0
+
+
+def test_publication_style_no_bbox_tight() -> None:
+    assert PUBLICATION_STYLE.get("savefig.bbox") is None
+
+
+def test_publication_tight_layout_pad_value() -> None:
+    assert PUBLICATION_TIGHT_LAYOUT_PAD == 0.3
+
+
+def test_finalize_publication_figure_runs_on_simple_figure() -> None:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_HEATMAP)
+    ax.plot([0, 1], [0, 1])
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    finalize_publication_figure(fig)
+    plt.close(fig)
+
+
+def test_finalize_publication_figure_with_colorbar() -> None:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_HEATMAP)
+    im = ax.pcolormesh(np.random.rand(5, 5))
+    plt.colorbar(im, ax=ax)
+    finalize_publication_figure(fig)
+    plt.close(fig)
+
+
+def test_save_publication_figure_writes_file(tmp_path) -> None:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_HEATMAP)
+    ax.plot([0, 1], [0, 1])
+    out = tmp_path / "test_output.png"
+    save_publication_figure(fig, out)
+    assert out.exists()
+    assert out.stat().st_size > 0

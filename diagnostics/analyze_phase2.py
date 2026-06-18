@@ -17,6 +17,7 @@ import re
 
 from malca.lightcurve_publication import (
     apply_publication_rcparams,
+    save_publication_figure,
     FIG_SINGLE_COL_LC_WIDE,
     FIG_TWO_COL_TRIPLE,
 )
@@ -205,9 +206,8 @@ def main():
         cmap="viridis", vmin=0, vmax=1, shading="nearest"
     )
     axes[0].set_xscale("log")
-    axes[0].set_xlabel("Duration (days)", fontsize=12)
+    axes[0].set_xlabel("Duration [days]", fontsize=12)
     axes[0].set_ylabel("Fractional Depth", fontsize=12)
-    axes[0].set_title(f"Baseline\n(mean eff = {stats_baseline['mean']:.2f})", fontsize=14)
     plt.colorbar(im0, ax=axes[0], label="Efficiency")
 
     # Optimized
@@ -216,9 +216,8 @@ def main():
         cmap="viridis", vmin=0, vmax=1, shading="nearest"
     )
     axes[1].set_xscale("log")
-    axes[1].set_xlabel("Duration (days)", fontsize=12)
+    axes[1].set_xlabel("Duration [days]", fontsize=12)
     axes[1].set_ylabel("Fractional Depth", fontsize=12)
-    axes[1].set_title(f"Optimized (min-mag-offset=0)\n(mean eff = {stats_optimized['mean']:.2f})", fontsize=14)
     plt.colorbar(im1, ax=axes[1], label="Efficiency")
 
     # Delta
@@ -227,9 +226,8 @@ def main():
         cmap="RdBu_r", vmin=-0.5, vmax=0.5, shading="nearest"
     )
     axes[2].set_xscale("log")
-    axes[2].set_xlabel("Duration (days)", fontsize=12)
+    axes[2].set_xlabel("Duration [days]", fontsize=12)
     axes[2].set_ylabel("Fractional Depth", fontsize=12)
-    axes[2].set_title(f"Improvement (Optimized - Baseline)\n(mean = {np.nanmean(delta_eff):+.2f})", fontsize=14)
     cbar = plt.colorbar(im2, ax=axes[2], label="Δ Efficiency")
 
     # Add zero contour
@@ -238,9 +236,7 @@ def main():
         levels=[0], colors="black", linewidths=2, linestyles="--"
     )
 
-    plt.tight_layout()
-    plt.savefig(output_dir / "phase2_comparison.png", dpi=150)
-    plt.close()
+    save_publication_figure(fig, output_dir / "phase2_comparison.png", dpi=150)
     print(f"  Saved: {output_dir / 'phase2_comparison.png'}")
 
     # Plot 2: Efficiency vs depth (marginalized over duration)
@@ -258,14 +254,11 @@ def main():
 
     ax.set_xlabel("Fractional Depth", fontsize=12)
     ax.set_ylabel("Detection Efficiency", fontsize=12)
-    ax.set_title("Detection Efficiency vs Depth\n(averaged over duration)", fontsize=14)
     ax.legend(fontsize=12)
     ax.grid(alpha=0.3)
     ax.set_ylim(0, 1.05)
 
-    plt.tight_layout()
-    plt.savefig(output_dir / "efficiency_vs_depth.png", dpi=150)
-    plt.close()
+    save_publication_figure(fig, output_dir / "efficiency_vs_depth.png", dpi=150)
     print(f"  Saved: {output_dir / 'efficiency_vs_depth.png'}")
 
     # Plot 3: Efficiency vs duration (marginalized over depth)
@@ -281,16 +274,13 @@ def main():
     ax.fill_between(dur_centers, eff_vs_dur_baseline, eff_vs_dur_optimized,
                     alpha=0.3, color='red', where=(eff_vs_dur_optimized < eff_vs_dur_baseline))
 
-    ax.set_xlabel("Duration (days)", fontsize=12)
+    ax.set_xlabel("Duration [days]", fontsize=12)
     ax.set_ylabel("Detection Efficiency", fontsize=12)
-    ax.set_title("Detection Efficiency vs Duration\n(averaged over depth)", fontsize=14)
     ax.legend(fontsize=12)
     ax.grid(alpha=0.3)
     ax.set_ylim(0, 1.05)
 
-    plt.tight_layout()
-    plt.savefig(output_dir / "efficiency_vs_duration.png", dpi=150)
-    plt.close()
+    save_publication_figure(fig, output_dir / "efficiency_vs_duration.png", dpi=150)
     print(f"  Saved: {output_dir / 'efficiency_vs_duration.png'}")
 
     # Summary

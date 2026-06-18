@@ -6,7 +6,7 @@ from io import BytesIO
 
 import numpy as np
 
-from malca.lightcurve_publication import FIG_TWO_COL_WIDTH, PUBLICATION_STYLE, _load_matplotlib, style_publication_axis
+from malca.lightcurve_publication import FIG_TWO_COL_WIDTH, PUBLICATION_STYLE, _load_matplotlib, finalize_publication_figure, style_publication_axis
 from malca.review.interactive_plot import DIP_EVENT_COLOR, JUMP_EVENT_COLOR, PHASE_TIME_COLORSCALE
 from malca.review.lightcurve_assembly import MARKER_MAP, PlotTrace, ReviewLightCurvePlotSpec
 
@@ -348,17 +348,13 @@ def render_review_lightcurve_pdf(spec: ReviewLightCurvePlotSpec) -> bytes:
 
         if spec.title and not (spec.header_left or spec.header_right):
             fig.text(0.09, 0.985, spec.title, ha="left", va="top", fontsize=8.0, color="0.15")
-        fig.subplots_adjust(
-            left=0.085,
-            right=0.80 if legend_handles else 0.965,
-            bottom=0.075,
-            top=0.90 if (spec.header_left or spec.header_right) else 0.955,
-            hspace=0.16 if len(spec.panels) > 1 else 0.08,
-        )
+        right = 0.80 if legend_handles else 0.965
+        top = 0.90 if (spec.header_left or spec.header_right) else 0.955
+        finalize_publication_figure(fig, rect=(0.085, 0.075, right, top))
 
         buf = BytesIO()
         try:
-            fig.savefig(buf, format="pdf", dpi=300, metadata={"Creator": "MALCA"}, bbox_inches="tight", pad_inches=0.035)
+            fig.savefig(buf, format="pdf", dpi=300, metadata={"Creator": "MALCA"}, bbox_inches=None)
             return buf.getvalue()
         finally:
             plt.close(fig)

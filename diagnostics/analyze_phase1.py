@@ -18,6 +18,7 @@ import re
 
 from malca.lightcurve_publication import (
     apply_publication_rcparams,
+    save_publication_figure,
     FIG_SINGLE_COL_HEATMAP,
     FIG_TWO_COL_LC_WIDE,
     FIG_TWO_COL_STANDARD,
@@ -147,12 +148,8 @@ def compare_efficiency_cubes(
         )
         
         ax.set_xscale("log")
-        ax.set_xlabel("Duration (days)", fontsize=14)
+        ax.set_xlabel("Duration [days]", fontsize=14)
         ax.set_ylabel("Fractional Depth", fontsize=14)
-        ax.set_title(
-            f"Efficiency Change: {labels[i]}\n(vs Baseline)",
-            fontsize=16
-        )
         
         cbar = plt.colorbar(im, ax=ax)
         cbar.set_label("Δ Efficiency", fontsize=12)
@@ -168,8 +165,7 @@ def compare_efficiency_cubes(
             linestyles="--",
         )
         
-        plt.tight_layout()
-        plt.savefig(output_dir / f"delta_{run_tag}.png", dpi=150)
+        save_publication_figure(fig, output_dir / f"delta_{run_tag}.png", dpi=150, close=False)
         plt.close()
         
         # Also plot side-by-side comparison
@@ -186,9 +182,8 @@ def compare_efficiency_cubes(
             shading="nearest",
         )
         axes[0].set_xscale("log")
-        axes[0].set_xlabel("Duration (days)", fontsize=12)
+        axes[0].set_xlabel("Duration [days]", fontsize=12)
         axes[0].set_ylabel("Fractional Depth", fontsize=12)
-        axes[0].set_title(f"{labels[0]} (Baseline)", fontsize=14)
         plt.colorbar(im0, ax=axes[0], label="Efficiency")
         
         # Modified
@@ -202,14 +197,11 @@ def compare_efficiency_cubes(
             shading="nearest",
         )
         axes[1].set_xscale("log")
-        axes[1].set_xlabel("Duration (days)", fontsize=12)
+        axes[1].set_xlabel("Duration [days]", fontsize=12)
         axes[1].set_ylabel("Fractional Depth", fontsize=12)
-        axes[1].set_title(f"{labels[i]}", fontsize=14)
         plt.colorbar(im1, ax=axes[1], label="Efficiency")
         
-        plt.tight_layout()
-        plt.savefig(output_dir / f"comparison_{run_tag}.png", dpi=150)
-        plt.close()
+        save_publication_figure(fig, output_dir / f"comparison_{run_tag}.png", dpi=150)
     
     print(f"Plots saved to {output_dir}/")
 
@@ -416,9 +408,7 @@ def main():
                    f'{rate:.2f}%',
                    ha='center', va='bottom', fontsize=10)
         
-        plt.tight_layout()
-        plt.savefig(analysis_dir / "detection_rate_comparison.png", dpi=150)
-        plt.close()
+        save_publication_figure(plt.gcf(), analysis_dir / "detection_rate_comparison.png", dpi=150)
         
         print(f"\nDetection rate comparison plot saved to {analysis_dir}/detection_rate_comparison.png")
     

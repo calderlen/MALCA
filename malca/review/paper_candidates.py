@@ -14,7 +14,7 @@ import pandas as pd
 
 from malca.config import DEFAULT_OUTPUT_DIR
 from malca.feature_layers import FEATURE_LAYER_COLUMNS
-from malca.lightcurve_publication import FIG_LC_SINGLE_COL, plot_lightcurve_panel
+from malca.lightcurve_publication import FIG_LC_SINGLE_COL, finalize_publication_figure, plot_lightcurve_panel
 from malca.notebook_paths import find_repo_root, resolve_local_lightcurve_path
 from malca.review.dustycult import load_canonical_cleaned_lightcurve
 from malca.review.filter_schema import SIDEBAR_GROUPS
@@ -24,7 +24,7 @@ MARCH18_RUN = DEFAULT_OUTPUT_DIR / "runs" / "runs_march18_bundle_all"
 REVIEW_DB = MARCH18_RUN / "review" / "review.taxonomy_filled.db"
 LIGHTCURVE_DIR = MARCH18_RUN / "bundle_assets" / "lightcurves"
 CLASSIFIED_PARQUET = MARCH18_RUN / "results" / "lc_events_classified.parquet"
-EXPORT_DIR = Path("output") / "notebooks" / "march18_paper"
+EXPORT_DIR = DEFAULT_OUTPUT_DIR / "notebooks" / "march18_paper"
 
 DEFAULT_PAPER_BUCKETS = ("Dipper", "LTV", "Microlensing")
 BUCKET_ORDER = (
@@ -459,7 +459,7 @@ def plot_candidate_lightcurve(
         ),
     )
     if show:
-        plt.tight_layout()
+        finalize_publication_figure(plt.gcf())
         plt.show()
     return df
 

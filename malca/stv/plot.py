@@ -43,6 +43,8 @@ from malca.lightcurve_publication import (
     FIG_SINGLE_COL_LC_WIDE,
     PUBLICATION_STYLE,
     apply_publication_rcparams,
+    finalize_publication_figure,
+    save_publication_figure,
     plot_phase_panel,
 )
 
@@ -220,7 +222,7 @@ def plot_phase_folded_lightcurve(
 
     asas_sn_id = csv_path.stem.split("-")[0]
     with plt.rc_context(PUBLICATION_STYLE):
-        fig, ax = plt.subplots(1, 1, figsize=figsize, constrained_layout=True)
+        fig, ax = plt.subplots(1, 1, figsize=figsize)
         phase_plot = plot_phase_panel(
             ax,
             df,
@@ -269,9 +271,10 @@ def plot_phase_folded_lightcurve(
     if out_path:
         out_path = Path(out_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        plt.savefig(out_path, dpi=150, bbox_inches="tight")
+        save_publication_figure(fig, out_path, dpi=150, close=False)
 
     if show:
+        finalize_publication_figure(fig)
         plt.show()
     else:
         plt.close(fig)
@@ -562,11 +565,11 @@ def plot_bayes_results(
 
     # Create unified 2x1 layout (both bands on same axes)
     if unified_layout:
-        fig, axes = plt.subplots(2, 1, figsize=figsize, constrained_layout=True, sharex=True)
+        fig, axes = plt.subplots(2, 1, figsize=figsize, sharex=True)
         ax_main = axes[0]
         ax_resid = axes[1]
     else:
-        fig, axes = plt.subplots(2, 2, figsize=figsize, constrained_layout=True, sharex="col")
+        fig, axes = plt.subplots(2, 2, figsize=figsize, sharex="col")
 
     # Track legend handles for unified legend
     legend_handles = []
@@ -1044,7 +1047,7 @@ def plot_bayes_results(
     if out_path:
         out_path = Path(out_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        plt.savefig(out_path, dpi=150, bbox_inches="tight")
+        save_publication_figure(fig, out_path, dpi=150, close=False)
         print(f"Saved plot to {out_path}")
 
     if show:

@@ -78,10 +78,26 @@ def test_ensure_candidate_id_reads_layer_first_coords() -> None:
     assert out.loc[0, "dec_deg"] == 60.72
 
 
+def test_parquet_safe_frame_handles_mixed_catalog_ids(tmp_path: Path) -> None:
+    from malca.enrich.spectra import _parquet_safe_frame
+
+    df = pd.DataFrame(
+        [
+            {"candidate_id": "C1", "survey": "sdss_boss", "objID": 1234567890123456789},
+            {"candidate_id": "C2", "survey": "sdss_boss", "objID": "J202733.2-305100"},
+        ]
+    )
+    out = _parquet_safe_frame(df)
+    path = tmp_path / "mixed_objid.parquet"
+    out.to_parquet(path, index=False)
+    loaded = pd.read_parquet(path)
+    assert str(loaded.loc[1, "objID"]) == "J202733.2-305100"
+
+
 def test_run_spectra_availability_with_mocked_query(monkeypatch, tmp_path: Path) -> None:
     targets = pd.DataFrame([{"candidate_id": "C1", "ra_deg": 10.0, "dec_deg": 20.0}])
 
-    def fake_query(coords, *, survey_specs, representative, radius_arcsec, chunk_size, show_progress=False, progress_desc=None):
+    def fake_query(coords, *, survey_specs, representative, radius_arcsec, chunk_size, show_progress=False, progress_desc=None, **kwargs):
         survey = next(iter(survey_specs))
         return pd.DataFrame(
             [

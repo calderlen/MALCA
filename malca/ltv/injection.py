@@ -24,6 +24,7 @@ import pandas as pd
 
 from malca.lightcurve_publication import (
     apply_publication_rcparams,
+    save_publication_figure,
     FIG_SINGLE_COL_HEATMAP,
     FIG_SINGLE_COL_LC_WIDE,
     FIG_TWO_COL_STANDARD,
@@ -539,7 +540,6 @@ def _heatmap_edges(values: np.ndarray, *, log_scale: bool) -> np.ndarray:
 def plot_heatmap(
     grid_df: pd.DataFrame,
     *,
-    title: str,
     output_path: Path,
     colorbar_label: str,
     cmap: str = "viridis",
@@ -561,14 +561,12 @@ def plot_heatmap(
     )
     if xlog:
         ax.set_xscale("log")
-    ax.set_xlabel("Injected Timescale (days)")
-    ax.set_ylabel("Injected Amplitude (mag)")
-    ax.set_title(title)
+    ax.set_xlabel("Injected Timescale [days]")
+    ax.set_ylabel("Injected Amplitude [mag]")
     cbar = fig.colorbar(mesh, ax=ax)
     cbar.set_label(colorbar_label)
-    fig.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=200, bbox_inches="tight")
+    save_publication_figure(fig, output_path, dpi=200, close=False)
     return fig
 
 
@@ -578,10 +576,8 @@ def plot_reason_breakdown(summary_df: pd.DataFrame, *, output_path: Path) -> plt
     ax.barh(ordered["filter_reason"], ordered["count"], color="steelblue")
     ax.set_xlabel("Trials")
     ax.set_ylabel("Outcome")
-    ax.set_title("LTV Injection Outcomes by First Rejection Reason")
-    fig.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=200, bbox_inches="tight")
+    save_publication_figure(fig, output_path, dpi=200, close=False)
     return fig
 
 
@@ -610,7 +606,6 @@ def generate_plots(
     pass_grid = plot_tables["pass_fraction"]
     fig = plot_heatmap(
         pass_grid,
-        title="LTV Pass Fraction Across Injected Trend Space",
         output_path=output_dir / "pass_fraction_heatmap.png",
         colorbar_label="Pass Fraction",
         cmap="viridis",
@@ -623,7 +618,6 @@ def generate_plots(
         reason = name.replace("rejection_", "")
         fig = plot_heatmap(
             table,
-            title=f"Fraction Rejected by {reason}",
             output_path=output_dir / f"{name}_heatmap.png",
             colorbar_label="Rejection Fraction",
             cmap="magma",
@@ -645,7 +639,6 @@ def generate_plots(
 
             fig = plot_heatmap(
                 slice_plot_tables["pass_fraction"],
-                title=f"LTV Pass Fraction ({display})",
                 output_path=mag_slice_dir / f"{label}_pass_fraction_heatmap.png",
                 colorbar_label="Pass Fraction",
                 cmap="viridis",
@@ -658,7 +651,6 @@ def generate_plots(
                 reason = name.replace("rejection_", "")
                 fig = plot_heatmap(
                     table,
-                    title=f"Fraction Rejected by {reason} ({display})",
                     output_path=mag_slice_dir / f"{label}_{name}_heatmap.png",
                     colorbar_label="Rejection Fraction",
                     cmap="magma",

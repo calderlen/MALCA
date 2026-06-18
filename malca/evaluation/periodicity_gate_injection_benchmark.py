@@ -22,6 +22,8 @@ from tqdm.auto import tqdm
 
 from malca.lightcurve_publication import (
     apply_publication_rcparams,
+    finalize_publication_figure,
+    save_publication_figure,
     FIG_LC_SINGLE_COL,
     FIG_SINGLE_COL_COMPACT,
     FIG_SINGLE_COL_PORTRAIT,
@@ -2451,7 +2453,7 @@ def plot_gate_processing_trial_diagnostic(
         f"bad cameras={bad_camera_text}"
     )
     axes.flat[0].figure.suptitle(title, fontsize=11, y=0.995)
-    axes.flat[0].figure.tight_layout(rect=(0, 0, 1, 0.95))
+    finalize_publication_figure(axes.flat[0].figure, rect=(0, 0, 1, 0.95))
     return axes
 
 
@@ -2489,8 +2491,7 @@ def save_gate_processing_visualizations(
             )
             safe_kind = str(row.get("example_kind", "example")).replace(" ", "_").replace("/", "_")
             out_path = output_root / f"trial_{trial_id:05d}_{safe_kind}.png"
-            fig.savefig(out_path, dpi=220)
-            plt.close(fig)
+            save_publication_figure(fig, out_path, dpi=220)
             record = {
                 "trial_id": trial_id,
                 "example_kind": row.get("example_kind", ""),
@@ -2559,9 +2560,7 @@ def _plot_recovery_by_class(results: pd.DataFrame, output_path: Path) -> None:
     ax.set_ylim(0, 1)
     ax.set_title("Detection by Injected Class and Pipeline Configuration")
     ax.grid(axis="y", alpha=0.25)
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=180)
-    plt.close(fig)
+    save_publication_figure(fig, output_path, dpi=180)
 
 
 def _plot_gate_confusion(results: pd.DataFrame, output_path: Path) -> None:
@@ -2579,9 +2578,7 @@ def _plot_gate_confusion(results: pd.DataFrame, output_path: Path) -> None:
                 ax.text(j, i, str(int(tab.iloc[i, j])), ha="center", va="center")
         fig.colorbar(im, ax=ax, label="count")
     ax.set_title("Pre-periodicity Gate Routing Confusion")
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=180)
-    plt.close(fig)
+    save_publication_figure(fig, output_path, dpi=180)
 
 
 def _bin_rate(df: pd.DataFrame, column: str, detected_col: str, bins: int = 8, log: bool = False) -> pd.DataFrame:
@@ -2625,9 +2622,7 @@ def _plot_recovery_vs_parameters(results: pd.DataFrame, output_path: Path) -> No
         ax.set_xlabel(xlabel)
         ax.set_ylabel("Bifurcated recovery")
         ax.grid(alpha=0.25)
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=180)
-    plt.close(fig)
+    save_publication_figure(fig, output_path, dpi=180)
 
 
 def _plot_threshold_heatmaps(threshold_sweep: pd.DataFrame, plots_dir: Path) -> None:
@@ -2652,9 +2647,7 @@ def _plot_threshold_heatmaps(threshold_sweep: pd.DataFrame, plots_dir: Path) -> 
         ax.set_xlabel("scatter_ratio_max")
         ax.set_ylabel("ce_snr_threshold")
         ax.set_title(f"Gate Threshold Sweep: {label}")
-        fig.tight_layout()
-        fig.savefig(plots_dir / f"threshold_heatmap_{metric}.png", dpi=180)
-        plt.close(fig)
+        save_publication_figure(fig, plots_dir / f"threshold_heatmap_{metric}.png", dpi=180)
 
 
 def _plot_pareto(threshold_sweep: pd.DataFrame, output_path: Path) -> None:
@@ -2678,9 +2671,7 @@ def _plot_pareto(threshold_sweep: pd.DataFrame, output_path: Path) -> None:
     ax.set_xlim(0, 1)
     ax.grid(alpha=0.25)
     ax.set_title("Gate Sweep Pareto: Recovery vs Branch Load")
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=180)
-    plt.close(fig)
+    save_publication_figure(fig, output_path, dpi=180)
 
 
 def _select_representative_rows(results: pd.DataFrame, n: int = 6) -> pd.DataFrame:
@@ -2762,9 +2753,7 @@ def _plot_representative_examples(
         else:
             ax_phase.text(0.5, 0.5, "No selected period", ha="center", va="center")
             ax_phase.set_axis_off()
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=180)
-    plt.close(fig)
+    save_publication_figure(fig, output_path, dpi=180)
 
 
 def _plot_standard_no_injection_false_positives(
@@ -2783,9 +2772,7 @@ def _plot_standard_no_injection_false_positives(
         fig, ax = plt.subplots(figsize=FIG_LC_SINGLE_COL)
         ax.text(0.5, 0.5, "No standard_only no-injection false positives", ha="center", va="center")
         ax.set_axis_off()
-        fig.tight_layout()
-        fig.savefig(output_path, dpi=180)
-        plt.close(fig)
+        save_publication_figure(fig, output_path, dpi=180)
         return
 
     examples = fp.sample(n=min(int(max_examples), len(fp)), random_state=20260513)
@@ -2840,6 +2827,4 @@ def _plot_standard_no_injection_false_positives(
         ax.set_axis_off()
 
     fig.suptitle("Random standard_only false positives on no-injection controls", y=1.0)
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=180)
-    plt.close(fig)
+    save_publication_figure(fig, output_path, dpi=180)

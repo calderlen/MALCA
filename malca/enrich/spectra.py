@@ -202,6 +202,23 @@ def _generate_link(row: pd.Series) -> str | None:
     return None
 
 
+def _parquet_safe_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Coerce heterogeneous VizieR catalog columns so parquet export succeeds."""
+    if df.empty:
+        return df
+    out = df.copy()
+    for col in out.columns:
+        if out[col].dtype == object:
+            out[col] = out[col].astype("string")
+    return out
+
+
+def _write_spectra_parquet(df: pd.DataFrame, path: Path, *, compression: str) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _parquet_safe_frame(df).to_parquet(path, index=False, compression=compression)
+
+
 def _normalize_spectra_long(spectra_long: pd.DataFrame) -> pd.DataFrame:
     if spectra_long.empty:
         return spectra_long
@@ -429,16 +446,14 @@ def run_spectra_availability(
             spectra_long = pd.concat([spectra_long, _normalize_spectra_long(transient)], ignore_index=True)
 
     if cache_file and not spectra_long.empty:
-        Path(cache_file).parent.mkdir(parents=True, exist_ok=True)
-        spectra_long.to_parquet(cache_file, index=False, compression="snappy")
+        _write_spectra_parquet(spectra_long, cache_file, compression="snappy")
 
     summary = _summarize_spectra_long(coords, spectra_long)
 
     if checkpoint_path and not spectra_long.empty:
-        Path(checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
-        spectra_long.to_parquet(checkpoint_path, index=False, compression="snappy")
+        _write_spectra_parquet(spectra_long, checkpoint_path, compression="snappy")
 
-    spectra_long.to_parquet(out_dir / "spectra_long.parquet", index=False, compression="zstd")
+    _write_spectra_parquet(spectra_long, out_dir / "spectra_long.parquet", compression="zstd")
     summary.to_parquet(out_dir / "spectra_summary.parquet", index=False, compression="zstd")
 
     if checkpoint_path and Path(checkpoint_path).exists():

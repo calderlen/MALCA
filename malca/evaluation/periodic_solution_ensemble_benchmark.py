@@ -22,6 +22,7 @@ from tqdm.auto import tqdm
 
 from malca.lightcurve_publication import (
     apply_publication_rcparams,
+    save_publication_figure,
     FIG_TWO_COL_LC_WIDE,
     figsize_from_legacy,
     figsize_two_col_grid,
@@ -1408,11 +1409,8 @@ def write_solution_baseline_gallery(
         )
         plot_solution_baseline_mode_grid(run, int(trial_id), modes=mode_names, ax=axes)
         fig.suptitle(f"Trial {int(trial_id)} baseline solutions by mode", y=0.995)
-        fig.tight_layout()
         path = out_dir / f"trial_{int(trial_id):05d}_baseline_modes.png"
-        fig.savefig(path, dpi=int(dpi), bbox_inches="tight")
-        if close:
-            plt.close(fig)
+        save_publication_figure(fig, path, dpi=int(dpi), close=close)
         paths.append(path)
     return paths
 

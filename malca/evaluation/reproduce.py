@@ -14,7 +14,7 @@ import matplotlib.pyplot as pl
 import numpy as np
 import pandas as pd
 
-from malca.lightcurve_publication import apply_publication_rcparams, FIG_TWO_COL_STANDARD
+from malca.lightcurve_publication import apply_publication_rcparams, save_publication_figure, FIG_TWO_COL_STANDARD
 
 apply_publication_rcparams(pl)
 
@@ -532,7 +532,7 @@ def plot_light_curve_with_dips(
         accepted_morphologies = {"gaussian", "paczynski"}
     
     # Use 2x2 layout: V-band and g-band columns, raw + residuals rows
-    fig, axes = pl.subplots(2, 2, figsize=FIG_TWO_COL_STANDARD, constrained_layout=True, sharex="col")
+    fig, axes = pl.subplots(2, 2, figsize=FIG_TWO_COL_STANDARD, sharex="col")
 
     # Baseline parameters (match the SHO-ish defaults; note baseline function takes q not Q)
     baseline_kwargs = {
@@ -728,8 +728,7 @@ def plot_light_curve_with_dips(
     fig.suptitle(f"{source_id} – SkyPatrol LC – {jd_label}", fontsize=14)
 
     plot_path.parent.mkdir(parents=True, exist_ok=True)
-    pl.savefig(plot_path, dpi=150, bbox_inches="tight")
-    pl.close()
+    save_publication_figure(fig, plot_path, dpi=150)
 
 
 def build_reproduction_report(

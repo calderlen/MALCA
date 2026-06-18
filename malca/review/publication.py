@@ -725,7 +725,7 @@ def matplotlib_pdf_from_plotly(
             axes_list[0].text(0.5, 0.5, "No data", transform=axes_list[0].transAxes, ha="center", va="center")
         buf = BytesIO()
         try:
-            fig.savefig(buf, format="pdf", metadata={"Creator": "MALCA"}, dpi=300, bbox_inches="tight", pad_inches=0.04)
+            fig.savefig(buf, format="pdf", metadata={"Creator": "MALCA"}, dpi=300, bbox_inches=None)
             return buf.getvalue()
         finally:
             plt.close(fig)

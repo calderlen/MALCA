@@ -65,6 +65,7 @@ import pandas as pd
 
 from malca.lightcurve_publication import (
     apply_publication_rcparams,
+    save_publication_figure,
     FIG_LC_SINGLE_COL,
     FIG_SINGLE_COL_SQUARE,
     FIG_TWO_COL_WIDTH,
@@ -559,16 +560,14 @@ def _save_microlensing_full_sky_plot(df: pd.DataFrame, out_path: Path, *, dpi: i
         fig, ax = plt.subplots(figsize=FIG_LC_SINGLE_COL)
         ax.text(0.5, 0.5, 'No candidates for sky map', ha='center', va='center')
         ax.axis('off')
-        fig.savefig(out_path, dpi=dpi, bbox_inches='tight', format='pdf')
-        plt.close(fig)
+        save_publication_figure(fig, out_path, dpi=dpi, format='pdf')
         return
 
     if 'ra_deg' not in df.columns or 'dec_deg' not in df.columns:
         fig, ax = plt.subplots(figsize=FIG_LC_SINGLE_COL)
         ax.text(0.5, 0.5, 'No RA/Dec for sky map', ha='center', va='center')
         ax.axis('off')
-        fig.savefig(out_path, dpi=dpi, bbox_inches='tight', format='pdf')
-        plt.close(fig)
+        save_publication_figure(fig, out_path, dpi=dpi, format='pdf')
         return
 
     l_deg, b_deg = _mw_galactic_lb_deg(df['ra_deg'].to_numpy(), df['dec_deg'].to_numpy())
@@ -577,8 +576,7 @@ def _save_microlensing_full_sky_plot(df: pd.DataFrame, out_path: Path, *, dpi: i
         fig, ax = plt.subplots(figsize=FIG_LC_SINGLE_COL)
         ax.text(0.5, 0.5, 'No valid Galactic coordinates', ha='center', va='center')
         ax.axis('off')
-        fig.savefig(out_path, dpi=dpi, bbox_inches='tight', format='pdf')
-        plt.close(fig)
+        save_publication_figure(fig, out_path, dpi=dpi, format='pdf')
         return
 
     chi = (
@@ -702,8 +700,7 @@ def _save_microlensing_full_sky_plot(df: pd.DataFrame, out_path: Path, *, dpi: i
     )
     fig.subplots_adjust(left=0.06, right=0.96, bottom=0.16, top=0.82)
 
-    fig.savefig(out_path, dpi=dpi, bbox_inches='tight', format='pdf', facecolor=fig.get_facecolor())
-    plt.close(fig)
+    save_publication_figure(fig, out_path, dpi=dpi, format='pdf', facecolor=fig.get_facecolor())
 
 
 _QUALITY_TIER_ORDER: dict[str, int] = {
@@ -928,8 +925,7 @@ def _save_microlensing_candidate_grid_plot(
         fig, ax = plt.subplots(figsize=FIG_LC_SINGLE_COL)
         ax.text(0.5, 0.5, "No candidates for microlensing grid", ha="center", va="center")
         ax.axis("off")
-        fig.savefig(out_path, dpi=dpi, bbox_inches="tight", format="pdf")
-        plt.close(fig)
+        save_publication_figure(fig, out_path, dpi=dpi, format="pdf")
         return
 
     work = df.copy()
@@ -945,8 +941,7 @@ def _save_microlensing_candidate_grid_plot(
         fig, ax = plt.subplots(figsize=FIG_LC_SINGLE_COL)
         ax.text(0.5, 0.5, f"No candidates at or above tier {min_tier}", ha="center", va="center")
         ax.axis("off")
-        fig.savefig(out_path, dpi=dpi, bbox_inches="tight", format="pdf")
-        plt.close(fig)
+        save_publication_figure(fig, out_path, dpi=dpi, format="pdf")
         return
 
     work = work.sort_values(["_tier_rank", "quality_score"], ascending=[False, False])
@@ -1139,8 +1134,9 @@ def _save_microlensing_candidate_grid_plot(
         frameon=False,
         fontsize=8,
     )
-    fig.subplots_adjust(left=0.055, right=0.99, bottom=0.055, top=0.955, wspace=0.22, hspace=0.36)
-    fig.savefig(out_path, dpi=dpi_save, bbox_inches="tight", format="pdf")
+    from malca.lightcurve_publication import finalize_publication_figure
+    finalize_publication_figure(fig, rect=(0.055, 0.055, 0.99, 0.955))
+    fig.savefig(out_path, dpi=dpi_save, bbox_inches=None, format="pdf")
     plt.close(fig)
 
 
@@ -1165,8 +1161,7 @@ def _save_microlensing_cmd_plot(df: pd.DataFrame, out_path: Path, *, dpi: int = 
     if "bp_rp" not in df.columns:
         ax.text(0.5, 0.5, "Missing BP-RP or M_G columns", ha="center", va="center")
         ax.axis("off")
-        fig.savefig(out_path, dpi=dpi, bbox_inches="tight", format="pdf")
-        plt.close(fig)
+        save_publication_figure(fig, out_path, dpi=dpi, format="pdf")
         return
 
     bp_rp = pd.to_numeric(df["bp_rp"], errors="coerce")
@@ -1180,8 +1175,7 @@ def _save_microlensing_cmd_plot(df: pd.DataFrame, out_path: Path, *, dpi: int = 
     if mg is None:
         ax.text(0.5, 0.5, "Missing BP-RP or M_G columns", ha="center", va="center")
         ax.axis("off")
-        fig.savefig(out_path, dpi=dpi, bbox_inches="tight", format="pdf")
-        plt.close(fig)
+        save_publication_figure(fig, out_path, dpi=dpi, format="pdf")
         return
 
     mg_num = pd.to_numeric(mg, errors="coerce")
@@ -1201,8 +1195,7 @@ def _save_microlensing_cmd_plot(df: pd.DataFrame, out_path: Path, *, dpi: int = 
     if not np.any(cand_mask):
         ax.text(0.5, 0.5, "Missing BP-RP or M_G columns", ha="center", va="center")
         ax.axis("off")
-        fig.savefig(out_path, dpi=dpi, bbox_inches="tight", format="pdf")
-        plt.close(fig)
+        save_publication_figure(fig, out_path, dpi=dpi, format="pdf")
         return
 
     # Background Gaia sample (dereddening not handled here; just a reference CMD cloud).
@@ -1275,8 +1268,7 @@ def _save_microlensing_cmd_plot(df: pd.DataFrame, out_path: Path, *, dpi: int = 
     ax.set_ylabel("M_G")
     ax.grid(alpha=0.25, linestyle="--", linewidth=0.5)
     ax.invert_yaxis()
-    fig.savefig(out_path, dpi=dpi, bbox_inches="tight", format="pdf")
-    plt.close(fig)
+    save_publication_figure(fig, out_path, dpi=dpi, format="pdf")
 
 
 def _crossmatch_col_missing_mask(series: pd.Series) -> pd.Series:
@@ -5752,15 +5744,10 @@ def run_microlensing_pipeline(
             summary = result['summary']
             fig, _axes = plot_candidate_fit(result)
             out_pdf = MICROLENSING_FIT_PDF_DIR / f'{_microlensing_fit_pdf_stem(summary)}.pdf'
-            fig.savefig(
-                out_pdf,
-                bbox_inches='tight',
-                format='pdf',
-                dpi=MICROLENSING_FIT_PDF_DPI,
-                facecolor=fig.get_facecolor(),
-                edgecolor='none',
+            save_publication_figure(
+                fig, out_pdf, dpi=MICROLENSING_FIT_PDF_DPI,
+                format='pdf', facecolor=fig.get_facecolor(), edgecolor='none',
             )
-            plt.close(fig)
         if show_progress:
             print(
                 f'Saved {len(fit_results)} March 18 + {len(jumps14_fit_results)} jumps-14 '

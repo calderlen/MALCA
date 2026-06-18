@@ -26,6 +26,8 @@ import pandas as pd
 
 from malca.lightcurve_publication import (
     apply_publication_rcparams,
+    finalize_publication_figure,
+    save_publication_figure,
     FIG_SINGLE_COL_HEATMAP,
     FIG_TWO_COL_STANDARD,
     scaled_publication_text_sizes,
@@ -1102,15 +1104,13 @@ def plot_detection_efficiency(
     dur_centers: np.ndarray,
     efficiency_grid: np.ndarray,
     output_path: Path | str | None = None,
-    title: str = "Detection Efficiency",
     vmin: float = 0.0,
     vmax: float = 1.0,
-    xlabel: str = "Duration (days)",
-    ylabel: str = "Amplitude (mag)",
+    xlabel: str = "Duration [days]",
+    ylabel: str = "Amplitude [mag]",
     xlog: bool = True,
     cmap: str = "viridis",
     show: bool = True,
-    grid_info: str | None = None,
 ) -> plt.Figure:
     """
     Plot 2D detection efficiency heatmap.
@@ -1131,19 +1131,17 @@ def plot_detection_efficiency(
         ax.set_xscale("log")
     ax.set_xlabel(xlabel, fontsize=text["label"])
     ax.set_ylabel(ylabel, fontsize=text["label"])
-    title_with_grid = title
-    if grid_info:
-        title_with_grid = f"{title}\n{grid_info}"
-    ax.set_title(title_with_grid, fontsize=text["title"])
     cbar = plt.colorbar(im, ax=ax)
     cbar.set_label("Detection Efficiency", fontsize=text["colorbar"])
-    plt.tight_layout()
 
     if output_path:
-        plt.savefig(output_path, dpi=300, bbox_inches="tight")
+        save_publication_figure(fig, output_path, close=False)
         print(f"Saved to {output_path}")
     elif show:
+        finalize_publication_figure(fig)
         plt.show()
+    else:
+        finalize_publication_figure(fig)
 
     return fig
 
@@ -1172,28 +1170,21 @@ def plot_efficiency_mag_slices(
         output_dir.mkdir(parents=True, exist_ok=True)
 
     figs = []
-    n_depth = len(cube["depth_centers"])
-    n_dur = len(cube["duration_centers"])
-    grid_info = f"Grid: {n_depth}x{n_dur}"
-    
     for k, mag in enumerate(cube["mag_centers"]):
         eff_slice = cube["efficiency"][:, :, k]
-        title = f"Detection Efficiency (mag = {mag:.2f})"
         out_path = output_dir / f"efficiency_mag_{mag:.2f}.png" if output_dir else None
 
         fig = plot_detection_efficiency(
             cube["depth_centers"],
             cube["duration_centers"],
             eff_slice,
-            xlabel="Duration (days)",
+            xlabel="Duration [days]",
             ylabel="Fractional Depth",
-            title=title,
             vmin=vmin,
             vmax=vmax,
             cmap=cmap,
             output_path=out_path,
             show=show and not output_dir,
-            grid_info=grid_info,
         )
         figs.append(fig)
         if output_dir:
@@ -1226,29 +1217,23 @@ def plot_efficiency_marginalized(
         eff_2d = np.nanmean(cube["efficiency"], axis=2)
         x_centers = cube["duration_centers"]
         y_centers = cube["depth_centers"]
-        xlabel = "Duration (days)"
+        xlabel = "Duration [days]"
         ylabel = "Fractional Depth"
-        title = "Detection Efficiency (averaged over magnitude)"
         xlog = True
-        grid_info = f"Grid: {len(y_centers)}x{len(x_centers)}"
     elif axis == "duration":
         eff_2d = np.nanmean(cube["efficiency"], axis=1)
         x_centers = cube["mag_centers"]
         y_centers = cube["depth_centers"]
         xlabel = "Median Magnitude"
         ylabel = "Fractional Depth"
-        title = "Detection Efficiency (averaged over duration)"
         xlog = False
-        grid_info = f"Grid: {len(y_centers)}x{len(x_centers)}"
     elif axis == "depth":
         eff_2d = np.nanmean(cube["efficiency"], axis=0).T  # Transpose: (dur, mag) -> (mag, dur)
         x_centers = cube["duration_centers"]
         y_centers = cube["mag_centers"]
-        xlabel = "Duration (days)"
+        xlabel = "Duration [days]"
         ylabel = "Median Magnitude"
-        title = "Detection Efficiency (averaged over depth)"
         xlog = True
-        grid_info = f"Grid: {len(y_centers)}x{len(x_centers)}"
     else:
         raise ValueError(f"Unknown axis: {axis}. Use 'mag', 'duration', or 'depth'.")
 
@@ -1258,14 +1243,12 @@ def plot_efficiency_marginalized(
         eff_2d,
         xlabel=xlabel,
         ylabel=ylabel,
-        title=title,
         xlog=xlog,
         vmin=vmin,
         vmax=vmax,
         cmap=cmap,
         output_path=output_path,
         show=show,
-        grid_info=grid_info,
     )
 
 
@@ -1316,20 +1299,18 @@ def plot_efficiency_threshold_contour(
     )
     ax.set_yscale("log")
     ax.set_xlabel("Median Magnitude", fontsize=text["label"])
-    ax.set_ylabel("Duration (days)", fontsize=text["label"])
-    ax.set_title(
-        f"Fractional Depth at {threshold*100:.0f}% Detection Efficiency",
-        fontsize=text["title"],
-    )
+    ax.set_ylabel("Duration [days]", fontsize=text["label"])
     cbar = plt.colorbar(im, ax=ax)
     cbar.set_label("Fractional Depth", fontsize=text["colorbar"])
-    plt.tight_layout()
 
     if output_path:
-        plt.savefig(output_path, dpi=300, bbox_inches="tight")
+        save_publication_figure(fig, output_path, close=False)
         print(f"Saved: {output_path}")
     elif show:
+        finalize_publication_figure(fig)
         plt.show()
+    else:
+        finalize_publication_figure(fig)
 
     return fig
 
@@ -1372,8 +1353,6 @@ def plot_efficiency_3d(
     M_valid = M_flat[valid_mask]
     eff_valid = efficiency_flat[valid_mask]
 
-    grid_info = f"Grid: {len(depth)}x{len(duration)}x{len(mag)}"
-    
     fig = go.Figure(data=go.Scatter3d(
         x=D_valid,
         y=np.log10(Du_valid),
@@ -1396,11 +1375,10 @@ def plot_efficiency_3d(
     fig.update_layout(
         scene=dict(
             xaxis_title="Fractional Depth",
-            yaxis_title="log₁₀(Duration/days)",
+            yaxis_title="log₁₀(Duration [days])",
             zaxis_title="Median Magnitude",
         ),
-        title=f"3D Detection Efficiency<br>{grid_info}",
-        margin=dict(l=0, r=0, b=0, t=40),
+        margin=dict(l=0, r=0, b=0, t=0),
     )
 
     if output_path:
@@ -1456,8 +1434,6 @@ def plot_efficiency_isosurface(
     Du_valid = Du_flat[valid_mask]
     M_valid = M_flat[valid_mask]
     eff_valid = efficiency_flat[valid_mask]
-    
-    grid_info = f"Grid: {len(depth)}x{len(duration)}x{len(mag)}"
 
     fig = go.Figure(data=go.Isosurface(
         x=D_valid,
@@ -1476,10 +1452,10 @@ def plot_efficiency_isosurface(
     fig.update_layout(
         scene=dict(
             xaxis_title="Fractional Depth",
-            yaxis_title="log₁₀(Duration/days)",
+            yaxis_title="log₁₀(Duration [days])",
             zaxis_title="Median Magnitude",
         ),
-        title=f"Detection Efficiency = {isovalue*100:.0f}% Isosurface<br>{grid_info}",
+        margin=dict(l=0, r=0, b=0, t=0),
     )
 
     if output_path:

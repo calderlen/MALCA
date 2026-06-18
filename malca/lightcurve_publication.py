@@ -49,7 +49,7 @@ PUBLICATION_STYLE = {
     "legend.fontsize": 8,
     "figure.dpi": 150,
     "savefig.dpi": 300,
-    "savefig.bbox": "tight",
+    "savefig.bbox": None,
     "pdf.fonttype": 42,
     "ps.fonttype": 42,
 }
@@ -65,6 +65,7 @@ FIG_ROC_PR_TWO_COL = (FIG_TWO_COL_WIDTH, 3.0)
 
 # Gaia CMD plot styling for FIG_SINGLE_COL_SQUARE (3.5 x 3.5 in).
 CMD_BG_SCATTER_SIZE = 2.0
+CMD_BG_SCATTER_ALPHA = 0.33
 CMD_BG_HOLLOW_SCATTER_SIZE = 3.5
 CMD_AXIS_LABEL_FONTSIZE = 8.0
 CMD_TICK_LABEL_FONTSIZE = 7.0
@@ -75,10 +76,10 @@ CMD_MARKER_EDGE_SOLID = 0.3
 CMD_MARKER_EDGE_HOLLOW = 0.45
 CMD_LEGEND_MARKERSCALE = 0.7
 CMD_BUCKET_STYLE: dict[str, dict[str, object]] = {
-    "Dipper": {"color": "#0072B2", "marker": "o", "size": 14, "zorder": 6},
-    "Interesting": {"color": "#D55E00", "marker": "o", "size": 10, "zorder": 4},
-    "LTV": {"color": "#009E73", "marker": "^", "size": 16, "zorder": 7},
-    "Microlensing": {"color": "#E69F00", "marker": "*", "size": 28, "zorder": 9},
+    "Dipper": {"color": "#0072B2", "marker": "v", "size": 16, "zorder": 6},
+    "Interesting": {"color": "#E69F00", "marker": "o", "size": 10, "zorder": 4},
+    "LTV": {"color": "#009E73", "marker": "v", "size": 16, "zorder": 7},
+    "Microlensing": {"color": "#E6B800", "marker": "*", "size": 28, "zorder": 9},
     "Eclipsing binary": {"color": "#CC79A7", "marker": "s", "size": 18, "zorder": 8},
     "Unknown": {"color": "#6A3D9A", "marker": "D", "size": 12, "zorder": 5},
 }
@@ -326,6 +327,45 @@ def apply_publication_rcparams(plt=None) -> None:
     if plt is None:
         import matplotlib.pyplot as plt
     plt.rcParams.update(PUBLICATION_STYLE)
+
+
+PUBLICATION_TIGHT_LAYOUT_PAD = 0.3
+
+
+def finalize_publication_figure(
+    fig,
+    *,
+    pad: float = PUBLICATION_TIGHT_LAYOUT_PAD,
+    w_pad: float | None = None,
+    h_pad: float | None = None,
+    rect: tuple[float, float, float, float] | None = None,
+) -> None:
+    """Apply aggressive tight_layout to a figure before saving.
+
+    All publication plots should call this instead of fig.tight_layout()
+    or using constrained_layout / bbox_inches="tight".
+    """
+    fig.tight_layout(pad=pad, w_pad=w_pad or pad, h_pad=h_pad or pad, rect=rect)
+
+
+def save_publication_figure(
+    fig,
+    path: str | Path,
+    *,
+    dpi: int = 300,
+    pad: float = PUBLICATION_TIGHT_LAYOUT_PAD,
+    w_pad: float | None = None,
+    h_pad: float | None = None,
+    rect: tuple[float, float, float, float] | None = None,
+    close: bool = True,
+    **kwargs,
+) -> None:
+    """Finalize layout and save a publication figure."""
+    finalize_publication_figure(fig, pad=pad, w_pad=w_pad, h_pad=h_pad, rect=rect)
+    fig.savefig(path, dpi=dpi, bbox_inches=None, **kwargs)
+    if close:
+        import matplotlib.pyplot as _plt
+        _plt.close(fig)
 
 
 def figsize_scale(
@@ -1339,7 +1379,7 @@ def plot_lightcurve(
     plt, _ = _load_matplotlib()
 
     with plt.rc_context(PUBLICATION_STYLE):
-        fig, ax = plt.subplots(figsize=figsize, constrained_layout=True)
+        fig, ax = plt.subplots(figsize=figsize)
 
         if title is None:
             title = _default_title(lc.source_path)
@@ -1361,7 +1401,7 @@ def plot_lightcurve(
         if output is not None:
             out_path = Path(output)
             out_path.parent.mkdir(parents=True, exist_ok=True)
-            fig.savefig(out_path, dpi=dpi)
+            save_publication_figure(fig, out_path, dpi=dpi, close=False)
 
         if show:
             plt.show()

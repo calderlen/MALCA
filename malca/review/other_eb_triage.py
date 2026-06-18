@@ -15,6 +15,8 @@ from malca.lightcurve_publication import (
     PUBLICATION_STYLE,
     figsize_feature_grid,
     figsize_two_col_grid,
+    finalize_publication_figure,
+    save_publication_figure,
     plot_lightcurve_panel,
     plot_phase_panel,
 )
@@ -744,7 +746,7 @@ def build_eb_triage_summary_figure(df: pd.DataFrame) -> plt.Figure:
         ),
     )
 
-    fig, axes = plt.subplots(1, len(plot_specs), figsize=figsize_two_col_grid(1, 2, row_height=2.5), constrained_layout=True)
+    fig, axes = plt.subplots(1, len(plot_specs), figsize=figsize_two_col_grid(1, 2, row_height=2.5))
     if not isinstance(axes, np.ndarray):
         axes = np.asarray([axes])
 
@@ -810,8 +812,7 @@ def export_eb_triage_products(
     triage_df.to_parquet(triage_path, index=False)
     top_candidate_export_frame(triage_df).to_parquet(top_path, index=False)
     fig = build_eb_triage_summary_figure(triage_df)
-    fig.savefig(summary_plot_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
+    save_publication_figure(fig, summary_plot_path, dpi=150)
 
     return {
         "subset_path": subset_path,
@@ -848,7 +849,7 @@ def _plot_lightcurve_axes(
     has_period = period_days is not None and np.isfinite(period_days) and period_days > 0
     ncols = 2 if has_period else 1
     with plt.rc_context(PUBLICATION_STYLE):
-        fig, axes = plt.subplots(1, ncols, figsize=figsize_feature_grid(ncols, 1, row_height=4.0), constrained_layout=True)
+        fig, axes = plt.subplots(1, ncols, figsize=figsize_feature_grid(ncols, 1, row_height=4.0))
         if not isinstance(axes, np.ndarray):
             axes = np.asarray([axes])
 
@@ -1084,7 +1085,7 @@ def plot_example_lightcurves(
 
         if out_dir is not None and result.get("figure") is not None:
             export_path = out_dir / f"{_safe_filename_token(eb_bin)}_{bin_rank:02d}_{_safe_filename_token(candidate_id)}.png"
-            result["figure"].savefig(export_path, dpi=150, bbox_inches="tight")
+            save_publication_figure(result["figure"], export_path, dpi=150, close=False)
             result["export_path"] = export_path
             exported_paths.append(export_path)
 
