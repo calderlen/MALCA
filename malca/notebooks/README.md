@@ -44,6 +44,7 @@ The notebooks are grouped by workflow purpose. Keep new notebooks in the shallow
 
 ### Review
 
+- `march18_paper_candidates.ipynb`: paper-focused March 18 reviewed-candidate audit, full feature missingness, separability tables, LC/CMD exports (canonical migrated paths via `malca.review.paper_candidates`).
 - `compare_db_to_brayden_candidates.ipynb`: compare a review database against Brayden candidates.
 - `dipper_review_label_separability.ipynb`: separability analysis for dipper review labels.
 - `ltv_candidate_label_separability.ipynb`: separability analysis for LTV candidate review labels.

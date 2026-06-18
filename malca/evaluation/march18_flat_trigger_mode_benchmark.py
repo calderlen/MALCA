@@ -19,6 +19,14 @@ import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 
+from malca.lightcurve_publication import (
+    apply_publication_rcparams,
+    FIG_SINGLE_COL_MEDIUM,
+    FIG_TWO_COL_STANDARD,
+)
+
+apply_publication_rcparams(plt)
+
 from malca.baseline import per_camera_gp_baseline, per_camera_gp_baseline_masked
 from malca.config import (
     BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
@@ -649,7 +657,7 @@ def plot_threshold_sweep(summary: pd.DataFrame, *, kind: str = "dip", ax: np.nda
         ("median_raw_trigger_points", "Median raw trigger points"),
     ]
     if ax is None:
-        _, ax = plt.subplots(len(metrics), 2, figsize=(14, 8), sharex="col")
+        _, ax = plt.subplots(len(metrics), 2, figsize=FIG_TWO_COL_STANDARD, sharex="col")
     colors = {"loo_posterior_prob": "goldenrod", "local_logbf": "tab:purple"}
     labels = {"loo_posterior_prob": "LOO posterior probability", "local_logbf": "local log BF"}
     sub_kind = summary[summary["event_kind"].eq(kind)].copy()
@@ -668,7 +676,7 @@ def plot_threshold_sweep(summary: pd.DataFrame, *, kind: str = "dip", ax: np.nda
 def plot_score_space(scores: pd.DataFrame, *, kind: str = "dip", ax: plt.Axes | None = None) -> plt.Axes:
     sub = scores[scores["event_kind"].eq(kind) & scores["status"].eq("ok")].copy()
     if ax is None:
-        _, ax = plt.subplots(figsize=(8, 6))
+        _, ax = plt.subplots(figsize=FIG_SINGLE_COL_MEDIUM)
     ax.scatter(sub["max_log_bf_local"], sub["max_event_probability"], s=10, alpha=0.35)
     ax.axhline(posterior_probability_threshold(SIGNIFICANCE_THRESHOLD), color="goldenrod", lw=1.0, label="posterior production threshold")
     ax.axvline(LOGBF_THRESHOLD_DIP if kind == "dip" else LOGBF_THRESHOLD_JUMP, color="tab:purple", lw=1.0, label="logBF production threshold")

@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from malca.lightcurve_publication import apply_publication_rcparams, figsize_from_legacy
 from malca.baseline import (
     global_mean_baseline,
     global_median_baseline,
@@ -57,7 +58,7 @@ def plot_skypatrol_with_peaks(
     results_df: pd.DataFrame,
     *,
     out_path: Path | None = None,
-    figsize=(16, 10),
+    figsize=figsize_from_legacy(16, 10),
     show=False,
     baseline_func=None,
     baseline_kwargs=None,

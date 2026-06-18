@@ -20,6 +20,25 @@ import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 
+from malca.lightcurve_publication import (
+    apply_publication_rcparams,
+    FIG_LC_SINGLE_COL,
+    FIG_SINGLE_COL_COMPACT,
+    FIG_SINGLE_COL_PORTRAIT,
+    FIG_TWO_COL_LC_WIDE,
+    FIG_TWO_COL_STANDARD,
+    FIG_TWO_COL_WIDTH,
+    figsize_from_legacy,
+    figsize_two_col_grid,
+    plot_lightcurve_panel,
+    plot_phase_panel,
+    plot_residual_panel,
+    publication_style_context,
+    style_publication_axis,
+)
+
+apply_publication_rcparams(plt)
+
 import malca.stv.periodicity_gate as pregate
 from malca.baseline import (
     global_median_baseline,
@@ -64,13 +83,6 @@ from malca.config import (
 from malca.stv.events import score_lightcurve
 from malca.stv.filter import apply_filters
 from malca.lightcurve_io import load_lightcurve_df, to_asassn_algorithm_frame
-from malca.lightcurve_publication import (
-    plot_lightcurve_panel,
-    plot_phase_panel,
-    plot_residual_panel,
-    publication_style_context,
-    style_publication_axis,
-)
 from malca.phase import phase_fold_dataframe
 from malca.stv.score import compute_event_score
 from malca.stats import compute_ce_stats
@@ -2284,7 +2296,7 @@ def plot_gate_processing_trial_diagnostic(
     selected_period = _finite_metric(row.get("pre_periodicity_selected_period", np.nan))
 
     if ax is None:
-        _, ax = plt.subplots(5, 2, figsize=(15.2, 16.8), squeeze=False)
+        _, ax = plt.subplots(5, 2, figsize=figsize_two_col_grid(2, 5), squeeze=False)
     axes = np.asarray(ax)
     if axes.size < 10:
         raise ValueError("plot_gate_processing_trial_diagnostic requires at least 10 axes")
@@ -2467,7 +2479,7 @@ def save_gate_processing_visualizations(
     with publication_style_context():
         for _, row in examples.iterrows():
             trial_id = int(row["trial_id"])
-            fig, axes = plt.subplots(5, 2, figsize=(15.2, 16.8), squeeze=False)
+            fig, axes = plt.subplots(5, 2, figsize=figsize_two_col_grid(2, 5), squeeze=False)
             plot_gate_processing_trial_diagnostic(
                 run,
                 trial_id,
@@ -2541,7 +2553,7 @@ def _plot_recovery_by_class(results: pd.DataFrame, output_path: Path) -> None:
             )
     df = pd.DataFrame(plot_rows)
     pivot = df.pivot(index="class_name", columns="pipeline", values="rate").reindex(BENCHMARK_CLASS_ORDER)
-    fig, ax = plt.subplots(figsize=(13, 6))
+    fig, ax = plt.subplots(figsize=FIG_TWO_COL_LC_WIDE)
     pivot.plot.bar(ax=ax)
     ax.set_ylabel("Detection fraction")
     ax.set_ylim(0, 1)
@@ -2554,7 +2566,7 @@ def _plot_recovery_by_class(results: pd.DataFrame, output_path: Path) -> None:
 
 def _plot_gate_confusion(results: pd.DataFrame, output_path: Path) -> None:
     hard = results[results["target_gate_label"].isin(["periodic", "non_periodic"])].copy()
-    fig, ax = plt.subplots(figsize=(6, 5))
+    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_COMPACT)
     if hard.empty:
         ax.text(0.5, 0.5, "No hard-labeled gate rows", ha="center", va="center")
     else:
@@ -2596,7 +2608,7 @@ def _bin_rate(df: pd.DataFrame, column: str, detected_col: str, bins: int = 8, l
 
 def _plot_recovery_vs_parameters(results: pd.DataFrame, output_path: Path) -> None:
     target = results[results["target_dip"].fillna(False)].copy()
-    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+    fig, axes = plt.subplots(2, 2, figsize=FIG_TWO_COL_STANDARD)
     specs = [
         ("amplitude", False, "Amplitude (mag)"),
         ("duration", True, "Duration (days)"),
@@ -2628,7 +2640,7 @@ def _plot_threshold_heatmaps(threshold_sweep: pd.DataFrame, plots_dir: Path) -> 
         ("gate_false_periodic_route_rate", "False periodic route rate"),
         ("periodic_branch_load", "Periodic branch load"),
     ]:
-        fig, ax = plt.subplots(figsize=(7, 5))
+        fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_PORTRAIT)
         if all_rows.empty:
             ax.text(0.5, 0.5, "No threshold rows", ha="center", va="center")
         else:
@@ -2647,7 +2659,7 @@ def _plot_threshold_heatmaps(threshold_sweep: pd.DataFrame, plots_dir: Path) -> 
 
 def _plot_pareto(threshold_sweep: pd.DataFrame, output_path: Path) -> None:
     all_rows = threshold_sweep[threshold_sweep["scope"] == "all"].copy()
-    fig, ax = plt.subplots(figsize=(7, 5))
+    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_PORTRAIT)
     if all_rows.empty:
         ax.text(0.5, 0.5, "No threshold rows", ha="center", va="center")
     else:
@@ -2702,7 +2714,12 @@ def _plot_representative_examples(
     output_path: Path,
 ) -> None:
     examples = _select_representative_rows(results, n=6)
-    fig, axes = plt.subplots(len(examples), 2, figsize=(13, 3.2 * len(examples)), squeeze=False)
+    fig, axes = plt.subplots(
+        len(examples),
+        2,
+        figsize=figsize_two_col_grid(2, len(examples), row_height=3.2 * FIG_TWO_COL_WIDTH / 13),
+        squeeze=False,
+    )
     for row_idx, (_, row) in enumerate(examples.iterrows()):
         trial_id = int(row["trial_id"])
         df = generated_lightcurves.get(trial_id)
@@ -2763,7 +2780,7 @@ def _plot_standard_no_injection_false_positives(
         & results["standard_detected"].fillna(False).astype(bool)
     ].copy()
     if fp.empty:
-        fig, ax = plt.subplots(figsize=(7, 4))
+        fig, ax = plt.subplots(figsize=FIG_LC_SINGLE_COL)
         ax.text(0.5, 0.5, "No standard_only no-injection false positives", ha="center", va="center")
         ax.set_axis_off()
         fig.tight_layout()
@@ -2775,7 +2792,12 @@ def _plot_standard_no_injection_false_positives(
     n = len(examples)
     ncols = 3
     nrows = int(np.ceil(n / ncols))
-    fig, axes = plt.subplots(nrows, ncols, figsize=(15, 3.4 * nrows), squeeze=False)
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=figsize_two_col_grid(ncols, nrows, row_height=3.4 * FIG_TWO_COL_WIDTH / 15),
+        squeeze=False,
+    )
 
     post_lookup: dict[int, bool] = {}
     if post_filter_results is not None and not post_filter_results.empty:

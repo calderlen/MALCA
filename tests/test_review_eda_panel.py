@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from malca.lightcurve_publication import PUBLICATION_PLOTLY_FONT
 from malca.review.eda_panel import (
     candidate_ids_from_eda_table_context,
     candidate_ids_from_plotly_selection,
@@ -269,7 +270,7 @@ def test_eda_publication_figure_uses_publication_style_and_highlight() -> None:
 
     assert fig.layout.paper_bgcolor == "white"
     assert fig.layout.plot_bgcolor == "white"
-    assert "Helvetica" in fig.layout.font.family
+    assert PUBLICATION_PLOTLY_FONT.split(",")[0].strip() in fig.layout.font.family
     assert fig.layout.xaxis.title.text == "period_n_sources"
     assert fig.layout.yaxis.title.text == "dipper_score"
     assert fig.data[-1].name == "current"

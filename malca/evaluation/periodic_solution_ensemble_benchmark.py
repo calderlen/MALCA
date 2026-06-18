@@ -20,6 +20,18 @@ import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 
+from malca.lightcurve_publication import (
+    apply_publication_rcparams,
+    FIG_TWO_COL_LC_WIDE,
+    figsize_from_legacy,
+    figsize_two_col_grid,
+    plot_lightcurve_panel,
+    plot_phase_panel,
+    plot_residual_panel,
+)
+
+apply_publication_rcparams(plt)
+
 from malca.baseline import per_camera_gp_baseline_masked, phase_template_baseline
 from malca.config import (
     BASELINE_JITTER,
@@ -43,7 +55,6 @@ from malca.evaluation.periodic_branch_simulation_benchmark import (
     generate_trial_design,
     simulate_periodic_lightcurve,
 )
-from malca.lightcurve_publication import plot_lightcurve_panel, plot_phase_panel, plot_residual_panel
 
 
 SOLUTION_SPECS: dict[str, dict[str, object]] = {
@@ -928,7 +939,7 @@ def plot_solution_metrics(summary: pd.DataFrame, *, ax: plt.Axes | None = None) 
     ]
     plot_df = summary.set_index("mode")[metrics]
     if ax is None:
-        _, ax = plt.subplots(figsize=(13, 5))
+        _, ax = plt.subplots(figsize=FIG_TWO_COL_LC_WIDE)
     plot_df.plot(kind="bar", ax=ax)
     ax.set_ylim(0.0, 1.0)
     ax.set_ylabel("rate")
@@ -954,7 +965,7 @@ def plot_solution_heatmap(
     else:
         values = ok.groupby([row, col], dropna=False)[metric].median().unstack(col)
     if ax is None:
-        _, ax = plt.subplots(figsize=(9, 5))
+        _, ax = plt.subplots(figsize=figsize_from_legacy(9, 5))
     im = ax.imshow(values.to_numpy(dtype=float), aspect="auto", origin="lower", cmap="viridis")
     ax.set_xticks(np.arange(values.shape[1]), labels=[str(x) for x in values.columns], rotation=35, ha="right")
     ax.set_yticks(np.arange(values.shape[0]), labels=[str(x) for x in values.index])
@@ -1128,7 +1139,7 @@ def plot_solution_baseline_mode_grid(
         _, ax = plt.subplots(
             n_modes,
             2,
-            figsize=(16, max(3.0 * n_modes, 5.5)),
+            figsize=figsize_two_col_grid(2, n_modes, row_height=max(3.0, 5.5 / n_modes)),
             sharex="col",
             squeeze=False,
         )
@@ -1391,7 +1402,7 @@ def write_solution_baseline_gallery(
         fig, axes = plt.subplots(
             len(mode_names),
             2,
-            figsize=(16, max(3.0 * len(mode_names), 5.5)),
+            figsize=figsize_two_col_grid(2, len(mode_names), row_height=max(3.0, 5.5 / len(mode_names))),
             sharex="col",
             squeeze=False,
         )
@@ -1415,7 +1426,7 @@ def plot_solution_trial_diagnostic(
 ) -> np.ndarray:
     df, df_base, info = recompute_solution_trial(run, trial_id, mode)
     if ax is None:
-        _, ax = plt.subplots(3, 1, figsize=(13, 10), sharex=False)
+        _, ax = plt.subplots(3, 1, figsize=figsize_from_legacy(13, 10), sharex=False)
     jd = df["JD"].to_numpy(dtype=float)
     truth_mask = df["truth_dip_mask"].to_numpy(dtype=bool)
     event_idx = np.asarray(info["dip"].get("event_indices", []), dtype=int)

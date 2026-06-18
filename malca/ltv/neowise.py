@@ -37,6 +37,7 @@ from malca.config import (
     NEOWISE_MATCH_RADIUS_ARCSEC,
     LTV_WORKERS,
 )
+from malca.neowise_filters import filter_neowise_single_exposure_lc
 
 
 # NEOWISE epoch grouping: combine points within this many days
@@ -107,19 +108,9 @@ def query_neowise_lc_bulk(
                 'w2mpro', 'w2sigmpro', 'w2snr',
                 'qual_frame', 'cc_flags', 'target_id'
             ]
+
+        res_df = filter_neowise_single_exposure_lc(res_df)
         
-        # Filter bad data
-        if "qual_frame" in res_df.columns:
-            res_df = res_df[res_df["qual_frame"].isin([0, 1])]
-        if "cc_flags" in res_df.columns:
-            if len(res_df) > 0 and res_df["cc_flags"].dtype == object and isinstance(res_df["cc_flags"].iloc[0], bytes):
-                res_df["cc_flags"] = res_df["cc_flags"].str.decode("utf-8")
-            res_df = res_df[~res_df["cc_flags"].str.contains("[^0]", regex=True, na=False)]
-        if "w1snr" in res_df.columns:
-            res_df = res_df[res_df["w1snr"] >= MIN_SNR]
-        if "w2snr" in res_df.columns:
-            res_df = res_df[res_df["w2snr"] >= MIN_SNR]
-            
         # Rename target_id back to original id_col
         res_df = res_df.rename(columns={"target_id": id_col})
         return res_df.reset_index(drop=True)

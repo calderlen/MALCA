@@ -466,13 +466,14 @@ def persist_review_save_request(save_request, current_candidate_id):
      Input('pdm-max-period', 'value'),
      Input('pdm-manual-period', 'value'),
      Input('yaxis-mode', 'value'),
+     Input('native-color-mode', 'value'),
      Input('phase-panel-mode', 'value'),
      Input('external-source-values', 'value'),
      Input('external-source-layout', 'value')],
      State('plot-render-request', 'data'),
     prevent_initial_call=True,
 )
-def queue_plot_render_request(idx, current_candidate_id, plot_mode, overlay_values, selected_cameras, preset, residual_height, theme_mode, _queue_size, _pipeline_progress, baseline_opacity, selected_bands, round_sigfigs, link_radius, pdm_result, pdm_min_period, pdm_max_period, pdm_manual_period, yaxis_mode, phase_panel_mode, external_source_values, external_source_layout=None, existing_request=None):
+def queue_plot_render_request(idx, current_candidate_id, plot_mode, overlay_values, selected_cameras, preset, residual_height, theme_mode, _queue_size, _pipeline_progress, baseline_opacity, selected_bands, round_sigfigs, link_radius, pdm_result, pdm_min_period, pdm_max_period, pdm_manual_period, yaxis_mode, native_color_mode, phase_panel_mode, external_source_values, external_source_layout=None, existing_request=None):
     """Debounced render request queue for native plot UX."""
     if existing_request is None and isinstance(external_source_layout, dict):
         existing_request = external_source_layout
@@ -552,6 +553,7 @@ def queue_plot_render_request(idx, current_candidate_id, plot_mode, overlay_valu
             'phase_period_pending': bool(phase_period_pending),
             'suppress_catalog_phase_period': bool(suppress_catalog_phase_period),
             'yaxis_mode': str(yaxis_mode or 'mag'),
+            'native_color_mode': 'band' if str(native_color_mode or 'camera') == 'band' else 'camera',
             'phase_panel_mode': str(phase_panel_mode or 'fold'),
             'external_source_values': normalized_external_sources,
             'external_source_layout': normalize_external_source_layout(external_source_layout),

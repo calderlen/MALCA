@@ -346,7 +346,7 @@ def _phoebe_result_figure(fit_row: pd.Series, theme: str | None) -> go.Figure:
         title=title,
         paper_bgcolor=spec["paper_bg"],
         plot_bgcolor=spec["plot_bg"],
-        font=dict(color=spec["font"], size=11),
+        font=dict(color=spec["font"], family=PUBLICATION_PLOTLY_FONT, size=11),
         margin=dict(l=56, r=18, t=42, b=48),
         height=340,
         legend=dict(

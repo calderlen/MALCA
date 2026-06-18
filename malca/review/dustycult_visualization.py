@@ -11,6 +11,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+from malca.lightcurve_publication import PUBLICATION_PLOTLY_FONT
 from malca.review.dustycult import DUSTYCULT_BANDPASS_NM, parse_json_cell
 
 
@@ -290,11 +291,11 @@ def build_dustycult_occulter_figure(
             xanchor="left",
             y=0.985,
             yanchor="top",
-            font=dict(size=14),
+            font=dict(size=14, family=PUBLICATION_PLOTLY_FONT),
         ),
         paper_bgcolor=paper,
         plot_bgcolor=plot,
-        font=dict(color=font, size=11),
+        font=dict(color=font, family=PUBLICATION_PLOTLY_FONT, size=11),
         margin=dict(l=58, r=94, t=78, b=62),
         height=430,
         showlegend=False,

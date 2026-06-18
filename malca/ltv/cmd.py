@@ -153,6 +153,107 @@ def fetch_bailer_jones_distances(
     return df
 
 
+def _finite_float(value: object) -> float | None:
+  try:
+    out = float(value)  # type: ignore[arg-type]
+  except (TypeError, ValueError):
+    return None
+  if not np.isfinite(out):
+    return None
+  return out
+
+
+def dustmaps_cmd_from_fields(
+    *,
+    g_mag: object = None,
+    bp_rp: object = None,
+    dist_pc: object = None,
+    a_v_3d: object = None,
+    bp_mag: object = None,
+    rp_mag: object = None,
+    parallax_mas: object = None,
+    a_g_per_av: float = CMD_A_G_PER_AV,
+    e_bp_rp_per_av: float = CMD_E_BP_RP_PER_AV,
+) -> dict[str, object]:
+    """Return CMD coordinates using dustmaps3d extinction when available.
+
+    Ignores any pre-stored StarHorse ``mg0``/``bprp0``; callers pass only
+    observed Gaia photometry, distance, and ``A_v_3d``.
+    """
+    g_f = _finite_float(g_mag)
+    if g_f is None:
+        return {
+            "cmd_color": np.nan,
+            "cmd_mag": np.nan,
+            "cmd_coordinate_source": "missing",
+            "bp_rp": np.nan,
+            "mg": np.nan,
+            "bprp0": np.nan,
+            "mg0": np.nan,
+        }
+
+    bprp_f = _finite_float(bp_rp)
+    if bprp_f is None:
+        bp_f = _finite_float(bp_mag)
+        rp_f = _finite_float(rp_mag)
+        if bp_f is not None and rp_f is not None:
+            bprp_f = bp_f - rp_f
+
+    if bprp_f is None:
+        return {
+            "cmd_color": np.nan,
+            "cmd_mag": np.nan,
+            "cmd_coordinate_source": "missing",
+            "bp_rp": np.nan,
+            "mg": np.nan,
+            "bprp0": np.nan,
+            "mg0": np.nan,
+        }
+
+    dist_f = _finite_float(dist_pc)
+    if dist_f is None or dist_f <= 0:
+        plx_f = _finite_float(parallax_mas)
+        if plx_f is not None and plx_f > 0:
+            dist_f = 1000.0 / plx_f
+
+    if dist_f is None or dist_f <= 0:
+        return {
+            "cmd_color": np.nan,
+            "cmd_mag": np.nan,
+            "cmd_coordinate_source": "missing",
+            "bp_rp": bprp_f,
+            "mg": np.nan,
+            "bprp0": np.nan,
+            "mg0": np.nan,
+        }
+
+    mg_f = g_f - 5.0 * np.log10(dist_f) + 5.0
+    av_f = _finite_float(a_v_3d)
+    if av_f is not None and av_f >= 0:
+        bprp0_f = bprp_f - e_bp_rp_per_av * av_f
+        mg0_f = mg_f - a_g_per_av * av_f
+        source = "dustmaps3d" if av_f > 0 else "observed_no_extinction"
+        return {
+            "cmd_color": bprp0_f,
+            "cmd_mag": mg0_f,
+            "cmd_coordinate_source": source,
+            "bp_rp": bprp_f,
+            "mg": mg_f,
+            "bprp0": bprp0_f,
+            "mg0": mg0_f,
+        }
+
+    return {
+        "cmd_color": bprp_f,
+        "cmd_mag": mg_f,
+        "cmd_coordinate_source": "observed_fallback",
+        "bp_rp": bprp_f,
+        "mg": mg_f,
+        "bprp0": np.nan,
+        "mg0": np.nan,
+    }
+
+
 def compute_cmd_features(
     df: pd.DataFrame,
     *,
@@ -186,9 +287,13 @@ def compute_cmd_features(
     g_col = g_col or _first_existing_column(df, ["phot_g_mean_mag", "G", "g_mag"])
     bp_col = bp_col or _first_existing_column(df, ["phot_bp_mean_mag", "BP", "bp_mag"])
     rp_col = rp_col or _first_existing_column(df, ["phot_rp_mean_mag", "RP", "rp_mag"])
+    bp_rp_col = _first_existing_column(df, ["bp_rp", "derived_bp_rp", "BP_RP", "gaia_bp_rp"])
 
-    if g_col is None or bp_col is None or rp_col is None:
+    if g_col is None:
         return append_derived_features(df)
+    if bp_col is None or rp_col is None:
+        if bp_rp_col is None:
+            return append_derived_features(df)
 
     # Distance in parsec — prefer Bailer-Jones photogeometric, then geometric,
     # then Gaia GSP-Phot, then a pre-existing distance_pc column.
@@ -213,17 +318,19 @@ def compute_cmd_features(
     else:
         return append_derived_features(df)
 
-    # Observed colors/magnitudes
-    bp = df[bp_col].astype(float)
-    rp = df[rp_col].astype(float)
     g = df[g_col].astype(float)
+    if bp_col is not None and rp_col is not None:
+        bp = df[bp_col].astype(float)
+        rp = df[rp_col].astype(float)
+        df["bp_rp"] = bp - rp
+    else:
+        df["bp_rp"] = pd.to_numeric(df[bp_rp_col], errors="coerce")
 
-    df["bp_rp"] = bp - rp
     df["mg"] = g - 5.0 * np.log10(dist_pc) + 5.0
 
-    # Extinction correction if available
+    # Extinction correction from dustmaps3d when available (including A_V = 0).
     if av_col in df.columns:
-        av = df[av_col].astype(float)
+        av = df[av_col].astype(float).fillna(0.0)
         a_g = a_g_per_av * av
         e_bp_rp = e_bp_rp_per_av * av
 

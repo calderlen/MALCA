@@ -11,7 +11,13 @@ import pandas as pd
 
 from malca.config import DEFAULT_OUTPUT_DIR
 from malca.feature_layers import with_feature_columns
-from malca.lightcurve_publication import PUBLICATION_STYLE, plot_lightcurve_panel, plot_phase_panel
+from malca.lightcurve_publication import (
+    PUBLICATION_STYLE,
+    figsize_feature_grid,
+    figsize_two_col_grid,
+    plot_lightcurve_panel,
+    plot_phase_panel,
+)
 from malca.lightcurve_io import load_lightcurve_df, to_asassn_algorithm_frame
 from malca.notebook_paths import find_repo_root, localize_lightcurve_frame_paths
 from malca.review.eda_data import infer_source_kind, load_candidate_source
@@ -738,7 +744,7 @@ def build_eb_triage_summary_figure(df: pd.DataFrame) -> plt.Figure:
         ),
     )
 
-    fig, axes = plt.subplots(1, len(plot_specs), figsize=(20, 5), constrained_layout=True)
+    fig, axes = plt.subplots(1, len(plot_specs), figsize=figsize_two_col_grid(1, 2, row_height=2.5), constrained_layout=True)
     if not isinstance(axes, np.ndarray):
         axes = np.asarray([axes])
 
@@ -842,7 +848,7 @@ def _plot_lightcurve_axes(
     has_period = period_days is not None and np.isfinite(period_days) and period_days > 0
     ncols = 2 if has_period else 1
     with plt.rc_context(PUBLICATION_STYLE):
-        fig, axes = plt.subplots(1, ncols, figsize=(7 * ncols, 4), constrained_layout=True)
+        fig, axes = plt.subplots(1, ncols, figsize=figsize_feature_grid(ncols, 1, row_height=4.0), constrained_layout=True)
         if not isinstance(axes, np.ndarray):
             axes = np.asarray([axes])
 

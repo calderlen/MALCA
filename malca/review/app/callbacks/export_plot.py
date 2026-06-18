@@ -91,6 +91,14 @@ def export_active_plot(n_clicks, figure, plot_mode, plot_src, idx, candidate_id,
                 residual_fraction=residual_height,
                 baseline_opacity=baseline_opacity,
                 yaxis_mode='flux' if str(state.get('yaxis_mode') or 'mag') == 'flux' else 'mag',
+                native_color_mode='band' if str(state.get('native_color_mode') or 'camera') == 'band' else 'camera',
+                external_source_view=list(state.get('external_source_values') or ['asassn']),
+                external_panel_mode=_coerce_choice(
+                    state.get('external_source_layout'),
+                    {'overlay', 'split'},
+                    'overlay',
+                ),
+                candidate_id=export_candidate_id,
             )
         except Exception as exc:
             return no_update, f'Export failed (PDF). {exc}'

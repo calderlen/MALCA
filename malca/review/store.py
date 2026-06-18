@@ -16,8 +16,6 @@ import pandas as pd
 from malca.config import GAIA_CHUNK_SIZE
 from malca.config import LTV_MAX_PM
 from malca.config import (
-    CMD_A_G_PER_AV,
-    CMD_E_BP_RP_PER_AV,
     VSX_CROSSMATCH_PATH,
     DEFAULT_OUTPUT_DIR,
     DEFAULT_CACHE_DIR,
@@ -27,6 +25,7 @@ from malca.config import (
     REVIEW_IMPORTED_LC_CACHE_DIR,
 )
 from malca.derived_stats import DERIVED_FEATURE_COLUMNS
+from malca.ltv.cmd import dustmaps_cmd_from_fields
 from malca.feature_layers import (
     FEATURE_LAYER_VERSION_COLUMN,
     FEATURE_LAYER_COLUMNS,
@@ -2519,9 +2518,7 @@ def get_diagnostic_background(conn: sqlite3.Connection) -> dict:
     result["kiel_teff"] = np.array(teff_list, dtype=np.float64)
     result["kiel_logg"] = np.array(logg_list, dtype=np.float64)
 
-    # CMD: prefer pre-computed dereddened values, fall back to Gaia photometry.
-    mg0_expr = _background_value_expr("mg0", column_map)
-    bprp0_expr = _background_value_expr("bprp0", column_map)
+    # CMD: dustmaps3d extinction from A_v_3d + Gaia photometry.
     phot_g_expr = _background_value_expr("phot_g_mean_mag", column_map)
     bp_rp_expr = _background_value_expr("bp_rp", column_map)
     phot_bp_expr = _background_value_expr("phot_bp_mean_mag", column_map)
@@ -2530,41 +2527,31 @@ def get_diagnostic_background(conn: sqlite3.Connection) -> dict:
     parallax_expr = _background_value_expr("parallax", column_map)
     av_expr = _background_value_expr("A_v_3d", column_map)
     rows = conn.execute(
-        f"SELECT {mg0_expr}, {bprp0_expr}, {phot_g_expr}, {bp_rp_expr}, "
+        f"SELECT {phot_g_expr}, {bp_rp_expr}, "
         f"{phot_bp_expr}, {phot_rp_expr}, {dist_expr}, {parallax_expr}, {av_expr} "
         "FROM candidates"
     ).fetchall()
     cmd_bprp0: list[float] = []
     cmd_mg0: list[float] = []
-    for mg0, bprp0, g_mag, bp_rp, bp_mag, rp_mag, dist, plx, av in rows:
+    for g_mag, bp_rp, bp_mag, rp_mag, dist, plx, av in rows:
+        coords = dustmaps_cmd_from_fields(
+            g_mag=g_mag,
+            bp_rp=bp_rp,
+            dist_pc=dist,
+            a_v_3d=av,
+            bp_mag=bp_mag,
+            rp_mag=rp_mag,
+            parallax_mas=plx,
+        )
+        if coords["cmd_coordinate_source"] == "missing":
+            continue
         try:
-            if mg0 is not None and bprp0 is not None:
-                mg0_f = float(mg0)
-                bprp0_f = float(bprp0)
-                if math.isfinite(mg0_f) and math.isfinite(bprp0_f):
-                    cmd_mg0.append(mg0_f)
-                    cmd_bprp0.append(bprp0_f)
-                    continue
-            g_f = float(g_mag)
-            if bp_rp is not None:
-                bprp_f = float(bp_rp)
-            else:
-                bprp_f = float(bp_mag) - float(rp_mag)
-            dist_f = float(dist) if dist is not None else None
-            if dist_f is None or not math.isfinite(dist_f) or dist_f <= 0:
-                plx_f = float(plx)
-                dist_f = 1000.0 / plx_f if math.isfinite(plx_f) and plx_f > 0 else None
-            if dist_f is None or not math.isfinite(dist_f) or dist_f <= 0:
-                continue
-            mg_f = g_f - 5.0 * math.log10(dist_f) + 5.0
-            av_f = float(av) if av is not None else 0.0
-            if math.isfinite(av_f) and av_f >= 0:
-                mg_f -= CMD_A_G_PER_AV * av_f
-                bprp_f -= CMD_E_BP_RP_PER_AV * av_f
-            if math.isfinite(mg_f) and math.isfinite(bprp_f):
-                cmd_mg0.append(mg_f)
-                cmd_bprp0.append(bprp_f)
-        except (TypeError, ValueError, ZeroDivisionError):
+            bprp0_f = float(coords["cmd_color"])
+            mg0_f = float(coords["cmd_mag"])
+            if math.isfinite(bprp0_f) and math.isfinite(mg0_f):
+                cmd_mg0.append(mg0_f)
+                cmd_bprp0.append(bprp0_f)
+        except (TypeError, ValueError):
             pass
     result["cmd_bprp0"] = np.array(cmd_bprp0, dtype=np.float64)
     result["cmd_mg0"] = np.array(cmd_mg0, dtype=np.float64)

@@ -53,7 +53,7 @@ def _render_external_followup(
     }
     muted_text_style = {'fontSize': '9px', 'lineHeight': 1.2, 'color': theme_spec["muted"]}
     error_text_style = {'fontSize': '10px', 'color': theme_spec["error"]}
-    run_dir = _resolve_run_dir_from_plot_dir(plot_dir if plot_dir is not None else PLOT_DIR)
+    run_dir = _resolve_run_dir_from_plot_dir(plot_dir if plot_dir is not None else PLOT_DIR) or _run_dir_from_source_path()
     lookup_keys = _candidate_lookup_keys(candidate_id, payload)
 
     def _fmt_ms(value, digits: int = 3) -> str:
@@ -181,16 +181,24 @@ def _render_external_followup(
     ]
     spectra_extras = []
     if not spectra_rows.empty:
-        spectra_rows = spectra_rows.head(8)
-        hdr = html.Tr([html.Th('survey'), html.Th('catalog'), html.Th('sep\"')])
-        body = [
-            html.Tr([
+        spectra_rows = spectra_rows.head(12)
+        hdr = html.Tr([html.Th('survey'), html.Th('sep"'), html.Th('z'), html.Th('type'), html.Th('link')])
+        body = []
+        for _, r in spectra_rows.iterrows():
+            link_val = str(r.get('link', '') or '').strip()
+            link_cell = html.Td(
+                html.A('view', href=link_val, target='_blank', rel='noopener noreferrer',
+                       style={'color': theme_spec["muted"], 'fontSize': '9px'})
+            ) if link_val else html.Td('')
+            z_val = r.get('spectrum_redshift')
+            z_text = f"{float(z_val):.4f}" if pd.notna(z_val) else ''
+            body.append(html.Tr([
                 html.Td(str(r.get('survey', ''))),
-                html.Td(str(r.get('catalog', ''))),
                 html.Td(f"{float(r.get('sep_arcsec')):.2f}" if pd.notna(r.get('sep_arcsec')) else ''),
-            ])
-            for _, r in spectra_rows.iterrows()
-        ]
+                html.Td(z_text),
+                html.Td(str(r.get('spectrum_spectral_type', '') or '')[:20]),
+                link_cell,
+            ]))
         spectra_extras.append(html.Table([html.Thead(hdr), html.Tbody(body)], style={'width': '100%', 'fontSize': '10px', 'marginTop': '4px'}))
     if spectrum_links:
         spectra_extras.append(

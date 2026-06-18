@@ -33,9 +33,14 @@ BAND_COLORS = {
 
 MARKERS = ("o", "s", "D", "^", "v", "P", "X", "<", ">", "h")
 
+# LaTeX Computer Modern–style serif (STIXGeneral + cm mathtext in matplotlib).
+PUBLICATION_SERIF_FONTS = ["STIXGeneral", "Nimbus Roman", "DejaVu Serif"]
+PUBLICATION_PLOTLY_FONT = ", ".join(PUBLICATION_SERIF_FONTS)
+
 PUBLICATION_STYLE = {
-    "font.family": "DejaVu Serif",
-    "mathtext.fontset": "dejavuserif",
+    "font.family": "serif",
+    "font.serif": PUBLICATION_SERIF_FONTS,
+    "mathtext.fontset": "cm",
     "axes.linewidth": 0.8,
     "axes.labelsize": 11,
     "axes.titlesize": 12,
@@ -48,6 +53,51 @@ PUBLICATION_STYLE = {
     "pdf.fonttype": 42,
     "ps.fonttype": 42,
 }
+
+# Publication figure widths (inches). ApJ-style single column = 3.5; two-column span = 7.0.
+FIG_SINGLE_COL_WIDTH = 3.5
+FIG_TWO_COL_WIDTH = 7.0
+
+FIG_SINGLE_COL_SQUARE = (FIG_SINGLE_COL_WIDTH, FIG_SINGLE_COL_WIDTH)
+FIG_LC_SINGLE_COL = (FIG_SINGLE_COL_WIDTH, 2.0)
+FIG_LC_TWO_COL = (FIG_TWO_COL_WIDTH, 3.0)
+FIG_ROC_PR_TWO_COL = (FIG_TWO_COL_WIDTH, 3.0)
+
+# Gaia CMD plot styling for FIG_SINGLE_COL_SQUARE (3.5 x 3.5 in).
+CMD_BG_SCATTER_SIZE = 2.0
+CMD_BG_HOLLOW_SCATTER_SIZE = 3.5
+CMD_AXIS_LABEL_FONTSIZE = 8.0
+CMD_TICK_LABEL_FONTSIZE = 7.0
+CMD_LEGEND_FONTSIZE = 6.5
+CMD_TICK_LENGTH = 2.2
+CMD_TICK_WIDTH = 0.5
+CMD_MARKER_EDGE_SOLID = 0.3
+CMD_MARKER_EDGE_HOLLOW = 0.45
+CMD_LEGEND_MARKERSCALE = 0.7
+CMD_BUCKET_STYLE: dict[str, dict[str, object]] = {
+    "Dipper": {"color": "#0072B2", "marker": "o", "size": 14, "zorder": 6},
+    "Interesting": {"color": "#D55E00", "marker": "o", "size": 10, "zorder": 4},
+    "LTV": {"color": "#009E73", "marker": "^", "size": 16, "zorder": 7},
+    "Microlensing": {"color": "#E69F00", "marker": "*", "size": 28, "zorder": 9},
+    "Eclipsing binary": {"color": "#CC79A7", "marker": "s", "size": 18, "zorder": 8},
+    "Unknown": {"color": "#6A3D9A", "marker": "D", "size": 12, "zorder": 5},
+}
+
+# Legacy-sized figures scaled to publication column widths (3.5" single / 7.0" two-column).
+FIG_SINGLE_COL_HEATMAP = (FIG_SINGLE_COL_WIDTH, FIG_SINGLE_COL_WIDTH * 8 / 10)  # was (10, 8)
+FIG_SINGLE_COL_LC_WIDE = (FIG_SINGLE_COL_WIDTH, FIG_SINGLE_COL_WIDTH * 6 / 10)  # was (10, 6)
+FIG_SINGLE_COL_MEDIUM = (FIG_SINGLE_COL_WIDTH, FIG_SINGLE_COL_WIDTH * 6 / 8)  # was (8, 6)
+FIG_SINGLE_COL_COMPACT = (FIG_SINGLE_COL_WIDTH, FIG_SINGLE_COL_WIDTH * 5 / 6)  # was (6, 5)
+FIG_SINGLE_COL_PORTRAIT = (FIG_SINGLE_COL_WIDTH, FIG_SINGLE_COL_WIDTH * 5 / 7)  # was (7, 5)
+FIG_TWO_COL_STANDARD = (FIG_TWO_COL_WIDTH, FIG_TWO_COL_WIDTH * 8 / 14)  # was (14, 8)
+FIG_TWO_COL_LC_WIDE = (FIG_TWO_COL_WIDTH, FIG_TWO_COL_WIDTH * 6 / 13)  # was (13, 6)
+FIG_TWO_COL_TRIPLE = (FIG_TWO_COL_WIDTH, FIG_TWO_COL_WIDTH * 6 / 18)  # was (18, 6)
+
+FIG_HEATMAP_REFERENCE = (10.0, 8.0)
+FIG_GRID_PANEL_WIDTH = 3.5  # matches malca.config.GRID_PANEL_WIDTH
+FIG_GRID_ROW_HEIGHT = 2.5
+FIG_HEATMAP_ROW_HEIGHT = 0.28
+FIG_HEATMAP_MIN_HEIGHT = 4.0
 
 COLUMN_ALIASES = {
     "time": (
@@ -267,7 +317,92 @@ def _load_matplotlib():
     import matplotlib.pyplot as plt
     from matplotlib.ticker import AutoMinorLocator
 
+    apply_publication_rcparams(plt)
     return plt, AutoMinorLocator
+
+
+def apply_publication_rcparams(plt=None) -> None:
+    """Apply MALCA publication rcParams to the active matplotlib runtime."""
+    if plt is None:
+        import matplotlib.pyplot as plt
+    plt.rcParams.update(PUBLICATION_STYLE)
+
+
+def figsize_scale(
+    figsize: tuple[float, float],
+    *,
+    reference: tuple[float, float] = FIG_HEATMAP_REFERENCE,
+) -> float:
+    """Return scale factor relative to a reference figure size (min of width/height ratios)."""
+    return min(figsize[0] / reference[0], figsize[1] / reference[1])
+
+
+def scaled_scatter_size(base_size: float, scale: float, *, minimum: float = 2.0) -> float:
+    """Scale matplotlib scatter ``s`` (points^2) for a smaller figure."""
+    return max(minimum, float(base_size) * scale**2)
+
+
+def scaled_font_size(base_size: float, scale: float, *, minimum: float = 7.0) -> float:
+    return max(minimum, float(base_size) * scale)
+
+
+def figsize_from_legacy(width: float, height: float) -> tuple[float, float]:
+    """Scale a legacy figure size to single- or two-column publication width."""
+    target_w = FIG_SINGLE_COL_WIDTH if width <= 10.0 else FIG_TWO_COL_WIDTH
+    scale = target_w / float(width)
+    return (target_w, float(height) * scale)
+
+
+def figsize_heatmap_single_col(*, aspect: float = 8 / 10) -> tuple[float, float]:
+    """Return a single-column heatmap size with the given width/height aspect."""
+    return (FIG_SINGLE_COL_WIDTH, FIG_SINGLE_COL_WIDTH * aspect)
+
+
+def figsize_two_col_grid(
+    ncols: int,
+    nrows: int,
+    *,
+    row_height: float = FIG_GRID_ROW_HEIGHT,
+) -> tuple[float, float]:
+    """Multi-panel figure spanning two-column width."""
+    del ncols  # subplot grid divides the fixed publication width internally
+    return (FIG_TWO_COL_WIDTH, row_height * nrows)
+
+
+def scaled_publication_text_sizes(
+    figsize: tuple[float, float],
+    *,
+    reference: tuple[float, float] = FIG_HEATMAP_REFERENCE,
+    label: float = 14.0,
+    title: float = 16.0,
+    colorbar: float = 14.0,
+) -> dict[str, float]:
+    """Scale explicit label/title sizes for a smaller publication figsize."""
+    scale = figsize_scale(figsize, reference=reference)
+    return {
+        "label": scaled_font_size(label, scale),
+        "title": scaled_font_size(title, scale, minimum=8.0),
+        "colorbar": scaled_font_size(colorbar, scale),
+    }
+
+
+def figsize_heatmap_two_col(
+    n_rows: int,
+    *,
+    row_height: float = FIG_HEATMAP_ROW_HEIGHT,
+    min_height: float = FIG_HEATMAP_MIN_HEIGHT,
+) -> tuple[float, float]:
+    return (FIG_TWO_COL_WIDTH, max(min_height, row_height * n_rows))
+
+
+def figsize_feature_grid(
+    ncols: int,
+    nrows: int,
+    *,
+    panel_width: float = FIG_GRID_PANEL_WIDTH,
+    row_height: float = FIG_GRID_ROW_HEIGHT,
+) -> tuple[float, float]:
+    return (panel_width * ncols, row_height * nrows)
 
 
 def _read_raw_lightcurve(path: Path) -> pd.DataFrame:
@@ -1187,7 +1322,7 @@ def plot_lightcurve(
     show: bool = False,
     close: bool = False,
     title: str | None = None,
-    figsize: tuple[float, float] = (7.0, 4.2),
+    figsize: tuple[float, float] = FIG_LC_TWO_COL,
     dpi: int = 300,
     group_by: str = "band",
     show_errorbars: bool = True,
@@ -1244,7 +1379,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("-o", "--output", type=Path, default=None, help="Output figure path. Defaults to '<input>_lightcurve.pdf' unless --show is used.")
     parser.add_argument("--show", action="store_true", help="Display the plot interactively.")
     parser.add_argument("--title", default=None, help="Figure title. Pass an empty string to suppress the title.")
-    parser.add_argument("--figsize", nargs=2, type=float, metavar=("WIDTH", "HEIGHT"), default=(7.0, 4.2), help="Figure size in inches.")
+    parser.add_argument("--figsize", nargs=2, type=float, metavar=("WIDTH", "HEIGHT"), default=FIG_LC_TWO_COL, help="Figure size in inches.")
     parser.add_argument("--dpi", type=int, default=300, help="Raster output DPI.")
     parser.add_argument("--group-by", choices=("band", "camera", "band-camera", "none"), default="band", help="Legend/grouping dimension.")
     parser.add_argument("--bands", nargs="+", default=None, help="Only plot these bands, e.g. --bands g V.")

@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
+from malca.lightcurve_publication import PUBLICATION_PLOTLY_FONT
 from malca.review.eda_data import (
     DEFAULT_COLOR,
     DEFAULT_MAIN_X,
@@ -187,7 +188,7 @@ def _style_eda_figure(fig: go.Figure, *, theme: str | None, height: int = 360) -
         template=None,
         paper_bgcolor=colors["paper"],
         plot_bgcolor=colors["plot"],
-        font={"color": colors["text"], "size": 11},
+        font={"color": colors["text"], "family": PUBLICATION_PLOTLY_FONT, "size": 11},
         margin={"l": 58, "r": 20, "t": 42, "b": 58},
         height=height,
         hovermode="closest",
@@ -197,7 +198,7 @@ def _style_eda_figure(fig: go.Figure, *, theme: str | None, height: int = 360) -
             "y": 1.02,
             "xanchor": "left",
             "x": 0,
-            "font": {"size": 10},
+            "font": {"size": 10, "family": PUBLICATION_PLOTLY_FONT},
         },
     )
     fig.update_xaxes(gridcolor=colors["grid"], zeroline=False)
@@ -215,7 +216,7 @@ def eda_status_figure(message: str, *, theme: str | None = None, height: int = 3
         y=0.5,
         xref="paper",
         yref="paper",
-        font={"color": colors["muted"], "size": 13},
+        font={"color": colors["muted"], "family": PUBLICATION_PLOTLY_FONT, "size": 13},
     )
     fig.update_xaxes(visible=False)
     fig.update_yaxes(visible=False)

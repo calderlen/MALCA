@@ -15,6 +15,14 @@ from typing import Dict
 import json
 import re
 
+from malca.lightcurve_publication import (
+    apply_publication_rcparams,
+    FIG_SINGLE_COL_LC_WIDE,
+    FIG_TWO_COL_TRIPLE,
+)
+
+apply_publication_rcparams(plt)
+
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from malca.config import DEFAULT_OUTPUT_DIR
@@ -186,7 +194,7 @@ def main():
     print("=" * 70)
 
     # Plot 1: Side-by-side comparison
-    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    fig, axes = plt.subplots(1, 3, figsize=FIG_TWO_COL_TRIPLE)
 
     depth_centers = cube_baseline["depth_centers"]
     dur_centers = cube_baseline["duration_centers"]
@@ -236,7 +244,7 @@ def main():
     print(f"  Saved: {output_dir / 'phase2_comparison.png'}")
 
     # Plot 2: Efficiency vs depth (marginalized over duration)
-    fig, ax = plt.subplots(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_LC_WIDE)
 
     eff_vs_depth_baseline = np.nanmean(stats_baseline["eff_2d"], axis=1)
     eff_vs_depth_optimized = np.nanmean(stats_optimized["eff_2d"], axis=1)
@@ -261,7 +269,7 @@ def main():
     print(f"  Saved: {output_dir / 'efficiency_vs_depth.png'}")
 
     # Plot 3: Efficiency vs duration (marginalized over depth)
-    fig, ax = plt.subplots(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_LC_WIDE)
 
     eff_vs_dur_baseline = np.nanmean(stats_baseline["eff_2d"], axis=0)
     eff_vs_dur_optimized = np.nanmean(stats_optimized["eff_2d"], axis=0)

@@ -21,6 +21,16 @@ import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 
+from malca.lightcurve_publication import (
+    apply_publication_rcparams,
+    FIG_TWO_COL_LC_WIDE,
+    FIG_TWO_COL_STANDARD,
+    figsize_from_legacy,
+    figsize_two_col_grid,
+)
+
+apply_publication_rcparams(plt)
+
 from malca.baseline import (
     per_camera_gp_baseline_masked,
     phase_template_baseline,
@@ -902,7 +912,7 @@ def metric_heatmap(
             .unstack(col)
         )
     if ax is None:
-        _, ax = plt.subplots(figsize=(9, 5))
+        _, ax = plt.subplots(figsize=FIG_TWO_COL_LC_WIDE)
     im = ax.imshow(values.to_numpy(dtype=float), aspect="auto", origin="lower", cmap="viridis", vmin=0 if metric in {"target_recovered", "dip_significant", "false_positive", "off_target_detection"} else None)
     ax.set_xticks(np.arange(values.shape[1]), labels=[str(x) for x in values.columns], rotation=35, ha="right")
     ax.set_yticks(np.arange(values.shape[0]), labels=[str(x) for x in values.index])
@@ -924,7 +934,7 @@ def plot_overall_metrics(summary: pd.DataFrame, *, ax: plt.Axes | None = None) -
     ]
     plot_df = summary.set_index("mode")[metrics]
     if ax is None:
-        _, ax = plt.subplots(figsize=(11, 5))
+        _, ax = plt.subplots(figsize=figsize_from_legacy(11, 5))
     plot_df.plot(kind="bar", ax=ax)
     ax.set_ylim(0.0, 1.0)
     ax.set_ylabel("rate")
@@ -945,7 +955,7 @@ def plot_metric_distributions(
     if modes is not None:
         ok = ok[ok["mode"].isin(modes)]
     if ax is None:
-        _, ax = plt.subplots(figsize=(10, 5))
+        _, ax = plt.subplots(figsize=FIG_TWO_COL_LC_WIDE)
     for mode, sub in ok.groupby("mode", sort=False):
         vals = pd.to_numeric(sub[metric], errors="coerce").dropna().to_numpy(dtype=float)
         if vals.size == 0:
@@ -1028,7 +1038,7 @@ def plot_trial_diagnostic(
 ) -> np.ndarray:
     df, df_base, info = recompute_trial_for_plot(run, trial_id, mode=mode)
     if ax is None:
-        _, ax = plt.subplots(3, 1, figsize=(13, 10), sharex=False)
+        _, ax = plt.subplots(3, 1, figsize=figsize_from_legacy(13, 10), sharex=False)
     jd = df["JD"].to_numpy(dtype=float)
     truth_mask = df["truth_dip_mask"].to_numpy(dtype=bool)
     event_idx = np.asarray(info["dip"].get("event_indices", []), dtype=int)

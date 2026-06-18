@@ -14,6 +14,10 @@ import matplotlib.pyplot as pl
 import numpy as np
 import pandas as pd
 
+from malca.lightcurve_publication import apply_publication_rcparams, FIG_TWO_COL_STANDARD
+
+apply_publication_rcparams(pl)
+
 from malca.baseline import (
     global_median_baseline,
     per_camera_median_baseline,
@@ -528,7 +532,7 @@ def plot_light_curve_with_dips(
         accepted_morphologies = {"gaussian", "paczynski"}
     
     # Use 2x2 layout: V-band and g-band columns, raw + residuals rows
-    fig, axes = pl.subplots(2, 2, figsize=(12, 8), constrained_layout=True, sharex="col")
+    fig, axes = pl.subplots(2, 2, figsize=FIG_TWO_COL_STANDARD, constrained_layout=True, sharex="col")
 
     # Baseline parameters (match the SHO-ish defaults; note baseline function takes q not Q)
     baseline_kwargs = {

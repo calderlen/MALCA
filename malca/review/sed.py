@@ -17,6 +17,7 @@ import plotly.graph_objects as go
 from astropy import units as u
 
 from malca.config import DEFAULT_CACHE_DIR, PARQUET_CACHE_COMPRESSION
+from malca.lightcurve_publication import PUBLICATION_PLOTLY_FONT
 
 SED_TABLE_NAME = "sed_photometry"
 VIZIER_QUERY_TIMEOUT_SEC = 30
@@ -783,7 +784,7 @@ def build_sed_figure(
         margin=dict(l=72, r=18, t=82, b=62),
         paper_bgcolor=spec["paper"],
         plot_bgcolor=spec["plot"],
-        font=dict(color=spec["font"], size=10),
+        font=dict(color=spec["font"], family=PUBLICATION_PLOTLY_FONT, size=10),
         legend=dict(orientation="h", y=1.17, x=0.0, bgcolor="rgba(0,0,0,0)"),
     )
     x_range = _log_axis_range_from_data(phot_x, pad_dex=0.10, min_span_dex=0.45)

@@ -19,6 +19,13 @@ import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 
+from malca.lightcurve_publication import (
+    apply_publication_rcparams,
+    figsize_two_col_grid,
+)
+
+apply_publication_rcparams(plt)
+
 from malca.baseline import per_camera_gp_baseline_masked, phase_template_baseline
 from malca.config import (
     BASELINE_JITTER,
@@ -844,7 +851,7 @@ def plot_trigger_mode_trial_diagnostic(
 ) -> np.ndarray:
     df, df_base, info = recompute_trial_scores(run, trial_id, mode=mode)
     if ax is None:
-        _, ax = plt.subplots(5, 1, figsize=(14, 14), sharex=False)
+        _, ax = plt.subplots(5, 1, figsize=figsize_two_col_grid(1, 5), sharex=False)
 
     jd = df["JD"].to_numpy(dtype=float)
     truth_mask = df["truth_dip_mask"].to_numpy(dtype=bool)

@@ -77,6 +77,7 @@ def _review_gui_state_from_values(
     camera_values: object = None,
     band_values: object = None,
     yaxis_mode: object = None,
+    native_color_mode: object = None,
     phase_panel_mode: object = None,
     period_method: object = None,
     pdm_min_period: object = None,
@@ -101,6 +102,7 @@ def _review_gui_state_from_values(
         'camera_values': _coerce_string_list(camera_values),
         'band_values': _coerce_string_list(band_values) or ['g', 'V'],
         'yaxis_mode': _coerce_choice(yaxis_mode, {'mag', 'flux'}, 'mag'),
+        'native_color_mode': _coerce_choice(native_color_mode, {'camera', 'band'}, 'camera'),
         'phase_panel_mode': _coerce_choice(phase_panel_mode, {'fold', 'time'}, 'fold'),
         'period_method': _coerce_choice(period_method, {'lsp', 'pdm', 'ce'}, 'pdm'),
         'pdm_min_period': _coerce_numeric_input_value(pdm_min_period),
@@ -124,6 +126,7 @@ def _normalize_review_gui_state(raw_state: object) -> dict[str, object] | None:
         camera_values=raw_state.get('camera_values'),
         band_values=raw_state.get('band_values'),
         yaxis_mode=raw_state.get('yaxis_mode'),
+        native_color_mode=raw_state.get('native_color_mode'),
         phase_panel_mode=raw_state.get('phase_panel_mode'),
         period_method=raw_state.get('period_method'),
         pdm_min_period=raw_state.get('pdm_min_period'),
@@ -677,6 +680,7 @@ def load_saved_review_gui_state(_tick):
      Output('camera-checklist', 'value', allow_duplicate=True),
      Output('band-checklist', 'value', allow_duplicate=True),
      Output('yaxis-mode', 'value', allow_duplicate=True),
+     Output('native-color-mode', 'value', allow_duplicate=True),
      Output('phase-panel-mode', 'value', allow_duplicate=True),
      Output('period-method', 'value', allow_duplicate=True),
      Output('pdm-min-period', 'value', allow_duplicate=True),
@@ -690,7 +694,7 @@ def load_saved_review_gui_state(_tick):
 def restore_saved_review_gui_state(saved_state):
     state = _normalize_review_gui_state(saved_state)
     if state is None:
-        return tuple([no_update] * 16)
+        return tuple([no_update] * 17)
     return (
         state['plot_mode'],
         state['plot_overlays'],
@@ -701,6 +705,7 @@ def restore_saved_review_gui_state(saved_state):
         state['camera_values'],
         state['band_values'],
         state['yaxis_mode'],
+        state['native_color_mode'],
         state['phase_panel_mode'],
         state['period_method'],
         state['pdm_min_period'],
@@ -727,6 +732,7 @@ def restore_saved_review_gui_state(saved_state):
         State('camera-checklist', 'value'),
         State('band-checklist', 'value'),
         State('yaxis-mode', 'value'),
+        State('native-color-mode', 'value'),
         State('phase-panel-mode', 'value'),
         State('period-method', 'value'),
         State('pdm-min-period', 'value'),
@@ -754,11 +760,12 @@ def save_review_gui_state(n_clicks, *state_values):
         camera_values=extra_values[7],
         band_values=extra_values[8],
         yaxis_mode=extra_values[9],
-        phase_panel_mode=extra_values[10],
-        period_method=extra_values[11],
-        pdm_min_period=extra_values[12],
-        pdm_max_period=extra_values[13],
-        pdm_manual_period=extra_values[14],
+        native_color_mode=extra_values[10],
+        phase_panel_mode=extra_values[11],
+        period_method=extra_values[12],
+        pdm_min_period=extra_values[13],
+        pdm_max_period=extra_values[14],
+        pdm_manual_period=extra_values[15],
     )
     try:
         with closing(db_connect(Path(DB_PATH))) as conn:

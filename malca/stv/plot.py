@@ -40,9 +40,13 @@ from malca.stv.events import score_lightcurve
 from malca.lightcurve_publication import (
     DIP_EVENT_COLOR,
     JUMP_EVENT_COLOR,
+    FIG_SINGLE_COL_LC_WIDE,
     PUBLICATION_STYLE,
+    apply_publication_rcparams,
     plot_phase_panel,
 )
+
+apply_publication_rcparams(plt)
 from malca.phase import camera_labels
 from malca.review.metadata import REVIEW_METADATA_FIELDS, normalize_vsx_record
 from malca.table_io import read_feature_table
@@ -187,7 +191,7 @@ def plot_phase_folded_lightcurve(
     align_v_to_g: bool = False,
     out_path: Path | None = None,
     show: bool = False,
-    figsize: tuple[float, float] = (10, 6),
+    figsize: tuple[float, float] = FIG_SINGLE_COL_LC_WIDE,
     clean_max_error_absolute: float = 1.0,
     clean_max_error_sigma: float = 5.0,
     filter_bad_cameras: bool = True,

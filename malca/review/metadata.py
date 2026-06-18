@@ -385,7 +385,7 @@ REVIEW_METADATA_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("SH A_G", "ag50"),
         ("SH A_BP", "abp50"),
         ("SH A_RP", "arp50"),
-        ("SH M_G (dered)", "mg0"),
+        ("M_G0 (dustmaps3d)", "mg0"),
     ]),
     ("Photometry", [
         ("2MASS J", "tmass_j"),
@@ -411,7 +411,7 @@ REVIEW_METADATA_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("W2-W3", "w2_w3"),
         ("W2-W4", "w2_w4"),
         ("W3-W4", "w3_w4"),
-        ("BP-RP (dered)", "bprp0"),
+        ("BP-RP0 (dustmaps3d)", "bprp0"),
         ("IPHAS H-alpha", "iphas_ha_mag"),
         ("IPHAS r-Halpha", "iphas_r_ha"),
         ("IPHAS R-I", "iphas_r_i"),

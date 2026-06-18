@@ -101,6 +101,7 @@ from malca.config import (
     AAVSO_RESULTS_PER_PAGE,
 )
 from malca.gaia_ids import parse_gaia_source_id
+from malca.neowise_filters import filter_neowise_single_exposure_lc
 from malca.utils import batch_tap_crossmatch
 from malca.candidates import select_passing_candidates_if_present
 from malca.table_io import read_feature_table, write_feature_table
@@ -3348,18 +3349,7 @@ def query_neowise_lightcurves(
 
             lc = table.to_pandas()
 
-            # Quality filters (same as characterize.py)
-            if "qual_frame" in lc.columns:
-                qual = pd.to_numeric(lc["qual_frame"], errors="coerce")
-                lc = lc[qual.isin([0, 1])]
-            if "cc_flags" in lc.columns:
-                cc = lc["cc_flags"].astype(str)
-                lc = lc[~cc.str.contains("[^0]", regex=True, na=False)]
-            if "qi_fact" in lc.columns:
-                qf = pd.to_numeric(lc["qi_fact"], errors="coerce")
-                lc = lc[qf >= 0.9]
-            if "w1snr" in lc.columns:
-                lc = lc[pd.to_numeric(lc["w1snr"], errors="coerce") >= 3.0]
+            lc = filter_neowise_single_exposure_lc(lc)
 
             if lc.empty:
                 return (idx, 0, np.nan, np.nan, None, cache_key)

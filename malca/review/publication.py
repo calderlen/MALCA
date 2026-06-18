@@ -12,24 +12,15 @@ from typing import Any
 
 import plotly.graph_objects as go
 
+from malca.lightcurve_publication import (
+    FIG_SINGLE_COL_WIDTH,
+    PUBLICATION_PLOTLY_FONT,
+    PUBLICATION_STYLE,
+    apply_publication_rcparams,
+)
 
-PUBLICATION_FONT = "Helvetica, Arial, DejaVu Sans, sans-serif"
+PUBLICATION_FONT = PUBLICATION_PLOTLY_FONT
 PLOTLY_IMAGE_EXPORT_BUTTON = "toImage"
-MATPLOTLIB_PUBLICATION_STYLE = {
-    "font.family": "DejaVu Serif",
-    "mathtext.fontset": "dejavuserif",
-    "axes.linewidth": 0.8,
-    "axes.labelsize": 10.5,
-    "axes.titlesize": 11.5,
-    "xtick.labelsize": 8.5,
-    "ytick.labelsize": 8.5,
-    "legend.fontsize": 7.8,
-    "figure.dpi": 150,
-    "savefig.dpi": 300,
-    "savefig.bbox": "tight",
-    "pdf.fonttype": 42,
-    "ps.fonttype": 42,
-}
 
 
 def slugify_token(value: object, *, fallback: str = "figure") -> str:
@@ -209,6 +200,7 @@ def _matplotlib_imports():
     from matplotlib.colors import to_rgba
     from matplotlib.patches import Circle, Rectangle
 
+    apply_publication_rcparams(plt)
     return plt, to_rgba, Circle, Rectangle
 
 
@@ -704,8 +696,8 @@ def matplotlib_pdf_from_plotly(
     data = [trace for trace in raw.get("data", []) if isinstance(trace, dict) and trace.get("visible") not in (False, "legendonly")]
     layout = raw.get("layout") if isinstance(raw.get("layout"), dict) else {}
     refs = _subplot_refs(data, layout)
-    figsize = (max(4.6, width / 240.0), max(3.2, height / 240.0))
-    with plt.rc_context(MATPLOTLIB_PUBLICATION_STYLE):
+    figsize = (max(FIG_SINGLE_COL_WIDTH, width / 240.0), max(FIG_SINGLE_COL_WIDTH * 0.9, height / 240.0))
+    with plt.rc_context(PUBLICATION_STYLE):
         fig = plt.figure(figsize=figsize, constrained_layout=False)
         ax_by_ref = _axes_from_plotly_domains(fig, refs, layout, legend_outside=legend_outside)
         axes_list = [ax_by_ref[ref] for ref in refs]

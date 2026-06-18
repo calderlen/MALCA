@@ -15,7 +15,12 @@ import tempfile
 import numpy as np
 import plotly.graph_objects as go
 
-from malca.config import CMD_A_G_PER_AV, CMD_E_BP_RP_PER_AV
+from malca.lightcurve_publication import (
+    FIG_SINGLE_COL_SQUARE,
+    PUBLICATION_PLOTLY_FONT,
+    apply_publication_rcparams,
+)
+from malca.ltv.cmd import dustmaps_cmd_from_fields
 from malca.config import (
     YSO_CLASS_I_W1W2,
     YSO_CLASS_II_W1W2_MIN,
@@ -90,7 +95,7 @@ def _apply_layout(fig: go.Figure, *, title: str, spec: dict, height: int = 280) 
         title=dict(text=title, font=dict(size=12)),
         paper_bgcolor=spec["paper_bg"],
         plot_bgcolor=spec["plot_bg"],
-        font=dict(color=spec["font"], size=10),
+        font=dict(color=spec["font"], family=PUBLICATION_PLOTLY_FONT, size=10),
         showlegend=False,
     )
     fig.update_traces(showlegend=False)
@@ -304,47 +309,36 @@ _CMD_REGIONS = [
 ]
 
 
+def _dustmaps_cmd_from_payload(payload: dict) -> dict[str, object] | None:
+    """Compute CMD coordinates from payload using dustmaps3d extinction."""
+    dist = _safe_float(payload, "distance_gspphot")
+    plx = _safe_float(payload, "parallax")
+    coords = dustmaps_cmd_from_fields(
+        g_mag=_safe_float(payload, "phot_g_mean_mag"),
+        bp_rp=_safe_float(payload, "bp_rp"),
+        dist_pc=dist,
+        a_v_3d=_safe_float(payload, "A_v_3d"),
+        bp_mag=_safe_float(payload, "phot_bp_mean_mag"),
+        rp_mag=_safe_float(payload, "phot_rp_mean_mag"),
+        parallax_mas=plx,
+    )
+    if coords["cmd_coordinate_source"] == "missing":
+        return None
+    return coords
+
+
 def build_cmd_figure(
     payload: dict, theme: str, *, background: dict | None = None,
 ) -> go.Figure | None:
     """Gaia extinction-corrected color-magnitude diagram."""
-    g_mag = _safe_float(payload, "phot_g_mean_mag")
-    bp_rp = _safe_float(payload, "bp_rp")
-    av = _safe_float(payload, "A_v_3d")
-    bprp0_payload = _safe_float(payload, "bprp0")
-    mg0_payload = _safe_float(payload, "mg0")
-
-    # Distance: prefer distance_gspphot, fall back to parallax
-    dist = _safe_float(payload, "distance_gspphot")
-    if dist is None or dist <= 0:
-        plx = _safe_float(payload, "parallax")
-        if plx is not None and plx > 0:
-            dist = 1000.0 / plx
-        else:
-            dist = None
-
-    if g_mag is None or dist is None or dist <= 0:
+    coords = _dustmaps_cmd_from_payload(payload)
+    if coords is None:
         return None
-    if bp_rp is None:
-        # Try computing from BP and RP
-        bp = _safe_float(payload, "phot_bp_mean_mag")
-        rp = _safe_float(payload, "phot_rp_mean_mag")
-        if bp is not None and rp is not None:
-            bp_rp = bp - rp
-        else:
-            return None
 
-    m_g = g_mag - 5.0 * math.log10(dist) + 5.0
-
-    if mg0_payload is not None and bprp0_payload is not None:
-        m_g0 = mg0_payload
-        bp_rp0 = bprp0_payload
-    elif av is not None and av >= 0:
-        m_g0 = m_g - CMD_A_G_PER_AV * av
-        bp_rp0 = bp_rp - CMD_E_BP_RP_PER_AV * av
-    else:
-        m_g0 = m_g
-        bp_rp0 = bp_rp
+    bp_rp = float(coords["bp_rp"])
+    m_g = float(coords["mg"])
+    bp_rp0 = float(coords["cmd_color"])
+    m_g0 = float(coords["cmd_mag"])
 
     spec = _theme_spec(theme)
     fig = go.Figure()
@@ -621,6 +615,7 @@ def _publication_imports():
     import matplotlib.pyplot as plt
     from matplotlib.colors import LinearSegmentedColormap, LogNorm
 
+    apply_publication_rcparams(plt)
     return plt, LinearSegmentedColormap, LogNorm
 
 
@@ -766,35 +761,14 @@ def _save_publication_pdf(fig) -> bytes:
 
 
 def _cmd_publication_pdf(payload: dict, background: dict | None) -> bytes | None:
-    g_mag = _safe_float(payload, "phot_g_mean_mag")
-    bp_rp = _safe_float(payload, "bp_rp")
-    av = _safe_float(payload, "A_v_3d")
-    bprp0_payload = _safe_float(payload, "bprp0")
-    mg0_payload = _safe_float(payload, "mg0")
-
-    dist = _safe_float(payload, "distance_gspphot")
-    if dist is None or dist <= 0:
-        plx = _safe_float(payload, "parallax")
-        dist = 1000.0 / plx if plx is not None and plx > 0 else None
-    if g_mag is None or dist is None or dist <= 0:
+    coords = _dustmaps_cmd_from_payload(payload)
+    if coords is None:
         return None
-    if bp_rp is None:
-        bp = _safe_float(payload, "phot_bp_mean_mag")
-        rp = _safe_float(payload, "phot_rp_mean_mag")
-        if bp is None or rp is None:
-            return None
-        bp_rp = bp - rp
 
-    m_g = g_mag - 5.0 * math.log10(dist) + 5.0
-    if mg0_payload is not None and bprp0_payload is not None:
-        m_g0 = mg0_payload
-        bp_rp0 = bprp0_payload
-    elif av is not None and av >= 0:
-        m_g0 = m_g - CMD_A_G_PER_AV * av
-        bp_rp0 = bp_rp - CMD_E_BP_RP_PER_AV * av
-    else:
-        m_g0 = m_g
-        bp_rp0 = bp_rp
+    bp_rp = float(coords["bp_rp"])
+    m_g = float(coords["mg"])
+    bp_rp0 = float(coords["cmd_color"])
+    m_g0 = float(coords["cmd_mag"])
 
     plt, _LinearSegmentedColormap, _LogNorm = _publication_imports()
     bg_x, bg_y = _finite_publication_xy(background, "cmd_bprp0", "cmd_mg0")
@@ -803,7 +777,7 @@ def _cmd_publication_pdf(payload: dict, background: dict | None) -> bytes | None
     xlim = (max(-0.8, xlim[0]), min(5.0, xlim[1]))
     ylim = (max(-8.0, ylim[0]), min(16.0, ylim[1]))
 
-    fig, ax = plt.subplots(figsize=(4.9, 4.2), constrained_layout=True)
+    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_SQUARE, constrained_layout=True)
     _background_density(ax, bg_x, bg_y, extent=(xlim[0], xlim[1], ylim[0], ylim[1]))
     if abs(bp_rp0 - bp_rp) > 0.01 or abs(m_g0 - m_g) > 0.01:
         ax.scatter(
@@ -867,7 +841,7 @@ def _ir_colorcolor_publication_pdf(payload: dict, background: dict | None) -> by
     xlim = (-0.5, 2.5)
     ylim = (-0.3, 2.0)
 
-    fig, ax = plt.subplots(figsize=(5.05, 4.0), constrained_layout=True)
+    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_SQUARE, constrained_layout=True)
     regions = [
         ("Photospheres", xlim[0], YSO_CLASS_II_W1W2_MIN, ylim[0], ylim[1], "#f3f4f6"),
         ("Transition disk", YSO_CLASS_II_W1W2_MIN, YSO_CLASS_I_W1W2, ylim[0], YSO_CLASS_II_HK, "#fff7d6"),
@@ -950,7 +924,7 @@ def _kiel_publication_pdf(payload: dict, background: dict | None) -> bytes | Non
     xlim = (max(2500.0, xlim[0]), min(40000.0, max(xlim[1], min(18000.0, float(teff) * 1.08))))
     ylim = (max(-0.5, ylim[0]), min(6.0, ylim[1]))
 
-    fig, ax = plt.subplots(figsize=(4.9, 4.2), constrained_layout=True)
+    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_SQUARE, constrained_layout=True)
     _background_density(ax, bg_x, bg_y, extent=(xlim[0], xlim[1], ylim[0], ylim[1]))
     xerr = None
     yerr = None
@@ -1114,7 +1088,7 @@ def _score_balance_publication_pdf(payload: dict, background: dict | None) -> by
     upper = max(6.0, upper_hi)
     lower = min(-0.25, upper_lo)
 
-    fig, ax = plt.subplots(figsize=(4.45, 3.75), constrained_layout=True)
+    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_SQUARE, constrained_layout=True)
     _publication_scatter_background(ax, bg_x, bg_y)
     ax.plot([0.0, upper], [0.0, upper], color="#6b7280", linewidth=0.75, linestyle=":", zorder=3)
     ax.text(0.73, 0.20, "dip-like", transform=ax.transAxes, fontsize=7.2, color="#374151")
@@ -1136,7 +1110,7 @@ def _catalog_support_publication_pdf(payload: dict, background: dict | None) -> 
     plt, _LinearSegmentedColormap, _LogNorm = _publication_imports()
     bg_x, bg_y = _finite_publication_xy(background, "plane_catalog_support_x", "plane_catalog_support_y")
 
-    fig, ax = plt.subplots(figsize=(4.45, 3.75), constrained_layout=True)
+    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_SQUARE, constrained_layout=True)
     _publication_scatter_background(ax, bg_x, bg_y)
     ax.axvline(2.0, color="#6b7280", linewidth=0.75, linestyle=":", zorder=3)
     ax.axhline(2.0, color="#6b7280", linewidth=0.75, linestyle=":", zorder=3)
@@ -1163,7 +1137,7 @@ def _recurrence_regularity_publication_pdf(payload: dict, background: dict | Non
     xlim = _positive_log_limits(bg_x, (spacing_median,), default=(1.0, 1000.0))
     ylim = _positive_log_limits(bg_y, (spacing_std,), default=(0.5, 1000.0))
 
-    fig, ax = plt.subplots(figsize=(4.45, 3.75), constrained_layout=True)
+    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_SQUARE, constrained_layout=True)
     ax.set_xscale("log")
     ax.set_yscale("log")
     _publication_scatter_background(ax, bg_x, bg_y)
@@ -1192,7 +1166,7 @@ def _dip_repeatability_publication_pdf(payload: dict, background: dict | None) -
     plt, _LinearSegmentedColormap, _LogNorm = _publication_imports()
     bg_x, bg_y = _finite_publication_xy(background, "plane_dip_repeatability_x", "plane_dip_repeatability_y")
 
-    fig, ax = plt.subplots(figsize=(4.45, 3.75), constrained_layout=True)
+    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_SQUARE, constrained_layout=True)
     _publication_scatter_background(ax, bg_x, bg_y)
     ax.axvline(0.5, color="#6b7280", linewidth=0.75, linestyle=":", zorder=3)
     ax.axhline(0.5, color="#6b7280", linewidth=0.75, linestyle=":", zorder=3)
@@ -1220,7 +1194,7 @@ def _variability_strength_publication_pdf(payload: dict, background: dict | None
     ylim = _quantile_limits(bg_y, (dipper_score, 5.0), default=(0.0, 20.0), min_pad=0.8)
     ylim = (min(-0.5, ylim[0]), ylim[1])
 
-    fig, ax = plt.subplots(figsize=(4.45, 3.75), constrained_layout=True)
+    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_SQUARE, constrained_layout=True)
     ax.set_xscale("log")
     _publication_scatter_background(ax, bg_x, bg_y)
     ax.axhline(5.0, color="#6b7280", linewidth=0.75, linestyle=":", zorder=3)
@@ -1245,7 +1219,7 @@ def _stetson_scatter_publication_pdf(payload: dict, background: dict | None) -> 
     xlim = _positive_log_limits(bg_x, (robust_sigma,), default=(0.003, 2.0))
     ylim = _quantile_limits(bg_y, (stetson_j,), default=(-0.2, 5.0), min_pad=0.35)
 
-    fig, ax = plt.subplots(figsize=(4.45, 3.75), constrained_layout=True)
+    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_SQUARE, constrained_layout=True)
     ax.set_xscale("log")
     _publication_scatter_background(ax, bg_x, bg_y)
     _publication_candidate_marker(ax, robust_sigma, stetson_j)
@@ -1269,7 +1243,7 @@ def _shape_impulsiveness_publication_pdf(payload: dict, background: dict | None)
     xlim = _quantile_limits(bg_x, (skew,), default=(-2.5, 3.0), min_pad=0.25)
     ylim = _positive_log_limits(bg_y, (max_slope,), default=(0.02, 1.0e5))
 
-    fig, ax = plt.subplots(figsize=(4.45, 3.75), constrained_layout=True)
+    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_SQUARE, constrained_layout=True)
     ax.set_yscale("log")
     _publication_scatter_background(ax, bg_x, bg_y)
     _publication_candidate_marker(ax, skew, max_slope)
@@ -1306,7 +1280,7 @@ def _rpm_publication_pdf(payload: dict, background: dict | None) -> bytes | None
     xlim = (max(-1.0, xlim[0]), min(5.5, xlim[1]))
     ylim = (max(-5.0, ylim[0]), min(22.0, ylim[1]))
 
-    fig, ax = plt.subplots(figsize=(4.45, 3.75), constrained_layout=True)
+    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_SQUARE, constrained_layout=True)
     _publication_scatter_background(ax, bg_x, bg_y)
     _publication_candidate_marker(ax, bp_rp, h_g)
     ax.text(0.25, 0.24, "main sequence", transform=ax.transAxes, color="#374151", fontsize=7.2)

@@ -666,17 +666,20 @@ def _load_spectra_rows(candidate_id: str, run_dir: Path | None) -> pd.DataFrame:
         return pd.DataFrame()
 
     cid = str(candidate_id)
-    cols = ["candidate_id", "survey", "catalog", "sep_arcsec"]
+    cols = ["candidate_id", "survey", "catalog", "sep_arcsec", "spectrum_redshift", "spectrum_spectral_type", "link"]
     try:
         df = pd.read_parquet(spectra_long, columns=cols, filters=[("candidate_id", "==", cid)])
     except Exception:
         try:
-            df = pd.read_parquet(spectra_long, columns=cols)
+            df = pd.read_parquet(spectra_long)
         except Exception:
             return pd.DataFrame()
         if "candidate_id" in df.columns:
             df = df[df["candidate_id"].astype(str) == cid]
-    return df.reset_index(drop=True)
+    for c in cols:
+        if c not in df.columns:
+            df[c] = "" if c in {"survey", "catalog", "spectrum_spectral_type", "link"} else pd.NA
+    return df[cols].reset_index(drop=True)
 
 
 @lru_cache(maxsize=4)
@@ -798,11 +801,11 @@ def _apply_external_figure_layout(
             bgcolor=spec["legend_bg"],
             bordercolor=spec["legend_border"],
             borderwidth=1,
-            font=dict(color=spec["font"]),
+            font=dict(color=spec["font"], family=PUBLICATION_PLOTLY_FONT),
         ),
         paper_bgcolor=spec["paper_bg"],
         plot_bgcolor=spec["plot_bg"],
-        font=dict(color=spec["font"]),
+        font=dict(color=spec["font"], family=PUBLICATION_PLOTLY_FONT),
     )
     fig.update_xaxes(title="JD - 2458000 [d]", gridcolor=spec["grid"], zeroline=False)
     fig.update_yaxes(

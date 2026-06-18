@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
+from malca.lightcurve_publication import PUBLICATION_PLOTLY_FONT
 from malca.review.dustycult import parse_json_cell
 from malca.review.dustycult_visualization import (
     occulter_parameters_from_fit,
@@ -249,11 +250,11 @@ def build_dustycult_fit_figure(curves: pd.DataFrame, fit_row: pd.Series | Mappin
             xanchor="left",
             y=0.985,
             yanchor="top",
-            font=dict(size=14),
+            font=dict(size=14, family=PUBLICATION_PLOTLY_FONT),
         ),
         paper_bgcolor=spec["paper_bg"],
         plot_bgcolor=spec["plot_bg"],
-        font=dict(color=spec["font"], size=11),
+        font=dict(color=spec["font"], family=PUBLICATION_PLOTLY_FONT, size=11),
         margin=dict(l=58, r=24, t=86, b=56),
         height=390,
         legend=dict(
@@ -265,7 +266,7 @@ def build_dustycult_fit_figure(curves: pd.DataFrame, fit_row: pd.Series | Mappin
             bgcolor=spec["legend_bg"],
             bordercolor=spec["legend_border"],
             borderwidth=1,
-            font=dict(size=10),
+            font=dict(size=10, family=PUBLICATION_PLOTLY_FONT),
             itemwidth=30,
         ),
     )

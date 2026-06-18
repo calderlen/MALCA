@@ -35,7 +35,6 @@ import pyvo
 from malca.config import (
     GAIA_CHUNK_SIZE, STARHORSE_TAP_CHUNK_SIZE,
     IPHAS_MAX_SEP_ARCSEC, CLUSTER_MAX_SEP_ARCSEC, UNWISE_MAX_SEP_ARCSEC,
-    UNWISE_QF_MIN,
     UNWISE_VARIABILITY_ZSCORE, UNWISE_EXPECTED_SCATTER_BASE,
     UNWISE_EXPECTED_SCATTER_SLOPE, UNWISE_EXPECTED_SCATTER_MAG_REF,
     UNWISE_WORKERS, UNWISE_CHECKPOINT_EVERY, UNWISE_MAX_RETRIES,
@@ -61,6 +60,7 @@ from malca.config import (
 from malca.candidates import select_passing_candidates_if_present
 from malca.feature_layers import to_layer_first_frame
 from malca.gaia_ids import normalize_gaia_source_ids, parse_gaia_source_id
+from malca.neowise_filters import filter_neowise_single_exposure_lc
 from malca.table_io import read_feature_table, read_parquet_table, write_feature_table
 from malca.vsx.metadata import normalize_asas_sn_ids, normalize_vsx_match_columns, select_best_vsx_matches
 
@@ -409,8 +409,6 @@ STARHORSE_PREFERRED_COLUMNS = (
     "ag50",
     "abp50",
     "arp50",
-    "bprp0",
-    "mg0",
     "xgal",
     "ygal",
     "zgal",
@@ -1482,25 +1480,7 @@ def _query_unwise_single(
                 return _unwise_empty_result(candidate_id)
 
             df_lc = table.to_pandas()
-
-            if "qual_frame" in df_lc.columns:
-                qual = pd.to_numeric(df_lc["qual_frame"], errors="coerce")
-                df_lc = df_lc[qual.isin([0, 1])]
-
-            if "cc_flags" in df_lc.columns:
-                cc = df_lc["cc_flags"].astype(str)
-                df_lc = df_lc[~cc.str.contains("[^0]", regex=True, na=False)]
-
-            if "qi_fact" in df_lc.columns:
-                qf = pd.to_numeric(df_lc["qi_fact"], errors="coerce")
-                df_lc = df_lc[qf >= UNWISE_QF_MIN]
-
-            if "w1snr" in df_lc.columns:
-                w1snr = pd.to_numeric(df_lc["w1snr"], errors="coerce")
-                df_lc = df_lc[w1snr >= 3.0]
-            if "w2snr" in df_lc.columns:
-                w2snr = pd.to_numeric(df_lc["w2snr"], errors="coerce")
-                df_lc = df_lc[w2snr >= 3.0]
+            df_lc = filter_neowise_single_exposure_lc(df_lc)
 
             if df_lc.empty:
                 return _unwise_empty_result(candidate_id)
@@ -2061,6 +2041,13 @@ def characterize_candidates_df(
                 output_columns=_dust_cache_columns(frame),
             ),
         )
+        if checkpoint_path:
+            _save_char_checkpoint(df_char, checkpoint_path)
+
+    if dust and "A_v_3d" in df_char.columns:
+        from malca.ltv.cmd import compute_cmd_features
+
+        df_char = compute_cmd_features(df_char)
         if checkpoint_path:
             _save_char_checkpoint(df_char, checkpoint_path)
 

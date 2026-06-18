@@ -216,20 +216,22 @@ def test_enrichment_no_match_outputs_are_valid(monkeypatch, tmp_path: Path) -> N
 def test_spectra_summary_carries_redshift_and_type(monkeypatch, tmp_path: Path) -> None:
     targets = pd.DataFrame([{"candidate_id": "C1", "ra_deg": 10.0, "dec_deg": 20.0}])
 
-    def fake_spectra_query(coords, *, catalog, radius_arcsec, chunk_size, show_progress=False, progress_desc=None):
+    def fake_spectra_query(coords, *, survey_specs, representative, radius_arcsec, chunk_size, show_progress=False, progress_desc=None):
+        survey = next(iter(survey_specs))
         return pd.DataFrame(
             [
                 {
                     "candidate_id": "C1",
                     "sep_arcsec": 0.5,
-                    "catalog": catalog,
+                    "catalog": representative.vizier_id,
+                    "survey": survey,
                     "z": 0.123,
                     "Class": "QSO",
                 }
             ]
         )
 
-    monkeypatch.setattr("malca.enrich.spectra._query_catalog_bulk", fake_spectra_query)
+    monkeypatch.setattr("malca.enrich.spectra.query_spectra_catalog_group", fake_spectra_query)
     _long, summary = run_spectra_availability(targets, out_dir=tmp_path / "spectra", catalogs={"sdss": "fake"})
 
     assert summary.loc[0, "spectrum_redshift"] == 0.123

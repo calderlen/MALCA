@@ -33,6 +33,7 @@ import pandas as pd
 import plotly.graph_objects as go
 
 from malca.config import GAIA_CHUNK_SIZE
+from malca.lightcurve_publication import PUBLICATION_PLOTLY_FONT
 from malca.phase import phase_template, template_phase_lag
 from malca.config import (
     BAD_CAMERA_SCATTER_RATIO_THRESHOLD,

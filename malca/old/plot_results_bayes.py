@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from malca.lightcurve_publication import apply_publication_rcparams, figsize_from_legacy
 from malca.baseline import (
     per_camera_gp_baseline,
     global_mean_baseline,
@@ -58,7 +59,7 @@ def plot_bayes_results(
     results_csv: Path | None = None,
     *,
     out_path: Path | None = None,
-    figsize=(16, 10),
+    figsize=figsize_from_legacy(16, 10),
     show=False,
     baseline_func=None,
     baseline_kwargs=None,

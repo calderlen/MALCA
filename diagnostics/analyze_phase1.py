@@ -16,6 +16,15 @@ from typing import Dict, List, Tuple
 import json
 import re
 
+from malca.lightcurve_publication import (
+    apply_publication_rcparams,
+    FIG_SINGLE_COL_HEATMAP,
+    FIG_TWO_COL_LC_WIDE,
+    FIG_TWO_COL_STANDARD,
+)
+
+apply_publication_rcparams(plt)
+
 # Import from malca
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -125,7 +134,7 @@ def compare_efficiency_cubes(
         print()
         
         # Plot delta efficiency
-        fig, ax = plt.subplots(figsize=(10, 8))
+        fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_HEATMAP)
         
         im = ax.pcolormesh(
             baseline_cube["duration_centers"],
@@ -164,7 +173,7 @@ def compare_efficiency_cubes(
         plt.close()
         
         # Also plot side-by-side comparison
-        fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+        fig, axes = plt.subplots(1, 2, figsize=FIG_TWO_COL_STANDARD)
         
         # Baseline
         im0 = axes[0].pcolormesh(
@@ -388,7 +397,7 @@ def main():
     
     # Create comparison plot
     if detection_stats:
-        fig, ax = plt.subplots(figsize=(12, 6))
+        fig, ax = plt.subplots(figsize=FIG_TWO_COL_LC_WIDE)
         
         labels_list = [v["label"] for v in detection_stats.values()]
         rates = [v["detection_rate"] for v in detection_stats.values()]

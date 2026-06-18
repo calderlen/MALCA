@@ -22,6 +22,15 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from malca.lightcurve_publication import (
+    apply_publication_rcparams,
+    FIG_SINGLE_COL_HEATMAP,
+    FIG_SINGLE_COL_LC_WIDE,
+    FIG_TWO_COL_STANDARD,
+)
+
+apply_publication_rcparams(plt)
+
 from malca.config import (
     LTV_CHUNK_SIZE,
     LTV_DSPRING,
@@ -540,7 +549,7 @@ def plot_heatmap(
     y_vals = np.asarray(grid_df.index, dtype=float)
     z = grid_df.to_numpy(dtype=float)
 
-    fig, ax = plt.subplots(figsize=(9, 7))
+    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_HEATMAP)
     mesh = ax.pcolormesh(
         _heatmap_edges(x_vals, log_scale=xlog),
         _heatmap_edges(y_vals, log_scale=False),
@@ -564,7 +573,7 @@ def plot_heatmap(
 
 
 def plot_reason_breakdown(summary_df: pd.DataFrame, *, output_path: Path) -> plt.Figure:
-    fig, ax = plt.subplots(figsize=(9, 6))
+    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_LC_WIDE)
     ordered = summary_df.sort_values("count", ascending=True)
     ax.barh(ordered["filter_reason"], ordered["count"], color="steelblue")
     ax.set_xlabel("Trials")

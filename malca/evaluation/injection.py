@@ -23,6 +23,15 @@ from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+
+from malca.lightcurve_publication import (
+    apply_publication_rcparams,
+    FIG_SINGLE_COL_HEATMAP,
+    FIG_TWO_COL_STANDARD,
+    scaled_publication_text_sizes,
+)
+
+apply_publication_rcparams(plt)
 import plotly.graph_objects as go
 
 from malca.baseline import (
@@ -614,7 +623,7 @@ def run_injection_recovery(
     min_mag_offset: float = 0.0,
     measure_pre_injection: bool = False,
     total_trials: int = INJECTION_N_SAMPLE,
-    amplitude_range: tuple[float, float] = (0.05, 2.0),
+    amplitude_range: tuple[float, float] = (0.05, 5.0),
     duration_range: tuple[float, float] = (1.0, 300.0),
     skewness_range: tuple[float, float] = (-0.5, 0.5),
     mag_err_order: int = 5,
@@ -1007,8 +1016,8 @@ def compute_detection_efficiency_3d(
         mag_edges : np.ndarray
     """
     depth_edges = np.linspace(
-        results_df["fractional_depth"].min(),
-        results_df["fractional_depth"].max(),
+        0.0,
+        1.0,
         depth_bins + 1,
     )
     dur_edges = np.logspace(
@@ -1098,7 +1107,9 @@ def plot_detection_efficiency(
     """
     Plot 2D detection efficiency heatmap.
     """
-    fig, ax = plt.subplots(figsize=(10, 8))
+    figsize = FIG_SINGLE_COL_HEATMAP
+    text = scaled_publication_text_sizes(figsize)
+    fig, ax = plt.subplots(figsize=figsize)
     im = ax.pcolormesh(
         dur_centers,
         amp_centers,
@@ -1110,14 +1121,14 @@ def plot_detection_efficiency(
     )
     if xlog:
         ax.set_xscale("log")
-    ax.set_xlabel(xlabel, fontsize=14)
-    ax.set_ylabel(ylabel, fontsize=14)
+    ax.set_xlabel(xlabel, fontsize=text["label"])
+    ax.set_ylabel(ylabel, fontsize=text["label"])
     title_with_grid = title
     if grid_info:
         title_with_grid = f"{title}\n{grid_info}"
-    ax.set_title(title_with_grid, fontsize=16)
+    ax.set_title(title_with_grid, fontsize=text["title"])
     cbar = plt.colorbar(im, ax=ax)
-    cbar.set_label("Detection Efficiency", fontsize=14)
+    cbar.set_label("Detection Efficiency", fontsize=text["colorbar"])
     plt.tight_layout()
 
     if output_path:
@@ -1285,7 +1296,9 @@ def plot_efficiency_threshold_contour(
                 idx = np.where(above)[0][0]
                 depth_at_threshold[j, k] = cube["depth_centers"][idx]
 
-    fig, ax = plt.subplots(figsize=(10, 8))
+    figsize = FIG_SINGLE_COL_HEATMAP
+    text = scaled_publication_text_sizes(figsize)
+    fig, ax = plt.subplots(figsize=figsize)
     im = ax.pcolormesh(
         cube["mag_centers"],
         cube["duration_centers"],
@@ -1294,11 +1307,14 @@ def plot_efficiency_threshold_contour(
         shading="auto",
     )
     ax.set_yscale("log")
-    ax.set_xlabel("Median Magnitude", fontsize=12)
-    ax.set_ylabel("Duration (days)", fontsize=12)
-    ax.set_title(f"Fractional Depth at {threshold*100:.0f}% Detection Efficiency", fontsize=14)
+    ax.set_xlabel("Median Magnitude", fontsize=text["label"])
+    ax.set_ylabel("Duration (days)", fontsize=text["label"])
+    ax.set_title(
+        f"Fractional Depth at {threshold*100:.0f}% Detection Efficiency",
+        fontsize=text["title"],
+    )
     cbar = plt.colorbar(im, ax=ax)
-    cbar.set_label("Fractional Depth", fontsize=12)
+    cbar.set_label("Fractional Depth", fontsize=text["colorbar"])
     plt.tight_layout()
 
     if output_path:
@@ -1686,7 +1702,7 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
     g_injection.add_argument("--min-points", type=int, default=INJECTION_MIN_POINTS, help="Minimum points in control sample if available.")
     g_injection.add_argument("--seed", type=int, default=INJECTION_SEED)
     g_injection.add_argument("--amp-min", type=float, default=0.05)
-    g_injection.add_argument("--amp-max", type=float, default=3.0)
+    g_injection.add_argument("--amp-max", type=float, default=5.0)
     g_injection.add_argument("--amp-steps", type=int, default=100)
     g_injection.add_argument("--dur-min", type=float, default=1.0)
     g_injection.add_argument("--dur-max", type=float, default=300.0)

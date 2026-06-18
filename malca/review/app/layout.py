@@ -52,7 +52,7 @@ def create_layout():
         dcc.Store(id='auto-period-request', data={'nonce': 0}),
         dcc.Store(id='dustycult-refresh-token', data=0),
         dcc.Store(id='phoebe-refresh-token', data=0),
-        dcc.Store(id='plot-render-request', data={'nonce': 1, 'ts': 0.0, 'state': {'idx': 0, 'candidate_id': None, 'plot_mode': 'native', 'overlay_values': list(PLOT_PRESETS['Diagnostics']['overlays']), 'selected_cameras': [], 'selected_bands': ['g', 'V'], 'preset': 'Diagnostics', 'theme': DEFAULT_THEME, 'residual_height': DEFAULT_RESIDUAL_FRACTION, 'baseline_opacity': 0.5, 'external_source_values': list(DEFAULT_EXTERNAL_SOURCE_VALUES), 'external_source_view': DEFAULT_EXTERNAL_SOURCE_VIEW, 'external_source_layout': DEFAULT_EXTERNAL_SOURCE_LAYOUT, 'phase_panel_mode': 'fold'}}),
+        dcc.Store(id='plot-render-request', data={'nonce': 1, 'ts': 0.0, 'state': {'idx': 0, 'candidate_id': None, 'plot_mode': 'native', 'overlay_values': list(PLOT_PRESETS['Diagnostics']['overlays']), 'selected_cameras': [], 'selected_bands': ['g', 'V'], 'native_color_mode': 'camera', 'preset': 'Diagnostics', 'theme': DEFAULT_THEME, 'residual_height': DEFAULT_RESIDUAL_FRACTION, 'baseline_opacity': 0.5, 'external_source_values': list(DEFAULT_EXTERNAL_SOURCE_VALUES), 'external_source_view': DEFAULT_EXTERNAL_SOURCE_VIEW, 'external_source_layout': DEFAULT_EXTERNAL_SOURCE_LAYOUT, 'phase_panel_mode': 'fold'}}),
         dcc.Store(id='plot-render-applied', data=0),
         dcc.Store(id='plot-defaults-initialized', data=False),
         dcc.Store(id='queue-source-path', data=''),
@@ -77,6 +77,7 @@ def create_layout():
         dcc.Download(id='mini-plot-export-download'),
         dcc.Download(id='eda-plot-export-download'),
         dcc.Download(id='run-config-download'),
+        dcc.Download(id='spectrum-export-download'),
         dcc.Interval(id='keyboard-init', interval=200, n_intervals=0, max_intervals=1),
         dcc.Interval(id='startup-lazy-init', interval=2500, n_intervals=0, max_intervals=1),
         dcc.Interval(id='review-metrics-interval', interval=1000, n_intervals=0),
@@ -497,6 +498,20 @@ def create_layout():
                                     ),
                                 ], className='plot-control-group plot-control-radio'),
                                 html.Div([
+                                    html.Span('Native colors', className='plot-control-label'),
+                                    dcc.RadioItems(
+                                        id='native-color-mode',
+                                        options=[
+                                            {'label': ' Camera colors', 'value': 'camera'},
+                                            {'label': ' Band colors', 'value': 'band'},
+                                        ],
+                                        value='camera',
+                                        inline=True,
+                                        persistence=_review_persistence_token(),
+                                        persistence_type='local',
+                                    ),
+                                ], className='plot-control-group plot-control-radio'),
+                                html.Div([
                                     html.Span('Baseline', className='plot-control-label'),
                                     dcc.Slider(
                                         id='baseline-opacity-slider',
@@ -754,6 +769,55 @@ def create_layout():
                                 ),
                             ]),
                         ], id='sed-details', open=False, className='metadata-sections', style={'margin-top': '0'}),
+                        html.Details([
+                            html.Summary('Spectrum', id='spectrum-summary', style={'cursor': 'pointer'}),
+                            html.Div([
+                                html.Div([
+                                    html.Span('Source', style={'fontSize': '10px', 'color': '#7d91a6', 'marginRight': '8px'}),
+                                    dcc.Dropdown(
+                                        id='spectrum-source-dropdown',
+                                        options=[],
+                                        value=None,
+                                        clearable=False,
+                                        style={'minWidth': '180px', 'fontSize': '11px', 'flex': '1'},
+                                    ),
+                                    html.Button(
+                                        'Export PDF',
+                                        id='export-spectrum-plot',
+                                        n_clicks=0,
+                                        className='compact-btn',
+                                        style={'marginLeft': 'auto'},
+                                    ),
+                                    html.Button(
+                                        'CSV',
+                                        id='export-spectrum-csv',
+                                        n_clicks=0,
+                                        className='compact-btn',
+                                    ),
+                                    html.Button(
+                                        'FITS',
+                                        id='export-spectrum-fits',
+                                        n_clicks=0,
+                                        className='compact-btn',
+                                    ),
+                                ], style={'display': 'flex', 'alignItems': 'center', 'gap': '6px', 'flexWrap': 'wrap', 'padding': '8px 10px 0 10px'}),
+                                html.Div(
+                                    id='spectrum-status',
+                                    children='Open panel to load spectrum.',
+                                    style={'fontSize': '10px', 'color': '#7d91a6', 'padding': '4px 10px 0 10px'},
+                                ),
+                                dcc.Loading(
+                                    [
+                                        html.Div(
+                                            id='spectrum-plot-panel',
+                                            children=_lazy_panel_placeholder('Waiting for Spectrum panel to load.'),
+                                            style={'padding': '8px 10px', 'display': 'grid', 'gap': '8px'},
+                                        ),
+                                    ],
+                                    type='default',
+                                ),
+                            ]),
+                        ], id='spectrum-details', open=False, className='metadata-sections', style={'margin-top': '0'}),
                         html.Details([
                             html.Summary('DustyCult', id='dustycult-summary', style={'cursor': 'pointer'}),
                             html.Div(

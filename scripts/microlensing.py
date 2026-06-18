@@ -62,6 +62,18 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 import numpy as np
 import pandas as pd
+
+from malca.lightcurve_publication import (
+    apply_publication_rcparams,
+    FIG_LC_SINGLE_COL,
+    FIG_SINGLE_COL_SQUARE,
+    FIG_TWO_COL_WIDTH,
+    figsize_from_legacy,
+    figsize_two_col_grid,
+)
+
+apply_publication_rcparams(plt)
+
 from astropy import units as u
 from astropy.coordinates import SkyCoord
 from astropy.time import Time
@@ -544,7 +556,7 @@ def _save_microlensing_full_sky_plot(df: pd.DataFrame, out_path: Path, *, dpi: i
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     if df.empty:
-        fig, ax = plt.subplots(figsize=(6.0, 2.0))
+        fig, ax = plt.subplots(figsize=FIG_LC_SINGLE_COL)
         ax.text(0.5, 0.5, 'No candidates for sky map', ha='center', va='center')
         ax.axis('off')
         fig.savefig(out_path, dpi=dpi, bbox_inches='tight', format='pdf')
@@ -552,7 +564,7 @@ def _save_microlensing_full_sky_plot(df: pd.DataFrame, out_path: Path, *, dpi: i
         return
 
     if 'ra_deg' not in df.columns or 'dec_deg' not in df.columns:
-        fig, ax = plt.subplots(figsize=(6.0, 2.0))
+        fig, ax = plt.subplots(figsize=FIG_LC_SINGLE_COL)
         ax.text(0.5, 0.5, 'No RA/Dec for sky map', ha='center', va='center')
         ax.axis('off')
         fig.savefig(out_path, dpi=dpi, bbox_inches='tight', format='pdf')
@@ -562,7 +574,7 @@ def _save_microlensing_full_sky_plot(df: pd.DataFrame, out_path: Path, *, dpi: i
     l_deg, b_deg = _mw_galactic_lb_deg(df['ra_deg'].to_numpy(), df['dec_deg'].to_numpy())
     ok = np.isfinite(l_deg) & np.isfinite(b_deg)
     if not np.any(ok):
-        fig, ax = plt.subplots(figsize=(6.0, 2.0))
+        fig, ax = plt.subplots(figsize=FIG_LC_SINGLE_COL)
         ax.text(0.5, 0.5, 'No valid Galactic coordinates', ha='center', va='center')
         ax.axis('off')
         fig.savefig(out_path, dpi=dpi, bbox_inches='tight', format='pdf')
@@ -592,7 +604,7 @@ def _save_microlensing_full_sky_plot(df: pd.DataFrame, out_path: Path, *, dpi: i
 
     # Reversed cividis: low χ² (better Paczynski fits) → yellow end; high χ² → dark end.
     cmap = plt.cm.cividis_r
-    fig, ax = plt.subplots(figsize=(14.0, 7.2), subplot_kw={'projection': 'mollweide'})
+    fig, ax = plt.subplots(figsize=figsize_from_legacy(14.0, 7.2), subplot_kw={'projection': 'mollweide'})
     ax.grid(True, alpha=0.35, linestyle='--', linewidth=0.6)
     ax.set_xlabel(r'Galactic longitude $l$')
     ax.set_ylabel(r'Galactic latitude $b$')
@@ -913,7 +925,7 @@ def _save_microlensing_candidate_grid_plot(
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     if df.empty:
-        fig, ax = plt.subplots(figsize=(6.0, 2.0))
+        fig, ax = plt.subplots(figsize=FIG_LC_SINGLE_COL)
         ax.text(0.5, 0.5, "No candidates for microlensing grid", ha="center", va="center")
         ax.axis("off")
         fig.savefig(out_path, dpi=dpi, bbox_inches="tight", format="pdf")
@@ -930,7 +942,7 @@ def _save_microlensing_candidate_grid_plot(
     min_rank = _QUALITY_TIER_ORDER.get(str(min_tier).strip().lower(), 0)
     work = work.loc[work["_tier_rank"] >= int(min_rank)].copy()
     if work.empty:
-        fig, ax = plt.subplots(figsize=(6.0, 2.0))
+        fig, ax = plt.subplots(figsize=FIG_LC_SINGLE_COL)
         ax.text(0.5, 0.5, f"No candidates at or above tier {min_tier}", ha="center", va="center")
         ax.axis("off")
         fig.savefig(out_path, dpi=dpi, bbox_inches="tight", format="pdf")
@@ -945,8 +957,8 @@ def _save_microlensing_candidate_grid_plot(
     nrows = int(np.ceil(n / ncols))
 
     # Keep approx the same subplot height as the previous default (25 candidates → nrows=5).
-    fig_width = 14.43
-    row_height = 18.46 / 5.0
+    fig_width = FIG_TWO_COL_WIDTH
+    row_height = (18.46 / 5.0) * (FIG_TWO_COL_WIDTH / 14.43)
     fig_height = max(row_height * nrows, row_height)
     fig, axes = plt.subplots(nrows, ncols, figsize=(fig_width, fig_height), squeeze=False)
     flat_axes = axes.ravel()
@@ -1137,7 +1149,7 @@ def _save_microlensing_cmd_plot(df: pd.DataFrame, out_path: Path, *, dpi: int = 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    fig, ax = plt.subplots(figsize=(4.85, 4.82))
+    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_SQUARE)
 
     def _compute_mg_from_phot_g_and_parallax(frame: pd.DataFrame) -> pd.Series | None:
         if "phot_g_mean_mag" not in frame.columns or "parallax" not in frame.columns:

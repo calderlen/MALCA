@@ -404,6 +404,7 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
     round_sigfigs = bool(state.get('round_sigfigs', True))
     link_radius = float(state.get('link_radius', 10.0))
     yaxis_mode = str(state.get('yaxis_mode', 'mag') or 'mag')
+    native_color_mode = 'band' if str(state.get('native_color_mode', 'camera') or 'camera') == 'band' else 'camera'
     phase_panel_mode = _coerce_choice(state.get('phase_panel_mode'), {'fold', 'time'}, 'fold')
     external_source_values = normalize_external_source_values(
         state.get('external_source_values', state.get('external_source_view', DEFAULT_EXTERNAL_SOURCE_VIEW)),
@@ -531,36 +532,7 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
     if run_params_status != 'loaded':
         mismatch_warnings.append(run_params_msg)
     axis_convention_revision = "mag-dimming-down-v1"
-    uirevision_key = f"{candidate_id}|{','.join(sorted(str(c) for c in selected_cameras))}|{','.join(sorted(str(b) for b in selected_bands))}|{theme_mode}|{residual_height:.3f}|{baseline_opacity:.2f}|{yaxis_mode}|{phase_panel_mode}|{','.join(external_source_values)}|{external_source_layout}|{axis_convention_revision}"
-
-    # Discover external LC parquets only when the user explicitly asks for them.
-    ext_lcs: dict[str, Path] | None = None
-    requested_external_sources = [
-        value for value in external_source_values
-        if value in EXTERNAL_SOURCE_VALUE_SET and value != 'asassn'
-    ]
-    if requested_external_sources:
-        run_dir = _resolve_run_dir_from_plot_dir(str(plot_dir_path) if plot_dir_path else None)
-        lk = _candidate_lookup_keys(candidate_id, payload)
-        found: dict[str, Path] = {}
-        search_roots: list[Path] = []
-        if run_dir is not None:
-            search_roots.append(run_dir / "results")
-        default_results_root = _APP_REPO_ROOT / DEFAULT_OUTPUT_DIR / "results"
-        if default_results_root not in search_roots:
-            search_roots.append(default_results_root)
-        for prefix in requested_external_sources:
-            for root in search_roots:
-                idx_map = _index_external_lc_paths_from_root(str(root.resolve()), prefix)
-                for key in lk:
-                    p = idx_map.get(str(key))
-                    if p:
-                        found[prefix] = Path(p)
-                        break
-                if prefix in found:
-                    break
-        if found:
-            ext_lcs = found
+    uirevision_key = f"{candidate_id}|{','.join(sorted(str(c) for c in selected_cameras))}|{','.join(sorted(str(b) for b in selected_bands))}|{native_color_mode}|{theme_mode}|{residual_height:.3f}|{baseline_opacity:.2f}|{yaxis_mode}|{phase_panel_mode}|{','.join(external_source_values)}|{external_source_layout}|{axis_convention_revision}"
 
     try:
         native = build_interactive_lightcurve_figure(
@@ -587,9 +559,10 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
             residual_fraction=residual_height,
             baseline_opacity=baseline_opacity,
             yaxis_mode=yaxis_mode,
-            external_lcs=ext_lcs,
+            native_color_mode=native_color_mode,
             external_source_view=external_source_values,
             external_panel_mode=external_source_layout,
+            candidate_id=candidate_id,
         )
     except Exception as exc:
 

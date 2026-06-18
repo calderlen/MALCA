@@ -23,6 +23,21 @@ DEFAULT_NEIGHBOR_CATALOGS: dict[str, str] = {
 }
 
 
+def _coord_from_layers(df: pd.DataFrame, axis: str) -> pd.Series:
+    """Pull RA or Dec from layer-first columns when not present at top level."""
+    from malca.feature_layers import feature_value_series
+
+    paths = (f"external_stats.{axis}", f"derived_stats.{axis}", f"lc_stats.{axis}")
+    for path in paths:
+        layer = path.split(".", 1)[0]
+        if layer not in df.columns:
+            continue
+        values = pd.to_numeric(feature_value_series(df, path), errors="coerce")
+        if values.notna().any():
+            return values
+    return pd.Series(pd.NA, index=df.index, dtype="Float64")
+
+
 def _ensure_candidate_id(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     if "candidate_id" not in out.columns:
@@ -36,6 +51,10 @@ def _ensure_candidate_id(df: pd.DataFrame) -> pd.DataFrame:
         out["ra_deg"] = pd.to_numeric(out["ra"], errors="coerce")
     if "dec_deg" not in out.columns and "dec" in out.columns:
         out["dec_deg"] = pd.to_numeric(out["dec"], errors="coerce")
+    if "ra_deg" not in out.columns or out["ra_deg"].isna().all():
+        out["ra_deg"] = _coord_from_layers(out, "ra")
+    if "dec_deg" not in out.columns or out["dec_deg"].isna().all():
+        out["dec_deg"] = _coord_from_layers(out, "dec")
     return out
 
 
