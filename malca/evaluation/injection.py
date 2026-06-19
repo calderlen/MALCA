@@ -1209,7 +1209,8 @@ def plot_efficiency_jointplot(
     
     # Smooth with NaN handling to avoid edge banding artifacts
     kernel = Gaussian2DKernel(x_stddev=1.0)
-    smoothed_eff = convolve(efficiency_grid, kernel, boundary='extend', preserve_nan=True)
+    # Set preserve_nan=False so empty bins (NaNs) are smoothly interpolated from their neighbors
+    smoothed_eff = convolve(efficiency_grid, kernel, boundary='extend', preserve_nan=False)
     
     im = ax.pcolormesh(
         x_edges,
@@ -1226,7 +1227,7 @@ def plot_efficiency_jointplot(
     # Contours
     try:
         cs = ax.contour(x_centers, y_centers, smoothed_eff, levels=[0.5, 0.9, 0.99], colors='black', alpha=0.9, linewidths=0.6)
-        texts = ax.clabel(cs, inline=True, fontsize=text["label"]*0.8, fmt='%g', manual=[(5, 0.6), (50, 0.6), (150, 0.6)])
+        texts = ax.clabel(cs, inline=True, fontsize=text["label"]*0.8, fmt='%g', manual=[(6, 0.6), (20, 0.6), (100, 0.6)])
         for t in texts:
             t.set_rotation(0)
     except Exception:
@@ -1241,17 +1242,27 @@ def plot_efficiency_jointplot(
         eff_x = np.nanmean(smoothed_eff, axis=0) # average over y
         eff_y = np.nanmean(smoothed_eff, axis=1) # average over x
     
+    if xlog:
+        ax.set_xscale("log")
+        ax_histx.set_xscale("log")
+        ax.set_xlim(left=1.0)
+        
+    ax.set_xlabel(xlabel, fontsize=text["label"])
+    ax.tick_params(axis="y", labelleft=False)
+    ax.set_ylabel("")
+
+    # Now that scales are set, format the marginal axes ticks
+    # ax_histx (top plot)
     ax_histx.plot(x_centers, eff_x, color="black", lw=0.6)
     ax_histx.set_ylim(0, 1)
     ax_histx.set_yticks([0, 1])
-    ax_histx.xaxis.tick_top()
-    ax_histx.xaxis.set_label_position("top")
-    ax_histx.tick_params(axis="x", labeltop=False, labelbottom=False)
+    ax_histx.tick_params(axis="x", bottom=False, top=False, labelbottom=False, labeltop=False)
     ax_histx.yaxis.tick_right()
     ax_histx.yaxis.set_label_position("right")
     ax_histx.set_ylabel("Efficiency", fontsize=text["label"]*0.85)
     ax_histx.tick_params(axis="y", labelsize=text["label"]*0.75)
     
+    # ax_histy (left plot)
     ax_histy.plot(eff_y, y_centers, color="black", lw=0.6)
     ax_histy.set_xlim(0, 1)
     ax_histy.set_xticks([0, 1])
@@ -1262,15 +1273,6 @@ def plot_efficiency_jointplot(
     ax_histy.set_xlabel("Efficiency", fontsize=text["label"]*0.85)
     ax_histy.tick_params(axis="x", labelsize=text["label"]*0.75)
     ax_histy.set_ylabel(ylabel, fontsize=text["label"])
-    
-    if xlog:
-        ax.set_xscale("log")
-        ax_histx.set_xscale("log")
-        ax.set_xlim(left=1.0)
-        
-    ax.set_xlabel(xlabel, fontsize=text["label"])
-    ax.tick_params(axis="y", labelleft=False)
-    ax.set_ylabel("")
     
     # Colorbar
     cax = divider.append_axes("right", size="7%", pad=0.1)
