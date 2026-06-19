@@ -1270,9 +1270,14 @@ def plot_efficiency_jointplot(
         ax.xaxis.set_major_locator(ticker.MultipleLocator(1))
         ax.xaxis.set_minor_locator(ticker.MultipleLocator(0.2))
         
-    ax.set_ylim(0.0, 1.0)
-    ax.set_yticks([0.0, 0.2, 0.4, 0.6, 0.8, 1.0])
-    ax.yaxis.set_ticks([0.1, 0.3, 0.5, 0.7, 0.9], minor=True)
+    if ylabel == "Fractional Depth":
+        ax.set_ylim(0.0, 1.0)
+        ax.set_yticks([0.0, 0.2, 0.4, 0.6, 0.8, 1.0])
+        ax.yaxis.set_ticks([0.1, 0.3, 0.5, 0.7, 0.9], minor=True)
+    elif ylabel == "Median Magnitude":
+        import matplotlib.ticker as ticker
+        ax.yaxis.set_major_locator(ticker.MultipleLocator(1))
+        ax.yaxis.set_minor_locator(ticker.MultipleLocator(0.2))
         
     ax.set_xlabel(xlabel, fontsize=text["label"])
     ax.tick_params(axis="y", labelleft=False)
