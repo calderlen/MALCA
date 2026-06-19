@@ -1212,22 +1212,25 @@ def plot_efficiency_jointplot(
     # Set preserve_nan=False so empty bins (NaNs) are smoothly interpolated from their neighbors
     smoothed_eff = convolve(efficiency_grid, kernel, boundary='extend', preserve_nan=False)
     
-    im = ax.pcolormesh(
-        x_edges,
-        y_edges,
+    levels_contourf = np.linspace(vmin, vmax, 100)
+    im = ax.contourf(
+        x_centers,
+        y_centers,
         smoothed_eff,
+        levels=levels_contourf,
         cmap=cmap,
-        vmin=vmin,
-        vmax=vmax,
-        shading="auto",
-        rasterized=True,
-        edgecolors="face",
+        extend='both'
     )
+    
+    # Rasterize and prevent PDF rendering gaps between contour bands
+    for c in im.collections:
+        c.set_edgecolor("face")
+        c.set_rasterized(True)
     
     # Contours
     try:
         cs = ax.contour(x_centers, y_centers, smoothed_eff, levels=[0.5, 0.9, 0.99], colors='black', alpha=0.9, linewidths=0.6)
-        texts = ax.clabel(cs, inline=True, fontsize=text["label"]*0.8, fmt='%g', manual=[(6, 0.6), (20, 0.6), (100, 0.6)])
+        texts = ax.clabel(cs, inline=True, fontsize=text["label"]*0.8, fmt='%g', manual=[(6, 0.6), (20, 0.6), (80, 0.8)])
         for t in texts:
             t.set_rotation(0)
     except Exception:
@@ -1256,7 +1259,7 @@ def plot_efficiency_jointplot(
     ax_histx.plot(x_centers, eff_x, color="black", lw=0.6)
     ax_histx.set_ylim(0, 1)
     ax_histx.set_yticks([0, 1])
-    ax_histx.tick_params(axis="x", bottom=False, top=False, labelbottom=False, labeltop=False)
+    ax_histx.tick_params(axis="x", bottom=False, top=True, labelbottom=False, labeltop=False, which="both")
     ax_histx.yaxis.tick_right()
     ax_histx.yaxis.set_label_position("right")
     ax_histx.set_ylabel("Efficiency", fontsize=text["label"]*0.85)
@@ -1273,6 +1276,10 @@ def plot_efficiency_jointplot(
     ax_histy.set_xlabel("Efficiency", fontsize=text["label"]*0.85)
     ax_histy.tick_params(axis="x", labelsize=text["label"]*0.75)
     ax_histy.set_ylabel(ylabel, fontsize=text["label"])
+    
+    for axis in [ax_histx, ax_histy]:
+        axis.tick_params(which="major", length=8)
+        axis.tick_params(which="minor", length=4)
     
     # Colorbar
     cax = divider.append_axes("right", size="7%", pad=0.1)
