@@ -44,7 +44,7 @@ def test_publication_width_constants() -> None:
 
 def test_cmd_bucket_style_tuned_for_single_column_square() -> None:
     assert CMD_BUCKET_STYLE["Microlensing"]["size"] == 28
-    assert CMD_BUCKET_STYLE["Dipper"]["size"] == 14
+    assert CMD_BUCKET_STYLE["Dipper"]["size"] == 16
 
 
 def test_figsize_scale_single_column_square() -> None:
