@@ -1187,6 +1187,8 @@ def plot_efficiency_mag_slices(
 def plot_efficiency_jointplot(
     x_centers: np.ndarray,
     y_centers: np.ndarray,
+    x_edges: np.ndarray,
+    y_edges: np.ndarray,
     efficiency_grid: np.ndarray,
     output_path: Path | str | None = None,
     vmin: float = 0.0,
@@ -1213,8 +1215,8 @@ def plot_efficiency_jointplot(
     smoothed_eff[nan_mask] = np.nan
     
     im = ax.pcolormesh(
-        x_centers,
-        y_centers,
+        x_edges,
+        y_edges,
         smoothed_eff,
         cmap=cmap,
         vmin=vmin,
@@ -1227,10 +1229,11 @@ def plot_efficiency_jointplot(
     # Contours
     import matplotlib.patheffects as pe
     try:
-        cs = ax.contour(x_centers, y_centers, smoothed_eff, levels=[0.5, 0.9], colors='white', alpha=0.9, linewidths=0.8)
+        cs = ax.contour(x_centers, y_centers, smoothed_eff, levels=[0.5, 0.9], colors='black', alpha=0.9, linewidths=0.6)
         texts = ax.clabel(cs, inline=True, fontsize=text["label"]*0.8, fmt='%.1f')
         for t in texts:
-            t.set_path_effects([pe.withStroke(linewidth=1.5, foreground='black')])
+            t.set_rotation(0)
+            t.set_path_effects([pe.withStroke(linewidth=1.5, foreground='white')])
     except Exception:
         pass # Ignore if contours fail due to all 0s
     
@@ -1243,22 +1246,24 @@ def plot_efficiency_jointplot(
         eff_x = np.nanmean(smoothed_eff, axis=0) # average over y
         eff_y = np.nanmean(smoothed_eff, axis=1) # average over x
     
-    ax_histx.plot(x_centers, eff_x, color="black", lw=2)
+    ax_histx.plot(x_centers, eff_x, color="black", lw=0.6)
     ax_histx.set_ylim(0, 1.05)
     ax_histx.tick_params(axis="x", labelbottom=False)
-    ax_histx.set_ylabel("Efficiency", fontsize=text["label"]*0.75)
+    ax_histx.set_ylabel("Efficiency", fontsize=text["label"]*0.85)
+    ax_histx.tick_params(axis="y", labelsize=text["label"]*0.75)
     
-    ax_histy.plot(eff_y, y_centers, color="black", lw=2)
+    ax_histy.plot(eff_y, y_centers, color="black", lw=0.6)
     ax_histy.set_xlim(0, 1.05)
     ax_histy.tick_params(axis="y", labelleft=False)
-    ax_histy.set_xlabel("Efficiency", fontsize=text["label"]*0.75)
+    ax_histy.set_xlabel("Efficiency", fontsize=text["label"]*0.85)
+    ax_histy.tick_params(axis="x", labelsize=text["label"]*0.75)
     
     if xlog:
         ax.set_xscale("log")
         ax_histx.set_xscale("log")
         
-    ax.set_xlabel(xlabel, fontsize=text["label"]*0.75)
-    ax.set_ylabel(ylabel, fontsize=text["label"]*0.75)
+    ax.set_xlabel(xlabel, fontsize=text["label"])
+    ax.set_ylabel(ylabel, fontsize=text["label"])
     
     # Colorbar
     cax = divider.append_axes("left", size="5%", pad=0.7)
@@ -1304,6 +1309,8 @@ def plot_efficiency_marginalized(
         eff_2d = np.nanmean(cube["efficiency"], axis=2)
         x_centers = cube["duration_centers"]
         y_centers = cube["depth_centers"]
+        x_edges = cube["duration_edges"]
+        y_edges = cube["depth_edges"]
         xlabel = "Duration [days]"
         ylabel = "Fractional Depth"
         xlog = True
@@ -1311,6 +1318,8 @@ def plot_efficiency_marginalized(
         eff_2d = np.nanmean(cube["efficiency"], axis=1)
         x_centers = cube["mag_centers"]
         y_centers = cube["depth_centers"]
+        x_edges = cube["mag_edges"]
+        y_edges = cube["depth_edges"]
         xlabel = "Median Magnitude"
         ylabel = "Fractional Depth"
         xlog = False
@@ -1318,6 +1327,8 @@ def plot_efficiency_marginalized(
         eff_2d = np.nanmean(cube["efficiency"], axis=0).T  # Transpose: (dur, mag) -> (mag, dur)
         x_centers = cube["duration_centers"]
         y_centers = cube["mag_centers"]
+        x_edges = cube["duration_edges"]
+        y_edges = cube["mag_edges"]
         xlabel = "Duration [days]"
         ylabel = "Median Magnitude"
         xlog = True
@@ -1327,6 +1338,8 @@ def plot_efficiency_marginalized(
     return plot_efficiency_jointplot(
         x_centers,
         y_centers,
+        x_edges,
+        y_edges,
         eff_2d,
         xlabel=xlabel,
         ylabel=ylabel,
