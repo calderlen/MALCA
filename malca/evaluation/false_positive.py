@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
+import matplotlib.pyplot as plt
 
 import numpy as np
 import pandas as pd
@@ -50,6 +52,8 @@ def _default_detection_func(df: pd.DataFrame, detection_kwargs: dict) -> dict:
         "detected": bool(dip.get("significant", False)),
         "dip_significant": bool(dip.get("significant", False)),
         "jump_significant": bool(jump.get("significant", False)),
+        "dip_trigger_max": float(dip.get("trigger_max", np.nan)),
+        "jump_trigger_max": float(jump.get("trigger_max", np.nan)),
     }
 
 
@@ -257,6 +261,8 @@ def run_false_positive_benchmark(
                         "detected": bool(det.get("detected", False)),
                         "dip_significant": bool(det.get("dip_significant", False)),
                         "jump_significant": bool(det.get("jump_significant", False)),
+                        "dip_trigger_max": float(det.get("dip_trigger_max", np.nan)),
+                        "jump_trigger_max": float(det.get("jump_trigger_max", np.nan)),
                     }
                 )
             except Exception as e:
@@ -281,9 +287,48 @@ def run_false_positive_benchmark(
     return df
 
 
+def plot_false_alarm_survival(df: pd.DataFrame, out_dir: Path, trigger_mode: str = "posterior_prob"):
+    """Plot False Alarm Rate vs Trigger Threshold."""
+    plt.figure(figsize=(8, 6))
+    
+    col = "dip_trigger_max" if "dip_trigger_max" in df.columns else None
+    if col is None:
+        return
+        
+    # If using logbf, the range is 0 to ~20. If posterior_prob, 0 to 1.
+    is_prob = (trigger_mode == "posterior_prob")
+    t_min = 0.0
+    t_max = 1.0 if is_prob else min(20.0, df[col].max() if pd.notnull(df[col].max()) else 10.0)
+    thresholds = np.linspace(t_min, t_max, 100)
+    
+    for family, group in df.groupby("family"):
+        rates = []
+        valid_scores = group[col].dropna().values
+        n_total = len(group)
+        if n_total == 0:
+            continue
+            
+        for t in thresholds:
+            n_trigger = np.sum(valid_scores >= t)
+            rates.append(n_trigger / n_total)
+            
+        plt.plot(thresholds, rates, label=family, lw=2)
+        
+    plt.xlabel(f"Trigger Threshold ({trigger_mode})", fontsize=12)
+    plt.ylabel("False Alarm Rate (FAR)", fontsize=12)
+    plt.title("False Alarm Survival Curve", fontsize=14)
+    plt.yscale("log")
+    plt.ylim(bottom=1e-4, top=1.0)
+    plt.grid(True, which="both", ls="--", alpha=0.5)
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.tight_layout()
+    plt.savefig(out_dir / "false_alarm_survival.pdf")
+    plt.close()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="False-positive contaminant benchmark for MALCA")
-    parser.add_argument("--manifest", type=Path, required=True, help="Manifest Parquet with asas_sn_id and path")
+    parser.add_argument("--manifest", type=Path, default=DEFAULT_OUTPUT_DIR / "lc_manifest_all.parquet", help="Manifest Parquet with asas_sn_id and path")
     parser.add_argument("--output-dir", dest="out_dir", type=Path, default=DEFAULT_OUTPUT_DIR / "false_positive")
     parser.add_argument("--families", type=str, default="camera_offset,camera_cluster,semiregular,rcb_like,cv_outburst,drw_agn,eclipsing_binary,contact_binary")
     parser.add_argument("--n-trials-per-family", type=int, default=FP_TRIALS_PER_FAMILY)
@@ -295,7 +340,7 @@ def main() -> None:
 
     detection_kwargs = _build_detection_kwargs(args.trigger_mode)
 
-    run_false_positive_benchmark(
+    df_results = run_false_positive_benchmark(
         df_manifest,
         out_dir=args.out_dir,
         families=[f.strip() for f in args.families.split(",") if f.strip()],
@@ -303,7 +348,9 @@ def main() -> None:
         detection_kwargs=detection_kwargs,
         seed=args.seed,
     )
-    print(f"Wrote false-positive benchmark outputs to {args.out_dir}")
+    
+    plot_false_alarm_survival(df_results, args.out_dir, args.trigger_mode)
+    print(f"Wrote false-positive benchmark outputs and plot to {args.out_dir}")
 
 
 if __name__ == "__main__":
