@@ -1234,7 +1234,7 @@ def plot_efficiency_jointplot(
     # Contours
     try:
         cs = ax.contour(x_centers, y_centers, smoothed_eff, levels=[0.5, 0.9, 0.99], colors='black', alpha=0.9, linewidths=0.6)
-        texts = ax.clabel(cs, inline=True, inline_spacing=10, fontsize=text["label"]*0.8, fmt='%g', manual=[(6, 0.6), (20, 0.6), (200, 0.4)])
+        texts = ax.clabel(cs, inline=True, fontsize=text["label"]*0.8, fmt='%g', manual=[(6, 0.6), (20, 0.6), (80, 0.6)])
         for t in texts:
             t.set_rotation(0)
     except Exception:
@@ -1263,7 +1263,7 @@ def plot_efficiency_jointplot(
     ax_histx.plot(x_centers, eff_x, color="black", lw=0.6)
     ax_histx.set_ylim(0, 1)
     ax_histx.set_yticks([0, 1])
-    ax_histx.tick_params(axis="x", bottom=False, top=False, labelbottom=False, labeltop=False, which="both")
+    ax_histx.tick_params(axis="x", bottom=False, top=True, labelbottom=False, labeltop=False, which="both")
     ax_histx.yaxis.tick_right()
     ax_histx.yaxis.set_label_position("right")
     ax_histx.set_ylabel("Efficiency", fontsize=text["label"]*0.85)
