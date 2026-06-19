@@ -579,8 +579,10 @@ def _plot_cmd(
     ax.minorticks_on()
     ax.legend(
         loc="lower left",
+        bbox_to_anchor=(0.02, 0.02),
         frameon=True,
         framealpha=0.92,
+        edgecolor="black",
         fontsize=CMD_LEGEND_FONTSIZE,
         markerscale=CMD_LEGEND_MARKERSCALE,
     )

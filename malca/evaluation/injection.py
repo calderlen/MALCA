@@ -19,6 +19,8 @@ import argparse
 import json
 
 from scipy.stats import skewnorm, skew
+from scipy.ndimage import gaussian_filter
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
 import numpy as np
@@ -390,8 +392,14 @@ def _simulate_trial(
     rng = np.random.default_rng(seed + int(trial_index))
     
     # improved random sampling for MC coverage
-    # Amplitude: Uniform
-    amplitude = rng.uniform(amp_range[0], amp_range[1])
+    # Sample uniformly in fractional depth: 1.0 - 10 ** (-0.4 * amplitude)
+    fd_min = 1.0 - 10 ** (-0.4 * amp_range[0])
+    fd_max = 1.0 - 10 ** (-0.4 * amp_range[1])
+    fd = rng.uniform(fd_min, fd_max)
+    # Avoid exact 1.0 which leads to log10(0) -> -inf amplitude
+    fd = min(fd, 0.99999999)
+    amplitude = -2.5 * np.log10(1.0 - fd)
+        
     # Duration: Log-Uniform
     log_dur_min = np.log10(dur_range[0])
     log_dur_max = np.log10(dur_range[1])
@@ -625,7 +633,7 @@ def run_injection_recovery(
     seed: int = INJECTION_SEED,
     workers: int = 1,
     task_size: int = 50,
-    checkpoint_interval: int = 1000,
+    checkpoint_interval: int = 100000,
     chunk_size: int = 1000,
     output_path: Path | None = None,
     checkpoint_path: Path | None = None,
@@ -1092,7 +1100,7 @@ def plot_detection_efficiency(
     xlabel: str = "Duration [days]",
     ylabel: str = "Amplitude [mag]",
     xlog: bool = True,
-    cmap: str = "viridis",
+    cmap: str = "magma",
     show: bool = True,
 ) -> plt.Figure:
     """
@@ -1135,7 +1143,7 @@ def plot_efficiency_mag_slices(
     output_dir: Path | str | None = None,
     vmin: float = 0.0,
     vmax: float = 1.0,
-    cmap: str = "viridis",
+    cmap: str = "magma",
     show: bool = False,
 ) -> list[plt.Figure]:
     """
@@ -1176,6 +1184,94 @@ def plot_efficiency_mag_slices(
     return figs
 
 
+def plot_efficiency_jointplot(
+    x_centers: np.ndarray,
+    y_centers: np.ndarray,
+    efficiency_grid: np.ndarray,
+    output_path: Path | str | None = None,
+    vmin: float = 0.0,
+    vmax: float = 1.0,
+    xlabel: str = "Duration [days]",
+    ylabel: str = "Fractional Depth",
+    xlog: bool = True,
+    cmap: str = "magma",
+    show: bool = True,
+) -> plt.Figure:
+    """
+    Plot 2D detection efficiency heatmap with 1D marginalized panels and contour lines.
+    """
+    figsize = FIG_SINGLE_COL_HEATMAP
+    text = scaled_publication_text_sizes(figsize)
+    fig, ax = plt.subplots(figsize=figsize)
+    
+    # Fill NaNs with 0 before smoothing, but keep track of them
+    nan_mask = np.isnan(efficiency_grid)
+    grid_filled = efficiency_grid.copy()
+    grid_filled[nan_mask] = 0.0
+    
+    smoothed_eff = gaussian_filter(grid_filled, sigma=1.0)
+    smoothed_eff[nan_mask] = np.nan
+    
+    im = ax.pcolormesh(
+        x_centers,
+        y_centers,
+        smoothed_eff,
+        cmap=cmap,
+        vmin=vmin,
+        vmax=vmax,
+        shading="auto",
+    )
+    
+    # Contours
+    try:
+        cs = ax.contour(x_centers, y_centers, smoothed_eff, levels=[0.5, 0.9], colors='black', alpha=0.8, linewidths=1.5)
+        ax.clabel(cs, inline=True, fontsize=text["label"]*0.8, fmt='%.1f')
+    except Exception:
+        pass # Ignore if contours fail due to all 0s
+    
+    # Create marginal axes
+    divider = make_axes_locatable(ax)
+    ax_histx = divider.append_axes("top", size=1.2, pad=0.1, sharex=ax)
+    ax_histy = divider.append_axes("right", size=1.2, pad=0.1, sharey=ax)
+    
+    with np.errstate(invalid='ignore'):
+        eff_x = np.nanmean(smoothed_eff, axis=0) # average over y
+        eff_y = np.nanmean(smoothed_eff, axis=1) # average over x
+    
+    ax_histx.plot(x_centers, eff_x, color="black", lw=2)
+    ax_histx.set_ylim(0, 1.05)
+    ax_histx.tick_params(axis="x", labelbottom=False)
+    ax_histx.set_ylabel("Eff", fontsize=text["label"]*0.8)
+    
+    ax_histy.plot(eff_y, y_centers, color="black", lw=2)
+    ax_histy.set_xlim(0, 1.05)
+    ax_histy.tick_params(axis="y", labelleft=False)
+    ax_histy.set_xlabel("Eff", fontsize=text["label"]*0.8)
+    
+    if xlog:
+        ax.set_xscale("log")
+        ax_histx.set_xscale("log")
+        
+    ax.set_xlabel(xlabel, fontsize=text["label"])
+    ax.set_ylabel(ylabel, fontsize=text["label"])
+    
+    # Colorbar
+    cax = divider.append_axes("right", size="5%", pad=0.5)
+    cbar = plt.colorbar(im, cax=cax)
+    cbar.set_label("Detection Efficiency", fontsize=text["colorbar"])
+    
+    if output_path:
+        save_publication_figure(fig, output_path, close=False)
+        print(f"Saved to {output_path}")
+    elif show:
+        finalize_publication_figure(fig)
+        plt.show()
+    else:
+        finalize_publication_figure(fig)
+
+    return fig
+
+
 def plot_efficiency_marginalized(
     cube: dict,
     *,
@@ -1183,7 +1279,7 @@ def plot_efficiency_marginalized(
     output_path: Path | str | None = None,
     vmin: float = 0.0,
     vmax: float = 1.0,
-    cmap: str = "viridis",
+    cmap: str = "magma",
     show: bool = True,
 ) -> plt.Figure:
     """
@@ -1220,9 +1316,9 @@ def plot_efficiency_marginalized(
     else:
         raise ValueError(f"Unknown axis: {axis}. Use 'mag', 'duration', or 'depth'.")
 
-    return plot_detection_efficiency(
-        y_centers,
+    return plot_efficiency_jointplot(
         x_centers,
+        y_centers,
         eff_2d,
         xlabel=xlabel,
         ylabel=ylabel,
@@ -1662,7 +1758,7 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
     )
     g_injection.add_argument("--min-points", type=int, default=INJECTION_MIN_POINTS, help="Minimum points in control sample if available.")
     g_injection.add_argument("--seed", type=int, default=INJECTION_SEED)
-    g_injection.add_argument("--amp-min", type=float, default=0.05)
+    g_injection.add_argument("--amp-min", type=float, default=0.001)
     g_injection.add_argument("--amp-max", type=float, default=5.0)
     g_injection.add_argument("--dur-min", type=float, default=1.0)
     g_injection.add_argument("--dur-max", type=float, default=300.0)
@@ -1720,7 +1816,7 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
 
     g_workers.add_argument("--workers", type=int, default=WORKERS, help="Parallel workers.")
     g_workers.add_argument("--task-size", type=int, default=50, help="Trials per worker task.")
-    g_workers.add_argument("--checkpoint-interval", type=int, default=1000, help="Trials per checkpoint update.")
+    g_workers.add_argument("--checkpoint-interval", type=int, default=100000, help="Trials per checkpoint update.")
     g_workers.add_argument("--chunk-size", type=int, default=INJECTION_CHUNK_SIZE, help="Rows per output flush.")
     g_workers.add_argument("--no-resume", action="store_true", help="Disable resume even if checkpoint exists.")
     g_workers.add_argument("--overwrite", action="store_true", help="Overwrite output/checkpoint.")

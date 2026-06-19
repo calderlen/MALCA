@@ -62,6 +62,8 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 import numpy as np
 import pandas as pd
+import healpy as hp
+from astroquery.gaia import Gaia
 
 from malca.lightcurve_publication import (
     apply_publication_rcparams,
@@ -173,7 +175,7 @@ VISUAL_INSPECTION_SUBJECTIVE_NOTE = (
     "(see microlensing.py VISUAL_INSPECTION_BAD_IDS / VISUAL_INSPECTION_PROBABLY_BAD_IDS)."
 )
 
-DB_PATH = REPO_ROOT / DEFAULT_OUTPUT_DIR / "runs" / "runs_march18_bundle_all" / "review" / "review.db"
+DB_PATH = REPO_ROOT / DEFAULT_OUTPUT_DIR / "runs" / "runs_march18_bundle_all" / "review" / "review.taxonomy_filled.db"
 MICROLENSING_OUTPUT_ROOT = (REPO_ROOT / DEFAULT_OUTPUT_DIR / "microlensing").resolve()
 MICROLENSING_FIT_PDF_DIR = (MICROLENSING_OUTPUT_ROOT / "fit_pdfs").resolve()
 MICROLENSING_FIT_PDF_DPI = 300
@@ -551,6 +553,7 @@ def _mw_lb_rad_mollweide(l_deg: np.ndarray, b_deg: np.ndarray) -> tuple[np.ndarr
     return np.radians(l_plot), np.radians(b)
 
 
+
 def _save_microlensing_full_sky_plot(df: pd.DataFrame, out_path: Path, *, dpi: int = 300) -> None:
     """Full-sky Mollweide map: color = Paczynski reduced χ², marker = BIC-best profile."""
     out_path = Path(out_path)
@@ -604,8 +607,36 @@ def _save_microlensing_full_sky_plot(df: pd.DataFrame, out_path: Path, *, dpi: i
     cmap = plt.cm.cividis_r
     fig, ax = plt.subplots(figsize=figsize_from_legacy(14.0, 7.2), subplot_kw={'projection': 'mollweide'})
     ax.grid(True, alpha=0.35, linestyle='--', linewidth=0.6)
-    ax.set_xlabel(r'Galactic longitude $l$')
-    ax.set_ylabel(r'Galactic latitude $b$')
+    ax.set_xlabel(r'$\ell$')
+    ax.set_ylabel(r'$b$')
+
+    try:
+        from astropy.coordinates import SkyCoord
+        import astropy.units as u
+        from dustmaps.sfd import SFDQuery
+        
+        # Create 2D grid for pcolormesh
+        lon_grid = np.linspace(-np.pi, np.pi, 800)
+        lat_grid = np.linspace(-np.pi/2, np.pi/2, 400)
+        Lon, Lat = np.meshgrid(lon_grid, lat_grid)
+        
+        coords = SkyCoord(l=Lon*u.rad, b=Lat*u.rad, frame='galactic')
+        sfd = SFDQuery()
+        ebv = sfd(coords)
+        
+        # Plot log density (add 0.1 to avoid log(0))
+        ax.pcolormesh(
+            Lon, Lat, np.log10(ebv + 0.1),
+            cmap='Greys',
+            alpha=0.65,
+            zorder=0,
+            rasterized=True,
+            shading='auto'
+        )
+    except ImportError:
+        print("Warning: dustmaps is not installed. Background dust map will be skipped.")
+    except Exception as e:
+        print(f"Warning: Failed to overlay dust map: {e}")
 
     model_order = ['paczynski', 'gaussian', 'fred', 'flat', 'unknown']
 
@@ -655,7 +686,7 @@ def _save_microlensing_full_sky_plot(df: pd.DataFrame, out_path: Path, *, dpi: i
     if norm is not None:
         sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
         sm.set_array([])
-        cbar = fig.colorbar(sm, ax=ax, orientation='horizontal', pad=0.10, shrink=0.78, aspect=34)
+        cbar = fig.colorbar(sm, ax=ax, orientation='horizontal', pad=0.10, shrink=0.55, aspect=34)
         cbar.set_label(r'Paczynski reduced $\chi^2_\nu$')
 
     legend_handles = [
@@ -686,19 +717,18 @@ def _save_microlensing_full_sky_plot(df: pd.DataFrame, out_path: Path, *, dpi: i
                 label=r'no Paczynski $\chi^2_\nu$',
             )
         )
-    # Legend above the map (figure coords) so it does not overlap the horizontal colorbar / label.
-    fig.legend(
+    # Legend above the map so it does not overlap the horizontal colorbar or the projection.
+    ax.legend(
         handles=legend_handles,
-        title='BIC-best model',
-        loc='center',
-        bbox_to_anchor=(0.5, 0.965),
-        bbox_transform=fig.transFigure,
+        title='Best model',
+        loc='lower center',
+        bbox_to_anchor=(0.5, 1.08),
         ncol=min(5, max(1, len(legend_handles))),
         frameon=True,
         fontsize=9,
         title_fontsize=9,
     )
-    fig.subplots_adjust(left=0.06, right=0.96, bottom=0.16, top=0.82)
+    fig.subplots_adjust(left=0.06, right=0.96, bottom=0.16, top=0.78)
 
     save_publication_figure(fig, out_path, dpi=dpi, format='pdf', facecolor=fig.get_facecolor())
 
@@ -1363,6 +1393,7 @@ def _run_microlensing_crossmatch_enrichment(
         if vsx_crossmatch is not None
         else (repo_root / _VSX_DEF).resolve()
     )
+    runs_root = repo_root / DEFAULT_OUTPUT_DIR / "runs"
 
     work = _prepare_vetting_style_coords(microlensing_table_df)
 
@@ -2403,7 +2434,9 @@ def _flatten_parallax_summary(parallax_result: dict[str, object]) -> dict[str, o
     return out
 
 def _prepare_lightcurve_df(lc_path: Path, *, prefer_g_band: bool = True) -> tuple[pd.DataFrame, str]:
+    from malca.lightcurve_io import to_asassn_algorithm_frame
     df = load_lightcurve_df(lc_path)
+    df = to_asassn_algorithm_frame(df)
     df = clean_lc(df)
     band_label = 'all'
     if prefer_g_band and 'v_g_band' in df.columns and (df['v_g_band'] == 0).any():
@@ -3962,16 +3995,21 @@ def fit_candidate_context(context: dict[str, object]) -> dict[str, object]:
     reported_tE = display_raw_tE if quality.get('fit_ok') else np.nan
 
     payload = context['payload']
-    ra_deg = _finite_float(payload.get('ra_deg'))
-    if ra_deg is None:
-        ra_deg = _finite_float(payload.get('ra'))
-    dec_deg = _finite_float(payload.get('dec_deg'))
-    if dec_deg is None:
-        dec_deg = _finite_float(payload.get('dec'))
-    gaia_dr3_source_id = _text_value(payload.get('gaia_id'))
-    vsx_name = _text_value(payload.get('vsx_name'))
-    vsx_class = _text_value(payload.get('vsx_class'))
-    vsx_sep_arcsec = _finite_float(payload.get('vsx_sep_arcsec'))
+    ext = payload.get('external_stats', {})
+    if isinstance(ext, str):
+        try:
+            import json
+            ext = json.loads(ext)
+        except Exception:
+            ext = {}
+    if not isinstance(ext, dict):
+        ext = {}
+    ra_deg = _finite_float(payload.get('ra_deg') or payload.get('ra') or ext.get('ra_deg') or ext.get('ra'))
+    dec_deg = _finite_float(payload.get('dec_deg') or payload.get('dec') or ext.get('dec_deg') or ext.get('dec'))
+    gaia_dr3_source_id = _text_value(payload.get('gaia_id') or ext.get('gaia_id'))
+    vsx_name = _text_value(payload.get('vsx_name') or ext.get('vsx_name'))
+    vsx_class = _text_value(payload.get('vsx_class') or ext.get('vsx_class'))
+    vsx_sep_arcsec = _finite_float(payload.get('vsx_sep_arcsec') or ext.get('vsx_sep_arcsec'))
     asassn_var_name = _text_value(payload.get('asassn_var_name'))
     asassn_var_type = _text_value(payload.get('asassn_var_type'))
     simbad_sep_arcsec = _finite_float(payload.get('simbad_sep_arcsec'))
@@ -4164,7 +4202,7 @@ def _load_candidate_metadata_from_candidates_parquet(
     Returns a mapping ``candidate_id -> {'ra_deg': float, 'dec_deg': float}`` for IDs present
     in the local candidates catalog.
     """
-    path = REPO_ROOT / 'output' / 'candidates.parquet'
+    path = REPO_ROOT / DEFAULT_OUTPUT_DIR / 'candidates.parquet'
     if not path.exists():
         return {}
     try:
@@ -4464,7 +4502,7 @@ def fit_microlensing_candidates(
     progress_desc: str = "Fitting candidates",
 ) -> tuple[pd.DataFrame, list[dict[str, object]]]:
     db_path = Path(db_path).expanduser().resolve()
-    plot_dir = infer_plot_dir_from_source(db_path)
+    plot_dir = db_path.parent.parent
     raw_n = len(candidate_ids)
     candidate_ids = exclude_visual_inspection_bad_ids(list(candidate_ids))
     dropped = raw_n - len(candidate_ids)
@@ -5165,7 +5203,7 @@ def run_microlensing_pipeline(
     DB_PATH = (
         Path(db_path).expanduser().resolve()
         if db_path is not None
-        else (REPO_ROOT / DEFAULT_OUTPUT_DIR / "runs" / "runs_march18_bundle_all" / "review" / "review.db")
+        else (REPO_ROOT / DEFAULT_OUTPUT_DIR / "runs" / "runs_march18_bundle_all" / "review" / "review.taxonomy_filled.db")
     )
     MICROLENSING_OUTPUT_ROOT = (REPO_ROOT / DEFAULT_OUTPUT_DIR / "microlensing").resolve()
     MICROLENSING_FIT_PDF_DIR = (MICROLENSING_OUTPUT_ROOT / "fit_pdfs").resolve()
@@ -5224,14 +5262,25 @@ def run_microlensing_pipeline(
             cat_coords = SkyCoord(ra=asml_ra[valid].values, dec=asml_dec[valid].values, unit='deg')
             asml_names = asml_name[valid].values
         
-            master_coords = SkyCoord(ra=master_df['ra_deg'].values, dec=master_df['dec_deg'].values, unit='deg')
-            idx_cat, sep2d, _ = master_coords.match_to_catalog_sky(cat_coords)
-            match_mask = sep2d <= 5.0 * u.arcsec
-        
-            if len(idx_cat) > 0:
-                master_df.loc[match_mask, 'asassn_ml_match'] = True
-                master_df.loc[match_mask, 'asassn_ml_name'] = asml_names[idx_cat][match_mask]
-                master_df.loc[match_mask, 'asassn_ml_sep_arcsec'] = sep2d.arcsec[match_mask]
+            master_ra = pd.to_numeric(master_df['ra_deg'], errors='coerce').astype(float)
+            master_dec = pd.to_numeric(master_df['dec_deg'], errors='coerce').astype(float)
+            valid_master = master_ra.notna() & master_dec.notna()
+            
+            if valid_master.any():
+                master_coords = SkyCoord(ra=master_ra[valid_master].values, dec=master_dec[valid_master].values, unit='deg')
+                idx_cat, sep2d, _ = master_coords.match_to_catalog_sky(cat_coords)
+                
+                # Match mask aligns with valid_master
+                valid_match_mask = sep2d <= 5.0 * u.arcsec
+                
+                if len(idx_cat) > 0:
+                    # Create a boolean series for the full dataframe
+                    full_match_mask = pd.Series(False, index=master_df.index)
+                    full_match_mask.loc[valid_master] = valid_match_mask
+                    
+                    master_df.loc[full_match_mask, 'asassn_ml_match'] = True
+                    master_df.loc[full_match_mask, 'asassn_ml_name'] = asml_names[idx_cat][valid_match_mask]
+                    master_df.loc[full_match_mask, 'asassn_ml_sep_arcsec'] = sep2d.arcsec[valid_match_mask]
     master_df['external_known_microlens'] = master_df['external_known_microlens'].fillna(False).astype(bool)
     master_df['gaia_alert_microlens_like'] = master_df['gaia_alert_microlens_like'].fillna(False).astype(bool)
     master_df['external_known_microlens'] = master_df['external_known_microlens'] | master_df['gaia_alert_microlens_like'] | master_df['asassn_ml_match']
@@ -5415,7 +5464,7 @@ def run_microlensing_pipeline(
     if show_progress:
         print("[5b] Jumps-14 single-bucket cohort (plots → DB resolve → fits) …", flush=True)
     # Jumps 14–14.5 uncategorized single-bucket cohort.
-    JUMPS14_PLOTS_BASE = REPO_ROOT / 'output' / 'runs' / 'plots' / 'jumps_14_14.5_uncategorized'
+    JUMPS14_PLOTS_BASE = REPO_ROOT / DEFAULT_OUTPUT_DIR / 'runs' / 'plots' / 'jumps_14_14.5_uncategorized'
     SINGLE_BUCKETS = ('single-fred', 'single-paczysnki', 'single-unclear')
 
     collected: set[str] = set()
@@ -5443,7 +5492,7 @@ def run_microlensing_pipeline(
         flush=True,
     )
 
-    runs_root = (REPO_ROOT / 'output' / 'runs').resolve()
+    runs_root = (REPO_ROOT / DEFAULT_OUTPUT_DIR / 'runs').resolve()
     all_dbs = [
         db_path
         for db_path in runs_root.rglob('review.db')

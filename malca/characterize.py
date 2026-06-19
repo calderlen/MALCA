@@ -81,10 +81,6 @@ CHARACTERIZE_CACHE_DIR = CATALOG_CACHE_DIR / "characterize"
 UNWISE_CHECKPOINT_BASENAME = "unwise_variability_CHECKPOINT.parquet"
 
 WISE_LEGACY_COLUMN_RENAMES = {
-    "unwise_w1": "w1",
-    "unwise_w1_err": "w1_err",
-    "unwise_w2": "w2",
-    "unwise_w2_err": "w2_err",
     "allwise_w3": "w3",
     "allwise_w3_err": "w3_err",
     "allwise_w4": "w4",
@@ -109,6 +105,7 @@ APASS_CACHE_COLUMNS = [
 ]
 GALEX_CACHE_COLUMNS = ["galex_fuv", "galex_fuv_err", "galex_nuv", "galex_nuv_err"]
 IPHAS_CACHE_COLUMNS = ["iphas_r_ha", "iphas_r_i", "iphas_ha_excess"]
+VPHAS_CACHE_COLUMNS = ["vphas_ha_mag", "vphas_r_ha", "vphas_r_i", "vphas_ha_excess"]
 OPEN_CLUSTER_CACHE_COLUMNS = ["cluster_name", "cluster_age_myr", "cluster_dist_pc"]
 DUST_BASE_CACHE_COLUMNS = ["A_v_3d", "ebv_3d", "dust_sigma", "dust_max_dist_kpc"]
 DUST_DERED_SOURCE_COLUMNS = [
@@ -967,7 +964,97 @@ def crossmatch_iphas(df: pd.DataFrame, max_sep_arcsec: float = IPHAS_MAX_SEP_ARC
             
     except Exception as e:
         print(f"IPHAS XMatch error: {e}")
-        raise
+        # Not fatal, return what we have
+
+    return df
+
+
+# =============================================================================
+# VPHAS+ Hα CROSSMATCH (Drew+2016, 2025)
+# =============================================================================
+
+def crossmatch_vphas(df: pd.DataFrame, max_sep_arcsec: float = IPHAS_MAX_SEP_ARCSEC) -> pd.DataFrame:
+    """
+    Crossmatch to VPHAS+ DR2 (II/341/vphasp) for Hα emission detection in the Southern Galactic Plane.
+    
+    Uses CDS XMatch for efficient batch crossmatching. Returns (r-Hα) and (r-i) colors.
+    """
+    if df.empty:
+        return df
+    df = df.copy()
+    
+    if 'ra' not in df.columns or 'dec' not in df.columns:
+        print("Warning: VPHAS+ crossmatch requires ra, dec columns")
+        df['vphas_ha_mag'] = np.nan
+        df['vphas_r_ha'] = np.nan
+        df['vphas_r_i'] = np.nan
+        df['vphas_ha_excess'] = False
+        return df
+    
+    # Initialize output columns
+    df['vphas_ha_mag'] = np.nan
+    df['vphas_r_ha'] = np.nan
+    df['vphas_r_i'] = np.nan
+    df['vphas_ha_excess'] = False
+    
+    # Prepare source table with unique index for matching back
+    valid_mask = df['ra'].notna() & df['dec'].notna()
+    if not valid_mask.any():
+        return df
+    
+    # Create astropy table for XMatch
+    source_table = Table()
+    source_table['_idx'] = np.where(valid_mask)[0]
+    source_table['ra'] = df.loc[valid_mask, 'ra'].values
+    source_table['dec'] = df.loc[valid_mask, 'dec'].values
+    
+    print(f"Running VPHAS+ XMatch for {len(source_table)} sources...")
+    
+    try:
+        result = XMatch.query(
+            cat1=source_table,
+            cat2='vizier:II/341/vphasp',
+            max_distance=max_sep_arcsec * u.arcsec,
+            colRA1='ra', colDec1='dec',
+            colRA2='RAJ2000', colDec2='DEJ2000'
+        )
+        
+        if result is not None and len(result) > 0:
+            result_df = result.to_pandas()
+            
+            # For sources with multiple matches, keep closest
+            if 'angDist' in result_df.columns:
+                result_df = result_df.sort_values('angDist').drop_duplicates(subset='_idx', keep='first')
+            else:
+                result_df = result_df.drop_duplicates(subset='_idx', keep='first')
+            
+            # Compute colors
+            for _, row in result_df.iterrows():
+                idx = int(row['_idx'])
+                r_mag = float(row.get('rmag', np.nan))
+                ha_mag = float(row.get('Hamag', np.nan))
+                i_mag = float(row.get('imag', np.nan))
+                
+                if np.isfinite(ha_mag):
+                    df.at[df.index[idx], 'vphas_ha_mag'] = ha_mag
+                
+                if np.isfinite(r_mag) and np.isfinite(ha_mag):
+                    r_ha = r_mag - ha_mag
+                    df.at[df.index[idx], 'vphas_r_ha'] = r_ha
+                    df.at[df.index[idx], 'vphas_ha_excess'] = r_ha > IPHAS_HA_EXCESS_THRESHOLD
+                
+                if np.isfinite(r_mag) and np.isfinite(i_mag):
+                    df.at[df.index[idx], 'vphas_r_i'] = r_mag - i_mag
+            
+            matched = len(result_df)
+            ha_excess_count = (df['vphas_ha_excess'] == True).sum()
+            print(f"VPHAS+: {matched}/{len(df)} matched, {ha_excess_count} with Hα excess")
+        else:
+            print("VPHAS+: No matches found")
+            
+    except Exception as e:
+        print(f"VPHAS+ XMatch error: {e}")
+        # Not fatal, return what we have
 
     return df
 
@@ -1730,6 +1817,7 @@ def characterize_candidates_df(
     starhorse_cache: Path | None = None,
     run_banyan: bool = True,
     run_iphas: bool = True,
+    run_vphas: bool = True,
     run_sfr: bool = True,
     run_clusters: bool = True,
     run_unwise: bool = True,
@@ -1821,7 +1909,7 @@ def characterize_candidates_df(
             df_char = pd.read_parquet(checkpoint_path)
             df_char = _add_wise_color_columns(df_char)
             completed = [m for m in ["population", "starhorse", "dust", "yso",
-                                      "banyan", "iphas", "sfr", "clusters", "unwise",
+                                      "banyan", "iphas", "vphas", "sfr", "clusters", "unwise",
                                       "apass", "galex", "allwise"]
                          if _module_completed(df_char, m)]
             print(f"Loaded characterization checkpoint ({len(df_char)} rows)")
@@ -2141,6 +2229,22 @@ def characterize_candidates_df(
         if checkpoint_path:
             _save_char_checkpoint(df_char, checkpoint_path)
 
+    if not _module_completed(df_char, "vphas"):
+        df_char = _run_optional_module(
+            df_char,
+            module="vphas",
+            enabled=run_vphas,
+            description="Running VPHAS+ H-alpha crossmatch...",
+            func=lambda frame: _run_cached_characterization_module(
+                frame,
+                module="vphas",
+                func=crossmatch_vphas,
+                output_columns=VPHAS_CACHE_COLUMNS,
+            ),
+        )
+        if checkpoint_path:
+            _save_char_checkpoint(df_char, checkpoint_path)
+
     if not _module_completed(df_char, "sfr"):
         df_char = _run_optional_module(
             df_char,
@@ -2213,6 +2317,7 @@ def main():
     parser.add_argument("--unwise-checkpoint-every", type=int, default=UNWISE_CHECKPOINT_EVERY, help="Persist unWISE checkpoint every N completed sources")
     parser.add_argument("--no-characterize-banyan", dest="characterize_banyan", action="store_false", help="Disable BANYAN Sigma enrichment")
     parser.add_argument("--no-characterize-iphas", dest="characterize_iphas", action="store_false", help="Disable IPHAS enrichment")
+    parser.add_argument("--no-characterize-vphas", dest="characterize_vphas", action="store_false", help="Disable VPHAS+ enrichment")
     parser.add_argument("--no-characterize-sfr", dest="characterize_sfr", action="store_false", help="Disable star-forming-region enrichment")
     parser.add_argument("--no-characterize-clusters", dest="characterize_clusters", action="store_false", help="Disable open-cluster enrichment")
     parser.add_argument("--characterize-unwise", dest="characterize_unwise", action="store_true", help="Enable unWISE/unTimely variability enrichment (default: disabled)")
@@ -2221,6 +2326,7 @@ def main():
     parser.set_defaults(
         characterize_banyan=True,
         characterize_iphas=True,
+        characterize_vphas=True,
         characterize_sfr=True,
         characterize_clusters=True,
         characterize_unwise=False,
@@ -2244,6 +2350,7 @@ def main():
         starhorse_cache=args.starhorse_cache,
         run_banyan=args.characterize_banyan,
         run_iphas=args.characterize_iphas,
+        run_vphas=args.characterize_vphas,
         run_sfr=args.characterize_sfr,
         run_clusters=args.characterize_clusters,
         run_unwise=args.characterize_unwise,

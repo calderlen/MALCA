@@ -30,6 +30,7 @@ dependencies = [
     "dustmaps3d",
     "pyvo",
     "lightkurve",
+    "healpy",
     "banyan-sigma @ git+https://github.com/jgagneastro/banyan_sigma.git",
     "regions",
     "requests",

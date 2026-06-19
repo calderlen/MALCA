@@ -135,10 +135,6 @@ def _opt_bool(d: dict[str, Any], key: str) -> int | None:
 def _canonicalize_wise_fields(row: dict[str, Any]) -> dict[str, Any]:
     out = dict(row)
     legacy_map = {
-        "unwise_w1": "w1",
-        "unwise_w1_err": "w1_err",
-        "unwise_w2": "w2",
-        "unwise_w2_err": "w2_err",
         "allwise_w3": "w3",
         "allwise_w3_err": "w3_err",
         "allwise_w4": "w4",
@@ -684,6 +680,8 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("w3_w4",                    "REAL",    "float"),
     ("iphas_ha_mag",             "REAL",    "float"),
     ("iphas_r_ha",               "REAL",    "float"),
+    ("vphas_ha_mag",             "REAL",    "float"),
+    ("vphas_r_ha",               "REAL",    "float"),
     ("unwise_w1_zscore",         "REAL",    "float"),
     ("unwise_w2_zscore",         "REAL",    "float"),
     ("unwise_w1_var",            "INTEGER", "bool"),
@@ -883,6 +881,7 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     # -- vetting details: other --
     ("cluster_dist_pc",          "REAL",    "float"),
     ("iphas_ha_excess",          "REAL",    "float"),
+    ("vphas_ha_excess",          "REAL",    "float"),
     # -- light curve basics --
     ("n_points",                 "REAL",    "float"),
     ("jd_first",                 "REAL",    "float"),
@@ -1782,10 +1781,6 @@ def init_db(conn: sqlite3.Connection) -> None:
         for row in conn.execute("PRAGMA table_info(candidates)").fetchall()
     }
     legacy_candidate_column_renames = {
-        "unwise_w1": "w1",
-        "unwise_w1_err": "w1_err",
-        "unwise_w2": "w2",
-        "unwise_w2_err": "w2_err",
         "allwise_w3": "w3",
         "allwise_w3_err": "w3_err",
         "allwise_w4": "w4",
@@ -2559,8 +2554,8 @@ def get_diagnostic_background(conn: sqlite3.Connection) -> dict:
     # IR color-color: prefer dereddened from payload, fall back to observed
     h_expr = _background_value_expr("tmass_h", column_map)
     k_expr = _background_value_expr("tmass_k", column_map)
-    w1_expr = _background_value_expr("w1", column_map, aliases=("unwise_w1",))
-    w2_expr = _background_value_expr("w2", column_map, aliases=("unwise_w2",))
+    w1_expr = _background_value_expr("w1", column_map)
+    w2_expr = _background_value_expr("w2", column_map)
     hk_expr = _background_value_expr("H_K", column_map)
     w1w2_expr = _background_value_expr("w1_w2", column_map, aliases=("W1_W2",))
     hk_dered_expr = _background_value_expr("H_K_dered", column_map)
@@ -2680,6 +2675,7 @@ VETTING_COLUMNS = [
     "banyan_best_assoc", "banyan_field_prob",
     "yso_class",
     "iphas_ha_excess",
+    "vphas_ha_excess",
     "pm_cluster_offset_sigma",
     "atlas_has_phot", "atlas_n_det_cyan", "atlas_n_det_orange",
     "atlas_cyan_range", "atlas_orange_range",
