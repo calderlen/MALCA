@@ -1223,9 +1223,13 @@ def plot_efficiency_jointplot(
     )
     
     # Rasterize and prevent PDF rendering gaps between contour bands
-    for c in im.collections:
-        c.set_edgecolor("face")
-        c.set_rasterized(True)
+    try:
+        for c in im.collections:
+            c.set_edgecolor("face")
+            c.set_rasterized(True)
+    except AttributeError:
+        im.set_edgecolor("face")
+        im.set_rasterized(True)
     
     # Contours
     try:
