@@ -7,6 +7,8 @@ import matplotlib.pyplot as plt
 
 import numpy as np
 import pandas as pd
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from tqdm import tqdm
 
 from malca.stv.events import score_lightcurve
 from malca.baseline import per_camera_gp_baseline
@@ -220,6 +222,30 @@ CONTAMINANT_FUNCS = {
 }
 
 
+def _run_single_injection(family: str, asas_sn_id: str, lc_dir: str, trial: int, detection_kwargs: dict, seed: int) -> dict:
+    fn = CONTAMINANT_FUNCS.get(family)
+    rng = np.random.default_rng(seed)
+    try:
+        df_g, df_v = read_lc_dat2(asas_sn_id, lc_dir)
+        df_lc = pd.concat([df_g, df_v], ignore_index=True)
+        if df_lc.empty:
+            return {"family": family, "trial": trial, "asas_sn_id": asas_sn_id, "detected": False, "error": "empty"}
+        df_bad = fn(df_lc, rng)
+        det = _default_detection_func(df_bad, detection_kwargs=detection_kwargs)
+        return {
+            "family": family,
+            "trial": trial,
+            "asas_sn_id": asas_sn_id,
+            "detected": bool(det.get("detected", False)),
+            "dip_significant": bool(det.get("dip_significant", False)),
+            "jump_significant": bool(det.get("jump_significant", False)),
+            "dip_trigger_max": float(det.get("dip_trigger_max", np.nan)),
+            "jump_trigger_max": float(det.get("jump_trigger_max", np.nan)),
+        }
+    except Exception as e:
+        return {"family": family, "trial": trial, "asas_sn_id": asas_sn_id, "detected": False, "error": str(e)}
+
+
 def run_false_positive_benchmark(
     manifest_df: pd.DataFrame,
     *,
@@ -228,6 +254,7 @@ def run_false_positive_benchmark(
     n_trials_per_family: int,
     detection_kwargs: dict,
     seed: int,
+    workers: int = 1,
 ) -> pd.DataFrame:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -235,38 +262,26 @@ def run_false_positive_benchmark(
 
     required = ["asas_sn_id", "path"]
     if not all(c in manifest_df.columns for c in required):
-        raise ValueError("manifest_df must contain asas_sn_id and path columns")
+        raise ValueError(f"manifest_df must contain asas_sn_id and path columns, got {manifest_df.columns}")
 
-    rows: list[dict] = []
+    tasks = []
     for family in families:
-        fn = CONTAMINANT_FUNCS.get(family)
-        if fn is None:
+        if family not in CONTAMINANT_FUNCS:
             continue
         for trial in range(int(n_trials_per_family)):
             pick = manifest_df.sample(n=1, random_state=int(rng.integers(0, 2**31 - 1))).iloc[0]
-            asas_sn_id = str(pick["asas_sn_id"])
-            lc_dir = str(pick["path"])
-            try:
-                df_g, df_v = read_lc_dat2(asas_sn_id, lc_dir)
-                df_lc = pd.concat([df_g, df_v], ignore_index=True)
-                if df_lc.empty:
-                    continue
-                df_bad = fn(df_lc, rng)
-                det = _default_detection_func(df_bad, detection_kwargs=detection_kwargs)
-                rows.append(
-                    {
-                        "family": family,
-                        "trial": trial,
-                        "asas_sn_id": asas_sn_id,
-                        "detected": bool(det.get("detected", False)),
-                        "dip_significant": bool(det.get("dip_significant", False)),
-                        "jump_significant": bool(det.get("jump_significant", False)),
-                        "dip_trigger_max": float(det.get("dip_trigger_max", np.nan)),
-                        "jump_trigger_max": float(det.get("jump_trigger_max", np.nan)),
-                    }
-                )
-            except Exception as e:
-                rows.append({"family": family, "trial": trial, "asas_sn_id": asas_sn_id, "detected": False, "error": str(e)})
+            trial_seed = int(rng.integers(0, 2**31 - 1))
+            tasks.append((family, str(pick["asas_sn_id"]), str(pick["path"]), trial, detection_kwargs, trial_seed))
+
+    rows = []
+    if workers > 1:
+        with ProcessPoolExecutor(max_workers=workers) as ex:
+            futures = [ex.submit(_run_single_injection, *t) for t in tasks]
+            for fut in tqdm(as_completed(futures), total=len(futures), desc="False Positive Trials"):
+                rows.append(fut.result())
+    else:
+        for t in tqdm(tasks, desc="False Positive Trials"):
+            rows.append(_run_single_injection(*t))
 
     df = pd.DataFrame(rows)
     if df.empty:
@@ -334,9 +349,18 @@ def main() -> None:
     parser.add_argument("--n-trials-per-family", type=int, default=FP_TRIALS_PER_FAMILY)
     parser.add_argument("--seed", type=int, default=INJECTION_SEED)
     parser.add_argument("--trigger-mode", type=str, default="posterior_prob", choices=["logbf", "posterior_prob"])
+    parser.add_argument("--workers", type=int, default=1, help="Number of parallel workers")
     args = parser.parse_args()
 
     df_manifest = read_parquet_table(args.manifest)
+    
+    # Handle schema from manifest builder
+    if "source_id" in df_manifest.columns and "asas_sn_id" not in df_manifest.columns:
+        df_manifest = df_manifest.rename(columns={"source_id": "asas_sn_id"})
+    if "dat_path" in df_manifest.columns and "path" not in df_manifest.columns:
+        df_manifest = df_manifest.rename(columns={"dat_path": "path"})
+    elif "lc_dir" in df_manifest.columns and "path" not in df_manifest.columns:
+        df_manifest = df_manifest.rename(columns={"lc_dir": "path"})
 
     detection_kwargs = _build_detection_kwargs(args.trigger_mode)
 
@@ -347,6 +371,7 @@ def main() -> None:
         n_trials_per_family=args.n_trials_per_family,
         detection_kwargs=detection_kwargs,
         seed=args.seed,
+        workers=args.workers,
     )
     
     plot_false_alarm_survival(df_results, args.out_dir, args.trigger_mode)
