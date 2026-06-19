@@ -1234,8 +1234,9 @@ def plot_efficiency_jointplot(
     # Contours
     try:
         cs = ax.contour(x_centers, y_centers, smoothed_eff, levels=[0.5, 0.9, 0.99], colors='black', alpha=0.9, linewidths=0.6)
-        texts = ax.clabel(cs, inline=True, inline_spacing=8, fontsize=text["label"]*0.8, fmt='%g', manual=[(6, 0.6), (20, 0.6), (80, 0.6)])
-        for t in texts:
+        texts1 = ax.clabel(cs, inline=True, inline_spacing=4, fontsize=text["label"]*0.8, fmt='%g', manual=[(6, 0.6), (20, 0.6)])
+        texts2 = ax.clabel(cs, inline=True, inline_spacing=8, fontsize=text["label"]*0.8, fmt='%g', manual=[(70, 0.5)])
+        for t in texts1 + texts2:
             t.set_rotation(0)
     except Exception:
         pass # Ignore if contours fail due to all 0s
