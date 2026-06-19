@@ -1232,10 +1232,21 @@ def plot_efficiency_jointplot(
         im.set_rasterized(True)
     
     # Contours
+    if contour_kwargs is None:
+        contour_kwargs = {
+            "levels": [0.5, 0.9, 0.99],
+            "manual1": [(6, 0.6), (20, 0.6)],
+            "manual2": [(70, 0.5)]
+        }
+        
     try:
-        cs = ax.contour(x_centers, y_centers, smoothed_eff, levels=[0.5, 0.9, 0.99], colors='black', alpha=0.9, linewidths=0.6)
-        texts1 = ax.clabel(cs, inline=True, inline_spacing=4, fontsize=text["label"]*0.8, fmt='%g', manual=[(6, 0.6), (20, 0.6)])
-        texts2 = ax.clabel(cs, inline=True, inline_spacing=8, fontsize=text["label"]*0.8, fmt='%g', manual=[(70, 0.5)])
+        cs = ax.contour(x_centers, y_centers, smoothed_eff, levels=contour_kwargs["levels"], colors='black', alpha=0.9, linewidths=0.6)
+        texts1 = []
+        texts2 = []
+        if contour_kwargs.get("manual1"):
+            texts1 = ax.clabel(cs, inline=True, inline_spacing=4, fontsize=text["label"]*0.8, fmt='%g', manual=contour_kwargs["manual1"])
+        if contour_kwargs.get("manual2"):
+            texts2 = ax.clabel(cs, inline=True, inline_spacing=8, fontsize=text["label"]*0.8, fmt='%g', manual=contour_kwargs["manual2"])
         for t in texts1 + texts2:
             t.set_rotation(0)
     except Exception:
@@ -1254,6 +1265,10 @@ def plot_efficiency_jointplot(
         ax.set_xscale("log")
         ax_histx.set_xscale("log")
         ax.set_xlim(left=1.0)
+    else:
+        import matplotlib.ticker as ticker
+        ax.xaxis.set_major_locator(ticker.MultipleLocator(1))
+        ax.xaxis.set_minor_locator(ticker.MultipleLocator(0.2))
         
     ax.set_ylim(0.0, 1.0)
     ax.set_yticks([0.0, 0.2, 0.4, 0.6, 0.8, 1.0])
@@ -1314,10 +1329,11 @@ def plot_efficiency_marginalized(
     cube: dict,
     *,
     axis: str = "mag",
-    output_path: Path | str | None = None,
     vmin: float = 0.0,
     vmax: float = 1.0,
     cmap: str = "magma",
+    contour_kwargs: dict = None,
+    output_path: Path | str | None = None,
     show: bool = True,
 ) -> plt.Figure:
     """
@@ -1339,6 +1355,11 @@ def plot_efficiency_marginalized(
         xlabel = "Duration [days]"
         ylabel = "Fractional Depth"
         xlog = True
+        contour_kwargs = {
+            "levels": [0.5, 0.9, 0.99],
+            "manual1": [(6, 0.6), (20, 0.6)],
+            "manual2": [(70, 0.5)]
+        }
     elif axis == "duration":
         eff_2d = np.nanmean(cube["efficiency"], axis=1)
         x_centers = cube["mag_centers"]
@@ -1348,6 +1369,11 @@ def plot_efficiency_marginalized(
         xlabel = "Median Magnitude"
         ylabel = "Fractional Depth"
         xlog = False
+        contour_kwargs = {
+            "levels": [0.5],
+            "manual1": [(14.5, 0.25)],
+            "manual2": []
+        }
     elif axis == "depth":
         eff_2d = np.nanmean(cube["efficiency"], axis=0).T  # Transpose: (dur, mag) -> (mag, dur)
         x_centers = cube["duration_centers"]
@@ -1357,6 +1383,11 @@ def plot_efficiency_marginalized(
         xlabel = "Duration [days]"
         ylabel = "Median Magnitude"
         xlog = True
+        contour_kwargs = {
+            "levels": [0.5, 0.9, 0.99],
+            "manual1": [(6, 14.5), (20, 14.5)],
+            "manual2": [(70, 13.5)]
+        }
     else:
         raise ValueError(f"Unknown axis: {axis}. Use 'mag', 'duration', or 'depth'.")
 
@@ -1372,6 +1403,7 @@ def plot_efficiency_marginalized(
         vmin=vmin,
         vmax=vmax,
         cmap=cmap,
+        contour_kwargs=contour_kwargs,
         output_path=output_path,
         show=show,
     )
