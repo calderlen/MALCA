@@ -95,11 +95,124 @@ def _inject_camera_cluster(df: pd.DataFrame, rng: np.random.Generator) -> pd.Dat
     return out
 
 
+def _inject_cv_outburst(df: pd.DataFrame, rng: np.random.Generator) -> pd.DataFrame:
+    out = df.copy()
+    t = out["JD"].to_numpy(dtype=float)
+    if len(t) == 0:
+        return out
+    t_0 = rng.uniform(t.min(), t.max())
+    tau_rise = rng.uniform(0.5, 5.0)
+    tau_decay = rng.uniform(5.0, 40.0)
+    amp = rng.uniform(-6.0, -2.0)  # negative because brightening
+
+    dt = t - t_0
+    profile = np.where(
+        dt >= 0,
+        np.exp(-dt / tau_decay),
+        np.exp(dt / tau_rise)
+    )
+    out["mag"] = out["mag"].to_numpy(dtype=float) + amp * profile
+    return out
+
+
+def _inject_drw_agn(df: pd.DataFrame, rng: np.random.Generator) -> pd.DataFrame:
+    out = df.copy()
+    t = out["JD"].to_numpy(dtype=float)
+    if len(t) == 0:
+        return out
+
+    # Ensure time is sorted for autoregressive generation
+    sort_idx = np.argsort(t)
+    t_sorted = t[sort_idx]
+
+    tau = rng.uniform(50.0, 600.0)
+    sf_inf = rng.uniform(0.1, 1.0)
+
+    s = np.zeros(len(t_sorted))
+    s[0] = rng.normal(0, sf_inf / np.sqrt(2.0))
+
+    for i in range(1, len(t_sorted)):
+        dt = t_sorted[i] - t_sorted[i-1]
+        decay = np.exp(-dt / tau)
+        sigma_drive = (sf_inf / np.sqrt(2.0)) * np.sqrt(max(0.0, 1.0 - decay**2))
+        s[i] = decay * s[i-1] + rng.normal(0, sigma_drive)
+
+    # Unsort to match original dataframe index order
+    unsort_idx = np.argsort(sort_idx)
+    s_original_order = s[unsort_idx]
+
+    out["mag"] = out["mag"].to_numpy(dtype=float) + s_original_order
+    return out
+
+
+def _inject_eclipsing_binary(df: pd.DataFrame, rng: np.random.Generator) -> pd.DataFrame:
+    out = df.copy()
+    t = out["JD"].to_numpy(dtype=float)
+    if len(t) == 0:
+        return out
+
+    period = rng.uniform(0.5, 30.0)
+    t0 = rng.uniform(0.0, period)
+
+    depth_pri = rng.uniform(0.3, 1.5)
+    width_pri = rng.uniform(0.02, 0.1)  # phase width
+
+    depth_sec = rng.uniform(0.05, 0.5)
+    width_sec = width_pri * rng.uniform(0.8, 1.2)
+
+    phase = ((t - t0) % period) / period
+
+    # Distance to primary eclipse at phase 0 or 1
+    dist_pri = np.minimum(phase, 1.0 - phase)
+    # Distance to secondary eclipse at phase 0.5
+    dist_sec = np.abs(phase - 0.5)
+
+    profile = depth_pri * np.exp(-0.5 * (dist_pri / width_pri)**2) + \
+              depth_sec * np.exp(-0.5 * (dist_sec / width_sec)**2)
+
+    out["mag"] = out["mag"].to_numpy(dtype=float) + profile
+    return out
+
+
+def _inject_contact_binary(df: pd.DataFrame, rng: np.random.Generator) -> pd.DataFrame:
+    """
+    Simulates a contact (W UMa) or semi-detached binary using ellipsoidal variations.
+    Modeled as continuous Fourier series rather than discrete Gaussians.
+    """
+    out = df.copy()
+    t = out["JD"].to_numpy(dtype=float)
+    if len(t) == 0:
+        return out
+
+    # Contact binaries have short periods
+    period = rng.uniform(0.2, 2.0)
+    t0 = rng.uniform(0.0, period)
+
+    phase = ((t - t0) % period) / period
+
+    # Ellipsoidal variation (causes the two minima per orbit)
+    amp_ellips = rng.uniform(0.05, 0.4)
+    # Asymmetry (difference in depth between primary and secondary minima)
+    amp_asym = rng.uniform(0.0, 0.2)
+
+    # Positive mag = fainter.
+    # cos(4*pi*phase) is +1 at phase 0 and 0.5 (the two eclipses/minima) and -1 at 0.25, 0.75 (maxima)
+    # cos(2*pi*phase) is +1 at phase 0 (making primary deeper) and -1 at 0.5 (making secondary shallower)
+    profile = amp_ellips * np.cos(4.0 * np.pi * phase) + amp_asym * np.cos(2.0 * np.pi * phase)
+
+    out["mag"] = out["mag"].to_numpy(dtype=float) + profile
+    return out
+
+
 CONTAMINANT_FUNCS = {
     "camera_offset": _inject_camera_offset,
     "camera_cluster": _inject_camera_cluster,
     "semiregular": _inject_semiregular,
     "rcb_like": _inject_rcb_like,
+    "cv_outburst": _inject_cv_outburst,
+    "drw_agn": _inject_drw_agn,
+    "eclipsing_binary": _inject_eclipsing_binary,
+    "contact_binary": _inject_contact_binary,
 }
 
 
@@ -172,7 +285,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="False-positive contaminant benchmark for MALCA")
     parser.add_argument("--manifest", type=Path, required=True, help="Manifest Parquet with asas_sn_id and path")
     parser.add_argument("--output-dir", dest="out_dir", type=Path, default=DEFAULT_OUTPUT_DIR / "false_positive")
-    parser.add_argument("--families", type=str, default="camera_offset,camera_cluster,semiregular,rcb_like")
+    parser.add_argument("--families", type=str, default="camera_offset,camera_cluster,semiregular,rcb_like,cv_outburst,drw_agn,eclipsing_binary,contact_binary")
     parser.add_argument("--n-trials-per-family", type=int, default=FP_TRIALS_PER_FAMILY)
     parser.add_argument("--seed", type=int, default=INJECTION_SEED)
     parser.add_argument("--trigger-mode", type=str, default="posterior_prob", choices=["logbf", "posterior_prob"])
