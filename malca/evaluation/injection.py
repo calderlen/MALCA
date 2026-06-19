@@ -1036,21 +1036,20 @@ def compute_detection_efficiency_3d(
     dur_centers = np.sqrt(dur_edges[:-1] * dur_edges[1:])
     mag_centers = (mag_edges[:-1] + mag_edges[1:]) / 2
 
-    efficiency = np.full((depth_bins, duration_bins, mag_bins), np.nan)
-
-    for i in range(depth_bins):
-        for j in range(duration_bins):
-            for k in range(mag_bins):
-                mask = (
-                    (results_df["fractional_depth"] >= depth_edges[i])
-                    & (results_df["fractional_depth"] < depth_edges[i + 1])
-                    & (results_df["duration"] >= dur_edges[j])
-                    & (results_df["duration"] < dur_edges[j + 1])
-                    & (results_df["median_mag"] >= mag_edges[k])
-                    & (results_df["median_mag"] < mag_edges[k + 1])
-                )
-                if mask.sum() > 0:
-                    efficiency[i, j, k] = results_df.loc[mask, detected_col].mean()
+    from scipy.stats import binned_statistic_dd
+    
+    sample = np.column_stack([
+        results_df["fractional_depth"].values,
+        results_df["duration"].values,
+        results_df["median_mag"].values
+    ])
+    
+    efficiency, _, _ = binned_statistic_dd(
+        sample,
+        results_df[detected_col].values,
+        statistic='mean',
+        bins=[depth_edges, dur_edges, mag_edges]
+    )
 
     return dict(
         efficiency=efficiency,

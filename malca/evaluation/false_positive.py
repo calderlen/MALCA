@@ -222,11 +222,11 @@ CONTAMINANT_FUNCS = {
 }
 
 
-def _run_single_injection(family: str, asas_sn_id: str, lc_dir: str, trial: int, detection_kwargs: dict, seed: int) -> dict:
+def _run_single_injection(family: str, asas_sn_id: str, lc_dir: str, file_ext: str, trial: int, detection_kwargs: dict, seed: int) -> dict:
     fn = CONTAMINANT_FUNCS.get(family)
     rng = np.random.default_rng(seed)
     try:
-        df_g, df_v = read_lc_dat2(asas_sn_id, lc_dir)
+        df_g, df_v = read_lc_dat2(asas_sn_id, lc_dir, file_ext=file_ext)
         df_lc = pd.concat([df_g, df_v], ignore_index=True)
         if df_lc.empty:
             return {"family": family, "trial": trial, "asas_sn_id": asas_sn_id, "detected": False, "error": "empty"}
@@ -271,7 +271,11 @@ def run_false_positive_benchmark(
         for trial in range(int(n_trials_per_family)):
             pick = manifest_df.sample(n=1, random_state=int(rng.integers(0, 2**31 - 1))).iloc[0]
             trial_seed = int(rng.integers(0, 2**31 - 1))
-            tasks.append((family, str(pick["asas_sn_id"]), str(pick["path"]), trial, detection_kwargs, trial_seed))
+            
+            p = Path(str(pick["path"]))
+            lc_dir = str(p.parent) if p.suffix else str(p)
+            file_ext = p.suffix[1:] if p.suffix else "dat3"
+            tasks.append((family, str(pick["asas_sn_id"]), lc_dir, file_ext, trial, detection_kwargs, trial_seed))
 
     rows = []
     if workers > 1:
