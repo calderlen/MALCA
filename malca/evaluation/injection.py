@@ -1120,10 +1120,10 @@ def plot_detection_efficiency(
     )
     if xlog:
         ax.set_xscale("log")
-    ax.set_xlabel(xlabel, fontsize=text["label"])
-    ax.set_ylabel(ylabel, fontsize=text["label"])
+    ax.set_xlabel(xlabel, fontsize=text["label"]*0.75)
+    ax.set_ylabel(ylabel, fontsize=text["label"]*0.75)
     cbar = plt.colorbar(im, ax=ax)
-    cbar.set_label("Detection Efficiency", fontsize=text["colorbar"])
+    cbar.set_label("Detection Efficiency", fontsize=text["colorbar"]*0.75)
 
     if output_path:
         save_publication_figure(fig, output_path, close=False)
@@ -1163,7 +1163,7 @@ def plot_efficiency_mag_slices(
     figs = []
     for k, mag in enumerate(cube["mag_centers"]):
         eff_slice = cube["efficiency"][:, :, k]
-        out_path = output_dir / f"efficiency_mag_{mag:.2f}.png" if output_dir else None
+        out_path = output_dir / f"efficiency_mag_{mag:.2f}.pdf" if output_dir else None
 
         fig = plot_detection_efficiency(
             cube["depth_centers"],
@@ -1223,16 +1223,19 @@ def plot_efficiency_jointplot(
     )
     
     # Contours
+    import matplotlib.patheffects as pe
     try:
-        cs = ax.contour(x_centers, y_centers, smoothed_eff, levels=[0.5, 0.9], colors='black', alpha=0.8, linewidths=1.5)
-        ax.clabel(cs, inline=True, fontsize=text["label"]*0.8, fmt='%.1f')
+        cs = ax.contour(x_centers, y_centers, smoothed_eff, levels=[0.5, 0.9, 0.99], colors='white', alpha=0.9, linewidths=0.8)
+        texts = ax.clabel(cs, inline=True, fontsize=text["label"]*0.8, fmt='%.1f')
+        for t in texts:
+            t.set_path_effects([pe.withStroke(linewidth=1.5, foreground='black')])
     except Exception:
         pass # Ignore if contours fail due to all 0s
     
     # Create marginal axes
     divider = make_axes_locatable(ax)
-    ax_histx = divider.append_axes("top", size=1.2, pad=0.1, sharex=ax)
-    ax_histy = divider.append_axes("right", size=1.2, pad=0.1, sharey=ax)
+    ax_histx = divider.append_axes("top", size="20%", pad=0.1, sharex=ax)
+    ax_histy = divider.append_axes("right", size="20%", pad=0.1, sharey=ax)
     
     with np.errstate(invalid='ignore'):
         eff_x = np.nanmean(smoothed_eff, axis=0) # average over y
@@ -1241,24 +1244,32 @@ def plot_efficiency_jointplot(
     ax_histx.plot(x_centers, eff_x, color="black", lw=2)
     ax_histx.set_ylim(0, 1.05)
     ax_histx.tick_params(axis="x", labelbottom=False)
-    ax_histx.set_ylabel("Eff", fontsize=text["label"]*0.8)
+    ax_histx.set_ylabel("Efficiency", fontsize=text["label"]*0.75)
     
     ax_histy.plot(eff_y, y_centers, color="black", lw=2)
     ax_histy.set_xlim(0, 1.05)
     ax_histy.tick_params(axis="y", labelleft=False)
-    ax_histy.set_xlabel("Eff", fontsize=text["label"]*0.8)
+    ax_histy.set_xlabel("Efficiency", fontsize=text["label"]*0.75)
     
     if xlog:
         ax.set_xscale("log")
         ax_histx.set_xscale("log")
         
-    ax.set_xlabel(xlabel, fontsize=text["label"])
-    ax.set_ylabel(ylabel, fontsize=text["label"])
+    ax.set_xlabel(xlabel, fontsize=text["label"]*0.75)
+    ax.set_ylabel(ylabel, fontsize=text["label"]*0.75)
     
     # Colorbar
-    cax = divider.append_axes("right", size="5%", pad=0.5)
-    cbar = plt.colorbar(im, cax=cax)
-    cbar.set_label("Detection Efficiency", fontsize=text["colorbar"])
+    cax = ax.inset_axes([0.55, 0.05, 0.4, 0.04])
+    cbar = plt.colorbar(im, cax=cax, orientation='horizontal')
+    cbar.set_label("Detection Efficiency", fontsize=text["colorbar"]*0.75, color='white', labelpad=2)
+    cbar.ax.tick_params(labelsize=text["label"]*0.6, colors='white', pad=2)
+    cbar.outline.set_edgecolor('white')
+    cbar.outline.set_linewidth(1.0)
+    
+    import matplotlib.patheffects as pe
+    cbar.ax.xaxis.label.set_path_effects([pe.withStroke(linewidth=1.5, foreground='black')])
+    for t in cbar.ax.get_xticklabels():
+        t.set_path_effects([pe.withStroke(linewidth=1.5, foreground='black')])
     
     if output_path:
         save_publication_figure(fig, output_path, close=False)
@@ -1377,10 +1388,10 @@ def plot_efficiency_threshold_contour(
         shading="auto",
     )
     ax.set_yscale("log")
-    ax.set_xlabel("Median Magnitude", fontsize=text["label"])
-    ax.set_ylabel("Duration [days]", fontsize=text["label"])
+    ax.set_xlabel("Median Magnitude", fontsize=text["label"]*0.75)
+    ax.set_ylabel("Duration [days]", fontsize=text["label"]*0.75)
     cbar = plt.colorbar(im, ax=ax)
-    cbar.set_label("Fractional Depth", fontsize=text["colorbar"])
+    cbar.set_label("Fractional Depth", fontsize=text["colorbar"]*0.75)
 
     if output_path:
         save_publication_figure(fig, output_path, close=False)
@@ -1568,7 +1579,7 @@ def plot_efficiency_all(
         Efficiency thresholds for contour plots (default: [0.5, 0.9])
     """
     if thresholds is None:
-        thresholds = [0.5, 0.9]
+        thresholds = [0.5, 0.9, 0.99]
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1588,7 +1599,7 @@ def plot_efficiency_all(
         plot_efficiency_marginalized(
             cube,
             axis=axis,
-            output_path=output_dir / f"efficiency_marginalized_{axis}.png",
+            output_path=output_dir / f"efficiency_marginalized_{axis}.pdf",
             show=show,
         )
         plt.close()
@@ -1598,7 +1609,7 @@ def plot_efficiency_all(
         plot_efficiency_threshold_contour(
             cube,
             threshold=thresh,
-            output_path=output_dir / f"depth_at_{int(thresh*100)}pct_efficiency.png",
+            output_path=output_dir / f"depth_at_{int(thresh*100)}pct_efficiency.pdf",
             show=show,
         )
         plt.close()
