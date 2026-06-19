@@ -1226,8 +1226,7 @@ def plot_efficiency_jointplot(
     # Contours
     try:
         cs = ax.contour(x_centers, y_centers, smoothed_eff, levels=[0.5, 0.9, 0.99], colors='black', alpha=0.9, linewidths=0.6)
-        fmt_dict = {0.5: '0.5', 0.9: '0.9', 0.99: '0.99'}
-        texts = ax.clabel(cs, inline=True, fontsize=text["label"]*0.8, fmt=fmt_dict, manual=[(5, 0.6), (50, 0.6), (150, 0.6)])
+        texts = ax.clabel(cs, inline=True, fontsize=text["label"]*0.8, fmt='%g', manual=[(5, 0.6), (50, 0.6), (150, 0.6)])
         for t in texts:
             t.set_rotation(0)
     except Exception:
@@ -1235,8 +1234,8 @@ def plot_efficiency_jointplot(
     
     # Create marginal axes
     divider = make_axes_locatable(ax)
-    ax_histx = divider.append_axes("top", size="20%", pad=0.1, sharex=ax)
-    ax_histy = divider.append_axes("left", size="20%", pad=0.1, sharey=ax)
+    ax_histx = divider.append_axes("top", size="20%", pad=0.15, sharex=ax)
+    ax_histy = divider.append_axes("left", size="20%", pad=0.15, sharey=ax)
     
     with np.errstate(invalid='ignore'):
         eff_x = np.nanmean(smoothed_eff, axis=0) # average over y
@@ -1247,9 +1246,9 @@ def plot_efficiency_jointplot(
     ax_histx.set_yticks([0, 1])
     ax_histx.xaxis.tick_top()
     ax_histx.xaxis.set_label_position("top")
-    ax_histx.tick_params(axis="x", labeltop=True, labelbottom=False, labelsize=text["label"]*0.75)
-    ax_histx.yaxis.tick_left()
-    ax_histx.yaxis.set_label_position("left")
+    ax_histx.tick_params(axis="x", labeltop=False, labelbottom=False)
+    ax_histx.yaxis.tick_right()
+    ax_histx.yaxis.set_label_position("right")
     ax_histx.set_ylabel("Efficiency", fontsize=text["label"]*0.85)
     ax_histx.tick_params(axis="y", labelsize=text["label"]*0.75)
     
@@ -1267,6 +1266,7 @@ def plot_efficiency_jointplot(
     if xlog:
         ax.set_xscale("log")
         ax_histx.set_xscale("log")
+        ax.set_xlim(left=1.0)
         
     ax.set_xlabel(xlabel, fontsize=text["label"])
     ax.tick_params(axis="y", labelleft=False)
@@ -1277,7 +1277,7 @@ def plot_efficiency_jointplot(
     cbar = plt.colorbar(im, cax=cax, orientation='vertical')
     cax.yaxis.set_ticks_position('right')
     cax.yaxis.set_label_position('right')
-    cbar.set_label("Efficiency", fontsize=text["colorbar"]*0.75, labelpad=8)
+    cbar.set_label("Efficiency", fontsize=text["label"], labelpad=8)
     cbar.ax.tick_params(labelsize=text["label"]*0.6)
     
     if output_path:
