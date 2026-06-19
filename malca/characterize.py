@@ -1829,6 +1829,12 @@ def characterize_candidates_df(
     checkpoint_path: Path | None = None,
 ) -> pd.DataFrame:
     """Characterize candidates and return an enriched dataframe."""
+
+    # Fallback for missing ra/dec but present ra_gaia/dec_gaia
+    if "ra" not in df.columns and "ra_gaia" in df.columns:
+        df["ra"] = df["ra_gaia"]
+    if "dec" not in df.columns and "dec_gaia" in df.columns:
+        df["dec"] = df["dec_gaia"]
     def _has_finite_values(frame: pd.DataFrame, *columns: str) -> bool:
         for column in columns:
             if column not in frame.columns:
@@ -1957,10 +1963,11 @@ def characterize_candidates_df(
             xmatch_path = crossmatch.expanduser()
 
             if not xmatch_path.exists():
-                print(f"Warning: Crossmatch file {xmatch_path} not found")
-                return df_in
-
-            print(f"Loading crossmatch file {xmatch_path}...")
+                print(f"Warning: Crossmatch file {xmatch_path} not found. Skipping VSX enrichment.")
+                df_merged = df_in
+            
+            if xmatch_path.exists():
+                print(f"Loading crossmatch file {xmatch_path}...")
             try:
                 header = _parquet_column_names(xmatch_path)
                 if header is None:
@@ -2023,39 +2030,40 @@ def characterize_candidates_df(
                 print(f"Merged {len(df_merged)} rows")
             except Exception as e:
                 print(f"Warning: characterize crossmatch read failed: {e}")
-                return df_in
+                df_merged = df_in
 
         if "gaia_id" not in df_merged.columns:
             print("Warning: characterize skipped Gaia query: gaia_id not present")
-            return df_merged
+            df_char = df_merged.copy()
+        else:
+            if cache:
+                cache.parent.mkdir(parents=True, exist_ok=True)
 
-        if cache:
-            cache.parent.mkdir(parents=True, exist_ok=True)
+            df_merged["gaia_id"] = df_merged["gaia_id"].map(parse_gaia_source_id)
+            missing_gaia = df_merged["gaia_id"].isna().sum()
+            print(f"Found Gaia IDs for {len(df_merged) - missing_gaia}/{len(df_merged)} sources")
+            gaia_ids = df_merged["gaia_id"].dropna().unique().tolist()
 
-        df_merged["gaia_id"] = df_merged["gaia_id"].map(parse_gaia_source_id)
-        missing_gaia = df_merged["gaia_id"].isna().sum()
-        print(f"Found Gaia IDs for {len(df_merged) - missing_gaia}/{len(df_merged)} sources")
-        gaia_ids = df_merged["gaia_id"].dropna().unique().tolist()
+            if not gaia_ids:
+                print("Warning: characterize found no Gaia IDs")
+                df_char = df_merged.copy()
+            else:
+                print(f"Querying Gaia DR3 for {len(gaia_ids)} sources...")
+                gaia_df = query_gaia_by_ids(
+                    gaia_ids,
+                    chunk_size=chunk_size,
+                    cache_file=str(cache) if cache else None,
+                )
+                if gaia_df.empty:
+                    print("Warning: characterize Gaia query returned no rows")
+                    df_char = df_merged.copy()
+                else:
+                    gaia_df["source_id"] = gaia_df["source_id"].map(parse_gaia_source_id)
+                    gaia_df = gaia_df.dropna(subset=["source_id"])
 
-        if not gaia_ids:
-            print("Warning: characterize found no Gaia IDs")
-            return df_merged
+                    print("Merging Gaia results...")
+                    df_char = df_merged.merge(gaia_df, left_on="gaia_id", right_on="source_id", how="left", suffixes=("", "_gaia"))
 
-        print(f"Querying Gaia DR3 for {len(gaia_ids)} sources...")
-        gaia_df = query_gaia_by_ids(
-            gaia_ids,
-            chunk_size=chunk_size,
-            cache_file=str(cache) if cache else None,
-        )
-        if gaia_df.empty:
-            print("Warning: characterize Gaia query returned no rows")
-            return df_merged
-
-        gaia_df["source_id"] = gaia_df["source_id"].map(parse_gaia_source_id)
-        gaia_df = gaia_df.dropna(subset=["source_id"])
-
-        print("Merging Gaia results...")
-        df_char = df_merged.merge(gaia_df, left_on="gaia_id", right_on="source_id", how="left", suffixes=("", "_gaia"))
         df_char = _add_wise_color_columns(df_char)
 
         # Compute Galactic coordinates from RA/Dec

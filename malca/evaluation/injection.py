@@ -1248,12 +1248,16 @@ def plot_efficiency_jointplot(
     ax_histx.plot(x_centers, eff_x, color="black", lw=0.6)
     ax_histx.set_ylim(0, 1.05)
     ax_histx.tick_params(axis="x", labelbottom=False)
+    ax_histx.yaxis.tick_right()
+    ax_histx.yaxis.set_label_position("right")
     ax_histx.set_ylabel("Efficiency", fontsize=text["label"]*0.85)
     ax_histx.tick_params(axis="y", labelsize=text["label"]*0.75)
     
     ax_histy.plot(eff_y, y_centers, color="black", lw=0.6)
     ax_histy.set_xlim(0, 1.05)
     ax_histy.tick_params(axis="y", labelleft=False)
+    ax_histy.xaxis.tick_top()
+    ax_histy.xaxis.set_label_position("top")
     ax_histy.set_xlabel("Efficiency", fontsize=text["label"]*0.85)
     ax_histy.tick_params(axis="x", labelsize=text["label"]*0.75)
     
@@ -1265,11 +1269,11 @@ def plot_efficiency_jointplot(
     ax.set_ylabel(ylabel, fontsize=text["label"])
     
     # Colorbar
-    cax = divider.append_axes("left", size="5%", pad=0.7)
+    cax = divider.append_axes("left", size="7%", pad=0.55)
     cbar = plt.colorbar(im, cax=cax, orientation='vertical')
     cax.yaxis.set_ticks_position('left')
     cax.yaxis.set_label_position('left')
-    cbar.set_label("Detection Efficiency", fontsize=text["colorbar"]*0.75, labelpad=8)
+    cbar.set_label("Efficiency", fontsize=text["colorbar"]*0.75, labelpad=8)
     cbar.ax.tick_params(labelsize=text["label"]*0.6)
     
     if output_path:
