@@ -1205,13 +1205,11 @@ def plot_efficiency_jointplot(
     text = scaled_publication_text_sizes(figsize)
     fig, ax = plt.subplots(figsize=figsize)
     
-    # Fill NaNs with 0 before smoothing, but keep track of them
-    nan_mask = np.isnan(efficiency_grid)
-    grid_filled = efficiency_grid.copy()
-    grid_filled[nan_mask] = 0.0
+    from astropy.convolution import convolve, Gaussian2DKernel
     
-    smoothed_eff = gaussian_filter(grid_filled, sigma=1.0)
-    smoothed_eff[nan_mask] = np.nan
+    # Smooth with NaN handling to avoid edge banding artifacts
+    kernel = Gaussian2DKernel(x_stddev=1.0)
+    smoothed_eff = convolve(efficiency_grid, kernel, boundary='extend', preserve_nan=True)
     
     im = ax.pcolormesh(
         x_edges,
@@ -1226,20 +1224,18 @@ def plot_efficiency_jointplot(
     )
     
     # Contours
-    import matplotlib.patheffects as pe
     try:
         cs = ax.contour(x_centers, y_centers, smoothed_eff, levels=[0.5, 0.9], colors='black', alpha=0.9, linewidths=0.6)
         texts = ax.clabel(cs, inline=True, fontsize=text["label"]*0.8, fmt='%.1f')
         for t in texts:
             t.set_rotation(0)
-            t.set_path_effects([pe.withStroke(linewidth=1.5, foreground='white')])
     except Exception:
         pass # Ignore if contours fail due to all 0s
     
     # Create marginal axes
     divider = make_axes_locatable(ax)
     ax_histx = divider.append_axes("top", size="20%", pad=0.1, sharex=ax)
-    ax_histy = divider.append_axes("right", size="20%", pad=0.1, sharey=ax)
+    ax_histy = divider.append_axes("left", size="20%", pad=0.1, sharey=ax)
     
     with np.errstate(invalid='ignore'):
         eff_x = np.nanmean(smoothed_eff, axis=0) # average over y
@@ -1248,31 +1244,34 @@ def plot_efficiency_jointplot(
     ax_histx.plot(x_centers, eff_x, color="black", lw=0.6)
     ax_histx.set_ylim(0, 1.05)
     ax_histx.tick_params(axis="x", labelbottom=False)
-    ax_histx.yaxis.tick_right()
-    ax_histx.yaxis.set_label_position("right")
+    ax_histx.yaxis.tick_left()
+    ax_histx.yaxis.set_label_position("left")
     ax_histx.set_ylabel("Efficiency", fontsize=text["label"]*0.85)
     ax_histx.tick_params(axis="y", labelsize=text["label"]*0.75)
     
     ax_histy.plot(eff_y, y_centers, color="black", lw=0.6)
     ax_histy.set_xlim(0, 1.05)
-    ax_histy.tick_params(axis="y", labelleft=False)
+    ax_histy.invert_xaxis()
+    ax_histy.tick_params(axis="y", labelleft=True, labelright=False)
     ax_histy.xaxis.tick_top()
     ax_histy.xaxis.set_label_position("top")
     ax_histy.set_xlabel("Efficiency", fontsize=text["label"]*0.85)
     ax_histy.tick_params(axis="x", labelsize=text["label"]*0.75)
+    ax_histy.set_ylabel(ylabel, fontsize=text["label"])
     
     if xlog:
         ax.set_xscale("log")
         ax_histx.set_xscale("log")
         
     ax.set_xlabel(xlabel, fontsize=text["label"])
-    ax.set_ylabel(ylabel, fontsize=text["label"])
+    ax.tick_params(axis="y", labelleft=False)
+    ax.set_ylabel("")
     
     # Colorbar
-    cax = divider.append_axes("left", size="7%", pad=0.55)
+    cax = divider.append_axes("right", size="7%", pad=0.1)
     cbar = plt.colorbar(im, cax=cax, orientation='vertical')
-    cax.yaxis.set_ticks_position('left')
-    cax.yaxis.set_label_position('left')
+    cax.yaxis.set_ticks_position('right')
+    cax.yaxis.set_label_position('right')
     cbar.set_label("Efficiency", fontsize=text["colorbar"]*0.75, labelpad=8)
     cbar.ax.tick_params(labelsize=text["label"]*0.6)
     
