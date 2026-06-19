@@ -1196,6 +1196,7 @@ def plot_efficiency_jointplot(
     ylabel: str = "Fractional Depth",
     xlog: bool = True,
     cmap: str = "magma",
+    contour_kwargs: dict | None = None,
     show: bool = True,
 ) -> plt.Figure:
     """
