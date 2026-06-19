@@ -1220,12 +1220,14 @@ def plot_efficiency_jointplot(
         vmin=vmin,
         vmax=vmax,
         shading="auto",
+        rasterized=True,
+        edgecolors="face",
     )
     
     # Contours
     import matplotlib.patheffects as pe
     try:
-        cs = ax.contour(x_centers, y_centers, smoothed_eff, levels=[0.5, 0.9, 0.99], colors='white', alpha=0.9, linewidths=0.8)
+        cs = ax.contour(x_centers, y_centers, smoothed_eff, levels=[0.5, 0.9], colors='white', alpha=0.9, linewidths=0.8)
         texts = ax.clabel(cs, inline=True, fontsize=text["label"]*0.8, fmt='%.1f')
         for t in texts:
             t.set_path_effects([pe.withStroke(linewidth=1.5, foreground='black')])
@@ -1259,17 +1261,12 @@ def plot_efficiency_jointplot(
     ax.set_ylabel(ylabel, fontsize=text["label"]*0.75)
     
     # Colorbar
-    cax = ax.inset_axes([0.55, 0.05, 0.4, 0.04])
-    cbar = plt.colorbar(im, cax=cax, orientation='horizontal')
-    cbar.set_label("Detection Efficiency", fontsize=text["colorbar"]*0.75, color='white', labelpad=2)
-    cbar.ax.tick_params(labelsize=text["label"]*0.6, colors='white', pad=2)
-    cbar.outline.set_edgecolor('white')
-    cbar.outline.set_linewidth(1.0)
-    
-    import matplotlib.patheffects as pe
-    cbar.ax.xaxis.label.set_path_effects([pe.withStroke(linewidth=1.5, foreground='black')])
-    for t in cbar.ax.get_xticklabels():
-        t.set_path_effects([pe.withStroke(linewidth=1.5, foreground='black')])
+    cax = divider.append_axes("left", size="5%", pad=0.7)
+    cbar = plt.colorbar(im, cax=cax, orientation='vertical')
+    cax.yaxis.set_ticks_position('left')
+    cax.yaxis.set_label_position('left')
+    cbar.set_label("Detection Efficiency", fontsize=text["colorbar"]*0.75, labelpad=8)
+    cbar.ax.tick_params(labelsize=text["label"]*0.6)
     
     if output_path:
         save_publication_figure(fig, output_path, close=False)
