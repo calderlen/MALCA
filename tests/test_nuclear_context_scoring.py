@@ -216,7 +216,7 @@ def test_enrichment_no_match_outputs_are_valid(monkeypatch, tmp_path: Path) -> N
 def test_spectra_summary_carries_redshift_and_type(monkeypatch, tmp_path: Path) -> None:
     targets = pd.DataFrame([{"candidate_id": "C1", "ra_deg": 10.0, "dec_deg": 20.0}])
 
-    def fake_spectra_query(coords, *, survey_specs, representative, radius_arcsec, chunk_size, show_progress=False, progress_desc=None, tap_timeout=None):
+    def fake_spectra_query(coords, *, survey_specs, representative, radius_arcsec, chunk_size, show_progress=False, progress_desc=None, **kwargs):
         survey = next(iter(survey_specs))
         return pd.DataFrame(
             [
