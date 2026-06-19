@@ -1225,8 +1225,9 @@ def plot_efficiency_jointplot(
     
     # Contours
     try:
-        cs = ax.contour(x_centers, y_centers, smoothed_eff, levels=[0.5, 0.9], colors='black', alpha=0.9, linewidths=0.6)
-        texts = ax.clabel(cs, inline=True, fontsize=text["label"]*0.8, fmt='%.1f')
+        cs = ax.contour(x_centers, y_centers, smoothed_eff, levels=[0.5, 0.9, 0.99], colors='black', alpha=0.9, linewidths=0.6)
+        fmt_dict = {0.5: '0.5', 0.9: '0.9', 0.99: '0.99'}
+        texts = ax.clabel(cs, inline=True, fontsize=text["label"]*0.8, fmt=fmt_dict, manual=[(5, 0.6), (50, 0.6), (150, 0.6)])
         for t in texts:
             t.set_rotation(0)
     except Exception:
@@ -1242,15 +1243,19 @@ def plot_efficiency_jointplot(
         eff_y = np.nanmean(smoothed_eff, axis=1) # average over x
     
     ax_histx.plot(x_centers, eff_x, color="black", lw=0.6)
-    ax_histx.set_ylim(0, 1.05)
-    ax_histx.tick_params(axis="x", labelbottom=False)
+    ax_histx.set_ylim(0, 1)
+    ax_histx.set_yticks([0, 1])
+    ax_histx.xaxis.tick_top()
+    ax_histx.xaxis.set_label_position("top")
+    ax_histx.tick_params(axis="x", labeltop=True, labelbottom=False, labelsize=text["label"]*0.75)
     ax_histx.yaxis.tick_left()
     ax_histx.yaxis.set_label_position("left")
     ax_histx.set_ylabel("Efficiency", fontsize=text["label"]*0.85)
     ax_histx.tick_params(axis="y", labelsize=text["label"]*0.75)
     
     ax_histy.plot(eff_y, y_centers, color="black", lw=0.6)
-    ax_histy.set_xlim(0, 1.05)
+    ax_histy.set_xlim(0, 1)
+    ax_histy.set_xticks([0, 1])
     ax_histy.invert_xaxis()
     ax_histy.tick_params(axis="y", labelleft=True, labelright=False)
     ax_histy.xaxis.tick_top()
