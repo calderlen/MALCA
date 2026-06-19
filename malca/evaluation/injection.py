@@ -1234,7 +1234,7 @@ def plot_efficiency_jointplot(
     # Contours
     try:
         cs = ax.contour(x_centers, y_centers, smoothed_eff, levels=[0.5, 0.9, 0.99], colors='black', alpha=0.9, linewidths=0.6)
-        texts = ax.clabel(cs, inline=True, fontsize=text["label"]*0.8, fmt='%g', manual=[(6, 0.6), (20, 0.6), (80, 0.8)])
+        texts = ax.clabel(cs, inline=True, inline_spacing=10, fontsize=text["label"]*0.8, fmt='%g', manual=[(6, 0.6), (20, 0.6), (200, 0.4)])
         for t in texts:
             t.set_rotation(0)
     except Exception:
@@ -1263,7 +1263,7 @@ def plot_efficiency_jointplot(
     ax_histx.plot(x_centers, eff_x, color="black", lw=0.6)
     ax_histx.set_ylim(0, 1)
     ax_histx.set_yticks([0, 1])
-    ax_histx.tick_params(axis="x", bottom=False, top=True, labelbottom=False, labeltop=False, which="both")
+    ax_histx.tick_params(axis="x", bottom=False, top=False, labelbottom=False, labeltop=False, which="both")
     ax_histx.yaxis.tick_right()
     ax_histx.yaxis.set_label_position("right")
     ax_histx.set_ylabel("Efficiency", fontsize=text["label"]*0.85)
@@ -1281,13 +1281,13 @@ def plot_efficiency_jointplot(
     ax_histy.tick_params(axis="x", labelsize=text["label"]*0.75)
     ax_histy.set_ylabel(ylabel, fontsize=text["label"])
     
-    for axis in [ax_histx, ax_histy]:
-        axis.tick_params(which="major", length=8)
-        axis.tick_params(which="minor", length=4)
-    
     # Colorbar
     cax = divider.append_axes("right", size="7%", pad=0.1)
     cbar = plt.colorbar(im, cax=cax, orientation='vertical')
+    cbar.set_ticks([0.0, 0.2, 0.4, 0.6, 0.8, 1.0])
+    cax.yaxis.set_ticks([0.1, 0.3, 0.5, 0.7, 0.9], minor=True)
+    import matplotlib.ticker as ticker
+    cax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
     cax.yaxis.set_ticks_position('right')
     cax.yaxis.set_label_position('right')
     cbar.set_label("Efficiency", fontsize=text["label"], labelpad=8)
