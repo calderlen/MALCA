@@ -688,7 +688,7 @@ def main():
     parser.add_argument('--amp-min', type=float, default=1.05, help='Minimum injected magnification (Amax)')
     parser.add_argument('--amp-max', type=float, default=100.0, help='Maximum injected magnification (Amax)')
     parser.add_argument('--dur-min', type=float, default=1.0, help='Minimum injected Einstein time (tE in days)')
-    parser.add_argument('--dur-max', type=float, default=300.0, help='Maximum injected Einstein time (tE in days)')
+    parser.add_argument('--dur-max', type=float, default=500.0, help='Maximum injected Einstein time (tE in days)')
     parser.add_argument('--measure-pre-injection', action='store_true', help='Measure fit before injecting to establish clean baseline')
     parser.add_argument('--overwrite', action='store_true',
                         help='Overwrite existing output')
