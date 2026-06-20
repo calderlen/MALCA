@@ -1333,7 +1333,7 @@ def plot_efficiency_jointplot(
     ax_histy.set_ylabel(ylabel, fontsize=text["label"])
     
     # Colorbar
-    cax_pad = 0.6 if r"\delta" in ylabel else 0.15
+    cax_pad = 0.4 if r"\delta" in ylabel else 0.15
     cax = divider.append_axes("right", size="7%", pad=cax_pad)
     cbar = plt.colorbar(im, cax=cax, orientation='vertical')
     cbar.set_ticks([0.0, 0.2, 0.4, 0.6, 0.8, 1.0])
