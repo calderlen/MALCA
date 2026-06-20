@@ -1108,6 +1108,7 @@ def plot_detection_efficiency(
     figsize = FIG_SINGLE_COL_HEATMAP
     text = scaled_publication_text_sizes(figsize)
     fig, ax = plt.subplots(figsize=figsize)
+    ax.set_box_aspect(1)
     im = ax.pcolormesh(
         dur_centers,
         amp_centers,
@@ -1205,6 +1206,7 @@ def plot_efficiency_jointplot(
     figsize = FIG_SINGLE_COL_HEATMAP
     text = scaled_publication_text_sizes(figsize)
     fig, ax = plt.subplots(figsize=figsize)
+    ax.set_box_aspect(1)
     
     from astropy.convolution import convolve, Gaussian2DKernel
     
@@ -1331,7 +1333,7 @@ def plot_efficiency_jointplot(
     ax_histy.set_ylabel(ylabel, fontsize=text["label"])
     
     # Colorbar
-    cax_pad = 0.8 if r"\delta" in ylabel else 0.1
+    cax_pad = 0.6 if r"\delta" in ylabel else 0.15
     cax = divider.append_axes("right", size="7%", pad=cax_pad)
     cbar = plt.colorbar(im, cax=cax, orientation='vertical')
     cbar.set_ticks([0.0, 0.2, 0.4, 0.6, 0.8, 1.0])

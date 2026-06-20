@@ -523,6 +523,7 @@ def plot_efficiency_map(
     )
 
     fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_HEATMAP)
+    ax.set_box_aspect(1)
     
     # Plot heatmap
     X, Y = np.meshgrid(x_edge, y_edge)
