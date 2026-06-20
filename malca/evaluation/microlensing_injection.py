@@ -505,6 +505,9 @@ def plot_efficiency_map(
     bins_tE: int = 15,
     bins_Amax: int = 15
 ):
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
+    from astropy.convolution import convolve, Gaussian2DKernel
+
     apply_publication_rcparams(plt)
     df_clean = df.dropna(subset=['tE', 'Amax', 'recovered'])
 
@@ -520,6 +523,10 @@ def plot_efficiency_map(
         log_tE, log_Amax, recovered,
         statistic='mean', bins=[tE_bins, Amax_bins]
     )
+    
+    # Smooth with NaN handling
+    kernel = Gaussian2DKernel(x_stddev=1.0)
+    smoothed_eff = convolve(stat.T, kernel, boundary='extend', preserve_nan=False)
 
     fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_HEATMAP)
     
@@ -527,30 +534,78 @@ def plot_efficiency_map(
     X, Y = np.meshgrid(x_edge, y_edge)
     cmap = plt.cm.viridis
     cmap.set_bad(color='0.9')
-    mesh = ax.pcolormesh(X, Y, stat.T, cmap=cmap, vmin=0, vmax=1)
+    
+    xc = (x_edge[:-1] + x_edge[1:]) / 2
+    yc = (y_edge[:-1] + y_edge[1:]) / 2
+    
+    levels_contourf = np.linspace(0.0, 1.0, 100)
+    im = ax.contourf(
+        xc,
+        yc,
+        smoothed_eff,
+        levels=levels_contourf,
+        cmap=cmap,
+        extend='both'
+    )
+    
+    # Rasterize
+    try:
+        for c in im.collections:
+            c.set_edgecolor("face")
+            c.set_rasterized(True)
+    except AttributeError:
+        im.set_edgecolor("face")
+        im.set_rasterized(True)
     
     # Add contours
     mask = ~np.isnan(stat.T)
     if np.any(mask):
-        xc = (x_edge[:-1] + x_edge[1:]) / 2
-        yc = (y_edge[:-1] + y_edge[1:]) / 2
         XC, YC = np.meshgrid(xc, yc)
         ax.contour(
             XC,
             YC,
-            stat.T,
+            smoothed_eff,
             levels=[0.1, 0.5, 0.9],
             colors='white',
             alpha=0.8,
             linewidths=1.0,
             linestyles=[':', '--', '-']
         )
+        
+    # Marginal axes
+    divider = make_axes_locatable(ax)
+    ax_histx = divider.append_axes("top", size="20%", pad=0.15, sharex=ax)
+    ax_histy = divider.append_axes("left", size="20%", pad=0.15, sharey=ax)
     
-    cbar = fig.colorbar(mesh, ax=ax, pad=0.15, label='Recovery Efficiency')
+    with np.errstate(invalid='ignore'):
+        eff_x = np.nanmean(smoothed_eff, axis=0) # avg over Amax
+        eff_y = np.nanmean(smoothed_eff, axis=1) # avg over tE
+        
+    # ax_histx (top)
+    ax_histx.plot(xc, eff_x, color="black", lw=0.6)
+    ax_histx.set_ylim(0, 1)
+    ax_histx.set_yticks([0, 1])
+    ax_histx.tick_params(axis="x", bottom=False, top=True, labelbottom=False, labeltop=False, which="both")
+    ax_histx.yaxis.tick_right()
+    ax_histx.yaxis.set_label_position("right")
+    ax_histx.set_ylabel("Efficiency", fontsize=10)
+    ax_histx.tick_params(axis="y", labelsize=8)
+    
+    # ax_histy (left)
+    ax_histy.plot(eff_y, yc, color="black", lw=0.6)
+    ax_histy.set_xlim(0, 1)
+    ax_histy.set_xticks([0, 1])
+    ax_histy.invert_xaxis()
+    ax_histy.tick_params(axis="y", labelleft=True, labelright=False)
+    ax_histy.xaxis.tick_top()
+    ax_histy.xaxis.set_label_position("top")
+    ax_histy.set_xlabel("Efficiency", fontsize=10)
+    ax_histy.tick_params(axis="x", labelsize=8)
+    ax_histy.set_ylabel(r'$A_{max}$')
     
     # Set tick labels to original scale
     ax.set_xlabel(r'$t_E$ (days)')
-    ax.set_ylabel(r'$A_{max}$')
+    ax.tick_params(axis="y", labelleft=False)
 
     x_ticks = np.linspace(log_tE.min(), log_tE.max(), 5)
     y_ticks = np.linspace(log_Amax.min(), log_Amax.max(), 5)
@@ -558,8 +613,8 @@ def plot_efficiency_map(
     ax.set_xticks(x_ticks)
     ax.set_xticklabels([f"{10**x:.1f}" for x in x_ticks])
     
-    ax.set_yticks(y_ticks)
-    ax.set_yticklabels([f"{10**y:.1f}" for y in y_ticks])
+    ax_histy.set_yticks(y_ticks)
+    ax_histy.set_yticklabels([f"{10**y:.1f}" for y in y_ticks])
     
     # Add a secondary y-axis for magnitude drop (Delta m)
     def logA_to_dm(logA):
@@ -574,6 +629,15 @@ def plot_efficiency_map(
     secax.set_yticklabels([f"{dm:.1f}" for dm in dm_ticks])
     secax.set_ylabel(r"$\Delta m$ [mag]")
 
+    cax = divider.append_axes("right", size="7%", pad=0.5)
+    cbar = plt.colorbar(im, cax=cax, orientation='vertical')
+    cbar.set_ticks([0.0, 0.2, 0.4, 0.6, 0.8, 1.0])
+    import matplotlib.ticker as ticker
+    cax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
+    cax.yaxis.set_ticks_position('right')
+    cax.yaxis.set_label_position('right')
+    cbar.set_label("Recovery Efficiency", fontsize=10, labelpad=8)
+    
     fig.tight_layout()
     save_publication_figure(fig, out_path, dpi=300)
     print(f"Efficiency map saved to {out_path}")
@@ -599,12 +663,20 @@ def calculate_event_rate(df: pd.DataFrame, n_stars_monitored: float, duration_ye
     else:
         print("Overall efficiency is 0, cannot calculate event rate.")
 
+from datetime import datetime
+import json
+import argparse
+
 def main():
     parser = argparse.ArgumentParser(description='Run microlensing injection-recovery and generate efficiency map')
     parser.add_argument('--manifest', type=str, default=str(DEFAULT_OUTPUT_DIR / "lc_manifest_all.parquet"),
                         help='Path to parquet or csv manifest of clean lightcurves (defaults to standard cluster manifest)')
-    parser.add_argument('--output', type=str, required=True,
-                        help='Path to output parquet file')
+    parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUTPUT_DIR / "microlensing_injection",
+                        help=f"Base output directory (default: {DEFAULT_OUTPUT_DIR / 'microlensing_injection'})")
+    parser.add_argument("--run-tag", type=str, default=None,
+                        help="Optional tag to append to run directory name")
+    parser.add_argument('--output', type=Path, default=None,
+                        help='Override Parquet output path (default: <out-dir>/<timestamp>/microlensing_results.parquet)')
     parser.add_argument('--trials', type=int, default=1000,
                         help='Number of injection trials to run')
     parser.add_argument('--workers', type=int, default=1,
@@ -620,31 +692,61 @@ def main():
     parser.add_argument('--measure-pre-injection', action='store_true', help='Measure fit before injecting to establish clean baseline')
     parser.add_argument('--overwrite', action='store_true',
                         help='Overwrite existing output')
+    parser.add_argument('--plot-only', action='store_true',
+                        help='Only generate the plot from an existing parquet file')
+    parser.add_argument('--bins-te', type=int, default=15, help='Number of bins for tE in plot')
+    parser.add_argument('--bins-amax', type=int, default=15, help='Number of bins for Amax in plot')
     args = parser.parse_args()
 
-    manifest_path = Path(args.manifest)
-    if manifest_path.suffix == '.parquet':
-        df_manifest = pd.read_parquet(manifest_path)
-    else:
-        df_manifest = pd.read_csv(manifest_path)
+    # Set up output paths with timestamped run directory
+    base_out_dir = Path(args.out_dir)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_name = f"{timestamp}_{args.run_tag}" if args.run_tag else timestamp
+    run_dir = base_out_dir / run_name
+    run_dir.mkdir(parents=True, exist_ok=True)
 
-    output_parquet_path = Path(args.output)
+    output_parquet_path = args.output if args.output else (run_dir / "microlensing_results.parquet")
     output_plot_path = output_parquet_path.with_suffix('.pdf')
 
-    run_microlensing_injection_recovery(
-        control_sample=df_manifest,
-        total_trials=args.trials,
-        workers=args.workers,
-        Amax_range=(args.amp_min, args.amp_max),
-        tE_range=(args.dur_min, args.dur_max),
-        measure_pre_injection=args.measure_pre_injection,
-        output_path=output_parquet_path,
-        overwrite=args.overwrite,
-    )
+    # Save run parameters to JSON
+    run_params_file = run_dir / "run_params.json"
+    run_params = vars(args).copy()
+    for key, value in run_params.items():
+        if isinstance(value, Path):
+            run_params[key] = str(value)
+    with open(run_params_file, "w") as f:
+        json.dump(run_params, f, indent=2, default=str)
 
-    print("Generating efficiency map...")
+    # Create/update 'latest' symlink
+    latest_link = base_out_dir / "latest"
+    if latest_link.exists() or latest_link.is_symlink():
+        latest_link.unlink()
+    try:
+        latest_link.symlink_to(run_name)
+    except Exception as e:
+        pass # Symlinks might fail on some filesystems
+
+    if not args.plot_only:
+        manifest_path = Path(args.manifest)
+        if manifest_path.suffix == '.parquet':
+            df_manifest = pd.read_parquet(manifest_path)
+        else:
+            df_manifest = pd.read_csv(manifest_path)
+
+        run_microlensing_injection_recovery(
+            control_sample=df_manifest,
+            total_trials=args.trials,
+            workers=args.workers,
+            Amax_range=(args.amp_min, args.amp_max),
+            tE_range=(args.dur_min, args.dur_max),
+            measure_pre_injection=args.measure_pre_injection,
+            output_path=output_parquet_path,
+            overwrite=args.overwrite,
+        )
+
+    print(f"Generating efficiency map in {output_plot_path}...")
     df_results = pd.read_parquet(output_parquet_path)
-    plot_efficiency_map(df_results, output_plot_path)
+    plot_efficiency_map(df_results, output_plot_path, bins_tE=args.bins_te, bins_Amax=args.bins_amax)
     calculate_event_rate(df_results, args.n_stars, args.duration)
 
 if __name__ == '__main__':
