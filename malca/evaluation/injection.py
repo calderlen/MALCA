@@ -1278,7 +1278,7 @@ def plot_efficiency_jointplot(
             ax.set_xlim(x_edges.min(), x_edges.max())
         
     if "Fractional Depth" in ylabel:
-        ylabel = r"Fractional Depth ($\delta$)"
+        ylabel = r"$\delta$"
         ax.set_ylim(0.0, 1.0)
         ax.set_yticks([0.0, 0.2, 0.4, 0.6, 0.8, 1.0])
         ax.yaxis.set_ticks([0.1, 0.3, 0.5, 0.7, 0.9], minor=True)

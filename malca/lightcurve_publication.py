@@ -85,7 +85,7 @@ CMD_BUCKET_STYLE: dict[str, dict[str, object]] = {
 }
 
 # Legacy-sized figures scaled to publication column widths (3.5" single / 7.0" two-column).
-FIG_SINGLE_COL_HEATMAP = (FIG_SINGLE_COL_WIDTH, FIG_SINGLE_COL_WIDTH * 8 / 10)  # was (10, 8)
+FIG_SINGLE_COL_HEATMAP = (FIG_SINGLE_COL_WIDTH, FIG_SINGLE_COL_WIDTH)  # was (10, 10)
 FIG_SINGLE_COL_LC_WIDE = (FIG_SINGLE_COL_WIDTH, FIG_SINGLE_COL_WIDTH * 6 / 10)  # was (10, 6)
 FIG_SINGLE_COL_MEDIUM = (FIG_SINGLE_COL_WIDTH, FIG_SINGLE_COL_WIDTH * 6 / 8)  # was (8, 6)
 FIG_SINGLE_COL_COMPACT = (FIG_SINGLE_COL_WIDTH, FIG_SINGLE_COL_WIDTH * 5 / 6)  # was (6, 5)
