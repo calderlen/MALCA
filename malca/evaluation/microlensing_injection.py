@@ -20,6 +20,9 @@ from scipy.stats import binned_statistic_2d
 
 from malca.config import SKYPATROL_CACHE_DIR
 from malca.lightcurve_publication import apply_publication_rcparams, save_publication_figure, FIG_SINGLE_COL_HEATMAP
+
+import sys
+sys.path.append(str(Path.cwd()))
 from scripts.microlensing import fit_candidate_context, _solve_u0_from_A0, _prepare_lightcurve_df
 from malca.evaluation.injection import _resolve_lc_dir
 from malca.config import (
