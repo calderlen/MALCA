@@ -62,7 +62,7 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 import numpy as np
 import pandas as pd
-import healpy as hp
+
 from astroquery.gaia import Gaia
 
 from malca.lightcurve_publication import (
