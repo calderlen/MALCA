@@ -191,15 +191,17 @@ def _simulate_microlensing_trial(
         pre_injection_result = {}
         if measure_pre_injection:
             pre_context = {
-                "lightcurves": [
-                    {
-                        "df": df_lc,
-                        "filter": band_label,
-                        "survey": "ASAS-SN",
-                        "t_min": t_min,
-                        "t_max": t_max
-                    }
-                ]
+                'candidate_id': asas_sn_id,
+                'asas_sn_id': asas_sn_id,
+                'row': {},
+                'payload': {
+                    'candidate_id': asas_sn_id,
+                    'ra_deg': 0.0,
+                    'dec_deg': 0.0,
+                },
+                'lc_path': Path("pre_injected.dat"),
+                'df': df_lc,
+                'band_label': band_label,
             }
             pre_fit = fit_candidate_context(pre_context)
             if pre_fit is not None:
