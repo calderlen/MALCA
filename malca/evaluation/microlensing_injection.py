@@ -19,9 +19,9 @@ import matplotlib.pyplot as plt
 from scipy.stats import binned_statistic_2d
 
 from malca.config import SKYPATROL_CACHE_DIR
-from malca.lightcurve_io import _prepare_lightcurve_df, _resolve_lc_dir
 from malca.lightcurve_publication import apply_publication_rcparams, save_publication_figure, FIG_SINGLE_COL_HEATMAP
-from scripts.microlensing import fit_candidate_context, _solve_u0_from_A0
+from scripts.microlensing import fit_candidate_context, _solve_u0_from_A0, _prepare_lightcurve_df
+from malca.evaluation.injection import _resolve_lc_dir
 from malca.config import (
     INJECTION_MAX_ATTEMPTS,
     INJECTION_MAG_LO,
