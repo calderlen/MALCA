@@ -681,9 +681,9 @@ def main():
                         help='Number of injection trials to run')
     parser.add_argument('--workers', type=int, default=1,
                         help='Number of workers for multiprocessing')
-    parser.add_argument('--n-stars', type=float, default=1e7,
+    parser.add_argument('--n-stars', type=float, default=17e6,
                         help='Number of monitored stars (for Gamma calculations)')
-    parser.add_argument('--duration', type=float, default=5.0,
+    parser.add_argument('--duration', type=float, default=12.0,
                         help='Survey duration in years (for Gamma calculations)')
     parser.add_argument('--amp-min', type=float, default=1.05, help='Minimum injected magnification (Amax)')
     parser.add_argument('--amp-max', type=float, default=100.0, help='Maximum injected magnification (Amax)')
