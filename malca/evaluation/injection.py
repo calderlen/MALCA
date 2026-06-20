@@ -1108,7 +1108,6 @@ def plot_detection_efficiency(
     figsize = FIG_SINGLE_COL_HEATMAP
     text = scaled_publication_text_sizes(figsize)
     fig, ax = plt.subplots(figsize=figsize)
-    ax.set_box_aspect(1)
     im = ax.pcolormesh(
         dur_centers,
         amp_centers,
@@ -1206,7 +1205,6 @@ def plot_efficiency_jointplot(
     figsize = FIG_SINGLE_COL_HEATMAP
     text = scaled_publication_text_sizes(figsize)
     fig, ax = plt.subplots(figsize=figsize)
-    ax.set_box_aspect(1)
     
     from astropy.convolution import convolve, Gaussian2DKernel
     
