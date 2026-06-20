@@ -113,6 +113,7 @@ def _simulate_microlensing_trial(
     Amax_range: tuple[float, float],
     tE_range: tuple[float, float],
     mag_err_poly: np.poly1d | None,
+    measure_pre_injection: bool,
     seed: int,
 ) -> dict:
     rng = np.random.default_rng(seed + int(trial_index))
@@ -183,6 +184,41 @@ def _simulate_microlensing_trial(
         if not np.isfinite(t_min) or not np.isfinite(t_max) or (t_max - t_min <= 4 * tE):
             return dict(trial_index=trial_index, Amax=Amax, tE=tE, asas_sn_id=asas_sn_id, recovered=False, error="invalid_time_range")
 
+        # Measure pre-injection detection rate if requested
+        pre_injection_result = {}
+        if measure_pre_injection:
+            pre_context = {
+                "lightcurves": [
+                    {
+                        "df": df_lc,
+                        "filter": band_label,
+                        "survey": "ASAS-SN",
+                        "t_min": t_min,
+                        "t_max": t_max
+                    }
+                ]
+            }
+            pre_fit = fit_candidate_context(pre_context)
+            if pre_fit is not None:
+                p_summary = pre_fit.get('summary', {})
+                p_fit_ok = bool(p_summary.get('fit_ok', False))
+                p_best_model = p_summary.get('best_model')
+                p_paczynski_summary = pre_fit.get('models', {}).get('paczynski', {})
+                p_reduced_chi2 = p_paczynski_summary.get('reduced_chi2', float('inf'))
+                p_is_paczynski = (p_best_model == 'paczynski')
+                p_good_fit = p_fit_ok and p_reduced_chi2 < 10.0
+                pre_injection_result = {
+                    "pre_injection_recovered": p_is_paczynski and p_good_fit,
+                    "pre_injection_fit_ok": p_fit_ok,
+                    "pre_injection_best_model": p_best_model
+                }
+            else:
+                pre_injection_result = {
+                    "pre_injection_recovered": False,
+                    "pre_injection_fit_ok": False,
+                    "pre_injection_error": "fit_returned_none"
+                }
+
         # Inject curve inside the observing window, leaving 2 tE buffer at edges
         t_center = rng.uniform(t_min + 2 * tE, t_max - 2 * tE)
 
@@ -239,7 +275,8 @@ def _simulate_microlensing_trial(
             reduced_chi2=reduced_chi2,
             recovered_tE=recovered_tE,
             n_points=len(df_injected),
-            error=None
+            error=None,
+            **pre_injection_result
         )
     except Exception as exc:
         return dict(
@@ -258,6 +295,7 @@ def _init_worker(
     Amax_range: tuple[float, float],
     tE_range: tuple[float, float],
     mag_err_poly: np.poly1d | None,
+    measure_pre_injection: bool,
     seed: int,
 ) -> None:
     _GLOBAL["control_ids"] = control_ids
@@ -265,6 +303,7 @@ def _init_worker(
     _GLOBAL["Amax_range"] = Amax_range
     _GLOBAL["tE_range"] = tE_range
     _GLOBAL["mag_err_poly"] = mag_err_poly
+    _GLOBAL["measure_pre_injection"] = measure_pre_injection
     _GLOBAL["seed"] = seed
 
 
@@ -279,6 +318,7 @@ def _process_trial_batch(trial_indices: list[int]) -> list[dict]:
                 Amax_range=_GLOBAL["Amax_range"],
                 tE_range=_GLOBAL["tE_range"],
                 mag_err_poly=_GLOBAL["mag_err_poly"],
+                measure_pre_injection=bool(_GLOBAL["measure_pre_injection"]),
                 seed=int(_GLOBAL["seed"]),
             )
         )
@@ -291,6 +331,7 @@ def run_microlensing_injection_recovery(
     total_trials: int = 1000,
     Amax_range: tuple[float, float] = (1.05, 100.0),
     tE_range: tuple[float, float] = (1.0, 300.0),
+    measure_pre_injection: bool = False,
     mag_err_order: int = 5,
     mag_err_sample: int = 100,
     seed: int = 42,
@@ -401,6 +442,7 @@ def run_microlensing_injection_recovery(
                 Amax_range=Amax_range,
                 tE_range=tE_range,
                 mag_err_poly=mag_err_poly,
+                measure_pre_injection=measure_pre_injection,
                 seed=seed,
             )
             results.append(res)
@@ -425,6 +467,7 @@ def run_microlensing_injection_recovery(
             Amax_range,
             tE_range,
             mag_err_poly,
+            measure_pre_injection,
             seed,
         ),
     ) as ex:
@@ -541,8 +584,8 @@ def calculate_event_rate(df: pd.DataFrame, n_stars_monitored: float, duration_ye
 
 def main():
     parser = argparse.ArgumentParser(description='Run microlensing injection-recovery and generate efficiency map')
-    parser.add_argument('--manifest', type=str, required=True,
-                        help='Path to parquet or csv manifest of clean lightcurves')
+    parser.add_argument('--manifest', type=str, default=str(DEFAULT_OUTPUT_DIR / "lc_manifest_all.parquet"),
+                        help='Path to parquet or csv manifest of clean lightcurves (defaults to standard cluster manifest)')
     parser.add_argument('--output', type=str, required=True,
                         help='Path to output parquet file')
     parser.add_argument('--trials', type=int, default=1000,
@@ -553,6 +596,11 @@ def main():
                         help='Number of monitored stars (for Gamma calculations)')
     parser.add_argument('--duration', type=float, default=5.0,
                         help='Survey duration in years (for Gamma calculations)')
+    parser.add_argument('--amp-min', type=float, default=1.05, help='Minimum injected magnification (Amax)')
+    parser.add_argument('--amp-max', type=float, default=100.0, help='Maximum injected magnification (Amax)')
+    parser.add_argument('--dur-min', type=float, default=1.0, help='Minimum injected Einstein time (tE in days)')
+    parser.add_argument('--dur-max', type=float, default=300.0, help='Maximum injected Einstein time (tE in days)')
+    parser.add_argument('--measure-pre-injection', action='store_true', help='Measure fit before injecting to establish clean baseline')
     parser.add_argument('--overwrite', action='store_true',
                         help='Overwrite existing output')
     args = parser.parse_args()
@@ -570,6 +618,9 @@ def main():
         control_sample=df_manifest,
         total_trials=args.trials,
         workers=args.workers,
+        Amax_range=(args.amp_min, args.amp_max),
+        tE_range=(args.dur_min, args.dur_max),
+        measure_pre_injection=args.measure_pre_injection,
         output_path=output_parquet_path,
         overwrite=args.overwrite,
     )
