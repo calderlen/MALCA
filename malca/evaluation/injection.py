@@ -1382,7 +1382,7 @@ def plot_efficiency_marginalized(
         contour_kwargs = {
             "levels": [0.5],
             "manual1": [(13.5, 0.1)],
-            "inline_spacing1": 10,
+            "inline_spacing1": 18,
             "manual2": []
         }
     elif axis == "depth":
