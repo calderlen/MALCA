@@ -1395,11 +1395,10 @@ def plot_efficiency_marginalized(
         ylabel = "Median Magnitude"
         xlog = True
         contour_kwargs = {
-            "levels": [0.5, 0.9, 0.99],
-            "manual1": [(6, 14.5), (20, 14.5)],
-            "inline_spacing1": 4,
-            "manual2": [(70, 13.5)],
-            "inline_spacing2": 8
+            "levels": [0.5, 0.9],
+            "manual1": [(5, 14.0), (20, 13.5)],
+            "inline_spacing1": 6,
+            "manual2": []
         }
     else:
         raise ValueError(f"Unknown axis: {axis}. Use 'mag', 'duration', or 'depth'.")
