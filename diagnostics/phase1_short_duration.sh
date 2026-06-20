@@ -14,7 +14,7 @@ echo "==================================================================="
 echo ""
 echo "[1/4] Running baseline (current config)..."
 echo "  - Injection test (100x100 grid, 100 inj/cell = 1M trials)..."
-malca injection --run-tag "1b_baseline" \
+malca dip-injection --run-tag "1b_baseline" \
   --amp-min 0.05 --amp-max 5.0 \
   --dur-min 1 --dur-max 300 \
   --total-trials 1000000 \
@@ -32,7 +32,7 @@ malca detection-rate --run-tag "1b_baseline" \
 echo ""
 echo "[2/4] Running with shorter GP timescale (~100 days)..."
 echo "  - Injection test (100x100 grid, 100 inj/cell = 1M trials)..."
-malca injection --run-tag "1b_short_gp" \
+malca dip-injection --run-tag "1b_short_gp" \
   --amp-min 0.05 --amp-max 5.0 \
   --dur-min 1 --dur-max 300 \
   --total-trials 1000000 \
@@ -52,7 +52,7 @@ malca detection-rate --run-tag "1b_short_gp" \
 echo ""
 echo "[3/4] Running with per-camera median baseline (no GP)..."
 echo "  - Injection test (100x100 grid, 100 inj/cell = 1M trials)..."
-malca injection --run-tag "1b_median_baseline" \
+malca dip-injection --run-tag "1b_median_baseline" \
   --amp-min 0.05 --amp-max 5.0 \
   --dur-min 1 --dur-max 300 \
   --total-trials 1000000 \
@@ -72,7 +72,7 @@ malca detection-rate --run-tag "1b_median_baseline" \
 echo ""
 echo "[4/4] Running with masked GP..."
 echo "  - Injection test (100x100 grid, 100 inj/cell = 1M trials)..."
-malca injection --run-tag "1b_masked_gp" \
+malca dip-injection --run-tag "1b_masked_gp" \
   --amp-min 0.05 --amp-max 5.0 \
   --dur-min 1 --dur-max 300 \
   --total-trials 1000000 \

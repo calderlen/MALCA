@@ -367,17 +367,17 @@ malca stv-plot --results output/lc_events_results_13_13.5_filtered.parquet --out
 
 **Note:** Event scores are computed automatically during detection and included in the results table (dipper_score, dipper_n_dips, dipper_n_valid_dips columns).
 
-#### malca injection
+#### malca dip-injection
 
 ```bash
 # Full run
-malca injection --workers 10
+malca dip-injection --workers 10
 
 # Quick test with limited trials
-malca injection --total-trials 1000 --workers 10
+malca dip-injection --total-trials 1000 --workers 10
 
 # Custom manifest and output directory
-malca injection --manifest /path/to/manifest.parquet --output-dir output/injection
+malca dip-injection --manifest /path/to/manifest.parquet --output-dir output/injection
 ```
 
 See [Injection Testing output](#injection-testing) for the directory layout.

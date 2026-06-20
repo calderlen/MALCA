@@ -14,7 +14,7 @@ echo "==================================================================="
 echo ""
 echo "[1/3] Running baseline (current config)..."
 echo "  - Injection test (100x100 grid, 100 inj/cell = 1M trials)..."
-malca injection --run-tag "1a_baseline" \
+malca dip-injection --run-tag "1a_baseline" \
   --amp-min 0.05 --amp-max 5.0 \
   --dur-min 1 --dur-max 300 \
   --total-trials 1000000 \
@@ -32,7 +32,7 @@ malca detection-rate --run-tag "1a_baseline" \
 echo ""
 echo "[2/3] Running with min-mag-offset=0.0 (remove filter)..."
 echo "  - Injection test (100x100 grid, 100 inj/cell = 1M trials)..."
-malca injection --run-tag "1a_no_mag_offset" \
+malca dip-injection --run-tag "1a_no_mag_offset" \
   --amp-min 0.05 --amp-max 5.0 \
   --dur-min 1 --dur-max 300 \
   --total-trials 1000000 \
@@ -52,7 +52,7 @@ malca detection-rate --run-tag "1a_no_mag_offset" \
 echo ""
 echo "[3/3] Running with lower LogBF threshold (3.0)..."
 echo "  - Injection test (100x100 grid, 100 inj/cell = 1M trials)..."
-malca injection --run-tag "1a_low_logbf" \
+malca dip-injection --run-tag "1a_low_logbf" \
   --amp-min 0.05 --amp-max 5.0 \
   --dur-min 1 --dur-max 300 \
   --total-trials 1000000 \

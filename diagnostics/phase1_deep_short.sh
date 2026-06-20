@@ -14,7 +14,7 @@ echo "==================================================================="
 echo ""
 echo "[1/3] Running baseline (current config)..."
 echo "  - Injection test (100x100 grid, 100 inj/cell = 1M trials)..."
-malca injection --run-tag "1c_baseline" \
+malca dip-injection --run-tag "1c_baseline" \
   --amp-min 0.05 --amp-max 5.0 \
   --dur-min 1 --dur-max 300 \
   --total-trials 1000000 \
@@ -32,7 +32,7 @@ malca detection-rate --run-tag "1c_baseline" \
 echo ""
 echo "[2/3] Running with extended mag grid (--mag-max-dip 18.0)..."
 echo "  - Injection test (100x100 grid, 100 inj/cell = 1M trials)..."
-malca injection --run-tag "1c_extended_mag_grid" \
+malca dip-injection --run-tag "1c_extended_mag_grid" \
   --amp-min 0.05 --amp-max 5.0 \
   --dur-min 1 --dur-max 300 \
   --total-trials 1000000 \
@@ -52,7 +52,7 @@ malca detection-rate --run-tag "1c_extended_mag_grid" \
 echo ""
 echo "[3/3] Running with very deep mag grid (--mag-max-dip 20.0)..."
 echo "  - Injection test (100x100 grid, 100 inj/cell = 1M trials)..."
-malca injection --run-tag "1c_deep_mag_grid" \
+malca dip-injection --run-tag "1c_deep_mag_grid" \
   --amp-min 0.05 --amp-max 5.0 \
   --dur-min 1 --dur-max 300 \
   --total-trials 1000000 \
