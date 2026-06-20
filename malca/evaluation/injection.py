@@ -1237,7 +1237,9 @@ def plot_efficiency_jointplot(
         contour_kwargs = {
             "levels": [0.5, 0.9, 0.99],
             "manual1": [(6, 0.6), (20, 0.6)],
-            "manual2": [(70, 0.5)]
+            "inline_spacing1": 4,
+            "manual2": [(70, 0.5)],
+            "inline_spacing2": 8
         }
         
     try:
@@ -1245,9 +1247,9 @@ def plot_efficiency_jointplot(
         texts1 = []
         texts2 = []
         if contour_kwargs.get("manual1"):
-            texts1 = ax.clabel(cs, inline=True, inline_spacing=4, fontsize=text["label"]*0.8, fmt='%g', manual=contour_kwargs["manual1"])
+            texts1 = ax.clabel(cs, inline=True, inline_spacing=contour_kwargs.get("inline_spacing1", 5), fontsize=text["label"]*0.8, fmt='%g', manual=contour_kwargs["manual1"])
         if contour_kwargs.get("manual2"):
-            texts2 = ax.clabel(cs, inline=True, inline_spacing=8, fontsize=text["label"]*0.8, fmt='%g', manual=contour_kwargs["manual2"])
+            texts2 = ax.clabel(cs, inline=True, inline_spacing=contour_kwargs.get("inline_spacing2", 5), fontsize=text["label"]*0.8, fmt='%g', manual=contour_kwargs["manual2"])
         for t in texts1 + texts2:
             t.set_rotation(0)
     except Exception:
@@ -1364,7 +1366,9 @@ def plot_efficiency_marginalized(
         contour_kwargs = {
             "levels": [0.5, 0.9, 0.99],
             "manual1": [(6, 0.6), (20, 0.6)],
-            "manual2": [(70, 0.5)]
+            "inline_spacing1": 4,
+            "manual2": [(70, 0.5)],
+            "inline_spacing2": 8
         }
     elif axis == "duration":
         eff_2d = np.nanmean(cube["efficiency"], axis=1)
@@ -1378,6 +1382,7 @@ def plot_efficiency_marginalized(
         contour_kwargs = {
             "levels": [0.5],
             "manual1": [(13.5, 0.1)],
+            "inline_spacing1": 10,
             "manual2": []
         }
     elif axis == "depth":
@@ -1392,7 +1397,9 @@ def plot_efficiency_marginalized(
         contour_kwargs = {
             "levels": [0.5, 0.9, 0.99],
             "manual1": [(6, 14.5), (20, 14.5)],
-            "manual2": [(70, 13.5)]
+            "inline_spacing1": 4,
+            "manual2": [(70, 13.5)],
+            "inline_spacing2": 8
         }
     else:
         raise ValueError(f"Unknown axis: {axis}. Use 'mag', 'duration', or 'depth'.")
