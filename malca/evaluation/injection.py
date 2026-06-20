@@ -1277,10 +1277,21 @@ def plot_efficiency_jointplot(
         else:
             ax.set_xlim(x_edges.min(), x_edges.max())
         
-    if ylabel == "Fractional Depth":
+    if "Fractional Depth" in ylabel:
+        ylabel = r"Fractional Depth ($\delta$)"
         ax.set_ylim(0.0, 1.0)
         ax.set_yticks([0.0, 0.2, 0.4, 0.6, 0.8, 1.0])
         ax.yaxis.set_ticks([0.1, 0.3, 0.5, 0.7, 0.9], minor=True)
+        
+        # Add a secondary y-axis for magnitude drop (Delta m)
+        ax_twin = ax.twinx()
+        ax_twin.set_ylim(0.0, 1.0)
+        dm_ticks = np.array([0.1, 0.5, 1.0, 2.0, 3.0, 5.0])
+        delta_ticks = 1.0 - 10.0**(-dm_ticks / 2.5)
+        ax_twin.set_yticks(delta_ticks)
+        ax_twin.set_yticklabels([f"{dm:.1f}" for dm in dm_ticks])
+        ax_twin.set_ylabel(r"$\Delta m$ [mag]", fontsize=text["label"])
+        ax_twin.tick_params(axis="y", labelsize=text["label"]*0.75)
     elif ylabel == "Median Magnitude":
         import matplotlib.ticker as ticker
         ax.yaxis.set_major_locator(ticker.MultipleLocator(1))
@@ -1315,7 +1326,8 @@ def plot_efficiency_jointplot(
     ax_histy.set_ylabel(ylabel, fontsize=text["label"])
     
     # Colorbar
-    cax = divider.append_axes("right", size="7%", pad=0.1)
+    cax_pad = 0.8 if r"(\delta)" in ylabel else 0.1
+    cax = divider.append_axes("right", size="7%", pad=cax_pad)
     cbar = plt.colorbar(im, cax=cax, orientation='vertical')
     cbar.set_ticks([0.0, 0.2, 0.4, 0.6, 0.8, 1.0])
     cax.yaxis.set_ticks([0.1, 0.3, 0.5, 0.7, 0.9], minor=True)
