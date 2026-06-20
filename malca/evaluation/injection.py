@@ -1284,14 +1284,19 @@ def plot_efficiency_jointplot(
         ax.yaxis.set_ticks([0.1, 0.3, 0.5, 0.7, 0.9], minor=True)
         
         # Add a secondary y-axis for magnitude drop (Delta m)
-        ax_twin = ax.twinx()
-        ax_twin.set_ylim(0.0, 1.0)
+        def delta_to_dm(delta):
+            delta_safe = np.clip(delta, 0.0, 0.99999)
+            return -2.5 * np.log10(1.0 - delta_safe)
+        
+        def dm_to_delta(dm):
+            return 1.0 - 10.0**(-dm / 2.5)
+
+        secax = ax.secondary_yaxis('right', functions=(delta_to_dm, dm_to_delta))
         dm_ticks = np.array([0.1, 0.5, 1.0, 2.0, 3.0, 5.0])
-        delta_ticks = 1.0 - 10.0**(-dm_ticks / 2.5)
-        ax_twin.set_yticks(delta_ticks)
-        ax_twin.set_yticklabels([f"{dm:.1f}" for dm in dm_ticks])
-        ax_twin.set_ylabel(r"$\Delta m$ [mag]", fontsize=text["label"])
-        ax_twin.tick_params(axis="y", labelsize=text["label"]*0.75)
+        secax.set_yticks(dm_ticks)
+        secax.set_yticklabels([f"{dm:.1f}" for dm in dm_ticks])
+        secax.set_ylabel(r"$\Delta m$ [mag]", fontsize=text["label"])
+        secax.tick_params(axis="y", labelsize=text["label"]*0.75)
     elif ylabel == "Median Magnitude":
         import matplotlib.ticker as ticker
         ax.yaxis.set_major_locator(ticker.MultipleLocator(1))

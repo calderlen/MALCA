@@ -563,14 +563,17 @@ def plot_efficiency_map(
     ax.set_yticklabels([f"{10**y:.1f}" for y in y_ticks])
     
     # Add a secondary y-axis for magnitude drop (Delta m)
-    ax_twin = ax.twinx()
-    ax_twin.set_ylim(ax.get_ylim())
+    def logA_to_dm(logA):
+        return 2.5 * logA
+
+    def dm_to_logA(dm):
+        return dm / 2.5
+
+    secax = ax.secondary_yaxis('right', functions=(logA_to_dm, dm_to_logA))
     dm_ticks = np.array([0.1, 0.5, 1.0, 2.0, 3.0, 5.0])
-    # Delta_m = 2.5 * log10(Amax), and y-axis is log10(Amax)
-    y_pos = dm_ticks / 2.5
-    ax_twin.set_yticks(y_pos)
-    ax_twin.set_yticklabels([f"{dm:.1f}" for dm in dm_ticks])
-    ax_twin.set_ylabel(r"$\Delta m$ [mag]")
+    secax.set_yticks(dm_ticks)
+    secax.set_yticklabels([f"{dm:.1f}" for dm in dm_ticks])
+    secax.set_ylabel(r"$\Delta m$ [mag]")
 
     fig.tight_layout()
     save_publication_figure(fig, out_path, dpi=300)
