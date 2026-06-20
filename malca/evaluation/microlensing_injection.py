@@ -24,7 +24,7 @@ from malca.lightcurve_publication import apply_publication_rcparams, save_public
 import sys
 sys.path.append(str(Path.cwd()))
 from scripts.microlensing import fit_candidate_context, _solve_u0_from_A0, _prepare_lightcurve_df
-from malca.evaluation.injection import _resolve_lc_dir
+from malca.evaluation.injection import _resolve_lc_path
 from malca.config import (
     INJECTION_MAX_ATTEMPTS,
     INJECTION_MAG_LO,
@@ -151,15 +151,14 @@ def _simulate_microlensing_trial(
                         return dict(trial_index=trial_index, Amax=Amax, tE=tE, asas_sn_id=asas_sn_id, recovered=False, error="lc_not_found")
                     continue
             else:
-                files = list(Path(lc_dir).glob(f"*{asas_sn_id}*.dat"))
-                if not files:
-                    if Path(lc_dir).is_file():
-                        lc_path = Path(lc_dir)
-                    else:
+                lc_path = Path(lc_dir)
+                if not lc_path.is_file():
+                    # Fallback to glob only if it's a directory
+                    files = list(lc_path.glob(f"*{asas_sn_id}*.dat"))
+                    if not files:
                         if attempt == max_attempts - 1:
                             return dict(trial_index=trial_index, Amax=Amax, tE=tE, asas_sn_id=asas_sn_id, recovered=False, error="lc_not_found")
                         continue
-                else:
                     lc_path = files[0]
 
             df_lc, band_label = _prepare_lightcurve_df(lc_path, prefer_g_band=True)
@@ -379,7 +378,7 @@ def run_microlensing_injection_recovery(
     control_ids = control_sample[id_col].astype(str).to_numpy()
     control_dirs = []
     for _, row in control_sample.iterrows():
-        lc_dir = _resolve_lc_dir(row)
+        lc_dir = _resolve_lc_path(row)
         if lc_dir is None:
             control_dirs.append("")
         else:
@@ -395,7 +394,7 @@ def run_microlensing_injection_recovery(
         if idx >= mag_err_sample:
             break
         asas_sn_id = str(row[id_col])
-        lc_dir = _resolve_lc_dir(row)
+        lc_dir = _resolve_lc_path(row)
         try:
             from malca.fetch import download_lightcurve_by_id
             from malca.config import SKYPATROL_CACHE_DIR
@@ -405,13 +404,13 @@ def run_microlensing_injection_recovery(
                 if lc_path is None:
                     continue
             else:
-                files = list(Path(lc_dir).glob(f"*{asas_sn_id}*.dat"))
-                if files:
-                    lc_path = files[0]
-                elif Path(lc_dir).is_file():
-                    lc_path = Path(lc_dir)
-                else:
-                    continue
+                lc_path = Path(lc_dir)
+                if not lc_path.is_file():
+                    files = list(lc_path.glob(f"*{asas_sn_id}*.dat"))
+                    if files:
+                        lc_path = files[0]
+                    else:
+                        continue
                     
             df_lc, _ = _prepare_lightcurve_df(lc_path)
             if not df_lc.empty:

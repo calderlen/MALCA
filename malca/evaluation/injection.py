@@ -253,15 +253,16 @@ def _get_id_col(df: pd.DataFrame) -> str:
     raise KeyError("Manifest is missing a usable ID column (expected asas_sn_id/source_id/id).")
 
 
-def _resolve_lc_dir(row: pd.Series) -> Path | None:
-    if "lc_dir" in row and pd.notna(row["lc_dir"]):
-        return Path(str(row["lc_dir"]))
+def _resolve_lc_path(row: pd.Series) -> Path | None:
     if "dat_path" in row and pd.notna(row["dat_path"]):
-        return Path(str(row["dat_path"])).parent
+        return Path(str(row["dat_path"]))
     if "path" in row and pd.notna(row["path"]):
-        p = Path(str(row["path"]))
-        return p if p.is_dir() else p.parent
+        return Path(str(row["path"]))
+    if "lc_dir" in row and pd.notna(row["lc_dir"]):
+        # Fallback to directory only if we must
+        return Path(str(row["lc_dir"]))
     return None
+
 
 
 def _load_lc(asas_sn_id: str, lc_dir: Path, *, file_ext: str | None = None) -> pd.DataFrame:
@@ -675,7 +676,7 @@ def run_injection_recovery(
     control_ids = control_sample[id_col].astype(str).to_numpy()
     control_dirs = []
     for _, row in control_sample.iterrows():
-        lc_dir = _resolve_lc_dir(row)
+        lc_dir = _resolve_lc_path(row)
         if lc_dir is None:
             control_dirs.append("")
         else:
@@ -691,7 +692,7 @@ def run_injection_recovery(
         if idx >= mag_err_sample:
             break
         asas_sn_id = str(row[id_col])
-        lc_dir = _resolve_lc_dir(row)
+        lc_dir = _resolve_lc_path(row)
         if lc_dir is None:
             continue
         try:

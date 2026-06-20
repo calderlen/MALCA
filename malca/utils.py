@@ -361,7 +361,11 @@ def read_lc_dat2(asassn_id, path, excluded_cameras: set[int] | str | None = None
     if file_ext is None:
         file_ext = LIGHT_CURVE_FILE_EXTENSION
     
-    lc_path = os.path.join(path, f"{asassn_id}.{file_ext}")
+    if os.path.isfile(path):
+        lc_path = path
+    else:
+        lc_path = os.path.join(path, f"{asassn_id}.{file_ext}")
+        
     if os.path.exists(lc_path):
         file = lc_path
                       
