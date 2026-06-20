@@ -1054,7 +1054,7 @@ def per_camera_gp_baseline_masked(
         return float(np.sqrt(floor2))
 
     df_out = df.copy()
-    out_cols = ("baseline", "base_rough", "resid", "sigma_resid") + (("sigma_eff",) if add_sigma_eff_col else ())
+    out_cols = ("baseline", "base_rough", "base_consensus", "is_masked", "needs_consensus", "resid", "sigma_resid") + (("sigma_eff",) if add_sigma_eff_col else ())
     for col in out_cols:
         if col not in df_out.columns:
             df_out[col] = np.nan
@@ -1219,8 +1219,13 @@ def per_camera_gp_baseline_masked(
 
         df_out.loc[idx, "base_rough"] = base_rough
 
+        df_out.loc[idx, "needs_consensus"] = use_consensus
+        if consensus is not None:
+            df_out.loc[idx, "base_consensus"] = consensus
+
         if use_consensus_baseline and consensus is not None and np.isfinite(consensus).any():
             baseline = np.where(np.isfinite(consensus), consensus, median_mag)
+            df_out.loc[idx, "is_masked"] = False
             _write_flat_baseline(idx, mag, mag_err, baseline)
             return baseline
 
@@ -1236,6 +1241,7 @@ def per_camera_gp_baseline_masked(
             pad_days=pad_days,
         )
 
+        df_out.loc[idx, "is_masked"] = ~keep
         if keep.sum() < min_gp_points:
             baseline = np.full_like(mag, median_mag, dtype=float)
             _write_flat_baseline(idx, mag, mag_err, baseline)
