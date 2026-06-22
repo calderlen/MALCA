@@ -1108,6 +1108,7 @@ def plot_detection_efficiency(
     """
     figsize = FIG_SINGLE_COL_HEATMAP
     text = scaled_publication_text_sizes(figsize)
+    text["label"] = 10.0
     fig, ax = plt.subplots(figsize=figsize)
     im = ax.pcolormesh(
         dur_centers,
@@ -1206,6 +1207,7 @@ def plot_efficiency_jointplot(
     """
     figsize = FIG_SINGLE_COL_HEATMAP
     text = scaled_publication_text_sizes(figsize)
+    text["label"] = 10.0
     fig, ax = plt.subplots(figsize=figsize)
     
     from astropy.convolution import convolve, Gaussian2DKernel
@@ -1461,6 +1463,7 @@ def plot_efficiency_threshold_contour(
 
     figsize = FIG_SINGLE_COL_HEATMAP
     text = scaled_publication_text_sizes(figsize)
+    text["label"] = 10.0
     fig, ax = plt.subplots(figsize=figsize)
     im = ax.pcolormesh(
         cube["mag_centers"],

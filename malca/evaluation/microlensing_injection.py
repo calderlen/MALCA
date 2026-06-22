@@ -530,6 +530,7 @@ def plot_efficiency_map(
 
     fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_HEATMAP)
     text = scaled_publication_text_sizes(FIG_SINGLE_COL_HEATMAP)
+    text["label"] = 10.0
     
     xc = (x_edge[:-1] + x_edge[1:]) / 2
     yc = (y_edge[:-1] + y_edge[1:]) / 2
