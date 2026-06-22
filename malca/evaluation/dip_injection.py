@@ -1214,6 +1214,7 @@ def plot_efficiency_jointplot(
     kernel = Gaussian2DKernel(x_stddev=1.0)
     # Set preserve_nan=False so empty bins (NaNs) are smoothly interpolated from their neighbors
     smoothed_eff = convolve(efficiency_grid, kernel, boundary='extend', preserve_nan=False)
+    smoothed_eff = np.clip(smoothed_eff, vmin, vmax)
     
     levels_contourf = np.linspace(vmin, vmax, 100)
     im = ax.contourf(
@@ -1222,7 +1223,7 @@ def plot_efficiency_jointplot(
         smoothed_eff,
         levels=levels_contourf,
         cmap=cmap,
-        extend='both'
+        extend='neither'
     )
     
     # Rasterize and prevent PDF rendering gaps between contour bands
@@ -1257,18 +1258,10 @@ def plot_efficiency_jointplot(
     except Exception:
         pass # Ignore if contours fail due to all 0s
     
-    # Create marginal axes
     divider = make_axes_locatable(ax)
-    ax_histx = divider.append_axes("top", size="20%", pad=0.15, sharex=ax)
-    ax_histy = divider.append_axes("left", size="20%", pad=0.15, sharey=ax)
-    
-    with np.errstate(invalid='ignore'):
-        eff_x = np.nanmean(smoothed_eff, axis=0) # average over y
-        eff_y = np.nanmean(smoothed_eff, axis=1) # average over x
     
     if xlog:
         ax.set_xscale("log")
-        ax_histx.set_xscale("log")
         ax.set_xlim(left=1.0)
     else:
         import matplotlib.ticker as ticker
@@ -1281,7 +1274,6 @@ def plot_efficiency_jointplot(
             
     if ylog:
         ax.set_yscale("log")
-        ax_histy.set_yscale("log")
         ax.set_ylim(bottom=1.0)
         
     if "Fractional Depth" in ylabel:
@@ -1311,35 +1303,9 @@ def plot_efficiency_jointplot(
         ax.set_ylim(15, 12)
         
     ax.set_xlabel(xlabel, fontsize=text["label"])
-    ax.tick_params(axis="y", labelleft=False)
-    ax.set_ylabel("")
-
-    # Now that scales are set, format the marginal axes ticks
-    # ax_histx (top plot)
-    ax_histx.plot(x_centers, eff_x, color="black", lw=0.6)
-    ax_histx.set_ylim(0, 1)
-    ax_histx.set_yticks([0, 1])
-    ax_histx.tick_params(axis="x", bottom=False, top=True, labelbottom=False, labeltop=False, which="both")
-    ax_histx.yaxis.tick_right()
-    ax_histx.yaxis.set_label_position("right")
-    ax_histx.set_ylabel("Efficiency", fontsize=text["label"]*0.85)
-    ax_histx.tick_params(axis="y", labelsize=text["label"]*0.75)
-    
-    # ax_histy (left plot)
-    ax_histy.plot(eff_y, y_centers, color="black", lw=0.6)
-    ax_histy.set_xlim(0, 1)
-    ax_histy.set_xticks([0, 1])
-    ax_histy.invert_xaxis()
-    ax_histy.tick_params(axis="y", labelleft=True, labelright=False, labelsize=text["label"]*0.75)
-    if ylabel == r"$\delta$":
-        ax_histy.set_ylabel("Fractional Depth", fontsize=text["label"])
-    else:
-        ax_histy.set_ylabel(ylabel, fontsize=text["label"])
-    ax_histy.xaxis.tick_top()
-    ax_histy.xaxis.set_label_position("top")
-    ax_histy.set_xlabel("Efficiency", fontsize=text["label"]*0.85)
-    ax_histy.tick_params(axis="x", labelsize=text["label"]*0.75)
-    ax_histy.set_ylabel(ylabel, fontsize=text["label"])
+    ax.set_ylabel("Fractional Depth" if ylabel == r"$\delta$" else ylabel, fontsize=text["label"])
+    ax.tick_params(axis="y", labelleft=True, labelsize=text["label"]*0.75)
+    ax.tick_params(axis="x", labelsize=text["label"]*0.75)
     
     # Colorbar
     cax_pad = 0.4 if r"\delta" in ylabel else 0.15

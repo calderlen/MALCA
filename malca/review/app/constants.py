@@ -51,7 +51,9 @@ EXTERNAL_SOURCE_VIEW_OPTIONS = [
     {"label": "ZTF", "value": "ztf"},
     {"label": "Gaia Epoch", "value": "gaia_epoch"},
     {"label": "TESS", "value": "tess"},
-    {"label": "NEOWISE W1/W2", "value": "neowise"},
+    {"label": "NEOWISE W1", "value": "neowise_w1"},
+    {"label": "NEOWISE W2", "value": "neowise_w2"},
+    {"label": "NEOWISE W1-W2", "value": "neowise_color"},
     {"label": "Kepler/K2", "value": "kepler"},
     {"label": "AAVSO", "value": "aavso"},
     {"label": "OGLE I/V", "value": "ogle"},
@@ -90,20 +92,30 @@ def normalize_external_source_values(raw_value: object, *, default: list[str] | 
             continue
         if text == "all":
             return list(EXTERNAL_SOURCE_VALUES)
-        if text in {"wise", "w1", "w2", "wise_w1_w2"}:
-            text = "neowise"
+        
+        texts = [text]
+        if text in {"wise", "neowise", "wise_w1_w2"}:
+            texts = ["neowise_w1", "neowise_w2"]
+        elif text in {"w1", "wise_w1"}:
+            texts = ["neowise_w1"]
+        elif text in {"w2", "wise_w2"}:
+            texts = ["neowise_w2"]
+        elif text in {"wise_color", "neowise_color", "w1_w2"}:
+            texts = ["neowise_color"]
         elif text in {"k2", "kepler_k2"}:
-            text = "kepler"
+            texts = ["kepler"]
         elif text in {"sdss_s82", "s82", "stripe_82", "sdss_stripe82"}:
-            text = "stripe82"
+            texts = ["stripe82"]
         elif text in {"allwise", "allwise_multiepoch", "wise_mep"}:
-            text = "allwise_mep"
+            texts = ["allwise_mep"]
         elif text in {"vvv", "vvvx", "virac", "virac2", "vvvx_virac2"}:
-            text = "vvvx_virac"
-        if text not in EXTERNAL_SOURCE_VALUE_SET or text in seen:
-            continue
-        out.append(text)
-        seen.add(text)
+            texts = ["vvvx_virac"]
+            
+        for t in texts:
+            if t not in EXTERNAL_SOURCE_VALUE_SET or t in seen:
+                continue
+            out.append(t)
+            seen.add(t)
 
     # Legacy single external choices always rendered over the native ASAS-SN LC.
     if isinstance(raw_value, str) and out and out[0] != "asassn":

@@ -588,45 +588,17 @@ def plot_efficiency_map(
         except Exception:
             pass
         
-    # Marginal axes
     divider = make_axes_locatable(ax)
-    ax_histx = divider.append_axes("top", size="20%", pad=0.15, sharex=ax)
-    ax_histy = divider.append_axes("left", size="20%", pad=0.15, sharey=ax)
     
-    with np.errstate(invalid='ignore'):
-        eff_x = np.nanmean(smoothed_eff, axis=0) # avg over Amax
-        eff_y = np.nanmean(smoothed_eff, axis=1) # avg over tE
-        
     left_lim = min(0.0, log_tE.min())
     bottom_lim = min(0.0, log_Amax.min())
     
     ax.set_xlim(left=left_lim, right=log_tE.max())
     ax.set_ylim(bottom=bottom_lim, top=log_Amax.max())
     
-    # ax_histx (top)
-    ax_histx.plot(xc, eff_x, color="black", lw=0.6)
-    ax_histx.set_ylim(0, 1)
-    ax_histx.set_yticks([0, 1])
-    ax_histx.tick_params(axis="x", bottom=False, top=True, labelbottom=False, labeltop=False, which="both")
-    ax_histx.yaxis.tick_right()
-    ax_histx.yaxis.set_label_position("right")
-    ax_histx.set_ylabel("Efficiency", fontsize=text["label"]*0.85)
-    ax_histx.tick_params(axis="y", labelsize=text["label"]*0.75)
-    
-    # ax_histy (left)
-    ax_histy.plot(eff_y, yc, color="black", lw=0.6)
-    ax_histy.set_xlim(0, 1)
-    ax_histy.set_xticks([0, 1])
-    ax_histy.invert_xaxis()
-    ax_histy.tick_params(axis="y", labelleft=True, labelright=False)
-    ax_histy.xaxis.tick_top()
-    ax_histy.xaxis.set_label_position("top")
-    ax_histy.set_xlabel("Efficiency", fontsize=text["label"]*0.85)
-    ax_histy.tick_params(axis="x", labelsize=text["label"]*0.75)
-    ax_histy.set_ylabel(r'$A_{max}$', fontsize=text["label"])
-    
     ax.set_xlabel(r'$t_E$ [days]', fontsize=text["label"])
-    ax.tick_params(axis="y", labelleft=False)
+    ax.set_ylabel(r'$A_{max}$', fontsize=text["label"])
+    ax.tick_params(axis="y", labelleft=True)
     
     # Manually configure logarithmic ticks on the linear axes
     import matplotlib.ticker as ticker
@@ -648,7 +620,7 @@ def plot_efficiency_map(
         axis_obj.set_ticks(minor_ticks, minor=True)
 
     set_log_ticks_on_linear_axis(ax.xaxis, left_lim, log_tE.max())
-    set_log_ticks_on_linear_axis(ax_histy.yaxis, bottom_lim, log_Amax.max())
+    set_log_ticks_on_linear_axis(ax.yaxis, bottom_lim, log_Amax.max())
     
     # Add a secondary y-axis for magnitude drop (Delta m)
     def logA_to_dm(logA):
@@ -669,8 +641,6 @@ def plot_efficiency_map(
     # STRICTLY set the axis limits at the very end to prevent matplotlib from autoscaling to the ticks!
     ax.set_xlim(left=log_tE.min(), right=log_tE.max())
     ax.set_ylim(bottom=log_Amax.min(), top=log_Amax.max())
-    ax_histx.set_xlim(left=log_tE.min(), right=log_tE.max())
-    ax_histy.set_ylim(bottom=log_Amax.min(), top=log_Amax.max())
 
     cax = divider.append_axes("right", size="7%", pad=0.4)
     cbar = plt.colorbar(im, cax=cax, orientation='vertical')

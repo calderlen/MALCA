@@ -67,16 +67,35 @@ EXTERNAL_LC_SPECS: dict[str, dict] = {
         "mag_col": "flux",
         "err_col": "flux_err",
     },
-    "neowise": {
+    "neowise_w1": {
         "time_col": "mjd",
         "jd_system": "mjd",
         "bands": {
             "W1": {"color": "#4fa3ff", "marker": "x", "label": "NEOWISE W1", "mag_col": "w1mpro", "err_col": "w1sigmpro"},
-            "W2": {"color": "#ff8c42", "marker": "x", "label": "NEOWISE W2", "mag_col": "w2mpro", "err_col": "w2sigmpro"},
         },
         "filter_col": None,
         "mag_col": "w1mpro",
         "err_col": "w1sigmpro",
+    },
+    "neowise_w2": {
+        "time_col": "mjd",
+        "jd_system": "mjd",
+        "bands": {
+            "W2": {"color": "#ff8c42", "marker": "x", "label": "NEOWISE W2", "mag_col": "w2mpro", "err_col": "w2sigmpro"},
+        },
+        "filter_col": None,
+        "mag_col": "w2mpro",
+        "err_col": "w2sigmpro",
+    },
+    "neowise_color": {
+        "time_col": "mjd",
+        "jd_system": "mjd",
+        "bands": {
+            "W1-W2": {"color": "#a832a8", "marker": "x", "label": "NEOWISE W1-W2", "mag_col": "color_w1_w2", "err_col": "color_w1_w2_err"},
+        },
+        "filter_col": None,
+        "mag_col": "color_w1_w2",
+        "err_col": "color_w1_w2_err",
     },
     "allwise_mep": {
         "time_col": "mjd",
@@ -180,7 +199,7 @@ EXTERNAL_LC_SPECS: dict[str, dict] = {
 }
 
 EXTERNAL_SOURCE_ORDER = (
-    "asassn", "atlas", "ztf", "gaia_epoch", "tess", "neowise",
+    "asassn", "atlas", "ztf", "gaia_epoch", "tess", "neowise_w1", "neowise_w2", "neowise_color",
     "kepler", "aavso", "ogle", "stripe82", "allwise_mep", "vvvx_virac",
     "ps1", "crts",
 )
@@ -190,7 +209,9 @@ EXTERNAL_SOURCE_LABELS = {
     "ztf": "ZTF",
     "gaia_epoch": "Gaia Epoch",
     "tess": "TESS",
-    "neowise": "NEOWISE W1/W2",
+    "neowise_w1": "NEOWISE W1",
+    "neowise_w2": "NEOWISE W2",
+    "neowise_color": "NEOWISE W1-W2",
     "kepler": "Kepler/K2",
     "aavso": "AAVSO",
     "ogle": "OGLE I/V",
@@ -239,20 +260,30 @@ def coerce_external_source_values(raw_value: object) -> list[str]:
             continue
         if text == "all":
             return list(EXTERNAL_SOURCE_ORDER)
-        if text in {"wise", "w1", "w2", "wise_w1_w2"}:
-            text = "neowise"
+        
+        texts = [text]
+        if text in {"wise", "neowise", "wise_w1_w2"}:
+            texts = ["neowise_w1", "neowise_w2"]
+        elif text in {"w1", "wise_w1"}:
+            texts = ["neowise_w1"]
+        elif text in {"w2", "wise_w2"}:
+            texts = ["neowise_w2"]
+        elif text in {"wise_color", "neowise_color", "w1_w2"}:
+            texts = ["neowise_color"]
         elif text in {"k2", "kepler_k2"}:
-            text = "kepler"
+            texts = ["kepler"]
         elif text in {"sdss_s82", "s82", "stripe_82", "sdss_stripe82"}:
-            text = "stripe82"
+            texts = ["stripe82"]
         elif text in {"allwise", "allwise_multiepoch", "wise_mep"}:
-            text = "allwise_mep"
+            texts = ["allwise_mep"]
         elif text in {"vvv", "vvvx", "virac", "virac2", "vvvx_virac2"}:
-            text = "vvvx_virac"
-        if text not in EXTERNAL_SOURCE_VALUES or text in seen:
-            continue
-        out.append(text)
-        seen.add(text)
+            texts = ["vvvx_virac"]
+            
+        for t in texts:
+            if t not in EXTERNAL_SOURCE_VALUES or t in seen:
+                continue
+            out.append(t)
+            seen.add(t)
 
     if isinstance(raw_value, str) and out and out[0] != "asassn":
         out.insert(0, "asassn")
@@ -349,18 +380,27 @@ def discover_external_lcs(
             search_roots.append(default_root)
 
     found: dict[str, Path] = {}
+    file_prefix_map: dict[str, Path] = {}
     for source_name in requested_sources:
         prefix = str(source_name).strip().lower()
         if prefix == "asassn" or prefix not in EXTERNAL_SOURCE_VALUES:
             continue
         if prefix in found:
             continue
+            
+        file_prefix = "neowise" if prefix in ("neowise_w1", "neowise_w2", "neowise_color", "neowise") else prefix
+
+        if file_prefix in file_prefix_map:
+            found[prefix] = file_prefix_map[file_prefix]
+            continue
+            
         for root in search_roots:
-            index_map = index_external_lc_paths_from_root(str(root.resolve()), prefix)
+            index_map = index_external_lc_paths_from_root(str(root.resolve()), file_prefix)
             for key in lookup_keys:
                 path_text = index_map.get(str(key))
                 if path_text:
                     found[prefix] = Path(path_text)
+                    file_prefix_map[file_prefix] = found[prefix]
                     break
             if prefix in found:
                 break
@@ -441,13 +481,22 @@ def normalize_external_lc_dataframe(source_name: str, df_ext: pd.DataFrame) -> p
         df = _rename_first_present(df, "flux", ("flux",))
         df = _rename_first_present(df, "flux_err", ("flux_err",))
         _coerce_numeric_column(df, "time")
-    elif source == "neowise":
+    elif source in ("neowise", "neowise_w1", "neowise_w2", "neowise_color"):
         df = _rename_first_present(df, "mjd", ("mjd", "MJD", "JD"))
         df = _rename_first_present(df, "w1mpro", ("w1mpro", "W1", "w1", "w1_mag"))
         df = _rename_first_present(df, "w1sigmpro", ("w1sigmpro", "w1err", "w1_err", "w1_mag_err"))
         df = _rename_first_present(df, "w2mpro", ("w2mpro", "W2", "w2", "w2_mag"))
         df = _rename_first_present(df, "w2sigmpro", ("w2sigmpro", "w2err", "w2_err", "w2_mag_err"))
         _normalize_mjd_column(df)
+        
+        if "w1mpro" in df.columns and "w2mpro" in df.columns:
+            w1 = pd.to_numeric(df["w1mpro"], errors="coerce")
+            w2 = pd.to_numeric(df["w2mpro"], errors="coerce")
+            df["color_w1_w2"] = w1 - w2
+            if "w1sigmpro" in df.columns and "w2sigmpro" in df.columns:
+                w1_err = pd.to_numeric(df["w1sigmpro"], errors="coerce")
+                w2_err = pd.to_numeric(df["w2sigmpro"], errors="coerce")
+                df["color_w1_w2_err"] = np.sqrt(w1_err**2 + w2_err**2)
     elif source == "allwise_mep":
         df = _rename_first_present(df, "mjd", ("mjd", "MJD", "JD"))
         for band in ("w1", "w2", "w3", "w4"):
