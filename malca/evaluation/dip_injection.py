@@ -1313,12 +1313,6 @@ def plot_efficiency_jointplot(
     ax.set_xlabel(xlabel, fontsize=text["label"])
     ax.tick_params(axis="y", labelleft=False)
     ax.set_ylabel("")
-    
-    # If ylabel is tau, label the y-axis ticks explicitly since we don't have secondary axes
-    if ylabel == r"$\tau$ [days]":
-        ax_histy.tick_params(axis="y", labelleft=True, labelsize=text["label"]*0.75)
-        ax.set_ylabel(ylabel, fontsize=text["label"])
-        ax.tick_params(axis="y", labelleft=True, labelsize=text["label"]*0.75)
 
     # Now that scales are set, format the marginal axes ticks
     # ax_histx (top plot)
@@ -1336,12 +1330,11 @@ def plot_efficiency_jointplot(
     ax_histy.set_xlim(0, 1)
     ax_histy.set_xticks([0, 1])
     ax_histy.invert_xaxis()
-    if ylabel != r"$\tau$ [days]": # Tau already shows ticks on ax
-        ax_histy.tick_params(axis="y", labelleft=True, labelright=False, labelsize=text["label"]*0.75)
-        if ylabel == r"$\delta$":
-            ax_histy.set_ylabel("Fractional Depth", fontsize=text["label"])
-        else:
-            ax_histy.set_ylabel(ylabel, fontsize=text["label"])
+    ax_histy.tick_params(axis="y", labelleft=True, labelright=False, labelsize=text["label"]*0.75)
+    if ylabel == r"$\delta$":
+        ax_histy.set_ylabel("Fractional Depth", fontsize=text["label"])
+    else:
+        ax_histy.set_ylabel(ylabel, fontsize=text["label"])
     ax_histy.xaxis.tick_top()
     ax_histy.xaxis.set_label_position("top")
     ax_histy.set_xlabel("Efficiency", fontsize=text["label"]*0.85)
