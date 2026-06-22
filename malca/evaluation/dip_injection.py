@@ -1846,8 +1846,8 @@ def main() -> None:
         description="Run injection-recovery tests for dip detection.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=f"""
-Output structure (default --output-dir {DEFAULT_OUTPUT_DIR / 'injection'}):
-  {DEFAULT_OUTPUT_DIR / 'injection'}/
+Output structure (default --output-dir {DEFAULT_OUTPUT_DIR / 'dip_injection'}):
+  {DEFAULT_OUTPUT_DIR / 'dip_injection'}/
     20250121_143052/             # Timestamped run directory
       run_params.json            # Full parameter dump
       results/
@@ -1875,8 +1875,8 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
 
     g_io.add_argument("--manifest", type=Path, default=DEFAULT_OUTPUT_DIR / "lc_manifest_all.parquet",
                         help=f"Manifest parquet path (default: {DEFAULT_OUTPUT_DIR / 'lc_manifest_all.parquet'})")
-    g_io.add_argument("--output-dir", dest="out_dir", type=Path, default=DEFAULT_OUTPUT_DIR / "injection",
-                        help=f"Base output directory (default: {DEFAULT_OUTPUT_DIR / 'injection'})")
+    g_io.add_argument("--output-dir", dest="out_dir", type=Path, default=DEFAULT_OUTPUT_DIR / "dip_injection",
+                      help=f"Base output directory (default: {DEFAULT_OUTPUT_DIR / 'dip_injection'})")
     g_io.add_argument("--run-tag", type=str, default=None,
                         help="Optional tag to append to run directory name (e.g., 'deep_dips_mag18')")
     g_io.add_argument("--output", type=Path, default=None,
@@ -1957,6 +1957,7 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
 
     g_postprocess.add_argument("--skip-cube", action="store_true", help="Skip computing efficiency cube.")
     g_postprocess.add_argument("--skip-plots", action="store_true", help="Skip generating plots.")
+    g_postprocess.add_argument("--plot-only", action="store_true", help="Only generate plots from existing results (skips injection-recovery)")
     g_postprocess.add_argument("--cube-out", type=Path, default=None,
                         help="Override cube output path (default: <out-dir>/cubes/efficiency_cube.npz)")
     g_postprocess.add_argument("--plot-dir", type=Path, default=None,
@@ -1980,15 +1981,23 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_name = f"{timestamp}_{args.run_tag}" if args.run_tag else timestamp
 
-    run_dir = base_out_dir / run_name
+    if args.output:
+        results_out = Path(args.output)
+        if results_out.parent.name == "results":
+            run_dir = results_out.parent.parent
+        else:
+            run_dir = results_out.parent
+        results_dir = results_out.parent
+    else:
+        run_dir = base_out_dir / run_name
+        results_dir = run_dir / "results"
+        results_out = results_dir / "injection_results.parquet"
 
-    results_dir = run_dir / "results"
     cubes_dir = run_dir / "cubes"
     plots_dir = run_dir / "plots"
 
     results_dir.mkdir(parents=True, exist_ok=True)
 
-    results_out = args.output if args.output else (results_dir / "injection_results.parquet")
     cube_out = args.cube_out if args.cube_out else (cubes_dir / "efficiency_cube.npz")
     plot_dir = args.plot_dir if args.plot_dir else plots_dir
 
@@ -2002,26 +2011,16 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
     with open(run_params_file, "w") as f:
         json.dump(run_params, f, indent=2, default=str)
 
-    # Create/update 'latest' symlink
-    latest_link = base_out_dir / "latest"
-    if latest_link.exists() or latest_link.is_symlink():
-        latest_link.unlink()
-    try:
-        latest_link.symlink_to(run_name)
-    except Exception as e:
-        # Symlinks may fail on some filesystems, just warn
-        print(f"Warning: Could not create 'latest' symlink: {e}")
-
-    manifest = pd.read_parquet(args.manifest)
-    control_sample = select_control_sample(
-        manifest,
-        n_sample=args.control_sample_size,
-        min_points=args.min_points,
-        seed=args.seed,
-    )
-
-
-    detection_kwargs = _build_detection_kwargs(args)
+    # Create/update 'latest' symlink only if we created a new run_dir
+    if not args.output:
+        latest_link = base_out_dir / "latest"
+        if latest_link.exists() or latest_link.is_symlink():
+            latest_link.unlink()
+        try:
+            latest_link.symlink_to(run_name)
+        except Exception as e:
+            # Symlinks may fail on some filesystems, just warn
+            print(f"Warning: Could not create 'latest' symlink: {e}")
 
     print(f"\nRun directory: {run_dir}")
     print(f"  Run params: {run_params_file}")
@@ -2030,32 +2029,43 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
         print(f"  Efficiency cube: {cube_out}")
     if not args.skip_plots:
         print(f"  Plots directory: {plot_dir}")
-    print(f"  Latest symlink: {latest_link} -> {run_name}\n")
+    if not args.output:
+        print(f"  Latest symlink: {latest_link} -> {run_name}\n")
 
+    if not args.plot_only:
+        manifest = pd.read_parquet(args.manifest)
+        control_sample = select_control_sample(
+            manifest,
+            n_sample=args.control_sample_size,
+            min_points=args.min_points,
+            seed=args.seed,
+        )
 
-    run_injection_recovery(
-        control_sample,
-        detection_kwargs=detection_kwargs,
-        min_mag_offset=args.min_mag_offset,
-        measure_pre_injection=args.measure_pre_injection,
-        total_trials=max(1, args.total_trials),
-        amplitude_range=(args.amp_min, args.amp_max),
-        duration_range=(args.dur_min, args.dur_max),
-        skewness_range=(args.skew_min, args.skew_max),
-        mag_err_order=args.mag_err_order,
-        mag_err_sample=args.mag_err_sample,
-        seed=args.seed,
-        workers=max(1, args.workers),
-        task_size=max(1, args.task_size),
-        checkpoint_interval=max(1, args.checkpoint_interval),
-        chunk_size=max(1, args.chunk_size),
-        output_path=results_out,
-        checkpoint_path=None,
-        resume=not args.no_resume,
-        overwrite=args.overwrite,
-        show_progress=True,
-        file_ext=args.file_ext,
-    )
+        detection_kwargs = _build_detection_kwargs(args)
+
+        run_injection_recovery(
+            control_sample,
+            detection_kwargs=detection_kwargs,
+            min_mag_offset=args.min_mag_offset,
+            measure_pre_injection=args.measure_pre_injection,
+            total_trials=max(1, args.total_trials),
+            amplitude_range=(args.amp_min, args.amp_max),
+            duration_range=(args.dur_min, args.dur_max),
+            skewness_range=(args.skew_min, args.skew_max),
+            mag_err_order=args.mag_err_order,
+            mag_err_sample=args.mag_err_sample,
+            seed=args.seed,
+            workers=max(1, args.workers),
+            task_size=max(1, args.task_size),
+            checkpoint_interval=max(1, args.checkpoint_interval),
+            chunk_size=max(1, args.chunk_size),
+            output_path=results_out,
+            checkpoint_path=None,
+            resume=not args.no_resume,
+            overwrite=args.overwrite,
+            show_progress=True,
+            file_ext=args.file_ext,
+        )
 
 
     # Post-processing: load results and compute metrics

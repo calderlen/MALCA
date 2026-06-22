@@ -746,10 +746,15 @@ def main():
     base_out_dir = Path(args.out_dir)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_name = f"{timestamp}_{args.run_tag}" if args.run_tag else timestamp
-    run_dir = base_out_dir / run_name
-    run_dir.mkdir(parents=True, exist_ok=True)
+    
+    if args.output:
+        output_parquet_path = Path(args.output)
+        run_dir = output_parquet_path.parent
+    else:
+        run_dir = base_out_dir / run_name
+        run_dir.mkdir(parents=True, exist_ok=True)
+        output_parquet_path = run_dir / "microlensing_results.parquet"
 
-    output_parquet_path = args.output if args.output else (run_dir / "microlensing_results.parquet")
     output_plot_path = output_parquet_path.with_suffix('.pdf')
 
     # Save run parameters to JSON
@@ -761,14 +766,15 @@ def main():
     with open(run_params_file, "w") as f:
         json.dump(run_params, f, indent=2, default=str)
 
-    # Create/update 'latest' symlink
-    latest_link = base_out_dir / "latest"
-    if latest_link.exists() or latest_link.is_symlink():
-        latest_link.unlink()
-    try:
-        latest_link.symlink_to(run_name)
-    except Exception as e:
-        pass # Symlinks might fail on some filesystems
+    # Create/update 'latest' symlink only if we created a new run_dir
+    if not args.output:
+        latest_link = base_out_dir / "latest"
+        if latest_link.exists() or latest_link.is_symlink():
+            latest_link.unlink()
+        try:
+            latest_link.symlink_to(run_name)
+        except Exception as e:
+            pass # Symlinks might fail on some filesystems
 
     if not args.plot_only:
         manifest_path = Path(args.manifest)
