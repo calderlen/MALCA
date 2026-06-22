@@ -643,7 +643,7 @@ def plot_efficiency_map(
     ax.set_xlim(left=log_tE.min(), right=log_tE.max())
     ax.set_ylim(bottom=log_Amax.min(), top=log_Amax.max())
 
-    cax = divider.append_axes("right", size="7%", pad=0.4)
+    cax = divider.append_axes("right", size="7%", pad=0.7)
     cbar = plt.colorbar(im, cax=cax, orientation='vertical')
     cbar.set_ticks([0.0, 0.2, 0.4, 0.6, 0.8, 1.0])
     import matplotlib.ticker as ticker
