@@ -534,7 +534,7 @@ def plot_efficiency_map(
     xc = (x_edge[:-1] + x_edge[1:]) / 2
     yc = (y_edge[:-1] + y_edge[1:]) / 2
     
-    cmap = plt.cm.cividis
+    cmap = plt.cm.viridis
     cmap.set_bad(color='0.9')
     
     levels_contourf = np.linspace(0.0, 1.0, 100)
