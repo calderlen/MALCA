@@ -615,15 +615,20 @@ def plot_efficiency_map(
     # Manually configure logarithmic ticks on the linear axes
     import matplotlib.ticker as ticker
     def set_log_ticks_on_linear_axis(axis_obj, vmin, vmax):
+        # Only create major ticks strictly within the plot limits (or slightly outside to allow margin)
         major_ticks = np.arange(np.floor(vmin), np.ceil(vmax) + 1)
+        # Filter out major ticks that are way outside the limits to avoid extending the axis
+        major_ticks = [x for x in major_ticks if x <= vmax + 0.1 and x >= vmin - 0.1]
+        
         axis_obj.set_ticks(major_ticks)
         axis_obj.set_ticklabels([rf"$10^{{{int(x)}}}$" for x in major_ticks])
         
         minor_ticks = []
-        for power in major_ticks:
+        for power in np.arange(np.floor(vmin)-1, np.ceil(vmax)+1):
             for mult in range(2, 10):
                 val = np.log10(mult * 10**power)
-                minor_ticks.append(val)
+                if vmin <= val <= vmax:
+                    minor_ticks.append(val)
         axis_obj.set_ticks(minor_ticks, minor=True)
 
     set_log_ticks_on_linear_axis(ax.xaxis, log_tE.min(), log_tE.max())
@@ -638,10 +643,18 @@ def plot_efficiency_map(
 
     secax = ax.secondary_yaxis('right', functions=(logA_to_dm, dm_to_logA))
     dm_ticks = np.array([0.1, 0.5, 1.0, 2.0, 3.0, 5.0])
+    # Only keep dm_ticks that fall within the Y axis range
+    dm_ticks = [dm for dm in dm_ticks if dm_to_logA(dm) <= log_Amax.max()]
     secax.set_yticks(dm_ticks)
     secax.set_yticklabels([f"{dm:.1f}" for dm in dm_ticks])
     secax.set_ylabel(r"$\Delta m$ [mag]", fontsize=text["label"])
     secax.tick_params(axis="y", labelsize=text["label"]*0.75)
+
+    # STRICTLY set the axis limits at the very end to prevent matplotlib from autoscaling to the ticks!
+    ax.set_xlim(left=log_tE.min(), right=log_tE.max())
+    ax.set_ylim(bottom=log_Amax.min(), top=log_Amax.max())
+    ax_histx.set_xlim(left=log_tE.min(), right=log_tE.max())
+    ax_histy.set_ylim(bottom=log_Amax.min(), top=log_Amax.max())
 
     cax = divider.append_axes("right", size="7%", pad=0.4)
     cbar = plt.colorbar(im, cax=cax, orientation='vertical')
