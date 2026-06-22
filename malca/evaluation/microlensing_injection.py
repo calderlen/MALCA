@@ -597,8 +597,11 @@ def plot_efficiency_map(
         eff_x = np.nanmean(smoothed_eff, axis=0) # avg over Amax
         eff_y = np.nanmean(smoothed_eff, axis=1) # avg over tE
         
-    ax.set_xlim(left=log_tE.min(), right=log_tE.max())
-    ax.set_ylim(bottom=log_Amax.min(), top=log_Amax.max())
+    left_lim = min(0.0, log_tE.min())
+    bottom_lim = min(0.0, log_Amax.min())
+    
+    ax.set_xlim(left=left_lim, right=log_tE.max())
+    ax.set_ylim(bottom=bottom_lim, top=log_Amax.max())
     
     # ax_histx (top)
     ax_histx.plot(xc, eff_x, color="black", lw=0.6)
@@ -644,8 +647,8 @@ def plot_efficiency_map(
                     minor_ticks.append(val)
         axis_obj.set_ticks(minor_ticks, minor=True)
 
-    set_log_ticks_on_linear_axis(ax.xaxis, log_tE.min(), log_tE.max())
-    set_log_ticks_on_linear_axis(ax_histy.yaxis, log_Amax.min(), log_Amax.max())
+    set_log_ticks_on_linear_axis(ax.xaxis, left_lim, log_tE.max())
+    set_log_ticks_on_linear_axis(ax_histy.yaxis, bottom_lim, log_Amax.max())
     
     # Add a secondary y-axis for magnitude drop (Delta m)
     def logA_to_dm(logA):

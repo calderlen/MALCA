@@ -1193,9 +1193,10 @@ def plot_efficiency_jointplot(
     output_path: Path | str | None = None,
     vmin: float = 0.0,
     vmax: float = 1.0,
-    xlabel: str = "Duration [days]",
+    xlabel: str = r"$\tau$ [days]",
     ylabel: str = "Fractional Depth",
     xlog: bool = True,
+    ylog: bool = False,
     cmap: str = "magma",
     contour_kwargs: dict | None = None,
     show: bool = True,
@@ -1274,9 +1275,14 @@ def plot_efficiency_jointplot(
         ax.xaxis.set_major_locator(ticker.MultipleLocator(1))
         ax.xaxis.set_minor_locator(ticker.MultipleLocator(0.25))
         if xlabel == "Median Magnitude":
-            ax.set_xlim(12, 15)
+            ax.set_xlim(15, 12)
         else:
             ax.set_xlim(x_edges.min(), x_edges.max())
+            
+    if ylog:
+        ax.set_yscale("log")
+        ax_histy.set_yscale("log")
+        ax.set_ylim(bottom=1.0)
         
     if "Fractional Depth" in ylabel:
         ylabel = r"$\delta$"
@@ -1302,11 +1308,17 @@ def plot_efficiency_jointplot(
         import matplotlib.ticker as ticker
         ax.yaxis.set_major_locator(ticker.MultipleLocator(1))
         ax.yaxis.set_minor_locator(ticker.MultipleLocator(0.25))
-        ax.set_ylim(12, 15)
+        ax.set_ylim(15, 12)
         
     ax.set_xlabel(xlabel, fontsize=text["label"])
     ax.tick_params(axis="y", labelleft=False)
     ax.set_ylabel("")
+    
+    # If ylabel is tau, label the y-axis ticks explicitly since we don't have secondary axes
+    if ylabel == r"$\tau$ [days]":
+        ax_histy.tick_params(axis="y", labelleft=True, labelsize=text["label"]*0.75)
+        ax.set_ylabel(ylabel, fontsize=text["label"])
+        ax.tick_params(axis="y", labelleft=True, labelsize=text["label"]*0.75)
 
     # Now that scales are set, format the marginal axes ticks
     # ax_histx (top plot)
@@ -1324,7 +1336,12 @@ def plot_efficiency_jointplot(
     ax_histy.set_xlim(0, 1)
     ax_histy.set_xticks([0, 1])
     ax_histy.invert_xaxis()
-    ax_histy.tick_params(axis="y", labelleft=True, labelright=False)
+    if ylabel != r"$\tau$ [days]": # Tau already shows ticks on ax
+        ax_histy.tick_params(axis="y", labelleft=True, labelright=False, labelsize=text["label"]*0.75)
+        if ylabel == r"$\delta$":
+            ax_histy.set_ylabel("Fractional Depth", fontsize=text["label"])
+        else:
+            ax_histy.set_ylabel(ylabel, fontsize=text["label"])
     ax_histy.xaxis.tick_top()
     ax_histy.xaxis.set_label_position("top")
     ax_histy.set_xlabel("Efficiency", fontsize=text["label"]*0.85)
@@ -1377,13 +1394,15 @@ def plot_efficiency_marginalized(
     axis : str
         Axis to marginalize over: "mag", "duration", or "depth"
     """
+    ylog = False
+    
     if axis == "mag":
         eff_2d = np.nanmean(cube["efficiency"], axis=2)
         x_centers = cube["duration_centers"]
         y_centers = cube["depth_centers"]
         x_edges = cube["duration_edges"]
         y_edges = cube["depth_edges"]
-        xlabel = "Duration [days]"
+        xlabel = r"$\tau$ [days]"
         ylabel = "Fractional Depth"
         xlog = True
         contour_kwargs = {
@@ -1409,17 +1428,18 @@ def plot_efficiency_marginalized(
             "manual2": []
         }
     elif axis == "depth":
-        eff_2d = np.nanmean(cube["efficiency"], axis=0).T  # Transpose: (dur, mag) -> (mag, dur)
-        x_centers = cube["duration_centers"]
-        y_centers = cube["mag_centers"]
-        x_edges = cube["duration_edges"]
-        y_edges = cube["mag_edges"]
-        xlabel = "Duration [days]"
-        ylabel = "Median Magnitude"
-        xlog = True
+        eff_2d = np.nanmean(cube["efficiency"], axis=0)  # Shape is (duration, mag) -> x=mag, y=duration
+        x_centers = cube["mag_centers"]
+        y_centers = cube["duration_centers"]
+        x_edges = cube["mag_edges"]
+        y_edges = cube["duration_edges"]
+        xlabel = "Median Magnitude"
+        ylabel = r"$\tau$ [days]"
+        xlog = False
+        ylog = True
         contour_kwargs = {
             "levels": [0.5, 0.9],
-            "manual1": [(5, 14.0), (20, 13.5)],
+            "manual1": [(14.0, 5), (13.5, 20)],
             "inline_spacing1": 6,
             "manual2": []
         }
@@ -1435,6 +1455,7 @@ def plot_efficiency_marginalized(
         xlabel=xlabel,
         ylabel=ylabel,
         xlog=xlog,
+        ylog=ylog,
         vmin=vmin,
         vmax=vmax,
         cmap=cmap,
