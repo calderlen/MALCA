@@ -19,7 +19,7 @@ import matplotlib.pyplot as plt
 from scipy.stats import binned_statistic_2d
 
 from malca.config import SKYPATROL_CACHE_DIR
-from malca.lightcurve_publication import apply_publication_rcparams, save_publication_figure, FIG_SINGLE_COL_HEATMAP
+from malca.lightcurve_publication import apply_publication_rcparams, save_publication_figure, FIG_SINGLE_COL_HEATMAP, scaled_publication_text_sizes
 
 import sys
 sys.path.append(str(Path.cwd()))
@@ -529,19 +529,18 @@ def plot_efficiency_map(
     smoothed_eff = convolve(stat.T, kernel, boundary='extend', preserve_nan=False)
 
     fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_HEATMAP)
+    text = scaled_publication_text_sizes(FIG_SINGLE_COL_HEATMAP)
     
-    # Plot heatmap
-    X, Y = np.meshgrid(x_edge, y_edge)
-    cmap = plt.cm.viridis
+    x_centers = 10**((x_edge[:-1] + x_edge[1:]) / 2)
+    y_centers = 10**((y_edge[:-1] + y_edge[1:]) / 2)
+    
+    cmap = plt.cm.cividis
     cmap.set_bad(color='0.9')
-    
-    xc = (x_edge[:-1] + x_edge[1:]) / 2
-    yc = (y_edge[:-1] + y_edge[1:]) / 2
     
     levels_contourf = np.linspace(0.0, 1.0, 100)
     im = ax.contourf(
-        xc,
-        yc,
+        x_centers,
+        y_centers,
         smoothed_eff,
         levels=levels_contourf,
         cmap=cmap,
@@ -560,17 +559,21 @@ def plot_efficiency_map(
     # Add contours
     mask = ~np.isnan(stat.T)
     if np.any(mask):
-        XC, YC = np.meshgrid(xc, yc)
-        ax.contour(
-            XC,
-            YC,
-            smoothed_eff,
-            levels=[0.1, 0.5, 0.9],
-            colors='white',
-            alpha=0.8,
-            linewidths=1.0,
-            linestyles=[':', '--', '-']
-        )
+        try:
+            cs = ax.contour(
+                x_centers,
+                y_centers,
+                smoothed_eff,
+                levels=[0.5, 0.9, 0.99],
+                colors='black',
+                alpha=0.9,
+                linewidths=0.6
+            )
+            texts = ax.clabel(cs, inline=True, inline_spacing=4, fontsize=8, fmt='%g')
+            for t in texts:
+                t.set_rotation(0)
+        except Exception:
+            pass
         
     # Marginal axes
     divider = make_axes_locatable(ax)
@@ -581,62 +584,62 @@ def plot_efficiency_map(
         eff_x = np.nanmean(smoothed_eff, axis=0) # avg over Amax
         eff_y = np.nanmean(smoothed_eff, axis=1) # avg over tE
         
+    ax.set_xscale("log")
+    ax_histx.set_xscale("log")
+    ax.set_xlim(left=10**log_tE.min(), right=10**log_tE.max())
+    
+    ax.set_yscale("log")
+    ax_histy.set_yscale("log")
+    ax.set_ylim(bottom=10**log_Amax.min(), top=10**log_Amax.max())
+    
     # ax_histx (top)
-    ax_histx.plot(xc, eff_x, color="black", lw=0.6)
+    ax_histx.plot(x_centers, eff_x, color="black", lw=0.6)
     ax_histx.set_ylim(0, 1)
     ax_histx.set_yticks([0, 1])
     ax_histx.tick_params(axis="x", bottom=False, top=True, labelbottom=False, labeltop=False, which="both")
     ax_histx.yaxis.tick_right()
     ax_histx.yaxis.set_label_position("right")
-    ax_histx.set_ylabel("Efficiency", fontsize=10)
-    ax_histx.tick_params(axis="y", labelsize=8)
+    ax_histx.set_ylabel("Efficiency", fontsize=text["label"]*0.85)
+    ax_histx.tick_params(axis="y", labelsize=text["label"]*0.75)
     
     # ax_histy (left)
-    ax_histy.plot(eff_y, yc, color="black", lw=0.6)
+    ax_histy.plot(eff_y, y_centers, color="black", lw=0.6)
     ax_histy.set_xlim(0, 1)
     ax_histy.set_xticks([0, 1])
     ax_histy.invert_xaxis()
     ax_histy.tick_params(axis="y", labelleft=True, labelright=False)
     ax_histy.xaxis.tick_top()
     ax_histy.xaxis.set_label_position("top")
-    ax_histy.set_xlabel("Efficiency", fontsize=10)
-    ax_histy.tick_params(axis="x", labelsize=8)
-    ax_histy.set_ylabel(r'$A_{max}$')
+    ax_histy.set_xlabel("Efficiency", fontsize=text["label"]*0.85)
+    ax_histy.tick_params(axis="x", labelsize=text["label"]*0.75)
+    ax_histy.set_ylabel(r'$A_{max}$', fontsize=text["label"])
     
-    # Set tick labels to original scale
-    ax.set_xlabel(r'$t_E$ (days)')
+    ax.set_xlabel(r'$t_E$ [days]', fontsize=text["label"])
     ax.tick_params(axis="y", labelleft=False)
-
-    x_ticks = np.linspace(log_tE.min(), log_tE.max(), 5)
-    y_ticks = np.linspace(log_Amax.min(), log_Amax.max(), 5)
-    
-    ax.set_xticks(x_ticks)
-    ax.set_xticklabels([f"{10**x:.1f}" for x in x_ticks])
-    
-    ax_histy.set_yticks(y_ticks)
-    ax_histy.set_yticklabels([f"{10**y:.1f}" for y in y_ticks])
     
     # Add a secondary y-axis for magnitude drop (Delta m)
-    def logA_to_dm(logA):
-        return 2.5 * logA
+    def A_to_dm_pos(A):
+        return 2.5 * np.log10(np.clip(A, 1.0, None))
 
-    def dm_to_logA(dm):
-        return dm / 2.5
+    def dm_to_A_pos(dm):
+        return 10.0**(dm / 2.5)
 
-    secax = ax.secondary_yaxis('right', functions=(logA_to_dm, dm_to_logA))
+    secax = ax.secondary_yaxis('right', functions=(A_to_dm_pos, dm_to_A_pos))
     dm_ticks = np.array([0.1, 0.5, 1.0, 2.0, 3.0, 5.0])
     secax.set_yticks(dm_ticks)
     secax.set_yticklabels([f"{dm:.1f}" for dm in dm_ticks])
-    secax.set_ylabel(r"$\Delta m$ [mag]")
+    secax.set_ylabel(r"$\Delta m$ [mag]", fontsize=text["label"])
+    secax.tick_params(axis="y", labelsize=text["label"]*0.75)
 
-    cax = divider.append_axes("right", size="7%", pad=0.5)
+    cax = divider.append_axes("right", size="7%", pad=0.4)
     cbar = plt.colorbar(im, cax=cax, orientation='vertical')
     cbar.set_ticks([0.0, 0.2, 0.4, 0.6, 0.8, 1.0])
     import matplotlib.ticker as ticker
     cax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
     cax.yaxis.set_ticks_position('right')
     cax.yaxis.set_label_position('right')
-    cbar.set_label("Recovery Efficiency", fontsize=10, labelpad=8)
+    cbar.set_label("Efficiency", fontsize=text["label"], labelpad=8)
+    cbar.ax.tick_params(labelsize=text["label"]*0.6)
     
     fig.tight_layout()
     save_publication_figure(fig, out_path, dpi=300)
