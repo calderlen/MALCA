@@ -30,7 +30,7 @@ apply_publication_rcparams(plt)
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from malca.config import DEFAULT_OUTPUT_DIR
-from malca.evaluation.injection import load_efficiency_cube, plot_detection_efficiency
+from malca.evaluation.dip_injection import load_efficiency_cube, plot_detection_efficiency
 
 
 def find_latest_run_dir(base_dir: Path, tag: str) -> Path | None:

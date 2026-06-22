@@ -388,7 +388,7 @@ See [Injection Testing output](#injection-testing) for the directory layout.
 
 Python API:
 ```python
-from malca.evaluation.injection import (
+from malca.evaluation.dip_injection import (
     load_efficiency_cube,
     plot_efficiency_all,
     plot_efficiency_mag_slices,

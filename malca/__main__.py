@@ -148,7 +148,7 @@ def main():
             sys.argv = [sys.argv[0]] + remaining
             reproduce.main()
         elif command == "dip-injection":
-            injection = importlib.import_module("malca.evaluation.injection")
+            injection = importlib.import_module("malca.evaluation.dip_injection")
             sys.argv = [sys.argv[0]] + remaining
             injection.main()
         elif command == "microlensing-injection":
