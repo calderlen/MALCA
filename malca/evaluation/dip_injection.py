@@ -1962,9 +1962,9 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
                         help="Override cube output path (default: <out-dir>/cubes/efficiency_cube.npz)")
     g_postprocess.add_argument("--plot-dir", type=Path, default=None,
                         help="Override plot directory (default: <out-dir>/plots)")
-    g_postprocess.add_argument("--depth-bins", type=int, default=20, help="Number of depth bins for cube.")
-    g_postprocess.add_argument("--duration-bins", type=int, default=20, help="Number of duration bins for cube.")
-    g_postprocess.add_argument("--mag-bins", type=int, default=10, help="Number of magnitude bins for cube.")
+    g_postprocess.add_argument("--depth-bins", type=int, default=100, help="Number of depth bins for cube.")
+    g_postprocess.add_argument("--duration-bins", type=int, default=100, help="Number of duration bins for cube.")
+    g_postprocess.add_argument("--mag-bins", type=int, default=100, help="Number of magnitude bins for cube.")
     add_config_args(g_postprocess)
     parser.set_defaults(**INJECTION_CONFIG_DEFAULTS)
 
