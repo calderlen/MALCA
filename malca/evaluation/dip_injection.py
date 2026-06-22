@@ -1303,7 +1303,7 @@ def plot_efficiency_jointplot(
         ax.set_ylim(15, 12)
         
     ax.set_xlabel(xlabel, fontsize=text["label"])
-    ax.set_ylabel("Fractional Depth" if ylabel == r"$\delta$" else ylabel, fontsize=text["label"])
+    ax.set_ylabel(ylabel, fontsize=text["label"])
     ax.tick_params(axis="y", labelleft=True, labelsize=text["label"]*0.75)
     ax.tick_params(axis="x", labelsize=text["label"]*0.75)
     
