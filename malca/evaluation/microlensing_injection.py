@@ -569,9 +569,22 @@ def plot_efficiency_map(
                 alpha=0.9,
                 linewidths=0.6
             )
-            texts = ax.clabel(cs, inline=True, inline_spacing=4, fontsize=8, fmt='%g')
-            for t in texts:
-                t.set_rotation(0)
+            
+            # Find the longest continuous segment for each contour level to place exactly one label
+            label_locations = []
+            for p in cs.get_paths():
+                polys = p.to_polygons()
+                if not polys:
+                    continue
+                longest_poly = max(polys, key=lambda poly: len(poly))
+                mid_idx = len(longest_poly) // 2
+                midpoint = longest_poly[mid_idx]
+                label_locations.append((midpoint[0], midpoint[1]))
+            
+            if label_locations:
+                texts = ax.clabel(cs, inline=True, inline_spacing=4, fontsize=8, fmt='%g', manual=label_locations)
+                for t in texts:
+                    t.set_rotation(0)
         except Exception:
             pass
         
