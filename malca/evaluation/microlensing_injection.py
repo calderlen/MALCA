@@ -531,16 +531,16 @@ def plot_efficiency_map(
     fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_HEATMAP)
     text = scaled_publication_text_sizes(FIG_SINGLE_COL_HEATMAP)
     
-    x_centers = 10**((x_edge[:-1] + x_edge[1:]) / 2)
-    y_centers = 10**((y_edge[:-1] + y_edge[1:]) / 2)
+    xc = (x_edge[:-1] + x_edge[1:]) / 2
+    yc = (y_edge[:-1] + y_edge[1:]) / 2
     
     cmap = plt.cm.cividis
     cmap.set_bad(color='0.9')
     
     levels_contourf = np.linspace(0.0, 1.0, 100)
     im = ax.contourf(
-        x_centers,
-        y_centers,
+        xc,
+        yc,
         smoothed_eff,
         levels=levels_contourf,
         cmap=cmap,
@@ -561,8 +561,8 @@ def plot_efficiency_map(
     if np.any(mask):
         try:
             cs = ax.contour(
-                x_centers,
-                y_centers,
+                xc,
+                yc,
                 smoothed_eff,
                 levels=[0.5, 0.9, 0.99],
                 colors='black',
@@ -584,16 +584,11 @@ def plot_efficiency_map(
         eff_x = np.nanmean(smoothed_eff, axis=0) # avg over Amax
         eff_y = np.nanmean(smoothed_eff, axis=1) # avg over tE
         
-    ax.set_xscale("log")
-    ax_histx.set_xscale("log")
-    ax.set_xlim(left=10**log_tE.min(), right=10**log_tE.max())
-    
-    ax.set_yscale("log")
-    ax_histy.set_yscale("log")
-    ax.set_ylim(bottom=10**log_Amax.min(), top=10**log_Amax.max())
+    ax.set_xlim(left=log_tE.min(), right=log_tE.max())
+    ax.set_ylim(bottom=log_Amax.min(), top=log_Amax.max())
     
     # ax_histx (top)
-    ax_histx.plot(x_centers, eff_x, color="black", lw=0.6)
+    ax_histx.plot(xc, eff_x, color="black", lw=0.6)
     ax_histx.set_ylim(0, 1)
     ax_histx.set_yticks([0, 1])
     ax_histx.tick_params(axis="x", bottom=False, top=True, labelbottom=False, labeltop=False, which="both")
@@ -603,7 +598,7 @@ def plot_efficiency_map(
     ax_histx.tick_params(axis="y", labelsize=text["label"]*0.75)
     
     # ax_histy (left)
-    ax_histy.plot(eff_y, y_centers, color="black", lw=0.6)
+    ax_histy.plot(eff_y, yc, color="black", lw=0.6)
     ax_histy.set_xlim(0, 1)
     ax_histy.set_xticks([0, 1])
     ax_histy.invert_xaxis()
@@ -617,14 +612,31 @@ def plot_efficiency_map(
     ax.set_xlabel(r'$t_E$ [days]', fontsize=text["label"])
     ax.tick_params(axis="y", labelleft=False)
     
+    # Manually configure logarithmic ticks on the linear axes
+    import matplotlib.ticker as ticker
+    def set_log_ticks_on_linear_axis(axis_obj, vmin, vmax):
+        major_ticks = np.arange(np.floor(vmin), np.ceil(vmax) + 1)
+        axis_obj.set_ticks(major_ticks)
+        axis_obj.set_ticklabels([rf"$10^{{{int(x)}}}$" for x in major_ticks])
+        
+        minor_ticks = []
+        for power in major_ticks:
+            for mult in range(2, 10):
+                val = np.log10(mult * 10**power)
+                minor_ticks.append(val)
+        axis_obj.set_ticks(minor_ticks, minor=True)
+
+    set_log_ticks_on_linear_axis(ax.xaxis, log_tE.min(), log_tE.max())
+    set_log_ticks_on_linear_axis(ax_histy.yaxis, log_Amax.min(), log_Amax.max())
+    
     # Add a secondary y-axis for magnitude drop (Delta m)
-    def A_to_dm_pos(A):
-        return 2.5 * np.log10(np.clip(A, 1.0, None))
+    def logA_to_dm(logA):
+        return 2.5 * logA
 
-    def dm_to_A_pos(dm):
-        return 10.0**(dm / 2.5)
+    def dm_to_logA(dm):
+        return dm / 2.5
 
-    secax = ax.secondary_yaxis('right', functions=(A_to_dm_pos, dm_to_A_pos))
+    secax = ax.secondary_yaxis('right', functions=(logA_to_dm, dm_to_logA))
     dm_ticks = np.array([0.1, 0.5, 1.0, 2.0, 3.0, 5.0])
     secax.set_yticks(dm_ticks)
     secax.set_yticklabels([f"{dm:.1f}" for dm in dm_ticks])
