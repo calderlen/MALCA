@@ -582,7 +582,7 @@ def plot_efficiency_map(
                 label_locations.append((midpoint[0], midpoint[1]))
             
             if label_locations:
-                texts = ax.clabel(cs, inline=True, inline_spacing=4, fontsize=8, fmt='%g', manual=label_locations)
+                texts = ax.clabel(cs, inline=True, inline_spacing=4, fontsize=text["label"]*0.8, fmt='%g', manual=label_locations)
                 for t in texts:
                     t.set_rotation(0)
         except Exception:
