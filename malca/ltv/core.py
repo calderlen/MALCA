@@ -1,4 +1,4 @@
-"""
+x"""
 Refactor of the LTvar-style seasonal-trend code.
 
 Key behavior preserved from the brute-force version:
