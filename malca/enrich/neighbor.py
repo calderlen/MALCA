@@ -91,7 +91,9 @@ def _query_catalog_bulk(
                 colRA1="ra",
                 colDec1="dec",
             )
-        except Exception:
+        except Exception as e:
+            import logging
+            logging.warning(f"XMatch query failed for {catalog}: {e}")
             continue
         if len(res) == 0:
             continue
