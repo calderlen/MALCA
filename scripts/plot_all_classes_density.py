@@ -20,11 +20,15 @@ plt.rcParams.update({
 from astropy.coordinates import SkyCoord
 from dustmaps.sfd import SFDQuery
 
-# Output path
-out_pdf = "output_migrated_camera_field_20260606/runs/runs_march18_bundle_all/results/all_classes_mollweide.pdf"
-out_png = "output_migrated_camera_field_20260606/runs/runs_march18_bundle_all/results/all_classes_mollweide.png"
-
 def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--extinction-map", choices=["sfd", "3d"], default="sfd")
+    args = parser.parse_args()
+
+    suffix = "_3d" if args.extinction_map == "3d" else ""
+    out_pdf = f"output_migrated_camera_field_20260606/runs/runs_march18_bundle_all/results/all_classes_mollweide{suffix}.pdf"
+    out_png = f"output_migrated_camera_field_20260606/runs/runs_march18_bundle_all/results/all_classes_mollweide{suffix}.png"
     print("Gathering data...")
     # 1. Get coords from DB
     conn = sqlite3.connect('output_migrated_camera_field_20260606/runs/runs_march18_bundle_all/review/review.taxonomy_filled.db')
@@ -70,15 +74,25 @@ def main():
     # Generate matplotlib mollweide grid
     fig, ax = plt.subplots(figsize=(7.0, 4.0), subplot_kw={'projection': 'mollweide'})
     
-    lon_grid = np.linspace(-np.pi, np.pi, 800)
-    lat_grid = np.linspace(-np.pi/2, np.pi/2, 400)
+    lon_grid = np.linspace(-np.pi, np.pi, 3200)
+    lat_grid = np.linspace(-np.pi/2, np.pi/2, 1600)
     Lon, Lat = np.meshgrid(lon_grid, lat_grid)
     
     # SkyCoord expects longitude to be positive, so we pass it as is and let Astropy wrap it
     coords = SkyCoord(l=Lon*u.rad, b=Lat*u.rad, frame='galactic')
     
-    sfd = SFDQuery()
-    ebv = sfd(coords)
+    if args.extinction_map == "sfd":
+        sfd = SFDQuery()
+        ebv = sfd(coords)
+    else:
+        from dustmaps3d import dustmaps3d
+        # Convert Lon (-pi to pi) to 0-360 degrees for dustmaps3d
+        lon_deg = np.degrees((Lon + 2*np.pi) % (2*np.pi)).flatten()
+        lat_deg = np.degrees(Lat).flatten()
+        # Query with a very large distance to get the maximum integrated column
+        ebv_1d, _, _, _ = dustmaps3d(lon_deg, lat_deg, np.ones_like(lon_deg) * 1000000)
+        ebv = np.array(ebv_1d).reshape(Lon.shape)
+
     ebv[np.isnan(ebv)] = 0
     ebv_log = np.log10(ebv + 0.1)
     

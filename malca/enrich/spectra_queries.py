@@ -12,8 +12,15 @@ def _row_matches_filter(row: pd.Series, spec: SpectraCatalogSpec) -> bool:
     if spec.filter_col is None:
         return True
     if spec.filter_col not in row.index:
-        return spec.filter_values is None and spec.filter_contains is None
-    value = str(row.get(spec.filter_col, "") or "").strip().lower()
+        return not getattr(spec, "filter_not_null", False) and spec.filter_values is None and spec.filter_contains is None
+        
+    val = row.get(spec.filter_col)
+    if getattr(spec, "filter_not_null", False):
+        import pandas as pd
+        if pd.isna(val) or val == "" or str(val).strip().lower() in ("", "nan"):
+            return False
+            
+    value = str(val or "").strip().lower()
     if not value:
         return False
     if spec.filter_values is not None:

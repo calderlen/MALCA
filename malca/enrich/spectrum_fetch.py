@@ -20,6 +20,7 @@ class FetchBackend(str, Enum):
     MAST = "mast"
     LAMOST = "lamost"
     DESI = "desi"
+    APOGEE = "apogee"
     LINK_ONLY = "link_only"
 
 
@@ -59,12 +60,12 @@ SURVEY_BACKEND_MAP: dict[str, tuple[FetchBackend, dict[str, Any]]] = {
     "sdss2_sn": (FetchBackend.SDSS, {}),
     "sdss_v": (FetchBackend.SDSS, {}),
     "desi_dr1": (FetchBackend.DESI, {}),
-    "galah_dr3": (FetchBackend.DIRECT_FITS, {"url_template": "https://cloud.datacentral.org.au/teamdata/GALAH/public/GALAH_DR4/spectra/{sobject_id}.fits"}),
-    "galah_dr4": (FetchBackend.DIRECT_FITS, {"url_template": "https://cloud.datacentral.org.au/teamdata/GALAH/public/GALAH_DR4/spectra/{sobject_id}.fits"}),
+    "galah_dr3": (FetchBackend.LINK_ONLY, {}),
+    "galah_dr4": (FetchBackend.LINK_ONLY, {}),
     "lamost_dr7": (FetchBackend.LAMOST, {}),
-    "apogee_dr16": (FetchBackend.SDSS, {"apogee": True}),
-    "apogee_dr17": (FetchBackend.SDSS, {"apogee": True}),
-    "rave_dr6": (FetchBackend.DIRECT_FITS, {"url_template": "https://www.rave-survey.org/ravedr6/dr6/spectrum/{RAVEID}"}),
+    "apogee_dr16": (FetchBackend.APOGEE, {}),
+    "apogee_dr17": (FetchBackend.APOGEE, {}),
+    "rave_dr6": (FetchBackend.DIRECT_FITS, {"url_template": "https://www.rave-survey.org/files/fits/{DATE}/RAVE_{ObsID}.fits"}),
     "cks": (FetchBackend.LINK_ONLY, {}),
     # Group 2 — astroquery / simple service
     "tns_spectra": (FetchBackend.TNS, {}),
@@ -317,7 +318,18 @@ def _fetch_direct_fits(row: pd.Series, *, url_template: str = "", **kwargs: Any)
     if not url_template:
         return SpectrumFetchResult(FetchStatus.LINK_ONLY, message="No URL template")
     try:
-        url = url_template.format_map({k: str(v) for k, v in row.items() if pd.notna(v)})
+        row_dict = row.to_dict()
+        if "sobject_id" not in row_dict and "GALAH" in row_dict and pd.notna(row_dict.get("GALAH")):
+            row_dict["sobject_id"] = int(row_dict["GALAH"])
+            
+        if "RAVEID" not in row_dict and "ID" in row_dict and pd.notna(row_dict.get("ID")):
+            row_dict["RAVEID"] = str(row_dict["ID"]).strip()
+        if "ObsID" in row_dict and pd.notna(row_dict.get("ObsID")):
+            obsid = str(row_dict["ObsID"])
+            if "_" in obsid:
+                row_dict["DATE"] = obsid.split("_")[0]
+                
+        url = url_template.format_map({k: str(v) for k, v in row_dict.items() if pd.notna(v)})
     except (KeyError, IndexError):
         return SpectrumFetchResult(FetchStatus.LINK_ONLY, message="Could not format URL from row fields")
     try:
@@ -347,6 +359,48 @@ def _fetch_desi(row: pd.Series, **kwargs: Any) -> SpectrumFetchResult:
         message="DESI DR1 portal download not yet automated",
     )
 
+_APOGEE_LOOKUP = None
+
+def _fetch_apogee(row: pd.Series, **kwargs: Any) -> SpectrumFetchResult:
+    global _APOGEE_LOOKUP
+    if _APOGEE_LOOKUP is None:
+        lookup_path = Path(__file__).parent.parent / "data" / "apogee_lookup.parquet"
+        if not lookup_path.exists():
+            return SpectrumFetchResult(FetchStatus.LINK_ONLY, message="apogee_lookup.parquet not found")
+        try:
+            _APOGEE_LOOKUP = pd.read_parquet(lookup_path).set_index("APOGEE_ID")
+        except Exception as e:
+            return SpectrumFetchResult(FetchStatus.ERROR, message=f"Failed to load lookup: {e}")
+            
+    apogee_id = row.get("ID") or row.get("id") or row.get("APOGEE_ID")
+    if not apogee_id:
+        return SpectrumFetchResult(FetchStatus.LINK_ONLY, message="No APOGEE ID")
+    apogee_id = str(apogee_id).strip()
+    
+    if apogee_id not in _APOGEE_LOOKUP.index:
+        return SpectrumFetchResult(FetchStatus.LINK_ONLY, message=f"APOGEE_ID {apogee_id} not in lookup")
+        
+    meta = _APOGEE_LOOKUP.loc[apogee_id]
+    if isinstance(meta, pd.DataFrame):
+        meta = meta.iloc[0]
+        
+    telescope = str(meta["TELESCOPE"])
+    field = str(meta["FIELD"])
+    
+    url = f"https://data.sdss.org/sas/dr17/apogee/spectro/redux/dr17/stars/{telescope}/{field}/apStar-dr17-{apogee_id}.fits"
+    try:
+        from urllib.request import Request, urlopen
+        req = Request(url, headers={"User-Agent": "malca-spectrum-fetch/1.0"})
+        with urlopen(req, timeout=30) as resp:
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix=".fits") as tmp:
+                tmp.write(resp.read())
+                tmp.flush()
+                return _parse_fits_spectrum(tmp.name)
+    except Exception as e:
+        return SpectrumFetchResult(FetchStatus.ERROR, message=str(e))
+
+
 
 def _parse_fits_spectrum(filepath: str) -> SpectrumFetchResult:
     """Best-effort extraction of wavelength + flux from a FITS file."""
@@ -375,19 +429,30 @@ def _parse_fits_spectrum(filepath: str) -> SpectrumFetchResult:
                         return SpectrumFetchResult(FetchStatus.OK, data=SpectrumData(wl, fl, fe))
 
             for hdu in hdul:
-                if hdu.data is not None and hdu.data.ndim == 1:
+                if hdu.data is not None and hdu.data.ndim in (1, 2):
                     header = hdu.header
                     crval = header.get("CRVAL1")
                     cdelt = header.get("CDELT1") or header.get("CD1_1")
                     if crval is not None and cdelt is not None:
-                        n = len(hdu.data)
+                        flux = np.array(hdu.data, dtype=np.float64)
+                        if flux.ndim == 2:
+                            flux = flux[0]  # APOGEE apStar: row 0 is combined flux
+                            
+                        n = len(flux)
                         crpix = header.get("CRPIX1", 1.0)
                         wl = crval + (np.arange(n) - (crpix - 1)) * cdelt
-                        if header.get("DC-FLAG", 0) == 1:
+                        
+                        ctype1 = str(header.get("CTYPE1", "")).lower()
+                        if header.get("DC-FLAG", 0) == 1 or "log" in ctype1 or "10" in ctype1:
                             wl = 10.0 ** wl
+                            
+                        err = None
+                        if hdu.data.ndim == 2 and hdu.data.shape[0] > 1:
+                            err = np.array(hdu.data[1], dtype=np.float64)
+                            
                         return SpectrumFetchResult(
                             FetchStatus.OK,
-                            data=SpectrumData(wl, np.array(hdu.data, dtype=np.float64)),
+                            data=SpectrumData(wl, flux, err),
                         )
 
         return SpectrumFetchResult(FetchStatus.NOT_FOUND, message="No recognized spectrum layout in FITS")
@@ -407,6 +472,7 @@ _BACKEND_DISPATCH: dict[FetchBackend, Any] = {
     FetchBackend.DIRECT_FITS: _fetch_direct_fits,
     FetchBackend.MAST: _fetch_mast,
     FetchBackend.DESI: _fetch_desi,
+    FetchBackend.APOGEE: _fetch_apogee,
 }
 
 

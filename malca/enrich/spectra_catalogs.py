@@ -17,6 +17,7 @@ class SpectraCatalogSpec:
   filter_col: str | None = None
   filter_values: tuple[str, ...] | None = None
   filter_contains: str | None = None
+  filter_not_null: bool = False
   tap_table: str | None = None
   tap_select: str = "*"
   ra_col: str = "RAJ2000"
@@ -33,74 +34,73 @@ DEFAULT_SPECTRA_CATALOG_SPECS: dict[str, SpectraCatalogSpec] = {
     # --- Tier A: wide-area surveys with direct flux archive access ---
     "desi_dr1": SpectraCatalogSpec(
         vizier_id="V/161/zcatdr1",
+        mode="tap",
+        tap_table='"V/161/zcatdr1"',
+        ra_col="RA",
+        dec_col="DEC",
     ),
-    "sdss_dr16_spec": SpectraCatalogSpec(vizier_id=_SDSS_SPEC, query_group=_SDSS_GROUP),
+    "sdss_dr16_spec": SpectraCatalogSpec(
+        vizier_id=_SDSS_SPEC,
+        query_group=_SDSS_GROUP,
+        filter_col="zsp",
+        filter_not_null=True
+    ),
     "sdss_boss": SpectraCatalogSpec(
         vizier_id=_SDSS_SPEC,
         query_group=_SDSS_GROUP,
         filter_col="survey",
         filter_values=("boss",),
-        enabled_by_default=False,
     ),
     "sdss_eboss": SpectraCatalogSpec(
         vizier_id=_SDSS_SPEC,
         query_group=_SDSS_GROUP,
         filter_col="survey",
         filter_values=("eboss",),
-        enabled_by_default=False,
     ),
     "sdss_legacy": SpectraCatalogSpec(
         vizier_id=_SDSS_SPEC,
         query_group=_SDSS_GROUP,
         filter_col="survey",
         filter_values=("sdss",),
-        enabled_by_default=False,
     ),
     "sdss_segue": SpectraCatalogSpec(
         vizier_id=_SDSS_SPEC,
         query_group=_SDSS_GROUP,
         filter_col="survey",
         filter_values=("segue1", "segue2"),
-        enabled_by_default=False,
     ),
     "sdss_spiders": SpectraCatalogSpec(
         vizier_id=_SDSS_SPEC,
         query_group=_SDSS_GROUP,
         filter_col="programname",
         filter_contains="spider",
-        enabled_by_default=False,
     ),
     "sdss_tdss": SpectraCatalogSpec(
         vizier_id=_SDSS_SPEC,
         query_group=_SDSS_GROUP,
         filter_col="programname",
         filter_contains="tdss",
-        enabled_by_default=False,
     ),
     "apogee_dr16": SpectraCatalogSpec(vizier_id="III/284/allstars"),
     "manga_dr17": SpectraCatalogSpec(vizier_id="J/ApJS/262/36/catalog"),
-    "lamost_dr7": SpectraCatalogSpec(vizier_id="V/156/dr7lrs", enabled_by_default=False),
+    "lamost_dr7": SpectraCatalogSpec(vizier_id="V/156/dr7lrs"),
     "galah_dr3": SpectraCatalogSpec(vizier_id="J/MNRAS/506/150/stars"),
     "rave_dr6": SpectraCatalogSpec(vizier_id="III/283/ravedr6"),
     "sixdf_gs": SpectraCatalogSpec(vizier_id="VII/259/6dfgs"),
     "2dfgrs": SpectraCatalogSpec(vizier_id="VII/250/2dfgrs"),
     "milliquas": SpectraCatalogSpec(vizier_id="VII/294/catalog"),
-    "sdss2_sn": SpectraCatalogSpec(vizier_id=_SDSS_SPEC, query_group=_SDSS_GROUP, enabled_by_default=False),
+    "sdss2_sn": SpectraCatalogSpec(vizier_id=_SDSS_SPEC, query_group=_SDSS_GROUP),
     "cks": SpectraCatalogSpec(vizier_id="J/AJ/154/107/stars"),
     # --- Tier B: metadata-rich; flux via astroquery or best-effort ---
     "gaia_rvs": SpectraCatalogSpec(
         vizier_id="I/355/rvsmean",
         mode="tap",
         tap_table='"I/355/rvsmean"',
-        ra_col="RAICRS",
-        dec_col="DEICRS",
     ),
     "gaia_xp": SpectraCatalogSpec(
         vizier_id="I/355/xpsample",
         mode="tap",
         tap_table='"I/355/xpsample"',
-        ra_col="RAICRS",
-        dec_col="DEICRS",
     ),
     "gaia_eso": SpectraCatalogSpec(vizier_id="J/A+A/676/A129/catalog"),
     "vvds": SpectraCatalogSpec(vizier_id="III/250/vvds_dp"),
@@ -111,7 +111,7 @@ DEFAULT_SPECTRA_CATALOG_SPECS: dict[str, SpectraCatalogSpec] = {
     "wigglez": SpectraCatalogSpec(vizier_id="J/MNRAS/401/1429/wigglez1"),
     "primus": SpectraCatalogSpec(vizier_id="J/ApJ/767/118/primus", enabled_by_default=False),
     "ozdes": SpectraCatalogSpec(vizier_id="J/MNRAS/472/273/ozdesdr1"),
-    "gama": SpectraCatalogSpec(vizier_id="VII/291/gladep", enabled_by_default=False),
+    "gama": SpectraCatalogSpec(vizier_id="VII/291/gladep"),
     "sdss_v": SpectraCatalogSpec(vizier_id=_SDSS_SPEC, query_group=_SDSS_GROUP, enabled_by_default=False),
     "3d_hst": SpectraCatalogSpec(vizier_id="J/ApJS/265/40/catalog"),
     "s5": SpectraCatalogSpec(vizier_id="J/MNRAS/490/3508/s5dr1"),
@@ -184,6 +184,14 @@ def resolve_spectra_catalogs(
 def grouped_catalog_queries(catalogs: dict[str, SpectraCatalogSpec]) -> dict[str, tuple[str, SpectraCatalogSpec]]:
     """Deduplicate VizieR queries by query_group or vizier_id+mode."""
     groups: dict[str, tuple[str, SpectraCatalogSpec]] = {}
+    for survey_key, spec in catalogs.items():
+        if spec.query_group:
+            group_id = f"{spec.mode}:{spec.query_group}:{spec.vizier_id}"
+        else:
+            group_id = f"{spec.mode}:{spec.vizier_id}"
+        if group_id not in groups:
+            groups[group_id] = (survey_key, spec)
+    return groups
     for survey_key, spec in catalogs.items():
         if spec.query_group:
             group_id = f"{spec.mode}:{spec.query_group}:{spec.vizier_id}"

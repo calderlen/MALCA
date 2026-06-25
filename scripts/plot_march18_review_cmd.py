@@ -230,10 +230,10 @@ GAIA_BG_PATH = Path("input/gaia/gaia_dr3_crossmatched.parquet")
 
 # "density" background style: full-field pcolormesh, viridis, lighter smoothing.
 CMD_DENSITY_STYLE_CMAP = "viridis"
-CMD_DENSITY_STYLE_BINS = 120
+CMD_DENSITY_STYLE_BINS = 480
 CMD_DENSITY_STYLE_SMOOTH_SIGMA = 1.0
 CMD_DENSITY_STYLE_CUTOFF_PERCENTILE = 8.0
-CMD_DENSITY_STYLE_CUTOFF_FRAC_MAX = 0.012
+CMD_DENSITY_STYLE_CUTOFF_FRAC_MAX = 0.005
 
 # "corner" background style: monochrome scatter + line contours (corner-plot-like).
 CMD_CORNER_STYLE_BINS = 100
@@ -484,10 +484,12 @@ def _plot_cmd_background_corner(ax, bg_x: np.ndarray, bg_y: np.ndarray) -> None:
     )
 
 
-def _load_gaia_background() -> tuple[np.ndarray, np.ndarray]:
+def _load_gaia_background(bg_path: Path | str = GAIA_BG_PATH) -> tuple[np.ndarray, np.ndarray]:
     """Load the full Gaia DR3 crossmatched sample for CMD density background."""
     import pandas as pd
-    path = Path(__file__).resolve().parents[1] / GAIA_BG_PATH
+    path = Path(bg_path)
+    if not path.is_absolute():
+        path = Path(__file__).resolve().parents[1] / path
     if not path.is_file():
         return np.empty(0), np.empty(0)
     df = pd.read_parquet(path, columns=["bp_rp", "phot_g_mean_mag", "parallax"])
@@ -505,6 +507,7 @@ def _plot_cmd(
     *,
     bucket_order: list[str] | None = None,
     background_style: str = DEFAULT_BACKGROUND_STYLE,
+    bg_path: Path | str = GAIA_BG_PATH,
 ) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     bucket_order = bucket_order or BUCKET_ORDER
@@ -514,7 +517,7 @@ def _plot_cmd(
     fig, ax = plt.subplots(figsize=CMD_FIGSIZE)
 
     # Combine Gaia DR3 background + all pipeline candidates
-    gaia_x, gaia_y = _load_gaia_background()
+    gaia_x, gaia_y = _load_gaia_background(bg_path)
     cand_x = plottable["cmd_color"].to_numpy(dtype=float)
     cand_y = plottable["cmd_mag"].to_numpy(dtype=float)
     bg_x = np.concatenate([gaia_x, cand_x])
@@ -600,6 +603,7 @@ def build_plot(
     title: str | None = None,
     only_reviewed: bool = True,
     background_style: str = DEFAULT_BACKGROUND_STYLE,
+    bg_path: Path | str = GAIA_BG_PATH,
 ) -> tuple[pd.DataFrame, dict[str, int]]:
     bucket_order = buckets or BUCKET_ORDER
     reviews = _read_reviews(review_db, only_reviewed=only_reviewed)
@@ -632,7 +636,7 @@ def build_plot(
             (bucket_mask & plot_df["cmd_coordinate_source"].isin(HOLLOW_CMD_SOURCES) & plottable_mask).sum()
         )
 
-    _plot_cmd(plot_df, output_path, bucket_order=bucket_order, background_style=background_style)
+    _plot_cmd(plot_df, output_path, bucket_order=bucket_order, background_style=background_style, bg_path=bg_path)
     csv_path = output_path.with_suffix(".csv")
     plot_df.loc[selected_mask].sort_values(["review_cmd_bucket", "candidate_id"]).to_csv(csv_path, index=False)
     return plot_df, counts
@@ -665,6 +669,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Include non-reviewed rows from the reviews table.",
     )
+    parser.add_argument(
+        "--gaia-bg",
+        type=Path,
+        default=GAIA_BG_PATH,
+        help="Path to the Gaia parquet file to use for the background.",
+    )
     return parser.parse_args()
 
 
@@ -689,6 +699,7 @@ def main() -> None:
         title=args.title,
         only_reviewed=not args.include_unreviewed,
         background_style=args.background_style,
+        bg_path=args.gaia_bg,
     )
     print(f"Wrote {output}")
     print(f"Wrote {output.with_suffix('.pdf')}")

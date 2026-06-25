@@ -1377,6 +1377,27 @@ app.index_string = '''
         .Select-menu-outer > div:first-child,
         .Select-menu-outer > div:nth-child(1) {
              color: #dce8f2 !important;
+             background-color: #0f1418 !important;
+             padding: 4px 8px !important;
+             border-bottom: 1px solid #2f4658 !important;
+        }
+
+        .Select-menu-outer > div:first-child a,
+        .Select-menu-outer > div:nth-child(1) a,
+        .Select-menu-outer > div:first-child button,
+        .Select-menu-outer > div:nth-child(1) button {
+             color: #86c7ff !important;
+             text-decoration: none !important;
+             margin-right: 12px !important;
+             cursor: pointer !important;
+        }
+
+        .Select-menu-outer > div:first-child a:hover,
+        .Select-menu-outer > div:nth-child(1) a:hover,
+        .Select-menu-outer > div:first-child button:hover,
+        .Select-menu-outer > div:nth-child(1) button:hover {
+             color: #b7dcff !important;
+             text-decoration: underline !important;
         }
         
         /* 5. Force text color on children (labels, spans) inside options */
