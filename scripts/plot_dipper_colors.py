@@ -86,6 +86,8 @@ def main():
         
         ax.set_xlabel(r'$W_1 - W_2$ [mag]')
         ax.set_ylabel(r'$H - K$ [mag]')
+        ax.set_xlim(-0.2, 1.0)
+        ax.set_ylim(0.0, 1.0)
         ax.legend(loc='best')
         ax.xaxis.set_minor_locator(AutoMinorLocator(2))
         ax.yaxis.set_minor_locator(AutoMinorLocator(2))

@@ -26,6 +26,7 @@ dependencies = [
     "dash[diskcache]>=2.14.0",
     "dash-bootstrap-components>=1.5.0",
     "astroquery>=0.4.6",
+    "sparclclient",
     "dust_extinction",
     "dustmaps3d",
     "pyvo",

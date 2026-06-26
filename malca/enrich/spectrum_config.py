@@ -26,6 +26,19 @@ def load_spectrum_fetch_config(
     clagn_catalog_path: str | Path | None = None,
 ) -> SpectrumFetchConfig:
     """Build config from explicit args, falling back to environment variables."""
+    # Attempt to load local .env if it exists
+    env_file = Path(".env")
+    if env_file.exists():
+        with open(env_file) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    k = k.strip()
+                    v = v.strip().strip("'\"")
+                    if k not in os.environ:
+                        os.environ[k] = v
+
     return SpectrumFetchConfig(
         eso_username=eso_username or os.environ.get("ESO_USERNAME"),
         eso_password=eso_password or os.environ.get("ESO_PASSWORD"),

@@ -21,6 +21,7 @@ class FetchBackend(str, Enum):
     LAMOST = "lamost"
     DESI = "desi"
     APOGEE = "apogee"
+    GALAH = "galah"
     LINK_ONLY = "link_only"
 
 
@@ -60,7 +61,7 @@ SURVEY_BACKEND_MAP: dict[str, tuple[FetchBackend, dict[str, Any]]] = {
     "sdss2_sn": (FetchBackend.SDSS, {}),
     "sdss_v": (FetchBackend.SDSS, {}),
     "desi_dr1": (FetchBackend.DESI, {}),
-    "galah_dr3": (FetchBackend.LINK_ONLY, {}),
+    "galah_dr3": (FetchBackend.GALAH, {}),
     "galah_dr4": (FetchBackend.LINK_ONLY, {}),
     "lamost_dr7": (FetchBackend.LAMOST, {}),
     "apogee_dr16": (FetchBackend.APOGEE, {}),
@@ -205,7 +206,13 @@ def _fetch_eso(row: pd.Series, *, collection: str = "", config: Any = None, **kw
         from astroquery.eso import Eso
         eso = Eso()
         if config and config.eso_username and config.eso_password:
-            eso.login(username=config.eso_username, store_password=False)
+            import getpass
+            original_getpass = getpass.getpass
+            getpass.getpass = lambda prompt="": config.eso_password
+            try:
+                eso.login(username=config.eso_username, store_password=False)
+            finally:
+                getpass.getpass = original_getpass
         table = eso.query_criteria(column_filters={"target": object_name}, collection=collection or None)
         if table is None or len(table) == 0:
             return SpectrumFetchResult(FetchStatus.NOT_FOUND, message=f"No ESO {collection} data for {object_name}")
@@ -353,11 +360,63 @@ def _fetch_desi(row: pd.Series, **kwargs: Any) -> SpectrumFetchResult:
     target_id = row.get("TARGETID") or row.get("targetid") or row.get("TARGET_ID")
     if not target_id:
         return SpectrumFetchResult(FetchStatus.LINK_ONLY, message="No DESI TARGETID")
-    return SpectrumFetchResult(
-        FetchStatus.LINK_ONLY,
-        link=f"https://www.desi.lbl.gov/documents/etc/DESI-DR1-target-{target_id}/",
-        message="DESI DR1 portal download not yet automated",
-    )
+        
+    try:
+        from sparcl.client import SparclClient
+        client = SparclClient(connect_timeout=10)
+        
+        # 1. Search for the target ID to get the sparcl_id
+        found = client.find(
+            outfields=['sparcl_id'], 
+            constraints={'targetid': [int(target_id)]},
+            limit=1
+        )
+        if not found.records:
+            return SpectrumFetchResult(FetchStatus.NOT_FOUND, message=f"No SPARCL records for TARGETID {target_id}")
+            
+        # Handle both dict-like and object-like return types
+        record = found.records[0]
+        sparcl_id = record.get('sparcl_id') if isinstance(record, dict) else getattr(record, 'sparcl_id', None)
+        
+        if not sparcl_id:
+            return SpectrumFetchResult(FetchStatus.NOT_FOUND, message="Could not extract sparcl_id from record")
+            
+        # 2. Retrieve the spectrum arrays
+        res = client.retrieve([sparcl_id], include=['wavelength', 'flux', 'ivar'])
+        if not res.records:
+            return SpectrumFetchResult(FetchStatus.NOT_FOUND, message="Failed to retrieve spectrum data")
+            
+        spec_data = res.records[0]
+        
+        def _get_arr(obj: Any, key: str) -> Any:
+            return obj.get(key) if isinstance(obj, dict) else getattr(obj, key, None)
+            
+        wave = _get_arr(spec_data, 'wavelength')
+        flux = _get_arr(spec_data, 'flux')
+        ivar = _get_arr(spec_data, 'ivar')
+        
+        if wave is None or flux is None:
+            return SpectrumFetchResult(FetchStatus.NOT_FOUND, message="Missing wavelength or flux in retrieved record")
+            
+        wavelength = np.array(wave, dtype=np.float64)
+        flux_arr = np.array(flux, dtype=np.float64)
+        
+        flux_err = None
+        if ivar is not None:
+            ivar_arr = np.array(ivar, dtype=np.float64)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                flux_err = np.where(ivar_arr > 0, 1.0 / np.sqrt(ivar_arr), 0.0)
+                
+        return SpectrumFetchResult(FetchStatus.OK, data=SpectrumData(wavelength, flux_arr, flux_err))
+        
+    except ImportError:
+        return SpectrumFetchResult(
+            FetchStatus.LINK_ONLY,
+            link=f"https://www.legacysurvey.org/viewer/desi-spectrum/dr1/targetid{target_id}",
+            message="sparclclient not installed (pip install sparclclient). Using viewer link instead.",
+        )
+    except Exception as e:
+        return SpectrumFetchResult(FetchStatus.ERROR, message=str(e))
 
 _APOGEE_LOOKUP = None
 
@@ -399,6 +458,57 @@ def _fetch_apogee(row: pd.Series, **kwargs: Any) -> SpectrumFetchResult:
                 return _parse_fits_spectrum(tmp.name)
     except Exception as e:
         return SpectrumFetchResult(FetchStatus.ERROR, message=str(e))
+
+_GALAH_LOOKUP = None
+
+def _fetch_galah(row: pd.Series, **kwargs: Any) -> SpectrumFetchResult:
+    global _GALAH_LOOKUP
+    if _GALAH_LOOKUP is None:
+        lookup_path = Path(__file__).parent.parent / "data" / "galah_lookup.parquet"
+        if not lookup_path.exists():
+            return SpectrumFetchResult(FetchStatus.LINK_ONLY, message="galah_lookup.parquet not found in malca/data")
+        try:
+            _GALAH_LOOKUP = pd.read_parquet(lookup_path)
+            if "sobject_id" in _GALAH_LOOKUP.columns:
+                _GALAH_LOOKUP = _GALAH_LOOKUP.set_index("sobject_id")
+        except Exception as e:
+            return SpectrumFetchResult(FetchStatus.ERROR, message=f"Failed to load GALAH lookup: {e}")
+            
+    sobject_id = row.get("sobject_id") or row.get("SOBJECT_ID") or row.get("id")
+    if pd.isna(sobject_id) or not sobject_id:
+        return SpectrumFetchResult(FetchStatus.LINK_ONLY, message="No GALAH sobject_id")
+        
+    sobject_id = str(sobject_id).strip()
+    if sobject_id.endswith(".0"):
+        sobject_id = sobject_id[:-2]
+        
+    if sobject_id not in _GALAH_LOOKUP.index:
+        return SpectrumFetchResult(FetchStatus.LINK_ONLY, message=f"sobject_id {sobject_id} not in galah_lookup.parquet")
+        
+    meta = _GALAH_LOOKUP.loc[sobject_id]
+    if isinstance(meta, pd.DataFrame):
+        meta = meta.iloc[0]
+        
+    if "file_path" in meta and pd.notna(meta["file_path"]):
+        path = Path(meta["file_path"])
+        if path.exists():
+            return _parse_fits_spectrum(path)
+            
+    if "url" in meta and pd.notna(meta["url"]):
+        url = str(meta["url"])
+        try:
+            from urllib.request import Request, urlopen
+            from tempfile import NamedTemporaryFile
+            req = Request(url, headers={"User-Agent": "malca-spectrum-fetch/1.0"})
+            with urlopen(req, timeout=30) as resp:
+                with NamedTemporaryFile(suffix=".fits") as tmp:
+                    tmp.write(resp.read())
+                    tmp.flush()
+                    return _parse_fits_spectrum(Path(tmp.name))
+        except Exception as e:
+            return SpectrumFetchResult(FetchStatus.ERROR, message=f"Failed to download GALAH FITS: {e}")
+            
+    return SpectrumFetchResult(FetchStatus.LINK_ONLY, message="GALAH lookup row missing file_path and url")
 
 
 
@@ -473,6 +583,7 @@ _BACKEND_DISPATCH: dict[FetchBackend, Any] = {
     FetchBackend.MAST: _fetch_mast,
     FetchBackend.DESI: _fetch_desi,
     FetchBackend.APOGEE: _fetch_apogee,
+    FetchBackend.GALAH: _fetch_galah,
 }
 
 

@@ -17,6 +17,7 @@ kaleido
 
 # Optional: multiwavelength analysis
 astroquery>=0.4.6
+sparclclient
 dust_extinction
 dustmaps3d
 
@@ -26,3 +27,5 @@ ipykernel
 seaborn
 scikit-learn
 joblib
+
+sparclclient

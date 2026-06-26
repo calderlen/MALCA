@@ -175,6 +175,7 @@ def resolve_spectra_catalogs(
                 ra_col=base.ra_col,
                 dec_col=base.dec_col,
                 enabled_by_default=base.enabled_by_default,
+                filter_not_null=getattr(base, "filter_not_null", False),
             )
         else:
             resolved[canon_key] = SpectraCatalogSpec(vizier_id=str(value))

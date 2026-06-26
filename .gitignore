@@ -73,3 +73,5 @@ malca/reproduction/
 /ltv/
 /review_bundles/
 malca/notebooks/**/output/
+
+.env
