@@ -615,19 +615,23 @@ def get_dust_extinction(df: pd.DataFrame) -> pd.DataFrame:
         return df
         
     # Distance (in pc from Gaia, need kpc for dustmaps3d)
-    if 'distance_gspphot' in df.columns:
-        dist_pc = df['distance_gspphot'].values
-    elif 'gaia_parallax' in df.columns:
+    dist_pc = np.full(len(df), np.nan)
+    
+    if 'gaia_parallax' in df.columns:
         plx = df['gaia_parallax'].values
         valid_plx = (np.isfinite(plx)) & (plx > 0)
-        dist_pc = np.full(len(df), np.nan)
         dist_pc[valid_plx] = 1000.0 / plx[valid_plx]
     elif 'parallax' in df.columns:
         plx = df['parallax'].values
         valid_plx = (np.isfinite(plx)) & (plx > 0)
-        dist_pc = np.full(len(df), np.nan)
         dist_pc[valid_plx] = 1000.0 / plx[valid_plx]
-    else:
+        
+    if 'distance_gspphot' in df.columns:
+        gsp = df['distance_gspphot'].values
+        valid_gsp = np.isfinite(gsp) & (gsp > 0)
+        dist_pc[valid_gsp] = gsp[valid_gsp]
+        
+    if np.isnan(dist_pc).all():
         print("Warning: No distance info for dust query.")
         return df
     

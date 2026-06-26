@@ -2314,6 +2314,14 @@ def get_candidate_payload(conn: sqlite3.Connection, candidate_id: str) -> dict:
         payload = {}
     if not isinstance(payload, dict):
         payload = {}
+
+    # Flatten layer blobs so downstream consumers see all fields at top level
+    for layer in FEATURE_LAYER_COLUMNS:
+        layer_data = parse_layer_value(payload.pop(layer, None))
+        for key, value in layer_data.items():
+            if key not in payload:
+                payload[key] = value
+
     # Merge SQL columns into payload so asassn_var_type, ztf_var_type, tns_type etc. show when only in SQL
     for i, col in enumerate(cols_to_fetch):
         if i + 1 >= len(row):

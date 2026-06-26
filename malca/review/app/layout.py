@@ -189,6 +189,25 @@ def create_layout():
             html.Div('Use the EDA rail on the right to plot and jump within the current queue.',
                      style={'fontSize': '10px', 'color': '#7d91a6', 'marginBottom': '6px'}),
 
+            html.Div('Batch Export', className='section-title', style={'marginTop': '20px'}),
+            html.Div([
+                dcc.Input(id='batch-export-path', type='text', placeholder='/path/to/export/dir', className='text-input', style={'width': '100%', 'marginBottom': '8px'}),
+                dcc.Dropdown(
+                    id='batch-export-target',
+                    options=[
+                        {'label': 'All in Queue', 'value': 'all'},
+                        {'label': 'Unreviewed in Queue', 'value': 'unreviewed'}
+                    ],
+                    value='unreviewed',
+                    clearable=False,
+                    style={'marginBottom': '8px'}
+                ),
+                html.Button('Export PDFs', id='batch-export-btn', className='action-btn primary', n_clicks=0, style={'width': '100%'}),
+                dcc.Loading(id='batch-export-loading', type='dot', children=[
+                    html.Div(id='batch-export-status', style={'fontSize': '11px', 'marginTop': '8px', 'color': '#7d91a6', 'minHeight': '15px'})
+                ])
+            ], style={'padding': '0 1px', 'marginBottom': '12px'}),
+
             html.Hr(),
 
             html.Div('Native Cameras', className='section-title'),
