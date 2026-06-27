@@ -11,7 +11,7 @@ from urllib.parse import quote, quote_plus
 import pandas as pd
 
 from malca.ltv.multi_survey import LTV_MS_FEATURE_COLUMN_SPECS
-from malca.review.filter_schema import is_definite_known_type_value
+from malca.review.filter_schema import is_known_variable_type_value
 
 
 # Grouped metadata fields: list of (group_name, fields) where each field is
@@ -785,30 +785,7 @@ def _finite_catalog_number(value: Any) -> bool:
 
 
 def _is_variable_simbad_otype(value: Any) -> bool:
-    text = _known_text_value(value)
-    if not text:
-        return False
-    if "V*" in text:
-        return True
-    markers = {
-        "EB*",
-        "YSO",
-        "SN",
-        "Nova",
-        "Catac",
-        "RR*",
-        "Cepheid",
-        "Mira",
-        "BYDra",
-        "RSCVn",
-        "Symbiotic",
-        "ELL",
-        "Blazar",
-        "QSO",
-        "AGN",
-    }
-    lowered = text.lower()
-    return any(marker.lower() in lowered for marker in markers)
+    return is_known_variable_type_value("simbad_otype", value)
 
 
 def has_known_catalog_evidence(record: dict[str, Any] | None) -> bool:
@@ -826,7 +803,7 @@ def has_known_catalog_evidence(record: dict[str, Any] | None) -> bool:
         "alerce_lc_class",
         "microlens_catalog",
     ):
-        if is_definite_known_type_value(column, record.get(column)):
+        if is_known_variable_type_value(column, record.get(column)):
             return True
     if _truthy_catalog_value(record.get("microlens_match")):
         return True

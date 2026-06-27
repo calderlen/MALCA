@@ -198,6 +198,53 @@ def test_upsert_candidates_frame_derives_known_from_definite_vsx_class(tmp_path:
     assert payload["vsx_class"] == "EA"
 
 
+def test_upsert_candidates_frame_does_not_derive_known_from_generic_simbad_type(tmp_path: Path) -> None:
+    review_db = tmp_path / "review.db"
+
+    with db_connect(review_db) as conn:
+        upsert_candidates_frame(
+            conn,
+            pd.DataFrame(
+                [
+                    {
+                        "candidate_id": "SIMBAD-IR",
+                        "asas_sn_id": "SIMBAD-IR",
+                        "simbad_main_id": "IR Source",
+                        "simbad_otype": "IR",
+                        "vetting_likely_known": False,
+                    }
+                ]
+            ),
+        )
+        payload = get_candidate_payload(conn, "SIMBAD-IR")
+
+    assert payload["vetting_likely_known"] is False
+    assert payload["simbad_otype"] == "IR"
+
+
+def test_upsert_candidates_frame_derives_known_from_variable_simbad_type(tmp_path: Path) -> None:
+    review_db = tmp_path / "review.db"
+
+    with db_connect(review_db) as conn:
+        upsert_candidates_frame(
+            conn,
+            pd.DataFrame(
+                [
+                    {
+                        "candidate_id": "SIMBAD-RR",
+                        "asas_sn_id": "SIMBAD-RR",
+                        "simbad_otype": "RR*",
+                        "vetting_likely_known": False,
+                    }
+                ]
+            ),
+        )
+        payload = get_candidate_payload(conn, "SIMBAD-RR")
+
+    assert payload["vetting_likely_known"] is True
+    assert payload["simbad_otype"] == "RR*"
+
+
 def test_merge_candidate_results_derives_known_from_backfilled_vsx_class(tmp_path: Path) -> None:
     review_db = tmp_path / "review.db"
 

@@ -465,7 +465,7 @@ def test_diagnostic_plots_show_loading_when_background_state_is_stale(monkeypatc
     assert seen == {}
 
 
-def test_vetting_known_preset_can_leave_uncertain_types_visible() -> None:
+def test_vetting_known_variable_preset_leaves_uncertain_types_visible() -> None:
     options = {col: [] for col in review_app.VETTING_KNOWN_SELECT_FILTERS}
     options["tns_type"] = [
         {"label": "SN Ia", "value": "SN Ia"},
@@ -477,6 +477,8 @@ def test_vetting_known_preset_can_leave_uncertain_types_visible() -> None:
         {"label": "GCAS", "value": "GCAS"},
         {"label": "BE", "value": "BE"},
         {"label": "EA", "value": "EA"},
+        {"label": "UXOR", "value": "UXOR"},
+        {"label": "YSO/DIP", "value": "YSO/DIP"},
         {"label": "DSCT", "value": "DSCT"},
         {"label": "EA:", "value": "EA:"},
         {"label": "EA/SD:", "value": "EA/SD:"},
@@ -490,64 +492,206 @@ def test_vetting_known_preset_can_leave_uncertain_types_visible() -> None:
     ]
     options["asassn_var_type"] = [
         {"label": "ROT", "value": "ROT"},
+        {"label": "YSO", "value": "YSO"},
         {"label": "ROT:", "value": "ROT:"},
         {"label": "VAR", "value": "VAR"},
     ]
+    options["gaia_var_class"] = [
+        {"label": "ECL", "value": "ECL"},
+        {"label": "YSO", "value": "YSO"},
+        {"label": "RR", "value": "RR"},
+        {"label": "DSCT|GDOR|SXPHE", "value": "DSCT|GDOR|SXPHE"},
+    ]
+    options["ztf_var_type"] = [
+        {"label": "EA", "value": "EA"},
+        {"label": "RSCVN", "value": "RSCVN"},
+    ]
+    options["alerce_lc_class"] = [
+        {"label": "Periodic", "value": "Periodic"},
+        {"label": "YSO", "value": "YSO"},
+        {"label": "CV/Nova", "value": "CV/Nova"},
+    ]
+    options["yso_class"] = [
+        {"label": "Class II", "value": "Class II"},
+        {"label": "Main Sequence", "value": "Main Sequence"},
+    ]
     options["simbad_otype"] = [
+        {"label": "EB*", "value": "EB*"},
+        {"label": "SB*", "value": "SB*"},
         {"label": "V*", "value": "V*"},
+        {"label": "LP*", "value": "LP*"},
+        {"label": "Or*", "value": "Or*"},
+        {"label": "Y*O", "value": "Y*O"},
         {"label": "Y*?", "value": "Y*?"},
+        {"label": "TT*", "value": "TT*"},
+        {"label": "Be*", "value": "Be*"},
+        {"label": "IR", "value": "IR"},
         {"label": "*", "value": "*"},
     ]
 
     bool_values, select_values = review_app._vetting_known_filter_preset(
         options,
-        include_uncertain=False,
-    )
-    select_values_by_col = dict(zip(review_app.VETTING_KNOWN_SELECT_FILTERS, select_values))
-    bool_values_by_col = dict(zip(review_app.VETTING_KNOWN_BOOL_FILTERS, bool_values))
-
-    assert bool_values_by_col["vetting_likely_known"] == "Any"
-    assert bool_values_by_col["microlens_match"] == "False"
-    assert select_values_by_col["vsx_class"] == [
-        "GCAS",
-        "BE",
-        "EA",
-        "DSCT",
-        "ACEP|CEP",
-        "BE|GCAS|SDOR|WR",
-    ]
-    assert select_values_by_col["asassn_var_type"] == ["ROT"]
-    assert select_values_by_col["tns_type"] == ["SN Ia"]
-    assert select_values_by_col["simbad_otype"] == ["V*"]
-
-
-def test_vetting_known_preset_broad_mode_keeps_existing_behavior() -> None:
-    options = {col: [] for col in review_app.VETTING_KNOWN_SELECT_FILTERS}
-    options["tns_type"] = [
-        {"label": "SN Ia", "value": "SN Ia"},
-        {"label": "CV candidate", "value": "CV candidate"},
-        {"label": "SN?", "value": "SN?"},
-    ]
-    options["vsx_class"] = [
-        {"label": "GCAS", "value": "GCAS"},
-        {"label": "BE", "value": "BE"},
-        {"label": "EA", "value": "EA"},
-        {"label": "VAR", "value": "VAR"},
-        {"label": "EA:", "value": "EA:"},
-        {"label": "DSCT:+VAR", "value": "DSCT:+VAR"},
-    ]
-
-    bool_values, select_values = review_app._vetting_known_filter_preset(
-        options,
-        include_uncertain=True,
+        policy="known_variables",
     )
     select_values_by_col = dict(zip(review_app.VETTING_KNOWN_SELECT_FILTERS, select_values))
     bool_values_by_col = dict(zip(review_app.VETTING_KNOWN_BOOL_FILTERS, bool_values))
 
     assert bool_values_by_col["vetting_likely_known"] == "False"
     assert bool_values_by_col["microlens_match"] == "False"
-    assert select_values_by_col["vsx_class"] == ["GCAS", "BE", "EA", "VAR", "EA:", "DSCT:+VAR"]
-    assert select_values_by_col["tns_type"] == ["SN Ia", "CV candidate", "SN?"]
+    assert select_values_by_col["vsx_class"] == [
+        "GCAS",
+        "BE",
+        "EA",
+        "UXOR",
+        "YSO/DIP",
+        "DSCT",
+        "ACEP|CEP",
+        "BE|GCAS|SDOR|WR",
+    ]
+    assert select_values_by_col["asassn_var_type"] == ["ROT", "YSO"]
+    assert select_values_by_col["gaia_var_class"] == ["ECL", "YSO", "RR", "DSCT|GDOR|SXPHE"]
+    assert select_values_by_col["ztf_var_type"] == ["EA", "RSCVN"]
+    assert select_values_by_col["alerce_lc_class"] == ["Periodic", "YSO", "CV/Nova"]
+    assert select_values_by_col["yso_class"] == []
+    assert select_values_by_col["tns_type"] == ["SN Ia"]
+    assert select_values_by_col["simbad_otype"] == ["EB*", "SB*", "V*", "LP*", "Or*"]
+
+    dipper_bool_values, dipper_select_values = review_app._vetting_known_filter_preset(
+        options,
+        policy="dipper_contaminants",
+    )
+    dipper_select_values_by_col = dict(zip(review_app.VETTING_KNOWN_SELECT_FILTERS, dipper_select_values))
+    dipper_bool_values_by_col = dict(zip(review_app.VETTING_KNOWN_BOOL_FILTERS, dipper_bool_values))
+    assert dipper_bool_values_by_col["vetting_likely_known"] == "Any"
+    assert dipper_bool_values_by_col["microlens_match"] == "Any"
+    assert dipper_select_values_by_col["vsx_class"] == ["GCAS", "BE", "EA", "UXOR", "YSO/DIP", "BE|GCAS|SDOR|WR"]
+    assert dipper_select_values_by_col["asassn_var_type"] == ["YSO"]
+    assert dipper_select_values_by_col["gaia_var_class"] == ["ECL", "YSO"]
+    assert dipper_select_values_by_col["ztf_var_type"] == ["EA"]
+    assert dipper_select_values_by_col["alerce_lc_class"] == ["YSO", "CV/Nova"]
+    assert dipper_select_values_by_col["yso_class"] == ["Class II"]
+    assert dipper_select_values_by_col["simbad_otype"] == ["EB*", "SB*", "Or*", "Y*O", "TT*", "Be*"]
+
+
+def test_vetting_dipper_contaminant_preset_selects_target_safe_simbad_values() -> None:
+    options = {col: [] for col in review_app.VETTING_KNOWN_SELECT_FILTERS}
+    options["simbad_otype"] = [
+        {"label": "EB*", "value": "EB*"},
+        {"label": "SB*", "value": "SB*"},
+        {"label": "RR*", "value": "RR*"},
+        {"label": "CV*", "value": "CV*"},
+        {"label": "No*", "value": "No*"},
+        {"label": "HXB", "value": "HXB"},
+        {"label": "V*", "value": "V*"},
+        {"label": "LP*", "value": "LP*"},
+        {"label": "Mi*", "value": "Mi*"},
+        {"label": "Or*", "value": "Or*"},
+        {"label": "Y*O", "value": "Y*O"},
+        {"label": "Y*?", "value": "Y*?"},
+        {"label": "TT*", "value": "TT*"},
+        {"label": "Be*", "value": "Be*"},
+        {"label": "Em*", "value": "Em*"},
+        {"label": "IR", "value": "IR"},
+        {"label": "Rad", "value": "Rad"},
+        {"label": "X", "value": "X"},
+        {"label": "FIR", "value": "FIR"},
+        {"label": "*", "value": "*"},
+    ]
+
+    bool_values, select_values = review_app._vetting_known_filter_preset(
+        options,
+        policy="dipper_contaminants",
+    )
+    select_values_by_col = dict(zip(review_app.VETTING_KNOWN_SELECT_FILTERS, select_values))
+    bool_values_by_col = dict(zip(review_app.VETTING_KNOWN_BOOL_FILTERS, bool_values))
+
+    assert bool_values_by_col["vetting_likely_known"] == "Any"
+    assert bool_values_by_col["microlens_match"] == "Any"
+    assert select_values_by_col["simbad_otype"] == [
+        "EB*",
+        "SB*",
+        "CV*",
+        "No*",
+        "HXB",
+        "Or*",
+        "Y*O",
+        "TT*",
+        "Be*",
+        "Em*",
+    ]
+
+
+def test_vetting_filter_toggles_preserve_other_filters_and_shared_values() -> None:
+    options = {col: [] for col in review_app.VETTING_KNOWN_SELECT_FILTERS}
+    options["vsx_class"] = [
+        {"label": "EA", "value": "EA"},
+        {"label": "UXOR", "value": "UXOR"},
+        {"label": "DSCT", "value": "DSCT"},
+        {"label": "USER_ONLY", "value": "USER_ONLY"},
+    ]
+    options["yso_class"] = [
+        {"label": "Class II", "value": "Class II"},
+        {"label": "Main Sequence", "value": "Main Sequence"},
+    ]
+
+    vsx_idx = review_app.VETTING_KNOWN_SELECT_FILTERS.index("vsx_class")
+    yso_idx = review_app.VETTING_KNOWN_SELECT_FILTERS.index("yso_class")
+    current_select_values = [[] for _col in review_app.VETTING_KNOWN_SELECT_FILTERS]
+    current_select_values[vsx_idx] = ["USER_ONLY"]
+
+    known_bool_values, known_select_values = review_app._apply_vetting_known_filter_toggle(
+        options,
+        current_bool_values=["Any", "Any"],
+        current_select_values=current_select_values,
+        policy="known_variables",
+        enabled=True,
+    )
+
+    assert known_bool_values == ["False", "False"]
+    assert known_select_values[vsx_idx] == ["USER_ONLY", "EA", "UXOR", "DSCT"]
+    assert known_select_values[yso_idx] == []
+
+    both_bool_values, both_select_values = review_app._apply_vetting_known_filter_toggle(
+        options,
+        current_bool_values=known_bool_values,
+        current_select_values=known_select_values,
+        policy="dipper_contaminants",
+        enabled=True,
+        other_policy="known_variables",
+        other_enabled=True,
+    )
+
+    assert both_bool_values == ["False", "False"]
+    assert both_select_values[vsx_idx] == ["USER_ONLY", "EA", "UXOR", "DSCT"]
+    assert both_select_values[yso_idx] == ["Class II"]
+
+    dipper_only_bool_values, dipper_only_select_values = review_app._apply_vetting_known_filter_toggle(
+        options,
+        current_bool_values=both_bool_values,
+        current_select_values=both_select_values,
+        policy="known_variables",
+        enabled=False,
+        other_policy="dipper_contaminants",
+        other_enabled=True,
+    )
+
+    assert dipper_only_bool_values == ["Any", "Any"]
+    assert dipper_only_select_values[vsx_idx] == ["USER_ONLY", "EA", "UXOR"]
+    assert dipper_only_select_values[yso_idx] == ["Class II"]
+
+    user_only_bool_values, user_only_select_values = review_app._apply_vetting_known_filter_toggle(
+        options,
+        current_bool_values=dipper_only_bool_values,
+        current_select_values=dipper_only_select_values,
+        policy="dipper_contaminants",
+        enabled=False,
+        other_policy="known_variables",
+        other_enabled=False,
+    )
+
+    assert user_only_bool_values == ["Any", "Any"]
+    assert user_only_select_values[vsx_idx] == ["USER_ONLY"]
+    assert user_only_select_values[yso_idx] == []
 
 
 def test_vetting_known_options_loader_includes_backfilled_vsx_classes(
@@ -573,11 +717,7 @@ def test_vetting_known_options_loader_includes_backfilled_vsx_classes(
         {"source_paths": ["run-a/results/candidates.parquet"]}
     )
 
-    assert options["vsx_class"] == [
-        {"label": "BE", "value": "BE"},
-        {"label": "GCAS", "value": "GCAS"},
-        {"label": "VAR", "value": "VAR"},
-    ]
+    assert [option["value"] for option in options["vsx_class"]] == ["BE", "GCAS", "VAR"]
 
 
 def test_vetting_known_options_refresh_replaces_stale_vsx_classes(
@@ -606,15 +746,11 @@ def test_vetting_known_options_refresh_replaces_stale_vsx_classes(
     )
     _bool_values, select_values = review_app._vetting_known_filter_preset(
         options,
-        include_uncertain=False,
+        policy="dipper_contaminants",
     )
     select_values_by_col = dict(zip(review_app.VETTING_KNOWN_SELECT_FILTERS, select_values))
 
-    assert options["vsx_class"] == [
-        {"label": "BE", "value": "BE"},
-        {"label": "GCAS", "value": "GCAS"},
-        {"label": "VAR", "value": "VAR"},
-    ]
+    assert [option["value"] for option in options["vsx_class"]] == ["BE", "GCAS", "VAR"]
     assert select_values_by_col["vsx_class"] == ["BE", "GCAS"]
 
 

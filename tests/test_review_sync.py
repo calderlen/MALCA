@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from malca.review.diagnostic_plots import build_cmd_figure
 from malca.review import sync
 from malca.review.store import db_connect, get_candidate_payload, get_review, upsert_candidates_frame
 
@@ -212,6 +213,67 @@ def test_review_store_payload_is_layer_first_but_display_payload_is_flat(tmp_pat
     assert raw_payload["external_stats"]["phot_g_mean_mag"] == 14.2
     assert display_payload["dipper_score"] == 6.0
     assert display_payload["phot_g_mean_mag"] == 14.2
+
+
+def test_review_store_display_payload_unpacks_nested_payload_json_for_cmd(tmp_path: Path) -> None:
+    db_path = tmp_path / "review.db"
+    inner_payload = {
+        "candidate_id": "C1",
+        "source_id": "2023932149190953600",
+        "phot_g_mean_mag": 14.2,
+        "bp_rp": 0.84,
+        "parallax": 2.0,
+        "A_v_3d": 0.1,
+    }
+    outer_payload = {
+        "candidate_id": "C1",
+        "asas_sn_id": "C1",
+        "payload_json": json.dumps(inner_payload, sort_keys=True),
+    }
+
+    with db_connect(db_path) as conn:
+        upsert_candidates_frame(conn, pd.DataFrame([{"candidate_id": "C1", "asas_sn_id": "C1"}]))
+        conn.execute(
+            "UPDATE candidates SET payload_json = ? WHERE candidate_id = ?",
+            (json.dumps(outer_payload, sort_keys=True), "C1"),
+        )
+        display_payload = get_candidate_payload(conn, "C1")
+
+    assert display_payload["phot_g_mean_mag"] == 14.2
+    assert display_payload["bp_rp"] == 0.84
+    assert display_payload["source_id"] == "2023932149190953600"
+    assert "payload_json" not in display_payload
+    fig = build_cmd_figure(display_payload, "black")
+    assert fig is not None
+    assert fig.layout.title.text == "Gaia CMD"
+
+
+def test_review_store_display_payload_precedence_over_nested_payload_json(tmp_path: Path) -> None:
+    db_path = tmp_path / "review.db"
+    inner_payload = {
+        "candidate_id": "C1",
+        "phot_g_mean_mag": 14.2,
+        "bp_rp": 0.7,
+        "external_stats": {"distance_gspphot": 900.0},
+    }
+    outer_payload = {
+        "candidate_id": "C1",
+        "payload_json": json.dumps(inner_payload, sort_keys=True),
+        "derived_stats": {"bp_rp": 0.9},
+        "external_stats": {"distance_gspphot": 1200.0},
+    }
+
+    with db_connect(db_path) as conn:
+        upsert_candidates_frame(conn, pd.DataFrame([{"candidate_id": "C1", "asas_sn_id": "C1"}]))
+        conn.execute(
+            "UPDATE candidates SET payload_json = ?, phot_g_mean_mag = ? WHERE candidate_id = ?",
+            (json.dumps(outer_payload, sort_keys=True), 16.5, "C1"),
+        )
+        display_payload = get_candidate_payload(conn, "C1")
+
+    assert display_payload["phot_g_mean_mag"] == 16.5
+    assert display_payload["bp_rp"] == 0.9
+    assert display_payload["distance_gspphot"] == 1200.0
 
 
 def test_review_sync_import_merge_keeps_newer_target_review(tmp_path: Path) -> None:

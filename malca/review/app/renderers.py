@@ -142,12 +142,226 @@ def _stat_feature_rows(stat_rows: list[tuple[str, str]]) -> list[dict[str, str]]
     return rows
 
 
+_OTHER_PAYLOAD_CONTAINER_KEYS = {
+    "payload",
+    "payload_json",
+    "lc_stats",
+    "external_stats",
+    "derived_stats",
+}
+
+_OTHER_PAYLOAD_RECORD_RUN_CONTEXT_KEYS = {
+    "candidate_id",
+    "feature_layer_version",
+    "imported_at",
+    "lc_path",
+    "source_path",
+    "trigger_mode",
+}
+
+_OTHER_PAYLOAD_COORDINATES_GAIA_KEYS = {
+    "source_id",
+    "ra_deg",
+    "dec_deg",
+    "ra_gaia",
+    "dec_gaia",
+    "parallax_gaia",
+    "parallax_error",
+    "parallax_error_gaia",
+    "pmra_gaia",
+    "pmdec_gaia",
+    "ruwe_gaia",
+    "radial_velocity_gaia",
+    "rv_amplitude_robust_gaia",
+    "ag_gspphot",
+    "distance_gspphot_gaia",
+    "teff_gspphot_gaia",
+    "logg_gspphot_gaia",
+    "mh_gspphot_gaia",
+}
+
+_OTHER_PAYLOAD_PERIOD_FILTER_KEYS = {
+    "failed_gaia_ruwe",
+    "failed_periodic_catalog",
+    "period_conflict_flag",
+    "period_consensus_support",
+    "period_ogle_match",
+    "period_primary_source",
+    "period_source_periods",
+    "periodic_flag",
+}
+
+_OTHER_PAYLOAD_EXTERNAL_LC_PREFIXES = (
+    "crts_lc_",
+    "gaia_epoch_lc_",
+    "ps1_lc_",
+    "tess_",
+    "ztf_lc_",
+)
+
+_OTHER_PAYLOAD_WISE_ERROR_KEYS = {"w1_err", "w2_err", "w3_err", "w4_err"}
+
+_OTHER_PAYLOAD_SUBSECTION_ORDER = [
+    "Record & Run Context",
+    "Coordinates & Gaia",
+    "Period & Filter Flags",
+    "Derived Feature Extras",
+    "Enrichment Stage Status",
+    "SED Pipeline Status",
+    "External LC Coverage",
+    "Multi-Survey Features",
+    "Photometric Error Columns",
+    "Miscellaneous",
+]
+
+_OTHER_PAYLOAD_SUBSECTION_INDEX = {
+    subsection: idx
+    for idx, subsection in enumerate(_OTHER_PAYLOAD_SUBSECTION_ORDER)
+}
+
+
+def _payload_value_is_present(value: object) -> bool:
+    if value is None:
+        return False
+    try:
+        if pd.isna(value):
+            return False
+    except Exception:
+        pass
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple, set, dict)):
+        return bool(value)
+    return True
+
+
+def _payload_field_label(key: str) -> str:
+    token_map = {
+        "id": "ID",
+        "jd": "JD",
+        "ra": "RA",
+        "dec": "Dec",
+        "lc": "LC",
+        "lsp": "LSP",
+        "pdm": "PDM",
+        "ce": "CE",
+        "yso": "YSO",
+        "vsx": "VSX",
+        "ztf": "ZTF",
+        "gaia": "Gaia",
+        "asas": "ASAS",
+        "sn": "SN",
+    }
+    parts = []
+    for token in str(key).replace("-", "_").split("_"):
+        if not token:
+            continue
+        parts.append(token_map.get(token.lower(), token.capitalize()))
+    return " ".join(parts) or str(key)
+
+
+def _payload_field_value(value: object) -> str:
+    if isinstance(value, (list, tuple, set)):
+        try:
+            return json.dumps(list(value), sort_keys=True, default=str)
+        except Exception:
+            return str(list(value))
+    return str(value)
+
+
+def _other_payload_subsection(key: str) -> str:
+    if key in _OTHER_PAYLOAD_RECORD_RUN_CONTEXT_KEYS:
+        return "Record & Run Context"
+    if key in _OTHER_PAYLOAD_COORDINATES_GAIA_KEYS:
+        return "Coordinates & Gaia"
+    if key in _OTHER_PAYLOAD_PERIOD_FILTER_KEYS:
+        return "Period & Filter Flags"
+    if key.startswith("derived_"):
+        return "Derived Feature Extras"
+    if key.startswith("char_status_"):
+        return "Enrichment Stage Status"
+    if key.startswith("sed_"):
+        return "SED Pipeline Status"
+    if key.startswith(_OTHER_PAYLOAD_EXTERNAL_LC_PREFIXES):
+        return "External LC Coverage"
+    if key.startswith("ms_"):
+        return "Multi-Survey Features"
+    if (
+        (key.startswith("apass_") and key.endswith("_err"))
+        or (key.startswith("tmass_") and key.endswith("_err"))
+        or key in _OTHER_PAYLOAD_WISE_ERROR_KEYS
+    ):
+        return "Photometric Error Columns"
+    return "Miscellaneous"
+
+
+def _other_payload_feature_rows(payload: dict, represented_rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    represented_keys = {str(row.get("key") or "") for row in represented_rows}
+    rows: list[dict[str, str]] = []
+    if not isinstance(payload, dict):
+        return rows
+    for raw_key, value in sorted(payload.items(), key=lambda item: str(item[0])):
+        key = str(raw_key)
+        if key in represented_keys or key in _OTHER_PAYLOAD_CONTAINER_KEYS:
+            continue
+        if isinstance(value, dict) or not _payload_value_is_present(value):
+            continue
+        rows.append({
+            "section": "Other Payload Fields",
+            "source_group": "Payload",
+            "label": _payload_field_label(key),
+            "key": key,
+            "value": _payload_field_value(value),
+            "role": "other",
+            "subsection": _other_payload_subsection(key),
+        })
+    rows.sort(key=lambda row: (_OTHER_PAYLOAD_SUBSECTION_INDEX.get(row["subsection"], 999), row["key"]))
+    return rows
+
+
 def _raw_feature_line(row: dict[str, str]) -> str:
     section = str(row.get("section") or "")
+    subsection = str(row.get("subsection") or "")
     label = str(row.get("label") or "")
     key = str(row.get("key") or "")
     value = str(row.get("value") or "")
+    if subsection:
+        return f"{section} / {subsection} / {label} / {key} = {value}"
     return f"{section} / {label} / {key} = {value}"
+
+
+def _render_all_features_lines(rows: list[dict[str, str]]) -> html.Div:
+    return html.Div([
+        html.Div([
+            html.Span(row["label"], className="all-features-label"),
+            html.Span(row["key"], className="all-features-key"),
+            html.Span(row["value"], className="all-features-value"),
+        ], className="all-features-line", title=_raw_feature_line(row))
+        for row in rows
+    ], className="all-features-lines")
+
+
+def _render_other_payload_feature_lines(rows: list[dict[str, str]]) -> html.Div:
+    rows_by_subsection: dict[str, list[dict[str, str]]] = {
+        subsection: []
+        for subsection in _OTHER_PAYLOAD_SUBSECTION_ORDER
+    }
+    for row in rows:
+        subsection = str(row.get("subsection") or "Miscellaneous")
+        rows_by_subsection.setdefault(subsection, []).append(row)
+
+    subsection_nodes = []
+    for subsection in _OTHER_PAYLOAD_SUBSECTION_ORDER:
+        subsection_rows = rows_by_subsection.get(subsection, [])
+        if not subsection_rows:
+            continue
+        subsection_rows = sorted(subsection_rows, key=lambda row: row["key"])
+        subsection_nodes.append(html.Div([
+            html.Div(f"{subsection} ({len(subsection_rows)})", className="all-features-subsection-title"),
+            _render_all_features_lines(subsection_rows),
+        ], className="all-features-subsection"))
+
+    return html.Div(subsection_nodes, className="all-features-subsections")
 
 
 def _render_all_features_plain_list(rows: list[dict[str, str]]) -> html.Details:
@@ -155,6 +369,7 @@ def _render_all_features_plain_list(rows: list[dict[str, str]]) -> html.Details:
     normalized = [
         {
             "section": str(row.get("section") or "Other"),
+            "subsection": str(row.get("subsection") or ""),
             "label": str(row.get("label") or ""),
             "key": str(row.get("key") or ""),
             "value": str(row.get("value") or ""),
@@ -169,16 +384,14 @@ def _render_all_features_plain_list(rows: list[dict[str, str]]) -> html.Details:
 
     group_nodes = []
     for section, section_rows in groups.items():
+        lines = (
+            _render_other_payload_feature_lines(section_rows)
+            if section == "Other Payload Fields"
+            else _render_all_features_lines(section_rows)
+        )
         group_nodes.append(html.Div([
             html.Div(f"{section} ({len(section_rows)})", className="all-features-group-title"),
-            html.Div([
-                html.Div([
-                    html.Span(row["label"], className="all-features-label"),
-                    html.Span(row["key"], className="all-features-key"),
-                    html.Span(row["value"], className="all-features-value"),
-                ], className="all-features-line", title=_raw_feature_line(row))
-                for row in section_rows
-            ], className="all-features-lines"),
+            lines,
         ], className="all-features-group"))
 
     return html.Details([
@@ -259,6 +472,7 @@ def _render_metadata_review_layout(
         ))
 
     all_rows = list(feature_rows) + _stat_feature_rows(stat_rows)
+    all_rows.extend(_other_payload_feature_rows(payload, all_rows))
     output.append(_render_all_features_plain_list(all_rows))
     return output
 
@@ -990,6 +1204,7 @@ def _render_vetting_banner(payload: dict | None, radius_arcsec: float = 10.0) ->
     simbad_id = payload.get('simbad_main_id')
     simbad_otype = payload.get('simbad_otype')
     if _ok(simbad_id) or _ok(simbad_otype):
+        simbad_hit = is_known_variable_type_value('simbad_otype', simbad_otype)
         refs = payload.get('simbad_nbref')
         parts = []
         if _ok(simbad_otype):
@@ -998,7 +1213,7 @@ def _render_vetting_banner(payload: dict | None, radius_arcsec: float = 10.0) ->
             parts.append(str(simbad_id))
         if refs:
             parts.append(f"({refs} refs)")
-        cards.append(_cell("SIMBAD", " \u00b7 ".join(parts), hit=True, title=str(simbad_id or '')))
+        cards.append(_cell("SIMBAD", " \u00b7 ".join(parts), hit=simbad_hit, title=str(simbad_id or '')))
 
     # VSX cell
     vsx_cls = payload.get('vsx_class')

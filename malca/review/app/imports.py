@@ -132,8 +132,10 @@ from malca.review.filter_schema import (
     SIDEBAR_GROUPS as REVIEW_FILTER_SIDEBAR_GROUPS,
     VETTING_KNOWN_BOOL_FILTERS,
     VETTING_KNOWN_SELECT_FILTERS,
-    is_definite_known_type_value,
+    is_dipper_contaminant_type_value,
+    is_known_variable_type_value,
 )
+from malca.review.classification_labels import format_catalog_class_label
 from malca.review.pipeline import detect_pipeline_status, detect_sed_model_status, detect_sed_photometry_status
 from malca.review.pipeline import run_missing_stages
 from malca.review.pipeline import update_candidate_payload
@@ -187,6 +189,7 @@ from malca.review.eda_panel import (
     eda_publication_figure,
     eda_scatter_figure,
     eda_status_figure,
+    eda_table_page,
     eda_table_rows,
     load_review_eda_frame,
     queue_eda_frame,

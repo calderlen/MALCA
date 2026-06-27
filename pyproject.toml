@@ -58,3 +58,6 @@ addopts = "-v --tb=short"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["malca*"]
+
+[tool.setuptools.package-data]
+malca = ["review/data/classification_labels/*.json"]

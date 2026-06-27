@@ -11,6 +11,7 @@
 )
 def load_queue(refresh_clicks, import_trigger, queue_source_scope, restored_filters, numeric_bounds, *callback_states):
     """Load queue data from all sidebar filter states."""
+    perf_start = time.perf_counter() if _review_perf_enabled() else None
     n_values = len(_queue_states)
     n_text_opts = len(_TEXT_OPTION_STATES)
     state_values = callback_states[:n_values]
@@ -38,6 +39,14 @@ def load_queue(refresh_clicks, import_trigger, queue_source_scope, restored_filt
             if v not in (None, 'Any', [])
         }
         print(f"[queue] size={queue_data['queue_size']} active_filters={active_filters}")
+        if perf_start is not None:
+            _review_perf_log(
+                'queue_load',
+                time.perf_counter() - perf_start,
+                queue_size=queue_data.get('queue_size'),
+                active_filters=len(active_filters),
+                payload_bytes=len(json.dumps(queue_data, default=str)),
+            )
         return queue_data
 
 
@@ -510,4 +519,3 @@ def restore_startup_candidate(queue_data, already_applied):
     if saved_candidate and saved_candidate in candidate_ids:
         return no_update, candidate_ids.index(saved_candidate), f"Restored last candidate {saved_candidate}.", True
     return no_update, no_update, no_update, True
-

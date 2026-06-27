@@ -21,6 +21,7 @@ app.index_string = '''
             --review-table-text: #dce8f2;
             --review-table-border: rgba(84, 118, 140, 0.35);
             --review-table-header-border: rgba(84, 118, 140, 0.45);
+            --review-sidebar-width: 380px;
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
             margin: 0;
             padding: 0;
@@ -32,9 +33,9 @@ app.index_string = '''
         }
         .sidebar {
             position: fixed;
-            left: -280px;
+            left: calc(-1 * var(--review-sidebar-width));
             top: 0;
-            width: 280px;
+            width: var(--review-sidebar-width);
             height: 100vh;
             background-color: #0a0a0a;
             border-right: 1px solid #333;
@@ -114,7 +115,7 @@ app.index_string = '''
             padding: 0;
         }
         .sidebar-toggle.sidebar-expanded {
-            left: 280px;
+            left: var(--review-sidebar-width);
         }
         .sidebar-toggle:hover {
             background-color: #2a2a2a;
@@ -130,7 +131,7 @@ app.index_string = '''
         }
         /* When sidebar is open, push main content so it doesn't get covered */
         .sidebar.expanded + .content-area {
-            padding-left: 280px;
+            padding-left: var(--review-sidebar-width);
         }
         .workspace-panels {
             flex: 1;
@@ -482,6 +483,15 @@ app.index_string = '''
             border-color: #7da8c4;
             background-color: #1a2b38;
         }
+        .compact-btn.vetting-filter-toggle-btn.is-active {
+            background-color: #123326;
+            border-color: #2cb67d;
+            color: #d7ffea;
+        }
+        .compact-btn.vetting-filter-toggle-btn.is-active:hover {
+            background-color: #174631;
+            border-color: #44d39a;
+        }
         .meta-toolbar {
             display: flex;
             align-items: center;
@@ -686,6 +696,16 @@ app.index_string = '''
             text-transform: uppercase;
             letter-spacing: 0.35px;
             margin-bottom: 2px;
+        }
+        .all-features-subsection + .all-features-subsection {
+            margin-top: 5px;
+        }
+        .all-features-subsection-title {
+            color: #a7c3d8;
+            font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            font-size: 9px;
+            font-weight: 650;
+            margin: 3px 0 1px 0;
         }
         .all-features-line {
             display: grid;
@@ -1851,6 +1871,16 @@ app.index_string = '''
             background: #e8f7ec !important;
             border-color: #2f7a57 !important;
             color: #2f7a57 !important;
+        }
+        body[data-theme="white"] .compact-btn.vetting-filter-toggle-btn.is-active {
+            background: #e6f7ee !important;
+            border-color: #2f7a57 !important;
+            color: #245d43 !important;
+        }
+        body[data-theme="white"] .compact-btn.vetting-filter-toggle-btn.is-active:hover {
+            background: #d8f0e4 !important;
+            border-color: #276747 !important;
+            color: #1d4f38 !important;
         }
         body[data-theme="white"] .header-key-info .item,
         body[data-theme="white"] .notification,

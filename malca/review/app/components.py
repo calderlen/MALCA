@@ -634,37 +634,46 @@ def _select_all_dropdown_values(options: list[dict[str, object]] | None) -> list
     return values
 
 
-def _select_definite_dropdown_values(
+def _select_predicate_dropdown_values(
     col: str,
     options: list[dict[str, object]] | None,
+    predicate,
 ) -> list[str]:
-    """Return dropdown values that represent definite known-type catalog labels."""
+    """Return dropdown values selected by a catalog-type predicate."""
     return [
         value
         for value in _select_all_dropdown_values(options)
-        if is_definite_known_type_value(col, value)
+        if predicate(col, value)
     ]
 
 
 def _vetting_known_filter_preset(
     select_options: dict[str, list[dict[str, object]] | None],
     *,
-    include_uncertain: bool = True,
+    policy: str = 'known_variables',
 ) -> tuple[list[str], list[list[str]]]:
-    """Build the known-type exclusion preset for broad or definite-only filtering."""
-    bool_values = [
-        'False' if include_uncertain or col == 'microlens_match' else 'Any'
-        for col in VETTING_KNOWN_BOOL_FILTERS
-    ]
+    """Build a known-variable or dipper-contaminant vetting preset."""
+    if policy == 'known_variables':
+        predicate = is_known_variable_type_value
+        bool_values = ['False' for _col in VETTING_KNOWN_BOOL_FILTERS]
+    elif policy == 'dipper_contaminants':
+        predicate = is_dipper_contaminant_type_value
+        bool_values = ['Any' for _col in VETTING_KNOWN_BOOL_FILTERS]
+    else:
+        raise ValueError(f"Unknown vetting known filter policy: {policy}")
+
     select_values = [
-        (
-            _select_all_dropdown_values(select_options.get(col))
-            if include_uncertain
-            else _select_definite_dropdown_values(col, select_options.get(col))
-        )
+        _select_predicate_dropdown_values(col, select_options.get(col), predicate)
         for col in VETTING_KNOWN_SELECT_FILTERS
     ]
     return bool_values, select_values
+
+
+def _vetting_filter_toggle_button_class(active: bool = False) -> str:
+    classes = ['compact-btn', 'vetting-filter-toggle-btn']
+    if active:
+        classes.append('is-active')
+    return ' '.join(classes)
 
 
 def _num_range_filter(col: str):
@@ -740,18 +749,18 @@ def _make_filter_group(name: str, items: list, *, default_open: bool = False):
         children.append(
             html.Div([
                 html.Button(
-                    'Exclude Known Types',
-                    id='vetting-known-types-btn',
+                    'Exclude Known Variables',
+                    id='vetting-known-variables-btn',
                     n_clicks=0,
-                    className='compact-btn',
-                    title='Turn on broad known-type vetting filters, including uncertainty and candidate-style labels.',
+                    className=_vetting_filter_toggle_button_class(False),
+                    title='Toggle exclusion of definite known variable or transient catalog labels while keeping candidate and generic SIMBAD labels visible.',
                 ),
                 html.Button(
-                    'Exclude Certain Known Types',
-                    id='vetting-definite-known-types-btn',
+                    'Exclude Dipper Contaminants',
+                    id='vetting-dipper-contaminants-btn',
                     n_clicks=0,
-                    className='compact-btn',
-                    title='Exclude only definite catalog known-type labels; keep possible, candidate, suspected, and question-marked labels visible.',
+                    className=_vetting_filter_toggle_button_class(False),
+                    title='Toggle exclusion of definite catalog labels for known dippers or common dipper mimics while keeping uncertain labels visible.',
                 ),
             ], style={'display': 'flex', 'gap': '6px', 'flexWrap': 'wrap', 'margin-bottom': '6px'})
         )

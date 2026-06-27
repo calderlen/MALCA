@@ -262,12 +262,111 @@ _VETTING_KNOWN_FILTER_OUTPUTS = (
     [Output('select-filter-mode', 'value', allow_duplicate=True)]
     + [Output(f'{_col_id(col)}-mode', 'value') for col in VETTING_KNOWN_BOOL_FILTERS]
     + [Output(f'exclude-{_col_id(col)}', 'value') for col in VETTING_KNOWN_SELECT_FILTERS]
+    + [Output('vetting-known-variables-btn', 'className'),
+       Output('vetting-dipper-contaminants-btn', 'className')]
+)
+
+_VETTING_KNOWN_FILTER_CURRENT_STATES = (
+    [State('select-filter-mode', 'value')]
+    + [State(f'{_col_id(col)}-mode', 'value') for col in VETTING_KNOWN_BOOL_FILTERS]
+    + [State(f'exclude-{_col_id(col)}', 'value') for col in VETTING_KNOWN_SELECT_FILTERS]
 )
 
 _VETTING_KNOWN_FILTER_OPTION_STATES = (
     [State('queue-source-path', 'data')]
     + [State(f'exclude-{_col_id(col)}', 'options') for col in VETTING_KNOWN_SELECT_FILTERS]
 )
+
+_VETTING_KNOWN_TOGGLE_POLICIES = {
+    'vetting-known-variables-btn': 'known_variables',
+    'vetting-dipper-contaminants-btn': 'dipper_contaminants',
+}
+
+
+def _vetting_filter_toggle_active(n_clicks: object) -> bool:
+    try:
+        return int(n_clicks or 0) % 2 == 1
+    except (TypeError, ValueError):
+        return False
+
+
+def _merge_unique_filter_values(current_values: object, added_values: object) -> list[str]:
+    merged = _coerce_string_list(current_values)
+    seen = set(merged)
+    for value in _coerce_string_list(added_values):
+        if value not in seen:
+            merged.append(value)
+            seen.add(value)
+    return merged
+
+
+def _remove_filter_values(current_values: object, removed_values: object) -> list[str]:
+    removed = set(_coerce_string_list(removed_values))
+    return [value for value in _coerce_string_list(current_values) if value not in removed]
+
+
+def _apply_vetting_known_filter_toggle(
+    select_options: dict[str, list[dict[str, object]] | None],
+    *,
+    current_bool_values: object,
+    current_select_values: object,
+    policy: str,
+    enabled: bool,
+    other_policy: str | None = None,
+    other_enabled: bool = False,
+) -> tuple[list[str], list[list[str]]]:
+    """Add or remove one vetting toggle's filter values while preserving others."""
+    policy_bool_values, policy_select_values = _vetting_known_filter_preset(
+        select_options,
+        policy=policy,
+    )
+    other_select_values = [[] for _col in VETTING_KNOWN_SELECT_FILTERS]
+    if other_policy and other_enabled:
+        _other_bool_values, other_select_values = _vetting_known_filter_preset(
+            select_options,
+            policy=other_policy,
+        )
+
+    bool_values = [
+        _coerce_bool_mode_value(value)
+        for value in list(current_bool_values or [])[:len(VETTING_KNOWN_BOOL_FILTERS)]
+    ]
+    if len(bool_values) < len(VETTING_KNOWN_BOOL_FILTERS):
+        bool_values.extend(['Any'] * (len(VETTING_KNOWN_BOOL_FILTERS) - len(bool_values)))
+
+    if policy == 'known_variables':
+        if enabled:
+            bool_values = list(policy_bool_values)
+        else:
+            bool_values = [
+                'Any' if current == preset else current
+                for current, preset in zip(bool_values, policy_bool_values)
+            ]
+
+    current_select_lists = list(current_select_values or [])[:len(VETTING_KNOWN_SELECT_FILTERS)]
+    if len(current_select_lists) < len(VETTING_KNOWN_SELECT_FILTERS):
+        missing_count = len(VETTING_KNOWN_SELECT_FILTERS) - len(current_select_lists)
+        current_select_lists.extend([[] for _col in range(missing_count)])
+
+    select_values: list[list[str]] = []
+    for current, policy_values, other_values in zip(
+        current_select_lists,
+        policy_select_values,
+        other_select_values,
+    ):
+        if enabled:
+            select_values.append(_merge_unique_filter_values(current, policy_values))
+            continue
+
+        keep_for_other_toggle = set(_coerce_string_list(other_values))
+        remove_values = [
+            value
+            for value in _coerce_string_list(policy_values)
+            if value not in keep_for_other_toggle
+        ]
+        select_values.append(_remove_filter_values(current, remove_values))
+
+    return bool_values, select_values
 
 
 def _normalize_numeric_filter_value(
@@ -428,7 +527,7 @@ def _load_sidebar_filter_payload(sidebar_open, queue_source_scope):
             values = get_distinct_values(conn, col, **scope_kwargs)
             select_options.append(
                 [
-                    {'label': str(v), 'value': str(v)}
+                    {'label': format_catalog_class_label(col, v), 'value': str(v)}
                     for v in values
                     if v is not None and str(v).strip() != ''
                 ]
@@ -443,7 +542,7 @@ def _load_vetting_known_select_options(queue_source_scope) -> dict[str, list[dic
     with closing(db_connect(Path(DB_PATH))) as conn:
         return {
             col: [
-                {'label': str(v), 'value': str(v)}
+                {'label': format_catalog_class_label(col, v), 'value': str(v)}
                 for v in get_distinct_values(conn, col, **scope_kwargs)
                 if v is not None and str(v).strip() != ''
             ]
@@ -491,36 +590,60 @@ else:
 
 @app.callback(
     _VETTING_KNOWN_FILTER_OUTPUTS,
-    [Input('vetting-known-types-btn', 'n_clicks'),
-     Input('vetting-definite-known-types-btn', 'n_clicks')],
-    _VETTING_KNOWN_FILTER_OPTION_STATES,
+    [Input('vetting-known-variables-btn', 'n_clicks'),
+     Input('vetting-dipper-contaminants-btn', 'n_clicks')],
+    [*_VETTING_KNOWN_FILTER_CURRENT_STATES, *_VETTING_KNOWN_FILTER_OPTION_STATES],
     prevent_initial_call=True,
 )
-def apply_vetting_known_type_filters(known_clicks, definite_clicks, *select_options):
-    """Apply the broad or definite-only known-type vetting preset."""
+def apply_vetting_known_type_filters(known_clicks, contaminant_clicks, *callback_values):
+    """Toggle the known-variable and dipper-contaminant vetting filters."""
     triggered_id = getattr(callback_context, 'triggered_id', None)
-    if triggered_id == 'vetting-known-types-btn':
-        if not known_clicks:
-            raise dash.exceptions.PreventUpdate
-        include_uncertain = True
-    elif triggered_id == 'vetting-definite-known-types-btn':
-        if not definite_clicks:
-            raise dash.exceptions.PreventUpdate
-        include_uncertain = False
-    else:
+    policy = _VETTING_KNOWN_TOGGLE_POLICIES.get(triggered_id)
+    if policy is None:
         raise dash.exceptions.PreventUpdate
 
-    queue_source_scope, *option_lists = select_options
+    known_enabled = _vetting_filter_toggle_active(known_clicks)
+    contaminant_enabled = _vetting_filter_toggle_active(contaminant_clicks)
+    if triggered_id == 'vetting-known-variables-btn' and not known_clicks:
+        raise dash.exceptions.PreventUpdate
+    if triggered_id == 'vetting-dipper-contaminants-btn' and not contaminant_clicks:
+        raise dash.exceptions.PreventUpdate
+
+    _current_select_mode, *rest = callback_values
+    current_bool_values = rest[:len(VETTING_KNOWN_BOOL_FILTERS)]
+    rest = rest[len(VETTING_KNOWN_BOOL_FILTERS):]
+    current_select_values = rest[:len(VETTING_KNOWN_SELECT_FILTERS)]
+    rest = rest[len(VETTING_KNOWN_SELECT_FILTERS):]
+    queue_source_scope, *option_lists = rest
+
     select_options_by_col = dict(zip(VETTING_KNOWN_SELECT_FILTERS, option_lists))
     select_options_by_col = _fresh_vetting_known_select_options(
         queue_source_scope,
         select_options_by_col,
     )
-    bool_values, select_values = _vetting_known_filter_preset(
+
+    enabled = known_enabled if policy == 'known_variables' else contaminant_enabled
+    other_policy = 'dipper_contaminants' if policy == 'known_variables' else 'known_variables'
+    other_enabled = contaminant_enabled if policy == 'known_variables' else known_enabled
+    bool_values, select_values = _apply_vetting_known_filter_toggle(
         select_options_by_col,
-        include_uncertain=include_uncertain,
+        policy=policy,
+        enabled=enabled,
+        other_policy=other_policy,
+        other_enabled=other_enabled,
+        current_bool_values=current_bool_values,
+        current_select_values=current_select_values,
     )
-    return ([], *bool_values, *select_values)
+
+    select_filter_mode = [] if enabled else no_update
+
+    return (
+        select_filter_mode,
+        *bool_values,
+        *select_values,
+        _vetting_filter_toggle_button_class(known_enabled),
+        _vetting_filter_toggle_button_class(contaminant_enabled),
+    )
 
 
 @app.callback(

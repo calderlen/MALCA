@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+import re
 from typing import Any
 
 import numpy as np
@@ -54,6 +55,13 @@ EDA_SYMBOL_SEQUENCE = [
     "cross",
     "x",
 ]
+
+_FILTER_RE = re.compile(
+    r"^\s*\{(?P<column>[^}]+)\}\s*"
+    r"(?P<operator>datestartswith|contains|ge|le|lt|gt|ne|eq|>=|<=|!=|=|>|<)\s*"
+    r"(?P<value>.+?)\s*$",
+    re.IGNORECASE,
+)
 
 
 def _source_label_for_db(path: Path) -> str:
@@ -562,6 +570,134 @@ def eda_table_rows(frame: pd.DataFrame) -> list[dict[str, Any]]:
             row["id"] = row_id
         rows.append(row)
     return rows
+
+
+def _strip_filter_value(value: str) -> str:
+    text = str(value or "").strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"', "`"}:
+        return text[1:-1]
+    return text
+
+
+def _split_filter_query(filter_query: object) -> list[str]:
+    query = str(filter_query or "").strip()
+    if not query:
+        return []
+    return [part.strip() for part in re.split(r"\s*&&\s*", query) if part.strip()]
+
+
+def _filter_compare_mask(series: pd.Series, operator: str, value: str) -> pd.Series:
+    op = operator.lower()
+    if op in {"=", "eq"}:
+        return series.astype(str) == value
+    if op in {"!=", "ne"}:
+        return series.astype(str) != value
+    if op == "contains":
+        return series.astype(str).str.contains(value, case=False, na=False, regex=False)
+    if op == "datestartswith":
+        return series.astype(str).str.startswith(value, na=False)
+
+    numeric_series = pd.to_numeric(series, errors="coerce")
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError):
+        numeric_value = None
+    if numeric_value is None:
+        comparable = series.astype(str)
+        rhs = value
+    else:
+        comparable = numeric_series
+        rhs = numeric_value
+
+    if op in {">", "gt"}:
+        return comparable > rhs
+    if op in {">=", "ge"}:
+        return comparable >= rhs
+    if op in {"<", "lt"}:
+        return comparable < rhs
+    if op in {"<=", "le"}:
+        return comparable <= rhs
+    return pd.Series(True, index=series.index)
+
+
+def filter_eda_table_frame(frame: pd.DataFrame, filter_query: object) -> pd.DataFrame:
+    """Apply a Dash DataTable-style filter query to an EDA table frame."""
+    if frame.empty:
+        return frame.copy()
+    filtered = frame
+    for part in _split_filter_query(filter_query):
+        match = _FILTER_RE.match(part)
+        if not match:
+            continue
+        col = match.group("column")
+        if col not in filtered.columns:
+            continue
+        operator = match.group("operator")
+        value = _strip_filter_value(match.group("value"))
+        mask = _filter_compare_mask(filtered[col], operator, value)
+        filtered = filtered.loc[mask.fillna(False)]
+        if filtered.empty:
+            break
+    return filtered.copy()
+
+
+def sort_eda_table_frame(frame: pd.DataFrame, sort_by: object) -> pd.DataFrame:
+    """Apply Dash DataTable sort_by metadata to an EDA table frame."""
+    sorters = list(sort_by or []) if isinstance(sort_by, list) else []
+    if frame.empty or not sorters:
+        return frame.copy()
+    sorted_frame = frame.copy()
+    for sorter in reversed(sorters):
+        if not isinstance(sorter, dict):
+            continue
+        col = str(sorter.get("column_id") or "").strip()
+        if col not in sorted_frame.columns:
+            continue
+        ascending = str(sorter.get("direction") or "asc").lower() != "desc"
+        values = sorted_frame[col]
+        numeric = pd.to_numeric(values, errors="coerce")
+        if numeric.notna().any():
+            sort_key = numeric
+        else:
+            sort_key = values.astype(str).str.lower()
+        tmp_col = "__eda_sort_key__"
+        sorted_frame[tmp_col] = sort_key
+        sorted_frame = (
+            sorted_frame.sort_values(tmp_col, ascending=ascending, na_position="last", kind="stable")
+            .drop(columns=[tmp_col])
+        )
+    return sorted_frame.reset_index(drop=True)
+
+
+def eda_table_page(
+    frame: pd.DataFrame,
+    *,
+    page_current: object = 0,
+    page_size: object = 12,
+    sort_by: object = None,
+    filter_query: object = None,
+) -> tuple[list[dict[str, Any]], int, int]:
+    """Return one server-side DataTable page plus page count and filtered row count."""
+    filtered = filter_eda_table_frame(frame, filter_query)
+    sorted_frame = sort_eda_table_frame(filtered, sort_by)
+    try:
+        size = int(page_size)
+    except (TypeError, ValueError):
+        size = 12
+    size = max(size, 1)
+    total = len(sorted_frame)
+    page_count = max(1, (total + size - 1) // size) if total else 0
+    try:
+        page = int(page_current)
+    except (TypeError, ValueError):
+        page = 0
+    if page_count:
+        page = min(max(page, 0), page_count - 1)
+    else:
+        page = 0
+    start = page * size
+    page_frame = sorted_frame.iloc[start:start + size]
+    return eda_table_rows(page_frame), page_count, total
 
 
 def candidate_ids_from_eda_table_context(

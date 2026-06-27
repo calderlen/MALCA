@@ -139,6 +139,45 @@ def test_vetting_banner_renders_known_for_definite_vsx_class_without_summary_fla
     assert "VSX" in text
 
 
+def test_vetting_banner_keeps_generic_simbad_match_as_context_not_known_hit() -> None:
+    banner = _render_vetting_banner(
+        {
+            "vetting_likely_known": False,
+            "simbad_main_id": "IR Source",
+            "simbad_otype": "IR",
+            "simbad_nbref": 3,
+        }
+    )
+
+    text = " ".join(_component_text(banner))
+    classes = _component_classes(banner)
+
+    assert "POTENTIALLY NEW" in text
+    assert "SIMBAD" in text
+    assert "IR" in text
+    assert "vetting-banner-shell new" in classes
+    assert "vetting-banner-cell hit new" not in classes
+    assert "vetting-banner-cell hit known" not in classes
+
+
+def test_vetting_banner_marks_variable_simbad_type_as_known_hit_without_summary_flag() -> None:
+    banner = _render_vetting_banner(
+        {
+            "simbad_main_id": "RR Lyrae",
+            "simbad_otype": "RR*",
+        }
+    )
+
+    text = " ".join(_component_text(banner))
+    classes = _component_classes(banner)
+
+    assert "KNOWN VARIABLE" in text
+    assert "SIMBAD" in text
+    assert "RR*" in text
+    assert "vetting-banner-shell known" in classes
+    assert "vetting-banner-cell hit known" in classes
+
+
 def test_vetting_banner_marks_gaia_class_as_known_without_summary_flag() -> None:
     banner = _render_vetting_banner(
         {

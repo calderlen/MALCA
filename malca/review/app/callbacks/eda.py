@@ -40,6 +40,44 @@ def toggle_eda_panel(collapse_clicks, expand_clicks, restore_clicks, panel_state
     return panel_class, splitter_class, expand_text, expand_title, 'EDA', 'Show EDA panel', state
 
 
+def _eda_panel_is_open(panel_state) -> bool:
+    return str(panel_state or 'open') in {'open', 'expanded'}
+
+
+def _eda_queue_ready(queue_data) -> bool:
+    if not isinstance(queue_data, dict):
+        return False
+    queue_ids = _queue_candidate_ids(queue_data)
+    if not queue_ids:
+        return False
+    try:
+        queue_size = int(queue_data.get('queue_size') or len(queue_ids))
+    except (TypeError, ValueError):
+        queue_size = len(queue_ids)
+    return queue_size > 0
+
+
+def _eda_startup_ready(startup_tick) -> bool:
+    try:
+        return int(startup_tick or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _eda_should_load(queue_data, panel_state, startup_tick) -> bool:
+    return _eda_panel_is_open(panel_state) and _eda_queue_ready(queue_data) and _eda_startup_ready(startup_tick)
+
+
+def _eda_placeholder_message(queue_data, panel_state, startup_tick) -> tuple[str, str]:
+    if not _eda_panel_is_open(panel_state):
+        return "EDA paused while panel is hidden.", "Open the EDA panel to load queue EDA."
+    if not _eda_queue_ready(queue_data):
+        return "No active review queue.", "Refresh the review queue to populate EDA."
+    if not _eda_startup_ready(startup_tick):
+        return "EDA waiting for startup to finish.", "EDA will load after startup finishes."
+    return "EDA not ready.", "EDA data is not ready yet."
+
+
 @app.callback(
     [Output('eda-x-metric', 'options'),
      Output('eda-x-metric', 'value'),
@@ -52,14 +90,30 @@ def toggle_eda_panel(collapse_clicks, expand_clicks, restore_clicks, panel_state
     [Input('queue-data', 'data'),
      Input('review-db-scope', 'data'),
      Input('last-candidate-saved', 'data'),
-     Input('import-trigger', 'data')],
+     Input('import-trigger', 'data'),
+     Input('eda-panel-state', 'data'),
+     Input('startup-lazy-init', 'n_intervals')],
     [State('eda-x-metric', 'value'),
      State('eda-y-metric', 'value'),
      State('eda-color-metric', 'value'),
      State('eda-symbol-metric', 'value')],
     prevent_initial_call=False,
 )
-def sync_eda_metric_controls(queue_data, _db_scope, _last_saved, _import_trigger, x_metric, y_metric, color_metric, symbol_metric):
+def sync_eda_metric_controls(
+    queue_data,
+    _db_scope,
+    _last_saved,
+    _import_trigger,
+    eda_panel_state,
+    startup_tick,
+    x_metric,
+    y_metric,
+    color_metric,
+    symbol_metric,
+):
+    if not _eda_should_load(queue_data, eda_panel_state, startup_tick):
+        return [], None, [], None, [], None, [], None
+    start = time.perf_counter() if _review_perf_enabled() else None
     try:
         frame = _current_eda_frame()
         queue_frame = queue_eda_frame(frame, _queue_candidate_ids(queue_data))
@@ -75,6 +129,13 @@ def sync_eda_metric_controls(queue_data, _db_scope, _last_saved, _import_trigger
     except Exception:
         options = []
         x_value = y_value = color_value = symbol_value = None
+    finally:
+        if start is not None:
+            _review_perf_log(
+                'eda_metric_sync',
+                time.perf_counter() - start,
+                queue_size=(queue_data or {}).get('queue_size') if isinstance(queue_data, dict) else None,
+            )
     return options, x_value, options, y_value, options, color_value, options, symbol_value
 
 
@@ -82,6 +143,7 @@ def sync_eda_metric_controls(queue_data, _db_scope, _last_saved, _import_trigger
     [Output('eda-status', 'children'),
      Output('eda-custom-graph', 'figure'),
      Output('eda-candidate-table', 'data'),
+     Output('eda-candidate-table', 'page_count'),
      Output('eda-candidate-table', 'style_data_conditional'),
      Output('eda-status-base-store', 'data'),
      Output('eda-current-trace-index-store', 'data')],
@@ -95,7 +157,13 @@ def sync_eda_metric_controls(queue_data, _db_scope, _last_saved, _import_trigger
      Input('eda-selection-candidate-ids', 'data'),
      Input('theme-mode-store', 'data'),
      Input('import-trigger', 'data'),
-     Input('review-db-scope', 'data')],
+     Input('review-db-scope', 'data'),
+     Input('eda-panel-state', 'data'),
+     Input('startup-lazy-init', 'n_intervals'),
+     Input('eda-candidate-table', 'page_current'),
+     Input('eda-candidate-table', 'page_size'),
+     Input('eda-candidate-table', 'sort_by'),
+     Input('eda-candidate-table', 'filter_query')],
     State('current-candidate-id', 'data'),
     prevent_initial_call=False,
 )
@@ -111,22 +179,33 @@ def update_eda_panel(
     theme_mode,
     _import_trigger,
     _db_scope,
+    eda_panel_state,
+    startup_tick,
+    page_current,
+    page_size,
+    sort_by,
+    filter_query,
     current_candidate_id,
 ):
     theme = str(theme_mode or DEFAULT_THEME)
+    if not _eda_should_load(queue_data, eda_panel_state, startup_tick):
+        status, message = _eda_placeholder_message(queue_data, eda_panel_state, startup_tick)
+        return status, eda_status_figure(message, theme=theme), [], 0, [], status, None
+
+    start = time.perf_counter() if _review_perf_enabled() else None
     try:
         frame = _current_eda_frame()
         queue_ids = _queue_candidate_ids(queue_data)
         queue_frame = queue_eda_frame(frame, queue_ids)
     except Exception as exc:
         status = f"EDA unavailable: {exc}"
-        return status, eda_status_figure("EDA data unavailable.", theme=theme), [], [], status, None
+        return status, eda_status_figure("EDA data unavailable.", theme=theme), [], 0, [], status, None
 
     selected_candidate = str(current_candidate_id or '').strip()
     if not queue_ids:
         fig = eda_status_figure("Refresh the review queue to populate EDA.", theme=theme)
         status = "No active review queue."
-        return status, fig, [], [], status, None
+        return status, fig, [], 0, [], status, None
 
     x_value, y_value, color_value, symbol_value = resolve_eda_metric_values(
         queue_frame if not queue_frame.empty else frame,
@@ -160,7 +239,13 @@ def update_eda_panel(
     if selection_active:
         table_frame = queue_frame[queue_frame["candidate_id"].astype(str).isin(selection_ids)].copy()
 
-    rows = eda_table_rows(table_frame)
+    rows, page_count, filtered_count = eda_table_page(
+        table_frame,
+        page_current=page_current,
+        page_size=page_size,
+        sort_by=sort_by,
+        filter_query=filter_query,
+    )
     style = selected_row_style(rows, selected_candidate, theme=theme)
     selected_text = selected_candidate or 'none'
     counts = eda_plot_row_counts(
@@ -182,12 +267,27 @@ def update_eda_panel(
         status_parts.append(f"Dropped log<=0: {dropped_nonpositive:,}")
     if selection_active:
         status_parts.append(f"Selected: {len(table_frame):,}")
+    if filter_query:
+        status_parts.append(f"Table filtered: {filtered_count:,}")
     status_base = " | ".join(status_parts)
     status = f"{status_base} | Current: {selected_text}" if status_base else f"Current: {selected_text}"
     current_trace_index = None
     if len(fig.data) and str(getattr(fig.data[-1], 'name', '')) == 'current':
         current_trace_index = len(fig.data) - 1
-    return status, fig, rows, style, status_base, current_trace_index
+    if start is not None:
+        table_bytes = len(json.dumps(rows, default=str))
+        fig_bytes = len(json.dumps(fig.to_plotly_json(), default=str))
+        _review_perf_log(
+            'eda_panel_update',
+            time.perf_counter() - start,
+            queue_rows=len(queue_frame),
+            table_rows=len(rows),
+            filtered_rows=filtered_count,
+            page_count=page_count,
+            fig_bytes=fig_bytes,
+            table_bytes=table_bytes,
+        )
+    return status, fig, rows, page_count, style, status_base, current_trace_index
 
 
 def _eda_current_marker_payload(
@@ -236,10 +336,24 @@ def _eda_current_marker_payload(
      State('eda-log-flags', 'value'),
      State('theme-mode-store', 'data'),
      State('eda-status-base-store', 'data'),
-     State('eda-current-trace-index-store', 'data')],
+     State('eda-current-trace-index-store', 'data'),
+     State('queue-data', 'data'),
+     State('eda-panel-state', 'data'),
+     State('startup-lazy-init', 'n_intervals')],
     prevent_initial_call=True,
 )
-def update_eda_current_candidate(candidate_id, x_metric, y_metric, log_flags, theme_mode, status_base, current_trace_index):
+def update_eda_current_candidate(
+    candidate_id,
+    x_metric,
+    y_metric,
+    log_flags,
+    theme_mode,
+    status_base,
+    current_trace_index,
+    queue_data,
+    eda_panel_state,
+    startup_tick,
+):
     """Patch only the EDA current-candidate marker and row style during navigation."""
     candidate_text = str(candidate_id or '').strip()
     selected_text = candidate_text or 'none'
@@ -252,7 +366,7 @@ def update_eda_current_candidate(candidate_id, x_metric, y_metric, log_flags, th
         trace_idx = int(current_trace_index)
     except (TypeError, ValueError):
         trace_idx = None
-    if trace_idx is not None and trace_idx >= 0:
+    if trace_idx is not None and trace_idx >= 0 and _eda_should_load(queue_data, eda_panel_state, startup_tick):
         try:
             frame = _current_eda_frame()
             x_values, y_values, customdata = _eda_current_marker_payload(

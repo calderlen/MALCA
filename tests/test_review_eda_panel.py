@@ -13,6 +13,7 @@ from malca.review.eda_panel import (
     eda_plot_row_counts,
     eda_publication_figure,
     eda_scatter_figure,
+    eda_table_page,
     eda_table_rows,
     load_review_eda_frame,
     queue_eda_frame,
@@ -83,6 +84,62 @@ def test_eda_table_rows_keep_candidate_key_payload() -> None:
     rows = eda_table_rows(pd.DataFrame({"candidate_id": ["A"], "candidate_key": ["K"], "dipper_score": [1.5]}))
 
     assert rows == [{"candidate_id": "A", "dipper_score": 1.5, "candidate_key": "K", "id": "A"}]
+
+
+def test_eda_table_page_slices_server_side() -> None:
+    frame = pd.DataFrame(
+        {
+            "candidate_id": ["A", "B", "C"],
+            "dipper_score": [1.0, 3.0, 2.0],
+        }
+    )
+
+    rows, page_count, total = eda_table_page(frame, page_current=1, page_size=2)
+
+    assert [row["candidate_id"] for row in rows] == ["C"]
+    assert page_count == 2
+    assert total == 3
+
+
+def test_eda_table_page_sorts_before_paging() -> None:
+    frame = pd.DataFrame(
+        {
+            "candidate_id": ["A", "B", "C"],
+            "dipper_score": [1.0, 3.0, 2.0],
+        }
+    )
+
+    rows, page_count, total = eda_table_page(
+        frame,
+        page_current=0,
+        page_size=2,
+        sort_by=[{"column_id": "dipper_score", "direction": "desc"}],
+    )
+
+    assert [row["candidate_id"] for row in rows] == ["B", "C"]
+    assert page_count == 2
+    assert total == 3
+
+
+def test_eda_table_page_filters_before_paging() -> None:
+    frame = pd.DataFrame(
+        {
+            "candidate_id": ["Alpha", "Beta", "Gamma"],
+            "dipper_score": [1.0, 3.0, 2.0],
+        }
+    )
+
+    rows, page_count, total = eda_table_page(
+        frame,
+        page_current=0,
+        page_size=10,
+        sort_by=[{"column_id": "dipper_score", "direction": "asc"}],
+        filter_query='{candidate_id} contains "a" && {dipper_score} >= 2',
+    )
+
+    assert [row["candidate_id"] for row in rows] == ["Gamma", "Beta"]
+    assert page_count == 1
+    assert total == 2
 
 
 def test_candidate_ids_from_eda_table_context_prefers_row_id() -> None:

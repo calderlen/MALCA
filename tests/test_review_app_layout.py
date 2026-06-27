@@ -73,6 +73,26 @@ def _component_ids_in_order(node: object) -> list[object]:
     return ids
 
 
+def _component_text_in_order(node: object) -> list[str]:
+    texts: list[str] = []
+
+    def walk(item: object) -> None:
+        if isinstance(item, (list, tuple)):
+            for child in item:
+                walk(child)
+            return
+        if item is None:
+            return
+        if isinstance(item, (str, int, float, bool)):
+            texts.append(str(item))
+            return
+        walk(getattr(item, "children", None))
+
+    layout = node() if callable(node) else node
+    walk(layout)
+    return texts
+
+
 def _graph_configs_in_order(node: object) -> list[dict]:
     configs: list[dict] = []
 
@@ -508,12 +528,24 @@ def test_streamlined_metadata_layout_opens_dip_and_collapses_empty_jump() -> Non
 
 def test_all_features_plain_list_contains_metadata_and_stats_rows() -> None:
     payload = {
+        "candidate_id": "618475536448",
         "asas_sn_id": "618475536448",
         "dipper_score": 18.6,
         "dip_significant": True,
         "jump_count": 0,
         "gaia_var_flag": False,
         "tmass_j": 11.5,
+        "tmass_j_err": 0.02,
+        "ra_deg": 12.34,
+        "period_source_periods": "asassn_var:1.2345",
+        "derived_harmonics_r32": 0.77,
+        "char_status_yso": "ok",
+        "sed_model_fit_checked": True,
+        "ztf_lc_n_det": 8,
+        "ms_feature_status": "ok",
+        "mystery_payload_field": "present",
+        "payload_json": '{"too": "large"}',
+        "lc_stats": '{"stats_amplitude": 0.1}',
     }
     grouped = review_app.extract_review_metadata_grouped(payload, round_sigfigs=True)
     feature_rows = review_app.extract_review_metadata_feature_rows(payload, round_sigfigs=True)
@@ -539,8 +571,47 @@ def test_all_features_plain_list_contains_metadata_and_stats_rows() -> None:
         "gaia_var_flag",
         "tmass_j",
         "stats_cadence_mean_dt_days",
+        "candidate_id",
+        "ra_deg",
+        "period_source_periods",
+        "derived_harmonics_r32",
+        "char_status_yso",
+        "sed_model_fit_checked",
+        "ztf_lc_n_det",
+        "ms_feature_status",
+        "tmass_j_err",
+        "mystery_payload_field",
     ):
         assert expected in copy_text
+    assert "Other Payload Fields / Record & Run Context / Candidate ID / candidate_id = 618475536448" in copy_text
+    assert "Other Payload Fields / Coordinates & Gaia / RA Deg / ra_deg = 12.34" in copy_text
+    assert "Other Payload Fields / Period & Filter Flags / Period Source Periods / period_source_periods = asassn_var:1.2345" in copy_text
+    assert "Other Payload Fields / Derived Feature Extras / Derived Harmonics R32 / derived_harmonics_r32 = 0.77" in copy_text
+    assert "Other Payload Fields / Enrichment Stage Status / Char Status YSO / char_status_yso = ok" in copy_text
+    assert "Other Payload Fields / SED Pipeline Status / Sed Model Fit Checked / sed_model_fit_checked = True" in copy_text
+    assert "Other Payload Fields / External LC Coverage / ZTF LC N Det / ztf_lc_n_det = 8" in copy_text
+    assert "Other Payload Fields / Multi-Survey Features / Ms Feature Status / ms_feature_status = ok" in copy_text
+    assert "Other Payload Fields / Photometric Error Columns / Tmass J Err / tmass_j_err = 0.02" in copy_text
+    assert "Other Payload Fields / Miscellaneous / Mystery Payload Field / mystery_payload_field = present" in copy_text
+    subsection_titles = {
+        str(getattr(component, "children", ""))
+        for component in _components_with_class(all_features, "all-features-subsection-title")
+    }
+    for expected in (
+        "Record & Run Context (1)",
+        "Coordinates & Gaia (1)",
+        "Period & Filter Flags (1)",
+        "Derived Feature Extras (1)",
+        "Enrichment Stage Status (1)",
+        "SED Pipeline Status (1)",
+        "External LC Coverage (1)",
+        "Multi-Survey Features (1)",
+        "Photometric Error Columns (1)",
+        "Miscellaneous (1)",
+    ):
+        assert expected in subsection_titles
+    assert "payload_json" not in copy_text
+    assert "lc_stats" not in copy_text
     assert raw_lines
 
 
@@ -1003,15 +1074,79 @@ def test_plot_render_request_keeps_catalog_period_for_stale_auto_result() -> Non
     assert state["suppress_catalog_phase_period"] is False
 
 
-def test_eda_table_has_native_sorting_and_filtering() -> None:
+def test_eda_table_uses_server_side_sorting_filtering_and_paging() -> None:
     table = _component_by_id(app.layout, "eda-candidate-table")
 
     assert table is not None
-    assert getattr(table, "sort_action", None) == "native"
+    assert getattr(table, "page_action", None) == "custom"
+    assert getattr(table, "page_current", None) == 0
+    assert getattr(table, "page_size", None) == 12
+    assert getattr(table, "page_count", None) == 0
+    assert getattr(table, "sort_action", None) == "custom"
     assert getattr(table, "sort_mode", None) == "multi"
-    assert getattr(table, "filter_action", None) == "native"
+    assert getattr(table, "sort_by", None) == []
+    assert getattr(table, "filter_action", None) == "custom"
+    assert getattr(table, "filter_query", None) == ""
     assert getattr(table, "hidden_columns", None) in (None, [])
     assert all(column.get("id") != "candidate_key" for column in table.columns)
+
+
+def test_initial_eda_metric_sync_defers_db_load(monkeypatch) -> None:
+    def fail_load():
+        raise AssertionError("EDA frame should not load during initial hydration")
+
+    monkeypatch.setattr(review_app, "_current_eda_frame", fail_load)
+
+    result = review_app.sync_eda_metric_controls(
+        {"candidate_ids": ["A"], "queue_size": 1},
+        "scope",
+        None,
+        None,
+        "open",
+        0,
+        None,
+        None,
+        None,
+        None,
+    )
+
+    assert result == ([], None, [], None, [], None, [], None)
+
+
+def test_initial_eda_panel_returns_placeholder_before_startup(monkeypatch) -> None:
+    def fail_load():
+        raise AssertionError("EDA frame should not load during initial hydration")
+
+    monkeypatch.setattr(review_app, "_current_eda_frame", fail_load)
+
+    status, fig, rows, page_count, style, status_base, trace_idx = review_app.update_eda_panel(
+        {"candidate_ids": ["A"], "queue_size": 1},
+        None,
+        None,
+        None,
+        None,
+        [],
+        [],
+        [],
+        "black",
+        None,
+        "scope",
+        "open",
+        0,
+        0,
+        12,
+        [],
+        "",
+        "A",
+    )
+
+    assert "startup" in status.lower()
+    assert "startup" in fig.layout.annotations[0].text.lower()
+    assert rows == []
+    assert page_count == 0
+    assert style == []
+    assert status_base == status
+    assert trace_idx is None
 
 
 def test_eda_plot_selection_filters_table_only_when_enabled(monkeypatch) -> None:
@@ -1025,7 +1160,7 @@ def test_eda_plot_selection_filters_table_only_when_enabled(monkeypatch) -> None
     queue_data = {"candidate_ids": ["A", "B", "C"], "queue_size": 3}
     monkeypatch.setattr(review_app, "_current_eda_frame", lambda: frame)
 
-    _status, fig, rows, _style, _status_base, _trace_idx = review_app.update_eda_panel(
+    _status, fig, rows, page_count, _style, _status_base, _trace_idx = review_app.update_eda_panel(
         queue_data,
         "dipper_score",
         "interest_score",
@@ -1037,10 +1172,17 @@ def test_eda_plot_selection_filters_table_only_when_enabled(monkeypatch) -> None
         "black",
         0,
         "scope",
+        "open",
+        1,
+        0,
+        12,
+        [],
+        "",
         "A",
     )
 
     assert [row["candidate_id"] for row in rows] == ["A", "B", "C"]
+    assert page_count == 1
     assert fig.layout.dragmode == "zoom"
 
     graph_fig = review_app.eda_scatter_figure(
@@ -1057,7 +1199,7 @@ def test_eda_plot_selection_filters_table_only_when_enabled(monkeypatch) -> None
 
     assert selected_ids == ["B", "C"]
 
-    status, fig, rows, _style, _status_base, _trace_idx = review_app.update_eda_panel(
+    status, fig, rows, page_count, _style, _status_base, _trace_idx = review_app.update_eda_panel(
         queue_data,
         "dipper_score",
         "interest_score",
@@ -1069,14 +1211,21 @@ def test_eda_plot_selection_filters_table_only_when_enabled(monkeypatch) -> None
         "black",
         0,
         "scope",
+        "open",
+        1,
+        0,
+        12,
+        [],
+        "",
         "A",
     )
 
     assert [row["candidate_id"] for row in rows] == ["B", "C"]
+    assert page_count == 1
     assert "Selected: 2" in status
     assert fig.layout.dragmode == "select"
 
-    status, _fig, rows, _style, _status_base, _trace_idx = review_app.update_eda_panel(
+    status, _fig, rows, page_count, _style, _status_base, _trace_idx = review_app.update_eda_panel(
         queue_data,
         "dipper_score",
         "interest_score",
@@ -1088,13 +1237,20 @@ def test_eda_plot_selection_filters_table_only_when_enabled(monkeypatch) -> None
         "black",
         0,
         "scope",
+        "open",
+        1,
+        0,
+        12,
+        [],
+        "",
         "A",
     )
 
     assert [row["candidate_id"] for row in rows] == ["B", "C"]
+    assert page_count == 1
     assert "Selected: 2" in status
 
-    status, _fig, rows, _style, _status_base, _trace_idx = review_app.update_eda_panel(
+    status, _fig, rows, page_count, _style, _status_base, _trace_idx = review_app.update_eda_panel(
         queue_data,
         "dipper_score",
         "interest_score",
@@ -1106,11 +1262,55 @@ def test_eda_plot_selection_filters_table_only_when_enabled(monkeypatch) -> None
         "black",
         0,
         "scope",
+        "open",
+        1,
+        0,
+        12,
+        [],
+        "",
         "A",
     )
 
     assert [row["candidate_id"] for row in rows] == ["A", "B", "C"]
+    assert page_count == 1
     assert "Selected:" not in status
+
+
+def test_eda_panel_sorts_filters_and_pages_table_server_side(monkeypatch) -> None:
+    frame = pd.DataFrame(
+        {
+            "candidate_id": ["A", "B", "C", "D"],
+            "dipper_score": [1.0, 4.0, 3.0, 2.0],
+            "interest_score": [4.0, 5.0, 6.0, 7.0],
+        }
+    )
+    queue_data = {"candidate_ids": ["A", "B", "C", "D"], "queue_size": 4}
+    monkeypatch.setattr(review_app, "_current_eda_frame", lambda: frame)
+
+    status, _fig, rows, page_count, _style, _status_base, _trace_idx = review_app.update_eda_panel(
+        queue_data,
+        "dipper_score",
+        "interest_score",
+        None,
+        None,
+        [],
+        [],
+        [],
+        "black",
+        0,
+        "scope",
+        "open",
+        1,
+        0,
+        1,
+        [{"column_id": "dipper_score", "direction": "desc"}],
+        "{dipper_score} > 0",
+        "A",
+    )
+
+    assert [row["candidate_id"] for row in rows] == ["B"]
+    assert page_count == 4
+    assert "Table filtered: 4" in status
 
 
 def test_eda_navigation_callback_returns_patch_without_large_state(monkeypatch) -> None:
@@ -1130,6 +1330,9 @@ def test_eda_navigation_callback_returns_patch_without_large_state(monkeypatch) 
         [],
         "black",
         "Queue rows: 2/2 | Plotted: 2",
+        1,
+        {"candidate_ids": ["A", "B"], "queue_size": 2},
+        "open",
         1,
     )
 
@@ -1424,11 +1627,54 @@ def test_dustycult_publication_export_controls_are_present() -> None:
     assert "dustycult-export-occulter-btn" in ids
 
 
-def test_vetting_filter_group_has_definite_known_type_preset() -> None:
+def test_vetting_filter_group_has_known_variable_and_dipper_contaminant_presets() -> None:
     ids = _component_ids_in_order(app.layout)
+    texts = _component_text_in_order(app.layout)
 
-    assert "vetting-known-types-btn" in ids
-    assert "vetting-definite-known-types-btn" in ids
+    assert "vetting-known-variables-btn" in ids
+    assert "vetting-dipper-contaminants-btn" in ids
+    assert "Exclude Known Variables" in texts
+    assert "Exclude Dipper Contaminants" in texts
+
+
+def test_sidebar_filter_options_show_classification_labels_without_changing_values(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "review.db"
+    with db_connect(db_path) as conn:
+        upsert_candidates_frame(
+            conn,
+            pd.DataFrame(
+                [
+                    {
+                        "candidate_id": "C1",
+                        "gaia_var_class": "DSCT|GDOR|SXPHE",
+                        "vsx_class": "EA/SD:",
+                        "simbad_otype": "EB?",
+                    }
+                ]
+            ),
+        )
+
+    monkeypatch.setattr(review_app, "DB_PATH", str(db_path))
+    payload = review_app._load_sidebar_filter_payload(True, None)
+    select_options = payload[len(review_app._TEXT_STATES):]
+    options_by_filter = {
+        filter_key: options
+        for (_cid, filter_key), options in zip(review_app._SELECT_STATES, select_options)
+    }
+
+    gaia_option = options_by_filter["exclude_gaia_var_class"][0]
+    vsx_option = options_by_filter["exclude_vsx_class"][0]
+    simbad_option = options_by_filter["exclude_simbad_otype"][0]
+
+    assert gaia_option["value"] == "DSCT|GDOR|SXPHE"
+    assert "Delta Scuti" in gaia_option["label"]
+    assert vsx_option["value"] == "EA/SD:"
+    assert "candidate/uncertain" in vsx_option["label"]
+    assert simbad_option["value"] == "EB?"
+    assert simbad_option["label"] == "EB? - candidate/uncertain Eclipsing binary [SIMBAD]"
 
 
 def test_external_followup_exposes_multi_survey_summary() -> None:

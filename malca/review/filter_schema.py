@@ -12,9 +12,9 @@ SPECIAL_FILTERS = {
     "require_failed_any_false": "Require failed_any=False",
 }
 
-# Catalog/type filters controlled by the vetting known-type presets.
-# The broad preset uses all of them; the "certain known" preset leaves
-# vetting_likely_known unset and drops uncertainty-style categorical labels.
+# Catalog/type filters controlled by the vetting presets. The broad preset
+# selects definite variable/non-target labels; the dipper-contaminant preset
+# leaves boolean flags unset and selects only targeted definite dipper mimics.
 VETTING_KNOWN_BOOL_FILTERS = (
     "vetting_likely_known",
     "microlens_match",
@@ -29,6 +29,7 @@ VETTING_KNOWN_SELECT_FILTERS = (
     "ztf_var_type",
     "tns_type",
     "alerce_lc_class",
+    "yso_class",
 )
 
 REVIEW_TAXONOMY_FILTER_COLUMNS: tuple[tuple[str, str], ...] = (
@@ -57,7 +58,115 @@ REVIEW_FILTER_COLUMN_TYPES = {
 
 _VSX_GENERIC_CLASSES = {"*", "MISC", "NAN", "NONE", "VAR"}
 _ASASSN_GENERIC_CLASSES = {"VAR"}
-_SIMBAD_GENERIC_TYPES = {"*", "**", "G", "FIR", "MUL"}
+_SIMBAD_SOURCE_OR_GENERIC_TYPES = {"*", "**", "FIR", "G", "IR", "MM", "MUL", "RAD", "X"}
+_SIMBAD_KNOWN_VARIABLE_TYPES = {
+    "BY*",
+    "CV*",
+    "EB*",
+    "EV",
+    "GD*",
+    "HXB",
+    "LP*",
+    "MI*",
+    "NO*",
+    "OR*",
+    "PU*",
+    "RC*",
+    "RO*",
+    "RR*",
+    "RS*",
+    "SB*",
+    "SY*",
+    "V*",
+    "WV*",
+    "CC*",
+    "DS*",
+}
+_SIMBAD_DIPPER_CONTAMINANT_TYPES = {
+    "AE*",
+    "BE*",
+    "CV*",
+    "EB*",
+    "EM*",
+    "EV",
+    "HXB",
+    "NO*",
+    "OR*",
+    "RC*",
+    "SB*",
+    "TT*",
+    "Y*O",
+}
+_VSX_DIPPER_CONTAMINANT_TOKENS = {
+    "BE",
+    "CTTS",
+    "DIP",
+    "DYPER",
+    "E",
+    "E-DO",
+    "EA",
+    "EB",
+    "EC",
+    "ED",
+    "ELL",
+    "EP",
+    "ESD",
+    "EW",
+    "EXOR",
+    "FUOR",
+    "GCAS",
+    "IN",
+    "INA",
+    "INAT",
+    "INB",
+    "INS",
+    "INSA",
+    "INSB",
+    "INST",
+    "INT",
+    "ISA",
+    "LERI",
+    "RCB",
+    "SD",
+    "SDOR",
+    "SPBE",
+    "TTS",
+    "UXOR",
+    "VY",
+    "WTTS",
+    "YSO",
+}
+_GAIA_DIPPER_CONTAMINANT_TOKENS = {
+    "BE",
+    "ECL",
+    "GCAS",
+    "RCB",
+    "SDOR",
+    "YSO",
+}
+_ZTF_DIPPER_CONTAMINANT_TYPES = {"EA", "EW"}
+_ALERCE_DIPPER_CONTAMINANT_TOKENS = {
+    "CV",
+    "E",
+    "EA",
+    "EB",
+    "ECL",
+    "EW",
+    "NOVA",
+    "YSO",
+}
+_TNS_DIPPER_CONTAMINANT_TYPES = {
+    "cataclysmic variable",
+    "classical nova",
+    "cv",
+    "nova",
+}
+_YSO_CLASS_DIPPER_RE = re.compile(
+    r"(?:^|[\s_\-/(,.;:])(?:class\s+i{1,3}|ctts|dipper|pms|pre-main|t\s*tauri|uxor|wtts|young|yso)"
+    r"(?:$|[\s_\-/),.;:])",
+    re.IGNORECASE,
+)
+_UNCERTAIN_FLAG_RE = re.compile(r"[?:]")
 _TNS_UNCERTAIN_RE = re.compile(
     r"(?:^|[\s_\-/(,.;:])(?:candidate|possible|probable|probably|suspected|tentative|uncertain)"
     r"(?:$|[\s_\-/),.;:])",
@@ -70,11 +179,25 @@ def _normalized_class_value(value: object) -> str:
     return str(value or "").strip()
 
 
+def _has_uncertainty_flag(text: str, *, include_textual: bool = False) -> bool:
+    if _UNCERTAIN_FLAG_RE.search(text):
+        return True
+    return include_textual and bool(_TNS_UNCERTAIN_RE.search(text))
+
+
+def _class_tokens(text: str) -> set[str]:
+    return {token.upper() for token in tokenize_vsx_classes(text)}
+
+
+def _bar_tokens(text: str) -> set[str]:
+    tokens = {text.upper()}
+    tokens.update(part.strip().upper() for part in text.split("|") if part.strip())
+    return tokens
+
+
 def _is_tns_definite_type(text: str) -> bool:
     lowered = text.lower()
-    if "?" in text:
-        return False
-    if _TNS_UNCERTAIN_RE.search(text):
+    if _has_uncertainty_flag(text, include_textual=True):
         return False
     if _TNS_DEFINITE_SN_RE.search(text):
         return True
@@ -89,16 +212,39 @@ def _is_vsx_definite_known_type(text: str) -> bool:
     """Return whether a VSX label contains a known-type contaminant token."""
     if text.upper() in _VSX_GENERIC_CLASSES:
         return False
-    if ":" in text:
+    if _has_uncertainty_flag(text):
         return False
-    tokens = set(tokenize_vsx_classes(text))
+    tokens = _class_tokens(text)
     if not tokens or tokens <= _VSX_GENERIC_CLASSES:
         return False
     return bool(tokens & VSX_EXCLUDE_CLASSES)
 
 
-def is_definite_known_type_value(column: str, value: object) -> bool:
-    """Return whether a catalog class value is a definite known-type exclusion."""
+def _is_vsx_dipper_contaminant_type(text: str) -> bool:
+    if text.upper() in _VSX_GENERIC_CLASSES:
+        return False
+    if _has_uncertainty_flag(text):
+        return False
+    tokens = _class_tokens(text)
+    return bool(tokens and tokens & _VSX_DIPPER_CONTAMINANT_TOKENS)
+
+
+def _is_yso_class_dipper_contaminant(text: str) -> bool:
+    if _has_uncertainty_flag(text, include_textual=True):
+        return False
+    upper = text.upper()
+    if upper in {"", "NAN", "NONE", "UNKNOWN", "MAIN SEQUENCE"}:
+        return False
+    return bool(_YSO_CLASS_DIPPER_RE.search(text))
+
+
+def _is_definite_simbad_otype(text: str) -> bool:
+    upper = text.upper()
+    return not _has_uncertainty_flag(text) and upper not in _SIMBAD_SOURCE_OR_GENERIC_TYPES
+
+
+def is_known_variable_type_value(column: str, value: object) -> bool:
+    """Return whether a catalog class value is a known-variable exclusion."""
     text = _normalized_class_value(value)
     if not text:
         return False
@@ -109,15 +255,52 @@ def is_definite_known_type_value(column: str, value: object) -> bool:
     if col == "vsx_class":
         return _is_vsx_definite_known_type(text)
     if col == "asassn_var_type":
-        return ":" not in text and upper not in _ASASSN_GENERIC_CLASSES
+        return not _has_uncertainty_flag(text) and upper not in _ASASSN_GENERIC_CLASSES
     if col == "simbad_otype":
-        return "?" not in text and upper not in _SIMBAD_GENERIC_TYPES
+        return _is_definite_simbad_otype(text) and upper in _SIMBAD_KNOWN_VARIABLE_TYPES
     if col == "tns_type":
         return _is_tns_definite_type(text)
+    if col == "yso_class":
+        return False
     if col in {"gaia_var_class", "ztf_var_type", "alerce_lc_class", "microlens_catalog"}:
-        return True
+        return not _has_uncertainty_flag(text)
 
-    return True
+    return not _has_uncertainty_flag(text)
+
+
+def is_dipper_contaminant_type_value(column: str, value: object) -> bool:
+    """Return whether a catalog class value is a dipper-contaminant exclusion."""
+    text = _normalized_class_value(value)
+    if not text:
+        return False
+
+    col = str(column or "").strip()
+    upper = text.upper()
+
+    if col in {"vsx_class", "asassn_var_type"}:
+        return _is_vsx_dipper_contaminant_type(text)
+    if col == "gaia_var_class":
+        return not _has_uncertainty_flag(text) and bool(_bar_tokens(text) & _GAIA_DIPPER_CONTAMINANT_TOKENS)
+    if col == "simbad_otype":
+        return _is_definite_simbad_otype(text) and upper in _SIMBAD_DIPPER_CONTAMINANT_TYPES
+    if col == "ztf_var_type":
+        return not _has_uncertainty_flag(text) and upper in _ZTF_DIPPER_CONTAMINANT_TYPES
+    if col == "tns_type":
+        return (
+            not _has_uncertainty_flag(text, include_textual=True)
+            and text.lower() in _TNS_DIPPER_CONTAMINANT_TYPES
+        )
+    if col == "alerce_lc_class":
+        return not _has_uncertainty_flag(text) and bool(_class_tokens(text) & _ALERCE_DIPPER_CONTAMINANT_TOKENS)
+    if col == "yso_class":
+        return _is_yso_class_dipper_contaminant(text)
+
+    return False
+
+
+def is_definite_known_type_value(column: str, value: object) -> bool:
+    """Return whether a catalog class value is a definite known-variable exclusion."""
+    return is_known_variable_type_value(column, value)
 
 
 SIDEBAR_GROUPS = [

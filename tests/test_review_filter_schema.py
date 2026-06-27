@@ -9,7 +9,9 @@ from malca.review.filter_schema import (
     REVIEW_FILTER_COLUMN_TYPES,
     REVIEW_TAXONOMY_FILTER_COLUMNS,
     SIDEBAR_GROUPS,
+    is_dipper_contaminant_type_value,
     is_definite_known_type_value,
+    is_known_variable_type_value,
 )
 from malca.review.store import (
     _CANDIDATE_COLUMNS,
@@ -185,6 +187,7 @@ def test_vsx_known_type_detection_tokenizes_certain_composites() -> None:
     assert is_definite_known_type_value("vsx_class", "ACEP|CEP") is True
     assert is_definite_known_type_value("vsx_class", "BE|GCAS|SDOR|WR") is True
     assert is_definite_known_type_value("vsx_class", "EA:") is False
+    assert is_definite_known_type_value("vsx_class", "EA?") is False
     assert is_definite_known_type_value("vsx_class", "EA/SD:") is False
     assert is_definite_known_type_value("vsx_class", "BE:") is False
     assert is_definite_known_type_value("vsx_class", "BY+Microlens:") is False
@@ -204,17 +207,46 @@ def test_asassn_uncertainty_and_generic_classes_stay_visible() -> None:
     assert is_definite_known_type_value("asassn_var_type", "VAR") is False
 
 
-def test_simbad_uncertainty_and_generic_types_stay_visible() -> None:
-    assert is_definite_known_type_value("simbad_otype", "EB*") is True
-    assert is_definite_known_type_value("simbad_otype", "EB?") is False
-    assert is_definite_known_type_value("simbad_otype", "Y*O") is True
-    assert is_definite_known_type_value("simbad_otype", "Y*?") is False
-    assert is_definite_known_type_value("simbad_otype", "s?r") is False
-    assert is_definite_known_type_value("simbad_otype", "*") is False
-    assert is_definite_known_type_value("simbad_otype", "**") is False
-    assert is_definite_known_type_value("simbad_otype", "G") is False
-    assert is_definite_known_type_value("simbad_otype", "FIR") is False
-    assert is_definite_known_type_value("simbad_otype", "mul") is False
+def test_simbad_known_variable_policy_excludes_only_definite_variables() -> None:
+    for code in ["EB*", "RR*", "V*", "LP*", "Mi*", "Or*"]:
+        assert is_known_variable_type_value("simbad_otype", code) is True
+        assert is_definite_known_type_value("simbad_otype", code) is True
+
+    for code in ["Y*O", "TT*", "Be*", "Em*", "IR", "Rad", "X", "FIR", "*", "**"]:
+        assert is_known_variable_type_value("simbad_otype", code) is False
+        assert is_definite_known_type_value("simbad_otype", code) is False
+
+
+def test_simbad_question_mark_types_stay_visible() -> None:
+    for code in ["EB?", "RR?", "LP?", "Y*?", "AB?", "Be?", "HS?", "S*?", "s?r"]:
+        assert is_known_variable_type_value("simbad_otype", code) is False
+        assert is_dipper_contaminant_type_value("simbad_otype", code) is False
+
+
+def test_simbad_dipper_contaminant_policy_is_target_safe() -> None:
+    for code in ["EB*", "SB*", "Y*O", "TT*", "Be*", "Ae*", "Or*", "RC*", "CV*", "No*", "HXB", "ev", "Em*"]:
+        assert is_dipper_contaminant_type_value("simbad_otype", code) is True
+
+    for code in [
+        "Y*?",
+        "TT?",
+        "LP*",
+        "Mi*",
+        "RR*",
+        "AB*",
+        "C*",
+        "OH*",
+        "pA*",
+        "RG*",
+        "Be?",
+        "IR",
+        "Rad",
+        "X",
+        "FIR",
+        "*",
+        "**",
+    ]:
+        assert is_dipper_contaminant_type_value("simbad_otype", code) is False
 
 
 def test_tns_definite_types_and_candidate_text() -> None:
@@ -227,6 +259,50 @@ def test_tns_definite_types_and_candidate_text() -> None:
     assert is_definite_known_type_value("tns_type", "SN?") is False
     assert is_definite_known_type_value("tns_type", "Fading blue star") is False
     assert is_definite_known_type_value("tns_type", "star with a deep dimming event") is False
+
+
+def test_dipper_contaminant_policy_is_source_specific_and_uncertainty_safe() -> None:
+    assert is_dipper_contaminant_type_value("vsx_class", "EA") is True
+    assert is_dipper_contaminant_type_value("vsx_class", "EA/SD") is True
+    assert is_dipper_contaminant_type_value("vsx_class", "BE|GCAS|SDOR|WR") is True
+    assert is_dipper_contaminant_type_value("vsx_class", "UXOR") is True
+    assert is_dipper_contaminant_type_value("vsx_class", "YSO/DIP") is True
+    assert is_dipper_contaminant_type_value("vsx_class", "DSCT") is False
+    assert is_dipper_contaminant_type_value("vsx_class", "ACEP|CEP") is False
+    assert is_dipper_contaminant_type_value("vsx_class", "EA:") is False
+    assert is_dipper_contaminant_type_value("vsx_class", "UXOR:") is False
+
+    assert is_dipper_contaminant_type_value("asassn_var_type", "EA") is True
+    assert is_dipper_contaminant_type_value("asassn_var_type", "YSO") is True
+    assert is_dipper_contaminant_type_value("asassn_var_type", "GCAS") is True
+    assert is_dipper_contaminant_type_value("asassn_var_type", "RRAB") is False
+    assert is_dipper_contaminant_type_value("asassn_var_type", "GCAS:") is False
+
+    assert is_dipper_contaminant_type_value("gaia_var_class", "ECL") is True
+    assert is_dipper_contaminant_type_value("gaia_var_class", "YSO") is True
+    assert is_dipper_contaminant_type_value("gaia_var_class", "BE|GCAS|SDOR|WR") is True
+    assert is_dipper_contaminant_type_value("gaia_var_class", "RR") is False
+    assert is_dipper_contaminant_type_value("gaia_var_class", "DSCT|GDOR|SXPHE") is False
+
+    assert is_dipper_contaminant_type_value("ztf_var_type", "EA") is True
+    assert is_dipper_contaminant_type_value("ztf_var_type", "EW") is True
+    assert is_dipper_contaminant_type_value("ztf_var_type", "RSCVN") is False
+
+    assert is_dipper_contaminant_type_value("alerce_lc_class", "YSO") is True
+    assert is_dipper_contaminant_type_value("alerce_lc_class", "EA") is True
+    assert is_dipper_contaminant_type_value("alerce_lc_class", "CV/Nova") is True
+    assert is_dipper_contaminant_type_value("alerce_lc_class", "Periodic") is False
+
+    assert is_dipper_contaminant_type_value("tns_type", "CV") is True
+    assert is_dipper_contaminant_type_value("tns_type", "Nova") is True
+    assert is_dipper_contaminant_type_value("tns_type", "SN Ia") is False
+    assert is_dipper_contaminant_type_value("tns_type", "CV candidate") is False
+
+    assert is_dipper_contaminant_type_value("yso_class", "Class II") is True
+    assert is_dipper_contaminant_type_value("yso_class", "T Tauri") is True
+    assert is_dipper_contaminant_type_value("yso_class", "Main Sequence") is False
+    assert is_dipper_contaminant_type_value("yso_class", "unknown") is False
+    assert is_dipper_contaminant_type_value("yso_class", "YSO?") is False
 
 
 def test_classifier_sources_are_definite_when_non_empty() -> None:

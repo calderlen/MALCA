@@ -171,6 +171,32 @@ def _layer_first_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return to_layer_first_mapping(payload, layer_values_as_json=False)
 
 
+def _payload_json_mapping(raw: object) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return dict(raw)
+    if not isinstance(raw, str):
+        return {}
+    text = raw.strip()
+    if not text:
+        return {}
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return {}
+    return dict(parsed) if isinstance(parsed, dict) else {}
+
+
+def _flatten_display_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    out = dict(payload)
+    out.pop("payload_json", None)
+    for layer in FEATURE_LAYER_COLUMNS:
+        layer_data = parse_layer_value(out.pop(layer, None))
+        for key, value in layer_data.items():
+            if key not in out:
+                out[key] = value
+    return out
+
+
 def _payload_layer_value(payload: dict[str, Any], key: str) -> Any:
     if key in payload:
         return payload.get(key)
@@ -2318,20 +2344,20 @@ def get_candidate_payload(conn: sqlite3.Connection, candidate_id: str) -> dict:
     ).fetchone()
     if row is None:
         return {}
-    try:
-        import json
-        payload = json.loads(row[0]) if row[0] else {}
-    except Exception:
-        payload = {}
-    if not isinstance(payload, dict):
-        payload = {}
+    payload = _payload_json_mapping(row[0])
+    nested_payload = _payload_json_mapping(payload.get("payload_json"))
 
-    # Flatten layer blobs so downstream consumers see all fields at top level
-    for layer in FEATURE_LAYER_COLUMNS:
-        layer_data = parse_layer_value(payload.pop(layer, None))
-        for key, value in layer_data.items():
-            if key not in payload:
-                payload[key] = value
+    # Flatten layer blobs so downstream consumers see all fields at top level.
+    # Some legacy rebuilt DBs accidentally wrapped the original payload JSON
+    # inside the outer payload_json document; treat that inner payload as a
+    # fallback without exposing the raw wrapper.
+    if nested_payload:
+        payload = {
+            **_flatten_display_payload(nested_payload),
+            **_flatten_display_payload(payload),
+        }
+    else:
+        payload = _flatten_display_payload(payload)
 
     # Merge SQL columns into payload so asassn_var_type, ztf_var_type, tns_type etc. show when only in SQL
     for i, col in enumerate(cols_to_fetch):
