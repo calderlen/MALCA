@@ -29,7 +29,7 @@ import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 
-from malca.candidates import merge_candidate_columns, select_passing_candidates
+from malca.products.candidates import merge_candidate_columns, select_passing_candidates
 from malca.config import SYDNEY_LTV_CSV_PATH
 from malca.config import (
     LTV_MIN_SLOPE,
@@ -61,8 +61,8 @@ from malca.ltv.filter import (
     filter_south_pole,
     filter_high_proper_motion,
 )
-from malca.feature_layers import to_layer_first_frame, with_feature_columns
-from malca.table_io import read_feature_table, read_parquet_table, write_feature_table
+from malca.products.feature_layers import to_layer_first_frame, with_feature_columns
+from malca.io.table_io import read_feature_table, read_parquet_table, write_feature_table
 from malca.ltv.paths import (
     DEFAULT_LTV_RUN_DIR,
     ltv_all_external_lcs_output_path,
@@ -76,9 +76,9 @@ from malca.ltv.paths import (
     ltv_pipeline_output_path,
     ltv_review_db_path,
 )
-from malca.product_schema import add_ltv_identity, assert_ltv_product_schema
-from malca.run_bundle import collect_candidate_lightcurve_files, export_run_bundle, import_bundle_zip
-from malca.run_context import (
+from malca.products.product_schema import add_ltv_identity, assert_ltv_product_schema
+from malca.products.run_bundle import collect_candidate_lightcurve_files, export_run_bundle, import_bundle_zip
+from malca.products.run_context import (
     init_pipeline_run_context,
     maybe_sync_review_bundle,
     run_dir_from_bundle,
@@ -88,7 +88,7 @@ from malca.run_context import (
     write_run_params,
     write_run_summary,
 )
-from malca.run_metadata import build_fingerprint, fingerprint_digest, json_stable
+from malca.products.run_metadata import build_fingerprint, fingerprint_digest, json_stable
 
 
 def _safe_status_print(message: object = "") -> None:
@@ -416,7 +416,7 @@ def run_full_pipeline(
     # Stage 4: Extinction correction
     # =========================================================================
     if run_extinction:
-        from malca.characterize import get_dust_extinction
+        from malca.enrichment.characterize import get_dust_extinction
 
         if verbose:
             print("-" * 60)
@@ -888,7 +888,7 @@ def _write_ltv_external_lcs(
     run_dir: Path,
     candidates: pd.DataFrame,
 ) -> tuple[Path, Path, pd.DataFrame]:
-    from malca.vetting import fetch_external_lcs
+    from malca.enrichment.vetting import fetch_external_lcs
 
     output_path = ltv_external_lcs_output_path(mag_bin, run_dir)
     external_lc_dir = run_dir / "results" / "external_lcs"
@@ -978,7 +978,7 @@ def _write_ltv_extended_products(
     external_lc_dir = run_dir / "results" / "external_lcs"
 
     if bool(args.run_external_lcs):
-        from malca.external_lcs import EXTERNAL_LC_COLUMNS
+        from malca.enrichment.external_lcs import EXTERNAL_LC_COLUMNS
 
         external_path, external_lc_dir, external_df = _write_ltv_external_lcs(args, mag_bin, run_dir, updated)
         updated = _merge_ltv_candidate_columns(updated, external_df, EXTERNAL_LC_COLUMNS)

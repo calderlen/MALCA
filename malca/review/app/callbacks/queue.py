@@ -324,6 +324,34 @@ def _run_period_search_for_payload(
     )
 
 
+def _run_harmonic_check_for_payload(
+    payload: dict,
+    *,
+    min_period: float,
+    max_period: float,
+) -> tuple[dict | None, str]:
+    """Run a live harmonic check against the current candidate payload."""
+    plot_dir_path = _review_plot_dir_for_context(payload.get("source_path"))
+    run_params = _load_run_params_for_plot_dir(str(plot_dir_path) if plot_dir_path else None)
+    filter_bad_cameras = not bool(run_params.get('skip_camera_median', False))
+    scatter_ratio = float(run_params.get('bad_camera_scatter_ratio', BAD_CAMERA_SCATTER_RATIO_THRESHOLD)) if run_params else BAD_CAMERA_SCATTER_RATIO_THRESHOLD
+    clean_abs = float(run_params.get('clean_max_error_absolute', CLEAN_LC_MAX_ERROR_ABSOLUTE)) if run_params else CLEAN_LC_MAX_ERROR_ABSOLUTE
+    clean_sig = float(run_params.get('clean_max_error_sigma', CLEAN_LC_MAX_ERROR_SIGMA)) if run_params else CLEAN_LC_MAX_ERROR_SIGMA
+    baseline_name, baseline_kwargs, _baseline_warnings = _baseline_config_from_run_params(run_params)
+    return shared_run_harmonic_check_for_payload(
+        payload,
+        plot_dir=plot_dir_path,
+        min_period=min_period,
+        max_period=max_period,
+        filter_bad_cameras=filter_bad_cameras,
+        scatter_ratio=scatter_ratio,
+        clean_max_error_absolute=clean_abs,
+        clean_max_error_sigma=clean_sig,
+        baseline_name=baseline_name,
+        baseline_kwargs=baseline_kwargs,
+    )
+
+
 
 @app.callback(
     [Output('queue-data', 'data', allow_duplicate=True),
@@ -482,5 +510,4 @@ def restore_startup_candidate(queue_data, already_applied):
     if saved_candidate and saved_candidate in candidate_ids:
         return no_update, candidate_ids.index(saved_candidate), f"Restored last candidate {saved_candidate}.", True
     return no_update, no_update, no_update, True
-
 

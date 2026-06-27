@@ -19,7 +19,7 @@ import pandas as pd
 import numpy as np
 
 from malca.config import DEFAULT_OUTPUT_DIR, VSX_MAX_SEP_ARCSEC
-from malca.table_io import read_feature_table, write_parquet_table
+from malca.io.table_io import read_feature_table, write_parquet_table
 
 
 # Default validation candidates (Brayden's list)

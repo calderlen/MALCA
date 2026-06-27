@@ -1,4 +1,4 @@
-x"""
+"""
 Refactor of the LTvar-style seasonal-trend code.
 
 Key behavior preserved from the brute-force version:
@@ -68,9 +68,9 @@ from malca.config import (
 from malca.config import LCV2_ROOT
 from malca.config import MAG_BINS, SKYPATROL_JD_OFFSET
 from malca.config import PARQUET_OUTPUT_COMPRESSION
-from malca.feature_layers import to_layer_first_frame
-from malca.utils import clean_lc
-from malca.stats import inverse_von_neumann_ratio, reduced_chisq, roms_statistic
+from malca.products.feature_layers import to_layer_first_frame
+from malca.core.utils import clean_lc
+from malca.core.stats import inverse_von_neumann_ratio, reduced_chisq, roms_statistic
 from malca.ltv.paths import DEFAULT_LTV_RUN_DIR, ltv_core_output_path
 
 from malca.ltv.optim import (

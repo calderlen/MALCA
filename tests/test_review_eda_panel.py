@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from malca.lightcurve_publication import PUBLICATION_PLOTLY_FONT
+from malca.plotting.lightcurve_publication import PUBLICATION_PLOTLY_FONT
 from malca.review.eda_panel import (
     candidate_ids_from_eda_table_context,
     candidate_ids_from_plotly_selection,
@@ -16,6 +16,7 @@ from malca.review.eda_panel import (
     eda_table_rows,
     load_review_eda_frame,
     queue_eda_frame,
+    selected_candidate_row_style,
     selected_row_style,
 )
 
@@ -200,6 +201,27 @@ def test_eda_scatter_figure_highlights_selected_candidate() -> None:
     assert fig.layout.yaxis.title.text == "dipper_score"
 
 
+def test_eda_scatter_figure_current_trace_is_empty_for_absent_candidate() -> None:
+    frame = pd.DataFrame(
+        {
+            "candidate_id": ["A", "B"],
+            "dipper_score": [1.0, 3.0],
+            "period_n_sources": [0, 2],
+        }
+    )
+
+    fig = eda_scatter_figure(
+        frame,
+        x_metric="period_n_sources",
+        y_metric="dipper_score",
+        selected_candidate_id="Z",
+    )
+
+    assert fig.data[-1].name == "current"
+    assert len(fig.data[-1].x) == 0
+    assert len(fig.data[-1].customdata) == 0
+
+
 def test_eda_scatter_figure_uses_plain_list_trace_data() -> None:
     frame = pd.DataFrame(
         {
@@ -248,7 +270,9 @@ def test_eda_scatter_figure_reports_log_filtered_empty_data() -> None:
 
     assert counts["plottable_rows"] == 0
     assert counts["dropped_nonpositive"] == 2
-    assert len(fig.data) == 0
+    assert len(fig.data) == 1
+    assert fig.data[-1].name == "current"
+    assert len(fig.data[-1].x) == 0
     assert "log-axis filtering" in fig.layout.annotations[0].text
 
 
@@ -283,6 +307,13 @@ def test_selected_row_style_targets_selected_candidate() -> None:
         "B",
         theme="white",
     )
+
+    assert style[0]["if"] == {"filter_query": '{candidate_id} = "B"'}
+    assert style[0]["fontWeight"] == "700"
+
+
+def test_selected_candidate_row_style_does_not_require_table_rows() -> None:
+    style = selected_candidate_row_style("B", theme="black")
 
     assert style[0]["if"] == {"filter_query": '{candidate_id} = "B"'}
     assert style[0]["fontWeight"] == "700"

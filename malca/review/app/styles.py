@@ -622,6 +622,97 @@ app.index_string = '''
         .meta-field-value p {
             margin: 0;
         }
+        .review-feature-section {
+            min-width: 0;
+            border-bottom: 1px solid #222;
+        }
+        .review-feature-section > summary {
+            cursor: pointer;
+            padding: 5px 6px;
+            color: #0af;
+            font-size: 11px;
+            font-weight: bold;
+            user-select: none;
+        }
+        .review-feature-grid {
+            padding-bottom: 8px;
+        }
+        .advanced-stats-wrap {
+            display: grid;
+            gap: 6px;
+            padding: 2px 6px 8px 6px;
+        }
+        .all-features-wrap {
+            padding: 3px 6px 8px 6px;
+        }
+        .all-features-copy-row {
+            display: flex;
+            justify-content: flex-end;
+            padding-bottom: 4px;
+        }
+        .all-features-copy-btn {
+            opacity: 1;
+            width: auto;
+            min-width: 0;
+            height: 22px;
+            padding: 0 8px;
+            font-size: 10px;
+            line-height: 20px;
+            font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        }
+        .all-features-plain {
+            max-height: 300px;
+            overflow: auto;
+            border: 1px solid rgba(84, 118, 140, 0.24);
+            border-radius: 6px;
+            background: rgba(3, 8, 12, 0.48);
+            padding: 5px 7px;
+            font-family: 'Monaco', 'Courier New', monospace;
+            font-size: 9.5px;
+            line-height: 1.32;
+            color: #9fb6cb;
+            user-select: text;
+        }
+        .all-features-group + .all-features-group {
+            margin-top: 7px;
+            padding-top: 5px;
+            border-top: 1px solid rgba(84, 118, 140, 0.18);
+        }
+        .all-features-group-title {
+            color: #7fa3bc;
+            font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            font-size: 9px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.35px;
+            margin-bottom: 2px;
+        }
+        .all-features-line {
+            display: grid;
+            grid-template-columns: minmax(110px, 0.8fr) minmax(130px, 1fr) minmax(80px, 1fr);
+            gap: 7px;
+            min-width: 430px;
+            padding: 1px 0;
+            border-bottom: 1px solid rgba(84, 118, 140, 0.08);
+        }
+        .all-features-label,
+        .all-features-key,
+        .all-features-value {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .all-features-label {
+            color: #b4c7d7;
+        }
+        .all-features-key {
+            color: #72899b;
+        }
+        .all-features-value {
+            color: #d0dde8;
+            text-align: right;
+        }
         .lazy-panel-placeholder {
             border: 1px dashed rgba(125, 145, 166, 0.36);
             border-radius: 6px;
@@ -1819,6 +1910,25 @@ app.index_string = '''
         }
         body[data-theme="white"] .meta-field-row {
             border-color: #d6e0e8 !important;
+        }
+        body[data-theme="white"] .all-features-plain {
+            background: #f7fafc !important;
+            border-color: #d6e0e8 !important;
+            color: #4f6273 !important;
+        }
+        body[data-theme="white"] .all-features-group + .all-features-group,
+        body[data-theme="white"] .all-features-line {
+            border-color: #e1e9f0 !important;
+        }
+        body[data-theme="white"] .all-features-group-title,
+        body[data-theme="white"] .all-features-key {
+            color: #6a7d8e !important;
+        }
+        body[data-theme="white"] .all-features-label {
+            color: #30475a !important;
+        }
+        body[data-theme="white"] .all-features-value {
+            color: #1c2733 !important;
         }
         body[data-theme="white"] .metadata-copy-btn {
             background: #edf4fa !important;

@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from malca import utils
+from malca.core import utils
 
 
 class _FakeResult:

@@ -75,8 +75,8 @@ from malca.config import (
 from malca.config import ASASSN_INDEX_PATH
 from malca.config import WORKERS, MIN_MAG_OFFSET
 from malca.config import PDM_METHOD_CHOICES
-from malca.gaia_ids import parse_gaia_source_id
-from malca.periodic_catalogs import (
+from malca.catalogs.gaia_ids import canonicalize_gaia_ids_in_frame, parse_gaia_source_id
+from malca.catalogs.periodic_catalogs import (
     PERIODIC_CATALOG_MERGE_COLS,
     PERIOD_SOURCE_PRIORITY,
     choose_consensus_period as _choose_consensus_period,
@@ -88,12 +88,12 @@ from malca.periodic_catalogs import (
     fetch_vsx_period_catalog,
     match_period_catalog as _match_period_catalog,
 )
-from malca.phase import align_v_to_g_magnitude
-from malca.product_schema import add_stv_identity, assert_stv_product_schema
-from malca.stats import compute_pdm_stats, compute_ce_stats
-from malca.table_io import read_feature_table, write_feature_table
-from malca.utils import log_rejections
-from malca.utils import read_lc_dat2
+from malca.core.phase import align_v_to_g_magnitude
+from malca.products.product_schema import add_stv_identity, assert_stv_product_schema
+from malca.core.stats import compute_pdm_stats, compute_ce_stats
+from malca.io.table_io import read_feature_table, write_feature_table
+from malca.core.utils import log_rejections
+from malca.core.utils import read_lc_dat2
 
 
 
@@ -344,7 +344,7 @@ def _ensure_gaia_cache_for_validation(
         )
 
     try:
-        from malca.gaia_fetch import fetch_gaia_catalog
+        from malca.catalogs.gaia_fetch import fetch_gaia_catalog
 
         fetch_gaia_catalog(gaia_ids, output_path=resolved_catalog_path, chunk_size=chunk_size)
     except Exception as e:
@@ -2655,6 +2655,7 @@ Example usage:
         on=join_col,
         how="left"
     )
+    df = canonicalize_gaia_ids_in_frame(df)
     if "_join_id" in df.columns:
         df = df.drop(columns=["_join_id"])
     print(f"Joined {len(available_cols)} columns ({', '.join(available_cols)}) from {index_path}")

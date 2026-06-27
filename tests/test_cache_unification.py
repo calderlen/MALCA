@@ -5,14 +5,14 @@ from pathlib import Path
 import pandas as pd
 
 from malca import config
-from malca import gaia_fetch
-from malca import characterize
+from malca.catalogs import gaia_fetch
+from malca.enrichment import characterize
 from malca.review import sed
-from malca import vetting
+from malca.enrichment import vetting
 
 
 def test_cache_defaults_are_under_output_cache() -> None:
-    output_root = Path("output_migrated_camera_field_20260606")
+    output_root = Path("output")
     assert config.DEFAULT_OUTPUT_DIR == output_root
     assert config.MALCA_CACHE_ROOT == output_root / "cache"
     assert config.DEFAULT_CACHE_DIR == output_root / "cache" / "catalogs"
@@ -51,6 +51,16 @@ def test_gaia_fetch_reads_legacy_default_and_migrates_to_new_cache(
     monkeypatch.setattr(gaia_fetch, "GAIA_LOCAL_CATALOG", new_cache)
     monkeypatch.setattr(gaia_fetch, "LEGACY_GAIA_LOCAL_CATALOG", legacy_cache)
     monkeypatch.setattr(gaia_fetch, "LEGACY_GAIA_CACHE_FILE", tmp_path / "output" / "gaia_cache.parquet")
+    monkeypatch.setattr(
+        gaia_fetch,
+        "canonicalize_gaia_ids",
+        lambda gaia_ids, **_kwargs: pd.DataFrame(
+            {
+                "source_id": [str(value) for value in gaia_ids],
+                "gaia_id_mapping_status": ["dr3"] * len(gaia_ids),
+            }
+        ),
+    )
 
     out = gaia_fetch.fetch_gaia_catalog(["123"], output_path=new_cache)
 

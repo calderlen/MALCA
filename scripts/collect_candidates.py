@@ -14,7 +14,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from malca.config import DEFAULT_OUTPUT_DIR
-from malca.table_io import read_feature_table, write_feature_table
+from malca.io.table_io import read_feature_table, write_feature_table
 
 
 def find_best_parquet(run_dir: Path, mag_bin: str) -> Path | None:

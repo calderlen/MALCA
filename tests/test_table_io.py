@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from malca.table_io import (
+from malca.io.table_io import (
     is_layer_first_table,
     read_feature_table,
     read_parquet_table,

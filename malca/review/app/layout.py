@@ -64,6 +64,8 @@ def create_layout():
         dcc.Store(id='status-resize-init', data=0),
         dcc.Store(id='eda-resize-init', data=0),
         dcc.Store(id='eda-selection-candidate-ids', data=[]),
+        dcc.Store(id='eda-status-base-store', data=''),
+        dcc.Store(id='eda-current-trace-index-store', data=None),
         dcc.Store(id='metadata-copy-init', data=0),
         dcc.Store(id='eda-panel-state', data='open', storage_type='local'),
         dcc.Store(id='sidebar-plot-saved', data=0),  # dummy sink for plot prefs save callback

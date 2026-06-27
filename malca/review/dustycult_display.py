@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
-from malca.lightcurve_publication import PUBLICATION_PLOTLY_FONT
+from malca.plotting.lightcurve_publication import PUBLICATION_PLOTLY_FONT
 from malca.review.dustycult import parse_json_cell
 from malca.review.dustycult_visualization import (
     occulter_parameters_from_fit,

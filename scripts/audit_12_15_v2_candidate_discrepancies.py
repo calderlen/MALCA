@@ -12,7 +12,7 @@ from typing import Iterable
 
 import pandas as pd
 
-from malca.table_io import read_feature_table
+from malca.io.table_io import read_feature_table
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:

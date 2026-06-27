@@ -107,7 +107,7 @@ flowchart TB
     %% STV
     subgraph stv["STV Discovery"]
         STV_PIPE["stv/pipeline.py<br/>orchestrates full, cluster, home,<br/>and full-extended stages"]
-        MAN["manifest.py<br/>source_id-to-path manifest"]
+        MAN["io/manifest.py<br/>source_id-to-path manifest"]
         TAG["stv/tag.py<br/>light-curve quality, camera,<br/>and VSX tags"]
         EVENTS["stv/events.py<br/>Bayesian event detection,<br/>morphology, recurrence, Bayes factors"]
         FILTER["stv/filter.py<br/>evidence, run robustness, scores,<br/>Gaia and periodic-catalog validation"]
@@ -122,13 +122,13 @@ flowchart TB
 
     %% Post-detection
     subgraph postdet["Post-Detection and Enrichment"]
-        CHAR["characterize.py<br/>Gaia, dust, YSO, galactic context,<br/>BANYAN, IPHAS, SFR, clusters, unWISE"]
-        SED["sed_photometry.py<br/>catalog photometry and SED inputs"]
-        VET["vetting.py<br/>SIMBAD, Gaia variability/EB, ASAS-SN Var,<br/>ZTF, TNS, ALeRCE, eROSITA, ATLAS, NEOWISE"]
-        CLASS["classify.py<br/>EB/CV/starspot/disk/YSO classes"]
-        EXT_LC["external_lcs.py<br/>supported external light curves"]
-        MULTI["multi_survey_features.py module<br/>event-relative multi-survey features"]
-        LAYERS["feature_layers.py<br/>LC, external, and derived feature layers"]
+        CHAR["enrichment/characterize.py<br/>Gaia, dust, YSO, galactic context,<br/>BANYAN, IPHAS, SFR, clusters, unWISE"]
+        SED["enrichment/sed_photometry.py<br/>catalog photometry and SED inputs"]
+        VET["enrichment/vetting.py<br/>SIMBAD, Gaia variability/EB, ASAS-SN Var,<br/>ZTF, TNS, ALeRCE, eROSITA, ATLAS, NEOWISE"]
+        CLASS["enrichment/classify.py<br/>EB/CV/starspot/disk/YSO classes"]
+        EXT_LC["enrichment/external_lcs.py<br/>supported external light curves"]
+        MULTI["enrichment/multi_survey_features.py module<br/>event-relative multi-survey features"]
+        LAYERS["products/feature_layers.py<br/>LC, external, and derived feature layers"]
         ENRICH["enrich/neighbor.py and enrich/spectra.py<br/>neighbor catalogs and spectra availability"]
         CHAR --> SED --> VET --> CLASS
         VET --> EXT_LC --> MULTI --> LAYERS
@@ -150,7 +150,7 @@ flowchart TB
         LTV_NEO["ltv/neowise.py<br/>IRSA TAP IR light curves"]
         LTV_DUST["ltv/dust.py<br/>dust excess flags"]
         LTV_CMD["ltv/cmd.py<br/>MIST grid and Bailer-Jones distances"]
-        LTV_EXT["external_lcs.py and ltv/multi_survey.py<br/>full-extended external-LC summaries"]
+        LTV_EXT["enrichment/external_lcs.py and ltv/multi_survey.py<br/>full-extended external-LC summaries"]
         LTV_REVIEW["ltv/review.py<br/>review DB ingest"]
         LTV_RUN[("LTV run bundle<br/>results, review DB, LC assets, provenance")]
         LTV_PIPE --> LTV_CORE --> LTV_FILTER --> LTV_CROSS --> LTV_STOCH
@@ -216,7 +216,7 @@ flowchart TB
         ATTR["attrition.py<br/>filter attrition"]
         DET_RATE["detection_rate.py<br/>baseline detection rate"]
         FP_EVAL["false_positive.py<br/>contaminant benchmark"]
-        AUDIT["audit.py<br/>run and baseline audits"]
+        AUDIT["evaluation/audit.py<br/>run and baseline audits"]
     end
 
     MAN -.-> INJ
@@ -232,14 +232,14 @@ flowchart TB
     %% Core libraries
     subgraph corelibs["Core Libraries"]
         CONFIG["config.py and cli_config.py<br/>defaults, profiles, paths, thresholds"]
-        IO["lightcurve_io.py, table_io.py, candidates.py<br/>light-curve and table loading"]
-        BASE["baseline.py<br/>GP + median baselines"]
+        IO["io/lightcurve_io.py, io/table_io.py,<br/>products/candidates.py<br/>light-curve and table loading"]
+        BASE["core/baseline.py<br/>GP + median baselines"]
         TRIG["stv/triggering.py and stv/score.py<br/>trigger resolution and event scoring"]
-        STATS_LIB["stats.py<br/>Stetson, von Neumann, RoMS, LS"]
-        PERIOD_LIB["periodogram.py and phase.py<br/>period search and phase utilities"]
-        FETCH_LIB["fetch.py<br/>SkyPatrol V1/V2 download"]
-        GAIA_FETCH["gaia_fetch.py<br/>Bulk Gaia DR3 via AIP TAP"]
-        BUNDLE_LIB["run_bundle.py, run_context.py, run_metadata.py<br/>bundle and provenance helpers"]
+        STATS_LIB["core/stats.py<br/>Stetson, von Neumann, RoMS, LS"]
+        PERIOD_LIB["core/periodogram.py and core/phase.py<br/>period search and phase utilities"]
+        FETCH_LIB["io/fetch.py<br/>SkyPatrol V1/V2 download"]
+        GAIA_FETCH["catalogs/gaia_fetch.py<br/>Bulk Gaia DR3 via AIP TAP"]
+        BUNDLE_LIB["products/run_bundle.py, products/run_context.py,<br/>products/run_metadata.py<br/>bundle and provenance helpers"]
     end
 
     CONFIG -.-> STV_PIPE
@@ -266,13 +266,13 @@ flowchart TB
 
 **Key Components:**
 - **CLI and configuration**: `__main__.py` dispatches `malca [command]`; `config.py` and `cli_config.py` centralize defaults, paths, thresholds, and profiles.
-- **STV discovery**: `manifest.py` &rarr; `stv/tag.py` &rarr; `stv/events.py` &rarr; `stv/filter.py`, orchestrated by `stv/pipeline.py` with full/cluster/home/full-extended stages and run bundles.
-- **Post-detection and enrichment**: `characterize.py`, `sed_photometry.py`, `vetting.py`, `classify.py`, `external_lcs.py`, `multi_survey_features.py`, `feature_layers.py`, and `enrich/` add catalog context, external light curves, feature layers, classifications, and spectra/neighbor products.
+- **STV discovery**: `io/manifest.py` &rarr; `stv/tag.py` &rarr; `stv/events.py` &rarr; `stv/filter.py`, orchestrated by `stv/pipeline.py` with full/cluster/home/full-extended stages and run bundles.
+- **Post-detection and enrichment**: `enrichment/characterize.py`, `enrichment/sed_photometry.py`, `enrichment/vetting.py`, `enrichment/classify.py`, `enrichment/external_lcs.py`, `enrichment/multi_survey_features.py`, `products/feature_layers.py`, and `enrich/` add catalog context, external light curves, feature layers, classifications, and spectra/neighbor products.
 - **LTV pipeline**: `ltv/pipeline.py` orchestrates `core.py`, `filter.py`, `crossmatch.py`, `stochastic.py`, `neowise.py`, `dust.py`, `cmd.py`, and `review.py`; full-extended stages add external light curves and LTV multi-survey summaries.
 - **Review**: `review/app/` is the Dash review package backed by `review/store.py`, with on-demand stages in `review/pipeline.py`, sync/merge/taxonomy utilities, diagnostics, EDA, and publication helpers.
 - **Science, ML, and product tooling**: `nuclear/`, `meta_analysis/ml/`, `external/malcat`, and `migration/` support AGN/TDE/CLAGN context, LightGBM/bad-photometry workflows, Transformer training, and three-layer product exports.
-- **Evaluation**: `evaluation/injection.py`, `validation.py`, `reproduce.py`, `attrition.py`, `detection_rate.py`, `false_positive.py`, and `ltv/injection.py` cover discovery validation, injection/recovery, attrition, contaminants, and LTV rejection-recovery.
-- **Core libraries**: `lightcurve_io.py`, `table_io.py`, `candidates.py`, `baseline.py`, `stats.py`, `periodogram.py`, `phase.py`, `fetch.py`, `gaia_fetch.py`, and run-bundle helpers provide shared I/O, modeling, catalog access, and provenance support.
+- **Evaluation**: `evaluation/dip_injection.py`, `evaluation/validation.py`, `evaluation/reproduce.py`, `evaluation/attrition.py`, `evaluation/detection_rate.py`, `evaluation/false_positive.py`, `evaluation/audit.py`, and `ltv/injection.py` cover discovery validation, injection/recovery, attrition, contaminants, audits, and LTV rejection-recovery.
+- **Core libraries**: `core/`, `io/`, `catalogs/`, and `products/` provide shared modeling, light-curve/table I/O, catalog access, feature layers, schemas, and provenance helpers.
 
 ## Usage Guide
 

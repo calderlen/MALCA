@@ -11,7 +11,7 @@ REPO = Path(__file__).resolve().parents[1]
 
 LAYOUT_IMPORT = "finalize_publication_figure"
 SAVE_IMPORT = "save_publication_figure"
-MODULE = "malca.lightcurve_publication"
+MODULE = "malca.plotting.lightcurve_publication"
 
 
 def _transform_cell(src: str) -> str:
@@ -54,7 +54,7 @@ def _ensure_layout_imports(src: str) -> str:
     if not needed:
         return src
 
-    # Try to extend existing import from malca.lightcurve_publication
+    # Try to extend existing import from malca.plotting.lightcurve_publication
     pattern = r"(from malca\.lightcurve_publication import\s*\()(.*?)(\))"
     match = re.search(pattern, src, re.DOTALL)
     if match:
@@ -86,7 +86,7 @@ def _ensure_layout_imports(src: str) -> str:
 
 
 def _existing_imports(src: str) -> str:
-    """Return the text of any existing malca.lightcurve_publication import block."""
+    """Return the text of any existing malca.plotting.lightcurve_publication import block."""
     match = re.search(r"from malca\.lightcurve_publication import.*?(?:\n(?!\s)|$)", src, re.DOTALL)
     return match.group(0) if match else ""
 

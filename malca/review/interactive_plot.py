@@ -11,16 +11,16 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from malca.baseline import (
+from malca.core.baseline import (
     global_median_baseline,
     per_camera_gp_baseline,
     per_camera_gp_baseline_masked,
     per_camera_median_baseline,
 )
-from malca.lightcurve_io import load_lightcurve_df, stable_camera_color, to_asassn_algorithm_frame
-from malca.lightcurve_publication import PUBLICATION_PLOTLY_FONT
-from malca.phase import BAND_LABELS, phase_fold_dataframe, phase_time_dataframe, resolve_phase_epoch, resolve_phase_period
-from malca.utils import (
+from malca.io.lightcurve_io import load_lightcurve_df, stable_camera_color, to_asassn_algorithm_frame
+from malca.plotting.lightcurve_publication import PUBLICATION_PLOTLY_FONT
+from malca.core.phase import BAND_LABELS, phase_fold_dataframe, phase_time_dataframe, resolve_phase_epoch, resolve_phase_period
+from malca.core.utils import (
     clean_lc,
     identify_bad_cameras,
     identify_catastrophic_outlier_cameras,
@@ -764,6 +764,7 @@ def build_interactive_lightcurve_figure(
     override_period: float | None = None,
     override_period_source: str = "manual/search",
     phase_period_pending: bool = False,
+    phase_period_pending_source: str = "",
     suppress_catalog_phase_period: bool = False,
     show_diagnostics: bool,
     confidence_colors: bool,
@@ -798,6 +799,7 @@ def build_interactive_lightcurve_figure(
         override_period=override_period,
         override_period_source=override_period_source,
         phase_period_pending=phase_period_pending,
+        phase_period_pending_source=phase_period_pending_source,
         suppress_catalog_phase_period=suppress_catalog_phase_period,
         show_diagnostics=show_diagnostics,
         confidence_colors=confidence_colors,
@@ -815,4 +817,3 @@ def build_interactive_lightcurve_figure(
     )
     spec = assemble_review_lightcurve_plot(request)
     return render_review_lightcurve_plotly(spec, theme=theme, uirevision_key=uirevision_key)
-

@@ -1,6 +1,6 @@
 import pandas as pd
 
-from malca.neowise_filters import filter_neowise_single_exposure_lc
+from malca.catalogs.neowise_filters import filter_neowise_single_exposure_lc
 
 
 def test_filter_neowise_keeps_good_qual_frame_and_drops_poor() -> None:

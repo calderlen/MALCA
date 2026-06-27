@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-from malca.lightcurve_publication import (
+from malca.plotting.lightcurve_publication import (
     filter_lightcurve,
     load_lightcurve,
     normalize_lightcurve_frame,

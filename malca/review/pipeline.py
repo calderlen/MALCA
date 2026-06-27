@@ -21,7 +21,7 @@ from malca.config import (
     RUN_MIN_POINTS, RUN_MAX_GAP_POINTS, BASELINE_FUNC,
     DEFAULT_OUTPUT_DIR,
 )
-from malca.feature_layers import feature_mapping_get, to_layer_first_mapping
+from malca.products.feature_layers import feature_mapping_get, to_layer_first_mapping
 from malca.review.stats_merge import merge_stats_summary_into_payload as _merge_stats_summary_into_payload
 from malca.review.store import _CANDIDATE_COLUMNS, _as_bool, _to_float
 
@@ -423,7 +423,7 @@ def update_candidate_payload(
 def _run_stats_stage(payload: dict, lc_path: str, p: Callable | None = None) -> None:
     """Run compute_stats and merge results into payload."""
     try:
-        from malca.stats import compute_stats
+        from malca.core.stats import compute_stats
 
         candidate_id = Path(lc_path).stem
         parent = str(Path(lc_path).parent)
@@ -468,7 +468,7 @@ def _run_events_stage(payload: dict, lc_path: str, p: Callable | None = None) ->
 def _run_characterize_stage(payload: dict, p: Callable | None = None) -> None:
     """Run characterize_candidates_df on a 1-row DataFrame."""
     try:
-        from malca.characterize import characterize_candidates_df
+        from malca.enrichment.characterize import characterize_candidates_df
 
         df = pd.DataFrame([payload])
         df_out = _run_with_progress_capture(lambda: characterize_candidates_df(df), p)
@@ -526,7 +526,7 @@ def _run_sed_model_fit_stage(
     """Run Castelli/Kurucz SED atmosphere fitting for one candidate."""
     try:
         from malca.review.sed import build_sed_dataframe, load_sed_rows
-        from malca.sed_model import fit_sed_models, upsert_sed_model_results
+        from malca.enrichment.sed_model import fit_sed_models, upsert_sed_model_results
 
         sed_rows = load_sed_rows(conn, str(candidate_id))
         model_rows = build_sed_dataframe(
@@ -569,7 +569,7 @@ def _run_sed_model_fit_stage(
 def _run_vetting_stage(payload: dict, p: Callable | None = None) -> None:
     """Run vet_candidates on a 1-row DataFrame."""
     try:
-        from malca.vetting import vet_candidates
+        from malca.enrichment.vetting import vet_candidates
 
         df = pd.DataFrame([payload])
         df_out = _run_with_progress_capture(
@@ -618,7 +618,7 @@ def _run_external_lcs_stage(
 ) -> bool:
     """Run fetch_external_lcs on a 1-row DataFrame."""
     try:
-        from malca.vetting import fetch_external_lcs
+        from malca.enrichment.vetting import fetch_external_lcs
 
         _normalize_coordinate_aliases(payload)
         df = pd.DataFrame([payload])
@@ -664,7 +664,7 @@ def _run_external_lcs_stage(
 def _run_multi_survey_features_stage(payload: dict, output_dir: Path, p: Callable | None = None) -> None:
     """Compute event-relative multi-survey features for a 1-row payload."""
     try:
-        from malca.multi_survey_features import MS_FEATURE_COLUMNS, compute_multi_survey_features
+        from malca.enrichment.multi_survey_features import MS_FEATURE_COLUMNS, compute_multi_survey_features
 
         df = pd.DataFrame([payload])
         df_out = _run_with_progress_capture(

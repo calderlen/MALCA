@@ -37,9 +37,9 @@ from malca.config import (
     SIMBAD_TAP_URL,
 )
 from malca.config import VSX_CROSSMATCH_PATH
-from malca.table_io import read_parquet_table
-from malca.utils import batch_tap_crossmatch as shared_batch_tap_crossmatch
-from malca.periodic_catalogs import (
+from malca.io.table_io import read_parquet_table
+from malca.core.utils import batch_tap_crossmatch as shared_batch_tap_crossmatch
+from malca.catalogs.periodic_catalogs import (
     fetch_chen2020_ztf_periodic,
     fetch_ogle_periodic_catalog,
     match_period_catalog,

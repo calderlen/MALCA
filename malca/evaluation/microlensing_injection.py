@@ -19,7 +19,7 @@ import matplotlib.pyplot as plt
 from scipy.stats import binned_statistic_2d
 
 from malca.config import SKYPATROL_CACHE_DIR
-from malca.lightcurve_publication import apply_publication_rcparams, save_publication_figure, FIG_SINGLE_COL_HEATMAP, scaled_publication_text_sizes
+from malca.plotting.lightcurve_publication import apply_publication_rcparams, save_publication_figure, FIG_SINGLE_COL_HEATMAP, scaled_publication_text_sizes
 
 import sys
 sys.path.append(str(Path.cwd()))
@@ -141,7 +141,7 @@ def _simulate_microlensing_trial(
             # We use _prepare_lightcurve_df to get the same clean single-band dataframe
             # that the pipeline expects. We pass the directory or file path.
             # Assuming lc_dir has the .dat files inside.
-            from malca.fetch import download_lightcurve_by_id
+            from malca.io.fetch import download_lightcurve_by_id
             from malca.config import SKYPATROL_CACHE_DIR
             
             if not lc_dir or str(lc_dir) == '.':
@@ -396,7 +396,7 @@ def run_microlensing_injection_recovery(
         asas_sn_id = str(row[id_col])
         lc_dir = _resolve_lc_path(row)
         try:
-            from malca.fetch import download_lightcurve_by_id
+            from malca.io.fetch import download_lightcurve_by_id
             from malca.config import SKYPATROL_CACHE_DIR
             
             if not lc_dir:

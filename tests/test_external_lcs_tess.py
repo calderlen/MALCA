@@ -7,13 +7,13 @@ from pathlib import Path
 
 import pandas as pd
 
-from malca import external_lcs
+from malca.enrichment import external_lcs
 from malca.review.pipeline import _run_external_lcs_stage, detect_pipeline_status, run_missing_stages
 from malca.review.store import db_connect, get_candidate_payload, import_candidates
 
 
 def _install_fake_vetting(monkeypatch, calls: list[dict]) -> None:
-    module = types.ModuleType("malca.vetting")
+    module = types.ModuleType("malca.enrichment.vetting")
 
     def fake_fetch_external_lcs(df: pd.DataFrame, **kwargs) -> pd.DataFrame:
         calls.append(kwargs)
@@ -56,7 +56,7 @@ def _install_fake_vetting(monkeypatch, calls: list[dict]) -> None:
         return out
 
     module.fetch_external_lcs = fake_fetch_external_lcs
-    monkeypatch.setitem(sys.modules, "malca.vetting", module)
+    monkeypatch.setitem(sys.modules, "malca.enrichment.vetting", module)
 
 
 def test_external_lcs_cli_runs_tess_by_default(monkeypatch, tmp_path: Path) -> None:
@@ -97,7 +97,7 @@ def test_external_lcs_cli_hydrates_coordinates_from_layer_first_input(monkeypatc
     calls: list[dict] = []
     seen: dict[str, pd.DataFrame] = {}
 
-    module = types.ModuleType("malca.vetting")
+    module = types.ModuleType("malca.enrichment.vetting")
 
     def fake_fetch_external_lcs(df: pd.DataFrame, **kwargs) -> pd.DataFrame:
         calls.append(kwargs)
@@ -107,7 +107,7 @@ def test_external_lcs_cli_hydrates_coordinates_from_layer_first_input(monkeypatc
         return out
 
     module.fetch_external_lcs = fake_fetch_external_lcs
-    monkeypatch.setitem(sys.modules, "malca.vetting", module)
+    monkeypatch.setitem(sys.modules, "malca.enrichment.vetting", module)
 
     input_path = tmp_path / "candidates.parquet"
     external_lcs.write_feature_table(
@@ -152,7 +152,7 @@ def test_external_lcs_cli_hydrates_coordinates_from_layer_first_input(monkeypatc
 def test_external_lcs_cli_accepts_review_db_input_without_implicit_merge(monkeypatch, tmp_path: Path) -> None:
     calls: list[dict] = []
     seen: dict[str, pd.DataFrame] = {}
-    module = types.ModuleType("malca.vetting")
+    module = types.ModuleType("malca.enrichment.vetting")
 
     def fake_fetch_external_lcs(df: pd.DataFrame, **kwargs) -> pd.DataFrame:
         calls.append(kwargs)
@@ -164,7 +164,7 @@ def test_external_lcs_cli_accepts_review_db_input_without_implicit_merge(monkeyp
         return out
 
     module.fetch_external_lcs = fake_fetch_external_lcs
-    monkeypatch.setitem(sys.modules, "malca.vetting", module)
+    monkeypatch.setitem(sys.modules, "malca.enrichment.vetting", module)
 
     db_path = tmp_path / "review.db"
     with db_connect(db_path) as conn:
@@ -221,7 +221,7 @@ def test_external_lcs_cli_accepts_review_db_input_without_implicit_merge(monkeyp
 
 def test_external_lcs_cli_explicit_review_db_merges_results(monkeypatch, tmp_path: Path) -> None:
     calls: list[dict] = []
-    module = types.ModuleType("malca.vetting")
+    module = types.ModuleType("malca.enrichment.vetting")
 
     def fake_fetch_external_lcs(df: pd.DataFrame, **kwargs) -> pd.DataFrame:
         calls.append(kwargs)
@@ -232,7 +232,7 @@ def test_external_lcs_cli_explicit_review_db_merges_results(monkeypatch, tmp_pat
         return out
 
     module.fetch_external_lcs = fake_fetch_external_lcs
-    monkeypatch.setitem(sys.modules, "malca.vetting", module)
+    monkeypatch.setitem(sys.modules, "malca.enrichment.vetting", module)
 
     db_path = tmp_path / "review.db"
     with db_connect(db_path) as conn:
@@ -352,7 +352,7 @@ def test_external_lcs_cli_new_default_sources_can_be_skipped(monkeypatch, tmp_pa
 
 
 def test_external_lcs_cache_only_rebuilds_summary_from_lc_file(monkeypatch, tmp_path: Path) -> None:
-    module = types.ModuleType("malca.vetting")
+    module = types.ModuleType("malca.enrichment.vetting")
 
     def fake_fetch_external_lcs(*_args, **_kwargs):
         raise AssertionError("cache-only mode should not call remote fetchers")
@@ -401,7 +401,7 @@ def test_external_lcs_cache_only_rebuilds_summary_from_lc_file(monkeypatch, tmp_
     module._summarize_stripe82_lc = lambda _lc: {}
     module._summarize_allwise_mep_lc = lambda _lc: {}
     module._summarize_vvvx_virac_lc = lambda _lc: {}
-    monkeypatch.setitem(sys.modules, "malca.vetting", module)
+    monkeypatch.setitem(sys.modules, "malca.enrichment.vetting", module)
 
     output_dir = tmp_path / "external_lcs"
     output_dir.mkdir()
@@ -518,7 +518,7 @@ def test_review_forced_external_lcs_stage_uses_canonical_coordinates(monkeypatch
 
 
 def test_review_external_lcs_failure_is_not_marked_complete(monkeypatch, tmp_path: Path) -> None:
-    module = types.ModuleType("malca.vetting")
+    module = types.ModuleType("malca.enrichment.vetting")
 
     def fake_fetch_external_lcs(df: pd.DataFrame, **kwargs) -> pd.DataFrame:
         out = df.copy()
@@ -527,7 +527,7 @@ def test_review_external_lcs_failure_is_not_marked_complete(monkeypatch, tmp_pat
         return out
 
     module.fetch_external_lcs = fake_fetch_external_lcs
-    monkeypatch.setitem(sys.modules, "malca.vetting", module)
+    monkeypatch.setitem(sys.modules, "malca.enrichment.vetting", module)
     results_dir = tmp_path / "run" / "results"
     results_dir.mkdir(parents=True)
     source_path = results_dir / "candidates.parquet"

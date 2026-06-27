@@ -2,7 +2,7 @@
 
 set -u -o pipefail
 
-BUNDLES_DIR="${1:-output_migrated_camera_field_20260606/bundles}"
+BUNDLES_DIR="${1:-output/bundles}"
 
 if [ ! -d "$BUNDLES_DIR" ]; then
     echo "Error: bundles directory not found: $BUNDLES_DIR" >&2

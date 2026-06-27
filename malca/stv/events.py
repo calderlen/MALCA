@@ -31,7 +31,7 @@ import pyarrow.parquet as pq
 
 _trapezoid = getattr(np, "trapezoid", np.trapz)
 
-from malca.baseline import (
+from malca.core.baseline import (
     global_median_baseline,
     phase_template_baseline,
     per_camera_median_baseline,
@@ -48,11 +48,11 @@ from malca.config import (
     BASELINE_FUNC, BASELINE_S0, BASELINE_W0, BASELINE_Q, BASELINE_JITTER,
 )
 from malca.cli_config import add_config_args, apply_config, namespace_keys
-from malca.feature_layers import is_layer_first_frame, to_layer_first_frame
+from malca.products.feature_layers import is_layer_first_frame, to_layer_first_frame
 from malca.stv.score import compute_event_score
-from malca.stats import log_gaussian, median_dt, bic
+from malca.core.stats import log_gaussian, median_dt, bic
 from malca.stv.triggering import resolve_trigger_indices
-from malca.utils import (
+from malca.core.utils import (
     read_lc_dat2,
     read_lc_csv,
     read_skypatrol_csv,

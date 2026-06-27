@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-import malca.vetting as vetting
+import malca.enrichment.vetting as vetting
 
 
 def test_gaia_variability_surfaces_classifier_for_numeric_like_gaia_ids(monkeypatch, tmp_path) -> None:

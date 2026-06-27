@@ -20,7 +20,7 @@ import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 
-from malca.lightcurve_publication import (
+from malca.plotting.lightcurve_publication import (
     apply_publication_rcparams,
     finalize_publication_figure,
     save_publication_figure,
@@ -42,7 +42,7 @@ from malca.lightcurve_publication import (
 apply_publication_rcparams(plt)
 
 import malca.stv.periodicity_gate as pregate
-from malca.baseline import (
+from malca.core.baseline import (
     global_median_baseline,
     per_camera_gp_baseline,
     per_camera_gp_baseline_masked,
@@ -84,12 +84,12 @@ from malca.config import (
 )
 from malca.stv.events import score_lightcurve
 from malca.stv.filter import apply_filters
-from malca.lightcurve_io import load_lightcurve_df, to_asassn_algorithm_frame
-from malca.phase import phase_fold_dataframe
+from malca.io.lightcurve_io import load_lightcurve_df, to_asassn_algorithm_frame
+from malca.core.phase import phase_fold_dataframe
 from malca.stv.score import compute_event_score
-from malca.stats import compute_ce_stats
+from malca.core.stats import compute_ce_stats
 from malca.stv.triggering import posterior_probability_threshold
-from malca.utils import clean_lc, compute_n_cameras, filter_bad_cameras
+from malca.core.utils import clean_lc, compute_n_cameras, filter_bad_cameras
 
 
 BENCHMARK_CLASS_ORDER: tuple[str, ...] = (

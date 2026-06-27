@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from malca.run_context import (
+from malca.products.run_context import (
     init_pipeline_run_context,
     run_dir_from_bundle,
     timestamped_run_dir,

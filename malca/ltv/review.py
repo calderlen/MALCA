@@ -19,13 +19,14 @@ import numpy as np
 import pandas as pd
 
 from concurrent.futures import ProcessPoolExecutor
-from malca.candidates import passing_candidates_mask
+from malca.products.candidates import passing_candidates_mask
 from malca.config import ASASSN_INDEX_PATH
 from malca.config import LTV_MAX_PM
-from malca.feature_layers import to_layer_first_frame, with_feature_columns
-from malca.product_schema import add_ltv_identity, assert_ltv_product_schema
+from malca.products.feature_layers import to_layer_first_frame, with_feature_columns
+from malca.catalogs.gaia_ids import canonicalize_gaia_ids_in_frame
+from malca.products.product_schema import add_ltv_identity, assert_ltv_product_schema
 from malca.review.store import db_connect, import_candidates
-from malca.table_io import read_feature_table, require_parquet_path
+from malca.io.table_io import read_feature_table, require_parquet_path
 from malca.ltv.paths import (
     DEFAULT_LTV_RUN_DIR,
     ltv_results_dir,
@@ -133,7 +134,7 @@ def enrich_with_stats(
     The flattening logic mirrors detect.py's --run-enrich step, producing
     the same stats_* column names that live in _CANDIDATE_COLUMNS.
     """
-    from malca.stats import _enrich_row_worker
+    from malca.core.stats import _enrich_row_worker
 
     if "lc_path" not in df.columns:
         if verbose:
@@ -206,7 +207,7 @@ def _add_gaia_ids_from_index_ltv(df: pd.DataFrame, index_path: Path, verbose: bo
     needs_fill = "gaia_id" not in df.columns or df["gaia_id"].isna().all()
     already_filled = "gaia_id" in df.columns and not df["gaia_id"].isna().any()
     if already_filled:
-        return df
+        return canonicalize_gaia_ids_in_frame(df, warn=verbose)
     try:
         if verbose:
             print(f"[ltv-review] Loading ASASSN index for gaia_id lookup: {index_path.name}")
@@ -231,6 +232,11 @@ def _add_gaia_ids_from_index_ltv(df: pd.DataFrame, index_path: Path, verbose: bo
         n_filled = int(missing.sum()) - int(out["gaia_id"].isna().sum())
         if verbose:
             print(f"[ltv-review] Filled gaia_id for {n_filled}/{len(out)} candidates from ASASSN index")
+        out = canonicalize_gaia_ids_in_frame(out, warn=verbose)
+        if verbose and "gaia_id_mapping_status" in out.columns:
+            n_translated = int(out["gaia_id_mapping_status"].astype(str).eq("dr2_translated").sum())
+            if n_translated:
+                print(f"[ltv-review] Translated {n_translated} Gaia DR2 ID(s) to DR3")
         return out
     except Exception as e:
         if verbose:

@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from malca.baseline import (
+from malca.core.baseline import (
     global_median_baseline,
     per_camera_gp_baseline,
     per_camera_gp_baseline_masked,

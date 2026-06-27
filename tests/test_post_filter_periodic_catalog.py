@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-import malca.periodic_catalogs as periodic_catalogs
+import malca.catalogs.periodic_catalogs as periodic_catalogs
 
 post_filter = pytest.importorskip("malca.stv.filter")
 

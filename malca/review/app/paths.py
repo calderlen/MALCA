@@ -411,7 +411,7 @@ def _resolve_db_cli_path(raw_path: str) -> Path:
         return _prefer_populated_db_sibling(ranked[0]).resolve()
     if len(existing) == 1:
         return _prefer_populated_db_sibling(existing[0]).resolve()
-    return repo_candidate
+    return cwd_candidate
 
 
 def _resolve_plot_cli_path(raw_path: str) -> Path:
@@ -427,7 +427,7 @@ def _resolve_plot_cli_path(raw_path: str) -> Path:
         return cwd_candidate
     if repo_candidate.exists() and repo_candidate.is_dir():
         return repo_candidate
-    return repo_candidate
+    return cwd_candidate
 
 
 def _extract_bundle_scope(path_text: str | None) -> str:
@@ -685,15 +685,7 @@ def _load_spectra_rows(candidate_id: str, run_dir: Path | None) -> pd.DataFrame:
 @lru_cache(maxsize=4)
 def _index_neowise_paths(run_dir_text: str) -> dict[str, str]:
     """Index candidate->NEOWISE parquet paths once per run directory."""
-    root = Path(run_dir_text) / "results"
-    mapping: dict[str, str] = {}
-    if not root.exists():
-        return mapping
-    for p in root.rglob("neowise_lc_*.parquet"):
-        cid = p.stem.replace("neowise_lc_", "")
-        if cid:
-            mapping[cid] = str(p)
-    return mapping
+    return _index_external_lc_paths(run_dir_text, "neowise")
 
 
 def _build_neowise_figure(df_neowise: pd.DataFrame) -> go.Figure:
@@ -947,15 +939,7 @@ def _index_external_lc_paths(run_dir_text: str, prefix: str) -> dict[str, str]:
 @lru_cache(maxsize=64)
 def _index_external_lc_paths_from_root(root_text: str, prefix: str) -> dict[str, str]:
     """Index candidate -> external LC parquet paths for a results root."""
-    root = Path(root_text)
-    mapping: dict[str, str] = {}
-    if not root.exists():
-        return mapping
-    for p in root.rglob(f"{prefix}_lc_*.parquet"):
-        cid = p.stem.replace(f"{prefix}_lc_", "")
-        if cid:
-            mapping[cid] = str(p)
-    return mapping
+    return shared_index_external_lc_paths_from_manifest(str(Path(root_text).expanduser()), prefix)
 
 
 def _build_external_lc_figure(

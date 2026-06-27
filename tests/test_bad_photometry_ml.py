@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 from malca.meta_analysis.ml import bad_photometry as bp
-from malca.table_io import write_feature_table
+from malca.io.table_io import write_feature_table
 
 
 def _write_dat3(path: Path, rows: list[tuple[float, float, float, int, int, int, int, str]]) -> None:

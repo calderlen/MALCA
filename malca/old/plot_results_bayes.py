@@ -15,8 +15,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from malca.lightcurve_publication import apply_publication_rcparams, figsize_from_legacy
-from malca.baseline import (
+from malca.plotting.lightcurve_publication import apply_publication_rcparams, figsize_from_legacy
+from malca.core.baseline import (
     per_camera_gp_baseline,
     global_mean_baseline,
     global_median_baseline,
@@ -28,7 +28,7 @@ from malca.baseline import (
 )
 from malca.stv.events import run_bayesian_significance
 from malca.stv.plot import read_skypatrol_csv, JD_OFFSET
-from malca.utils import gaussian, paczynski_kernel
+from malca.core.utils import gaussian, paczynski_kernel
 
 
 

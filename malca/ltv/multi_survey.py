@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 
 from malca.config import GAIA_TCB_EPOCH_JD, KEPLER_BKJD_OFFSET, MJD_TO_JD, SKYPATROL_JD_OFFSET, TESS_BTJD_OFFSET
-from malca.table_io import read_parquet_table, write_feature_table
+from malca.io.table_io import read_parquet_table, write_feature_table
 
 
 LTV_MS_FEATURE_VERSION = "1"

@@ -27,7 +27,7 @@ from malca.config import (
 )
 from malca.stv.plot import plot_bayes_results, plot_phase_folded_lightcurve, BASELINE_FUNCTIONS
 from malca.review.metadata import REVIEW_METADATA_FIELDS, normalize_vsx_df, normalize_vsx_record
-from malca.table_io import read_feature_table, write_parquet_table
+from malca.io.table_io import read_feature_table, write_parquet_table
 
 
 

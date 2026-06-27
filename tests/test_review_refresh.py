@@ -5,10 +5,10 @@ from pathlib import Path
 
 import pandas as pd
 
-from malca.feature_layers import feature_mapping_get, parse_layer_value
+from malca.products.feature_layers import feature_mapping_get, parse_layer_value
 from malca.review import refresh as review_refresh
 from malca.review.store import db_connect, get_candidate_payload, import_candidates, save_review
-from malca.table_io import write_feature_table
+from malca.io.table_io import write_feature_table
 
 
 def test_refresh_review_stats_from_run_replaces_stats_only(tmp_path: Path, monkeypatch) -> None:

@@ -5,7 +5,7 @@ import pandas as pd
 from malca.config import VIZIER_TAP_URL, SPECTRA_TAP_CHUNK_SIZE, SPECTRA_TAP_TIMEOUT
 from malca.enrich.neighbor import _query_catalog_bulk
 from malca.enrich.spectra_catalogs import SpectraCatalogSpec
-from malca.utils import batch_tap_crossmatch
+from malca.core.utils import batch_tap_crossmatch
 
 
 def _row_matches_filter(row: pd.Series, spec: SpectraCatalogSpec) -> bool:

@@ -5,7 +5,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from malca import vetting
+from malca.enrichment import vetting
 
 
 class _FakeResponse:

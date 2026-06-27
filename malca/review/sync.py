@@ -10,7 +10,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
-from malca.feature_layers import FEATURE_LAYER_COLUMNS, to_layer_first_mapping
+from malca.products.feature_layers import FEATURE_LAYER_COLUMNS, to_layer_first_mapping
 from malca.review.taxonomy import (
     REVIEW_TAXONOMY_FIELDS,
     TAXONOMY_VERSION,

@@ -1,6 +1,6 @@
 # Notebook Organization
 
-The notebooks are grouped by workflow purpose. Keep new notebooks in the shallowest folder that matches their primary use, and prefer repo-root path helpers from `malca.notebook_paths` over location-relative paths.
+The notebooks are grouped by workflow purpose. Keep new notebooks in the shallowest folder that matches their primary use, and prefer repo-root path helpers from `malca.io.notebook_paths` over location-relative paths.
 
 ## Folders
 

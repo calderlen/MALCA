@@ -98,22 +98,22 @@ REGEX_REPLACEMENTS: list[tuple[str, str]] = [
 REPLACEMENTS = LITERAL_REPLACEMENTS
 
 SYMBOL_TO_MODULE = {
-    "FIG_SINGLE_COL_SQUARE": "malca.lightcurve_publication",
-    "FIG_SINGLE_COL_HEATMAP": "malca.lightcurve_publication",
-    "FIG_SINGLE_COL_LC_WIDE": "malca.lightcurve_publication",
-    "FIG_SINGLE_COL_MEDIUM": "malca.lightcurve_publication",
-    "FIG_SINGLE_COL_PORTRAIT": "malca.lightcurve_publication",
-    "FIG_SINGLE_COL_COMPACT": "malca.lightcurve_publication",
-    "FIG_TWO_COL_STANDARD": "malca.lightcurve_publication",
-    "FIG_TWO_COL_LC_WIDE": "malca.lightcurve_publication",
-    "FIG_TWO_COL_TRIPLE": "malca.lightcurve_publication",
-    "FIG_LC_SINGLE_COL": "malca.lightcurve_publication",
-    "FIG_ROC_PR_TWO_COL": "malca.lightcurve_publication",
-    "FIG_TWO_COL_WIDTH": "malca.lightcurve_publication",
-    "figsize_from_legacy": "malca.lightcurve_publication",
-    "figsize_feature_grid": "malca.lightcurve_publication",
-    "figsize_heatmap_two_col": "malca.lightcurve_publication",
-    "figsize_two_col_grid": "malca.lightcurve_publication",
+    "FIG_SINGLE_COL_SQUARE": "malca.plotting.lightcurve_publication",
+    "FIG_SINGLE_COL_HEATMAP": "malca.plotting.lightcurve_publication",
+    "FIG_SINGLE_COL_LC_WIDE": "malca.plotting.lightcurve_publication",
+    "FIG_SINGLE_COL_MEDIUM": "malca.plotting.lightcurve_publication",
+    "FIG_SINGLE_COL_PORTRAIT": "malca.plotting.lightcurve_publication",
+    "FIG_SINGLE_COL_COMPACT": "malca.plotting.lightcurve_publication",
+    "FIG_TWO_COL_STANDARD": "malca.plotting.lightcurve_publication",
+    "FIG_TWO_COL_LC_WIDE": "malca.plotting.lightcurve_publication",
+    "FIG_TWO_COL_TRIPLE": "malca.plotting.lightcurve_publication",
+    "FIG_LC_SINGLE_COL": "malca.plotting.lightcurve_publication",
+    "FIG_ROC_PR_TWO_COL": "malca.plotting.lightcurve_publication",
+    "FIG_TWO_COL_WIDTH": "malca.plotting.lightcurve_publication",
+    "figsize_from_legacy": "malca.plotting.lightcurve_publication",
+    "figsize_feature_grid": "malca.plotting.lightcurve_publication",
+    "figsize_heatmap_two_col": "malca.plotting.lightcurve_publication",
+    "figsize_two_col_grid": "malca.plotting.lightcurve_publication",
 }
 
 
@@ -128,10 +128,10 @@ def _needed_symbols(text: str) -> set[str]:
 def _ensure_imports(source: str, needed: set[str]) -> str:
     if not needed:
         return source
-    if "from malca.lightcurve_publication import" in source:
+    if "from malca.plotting.lightcurve_publication import" in source:
         return source
     symbols = ",\n    ".join(sorted(needed))
-    import_line = f"from malca.lightcurve_publication import (\n    {symbols},\n)\n"
+    import_line = f"from malca.plotting.lightcurve_publication import (\n    {symbols},\n)\n"
     if source.startswith("#"):
         lines = source.splitlines(keepends=True)
         idx = 0

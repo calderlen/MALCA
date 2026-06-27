@@ -3,8 +3,8 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from malca.feature_layers import to_layer_first_frame
-from malca.product_schema import (
+from malca.products.feature_layers import to_layer_first_frame
+from malca.products.product_schema import (
     ProductSchemaError,
     add_ltv_identity,
     add_stv_identity,

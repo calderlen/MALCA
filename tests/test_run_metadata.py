@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 import json
 
-from malca.run_metadata import (
+from malca.products.run_metadata import (
     build_fingerprint,
     build_run_summary,
     fingerprint_digest,

@@ -8,10 +8,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from malca import fetch as skypatrol_fetch
-from malca.feature_layers import feature_mapping_get
+from malca.io import fetch as skypatrol_fetch
+from malca.products.feature_layers import feature_mapping_get
 from malca.review import fetch as review_fetch
-from malca import vetting
+from malca.enrichment import vetting
 
 
 def _write_skypatrol_csv(path: Path) -> None:
@@ -87,7 +87,7 @@ def test_review_stats_cache_reuses_and_invalidates_by_lc_file_state(
     _write_skypatrol_csv(lc_path)
     calls = {"stats": 0}
 
-    import malca.stats as stats_mod
+    import malca.core.stats as stats_mod
 
     def fake_compute_stats(_candidate_id: str, _parent: str, *, compute_ls: bool = True):
         calls["stats"] += 1

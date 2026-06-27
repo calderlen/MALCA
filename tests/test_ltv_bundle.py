@@ -6,7 +6,7 @@ from pathlib import Path
 import pandas as pd
 
 from malca.ltv.bundle import export_ltv_bundle
-from malca.table_io import write_feature_table
+from malca.io.table_io import write_feature_table
 
 
 def _write_text(path: Path, content: str) -> None:

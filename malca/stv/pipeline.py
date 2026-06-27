@@ -39,14 +39,14 @@ import zipfile
 from tqdm.auto import tqdm
 import pandas as pd
 
-from malca.characterize import characterize_candidates_df
-from malca.classify import compute_all_classifications
+from malca.enrichment.characterize import characterize_candidates_df
+from malca.enrichment.classify import compute_all_classifications
 from malca.config import (
     GAIA_CHUNK_SIZE, NEIGHBOR_RADIUS_ARCSEC, NEIGHBOR_CHUNK_SIZE,
     SPECTRA_RADIUS_ARCSEC, SPECTRA_CHUNK_SIZE,
     UNWISE_CHECKPOINT_EVERY,
 )
-from malca.candidates import ensure_candidate_id, merge_candidate_columns, select_passing_candidates
+from malca.products.candidates import ensure_candidate_id, merge_candidate_columns, select_passing_candidates
 from malca.config import (
     MIN_TIME_SPAN, MIN_POINTS_PER_DAY, MIN_CAMERAS,
     VSX_MAX_SEP_ARCSEC, CAMERA_MEDIAN_TOLERANCE, STATS_CHUNK_SIZE,
@@ -72,15 +72,15 @@ from malca.config import (
 from malca.config import PDM_METHOD_CHOICES
 from malca.enrich.neighbor import run_neighbor_enrichment
 from malca.enrich.spectra import run_spectra_availability
-from malca.gaia_fetch import _extract_gaia_ids, fetch_gaia_catalog
-from malca.gaia_ids import normalize_gaia_source_id_series
-from malca.manifest import build_manifest
-from malca.product_schema import add_stv_identity, assert_stv_product_schema
+from malca.catalogs.gaia_fetch import _extract_gaia_ids, fetch_gaia_catalog
+from malca.catalogs.gaia_ids import canonicalize_gaia_ids_in_frame, normalize_gaia_source_id_series
+from malca.io.manifest import build_manifest
+from malca.products.product_schema import add_stv_identity, assert_stv_product_schema
 from malca.stv.periodicity_gate import apply_pre_periodicity_gate, PREGATE_ROUTER_MODE
 from malca.stv.plot import plot_passing_candidates
 from malca.stv.filter import apply_filters
-from malca.run_bundle import collect_candidate_lightcurve_files, export_run_bundle, import_bundle_zip
-from malca.run_context import (
+from malca.products.run_bundle import collect_candidate_lightcurve_files, export_run_bundle, import_bundle_zip
+from malca.products.run_context import (
     init_pipeline_run_context,
     maybe_sync_review_bundle,
     run_dir_from_bundle,
@@ -88,7 +88,7 @@ from malca.run_context import (
     write_run_params,
     write_run_summary,
 )
-from malca.run_metadata import (
+from malca.products.run_metadata import (
     build_fingerprint,
     build_run_summary,
     fingerprint_digest,
@@ -98,18 +98,18 @@ from malca.run_metadata import (
 )
 from malca.review.store import db_connect, import_candidates
 from concurrent.futures import ProcessPoolExecutor
-from malca.stats import compute_stats, _enrich_row_worker
+from malca.core.stats import compute_stats, _enrich_row_worker
 from malca.stv.tag import RAW_MEDIAN_SUSPECT_COL, apply_tags, filter_camera_medians
-from malca.feature_layers import to_layer_first_frame
-from malca.table_io import (
+from malca.products.feature_layers import to_layer_first_frame
+from malca.io.table_io import (
     read_feature_table,
     read_passing_feature_table,
     require_parquet_path,
     write_feature_table,
     write_parquet_table,
 )
-from malca.utils import log as _log
-from malca.vetting import vet_candidates
+from malca.core.utils import log as _log
+from malca.enrichment.vetting import vet_candidates
 
 
 RUN_REUSE_FINGERPRINT_VERSION = 1
@@ -615,7 +615,7 @@ def _run_external_lcs_enrichment(
     overwrite: bool = False,
 ) -> tuple[Path, Path, pd.DataFrame]:
     """Fetch safe-default external light curves and write the enriched table."""
-    from malca.vetting import fetch_external_lcs
+    from malca.enrichment.vetting import fetch_external_lcs
 
     external_lc_dir = results_dir / "external_lcs"
     external_lc_dir.mkdir(parents=True, exist_ok=True)
@@ -657,7 +657,7 @@ def _run_multi_survey_features_enrichment(
     external_lc_dir: Path,
 ) -> tuple[Path, pd.DataFrame]:
     """Compute event-relative multi-survey features and write the enriched table."""
-    from malca.multi_survey_features import compute_multi_survey_features
+    from malca.enrichment.multi_survey_features import compute_multi_survey_features
 
     output_path = results_dir / "lc_events_multi_survey_features.parquet"
     df_run = _ensure_candidate_id_column(_select_passing_candidates(df_input))
@@ -1100,6 +1100,11 @@ def _add_gaia_ids_from_index(df_events: pd.DataFrame, index_path) -> pd.DataFram
         n_total = len(df_merged)
         pct = 100.0 * n_with_gaia / n_total if n_total > 0 else 0.0
         _log(f"[gaia_id merge] Added gaia_id for {n_with_gaia}/{n_total} events ({pct:.2f}%)")
+        df_merged = canonicalize_gaia_ids_in_frame(df_merged)
+        if "gaia_id_mapping_status" in df_merged.columns:
+            n_translated = int(df_merged["gaia_id_mapping_status"].astype(str).eq("dr2_translated").sum())
+            if n_translated:
+                _log(f"[gaia_id merge] Translated {n_translated} Gaia DR2 ID(s) to DR3")
 
         return df_merged
     except Exception as e:
@@ -3215,7 +3220,7 @@ def main():
             log("\n=== Step 9b: Fitting Castelli/Kurucz SED atmosphere models ===")
             sed_model_started = time.perf_counter()
             try:
-                from malca.sed_model import SED_MODEL_CURVE_COLUMNS, SED_MODEL_FIT_COLUMNS, fit_sed_models
+                from malca.enrichment.sed_model import SED_MODEL_CURVE_COLUMNS, SED_MODEL_FIT_COLUMNS, fit_sed_models
 
                 characterize_output = results_dir / "lc_events_characterized.parquet"
                 post_filter_output = results_dir / "lc_events_filtered.parquet"
@@ -3660,7 +3665,7 @@ def main():
                             log(f"Warning: SED photometry review import failed: {sed_exc}")
                     if sed_model_fits_output.exists() or sed_model_curves_output.exists():
                         try:
-                            from malca.sed_model import upsert_sed_model_results
+                            from malca.enrichment.sed_model import upsert_sed_model_results
 
                             sed_model_fits_for_review = (
                                 load_table(sed_model_fits_output)

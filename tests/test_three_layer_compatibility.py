@@ -34,7 +34,7 @@ def test_old_product_schema_helpers_are_migration_only() -> None:
 
 
 def test_feature_table_api_has_no_flat_compatibility_switches() -> None:
-    text = _source("malca/table_io.py")
+    text = _source("malca/io/table_io.py")
     assert "flatten:" not in text
     assert "layer_first:" not in text
     assert "not layer-first" in text

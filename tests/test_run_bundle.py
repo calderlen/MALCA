@@ -6,7 +6,7 @@ import zipfile
 import pandas as pd
 import pytest
 
-from malca.run_bundle import collect_candidate_lightcurve_files, export_run_bundle, import_bundle_zip
+from malca.products.run_bundle import collect_candidate_lightcurve_files, export_run_bundle, import_bundle_zip
 
 
 def test_import_bundle_zip_rejects_missing_and_invalid_zip(tmp_path: Path) -> None:

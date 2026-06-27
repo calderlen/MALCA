@@ -11,7 +11,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from malca.lightcurve_publication import PUBLICATION_PLOTLY_FONT
+from malca.plotting.lightcurve_publication import PUBLICATION_PLOTLY_FONT
 from malca.review.dustycult import DUSTYCULT_BANDPASS_NM, parse_json_cell
 
 

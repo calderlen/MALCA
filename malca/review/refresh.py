@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from malca.feature_layers import FEATURE_LAYER_COLUMNS, feature_mapping_get, parse_layer_value
+from malca.products.feature_layers import FEATURE_LAYER_COLUMNS, feature_mapping_get, parse_layer_value
 from malca.review.stats_merge import merge_stats_summary_into_payload
 from malca.review.sync import auto_export_review_bundle
 from malca.review.store import (
@@ -21,7 +21,7 @@ from malca.review.store import (
     load_candidates_file,
     replace_candidate_payload_fields,
 )
-from malca.stats import compute_stats
+from malca.core.stats import compute_stats
 
 
 CORE_STATS_KEYS = {

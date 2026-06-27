@@ -54,7 +54,7 @@ def test_audit_dispatches_to_audit_module(monkeypatch) -> None:
     monkeypatch.setattr(sys, "argv", ["malca", "audit", "ltv-status"])
 
     assert cli.main() == 0
-    assert calls == [("malca.audit", ["ltv-status"])]
+    assert calls == [("malca.evaluation.audit", ["ltv-status"])]
 
 
 def test_ltv_pipeline_dispatches_to_pipeline_module(monkeypatch) -> None:

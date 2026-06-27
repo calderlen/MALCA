@@ -19,7 +19,7 @@ from malca.config import (
     LTV_WORKERS,
 )
 from malca.config import GAIA_AIP_TAP_URL, GAIA_ESA_TAP_URL, MIST_GRID_PATH
-from malca.derived_stats import append_derived_features
+from malca.core.derived_stats import append_derived_features
 
 
 DEFAULT_MIST_PATH = MIST_GRID_PATH

@@ -20,7 +20,7 @@ import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 
-from malca.lightcurve_publication import (
+from malca.plotting.lightcurve_publication import (
     apply_publication_rcparams,
     save_publication_figure,
     FIG_TWO_COL_LC_WIDE,
@@ -33,7 +33,7 @@ from malca.lightcurve_publication import (
 
 apply_publication_rcparams(plt)
 
-from malca.baseline import per_camera_gp_baseline_masked, phase_template_baseline
+from malca.core.baseline import per_camera_gp_baseline_masked, phase_template_baseline
 from malca.config import (
     BASELINE_JITTER,
     BASELINE_Q,

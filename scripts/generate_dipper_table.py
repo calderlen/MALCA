@@ -5,9 +5,9 @@ from pathlib import Path
 
 def main():
     # File paths
-    csv_path = 'output_migrated_camera_field_20260606/runs/runs_march18_bundle_all/results/march18_review_cmd_dustmaps_full.csv'
-    db_path = 'output_migrated_camera_field_20260606/runs/runs_march18_bundle_all/review/review.taxonomy_filled.db'
-    out_path = 'output_migrated_camera_field_20260606/runs/runs_march18_bundle_all/results/dipper_candidates_table.csv'
+    csv_path = 'output/runs/runs_march18_bundle_all/results/march18_review_cmd_dustmaps_full.csv'
+    db_path = 'output/runs/runs_march18_bundle_all/review/review.taxonomy_filled.db'
+    out_path = 'output/runs/runs_march18_bundle_all/results/dipper_candidates_table.csv'
     
     # 1. Read the CSV for G, BP-RP, and Distance
     df_csv = pd.read_csv(csv_path, dtype={'source_id': str, 'candidate_id': str})

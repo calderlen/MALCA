@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from malca.table_io import read_feature_table
+from malca.io.table_io import read_feature_table
 
 
 BEST_FIELDS = [

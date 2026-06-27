@@ -49,6 +49,220 @@ def _copyable_math_value(value: object) -> html.Div:
     ], className="copyable-math-field")
 
 
+_REVIEW_SECTION_ORDER = [
+    "Review Summary",
+    "Dip Evidence",
+    "Jump Evidence",
+    "Coverage & Photometry",
+    "Catalog & Vetting",
+    "Classification & Environment",
+    "Advanced Metadata",
+]
+
+
+def _truthy_display(value: object) -> bool | None:
+    text = str(value).strip().lower()
+    if text in {"true", "1", "yes", "y"}:
+        return True
+    if text in {"false", "0", "no", "n"}:
+        return False
+    return None
+
+
+def _numeric_payload_value(payload: dict, key: str) -> float:
+    try:
+        value = payload.get(key)
+        if value is None:
+            return 0.0
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _copyable_plain_value(value: object) -> html.Div:
+    raw = str(value)
+    return html.Div([
+        html.Span(raw, className="meta-field-value"),
+        html.Button(
+            "⧉",
+            type="button",
+            title="Copy raw value",
+            className="metadata-copy-btn",
+            **{
+                "aria-label": "Copy raw value",
+                "data-copy-text": raw,
+            },
+        ),
+    ], className="copyable-math-field")
+
+
+def _render_feature_section(title: str, rows: list[dict[str, str]], open_default: bool = False) -> html.Details | None:
+    """Render a review-oriented metadata section."""
+    if not rows:
+        return None
+    field_divs = [
+        html.Div([
+            html.Span(str(row.get("label", "")), className="meta-field-label"),
+            _copyable_plain_value(row.get("value", "")),
+        ], className="meta-field-row", title=str(row.get("key", "")))
+        for row in rows
+    ]
+    slug = title.lower().replace("&", "and").replace(" ", "-")
+    return html.Details([
+        html.Summary(f"{title} ({len(rows)})"),
+        html.Div(field_divs, className="meta-grid review-feature-grid"),
+    ],
+        id={"type": "meta-details", "group": title},
+        open=bool(open_default),
+        className=f"review-feature-section review-feature-section-{slug}",
+    )
+
+
+def _stat_feature_label(key: str) -> str:
+    raw = str(key)
+    if raw.startswith("stats_"):
+        raw = raw[6:]
+    elif raw.startswith("ltv_"):
+        raw = raw[4:]
+    return raw.replace("_", " ").strip().title()
+
+
+def _stat_feature_rows(stat_rows: list[tuple[str, str]]) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for key_raw, value in stat_rows or []:
+        key = str(key_raw)
+        rows.append({
+            "section": "Advanced Stats",
+            "source_group": "Stats",
+            "label": _stat_feature_label(key),
+            "key": key,
+            "value": str(value),
+            "role": "stat",
+        })
+    return rows
+
+
+def _raw_feature_line(row: dict[str, str]) -> str:
+    section = str(row.get("section") or "")
+    label = str(row.get("label") or "")
+    key = str(row.get("key") or "")
+    value = str(row.get("value") or "")
+    return f"{section} / {label} / {key} = {value}"
+
+
+def _render_all_features_plain_list(rows: list[dict[str, str]]) -> html.Details:
+    """Render the exhaustive metadata/stat dump without spreadsheet chrome."""
+    normalized = [
+        {
+            "section": str(row.get("section") or "Other"),
+            "label": str(row.get("label") or ""),
+            "key": str(row.get("key") or ""),
+            "value": str(row.get("value") or ""),
+        }
+        for row in rows
+    ]
+    copy_text = "\n".join(_raw_feature_line(row) for row in normalized)
+
+    groups: dict[str, list[dict[str, str]]] = {}
+    for row in normalized:
+        groups.setdefault(row["section"], []).append(row)
+
+    group_nodes = []
+    for section, section_rows in groups.items():
+        group_nodes.append(html.Div([
+            html.Div(f"{section} ({len(section_rows)})", className="all-features-group-title"),
+            html.Div([
+                html.Div([
+                    html.Span(row["label"], className="all-features-label"),
+                    html.Span(row["key"], className="all-features-key"),
+                    html.Span(row["value"], className="all-features-value"),
+                ], className="all-features-line", title=_raw_feature_line(row))
+                for row in section_rows
+            ], className="all-features-lines"),
+        ], className="all-features-group"))
+
+    return html.Details([
+        html.Summary(f"All Features ({len(normalized)})"),
+        html.Div([
+            html.Div([
+                html.Button(
+                    "Copy all",
+                    type="button",
+                    title="Copy all raw features",
+                    className="metadata-copy-btn all-features-copy-btn",
+                    **{
+                        "aria-label": "Copy all raw features",
+                        "data-copy-text": copy_text,
+                    },
+                ),
+            ], className="all-features-copy-row"),
+            html.Div(group_nodes, className="all-features-plain"),
+        ], className="all-features-wrap"),
+    ],
+        id={"type": "meta-details", "group": "All Features"},
+        open=False,
+        className="review-feature-section all-features-details",
+    )
+
+
+def _render_metadata_review_layout(
+    payload: dict,
+    grouped: list,
+    stat_rows: list[tuple[str, str]],
+    feature_rows: list[dict[str, str]],
+) -> list:
+    """Render the streamlined candidate metadata panel."""
+    output: list = []
+
+    rows_by_section: dict[str, list[dict[str, str]]] = {section: [] for section in _REVIEW_SECTION_ORDER}
+    for row in feature_rows:
+        section = str(row.get("section") or "Advanced Metadata")
+        rows_by_section.setdefault(section, []).append(row)
+
+    dip_open = (
+        bool(_truthy_display(payload.get("dip_significant")))
+        or _numeric_payload_value(payload, "dipper_score") > 0
+    )
+    jump_open = (
+        bool(_truthy_display(payload.get("jump_significant")))
+        or _numeric_payload_value(payload, "jumper_score") > 0
+        or _numeric_payload_value(payload, "jump_count") > 0
+    )
+    open_defaults = {
+        "Review Summary": True,
+        "Dip Evidence": dip_open,
+        "Jump Evidence": jump_open,
+        "Coverage & Photometry": True,
+        "Catalog & Vetting": False,
+        "Classification & Environment": False,
+        "Advanced Metadata": False,
+    }
+
+    for section in _REVIEW_SECTION_ORDER:
+        rendered = _render_feature_section(
+            section,
+            rows_by_section.get(section, []),
+            open_default=open_defaults.get(section, False),
+        )
+        if rendered is not None:
+            output.append(rendered)
+
+    stat_cards = _render_stat_cards(stat_rows)
+    if stat_cards:
+        output.append(html.Details([
+            html.Summary(f"Advanced Stats ({len(stat_rows)})"),
+            html.Div(stat_cards, className="advanced-stats-wrap"),
+        ],
+            id={"type": "meta-details", "group": "Advanced Stats"},
+            open=False,
+            className="review-feature-section advanced-stats-details",
+        ))
+
+    all_rows = list(feature_rows) + _stat_feature_rows(stat_rows)
+    output.append(_render_all_features_plain_list(all_rows))
+    return output
+
+
 def _render_stat_cards(stat_rows: list[tuple[str, str]]) -> list:
     """Render stats as grouped collapsible sections with readable labels."""
     if not stat_rows:
@@ -743,12 +957,10 @@ def _render_vetting_banner(payload: dict | None, radius_arcsec: float = 10.0) ->
         """True if v is a non-empty, non-NaN string."""
         return bool(v) and str(v).strip().lower() not in ('nan', '<na>')
 
-    gaia_cls = payload.get('gaia_var_class')
-    gaia_has_class = _ok(gaia_cls)
-    if 'vetting_likely_known' not in payload and not gaia_has_class:
+    known = has_known_catalog_evidence(payload)
+    if 'vetting_likely_known' not in payload and not known:
         return html.Div("Not vetted", className='vetting-banner-empty')
 
-    known = _coerce_bool(payload.get('vetting_likely_known')) or gaia_has_class
     banner_state = 'known' if known else 'new'
 
     # Status header
@@ -798,6 +1010,7 @@ def _render_vetting_banner(payload: dict | None, radius_arcsec: float = 10.0) ->
         cards.append(_cell("VSX", f"{vsx_cls}{p_str}{sep_str}", hit=True))
 
     # Gaia variability cell
+    gaia_cls = payload.get('gaia_var_class')
     if _ok(gaia_cls):
         score = payload.get('gaia_var_score')
         score_str = f" ({score:.2f})" if score and not pd.isna(score) else ""

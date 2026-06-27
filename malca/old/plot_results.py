@@ -15,8 +15,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from malca.lightcurve_publication import apply_publication_rcparams, figsize_from_legacy
-from malca.baseline import (
+from malca.plotting.lightcurve_publication import apply_publication_rcparams, figsize_from_legacy
+from malca.core.baseline import (
     global_mean_baseline,
     global_median_baseline,
     global_rolling_median_baseline,

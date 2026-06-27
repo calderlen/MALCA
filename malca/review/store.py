@@ -24,9 +24,9 @@ from malca.config import (
     LEGACY_GAIA_CACHE_FILE,
     REVIEW_IMPORTED_LC_CACHE_DIR,
 )
-from malca.derived_stats import DERIVED_FEATURE_COLUMNS
+from malca.core.derived_stats import DERIVED_FEATURE_COLUMNS
 from malca.ltv.cmd import dustmaps_cmd_from_fields
-from malca.feature_layers import (
+from malca.products.feature_layers import (
     FEATURE_LAYER_VERSION_COLUMN,
     FEATURE_LAYER_COLUMNS,
     parse_layer_value,
@@ -34,10 +34,10 @@ from malca.feature_layers import (
     to_layer_first_mapping,
 )
 from malca.ltv.multi_survey import LTV_MS_FEATURE_COLUMN_SPECS
-from malca.multi_survey_features import MS_FEATURE_COLUMN_SPECS
+from malca.enrichment.multi_survey_features import MS_FEATURE_COLUMN_SPECS
 from malca.review.filter_schema import REVIEW_FILTER_COLUMN_TYPES
-from malca.review.metadata import normalize_vsx_record
-from malca.table_io import read_feature_table, read_parquet_table, write_feature_table, write_parquet_table
+from malca.review.metadata import has_known_catalog_evidence, normalize_vsx_record
+from malca.io.table_io import read_feature_table, read_parquet_table, write_feature_table, write_parquet_table
 from malca.review.taxonomy import (
     REVIEW_TAXONOMY_FIELDS,
     REVIEW_TAXONOMY_SQL_COLUMNS,
@@ -259,8 +259,7 @@ def _candidate_insert_tuple_from_row_dict(
         if pm_total is not None:
             normalized["high_pm_flag"] = bool(pm_total > LTV_MAX_PM)
 
-    gaia_var_class = str(normalized.get("gaia_var_class") or "").strip()
-    if gaia_var_class and gaia_var_class.lower() not in {"nan", "<na>"}:
+    if has_known_catalog_evidence(normalized):
         normalized["vetting_likely_known"] = True
 
     row_source_path = str(source_path if source_path is not None else normalized.get("source_path") or "")
@@ -498,6 +497,11 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("lc_path",                  "TEXT",    "text"),
     ("source_id",                "TEXT",    "text"),
     ("gaia_id",                  "TEXT",    "text"),
+    ("gaia_dr2_id",              "TEXT",    "text"),
+    ("gaia_id_release",          "TEXT",    "text"),
+    ("gaia_id_mapping_status",   "TEXT",    "text"),
+    ("dr2_dr3_angular_distance_mas", "REAL", "float"),
+    ("dr2_dr3_magnitude_difference", "REAL", "float"),
     ("ra",                       "REAL",    "float"),
     ("dec",                      "REAL",    "float"),
     ("asassn_field_key",         "TEXT",    "text"),
@@ -1880,7 +1884,7 @@ def import_candidates(
     df_use = df
     if characterize_before_import:
         try:
-            from malca.characterize import characterize_candidates_df
+            from malca.enrichment.characterize import characterize_candidates_df
 
             df_use = characterize_candidates_df(
                 df,
@@ -1974,7 +1978,7 @@ def import_candidates(
 
     if vet_before_import:
         try:
-            from malca.vetting import vet_candidates
+            from malca.enrichment.vetting import vet_candidates
 
             # --- vetting cache: skip candidates already vetted ----
             # Use the unified repo cache for real paths or fetch:// sources.
@@ -2343,6 +2347,8 @@ def get_candidate_payload(conn: sqlite3.Connection, candidate_id: str) -> dict:
         pm_total = _to_float(_payload_layer_value(payload, "pm_total"))
         if pm_total is not None:
             payload = _layer_first_payload({**payload, "high_pm_flag": bool(pm_total > LTV_MAX_PM)})
+    if has_known_catalog_evidence(payload):
+        payload["vetting_likely_known"] = True
     return payload
 
 
@@ -2740,8 +2746,7 @@ def merge_vetting_results(
             val = row[col]
             if val is not None and not (isinstance(val, float) and np.isnan(val)):
                 d[col] = val
-        gaia_var_class = str(d.get("gaia_var_class") or "").strip()
-        if gaia_var_class and gaia_var_class.lower() not in {"nan", "<na>"}:
+        if has_known_catalog_evidence(d):
             d["vetting_likely_known"] = True
         if d:
             lookup[cid] = d
@@ -2873,6 +2878,8 @@ def merge_candidate_results(
             except Exception:
                 pass
             updates[col] = value
+        if has_known_catalog_evidence(updates):
+            updates["vetting_likely_known"] = True
 
         replace_candidate_payload_fields(
             conn,

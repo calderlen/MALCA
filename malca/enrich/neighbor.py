@@ -10,9 +10,9 @@ from astropy.table import Table
 from astroquery.xmatch import XMatch
 from tqdm.auto import tqdm
 
-from malca.candidates import select_passing_candidates_if_present
+from malca.products.candidates import select_passing_candidates_if_present
 from malca.config import NEIGHBOR_RADIUS_ARCSEC, NEIGHBOR_CHUNK_SIZE
-from malca.table_io import read_feature_table
+from malca.io.table_io import read_feature_table
 
 
 DEFAULT_NEIGHBOR_CATALOGS: dict[str, str] = {
@@ -25,7 +25,7 @@ DEFAULT_NEIGHBOR_CATALOGS: dict[str, str] = {
 
 def _coord_from_layers(df: pd.DataFrame, axis: str) -> pd.Series:
     """Pull RA or Dec from layer-first columns when not present at top level."""
-    from malca.feature_layers import feature_value_series
+    from malca.products.feature_layers import feature_value_series
 
     paths = (f"external_stats.{axis}", f"derived_stats.{axis}", f"lc_stats.{axis}")
     for path in paths:

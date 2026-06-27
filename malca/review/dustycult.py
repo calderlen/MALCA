@@ -34,7 +34,7 @@ from malca.config import (
     SKYPATROL_JD_OFFSET,
     TRIGGER_MODE,
 )
-from malca.phase import BAND_LABELS
+from malca.core.phase import BAND_LABELS
 
 
 DUSTYCULT_FIT_TABLE = "dustycult_fits"

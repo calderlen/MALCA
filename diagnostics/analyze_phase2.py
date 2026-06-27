@@ -15,7 +15,7 @@ from typing import Dict
 import json
 import re
 
-from malca.lightcurve_publication import (
+from malca.plotting.lightcurve_publication import (
     apply_publication_rcparams,
     save_publication_figure,
     FIG_SINGLE_COL_LC_WIDE,

@@ -3,8 +3,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from malca.baseline import per_camera_gp_baseline_masked
-from malca.utils import (
+from malca.core.baseline import per_camera_gp_baseline_masked
+from malca.core.utils import (
     compute_field_summary,
     filter_bad_cameras,
     identify_bad_cameras,

@@ -7,7 +7,7 @@ import pandas as pd
 
 from malca.config import ASASSN_INDEX_PATH
 from malca.stv.pipeline import _resolve_asassn_index_path, export_bundle_zip
-from malca.table_io import write_feature_table
+from malca.io.table_io import write_feature_table
 
 
 def _write_text(path: Path, content: str) -> None:

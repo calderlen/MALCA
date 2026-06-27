@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 
-from malca.lightcurve_publication import (
+from malca.plotting.lightcurve_publication import (
     apply_publication_rcparams,
     FIG_SINGLE_COL_MEDIUM,
     FIG_TWO_COL_STANDARD,
@@ -27,7 +27,7 @@ from malca.lightcurve_publication import (
 
 apply_publication_rcparams(plt)
 
-from malca.baseline import per_camera_gp_baseline, per_camera_gp_baseline_masked
+from malca.core.baseline import per_camera_gp_baseline, per_camera_gp_baseline_masked
 from malca.config import (
     BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
     BASELINE_JITTER,
@@ -46,7 +46,7 @@ from malca.config import (
 )
 from malca.stv.events import build_runs, filter_runs, score_lightcurve, summarize_kept_runs
 from malca.stv.triggering import posterior_probability_threshold, resolve_trigger_indices
-from malca.utils import clean_lc, filter_bad_cameras, read_lc_dat2, read_skypatrol_csv
+from malca.core.utils import clean_lc, filter_bad_cameras, read_lc_dat2, read_skypatrol_csv
 
 
 DEFAULT_POSTERIOR_PROBABILITY_THRESHOLDS: tuple[float, ...] = (

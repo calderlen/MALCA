@@ -10,8 +10,8 @@ import numpy as np
 import pandas as pd
 
 from malca.config import DEFAULT_OUTPUT_DIR
-from malca.feature_layers import with_feature_columns
-from malca.lightcurve_publication import (
+from malca.products.feature_layers import with_feature_columns
+from malca.plotting.lightcurve_publication import (
     PUBLICATION_STYLE,
     figsize_feature_grid,
     figsize_two_col_grid,
@@ -20,8 +20,8 @@ from malca.lightcurve_publication import (
     plot_lightcurve_panel,
     plot_phase_panel,
 )
-from malca.lightcurve_io import load_lightcurve_df, to_asassn_algorithm_frame
-from malca.notebook_paths import find_repo_root, localize_lightcurve_frame_paths
+from malca.io.lightcurve_io import load_lightcurve_df, to_asassn_algorithm_frame
+from malca.io.notebook_paths import find_repo_root, localize_lightcurve_frame_paths
 from malca.review.eda_data import infer_source_kind, load_candidate_source
 
 

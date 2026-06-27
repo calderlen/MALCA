@@ -7,10 +7,11 @@ loader is the only place where old review-schema compatibility is applied.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 import json
 import math
+import pickle
 import re
 import sqlite3
 from typing import Any, Iterable, Mapping, Sequence
@@ -18,24 +19,22 @@ from typing import Any, Iterable, Mapping, Sequence
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
-from sklearn.metrics import accuracy_score, classification_report, f1_score
-from sklearn.model_selection import StratifiedKFold, train_test_split
-
-from malca.lightcurve_io import load_lightcurve_df
-from malca.review.taxonomy import legacy_review_to_taxonomy
-from malca.table_io import read_feature_table
-
-
-CURRENT_SCHEMA_REQUIRED_REVIEW_COLUMNS = (
-    "candidate_id",
-    "workflow_status",
-    "disposition",
-    "morphology_primary",
-    "morphology_secondary",
-    "physical_primary",
-    "physical_secondary",
-    "classification_confidence",
+from sklearn.metrics import (
+    accuracy_score,
+    average_precision_score,
+    classification_report,
+    confusion_matrix,
+    f1_score,
+    roc_auc_score,
 )
+from sklearn.model_selection import StratifiedKFold
+
+from malca.io.lightcurve_io import load_lightcurve_df
+from malca.review.taxonomy import REVIEW_TAXONOMY_FIELDS, legacy_review_to_taxonomy
+from malca.io.table_io import read_feature_table
+
+
+CURRENT_SCHEMA_REQUIRED_REVIEW_COLUMNS = ("candidate_id", *REVIEW_TAXONOMY_FIELDS)
 
 LEGACY_SCHEMA_REQUIRED_REVIEW_COLUMNS = (
     "candidate_id",
@@ -90,6 +89,7 @@ REVIEW_METADATA_COLUMNS = {
 
 TAXONOMY_LABEL_COLUMNS = {
     "event_class",
+    "morphology_secondary_json",
     "morphology_primary",
     "morphology_secondary",
     "morphology_polarity",
@@ -100,6 +100,8 @@ TAXONOMY_LABEL_COLUMNS = {
     "physical_family",
     "physical_subclass",
 }
+
+CURRENT_REVIEW_SCHEMA_COLUMNS = set(REVIEW_TAXONOMY_FIELDS)
 
 IDENTIFIER_AND_PATH_COLUMNS = {
     "candidate_id",
@@ -137,6 +139,7 @@ NON_FEATURE_UTILITY_COLUMNS = {
 DEFAULT_DROP_COLUMNS = (
     REVIEW_METADATA_COLUMNS
     | TAXONOMY_LABEL_COLUMNS
+    | CURRENT_REVIEW_SCHEMA_COLUMNS
     | IDENTIFIER_AND_PATH_COLUMNS
     | JSON_PAYLOAD_COLUMNS
     | NON_FEATURE_UTILITY_COLUMNS
@@ -151,7 +154,8 @@ class TrainingConfig:
     """Small set of LightGBM knobs used by both notebooks."""
 
     random_state: int = 42
-    test_size: float = 0.2
+    val_size: float = 0.15
+    test_size: float = 0.15
     cv_folds: int = 5
     n_estimators: int = 500
     learning_rate: float = 0.05
@@ -160,9 +164,11 @@ class TrainingConfig:
     colsample_bytree: float = 0.8
     min_child_samples: int = 20
     max_categorical_cardinality: int = 50
-    min_class_count: int = 2
+    min_class_count: int = 3
     class_weight: str | None = "balanced"
     n_jobs: int = 1
+    calibration_method: str = "none"
+    reliability_bins: int = 10
 
 
 @dataclass
@@ -176,7 +182,15 @@ class TargetTrainingResult:
     categorical_maps: dict[str, list[str]]
     label_classes: list[str]
     cv_metrics: pd.DataFrame
+    validation_metrics: dict[str, Any]
     holdout_metrics: dict[str, Any]
+    split_assignments: pd.DataFrame
+    test_predictions: pd.DataFrame
+    feature_importance: pd.DataFrame
+    confusion_matrix: pd.DataFrame
+    calibration_diagnostics: pd.DataFrame
+    probability_columns: list[str]
+    config: TrainingConfig
     model: lgb.LGBMClassifier | None = field(repr=False, default=None)
 
     def metadata(self) -> dict[str, Any]:
@@ -189,8 +203,12 @@ class TargetTrainingResult:
             "categorical_features": self.categorical_features,
             "categorical_maps": self.categorical_maps,
             "label_classes": self.label_classes,
+            "probability_columns": self.probability_columns,
+            "config": asdict(self.config),
             "cv_metrics": self.cv_metrics.to_dict(orient="records"),
+            "validation_metrics": self.validation_metrics,
             "holdout_metrics": self.holdout_metrics,
+            "test_metrics": self.holdout_metrics,
         }
 
 
@@ -818,6 +836,26 @@ def _encode_labels(y: pd.Series) -> tuple[np.ndarray, list[str]]:
     return y.map(mapping).to_numpy(dtype=int), classes
 
 
+def _class_label(values: Sequence[str], encoded: int) -> str:
+    return str(values[int(encoded)])
+
+
+def _safe_column_token(value: object) -> str:
+    token = re.sub(r"[^0-9A-Za-z]+", "_", str(value).strip().lower()).strip("_")
+    return token or "class"
+
+
+def _probability_columns(label_classes: Sequence[str]) -> list[str]:
+    columns: list[str] = []
+    seen: dict[str, int] = {}
+    for idx, label in enumerate(label_classes):
+        base = f"prob_{_safe_column_token(label)}"
+        count = seen.get(base, 0)
+        seen[base] = count + 1
+        columns.append(base if count == 0 else f"{base}_{idx}")
+    return columns
+
+
 def _build_classifier(config: TrainingConfig, n_classes: int) -> lgb.LGBMClassifier:
     objective = "binary" if n_classes == 2 else "multiclass"
     return lgb.LGBMClassifier(
@@ -835,14 +873,119 @@ def _build_classifier(config: TrainingConfig, n_classes: int) -> lgb.LGBMClassif
     )
 
 
-def _metric_row(y_true: np.ndarray, y_pred: np.ndarray, *, fold: int | str) -> dict[str, Any]:
-    return {
+def _predict_proba_matrix(
+    model: lgb.LGBMClassifier,
+    X: pd.DataFrame,
+    *,
+    n_classes: int,
+) -> np.ndarray:
+    proba = np.asarray(model.predict_proba(X), dtype=float)
+    if proba.ndim == 1:
+        proba = np.column_stack([1.0 - proba, proba])
+    if proba.shape[1] != n_classes:
+        out = np.zeros((len(X), n_classes), dtype=float)
+        classes = getattr(model, "classes_", np.arange(proba.shape[1]))
+        for source_idx, class_value in enumerate(classes):
+            try:
+                target_idx = int(class_value)
+            except Exception:
+                continue
+            if 0 <= target_idx < n_classes:
+                out[:, target_idx] = proba[:, source_idx]
+        proba = out
+    row_sum = proba.sum(axis=1, keepdims=True)
+    valid = np.isfinite(row_sum) & (row_sum > 0)
+    proba = np.where(valid, proba / np.where(valid, row_sum, 1.0), proba)
+    return np.nan_to_num(proba, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def _probability_metrics(
+    y_true: np.ndarray,
+    y_proba: np.ndarray,
+    *,
+    label_classes: Sequence[str],
+    probability_columns: Sequence[str],
+) -> dict[str, Any]:
+    metrics: dict[str, Any] = {}
+    n_classes = len(label_classes)
+    if len(y_true) == 0 or y_proba.size == 0:
+        return metrics
+
+    if n_classes == 2:
+        score = y_proba[:, 1]
+        if len(np.unique(y_true)) == 2:
+            try:
+                metrics["roc_auc"] = float(roc_auc_score(y_true, score))
+            except Exception:
+                metrics["roc_auc"] = math.nan
+            try:
+                metrics["pr_auc"] = float(average_precision_score(y_true, score))
+            except Exception:
+                metrics["pr_auc"] = math.nan
+        return metrics
+
+    labels = np.arange(n_classes)
+    y_binary = (y_true[:, None] == labels[None, :]).astype(int)
+    try:
+        metrics["roc_auc_ovr_macro"] = float(
+            roc_auc_score(y_true, y_proba, labels=labels, multi_class="ovr", average="macro")
+        )
+    except Exception:
+        metrics["roc_auc_ovr_macro"] = math.nan
+    try:
+        metrics["roc_auc_ovr_weighted"] = float(
+            roc_auc_score(y_true, y_proba, labels=labels, multi_class="ovr", average="weighted")
+        )
+    except Exception:
+        metrics["roc_auc_ovr_weighted"] = math.nan
+    try:
+        metrics["pr_auc_macro"] = float(average_precision_score(y_binary, y_proba, average="macro"))
+    except Exception:
+        metrics["pr_auc_macro"] = math.nan
+    try:
+        metrics["pr_auc_weighted"] = float(average_precision_score(y_binary, y_proba, average="weighted"))
+    except Exception:
+        metrics["pr_auc_weighted"] = math.nan
+
+    for idx, column in enumerate(probability_columns):
+        positives = int(y_binary[:, idx].sum())
+        if positives == 0 or positives == len(y_binary):
+            continue
+        try:
+            metrics[f"pr_auc_class_{column.removeprefix('prob_')}"] = float(
+                average_precision_score(y_binary[:, idx], y_proba[:, idx])
+            )
+        except Exception:
+            metrics[f"pr_auc_class_{column.removeprefix('prob_')}"] = math.nan
+    return metrics
+
+
+def _metric_row(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    *,
+    fold: int | str,
+    y_proba: np.ndarray | None = None,
+    label_classes: Sequence[str] = (),
+    probability_columns: Sequence[str] = (),
+) -> dict[str, Any]:
+    metrics = {
         "fold": fold,
         "n_eval": int(len(y_true)),
         "accuracy": float(accuracy_score(y_true, y_pred)),
         "macro_f1": float(f1_score(y_true, y_pred, average="macro", zero_division=0)),
         "weighted_f1": float(f1_score(y_true, y_pred, average="weighted", zero_division=0)),
     }
+    if y_proba is not None and label_classes and probability_columns:
+        metrics.update(
+            _probability_metrics(
+                y_true,
+                y_proba,
+                label_classes=label_classes,
+                probability_columns=probability_columns,
+            )
+        )
+    return metrics
 
 
 def _cv_metrics(
@@ -851,6 +994,8 @@ def _cv_metrics(
     *,
     config: TrainingConfig,
     n_classes: int,
+    label_classes: Sequence[str],
+    probability_columns: Sequence[str],
 ) -> pd.DataFrame:
     counts = pd.Series(y_encoded).value_counts()
     n_splits = min(config.cv_folds, int(counts.min()))
@@ -862,17 +1007,183 @@ def _cv_metrics(
         model = _build_classifier(config, n_classes)
         model.fit(X.iloc[train_idx], y_encoded[train_idx])
         pred = model.predict(X.iloc[val_idx])
-        rows.append(_metric_row(y_encoded[val_idx], pred, fold=fold))
+        proba = _predict_proba_matrix(model, X.iloc[val_idx], n_classes=n_classes)
+        rows.append(
+            _metric_row(
+                y_encoded[val_idx],
+                pred,
+                fold=fold,
+                y_proba=proba,
+                label_classes=label_classes,
+                probability_columns=probability_columns,
+            )
+        )
     return pd.DataFrame(rows)
 
 
-def _effective_test_size(n_rows: int, n_classes: int, requested: float) -> float:
-    if n_rows <= n_classes:
-        return requested
-    min_fraction = n_classes / n_rows
-    max_fraction = (n_rows - n_classes) / n_rows
-    adjusted = max(requested, min_fraction)
-    return min(adjusted, max_fraction)
+def _validate_training_config(config: TrainingConfig) -> None:
+    if not (0.0 < float(config.val_size) < 1.0):
+        raise ValueError("TrainingConfig.val_size must be between 0 and 1")
+    if not (0.0 < float(config.test_size) < 1.0):
+        raise ValueError("TrainingConfig.test_size must be between 0 and 1")
+    if float(config.val_size) + float(config.test_size) >= 1.0:
+        raise ValueError("TrainingConfig.val_size + test_size must be less than 1")
+    if str(config.calibration_method or "none").lower() != "none":
+        raise ValueError("Only calibration_method='none' is currently supported")
+
+
+def _candidate_id_series(df: pd.DataFrame) -> pd.Series:
+    if "candidate_id" in df.columns:
+        return df["candidate_id"].astype(str)
+    return pd.Series([str(idx) for idx in df.index], index=df.index, dtype=object)
+
+
+def _make_split_assignments(
+    work: pd.DataFrame,
+    y: pd.Series,
+    y_encoded: np.ndarray,
+    *,
+    config: TrainingConfig,
+    target_col: str,
+) -> pd.DataFrame:
+    _validate_training_config(config)
+    rng = np.random.default_rng(config.random_state)
+    splits = pd.Series("", index=work.index, dtype=object)
+    for class_value in sorted(np.unique(y_encoded)):
+        positions = np.flatnonzero(y_encoded == class_value)
+        n_class = int(len(positions))
+        if n_class < 3:
+            label = _class_label(sorted(y.astype(str).unique()), int(class_value))
+            raise ValueError(
+                f"Class {label!r} has {n_class} trainable rows; at least 3 are required "
+                "for train/val/test splitting"
+            )
+        shuffled = positions.copy()
+        rng.shuffle(shuffled)
+        n_test = max(1, int(round(n_class * float(config.test_size))))
+        n_val = max(1, int(round(n_class * float(config.val_size))))
+        while n_test + n_val > n_class - 1:
+            if n_test >= n_val and n_test > 1:
+                n_test -= 1
+            elif n_val > 1:
+                n_val -= 1
+            else:
+                break
+        n_train = n_class - n_test - n_val
+        if n_train < 1:
+            label = _class_label(sorted(y.astype(str).unique()), int(class_value))
+            raise ValueError(
+                f"Class {label!r} cannot be split into non-empty train, val, and test subsets"
+            )
+        test_pos = shuffled[:n_test]
+        val_pos = shuffled[n_test : n_test + n_val]
+        train_pos = shuffled[n_test + n_val :]
+        splits.iloc[test_pos] = "test"
+        splits.iloc[val_pos] = "val"
+        splits.iloc[train_pos] = "train"
+
+    if splits.eq("").any():
+        raise ValueError("Internal split assignment error: some rows were not assigned")
+    return pd.DataFrame(
+        {
+            "candidate_id": _candidate_id_series(work),
+            "target_column": target_col,
+            "label": y.astype(str),
+            "label_encoded": y_encoded,
+            "split": splits,
+        },
+        index=work.index,
+    )
+
+
+def _prediction_frame(
+    source: pd.DataFrame,
+    *,
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    y_proba: np.ndarray,
+    label_classes: Sequence[str],
+    probability_columns: Sequence[str],
+) -> pd.DataFrame:
+    true_labels = [_class_label(label_classes, int(value)) for value in y_true]
+    pred_labels = [_class_label(label_classes, int(value)) for value in y_pred]
+    out = pd.DataFrame(
+        {
+            "candidate_id": _candidate_id_series(source).to_numpy(),
+            "y_true": true_labels,
+            "y_pred": pred_labels,
+            "correct": np.asarray(y_true, dtype=int) == np.asarray(y_pred, dtype=int),
+        },
+        index=source.index,
+    )
+    for idx, column in enumerate(probability_columns):
+        out[column] = y_proba[:, idx]
+    return out.reset_index(drop=True)
+
+
+def _confusion_matrix_frame(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    *,
+    label_classes: Sequence[str],
+) -> pd.DataFrame:
+    encoded_labels = list(range(len(label_classes)))
+    matrix = confusion_matrix(y_true, y_pred, labels=encoded_labels)
+    out = pd.DataFrame(matrix, index=list(label_classes), columns=list(label_classes))
+    out.index.name = "y_true"
+    return out.reset_index()
+
+
+def _reliability_bin_frame(
+    y_true: np.ndarray,
+    y_proba: np.ndarray,
+    *,
+    label_classes: Sequence[str],
+    probability_columns: Sequence[str],
+    n_bins: int,
+) -> pd.DataFrame:
+    rows: list[pd.DataFrame] = []
+    bins = np.linspace(0.0, 1.0, max(int(n_bins), 1) + 1)
+    labels = list(range(1, len(bins)))
+    for idx, class_label in enumerate(label_classes):
+        scores = pd.Series(y_proba[:, idx], dtype="float64")
+        observed = pd.Series((y_true == idx).astype(int), dtype="int8")
+        frame = pd.DataFrame(
+            {
+                "class_label": str(class_label),
+                "probability_column": probability_columns[idx],
+                "probability": scores,
+                "observed": observed,
+            }
+        )
+        frame["probability_bin"] = pd.cut(
+            frame["probability"],
+            bins=bins,
+            labels=labels,
+            include_lowest=True,
+        )
+        summary = (
+            frame.groupby(["class_label", "probability_column", "probability_bin"], observed=True)
+            .agg(
+                n=("observed", "size"),
+                mean_probability=("probability", "mean"),
+                observed_rate=("observed", "mean"),
+            )
+            .reset_index()
+        )
+        rows.append(summary)
+    if not rows:
+        return pd.DataFrame(
+            columns=[
+                "class_label",
+                "probability_column",
+                "probability_bin",
+                "n",
+                "mean_probability",
+                "observed_rate",
+            ]
+        )
+    return pd.concat(rows, ignore_index=True)
 
 
 def train_target_model(
@@ -909,29 +1220,99 @@ def train_target_model(
     n_classes = len(label_classes)
     if n_classes < 2:
         raise ValueError(f"Target {target_col!r} has fewer than two trainable classes")
+    probability_columns = _probability_columns(label_classes)
 
-    cv = _cv_metrics(X, y_encoded, config=config, n_classes=n_classes)
-
-    stratify = y_encoded if pd.Series(y_encoded).value_counts().min() >= 2 else None
-    test_size = _effective_test_size(len(X), n_classes, config.test_size)
-    X_train, X_test, y_train, y_test = train_test_split(
+    cv = _cv_metrics(
         X,
         y_encoded,
-        test_size=test_size,
-        random_state=config.random_state,
-        stratify=stratify,
+        config=config,
+        n_classes=n_classes,
+        label_classes=label_classes,
+        probability_columns=probability_columns,
     )
+
+    split_assignments = _make_split_assignments(
+        work,
+        y,
+        y_encoded,
+        config=config,
+        target_col=target_col,
+    )
+    train_mask = split_assignments["split"].eq("train").to_numpy()
+    val_mask = split_assignments["split"].eq("val").to_numpy()
+    test_mask = split_assignments["split"].eq("test").to_numpy()
+
+    X_train = X.loc[train_mask]
+    X_val = X.loc[val_mask]
+    X_test = X.loc[test_mask]
+    y_train = y_encoded[train_mask]
+    y_val = y_encoded[val_mask]
+    y_test = y_encoded[test_mask]
+
     model = _build_classifier(config, n_classes)
     model.fit(X_train, y_train)
-    pred = model.predict(X_test)
-    holdout = _metric_row(y_test, pred, fold="holdout")
-    holdout["classification_report"] = classification_report(
-        y_test,
-        pred,
+    val_pred = model.predict(X_val)
+    val_proba = _predict_proba_matrix(model, X_val, n_classes=n_classes)
+    validation = _metric_row(
+        y_val,
+        val_pred,
+        fold="val",
+        y_proba=val_proba,
+        label_classes=label_classes,
+        probability_columns=probability_columns,
+    )
+    validation["classification_report"] = classification_report(
+        y_val,
+        val_pred,
         labels=list(range(n_classes)),
         target_names=label_classes,
         output_dict=True,
         zero_division=0,
+    )
+
+    test_pred = model.predict(X_test)
+    test_proba = _predict_proba_matrix(model, X_test, n_classes=n_classes)
+    holdout = _metric_row(
+        y_test,
+        test_pred,
+        fold="test",
+        y_proba=test_proba,
+        label_classes=label_classes,
+        probability_columns=probability_columns,
+    )
+    holdout["classification_report"] = classification_report(
+        y_test,
+        test_pred,
+        labels=list(range(n_classes)),
+        target_names=label_classes,
+        output_dict=True,
+        zero_division=0,
+    )
+    test_predictions = _prediction_frame(
+        work.loc[test_mask],
+        y_true=y_test,
+        y_pred=test_pred,
+        y_proba=test_proba,
+        label_classes=label_classes,
+        probability_columns=probability_columns,
+    )
+    feature_importance = pd.DataFrame(
+        {
+            "feature": list(feature_columns),
+            "importance": model.feature_importances_,
+        }
+    ).sort_values("importance", ascending=False, ignore_index=True)
+    confusion = _confusion_matrix_frame(
+        y_test,
+        test_pred,
+        label_classes=label_classes,
+    )
+    calibration = _reliability_bin_frame(
+        y_test,
+        test_proba,
+        label_classes=label_classes,
+        probability_columns=probability_columns,
+        n_bins=config.reliability_bins,
     )
 
     return TargetTrainingResult(
@@ -944,7 +1325,15 @@ def train_target_model(
         categorical_maps={k: list(v) for k, v in categorical_maps.items()},
         label_classes=label_classes,
         cv_metrics=cv,
+        validation_metrics=validation,
         holdout_metrics=holdout,
+        split_assignments=split_assignments.reset_index(drop=True),
+        test_predictions=test_predictions,
+        feature_importance=feature_importance,
+        confusion_matrix=confusion,
+        calibration_diagnostics=calibration,
+        probability_columns=probability_columns,
+        config=config,
         model=model,
     )
 
@@ -970,6 +1359,56 @@ def train_review_models(
     return results
 
 
+def _write_parquet_artifact(df: pd.DataFrame, path: str | Path) -> None:
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(out, index=False)
+
+
+def _dump_pickle(obj: Any, path: str | Path) -> None:
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        import joblib
+
+        joblib.dump(obj, out)
+    except Exception:
+        with out.open("wb") as handle:
+            pickle.dump(obj, handle)
+
+
+def _load_pickle(path: str | Path) -> Any:
+    try:
+        import joblib
+
+        return joblib.load(path)
+    except Exception:
+        with Path(path).open("rb") as handle:
+            return pickle.load(handle)
+
+
+def _target_model_path(path: str | Path) -> Path:
+    model_path = Path(path).expanduser()
+    if model_path.is_dir():
+        return model_path / "model.joblib"
+    return model_path
+
+
+def _target_model_bundle(result: TargetTrainingResult) -> dict[str, Any]:
+    if result.model is None:
+        raise ValueError("Cannot bundle a result without a trained model")
+    return {
+        "model": result.model,
+        "target_column": result.target_column,
+        "feature_columns": list(result.feature_columns),
+        "categorical_features": list(result.categorical_features),
+        "categorical_maps": {key: list(value) for key, value in result.categorical_maps.items()},
+        "label_classes": list(result.label_classes),
+        "probability_columns": list(result.probability_columns),
+        "config": asdict(result.config),
+    }
+
+
 def save_target_model(result: TargetTrainingResult, output_dir: str | Path) -> None:
     """Save model booster and metadata for one target."""
 
@@ -977,14 +1416,66 @@ def save_target_model(result: TargetTrainingResult, output_dir: str | Path) -> N
     out_dir.mkdir(parents=True, exist_ok=True)
     if result.model is None:
         raise ValueError("Cannot save a result without a trained model")
+    _dump_pickle(_target_model_bundle(result), out_dir / "model.joblib")
     result.model.booster_.save_model(str(out_dir / "lightgbm_model.txt"))
     metadata = result.metadata()
     (out_dir / "metadata.json").write_text(
         json.dumps(metadata, indent=2, sort_keys=True, default=_json_default) + "\n",
         encoding="utf-8",
     )
+    _write_parquet_artifact(result.split_assignments, out_dir / "split_assignments.parquet")
+    _write_parquet_artifact(result.test_predictions, out_dir / "test_predictions.parquet")
+    result.feature_importance.to_csv(out_dir / "feature_importance.csv", index=False)
+    result.confusion_matrix.to_csv(out_dir / "confusion_matrix.csv", index=False)
+    result.calibration_diagnostics.to_csv(out_dir / "calibration_by_bin.csv", index=False)
     if not result.cv_metrics.empty:
         result.cv_metrics.to_csv(out_dir / "cv_metrics.csv", index=False)
+
+
+def load_target_model(path: str | Path) -> dict[str, Any]:
+    """Load a saved review-LightGBM target model bundle."""
+
+    model_path = _target_model_path(path)
+    if not model_path.exists():
+        raise FileNotFoundError(f"Target model bundle not found: {model_path}")
+    bundle = _load_pickle(model_path)
+    if not isinstance(bundle, dict) or "model" not in bundle:
+        raise ValueError(f"Invalid target model bundle: {model_path}")
+    return bundle
+
+
+def score_target_model(
+    model_or_path: str | Path | Mapping[str, Any],
+    df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Score rows with a saved review-LightGBM target model."""
+
+    bundle = (
+        load_target_model(model_or_path)
+        if isinstance(model_or_path, (str, Path))
+        else dict(model_or_path)
+    )
+    model = bundle["model"]
+    feature_columns = list(bundle["feature_columns"])
+    categorical_maps = {
+        str(key): list(value)
+        for key, value in dict(bundle.get("categorical_maps", {})).items()
+    }
+    label_classes = list(bundle["label_classes"])
+    probability_columns = list(bundle.get("probability_columns") or _probability_columns(label_classes))
+    X = transform_features(
+        df,
+        feature_columns=feature_columns,
+        categorical_maps=categorical_maps,
+    )
+    proba = _predict_proba_matrix(model, X, n_classes=len(label_classes))
+    pred_encoded = np.argmax(proba, axis=1)
+    out = df.copy()
+    out["y_pred"] = [_class_label(label_classes, int(value)) for value in pred_encoded]
+    out["prediction_confidence"] = proba.max(axis=1) if len(proba) else np.array([], dtype=float)
+    for idx, column in enumerate(probability_columns):
+        out[column] = proba[:, idx]
+    return out
 
 
 def _json_default(value: Any) -> Any:

@@ -14,18 +14,18 @@ import matplotlib.pyplot as pl
 import numpy as np
 import pandas as pd
 
-from malca.lightcurve_publication import apply_publication_rcparams, save_publication_figure, FIG_TWO_COL_STANDARD
+from malca.plotting.lightcurve_publication import apply_publication_rcparams, save_publication_figure, FIG_TWO_COL_STANDARD
 
 apply_publication_rcparams(pl)
 
-from malca.baseline import (
+from malca.core.baseline import (
     global_median_baseline,
     per_camera_median_baseline,
     per_camera_gp_baseline,
 )
 from malca.cli_config import add_config_args, apply_config, namespace_keys
-from malca.characterize import query_gaia_by_ids, get_dust_extinction
-from malca.classify import compute_all_classifications
+from malca.enrichment.characterize import query_gaia_by_ids, get_dust_extinction
+from malca.enrichment.classify import compute_all_classifications
 from malca.config import (
     MIN_TIME_SPAN,
     MIN_POINTS_PER_DAY,
@@ -62,11 +62,11 @@ from malca.stv.plot import plot_passing_candidates
 from malca.stv.plot import read_skypatrol_csv
 from malca.stv.score import compute_event_score
 from concurrent.futures import ProcessPoolExecutor
-from malca.stats import median_dt, compute_stats, _enrich_row_worker
+from malca.core.stats import median_dt, compute_stats, _enrich_row_worker
 from malca.stv.tag import apply_tags
-from malca.table_io import read_feature_table, read_parquet_table, write_parquet_table
+from malca.io.table_io import read_feature_table, read_parquet_table, write_parquet_table
 from malca.stv.triggering import normalize_trigger_block
-from malca.utils import read_lc_dat2
+from malca.core.utils import read_lc_dat2
 
 
 

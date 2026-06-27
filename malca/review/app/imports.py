@@ -33,12 +33,15 @@ import pandas as pd
 import plotly.graph_objects as go
 
 from malca.config import GAIA_CHUNK_SIZE
-from malca.lightcurve_publication import PUBLICATION_PLOTLY_FONT
-from malca.phase import phase_template, template_phase_lag
+from malca.plotting.lightcurve_publication import PUBLICATION_PLOTLY_FONT
+from malca.core.phase import phase_template, template_phase_lag
 from malca.config import (
     BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
     CLEAN_LC_MAX_ERROR_ABSOLUTE,
     CLEAN_LC_MAX_ERROR_SIGMA,
+)
+from malca.external_lc_manifest import (
+    index_external_lc_paths_from_manifest as shared_index_external_lc_paths_from_manifest,
 )
 from malca.config import VSX_CROSSMATCH_PATH, GAIA_CACHE_FILE, DEFAULT_OUTPUT_DIR
 from malca.config import (
@@ -107,14 +110,16 @@ from malca.review.interactive_plot import (
     normalize_external_lc_dataframe,
 )
 from malca.review.lightcurve_publication import build_review_lightcurve_publication_pdf
+from malca.review.lightcurve_sources import clear_external_lc_discovery_caches
 from malca.review.keyboard import (
     HELP_TEXT,
     CLASS_KEY_MAP,
 )
 from malca.review.metadata import (
+    extract_review_metadata_feature_rows,
     extract_review_metadata_grouped,
-    is_group_default_open,
     build_external_lookup_links,
+    has_known_catalog_evidence,
     markdown_literal_unit_label,
 )
 from malca.review.cutouts import (
@@ -133,6 +138,8 @@ from malca.review.pipeline import run_missing_stages
 from malca.review.pipeline import update_candidate_payload
 from malca.review.period_search import (
     has_external_period as shared_has_external_period,
+    resolve_stored_review_period as shared_resolve_stored_review_period,
+    run_harmonic_check_for_payload as shared_run_harmonic_check_for_payload,
     run_period_search_for_payload as shared_run_period_search_for_payload,
 )
 from malca.review.dustycult_visualization import build_dustycult_occulter_figure
@@ -184,9 +191,10 @@ from malca.review.eda_panel import (
     queue_eda_frame,
     resolve_eda_metric_values,
     selected_candidate_from_queue,
+    selected_candidate_row_style,
     selected_row_style,
 )
-from malca.sed_model import load_sed_model_curves, load_sed_model_fits
+from malca.enrichment.sed_model import load_sed_model_curves, load_sed_model_fits
 
 
 

@@ -13,7 +13,7 @@ if "celerite2" not in sys.modules:
         terms=types.SimpleNamespace(SHOTerm=object),
     )
 
-from malca.lightcurve_publication import BAND_COLORS
+from malca.plotting.lightcurve_publication import BAND_COLORS
 from malca.review.lightcurve_assembly import ReviewPlotRequest, assemble_review_lightcurve_plot
 from malca.review.lightcurve_pdf import render_review_lightcurve_pdf
 from malca.review.lightcurve_plotly import render_review_lightcurve_plotly

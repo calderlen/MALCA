@@ -28,7 +28,7 @@ from tqdm.auto import tqdm
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from malca.fetch import cone_search, download_lightcurve_by_id
+from malca.io.fetch import cone_search, download_lightcurve_by_id
 from malca.config import DEFAULT_OUTPUT_DIR, SKYPATROL_CACHE_DIR
 
 

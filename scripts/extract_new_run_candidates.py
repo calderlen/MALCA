@@ -11,8 +11,8 @@ from pathlib import Path
 import pandas as pd
 
 from malca.config import DEFAULT_OUTPUT_DIR
-from malca.feature_layers import with_feature_columns
-from malca.table_io import read_feature_table
+from malca.products.feature_layers import with_feature_columns
+from malca.io.table_io import read_feature_table
 
 
 DEFAULT_COLUMNS = ("lc_path", "asas_sn_id", "mag_bin", "ra", "dec")

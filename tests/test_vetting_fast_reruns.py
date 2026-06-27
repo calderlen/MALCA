@@ -5,7 +5,7 @@ import sys
 import numpy as np
 import pandas as pd
 
-import malca.vetting as vetting
+import malca.enrichment.vetting as vetting
 
 
 def test_asassn_variables_local_csv_does_not_call_tap(monkeypatch, tmp_path) -> None:

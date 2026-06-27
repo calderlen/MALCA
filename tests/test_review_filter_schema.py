@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from malca.feature_layers import ALL_FEATURE_LAYER_COLUMNS
+from malca.products.feature_layers import ALL_FEATURE_LAYER_COLUMNS
 from malca.review.filter_schema import (
     REVIEW_FILTER_COLUMN_TYPES,
     REVIEW_TAXONOMY_FILTER_COLUMNS,

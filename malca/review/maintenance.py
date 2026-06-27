@@ -17,7 +17,7 @@ from malca.review.store import (
     merge_candidate_results,
     merge_vetting_results,
 )
-from malca.table_io import read_feature_table, read_parquet_table
+from malca.io.table_io import read_feature_table, read_parquet_table
 from malca.vsx.filter import colspecs as VSX_COLSPECS, vsx_columns as VSX_COLUMNS
 from malca.vsx.metadata import normalize_vsx_match_columns, select_best_vsx_matches
 

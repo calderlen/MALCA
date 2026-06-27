@@ -19,14 +19,14 @@ import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 
-from malca.lightcurve_publication import (
+from malca.plotting.lightcurve_publication import (
     apply_publication_rcparams,
     figsize_two_col_grid,
 )
 
 apply_publication_rcparams(plt)
 
-from malca.baseline import per_camera_gp_baseline_masked, phase_template_baseline
+from malca.core.baseline import per_camera_gp_baseline_masked, phase_template_baseline
 from malca.config import (
     BASELINE_JITTER,
     BASELINE_Q,
@@ -42,14 +42,14 @@ from malca.config import (
     SIGNIFICANCE_THRESHOLD,
 )
 from malca.stv.events import build_runs, filter_runs, score_events_bayesian, summarize_kept_runs
-from malca.lightcurve_publication import (
+from malca.plotting.lightcurve_publication import (
     plot_lightcurve_panel,
     plot_phase_panel,
     plot_residual_panel,
     style_publication_axis,
 )
 from malca.stv.triggering import posterior_probability_threshold, resolve_trigger_indices
-from malca.utils import clean_lc
+from malca.core.utils import clean_lc
 
 from malca.evaluation.periodic_branch_simulation_benchmark import (
     DEFAULT_MODE_NAMES,

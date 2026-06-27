@@ -175,6 +175,100 @@ def test_upsert_candidates_frame_derives_known_from_gaia_class(tmp_path: Path) -
     assert payload["gaia_var_class"] == "LPV"
 
 
+def test_upsert_candidates_frame_derives_known_from_definite_vsx_class(tmp_path: Path) -> None:
+    review_db = tmp_path / "review.db"
+
+    with db_connect(review_db) as conn:
+        upsert_candidates_frame(
+            conn,
+            pd.DataFrame(
+                [
+                    {
+                        "candidate_id": "VSX-EA",
+                        "asas_sn_id": "VSX-EA",
+                        "vsx_class": "EA",
+                        "vetting_likely_known": False,
+                    }
+                ]
+            ),
+        )
+        payload = get_candidate_payload(conn, "VSX-EA")
+
+    assert payload["vetting_likely_known"] is True
+    assert payload["vsx_class"] == "EA"
+
+
+def test_merge_candidate_results_derives_known_from_backfilled_vsx_class(tmp_path: Path) -> None:
+    review_db = tmp_path / "review.db"
+
+    with db_connect(review_db) as conn:
+        upsert_candidates_frame(
+            conn,
+            pd.DataFrame(
+                [
+                    {
+                        "candidate_id": "VSX-BACKFILL",
+                        "asas_sn_id": "300647863051",
+                        "vetting_likely_known": False,
+                    }
+                ]
+            ),
+        )
+        updated = merge_candidate_results(
+            conn,
+            pd.DataFrame(
+                [
+                    {
+                        "asas_sn_id": "300647863051",
+                        "vsx_class": "EA",
+                        "vsx_period": 1.7292,
+                    }
+                ]
+            ),
+            id_column="asas_sn_id",
+        )
+        payload = get_candidate_payload(conn, "VSX-BACKFILL")
+
+    assert updated == 1
+    assert payload["vetting_likely_known"] is True
+    assert payload["vsx_class"] == "EA"
+
+
+def test_get_candidate_payload_derives_known_from_existing_vsx_class_when_summary_is_stale(tmp_path: Path) -> None:
+    review_db = tmp_path / "review.db"
+
+    with db_connect(review_db) as conn:
+        upsert_candidates_frame(
+            conn,
+            pd.DataFrame(
+                [
+                    {
+                        "candidate_id": "STALE-VSX",
+                        "asas_sn_id": "STALE-VSX",
+                        "vsx_class": "EA",
+                        "vetting_likely_known": True,
+                    }
+                ]
+            ),
+        )
+        stale_payload = {
+            "candidate_id": "STALE-VSX",
+            "asas_sn_id": "STALE-VSX",
+            "vsx_class": "EA",
+            "vetting_likely_known": False,
+        }
+        conn.execute(
+            "UPDATE candidates SET vetting_likely_known=0, payload_json=? WHERE candidate_id=?",
+            (json.dumps(stale_payload), "STALE-VSX"),
+        )
+        conn.commit()
+
+        payload = get_candidate_payload(conn, "STALE-VSX")
+
+    assert payload["vetting_likely_known"] is True
+    assert payload["vsx_class"] == "EA"
+
+
 def test_merge_candidate_results_updates_candidate_fields_without_touching_reviews(tmp_path: Path) -> None:
     review_db = tmp_path / "review.db"
     _seed_review_db(

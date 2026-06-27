@@ -18,6 +18,11 @@ from malca.config import (
     REVIEW_MAX_EXTERNAL_POINTS,
     TESS_BTJD_OFFSET,
 )
+from malca.external_lc_manifest import (
+    clear_external_lc_manifest_caches,
+    index_external_lc_paths_from_manifest,
+    normalize_external_lc_file_prefix,
+)
 
 _MAX_EXTERNAL_TRACE_POINTS = REVIEW_MAX_EXTERNAL_POINTS
 
@@ -66,6 +71,17 @@ EXTERNAL_LC_SPECS: dict[str, dict] = {
         "filter_col": None,
         "mag_col": "flux",
         "err_col": "flux_err",
+    },
+    "neowise": {
+        "time_col": "mjd",
+        "jd_system": "mjd",
+        "bands": {
+            "W1": {"color": "#4fa3ff", "marker": "x", "label": "NEOWISE W1", "mag_col": "w1mpro", "err_col": "w1sigmpro"},
+            "W2": {"color": "#ff8c42", "marker": "x", "label": "NEOWISE W2", "mag_col": "w2mpro", "err_col": "w2sigmpro"},
+        },
+        "filter_col": None,
+        "mag_col": "w1mpro",
+        "err_col": "w1sigmpro",
     },
     "neowise_w1": {
         "time_col": "mjd",
@@ -199,7 +215,7 @@ EXTERNAL_LC_SPECS: dict[str, dict] = {
 }
 
 EXTERNAL_SOURCE_ORDER = (
-    "asassn", "atlas", "ztf", "gaia_epoch", "tess", "neowise_w1", "neowise_w2", "neowise_color",
+    "asassn", "atlas", "ztf", "gaia_epoch", "tess", "neowise", "neowise_w1", "neowise_w2", "neowise_color",
     "kepler", "aavso", "ogle", "stripe82", "allwise_mep", "vvvx_virac",
     "ps1", "crts",
 )
@@ -209,6 +225,7 @@ EXTERNAL_SOURCE_LABELS = {
     "ztf": "ZTF",
     "gaia_epoch": "Gaia Epoch",
     "tess": "TESS",
+    "neowise": "NEOWISE W1/W2",
     "neowise_w1": "NEOWISE W1",
     "neowise_w2": "NEOWISE W2",
     "neowise_color": "NEOWISE W1-W2",
@@ -263,7 +280,7 @@ def coerce_external_source_values(raw_value: object) -> list[str]:
         
         texts = [text]
         if text in {"wise", "neowise", "wise_w1_w2"}:
-            texts = ["neowise_w1", "neowise_w2"]
+            texts = ["neowise"]
         elif text in {"w1", "wise_w1"}:
             texts = ["neowise_w1"]
         elif text in {"w2", "wise_w2"}:
@@ -349,15 +366,13 @@ def _resolve_run_dir_from_plot_dir_cached(plot_dir_text: str) -> str | None:
 @lru_cache(maxsize=64)
 def index_external_lc_paths_from_root(root_text: str, prefix: str) -> dict[str, str]:
     """Index candidate -> external LC parquet paths for a results root."""
-    root = Path(root_text)
-    mapping: dict[str, str] = {}
-    if not root.exists():
-        return mapping
-    for parquet_path in root.rglob(f"{prefix}_lc_*.parquet"):
-        candidate_id = parquet_path.stem.replace(f"{prefix}_lc_", "")
-        if candidate_id:
-            mapping[candidate_id] = str(parquet_path)
-    return mapping
+    return index_external_lc_paths_from_manifest(str(Path(root_text).expanduser()), prefix)
+
+
+def clear_external_lc_discovery_caches() -> None:
+    """Clear review-side external LC discovery caches."""
+    index_external_lc_paths_from_root.cache_clear()
+    clear_external_lc_manifest_caches()
 
 
 def discover_external_lcs(
@@ -388,7 +403,7 @@ def discover_external_lcs(
         if prefix in found:
             continue
             
-        file_prefix = "neowise" if prefix in ("neowise_w1", "neowise_w2", "neowise_color", "neowise") else prefix
+        file_prefix = normalize_external_lc_file_prefix(prefix)
 
         if file_prefix in file_prefix_map:
             found[prefix] = file_prefix_map[file_prefix]

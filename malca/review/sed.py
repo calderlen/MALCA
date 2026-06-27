@@ -17,7 +17,7 @@ import plotly.graph_objects as go
 from astropy import units as u
 
 from malca.config import DEFAULT_CACHE_DIR, PARQUET_CACHE_COMPRESSION
-from malca.lightcurve_publication import PUBLICATION_PLOTLY_FONT
+from malca.plotting.lightcurve_publication import PUBLICATION_PLOTLY_FONT
 
 SED_TABLE_NAME = "sed_photometry"
 VIZIER_QUERY_TIMEOUT_SEC = 30

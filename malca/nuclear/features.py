@@ -6,7 +6,7 @@ import math
 import numpy as np
 import pandas as pd
 
-from malca.lightcurve_io import normalize_asassn_lightcurve
+from malca.io.lightcurve_io import normalize_asassn_lightcurve
 
 
 def _robust_sigma(values: pd.Series) -> float:

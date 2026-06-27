@@ -11,7 +11,7 @@ from tqdm.auto import tqdm
 
 from malca.config import LTV_WORKERS
 from malca.config import SKYPATROL_JD_OFFSET
-from malca.utils import clean_lc, read_lc_dat2
+from malca.core.utils import clean_lc, read_lc_dat2
 
 
 STOCHASTIC_COLUMNS = [
@@ -34,7 +34,7 @@ def _empty_stochastic_result() -> dict[str, float]:
 
 def _load_stochastic_functions(include_drw: bool) -> dict[str, object]:
     try:
-        from malca.stats import structure_function, iar_phi_fit, mhps
+        from malca.core.stats import structure_function, iar_phi_fit, mhps
 
         funcs: dict[str, object] = {
             "structure_function": structure_function,
@@ -42,7 +42,7 @@ def _load_stochastic_functions(include_drw: bool) -> dict[str, object]:
             "mhps": mhps,
         }
         if include_drw:
-            from malca.stats import fit_drw
+            from malca.core.stats import fit_drw
 
             funcs["fit_drw"] = fit_drw
         return funcs

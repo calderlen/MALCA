@@ -382,6 +382,8 @@ def _fetch_candidate_impl(set_progress, n_clicks, fetch_type, fetch_query, fetch
         cid = str(df.iloc[0]['candidate_id']) if 'candidate_id' in df.columns else effective_query
         _index_external_lc_paths.cache_clear()
         _index_external_lc_paths_from_root.cache_clear()
+        _index_neowise_paths.cache_clear()
+        clear_external_lc_discovery_caches()
         
         auto_run = no_update
         if fetch_mode in ('full', 'full_ext'):
@@ -567,4 +569,3 @@ def render_pipeline_module_log(log_data):
     if not lines:
         return "No pipeline run log yet."
     return "\n".join(lines[-300:])
-

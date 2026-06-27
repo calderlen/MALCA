@@ -19,7 +19,7 @@ if "iar.IARModel" not in sys.modules:
     sys.modules["iar"] = fake_iar_pkg
     sys.modules["iar.IARModel"] = fake_iar_model
 
-import malca.stats as stats
+import malca.core.stats as stats
 
 
 def _identity_baseline(df: pd.DataFrame, **kwargs) -> pd.DataFrame:

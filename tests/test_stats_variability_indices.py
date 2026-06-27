@@ -26,9 +26,9 @@ from malca.config import (
     STETSON_REWEIGHT_MIN_ITERS,
     STETSON_REWEIGHT_RTOL,
 )
-from malca.feature_layers import feature_mapping_get
+from malca.products.feature_layers import feature_mapping_get
 from malca.review.stats_merge import merge_stats_summary_into_payload
-from malca.stats import (
+from malca.core.stats import (
     inverse_von_neumann_ratio,
     paper_iqr,
     paper_stetson_indices,

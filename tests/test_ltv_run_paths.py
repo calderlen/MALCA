@@ -9,11 +9,11 @@ from pathlib import Path
 
 import pandas as pd
 
-from malca.audit import ltv_status
+from malca.evaluation.audit import ltv_status
 from malca.config import DEFAULT_OUTPUT_DIR
-from malca.feature_layers import with_feature_columns
+from malca.products.feature_layers import with_feature_columns
 from malca.ltv import pipeline as ltv_pipeline
-from malca.table_io import read_feature_table, write_feature_table
+from malca.io.table_io import read_feature_table, write_feature_table
 
 
 def _write_review_db(path: Path, *, candidate_rows: int = 2, review_rows: int = 1) -> None:
@@ -227,7 +227,7 @@ def test_ltv_external_lcs_verbose_survives_closed_stdout(monkeypatch, tmp_path: 
     monkeypatch.setattr(ltv_pipeline, "_run_core_if_needed", fake_run_core)
     monkeypatch.setattr(ltv_pipeline, "run_full_pipeline", fake_run_full_pipeline)
     monkeypatch.setattr("malca.ltv.review.ingest_ltv_results", fake_ingest)
-    monkeypatch.setattr("malca.vetting.fetch_external_lcs", fake_fetch_external_lcs)
+    monkeypatch.setattr("malca.enrichment.vetting.fetch_external_lcs", fake_fetch_external_lcs)
 
     closed_stdout = io.StringIO()
     closed_stdout.close()

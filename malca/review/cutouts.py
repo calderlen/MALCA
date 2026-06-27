@@ -6,7 +6,7 @@ import math
 import re
 from urllib.parse import urlencode
 
-from malca.feature_layers import FEATURE_LAYER_COLUMNS, parse_layer_value
+from malca.products.feature_layers import FEATURE_LAYER_COLUMNS, parse_layer_value
 from malca.nuclear.targets import DEC_ALIASES, RA_ALIASES
 
 

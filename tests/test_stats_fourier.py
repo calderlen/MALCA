@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import numpy as np
 
-from malca.feature_layers import feature_mapping_get
+from malca.products.feature_layers import feature_mapping_get
 from malca.review.stats_merge import merge_stats_summary_into_payload
-from malca.stats import fit_fourier_decomposition
+from malca.core.stats import fit_fourier_decomposition
 
 
 def _wrap_2pi(angle: float) -> float:

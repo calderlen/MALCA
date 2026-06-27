@@ -31,7 +31,7 @@ from malca.review.sed import (
 )
 from malca.review.pipeline import detect_sed_model_status, detect_sed_photometry_status, run_missing_stages
 from malca.review.store import db_connect
-from malca.sed_model import (
+from malca.enrichment.sed_model import (
     SED_MODEL_CURVE_COLUMNS,
     SED_MODEL_FIT_COLUMNS,
     load_sed_model_curves,
@@ -441,7 +441,7 @@ def test_sed_model_stage_failure_is_not_marked_complete(tmp_path: Path, monkeypa
     def fail_fit(*_args, **_kwargs):
         raise RuntimeError("kurucz grid missing")
 
-    monkeypatch.setattr("malca.sed_model.fit_sed_models", fail_fit)
+    monkeypatch.setattr("malca.enrichment.sed_model.fit_sed_models", fail_fit)
     log_lines: list[str] = []
     completed: list[str] = []
 
@@ -516,7 +516,7 @@ def test_sed_model_stage_uses_payload_sed_rows_when_sidecar_is_empty(tmp_path: P
         )
         return pd.DataFrame([fit]), pd.DataFrame([curve])
 
-    monkeypatch.setattr("malca.sed_model.fit_sed_models", fake_fit)
+    monkeypatch.setattr("malca.enrichment.sed_model.fit_sed_models", fake_fit)
     log_lines: list[str] = []
 
     with closing(db_connect(db_path)) as conn:

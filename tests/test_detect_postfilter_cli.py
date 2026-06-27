@@ -34,7 +34,7 @@ from malca.stv.pipeline import (
     main as detect_main,
 )
 from malca.config import EVENTS_OUTPUT_CHUNK_SIZE
-from malca.table_io import write_feature_table
+from malca.io.table_io import write_feature_table
 
 
 def _base_args() -> argparse.Namespace:
@@ -175,8 +175,8 @@ def test_extended_enrichment_helpers_use_passers_and_safe_defaults(tmp_path: Pat
         out["ms_feature_status"] = "ok"
         return out
 
-    monkeypatch.setattr("malca.vetting.fetch_external_lcs", fake_fetch_external_lcs)
-    monkeypatch.setattr("malca.multi_survey_features.compute_multi_survey_features", fake_compute_multi_survey_features)
+    monkeypatch.setattr("malca.enrichment.vetting.fetch_external_lcs", fake_fetch_external_lcs)
+    monkeypatch.setattr("malca.enrichment.multi_survey_features.compute_multi_survey_features", fake_compute_multi_survey_features)
 
     df = pd.DataFrame({
         "candidate_id": ["C1", "C2"],

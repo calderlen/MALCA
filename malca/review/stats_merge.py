@@ -1,4 +1,4 @@
-"""Helpers for mapping `malca.stats.compute_stats()` output into review payloads.
+"""Helpers for mapping `malca.core.stats.compute_stats()` output into review payloads.
 
 This is split out from `malca.review.pipeline` so that lightweight callers
 (`malca.review.fetch`, CLI helpers, etc.) can enrich payloads without importing
@@ -10,8 +10,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from malca.derived_stats import DERIVED_FEATURE_COLUMNS, append_derived_features
-from malca.feature_layers import to_layer_first_mapping
+from malca.core.derived_stats import DERIVED_FEATURE_COLUMNS, append_derived_features
+from malca.products.feature_layers import to_layer_first_mapping
 
 
 def _is_missing_value(value: object) -> bool:

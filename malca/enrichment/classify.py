@@ -1,0 +1,673 @@
+"""
+Dipper Classification Module
+
+Implements classification scenarios from Tzanidakis et al. (2025):
+- Eclipsing Binary (EB) rejection
+- Cataclysmic Variable (CV) rejection  
+- Starspot rejection
+- YSO classification (Koenig & Leisawitz 2014)
+- Circumstellar material estimation
+- Disk occultation probability
+
+Usage:
+    malca classify --input output/events.parquet --output output/classified.parquet
+"""
+from pathlib import Path
+import argparse
+import os
+
+from astropy.coordinates import SkyCoord
+from astroquery.mast import Catalogs
+from astroquery.vizier import Vizier
+from tqdm import tqdm
+import astropy.units as u
+import numpy as np
+import pandas as pd
+
+from malca.config import (
+    SOLAR_MASS_KG, SOLAR_RADIUS_M, AU_M, DAY_S,
+    GRAVITATIONAL_CONSTANT_SI, EARTH_MASS_KG,
+    EB_SHORT_DIP_DAYS, EB_LONG_DIP_DAYS, EB_SHORT_P, EB_LONG_P, EB_VERY_LONG_P,
+    EB_PERIODIC_BONUS, EB_SYMMETRIC_BONUS, EB_BINARY_BONUS, EB_ASYMMETRY_THRESHOLD,
+    CV_BP_RP_THRESHOLD, CV_G_ABS_THRESHOLD, CV_BASE_P,
+    CV_HA_EW_THRESHOLD, CV_HA_BONUS, CV_KNOWN_P,
+    STARSPOT_SMALL_AMP, STARSPOT_MEDIUM_AMP, STARSPOT_SMALL_P,
+    STARSPOT_MEDIUM_P, STARSPOT_LARGE_P, STARSPOT_ROTATION_PERIOD_DAYS,
+    YSO_CLASS_I_W1W2, YSO_CLASS_II_W1W2_MIN, YSO_CLASS_II_HK,
+    YSO_DUST_CORRECTION_HK, YSO_DUST_CORRECTION_W1W2,
+    DISK_BASE_P, DISK_LARGE_A_AU, DISK_VERY_LARGE_A_AU,
+    DISK_LARGE_A_P, DISK_VERY_LARGE_A_P, DISK_LARGE_HILL_BONUS,
+    DISK_NO_IR_EXCESS_BONUS, DISK_P_CAP,
+    CLASSIFY_EB_THRESHOLD, CLASSIFY_CV_THRESHOLD, CLASSIFY_STARSPOT_THRESHOLD,
+    CLASSIFY_DISK_THRESHOLD, CLASSIFY_MS_EB_REJECTION, CLASSIFY_MS_CV_REJECTION,
+    CLASSIFY_IPHAS_RADIUS_ARCSEC, CLASSIFY_PS1_RADIUS_ARCSEC,
+)
+from malca.products.candidates import select_passing_candidates_if_present
+from malca.io.table_io import read_feature_table, write_feature_table
+from malca.config import VIZIER_TAP_URL
+from malca.core.utils import batch_tap_crossmatch
+
+
+
+
+
+
+# =============================================================================
+# ECLIPSING BINARY REJECTION
+# =============================================================================
+
+def check_eb_contamination(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Test for eclipsing binary contamination.
+    
+    Checks:
+    1. Light curve asymmetry (EBs are symmetric)
+    2. Dip duration vs Keplerian expectations
+    3. Transit probability at required separation
+    
+    Returns df with columns: P_eb, eb_notes
+    """
+    df = df.copy()
+    df['P_eb'] = 0.0
+    df['eb_notes'] = ''
+    
+    # Get required columns
+    has_asymmetry = 'asymmetry' in df.columns or 'skewness' in df.columns
+    has_duration = 'event_duration_days' in df.columns or 'timescale_days' in df.columns
+    has_stellar = 'mass50' in df.columns or 'teff_gspphot' in df.columns
+    
+    if not has_duration:
+        df['eb_notes'] = 'No duration data'
+        return df
+    
+    # Get duration column
+    dur_col = 'event_duration_days' if 'event_duration_days' in df.columns else 'timescale_days'
+    duration_days = df[dur_col].fillna(1.0)
+    
+    # Estimate stellar mass (default to 1 M_sun)
+    if 'mass50' in df.columns:
+        M_star = df['mass50'].fillna(1.0)
+    else:
+        M_star = 1.0
+    
+    # Estimate stellar radius (default to 1 R_sun)
+    if 'radius' in df.columns:
+        R_star = df['radius'].fillna(1.0)
+    else:
+        R_star = 1.0
+    
+    # For EB with semimajor axis ~1.8 AU (to explain single eclipse in 2.5yr baseline)
+    # Eclipse duration ~ 1.5 days for tangential velocity of 21 km/s
+    # If observed duration >> 1.5 days, EB is unlikely
+    
+    # Expected EB duration for a = 1.8 AU
+    v_tang = 21  # km/s for 2.5yr period
+    expected_eb_duration = 2 * R_star * SOLAR_RADIUS_M / (v_tang * 1000) / DAY_S
+    
+    # Dips lasting weeks-months require 10-10000 AU separations
+    # Transit probability at such separations: 10^-4 to 10^-7
+    
+    # Simple heuristic: if duration > EB_SHORT_DIP_DAYS, unlikely to be EB
+    long_dip = duration_days > EB_SHORT_DIP_DAYS
+    very_long_dip = duration_days > EB_LONG_DIP_DAYS
+
+    # Assign probabilities
+    df.loc[~long_dip, 'P_eb'] = EB_SHORT_P  # Short dips could be EBs
+    df.loc[long_dip, 'P_eb'] = EB_LONG_P  # Long dips unlikely EBs
+    df.loc[very_long_dip, 'P_eb'] = EB_VERY_LONG_P  # Very long dips very unlikely EBs
+    
+    # Check for periodicity if available
+    if 'is_periodic' in df.columns:
+        periodic = df['is_periodic'] == True
+        df.loc[periodic, 'P_eb'] = np.minimum(df.loc[periodic, 'P_eb'] + EB_PERIODIC_BONUS, 1.0)
+        df.loc[periodic, 'eb_notes'] += 'Periodic; '
+    
+    # Check for symmetry if available
+    if 'asymmetry' in df.columns:
+        symmetric = np.abs(df['asymmetry']) < EB_ASYMMETRY_THRESHOLD
+        df.loc[symmetric, 'P_eb'] = np.minimum(df.loc[symmetric, 'P_eb'] + EB_SYMMETRIC_BONUS, 1.0)
+        df.loc[symmetric, 'eb_notes'] += 'Symmetric; '
+    
+    # Gaia binary flag
+    if 'non_single_star' in df.columns:
+        binary = df['non_single_star'] > 0
+        df.loc[binary, 'P_eb'] = np.minimum(df.loc[binary, 'P_eb'] + EB_BINARY_BONUS, 1.0)
+        df.loc[binary, 'eb_notes'] += 'Gaia binary; '
+    
+    return df
+
+
+# =============================================================================
+# EXTERNAL CATALOG QUERIES (IPHAS, PS1)
+# =============================================================================
+
+def query_iphas_by_coords(df: pd.DataFrame, radius_arcsec: float = CLASSIFY_IPHAS_RADIUS_ARCSEC) -> pd.DataFrame:
+    """
+    Query IPHAS DR2 for Hα photometry using batch VizieR TAP upload.
+    
+    IPHAS covers Northern Galactic Plane: -5° < b < 5°, 30° < l < 215°
+    Returns r, i, Hα magnitudes and r-Hα color
+    """
+
+
+
+    if 'ra' not in df.columns or 'dec' not in df.columns:
+        print("Warning: No ra/dec for IPHAS query")
+        return df
+    
+    df = df.copy()
+    df['iphas_r'] = np.nan
+    df['iphas_i'] = np.nan
+    df['iphas_ha'] = np.nan
+    df['r_ha'] = np.nan
+    df['ha_ew'] = np.nan
+
+    valid = df['ra'].notna() & df['dec'].notna()
+    if not valid.any():
+        return df
+
+    print(f"Querying IPHAS for {int(valid.sum())} sources via TAP...")
+
+    coords_df = pd.DataFrame({
+        "_idx": df.index[valid],
+        "ra": df.loc[valid, "ra"].values,
+        "dec": df.loc[valid, "dec"].values,
+    })
+
+    result = batch_tap_crossmatch(
+        coords_df,
+        tap_url=VIZIER_TAP_URL,
+        catalog_table='"II/321/iphas2"',
+        select_cols='c.rmag, c.imag, c."Hamag"',
+        ra_col="RAJ2000",
+        dec_col="DEJ2000",
+        match_radius_arcsec=radius_arcsec,
+        chunk_size=1000,
+        n_workers=4,
+        verbose=True,
+        desc="IPHAS TAP",
+    )
+
+    if not result.empty:
+        result = result.sort_values("sep_arcsec").drop_duplicates(subset="_idx", keep="first")
+        for _, row in result.iterrows():
+            idx = int(row["_idx"])
+            if idx in df.index:
+                r = float(row["rmag"]) if pd.notna(row.get("rmag")) else np.nan
+                i = float(row["imag"]) if pd.notna(row.get("imag")) else np.nan
+                ha = float(row["Hamag"]) if pd.notna(row.get("Hamag")) else np.nan
+                df.loc[idx, 'iphas_r'] = r
+                df.loc[idx, 'iphas_i'] = i
+                df.loc[idx, 'iphas_ha'] = ha
+                if not pd.isna(r) and not pd.isna(ha):
+                    df.loc[idx, 'r_ha'] = r - ha
+
+    n_found = df['iphas_r'].notna().sum()
+    print(f"Found IPHAS photometry for {n_found}/{len(df)} sources")
+    
+    return df
+
+
+def query_ps1_by_coords(df: pd.DataFrame, radius_arcsec: float = CLASSIFY_PS1_RADIUS_ARCSEC) -> pd.DataFrame:
+    """
+    Query Pan-STARRS1 for grizy photometry using MAST.
+    
+    PS1 covers 3π sky (dec > -30°)
+    Returns g, r, i, z, y PSF magnitudes
+    """
+    if 'ra' not in df.columns or 'dec' not in df.columns:
+        print("Warning: No ra/dec for PS1 query")
+        return df
+    
+    df = df.copy()
+    for band in ['g', 'r', 'i', 'z', 'y']:
+        df[f'ps1_{band}'] = np.nan
+
+    print(f"Querying PS1 for {len(df)} sources...")
+    
+    for idx in tqdm(df.index, desc="PS1"):
+        ra, dec = df.loc[idx, 'ra'], df.loc[idx, 'dec']
+        if pd.isna(ra) or pd.isna(dec):
+            continue
+            
+        try:
+            result = Catalogs.query_region(
+                f"{ra} {dec}",
+                radius=radius_arcsec/3600,  # degrees
+                catalog="Panstarrs",
+                table="mean"
+            )
+            
+            if result and len(result) > 0:
+                row = result[0]
+                for band in ['g', 'r', 'i', 'z', 'y']:
+                    col = f'{band}MeanPSFMag'
+                    if col in row.colnames:
+                        df.loc[idx, f'ps1_{band}'] = row[col]
+        except Exception:
+            continue
+    
+    n_found = df['ps1_g'].notna().sum()
+    print(f"Found PS1 photometry for {n_found}/{len(df)} sources")
+    
+    return df
+
+
+# =============================================================================
+# CATACLYSMIC VARIABLE REJECTION
+# =============================================================================
+
+def check_cv_contamination(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Test for CV contamination using color-color locus.
+    
+    Checks:
+    1. PS1 grizy colors vs main sequence locus
+    2. Hα excess (if IPHAS data available)
+    3. Gaia CMD position (CVs between MS and WD cooling sequence)
+    
+    Returns df with columns: P_cv, cv_notes
+    """
+    df = df.copy()
+    df['P_cv'] = 0.0
+    df['cv_notes'] = ''
+    
+    # Check Gaia CMD position
+    # CVs typically have: G_abs > 4 and BP-RP < 0.5 (blue, faint)
+    has_gaia = 'phot_g_mean_mag' in df.columns and 'bp_rp' in df.columns
+    
+    if has_gaia and 'distance_gspphot' in df.columns:
+        valid = df['distance_gspphot'].notna() & (df['distance_gspphot'] > 0)
+        dist_pc = df.loc[valid, 'distance_gspphot']
+        G_abs = df.loc[valid, 'phot_g_mean_mag'] - 5 * np.log10(dist_pc / 10)
+        bp_rp = df.loc[valid, 'bp_rp']
+        
+        # CV region: blue (BP-RP < CV_BP_RP_THRESHOLD) and faint (G_abs > CV_G_ABS_THRESHOLD)
+        cv_like = (bp_rp < CV_BP_RP_THRESHOLD) & (G_abs > CV_G_ABS_THRESHOLD)
+        df.loc[valid, 'P_cv'] = np.where(cv_like, CV_BASE_P, 0.01)
+
+        # cv_like is indexed only over the valid-distance subset; use its index
+        # to avoid boolean mask shape mismatches when some rows are invalid.
+        cv_like_idx = cv_like[cv_like].index
+        df.loc[cv_like_idx, 'cv_notes'] += 'Blue+faint in CMD; '
+    
+    # Check Hα if IPHAS data available
+    if 'ha_ew' in df.columns:
+        ha_excess = df['ha_ew'] > CV_HA_EW_THRESHOLD  # Å
+        df.loc[ha_excess, 'P_cv'] = np.minimum(df.loc[ha_excess, 'P_cv'] + CV_HA_BONUS, 1.0)
+        df.loc[ha_excess, 'cv_notes'] += 'Hα excess; '
+    
+    # Check for known CV catalogs
+    if 'is_known_cv' in df.columns:
+        df.loc[df['is_known_cv'], 'P_cv'] = CV_KNOWN_P
+        df.loc[df['is_known_cv'], 'cv_notes'] += 'Known CV; '
+    
+    return df
+
+
+# =============================================================================
+# STARSPOT REJECTION
+# =============================================================================
+
+def check_starspot_contamination(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Test for starspot-induced variability.
+    
+    Checks:
+    1. Amplitude (starspots cause ~few % variations, not >0.1 mag)
+    2. Timescale (starspots modulate on rotation periods: hours-days)
+    
+    Returns df with columns: P_starspot, starspot_notes
+    """
+    df = df.copy()
+    df['P_starspot'] = 0.0
+    df['starspot_notes'] = ''
+    
+    # Get dip amplitude
+    if 'event_depth_mag' in df.columns:
+        depth = df['event_depth_mag'].fillna(0.1)
+    elif 'max_depth' in df.columns:
+        depth = df['max_depth'].fillna(0.1)
+    else:
+        df['starspot_notes'] = 'No depth data'
+        return df
+    
+    # Starspots typically cause <0.05 mag variations
+    # Dips >0.1 mag are unlikely to be starspots
+    
+    small_amp = depth < STARSPOT_SMALL_AMP
+    medium_amp = (depth >= STARSPOT_SMALL_AMP) & (depth < STARSPOT_MEDIUM_AMP)
+    large_amp = depth >= STARSPOT_MEDIUM_AMP
+
+    df.loc[small_amp, 'P_starspot'] = STARSPOT_SMALL_P
+    df.loc[small_amp, 'starspot_notes'] += 'Small amplitude; '
+
+    df.loc[medium_amp, 'P_starspot'] = STARSPOT_MEDIUM_P
+    df.loc[large_amp, 'P_starspot'] = STARSPOT_LARGE_P
+    
+    # Timescale check
+    dur_col = None
+    for col in ['event_duration_days', 'timescale_days', 'duration']:
+        if col in df.columns:
+            dur_col = col
+            break
+    
+    if dur_col:
+        duration = df[dur_col].fillna(10)
+        # Starspot rotation periods are typically hours to ~STARSPOT_ROTATION_PERIOD_DAYS days
+        short_timescale = duration < STARSPOT_ROTATION_PERIOD_DAYS
+        df.loc[short_timescale, 'P_starspot'] = np.minimum(
+            df.loc[short_timescale, 'P_starspot'] + STARSPOT_MEDIUM_P, 1.0
+        )
+    
+    return df
+
+
+# =============================================================================
+# YSO CLASSIFICATION
+# =============================================================================
+
+def classify_yso(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Classify YSO candidates using 2MASS-WISE IR colors.
+    Following Koenig & Leisawitz (2014).
+    
+    Returns df with columns: yso_class, H_K, w1_w2
+    """
+    df = df.copy()
+    
+    # Map columns
+    col_map = {
+        'H': ['Hmag', 'tmass_h'], 
+        'K': ['Kmag', 'tmass_k'], 
+        'W1': ['w1', 'W1mag', 'w1mpro'], 
+        'W2': ['w2', 'W2mag', 'w2mpro']
+    }
+    
+    vals = {}
+    for bands, candidates in col_map.items():
+        found = None
+        for c in candidates:
+            if c in df.columns:
+                found = c
+                break
+        vals[bands] = found
+        
+    if not all(vals.values()):
+        df['yso_class'] = 'unknown'
+        return df
+        
+    H = df[vals['H']]
+    K = df[vals['K']]
+    W1 = df[vals['W1']]
+    W2 = df[vals['W2']]
+        
+    hk_color = H - K
+    w1w2_color = W1 - W2
+    
+    # Dust correction if available
+    if 'A_v_3d' in df.columns and df['A_v_3d'].sum() > 0:
+        av = df['A_v_3d'].fillna(0.0)
+        hk_color = hk_color - (YSO_DUST_CORRECTION_HK * av)
+        w1w2_color = w1w2_color - (YSO_DUST_CORRECTION_W1W2 * av)
+    
+    df['H_K'] = hk_color 
+    df['w1_w2'] = w1w2_color
+    
+    # Classification
+    class_i = df['w1_w2'] > YSO_CLASS_I_W1W2
+    class_ii = ((df['w1_w2'] > YSO_CLASS_II_W1W2_MIN) & (df['w1_w2'] < YSO_CLASS_I_W1W2) & (df['H_K'] > YSO_CLASS_II_HK))
+    trans = ((df['w1_w2'] > YSO_CLASS_II_W1W2_MIN) & (df['w1_w2'] < YSO_CLASS_I_W1W2) & (df['H_K'] < YSO_CLASS_II_HK))
+    ms = df['w1_w2'] < YSO_CLASS_II_W1W2_MIN
+    
+    df['yso_class'] = 'unknown'
+    df.loc[class_i, 'yso_class'] = 'Class I'
+    df.loc[class_ii, 'yso_class'] = 'Class II'
+    df.loc[trans, 'yso_class'] = 'Transition Disk'
+    df.loc[ms, 'yso_class'] = 'Main Sequence'
+    
+    return df
+
+
+# =============================================================================
+# CIRCUMSTELLAR MATERIAL ESTIMATION
+# =============================================================================
+
+def estimate_semimajor_axis(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Estimate upper limit on semimajor axis of occulting material.
+    
+    Based on Tzanidakis et al. (2025) Eq. 11:
+    a_circ ∝ M*^(1/2) * (S + R*)^(1/2) * Δt
+    
+    Assumes:
+    - Circular equatorial transit
+    - Opaque occulter
+    - Occulter mass << stellar mass
+    
+    Returns df with columns: a_circ_au, transit_prob, hill_radius_rsun
+    """
+    df = df.copy()
+    df['a_circ_au'] = np.nan
+    df['transit_prob'] = np.nan
+    df['hill_radius_rsun'] = np.nan
+    
+    # Get dip depth
+    if 'event_depth_mag' in df.columns:
+        tau = 1 - 10**(-0.4 * df['event_depth_mag'].fillna(0.1))
+    elif 'max_depth' in df.columns:
+        tau = df['max_depth'].fillna(0.1)
+    else:
+        return df
+    
+    # Get duration
+    dur_col = None
+    for col in ['event_duration_days', 'timescale_days', 'duration']:
+        if col in df.columns:
+            dur_col = col
+            break
+    
+    if dur_col is None:
+        return df
+        
+    dt_days = df[dur_col].fillna(10)
+    
+    # Stellar mass (default 1 M_sun)
+    if 'mass50' in df.columns:
+        M_star = df['mass50'].fillna(1.0)
+    else:
+        M_star = 1.0
+    
+    # Stellar radius (default 1 R_sun)
+    if 'radius' in df.columns:
+        R_star = df['radius'].fillna(1.0)
+    else:
+        R_star = 1.0
+    
+    # Occulter size estimate (assume S ~ R* * sqrt(tau))
+    S = R_star * np.sqrt(tau)
+    
+    # Semimajor axis (simplified Keplerian)
+    # v = 2π * a / P, transit duration ~ 2(S+R*)/v
+    # Solving: a ~ [M* * (S+R*) * dt]^(1/2) in appropriate units
+    
+    # Using Kepler's 3rd law: P = 2π * sqrt(a^3 / GM)
+    # Transit duration ~ 2(S+R*) * P / (2π * a) = (S+R*) * sqrt(a / GM)
+    # Solving for a: a = (GM * dt^2) / (S+R*)^2
+    
+    M_kg = M_star * SOLAR_MASS_KG
+    R_m = R_star * SOLAR_RADIUS_M
+    S_m = S * SOLAR_RADIUS_M
+    dt_s = dt_days * DAY_S
+    
+    # a = GM * dt^2 / (S+R)^2
+    a_m = (GRAVITATIONAL_CONSTANT_SI * M_kg * dt_s**2) / ((S_m + R_m)**2)
+    a_au = a_m / AU_M
+    
+    df['a_circ_au'] = a_au
+    
+    # Transit probability: P ~ (R* + R_occulter) / a
+    df['transit_prob'] = (R_m + S_m) / a_m
+    
+    # Hill radius for 1 Earth mass at estimated a
+    # R_H = a * (M_planet / 3*M_star)^(1/3)
+    r_hill_m = a_m * (EARTH_MASS_KG / (3 * M_kg))**(1/3)
+    df['hill_radius_rsun'] = r_hill_m / SOLAR_RADIUS_M
+    
+    return df
+
+
+# =============================================================================
+# DISK OCCULTATION PROBABILITY
+# =============================================================================
+
+def estimate_disk_probability(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Estimate probability of disk occultation scenario.
+    
+    Favorable conditions:
+    - Large semimajor axis (>2 AU)
+    - Sufficient Hill radius for disk
+    - No hot disk detected in WISE
+    
+    Returns df with column: P_disk
+    """
+    df = df.copy()
+    df['P_disk'] = DISK_BASE_P  # Base probability
+
+    # Check semimajor axis
+    if 'a_circ_au' in df.columns:
+        large_a = df['a_circ_au'] > DISK_LARGE_A_AU
+        very_large_a = df['a_circ_au'] > DISK_VERY_LARGE_A_AU
+
+        df.loc[large_a, 'P_disk'] = DISK_LARGE_A_P
+        df.loc[very_large_a, 'P_disk'] = DISK_VERY_LARGE_A_P
+
+    # Check Hill radius
+    if 'hill_radius_rsun' in df.columns:
+        large_hill = df['hill_radius_rsun'] > 10
+        df.loc[large_hill, 'P_disk'] += DISK_LARGE_HILL_BONUS
+
+    # Check WISE upper limits (no hot disk)
+    # If W3/W4 not detected, consistent with cool/no disk
+    if 'w1' in df.columns and 'w2' in df.columns:
+        no_ir_excess = df['w1_w2'] < YSO_CLASS_II_W1W2_MIN if 'w1_w2' in df.columns else True
+        if isinstance(no_ir_excess, pd.Series):
+            df.loc[no_ir_excess, 'P_disk'] += DISK_NO_IR_EXCESS_BONUS
+
+    # Cap at DISK_P_CAP (never fully certain without RV confirmation)
+    df['P_disk'] = df['P_disk'].clip(upper=DISK_P_CAP)
+    
+    return df
+
+
+# =============================================================================
+# MASTER CLASSIFICATION
+# =============================================================================
+
+def compute_all_classifications(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Run all classifiers and compute final classification.
+    
+    Returns df with:
+    - P_eb, P_cv, P_starspot, P_disk
+    - yso_class
+    - a_circ_au, transit_prob, hill_radius_rsun
+    - final_class (most likely classification)
+    """
+    print("Running EB contamination check...")
+    df = check_eb_contamination(df)
+    
+    print("Running CV contamination check...")
+    df = check_cv_contamination(df)
+    
+    print("Running starspot check...")
+    df = check_starspot_contamination(df)
+    
+    print("Running YSO classification...")
+    df = classify_yso(df)
+    
+    print("Estimating semimajor axis...")
+    df = estimate_semimajor_axis(df)
+    
+    print("Estimating disk probability...")
+    df = estimate_disk_probability(df)
+    
+    # Compute final classification
+    # Priority: known classes > high-probability contaminants > disk/circumstellar
+    
+    df['final_class'] = 'Unknown Dipper'
+    
+    # YSO classes
+    yso_classes = ['Class I', 'Class II', 'Transition Disk']
+    for yc in yso_classes:
+        df.loc[df['yso_class'] == yc, 'final_class'] = f'YSO ({yc})'
+    
+    # Contamination flags
+    df.loc[df['P_eb'] > CLASSIFY_EB_THRESHOLD, 'final_class'] = 'Likely EB'
+    df.loc[df['P_cv'] > CLASSIFY_CV_THRESHOLD, 'final_class'] = 'Likely CV'
+    df.loc[df['P_starspot'] > CLASSIFY_STARSPOT_THRESHOLD, 'final_class'] = 'Likely Starspot'
+
+    # Disk candidates
+    disk_cand = (df['P_disk'] > CLASSIFY_DISK_THRESHOLD) & (df['final_class'] == 'Unknown Dipper')
+    df.loc[disk_cand, 'final_class'] = 'Disk Occultation Candidate'
+
+    # Main sequence dippers
+    ms_dipper = (df['yso_class'] == 'Main Sequence') & (df['P_eb'] < CLASSIFY_MS_EB_REJECTION) & (df['P_cv'] < CLASSIFY_MS_CV_REJECTION)
+    df.loc[ms_dipper, 'final_class'] = 'Main Sequence Dipper'
+    
+    print("Classification complete.")
+    return df
+
+
+# =============================================================================
+# CLI
+# =============================================================================
+
+def main():
+    parser = argparse.ArgumentParser(description="Classify dipper candidates (Tzanidakis+ 2025)")
+    parser.add_argument("--input", type=Path, required=True, help="Input events Parquet")
+    parser.add_argument("--output", type=Path, required=True, help="Output classified Parquet")
+    parser.add_argument("--skip-eb", action="store_true", help="Skip EB check")
+    parser.add_argument("--skip-cv", action="store_true", help="Skip CV check")
+    parser.add_argument("--skip-starspot", action="store_true", help="Skip starspot check")
+    parser.add_argument("--enable-iphas", dest="iphas", action="store_true", help="Query IPHAS for H-alpha photometry (slow)")
+    parser.add_argument("--enable-ps1", dest="ps1", action="store_true", help="Query PS1 for grizy photometry (slow)")
+    parser.add_argument("--all-candidates", action="store_true", help="Classify all input rows instead of only failed_any=False passers")
+    
+    args = parser.parse_args()
+    
+    # Load
+    print(f"Loading {args.input}...")
+    df = read_feature_table(args.input)
+    if not getattr(args, "all_candidates", False):
+        df = select_passing_candidates_if_present(df, printer=print)
+    
+    print(f"Loaded {len(df)} events")
+    
+    # Optional external queries
+    if args.iphas:
+        print("\n=== Querying IPHAS ===")
+        df = query_iphas_by_coords(df)
+    
+    if args.ps1:
+        print("\n=== Querying PS1 ===")
+        df = query_ps1_by_coords(df)
+    
+    # Classify
+    print("\n=== Running Classification ===")
+    df = compute_all_classifications(df)
+    
+    # Summary
+    print("\n=== Classification Summary ===")
+    print(df['final_class'].value_counts())
+    
+    # Save
+    print(f"\nSaving to {args.output}...")
+    write_feature_table(df, args.output)
+    
+    print("Done!")
+
+
+if __name__ == "__main__":
+    main()

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from malca.feature_layers import FEATURE_LAYER_COLUMNS
+from malca.products.feature_layers import FEATURE_LAYER_COLUMNS
 from malca.migration import discover_artifacts, migrate_tree
 from malca.review import sync
 from malca.review.store import count_queue, db_connect, save_app_state, upsert_candidates_frame

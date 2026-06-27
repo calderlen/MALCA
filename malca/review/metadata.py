@@ -11,6 +11,7 @@ from urllib.parse import quote, quote_plus
 import pandas as pd
 
 from malca.ltv.multi_survey import LTV_MS_FEATURE_COLUMN_SPECS
+from malca.review.filter_schema import is_definite_known_type_value
 
 
 # Grouped metadata fields: list of (group_name, fields) where each field is
@@ -530,6 +531,122 @@ REVIEW_METADATA_FIELDS: list[tuple[str, str]] = [
     for label, key in fields
 ]
 
+_PRESENTATION_SECTION_BY_GROUP: dict[str, str] = {
+    "Triage Summary": "Review Summary",
+    "Nuclear Summary": "Catalog & Vetting",
+    "LTV Summary": "Coverage & Photometry",
+    "LTV Season Diagnostics": "Advanced Metadata",
+    "LTV Trend Diagnostics": "Advanced Metadata",
+    "LTV Long-Term Features": "Advanced Metadata",
+    "LTV Stochastic": "Advanced Metadata",
+    "LTV Multi-Survey": "Advanced Metadata",
+    "Identification": "Coverage & Photometry",
+    "Light Curve Basics": "Coverage & Photometry",
+    "Event Scoring": "Review Summary",
+    "Dip Detection": "Dip Evidence",
+    "Dip Runs": "Dip Evidence",
+    "Dip Recurrence": "Dip Evidence",
+    "Jump Detection": "Jump Evidence",
+    "Jump Runs": "Jump Evidence",
+    "Jump Recurrence": "Jump Evidence",
+    "Microlensing Fits": "Catalog & Vetting",
+    "Period Consensus": "Catalog & Vetting",
+    "Periodicity": "Catalog & Vetting",
+    "Phase Folding": "Catalog & Vetting",
+    "Vetting": "Catalog & Vetting",
+    "Stellar Parameters": "Classification & Environment",
+    "Photometry": "Classification & Environment",
+    "External Follow-up": "Catalog & Vetting",
+    "Environment": "Classification & Environment",
+    "YSO / Classification": "Classification & Environment",
+    "Filter Flags": "Review Summary",
+}
+
+_PRESENTATION_ROLE_BY_KEY: dict[str, str] = {
+    "vetting_likely_known": "summary",
+    "final_class": "summary",
+    "yso_class": "summary",
+    "dipper_score": "summary",
+    "jumper_score": "summary",
+    "phase_plot_ready": "summary",
+    "failed_any": "summary",
+    "catalog_match": "summary",
+    "period_consensus_agree": "summary",
+    "asas_sn_id": "summary",
+    "gaia_id": "summary",
+    "n_points": "summary",
+    "time_span_days": "summary",
+    "cadence_median_days": "summary",
+    "n_cameras": "summary",
+    "baseline_mag": "summary",
+    "baseline_source": "summary",
+    "gaia_var_flag": "summary",
+    "xray_det": "summary",
+    "high_ruwe_flag": "summary",
+    "bad_cameras_filtered": "summary",
+    "failed_periodicity": "summary",
+}
+
+for _key in {
+    "dipper_n_dips",
+    "dipper_n_valid_dips",
+    "dip_significant",
+    "dip_best_morph",
+    "dip_best_log_bf",
+    "dip_best_delta_bic",
+    "dip_bayes_factor",
+    "dip_best_p",
+    "dip_best_mag_event",
+    "dip_trigger_max",
+    "dip_max_event_prob",
+    "dip_trigger_threshold",
+    "dip_count",
+    "dip_run_count",
+    "dip_max_run_points",
+    "dip_max_run_duration",
+    "dip_max_run_sum",
+    "dip_max_run_max",
+    "dip_max_run_cameras",
+    "dip_max_log_bf_local",
+    "dip_is_single_event",
+    "dip_inter_event_spacing_median",
+    "dip_inter_event_spacing_std",
+    "dip_amplitude_consistency",
+    "dip_duration_consistency",
+}:
+    _PRESENTATION_ROLE_BY_KEY.setdefault(_key, "dip")
+
+for _key in {
+    "jumper_n_jumps",
+    "jumper_n_valid_jumps",
+    "jump_significant",
+    "jump_best_morph",
+    "jump_best_log_bf",
+    "jump_best_delta_bic",
+    "jump_bayes_factor",
+    "jump_best_p",
+    "jump_best_mag_event",
+    "jump_trigger_max",
+    "jump_max_event_prob",
+    "jump_trigger_threshold",
+    "jump_count",
+    "jump_run_count",
+    "jump_max_run_points",
+    "jump_max_run_duration",
+    "jump_max_run_sum",
+    "jump_max_run_max",
+    "jump_max_run_cameras",
+    "jump_max_log_bf_local",
+    "jump_is_single_event",
+    "jump_inter_event_spacing_median",
+    "jump_inter_event_spacing_std",
+    "jump_amplitude_consistency",
+    "jump_duration_consistency",
+}:
+    _PRESENTATION_ROLE_BY_KEY.setdefault(_key, "jump")
+
+del _key
+
 _DISPLAY_UNIT_LABELS = {
     '"': "arcsec",
     "AU": "AU",
@@ -620,6 +737,98 @@ _RANGE_KEYS: dict[str, tuple[str, str]] = {
 
 def normalize_vsx_record(record: dict[str, Any]) -> dict[str, Any]:
     return dict(record)
+
+
+def _known_text_value(value: Any) -> str:
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    text = str(value).strip()
+    if text.lower() in {"", "nan", "<na>", "none", "null"}:
+        return ""
+    return text
+
+
+def _truthy_catalog_value(value: Any) -> bool:
+    if value is None:
+        return False
+    try:
+        if pd.isna(value):
+            return False
+    except Exception:
+        pass
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, numbers.Number):
+        return float(value) != 0.0
+    return str(value).strip().lower() in {"1", "true", "t", "yes", "y"}
+
+
+def _finite_catalog_number(value: Any) -> bool:
+    if value is None:
+        return False
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(numeric)
+
+
+def _is_variable_simbad_otype(value: Any) -> bool:
+    text = _known_text_value(value)
+    if not text:
+        return False
+    if "V*" in text:
+        return True
+    markers = {
+        "EB*",
+        "YSO",
+        "SN",
+        "Nova",
+        "Catac",
+        "RR*",
+        "Cepheid",
+        "Mira",
+        "BYDra",
+        "RSCVn",
+        "Symbiotic",
+        "ELL",
+        "Blazar",
+        "QSO",
+        "AGN",
+    }
+    lowered = text.lower()
+    return any(marker.lower() in lowered for marker in markers)
+
+
+def has_known_catalog_evidence(record: dict[str, Any] | None) -> bool:
+    """Return whether payload/catalog fields identify an already known object."""
+    if not isinstance(record, dict):
+        return False
+    if _truthy_catalog_value(record.get("vetting_likely_known")):
+        return True
+    for column in (
+        "vsx_class",
+        "asassn_var_type",
+        "gaia_var_class",
+        "ztf_var_type",
+        "tns_type",
+        "alerce_lc_class",
+        "microlens_catalog",
+    ):
+        if is_definite_known_type_value(column, record.get(column)):
+            return True
+    if _truthy_catalog_value(record.get("microlens_match")):
+        return True
+    if _known_text_value(record.get("tns_name")):
+        return True
+    if _finite_catalog_number(record.get("gaia_eb_period")):
+        return True
+    return _is_variable_simbad_otype(record.get("simbad_otype"))
 
 
 def normalize_vsx_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -860,6 +1069,62 @@ def extract_review_metadata_grouped(
         if items:
             groups.append((group_name, items))
     return groups
+
+
+def metadata_presentation_section(group_name: str, key: str) -> str:
+    """Return the review-GUI presentation section for a metadata field."""
+    role = _PRESENTATION_ROLE_BY_KEY.get(str(key))
+    if role == "dip":
+        return "Dip Evidence"
+    if role == "jump":
+        return "Jump Evidence"
+    return _PRESENTATION_SECTION_BY_GROUP.get(str(group_name), "Advanced Metadata")
+
+
+def metadata_presentation_role(group_name: str, key: str) -> str:
+    """Return the review-GUI presentation role for a metadata field."""
+    explicit = _PRESENTATION_ROLE_BY_KEY.get(str(key))
+    if explicit:
+        return explicit
+    section = metadata_presentation_section(group_name, key)
+    if section == "Coverage & Photometry":
+        return "coverage"
+    if section == "Catalog & Vetting":
+        return "catalog"
+    if section == "Classification & Environment":
+        return "classification"
+    return "advanced"
+
+
+def extract_review_metadata_feature_rows(
+    payload: dict[str, Any],
+    *,
+    round_sigfigs: bool = False,
+) -> list[dict[str, str]]:
+    """Return formatted metadata rows with keys and presentation sections.
+
+    This complements ``extract_review_metadata_grouped`` for the Dash GUI: the
+    grouped API stays stable for existing callers, while the GUI can build a
+    streamlined review surface and an exhaustive feature table without losing
+    the original key provenance.
+    """
+    p = normalize_vsx_record(payload)
+    rows: list[dict[str, str]] = []
+    for group_name, fields in REVIEW_METADATA_GROUPS:
+        for label, key in fields:
+            val = p.get(key)
+            if not _is_present(val):
+                continue
+            display_label = bracket_unit_label(_display_label_for_group(group_name, label))
+            rows.append({
+                "section": metadata_presentation_section(group_name, key),
+                "source_group": str(group_name),
+                "label": display_label,
+                "key": str(key),
+                "value": str(_format_with_uncertainty(key, val, p, round_sf=round_sigfigs)),
+                "role": metadata_presentation_role(group_name, key),
+            })
+    return rows
 
 
 def is_group_default_open(group_name: str) -> bool:

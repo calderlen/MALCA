@@ -1,14 +1,14 @@
 import pandas as pd
 import numpy as np
 import os
-from malca.fetch import download_lightcurve_by_id
-from malca.lightcurve_io import load_lightcurve_df
+from malca.io.fetch import download_lightcurve_by_id
+from malca.io.lightcurve_io import load_lightcurve_df
 from malca.config import SKYPATROL_CACHE_DIR
 import warnings
 warnings.filterwarnings('ignore')
 
-csv_path = 'output_migrated_camera_field_20260606/runs/runs_march18_bundle_all/results/march18_review_cmd_dustmaps_full.csv'
-vetted_path = 'output_migrated_camera_field_20260606/runs/runs_march18_bundle_all/results/lc_events_vetted.parquet'
+csv_path = 'output/runs/runs_march18_bundle_all/results/march18_review_cmd_dustmaps_full.csv'
+vetted_path = 'output/runs/runs_march18_bundle_all/results/lc_events_vetted.parquet'
 
 print("Loading data...")
 df_csv = pd.read_csv(csv_path)

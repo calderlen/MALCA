@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from malca.lightcurve_publication import (
+from malca.plotting.lightcurve_publication import (
     CMD_AXIS_LABEL_FONTSIZE,
     CMD_BG_SCATTER_SIZE,
     CMD_BG_SCATTER_ALPHA,

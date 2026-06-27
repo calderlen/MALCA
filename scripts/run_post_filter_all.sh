@@ -1,9 +1,9 @@
 #!/bin/bash
-# Run filter on all detect run directories in output_migrated_camera_field_20260606/runs/
+# Run filter on all detect run directories in output/runs/
 
 set -e
 
-RUNS_DIR="${1:-output_migrated_camera_field_20260606/runs}"
+RUNS_DIR="${1:-output/runs}"
 
 if [ ! -d "$RUNS_DIR" ]; then
     echo "Error: $RUNS_DIR does not exist"

@@ -116,10 +116,15 @@ def test_backfill_vsx_updates_payload_and_sql_columns(tmp_path: Path) -> None:
         )
         payload = get_candidate_payload(conn, "292058860969")
         row = conn.execute(
-            "SELECT vsx_class, vsx_sep_arcsec, vsx_period FROM candidates WHERE candidate_id=?",
+            """
+            SELECT vsx_class, vsx_sep_arcsec, vsx_period, vetting_likely_known
+            FROM candidates
+            WHERE candidate_id=?
+            """,
             ("292058860969",),
         ).fetchone()
 
     assert updated == 1
     assert payload["vsx_class"] == "GCAS"
-    assert row == ("GCAS", 0.4, 591.8991)
+    assert payload["vetting_likely_known"] is True
+    assert row == ("GCAS", 0.4, 591.8991, 1)

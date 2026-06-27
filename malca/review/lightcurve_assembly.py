@@ -17,9 +17,9 @@ from malca.config import (
     JD_OFFSET,
     REVIEW_RESIDUAL_FRACTION,
 )
-from malca.lightcurve_io import stable_camera_color
-from malca.lightcurve_publication import BAND_COLORS
-from malca.phase import BAND_LABELS, phase_fold_dataframe, phase_time_dataframe, resolve_phase_epoch, resolve_phase_period
+from malca.io.lightcurve_io import stable_camera_color
+from malca.plotting.lightcurve_publication import BAND_COLORS
+from malca.core.phase import BAND_LABELS, phase_fold_dataframe, phase_time_dataframe, resolve_phase_epoch, resolve_phase_period
 from malca.review.interactive_plot import (
     DIP_EVENT_COLOR,
     JUMP_EVENT_COLOR,
@@ -237,6 +237,7 @@ class ReviewPlotRequest:
     override_period: float | None
     override_period_source: str
     phase_period_pending: bool
+    phase_period_pending_source: str
     suppress_catalog_phase_period: bool
     show_diagnostics: bool
     confidence_colors: bool
@@ -269,6 +270,7 @@ class ReviewPlotRequest:
         override_period: float | None = None,
         override_period_source: str = "manual/search",
         phase_period_pending: bool = False,
+        phase_period_pending_source: str = "",
         suppress_catalog_phase_period: bool = False,
         show_diagnostics: bool,
         confidence_colors: bool,
@@ -298,6 +300,7 @@ class ReviewPlotRequest:
             override_period=override_period,
             override_period_source=override_period_source,
             phase_period_pending=phase_period_pending,
+            phase_period_pending_source=str(phase_period_pending_source or ""),
             suppress_catalog_phase_period=suppress_catalog_phase_period,
             show_diagnostics=show_diagnostics,
             confidence_colors=confidence_colors,
@@ -530,11 +533,12 @@ def assemble_review_lightcurve_plot(request: ReviewPlotRequest) -> ReviewLightCu
         phase_period = None
         phase_source = ""
     phase_enabled = bool(phase_requested and phase_period is not None)
+    pending_period_source = str(request.phase_period_pending_source or "Auto period search")
     if phase_requested and not phase_enabled:
         if request.phase_period_pending:
-            warnings.append("Auto PDM period search is running; the phase panel will update when it finishes.")
+            warnings.append(f"{pending_period_source} is running; the phase panel will update when it finishes.")
         elif request.suppress_catalog_phase_period:
-            warnings.append("Auto PDM did not return a valid period. Run Find Period or enter Manual P.")
+            warnings.append("Auto harmonic check did not return a valid period. Run Find Period or enter Manual P.")
         else:
             warnings.append("Phase panel requested, but no valid period was found. Use Find Period to search manually.")
 
@@ -1108,9 +1112,9 @@ def assemble_review_lightcurve_plot(request: ReviewPlotRequest) -> ReviewLightCu
             for p in panels
         ]
         if request.phase_period_pending:
-            phase_placeholder = "Auto PDM period search is running..."
+            phase_placeholder = f"{pending_period_source} is running..."
         elif request.suppress_catalog_phase_period:
-            phase_placeholder = "No automatic PDM period available. Run Find Period or enter Manual P."
+            phase_placeholder = "No automatic harmonic-check period available. Run Find Period or enter Manual P."
         else:
             phase_placeholder = "No phase period available. Run Find Period or enter Manual P."
         annotations.append(
@@ -1247,9 +1251,9 @@ def assemble_review_lightcurve_plot(request: ReviewPlotRequest) -> ReviewLightCu
                 phase_bits.append(f"|lag|={phase_lag_abs:.3f}")
         status_message = "; ".join(phase_bits)
     elif phase_requested and request.phase_period_pending:
-        status_message = "Auto PDM: searching..."
+        status_message = f"{pending_period_source}: searching..."
     elif phase_requested and request.suppress_catalog_phase_period:
-        status_message = "Auto PDM: no valid period"
+        status_message = "Auto harmonic check: no valid period"
 
     header_left, header_right = publication_coordinate_headers(request.payload)
 

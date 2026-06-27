@@ -16,9 +16,9 @@ from malca.enrich.spectra_catalogs import (
 from malca.enrich.spectra_provenance import merge_external_spectral_provenance
 from malca.enrich.spectra_queries import query_spectra_catalog_group
 from malca.enrich.transient_spectra import run_transient_spectra_enrichment
-from malca.candidates import select_passing_candidates_if_present
+from malca.products.candidates import select_passing_candidates_if_present
 from malca.config import SPECTRA_RADIUS_ARCSEC, SPECTRA_CHUNK_SIZE, SPECTRA_TAP_CHUNK_SIZE, SPECTRA_TAP_TIMEOUT
-from malca.table_io import read_feature_table
+from malca.io.table_io import read_feature_table
 
 
 SPECTRA_REDSHIFT_COLUMNS: tuple[str, ...] = (

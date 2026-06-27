@@ -15,7 +15,7 @@ import tempfile
 import numpy as np
 import plotly.graph_objects as go
 
-from malca.lightcurve_publication import (
+from malca.plotting.lightcurve_publication import (
     FIG_SINGLE_COL_SQUARE,
     PUBLICATION_PLOTLY_FONT,
     apply_publication_rcparams,

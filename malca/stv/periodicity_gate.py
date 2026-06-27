@@ -25,10 +25,10 @@ from malca.config import (
 )
 from malca.config import WORKERS
 from malca.config import LS_ALIAS_PERIODS, LS_ALIAS_TOLERANCE
-from malca.lightcurve_io import load_lightcurve_df, to_asassn_algorithm_frame
-from malca.phase import align_v_to_g_magnitude, phase_template, template_phase_lag
-from malca.stats import compute_ce_stats
-from malca.utils import clean_lc, compute_n_cameras
+from malca.io.lightcurve_io import load_lightcurve_df, to_asassn_algorithm_frame
+from malca.core.phase import align_v_to_g_magnitude, phase_template, template_phase_lag
+from malca.core.stats import compute_ce_stats
+from malca.core.utils import clean_lc, compute_n_cameras
 
 
 PREGATE_HARMONIC_FACTORS: tuple[float, ...] = (

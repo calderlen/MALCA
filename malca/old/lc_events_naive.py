@@ -8,8 +8,8 @@ import os
 from datetime import datetime
 from concurrent.futures import ProcessPoolExecutor
 
-from malca.baseline import per_camera_trend_baseline, per_camera_median_baseline
-from malca.utils import read_lc_dat2, read_lc_raw, match_index_to_lc, clean_lc
+from malca.core.baseline import per_camera_trend_baseline, per_camera_median_baseline
+from malca.core.utils import read_lc_dat2, read_lc_raw, match_index_to_lc, clean_lc
 from malca.old.df_utils import peak_search_residual_baseline, empty_metrics
 from malca.old.lc_metrics import run_metrics, is_dip_dominated
 

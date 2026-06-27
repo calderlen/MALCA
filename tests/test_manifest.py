@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from malca.manifest import build_manifest
+from malca.io.manifest import build_manifest
 
 
 def _write_mock_lc(path: Path) -> None:

@@ -9,9 +9,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from malca.baseline import per_camera_gp_baseline_masked
+from malca.core.baseline import per_camera_gp_baseline_masked
 from malca.evaluation import detection_rate
-from malca.evaluation import injection
+from malca.evaluation import dip_injection as injection
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -120,7 +120,7 @@ def test_run_injection_recovery_keeps_in_memory_rows_when_chunking(
 
 def test_injection_cli_exposes_diagnostics_detection_flags() -> None:
     help_text = subprocess.run(
-        [sys.executable, "-m", "malca", "injection", "--help"],
+        [sys.executable, "-m", "malca", "dip-injection", "--help"],
         cwd=REPO_ROOT,
         text=True,
         capture_output=True,

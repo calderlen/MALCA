@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from malca.audit import compare_results
-from malca.table_io import write_feature_table
+from malca.evaluation.audit import compare_results
+from malca.io.table_io import write_feature_table
 
 
 def test_compare_results_reports_filtered_only_and_raw_missing_rows(tmp_path: Path) -> None:

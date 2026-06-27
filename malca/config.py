@@ -29,7 +29,7 @@ LTV_LIGHT_CURVE_FILE_EXTENSION = "dat2"
 # Paths, API Endpoints, and Cache Directories
 # =============================================================================
 
-DEFAULT_OUTPUT_DIR = Path("output_migrated_camera_field_20260606")
+DEFAULT_OUTPUT_DIR = Path("output")
 VSX_ALL_CATALOG_PATH = Path("input/vsx/vsx_all.parquet")
 VSX_FILTERED_CATALOG_PATH = Path("input/vsx/vsx_cleaned.parquet")
 VSX_CROSSMATCH_PATH = Path("input/vsx/asassn_x_vsx_matches_full.parquet")
@@ -42,6 +42,7 @@ MALCA_CACHE_ROOT = Path(os.environ.get("MALCA_CACHE_ROOT", str(DEFAULT_OUTPUT_DI
 DEFAULT_CACHE_DIR = MALCA_CACHE_ROOT / "catalogs"
 LEGACY_DEFAULT_CACHE_DIR = Path("~/.cache/malca/catalogs")
 GAIA_CACHE_FILE = DEFAULT_CACHE_DIR / "gaia" / "gaia_dr3_crossmatched.parquet"
+GAIA_ID_MAPPING_CACHE = DEFAULT_CACHE_DIR / "gaia" / "gaia_dr2_to_dr3_mapping.parquet"
 LEGACY_GAIA_CACHE_FILE = Path("output/gaia_cache.parquet")
 LTV_OUTPUT_DIR = DEFAULT_OUTPUT_DIR / "runs" / "ltv"
 LTV_INJECTION_OUTPUT_DIR = LTV_OUTPUT_DIR / "injection"
@@ -124,7 +125,7 @@ SKYPATROL_JD_OFFSET = 2450000.0
 
 # UI / plotting
 PLOT_DPI = 150
-PLOT_FIGSIZE = (7.0, 4.0)  # malca.lightcurve_publication.FIG_TWO_COL_STANDARD
+PLOT_FIGSIZE = (7.0, 4.0)  # malca.plotting.lightcurve_publication.FIG_TWO_COL_STANDARD
 REVIEW_CACHE_LIMIT = 256
 REVIEW_MAX_EXTERNAL_POINTS = 20000
 REVIEW_RESIDUAL_FRACTION = 0.33
@@ -714,7 +715,7 @@ QUALITY_TIER_BRONZE = 0.4
 
 # Candidate grid plot
 GRID_MAX_COLS = 4
-GRID_PANEL_WIDTH = 3.5  # see malca.lightcurve_publication.FIG_GRID_PANEL_WIDTH
+GRID_PANEL_WIDTH = 3.5  # see malca.plotting.lightcurve_publication.FIG_GRID_PANEL_WIDTH
 GRID_PANEL_HEIGHT = 2.5
 GRID_DPI = 300
 GRID_ZOOM_TE_FACTOR = 3.5

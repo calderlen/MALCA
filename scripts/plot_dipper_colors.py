@@ -6,7 +6,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 from matplotlib.ticker import AutoMinorLocator
-from malca.lightcurve_publication import apply_publication_rcparams
+from malca.plotting.lightcurve_publication import apply_publication_rcparams
 
 apply_publication_rcparams(plt)
 plt.rcParams.update({
@@ -19,12 +19,12 @@ plt.rcParams.update({
 
 def main():
     # 1. Get event_class from CSV
-    csv_path = 'output_migrated_camera_field_20260606/runs/runs_march18_bundle_all/results/march18_review_cmd_dustmaps_full.csv'
+    csv_path = 'output/runs/runs_march18_bundle_all/results/march18_review_cmd_dustmaps_full.csv'
     df_csv = pd.read_csv(csv_path)
     dipper_ids = df_csv.loc[df_csv['event_class'] == 'dipper', 'candidate_id'].astype(str).tolist()
     
     # 2. Get features from DB
-    conn = sqlite3.connect('output_migrated_camera_field_20260606/runs/runs_march18_bundle_all/review/review.taxonomy_filled.db')
+    conn = sqlite3.connect('output/runs/runs_march18_bundle_all/review/review.taxonomy_filled.db')
     c = conn.cursor()
     c.execute('SELECT candidate_id, payload_json FROM candidates')
     
@@ -48,7 +48,7 @@ def main():
     for col in ['w1_w2', 'H_K', 'vphas_r_ha', 'vphas_r_i']:
         df[col] = pd.to_numeric(df[col], errors='coerce')
         
-    out_dir = Path('output_migrated_camera_field_20260606/runs/runs_march18_bundle_all/results')
+    out_dir = Path('output/runs/runs_march18_bundle_all/results')
     out_dir.mkdir(parents=True, exist_ok=True)
     
     # Plot 1: VPHAS+ r-i vs r-Ha

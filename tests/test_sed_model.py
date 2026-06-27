@@ -12,10 +12,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-import malca.sed_photometry as sed_photometry
+import malca.enrichment.sed_photometry as sed_photometry
 from malca.review.sed import build_sed_dataframe
 from malca.review.store import db_connect, upsert_candidates_frame
-from malca.sed_model import (
+from malca.enrichment.sed_model import (
     LSUN_ERG_S,
     PC_CM,
     SED_MODEL_CURVE_COLUMNS,
@@ -24,7 +24,7 @@ from malca.sed_model import (
     _patch_pystellibs_kurucz_libsdir,
     fit_sed_models,
 )
-from malca.table_io import write_feature_table, write_parquet_table
+from malca.io.table_io import write_feature_table, write_parquet_table
 
 _trapezoid = getattr(np, "trapezoid", np.trapz)
 
@@ -174,7 +174,7 @@ def test_missing_pystellibs_raises_actionable_error(monkeypatch) -> None:
             raise ModuleNotFoundError("No module named 'pystellibs'")
         return real_import_module(name, *args, **kwargs)
 
-    monkeypatch.setattr("malca.sed_model.importlib.import_module", fake_import_module)
+    monkeypatch.setattr("malca.enrichment.sed_model.importlib.import_module", fake_import_module)
     candidate = pd.DataFrame([{"candidate_id": "sed-cand"}])
     sed_rows = _rows_from_fake_model("sed-cand")
 

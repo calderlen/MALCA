@@ -21,7 +21,7 @@ import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 
-from malca.lightcurve_publication import (
+from malca.plotting.lightcurve_publication import (
     apply_publication_rcparams,
     FIG_TWO_COL_LC_WIDE,
     FIG_TWO_COL_STANDARD,
@@ -31,7 +31,7 @@ from malca.lightcurve_publication import (
 
 apply_publication_rcparams(plt)
 
-from malca.baseline import (
+from malca.core.baseline import (
     per_camera_gp_baseline_masked,
     phase_template_baseline,
 )
@@ -52,7 +52,7 @@ from malca.config import (
     TRIGGER_MODE,
 )
 from malca.stv.events import score_lightcurve
-from malca.lightcurve_publication import (
+from malca.plotting.lightcurve_publication import (
     plot_lightcurve_panel,
     plot_phase_panel,
     plot_residual_panel,

@@ -11,8 +11,8 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm
 
 from malca.stv.events import score_lightcurve
-from malca.baseline import per_camera_gp_baseline
-from malca.utils import read_lc_dat2
+from malca.core.baseline import per_camera_gp_baseline
+from malca.core.utils import read_lc_dat2
 from malca.config import (
     LOGBF_THRESHOLD_DIP,
     LOGBF_THRESHOLD_JUMP,
@@ -25,7 +25,7 @@ from malca.config import (
     INJECTION_SEED,
     DEFAULT_OUTPUT_DIR,
 )
-from malca.table_io import read_parquet_table, write_parquet_table
+from malca.io.table_io import read_parquet_table, write_parquet_table
 
 
 def _build_detection_kwargs(trigger_mode: str) -> dict:

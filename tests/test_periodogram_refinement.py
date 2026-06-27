@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import numpy as np
 
-import malca.periodogram as periodogram
+import malca.core.periodogram as periodogram
 from malca.config import PDM_PLAVCHAN_GRID_FACTOR, PDM_PLAVCHAN_WORST_FRAC, PDM_PLAVCHAN_WORST_MIN
-from malca.periodogram import _build_plavchan_period_grid, ce_find_period, lsp_find_period, pdm_find_period
+from malca.core.periodogram import _build_plavchan_period_grid, ce_find_period, lsp_find_period, pdm_find_period
 
 
 def _make_split_epoch_signal(true_period: float, seed: int = 12345) -> tuple[np.ndarray, np.ndarray]:

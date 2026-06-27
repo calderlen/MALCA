@@ -1,5 +1,6 @@
 # This file was mechanically split from malca.review.app; preserve behavior when editing.
 NATIVE_PLOT_STYLE = {'display': 'block', 'width': '100%', 'height': '100%'}
+AUTO_FALLBACK_PERIOD_METHOD = 'pdm'
 
 
 def run_period_search(n_clicks, candidate_id, min_period, max_period, method, auto_period_cache):
@@ -89,9 +90,17 @@ def _normalize_period_search_bounds(min_period, max_period) -> tuple[float, floa
     return min_p, max_p
 
 
-def _period_cache_key(candidate_id: object, method: object, min_period: float, max_period: float) -> str:
+def _period_cache_key(candidate_id: object, method: object, min_period: float, max_period: float, base_period: object = None) -> str:
     method_name = str(method or 'pdm').strip().lower()
-    return f"{str(candidate_id)}|{method_name}|{float(min_period):.12g}|{float(max_period):.12g}"
+    key = f"{str(candidate_id)}|{method_name}|{float(min_period):.12g}|{float(max_period):.12g}"
+    if method_name == 'alias_check' or base_period is not None:
+        try:
+            base = float(base_period)
+        except (TypeError, ValueError):
+            base = np.nan
+        base_text = f"{base:.12g}" if np.isfinite(base) else ""
+        key = f"{key}|base={base_text}"
+    return key
 
 
 def _period_cache_entry(
@@ -101,9 +110,10 @@ def _period_cache_entry(
     method: object,
     min_period: float,
     max_period: float,
+    base_period: object = None,
 ) -> dict | None:
     cache = dict(auto_period_cache or {})
-    key = _period_cache_key(candidate_id, method, min_period, max_period)
+    key = _period_cache_key(candidate_id, method, min_period, max_period, base_period)
     entry = cache.get(key)
     if not isinstance(entry, dict):
         return None
@@ -118,6 +128,14 @@ def _period_cache_entry(
         return None
     if not (np.isclose(entry_min, float(min_period)) and np.isclose(entry_max, float(max_period))):
         return None
+    if base_period is not None:
+        try:
+            entry_base = float(entry.get('base_period'))
+            expected_base = float(base_period)
+        except (TypeError, ValueError):
+            return None
+        if not np.isclose(entry_base, expected_base):
+            return None
     return entry
 
 
@@ -130,9 +148,10 @@ def _store_period_cache_entry(
     max_period: float,
     result: dict | None,
     label: str,
+    base_period: object = None,
 ) -> None:
     method_name = str(method or 'pdm').strip().lower()
-    key = _period_cache_key(candidate_id, method_name, min_period, max_period)
+    key = _period_cache_key(candidate_id, method_name, min_period, max_period, base_period)
     auto_period_cache[key] = {
         'candidate_id': str(candidate_id),
         'method': method_name,
@@ -141,46 +160,87 @@ def _store_period_cache_entry(
         'result': result,
         'label': str(label or ''),
     }
+    if base_period is not None:
+        try:
+            auto_period_cache[key]['base_period'] = float(base_period)
+        except (TypeError, ValueError):
+            pass
 
 
-def _pending_auto_pdm_result(candidate_id: object, min_period: float, max_period: float) -> dict:
+def _pending_auto_harmonic_result(candidate_id: object, min_period: float, max_period: float, base_period: float, base_source: str) -> dict:
     return {
         'pending': True,
         'auto': True,
         'candidate_id': str(candidate_id),
-        'method': 'PDM',
-        'search_method': 'pdm',
-        'source': 'Auto PDM',
+        'method': 'Harmonic check',
+        'search_method': 'alias_check',
+        'source': 'Auto harmonic check',
         'min_period': float(min_period),
         'max_period': float(max_period),
+        'base_period': float(base_period),
+        'base_period_source': str(base_source or 'stored period'),
     }
 
 
-def _failed_auto_pdm_result(candidate_id: object, min_period: float, max_period: float, label: str) -> dict:
+def _failed_auto_harmonic_result(candidate_id: object, min_period: float, max_period: float, base_period: object, label: str) -> dict:
+    result = {
+        'auto': True,
+        'candidate_id': str(candidate_id),
+        'method': 'Harmonic check',
+        'search_method': 'alias_check',
+        'source': 'Auto harmonic check',
+        'min_period': float(min_period),
+        'max_period': float(max_period),
+        'error': str(label or 'No valid harmonic candidate'),
+    }
+    try:
+        result['base_period'] = float(base_period)
+    except (TypeError, ValueError):
+        pass
+    return result
+
+
+def _pending_auto_period_search_result(candidate_id: object, min_period: float, max_period: float, method: str) -> dict:
+    method_name = str(method or AUTO_FALLBACK_PERIOD_METHOD).strip().lower()
+    method_label = method_name.upper()
+    return {
+        'pending': True,
+        'auto': True,
+        'candidate_id': str(candidate_id),
+        'method': method_label,
+        'search_method': method_name,
+        'source': f"Auto {method_label}",
+        'min_period': float(min_period),
+        'max_period': float(max_period),
+        'reason': 'no stored period',
+    }
+
+
+def _failed_auto_period_search_result(candidate_id: object, min_period: float, max_period: float, method: str, label: str) -> dict:
+    method_name = str(method or AUTO_FALLBACK_PERIOD_METHOD).strip().lower()
+    method_label = method_name.upper()
     return {
         'auto': True,
         'candidate_id': str(candidate_id),
-        'method': 'PDM',
-        'search_method': 'pdm',
-        'source': 'Auto PDM',
+        'method': method_label,
+        'search_method': method_name,
+        'source': f"Auto {method_label}",
         'min_period': float(min_period),
         'max_period': float(max_period),
         'error': str(label or 'No valid period'),
+        'reason': 'no stored period',
     }
 
 
-def _auto_period_label(method: str, label: str) -> str:
-    method_name = str(method or 'pdm').strip().lower()
+def _auto_period_search_label(method: str, label: str) -> str:
+    method_name = str(method or AUTO_FALLBACK_PERIOD_METHOD).strip().lower()
+    method_label = method_name.upper()
     clean_label = str(label or '').strip()
-    if method_name == 'pdm':
-        if clean_label.startswith('PDM:'):
-            return f"Auto PDM:{clean_label[len('PDM:'):]}"
-        if clean_label.lower().startswith('auto pdm:'):
-            return clean_label
-        return f"Auto PDM: {clean_label}" if clean_label else "Auto PDM: no result"
-    if clean_label.lower().startswith('auto'):
+    if clean_label.lower().startswith('auto '):
         return clean_label
-    return f"Auto {method_name.upper()}: {clean_label}" if clean_label else f"Auto {method_name.upper()}: no result"
+    if clean_label.startswith(f"{method_label}:"):
+        return f"Auto {method_label}:{clean_label[len(method_label) + 1:]}"
+    return f"Auto {method_label}: {clean_label}" if clean_label else f"Auto {method_label}: no result"
 
 
 @app.callback(
@@ -197,20 +257,55 @@ def _auto_period_label(method: str, label: str) -> str:
     prevent_initial_call=True,
 )
 def auto_period_on_navigate(candidate_id, min_period, max_period, auto_period_cache, auto_period_request):
-    """Populate cached period status or queue an automatic search on navigation."""
+    """Queue harmonic checks for stored periods, or a fallback search when no period exists."""
     if candidate_id is None:
         return None, '', None, no_update, {'nonce': 0}
     candidate_id = str(candidate_id)
     auto_period_cache = dict(auto_period_cache or {})
     auto_period_request = dict(auto_period_request or {})
     min_p, max_p = _normalize_period_search_bounds(min_period, max_period)
+    payload, _stored_lc_path, _source_path = _candidate_context(candidate_id)
+    base_period, base_source = shared_resolve_stored_review_period(payload)
+    if base_period is None:
+        method = AUTO_FALLBACK_PERIOD_METHOD
+        cached_entry = _period_cache_entry(
+            auto_period_cache,
+            candidate_id=candidate_id,
+            method=method,
+            min_period=min_p,
+            max_period=max_p,
+        )
+        if isinstance(cached_entry, dict):
+            return (
+                cached_entry.get('result'),
+                str(cached_entry.get('label', '')),
+                None,
+                no_update,
+                no_update,
+            )
+        request = {
+            'nonce': int(auto_period_request.get('nonce', 0) or 0) + 1,
+            'candidate_id': candidate_id,
+            'min_period': min_p,
+            'max_period': max_p,
+            'method': method,
+            'reason': 'no stored period',
+        }
+        return (
+            _pending_auto_period_search_result(candidate_id, min_p, max_p, method),
+            f"No stored period; running auto {method.upper()}...",
+            None,
+            no_update,
+            request,
+        )
 
     cached_entry = _period_cache_entry(
         auto_period_cache,
         candidate_id=candidate_id,
-        method='pdm',
+        method='alias_check',
         min_period=min_p,
         max_period=max_p,
+        base_period=base_period,
     )
     if isinstance(cached_entry, dict):
         return (
@@ -226,13 +321,21 @@ def auto_period_on_navigate(candidate_id, min_period, max_period, auto_period_ca
         'candidate_id': candidate_id,
         'min_period': min_p,
         'max_period': max_p,
-        'method': 'pdm',
+        'method': 'alias_check',
+        'base_period': float(base_period),
+        'base_period_source': str(base_source or 'stored period'),
     }
-    return _pending_auto_pdm_result(candidate_id, min_p, max_p), 'Auto PDM: searching...', None, no_update, request
+    return (
+        _pending_auto_harmonic_result(candidate_id, min_p, max_p, float(base_period), str(base_source or 'stored period')),
+        'Auto harmonic check: checking aliases...',
+        None,
+        no_update,
+        request,
+    )
 
 
 def run_auto_period_search(auto_period_request, auto_period_cache):
-    """Run automatic CE/PDM search for the active candidate request."""
+    """Run the automatic harmonic check or missing-period fallback search."""
     if not isinstance(auto_period_request, dict):
         raise dash.exceptions.PreventUpdate
 
@@ -252,26 +355,51 @@ def run_auto_period_search(auto_period_request, auto_period_cache):
         auto_period_request.get('min_period'),
         auto_period_request.get('max_period'),
     )
-    method = str(auto_period_request.get('method') or 'pdm').strip().lower()
+    method = str(auto_period_request.get('method') or 'alias_check').strip().lower()
+    try:
+        base_period = float(auto_period_request.get('base_period'))
+    except (TypeError, ValueError):
+        base_period = np.nan
 
     payload, _stored_lc_path, _source_path = _candidate_context(candidate_id)
-    result, label = _run_period_search_for_payload(
-        payload,
-        min_period=min_p,
-        max_period=max_p,
-        method=method,
-    )
-    label = _auto_period_label(method, label)
-    if isinstance(result, dict):
-        result = dict(result)
-        result['auto'] = True
-        result['candidate_id'] = candidate_id
-        result['search_method'] = method
-        result['source'] = 'Auto PDM' if method == 'pdm' else f"Auto {method.upper()}"
-        result['min_period'] = min_p
-        result['max_period'] = max_p
-    elif method == 'pdm':
-        result = _failed_auto_pdm_result(candidate_id, min_p, max_p, label)
+    if method == 'alias_check':
+        result, label = _run_harmonic_check_for_payload(
+            payload,
+            min_period=min_p,
+            max_period=max_p,
+        )
+        if isinstance(result, dict):
+            result = dict(result)
+            result['auto'] = True
+            result['candidate_id'] = candidate_id
+            result['search_method'] = 'alias_check'
+            result['source'] = 'Auto harmonic check'
+            result['min_period'] = min_p
+            result['max_period'] = max_p
+            base_period = float(result.get('base_period', base_period))
+        else:
+            result = _failed_auto_harmonic_result(candidate_id, min_p, max_p, base_period, label)
+    else:
+        method = AUTO_FALLBACK_PERIOD_METHOD
+        result, label = _run_period_search_for_payload(
+            payload,
+            min_period=min_p,
+            max_period=max_p,
+            method=method,
+        )
+        label = _auto_period_search_label(method, label)
+        if isinstance(result, dict):
+            result = dict(result)
+            result['auto'] = True
+            result['candidate_id'] = candidate_id
+            result['search_method'] = method
+            result['source'] = f"Auto {method.upper()}"
+            result['min_period'] = min_p
+            result['max_period'] = max_p
+            result['reason'] = 'no stored period'
+        else:
+            result = _failed_auto_period_search_result(candidate_id, min_p, max_p, method, label)
+    cache_base_period = base_period if method == 'alias_check' else None
     _store_period_cache_entry(
         auto_period_cache,
         candidate_id=candidate_id,
@@ -280,6 +408,7 @@ def run_auto_period_search(auto_period_request, auto_period_cache):
         max_period=max_p,
         result=result,
         label=label,
+        base_period=cache_base_period,
     )
     return result, label, auto_period_cache
 
@@ -413,6 +542,7 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
     external_source_layout = normalize_external_source_layout(state.get('external_source_layout'))
     override_period_source = str(state.get('override_period_source') or 'manual/search')
     phase_period_pending = bool(state.get('phase_period_pending', False))
+    phase_period_pending_source = str(state.get('phase_period_pending_source') or '')
     suppress_catalog_phase_period = bool(state.get('suppress_catalog_phase_period', False))
     override_period = state.get('override_period')
     if override_period is not None:
@@ -451,35 +581,10 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
     plot_search_root = _plot_search_root_for_payload(payload)
 
     grouped = extract_review_metadata_grouped(payload, round_sigfigs=round_sigfigs)
+    feature_rows = extract_review_metadata_feature_rows(payload, round_sigfigs=round_sigfigs)
     metadata_health = _render_metadata_health(grouped)
     vetting_banner = _render_vetting_banner(payload, radius_arcsec=link_radius)
-    grid_items = []
-    for group_name, items in grouped:
-        field_divs = [
-            html.Div([
-                html.Span(label, className='meta-field-label'),
-                html.Span(str(value), className='meta-field-value'),
-            ], className='meta-field-row')
-            for label, value in items
-        ]
-
-        details_id = {'type': 'meta-details', 'group': str(group_name)}
-        if is_group_default_open(group_name):
-            grid_items.append(
-                html.Details(
-                    [html.Summary(f"{group_name} ({len(items)})"), html.Div(field_divs, className='meta-grid')],
-                    id=details_id,
-                    open=True,
-                )
-            )
-        else:
-            grid_items.append(
-                html.Details(
-                    [html.Summary(f"{group_name} ({len(items)})"), html.Div(field_divs, className='meta-grid')],
-                    id=details_id,
-                    open=False,
-                )
-            )
+    grid_items = _render_metadata_review_layout(payload, grouped, [], feature_rows)
 
     progress = f"[{idx + 1}/{queue_size}]"
 
@@ -490,8 +595,8 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
         if run_params_status != 'loaded':
             mismatch_warnings.append(run_params_msg)
 
-        stats_group = _render_stat_cards(_build_stat_rows(payload, pd.DataFrame(), set()))
-        merged_grid = stats_group + grid_items
+        stat_rows = _build_stat_rows(payload, pd.DataFrame(), set())
+        merged_grid = _render_metadata_review_layout(payload, grouped, stat_rows, feature_rows)
 
         png_src = _candidate_plot_src(payload)
         png_msg = 'PNG view enabled. Switch to Native for interactive hover and diagnostics.'
@@ -550,6 +655,7 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
             override_period=override_period,
             override_period_source=override_period_source,
             phase_period_pending=phase_period_pending,
+            phase_period_pending_source=phase_period_pending_source,
             suppress_catalog_phase_period=suppress_catalog_phase_period,
             show_diagnostics='diagnostics' in overlays,
             confidence_colors='confidence' in overlays,
@@ -645,9 +751,9 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
             if key == 'filtered_cams':
                 filtered = [x.strip() for x in str(val).split(',') if x.strip()]
 
-    # Merge stats into the metadata grid as the first collapsible group
-    stats_group = _render_stat_cards(native['stat_rows'])
-    merged_grid = stats_group + grid_items
+    # Merge stats into the streamlined metadata layout.
+    stat_rows = native['stat_rows']
+    merged_grid = _render_metadata_review_layout(payload, grouped, stat_rows, feature_rows)
 
     return (
         '',

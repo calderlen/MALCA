@@ -6,7 +6,7 @@ from io import BytesIO
 
 import numpy as np
 
-from malca.lightcurve_publication import FIG_TWO_COL_WIDTH, PUBLICATION_STYLE, _load_matplotlib, finalize_publication_figure, style_publication_axis
+from malca.plotting.lightcurve_publication import FIG_TWO_COL_WIDTH, PUBLICATION_STYLE, _load_matplotlib, finalize_publication_figure, style_publication_axis
 from malca.review.interactive_plot import DIP_EVENT_COLOR, JUMP_EVENT_COLOR, PHASE_TIME_COLORSCALE
 from malca.review.lightcurve_assembly import MARKER_MAP, PlotTrace, ReviewLightCurvePlotSpec
 

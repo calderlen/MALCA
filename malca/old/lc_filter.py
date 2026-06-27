@@ -14,7 +14,7 @@ from astropy.timeseries import LombScargle
 from astropy import units as u
 
 from malca.vsx.crossmatch import propagate_asassn_coords, vsx_coords
-from malca.utils import read_lc_raw
+from malca.core.utils import read_lc_raw
 
 
 

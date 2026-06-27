@@ -13,12 +13,12 @@ def update_dipper_photometry(db_path: str):
     conn = sqlite3.connect(db_path)
     
     # 1. Get dipper IDs from CSV
-    csv_path = 'output_migrated_camera_field_20260606/runs/runs_march18_bundle_all/results/march18_review_cmd_dustmaps_full.csv'
+    csv_path = 'output/runs/runs_march18_bundle_all/results/march18_review_cmd_dustmaps_full.csv'
     df_csv = pd.read_csv(csv_path)
     dipper_ids = df_csv.loc[df_csv['event_class'] == 'dipper', 'candidate_id'].astype(str).tolist()
     
     # 2. Get RA and Dec from characterized.parquet
-    char_df = pd.read_parquet('output_migrated_camera_field_20260606/runs/runs_march18_bundle_all/results/characterized.parquet')
+    char_df = pd.read_parquet('output/runs/runs_march18_bundle_all/results/characterized.parquet')
     if 'candidate_id' in char_df.columns:
         id_col = 'candidate_id'
     elif 'asas_sn_id' in char_df.columns:

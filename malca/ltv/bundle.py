@@ -7,10 +7,10 @@ from pathlib import Path
 import pandas as pd
 
 from malca.config import LTV_MIN_SLOPE, LTV_MIN_DIFF
-from malca.feature_layers import with_feature_columns
+from malca.products.feature_layers import with_feature_columns
 from malca.ltv.filter import filter_slope_threshold, filter_max_diff_threshold
-from malca.run_bundle import BundleFileCollection, collect_candidate_lightcurve_files, export_run_bundle
-from malca.table_io import read_feature_table
+from malca.products.run_bundle import BundleFileCollection, collect_candidate_lightcurve_files, export_run_bundle
+from malca.io.table_io import read_feature_table
 
 
 def _load_ltv_table(path: Path) -> pd.DataFrame:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from malca.lightcurve_publication import (
+from malca.plotting.lightcurve_publication import (
     CMD_BUCKET_STYLE,
     FIG_GRID_PANEL_WIDTH,
     FIG_GRID_ROW_HEIGHT,
@@ -53,7 +53,7 @@ def test_figsize_scale_single_column_square() -> None:
 
 
 def test_figsize_scale_reference_is_unity() -> None:
-    from malca.lightcurve_publication import FIG_HEATMAP_REFERENCE
+    from malca.plotting.lightcurve_publication import FIG_HEATMAP_REFERENCE
 
     assert figsize_scale(FIG_HEATMAP_REFERENCE) == pytest.approx(1.0)
 

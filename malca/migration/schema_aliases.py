@@ -10,9 +10,9 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
-from malca.candidates import ensure_candidate_id
-from malca.product_schema import TIMESCALE_LTV, TIMESCALE_STV
-from malca.table_io import read_parquet_table, write_parquet_table
+from malca.products.candidates import ensure_candidate_id
+from malca.products.product_schema import TIMESCALE_LTV, TIMESCALE_STV
+from malca.io.table_io import read_parquet_table, write_parquet_table
 
 
 PreferPolicy = Literal["fail", "canonical", "legacy"]

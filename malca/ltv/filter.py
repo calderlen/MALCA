@@ -43,7 +43,7 @@ from malca.config import (
     LTV_NEIGHBOR_SEARCH_RADIUS_ARCSEC,
     LTV_NEIGHBOR_MIN_PM_MAS_YR,
 )
-from malca.utils import log_rejections, batch_gaia_cone_query
+from malca.core.utils import log_rejections, batch_gaia_cone_query
 
 
 _SELF_MATCH_FALLBACK_SEP_ARCSEC = 1.0

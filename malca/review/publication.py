@@ -12,7 +12,7 @@ from typing import Any
 
 import plotly.graph_objects as go
 
-from malca.lightcurve_publication import (
+from malca.plotting.lightcurve_publication import (
     FIG_SINGLE_COL_WIDTH,
     PUBLICATION_PLOTLY_FONT,
     PUBLICATION_STYLE,

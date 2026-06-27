@@ -28,6 +28,7 @@ COMMAND_GROUPS = {
     "stv-plot": "Discovery",
     "lc-plot": "Discovery",
     "gaia-fetch": "Discovery",
+    "gaia-id-repair": "Discovery",
     "characterize": "Discovery",
     "classify": "Discovery",
     "review": "Review",
@@ -128,7 +129,7 @@ def main():
         "microlensing-injection",
         "detection-rate", "validate", "stv-plot", "audit",
         "bad-photometry",
-        "stv-events", "lc-plot", "gaia-fetch", "characterize", "classify", "stv-filter", "stv-tag",
+        "stv-events", "lc-plot", "gaia-fetch", "gaia-id-repair", "characterize", "classify", "stv-filter", "stv-tag",
         "attrition", "review", "review-refresh", "review-merge", "review-sync", "review-taxonomy", "review-maint",
         "neighbors", "spectra", "false-positive", "vsx-filter", "vsx-crossmatch", "external-lcs", "multi-survey-features", "feature-layers", "migrate", "sed-photometry", "nuclear-context",
         "vetting",
@@ -140,7 +141,7 @@ def main():
         
         # Dispatch to appropriate module (--help will be handled by that module)
         if command == "manifest":
-            _run_module_main("malca.manifest", remaining)
+            _run_module_main("malca.io.manifest", remaining)
         elif command == "stv-pipeline":
             _run_module_main("malca.stv.pipeline", remaining)
         elif command == "reproduce":
@@ -164,21 +165,23 @@ def main():
             sys.argv = [sys.argv[0]] + remaining
             attrition.main()
         elif command == "audit":
-            _run_module_main("malca.audit", remaining)
+            _run_module_main("malca.evaluation.audit", remaining)
         elif command == "bad-photometry":
             _run_module_main("malca.meta_analysis.ml.bad_photometry", remaining)
         elif command == "stv-plot":
             _run_module_main("malca.stv.plot", remaining)
         elif command == "lc-plot":
-            _run_module_main("malca.lightcurve_publication", remaining)
+            _run_module_main("malca.plotting.lightcurve_publication", remaining)
         elif command == "stv-events":
             _run_module_main("malca.stv.events", remaining)
         elif command == "gaia-fetch":
-            _run_module_main("malca.gaia_fetch", remaining)
+            _run_module_main("malca.catalogs.gaia_fetch", remaining)
+        elif command == "gaia-id-repair":
+            _run_module_main("malca.catalogs.gaia_id_repair", remaining)
         elif command == "characterize":
-            _run_module_main("malca.characterize", remaining)
+            _run_module_main("malca.enrichment.characterize", remaining)
         elif command == "classify":
-            _run_module_main("malca.classify", remaining)
+            _run_module_main("malca.enrichment.classify", remaining)
         elif command == "stv-filter":
             _run_module_main("malca.stv.filter", remaining)
         elif command == "stv-tag":
@@ -216,19 +219,19 @@ def main():
             vsx_crossmatch = importlib.import_module("malca.vsx.crossmatch")
             vsx_crossmatch.cli()
         elif command == "external-lcs":
-            _run_module_main("malca.external_lcs", remaining)
+            _run_module_main("malca.enrichment.external_lcs", remaining)
         elif command == "multi-survey-features":
-            _run_module_main("malca.multi_survey_features", remaining)
+            _run_module_main("malca.enrichment.multi_survey_features", remaining)
         elif command == "feature-layers":
-            _run_module_main("malca.feature_layers", remaining)
+            _run_module_main("malca.products.feature_layers", remaining)
         elif command == "migrate":
             _run_module_main("malca.migration.cli", remaining)
         elif command == "sed-photometry":
-            _run_module_main("malca.sed_photometry", remaining)
+            _run_module_main("malca.enrichment.sed_photometry", remaining)
         elif command == "nuclear-context":
             _run_module_main("malca.nuclear.cmd", remaining)
         elif command == "vetting":
-            _run_module_main("malca.vetting", remaining)
+            _run_module_main("malca.enrichment.vetting", remaining)
         elif command == "ltv-pipeline":
             _run_module_main("malca.ltv.pipeline", remaining)
         elif command == "dev":
@@ -238,7 +241,7 @@ def main():
             if dev_command == "score":
                 _run_module_main("malca.stv.score", dev_args)
             elif dev_command == "stats":
-                _run_module_main("malca.stats", dev_args)
+                _run_module_main("malca.core.stats", dev_args)
             else:
                 raise SystemExit(f"unknown dev command: {dev_command}")
         elif command == "ltv-injection":
@@ -269,6 +272,7 @@ def main():
     subparsers.add_parser("stv-plot", description="Plot STV light curves with events")
     subparsers.add_parser("lc-plot", description="Create a publication-quality light-curve figure")
     subparsers.add_parser("gaia-fetch", description="Download Gaia DR3 data for candidates (AIP TAP mirror)")
+    subparsers.add_parser("gaia-id-repair", description="Canonicalize stale Gaia DR2 IDs in review artifacts")
     subparsers.add_parser("characterize", description="Characterize candidates with external catalogs")
     subparsers.add_parser("classify", description="Classify candidates by variability type")
     # Review

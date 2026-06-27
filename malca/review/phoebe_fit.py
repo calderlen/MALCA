@@ -12,7 +12,7 @@ from typing import Any, Mapping
 import numpy as np
 import pandas as pd
 
-from malca.lightcurve_io import load_lightcurve_df
+from malca.io.lightcurve_io import load_lightcurve_df
 
 
 PHOEBE_FIT_TABLE = "phoebe_fits"

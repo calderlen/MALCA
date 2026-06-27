@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from malca.phase import (
+from malca.core.phase import (
     BAND_LABELS,
     align_v_to_g_magnitude,
     camera_labels,
@@ -26,6 +26,17 @@ def test_resolve_phase_period_prefers_manual_then_payload_priority() -> None:
     assert resolve_phase_period({"lsp_period": "5.5"}) == (5.5, "lsp_period")
     assert resolve_phase_period({"lsp_period": "5.5"}, include_lsp=False) == (None, "")
     assert resolve_phase_period({"lsp_period": "bad"}) == (None, "")
+    assert resolve_phase_period({"pre_periodicity_selected_period": 6.0}) == (6.0, "pre_periodicity_selected_period")
+    assert resolve_phase_period({"pre_periodicity_selected_period": 6.0, "lsp_period": 5.5}) == (
+        6.0,
+        "pre_periodicity_selected_period",
+    )
+    assert resolve_phase_period({"pdm_period": 7.0}) == (7.0, "pdm_period")
+    assert resolve_phase_period({"ce_period": 8.0}) == (8.0, "ce_period")
+    assert resolve_phase_period({"stats_variability_lomb_scargle_best_period_days": 9.0}) == (
+        9.0,
+        "stats_variability_lomb_scargle_best_period_days",
+    )
 
 
 def test_resolve_phase_epoch_uses_minimum_finite_jd() -> None:

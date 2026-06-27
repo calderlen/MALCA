@@ -27,7 +27,7 @@ from typing import Any, Iterable, Mapping, Sequence
 import numpy as np
 import pandas as pd
 
-from malca.table_io import read_feature_table, write_feature_table
+from malca.io.table_io import read_feature_table, write_feature_table
 
 
 ID_COLUMNS = (

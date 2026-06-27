@@ -17,7 +17,7 @@ from pathlib import Path
 import pandas as pd
 
 from malca.config import DEFAULT_OUTPUT_DIR
-from malca.table_io import read_feature_table
+from malca.io.table_io import read_feature_table
 
 
 def _find_repo_root(start: Path) -> Path:

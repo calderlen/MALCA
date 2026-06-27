@@ -22,7 +22,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from malca.lightcurve_publication import (
+from malca.plotting.lightcurve_publication import (
     apply_publication_rcparams,
     save_publication_figure,
     FIG_SINGLE_COL_HEATMAP,
@@ -56,7 +56,7 @@ from malca.config import (
 from malca.config import LTV_INJECTION_OUTPUT_DIR
 from malca.ltv.core import Config, SourceMeta, process_one_lc
 from malca.ltv.filter import apply_all_filters
-from malca.table_io import read_parquet_table, write_parquet_table
+from malca.io.table_io import read_parquet_table, write_parquet_table
 
 
 DAT2_COLUMNS = [

@@ -82,9 +82,10 @@ def sync_eda_metric_controls(queue_data, _db_scope, _last_saved, _import_trigger
     [Output('eda-status', 'children'),
      Output('eda-custom-graph', 'figure'),
      Output('eda-candidate-table', 'data'),
-     Output('eda-candidate-table', 'style_data_conditional')],
+     Output('eda-candidate-table', 'style_data_conditional'),
+     Output('eda-status-base-store', 'data'),
+     Output('eda-current-trace-index-store', 'data')],
     [Input('queue-data', 'data'),
-     Input('current-index', 'data'),
      Input('eda-x-metric', 'value'),
      Input('eda-y-metric', 'value'),
      Input('eda-color-metric', 'value'),
@@ -93,14 +94,13 @@ def sync_eda_metric_controls(queue_data, _db_scope, _last_saved, _import_trigger
      Input('eda-selection-mode', 'value'),
      Input('eda-selection-candidate-ids', 'data'),
      Input('theme-mode-store', 'data'),
-     Input('last-candidate-saved', 'data'),
      Input('import-trigger', 'data'),
      Input('review-db-scope', 'data')],
+    State('current-candidate-id', 'data'),
     prevent_initial_call=False,
 )
 def update_eda_panel(
     queue_data,
-    current_index,
     x_metric,
     y_metric,
     color_metric,
@@ -109,9 +109,9 @@ def update_eda_panel(
     selection_mode,
     selection_candidate_ids,
     theme_mode,
-    _last_saved,
     _import_trigger,
     _db_scope,
+    current_candidate_id,
 ):
     theme = str(theme_mode or DEFAULT_THEME)
     try:
@@ -119,12 +119,14 @@ def update_eda_panel(
         queue_ids = _queue_candidate_ids(queue_data)
         queue_frame = queue_eda_frame(frame, queue_ids)
     except Exception as exc:
-        return f"EDA unavailable: {exc}", eda_status_figure("EDA data unavailable.", theme=theme), [], []
+        status = f"EDA unavailable: {exc}"
+        return status, eda_status_figure("EDA data unavailable.", theme=theme), [], [], status, None
 
-    selected_candidate = selected_candidate_from_queue(queue_data, current_index)
+    selected_candidate = str(current_candidate_id or '').strip()
     if not queue_ids:
         fig = eda_status_figure("Refresh the review queue to populate EDA.", theme=theme)
-        return "No active review queue.", fig, [], []
+        status = "No active review queue."
+        return status, fig, [], [], status, None
 
     x_value, y_value, color_value, symbol_value = resolve_eda_metric_values(
         queue_frame if not queue_frame.empty else frame,
@@ -180,9 +182,94 @@ def update_eda_panel(
         status_parts.append(f"Dropped log<=0: {dropped_nonpositive:,}")
     if selection_active:
         status_parts.append(f"Selected: {len(table_frame):,}")
-    status_parts.append(f"Current: {selected_text}")
-    status = " | ".join(status_parts)
-    return status, fig, rows, style
+    status_base = " | ".join(status_parts)
+    status = f"{status_base} | Current: {selected_text}" if status_base else f"Current: {selected_text}"
+    current_trace_index = None
+    if len(fig.data) and str(getattr(fig.data[-1], 'name', '')) == 'current':
+        current_trace_index = len(fig.data) - 1
+    return status, fig, rows, style, status_base, current_trace_index
+
+
+def _eda_current_marker_payload(
+    frame: pd.DataFrame,
+    candidate_id: object,
+    *,
+    x_metric: object,
+    y_metric: object,
+    log_flags: object,
+) -> tuple[list[float], list[float], list[list[str]]]:
+    """Return the one-point current marker payload for the active EDA metrics."""
+    candidate_text = str(candidate_id or '').strip()
+    x_col = str(x_metric or '').strip()
+    y_col = str(y_metric or '').strip()
+    if not candidate_text or not x_col or not y_col:
+        return [], [], []
+    if x_col not in frame.columns or y_col not in frame.columns or 'candidate_id' not in frame.columns:
+        return [], [], []
+
+    row = frame[frame['candidate_id'].astype(str) == candidate_text]
+    if row.empty:
+        return [], [], []
+
+    x = pd.to_numeric(row[x_col], errors='coerce')
+    y = pd.to_numeric(row[y_col], errors='coerce')
+    valid = x.notna() & y.notna()
+    flags = set(log_flags or [])
+    if 'logx' in flags:
+        valid &= x > 0
+    if 'logy' in flags:
+        valid &= y > 0
+    if not bool(valid.any()):
+        return [], [], []
+
+    first_idx = valid[valid].index[0]
+    return [float(x.loc[first_idx])], [float(y.loc[first_idx])], [[candidate_text]]
+
+
+@app.callback(
+    [Output('eda-status', 'children', allow_duplicate=True),
+     Output('eda-custom-graph', 'figure', allow_duplicate=True),
+     Output('eda-candidate-table', 'style_data_conditional', allow_duplicate=True)],
+    Input('current-candidate-id', 'data'),
+    [State('eda-x-metric', 'value'),
+     State('eda-y-metric', 'value'),
+     State('eda-log-flags', 'value'),
+     State('theme-mode-store', 'data'),
+     State('eda-status-base-store', 'data'),
+     State('eda-current-trace-index-store', 'data')],
+    prevent_initial_call=True,
+)
+def update_eda_current_candidate(candidate_id, x_metric, y_metric, log_flags, theme_mode, status_base, current_trace_index):
+    """Patch only the EDA current-candidate marker and row style during navigation."""
+    candidate_text = str(candidate_id or '').strip()
+    selected_text = candidate_text or 'none'
+    base = str(status_base or '').strip()
+    status = f"{base} | Current: {selected_text}" if base else f"Current: {selected_text}"
+    style = selected_candidate_row_style(candidate_text, theme=str(theme_mode or DEFAULT_THEME))
+
+    patch = no_update
+    try:
+        trace_idx = int(current_trace_index)
+    except (TypeError, ValueError):
+        trace_idx = None
+    if trace_idx is not None and trace_idx >= 0:
+        try:
+            frame = _current_eda_frame()
+            x_values, y_values, customdata = _eda_current_marker_payload(
+                frame,
+                candidate_text,
+                x_metric=x_metric,
+                y_metric=y_metric,
+                log_flags=log_flags,
+            )
+            patch = dash.Patch()
+            patch['data'][trace_idx]['x'] = x_values
+            patch['data'][trace_idx]['y'] = y_values
+            patch['data'][trace_idx]['customdata'] = customdata
+        except Exception:
+            patch = no_update
+
+    return status, patch, style
 
 
 def _eda_selection_enabled(selection_mode):

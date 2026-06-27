@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
-from malca.lightcurve_publication import PUBLICATION_PLOTLY_FONT
+from malca.plotting.lightcurve_publication import PUBLICATION_PLOTLY_FONT
 from malca.review.eda_data import (
     DEFAULT_COLOR,
     DEFAULT_MAIN_X,
@@ -295,6 +295,32 @@ def _plot_status_message(counts: dict[str, Any], x_metric: str | None, y_metric:
     return f"No queue rows have plottable {x_metric} and {y_metric} values."
 
 
+def _current_marker_trace(
+    *,
+    x: list[float] | tuple[float, ...] | None,
+    y: list[float] | tuple[float, ...] | None,
+    customdata: list[list[str]] | tuple[tuple[str, ...], ...] | None,
+    colors: dict[str, str],
+    use_webgl: bool,
+):
+    scatter_cls = go.Scattergl if use_webgl else go.Scatter
+    return scatter_cls(
+        x=list(x or []),
+        y=list(y or []),
+        mode="markers",
+        marker={
+            "size": 15,
+            "symbol": "diamond-open",
+            "color": colors["selected"],
+            "line": {"width": 2.2, "color": colors["accent"]},
+        },
+        name="current",
+        customdata=list(customdata or []),
+        hovertemplate="current %{customdata[0]}<extra></extra>",
+        showlegend=False,
+    )
+
+
 def _categorical_label(value: Any) -> str:
     if value is None:
         return "missing"
@@ -338,7 +364,18 @@ def eda_scatter_figure(
 ) -> go.Figure:
     data, counts = _plot_data_and_counts(frame, x_metric=x_metric, y_metric=y_metric, log_x=log_x, log_y=log_y)
     if data.empty:
-        return eda_status_figure(_plot_status_message(counts, x_metric, y_metric), theme=theme, height=height)
+        colors = _theme_palette(theme)
+        fig = eda_status_figure(_plot_status_message(counts, x_metric, y_metric), theme=theme, height=height)
+        fig.add_trace(
+            _current_marker_trace(
+                x=[],
+                y=[],
+                customdata=[],
+                colors=colors,
+                use_webgl=use_webgl,
+            )
+        )
+        return fig
 
     colors = _theme_palette(theme)
     hover_cols = [
@@ -427,26 +464,20 @@ def eda_scatter_figure(
     fig.update_yaxes(title_text=str(y_metric), title_standoff=10, type="log" if log_y else "linear")
 
     selected_id = str(selected_candidate_id or "").strip()
-    if selected_id:
-        selected = data[data["candidate_id"].astype(str) == selected_id]
-        if not selected.empty:
-            fig.add_trace(
-                scatter_cls(
-                    x=[float(v) for v in selected[x_metric].tolist()],
-                    y=[float(v) for v in selected[y_metric].tolist()],
-                    mode="markers",
-                    marker={
-                        "size": 15,
-                        "symbol": "diamond-open",
-                        "color": colors["selected"],
-                        "line": {"width": 2.2, "color": colors["accent"]},
-                    },
-                    name="current",
-                    customdata=[[str(v)] for v in selected["candidate_id"].astype(str).tolist()],
-                    hovertemplate="current %{customdata[0]}<extra></extra>",
-                    showlegend=False,
-                )
-            )
+    selected = (
+        data[data["candidate_id"].astype(str) == selected_id]
+        if selected_id
+        else data.iloc[0:0]
+    )
+    fig.add_trace(
+        _current_marker_trace(
+            x=[float(v) for v in selected[x_metric].tolist()],
+            y=[float(v) for v in selected[y_metric].tolist()],
+            customdata=[[str(v)] for v in selected["candidate_id"].astype(str).tolist()],
+            colors=colors,
+            use_webgl=use_webgl,
+        )
+    )
     return fig
 
 
@@ -690,21 +721,28 @@ def selected_candidate_from_queue(queue_data: object, index: object) -> str:
     return candidate_ids[idx]
 
 
+def selected_candidate_row_style(selected_candidate_id: object, *, theme: str | None = None) -> list[dict[str, Any]]:
+    selected_id = str(selected_candidate_id or "").strip()
+    if not selected_id:
+        return []
+    colors = _theme_palette(theme)
+    escaped_id = selected_id.replace("\\", "\\\\").replace('"', '\\"')
+    return [
+        {
+            "if": {"filter_query": f'{{candidate_id}} = "{escaped_id}"'},
+            "backgroundColor": "rgba(10, 167, 255, 0.22)" if str(theme or "").lower() != "white" else "#dbeeff",
+            "color": colors["text"],
+            "fontWeight": "700",
+            "boxShadow": "inset 3px 0 0 #0aa7ff",
+        }
+    ]
+
+
 def selected_row_style(rows: list[dict[str, Any]], selected_candidate_id: object, *, theme: str | None = None) -> list[dict[str, Any]]:
     selected_id = str(selected_candidate_id or "").strip()
     if not selected_id:
         return []
     for row in rows:
         if str(row.get("candidate_id") or "") == selected_id:
-            colors = _theme_palette(theme)
-            escaped_id = selected_id.replace("\\", "\\\\").replace('"', '\\"')
-            return [
-                {
-                    "if": {"filter_query": f'{{candidate_id}} = "{escaped_id}"'},
-                    "backgroundColor": "rgba(10, 167, 255, 0.22)" if str(theme or "").lower() != "white" else "#dbeeff",
-                    "color": colors["text"],
-                    "fontWeight": "700",
-                    "boxShadow": "inset 3px 0 0 #0aa7ff",
-                }
-            ]
+            return selected_candidate_row_style(selected_id, theme=theme)
     return []

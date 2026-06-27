@@ -10,7 +10,7 @@ from typing import Any, Iterable, Literal
 
 import pandas as pd
 
-from malca.feature_layers import (
+from malca.products.feature_layers import (
     ALL_FEATURE_LAYER_COLUMNS,
     DERIVED_STATS_LAYER,
     EXTERNAL_STATS_LAYER,
@@ -33,7 +33,7 @@ from malca.migration.schema_aliases import (
     migrate_camera_field_mapping,
 )
 from malca.config import DEFAULT_OUTPUT_DIR
-from malca.table_io import read_parquet_table, write_parquet_table
+from malca.io.table_io import read_parquet_table, write_parquet_table
 
 
 ArtifactAction = Literal["migrate", "copy"]

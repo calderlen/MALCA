@@ -479,10 +479,11 @@ def queue_plot_render_request(idx, current_candidate_id, plot_mode, overlay_valu
         existing_request = external_source_layout
         external_source_layout = DEFAULT_EXTERNAL_SOURCE_LAYOUT
     req = existing_request or {'nonce': 0, 'ts': 0.0}
-    # Determine effective phase period: manual override > search result > pending auto PDM.
+    # Determine effective phase period: manual override > search/harmonic result.
     override_period = None
     override_period_source = ''
     phase_period_pending = False
+    phase_period_pending_source = ''
     suppress_catalog_phase_period = False
     candidate_id = str(current_candidate_id) if current_candidate_id is not None else None
     if pdm_manual_period is not None:
@@ -514,7 +515,7 @@ def queue_plot_render_request(idx, current_candidate_id, plot_mode, overlay_valu
         if isinstance(pdm_result, dict) and result_matches_context:
             if bool(pdm_result.get('pending')):
                 phase_period_pending = True
-                suppress_catalog_phase_period = True
+                phase_period_pending_source = str(pdm_result.get('source') or pdm_result.get('method') or 'Auto period search')
             else:
                 try:
                     period = float(pdm_result.get('best_period'))
@@ -523,11 +524,6 @@ def queue_plot_render_request(idx, current_candidate_id, plot_mode, overlay_valu
                 if np.isfinite(period) and period > 0:
                     override_period = period
                     override_period_source = str(pdm_result.get('source') or pdm_result.get('method') or 'period search')
-                elif bool(pdm_result.get('auto')):
-                    suppress_catalog_phase_period = True
-        elif candidate_id:
-            phase_period_pending = True
-            suppress_catalog_phase_period = True
     normalized_external_sources = normalize_external_source_values(
         external_source_values,
         default=list(DEFAULT_EXTERNAL_SOURCE_VALUES),
@@ -551,6 +547,7 @@ def queue_plot_render_request(idx, current_candidate_id, plot_mode, overlay_valu
             'override_period': override_period,
             'override_period_source': override_period_source,
             'phase_period_pending': bool(phase_period_pending),
+            'phase_period_pending_source': phase_period_pending_source,
             'suppress_catalog_phase_period': bool(suppress_catalog_phase_period),
             'yaxis_mode': str(yaxis_mode or 'mag'),
             'native_color_mode': 'band' if str(native_color_mode or 'camera') == 'band' else 'camera',

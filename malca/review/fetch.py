@@ -5,7 +5,7 @@ Supports three search modes:
   - Gaia DR3 ID → download_lightcurve_by_gaia_id
   - RA/Dec      → cone_search (returns catalog rows; caller picks target)
 
-After downloading, we run the full `malca.stats.compute_stats` suite on the
+After downloading, we run the full `malca.core.stats.compute_stats` suite on the
 downloaded SkyPatrol-format CSV and then hand the result to import_candidates.
 """
 from __future__ import annotations
@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 
 from malca.config import RUN_MAX_GAP_POINTS, BASELINE_FUNC
-from malca.fetch import (
+from malca.io.fetch import (
     cone_search,
     download_lightcurve_by_id,
     download_lightcurve_by_gaia_id,
@@ -185,7 +185,7 @@ def _compute_stats_from_skypatrol_csv(lc_path: Path, *, refresh_stats_cache: boo
             return cached
 
     try:
-        from malca.stats import compute_stats
+        from malca.core.stats import compute_stats
 
         candidate_id = Path(lc_path).stem
         parent = str(Path(lc_path).parent)

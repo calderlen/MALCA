@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 from __future__ import annotations
 
-from malca.lightcurve_publication import main
+from malca.plotting.lightcurve_publication import main
 
 
 if __name__ == "__main__":

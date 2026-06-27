@@ -13,9 +13,9 @@ import numpy as np
 import pandas as pd
 
 from malca.config import DEFAULT_OUTPUT_DIR
-from malca.feature_layers import FEATURE_LAYER_COLUMNS
-from malca.lightcurve_publication import FIG_LC_SINGLE_COL, finalize_publication_figure, plot_lightcurve_panel
-from malca.notebook_paths import find_repo_root, resolve_local_lightcurve_path
+from malca.products.feature_layers import FEATURE_LAYER_COLUMNS
+from malca.plotting.lightcurve_publication import FIG_LC_SINGLE_COL, finalize_publication_figure, plot_lightcurve_panel
+from malca.io.notebook_paths import find_repo_root, resolve_local_lightcurve_path
 from malca.review.dustycult import load_canonical_cleaned_lightcurve
 from malca.review.filter_schema import SIDEBAR_GROUPS
 

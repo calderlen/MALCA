@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import numpy as np
 
-from malca.feature_layers import feature_mapping_get
+from malca.products.feature_layers import feature_mapping_get
 from malca.review.filter_schema import SIDEBAR_GROUPS
 from malca.review.stats_merge import merge_stats_summary_into_payload
 from malca.review.store import _COL_NAMES
-from malca.stats import flux_asymmetry_metric, quasi_periodicity_metric
+from malca.core.stats import flux_asymmetry_metric, quasi_periodicity_metric
 
 
 def test_flux_asymmetry_metric_is_near_zero_for_symmetric_variability() -> None:

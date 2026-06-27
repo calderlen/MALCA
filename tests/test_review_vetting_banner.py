@@ -111,6 +111,34 @@ def test_vetting_banner_displays_vsx_class() -> None:
     assert "GCAS" in text
 
 
+def test_vetting_banner_treats_definite_vsx_class_as_known_even_when_summary_is_stale() -> None:
+    banner = _render_vetting_banner(
+        {
+            "vetting_likely_known": False,
+            "vsx_class": "EA",
+            "vsx_period": 1.7292,
+        }
+    )
+
+    text = " ".join(_component_text(banner))
+    classes = _component_classes(banner)
+
+    assert "KNOWN VARIABLE" in text
+    assert "POTENTIALLY NEW" not in text
+    assert "VSX" in text
+    assert "EA" in text
+    assert "vetting-banner-shell known" in classes
+
+
+def test_vetting_banner_renders_known_for_definite_vsx_class_without_summary_flag() -> None:
+    banner = _render_vetting_banner({"vsx_class": "EA"})
+
+    text = " ".join(_component_text(banner))
+
+    assert "KNOWN VARIABLE" in text
+    assert "VSX" in text
+
+
 def test_vetting_banner_marks_gaia_class_as_known_without_summary_flag() -> None:
     banner = _render_vetting_banner(
         {

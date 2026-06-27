@@ -6,8 +6,8 @@ from scipy.interpolate import RegularGridInterpolator
 import matplotlib.pyplot as plt
 
 from malca.evaluation.dip_injection import load_efficiency_cube, plot_efficiency_marginalized
-from malca.fetch import download_lightcurve_by_id
-from malca.lightcurve_io import load_lightcurve_df
+from malca.io.fetch import download_lightcurve_by_id
+from malca.io.lightcurve_io import load_lightcurve_df
 from malca.config import SKYPATROL_CACHE_DIR
 
 def measure_dipper_properties(df_dippers):
@@ -60,8 +60,8 @@ def measure_dipper_properties(df_dippers):
 def main():
     parser = argparse.ArgumentParser(description="Plot dipper occurrence using inverse-efficiency from dip-injection")
     parser.add_argument("--efficiency-parquet", type=str, required=True, help="Path to dip_efficiency.parquet from cluster")
-    parser.add_argument("--review-csv", type=str, default="output_migrated_camera_field_20260606/runs/runs_march18_bundle_all/results/march18_review_cmd_dustmaps_full.csv")
-    parser.add_argument("--vetted-parquet", type=str, default="output_migrated_camera_field_20260606/runs/runs_march18_bundle_all/results/lc_events_vetted.parquet")
+    parser.add_argument("--review-csv", type=str, default="output/runs/runs_march18_bundle_all/results/march18_review_cmd_dustmaps_full.csv")
+    parser.add_argument("--vetted-parquet", type=str, default="output/runs/runs_march18_bundle_all/results/lc_events_vetted.parquet")
     parser.add_argument("--output", type=str, default="output/dipper_occurrence.pdf", help="Path to save the plot")
     
     args = parser.parse_args()

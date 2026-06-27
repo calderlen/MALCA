@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from malca.feature_layers import with_feature_columns
+from malca.products.feature_layers import with_feature_columns
 from malca.ltv.review import map_ltv_columns
 from malca.review.filter_schema import SIDEBAR_GROUPS
 from malca.review.metadata import REVIEW_METADATA_GROUPS

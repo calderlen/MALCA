@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from malca.lightcurve_io import (
+from malca.io.lightcurve_io import (
     CANONICAL_ASASSN_COLUMNS,
     AB_ZERO_POINT_JY,
     V_VEGA_ZERO_POINT_JY,

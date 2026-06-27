@@ -20,8 +20,8 @@ from malca.stv.events import (
     score_events_bayesian,
     score_lightcurve,
 )
-from malca.baseline import per_camera_gp_baseline
-from malca.feature_layers import with_feature_columns
+from malca.core.baseline import per_camera_gp_baseline
+from malca.products.feature_layers import with_feature_columns
 
 
 def _global_constant_baseline(df: pd.DataFrame, **kwargs) -> pd.DataFrame:

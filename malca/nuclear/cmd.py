@@ -5,7 +5,7 @@ from pathlib import Path
 
 from malca.config import DEFAULT_OUTPUT_DIR
 from malca.nuclear.context import NuclearContextConfig, run_nuclear_context
-from malca.table_io import read_feature_table
+from malca.io.table_io import read_feature_table
 
 
 def main() -> None:

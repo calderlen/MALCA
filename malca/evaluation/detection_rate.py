@@ -23,7 +23,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pa_parquet
 
-from malca.baseline import (
+from malca.core.baseline import (
     global_median_baseline,
     per_camera_median_baseline,
     per_camera_gp_baseline,
@@ -54,7 +54,7 @@ from malca.config import (
     DEFAULT_OUTPUT_DIR,
 )
 from malca.stv.events import score_lightcurve
-from malca.utils import read_lc_dat2
+from malca.core.utils import read_lc_dat2
 
 
 DETECTION_RATE_CONFIG_DEFAULTS = {

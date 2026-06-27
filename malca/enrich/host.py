@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 from malca.enrich.neighbor import _ensure_candidate_id, _query_catalog_bulk
-from malca.table_io import read_feature_table, write_parquet_table
+from malca.io.table_io import read_feature_table, write_parquet_table
 
 
 DEFAULT_HOST_CATALOGS: dict[str, str] = {

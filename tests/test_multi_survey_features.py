@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 
 from malca.config import GAIA_TCB_EPOCH_JD, MJD_TO_JD, TESS_BTJD_OFFSET
-from malca.multi_survey_features import (
+from malca.enrichment.multi_survey_features import (
     _derive_event_window,
     compute_multi_survey_features,
     run as run_multi_survey_features,
@@ -18,8 +18,8 @@ from malca.review.pipeline import (
     detect_pipeline_status,
 )
 from malca.review.store import db_connect, get_candidate_payload, upsert_candidates_frame
-from malca.feature_layers import feature_mapping_get, with_feature_columns
-from malca.table_io import read_feature_table, write_feature_table, write_parquet_table
+from malca.products.feature_layers import feature_mapping_get, with_feature_columns
+from malca.io.table_io import read_feature_table, write_feature_table, write_parquet_table
 
 
 def _base_event_row(candidate_id: str = "C1") -> dict[str, object]:

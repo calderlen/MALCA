@@ -20,7 +20,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from malca.baseline import (
+from malca.core.baseline import (
     global_median_baseline,
     per_camera_median_baseline,
     per_camera_gp_baseline,
@@ -37,7 +37,7 @@ from malca.config import (
 )
 from malca.config import MAD_SCALE
 from malca.stv.events import score_lightcurve
-from malca.lightcurve_publication import (
+from malca.plotting.lightcurve_publication import (
     DIP_EVENT_COLOR,
     JUMP_EVENT_COLOR,
     FIG_SINGLE_COL_LC_WIDE,
@@ -49,16 +49,16 @@ from malca.lightcurve_publication import (
 )
 
 apply_publication_rcparams(plt)
-from malca.phase import camera_labels
+from malca.core.phase import camera_labels
 from malca.review.metadata import REVIEW_METADATA_FIELDS, normalize_vsx_record
-from malca.table_io import read_feature_table
-from malca.lightcurve_io import (
+from malca.io.table_io import read_feature_table
+from malca.io.lightcurve_io import (
     load_lightcurve_df as _canonical_load_lightcurve_df,
     read_asassn_dat as _read_asassn_dat,
     to_asassn_algorithm_frame,
 )
-from malca.utils import clean_lc
-from malca.utils import gaussian, paczynski_kernel, read_skypatrol_csv as _read_skypatrol_csv
+from malca.core.utils import clean_lc
+from malca.core.utils import gaussian, paczynski_kernel, read_skypatrol_csv as _read_skypatrol_csv
 
 read_skypatrol_csv = _read_skypatrol_csv
 

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from malca.table_io import write_feature_table
+from malca.io.table_io import write_feature_table
 
 
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "extract_new_run_candidates.py"

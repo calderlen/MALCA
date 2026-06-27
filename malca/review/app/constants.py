@@ -51,6 +51,7 @@ EXTERNAL_SOURCE_VIEW_OPTIONS = [
     {"label": "ZTF", "value": "ztf"},
     {"label": "Gaia Epoch", "value": "gaia_epoch"},
     {"label": "TESS", "value": "tess"},
+    {"label": "NEOWISE W1/W2", "value": "neowise"},
     {"label": "NEOWISE W1", "value": "neowise_w1"},
     {"label": "NEOWISE W2", "value": "neowise_w2"},
     {"label": "NEOWISE W1-W2", "value": "neowise_color"},
@@ -95,7 +96,7 @@ def normalize_external_source_values(raw_value: object, *, default: list[str] | 
         
         texts = [text]
         if text in {"wise", "neowise", "wise_w1_w2"}:
-            texts = ["neowise_w1", "neowise_w2"]
+            texts = ["neowise"]
         elif text in {"w1", "wise_w1"}:
             texts = ["neowise_w1"]
         elif text in {"w2", "wise_w2"}:

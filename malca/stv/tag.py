@@ -42,9 +42,9 @@ from malca.config import (
 from malca.config import PARQUET_CACHE_COMPRESSION, PARQUET_OUTPUT_COMPRESSION
 from malca.config import VSX_CROSSMATCH_PATH
 from malca.config import WORKERS
-from malca.table_io import read_feature_table, read_parquet_table, write_feature_table
+from malca.io.table_io import read_feature_table, read_parquet_table, write_feature_table
 from malca.vsx.metadata import normalize_vsx_match_columns, select_best_vsx_matches
-from malca.utils import (
+from malca.core.utils import (
     read_lc_dat2,
     get_id_col,
     compute_time_stats,

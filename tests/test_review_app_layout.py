@@ -8,6 +8,7 @@ import sys
 import types
 from pathlib import Path
 
+import dash
 import pandas as pd
 
 
@@ -132,6 +133,26 @@ def _component_by_id(node: object, target_id: object) -> object | None:
     layout = node() if callable(node) else node
     walk(layout)
     return found
+
+
+def _components_with_class(node: object, class_fragment: str) -> list[object]:
+    matches: list[object] = []
+
+    def walk(item: object) -> None:
+        if isinstance(item, (list, tuple)):
+            for child in item:
+                walk(child)
+            return
+        if item is None or isinstance(item, (str, int, float, bool)):
+            return
+        class_name = str(getattr(item, "className", "") or "")
+        if class_fragment in class_name:
+            matches.append(item)
+        walk(getattr(item, "children", None))
+
+    layout = node() if callable(node) else node
+    walk(layout)
+    return matches
 
 
 def _props(component: object) -> dict:
@@ -423,6 +444,106 @@ def test_stat_cards_are_full_width_and_copyable() -> None:
     assert buttons[0].to_plotly_json()["props"]["data-copy-text"] == r"2.64723 \times 10^{-4}"
 
 
+def test_streamlined_metadata_layout_renders_summary_as_normal_rows() -> None:
+    payload = {
+        "asas_sn_id": "618475536448",
+        "gaia_id": "5885468452501959424",
+        "dipper_score": 18.6,
+        "dip_significant": True,
+        "jump_count": 0,
+        "baseline_mag": 12.696,
+    }
+    grouped = review_app.extract_review_metadata_grouped(payload, round_sigfigs=True)
+    feature_rows = review_app.extract_review_metadata_feature_rows(payload, round_sigfigs=True)
+
+    layout = review_app._render_metadata_review_layout(
+        payload,
+        grouped,
+        [("stats_cadence_mean_dt_days", "2.83856")],
+        feature_rows,
+    )
+
+    class_order = [
+        str(getattr(component, "className", "") or "")
+        for component in _components_with_class(layout, "review-feature-section")
+    ]
+    assert any("review-feature-section-review-summary" in class_name for class_name in class_order)
+    assert any("review-feature-section-dip-evidence" in class_name for class_name in class_order)
+    assert any("all-features-details" in class_name for class_name in class_order)
+    assert next(
+        i for i, class_name in enumerate(class_order) if "review-feature-section-review-summary" in class_name
+    ) < next(
+        i for i, class_name in enumerate(class_order) if "review-feature-section-dip-evidence" in class_name
+    )
+    assert next(
+        i for i, class_name in enumerate(class_order) if "review-feature-section-review-summary" in class_name
+    ) < next(
+        i for i, class_name in enumerate(class_order) if "all-features-details" in class_name
+    )
+
+    summary = _components_with_class(layout, "review-feature-section-review-summary")[0]
+    assert _props(summary).get("open") is True
+    assert _components_with_class(summary, "meta-field-row")
+    assert _components_with_class(layout, "review-summary-tile") == []
+
+
+def test_streamlined_metadata_layout_opens_dip_and_collapses_empty_jump() -> None:
+    payload = {
+        "dipper_score": 18.6,
+        "dip_significant": True,
+        "jumper_score": 0,
+        "jump_count": 0,
+        "jump_significant": False,
+    }
+    grouped = review_app.extract_review_metadata_grouped(payload, round_sigfigs=True)
+    feature_rows = review_app.extract_review_metadata_feature_rows(payload, round_sigfigs=True)
+    layout = review_app._render_metadata_review_layout(payload, grouped, [], feature_rows)
+
+    dip_section = _components_with_class(layout, "review-feature-section-dip-evidence")[0]
+    jump_section = _components_with_class(layout, "review-feature-section-jump-evidence")[0]
+
+    assert _props(dip_section).get("open") is True
+    assert _props(jump_section).get("open") is False
+
+
+def test_all_features_plain_list_contains_metadata_and_stats_rows() -> None:
+    payload = {
+        "asas_sn_id": "618475536448",
+        "dipper_score": 18.6,
+        "dip_significant": True,
+        "jump_count": 0,
+        "gaia_var_flag": False,
+        "tmass_j": 11.5,
+    }
+    grouped = review_app.extract_review_metadata_grouped(payload, round_sigfigs=True)
+    feature_rows = review_app.extract_review_metadata_feature_rows(payload, round_sigfigs=True)
+    layout = review_app._render_metadata_review_layout(
+        payload,
+        grouped,
+        [("stats_cadence_mean_dt_days", "2.83856")],
+        feature_rows,
+    )
+    all_features = _components_with_class(layout, "all-features-details")[0]
+    copy_buttons = _components_with_class(all_features, "all-features-copy-btn")
+    raw_lines = _components_with_class(all_features, "all-features-line")
+
+    assert _component_by_id(layout, "all-features-table") is None
+    assert _components_by_type(layout, "DataTable") == []
+    assert _props(all_features).get("open") is False
+    assert copy_buttons
+    copy_text = copy_buttons[0].to_plotly_json()["props"]["data-copy-text"]
+    for expected in (
+        "asas_sn_id",
+        "dip_significant",
+        "jump_count",
+        "gaia_var_flag",
+        "tmass_j",
+        "stats_cadence_mean_dt_days",
+    ):
+        assert expected in copy_text
+    assert raw_lines
+
+
 def test_layout_exposes_phase_time_toggle() -> None:
     control = _component_by_id(app.layout, "phase-panel-mode")
 
@@ -484,8 +605,40 @@ def test_taxonomy_subtype_positive_click_selects_brightening_detail(monkeypatch)
     assert "single brightening" in note
 
 
-def test_auto_period_on_navigate_queues_pdm_even_with_external_period(monkeypatch) -> None:
-    monkeypatch.setattr(review_app, "_has_external_period", lambda _payload: True)
+def test_auto_period_on_navigate_queues_harmonic_check_with_stored_period(monkeypatch) -> None:
+    monkeypatch.setattr(
+        review_app,
+        "_candidate_context",
+        lambda _candidate_id: ({"candidate_id": "cand-1", "period_consensus_days": 8.0}, None, None),
+    )
+
+    result, label, manual_period, cache_update, request = review_app.auto_period_on_navigate(
+        "cand-1",
+        0.1,
+        10.0,
+        {},
+        {"nonce": 4},
+    )
+
+    assert result["pending"] is True
+    assert result["source"] == "Auto harmonic check"
+    assert result["search_method"] == "alias_check"
+    assert result["base_period"] == 8.0
+    assert label == "Auto harmonic check: checking aliases..."
+    assert manual_period is None
+    assert cache_update is review_app.no_update
+    assert request["candidate_id"] == "cand-1"
+    assert request["method"] == "alias_check"
+    assert request["base_period"] == 8.0
+    assert request["nonce"] == 5
+
+
+def test_auto_period_on_navigate_queues_fallback_pdm_without_stored_period(monkeypatch) -> None:
+    monkeypatch.setattr(
+        review_app,
+        "_candidate_context",
+        lambda _candidate_id: ({"candidate_id": "cand-1"}, None, None),
+    )
 
     result, label, manual_period, cache_update, request = review_app.auto_period_on_navigate(
         "cand-1",
@@ -497,37 +650,46 @@ def test_auto_period_on_navigate_queues_pdm_even_with_external_period(monkeypatc
 
     assert result["pending"] is True
     assert result["source"] == "Auto PDM"
-    assert label == "Auto PDM: searching..."
+    assert result["search_method"] == "pdm"
+    assert result["reason"] == "no stored period"
+    assert label == "No stored period; running auto PDM..."
     assert manual_period is None
     assert cache_update is review_app.no_update
     assert request["candidate_id"] == "cand-1"
     assert request["method"] == "pdm"
-    assert request["nonce"] == 5
+    assert request["reason"] == "no stored period"
 
 
-def test_auto_period_cache_reuses_only_matching_bounds() -> None:
+def test_auto_period_cache_reuses_only_matching_bounds(monkeypatch) -> None:
     cached_result = {
         "candidate_id": "cand-1",
-        "search_method": "pdm",
-        "method": "PDM",
-        "source": "Auto PDM",
+        "search_method": "alias_check",
+        "method": "Harmonic check",
+        "source": "Auto harmonic check",
         "best_period": 2.5,
         "min_period": 0.1,
         "max_period": 10.0,
+        "base_period": 10.0,
         "auto": True,
     }
-    key = review_app._period_cache_key("cand-1", "pdm", 0.1, 10.0)
+    key = review_app._period_cache_key("cand-1", "alias_check", 0.1, 10.0, 10.0)
     cache = {
         key: {
             "candidate_id": "cand-1",
-            "method": "pdm",
+            "method": "alias_check",
             "min_period": 0.1,
             "max_period": 10.0,
+            "base_period": 10.0,
             "result": cached_result,
-            "label": "Auto PDM: P=2.50000 d",
+            "label": "Auto harmonic check: P=2.50000 d",
         }
     }
 
+    monkeypatch.setattr(
+        review_app,
+        "_candidate_context",
+        lambda _candidate_id: ({"candidate_id": "cand-1", "period_consensus_days": 10.0}, None, None),
+    )
     result, label, _manual_period, cache_update, request = review_app.auto_period_on_navigate(
         "cand-1",
         0.1,
@@ -536,7 +698,7 @@ def test_auto_period_cache_reuses_only_matching_bounds() -> None:
         {"nonce": 1},
     )
     assert result == cached_result
-    assert label == "Auto PDM: P=2.50000 d"
+    assert label == "Auto harmonic check: P=2.50000 d"
     assert cache_update is review_app.no_update
     assert request is review_app.no_update
 
@@ -548,45 +710,134 @@ def test_auto_period_cache_reuses_only_matching_bounds() -> None:
         {"nonce": 1},
     )
     assert changed_result["pending"] is True
-    assert changed_label == "Auto PDM: searching..."
-    assert changed_request["method"] == "pdm"
+    assert changed_label == "Auto harmonic check: checking aliases..."
+    assert changed_request["method"] == "alias_check"
     assert changed_request["max_period"] == 12.0
 
 
-def test_run_auto_period_search_marks_result_and_cache_as_auto_pdm(monkeypatch) -> None:
-    monkeypatch.setattr(review_app, "_candidate_context", lambda _candidate_id: ({"candidate_id": "cand-1"}, None, None))
+def test_auto_period_cache_reuses_only_matching_base_period(monkeypatch) -> None:
+    cached_result = {
+        "candidate_id": "cand-1",
+        "search_method": "alias_check",
+        "method": "Harmonic check",
+        "source": "Auto harmonic check",
+        "best_period": 2.5,
+        "min_period": 0.1,
+        "max_period": 10.0,
+        "base_period": 10.0,
+        "auto": True,
+    }
+    key = review_app._period_cache_key("cand-1", "alias_check", 0.1, 10.0, 10.0)
+    cache = {
+        key: {
+            "candidate_id": "cand-1",
+            "method": "alias_check",
+            "min_period": 0.1,
+            "max_period": 10.0,
+            "base_period": 10.0,
+            "result": cached_result,
+            "label": "Auto harmonic check: P=2.50000 d",
+        }
+    }
+    monkeypatch.setattr(
+        review_app,
+        "_candidate_context",
+        lambda _candidate_id: ({"candidate_id": "cand-1", "period_consensus_days": 8.0}, None, None),
+    )
 
-    def fake_search(_payload, *, min_period, max_period, method):
-        assert method == "pdm"
+    result, label, _manual_period, cache_update, request = review_app.auto_period_on_navigate(
+        "cand-1",
+        0.1,
+        10.0,
+        cache,
+        {"nonce": 1},
+    )
+    assert result["pending"] is True
+    assert label == "Auto harmonic check: checking aliases..."
+    assert cache_update is review_app.no_update
+    assert request["method"] == "alias_check"
+    assert request["base_period"] == 8.0
+
+
+def test_run_auto_period_search_marks_result_and_cache_as_harmonic_check(monkeypatch) -> None:
+    monkeypatch.setattr(review_app, "_candidate_context", lambda _candidate_id: ({"candidate_id": "cand-1"}, None, None))
+    monkeypatch.setattr(
+        review_app,
+        "_run_period_search_for_payload",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("navigation must not run full period search")),
+    )
+
+    def fake_check(_payload, *, min_period, max_period):
         assert min_period == 0.1
         assert max_period == 10.0
-        return {"best_period": 1.234, "method": "PDM"}, "PDM: P=1.23400 d"
+        return {
+            "best_period": 1.234,
+            "method": "Harmonic check",
+            "base_period": 4.936,
+        }, "Auto harmonic check: P=1.23400 d"
+
+    monkeypatch.setattr(review_app, "_run_harmonic_check_for_payload", fake_check)
+
+    result, label, cache = review_app.run_auto_period_search(
+        {"nonce": 2, "candidate_id": "cand-1", "min_period": 0.1, "max_period": 10.0, "method": "alias_check", "base_period": 4.936},
+        {},
+    )
+
+    key = review_app._period_cache_key("cand-1", "alias_check", 0.1, 10.0, 4.936)
+    assert label == "Auto harmonic check: P=1.23400 d"
+    assert result["auto"] is True
+    assert result["source"] == "Auto harmonic check"
+    assert result["search_method"] == "alias_check"
+    assert result["candidate_id"] == "cand-1"
+    assert cache[key]["method"] == "alias_check"
+    assert cache[key]["result"]["best_period"] == 1.234
+
+
+def test_run_auto_period_search_runs_fallback_pdm_without_stored_period(monkeypatch) -> None:
+    monkeypatch.setattr(review_app, "_candidate_context", lambda _candidate_id: ({"candidate_id": "cand-1"}, None, None))
+    monkeypatch.setattr(
+        review_app,
+        "_run_harmonic_check_for_payload",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("missing-period fallback must run full search")),
+    )
+
+    def fake_search(_payload, *, min_period, max_period, method):
+        assert min_period == 0.1
+        assert max_period == 10.0
+        assert method == "pdm"
+        return {
+            "best_period": 3.21,
+            "method": "PDM",
+        }, "PDM: P=3.21000 d"
 
     monkeypatch.setattr(review_app, "_run_period_search_for_payload", fake_search)
 
     result, label, cache = review_app.run_auto_period_search(
-        {"nonce": 2, "candidate_id": "cand-1", "min_period": 0.1, "max_period": 10.0, "method": "pdm"},
+        {"nonce": 2, "candidate_id": "cand-1", "min_period": 0.1, "max_period": 10.0, "method": "pdm", "reason": "no stored period"},
         {},
     )
 
     key = review_app._period_cache_key("cand-1", "pdm", 0.1, 10.0)
-    assert label == "Auto PDM: P=1.23400 d"
+    assert label == "Auto PDM: P=3.21000 d"
     assert result["auto"] is True
     assert result["source"] == "Auto PDM"
+    assert result["search_method"] == "pdm"
     assert result["candidate_id"] == "cand-1"
+    assert result["reason"] == "no stored period"
     assert cache[key]["method"] == "pdm"
-    assert cache[key]["result"]["best_period"] == 1.234
+    assert cache[key]["result"]["best_period"] == 3.21
 
 
-def test_plot_render_request_manual_overrides_pending_auto_pdm() -> None:
+def test_plot_render_request_manual_overrides_pending_harmonic_check() -> None:
     pending_result = {
         "pending": True,
         "candidate_id": "cand-1",
-        "search_method": "pdm",
-        "method": "PDM",
-        "source": "Auto PDM",
+        "search_method": "alias_check",
+        "method": "Harmonic check",
+        "source": "Auto harmonic check",
         "min_period": 0.1,
         "max_period": 10.0,
+        "base_period": 8.0,
     }
 
     request = review_app.queue_plot_render_request(
@@ -621,15 +872,104 @@ def test_plot_render_request_manual_overrides_pending_auto_pdm() -> None:
     assert state["suppress_catalog_phase_period"] is False
 
 
-def test_plot_render_request_suppresses_catalog_until_matching_pdm_result() -> None:
-    stale_result = {
-        "candidate_id": "old-cand",
+def test_plot_render_request_keeps_catalog_period_while_harmonic_check_pending() -> None:
+    pending_result = {
+        "pending": True,
+        "candidate_id": "cand-1",
+        "search_method": "alias_check",
+        "method": "Harmonic check",
+        "source": "Auto harmonic check",
+        "min_period": 0.1,
+        "max_period": 10.0,
+        "base_period": 8.0,
+    }
+
+    request = review_app.queue_plot_render_request(
+        0,
+        "cand-1",
+        "native",
+        ["phase"],
+        [],
+        "Diagnostics",
+        0.3,
+        "black",
+        1,
+        0,
+        0.5,
+        ["g", "V"],
+        ["yes"],
+        10.0,
+        pending_result,
+        0.1,
+        10.0,
+        None,
+        "mag",
+        "fold",
+        "asassn",
+        {"nonce": 9},
+    )
+
+    state = request["state"]
+    assert state["override_period"] is None
+    assert state["phase_period_pending"] is True
+    assert state["phase_period_pending_source"] == "Auto harmonic check"
+    assert state["suppress_catalog_phase_period"] is False
+
+
+def test_plot_render_request_labels_pending_fallback_pdm() -> None:
+    pending_result = {
+        "pending": True,
+        "candidate_id": "cand-1",
         "search_method": "pdm",
         "method": "PDM",
         "source": "Auto PDM",
+        "min_period": 0.1,
+        "max_period": 10.0,
+        "reason": "no stored period",
+    }
+
+    request = review_app.queue_plot_render_request(
+        0,
+        "cand-1",
+        "native",
+        ["phase"],
+        [],
+        "Diagnostics",
+        0.3,
+        "black",
+        1,
+        0,
+        0.5,
+        ["g", "V"],
+        ["yes"],
+        10.0,
+        pending_result,
+        0.1,
+        10.0,
+        None,
+        "mag",
+        "fold",
+        "asassn",
+        {"nonce": 9},
+    )
+
+    state = request["state"]
+    assert state["override_period"] is None
+    assert state["phase_period_pending"] is True
+    assert state["phase_period_pending_source"] == "Auto PDM"
+    assert state["suppress_catalog_phase_period"] is False
+
+
+def test_plot_render_request_keeps_catalog_period_for_stale_auto_result() -> None:
+    stale_result = {
+        "candidate_id": "old-cand",
+        "search_method": "alias_check",
+        "method": "Harmonic check",
+        "source": "Auto harmonic check",
         "best_period": 9.0,
         "min_period": 0.1,
         "max_period": 10.0,
+        "base_period": 9.0,
     }
 
     request = review_app.queue_plot_render_request(
@@ -659,8 +999,8 @@ def test_plot_render_request_suppresses_catalog_until_matching_pdm_result() -> N
 
     state = request["state"]
     assert state["override_period"] is None
-    assert state["phase_period_pending"] is True
-    assert state["suppress_catalog_phase_period"] is True
+    assert state["phase_period_pending"] is False
+    assert state["suppress_catalog_phase_period"] is False
 
 
 def test_eda_table_has_native_sorting_and_filtering() -> None:
@@ -685,9 +1025,8 @@ def test_eda_plot_selection_filters_table_only_when_enabled(monkeypatch) -> None
     queue_data = {"candidate_ids": ["A", "B", "C"], "queue_size": 3}
     monkeypatch.setattr(review_app, "_current_eda_frame", lambda: frame)
 
-    _status, fig, rows, _style = review_app.update_eda_panel(
+    _status, fig, rows, _style, _status_base, _trace_idx = review_app.update_eda_panel(
         queue_data,
-        0,
         "dipper_score",
         "interest_score",
         None,
@@ -697,8 +1036,8 @@ def test_eda_plot_selection_filters_table_only_when_enabled(monkeypatch) -> None
         ["B", "C"],
         "black",
         0,
-        0,
         "scope",
+        "A",
     )
 
     assert [row["candidate_id"] for row in rows] == ["A", "B", "C"]
@@ -718,9 +1057,8 @@ def test_eda_plot_selection_filters_table_only_when_enabled(monkeypatch) -> None
 
     assert selected_ids == ["B", "C"]
 
-    status, fig, rows, _style = review_app.update_eda_panel(
+    status, fig, rows, _style, _status_base, _trace_idx = review_app.update_eda_panel(
         queue_data,
-        0,
         "dipper_score",
         "interest_score",
         None,
@@ -730,17 +1068,16 @@ def test_eda_plot_selection_filters_table_only_when_enabled(monkeypatch) -> None
         selected_ids,
         "black",
         0,
-        0,
         "scope",
+        "A",
     )
 
     assert [row["candidate_id"] for row in rows] == ["B", "C"]
     assert "Selected: 2" in status
     assert fig.layout.dragmode == "select"
 
-    status, _fig, rows, _style = review_app.update_eda_panel(
+    status, _fig, rows, _style, _status_base, _trace_idx = review_app.update_eda_panel(
         queue_data,
-        0,
         "dipper_score",
         "interest_score",
         None,
@@ -750,16 +1087,15 @@ def test_eda_plot_selection_filters_table_only_when_enabled(monkeypatch) -> None
         ["B", "C"],
         "black",
         0,
-        0,
         "scope",
+        "A",
     )
 
     assert [row["candidate_id"] for row in rows] == ["B", "C"]
     assert "Selected: 2" in status
 
-    status, _fig, rows, _style = review_app.update_eda_panel(
+    status, _fig, rows, _style, _status_base, _trace_idx = review_app.update_eda_panel(
         queue_data,
-        0,
         "dipper_score",
         "interest_score",
         None,
@@ -769,12 +1105,68 @@ def test_eda_plot_selection_filters_table_only_when_enabled(monkeypatch) -> None
         [],
         "black",
         0,
-        0,
         "scope",
+        "A",
     )
 
     assert [row["candidate_id"] for row in rows] == ["A", "B", "C"]
     assert "Selected:" not in status
+
+
+def test_eda_navigation_callback_returns_patch_without_large_state(monkeypatch) -> None:
+    frame = pd.DataFrame(
+        {
+            "candidate_id": ["A", "B"],
+            "dipper_score": [1.0, 2.0],
+            "interest_score": [4.0, 5.0],
+        }
+    )
+    monkeypatch.setattr(review_app, "_current_eda_frame", lambda: frame)
+
+    status, patch, style = review_app.update_eda_current_candidate(
+        "B",
+        "dipper_score",
+        "interest_score",
+        [],
+        "black",
+        "Queue rows: 2/2 | Plotted: 2",
+        1,
+    )
+
+    assert status.endswith("Current: B")
+    assert isinstance(patch, dash.Patch)
+    assert style[0]["if"] == {"filter_query": '{candidate_id} = "B"'}
+
+    callback = None
+    for meta in review_app.app.callback_map.values():
+        outputs = meta.get("output")
+        output_text = str(outputs)
+        if "eda-custom-graph.figure" in output_text and "eda-candidate-table.style_data_conditional" in output_text:
+            inputs = {item["id"] for item in meta.get("inputs", [])}
+            if "current-candidate-id" in inputs:
+                callback = meta
+                break
+
+    assert callback is not None
+    state_props = {(item["id"], item["property"]) for item in callback.get("state", [])}
+    assert ("eda-custom-graph", "figure") not in state_props
+    assert ("eda-candidate-table", "data") not in state_props
+
+
+def test_full_eda_rebuild_callback_does_not_listen_to_navigation() -> None:
+    callback = None
+    for meta in review_app.app.callback_map.values():
+        output_text = str(meta.get("output"))
+        if "eda-candidate-table.data" in output_text:
+            callback = meta
+            break
+
+    assert callback is not None
+    input_ids = {item["id"] for item in callback.get("inputs", [])}
+    state_ids = {item["id"] for item in callback.get("state", [])}
+    assert "current-index" not in input_ids
+    assert "last-candidate-saved" not in input_ids
+    assert "current-candidate-id" in state_ids
 
 
 def test_eda_splitter_reuses_metadata_splitter_style() -> None:

@@ -31,7 +31,7 @@ from typing import Iterable
 import pandas as pd
 
 from malca.config import DEFAULT_OUTPUT_DIR
-from malca.table_io import read_feature_table
+from malca.io.table_io import read_feature_table
 
 
 DEFAULT_CANDIDATES = Path("output/12-15mag_candidates_v2_minus_previous.csv")

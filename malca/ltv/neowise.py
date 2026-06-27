@@ -37,7 +37,7 @@ from malca.config import (
     NEOWISE_MATCH_RADIUS_ARCSEC,
     LTV_WORKERS,
 )
-from malca.neowise_filters import filter_neowise_single_exposure_lc
+from malca.catalogs.neowise_filters import filter_neowise_single_exposure_lc
 
 
 # NEOWISE epoch grouping: combine points within this many days

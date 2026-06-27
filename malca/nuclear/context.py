@@ -13,8 +13,8 @@ from malca.nuclear.features import compute_lightcurve_feature_table
 from malca.nuclear.redshift import resolve_redshift_spectral_types
 from malca.nuclear.scoring import score_nuclear_candidates
 from malca.nuclear.clagn_catalogs import load_known_clagn_catalogs, match_known_clagn_catalogs
-from malca.run_context import init_pipeline_run_context, write_run_params, write_run_summary
-from malca.table_io import write_feature_table
+from malca.products.run_context import init_pipeline_run_context, write_run_params, write_run_summary
+from malca.io.table_io import write_feature_table
 
 
 @dataclass
@@ -155,7 +155,7 @@ def run_nuclear_context(df: pd.DataFrame, config: NuclearContextConfig | None = 
 
     if config.run_characterize:
         def _characterize(frame: pd.DataFrame) -> pd.DataFrame:
-            from malca.characterize import characterize_candidates_df
+            from malca.enrichment.characterize import characterize_candidates_df
 
             return characterize_candidates_df(
                 frame,
@@ -181,7 +181,7 @@ def run_nuclear_context(df: pd.DataFrame, config: NuclearContextConfig | None = 
             out = _mark_stage(out, "atlas", "not_configured", "atlas_token is not set")
 
         def _vet(frame: pd.DataFrame) -> pd.DataFrame:
-            from malca.vetting import vet_candidates
+            from malca.enrichment.vetting import vet_candidates
 
             return vet_candidates(
                 frame,
@@ -204,7 +204,7 @@ def run_nuclear_context(df: pd.DataFrame, config: NuclearContextConfig | None = 
             out = _mark_stage(out, "external_lcs_atlas", "not_configured", "atlas_token is not set")
 
         def _external(frame: pd.DataFrame) -> pd.DataFrame:
-            from malca.vetting import fetch_external_lcs
+            from malca.enrichment.vetting import fetch_external_lcs
 
             return fetch_external_lcs(
                 frame,

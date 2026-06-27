@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from malca.candidates import ensure_candidate_id, merge_candidate_columns, passing_candidates_mask
+from malca.products.candidates import ensure_candidate_id, merge_candidate_columns, passing_candidates_mask
 
 
 def test_ensure_candidate_id_infers_from_asas_sn_id_with_prefix() -> None:

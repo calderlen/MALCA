@@ -5,7 +5,7 @@ import pandas as pd
 import numpy as np
 import healpy as hp
 import matplotlib.pyplot as plt
-from malca.lightcurve_publication import apply_publication_rcparams
+from malca.plotting.lightcurve_publication import apply_publication_rcparams
 
 # Apply publication LaTeX font and style globally
 apply_publication_rcparams(plt)
@@ -27,11 +27,11 @@ def main():
     args = parser.parse_args()
 
     suffix = "_3d" if args.extinction_map == "3d" else ""
-    out_pdf = f"output_migrated_camera_field_20260606/runs/runs_march18_bundle_all/results/all_classes_mollweide{suffix}.pdf"
-    out_png = f"output_migrated_camera_field_20260606/runs/runs_march18_bundle_all/results/all_classes_mollweide{suffix}.png"
+    out_pdf = f"output/runs/runs_march18_bundle_all/results/all_classes_mollweide{suffix}.pdf"
+    out_png = f"output/runs/runs_march18_bundle_all/results/all_classes_mollweide{suffix}.png"
     print("Gathering data...")
     # 1. Get coords from DB
-    conn = sqlite3.connect('output_migrated_camera_field_20260606/runs/runs_march18_bundle_all/review/review.taxonomy_filled.db')
+    conn = sqlite3.connect('output/runs/runs_march18_bundle_all/review/review.taxonomy_filled.db')
     c = conn.cursor()
     c.execute('SELECT candidate_id, payload_json FROM candidates')
     rows = []
@@ -45,12 +45,12 @@ def main():
     df_coords['candidate_id'] = df_coords['candidate_id'].astype(str)
 
     # 2. Get event_class from CSV
-    csv_path = 'output_migrated_camera_field_20260606/runs/runs_march18_bundle_all/results/march18_review_cmd_dustmaps_full.csv'
+    csv_path = 'output/runs/runs_march18_bundle_all/results/march18_review_cmd_dustmaps_full.csv'
     df_csv = pd.read_csv(csv_path)
     df_csv['candidate_id'] = df_csv['candidate_id'].astype(str)
 
     # 3. Get best_model from parquet
-    pq_path = 'output_migrated_camera_field_20260606/microlensing/microlensing_results_20260619_001924.parquet'
+    pq_path = 'output/microlensing/microlensing_results_20260619_001924.parquet'
     df_pq = pd.read_parquet(pq_path, columns=['candidate_id', 'best_model'])
     df_pq['candidate_id'] = df_pq['candidate_id'].astype(str)
 
@@ -127,7 +127,7 @@ def main():
         txt.set_path_effects([pe.withStroke(linewidth=1.5, foreground='white')])
 
     print("Plotting candidates...")
-    from malca.lightcurve_publication import CMD_BUCKET_STYLE
+    from malca.plotting.lightcurve_publication import CMD_BUCKET_STYLE
     
     styles = {
         'Microlensing': CMD_BUCKET_STYLE['Microlensing'],

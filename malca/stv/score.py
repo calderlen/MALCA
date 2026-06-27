@@ -26,9 +26,9 @@ from scipy.optimize import curve_fit
 import numpy as np
 import pandas as pd
 
-from malca.stats import robust_sigma
-from malca.table_io import read_parquet_table
-from malca.utils import gaussian
+from malca.core.stats import robust_sigma
+from malca.io.table_io import read_parquet_table
+from malca.core.utils import gaussian
 
 
 

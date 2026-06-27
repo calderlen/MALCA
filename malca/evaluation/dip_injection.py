@@ -26,7 +26,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from malca.lightcurve_publication import (
+from malca.plotting.lightcurve_publication import (
     apply_publication_rcparams,
     finalize_publication_figure,
     save_publication_figure,
@@ -38,7 +38,7 @@ from malca.lightcurve_publication import (
 apply_publication_rcparams(plt)
 import plotly.graph_objects as go
 
-from malca.baseline import (
+from malca.core.baseline import (
     global_median_baseline,
     per_camera_median_baseline,
     per_camera_gp_baseline,
@@ -73,7 +73,7 @@ from malca.config import (
     LIGHT_CURVE_FILE_EXTENSION,
 )
 from malca.stv.events import score_lightcurve
-from malca.utils import read_lc_dat2
+from malca.core.utils import read_lc_dat2
 
 
 INJECTION_CONFIG_DEFAULTS = {

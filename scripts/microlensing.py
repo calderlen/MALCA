@@ -15,8 +15,8 @@ are **excluded from fits and from the results table entirely** (not merged, not 
 $\chi^2$ by color, best model by marker), candidate grid ``microlensing_grid_<timestamp>.pdf``, Gaia CMD summary
 ``microlensing_cmd_<timestamp>.pdf``, and optionally—with ``--plot-lc``—per-candidate LC PDFs under
 ``output/microlensing/fit_pdfs/`` (named ``{chi2nu_paczynski}_{t_E_days}_{asas_sn_id}.pdf``).
-With ``--crossmatch``, enrichment is delegated to ``malca.characterize.characterize_candidates_df`` and
-``malca.vetting.vet_candidates`` (Gaia/2MASS/WISE context, SIMBAD, ZTF, ASAS-SN, TNS, ALeRCE, eROSITA, …; ATLAS forced photometry disabled here).
+With ``--crossmatch``, enrichment is delegated to ``malca.enrichment.characterize.characterize_candidates_df`` and
+``malca.enrichment.vetting.vet_candidates`` (Gaia/2MASS/WISE context, SIMBAD, ZTF, ASAS-SN, TNS, ALeRCE, eROSITA, …; ATLAS forced photometry disabled here).
 
 Progress: phase lines always; tqdm bars when stderr is a TTY.
 """
@@ -65,7 +65,7 @@ import pandas as pd
 
 from astroquery.gaia import Gaia
 
-from malca.lightcurve_publication import (
+from malca.plotting.lightcurve_publication import (
     apply_publication_rcparams,
     save_publication_figure,
     FIG_LC_SINGLE_COL,
@@ -84,11 +84,11 @@ from astropy.coordinates.solar_system import get_body_barycentric_posvel
 from scipy.optimize import least_squares, lsq_linear
 
 from malca.config import DEFAULT_OUTPUT_DIR
-from malca.lightcurve_io import load_lightcurve_df
+from malca.io.lightcurve_io import load_lightcurve_df
 from malca.review.eda_data import infer_plot_dir_from_source
 from malca.review.interactive_plot import resolve_lightcurve_path
 from malca.review.store import get_candidate_payload, init_db
-from malca.utils import batch_gaia_cone_query, clean_lc
+from malca.core.utils import batch_gaia_cone_query, clean_lc
 from tqdm import tqdm
 
 
@@ -1164,7 +1164,7 @@ def _save_microlensing_candidate_grid_plot(
         frameon=False,
         fontsize=8,
     )
-    from malca.lightcurve_publication import finalize_publication_figure
+    from malca.plotting.lightcurve_publication import finalize_publication_figure
     finalize_publication_figure(fig, rect=(0.055, 0.055, 0.99, 0.955))
     fig.savefig(out_path, dpi=dpi_save, bbox_inches=None, format="pdf")
     plt.close(fig)
@@ -1377,9 +1377,9 @@ def _run_microlensing_crossmatch_enrichment(
     published microlensing events separately.
     """
     try:
-        from malca.characterize import characterize_candidates_df
+        from malca.enrichment.characterize import characterize_candidates_df
         from malca.config import GAIA_LOCAL_CATALOG as _GAIA_LOCAL, VSX_CROSSMATCH_PATH as _VSX_DEF
-        from malca.vetting import vet_candidates
+        from malca.enrichment.vetting import vet_candidates
     except ImportError as exc:
         print(f'Crossmatch suite skipped (import failed): {exc}', flush=True)
         return microlensing_table_df
@@ -2434,7 +2434,7 @@ def _flatten_parallax_summary(parallax_result: dict[str, object]) -> dict[str, o
     return out
 
 def _prepare_lightcurve_df(lc_path: Path, *, prefer_g_band: bool = True) -> tuple[pd.DataFrame, str]:
-    from malca.lightcurve_io import to_asassn_algorithm_frame
+    from malca.io.lightcurve_io import to_asassn_algorithm_frame
     df = load_lightcurve_df(lc_path)
     df = to_asassn_algorithm_frame(df)
     df = clean_lc(df)
@@ -3562,7 +3562,7 @@ def _scan_periodicity(
     """Scan for periodicity using LSP and PDM.
     
     Runs period search on raw lightcurve and optionally on model residuals.
-    Uses malca.periodogram functions.
+    Uses malca.core.periodogram functions.
     
     Returns dict with lsp_best_period, lsp_best_power, pdm_best_period, pdm_best_theta,
     resid_* versions, and periodicity_detected flag.
@@ -3586,7 +3586,7 @@ def _scan_periodicity(
     
     # Import periodogram functions
     try:
-        from malca.periodogram import lsp_find_period, pdm_find_period
+        from malca.core.periodogram import lsp_find_period, pdm_find_period
     except ImportError:
         return results
     
@@ -4884,7 +4884,7 @@ def plot_candidate_fit(result: dict[str, object], *, figsize: tuple[float, float
 
 
 
-from malca.vetting import (
+from malca.enrichment.vetting import (
     MICROLENS_CACHE_DIR,
     fetch_microlensing_event_catalog,
     _safe_text,
@@ -5690,7 +5690,7 @@ def run_microlensing_pipeline(
     if crossmatch:
         if show_progress:
             print(
-                "[4c] Crossmatch suite: malca.characterize + malca.vetting (not reimplemented here) …",
+                "[4c] Crossmatch suite: malca.enrichment.characterize + malca.enrichment.vetting (not reimplemented here) …",
                 flush=True,
             )
         characterize_checkpoint_path: Path | None = None
@@ -5824,7 +5824,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--crossmatch",
         action="store_true",
         help=(
-            "After fits, run malca.characterize_candidates_df + malca.vet_candidates (Gaia context, SIMBAD, "
+            "After fits, run malca.enrichment.characterize_candidates_df + malca.vet_candidates (Gaia context, SIMBAD, "
             "ZTF/ASAS-SN vars, TNS, ALeRCE, eROSITA, …; ATLAS forced photometry is not used); merges into the results Parquet. "
             "Requires local Gaia parquet for full characterize (see --crossmatch-gaia-catalog)."
         ),

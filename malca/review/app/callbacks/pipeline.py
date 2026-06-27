@@ -124,7 +124,7 @@ def _run_pipeline_impl(set_progress, run_clicks, rerun_clicks, rerun_stats_click
             # If triggered by a full_ext fetch, ensure we run external LCs
             if fetch_mode == 'full_ext' and 'external_lcs' not in stages:
                 p("Running external LCs...")
-                from malca.vetting import fetch_external_lcs
+                from malca.enrichment.vetting import fetch_external_lcs
 
 
 
@@ -177,6 +177,8 @@ def _run_pipeline_impl(set_progress, run_clicks, rerun_clicks, rerun_stats_click
         if stages:
             _index_external_lc_paths.cache_clear()
             _index_external_lc_paths_from_root.cache_clear()
+            _index_neowise_paths.cache_clear()
+            clear_external_lc_discovery_caches()
             return f"✓ Ran: {', '.join(stages)}", no_update, refresh_idx
         else:
             if triggered_id in {

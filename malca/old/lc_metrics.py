@@ -1,6 +1,6 @@
 import numpy as np
 
-from malca.baseline import (
+from malca.core.baseline import (
     per_camera_trend_baseline,
     per_camera_median_baseline,
     per_camera_mean_baseline,

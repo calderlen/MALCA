@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from malca.table_io import read_feature_table
+from malca.io.table_io import read_feature_table
 
 
 def _parse_columns(values: list[str] | None) -> list[str] | None:

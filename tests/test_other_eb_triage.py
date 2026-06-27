@@ -18,7 +18,7 @@ from malca.review.other_eb_triage import (
     scan_eb_candidates,
     select_example_candidates,
 )
-from malca.table_io import write_feature_table
+from malca.io.table_io import write_feature_table
 
 
 def _write_review_db(

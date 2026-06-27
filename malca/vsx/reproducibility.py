@@ -14,7 +14,7 @@ from malca.config import (
     VSX_RAW_CATALOG_PATH,
     DEFAULT_OUTPUT_DIR,
 )
-from malca.table_io import read_parquet_table, write_parquet_table
+from malca.io.table_io import read_parquet_table, write_parquet_table
 
 
 DEFAULT_VSX_CROSSMATCH = VSX_CROSSMATCH_PATH
