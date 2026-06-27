@@ -18,11 +18,29 @@ _HEADER_BOX = {
     "alpha": 1.0,
 }
 
+_RAW_MARKER_CAP_PT = 3.0
+_SECONDARY_MARKER_CAP_PT = 2.4
+_MARKER_EDGE_WIDTH = 0.15
+_MARKER_ERRORBAR_WIDTH = 0.3
+
 
 def _mpl_marker(plotly_marker: str | None) -> str:
     if not plotly_marker:
         return "o"
     return MARKER_MAP.get(plotly_marker, {}).get("mpl", "o")
+
+
+def _adaptive_pdf_marker_size(panel_id: str, requested_size: float, n_points: int) -> float:
+    """Return a publication PDF marker size that stays readable for dense traces."""
+    cap = _RAW_MARKER_CAP_PT if str(panel_id) == "raw" else _SECONDARY_MARKER_CAP_PT
+    size = min(float(requested_size), cap)
+    if n_points >= 800:
+        size = min(size, 1.6)
+    elif n_points >= 400:
+        size = min(size, 1.9)
+    elif n_points >= 200:
+        size = min(size, 2.2)
+    return max(size, 0.8)
 
 
 def _phase_time_colormap():
@@ -105,7 +123,11 @@ def _plot_trace(ax, trace: PlotTrace, *, label: str | None = None, marker_size: 
     x = x[mask]
     y = y[mask]
     marker = _mpl_marker(trace.marker)
-    size = float(marker_size if marker_size is not None else trace.marker_size)
+    size = _adaptive_pdf_marker_size(
+        trace.panel_id,
+        float(marker_size if marker_size is not None else trace.marker_size),
+        int(x.size),
+    )
     yerr = None
     if trace.yerr is not None:
         err = np.asarray(trace.yerr, dtype=float)[mask]
@@ -122,9 +144,9 @@ def _plot_trace(ax, trace: PlotTrace, *, label: str | None = None, marker_size: 
             markersize=size,
             markerfacecolor=color,
             markeredgecolor="0.12",
-            markeredgewidth=0.35,
+            markeredgewidth=_MARKER_EDGE_WIDTH,
             ecolor=color,
-            elinewidth=0.45,
+            elinewidth=_MARKER_ERRORBAR_WIDTH,
             capsize=0.0,
             alpha=trace.alpha,
             label=label if label is not None else trace.label,
@@ -138,7 +160,7 @@ def _plot_trace(ax, trace: PlotTrace, *, label: str | None = None, marker_size: 
             marker=marker,
             facecolors=color,
             edgecolors="0.12",
-            linewidths=0.35,
+            linewidths=_MARKER_EDGE_WIDTH,
             alpha=trace.alpha,
             label=label if label is not None else trace.label,
             zorder=4,
@@ -190,13 +212,14 @@ def render_review_lightcurve_pdf(spec: ReviewLightCurvePlotSpec) -> bytes:
                 valid = np.isfinite(x) & np.isfinite(y) & np.isfinite(c)
                 if not valid.any():
                     continue
+                size = _adaptive_pdf_marker_size(trace.panel_id, trace.marker_size, int(np.count_nonzero(valid)))
                 scatter_kwargs = {
-                    "s": 8.0,
+                    "s": size**2,
                     "marker": _mpl_marker(trace.marker),
                     "c": c[valid],
                     "cmap": cmap,
                     "edgecolors": "0.12",
-                    "linewidths": 0.25,
+                    "linewidths": _MARKER_EDGE_WIDTH,
                     "alpha": 0.84,
                     "zorder": 4,
                 }

@@ -229,6 +229,43 @@ def test_sed_photometry_cli_writes_fit_and_curve_outputs(tmp_path: Path, monkeyp
     assert curve_path.exists()
 
 
+def test_sed_photometry_cli_writes_alpha_output_without_atmosphere_fit(tmp_path: Path, monkeypatch) -> None:
+    input_path = tmp_path / "candidates.parquet"
+    write_feature_table(
+        pd.DataFrame([{"candidate_id": "sed-alpha-cand", "timescale": "stv", "ra": 1.0, "dec": 2.0}]),
+        input_path,
+    )
+    sed_rows = pd.DataFrame(
+        [
+            {
+                "candidate_id": "sed-alpha-cand",
+                "source": "Test",
+                "band": f"b{idx}",
+                "lambda_eff_angstrom": wave_micron * 1.0e4,
+                "lambda_l_lambda": wave_micron ** -0.5,
+                "flux_lambda": wave_micron ** -0.5 / (wave_micron * 1.0e4),
+                "is_upper_limit": False,
+                "is_synthetic": False,
+            }
+            for idx, wave_micron in enumerate((2.159, 3.4, 12.0, 22.0))
+        ]
+    )
+
+    monkeypatch.setattr(sed_photometry, "fetch_sed_photometry", lambda *args, **kwargs: sed_rows)
+
+    args = sed_photometry.build_arg_parser().parse_args(
+        [str(input_path), "--sources", "payload", "--no-fit-atmosphere"]
+    )
+    output_path = sed_photometry.run(args)
+    alpha_path = sed_photometry._default_alpha_output_path(output_path)
+    alpha_rows = pd.read_parquet(alpha_path)
+
+    assert output_path.exists()
+    assert alpha_path.exists()
+    assert alpha_rows.loc[0, "sed_alpha_status"] == "ok"
+    assert alpha_rows.loc[0, "sed_alpha"] == pytest.approx(-0.5, abs=1.0e-12)
+
+
 def test_sed_photometry_cli_reads_candidates_from_review_db_by_default(tmp_path: Path, monkeypatch) -> None:
     db_path = tmp_path / "review.db"
     with closing(db_connect(db_path)) as conn:

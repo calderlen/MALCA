@@ -304,6 +304,90 @@ def test_export_active_plot_png_mode_uses_matplotlib_lightcurve_renderer(monkeyp
     assert seen["yaxis_mode"] == "flux"
 
 
+def test_batch_export_searches_missing_phase_period(tmp_path: Path, monkeypatch) -> None:
+    seen = {}
+    progress_messages = []
+
+    def fake_candidate_context(candidate_id):
+        return {"candidate_id": candidate_id, "asas_sn_id": "asas-1"}, None, None
+
+    def fake_search(payload, **kwargs):
+        seen["search_payload"] = payload
+        seen["search_kwargs"] = kwargs
+        return {"best_period": 2.75, "method": "PDM"}, "PDM: P=2.75000 d"
+
+    def fake_build(payload, **kwargs):
+        seen["payload"] = payload
+        seen["build_kwargs"] = kwargs
+        return b"%PDF-1.4\n%%EOF"
+
+    monkeypatch.setattr(review_app, "_candidate_context", fake_candidate_context)
+    monkeypatch.setattr(review_app, "_review_plot_dir_for_context", lambda _source_path: None)
+    monkeypatch.setattr(review_app, "_load_run_params_for_plot_dir", lambda _plot_dir: {})
+    monkeypatch.setattr(review_app, "_run_period_search_for_payload", fake_search)
+    monkeypatch.setattr(review_app, "build_review_lightcurve_publication_pdf", fake_build)
+
+    message = review_app.handle_batch_export(
+        progress_messages.append,
+        1,
+        "all",
+        str(tmp_path),
+        {"candidate_ids": ["cand-1"]},
+        {"state": {"overlay_values": ["phase"], "selected_bands": ["g"]}},
+        0.2,
+        5.0,
+        "pdm",
+    )
+
+    assert (tmp_path / "malca_plot_asas-1.pdf").exists()
+    assert seen["search_payload"]["candidate_id"] == "cand-1"
+    assert seen["search_kwargs"] == {"min_period": 0.2, "max_period": 5.0, "method": "pdm"}
+    assert seen["build_kwargs"]["show_phase_fold"] is True
+    assert seen["build_kwargs"]["override_period"] == 2.75
+    assert seen["build_kwargs"]["override_period_source"] == "Batch auto-search (PDM)"
+    assert "phase found: 1" in message
+    assert "phase skipped: 0" in message
+    assert any("PDF ok:" in item for item in progress_messages)
+
+
+def test_batch_export_skips_phase_panel_when_period_search_fails(tmp_path: Path, monkeypatch) -> None:
+    seen = {}
+
+    def fake_candidate_context(candidate_id):
+        return {"candidate_id": candidate_id, "asas_sn_id": "asas-1"}, None, None
+
+    def fake_build(payload, **kwargs):
+        seen["payload"] = payload
+        seen["build_kwargs"] = kwargs
+        return b"%PDF-1.4\n%%EOF"
+
+    monkeypatch.setattr(review_app, "_candidate_context", fake_candidate_context)
+    monkeypatch.setattr(review_app, "_review_plot_dir_for_context", lambda _source_path: None)
+    monkeypatch.setattr(review_app, "_load_run_params_for_plot_dir", lambda _plot_dir: {})
+    monkeypatch.setattr(review_app, "_run_period_search_for_payload", lambda *args, **kwargs: (None, "No valid period"))
+    monkeypatch.setattr(review_app, "build_review_lightcurve_publication_pdf", fake_build)
+
+    message = review_app.handle_batch_export(
+        lambda _message: None,
+        1,
+        "all",
+        str(tmp_path),
+        {"candidate_ids": ["cand-1"]},
+        {"state": {"overlay_values": ["phase"], "selected_bands": ["g"]}},
+        None,
+        None,
+        "pdm",
+    )
+
+    assert (tmp_path / "malca_plot_asas-1.pdf").exists()
+    assert seen["build_kwargs"]["show_phase_fold"] is False
+    assert seen["build_kwargs"]["override_period"] is None
+    assert seen["build_kwargs"]["phase_period_pending"] is False
+    assert seen["build_kwargs"]["suppress_catalog_phase_period"] is False
+    assert "phase found: 0" in message
+    assert "phase skipped: 1" in message
+
+
 def test_external_followup_panel_renders_without_details_open_state(monkeypatch) -> None:
     seen = {}
 

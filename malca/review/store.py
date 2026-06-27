@@ -682,6 +682,13 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("w2_w3",                    "REAL",    "float"),
     ("w2_w4",                    "REAL",    "float"),
     ("w3_w4",                    "REAL",    "float"),
+    ("sed_alpha",                "REAL",    "float"),
+    ("sed_alpha_class",          "TEXT",    "select"),
+    ("sed_alpha_n_points",       "REAL",    "float"),
+    ("sed_alpha_lambda_min_micron", "REAL", "float"),
+    ("sed_alpha_lambda_max_micron", "REAL", "float"),
+    ("sed_alpha_bands_json",     "TEXT",    "text"),
+    ("sed_alpha_status",         "TEXT",    "select"),
     ("iphas_ha_mag",             "REAL",    "float"),
     ("iphas_r_ha",               "REAL",    "float"),
     ("vphas_ha_mag",             "REAL",    "float"),
@@ -2526,6 +2533,27 @@ def get_diagnostic_background(conn: sqlite3.Connection) -> dict:
                 pass
     result["kiel_teff"] = np.array(teff_list, dtype=np.float64)
     result["kiel_logg"] = np.array(logg_list, dtype=np.float64)
+
+    # Teff-alpha: use the same StarHorse -> GSP-Phot Teff precedence as Kiel.
+    sed_alpha_expr = _background_value_expr("sed_alpha", column_map)
+    rows = conn.execute(
+        f"SELECT {teff_gsp_expr}, {teff50_expr}, {sed_alpha_expr} "
+        "FROM candidates"
+    ).fetchall()
+    teff_alpha_t, teff_alpha_a = [], []
+    for gsp_t, sh_t, alpha in rows:
+        t = sh_t if sh_t is not None else gsp_t
+        if t is None or alpha is None:
+            continue
+        try:
+            tf, af = float(t), float(alpha)
+            if math.isfinite(tf) and math.isfinite(af):
+                teff_alpha_t.append(tf)
+                teff_alpha_a.append(af)
+        except (TypeError, ValueError):
+            pass
+    result["plane_teff_alpha_x"] = np.array(teff_alpha_t, dtype=np.float64)
+    result["plane_teff_alpha_y"] = np.array(teff_alpha_a, dtype=np.float64)
 
     # CMD: dustmaps3d extinction from A_v_3d + Gaia photometry.
     phot_g_expr = _background_value_expr("phot_g_mean_mag", column_map)

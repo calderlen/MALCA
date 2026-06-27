@@ -18,6 +18,11 @@ from malca.enrichment.sed_model import (
     fit_sed_models,
     upsert_sed_model_results,
 )
+from malca.enrichment.sed_alpha import (
+    SED_ALPHA_COLUMNS,
+    compute_sed_alpha_features,
+    upsert_sed_alpha_results,
+)
 from malca.review.sed import (
     ALL_CATALOG_SOURCES,
     DEFAULT_PIPELINE_SED_SOURCES,
@@ -78,6 +83,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Fetch SED photometry for all input rows instead of only failed_any=False passers.",
     )
+    parser.add_argument(
+        "--no-alpha",
+        dest="compute_alpha",
+        action="store_false",
+        default=True,
+        help="Skip 2-24 micron SED spectral-index feature calculation.",
+    )
     return parser
 
 
@@ -98,6 +110,18 @@ def _default_model_output_paths(output_path: Path) -> tuple[Path, Path]:
         output_path.with_name(f"{prefix_text}sed_model_fits.parquet"),
         output_path.with_name(f"{prefix_text}sed_model_curves.parquet"),
     )
+
+
+def _default_alpha_output_path(output_path: Path) -> Path:
+    stem = output_path.stem
+    if stem == "sed_photometry":
+        prefix = ""
+    elif stem.endswith("_sed_photometry"):
+        prefix = stem[: -len("_sed_photometry")]
+    else:
+        prefix = stem
+    prefix_text = f"{prefix}_" if prefix else ""
+    return output_path.with_name(f"{prefix_text}sed_alpha.parquet")
 
 
 def _is_sqlite_input(path: Path) -> bool:
@@ -205,6 +229,22 @@ def run(args: argparse.Namespace) -> Path:
 
     fits = pd.DataFrame(columns=SED_MODEL_FIT_COLUMNS)
     curves = pd.DataFrame(columns=SED_MODEL_CURVE_COLUMNS)
+    alpha_rows = pd.DataFrame(columns=SED_ALPHA_COLUMNS)
+    alpha_output_path = _default_alpha_output_path(output_path)
+    if bool(getattr(args, "compute_alpha", True)):
+        alpha_rows = compute_sed_alpha_features(df, rows)
+        for col in SED_ALPHA_COLUMNS:
+            if col not in alpha_rows.columns:
+                alpha_rows[col] = None
+        alpha_rows = alpha_rows[SED_ALPHA_COLUMNS]
+        write_parquet_table(alpha_rows, alpha_output_path)
+        n_ok_alpha = (
+            int((alpha_rows["sed_alpha_status"].astype(str) == "ok").sum())
+            if "sed_alpha_status" in alpha_rows.columns
+            else 0
+        )
+        print(f"Saved {len(alpha_rows)} SED alpha rows to {alpha_output_path} ({n_ok_alpha} ok)")
+
     fit_output_path, curve_output_path = _default_model_output_paths(output_path)
     if fit_atmosphere:
         fits, curves = fit_sed_models(
@@ -229,11 +269,18 @@ def run(args: argparse.Namespace) -> Path:
     if review_db_path:
         with closing(db_connect(review_db_path)) as conn:
             updated = upsert_sed_rows(conn, rows)
+            n_alpha = (
+                upsert_sed_alpha_results(conn, alpha_rows)
+                if bool(getattr(args, "compute_alpha", True))
+                else 0
+            )
             if fit_atmosphere:
                 n_fits, n_curves = upsert_sed_model_results(conn, fits, curves)
             else:
                 n_fits, n_curves = 0, 0
         print(f"\nUpserted {updated} SED rows into {review_db_path}")
+        if bool(getattr(args, "compute_alpha", True)):
+            print(f"Upserted {n_alpha} SED alpha rows into {review_db_path}")
         if fit_atmosphere:
             print(f"Upserted {n_fits} SED model fit rows and {n_curves} curve rows into {review_db_path}")
 

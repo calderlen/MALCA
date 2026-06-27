@@ -598,6 +598,26 @@ def build_kiel_figure(
     return fig
 
 
+def build_teff_sed_alpha_figure(
+    payload: dict, theme: str, *, background: dict | None = None,
+) -> go.Figure | None:
+    """Catalog Teff vs 2-24 micron SED spectral index."""
+    return _metric_plane_figure(
+        payload,
+        theme,
+        background=background,
+        title="Teff vs SED Alpha",
+        x_keys=("teff50", "teff_gspphot"),
+        y_keys=("sed_alpha",),
+        background_x_key="plane_teff_alpha_x",
+        background_y_key="plane_teff_alpha_y",
+        x_title="T_eff [K]",
+        y_title="SED alpha",
+        hlines=(-1.6, -0.3, 0.3),
+        y_range=[-3.2, 2.2],
+    )
+
+
 def _publication_imports():
     cache_dir = Path(tempfile.gettempdir()) / "malca-matplotlib"
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -957,6 +977,39 @@ def _kiel_publication_pdf(payload: dict, background: dict | None) -> bytes | Non
     return _save_publication_pdf(fig)
 
 
+def _teff_sed_alpha_publication_pdf(payload: dict, background: dict | None) -> bytes | None:
+    teff = _safe_float(payload, "teff50")
+    if teff is None:
+        teff = _safe_float(payload, "teff_gspphot")
+    alpha = _safe_float(payload, "sed_alpha")
+    if teff is None or alpha is None:
+        return None
+
+    plt, _LinearSegmentedColormap, _LogNorm = _publication_imports()
+    bg_x, bg_y = _finite_publication_xy(background, "plane_teff_alpha_x", "plane_teff_alpha_y")
+    xlim = _quantile_limits(bg_x, (teff,), default=(2500.0, 12000.0), qlo=0.005, qhi=0.995, min_pad=350.0)
+    ylim = _quantile_limits(bg_y, (alpha, -1.6, -0.3, 0.3), default=(-3.0, 2.0), qlo=0.005, qhi=0.995, min_pad=0.35)
+
+    fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_SQUARE)
+    _background_density(ax, bg_x, bg_y, extent=(xlim[0], xlim[1], ylim[0], ylim[1]))
+    for value in (-1.6, -0.3, 0.3):
+        ax.axhline(value, color="#6b7280", linestyle=":", linewidth=0.8, zorder=2)
+    ax.scatter(
+        [teff],
+        [alpha],
+        s=_PUBLICATION_CANDIDATE_SIZE,
+        marker="o",
+        facecolors=_CANDIDATE_COLOR,
+        edgecolors=_CANDIDATE_EDGE_COLOR,
+        linewidths=0.95,
+        zorder=6,
+    )
+    _publication_axes(ax, xlabel=r"$T_{\rm eff}\ {\rm [K]}$", ylabel=r"$\alpha_{2-24\mu{\rm m}}$")
+    ax.set_xlim(*xlim)
+    ax.set_ylim(*ylim)
+    return _save_publication_pdf(fig)
+
+
 def _sample_publication_points(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     if x.size <= _BACKGROUND_POINT_LIMIT:
         return x, y
@@ -1305,6 +1358,8 @@ def build_publication_diagnostic_pdf(
         return _ir_colorcolor_publication_pdf(payload, background)
     if key == "kiel":
         return _kiel_publication_pdf(payload, background)
+    if key == "teff_sed_alpha":
+        return _teff_sed_alpha_publication_pdf(payload, background)
     if key == "rpm":
         return _rpm_publication_pdf(payload, background)
     if key in {"score_balance", "morphology_scores"}:

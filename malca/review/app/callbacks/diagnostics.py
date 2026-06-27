@@ -94,6 +94,7 @@ def _render_diagnostic_plots(payload: dict, theme: str, background: dict | None 
         build_cmd_figure,
         build_ir_colorcolor_figure,
         build_kiel_figure,
+        build_teff_sed_alpha_figure,
         build_rpm_figure,
         build_uv_optical_figure,
         build_periodicity_plane_figure,

@@ -70,6 +70,7 @@ from malca.review.diagnostic_plots import (
     build_score_balance_figure,
     build_shape_impulsiveness_figure,
     build_stetson_scatter_figure,
+    build_teff_sed_alpha_figure,
     build_uv_optical_figure,
     build_variability_strength_figure,
     build_ztf_range_figure,

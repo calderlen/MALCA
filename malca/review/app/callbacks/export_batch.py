@@ -7,6 +7,9 @@
     State('batch-export-path', 'value'),
     State('queue-data', 'data'),
     State('plot-render-request', 'data'),
+    State('pdm-min-period', 'value'),
+    State('pdm-max-period', 'value'),
+    State('period-method', 'value'),
     background=True,
     running=[
         (Output('batch-export-btn', 'disabled'), True, False),
@@ -14,7 +17,17 @@
     progress=[Output('batch-export-status', 'children')],
     prevent_initial_call=True
 )
-def handle_batch_export(set_progress, n_clicks, target, out_path_str, queue_data, render_request):
+def handle_batch_export(
+    set_progress,
+    n_clicks,
+    target,
+    out_path_str,
+    queue_data,
+    render_request,
+    min_period,
+    max_period,
+    period_method,
+):
     """Batch export candidate PDFs to a specified directory."""
     if not n_clicks:
         return ""
@@ -58,10 +71,12 @@ def handle_batch_export(set_progress, n_clicks, target, out_path_str, queue_data
     if total == 0:
         return "No candidates match the selected criteria."
 
-    set_progress(f"Exporting 0/{total} PDFs...")
+    set_progress(f"Exporting 0/{total} (PDF ok: 0, phase found: 0, phase skipped: 0, failed: 0)...")
 
     success = 0
     failed = 0
+    phase_found = 0
+    phase_skipped = 0
 
     # Parse settings from the current render request state
     state = {}
@@ -72,6 +87,9 @@ def handle_batch_export(set_progress, n_clicks, target, out_path_str, queue_data
     override_period_source = str(state.get('override_period_source') or 'manual/search')
     phase_period_pending = bool(state.get('phase_period_pending', False))
     suppress_catalog_phase_period = bool(state.get('suppress_catalog_phase_period', False))
+    phase_requested = 'phase' in overlays
+    min_p, max_p = _normalize_period_search_bounds(min_period, max_period)
+    search_method = str(period_method or AUTO_FALLBACK_PERIOD_METHOD).strip().lower()
     
     residual_height = state.get('residual_height', DEFAULT_RESIDUAL_FRACTION)
     baseline_opacity = state.get('baseline_opacity', 0.5)
@@ -86,12 +104,56 @@ def handle_batch_export(set_progress, n_clicks, target, out_path_str, queue_data
 
     for i, cid in enumerate(candidate_ids):
         # Update progress text
-        set_progress(f"Exporting {i+1}/{total} (Success: {success}, Failed: {failed})...")
+        set_progress(
+            f"Exporting {i+1}/{total} "
+            f"(PDF ok: {success}, phase found: {phase_found}, phase skipped: {phase_skipped}, failed: {failed})..."
+        )
         
         try:
             payload, _stored_lc_path, source_path = _candidate_context(cid)
             plot_dir_path = _review_plot_dir_for_context(source_path)
             run_params = _load_run_params_for_plot_dir(str(plot_dir_path) if plot_dir_path else None)
+            show_phase_for_candidate = bool(phase_requested)
+            candidate_override_period = None
+            candidate_override_source = override_period_source
+            candidate_phase_pending = phase_period_pending
+            candidate_suppress_catalog_period = suppress_catalog_phase_period
+            candidate_phase_status = "not_requested"
+
+            if phase_requested:
+                candidate_phase_pending = False
+                candidate_suppress_catalog_period = False
+                search_payload = dict(payload or {})
+                if source_path and not search_payload.get("source_path"):
+                    search_payload["source_path"] = str(source_path)
+                stored_period, _stored_source = shared_resolve_stored_review_period(search_payload)
+                if stored_period is not None and np.isfinite(stored_period) and stored_period > 0:
+                    candidate_phase_status = "found"
+                else:
+                    result, _label = _run_period_search_for_payload(
+                        search_payload,
+                        min_period=min_p,
+                        max_period=max_p,
+                        method=search_method,
+                    )
+                    best_period = np.nan
+                    if isinstance(result, dict):
+                        try:
+                            best_period = float(result.get("best_period"))
+                        except (TypeError, ValueError):
+                            best_period = np.nan
+                    if np.isfinite(best_period) and best_period > 0:
+                        candidate_override_period = float(best_period)
+                        method_label = str((result or {}).get("method") or search_method.upper())
+                        candidate_override_source = f"Batch auto-search ({method_label})"
+                        candidate_phase_pending = False
+                        candidate_suppress_catalog_period = False
+                        candidate_phase_status = "found"
+                    else:
+                        show_phase_for_candidate = False
+                        candidate_phase_pending = False
+                        candidate_suppress_catalog_period = False
+                        candidate_phase_status = "skipped"
             
             asas_sn_id = str(payload.get('asas_sn_id') or payload.get('candidate_id') or 'unknown')
             fname = f"malca_plot_{asas_sn_id}.pdf"
@@ -106,13 +168,13 @@ def handle_batch_export(set_progress, n_clicks, target, out_path_str, queue_data
                 show_baseline=baseline_opacity > 0,
                 show_event_markers='markers' in overlays,
                 show_residuals='residuals' in overlays,
-                show_phase_fold='phase' in overlays,
+                show_phase_fold=show_phase_for_candidate,
                 phase_panel_mode=_coerce_choice(state.get('phase_panel_mode'), {'fold', 'time'}, 'fold'),
                 show_raw_mag='raw' in overlays,
-                override_period=None, # Cannot assume the current override period applies to all candidates
-                override_period_source=override_period_source,
-                phase_period_pending=phase_period_pending,
-                suppress_catalog_phase_period=suppress_catalog_phase_period,
+                override_period=candidate_override_period,
+                override_period_source=candidate_override_source,
+                phase_period_pending=candidate_phase_pending,
+                suppress_catalog_phase_period=candidate_suppress_catalog_period,
                 show_diagnostics='diagnostics' in overlays,
                 confidence_colors='confidence' in overlays,
                 run_params=run_params or {},
@@ -131,9 +193,18 @@ def handle_batch_export(set_progress, n_clicks, target, out_path_str, queue_data
             
             out_file.write_bytes(image_bytes)
             success += 1
+            if phase_requested:
+                if candidate_phase_status == "found":
+                    phase_found += 1
+                else:
+                    phase_skipped += 1
             
         except Exception as e:
             failed += 1
             print(f"Error exporting PDF for candidate {cid}: {e}")
             
-    return f"Export complete! Success: {success}, Failed: {failed}. Total: {total} PDFs saved to {out_dir}"
+    return (
+        f"Export complete! PDF ok: {success}, phase found: {phase_found}, "
+        f"phase skipped: {phase_skipped}, failed: {failed}. "
+        f"Total: {total} PDFs saved to {out_dir}"
+    )

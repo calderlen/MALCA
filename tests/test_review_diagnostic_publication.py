@@ -8,7 +8,11 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from malca.review.diagnostic_plots import build_publication_diagnostic_pdf, _background_density
+from malca.review.diagnostic_plots import (
+    build_publication_diagnostic_pdf,
+    build_teff_sed_alpha_figure,
+    _background_density,
+)
 from malca.review.store import get_diagnostic_background
 from malca.review.publication import _numeric_sequence, _trace_array, graph_config_without_image_export, render_publication_pdf
 
@@ -39,6 +43,7 @@ def _payload() -> dict[str, float]:
         "dip_inter_event_spacing_std": 30.0,
         "dip_amplitude_consistency": 0.8,
         "dip_duration_consistency": 0.7,
+        "sed_alpha": -0.55,
     }
 
 
@@ -51,6 +56,8 @@ def _background() -> dict[str, np.ndarray]:
         "ir_hk": rng.normal(0.05, 0.12, 300),
         "kiel_teff": rng.normal(6200.0, 1000.0, 300),
         "kiel_logg": rng.normal(4.0, 0.35, 300),
+        "plane_teff_alpha_x": rng.normal(5200.0, 1200.0, 300),
+        "plane_teff_alpha_y": rng.normal(-0.8, 0.6, 300),
         "rpm_bprp": rng.normal(1.0, 0.45, 300),
         "rpm_hg": rng.normal(8.0, 2.0, 300),
         "metric_dipper_score": rng.gamma(1.8, 2.0, 300),
@@ -78,6 +85,7 @@ def test_publication_diagnostic_pdf_renderers_emit_pdf_bytes() -> None:
         "cmd",
         "ir_colorcolor",
         "kiel",
+        "teff_sed_alpha",
         "rpm",
         "score_balance",
         "catalog_support",
@@ -105,7 +113,7 @@ def test_diagnostic_publication_pdfs_avoid_in_plot_titles_and_legends(monkeypatc
     monkeypatch.setattr(matplotlib.axes.Axes, "set_title", fail_title)
     monkeypatch.setattr(matplotlib.axes.Axes, "legend", fail_legend)
 
-    for name in ("cmd", "ir_colorcolor", "kiel"):
+    for name in ("cmd", "ir_colorcolor", "kiel", "teff_sed_alpha"):
         pdf = build_publication_diagnostic_pdf(name, _payload(), _background())
     assert pdf.startswith(b"%PDF")
 
@@ -143,6 +151,7 @@ def test_publication_diagnostic_pdfs_do_not_add_candidate_text(monkeypatch) -> N
         "cmd",
         "ir_colorcolor",
         "kiel",
+        "teff_sed_alpha",
         "rpm",
         "score_balance",
         "catalog_support",
@@ -178,6 +187,7 @@ def test_diagnostic_background_uses_payload_json_when_columns_are_absent(tmp_pat
         "stats_skew": 0.2,
         "stats_max_slope": 30.0,
         "dipper_score": 7.0,
+        "sed_alpha": -0.6,
     }
     with sqlite3.connect(db_path) as conn:
         conn.execute("CREATE TABLE candidates (candidate_id TEXT, payload_json TEXT NOT NULL)")
@@ -187,8 +197,19 @@ def test_diagnostic_background_uses_payload_json_when_columns_are_absent(tmp_pat
     assert bg["cmd_bprp0"].shape == (1,)
     assert bg["ir_w1w2"].tolist() == [0.04]
     assert bg["rpm_bprp"].shape == (1,)
+    assert bg["plane_teff_alpha_x"].tolist() == [6100.0]
+    assert bg["plane_teff_alpha_y"].tolist() == [-0.6]
     assert bg["plane_stetson_x"].tolist() == [0.03]
     assert bg["plane_shape_y"].tolist() == [30.0]
+
+
+def test_teff_sed_alpha_diagnostic_requires_teff_and_alpha() -> None:
+    assert build_teff_sed_alpha_figure({"teff50": 4300.0}, "white", background=_background()) is None
+    fig = build_teff_sed_alpha_figure(_payload(), "white", background=_background())
+
+    assert fig is not None
+    assert fig.layout.yaxis.title.text == "SED alpha"
+    assert len(fig.layout.shapes) >= 3
 
 
 def test_publication_background_density_uses_unsmoothed_circle_bins(monkeypatch) -> None:

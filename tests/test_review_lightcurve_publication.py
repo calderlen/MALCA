@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 import types
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -15,6 +16,8 @@ if "celerite2" not in sys.modules:
     )
 
 from malca.review.lightcurve_publication import _axis_label_for_offset, build_review_lightcurve_publication_pdf
+from malca.review.lightcurve_assembly import PlotTrace
+from malca.review.lightcurve_pdf import _plot_trace
 from malca.review.interactive_plot import build_interactive_lightcurve_figure
 
 
@@ -75,6 +78,46 @@ def test_review_time_axis_label_includes_days() -> None:
 
     assert "2458000" in label
     assert r"\mathrm{d}" in label
+
+
+def test_review_lightcurve_pdf_uses_adaptive_small_markers() -> None:
+    class FakeAxis:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def errorbar(self, *args, **kwargs) -> None:
+            self.calls.append(("errorbar", args, kwargs))
+
+        def scatter(self, *args, **kwargs) -> None:
+            self.calls.append(("scatter", args, kwargs))
+
+    raw_axis = FakeAxis()
+    _plot_trace(
+        raw_axis,
+        PlotTrace(
+            panel_id="raw",
+            x=np.arange(500, dtype=float),
+            y=np.ones(500),
+            yerr=np.full(500, 0.02),
+            marker_size=7.0,
+        ),
+    )
+    assert raw_axis.calls[0][2]["markersize"] == pytest.approx(1.9)
+    assert raw_axis.calls[0][2]["markeredgewidth"] == pytest.approx(0.15)
+    assert raw_axis.calls[0][2]["elinewidth"] == pytest.approx(0.3)
+
+    resid_axis = FakeAxis()
+    _plot_trace(
+        resid_axis,
+        PlotTrace(
+            panel_id="resid",
+            x=np.arange(50, dtype=float),
+            y=np.ones(50),
+            marker_size=6.0,
+        ),
+    )
+    assert resid_axis.calls[0][2]["s"] == pytest.approx(2.4**2)
+    assert resid_axis.calls[0][2]["linewidths"] == pytest.approx(0.15)
 
 
 def test_review_lightcurve_publication_pdf_uses_native_matplotlib_data_path(tmp_path: Path) -> None:
