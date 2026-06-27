@@ -1,0 +1,135 @@
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from malca.review import period_search
+
+
+def _band_dfs() -> dict[int, pd.DataFrame]:
+    jd = np.linspace(2458000.0, 2458100.0, 40)
+    resid = np.sin(np.linspace(0.0, 4.0 * np.pi, 40))
+    return {
+        0: pd.DataFrame({"JD": jd, "resid": resid}),
+        1: pd.DataFrame({"JD": jd + 0.1, "resid": resid * 0.8}),
+    }
+
+
+def test_harmonic_check_candidate_periods_returns_base_and_divisors() -> None:
+    candidates = period_search._harmonic_check_candidate_periods(8.0, min_period=0.1, max_period=10.0)
+
+    assert [candidate["divisor"] for candidate in candidates] == [1.0, 2.0, 3.0, 4.0]
+    assert [candidate["period"] for candidate in candidates] == pytest.approx([8.0, 4.0, 8.0 / 3.0, 2.0])
+
+
+def test_harmonic_check_candidate_periods_ignores_out_of_bounds_divisors() -> None:
+    candidates = period_search._harmonic_check_candidate_periods(8.0, min_period=3.0, max_period=6.0)
+
+    assert [candidate["divisor"] for candidate in candidates] == [2.0]
+    assert [candidate["period"] for candidate in candidates] == pytest.approx([4.0])
+
+
+def test_harmonic_check_prefers_shortest_comparable_period(monkeypatch: pytest.MonkeyPatch) -> None:
+    scores = {
+        8.0: 1.0,
+        4.0: 0.99,
+        8.0 / 3.0: 0.98,
+        2.0: 0.99,
+    }
+
+    def fake_score(_band_resid, period, *, alias_penalty=0.0):
+        score = scores[float(period)]
+        return {
+            "objective": score,
+            "raw_objective": score,
+            "scatter_ratio": score,
+            "lag_phase": 0.0,
+            "alias_flag": False,
+            "alias_matches": [],
+        }
+
+    monkeypatch.setattr(period_search, "_score_period_harmonic_candidate", fake_score)
+
+    selected_period, factor, diag = period_search.check_stored_period_harmonics(
+        _band_dfs(),
+        8.0,
+        min_period=0.1,
+        max_period=10.0,
+    )
+
+    assert selected_period == pytest.approx(2.0)
+    assert factor == pytest.approx(0.25)
+    assert diag["harmonic_divisor"] == pytest.approx(4.0)
+
+
+def test_harmonic_check_keeps_base_when_it_is_clearly_better(monkeypatch: pytest.MonkeyPatch) -> None:
+    scores = {
+        8.0: 1.0,
+        4.0: 1.04,
+        8.0 / 3.0: 1.04,
+        2.0: 1.04,
+    }
+
+    def fake_score(_band_resid, period, *, alias_penalty=0.0):
+        score = scores[float(period)]
+        return {
+            "objective": score,
+            "raw_objective": score,
+            "scatter_ratio": score,
+            "lag_phase": 0.0,
+            "alias_flag": False,
+            "alias_matches": [],
+        }
+
+    monkeypatch.setattr(period_search, "_score_period_harmonic_candidate", fake_score)
+
+    selected_period, factor, diag = period_search.check_stored_period_harmonics(
+        _band_dfs(),
+        8.0,
+        min_period=0.1,
+        max_period=10.0,
+    )
+
+    assert selected_period == pytest.approx(8.0)
+    assert factor == pytest.approx(1.0)
+    assert diag["harmonic_divisor"] == pytest.approx(1.0)
+
+
+def test_harmonic_check_returns_nan_when_no_scores_are_finite(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_score(_band_resid, period, *, alias_penalty=0.0):
+        return {
+            "objective": np.inf,
+            "raw_objective": np.inf,
+            "scatter_ratio": np.inf,
+            "lag_phase": np.nan,
+            "alias_flag": False,
+            "alias_matches": [],
+        }
+
+    monkeypatch.setattr(period_search, "_score_period_harmonic_candidate", fake_score)
+
+    selected_period, factor, diag = period_search.check_stored_period_harmonics(
+        _band_dfs(),
+        8.0,
+        min_period=0.1,
+        max_period=10.0,
+    )
+
+    assert np.isnan(selected_period)
+    assert factor == pytest.approx(1.0)
+    assert diag["candidates"]
+
+
+def test_harmonic_selection_keeps_cadence_alias_flag_out_of_ranking() -> None:
+    selected = period_search._select_harmonic_check_candidate(
+        [
+            {"period": 4.0, "selection_objective": 1.0, "alias_flag": False, "alias_matches": []},
+            {"period": 1.0, "selection_objective": 1.0, "alias_flag": True, "alias_matches": [1.0]},
+        ]
+    )
+
+    assert selected is not None
+    assert selected["period"] == pytest.approx(1.0)
+    assert selected["alias_flag"] is True
+    assert selected["alias_matches"] == [1.0]
