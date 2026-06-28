@@ -1,1 +1,0 @@
-asassn_catalog_full.csv filter=lfs diff=lfs merge=lfs -text
