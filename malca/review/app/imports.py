@@ -135,7 +135,8 @@ from malca.review.filter_schema import (
     is_dipper_contaminant_type_value,
     is_known_variable_type_value,
 )
-from malca.review.classification_labels import format_catalog_class_label
+from malca.review.classification_labels import format_catalog_class_label, resolve_catalog_class
+from malca.vsx.nearby import VsxNeighbor, find_nearby_vsx
 from malca.review.pipeline import detect_pipeline_status, detect_sed_model_status, detect_sed_photometry_status
 from malca.review.pipeline import run_missing_stages
 from malca.review.pipeline import update_candidate_payload

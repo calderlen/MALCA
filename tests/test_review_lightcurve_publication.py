@@ -677,5 +677,6 @@ def test_interactive_tess_overlay_appears_as_flux_in_flux_mode(tmp_path: Path) -
     tess_trace = next(trace for trace in fig.data if trace.name == "TESS flux")
     assert list(tess_trace.y) == [1.0, 0.9, 1.1]
     assert "F: %{y:.4e}" in tess_trace.hovertemplate
-    assert fig.layout.yaxis.autorange is True
+    assert fig.layout.yaxis.range[0] == pytest.approx(0.0)
+    assert fig.layout.yaxis.range[1] > max(tess_trace.y)
     assert not any("not calibrated TESS-band magnitude" in warning for warning in result["warnings"])

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -65,6 +65,42 @@ MARKER_MAP: dict[str, dict[str, str]] = {
 
 _BAND_MARKERS = {0: "circle", 1: "square"}
 NativeColorMode = Literal["camera", "band"]
+
+
+def _finite_values(values: list[np.ndarray]) -> np.ndarray:
+    finite_arrays = []
+    for value in values:
+        arr = np.asarray(value, dtype=float).reshape(-1)
+        if arr.size:
+            finite = arr[np.isfinite(arr)]
+            if finite.size:
+                finite_arrays.append(finite)
+    if not finite_arrays:
+        return np.array([], dtype=float)
+    return np.concatenate(finite_arrays)
+
+
+def _padded_range(
+    values: list[np.ndarray],
+    *,
+    pad_fraction: float,
+    single_value_pad: float,
+    inverted: bool = False,
+) -> tuple[float, float] | None:
+    finite = _finite_values(values)
+    if finite.size == 0:
+        return None
+    lo = float(np.nanmin(finite))
+    hi = float(np.nanmax(finite))
+    if not np.isfinite(lo) or not np.isfinite(hi):
+        return None
+    if hi <= lo:
+        pad = float(single_value_pad)
+    else:
+        pad = max(float(single_value_pad) * 0.1, (hi - lo) * float(pad_fraction))
+    if inverted:
+        return hi + pad, lo - pad
+    return lo - pad, hi + pad
 
 
 def _native_trace_color(
@@ -1235,6 +1271,54 @@ def assemble_review_lightcurve_plot(request: ReviewPlotRequest) -> ReviewLightCu
             warnings.append(
                 f"{external_source_label(source_name)} light curve has no plottable points for this candidate."
             )
+
+    visible_jd_x_values = [
+        trace.x
+        for trace in traces
+        if trace.panel_id in jd_panel_ids and trace.kind != "line"
+    ]
+    raw_visible_y_values = [
+        trace.y
+        for trace in traces
+        if trace.panel_id == "raw" and trace.kind != "line"
+    ]
+    visible_jd_x_range = _padded_range(
+        visible_jd_x_values,
+        pad_fraction=0.025,
+        single_value_pad=0.5,
+    )
+    raw_visible_y_range = _padded_range(
+        raw_visible_y_values,
+        pad_fraction=0.10 if request.show_event_markers and event_entries else 0.05,
+        single_value_pad=0.5 if not is_flux else 0.05,
+        inverted=not is_flux,
+    )
+    if is_flux and raw_visible_y_range is not None:
+        raw_finite_y = _finite_values(raw_visible_y_values)
+        if raw_finite_y.size and float(np.nanmin(raw_finite_y)) >= 0.0:
+            raw_visible_y_range = (max(0.0, raw_visible_y_range[0]), raw_visible_y_range[1])
+    if visible_jd_x_range is not None or raw_visible_y_range is not None:
+        panels = [
+            replace(
+                p,
+                x_range=(
+                    visible_jd_x_range
+                    if (visible_jd_x_range is not None and p.panel_id in jd_panel_ids)
+                    else p.x_range
+                ),
+                y_range=(
+                    raw_visible_y_range
+                    if (raw_visible_y_range is not None and p.panel_id == "raw")
+                    else p.y_range
+                ),
+                y_autorange=(
+                    False
+                    if (raw_visible_y_range is not None and p.panel_id == "raw")
+                    else p.y_autorange
+                ),
+            )
+            for p in panels
+        ]
 
     status_message = ""
     if phase_enabled and phase_period is not None:

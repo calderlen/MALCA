@@ -38,6 +38,7 @@ def _install_review_app_import_stubs() -> None:
 _install_review_app_import_stubs()
 
 from malca.review.app import _render_vetting_banner
+from malca.vsx.nearby import VsxNeighbor
 
 
 def _component_text(node) -> list[str]:
@@ -65,6 +66,20 @@ def _component_classes(node) -> list[str]:
     classes = [str(class_name)] if class_name else []
     classes.extend(_component_classes(getattr(node, "children", None)))
     return classes
+
+
+def _component_hrefs(node) -> list[str]:
+    if node is None or isinstance(node, (str, int, float)):
+        return []
+    if isinstance(node, (list, tuple)):
+        hrefs: list[str] = []
+        for child in node:
+            hrefs.extend(_component_hrefs(child))
+        return hrefs
+    href = getattr(node, "href", None)
+    hrefs = [str(href)] if href else []
+    hrefs.extend(_component_hrefs(getattr(node, "children", None)))
+    return hrefs
 
 
 def test_vetting_banner_does_not_mark_gaia_flag_only_as_known() -> None:
@@ -109,6 +124,68 @@ def test_vetting_banner_displays_vsx_class() -> None:
 
     assert "VSX" in text
     assert "GCAS" in text
+
+
+def test_vetting_banner_renders_nearby_vsx_as_informational_panel(monkeypatch) -> None:
+    import malca.review.app as review_app
+
+    def fake_nearby(ra, dec, *, limit, radius_arcsec):
+        assert ra == 10.0
+        assert dec == 20.0
+        assert limit == 3
+        assert radius_arcsec == 60.0
+        return [
+            VsxNeighbor(
+                sep_arcsec=1.23,
+                oid="101",
+                name="VSX Near",
+                ra_deg=10.0,
+                dec_deg=20.0,
+                vsx_type="ROT",
+                type_label="ROT - Rotational variable",
+                period_days=2.99288,
+                url="https://vsx.aavso.org/index.php?view=detail.top&oid=101",
+            ),
+            VsxNeighbor(
+                sep_arcsec=12.5,
+                oid="202",
+                name="VSX Mid",
+                ra_deg=10.0,
+                dec_deg=20.0,
+                vsx_type="EA",
+                type_label="EA - Algol-type eclipsing binary",
+                period_days=None,
+                url="https://vsx.aavso.org/index.php?view=detail.top&oid=202",
+            ),
+        ]
+
+    monkeypatch.setattr(review_app, "find_nearby_vsx", fake_nearby)
+
+    banner = _render_vetting_banner(
+        {
+            "vetting_likely_known": False,
+            "ra": 10.0,
+            "dec": 20.0,
+        }
+    )
+
+    text = " ".join(_component_text(banner))
+    classes = _component_classes(banner)
+    hrefs = _component_hrefs(banner)
+
+    assert "POTENTIALLY NEW" in text
+    assert "Nearby VSX" in text
+    assert "1.2\"" in text
+    assert "VSX Near" in text
+    assert "ROT - Rotational variable" in text
+    assert "P=2.9929 d" in text
+    assert "12.5\"" in text
+    assert "VSX Mid" in text
+    assert "KNOWN VARIABLE" not in text
+    assert "vetting-banner-shell new" in classes
+    assert "vetting-banner-cell hit new" not in classes
+    assert "https://vsx.aavso.org/index.php?view=detail.top&oid=101" in hrefs
+    assert "https://vsx.aavso.org/index.php?view=detail.top&oid=202" in hrefs
 
 
 def test_vetting_banner_treats_definite_vsx_class_as_known_even_when_summary_is_stale() -> None:
@@ -158,6 +235,26 @@ def test_vetting_banner_keeps_generic_simbad_match_as_context_not_known_hit() ->
     assert "vetting-banner-shell new" in classes
     assert "vetting-banner-cell hit new" not in classes
     assert "vetting-banner-cell hit known" not in classes
+
+
+def test_vetting_banner_translates_simbad_object_type() -> None:
+    banner = _render_vetting_banner(
+        {
+            "vetting_likely_known": False,
+            "simbad_main_id": "WRAY 15-1177",
+            "simbad_otype": "Em*",
+            "simbad_nbref": 1.0,
+        }
+    )
+
+    text = " ".join(_component_text(banner))
+    classes = _component_classes(banner)
+
+    assert "POTENTIALLY NEW" in text
+    assert "Em* - Emission-line star" in text
+    assert "WRAY 15-1177" in text
+    assert "vetting-banner-shell new" in classes
+    assert "vetting-banner-cell hit new" not in classes
 
 
 def test_vetting_banner_marks_variable_simbad_type_as_known_hit_without_summary_flag() -> None:

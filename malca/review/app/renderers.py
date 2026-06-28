@@ -1200,6 +1200,24 @@ def _render_vetting_banner(payload: dict | None, radius_arcsec: float = 10.0) ->
             _value(right, hit=hit, title=title),
         ], className=cell_class)
 
+    def _rich_cell(left: str, children, *, hit: bool = False) -> html.Div:
+        cell_class = 'vetting-banner-cell vetting-banner-rich-cell'
+        if hit:
+            cell_class += f' hit {banner_state}'
+        return html.Div([
+            _label(left),
+            html.Div(children, className='vetting-banner-value vetting-banner-rich-value'),
+        ], className=cell_class)
+
+    def _catalog_class_short_label(column: str, value: object) -> str:
+        resolved = resolve_catalog_class(column, value)
+        if not resolved.value:
+            return ""
+        suffix = f" [{resolved.source}]" if resolved.source else ""
+        if suffix and resolved.label.endswith(suffix):
+            return resolved.label[: -len(suffix)]
+        return resolved.label
+
     # SIMBAD cell
     simbad_id = payload.get('simbad_main_id')
     simbad_otype = payload.get('simbad_otype')
@@ -1208,7 +1226,7 @@ def _render_vetting_banner(payload: dict | None, radius_arcsec: float = 10.0) ->
         refs = payload.get('simbad_nbref')
         parts = []
         if _ok(simbad_otype):
-            parts.append(str(simbad_otype))
+            parts.append(_catalog_class_short_label('simbad_otype', simbad_otype))
         if _ok(simbad_id):
             parts.append(str(simbad_id))
         if refs:
@@ -1223,6 +1241,53 @@ def _render_vetting_banner(payload: dict | None, radius_arcsec: float = 10.0) ->
         vsx_p = payload.get('vsx_period')
         p_str = f", P={vsx_p:.4f}d" if vsx_p and not pd.isna(vsx_p) else ""
         cards.append(_cell("VSX", f"{vsx_cls}{p_str}{sep_str}", hit=True))
+
+    def _payload_float(*keys: str) -> float | None:
+        for key in keys:
+            try:
+                value = payload.get(key)
+                if value is None or pd.isna(value):
+                    continue
+                return float(value)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def _format_vsx_neighbor(neighbor: VsxNeighbor):
+        parts = [f"{neighbor.sep_arcsec:.1f}\""]
+        if neighbor.name:
+            parts.append(neighbor.name)
+        if neighbor.type_label:
+            parts.append(neighbor.type_label)
+        if neighbor.period_days is not None:
+            parts.append(f"P={neighbor.period_days:.5g} d")
+        label = " \u00b7 ".join(parts)
+        if neighbor.url:
+            return html.A(
+                label,
+                href=neighbor.url,
+                target='_blank',
+                rel='noopener noreferrer',
+                className='vetting-banner-nearby-vsx-link',
+                title=neighbor.url,
+            )
+        return html.Span(label, className='vetting-banner-nearby-vsx-text')
+
+    ra_for_vsx = _payload_float('ra', 'ra_deg')
+    dec_for_vsx = _payload_float('dec', 'dec_deg')
+    if ra_for_vsx is not None and dec_for_vsx is not None:
+        neighbors = find_nearby_vsx(ra_for_vsx, dec_for_vsx, limit=3, radius_arcsec=60.0)
+        if neighbors:
+            cards.append(_rich_cell(
+                "Nearby VSX",
+                [
+                    html.Div(
+                        _format_vsx_neighbor(neighbor),
+                        className='vetting-banner-nearby-vsx-row',
+                    )
+                    for neighbor in neighbors
+                ],
+            ))
 
     # Gaia variability cell
     gaia_cls = payload.get('gaia_var_class')

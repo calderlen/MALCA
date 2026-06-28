@@ -65,15 +65,15 @@ def _style_lightcurve_axis(ax) -> None:
 
 
 def _draw_header_boxes(ax, *, left: str | None, right: str | None) -> None:
-    """Draw left/right coordinate boxes straddling the top plot edge."""
+    """Draw left/right coordinate boxes inside the top plot corners."""
     if left:
         ax.text(
-            0.0,
-            1.0,
+            0.012,
+            0.965,
             left,
             transform=ax.transAxes,
             ha="left",
-            va="center",
+            va="top",
             fontsize=8.2,
             color="0.12",
             bbox=_HEADER_BOX,
@@ -82,12 +82,12 @@ def _draw_header_boxes(ax, *, left: str | None, right: str | None) -> None:
         )
     if right:
         ax.text(
-            1.0,
-            1.0,
+            0.988,
+            0.965,
             right,
             transform=ax.transAxes,
             ha="right",
-            va="center",
+            va="top",
             fontsize=8.2,
             color="0.12",
             bbox=_HEADER_BOX,
@@ -112,6 +112,27 @@ def _set_robust_limits(ax, values: list[np.ndarray], *, inverted: bool, pad_frac
         lo -= pad
         hi += pad
     ax.set_ylim((hi, lo) if inverted else (lo, hi))
+
+
+def _attach_raw_residual_axes(ax_by_panel: dict[str, object], panels: tuple) -> None:
+    """Remove vertical whitespace between adjacent raw and residual axes."""
+    for upper, lower in zip(panels, panels[1:]):
+        if upper.panel_id != "raw" or lower.panel_id != "resid":
+            continue
+        upper_ax = ax_by_panel.get(upper.panel_id)
+        lower_ax = ax_by_panel.get(lower.panel_id)
+        if upper_ax is None or lower_ax is None:
+            continue
+        upper_pos = upper_ax.get_position()
+        lower_pos = lower_ax.get_position()
+        if upper_pos.y0 <= lower_pos.y1:
+            continue
+        lower_ax.set_position(
+            [upper_pos.x0, lower_pos.y0, upper_pos.width, lower_pos.height]
+        )
+        upper_ax.set_position(
+            [upper_pos.x0, lower_pos.y1, upper_pos.width, upper_pos.y1 - lower_pos.y1]
+        )
 
 
 def _plot_trace(ax, trace: PlotTrace, *, label: str | None = None, marker_size: float | None = None) -> None:
@@ -189,7 +210,7 @@ def render_review_lightcurve_pdf(spec: ReviewLightCurvePlotSpec) -> bytes:
         fig, axes = plt.subplots(
             n_rows,
             1,
-            figsize=(FIG_TWO_COL_WIDTH, 2.15 + 1.35 * n_rows),
+            figsize=(FIG_TWO_COL_WIDTH, 1.70 + 1.25 * n_rows),
             sharex=False,
             gridspec_kw={"height_ratios": height_ratios[:n_rows]},
         )
@@ -337,7 +358,7 @@ def render_review_lightcurve_pdf(spec: ReviewLightCurvePlotSpec) -> bytes:
             ax_by_panel[time_panel].set_xlabel(_axis_label_for_offset(spec.jd_offset))
             for panel in spec.panels:
                 if panel.kind in {"raw", "resid", "external"} and panel.panel_id != time_panel:
-                    ax_by_panel[panel.panel_id].tick_params(axis="x", labelbottom=False)
+                    ax_by_panel[panel.panel_id].tick_params(axis="x", labelbottom=False, bottom=False)
 
         raw_ax = ax_by_panel.get("raw")
         if raw_ax is not None:
@@ -371,9 +392,13 @@ def render_review_lightcurve_pdf(spec: ReviewLightCurvePlotSpec) -> bytes:
 
         if spec.title and not (spec.header_left or spec.header_right):
             fig.text(0.09, 0.985, spec.title, ha="left", va="top", fontsize=8.0, color="0.15")
-        right = 0.80 if legend_handles else 0.965
-        top = 0.90 if (spec.header_left or spec.header_right) else 0.955
-        finalize_publication_figure(fig, rect=(0.085, 0.075, right, top))
+        if legend_handles:
+            right = 0.86 if len(legend_labels) <= 6 else 0.82
+        else:
+            right = 0.985
+        top = 0.97 if (spec.header_left or spec.header_right) else 0.98
+        finalize_publication_figure(fig, h_pad=0.18, rect=(0.075, 0.055, right, top))
+        _attach_raw_residual_axes(ax_by_panel, spec.panels)
 
         buf = BytesIO()
         try:

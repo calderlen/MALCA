@@ -946,6 +946,27 @@ app.index_string = '''
             word-break: break-word;
             white-space: normal;
         }
+        .vetting-banner-rich-cell {
+            align-items: flex-start;
+        }
+        .vetting-banner-rich-value {
+            flex: 1 1 auto;
+            min-width: 0;
+            text-align: right;
+        }
+        .vetting-banner-nearby-vsx-row {
+            line-height: 1.25;
+            margin: 1px 0;
+        }
+        .vetting-banner-nearby-vsx-link,
+        .vetting-banner-nearby-vsx-text {
+            color: #9fc7ff;
+            text-decoration: none;
+        }
+        .vetting-banner-nearby-vsx-link:hover {
+            color: #c9ddff;
+            text-decoration: underline;
+        }
         .vetting-banner-hit.known {
             color: #ff6b6b;
         }
@@ -2229,6 +2250,10 @@ app.index_string = '''
         body[data-theme="white"] .vetting-banner-link {
             background: #f5f8fb !important;
             border-color: #c5d0da !important;
+            color: #245f8f !important;
+        }
+        body[data-theme="white"] .vetting-banner-nearby-vsx-link,
+        body[data-theme="white"] .vetting-banner-nearby-vsx-text {
             color: #245f8f !important;
         }
     </style>

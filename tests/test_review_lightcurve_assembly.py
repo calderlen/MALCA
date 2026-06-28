@@ -37,6 +37,21 @@ def _write_dat2(path: Path) -> None:
     )
 
 
+def _write_hidden_band_outlier_dat2(path: Path) -> None:
+    path.write_text(
+        "\n".join(
+            [
+                "2458000.0 14.00 0.02 1 4 0 0 ba/F1",
+                "2458001.0 14.08 0.02 1 4 0 0 ba/F1",
+                "2458002.0 14.04 0.02 1 4 0 0 ba/F1",
+                "2459500.0 20.00 0.02 1 5 1 0 bb/F1",
+                "2459600.0 20.20 0.02 1 5 1 0 bb/F1",
+            ]
+        ),
+        encoding="ascii",
+    )
+
+
 def _write_tess_parquet(path: Path) -> None:
     pd.DataFrame(
         {
@@ -139,7 +154,36 @@ def test_assembler_populates_coordinate_headers(tmp_path: Path) -> None:
     }
     spec = assemble_review_lightcurve_plot(_base_request(payload))
     assert spec.header_left is not None and spec.header_left.startswith("J")
-    assert spec.header_right is not None and r"\alpha" in spec.header_right
+    assert spec.header_right == "ra=147.20000, dec=-54.99970"
+
+
+def test_assembler_ranges_follow_visible_points_not_hidden_band(tmp_path: Path) -> None:
+    lc_path = tmp_path / "123.dat2"
+    _write_hidden_band_outlier_dat2(lc_path)
+    payload = {"candidate_id": "123", "asas_sn_id": "123", "lc_path": str(lc_path)}
+
+    spec = assemble_review_lightcurve_plot(
+        _base_request(
+            payload,
+            selected_bands=["g"],
+            show_baseline=False,
+            show_residuals=True,
+        )
+    )
+
+    raw_panel = next(panel for panel in spec.panels if panel.panel_id == "raw")
+    resid_panel = next(panel for panel in spec.panels if panel.panel_id == "resid")
+
+    assert raw_panel.x_range is not None
+    assert raw_panel.x_range == resid_panel.x_range
+    assert raw_panel.x_range[0] == pytest.approx(-0.05)
+    assert raw_panel.x_range[1] == pytest.approx(2.05)
+    assert raw_panel.y_range is not None
+    assert max(raw_panel.y_range) < 14.2
+
+    plotly = render_review_lightcurve_plotly(spec, theme="black", uirevision_key="test")
+    fig = plotly["figure"]
+    assert fig.layout.yaxis.domain[0] == pytest.approx(fig.layout.yaxis2.domain[1])
 
 
 def test_plotly_and_pdf_backends_share_external_overlay(tmp_path: Path) -> None:

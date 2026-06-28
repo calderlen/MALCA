@@ -27,6 +27,24 @@ def _panel_row_map(panels: tuple) -> dict[str, int]:
     return {panel.panel_id: idx + 1 for idx, panel in enumerate(panels)}
 
 
+def _panel_vertical_domains(panels: tuple, *, default_gap: float = 0.05) -> list[tuple[float, float]]:
+    gaps = [
+        0.0 if upper.panel_id == "raw" and lower.panel_id == "resid" else default_gap
+        for upper, lower in zip(panels, panels[1:])
+    ]
+    total_weight = float(sum(panel.height_ratio for panel in panels)) or 1.0
+    available = max(0.1, 1.0 - float(sum(gaps)))
+    heights = [available * (panel.height_ratio / total_weight) for panel in panels]
+    domains: list[tuple[float, float]] = []
+    top = 1.0
+    for idx, height in enumerate(heights):
+        bottom = top - height
+        domains.append((bottom, top))
+        if idx < len(gaps):
+            top = bottom - gaps[idx]
+    return domains
+
+
 def _resolve_axis_ref(panel_id: str, row_map: dict[str, int], axis: str, xref: str) -> str:
     row = row_map.get(panel_id, 1)
     if xref == "domain":
@@ -284,9 +302,11 @@ def render_review_lightcurve_plotly(
         rows=len(spec.panels),
         cols=1,
         shared_xaxes=False,
-        vertical_spacing=0.05,
+        vertical_spacing=0.0,
         row_heights=row_heights,
     )
+    for row, domain in enumerate(_panel_vertical_domains(spec.panels), start=1):
+        fig.update_yaxes(domain=list(domain), row=row, col=1)
 
     colorbar_shown = False
     for trace in spec.traces:
@@ -351,6 +371,9 @@ def render_review_lightcurve_plotly(
         xaxis_kwargs: dict = {}
         if panel.x_label:
             xaxis_kwargs["title_text"] = panel.x_label
+        elif panel.kind in {"raw", "resid", "external"}:
+            xaxis_kwargs["showticklabels"] = False
+            xaxis_kwargs["ticks"] = ""
         if panel.x_range is not None:
             xaxis_kwargs["range"] = list(panel.x_range)
         if xaxis_kwargs:
