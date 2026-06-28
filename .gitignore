@@ -22,9 +22,6 @@ htmlcov/
 /malca/old/
 /diagnostics/
 
-/fix_db.py
-/fix_db_dust.py
-
 lc_plots/
 results_test/
 skypatrol/
