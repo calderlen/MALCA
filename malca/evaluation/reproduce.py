@@ -2205,7 +2205,7 @@ Examples:
     g_input.add_argument(
         "--path-prefix",
         default=None,
-        help="Path prefix to rewrite for candidates with a 'path' column (e.g. /data/poohbah/1/assassin/rowan.90/lcsv2).",
+        help="Path prefix to rewrite for candidates with a 'path' column (for example, the original raw light-curve root).",
     )
     g_input.add_argument(
         "--path-root",

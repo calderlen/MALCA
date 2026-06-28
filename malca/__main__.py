@@ -40,7 +40,6 @@ COMMAND_GROUPS = {
     "ltv-pipeline": "LTV",
     "ltv-injection": "LTV",
     "dip-injection": "Evaluation",
-    "microlensing-injection": "Evaluation",
     "detection-rate": "Evaluation",
     "validate": "Evaluation",
     "attrition": "Evaluation",
@@ -126,7 +125,6 @@ def main():
     # If so, forward directly to the submodule
     if len(sys.argv) >= 2 and sys.argv[1] in [
         "manifest", "stv-pipeline", "reproduce", "dip-injection",
-        "microlensing-injection",
         "detection-rate", "validate", "stv-plot", "audit",
         "bad-photometry",
         "stv-events", "lc-plot", "gaia-fetch", "gaia-id-repair", "characterize", "classify", "stv-filter", "stv-tag",
@@ -152,10 +150,6 @@ def main():
             injection = importlib.import_module("malca.evaluation.dip_injection")
             sys.argv = [sys.argv[0]] + remaining
             injection.main()
-        elif command == "microlensing-injection":
-            ml_inj = importlib.import_module("malca.evaluation.microlensing_injection")
-            sys.argv = [sys.argv[0]] + remaining
-            ml_inj.main()
         elif command == "detection-rate":
             detection_rate_mod = importlib.import_module("malca.evaluation.detection_rate")
             sys.argv = [sys.argv[0]] + remaining
@@ -290,7 +284,6 @@ def main():
     subparsers.add_parser("ltv-injection", description="Run LTV rejection-recovery injections and plots")
     # Evaluation
     subparsers.add_parser("dip-injection", description="Run dip injection-recovery tests (skew-normal/step dips)")
-    subparsers.add_parser("microlensing-injection", description="Run microlensing injection-recovery tests and plot efficiency map")
     subparsers.add_parser("detection-rate", description="Measure detection rate")
     subparsers.add_parser("validate", description="Validate results against known candidates")
     subparsers.add_parser("attrition", description="Summarize pre/filter attrition")

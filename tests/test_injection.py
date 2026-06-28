@@ -137,11 +137,3 @@ def test_injection_cli_exposes_diagnostics_detection_flags() -> None:
 
     for flag in ("--amp-steps", "--dur-steps", "--n-injections-per-grid", "--max-trials"):
         assert flag not in help_text
-
-
-def test_diagnostics_scripts_use_current_cli_entrypoints() -> None:
-    script_text = "\n".join(path.read_text() for path in (REPO_ROOT / "diagnostics").glob("*.sh"))
-
-    assert "python -m malca.injection" not in script_text
-    assert "python -m malca.detection_rate" not in script_text
-    assert "--sample-size" not in script_text

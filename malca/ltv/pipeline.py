@@ -44,12 +44,13 @@ from malca.config import (
     LTV_CORE_CHUNK_SIZE,
     GAIA_EPOCH_DATA_RELEASE,
     GAIA_EPOCH_DATA_STRUCTURE,
-    LCV2_ROOT,
+    MALCA_LCV2_ROOT_ENV,
     MAG_BINS,
     LTV_DSPRING,
     LTV_MAX_SEASONS,
     LTV_MIN_POINTS_PER_SEASON,
     LTV_MIN_SEASONS_FOR_QUADRATIC,
+    require_lcv2_root,
 )
 from malca.cli_config import add_config_args, apply_config
 from malca.ltv.filter import (
@@ -161,7 +162,7 @@ LTV_ORCHESTRATOR_CONFIG_DEFAULTS = {
     **LTV_BUILD_CONFIG_DEFAULTS,
     "stage": "full",
     "run_dir": None,
-    "root": LCV2_ROOT,
+    "root": None,
     "extension": None,
     "overwrite": False,
     "export_bundle": None,
@@ -1079,7 +1080,12 @@ def add_ltv_pipeline_args(parser: argparse.ArgumentParser) -> argparse.ArgumentP
     g_general = parser.add_argument_group("General")
 
     g_io.add_argument("--mag-bin", nargs="+", default=["13_13.5"], choices=[*MAG_BINS, "all"])
-    g_io.add_argument("--root", type=Path, default=LCV2_ROOT, help="Raw ASAS-SN light-curve root")
+    g_io.add_argument(
+        "--root",
+        type=Path,
+        default=None,
+        help=f"Raw ASAS-SN light-curve root; defaults to ${MALCA_LCV2_ROOT_ENV}",
+    )
     g_io.add_argument("--run-dir", type=Path, default=None, help=f"LTV run directory (default: {DEFAULT_LTV_RUN_DIR}/<timestamp>)")
     g_stage.add_argument(
         "--stage",
@@ -1205,6 +1211,8 @@ def run_ltv_pipeline_cli(args: argparse.Namespace) -> dict:
             _safe_status_print("Info: --stage cluster runs raw-dependent LTV products only. Extended external-LC work is skipped.")
         args.run_external_lcs = False
         args.run_multi_survey_features = False
+    if _stage_runs_ltv_upstream(args.stage):
+        args.root = require_lcv2_root(args.root)
 
     run_dir = _resolve_ltv_run_dir(args)
     if args.import_bundle is not None:
@@ -1225,7 +1233,7 @@ def run_ltv_pipeline_cli(args: argparse.Namespace) -> dict:
         "command": cmd,
         "stage": args.stage,
         "mag_bin": mag_bins,
-        "root": str(Path(args.root).expanduser()),
+        "root": str(Path(args.root).expanduser()) if args.root is not None else None,
         "run_dir": str(run_dir),
         "results_dir": str(results_dir),
         "review_db": str(args.review_db or ltv_review_db_path(run_dir)),
@@ -1384,7 +1392,7 @@ def run_ltv_pipeline_cli(args: argparse.Namespace) -> dict:
         "command": cmd,
         "stage": args.stage,
         "run_dir": str(run_dir),
-        "root": str(Path(args.root).expanduser()),
+        "root": str(Path(args.root).expanduser()) if args.root is not None else None,
         "mag_bin": mag_bins,
         "elapsed_sec": round(time.perf_counter() - started_perf, 3),
         "run_reuse_fingerprint_hash": fingerprint_hash,

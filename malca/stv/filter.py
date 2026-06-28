@@ -76,18 +76,6 @@ from malca.config import ASASSN_INDEX_PATH
 from malca.config import WORKERS, MIN_MAG_OFFSET
 from malca.config import PDM_METHOD_CHOICES
 from malca.catalogs.gaia_ids import canonicalize_gaia_ids_in_frame, parse_gaia_source_id
-from malca.catalogs.periodic_catalogs import (
-    PERIODIC_CATALOG_MERGE_COLS,
-    PERIOD_SOURCE_PRIORITY,
-    choose_consensus_period as _choose_consensus_period,
-    extract_asassn_ids as _extract_asassn_ids,
-    fetch_asassn_variable_catalog,
-    fetch_chen2020_ztf_periodic,
-    fetch_gaia_dr3_eb_periods,
-    fetch_ogle_periodic_catalog,
-    fetch_vsx_period_catalog,
-    match_period_catalog as _match_period_catalog,
-)
 from malca.core.phase import align_v_to_g_magnitude
 from malca.products.product_schema import add_stv_identity, assert_stv_product_schema
 from malca.core.stats import compute_pdm_stats, compute_ce_stats
@@ -96,7 +84,48 @@ from malca.core.utils import log_rejections
 from malca.core.utils import read_lc_dat2
 
 
+PERIOD_SOURCE_PRIORITY = (
+    "gaia_eb",
+    "vsx",
+    "asassn_var",
+    "ztf_periodic",
+    "ogle",
+)
 
+PERIODIC_CATALOG_MERGE_COLS = (
+    "catalog_match",
+    "catalog_period",
+    "catalog_class",
+    "catalog_source",
+    "period_sources",
+    "period_n_sources",
+    "period_consensus_days",
+    "period_consensus_agree",
+    "period_conflict_flag",
+    "period_consensus_support",
+    "period_primary_source",
+    "period_source_periods",
+    "period_gaia_eb_match",
+    "period_gaia_eb_days",
+    "period_gaia_eb_class",
+    "period_gaia_eb_sep_arcsec",
+    "period_vsx_match",
+    "period_vsx_days",
+    "period_vsx_class",
+    "period_vsx_sep_arcsec",
+    "period_asassn_var_match",
+    "period_asassn_var_days",
+    "period_asassn_var_class",
+    "period_asassn_var_sep_arcsec",
+    "period_ztf_periodic_match",
+    "period_ztf_periodic_days",
+    "period_ztf_periodic_class",
+    "period_ztf_periodic_sep_arcsec",
+    "period_ogle_match",
+    "period_ogle_days",
+    "period_ogle_class",
+    "period_ogle_sep_arcsec",
+)
 
 
 
@@ -1730,6 +1759,17 @@ def validate_periodic_catalog(
         period_sources, period_n_sources, period_consensus_days,
         period_consensus_agree, period_conflict_flag, catalog_match.
     """
+    from malca.catalogs.periodic_catalogs import (
+        choose_consensus_period as _choose_consensus_period,
+        extract_asassn_ids as _extract_asassn_ids,
+        fetch_asassn_variable_catalog,
+        fetch_chen2020_ztf_periodic,
+        fetch_gaia_dr3_eb_periods,
+        fetch_ogle_periodic_catalog,
+        fetch_vsx_period_catalog,
+        match_period_catalog as _match_period_catalog,
+    )
+
     n0 = len(df)
 
     df_out = df.copy()

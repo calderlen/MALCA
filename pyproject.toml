@@ -19,32 +19,75 @@ dependencies = [
     "astropy",
     "celerite2",
     "pyarrow",
+    "iar",
+]
+
+[project.optional-dependencies]
+catalogs = [
+    "astroquery>=0.4.6",
+    "banyan-sigma @ git+https://github.com/jgagneastro/banyan_sigma.git",
+    "dust_extinction",
+    "dustmaps3d",
+    "healpy",
+    "lightkurve",
+    "pyvo",
+    "regions",
+    "requests",
+    "skypatrol",
+    "sparclclient",
+]
+review = [
     "plotly",
-    "phoebe",
     "kaleido",
     "watchdog",
     "dash[diskcache]>=2.14.0",
     "dash-bootstrap-components>=1.5.0",
-    "astroquery>=0.4.6",
-    "sparclclient",
-    "dust_extinction",
-    "dustmaps3d",
-    "pyvo",
-    "lightkurve",
-    "healpy",
-    "banyan-sigma @ git+https://github.com/jgagneastro/banyan_sigma.git",
-    "regions",
-    "requests",
-    "skypatrol",
+]
+ml = [
     "joblib",
-    "iar",
     "lightgbm",
     "scikit-learn",
     "torch",
+]
+sed = [
+    "pystellibs @ git+https://github.com/mfouesneau/pystellibs.git@v1.0.0",
+]
+phoebe = [
+    "phoebe; python_version < '3.13'",
+]
+dev = [
     "pytest",
     "pytest-cov",
     "pytest-xdist",
+]
+notebooks = [
+    "jupyterlab",
+    "ipykernel",
+    "seaborn",
+]
+all = [
+    "astroquery>=0.4.6",
+    "banyan-sigma @ git+https://github.com/jgagneastro/banyan_sigma.git",
+    "dash[diskcache]>=2.14.0",
+    "dash-bootstrap-components>=1.5.0",
+    "dust_extinction",
+    "dustmaps3d",
+    "healpy",
+    "joblib",
+    "kaleido",
+    "lightgbm",
+    "lightkurve",
+    "phoebe; python_version < '3.13'",
+    "plotly",
     "pystellibs @ git+https://github.com/mfouesneau/pystellibs.git@v1.0.0",
+    "pyvo",
+    "regions",
+    "requests",
+    "scikit-learn",
+    "skypatrol",
+    "sparclclient",
+    "torch",
+    "watchdog",
 ]
 
 [project.scripts]

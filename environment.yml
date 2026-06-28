@@ -5,21 +5,6 @@ channels:
   - defaults
 dependencies:
   - python=3.10
-  - numpy
-  - pandas
-  - scipy
-  - numba
-  - astropy
-  - matplotlib
-  - seaborn
-  - scikit-learn
-  - joblib
-  - pyarrow
-  - tqdm
-  - ipython
-  - ipykernel
-  - jupyterlab
   - pip
   - pip:
-      - -e .
-      - sparclclient
+      - -e .[all,dev,notebooks]

@@ -26,7 +26,10 @@ MALCA is a Bayesian event-detection pipeline for finding dimming and dipping eve
 ```bash
 # Requires Python >= 3.9
 git clone https://github.com/calderlen/malca.git && cd malca
-pip install -e "."          # installs all runtime + test dependencies
+pip install -e "."                    # lean core install
+pip install -e ".[catalogs,review]"   # catalog queries + Dash review UI
+pip install -e ".[dev]"               # test tools
+pip install -e ".[all,dev]"           # full contributor install
 ```
 
 Conda option:
@@ -40,16 +43,21 @@ conda activate malca
 - Per-mag-bin directories: `<lcsv2_root>/<mag_bin>/`
   - Index CSVs: `index*.csv` with columns like `asas_sn_id, ra_deg, dec_deg, pm_ra, pm_dec, ...`
 - Light curves: `lc<num>_cal/` folders containing `<asas_sn_id>.dat2`
+- Raw-root defaults are not hardcoded. Pass `--index-root`/`--lc-root`/`--root`, use config files, or set:
+  - `MALCA_LCV2_ROOT=/path/to/lcsv2`
+  - `MALCA_LCV2_MASKED_ROOT=/path/to/lcsv2_masked`
 - Optional catalogs:
   - VSX crossmatch: `input/vsx/asassn_x_vsx_matches_20250919_2252.parquet` (pre-crossmatched with columns: asas_sn_id, sep_arcsec, class)
   - Raw VSX: `input/vsx/vsxcat.090525.csv` (used by `vsx/filter.py` to generate crossmatch)
   - Note: Bright nearby star (BNS) filtering is handled upstream by ASAS-SN during LC generation
 
 ### Dependencies
-- Core + runtime modules: numpy, pandas, scipy, numba, astropy, celerite2, matplotlib, tqdm, pyarrow
-- Review + plotting: dash, dash-bootstrap-components, plotly
-- Characterization + catalog access: astroquery, dustmaps3d, pyvo, banyan-sigma, requests
-- ML utilities: lightgbm
+- Base install: core table/light-curve processing and plotting primitives.
+- `catalogs`: live catalog/TAP queries, dust maps, spectral/crossmatch clients.
+- `review`: Dash review app and Plotly/Kaleido export support.
+- `ml`: classifier/training utilities.
+- `sed` and `phoebe`: optional model-fitting integrations.
+- `dev` and `notebooks`: tests and notebook authoring tools.
 
 ## Quick Start
 ```bash
@@ -429,9 +437,6 @@ malca ltv-pipeline --stage cluster --mag-bin 13_13.5 --export-bundle output/ltv_
 
 # Home/catalog/review stage from an imported bundle
 malca ltv-pipeline --stage home --import-bundle output/ltv_cluster_bundle.zip
-
-# Open the migrated March 18 LTV bundle
-malca review --review-db output/runs/ltv_march18/review/review.db
 ```
 
 #### malca validate
@@ -667,7 +672,7 @@ output/runs/stv/20250121_143052/          # Timestamp-based run directory
 
 ### LTV Run Bundle
 
-LTV run artifacts are stored under `output/runs/ltv/<timestamp>/`, with March 18 migrated to `output/runs/ltv_march18/`.
+LTV run artifacts are stored under `output/runs/ltv/<timestamp>/`.
 
 ```
 output/runs/ltv/
@@ -687,18 +692,6 @@ output/runs/ltv/
 │   │   └── review.db
 │   └── bundle_assets/
 │       └── lightcurves/
-```
-
-Legacy fixed run directories and migrated LTV bundles are still supported:
-
-```
-output/runs/ltv_march18/
-├── results/
-│   └── LTvar13-13.5_pipeline.parquet
-├── review/
-│   └── review.db
-└── bundle_assets/
-    └── lightcurves/
 ```
 
 ### Standalone Module Outputs

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 from glob import glob
 from pathlib import Path
@@ -6,8 +8,6 @@ import re
 import time
 
 from astropy.stats import mad_std, sigma_clip
-from astropy.table import Table
-from astroquery.utils.tap.core import TapPlus
 from scipy.special import erf
 from tqdm import tqdm
 import numpy as np
@@ -20,7 +20,6 @@ try:
 except TypeError:
     pass  # For older numpy versions that don't support legacy='1.21'
 import pandas as pd
-import pyvo
 
 from malca.config import (
     CLEAN_LC_MAX_ERROR_ABSOLUTE, CLEAN_LC_MAX_ERROR_SIGMA,
@@ -32,7 +31,7 @@ from malca.config import (
     CATASTROPHIC_MAX_FRACTION,
 )
 from malca.config import GAIA_AIP_TAP_URL
-from malca.config import LCV2_MASKED_ROOT, LCV2_ROOT
+from malca.config import require_lcv2_masked_root, require_lcv2_root
 from malca.config import MAG_BINS
 from malca.config import PARQUET_OUTPUT_COMPRESSION, SKYPATROL_JD_OFFSET
 
@@ -1135,8 +1134,8 @@ def filter_residual_bad_cameras(
 
 
 def match_index_to_lc(
-    index_path: str | Path = LCV2_MASKED_ROOT,
-    lc_path: str | Path = LCV2_ROOT,
+    index_path: str | Path | None = None,
+    lc_path: str | Path | None = None,
     mag_bins: list = MAG_BINS,
     id_column:  str = "asas_sn_id",
 ):
@@ -1145,6 +1144,8 @@ def match_index_to_lc(
     """
 
     idx_pattern = re.compile(r"index(\d+)_masked\.csv$", re.IGNORECASE)
+    index_path = require_lcv2_masked_root(index_path)
+    lc_path = require_lcv2_root(lc_path)
 
     for mag_bin in tqdm(mag_bins, desc="Bins", unit="bin"):
         idx_paths = sorted(glob(os.path.join(str(index_path), mag_bin, "index*_masked.csv")))
@@ -1251,6 +1252,8 @@ def batch_gaia_cone_query(
     """
     if coords_df.empty:
         return pd.DataFrame()
+    from astropy.table import Table
+    import pyvo
 
     results = []
     chunks = [coords_df.iloc[i:i + chunk_size] for i in range(0, len(coords_df), chunk_size)]
@@ -1365,6 +1368,8 @@ def batch_tap_crossmatch(
     """
     if coords_df.empty:
         return pd.DataFrame()
+    from astropy.table import Table
+    from astroquery.utils.tap.core import TapPlus
 
     results: list[pd.DataFrame] = []
     chunks = [coords_df.iloc[i:i + chunk_size] for i in range(0, len(coords_df), chunk_size)]

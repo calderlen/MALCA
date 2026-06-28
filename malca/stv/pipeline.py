@@ -39,8 +39,6 @@ import zipfile
 from tqdm.auto import tqdm
 import pandas as pd
 
-from malca.enrichment.characterize import characterize_candidates_df
-from malca.enrichment.classify import compute_all_classifications
 from malca.config import (
     GAIA_CHUNK_SIZE, NEIGHBOR_RADIUS_ARCSEC, NEIGHBOR_CHUNK_SIZE,
     SPECTRA_RADIUS_ARCSEC, SPECTRA_CHUNK_SIZE,
@@ -61,7 +59,14 @@ from malca.config import (
 from malca.cli_config import add_config_args, apply_config, namespace_keys
 from malca.config import EVENTS_OUTPUT_CHUNK_SIZE
 from malca.config import PARQUET_OUTPUT_COMPRESSION, PARQUET_CACHE_COMPRESSION
-from malca.config import ASASSN_INDEX_PATH, LCV2_ROOT, VSX_CROSSMATCH_PATH, GAIA_LOCAL_CATALOG, DEFAULT_OUTPUT_DIR
+from malca.config import (
+    ASASSN_INDEX_PATH,
+    DEFAULT_OUTPUT_DIR,
+    GAIA_LOCAL_CATALOG,
+    MALCA_LCV2_ROOT_ENV,
+    VSX_CROSSMATCH_PATH,
+    require_lcv2_root,
+)
 from malca.config import (
     WORKERS, BATCH_SIZE, TRIGGER_MODE, P_POINTS, MAG_POINTS,
     LOGBF_THRESHOLD_DIP, LOGBF_THRESHOLD_JUMP, SIGNIFICANCE_THRESHOLD,
@@ -70,9 +75,6 @@ from malca.config import (
     JD_OFFSET, MAG_BINS,
 )
 from malca.config import PDM_METHOD_CHOICES
-from malca.enrich.neighbor import run_neighbor_enrichment
-from malca.enrich.spectra import run_spectra_availability
-from malca.catalogs.gaia_fetch import _extract_gaia_ids, fetch_gaia_catalog
 from malca.catalogs.gaia_ids import canonicalize_gaia_ids_in_frame, normalize_gaia_source_id_series
 from malca.io.manifest import build_manifest
 from malca.products.product_schema import add_stv_identity, assert_stv_product_schema
@@ -96,7 +98,6 @@ from malca.products.run_metadata import (
     load_summary_state,
     preserve_imported_run_snapshots,
 )
-from malca.review.store import db_connect, import_candidates
 from concurrent.futures import ProcessPoolExecutor
 from malca.core.stats import compute_stats, _enrich_row_worker
 from malca.stv.tag import RAW_MEDIAN_SUSPECT_COL, apply_tags, filter_camera_medians
@@ -109,7 +110,6 @@ from malca.io.table_io import (
     write_parquet_table,
 )
 from malca.core.utils import log as _log
-from malca.enrichment.vetting import vet_candidates
 
 
 RUN_REUSE_FINGERPRINT_VERSION = 1
@@ -493,6 +493,8 @@ PIPELINE_CONFIG_DEFAULTS: dict[str, Any] = {
 
 PIPELINE_CONFIG_PATH_KEYS = {
     "flat_lc_dir",
+    "index_root",
+    "lc_root",
     "index_file",
     "manifest_file",
     "filtered_file",
@@ -1291,10 +1293,18 @@ def main():
     g_general = parser.add_argument_group("General")
 
     g_manifest.add_argument("--mag-bin", nargs="+", help="Magnitude bin(s) to process. Use 'all' to process all bins automatically.")
-    g_manifest.add_argument("--index-root", type=Path, default=LCV2_ROOT,
-                        help="Index root directory (contains mag_bin/index*.csv)")
-    g_manifest.add_argument("--lc-root", type=Path, default=LCV2_ROOT,
-                        help="Light curve root directory (contains mag_bin/lc*_cal/)")
+    g_manifest.add_argument(
+        "--index-root",
+        type=Path,
+        default=None,
+        help=f"Index root directory (contains mag_bin/index*.csv); defaults to ${MALCA_LCV2_ROOT_ENV}",
+    )
+    g_manifest.add_argument(
+        "--lc-root",
+        type=Path,
+        default=None,
+        help=f"Light curve root directory (contains mag_bin/lc*_cal/); defaults to ${MALCA_LCV2_ROOT_ENV}",
+    )
     g_manifest.add_argument("--flat-lc-dir", type=Path, default=None,
                         help="Flat directory of <source_id>.<extension> light curves, such as bundle_assets/lightcurves")
     g_manifest.add_argument("--index-file", type=Path, default=None,
@@ -1590,6 +1600,10 @@ def main():
             args.run_multi_survey_features = True
     run_upstream = _stage_runs_upstream(stage)
     run_downstream = _stage_runs_downstream(stage)
+
+    if run_upstream and args.flat_lc_dir is None:
+        args.index_root = require_lcv2_root(args.index_root)
+        args.lc_root = require_lcv2_root(args.lc_root)
 
     if stage != "home" and not args.mag_bin:
         parser.error("--mag-bin is required unless --stage home is used.")
@@ -3084,6 +3098,8 @@ def main():
         log("\n=== Ensuring local Gaia catalog is up to date ===")
         gaia_fetch_started = time.perf_counter()
         try:
+            from malca.catalogs.gaia_fetch import _extract_gaia_ids, fetch_gaia_catalog
+
             gaia_catalog_path = args.gaia_cache.expanduser() if args.gaia_cache else GAIA_LOCAL_CATALOG
             gaia_ids = _extract_gaia_ids(
                 post_filter_output,
@@ -3106,6 +3122,8 @@ def main():
         log("\n=== Step 8: Characterizing candidates ===")
         characterize_started = time.perf_counter()
         try:
+            from malca.enrichment.characterize import characterize_candidates_df
+
             df_char = load_passing_table(post_filter_output)
 
             if "lc_path" in df_char.columns and "asas_sn_id" not in df_char.columns:
@@ -3304,6 +3322,8 @@ def main():
                         df_passed = df_post_filtered
 
                         if len(df_passed) > 0:
+                            from malca.enrichment.classify import compute_all_classifications
+
                             df_classified = compute_all_classifications(df_passed)
 
                             # Save classified results
@@ -3358,6 +3378,8 @@ def main():
                     df_neighbors_in = None
 
                 if df_neighbors_in is not None:
+                    from malca.enrich.neighbor import run_neighbor_enrichment
+
                     df_neighbors_in = ensure_candidate_id(df_neighbors_in, prefix="stv")
                     neighbor_dir = results_dir / "neighbor_enrichment"
                     neighbor_cache = args.neighbor_cache.expanduser() if args.neighbor_cache else (neighbor_dir / "neighbors_cache.parquet")
@@ -3427,6 +3449,8 @@ def main():
                     df_spectra_in = None
 
                 if df_spectra_in is not None:
+                    from malca.enrich.spectra import run_spectra_availability
+
                     df_spectra_in = ensure_candidate_id(df_spectra_in, prefix="stv")
                     spectra_dir = results_dir / "spectra_enrichment"
                     spectra_cache = args.spectra_cache.expanduser() if args.spectra_cache else (spectra_dir / "spectra_cache.parquet")
@@ -3498,6 +3522,8 @@ def main():
                     log(f"Filtered to {len(df_vet)} candidates with score >= {args.vetting_min_score} (from {before})")
 
                 vetting_checkpoint = results_dir / "lc_events_vetting_CHECKPOINT.parquet"
+                from malca.enrichment.vetting import vet_candidates
+
                 df_vet = vet_candidates(
                     df_vet,
                     run_simbad=not args.no_vetting_simbad,
@@ -3639,6 +3665,8 @@ def main():
             _import_file = _first_existing_candidate_result(results_dir, include_extended=True)
 
             if _import_file is not None:
+                from malca.review.store import db_connect, import_candidates
+
                 conn = db_connect(review_db_path)
                 df_import = load_passing_table(_import_file)
                 if df_import.empty:

@@ -9,14 +9,19 @@ import re
 from tqdm.auto import tqdm
 import pandas as pd
 
-from malca.config import LCV2_ROOT, LCV2_MASKED_ROOT, VSX_RAW_CATALOG_PATH
+from malca.config import (
+    MALCA_LCV2_MASKED_ROOT_ENV,
+    VSX_RAW_CATALOG_PATH,
+    require_lcv2_masked_root,
+    require_lcv2_root,
+)
 from malca.config import MAG_BINS
 
 
 
 
-DEFAULT_LC_DIR = LCV2_ROOT
-DEFAULT_LC_DIR_MASKED = LCV2_MASKED_ROOT
+DEFAULT_LC_DIR = None
+DEFAULT_LC_DIR_MASKED = None
 DEFAULT_VSX_FILE = VSX_RAW_CATALOG_PATH
 DEFAULT_OUTPUT_DIR = Path(__file__).parent.parent.parent / "input" / "vsx"
 
@@ -262,9 +267,9 @@ def filter_vsx(df_vsx: pd.DataFrame) -> pd.DataFrame:
     return normalize_vsx_catalog(df_vsx[~mask].copy())
 
 
-def load_masked_indexes(masked_root: Path | str = DEFAULT_LC_DIR_MASKED) -> pd.DataFrame:
+def load_masked_indexes(masked_root: Path | str | None = DEFAULT_LC_DIR_MASKED) -> pd.DataFrame:
     """Concatenate all masked index CSVs into a single dataframe."""
-    masked_root = Path(masked_root)
+    masked_root = require_lcv2_masked_root(masked_root)
     masked_files = [
         f
         for mag_bin in MAG_BINS
@@ -280,9 +285,9 @@ def load_masked_indexes(masked_root: Path | str = DEFAULT_LC_DIR_MASKED) -> pd.D
     return df.dropna(subset=["ra_deg", "dec_deg"]).reset_index(drop=True)
 
 
-def collect_present_ids(lc_root: Path | str = DEFAULT_LC_DIR) -> set[str]:
+def collect_present_ids(lc_root: Path | str | None = DEFAULT_LC_DIR) -> set[str]:
     """Return the set of ASAS-SN IDs with .dat files present."""
-    lc_root = Path(lc_root)
+    lc_root = require_lcv2_root(lc_root)
     present_ids = {
         Path(f).stem
         for mag_bin in MAG_BINS
@@ -322,7 +327,7 @@ def write_clean_outputs(
 
 def main(
     vsx_file: Path | str = DEFAULT_VSX_FILE,
-    masked_dir: Path | str = DEFAULT_LC_DIR_MASKED,
+    masked_dir: Path | str | None = DEFAULT_LC_DIR_MASKED,
     output_dir: Path | str = DEFAULT_OUTPUT_DIR,
     stamp: str | None = None,
 ) -> tuple[Path, Path, Path]:
@@ -344,7 +349,7 @@ def cli():
     parser.add_argument("--vsx-file", type=Path, default=DEFAULT_VSX_FILE,
                         help=f"Raw VSX catalog (default: {DEFAULT_VSX_FILE})")
     parser.add_argument("--masked-dir", type=Path, default=DEFAULT_LC_DIR_MASKED,
-                        help=f"Masked light-curve index root (default: {DEFAULT_LC_DIR_MASKED})")
+                        help=f"Masked light-curve index root (default: ${MALCA_LCV2_MASKED_ROOT_ENV})")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR,
                         help=f"Output directory (default: {DEFAULT_OUTPUT_DIR})")
     parser.add_argument("--stamp", type=str, default=None,

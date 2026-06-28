@@ -11,7 +11,11 @@ import pandas as pd
 from tqdm import tqdm
 
 from malca.config import PARQUET_OUTPUT_COMPRESSION
-from malca.config import LCV2_ROOT, DEFAULT_OUTPUT_DIR
+from malca.config import (
+    DEFAULT_OUTPUT_DIR,
+    MALCA_LCV2_ROOT_ENV,
+    require_lcv2_root,
+)
 from malca.config import WORKERS, MAG_BINS
 
 IDX_PATTERN = re.compile(r"index(\d+)\.csv$", re.IGNORECASE)
@@ -285,14 +289,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--index-root",
         type=Path,
-        default=LCV2_ROOT,
-        help="Root directory that contains <mag_bin>/index*.csv files. Ignored when --flat-lc-dir is used.",
+        default=None,
+        help=(
+            "Root directory that contains <mag_bin>/index*.csv files. "
+            f"Defaults to ${MALCA_LCV2_ROOT_ENV}; ignored when --flat-lc-dir is used."
+        ),
     )
     parser.add_argument(
         "--lc-root",
         type=Path,
-        default=LCV2_ROOT,
-        help="Root directory that contains <mag_bin>/lc*_cal/ light-curve folders. Ignored when --flat-lc-dir is used.",
+        default=None,
+        help=(
+            "Root directory that contains <mag_bin>/lc*_cal/ light-curve folders. "
+            f"Defaults to ${MALCA_LCV2_ROOT_ENV}; ignored when --flat-lc-dir is used."
+        ),
     )
     parser.add_argument(
         "--flat-lc-dir",
@@ -352,9 +362,11 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     mag_bins = args.mag_bins if args.mag_bins else MAG_BINS
+    index_root = None if args.flat_lc_dir else require_lcv2_root(args.index_root)
+    lc_root = None if args.flat_lc_dir else require_lcv2_root(args.lc_root)
     df = build_manifest(
-        index_root=args.index_root.expanduser(),
-        lc_root=args.lc_root.expanduser(),
+        index_root=index_root,
+        lc_root=lc_root,
         mag_bins=mag_bins,
         id_column=args.id_column,
         file_ext=args.extension,

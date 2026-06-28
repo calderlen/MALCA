@@ -65,7 +65,7 @@ from malca.config import (
     LTV_BINNED_SF_BIN_DAYS,
     LTV_BINNED_SF_LAG_BINS_DAYS,
 )
-from malca.config import LCV2_ROOT
+from malca.config import MALCA_LCV2_ROOT_ENV, require_lcv2_root
 from malca.config import MAG_BINS, SKYPATROL_JD_OFFSET
 from malca.config import PARQUET_OUTPUT_COMPRESSION
 from malca.products.feature_layers import to_layer_first_frame
@@ -116,7 +116,7 @@ def _build_config(a, mag_bin: str) -> Config:
     """Build a Config for a single mag bin from parsed args."""
     from malca.config import LTV_LIGHT_CURVE_FILE_EXTENSION
 
-    root = Path(a.root)
+    root = require_lcv2_root(a.root)
     out = a.output
     if out is None:
         out = str(ltv_core_output_path(mag_bin, a.run_dir))
@@ -151,8 +151,9 @@ def parse_args() -> tuple[list[Config], bool]:
     p = argparse.ArgumentParser(prog="ltv", description="Compute seasonal trends for ASAS-SN light curves.")
 
     p.add_argument("--root",
-                   default=str(LCV2_ROOT),
-                   type=str)
+                   default=None,
+                   type=str,
+                   help=f"Raw ASAS-SN light-curve root; defaults to ${MALCA_LCV2_ROOT_ENV}")
     p.add_argument("--run-dir",
                    default=str(DEFAULT_LTV_RUN_DIR),
                    type=str,

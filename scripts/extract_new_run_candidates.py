@@ -10,7 +10,6 @@ from pathlib import Path
 
 import pandas as pd
 
-from malca.config import DEFAULT_OUTPUT_DIR
 from malca.products.feature_layers import with_feature_columns
 from malca.io.table_io import read_feature_table
 
@@ -178,26 +177,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--run-candidates",
         type=Path,
-        default=Path("output/runs/may13/results/lc_events_filtered_all.parquet"),
-        help="Run candidate table, CSV/Parquet/directory. Default: output/runs/may13/results/lc_events_filtered_all.parquet",
+        required=True,
+        help="Run candidate table, CSV/Parquet/directory.",
     )
     parser.add_argument(
         "--existing",
         type=Path,
-        default=Path("output/candidates_12_15_combined.csv"),
-        help="Existing candidate CSV/table to subtract. Default: output/candidates_12_15_combined.csv",
+        required=True,
+        help="Existing candidate CSV/table to subtract.",
     )
     parser.add_argument(
         "--output",
         type=Path,
-        default=DEFAULT_OUTPUT_DIR / "new_candidates_12_15.csv",
-        help=f"Output CSV. Default: {DEFAULT_OUTPUT_DIR / 'new_candidates_12_15.csv'}",
+        default=Path("output/new_candidates.csv"),
+        help="Output CSV. Default: output/new_candidates.csv",
     )
     parser.add_argument("--key", default=None, help="Candidate ID column. Defaults to auto-detect.")
     parser.add_argument(
         "--characterized",
         type=Path,
-        default=Path("output/runs/may13/results/lc_events_characterized.parquet"),
+        default=None,
         help="Optional characterized table used to fill ra_deg/dec_deg when available.",
     )
     parser.add_argument(

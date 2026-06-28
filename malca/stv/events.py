@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -40,7 +42,7 @@ from malca.core.baseline import (
 )
 from malca.config import BAD_CAMERA_SCATTER_RATIO_THRESHOLD
 from malca.config import PARQUET_OUTPUT_COMPRESSION, OUTPUT_FORMAT, EVENTS_OUTPUT_CHUNK_SIZE
-from malca.config import LCV2_ROOT, DEFAULT_OUTPUT_DIR
+from malca.config import DEFAULT_OUTPUT_DIR, MALCA_LCV2_ROOT_ENV, require_lcv2_root
 from malca.config import (
     WORKERS, TRIGGER_MODE, P_POINTS, MAG_POINTS,
     LOGBF_THRESHOLD_DIP, LOGBF_THRESHOLD_JUMP, SIGNIFICANCE_THRESHOLD,
@@ -2023,7 +2025,12 @@ def main():
     g_input.add_argument("--input", dest="input_patterns", action="append", default=None, help="Path or glob to a light-curve file. Repeat for multiple inputs.")
     g_input.add_argument("--input-file", type=Path, default=None, help="Read paths from file (one path per line); avoids long argv for large batches.")
     g_input.add_argument("--mag-bin", dest="mag_bins", action="append", choices=MAG_BINS, help="Process all light curves in this magnitude bin.")
-    g_input.add_argument("--lc-path", type=str, default=str(LCV2_ROOT), help="Base path to light curve directories")
+    g_input.add_argument(
+        "--lc-path",
+        type=str,
+        default=None,
+        help=f"Base path to light curve directories; defaults to ${MALCA_LCV2_ROOT_ENV} when --mag-bin is used",
+    )
     g_input.add_argument("--workers", type=int, default=WORKERS, help="Number of worker processes")
 
     g_output.add_argument("--output", type=Path, default=None, help="Output path for results (suffix adjusted per format).")
@@ -2230,7 +2237,7 @@ def main():
 
     expanded_inputs = []
     if args.mag_bins:
-        lc_path = args.lc_path
+        lc_path = str(require_lcv2_root(args.lc_path))
         for mag_bin in args.mag_bins:
             mag_bin_dir = os.path.join(lc_path, mag_bin)
             lc_dirs = sorted(glob.glob(os.path.join(mag_bin_dir, "lc*_cal")))
