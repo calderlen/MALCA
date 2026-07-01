@@ -257,7 +257,9 @@ def run_neighbor_enrichment(
         known_var = neighbors_long.loc[known_var_mask, ["candidate_id"]].drop_duplicates()
         known_var["nearby_known_variable"] = True
         summary = summary.merge(known_var, on="candidate_id", how="left")
-        summary["nearby_known_variable"] = summary["nearby_known_variable"].fillna(False)
+        summary["nearby_known_variable"] = (
+            summary["nearby_known_variable"].astype("boolean").fillna(False).astype(bool)
+        )
 
         if "phot_g_mean_mag" in neighbors_long.columns:
             bright_mask = (pd.to_numeric(neighbors_long["phot_g_mean_mag"], errors="coerce") <= 13.0) & (
@@ -266,7 +268,9 @@ def run_neighbor_enrichment(
             bright = neighbors_long.loc[bright_mask, ["candidate_id"]].drop_duplicates()
             bright["bright_close_neighbor"] = True
             summary = summary.merge(bright, on="candidate_id", how="left")
-            summary["bright_close_neighbor"] = summary["bright_close_neighbor"].fillna(False)
+            summary["bright_close_neighbor"] = (
+                summary["bright_close_neighbor"].astype("boolean").fillna(False).astype(bool)
+            )
         else:
             summary["bright_close_neighbor"] = False
 

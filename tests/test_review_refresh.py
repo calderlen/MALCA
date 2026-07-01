@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from malca.products.feature_layers import feature_mapping_get, parse_layer_value
+from malca.products.feature_layers import feature_mapping_get
 from malca.review import refresh as review_refresh
 from malca.review.store import db_connect, get_candidate_payload, import_candidates, save_review
 from malca.io.table_io import write_feature_table
@@ -82,7 +82,7 @@ def test_refresh_review_stats_from_run_replaces_stats_only(tmp_path: Path, monke
     assert feature_mapping_get(payload, "n_points") == 11.0
     assert feature_mapping_get(payload, "cadence_median_days") == 2.5
     assert feature_mapping_get(payload, "baseline_mag") == 14.1
-    assert "stats_legacy_extra" not in parse_layer_value(payload.get("lc_stats"))
+    assert "stats_legacy_extra" not in payload
     assert row == (str(lc_path), 12.0, 14.2)
 
 

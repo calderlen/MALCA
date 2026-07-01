@@ -256,26 +256,26 @@ def test_migrate_tree_rewrites_review_db_payload_but_keeps_sql_filter_columns(tm
         columns = {row[1] for row in conn.execute("PRAGMA table_info(candidates)").fetchall()}
         row = conn.execute(
             """
-            SELECT dipper_score, payload_json, lc_stats, external_stats,
+            SELECT dipper_score, phot_g_mean_mag, payload_json,
                    camera_name_key, camera_names, camera_name_count, camera_name_key_fraction
             FROM candidates WHERE candidate_id='C1'
             """
         ).fetchone()
+        marker = conn.execute(
+            "SELECT value FROM app_state WHERE key='review_candidates_schema'"
+        ).fetchone()[0]
     assert "camera_field_key" not in columns
+    assert {"lc_stats", "external_stats", "derived_stats", "feature_layer_version"}.isdisjoint(columns)
     assert row[0] == 6.0
-    payload = json.loads(row[1])
-    assert "dipper_score" not in payload
-    assert payload["lc_stats"]["dipper_score"] == 6.0
-    assert payload["external_stats"]["phot_g_mean_mag"] == 14.2
-    assert payload["external_stats"]["camera_name_key"] == "ba"
-    assert "camera_field_key" not in payload["external_stats"]
-    assert json.loads(row[2])["dipper_score"] == 6.0
-    assert json.loads(row[3])["phot_g_mean_mag"] == 14.2
-    assert json.loads(row[3])["camera_name_key"] == "ba"
-    assert row[4] == "ba"
-    assert row[5] == "ba,bb"
-    assert row[6] == 2
-    assert row[7] == 0.5
+    assert row[1] == 14.2
+    payload = json.loads(row[2])
+    assert {"lc_stats", "external_stats", "derived_stats", "feature_layer_version"}.isdisjoint(payload)
+    assert "camera_field_key" not in payload
+    assert row[3] == "ba"
+    assert row[4] == "ba,bb"
+    assert row[5] == 2
+    assert row[6] == 0.5
+    assert marker == "flat_v1"
 
 
 def test_migrate_tree_rewrites_review_db_paths_for_migrated_queue_scope(tmp_path: Path) -> None:
@@ -372,10 +372,14 @@ def test_migrate_tree_rewrites_candidates_jsonl_and_import_indexes_layers(tmp_pa
     rebuilt = tmp_path / "rebuilt.db"
     sync.import_review_bundle(migrated_transfer, db_path=rebuilt, replace=True)
     with sqlite3.connect(rebuilt) as conn:
-        sql_value = conn.execute("SELECT dipper_score FROM candidates WHERE candidate_id='C1'").fetchone()[0]
+        sql_value, camera_name_key = conn.execute(
+            "SELECT dipper_score, camera_name_key FROM candidates WHERE candidate_id='C1'"
+        ).fetchone()
         payload = json.loads(conn.execute("SELECT payload_json FROM candidates WHERE candidate_id='C1'").fetchone()[0])
     assert sql_value == 6.0
-    assert payload["lc_stats"]["dipper_score"] == 6.0
+    assert camera_name_key == "ba"
+    assert {"lc_stats", "external_stats", "derived_stats", "feature_layer_version"}.isdisjoint(payload)
+    assert payload["custom_nested"]["ok"] is True
 
 
 def test_python_migrate_scan_only_writes_report_without_mirror(tmp_path: Path) -> None:

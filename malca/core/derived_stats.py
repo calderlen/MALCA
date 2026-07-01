@@ -45,6 +45,15 @@ def _numeric_column(df: pd.DataFrame, names: Iterable[str]) -> pd.Series:
     return pd.Series(np.nan, index=df.index, dtype=float)
 
 
+def _combine_first_numeric(base: pd.Series, values: pd.Series) -> pd.Series:
+    out = pd.to_numeric(base, errors="coerce").copy()
+    fill = pd.to_numeric(values, errors="coerce")
+    mask = out.isna() & fill.notna()
+    if bool(mask.any()):
+        out.loc[mask] = fill.loc[mask]
+    return out
+
+
 def _distance_pc(df: pd.DataFrame) -> pd.Series:
     dist = pd.Series(np.nan, index=df.index, dtype=float)
     for name in (
@@ -55,11 +64,11 @@ def _distance_pc(df: pd.DataFrame) -> pd.Series:
         "dist",
     ):
         values = _numeric_column(df, (name,)).where(lambda s: s > 0, np.nan)
-        dist = dist.combine_first(values)
+        dist = _combine_first_numeric(dist, values)
 
     parallax = _numeric_column(df, ("parallax", "gaia_parallax"))
     parallax_dist = (1000.0 / parallax).where(parallax > 0, np.nan)
-    return dist.combine_first(parallax_dist)
+    return _combine_first_numeric(dist, parallax_dist)
 
 
 def append_derived_features(df: pd.DataFrame, *, overwrite: bool = False) -> pd.DataFrame:
@@ -93,13 +102,13 @@ def append_derived_features(df: pd.DataFrame, *, overwrite: bool = False) -> pd.
     bp = _numeric_column(out, ("phot_bp_mean_mag", "bp_mag", "gaia_bp_mag", "BP"))
     rp = _numeric_column(out, ("phot_rp_mean_mag", "rp_mag", "gaia_rp_mag", "RP"))
     bp_rp = _numeric_column(out, ("bp_rp", "BP_RP", "gaia_bp_rp"))
-    bp_rp = bp_rp.combine_first(bp - rp)
+    bp_rp = _combine_first_numeric(bp_rp, bp - rp)
     derived["derived_bp_rp"] = bp_rp
 
     jmag = _numeric_column(out, ("tmass_j", "j_mag", "Jmag", "J"))
     kmag = _numeric_column(out, ("tmass_k", "k_mag", "Kmag", "Ks", "K"))
     j_k = _numeric_column(out, ("j_k", "J_K", "J-K", "tmass_j_k"))
-    j_k = j_k.combine_first(jmag - kmag)
+    j_k = _combine_first_numeric(j_k, jmag - kmag)
     derived["derived_j_k"] = j_k
 
     dist_pc = _distance_pc(out)
@@ -118,7 +127,7 @@ def append_derived_features(df: pd.DataFrame, *, overwrite: bool = False) -> pd.
         if overwrite or col not in out.columns:
             out[col] = values
         else:
-            out[col] = pd.to_numeric(out[col], errors="coerce").combine_first(values)
+            out[col] = _combine_first_numeric(out[col], values)
 
     return out
 

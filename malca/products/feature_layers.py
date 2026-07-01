@@ -747,6 +747,29 @@ def with_feature_columns(df: pd.DataFrame, columns: Iterable[str]) -> pd.DataFra
     return out
 
 
+def expand_feature_layers(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy with all stored layer values exposed as flat columns."""
+    if not is_layer_first_frame(df):
+        return df.copy()
+
+    out = df.copy()
+    for layer in FEATURE_LAYER_COLUMNS:
+        if layer not in out.columns:
+            continue
+        parsed = out[layer].map(_parse_layer_value)
+        keys: list[str] = []
+        seen: set[str] = set()
+        for mapping in parsed:
+            for key in mapping:
+                if key not in seen:
+                    seen.add(key)
+                    keys.append(key)
+        for key in keys:
+            if key not in out.columns:
+                out[key] = parsed.map(lambda mapping, k=key: mapping.get(k, pd.NA))
+    return out
+
+
 def row_feature_layers(row: Mapping[str, Any], *, include_missing: bool = False) -> dict[str, dict[str, Any]]:
     """Split a row-like mapping into the three feature layers."""
     layers: dict[str, dict[str, Any]] = {layer: {} for layer in FEATURE_LAYER_COLUMNS}

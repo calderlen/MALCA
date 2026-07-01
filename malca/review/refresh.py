@@ -13,11 +13,15 @@ from malca.review.store import (
     _CANDIDATE_COLUMNS,
     _COL_NAMES,
     _as_bool,
+    _flatten_review_payload,
+    _is_payload_missing,
     _normalize_large_integer_like_id,
+    _review_payload_extra,
     _to_float,
     _utc_now,
     db_connect,
     detect_run_directory_files,
+    get_candidate_payload,
     load_candidates_file,
     replace_candidate_payload_fields,
 )
@@ -195,16 +199,13 @@ def refresh_review_stats_from_run(
     with db_connect(db_path) as conn:
         rows = conn.execute("SELECT candidate_id, asas_sn_id, payload_json FROM candidates").fetchall()
         payload_by_id: dict[str, dict] = {}
-        for candidate_id, _asas_sn_id, payload_json in rows:
+        for candidate_id, asas_sn_id, _payload_json in rows:
             cid = str(candidate_id)
-            try:
-                payload = json.loads(payload_json) if payload_json else {}
-            except Exception:
-                payload = {}
-            if isinstance(payload, dict) and payload:
-                payload_by_id[cid] = payload
-            else:
-                payload_by_id[cid] = {}
+            payload = get_candidate_payload(conn, cid)
+            payload["candidate_id"] = cid
+            if asas_sn_id not in (None, "") and not payload.get("asas_sn_id"):
+                payload["asas_sn_id"] = str(asas_sn_id)
+            payload_by_id[cid] = payload
 
         table_cols = {
             str(info[1])
@@ -266,17 +267,27 @@ def refresh_review_stats_from_run(
     }
 
 
-def _candidate_insert_rows_from_db_rows(rows: list[tuple[object, object, object, object]]) -> list[tuple[object, ...]]:
+def _candidate_insert_rows_from_db_rows(
+    rows: list[tuple[object, ...]],
+    row_columns: list[str],
+) -> list[tuple[object, ...]]:
     payload_rows: list[tuple[object, ...]] = []
-    for candidate_id, source_path, payload_json, imported_at in rows:
+    for row in rows:
+        raw = dict(zip(row_columns, row))
+        candidate_id = raw.get("candidate_id")
+        source_path = raw.get("source_path")
+        imported_at = raw.get("imported_at")
         try:
-            payload = json.loads(payload_json) if payload_json else {}
+            payload = json.loads(raw.get("payload_json")) if raw.get("payload_json") else {}
         except Exception:
             payload = {}
-        if not isinstance(payload, dict):
-            payload = {}
+        payload = _flatten_review_payload(payload if isinstance(payload, dict) else {})
 
-        payload = dict(payload)
+        for col in _COL_NAMES:
+            value = raw.get(col)
+            if not _is_payload_missing(value):
+                payload[col] = value
+
         payload["candidate_id"] = str(payload.get("candidate_id") or candidate_id)
         if "gaia_id" in payload:
             payload["gaia_id"] = _normalize_large_integer_like_id(payload.get("gaia_id"))
@@ -292,7 +303,7 @@ def _candidate_insert_rows_from_db_rows(rows: list[tuple[object, object, object,
                 vals.append(_to_float(raw))
             else:
                 vals.append(str(raw) if raw is not None else None)
-        vals.append(json.dumps(payload, default=str))
+        vals.append(json.dumps(_review_payload_extra(payload), default=str))
         vals.append(imported_at or _utc_now())
         payload_rows.append(tuple(vals))
     return payload_rows
@@ -315,8 +326,13 @@ def rebuild_review_db(
         target_db.unlink()
 
     with db_connect(source_db) as src_conn:
+        source_candidate_cols = [
+            col
+            for col in ["candidate_id", "source_path", *_COL_NAMES, "payload_json", "imported_at"]
+            if col in {str(row[1]) for row in src_conn.execute("PRAGMA table_info(candidates)").fetchall()}
+        ]
         candidate_rows = src_conn.execute(
-            "SELECT candidate_id, source_path, payload_json, imported_at FROM candidates"
+            f"SELECT {', '.join(source_candidate_cols)} FROM candidates"
         ).fetchall()
         reviews = pd.read_sql_query("SELECT * FROM reviews", src_conn)
         review_history = pd.read_sql_query("SELECT * FROM review_history", src_conn)
@@ -326,7 +342,7 @@ def rebuild_review_db(
         all_col_names = ["candidate_id", "source_path"] + _COL_NAMES + ["payload_json", "imported_at"]
         placeholders = ", ".join(["?"] * len(all_col_names))
         insert_cols = ", ".join(all_col_names)
-        candidate_payload_rows = _candidate_insert_rows_from_db_rows(candidate_rows)
+        candidate_payload_rows = _candidate_insert_rows_from_db_rows(candidate_rows, source_candidate_cols)
         if candidate_payload_rows:
             dst_conn.executemany(
                 f"INSERT INTO candidates ({insert_cols}) VALUES ({placeholders})",
@@ -337,7 +353,19 @@ def rebuild_review_db(
         if not review_history.empty:
             review_history.to_sql("review_history", dst_conn, if_exists="append", index=False)
         if not app_state.empty:
-            app_state.to_sql("app_state", dst_conn, if_exists="append", index=False)
+            dst_conn.executemany(
+                """
+                INSERT INTO app_state (key, value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value=excluded.value,
+                    updated_at=excluded.updated_at
+                """,
+                [
+                    (str(row["key"]), str(row["value"]), str(row["updated_at"] or _utc_now()))
+                    for _, row in app_state.iterrows()
+                ],
+            )
         dst_conn.commit()
 
     return {

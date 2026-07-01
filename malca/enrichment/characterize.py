@@ -600,14 +600,20 @@ def query_starhorse_by_ids(
                     f"WHERE source_id IN ({ids_str})"
                 )
 
-                try:
-                    chunk_df = tap_service.search(query=query).to_table().to_pandas()
-                    if not chunk_df.empty:
-                        chunk_df["source_id"] = chunk_df["source_id"].astype(str)
-                        new_rows.append(chunk_df)
-                except Exception as e:
-                    print(f"TAP query error for chunk {i}: {e}")
-                    continue
+                for attempt in range(1, 4):
+                    try:
+                        chunk_df = tap_service.search(query=query).to_table().to_pandas()
+                        if not chunk_df.empty:
+                            chunk_df["source_id"] = chunk_df["source_id"].astype(str)
+                            new_rows.append(chunk_df)
+                        break
+                    except Exception as e:
+                        if attempt >= 3:
+                            print(f"TAP query error for chunk {i}: {e}")
+                            break
+                        delay = min(5.0 * attempt, 30.0)
+                        print(f"TAP query error for chunk {i} attempt {attempt}/3: {e}; retrying in {delay:.0f}s")
+                        time.sleep(delay)
 
         new_df = pd.concat(new_rows, ignore_index=True) if new_rows else pd.DataFrame()
         if not new_df.empty:
@@ -764,7 +770,7 @@ def get_dust_extinction(df: pd.DataFrame) -> pd.DataFrame:
         print(f"Error querying dustmaps3d: {e}")
         raise
 
-    df['A_v_3d'] = df['A_v_3d'].fillna(0.0)
+    df['A_v_3d'] = pd.to_numeric(df['A_v_3d'], errors="coerce").fillna(0.0)
     
     # Compute dereddened magnitudes for active pipeline bands if they exist
     extinction_coeffs = {
@@ -840,7 +846,7 @@ def classify_yso(df: pd.DataFrame) -> pd.DataFrame:
     
     # Dust Correction
     if 'A_v_3d' in df.columns and df['A_v_3d'].sum() > 0:
-        av = df['A_v_3d'].fillna(0.0)
+        av = pd.to_numeric(df['A_v_3d'], errors="coerce").fillna(0.0)
         hk_color = hk_color - (YSO_DUST_CORRECTION_HK * av)
         w1w2_color = w1w2_color - (YSO_DUST_CORRECTION_W1W2 * av)
         df['H_K_dered'] = hk_color
@@ -1900,9 +1906,9 @@ def query_unwise_variability(
     key = df[id_col].astype(str)
     df['unwise_w1_zscore'] = key.map(ckpt_idx['unwise_w1_zscore'])
     df['unwise_w2_zscore'] = key.map(ckpt_idx['unwise_w2_zscore'])
-    df['unwise_w1_var'] = key.map(ckpt_idx['unwise_w1_var']).fillna(False).astype(bool)
+    df['unwise_w1_var'] = key.map(ckpt_idx['unwise_w1_var']).astype("boolean").fillna(False).astype(bool)
 
-    n_var = int(df['unwise_w1_var'].fillna(False).sum())
+    n_var = int(df['unwise_w1_var'].sum())
     print(f"unWISE: {n_var}/{len(df)} sources with W1 variability z-score > 3")
     return df
 

@@ -9,7 +9,6 @@ import contextlib
 import io
 from pathlib import Path
 from typing import Callable, Optional
-import json
 import sqlite3
 
 import numpy as np
@@ -21,9 +20,9 @@ from malca.config import (
     RUN_MIN_POINTS, RUN_MAX_GAP_POINTS, BASELINE_FUNC,
     DEFAULT_OUTPUT_DIR,
 )
-from malca.products.feature_layers import feature_mapping_get, to_layer_first_mapping
+from malca.products.feature_layers import feature_mapping_get
 from malca.review.stats_merge import merge_stats_summary_into_payload as _merge_stats_summary_into_payload
-from malca.review.store import _CANDIDATE_COLUMNS, _as_bool, _to_float
+from malca.review.store import get_candidate_payload, replace_candidate_payload_fields, _to_float
 
 
 class _ProgressCaptureStream(io.TextIOBase):
@@ -233,20 +232,16 @@ def run_missing_stages(
     Returns a list of stage names that were executed.
     """
     # 1. Load payload from DB
-    row = conn.execute(
-        "SELECT payload_json, lc_path FROM candidates WHERE candidate_id = ?",
-        (candidate_id,),
-    ).fetchone()
+    row = conn.execute("SELECT lc_path FROM candidates WHERE candidate_id = ?", (candidate_id,)).fetchone()
     conn.commit()  # Release structural read lock during heavy API wait times
     
     if row is None:
         raise ValueError(f"Candidate {candidate_id} not found in DB")
 
-    payload = json.loads(row[0]) if row[0] else {}
-    if not isinstance(payload, dict):
-        payload = {}
+    payload = get_candidate_payload(conn, candidate_id)
+    payload["candidate_id"] = str(candidate_id)
     _normalize_coordinate_aliases(payload)
-    lc_path = row[1] or feature_mapping_get(payload, "lc_path")
+    lc_path = row[0] or feature_mapping_get(payload, "lc_path")
 
     # 2. Detect current status
     status = detect_pipeline_status(payload)
@@ -376,43 +371,7 @@ def update_candidate_payload(
     updates: dict,
 ) -> None:
     """Merge *updates* into the existing payload_json for a candidate."""
-    row = conn.execute(
-        "SELECT payload_json FROM candidates WHERE candidate_id = ?",
-        (candidate_id,),
-    ).fetchone()
-    if row is None:
-        return
-    existing = json.loads(row[0]) if row[0] else {}
-    if not isinstance(existing, dict):
-        existing = {}
-    existing.update(updates)
-    payload_json = to_layer_first_mapping(existing, layer_values_as_json=False)
-    conn.execute(
-        "UPDATE candidates SET payload_json = ? WHERE candidate_id = ?",
-        (json.dumps(payload_json, default=str), candidate_id),
-    )
-
-    # Also update extracted columns if they match _CANDIDATE_COLUMNS
-
-    col_updates = []
-    params = []
-    for col, _dtype, etype in _CANDIDATE_COLUMNS:
-        if col in updates:
-            col_updates.append(f"{col} = ?")
-            raw = updates[col]
-            if etype == "bool":
-                params.append(int(_as_bool(raw)) if raw is not None else None)
-            elif etype == "float":
-                params.append(_to_float(raw))
-            else:
-                params.append(str(raw) if raw is not None else None)
-    if col_updates:
-        params.append(candidate_id)
-        conn.execute(
-            f"UPDATE candidates SET {', '.join(col_updates)} WHERE candidate_id = ?",
-            params,
-        )
-    conn.commit()
+    replace_candidate_payload_fields(conn, candidate_id, updates)
 
 
 # ---------------------------------------------------------------------------

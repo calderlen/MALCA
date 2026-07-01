@@ -24,7 +24,7 @@ from malca.enrichment.sed_model import (
     _patch_pystellibs_kurucz_libsdir,
     fit_sed_models,
 )
-from malca.io.table_io import write_feature_table, write_parquet_table
+from malca.io.table_io import read_parquet_table, write_feature_table
 
 _trapezoid = getattr(np, "trapezoid", np.trapz)
 
@@ -227,6 +227,16 @@ def test_sed_photometry_cli_writes_fit_and_curve_outputs(tmp_path: Path, monkeyp
     assert output_path.exists()
     assert fit_path.exists()
     assert curve_path.exists()
+    layer_cols = {"lc_stats", "external_stats", "derived_stats", "feature_layer_version"}
+    sed_out = read_parquet_table(output_path)
+    fit_out = read_parquet_table(fit_path)
+    curve_out = read_parquet_table(curve_path)
+    assert len(sed_out) == len(sed_rows)
+    assert len(fit_out) == len(fits)
+    assert len(curve_out) == len(curves)
+    assert layer_cols.isdisjoint(sed_out.columns)
+    assert layer_cols.isdisjoint(fit_out.columns)
+    assert layer_cols.isdisjoint(curve_out.columns)
 
 
 def test_sed_photometry_cli_writes_alpha_output_without_atmosphere_fit(tmp_path: Path, monkeypatch) -> None:
@@ -262,8 +272,35 @@ def test_sed_photometry_cli_writes_alpha_output_without_atmosphere_fit(tmp_path:
 
     assert output_path.exists()
     assert alpha_path.exists()
+    sed_out = read_parquet_table(output_path)
+    assert len(sed_out) == len(sed_rows)
+    assert {"lc_stats", "external_stats", "derived_stats", "feature_layer_version"}.isdisjoint(sed_out.columns)
     assert alpha_rows.loc[0, "sed_alpha_status"] == "ok"
     assert alpha_rows.loc[0, "sed_alpha"] == pytest.approx(-0.5, abs=1.0e-12)
+    assert {"lc_stats", "external_stats", "derived_stats", "feature_layer_version"}.isdisjoint(alpha_rows.columns)
+
+
+def test_sed_photometry_cli_writes_empty_plain_output(tmp_path: Path, monkeypatch) -> None:
+    input_path = tmp_path / "candidates.parquet"
+    write_feature_table(
+        pd.DataFrame([{"candidate_id": "sed-empty-cand", "timescale": "stv", "ra": 1.0, "dec": 2.0}]),
+        input_path,
+    )
+    monkeypatch.setattr(
+        sed_photometry,
+        "fetch_sed_photometry",
+        lambda *args, **kwargs: pd.DataFrame(columns=sed_photometry.SED_COLUMNS),
+    )
+
+    args = sed_photometry.build_arg_parser().parse_args(
+        [str(input_path), "--sources", "payload", "--no-fit-atmosphere"]
+    )
+    output_path = sed_photometry.run(args)
+
+    out = read_parquet_table(output_path)
+    assert out.empty
+    assert set(sed_photometry.SED_COLUMNS).issubset(out.columns)
+    assert {"lc_stats", "external_stats", "derived_stats", "feature_layer_version"}.isdisjoint(out.columns)
 
 
 def test_sed_photometry_cli_reads_candidates_from_review_db_by_default(tmp_path: Path, monkeypatch) -> None:

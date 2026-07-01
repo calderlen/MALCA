@@ -31,7 +31,6 @@ from malca.products.feature_layers import (
     FEATURE_LAYER_COLUMNS,
     parse_layer_value,
     to_layer_first_frame,
-    to_layer_first_mapping,
 )
 from malca.ltv.multi_survey import LTV_MS_FEATURE_COLUMN_SPECS
 from malca.enrichment.multi_survey_features import MS_FEATURE_COLUMN_SPECS
@@ -58,6 +57,8 @@ from malca.review.taxonomy import (
 DEFAULT_DB_PATH = Path(__file__).resolve().parents[2] / DEFAULT_OUTPUT_DIR / "review" / "review.db"
 DEFAULT_STANDALONE_DB_PATH = Path(__file__).resolve().parents[2] / DEFAULT_OUTPUT_DIR / "review" / "standalone.db"
 SQLITE_BUSY_TIMEOUT_MS = 30_000
+REVIEW_CANDIDATES_SCHEMA_KEY = "review_candidates_schema"
+REVIEW_CANDIDATES_SCHEMA_VERSION = "flat_v1"
 STATUS_OPTIONS = ["unreviewed", "reviewed", "needs_followup"]
 EVENT_CLASS_OPTIONS = [
     "unclassified",
@@ -167,10 +168,6 @@ def _canonicalize_wise_fields(row: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _layer_first_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    return to_layer_first_mapping(payload, layer_values_as_json=False)
-
-
 def _payload_json_mapping(raw: object) -> dict[str, Any]:
     if isinstance(raw, dict):
         return dict(raw)
@@ -186,14 +183,37 @@ def _payload_json_mapping(raw: object) -> dict[str, Any]:
     return dict(parsed) if isinstance(parsed, dict) else {}
 
 
-def _flatten_display_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    out = dict(payload)
-    out.pop("payload_json", None)
+def _is_payload_missing(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip() == ""
+    try:
+        missing = pd.isna(value)
+    except Exception:
+        return False
+    return bool(missing) if isinstance(missing, (bool, np.bool_)) else False
+
+
+def _flatten_review_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return a flat review payload, unpacking any old layer/nested wrappers."""
+    out: dict[str, Any] = {}
+    nested_payload = _payload_json_mapping(payload.get("payload_json"))
+    if nested_payload:
+        out.update(_flatten_review_payload(nested_payload))
+
     for layer in FEATURE_LAYER_COLUMNS:
-        layer_data = parse_layer_value(out.pop(layer, None))
+        layer_data = parse_layer_value(payload.get(layer))
         for key, value in layer_data.items():
-            if key not in out:
+            if not _is_payload_missing(value) or key not in out:
                 out[key] = value
+
+    for key, value in payload.items():
+        name = str(key)
+        if name in FEATURE_LAYER_COLUMNS or name in {FEATURE_LAYER_VERSION_COLUMN, "payload_json"}:
+            continue
+        if not _is_payload_missing(value) or name not in out:
+            out[name] = value
     return out
 
 
@@ -208,38 +228,21 @@ def _payload_layer_value(payload: dict[str, Any], key: str) -> Any:
 
 
 def _drop_payload_keys(payload: dict[str, Any], keys: set[str]) -> dict[str, Any]:
-    out = dict(payload)
+    out = _flatten_review_payload(payload)
     clear_stats_family = any(str(key).startswith("stats_") for key in keys)
     for key in keys:
         out.pop(key, None)
-    for layer in FEATURE_LAYER_COLUMNS:
-        layer_payload = parse_layer_value(out.get(layer))
-        changed = False
-        if clear_stats_family:
-            for layer_key in list(layer_payload):
-                if str(layer_key).startswith("stats_"):
-                    layer_payload.pop(layer_key, None)
-                    changed = True
-        for key in keys:
-            if key in layer_payload:
-                layer_payload.pop(key, None)
-                changed = True
-        if changed or isinstance(out.get(layer), dict):
-            out[layer] = layer_payload
+    if clear_stats_family:
+        for key in list(out):
+            if str(key).startswith("stats_"):
+                out.pop(key, None)
     return out
 
 
 def _merge_layer_payload_updates(payload: dict[str, Any], updates: dict[str, object]) -> dict[str, Any]:
-    out = dict(payload)
-    for key, value in updates.items():
-        if key in FEATURE_LAYER_COLUMNS:
-            continue
-        out[key] = value
-    for layer in FEATURE_LAYER_COLUMNS:
-        merged = parse_layer_value(out.get(layer))
-        merged.update(parse_layer_value(updates.get(layer)))
-        if merged:
-            out[layer] = merged
+    out = _flatten_review_payload(payload)
+    for key, value in _payload_update_values(updates).items():
+        out[str(key)] = value
     return out
 
 
@@ -254,6 +257,38 @@ def _payload_update_values(updates: dict[str, object]) -> dict[str, object]:
     return values
 
 
+def _review_payload_extra(payload: dict[str, Any], table_cols: set[str] | None = None) -> dict[str, Any]:
+    """Return flat payload keys that are not stored as first-class SQL columns."""
+    sql_cols = set(table_cols or _COL_NAMES)
+    skip = {
+        "candidate_id",
+        "source_path",
+        "imported_at",
+        FEATURE_LAYER_VERSION_COLUMN,
+        *FEATURE_LAYER_COLUMNS,
+    }
+    out: dict[str, Any] = {}
+    for key, value in _flatten_review_payload(payload).items():
+        name = str(key)
+        if name in skip or name in sql_cols:
+            continue
+        if _is_payload_missing(value):
+            continue
+        out[name] = value
+    return out
+
+
+def _sql_value_for_column(column: str, value: object) -> object:
+    if _is_payload_missing(value):
+        return None
+    etype = _COL_TYPE_MAP.get(column)
+    if etype == "bool":
+        return int(_as_bool(value))
+    if etype == "float":
+        return _to_float(value)
+    return str(value)
+
+
 def _candidate_insert_tuple_from_row_dict(
     row_dict: dict[str, Any],
     *,
@@ -261,6 +296,7 @@ def _candidate_insert_tuple_from_row_dict(
     imported_at: str | None = None,
 ) -> tuple[Any, ...]:
     normalized = {k: (None if pd.isna(v) else v) for k, v in row_dict.items()}
+    normalized = _flatten_review_payload(normalized)
     normalized = normalize_vsx_record(normalized)
     normalized = _canonicalize_wise_fields(normalized)
 
@@ -300,7 +336,7 @@ def _candidate_insert_tuple_from_row_dict(
             vals.append(_to_float(raw))
         else:
             vals.append(str(raw) if raw is not None else None)
-    vals.append(json.dumps(_layer_first_payload(normalized), default=str))
+    vals.append(json.dumps(_review_payload_extra(normalized), default=str))
     vals.append(row_imported_at)
     return tuple(vals)
 
@@ -992,9 +1028,6 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("failed_periodic_catalog",  "INTEGER", "bool"),
     ("failed_signal_amplitude",  "INTEGER", "bool"),
     ("bad_cameras_filtered",     "INTEGER", "bool"),
-    # -- structured feature layers; flat columns below remain canonical SQL fields --
-    (FEATURE_LAYER_VERSION_COLUMN, "TEXT",   "text"),
-    *((col, "TEXT", "text") for col in FEATURE_LAYER_COLUMNS),
     # -- light curve statistics (from stats.py / enrichment) --
     ("stats_file_points_total",                    "REAL", "float"),
     ("stats_file_points_kept_after_filter",         "REAL", "float"),
@@ -1427,6 +1460,70 @@ def get_numeric_bounds(
             "max": float(hi) if hi is not None else None,
         }
     return bounds
+
+
+def _migrate_review_candidates_schema_flat_v1(conn: sqlite3.Connection) -> None:
+    """Flatten old mixed review candidate rows and remove layer blob columns."""
+    marker = conn.execute(
+        "SELECT value FROM app_state WHERE key = ?",
+        (REVIEW_CANDIDATES_SCHEMA_KEY,),
+    ).fetchone()
+    marker_value = str(marker[0]) if marker else ""
+
+    table_info = conn.execute("PRAGMA table_info(candidates)").fetchall()
+    existing = {str(row[1]) for row in table_info}
+    layer_sql_cols = [
+        col
+        for col in (FEATURE_LAYER_VERSION_COLUMN, *FEATURE_LAYER_COLUMNS)
+        if col in existing
+    ]
+    if marker_value == REVIEW_CANDIDATES_SCHEMA_VERSION and not layer_sql_cols:
+        return
+
+    sql_cols = [col for col in _COL_NAMES if col in existing]
+    select_cols = list(dict.fromkeys(["rowid", "payload_json", *sql_cols, *layer_sql_cols]))
+    cursor = conn.execute(f"SELECT {', '.join(select_cols)} FROM candidates ORDER BY rowid")
+    names = [desc[0] for desc in cursor.description or []]
+    for values in cursor.fetchall():
+        raw = dict(zip(names, values))
+        flat = _flatten_review_payload(_payload_json_mapping(raw.get("payload_json")))
+        for layer in FEATURE_LAYER_COLUMNS:
+            for key, value in parse_layer_value(raw.get(layer)).items():
+                if key not in flat or _is_payload_missing(flat.get(key)):
+                    flat[key] = value
+        for col in sql_cols:
+            value = raw.get(col)
+            if not _is_payload_missing(value):
+                flat[col] = value
+
+        assignments = ["payload_json = ?"]
+        params: list[object] = [json.dumps(_review_payload_extra(flat, set(sql_cols)), default=str)]
+        for col in sql_cols:
+            assignments.append(f"{col} = ?")
+            params.append(_sql_value_for_column(col, flat.get(col)))
+        params.append(raw["rowid"])
+        conn.execute(
+            f"UPDATE candidates SET {', '.join(assignments)} WHERE rowid = ?",
+            params,
+        )
+
+    for col in layer_sql_cols:
+        try:
+            conn.execute(f"ALTER TABLE candidates DROP COLUMN {col}")
+        except sqlite3.OperationalError as exc:
+            if "no such column" not in str(exc).lower():
+                raise
+
+    conn.execute(
+        """
+        INSERT INTO app_state (key, value, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET
+            value=excluded.value,
+            updated_at=excluded.updated_at
+        """,
+        (REVIEW_CANDIDATES_SCHEMA_KEY, REVIEW_CANDIDATES_SCHEMA_VERSION, _utc_now()),
+    )
 
 
 def init_db(conn: sqlite3.Connection) -> None:
@@ -1885,6 +1982,8 @@ def init_db(conn: sqlite3.Connection) -> None:
                 if "duplicate column name" not in str(e).lower():
                     raise
                 # Column already exists (e.g. race or schema drift); skip
+
+    _migrate_review_candidates_schema_flat_v1(conn)
 
     existing_review_columns = {
         str(row[1]).lower(): str(row[1])
@@ -2381,20 +2480,7 @@ def get_candidate_payload(conn: sqlite3.Connection, candidate_id: str) -> dict:
     ).fetchone()
     if row is None:
         return {}
-    payload = _payload_json_mapping(row[0])
-    nested_payload = _payload_json_mapping(payload.get("payload_json"))
-
-    # Flatten layer blobs so downstream consumers see all fields at top level.
-    # Some legacy rebuilt DBs accidentally wrapped the original payload JSON
-    # inside the outer payload_json document; treat that inner payload as a
-    # fallback without exposing the raw wrapper.
-    if nested_payload:
-        payload = {
-            **_flatten_display_payload(nested_payload),
-            **_flatten_display_payload(payload),
-        }
-    else:
-        payload = _flatten_display_payload(payload)
+    payload = _flatten_review_payload(_payload_json_mapping(row[0]))
 
     # Merge SQL columns into payload so asassn_var_type, ztf_var_type, tns_type etc. show when only in SQL
     for i, col in enumerate(cols_to_fetch):
@@ -2416,7 +2502,7 @@ def get_candidate_payload(conn: sqlite3.Connection, candidate_id: str) -> dict:
     if _payload_layer_value(payload, "high_pm_flag") in (None, "") and _payload_layer_value(payload, "pm_total") not in (None, ""):
         pm_total = _to_float(_payload_layer_value(payload, "pm_total"))
         if pm_total is not None:
-            payload = _layer_first_payload({**payload, "high_pm_flag": bool(pm_total > LTV_MAX_PM)})
+            payload["high_pm_flag"] = bool(pm_total > LTV_MAX_PM)
     if has_known_catalog_evidence(payload):
         payload["vetting_likely_known"] = True
     return payload
@@ -2450,12 +2536,6 @@ def replace_candidate_payload_fields(
     clear = set(clear_keys or ())
     payload = _drop_payload_keys(payload if isinstance(payload, dict) else {}, clear)
     payload = _merge_layer_payload_updates(payload, updates)
-    payload = _layer_first_payload(payload)
-
-    conn.execute(
-        "UPDATE candidates SET payload_json = ? WHERE candidate_id = ?",
-        (json.dumps(payload, default=str), candidate_id),
-    )
 
     table_cols = {
         str(info[1])
@@ -2464,32 +2544,23 @@ def replace_candidate_payload_fields(
     update_values = _payload_update_values(updates)
     sql_targets = {key for key in clear if key in table_cols}
     sql_targets.update(key for key in update_values if key in table_cols)
-    if any(key in updates for key in (*FEATURE_LAYER_COLUMNS, FEATURE_LAYER_VERSION_COLUMN)):
-        sql_targets.update(key for key in (*FEATURE_LAYER_COLUMNS, FEATURE_LAYER_VERSION_COLUMN) if key in table_cols)
+    payload = _review_payload_extra(payload, table_cols)
+
+    conn.execute(
+        "UPDATE candidates SET payload_json = ? WHERE candidate_id = ?",
+        (json.dumps(payload, default=str), candidate_id),
+    )
 
     if sql_targets:
         assignments: list[str] = []
         params: list[object] = []
         for col in sorted(sql_targets):
             assignments.append(f"{col} = ?")
-            if col in FEATURE_LAYER_COLUMNS:
-                params.append(json.dumps(parse_layer_value(payload.get(col)), default=str))
-                continue
-            if col == FEATURE_LAYER_VERSION_COLUMN:
-                params.append(str(payload.get(FEATURE_LAYER_VERSION_COLUMN) or ""))
-                continue
             if col not in update_values:
                 params.append(None)
                 continue
 
-            raw = update_values[col]
-            etype = _COL_TYPE_MAP.get(col)
-            if etype == "bool":
-                params.append(int(_as_bool(raw)) if raw is not None else None)
-            elif etype == "float":
-                params.append(_to_float(raw))
-            else:
-                params.append(str(raw) if raw is not None else None)
+            params.append(_sql_value_for_column(col, update_values[col]))
 
         params.append(candidate_id)
         conn.execute(
@@ -2858,9 +2929,9 @@ def merge_vetting_results(
         return 0
 
     # Fetch all candidates and update payloads
-    rows = conn.execute("SELECT candidate_id, asas_sn_id, payload_json FROM candidates").fetchall()
+    rows = conn.execute("SELECT candidate_id, asas_sn_id FROM candidates").fetchall()
     updated = 0
-    for cid, asas_sn_id, payload_json in rows:
+    for cid, asas_sn_id in rows:
         cid_str = str(cid).strip()
         vetting_data = lookup.get(cid_str)
         if vetting_data is None and asas_sn_id is not None:
@@ -2868,37 +2939,12 @@ def merge_vetting_results(
         if vetting_data is None:
             continue
 
-        try:
-            payload = json.loads(payload_json) if payload_json else {}
-        except Exception:
-            payload = {}
-        if not isinstance(payload, dict):
-            payload = {}
-
-        payload.update(vetting_data)
-        payload = _layer_first_payload(payload)
-
-        # Update payload JSON
-        conn.execute(
-            "UPDATE candidates SET payload_json=? WHERE candidate_id=?",
-            (json.dumps(payload, default=str), cid),
+        replace_candidate_payload_fields(
+            conn,
+            str(cid),
+            vetting_data,
+            commit=False,
         )
-        # Also update real columns for SQL-filterable vetting fields
-        _REAL_VETTING_COLS = {"vetting_likely_known", "microlens_match",
-                              "gaia_var_flag",
-                              "microlens_catalog", "asassn_var_type",
-                              "gaia_var_class", "simbad_otype", "ztf_var_type",
-                              "tns_type", "yso_class",
-                              "vsx_class", "vsx_sep_arcsec", "vsx_period"}
-        for col in _REAL_VETTING_COLS:
-            if col in vetting_data:
-                val = vetting_data[col]
-                if col in {"vetting_likely_known", "microlens_match", "gaia_var_flag"}:
-                    val = int(_as_bool(val))
-                conn.execute(
-                    f"UPDATE candidates SET {col}=? WHERE candidate_id=?",
-                    (val, cid),
-                )
         updated += 1
 
     conn.commit()

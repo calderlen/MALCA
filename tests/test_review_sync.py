@@ -8,7 +8,14 @@ import pandas as pd
 
 from malca.review.diagnostic_plots import build_cmd_figure
 from malca.review import sync
-from malca.review.store import db_connect, get_candidate_payload, get_review, upsert_candidates_frame
+from malca.review.store import (
+    REVIEW_CANDIDATES_SCHEMA_KEY,
+    REVIEW_CANDIDATES_SCHEMA_VERSION,
+    db_connect,
+    get_candidate_payload,
+    get_review,
+    upsert_candidates_frame,
+)
 
 
 def _write_text(path: Path, content: str) -> None:
@@ -187,7 +194,7 @@ def test_review_sync_export_import_roundtrip_and_manifest_hashes(tmp_path: Path)
     assert review["morphology_secondary_list"] == ["recurrent_dips", "multi_depth_dips"]
 
 
-def test_review_store_payload_is_layer_first_but_display_payload_is_flat(tmp_path: Path) -> None:
+def test_review_store_payload_is_flat_extra_only_and_display_payload_is_flat(tmp_path: Path) -> None:
     db_path = tmp_path / "review.db"
     with db_connect(db_path) as conn:
         upsert_candidates_frame(
@@ -206,13 +213,90 @@ def test_review_store_payload_is_layer_first_but_display_payload_is_flat(tmp_pat
         raw_payload = json.loads(
             conn.execute("SELECT payload_json FROM candidates WHERE candidate_id='C1'").fetchone()[0]
         )
+        raw_row = conn.execute(
+            "SELECT dipper_score, phot_g_mean_mag FROM candidates WHERE candidate_id='C1'"
+        ).fetchone()
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(candidates)").fetchall()}
         display_payload = get_candidate_payload(conn, "C1")
 
-    assert "dipper_score" not in raw_payload
-    assert raw_payload["lc_stats"]["dipper_score"] == 6.0
-    assert raw_payload["external_stats"]["phot_g_mean_mag"] == 14.2
+    assert raw_payload == {}
+    assert {"lc_stats", "external_stats", "derived_stats", "feature_layer_version"}.isdisjoint(columns)
+    assert raw_row == (6.0, 14.2)
     assert display_payload["dipper_score"] == 6.0
     assert display_payload["phot_g_mean_mag"] == 14.2
+
+
+def test_review_db_migrates_old_layer_columns_to_flat_schema(tmp_path: Path) -> None:
+    db_path = tmp_path / "old_review.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE candidates (
+                candidate_id TEXT PRIMARY KEY,
+                source_path TEXT,
+                dipper_score REAL,
+                phot_g_mean_mag REAL,
+                payload_json TEXT NOT NULL,
+                feature_layer_version TEXT,
+                lc_stats TEXT,
+                external_stats TEXT,
+                derived_stats TEXT,
+                imported_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO candidates (
+                candidate_id, source_path, dipper_score, phot_g_mean_mag, payload_json,
+                feature_layer_version, lc_stats, external_stats, derived_stats, imported_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "C1",
+                "old.parquet",
+                None,
+                None,
+                json.dumps(
+                    {
+                        "candidate_id": "C1",
+                        "payload_custom": {"ok": True},
+                        "derived_stats": {"bp_rp": 0.8},
+                    },
+                    sort_keys=True,
+                ),
+                "1",
+                json.dumps({"dipper_score": 6.0, "stats_amplitude": 0.12}, sort_keys=True),
+                json.dumps({"phot_g_mean_mag": 14.2}, sort_keys=True),
+                json.dumps({"failed_any": False}, sort_keys=True),
+                "2026-01-01T00:00:00+00:00",
+            ),
+        )
+        conn.commit()
+
+    with db_connect(db_path) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(candidates)").fetchall()}
+        row = conn.execute(
+            """
+            SELECT dipper_score, phot_g_mean_mag, stats_amplitude, bp_rp, failed_any, payload_json
+            FROM candidates WHERE candidate_id='C1'
+            """
+        ).fetchone()
+        marker = conn.execute(
+            "SELECT value FROM app_state WHERE key = ?",
+            (REVIEW_CANDIDATES_SCHEMA_KEY,),
+        ).fetchone()[0]
+        display_payload = get_candidate_payload(conn, "C1")
+
+    raw_payload = json.loads(row[5])
+    assert {"lc_stats", "external_stats", "derived_stats", "feature_layer_version"}.isdisjoint(columns)
+    assert row[:5] == (6.0, 14.2, 0.12, 0.8, 0)
+    assert raw_payload == {"payload_custom": {"ok": True}}
+    assert marker == REVIEW_CANDIDATES_SCHEMA_VERSION
+    assert display_payload["dipper_score"] == 6.0
+    assert display_payload["phot_g_mean_mag"] == 14.2
+    assert display_payload["payload_custom"]["ok"] is True
 
 
 def test_review_store_display_payload_unpacks_nested_payload_json_for_cmd(tmp_path: Path) -> None:

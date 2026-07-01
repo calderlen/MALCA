@@ -100,9 +100,10 @@ from malca.review.store import db_connect, import_candidates
 from concurrent.futures import ProcessPoolExecutor
 from malca.core.stats import compute_stats, _enrich_row_worker
 from malca.stv.tag import RAW_MEDIAN_SUSPECT_COL, apply_tags, filter_camera_medians
-from malca.products.feature_layers import to_layer_first_frame
+from malca.products.feature_layers import expand_feature_layers, to_layer_first_frame
 from malca.io.table_io import (
     read_feature_table,
+    read_parquet_table,
     read_passing_feature_table,
     require_parquet_path,
     write_feature_table,
@@ -524,8 +525,12 @@ def load_table(path: Path) -> pd.DataFrame:
     return read_feature_table(path)
 
 
+def load_side_table(path: Path) -> pd.DataFrame:
+    return read_parquet_table(path)
+
+
 def load_passing_table(path: Path, *, columns: list[str] | None = None) -> pd.DataFrame:
-    return _select_passing_candidates(read_passing_feature_table(path, columns=columns))
+    return expand_feature_layers(_select_passing_candidates(read_passing_feature_table(path, columns=columns)))
 
 
 def _effective_enrich_workers(args: argparse.Namespace) -> tuple[int, str | None]:
@@ -598,7 +603,8 @@ def _config_arg(args: argparse.Namespace, name: str) -> Any:
 
 
 def save_table(df: pd.DataFrame, path: Path) -> None:
-    if Path(path).name.startswith("lc_events_"):
+    path = Path(path)
+    if path.name.startswith("lc_events_"):
         df = to_layer_first_frame(add_stv_identity(df))
         assert_stv_product_schema(df, stage=Path(path).stem)
         write_feature_table(df, require_parquet_path(path), compression=PARQUET_OUTPUT_COMPRESSION)
@@ -3237,7 +3243,7 @@ def main():
                 if df_model_in is None:
                     log("Warning: no suitable input found for SED model fitting, skipping")
                 else:
-                    sed_rows_for_model = load_table(sed_photometry_output)
+                    sed_rows_for_model = load_side_table(sed_photometry_output)
                     log(f"SED model input: {len(df_model_in)} passing candidates; {len(sed_rows_for_model)} SED rows")
                     sed_model_fits, sed_model_curves = fit_sed_models(
                         df_model_in,
@@ -3663,7 +3669,7 @@ def main():
                         try:
                             from malca.review.sed import upsert_sed_rows
 
-                            sed_rows_for_review = load_table(sed_photometry_output)
+                            sed_rows_for_review = load_side_table(sed_photometry_output)
                             n_sed = upsert_sed_rows(conn, sed_rows_for_review)
                             log(f"Imported {n_sed} SED photometry rows into {review_db_path}")
                         except Exception as sed_exc:
@@ -3673,12 +3679,12 @@ def main():
                             from malca.enrichment.sed_model import upsert_sed_model_results
 
                             sed_model_fits_for_review = (
-                                load_table(sed_model_fits_output)
+                                load_side_table(sed_model_fits_output)
                                 if sed_model_fits_output.exists()
                                 else pd.DataFrame()
                             )
                             sed_model_curves_for_review = (
-                                load_table(sed_model_curves_output)
+                                load_side_table(sed_model_curves_output)
                                 if sed_model_curves_output.exists()
                                 else pd.DataFrame()
                             )

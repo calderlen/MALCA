@@ -10,7 +10,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
-from malca.products.feature_layers import FEATURE_LAYER_COLUMNS, to_layer_first_mapping
+from malca.products.feature_layers import to_layer_first_mapping
 from malca.review.taxonomy import (
     REVIEW_TAXONOMY_FIELDS,
     TAXONOMY_VERSION,
@@ -24,7 +24,9 @@ from malca.review.store import (
     _COL_TYPE_MAP,
     DEFAULT_DB_PATH,
     _as_bool,
+    _flatten_review_payload,
     _parse_updated_at,
+    _review_payload_extra,
     _to_float,
     _utc_now,
     db_connect,
@@ -129,13 +131,7 @@ def _parse_layer_object(raw: object) -> dict[str, object]:
 
 
 def _flatten_layer_payload(payload: dict[str, object]) -> dict[str, object]:
-    flat = dict(payload)
-    for layer in FEATURE_LAYER_COLUMNS:
-        layer_values = _parse_layer_object(flat.get(layer))
-        for key, value in layer_values.items():
-            if key not in flat or _is_missing(flat.get(key)):
-                flat[str(key)] = value
-    return flat
+    return _flatten_review_payload(payload)
 
 
 def _candidate_column_value(column: str, value: object) -> object:
@@ -609,8 +605,7 @@ def _candidate_sql_rows(records: Sequence[dict[str, object]]) -> list[tuple[obje
             if key not in {"schema_version", "payload", "payload_json"}
             and not _is_missing(value)
         }
-        payload_json = {**payload_dict, **first_class_payload}
-        sql_source = _flatten_layer_payload(payload_json)
+        sql_source = _flatten_layer_payload({**payload_dict, **first_class_payload})
 
         source_path = record.get("source_path")
         imported_at = record.get("imported_at") or _utc_now()
@@ -620,7 +615,7 @@ def _candidate_sql_rows(records: Sequence[dict[str, object]]) -> list[tuple[obje
         ]
         for col, _dtype, _etype in _CANDIDATE_COLUMNS:
             values.append(_sqlite_column_value(col, sql_source.get(col)))
-        values.append(_json_dumps(payload_json))
+        values.append(_json_dumps(_review_payload_extra(sql_source, set(_COL_NAMES))))
         values.append(str(imported_at))
         rows.append(tuple(values))
     return rows

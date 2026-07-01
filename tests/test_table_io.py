@@ -84,6 +84,28 @@ def test_feature_table_layer_first_roundtrip_and_projection(tmp_path) -> None:
     assert projected["external_stats.phot_g_mean_mag"].tolist() == [14.2, 15.1]
 
 
+def test_plain_side_table_preserves_flat_feature_names(tmp_path) -> None:
+    path = tmp_path / "sed_photometry.parquet"
+    df = pd.DataFrame(
+        {
+            "candidate_id": ["stv_a"],
+            "lambda_l_lambda": [1.23e33],
+            "flux_lambda": [4.56e-12],
+            "failed_any": [False],
+        }
+    )
+
+    write_parquet_table(df, path)
+
+    physical = read_parquet_table(path)
+    assert not is_layer_first_table(path)
+    assert "lambda_l_lambda" in physical.columns
+    assert "failed_any" in physical.columns
+    assert {"lc_stats", "external_stats", "derived_stats", "feature_layer_version"}.isdisjoint(physical.columns)
+    assert physical.loc[0, "lambda_l_lambda"] == 1.23e33
+    assert physical.loc[0, "flux_lambda"] == 4.56e-12
+
+
 def test_read_passing_feature_table_filters_layer_failed_any(tmp_path) -> None:
     path = tmp_path / "layered_filtered.parquet"
     df = pd.DataFrame(

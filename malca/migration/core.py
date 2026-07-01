@@ -34,6 +34,13 @@ from malca.migration.schema_aliases import (
 )
 from malca.config import DEFAULT_OUTPUT_DIR
 from malca.io.table_io import read_parquet_table, write_parquet_table
+from malca.review.store import (
+    _COL_NAMES as REVIEW_CANDIDATE_COLUMNS,
+    _flatten_review_payload,
+    _review_payload_extra,
+    _sql_value_for_column,
+    init_db as init_review_db,
+)
 
 
 ArtifactAction = Literal["migrate", "copy"]
@@ -709,11 +716,8 @@ def migrate_review_db(artifact: Artifact, output_path: Path) -> ArtifactReport:
         _input_root, output_root = _artifact_roots(artifact, output_path)
         with sqlite3.connect(str(output_path)) as conn:
             conn.row_factory = sqlite3.Row
+            init_review_db(conn)
             existing = {str(row[1]) for row in conn.execute("PRAGMA table_info(candidates)").fetchall()}
-            for col in ALL_FEATURE_LAYER_COLUMNS:
-                if col not in existing:
-                    conn.execute(f"ALTER TABLE candidates ADD COLUMN {col} TEXT")
-                    existing.add(col)
             for col, dtype in _CAMERA_NAME_SQL_COLUMN_TYPES.items():
                 if col not in existing:
                     conn.execute(f"ALTER TABLE candidates ADD COLUMN {col} {dtype}")
@@ -722,41 +726,28 @@ def migrate_review_db(artifact: Artifact, output_path: Path) -> ArtifactReport:
             rows = conn.execute("SELECT rowid, * FROM candidates ORDER BY rowid").fetchall()
             layer_counts = {layer: 0 for layer in FEATURE_LAYER_COLUMNS}
             for row in rows:
-                layered, layer_sql = _candidate_row_layer_payload(row, output_root=output_root)
-                for layer in FEATURE_LAYER_COLUMNS:
-                    layer_counts[layer] = max(layer_counts[layer], len(layered.get(layer) or {}))
-                source_path = _rewrite_path_values(row["source_path"], output_root, key="source_path")
-                lc_path = _rewrite_path_values(row["lc_path"], output_root, key="lc_path")
+                raw = dict(row)
+                merged = _flatten_review_payload(_parse_json_object(raw.get("payload_json")))
+                for key, value in raw.items():
+                    if key in {"rowid", "payload_json"} or _is_missing(value):
+                        continue
+                    merged[str(key)] = value
+                merged = _rewrite_path_values(merged, output_root)
+                merged = migrate_camera_field_mapping(merged)
+
+                sql_cols = [col for col in REVIEW_CANDIDATE_COLUMNS if col in existing]
+                assignments = ["source_path = ?", "payload_json = ?"]
+                params: list[Any] = [
+                    merged.get("source_path"),
+                    _json_dumps(_review_payload_extra(merged, set(REVIEW_CANDIDATE_COLUMNS))),
+                ]
+                for col in sql_cols:
+                    assignments.append(f"{col} = ?")
+                    params.append(_sql_value_for_column(col, merged.get(col)))
+                params.append(row["rowid"])
                 conn.execute(
-                    """
-                    UPDATE candidates
-                    SET source_path = ?,
-                        lc_path = ?,
-                        payload_json = ?,
-                        feature_layer_version = ?,
-                        lc_stats = ?,
-                        external_stats = ?,
-                        derived_stats = ?,
-                        camera_name_key = ?,
-                        camera_names = ?,
-                        camera_name_count = ?,
-                        camera_name_key_fraction = ?
-                    WHERE rowid = ?
-                    """,
-                    (
-                        source_path,
-                        lc_path,
-                        _json_dumps(layered),
-                        FEATURE_LAYER_VERSION,
-                        layer_sql[LC_STATS_LAYER],
-                        layer_sql[EXTERNAL_STATS_LAYER],
-                        layer_sql[DERIVED_STATS_LAYER],
-                        _camera_sql_value(layered, "camera_name_key"),
-                        _camera_sql_value(layered, "camera_names"),
-                        _camera_sql_value(layered, "camera_name_count"),
-                        _camera_sql_value(layered, "camera_name_key_fraction"),
-                        row["rowid"],
-                    ),
+                    f"UPDATE candidates SET {', '.join(assignments)} WHERE rowid = ?",
+                    params,
                 )
             for key, value in conn.execute("SELECT key, value FROM app_state").fetchall():
                 if _is_path_like_key(key):

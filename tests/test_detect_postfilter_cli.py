@@ -24,6 +24,8 @@ from malca.stv.pipeline import (
     _copy_single_tagged_table_output,
     _effective_enrich_workers,
     _first_existing_candidate_result,
+    load_side_table,
+    load_passing_table,
     _run_external_lcs_enrichment,
     _run_multi_survey_features_enrichment,
     _select_passing_candidates,
@@ -34,7 +36,7 @@ from malca.stv.pipeline import (
     main as detect_main,
 )
 from malca.config import EVENTS_OUTPUT_CHUNK_SIZE
-from malca.io.table_io import write_feature_table
+from malca.io.table_io import write_feature_table, write_parquet_table
 
 
 def _base_args() -> argparse.Namespace:
@@ -346,6 +348,47 @@ def test_select_passing_candidates_filters_truthy_failed_any_values() -> None:
     out = _select_passing_candidates(df)
 
     assert out["path"].tolist() == ["a", "d"]
+
+
+def test_load_side_table_reads_plain_side_table(tmp_path: Path) -> None:
+    path = tmp_path / "sed_photometry.parquet"
+    side_table = pd.DataFrame(
+        {
+            "candidate_id": ["stv-a"],
+            "source": ["Pan-STARRS"],
+            "band": ["g"],
+        }
+    )
+    write_parquet_table(side_table, path)
+
+    out = load_side_table(path)
+
+    assert out.to_dict("records") == side_table.to_dict("records")
+
+
+def test_load_passing_table_expands_layer_features(tmp_path: Path) -> None:
+    path = tmp_path / "lc_events_characterized.parquet"
+    write_feature_table(
+        pd.DataFrame(
+            {
+                "candidate_id": ["stv-a", "stv-b"],
+                "timescale": ["stv", "stv"],
+                "lc_path": ["a.dat3", "b.dat3"],
+                "ra": [10.0, 11.0],
+                "dec": [20.0, 21.0],
+                "gaia_id": ["123", "456"],
+                "failed_any": [False, True],
+            }
+        ),
+        path,
+    )
+
+    out = load_passing_table(path)
+
+    assert out["candidate_id"].tolist() == ["stv-a"]
+    assert float(out.loc[out.index[0], "ra"]) == 10.0
+    assert float(out.loc[out.index[0], "dec"]) == 20.0
+    assert str(out.loc[out.index[0], "gaia_id"]) == "123"
 
 
 def test_filter_stage_skip_requires_existing_output_and_no_new_event_attempts(tmp_path: Path) -> None:
