@@ -9,6 +9,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from malca.enrich.apogee import apogee_metadata_from_mapping, is_apogee_survey
+
 
 class FetchBackend(str, Enum):
     SDSS = "sdss"
@@ -39,6 +41,51 @@ class SpectrumData:
     flux: np.ndarray
     flux_err: np.ndarray | None = None
 
+    def __post_init__(self) -> None:
+        self.wavelength = np.squeeze(np.asarray(self.wavelength, dtype=np.float64))
+        self.flux = np.squeeze(np.asarray(self.flux, dtype=np.float64))
+        if self.flux_err is not None:
+            self.flux_err = np.squeeze(np.asarray(self.flux_err, dtype=np.float64))
+
+    def to_specutils(self):
+        """Return this cached spectrum as a specutils Spectrum."""
+        try:
+            from astropy import units as u
+            from astropy.nddata import StdDevUncertainty
+            from specutils import Spectrum
+        except ImportError as exc:
+            raise ImportError("specutils and astropy are required for spectrum analysis") from exc
+
+        flux_unit = u.dimensionless_unscaled
+        uncertainty = None
+        if self.flux_err is not None:
+            uncertainty = StdDevUncertainty(np.asarray(self.flux_err, dtype=np.float64) * flux_unit)
+        return Spectrum(
+            spectral_axis=np.asarray(self.wavelength, dtype=np.float64) * u.AA,
+            flux=np.asarray(self.flux, dtype=np.float64) * flux_unit,
+            uncertainty=uncertainty,
+        )
+
+    @classmethod
+    def from_specutils(cls, spectrum: Any) -> "SpectrumData":
+        """Create cacheable arrays from a specutils Spectrum-like object."""
+        try:
+            from astropy import units as u
+        except ImportError as exc:
+            raise ImportError("astropy is required to convert specutils spectra") from exc
+
+        wavelength = np.asarray(spectrum.spectral_axis.to_value(u.AA), dtype=np.float64)
+        flux = np.asarray(spectrum.flux.value, dtype=np.float64)
+        flux_err = None
+        uncertainty = getattr(spectrum, "uncertainty", None)
+        if uncertainty is not None:
+            quantity = getattr(uncertainty, "quantity", None)
+            if quantity is None and getattr(uncertainty, "array", None) is not None:
+                quantity = uncertainty.array * spectrum.flux.unit
+            if quantity is not None:
+                flux_err = np.asarray(quantity.to_value(spectrum.flux.unit), dtype=np.float64)
+        return cls(wavelength=wavelength, flux=flux, flux_err=flux_err)
+
 
 @dataclass
 class SpectrumFetchResult:
@@ -46,6 +93,7 @@ class SpectrumFetchResult:
     data: SpectrumData | None = None
     link: str | None = None
     message: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 # Maps survey_key → (backend, kwargs passed to the backend fetcher).
@@ -357,7 +405,7 @@ def _fetch_mast(row: pd.Series, **kwargs: Any) -> SpectrumFetchResult:
 
 
 def _fetch_desi(row: pd.Series, **kwargs: Any) -> SpectrumFetchResult:
-    target_id = row.get("TARGETID") or row.get("targetid") or row.get("TARGET_ID")
+    target_id = row.get("TARGETID") or row.get("TargetID") or row.get("targetid") or row.get("TARGET_ID")
     if not target_id:
         return SpectrumFetchResult(FetchStatus.LINK_ONLY, message="No DESI TARGETID")
         
@@ -435,13 +483,19 @@ def _fetch_apogee(row: pd.Series, **kwargs: Any) -> SpectrumFetchResult:
     if not apogee_id:
         return SpectrumFetchResult(FetchStatus.LINK_ONLY, message="No APOGEE ID")
     apogee_id = str(apogee_id).strip()
+    row_metadata = apogee_metadata_from_mapping(row)
     
     if apogee_id not in _APOGEE_LOOKUP.index:
-        return SpectrumFetchResult(FetchStatus.LINK_ONLY, message=f"APOGEE_ID {apogee_id} not in lookup")
+        return SpectrumFetchResult(
+            FetchStatus.LINK_ONLY,
+            message=f"APOGEE_ID {apogee_id} not in lookup",
+            metadata=row_metadata,
+        )
         
     meta = _APOGEE_LOOKUP.loc[apogee_id]
     if isinstance(meta, pd.DataFrame):
         meta = meta.iloc[0]
+    metadata = apogee_metadata_from_mapping(row, meta)
         
     telescope = str(meta["TELESCOPE"])
     field = str(meta["FIELD"])
@@ -455,9 +509,11 @@ def _fetch_apogee(row: pd.Series, **kwargs: Any) -> SpectrumFetchResult:
             with tempfile.NamedTemporaryFile(suffix=".fits") as tmp:
                 tmp.write(resp.read())
                 tmp.flush()
-                return _parse_fits_spectrum(tmp.name)
+                result = _parse_fits_spectrum(tmp.name)
+                result.metadata.update(metadata)
+                return result
     except Exception as e:
-        return SpectrumFetchResult(FetchStatus.ERROR, message=str(e))
+        return SpectrumFetchResult(FetchStatus.ERROR, message=str(e), metadata=metadata)
 
 _GALAH_LOOKUP = None
 
@@ -474,7 +530,7 @@ def _fetch_galah(row: pd.Series, **kwargs: Any) -> SpectrumFetchResult:
         except Exception as e:
             return SpectrumFetchResult(FetchStatus.ERROR, message=f"Failed to load GALAH lookup: {e}")
             
-    sobject_id = row.get("sobject_id") or row.get("SOBJECT_ID") or row.get("id")
+    sobject_id = row.get("sobject_id") or row.get("SOBJECT_ID") or row.get("id") or row.get("GALAH")
     if pd.isna(sobject_id) or not sobject_id:
         return SpectrumFetchResult(FetchStatus.LINK_ONLY, message="No GALAH sobject_id")
         
@@ -490,8 +546,9 @@ def _fetch_galah(row: pd.Series, **kwargs: Any) -> SpectrumFetchResult:
         meta = meta.iloc[0]
         
     if "file_path" in meta and pd.notna(meta["file_path"]):
-        path = Path(meta["file_path"])
-        if path.exists():
+        file_path = str(meta["file_path"]).strip()
+        path = Path(file_path)
+        if file_path and path.is_file():
             return _parse_fits_spectrum(path)
             
     if "url" in meta and pd.notna(meta["url"]):
@@ -512,11 +569,66 @@ def _fetch_galah(row: pd.Series, **kwargs: Any) -> SpectrumFetchResult:
 
 
 
+def _wavelength_from_fits_header(header: Any, n_pixels: int) -> np.ndarray | None:
+    crval = header.get("CRVAL1")
+    cdelt = header.get("CDELT1") or header.get("CD1_1")
+    if crval is None or cdelt is None:
+        return None
+
+    crpix = header.get("CRPIX1", 1.0)
+    wavelength = float(crval) + (np.arange(n_pixels, dtype=np.float64) - (float(crpix) - 1.0)) * float(cdelt)
+    ctype1 = str(header.get("CTYPE1", "")).lower()
+    if header.get("DC-FLAG", 0) == 1 or "log" in ctype1 or "10" in ctype1:
+        wavelength = 10.0 ** wavelength
+    return wavelength
+
+
+def _first_image_row(data: Any) -> np.ndarray:
+    array = np.asarray(data, dtype=np.float64)
+    if array.ndim == 2:
+        return array[0]
+    return array
+
+
+def _looks_like_apogee_apstar(hdul: Any) -> bool:
+    if len(hdul) < 3 or hdul[1].data is None or hdul[2].data is None:
+        return False
+    primary = hdul[0].header
+    flux_unit = str(hdul[1].header.get("BUNIT", "")).lower()
+    err_unit = str(hdul[2].header.get("BUNIT", "")).lower()
+    has_apogee_header = "NVISITS" in primary or any(str(primary.get(f"SFILE{i}", "")).startswith("apVisit") for i in range(1, 6))
+    has_error_unit = any(marker in err_unit for marker in ("error", "err", "uncert"))
+    return has_apogee_header and "flux" in flux_unit and has_error_unit
+
+
+def _parse_apogee_apstar_spectrum(hdul: Any) -> SpectrumFetchResult | None:
+    """Parse an APOGEE apStar file using HDU1 flux and HDU2 uncertainty."""
+    if not _looks_like_apogee_apstar(hdul):
+        return None
+
+    flux = _first_image_row(hdul[1].data)
+    flux_err = _first_image_row(hdul[2].data)
+    if flux.shape != flux_err.shape:
+        flux_err = None
+
+    wavelength = _wavelength_from_fits_header(hdul[1].header, len(flux))
+    if wavelength is None:
+        wavelength = _wavelength_from_fits_header(hdul[0].header, len(flux))
+    if wavelength is None:
+        return None
+
+    return SpectrumFetchResult(FetchStatus.OK, data=SpectrumData(wavelength, flux, flux_err))
+
+
 def _parse_fits_spectrum(filepath: str) -> SpectrumFetchResult:
     """Best-effort extraction of wavelength + flux from a FITS file."""
     try:
         from astropy.io import fits
         with fits.open(filepath) as hdul:
+            apogee_result = _parse_apogee_apstar_spectrum(hdul)
+            if apogee_result is not None:
+                return apogee_result
+
             for hdu in hdul:
                 if hdu.data is None:
                     continue
@@ -541,21 +653,9 @@ def _parse_fits_spectrum(filepath: str) -> SpectrumFetchResult:
             for hdu in hdul:
                 if hdu.data is not None and hdu.data.ndim in (1, 2):
                     header = hdu.header
-                    crval = header.get("CRVAL1")
-                    cdelt = header.get("CDELT1") or header.get("CD1_1")
-                    if crval is not None and cdelt is not None:
-                        flux = np.array(hdu.data, dtype=np.float64)
-                        if flux.ndim == 2:
-                            flux = flux[0]  # APOGEE apStar: row 0 is combined flux
-                            
-                        n = len(flux)
-                        crpix = header.get("CRPIX1", 1.0)
-                        wl = crval + (np.arange(n) - (crpix - 1)) * cdelt
-                        
-                        ctype1 = str(header.get("CTYPE1", "")).lower()
-                        if header.get("DC-FLAG", 0) == 1 or "log" in ctype1 or "10" in ctype1:
-                            wl = 10.0 ** wl
-                            
+                    flux = _first_image_row(hdu.data)
+                    wl = _wavelength_from_fits_header(header, len(flux))
+                    if wl is not None:
                         err = None
                         if hdu.data.ndim == 2 and hdu.data.shape[0] > 1:
                             err = np.array(hdu.data[1], dtype=np.float64)
@@ -597,11 +697,12 @@ def fetch_spectrum(
     """Fetch a spectrum for one row from spectra_long, using cache when available."""
     survey = survey_key or str(row.get("survey", ""))
     candidate_id = str(row.get("candidate_id", ""))
+    row_metadata = apogee_metadata_from_mapping(row) if is_apogee_survey(survey) else {}
 
     if cache_dir:
         cached = load_spectrum_cache(_cache_path(cache_dir, candidate_id, survey))
         if cached is not None:
-            return SpectrumFetchResult(FetchStatus.OK, data=cached)
+            return SpectrumFetchResult(FetchStatus.OK, data=cached, metadata=row_metadata)
 
     backend_spec = SURVEY_BACKEND_MAP.get(survey)
     if backend_spec is None:
@@ -617,6 +718,8 @@ def fetch_spectrum(
         return SpectrumFetchResult(FetchStatus.ERROR, message=f"No fetcher for backend {backend}")
 
     result = fetcher(row, config=config, **backend_kwargs)
+    if row_metadata:
+        result.metadata = {**row_metadata, **result.metadata}
 
     if result.status == FetchStatus.OK and result.data and cache_dir:
         save_spectrum_cache(_cache_path(cache_dir, candidate_id, survey), result.data)

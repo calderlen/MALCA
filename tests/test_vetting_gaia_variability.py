@@ -64,6 +64,7 @@ def test_gaia_variable_flag_alone_does_not_mark_candidate_likely_known() -> None
         run_atlas=False,
         run_gaia_epoch=False,
         run_erosita=False,
+        run_chandra_csc=False,
         run_pm_check=False,
     )
 

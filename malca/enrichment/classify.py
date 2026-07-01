@@ -141,6 +141,29 @@ def check_eb_contamination(df: pd.DataFrame) -> pd.DataFrame:
 # EXTERNAL CATALOG QUERIES (IPHAS, PS1)
 # =============================================================================
 
+def _float_or_nan(value: object) -> float:
+    if value is None or np.ma.is_masked(value):
+        return np.nan
+    try:
+        if pd.isna(value):
+            return np.nan
+    except (TypeError, ValueError):
+        pass
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return np.nan
+
+
+def _row_first_numeric(row: pd.Series, *names: str) -> float:
+    for name in names:
+        if name in row.index:
+            value = _float_or_nan(row.get(name))
+            if np.isfinite(value):
+                return value
+    return np.nan
+
+
 def query_iphas_by_coords(df: pd.DataFrame, radius_arcsec: float = CLASSIFY_IPHAS_RADIUS_ARCSEC) -> pd.DataFrame:
     """
     Query IPHAS DR2 for Hα photometry using batch VizieR TAP upload.
@@ -160,6 +183,7 @@ def query_iphas_by_coords(df: pd.DataFrame, radius_arcsec: float = CLASSIFY_IPHA
     df['iphas_i'] = np.nan
     df['iphas_ha'] = np.nan
     df['r_ha'] = np.nan
+    df['r_i'] = np.nan
     df['ha_ew'] = np.nan
 
     valid = df['ra'].notna() & df['dec'].notna()
@@ -178,7 +202,7 @@ def query_iphas_by_coords(df: pd.DataFrame, radius_arcsec: float = CLASSIFY_IPHA
         coords_df,
         tap_url=VIZIER_TAP_URL,
         catalog_table='"II/321/iphas2"',
-        select_cols='c.rmag, c.imag, c."Hamag"',
+        select_cols='c.r, c.i, c.ha, c.rmi, c.rmha',
         ra_col="RAJ2000",
         dec_col="DEJ2000",
         match_radius_arcsec=radius_arcsec,
@@ -193,14 +217,20 @@ def query_iphas_by_coords(df: pd.DataFrame, radius_arcsec: float = CLASSIFY_IPHA
         for _, row in result.iterrows():
             idx = int(row["_idx"])
             if idx in df.index:
-                r = float(row["rmag"]) if pd.notna(row.get("rmag")) else np.nan
-                i = float(row["imag"]) if pd.notna(row.get("imag")) else np.nan
-                ha = float(row["Hamag"]) if pd.notna(row.get("Hamag")) else np.nan
+                r = _row_first_numeric(row, "r", "rmag")
+                i = _row_first_numeric(row, "i", "imag")
+                ha = _row_first_numeric(row, "ha", "Ha", "Hamag")
+                r_i = _row_first_numeric(row, "rmi", "r-i")
+                r_ha = _row_first_numeric(row, "rmha", "r-ha", "r-Ha")
+                if not np.isfinite(r_i) and np.isfinite(r) and np.isfinite(i):
+                    r_i = r - i
+                if not np.isfinite(r_ha) and np.isfinite(r) and np.isfinite(ha):
+                    r_ha = r - ha
                 df.loc[idx, 'iphas_r'] = r
                 df.loc[idx, 'iphas_i'] = i
                 df.loc[idx, 'iphas_ha'] = ha
-                if not pd.isna(r) and not pd.isna(ha):
-                    df.loc[idx, 'r_ha'] = r - ha
+                df.loc[idx, 'r_i'] = r_i
+                df.loc[idx, 'r_ha'] = r_ha
 
     n_found = df['iphas_r'].notna().sum()
     print(f"Found IPHAS photometry for {n_found}/{len(df)} sources")

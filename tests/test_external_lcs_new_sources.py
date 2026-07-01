@@ -230,6 +230,38 @@ def test_allwise_mep_fetch_reuses_cached_parquet(
     assert out.loc[0, "allwise_mep_w1_range"] == pytest.approx(0.4)
 
 
+def test_allwise_mep_fetch_retries_transient_irsa_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    df = pd.DataFrame([{"candidate_id": "C1", "ra": 1.0, "dec": 1.0}])
+    calls: list[int] = []
+    sleeps: list[float] = []
+
+    def flaky_query(ra: float, dec: float, max_sep_arcsec: float = vetting.ALLWISE_MEP_MAX_SEP_ARCSEC) -> pd.DataFrame:
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("HTTP 503 Service Unavailable")
+        return pd.DataFrame(
+            {
+                "mjd": [55400.0, 55401.0],
+                "w1mpro": [12.0, 12.5],
+                "w1sigmpro": [0.03, 0.04],
+            }
+        )
+
+    monkeypatch.setattr(vetting, "_query_allwise_mep_one", flaky_query)
+    monkeypatch.setattr(vetting.time, "sleep", lambda delay: sleeps.append(float(delay)))
+
+    out = vetting.fetch_allwise_mep_lightcurves(df, output_dir=tmp_path, workers=1)
+
+    assert len(calls) == 2
+    assert sleeps == [1.0]
+    assert int(out.loc[0, "allwise_mep_n_epochs"]) == 2
+    status = pd.read_parquet(tmp_path / vetting.EXTERNAL_LC_STATUS_FILE)
+    assert status.loc[0, "status"] == "fetched"
+
+
 def test_vvvx_virac_query_uses_published_de_column_and_sourceid(monkeypatch: pytest.MonkeyPatch) -> None:
     queries: list[str] = []
 

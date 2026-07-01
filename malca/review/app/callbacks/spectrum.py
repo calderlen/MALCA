@@ -88,8 +88,9 @@ def update_spectrum_panel(source_value, theme_mode, candidate_id, panel_clicks):
     result = _load_spectrum_for_row(row_dict, survey)
 
     if result.status == FetchStatus.OK and result.data is not None:
-        from malca.review.spectrum_plot import build_spectrum_figure
+        from base64 import b64encode
         import numpy as np
+        from malca.review.spectrum_plot import render_spectrum_png
 
         redshift = row_dict.get("spectrum_redshift")
         if redshift is not None:
@@ -100,21 +101,17 @@ def update_spectrum_panel(source_value, theme_mode, candidate_id, panel_clicks):
             except (ValueError, TypeError):
                 redshift = None
 
-        fig = build_spectrum_figure(
-            result.data.wavelength,
-            result.data.flux,
-            flux_err=result.data.flux_err,
+        image_bytes = render_spectrum_png(
+            result.data,
             survey=survey,
             candidate_id=str(candidate_id),
             redshift=redshift,
-            theme=str(theme_mode or DEFAULT_THEME),
         )
-        graph = dcc.Graph(
+        image_src = "data:image/png;base64," + b64encode(image_bytes).decode("ascii")
+        graph = html.Img(
             id='spectrum-plot',
-            figure=fig,
-            mathjax=True,
-            config=graph_config_without_image_export({'displayModeBar': True, 'responsive': True}),
-            style={'height': '420px'},
+            src=image_src,
+            style={'height': '420px', 'width': '100%', 'objectFit': 'contain', 'display': 'block'},
         )
         n_pts = len(result.data.wavelength)
         wl_min = float(result.data.wavelength.min())
@@ -174,12 +171,24 @@ def export_spectrum_pdf(n_clicks, source_value, candidate_id, theme_mode):
         return no_update, f'No flux data to export for {survey}.'
 
     try:
-        from malca.review.spectrum_plot import build_spectrum_figure
-        fig = build_spectrum_figure(
-            result.data.wavelength, result.data.flux, flux_err=result.data.flux_err,
-            survey=survey, candidate_id=str(candidate_id), theme='white',
+        from malca.review.spectrum_plot import render_spectrum_pdf
+        import numpy as np
+
+        redshift = row_dict.get("spectrum_redshift")
+        if redshift is not None:
+            try:
+                redshift = float(redshift)
+                if not np.isfinite(redshift):
+                    redshift = None
+            except (ValueError, TypeError):
+                redshift = None
+
+        image_bytes = render_spectrum_pdf(
+            result.data,
+            survey=survey,
+            candidate_id=str(candidate_id),
+            redshift=redshift,
         )
-        image_bytes = render_publication_pdf(fig, title='Spectrum', width=1200, height=820)
     except Exception as exc:
         return no_update, f'Export failed: {exc}'
 

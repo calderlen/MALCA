@@ -223,3 +223,27 @@ def test_assembler_native_band_color_mode_groups_cameras_by_band(tmp_path: Path)
     assert {trace.color for trace in band_raw if trace.color} == {BAND_COLORS["g"], BAND_COLORS["V"]}
     assert sum(trace.color == BAND_COLORS["g"] for trace in band_raw) == 1
     assert sum(trace.color == BAND_COLORS["V"] for trace in band_raw) == 1
+
+
+def test_assembler_does_not_phase_fold_on_stats_lomb_scargle_only(tmp_path: Path) -> None:
+    lc_path = tmp_path / "123.dat2"
+    _write_dat2(lc_path)
+    payload = {
+        "candidate_id": "123",
+        "asas_sn_id": "123",
+        "lc_path": str(lc_path),
+        "stats_variability_lomb_scargle_best_period_days": 5818.14746,
+    }
+
+    spec = assemble_review_lightcurve_plot(
+        _base_request(
+            payload,
+            show_phase_fold=True,
+            show_residuals=True,
+        )
+    )
+
+    assert spec.phase_requested is True
+    assert spec.phase_enabled is False
+    assert spec.phase_period is None
+    assert any("no valid period" in warning for warning in spec.warnings)

@@ -66,6 +66,8 @@ def _query_catalog_bulk(
     chunk_size: int,
     show_progress: bool = False,
     progress_desc: str | None = None,
+    status_rows: list[dict] | None = None,
+    status_context: dict[str, object] | None = None,
 ) -> pd.DataFrame:
     chunks: list[pd.DataFrame] = []
     n = len(coords_df)
@@ -82,6 +84,18 @@ def _query_catalog_bulk(
         chunk = coords_df.iloc[start : start + int(chunk_size)].copy()
         if chunk.empty:
             continue
+        attempted = int(len(chunk))
+        status_base = {
+            "catalog": catalog,
+            "mode": "xmatch",
+            "chunk_start": int(start),
+            "chunk_stop": int(start + attempted),
+            "attempted": attempted,
+            "matched": 0,
+            "error_message": "",
+        }
+        if status_context:
+            status_base.update(status_context)
         table = Table.from_pandas(chunk[["candidate_id", "ra_deg", "dec_deg"]].rename(columns={"ra_deg": "ra", "dec_deg": "dec"}))
         try:
             res = XMatch.query(
@@ -94,8 +108,16 @@ def _query_catalog_bulk(
         except Exception as e:
             import logging
             logging.warning(f"XMatch query failed for {catalog}: {e}")
+            if status_rows is not None:
+                status_rows.append({
+                    **status_base,
+                    "status": "error",
+                    "error_message": str(e),
+                })
             continue
         if len(res) == 0:
+            if status_rows is not None:
+                status_rows.append({**status_base, "status": "no_data"})
             continue
         out = res.to_pandas()
         sep_col = None
@@ -104,9 +126,22 @@ def _query_catalog_bulk(
                 sep_col = candidate
                 break
         if sep_col is None:
+            if status_rows is not None:
+                status_rows.append({
+                    **status_base,
+                    "status": "error",
+                    "matched": int(len(out)),
+                    "error_message": "missing separation column in XMatch result",
+                })
             continue
         out = out.rename(columns={sep_col: "sep_arcsec"})
         out["catalog"] = catalog
+        if status_rows is not None:
+            status_rows.append({
+                **status_base,
+                "status": "ok",
+                "matched": int(len(out)),
+            })
         chunks.append(out)
 
     if not chunks:

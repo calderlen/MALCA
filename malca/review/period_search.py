@@ -45,13 +45,13 @@ _METHOD_PRIORITY: dict[str, int] = {
 
 
 def has_external_period(payload: dict | None) -> bool:
-    period, _ = resolve_phase_period(payload, include_lsp=False)
+    period, _ = resolve_phase_period(payload, include_lsp=False, include_periodogram_periods=False)
     return bool(period is not None and np.isfinite(period) and period > 0)
 
 
 def resolve_stored_review_period(payload: dict | None) -> tuple[float | None, str]:
     """Return the stored/precomputed period used as the review harmonic-check seed."""
-    period, source = resolve_phase_period(payload, include_lsp=True)
+    period, source = resolve_phase_period(payload, include_periodogram_periods=False)
     if period is None or not np.isfinite(period) or period <= 0:
         return None, ""
     return float(period), str(source or "stored period")

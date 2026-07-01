@@ -1344,7 +1344,9 @@ def _render_vetting_banner(payload: dict | None, radius_arcsec: float = 10.0) ->
     if xray:
         flux = payload.get('xray_flux')
         flux_str = f" {flux:.1e}" if flux and not pd.isna(flux) else ""
-        cards.append(_cell("X-ray", f"Detected{flux_str}", hit=True))
+        catalogs = payload.get('xray_source_catalogs')
+        catalog_str = f" ({catalogs})" if catalogs and str(catalogs).strip() else ""
+        cards.append(_cell("X-ray", f"Detected{catalog_str}{flux_str}", hit=True))
 
     # SFR cell
     sfr_name = payload.get('sfr_name')

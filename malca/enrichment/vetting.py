@@ -13,8 +13,9 @@ Queries:
  9. ATLAS forced photometry — independent cyan/orange confirmation
 10. Gaia DR3 epoch photometry — space-based variability confirmation
 11. eROSITA X-ray catalog — youth indicator
-12. Proper motion consistency — cluster membership validation
-13. NEOWISE light curves — IR time-series for dipper confirmation
+12. Chandra CSC X-ray catalog — archival high-resolution X-ray detections
+13. Proper motion consistency — cluster membership validation
+14. NEOWISE light curves — IR time-series for dipper confirmation
 
 Usage:
     from malca.enrichment.vetting import vet_candidates
@@ -72,12 +73,14 @@ from malca.config import (
     ASASSN_VAR_CATALOG_ID,
     ZTF_VAR_CATALOG_ID,
     EROSITA_CATALOG_ID,
+    CHANDRA_CSC_CATALOG_ID,
     OGLE_MICROLENS_CATALOG_ID,
     ALERCE_RADIUS_ARCSEC as CFG_ALERCE_RADIUS_ARCSEC,
     ATLAS_MJD_MIN as CFG_ATLAS_MJD_MIN,
     ZTF_VAR_RADIUS_ARCSEC as CFG_ZTF_VAR_RADIUS_ARCSEC,
     TNS_RADIUS_ARCSEC as CFG_TNS_RADIUS_ARCSEC,
     EROSITA_RADIUS_ARCSEC as CFG_EROSITA_RADIUS_ARCSEC,
+    CHANDRA_CSC_RADIUS_ARCSEC as CFG_CHANDRA_CSC_RADIUS_ARCSEC,
     OGLE_MICROLENS_RADIUS_ARCSEC as CFG_OGLE_MICROLENS_RADIUS_ARCSEC,
     NEOWISE_VET_MAX_SEP_ARCSEC,
     ZTF_LC_RADIUS_ARCSEC,
@@ -338,6 +341,10 @@ _tns_cache: dict = {}
 EROSITA_CATALOG = EROSITA_CATALOG_ID
 EROSITA_LOCAL_FITS = Path(__file__).resolve().parent.parent / "input" / "eRASS1_Main.v1.2.fits"
 EROSITA_RADIUS_ARCSEC = CFG_EROSITA_RADIUS_ARCSEC
+CHANDRA_CSC_CATALOG = CHANDRA_CSC_CATALOG_ID
+CHANDRA_CSC_RADIUS_ARCSEC = CFG_CHANDRA_CSC_RADIUS_ARCSEC
+EROSITA_XRAY_LABEL = "eROSITA"
+CHANDRA_XRAY_LABEL = "Chandra CSC 2.1"
 
 # Module-level cache for the local eROSITA catalog
 _erosita_cache: dict = {}
@@ -432,6 +439,19 @@ STRIPE82_LC_ARCHIVE_FALLBACK_URLS = (
     "https://faculty.washington.edu/ivezic/sdss/catalogs/S82variables/AllLCs.tar.gz",
 )
 ALLWISE_MEP_MAX_SEP_ARCSEC = 3.0
+ALLWISE_MEP_MAX_ATTEMPTS = 3
+ALLWISE_MEP_RETRY_BASE_DELAY = 1.0
+ALLWISE_MEP_RETRY_MARKERS = (
+    "502",
+    "503",
+    "504",
+    "bad gateway",
+    "gateway timeout",
+    "service unavailable",
+    "temporarily unavailable",
+    "transient",
+    "internal server error",
+)
 VVVX_VIRAC_MAX_SEP_ARCSEC = 1.0
 OGLE_LC_MAX_SEP_ARCSEC = 2.0
 STRIPE82_MAX_SEP_ARCSEC = 1.5
@@ -3059,6 +3079,124 @@ def fetch_gaia_epoch_lcs(
 # =============================================================================
 
 
+def _to_bool_flag(value: object) -> bool:
+    """Coerce catalog flag values without treating arbitrary non-empty strings as true."""
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if value is None:
+        return False
+    try:
+        if pd.isna(value):
+            return False
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        return float(value) != 0.0
+    text = str(value).strip().lower()
+    return text in {"1", "true", "t", "yes", "y", "detected"}
+
+
+def _safe_float(value: object) -> float:
+    if value is None:
+        return np.nan
+    try:
+        if pd.isna(value):
+            return np.nan
+        return float(value)
+    except (TypeError, ValueError):
+        return np.nan
+
+
+def _init_xray_aggregate_columns(df: pd.DataFrame) -> None:
+    if "xray_det" not in df.columns:
+        df["xray_det"] = False
+    if "xray_flux" not in df.columns:
+        df["xray_flux"] = np.nan
+    if "xray_sep_arcsec" not in df.columns:
+        df["xray_sep_arcsec"] = np.nan
+    if "xray_source_catalogs" not in df.columns:
+        df["xray_source_catalogs"] = ""
+
+
+def _sync_xray_aggregate_fields(df: pd.DataFrame) -> pd.DataFrame:
+    """Set generic xray_* fields from source-specific X-ray catalog matches."""
+    df = df.copy()
+    legacy_xray_available = "erosita_det" not in df.columns and "xray_det" in df.columns
+    _init_xray_aggregate_columns(df)
+
+    for idx, row in df.iterrows():
+        matched_catalogs: list[str] = []
+        candidates: list[tuple[float, int, str, float, float]] = []
+
+        if "erosita_det" in df.columns:
+            erosita_det = _to_bool_flag(row.get("erosita_det"))
+            erosita_flux = _safe_float(row.get("erosita_flux"))
+            erosita_sep = _safe_float(row.get("erosita_sep_arcsec"))
+        elif legacy_xray_available:
+            catalogs_text = str(row.get("xray_source_catalogs") or "")
+            legacy_is_chandra = "chandra" in catalogs_text.lower()
+            erosita_det = _to_bool_flag(row.get("xray_det")) and not legacy_is_chandra
+            erosita_flux = _safe_float(row.get("xray_flux"))
+            erosita_sep = _safe_float(row.get("xray_sep_arcsec"))
+        else:
+            erosita_det = False
+            erosita_flux = np.nan
+            erosita_sep = np.nan
+
+        if erosita_det:
+            matched_catalogs.append(EROSITA_XRAY_LABEL)
+            sort_sep = erosita_sep if np.isfinite(erosita_sep) else np.inf
+            candidates.append((sort_sep, 0, EROSITA_XRAY_LABEL, erosita_flux, erosita_sep))
+
+        chandra_det = _to_bool_flag(row.get("chandra_det")) if "chandra_det" in df.columns else False
+        if chandra_det:
+            chandra_flux = _safe_float(row.get("chandra_flux_05_7"))
+            if not np.isfinite(chandra_flux):
+                chandra_flux = _safe_float(row.get("chandra_flux_broad"))
+            chandra_sep = _safe_float(row.get("chandra_sep_arcsec"))
+            matched_catalogs.append(CHANDRA_XRAY_LABEL)
+            sort_sep = chandra_sep if np.isfinite(chandra_sep) else np.inf
+            candidates.append((sort_sep, 1, CHANDRA_XRAY_LABEL, chandra_flux, chandra_sep))
+
+        if candidates:
+            _sort_sep, _order, _label, flux, sep = sorted(candidates)[0]
+            df.loc[idx, "xray_det"] = True
+            df.loc[idx, "xray_flux"] = flux if np.isfinite(flux) else np.nan
+            df.loc[idx, "xray_sep_arcsec"] = round(float(sep), 3) if np.isfinite(sep) else np.nan
+            df.loc[idx, "xray_source_catalogs"] = ",".join(matched_catalogs)
+        else:
+            df.loc[idx, "xray_det"] = False
+            df.loc[idx, "xray_flux"] = np.nan
+            df.loc[idx, "xray_sep_arcsec"] = np.nan
+            df.loc[idx, "xray_source_catalogs"] = ""
+
+    return df
+
+
+def _init_erosita_columns(df: pd.DataFrame) -> None:
+    df["erosita_det"] = False
+    df["erosita_flux"] = np.nan
+    df["erosita_sep_arcsec"] = np.nan
+    _init_xray_aggregate_columns(df)
+
+
+def _init_chandra_columns(df: pd.DataFrame) -> None:
+    df["chandra_det"] = False
+    df["chandra_source_id"] = ""
+    df["chandra_flux_05_7"] = np.nan
+    df["chandra_flux_broad"] = np.nan
+    df["chandra_significance"] = np.nan
+    df["chandra_likelihood"] = np.nan
+    df["chandra_likelihood_class"] = ""
+    df["chandra_pos_err_maj_arcsec"] = np.nan
+    df["chandra_pos_err_min_arcsec"] = np.nan
+    df["chandra_pos_err_pa_deg"] = np.nan
+    df["chandra_extended_flag"] = False
+    df["chandra_variable_flag"] = False
+    df["chandra_sep_arcsec"] = np.nan
+    _init_xray_aggregate_columns(df)
+
+
 def crossmatch_erosita(
     df: pd.DataFrame,
     radius_arcsec: float = EROSITA_RADIUS_ARCSEC,
@@ -3074,16 +3212,14 @@ def crossmatch_erosita(
     method='local'  — local FITS crossmatch via SkyCoord (instant, no network).
 
     X-ray detection is a strong youth indicator for YSO candidates.
-    Adds columns: xray_det, xray_flux, xray_sep_arcsec.
+    Adds source-specific erosita_* columns and updates aggregate xray_* columns.
     """
     df = df.copy()
-    df["xray_det"] = False
-    df["xray_flux"] = np.nan
-    df["xray_sep_arcsec"] = np.nan
+    _init_erosita_columns(df)
 
     valid = df["ra"].notna() & df["dec"].notna()
     if not valid.any():
-        return df
+        return _sync_xray_aggregate_fields(df)
 
     n_valid = int(valid.sum())
 
@@ -3141,17 +3277,17 @@ def crossmatch_erosita(
         for _, row in result.iterrows():
             idx = int(row["_idx"])
             if idx in df.index:
-                df.loc[idx, "xray_det"] = True
+                df.loc[idx, "erosita_det"] = True
                 sep = row.get("angDist", row.get("sep_arcsec", np.nan))
-                df.loc[idx, "xray_sep_arcsec"] = round(float(sep), 3) if pd.notna(sep) else np.nan
+                df.loc[idx, "erosita_sep_arcsec"] = round(float(sep), 3) if pd.notna(sep) else np.nan
                 try:
-                    df.loc[idx, "xray_flux"] = float(row["MLFlux1"])
+                    df.loc[idx, "erosita_flux"] = float(row["MLFlux1"])
                 except (ValueError, TypeError, KeyError):
                     pass
                 matched += 1
 
     print(f"eROSITA: {matched} X-ray matches")
-    return df
+    return _sync_xray_aggregate_fields(df)
 
 
 def _erosita_via_local(
@@ -3191,16 +3327,150 @@ def _erosita_via_local(
     matched = 0
     for i, df_idx in enumerate(df.index[valid]):
         if sep2d[i] <= max_sep:
-            df.loc[df_idx, "xray_det"] = True
-            df.loc[df_idx, "xray_sep_arcsec"] = round(sep2d[i].arcsec, 3)
+            df.loc[df_idx, "erosita_det"] = True
+            df.loc[df_idx, "erosita_sep_arcsec"] = round(sep2d[i].arcsec, 3)
             try:
-                df.loc[df_idx, "xray_flux"] = float(flux_arr[idx_cat[i]])
+                df.loc[df_idx, "erosita_flux"] = float(flux_arr[idx_cat[i]])
             except (ValueError, TypeError):
                 pass
             matched += 1
 
     print(f"eROSITA: {matched} X-ray matches")
-    return df
+    return _sync_xray_aggregate_fields(df)
+
+
+# =============================================================================
+# CHANDRA CSC X-RAY CATALOG
+# =============================================================================
+
+
+def crossmatch_chandra_csc(
+    df: pd.DataFrame,
+    radius_arcsec: float = CHANDRA_CSC_RADIUS_ARCSEC,
+    chunk_size: int = 1000,
+    method: Literal["tap", "xmatch"] = "tap",
+) -> pd.DataFrame:
+    """
+    Crossmatch against Chandra Source Catalog 2.1 master sources in VizieR.
+
+    Chandra is an archival pointed-observation catalog, so a non-match means
+    no nearby CSC source entry, not a uniform all-sky X-ray non-detection.
+    Adds source-specific chandra_* columns and updates aggregate xray_* columns.
+    """
+    df = df.copy()
+    _init_chandra_columns(df)
+
+    valid = df["ra"].notna() & df["dec"].notna()
+    if not valid.any():
+        return _sync_xray_aggregate_fields(df)
+
+    n_valid = int(valid.sum())
+    coords_df = pd.DataFrame({
+        "_idx": df.index[valid],
+        "ra": df.loc[valid, "ra"].values,
+        "dec": df.loc[valid, "dec"].values,
+    })
+    if method == "xmatch":
+        print(f"Chandra CSC: crossmatching {n_valid} candidates via CDS XMatch (radius={radius_arcsec}\")")
+        source_table = Table()
+        source_table["_idx"] = np.array(coords_df["_idx"])
+        source_table["ra"] = coords_df["ra"].values
+        source_table["dec"] = coords_df["dec"].values
+
+        try:
+            result_tab = XMatch.query(
+                cat1=source_table,
+                cat2=f"vizier:{CHANDRA_CSC_CATALOG}",
+                max_distance=radius_arcsec * u.arcsec,
+                colRA1="ra", colDec1="dec",
+            )
+            result = result_tab.to_pandas() if result_tab is not None and len(result_tab) > 0 else pd.DataFrame()
+        except Exception as e:
+            raise RuntimeError(f"Chandra CSC XMatch lookup failed: {e}") from e
+
+        if not result.empty:
+            result = result.rename(columns={
+                "2CXO": "chandra_source_id",
+                "FPL0.5-7": "chandra_flux_05_7",
+                "Favgb": "chandra_flux_broad",
+                "signi": "chandra_significance",
+                "like": "chandra_likelihood",
+                "likeClass": "chandra_likelihood_class",
+                "r0": "chandra_pos_err_maj_arcsec",
+                "r1": "chandra_pos_err_min_arcsec",
+                "PA": "chandra_pos_err_pa_deg",
+                "fe": "chandra_extended_flag",
+                "fv": "chandra_variable_flag",
+            })
+        sep_col = "angDist"
+    else:
+        print(f"Chandra CSC: crossmatching {n_valid} candidates via TAP (radius={radius_arcsec}\")")
+        result = batch_tap_crossmatch(
+            coords_df,
+            tap_url=VIZIER_TAP_URL,
+            catalog_table=f'"{CHANDRA_CSC_CATALOG}"',
+            select_cols=(
+                'c."2CXO" AS chandra_source_id, '
+                'c."FPL0.5-7" AS chandra_flux_05_7, '
+                'c."Favgb" AS chandra_flux_broad, '
+                'c."signi" AS chandra_significance, '
+                'c."like" AS chandra_likelihood, '
+                'c."likeClass" AS chandra_likelihood_class, '
+                'c."r0" AS chandra_pos_err_maj_arcsec, '
+                'c."r1" AS chandra_pos_err_min_arcsec, '
+                'c."PA" AS chandra_pos_err_pa_deg, '
+                'c."fe" AS chandra_extended_flag, '
+                'c."fv" AS chandra_variable_flag'
+            ),
+            ra_col='"RAICRS"',
+            dec_col='"DEICRS"',
+            match_radius_arcsec=radius_arcsec,
+            chunk_size=chunk_size,
+            n_workers=4,
+            verbose=True,
+            desc="Chandra CSC TAP",
+            raise_on_all_failed=True,
+            raise_on_failed_chunk=True,
+        )
+        sep_col = "sep_arcsec"
+    if not result.empty:
+        result = result.sort_values(sep_col).drop_duplicates(subset="_idx", keep="first")
+
+    matched = 0
+    if not result.empty:
+        for _, row in result.iterrows():
+            idx = int(row["_idx"])
+            if idx not in df.index:
+                continue
+
+            df.loc[idx, "chandra_det"] = True
+            source_id = row.get("chandra_source_id", "")
+            if pd.notna(source_id):
+                df.loc[idx, "chandra_source_id"] = str(source_id)
+            for out_col in (
+                "chandra_flux_05_7",
+                "chandra_flux_broad",
+                "chandra_significance",
+                "chandra_likelihood",
+                "chandra_pos_err_maj_arcsec",
+                "chandra_pos_err_min_arcsec",
+                "chandra_pos_err_pa_deg",
+            ):
+                value = _safe_float(row.get(out_col))
+                if np.isfinite(value):
+                    df.loc[idx, out_col] = value
+            like_class = row.get("chandra_likelihood_class", "")
+            if pd.notna(like_class):
+                df.loc[idx, "chandra_likelihood_class"] = str(like_class)
+            df.loc[idx, "chandra_extended_flag"] = _to_bool_flag(row.get("chandra_extended_flag"))
+            df.loc[idx, "chandra_variable_flag"] = _to_bool_flag(row.get("chandra_variable_flag"))
+            sep = _safe_float(row.get(sep_col, row.get("sep_arcsec")))
+            if np.isfinite(sep):
+                df.loc[idx, "chandra_sep_arcsec"] = round(float(sep), 3)
+            matched += 1
+
+    print(f"Chandra CSC: {matched} X-ray matches")
+    return _sync_xray_aggregate_fields(df)
 
 
 # =============================================================================
@@ -3419,6 +3689,57 @@ def query_neowise_lightcurves(
 # =============================================================================
 
 
+def _tess_error_is_retryable(exc: Exception) -> bool:
+    message = str(exc).lower()
+    markers = (
+        "i/o operation on closed file",
+        "error in reading data product",
+        "failed to read",
+        "cannot read",
+        "corrupt",
+        "fits",
+    )
+    return any(marker in message for marker in markers)
+
+
+def _tess_cache_paths_from_error(exc: Exception) -> list[Path]:
+    paths: list[Path] = []
+    for match in re.finditer(r"(/[^\s\"'<>]+?\.fits(?:\.gz)?)", str(exc)):
+        text = match.group(1).rstrip(").,;:")
+        path = Path(text).expanduser()
+        if path not in paths:
+            paths.append(path)
+    return paths
+
+
+def _tess_cache_path_is_safe_to_purge(path: Path) -> bool:
+    parts = {part.lower() for part in path.parts}
+    name = path.name.lower()
+    return (
+        ".lightkurve" in parts
+        and "mastdownload" in parts
+        and (name.endswith(".fits") or name.endswith(".fits.gz"))
+    )
+
+
+def _purge_tess_bad_cache_files(paths: list[Path]) -> list[Path]:
+    purged: list[Path] = []
+    for path in paths:
+        try:
+            resolved = path.expanduser().resolve()
+        except Exception:
+            resolved = path.expanduser()
+        if not _tess_cache_path_is_safe_to_purge(resolved):
+            continue
+        try:
+            if resolved.is_file():
+                resolved.unlink()
+                purged.append(resolved)
+        except Exception:
+            continue
+    return purged
+
+
 def fetch_tess_lightcurves(
     df: pd.DataFrame,
     output_dir: Path | None = None,
@@ -3475,7 +3796,7 @@ def fetch_tess_lightcurves(
 
         cache_key = _coord_lookup_cache_key(df, idx, TESS_SEARCH_RADIUS_ARCSEC, "tess")
 
-        try:
+        def _attempt_fetch() -> tuple:
             coord = SkyCoord(ra=ra, dec=dec, unit="deg")
             search = lk.search_lightcurve(coord, radius=21, mission="TESS")
             if search is None or len(search) == 0:
@@ -3534,8 +3855,17 @@ def fetch_tess_lightcurves(
                 None,
                 cache_key,
             )
-        except Exception as exc:
-            return (idx, 0, 0, np.nan, f"{idx}: {_short_error(exc)}", cache_key)
+
+        for attempt in range(2):
+            try:
+                return _attempt_fetch()
+            except Exception as exc:
+                if attempt == 0 and _tess_error_is_retryable(exc):
+                    _purge_tess_bad_cache_files(_tess_cache_paths_from_error(exc))
+                    continue
+                return (idx, 0, 0, np.nan, f"{idx}: {_short_error(exc)}", cache_key)
+
+        return (idx, 0, 0, np.nan, f"{idx}: TESS retry exhausted", cache_key)
 
     matched = cached_matched
     failures: list[str] = []
@@ -4512,6 +4842,33 @@ def _query_allwise_mep_one(ra: float, dec: float, max_sep_arcsec: float = ALLWIS
     return _normalize_allwise_mep_table(mep)
 
 
+def _allwise_mep_error_is_retryable(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return any(marker in message for marker in ALLWISE_MEP_RETRY_MARKERS)
+
+
+def _query_allwise_mep_one_with_retry(
+    ra: float,
+    dec: float,
+    max_sep_arcsec: float = ALLWISE_MEP_MAX_SEP_ARCSEC,
+    *,
+    max_attempts: int = ALLWISE_MEP_MAX_ATTEMPTS,
+) -> pd.DataFrame:
+    attempts = max(1, int(max_attempts))
+    last_exc: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            return _query_allwise_mep_one(ra, dec, max_sep_arcsec=max_sep_arcsec)
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= attempts - 1 or not _allwise_mep_error_is_retryable(exc):
+                raise
+            time.sleep(min(8.0, ALLWISE_MEP_RETRY_BASE_DELAY * (2 ** attempt)))
+    if last_exc is not None:
+        raise last_exc
+    return pd.DataFrame()
+
+
 def fetch_allwise_mep_lightcurves(
     df: pd.DataFrame,
     output_dir: Path | None = None,
@@ -4550,7 +4907,7 @@ def fetch_allwise_mep_lightcurves(
     def _fetch_one(idx) -> tuple:
         cache_key = _coord_lookup_cache_key(df, idx, ALLWISE_MEP_MAX_SEP_ARCSEC, "allwise_mep")
         try:
-            lc_df = _query_allwise_mep_one(float(df.loc[idx, "ra"]), float(df.loc[idx, "dec"]))
+            lc_df = _query_allwise_mep_one_with_retry(float(df.loc[idx, "ra"]), float(df.loc[idx, "dec"]))
             if lc_df.empty:
                 summary = {col: (0 if col == "allwise_mep_n_epochs" else np.nan) for col in summary_cols}
                 return (idx, summary, None, cache_key)
@@ -5029,7 +5386,7 @@ def _read_crts_csv_text(csv_text: str) -> pd.DataFrame:
         table = pd.read_csv(io.StringIO(text))
     except Exception as exc:
         raise RuntimeError(f"CRTS CSV parser failed: {_short_error(exc)}") from exc
-    required = {"MasterID", "Mag", "Magerr", "RA", "Dec", "MJD", "Blend"}
+    required = {"Mag", "MJD"}
     missing = required.difference(table.columns)
     if missing:
         raise RuntimeError(f"CRTS CSV missing required columns: {', '.join(sorted(missing))}")
@@ -5077,7 +5434,7 @@ def _normalize_crts_cgi_lightcurve(
     if raw.empty:
         return pd.DataFrame(columns=["crts_id", "mag", "mag_err", "ra", "dec", "mjd", "blend", "catalog", "sep_arcsec"])
 
-    required = {"MasterID", "Mag", "Magerr", "RA", "Dec", "MJD", "Blend"}
+    required = {"Mag", "MJD"}
     missing = required.difference(raw.columns)
     if missing:
         raise RuntimeError(f"CRTS CSV missing required columns: {', '.join(sorted(missing))}")
@@ -5093,9 +5450,19 @@ def _normalize_crts_cgi_lightcurve(
             "Blend": "blend",
         }
     ).copy()
+    if "crts_id" not in lc.columns:
+        lc["crts_id"] = f"{catalog}:{float(ra):.7f}:{float(dec):.7f}"
+    if "mag_err" not in lc.columns:
+        lc["mag_err"] = np.nan
+    if "ra" not in lc.columns:
+        lc["ra"] = float(ra)
+    if "dec" not in lc.columns:
+        lc["dec"] = float(dec)
+    if "blend" not in lc.columns:
+        lc["blend"] = 0
     for col in ("mag", "mag_err", "ra", "dec", "mjd", "blend"):
         lc[col] = pd.to_numeric(lc[col], errors="coerce")
-    lc = lc.dropna(subset=["crts_id", "mag", "ra", "dec", "mjd"])
+    lc = lc.dropna(subset=["mag", "ra", "dec", "mjd"])
     lc["crts_id"] = lc["crts_id"].astype(str)
     if lc.empty:
         return pd.DataFrame(columns=["crts_id", "mag", "mag_err", "ra", "dec", "mjd", "blend", "catalog", "sep_arcsec"])
@@ -5415,6 +5782,7 @@ def vet_candidates(
     run_atlas: bool = True,
     run_gaia_epoch: bool = True,
     run_erosita: bool = True,
+    run_chandra_csc: bool = True,
     run_pm_check: bool = True,
     run_neowise_lc: bool = False,
     simbad_radius_arcsec: float = SIMBAD_RADIUS_ARCSEC,
@@ -5424,6 +5792,7 @@ def vet_candidates(
     tns_radius_arcsec: float = TNS_RADIUS_ARCSEC,
     alerce_radius_arcsec: float = ALERCE_RADIUS_ARCSEC,
     erosita_radius_arcsec: float = EROSITA_RADIUS_ARCSEC,
+    chandra_radius_arcsec: float = CHANDRA_CSC_RADIUS_ARCSEC,
     gaia_var_chunk_size: int = GAIA_VAR_CHUNK_SIZE,
     atlas_token: str | None = None,
     atlas_output_dir: Path | None = None,
@@ -5455,11 +5824,12 @@ def vet_candidates(
     run_atlas : query ATLAS forced photometry (requires token)
     run_gaia_epoch : check Gaia epoch photometry availability
     run_erosita : crossmatch eROSITA X-ray catalog
+    run_chandra_csc : crossmatch Chandra CSC 2.1 source catalog
     run_pm_check : proper motion consistency with clusters
     run_neowise_lc : fetch full NEOWISE light curves (opt-in)
     checkpoint_path : if set, save intermediate results after each module
     method : Propagated to non-SIMBAD crossmatch functions such as ZTF vars,
-        TNS, and eROSITA. SIMBAD always uses CDS XMatch. For ASAS-SN
+        TNS, eROSITA, and Chandra CSC. SIMBAD always uses CDS XMatch. For ASAS-SN
         variables, ``xmatch`` uses the bundled local CSV.
     skip_existing : Skip modules whose marker columns already contain data in
         the input table. Checkpoints are always skipped this way.
@@ -5510,7 +5880,8 @@ def vet_candidates(
         "TNS": "tns_name",
         "Gaia EB params": "gaia_eb_period",
         "ALeRCE": "alerce_oid",
-        "eROSITA": "xray_det",
+        "eROSITA": "erosita_det",
+        "Chandra CSC": "chandra_det",
         "ATLAS forced phot": "atlas_has_phot",
         "PM consistency": "pm_cluster_offset_sigma",
         "NEOWISE LCs": "neowise_n_epochs",
@@ -5612,6 +5983,14 @@ def vet_candidates(
             _erosita_method = method
         _run_module("eROSITA", crossmatch_erosita, radius_arcsec=erosita_radius_arcsec, method=_erosita_method)
 
+    if run_chandra_csc:
+        _run_module("Chandra CSC", crossmatch_chandra_csc, radius_arcsec=chandra_radius_arcsec, method=method)
+
+    if run_erosita or run_chandra_csc:
+        df = _sync_xray_aggregate_fields(df)
+        if checkpoint_path:
+            df.to_parquet(checkpoint_path, index=False)
+
     if run_atlas:
         _run_module(
             "ATLAS forced phot",
@@ -5706,9 +6085,15 @@ def _print_vetting_summary(df: pd.DataFrame, total_start: float) -> None:
                 for cls, cnt in lc_cls.items():
                     print(f"    {cls}: {cnt}")
 
-    if "xray_det" in df.columns:
-        n = df["xray_det"].sum()
+    if "erosita_det" in df.columns:
+        n = df["erosita_det"].fillna(False).astype(bool).sum()
         print(f"  eROSITA X-ray det:      {n}/{len(df)}")
+    if "chandra_det" in df.columns:
+        n = df["chandra_det"].fillna(False).astype(bool).sum()
+        print(f"  Chandra CSC det:        {n}/{len(df)}")
+    if "xray_det" in df.columns:
+        n = df["xray_det"].fillna(False).astype(bool).sum()
+        print(f"  Structured X-ray det:   {n}/{len(df)}")
 
     if "atlas_has_phot" in df.columns:
         n = df["atlas_has_phot"].sum()
@@ -5778,6 +6163,7 @@ VETTING_ONLY_MODULES = {
     "gaia-eb": "run_gaia_eb",
     "alerce": "run_alerce",
     "erosita": "run_erosita",
+    "chandra-csc": "run_chandra_csc",
     "pm-check": "run_pm_check",
     "atlas": "run_atlas",
     "neowise-lc": "run_neowise_lc",
@@ -5815,6 +6201,7 @@ def main():
     g_radii.add_argument("--microlens-radius", type=float, default=OGLE_MICROLENS_RADIUS_ARCSEC, help=f"Microlensing catalog crossmatch radius in arcsec (default: {OGLE_MICROLENS_RADIUS_ARCSEC})")
     g_radii.add_argument("--alerce-radius", type=float, default=ALERCE_RADIUS_ARCSEC, help=f"ALeRCE search radius in arcsec (default: {ALERCE_RADIUS_ARCSEC})")
     g_radii.add_argument("--erosita-radius", type=float, default=EROSITA_RADIUS_ARCSEC, help=f"eROSITA search radius in arcsec (default: {EROSITA_RADIUS_ARCSEC})")
+    g_radii.add_argument("--chandra-radius", type=float, default=CHANDRA_CSC_RADIUS_ARCSEC, help=f"Chandra CSC search radius in arcsec (default: {CHANDRA_CSC_RADIUS_ARCSEC})")
     g_radii.add_argument("--ztf-var-radius", type=float, default=ZTF_VAR_RADIUS_ARCSEC, help=f"ZTF variable crossmatch radius in arcsec (default: {ZTF_VAR_RADIUS_ARCSEC})")
     g_radii.add_argument("--tns-radius", type=float, default=TNS_RADIUS_ARCSEC, help=f"TNS crossmatch radius in arcsec (default: {TNS_RADIUS_ARCSEC})")
     g_skip.add_argument("--no-simbad", action="store_true", help="Skip SIMBAD query")
@@ -5827,6 +6214,7 @@ def main():
     g_skip.add_argument("--no-gaia-eb", action="store_true", help="Skip Gaia DR3 eclipsing binary parameters")
     g_skip.add_argument("--no-alerce", action="store_true", help="Skip ALeRCE ZTF query")
     g_skip.add_argument("--no-erosita", action="store_true", help="Skip eROSITA X-ray crossmatch")
+    g_skip.add_argument("--no-chandra-csc", action="store_true", help="Skip Chandra CSC X-ray crossmatch")
     g_skip.add_argument("--no-pm-check", action="store_true", help="Skip proper motion consistency check")
     g_skip.add_argument("--no-atlas", action="store_true", help="Skip ATLAS forced photometry (default: enabled)")
     g_workers.add_argument("--alerce-workers", type=int, default=8, help="Parallel workers for ALeRCE queries (default: 8)")
@@ -5918,6 +6306,7 @@ def main():
         run_gaia_eb=_enabled("gaia-eb", args.no_gaia_eb),
         run_alerce=_enabled("alerce", args.no_alerce),
         run_erosita=_enabled("erosita", args.no_erosita),
+        run_chandra_csc=_enabled("chandra-csc", args.no_chandra_csc),
         run_atlas=_enabled("atlas", args.no_atlas),
         run_pm_check=_enabled("pm-check", args.no_pm_check),
         run_neowise_lc=("neowise-lc" in only_modules) if only_modules is not None else args.neowise_lc,
@@ -5929,6 +6318,7 @@ def main():
         alerce_radius_arcsec=args.alerce_radius,
         alerce_workers=args.alerce_workers,
         erosita_radius_arcsec=args.erosita_radius,
+        chandra_radius_arcsec=args.chandra_radius,
         atlas_token=args.atlas_token or os.environ.get("MALCA_ATLAS_TOKEN"),
         tns_api_key=args.tns_api_key or os.environ.get("MALCA_TNS_API_KEY"),
         neowise_output_dir=args.neowise_output_dir,

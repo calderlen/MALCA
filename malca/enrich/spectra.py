@@ -7,6 +7,12 @@ import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 
+from malca.enrich.apogee import (
+    APOGEE_SUMMARY_COLUMNS,
+    apogee_summary_column,
+    apogee_summary_columns,
+    normalize_apogee_metadata_columns,
+)
 from malca.enrich.neighbor import _ensure_candidate_id
 from malca.enrich.spectra_catalogs import (
     DEFAULT_SPECTRA_CATALOGS,
@@ -43,6 +49,18 @@ SPECTRA_TYPE_COLUMNS: tuple[str, ...] = (
     "SPECTYPE",
     "spectype",
     "MORPHTYPE",
+)
+SPECTRA_QUERY_STATUS_COLUMNS: tuple[str, ...] = (
+    "catalog",
+    "survey_keys",
+    "query_group",
+    "mode",
+    "status",
+    "attempted",
+    "matched",
+    "chunk_start",
+    "chunk_stop",
+    "error_message",
 )
 
 
@@ -84,7 +102,7 @@ def _generate_link(row: pd.Series) -> str | None:
             return f"http://skyserver.sdss.org/dr17/en/tools/explore/Summary.aspx?sid={sid}"
 
     if "desi" in survey:
-        targetid = row.get("TARGETID") or row.get("targetid") or row.get("TARGET_ID")
+        targetid = row.get("TARGETID") or row.get("TargetID") or row.get("targetid") or row.get("TARGET_ID")
         if targetid:
             return f"https://www.desi.lbl.gov/documents/etc/DESI-DR1-target-{targetid}/"
         return "https://data.desi.lbl.gov/documents/"
@@ -95,7 +113,7 @@ def _generate_link(row: pd.Series) -> str | None:
             return f"https://www.lamost.org/dr7/v2.0/spectrum/view?obsid={obsid}"
 
     if "galah" in survey:
-        sobj = row.get("sobject_id") or row.get("sobjectid") or row.get("SOBJECT_ID")
+        sobj = row.get("sobject_id") or row.get("sobjectid") or row.get("SOBJECT_ID") or row.get("GALAH")
         if sobj:
             return f"https://cloud.datacentral.org.au/teamdata/GALAH/public/GALAH_DR4/spectra/{sobj}.fits"
 
@@ -122,7 +140,7 @@ def _generate_link(row: pd.Series) -> str | None:
         return "https://www.sdss.org/dr17/manga/"
 
     if "apogee" in survey:
-        apogee_id = row.get("APOGEE_ID") or row.get("apogee_id")
+        apogee_id = row.get("APOGEE_ID") or row.get("apogee_id") or row.get("ID") or row.get("id")
         if apogee_id:
             return f"https://www.sdss.org/dr17/apogee/spectrum/?id={apogee_id}"
         return "https://www.sdss.org/dr17/apogee/"
@@ -194,8 +212,9 @@ def _generate_link(row: pd.Series) -> str | None:
     if "ozdes" in survey:
         return "https://ozdes.org/"
 
-    if row.get("link"):
-        existing = str(row.get("link") or "").strip()
+    existing_link = row.get("link")
+    if existing_link is not None and pd.notna(existing_link):
+        existing = str(existing_link or "").strip()
         if existing:
             return existing
 
@@ -217,6 +236,16 @@ def _write_spectra_parquet(df: pd.DataFrame, path: Path, *, compression: str) ->
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     _parquet_safe_frame(df).to_parquet(path, index=False, compression=compression)
+
+
+def _spectra_query_status_frame(rows: list[dict]) -> pd.DataFrame:
+    if not rows:
+        return pd.DataFrame(columns=SPECTRA_QUERY_STATUS_COLUMNS)
+    out = pd.DataFrame(rows)
+    for col in SPECTRA_QUERY_STATUS_COLUMNS:
+        if col not in out.columns:
+            out[col] = pd.NA
+    return out[list(SPECTRA_QUERY_STATUS_COLUMNS) + [col for col in out.columns if col not in SPECTRA_QUERY_STATUS_COLUMNS]]
 
 
 def _normalize_spectra_long(spectra_long: pd.DataFrame) -> pd.DataFrame:
@@ -248,6 +277,8 @@ def _normalize_spectra_long(spectra_long: pd.DataFrame) -> pd.DataFrame:
         missing = out["spectrum_spectral_type"].fillna("").astype(str).str.strip().eq("")
         out.loc[missing, "spectrum_spectral_type"] = fallback.loc[missing]
 
+    out = normalize_apogee_metadata_columns(out)
+
     keep_cols = [
         c
         for c in [
@@ -277,9 +308,11 @@ def _summarize_spectra_long(coords: pd.DataFrame, spectra_long: pd.DataFrame) ->
         summary["spectrum_redshift"] = np.nan
         summary["spectrum_spectral_type"] = ""
         summary["spectrum_sep_arcsec"] = np.nan
+        for col in apogee_summary_columns():
+            summary[col] = pd.NA
         return summary
 
-    work = spectra_long.copy()
+    work = normalize_apogee_metadata_columns(spectra_long.copy())
     work["sep_arcsec"] = pd.to_numeric(work.get("sep_arcsec"), errors="coerce")
     work = work.sort_values(["candidate_id", "sep_arcsec"], na_position="last")
     nearest = work.drop_duplicates(subset=["candidate_id"], keep="first")
@@ -304,6 +337,19 @@ def _summarize_spectra_long(coords: pd.DataFrame, spectra_long: pd.DataFrame) ->
     summary["spectrum_links"] = summary["spectrum_links"].fillna("")
     summary["spectrum_spectral_type"] = summary["spectrum_spectral_type"].fillna("")
     summary["has_spectrum"] = summary["spectrum_sources"].str.len() > 0
+
+    apogee = work[work["survey"].astype(str).str.contains("apogee", case=False, na=False)]
+    if not apogee.empty:
+        apogee_nearest = apogee.drop_duplicates(subset=["candidate_id"], keep="first")
+        apogee_cols = [col for col in APOGEE_SUMMARY_COLUMNS if col in apogee_nearest.columns]
+        if apogee_cols:
+            apogee_summary = apogee_nearest[["candidate_id", *apogee_cols]].rename(
+                columns={col: apogee_summary_column(col) for col in apogee_cols}
+            )
+            summary = summary.merge(apogee_summary, on="candidate_id", how="left")
+    for col in apogee_summary_columns():
+        if col not in summary.columns:
+            summary[col] = pd.NA
     return summary
 
 
@@ -316,6 +362,7 @@ def _query_all_catalogs(
     show_progress: bool,
     tap_timeout: float = SPECTRA_TAP_TIMEOUT,
     tap_chunk_size: int = SPECTRA_TAP_CHUNK_SIZE,
+    status_rows: list[dict] | None = None,
 ) -> pd.DataFrame:
     from malca.enrich.spectra_catalogs import SpectraCatalogSpec
 
@@ -349,6 +396,7 @@ def _query_all_catalogs(
             progress_desc=f"spectra:{rep_key}",
             tap_timeout=tap_timeout,
             tap_chunk_size=tap_chunk_size,
+            status_rows=status_rows,
         )
         if not res.empty:
             frames.append(res)
@@ -385,6 +433,7 @@ def run_spectra_availability(
         empty = pd.DataFrame()
         empty.to_parquet(out_dir / "spectra_long.parquet", index=False, compression="zstd")
         empty.to_parquet(out_dir / "spectra_summary.parquet", index=False, compression="zstd")
+        _spectra_query_status_frame([]).to_parquet(out_dir / "spectra_query_status.parquet", index=False, compression="zstd")
         return empty, empty
 
     coords = df_use[["candidate_id", "ra_deg", "dec_deg"]].dropna(subset=["ra_deg", "dec_deg"]).copy()
@@ -412,6 +461,7 @@ def run_spectra_availability(
             cache_df = pd.DataFrame()
 
     fresh = pd.DataFrame()
+    status_rows: list[dict] = []
     if not coords_todo.empty:
         fresh = _query_all_catalogs(
             coords_todo,
@@ -421,6 +471,7 @@ def run_spectra_availability(
             show_progress=show_progress,
             tap_timeout=tap_timeout,
             tap_chunk_size=tap_chunk_size,
+            status_rows=status_rows,
         )
     elif cached_ids:
         print(f"[spectra] All {len(coords)} candidates already in checkpoint, skipping queries")
@@ -455,6 +506,7 @@ def run_spectra_availability(
 
     _write_spectra_parquet(spectra_long, out_dir / "spectra_long.parquet", compression="zstd")
     summary.to_parquet(out_dir / "spectra_summary.parquet", index=False, compression="zstd")
+    _write_spectra_parquet(_spectra_query_status_frame(status_rows), out_dir / "spectra_query_status.parquet", compression="zstd")
 
     if checkpoint_path and Path(checkpoint_path).exists():
         Path(checkpoint_path).unlink()

@@ -564,6 +564,7 @@ def assemble_review_lightcurve_plot(request: ReviewPlotRequest) -> ReviewLightCu
             period_payload,
             override_period=request.override_period,
             override_source=request.override_period_source or "manual/search",
+            include_periodogram_periods=False,
         )
     else:
         phase_period = None

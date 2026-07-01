@@ -731,6 +731,39 @@ def test_auto_period_on_navigate_queues_fallback_pdm_without_stored_period(monke
     assert request["reason"] == "no stored period"
 
 
+def test_auto_period_on_navigate_ignores_stats_lomb_scargle_seed(monkeypatch) -> None:
+    monkeypatch.setattr(
+        review_app,
+        "_candidate_context",
+        lambda _candidate_id: (
+            {
+                "candidate_id": "cand-1",
+                "stats_variability_lomb_scargle_best_period_days": 5818.14746,
+            },
+            None,
+            None,
+        ),
+    )
+
+    result, label, manual_period, cache_update, request = review_app.auto_period_on_navigate(
+        "cand-1",
+        0.1,
+        10.0,
+        {},
+        {"nonce": 4},
+    )
+
+    assert result["pending"] is True
+    assert result["source"] == "Auto PDM"
+    assert result["search_method"] == "pdm"
+    assert result["reason"] == "no stored period"
+    assert label == "No stored period; running auto PDM..."
+    assert manual_period is None
+    assert cache_update is review_app.no_update
+    assert request["method"] == "pdm"
+    assert request["reason"] == "no stored period"
+
+
 def test_auto_period_cache_reuses_only_matching_bounds(monkeypatch) -> None:
     cached_result = {
         "candidate_id": "cand-1",

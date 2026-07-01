@@ -412,6 +412,7 @@ _EXTERNAL_PREFIXES = (
     "apass_",
     "galex_",
     "iphas_",
+    "vphas_",
     "sfr_",
     "cluster_",
     "banyan_",

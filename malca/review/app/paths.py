@@ -659,6 +659,8 @@ def _vetting_mode_for_input(input_path: str | Path | None) -> str:
 
 def _load_spectra_rows(candidate_id: str, run_dir: Path | None) -> pd.DataFrame:
     """Load spectra matches for one candidate if local enrichment exists."""
+    from malca.enrich.apogee import APOGEE_FETCH_COLUMNS
+
     if run_dir is None:
         return pd.DataFrame()
     spectra_long = run_dir / "results" / "spectra_enrichment" / "spectra_long.parquet"
@@ -666,7 +668,16 @@ def _load_spectra_rows(candidate_id: str, run_dir: Path | None) -> pd.DataFrame:
         return pd.DataFrame()
 
     cid = str(candidate_id)
-    cols = ["candidate_id", "survey", "catalog", "sep_arcsec", "spectrum_redshift", "spectrum_spectral_type", "link"]
+    cols = [
+        "candidate_id",
+        "survey",
+        "catalog",
+        "sep_arcsec",
+        "spectrum_redshift",
+        "spectrum_spectral_type",
+        "link",
+        *APOGEE_FETCH_COLUMNS,
+    ]
     try:
         df = pd.read_parquet(spectra_long, columns=cols, filters=[("candidate_id", "==", cid)])
     except Exception:

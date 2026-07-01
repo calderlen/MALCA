@@ -104,8 +104,24 @@ APASS_CACHE_COLUMNS = [
     "apass_g", "apass_g_err", "apass_r", "apass_r_err", "apass_i", "apass_i_err",
 ]
 GALEX_CACHE_COLUMNS = ["galex_fuv", "galex_fuv_err", "galex_nuv", "galex_nuv_err"]
-IPHAS_CACHE_COLUMNS = ["iphas_r_ha", "iphas_r_i", "iphas_ha_excess"]
-VPHAS_CACHE_COLUMNS = ["vphas_ha_mag", "vphas_r_ha", "vphas_r_i", "vphas_ha_excess"]
+IPHAS_CACHE_COLUMNS = [
+    "iphas_r_mag", "iphas_r_err",
+    "iphas_i_mag", "iphas_i_err",
+    "iphas_ha_mag", "iphas_ha_err",
+    "iphas_r_i", "iphas_r_i_err",
+    "iphas_r_ha", "iphas_r_ha_err",
+    "iphas_sep_arcsec", "iphas_source_catalog",
+    "iphas_ha_excess",
+]
+VPHAS_CACHE_COLUMNS = [
+    "vphas_r_mag", "vphas_r_err",
+    "vphas_i_mag", "vphas_i_err",
+    "vphas_ha_mag", "vphas_ha_err",
+    "vphas_r_i", "vphas_r_i_err",
+    "vphas_r_ha", "vphas_r_ha_err",
+    "vphas_sep_arcsec", "vphas_source_catalog",
+    "vphas_ha_excess",
+]
 OPEN_CLUSTER_CACHE_COLUMNS = ["cluster_name", "cluster_age_myr", "cluster_dist_pc"]
 DUST_BASE_CACHE_COLUMNS = ["A_v_3d", "ebv_3d", "dust_sigma", "dust_max_dist_kpc"]
 DUST_DERED_SOURCE_COLUMNS = [
@@ -114,6 +130,16 @@ DUST_DERED_SOURCE_COLUMNS = [
     "apass_b", "apass_v", "apass_g", "apass_r", "apass_i",
     "galex_fuv", "galex_nuv", "baseline_mag", "g", "r", "i",
 ]
+
+MODULE_COMPLETION_COLUMNS = {
+    "allwise": ALLWISE_CACHE_COLUMNS,
+    "tmass": TMASS_CACHE_COLUMNS,
+    "apass": APASS_CACHE_COLUMNS,
+    "galex": GALEX_CACHE_COLUMNS,
+    "iphas": IPHAS_CACHE_COLUMNS,
+    "vphas": VPHAS_CACHE_COLUMNS,
+    "clusters": OPEN_CLUSTER_CACHE_COLUMNS,
+}
 
 
 def _parquet_column_names(path: Path) -> list[str] | None:
@@ -124,6 +150,52 @@ def _parquet_column_names(path: Path) -> list[str] | None:
         return list(pq.read_schema(path).names)
     except Exception:
         return None
+
+
+def _float_or_nan(value: object) -> float:
+    """Coerce a scalar catalog value to float, preserving missing values."""
+    if value is None or np.ma.is_masked(value):
+        return np.nan
+    try:
+        if pd.isna(value):
+            return np.nan
+    except (TypeError, ValueError):
+        pass
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return np.nan
+
+
+def _row_first_numeric(row: pd.Series, *names: str) -> float:
+    """Return the first finite numeric value among a row's possible column aliases."""
+    for name in names:
+        if name in row.index:
+            value = _float_or_nan(row.get(name))
+            if np.isfinite(value):
+                return value
+    return np.nan
+
+
+def _row_sep_arcsec(row: pd.Series) -> float:
+    return _row_first_numeric(row, "angDist", "sep_arcsec", "_r")
+
+
+def _quadrature_error(left: float, right: float) -> float:
+    if np.isfinite(left) and np.isfinite(right):
+        return float(np.hypot(left, right))
+    return np.nan
+
+
+def _ensure_output_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    for col in columns:
+        if col.endswith("_source_catalog"):
+            df[col] = ""
+        elif col.endswith("_ha_excess"):
+            df[col] = False
+        else:
+            df[col] = np.nan
+    return df
 
 
 def _canonicalize_wise_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -252,6 +324,14 @@ def _run_cached_characterization_module(
     out = df.copy()
     keys = _characterize_cache_keys(out, module)
     cache = _read_characterize_cache(module)
+    if not cache.empty:
+        missing_cache_columns = [col for col in output_columns if col not in cache.columns]
+        if missing_cache_columns:
+            print(
+                f"{module} cache schema stale; rerunning lookup "
+                f"for missing columns: {', '.join(missing_cache_columns[:5])}"
+            )
+            cache = pd.DataFrame()
     cache_columns = [c for c in cache.columns if c not in CHARACTERIZE_CACHE_META_COLUMNS]
     cache_hit_mask = pd.Series(False, index=out.index)
 
@@ -901,19 +981,12 @@ def crossmatch_iphas(df: pd.DataFrame, max_sep_arcsec: float = IPHAS_MAX_SEP_ARC
     if df.empty:
         return df
     df = df.copy()
+    df = _ensure_output_columns(df, IPHAS_CACHE_COLUMNS)
     
     if 'ra' not in df.columns or 'dec' not in df.columns:
         print("Warning: IPHAS crossmatch requires ra, dec columns")
-        df['iphas_r_ha'] = np.nan
-        df['iphas_r_i'] = np.nan
-        df['iphas_ha_excess'] = False
         return df
-    
-    # Initialize output columns
-    df['iphas_r_ha'] = np.nan
-    df['iphas_r_i'] = np.nan
-    df['iphas_ha_excess'] = False
-    
+
     # Prepare source table with unique index for matching back
     valid_mask = df['ra'].notna() & df['dec'].notna()
     if not valid_mask.any():
@@ -948,17 +1021,42 @@ def crossmatch_iphas(df: pd.DataFrame, max_sep_arcsec: float = IPHAS_MAX_SEP_ARC
             # Compute colors
             for _, row in result_df.iterrows():
                 idx = int(row['_idx'])
-                r_mag = float(row.get('r', np.nan))
-                ha_mag = float(row.get('Ha', np.nan))
-                i_mag = float(row.get('i', np.nan))
+                out_idx = df.index[idx]
+                r_mag = _row_first_numeric(row, "r", "rmag", "r_mag")
+                i_mag = _row_first_numeric(row, "i", "imag", "i_mag")
+                ha_mag = _row_first_numeric(row, "ha", "Ha", "Hamag", "Ha_mag")
+                r_err = _row_first_numeric(row, "rErr", "e_r", "e_rmag", "r_err")
+                i_err = _row_first_numeric(row, "iErr", "e_i", "e_imag", "i_err")
+                ha_err = _row_first_numeric(row, "haErr", "e_ha", "e_Ha", "e_Hamag", "ha_err")
+                r_i = _row_first_numeric(row, "rmi", "r-i", "r_i")
+                r_ha = _row_first_numeric(row, "rmha", "r-ha", "r-Ha", "r_Ha", "r_ha")
+                r_i_err = _row_first_numeric(row, "e_rmi", "e_r-i", "e_r_i", "r_i_err")
+                r_ha_err = _row_first_numeric(row, "e_rmha", "e_r-ha", "e_r-Ha", "e_r_ha", "r_ha_err")
                 
-                if np.isfinite(r_mag) and np.isfinite(ha_mag):
+                if not np.isfinite(r_i) and np.isfinite(r_mag) and np.isfinite(i_mag):
+                    r_i = r_mag - i_mag
+                if not np.isfinite(r_ha) and np.isfinite(r_mag) and np.isfinite(ha_mag):
                     r_ha = r_mag - ha_mag
-                    df.at[df.index[idx], 'iphas_r_ha'] = r_ha
-                    df.at[df.index[idx], 'iphas_ha_excess'] = r_ha > IPHAS_HA_EXCESS_THRESHOLD
+                if not np.isfinite(r_i_err):
+                    r_i_err = _quadrature_error(r_err, i_err)
+                if not np.isfinite(r_ha_err):
+                    r_ha_err = _quadrature_error(r_err, ha_err)
+
+                df.at[out_idx, 'iphas_r_mag'] = r_mag
+                df.at[out_idx, 'iphas_i_mag'] = i_mag
+                df.at[out_idx, 'iphas_ha_mag'] = ha_mag
+                df.at[out_idx, 'iphas_r_err'] = r_err
+                df.at[out_idx, 'iphas_i_err'] = i_err
+                df.at[out_idx, 'iphas_ha_err'] = ha_err
+                df.at[out_idx, 'iphas_r_i'] = r_i
+                df.at[out_idx, 'iphas_r_i_err'] = r_i_err
+                df.at[out_idx, 'iphas_r_ha'] = r_ha
+                df.at[out_idx, 'iphas_r_ha_err'] = r_ha_err
+                df.at[out_idx, 'iphas_sep_arcsec'] = _row_sep_arcsec(row)
+                df.at[out_idx, 'iphas_source_catalog'] = "II/321/iphas2"
                 
-                if np.isfinite(r_mag) and np.isfinite(i_mag):
-                    df.at[df.index[idx], 'iphas_r_i'] = r_mag - i_mag
+                if np.isfinite(r_ha):
+                    df.at[out_idx, 'iphas_ha_excess'] = r_ha > IPHAS_HA_EXCESS_THRESHOLD
             
             matched = len(result_df)
             ha_excess_count = (df['iphas_ha_excess'] == True).sum()
@@ -979,86 +1077,134 @@ def crossmatch_iphas(df: pd.DataFrame, max_sep_arcsec: float = IPHAS_MAX_SEP_ARC
 
 def crossmatch_vphas(df: pd.DataFrame, max_sep_arcsec: float = IPHAS_MAX_SEP_ARCSEC) -> pd.DataFrame:
     """
-    Crossmatch to VPHAS+ DR2 (II/341/vphasp) for Hα emission detection in the Southern Galactic Plane.
+    Crossmatch to VPHAS+ for Hα emission detection in the Southern Galactic Plane.
     
-    Uses CDS XMatch for efficient batch crossmatching. Returns (r-Hα) and (r-i) colors.
+    Uses VPHAS+ DR3 first, then falls back to DR2 for rows without complete
+    Hα colors. Returns (r-Hα) and (r-i) colors plus raw r/i/Hα photometry.
     """
     if df.empty:
         return df
     df = df.copy()
+    df = _ensure_output_columns(df, VPHAS_CACHE_COLUMNS)
     
     if 'ra' not in df.columns or 'dec' not in df.columns:
         print("Warning: VPHAS+ crossmatch requires ra, dec columns")
-        df['vphas_ha_mag'] = np.nan
-        df['vphas_r_ha'] = np.nan
-        df['vphas_r_i'] = np.nan
-        df['vphas_ha_excess'] = False
         return df
-    
-    # Initialize output columns
-    df['vphas_ha_mag'] = np.nan
-    df['vphas_r_ha'] = np.nan
-    df['vphas_r_i'] = np.nan
-    df['vphas_ha_excess'] = False
-    
+
     # Prepare source table with unique index for matching back
     valid_mask = df['ra'].notna() & df['dec'].notna()
     if not valid_mask.any():
         return df
-    
-    # Create astropy table for XMatch
-    source_table = Table()
-    source_table['_idx'] = np.where(valid_mask)[0]
-    source_table['ra'] = df.loc[valid_mask, 'ra'].values
-    source_table['dec'] = df.loc[valid_mask, 'dec'].values
-    
-    print(f"Running VPHAS+ XMatch for {len(source_table)} sources...")
-    
+
+    valid_positions = np.where(valid_mask)[0]
+
+    def _source_table_for_positions(positions: np.ndarray) -> Table:
+        tab = Table()
+        tab['_idx'] = positions
+        tab['ra'] = df.iloc[positions]['ra'].values
+        tab['dec'] = df.iloc[positions]['dec'].values
+        return tab
+
+    def _apply_matches(result, catalog: str, schema: str) -> int:
+        if result is None or len(result) == 0:
+            return 0
+        result_df = result.to_pandas()
+        if result_df.empty:
+            return 0
+        if 'angDist' in result_df.columns:
+            result_df = result_df.sort_values('angDist').drop_duplicates(subset='_idx', keep='first')
+        else:
+            result_df = result_df.drop_duplicates(subset='_idx', keep='first')
+
+        for _, row in result_df.iterrows():
+            idx = int(row['_idx'])
+            out_idx = df.index[idx]
+            if schema == "dr3":
+                r_mag = _row_first_numeric(row, "rap3", "rmag", "r_mag")
+                i_mag = _row_first_numeric(row, "iap3", "imag", "i_mag")
+                ha_mag = _row_first_numeric(row, "Haap3", "Hamag", "Ha_mag")
+                r_err = _row_first_numeric(row, "e_rap3", "e_rmag", "r_err")
+                i_err = _row_first_numeric(row, "e_iap3", "e_imag", "i_err")
+                ha_err = _row_first_numeric(row, "e_Haap3", "e_Hamag", "ha_err")
+                r_i = _row_first_numeric(row, "r-ipnt", "r-i", "r_i")
+                r_ha = _row_first_numeric(row, "r-Hapnt", "r-ha", "r_Ha", "r_ha")
+                r_i_err = _row_first_numeric(row, "e_r-ipnt", "e_r-i", "e_r_i", "r_i_err")
+                r_ha_err = _row_first_numeric(row, "e_r-Hapnt", "e_r-ha", "e_r_ha", "r_ha_err")
+            else:
+                r_mag = _row_first_numeric(row, "rmag", "r_mag", "rap3")
+                i_mag = _row_first_numeric(row, "imag", "i_mag", "iap3")
+                ha_mag = _row_first_numeric(row, "Hamag", "Ha_mag", "Haap3")
+                r_err = _row_first_numeric(row, "e_rmag", "e_rap3", "r_err")
+                i_err = _row_first_numeric(row, "e_imag", "e_iap3", "i_err")
+                ha_err = _row_first_numeric(row, "e_Hamag", "e_Haap3", "ha_err")
+                r_i = _row_first_numeric(row, "r-i", "r-ipnt", "r_i")
+                r_ha = _row_first_numeric(row, "r-ha", "r-Hapnt", "r_Ha", "r_ha")
+                r_i_err = _row_first_numeric(row, "e_r-i", "e_r-ipnt", "e_r_i", "r_i_err")
+                r_ha_err = _row_first_numeric(row, "e_r-ha", "e_r-Hapnt", "e_r_ha", "r_ha_err")
+
+            if not np.isfinite(r_i) and np.isfinite(r_mag) and np.isfinite(i_mag):
+                r_i = r_mag - i_mag
+            if not np.isfinite(r_ha) and np.isfinite(r_mag) and np.isfinite(ha_mag):
+                r_ha = r_mag - ha_mag
+            if not np.isfinite(r_i_err):
+                r_i_err = _quadrature_error(r_err, i_err)
+            if not np.isfinite(r_ha_err):
+                r_ha_err = _quadrature_error(r_err, ha_err)
+
+            df.at[out_idx, 'vphas_r_mag'] = r_mag
+            df.at[out_idx, 'vphas_i_mag'] = i_mag
+            df.at[out_idx, 'vphas_ha_mag'] = ha_mag
+            df.at[out_idx, 'vphas_r_err'] = r_err
+            df.at[out_idx, 'vphas_i_err'] = i_err
+            df.at[out_idx, 'vphas_ha_err'] = ha_err
+            df.at[out_idx, 'vphas_r_i'] = r_i
+            df.at[out_idx, 'vphas_r_i_err'] = r_i_err
+            df.at[out_idx, 'vphas_r_ha'] = r_ha
+            df.at[out_idx, 'vphas_r_ha_err'] = r_ha_err
+            df.at[out_idx, 'vphas_sep_arcsec'] = _row_sep_arcsec(row)
+            df.at[out_idx, 'vphas_source_catalog'] = catalog
+            if np.isfinite(r_ha):
+                df.at[out_idx, 'vphas_ha_excess'] = r_ha > IPHAS_HA_EXCESS_THRESHOLD
+        return len(result_df)
+
+    print(f"Running VPHAS+ DR3 XMatch for {len(valid_positions)} sources...")
     try:
+        source_table = _source_table_for_positions(valid_positions)
         result = XMatch.query(
             cat1=source_table,
-            cat2='vizier:II/341/vphasp',
+            cat2='vizier:II/386/vphasplus32',
             max_distance=max_sep_arcsec * u.arcsec,
             colRA1='ra', colDec1='dec',
             colRA2='RAJ2000', colDec2='DEJ2000'
         )
-        
-        if result is not None and len(result) > 0:
-            result_df = result.to_pandas()
-            
-            # For sources with multiple matches, keep closest
-            if 'angDist' in result_df.columns:
-                result_df = result_df.sort_values('angDist').drop_duplicates(subset='_idx', keep='first')
-            else:
-                result_df = result_df.drop_duplicates(subset='_idx', keep='first')
-            
-            # Compute colors
-            for _, row in result_df.iterrows():
-                idx = int(row['_idx'])
-                r_mag = float(row.get('rmag', np.nan))
-                ha_mag = float(row.get('Hamag', np.nan))
-                i_mag = float(row.get('imag', np.nan))
-                
-                if np.isfinite(ha_mag):
-                    df.at[df.index[idx], 'vphas_ha_mag'] = ha_mag
-                
-                if np.isfinite(r_mag) and np.isfinite(ha_mag):
-                    r_ha = r_mag - ha_mag
-                    df.at[df.index[idx], 'vphas_r_ha'] = r_ha
-                    df.at[df.index[idx], 'vphas_ha_excess'] = r_ha > IPHAS_HA_EXCESS_THRESHOLD
-                
-                if np.isfinite(r_mag) and np.isfinite(i_mag):
-                    df.at[df.index[idx], 'vphas_r_i'] = r_mag - i_mag
-            
-            matched = len(result_df)
-            ha_excess_count = (df['vphas_ha_excess'] == True).sum()
-            print(f"VPHAS+: {matched}/{len(df)} matched, {ha_excess_count} with Hα excess")
-        else:
-            print("VPHAS+: No matches found")
-            
+        _apply_matches(result, "II/386/vphasplus32", "dr3")
     except Exception as e:
-        print(f"VPHAS+ XMatch error: {e}")
-        # Not fatal, return what we have
+        print(f"VPHAS+ DR3 XMatch error: {e}")
+
+    complete = pd.to_numeric(df['vphas_r_ha'], errors="coerce").notna() & pd.to_numeric(df['vphas_r_i'], errors="coerce").notna()
+    fallback_positions = np.array([pos for pos in valid_positions if not bool(complete.iloc[pos])], dtype=int)
+    if len(fallback_positions) > 0:
+        print(f"Running VPHAS+ DR2 fallback XMatch for {len(fallback_positions)} sources...")
+        try:
+            source_table = _source_table_for_positions(fallback_positions)
+            result = XMatch.query(
+                cat1=source_table,
+                cat2='vizier:II/341/vphasp',
+                max_distance=max_sep_arcsec * u.arcsec,
+                colRA1='ra', colDec1='dec',
+                colRA2='RAJ2000', colDec2='DEJ2000'
+            )
+            _apply_matches(result, "II/341/vphasp", "dr2")
+        except Exception as e:
+            print(f"VPHAS+ DR2 XMatch error: {e}")
+
+    matched_rows = int(df['vphas_source_catalog'].astype(str).str.len().gt(0).sum())
+    if matched_rows:
+        ha_excess_count = (df['vphas_ha_excess'] == True).sum()
+        complete_count = int((pd.to_numeric(df['vphas_r_ha'], errors="coerce").notna() & pd.to_numeric(df['vphas_r_i'], errors="coerce").notna()).sum())
+        print(f"VPHAS+: {matched_rows}/{len(df)} matched, {complete_count} complete color pairs, {ha_excess_count} with Hα excess")
+    else:
+        print("VPHAS+: No matches found")
 
     return df
 
@@ -1106,22 +1252,25 @@ def crossmatch_apass(df: pd.DataFrame, max_sep_arcsec: float = APASS_MAX_SEP_ARC
             else:
                 result_df = result_df.drop_duplicates(subset='_idx', keep='first')
                 
-            # Map Vizier columns to internal names
-            # APASS DR9 cols: Vmag, e_Vmag, Bmag, e_Bmag, g_mag, e_g_mag, r_mag, e_r_mag, i_mag, e_i_mag
+            # Map Vizier columns to internal names. The Sloan-like APASS
+            # columns are named g'mag/r'mag/i'mag in VizieR.
             col_map = {
-                "Vmag": "apass_v", "e_Vmag": "apass_v_err",
-                "Bmag": "apass_b", "e_Bmag": "apass_b_err",
-                "g_mag": "apass_g", "e_g_mag": "apass_g_err",
-                "r_mag": "apass_r", "e_r_mag": "apass_r_err",
-                "i_mag": "apass_i", "e_i_mag": "apass_i_err"
+                ("Vmag",): "apass_v", ("e_Vmag",): "apass_v_err",
+                ("Bmag",): "apass_b", ("e_Bmag",): "apass_b_err",
+                ("g'mag", "g_mag", "gmag"): "apass_g",
+                ("e_g'mag", "e_g_mag", "e_gmag"): "apass_g_err",
+                ("r'mag", "r_mag", "rmag"): "apass_r",
+                ("e_r'mag", "e_r_mag", "e_rmag"): "apass_r_err",
+                ("i'mag", "i_mag", "imag"): "apass_i",
+                ("e_i'mag", "e_i_mag", "e_imag"): "apass_i_err",
             }
             
             for _, row in result_df.iterrows():
                 idx = int(row['_idx'])
-                for viz_col, my_col in col_map.items():
-                    val = row.get(viz_col, np.nan)
-                    if pd.notna(val):
-                        df.at[df.index[idx], my_col] = float(val)
+                for viz_cols, my_col in col_map.items():
+                    val = _row_first_numeric(row, *viz_cols)
+                    if np.isfinite(val):
+                        df.at[df.index[idx], my_col] = val
             
             print(f"APASS: {len(result_df)} matches found")
     except Exception as e:
@@ -1169,16 +1318,18 @@ def crossmatch_galex(df: pd.DataFrame, max_sep_arcsec: float = GALEX_MAX_SEP_ARC
                 result_df = result_df.drop_duplicates(subset='_idx', keep='first')
                 
             col_map = {
-                "FUVmag": "galex_fuv", "e_FUVmag": "galex_fuv_err",
-                "NUVmag": "galex_nuv", "e_NUVmag": "galex_nuv_err"
+                ("FUV", "FUVmag"): "galex_fuv",
+                ("e_FUV", "e_FUVmag"): "galex_fuv_err",
+                ("NUV", "NUVmag"): "galex_nuv",
+                ("e_NUV", "e_NUVmag"): "galex_nuv_err",
             }
             
             for _, row in result_df.iterrows():
                 idx = int(row['_idx'])
-                for viz_col, my_col in col_map.items():
-                    val = row.get(viz_col, np.nan)
-                    if pd.notna(val):
-                        df.at[df.index[idx], my_col] = float(val)
+                for viz_cols, my_col in col_map.items():
+                    val = _row_first_numeric(row, *viz_cols)
+                    if np.isfinite(val):
+                        df.at[df.index[idx], my_col] = val
             
             print(f"GALEX: {len(result_df)} matches found")
     except Exception as e:
@@ -1807,7 +1958,14 @@ def _module_completed(df: pd.DataFrame, module: str) -> bool:
     if col not in df.columns:
         return False
     vals = df[col].dropna().unique()
-    return len(vals) > 0 and all(v in ("ok", "skipped") for v in vals)
+    if len(vals) == 0 or any(v not in ("ok", "skipped") for v in vals):
+        return False
+    if "ok" in set(vals):
+        required = MODULE_COMPLETION_COLUMNS.get(module, [])
+        missing = [out_col for out_col in required if out_col not in df.columns]
+        if missing:
+            return False
+    return True
 
 
 def characterize_candidates_df(

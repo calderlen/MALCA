@@ -83,6 +83,53 @@ def test_import_candidates_preserves_extended_enrichment_payload(tmp_path: Path)
     assert payload["ms_event_type"] == "dip"
 
 
+def test_import_candidates_preserves_halpha_photometry_payload(tmp_path: Path) -> None:
+    db_path = tmp_path / "review.db"
+    df = pd.DataFrame([
+        {
+            "candidate_id": "HA-1",
+            "asas_sn_id": "HA-1",
+            "iphas_r_mag": 12.20,
+            "iphas_i_mag": 11.87,
+            "iphas_ha_mag": 12.04,
+            "iphas_r_i": 0.33,
+            "iphas_r_ha": 0.16,
+            "iphas_sep_arcsec": 0.4,
+            "iphas_source_catalog": "II/321/iphas2",
+            "vphas_r_mag": 16.0,
+            "vphas_i_mag": 15.3,
+            "vphas_ha_mag": 15.5,
+            "vphas_r_i": 0.7,
+            "vphas_r_ha": 0.5,
+            "vphas_sep_arcsec": 0.7,
+            "vphas_source_catalog": "II/341/vphasp",
+        }
+    ])
+
+    with db_connect(db_path) as conn:
+        import_candidates(
+            conn,
+            df,
+            source_path=str(tmp_path),
+            characterize_before_import=False,
+            vet_before_import=False,
+        )
+        payload = get_candidate_payload(conn, "HA-1")
+
+    assert payload["iphas_r_mag"] == 12.20
+    assert payload["iphas_i_mag"] == 11.87
+    assert payload["iphas_ha_mag"] == 12.04
+    assert payload["iphas_r_i"] == 0.33
+    assert payload["iphas_r_ha"] == 0.16
+    assert payload["iphas_source_catalog"] == "II/321/iphas2"
+    assert payload["vphas_r_mag"] == 16.0
+    assert payload["vphas_i_mag"] == 15.3
+    assert payload["vphas_ha_mag"] == 15.5
+    assert payload["vphas_r_i"] == 0.7
+    assert payload["vphas_r_ha"] == 0.5
+    assert payload["vphas_source_catalog"] == "II/341/vphasp"
+
+
 def test_merge_review_databases_prefers_newer_updated_at(tmp_path: Path) -> None:
     source_db = tmp_path / "source.db"
     target_db = tmp_path / "target.db"

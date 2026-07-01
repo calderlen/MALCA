@@ -140,6 +140,7 @@ def test_vet_candidates_missing_coordinates_skips_coordinate_crossmatches() -> N
         run_atlas=False,
         run_gaia_epoch=False,
         run_erosita=False,
+        run_chandra_csc=False,
         run_pm_check=False,
     )
 

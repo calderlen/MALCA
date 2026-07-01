@@ -9,6 +9,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 from astropy.table import Table
 
 import malca.review.sed as review_sed
@@ -38,6 +39,28 @@ from malca.enrichment.sed_model import (
     load_sed_model_fits,
     upsert_sed_model_results,
 )
+
+
+def _table_from_dicts(rows: list[dict]) -> Table:
+    if not rows:
+        return Table()
+    names = list(rows[0])
+    values = [tuple(row.get(name) for name in names) for row in rows]
+    return Table(rows=values, names=names)
+
+
+def _patch_vizier_query(monkeypatch, tables_by_catalog: dict[str, Table]) -> None:
+    vizier_module = pytest.importorskip("astroquery.vizier")
+
+    class FakeVizier:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.TIMEOUT = None
+
+        def query_region(self, *_args, catalog=None, **_kwargs):
+            table = tables_by_catalog.get(str(catalog))
+            return [] if table is None else [table]
+
+    monkeypatch.setattr(vizier_module, "Vizier", FakeVizier)
 
 
 def test_ab_and_vega_flux_conversions() -> None:
@@ -301,6 +324,117 @@ def test_jy_catalog_rows_roundtrip_as_flux_density() -> None:
     assert math.isclose(float(rows.loc[0, "flux_nu_jy"]), 2.0)
     assert rows.loc[0, "mag_system"] == "AB"
     assert "confusion_risk" in rows.loc[0, "quality_flags"]
+
+
+def test_ukidss_j_uses_epoch_specific_aliases(monkeypatch) -> None:
+    candidates = pd.DataFrame([{"candidate_id": "cand-ukidss", "ra_deg": 10.0, "dec_deg": 20.0}])
+    table = _table_from_dicts([
+        {
+            "RAJ2000": 10.0,
+            "DEJ2000": 20.0,
+            "Jmag1": 16.1,
+            "e_Jmag1": 0.03,
+            "Jmag2": np.nan,
+            "e_Jmag2": np.nan,
+        }
+    ])
+    _patch_vizier_query(monkeypatch, {"II/319/las9": table})
+
+    rows = review_sed.query_vizier_source(candidates, "ukidss")
+
+    j_row = rows.loc[rows["band"] == "J"].iloc[0]
+    assert math.isclose(float(j_row["mag"]), 16.1)
+    assert math.isclose(float(j_row["mag_err"]), 0.03)
+
+
+def test_ukidss_j_falls_back_to_second_epoch(monkeypatch) -> None:
+    candidates = pd.DataFrame([{"candidate_id": "cand-ukidss-2", "ra_deg": 10.0, "dec_deg": 20.0}])
+    table = _table_from_dicts([
+        {
+            "RAJ2000": 10.0,
+            "DEJ2000": 20.0,
+            "Jmag1": np.nan,
+            "e_Jmag1": np.nan,
+            "Jmag2": 16.4,
+            "e_Jmag2": 0.05,
+        }
+    ])
+    _patch_vizier_query(monkeypatch, {"II/319/las9": table})
+
+    rows = review_sed.query_vizier_source(candidates, "ukidss")
+
+    j_row = rows.loc[rows["band"] == "J"].iloc[0]
+    assert math.isclose(float(j_row["mag"]), 16.4)
+    assert math.isclose(float(j_row["mag_err"]), 0.05)
+
+
+def test_des_vizier_source_prefers_psf_columns(monkeypatch) -> None:
+    candidates = pd.DataFrame([{"candidate_id": "cand-des", "ra_deg": 10.0, "dec_deg": 20.0}])
+    table = _table_from_dicts([
+        {
+            "RA_ICRS": 10.0,
+            "DE_ICRS": 20.0,
+            "gmagPSF": 18.2,
+            "e_gmagPSF": 0.02,
+            "gmag": 19.9,
+            "e_gmag": 0.3,
+        }
+    ])
+    _patch_vizier_query(monkeypatch, {"II/371/des_dr2": table})
+
+    rows = review_sed.query_des_photometry(candidates)
+
+    g_row = rows.loc[rows["band"] == "g"].iloc[0]
+    assert math.isclose(float(g_row["mag"]), 18.2)
+    assert math.isclose(float(g_row["mag_err"]), 0.02)
+
+
+def test_akari_irc_uses_flux_columns_not_flags(monkeypatch) -> None:
+    candidates = pd.DataFrame([{"candidate_id": "cand-akari", "ra_deg": 10.0, "dec_deg": 20.0}])
+    table = _table_from_dicts([
+        {
+            "S09": 0.1599,
+            "e_S09": 0.0444,
+            "S18": 0.25,
+            "e_S18": 0.05,
+            "f09": "9",
+            "f18": "8",
+        }
+    ])
+    _patch_vizier_query(monkeypatch, {"II/297/irc": table, "II/298/fis": Table()})
+
+    rows = review_sed.query_flux_catalog_source(candidates, "akari")
+    by_band = rows.set_index("band")
+
+    assert math.isclose(float(by_band.loc["S9W", "flux_nu_jy"]), 0.1599)
+    assert math.isclose(float(by_band.loc["S9W", "flux_nu_jy_err"]), 0.0444)
+    assert not math.isclose(float(by_band.loc["S9W", "flux_nu_jy"]), 9.0)
+    assert math.isclose(float(by_band.loc["L18W", "flux_nu_jy"]), 0.25)
+
+
+def test_herschel_pacs_flux_and_noise_are_scaled_from_mjy(monkeypatch) -> None:
+    candidates = pd.DataFrame([{"candidate_id": "cand-herschel", "ra_deg": 10.0, "dec_deg": 20.0}])
+    table = _table_from_dicts([
+        {
+            "Flux": 2163.374054,
+            "snrnoise": 2.05664964214913,
+            "rms": 91.181079,
+        }
+    ])
+    _patch_vizier_query(
+        monkeypatch,
+        {
+            "VIII/106/hppsc070": table,
+            "VIII/106/hppsc100": Table(),
+            "VIII/106/hppsc160": Table(),
+        },
+    )
+
+    rows = review_sed.query_flux_catalog_source(candidates, "herschel")
+
+    pacs70 = rows.loc[rows["band"] == "PACS70"].iloc[0]
+    assert math.isclose(float(pacs70["flux_nu_jy"]), 2.163374054)
+    assert math.isclose(float(pacs70["flux_nu_jy_err"]), 0.00205664964214913)
 
 
 def test_sed_rows_roundtrip_review_db(tmp_path: Path) -> None:

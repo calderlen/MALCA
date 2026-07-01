@@ -27,6 +27,13 @@ _PERIOD_SOURCE_KEYS: tuple[tuple[str, str], ...] = (
     ("stats_variability_lomb_scargle_best_period_days", "stats_variability_lomb_scargle_best_period_days"),
 )
 
+_PERIODOGRAM_PERIOD_KEYS = {
+    "lsp_period",
+    "pdm_period",
+    "ce_period",
+    "stats_variability_lomb_scargle_best_period_days",
+}
+
 
 def _finite_float(value: object) -> float | None:
     try:
@@ -42,6 +49,7 @@ def resolve_phase_period(
     override_period: float | None = None,
     override_source: str = "manual/search",
     include_lsp: bool = True,
+    include_periodogram_periods: bool = True,
 ) -> tuple[float | None, str]:
     """Return the preferred period and source label for phase folding."""
     manual = _finite_float(override_period)
@@ -51,6 +59,8 @@ def resolve_phase_period(
     payload = payload or {}
     for key, source in _PERIOD_SOURCE_KEYS:
         if key == "lsp_period" and not include_lsp:
+            continue
+        if key in _PERIODOGRAM_PERIOD_KEYS and not include_periodogram_periods:
             continue
         period = _finite_float(payload.get(key))
         if period is not None and period > 0:

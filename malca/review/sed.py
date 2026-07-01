@@ -1206,14 +1206,14 @@ VIZIER_SOURCE_SPECS: dict[str, VizierSourceSpec] = {
         "u": ("uPSF", "e_uPSF"), "v": ("vPSF", "e_vPSF"), "g": ("gPSF", "e_gPSF"), "r": ("rPSF", "e_rPSF"), "i": ("iPSF", "e_iPSF"), "z": ("zPSF", "e_zPSF"),
     }),
     "des": VizierSourceSpec("DES", "II/371/des_dr2", 1.2, "RA_ICRS", "DE_ICRS", {
-        "g": (("WAVG_MAG_PSF_G", "MAG_PSF_G", "gmag"), ("WAVG_MAGERR_PSF_G", "MAGERR_PSF_G", "e_gmag")),
-        "r": (("WAVG_MAG_PSF_R", "MAG_PSF_R", "rmag"), ("WAVG_MAGERR_PSF_R", "MAGERR_PSF_R", "e_rmag")),
-        "i": (("WAVG_MAG_PSF_I", "MAG_PSF_I", "imag"), ("WAVG_MAGERR_PSF_I", "MAGERR_PSF_I", "e_imag")),
-        "z": (("WAVG_MAG_PSF_Z", "MAG_PSF_Z", "zmag"), ("WAVG_MAGERR_PSF_Z", "MAGERR_PSF_Z", "e_zmag")),
-        "Y": (("WAVG_MAG_PSF_Y", "MAG_PSF_Y", "Ymag"), ("WAVG_MAGERR_PSF_Y", "MAGERR_PSF_Y", "e_Ymag")),
+        "g": (("gmagPSF", "WAVG_MAG_PSF_G", "MAG_PSF_G", "gmag"), ("e_gmagPSF", "WAVG_MAGERR_PSF_G", "MAGERR_PSF_G", "e_gmag")),
+        "r": (("rmagPSF", "WAVG_MAG_PSF_R", "MAG_PSF_R", "rmag"), ("e_rmagPSF", "WAVG_MAGERR_PSF_R", "MAGERR_PSF_R", "e_rmag")),
+        "i": (("imagPSF", "WAVG_MAG_PSF_I", "MAG_PSF_I", "imag"), ("e_imagPSF", "WAVG_MAGERR_PSF_I", "MAGERR_PSF_I", "e_imag")),
+        "z": (("zmagPSF", "WAVG_MAG_PSF_Z", "MAG_PSF_Z", "zmag"), ("e_zmagPSF", "WAVG_MAGERR_PSF_Z", "MAGERR_PSF_Z", "e_zmag")),
+        "Y": (("YmagPSF", "WAVG_MAG_PSF_Y", "MAG_PSF_Y", "Ymag"), ("e_YmagPSF", "WAVG_MAGERR_PSF_Y", "MAGERR_PSF_Y", "e_Ymag")),
     }),
     "ukidss": VizierSourceSpec("UKIDSS", "II/319/las9", 1.2, "RAJ2000", "DEJ2000", {
-        "Y": ("Ymag", "e_Ymag"), "J": ("Jmag", "e_Jmag"), "H": ("Hmag", "e_Hmag"), "K": ("Kmag", "e_Kmag"),
+        "Y": ("Ymag", "e_Ymag"), "J": (("Jmag1", "Jmag2"), ("e_Jmag1", "e_Jmag2")), "H": ("Hmag", "e_Hmag"), "K": ("Kmag", "e_Kmag"),
     }),
     "vista": VizierSourceSpec("VISTA/VVV", "II/376/vvv4", 1.2, "RAJ2000", "DEJ2000", {
         "Z": (("Z1ap3", "Z2ap3", "Zmag3"), ("e_Z1ap3", "e_Z2ap3", "e_Zmag3")),
@@ -1398,8 +1398,8 @@ VIZIER_FLUX_SPECS: dict[str, VizierFluxSpec] = {
         "MIPS24": (("F24-PSF", "F24-Ap"), ("e_F24-PSF", "e_F24-Ap")),
     }, flux_scale_to_jy=1.0e-6),
     "akari": VizierFluxSpec("AKARI", "II/297/irc", 5.0, {
-        "S9W": (("S9W", "F09", "Flux9"), ("e_S9W", "e_F09", "e_Flux9")),
-        "L18W": (("L18W", "F18", "Flux18"), ("e_L18W", "e_F18", "e_Flux18")),
+        "S9W": ("S09", "e_S09"),
+        "L18W": ("S18", "e_S18"),
     }),
     "akari_fis": VizierFluxSpec("AKARI", "II/298/fis", 20.0, {
         "N60": (("S65", "F65", "N60", "Flux65"), ("e_S65", "e_F65", "e_N60")),
@@ -1414,14 +1414,14 @@ VIZIER_FLUX_SPECS: dict[str, VizierFluxSpec] = {
         "100": (("Fnu_100", "F100", "f100"), ("e_Fnu_100", "e_F100")),
     }, error_is_percent=True),
     "herschel70": VizierFluxSpec("Herschel", "VIII/106/hppsc070", 8.0, {
-        "PACS70": (("Flux", "flux", "F70", "Fnu"), ("e_Flux", "e_flux", "e_F70")),
-    }),
+        "PACS70": (("Flux", "flux", "F70", "Fnu"), ("snrnoise", "rms", "e_Flux", "e_flux", "e_F70")),
+    }, flux_scale_to_jy=1.0e-3),
     "herschel100": VizierFluxSpec("Herschel", "VIII/106/hppsc100", 10.0, {
-        "PACS100": (("Flux", "flux", "F100", "Fnu"), ("e_Flux", "e_flux", "e_F100")),
-    }),
+        "PACS100": (("Flux", "flux", "F100", "Fnu"), ("snrnoise", "rms", "e_Flux", "e_flux", "e_F100")),
+    }, flux_scale_to_jy=1.0e-3),
     "herschel160": VizierFluxSpec("Herschel", "VIII/106/hppsc160", 14.0, {
-        "PACS160": (("Flux", "flux", "F160", "Fnu"), ("e_Flux", "e_flux", "e_F160")),
-    }),
+        "PACS160": (("Flux", "flux", "F160", "Fnu"), ("snrnoise", "rms", "e_Flux", "e_flux", "e_F160")),
+    }, flux_scale_to_jy=1.0e-3),
 }
 
 

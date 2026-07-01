@@ -440,6 +440,22 @@ def test_fetch_tess_lightcurves_records_lookup_errors(
     assert no_data_row["status"] == "no_data"
 
 
+def test_tess_bad_cache_purge_is_scoped_to_lightkurve_cache(tmp_path: Path) -> None:
+    bad_cache = tmp_path / ".lightkurve" / "cache" / "mastDownload" / "TESS" / "bad.fits"
+    bad_cache.parent.mkdir(parents=True)
+    bad_cache.write_text("corrupt", encoding="ascii")
+    outside = tmp_path / "outside.fits"
+    outside.write_text("keep", encoding="ascii")
+    exc = RuntimeError(f"Error in reading Data product {bad_cache}")
+
+    paths = vetting._tess_cache_paths_from_error(exc)
+    purged = vetting._purge_tess_bad_cache_files(paths + [outside])
+
+    assert purged == [bad_cache.resolve()]
+    assert not bad_cache.exists()
+    assert outside.exists()
+
+
 class _FakeGaiaEpochTapTable:
     def __init__(self, df: pd.DataFrame) -> None:
         self._df = df
@@ -654,6 +670,27 @@ def test_crts_cgi_html_link_and_csv_normalization() -> None:
     assert lc["mag"].tolist() == [14.0, 14.2]
     assert lc["catalog"].unique().tolist() == ["photcat"]
     assert lc["mjd"].tolist() == [56000.0, 56001.0]
+
+
+def test_crts_cgi_normalization_tolerates_missing_optional_columns() -> None:
+    raw = vetting._read_crts_csv_text(
+        "Mag,Magerr,RA,MJD\n"
+        "14.0,0.05,10.0,56000.0\n"
+        "14.2,0.06,10.0,56001.0\n"
+    )
+
+    lc = vetting._normalize_crts_cgi_lightcurve(
+        raw,
+        ra=10.0,
+        dec=20.0,
+        radius_arcsec=10.0,
+        catalog="photcat",
+    )
+
+    assert len(lc) == 2
+    assert lc["crts_id"].unique().tolist() == ["photcat:10.0000000:20.0000000"]
+    assert lc["dec"].tolist() == [20.0, 20.0]
+    assert lc["blend"].tolist() == [0, 0]
 
 
 def test_fetch_crts_lightcurves_cgi_success_writes_parquet_and_status(

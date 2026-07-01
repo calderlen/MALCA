@@ -133,3 +133,28 @@ def test_harmonic_selection_keeps_cadence_alias_flag_out_of_ranking() -> None:
     assert selected["period"] == pytest.approx(1.0)
     assert selected["alias_flag"] is True
     assert selected["alias_matches"] == [1.0]
+
+
+def test_review_stored_period_ignores_raw_periodogram_outputs() -> None:
+    payload = {
+        "candidate_id": "cand-1",
+        "lsp_period": 2.0,
+        "pdm_period": 3.0,
+        "ce_period": 4.0,
+        "stats_variability_lomb_scargle_best_period_days": 5818.14746,
+    }
+
+    assert period_search.has_external_period(payload) is False
+    assert period_search.resolve_stored_review_period(payload) == (None, "")
+
+
+def test_review_stored_period_keeps_authoritative_payload_periods() -> None:
+    assert period_search.has_external_period({"period_consensus_days": 8.0}) is True
+    assert period_search.resolve_stored_review_period({"period_consensus_days": 8.0}) == (
+        8.0,
+        "period_consensus_days",
+    )
+    assert period_search.resolve_stored_review_period({"pre_periodicity_selected_period": 6.0}) == (
+        6.0,
+        "pre_periodicity_selected_period",
+    )

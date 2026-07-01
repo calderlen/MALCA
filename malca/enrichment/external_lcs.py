@@ -345,6 +345,12 @@ def _cache_only_specs():
             "summary_cols": ["ztf_lc_n_det", "ztf_lc_g_range", "ztf_lc_r_range"],
             "match_col": "ztf_lc_n_det",
             "summarize": vetting._summarize_ztf_lc,
+            "cache_key": lambda df, idx: vetting._coord_lookup_cache_key(
+                df,
+                idx,
+                2.0,
+                vetting.ZTF_LC_COLLECTION,
+            ),
         },
         "gaia_epoch": {
             "module": "Gaia epoch LCs",
@@ -352,6 +358,10 @@ def _cache_only_specs():
             "summary_cols": ["gaia_epoch_lc_n_g", "gaia_epoch_lc_g_range"],
             "match_col": "gaia_epoch_lc_n_g",
             "summarize": vetting._summarize_gaia_epoch_lc,
+            "cache_key": lambda df, idx: vetting._source_lookup_cache_key(
+                vetting._parse_gaia_source_id_str(df.loc[idx, "gaia_id"] if "gaia_id" in df.columns else None),
+                "gaia_epoch_lc",
+            ),
         },
         "tess": {
             "module": "TESS LCs",
@@ -359,6 +369,12 @@ def _cache_only_specs():
             "summary_cols": ["tess_n_sectors", "tess_total_points", "tess_flux_range"],
             "match_col": "tess_n_sectors",
             "summarize": lambda lc: vetting._summarize_flux_lc(lc, "sector", "tess_n_sectors", "tess_total_points", "tess_flux_range"),
+            "cache_key": lambda df, idx: vetting._coord_lookup_cache_key(
+                df,
+                idx,
+                vetting.TESS_SEARCH_RADIUS_ARCSEC,
+                "tess",
+            ),
         },
         "neowise": {
             "module": "NEOWISE LCs",
@@ -401,6 +417,12 @@ def _cache_only_specs():
             "summary_cols": ["allwise_mep_n_epochs", "allwise_mep_w1_range", "allwise_mep_w2_range", "allwise_mep_w3_range", "allwise_mep_w4_range"],
             "match_col": "allwise_mep_n_epochs",
             "summarize": vetting._summarize_allwise_mep_lc,
+            "cache_key": lambda df, idx: vetting._coord_lookup_cache_key(
+                df,
+                idx,
+                vetting.ALLWISE_MEP_MAX_SEP_ARCSEC,
+                "allwise_mep",
+            ),
         },
         "vvvx_virac": {
             "module": "VVVX/VIRAC2 LCs",
@@ -408,6 +430,12 @@ def _cache_only_specs():
             "summary_cols": ["vvvx_virac_n_epochs", "vvvx_virac_z_range", "vvvx_virac_y_range", "vvvx_virac_j_range", "vvvx_virac_h_range", "vvvx_virac_ks_range"],
             "match_col": "vvvx_virac_n_epochs",
             "summarize": vetting._summarize_vvvx_virac_lc,
+            "cache_key": lambda df, idx: vetting._coord_lookup_cache_key(
+                df,
+                idx,
+                vetting.VVVX_VIRAC_MAX_SEP_ARCSEC,
+                "vvvx_virac2",
+            ),
         },
         "ps1": {
             "module": "Pan-STARRS LCs",
@@ -415,6 +443,12 @@ def _cache_only_specs():
             "summary_cols": ["ps1_lc_n_points"],
             "match_col": "ps1_lc_n_points",
             "summarize": lambda lc: vetting._summarize_count_lc(lc, "ps1_lc_n_points"),
+            "cache_key": lambda df, idx: vetting._coord_lookup_cache_key(
+                df,
+                idx,
+                vetting.PANSTARRS_LC_RADIUS_DEG * 3600.0,
+                "ps1_dr2",
+            ),
         },
         "crts": {
             "module": "CRTS LCs",
@@ -422,6 +456,12 @@ def _cache_only_specs():
             "summary_cols": ["crts_lc_n_points"],
             "match_col": "crts_lc_n_points",
             "summarize": lambda lc: vetting._summarize_count_lc(lc, "crts_lc_n_points"),
+            "cache_key": lambda df, idx: vetting._coord_lookup_cache_key(
+                df,
+                idx,
+                vetting.CRTS_MATCH_RADIUS_ARCSEC,
+                "crts",
+            ),
         },
     }
 
@@ -445,6 +485,46 @@ def _cache_only_status_summary(status_df: pd.DataFrame, module: str, candidate_i
     return {col: row.get(col, _cache_only_default_value(col)) for col in summary_cols}
 
 
+def _cache_only_summary_is_positive(summary: dict, match_col: str) -> bool:
+    value = summary.get(match_col)
+    if isinstance(value, bool):
+        return value
+    try:
+        return bool(pd.notna(value) and float(value) > 0)
+    except Exception:
+        return False
+
+
+def _cache_only_status_row(vetting, spec: dict, df: pd.DataFrame, idx: object, summary: dict) -> dict | None:
+    cache_key_func = spec.get("cache_key")
+    if cache_key_func is None:
+        return None
+    try:
+        cache_key = cache_key_func(df, idx)
+    except Exception:
+        cache_key = None
+    if cache_key is None:
+        return None
+    status = "fetched" if _cache_only_summary_is_positive(summary, spec["match_col"]) else "no_data"
+    if hasattr(vetting, "_external_lc_status_row"):
+        return vetting._external_lc_status_row(
+            df,
+            idx,
+            module=spec["module"],
+            cache_key=cache_key,
+            summary=summary,
+            status=status,
+        )
+    return {
+        "module": spec["module"],
+        "candidate_id": vetting._candidate_cache_id(df, idx),
+        "cache_key": cache_key,
+        "status": status,
+        "updated_unix": time.time(),
+        **summary,
+    }
+
+
 def rebuild_external_lc_table_from_cache(df: pd.DataFrame, output_dir: Path, run_flags: dict[str, bool]) -> pd.DataFrame:
     from malca.enrichment import vetting
 
@@ -452,6 +532,7 @@ def rebuild_external_lc_table_from_cache(df: pd.DataFrame, output_dir: Path, run
     specs = _cache_only_specs()
     status_df = vetting._read_external_lc_status(output_dir)
     messages: list[str] = []
+    repaired_status_rows: list[dict] = []
     for key, enabled in run_flags.items():
         if not enabled or key not in specs:
             continue
@@ -471,6 +552,10 @@ def rebuild_external_lc_table_from_cache(df: pd.DataFrame, output_dir: Path, run
                     summary = spec["summarize"](lc_df)
                 except Exception:
                     summary = None
+                if summary is not None:
+                    row = _cache_only_status_row(vetting, spec, out, idx, summary)
+                    if row is not None:
+                        repaired_status_rows.append(row)
             if summary is None:
                 summary = _cache_only_status_summary(status_df, spec["module"], cand_id, spec["summary_cols"])
                 if summary is not None:
@@ -480,12 +565,12 @@ def rebuild_external_lc_table_from_cache(df: pd.DataFrame, output_dir: Path, run
             found += 1
             for col in spec["summary_cols"]:
                 out.loc[idx, col] = summary.get(col, _cache_only_default_value(col))
-            try:
-                if pd.notna(summary.get(spec["match_col"])) and float(summary.get(spec["match_col"])) > 0:
-                    positive += 1
-            except Exception:
-                pass
+            if _cache_only_summary_is_positive(summary, spec["match_col"]):
+                positive += 1
         messages.append(f"{spec['module']}: restored {found} candidates from cache/status ({positive} with data; {status_hits} status-only)")
+    if repaired_status_rows:
+        vetting._write_external_lc_status(output_dir, repaired_status_rows)
+        messages.append(f"External LC status: repaired {len(repaired_status_rows)} rows from existing LC files")
     for msg in messages:
         print(msg)
     return out

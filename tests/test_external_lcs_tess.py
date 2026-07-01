@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from malca.enrichment import external_lcs
+from malca.enrichment import external_lcs, vetting
 from malca.review.pipeline import _run_external_lcs_stage, detect_pipeline_status, run_missing_stages
 from malca.review.store import db_connect, get_candidate_payload, import_candidates
 
@@ -446,6 +446,40 @@ def test_external_lcs_cache_only_rebuilds_summary_from_lc_file(monkeypatch, tmp_
     assert external_stats["kepler_n_quarters"] == 2
     assert external_stats["kepler_total_points"] == 3
     assert external_stats["kepler_flux_range"] == 0.3999999999999999
+
+
+def test_external_lcs_cache_only_repairs_ztf_status_from_existing_file(tmp_path: Path) -> None:
+    output_dir = tmp_path / "external_lcs"
+    output_dir.mkdir()
+    df = pd.DataFrame([{"candidate_id": "C1", "ra": 1.0, "dec": 2.0}])
+    pd.DataFrame(
+        {
+            "mjd": [59000.0, 59001.0, 59002.0],
+            "mag": [15.0, 15.4, 15.1],
+            "band": ["zg", "zg", "zr"],
+        }
+    ).to_parquet(output_dir / "ztf_lc_C1.parquet", index=False)
+    cache_key = vetting._coord_lookup_cache_key(df, 0, 2.0, vetting.ZTF_LC_COLLECTION)
+    pd.DataFrame(
+        [
+            {
+                "module": "ZTF LCs",
+                "candidate_id": "C1",
+                "cache_key": cache_key,
+                "status": "failed",
+                "ztf_lc_n_det": 0,
+            }
+        ]
+    ).to_parquet(output_dir / vetting.EXTERNAL_LC_STATUS_FILE, index=False)
+
+    out = external_lcs.rebuild_external_lc_table_from_cache(df, output_dir, {"ztf": True})
+
+    assert int(out.loc[0, "ztf_lc_n_det"]) == 3
+    assert round(float(out.loc[0, "ztf_lc_g_range"]), 6) == 0.4
+    status = pd.read_parquet(output_dir / vetting.EXTERNAL_LC_STATUS_FILE)
+    row = status[status["candidate_id"] == "C1"].iloc[-1]
+    assert row["status"] == "fetched"
+    assert int(row["ztf_lc_n_det"]) == 3
 
 
 def test_review_external_lcs_stage_runs_tess(monkeypatch, tmp_path: Path) -> None:

@@ -37,6 +37,19 @@ def test_resolve_phase_period_prefers_manual_then_payload_priority() -> None:
         9.0,
         "stats_variability_lomb_scargle_best_period_days",
     )
+    assert resolve_phase_period(
+        {
+            "period_consensus_days": 2.0,
+            "stats_variability_lomb_scargle_best_period_days": 9.0,
+        },
+        include_periodogram_periods=False,
+    ) == (2.0, "period_consensus_days")
+    assert resolve_phase_period(
+        {"stats_variability_lomb_scargle_best_period_days": 9.0},
+        include_periodogram_periods=False,
+    ) == (None, "")
+    assert resolve_phase_period({"pdm_period": 7.0}, include_periodogram_periods=False) == (None, "")
+    assert resolve_phase_period({"ce_period": 8.0}, include_periodogram_periods=False) == (None, "")
 
 
 def test_resolve_phase_epoch_uses_minimum_finite_jd() -> None:

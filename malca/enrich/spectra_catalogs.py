@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 
-QueryMode = Literal["xmatch", "tap"]
+QueryMode = Literal["xmatch", "tap", "tap_cone"]
 
 
 @dataclass(frozen=True)
@@ -34,10 +34,9 @@ DEFAULT_SPECTRA_CATALOG_SPECS: dict[str, SpectraCatalogSpec] = {
     # --- Tier A: wide-area surveys with direct flux archive access ---
     "desi_dr1": SpectraCatalogSpec(
         vizier_id="V/161/zcatdr1",
-        mode="tap",
-        tap_table='"V/161/zcatdr1"',
-        ra_col="RA",
-        dec_col="DEC",
+        mode="xmatch",
+        ra_col="RAICRS",
+        dec_col="DEICRS",
     ),
     "sdss_dr16_spec": SpectraCatalogSpec(
         vizier_id=_SDSS_SPEC,
@@ -50,40 +49,52 @@ DEFAULT_SPECTRA_CATALOG_SPECS: dict[str, SpectraCatalogSpec] = {
         query_group=_SDSS_GROUP,
         filter_col="survey",
         filter_values=("boss",),
+        enabled_by_default=False,
     ),
     "sdss_eboss": SpectraCatalogSpec(
         vizier_id=_SDSS_SPEC,
         query_group=_SDSS_GROUP,
         filter_col="survey",
         filter_values=("eboss",),
+        enabled_by_default=False,
     ),
     "sdss_legacy": SpectraCatalogSpec(
         vizier_id=_SDSS_SPEC,
         query_group=_SDSS_GROUP,
         filter_col="survey",
         filter_values=("sdss",),
+        enabled_by_default=False,
     ),
     "sdss_segue": SpectraCatalogSpec(
         vizier_id=_SDSS_SPEC,
         query_group=_SDSS_GROUP,
         filter_col="survey",
         filter_values=("segue1", "segue2"),
+        enabled_by_default=False,
     ),
     "sdss_spiders": SpectraCatalogSpec(
         vizier_id=_SDSS_SPEC,
         query_group=_SDSS_GROUP,
         filter_col="programname",
         filter_contains="spider",
+        enabled_by_default=False,
     ),
     "sdss_tdss": SpectraCatalogSpec(
         vizier_id=_SDSS_SPEC,
         query_group=_SDSS_GROUP,
         filter_col="programname",
         filter_contains="tdss",
+        enabled_by_default=False,
     ),
     "apogee_dr16": SpectraCatalogSpec(vizier_id="III/284/allstars"),
     "manga_dr17": SpectraCatalogSpec(vizier_id="J/ApJS/262/36/catalog"),
-    "lamost_dr7": SpectraCatalogSpec(vizier_id="V/156/dr7lrs"),
+    "lamost_dr7": SpectraCatalogSpec(
+        vizier_id="V/156/dr7lrs",
+        mode="tap_cone",
+        tap_table='"V/156/dr7lrs"',
+        ra_col="RAJ2000",
+        dec_col="DEJ2000",
+    ),
     "galah_dr3": SpectraCatalogSpec(vizier_id="J/MNRAS/506/150/stars"),
     "rave_dr6": SpectraCatalogSpec(vizier_id="III/283/ravedr6"),
     "sixdf_gs": SpectraCatalogSpec(vizier_id="VII/259/6dfgs"),
@@ -96,11 +107,15 @@ DEFAULT_SPECTRA_CATALOG_SPECS: dict[str, SpectraCatalogSpec] = {
         vizier_id="I/355/rvsmean",
         mode="tap",
         tap_table='"I/355/rvsmean"',
+        ra_col="RAICRS",
+        dec_col="DEICRS",
     ),
     "gaia_xp": SpectraCatalogSpec(
-        vizier_id="I/355/xpsample",
+        vizier_id="I/355/xpsummary",
         mode="tap",
-        tap_table='"I/355/xpsample"',
+        tap_table='"I/355/xpsummary"',
+        ra_col="RA_ICRS",
+        dec_col="DE_ICRS",
     ),
     "gaia_eso": SpectraCatalogSpec(vizier_id="J/A+A/676/A129/catalog"),
     "vvds": SpectraCatalogSpec(vizier_id="III/250/vvds_dp"),
