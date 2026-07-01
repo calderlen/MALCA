@@ -6,6 +6,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from malca.products.feature_layers import to_layer_first_frame
+
 post_filter = pytest.importorskip("malca.stv.filter")
 
 
@@ -86,6 +88,58 @@ def test_filter_significant_detection_explicit_gate() -> None:
     )
 
     assert set(out["lc_path"]) == {"dip_ok.csv", "jump_ok.csv"}
+
+
+def test_filter_evidence_strength_skips_missing_bayes_factor_columns() -> None:
+    df = pd.DataFrame(
+        {
+            "lc_path": ["a.csv", "b.csv"],
+            "dip_max_log_bf_local": [12.0, 1.0],
+            "jump_max_log_bf_local": [np.nan, np.nan],
+        }
+    )
+
+    out = post_filter.filter_evidence_strength(df)
+
+    assert out["lc_path"].tolist() == ["a.csv", "b.csv"]
+
+
+def test_apply_filters_hydrates_layer_first_event_metrics() -> None:
+    df = pd.DataFrame(
+        {
+            "candidate_id": ["stv-a", "stv-b"],
+            "timescale": ["stv", "stv"],
+            "lc_path": ["pass.csv", "fail.csv"],
+            "dip_bayes_factor": [20.0, 2.0],
+            "jump_bayes_factor": [0.0, 0.0],
+            "dip_max_log_bf_local": [8.0, 8.0],
+            "jump_max_log_bf_local": [np.nan, np.nan],
+        }
+    )
+    layer_first = to_layer_first_frame(df)
+
+    out = post_filter.apply_filters(
+        layer_first,
+        apply_evidence_strength=True,
+        min_bayes_factor=10.0,
+        require_finite_local_bf=True,
+        apply_significant_detection=False,
+        apply_run_robustness=False,
+        apply_morphology=False,
+        apply_score=False,
+        apply_periodicity_validation=False,
+        apply_gaia_ruwe_validation=False,
+        apply_gaia_pm_validation=False,
+        apply_periodic_catalog_validation=False,
+        show_tqdm=False,
+        verbose=False,
+    )
+
+    out_by_path = out.set_index("lc_path")
+    assert int(out_by_path.loc["pass.csv", "failed_posterior_strength"]) == 0
+    assert int(out_by_path.loc["fail.csv", "failed_posterior_strength"]) == 1
+    assert int(out_by_path.loc["pass.csv", "failed_any"]) == 0
+    assert int(out_by_path.loc["fail.csv", "failed_any"]) == 1
 
 
 def test_apply_filters_tags_significant_detection_failures() -> None:

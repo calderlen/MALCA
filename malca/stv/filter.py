@@ -89,6 +89,7 @@ from malca.catalogs.periodic_catalogs import (
     match_period_catalog as _match_period_catalog,
 )
 from malca.core.phase import align_v_to_g_magnitude
+from malca.products.feature_layers import with_feature_columns
 from malca.products.product_schema import add_stv_identity, assert_stv_product_schema
 from malca.core.stats import compute_pdm_stats, compute_ce_stats
 from malca.io.table_io import read_feature_table, write_feature_table
@@ -104,6 +105,29 @@ HOME_ONLY_FILTER_LABELS = (
     "periodic_catalog",
     "gaia_ruwe",
     "gaia_pm",
+)
+
+CORE_FILTER_FEATURE_COLUMNS = (
+    "dip_bayes_factor",
+    "jump_bayes_factor",
+    "dip_max_log_bf_local",
+    "jump_max_log_bf_local",
+    "dip_significant",
+    "jump_significant",
+    "dip_count",
+    "jump_count",
+    "dip_run_count",
+    "jump_run_count",
+    "dip_max_run_points",
+    "jump_max_run_points",
+    "dip_max_run_cameras",
+    "jump_max_run_cameras",
+    "dip_best_morph",
+    "jump_best_morph",
+    "dip_best_delta_bic",
+    "jump_best_delta_bic",
+    "dipper_score",
+    "jumper_score",
 )
 
 GAIA_RUWE_MERGE_COLS = (
@@ -267,6 +291,18 @@ def _to_bool_mask(series: pd.Series) -> pd.Series:
     return lowered.isin({"1", "true", "t", "yes", "y"}).fillna(False)
 
 
+def _numeric_column_or_default(
+    df: pd.DataFrame,
+    column: str,
+    *,
+    default: float = np.nan,
+) -> pd.Series:
+    """Return a numeric Series aligned to ``df``, or a default when absent."""
+    if column in df.columns:
+        return pd.to_numeric(df[column], errors="coerce")
+    return pd.Series(default, index=df.index, dtype=float)
+
+
 def _passing_mask_from_failures(
     df: pd.DataFrame,
     *,
@@ -390,15 +426,37 @@ def filter_evidence_strength(
     n0 = len(df)
     pbar = tqdm(total=2, desc="filter_evidence_strength", leave=False) if show_tqdm else None
 
+    bf_cols = ("dip_bayes_factor", "jump_bayes_factor")
+    missing_bf_cols = [col for col in bf_cols if col not in df.columns]
+    if missing_bf_cols:
+        if verbose:
+            tqdm.write(
+                "[filter_evidence_strength] WARNING: missing columns "
+                f"{missing_bf_cols}; skipping evidence strength filter"
+            )
+        if pbar:
+            pbar.close()
+        return df.copy()
+
     # At least one of dip or jump BF must exceed threshold
-    mask = (df["dip_bayes_factor"].fillna(0) > min_bayes_factor) | \
-           (df["jump_bayes_factor"].fillna(0) > min_bayes_factor)
+    dip_bf = _numeric_column_or_default(df, "dip_bayes_factor", default=0).fillna(0)
+    jump_bf = _numeric_column_or_default(df, "jump_bayes_factor", default=0).fillna(0)
+    mask = (dip_bf > min_bayes_factor) | (jump_bf > min_bayes_factor)
 
     # Require finite local BF if requested
     if require_finite_local_bf:
-        is_finite_dip = df["dip_max_log_bf_local"].notna() & np.isfinite(df["dip_max_log_bf_local"])
-        is_finite_jump = df["jump_max_log_bf_local"].notna() & np.isfinite(df["jump_max_log_bf_local"])
-        mask &= (is_finite_dip | is_finite_jump)
+        local_cols = ("dip_max_log_bf_local", "jump_max_log_bf_local")
+        if any(col in df.columns for col in local_cols):
+            dip_local = _numeric_column_or_default(df, "dip_max_log_bf_local")
+            jump_local = _numeric_column_or_default(df, "jump_max_log_bf_local")
+            is_finite_dip = dip_local.notna() & np.isfinite(dip_local)
+            is_finite_jump = jump_local.notna() & np.isfinite(jump_local)
+            mask &= (is_finite_dip | is_finite_jump)
+        elif verbose:
+            tqdm.write(
+                "[filter_evidence_strength] WARNING: local BF columns missing; "
+                "skipping finite-local-BF requirement"
+            )
 
     out = df.loc[mask].reset_index(drop=True)
 
@@ -1957,7 +2015,7 @@ def annotate_phase_plot_candidates(
             ready &= power.notna() & np.isfinite(power) & (power >= float(min_power))
 
     if not allow_alias and "lsp_is_alias" in out.columns:
-        alias = out["lsp_is_alias"].fillna(False).astype(bool)
+        alias = _to_bool_mask(out["lsp_is_alias"])
         ready &= ~alias
 
     if "periodicity_score" in out.columns:
@@ -2102,6 +2160,21 @@ def apply_filters(
         raise ValueError("STV candidate products must include an 'lc_path' column")
     if home_passers_only is not None:
         external_validations_passers_only = bool(home_passers_only)
+
+    df_filtered = with_feature_columns(
+        df_filtered,
+        (
+            *CORE_FILTER_FEATURE_COLUMNS,
+            *PERIODIC_CATALOG_MERGE_COLS,
+            *GAIA_RUWE_MERGE_COLS,
+            *GAIA_PM_MERGE_COLS,
+            *PERIODICITY_MERGE_COLS,
+            "gaia_id",
+            "source_id",
+            "ra",
+            "dec",
+        ),
+    )
 
     def _merge_columns_by_lc_path(
         df_base: pd.DataFrame,

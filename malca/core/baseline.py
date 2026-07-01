@@ -22,6 +22,15 @@ from malca.config import (
 from malca.config import MAD_SCALE
 
 
+def _coerce_bool_series(series: pd.Series) -> pd.Series:
+    """Return a bool Series without relying on pandas fillna downcasting."""
+    if pd.api.types.is_bool_dtype(series):
+        return series.fillna(False).astype(bool)
+    if pd.api.types.is_numeric_dtype(series):
+        return series.fillna(0).astype(float) != 0.0
+    lowered = series.astype("string").str.strip().str.lower()
+    return lowered.isin({"1", "true", "t", "yes", "y"}).fillna(False).astype(bool)
+
 
 def global_median_baseline(
     df,
@@ -1054,10 +1063,20 @@ def per_camera_gp_baseline_masked(
         return float(np.sqrt(floor2))
 
     df_out = df.copy()
-    out_cols = ("baseline", "base_rough", "base_consensus", "is_masked", "needs_consensus", "resid", "sigma_resid") + (("sigma_eff",) if add_sigma_eff_col else ())
+    bool_out_cols = ("is_masked", "needs_consensus")
+    out_cols = (
+        "baseline",
+        "base_rough",
+        "base_consensus",
+        *bool_out_cols,
+        "resid",
+        "sigma_resid",
+    ) + (("sigma_eff",) if add_sigma_eff_col else ())
     for col in out_cols:
         if col not in df_out.columns:
-            df_out[col] = np.nan
+            df_out[col] = False if col in bool_out_cols else np.nan
+    for col in bool_out_cols:
+        df_out[col] = _coerce_bool_series(df_out[col])
 
     has_band_col = band_col in df_out.columns
     cam_band_map: dict = {}
