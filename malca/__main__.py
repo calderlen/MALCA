@@ -39,6 +39,7 @@ COMMAND_GROUPS = {
     "review-maint": "Review",
     "ltv-pipeline": "LTV",
     "ltv-injection": "LTV",
+    "ltv-new": "LTV",
     "dip-injection": "Evaluation",
     "microlensing-injection": "Evaluation",
     "detection-rate": "Evaluation",
@@ -71,6 +72,7 @@ Common workflows:
   STV extended  malca stv-pipeline --stage full-extended
   LTV           malca ltv-pipeline --mag-bin 13_13.5  then  malca review --review-db <run>/review/review.db
   LTV extended  malca ltv-pipeline --stage full-extended --full-bundle
+  LTV new       malca ltv-new fit --input <lc-or-manifest> --output <dir>
 """
 
 
@@ -133,7 +135,7 @@ def main():
         "attrition", "review", "review-refresh", "review-merge", "review-sync", "review-taxonomy", "review-maint",
         "neighbors", "spectra", "false-positive", "vsx-filter", "vsx-crossmatch", "external-lcs", "multi-survey-features", "feature-layers", "migrate", "sed-photometry", "nuclear-context",
         "vetting",
-        "ltv-pipeline", "ltv-injection",
+        "ltv-pipeline", "ltv-injection", "ltv-new",
         "dev", "malcat-train",
     ]:
         command = sys.argv[1]
@@ -234,6 +236,8 @@ def main():
             _run_module_main("malca.enrichment.vetting", remaining)
         elif command == "ltv-pipeline":
             _run_module_main("malca.ltv.pipeline", remaining)
+        elif command == "ltv-new":
+            _run_module_main("malca.ltv_new.pipeline", remaining)
         elif command == "dev":
             if not remaining:
                 raise SystemExit("usage: malca dev {score,stats} ...")
@@ -288,6 +292,7 @@ def main():
         description="Run LTV workflow; --stage full-extended adds external LCs/multi-survey and --full-bundle includes LC assets",
     )
     subparsers.add_parser("ltv-injection", description="Run LTV rejection-recovery injections and plots")
+    subparsers.add_parser("ltv-new", description="Run standalone evidence-based LTV model comparisons")
     # Evaluation
     subparsers.add_parser("dip-injection", description="Run dip injection-recovery tests (skew-normal/step dips)")
     subparsers.add_parser("microlensing-injection", description="Run microlensing injection-recovery tests and plot efficiency map")
