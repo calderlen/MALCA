@@ -72,6 +72,16 @@ warnings.filterwarnings("ignore", message=".*overflow encountered in.*")
 warnings.filterwarnings("ignore", message=".*invalid value encountered in.*", category=RuntimeWarning)
 
 
+def _curve_fit_quiet(*args, **kwargs):
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=".*divide by zero encountered in divide.*",
+            category=RuntimeWarning,
+            module=r"scipy\.optimize\._lsq\.common",
+        )
+        return curve_fit(*args, **kwargs)
+
 
 EventKind: TypeAlias = Literal["dip", "jump"]
 
@@ -675,7 +685,7 @@ def classify_run_morphology(
 
     if kind == "dip":
         try:
-            popt_g, _ = curve_fit(
+            popt_g, _ = _curve_fit_quiet(
                 gaussian, t_padded, mag_padded,
                 p0=[amp_guess_dip, t0_guess, sigma_guess, baseline_guess],
                 sigma=sigma_eff_padded, maxfev=2000
@@ -696,7 +706,7 @@ def classify_run_morphology(
     # skew_gaussian for dips (asymmetric profiles)
     if kind == "dip":
         try:
-            popt_sg, _ = curve_fit(
+            popt_sg, _ = _curve_fit_quiet(
                 skew_gaussian, t_padded, mag_padded,
                 p0=[amp_guess_dip, t0_guess, sigma_guess, baseline_guess, 0.0],
                 sigma=sigma_eff_padded, maxfev=3000,
@@ -721,7 +731,7 @@ def classify_run_morphology(
 
     if kind == "jump":
         try:
-            popt_p, _ = curve_fit(
+            popt_p, _ = _curve_fit_quiet(
                 paczynski_kernel, t_padded, mag_padded,
                 p0=[amp_guess_jump, t0_guess, sigma_guess, baseline_guess],
                 sigma=sigma_eff_padded, maxfev=2000
@@ -740,7 +750,7 @@ def classify_run_morphology(
             pass
 
         try:
-            popt_f, _ = curve_fit(
+            popt_f, _ = _curve_fit_quiet(
                 fred, t_padded, mag_padded,
                 p0=[amp_guess_jump, t0_guess, 0.05, baseline_guess],
                 sigma=sigma_eff_padded, maxfev=2000
@@ -1146,9 +1156,20 @@ def score_events_bayesian(
     mags_finite = np.isfinite(mags).sum()
     mags_total = len(mags)
     if mags_finite == 0:
+        if mags_total == 0:
+            detail = (
+                "No usable light-curve rows after cleaning"
+                if df_base is None
+                else "No usable rows in prepared light curve"
+            )
+        else:
+            detail = (
+                "All magnitudes are NaN/inf after cleaning"
+                if df_base is None
+                else "All magnitudes are NaN/inf in prepared light curve"
+            )
         raise ValueError(
-            f"All magnitudes are NaN/inf after reading: "
-            f"total={mags_total}, finite={mags_finite}, "
+            f"{detail}: total={mags_total}, finite={mags_finite}, "
             f"NaN={np.isnan(mags).sum()}, inf={np.isinf(mags).sum()}"
         )
 

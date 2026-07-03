@@ -721,21 +721,23 @@ def select_feature_values(
     include_identity: Iterable[str] = (),
 ) -> pd.DataFrame:
     """Build a temporary view from identity columns and canonical feature paths."""
-    out = pd.DataFrame(index=df.index)
+    columns: dict[str, pd.Series] = {}
     for col in include_identity:
         name = str(col)
         if name not in df.columns:
             raise KeyError(f"Identity column not found in layer-first table: {name}")
-        out[name] = df[name]
+        columns[name] = df[name]
     for path in paths:
         name = str(path)
-        out[name] = feature_value_series(df, name)
+        columns[name] = feature_value_series(df, name)
+    out = pd.DataFrame(columns, index=df.index)
     return out.reset_index(drop=True)
 
 
 def with_feature_columns(df: pd.DataFrame, columns: Iterable[str]) -> pd.DataFrame:
     """Return a copy with selected flat feature columns populated from layers when absent."""
     out = df.copy()
+    additions: dict[str, pd.Series] = {}
     for column in columns:
         name = str(column)
         if name in out.columns:
@@ -743,7 +745,9 @@ def with_feature_columns(df: pd.DataFrame, columns: Iterable[str]) -> pd.DataFra
         path = name if is_layer_path(name) else layer_path_for_column(name)
         if path is None:
             continue
-        out[name] = feature_value_series(out, path)
+        additions[name] = feature_value_series(out, path)
+    if additions:
+        out = pd.concat([out, pd.DataFrame(additions, index=out.index)], axis=1)
     return out
 
 
@@ -753,6 +757,7 @@ def expand_feature_layers(df: pd.DataFrame) -> pd.DataFrame:
         return df.copy()
 
     out = df.copy()
+    additions: dict[str, pd.Series] = {}
     for layer in FEATURE_LAYER_COLUMNS:
         if layer not in out.columns:
             continue
@@ -765,8 +770,10 @@ def expand_feature_layers(df: pd.DataFrame) -> pd.DataFrame:
                     seen.add(key)
                     keys.append(key)
         for key in keys:
-            if key not in out.columns:
-                out[key] = parsed.map(lambda mapping, k=key: mapping.get(k, pd.NA))
+            if key not in out.columns and key not in additions:
+                additions[key] = parsed.map(lambda mapping, k=key: mapping.get(k, pd.NA))
+    if additions:
+        out = pd.concat([out, pd.DataFrame(additions, index=out.index)], axis=1)
     return out
 
 

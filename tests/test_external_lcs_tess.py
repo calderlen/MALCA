@@ -8,6 +8,11 @@ from pathlib import Path
 import pandas as pd
 
 from malca.enrichment import external_lcs, vetting
+from malca.external_lc_manifest import (
+    clear_external_lc_manifest_caches,
+    read_external_lc_manifest,
+    upsert_external_lc_manifest_entry,
+)
 from malca.review.pipeline import _run_external_lcs_stage, detect_pipeline_status, run_missing_stages
 from malca.review.store import db_connect, get_candidate_payload, import_candidates
 
@@ -446,6 +451,107 @@ def test_external_lcs_cache_only_rebuilds_summary_from_lc_file(monkeypatch, tmp_
     assert external_stats["kepler_n_quarters"] == 2
     assert external_stats["kepler_total_points"] == 3
     assert external_stats["kepler_flux_range"] == 0.3999999999999999
+
+
+def test_external_lcs_cache_only_uses_manifest_for_nested_ps1_file(tmp_path: Path) -> None:
+    root = tmp_path / "results"
+    lc_path = root / "external_lcs_staging" / "ps1" / "ps1_lc_C1.parquet"
+    lc_path.parent.mkdir(parents=True)
+    pd.DataFrame({"mjd": [59000.0, 59001.0, 59002.0], "mag": [15.0, 15.2, 15.1]}).to_parquet(lc_path, index=False)
+    assert upsert_external_lc_manifest_entry(root, candidate_id="C1", source="ps1", file_prefix="ps1", path=lc_path)
+    clear_external_lc_manifest_caches()
+
+    df = pd.DataFrame([{"candidate_id": "C1", "ra": 1.0, "dec": 2.0}])
+    out = external_lcs.rebuild_external_lc_table_from_cache(df, root, {"ps1": True})
+
+    assert int(out.loc[0, "ps1_lc_n_points"]) == 3
+    frames = external_lcs._cache_only_source_merge_frames(out, {"ps1": True})
+    assert len(frames) == 1
+    assert frames[0][0] == "ps1"
+    assert frames[0][1].to_dict("records") == [{"candidate_id": "C1", "ps1_lc_n_points": 3}]
+
+
+def test_external_lcs_cache_only_scans_nested_files_when_manifest_missing(tmp_path: Path) -> None:
+    root = tmp_path / "results"
+    lc_path = root / "external_lcs_staging" / "ps1" / "ps1_lc_C1.parquet"
+    lc_path.parent.mkdir(parents=True)
+    pd.DataFrame({"mjd": [59000.0, 59001.0], "mag": [15.0, 15.2]}).to_parquet(lc_path, index=False)
+    clear_external_lc_manifest_caches()
+
+    df = pd.DataFrame([{"candidate_id": "C1", "ra": 1.0, "dec": 2.0}])
+    out = external_lcs.rebuild_external_lc_table_from_cache(df, root, {"ps1": True})
+
+    assert int(out.loc[0, "ps1_lc_n_points"]) == 2
+    manifest = read_external_lc_manifest(root)
+    assert manifest[["candidate_id", "file_prefix", "path_relative"]].to_dict("records") == [
+        {
+            "candidate_id": "C1",
+            "file_prefix": "ps1",
+            "path_relative": "external_lcs_staging/ps1/ps1_lc_C1.parquet",
+        }
+    ]
+
+
+def test_external_lcs_cache_only_reads_staged_status_without_touching_unattempted_rows(tmp_path: Path) -> None:
+    root = tmp_path / "results"
+    status_path = root / "external_lcs_staging" / "ps1" / vetting.EXTERNAL_LC_STATUS_FILE
+    status_path.parent.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "module": "Pan-STARRS LCs",
+                "candidate_id": "C1",
+                "cache_key": "synthetic",
+                "status": "no_data",
+                "updated_unix": 1.0,
+                "ps1_lc_n_points": 0,
+            }
+        ]
+    ).to_parquet(status_path, index=False)
+
+    df = pd.DataFrame(
+        [
+            {"candidate_id": "C1", "ra": 1.0, "dec": 2.0},
+            {"candidate_id": "C2", "ra": 3.0, "dec": 4.0},
+        ]
+    )
+    out = external_lcs.rebuild_external_lc_table_from_cache(df, root, {"ps1": True})
+
+    assert int(out.loc[0, "ps1_lc_n_points"]) == 0
+    frames = external_lcs._cache_only_source_merge_frames(out, {"ps1": True})
+    assert frames[0][1].to_dict("records") == [{"candidate_id": "C1", "ps1_lc_n_points": 0}]
+
+
+def test_external_lcs_cache_only_source_merge_preserves_unrelated_columns(tmp_path: Path) -> None:
+    db_path = tmp_path / "review.db"
+    with db_connect(db_path) as conn:
+        import_candidates(
+            conn,
+            pd.DataFrame(
+                [
+                    {
+                        "candidate_id": "C1",
+                        "asas_sn_id": "C1",
+                        "neowise_n_epochs": 9,
+                        "ps1_lc_n_points": 0,
+                    }
+                ]
+            ),
+            source_path=str(tmp_path),
+            characterize_before_import=False,
+            vet_before_import=False,
+        )
+
+    updates = external_lcs._merge_source_frames_into_review_db_with_retries(
+        db_path,
+        [("ps1", pd.DataFrame([{"candidate_id": "C1", "ps1_lc_n_points": 5}]))],
+    )
+
+    assert updates == {"ps1": 1}
+    with db_connect(db_path) as conn:
+        payload = get_candidate_payload(conn, "C1")
+    assert payload["ps1_lc_n_points"] == 5
+    assert payload["neowise_n_epochs"] == 9
 
 
 def test_external_lcs_cache_only_repairs_ztf_status_from_existing_file(tmp_path: Path) -> None:

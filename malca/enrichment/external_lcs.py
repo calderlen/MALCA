@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from malca.external_lc_manifest import index_external_lc_paths_from_manifest
 from malca.products.candidates import select_passing_candidates_if_present
 from malca.products.feature_layers import feature_mapping_get, with_feature_columns
 from malca.review.store import db_connect, merge_candidate_results
@@ -310,6 +311,9 @@ def _merge_frame(out: pd.DataFrame) -> pd.DataFrame:
     return out[id_cols + value_cols].copy()
 
 
+_CACHE_ONLY_TOUCHED_ATTR = "_external_lc_cache_only_touched"
+
+
 def _source_run_flags(args: argparse.Namespace) -> dict[str, bool]:
     return {
         "atlas": bool(args.run_atlas),
@@ -479,10 +483,76 @@ def _cache_only_status_summary(status_df: pd.DataFrame, module: str, candidate_i
     ]
     if rows.empty:
         return None
+    if "updated_unix" in rows.columns:
+        rows = rows.sort_values("updated_unix", kind="stable")
     row = rows.iloc[-1]
     if str(row.get("status", "")) not in {"fetched", "no_data", "error", "failed"}:
         return None
     return {col: row.get(col, _cache_only_default_value(col)) for col in summary_cols}
+
+
+def _read_external_lc_statuses(vetting, output_dir: Path) -> pd.DataFrame:
+    root = Path(output_dir)
+    status_name = str(getattr(vetting, "EXTERNAL_LC_STATUS_FILE", "_external_lc_status.parquet"))
+    paths: list[Path] = []
+    direct = root / status_name
+    if direct.exists():
+        paths.append(direct)
+    if root.exists():
+        for path in sorted(root.rglob(status_name)):
+            if path not in paths:
+                paths.append(path)
+
+    frames: list[pd.DataFrame] = []
+    for path in paths:
+        try:
+            status = pd.read_parquet(path)
+        except Exception as exc:
+            print(f"External LC status warning: could not read {path}: {exc}")
+            continue
+        if status.empty:
+            continue
+        status = status.copy()
+        status["_status_path"] = str(path)
+        frames.append(status)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+def _cache_only_lc_path(vetting, output_dir: Path, manifest_paths: dict[str, str], spec: dict, df: pd.DataFrame, idx: object) -> Path | None:
+    cand_id = vetting._candidate_cache_id(df, idx)
+    path_text = manifest_paths.get(str(cand_id))
+    if path_text:
+        return Path(path_text)
+    return vetting._external_lc_path(output_dir, spec["prefix"], df, idx)
+
+
+def _cache_only_source_merge_frames(out: pd.DataFrame, run_flags: dict[str, bool]) -> list[tuple[str, pd.DataFrame]]:
+    specs = _cache_only_specs()
+    touched = out.attrs.get(_CACHE_ONLY_TOUCHED_ATTR, {})
+    if not isinstance(touched, dict):
+        touched = {}
+
+    id_cols = [c for c in ("candidate_id", "asas_sn_id") if c in out.columns]
+    if not id_cols:
+        return []
+
+    frames: list[tuple[str, pd.DataFrame]] = []
+    candidate_ids = out["candidate_id"].astype(str) if "candidate_id" in out.columns else pd.Series("", index=out.index)
+    for key, enabled in run_flags.items():
+        if not enabled or key not in specs:
+            continue
+        touched_ids = {str(v) for v in touched.get(key, []) if str(v)}
+        if not touched_ids:
+            continue
+        value_cols = [c for c in specs[key]["summary_cols"] if c in out.columns]
+        if not value_cols:
+            continue
+        frame = out.loc[candidate_ids.isin(touched_ids), id_cols + value_cols].copy()
+        if frame.empty:
+            continue
+        frame = frame.drop_duplicates(subset=id_cols[0], keep="last")
+        frames.append((key, frame))
+    return frames
 
 
 def _cache_only_summary_is_positive(summary: dict, match_col: str) -> bool:
@@ -530,21 +600,24 @@ def rebuild_external_lc_table_from_cache(df: pd.DataFrame, output_dir: Path, run
 
     out = df.copy()
     specs = _cache_only_specs()
-    status_df = vetting._read_external_lc_status(output_dir)
+    status_df = _read_external_lc_statuses(vetting, output_dir)
     messages: list[str] = []
     repaired_status_rows: list[dict] = []
+    touched_by_source: dict[str, set[str]] = {}
     for key, enabled in run_flags.items():
         if not enabled or key not in specs:
             continue
         spec = specs[key]
         for col in spec["summary_cols"]:
             out[col] = _cache_only_default_value(col)
+        manifest_paths = index_external_lc_paths_from_manifest(str(Path(output_dir).expanduser()), spec["prefix"])
+        touched_by_source[key] = set()
         found = 0
         positive = 0
         status_hits = 0
         for idx in out.index:
             cand_id = vetting._candidate_cache_id(out, idx)
-            path = vetting._external_lc_path(output_dir, spec["prefix"], out, idx)
+            path = _cache_only_lc_path(vetting, output_dir, manifest_paths, spec, out, idx)
             summary = None
             lc_df = vetting._read_external_lc_file(path)
             if lc_df is not None:
@@ -562,6 +635,7 @@ def rebuild_external_lc_table_from_cache(df: pd.DataFrame, output_dir: Path, run
                     status_hits += 1
             if summary is None:
                 continue
+            touched_by_source[key].add(str(cand_id))
             found += 1
             for col in spec["summary_cols"]:
                 out.loc[idx, col] = summary.get(col, _cache_only_default_value(col))
@@ -573,6 +647,7 @@ def rebuild_external_lc_table_from_cache(df: pd.DataFrame, output_dir: Path, run
         messages.append(f"External LC status: repaired {len(repaired_status_rows)} rows from existing LC files")
     for msg in messages:
         print(msg)
+    out.attrs[_CACHE_ONLY_TOUCHED_ATTR] = {key: sorted(values) for key, values in touched_by_source.items() if values}
     return out
 
 
@@ -589,6 +664,41 @@ def _merge_into_review_db_with_retries(review_db: Path, merge_df: pd.DataFrame) 
                 try:
                     with closing(db_connect(review_db)) as conn:
                         return merge_candidate_results(conn, merge_df)
+                except sqlite3.OperationalError as exc:
+                    if "locked" not in str(exc).lower() or attempt >= attempts:
+                        raise
+                    delay = min(30.0, 2.0 * attempt)
+                    print(
+                        f"Review DB is locked; retrying merge in {delay:.0f}s "
+                        f"({attempt}/{attempts - 1})"
+                    )
+                    time.sleep(delay)
+            raise RuntimeError("Review DB merge retry loop exhausted")
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _merge_source_frames_into_review_db_with_retries(review_db: Path, source_frames: list[tuple[str, pd.DataFrame]]) -> dict[str, int]:
+    source_frames = [(key, frame) for key, frame in source_frames if frame is not None and not frame.empty]
+    if not source_frames:
+        return {}
+
+    lock_path = review_db.with_suffix(review_db.suffix + ".external_lcs_merge.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "a", encoding="ascii") as lock_file:
+        if fcntl is not None:
+            print(f"Waiting for review DB merge lock: {lock_path}")
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            attempts = 30
+            for attempt in range(1, attempts + 1):
+                try:
+                    updates: dict[str, int] = {}
+                    with closing(db_connect(review_db)) as conn:
+                        for source_key, frame in source_frames:
+                            updates[source_key] = merge_candidate_results(conn, frame)
+                    return updates
                 except sqlite3.OperationalError as exc:
                     if "locked" not in str(exc).lower() or attempt >= attempts:
                         raise
@@ -660,9 +770,16 @@ def run(args: argparse.Namespace) -> Path:
 
     if review_db_path:
         review_db = review_db_path
-        merge_df = _merge_frame(out)
-        updated = _merge_into_review_db_with_retries(review_db, merge_df)
-        print(f"Merged external-LC fields into {review_db} ({updated} candidates updated)")
+        if args.cache_only:
+            source_frames = _cache_only_source_merge_frames(out, run_flags)
+            updates = _merge_source_frames_into_review_db_with_retries(review_db, source_frames)
+            updated = sum(updates.values())
+            source_count = sum(1 for value in updates.values() if value)
+            print(f"Merged cache-only external-LC fields into {review_db} ({updated} source-candidate updates across {source_count} sources)")
+        else:
+            merge_df = _merge_frame(out)
+            updated = _merge_into_review_db_with_retries(review_db, merge_df)
+            print(f"Merged external-LC fields into {review_db} ({updated} candidates updated)")
 
     if checkpoint_path and checkpoint_path.exists():
         checkpoint_path.unlink()

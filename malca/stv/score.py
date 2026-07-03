@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 import argparse
+import warnings
 
 from scipy.optimize import curve_fit
 import numpy as np
@@ -31,10 +32,15 @@ from malca.io.table_io import read_parquet_table
 from malca.core.utils import gaussian
 
 
-
-
-
-
+def _curve_fit_quiet(*args, **kwargs):
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=".*divide by zero encountered in divide.*",
+            category=RuntimeWarning,
+            module=r"scipy\.optimize\._lsq\.common",
+        )
+        return curve_fit(*args, **kwargs)
 
 
 @dataclass
@@ -197,7 +203,7 @@ def _fit_gaussian(
     if sigma_guess <= 0:
         sigma_guess = max((jd.max() - jd.min()) / 6.0, 0.1)
     try:
-        popt, _ = curve_fit(
+        popt, _ = _curve_fit_quiet(
             gaussian,
             jd,
             mag,
@@ -256,7 +262,7 @@ def _fit_paczynski(
         return 0.0, np.nan
 
     try:
-        popt, _ = curve_fit(
+        popt, _ = _curve_fit_quiet(
             paczynski,
             jd,
             mag,
