@@ -453,6 +453,37 @@ def test_external_lcs_cache_only_rebuilds_summary_from_lc_file(monkeypatch, tmp_
     assert external_stats["kepler_flux_range"] == 0.3999999999999999
 
 
+def test_external_lc_status_writer_recovers_from_zero_byte_status(tmp_path: Path) -> None:
+    output_dir = tmp_path / "external_lcs"
+    output_dir.mkdir()
+    status_path = output_dir / vetting.EXTERNAL_LC_STATUS_FILE
+    status_path.write_bytes(b"")
+
+    vetting._write_external_lc_status(
+        output_dir,
+        [
+            {
+                "module": "NEOWISE LCs",
+                "candidate_id": "C1",
+                "cache_key": "1.0,2.0|neowise",
+                "status": "fetched",
+                "neowise_n_epochs": 12,
+            }
+        ],
+    )
+
+    saved = pd.read_parquet(status_path)
+    assert saved.to_dict("records") == [
+        {
+            "module": "NEOWISE LCs",
+            "candidate_id": "C1",
+            "cache_key": "1.0,2.0|neowise",
+            "status": "fetched",
+            "neowise_n_epochs": 12,
+        }
+    ]
+
+
 def test_external_lcs_cache_only_uses_manifest_for_nested_ps1_file(tmp_path: Path) -> None:
     root = tmp_path / "results"
     lc_path = root / "external_lcs_staging" / "ps1" / "ps1_lc_C1.parquet"

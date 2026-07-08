@@ -500,6 +500,18 @@ def _read_external_lc_status(output_dir: Path | str | None) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def _atomic_write_parquet(df: pd.DataFrame, path: Path, **kwargs) -> None:
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        df.to_parquet(tmp_path, **kwargs)
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def _write_external_lc_status(output_dir: Path | str | None, rows: list[dict]) -> None:
     path = _external_lc_status_path(output_dir)
     if path is None or not rows:
@@ -512,10 +524,10 @@ def _write_external_lc_status(output_dir: Path | str | None, rows: list[dict]) -
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
             try:
                 new = pd.DataFrame(rows)
-                existing = pd.read_parquet(path) if path.exists() else pd.DataFrame()
+                existing = _read_external_lc_status(output_dir)
                 combined = pd.concat([existing, new], ignore_index=True) if not existing.empty else new
                 combined = combined.drop_duplicates(subset=["module", "candidate_id", "cache_key"], keep="last")
-                combined.to_parquet(path, index=False, compression=PARQUET_CACHE_COMPRESSION)
+                _atomic_write_parquet(combined, path, index=False, compression=PARQUET_CACHE_COMPRESSION)
             finally:
                 if fcntl is not None:
                     fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
@@ -676,7 +688,7 @@ def _write_external_lc_file(output_dir: Path | str | None, file_prefix: str, df:
     if path is None or lc_df.empty:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    lc_df.to_parquet(path, index=False, compression=PARQUET_CACHE_COMPRESSION)
+    _atomic_write_parquet(lc_df, path, index=False, compression=PARQUET_CACHE_COMPRESSION)
     if output_dir is not None:
         upsert_external_lc_manifest_entry(
             output_dir,
