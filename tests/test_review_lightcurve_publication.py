@@ -7,6 +7,7 @@ import types
 import numpy as np
 import pandas as pd
 import pytest
+from matplotlib.ticker import NullLocator
 
 
 if "celerite2" not in sys.modules:
@@ -15,10 +16,17 @@ if "celerite2" not in sys.modules:
         terms=types.SimpleNamespace(SHOTerm=object),
     )
 
-from malca.review.lightcurve_publication import _axis_label_for_offset, build_review_lightcurve_publication_pdf
-from malca.review.lightcurve_assembly import PlotTrace
-from malca.review.lightcurve_pdf import _plot_trace
+from malca.plotting.lightcurve_publication import _load_matplotlib
+from malca.review.lightcurve_assembly import PlotPanel, PlotTrace
 from malca.review.interactive_plot import build_interactive_lightcurve_figure
+from malca.review.lightcurve_pdf import (
+    _apply_magnitude_y_tick_policy,
+    _attach_raw_residual_axes,
+    _draw_header_boxes,
+    _plot_trace,
+    _style_lightcurve_axis,
+)
+from malca.review.lightcurve_publication import _axis_label_for_offset, build_review_lightcurve_publication_pdf
 
 
 def _write_dat2(path: Path) -> None:
@@ -118,6 +126,72 @@ def test_review_lightcurve_pdf_uses_adaptive_small_markers() -> None:
     )
     assert resid_axis.calls[0][2]["s"] == pytest.approx(2.4**2)
     assert resid_axis.calls[0][2]["linewidths"] == pytest.approx(0.15)
+
+
+def test_review_pdf_header_boxes_straddle_top_axis() -> None:
+    plt, _auto_minor = _load_matplotlib()
+    fig, ax = plt.subplots(figsize=(4.0, 2.0))
+    try:
+        _draw_header_boxes(ax, left="J123456-123456", right="α=123.45678°, δ=-12.34567°")
+
+        assert len(ax.texts) == 2
+        left, right = ax.texts
+        assert left.get_position()[0] == pytest.approx(0.035)
+        assert right.get_position()[0] == pytest.approx(0.965)
+        assert left.get_position()[1] == pytest.approx(1.0)
+        assert right.get_position()[1] == pytest.approx(1.0)
+        assert left.get_va() == "center"
+        assert right.get_va() == "center"
+        assert left.get_fontsize() == pytest.approx(11.0)
+        assert right.get_fontsize() == pytest.approx(11.0)
+        assert left.get_bbox_patch().get_alpha() == pytest.approx(1.0)
+        assert right.get_bbox_patch().get_alpha() == pytest.approx(1.0)
+    finally:
+        plt.close(fig)
+
+
+def test_review_pdf_axis_style_suppresses_grid_lines() -> None:
+    plt, _auto_minor = _load_matplotlib()
+    fig, ax = plt.subplots(figsize=(4.0, 2.0))
+    try:
+        ax.grid(True, which="both")
+        _style_lightcurve_axis(ax)
+
+        assert all(not line.get_visible() for line in ax.get_xgridlines())
+        assert all(not line.get_visible() for line in ax.get_ygridlines())
+    finally:
+        plt.close(fig)
+
+
+def test_review_pdf_magnitude_y_ticks_are_tenth_spaced() -> None:
+    plt, _auto_minor = _load_matplotlib()
+    fig, ax = plt.subplots(figsize=(4.0, 2.0))
+    try:
+        panel = PlotPanel(panel_id="resid", kind="resid", y_label=r"$\Delta m$ [mag]")
+        _apply_magnitude_y_tick_policy(ax, panel)
+
+        ticks = ax.yaxis.get_major_locator().tick_values(-0.2, 0.2)
+        assert np.allclose(np.diff(ticks), 0.1)
+        assert isinstance(ax.yaxis.get_minor_locator(), NullLocator)
+    finally:
+        plt.close(fig)
+
+
+def test_review_pdf_raw_residual_axes_keep_gap() -> None:
+    plt, _auto_minor = _load_matplotlib()
+    fig, (raw_ax, resid_ax) = plt.subplots(2, 1, figsize=(4.0, 3.0))
+    try:
+        raw_ax.set_position([0.10, 0.52, 0.80, 0.34])
+        resid_ax.set_position([0.10, 0.18, 0.80, 0.30])
+        panels = (types.SimpleNamespace(panel_id="raw"), types.SimpleNamespace(panel_id="resid"))
+
+        _attach_raw_residual_axes({"raw": raw_ax, "resid": resid_ax}, panels)
+
+        gap = raw_ax.get_position().y0 - resid_ax.get_position().y1
+        assert gap > 0.0
+        assert gap == pytest.approx(0.026)
+    finally:
+        plt.close(fig)
 
 
 def test_review_lightcurve_publication_pdf_uses_native_matplotlib_data_path(tmp_path: Path) -> None:

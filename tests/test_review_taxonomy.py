@@ -7,8 +7,33 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from malca.review.taxonomy import keyboard_payload, legacy_review_to_taxonomy, migrate_legacy_review_db, normalize_selection
+from malca.review.taxonomy import (
+    PHYSICAL_PRIMARY,
+    PHYSICAL_SECONDARY,
+    keyboard_payload,
+    legacy_review_to_taxonomy,
+    migrate_legacy_review_db,
+    normalize_selection,
+)
 from malca.review.store import db_connect, get_review, save_review, upsert_candidates_frame
+
+
+EXPECTED_PHYSICAL_SECONDARY_COUNTS = {
+    "young_stellar_object_or_pms": 26,
+    "massive_star_emission_line_or_mass_loss": 13,
+    "dust_obscuration_or_fading_variable": 14,
+    "pulsating_variable": 19,
+    "rotating_spotted_or_magnetic_variable": 11,
+    "eclipsing_or_geometric_binary": 22,
+    "cataclysmic_or_compact_accretor": 14,
+    "xray_or_high_energy_binary": 8,
+    "microlensing": 10,
+    "flare_star_or_magnetically_active_star": 7,
+    "extragalactic_or_nuclear_variable": 13,
+    "solar_system_or_moving_object": 6,
+    "false_positive_or_contaminant": 24,
+    "unknown": 17,
+}
 
 
 def test_keyboard_payload_keeps_dimming_recurrent_dip_shortcuts() -> None:
@@ -24,6 +49,35 @@ def test_keyboard_payload_keeps_dimming_recurrent_dip_shortcuts() -> None:
 
     assert primary_by_key["e"] == "dimming_event"
     assert dimming_detail_by_key["k"] == "recurrent_dips"
+
+
+def test_physical_taxonomy_has_broad_review_secondary_counts() -> None:
+    primary_values = [item["value"] for item in PHYSICAL_PRIMARY]
+
+    assert len(primary_values) == 14
+    assert set(primary_values) == set(EXPECTED_PHYSICAL_SECONDARY_COUNTS)
+    assert {
+        family: len(PHYSICAL_SECONDARY.get(family, ()))
+        for family in primary_values
+    } == EXPECTED_PHYSICAL_SECONDARY_COUNTS
+    assert sum(EXPECTED_PHYSICAL_SECONDARY_COUNTS.values()) == 204
+
+
+def test_keyboard_payload_uses_scientific_labels_for_broad_hypothesis_subclasses() -> None:
+    payload = keyboard_payload()
+    labels = {
+        item["value"]: item["label"]
+        for values in payload["physical_secondary"].values()
+        for item in values
+    }
+
+    assert labels["rr_lyrae"] == "RR Lyrae"
+    assert labels["long_secondary_period_red_giant"] == "long secondary period red giant"
+    assert labels["v_y_scl_low_state_candidate"] == "VY Scl low-state candidate"
+    assert labels["be_disk_building_or_dissipation"] == "be disk building or dissipation"
+    assert labels["non_nuclear_extragalactic_transient"] == "non nuclear extragalactic transient"
+    assert labels["stellar_merger_or_luminous_red_nova_candidate"] == "stellar merger or luminous red nova candidate"
+    assert labels["high_proper_motion_mismatch"] == "high proper-motion mismatch"
 
 
 def test_save_review_round_trips_taxonomy_fields(tmp_path: Path) -> None:
@@ -62,6 +116,30 @@ def test_save_review_round_trips_taxonomy_fields(tmp_path: Path) -> None:
     assert review["priority_tags"] == ["priority_dipper", "priority_followup"]
     assert review["evidence_flags"] == ["stable_baseline"]
     assert review["model_tags"] == ["bic_prefers_dip"]
+
+
+def test_save_review_round_trips_new_physical_secondary(tmp_path: Path) -> None:
+    db_path = tmp_path / "review.db"
+    with db_connect(db_path) as conn:
+        upsert_candidates_frame(conn, pd.DataFrame([{"candidate_id": "PULSE1"}]))
+        save_review(
+            conn,
+            candidate_id="PULSE1",
+            interest_score=3,
+            review_pass=1,
+            notes="new pulsator subtype",
+            workflow_status="reviewed",
+            disposition="keep",
+            morphology_primary="periodic",
+            physical_primary="pulsating_variable",
+            physical_secondary="rr_lyrae",
+            reviewer="tester",
+        )
+        review = get_review(conn, "PULSE1")
+
+    assert review["morphology_primary"] == "periodic"
+    assert review["physical_primary"] == "pulsating_variable"
+    assert review["physical_secondary"] == "rr_lyrae"
 
 
 def test_normalize_selection_promotes_legacy_single_detail_to_list() -> None:

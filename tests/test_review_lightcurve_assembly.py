@@ -13,6 +13,7 @@ if "celerite2" not in sys.modules:
         terms=types.SimpleNamespace(SHOTerm=object),
     )
 
+import malca.review.lightcurve_assembly as lightcurve_assembly
 from malca.plotting.lightcurve_publication import BAND_COLORS
 from malca.review.lightcurve_assembly import ReviewPlotRequest, assemble_review_lightcurve_plot
 from malca.review.lightcurve_pdf import render_review_lightcurve_pdf
@@ -154,7 +155,52 @@ def test_assembler_populates_coordinate_headers(tmp_path: Path) -> None:
     }
     spec = assemble_review_lightcurve_plot(_base_request(payload))
     assert spec.header_left is not None and spec.header_left.startswith("J")
-    assert spec.header_right == "ra=147.20000, dec=-54.99970"
+    assert spec.header_right == "α=147.20000°, δ=-54.99970°"
+
+
+def test_assembler_keeps_phase_lag_diagnostics_out_of_visible_text(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    lc_path = tmp_path / "123.dat2"
+    _write_dat2(lc_path)
+
+    def fake_phase_fold_dataframe(*_args, **_kwargs):
+        folded = pd.DataFrame(
+            {
+                "phase": [0.10, 1.10, 0.25, 1.25],
+                "phase_value": [0.00, 0.00, 0.04, 0.04],
+                "mag": [14.0, 14.0, 14.1, 14.1],
+                "mag_err": [0.02, 0.02, 0.02, 0.02],
+                "v_g_band": [0, 0, 1, 1],
+                "camera_label": ["F1", "F1", "F1", "F1"],
+                "JD_plot": [0.0, 0.0, 0.5, 0.5],
+            }
+        )
+        diagnostics = {
+            "phase_lag_g_v_cycles": -0.062,
+            "phase_lag_g_v_abs_cycles": 0.062,
+        }
+        return folded, diagnostics
+
+    monkeypatch.setattr(lightcurve_assembly, "phase_fold_dataframe", fake_phase_fold_dataframe)
+    payload = {
+        "candidate_id": "123",
+        "asas_sn_id": "123",
+        "lc_path": str(lc_path),
+        "period_consensus_days": 2.0,
+    }
+
+    spec = assemble_review_lightcurve_plot(
+        _base_request(
+            payload,
+            show_phase_fold=True,
+            show_residuals=True,
+        )
+    )
+
+    visible_text = " ".join([spec.status_message, *[ann.text for ann in spec.annotations]])
+    assert spec.phase_diagnostics["phase_lag_g_v_cycles"] == pytest.approx(-0.062)
+    assert "g-V lag" not in visible_text
+    assert "|lag|" not in visible_text
+    assert "cyc" not in visible_text
 
 
 def test_assembler_ranges_follow_visible_points_not_hidden_band(tmp_path: Path) -> None:

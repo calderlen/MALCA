@@ -11,10 +11,10 @@ from malca.review.interactive_plot import DIP_EVENT_COLOR, JUMP_EVENT_COLOR, PHA
 from malca.review.lightcurve_assembly import MARKER_MAP, PlotTrace, ReviewLightCurvePlotSpec
 
 _HEADER_BOX = {
-    "boxstyle": "square,pad=0.28",
+    "boxstyle": "square,pad=0.52",
     "facecolor": "white",
     "edgecolor": "0.15",
-    "linewidth": 0.85,
+    "linewidth": 0.95,
     "alpha": 1.0,
 }
 
@@ -22,6 +22,11 @@ _RAW_MARKER_CAP_PT = 3.0
 _SECONDARY_MARKER_CAP_PT = 2.4
 _MARKER_EDGE_WIDTH = 0.15
 _MARKER_ERRORBAR_WIDTH = 0.3
+_HEADER_TEXT_FONT_SIZE = 11.0
+_HEADER_LEFT_X = 0.035
+_HEADER_RIGHT_X = 0.965
+_RAW_RESIDUAL_PANEL_GAP = 0.026
+_MAG_Y_TICK_INTERVAL = 0.1
 
 
 def _mpl_marker(plotly_marker: str | None) -> str:
@@ -59,22 +64,36 @@ def _axis_label_for_offset(jd_offset: float) -> str:
 
 
 def _style_lightcurve_axis(ax) -> None:
-    style_publication_axis(ax, top=True, right=True)
-    ax.grid(True, which="major", linewidth=0.42, alpha=0.24)
+    style_publication_axis(ax, grid=False, top=True, right=True)
+    ax.grid(False, which="both")
     ax.tick_params(which="both", direction="in", top=True, right=True)
 
 
+def _apply_magnitude_y_tick_policy(ax, panel) -> None:
+    """Use 0.1-spaced y ticks for magnitude panels in PDF exports."""
+    label = str(getattr(panel, "y_label", "") or "")
+    kind = str(getattr(panel, "kind", "") or "")
+    if kind not in {"raw", "resid", "phase"} or "[mag]" not in label:
+        return
+
+    from matplotlib.ticker import MultipleLocator, NullLocator
+
+    ax.yaxis.set_major_locator(MultipleLocator(_MAG_Y_TICK_INTERVAL))
+    ax.yaxis.set_minor_locator(NullLocator())
+    ax.tick_params(axis="y", which="minor", left=False, right=False)
+
+
 def _draw_header_boxes(ax, *, left: str | None, right: str | None) -> None:
-    """Draw left/right coordinate boxes inside the top plot corners."""
+    """Draw left/right coordinate boxes centered on the top plot border."""
     if left:
         ax.text(
-            0.012,
-            0.965,
+            _HEADER_LEFT_X,
+            1.0,
             left,
             transform=ax.transAxes,
             ha="left",
-            va="top",
-            fontsize=8.2,
+            va="center",
+            fontsize=_HEADER_TEXT_FONT_SIZE,
             color="0.12",
             bbox=_HEADER_BOX,
             clip_on=False,
@@ -82,13 +101,13 @@ def _draw_header_boxes(ax, *, left: str | None, right: str | None) -> None:
         )
     if right:
         ax.text(
-            0.988,
-            0.965,
+            _HEADER_RIGHT_X,
+            1.0,
             right,
             transform=ax.transAxes,
             ha="right",
-            va="top",
-            fontsize=8.2,
+            va="center",
+            fontsize=_HEADER_TEXT_FONT_SIZE,
             color="0.12",
             bbox=_HEADER_BOX,
             clip_on=False,
@@ -115,7 +134,7 @@ def _set_robust_limits(ax, values: list[np.ndarray], *, inverted: bool, pad_frac
 
 
 def _attach_raw_residual_axes(ax_by_panel: dict[str, object], panels: tuple) -> None:
-    """Remove vertical whitespace between adjacent raw and residual axes."""
+    """Keep a small controlled gap between adjacent raw and residual axes."""
     for upper, lower in zip(panels, panels[1:]):
         if upper.panel_id != "raw" or lower.panel_id != "resid":
             continue
@@ -125,13 +144,16 @@ def _attach_raw_residual_axes(ax_by_panel: dict[str, object], panels: tuple) -> 
             continue
         upper_pos = upper_ax.get_position()
         lower_pos = lower_ax.get_position()
-        if upper_pos.y0 <= lower_pos.y1:
+        available_height = upper_pos.y1 - lower_pos.y1
+        if available_height <= 0.01:
             continue
+        gap = min(_RAW_RESIDUAL_PANEL_GAP, available_height - 0.01)
+        upper_bottom = lower_pos.y1 + gap
         lower_ax.set_position(
             [upper_pos.x0, lower_pos.y0, upper_pos.width, lower_pos.height]
         )
         upper_ax.set_position(
-            [upper_pos.x0, lower_pos.y1, upper_pos.width, upper_pos.y1 - lower_pos.y1]
+            [upper_pos.x0, upper_bottom, upper_pos.width, upper_pos.y1 - upper_bottom]
         )
 
 
@@ -351,6 +373,7 @@ def render_review_lightcurve_pdf(spec: ReviewLightCurvePlotSpec) -> bytes:
                     value_buckets[panel.panel_id],
                     inverted=bool(panel.invert_y),
                 )
+            _apply_magnitude_y_tick_policy(ax, panel)
             if panel.kind in {"raw", "resid", "external"}:
                 time_panel = panel.panel_id
 
@@ -385,20 +408,21 @@ def render_review_lightcurve_pdf(spec: ReviewLightCurvePlotSpec) -> bytes:
                     handletextpad=0.35,
                 )
 
+        has_headers = bool(spec.header_left or spec.header_right)
         top_panel_id = spec.panels[0].panel_id if spec.panels else None
         top_ax = ax_by_panel.get(top_panel_id) if top_panel_id else None
-        if top_ax is not None and (spec.header_left or spec.header_right):
-            _draw_header_boxes(top_ax, left=spec.header_left, right=spec.header_right)
 
-        if spec.title and not (spec.header_left or spec.header_right):
+        if spec.title and not has_headers:
             fig.text(0.09, 0.985, spec.title, ha="left", va="top", fontsize=8.0, color="0.15")
         if legend_handles:
             right = 0.86 if len(legend_labels) <= 6 else 0.82
         else:
             right = 0.985
-        top = 0.97 if (spec.header_left or spec.header_right) else 0.98
+        top = 0.945 if has_headers else 0.98
         finalize_publication_figure(fig, h_pad=0.18, rect=(0.075, 0.055, right, top))
         _attach_raw_residual_axes(ax_by_panel, spec.panels)
+        if top_ax is not None and has_headers:
+            _draw_header_boxes(top_ax, left=spec.header_left, right=spec.header_right)
 
         buf = BytesIO()
         try:

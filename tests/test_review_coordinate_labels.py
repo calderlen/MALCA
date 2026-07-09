@@ -24,7 +24,7 @@ def test_publication_coordinate_headers_from_payload() -> None:
     payload = {"ra": 147.2, "dec": -54.9997}
     left, right = publication_coordinate_headers(payload)
     assert left is not None and left.startswith("J")
-    assert right == "ra=147.20000, dec=-54.99970"
+    assert right == "α=147.20000°, δ=-54.99970°"
 
 
 def test_publication_coordinate_headers_missing_coords() -> None:

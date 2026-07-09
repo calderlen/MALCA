@@ -1004,28 +1004,6 @@ def assemble_review_lightcurve_plot(request: ReviewPlotRequest) -> ReviewLightCu
                         )
                     )
 
-            phase_lag = float(phase_diag.get("phase_lag_g_v_cycles", np.nan))
-            phase_lag_abs = float(phase_diag.get("phase_lag_g_v_abs_cycles", np.nan))
-            if np.isfinite(phase_lag):
-                lag_text = f"g-V lag {phase_lag:+.3f} cyc"
-                if np.isfinite(phase_lag_abs):
-                    lag_text += f" (|lag| {phase_lag_abs:.3f})"
-                annotations.append(
-                    PlotAnnotation(
-                        panel_id="phase",
-                        text=lag_text,
-                        x=0.99,
-                        y=0.98,
-                        xref="paper",
-                        yref="paper",
-                        xanchor="right",
-                        yanchor="top",
-                        font_size=11.0,
-                        borderwidth=1.0,
-                        opacity=0.9,
-                    )
-                )
-
         for x in (0.0, 1.0, 2.0):
             vlines.append(PlotVLine(panel_id="phase", x=x))
         if phase_panel_mode == "fold":
@@ -1328,12 +1306,6 @@ def assemble_review_lightcurve_plot(request: ReviewPlotRequest) -> ReviewLightCu
         ]
         if phase_source:
             phase_bits.append(f"source={phase_source}")
-        phase_lag = float(phase_diag.get("phase_lag_g_v_cycles", np.nan))
-        phase_lag_abs = float(phase_diag.get("phase_lag_g_v_abs_cycles", np.nan))
-        if np.isfinite(phase_lag):
-            phase_bits.append(f"g-V lag={phase_lag:+.3f} cycles")
-            if np.isfinite(phase_lag_abs):
-                phase_bits.append(f"|lag|={phase_lag_abs:.3f}")
         status_message = "; ".join(phase_bits)
     elif phase_requested and request.phase_period_pending:
         status_message = f"{pending_period_source}: searching..."

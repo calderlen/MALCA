@@ -676,6 +676,54 @@ def test_taxonomy_subtype_positive_click_selects_brightening_detail(monkeypatch)
     assert "single brightening" in note
 
 
+def test_taxonomy_expanded_physical_primary_opens_and_stores_subclass(monkeypatch) -> None:
+    primary_trigger = {
+        "type": "taxonomy-option-btn",
+        "menu": "physical_primary",
+        "value": "pulsating_variable",
+    }
+    monkeypatch.setattr(
+        review_app,
+        "callback_context",
+        types.SimpleNamespace(triggered_id=primary_trigger, inputs_list=[[{"id": primary_trigger}]]),
+    )
+
+    selection, active_menu, submenu, note = review_app.click_taxonomy_option(
+        [1],
+        {},
+        "physical_primary",
+    )
+
+    assert selection["physical_primary"] == "pulsating_variable"
+    assert selection["physical_secondary"] is None
+    assert active_menu == "physical_secondary"
+    assert submenu == "pulsating_variable"
+    assert "pulsating variable" in note
+
+    secondary_trigger = {
+        "type": "taxonomy-option-btn",
+        "menu": "physical_secondary",
+        "value": "rr_lyrae",
+    }
+    monkeypatch.setattr(
+        review_app,
+        "callback_context",
+        types.SimpleNamespace(triggered_id=secondary_trigger, inputs_list=[[{"id": secondary_trigger}]]),
+    )
+
+    selection, active_menu, submenu, note = review_app.click_taxonomy_option(
+        [1],
+        selection,
+        "physical_secondary",
+    )
+
+    assert selection["physical_primary"] == "pulsating_variable"
+    assert selection["physical_secondary"] == "rr_lyrae"
+    assert active_menu == "physical_secondary"
+    assert submenu == "pulsating_variable"
+    assert "RR Lyrae" in note
+
+
 def test_auto_period_on_navigate_queues_harmonic_check_with_stored_period(monkeypatch) -> None:
     monkeypatch.setattr(
         review_app,

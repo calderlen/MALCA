@@ -45,7 +45,7 @@ def format_j_designation(ra_deg: float, dec_deg: float) -> str:
 
 def format_ra_dec_degrees_label(ra_deg: float, dec_deg: float) -> str:
     """Plain decimal-degree coordinate label for publication headers."""
-    return f"ra={float(ra_deg):.5f}, dec={float(dec_deg):+.5f}"
+    return f"α={float(ra_deg):.5f}°, δ={float(dec_deg):+.5f}°"
 
 
 def publication_coordinate_headers(payload: dict) -> tuple[str | None, str | None]:
