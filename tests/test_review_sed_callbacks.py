@@ -7,6 +7,7 @@ import types
 
 import pandas as pd
 import plotly.graph_objects as go
+import pytest
 from dash import dcc, no_update
 
 
@@ -832,8 +833,152 @@ def test_update_dustycult_controls_uses_candidate_defaults(tmp_path, monkeypatch
     values = review_app.update_dustycult_controls("cand-1", 0)
 
     assert values[0:3] == (1.0, 3.0, 2.0)
-    assert values[-4:-1] == (1.1, 0.2, 0.3)
-    assert "stored_event_columns" in values[-1]
+    assert values[-5:-2] == (1.1, 0.2, 0.3)
+    assert "stored_event_columns" in values[-2]
+    assert values[-1]["candidate_id"] == "cand-1"
+    assert values[-1]["source"] == "stored_event_columns"
+
+
+def test_dustycult_warning_renders_but_failed_does_not_render_model_graph(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "review.db"
+    monkeypatch.setattr(review_app, "DB_PATH", str(db_path))
+    monkeypatch.setattr(
+        review_app,
+        "check_dustycult_available",
+        lambda: DustyCultAvailability(True, "julia", tmp_path, tmp_path / "fit_lightcurve.jl", "available"),
+    )
+    posterior = {
+        "t0": {"median": 10.0, "p16": 9.9, "p84": 10.1},
+        "v": {"median": 1.0, "p16": 0.9, "p84": 1.1},
+        "b": {"median": 0.0, "p16": -0.1, "p84": 0.1},
+        "tau0": {"median": 0.4, "p16": 0.3, "p84": 0.5},
+        "lambda0": {"median": 510.0, "p16": 500.0, "p84": 520.0},
+        "alpha": {"median": 0.0, "p16": -0.1, "p84": 0.1},
+        "sigma_y": {"median": 0.25, "p16": 0.2, "p84": 0.3},
+        "sigma_x_plus": {"median": 0.25, "p16": 0.2, "p84": 0.3},
+        "sigma_x_minus": {"median": 0.25, "p16": 0.2, "p84": 0.3},
+    }
+    curves = pd.DataFrame(
+        {
+            "candidate_id": ["cand-1", "cand-1"],
+            "mode": ["quick", "quick"],
+            "point_id": [1, 2],
+            "time": [9.5, 10.5],
+            "band": ["g", "V"],
+            "observed": [0.95, 0.96],
+            "error": [0.02, 0.02],
+            "lower95": [0.9, 0.91],
+            "lower68": [0.93, 0.94],
+            "median": [0.95, 0.96],
+            "upper68": [0.98, 0.99],
+            "upper95": [1.0, 1.01],
+        }
+    )
+    with review_app.db_connect(db_path) as conn:
+        upsert_dustycult_fit(
+            conn,
+            {
+                "candidate_id": "cand-1",
+                "mode": "quick",
+                "status": "warning",
+                "error": "one-band warning",
+                "posterior_json": review_app.json.dumps(posterior),
+                "stellar_json": review_app.json.dumps({"R": 1.0, "u1": 0.1, "u2": 0.1}),
+                "t0_jd": 10.0,
+            },
+            curves,
+        )
+
+    panel = review_app._render_dustycult_result_panel("cand-1", "black", 0)
+    assert "dustycult-fit-plot" in _collect_component_ids(panel)
+    assert "one-band warning" in "\n".join(_collect_text(panel))
+
+    with review_app.db_connect(db_path) as conn:
+        upsert_dustycult_fit(
+            conn,
+            {
+                "candidate_id": "cand-1",
+                "mode": "quick",
+                "status": "failed",
+                "error": "quality gate failed",
+            },
+            pd.DataFrame(),
+        )
+
+    failed_panel = review_app._render_dustycult_result_panel("cand-1", "black", 1)
+    assert "dustycult-fit-plot" not in _collect_component_ids(failed_panel)
+    assert "quality gate failed" in "\n".join(_collect_text(failed_panel))
+
+
+def test_dustycult_fit_click_recomputes_stale_controls_and_preserves_current_manual(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(review_app, "DB_PATH", str(tmp_path / "review.db"))
+    monkeypatch.setattr(review_app, "_candidate_context", lambda candidate_id: ({"candidate_id": candidate_id}, "/tmp/cand.dat2", "source"))
+    monkeypatch.setattr(review_app, "_effective_local_lc_path", lambda payload, stored_lc_path=None, source_path=None: stored_lc_path)
+    monkeypatch.setattr(review_app, "_review_plot_dir_for_context", lambda _source_path: tmp_path)
+    monkeypatch.setattr(review_app, "_load_run_params_for_plot_dir", lambda _plot_dir: {"baseline_func": "global_median"})
+    defaults = {
+        "source": "stored_event_columns",
+        "start_jd": 1.0,
+        "end_jd": 3.0,
+        "t0_jd": 2.0,
+        "t0_width_days": 0.5,
+        "log_v_width": 1.0,
+        "b_center": 0.0,
+        "b_width": 0.5,
+        "log_tau0_width": 1.5,
+        "alpha_center": 0.0,
+        "alpha_width": 2.0,
+        "log_sigma_width": 0.75,
+        "star_R": 1.1,
+        "star_u1": 0.2,
+        "star_u2": 0.3,
+    }
+    default_calls = {"count": 0}
+    captured: list[dict[str, object]] = []
+
+    def fake_defaults(*_args, **_kwargs):
+        default_calls["count"] += 1
+        return dict(defaults)
+
+    def fake_run(_conn, _candidate_id, _payload, **kwargs):
+        captured.append(dict(kwargs["controls"]))
+        return {"status": "ok", "runtime_sec": 0.1, "artifact_dir": "/tmp/dustycult"}
+
+    monkeypatch.setattr(review_app, "control_defaults_for_candidate", fake_defaults)
+    monkeypatch.setattr(review_app, "run_dustycult_fit", fake_run)
+
+    stale_values = [99.0 for _key, _field_id, _label, _step in review_app._DUSTYCULT_CONTROL_FIELDS]
+    message, _token = review_app._dustycult_fit_callback_impl(
+        "dustycult-quick-fit-btn",
+        1,
+        0,
+        "cand-1",
+        0,
+        {"candidate_id": "other", "source": "manual_controls"},
+        *stale_values,
+    )
+
+    assert "Status: ok" in message
+    assert default_calls["count"] == 1
+    assert captured[-1]["start_jd"] == 1.0
+    assert captured[-1]["_dustycult_window_source"] == "stored_event_columns"
+
+    manual = dict(defaults)
+    manual.update({"start_jd": 10.0, "end_jd": 20.0, "t0_jd": 15.0})
+    current_values = [manual.get(key) for key, _field_id, _label, _step in review_app._DUSTYCULT_CONTROL_FIELDS]
+    review_app._dustycult_fit_callback_impl(
+        "dustycult-quick-fit-btn",
+        2,
+        0,
+        "cand-1",
+        1,
+        {"candidate_id": "cand-1", "source": "manual_controls"},
+        *current_values,
+    )
+
+    assert default_calls["count"] == 1
+    assert captured[-1]["start_jd"] == 10.0
+    assert captured[-1]["_dustycult_window_source"] == "manual_controls"
 
 
 def test_dustycult_publication_figures_use_best_fit(tmp_path, monkeypatch) -> None:
@@ -856,7 +1001,8 @@ def test_dustycult_publication_figures_use_best_fit(tmp_path, monkeypatch) -> No
             {
                 "candidate_id": "cand-1",
                 "mode": "quick",
-                "status": "ok",
+                "status": "warning",
+                "error": "quality warning",
                 "posterior_json": review_app.json.dumps(posterior),
                 "stellar_json": review_app.json.dumps({"R": 1.0, "u1": 0.1, "u2": 0.1}),
                 "t0_jd": 10.0,
@@ -880,6 +1026,18 @@ def test_dustycult_publication_figures_use_best_fit(tmp_path, monkeypatch) -> No
         )
         fit_fig, fit_mode = review_app._dustycult_fit_publication_figure(conn, "cand-1")
         occulter_fig, occulter_mode = review_app._dustycult_occulter_publication_figure(conn, "cand-1")
+        upsert_dustycult_fit(
+            conn,
+            {
+                "candidate_id": "cand-1",
+                "mode": "quick",
+                "status": "failed",
+                "error": "quality failed",
+            },
+            pd.DataFrame(),
+        )
+        with pytest.raises(ValueError, match="not exportable"):
+            review_app._dustycult_fit_publication_figure(conn, "cand-1")
 
     assert fit_mode == "quick"
     assert occulter_mode == "quick"
@@ -993,3 +1151,22 @@ def _collect_text(node) -> list[str]:
 
     walk(node)
     return text
+
+
+def _collect_component_ids(node) -> list[str]:
+    ids: list[str] = []
+
+    def walk(item) -> None:
+        if isinstance(item, (list, tuple)):
+            for child in item:
+                walk(child)
+            return
+        if item is None or isinstance(item, (str, int, float, bool)):
+            return
+        component_id = getattr(item, "id", None)
+        if component_id is not None:
+            ids.append(str(component_id))
+        walk(getattr(item, "children", None))
+
+    walk(node)
+    return ids

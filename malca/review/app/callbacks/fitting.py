@@ -32,7 +32,7 @@ def _dustycult_status_cards(fits: pd.DataFrame, theme: str | None) -> html.Div:
     for card in dustycult_status_card_rows(fits):
         status = str(card.get("status") or "not run")
         detail = str(card.get("detail") or "")
-        color = "#64c27b" if status == "ok" else ("#dd8080" if status == "failed" else muted)
+        color = "#64c27b" if status == "ok" else ("#d99a28" if status == "warning" else ("#dd8080" if status == "failed" else muted))
         cards.append(html.Div([
             html.Div(str(card.get("label") or card.get("mode") or ""), style={'fontSize': '10px', 'color': muted}),
             html.Div(status, style={'fontSize': '13px', 'fontWeight': 600, 'color': color}),
@@ -126,7 +126,14 @@ def _render_dustycult_result_panel(candidate_id: str, theme_mode: str | None, _r
     mode = str(fit_row.get("mode") or "quick")
     with closing(db_connect(Path(DB_PATH))) as conn:
         curves = load_dustycult_curve(conn, str(candidate_id), mode)
-    if str(fit_row.get("status") or "").lower() == "ok":
+    status = str(fit_row.get("status") or "").lower()
+    if status in {"ok", "warning"}:
+        if status == "warning":
+            warning = str(fit_row.get("error") or "DustyCult fit completed with quality warnings.")
+            children.append(html.Div(
+                warning,
+                style={'fontSize': '11px', 'color': "#d99a28", 'overflowWrap': 'anywhere'},
+            ))
         children.append(dcc.Graph(
             id='dustycult-fit-plot',
             figure=_dustycult_result_figure(curves, fit_row, theme_mode),
@@ -163,8 +170,9 @@ def _render_dustycult_result_panel(candidate_id: str, theme_mode: str | None, _r
             }),
         ]))
     children.append(html.Div(dustycult_fit_metadata_text(fit_row), style={'fontSize': '10px', 'color': spec["muted"], 'overflowWrap': 'anywhere'}))
-    children.append(_dustycult_geometry_table(fit_row, theme_mode))
-    children.append(_dustycult_parameter_table(fit_row, theme_mode))
+    if status in {"ok", "warning"}:
+        children.append(_dustycult_geometry_table(fit_row, theme_mode))
+        children.append(_dustycult_parameter_table(fit_row, theme_mode))
     return children
 
 
@@ -182,7 +190,7 @@ def _dustycult_fit_publication_figure(conn, candidate_id: str) -> tuple[go.Figur
     if fit_row is None:
         raise ValueError("No DustyCult fit has been run for this candidate.")
     status = str(fit_row.get("status") or "").lower()
-    if status != "ok":
+    if status not in {"ok", "warning"}:
         raise ValueError(f"DustyCult fit is not exportable because status is {status or 'unknown'}.")
     mode = str(fit_row.get("mode") or "quick")
     fig = _dustycult_result_figure(curves, fit_row, "white")
@@ -204,7 +212,7 @@ def _dustycult_occulter_publication_figure(conn, candidate_id: str) -> tuple[go.
     if fit_row is None:
         raise ValueError("No DustyCult fit has been run for this candidate.")
     status = str(fit_row.get("status") or "").lower()
-    if status != "ok":
+    if status not in {"ok", "warning"}:
         raise ValueError(f"DustyCult occulter is not exportable because fit status is {status or 'unknown'}.")
     mode = str(fit_row.get("mode") or "quick")
     fig = build_dustycult_occulter_figure(fit_row, theme="white", grid_n=501)
@@ -444,7 +452,10 @@ def _dustycult_config_status_text() -> str:
 
 @app.callback(
     [Output(field_id, 'value') for _key, field_id, _label, _step in _DUSTYCULT_CONTROL_FIELDS]
-    + [Output('dustycult-defaults-status', 'children')],
+    + [
+        Output('dustycult-defaults-status', 'children'),
+        Output('dustycult-control-state', 'data'),
+    ],
     [Input('current-candidate-id', 'data'),
      Input('dustycult-recompute-dip-btn', 'n_clicks'),
      Input('dustycult-summary', 'n_clicks')],
@@ -453,9 +464,9 @@ def _dustycult_config_status_text() -> str:
 def update_dustycult_controls(candidate_id, _recompute_clicks, panel_requested=True):
     """Populate editable DustyCult defaults for the current candidate."""
     if not _details_open(panel_requested):
-        return tuple([no_update] * len(_DUSTYCULT_CONTROL_FIELDS) + [no_update])
+        return tuple([no_update] * len(_DUSTYCULT_CONTROL_FIELDS) + [no_update, no_update])
     if not candidate_id:
-        return tuple([None] * len(_DUSTYCULT_CONTROL_FIELDS) + ["No candidates loaded."])
+        return tuple([None] * len(_DUSTYCULT_CONTROL_FIELDS) + ["No candidates loaded.", {}])
     triggered_id = _dash_triggered_id()
     recompute = triggered_id == 'dustycult-recompute-dip-btn'
     try:
@@ -474,14 +485,32 @@ def update_dustycult_controls(candidate_id, _recompute_clicks, panel_requested=T
                 recompute=recompute,
             )
     except Exception as exc:
-        return tuple([None] * len(_DUSTYCULT_CONTROL_FIELDS) + [f"DustyCult defaults failed: {exc}"])
+        return tuple([None] * len(_DUSTYCULT_CONTROL_FIELDS) + [f"DustyCult defaults failed: {exc}", {}])
     values = [defaults.get(key) for key, _field_id, _label, _step in _DUSTYCULT_CONTROL_FIELDS]
     source = str(defaults.get("source") or "defaults")
     message = str(defaults.get("message") or "")
-    return tuple(values + [f"{source}: {message}"])
+    state = {
+        "candidate_id": str(candidate_id),
+        "source": source,
+        "message": message,
+        "recomputed": bool(recompute),
+    }
+    return tuple(values + [f"{source}: {message}", state])
 
 
-def _dustycult_fit_callback_impl(triggered_id, quick_clicks, full_clicks, candidate_id, refresh_token, *control_values):
+def _dustycult_controls_complete(controls: dict[str, object]) -> bool:
+    for key in ("start_jd", "end_jd", "t0_jd"):
+        value = controls.get(key)
+        try:
+            if value is None or pd.isna(value):
+                return False
+        except Exception:
+            if value is None:
+                return False
+    return True
+
+
+def _dustycult_fit_callback_impl(triggered_id, quick_clicks, full_clicks, candidate_id, refresh_token, control_state, *control_values):
     if triggered_id == 'dustycult-quick-fit-btn':
         mode = "quick"
         if not quick_clicks:
@@ -501,6 +530,24 @@ def _dustycult_fit_callback_impl(triggered_id, quick_clicks, full_clicks, candid
         plot_dir_path = _review_plot_dir_for_context(source_path)
         run_params = _load_run_params_for_plot_dir(str(plot_dir_path) if plot_dir_path else None)
         with closing(db_connect(Path(DB_PATH))) as conn:
+            control_state = control_state if isinstance(control_state, dict) else {}
+            stale_controls = str(control_state.get("candidate_id") or "") != str(candidate_id)
+            if stale_controls or not _dustycult_controls_complete(controls):
+                defaults = control_defaults_for_candidate(
+                    conn,
+                    str(candidate_id),
+                    payload,
+                    lc_path=lc_path,
+                    plot_dir=str(plot_dir_path) if plot_dir_path else None,
+                    run_params=run_params,
+                    recompute=False,
+                )
+                controls = _dustycult_control_values_from_states(
+                    [defaults.get(key) for key, _field_id, _label, _step in _DUSTYCULT_CONTROL_FIELDS]
+                )
+                controls["_dustycult_window_source"] = str(defaults.get("source") or "defaults")
+            else:
+                controls["_dustycult_window_source"] = str(control_state.get("source") or "manual_controls")
             row = run_dustycult_fit(
                 conn,
                 str(candidate_id),
@@ -516,10 +563,11 @@ def _dustycult_fit_callback_impl(triggered_id, quick_clicks, full_clicks, candid
         row = {"status": "failed", "error": str(exc), "runtime_sec": None, "artifact_dir": ""}
     next_token = int(refresh_token or 0) + 1
     status = str(row.get("status") or "unknown")
-    if status == "ok":
+    if status in {"ok", "warning"}:
+        warning_text = f" Warnings: {row.get('error')}" if status == "warning" and row.get("error") else ""
         return (
             f"DustyCult {mode} fit complete in {_dustycult_float(row.get('runtime_sec'), 3)} s. "
-            f"Artifact: {row.get('artifact_dir') or ''}",
+            f"Status: {status}. Artifact: {row.get('artifact_dir') or ''}{warning_text}",
             next_token,
         )
     return (
@@ -535,7 +583,8 @@ if _background_callback_manager is not None:
         [Input('dustycult-quick-fit-btn', 'n_clicks'),
          Input('dustycult-full-fit-btn', 'n_clicks')],
         [State('current-candidate-id', 'data'),
-         State('dustycult-refresh-token', 'data')]
+         State('dustycult-refresh-token', 'data'),
+         State('dustycult-control-state', 'data')]
         + [State(field_id, 'value') for _key, field_id, _label, _step in _DUSTYCULT_CONTROL_FIELDS],
         background=True,
         running=[
@@ -545,13 +594,14 @@ if _background_callback_manager is not None:
         ],
         prevent_initial_call=True,
     )
-    def run_dustycult_fit_callback(quick_clicks, full_clicks, candidate_id, refresh_token, *control_values):
+    def run_dustycult_fit_callback(quick_clicks, full_clicks, candidate_id, refresh_token, control_state, *control_values):
         return _dustycult_fit_callback_impl(
             _dash_triggered_id(),
             quick_clicks,
             full_clicks,
             candidate_id,
             refresh_token,
+            control_state,
             *control_values,
         )
 else:
@@ -561,17 +611,19 @@ else:
         [Input('dustycult-quick-fit-btn', 'n_clicks'),
          Input('dustycult-full-fit-btn', 'n_clicks')],
         [State('current-candidate-id', 'data'),
-         State('dustycult-refresh-token', 'data')]
+         State('dustycult-refresh-token', 'data'),
+         State('dustycult-control-state', 'data')]
         + [State(field_id, 'value') for _key, field_id, _label, _step in _DUSTYCULT_CONTROL_FIELDS],
         prevent_initial_call=True,
     )
-    def run_dustycult_fit_callback(quick_clicks, full_clicks, candidate_id, refresh_token, *control_values):
+    def run_dustycult_fit_callback(quick_clicks, full_clicks, candidate_id, refresh_token, control_state, *control_values):
         return _dustycult_fit_callback_impl(
             _dash_triggered_id(),
             quick_clicks,
             full_clicks,
             candidate_id,
             refresh_token,
+            control_state,
             *control_values,
         )
 

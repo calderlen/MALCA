@@ -75,6 +75,15 @@ def _series_get(row: pd.Series | Mapping[str, Any], key: str, default: Any = Non
     return row.get(key, default)
 
 
+def _quality_dict(row: pd.Series | Mapping[str, Any]) -> dict[str, Any]:
+    summary = parse_json_cell(_series_get(row, "summary_json"), {})
+    if isinstance(summary, Mapping):
+        quality = summary.get("quality")
+        if isinstance(quality, Mapping):
+            return dict(quality)
+    return {}
+
+
 def _latest_row(frame: pd.DataFrame) -> pd.Series | None:
     if frame is None or frame.empty:
         return None
@@ -110,11 +119,15 @@ def select_dustycult_display_row(fits: pd.DataFrame | None, mode: str | None = N
         if sub.empty:
             return None
         ok = sub[status_series.loc[sub.index] == "ok"]
-        return _latest_row(ok if not ok.empty else sub)
-    for preferred in ("full", "quick"):
-        matches = frame[(mode_series == preferred) & (status_series == "ok")]
-        if not matches.empty:
-            return _latest_row(matches)
+        if not ok.empty:
+            return _latest_row(ok)
+        warning = sub[status_series.loc[sub.index] == "warning"]
+        return _latest_row(warning if not warning.empty else sub)
+    for preferred_status in ("ok", "warning"):
+        for preferred in ("full", "quick"):
+            matches = frame[(mode_series == preferred) & (status_series == preferred_status)]
+            if not matches.empty:
+                return _latest_row(matches)
     return _latest_row(frame)
 
 
@@ -140,6 +153,10 @@ def dustycult_status_card_rows(fits: pd.DataFrame | None) -> list[dict[str, str]
                 detail_parts.append(f"{format_dustycult_float(runtime, 3)} s")
             if n_points is not None and not pd.isna(n_points):
                 detail_parts.append(f"{int(float(n_points))} pts")
+            quality = _quality_dict(row)
+            band_counts = quality.get("band_counts") if isinstance(quality.get("band_counts"), Mapping) else {}
+            if band_counts:
+                detail_parts.append(", ".join(f"{band}:{count}" for band, count in band_counts.items()))
             error = str(row.get("error") or "").strip()
             if status != "ok" and error:
                 detail_parts.append(error[:120])
@@ -287,6 +304,23 @@ def dustycult_fit_metadata_rows(fit_row: pd.Series | Mapping[str, Any]) -> list[
             f"{format_dustycult_float(_series_get(fit_row, 'end_jd'), 2)}",
         ),
     ]
+    quality = _quality_dict(fit_row)
+    if quality:
+        band_counts = quality.get("band_counts") if isinstance(quality.get("band_counts"), Mapping) else {}
+        if band_counts:
+            rows.append(("bands", ", ".join(f"{band}:{count}" for band, count in band_counts.items())))
+        span = quality.get("time_span_days")
+        if span is not None:
+            rows.append(("input span", f"{format_dustycult_float(span, 3)} d"))
+        baseline = quality.get("baseline") if isinstance(quality.get("baseline"), Mapping) else {}
+        if baseline.get("name"):
+            rows.append(("baseline", str(baseline.get("name"))))
+        errors = [str(item) for item in quality.get("errors", []) or [] if str(item).strip()]
+        warnings = [str(item) for item in quality.get("warnings", []) or [] if str(item).strip()]
+        if errors:
+            rows.append(("quality errors", " ".join(errors)))
+        if warnings:
+            rows.append(("quality warnings", " ".join(warnings)))
     artifact = str(_series_get(fit_row, "artifact_dir", "") or "").strip()
     if artifact:
         rows.append(("artifact", artifact))

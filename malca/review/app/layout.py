@@ -51,6 +51,7 @@ def create_layout():
         dcc.Store(id='auto-period-cache', data={}, storage_type='session'),
         dcc.Store(id='auto-period-request', data={'nonce': 0}),
         dcc.Store(id='dustycult-refresh-token', data=0),
+        dcc.Store(id='dustycult-control-state', data={}),
         dcc.Store(id='phoebe-refresh-token', data=0),
         dcc.Store(id='plot-render-request', data={'nonce': 1, 'ts': 0.0, 'state': {'idx': 0, 'candidate_id': None, 'plot_mode': 'native', 'overlay_values': list(PLOT_PRESETS['Diagnostics']['overlays']), 'selected_cameras': [], 'selected_bands': ['g', 'V'], 'native_color_mode': 'camera', 'preset': 'Diagnostics', 'theme': DEFAULT_THEME, 'residual_height': DEFAULT_RESIDUAL_FRACTION, 'baseline_opacity': 0.5, 'external_source_values': list(DEFAULT_EXTERNAL_SOURCE_VALUES), 'external_source_view': DEFAULT_EXTERNAL_SOURCE_VIEW, 'external_source_layout': DEFAULT_EXTERNAL_SOURCE_LAYOUT, 'phase_panel_mode': 'fold'}}),
         dcc.Store(id='plot-render-applied', data=0),

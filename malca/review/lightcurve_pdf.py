@@ -25,7 +25,7 @@ _MARKER_ERRORBAR_WIDTH = 0.3
 _HEADER_TEXT_FONT_SIZE = 11.0
 _HEADER_LEFT_X = 0.035
 _HEADER_RIGHT_X = 0.965
-_RAW_RESIDUAL_PANEL_GAP = 0.026
+_RAW_RESIDUAL_PANEL_GAP = 0.0
 _MAG_Y_TICK_INTERVAL = 0.1
 
 
@@ -134,7 +134,7 @@ def _set_robust_limits(ax, values: list[np.ndarray], *, inverted: bool, pad_frac
 
 
 def _attach_raw_residual_axes(ax_by_panel: dict[str, object], panels: tuple) -> None:
-    """Keep a small controlled gap between adjacent raw and residual axes."""
+    """Attach adjacent raw and residual axes so they share a single border."""
     for upper, lower in zip(panels, panels[1:]):
         if upper.panel_id != "raw" or lower.panel_id != "resid":
             continue
@@ -155,6 +155,7 @@ def _attach_raw_residual_axes(ax_by_panel: dict[str, object], panels: tuple) -> 
         upper_ax.set_position(
             [upper_pos.x0, upper_bottom, upper_pos.width, upper_pos.y1 - upper_bottom]
         )
+        upper_ax.spines["bottom"].set_visible(False)
 
 
 def _plot_trace(ax, trace: PlotTrace, *, label: str | None = None, marker_size: float | None = None) -> None:
@@ -276,7 +277,7 @@ def render_review_lightcurve_pdf(spec: ReviewLightCurvePlotSpec) -> bytes:
                     cbar.set_label(r"$\Delta m$", fontsize=7.0)
                     cbar.ax.tick_params(labelsize=6.5)
             else:
-                label = trace.label if trace.showlegend else None
+                label = trace.label if trace.showlegend else "_nolegend_"
                 _plot_trace(ax, trace, label=label)
                 value_buckets[trace.panel_id].append(np.asarray(trace.y, dtype=float))
 
@@ -322,6 +323,8 @@ def render_review_lightcurve_pdf(spec: ReviewLightCurvePlotSpec) -> bytes:
         for vline in spec.vlines:
             ax = ax_by_panel.get(vline.panel_id)
             if ax is None:
+                continue
+            if vline.panel_id == "phase":
                 continue
             ax.axvline(vline.x, color=vline.color or "0.55", linestyle=":", linewidth=0.65, alpha=0.7, zorder=1)
 
@@ -378,10 +381,13 @@ def render_review_lightcurve_pdf(spec: ReviewLightCurvePlotSpec) -> bytes:
                 time_panel = panel.panel_id
 
         if time_panel is not None:
-            ax_by_panel[time_panel].set_xlabel(_axis_label_for_offset(spec.jd_offset))
+            ax_by_panel[time_panel].set_xlabel(_axis_label_for_offset(spec.jd_offset), labelpad=1.5)
             for panel in spec.panels:
                 if panel.kind in {"raw", "resid", "external"} and panel.panel_id != time_panel:
                     ax_by_panel[panel.panel_id].tick_params(axis="x", labelbottom=False, bottom=False)
+        phase_ax = ax_by_panel.get("phase")
+        if phase_ax is not None:
+            phase_ax.xaxis.labelpad = 5.0
 
         raw_ax = ax_by_panel.get("raw")
         if raw_ax is not None:
@@ -415,7 +421,12 @@ def render_review_lightcurve_pdf(spec: ReviewLightCurvePlotSpec) -> bytes:
         if spec.title and not has_headers:
             fig.text(0.09, 0.985, spec.title, ha="left", va="top", fontsize=8.0, color="0.15")
         if legend_handles:
-            right = 0.86 if len(legend_labels) <= 6 else 0.82
+            if len(legend_labels) <= 4:
+                right = 0.925
+            elif len(legend_labels) <= 6:
+                right = 0.90
+            else:
+                right = 0.82
         else:
             right = 0.985
         top = 0.945 if has_headers else 0.98

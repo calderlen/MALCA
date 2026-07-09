@@ -17,7 +17,7 @@ if "celerite2" not in sys.modules:
     )
 
 from malca.plotting.lightcurve_publication import _load_matplotlib
-from malca.review.lightcurve_assembly import PlotPanel, PlotTrace
+from malca.review.lightcurve_assembly import PlotPanel, PlotTrace, PlotVLine, ReviewLightCurvePlotSpec
 from malca.review.interactive_plot import build_interactive_lightcurve_figure
 from malca.review.lightcurve_pdf import (
     _apply_magnitude_y_tick_policy,
@@ -25,6 +25,7 @@ from malca.review.lightcurve_pdf import (
     _draw_header_boxes,
     _plot_trace,
     _style_lightcurve_axis,
+    render_review_lightcurve_pdf,
 )
 from malca.review.lightcurve_publication import _axis_label_for_offset, build_review_lightcurve_publication_pdf
 
@@ -177,7 +178,7 @@ def test_review_pdf_magnitude_y_ticks_are_tenth_spaced() -> None:
         plt.close(fig)
 
 
-def test_review_pdf_raw_residual_axes_keep_gap() -> None:
+def test_review_pdf_raw_residual_axes_share_border() -> None:
     plt, _auto_minor = _load_matplotlib()
     fig, (raw_ax, resid_ax) = plt.subplots(2, 1, figsize=(4.0, 3.0))
     try:
@@ -188,10 +189,92 @@ def test_review_pdf_raw_residual_axes_keep_gap() -> None:
         _attach_raw_residual_axes({"raw": raw_ax, "resid": resid_ax}, panels)
 
         gap = raw_ax.get_position().y0 - resid_ax.get_position().y1
-        assert gap > 0.0
-        assert gap == pytest.approx(0.026)
+        assert gap == pytest.approx(0.0)
+        assert not raw_ax.spines["bottom"].get_visible()
     finally:
         plt.close(fig)
+
+
+def test_review_pdf_legend_omits_hidden_band_camera_labels(monkeypatch: pytest.MonkeyPatch) -> None:
+    import matplotlib.axes
+
+    seen_labels: list[str] = []
+    original_legend = matplotlib.axes.Axes.legend
+
+    def record_legend(self, handles, labels, *args, **kwargs):
+        seen_labels.extend(str(label) for label in labels)
+        return original_legend(self, handles, labels, *args, **kwargs)
+
+    monkeypatch.setattr(matplotlib.axes.Axes, "legend", record_legend)
+    spec = ReviewLightCurvePlotSpec(
+        title="",
+        jd_offset=2458000.0,
+        panels=(PlotPanel(panel_id="raw", kind="raw", y_label=r"$m$ [mag]"),),
+        traces=(
+            PlotTrace(panel_id="raw", x=np.array([0.0]), y=np.array([12.5]), label="g", showlegend=True),
+            PlotTrace(panel_id="raw", x=np.array([1.0]), y=np.array([12.6]), label="bj (g)", showlegend=False),
+            PlotTrace(panel_id="raw", x=np.array([2.0]), y=np.array([12.7]), label="V", showlegend=True),
+        ),
+        baselines=(),
+        events=(),
+        hlines=(),
+        vlines=(),
+        annotations=(),
+        legend_panel_id="raw",
+        warnings=(),
+        status="ok",
+        status_message="",
+        stat_rows=(),
+        camera_diagnostics={},
+        camera_options=(),
+        camera_values=(),
+    )
+
+    pdf = render_review_lightcurve_pdf(spec)
+
+    assert pdf.startswith(b"%PDF")
+    assert seen_labels == ["g", "V"]
+
+
+def test_review_pdf_skips_phase_cycle_vlines(monkeypatch: pytest.MonkeyPatch) -> None:
+    import matplotlib.axes
+
+    drawn_vlines: list[float] = []
+    original_axvline = matplotlib.axes.Axes.axvline
+
+    def record_axvline(self, x=0, *args, **kwargs):
+        drawn_vlines.append(float(x))
+        return original_axvline(self, x=x, *args, **kwargs)
+
+    monkeypatch.setattr(matplotlib.axes.Axes, "axvline", record_axvline)
+    spec = ReviewLightCurvePlotSpec(
+        title="",
+        jd_offset=2458000.0,
+        panels=(PlotPanel(panel_id="phase", kind="phase", y_label=r"$\Delta m$ [mag]", x_label=r"$\phi$"),),
+        traces=(),
+        baselines=(),
+        events=(),
+        hlines=(),
+        vlines=(
+            PlotVLine(panel_id="phase", x=0.0),
+            PlotVLine(panel_id="phase", x=1.0),
+            PlotVLine(panel_id="phase", x=2.0),
+        ),
+        annotations=(),
+        legend_panel_id=None,
+        warnings=(),
+        status="ok",
+        status_message="",
+        stat_rows=(),
+        camera_diagnostics={},
+        camera_options=(),
+        camera_values=(),
+    )
+
+    pdf = render_review_lightcurve_pdf(spec)
+
+    assert pdf.startswith(b"%PDF")
+    assert drawn_vlines == []
 
 
 def test_review_lightcurve_publication_pdf_uses_native_matplotlib_data_path(tmp_path: Path) -> None:

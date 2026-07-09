@@ -38,6 +38,19 @@ from malca.review.dustycult_visualization import (
 from malca.review.store import db_connect
 
 
+_DUSTYCULT_REQUIRED_SAMPLE_COLUMNS = (
+    "t0",
+    "v",
+    "b",
+    "tau0",
+    "lambda0",
+    "alpha",
+    "sigma_y",
+    "sigma_x_plus",
+    "sigma_x_minus",
+)
+
+
 def _fit_row_with_posterior(**overrides: object) -> dict[str, object]:
     row: dict[str, object] = {
         "candidate_id": "cand-1",
@@ -67,6 +80,97 @@ def _fit_row_with_posterior(**overrides: object) -> dict[str, object]:
     return row
 
 
+def _prepared_quality(frame: pd.DataFrame, window: dict[str, object], *, warnings: list[str] | None = None, errors: list[str] | None = None) -> dict[str, object]:
+    warnings = list(warnings or [])
+    errors = list(errors or [])
+    return {
+        "status": "failed" if errors else ("warning" if warnings else "ok"),
+        "warnings": warnings,
+        "errors": errors,
+        "n_points": int(len(frame)),
+        "band_counts": {str(k): int(v) for k, v in frame["band"].value_counts().items()},
+        "time_span_days": float(frame["time"].max() - frame["time"].min()) if not frame.empty else None,
+        "window_span_days": float(window["end_jd"] - window["start_jd"]),
+        "finite_error_points": int(np.isfinite(frame["relative_flux_error"]).sum()) if not frame.empty else 0,
+        "before_t0_points": int((frame["time"] < window["t0_jd"]).sum()) if not frame.empty else 0,
+        "after_t0_points": int((frame["time"] > window["t0_jd"]).sum()) if not frame.empty else 0,
+        "baseline": {"name": "median", "warnings": []},
+        "window": {
+            "start_jd": window["start_jd"],
+            "end_jd": window["end_jd"],
+            "t0_jd": window["t0_jd"],
+            "source": window.get("source", "test"),
+        },
+    }
+
+
+def _prepared_input(n_points: int = 30, *, one_band: bool = False, warnings: list[str] | None = None, errors: list[str] | None = None) -> PreparedDustyCultInput:
+    times = np.linspace(0.0, 20.0, n_points)
+    flux = 1.0 - 0.08 * np.exp(-0.5 * ((times - 10.0) / 1.2) ** 2)
+    bands = ["g"] * n_points if one_band else ["g" if i % 2 == 0 else "V" for i in range(n_points)]
+    frame = pd.DataFrame(
+        {
+            "time": times,
+            "relative_flux": flux,
+            "relative_flux_error": np.full(n_points, 0.02),
+            "band": bands,
+        }
+    )
+    window = {"start_jd": 0.0, "end_jd": 20.0, "t0_jd": 10.0, "n_input_points": n_points, "source": "test"}
+    return PreparedDustyCultInput(
+        frame=frame,
+        window=window,
+        baseline_name="median",
+        baseline_warnings=[],
+        quality=_prepared_quality(frame, window, warnings=warnings, errors=errors),
+    )
+
+
+def _sample_artifacts(n_samples: int = 30, *, degenerate: bool = False) -> pd.DataFrame:
+    if degenerate:
+        values = np.zeros(n_samples)
+    else:
+        values = np.linspace(-0.05, 0.05, n_samples)
+    return pd.DataFrame(
+        {
+            "t0": 10.0 + values,
+            "v": 1.0 + 0.1 * values,
+            "b": 0.1 + 0.05 * values,
+            "tau0": 0.3 + 0.05 * values,
+            "lambda0": 510.0 + values,
+            "alpha": 0.2 + 0.1 * values,
+            "sigma_y": 0.25 + 0.02 * values,
+            "sigma_x_plus": 0.25 + 0.02 * values,
+            "sigma_x_minus": 0.25 + 0.02 * values,
+        }
+    )
+
+
+def _predictive_artifacts(prepared: PreparedDustyCultInput, *, flat: bool = False) -> pd.DataFrame:
+    frame = prepared.frame.reset_index(drop=True)
+    median = np.ones(len(frame)) if flat else frame["relative_flux"].to_numpy(dtype=float)
+    return pd.DataFrame(
+        {
+            "point_id": np.arange(1, len(frame) + 1),
+            "time": frame["time"].to_numpy(dtype=float),
+            "band": frame["band"].astype(str).to_numpy(),
+            "observed": frame["relative_flux"].to_numpy(dtype=float),
+            "error": frame["relative_flux_error"].to_numpy(dtype=float),
+            "lower95": median - 0.04,
+            "lower68": median - 0.02,
+            "median": median,
+            "upper68": median + 0.02,
+            "upper95": median + 0.04,
+        }
+    )
+
+
+def _write_mock_fit_artifacts(output_dir: Path, prepared: PreparedDustyCultInput, *, degenerate: bool = False, flat: bool = False) -> None:
+    _sample_artifacts(degenerate=degenerate).to_csv(output_dir / "samples.csv", index=False)
+    _predictive_artifacts(prepared, flat=flat).to_csv(output_dir / "predictive_intervals.csv", index=False)
+    (output_dir / "manifest.json").write_text('{"status":"ok"}\n', encoding="utf-8")
+
+
 def test_dustycult_display_selects_full_ok_then_quick_ok_then_latest() -> None:
     fits = pd.DataFrame(
         [
@@ -80,6 +184,8 @@ def test_dustycult_display_selects_full_ok_then_quick_ok_then_latest() -> None:
     assert select_dustycult_display_row(fits, mode="quick").get("mode") == "quick"
     no_ok = fits.assign(status=["failed", "failed", "failed"])
     assert select_dustycult_display_row(no_ok).get("updated_at") == "2026-01-03T00:00:00Z"
+    warning_only = fits.assign(status=["failed", "warning", "failed"])
+    assert select_dustycult_display_row(warning_only).get("mode") == "full"
 
 
 def test_dustycult_display_rows_extract_metadata_geometry_and_posterior() -> None:
@@ -134,7 +240,54 @@ def test_control_defaults_use_stored_dip_columns_for_window(tmp_path: Path) -> N
     assert defaults["t0_jd"] == 2459000.0
     assert defaults["start_jd"] == 2458990.0
     assert defaults["end_jd"] == 2459010.0
+    assert np.isclose(defaults["t0_width_days"], 10.0 / 3.0)
     assert defaults["star_R"] == 1.0
+
+
+def test_control_defaults_broad_stored_event_gets_broad_t0_prior(tmp_path: Path) -> None:
+    payload = {
+        "dip_best_t0": 2459000.0,
+        "dip_best_width_param": 100.0,
+        "dip_max_run_duration": 400.0,
+    }
+    with db_connect(tmp_path / "review.db") as conn:
+        defaults = control_defaults_for_candidate(conn, "cand-1", payload)
+
+    assert defaults["start_jd"] == 2458880.0
+    assert defaults["end_jd"] == 2459120.0
+    assert defaults["half_width_days"] == 120.0
+    assert defaults["t0_width_days"] == 30.0
+
+
+def test_control_defaults_fall_back_when_stored_window_fails_preflight(tmp_path: Path, monkeypatch) -> None:
+    df = pd.DataFrame({"JD": [1.0, 2.0, 3.0], "mag": [12.0, 13.0, 12.1], "error": [0.02, 0.02, 0.02]})
+
+    monkeypatch.setattr(
+        "malca.review.dustycult.load_canonical_cleaned_lightcurve",
+        lambda *args, **kwargs: (df, tmp_path / "lc.dat2"),
+    )
+    monkeypatch.setattr(
+        "malca.review.dustycult._defaults_viability_quality",
+        lambda *_args, **_kwargs: {"status": "failed", "warnings": [], "errors": ["stored window has no points"]},
+    )
+    monkeypatch.setattr(
+        "malca.review.dustycult.recompute_dip_defaults",
+        lambda *_args, **_kwargs: {
+            "source": "recomputed_dip_run",
+            "start_jd": 1.0,
+            "end_jd": 3.0,
+            "t0_jd": 2.0,
+            "half_width_days": 1.0,
+            "message": "recomputed",
+        },
+    )
+
+    with db_connect(tmp_path / "review.db") as conn:
+        defaults = control_defaults_for_candidate(conn, "cand-1", {"dip_best_t0": 100.0})
+
+    assert defaults["source"] == "recomputed_dip_run"
+    assert defaults["t0_jd"] == 2.0
+    assert "stored window has no points" in defaults["message"]
 
 
 def test_control_defaults_recompute_when_stored_window_missing(tmp_path: Path, monkeypatch) -> None:
@@ -290,20 +443,7 @@ def test_upsert_dustycult_fit_replaces_mode_and_curve_rows(tmp_path: Path) -> No
 
 
 def test_run_dustycult_fit_imports_mocked_artifacts(tmp_path: Path, monkeypatch) -> None:
-    frame = pd.DataFrame(
-        {
-            "time": [10.0, 11.0],
-            "relative_flux": [0.9, 1.0],
-            "relative_flux_error": [0.02, 0.02],
-            "band": ["g", "V"],
-        }
-    )
-    prepared = PreparedDustyCultInput(
-        frame=frame,
-        window={"start_jd": 9.0, "end_jd": 12.0, "t0_jd": 10.5, "n_input_points": 2},
-        baseline_name="median",
-        baseline_warnings=[],
-    )
+    prepared = _prepared_input()
 
     def fake_prepare(*args, **kwargs):
         return prepared
@@ -322,22 +462,7 @@ def test_run_dustycult_fit_imports_mocked_artifacts(tmp_path: Path, monkeypatch)
     def fake_run(command, check, capture_output, text):
         seen["command"] = command
         out_dir = Path(command[command.index("--out") + 1])
-        pd.DataFrame({"t0": [10.4, 10.6], "v": [1.0, 1.2]}).to_csv(out_dir / "samples.csv", index=False)
-        pd.DataFrame(
-            {
-                "point_id": [1, 2],
-                "time": [10.0, 11.0],
-                "band": ["g", "V"],
-                "observed": [0.9, 1.0],
-                "error": [0.02, 0.02],
-                "lower95": [0.8, 0.9],
-                "lower68": [0.85, 0.95],
-                "median": [0.9, 1.0],
-                "upper68": [0.95, 1.05],
-                "upper95": [1.0, 1.1],
-            }
-        ).to_csv(out_dir / "predictive_intervals.csv", index=False)
-        (out_dir / "manifest.json").write_text('{"status":"ok"}\n')
+        _write_mock_fit_artifacts(out_dir, prepared)
         return subprocess.CompletedProcess(command, 0, stdout="done", stderr="")
 
     monkeypatch.setattr("malca.review.dustycult.prepare_dustycult_input", fake_prepare)
@@ -345,7 +470,7 @@ def test_run_dustycult_fit_imports_mocked_artifacts(tmp_path: Path, monkeypatch)
     monkeypatch.setattr("malca.review.dustycult.subprocess.run", fake_run)
 
     controls = dict(DEFAULT_CONTROLS)
-    controls.update({"start_jd": 9.0, "end_jd": 12.0, "t0_jd": 10.5})
+    controls.update({"start_jd": 0.0, "end_jd": 20.0, "t0_jd": 10.0})
     with db_connect(tmp_path / "review.db") as conn:
         row = run_dustycult_fit(
             conn,
@@ -363,9 +488,122 @@ def test_run_dustycult_fit_imports_mocked_artifacts(tmp_path: Path, monkeypatch)
     assert "--input" not in seen["command"]
     config_path = Path(seen["command"][seen["command"].index("--config") + 1])
     config = json.loads(config_path.read_text())
-    assert config["prior_kwargs"]["t0_center"] == 10.5
-    assert row["n_curve_points"] == 2
-    assert len(curves) == 2
+    assert config["prior_kwargs"]["t0_center"] == 10.0
+    assert row["n_curve_points"] == len(prepared.frame)
+    assert len(curves) == len(prepared.frame)
+
+
+def test_run_dustycult_fit_preflight_failure_skips_julia(tmp_path: Path, monkeypatch) -> None:
+    prepared = _prepared_input(
+        4,
+        errors=["DustyCult needs at least 12 valid g/V points; found 4."],
+    )
+
+    def fake_available(*args, **kwargs):
+        return DustyCultAvailability(
+            True,
+            sys.executable,
+            tmp_path,
+            tmp_path / "scripts" / "fit_lightcurve.jl",
+            "available",
+        )
+
+    def fail_run(*_args, **_kwargs):
+        raise AssertionError("preflight failure should not launch DustyCult")
+
+    monkeypatch.setattr("malca.review.dustycult.prepare_dustycult_input", lambda *args, **kwargs: prepared)
+    monkeypatch.setattr("malca.review.dustycult.check_dustycult_available", fake_available)
+    monkeypatch.setattr("malca.review.dustycult.subprocess.run", fail_run)
+
+    controls = dict(DEFAULT_CONTROLS)
+    controls.update({"start_jd": 0.0, "end_jd": 20.0, "t0_jd": 10.0})
+    with db_connect(tmp_path / "review.db") as conn:
+        row = run_dustycult_fit(
+            conn,
+            "cand-1",
+            {},
+            db_path=tmp_path / "review.db",
+            controls=controls,
+            mode="quick",
+        )
+
+    assert row["status"] == "failed"
+    assert row["n_input_points"] == 4
+    assert "at least 12" in row["error"]
+
+
+def test_run_dustycult_fit_one_band_result_is_warning(tmp_path: Path, monkeypatch) -> None:
+    prepared = _prepared_input(30, one_band=True, warnings=["DustyCult input contains only one ASAS-SN band."])
+
+    def fake_available(*args, **kwargs):
+        return DustyCultAvailability(
+            True,
+            sys.executable,
+            tmp_path,
+            tmp_path / "scripts" / "fit_lightcurve.jl",
+            "available",
+        )
+
+    def fake_run(command, check, capture_output, text):
+        out_dir = Path(command[command.index("--out") + 1])
+        _write_mock_fit_artifacts(out_dir, prepared)
+        return subprocess.CompletedProcess(command, 0, stdout="done", stderr="")
+
+    monkeypatch.setattr("malca.review.dustycult.prepare_dustycult_input", lambda *args, **kwargs: prepared)
+    monkeypatch.setattr("malca.review.dustycult.check_dustycult_available", fake_available)
+    monkeypatch.setattr("malca.review.dustycult.subprocess.run", fake_run)
+
+    controls = dict(DEFAULT_CONTROLS)
+    controls.update({"start_jd": 0.0, "end_jd": 20.0, "t0_jd": 10.0})
+    with db_connect(tmp_path / "review.db") as conn:
+        row = run_dustycult_fit(
+            conn,
+            "cand-1",
+            {},
+            db_path=tmp_path / "review.db",
+            controls=controls,
+            mode="quick",
+        )
+
+    assert row["status"] == "warning"
+    assert "one ASAS-SN band" in row["error"]
+
+
+def test_run_dustycult_fit_all_divergent_degenerate_samples_fail(tmp_path: Path, monkeypatch) -> None:
+    prepared = _prepared_input()
+
+    def fake_available(*args, **kwargs):
+        return DustyCultAvailability(
+            True,
+            sys.executable,
+            tmp_path,
+            tmp_path / "scripts" / "fit_lightcurve.jl",
+            "available",
+        )
+
+    def fake_run(command, check, capture_output, text):
+        out_dir = Path(command[command.index("--out") + 1])
+        _write_mock_fit_artifacts(out_dir, prepared, degenerate=True, flat=True)
+        return subprocess.CompletedProcess(command, 0, stdout="done", stderr="There were 30 divergent transitions after tuning")
+
+    monkeypatch.setattr("malca.review.dustycult.prepare_dustycult_input", lambda *args, **kwargs: prepared)
+    monkeypatch.setattr("malca.review.dustycult.check_dustycult_available", fake_available)
+    monkeypatch.setattr("malca.review.dustycult.subprocess.run", fake_run)
+
+    controls = dict(DEFAULT_CONTROLS)
+    controls.update({"start_jd": 0.0, "end_jd": 20.0, "t0_jd": 10.0})
+    with db_connect(tmp_path / "review.db") as conn:
+        row = run_dustycult_fit(
+            conn,
+            "cand-1",
+            {},
+            db_path=tmp_path / "review.db",
+            controls=controls,
+            mode="quick",
+        )
+
+    assert row["status"] == "failed"
+    assert "All DustyCult samples diverged" in row["error"]
 
 
 def test_occulter_parameters_extract_physical_and_log_posteriors() -> None:

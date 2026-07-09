@@ -312,6 +312,7 @@ def test_layout_exposes_lazy_feedback_and_copy_initializer() -> None:
     assert "external-followup-summary" in ids
     assert "sed-summary" in ids
     assert "dustycult-summary" in ids
+    assert "dustycult-control-state" in ids
     assert "phoebe-summary" in ids
     assert "diagnostic-plots-summary" in ids
     assert "external-followup-status" in ids
@@ -1669,7 +1670,7 @@ def test_closed_lazy_panels_skip_candidate_work(monkeypatch) -> None:
 
     dustycult_controls = review_app.update_dustycult_controls("C1", 0, False)
     assert dustycult_controls == tuple(
-        [review_app.no_update] * len(review_app._DUSTYCULT_CONTROL_FIELDS) + [review_app.no_update]
+        [review_app.no_update] * len(review_app._DUSTYCULT_CONTROL_FIELDS) + [review_app.no_update, review_app.no_update]
     )
 
 

@@ -1308,6 +1308,7 @@ _FLOAT_COLS = {c[0] for c in _CANDIDATE_COLUMNS if c[2] == "float"}
 _TEXT_COLS = {c[0] for c in _CANDIDATE_COLUMNS if c[2] == "text"}
 _SELECT_COLS = {c[0] for c in _CANDIDATE_COLUMNS if c[2] == "select"}
 _COL_TYPE_MAP = {c[0]: c[2] for c in _CANDIDATE_COLUMNS}
+_FALSE_INCLUDES_UNSET_BOOL_COLS = {"microlens_match", "vetting_likely_known"}
 _REVIEW_FLOAT_COLS = {col for col, kind in REVIEW_FILTER_COLUMN_TYPES.items() if kind == "num"}
 _REVIEW_TEXT_COLS = {col for col, kind in REVIEW_FILTER_COLUMN_TYPES.items() if kind == "text"}
 _REVIEW_SELECT_COLS = {col for col, kind in REVIEW_FILTER_COLUMN_TYPES.items() if kind == "select"}
@@ -2332,7 +2333,7 @@ def _queue_where_params(filters: dict | None = None) -> tuple[list[str], list[ob
         if val == "unset":
             where.append(f"(c.{col} IS NULL)")
         elif val is not None:
-            if col == "microlens_match" and val == 0:
+            if col in _FALSE_INCLUDES_UNSET_BOOL_COLS and val == 0:
                 where.append(f"(c.{col} IS NULL OR c.{col} = ?)")
             else:
                 where.append(f"(c.{col} = ?)")

@@ -10,7 +10,7 @@ import shutil
 import sqlite3
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -88,6 +88,23 @@ DUSTYCULT_BANDPASS_NM = {
     "V": 545.0,
 }
 
+DUSTYCULT_MIN_POINTS = 12
+DUSTYCULT_WARN_POINTS = 25
+DUSTYCULT_WARN_SPAN_DAYS = 14.0
+DUSTYCULT_MIN_SIDE_POINTS = 2
+DUSTYCULT_REQUIRED_POSTERIOR = (
+    "t0",
+    "v",
+    "b",
+    "tau0",
+    "lambda0",
+    "alpha",
+    "sigma_y",
+    "sigma_x_plus",
+    "sigma_x_minus",
+)
+DUSTYCULT_POSITIVE_POSTERIOR = {"v", "tau0", "lambda0", "sigma_y", "sigma_x_plus", "sigma_x_minus"}
+
 QUICK_SAMPLING = {
     "n_samples": 200,
     "n_adapt": 200,
@@ -137,6 +154,7 @@ class PreparedDustyCultInput:
     window: dict[str, object]
     baseline_name: str
     baseline_warnings: list[str]
+    quality: dict[str, object] = field(default_factory=dict)
 
 
 def _utc_now() -> str:
@@ -286,6 +304,165 @@ def _lc_median_time(df: pd.DataFrame | None) -> float | None:
     arr = pd.to_numeric(df["JD"], errors="coerce").to_numpy(dtype=float)
     arr = arr[np.isfinite(arr)]
     return float(np.nanmedian(arr)) if arr.size else None
+
+
+def _derived_t0_width_days(half_width_days: object) -> float:
+    half_width = _safe_float(half_width_days, 7.0) or 7.0
+    return max(0.5, min(30.0, float(half_width) / 3.0))
+
+
+def _apply_default_controls(defaults: Mapping[str, object] | None) -> dict[str, object]:
+    out = dict(defaults or {})
+    if out.get("t0_width_days") is None:
+        out["t0_width_days"] = _derived_t0_width_days(out.get("half_width_days"))
+    for key, value in DEFAULT_CONTROLS.items():
+        out.setdefault(key, value)
+    out.setdefault("log_v_width", DEFAULT_CONTROLS["log_v_width"])
+    out.setdefault("status", "ok" if out.get("t0_jd") is not None else "missing")
+    if not out.get("message"):
+        out["message"] = "DustyCult defaults are ready." if out["status"] == "ok" else "Could not derive a dip window."
+    return out
+
+
+def _quality_status(errors: list[str], warnings: list[str]) -> str:
+    if errors:
+        return "failed"
+    if warnings:
+        return "warning"
+    return "ok"
+
+
+def _band_count_dict(values: pd.Series | np.ndarray | list[object]) -> dict[str, int]:
+    series = pd.Series(values).dropna().astype(str)
+    return {str(key): int(value) for key, value in series.value_counts().sort_index().items()}
+
+
+def _preflight_quality(
+    frame: pd.DataFrame,
+    window: Mapping[str, object],
+    *,
+    baseline_name: str,
+    baseline_warnings: list[str] | None = None,
+) -> dict[str, object]:
+    warnings = [str(item) for item in (baseline_warnings or []) if str(item).strip()]
+    errors: list[str] = []
+    start = _safe_float(window.get("start_jd"))
+    end = _safe_float(window.get("end_jd"))
+    t0 = _safe_float(window.get("t0_jd"))
+    n_points = int(len(frame) if frame is not None else 0)
+    band_counts = _band_count_dict(frame["band"]) if frame is not None and "band" in frame.columns else {}
+    time_span = None
+    before_t0 = 0
+    after_t0 = 0
+    finite_errors = 0
+    min_flux = None
+    max_flux = None
+
+    if start is None or end is None or end <= start:
+        errors.append("DustyCult fit window is missing or invalid.")
+    if t0 is None:
+        errors.append("DustyCult t0 is missing.")
+    elif start is not None and end is not None and not (start <= t0 <= end):
+        errors.append("DustyCult t0 is outside the selected fit window.")
+
+    if frame is None or frame.empty:
+        errors.append("No valid g/V points fall inside the selected DustyCult window.")
+    else:
+        times = pd.to_numeric(frame.get("time"), errors="coerce").to_numpy(dtype=float)
+        flux = pd.to_numeric(frame.get("relative_flux"), errors="coerce").to_numpy(dtype=float)
+        errs = pd.to_numeric(frame.get("relative_flux_error"), errors="coerce").to_numpy(dtype=float)
+        finite_time = times[np.isfinite(times)]
+        finite_flux = flux[np.isfinite(flux)]
+        finite_errors = int(np.isfinite(errs).sum())
+        if finite_time.size:
+            time_span = float(np.nanmax(finite_time) - np.nanmin(finite_time))
+            if t0 is not None:
+                before_t0 = int(np.sum(finite_time < float(t0)))
+                after_t0 = int(np.sum(finite_time > float(t0)))
+        if finite_flux.size:
+            min_flux = float(np.nanmin(finite_flux))
+            max_flux = float(np.nanmax(finite_flux))
+        if n_points < DUSTYCULT_MIN_POINTS:
+            errors.append(f"DustyCult needs at least {DUSTYCULT_MIN_POINTS} valid g/V points; found {n_points}.")
+        elif n_points < DUSTYCULT_WARN_POINTS:
+            warnings.append(f"DustyCult has only {n_points} valid g/V points.")
+        if finite_errors <= 0:
+            errors.append("DustyCult input has no finite flux errors.")
+        if len(band_counts) <= 1:
+            warnings.append("DustyCult input contains only one ASAS-SN band.")
+        if time_span is not None and time_span < DUSTYCULT_WARN_SPAN_DAYS:
+            warnings.append(f"DustyCult input spans only {time_span:.2f} days.")
+        if t0 is not None and finite_time.size and (before_t0 < DUSTYCULT_MIN_SIDE_POINTS or after_t0 < DUSTYCULT_MIN_SIDE_POINTS):
+            warnings.append("DustyCult input has sparse coverage on one side of t0.")
+
+    window_span = float(end - start) if start is not None and end is not None and end >= start else None
+    return {
+        "status": _quality_status(errors, warnings),
+        "warnings": warnings,
+        "errors": errors,
+        "n_points": n_points,
+        "band_counts": band_counts,
+        "time_span_days": time_span,
+        "window_span_days": window_span,
+        "before_t0_points": before_t0,
+        "after_t0_points": after_t0,
+        "finite_error_points": finite_errors,
+        "min_relative_flux": min_flux,
+        "max_relative_flux": max_flux,
+        "baseline": {"name": str(baseline_name or ""), "warnings": list(baseline_warnings or [])},
+        "window": {
+            "start_jd": start,
+            "end_jd": end,
+            "t0_jd": t0,
+            "source": str(window.get("source") or "manual_controls"),
+        },
+    }
+
+
+def _preflight_failed(quality: Mapping[str, object] | None) -> bool:
+    return str((quality or {}).get("status") or "").lower() == "failed"
+
+
+def _quality_message(quality: Mapping[str, object] | None, *, include_warnings: bool = True) -> str:
+    if not isinstance(quality, Mapping):
+        return ""
+    messages = [str(item) for item in quality.get("errors", []) or [] if str(item).strip()]
+    if include_warnings:
+        messages.extend(str(item) for item in quality.get("warnings", []) or [] if str(item).strip())
+    return " ".join(messages)
+
+
+def _defaults_viability_quality(
+    payload: Mapping[str, object],
+    defaults: Mapping[str, object],
+    *,
+    lc_path: str | Path | None,
+    plot_dir: str | Path | None,
+    run_params: Mapping[str, object] | None,
+) -> dict[str, object] | None:
+    try:
+        controls = dict(defaults)
+        controls["_dustycult_window_source"] = str(defaults.get("source") or "defaults")
+        prepared = prepare_dustycult_input(
+            payload,
+            controls,
+            lc_path=lc_path,
+            plot_dir=plot_dir,
+            run_params=run_params,
+        )
+        return dict(prepared.quality)
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "warnings": [],
+            "errors": [str(exc)],
+            "window": {
+                "start_jd": _safe_float(defaults.get("start_jd")),
+                "end_jd": _safe_float(defaults.get("end_jd")),
+                "t0_jd": _safe_float(defaults.get("t0_jd")),
+                "source": str(defaults.get("source") or "defaults"),
+            },
+        }
 
 
 def _window_from_t0_width(t0: float, width: float | None, duration: float | None) -> tuple[float, float, float]:
@@ -473,6 +650,30 @@ def control_defaults_for_candidate(
             defaults["message"] = f"Recompute failed: {exc}. " + str(defaults.get("message") or "")
     if not defaults:
         defaults = _stored_dip_defaults(payload, lc_median)
+        if defaults and not df.empty:
+            quality = _defaults_viability_quality(
+                payload,
+                defaults,
+                lc_path=lc_path,
+                plot_dir=plot_dir,
+                run_params=run_params,
+            )
+            if _preflight_failed(quality):
+                try:
+                    recomputed = recompute_dip_defaults(df, run_params=run_params)
+                except Exception as exc:
+                    recomputed = {}
+                    defaults["message"] = (
+                        f"Stored dip defaults failed preflight: {_quality_message(quality, include_warnings=False)} "
+                        f"Recompute failed: {exc}. "
+                        + str(defaults.get("message") or "")
+                    ).strip()
+                if recomputed:
+                    recomputed["message"] = (
+                        f"Stored dip defaults failed preflight: {_quality_message(quality, include_warnings=False)} "
+                        + str(recomputed.get("message") or "")
+                    ).strip()
+                    defaults = recomputed
     if not defaults and not df.empty:
         try:
             defaults = recompute_dip_defaults(df, run_params=run_params)
@@ -480,15 +681,10 @@ def control_defaults_for_candidate(
             defaults = _deepest_point_defaults(df)
             if defaults:
                 defaults["message"] = f"Recompute failed: {exc}. " + str(defaults.get("message") or "")
-    for key, value in DEFAULT_CONTROLS.items():
-        defaults.setdefault(key, value)
+    if not defaults and not df.empty:
+        defaults = _deepest_point_defaults(df)
+    defaults = _apply_default_controls(defaults)
     defaults.update(_stellar_defaults(conn, candidate_id, payload))
-    half_width = _safe_float(defaults.get("half_width_days"), 7.0) or 7.0
-    defaults.setdefault("t0_width_days", max(0.5, min(30.0, half_width / 3.0)))
-    defaults.setdefault("log_v_width", DEFAULT_CONTROLS["log_v_width"])
-    defaults.setdefault("status", "ok" if defaults.get("t0_jd") is not None else "missing")
-    if not defaults.get("message"):
-        defaults["message"] = "DustyCult defaults are ready." if defaults["status"] == "ok" else "Could not derive a dip window."
     return defaults
 
 
@@ -545,6 +741,12 @@ def prepare_dustycult_input(
     plot_dir: str | Path | None = None,
     run_params: Mapping[str, object] | None = None,
 ) -> PreparedDustyCultInput:
+    raw_controls = dict(controls or {})
+    window_source = str(
+        raw_controls.get("_dustycult_window_source")
+        or raw_controls.get("source")
+        or "manual_controls"
+    )
     controls = normalize_controls(controls)
     df, resolved_lc_path = load_canonical_cleaned_lightcurve(
         payload,
@@ -617,8 +819,16 @@ def prepare_dustycult_input(
         "t0_jd": float(t0),
         "n_input_points": int(len(out)),
         "lc_path": str(resolved_lc_path),
+        "source": window_source,
     }
-    return PreparedDustyCultInput(out.reset_index(drop=True), window, baseline_name, list(baseline_warnings))
+    out = out.reset_index(drop=True)
+    quality = _preflight_quality(
+        out,
+        window,
+        baseline_name=baseline_name,
+        baseline_warnings=list(baseline_warnings),
+    )
+    return PreparedDustyCultInput(out, window, baseline_name, list(baseline_warnings), quality)
 
 
 def build_dustycult_config(input_csv: str | Path, controls: Mapping[str, object], mode: str) -> dict[str, object]:
@@ -699,6 +909,134 @@ def _posterior_summary(samples: pd.DataFrame) -> dict[str, dict[str, float]]:
     return summary
 
 
+def _sample_diagnostics(samples: pd.DataFrame) -> dict[str, object]:
+    if samples is None or samples.empty:
+        return {"sample_count": 0, "finite_sample_count": 0, "degenerate_parameters": [], "all_required_degenerate": False}
+    finite_count = 0
+    degenerate: list[str] = []
+    for col in samples.columns:
+        if col == "draw_id":
+            continue
+        series = pd.to_numeric(samples[col], errors="coerce").dropna()
+        if not series.empty:
+            finite_count = max(finite_count, int(len(series)))
+        if col in DUSTYCULT_REQUIRED_POSTERIOR and len(series) > 1 and float(series.std(ddof=0)) <= 1e-12:
+            degenerate.append(str(col))
+    required_present = [col for col in DUSTYCULT_REQUIRED_POSTERIOR if col in samples.columns]
+    return {
+        "sample_count": int(len(samples)),
+        "finite_sample_count": int(finite_count),
+        "degenerate_parameters": degenerate,
+        "all_required_degenerate": bool(required_present and set(required_present).issubset(set(degenerate))),
+    }
+
+
+def _parse_divergent_transitions(stderr: str) -> int:
+    values = [int(match) for match in re.findall(r"There were\s+(\d+)\s+divergent transitions", str(stderr or ""))]
+    return max(values) if values else 0
+
+
+def _posterior_median(summary: Mapping[str, object], key: str) -> float | None:
+    value = summary.get(key)
+    if isinstance(value, Mapping):
+        return _safe_float(value.get("median"))
+    return _safe_float(value)
+
+
+def _posterior_spread(summary: Mapping[str, object], key: str) -> float | None:
+    value = summary.get(key)
+    if not isinstance(value, Mapping):
+        return None
+    p16 = _safe_float(value.get("p16"))
+    p84 = _safe_float(value.get("p84"))
+    if p16 is None or p84 is None:
+        return None
+    return abs(float(p84) - float(p16))
+
+
+def _validate_postfit_quality(
+    preflight_quality: Mapping[str, object],
+    artifact_summary: Mapping[str, object],
+    curves: pd.DataFrame,
+    *,
+    stderr: str,
+    controls: Mapping[str, object],
+    window: Mapping[str, object],
+) -> dict[str, object]:
+    warnings = [str(item) for item in preflight_quality.get("warnings", []) or [] if str(item).strip()]
+    errors = [str(item) for item in preflight_quality.get("errors", []) or [] if str(item).strip()]
+    posterior = artifact_summary.get("posterior") if isinstance(artifact_summary.get("posterior"), Mapping) else {}
+    sample_diag = artifact_summary.get("sample_diagnostics") if isinstance(artifact_summary.get("sample_diagnostics"), Mapping) else {}
+    sample_count = int(artifact_summary.get("sample_count") or sample_diag.get("sample_count") or 0)
+    divergent_count = _parse_divergent_transitions(stderr)
+
+    if sample_count <= 0:
+        errors.append("DustyCult wrote no posterior samples.")
+    if divergent_count > 0:
+        if sample_count > 0 and divergent_count >= sample_count:
+            errors.append(f"All DustyCult samples diverged ({divergent_count}/{sample_count}).")
+        else:
+            warnings.append(f"DustyCult reported {divergent_count} divergent transitions.")
+    if bool(sample_diag.get("all_required_degenerate")):
+        errors.append("DustyCult posterior samples are degenerate.")
+
+    for key in DUSTYCULT_REQUIRED_POSTERIOR:
+        median = _posterior_median(posterior, key)
+        if median is None:
+            errors.append(f"DustyCult posterior is missing {key}.")
+            continue
+        if key in DUSTYCULT_POSITIVE_POSTERIOR and median <= 0:
+            errors.append(f"DustyCult posterior {key} is non-positive.")
+    zero_spread = [
+        key
+        for key in DUSTYCULT_REQUIRED_POSTERIOR
+        if (_posterior_spread(posterior, key) is not None and (_posterior_spread(posterior, key) or 0.0) <= 1e-12)
+    ]
+    if len(zero_spread) >= len(DUSTYCULT_REQUIRED_POSTERIOR):
+        errors.append("DustyCult posterior credible intervals are degenerate.")
+    elif len(zero_spread) >= max(4, len(DUSTYCULT_REQUIRED_POSTERIOR) // 2):
+        warnings.append("DustyCult posterior has weak or degenerate spread for many parameters.")
+
+    t0 = _posterior_median(posterior, "t0")
+    t0_center = _safe_float(controls.get("t0_jd"), _safe_float(window.get("t0_jd")))
+    t0_width = _safe_float(controls.get("t0_width_days"), DEFAULT_CONTROLS["t0_width_days"]) or DEFAULT_CONTROLS["t0_width_days"]
+    start = _safe_float(window.get("start_jd"))
+    end = _safe_float(window.get("end_jd"))
+    if t0 is not None and t0_center is not None and start is not None and end is not None:
+        span = max(float(end) - float(start), 1.0)
+        allowed = max(5.0 * float(t0_width), span)
+        if abs(float(t0) - float(t0_center)) > allowed:
+            errors.append("DustyCult posterior t0 is far outside the configured prior/window.")
+
+    if curves is not None and not curves.empty and {"observed", "median"}.issubset(curves.columns):
+        observed = pd.to_numeric(curves["observed"], errors="coerce").to_numpy(dtype=float)
+        median = pd.to_numeric(curves["median"], errors="coerce").to_numpy(dtype=float)
+        observed = observed[np.isfinite(observed)]
+        median = median[np.isfinite(median)]
+        if observed.size and median.size:
+            obs_min = float(np.nanmin(observed))
+            obs_range = float(np.nanmax(observed) - np.nanmin(observed))
+            pred_range = float(np.nanmax(median) - np.nanmin(median))
+            if pred_range <= 1e-5 and obs_min < 0.97 and obs_range > 0.03:
+                errors.append("DustyCult predictive curve is flat while the observed input contains a significant dip.")
+
+    quality = dict(preflight_quality)
+    quality.update(
+        {
+            "status": _quality_status(errors, warnings),
+            "warnings": warnings,
+            "errors": errors,
+            "divergent_transitions": divergent_count,
+            "sample_count": sample_count,
+            "sample_diagnostics": dict(sample_diag),
+            "postfit": {
+                "posterior_zero_spread_parameters": zero_spread,
+            },
+        }
+    )
+    return quality
+
+
 def _load_artifact_frame(path_base: Path) -> pd.DataFrame:
     parquet_path = path_base.with_suffix(".parquet")
     csv_path = path_base.with_suffix(".csv")
@@ -714,11 +1052,13 @@ def _load_fit_artifacts(output_dir: Path) -> tuple[dict[str, object], pd.DataFra
     manifest = _json_loads(manifest_path.read_text() if manifest_path.exists() else None, {})
     samples = _load_artifact_frame(output_dir / "samples")
     posterior = _posterior_summary(samples)
+    sample_diagnostics = _sample_diagnostics(samples)
     curves = _load_artifact_frame(output_dir / "predictive_intervals")
     summary = {
         "manifest": manifest,
         "posterior": posterior,
         "sample_count": int(len(samples)),
+        "sample_diagnostics": sample_diagnostics,
     }
     return summary, curves
 
@@ -754,6 +1094,10 @@ def preferred_fit_mode(fits: pd.DataFrame | None) -> str | None:
     for mode in ("full", "quick"):
         ok = frame[(mode_series == mode) & (status_series == "ok")]
         if not ok.empty:
+            return mode
+    for mode in ("full", "quick"):
+        warning = frame[(mode_series == mode) & (status_series == "warning")]
+        if not warning.empty:
             return mode
     for mode in ("full", "quick"):
         present = frame[mode_series == mode]
@@ -839,7 +1183,9 @@ def _failure_row(
     stderr: str = "",
     config: Mapping[str, object] | None = None,
     window: Mapping[str, object] | None = None,
+    quality: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
+    summary = {"quality": dict(quality or {})}
     return {
         "candidate_id": str(candidate_id),
         "mode": normalize_mode(mode),
@@ -850,6 +1196,7 @@ def _failure_row(
         "config_json": _json_dumps(config or {}),
         "controls_json": _json_dumps(dict(controls or {})),
         "window_json": _json_dumps(dict(window or {})),
+        "summary_json": _json_dumps(summary),
         "stderr_tail": _tail_text(stderr),
         "stdout_tail": _tail_text(stdout),
         "error": str(error),
@@ -876,7 +1223,9 @@ def run_dustycult_fit(
     julia: str | Path | None = None,
 ) -> dict[str, object]:
     mode = normalize_mode(mode)
-    controls = normalize_controls(controls)
+    raw_controls = dict(controls or {})
+    window_source = str(raw_controls.get("_dustycult_window_source") or raw_controls.get("source") or "manual_controls")
+    controls = normalize_controls(raw_controls)
     started = time.monotonic()
     output_dir = artifact_dir_for_candidate(db_path, candidate_id, mode)
     availability = check_dustycult_available(project_path=project_path, julia=julia)
@@ -893,13 +1242,29 @@ def run_dustycult_fit(
         return row
 
     try:
+        prepare_controls = dict(controls)
+        prepare_controls["_dustycult_window_source"] = window_source
         prepared = prepare_dustycult_input(
             payload,
-            controls,
+            prepare_controls,
             lc_path=lc_path,
             plot_dir=plot_dir,
             run_params=run_params,
         )
+        preflight_quality = dict(prepared.quality)
+        if _preflight_failed(preflight_quality):
+            row = _failure_row(
+                candidate_id=candidate_id,
+                mode=mode,
+                controls=controls,
+                started_at=started,
+                error=_quality_message(preflight_quality, include_warnings=False) or "DustyCult preflight failed.",
+                output_dir=output_dir,
+                window=prepared.window,
+                quality=preflight_quality,
+            )
+            upsert_dustycult_fit(conn, row)
+            return row
         if output_dir.exists():
             shutil.rmtree(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -914,6 +1279,7 @@ def run_dustycult_fit(
                     "name": prepared.baseline_name,
                     "warnings": prepared.baseline_warnings,
                 },
+                "quality": preflight_quality,
             }
         )
         config_path = output_dir / "run_config.json"
@@ -926,6 +1292,7 @@ def run_dustycult_fit(
             started_at=started,
             error=str(exc),
             output_dir=output_dir,
+            quality={"status": "failed", "warnings": [], "errors": [str(exc)]},
         )
         upsert_dustycult_fit(conn, row)
         return row
@@ -940,6 +1307,7 @@ def run_dustycult_fit(
             output_dir=output_dir,
             config=config,
             window=prepared.window,
+            quality=prepared.quality,
         )
         row["input_path"] = str(input_csv)
         row["config_path"] = str(config_path)
@@ -968,6 +1336,7 @@ def run_dustycult_fit(
             command=command,
             config=config,
             window=prepared.window,
+            quality=prepared.quality,
         )
         row["input_path"] = str(input_csv)
         row["config_path"] = str(config_path)
@@ -986,6 +1355,7 @@ def run_dustycult_fit(
             stderr=completed.stderr,
             config=config,
             window=prepared.window,
+            quality=prepared.quality,
         )
         row["input_path"] = str(input_csv)
         row["config_path"] = str(config_path)
@@ -996,11 +1366,23 @@ def run_dustycult_fit(
         artifact_summary, curves = _load_fit_artifacts(output_dir)
         curve_rows = _curve_rows(candidate_id, mode, curves)
         posterior = artifact_summary.get("posterior", {})
+        final_quality = _validate_postfit_quality(
+            prepared.quality,
+            artifact_summary,
+            curves,
+            stderr=completed.stderr,
+            controls=controls,
+            window=prepared.window,
+        )
+        artifact_summary = dict(artifact_summary)
+        artifact_summary["quality"] = final_quality
+        status = str(final_quality.get("status") or "ok")
+        status_message = _quality_message(final_quality, include_warnings=(status != "ok"))
         manifest_path = output_dir / "manifest.json"
         row = {
             "candidate_id": str(candidate_id),
             "mode": mode,
-            "status": "ok",
+            "status": status,
             "runtime_sec": float(time.monotonic() - started),
             "artifact_dir": str(output_dir),
             "input_path": str(input_csv),
@@ -1015,7 +1397,7 @@ def run_dustycult_fit(
             "summary_json": _json_dumps(artifact_summary),
             "stderr_tail": _tail_text(completed.stderr),
             "stdout_tail": _tail_text(completed.stdout),
-            "error": "",
+            "error": "" if status == "ok" else status_message,
             "t0_jd": _safe_float(prepared.window.get("t0_jd")),
             "start_jd": _safe_float(prepared.window.get("start_jd")),
             "end_jd": _safe_float(prepared.window.get("end_jd")),
@@ -1037,6 +1419,7 @@ def run_dustycult_fit(
             stderr=completed.stderr,
             config=config,
             window=prepared.window,
+            quality=prepared.quality,
         )
         row["input_path"] = str(input_csv)
         row["config_path"] = str(config_path)

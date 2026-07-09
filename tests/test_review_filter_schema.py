@@ -179,6 +179,29 @@ def test_microlens_false_filter_keeps_unset_rows(tmp_path: Path) -> None:
     assert ids == ["C1", "C2"]
 
 
+def test_vetting_likely_known_false_filter_keeps_unset_rows(tmp_path: Path) -> None:
+    db_path = tmp_path / "review.db"
+    with db_connect(db_path) as conn:
+        upsert_candidates_frame(
+            conn,
+            pd.DataFrame(
+                [
+                    {"candidate_id": "C1"},
+                    {"candidate_id": "C2", "vetting_likely_known": False},
+                    {"candidate_id": "C3", "vetting_likely_known": True},
+                ]
+            ),
+        )
+
+        ids = query_queue(
+            conn,
+            filters={"vetting_likely_known_mode": "False"},
+            ids_only=True,
+        )["candidate_id"].tolist()
+
+    assert ids == ["C1", "C2"]
+
+
 def test_vsx_known_type_detection_tokenizes_certain_composites() -> None:
     assert is_definite_known_type_value("vsx_class", "GCAS") is True
     assert is_definite_known_type_value("vsx_class", "BE") is True
