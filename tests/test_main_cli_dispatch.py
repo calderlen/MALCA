@@ -6,7 +6,6 @@ import sys
 import pytest
 
 import malca.__main__ as cli
-from malca.ltv import pipeline as ltv_pipeline
 
 
 def test_stv_pipeline_dispatches_to_pipeline_orchestrator(monkeypatch) -> None:
@@ -70,7 +69,23 @@ def test_ltv_pipeline_dispatches_to_pipeline_module(monkeypatch) -> None:
     assert calls == [("malca.ltv.pipeline", ["--stage", "home"])]
 
 
+def test_ltv_new_dispatches_to_standalone_pipeline(monkeypatch) -> None:
+    calls: list[tuple[str, list[str]]] = []
+
+    def fake_run_module_main(module_name: str, remaining_args: list[str]) -> None:
+        calls.append((module_name, remaining_args))
+
+    monkeypatch.setattr(cli, "_run_module_main", fake_run_module_main)
+    monkeypatch.setattr(sys, "argv", ["malca", "ltv-new", "fit", "--help"])
+
+    assert cli.main() == 0
+    assert calls == [("malca.ltv_new.pipeline", ["fit", "--help"])]
+
+
 def test_ltv_pipeline_stage_choices_include_full_extended() -> None:
+    pytest.importorskip("astropy")
+    from malca.ltv import pipeline as ltv_pipeline
+
     args = ltv_pipeline.add_ltv_pipeline_args(argparse.ArgumentParser()).parse_args(
         ["--stage", "full-extended"]
     )
