@@ -97,6 +97,34 @@ def test_vetting_banner_does_not_mark_gaia_flag_only_as_known() -> None:
     assert "Gaia DR3" not in text
 
 
+def test_vetting_banner_renders_missing_likely_known_with_context_as_new() -> None:
+    banner = _render_vetting_banner(
+        {
+            "candidate_id": "LIKELY-NEW",
+            "char_status_yso": "ok",
+            "yso_class": "Main Sequence",
+        }
+    )
+
+    text = " ".join(_component_text(banner))
+    classes = _component_classes(banner)
+
+    assert "POTENTIALLY NEW" in text
+    assert "Not vetted" not in text
+    assert "vetting-banner-shell new" in classes
+
+
+def test_vetting_banner_keeps_missing_likely_known_without_context_unvetted() -> None:
+    banner = _render_vetting_banner({"candidate_id": "RAW"})
+
+    text = " ".join(_component_text(banner))
+    classes = _component_classes(banner)
+
+    assert "Not vetted" in text
+    assert "POTENTIALLY NEW" not in text
+    assert "vetting-banner-empty" in classes
+
+
 def test_vetting_banner_marks_known_catalog_cells_as_red_hit_boxes() -> None:
     banner = _render_vetting_banner(
         {

@@ -126,7 +126,9 @@ SIMBAD_MAX_RETRIES = VETTING_SIMBAD_MAX_RETRIES
 GAIA_VAR_CHUNK_SIZE = min(GAIA_CHUNK_SIZE, 100)
 GAIA_TAP_URLS = [GAIA_ESA_TAP_URL, GAIA_AIP_TAP_URL]
 ASASSN_VAR_CATALOG = ASASSN_VAR_CATALOG_ID
-ASASSN_VAR_LOCAL_CSV = Path(__file__).resolve().parent.parent / "input" / "asassn_variables_220326.csv"
+ASASSN_VAR_REPO_LOCAL_CSV = Path(__file__).resolve().parents[2] / "input" / "asassn_variables_220326.csv"
+ASASSN_VAR_PACKAGE_LOCAL_CSV = Path(__file__).resolve().parent.parent / "input" / "asassn_variables_220326.csv"
+ASASSN_VAR_LOCAL_CSV = ASASSN_VAR_REPO_LOCAL_CSV
 ASASSN_VAR_RADIUS_ARCSEC = 5.0
 GAIA_TAP_RETRY_BASE_DELAY = 5.0
 GAIA_TAP_RETRY_MAX_DELAY = 60.0
@@ -1373,6 +1375,23 @@ def query_gaia_variability(
 # =============================================================================
 
 
+def resolve_asassn_var_local_csv(local_csv: Path | str | None = None) -> Path:
+    """Resolve the local ASAS-SN variable catalog CSV."""
+    if local_csv is not None:
+        path = Path(local_csv).expanduser()
+        if not path.is_file():
+            raise FileNotFoundError(f"ASAS-SN variables local CSV not found: {path}")
+        return path
+
+    checked = [ASASSN_VAR_REPO_LOCAL_CSV, ASASSN_VAR_PACKAGE_LOCAL_CSV]
+    for path in checked:
+        path = Path(path).expanduser()
+        if path.is_file():
+            return path
+    checked_text = ", ".join(str(Path(path).expanduser()) for path in checked)
+    raise FileNotFoundError(f"ASAS-SN variables local CSV not found. Checked: {checked_text}")
+
+
 def _load_asassn_local_catalog(path: Path) -> pd.DataFrame:
     key = str(path.resolve())
     if key in _asassn_cache:
@@ -1395,7 +1414,7 @@ def _asassn_via_local(
     radius_arcsec: float,
     local_csv: Path | str | None,
 ) -> pd.DataFrame:
-    path = Path(local_csv) if local_csv is not None else ASASSN_VAR_LOCAL_CSV
+    path = resolve_asassn_var_local_csv(local_csv)
     cat = _load_asassn_local_catalog(path)
     if cat.empty:
         return df

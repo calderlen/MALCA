@@ -70,6 +70,7 @@ from malca.config import (
     JD_OFFSET, MAG_BINS,
 )
 from malca.config import PDM_METHOD_CHOICES
+from malca.catalogs.evidence import normalize_catalog_evidence
 from malca.enrich.neighbor import run_neighbor_enrichment
 from malca.enrich.spectra import run_spectra_availability
 from malca.catalogs.gaia_fetch import _extract_gaia_ids, fetch_gaia_catalog
@@ -3372,7 +3373,7 @@ def main():
                     neighbor_checkpoint = neighbor_dir / "neighbors_CHECKPOINT.parquet"
                     if args.overwrite and neighbor_checkpoint.exists():
                         neighbor_checkpoint.unlink()
-                    _, df_neighbor_summary = run_neighbor_enrichment(
+                    df_neighbors_long, df_neighbor_summary = run_neighbor_enrichment(
                         df_neighbors_in,
                         out_dir=neighbor_dir,
                         radius_arcsec=args.neighbor_radius_arcsec,
@@ -3387,6 +3388,11 @@ def main():
                             df_neighbors_in,
                             ensure_candidate_id(df_neighbor_summary, prefix="stv"),
                             [col for col in df_neighbor_summary.columns if col != "candidate_id"],
+                        )
+                        merged = normalize_catalog_evidence(
+                            merged,
+                            neighbors_long=df_neighbors_long,
+                            vsx_max_sep_arcsec=float(args.vsx_max_sep),
                         )
                         save_table(merged, results_dir / "lc_events_neighbors.parquet")
 

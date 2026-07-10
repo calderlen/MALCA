@@ -222,6 +222,48 @@ def test_upsert_candidates_frame_derives_known_from_gaia_class(tmp_path: Path) -
     assert payload["gaia_var_class"] == "LPV"
 
 
+def test_upsert_candidates_frame_derives_known_new_and_unset_vetting_states(tmp_path: Path) -> None:
+    review_db = tmp_path / "review.db"
+
+    with db_connect(review_db) as conn:
+        upsert_candidates_frame(
+            conn,
+            pd.DataFrame(
+                [
+                    {
+                        "candidate_id": "KNOWN",
+                        "asas_sn_id": "KNOWN",
+                        "gaia_var_class": "LPV",
+                    },
+                    {
+                        "candidate_id": "LIKELY-NEW",
+                        "asas_sn_id": "LIKELY-NEW",
+                        "char_status_yso": "ok",
+                        "yso_class": "Main Sequence",
+                    },
+                    {
+                        "candidate_id": "RAW",
+                        "asas_sn_id": "RAW",
+                    },
+                ]
+            ),
+        )
+        payload_known = get_candidate_payload(conn, "KNOWN")
+        payload_new = get_candidate_payload(conn, "LIKELY-NEW")
+        payload_raw = get_candidate_payload(conn, "RAW")
+        sql_rows = {
+            cid: likely_known
+            for cid, likely_known in conn.execute(
+                "SELECT candidate_id, vetting_likely_known FROM candidates ORDER BY candidate_id"
+            ).fetchall()
+        }
+
+    assert payload_known["vetting_likely_known"] is True
+    assert payload_new["vetting_likely_known"] is False
+    assert "vetting_likely_known" not in payload_raw
+    assert sql_rows == {"KNOWN": 1, "LIKELY-NEW": 0, "RAW": None}
+
+
 def test_upsert_candidates_frame_derives_known_from_definite_vsx_class(tmp_path: Path) -> None:
     review_db = tmp_path / "review.db"
 

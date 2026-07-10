@@ -733,6 +733,50 @@ def test_interactive_external_sources_can_split_selected_neowise_only(tmp_path: 
     assert all(getattr(trace, "yaxis", None) == "y2" for trace in fig.data if str(trace.name).startswith("NEOWISE"))
 
 
+def test_interactive_split_external_residual_phase_domains_stay_valid(tmp_path: Path) -> None:
+    lc_path = tmp_path / "123.dat2"
+    neowise_path = tmp_path / "neowise_lc_123.parquet"
+    _write_dat2(lc_path)
+    _write_neowise_parquet(neowise_path)
+    payload = {
+        "candidate_id": "123",
+        "asas_sn_id": "123",
+        "lc_path": str(lc_path),
+    }
+
+    result = build_interactive_lightcurve_figure(
+        payload,
+        plot_dir=None,
+        selected_cameras=[],
+        selected_bands=["g", "V"],
+        filter_bad_cameras=False,
+        show_baseline=False,
+        show_event_markers=False,
+        show_residuals=True,
+        show_phase_fold=True,
+        phase_panel_mode="fold",
+        show_raw_mag=True,
+        override_period=2.0,
+        show_diagnostics=False,
+        confidence_colors=False,
+        run_params={"baseline_func": "global_median"},
+        uirevision_key="test",
+        residual_fraction=0.15,
+        yaxis_mode="mag",
+        external_lcs={"neowise": neowise_path},
+        external_source_view=["asassn", "neowise"],
+        external_panel_mode="split",
+    )
+
+    fig = result["figure"]
+    domains = [
+        tuple(getattr(fig.layout, f"yaxis{idx if idx > 1 else ''}").domain)
+        for idx in range(1, 5)
+    ]
+    assert domains[-1][0] == pytest.approx(0.0)
+    assert all(0.0 <= edge <= 1.0 for domain in domains for edge in domain)
+
+
 def test_interactive_external_sources_render_new_lc_products(tmp_path: Path) -> None:
     lc_path = tmp_path / "123.dat2"
     _write_dat2(lc_path)

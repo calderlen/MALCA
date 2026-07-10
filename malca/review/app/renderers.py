@@ -1172,7 +1172,7 @@ def _render_vetting_banner(payload: dict | None, radius_arcsec: float = 10.0) ->
         return bool(v) and str(v).strip().lower() not in ('nan', '<na>')
 
     known = has_known_catalog_evidence(payload)
-    if 'vetting_likely_known' not in payload and not known:
+    if not known and not has_catalog_vetting_context(payload):
         return html.Div("Not vetted", className='vetting-banner-empty')
 
     banner_state = 'known' if known else 'new'

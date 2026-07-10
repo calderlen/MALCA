@@ -27,6 +27,11 @@ def _panel_row_map(panels: tuple) -> dict[str, int]:
     return {panel.panel_id: idx + 1 for idx, panel in enumerate(panels)}
 
 
+def _clip_domain_value(value: float) -> float:
+    """Keep Plotly domain endpoints valid after harmless float roundoff."""
+    return float(np.clip(value, 0.0, 1.0))
+
+
 def _panel_vertical_domains(panels: tuple, *, default_gap: float = 0.05) -> list[tuple[float, float]]:
     gaps = [
         0.0 if upper.panel_id == "raw" and lower.panel_id == "resid" else default_gap
@@ -39,7 +44,7 @@ def _panel_vertical_domains(panels: tuple, *, default_gap: float = 0.05) -> list
     top = 1.0
     for idx, height in enumerate(heights):
         bottom = top - height
-        domains.append((bottom, top))
+        domains.append((_clip_domain_value(bottom), _clip_domain_value(top)))
         if idx < len(gaps):
             top = bottom - gaps[idx]
     return domains

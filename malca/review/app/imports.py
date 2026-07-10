@@ -120,6 +120,7 @@ from malca.review.metadata import (
     extract_review_metadata_feature_rows,
     extract_review_metadata_grouped,
     build_external_lookup_links,
+    has_catalog_vetting_context,
     has_known_catalog_evidence,
     markdown_literal_unit_label,
 )

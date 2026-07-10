@@ -35,7 +35,7 @@ from malca.products.feature_layers import (
 from malca.ltv.multi_survey import LTV_MS_FEATURE_COLUMN_SPECS
 from malca.enrichment.multi_survey_features import MS_FEATURE_COLUMN_SPECS
 from malca.review.filter_schema import REVIEW_FILTER_COLUMN_TYPES
-from malca.review.metadata import has_known_catalog_evidence, normalize_vsx_record
+from malca.review.metadata import has_catalog_vetting_context, has_known_catalog_evidence, normalize_vsx_record
 from malca.io.table_io import read_feature_table, read_parquet_table, write_feature_table, write_parquet_table
 from malca.review.taxonomy import (
     REVIEW_TAXONOMY_FIELDS,
@@ -323,6 +323,8 @@ def _candidate_insert_tuple_from_row_dict(
 
     if has_known_catalog_evidence(normalized):
         normalized["vetting_likely_known"] = True
+    elif has_catalog_vetting_context(normalized):
+        normalized["vetting_likely_known"] = False
 
     row_source_path = str(source_path if source_path is not None else normalized.get("source_path") or "")
     row_imported_at = str(imported_at or normalized.get("imported_at") or _utc_now())
@@ -2506,6 +2508,8 @@ def get_candidate_payload(conn: sqlite3.Connection, candidate_id: str) -> dict:
             payload["high_pm_flag"] = bool(pm_total > LTV_MAX_PM)
     if has_known_catalog_evidence(payload):
         payload["vetting_likely_known"] = True
+    elif has_catalog_vetting_context(payload):
+        payload["vetting_likely_known"] = False
     return payload
 
 
@@ -2921,8 +2925,11 @@ def merge_vetting_results(
             val = row[col]
             if val is not None and not (isinstance(val, float) and np.isnan(val)):
                 d[col] = val
+        d = normalize_vsx_record(d)
         if has_known_catalog_evidence(d):
             d["vetting_likely_known"] = True
+        elif has_catalog_vetting_context(d):
+            d["vetting_likely_known"] = False
         if d:
             lookup[cid] = d
 
@@ -3028,8 +3035,11 @@ def merge_candidate_results(
             except Exception:
                 pass
             updates[col] = value
+        updates = normalize_vsx_record(updates)
         if has_known_catalog_evidence(updates):
             updates["vetting_likely_known"] = True
+        elif has_catalog_vetting_context(updates):
+            updates["vetting_likely_known"] = False
 
         replace_candidate_payload_fields(
             conn,

@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 
 from concurrent.futures import ProcessPoolExecutor
+from malca.catalogs.evidence import normalize_catalog_evidence
 from malca.products.candidates import passing_candidates_mask
 from malca.config import ASASSN_INDEX_PATH
 from malca.config import LTV_MAX_PM
@@ -53,6 +54,10 @@ def map_ltv_columns(df: pd.DataFrame) -> pd.DataFrame:
         df,
         [
             "failed_any",
+            "vsx_class",
+            "vsx_type",
+            "vsx_period",
+            "vsx_sep_arcsec",
             "vsx_name",
             "ltv_vsx_name",
             "milliquas_name",
@@ -65,11 +70,16 @@ def map_ltv_columns(df: pd.DataFrame) -> pd.DataFrame:
     )
     df = add_ltv_identity(df)
     df["asas_sn_id"] = df["asas_sn_id"].astype(str)
+    df = normalize_catalog_evidence(df)
 
     # Generic VSX catalog columns are canonical shared enrichment output;
     # mirror the name into the LTV-specific review column used by the UI.
-    if "vsx_name" in df.columns and "ltv_vsx_name" not in df.columns:
-        df["ltv_vsx_name"] = df["vsx_name"]
+    if "vsx_name" in df.columns:
+        if "ltv_vsx_name" not in df.columns:
+            df["ltv_vsx_name"] = df["vsx_name"]
+        else:
+            missing_ltv_vsx = df["ltv_vsx_name"].isna() | df["ltv_vsx_name"].astype(str).str.strip().isin({"", "<NA>"})
+            df.loc[missing_ltv_vsx, "ltv_vsx_name"] = df.loc[missing_ltv_vsx, "vsx_name"]
     if "ltv_vsx_name" in df.columns and "ltv_vsx_match" not in df.columns:
         df["ltv_vsx_match"] = df["ltv_vsx_name"].notna().astype(int)
 

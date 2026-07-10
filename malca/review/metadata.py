@@ -10,6 +10,7 @@ from urllib.parse import quote, quote_plus
 
 import pandas as pd
 
+from malca.catalogs.evidence import normalize_catalog_evidence_record
 from malca.ltv.multi_survey import LTV_MS_FEATURE_COLUMN_SPECS
 from malca.review.filter_schema import is_known_variable_type_value
 
@@ -781,7 +782,7 @@ _RANGE_KEYS: dict[str, tuple[str, str]] = {
 
 
 def normalize_vsx_record(record: dict[str, Any]) -> dict[str, Any]:
-    return dict(record)
+    return normalize_catalog_evidence_record(record)
 
 
 def _known_text_value(value: Any) -> str:
@@ -825,6 +826,118 @@ def _finite_catalog_number(value: Any) -> bool:
 
 def _is_variable_simbad_otype(value: Any) -> bool:
     return is_known_variable_type_value("simbad_otype", value)
+
+
+_CATALOG_CONTEXT_TEXT_FIELDS = (
+    "vsx_class",
+    "microlens_catalog",
+    "microlens_name",
+    "microlens_alt_name",
+    "asassn_var_name",
+    "asassn_var_type",
+    "gaia_var_class",
+    "gaia_eb_morph",
+    "simbad_main_id",
+    "simbad_otype",
+    "ztf_var_type",
+    "tns_name",
+    "tns_type",
+    "alerce_oid",
+    "alerce_lc_class",
+    "alerce_stamp_class",
+    "yso_class",
+    "catalog_source",
+)
+_CATALOG_CONTEXT_BOOL_FIELDS = (
+    "microlens_match",
+    "gaia_var_flag",
+    "gaia_epoch_available",
+    "period_vsx_match",
+    "period_asassn_var_match",
+    "period_gaia_eb_match",
+    "period_ztf_periodic_match",
+    "period_ogle_match",
+)
+_CATALOG_CONTEXT_NUMERIC_FIELDS = (
+    "vsx_period",
+    "vsx_sep_arcsec",
+    "microlens_te_days",
+    "microlens_sep_arcsec",
+    "asassn_var_period",
+    "gaia_var_score",
+    "gaia_eb_period",
+    "gaia_eb_global_ranking",
+    "gaia_epoch_n_obs",
+    "gaia_epoch_g_range",
+    "simbad_nbref",
+    "simbad_sep_arcsec",
+    "ztf_var_period",
+    "ztf_var_amp",
+    "tns_redshift",
+    "alerce_ndet",
+    "alerce_lc_prob",
+    "alerce_stamp_prob",
+)
+_CATALOG_CONTEXT_GENERIC_TEXT = {"unknown", "n/a", "na", "none", "null"}
+_CATALOG_CONTEXT_STATUS_VALUES = {
+    "ok",
+    "complete",
+    "completed",
+    "loaded",
+    "present",
+    "cached",
+    "no_match",
+    "no_matches",
+    "no_data",
+    "no_event",
+    "not_found",
+}
+
+
+def _catalog_context_text_value(value: Any) -> str:
+    text = _known_text_value(value)
+    if text.lower() in _CATALOG_CONTEXT_GENERIC_TEXT:
+        return ""
+    return text
+
+
+def _has_nonmissing_bool_context(record: dict[str, Any], key: str) -> bool:
+    if key not in record:
+        return False
+    value = record.get(key)
+    if value is None:
+        return False
+    try:
+        missing = pd.isna(value)
+    except Exception:
+        return True
+    try:
+        return not bool(missing)
+    except (TypeError, ValueError):
+        return True
+
+
+def _catalog_status_indicates_context(value: Any) -> bool:
+    text = _known_text_value(value).lower().replace(" ", "_").replace("-", "_")
+    return text in _CATALOG_CONTEXT_STATUS_VALUES
+
+
+def has_catalog_vetting_context(record: dict[str, Any] | None) -> bool:
+    """Return whether catalog/enrichment context is present for a new/known call."""
+    if not isinstance(record, dict):
+        return False
+    if _known_text_value(record.get("vetting_likely_known")):
+        return True
+    if any(_catalog_context_text_value(record.get(column)) for column in _CATALOG_CONTEXT_TEXT_FIELDS):
+        return True
+    if any(_has_nonmissing_bool_context(record, column) for column in _CATALOG_CONTEXT_BOOL_FIELDS):
+        return True
+    if any(_finite_catalog_number(record.get(column)) for column in _CATALOG_CONTEXT_NUMERIC_FIELDS):
+        return True
+    for key, value in record.items():
+        if str(key).startswith("char_status_") and _catalog_status_indicates_context(value):
+            return True
+    return False
 
 
 def has_known_catalog_evidence(record: dict[str, Any] | None) -> bool:

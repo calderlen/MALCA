@@ -10,6 +10,7 @@ from pathlib import Path
 
 import dash
 import pandas as pd
+import pytest
 
 
 def _install_review_app_import_stubs() -> None:
@@ -408,6 +409,34 @@ def test_external_followup_cutout_handles_missing_coordinates() -> None:
     assert _props(fwhm_overlay)["style"]["display"] == "none"
     assert _props(source_link)["href"] == "#"
     assert "RA/Dec" in str(_props(status).get("children"))
+
+
+def test_external_followup_handles_nullable_spectrum_link(monkeypatch: pytest.MonkeyPatch) -> None:
+    spectra_rows = pd.DataFrame(
+        {
+            "survey": ["DESI"],
+            "sep_arcsec": [pd.NA],
+            "spectrum_redshift": [pd.NA],
+            "spectrum_spectral_type": [pd.NA],
+            "link": [pd.NA],
+        }
+    )
+    monkeypatch.setattr(review_app, "_load_spectra_rows", lambda *_args, **_kwargs: spectra_rows)
+
+    cards = review_app._render_external_followup(
+        {
+            "candidate_id": "C3",
+            "has_spectrum": True,
+            "spectrum_sources": pd.NA,
+            "spectrum_links": pd.NA,
+        },
+        "C3",
+    )
+
+    text = " ".join(_component_text_in_order(cards))
+    assert "DESI" in text
+    assert "<NA>" not in text
+    assert "view" not in text
 
 
 def test_cutout_fwhm_overlay_uses_simple_negative_circle_without_crosshair_or_glow() -> None:
@@ -1195,6 +1224,28 @@ def test_initial_eda_metric_sync_defers_db_load(monkeypatch) -> None:
     assert result == ([], None, [], None, [], None, [], None)
 
 
+def test_hidden_eda_metric_sync_preserves_restored_values(monkeypatch) -> None:
+    def fail_load():
+        raise AssertionError("EDA frame should not load while the panel is hidden")
+
+    monkeypatch.setattr(review_app, "_current_eda_frame", fail_load)
+
+    result = review_app.sync_eda_metric_controls(
+        {"candidate_ids": ["A"], "queue_size": 1},
+        "scope",
+        None,
+        None,
+        "collapsed",
+        1,
+        "dipper_score",
+        "interest_score",
+        "review_score",
+        "event_class",
+    )
+
+    assert all(item is review_app.no_update for item in result)
+
+
 def test_initial_eda_panel_returns_placeholder_before_startup(monkeypatch) -> None:
     def fail_load():
         raise AssertionError("EDA frame should not load during initial hydration")
@@ -1493,6 +1544,131 @@ def test_eda_panel_state_callback_supports_collapse_restore_and_wide(monkeypatch
     assert splitter_class == "eda-splitter panel-splitter-vertical"
     assert wide_text == "Restore"
     assert state == "expanded"
+
+
+def _sample_saved_review_gui_state(**overrides: object) -> dict[str, object]:
+    values: dict[str, object] = {
+        "theme_mode": "white",
+        "plot_mode": "native",
+        "plot_overlays": ["raw", "phase"],
+        "baseline_opacity": 0.4,
+        "residual_height": 0.3,
+        "external_source_values": ["asassn"],
+        "external_source_layout": "overlay",
+        "camera_values": ["cam1"],
+        "band_values": ["g"],
+        "yaxis_mode": "mag",
+        "native_color_mode": "camera",
+        "phase_panel_mode": "fold",
+        "period_method": "pdm",
+        "pdm_min_period": 0.1,
+        "pdm_max_period": 20.0,
+        "pdm_manual_period": None,
+    }
+    values.update(overrides)
+    return review_app._review_gui_state_from_values(**values)
+
+
+def test_review_gui_state_round_trips_eda_controls() -> None:
+    state = _sample_saved_review_gui_state(
+        eda_panel_state="expanded",
+        eda_x_metric="dipper_score",
+        eda_y_metric="interest_score",
+        eda_color_metric="review_score",
+        eda_symbol_metric="event_class",
+        eda_log_flags=["logy", "ignored"],
+        eda_selection_mode=["table", "ignored"],
+        eda_table_sort_by=[
+            {"column_id": "interest_score", "direction": "desc"},
+            {"column_id": "dipper_score", "direction": "asc"},
+        ],
+        eda_table_filter_query='{candidate_id} contains "A"',
+        eda_table_page_size="25",
+    )
+
+    outputs = review_app.restore_saved_review_gui_state(state)
+
+    assert state["eda_state"] == {
+        "panel_state": "expanded",
+        "x_metric": "dipper_score",
+        "y_metric": "interest_score",
+        "color_metric": "review_score",
+        "symbol_metric": "event_class",
+        "log_flags": ["logy"],
+        "selection_mode": ["table"],
+        "table_sort_by": [
+            {"column_id": "interest_score", "direction": "desc"},
+            {"column_id": "dipper_score", "direction": "asc"},
+        ],
+        "table_filter_query": '{candidate_id} contains "A"',
+        "table_page_size": 25,
+    }
+    assert outputs[17:] == (
+        "expanded",
+        "dipper_score",
+        "interest_score",
+        "review_score",
+        "event_class",
+        ["logy"],
+        ["table"],
+        [
+            {"column_id": "interest_score", "direction": "desc"},
+            {"column_id": "dipper_score", "direction": "asc"},
+        ],
+        '{candidate_id} contains "A"',
+        25,
+    )
+
+
+def test_legacy_saved_review_gui_state_does_not_clobber_eda_controls() -> None:
+    state = _sample_saved_review_gui_state(include_eda_state=False)
+
+    outputs = review_app.restore_saved_review_gui_state(state)
+
+    assert "eda_state" not in state
+    assert all(item is review_app.no_update for item in outputs[17:])
+
+
+def test_save_and_restore_review_gui_state_callbacks_include_eda_controls() -> None:
+    save_callback = None
+    restore_callback = None
+    for meta in app.callback_map.values():
+        output_text = str(meta.get("output"))
+        if "save-review-gui-state-status.children" in output_text:
+            save_callback = meta
+        if "plot-mode.value" in output_text and "eda-panel-state.data" in output_text:
+            restore_callback = meta
+
+    assert save_callback is not None
+    assert restore_callback is not None
+
+    save_states = {(item["id"], item["property"]) for item in save_callback.get("state", [])}
+    restore_outputs = {(item.component_id, item.component_property) for item in restore_callback.get("output", [])}
+
+    assert {
+        ("eda-panel-state", "data"),
+        ("eda-x-metric", "value"),
+        ("eda-y-metric", "value"),
+        ("eda-color-metric", "value"),
+        ("eda-symbol-metric", "value"),
+        ("eda-log-flags", "value"),
+        ("eda-selection-mode", "value"),
+        ("eda-candidate-table", "sort_by"),
+        ("eda-candidate-table", "filter_query"),
+        ("eda-candidate-table", "page_size"),
+    }.issubset(save_states)
+    assert {
+        ("eda-panel-state", "data"),
+        ("eda-x-metric", "value"),
+        ("eda-y-metric", "value"),
+        ("eda-color-metric", "value"),
+        ("eda-symbol-metric", "value"),
+        ("eda-log-flags", "value"),
+        ("eda-selection-mode", "value"),
+        ("eda-candidate-table", "sort_by"),
+        ("eda-candidate-table", "filter_query"),
+        ("eda-candidate-table", "page_size"),
+    }.issubset(restore_outputs)
 
 
 def test_external_source_selector_exposes_tess() -> None:

@@ -8,6 +8,25 @@ import pandas as pd
 import malca.enrichment.vetting as vetting
 
 
+def test_asassn_variables_default_local_csv_prefers_repo_input(monkeypatch, tmp_path) -> None:
+    repo_csv = tmp_path / "input" / "asassn_variables_220326.csv"
+    package_csv = tmp_path / "malca" / "input" / "asassn_variables_220326.csv"
+    repo_csv.parent.mkdir(parents=True)
+    repo_csv.write_text("ID,RAJ2000,DEJ2000\n", encoding="utf-8")
+
+    monkeypatch.setattr(vetting, "ASASSN_VAR_REPO_LOCAL_CSV", repo_csv)
+    monkeypatch.setattr(vetting, "ASASSN_VAR_PACKAGE_LOCAL_CSV", package_csv)
+
+    assert vetting.resolve_asassn_var_local_csv() == repo_csv
+
+
+def test_asassn_variables_explicit_local_csv_override_wins(tmp_path) -> None:
+    local_csv = tmp_path / "custom.csv"
+    local_csv.write_text("ID,RAJ2000,DEJ2000\n", encoding="utf-8")
+
+    assert vetting.resolve_asassn_var_local_csv(local_csv) == local_csv
+
+
 def test_asassn_variables_local_csv_does_not_call_tap(monkeypatch, tmp_path) -> None:
     local_csv = tmp_path / "asassn_variables_220326.csv"
     pd.DataFrame(

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Sequence
 
 from astropy.table import Table
 from tqdm.auto import tqdm
@@ -23,6 +23,10 @@ from malca.core.derived_stats import append_derived_features
 
 
 DEFAULT_MIST_PATH = MIST_GRID_PATH
+DEFAULT_CMD_COLOR_ERR_FLOOR = 0.03
+DEFAULT_CMD_MAG_ERR_FLOOR = 0.03
+DEFAULT_CMD_NEAREST_COLOR_SCALE = 0.08
+DEFAULT_CMD_NEAREST_MAG_SCALE = 0.20
 
 
 def _first_existing_column(df: pd.DataFrame, candidates: Iterable[str]) -> str | None:
@@ -46,6 +50,372 @@ def load_mist_grid(path: str | Path | None = None) -> pd.DataFrame:
     if grid_path.suffix == ".parquet":
         return pd.read_parquet(grid_path)
     return pd.read_csv(grid_path)
+
+
+def _require_first_existing_column(df: pd.DataFrame, candidates: Iterable[str], label: str) -> str:
+    col = _first_existing_column(df, candidates)
+    if col is None:
+        raise ValueError(f"MIST grid is missing required {label} column; tried {list(candidates)}")
+    return col
+
+
+def _age_column_key(age_myr: float) -> str:
+    text = f"{float(age_myr):g}".replace(".", "p")
+    return f"{text}myr"
+
+
+def normalize_mist_cmd_grid(grid: pd.DataFrame) -> pd.DataFrame:
+    """Return a canonical Gaia CMD grid from a MIST photometry table.
+
+    The canonical table uses intrinsic Gaia color and absolute Gaia G magnitude,
+    which should be compared to dereddened observed CMD coordinates.
+    """
+    if grid.empty:
+        return pd.DataFrame(
+            columns=[
+                "mist_age_myr",
+                "mist_log_age_yr",
+                "mist_initial_mass",
+                "mist_star_mass",
+                "mist_gaia_g",
+                "mist_gaia_bp",
+                "mist_gaia_rp",
+                "mist_gaia_bp_rp",
+            ]
+        )
+
+    g_col = _require_first_existing_column(grid, ["gaia_g", "Gaia_G_EDR3", "Gaia_G_DR2Rev"], "Gaia G")
+    bp_col = _require_first_existing_column(grid, ["gaia_bp", "Gaia_BP_EDR3", "Gaia_BP_DR2Rev"], "Gaia BP")
+    rp_col = _require_first_existing_column(grid, ["gaia_rp", "Gaia_RP_EDR3", "Gaia_RP_DR2Rev"], "Gaia RP")
+    initial_mass_col = _require_first_existing_column(grid, ["initial_mass", "mist_initial_mass"], "initial mass")
+    star_mass_col = _first_existing_column(grid, ["star_mass", "mist_star_mass"])
+    log_age_col = _first_existing_column(grid, ["log10_isochrone_age_yr", "mist_log_age_yr", "log_age"])
+    age_myr_col = _first_existing_column(grid, ["age_myr", "mist_age_myr"])
+
+    out = pd.DataFrame(index=grid.index)
+    if age_myr_col is not None:
+        out["mist_age_myr"] = pd.to_numeric(grid[age_myr_col], errors="coerce")
+    elif log_age_col is not None:
+        log_age = pd.to_numeric(grid[log_age_col], errors="coerce")
+        out["mist_age_myr"] = np.power(10.0, log_age) / 1.0e6
+    else:
+        raise ValueError("MIST grid is missing age_myr or log10_isochrone_age_yr")
+
+    if log_age_col is not None:
+        out["mist_log_age_yr"] = pd.to_numeric(grid[log_age_col], errors="coerce")
+    else:
+        out["mist_log_age_yr"] = np.log10(out["mist_age_myr"] * 1.0e6)
+
+    out["mist_initial_mass"] = pd.to_numeric(grid[initial_mass_col], errors="coerce")
+    if star_mass_col is not None:
+        out["mist_star_mass"] = pd.to_numeric(grid[star_mass_col], errors="coerce")
+    else:
+        out["mist_star_mass"] = out["mist_initial_mass"]
+    out["mist_gaia_g"] = pd.to_numeric(grid[g_col], errors="coerce")
+    out["mist_gaia_bp"] = pd.to_numeric(grid[bp_col], errors="coerce")
+    out["mist_gaia_rp"] = pd.to_numeric(grid[rp_col], errors="coerce")
+
+    color_col = _first_existing_column(grid, ["gaia_bp_rp", "mist_gaia_bp_rp"])
+    if color_col is not None:
+        out["mist_gaia_bp_rp"] = pd.to_numeric(grid[color_col], errors="coerce")
+    else:
+        out["mist_gaia_bp_rp"] = out["mist_gaia_bp"] - out["mist_gaia_rp"]
+
+    optional_cols = (
+        "mist_version",
+        "mesa_revision",
+        "photometric_system",
+        "feh",
+        "alpha_fe",
+        "v_vcrit",
+        "eep",
+        "phase",
+    )
+    for optional in optional_cols:
+        if optional in grid.columns:
+            out[optional] = grid[optional]
+
+    required = [
+        "mist_age_myr",
+        "mist_initial_mass",
+        "mist_star_mass",
+        "mist_gaia_g",
+        "mist_gaia_bp",
+        "mist_gaia_rp",
+        "mist_gaia_bp_rp",
+    ]
+    ok = np.ones(len(out), dtype=bool)
+    for col in required:
+        ok &= np.isfinite(pd.to_numeric(out[col], errors="coerce"))
+    out = out.loc[ok].copy()
+    return out.sort_values(["mist_age_myr", "mist_initial_mass"]).reset_index(drop=True)
+
+
+def _resolve_grid_ages(grid: pd.DataFrame, ages_myr: Sequence[float] | None = None) -> list[float]:
+    available = np.array(sorted(pd.to_numeric(grid["mist_age_myr"], errors="coerce").dropna().unique()), dtype=float)
+    if available.size == 0:
+        return []
+    if ages_myr is None:
+        return [float(age) for age in available]
+
+    resolved: list[float] = []
+    for requested in ages_myr:
+        req = float(requested)
+        delta = np.abs(available - req)
+        idx = int(np.nanargmin(delta))
+        match = float(available[idx])
+        if np.isclose(match, req, rtol=5e-3, atol=1e-6) and match not in resolved:
+            resolved.append(match)
+    return resolved
+
+
+def _nearest_isochrone_point(
+    iso: pd.DataFrame,
+    *,
+    color: float,
+    mag: float,
+    color_err: float | None = None,
+    mag_err: float | None = None,
+    min_color_scale: float = DEFAULT_CMD_NEAREST_COLOR_SCALE,
+    min_mag_scale: float = DEFAULT_CMD_NEAREST_MAG_SCALE,
+) -> pd.Series | None:
+    if iso.empty or not (np.isfinite(color) and np.isfinite(mag)):
+        return None
+
+    x = pd.to_numeric(iso["mist_gaia_bp_rp"], errors="coerce").to_numpy(dtype=float)
+    y = pd.to_numeric(iso["mist_gaia_g"], errors="coerce").to_numpy(dtype=float)
+    ok = np.isfinite(x) & np.isfinite(y)
+    if not ok.any():
+        return None
+
+    xerr = float(color_err) if color_err is not None and np.isfinite(color_err) and color_err > 0 else min_color_scale
+    yerr = float(mag_err) if mag_err is not None and np.isfinite(mag_err) and mag_err > 0 else min_mag_scale
+    xscale = max(xerr, min_color_scale)
+    yscale = max(yerr, min_mag_scale)
+    residual = np.sqrt(((x - color) / xscale) ** 2 + ((y - mag) / yscale) ** 2)
+    residual = np.where(ok, residual, np.nan)
+    if not np.isfinite(residual).any():
+        return None
+    idx = int(np.nanargmin(residual))
+    point = iso.iloc[idx].copy()
+    point["cmd_model_residual"] = float(residual[idx])
+    point["cmd_model_delta_color"] = float(color - x[idx])
+    point["cmd_model_delta_mag"] = float(mag - y[idx])
+    return point
+
+
+def estimate_cmd_masses(
+    df: pd.DataFrame,
+    mist_grid: pd.DataFrame,
+    *,
+    color_col: str = "cmd_color",
+    mag_col: str = "cmd_mag",
+    color_err_col: str = "cmd_color_err",
+    mag_err_col: str = "cmd_mag_err",
+    ages_myr: Sequence[float] | None = None,
+) -> pd.DataFrame:
+    """Append nearest-isochrone mass estimates for each CMD point."""
+    out = df.copy()
+    grid = normalize_mist_cmd_grid(mist_grid)
+    ages = _resolve_grid_ages(grid, ages_myr)
+    if grid.empty or not ages:
+        out["cmd_mass_source"] = "no_mist_grid"
+        out["cmd_mass_best"] = np.nan
+        out["cmd_mass_best_age_myr"] = np.nan
+        out["cmd_mass_best_residual"] = np.nan
+        return out
+
+    masses_by_age: dict[float, list[float]] = {age: [] for age in ages}
+    residuals_by_age: dict[float, list[float]] = {age: [] for age in ages}
+    model_colors_by_age: dict[float, list[float]] = {age: [] for age in ages}
+    model_mags_by_age: dict[float, list[float]] = {age: [] for age in ages}
+
+    best_mass: list[float] = []
+    best_age: list[float] = []
+    best_residual: list[float] = []
+    source: list[str] = []
+
+    for _, row in out.iterrows():
+        color = _finite_float(row.get(color_col))
+        mag = _finite_float(row.get(mag_col))
+        color_err = _finite_float(row.get(color_err_col))
+        mag_err = _finite_float(row.get(mag_err_col))
+        row_best: tuple[float, float, float] | None = None
+
+        for age in ages:
+            iso = grid[np.isclose(grid["mist_age_myr"], age, rtol=5e-3, atol=1e-6)]
+            point = None
+            if color is not None and mag is not None:
+                point = _nearest_isochrone_point(
+                    iso,
+                    color=color,
+                    mag=mag,
+                    color_err=color_err,
+                    mag_err=mag_err,
+                )
+            if point is None:
+                mass = residual = model_color = model_mag = np.nan
+            else:
+                mass = float(point["mist_star_mass"])
+                residual = float(point["cmd_model_residual"])
+                model_color = float(point["mist_gaia_bp_rp"])
+                model_mag = float(point["mist_gaia_g"])
+                if row_best is None or residual < row_best[2]:
+                    row_best = (mass, age, residual)
+
+            masses_by_age[age].append(mass)
+            residuals_by_age[age].append(residual)
+            model_colors_by_age[age].append(model_color)
+            model_mags_by_age[age].append(model_mag)
+
+        if row_best is None:
+            best_mass.append(np.nan)
+            best_age.append(np.nan)
+            best_residual.append(np.nan)
+            source.append("missing_cmd")
+        else:
+            best_mass.append(row_best[0])
+            best_age.append(row_best[1])
+            best_residual.append(row_best[2])
+            source.append("mist_nearest_isochrone")
+
+    for age in ages:
+        key = _age_column_key(age)
+        out[f"cmd_mass_{key}"] = masses_by_age[age]
+        out[f"cmd_mass_residual_{key}"] = residuals_by_age[age]
+        out[f"cmd_model_color_{key}"] = model_colors_by_age[age]
+        out[f"cmd_model_mag_{key}"] = model_mags_by_age[age]
+
+    mass_cols = [f"cmd_mass_{_age_column_key(age)}" for age in ages]
+    out["cmd_mass_best"] = best_mass
+    out["cmd_mass_best_age_myr"] = best_age
+    out["cmd_mass_best_residual"] = best_residual
+    out["cmd_mass_min_age_grid"] = out[mass_cols].min(axis=1, skipna=True)
+    out["cmd_mass_max_age_grid"] = out[mass_cols].max(axis=1, skipna=True)
+    out["cmd_mass_age_grid_span"] = out["cmd_mass_max_age_grid"] - out["cmd_mass_min_age_grid"]
+    out["cmd_mass_source"] = source
+    return out
+
+
+def mist_mass_tracks(
+    mist_grid: pd.DataFrame,
+    masses: Sequence[float],
+    *,
+    ages_myr: Sequence[float] | None = None,
+) -> pd.DataFrame:
+    """Interpolate fixed-mass tracks through the available MIST isochrones."""
+    grid = normalize_mist_cmd_grid(mist_grid)
+    ages = _resolve_grid_ages(grid, ages_myr)
+    rows: list[dict[str, float]] = []
+    for mass in masses:
+        target_mass = float(mass)
+        for age in ages:
+            iso = grid[np.isclose(grid["mist_age_myr"], age, rtol=5e-3, atol=1e-6)].copy()
+            iso = iso.sort_values("mist_initial_mass")
+            mass_grid = pd.to_numeric(iso["mist_initial_mass"], errors="coerce").to_numpy(dtype=float)
+            color_grid = pd.to_numeric(iso["mist_gaia_bp_rp"], errors="coerce").to_numpy(dtype=float)
+            mag_grid = pd.to_numeric(iso["mist_gaia_g"], errors="coerce").to_numpy(dtype=float)
+            ok = np.isfinite(mass_grid) & np.isfinite(color_grid) & np.isfinite(mag_grid)
+            if ok.sum() < 2:
+                continue
+            mass_grid = mass_grid[ok]
+            color_grid = color_grid[ok]
+            mag_grid = mag_grid[ok]
+            if target_mass < np.nanmin(mass_grid) or target_mass > np.nanmax(mass_grid):
+                continue
+            rows.append(
+                {
+                    "mass": target_mass,
+                    "age_myr": float(age),
+                    "gaia_bp_rp": float(np.interp(target_mass, mass_grid, color_grid)),
+                    "gaia_g": float(np.interp(target_mass, mass_grid, mag_grid)),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def cmd_uncertainty_from_fields(
+    *,
+    g_mag_err: object = None,
+    bp_mag_err: object = None,
+    rp_mag_err: object = None,
+    dist_pc: object = None,
+    dist_pc_err: object = None,
+    parallax_mas: object = None,
+    parallax_err_mas: object = None,
+    a_v_3d: object = None,
+    a_v_3d_err: object = None,
+    a_g_per_av: float = CMD_A_G_PER_AV,
+    e_bp_rp_per_av: float = CMD_E_BP_RP_PER_AV,
+    color_err_floor: float = DEFAULT_CMD_COLOR_ERR_FLOOR,
+    mag_err_floor: float = DEFAULT_CMD_MAG_ERR_FLOOR,
+) -> dict[str, object]:
+    """Propagate simple Gaia CMD uncertainties for observed and dereddened axes."""
+    g_err = _finite_float(g_mag_err)
+    bp_err = _finite_float(bp_mag_err)
+    rp_err = _finite_float(rp_mag_err)
+
+    phot_sources: list[str] = []
+    if g_err is None or g_err <= 0:
+        g_err = mag_err_floor
+        phot_sources.append("g_floor")
+    else:
+        phot_sources.append("g_error")
+
+    color_terms = []
+    if bp_err is not None and bp_err > 0:
+        color_terms.append(bp_err)
+        phot_sources.append("bp_error")
+    else:
+        color_terms.append(color_err_floor / np.sqrt(2.0))
+        phot_sources.append("bp_floor")
+    if rp_err is not None and rp_err > 0:
+        color_terms.append(rp_err)
+        phot_sources.append("rp_error")
+    else:
+        color_terms.append(color_err_floor / np.sqrt(2.0))
+        phot_sources.append("rp_floor")
+    bp_rp_err = float(np.sqrt(np.sum(np.square(color_terms))))
+
+    dist_mod_err = np.nan
+    dist_source = "none"
+    dist_f = _finite_float(dist_pc)
+    dist_err_f = _finite_float(dist_pc_err)
+    if dist_f is not None and dist_f > 0 and dist_err_f is not None and dist_err_f > 0:
+        dist_mod_err = float(5.0 / np.log(10.0) * dist_err_f / dist_f)
+        dist_source = "distance_error"
+    else:
+        plx_f = _finite_float(parallax_mas)
+        plx_err_f = _finite_float(parallax_err_mas)
+        if plx_f is not None and plx_f > 0 and plx_err_f is not None and plx_err_f > 0:
+            dist_mod_err = float(5.0 / np.log(10.0) * plx_err_f / plx_f)
+            dist_source = "parallax_error"
+
+    mg_terms = [g_err]
+    if np.isfinite(dist_mod_err):
+        mg_terms.append(dist_mod_err)
+    mg_err = float(np.sqrt(np.sum(np.square(mg_terms))))
+
+    av_f = _finite_float(a_v_3d)
+    av_err_f = _finite_float(a_v_3d_err)
+    if av_f is not None and av_f >= 0 and av_err_f is not None and av_err_f > 0:
+        color_dered_err = float(np.sqrt(bp_rp_err**2 + (e_bp_rp_per_av * av_err_f) ** 2))
+        mag_dered_err = float(np.sqrt(mg_err**2 + (a_g_per_av * av_err_f) ** 2))
+        extinction_source = "av_error"
+    else:
+        color_dered_err = bp_rp_err
+        mag_dered_err = mg_err
+        extinction_source = "no_av_error"
+
+    return {
+        "bp_rp_err": bp_rp_err,
+        "mg_err": mg_err,
+        "cmd_color_err": color_dered_err,
+        "cmd_mag_err": mag_dered_err,
+        "cmd_phot_error_source": "+".join(phot_sources),
+        "cmd_distance_error_source": dist_source,
+        "cmd_extinction_error_source": extinction_source,
+    }
 
 
 def fetch_bailer_jones_distances(
@@ -154,13 +524,13 @@ def fetch_bailer_jones_distances(
 
 
 def _finite_float(value: object) -> float | None:
-  try:
-    out = float(value)  # type: ignore[arg-type]
-  except (TypeError, ValueError):
-    return None
-  if not np.isfinite(out):
-    return None
-  return out
+    try:
+        out = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(out):
+        return None
+    return out
 
 
 def dustmaps_cmd_from_fields(

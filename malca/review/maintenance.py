@@ -2,22 +2,28 @@ from __future__ import annotations
 
 import argparse
 from contextlib import closing
+from datetime import datetime, timezone
 import json
 from pathlib import Path
+import shutil
 
 from astropy import units as u
 from astropy.coordinates import SkyCoord
 import numpy as np
 import pandas as pd
 
+from malca.catalogs.evidence import normalize_catalog_evidence, normalize_catalog_evidence_record
 from malca.config import VSX_CROSSMATCH_PATH, VSX_MAX_SEP_ARCSEC, VSX_RAW_CATALOG_PATH
 from malca.review.store import (
     db_connect,
     load_candidates_file,
     merge_candidate_results,
     merge_vetting_results,
+    replace_candidate_payload_fields,
 )
-from malca.io.table_io import read_feature_table, read_parquet_table
+from malca.io.table_io import read_feature_table, read_parquet_table, write_feature_table
+from malca.products.feature_layers import to_layer_first_frame, with_feature_columns
+from malca.review.metadata import has_catalog_vetting_context, has_known_catalog_evidence
 from malca.vsx.filter import colspecs as VSX_COLSPECS, vsx_columns as VSX_COLUMNS
 from malca.vsx.metadata import normalize_vsx_match_columns, select_best_vsx_matches
 
@@ -178,6 +184,170 @@ def backfill_vsx_results(
     return updated
 
 
+CATALOG_EVIDENCE_COLUMNS = (
+    "vsx_sep_arcsec",
+    "vsx_period",
+    "vsx_class",
+    "asassn_var_name",
+    "asassn_var_period",
+    "asassn_var_type",
+)
+
+
+def _is_missing(value: object) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() in {"", "nan", "none", "null", "<na>"}
+    try:
+        missing = pd.isna(value)
+    except Exception:
+        return False
+    return bool(missing) if isinstance(missing, (bool, np.bool_)) else False
+
+
+def _backup_file(path: Path, *, stamp: str) -> Path:
+    backup = path.with_name(f"{path.name}.pre_catalog_evidence_{stamp}.bak")
+    shutil.copy2(path, backup)
+    return backup
+
+
+def _catalog_evidence_update_frame(df: pd.DataFrame) -> pd.DataFrame:
+    columns = ["candidate_id", *CATALOG_EVIDENCE_COLUMNS]
+    view = with_feature_columns(df, columns)
+    keep = [col for col in columns if col in view.columns]
+    if "candidate_id" not in keep:
+        return pd.DataFrame(columns=columns)
+    return view[keep].copy()
+
+
+def _fill_asassn_variables_blank_only(
+    df: pd.DataFrame,
+    *,
+    local_csv: Path | None,
+    radius_arcsec: float,
+) -> pd.DataFrame:
+    from malca.enrichment.vetting import crossmatch_asassn_variables
+
+    out = with_feature_columns(df, ["ra", "dec", "asassn_var_name", "asassn_var_type", "asassn_var_period"])
+    if "ra" not in out.columns or "dec" not in out.columns:
+        return out
+    matched = crossmatch_asassn_variables(
+        out.copy(),
+        method="local",
+        radius_arcsec=radius_arcsec,
+        local_csv=local_csv,
+    )
+    for column in ("asassn_var_name", "asassn_var_type", "asassn_var_period"):
+        if column not in out.columns:
+            out[column] = pd.NA
+        if column not in matched.columns:
+            continue
+        fill = out[column].map(_is_missing).astype(bool) & ~matched[column].map(_is_missing).astype(bool)
+        if fill.any():
+            out.loc[fill, column] = matched.loc[fill, column]
+    return out
+
+
+def _sparse_merge_catalog_evidence(conn, update_df: pd.DataFrame) -> int:
+    if update_df.empty or "candidate_id" not in update_df.columns:
+        return 0
+
+    known_ids = {
+        str(row[0]).strip()
+        for row in conn.execute("SELECT candidate_id FROM candidates").fetchall()
+    }
+    updated = 0
+    for _, row in update_df.iterrows():
+        candidate_id = str(row.get("candidate_id") or "").strip()
+        if not candidate_id or candidate_id not in known_ids:
+            continue
+        updates = {
+            col: row[col]
+            for col in CATALOG_EVIDENCE_COLUMNS
+            if col in update_df.columns and not _is_missing(row[col])
+        }
+        updates = normalize_catalog_evidence_record(updates)
+        if not updates:
+            continue
+        if has_known_catalog_evidence(updates):
+            updates["vetting_likely_known"] = True
+        elif has_catalog_vetting_context(updates):
+            updates["vetting_likely_known"] = False
+        if replace_candidate_payload_fields(conn, candidate_id, updates, commit=False):
+            updated += 1
+    conn.commit()
+    return updated
+
+
+def repair_catalog_evidence_run(
+    run_dir: Path,
+    *,
+    review_db: Path | None,
+    neighbors_long_path: Path | None,
+    vsx_max_sep_arcsec: float,
+    include_asassn_var: bool,
+    asassn_local_csv: Path | None,
+    asassn_radius_arcsec: float,
+    backup: bool,
+) -> dict[str, int]:
+    run_dir = run_dir.expanduser().resolve()
+    results_dir = run_dir / "results"
+    if neighbors_long_path is None:
+        neighbors_long_path = results_dir / "neighbor_enrichment" / "neighbors_long.parquet"
+    neighbors_long_path = neighbors_long_path.expanduser().resolve()
+    if not neighbors_long_path.exists():
+        raise FileNotFoundError(f"Neighbor long table not found: {neighbors_long_path}")
+
+    neighbors_long = read_parquet_table(neighbors_long_path)
+    candidate_paths = [
+        results_dir / "lc_events_neighbors.parquet",
+        results_dir / "lc_events_vetted.parquet",
+        results_dir / "lc_events_external_lcs.parquet",
+    ]
+    existing_paths = [path for path in candidate_paths if path.exists()]
+    if not existing_paths:
+        raise FileNotFoundError(f"No repairable lc_events result parquets found under {results_dir}")
+
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stats = {"parquets_repaired": 0, "db_candidates_updated": 0}
+    normalized_by_path: dict[Path, pd.DataFrame] = {}
+
+    for path in existing_paths:
+        df = read_feature_table(path)
+        repaired = normalize_catalog_evidence(
+            df,
+            neighbors_long=neighbors_long,
+            vsx_max_sep_arcsec=vsx_max_sep_arcsec,
+        )
+        if include_asassn_var:
+            repaired = _fill_asassn_variables_blank_only(
+                repaired,
+                local_csv=asassn_local_csv,
+                radius_arcsec=asassn_radius_arcsec,
+            )
+        if backup:
+            _backup_file(path, stamp=stamp)
+        write_feature_table(to_layer_first_frame(repaired), path)
+        normalized_by_path[path] = repaired
+        stats["parquets_repaired"] += 1
+
+    if review_db is None:
+        review_db = run_dir / "review" / "review.db"
+    review_db = review_db.expanduser().resolve()
+    if review_db.exists():
+        if backup:
+            _backup_file(review_db, stamp=stamp)
+        source_path = next(
+            (path for path in reversed(candidate_paths) if path in normalized_by_path),
+            existing_paths[-1],
+        )
+        update_df = _catalog_evidence_update_frame(normalized_by_path[source_path])
+        with closing(db_connect(review_db)) as conn:
+            stats["db_candidates_updated"] = _sparse_merge_catalog_evidence(conn, update_df)
+    return stats
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="malca review-maint",
@@ -209,13 +379,43 @@ def build_arg_parser() -> argparse.ArgumentParser:
     backfill_vsx.add_argument("--radius", type=float, default=VSX_MAX_SEP_ARCSEC, help="Raw VSX fallback match radius in arcsec")
     backfill_vsx.add_argument("--chunksize", type=int, default=200_000, help="Raw VSX fallback read chunk size")
     backfill_vsx.add_argument("--no-raw-fallback", action="store_true", help="Do not scan raw VSX when crossmatch is absent/incomplete")
+
+    repair_catalog = subparsers.add_parser(
+        "repair-catalog-evidence",
+        help="Repair canonical catalog evidence in run products and review DB",
+    )
+    repair_catalog.add_argument("--run-dir", required=True, type=Path, help="MALCA run directory")
+    repair_catalog.add_argument("--review-db", type=Path, default=None, help="Review SQLite DB (default: <run-dir>/review/review.db)")
+    repair_catalog.add_argument("--neighbors-long", type=Path, default=None, help="neighbors_long parquet (default: <run-dir>/results/neighbor_enrichment/neighbors_long.parquet)")
+    repair_catalog.add_argument("--vsx-max-sep", type=float, default=VSX_MAX_SEP_ARCSEC, help="Maximum VSX neighbor promotion separation in arcsec")
+    repair_catalog.add_argument("--asassn-local-csv", type=Path, default=None, help="Local ASAS-SN variables CSV override")
+    repair_catalog.add_argument("--asassn-radius", type=float, default=5.0, help="ASAS-SN variable match radius in arcsec")
+    repair_catalog.add_argument("--skip-asassn-var", action="store_true", help="Only repair VSX evidence")
+    repair_catalog.add_argument("--no-backup", action="store_true", help="Do not create .bak files before writing")
     return parser
 
 
 def main() -> None:
     args = build_arg_parser().parse_args()
-    review_db = args.review_db.expanduser().resolve()
 
+    if args.command == "repair-catalog-evidence":
+        stats = repair_catalog_evidence_run(
+            args.run_dir,
+            review_db=args.review_db,
+            neighbors_long_path=args.neighbors_long,
+            vsx_max_sep_arcsec=args.vsx_max_sep,
+            include_asassn_var=not args.skip_asassn_var,
+            asassn_local_csv=args.asassn_local_csv,
+            asassn_radius_arcsec=args.asassn_radius,
+            backup=not args.no_backup,
+        )
+        print(
+            f"Repaired {stats['parquets_repaired']} result parquet(s); "
+            f"updated {stats['db_candidates_updated']} DB candidate(s)."
+        )
+        return
+
+    review_db = args.review_db.expanduser().resolve()
     with closing(db_connect(review_db)) as conn:
         if args.command == "merge-vetting":
             input_path = args.input.expanduser().resolve()

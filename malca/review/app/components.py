@@ -3,13 +3,33 @@ def _candidate_lookup_keys(candidate_id: str, payload: dict) -> list[str]:
     keys = [str(candidate_id)]
     for key in ("candidate_id", "asas_sn_id"):
         v = payload.get(key)
-        if v is not None:
+        if not _is_missing_scalar(v):
             keys.append(str(v))
     path_v = payload.get("path")
-    if path_v:
-        keys.append(Path(str(path_v)).stem)
+    if not _is_missing_scalar(path_v):
+        path_text = str(path_v).strip()
+        if path_text:
+            keys.append(Path(path_text).stem)
     seen = set()
     return [k for k in keys if k and not (k in seen or seen.add(k))]
+
+
+def _is_missing_scalar(value: object) -> bool:
+    if value is None:
+        return True
+    try:
+        missing = pd.isna(value)
+    except Exception:
+        return False
+    if isinstance(missing, (bool, np.bool_)):
+        return bool(missing)
+    return False
+
+
+def _optional_text(value: object, default: str = "") -> str:
+    if _is_missing_scalar(value):
+        return default
+    return str(value)
 
 
 def _render_external_followup(
@@ -62,7 +82,7 @@ def _render_external_followup(
                 return "n/a"
             return f"{float(value):.{digits}g}"
         except Exception:
-            text = str(value or "").strip()
+            text = _optional_text(value).strip()
             return text if text else "n/a"
 
     def _metric(label: str, value) -> html.Div:
@@ -166,8 +186,8 @@ def _render_external_followup(
 
     # Spectra
     has_spectrum = _coerce_bool(payload.get('has_spectrum'))
-    spectrum_sources = str(payload.get('spectrum_sources') or '').strip()
-    spectrum_links_raw = str(payload.get('spectrum_links') or '').strip()
+    spectrum_sources = _optional_text(payload.get('spectrum_sources')).strip()
+    spectrum_links_raw = _optional_text(payload.get('spectrum_links')).strip()
     spectrum_links = [x.strip() for x in spectrum_links_raw.replace(';', ',').split(',') if x.strip()]
     spectra_rows = pd.DataFrame()
     for key in lookup_keys:
@@ -185,7 +205,7 @@ def _render_external_followup(
         hdr = html.Tr([html.Th('survey'), html.Th('sep"'), html.Th('z'), html.Th('type'), html.Th('link')])
         body = []
         for _, r in spectra_rows.iterrows():
-            link_val = str(r.get('link', '') or '').strip()
+            link_val = _optional_text(r.get('link', '')).strip()
             link_cell = html.Td(
                 html.A('view', href=link_val, target='_blank', rel='noopener noreferrer',
                        style={'color': theme_spec["muted"], 'fontSize': '9px'})
@@ -193,10 +213,10 @@ def _render_external_followup(
             z_val = r.get('spectrum_redshift')
             z_text = f"{float(z_val):.4f}" if pd.notna(z_val) else ''
             body.append(html.Tr([
-                html.Td(str(r.get('survey', ''))),
+                html.Td(_optional_text(r.get('survey', ''))),
                 html.Td(f"{float(r.get('sep_arcsec')):.2f}" if pd.notna(r.get('sep_arcsec')) else ''),
                 html.Td(z_text),
-                html.Td(str(r.get('spectrum_spectral_type', '') or '')[:20]),
+                html.Td(_optional_text(r.get('spectrum_spectral_type', ''))[:20]),
                 link_cell,
             ]))
         spectra_extras.append(html.Table([html.Thead(hdr), html.Tbody(body)], style={'width': '100%', 'fontSize': '10px', 'marginTop': '4px'}))

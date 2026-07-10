@@ -111,6 +111,8 @@ def sync_eda_metric_controls(
     color_metric,
     symbol_metric,
 ):
+    if _eda_queue_ready(queue_data) and _eda_startup_ready(startup_tick) and not _eda_panel_is_open(eda_panel_state):
+        return tuple([no_update] * 8)
     if not _eda_should_load(queue_data, eda_panel_state, startup_tick):
         return [], None, [], None, [], None, [], None
     start = time.perf_counter() if _review_perf_enabled() else None

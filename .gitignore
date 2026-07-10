@@ -58,7 +58,8 @@ input/vsx/vsxcat.090525.save
 
 lc_plots/
 
-input/mist/
+input/mist/*
+!input/mist/mist_cmd_minimal.csv
 malca/changes.txt
 results_test/
 skypatrol

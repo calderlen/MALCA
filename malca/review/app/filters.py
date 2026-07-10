@@ -64,6 +64,110 @@ def _coerce_choice(raw_value: object, allowed: set[str], default: str) -> str:
     return text if text in allowed else default
 
 
+def _coerce_eda_metric_value(raw_value: object) -> str | None:
+    text = str(raw_value).strip() if raw_value is not None else ''
+    return text or None
+
+
+def _coerce_eda_log_flags(raw_value: object) -> list[str]:
+    allowed = {'logx', 'logy'}
+    return [value for value in _coerce_string_list(raw_value) if value in allowed]
+
+
+def _coerce_eda_selection_mode(raw_value: object) -> list[str]:
+    return ['table'] if 'table' in _coerce_string_list(raw_value) else []
+
+
+def _coerce_eda_table_sort_by(raw_value: object) -> list[dict[str, str]]:
+    if raw_value is None:
+        return []
+    raw_items = raw_value if isinstance(raw_value, (list, tuple)) else [raw_value]
+    sort_by: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        column_id = str(item.get('column_id') or '').strip()
+        if not column_id or column_id in seen:
+            continue
+        direction = str(item.get('direction') or '').strip().lower()
+        sort_by.append({'column_id': column_id, 'direction': 'desc' if direction == 'desc' else 'asc'})
+        seen.add(column_id)
+    return sort_by
+
+
+def _coerce_eda_table_filter_query(raw_value: object) -> str:
+    text = str(raw_value).strip() if raw_value is not None else ''
+    return text
+
+
+def _coerce_eda_table_page_size(raw_value: object) -> int:
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        return 12
+    return value if value > 0 else 12
+
+
+def _eda_review_gui_state_from_values(
+    *,
+    panel_state: object,
+    x_metric: object,
+    y_metric: object,
+    color_metric: object,
+    symbol_metric: object,
+    log_flags: object,
+    selection_mode: object,
+    table_sort_by: object,
+    table_filter_query: object,
+    table_page_size: object,
+) -> dict[str, object]:
+    return {
+        'panel_state': _coerce_choice(panel_state, {'open', 'collapsed', 'expanded'}, 'open'),
+        'x_metric': _coerce_eda_metric_value(x_metric),
+        'y_metric': _coerce_eda_metric_value(y_metric),
+        'color_metric': _coerce_eda_metric_value(color_metric),
+        'symbol_metric': _coerce_eda_metric_value(symbol_metric),
+        'log_flags': _coerce_eda_log_flags(log_flags),
+        'selection_mode': _coerce_eda_selection_mode(selection_mode),
+        'table_sort_by': _coerce_eda_table_sort_by(table_sort_by),
+        'table_filter_query': _coerce_eda_table_filter_query(table_filter_query),
+        'table_page_size': _coerce_eda_table_page_size(table_page_size),
+    }
+
+
+def _saved_eda_review_gui_state(raw_state: dict[str, object]) -> dict[str, object] | None:
+    raw_eda = raw_state.get('eda_state')
+    if isinstance(raw_eda, dict):
+        return raw_eda
+    legacy_keys = {
+        'eda_panel_state',
+        'eda_x_metric',
+        'eda_y_metric',
+        'eda_color_metric',
+        'eda_symbol_metric',
+        'eda_log_flags',
+        'eda_selection_mode',
+        'eda_table_sort_by',
+        'eda_table_filter_query',
+        'eda_table_page_size',
+    }
+    if not any(key in raw_state for key in legacy_keys):
+        return None
+    return {
+        'panel_state': raw_state.get('eda_panel_state'),
+        'x_metric': raw_state.get('eda_x_metric'),
+        'y_metric': raw_state.get('eda_y_metric'),
+        'color_metric': raw_state.get('eda_color_metric'),
+        'symbol_metric': raw_state.get('eda_symbol_metric'),
+        'log_flags': raw_state.get('eda_log_flags'),
+        'selection_mode': raw_state.get('eda_selection_mode'),
+        'table_sort_by': raw_state.get('eda_table_sort_by'),
+        'table_filter_query': raw_state.get('eda_table_filter_query'),
+        'table_page_size': raw_state.get('eda_table_page_size'),
+    }
+
+
 def _review_gui_state_from_values(
     *,
     theme_mode: object,
@@ -83,6 +187,17 @@ def _review_gui_state_from_values(
     pdm_min_period: object = None,
     pdm_max_period: object = None,
     pdm_manual_period: object = None,
+    include_eda_state: bool = True,
+    eda_panel_state: object = None,
+    eda_x_metric: object = None,
+    eda_y_metric: object = None,
+    eda_color_metric: object = None,
+    eda_symbol_metric: object = None,
+    eda_log_flags: object = None,
+    eda_selection_mode: object = None,
+    eda_table_sort_by: object = None,
+    eda_table_filter_query: object = None,
+    eda_table_page_size: object = None,
 ) -> dict[str, object]:
     overlay_allowed = {'raw', 'markers', 'residuals', 'phase', 'filter_bad_cameras', 'diagnostics', 'confidence'}
     source_values = normalize_external_source_values(
@@ -90,7 +205,7 @@ def _review_gui_state_from_values(
         default=list(DEFAULT_EXTERNAL_SOURCE_VALUES),
     )
     source_layout = normalize_external_source_layout(external_source_layout)
-    return {
+    state = {
         'theme_mode': _coerce_choice(theme_mode, {'black', 'gray', 'white'}, DEFAULT_THEME),
         'plot_mode': _coerce_choice(plot_mode, {'native', 'png'}, 'native'),
         'plot_overlays': [value for value in _coerce_string_list(plot_overlays) if value in overlay_allowed],
@@ -109,11 +224,26 @@ def _review_gui_state_from_values(
         'pdm_max_period': _coerce_numeric_input_value(pdm_max_period),
         'pdm_manual_period': _coerce_numeric_input_value(pdm_manual_period),
     }
+    if include_eda_state:
+        state['eda_state'] = _eda_review_gui_state_from_values(
+            panel_state=eda_panel_state,
+            x_metric=eda_x_metric,
+            y_metric=eda_y_metric,
+            color_metric=eda_color_metric,
+            symbol_metric=eda_symbol_metric,
+            log_flags=eda_log_flags,
+            selection_mode=eda_selection_mode,
+            table_sort_by=eda_table_sort_by,
+            table_filter_query=eda_table_filter_query,
+            table_page_size=eda_table_page_size,
+        )
+    return state
 
 
 def _normalize_review_gui_state(raw_state: object) -> dict[str, object] | None:
     if not isinstance(raw_state, dict) or not raw_state:
         return None
+    eda_state = _saved_eda_review_gui_state(raw_state)
     return _review_gui_state_from_values(
         theme_mode=raw_state.get('theme_mode'),
         plot_mode=raw_state.get('plot_mode'),
@@ -132,6 +262,17 @@ def _normalize_review_gui_state(raw_state: object) -> dict[str, object] | None:
         pdm_min_period=raw_state.get('pdm_min_period'),
         pdm_max_period=raw_state.get('pdm_max_period'),
         pdm_manual_period=raw_state.get('pdm_manual_period'),
+        include_eda_state=eda_state is not None,
+        eda_panel_state=eda_state.get('panel_state') if eda_state else None,
+        eda_x_metric=eda_state.get('x_metric') if eda_state else None,
+        eda_y_metric=eda_state.get('y_metric') if eda_state else None,
+        eda_color_metric=eda_state.get('color_metric') if eda_state else None,
+        eda_symbol_metric=eda_state.get('symbol_metric') if eda_state else None,
+        eda_log_flags=eda_state.get('log_flags') if eda_state else None,
+        eda_selection_mode=eda_state.get('selection_mode') if eda_state else None,
+        eda_table_sort_by=eda_state.get('table_sort_by') if eda_state else None,
+        eda_table_filter_query=eda_state.get('table_filter_query') if eda_state else None,
+        eda_table_page_size=eda_state.get('table_page_size') if eda_state else None,
     )
 
 
@@ -810,15 +951,25 @@ def load_saved_review_gui_state(_tick):
      Output('pdm-max-period', 'value', allow_duplicate=True),
      Output('pdm-manual-period', 'value', allow_duplicate=True),
      Output('theme-mode', 'value', allow_duplicate=True),
-     Output('plot-defaults-initialized', 'data', allow_duplicate=True)],
+     Output('plot-defaults-initialized', 'data', allow_duplicate=True),
+     Output('eda-panel-state', 'data', allow_duplicate=True),
+     Output('eda-x-metric', 'value', allow_duplicate=True),
+     Output('eda-y-metric', 'value', allow_duplicate=True),
+     Output('eda-color-metric', 'value', allow_duplicate=True),
+     Output('eda-symbol-metric', 'value', allow_duplicate=True),
+     Output('eda-log-flags', 'value', allow_duplicate=True),
+     Output('eda-selection-mode', 'value', allow_duplicate=True),
+     Output('eda-candidate-table', 'sort_by', allow_duplicate=True),
+     Output('eda-candidate-table', 'filter_query', allow_duplicate=True),
+     Output('eda-candidate-table', 'page_size', allow_duplicate=True)],
     Input('saved-review-gui-state', 'data'),
     prevent_initial_call='initial_duplicate',
 )
 def restore_saved_review_gui_state(saved_state):
     state = _normalize_review_gui_state(saved_state)
     if state is None:
-        return tuple([no_update] * 17)
-    return (
+        return tuple([no_update] * 27)
+    base_outputs = (
         state['plot_mode'],
         state['plot_overlays'],
         state['baseline_opacity'],
@@ -836,6 +987,22 @@ def restore_saved_review_gui_state(saved_state):
         state['pdm_manual_period'],
         state['theme_mode'],
         True,
+    )
+    eda_state = state.get('eda_state')
+    if not isinstance(eda_state, dict):
+        return (*base_outputs, *([no_update] * 10))
+    return (
+        *base_outputs,
+        eda_state['panel_state'],
+        eda_state['x_metric'],
+        eda_state['y_metric'],
+        eda_state['color_metric'],
+        eda_state['symbol_metric'],
+        eda_state['log_flags'],
+        eda_state['selection_mode'],
+        eda_state['table_sort_by'],
+        eda_state['table_filter_query'],
+        eda_state['table_page_size'],
     )
 
 
@@ -861,6 +1028,16 @@ def restore_saved_review_gui_state(saved_state):
         State('pdm-min-period', 'value'),
         State('pdm-max-period', 'value'),
         State('pdm-manual-period', 'value'),
+        State('eda-panel-state', 'data'),
+        State('eda-x-metric', 'value'),
+        State('eda-y-metric', 'value'),
+        State('eda-color-metric', 'value'),
+        State('eda-symbol-metric', 'value'),
+        State('eda-log-flags', 'value'),
+        State('eda-selection-mode', 'value'),
+        State('eda-candidate-table', 'sort_by'),
+        State('eda-candidate-table', 'filter_query'),
+        State('eda-candidate-table', 'page_size'),
     ],
     prevent_initial_call=True,
 )
@@ -889,6 +1066,16 @@ def save_review_gui_state(n_clicks, *state_values):
         pdm_min_period=extra_values[13],
         pdm_max_period=extra_values[14],
         pdm_manual_period=extra_values[15],
+        eda_panel_state=extra_values[16],
+        eda_x_metric=extra_values[17],
+        eda_y_metric=extra_values[18],
+        eda_color_metric=extra_values[19],
+        eda_symbol_metric=extra_values[20],
+        eda_log_flags=extra_values[21],
+        eda_selection_mode=extra_values[22],
+        eda_table_sort_by=extra_values[23],
+        eda_table_filter_query=extra_values[24],
+        eda_table_page_size=extra_values[25],
     )
     try:
         with closing(db_connect(Path(DB_PATH))) as conn:

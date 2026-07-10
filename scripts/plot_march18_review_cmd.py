@@ -34,8 +34,15 @@ from malca.plotting.lightcurve_publication import (
 
 apply_publication_rcparams(plt)
 
-from malca.config import DEFAULT_OUTPUT_DIR
-from malca.ltv.cmd import dustmaps_cmd_from_fields
+from malca.config import DEFAULT_OUTPUT_DIR, MIST_GRID_PATH
+from malca.ltv.cmd import (
+    cmd_uncertainty_from_fields,
+    dustmaps_cmd_from_fields,
+    estimate_cmd_masses,
+    load_mist_grid,
+    mist_mass_tracks,
+    normalize_mist_cmd_grid,
+)
 
 
 MARCH18_RUN = DEFAULT_OUTPUT_DIR / "runs" / "runs_march18_bundle_all"
@@ -45,6 +52,20 @@ DEFAULT_OUTPUT = MARCH18_RUN / "results" / "march18_review_cmd_selected.png"
 CMD_FIGSIZE = FIG_SINGLE_COL_SQUARE
 CMD_XLIM = (-1.0, 3.0)
 CMD_YLIM = (-4.0, 10.0)
+DEFAULT_CMD_MODE = "dereddened"
+DEFAULT_ISOCHRONE_AGES_MYR = (1.0, 3.0, 10.0, 30.0)
+DEFAULT_MASS_LABELS = (0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.7, 1.0, 1.5, 2.3, 3.0)
+ISOCHRONE_COLORS = ("#1b9e77", "#d95f02", "#7570b3", "#e7298a", "#66a61e", "#e6ab02")
+ISOCHRONE_LINEWIDTH = 1.0
+ISOCHRONE_ALPHA = 0.88
+MASS_TRACK_COLOR = "#333333"
+MASS_TRACK_ALPHA = 0.58
+MASS_TRACK_LINEWIDTH = 0.75
+MASS_LABEL_FONTSIZE = 5.6
+ERRORBAR_ALPHA = 0.72
+ERRORBAR_LINEWIDTH = 0.46
+ERRORBAR_CAPSIZE = 1.1
+ERRORBAR_CAPTHICK = 0.46
 SOLID_CMD_SOURCES = frozenset({"dustmaps3d", "observed_no_extinction"})
 HOLLOW_CMD_SOURCES = frozenset({"observed_fallback"})
 PLOTTABLE_CMD_SOURCES = SOLID_CMD_SOURCES | HOLLOW_CMD_SOURCES
@@ -64,6 +85,19 @@ def _json_frame(series: pd.Series) -> pd.DataFrame:
         else:
             rows.append({})
     return pd.DataFrame(rows, index=series.index)
+
+
+def _copy_external_column(
+    out: pd.DataFrame,
+    external: pd.DataFrame,
+    target: str,
+    aliases: tuple[str, ...] = (),
+) -> None:
+    for col in (target, *aliases):
+        if col in external.columns:
+            out[target] = external[col]
+            return
+    out[target] = np.nan
 
 
 def _read_reviews(db_path: Path, *, only_reviewed: bool = True) -> pd.DataFrame:
@@ -97,22 +131,38 @@ def _compute_cmd_coordinates(candidates: pd.DataFrame) -> pd.DataFrame:
     out = pd.DataFrame({"candidate_id": candidates["candidate_id"].astype("string")})
     for col in ("bp_rp",):
         out[col] = pd.to_numeric(derived.get(col), errors="coerce")
-    for col in (
-        "phot_g_mean_mag",
-        "phot_bp_mean_mag",
-        "phot_rp_mean_mag",
-        "distance_gspphot",
-        "parallax",
-        "A_v_3d",
-        "source_id",
-        "gaia_id",
-    ):
-        if col in external.columns:
-            out[col] = external[col]
-        else:
-            out[col] = np.nan
+    _copy_external_column(out, external, "phot_g_mean_mag")
+    _copy_external_column(out, external, "phot_bp_mean_mag")
+    _copy_external_column(out, external, "phot_rp_mean_mag")
+    _copy_external_column(out, external, "phot_g_mean_mag_error", ("phot_g_mean_mag_err", "g_mag_error", "g_mag_err"))
+    _copy_external_column(
+        out,
+        external,
+        "phot_bp_mean_mag_error",
+        ("phot_bp_mean_mag_err", "bp_mag_error", "bp_mag_err"),
+    )
+    _copy_external_column(
+        out,
+        external,
+        "phot_rp_mean_mag_error",
+        ("phot_rp_mean_mag_err", "rp_mag_error", "rp_mag_err"),
+    )
+    _copy_external_column(out, external, "distance_gspphot")
+    _copy_external_column(
+        out,
+        external,
+        "distance_gspphot_error",
+        ("distance_gspphot_err", "dist_pc_error", "dist_pc_err"),
+    )
+    _copy_external_column(out, external, "parallax")
+    _copy_external_column(out, external, "parallax_error", ("parallax_error_gaia", "plx_d", "plx_err"))
+    _copy_external_column(out, external, "A_v_3d")
+    _copy_external_column(out, external, "dust_sigma", ("A_v_3d_error", "A_v_3d_err", "av_error", "av_err"))
+    _copy_external_column(out, external, "source_id")
+    _copy_external_column(out, external, "gaia_id")
 
     cmd_rows: list[dict[str, object]] = []
+    err_rows: list[dict[str, object]] = []
     for idx in out.index:
         row = out.loc[idx]
         coords = dustmaps_cmd_from_fields(
@@ -125,9 +175,28 @@ def _compute_cmd_coordinates(candidates: pd.DataFrame) -> pd.DataFrame:
             parallax_mas=row.get("parallax"),
         )
         cmd_rows.append(coords)
+        err_rows.append(
+            cmd_uncertainty_from_fields(
+                g_mag_err=row.get("phot_g_mean_mag_error"),
+                bp_mag_err=row.get("phot_bp_mean_mag_error"),
+                rp_mag_err=row.get("phot_rp_mean_mag_error"),
+                dist_pc=row.get("distance_gspphot"),
+                dist_pc_err=row.get("distance_gspphot_error"),
+                parallax_mas=row.get("parallax"),
+                parallax_err_mas=row.get("parallax_error"),
+                a_v_3d=row.get("A_v_3d"),
+                a_v_3d_err=row.get("dust_sigma"),
+            )
+        )
 
     cmd_df = pd.DataFrame(cmd_rows, index=out.index)
-    out = pd.concat([out, cmd_df], axis=1)
+    if "bp_rp" in cmd_df.columns:
+        out["bp_rp"] = pd.to_numeric(out["bp_rp"], errors="coerce").combine_first(
+            pd.to_numeric(cmd_df["bp_rp"], errors="coerce")
+        )
+        cmd_df = cmd_df.drop(columns=["bp_rp"])
+    err_df = pd.DataFrame(err_rows, index=out.index)
+    out = pd.concat([out, cmd_df, err_df], axis=1)
     return out
 
 
@@ -152,10 +221,63 @@ def _assign_bucket(row: pd.Series) -> str | None:
 
 
 def _plottable_mask(df: pd.DataFrame) -> pd.Series:
+    x_col = "cmd_plot_color" if "cmd_plot_color" in df.columns else "cmd_color"
+    y_col = "cmd_plot_mag" if "cmd_plot_mag" in df.columns else "cmd_mag"
     return (
         df["cmd_coordinate_source"].isin(PLOTTABLE_CMD_SOURCES)
-        & df["cmd_color"].notna()
-        & df["cmd_mag"].notna()
+        & df[x_col].notna()
+        & df[y_col].notna()
+    )
+
+
+def _apply_cmd_mode(plot_df: pd.DataFrame, cmd_mode: str) -> pd.DataFrame:
+    out = plot_df.copy()
+    if cmd_mode == "observed":
+        out["cmd_plot_color"] = pd.to_numeric(out["bp_rp"], errors="coerce")
+        out["cmd_plot_mag"] = pd.to_numeric(out["mg"], errors="coerce")
+        out["cmd_plot_color_err"] = pd.to_numeric(out["bp_rp_err"], errors="coerce")
+        out["cmd_plot_mag_err"] = pd.to_numeric(out["mg_err"], errors="coerce")
+    elif cmd_mode == "dereddened":
+        out["cmd_plot_color"] = pd.to_numeric(out["cmd_color"], errors="coerce")
+        out["cmd_plot_mag"] = pd.to_numeric(out["cmd_mag"], errors="coerce")
+        out["cmd_plot_color_err"] = pd.to_numeric(out["cmd_color_err"], errors="coerce")
+        out["cmd_plot_mag_err"] = pd.to_numeric(out["cmd_mag_err"], errors="coerce")
+    else:
+        raise ValueError(f"Unsupported CMD mode: {cmd_mode}")
+    out["cmd_plot_mode"] = cmd_mode
+    return out
+
+
+def _draw_errorbars(
+    ax,
+    df: pd.DataFrame,
+    *,
+    color,
+    x_col: str,
+    y_col: str,
+    xerr_col: str,
+    yerr_col: str,
+    zorder: float,
+) -> None:
+    if df.empty or xerr_col not in df.columns or yerr_col not in df.columns:
+        return
+    xerr = pd.to_numeric(df[xerr_col], errors="coerce").to_numpy(dtype=float)
+    yerr = pd.to_numeric(df[yerr_col], errors="coerce").to_numpy(dtype=float)
+    ok = np.isfinite(xerr) | np.isfinite(yerr)
+    if not ok.any():
+        return
+    ax.errorbar(
+        pd.to_numeric(df.loc[ok, x_col], errors="coerce"),
+        pd.to_numeric(df.loc[ok, y_col], errors="coerce"),
+        xerr=xerr[ok],
+        yerr=yerr[ok],
+        fmt="none",
+        ecolor=color,
+        alpha=ERRORBAR_ALPHA,
+        elinewidth=ERRORBAR_LINEWIDTH,
+        capsize=ERRORBAR_CAPSIZE,
+        capthick=ERRORBAR_CAPTHICK,
+        zorder=zorder,
     )
 
 
@@ -171,12 +293,28 @@ def _scatter_solid(
     label=None,
     edge_lw: float = CMD_MARKER_EDGE_SOLID,
     edgecolors=None,
+    x_col: str = "cmd_plot_color",
+    y_col: str = "cmd_plot_mag",
+    xerr_col: str = "cmd_plot_color_err",
+    yerr_col: str = "cmd_plot_mag_err",
+    show_errorbars: bool = False,
 ) -> None:
     if df.empty:
         return
+    if show_errorbars:
+        _draw_errorbars(
+            ax,
+            df,
+            color=color,
+            x_col=x_col,
+            y_col=y_col,
+            xerr_col=xerr_col,
+            yerr_col=yerr_col,
+            zorder=zorder - 0.2,
+        )
     ax.scatter(
-        df["cmd_color"],
-        df["cmd_mag"],
+        df[x_col],
+        df[y_col],
         s=size,
         c=color,
         marker=marker,
@@ -200,12 +338,28 @@ def _scatter_hollow(
     label=None,
     edge_lw: float = CMD_MARKER_EDGE_HOLLOW,
     edgecolors=None,
+    x_col: str = "cmd_plot_color",
+    y_col: str = "cmd_plot_mag",
+    xerr_col: str = "cmd_plot_color_err",
+    yerr_col: str = "cmd_plot_mag_err",
+    show_errorbars: bool = False,
 ) -> None:
     if df.empty:
         return
+    if show_errorbars:
+        _draw_errorbars(
+            ax,
+            df,
+            color=color,
+            x_col=x_col,
+            y_col=y_col,
+            xerr_col=xerr_col,
+            yerr_col=yerr_col,
+            zorder=zorder - 0.2,
+        )
     ax.scatter(
-        df["cmd_color"],
-        df["cmd_mag"],
+        df[x_col],
+        df[y_col],
         s=size,
         facecolors="none",
         edgecolors=edgecolors if edgecolors is not None else "black",
@@ -501,6 +655,109 @@ def _load_gaia_background(bg_path: Path | str = GAIA_BG_PATH) -> tuple[np.ndarra
     return bp_rp[ok], mg
 
 
+def _resolve_plot_ages(grid: pd.DataFrame, ages_myr: tuple[float, ...] | list[float]) -> list[float]:
+    available = np.array(sorted(pd.to_numeric(grid["mist_age_myr"], errors="coerce").dropna().unique()), dtype=float)
+    resolved: list[float] = []
+    for requested in ages_myr:
+        if available.size == 0:
+            break
+        idx = int(np.nanargmin(np.abs(available - float(requested))))
+        age = float(available[idx])
+        if age not in resolved:
+            resolved.append(age)
+    return resolved
+
+
+def _visible_cmd_rows(df: pd.DataFrame, x_col: str, y_col: str) -> pd.DataFrame:
+    x = pd.to_numeric(df[x_col], errors="coerce")
+    y = pd.to_numeric(df[y_col], errors="coerce")
+    return df[
+        x.between(CMD_XLIM[0], CMD_XLIM[1])
+        & y.between(CMD_YLIM[0], CMD_YLIM[1])
+    ].copy()
+
+
+def _plot_mist_isochrones(
+    ax,
+    mist_grid: pd.DataFrame,
+    *,
+    ages_myr: tuple[float, ...] | list[float],
+) -> None:
+    grid = normalize_mist_cmd_grid(mist_grid)
+    if grid.empty:
+        return
+    ages = _resolve_plot_ages(grid, ages_myr)
+    for i, age in enumerate(ages):
+        iso = grid[np.isclose(grid["mist_age_myr"], age, rtol=5e-3, atol=1e-6)].sort_values("mist_initial_mass")
+        if iso.empty:
+            continue
+        color = ISOCHRONE_COLORS[i % len(ISOCHRONE_COLORS)]
+        ax.plot(
+            iso["mist_gaia_bp_rp"],
+            iso["mist_gaia_g"],
+            color=color,
+            linestyle="--",
+            linewidth=ISOCHRONE_LINEWIDTH,
+            alpha=ISOCHRONE_ALPHA,
+            zorder=2.1,
+        )
+        visible = _visible_cmd_rows(iso, "mist_gaia_bp_rp", "mist_gaia_g")
+        if not visible.empty:
+            label_row = visible.iloc[min(len(visible) - 1, max(0, int(0.8 * len(visible))))]
+            ax.text(
+                label_row["mist_gaia_bp_rp"],
+                label_row["mist_gaia_g"],
+                f"{age:g} Myr",
+                color=color,
+                fontsize=MASS_LABEL_FONTSIZE,
+                ha="left",
+                va="center",
+                clip_on=True,
+                zorder=2.2,
+            )
+
+
+def _plot_mist_mass_tracks(
+    ax,
+    mist_grid: pd.DataFrame,
+    *,
+    masses: tuple[float, ...] | list[float],
+    ages_myr: tuple[float, ...] | list[float],
+) -> None:
+    tracks = mist_mass_tracks(mist_grid, masses, ages_myr=ages_myr)
+    if tracks.empty:
+        return
+    for mass in masses:
+        track = tracks[np.isclose(pd.to_numeric(tracks["mass"], errors="coerce"), float(mass))]
+        track = track.sort_values("age_myr")
+        if track.empty:
+            continue
+        ax.plot(
+            track["gaia_bp_rp"],
+            track["gaia_g"],
+            color=MASS_TRACK_COLOR,
+            alpha=MASS_TRACK_ALPHA,
+            linewidth=MASS_TRACK_LINEWIDTH,
+            zorder=2.0,
+        )
+        visible = _visible_cmd_rows(track, "gaia_bp_rp", "gaia_g")
+        if visible.empty:
+            continue
+        label_row = visible.iloc[-1]
+        ax.text(
+            label_row["gaia_bp_rp"],
+            label_row["gaia_g"],
+            rf"{mass:g}$M_\odot$",
+            color=MASS_TRACK_COLOR,
+            fontsize=MASS_LABEL_FONTSIZE,
+            ha="left",
+            va="center",
+            alpha=0.86,
+            clip_on=True,
+            zorder=2.2,
+        )
+
+
 def _plot_cmd(
     plot_df: pd.DataFrame,
     out_path: Path,
@@ -508,6 +765,12 @@ def _plot_cmd(
     bucket_order: list[str] | None = None,
     background_style: str = DEFAULT_BACKGROUND_STYLE,
     bg_path: Path | str = GAIA_BG_PATH,
+    cmd_mode: str = DEFAULT_CMD_MODE,
+    mist_grid: pd.DataFrame | None = None,
+    with_isochrones: bool = False,
+    isochrone_ages_myr: tuple[float, ...] | list[float] = DEFAULT_ISOCHRONE_AGES_MYR,
+    mass_labels: tuple[float, ...] | list[float] = DEFAULT_MASS_LABELS,
+    show_errorbars: bool = False,
 ) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     bucket_order = bucket_order or BUCKET_ORDER
@@ -518,8 +781,8 @@ def _plot_cmd(
 
     # Combine Gaia DR3 background + all pipeline candidates
     gaia_x, gaia_y = _load_gaia_background(bg_path)
-    cand_x = plottable["cmd_color"].to_numpy(dtype=float)
-    cand_y = plottable["cmd_mag"].to_numpy(dtype=float)
+    cand_x = plottable["cmd_plot_color"].to_numpy(dtype=float)
+    cand_y = plottable["cmd_plot_mag"].to_numpy(dtype=float)
     bg_x = np.concatenate([gaia_x, cand_x])
     bg_y = np.concatenate([gaia_y, cand_y])
     mask = np.isfinite(bg_x) & np.isfinite(bg_y)
@@ -536,6 +799,10 @@ def _plot_cmd(
     ax.set_xlim(*CMD_XLIM)
     ax.set_ylim(*CMD_YLIM)
     ax.invert_yaxis()
+
+    if with_isochrones and mist_grid is not None:
+        _plot_mist_mass_tracks(ax, mist_grid, masses=mass_labels, ages_myr=isochrone_ages_myr)
+        _plot_mist_isochrones(ax, mist_grid, ages_myr=isochrone_ages_myr)
 
     for bucket in bucket_order:
         sub = selected[selected["review_cmd_bucket"] == bucket]
@@ -554,6 +821,7 @@ def _plot_cmd(
             marker=style["marker"],
             zorder=style["zorder"],
             label=solid_label if not sub_solid.empty else None,
+            show_errorbars=show_errorbars,
         )
         _scatter_hollow(
             ax,
@@ -563,10 +831,15 @@ def _plot_cmd(
             marker=style["marker"],
             zorder=style["zorder"],
             label=f"{bucket} observed ({len(sub_hollow):,})" if not sub_hollow.empty else None,
+            show_errorbars=show_errorbars,
         )
 
-    ax.set_xlabel(r"$G_{\mathrm{BP}} - G_{\mathrm{RP}}$ [mag]", fontsize=CMD_AXIS_LABEL_FONTSIZE)
-    ax.set_ylabel(r"$M_G$ [mag]", fontsize=CMD_AXIS_LABEL_FONTSIZE)
+    if cmd_mode == "dereddened":
+        ax.set_xlabel(r"$(G_{\mathrm{BP}} - G_{\mathrm{RP}})_0$ [mag]", fontsize=CMD_AXIS_LABEL_FONTSIZE)
+        ax.set_ylabel(r"$M_{G,0}$ [mag]", fontsize=CMD_AXIS_LABEL_FONTSIZE)
+    else:
+        ax.set_xlabel(r"$G_{\mathrm{BP}} - G_{\mathrm{RP}}$ [mag]", fontsize=CMD_AXIS_LABEL_FONTSIZE)
+        ax.set_ylabel(r"$M_G$ [mag]", fontsize=CMD_AXIS_LABEL_FONTSIZE)
     ax.tick_params(
         axis="both",
         which="both",
@@ -604,6 +877,12 @@ def build_plot(
     only_reviewed: bool = True,
     background_style: str = DEFAULT_BACKGROUND_STYLE,
     bg_path: Path | str = GAIA_BG_PATH,
+    cmd_mode: str = DEFAULT_CMD_MODE,
+    with_isochrones: bool = False,
+    isochrone_grid: Path | str = MIST_GRID_PATH,
+    isochrone_ages_myr: tuple[float, ...] | list[float] = DEFAULT_ISOCHRONE_AGES_MYR,
+    mass_labels: tuple[float, ...] | list[float] = DEFAULT_MASS_LABELS,
+    show_errorbars: bool | None = None,
 ) -> tuple[pd.DataFrame, dict[str, int]]:
     bucket_order = buckets or BUCKET_ORDER
     reviews = _read_reviews(review_db, only_reviewed=only_reviewed)
@@ -611,6 +890,21 @@ def build_plot(
     cmd = _compute_cmd_coordinates(candidates)
     plot_df = cmd.merge(reviews, on="candidate_id", how="left")
     plot_df["review_cmd_bucket"] = plot_df.apply(_assign_bucket, axis=1)
+    plot_df = _apply_cmd_mode(plot_df, cmd_mode)
+    show_errorbars = with_isochrones if show_errorbars is None else show_errorbars
+
+    mist_grid = None
+    if with_isochrones:
+        mist_grid = load_mist_grid(isochrone_grid)
+        plot_df = estimate_cmd_masses(
+            plot_df,
+            mist_grid,
+            color_col="cmd_plot_color",
+            mag_col="cmd_plot_mag",
+            color_err_col="cmd_plot_color_err",
+            mag_err_col="cmd_plot_mag_err",
+            ages_myr=isochrone_ages_myr,
+        )
 
     plottable_mask = _plottable_mask(plot_df)
     selected_mask = plot_df["review_cmd_bucket"].isin(bucket_order)
@@ -636,7 +930,23 @@ def build_plot(
             (bucket_mask & plot_df["cmd_coordinate_source"].isin(HOLLOW_CMD_SOURCES) & plottable_mask).sum()
         )
 
-    _plot_cmd(plot_df, output_path, bucket_order=bucket_order, background_style=background_style, bg_path=bg_path)
+    if with_isochrones:
+        mass_mask = selected_mask & plottable_mask & plot_df["cmd_mass_best"].notna()
+        counts["selected_mass_estimates"] = int(mass_mask.sum())
+
+    _plot_cmd(
+        plot_df,
+        output_path,
+        bucket_order=bucket_order,
+        background_style=background_style,
+        bg_path=bg_path,
+        cmd_mode=cmd_mode,
+        mist_grid=mist_grid,
+        with_isochrones=with_isochrones,
+        isochrone_ages_myr=isochrone_ages_myr,
+        mass_labels=mass_labels,
+        show_errorbars=bool(show_errorbars),
+    )
     csv_path = output_path.with_suffix(".csv")
     plot_df.loc[selected_mask].sort_values(["review_cmd_bucket", "candidate_id"]).to_csv(csv_path, index=False)
     return plot_df, counts
@@ -675,6 +985,54 @@ def parse_args() -> argparse.Namespace:
         default=GAIA_BG_PATH,
         help="Path to the Gaia parquet file to use for the background.",
     )
+    parser.add_argument(
+        "--cmd-mode",
+        choices=("dereddened", "observed"),
+        default=DEFAULT_CMD_MODE,
+        help=(
+            "CMD coordinates for the selected candidates. Use 'dereddened' for "
+            "MIST comparison and mass estimates; use 'observed' for raw Gaia CMD axes."
+        ),
+    )
+    parser.add_argument(
+        "--with-isochrones",
+        action="store_true",
+        help="Overlay MIST Gaia isochrones/mass tracks and write nearest-track mass estimates.",
+    )
+    parser.add_argument(
+        "--isochrone-grid",
+        type=Path,
+        default=MIST_GRID_PATH,
+        help="Path to the compact MIST Gaia isochrone grid.",
+    )
+    parser.add_argument(
+        "--isochrone-ages-myr",
+        nargs="+",
+        type=float,
+        default=list(DEFAULT_ISOCHRONE_AGES_MYR),
+        help="MIST isochrone ages to plot and use for mass estimates, in Myr.",
+    )
+    parser.add_argument(
+        "--mass-labels",
+        nargs="+",
+        type=float,
+        default=list(DEFAULT_MASS_LABELS),
+        help="Fixed masses to draw as tracks through the requested isochrone ages.",
+    )
+    errorbar_group = parser.add_mutually_exclusive_group()
+    errorbar_group.add_argument(
+        "--show-errorbars",
+        dest="show_errorbars",
+        action="store_true",
+        default=None,
+        help="Draw propagated CMD uncertainty bars on candidate points.",
+    )
+    errorbar_group.add_argument(
+        "--hide-errorbars",
+        dest="show_errorbars",
+        action="store_false",
+        help="Suppress CMD uncertainty bars, even when plotting isochrones.",
+    )
     return parser.parse_args()
 
 
@@ -700,6 +1058,12 @@ def main() -> None:
         only_reviewed=not args.include_unreviewed,
         background_style=args.background_style,
         bg_path=args.gaia_bg,
+        cmd_mode=args.cmd_mode,
+        with_isochrones=args.with_isochrones,
+        isochrone_grid=args.isochrone_grid,
+        isochrone_ages_myr=args.isochrone_ages_myr,
+        mass_labels=args.mass_labels,
+        show_errorbars=args.show_errorbars,
     )
     print(f"Wrote {output}")
     print(f"Wrote {output.with_suffix('.pdf')}")
