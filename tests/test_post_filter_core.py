@@ -187,6 +187,10 @@ def test_apply_filters_periodicity_checks_only_prereq_passers(monkeypatch: pytes
         seen["paths"] = list(df["lc_path"].astype(str))
         seen["kwargs"] = dict(_kwargs)
         out = df.copy()
+        out["periodicity_period"] = 2.5
+        out["periodicity_method"] = "pdm"
+        out["periodicity_bootstrap_sig"] = 0.2
+        out["periodicity_is_significant"] = False
         out["lsp_power"] = 0.42
         out["lsp_period"] = 2.5
         out["lsp_bootstrap_sig"] = 0.2
@@ -228,7 +232,10 @@ def test_apply_filters_periodicity_checks_only_prereq_passers(monkeypatch: pytes
     assert seen["paths"] == ["pass.csv"]
     assert seen["kwargs"]["pdm_method"] == "plavchan"
     out_by_path = out.set_index("lc_path")
+    assert float(out_by_path.loc["pass.csv", "periodicity_period"]) == 2.5
+    assert out_by_path.loc["pass.csv", "periodicity_method"] == "pdm"
     assert float(out_by_path.loc["pass.csv", "lsp_period"]) == 2.5
+    assert pd.isna(out_by_path.loc["prefail.csv", "periodicity_period"])
     assert pd.isna(out_by_path.loc["prefail.csv", "lsp_period"])
     assert int(out_by_path.loc["pass.csv", "failed_periodicity"]) == 0
     assert int(out_by_path.loc["prefail.csv", "failed_periodicity"]) == 0
@@ -240,6 +247,10 @@ def test_apply_filters_periodicity_reject_only_marks_checked_rows(monkeypatch: p
     def _fake_validate_periodicity(df: pd.DataFrame, **_kwargs) -> pd.DataFrame:
         seen["paths"] = list(df["lc_path"].astype(str))
         out = df.copy()
+        out["periodicity_period"] = 1.5
+        out["periodicity_method"] = "pdm"
+        out["periodicity_bootstrap_sig"] = 1e-4
+        out["periodicity_is_significant"] = True
         out["lsp_power"] = 0.5
         out["lsp_period"] = 1.5
         out["lsp_bootstrap_sig"] = 1e-4
@@ -292,6 +303,10 @@ def test_apply_filters_periodicity_all_candidates_overrides_prereq_mask(monkeypa
     def _fake_validate_periodicity(df: pd.DataFrame, **_kwargs) -> pd.DataFrame:
         seen["paths"] = list(df["lc_path"].astype(str))
         out = df.copy()
+        out["periodicity_period"] = 2.5
+        out["periodicity_method"] = "pdm"
+        out["periodicity_bootstrap_sig"] = 0.2
+        out["periodicity_is_significant"] = False
         out["lsp_power"] = 0.42
         out["lsp_period"] = 2.5
         out["lsp_bootstrap_sig"] = 0.2
@@ -333,6 +348,8 @@ def test_apply_filters_periodicity_all_candidates_overrides_prereq_mask(monkeypa
 
     assert seen["paths"] == ["pass.csv", "prefail.csv"]
     out_by_path = out.set_index("lc_path")
+    assert float(out_by_path.loc["pass.csv", "periodicity_period"]) == 2.5
+    assert float(out_by_path.loc["prefail.csv", "periodicity_period"]) == 2.5
     assert float(out_by_path.loc["pass.csv", "lsp_period"]) == 2.5
     assert float(out_by_path.loc["prefail.csv", "lsp_period"]) == 2.5
 
@@ -354,6 +371,10 @@ def test_validate_periodicity_uses_local_bundle_lightcurves(
         return {
             "lc_path": original_path,
             "resolved_path": resolved_path,
+            "periodicity_period": 2.5,
+            "periodicity_method": "pdm",
+            "periodicity_bootstrap_sig": 1e-3,
+            "periodicity_is_significant": True,
             "lsp_power": np.nan,
             "lsp_period": 2.5,
             "lsp_bootstrap_sig": 1e-3,
@@ -369,8 +390,6 @@ def test_validate_periodicity_uses_local_bundle_lightcurves(
             "ce_snr": 6.0,
             "ce_bootstrap_sig": 2e-3,
             "ce_is_significant": True,
-            "periodicity_bootstrap_sig": 1e-3,
-            "periodicity_is_significant": True,
             "periodicity_is_rejected": True,
             "error": None,
         }
@@ -402,6 +421,8 @@ def test_validate_periodicity_uses_local_bundle_lightcurves(
     row = out.iloc[0]
     assert float(row["pdm_snr"]) == 7.0
     assert float(row["ce_snr"]) == 6.0
+    assert float(row["periodicity_period"]) == 2.5
+    assert row["periodicity_method"] == "pdm"
     assert float(row["lsp_period"]) == 2.5
 
 
@@ -468,6 +489,9 @@ def test_lsp_worker_aligns_simple_v_minus_g_median_offset(monkeypatch: pytest.Mo
         mag = captured[key]
         assert np.isclose(np.median(mag[:g_count]), np.median(mag[g_count:]), atol=1e-10)
     assert out["pdm_method"] == "plavchan"
+    assert out["periodicity_period"] == 4.0
+    assert out["periodicity_method"] == "pdm"
+    assert out["lsp_period"] == 4.0
     assert captured["file_ext"] == "dat3"
     assert np.isclose(expected_offset, 0.8, atol=5e-3)
 
@@ -489,10 +513,12 @@ def test_validate_periodicity_recomputes_stale_checkpoint_rows(
             {
                 "lc_path": "/data/poohbah/cluster/123.dat3",
                 "resolved_path": "/data/poohbah/cluster/123.dat3",
-                "lsp_period": np.nan,
-                "lsp_bootstrap_sig": np.nan,
+                "periodicity_period": np.nan,
+                "periodicity_method": "",
                 "periodicity_bootstrap_sig": np.nan,
                 "periodicity_is_significant": False,
+                "lsp_period": np.nan,
+                "lsp_bootstrap_sig": np.nan,
                 "periodicity_is_rejected": False,
                 "pdm_period": np.nan,
                 "pdm_min_theta": np.nan,
@@ -517,6 +543,10 @@ def test_validate_periodicity_recomputes_stale_checkpoint_rows(
         return {
             "lc_path": original_path,
             "resolved_path": resolved_path,
+            "periodicity_period": 3.5,
+            "periodicity_method": "pdm",
+            "periodicity_bootstrap_sig": 5e-4,
+            "periodicity_is_significant": True,
             "lsp_power": np.nan,
             "lsp_period": 3.5,
             "lsp_bootstrap_sig": 5e-4,
@@ -532,8 +562,6 @@ def test_validate_periodicity_recomputes_stale_checkpoint_rows(
             "ce_snr": 5.8,
             "ce_bootstrap_sig": 6e-4,
             "ce_is_significant": True,
-            "periodicity_bootstrap_sig": 5e-4,
-            "periodicity_is_significant": True,
             "periodicity_is_rejected": True,
             "error": None,
         }
@@ -564,7 +592,11 @@ def test_validate_periodicity_recomputes_stale_checkpoint_rows(
     row = out.iloc[0]
     assert float(row["pdm_snr"]) == 5.5
     assert float(row["ce_snr"]) == 5.8
+    assert float(row["periodicity_period"]) == 3.5
+    assert row["periodicity_method"] == "pdm"
     assert bool(row["periodic_flag"]) is True
     saved = pd.read_parquet(checkpoint_path)
     assert int(saved["error"].notna().sum()) == 0
     assert saved.loc[0, "pdm_method"] == "plavchan"
+    assert float(saved.loc[0, "periodicity_period"]) == 3.5
+    assert saved.loc[0, "periodicity_method"] == "pdm"

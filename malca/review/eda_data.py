@@ -23,6 +23,10 @@ BEST_FIELDS = [
     "period_consensus_agree",
     "phase_quality_score",
     "periodicity_score",
+    "periodicity_is_significant",
+    "periodicity_bootstrap_sig",
+    "periodicity_period",
+    "periodicity_method",
     "lsp_is_significant",
     "lsp_bootstrap_sig",
     "lsp_period",
@@ -228,6 +232,8 @@ def add_eda_columns(frame: pd.DataFrame) -> pd.DataFrame:
         "period_consensus_days",
         "phase_quality_score",
         "periodicity_score",
+        "periodicity_bootstrap_sig",
+        "periodicity_period",
         "lsp_bootstrap_sig",
         "lsp_power",
         "lsp_period",
@@ -263,8 +269,9 @@ def add_eda_columns(frame: pd.DataFrame) -> pd.DataFrame:
         & bool_series(out, "period_consensus_agree")
         & (numeric_series(out, "period_n_sources").fillna(0) >= 2)
     )
+    periodicity_significant = bool_series(out, "periodicity_is_significant") | bool_series(out, "lsp_is_significant")
     out["strong_native_period"] = (
-        bool_series(out, "lsp_is_significant")
+        periodicity_significant
         & (~bool_series(out, "lsp_is_alias"))
         & (numeric_series(out, "phase_quality_score").fillna(-np.inf) >= 0.5)
     )

@@ -148,6 +148,10 @@ GAIA_PM_MERGE_COLS = (
 )
 
 PERIODICITY_MERGE_COLS = (
+    "periodicity_period",
+    "periodicity_method",
+    "periodicity_bootstrap_sig",
+    "periodicity_is_significant",
     "lsp_power",
     "lsp_period",
     "lsp_bootstrap_sig",
@@ -164,8 +168,6 @@ PERIODICITY_MERGE_COLS = (
     "ce_snr",
     "ce_bootstrap_sig",
     "ce_is_significant",
-    "periodicity_bootstrap_sig",
-    "periodicity_is_significant",
     "periodicity_score",
     "periodic_flag",
 )
@@ -962,7 +964,10 @@ def _checkpoint_result_is_usable(
         catalog_match = _to_bool_mask(pd.Series([row.get("catalog_match")]))[0]
     catalog_period = _finite_float(row.get("catalog_period"))
     if catalog_match and catalog_period is not None and catalog_period > 0:
-        return _finite_float(result.get("lsp_period")) is not None
+        return (
+            _finite_float(result.get("periodicity_period")) is not None
+            or _finite_float(result.get("lsp_period")) is not None
+        )
 
     cached_pdm_method = str(result.get("pdm_method") or "").strip().lower()
     if cached_pdm_method != str(expected_pdm_method).strip().lower():
@@ -989,6 +994,7 @@ def _checkpoint_result_is_usable(
         "ce_min_entropy",
         "ce_snr",
         "ce_bootstrap_sig",
+        "periodicity_period",
         "periodicity_bootstrap_sig",
         "lsp_period",
         "lsp_bootstrap_sig",
@@ -1076,12 +1082,21 @@ def _lsp_worker(args: tuple) -> dict:
         is_rejected = pdm_rej or ce_rej
 
         best_period = pdm_result.get("pdm_period", np.nan)
+        periodicity_method = "pdm"
         if np.isfinite(ce_boot_sig) and (not np.isfinite(pdm_boot_sig) or ce_boot_sig < pdm_boot_sig):
             best_period = ce_result.get("ce_period", np.nan)
+            periodicity_method = "ce"
+        elif not np.isfinite(best_period) and np.isfinite(ce_result.get("ce_period", np.nan)):
+            best_period = ce_result.get("ce_period", np.nan)
+            periodicity_method = "ce"
 
         return {
             "lc_path": original_path,
             "resolved_path": path_str,
+            "periodicity_period": best_period,
+            "periodicity_method": periodicity_method,
+            "periodicity_bootstrap_sig": periodicity_bootstrap_sig,
+            "periodicity_is_significant": periodicity_is_significant,
             "lsp_power": np.nan,
             "lsp_period": best_period,
             "lsp_bootstrap_sig": periodicity_bootstrap_sig,
@@ -1098,8 +1113,6 @@ def _lsp_worker(args: tuple) -> dict:
             "ce_snr": ce_result["ce_snr"],
             "ce_bootstrap_sig": ce_result.get("ce_bootstrap_sig", np.nan),
             "ce_is_significant": bool(ce_result.get("ce_is_significant", False)),
-            "periodicity_bootstrap_sig": periodicity_bootstrap_sig,
-            "periodicity_is_significant": periodicity_is_significant,
             "periodicity_is_rejected": is_rejected,
             "error": None,
         }
@@ -1107,6 +1120,13 @@ def _lsp_worker(args: tuple) -> dict:
         return {
             "lc_path": original_path,
             "resolved_path": path_str,
+            "periodicity_period": np.nan,
+            "periodicity_method": "",
+            "lsp_power": np.nan,
+            "lsp_period": np.nan,
+            "lsp_bootstrap_sig": np.nan,
+            "lsp_is_alias": False,
+            "lsp_is_significant": False,
             "pdm_method": str(pdm_method),
             "pdm_period": np.nan,
             "pdm_min_theta": np.nan,
@@ -1244,9 +1264,13 @@ def validate_periodicity(
                     skipped_consensus[p] = {
                         "lc_path": p,
                         "resolved_path": None,
+                        "periodicity_period": period,
+                        "periodicity_method": str(row.get("period_primary_source") or row.get("catalog_source") or "catalog_consensus"),
+                        "periodicity_bootstrap_sig": 0.0,
+                        "periodicity_is_significant": True,
                         "lsp_power": np.nan,  # Not computed
-                        "lsp_period": period, # Trust catalog period
-                        "lsp_bootstrap_sig": 0.0, # Treat as highly significant
+                        "lsp_period": period,  # Deprecated alias for compatibility
+                        "lsp_bootstrap_sig": 0.0,  # Deprecated alias for compatibility
                         "lsp_is_alias": False,
                         "lsp_is_significant": True,
                         "pdm_method": str(pdm_method),
@@ -1270,6 +1294,13 @@ def validate_periodicity(
                 prefilled_errors.append({
                     "lc_path": p,
                     "resolved_path": None,
+                    "periodicity_period": np.nan,
+                    "periodicity_method": "",
+                    "lsp_power": np.nan,
+                    "lsp_period": np.nan,
+                    "lsp_bootstrap_sig": np.nan,
+                    "lsp_is_alias": False,
+                    "lsp_is_significant": False,
                     "pdm_method": str(pdm_method),
                     "pdm_period": np.nan,
                     "pdm_min_theta": np.nan,
@@ -1307,6 +1338,13 @@ def validate_periodicity(
                 prefilled_errors.append({
                     "lc_path": p,
                     "resolved_path": None,
+                    "periodicity_period": np.nan,
+                    "periodicity_method": "",
+                    "lsp_power": np.nan,
+                    "lsp_period": np.nan,
+                    "lsp_bootstrap_sig": np.nan,
+                    "lsp_is_alias": False,
+                    "lsp_is_significant": False,
                     "pdm_method": str(pdm_method),
                     "pdm_period": np.nan,
                     "pdm_min_theta": np.nan,
@@ -1398,6 +1436,8 @@ def validate_periodicity(
     bootstrap_significances = []
     is_alias = []
     is_significant = []
+    periodicity_periods = []
+    periodicity_methods = []
     
     pdm_methods = []
     pdm_periods = []
@@ -1420,8 +1460,15 @@ def validate_periodicity(
     
     for path_str in paths:
         result = all_results.get(path_str, {})
+        periodicity_period = result.get("periodicity_period", result.get("lsp_period", np.nan))
+        periodicity_method = str(result.get("periodicity_method") or "").strip()
+        if not periodicity_method and _finite_float(periodicity_period) is not None:
+            periodicity_method = "legacy_lsp"
+        periodicity_periods.append(periodicity_period)
+        periodicity_methods.append(periodicity_method)
+
         powers.append(result.get("lsp_power", np.nan))
-        periods.append(result.get("lsp_period", np.nan))
+        periods.append(periodicity_period)
         sig = result.get("periodicity_bootstrap_sig", result.get("lsp_bootstrap_sig", np.nan))
         bootstrap_significances.append(sig)
         alias_flag = result.get("lsp_is_alias", False)
@@ -1456,6 +1503,11 @@ def validate_periodicity(
         keep_flags.append(keep)
 
     df_out = df.copy()
+    df_out["periodicity_period"] = periodicity_periods
+    df_out["periodicity_method"] = periodicity_methods
+    df_out["periodicity_bootstrap_sig"] = periodicity_bootstrap_significances
+    df_out["periodicity_is_significant"] = periodicity_significant_flags
+
     df_out["lsp_power"] = powers
     df_out["lsp_period"] = periods
     df_out["lsp_bootstrap_sig"] = bootstrap_significances
@@ -1475,9 +1527,6 @@ def validate_periodicity(
     df_out["ce_bootstrap_sig"] = ce_bootstrap_significances
     df_out["ce_is_significant"] = ce_significant_flags
 
-    df_out["periodicity_bootstrap_sig"] = periodicity_bootstrap_significances
-    df_out["periodicity_is_significant"] = periodicity_significant_flags
-    
     df_out["periodicity_score"] = periodicity_scores
 
     periodic_flags = [not x for x in keep_flags]
@@ -1511,11 +1560,15 @@ def _save_checkpoint(checkpoint_file: Path, completed: dict, new_results: list) 
         clean_data.append({
             "lc_path": r["lc_path"],
             "resolved_path": r.get("resolved_path"),
+            "periodicity_period": r.get("periodicity_period", r.get("lsp_period", np.nan)),
+            "periodicity_method": r.get("periodicity_method", ""),
+            "periodicity_bootstrap_sig": r.get("periodicity_bootstrap_sig", r.get("lsp_bootstrap_sig", np.nan)),
+            "periodicity_is_significant": r.get("periodicity_is_significant", r.get("lsp_is_significant", False)),
             "lsp_power": r.get("lsp_power", np.nan),
-            "lsp_period": r.get("lsp_period", np.nan),
-            "lsp_bootstrap_sig": r.get("lsp_bootstrap_sig", np.nan),
+            "lsp_period": r.get("lsp_period", r.get("periodicity_period", np.nan)),
+            "lsp_bootstrap_sig": r.get("lsp_bootstrap_sig", r.get("periodicity_bootstrap_sig", np.nan)),
             "lsp_is_alias": r.get("lsp_is_alias", False),
-            "lsp_is_significant": r.get("lsp_is_significant", False),
+            "lsp_is_significant": r.get("lsp_is_significant", r.get("periodicity_is_significant", False)),
             "pdm_method": r.get("pdm_method", str(POST_FILTER_PDM_METHOD)),
             "pdm_period": r.get("pdm_period", np.nan),
             "pdm_min_theta": r.get("pdm_min_theta", np.nan),
@@ -1527,8 +1580,6 @@ def _save_checkpoint(checkpoint_file: Path, completed: dict, new_results: list) 
             "ce_snr": r.get("ce_snr", np.nan),
             "ce_bootstrap_sig": r.get("ce_bootstrap_sig", np.nan),
             "ce_is_significant": r.get("ce_is_significant", False),
-            "periodicity_bootstrap_sig": r.get("periodicity_bootstrap_sig", np.nan),
-            "periodicity_is_significant": r.get("periodicity_is_significant", False),
             "periodicity_is_rejected": r.get("periodicity_is_rejected", False),
             "error": r.get("error"),
         })
@@ -2051,11 +2102,13 @@ def annotate_phase_plot_candidates(
     out["phase_source"] = ""
     out["phase_quality_score"] = np.nan
 
-    if "lsp_period" not in out.columns or "lsp_bootstrap_sig" not in out.columns:
+    period_col = "periodicity_period" if "periodicity_period" in out.columns else "lsp_period"
+    sig_col = "periodicity_bootstrap_sig" if "periodicity_bootstrap_sig" in out.columns else "lsp_bootstrap_sig"
+    if period_col not in out.columns or sig_col not in out.columns:
         return out
 
-    period = pd.to_numeric(out["lsp_period"], errors="coerce")
-    sig = pd.to_numeric(out["lsp_bootstrap_sig"], errors="coerce")
+    period = pd.to_numeric(out[period_col], errors="coerce")
+    sig = pd.to_numeric(out[sig_col], errors="coerce")
 
     ready = period.notna() & np.isfinite(period) & (period > 0)
     ready &= sig.notna() & np.isfinite(sig) & (sig <= float(max_sig))
@@ -2081,7 +2134,11 @@ def annotate_phase_plot_candidates(
 
     out.loc[ready, "phase_plot_ready"] = True
     out.loc[ready, "phase_period_days"] = period[ready].astype(float)
-    out.loc[ready, "phase_source"] = "lsp"
+    if "periodicity_method" in out.columns and period_col == "periodicity_period":
+        method = out["periodicity_method"].fillna("").astype(str).str.strip()
+        out.loc[ready, "phase_source"] = method[ready].replace("", "periodicity")
+    else:
+        out.loc[ready, "phase_source"] = "lsp"
     out.loc[ready, "phase_quality_score"] = quality[ready].astype(float)
     return out
 

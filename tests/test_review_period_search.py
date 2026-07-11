@@ -135,13 +135,79 @@ def test_harmonic_selection_keeps_cadence_alias_flag_out_of_ranking() -> None:
     assert selected["alias_matches"] == [1.0]
 
 
+def test_find_period_arbitration_only_evaluates_base_and_shorter_harmonics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evaluated_periods: list[float] = []
+
+    def fake_score(_band_resid, period, *, alias_penalty=0.2):
+        evaluated_periods.append(float(period))
+        return {
+            "objective": 1.0,
+            "raw_objective": 1.0,
+            "scatter_ratio": 1.0,
+            "lag_phase": 0.0,
+            "alias_flag": False,
+            "alias_matches": [],
+        }
+
+    monkeypatch.setattr(period_search, "_score_period_harmonic_candidate", fake_score)
+
+    selected_period, factor, _diag = period_search.arbitrate_harmonic_period(
+        _band_dfs(),
+        2.0,
+        min_period=0.1,
+        max_period=10.0,
+    )
+
+    assert selected_period == pytest.approx(2.0)
+    assert factor == pytest.approx(1.0)
+    assert evaluated_periods == pytest.approx([2.0, 1.0, 2.0 / 3.0, 0.5])
+    assert all(period <= 2.0 for period in evaluated_periods)
+
+
+def test_find_period_arbitration_cannot_promote_to_longer_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_score(_band_resid, period, *, alias_penalty=0.2):
+        if float(period) > 2.0:
+            score = 0.1
+        elif np.isclose(float(period), 2.0):
+            score = 1.0
+        else:
+            score = 1.05
+        return {
+            "objective": score,
+            "raw_objective": score,
+            "scatter_ratio": score,
+            "lag_phase": 0.0,
+            "alias_flag": False,
+            "alias_matches": [],
+        }
+
+    monkeypatch.setattr(period_search, "_score_period_harmonic_candidate", fake_score)
+
+    selected_period, factor, diag = period_search.arbitrate_harmonic_period(
+        _band_dfs(),
+        2.0,
+        min_period=0.1,
+        max_period=10.0,
+    )
+
+    assert selected_period == pytest.approx(2.0)
+    assert factor == pytest.approx(1.0)
+    assert diag["base_objective"] == pytest.approx(1.0)
+
+
 def test_review_stored_period_ignores_raw_periodogram_outputs() -> None:
     payload = {
         "candidate_id": "cand-1",
+        "periodicity_period": 1.5,
         "lsp_period": 2.0,
         "pdm_period": 3.0,
         "ce_period": 4.0,
         "stats_variability_lomb_scargle_best_period_days": 5818.14746,
+        "vsx_period": 9.0,
     }
 
     assert period_search.has_external_period(payload) is False

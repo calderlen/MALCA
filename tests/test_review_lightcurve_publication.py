@@ -528,7 +528,7 @@ def test_interactive_phase_panel_labels_pending_auto_pdm_without_period(tmp_path
     assert any(str(annotation.text).startswith("Auto PDM is running") for annotation in result["figure"].layout.annotations)
 
 
-def test_interactive_phase_panel_uses_vsx_while_harmonic_check_pending(tmp_path: Path) -> None:
+def test_interactive_phase_panel_ignores_direct_vsx_while_harmonic_check_pending(tmp_path: Path) -> None:
     lc_path = tmp_path / "123.dat2"
     _write_dat2(lc_path)
     payload = {
@@ -560,9 +560,8 @@ def test_interactive_phase_panel_uses_vsx_while_harmonic_check_pending(tmp_path:
     )
 
     assert result["status"] == "ok"
-    assert "P=9.00000 d" in result["status_message"]
-    assert "source=vsx_period" in result["status_message"]
-    assert not any("auto harmonic check is running" in warning.lower() for warning in result["warnings"])
+    assert result["status_message"] == "Auto period search: searching..."
+    assert any("auto period search is running" in warning.lower() for warning in result["warnings"])
 
 
 def test_interactive_phase_panel_uses_completed_harmonic_check_over_vsx(tmp_path: Path) -> None:

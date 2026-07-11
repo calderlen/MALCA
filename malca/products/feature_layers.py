@@ -90,6 +90,10 @@ IDENTITY_AND_BOOKKEEPING_COLUMNS = frozenset(_IDENTITY_AND_BOOKKEEPING_COLUMNS)
 
 _LC_EXACT_COLUMNS = {
     "periodicity_score",
+    "periodicity_period",
+    "periodicity_method",
+    "periodicity_bootstrap_sig",
+    "periodicity_is_significant",
     "lsp_bootstrap_sig",
     "lsp_power",
     "lsp_period",
@@ -105,8 +109,6 @@ _LC_EXACT_COLUMNS = {
     "ce_snr",
     "ce_bootstrap_sig",
     "ce_is_significant",
-    "periodicity_bootstrap_sig",
-    "periodicity_is_significant",
     "phase_plot_ready",
     "phase_period_days",
     "phase_source",

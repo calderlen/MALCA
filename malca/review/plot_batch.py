@@ -98,10 +98,11 @@ def load_passing_candidates(
             print("Warning: 'lsp_power' column not found; skipping --min-lsp-power")
 
     if max_lsp_bootstrap_sig is not None:
-        if "lsp_bootstrap_sig" in df.columns:
-            df = df[df["lsp_bootstrap_sig"].fillna(np.inf) <= float(max_lsp_bootstrap_sig)].copy()
+        sig_col = "periodicity_bootstrap_sig" if "periodicity_bootstrap_sig" in df.columns else "lsp_bootstrap_sig"
+        if sig_col in df.columns:
+            df = df[df[sig_col].fillna(np.inf) <= float(max_lsp_bootstrap_sig)].copy()
         else:
-            print("Warning: 'lsp_bootstrap_sig' column not found; skipping --max-lsp-bootstrap-sig")
+            print("Warning: no periodicity bootstrap significance column found; skipping --max-lsp-bootstrap-sig")
 
     if min_periodicity_score is not None:
         if "periodicity_score" in df.columns:
@@ -339,6 +340,8 @@ def plot_passing_candidates(
 
         phase_ready_raw = row.get("phase_plot_ready", False)
         phase_period_raw = row.get("phase_period_days", np.nan)
+        if (pd.isna(phase_period_raw) or phase_period_raw is None) and ("periodicity_period" in row.index):
+            phase_period_raw = row.get("periodicity_period", np.nan)
         if (pd.isna(phase_period_raw) or phase_period_raw is None) and ("lsp_period" in row.index):
             phase_period_raw = row.get("lsp_period", np.nan)
         try:
@@ -359,12 +362,16 @@ def plot_passing_candidates(
             annotations["RUWE"] = f"{row['ruwe']:.2f}"
         if "catalog_match" in row.index:
             annotations["periodic"] = "Yes" if row["catalog_match"] else "No"
-        if "lsp_period" in row.index and pd.notna(row["lsp_period"]):
-            annotations["LSP_period_d"] = f"{row['lsp_period']:.4f}"
+        if "periodicity_period" in row.index and pd.notna(row["periodicity_period"]):
+            annotations["periodicity_period_d"] = f"{row['periodicity_period']:.4f}"
+        elif "lsp_period" in row.index and pd.notna(row["lsp_period"]):
+            annotations["legacy_lsp_period_d"] = f"{row['lsp_period']:.4f}"
         if "lsp_power" in row.index and pd.notna(row["lsp_power"]):
             annotations["LSP_power"] = f"{row['lsp_power']:.4f}"
-        if "lsp_bootstrap_sig" in row.index and pd.notna(row["lsp_bootstrap_sig"]):
-            annotations["LSP_boot_sig"] = f"{row['lsp_bootstrap_sig']:.4g}"
+        if "periodicity_bootstrap_sig" in row.index and pd.notna(row["periodicity_bootstrap_sig"]):
+            annotations["periodicity_boot_sig"] = f"{row['periodicity_bootstrap_sig']:.4g}"
+        elif "lsp_bootstrap_sig" in row.index and pd.notna(row["lsp_bootstrap_sig"]):
+            annotations["legacy_lsp_boot_sig"] = f"{row['lsp_bootstrap_sig']:.4g}"
         if "periodicity_score" in row.index and pd.notna(row["periodicity_score"]):
             annotations["periodicity_score"] = f"{row['periodicity_score']:.3f}"
 

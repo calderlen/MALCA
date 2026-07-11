@@ -11,16 +11,8 @@ BAND_LABELS: dict[int, str] = {0: "g", 1: "V"}
 _PERIOD_SOURCE_KEYS: tuple[tuple[str, str], ...] = (
     ("phase_period_days", "phase_period_days"),
     ("period_consensus_days", "period_consensus_days"),
-    ("vsx_period", "vsx_period"),
-    ("period_vsx_days", "period_vsx_days"),
-    ("asassn_var_period", "asassn_var_period"),
-    ("period_asassn_var_days", "period_asassn_var_days"),
-    ("gaia_eb_period", "gaia_eb_period"),
-    ("period_gaia_eb_days", "period_gaia_eb_days"),
-    ("ztf_var_period", "ztf_var_period"),
-    ("period_ztf_periodic_days", "period_ztf_periodic_days"),
-    ("catalog_period", "catalog_period"),
     ("pre_periodicity_selected_period", "pre_periodicity_selected_period"),
+    ("periodicity_period", "periodicity_period"),
     ("lsp_period", "lsp_period"),
     ("pdm_period", "pdm_period"),
     ("ce_period", "ce_period"),
@@ -28,6 +20,7 @@ _PERIOD_SOURCE_KEYS: tuple[tuple[str, str], ...] = (
 )
 
 _PERIODOGRAM_PERIOD_KEYS = {
+    "periodicity_period",
     "lsp_period",
     "pdm_period",
     "ce_period",

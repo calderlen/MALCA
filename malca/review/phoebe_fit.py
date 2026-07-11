@@ -147,7 +147,8 @@ def infer_period_days(
         ("period_ztf_periodic_period", "ztf"),
         ("period_ztf_periodic_period_days", "ztf"),
         ("period_consensus_days", "period_consensus"),
-        ("lsp_period", "lomb_scargle"),
+        ("periodicity_period", "periodicity"),
+        ("lsp_period", "legacy_lsp"),
         ("stats_variability_lomb_scargle_best_period_days", "lomb_scargle"),
         ("phase_period_days", "phase"),
     )

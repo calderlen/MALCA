@@ -22,11 +22,8 @@ from malca.review.interactive_plot import (
 
 REVIEW_PERIOD_HARMONIC_FACTORS: tuple[float, ...] = (
     1.0,
-    2.0,
     0.5,
-    3.0,
     1.0 / 3.0,
-    4.0,
     0.25,
 )
 REVIEW_HARMONIC_CHECK_DIVISORS: tuple[float, ...] = (1.0, 2.0, 3.0, 4.0)

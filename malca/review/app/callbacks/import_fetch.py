@@ -473,9 +473,9 @@ def _pipeline_status_chip_elements(candidate_id) -> list:
 
         periodicity_sig_cols = (
             'periodicity_score',
-            'lsp_period',
-            'lsp_power',
-            'lsp_is_significant',
+            'periodicity_period',
+            'periodicity_method',
+            'periodicity_is_significant',
         )
         periodicity_present = sum(
             1
