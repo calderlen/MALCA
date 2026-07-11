@@ -1,0 +1,21 @@
+name,l_deg,b_deg,radius_deg,group,distance_pc,notes,source
+Taurus,170.0,-15.0,12.0,Nearby clouds,140,Broad Taurus-Auriga visual footprint,Approximate editable mask for visualization
+Perseus,160.0,-20.0,8.0,Nearby clouds,300,Broad Perseus molecular cloud footprint,Approximate editable mask for visualization
+Orion A,210.0,-19.0,6.0,Orion complex,400,Broad Orion A footprint,Approximate editable mask for visualization
+Orion B,205.0,-14.0,5.0,Orion complex,400,Broad Orion B footprint,Approximate editable mask for visualization
+lambda Orionis,195.0,-12.0,6.0,Orion complex,400,Broad lambda Orionis ring footprint,Approximate editable mask for visualization
+Mon R2,214.0,-12.0,4.0,Orion-Monoceros,830,Broad Mon R2 footprint,Approximate editable mask for visualization
+Rosette,207.0,-2.0,4.5,Orion-Monoceros,1500,Broad Rosette molecular cloud footprint,Approximate editable mask for visualization
+Ophiuchus,353.0,16.0,7.0,Nearby clouds,140,Broad rho Ophiuchi and L1688/L1689 footprint,Approximate editable mask for visualization
+Lupus,338.0,15.0,8.0,Nearby clouds,160,Broad Lupus cloud complex footprint,Approximate editable mask for visualization
+Chamaeleon,300.0,-16.0,8.0,Nearby clouds,190,Broad Chamaeleon complex footprint,Approximate editable mask for visualization
+Corona Australis,0.0,-18.0,4.0,Nearby clouds,150,Broad Corona Australis footprint,Approximate editable mask for visualization
+Aquila-Serpens,30.0,5.0,8.0,Rift and inner clouds,430,Broad Aquila Rift and Serpens footprint,Approximate editable mask for visualization
+Cepheus,110.0,15.0,12.0,Northern clouds,800,Broad Cepheus cloud complex footprint,Approximate editable mask for visualization
+Cygnus X,80.0,1.0,8.0,Massive complexes,1400,Broad Cygnus X footprint,Approximate editable mask for visualization
+Carina,287.0,-1.0,7.0,Massive complexes,2300,Broad Carina nebula complex footprint,Approximate editable mask for visualization
+Vela,265.0,-2.0,8.0,Massive complexes,700,Broad Vela star-forming complex footprint,Approximate editable mask for visualization
+W3-W4-W5,135.0,1.0,7.0,Massive complexes,2000,Broad W3 W4 W5 footprint,Approximate editable mask for visualization
+Lagoon-Trifid,7.0,-1.0,4.5,Inner galaxy,1300,Broad M8 M20 footprint,Approximate editable mask for visualization
+Eagle-Omega,17.0,0.0,5.0,Inner galaxy,2000,Broad M16 M17 footprint,Approximate editable mask for visualization
+NGC 6334-6357,352.0,1.0,5.0,Inner galaxy,1700,Broad NGC 6334 and NGC 6357 footprint,Approximate editable mask for visualization

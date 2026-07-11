@@ -76,3 +76,4 @@ malca/reproduction/
 malca/notebooks/**/output/
 
 .env
+data/dustmaps/
