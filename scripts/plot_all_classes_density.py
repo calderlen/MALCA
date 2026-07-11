@@ -1,10 +1,13 @@
 import os
 import sqlite3
 import json
+from pathlib import Path
 import pandas as pd
 import numpy as np
 import healpy as hp
 import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
+from matplotlib.colors import LogNorm
 from malca.plotting.lightcurve_publication import apply_publication_rcparams
 
 # Apply publication LaTeX font and style globally
@@ -19,6 +22,90 @@ plt.rcParams.update({
 })
 from astropy.coordinates import SkyCoord
 from dustmaps.sfd import SFDQuery
+import astropy.units as u
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DUSTMAPS_DIR = REPO_ROOT / "data" / "dustmaps"
+SFD_DIR = DUSTMAPS_DIR / "sfd"
+DUST_GRID_N_L = 2880
+DUST_GRID_N_B = 1440
+
+
+def _perceptual_gray_cmap(name="dust_perceptual_gray", lstar_min=0.0, lstar_max=100.0):
+    """Neutral grayscale with roughly uniform steps in CIE L* lightness."""
+    lstar = np.linspace(lstar_max, lstar_min, 256)
+    y = np.where(lstar > 8.0, ((lstar + 16.0) / 116.0) ** 3, lstar / 903.3)
+    srgb = np.where(y <= 0.0031308, 12.92 * y, 1.055 * np.power(y, 1.0 / 2.4) - 0.055)
+    srgb = np.clip(srgb, 0.0, 1.0)
+    colors = np.column_stack([srgb, srgb, srgb, np.ones_like(srgb)])
+    return LinearSegmentedColormap.from_list(name, colors)
+
+
+DUST_CMAP = _perceptual_gray_cmap()
+
+
+def _project_cache_has_sfd():
+    return all((SFD_DIR / filename).exists() for filename in ("SFD_dust_4096_ngp.fits", "SFD_dust_4096_sgp.fits"))
+
+
+def _sfd_query():
+    if _project_cache_has_sfd():
+        return SFDQuery(map_dir=str(SFD_DIR))
+    return SFDQuery()
+
+
+def _dust_norm_from_ebv(ebv):
+    positive = np.asarray(ebv, dtype=float)
+    positive = positive[np.isfinite(positive) & (positive > 0.0)]
+    if positive.size == 0:
+        raise ValueError("Dust grid has no positive finite E(B-V) values to plot.")
+    vmin = max(float(np.nanpercentile(positive, 4.0)), 1.0e-3)
+    vmax = float(np.nanpercentile(positive, 99.5))
+    if vmax <= vmin:
+        vmax = vmin * 10.0
+    return LogNorm(vmin=vmin, vmax=vmax)
+
+
+def _make_matched_dust_grid(extinction_map):
+    x_edges = np.linspace(-180.0, 180.0, DUST_GRID_N_L + 1)
+    y_edges = np.linspace(-90.0, 90.0, DUST_GRID_N_B + 1)
+    x_centers = 0.5 * (x_edges[:-1] + x_edges[1:])
+    y_centers = 0.5 * (y_edges[:-1] + y_edges[1:])
+    xx, yy = np.meshgrid(x_centers, y_centers)
+    l_deg = xx % 360.0
+    b_deg = yy
+
+    if extinction_map == "sfd":
+        coords = SkyCoord(l=l_deg.ravel() * u.deg, b=b_deg.ravel() * u.deg, frame="galactic")
+        ebv = _sfd_query().query(coords).reshape(DUST_GRID_N_B, DUST_GRID_N_L)
+    else:
+        from dustmaps3d import dustmaps3d
+        distance_kpc = np.full(l_deg.size, 1000.0, dtype=float)
+        ebv_1d, *_ = dustmaps3d(l_deg.ravel(), b_deg.ravel(), distance_kpc)
+        ebv = np.asarray(ebv_1d, dtype=float).reshape(DUST_GRID_N_B, DUST_GRID_N_L)
+
+    return x_edges, y_edges, ebv
+
+
+def _draw_matched_dust_background(ax, extinction_map):
+    x_edges, y_edges, ebv = _make_matched_dust_grid(extinction_map)
+    masked_ebv = np.ma.masked_invalid(np.ma.masked_less_equal(np.asarray(ebv, dtype=float), 0.0))
+    return ax.pcolormesh(
+        -np.deg2rad(np.asarray(x_edges)[::-1]),
+        np.deg2rad(y_edges),
+        masked_ebv[:, ::-1],
+        shading="auto",
+        cmap=DUST_CMAP,
+        norm=_dust_norm_from_ebv(ebv),
+        alpha=1.0,
+        zorder=0,
+        rasterized=True,
+    )
+
+
+def _galactic_to_matched_mollweide(l_deg, b_deg):
+    l_wrapped = ((np.asarray(l_deg, dtype=float) + 180.0) % 360.0) - 180.0
+    return -np.deg2rad(l_wrapped), np.deg2rad(np.asarray(b_deg, dtype=float))
 
 def main():
     import argparse
@@ -38,8 +125,8 @@ def main():
     for cid, p_json in c.fetchall():
         p = json.loads(p_json)
         ext = p.get('external_stats', {})
-        ra = ext.get('ra_deg')
-        dec = ext.get('dec_deg')
+        ra = ext.get('ra_deg', p.get('ra_deg'))
+        dec = ext.get('dec_deg', p.get('dec_deg'))
         rows.append({'candidate_id': cid, 'ra': ra, 'dec': dec})
     df_coords = pd.DataFrame(rows)
     df_coords['candidate_id'] = df_coords['candidate_id'].astype(str)
@@ -68,47 +155,18 @@ def main():
     
     df_merged = df_merged.dropna(subset=['ra', 'dec'])
 
-    print("Evaluating SFD Dust Map...")
-    import astropy.units as u
+    print(f"Evaluating {args.extinction_map.upper()} Dust Map...")
     
     # Generate matplotlib mollweide grid
     fig, ax = plt.subplots(figsize=(7.0, 4.0), subplot_kw={'projection': 'mollweide'})
-    
-    lon_grid = np.linspace(-np.pi, np.pi, 3200)
-    lat_grid = np.linspace(-np.pi/2, np.pi/2, 1600)
-    Lon, Lat = np.meshgrid(lon_grid, lat_grid)
-    
-    # SkyCoord expects longitude to be positive, so we pass it as is and let Astropy wrap it
-    coords = SkyCoord(l=Lon*u.rad, b=Lat*u.rad, frame='galactic')
-    
-    if args.extinction_map == "sfd":
-        sfd = SFDQuery()
-        ebv = sfd(coords)
-    else:
-        from dustmaps3d import dustmaps3d
-        # Convert Lon (-pi to pi) to 0-360 degrees for dustmaps3d
-        lon_deg = np.degrees((Lon + 2*np.pi) % (2*np.pi)).flatten()
-        lat_deg = np.degrees(Lat).flatten()
-        # Query with a very large distance to get the maximum integrated column
-        ebv_1d, _, _, _ = dustmaps3d(lon_deg, lat_deg, np.ones_like(lon_deg) * 1000000)
-        ebv = np.array(ebv_1d).reshape(Lon.shape)
-
-    ebv[np.isnan(ebv)] = 0
-    ebv_log = np.log10(ebv + 0.1)
-    
-    ax.pcolormesh(
-        Lon, Lat, ebv_log,
-        cmap='Greys',
-        vmin=np.percentile(ebv_log, 5),
-        vmax=np.percentile(ebv_log, 99),
-        rasterized=True,
-        shading='auto',
-        zorder=0
-    )
+    _draw_matched_dust_background(ax, args.extinction_map)
     
     import matplotlib.patheffects as pe
     
     ax.grid(True, alpha=0.35, linestyle='--', linewidth=0.6)
+    tick_labels = np.arange(180, -181, -30)
+    ax.set_xticks(-np.deg2rad(tick_labels))
+    ax.set_xticklabels([f"{int(value)}°" for value in tick_labels])
     ax.set_xlabel(r'$\ell$ [$^\circ$]')
     ax.set_ylabel(r'$b$ [$^\circ$]')
     ax.set_title("")  # Removed plot title
@@ -147,8 +205,7 @@ def main():
         
         # Convert ICRS RA/Dec to Galactic l/b
         c = SkyCoord(ra=subset['ra'].values, dec=subset['dec'].values, unit='deg', frame='icrs')
-        l_rad = np.radians(((c.galactic.l.deg + 180.0) % 360.0) - 180.0)
-        b_rad = np.radians(c.galactic.b.deg)
+        l_rad, b_rad = _galactic_to_matched_mollweide(c.galactic.l.deg, c.galactic.b.deg)
             
         ax.scatter(
             l_rad, 

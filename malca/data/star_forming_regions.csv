@@ -1,21 +1,21 @@
-name,l_deg,b_deg,radius_deg,group,distance_pc,notes,source
-Taurus,170.0,-15.0,12.0,Nearby clouds,140,Broad Taurus-Auriga visual footprint,Approximate editable mask for visualization
-Perseus,160.0,-20.0,8.0,Nearby clouds,300,Broad Perseus molecular cloud footprint,Approximate editable mask for visualization
-Orion A,210.0,-19.0,6.0,Orion complex,400,Broad Orion A footprint,Approximate editable mask for visualization
-Orion B,205.0,-14.0,5.0,Orion complex,400,Broad Orion B footprint,Approximate editable mask for visualization
-lambda Orionis,195.0,-12.0,6.0,Orion complex,400,Broad lambda Orionis ring footprint,Approximate editable mask for visualization
-Mon R2,214.0,-12.0,4.0,Orion-Monoceros,830,Broad Mon R2 footprint,Approximate editable mask for visualization
-Rosette,207.0,-2.0,4.5,Orion-Monoceros,1500,Broad Rosette molecular cloud footprint,Approximate editable mask for visualization
-Ophiuchus,353.0,16.0,7.0,Nearby clouds,140,Broad rho Ophiuchi and L1688/L1689 footprint,Approximate editable mask for visualization
-Lupus,338.0,15.0,8.0,Nearby clouds,160,Broad Lupus cloud complex footprint,Approximate editable mask for visualization
-Chamaeleon,300.0,-16.0,8.0,Nearby clouds,190,Broad Chamaeleon complex footprint,Approximate editable mask for visualization
-Corona Australis,0.0,-18.0,4.0,Nearby clouds,150,Broad Corona Australis footprint,Approximate editable mask for visualization
-Aquila-Serpens,30.0,5.0,8.0,Rift and inner clouds,430,Broad Aquila Rift and Serpens footprint,Approximate editable mask for visualization
-Cepheus,110.0,15.0,12.0,Northern clouds,800,Broad Cepheus cloud complex footprint,Approximate editable mask for visualization
-Cygnus X,80.0,1.0,8.0,Massive complexes,1400,Broad Cygnus X footprint,Approximate editable mask for visualization
-Carina,287.0,-1.0,7.0,Massive complexes,2300,Broad Carina nebula complex footprint,Approximate editable mask for visualization
-Vela,265.0,-2.0,8.0,Massive complexes,700,Broad Vela star-forming complex footprint,Approximate editable mask for visualization
-W3-W4-W5,135.0,1.0,7.0,Massive complexes,2000,Broad W3 W4 W5 footprint,Approximate editable mask for visualization
-Lagoon-Trifid,7.0,-1.0,4.5,Inner galaxy,1300,Broad M8 M20 footprint,Approximate editable mask for visualization
-Eagle-Omega,17.0,0.0,5.0,Inner galaxy,2000,Broad M16 M17 footprint,Approximate editable mask for visualization
-NGC 6334-6357,352.0,1.0,5.0,Inner galaxy,1700,Broad NGC 6334 and NGC 6357 footprint,Approximate editable mask for visualization
+name,l_deg,b_deg,radius_deg,group,distance_pc,distance_min_pc,distance_max_pc,distance_interval_source,distance_interval_notes,notes,source
+Taurus,170.0,-15.0,12.0,Nearby clouds,140,120,185,Zucker2019 cloud and sightline distances,Average 141 pc and Taurus sightlines 129-170 pc with quoted uncertainties,Broad Taurus-Auriga visual footprint,Legacy editable seed window for footprint selection and labels
+Perseus,160.0,-20.0,8.0,Nearby clouds,300,220,380,Zucker2019 cloud and sightline distances,Average 294 pc and Perseus sightlines 234-347 pc with quoted uncertainties,Broad Perseus molecular cloud footprint,Legacy editable seed window for footprint selection and labels
+Orion A,210.0,-19.0,6.0,Orion complex,400,390,480,Zucker2019 cloud and sightline distances,Average 432 pc with Orion sightlines and literature spanning about 400-470 pc,Broad Orion A footprint,Legacy editable seed window for footprint selection and labels
+Orion B,205.0,-14.0,5.0,Orion complex,400,380,460,Zucker2019 cloud and sightline distances,Average 423 pc with about 21 pc systematic uncertainty,Broad Orion B footprint,Legacy editable seed window for footprint selection and labels
+lambda Orionis,195.0,-12.0,6.0,Orion complex,400,370,455,Zucker2019 cloud and sightline distances,Orion Lam average 402 pc and sightlines 393-426 pc with quoted uncertainties,Broad lambda Orionis ring footprint,Legacy editable seed window for footprint selection and labels
+Mon R2,214.0,-12.0,4.0,Orion-Monoceros,830,725,990,Zucker2019 cloud and sightline distances,Mon R2 sightlines span 767-943 pc with quoted uncertainties,Broad Mon R2 footprint,Legacy editable seed window for footprint selection and labels
+Rosette,207.0,-2.0,4.5,Orion-Monoceros,1500,1190,1490,Zucker2019 and Zucker2020 cloud distances,Rosette sightlines span 1261-1413 pc with quoted uncertainties,Broad Rosette molecular cloud footprint,Legacy editable seed window for footprint selection and labels
+Ophiuchus,353.0,16.0,7.0,Nearby clouds,140,100,180,Zucker2020 cloud distances,Ophiuchus components span 109-167 pc with quoted uncertainties,Broad rho Ophiuchi and L1688/L1689 footprint,Legacy editable seed window for footprint selection and labels
+Lupus,338.0,15.0,8.0,Nearby clouds,160,90,305,Zucker2020 cloud distances,Lupus sightlines span 108-239 pc with large component uncertainties,Broad Lupus cloud complex footprint,Legacy editable seed window for footprint selection and labels
+Chamaeleon,300.0,-16.0,8.0,Nearby clouds,190,140,240,Zucker2020 cloud distances,Chamaeleon sightlines span 161-210 pc with quoted uncertainties,Broad Chamaeleon complex footprint,Legacy editable seed window for footprint selection and labels
+Corona Australis,0.0,-18.0,4.0,Nearby clouds,150,130,185,Zucker2019 and Zucker2020 cloud distances,Average 151 pc and sightlines 147-165 pc with quoted uncertainties,Broad Corona Australis footprint,Legacy editable seed window for footprint selection and labels
+Aquila-Serpens,30.0,5.0,8.0,Rift and inner clouds,430,450,530,Zucker2019 cloud distances,Serpens-AqR average 484 pc and W40 sightline 487 pc with quoted uncertainties,Broad Aquila Rift and Serpens footprint,Legacy editable seed window for footprint selection and labels
+Cepheus,110.0,15.0,12.0,Northern clouds,800,315,1075,Zucker2019 and Zucker2020 cloud distances,Cepheus Near and Far averages 352 pc and 923 pc so the broad slab keeps both sourced components,Broad Cepheus cloud complex footprint,Legacy editable seed window for footprint selection and labels
+Cygnus X,80.0,1.0,8.0,Massive complexes,1400,720,1800,Zucker2020 cloud distances,CygnusX sightlines span 761-1622 pc with quoted uncertainties,Broad Cygnus X footprint,Legacy editable seed window for footprint selection and labels
+Carina,287.0,-1.0,7.0,Massive complexes,2300,2200,2850,Zucker2020 cloud distances,Carina sightlines span 2439-2558 pc with roughly 10 percent systematic uncertainties,Broad Carina nebula complex footprint,Legacy editable seed window for footprint selection and labels
+Vela,265.0,-2.0,8.0,Massive complexes,700,650,1050,Zucker2020 cloud distances and Massi2019 Vela Molecular Ridge context,Massi2019 uses 700 pc for the Vela Molecular Ridge and Zucker2020 Vela C sightlines span 866-965 pc,Broad Vela star-forming complex footprint,Legacy editable seed window for footprint selection and labels
+W3-W4-W5,135.0,1.0,7.0,Massive complexes,2000,1300,2420,Zucker2020 cloud distances,W3 W4 W5 sightlines span 1451-2184 pc with quoted uncertainties,Broad W3 W4 W5 footprint,Legacy editable seed window for footprint selection and labels
+Lagoon-Trifid,7.0,-1.0,4.5,Inner galaxy,1300,1120,1400,Zucker2020 cloud distances,Lagoon and M20 sightlines span 1184-1325 pc with quoted uncertainties,Broad M8 M20 footprint,Legacy editable seed window for footprint selection and labels
+Eagle-Omega,17.0,0.0,5.0,Inner galaxy,2000,1400,1950,Zucker2020 cloud distances,M16 and M17 sightlines span 1488-1739 pc with quoted uncertainties,Broad M16 M17 footprint,Legacy editable seed window for footprint selection and labels
+NGC 6334-6357,352.0,1.0,5.0,Inner galaxy,1700,1590,1750,Povich2026 Gaia DR3 G352 complex,Mean heliocentric distance 1670 plus or minus 80 pc for the connected NGC 6334 and NGC 6357 complex,Broad NGC 6334 and NGC 6357 footprint,Legacy editable seed window for footprint selection and labels

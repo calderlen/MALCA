@@ -1344,7 +1344,9 @@ def validate_periodicity(
     if workers > 1 and len(worker_args) > 0:
         # Parallel execution
         actual_workers = min(workers, cpu_count(), len(worker_args))
-        chunksize = max(1, len(worker_args) // (actual_workers * 4))
+        # Periodicity validation is expensive enough that large multiprocessing
+        # chunks can hide progress and delay checkpoints for many hours.
+        chunksize = 1
 
         with Pool(processes=actual_workers, maxtasksperchild=50) as pool:
             iterator = pool.imap_unordered(_lsp_worker, worker_args, chunksize=chunksize)
@@ -1352,7 +1354,7 @@ def validate_periodicity(
                 iterator = tqdm(iterator, total=len(worker_args), desc="Periodicity validation")
             
             checkpoint_batch = []
-            checkpoint_interval = max(100, len(worker_args) // 20)  # Save every 5%
+            checkpoint_interval = 100
             
             for result in iterator:
                 new_results.append(result)

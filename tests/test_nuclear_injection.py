@@ -157,6 +157,90 @@ def test_score_injected_lightcurve_uses_template_features_and_context(tmp_path: 
     assert scored.loc[0, "nuclear_primary_hypothesis"] == "tde"
 
 
+def test_load_manifest_joins_standard_lc_manifest_to_asassn_index(tmp_path: Path) -> None:
+    dat_path = tmp_path / "1001.dat2"
+    write_dat2_table(_light_curve(), dat_path)
+    missing_dat_path = tmp_path / "1002.dat2"
+
+    manifest_path = tmp_path / "lc_manifest.parquet"
+    write_parquet_table(
+        pd.DataFrame(
+            [
+                {
+                    "source_id": "1001",
+                    "dat_path": str(dat_path),
+                    "dat_exists": True,
+                    "mag_bin": "14.5_15",
+                },
+                {
+                    "source_id": "1002",
+                    "dat_path": str(missing_dat_path),
+                    "dat_exists": False,
+                    "mag_bin": "14.5_15",
+                },
+                {
+                    "source_id": "9999",
+                    "dat_path": str(tmp_path / "9999.dat2"),
+                    "dat_exists": True,
+                    "mag_bin": "14.5_15",
+                },
+            ]
+        ),
+        manifest_path,
+    )
+    asassn_index_path = tmp_path / "asassn_index.parquet"
+    write_parquet_table(
+        pd.DataFrame(
+            [
+                {
+                    "asas_sn_id": "1001",
+                    "ra_deg": 10.5,
+                    "dec_deg": -20.5,
+                    "pstarrs_g_mag": 17.2,
+                },
+                {
+                    "asas_sn_id": "1002",
+                    "ra_deg": 11.5,
+                    "dec_deg": -21.5,
+                    "pstarrs_g_mag": 18.2,
+                },
+            ]
+        ),
+        asassn_index_path,
+    )
+
+    out = load_manifest(manifest_path, asassn_index=asassn_index_path)
+
+    assert out["asas_sn_id"].tolist() == ["1001"]
+    assert out.loc[0, "source_id"] == "1001"
+    assert out.loc[0, "ra_deg"] == 10.5
+    assert out.loc[0, "dec_deg"] == -20.5
+    assert out.loc[0, "pstarrs_g_mag"] == 17.2
+
+
+def test_load_manifest_without_coordinates_requires_asassn_index(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "lc_manifest.parquet"
+    write_parquet_table(
+        pd.DataFrame(
+            [
+                {
+                    "source_id": "1001",
+                    "dat_path": str(tmp_path / "1001.dat2"),
+                    "dat_exists": True,
+                }
+            ]
+        ),
+        manifest_path,
+    )
+
+    try:
+        load_manifest(manifest_path)
+    except ValueError as exc:
+        assert "--asassn-index" in str(exc)
+    else:
+        raise AssertionError("load_manifest should require an ASAS-SN index when coordinates are missing")
+
+
 def test_tiny_nuclear_injection_recovery_run_writes_resumable_results(tmp_path: Path) -> None:
     dat_paths = []
     for idx in range(2):

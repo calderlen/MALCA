@@ -22,6 +22,7 @@ import numpy as np
 import pandas as pd
 
 from malca.config import (
+    ASASSN_INDEX_PATH,
     NUCLEAR_INJECTION_AMP_MAX,
     NUCLEAR_INJECTION_AMP_MIN,
     NUCLEAR_INJECTION_AMP_STEPS,
@@ -134,6 +135,85 @@ def _get_id_col(df: pd.DataFrame) -> str:
     raise KeyError("Manifest is missing a usable ID column.")
 
 
+def _normalize_id_values(series: pd.Series) -> pd.Series:
+    return series.astype("string").str.strip().fillna("").astype(str)
+
+
+def _truthy_series(series: pd.Series) -> pd.Series:
+    if pd.api.types.is_bool_dtype(series):
+        return series.fillna(False).astype(bool)
+    if pd.api.types.is_numeric_dtype(series):
+        return pd.to_numeric(series, errors="coerce").fillna(0).ne(0)
+    return series.astype("string").str.strip().str.lower().isin({"true", "1", "yes", "y"})
+
+
+def _parquet_columns(path: Path) -> set[str]:
+    try:
+        import pyarrow.parquet as pq
+
+        return set(pq.read_schema(path).names)
+    except Exception:
+        return set(read_parquet_table(path).columns)
+
+
+def _filter_existing_dat_rows(df: pd.DataFrame) -> pd.DataFrame:
+    if "dat_exists" not in df.columns:
+        return df
+    out = df.loc[_truthy_series(df["dat_exists"])].copy()
+    if out.empty:
+        raise ValueError("Manifest has no rows with dat_exists=True.")
+    return out.reset_index(drop=True)
+
+
+def _attach_asassn_coordinates(
+    df: pd.DataFrame,
+    *,
+    id_col: str,
+    asassn_index: Path,
+) -> pd.DataFrame:
+    index_path = Path(asassn_index).expanduser()
+    if not index_path.exists():
+        raise FileNotFoundError(f"ASAS-SN index not found: {index_path}")
+
+    available = _parquet_columns(index_path)
+    required = {"asas_sn_id", "ra_deg", "dec_deg"}
+    missing = sorted(required - available)
+    if missing:
+        raise ValueError(f"ASAS-SN index is missing required columns: {', '.join(missing)}")
+
+    optional = (
+        "gaia_mag",
+        "pstarrs_g_mag",
+        "pstarrs_r_mag",
+        "pstarrs_i_mag",
+        "pstarrs_z_mag",
+        "gaia_id",
+        "refcat_id",
+    )
+    index_columns = ["asas_sn_id", "ra_deg", "dec_deg"]
+    index_columns.extend(col for col in optional if col in available and col not in df.columns)
+    index_df = read_parquet_table(index_path, columns=index_columns)
+    index_df = index_df.copy()
+    index_df["_asassn_join_id"] = _normalize_id_values(index_df["asas_sn_id"])
+    index_df = index_df.loc[index_df["_asassn_join_id"].ne("")].drop_duplicates("_asassn_join_id", keep="last")
+
+    work = df.drop(columns=[col for col in ("ra_deg", "dec_deg") if col in df.columns]).copy()
+    work["_asassn_join_id"] = _normalize_id_values(work[id_col])
+    join_columns = ["_asassn_join_id", *[col for col in index_columns if col != "asas_sn_id"]]
+    if "asas_sn_id" not in work.columns:
+        join_columns.append("asas_sn_id")
+
+    out = work.merge(index_df[join_columns], on="_asassn_join_id", how="left", validate="many_to_one")
+    out["asas_sn_id"] = out["_asassn_join_id"]
+    out["ra_deg"] = pd.to_numeric(out["ra_deg"], errors="coerce")
+    out["dec_deg"] = pd.to_numeric(out["dec_deg"], errors="coerce")
+    has_coords = out["ra_deg"].notna() & out["dec_deg"].notna()
+    out = out.loc[has_coords].drop(columns=["_asassn_join_id"]).reset_index(drop=True)
+    if out.empty:
+        raise ValueError("No manifest rows could be joined to ASAS-SN index coordinates.")
+    return out
+
+
 def _resolve_dat_path(row: pd.Series, id_col: str) -> Path:
     if "dat_path" in row and pd.notna(row["dat_path"]):
         return Path(str(row["dat_path"])).expanduser()
@@ -156,15 +236,28 @@ def _series_value(row: pd.Series, *names: str, default: float = np.nan) -> float
     return float(default)
 
 
-def load_manifest(path: Path) -> pd.DataFrame:
+def load_manifest(path: Path, *, asassn_index: Path | None = None) -> pd.DataFrame:
     df = read_parquet_table(path)
     id_col = _get_id_col(df)
-    required = {id_col, "ra_deg", "dec_deg"}
-    missing = sorted(required - set(df.columns))
-    if missing:
-        raise ValueError(f"Manifest missing required columns: {', '.join(missing)}")
     if not any(col in df.columns for col in ("dat_path", "path", "lc_dir")):
         raise ValueError("Manifest must include dat_path, path, or lc_dir.")
+    df = _filter_existing_dat_rows(df)
+    missing_coords = [col for col in ("ra_deg", "dec_deg") if col not in df.columns]
+    if missing_coords:
+        if asassn_index is None:
+            raise ValueError(
+                "Manifest missing required columns: "
+                + ", ".join(missing_coords)
+                + ". Pass --asassn-index to join coordinates from the ASAS-SN index."
+            )
+        df = _attach_asassn_coordinates(df, id_col=id_col, asassn_index=asassn_index)
+    else:
+        df = df.copy()
+        df["ra_deg"] = pd.to_numeric(df["ra_deg"], errors="coerce")
+        df["dec_deg"] = pd.to_numeric(df["dec_deg"], errors="coerce")
+        df = df.loc[df["ra_deg"].notna() & df["dec_deg"].notna()].reset_index(drop=True)
+        if df.empty:
+            raise ValueError("Manifest has no rows with valid ra_deg/dec_deg coordinates.")
     return df
 
 
@@ -1134,7 +1227,18 @@ Output structure (default --output-dir {NUCLEAR_INJECTION_OUTPUT_DIR}):
     g_workers = parser.add_argument_group("Workers & chunks")
     g_plots = parser.add_argument_group("Plots")
 
-    g_io.add_argument("--manifest", type=Path, required=True, help="Manifest Parquet with dat_path/path/lc_dir and coordinates.")
+    g_io.add_argument(
+        "--manifest",
+        type=Path,
+        required=True,
+        help="Manifest Parquet with dat_path/path/lc_dir; coordinates are joined from --asassn-index when absent.",
+    )
+    g_io.add_argument(
+        "--asassn-index",
+        type=Path,
+        default=ASASSN_INDEX_PATH,
+        help=f"ASAS-SN coordinate index used when the manifest lacks ra_deg/dec_deg (default: {ASASSN_INDEX_PATH}).",
+    )
     g_io.add_argument("--output-dir", dest="out_dir", type=Path, default=NUCLEAR_INJECTION_OUTPUT_DIR, help=f"Base output directory (default: {NUCLEAR_INJECTION_OUTPUT_DIR}).")
     g_io.add_argument("--run-tag", type=str, default=None, help="Optional suffix for the run directory.")
     g_io.add_argument("--output", type=Path, default=None, help="Override trial Parquet output path.")
@@ -1187,7 +1291,7 @@ Output structure (default --output-dir {NUCLEAR_INJECTION_OUTPUT_DIR}):
     results_out = args.output if args.output is not None else (results_dir / "nuclear_injection_trials.parquet")
     checkpoint_path = results_out.with_name(f"{results_out.stem}_PROCESSED.txt")
 
-    manifest_df = load_manifest(Path(args.manifest))
+    manifest_df = load_manifest(Path(args.manifest), asassn_index=Path(args.asassn_index))
     control_sample = select_control_sample(
         manifest_df,
         n_sample=int(args.control_sample_size),
