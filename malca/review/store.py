@@ -2985,7 +2985,14 @@ def merge_candidate_results(
     if id_column is None:
         raise ValueError("Candidate DataFrame must have 'candidate_id' or 'asas_sn_id' column")
 
-    ignored_cols = {"candidate_id", "source_path", "payload_json", "imported_at"}
+    ignored_cols = {
+        "candidate_id",
+        "source_path",
+        "payload_json",
+        "imported_at",
+        FEATURE_LAYER_VERSION_COLUMN,
+        *FEATURE_LAYER_COLUMNS,
+    }
     merge_cols = [c for c in candidate_df.columns if c not in ignored_cols]
     if not merge_cols:
         print("Warning: no candidate columns found in DataFrame")

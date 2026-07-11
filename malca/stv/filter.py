@@ -89,10 +89,15 @@ from malca.catalogs.periodic_catalogs import (
     match_period_catalog as _match_period_catalog,
 )
 from malca.core.phase import align_v_to_g_magnitude
-from malca.products.feature_layers import with_feature_columns
+from malca.products.feature_layers import to_layer_first_frame, with_feature_columns
 from malca.products.product_schema import add_stv_identity, assert_stv_product_schema
 from malca.core.stats import compute_pdm_stats, compute_ce_stats
-from malca.io.table_io import read_feature_table, write_feature_table
+from malca.io.table_io import (
+    is_layer_first_table,
+    read_feature_table,
+    read_parquet_table,
+    write_feature_table,
+)
 from malca.core.utils import log_rejections
 from malca.core.utils import read_lc_dat2
 
@@ -164,6 +169,52 @@ PERIODICITY_MERGE_COLS = (
     "periodicity_score",
     "periodic_flag",
 )
+
+
+def _parquet_schema_names(path: Path) -> list[str]:
+    try:
+        import pyarrow.parquet as pq
+
+        return list(pq.read_schema(path).names)
+    except Exception:
+        return list(read_parquet_table(path).columns)
+
+
+def _normalize_index_coordinate_columns(index_df: pd.DataFrame) -> pd.DataFrame:
+    out = index_df.copy()
+    for raw_col, canonical_col in (("ra_deg", "ra"), ("dec_deg", "dec")):
+        if raw_col not in out.columns:
+            continue
+        if canonical_col in out.columns:
+            out[canonical_col] = out[canonical_col].combine_first(out[raw_col])
+            out = out.drop(columns=[raw_col])
+        else:
+            out = out.rename(columns={raw_col: canonical_col})
+    return out
+
+
+def _load_index_table(index_path: Path) -> pd.DataFrame:
+    """Load the ASAS-SN index, accepting raw catalog parquet or layer-first products."""
+    schema_names = set(_parquet_schema_names(index_path))
+    identity_cols = [col for col in ("asas_sn_id", "lc_path") if col in schema_names]
+    flat_cols = [
+        col
+        for col in ("gaia_id", "ra", "dec", "ra_deg", "dec_deg")
+        if col in schema_names
+    ]
+
+    if is_layer_first_table(index_path):
+        layer_cols = [col for col in ("external_stats",) if col in schema_names]
+        read_cols = [*identity_cols, *flat_cols, *layer_cols]
+        index_df = read_feature_table(index_path, columns=read_cols or None)
+        index_df = with_feature_columns(index_df, ("gaia_id", "ra", "dec", "ra_deg", "dec_deg"))
+        return _normalize_index_coordinate_columns(index_df)
+
+    read_cols = [*identity_cols, *flat_cols]
+    if not read_cols:
+        raise ValueError(f"Index file has no usable join/coordinate columns: {index_path}")
+    return _normalize_index_coordinate_columns(read_parquet_table(index_path, columns=read_cols))
+
 
 HOME_ONLY_CLEAR_DEFAULTS: dict[str, dict[str, object]] = {
     "periodic_catalog": {
@@ -2663,11 +2714,12 @@ Example usage:
 
     args = parser.parse_args()
 
+    detect_run = args.detect_run.expanduser() if args.detect_run else None
+
     # Determine input path
     if args.input:
         input_path = args.input.expanduser()
-    elif args.detect_run:
-        detect_run = args.detect_run.expanduser()
+    elif detect_run:
         results_dir = detect_run / "results"
         # Look for events results file in the detect run directory
         candidates = list(results_dir.glob("*events_results.parquet"))
@@ -2689,7 +2741,7 @@ Example usage:
     if not index_path.exists():
         raise FileNotFoundError(f"Index file not found: {index_path}")
 
-    index_df = read_feature_table(index_path)
+    index_df = _load_index_table(index_path)
 
     # Determine join column (asas_sn_id or lc_path stem)
     if "asas_sn_id" in df.columns and "asas_sn_id" in index_df.columns:
@@ -2736,8 +2788,7 @@ Example usage:
     # Determine output path
     if args.output:
         output_path = args.output.expanduser()
-    elif args.detect_run:
-        detect_run = args.detect_run.expanduser()
+    elif detect_run:
         results_dir = detect_run / "results"
         # Create filtered filename based on input filename
         base_name = input_path.stem.replace("_results", "").replace("events", "")
@@ -2753,7 +2804,7 @@ Example usage:
     periodicity_lightcurve_dir = None
     if args.apply_periodicity_validation:
         run_dir_candidates = [
-            detect_run if args.detect_run else None,
+            detect_run,
             input_path,
             output_path,
             args.checkpoint_dir.expanduser() if args.checkpoint_dir else None,
@@ -2766,7 +2817,7 @@ Example usage:
             if lc_dir.is_dir():
                 periodicity_lightcurve_dir = lc_dir
                 break
-        if verbose and periodicity_lightcurve_dir is not None:
+        if args.verbose and periodicity_lightcurve_dir is not None:
             print(f"Using local bundled light curves for periodicity validation: {periodicity_lightcurve_dir}")
 
     # Apply filters
@@ -2934,8 +2985,9 @@ Example usage:
 
     # Save output
     df_filtered = add_stv_identity(df_filtered)
-    assert_stv_product_schema(df_filtered, stage="stv-filter")
-    write_feature_table(df_filtered, output_path)
+    df_output = to_layer_first_frame(df_filtered)
+    assert_stv_product_schema(df_output, stage="stv-filter")
+    write_feature_table(df_output, output_path)
 
     n_failed = int(df_filtered["failed_any"].sum()) if "failed_any" in df_filtered.columns else 0
     n_passed = len(df_filtered) - n_failed
