@@ -8,6 +8,7 @@ import pandas as pd
 from malca.io.table_io import read_parquet_table, write_parquet_table
 from malca.nuclear.arbitration import arbitrate_nuclear_scores
 from malca.nuclear.injection import (
+    _smooth_heatmap_grid,
     build_amplitude_grid,
     build_timescale_grid,
     compute_recovery_summary,
@@ -75,6 +76,18 @@ def test_analytic_templates_create_expected_light_curve_morphologies() -> None:
     assert direction in {-1, 1}
     assert abs(float(clagn_features["clagn_state_change_mag"])) > 0.7
     assert float(clagn_features["clagn_monotonicity_score"]) > 0.8
+
+
+def test_nuclear_heatmap_grid_uses_gaussian_smoothing() -> None:
+    grid = np.zeros((5, 5), dtype=float)
+    grid[2, 2] = 1.0
+
+    smoothed = _smooth_heatmap_grid(grid, sigma=1.0)
+
+    assert smoothed.shape == grid.shape
+    assert 0.0 < smoothed[2, 1] < smoothed[2, 2] < 1.0
+    assert smoothed[0, 0] >= 0.0
+    assert smoothed[0, 0] <= 1.0
 
 
 def test_synthetic_context_scores_and_arbitrates_to_expected_classes() -> None:

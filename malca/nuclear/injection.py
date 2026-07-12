@@ -1022,6 +1022,18 @@ def _heatmap_edges(values: np.ndarray, *, log_scale: bool) -> np.ndarray:
     return edges
 
 
+def _smooth_heatmap_grid(grid: np.ndarray, *, sigma: float = 1.0) -> np.ndarray:
+    z = np.asarray(grid, dtype=float)
+    if sigma <= 0 or z.size == 0 or not np.isfinite(z).any():
+        return z
+
+    from astropy.convolution import Gaussian2DKernel, convolve
+
+    kernel = Gaussian2DKernel(x_stddev=float(sigma))
+    smoothed = convolve(z, kernel, boundary="extend", preserve_nan=False)
+    return np.clip(smoothed, 0.0, 1.0)
+
+
 def plot_heatmap(
     grid_df: pd.DataFrame,
     *,
@@ -1029,21 +1041,55 @@ def plot_heatmap(
     colorbar_label: str,
     cmap: str = "viridis",
     xlog: bool = True,
+    smooth_sigma: float = 1.0,
 ) -> plt.Figure:
     x_vals = np.asarray(grid_df.columns, dtype=float)
     y_vals = np.asarray(grid_df.index, dtype=float)
     z = grid_df.to_numpy(dtype=float)
+    z_plot = _smooth_heatmap_grid(z, sigma=float(smooth_sigma))
 
     fig, ax = plt.subplots(figsize=FIG_SINGLE_COL_HEATMAP)
-    mesh = ax.pcolormesh(
-        _heatmap_edges(x_vals, log_scale=xlog),
-        _heatmap_edges(y_vals, log_scale=False),
-        z,
-        shading="auto",
-        cmap=cmap,
-        vmin=0.0,
-        vmax=1.0,
-    )
+    if z_plot.shape[0] >= 2 and z_plot.shape[1] >= 2:
+        levels = np.linspace(0.0, 1.0, 100)
+        mesh = ax.contourf(
+            x_vals,
+            y_vals,
+            z_plot,
+            levels=levels,
+            cmap=cmap,
+            vmin=0.0,
+            vmax=1.0,
+            extend="neither",
+        )
+        try:
+            for collection in mesh.collections:
+                collection.set_edgecolor("face")
+                collection.set_rasterized(True)
+        except AttributeError:
+            mesh.set_edgecolor("face")
+            mesh.set_rasterized(True)
+        try:
+            ax.contour(
+                x_vals,
+                y_vals,
+                z_plot,
+                levels=[0.5, 0.9, 0.99],
+                colors="black",
+                alpha=0.9,
+                linewidths=0.6,
+            )
+        except Exception:
+            pass
+    else:
+        mesh = ax.pcolormesh(
+            _heatmap_edges(x_vals, log_scale=xlog),
+            _heatmap_edges(y_vals, log_scale=False),
+            z_plot,
+            shading="auto",
+            cmap=cmap,
+            vmin=0.0,
+            vmax=1.0,
+        )
     if xlog:
         ax.set_xscale("log")
     ax.set_xlabel("Injected Timescale [days]")
