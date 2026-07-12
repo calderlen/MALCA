@@ -11,19 +11,23 @@ BAND_LABELS: dict[int, str] = {0: "g", 1: "V"}
 _PERIOD_SOURCE_KEYS: tuple[tuple[str, str], ...] = (
     ("phase_period_days", "phase_period_days"),
     ("period_consensus_days", "period_consensus_days"),
-    ("pre_periodicity_selected_period", "pre_periodicity_selected_period"),
     ("periodicity_period", "periodicity_period"),
-    ("lsp_period", "lsp_period"),
+    ("pdm_corrected_period", "pdm_corrected_period"),
+    ("ce_corrected_period", "ce_corrected_period"),
     ("pdm_period", "pdm_period"),
     ("ce_period", "ce_period"),
+    ("pre_periodicity_selected_period", "pre_periodicity_selected_period"),
+    ("lsp_period", "lsp_period"),
     ("stats_variability_lomb_scargle_best_period_days", "stats_variability_lomb_scargle_best_period_days"),
 )
 
 _PERIODOGRAM_PERIOD_KEYS = {
     "periodicity_period",
-    "lsp_period",
+    "pdm_corrected_period",
+    "ce_corrected_period",
     "pdm_period",
     "ce_period",
+    "lsp_period",
     "stats_variability_lomb_scargle_best_period_days",
 }
 
@@ -41,7 +45,7 @@ def resolve_phase_period(
     *,
     override_period: float | None = None,
     override_source: str = "manual/search",
-    include_lsp: bool = True,
+    include_lsp: bool = False,
     include_periodogram_periods: bool = True,
 ) -> tuple[float | None, str]:
     """Return the preferred period and source label for phase folding."""
@@ -51,7 +55,7 @@ def resolve_phase_period(
 
     payload = payload or {}
     for key, source in _PERIOD_SOURCE_KEYS:
-        if key == "lsp_period" and not include_lsp:
+        if key in {"lsp_period", "stats_variability_lomb_scargle_best_period_days"} and not include_lsp:
             continue
         if key in _PERIODOGRAM_PERIOD_KEYS and not include_periodogram_periods:
             continue

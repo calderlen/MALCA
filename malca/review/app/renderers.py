@@ -527,7 +527,20 @@ def _render_stat_cards(stat_rows: list[tuple[str, str]]) -> list:
         "stats_variability_stetson_J_time": r"Stetson $J_\mathrm{time}$",
         "stats_variability_stetson_L_time": r"Stetson $L_\mathrm{time}$",
         "stats_variability_flux_asymmetry_m": r"Flux asymmetry $M$",
-        "stats_variability_quasi_periodicity_q": r"Quasi-periodicity $Q$",
+        "stats_variability_quasi_periodicity_q": r"Phase-template quasi-periodicity $Q$",
+        "stats_variability_quasi_periodicity_method": "Q method",
+        "stats_variability_quasi_periodicity_n_points": "Q point count",
+        "stats_variability_quasi_periodicity_n_bins": "Q phase bins",
+        "stats_variability_quasi_periodicity_populated_bins": "Q populated bins",
+        "stats_variability_quasi_periodicity_bin_coverage": "Q bin coverage",
+        "stats_variability_quasi_periodicity_smooth_window_bins": "Q smoothing bins",
+        "stats_variability_quasi_periodicity_template_amplitude": "Q template amplitude (mag)",
+        "stats_variability_quasi_periodicity_raw_scatter": "Q raw scatter (mag)",
+        "stats_variability_quasi_periodicity_resid_scatter": "Q residual scatter (mag)",
+        "stats_variability_quasi_periodicity_scatter_ratio": "Q residual/raw scatter",
+        "stats_variability_quasi_periodicity_status": "Q status",
+        "stats_variability_periodic_feature_period_days": "Q feature period (days)",
+        "stats_variability_periodic_feature_period_source": "Q feature period source",
         "stats_variability_string_length_resid_total": "String length total (mag)",
         "stats_variability_string_length_resid_mean_step": "String length mean step (mag)",
         "stats_variability_string_length_resid_n_steps": "String length n steps",
@@ -1278,8 +1291,11 @@ def _render_vetting_banner(payload: dict | None, radius_arcsec: float = 10.0) ->
     if ra_for_vsx is not None and dec_for_vsx is not None:
         neighbors = find_nearby_vsx(ra_for_vsx, dec_for_vsx, limit=3, radius_arcsec=60.0)
         if neighbors:
+            label = "Nearby VSX"
+            if not _ok(vsx_cls):
+                label = "Nearby VSX (live)"
             cards.append(_rich_cell(
-                "Nearby VSX",
+                label,
                 [
                     html.Div(
                         _format_vsx_neighbor(neighbor),

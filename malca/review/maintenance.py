@@ -21,11 +21,48 @@ from malca.review.store import (
     merge_vetting_results,
     replace_candidate_payload_fields,
 )
-from malca.io.table_io import read_feature_table, read_parquet_table, write_feature_table
+from malca.io.table_io import read_feature_table, read_parquet_table, write_feature_table, write_parquet_table
 from malca.products.feature_layers import to_layer_first_frame, with_feature_columns
 from malca.review.metadata import has_catalog_vetting_context, has_known_catalog_evidence
 from malca.vsx.filter import colspecs as VSX_COLSPECS, vsx_columns as VSX_COLUMNS
 from malca.vsx.metadata import normalize_vsx_match_columns, select_best_vsx_matches
+from malca.vsx.nearby import VsxNeighbor, find_nearby_vsx
+
+
+VSX_LIVE_BACKFILL_FILENAME = "vsx_live_backfill.parquet"
+VSX_LIVE_PRODUCT_COLUMNS = ("vsx_class", "vsx_sep_arcsec", "vsx_period")
+VSX_LIVE_BACKFILL_COLUMNS = (
+    "candidate_id",
+    "asas_sn_id",
+    "gaia_id",
+    "ra",
+    "dec",
+    "vsx_live_status",
+    "vsx_live_error",
+    "vsx_source",
+    "vsx_queried_at",
+    "vsx_query_radius_arcsec",
+    "vsx_query_limit",
+    "vsx_query_timeout_sec",
+    "vsx_class",
+    "vsx_sep_arcsec",
+    "vsx_period",
+    "vsx_oid",
+    "vsx_name",
+    "vsx_ra_deg",
+    "vsx_dec_deg",
+    "vsx_type_label",
+    "vsx_url",
+    "vsx_n_neighbors",
+    "vsx_neighbor_oids",
+    "vsx_neighbor_classes",
+    "vsx_neighbor_sep_arcsec",
+)
+VSX_LIVE_CANDIDATE_FILENAMES = (
+    "lc_events_neighbors.parquet",
+    "lc_events_vetted.parquet",
+    "lc_events_external_lcs.parquet",
+)
 
 
 def _vsx_backfill_columns(df: pd.DataFrame, id_column: str) -> pd.DataFrame:
@@ -47,51 +84,98 @@ def _load_vsx_backfill_crossmatch(path: Path) -> pd.DataFrame:
     return _vsx_backfill_columns(df, "asas_sn_id")
 
 
-def _candidate_coord_frame(conn) -> pd.DataFrame:
+def _clean_text(value: object) -> str | None:
+    if _is_missing(value):
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _append_payload_coords(df: pd.DataFrame) -> pd.DataFrame:
+    if "payload_json" not in df.columns:
+        return df
+    payload_coords: list[dict[str, object]] = []
+    for raw in df["payload_json"].tolist():
+        try:
+            payload = json.loads(raw) if raw else {}
+        except Exception:
+            payload = {}
+        payload_coords.append(
+            {
+                "payload_ra": payload.get("ra", payload.get("ra_deg")),
+                "payload_dec": payload.get("dec", payload.get("dec_deg")),
+            }
+        )
+    payload_df = pd.DataFrame(payload_coords, index=df.index)
+    return pd.concat([df, payload_df], axis=1)
+
+
+def _coalesce_numeric(df: pd.DataFrame, *columns: str) -> pd.Series:
+    out = pd.Series(np.nan, index=df.index, dtype=float)
+    for column in columns:
+        if column not in df.columns:
+            continue
+        out = out.combine_first(pd.to_numeric(df[column], errors="coerce"))
+    return out
+
+
+def _normalize_candidate_coord_frame(df: pd.DataFrame, *, drop_missing: bool) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(columns=["candidate_id", "asas_sn_id", "gaia_id", "ra", "dec", *VSX_LIVE_PRODUCT_COLUMNS])
+
+    requested = [
+        "candidate_id",
+        "asas_sn_id",
+        "gaia_id",
+        "ra",
+        "dec",
+        "ra_deg",
+        "dec_deg",
+        "payload_json",
+        *VSX_LIVE_PRODUCT_COLUMNS,
+    ]
+    view = with_feature_columns(df, requested)
+    if "candidate_id" not in view.columns:
+        return pd.DataFrame(columns=["candidate_id", "asas_sn_id", "gaia_id", "ra", "dec", *VSX_LIVE_PRODUCT_COLUMNS])
+    view = _append_payload_coords(view)
+    for col in ("asas_sn_id", "gaia_id", *VSX_LIVE_PRODUCT_COLUMNS):
+        if col not in view.columns:
+            view[col] = pd.NA
+    view["ra"] = _coalesce_numeric(view, "ra", "ra_deg", "payload_ra")
+    view["dec"] = _coalesce_numeric(view, "dec", "dec_deg", "payload_dec")
+    keep = ["candidate_id", "asas_sn_id", "gaia_id", "ra", "dec", *VSX_LIVE_PRODUCT_COLUMNS]
+    out = view[keep].copy()
+    if drop_missing:
+        out = out.dropna(subset=["ra", "dec"])
+    return out.reset_index(drop=True)
+
+
+def _candidate_coord_frame(conn, *, drop_missing: bool = True) -> pd.DataFrame:
     table_cols = {
         str(info[1])
         for info in conn.execute("PRAGMA table_info(candidates)").fetchall()
     }
-    cols = [c for c in ("candidate_id", "asas_sn_id", "ra", "dec", "ra_deg", "dec_deg", "payload_json") if c in table_cols]
+    cols = [
+        c
+        for c in (
+            "candidate_id",
+            "asas_sn_id",
+            "gaia_id",
+            "ra",
+            "dec",
+            "ra_deg",
+            "dec_deg",
+            "vsx_class",
+            "vsx_sep_arcsec",
+            "vsx_period",
+            "payload_json",
+        )
+        if c in table_cols
+    ]
     if "candidate_id" not in cols:
         return pd.DataFrame()
     df = pd.read_sql_query(f"SELECT {', '.join(cols)} FROM candidates", conn)
-    if "payload_json" in df.columns:
-        payload_coords: list[dict[str, object]] = []
-        for raw in df["payload_json"].tolist():
-            try:
-                payload = json.loads(raw) if raw else {}
-            except Exception:
-                payload = {}
-            payload_coords.append(
-                {
-                    "payload_ra": payload.get("ra", payload.get("ra_deg")),
-                    "payload_dec": payload.get("dec", payload.get("dec_deg")),
-                }
-            )
-        payload_df = pd.DataFrame(payload_coords, index=df.index)
-        df = pd.concat([df, payload_df], axis=1)
-    if "ra" not in df.columns and "ra_deg" in df.columns:
-        df["ra"] = df["ra_deg"]
-    elif "ra_deg" in df.columns:
-        df["ra"] = pd.to_numeric(df["ra"], errors="coerce").combine_first(pd.to_numeric(df["ra_deg"], errors="coerce"))
-    elif "payload_ra" in df.columns:
-        df["ra"] = df["payload_ra"]
-    if "dec" not in df.columns and "dec_deg" in df.columns:
-        df["dec"] = df["dec_deg"]
-    elif "dec_deg" in df.columns:
-        df["dec"] = pd.to_numeric(df["dec"], errors="coerce").combine_first(pd.to_numeric(df["dec_deg"], errors="coerce"))
-    elif "payload_dec" in df.columns:
-        df["dec"] = df["payload_dec"]
-    if "payload_ra" in df.columns:
-        df["ra"] = pd.to_numeric(df["ra"], errors="coerce").combine_first(pd.to_numeric(df["payload_ra"], errors="coerce"))
-    if "payload_dec" in df.columns:
-        df["dec"] = pd.to_numeric(df["dec"], errors="coerce").combine_first(pd.to_numeric(df["payload_dec"], errors="coerce"))
-    if "ra" not in df.columns or "dec" not in df.columns:
-        return pd.DataFrame()
-    df["ra"] = pd.to_numeric(df.get("ra"), errors="coerce")
-    df["dec"] = pd.to_numeric(df.get("dec"), errors="coerce")
-    return df.dropna(subset=["ra", "dec"]).reset_index(drop=True)
+    return _normalize_candidate_coord_frame(df, drop_missing=drop_missing)
 
 
 def _load_vsx_backfill_raw(
@@ -157,6 +241,275 @@ def _load_vsx_backfill_raw(
     return _vsx_backfill_columns(pd.DataFrame(best.values()), "candidate_id")
 
 
+def _usable_vsx_neighbor(neighbors: list[VsxNeighbor]) -> VsxNeighbor | None:
+    for neighbor in neighbors:
+        if str(neighbor.vsx_type or "").strip():
+            return neighbor
+    return None
+
+
+def _format_neighbor_sep(value: float) -> str:
+    try:
+        return f"{float(value):.6g}"
+    except Exception:
+        return ""
+
+
+def _neighbor_summary(neighbors: list[VsxNeighbor]) -> dict[str, object]:
+    return {
+        "vsx_n_neighbors": int(len(neighbors)),
+        "vsx_neighbor_oids": "|".join(str(neighbor.oid or "").strip() for neighbor in neighbors),
+        "vsx_neighbor_classes": "|".join(str(neighbor.vsx_type or "").strip() for neighbor in neighbors),
+        "vsx_neighbor_sep_arcsec": "|".join(_format_neighbor_sep(neighbor.sep_arcsec) for neighbor in neighbors),
+    }
+
+
+def _empty_vsx_live_backfill_frame() -> pd.DataFrame:
+    return pd.DataFrame(columns=list(VSX_LIVE_BACKFILL_COLUMNS))
+
+
+def _base_vsx_live_record(
+    row: pd.Series,
+    *,
+    status: str,
+    error: str | None,
+    queried_at: str,
+    radius_arcsec: float,
+    timeout_sec: float,
+    limit: int,
+) -> dict[str, object]:
+    return {
+        "candidate_id": _clean_text(row.get("candidate_id")),
+        "asas_sn_id": _clean_text(row.get("asas_sn_id")),
+        "gaia_id": _clean_text(row.get("gaia_id")),
+        "ra": row.get("ra"),
+        "dec": row.get("dec"),
+        "vsx_live_status": status,
+        "vsx_live_error": error,
+        "vsx_source": "vizier_live",
+        "vsx_queried_at": queried_at,
+        "vsx_query_radius_arcsec": float(radius_arcsec),
+        "vsx_query_limit": int(limit),
+        "vsx_query_timeout_sec": float(timeout_sec),
+        "vsx_class": None,
+        "vsx_sep_arcsec": None,
+        "vsx_period": None,
+        "vsx_oid": None,
+        "vsx_name": None,
+        "vsx_ra_deg": None,
+        "vsx_dec_deg": None,
+        "vsx_type_label": None,
+        "vsx_url": None,
+        "vsx_n_neighbors": 0,
+        "vsx_neighbor_oids": "",
+        "vsx_neighbor_classes": "",
+        "vsx_neighbor_sep_arcsec": "",
+    }
+
+
+def _valid_coord_pair(ra: object, dec: object) -> tuple[bool, str | None]:
+    try:
+        ra_value = float(ra)
+        dec_value = float(dec)
+    except (TypeError, ValueError):
+        return False, "missing coordinates"
+    if not np.isfinite(ra_value) or not np.isfinite(dec_value):
+        return False, "missing coordinates"
+    if not (0.0 <= ra_value <= 360.0 and -90.0 <= dec_value <= 90.0):
+        return False, "coordinates out of bounds"
+    return True, None
+
+
+def _build_vsx_live_backfill_frame(
+    candidates: pd.DataFrame,
+    *,
+    radius_arcsec: float,
+    timeout_sec: float,
+    limit: int,
+    only_missing: bool = True,
+    max_candidates: int | None = None,
+) -> pd.DataFrame:
+    candidates = _normalize_candidate_coord_frame(candidates, drop_missing=False)
+    if candidates.empty:
+        return _empty_vsx_live_backfill_frame()
+
+    if only_missing and "vsx_class" in candidates.columns:
+        existing = candidates["vsx_class"].map(_is_missing).astype(bool)
+        candidates = candidates.loc[existing].reset_index(drop=True)
+
+    if max_candidates is not None:
+        candidates = candidates.head(int(max_candidates)).reset_index(drop=True)
+
+    records: list[dict[str, object]] = []
+    total = len(candidates)
+    queried_at = datetime.now(timezone.utc).isoformat()
+    for idx, row in candidates.iterrows():
+        valid_coord, coord_error = _valid_coord_pair(row.get("ra"), row.get("dec"))
+        if not valid_coord:
+            records.append(
+                _base_vsx_live_record(
+                    row,
+                    status="missing_coords",
+                    error=coord_error,
+                    queried_at=queried_at,
+                    radius_arcsec=radius_arcsec,
+                    timeout_sec=timeout_sec,
+                    limit=limit,
+                )
+            )
+            continue
+
+        try:
+            neighbors = find_nearby_vsx(
+                row.get("ra"),
+                row.get("dec"),
+                limit=int(limit),
+                radius_arcsec=float(radius_arcsec),
+                timeout_sec=float(timeout_sec),
+            )
+        except Exception as exc:
+            records.append(
+                _base_vsx_live_record(
+                    row,
+                    status="query_failed",
+                    error=str(exc),
+                    queried_at=queried_at,
+                    radius_arcsec=radius_arcsec,
+                    timeout_sec=timeout_sec,
+                    limit=limit,
+                )
+            )
+            continue
+
+        record = _base_vsx_live_record(
+            row,
+            status="no_match",
+            error=None,
+            queried_at=queried_at,
+            radius_arcsec=radius_arcsec,
+            timeout_sec=timeout_sec,
+            limit=limit,
+        )
+        record.update(_neighbor_summary(neighbors))
+        neighbor = _usable_vsx_neighbor(neighbors)
+        if neighbor is None:
+            records.append(record)
+            continue
+
+        record.update(
+            {
+                "vsx_live_status": "matched",
+                "vsx_class": str(neighbor.vsx_type).strip(),
+                "vsx_sep_arcsec": float(neighbor.sep_arcsec),
+                "vsx_period": None if neighbor.period_days is None else float(neighbor.period_days),
+                "vsx_oid": _clean_text(neighbor.oid),
+                "vsx_name": _clean_text(neighbor.name),
+                "vsx_ra_deg": neighbor.ra_deg,
+                "vsx_dec_deg": neighbor.dec_deg,
+                "vsx_type_label": _clean_text(neighbor.type_label),
+                "vsx_url": _clean_text(neighbor.url),
+            }
+        )
+        records.append(record)
+
+        if total >= 100 and (idx + 1) % 100 == 0:
+            matched = sum(1 for item in records if item.get("vsx_live_status") == "matched")
+            print(f"Live VSX lookup: scanned {idx + 1}/{total}, matched {matched}")
+
+    if not records:
+        return _empty_vsx_live_backfill_frame()
+    out = pd.DataFrame(records)
+    for column in VSX_LIVE_BACKFILL_COLUMNS:
+        if column not in out.columns:
+            out[column] = pd.NA
+    return out[list(VSX_LIVE_BACKFILL_COLUMNS)].copy()
+
+
+def _live_updates_from_backfill_frame(backfill_df: pd.DataFrame) -> pd.DataFrame:
+    if backfill_df.empty:
+        return pd.DataFrame()
+    if "vsx_live_status" in backfill_df.columns:
+        matched = backfill_df.loc[backfill_df["vsx_live_status"].astype(str).eq("matched")].copy()
+    else:
+        matched = backfill_df.copy()
+    if matched.empty:
+        return pd.DataFrame()
+    keep = [col for col in ("candidate_id", "asas_sn_id", *VSX_LIVE_PRODUCT_COLUMNS) if col in matched.columns]
+    updates = matched[keep].copy()
+    if "vsx_class" in updates.columns:
+        updates = updates.loc[~updates["vsx_class"].map(_is_missing)].copy()
+    if updates.empty:
+        return pd.DataFrame()
+    return _vsx_backfill_columns(updates, "candidate_id")
+
+
+def _load_vsx_backfill_live(
+    conn,
+    *,
+    radius_arcsec: float,
+    timeout_sec: float,
+    limit: int,
+    only_missing: bool = True,
+    max_candidates: int | None = None,
+) -> pd.DataFrame:
+    candidates = _candidate_coord_frame(conn, drop_missing=False)
+    backfill_df = _build_vsx_live_backfill_frame(
+        candidates,
+        radius_arcsec=radius_arcsec,
+        timeout_sec=timeout_sec,
+        limit=limit,
+        only_missing=only_missing,
+        max_candidates=max_candidates,
+    )
+    return _live_updates_from_backfill_frame(backfill_df)
+
+
+def _merge_vsx_live_updates(
+    conn,
+    live_updates: pd.DataFrame,
+    *,
+    only_missing: bool,
+) -> int:
+    if live_updates.empty or "candidate_id" not in live_updates.columns:
+        return 0
+
+    table_cols = {
+        str(info[1])
+        for info in conn.execute("PRAGMA table_info(candidates)").fetchall()
+    }
+    select_cols = ["candidate_id", *[col for col in VSX_LIVE_PRODUCT_COLUMNS if col in table_cols]]
+    current = {
+        str(row[0]).strip(): dict(zip(select_cols[1:], row[1:]))
+        for row in conn.execute(f"SELECT {', '.join(select_cols)} FROM candidates").fetchall()
+    }
+    updated = 0
+    for _, row in live_updates.iterrows():
+        candidate_id = str(row.get("candidate_id") or "").strip()
+        if not candidate_id or candidate_id not in current:
+            continue
+
+        updates = {}
+        existing = current[candidate_id]
+        for col in VSX_LIVE_PRODUCT_COLUMNS:
+            if col not in live_updates.columns or _is_missing(row.get(col)):
+                continue
+            if only_missing and not _is_missing(existing.get(col)):
+                continue
+            updates[col] = row[col]
+        updates = normalize_catalog_evidence_record(updates)
+        if not updates:
+            continue
+        if has_known_catalog_evidence(updates):
+            updates["vetting_likely_known"] = True
+        elif has_catalog_vetting_context(updates):
+            updates["vetting_likely_known"] = False
+        if replace_candidate_payload_fields(conn, candidate_id, updates, commit=False):
+            updated += 1
+
+    conn.commit()
+    return updated
+
+
 def backfill_vsx_results(
     conn,
     *,
@@ -184,6 +537,34 @@ def backfill_vsx_results(
     return updated
 
 
+def backfill_vsx_live_results(
+    conn,
+    *,
+    radius_arcsec: float,
+    timeout_sec: float,
+    limit: int,
+    only_missing: bool = True,
+    max_candidates: int | None = None,
+    dry_run: bool = False,
+) -> int:
+    live_updates = _load_vsx_backfill_live(
+        conn,
+        radius_arcsec=radius_arcsec,
+        timeout_sec=timeout_sec,
+        limit=limit,
+        only_missing=only_missing,
+        max_candidates=max_candidates,
+    )
+    if live_updates.empty:
+        print("Live VSX lookup found no candidate updates")
+        return 0
+    if dry_run:
+        print(live_updates.to_string(index=False))
+        print(f"Dry run: would update {len(live_updates)} candidates from live VSX")
+        return 0
+    return _merge_vsx_live_updates(conn, live_updates, only_missing=only_missing)
+
+
 CATALOG_EVIDENCE_COLUMNS = (
     "vsx_sep_arcsec",
     "vsx_period",
@@ -206,10 +587,180 @@ def _is_missing(value: object) -> bool:
     return bool(missing) if isinstance(missing, (bool, np.bool_)) else False
 
 
-def _backup_file(path: Path, *, stamp: str) -> Path:
-    backup = path.with_name(f"{path.name}.pre_catalog_evidence_{stamp}.bak")
+def _backup_file(path: Path, *, stamp: str, label: str = "catalog_evidence") -> Path:
+    backup = path.with_name(f"{path.name}.pre_{label}_{stamp}.bak")
     shutil.copy2(path, backup)
     return backup
+
+
+def _candidate_result_paths(results_dir: Path) -> list[Path]:
+    return [results_dir / name for name in VSX_LIVE_CANDIDATE_FILENAMES]
+
+
+def _primary_vsx_live_candidate_path(results_dir: Path) -> Path:
+    preferred = results_dir / "lc_events_vetted.parquet"
+    if preferred.exists():
+        return preferred
+    existing = [path for path in _candidate_result_paths(results_dir) if path.exists()]
+    if not existing:
+        raise FileNotFoundError(f"No lc_events result parquets found under {results_dir}")
+    return existing[0]
+
+
+def _values_equal(left: object, right: object) -> bool:
+    if _is_missing(left) and _is_missing(right):
+        return True
+    if _is_missing(left) or _is_missing(right):
+        return False
+    try:
+        return bool(float(left) == float(right))
+    except (TypeError, ValueError):
+        return str(left) == str(right)
+
+
+def _merge_vsx_live_into_candidate_frame(
+    df: pd.DataFrame,
+    live_updates: pd.DataFrame,
+    *,
+    only_missing: bool,
+) -> tuple[pd.DataFrame, int]:
+    if df.empty or live_updates.empty or "candidate_id" not in live_updates.columns:
+        return df.copy(), 0
+    out = with_feature_columns(df, ["candidate_id", *VSX_LIVE_PRODUCT_COLUMNS])
+    if "candidate_id" not in out.columns:
+        return out, 0
+    for col in VSX_LIVE_PRODUCT_COLUMNS:
+        if col not in out.columns:
+            out[col] = pd.NA
+
+    updates = live_updates.copy()
+    updates["candidate_id"] = updates["candidate_id"].astype(str).str.strip()
+    update_lookup = {
+        str(row["candidate_id"]).strip(): row
+        for _, row in updates.iterrows()
+        if str(row.get("candidate_id") or "").strip()
+    }
+
+    changed_rows: set[object] = set()
+    for idx, row in out.iterrows():
+        candidate_id = str(row.get("candidate_id") or "").strip()
+        update = update_lookup.get(candidate_id)
+        if update is None:
+            continue
+        for col in VSX_LIVE_PRODUCT_COLUMNS:
+            if col not in update or _is_missing(update.get(col)):
+                continue
+            if only_missing and not _is_missing(out.at[idx, col]):
+                continue
+            if _values_equal(out.at[idx, col], update[col]):
+                continue
+            out.at[idx, col] = update[col]
+            changed_rows.add(idx)
+    return out, len(changed_rows)
+
+
+def _vsx_live_status_stats(backfill_df: pd.DataFrame) -> dict[str, int]:
+    stats = {
+        "sidecar_rows": int(len(backfill_df)),
+        "matched": 0,
+        "no_match": 0,
+        "missing_coords": 0,
+        "query_failed": 0,
+    }
+    if backfill_df.empty or "vsx_live_status" not in backfill_df.columns:
+        return stats
+    counts = backfill_df["vsx_live_status"].astype(str).value_counts(dropna=False)
+    for key in ("matched", "no_match", "missing_coords", "query_failed"):
+        stats[key] = int(counts.get(key, 0))
+    return stats
+
+
+def backfill_vsx_live_run(
+    run_dir: Path,
+    *,
+    review_db: Path | None,
+    output_path: Path | None,
+    radius_arcsec: float,
+    timeout_sec: float,
+    limit: int,
+    only_missing: bool = True,
+    max_candidates: int | None = None,
+    dry_run: bool = False,
+    update_products: bool = True,
+    update_db: bool = True,
+    backup: bool = True,
+) -> dict[str, object]:
+    run_dir = run_dir.expanduser().resolve()
+    results_dir = run_dir / "results"
+    source_path = _primary_vsx_live_candidate_path(results_dir)
+    source_df = read_feature_table(source_path)
+    candidates = _normalize_candidate_coord_frame(source_df, drop_missing=False)
+    backfill_df = _build_vsx_live_backfill_frame(
+        candidates,
+        radius_arcsec=radius_arcsec,
+        timeout_sec=timeout_sec,
+        limit=limit,
+        only_missing=only_missing,
+        max_candidates=max_candidates,
+    )
+    live_updates = _live_updates_from_backfill_frame(backfill_df)
+
+    if output_path is None:
+        output_path = results_dir / VSX_LIVE_BACKFILL_FILENAME
+    output_path = output_path.expanduser().resolve()
+
+    stats: dict[str, object] = {
+        **_vsx_live_status_stats(backfill_df),
+        "sidecar_path": str(output_path),
+        "parquets_updated": 0,
+        "parquet_rows_updated": 0,
+        "db_candidates_updated": 0,
+    }
+    if dry_run:
+        if backfill_df.empty:
+            print("Live VSX lookup produced no sidecar rows")
+        else:
+            print(backfill_df.to_string(index=False))
+        print(
+            "Dry run: would write "
+            f"{len(backfill_df)} live VSX row(s) to {output_path}; "
+            f"{len(live_updates)} matched candidate update(s)"
+        )
+        return stats
+
+    write_parquet_table(backfill_df, output_path)
+
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    if update_products and not live_updates.empty:
+        for path in [path for path in _candidate_result_paths(results_dir) if path.exists()]:
+            df = read_feature_table(path)
+            patched, changed = _merge_vsx_live_into_candidate_frame(
+                df,
+                live_updates,
+                only_missing=only_missing,
+            )
+            if changed <= 0:
+                continue
+            if backup:
+                _backup_file(path, stamp=stamp, label="vsx_live_backfill")
+            write_feature_table(to_layer_first_frame(patched), path)
+            stats["parquets_updated"] = int(stats["parquets_updated"]) + 1
+            stats["parquet_rows_updated"] = int(stats["parquet_rows_updated"]) + int(changed)
+
+    if update_db and not live_updates.empty:
+        if review_db is None:
+            review_db = run_dir / "review" / "review.db"
+        review_db = review_db.expanduser().resolve()
+        if review_db.exists():
+            if backup:
+                _backup_file(review_db, stamp=stamp, label="vsx_live_backfill")
+            with closing(db_connect(review_db)) as conn:
+                stats["db_candidates_updated"] = _merge_vsx_live_updates(
+                    conn,
+                    live_updates,
+                    only_missing=only_missing,
+                )
+    return stats
 
 
 def _catalog_evidence_update_frame(df: pd.DataFrame) -> pd.DataFrame:
@@ -380,6 +931,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
     backfill_vsx.add_argument("--chunksize", type=int, default=200_000, help="Raw VSX fallback read chunk size")
     backfill_vsx.add_argument("--no-raw-fallback", action="store_true", help="Do not scan raw VSX when crossmatch is absent/incomplete")
 
+    backfill_vsx_live = subparsers.add_parser(
+        "backfill-vsx-live",
+        help="Backfill VSX labels using live VizieR cone searches",
+    )
+    backfill_vsx_live.add_argument("--run-dir", type=Path, default=None, help="MALCA run directory; writes <run-dir>/results/vsx_live_backfill.parquet and patches run products")
+    backfill_vsx_live.add_argument("--review-db", type=Path, default=None, help="Review SQLite DB (required without --run-dir; default with --run-dir: <run-dir>/review/review.db)")
+    backfill_vsx_live.add_argument("--output", type=Path, default=None, help="Live VSX sidecar parquet (default: <run-dir>/results/vsx_live_backfill.parquet)")
+    backfill_vsx_live.add_argument("--radius", type=float, default=VSX_MAX_SEP_ARCSEC, help="Live VSX match radius in arcsec")
+    backfill_vsx_live.add_argument("--timeout", type=float, default=5.0, help="Per-candidate VizieR timeout in seconds")
+    backfill_vsx_live.add_argument("--limit", type=int, default=3, help="Maximum nearby VSX rows to inspect per candidate")
+    backfill_vsx_live.add_argument("--overwrite-existing", action="store_true", help="Also refresh candidates that already have vsx_class")
+    backfill_vsx_live.add_argument("--max-candidates", type=int, default=None, help="Limit candidates scanned, useful for smoke tests")
+    backfill_vsx_live.add_argument("--dry-run", action="store_true", help="Print live VSX rows without writing outputs")
+    backfill_vsx_live.add_argument("--no-product-update", action="store_true", help="Write the sidecar but do not patch lc_events result parquets")
+    backfill_vsx_live.add_argument("--no-db-update", action="store_true", help="Write the sidecar/products but do not update a review DB")
+    backfill_vsx_live.add_argument("--no-backup", action="store_true", help="Do not create .bak files before patching products or DB")
+
     repair_catalog = subparsers.add_parser(
         "repair-catalog-evidence",
         help="Repair canonical catalog evidence in run products and review DB",
@@ -415,6 +983,35 @@ def main() -> None:
         )
         return
 
+    if args.command == "backfill-vsx-live" and args.run_dir is not None:
+        stats = backfill_vsx_live_run(
+            args.run_dir,
+            review_db=args.review_db,
+            output_path=args.output,
+            radius_arcsec=args.radius,
+            timeout_sec=args.timeout,
+            limit=args.limit,
+            only_missing=not args.overwrite_existing,
+            max_candidates=args.max_candidates,
+            dry_run=args.dry_run,
+            update_products=not args.no_product_update,
+            update_db=not args.no_db_update,
+            backup=not args.no_backup,
+        )
+        print(
+            f"Live VSX scanned {stats['sidecar_rows']} candidate(s): "
+            f"{stats['matched']} matched, {stats['no_match']} no match, "
+            f"{stats['missing_coords']} missing coords, {stats['query_failed']} failed. "
+            f"Sidecar: {stats['sidecar_path']}. "
+            f"Updated {stats['parquet_rows_updated']} row(s) across "
+            f"{stats['parquets_updated']} result parquet(s); "
+            f"updated {stats['db_candidates_updated']} DB candidate(s)."
+        )
+        return
+
+    if args.command == "backfill-vsx-live" and args.review_db is None:
+        raise SystemExit("--review-db is required when --run-dir is not provided")
+
     review_db = args.review_db.expanduser().resolve()
     with closing(db_connect(review_db)) as conn:
         if args.command == "merge-vetting":
@@ -437,6 +1034,16 @@ def main() -> None:
                 raw_vsx=raw_vsx,
                 radius_arcsec=args.radius,
                 chunksize=args.chunksize,
+            )
+        elif args.command == "backfill-vsx-live":
+            updated = backfill_vsx_live_results(
+                conn,
+                radius_arcsec=args.radius,
+                timeout_sec=args.timeout,
+                limit=args.limit,
+                only_missing=not args.overwrite_existing,
+                max_candidates=args.max_candidates,
+                dry_run=args.dry_run,
             )
         else:  # pragma: no cover - argparse enforces choices
             raise SystemExit(f"Unknown command: {args.command}")

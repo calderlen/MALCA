@@ -6,6 +6,7 @@ import types
 
 import numpy as np
 import pandas as pd
+import pytest
 
 if "iar.IARModel" not in sys.modules:
     fake_iar_pkg = types.ModuleType("iar")
@@ -544,14 +545,16 @@ def test_apply_pre_periodicity_gate_allows_alias_periodic_branch(monkeypatch) ->
     assert out.loc[0, "pre_periodicity_reason"] == "ce,folded_scatter"
 
 
-def test_arbitrate_harmonic_period_uses_shortlist_double_when_best(monkeypatch) -> None:
+def test_arbitrate_harmonic_period_does_not_evaluate_longer_aliases(monkeypatch) -> None:
     raw_scores = {
         1.0: 0.40,
         2.0: 0.35,
         4.0: 0.01,
     }
+    evaluated: list[float] = []
 
     def fake_score(_band_resid: dict[int, tuple[np.ndarray, np.ndarray]], period: float, **_kwargs: object) -> dict[str, object]:
+        evaluated.append(float(period))
         objective = float(raw_scores.get(round(float(period), 10), np.inf))
         return {
             "objective": objective,
@@ -573,23 +576,14 @@ def test_arbitrate_harmonic_period_uses_shortlist_double_when_best(monkeypatch) 
 
     assert periodicity_gate.PREGATE_HARMONIC_FACTORS == (
         1.0,
-        2.0,
         0.5,
-        3.0,
         1.0 / 3.0,
-        4.0,
         0.25,
-        5.0,
-        1.0 / 5.0,
-        6.0,
-        1.0 / 6.0,
-        7.0,
-        1.0 / 7.0,
-        8.0,
-        1.0 / 8.0,
     )
-    assert factor == 2.0
-    assert selected_period == 4.0
+    assert evaluated == pytest.approx([2.0, 1.0, 2.0 / 3.0, 0.5])
+    assert all(period <= 2.0 for period in evaluated)
+    assert factor == 1.0
+    assert selected_period == 2.0
 
 
 def test_arbitrate_harmonic_period_uses_shortlist_half_when_best(monkeypatch) -> None:

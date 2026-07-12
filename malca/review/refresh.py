@@ -25,7 +25,7 @@ from malca.review.store import (
     load_candidates_file,
     replace_candidate_payload_fields,
 )
-from malca.core.stats import compute_stats
+from malca.core.stats import _period_feature_from_row, compute_stats
 
 
 CORE_STATS_KEYS = {
@@ -145,13 +145,21 @@ def _resolve_lightcurve_path(payload: dict, run_dir: Path) -> Path | None:
     return None
 
 
-def _build_stats_updates(lc_path: Path, *, compute_ls: bool) -> dict[str, object]:
+def _build_stats_updates(
+    lc_path: Path,
+    *,
+    compute_ls: bool,
+    period_payload: dict[str, object] | None = None,
+) -> dict[str, object]:
     file_ext = lc_path.suffix[1:] if lc_path.suffix.startswith(".") else None
+    feature_period_days, feature_period_source = _period_feature_from_row(period_payload or {})
     _df, summary = compute_stats(
         lc_path.stem,
         str(lc_path.parent),
         compute_ls=compute_ls,
         file_ext=file_ext,
+        feature_period_days=feature_period_days,
+        feature_period_source=feature_period_source,
     )
     updates: dict[str, object] = {"lc_path": str(lc_path)}
     merge_stats_summary_into_payload(updates, summary)
@@ -238,7 +246,7 @@ def refresh_review_stats_from_run(
                 continue
 
             try:
-                updates = _build_stats_updates(lc_path, compute_ls=compute_ls)
+                updates = _build_stats_updates(lc_path, compute_ls=compute_ls, period_payload=payload)
                 replace_candidate_payload_fields(
                     conn,
                     candidate_id,

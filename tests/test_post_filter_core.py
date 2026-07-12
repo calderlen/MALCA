@@ -422,6 +422,8 @@ def test_validate_periodicity_uses_local_bundle_lightcurves(
     assert float(row["pdm_snr"]) == 7.0
     assert float(row["ce_snr"]) == 6.0
     assert float(row["periodicity_period"]) == 2.5
+    assert float(row["pdm_corrected_period"]) == 2.5
+    assert float(row["ce_corrected_period"]) == 2.5
     assert row["periodicity_method"] == "pdm"
     assert float(row["lsp_period"]) == 2.5
 
@@ -491,9 +493,122 @@ def test_lsp_worker_aligns_simple_v_minus_g_median_offset(monkeypatch: pytest.Mo
     assert out["pdm_method"] == "plavchan"
     assert out["periodicity_period"] == 4.0
     assert out["periodicity_method"] == "pdm"
+    assert out["pdm_period"] == 4.0
+    assert out["ce_period"] == 4.0
+    assert out["pdm_corrected_period"] == 4.0
+    assert out["ce_corrected_period"] == 4.0
     assert out["lsp_period"] == 4.0
     assert captured["file_ext"] == "dat3"
     assert np.isclose(expected_offset, 0.8, atol=5e-3)
+
+
+def test_lsp_worker_no_bootstrap_selects_supported_ce_without_defaulting_to_pdm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    jd_g = np.linspace(0.0, 120.0, 80)
+    jd_v = jd_g + 0.15
+    signal_g = 14.0 + 0.10 * np.sin(2.0 * np.pi * jd_g / 4.0)
+    signal_v = 14.0 + 0.10 * np.sin(2.0 * np.pi * jd_v / 8.0) + 0.8
+
+    df_g = pd.DataFrame(
+        {
+            "JD": jd_g,
+            "mag": signal_g,
+            "error": np.full(jd_g.size, 0.03, dtype=float),
+            "v_g_band": np.zeros(jd_g.size, dtype=int),
+        }
+    )
+    df_v = pd.DataFrame(
+        {
+            "JD": jd_v,
+            "mag": signal_v,
+            "error": np.full(jd_v.size, 0.03, dtype=float),
+            "v_g_band": np.ones(jd_v.size, dtype=int),
+        }
+    )
+
+    def _fake_read_lc_dat2(*_args: object, **_kwargs: object) -> tuple[pd.DataFrame, pd.DataFrame]:
+        return df_g.copy(), df_v.copy()
+
+    def _fake_pdm_stats(_jd: np.ndarray, _mag: np.ndarray, _err: np.ndarray, **_kwargs: object) -> dict[str, float]:
+        assert _kwargs["n_bootstrap"] == 0
+        return {
+            "pdm_period": 6.0,
+            "pdm_min_theta": 0.9,
+            "pdm_snr": 1.5,
+            "pdm_bootstrap_sig": np.nan,
+            "pdm_is_significant": False,
+        }
+
+    def _fake_ce_stats(_jd: np.ndarray, _mag: np.ndarray, _err: np.ndarray, **_kwargs: object) -> dict[str, float]:
+        assert _kwargs["n_bootstrap"] == 0
+        return {
+            "ce_period": 8.0,
+            "ce_min_entropy": 0.25,
+            "ce_snr": 8.0,
+            "ce_bootstrap_sig": np.nan,
+            "ce_is_significant": False,
+        }
+
+    def _fake_correct_native_period(
+        raw_period: float,
+        _band_resid: dict[int, tuple[np.ndarray, np.ndarray]],
+    ) -> dict[str, object]:
+        raw = float(raw_period)
+        corrected = raw / 2.0
+        return {
+            "raw_period": raw,
+            "corrected_period": corrected,
+            "harmonic_factor": 0.5,
+            "objective": 0.2 if np.isclose(raw, 8.0) else 0.9,
+            "selection_objective": 0.2 if np.isclose(raw, 8.0) else 0.9,
+            "scatter_ratio": 0.2 if np.isclose(raw, 8.0) else 0.9,
+            "alias_flag": False,
+            "alias_matches": [],
+            "candidates": [],
+        }
+
+    monkeypatch.setattr(post_filter, "read_lc_dat2", _fake_read_lc_dat2)
+    monkeypatch.setattr(post_filter, "compute_pdm_stats", _fake_pdm_stats)
+    monkeypatch.setattr(post_filter, "compute_ce_stats", _fake_ce_stats)
+    monkeypatch.setattr(post_filter, "_correct_native_period", _fake_correct_native_period)
+
+    out = post_filter._lsp_worker(
+        ("/data/poohbah/cluster/123.dat3", "/tmp/123.dat3", 0, 0.01, True, "plavchan")
+    )
+
+    assert out["error"] is None
+    assert out["pdm_period"] == 6.0
+    assert out["ce_period"] == 8.0
+    assert out["pdm_corrected_period"] == 3.0
+    assert out["ce_corrected_period"] == 4.0
+    assert out["periodicity_method"] == "ce"
+    assert out["periodicity_base_period"] == 8.0
+    assert out["periodicity_period"] == 4.0
+    assert out["periodicity_harmonic_factor"] == 0.5
+
+
+def test_annotate_phase_plot_candidates_uses_native_support_not_lsp_power() -> None:
+    df = pd.DataFrame(
+        {
+            "lc_path": ["pdm.dat3", "ce.dat3", "weak.dat3"],
+            "periodicity_period": [3.0, 4.0, 5.0],
+            "periodicity_method": ["pdm", "ce", "pdm"],
+            "periodicity_bootstrap_sig": [1e-3, 2e-3, 1e-3],
+            "periodicity_alias_flag": [False, False, False],
+            "pdm_theta": [0.2, np.nan, 0.9],
+            "pdm_snr": [7.0, np.nan, 1.5],
+            "ce_entropy": [np.nan, 0.25, np.nan],
+            "ce_snr": [np.nan, 8.0, np.nan],
+            "lsp_power": [np.nan, np.nan, np.nan],
+        }
+    )
+
+    out = post_filter.annotate_phase_plot_candidates(df, max_sig=0.01, min_power=0.3)
+
+    assert out["phase_plot_ready"].tolist() == [True, True, False]
+    assert out["phase_period_days"].iloc[:2].tolist() == [3.0, 4.0]
+    assert out["phase_source"].iloc[:2].tolist() == ["pdm", "ce"]
 
 
 def test_validate_periodicity_recomputes_stale_checkpoint_rows(

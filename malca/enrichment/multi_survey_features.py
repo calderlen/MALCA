@@ -561,12 +561,13 @@ def _add_gaia_epoch_features(features: dict[str, object], gaia: pd.DataFrame, st
 
 def _candidate_period_days(row: pd.Series | dict[str, Any]) -> float:
     for col in (
-        "pre_periodicity_selected_period",
         "periodicity_period",
+        "pdm_corrected_period",
+        "ce_corrected_period",
         "pdm_period",
-        "lsp_period",
         "ce_period",
         "period_consensus_days",
+        "pre_periodicity_selected_period",
         "asassn_var_period",
         "ztf_var_period",
         "vsx_period",

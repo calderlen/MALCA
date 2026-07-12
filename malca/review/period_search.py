@@ -10,7 +10,11 @@ from malca.config import (
     CLEAN_LC_MAX_ERROR_ABSOLUTE,
     CLEAN_LC_MAX_ERROR_SIGMA,
 )
-from malca.config import LS_ALIAS_PERIODS, LS_ALIAS_TOLERANCE
+from malca.core.period_arbitration import (
+    NATIVE_PERIOD_HARMONIC_FACTORS,
+    native_harmonic_period_candidates,
+    period_alias_matches,
+)
 from malca.core.phase import phase_template, resolve_phase_period, template_phase_lag
 from malca.core.periodogram import ce_find_period, lsp_find_period, pdm_find_period
 from malca.review.interactive_plot import (
@@ -20,12 +24,7 @@ from malca.review.interactive_plot import (
 )
 
 
-REVIEW_PERIOD_HARMONIC_FACTORS: tuple[float, ...] = (
-    1.0,
-    0.5,
-    1.0 / 3.0,
-    0.25,
-)
+REVIEW_PERIOD_HARMONIC_FACTORS: tuple[float, ...] = NATIVE_PERIOD_HARMONIC_FACTORS
 REVIEW_HARMONIC_CHECK_DIVISORS: tuple[float, ...] = (1.0, 2.0, 3.0, 4.0)
 REVIEW_HARMONIC_CHECK_SCORE_TOLERANCE = 0.03
 AUTO_PERIOD_METHODS: tuple[str, ...] = ("pdm", "ce")
@@ -73,18 +72,24 @@ def _harmonic_check_candidate_periods(
     if max_p < min_p:
         min_p, max_p = max_p, min_p
 
-    candidates: list[dict[str, float]] = []
-    for divisor in divisors:
-        divisor = float(divisor)
-        if not np.isfinite(divisor) or divisor <= 0:
-            continue
-        period = base / divisor
-        if not np.isfinite(period) or period <= 0 or period < min_p or period > max_p:
-            continue
-        if any(abs(period - item["period"]) <= 1e-10 * max(1.0, abs(period), abs(item["period"])) for item in candidates):
-            continue
-        candidates.append({"factor": 1.0 / divisor, "divisor": divisor, "period": float(period)})
-    return candidates
+    factors = tuple(
+        1.0 / float(divisor)
+        for divisor in divisors
+        if np.isfinite(float(divisor)) and float(divisor) > 0
+    )
+    return [
+        {
+            "factor": float(candidate["factor"]),
+            "divisor": float(candidate["divisor"]),
+            "period": float(candidate["period"]),
+        }
+        for candidate in native_harmonic_period_candidates(
+            base,
+            min_period=min_p,
+            max_period=max_p,
+            harmonic_factors=factors,
+        )
+    ]
 
 
 def _robust_sigma(values: np.ndarray) -> float:
@@ -165,11 +170,7 @@ def _score_period_harmonic_candidate(
         lag_phase = template_phase_lag(templates[0], templates[1])
     lag_term = 0.0 if not np.isfinite(lag_phase) else float(lag_phase)
     raw_objective = float(scatter_ratio + lag_weight * lag_term)
-    alias_matches = [
-        float(alias_period)
-        for alias_period in LS_ALIAS_PERIODS
-        if np.isfinite(alias_period) and abs(float(period) - float(alias_period)) <= float(LS_ALIAS_TOLERANCE)
-    ]
+    alias_matches = period_alias_matches(period)
     alias_flag = bool(alias_matches)
     return {
         "objective": float(raw_objective + (alias_penalty if alias_flag else 0.0)),
@@ -307,18 +308,22 @@ def arbitrate_harmonic_period(
     if not band_resid:
         return float(base_period), 1.0, {"objective": np.nan, "base_objective": np.nan}
 
-    candidates: list[tuple[float, float, dict[str, float]]] = []
-    for factor in harmonic_factors:
-        p = float(base_period) * float(factor)
-        if not np.isfinite(p) or p <= 0 or p < float(min_period) or p > float(max_period):
-            continue
-        if any(abs(p - prev_p) <= 1e-10 * max(1.0, abs(p), abs(prev_p)) for _, prev_p, _ in candidates):
-            continue
+    candidates: list[tuple[float, float, dict[str, object]]] = []
+    for candidate in native_harmonic_period_candidates(
+        base_period,
+        min_period=min_period,
+        max_period=max_period,
+        harmonic_factors=harmonic_factors,
+    ):
+        factor = float(candidate["factor"])
+        p = float(candidate["period"])
         score = dict(_score_period_harmonic_candidate(band_resid, p))
         harmonic_penalty = float(harmonic_penalty_scale * abs(np.log2(float(factor)))) if factor > 0 else np.inf
         score["harmonic_penalty"] = harmonic_penalty
         base_objective = float(score.get("objective", np.inf))
         score["selection_objective"] = float(base_objective + harmonic_penalty) if np.isfinite(base_objective) else np.inf
+        score["alias_flag"] = bool(score.get("alias_flag", candidate.get("alias_flag", False)))
+        score["alias_matches"] = [float(v) for v in score.get("alias_matches", candidate.get("alias_matches", []))]
         candidates.append((float(factor), p, score))
 
     if not candidates:

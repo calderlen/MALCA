@@ -46,6 +46,24 @@ from malca.core.periodogram import pdm_find_period, ce_find_period
 from malca.core.utils import read_lc_dat2, read_lc_csv, read_skypatrol_lc_csv, compute_camera_loo_metrics, compute_field_summary
 
 
+_LC_COLUMNS = [
+    "JD",
+    "mag",
+    "error",
+    "good_bad",
+    "camera#",
+    "v_g_band",
+    "saturated",
+    "camera_name",
+    "field",
+]
+
+Q_TEMPLATE_METHOD = "phase_template_50bin"
+Q_TEMPLATE_N_PHASE_BINS = 50
+Q_TEMPLATE_MIN_BIN_POINTS = 3
+Q_TEMPLATE_SMOOTH_WINDOW_BINS = 3
+Q_TEMPLATE_MIN_BIN_COVERAGE = 0.25
+
 
 
 
@@ -69,6 +87,88 @@ def robust_sigma(x):
     if x.size == 0:
         return np.nan
     return MAD_SCALE * np.median(np.abs(x - np.median(x)))
+
+
+def _prepare_stats_lightcurve_frame(raw: pd.DataFrame | None) -> pd.DataFrame:
+    """Normalize loaded ASAS-SN light-curve columns for compute_stats."""
+    if raw is None or raw.empty:
+        return pd.DataFrame(columns=_LC_COLUMNS)
+
+    df = raw.copy()
+    df.columns = _LC_COLUMNS[:len(df.columns)] + [f"extra_{i}" for i in range(len(df.columns) - len(_LC_COLUMNS))]
+    for col in _LC_COLUMNS:
+        if col not in df.columns:
+            df[col] = np.nan
+    for col in ("JD", "mag", "error", "good_bad", "camera#", "v_g_band", "saturated"):
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df["good_bad"] = df["good_bad"].fillna(1)
+    df["saturated"] = df["saturated"].fillna(0)
+    return df.dropna(subset=["JD", "mag", "error"]).sort_values("JD").reset_index(drop=True)
+
+
+def _filter_stats_lightcurve_frame(
+    df: pd.DataFrame,
+    *,
+    use_only_good: bool,
+    drop_dupes: bool,
+    duplicate_subset: tuple[str, ...],
+) -> pd.DataFrame:
+    """Apply the basic compute_stats quality filters."""
+    out = df.copy()
+    if out.empty:
+        return out
+    if drop_dupes:
+        subset = [col for col in duplicate_subset if col in out.columns]
+        if subset:
+            out = out[~out.duplicated(subset=subset, keep="first")].reset_index(drop=True)
+    if use_only_good:
+        good = pd.to_numeric(out.get("good_bad"), errors="coerce").fillna(1) == 1
+        saturated = pd.to_numeric(out.get("saturated"), errors="coerce").fillna(0) == 0
+        out = out[good & saturated].reset_index(drop=True)
+    return out
+
+
+def _camera_band_normalized_q_arrays(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return time, offset-normalized magnitude, and error arrays for Q."""
+    if df.empty:
+        empty = np.array([], dtype=float)
+        return empty, empty, empty
+
+    work = df.copy()
+    work["_q_time"] = pd.to_numeric(work.get("JD"), errors="coerce")
+    work["_q_mag"] = pd.to_numeric(work.get("mag"), errors="coerce")
+    work["_q_err"] = pd.to_numeric(work.get("error"), errors="coerce")
+
+    camera = (
+        work["camera_name"].astype("string")
+        if "camera_name" in work.columns
+        else work.get("camera#", pd.Series("unknown", index=work.index)).astype("string")
+    )
+    camera = camera.fillna("").str.strip()
+    camera = camera.where(camera != "", "unknown")
+    band = pd.to_numeric(work.get("v_g_band"), errors="coerce").astype("Float64").astype("string").fillna("unknown")
+    work["_q_group"] = band + "|" + camera
+
+    finite = (
+        np.isfinite(work["_q_time"].to_numpy(dtype=float))
+        & np.isfinite(work["_q_mag"].to_numpy(dtype=float))
+        & np.isfinite(work["_q_err"].to_numpy(dtype=float))
+        & (work["_q_err"].to_numpy(dtype=float) > 0)
+    )
+    work = work.loc[finite].copy()
+    if work.empty:
+        empty = np.array([], dtype=float)
+        return empty, empty, empty
+
+    global_median = float(np.median(work["_q_mag"].to_numpy(dtype=float)))
+    group_median = work.groupby("_q_group")["_q_mag"].transform("median")
+    offsets = pd.to_numeric(group_median, errors="coerce").fillna(global_median).to_numpy(dtype=float)
+    values = work["_q_mag"].to_numpy(dtype=float) - offsets + global_median
+    return (
+        work["_q_time"].to_numpy(dtype=float),
+        values.astype(float),
+        work["_q_err"].to_numpy(dtype=float),
+    )
 
 
 def _stetson_robust_mean(
@@ -1624,47 +1724,201 @@ def fit_fourier_decomposition(mag, time, period, err=None, max_harmonics=7):
     return result
 
 
-def quasi_periodicity_metric(mag, time, err, period, max_harmonics=7) -> float:
-    """Cody-style quasi-periodicity metric from raw and phased residual variance."""
-    if (not np.isfinite(period)) or period <= 0:
-        return np.nan
+def _empty_quasi_periodicity_result(
+    status: str,
+    *,
+    n_points: int = 0,
+    n_phase_bins: int = Q_TEMPLATE_N_PHASE_BINS,
+    smooth_window_bins: int = Q_TEMPLATE_SMOOTH_WINDOW_BINS,
+    raw_scatter: float = np.nan,
+) -> dict[str, object]:
+    return {
+        "q": np.nan,
+        "method": Q_TEMPLATE_METHOD,
+        "n_points": int(n_points),
+        "n_bins": int(n_phase_bins),
+        "populated_bins": np.nan,
+        "bin_coverage": np.nan,
+        "smooth_window_bins": int(smooth_window_bins),
+        "template_amplitude": np.nan,
+        "raw_scatter": float(raw_scatter) if np.isfinite(raw_scatter) else np.nan,
+        "resid_scatter": np.nan,
+        "scatter_ratio": np.nan,
+        "status": str(status),
+    }
+
+
+def _circular_fill_template(template: np.ndarray) -> np.ndarray | None:
+    values = np.asarray(template, dtype=float)
+    n_bins = int(values.size)
+    finite = np.isfinite(values)
+    if n_bins == 0 or not finite.any():
+        return None
+    if finite.sum() == 1:
+        return np.full(n_bins, float(values[finite][0]), dtype=float)
+
+    centers = (np.arange(n_bins, dtype=float) + 0.5) / float(n_bins)
+    xp = np.concatenate([centers[finite] - 1.0, centers[finite], centers[finite] + 1.0])
+    fp = np.concatenate([values[finite], values[finite], values[finite]])
+    return np.interp(centers, xp, fp)
+
+
+def _circular_boxcar_smooth(values: np.ndarray, window_bins: int) -> np.ndarray:
+    arr = np.asarray(values, dtype=float)
+    window = max(int(window_bins), 1)
+    if window <= 1:
+        return arr.copy()
+    if window % 2 == 0:
+        window += 1
+    pad = window // 2
+    kernel = np.ones(window, dtype=float) / float(window)
+    padded = np.concatenate([arr[-pad:], arr, arr[:pad]])
+    return np.convolve(padded, kernel, mode="valid")
+
+
+def phase_template_quasi_periodicity(
+    mag,
+    time,
+    err,
+    period,
+    *,
+    n_phase_bins: int = Q_TEMPLATE_N_PHASE_BINS,
+    min_bin_points: int = Q_TEMPLATE_MIN_BIN_POINTS,
+    smooth_window_bins: int = Q_TEMPLATE_SMOOTH_WINDOW_BINS,
+    min_bin_coverage: float = Q_TEMPLATE_MIN_BIN_COVERAGE,
+) -> dict[str, object]:
+    """Cody-style Q using a smoothed empirical phase-folded template."""
+    try:
+        period_value = float(period)
+    except (TypeError, ValueError):
+        period_value = np.nan
+    if not np.isfinite(period_value) or period_value <= 0:
+        return _empty_quasi_periodicity_result("invalid_period", n_phase_bins=n_phase_bins, smooth_window_bins=smooth_window_bins)
 
     mag = np.asarray(mag, float)
     time = np.asarray(time, float)
     err = np.asarray(err, float)
     mask = np.isfinite(mag) & np.isfinite(time) & np.isfinite(err) & (err > 0)
-    if int(mask.sum()) < 5:
-        return np.nan
+    n_points = int(mask.sum())
+    if n_points < 5:
+        return _empty_quasi_periodicity_result(
+            "insufficient_points",
+            n_points=n_points,
+            n_phase_bins=n_phase_bins,
+            smooth_window_bins=smooth_window_bins,
+        )
 
     mag = mag[mask]
     time = time[mask]
     err = err[mask]
-
     raw_var = float(np.var(mag, ddof=1))
+    raw_scatter = float(np.sqrt(raw_var)) if np.isfinite(raw_var) and raw_var >= 0 else np.nan
     noise_var = float(np.mean(np.square(err)))
     denom = raw_var - noise_var
     if not np.isfinite(denom) or denom <= 0:
-        return np.nan
+        return _empty_quasi_periodicity_result(
+            "low_intrinsic_variance",
+            n_points=n_points,
+            n_phase_bins=n_phase_bins,
+            smooth_window_bins=smooth_window_bins,
+            raw_scatter=raw_scatter,
+        )
 
-    phase_fit = _fit_phase_fourier_series(mag, time, period, err=err, max_harmonics=max_harmonics)
-    if phase_fit is None:
-        return np.nan
+    n_bins = max(int(n_phase_bins), 4)
+    phase = np.mod((time - float(np.min(time))) / period_value, 1.0)
+    bin_idx = np.floor(phase * n_bins).astype(int)
+    bin_idx = np.clip(bin_idx, 0, n_bins - 1)
 
-    best_fit = phase_fit["best_fit"]
-    fitted = np.asarray(best_fit["fitted"], float)
-    fit_mag = np.asarray(phase_fit["mag"], float)
-    fit_err = np.asarray(phase_fit["err"], float)
-    if fitted.size != fit_mag.size or fitted.size < 2:
-        return np.nan
+    template = np.full(n_bins, np.nan, dtype=float)
+    counts = np.zeros(n_bins, dtype=int)
+    for idx in range(n_bins):
+        vals = mag[bin_idx == idx]
+        if vals.size >= int(min_bin_points):
+            template[idx] = float(np.median(vals))
+            counts[idx] = int(vals.size)
 
-    resid = fit_mag - fitted
+    populated_bins = int(np.count_nonzero(np.isfinite(template)))
+    bin_coverage = float(populated_bins / n_bins)
+    min_populated_bins = max(8, int(np.ceil(float(min_bin_coverage) * n_bins)))
+    if populated_bins < min_populated_bins:
+        result = _empty_quasi_periodicity_result(
+            "insufficient_phase_coverage",
+            n_points=n_points,
+            n_phase_bins=n_bins,
+            smooth_window_bins=smooth_window_bins,
+            raw_scatter=raw_scatter,
+        )
+        result["populated_bins"] = populated_bins
+        result["bin_coverage"] = bin_coverage
+        return result
+
+    filled = _circular_fill_template(template)
+    if filled is None or not np.isfinite(filled).any():
+        result = _empty_quasi_periodicity_result(
+            "template_fill_failed",
+            n_points=n_points,
+            n_phase_bins=n_bins,
+            smooth_window_bins=smooth_window_bins,
+            raw_scatter=raw_scatter,
+        )
+        result["populated_bins"] = populated_bins
+        result["bin_coverage"] = bin_coverage
+        return result
+
+    smoothed = _circular_boxcar_smooth(filled, int(smooth_window_bins))
+    centers = (np.arange(n_bins, dtype=float) + 0.5) / float(n_bins)
+    xp = np.concatenate([centers - 1.0, centers, centers + 1.0])
+    fp = np.concatenate([smoothed, smoothed, smoothed])
+    model = np.interp(phase, xp, fp)
+    valid_model = np.isfinite(model) & np.isfinite(mag)
+    if int(valid_model.sum()) < 2:
+        result = _empty_quasi_periodicity_result(
+            "template_model_failed",
+            n_points=n_points,
+            n_phase_bins=n_bins,
+            smooth_window_bins=smooth_window_bins,
+            raw_scatter=raw_scatter,
+        )
+        result["populated_bins"] = populated_bins
+        result["bin_coverage"] = bin_coverage
+        return result
+
+    resid = mag[valid_model] - model[valid_model]
     resid_var = float(np.var(resid, ddof=1))
-    fit_noise_var = float(np.mean(np.square(fit_err)))
-    numer = resid_var - fit_noise_var
-    if not np.isfinite(numer):
-        return np.nan
+    resid_noise_var = float(np.mean(np.square(err[valid_model])))
+    numer = resid_var - resid_noise_var
+    q_value = float(numer / denom) if np.isfinite(numer) else np.nan
+    resid_scatter = float(np.sqrt(resid_var)) if np.isfinite(resid_var) and resid_var >= 0 else np.nan
+    scatter_ratio = float(resid_scatter / raw_scatter) if np.isfinite(resid_scatter) and np.isfinite(raw_scatter) and raw_scatter > 0 else np.nan
+    template_amp = float(np.nanmax(smoothed) - np.nanmin(smoothed)) if np.isfinite(smoothed).any() else np.nan
 
-    return float(numer / denom)
+    return {
+        "q": q_value,
+        "method": Q_TEMPLATE_METHOD,
+        "n_points": int(valid_model.sum()),
+        "n_bins": int(n_bins),
+        "populated_bins": int(populated_bins),
+        "bin_coverage": float(bin_coverage),
+        "smooth_window_bins": int(smooth_window_bins),
+        "template_amplitude": template_amp,
+        "raw_scatter": raw_scatter,
+        "resid_scatter": resid_scatter,
+        "scatter_ratio": scatter_ratio,
+        "status": "ok" if np.isfinite(q_value) else "invalid_q",
+    }
+
+
+def quasi_periodicity_metric(mag, time, err, period, max_harmonics=7) -> float:
+    """Cody-style quasi-periodicity Q from a smoothed phase-folded template.
+
+    ``max_harmonics`` is accepted for compatibility with older callers; Q no
+    longer uses a Fourier model.
+    """
+    result = phase_template_quasi_periodicity(mag, time, err, period)
+    try:
+        return float(result["q"])
+    except (TypeError, ValueError, KeyError):
+        return np.nan
 
 
 def psi_cs(mag, time, period):
@@ -1865,13 +2119,26 @@ def mhps(jd, mag, err):
         return nan_result
 
 
-def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=True, compute_ls=False, file_ext: str | None = None):
+def compute_stats(
+    asassn_id,
+    path,
+    use_only_good=True,
+    drop_dupes=True,
+    use_g=True,
+    compute_ls=False,
+    file_ext: str | None = None,
+    feature_period_days: float | None = None,
+    feature_period_source: str | None = None,
+):
 
-    df_g, df_v = read_lc_csv(asassn_id, path)
-    if df_g.empty and df_v.empty:
-        df_g, df_v = read_skypatrol_lc_csv(asassn_id, path)
-    if df_g.empty and df_v.empty:
-        df_g, df_v = read_lc_dat2(asassn_id, path, file_ext=file_ext)
+    df_g_raw, df_v_raw = read_lc_csv(asassn_id, path)
+    if df_g_raw.empty and df_v_raw.empty:
+        df_g_raw, df_v_raw = read_skypatrol_lc_csv(asassn_id, path)
+    if df_g_raw.empty and df_v_raw.empty:
+        df_g_raw, df_v_raw = read_lc_dat2(asassn_id, path, file_ext=file_ext)
+
+    df_g = _prepare_stats_lightcurve_frame(df_g_raw)
+    df_v = _prepare_stats_lightcurve_frame(df_v_raw)
 
     if use_g:
         if df_g.empty and not df_v.empty:
@@ -1885,34 +2152,25 @@ def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=Tr
             df = df_g.copy()
         else:
             df = df_v.copy()
-    
-    cols = ["JD",
-            "mag",
-            "error",
-            "good_bad",
-            "camera#",
-            "v_g_band",
-            "saturated",
-            "camera_name",
-            "field"]
-    
-    df.columns = cols[:len(df.columns)] + [f"extra_{i}" for i in range(len(df.columns)-len(cols))]
 
-    for c in ["JD","mag","error","good_bad","camera#","v_g_band","saturated"]:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-
-    df = df.dropna(subset=["JD","mag","error"]).sort_values("JD").reset_index(drop=True)
-
-    # drop duplicate JDs
-    if drop_dupes:
-        df = df[~df["JD"].duplicated(keep="first")].reset_index(drop=True)
-
-    # filtering
     base_n = len(df)
-    if use_only_good:
-        df = df[(df["good_bad"] == 1) & (df["saturated"] == 0)].reset_index(drop=True)
+    df = _filter_stats_lightcurve_frame(
+        df,
+        use_only_good=use_only_good,
+        drop_dupes=drop_dupes,
+        duplicate_subset=("JD",),
+    )
     kept_n = len(df)
     field_summary = compute_field_summary(df)
+
+    q_frames = [frame for frame in (df_g, df_v) if not frame.empty]
+    q_df = pd.concat(q_frames, ignore_index=True) if q_frames else pd.DataFrame(columns=_LC_COLUMNS)
+    q_df = _filter_stats_lightcurve_frame(
+        q_df,
+        use_only_good=use_only_good,
+        drop_dupes=drop_dupes,
+        duplicate_subset=("JD", "v_g_band", "camera#", "camera_name", "field"),
+    )
 
     # time axis in days since first exposure (JD is in days already)
     jd0 = df["JD"].iloc[0]
@@ -2049,9 +2307,21 @@ def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=Tr
     _autocor_length = autocor_length(mag, vnr)
     _sf_amplitude, _sf_gamma = structure_function(mag, jd_arr)
 
-    # period-dependent features (use LS best period)
-    best_period = ls_stats["ls_best_period_days"]
-    quasi_periodicity_q = quasi_periodicity_metric(mag, jd_arr, merr, best_period)
+    # Period-dependent features use an explicit period. Lomb-Scargle remains
+    # an optional legacy feature, but no longer drives Q or related stats by
+    # default.
+    try:
+        best_period = float(feature_period_days)
+    except (TypeError, ValueError):
+        best_period = np.nan
+    if not np.isfinite(best_period) or best_period <= 0:
+        best_period = np.nan
+        periodic_feature_source = ""
+    else:
+        periodic_feature_source = str(feature_period_source or "explicit_period")
+    q_time, q_mag, q_err = _camera_band_normalized_q_arrays(q_df)
+    q_result = phase_template_quasi_periodicity(q_mag, q_time, q_err, best_period)
+    quasi_periodicity_q = q_result["q"]
     _harmonics = fit_fourier_decomposition(mag, jd_arr, best_period, err=merr)
     _psi_cs = psi_cs(mag, jd_arr, best_period)
     _psi_eta = psi_eta(mag, jd_arr, best_period)
@@ -2178,6 +2448,19 @@ def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=Tr
         ("variability_stetson_L_time", stetson["stetson_L_time"]),
         ("variability_flux_asymmetry_m", flux_asymmetry_m),
         ("variability_quasi_periodicity_q", quasi_periodicity_q),
+        ("variability_quasi_periodicity_method", q_result["method"]),
+        ("variability_quasi_periodicity_n_points", q_result["n_points"]),
+        ("variability_quasi_periodicity_n_bins", q_result["n_bins"]),
+        ("variability_quasi_periodicity_populated_bins", q_result["populated_bins"]),
+        ("variability_quasi_periodicity_bin_coverage", q_result["bin_coverage"]),
+        ("variability_quasi_periodicity_smooth_window_bins", q_result["smooth_window_bins"]),
+        ("variability_quasi_periodicity_template_amplitude", q_result["template_amplitude"]),
+        ("variability_quasi_periodicity_raw_scatter", q_result["raw_scatter"]),
+        ("variability_quasi_periodicity_resid_scatter", q_result["resid_scatter"]),
+        ("variability_quasi_periodicity_scatter_ratio", q_result["scatter_ratio"]),
+        ("variability_quasi_periodicity_status", q_result["status"]),
+        ("variability_periodic_feature_period_days", best_period),
+        ("variability_periodic_feature_period_source", periodic_feature_source),
         ("variability_string_length_resid_total", string_length_stats["string_length_total"]),
         ("variability_string_length_resid_mean_step", string_length_stats["string_length_mean_step"]),
         ("variability_string_length_resid_n_steps", string_length_stats["string_length_n_steps"]),
@@ -2429,6 +2712,27 @@ def load_dat(path, has_header=False):
 
     return df
 
+
+def _period_feature_from_row(row: dict[str, object]) -> tuple[float | None, str | None]:
+    for key in (
+        "periodicity_period",
+        "pdm_corrected_period",
+        "ce_corrected_period",
+        "pdm_period",
+        "ce_period",
+        "period_consensus_days",
+        "pre_periodicity_selected_period",
+        "phase_period_days",
+    ):
+        try:
+            value = float(row.get(key))
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(value) and value > 0:
+            return float(value), key
+    return None, None
+
+
 def _enrich_row_worker(args: tuple) -> dict:
     """Top-level picklable worker for parallel compute_stats enrichment.
 
@@ -2445,12 +2749,15 @@ def _enrich_row_worker(args: tuple) -> dict:
         row_dict, asassn_id, dir_path, compute_ls = args
         file_ext = None
     try:
+        feature_period_days, feature_period_source = _period_feature_from_row(row_dict)
         _, stats_dict = compute_stats(
             asassn_id,
             dir_path,
             use_only_good=True,
             compute_ls=compute_ls,
             file_ext=file_ext,
+            feature_period_days=feature_period_days,
+            feature_period_source=feature_period_source,
         )
         merged = dict(row_dict)
         for k, v in stats_dict.items():

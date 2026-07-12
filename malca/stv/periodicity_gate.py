@@ -24,30 +24,18 @@ from malca.config import (
     PRE_PERIODICITY_SCATTER_RATIO_RESCUE_MARGIN,
 )
 from malca.config import WORKERS
-from malca.config import LS_ALIAS_PERIODS, LS_ALIAS_TOLERANCE
 from malca.io.lightcurve_io import load_lightcurve_df, to_asassn_algorithm_frame
+from malca.core.period_arbitration import (
+    NATIVE_PERIOD_HARMONIC_FACTORS,
+    native_harmonic_period_candidates,
+    period_alias_matches,
+)
 from malca.core.phase import align_v_to_g_magnitude, phase_template, template_phase_lag
 from malca.core.stats import compute_ce_stats
 from malca.core.utils import clean_lc, compute_n_cameras
 
 
-PREGATE_HARMONIC_FACTORS: tuple[float, ...] = (
-    1.0,
-    2.0,
-    0.5,
-    3.0,
-    1.0 / 3.0,
-    4.0,
-    0.25,
-    5.0,
-    1.0 / 5.0,
-    6.0,
-    1.0 / 6.0,
-    7.0,
-    1.0 / 7.0,
-    8.0,
-    1.0 / 8.0,
-)
+PREGATE_HARMONIC_FACTORS: tuple[float, ...] = NATIVE_PERIOD_HARMONIC_FACTORS
 PREGATE_HARMONIC_MIN_REL_IMPROVEMENT = 0.02
 PREGATE_ROUTER_MODE = "ce_folded_scatter_phase_shape_v5"
 PREGATE_CHECKPOINT_VERSION = "v8_ce_folded_scatter_phase_shape_lag"
@@ -258,11 +246,7 @@ def _score_period_harmonic_candidate(
     if 0 in templates and 1 in templates:
         phase_lag = template_phase_lag(templates[0], templates[1], signed=True)
     phase_lag_abs = abs(float(phase_lag)) if np.isfinite(phase_lag) else np.nan
-    alias_matches = [
-        float(alias_period)
-        for alias_period in LS_ALIAS_PERIODS
-        if np.isfinite(alias_period) and abs(float(period) - float(alias_period)) <= float(LS_ALIAS_TOLERANCE)
-    ]
+    alias_matches = period_alias_matches(period)
     alias_flag = bool(alias_matches)
     return {
         "objective": scatter_ratio,
@@ -327,14 +311,18 @@ def _arbitrate_harmonic_period(
         }
 
     candidates: list[tuple[float, float, dict[str, object]]] = []
-    for factor in harmonic_factors:
-        period = float(base_period) * float(factor)
-        if not np.isfinite(period) or period <= 0 or period < float(min_period) or period > float(max_period):
-            continue
-        if any(abs(period - prev_period) <= 1e-10 * max(1.0, abs(period), abs(prev_period)) for _, prev_period, _ in candidates):
-            continue
+    for candidate in native_harmonic_period_candidates(
+        base_period,
+        min_period=min_period,
+        max_period=max_period,
+        harmonic_factors=harmonic_factors,
+    ):
+        factor = float(candidate["factor"])
+        period = float(candidate["period"])
         score = dict(_score_period_harmonic_candidate(band_resid, period))
         score["selection_objective"] = float(score.get("objective", np.inf))
+        score["alias_flag"] = bool(score.get("alias_flag", candidate.get("alias_flag", False)))
+        score["alias_matches"] = [float(v) for v in score.get("alias_matches", candidate.get("alias_matches", []))]
         candidates.append((float(factor), period, score))
 
     if not candidates:

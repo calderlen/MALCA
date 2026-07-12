@@ -38,6 +38,8 @@ def test_refresh_review_stats_from_run_replaces_stats_only(tmp_path: Path, monke
                         "asas_sn_id": "REFRESH-1",
                         "lc_path": "/missing/original/REFRESH-1.dat2",
                         "parallax": 7.1,
+                        "periodicity_period": 2.5,
+                        "periodicity_method": "pdm",
                         "stats_file_points_total": 999.0,
                         "stats_photometry_mean_mag": 99.0,
                         "stats_legacy_extra": 123.0,
@@ -49,15 +51,28 @@ def test_refresh_review_stats_from_run_replaces_stats_only(tmp_path: Path, monke
             vet_before_import=False,
         )
 
-    def fake_compute_stats(_candidate_id: str, _parent: str, *, compute_ls: bool = True, file_ext: str | None = None):
+    def fake_compute_stats(
+        _candidate_id: str,
+        _parent: str,
+        *,
+        compute_ls: bool = True,
+        file_ext: str | None = None,
+        feature_period_days: float | None = None,
+        feature_period_source: str | None = None,
+    ):
         assert compute_ls is True
         assert file_ext == "dat2"
+        assert feature_period_days == 2.5
+        assert feature_period_source == "periodicity_period"
         return pd.DataFrame(), {
             "file_points_total": 12.0,
             "file_points_kept_after_filter": 11.0,
             "cadence_median_dt_days": 2.5,
             "photometry_mean_mag": 14.2,
             "photometry_median_mag": 14.1,
+            "variability_quasi_periodicity_q": 0.12,
+            "variability_periodic_feature_period_days": feature_period_days,
+            "variability_periodic_feature_period_source": feature_period_source,
         }
 
     monkeypatch.setattr(review_refresh, "compute_stats", fake_compute_stats)
@@ -79,6 +94,9 @@ def test_refresh_review_stats_from_run_replaces_stats_only(tmp_path: Path, monke
     assert payload["lc_path"] == str(lc_path)
     assert feature_mapping_get(payload, "stats_file_points_total") == 12.0
     assert feature_mapping_get(payload, "stats_photometry_mean_mag") == 14.2
+    assert feature_mapping_get(payload, "stats_variability_quasi_periodicity_q") == 0.12
+    assert feature_mapping_get(payload, "stats_variability_periodic_feature_period_days") == 2.5
+    assert feature_mapping_get(payload, "stats_variability_periodic_feature_period_source") == "periodicity_period"
     assert feature_mapping_get(payload, "n_points") == 11.0
     assert feature_mapping_get(payload, "cadence_median_days") == 2.5
     assert feature_mapping_get(payload, "baseline_mag") == 14.1
@@ -165,8 +183,18 @@ def test_refresh_review_stats_from_ltv_scope_matches_db_by_asas_sn_id(tmp_path: 
             vet_before_import=False,
         )
 
-    def fake_compute_stats(_candidate_id: str, _parent: str, *, compute_ls: bool = True, file_ext: str | None = None):
+    def fake_compute_stats(
+        _candidate_id: str,
+        _parent: str,
+        *,
+        compute_ls: bool = True,
+        file_ext: str | None = None,
+        feature_period_days: float | None = None,
+        feature_period_source: str | None = None,
+    ):
         assert file_ext == "dat2"
+        assert feature_period_days is None
+        assert feature_period_source is None
         return pd.DataFrame(), {
             "file_points_total": 10.0,
             "file_points_kept_after_filter": 9.0,

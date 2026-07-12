@@ -25,6 +25,7 @@ from malca.config import (
 from malca.config import (
     JD_OFFSET, LOGBF_THRESHOLD_DIP, LOGBF_THRESHOLD_JUMP,
 )
+from malca.core.phase import resolve_phase_period
 from malca.stv.plot import plot_bayes_results, plot_phase_folded_lightcurve, BASELINE_FUNCTIONS
 from malca.review.metadata import REVIEW_METADATA_FIELDS, normalize_vsx_df, normalize_vsx_record
 from malca.io.table_io import read_feature_table, write_parquet_table
@@ -339,11 +340,7 @@ def plot_passing_candidates(
         out_path = bucket_dirs[bucket] / f"{asas_sn_id}_candidate.{format}"
 
         phase_ready_raw = row.get("phase_plot_ready", False)
-        phase_period_raw = row.get("phase_period_days", np.nan)
-        if (pd.isna(phase_period_raw) or phase_period_raw is None) and ("periodicity_period" in row.index):
-            phase_period_raw = row.get("periodicity_period", np.nan)
-        if (pd.isna(phase_period_raw) or phase_period_raw is None) and ("lsp_period" in row.index):
-            phase_period_raw = row.get("lsp_period", np.nan)
+        phase_period_raw, _phase_source = resolve_phase_period(row_dict)
         try:
             phase_period = float(phase_period_raw)
             phase_ready = bool(phase_ready_raw) and np.isfinite(phase_period) and phase_period > 0

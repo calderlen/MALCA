@@ -88,7 +88,14 @@ from malca.catalogs.periodic_catalogs import (
     fetch_vsx_period_catalog,
     match_period_catalog as _match_period_catalog,
 )
-from malca.core.phase import align_v_to_g_magnitude
+from malca.core.period_arbitration import (
+    NATIVE_PERIOD_HARMONIC_FACTORS,
+    NATIVE_PERIOD_MIN_REL_IMPROVEMENT,
+    choose_native_harmonic_candidate,
+    native_harmonic_period_candidates,
+    period_alias_matches,
+)
+from malca.core.phase import align_v_to_g_magnitude, phase_template, template_phase_lag
 from malca.products.feature_layers import to_layer_first_frame, with_feature_columns
 from malca.products.product_schema import add_stv_identity, assert_stv_product_schema
 from malca.core.stats import compute_pdm_stats, compute_ce_stats
@@ -150,24 +157,42 @@ GAIA_PM_MERGE_COLS = (
 PERIODICITY_MERGE_COLS = (
     "periodicity_period",
     "periodicity_method",
+    "periodicity_base_period",
+    "periodicity_harmonic_factor",
+    "periodicity_harmonic_objective",
+    "periodicity_scatter_ratio",
+    "periodicity_alias_flag",
+    "periodicity_alias_matches",
     "periodicity_bootstrap_sig",
     "periodicity_is_significant",
-    "lsp_power",
-    "lsp_period",
-    "lsp_bootstrap_sig",
-    "lsp_is_alias",
-    "lsp_is_significant",
     "pdm_method",
     "pdm_period",
+    "pdm_corrected_period",
+    "pdm_harmonic_factor",
+    "pdm_harmonic_objective",
+    "pdm_harmonic_scatter_ratio",
+    "pdm_alias_flag",
+    "pdm_alias_matches",
     "pdm_theta",
     "pdm_snr",
     "pdm_bootstrap_sig",
     "pdm_is_significant",
     "ce_period",
+    "ce_corrected_period",
+    "ce_harmonic_factor",
+    "ce_harmonic_objective",
+    "ce_harmonic_scatter_ratio",
+    "ce_alias_flag",
+    "ce_alias_matches",
     "ce_entropy",
     "ce_snr",
     "ce_bootstrap_sig",
     "ce_is_significant",
+    "lsp_power",
+    "lsp_period",
+    "lsp_bootstrap_sig",
+    "lsp_is_alias",
+    "lsp_is_significant",
     "periodicity_score",
     "periodic_flag",
 )
@@ -891,6 +916,264 @@ def _finite_float(value: object) -> float | None:
     return f if np.isfinite(f) else None
 
 
+def _robust_sigma(values: np.ndarray) -> float:
+    vals = np.asarray(values, dtype=float)
+    vals = vals[np.isfinite(vals)]
+    if vals.size < 3:
+        return np.nan
+    med = float(np.median(vals))
+    mad = float(np.median(np.abs(vals - med)))
+    sigma = 1.4826 * mad
+    if not np.isfinite(sigma) or sigma <= 0:
+        sigma = float(np.nanstd(vals))
+    return sigma if np.isfinite(sigma) and sigma > 0 else np.nan
+
+
+def _build_periodicity_band_residuals(df_lc: pd.DataFrame) -> dict[int, tuple[np.ndarray, np.ndarray]]:
+    band_resid: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    if df_lc.empty or "v_g_band" not in df_lc.columns:
+        return band_resid
+    for band_value, band_df in df_lc.groupby("v_g_band"):
+        try:
+            band = int(band_value)
+        except Exception:
+            continue
+        jd = band_df["JD"].to_numpy(dtype=float)
+        mag = band_df["mag"].to_numpy(dtype=float)
+        valid = np.isfinite(jd) & np.isfinite(mag)
+        if np.count_nonzero(valid) < 20:
+            continue
+        mag_valid = mag[valid]
+        resid = mag_valid - float(np.median(mag_valid))
+        band_resid[band] = (jd[valid], resid)
+    return band_resid
+
+
+def _score_periodicity_harmonic_candidate(
+    band_resid: dict[int, tuple[np.ndarray, np.ndarray]],
+    period: float,
+    *,
+    n_bins: int = 48,
+    lag_weight: float = 2.5,
+    alias_penalty: float = 0.2,
+) -> dict[str, object]:
+    if not np.isfinite(period) or period <= 0:
+        return {
+            "objective": np.inf,
+            "raw_objective": np.inf,
+            "scatter_ratio": np.inf,
+            "lag_phase": np.nan,
+            "alias_flag": False,
+            "alias_matches": [],
+        }
+    all_jd = [jd for jd, _ in band_resid.values() if jd.size > 0]
+    if not all_jd:
+        aliases = period_alias_matches(period)
+        return {
+            "objective": np.nan,
+            "raw_objective": np.nan,
+            "scatter_ratio": np.nan,
+            "lag_phase": np.nan,
+            "alias_flag": bool(aliases),
+            "alias_matches": aliases,
+        }
+
+    jd0 = float(min(np.min(jd) for jd in all_jd))
+    templates: dict[int, np.ndarray] = {}
+    scatter_ratios: list[float] = []
+    for band, (jd, resid) in band_resid.items():
+        phase = np.mod((jd - jd0) / float(period), 1.0)
+        template, _ = phase_template(phase, resid, n_bins=n_bins)
+        templates[int(band)] = template
+
+        bin_idx = np.floor(phase * n_bins).astype(int)
+        bin_idx = np.clip(bin_idx, 0, n_bins - 1)
+        model = template[bin_idx]
+        valid = np.isfinite(model) & np.isfinite(resid)
+        if np.count_nonzero(valid) < 20:
+            continue
+
+        raw_sigma = _robust_sigma(resid[valid])
+        folded_sigma = _robust_sigma(resid[valid] - model[valid])
+        if np.isfinite(raw_sigma) and raw_sigma > 0 and np.isfinite(folded_sigma):
+            scatter_ratios.append(float(folded_sigma / raw_sigma))
+
+    if not scatter_ratios:
+        aliases = period_alias_matches(period)
+        return {
+            "objective": np.inf,
+            "raw_objective": np.inf,
+            "scatter_ratio": np.inf,
+            "lag_phase": np.nan,
+            "alias_flag": bool(aliases),
+            "alias_matches": aliases,
+        }
+
+    scatter_ratio = float(np.mean(scatter_ratios))
+    lag_phase = np.nan
+    if 0 in templates and 1 in templates:
+        lag_phase = template_phase_lag(templates[0], templates[1])
+    lag_term = 0.0 if not np.isfinite(lag_phase) else float(lag_phase)
+    raw_objective = float(scatter_ratio + lag_weight * lag_term)
+    aliases = period_alias_matches(period)
+    return {
+        "objective": float(raw_objective + (alias_penalty if aliases else 0.0)),
+        "raw_objective": raw_objective,
+        "scatter_ratio": scatter_ratio,
+        "lag_phase": lag_phase,
+        "alias_flag": bool(aliases),
+        "alias_matches": aliases,
+    }
+
+
+def _correct_native_period(
+    raw_period: object,
+    band_resid: dict[int, tuple[np.ndarray, np.ndarray]],
+    *,
+    min_period: float = 1.0,
+    max_period: float = 100.0,
+) -> dict[str, object]:
+    raw = _finite_float(raw_period)
+    if raw is None or raw <= 0:
+        return {
+            "raw_period": np.nan,
+            "corrected_period": np.nan,
+            "harmonic_factor": np.nan,
+            "objective": np.nan,
+            "selection_objective": np.nan,
+            "scatter_ratio": np.nan,
+            "alias_flag": False,
+            "alias_matches": [],
+        }
+
+    candidates: list[dict[str, object]] = []
+    for candidate in native_harmonic_period_candidates(
+        raw,
+        min_period=min_period,
+        max_period=max_period,
+        harmonic_factors=NATIVE_PERIOD_HARMONIC_FACTORS,
+    ):
+        factor = float(candidate["factor"])
+        period = float(candidate["period"])
+        score = dict(_score_periodicity_harmonic_candidate(band_resid, period))
+        harmonic_penalty = 0.02 * abs(np.log2(factor)) if factor > 0 else np.inf
+        objective = _finite_float(score.get("objective"))
+        selection_objective = (
+            float(objective + harmonic_penalty)
+            if objective is not None
+            else np.nan
+        )
+        candidates.append(
+            {
+                **candidate,
+                "objective": score.get("objective", np.nan),
+                "selection_objective": selection_objective,
+                "raw_objective": score.get("raw_objective", np.nan),
+                "scatter_ratio": score.get("scatter_ratio", np.nan),
+                "lag_phase": score.get("lag_phase", np.nan),
+                "harmonic_penalty": harmonic_penalty,
+                "alias_flag": bool(score.get("alias_flag", candidate.get("alias_flag", False))),
+                "alias_matches": [float(v) for v in score.get("alias_matches", candidate.get("alias_matches", []))],
+            }
+        )
+
+    selected = choose_native_harmonic_candidate(
+        candidates,
+        min_rel_improvement=NATIVE_PERIOD_MIN_REL_IMPROVEMENT,
+    )
+    if selected is None:
+        aliases = period_alias_matches(raw)
+        return {
+            "raw_period": float(raw),
+            "corrected_period": float(raw),
+            "harmonic_factor": 1.0,
+            "objective": np.nan,
+            "selection_objective": np.nan,
+            "scatter_ratio": np.nan,
+            "alias_flag": bool(aliases),
+            "alias_matches": aliases,
+            "candidates": candidates,
+        }
+    return {
+        "raw_period": float(raw),
+        "corrected_period": float(selected.get("period", raw)),
+        "harmonic_factor": float(selected.get("factor", 1.0)),
+        "objective": selected.get("objective", np.nan),
+        "selection_objective": selected.get("selection_objective", np.nan),
+        "scatter_ratio": selected.get("scatter_ratio", np.nan),
+        "alias_flag": bool(selected.get("alias_flag", False)),
+        "alias_matches": [float(v) for v in selected.get("alias_matches", [])],
+        "candidates": candidates,
+    }
+
+
+def _method_support_score(method: str, result: dict[str, object]) -> float:
+    if method == "pdm":
+        snr = _finite_float(result.get("pdm_snr"))
+        theta = _finite_float(result.get("pdm_min_theta"))
+        if snr is None or theta is None or theta <= 0:
+            return -np.inf
+        return min(
+            float(snr) / float(POST_FILTER_PDM_SNR_THRESHOLD),
+            float(POST_FILTER_PDM_MIN_THETA) / float(theta),
+        )
+    if method == "ce":
+        snr = _finite_float(result.get("ce_snr"))
+        entropy = _finite_float(result.get("ce_min_entropy"))
+        if snr is None or entropy is None or entropy <= 0:
+            return -np.inf
+        return min(
+            float(snr) / float(POST_FILTER_CE_SNR_THRESHOLD),
+            float(POST_FILTER_CE_MIN_ENTROPY) / float(entropy),
+        )
+    return -np.inf
+
+
+def _select_native_periodicity_method(
+    pdm_result: dict[str, object],
+    ce_result: dict[str, object],
+    pdm_correction: dict[str, object],
+    ce_correction: dict[str, object],
+    *,
+    significance_level: float,
+) -> tuple[str, dict[str, object], dict[str, object]]:
+    pdm_boot_sig = _finite_float(pdm_result.get("pdm_bootstrap_sig"))
+    ce_boot_sig = _finite_float(ce_result.get("ce_bootstrap_sig"))
+    if pdm_boot_sig is not None or ce_boot_sig is not None:
+        if ce_boot_sig is not None and (pdm_boot_sig is None or ce_boot_sig < pdm_boot_sig):
+            return "ce", ce_result, ce_correction
+        return "pdm", pdm_result, pdm_correction
+
+    pdm_supported = (
+        _finite_float(pdm_result.get("pdm_snr")) is not None
+        and _finite_float(pdm_result.get("pdm_min_theta")) is not None
+        and float(pdm_result["pdm_snr"]) >= float(POST_FILTER_PDM_SNR_THRESHOLD)
+        and float(pdm_result["pdm_min_theta"]) <= float(POST_FILTER_PDM_MIN_THETA)
+    )
+    ce_supported = (
+        _finite_float(ce_result.get("ce_snr")) is not None
+        and _finite_float(ce_result.get("ce_min_entropy")) is not None
+        and float(ce_result["ce_snr"]) >= float(POST_FILTER_CE_SNR_THRESHOLD)
+        and float(ce_result["ce_min_entropy"]) <= float(POST_FILTER_CE_MIN_ENTROPY)
+    )
+    if ce_supported and not pdm_supported:
+        return "ce", ce_result, ce_correction
+    if pdm_supported and not ce_supported:
+        return "pdm", pdm_result, pdm_correction
+    if ce_supported and pdm_supported:
+        if _method_support_score("ce", ce_result) > _method_support_score("pdm", pdm_result):
+            return "ce", ce_result, ce_correction
+        return "pdm", pdm_result, pdm_correction
+
+    pdm_obj = _finite_float(pdm_correction.get("selection_objective", pdm_correction.get("objective")))
+    ce_obj = _finite_float(ce_correction.get("selection_objective", ce_correction.get("objective")))
+    if ce_obj is not None and (pdm_obj is None or ce_obj < pdm_obj):
+        return "ce", ce_result, ce_correction
+    if _finite_float(pdm_correction.get("corrected_period")) is not None:
+        return "pdm", pdm_result, pdm_correction
+    return "ce", ce_result, ce_correction
+
+
 def _candidate_lc_filenames(row: pd.Series | dict[str, object]) -> list[str]:
     names: list[str] = []
     seen: set[str] = set()
@@ -975,11 +1258,17 @@ def _checkpoint_result_is_usable(
 
     required_cols = (
         "pdm_period",
+        "pdm_corrected_period",
+        "pdm_harmonic_factor",
         "pdm_min_theta",
         "pdm_snr",
         "ce_period",
+        "ce_corrected_period",
+        "ce_harmonic_factor",
         "ce_min_entropy",
         "ce_snr",
+        "periodicity_base_period",
+        "periodicity_harmonic_factor",
         "periodicity_is_rejected",
     )
     if any(col not in result for col in required_cols):
@@ -987,10 +1276,12 @@ def _checkpoint_result_is_usable(
 
     metric_cols = (
         "pdm_period",
+        "pdm_corrected_period",
         "pdm_min_theta",
         "pdm_snr",
         "pdm_bootstrap_sig",
         "ce_period",
+        "ce_corrected_period",
         "ce_min_entropy",
         "ce_snr",
         "ce_bootstrap_sig",
@@ -1040,6 +1331,7 @@ def _lsp_worker(args: tuple) -> dict:
         dfg, dfv = read_lc_dat2(asassn_id, dir_path, file_ext=file_ext)
         df_lc = pd.concat([dfg, dfv], ignore_index=True)
         df_lc_aligned, _ = align_v_to_g_magnitude(df_lc)
+        band_resid = _build_periodicity_band_residuals(df_lc_aligned)
 
         jd = df_lc_aligned["JD"].values
         mag = df_lc_aligned["mag"].values
@@ -1081,34 +1373,55 @@ def _lsp_worker(args: tuple) -> dict:
 
         is_rejected = pdm_rej or ce_rej
 
-        best_period = pdm_result.get("pdm_period", np.nan)
-        periodicity_method = "pdm"
-        if np.isfinite(ce_boot_sig) and (not np.isfinite(pdm_boot_sig) or ce_boot_sig < pdm_boot_sig):
-            best_period = ce_result.get("ce_period", np.nan)
-            periodicity_method = "ce"
-        elif not np.isfinite(best_period) and np.isfinite(ce_result.get("ce_period", np.nan)):
-            best_period = ce_result.get("ce_period", np.nan)
-            periodicity_method = "ce"
+        pdm_correction = _correct_native_period(pdm_result.get("pdm_period", np.nan), band_resid)
+        ce_correction = _correct_native_period(ce_result.get("ce_period", np.nan), band_resid)
+        periodicity_method, _selected_result, selected_correction = _select_native_periodicity_method(
+            pdm_result,
+            ce_result,
+            pdm_correction,
+            ce_correction,
+            significance_level=significance_level,
+        )
+        best_period = selected_correction.get("corrected_period", np.nan)
+        base_period = selected_correction.get("raw_period", np.nan)
 
         return {
             "lc_path": original_path,
             "resolved_path": path_str,
             "periodicity_period": best_period,
             "periodicity_method": periodicity_method,
+            "periodicity_base_period": base_period,
+            "periodicity_harmonic_factor": selected_correction.get("harmonic_factor", np.nan),
+            "periodicity_harmonic_objective": selected_correction.get("objective", np.nan),
+            "periodicity_scatter_ratio": selected_correction.get("scatter_ratio", np.nan),
+            "periodicity_alias_flag": bool(selected_correction.get("alias_flag", False)),
+            "periodicity_alias_matches": ";".join(str(v) for v in selected_correction.get("alias_matches", [])),
             "periodicity_bootstrap_sig": periodicity_bootstrap_sig,
             "periodicity_is_significant": periodicity_is_significant,
             "lsp_power": np.nan,
             "lsp_period": best_period,
             "lsp_bootstrap_sig": periodicity_bootstrap_sig,
-            "lsp_is_alias": False,
+            "lsp_is_alias": bool(selected_correction.get("alias_flag", False)),
             "lsp_is_significant": periodicity_is_significant,
             "pdm_method": str(pdm_method),
             "pdm_period": pdm_result["pdm_period"],
+            "pdm_corrected_period": pdm_correction.get("corrected_period", np.nan),
+            "pdm_harmonic_factor": pdm_correction.get("harmonic_factor", np.nan),
+            "pdm_harmonic_objective": pdm_correction.get("objective", np.nan),
+            "pdm_harmonic_scatter_ratio": pdm_correction.get("scatter_ratio", np.nan),
+            "pdm_alias_flag": bool(pdm_correction.get("alias_flag", False)),
+            "pdm_alias_matches": ";".join(str(v) for v in pdm_correction.get("alias_matches", [])),
             "pdm_min_theta": pdm_result["pdm_min_theta"],
             "pdm_snr": pdm_result["pdm_snr"],
             "pdm_bootstrap_sig": pdm_result.get("pdm_bootstrap_sig", np.nan),
             "pdm_is_significant": bool(pdm_result.get("pdm_is_significant", False)),
             "ce_period": ce_result["ce_period"],
+            "ce_corrected_period": ce_correction.get("corrected_period", np.nan),
+            "ce_harmonic_factor": ce_correction.get("harmonic_factor", np.nan),
+            "ce_harmonic_objective": ce_correction.get("objective", np.nan),
+            "ce_harmonic_scatter_ratio": ce_correction.get("scatter_ratio", np.nan),
+            "ce_alias_flag": bool(ce_correction.get("alias_flag", False)),
+            "ce_alias_matches": ";".join(str(v) for v in ce_correction.get("alias_matches", [])),
             "ce_min_entropy": ce_result["ce_min_entropy"],
             "ce_snr": ce_result["ce_snr"],
             "ce_bootstrap_sig": ce_result.get("ce_bootstrap_sig", np.nan),
@@ -1122,6 +1435,12 @@ def _lsp_worker(args: tuple) -> dict:
             "resolved_path": path_str,
             "periodicity_period": np.nan,
             "periodicity_method": "",
+            "periodicity_base_period": np.nan,
+            "periodicity_harmonic_factor": np.nan,
+            "periodicity_harmonic_objective": np.nan,
+            "periodicity_scatter_ratio": np.nan,
+            "periodicity_alias_flag": False,
+            "periodicity_alias_matches": "",
             "lsp_power": np.nan,
             "lsp_period": np.nan,
             "lsp_bootstrap_sig": np.nan,
@@ -1129,11 +1448,23 @@ def _lsp_worker(args: tuple) -> dict:
             "lsp_is_significant": False,
             "pdm_method": str(pdm_method),
             "pdm_period": np.nan,
+            "pdm_corrected_period": np.nan,
+            "pdm_harmonic_factor": np.nan,
+            "pdm_harmonic_objective": np.nan,
+            "pdm_harmonic_scatter_ratio": np.nan,
+            "pdm_alias_flag": False,
+            "pdm_alias_matches": "",
             "pdm_min_theta": np.nan,
             "pdm_snr": np.nan,
             "pdm_bootstrap_sig": np.nan,
             "pdm_is_significant": False,
             "ce_period": np.nan,
+            "ce_corrected_period": np.nan,
+            "ce_harmonic_factor": np.nan,
+            "ce_harmonic_objective": np.nan,
+            "ce_harmonic_scatter_ratio": np.nan,
+            "ce_alias_flag": False,
+            "ce_alias_matches": "",
             "ce_min_entropy": np.nan,
             "ce_snr": np.nan,
             "ce_bootstrap_sig": np.nan,
@@ -1266,6 +1597,12 @@ def validate_periodicity(
                         "resolved_path": None,
                         "periodicity_period": period,
                         "periodicity_method": str(row.get("period_primary_source") or row.get("catalog_source") or "catalog_consensus"),
+                        "periodicity_base_period": period,
+                        "periodicity_harmonic_factor": 1.0,
+                        "periodicity_harmonic_objective": np.nan,
+                        "periodicity_scatter_ratio": np.nan,
+                        "periodicity_alias_flag": False,
+                        "periodicity_alias_matches": "",
                         "periodicity_bootstrap_sig": 0.0,
                         "periodicity_is_significant": True,
                         "lsp_power": np.nan,  # Not computed
@@ -1274,6 +1611,28 @@ def validate_periodicity(
                         "lsp_is_alias": False,
                         "lsp_is_significant": True,
                         "pdm_method": str(pdm_method),
+                        "pdm_period": np.nan,
+                        "pdm_corrected_period": np.nan,
+                        "pdm_harmonic_factor": np.nan,
+                        "pdm_harmonic_objective": np.nan,
+                        "pdm_harmonic_scatter_ratio": np.nan,
+                        "pdm_alias_flag": False,
+                        "pdm_alias_matches": "",
+                        "pdm_min_theta": np.nan,
+                        "pdm_snr": np.nan,
+                        "pdm_bootstrap_sig": np.nan,
+                        "pdm_is_significant": False,
+                        "ce_period": np.nan,
+                        "ce_corrected_period": np.nan,
+                        "ce_harmonic_factor": np.nan,
+                        "ce_harmonic_objective": np.nan,
+                        "ce_harmonic_scatter_ratio": np.nan,
+                        "ce_alias_flag": False,
+                        "ce_alias_matches": "",
+                        "ce_min_entropy": np.nan,
+                        "ce_snr": np.nan,
+                        "ce_bootstrap_sig": np.nan,
+                        "ce_is_significant": False,
                         "periodicity_score": POST_FILTER_PERIODICITY_SCORE,
                         "error": None,
                     }
@@ -1296,6 +1655,12 @@ def validate_periodicity(
                     "resolved_path": None,
                     "periodicity_period": np.nan,
                     "periodicity_method": "",
+                    "periodicity_base_period": np.nan,
+                    "periodicity_harmonic_factor": np.nan,
+                    "periodicity_harmonic_objective": np.nan,
+                    "periodicity_scatter_ratio": np.nan,
+                    "periodicity_alias_flag": False,
+                    "periodicity_alias_matches": "",
                     "lsp_power": np.nan,
                     "lsp_period": np.nan,
                     "lsp_bootstrap_sig": np.nan,
@@ -1303,11 +1668,23 @@ def validate_periodicity(
                     "lsp_is_significant": False,
                     "pdm_method": str(pdm_method),
                     "pdm_period": np.nan,
+                    "pdm_corrected_period": np.nan,
+                    "pdm_harmonic_factor": np.nan,
+                    "pdm_harmonic_objective": np.nan,
+                    "pdm_harmonic_scatter_ratio": np.nan,
+                    "pdm_alias_flag": False,
+                    "pdm_alias_matches": "",
                     "pdm_min_theta": np.nan,
                     "pdm_snr": np.nan,
                     "pdm_bootstrap_sig": np.nan,
                     "pdm_is_significant": False,
                     "ce_period": np.nan,
+                    "ce_corrected_period": np.nan,
+                    "ce_harmonic_factor": np.nan,
+                    "ce_harmonic_objective": np.nan,
+                    "ce_harmonic_scatter_ratio": np.nan,
+                    "ce_alias_flag": False,
+                    "ce_alias_matches": "",
                     "ce_min_entropy": np.nan,
                     "ce_snr": np.nan,
                     "ce_bootstrap_sig": np.nan,
@@ -1340,6 +1717,12 @@ def validate_periodicity(
                     "resolved_path": None,
                     "periodicity_period": np.nan,
                     "periodicity_method": "",
+                    "periodicity_base_period": np.nan,
+                    "periodicity_harmonic_factor": np.nan,
+                    "periodicity_harmonic_objective": np.nan,
+                    "periodicity_scatter_ratio": np.nan,
+                    "periodicity_alias_flag": False,
+                    "periodicity_alias_matches": "",
                     "lsp_power": np.nan,
                     "lsp_period": np.nan,
                     "lsp_bootstrap_sig": np.nan,
@@ -1347,11 +1730,23 @@ def validate_periodicity(
                     "lsp_is_significant": False,
                     "pdm_method": str(pdm_method),
                     "pdm_period": np.nan,
+                    "pdm_corrected_period": np.nan,
+                    "pdm_harmonic_factor": np.nan,
+                    "pdm_harmonic_objective": np.nan,
+                    "pdm_harmonic_scatter_ratio": np.nan,
+                    "pdm_alias_flag": False,
+                    "pdm_alias_matches": "",
                     "pdm_min_theta": np.nan,
                     "pdm_snr": np.nan,
                     "pdm_bootstrap_sig": np.nan,
                     "pdm_is_significant": False,
                     "ce_period": np.nan,
+                    "ce_corrected_period": np.nan,
+                    "ce_harmonic_factor": np.nan,
+                    "ce_harmonic_objective": np.nan,
+                    "ce_harmonic_scatter_ratio": np.nan,
+                    "ce_alias_flag": False,
+                    "ce_alias_matches": "",
                     "ce_min_entropy": np.nan,
                     "ce_snr": np.nan,
                     "ce_bootstrap_sig": np.nan,
@@ -1438,15 +1833,33 @@ def validate_periodicity(
     is_significant = []
     periodicity_periods = []
     periodicity_methods = []
+    periodicity_base_periods = []
+    periodicity_harmonic_factors = []
+    periodicity_harmonic_objectives = []
+    periodicity_scatter_ratios = []
+    periodicity_alias_flags = []
+    periodicity_alias_matches = []
     
     pdm_methods = []
     pdm_periods = []
+    pdm_corrected_periods = []
+    pdm_harmonic_factors = []
+    pdm_harmonic_objectives = []
+    pdm_harmonic_scatter_ratios = []
+    pdm_alias_flags = []
+    pdm_alias_matches = []
     pdm_thetas = []
     pdm_snrs = []
     pdm_bootstrap_significances = []
     pdm_significant_flags = []
 
     ce_periods = []
+    ce_corrected_periods = []
+    ce_harmonic_factors = []
+    ce_harmonic_objectives = []
+    ce_harmonic_scatter_ratios = []
+    ce_alias_flags = []
+    ce_alias_matches = []
     ce_entropies = []
     ce_snrs = []
     ce_bootstrap_significances = []
@@ -1466,6 +1879,12 @@ def validate_periodicity(
             periodicity_method = "legacy_lsp"
         periodicity_periods.append(periodicity_period)
         periodicity_methods.append(periodicity_method)
+        periodicity_base_periods.append(result.get("periodicity_base_period", periodicity_period))
+        periodicity_harmonic_factors.append(result.get("periodicity_harmonic_factor", np.nan))
+        periodicity_harmonic_objectives.append(result.get("periodicity_harmonic_objective", np.nan))
+        periodicity_scatter_ratios.append(result.get("periodicity_scatter_ratio", np.nan))
+        periodicity_alias_flags.append(bool(result.get("periodicity_alias_flag", result.get("lsp_is_alias", False))))
+        periodicity_alias_matches.append(result.get("periodicity_alias_matches", ""))
 
         powers.append(result.get("lsp_power", np.nan))
         periods.append(periodicity_period)
@@ -1480,12 +1899,24 @@ def validate_periodicity(
         # New PDM/CE columns
         pdm_methods.append(result.get("pdm_method", str(pdm_method)))
         pdm_periods.append(result.get("pdm_period", np.nan))
+        pdm_corrected_periods.append(result.get("pdm_corrected_period", result.get("pdm_period", np.nan)))
+        pdm_harmonic_factors.append(result.get("pdm_harmonic_factor", np.nan))
+        pdm_harmonic_objectives.append(result.get("pdm_harmonic_objective", np.nan))
+        pdm_harmonic_scatter_ratios.append(result.get("pdm_harmonic_scatter_ratio", np.nan))
+        pdm_alias_flags.append(bool(result.get("pdm_alias_flag", False)))
+        pdm_alias_matches.append(result.get("pdm_alias_matches", ""))
         pdm_thetas.append(result.get("pdm_min_theta", np.nan))
         pdm_snrs.append(result.get("pdm_snr", np.nan))
         pdm_bootstrap_significances.append(result.get("pdm_bootstrap_sig", np.nan))
         pdm_significant_flags.append(bool(result.get("pdm_is_significant", False)))
 
         ce_periods.append(result.get("ce_period", np.nan))
+        ce_corrected_periods.append(result.get("ce_corrected_period", result.get("ce_period", np.nan)))
+        ce_harmonic_factors.append(result.get("ce_harmonic_factor", np.nan))
+        ce_harmonic_objectives.append(result.get("ce_harmonic_objective", np.nan))
+        ce_harmonic_scatter_ratios.append(result.get("ce_harmonic_scatter_ratio", np.nan))
+        ce_alias_flags.append(bool(result.get("ce_alias_flag", False)))
+        ce_alias_matches.append(result.get("ce_alias_matches", ""))
         ce_entropies.append(result.get("ce_min_entropy", np.nan))
         ce_snrs.append(result.get("ce_snr", np.nan))
         ce_bootstrap_significances.append(result.get("ce_bootstrap_sig", np.nan))
@@ -1505,6 +1936,12 @@ def validate_periodicity(
     df_out = df.copy()
     df_out["periodicity_period"] = periodicity_periods
     df_out["periodicity_method"] = periodicity_methods
+    df_out["periodicity_base_period"] = periodicity_base_periods
+    df_out["periodicity_harmonic_factor"] = periodicity_harmonic_factors
+    df_out["periodicity_harmonic_objective"] = periodicity_harmonic_objectives
+    df_out["periodicity_scatter_ratio"] = periodicity_scatter_ratios
+    df_out["periodicity_alias_flag"] = periodicity_alias_flags
+    df_out["periodicity_alias_matches"] = periodicity_alias_matches
     df_out["periodicity_bootstrap_sig"] = periodicity_bootstrap_significances
     df_out["periodicity_is_significant"] = periodicity_significant_flags
 
@@ -1516,12 +1953,24 @@ def validate_periodicity(
     
     df_out["pdm_method"] = pdm_methods
     df_out["pdm_period"] = pdm_periods
+    df_out["pdm_corrected_period"] = pdm_corrected_periods
+    df_out["pdm_harmonic_factor"] = pdm_harmonic_factors
+    df_out["pdm_harmonic_objective"] = pdm_harmonic_objectives
+    df_out["pdm_harmonic_scatter_ratio"] = pdm_harmonic_scatter_ratios
+    df_out["pdm_alias_flag"] = pdm_alias_flags
+    df_out["pdm_alias_matches"] = pdm_alias_matches
     df_out["pdm_theta"] = pdm_thetas
     df_out["pdm_snr"] = pdm_snrs
     df_out["pdm_bootstrap_sig"] = pdm_bootstrap_significances
     df_out["pdm_is_significant"] = pdm_significant_flags
 
     df_out["ce_period"] = ce_periods
+    df_out["ce_corrected_period"] = ce_corrected_periods
+    df_out["ce_harmonic_factor"] = ce_harmonic_factors
+    df_out["ce_harmonic_objective"] = ce_harmonic_objectives
+    df_out["ce_harmonic_scatter_ratio"] = ce_harmonic_scatter_ratios
+    df_out["ce_alias_flag"] = ce_alias_flags
+    df_out["ce_alias_matches"] = ce_alias_matches
     df_out["ce_entropy"] = ce_entropies
     df_out["ce_snr"] = ce_snrs
     df_out["ce_bootstrap_sig"] = ce_bootstrap_significances
@@ -1562,6 +2011,12 @@ def _save_checkpoint(checkpoint_file: Path, completed: dict, new_results: list) 
             "resolved_path": r.get("resolved_path"),
             "periodicity_period": r.get("periodicity_period", r.get("lsp_period", np.nan)),
             "periodicity_method": r.get("periodicity_method", ""),
+            "periodicity_base_period": r.get("periodicity_base_period", r.get("periodicity_period", r.get("lsp_period", np.nan))),
+            "periodicity_harmonic_factor": r.get("periodicity_harmonic_factor", np.nan),
+            "periodicity_harmonic_objective": r.get("periodicity_harmonic_objective", np.nan),
+            "periodicity_scatter_ratio": r.get("periodicity_scatter_ratio", np.nan),
+            "periodicity_alias_flag": r.get("periodicity_alias_flag", r.get("lsp_is_alias", False)),
+            "periodicity_alias_matches": r.get("periodicity_alias_matches", ""),
             "periodicity_bootstrap_sig": r.get("periodicity_bootstrap_sig", r.get("lsp_bootstrap_sig", np.nan)),
             "periodicity_is_significant": r.get("periodicity_is_significant", r.get("lsp_is_significant", False)),
             "lsp_power": r.get("lsp_power", np.nan),
@@ -1571,11 +2026,23 @@ def _save_checkpoint(checkpoint_file: Path, completed: dict, new_results: list) 
             "lsp_is_significant": r.get("lsp_is_significant", r.get("periodicity_is_significant", False)),
             "pdm_method": r.get("pdm_method", str(POST_FILTER_PDM_METHOD)),
             "pdm_period": r.get("pdm_period", np.nan),
+            "pdm_corrected_period": r.get("pdm_corrected_period", r.get("pdm_period", np.nan)),
+            "pdm_harmonic_factor": r.get("pdm_harmonic_factor", np.nan),
+            "pdm_harmonic_objective": r.get("pdm_harmonic_objective", np.nan),
+            "pdm_harmonic_scatter_ratio": r.get("pdm_harmonic_scatter_ratio", np.nan),
+            "pdm_alias_flag": r.get("pdm_alias_flag", False),
+            "pdm_alias_matches": r.get("pdm_alias_matches", ""),
             "pdm_min_theta": r.get("pdm_min_theta", np.nan),
             "pdm_snr": r.get("pdm_snr", np.nan),
             "pdm_bootstrap_sig": r.get("pdm_bootstrap_sig", np.nan),
             "pdm_is_significant": r.get("pdm_is_significant", False),
             "ce_period": r.get("ce_period", np.nan),
+            "ce_corrected_period": r.get("ce_corrected_period", r.get("ce_period", np.nan)),
+            "ce_harmonic_factor": r.get("ce_harmonic_factor", np.nan),
+            "ce_harmonic_objective": r.get("ce_harmonic_objective", np.nan),
+            "ce_harmonic_scatter_ratio": r.get("ce_harmonic_scatter_ratio", np.nan),
+            "ce_alias_flag": r.get("ce_alias_flag", False),
+            "ce_alias_matches": r.get("ce_alias_matches", ""),
             "ce_min_entropy": r.get("ce_min_entropy", np.nan),
             "ce_snr": r.get("ce_snr", np.nan),
             "ce_bootstrap_sig": r.get("ce_bootstrap_sig", np.nan),
@@ -2114,14 +2581,46 @@ def annotate_phase_plot_candidates(
     ready &= sig.notna() & np.isfinite(sig) & (sig <= float(max_sig))
 
     if min_power is not None:
-        if "lsp_power" not in out.columns:
+        if period_col == "periodicity_period":
+            method = out.get("periodicity_method", pd.Series("", index=out.index)).fillna("").astype(str).str.lower()
+            native_support = pd.Series(False, index=out.index)
+            pdm_theta_col = "pdm_theta" if "pdm_theta" in out.columns else "pdm_min_theta"
+            if pdm_theta_col in out.columns and "pdm_snr" in out.columns:
+                pdm_snr = pd.to_numeric(out["pdm_snr"], errors="coerce")
+                pdm_theta = pd.to_numeric(out[pdm_theta_col], errors="coerce")
+                pdm_ready = (
+                    method.eq("pdm")
+                    & pdm_snr.notna()
+                    & np.isfinite(pdm_snr)
+                    & (pdm_snr >= float(POST_FILTER_PDM_SNR_THRESHOLD))
+                    & pdm_theta.notna()
+                    & np.isfinite(pdm_theta)
+                    & (pdm_theta <= float(POST_FILTER_PDM_MIN_THETA))
+                )
+                native_support |= pdm_ready
+            if "ce_entropy" in out.columns and "ce_snr" in out.columns:
+                ce_snr = pd.to_numeric(out["ce_snr"], errors="coerce")
+                ce_entropy = pd.to_numeric(out["ce_entropy"], errors="coerce")
+                ce_ready = (
+                    method.eq("ce")
+                    & ce_snr.notna()
+                    & np.isfinite(ce_snr)
+                    & (ce_snr >= float(POST_FILTER_CE_SNR_THRESHOLD))
+                    & ce_entropy.notna()
+                    & np.isfinite(ce_entropy)
+                    & (ce_entropy <= float(POST_FILTER_CE_MIN_ENTROPY))
+                )
+                native_support |= ce_ready
+            ready &= native_support
+        elif "lsp_power" not in out.columns:
             ready &= False
         else:
             power = pd.to_numeric(out["lsp_power"], errors="coerce")
             ready &= power.notna() & np.isfinite(power) & (power >= float(min_power))
 
-    if not allow_alias and "lsp_is_alias" in out.columns:
-        alias = _to_bool_mask(out["lsp_is_alias"])
+    alias_col = "periodicity_alias_flag" if "periodicity_alias_flag" in out.columns else "lsp_is_alias"
+    if not allow_alias and alias_col in out.columns:
+        alias = _to_bool_mask(out[alias_col])
         ready &= ~alias
 
     if "periodicity_score" in out.columns:
@@ -2713,9 +3212,9 @@ Example usage:
     g_periodicity.add_argument("--checkpoint-dir", type=Path, default=None,
                         help="Directory for checkpoints (enables resume on restart)")
     g_periodicity.add_argument("--phase-plot-max-sig", type=float, default=0.01,
-                        help="Require lsp_bootstrap_sig <= this for phase plots (default: 0.01)")
+                        help="Require periodicity_bootstrap_sig <= this for phase plots (default: 0.01)")
     g_periodicity.add_argument("--phase-plot-min-power", type=float, default=0.3,
-                        help="Require lsp_power >= this for phase plots (default: 0.3)")
+                        help="Require native PDM/CE support, or legacy lsp_power when only legacy LSP columns exist (default: 0.3)")
     g_periodicity.add_argument("--phase-plot-allow-alias", action="store_true",
                         help="Allow alias periods for phase plots (default: disabled)")
 

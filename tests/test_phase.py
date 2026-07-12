@@ -28,20 +28,23 @@ def test_resolve_phase_period_prefers_manual_then_payload_priority() -> None:
     assert resolve_phase_period({"catalog_period": 3.0}) == (None, "")
     assert resolve_phase_period({"periodicity_period": "4.5"}) == (4.5, "periodicity_period")
     assert resolve_phase_period({"periodicity_period": "4.5"}, include_periodogram_periods=False) == (None, "")
-    assert resolve_phase_period({"lsp_period": "5.5"}) == (5.5, "lsp_period")
-    assert resolve_phase_period({"lsp_period": "5.5"}, include_lsp=False) == (None, "")
+    assert resolve_phase_period({"lsp_period": "5.5"}) == (None, "")
+    assert resolve_phase_period({"lsp_period": "5.5"}, include_lsp=True) == (5.5, "lsp_period")
     assert resolve_phase_period({"lsp_period": "bad"}) == (None, "")
     assert resolve_phase_period({"pre_periodicity_selected_period": 6.0}) == (6.0, "pre_periodicity_selected_period")
     assert resolve_phase_period({"pre_periodicity_selected_period": 6.0, "periodicity_period": 5.5}) == (
-        6.0,
-        "pre_periodicity_selected_period",
+        5.5,
+        "periodicity_period",
     )
+    assert resolve_phase_period({"pdm_corrected_period": 6.5}) == (6.5, "pdm_corrected_period")
+    assert resolve_phase_period({"ce_corrected_period": 6.75}) == (6.75, "ce_corrected_period")
     assert resolve_phase_period({"pdm_period": 7.0}) == (7.0, "pdm_period")
     assert resolve_phase_period({"ce_period": 8.0}) == (8.0, "ce_period")
-    assert resolve_phase_period({"stats_variability_lomb_scargle_best_period_days": 9.0}) == (
-        9.0,
-        "stats_variability_lomb_scargle_best_period_days",
-    )
+    assert resolve_phase_period({"stats_variability_lomb_scargle_best_period_days": 9.0}) == (None, "")
+    assert resolve_phase_period(
+        {"stats_variability_lomb_scargle_best_period_days": 9.0},
+        include_lsp=True,
+    ) == (9.0, "stats_variability_lomb_scargle_best_period_days")
     assert resolve_phase_period(
         {
             "period_consensus_days": 2.0,
@@ -54,7 +57,9 @@ def test_resolve_phase_period_prefers_manual_then_payload_priority() -> None:
         include_periodogram_periods=False,
     ) == (None, "")
     assert resolve_phase_period({"pdm_period": 7.0}, include_periodogram_periods=False) == (None, "")
+    assert resolve_phase_period({"pdm_corrected_period": 7.0}, include_periodogram_periods=False) == (None, "")
     assert resolve_phase_period({"ce_period": 8.0}, include_periodogram_periods=False) == (None, "")
+    assert resolve_phase_period({"ce_corrected_period": 8.0}, include_periodogram_periods=False) == (None, "")
 
 
 def test_resolve_phase_epoch_uses_minimum_finite_jd() -> None:
