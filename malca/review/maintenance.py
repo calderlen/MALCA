@@ -328,6 +328,7 @@ def _build_vsx_live_backfill_frame(
     limit: int,
     only_missing: bool = True,
     max_candidates: int | None = None,
+    progress_every: int = 25,
 ) -> pd.DataFrame:
     candidates = _normalize_candidate_coord_frame(candidates, drop_missing=False)
     if candidates.empty:
@@ -343,6 +344,34 @@ def _build_vsx_live_backfill_frame(
     records: list[dict[str, object]] = []
     total = len(candidates)
     queried_at = datetime.now(timezone.utc).isoformat()
+    progress_interval = max(int(progress_every), 0)
+    matched_count = 0
+    no_match_count = 0
+    missing_coords_count = 0
+    query_failed_count = 0
+
+    def _print_progress(idx: int) -> None:
+        scanned = idx + 1
+        if progress_interval <= 0:
+            return
+        if scanned != total and scanned % progress_interval != 0:
+            return
+        print(
+            "Live VSX lookup: "
+            f"scanned {scanned}/{total}, matched {matched_count}, "
+            f"no match {no_match_count}, missing coords {missing_coords_count}, "
+            f"failed {query_failed_count}",
+            flush=True,
+        )
+
+    if progress_interval > 0:
+        print(
+            "Live VSX lookup: "
+            f"scanning {total} candidate(s) "
+            f"(radius={float(radius_arcsec):g} arcsec, timeout={float(timeout_sec):g}s, limit={int(limit)})",
+            flush=True,
+        )
+
     for idx, row in candidates.iterrows():
         valid_coord, coord_error = _valid_coord_pair(row.get("ra"), row.get("dec"))
         if not valid_coord:
@@ -357,6 +386,8 @@ def _build_vsx_live_backfill_frame(
                     limit=limit,
                 )
             )
+            missing_coords_count += 1
+            _print_progress(idx)
             continue
 
         try:
@@ -379,6 +410,8 @@ def _build_vsx_live_backfill_frame(
                     limit=limit,
                 )
             )
+            query_failed_count += 1
+            _print_progress(idx)
             continue
 
         record = _base_vsx_live_record(
@@ -394,6 +427,8 @@ def _build_vsx_live_backfill_frame(
         neighbor = _usable_vsx_neighbor(neighbors)
         if neighbor is None:
             records.append(record)
+            no_match_count += 1
+            _print_progress(idx)
             continue
 
         record.update(
@@ -411,10 +446,8 @@ def _build_vsx_live_backfill_frame(
             }
         )
         records.append(record)
-
-        if total >= 100 and (idx + 1) % 100 == 0:
-            matched = sum(1 for item in records if item.get("vsx_live_status") == "matched")
-            print(f"Live VSX lookup: scanned {idx + 1}/{total}, matched {matched}")
+        matched_count += 1
+        _print_progress(idx)
 
     if not records:
         return _empty_vsx_live_backfill_frame()
@@ -451,6 +484,7 @@ def _load_vsx_backfill_live(
     limit: int,
     only_missing: bool = True,
     max_candidates: int | None = None,
+    progress_every: int = 25,
 ) -> pd.DataFrame:
     candidates = _candidate_coord_frame(conn, drop_missing=False)
     backfill_df = _build_vsx_live_backfill_frame(
@@ -460,6 +494,7 @@ def _load_vsx_backfill_live(
         limit=limit,
         only_missing=only_missing,
         max_candidates=max_candidates,
+        progress_every=progress_every,
     )
     return _live_updates_from_backfill_frame(backfill_df)
 
@@ -545,6 +580,7 @@ def backfill_vsx_live_results(
     limit: int,
     only_missing: bool = True,
     max_candidates: int | None = None,
+    progress_every: int = 25,
     dry_run: bool = False,
 ) -> int:
     live_updates = _load_vsx_backfill_live(
@@ -554,6 +590,7 @@ def backfill_vsx_live_results(
         limit=limit,
         only_missing=only_missing,
         max_candidates=max_candidates,
+        progress_every=progress_every,
     )
     if live_updates.empty:
         print("Live VSX lookup found no candidate updates")
@@ -685,6 +722,7 @@ def backfill_vsx_live_run(
     limit: int,
     only_missing: bool = True,
     max_candidates: int | None = None,
+    progress_every: int = 25,
     dry_run: bool = False,
     update_products: bool = True,
     update_db: bool = True,
@@ -702,6 +740,7 @@ def backfill_vsx_live_run(
         limit=limit,
         only_missing=only_missing,
         max_candidates=max_candidates,
+        progress_every=progress_every,
     )
     live_updates = _live_updates_from_backfill_frame(backfill_df)
 
@@ -943,6 +982,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     backfill_vsx_live.add_argument("--limit", type=int, default=3, help="Maximum nearby VSX rows to inspect per candidate")
     backfill_vsx_live.add_argument("--overwrite-existing", action="store_true", help="Also refresh candidates that already have vsx_class")
     backfill_vsx_live.add_argument("--max-candidates", type=int, default=None, help="Limit candidates scanned, useful for smoke tests")
+    backfill_vsx_live.add_argument("--progress-every", type=int, default=25, help="Print live lookup progress every N scanned candidates; use 0 to disable")
     backfill_vsx_live.add_argument("--dry-run", action="store_true", help="Print live VSX rows without writing outputs")
     backfill_vsx_live.add_argument("--no-product-update", action="store_true", help="Write the sidecar but do not patch lc_events result parquets")
     backfill_vsx_live.add_argument("--no-db-update", action="store_true", help="Write the sidecar/products but do not update a review DB")
@@ -993,6 +1033,7 @@ def main() -> None:
             limit=args.limit,
             only_missing=not args.overwrite_existing,
             max_candidates=args.max_candidates,
+            progress_every=args.progress_every,
             dry_run=args.dry_run,
             update_products=not args.no_product_update,
             update_db=not args.no_db_update,
@@ -1043,6 +1084,7 @@ def main() -> None:
                 limit=args.limit,
                 only_missing=not args.overwrite_existing,
                 max_candidates=args.max_candidates,
+                progress_every=args.progress_every,
                 dry_run=args.dry_run,
             )
         else:  # pragma: no cover - argparse enforces choices
